@@ -30,10 +30,11 @@ import copy
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -204,6 +205,8 @@ class PluginHotReloader:
         validator: ConfigSchemaValidator | None = None,
     ) -> None:
         self._config_dir = Path(config_dir)
+        self._disabled_plugins: set[str] = set()
+        self._config_center: Any | None = None
         self._agent_registry = agent_registry
         self._tool_registry = tool_registry
         self._event_bus = event_bus
@@ -256,8 +259,33 @@ class PluginHotReloader:
             return True
         return False
 
+    def disable_plugin(self, config_id: str) -> bool:
+        """禁用插件，使其不被重载。"""
+        if config_id in self._disabled_plugins:
+            return False
+        self._disabled_plugins.add(config_id)
+        return True
+
+    def enable_plugin(self, config_id: str) -> bool:
+        """启用已禁用的插件。"""
+        if config_id not in self._disabled_plugins:
+            return False
+        self._disabled_plugins.discard(config_id)
+        return True
+
+    def integrate_with_config_center(self, config_center) -> None:
+        """与 ConfigCenter 集成，注册各子目录的监听回调。"""
+        self._config_center = config_center
+        prefixes = ["agents/", "tools/", "pipelines/", "models/"]
+        for prefix in prefixes:
+            config_center.watch(prefix, self._on_file_change)
+
     def start(self) -> None:
         """Start watching config/ for changes.
+
+        监听来源选择（避免重复监听）：
+        - ConfigCenter 已运行（生产环境）-> 订阅它的回调
+        - 否则（测试/独立运行）-> 独立 watchdog Observer
 
         Idempotent -- calling while already running is a no-op.
         """
@@ -269,6 +297,22 @@ class PluginHotReloader:
             logger.error("Config directory does not exist: %s", self._config_dir)
             return
 
+        # 优先：订阅 ConfigCenter（生产环境主路径）
+        try:
+            from config.config_center import get_config_center  # noqa: PLC0415
+            center = get_config_center()
+            if center.is_running:
+                self.integrate_with_config_center(center)
+                self._running = True
+                logger.info(
+                    "PluginHotReloader started (subscribed to ConfigCenter) | config_dir=%s",
+                    self._config_dir,
+                )
+                return
+        except Exception as exc:
+            logger.debug("ConfigCenter 不可用，回退到独立 watchdog: %s", exc)
+
+        # 回退：独立 watchdog（测试场景或 ConfigCenter 未启动）
         handler = PluginConfigWatchHandler(
             callback=self._on_file_change,
             debounce_seconds=self._debounce_seconds,
@@ -279,7 +323,7 @@ class PluginHotReloader:
         self._observer.start()
         self._running = True
         logger.info(
-            "PluginHotReloader started | config_dir=%s | debounce=%.2fs",
+            "PluginHotReloader started (standalone watchdog) | config_dir=%s | debounce=%.2fs",
             self._config_dir,
             self._debounce_seconds,
         )
@@ -287,6 +331,15 @@ class PluginHotReloader:
     def stop(self) -> None:
         """Stop watching."""
         self._running = False
+        # 订阅模式：取消 ConfigCenter 回调
+        if self._config_center is not None:
+            try:
+                for prefix in ["agents/", "tools/", "pipelines/", "models/"]:
+                    self._config_center.unwatch(prefix, self._on_file_change)
+            except Exception:
+                pass
+            self._config_center = None
+        # 独立模式：停止 watchdog Observer
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=5)
@@ -378,7 +431,7 @@ class PluginHotReloader:
 
     # -- Internal ----------------------------------------------------------
 
-    def _on_file_change(self, event_type: str, file_path: str) -> None:
+    def _on_file_change(self, event_type: str, file_path: str, _metadata: Any = None) -> None:
         """Entry point called by the watchdog handler.
 
         Dispatches to _do_reload in a background thread so the watchdog
@@ -390,7 +443,7 @@ class PluginHotReloader:
         """
         # Lazily create a single-thread executor on first use
         if self._reload_executor is None:
-            from concurrent.futures import ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
             self._reload_executor = ThreadPoolExecutor(max_workers=1)
 
         self._reload_executor.submit(self._do_reload_safe, event_type, file_path)
@@ -410,7 +463,7 @@ class PluginHotReloader:
                 event_type, file_path,
             )
 
-    def _do_reload(self, event_type: str, file_path: str) -> ReloadEvent:
+    def _do_reload(self, event_type: str, file_path: str) -> ReloadEvent:  # noqa: PLR0911
         """Execute a single reload operation.
 
         For 'deleted': unregister the plugin.
@@ -453,6 +506,14 @@ class PluginHotReloader:
             return self._handle_parse_error(
                 file_path, config_type, event_type,
                 f"Expected dict, got {type(data).__name__}",
+            )
+
+        # Check if plugin is disabled
+        config_id = data.get("config_id", data.get("name", ""))
+        if config_id in self._disabled_plugins:
+            return self._make_event(
+                file_path, config_type, event_type,
+                success=True, error="disabled",
             )
 
         # Validate
@@ -719,7 +780,7 @@ class PluginHotReloader:
         if config_type == "agent":
             if self._agent_registry is None:
                 raise ValueError("AgentRegistry not configured")
-            from agents.loader import AgentConfigLoader
+            from agents.loader import AgentConfigLoader  # noqa: PLC0415
 
             # Prefer loading from disk if the file exists
             load_path = file_path
@@ -737,8 +798,7 @@ class PluginHotReloader:
             logger.debug("Tool config reload recorded (definition update)")
 
         elif config_type == "model":
-            # BUG-FIX: 模型配置变更时清除所有 LLM 缓存，使配置实时生效
-            from config.models import invalidate_all_llm_caches
+            from config.models import invalidate_all_llm_caches  # noqa: PLC0415
             invalidate_all_llm_caches()
             logger.info("Model config hot-reloaded: %s", file_path)
 
@@ -761,8 +821,7 @@ class PluginHotReloader:
             logger.debug("Tool config unload recorded: %s", record.config_path)
 
         elif record.config_type == "model":
-            # BUG-FIX: 模型配置删除时同样清除所有 LLM 缓存
-            from config.models import invalidate_all_llm_caches
+            from config.models import invalidate_all_llm_caches  # noqa: PLC0415
             invalidate_all_llm_caches()
             logger.info("Model config cache invalidated on delete: %s", record.config_path)
 
@@ -789,17 +848,16 @@ class PluginHotReloader:
             errors.extend(self._validator.validate_pipeline_config(data))
         elif config_type == "model":
             errors.extend(self._validator.validate_model_config(data))
-        else:
-            # Unknown types: only check it's a non-empty dict
-            if not data:
-                errors.append("Configuration is empty")
+        # Unknown types: only check it's a non-empty dict
+        elif not data:
+            errors.append("Configuration is empty")
 
         return errors
 
     # -- Helpers -----------------------------------------------------------
 
     @staticmethod
-    def _determine_config_type(file_path: str) -> str:
+    def _determine_config_type(file_path: str) -> str:  # noqa: PLR0911
         """Determine config type from file path.
 
         Same logic as ConfigReloader._determine_config_type but also
@@ -928,9 +986,9 @@ def _write_temp_yaml(data: dict[str, Any]) -> Path:
     Returns:
         Path to the temporary file.
     """
-    import tempfile
+    import tempfile  # noqa: PLC0415
 
-    global _temp_counter
+    global _temp_counter  # noqa: PLW0603
     _temp_counter += 1
 
     tmp_dir = Path(tempfile.gettempdir()) / "agent_os_hot_reload"

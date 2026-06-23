@@ -23,7 +23,6 @@ import {
   getUsageStatistics,
   type BudgetStatusResponse,
   type UsageStatisticsResponse,
-  type UsageRecord,
 } from '@/services/api/costControl'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
@@ -48,25 +47,6 @@ const DEFAULT_CONFIG: CostControlConfigResponse = {
   enabled: true,
 }
 
-/** 模拟最近使用记录 */
-const MOCK_RECORDS: UsageRecord[] = [
-  { tokens: 12450, model: 'gpt-4o', cost: 0.0374, timestamp: '2026-04-30T10:23:00Z' },
-  {
-    tokens: 8320,
-    model: 'claude-sonnet-4-20250514',
-    cost: 0.025,
-    timestamp: '2026-04-30T09:45:00Z',
-  },
-  { tokens: 22100, model: 'gpt-4o', cost: 0.0663, timestamp: '2026-04-30T09:12:00Z' },
-  { tokens: 5600, model: 'glm-4-plus', cost: 0.0056, timestamp: '2026-04-30T08:30:00Z' },
-  {
-    tokens: 15800,
-    model: 'claude-sonnet-4-20250514',
-    cost: 0.0474,
-    timestamp: '2026-04-29T18:20:00Z',
-  },
-]
-
 /**
  * 费用控制配置页面组件
  */
@@ -85,10 +65,14 @@ export function CostSettingsPage() {
     setIsLoading(true)
     setLoadError(null)
 
+    // BUG-FIX-fix_20260617_silent_catch:
+    // 问题根因: 原 Promise.all 中每个 promise 单独 .catch 消化错误返回默认值/ null，
+    //          导致外层 .catch 永远不会触发（死代码），加载失败被静默吞掉。
+    // 修复方案: 移除内层 .catch，让错误冒泡到外层 catch 触发 setLoadError。
     Promise.all([
-      getCostControlConfig().catch(() => DEFAULT_CONFIG),
-      getBudgetStatus().catch(() => null),
-      getUsageStatistics().catch(() => null),
+      getCostControlConfig(),
+      getBudgetStatus(),
+      getUsageStatistics(),
     ])
       .then(([configData, budgetData, statsData]) => {
         if (cancelled) return
@@ -98,7 +82,7 @@ export function CostSettingsPage() {
       })
       .catch(() => {
         if (!cancelled) {
-          setLoadError('无法连接服务器，显示默认配置和模拟数据')
+          setLoadError('无法连接服务器，请稍后重试')
         }
       })
       .finally(() => {
@@ -473,23 +457,35 @@ export function CostSettingsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(stats?.recent_records ?? MOCK_RECORDS).map((record, idx) => (
-                      <tr key={idx} className="border-b last:border-b-0">
-                        <td className="text-muted-foreground px-3 py-2">
-                          {new Date(record.timestamp).toLocaleString('zh-CN', {
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </td>
-                        <td className="px-3 py-2">{record.model}</td>
-                        <td className="px-3 py-2 text-right font-mono">{fmtK(record.tokens)}</td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          ${record.cost.toFixed(4)}
+                    {/* BUG-FIX-fix_20260617_mock_fallback:
+                        问题根因: 原代码 (stats?.recent_records ?? MOCK_RECORDS) 在加载失败时
+                                  降级显示假数据，误导用户以为有真实记录。
+                        修复方案: stats 为 null 或无记录时显示空状态提示。 */}
+                    {stats?.recent_records?.length ? (
+                      stats.recent_records.map((record, idx) => (
+                        <tr key={idx} className="border-b last:border-b-0">
+                          <td className="text-muted-foreground px-3 py-2">
+                            {new Date(record.timestamp).toLocaleString('zh-CN', {
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="px-3 py-2">{record.model}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtK(record.tokens)}</td>
+                          <td className="px-3 py-2 text-right font-mono">
+                            ${record.cost.toFixed(4)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={4} className="text-muted-foreground px-3 py-6 text-center">
+                          暂无使用记录
                         </td>
                       </tr>
-                    ))}
+                    )}
                   </tbody>
                 </table>
               </div>

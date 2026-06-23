@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -101,10 +102,8 @@ class TaskEventReceiverPlugin(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        try:
+        with contextlib.suppress(KeyError):
             self._task_service = ctx.get_service("task_service")
-        except KeyError:
-            pass
 
         if self._task_service is not None:
             try:
@@ -133,10 +132,8 @@ class TaskEventReceiverPlugin(IInputPlugin):
 
         task = None
         if self._task_service and task_id:
-            try:
+            with contextlib.suppress(Exception):
                 task = self._task_service.get_task(task_id)
-            except Exception:
-                pass
 
         if isinstance(task, dict):
             parent_id = task.get("parent_task_id", "")
@@ -182,9 +179,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
     def shutdown(self) -> None:
         """关闭插件，注销回调。"""
         if self._subscribed and self._task_service:
-            try:
+            with contextlib.suppress(Exception):
                 self._task_service.unregister_state_callback(self._on_state_changed)
-            except Exception:
-                pass
             logger.info("[TaskEventReceiver] Shutdown, callback unregistered")
             self._pending_events.clear()

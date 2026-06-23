@@ -14,9 +14,8 @@
  */
 
 import { ChevronLeft, ChevronRight, Loader2, MessageSquare, Plus, Search, X } from 'lucide-react'
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { NewSessionModal } from '@/components/session/NewSessionModal'
 import { SessionEditModal } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
@@ -27,6 +26,7 @@ import { reportError } from '@/services/errorReporting'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useAuthStore } from '@/stores/authStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -84,9 +84,9 @@ const SIDEBAR_STYLES = {
 export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const navigate = useNavigate()
   const [searchKeyword, setSearchKeyword] = useState('')
-  // 新建会话模态框状态 - Requirements: 13.3
-  const [isNewSessionModalOpen, setIsNewSessionModalOpen] = useState(false)
-  const [isCreatingSession, setIsCreatingSession] = useState(false)
+  // 模态框统一状态: { mode: 'create' } 或 { mode: 'edit', sessionId } 或 null
+  const [modal, setModal] = useState<{ mode: 'create' | 'edit'; sessionId?: string } | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
 
   const sessions = useSessionStore((state) => state.sessions)
   const activeSessionId = useSessionStore((state) => state.activeSessionId)
@@ -111,11 +111,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   // Agent 数据统一在这里加载
   const fetchAgents = useAgentStore((state) => state.fetchAgents)
 
-  // 编辑会话模态框状态
-  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
-
-  // 组件挂载时加载数据（会话列表和 Agent 列表）
+  // 等 auth token 就绪后加载数据，只加载一次
+  const authToken = useAuthStore((state) => state.token)
+  const hasLoadedRef = useRef(false)
   useEffect(() => {
+    if (!authToken || hasLoadedRef.current) return
+    hasLoadedRef.current = true
     fetchSessions().catch((error) => {
       reportError(error instanceof Error ? error.message : String(error), {
         type: 'server',
@@ -130,7 +131,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         operation: 'fetchAgents',
       })
     })
-  }, [])
+  }, [authToken])
 
   // 监听 WS session_update 事件，事件驱动刷新会话列表
   useEffect(() => {
@@ -171,60 +172,58 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   )
 
   /**
-   * 打开新建会话模态框 - Requirements: 13.3
+   * 打开新建会话模态框
    */
   const handleOpenNewSessionModal = useCallback(() => {
-    setIsNewSessionModalOpen(true)
+    setModal({ mode: 'create' })
   }, [])
 
   /**
-   * 关闭新建会话模态框
+   * 关闭模态框
    */
-  const handleCloseNewSessionModal = useCallback(() => {
-    setIsNewSessionModalOpen(false)
+  const handleCloseModal = useCallback(() => {
+    setModal(null)
   }, [])
 
   /**
-   * 确认创建会话 - Requirements: 13.3
-   * 创建会话后自动导航到会话页面
+   * 确认创建 / 编辑会话
    */
-  const handleConfirmCreateSession = useCallback(
-    async (agentId: string | null, title?: string) => {
-      setIsCreatingSession(true)
+  const handleSaveSession = useCallback(
+    async (sessionId: string | null, title: string, agentId: string | null) => {
+      setIsSaving(true)
       try {
-        const session = await createSession(title, {
-          agentId: agentId || undefined,
-        })
-        setIsNewSessionModalOpen(false)
-
-        // 直接导航到新创建的会话页面
-        navigate(`/session/${session.id}`)
+        if (sessionId) {
+          // 编辑已有会话 — 两个操作必须串行，避免竞争
+          await renameSession(sessionId, title)
+          await updateSessionAgent(sessionId, agentId)
+          setModal(null)
+        } else {
+          // 新建会话
+          const session = await createSession(title || undefined, {
+            agentId: agentId || undefined,
+          })
+          setModal(null)
+          navigate(`/session/${session.id}`)
+        }
       } catch (error) {
         reportError(error instanceof Error ? error.message : String(error), {
           type: 'server',
           componentName: 'Sidebar',
-          operation: 'createSession',
-          title,
+          operation: sessionId ? 'saveSessionEdit' : 'createSession',
+          sessionId: sessionId || undefined,
         })
       } finally {
-        setIsCreatingSession(false)
+        setIsSaving(false)
       }
     },
-    [createSession, navigate],
+    [createSession, renameSession, updateSessionAgent, navigate],
   )
 
   /**
    * 处理编辑会话 - 打开编辑模态框
    */
   const handleEditSession = useCallback((session: Session) => {
-    setEditingSessionId(session.id)
-  }, [])
-
-  /**
-   * 关闭编辑模态框
-   */
-  const handleCloseEditModal = useCallback(() => {
-    setEditingSessionId(null)
+    setModal({ mode: 'edit', sessionId: session.id })
   }, [])
 
   /**
@@ -267,33 +266,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   )
 
   /**
-   * 处理保存编辑
-   */
-  const handleSaveEdit = useCallback(
-    async (sessionId: string, title: string, agentId: string | null) => {
-      try {
-        // 更新标题
-        renameSession(sessionId, title)
-        // 更新绑定的 Agent
-        await updateSessionAgent(sessionId, agentId)
-        setEditingSessionId(null)
-      } catch (error) {
-        reportError(error instanceof Error ? error.message : String(error), {
-          type: 'server',
-          componentName: 'Sidebar',
-          operation: 'saveSessionEdit',
-          sessionId,
-        })
-      }
-    },
-    [renameSession, updateSessionAgent],
-  )
-
-  /**
    * 获取正在编辑的会话
    */
-  const editingSession = editingSessionId
-    ? sessions.find((s) => s.id === editingSessionId) || null
+  const editingSession = modal?.mode === 'edit' && modal.sessionId
+    ? sessions.find((s) => s.id === modal.sessionId) || null
     : null
 
   /**
@@ -456,22 +432,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               </div>
             </div>
 
-            {/* 新建会话模态框 - Requirements: 13.3 */}
-            <NewSessionModal
-              isOpen={isNewSessionModalOpen}
-              onClose={handleCloseNewSessionModal}
-              onConfirm={handleConfirmCreateSession}
-              isCreating={isCreatingSession}
-            />
-
-            {/* 编辑会话模态框 */}
-            <SessionEditModal
-              isOpen={!!editingSessionId}
-              session={editingSession}
-              onClose={handleCloseEditModal}
-              onSave={handleSaveEdit}
-            />
-
             {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
             <div
               className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
@@ -554,6 +514,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           </>
         )}
       </aside>
+
+      {/* 模态框放在 aside 外面，折叠/展开状态下都能渲染 */}
+      <SessionEditModal
+        mode={modal?.mode || 'create'}
+        isOpen={modal !== null}
+        session={editingSession}
+        onClose={handleCloseModal}
+        onSave={handleSaveSession}
+        isSaving={isSaving}
+      />
     </>
   )
 })

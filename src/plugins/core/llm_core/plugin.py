@@ -14,7 +14,8 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from llm.adapter import (
     LiteLLMAdapter,
@@ -30,6 +31,55 @@ from plugins.core.llm_core._message_normalizer import (
 from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
+
+# 日志中单条 content 最大长度，超过则截断
+_LOG_CONTENT_MAX_LEN = 200
+
+
+def _summarize_content_for_log(content: Any) -> str:
+    """将消息内容转换为日志友好的简短摘要。
+
+    处理多模态 content（list[dict]）和纯文本 content：
+    - 纯文本：直接截断到 _LOG_CONTENT_MAX_LEN
+    - 多模态列表：展示每个 block 的类型和摘要，base64 数据只保留前缀和长度
+
+    Args:
+        content: 消息内容，可能是 str 或 list[dict]
+
+    Returns:
+        截断后的日志字符串
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        if len(content) > _LOG_CONTENT_MAX_LEN:
+            return f"{content[:_LOG_CONTENT_MAX_LEN]}...(truncated, total={len(content)})"
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                parts.append(str(block)[:_LOG_CONTENT_MAX_LEN])
+                continue
+            btype = block.get("type", "unknown")
+            if btype == "text":
+                text = str(block.get("text", ""))
+                if len(text) > _LOG_CONTENT_MAX_LEN:
+                    parts.append(f"{{text: {text[:_LOG_CONTENT_MAX_LEN]}...(truncated, len={len(text)})}}")
+                else:
+                    parts.append(f"{{text: {text}}}")
+            elif btype == "image_url":
+                url = (block.get("image_url") or {}).get("url", "")
+                if url.startswith("data:"):
+                    # base64 data URL：只记录 mime 和长度，不打印二进制内容
+                    head = url.split(",", 1)[0]
+                    parts.append(f"{{image_url: {head},<base64 len={len(url)}>}}")
+                else:
+                    parts.append(f"{{image_url: {url}}}")
+            else:
+                parts.append(f"{{{btype}}}")
+        return "[" + ", ".join(parts) + "]"
+    return str(content)[:_LOG_CONTENT_MAX_LEN]
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -116,6 +166,12 @@ class LLMCore(ICorePlugin):
         """
         self._config = config or {}
         self._provider: str = self._config.get("provider", "openai")
+        # model_id（yaml key，如 deepseek-v4-pro-apigo）：路由标识，
+        # 传给 Router/KeyPool 做 deployment 匹配，保证不同 provider 的同名模型隔离。
+        # model_name（yaml 的 model_name，如 deepseek-v4-pro）：发给上游的真实模型名，
+        # 直连模式拼 litellm model 字符串用。
+        # 两者必须分开：model_name 重名时（官方与 apigo 同底模），靠 model_id 区分路由。
+        self._model_id: str = self._config.get("model_id", "")
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
@@ -130,12 +186,13 @@ class LLMCore(ICorePlugin):
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
-        # BUG-FIX-fix_20260603_call_timeout_from_config:
-        # call_timeout 在 llm.yaml 中配置（如 call_timeout: 300），
-        # 但在 LLMCore 中从未被读取，导致适配器使用硬编码默认值 300。
-        # 现在从配置读取并透传为 inter_chunk_timeout。
         self._call_timeout: float = float(
             self._config.get("call_timeout", 300)
+        )
+        # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 60s）。
+        # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
+        self._first_token_timeout: float = float(
+            self._config.get("first_token_timeout", 60)
         )
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
@@ -167,7 +224,7 @@ class LLMCore(ICorePlugin):
         """插件执行优先级。"""
         return 50
 
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行 LLM 调用，返回原始结果。
 
         调用 LLM 后，将 assistant 回复 append 到 messages 中。
@@ -193,7 +250,7 @@ class LLMCore(ICorePlugin):
             on_chunk = StreamRepetitionMonitor(on_chunk)
 
         try:
-            from llm.key_pool import set_agent_priority
+            from llm.key_pool import set_agent_priority  # noqa: PLC0415
             agent_level = ctx.state.get("agent_level", "L3")
             set_agent_priority(agent_level)
 
@@ -286,7 +343,7 @@ class LLMCore(ICorePlugin):
             )
             if tool_calls:
                 for tc in tool_calls:
-                    logger.info(
+                    logger.debug(
                         "[%s] tool_call: %s(%s)",
                         self.name, tc.get("name", "?"),
                         str(tc.get("args", tc.get("arguments", "")))[:200],
@@ -319,6 +376,8 @@ class LLMCore(ICorePlugin):
                     tc["id"] = resolved_ids[i]
 
                 # LLM 返回工具调用 -> append assistant 消息（含 tool_calls）
+                # 统一保留 reasoning_content 到内存（不管 provider）：
+                # 发送给 API 时由 ProviderAdapter 按 provider 决定是否剥离
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": result_text or "",
@@ -334,14 +393,19 @@ class LLMCore(ICorePlugin):
                         for i, tc in enumerate(tool_calls)
                     ],
                 }
+                if thinking_text:
+                    assistant_msg["reasoning_content"] = thinking_text
                 history.append(assistant_msg)
             elif result_text:
                 # LLM 普通文本回复 -> append assistant 消息
-                history.append({"role": "assistant", "content": result_text})
+                _plain_msg: dict[str, Any] = {"role": "assistant", "content": result_text}
+                if thinking_text:
+                    _plain_msg["reasoning_content"] = thinking_text
+                history.append(_plain_msg)
 
             _pipeline_id = ctx.state.get("pipeline_id", "?")
             _iteration = ctx.state.get("iteration", -1)
-            logger.info(
+            logger.debug(
                 "[%s] pipeline=%s iter=%d LLM returned: "
                 "text=%d chars, tool_calls=%d, thinking=%d chars",
                 self.name, _pipeline_id, _iteration,
@@ -370,13 +434,17 @@ class LLMCore(ICorePlugin):
             # 工具调用错误后重置消息配对缓存，确保下次全量扫描
             exc_msg = str(exc)
             if "tool_call" in exc_msg.lower() or "tool call" in exc_msg.lower():
-                from plugins.core.llm_core._message_normalizer import (
+                from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
                     reset_pairing_cache,
                 )
-                reset_pairing_cache(self._provider, self.name)
+                # 精确重置当前管道的缓存（pipeline_id 维度隔离后必须带 ID）
+                _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+                reset_pairing_cache(
+                    self._provider, self.name, pipeline_id=_pipeline_id,
+                )
                 logger.info(
-                    "[%s] 检测到 tool_call 相关错误，已重置配对缓存",
-                    self.name,
+                    "[%s] 检测到 tool_call 相关错误，已重置配对缓存 (pipeline=%s)",
+                    self.name, _pipeline_id or "?",
                 )
             raise
 
@@ -387,7 +455,8 @@ class LLMCore(ICorePlugin):
         1. state["system_message"] -- prompt_build 产出的纯 SystemMessage
         2. state["compression_messages"] -- 压缩块独立消息（L2→L1→state_snapshot）
         3. state["messages"] -- 管道维护的对话历史（最近消息）
-        4. state["prompt.dynamic_vars"] -- 动态变量（追加在最后）
+        4. state["multimodal_content"] -- 多模态内容（图片/文件等，合并到最后一条用户消息）
+        5. state["prompt.dynamic_vars"] -- 动态变量（追加在最后）
 
         Args:
             state: 管道状态字典
@@ -411,10 +480,33 @@ class LLMCore(ICorePlugin):
         for m in history:
             # 清理内部标记字段，不发给 LLM
             if "_record_sequence" in m:
-                m = {k: v for k, v in m.items() if k != "_record_sequence"}
+                m = {k: v for k, v in m.items() if k != "_record_sequence"}  # noqa: PLW2901
             messages.append(m)
 
-        # 4. 动态变量（每轮变化的上下文：时间戳、session_id 等）
+        # 4. 多模态内容（合并到最后一条用户消息）
+        multimodal_content = state.get("multimodal_content")
+        if multimodal_content and messages:
+            # 找到最后一条用户消息
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    # 将纯文本内容转换为 content blocks 格式
+                    existing_content = messages[i].get("content", "")
+                    if isinstance(existing_content, str):
+                        # 转换为 content blocks 数组
+                        messages[i]["content"] = [
+                            {"type": "text", "text": existing_content}
+                        ] + multimodal_content
+                    elif isinstance(existing_content, list):
+                        # 已经是 content blocks，直接追加
+                        messages[i]["content"].extend(multimodal_content)
+                    break
+
+        # 5. 动态变量（每轮变化的上下文：时间戳、session_id 等）
+        #    作为独立 system 消息追加在末尾，绝不合并进 messages[0]（system_message）。
+        #    system_message 必须保持纯 prompt、永不变化（prompt cache 命中依赖此不变性），
+        #    而 dynamic_vars 含时间戳等每轮变化的内容，合并进去会破坏 cache 并污染系统提示词。
+        #    也不必担心污染对话历史：该消息 role=system name=dynamic_context，
+        #    与 user/assistant 历史段物理隔离。
         dynamic_vars_msg = state.get("prompt.dynamic_vars")
         if dynamic_vars_msg:
             if isinstance(dynamic_vars_msg, dict):
@@ -423,34 +515,83 @@ class LLMCore(ICorePlugin):
                 content = str(dynamic_vars_msg)
             if content:
                 messages.append({
-                    "role": "user",
+                    "role": "system",
                     "name": "dynamic_context",
                     "content": content,
                 })
 
         return messages
 
+    def _writeback_cleaned_history(
+        self,
+        state: dict[str, Any],
+        raw_messages: list[dict[str, Any]],
+        cleaned_messages: list[dict[str, Any]],
+    ) -> None:
+        """把 normalize 清理后的历史段写回 state["messages"]。
+
+        _build_messages 拼接顺序为 [system?] + compression* + history* + [dynamic_vars?]。
+        normalize 的配对清理只发生在 history 段（移除孤儿 tool result /
+        未配对 assistant(tool_calls)），不会删除 system/compression/dynamic_vars，
+        因此前缀计数与后缀计数不变，可用偏移量定位历史段。
+
+        Args:
+            state: 管道状态字典
+            raw_messages: normalize 前的完整消息列表
+            cleaned_messages: normalize 后的完整消息列表
+        """
+        prefix_len = 0
+        if state.get("system_message"):
+            prefix_len += 1
+        prefix_len += len(state.get("compression_messages", []))
+
+        suffix_len = 1 if state.get("prompt.dynamic_vars") else 0
+
+        raw_history_len = len(raw_messages) - prefix_len - suffix_len
+        cleaned_history_len = len(cleaned_messages) - prefix_len - suffix_len
+        if cleaned_history_len <= 0 or raw_history_len <= 0:
+            return
+
+        cleaned_history = cleaned_messages[prefix_len:prefix_len + cleaned_history_len]
+        state["messages"] = list(cleaned_history)
+        logger.info(
+            "[%s] normalize 清理写回 state: history %d → %d 条（移除孤儿/未配对消息）",
+            self.name, raw_history_len, cleaned_history_len,
+        )
+
     def _get_model_string(self) -> str:
         """获取 LiteLLM 格式的模型标识字符串。
 
         LiteLLM 使用 "provider/model" 格式路由到不同的 LLM 提供商。
 
+        优先用 router_factory 的动态映射（读 llm.yaml 的 providers.type 字段），
+        命中自定义 provider（如 apigo → openai）。未命中（router 未初始化的测试
+        场景）回退到内置常见提供商映射，保持兼容。
+
         Returns:
             LiteLLM 模型标识字符串
         """
-        # 常见提供商映射
-        provider_map = {
-            "openai": "openai",
-            "minimax": "minimax",
-            "anthropic": "anthropic",
-            "azure": "azure",
-            "zhipu_coding": "zai",
-            "zhipu": "zai",
-        }
-        provider_prefix = provider_map.get(self._provider, self._provider)
+        provider_prefix = ""
+        try:
+            from llm.router_factory import get_litellm_prefix  # noqa: PLC0415
+            provider_prefix = get_litellm_prefix(self._provider)
+        except Exception:  # noqa: BLE001
+            provider_prefix = ""
+
+        # 动态映射未命中（空或返回原名）→ 回退到内置映射
+        if not provider_prefix or provider_prefix == self._provider:
+            provider_map = {
+                "openai": "openai",
+                "minimax": "minimax",
+                "anthropic": "anthropic",
+                "azure": "azure",
+                "zhipu_coding": "zai",
+                "zhipu": "zai",
+            }
+            provider_prefix = provider_map.get(self._provider, self._provider)
         return f"{provider_prefix}/{self._model}"
 
-    async def _call_llm(
+    async def _call_llm(  # noqa: PLR0912
         self,
         messages: list[dict[str, Any]],
         ctx: PluginContext,
@@ -473,8 +614,14 @@ class LLMCore(ICorePlugin):
             统一的 LLMResponse 响应结构
         """
         normalized_messages = normalize_messages_for_provider(
-            messages, provider=self._provider, name=self.name,
+            messages,
+            provider=self._provider,
+            name=self.name,
+            pipeline_id=ctx.state.get(StateKeys.PIPELINE_ID, ""),
         )
+
+        if len(normalized_messages) < len(messages):
+            self._writeback_cleaned_history(ctx.state, messages, normalized_messages)
 
         # 主动修复：Phase 1-4 转换后仍可能存在遗漏（极端边界情况），
         # 此处主动修复而非仅做诊断日志。
@@ -528,9 +675,11 @@ class LLMCore(ICorePlugin):
                 )
 
         if self._use_router:
-            # Router 路径：model 用路由别名，凭证和重试由 Router 管理
+            # Router 路径：model 用 yaml key（model_id）做 deployment 匹配，
+            # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。
+            # _model_id 为空（旧 config）时回退到 _model，保持兼容。
             kwargs: dict[str, Any] = {
-                "model": self._model,
+                "model": self._model_id or self._model,
                 "messages": normalized_messages,
                 **self._default_params,
             }
@@ -571,6 +720,7 @@ class LLMCore(ICorePlugin):
                 stream=stream,
                 on_chunk=on_chunk,
                 inter_chunk_timeout=self._call_timeout,
+                first_chunk_timeout=self._first_token_timeout,
                 **kwargs,
             )
         except asyncio.TimeoutError:

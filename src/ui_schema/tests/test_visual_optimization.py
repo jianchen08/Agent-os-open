@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-
 from ui_schema.design_tokens import (
     ColorPalette,
     DesignTokens,
@@ -28,7 +27,6 @@ from ui_schema.design_tokens import (
     tokens_to_css_variables,
     validate_token_values,
 )
-
 
 # ============================================================
 # LayoutScale 布局令牌测试
@@ -311,7 +309,7 @@ class TestCssVariablesWithNewTokens:
         """CSS 变量名应使用连字符分隔。"""
         tokens = DesignTokens()
         css_vars = tokens_to_css_variables(tokens)
-        for key in css_vars.keys():
+        for key in css_vars:
             assert key.startswith("--"), f"CSS 变量名 {key} 不以 -- 开头"
             # 不应包含下划线（应转换为连字符）
             assert "_" not in key, f"CSS 变量名 {key} 包含下划线"

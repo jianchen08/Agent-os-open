@@ -25,10 +25,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from pathlib import Path  # noqa: F401
+from typing import TYPE_CHECKING, Any
 
-import yaml
+import yaml  # noqa: F401
 
 if TYPE_CHECKING:
     from tasks.service import TaskService
@@ -122,7 +122,7 @@ class TimerManager:
         await manager.cancel_timer("task-123")
     """
 
-    _instance: "TimerManager | None" = None
+    _instance: TimerManager | None = None
     _initialized: bool = False
 
     DEFAULT_CONFIG = {
@@ -156,7 +156,7 @@ class TimerManager:
         },
     }
 
-    def __new__(cls) -> "TimerManager":
+    def __new__(cls) -> TimerManager:
         """单例模式：确保全局唯一实例"""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -181,14 +181,12 @@ class TimerManager:
         不再依赖 config.system_config 模块。
         """
         try:
-            config_path = Path("config/system/long_term_task.yaml")
-            if config_path.exists():
-                text = config_path.read_text(encoding="utf-8")
-                config = yaml.safe_load(text)
-                if config and isinstance(config, dict):
-                    self._config = self._merge_config(self.DEFAULT_CONFIG, config)
-                    logger.info("从配置文件加载长期任务配置成功")
-                    return
+            from config.config_center import get_config_center  # noqa: PLC0415
+            config = get_config_center().get("system/long_term_task.yaml")
+            if config and isinstance(config, dict):
+                self._config = self._merge_config(self.DEFAULT_CONFIG, config)
+                logger.info("从配置文件加载长期任务配置成功")
+                return
 
             self._config = self.DEFAULT_CONFIG.copy()
             logger.info("使用默认长期任务配置")
@@ -223,7 +221,7 @@ class TimerManager:
         return result
 
     @classmethod
-    def get_instance(cls) -> "TimerManager":
+    def get_instance(cls) -> TimerManager:
         """获取单例实例"""
         return cls()
 
@@ -445,7 +443,7 @@ class TimerManager:
         """获取计时器总数"""
         return len(self._timers)
 
-    async def restore_from_storage(
+    async def restore_from_storage(  # noqa: PLR0912
         self,
         task_service: TaskService,
         callback: Callable[[str], None] | None = None,

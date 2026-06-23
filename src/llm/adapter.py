@@ -15,10 +15,13 @@ import asyncio
 import logging
 import re
 import time as _time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import litellm
+
+from llm.error_classifier import ErrorKind, classify_error
 
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
@@ -26,84 +29,8 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+# cleanup_litellm_resources/logging 已删除（engine.run() 在主事件循环中运行，循环不关闭）
 
-def cleanup_litellm_logging() -> None:
-    """清理 LiteLLM 内部 LoggingWorker 后台任务。
-
-    LiteLLM 的 LoggingWorker 会创建长期运行的后台 asyncio Task，
-    在 asyncio.run() 结束事件循环时这些 Task 不会被正确取消，
-    导致 "Task was destroyed but it is pending!" 警告。
-
-    此函数尝试取消这些未完成的 Task，消除关闭时的警告噪音。
-    """
-    try:
-        # litellm 内部可能有多个 logging worker 实例
-        from litellm.litellm_core_utils import logging_worker as _lw
-
-        for attr_name in ("_workers", "_instance", "_instances"):
-            obj = getattr(_lw, attr_name, None)
-            if obj is None:
-                continue
-            if isinstance(obj, dict):
-                for worker in obj.values():
-                    _cancel_worker_tasks(worker)
-            elif isinstance(obj, list):
-                for worker in obj:
-                    _cancel_worker_tasks(worker)
-            else:
-                _cancel_worker_tasks(obj)
-    except Exception as exc:
-        logger.debug("cleanup_litellm_logging 部分步骤失败（可忽略）: %s", exc)
-
-
-async def cleanup_litellm_resources() -> None:
-    """清理 LiteLLM 所有资源：后台任务 + HTTP 会话。
-
-    在异步上下文中调用（事件循环仍活跃时）。
-    """
-    cleanup_litellm_logging()
-    try:
-        from litellm.llms.custom_httpx.async_client_cleanup import (
-            close_litellm_async_clients,
-        )
-        await close_litellm_async_clients()
-    except Exception as exc:
-        logger.debug("close_litellm_async_clients 失败（可忽略）: %s", exc)
-
-
-def cleanup_litellm_resources_sync() -> None:
-    """同步版本，在事件循环关闭后调用（如 main() finally 块）。"""
-    cleanup_litellm_logging()
-    try:
-        from litellm.llms.custom_httpx.async_client_cleanup import (
-            close_litellm_async_clients,
-        )
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(close_litellm_async_clients())
-        finally:
-            loop.close()
-    except Exception as exc:
-        logger.debug("cleanup_litellm_resources_sync 部分步骤失败（可忽略）: %s", exc)
-
-
-def _cancel_worker_tasks(worker: Any) -> None:
-    """取消单个 worker 的后台任务。"""
-    if worker is None:
-        return
-    loop = None
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        return
-    if loop is None or loop.is_closed():
-        return
-    for attr_name in ("_task", "_background_task", "_loop_task"):
-        task = getattr(worker, attr_name, None)
-        if task is not None and isinstance(task, asyncio.Task) and not task.done():
-            task.cancel()
-
-# 专用 logger：只写文件，不传播到 root（不显示在 CLI）
 _diag_logger = logging.getLogger(__name__ + "._diag")
 _diag_logger.propagate = False
 _stream_logger = logging.getLogger(__name__ + "._stream")
@@ -160,6 +87,27 @@ def _extract_thinking_from_content(content: str | None) -> tuple[str | None, str
     thinking = "\n".join(m.strip() for m in matches if m.strip())
     cleaned = pattern.sub("", content).strip()
     return thinking if thinking else None, cleaned if cleaned else None
+
+
+def _move_to_extra_body(kwargs: dict[str, Any], keys: tuple[str, ...]) -> None:
+    """把指定的 kwargs 挪进 extra_body，让 litellm/OpenAI SDK 原样透传给上游。
+
+    litellm 的 openai provider 对部分参数（reasoning_effort、thinking 等）会
+    主动拦截或丢弃，但这些参数经 OpenAI 兼容中转端（如 apigo）时上游能接受。
+    extra_body 是 OpenAI SDK 的官方透传通道，litellm 把它原样合并进请求 body。
+
+    仅移动 kwargs 中已存在的 key；不存在的跳过。原地修改 kwargs。
+
+    Args:
+        kwargs: litellm 调用参数字典（原地修改）
+        keys: 需要挪进 extra_body 的参数名
+    """
+    extra = dict(kwargs.get("extra_body") or {})
+    for k in keys:
+        if k in kwargs:
+            extra[k] = kwargs.pop(k)
+    if extra:
+        kwargs["extra_body"] = extra
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +256,24 @@ class _BaseLiteLLMAdapter:
         # 防御性兜底：确保 minimax 不会收到非法 system 消息
         self._ensure_minimax_role_safety(model, messages)
 
+        # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
+        # 透传 **kwargs（即 default_params），adapter 按需读取自身配置
+        from llm.provider_adapters import get_provider_adapter  # noqa: PLC0415
+        adapter = get_provider_adapter(model)
+        messages = adapter.adapt_messages_before_send(messages, **kwargs)
+
+        # 弹出 adapter 专属参数（不发给 litellm / API）
+        kwargs.pop("reasoning_retention", None)
+
+        # 自定义 OpenAI 兼容端点（openai/ 前缀，如 apigo 中转）：
+        # litellm 的 openai provider 不认 reasoning_effort/thinking 等 deepseek
+        # 专有参数（会抛 UnsupportedParamsError 或被 drop_params 丢弃）。但中转
+        # 端上游本身能接受它们（实测 apigo 返回 200），所以挪进 extra_body
+        # 透传——OpenAI SDK 原生通道，litellm 会原样塞进请求 body。
+        # 原生支持的 provider（deepseek/、minimax/ 等）不进这里，参数照常直传。
+        if model.lower().startswith("openai/"):
+            _move_to_extra_body(kwargs, ("reasoning_effort", "thinking"))
+
         if stream:
             return await self._call_streaming(
                 model, messages, tools=tools, on_chunk=on_chunk, **kwargs
@@ -349,7 +315,10 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
-        response = await self._do_completion(**call_kwargs)
+        # drop_params 与流式路径对齐：openai provider 不接受 thinking /
+        # reasoning_effort 等 deepseek/anthropic 专有参数（自定义中转端点经
+        # type=openai 接入时常见），不丢会抛 UnsupportedParamsError。
+        response = await self._do_completion(**call_kwargs, drop_params=True)
 
         choice = response.choices[0]
         result_text = choice.message.content
@@ -396,7 +365,7 @@ class _BaseLiteLLMAdapter:
             usage=usage,
         )
 
-    async def _call_streaming(
+    async def _call_streaming(  # noqa: PLR0915
         self,
         model: str,
         messages: list[dict[str, Any]],
@@ -406,6 +375,12 @@ class _BaseLiteLLMAdapter:
         **kwargs: Any,
     ) -> LLMResponse:
         """流式调用 LLM。"""
+        # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死。
+        # 必须在构造 call_kwargs 之前 pop 出来，否则会被 **kwargs 塞进
+        # litellm 请求参数（litellm 不识别这两个 key）。
+        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
+        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
+
         call_kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -416,6 +391,17 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
+        # BUG-FIX-fix_20260623_first_chunk_timeout:
+        # 原实现把 call_kwargs["timeout"] 写在 _do_completion 之后（对已发出的
+        # 请求无效），导致首 chunk 不来时 asyncio.wait_for 的 cancel 传不到
+        # httpx C 层 socket recv()，流式调用永久卡死（实测卡 5~10 分钟不超时）。
+        # 修复：在发请求之前就把 timeout 传给 litellm → httpx.Timeout(read=N)，
+        # 让 socket 层强制超时。litellm 的 timeout 是核心参数（router_factory.py
+        # 已用 float 传过），drop_params=True 不会丢弃它。
+        # 首 chunk 阶段是卡死高发点，用更短的 first_chunk_timeout 让建连/首字节
+        # 卡住时必超时；后续 chunk 由 asyncio.wait_for(inter_chunk_timeout) 控制。
+        call_kwargs["timeout"] = first_chunk_timeout
+
         response = await self._do_completion(**call_kwargs, drop_params=True)
 
         result_parts: list[str] = []
@@ -423,16 +409,6 @@ class _BaseLiteLLMAdapter:
         tool_calls_map: dict[int, dict[str, Any]] = {}
         stream_usage: dict[str, Any] | None = None
         _stream_start: float = _time.monotonic()
-
-        # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死
-        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
-        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
-
-        # BUG-FIX-fix_20260606_socket_level_timeout:
-        # asyncio.wait_for 的 cancel 无法中断 httpx 在 C 层的 socket recv()，
-        # 导致流式调用在 API 不响应时永久卡死。解决：将 inter_chunk_timeout
-        # 透传给 litellm → httpx.Timeout(read=N)，在 socket 层面强制超时。
-        call_kwargs["timeout"] = inter_chunk_timeout
 
         stream_repetition = False
         thinking_truncated = False
@@ -463,7 +439,7 @@ class _BaseLiteLLMAdapter:
                     " model=%s",
                     type(self).__name__, first_chunk_timeout, model,
                 )
-                raise litellm.Timeout(
+                raise litellm.Timeout(  # noqa: B904
                     message=(
                         "Stream first chunk timeout:"
                         f" no data for {first_chunk_timeout:.0f}s"
@@ -474,9 +450,9 @@ class _BaseLiteLLMAdapter:
 
             # 边收边处理，保持真正的流式
             # _process_chunk 内联处理每个 chunk
-            async def _process_chunk(chunk: Any) -> bool:
+            async def _process_chunk(chunk: Any) -> bool:  # noqa: PLR0911,PLR0912,PLR0915
                 """处理单个 chunk，返回是否应该 break。"""
-                nonlocal stream_repetition, _in_think_tag, stream_usage
+                nonlocal stream_repetition, _in_think_tag, stream_usage, thinking_truncated
                 # 流式诊断：只写文件，不显示在 CLI
                 _chunk_idx = len(result_parts) + len(thinking_parts)
                 if _chunk_idx <= 1 or _chunk_idx % 200 == 0:
@@ -550,6 +526,7 @@ class _BaseLiteLLMAdapter:
                             thinking_len,
                             _max_thinking_chars,
                         )
+                        thinking_truncated = True
                         return True
 
                 # 文本内容：流式 <think/> 状态机处理（MiniMax 等模型）
@@ -591,66 +568,66 @@ class _BaseLiteLLMAdapter:
                                     type(self).__name__,
                                     thinking_len, _max_thinking_chars,
                                 )
+                                thinking_truncated = True
                                 return True
-                    else:
-                        # 标签外：检查开标签
-                        if "<think" in content:
-                            _open_idx = content.index("<think")
-                            _before = content[:_open_idx]
-                            if _before:
-                                result_parts.append(_before)
+                    # 标签外：检查开标签
+                    elif "<think" in content:
+                        _open_idx = content.index("<think")
+                        _before = content[:_open_idx]
+                        if _before:
+                            result_parts.append(_before)
+                            if on_chunk:
+                                on_chunk({"type": "text", "content": _before})
+                        _after_open = content[_open_idx:]
+                        _gt = _after_open.find(">")
+                        _inner = _after_open[_gt + 1:] if _gt >= 0 else ""
+                        _in_think_tag = True
+                        if "</think" in _inner:
+                            _ci = _inner.index("</think")
+                            _tp = _inner[:_ci]
+                            if _tp:
+                                thinking_parts.append(_tp)
                                 if on_chunk:
-                                    on_chunk({"type": "text", "content": _before})
-                            _after_open = content[_open_idx:]
-                            _gt = _after_open.find(">")
-                            _inner = _after_open[_gt + 1:] if _gt >= 0 else ""
-                            _in_think_tag = True
-                            if "</think" in _inner:
-                                _ci = _inner.index("</think")
-                                _tp = _inner[:_ci]
-                                if _tp:
-                                    thinking_parts.append(_tp)
-                                    if on_chunk:
-                                        on_chunk({"type": "thinking", "content": _tp})
-                                _ac = _inner[_ci:]
-                                _g2 = _ac.find(">")
-                                _rs = _ac[_g2 + 1:] if _g2 >= 0 else ""
-                                _in_think_tag = False
-                                if _rs.strip():
-                                    result_parts.append(_rs)
-                                    if on_chunk:
-                                        signal = on_chunk({"type": "text", "content": _rs})
-                                        if signal == "stop":
-                                            stream_repetition = True
-                                            return True
-                            elif _inner:
-                                thinking_parts.append(_inner)
-                                _stream_logger.debug(
-                                    "[STREAM][THINKING] #%d +%d chars",
-                                    len(thinking_parts), len(_inner),
-                                )
+                                    on_chunk({"type": "thinking", "content": _tp})
+                            _ac = _inner[_ci:]
+                            _g2 = _ac.find(">")
+                            _rs = _ac[_g2 + 1:] if _g2 >= 0 else ""
+                            _in_think_tag = False
+                            if _rs.strip():
+                                result_parts.append(_rs)
                                 if on_chunk:
-                                    on_chunk({"type": "thinking", "content": _inner})
-                        else:
-                            if on_chunk and thinking_parts:
-                                on_chunk({"type": "thinking_end", "content": ""})
-                            result_parts.append(content)
+                                    signal = on_chunk({"type": "text", "content": _rs})
+                                    if signal == "stop":
+                                        stream_repetition = True
+                                        return True
+                        elif _inner:
+                            thinking_parts.append(_inner)
                             _stream_logger.debug(
-                                "[STREAM][TEXT] #%d +%d chars: %s",
-                                len(result_parts), len(content),
-                                repr(content[:80]),
+                                "[STREAM][THINKING] #%d +%d chars",
+                                len(thinking_parts), len(_inner),
                             )
                             if on_chunk:
-                                signal = on_chunk(
-                                    {"type": "text", "content": content}
+                                on_chunk({"type": "thinking", "content": _inner})
+                    else:
+                        if on_chunk and thinking_parts:
+                            on_chunk({"type": "thinking_end", "content": ""})
+                        result_parts.append(content)
+                        _stream_logger.debug(
+                            "[STREAM][TEXT] #%d +%d chars: %s",
+                            len(result_parts), len(content),
+                            repr(content[:80]),
+                        )
+                        if on_chunk:
+                            signal = on_chunk(
+                                {"type": "text", "content": content}
+                            )
+                            if signal == "stop":
+                                stream_repetition = True
+                                logger.warning(
+                                    "[%s] 收到 stop 信号，截断流式输出",
+                                    type(self).__name__,
                                 )
-                                if signal == "stop":
-                                    stream_repetition = True
-                                    logger.warning(
-                                        "[%s] 收到 stop 信号，截断流式输出",
-                                        type(self).__name__,
-                                    )
-                                    return True
+                                return True
 
                 # 工具调用（流式增量）
                 if delta.tool_calls:
@@ -723,7 +700,7 @@ class _BaseLiteLLMAdapter:
                         type(self).__name__, inter_chunk_timeout, model,
                         len(result_parts) + len(thinking_parts),
                     )
-                    raise litellm.Timeout(
+                    raise litellm.Timeout(  # noqa: B904
                         message=(
                             "Stream inter-chunk timeout:"
                             f" no data for {inter_chunk_timeout:.0f}s"
@@ -846,7 +823,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         优先用 router_factory 的映射表（model_id → provider），
         兜底用 litellm 前缀反查。
         """
-        from llm.router_factory import (
+        from llm.router_factory import (  # noqa: PLC0415
             get_key_pool,
             get_provider_for_model,
         )
@@ -867,9 +844,9 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             return model.split("/", 1)[1]
         return model
 
-    async def _do_completion(self, **kwargs: Any) -> Any:
-        from llm.router_factory import get_key_pool
-        from llm.key_pool import KeySlot
+    async def _do_completion(self, **kwargs: Any) -> Any:  # noqa: PLR0912,PLR0915
+        from llm.key_pool import KeySlot  # noqa: PLC0415
+        from llm.router_factory import get_key_pool  # noqa: PLC0415
 
         model_str = kwargs.get("model", "")
         provider_name = self._resolve_provider(model_str)
@@ -883,103 +860,102 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         max_retries = len(pool.slots)
         last_exc: Exception | None = None
 
-        for attempt in range(max_retries):
-            slot: KeySlot = await pool.acquire_slot()
-            try:
-                key_kwargs = dict(kwargs)
-                key_kwargs["api_key"] = slot.api_key
-                if slot.api_base:
-                    key_kwargs.setdefault("api_base", slot.api_base)
+        from llm.exceptions import KeyPoolExhaustedError  # noqa: PLC0415
 
-                if key_kwargs.get("stream"):
+        try:
+            for attempt in range(max_retries):
+                slot: KeySlot = await pool.acquire_slot()
+                logger.info(
+                    "[KeyPoolAdapter] provider=%s 选用 key=%s (api_key=%s...) attempt=%d/%d",
+                    provider_name, slot.key_id, slot.api_key[:6], attempt + 1, max_retries,
+                )
+                try:
+                    key_kwargs = dict(kwargs)
+                    key_kwargs["api_key"] = slot.api_key
+                    if slot.api_base:
+                        key_kwargs.setdefault("api_base", slot.api_base)
+
                     result = await self._direct_call_with_slot(
                         slot=slot, **key_kwargs
                     )
-                else:
-                    result = await self._direct_call_with_slot(
-                        slot=slot, **key_kwargs
-                    )
 
-                slot.on_success()
-                return result
-            except litellm.AuthenticationError as exc:
-                # 认证失败：冷却该 key，用其他 key 重试
-                slot.on_rate_limit(retry_after=300)
-                logger.error(
-                    "[KeyPoolAdapter] 认证失败 → key=%s 冷却 300s"
-                    "，尝试其他 key (attempt %d/%d): %s",
-                    slot.key_id, attempt + 1, max_retries, exc,
-                )
-                last_exc = exc
-                # 不要 raise，继续循环尝试下一个 key
-            except litellm.RateLimitError as exc:
-                # 429 限流：冷却该 key，尝试其他 key
-                slot.on_rate_limit()
-                last_exc = exc
-            except litellm.BudgetExceededError as exc:
-                # 配额耗尽（如"每周/每月使用上限"）：冷却该 key，尝试其他 key
-                slot.on_rate_limit(retry_after=3600.0)
-                logger.warning(
-                    "[KeyPoolAdapter] 配额耗尽 → key=%s 冷却 3600s"
-                    "，尝试其他 key (attempt %d/%d): %s",
-                    slot.key_id, attempt + 1, max_retries, exc,
-                )
-                last_exc = exc
-            except litellm.Timeout as exc:
-                last_exc = exc
-                # 超时：不冷却 key，不轮转（不是 key 的问题）
-                raise
-            except asyncio.CancelledError:
-                # 用户取消：不冷却，直接抛
-                raise
-            except litellm.InternalServerError as exc:
-                slot.on_rate_limit()
-                logger.warning(
-                    "[KeyPoolAdapter] InternalServerError"
-                    " → key=%s 冷却: %s",
-                    slot.key_id, exc,
-                )
-                last_exc = exc
-            except litellm.BadRequestError as exc:
-                # 400：通常是请求参数错误，但如果错误消息包含配额相关关键词
-                # （如 DeepSeek 的 "Insufficient Balance"），也应轮转 key
-                _msg = str(exc).lower()
-                _quota_keywords = (
-                    "insufficient", "balance", "quota", "exceeded",
-                    "limit", "额度", "上限", "用完", "余额", "不足",
-                )
-                if any(kw in _msg for kw in _quota_keywords):
-                    slot.on_rate_limit(retry_after=3600.0)
-                    logger.warning(
-                        "[KeyPoolAdapter] 疑似配额耗尽 (400) → key=%s 冷却"
-                        "，尝试其他 key (attempt %d/%d): %s",
-                        slot.key_id, attempt + 1, max_retries, exc,
-                    )
-                    last_exc = exc
-                else:
-                    # 真正的请求参数错误 → 不轮转
+                    slot.on_success()
+                    return result
+                except asyncio.CancelledError:
+                    # 用户取消：不冷却，直接抛
                     raise
-            except Exception as exc:
-                # 其他所有异常（含 PermissionDeniedError、ServiceUnavailableError、
-                # APIConnectionError 等 API 错误，以及可能的未分类配额错误）：
-                # 冷却当前 key 并尝试下一个。只有所有 key 都失败才最终抛异常。
-                slot.on_rate_limit()
-                logger.warning(
-                    "[KeyPoolAdapter] 未分类错误 → key=%s 冷却 type=%s"
-                    "，尝试其他 key (attempt %d/%d): %s",
-                    slot.key_id, type(exc).__name__, attempt + 1, max_retries, exc,
-                )
-                last_exc = exc
-            finally:
-                slot.release()
+                except Exception as exc:
+                    # 统一异常处理：先翻译成 ErrorInfo，再按 kind 决策
+                    info = classify_error(exc)
 
-        # 所有 key 都试过了
-        logger.error(
-            "[KeyPoolAdapter] 所有 key 均失败"
-            " provider=%s model=%s",
+                    # BAD_REQUEST 是不可恢复的参数错误，直接抛（不换 key）
+                    if info.kind == ErrorKind.BAD_REQUEST:
+                        logger.warning(
+                            "[KeyPoolAdapter] BAD_REQUEST 不可恢复 → key=%s: %s",
+                            slot.key_id, str(exc)[:200],
+                        )
+                        raise
+
+                    # SERVICE_DOWN：退避重试同一 key（上游临时挂，换 key 没意义）
+                    if info.kind == ErrorKind.SERVICE_DOWN:
+                        backoff = min(2.0 * (2 ** slot._consecutive_down), 16.0)
+                        logger.warning(
+                            "[KeyPoolAdapter] SERVICE_DOWN → key=%s 退避 %.1fs 重试"
+                            " (attempt %d/%d): %s",
+                            slot.key_id, backoff, attempt + 1, max_retries,
+                            str(exc)[:150],
+                        )
+                        slot.handle_error(info)
+                        await asyncio.sleep(backoff)
+                        last_exc = exc
+                        # 注意：不 release，因为要重试同一 key——但 acquire_slot 已占信号量，
+                        # 这里需先释放再重新获取以避免死锁
+                        # 简化：SERVICE_DOWN 也走换 key 路径（释放后 select 会再选回它，
+                        # 因为没冷却）。重试逻辑交给下一轮 attempt。
+                        # → 实际效果：换 key 重试，但 slot 记录了连续 down 次数
+                    else:
+                        # 其他可恢复错误：交给 KeySlot 统一策略处理（冷却/降级/不冷却）
+                        slot.handle_error(info)
+                        logger.info(
+                            "[KeyPoolAdapter] %s → key=%s 处理 (attempt %d/%d)",
+                            info.kind.value, slot.key_id, attempt + 1, max_retries,
+                        )
+                        last_exc = exc
+                finally:
+                    slot.release()
+        except KeyPoolExhaustedError as exc:
+            # 所有 key 不可用且等待超时：不可恢复的资源耗尽，
+            # 转成业务可读的 RateLimitError，保留原始异常链（backend_rules §3.1）。
+            logger.error(
+                "[KeyPoolAdapter] key 池耗尽 provider=%s model=%s: %s",
+                provider_name, model_str, exc,
+            )
+            last_exc = litellm.RateLimitError(
+                message=f"所有 API key 不可用且等待超时（{exc.timeout:.0f}s）；"
+                        f"不可用 key 诊断: {exc.unavailable}",
+                model=model_str,
+                llm_provider=provider_name or "unknown",
+            )
+            last_exc.__cause__ = exc
+
+        # 所有 key 都试过了或 pool 已耗尽 → 尝试 Router fallback
+        # 走 router.acompletion() 利用 llm.yaml 的 fallback_chain 配置
+        # 切换到备用模型（如 deepseek-v4-pro → minimax-m3）
+        logger.warning(
+            "[KeyPoolAdapter] 所有 key 均失败 provider=%s model=%s，"
+            "尝试 Router fallback...",
             provider_name, model_str,
         )
-        raise last_exc  # type: ignore[misc]
+        try:
+            return await self._route_call(**kwargs)
+        except Exception as fb_exc:
+            logger.error(
+                "[KeyPoolAdapter] Router fallback 也失败: %s",
+                fb_exc,
+            )
+            if last_exc is not None:
+                raise last_exc  # noqa: B904
+            raise fb_exc
 
     async def _route_call(self, **kwargs: Any) -> Any:
         """无 KeyPool 时的回退路径，动态获取最新 Router。
@@ -993,15 +969,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         影响范围: KeyPoolAdapter 的所有 LLM 调用路径
         修复日期: 2026-05-30
         """
-        from llm.router_factory import get_or_create_router
-        from config.models import get_model_config_loader
+        from config.models import get_model_config_loader  # noqa: PLC0415
+        from llm.router_factory import get_or_create_router  # noqa: PLC0415
 
         model_loader = get_model_config_loader()
         router = get_or_create_router(model_loader)
-        logger.info(
-            "[DIAG][KeyPoolAdapter._route_call] model=%s router_id=%s",
-            kwargs.get("model", "?"), id(router),
-        )
         return await router.acompletion(**kwargs)
 
     async def _direct_call_with_slot(
@@ -1010,20 +982,28 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         """用指定 slot 的 key 直接调用 litellm.acompletion。
 
         不经过 Router，直接构建 litellm 参数，确保使用 slot 的 key。
+
+        关键：kwargs["model"] 此时是 model_id（yaml key），不是 model_name。
+        需要反查 model_name 来拼 litellm 模型字符串（如 apigo/MiniMax-M3 → openai/MiniMax-M3），
+        因为上游 API 只认 model_name，不认内部 model_id。
         """
-        from llm.router_factory import (
-            _PROVIDER_MAP,
+        from llm.router_factory import (  # noqa: PLC0415
+            get_litellm_prefix,
+            get_model_name_for_id,
             get_provider_for_model,
         )
 
         model_id = kwargs.get("model", "")
         # 去掉 litellm 前缀（"zai/glm-5.1" → "glm-5.1"）
-        bare_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
+        bare = model_id.split("/", 1)[1] if "/" in model_id else model_id
 
         # 查 provider → 构建 litellm 模型字符串
-        provider = get_provider_for_model(bare_model)
-        prefix = _PROVIDER_MAP.get(provider, provider) if provider else ""
-        litellm_model = f"{prefix}/{bare_model}" if prefix else bare_model
+        provider = get_provider_for_model(bare)
+        prefix = get_litellm_prefix(provider) if provider else ""
+        # 反查 model_name（yaml 的 model_name 字段），而非直接用 model_id
+        # 例: bare="deepseek-v4-pro-apigo" → model_name="deepseek-v4-pro"
+        model_name = get_model_name_for_id(bare)
+        litellm_model = f"{prefix}/{model_name}" if prefix else model_name
 
         # 构建 kwargs：用 slot 的凭证，去掉 model 让 litellm_params 里的生效
         input_kwargs = {k: v for k, v in kwargs.items() if k not in ("model",)}

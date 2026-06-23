@@ -7,11 +7,13 @@
 - HumanInteractionTool：HumanInteractionTool类
 """
 
-import asyncio
-from asyncio import CancelledError
+import asyncio  # noqa: F401
+import contextlib
 import logging
+from asyncio import CancelledError
 from typing import Any
 
+from core.results import ToolExecutionResult
 from human_interaction import (
     InteractionMode,
     Priority,
@@ -22,7 +24,6 @@ from human_interaction.service import (
     InteractionDeniedError,
     InteractionTimeoutError,
 )
-from core.results import ToolExecutionResult
 from tools.builtin.base import BuiltinTool
 from tools.builtin.shared.formatters import format_size
 from tools.builtin.workspace_aware import WorkspaceAwareMixin
@@ -123,7 +124,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。",
+                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。工作空间范围限制仅对子任务（L2+）生效；主 agent（L1）可展示项目内任意路径。",
                     },
                 },
                 "required": ["mode", "title"],
@@ -142,16 +143,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         """执行人类交互工具"""
         self._init_workspace(inputs)
 
-        # DIAG: check if pipeline task is already being cancelled
-        _current_task = asyncio.current_task()
-        if _current_task:
-            _cancelling = _current_task.cancelling()
-            if _cancelling > 0:
-                logger.warning(
-                    "[HumanInteractionTool] Task already cancelling! "
-                    "cancelling=%d — tool execution will fail",
-                    _cancelling,
-                )
+
 
         mode = inputs.get("mode")
 
@@ -166,12 +158,11 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         if mode == InteractionMode.CHOICE.value:
             return await self._execute_choice_mode(inputs, service, pipeline_id)
-        elif mode == InteractionMode.CONVERSATION.value:
+        if mode == InteractionMode.CONVERSATION.value:
             return await self._execute_conversation_mode(inputs, service, pipeline_id)
-        elif mode == InteractionMode.NOTIFICATION.value:
+        if mode == InteractionMode.NOTIFICATION.value:
             return await self._execute_notification_mode(inputs, service, pipeline_id)
-        else:
-            return create_failure_result(error=f"不支持的交互模式: {mode}")
+        return create_failure_result(error=f"不支持的交互模式: {mode}")
 
     def _parse_agent_level(self, inputs: dict[str, Any]) -> str:
         """从输入参数中解析代理层级标识"""
@@ -189,7 +180,8 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         - file_paths 为 None 或空列表 → 合法，直接返回 None
         - file_paths 类型必须为 list → 否则返回错误
         - file_paths 超过 MAX_FILE_PATHS 个 → 返回错误
-        - 逐个路径校验：文件不存在、路径是目录、文件超过大小限制、路径超出工作空间范围 → 收集错误
+        - 逐个路径校验：统一读权限检查（按 agent_level + permission_policies 声明决策）、
+          文件不存在、路径是目录、文件超过大小限制 → 收集错误
 
         Args:
             inputs: 工具执行时接收的输入参数字典
@@ -223,17 +215,16 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             )
 
         errors: list[str] = []
-        workspace_root = self._workspace.resolve()
+        agent_level = inputs.get("parent_agent_level", None)
         for path_str in file_paths:
             path = self.resolve_path(path_str)
             real_path = path.resolve()
 
-            try:
-                real_path.relative_to(workspace_root)
-            except ValueError:
+            # 统一读权限检查（按 agent 层级 + permission_policies 声明决策）
+            ok, err = self.check_path_allowed(str(real_path), "read", agent_level)
+            if not ok:
                 errors.append(
-                    f"路径 \"{path_str}\" 超出工作空间范围（{workspace_root}），"
-                    "不允许访问工作空间之外的文件。"
+                    f"路径 \"{path_str}\" 超出允许范围（{err}）。"
                     "请确认路径是否正确，或改用工作空间内的相对路径"
                 )
                 continue
@@ -273,7 +264,27 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         return None
 
-    async def _execute_choice_mode(
+    def _resolve_file_paths(self, file_paths: list[str] | None) -> list[str] | None:
+        """将 file_paths 中的相对路径转为基于 workspace 的绝对路径。
+
+        前端 _local API 将相对路径解析到当前项目根（跨容器场景会错误），
+        转为绝对路径后前端直接使用，不再依赖项目根解析。
+
+        Args:
+            file_paths: 原始文件路径列表，可为 None
+
+        Returns:
+            解析后的绝对路径列表，输入为空时返回 None
+        """
+        if not file_paths:
+            return None
+        resolved: list[str] = []
+        for p in file_paths:
+            resolved_path = self.resolve_path(p).resolve()
+            resolved.append(str(resolved_path))
+        return resolved
+
+    async def _execute_choice_mode(  # noqa: PLR0912
         self,
         inputs: dict[str, Any],
         service,
@@ -284,6 +295,9 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         validation_error = self._validate_file_paths(inputs)
         if validation_error is not None:
             return validation_error
+
+        # 将 file_paths 中的相对路径转为绝对路径
+        file_paths = self._resolve_file_paths(inputs.get("file_paths"))
 
         title = inputs.get("title", "")
         description = inputs.get("description", "")
@@ -308,10 +322,11 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 questions=questions,
                 timeout_seconds=timeout_seconds,
                 priority=priority,
-                file_paths=inputs.get("file_paths"),
+                file_paths=file_paths,
                 user_id=None,
                 agent_id=pipeline_id,
                 agent_level=agent_level_str,
+                pipeline_id=pipeline_id,
             )
 
             response = await service.wait_for_choice(
@@ -392,12 +407,10 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 request_id,
             )
             if request_id:
-                try:
+                with contextlib.suppress(Exception):
                     await service.cancel_request(
                         request_id, reason="pipeline_cancelled",
                     )
-                except Exception:
-                    pass
             raise
 
         except Exception as e:
@@ -425,6 +438,10 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         if validation_error is not None:
             return validation_error
 
+        # 将 file_paths 中的相对路径转为绝对路径，防止前端 _local API
+        # 解析到错误的项目根目录（跨容器场景中文件在旧容器，非当前项目根）。
+        file_paths = self._resolve_file_paths(inputs.get("file_paths"))
+
         title = inputs.get("title", "")
         description = inputs.get("description", "")
         initial_message = inputs.get("initial_message")
@@ -443,10 +460,11 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 description=description,
                 initial_message=initial_message,
                 suggestions=suggestions,
-                file_paths=inputs.get("file_paths"),
+                file_paths=file_paths,
                 user_id=None,
                 agent_id=pipeline_id,
                 agent_level=agent_level_str,
+                pipeline_id=pipeline_id,
             )
 
             response = await service.wait_for_choice(
@@ -526,12 +544,10 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 request_id,
             )
             if request_id:
-                try:
+                with contextlib.suppress(Exception):
                     await service.cancel_request(
                         request_id, reason="pipeline_cancelled",
                     )
-                except Exception:
-                    pass
             raise
 
         except Exception as e:

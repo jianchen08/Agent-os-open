@@ -208,10 +208,12 @@ export interface Message {
   metadata?: Record<string, unknown>
   /** 附件列表（用户消息可选） */
   attachments?: Array<{
-    id: string
+    id?: string
     name: string
-    type: string
+    type?: string
+    mime_type?: string
     url: string
+    size?: number
   }>
   /** 思考内容（AI 消息可选） */
   thinking?: ThinkingContent
@@ -258,7 +260,9 @@ export interface Message {
     error?: string
   }
   /** 消息状态（流式状态或工具消息状态） */
-  status?: 'streaming' | 'completed' | string
+  status?: 'idle' | 'sending' | 'streaming' | 'completed' | 'error'
+  /** 前端乐观消息 ID，用于与服务端持久化消息对账（消除重复/丢失） */
+  clientMessageId?: string
   toolCallId?: string
   toolName?: string
   toolArgs?: Record<string, unknown>

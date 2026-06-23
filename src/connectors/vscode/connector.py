@@ -12,16 +12,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from typing import Any
 
-from connectors.base import BaseConnector
-from connectors.types import (
+from ..base import BaseConnector
+from ..config_mixin import ConfigSubscriberMixin
+from ..types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,
     ConnectorInfo,
     ConnectorState,
 )
-from connectors.vscode.channel import VSCodeChannel
+from .channel import VSCodeChannel
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +32,14 @@ MAX_RETRIES: int = 3
 BASE_RETRY_DELAY: float = 1.0  # 秒
 
 
-class VSCodeConnector(BaseConnector):
+class VSCodeConnector(BaseConnector, ConfigSubscriberMixin):
     """VSCode 连接器。
 
     通过 HTTP 短轮询与 VSCode 扩展通信，支持：
     - 获取 VSCode 当前上下文（活动文件、选中文本等）
     - 向 VSCode 发送操作指令（打开文件、显示差异等）
     - 自动重连机制（最多 3 次重试，指数退避）
+    - ConfigCenter 配置热加载
 
     使用方式:
         connector = VSCodeConnector()
@@ -121,6 +124,8 @@ class VSCodeConnector(BaseConnector):
 
     async def disconnect(self) -> None:
         """断开与 VSCode 扩展的连接。"""
+        self.unsubscribe_config()
+
         if self._state == ConnectorState.DISCONNECTED:
             return
 
@@ -181,11 +186,10 @@ class VSCodeConnector(BaseConnector):
                     success=True,
                     data=response.get("data"),
                 )
-            else:
-                return ActionResult(
-                    success=False,
-                    error=response.get("error", "未知错误"),
-                )
+            return ActionResult(
+                success=False,
+                error=response.get("error", "未知错误"),
+            )
         except ConnectionError as e:
             self._set_state(ConnectorState.ERROR)
             return ActionResult(
@@ -216,4 +220,18 @@ class VSCodeConnector(BaseConnector):
                 "get_selection",
             ],
             priority=10,
+        )
+
+    def _on_config_changed(
+        self, event_type: str, file_path: str, context: dict[str, Any],
+    ) -> None:
+        """配置变更回调：记录日志。
+
+        Args:
+            event_type: 事件类型
+            file_path: 变更文件路径
+            context: 变更上下文
+        """
+        self._logger.info(
+            "VSCode 配置变更: event=%s, path=%s", event_type, file_path,
         )

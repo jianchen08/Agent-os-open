@@ -7,6 +7,20 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class MultimodalCapabilityConfig(BaseModel):
+    """模型多模态能力配置（对应 llm.yaml 的 multimodal 子节点）"""
+
+    supports_image: bool = False
+    supports_audio: bool = False
+    supports_video: bool = False
+    supports_document: bool = False
+    supported_image_types: list[str] = Field(default_factory=list)
+    max_image_size: int = 20 * 1024 * 1024
+    max_audio_size: int = 25 * 1024 * 1024
+    max_video_size: int = 100 * 1024 * 1024
+    max_document_size: int = 10 * 1024 * 1024
+
+
 class ModelConfig(BaseModel):
     """单个模型配置"""
 
@@ -19,6 +33,7 @@ class ModelConfig(BaseModel):
     reasoning_model: bool | None = None  # 是否为推理模型
     dimension: int | None = None  # 嵌入维度（仅嵌入模型）
     default_params: dict[str, Any] = Field(default_factory=dict)
+    multimodal: MultimodalCapabilityConfig | None = None  # 多模态能力（仅对话模型）
 
 
 class ProviderConfig(BaseModel):

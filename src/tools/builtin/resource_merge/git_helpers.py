@@ -106,9 +106,7 @@ class GitHelpers:
         git_file = workspace / ".git"
         if not git_file.exists():
             return False
-        if git_file.is_file():
-            return True
-        return False
+        return bool(git_file.is_file())
 
     async def ensure_project_repo(self) -> ToolResult | None:
         """确保 base_path 是一个 git 仓库

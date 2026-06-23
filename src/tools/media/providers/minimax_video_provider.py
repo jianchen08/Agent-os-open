@@ -174,19 +174,18 @@ class MiniMaxVideoProvider(MediaProvider):
             "Content-Type": "application/json",
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"MiniMax 视频生成任务提交失败 (status={resp.status}): {error_text}"
-                    )
-                result = await resp.json()
+        async with aiohttp.ClientSession() as session, session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"MiniMax 视频生成任务提交失败 (status={resp.status}): {error_text}"
+                )
+            result = await resp.json()
 
         base_resp = result.get("base_resp", {})
         if base_resp.get("status_code", 0) != 0:
@@ -269,19 +268,18 @@ class MiniMaxVideoProvider(MediaProvider):
         url = f"{self._api_base}/files/retrieve"
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                params={"file_id": file_id, "purpose": "video_generation"},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=300),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"下载视频文件失败 (status={resp.status}): {error_text}"
-                    )
-                content = await resp.read()
+        async with aiohttp.ClientSession() as session, session.get(
+            url,
+            params={"file_id": file_id, "purpose": "video_generation"},
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=300),
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"下载视频文件失败 (status={resp.status}): {error_text}"
+                )
+            content = await resp.read()
 
         filename = f"minimax_video_{uuid.uuid4().hex[:8]}.mp4"
         output_path = self._output_dir / filename

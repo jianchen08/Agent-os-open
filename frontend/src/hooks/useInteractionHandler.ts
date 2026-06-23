@@ -12,13 +12,12 @@ import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
-import { registerFileReview } from '@/stores/fileReviewRegistry'
+import { registerFileReview, getFileReviewData } from '@/stores/fileReviewRegistry'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
@@ -43,7 +42,6 @@ async function parseInteractionEvent(
 
   const filePaths = inner.file_paths as string[] | undefined
   let fileContents: Record<string, string> | undefined
-  console.log('[InteractionHandler] file_paths=', filePaths)
   if (filePaths && filePaths.length > 0) {
     const contents: Record<string, string> = {}
     const failedPaths: string[] = []
@@ -54,7 +52,6 @@ async function parseInteractionEvent(
             `/api/v1/workspaces/_local/file-content`,
             { params: { path: filePath } },
           )
-          console.log('[InteractionHandler] API response for', filePath, ':', resp.data?.success, resp.data?.message)
           if (resp.data?.success) {
             contents[filePath] = resp.data.content ?? ''
           } else {
@@ -71,7 +68,6 @@ async function parseInteractionEvent(
     if (failedPaths.length > 0) {
       console.warn('[InteractionHandler] 部分文件加载失败:', failedPaths)
     }
-    console.log('[InteractionHandler] contents keys=', Object.keys(contents))
     if (Object.keys(contents).length > 0) {
       fileContents = contents
     }
@@ -164,14 +160,11 @@ export function useInteractionHandler(sessionId: string | undefined) {
     const requestToNotificationMap = new Map<string, string>()
 
     const handleInteractionRequest = async (data: Record<string, unknown>) => {
-      console.log('[InteractionHandler] handleInteractionRequest received:', JSON.stringify(data).slice(0, 500))
       const parsed = await parseInteractionEvent(data)
       if (!parsed) {
         console.warn('[InteractionHandler] parseInteractionEvent returned null')
         return
       }
-      console.log('[InteractionHandler] parsed.fileContents=', parsed.fileContents ? Object.keys(parsed.fileContents) : 'undefined')
-
       const existing = useInteractionStore.getState().pendingInteractions.find(
         (i) => i.requestId === parsed.requestId,
       )
@@ -197,26 +190,68 @@ export function useInteractionHandler(sessionId: string | undefined) {
         })
         requestToNotificationMap.set(parsed.requestId, notifId)
       } else {
-        // choice/conversation 模式：只写入交互 Store，不写入通知中心
+        // choice/conversation 模式：只写入交互 Store，由 GlobalInteractionOverlay 全局展示
         addInteraction(parsed)
       }
 
-      playNotificationSound().catch(() => {})
+      // BUG-FIX-fix_20260617_silent_audio_catch:
+      // 问题根因: 原代码 playNotificationSound().catch(() => {}) 静默吞异常，
+      //          AI 请求人类交互时音频通知失败用户无感知。
+      // 修复方案: 音频失败时通过视觉通知兜底。notification 模式已通过上方
+      //          addNotification 通知用户，此处仅对 choice/conversation 模式补充视觉兜底，
+      //          避免重复通知。
+      playNotificationSound().catch(() => {
+        if (parsed.mode === 'notification') return
+        useNotificationStore.getState().addNotification({
+          title: parsed.title || '人类交互请求',
+          message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入（音频通知失败）`,
+          priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
+          category: 'alert',
+          isBlocking: false,
+          autoDismissMs: 8000,
+        })
+      })
 
       if (parsed.fileContents && Object.keys(parsed.fileContents).length > 0) {
-        const tabId = `review-${parsed.requestId}`
-        registerFileReview(tabId, {
-          requestId: parsed.requestId,
-          mode: parsed.mode as 'choice' | 'conversation' | 'notification',
-          title: parsed.title || '',
-          pipelineId: parsed.pipelineId || '',
-          fileContents: parsed.fileContents,
-          options: parsed.options,
-          sessionId: parsed.sessionId,
-        })
         const layoutStore = useLayoutModeStore.getState()
-        const existingTab = layoutStore.workspaceTabs.find((t) => t.id === tabId)
-        if (!existingTab) {
+
+        // 检查是否已有相同文件的标签页打开，如果有则直接跳转
+        const filePaths = Object.keys(parsed.fileContents)
+        const existingTab = layoutStore.workspaceTabs.find((t) => {
+          // 匹配文件编辑器标签（tabId 格式：file-local-${sanitizedPath}）
+          if (t.moduleId === '__file_editor__') {
+            return filePaths.some((fp) => {
+              const editorTabId = `file-local-${fp.replace(/[/\\]/g, '_')}`
+              return t.id === editorTabId
+            })
+          }
+          // 匹配文件审阅标签（tabId 格式：review-${requestId}），检查注册表中文件路径是否相同
+          if (t.moduleId === '__file_review__') {
+            const reviewData = getFileReviewData(t.id)
+            if (reviewData) {
+              const reviewFiles = Object.keys(reviewData.fileContents)
+              return filePaths.length === reviewFiles.length
+                && filePaths.every((fp) => reviewFiles.includes(fp))
+            }
+          }
+          return false
+        })
+
+        if (existingTab) {
+          // 已有相同文件的标签，直接激活跳转
+          layoutStore.setActiveTab(existingTab.id)
+        } else {
+          // 没有已打开的相同文件标签，创建新的审阅标签
+          const tabId = `review-${parsed.requestId}`
+          registerFileReview(tabId, {
+            requestId: parsed.requestId,
+            mode: parsed.mode as 'choice' | 'conversation' | 'notification',
+            title: parsed.title || '',
+            pipelineId: parsed.pipelineId || '',
+            fileContents: parsed.fileContents,
+            options: parsed.options,
+            sessionId: parsed.sessionId,
+          })
           layoutStore.addWorkspaceTab({
             id: tabId,
             title: parsed.title || '文件审阅',
@@ -225,8 +260,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
             isActive: true,
             isPinned: false,
           })
+          layoutStore.setActiveTab(tabId)
         }
-        layoutStore.setActiveTab(tabId)
         useLayoutModeStore.getState().setMode('five-space')
         useUIStore.getState().setWorkspaceCollapsed(false)
       }
@@ -291,7 +326,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {
       const sid = useSessionStore.getState().activeSessionId
-      console.log('[InteractionHandler] respondChoice | requestId=%s | sid=%s | selectedOption=%s', requestId, sid, selectedOption)
       if (!sid) {
         console.warn('[InteractionHandler] respondChoice 中止: activeSessionId 为空!')
         return
@@ -309,7 +343,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const respondConversation = useCallback(
     async (requestId: string, feedback: string) => {
       const sid = useSessionStore.getState().activeSessionId
-      console.log('[InteractionHandler] respondConversation | requestId=%s | sid=%s | feedback=%s', requestId, sid, feedback.slice(0, 50))
       if (!sid) {
         console.warn('[InteractionHandler] respondConversation 中止: activeSessionId 为空!')
         return
@@ -348,7 +381,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
       const activePid = pipelineStore.activePipelineId
       if (activePid && pipelineStore.streamingState[activePid]?.isStreaming) {
         pipelineStore.stopStreaming(activePid)
-        useStreamingStore.getState().setStreamingForTab(activePid, false)
       }
 
       if (window.location.pathname !== ROUTES.HOME) {

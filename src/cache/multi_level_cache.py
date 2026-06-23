@@ -1,16 +1,13 @@
 """
 多层缓存管理器
 
-实现L1(内存) + L2(Redis)的多层缓存策略
+实现纯内存缓存策略（原 L2 Redis 层已移除）
 """
 
 import asyncio
-import os
 import time
 from datetime import timedelta
 from typing import Any
-
-from .redis_manager import get_redis_manager
 
 
 class CacheManager:
@@ -57,38 +54,26 @@ class CacheManager:
 
 class MultiLevelCache:
     """
-    多层缓存管理器
+    多层缓存管理器（纯内存实现）
 
     L1: 内存缓存（快速访问）
-    L2: Redis缓存（分布式共享）
     """
 
     def __init__(
         self,
         l1_ttl: int = 300,  # L1缓存5分钟
-        l2_ttl: int = 3600,  # L2缓存1小时
-        enable_redis: bool = True,
     ):
         """
-        初始化多层缓存
+        初始化内存缓存
 
         Args:
             l1_ttl: L1缓存TTL（秒）
-            l2_ttl: L2缓存TTL（秒）
-            enable_redis: 是否启用Redis
         """
         self.l1_cache = CacheManager(default_ttl=l1_ttl)
-        self.l2_ttl = l2_ttl
-        self.enable_redis = enable_redis
-
-        if enable_redis:
-            self.redis_manager = get_redis_manager()
-        else:
-            self.redis_manager = None
 
     async def get(self, key: str) -> Any | None:
         """
-        获取缓存值（L1 -> L2）
+        获取缓存值
 
         Args:
             key: 缓存键
@@ -96,24 +81,7 @@ class MultiLevelCache:
         Returns:
             缓存值或None
         """
-        # 先尝试L1缓存
-        value = self.l1_cache.get(key)
-        if value is not None:
-            return value
-
-        # 尝试L2缓存
-        if self.enable_redis and self.redis_manager:
-            try:
-                value = await self.redis_manager.get(key)
-                if value is not None:
-                    # 回填L1缓存
-                    self.l1_cache.set(key, value)
-                    return value
-            except Exception:
-                # Redis失败时继续使用L1缓存
-                pass
-
-        return None
+        return self.l1_cache.get(key)
 
     async def set(
         self,
@@ -122,7 +90,7 @@ class MultiLevelCache:
         ttl: int | timedelta | None = None,
     ) -> bool:
         """
-        设置缓存值（同时写入L1和L2）
+        设置缓存值
 
         Args:
             key: 缓存键
@@ -132,26 +100,15 @@ class MultiLevelCache:
         Returns:
             是否成功
         """
-        # 设置L1缓存
         l1_ttl = (
             ttl if isinstance(ttl, int) else (int(ttl.total_seconds()) if ttl else None)
         )
         self.l1_cache.set(key, value, l1_ttl)
-
-        # 设置L2缓存
-        if self.enable_redis and self.redis_manager:
-            try:
-                l2_ttl = ttl or self.l2_ttl
-                await self.redis_manager.set(key, value, l2_ttl)
-            except Exception:
-                # Redis失败不影响L1缓存
-                pass
-
         return True
 
     async def delete(self, key: str) -> bool:
         """
-        删除缓存（同时删除L1和L2）
+        删除缓存
 
         Args:
             key: 缓存键
@@ -159,18 +116,7 @@ class MultiLevelCache:
         Returns:
             是否成功
         """
-        # 删除L1缓存
-        l1_success = self.l1_cache.delete(key)
-
-        # 删除L2缓存
-        l2_success = True
-        if self.enable_redis and self.redis_manager:
-            try:
-                l2_success = await self.redis_manager.delete(key)
-            except Exception:
-                l2_success = False
-
-        return l1_success or l2_success
+        return self.l1_cache.delete(key)
 
     async def clear_pattern(self, pattern: str) -> int:
         """
@@ -182,20 +128,12 @@ class MultiLevelCache:
         Returns:
             删除的键数量
         """
-        count = 0
-
-        # 清除L2缓存
-        if self.enable_redis and self.redis_manager:
-            try:
-                count = await self.redis_manager.clear_pattern(pattern)
-            except Exception:
-                pass
-
         # L1缓存没有模式匹配，只能全清
         if pattern == "*":
             self.l1_cache.clear()
+            return 1
 
-        return count
+        return 0
 
     def get_stats(self) -> dict:
         """
@@ -204,12 +142,7 @@ class MultiLevelCache:
         Returns:
             统计信息
         """
-        stats = {
-            "l1": self.l1_cache.stats(),
-            "l2": {"enabled": self.enable_redis},
-        }
-
-        return stats
+        return {"l1": self.l1_cache.stats()}
 
 
 # 全局缓存实例
@@ -223,12 +156,9 @@ def get_global_cache() -> MultiLevelCache:
     Returns:
         MultiLevelCache实例
     """
-    global _global_cache
+    global _global_cache  # noqa: PLW0603
     if _global_cache is None:
-        # 根据环境变量决定是否启用 Redis
-        # 在测试环境中禁用 Redis 以避免连接超时
-        enable_redis = os.environ.get("ENABLE_REDIS_CACHE", "true").lower() == "true"
-        _global_cache = MultiLevelCache(enable_redis=enable_redis)
+        _global_cache = MultiLevelCache()
     return _global_cache
 
 

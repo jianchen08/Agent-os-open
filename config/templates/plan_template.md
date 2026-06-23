@@ -170,6 +170,21 @@ flowchart TD
 | ---- | ------------------ | ------- | ---------------------- | ----- | ----- |
 | AC-1 | {acceptance\_item} | 技术/用户体验 | {verification\_method} | 高/中/低 | REQ-1 |
 
+### 4.1 验收标准清单（机读，唯一真相源）\[必填]
+
+上方表格给人看；下方 yaml 给机器读，是后续执行/门禁/状态矩阵的唯一基准。
+**修改验收标准时表格与此 yaml 必须同步**，二者冲突以 yaml 为准。
+每条 AC 必须可二值判定；执行阶段细化出的实现级 AC 通过 `traces_to` 指回这里的方案级 AC。
+
+```yaml
+acceptance_criteria:
+  - id: AC-1
+    title: {一句话验收项}
+    must: true              # true=必须, false=应该
+    category: 功能            # 功能/安全/性能/质量/文档
+    verify_hint: {验证方向，不给实现细节}
+```
+
 ***
 
 ## 五、执行评估 \[必填]
@@ -204,9 +219,9 @@ flowchart TD
 - **推荐执行者**: {recommended\_executor}（L2/L3）
 - **资源状态**: 已有 / 需新建: {职责和适用场景}（⚠️ 需新建时必须说明：为何现有资源无法复用、新建资源的职责边界是什么）
 - **依赖**: 无 / 依赖 {task\_id}
-- **验收标准**:
-  - AC-1: {acceptance\_criteria}
-  - AC-2: {acceptance\_criteria}
+- **验收标准**（每条标注追溯到方案级哪条 AC）:
+  - AC-1（traces_to: AC-1）: {acceptance\_criteria}
+  - AC-2（traces_to: AC-1）: {acceptance\_criteria}
 - **预估时间**: {estimated\_time}
 - **上下文环境拆分指引**: （仅 L3 直通时填写）按 知识域/操作域/依赖域 给出拆分建议
 
@@ -216,8 +231,8 @@ flowchart TD
 - **推荐执行者**: {recommended\_executor}（L2/L3）
 - **资源状态**: 已有 / 需新建: {职责和适用场景}
 - **依赖**: 依赖任务 {task\_id}
-- **验收标准**:
-  - AC-1: {acceptance\_criteria}
+- **验收标准**（每条标注追溯到方案级哪条 AC）:
+  - AC-1（traces_to: AC-1）: {acceptance\_criteria}
 - **预估时间**: {estimated\_time}
 - **上下文环境拆分指引**: （仅 L3 直通时填写）按 知识域/操作域/依赖域 给出拆分建议
 

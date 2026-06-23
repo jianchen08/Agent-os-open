@@ -351,22 +351,21 @@ class BudgetManager:
                 f"本月用量: {self._global_monthly_usage:,} tokens\n"
                 f"已自动停止执行，请等待配额重置。"
             )
-        elif level == BudgetAlertLevel.CRITICAL:
+        if level == BudgetAlertLevel.CRITICAL:
             return (
                 f"🚨 Token 配额即将耗尽！\n"
                 f"当前用量: {usage_percent * 100:.1f}%\n"
                 f"今日: {self._global_daily_usage:,} tokens\n"
                 f"建议立即暂停任务并保存进度。"
             )
-        elif level == BudgetAlertLevel.WARNING:
+        if level == BudgetAlertLevel.WARNING:
             return (
                 f"⚠️ Token 配额使用警告\n"
                 f"当前用量: {usage_percent * 100:.1f}%\n"
                 f"今日: {self._global_daily_usage:,} tokens\n"
                 f"已自动创建检查点。"
             )
-        else:
-            return f"✅ 用量正常: {self._global_daily_usage:,} tokens"
+        return f"✅ 用量正常: {self._global_daily_usage:,} tokens"
 
     def get_budget_status(
         self,
@@ -488,7 +487,7 @@ _budget_manager: BudgetManager | None = None
 
 def get_budget_manager() -> BudgetManager:
     """获取预算管理器单例"""
-    global _budget_manager
+    global _budget_manager  # noqa: PLW0603
     if _budget_manager is None:
         _budget_manager = BudgetManager()
     return _budget_manager
@@ -496,5 +495,5 @@ def get_budget_manager() -> BudgetManager:
 
 def reset_budget_manager() -> None:
     """重置预算管理器（用于测试）"""
-    global _budget_manager
+    global _budget_manager  # noqa: PLW0603
     _budget_manager = None

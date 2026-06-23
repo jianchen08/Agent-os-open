@@ -13,7 +13,7 @@ description: '通用调研Agent，负责各类调研任务：
   - 支持三种严格度模式下的差异化执行
 
   '
-model_name: minimax-m3
+model_name: minimax-m3-guangfang
 model_tier: small
 agent_type: specialized
 category: analysis
@@ -165,7 +165,7 @@ deliverables:
   description: 调研报告文件
   template_source: knowledge
   template_name: config/templates/research_report_template.md
-  output_path: '{{workspace}}/docs/{title}.md'
+  output_path: '{{workspace}}/docs/{title}_research_report.md'
   type: markdown
   required: true
 recommended_metrics:

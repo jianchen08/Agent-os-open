@@ -79,6 +79,21 @@ install_python_deps() {
 
 install_python_deps
 
+# ========== 查找可用端口 ==========
+find_available_port() {
+    local start_port=$1
+    local port=$start_port
+    local max_port=$((start_port + 100))
+    while [ $port -le $max_port ]; do
+        if ! lsof -ti:$port &>/dev/null; then
+            echo $port
+            return 0
+        fi
+        port=$((port + 1))
+    done
+    return 1
+}
+
 # ========== 确保 Docker 和 Redis 就绪 ==========
 ensure_docker_and_redis() {
     if ! command -v docker &>/dev/null; then
@@ -215,24 +230,10 @@ if [ -f "$PORTS_FILE" ]; then
     fi
 fi
 
-# ========== 查找可用端口 ==========
+# ========== 分配端口 ==========
 echo "[INFO] 正在查找可用端口..."
 
-find_available_port() {
-    local start_port=$1
-    local port=$start_port
-    local max_port=$((start_port + 100))
-    while [ $port -le $max_port ]; do
-        if ! lsof -ti:$port &>/dev/null; then
-            echo $port
-            return 0
-        fi
-        port=$((port + 1))
-    done
-    return 1
-}
-
-BACKEND_PORT=$(find_available_port 8888) || {
+BACKEND_PORT=$(find_available_port 8988) || {
     echo "[ERROR] 无法找到可用的后端端口"
     exit 1
 }

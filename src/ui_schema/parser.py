@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 from pathlib import Path
@@ -70,15 +71,14 @@ class SchemaParser:
 
         for yaml_file in sorted(dir_path.rglob("*.yml")):
             schema = self.load_file(yaml_file)
-            if schema is not None:
-                if schema.identity.id not in self._schemas:
-                    self._schemas[schema.identity.id] = schema
-                    schemas.append(schema)
+            if schema is not None and schema.identity.id not in self._schemas:
+                self._schemas[schema.identity.id] = schema
+                schemas.append(schema)
 
         logger.info("从 %s 加载了 %d 个 UI Schema", dir_path, len(schemas))
         return schemas
 
-    def load_file(self, file_path: str | Path) -> ModuleUISchema | None:
+    def load_file(self, file_path: str | Path) -> ModuleUISchema | None:  # noqa: PLR0911
         """加载单个 YAML 配置文件。
 
         Args:
@@ -201,10 +201,8 @@ class SchemaParser:
             raw: 解析后的 YAML 数据。
         """
         key = str(file_path)
-        try:
+        with contextlib.suppress(OSError):
             self._file_mtimes[key] = file_path.stat().st_mtime
-        except OSError:
-            pass
 
         content_str = str(raw.get("ui", ""))
         self._file_hashes[key] = hashlib.md5(

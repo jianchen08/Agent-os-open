@@ -41,7 +41,7 @@ class TaskRecoveryMixin:
             return
 
         # 局部导入：避免模块级循环依赖
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         suspended_count = 0
 
@@ -82,9 +82,9 @@ class TaskRecoveryMixin:
                     "TaskWorker: 恢复 pending 任务失败: task_id=%s, error=%s", task.id, e,
                 )
 
-        # ── 3. 已是 suspended 的任务保持原样 ──
-        # 无论是用户手动暂停还是系统暂停，都应保持 suspended，不自动恢复
-        paused_tasks = self._task_service.list_by_status(TaskStatus.SUSPENDED)
+        # ── 3. 已是 stopped 的任务保持原样 ──
+        # 无论是用户手动暂停还是系统暂停，都应保持 stopped，不自动恢复
+        paused_tasks = self._task_service.list_by_status(TaskStatus.STOPPED)
         for task in paused_tasks:
             paused_by = (task.metadata or {}).get("paused_by", "unknown")
             logger.info(
@@ -111,7 +111,7 @@ class TaskRecoveryMixin:
         if not self._task_service:
             return
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         evaluating_tasks = self._task_service.list_by_status(
             TaskStatus.EVALUATING,
@@ -145,12 +145,54 @@ class TaskRecoveryMixin:
                     task.id, e,
                 )
                 try:
-                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await self._task_service.fail_task(
                         task.id, f"评估恢复失败: {e}",
                     )
                 except Exception:
                     logger.warning("TaskWorker: fail_task 也失败: task_id=%s", task.id, exc_info=True)
+
+    async def _complete_with_merge(self, task_id: str, passed: bool,
+                                    result: dict | None = None) -> None:
+        """评估通过后统一完成入口：worktree 模式先合并再 complete_evaluation。
+
+        BUG-FIX-fix_20260618_rerun_skip_merge:
+        原先 _rerun_evaluation 评估通过后直接 complete_evaluation(passed=True)，
+        完全绕过合并门控，导致走恢复路径的 worktree 任务产出永不合并。
+        现统一调用 lifecycle.merge_worktree_before_complete，合并失败则标记 failed。
+
+        Args:
+            task_id: 任务 ID
+            passed: 评估是否通过
+            result: 评估结果数据（传入会被按需补充合并失败信息）
+        """
+        if passed:
+            merge_error = self._try_merge_worktree(task_id)
+            if merge_error:
+                logger.error(
+                    "TaskWorker: 恢复路径 worktree 合并失败，任务标记 failed: "
+                    "task_id=%s, error=%s", task_id, merge_error,
+                )
+                result = dict(result) if result else {}
+                result["overall_passed"] = False
+                result["merge_failure"] = merge_error
+                result["summary"] = f"评估指标已通过，但 worktree 合并失败: {merge_error}"
+                await self._task_service.complete_evaluation(
+                    task_id, passed=False, result=result,
+                )
+                return
+        await self._task_service.complete_evaluation(task_id, passed=passed, result=result)
+
+    def _try_merge_worktree(self, task_id: str) -> str | None:
+        """获取 lifecycle 并执行合并门控，lifecycle 不可用时返回 None。"""
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        lifecycle = get_service_provider().get("workspace_lifecycle_manager")
+        if lifecycle is None:
+            logger.warning(
+                "TaskWorker: workspace_lifecycle_manager 不可用，跳过合并门控 | task=%s",
+                task_id,
+            )
+            return None
+        return lifecycle.merge_worktree_before_complete(task_id)
 
     async def _rerun_evaluation(self, task: Any) -> None:
         """为 evaluating 状态的任务重新运行评估。
@@ -158,8 +200,9 @@ class TaskRecoveryMixin:
         保持任务在 evaluating 状态，直接创建 EvaluationExecutor
         对剩余未通过的指标执行评估，完成后转换为终态。
         """
-        import asyncio as _asyncio
-        from evaluation.executor import EvaluationExecutor
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        from evaluation.executor import EvaluationExecutor  # noqa: PLC0415
 
         task_id = task.id
         metadata = task.metadata or {}
@@ -178,8 +221,10 @@ class TaskRecoveryMixin:
                 "TaskWorker: 任务 %s 无评估指标，直接标记完成",
                 task_id,
             )
-            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
-            await self._task_service.complete_evaluation(task_id, passed=True)
+            await self._complete_with_merge(
+                task_id, passed=True,
+                result={"overall_passed": True, "summary": "无评估指标，自动通过"},
+            )
             return
 
         # 2. 从 evaluation_history 收集已通过指标
@@ -200,8 +245,10 @@ class TaskRecoveryMixin:
                 "TaskWorker: 任务 %s 所有指标已通过，直接标记完成",
                 task_id,
             )
-            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
-            await self._task_service.complete_evaluation(task_id, passed=True)
+            await self._complete_with_merge(
+                task_id, passed=True,
+                result={"overall_passed": True, "summary": "所有指标已通过（历史记录）"},
+            )
             return
 
         # 3. 构建 input_params
@@ -229,11 +276,6 @@ class TaskRecoveryMixin:
             task_id, remaining, timeout,
         )
 
-        # BUG-FIX-fix_20260531_idle_timer_race:
-        # 问题根因: 评估管道在等待人类交互时(最长300s)，idle timer
-        #   仍在倒计时，300s后触发将任务标记为 failed，覆盖评估结果。
-        #   导致用户点击"通过"后任务状态仍为 failed。
-        # 修复方案: 评估期间取消 idle timer，评估完成后恢复。
         _idle_timer_cancelled = False
         if hasattr(self, "_cancel_idle_timer_async"):
             try:
@@ -246,7 +288,6 @@ class TaskRecoveryMixin:
             except Exception:
                 pass
 
-        # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
         result = await _asyncio.wait_for(
             executor.run_evaluation(
                 task_id=task_id,
@@ -263,9 +304,9 @@ class TaskRecoveryMixin:
                 "TaskWorker: 评估恢复完成（通过）: task_id=%s",
                 task_id,
             )
-            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
-            await self._task_service.complete_evaluation(
-                task_id, passed=True, result={
+            await self._complete_with_merge(
+                task_id, passed=True,
+                result={
                     "overall_passed": True,
                     "summary": result.summary,
                     "recovered": True,
@@ -289,7 +330,6 @@ class TaskRecoveryMixin:
                 "failed=%s",
                 task_id, failed_metrics,
             )
-            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
             await self._task_service.complete_evaluation(
                 task_id, passed=False, result={
                     "overall_passed": False,
@@ -308,7 +348,7 @@ class TaskRecoveryMixin:
                 },
             )
 
-    def _build_recovery_input_params(
+    def _build_recovery_input_params(  # noqa: PLR0912
         self, task: Any, metric_ids: list[str],
     ) -> dict[str, dict[str, Any]]:
         """为评估恢复构建 input_params。

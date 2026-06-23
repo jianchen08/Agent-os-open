@@ -102,11 +102,14 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
             isLoading: false,
           })
         } catch (error) {
+          // BUG-FIX-fix_20260617_clear_tasks_on_error:
+          // 问题根因: 原代码失败时 set({ tasks: [] }) 清空已有任务列表，
+          //          导致用户丢失正在查看的任务数据，体验差且无法恢复。
+          // 修复方案: 保留旧 tasks 数据，仅设置 error 状态，让 UI 据此提示用户。
           const errorMessage = getErrorMessage(error, '获取长期任务列表失败')
           set({
             isLoading: false,
             error: errorMessage,
-            tasks: [],
           })
           throw new Error(errorMessage)
         }

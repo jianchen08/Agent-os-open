@@ -20,6 +20,7 @@ import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { handleSchemaUpdate } from '@/services/modules'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { generateUUID } from '@/utils/uuid'
@@ -42,7 +43,7 @@ export function useRealtimeEvents(): void {
     const lastFetchTimeRef = { current: 0 }
 
     /**
-     * FIX: WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。
+     * WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。
      * 流式事件（stream_start 等）由 streaming/index.ts 统一处理，此处不重复订阅。
      *
      * BUG-FIX-fix_20260601_ws_connect_fetch:
@@ -52,8 +53,17 @@ export function useRealtimeEvents(): void {
      *          streaming/index.ts 中的 handleReconnected 会处理流式状态的恢复和补漏。
      * 影响范围: 页面刷新后、WS 重连后的消息获取
      * 修复日期: 2026-06-01
+     *
+     * BUG-FIX-fix_20260617_session_switch_dup_render:
+     * 问题根因: 原 handler 订阅 'connect' 事件，每次 WS 连接成功都触发（包括首次连接），
+     *          与 setActiveSession 中的 fetchMessages 重复加载，导致 initFromAPI 多次调用，
+     *          每次创建新数组触发 ChatContainer 重渲染，叠加 id 不一致时合并逻辑产生重复消息。
+     * 修复方案: 改为只订阅 'reconnected' 事件（仅 WS 断线重连时触发），首次连接由
+     *          setActiveSession 负责加载消息，消除重复加载路径。
+     * 影响范围: 会话切换、页面刷新时的消息加载次数
+     * 修复日期: 2026-06-17
      */
-    const handleWsConnect = () => {
+    const handleWsReconnect = () => {
       // 防抖：1 秒内不重复调用 fetchMessages
       const now = Date.now()
       if (now - lastFetchTimeRef.current < 1000) {
@@ -67,8 +77,36 @@ export function useRealtimeEvents(): void {
       if (activeSessionId && activePipelineId) {
         // 总是获取最新消息，不管是否正在流式输出
         // handleReconnected 会处理流式状态的恢复
-        usePipelineMessageStore.getState().fetchMessages(activePipelineId, { threadId: activeSessionId }).catch(() => {})
+        // BUG-FIX-fix_20260617_silent_fetch_catch:
+        // 问题根因: 原代码 .catch(() => {}) 静默吞异常，WS 重连后消息补漏失败用户无感知。
+        // 修复方案: 失败时通过 notification store 通知用户消息同步失败。
+        usePipelineMessageStore
+          .getState()
+          .fetchMessages(activePipelineId, { threadId: activeSessionId })
+          .catch(() => {
+            useNotificationStore.getState().addNotification({
+              title: '消息同步失败',
+              message: 'WebSocket 重连后消息同步失败，请手动刷新页面',
+              priority: 'high',
+              category: 'error',
+              isBlocking: false,
+              autoDismissMs: 8000,
+            })
+          })
       }
+
+      // BUG-FIX-fix_20260621_workspace_empty_no_retry:
+      // 问题根因: WS 重连只补消息，不重新同步模块。若初始化时因网络问题未创建
+      //          workspace tabs，工作区会持续显示"工作区为空 — 模块激活后自动出现"，
+      //          直到后端推送 SCHEMA_UPDATED 事件或重新登录才恢复。
+      // 修复方案: WS 重连时若工作区 tab 缺失，重新拉取并同步模块。
+      // 影响范围: 网络恢复后工作区面板的自动恢复
+      // 修复日期: 2026-06-21
+      import('@/services/modules/ModuleManager')
+        .then(({ moduleManager }) => moduleManager.syncOnReconnect())
+        .catch(() => {
+          // syncOnReconnect 内部已兜底，此处仅防止未捕获 rejection
+        })
     }
 
     // ---- Execution progress handlers ----
@@ -265,10 +303,25 @@ export function useRealtimeEvents(): void {
       bumpWorkspaceDataVersion()
     }
 
+    /**
+     * 处理 TaskService 状态机变更事件（running/completed/failed 等切换）
+     *
+     * BUG-FIX-fix_20260618_tasktree_refresh:
+     * 问题根因: TaskService 发送的 task_status_changed 事件未被订阅，仅 taskStore 订阅且
+     *          只更新 statusOverrides Map，未触发工作区刷新，导致 FileTreeWidget 任务树不更新。
+     * 修复方案: 订阅 task_status_changed 事件，调用 bumpWorkspaceDataVersion 触发任务树重新加载，
+     *          与 task_status_update 处理路径对齐。
+     * 影响范围: TaskService 任务状态变更时的任务树刷新
+     * 修复日期: 2026-06-18
+     */
+    const handleTaskStatusChanged = () => {
+      bumpWorkspaceDataVersion()
+    }
+
     // ---- Subscribe to all events ----
 
-    // WebSocket lifecycle
-    globalWS.subscribe('connect', handleWsConnect)
+    // WebSocket lifecycle（仅重连时补漏，首次连接由 setActiveSession 负责加载）
+    globalWS.subscribe('reconnected', handleWsReconnect)
 
     // Execution events
     globalWS.subscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
@@ -287,6 +340,7 @@ export function useRealtimeEvents(): void {
 
     // Task lifecycle events
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
 
     // Module schema update events (event-driven, replaces polling)
@@ -302,7 +356,7 @@ export function useRealtimeEvents(): void {
 
     return () => {
       // WebSocket lifecycle
-      globalWS.unsubscribe('connect', handleWsConnect)
+      globalWS.unsubscribe('reconnected', handleWsReconnect)
 
       // Execution events
       globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
@@ -321,6 +375,7 @@ export function useRealtimeEvents(): void {
 
       // Task lifecycle events
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
 
       // Module schema events

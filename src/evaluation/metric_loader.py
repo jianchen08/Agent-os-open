@@ -199,7 +199,7 @@ class MetricLoader:
         for metric in self._cache.values():
             if "category" in metric:
                 categories.add(metric["category"])
-        return sorted(list(categories))
+        return sorted(categories)
 
     def render_config(
         self,
@@ -311,7 +311,7 @@ class MetricLoader:
             >>> if errors:
             ...     print(f"配置错误: {errors}")
         """
-        from src.evaluation.expect_evaluator import ExpectConditionEvaluator
+        from src.evaluation.expect_evaluator import ExpectConditionEvaluator  # noqa: PLC0415
 
         errors = []
         expect = metric.get("expect", {})
@@ -334,7 +334,7 @@ def get_metric_loader() -> MetricLoader:
     Returns:
         MetricLoader 实例
     """
-    global _metric_loader
+    global _metric_loader  # noqa: PLW0603
     if _metric_loader is None:
         _metric_loader = MetricLoader()
     return _metric_loader
@@ -346,5 +346,5 @@ def reset_metric_loader() -> None:
 
     主要用于测试场景。
     """
-    global _metric_loader
+    global _metric_loader  # noqa: PLW0603
     _metric_loader = None

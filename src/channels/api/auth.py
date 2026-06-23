@@ -15,9 +15,12 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
-# 密钥配置 — 优先从环境变量读取，保留开发默认值
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "dev-secret-key-change-in-production")
+# 密钥配置 — DEBT: 统一使用 Settings.jwt_secret_key。ceiling: channels/api/auth.py 仍保留独立常量。
+# upgrade: 全部路由认证迁移到 TokenManager 后删除此模块。
+from src.config.settings import get_settings
+
 ALGORITHM = "HS256"
+SECRET_KEY = get_settings().jwt_secret_key
 
 
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
@@ -31,8 +34,11 @@ def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = 
         编码后的 JWT 字符串
     """
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=30))
-    to_encode.update({"exp": expire, "type": "access"})
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=30))
+    # 必须写入 iat：TokenManager.verify_token 会读取 iat 做用户撤销校验，
+    # 缺失会导致 KeyError，令牌验证直接失败（401）。
+    to_encode.update({"exp": expire, "iat": now, "type": "access"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -47,28 +53,45 @@ def create_refresh_token(data: dict[str, Any], expires_delta: timedelta | None =
         编码后的 JWT 字符串
     """
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(days=7))
-    to_encode.update({"exp": expire, "type": "refresh"})
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(days=7))
+    # 同 create_access_token，写入 iat 以匹配 TokenManager.verify_token 的契约。
+    to_encode.update({"exp": expire, "iat": now, "type": "refresh"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def verify_token(token: str) -> dict[str, Any] | None:
+def verify_token(token: str, token_type: str = "access") -> dict[str, Any] | None:
     """验证 token 并返回负载数据。
+
+    DEBT: 旧版 JWT 验证，委托到 TokenManager。ceiling: 两套并存。
+    upgrade: 全部路由认证迁移到 TokenManager 后删除此模块函数。
+
+    委托 TokenManager 进行验证（含撤销检查），但返回完整的原始 payload dict
+    以保持对 username 等自定义字段的向后兼容。
 
     Args:
         token: 待验证的 JWT 字符串
+        token_type: 期望的令牌类型（access/refresh）
 
     Returns:
         验证成功返回 payload 字典，失败返回 None
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        import jwt as _jwt
+
+        from src.auth.token import TokenManager
+        from src.config.settings import get_settings
+
+        manager = TokenManager(secret_key=get_settings().jwt_secret_key)
+        # 先用 TokenManager 验证（含撤销检查），再 decode 获取完整 payload
+        manager.verify_token(token, token_type=token_type)
+        # 验证通过后，decode 获取完整 payload（含 username 等自定义字段）
+        payload = _jwt.decode(
+            token, manager.secret_key, algorithms=[manager.algorithm]
+        )
         return payload
-    except jwt.ExpiredSignatureError:
-        logger.warning("Token 已过期")
-        return None
-    except jwt.InvalidTokenError as exc:
-        logger.warning("无效 Token: %s", exc)
+    except Exception as exc:
+        logger.warning("Token 验证失败: %s", exc)
         return None
 
 

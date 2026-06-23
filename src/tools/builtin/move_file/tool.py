@@ -16,6 +16,7 @@ from tools.types import (
     Tool,
     ToolCategory,
     ToolLevel,
+    ToolResult,
     ToolSource,
     create_failure_result,
     create_success_result,
@@ -128,7 +129,7 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
             metadata={"action": "batch_move_files"},
         )
 
-    async def _move_single(self, inputs: dict[str, Any]):
+    async def _move_single(self, inputs: dict[str, Any]):  # noqa: PLR0911
         """移动单个文件"""
         try:
             source_str = inputs.get("source")
@@ -170,7 +171,7 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
             # 执行移动
             if dest.exists() and overwrite:
                 if dest.is_dir():
-                    import shutil as sh
+                    import shutil as sh  # noqa: PLC0415
                     sh.rmtree(dest)
                 else:
                     dest.unlink()

@@ -844,11 +844,11 @@ class TestSecurityCheckIntegration:
         assert "not a tool execution" in decision.get("reason", "")
 
     @pytest.mark.asyncio
-    async def test_needs_approval_without_service_blocks(self) -> None:
-        """无审批服务时 needs_approval 直接拦截。
+    async def test_needs_approval_without_service_blocks(self, monkeypatch) -> None:
+        """engine 未注入服务时回退全局单例，用户拒绝则拦截。
 
-        触发 needs_approval 规则（sudo 命令），不注册 human_interaction 服务，
-        验证 allowed=False。
+        修复后契约：不再因 ctx._services 未注入而直接拒绝，而是回退全局单例
+        正常发起审批。此处 mock 全局单例返回 denied，验证仍能拦截。
         """
         rules = [
             {
@@ -865,7 +865,18 @@ class TestSecurityCheckIntegration:
 
         registry = PluginRegistry()
         registry.register(plugin)
-        # 不注册 human_interaction 服务
+        # 不注入 engine 服务 → 回退全局单例
+
+        # mock 全局单例返回 denied（模拟用户拒绝）
+        mock_svc = AsyncMock()
+        mock_svc.create_choice_request = AsyncMock(return_value="req-fallback")
+        mock_svc.wait_for_choice = AsyncMock(
+            return_value={"response_type": "denied"}
+        )
+        import human_interaction
+        monkeypatch.setattr(
+            human_interaction, "get_human_interaction_service", lambda: mock_svc,
+        )
 
         input_table = _build_security_input_table()
         output_table = OutputRouteTable([])
@@ -922,7 +933,7 @@ class TestSecurityCheckIntegration:
 
         engine = _build_engine_with_route(
             input_table, output_table, registry,
-            services={"human_interaction": mock_interaction_svc},
+            services={"human_interaction_service": mock_interaction_svc},
         )
         state = create_initial_state(
             **{
@@ -976,7 +987,7 @@ class TestSecurityCheckIntegration:
 
         engine = _build_engine_with_route(
             input_table, output_table, registry,
-            services={"human_interaction": mock_interaction_svc},
+            services={"human_interaction_service": mock_interaction_svc},
         )
         state = create_initial_state(
             **{
@@ -1375,7 +1386,7 @@ class TestSecurityGuardE2E:
 
         engine = _build_engine_with_route(
             input_table, output_table, registry,
-            services={"human_interaction": mock_interaction_svc},
+            services={"human_interaction_service": mock_interaction_svc},
         )
         ApprovalRoundOutputPlugin._call_count = 0
         # 使用 L2 agent_level（bash 在 L2 允许列表中）

@@ -13,7 +13,7 @@ import logging
 import random
 from typing import Any
 
-from pipeline.plugin import IInputPlugin, PluginResult, PluginContext
+from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,12 @@ class ToolCallGuard(IInputPlugin):
         return PluginResult(state_updates=result)
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
-        """核心工作逻辑，检测重复并生成对应的状态更新。"""
+        """核心工作逻辑，检测重复并生成对应的状态更新。
+
+        工具相关提示统一作为 tool_result 返回（带 tool_call_id 的 role=tool
+        消息），不用消息注入（往 messages 追加 system/user），避免打断
+        assistant(tool_calls)→tool 序列导致引擎异常。
+        """
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             return {}
@@ -90,35 +95,36 @@ class ToolCallGuard(IInputPlugin):
 
         if repeat_count == 0:
             return updates
-        elif repeat_count <= 2:
+        if repeat_count <= 2:
             prompt = self._get_random_prompt()
             updates["tool_call.filter_reason"] = f"Duplicate detected, using prompt: {prompt[:30]}..."
-            updates["messages"] = self._add_system_prompt(ctx, prompt)
+            # 软提示也作为 tool_result 返回，避免打断消息序列
+            updates["messages"] = self._add_tool_results(ctx, tool_calls, prompt)
             return updates
-        elif repeat_count <= self._max_retries:
+        if repeat_count <= self._max_retries:
             prompt = self._get_random_prompt()
             updates[StateKeys.RAW_TOOL_CALLS] = []
             updates["tool_call.blocked"] = True
             updates["tool_call.block_reason"] = f"Too many repeats ({repeat_count}), retry with prompt"
-            updates["messages"] = self._add_system_prompt(ctx, prompt)
+            # 拦截：清空 raw_tool_calls + 为每个 tool_call 注入拒绝结果
+            updates["messages"] = self._add_tool_results(ctx, tool_calls, prompt)
             updates["__route_signal__"] = RouteSignal(
                 route_type="next_llm",
                 reason=f"Tool call blocked after {repeat_count} repeats",
             )
             return updates
-        else:
-            updates["__route_signal__"] = RouteSignal(
-                route_type="decision",
-                reason=f"Tool call repeat exceeded max retries ({self._max_retries})",
-                payload={
-                    "decision_type": "agent",
-                    "repeat_count": repeat_count,
-                    "tool_signature": current_sig,
-                    "used_prompts": self._used_prompts,
-                    "suggested_action": "analyze_and_guide",
-                },
-            )
-            return updates
+        updates["__route_signal__"] = RouteSignal(
+            route_type="decision",
+            reason=f"Tool call repeat exceeded max retries ({self._max_retries})",
+            payload={
+                "decision_type": "agent",
+                "repeat_count": repeat_count,
+                "tool_signature": current_sig,
+                "used_prompts": self._used_prompts,
+                "suggested_action": "analyze_and_guide",
+            },
+        )
+        return updates
 
     def _generate_signature(self, tool_calls: list[dict]) -> str:
         """生成工具调用签名，用于检测重复调用。
@@ -151,19 +157,32 @@ class ToolCallGuard(IInputPlugin):
         self._used_prompts.append(prompt)
         return prompt
 
-    def _add_system_prompt(self, ctx: PluginContext, prompt: str) -> list:
-        """添加系统提示到消息列表。
+    def _add_tool_results(
+        self, ctx: PluginContext, tool_calls: list[dict], prompt: str,
+    ) -> list:
+        """把重复提示作为 tool_result 注入消息列表。
+
+        不用 role=system 消息注入（那会打断 assistant(tool_calls)→tool 序列），
+        而是为每个工具调用生成一条 role=tool 消息（带 tool_call_id），
+        内容是重复提示。这样工具调用意图被"完成"（有了对应 tool result），
+        序列保持完整，提示也通过 tool_result 通道反馈给 LLM。
 
         Args:
             ctx: 插件执行上下文。
-            prompt: 要添加的提示词内容。
+            tool_calls: 被拦截/提示的工具调用列表。
+            prompt: 重复提示内容。
 
         Returns:
-            添加了系统提示后的消息列表。
+            追加了 tool 消息后的消息列表。
         """
         messages = list(ctx.state.get("messages", []))
-        messages.append({
-            "role": "system",
-            "content": f"[ToolCallGuard] {prompt}",
-        })
+        for tc in tool_calls:
+            tool_name = tc.get("name", "unknown")
+            call_id = tc.get("id", "")
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": tool_name,
+                "content": f"[ToolCallGuard] {prompt}",
+            })
         return messages

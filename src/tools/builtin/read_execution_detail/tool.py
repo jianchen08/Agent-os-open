@@ -99,7 +99,7 @@ class ReadExecutionDetailTool(BuiltinTool):
             injected_params=["storage"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> Any:
+    async def execute(self, inputs: dict[str, Any]) -> Any:  # noqa: PLR0911
         """执行工具逻辑，根据 level 参数分派到对应的处理方法。
 
         Args:
@@ -137,15 +137,14 @@ class ReadExecutionDetailTool(BuiltinTool):
         # 按 level 分派
         if level == "skeleton":
             return self._get_skeleton(storage, pipeline_run_id)
-        elif level == "L1":
+        if level == "L1":
             return self._get_l1_block(storage, inputs, pipeline_run_id)
-        elif level == "L0":
+        if level == "L0":
             return self._get_l0_records(storage, inputs, pipeline_run_id)
-        else:
-            return create_failure_result(
-                error=f"不支持的 level: {level}，可选值：skeleton, L1, L0",
-                error_code="INVALID_LEVEL",
-            )
+        return create_failure_result(
+            error=f"不支持的 level: {level}，可选值：skeleton, L1, L0",
+            error_code="INVALID_LEVEL",
+        )
 
     def _get_skeleton(self, storage: Any, pipeline_run_id: str) -> Any:
         """生成骨架视图：每条执行记录压缩为一行。
@@ -196,7 +195,7 @@ class ReadExecutionDetailTool(BuiltinTool):
                 "pipeline_run_id": pipeline_run_id,
                 "level": "skeleton",
                 "total_records": len(records),
-                "iterations": sorted(set(r.iteration for r in records)),
+                "iterations": sorted({r.iteration for r in records}),
                 "lines": lines,
             },
             metadata={"action": "skeleton"},

@@ -43,7 +43,7 @@ class PermissionChecker:
         """初始化权限检查器"""
         self._project_root = Path(project_root).resolve()
 
-    def check_read_permission(
+    def check_read_permission(  # noqa: PLR0911
         self,
         path: str,
         workspace: str | None,
@@ -82,7 +82,7 @@ class PermissionChecker:
 
         return True, ""
 
-    def check_write_permission(
+    def check_write_permission(  # noqa: PLR0911
         self,
         path: str,
         workspace: str | None,
@@ -134,9 +134,8 @@ class PermissionChecker:
                 )
 
             # 5. 检查允许的操作类型
-            if write_perm.allowed_operations:
-                if operation not in write_perm.allowed_operations:
-                    return False, f"当前策略不允许执行 '{operation}' 操作"
+            if write_perm.allowed_operations and operation not in write_perm.allowed_operations:
+                return False, f"当前策略不允许执行 '{operation}' 操作"
 
             return True, ""
 
@@ -166,8 +165,7 @@ class PermissionChecker:
 
             if is_inside:
                 return True, None
-            else:
-                return False, f"路径 '{path}' 不在工作目录 '{workspace}' 内"
+            return False, f"路径 '{path}' 不在工作目录 '{workspace}' 内"
 
         except Exception as e:
             error_msg = f"路径检查失败: {str(e)}"
@@ -177,10 +175,7 @@ class PermissionChecker:
     def _normalize_path(self, path: str) -> str:
         """标准化路径"""
         # 如果是相对路径，转换为绝对路径
-        if not os.path.isabs(path):
-            abs_path = (self._project_root / path).resolve()
-        else:
-            abs_path = Path(path).resolve()
+        abs_path = (self._project_root / path).resolve() if not os.path.isabs(path) else Path(path).resolve()  # noqa: PTH117
 
         # 使用 normpath 处理路径分隔符
         normalized = os.path.normpath(str(abs_path))
@@ -211,10 +206,7 @@ class PermissionChecker:
         # 路径以工作目录开头（需要路径分隔符）
         # 例如: workspace_path = "C:\\project\\src\\auth"
         #       path = "C:\\project\\src\\auth\\file.py"
-        if path.startswith(workspace_path + os.sep):
-            return True
-
-        return False
+        return bool(path.startswith(workspace_path + os.sep))
 
     def get_project_root(self) -> str:
         """获取项目根目录"""
@@ -222,7 +214,7 @@ class PermissionChecker:
 
     def resolve_path(self, path: str) -> str:
         """解析路径为绝对路径"""
-        if os.path.isabs(path):
+        if os.path.isabs(path):  # noqa: PTH117
             return os.path.normpath(path)
         return str((self._project_root / path).resolve())
 
@@ -239,7 +231,7 @@ def check_write_permission(
 
     # 如果传入的是字典，转换为策略对象
     if isinstance(policy, dict):
-        from isolation.permission_policy import (
+        from isolation.permission_policy import (  # noqa: PLC0415
             PermissionPolicyType,
             ReadPermission,
             WritePermission,

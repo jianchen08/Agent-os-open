@@ -7,18 +7,19 @@
 - 不支持的 search_type 错误处理
 - case_sensitive 大小写敏感参数
 - file_pattern 文件过滤参数
-- max_results 结果数量限制
+- max_results 结果数量限制（限制 match 行数，context 行不计入）
 - 搜索路径不存在的错误处理
 - use_regex 正则表达式参数
+- 回归测试：context 截断 / max_depth / 字面量换行 / match_count 字段
 
-所有测试通过 mock _check_ripgrep 返回 False，强制使用 Python 搜索模式，
-确保在无 ripgrep 环境下测试也可稳定运行。
+测试走真实 ripgrep 路径（不再 mock）。rg 不可用的环境会自动 skip，
+避免假失败。
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -30,12 +31,17 @@ from tools.builtin.enhanced_search import EnhancedSearchTool
 # ═══════════════════════════════════════════════════════════
 
 
+def _ripgrep_available() -> bool:
+    """检测系统是否安装 ripgrep。"""
+    return shutil.which("rg") is not None
+
+
 @pytest.fixture
 def search_tool(tmp_path: Path) -> EnhancedSearchTool:
-    """创建禁用 ripgrep 的 EnhancedSearchTool 实例。
+    """创建走真实 ripgrep 路径的 EnhancedSearchTool 实例。
 
-    通过 mock _check_ripgrep 返回 False，强制使用 Python 搜索实现，
-    确保测试不依赖系统 ripgrep 安装。
+    不再 mock _check_ripgrep。若环境未安装 ripgrep，整个用例 skip，
+    而不是退化到旧 Python 回退路径（该路径已移除）。
 
     Args:
         tmp_path: pytest 内置临时目录 fixture
@@ -43,9 +49,9 @@ def search_tool(tmp_path: Path) -> EnhancedSearchTool:
     Returns:
         配置好的 EnhancedSearchTool 实例，base_path 指向 tmp_path
     """
-    with patch.object(EnhancedSearchTool, "_check_ripgrep", return_value=False):
-        tool = EnhancedSearchTool(base_path=str(tmp_path))
-    return tool
+    if not _ripgrep_available():
+        pytest.skip("ripgrep 未安装，enhanced_search 测试需要真实 rg")
+    return EnhancedSearchTool(base_path=str(tmp_path))
 
 
 @pytest.fixture
@@ -192,23 +198,6 @@ class TestTextSearch:
         assert len(contents) > 0
         matched = " ".join(contents)
         assert "Hello World" in matched
-
-    async def test_text_search_engine_is_python(
-        self, search_tool: EnhancedSearchTool, sample_files: Path
-    ) -> None:
-        """测试禁用 ripgrep 时引擎标识为 python。
-
-        验证：
-        - output 中 engine 字段为 "python"
-        """
-        result = await search_tool.execute({
-            "query": "test",
-            "search_type": "text",
-            "path": str(sample_files),
-        })
-
-        assert result.success is True
-        assert result.output["engine"] == "python"
 
     async def test_text_search_no_match(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -637,11 +626,12 @@ class TestMaxResults:
     async def test_max_results_limits_output(
         self, search_tool: EnhancedSearchTool, sample_files: Path
     ) -> None:
-        """测试 max_results 限制返回结果数量。
+        """测试 max_results 限制 match 行数（context 行不计入）。
 
-        准备：在多个文件中写入大量匹配行，验证 max_results=1 时只返回 1 条。
+        准备：写入 5 行匹配内容，max_results=1、context_lines=0（无上下文）。
         验证：
-        - count 不超过 max_results 值
+        - match_count 不超过 max_results
+        - 无 context 时 c == match_count
         """
         # 创建一个包含多行匹配内容的文件
         (sample_files / "multi_match.py").write_text(
@@ -662,7 +652,10 @@ class TestMaxResults:
         })
 
         assert result.success is True
-        assert result.output["c"] <= 1
+        # max_results 限制的是 match 行数
+        assert result.output["match_count"] == 1
+        # context_lines=0 时无上下文行，总行数 == match 数
+        assert result.output["c"] == 1
 
     async def test_max_results_filename_search(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -860,3 +853,129 @@ class TestToolDefinition:
         assert props["max_results"]["default"] == 100
         assert props["use_regex"]["default"] is False
         assert props["file_pattern"]["default"] == "*"
+
+
+# ═══════════════════════════════════════════════════════════
+# 回归测试：审查中实测出的 4 个 bug（均已修复）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestRegressionBugFix:
+    """回归测试，锁定审查中发现并修复的 4 个 bug。
+
+    每个测试对应一个具体 bug，确保其不再复发。
+    """
+
+    async def test_context_after_not_truncated(
+        self, search_tool: EnhancedSearchTool, tmp_path: Path
+    ) -> None:
+        """Bug#1：max_results 达上限后不能丢掉当前 match 的后置 context。
+
+        复现条件：单 match，context_lines=2，max_results=1。
+        修复前：rg 路径在 match 计数达上限后立即 break，丢失 after-context。
+        修复后：drain 完当前 match 的 context-after 再停。
+        """
+        (tmp_path / "a.py").write_text(
+            "L0\nL1\nmatch\nL3\nL4\n", encoding="utf-8"
+        )
+        result = await search_tool.execute({
+            "query": "match",
+            "search_type": "text",
+            "path": str(tmp_path),
+            "max_results": 1,
+            "context_lines": 2,
+            "case_sensitive": True,
+        })
+
+        assert result.success is True
+        data = result.output
+        # match 行数被 max_results 限制为 1
+        assert data["match_count"] == 1
+        # 返回行内容应同时包含 match 本身和它前后的上下文 L1/L3/L4
+        line_contents = {row[2] for row in data["d"]}
+        assert "match" in line_contents  # 匹配行
+        assert "L3" in line_contents      # after-context 未丢失
+        assert "L4" in line_contents      # after-context 未丢失
+
+    async def test_max_depth_honored_in_rg(
+        self, search_tool: EnhancedSearchTool, tmp_path: Path
+    ) -> None:
+        """Bug#3：max_depth 在 rg 路径必须生效。
+
+        复现条件：深层目录（4 层）放 needle.py，顶层放 top.py，max_depth=1。
+        修复前：rg 路径根本没传 -d，深层文件照样命中。
+        修复后：只命中顶层 top.py。
+        """
+        deep = tmp_path
+        for d in ("l1", "l2", "l3", "l4"):
+            deep = deep / d
+            deep.mkdir()
+        (deep / "needle.py").write_text("target_match\n", encoding="utf-8")
+        (tmp_path / "top.py").write_text("target_match\n", encoding="utf-8")
+
+        result = await search_tool.execute({
+            "query": "target_match",
+            "search_type": "text",
+            "path": str(tmp_path),
+            "max_depth": 1,
+            "context_lines": 0,
+        })
+
+        assert result.success is True
+        matched_files = {row[0] for row in result.output["d"]}
+        # 只命中顶层 top.py，深层 needle.py 被深度限制排除
+        assert any("top.py" in f for f in matched_files)
+        assert not any("needle.py" in f for f in matched_files)
+
+    async def test_literal_multiline_query(
+        self, search_tool: EnhancedSearchTool, tmp_path: Path
+    ) -> None:
+        """Bug#4：字面量模式下含换行的 query 不能抛 SEARCH_FAILED。
+
+        复现条件：use_regex=False，query 含换行（常见多行粘贴）。
+        修复前：rg 字面量模式遇换行报 "the literal is not allowed in a regex"，
+                被当成 SEARCH_FAILED 返回。
+        修复后：自动加 -U multiline 消除该报错；查询以正常结果返回
+                （可能 0 匹配——rg 对字面量跨行匹配能力有限，属固有行为，
+                不在本工具职责内）。
+        """
+        (tmp_path / "a.py").write_text("foo bar\nbaz\n", encoding="utf-8")
+        result = await search_tool.execute({
+            "query": "foo bar\nbaz",
+            "search_type": "text",
+            "path": str(tmp_path),
+            "use_regex": False,
+            "context_lines": 0,
+        })
+
+        # 核心断言：不再抛含混的 SEARCH_FAILED
+        assert result.success is True, f"字面量换行查询不应失败: {result.error}"
+        # match_count 可能为 0（rg 字面量跨行匹配有限），只要不报错即可
+        assert "match_count" in result.output
+
+    async def test_match_count_field_present(
+        self, search_tool: EnhancedSearchTool, sample_files: Path
+    ) -> None:
+        """Bug#5：输出必须含 match_count 字段，供区分匹配数与总行数。
+
+        修复前：max_results 语义混乱（c 可超 max_results 却无字段说明）。
+        修复后：match_count 表示匹配行数，受 max_results 限制；c 含 context 行。
+        """
+        result = await search_tool.execute({
+            "query": "search_test_marker",
+            "search_type": "text",
+            "path": str(sample_files),
+            "max_results": 100,
+            "context_lines": 2,
+        })
+
+        assert result.success is True
+        data = result.output
+        # match_count 字段存在且为非负整数
+        assert "match_count" in data
+        assert isinstance(data["match_count"], int)
+        assert data["match_count"] >= 0
+        # match_count 受 max_results 限制
+        assert data["match_count"] <= 100
+        # 当 context_lines > 0 时，c（含上下文）可以 >= match_count
+        assert data["c"] >= data["match_count"]

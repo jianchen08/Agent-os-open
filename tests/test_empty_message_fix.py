@@ -101,43 +101,6 @@ class TestEngineInjectMessageEmptyFilter:
         # 消息已由 bridge.enqueue_notification 处理，engine 不维护自己的队列
 
 
-# ── 测试通知消费过滤 ──────────────────────────
-
-class TestConsumePendingNotificationsFilter:
-    """验证 _run_loop 消费通知时过滤空字符串。"""
-
-    def test_run_loop_filters_empty_notifications(self):
-        """consume_pending_notifications 从 bridge 拉取通知并过滤空字符串。"""
-        from unittest.mock import MagicMock
-        from pipeline.engine import PipelineEngine
-
-        engine = PipelineEngine(
-            input_route_table=MagicMock(),
-            output_route_table=MagicMock(),
-            plugin_registry=MagicMock(),
-        )
-
-        # 模拟 bridge
-        mock_bridge = MagicMock()
-        mock_bridge._pending_notifications = ["valid", "", "  ", "also valid", "\n"]
-        mock_bridge.message_id = "test_msg"
-
-        # 注册引擎 + bridge 到 registry
-        from pipeline.registry import get_engine_registry
-        registry = get_engine_registry()
-        registry.register(engine._pipeline_id, engine)
-        entry = registry.get(engine._pipeline_id)
-        if entry:
-            entry.bridge = mock_bridge
-
-        _iter_notifs = engine.consume_pending_notifications()
-        _filtered_notifs = [n for n in _iter_notifs if n and n.strip()]
-        assert _filtered_notifs == ["valid", "also valid"]
-
-        # 清理
-        registry.unregister(engine._pipeline_id)
-
-
 # ── 测试 task_executor 历史记录处理 ──────────────────────────
 
 class TestTaskExecutorHistoryHandling:
@@ -186,50 +149,5 @@ class TestTaskExecutorHistoryHandling:
 
 
 # ── 集成测试: 端到端空消息过滤 ──────────────────────────
-
-@pytest.mark.asyncio
-async def test_empty_message_e2e():
-    """端到端测试: 空消息不会进入对话历史。
-
-    模拟场景:
-    1. 创建引擎
-    2. 尝试注入空消息
-    3. 验证空消息未进入 pending_notifications
-    4. 注入有效消息
-    5. 验证有效消息正常进入
-    """
-    from pipeline.engine import PipelineEngine
-
-    engine = PipelineEngine(
-        input_route_table=MagicMock(),
-        output_route_table=MagicMock(),
-        plugin_registry=MagicMock(),
-    )
-
-    # 步骤 1: 注入空消息（多种变体）
-    empty_variants = ["", "   ", "\n", "\t", "  \n  "]
-    for variant in empty_variants:
-        engine.inject_message(variant)
-
-    # 验证: pending_notifications 应为空
-    assert len(engine._pending_notifications) == 0, \
-        f"空消息不应进入通知队列，实际有: {engine._pending_notifications}"
-
-    # 步骤 2: 注入有效消息
-    engine.inject_message("hello")
-    engine.inject_message("world")
-
-    # 验证: 有效消息正常进入
-    assert len(engine._pending_notifications) == 2
-    assert engine._pending_notifications == ["hello", "world"]
-
-    # 步骤 3: 消费通知
-    consumed = engine.consume_pending_notifications()
-    assert consumed == ["hello", "world"]
-    assert len(engine._pending_notifications) == 0
-
-
-if __name__ == "__main__":
-    # 运行简单测试
-    asyncio.run(test_empty_message_e2e())
-    print("✓ 端到端空消息过滤测试通过")
+# 注: inject_message / consume_pending_notifications 已在减代码重构中移除，
+# 空消息过滤逻辑由 send_pipeline_message 层覆盖（见 TestSendPipelineMessageEmptyFilter）。

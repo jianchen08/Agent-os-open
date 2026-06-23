@@ -16,7 +16,6 @@ from pathlib import Path
 
 import yaml
 
-
 # ============================================================
 # 辅助工具
 # ============================================================
@@ -50,7 +49,7 @@ def _crud_definition() -> dict:
 
 def _create_app_with_crud():
     """创建包含 CRUD 路由的测试应用。"""
-    from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store
+    from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store  # noqa: PLC0415
 
     # 清空存储
     _clear_store()
@@ -60,7 +59,7 @@ def _create_app_with_crud():
     router = generator.register("test_mod", "items", definition)
     assert router is not None
 
-    from channels.api.app import create_app
+    from channels.api.app import create_app  # noqa: PLC0415
 
     app = create_app()
     app.include_router(router)
@@ -77,18 +76,18 @@ class TestAutoCRUDGeneratorRegister:
 
     def test_register_returns_router(self) -> None:
         """register 应返回有效的 APIRouter。"""
-        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store
+        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store  # noqa: PLC0415
 
         _clear_store()
         generator = AutoCRUDGenerator()
         router = generator.register("mod1", "coll1", _crud_definition())
         assert router is not None
         # 检查路由前缀
-        assert router.prefix == "/api/modules/mod1/data/coll1"
+        assert router.prefix == "/api/v1/modules/mod1/data/coll1"
 
     def test_register_invalid_fields_returns_none(self) -> None:
         """缺少 fields 的定义应返回 None。"""
-        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store
+        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store  # noqa: PLC0415
 
         _clear_store()
         generator = AutoCRUDGenerator()
@@ -97,7 +96,7 @@ class TestAutoCRUDGeneratorRegister:
 
     def test_register_auto_adds_id_if_no_primary(self) -> None:
         """没有主键字段时应自动添加 id 字段。"""
-        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store
+        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store  # noqa: PLC0415
 
         _clear_store()
         definition = {
@@ -112,7 +111,7 @@ class TestAutoCRUDGeneratorRegister:
 
     def test_register_all_batch(self) -> None:
         """register_all 批量注册多个集合。"""
-        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store
+        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store  # noqa: PLC0415
 
         _clear_store()
         generator = AutoCRUDGenerator()
@@ -140,8 +139,9 @@ class TestCRUDCreate:
 
     def test_create_record_success(self) -> None:
         """成功创建一条记录。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -149,7 +149,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon", "quantity": 3},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -163,8 +163,9 @@ class TestCRUDCreate:
 
     def test_create_record_with_default_value(self) -> None:
         """未提供字段应使用默认值。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -172,7 +173,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Potion"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -182,8 +183,9 @@ class TestCRUDCreate:
 
     def test_create_record_missing_required_field(self) -> None:
         """缺少必填字段应返回 400。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -191,7 +193,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"type": "weapon"},  # 缺少 name
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -199,8 +201,9 @@ class TestCRUDCreate:
 
     def test_create_record_invalid_enum(self) -> None:
         """枚举值不合法应返回 400。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -208,7 +211,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Test", "type": "invalid_type"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -216,8 +219,9 @@ class TestCRUDCreate:
 
     def test_create_record_value_below_min(self) -> None:
         """数值小于最小值应返回 400。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -225,7 +229,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Test", "quantity": -1},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -237,8 +241,9 @@ class TestCRUDRead:
 
     def test_list_records(self) -> None:
         """获取记录列表。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -248,13 +253,13 @@ class TestCRUDRead:
         # 先创建几条记录
         for name in ["Sword", "Shield", "Potion"]:
             client.post(
-                "/api/modules/test_mod/data/items",
+                "/api/v1/modules/test_mod/data/items",
                 json={"name": name, "type": "weapon"},
                 headers={"Authorization": f"Bearer {token}"},
             )
 
         resp = client.get(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -264,8 +269,9 @@ class TestCRUDRead:
 
     def test_get_single_record(self) -> None:
         """获取单条记录。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -274,7 +280,7 @@ class TestCRUDRead:
 
         # 创建记录
         create_resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -282,7 +288,7 @@ class TestCRUDRead:
 
         # 获取记录
         resp = client.get(
-            f"/api/modules/test_mod/data/items/{record_id}",
+            f"/api/v1/modules/test_mod/data/items/{record_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -292,8 +298,9 @@ class TestCRUDRead:
 
     def test_get_nonexistent_record(self) -> None:
         """获取不存在的记录应返回 404。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -301,15 +308,16 @@ class TestCRUDRead:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/test_mod/data/items/nonexistent-id",
+            "/api/v1/modules/test_mod/data/items/nonexistent-id",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
 
     def test_list_with_pagination(self) -> None:
         """分页查询。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -319,14 +327,14 @@ class TestCRUDRead:
         # 创建 5 条记录
         for i in range(5):
             client.post(
-                "/api/modules/test_mod/data/items",
+                "/api/v1/modules/test_mod/data/items",
                 json={"name": f"Item{i}", "type": "weapon"},
                 headers={"Authorization": f"Bearer {token}"},
             )
 
         # 第 1 页，每页 2 条
         resp = client.get(
-            "/api/modules/test_mod/data/items?_page=1&_page_size=2",
+            "/api/v1/modules/test_mod/data/items?_page=1&_page_size=2",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -339,8 +347,9 @@ class TestCRUDRead:
 
     def test_list_with_filter(self) -> None:
         """按字段筛选。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -349,19 +358,19 @@ class TestCRUDRead:
 
         # 创建不同类型的记录
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon"},
             headers={"Authorization": f"Bearer {token}"},
         )
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Helmet", "type": "armor"},
             headers={"Authorization": f"Bearer {token}"},
         )
 
         # 按 type 筛选
         resp = client.get(
-            "/api/modules/test_mod/data/items?type=weapon",
+            "/api/v1/modules/test_mod/data/items?type=weapon",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -371,8 +380,9 @@ class TestCRUDRead:
 
     def test_list_with_sort(self) -> None:
         """排序查询。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -381,19 +391,19 @@ class TestCRUDRead:
 
         # 创建记录
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Banana", "type": "potion", "quantity": 5},
             headers={"Authorization": f"Bearer {token}"},
         )
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Apple", "type": "potion", "quantity": 3},
             headers={"Authorization": f"Bearer {token}"},
         )
 
         # 按 name 升序
         resp = client.get(
-            "/api/modules/test_mod/data/items?_sort=name&_order=asc",
+            "/api/v1/modules/test_mod/data/items?_sort=name&_order=asc",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -407,8 +417,9 @@ class TestCRUDUpdate:
 
     def test_update_record_success(self) -> None:
         """成功更新记录。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -417,7 +428,7 @@ class TestCRUDUpdate:
 
         # 创建记录
         create_resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon", "quantity": 1},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -425,7 +436,7 @@ class TestCRUDUpdate:
 
         # 更新记录
         resp = client.put(
-            f"/api/modules/test_mod/data/items/{record_id}",
+            f"/api/v1/modules/test_mod/data/items/{record_id}",
             json={"quantity": 10, "name": "Big Sword"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -437,8 +448,9 @@ class TestCRUDUpdate:
 
     def test_update_nonexistent_record(self) -> None:
         """更新不存在的记录应返回 404。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -446,7 +458,7 @@ class TestCRUDUpdate:
         token = _get_auth_token(client)
 
         resp = client.put(
-            "/api/modules/test_mod/data/items/nonexistent-id",
+            "/api/v1/modules/test_mod/data/items/nonexistent-id",
             json={"name": "Test"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -458,8 +470,9 @@ class TestCRUDDelete:
 
     def test_delete_record_success(self) -> None:
         """成功删除记录。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -468,7 +481,7 @@ class TestCRUDDelete:
 
         # 创建记录
         create_resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -476,7 +489,7 @@ class TestCRUDDelete:
 
         # 删除记录
         resp = client.delete(
-            f"/api/modules/test_mod/data/items/{record_id}",
+            f"/api/v1/modules/test_mod/data/items/{record_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -485,15 +498,16 @@ class TestCRUDDelete:
 
         # 确认已删除
         list_resp = client.get(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert list_resp.json()["total"] == 0
 
     def test_delete_nonexistent_record(self) -> None:
         """删除不存在的记录应返回 404。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import _clear_store  # noqa: PLC0415
 
         _clear_store()
         app = _create_app_with_crud()
@@ -501,7 +515,7 @@ class TestCRUDDelete:
         token = _get_auth_token(client)
 
         resp = client.delete(
-            "/api/modules/test_mod/data/items/nonexistent-id",
+            "/api/v1/modules/test_mod/data/items/nonexistent-id",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
@@ -517,8 +531,9 @@ class TestAccessControl:
 
     def test_read_only_no_write_routes(self) -> None:
         """read-only 模式应拒绝 POST/PUT/DELETE。"""
-        from fastapi.testclient import TestClient
-        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store
+        from fastapi.testclient import TestClient  # noqa: PLC0415
+
+        from ui_schema.auto_crud import AutoCRUDGenerator, _clear_store  # noqa: PLC0415
 
         _clear_store()
         generator = AutoCRUDGenerator()
@@ -532,7 +547,7 @@ class TestAccessControl:
         router = generator.register("ro_mod", "items", definition)
         assert router is not None
 
-        from channels.api.app import create_app
+        from channels.api.app import create_app  # noqa: PLC0415
 
         app = create_app()
         app.include_router(router)
@@ -541,14 +556,14 @@ class TestAccessControl:
 
         # GET 应该可用
         resp = client.get(
-            "/api/modules/ro_mod/data/items",
+            "/api/v1/modules/ro_mod/data/items",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
 
         # POST 应返回 405
         resp = client.post(
-            "/api/modules/ro_mod/data/items",
+            "/api/v1/modules/ro_mod/data/items",
             json={"name": "Test"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -556,7 +571,7 @@ class TestAccessControl:
 
         # PUT 应返回 405
         resp = client.put(
-            "/api/modules/ro_mod/data/items/some-id",
+            "/api/v1/modules/ro_mod/data/items/some-id",
             json={"name": "Test"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -564,7 +579,7 @@ class TestAccessControl:
 
         # DELETE 应返回 405
         resp = client.delete(
-            "/api/modules/ro_mod/data/items/some-id",
+            "/api/v1/modules/ro_mod/data/items/some-id",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 405
@@ -580,21 +595,21 @@ class TestValidationHelpers:
 
     def test_coerce_value_string(self) -> None:
         """字符串类型转换。"""
-        from ui_schema.auto_crud import _coerce_value
+        from ui_schema.auto_crud import _coerce_value  # noqa: PLC0415
 
         assert _coerce_value("hello", "string") == "hello"
         assert _coerce_value(123, "string") == "123"
 
     def test_coerce_value_integer(self) -> None:
         """整数类型转换。"""
-        from ui_schema.auto_crud import _coerce_value
+        from ui_schema.auto_crud import _coerce_value  # noqa: PLC0415
 
         assert _coerce_value("42", "integer") == 42
         assert _coerce_value(3.14, "integer") == 3
 
     def test_coerce_value_boolean(self) -> None:
         """布尔类型转换。"""
-        from ui_schema.auto_crud import _coerce_value
+        from ui_schema.auto_crud import _coerce_value  # noqa: PLC0415
 
         assert _coerce_value("true", "boolean") is True
         assert _coerce_value("false", "boolean") is False
@@ -603,13 +618,13 @@ class TestValidationHelpers:
 
     def test_coerce_value_none(self) -> None:
         """None 值应保持 None。"""
-        from ui_schema.auto_crud import _coerce_value
+        from ui_schema.auto_crud import _coerce_value  # noqa: PLC0415
 
         assert _coerce_value(None, "string") is None
 
     def test_validate_field_required(self) -> None:
         """必填字段校验。"""
-        from ui_schema.auto_crud import _validate_field_value
+        from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
         error = _validate_field_value("name", None, {"required": True})
         assert error is not None
@@ -617,7 +632,7 @@ class TestValidationHelpers:
 
     def test_validate_field_enum(self) -> None:
         """枚举值校验。"""
-        from ui_schema.auto_crud import _validate_field_value
+        from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
         error = _validate_field_value(
             "type", "invalid", {"type": "enum", "values": ["a", "b"]}
@@ -627,7 +642,7 @@ class TestValidationHelpers:
 
     def test_validate_field_min_max(self) -> None:
         """数值范围校验。"""
-        from ui_schema.auto_crud import _validate_field_value
+        from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
         error = _validate_field_value(
             "qty", -1, {"type": "integer", "min": 0}
@@ -637,7 +652,7 @@ class TestValidationHelpers:
 
     def test_validate_field_pass(self) -> None:
         """合法值应通过校验。"""
-        from ui_schema.auto_crud import _validate_field_value
+        from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
         error = _validate_field_value(
             "name", "hello", {"type": "string", "required": True}
@@ -655,7 +670,7 @@ class TestSchemaParserDataDecls:
 
     def test_parse_data_section(self) -> None:
         """解析包含 data 段的 YAML。"""
-        from ui_schema.parser import SchemaParser
+        from ui_schema.parser import SchemaParser  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -688,7 +703,7 @@ class TestSchemaParserDataDecls:
 
     def test_parse_data_without_ui(self) -> None:
         """没有 ui 段但有 data 段的文件也能提取 data。"""
-        from ui_schema.parser import SchemaParser
+        from ui_schema.parser import SchemaParser  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -717,7 +732,7 @@ class TestSchemaParserDataDecls:
 
     def test_list_all_data_decls(self) -> None:
         """list_all_data_decls 返回所有模块的 data 声明。"""
-        from ui_schema.parser import SchemaParser
+        from ui_schema.parser import SchemaParser  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -750,7 +765,7 @@ class TestSchemaParserDataDecls:
 
     def test_no_data_returns_none(self) -> None:
         """没有 data 段时 get_data_decls 返回 None。"""
-        from ui_schema.parser import SchemaParser
+        from ui_schema.parser import SchemaParser  # noqa: PLC0415
 
         parser = SchemaParser()
         assert parser.get_data_decls("nonexistent") is None

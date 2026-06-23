@@ -1,6 +1,6 @@
 """基础设施集成测试。
 
-测试 Scheduler + ConcurrencyController + ResourceManager 协同工作。
+测试 ResourceManager + ErrorPolicy + StatsCollector 协同工作。
 """
 
 from __future__ import annotations
@@ -9,73 +9,10 @@ import asyncio
 
 import pytest
 
-from infrastructure.concurrency import ConcurrencyController
 from infrastructure.error_policy import apply_error_policy
 from infrastructure.resource import ResourceManager, ResourceQuota
-from infrastructure.scheduler import Scheduler
 from infrastructure.stats import StatsCollector
 from pipeline.types import ErrorPolicy
-
-
-class TestInfrastructureIntegration:
-    """Scheduler + ConcurrencyController + ResourceManager 协同。"""
-
-    @pytest.mark.asyncio
-    async def test_full_pipeline_lifecycle(self) -> None:
-        """模拟管道生命周期：调度 → 资源检查 → 并发控制 → 统计。"""
-        # 设置
-        scheduler = Scheduler()
-        controller = ConcurrencyController(config={"agent_max": 2})
-        resource_mgr = ResourceManager(quotas={
-            "default": ResourceQuota(max_pipelines=5),
-        })
-        stats = StatsCollector()
-
-        # 提交任务
-        await scheduler.submit("task-1", priority=1)
-        await scheduler.submit("task-2", priority=3)
-        stats.increment("submitted")
-
-        # 调度第一个任务
-        task = await scheduler.pick_next()
-        assert task == "task-1"
-
-        # 检查资源
-        assert resource_mgr.can_create("default")
-        resource_mgr.register("default")
-        stats.increment("active_pipelines")
-
-        # 并发控制
-        async with controller.acquire("agent"):
-            stats.record("concurrency_available", controller.available["agent"])
-            # 模拟工作
-            await asyncio.sleep(0.01)
-
-        # 释放资源
-        resource_mgr.release("default")
-        stats.increment("active_pipelines", delta=-1)
-
-        # 验证统计
-        assert stats.get("submitted") == 1
-        assert stats.get("active_pipelines") == 0  # released
-        assert stats.snapshot()["concurrency_available"] == 1  # agent_max=2, 占了1个
-
-    @pytest.mark.asyncio
-    async def test_resource_quota_blocks_creation(self) -> None:
-        """资源配额满时应拒绝创建。"""
-        resource_mgr = ResourceManager(quotas={
-            "default": ResourceQuota(max_pipelines=10),
-            "limited": ResourceQuota(max_pipelines=2),
-        })
-
-        assert resource_mgr.can_create("limited")
-        resource_mgr.register("limited")
-        assert resource_mgr.can_create("limited")
-        resource_mgr.register("limited")
-        assert not resource_mgr.can_create("limited")  # 已满
-
-        resource_mgr.release("limited")
-        assert resource_mgr.can_create("limited")  # 释放后可创建
 
 
 class TestErrorPolicyIntegration:

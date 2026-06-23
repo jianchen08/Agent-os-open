@@ -20,7 +20,7 @@
 - EvaluationExecutionResult：EvaluationExecutionResult类
 """
 
-from datetime import datetime
+from datetime import datetime  # noqa: F401
 from enum import Enum
 from typing import Any
 
@@ -191,10 +191,7 @@ class EvaluationExecutionResult(ExecutionResult[Any]):
         raw_score = data.get("score", 0.0)
 
         # 自动转换 0-1 分数为 0-100
-        if isinstance(raw_score, (int, float)) and raw_score <= 1.0:
-            score = raw_score * 100
-        else:
-            score = raw_score
+        score = raw_score * 100 if isinstance(raw_score, (int, float)) and raw_score <= 1.0 else raw_score
 
         # 解析状态
         status_str = data.get("status", "")

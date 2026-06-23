@@ -137,7 +137,7 @@ class ContextBuilder:
 
         return "\n\n".join(parts)
 
-    def _build_item_value(self, item: ContextVarItem) -> dict[str, Any]:
+    def _build_item_value(self, item: ContextVarItem) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """构建单个上下文变量项的值。
 
         Args:

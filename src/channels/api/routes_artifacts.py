@@ -1,23 +1,192 @@
 """制品与批注 API 路由。
 
 提供制品 CRUD、版本管理、差异对比，以及批注 CRUD 的 REST API 端点。
+包含多模态文件上传端点。
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 
-from channels.api.deps import require_auth
-from artifacts.artifact_service import get_artifact_service
 from artifacts.annotation_service import get_annotation_service
+from artifacts.artifact_service import get_artifact_service
+from channels.api.deps import require_auth
+from multimodal import AttachmentInfo, DiskFileStorage, MediaType
+from multimodal.storage import DiskFileStorage  # noqa: F811
+from multimodal.types import AttachmentInfo, MediaType  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
-artifacts_router = APIRouter(prefix="/api/v1/artifacts", tags=["制品"])
-annotations_router_v1 = APIRouter(prefix="/api/v1", tags=["批注"])
+artifacts_router = APIRouter(
+    prefix="/api/v1/artifacts",
+    tags=["制品"],
+    dependencies=[Depends(require_auth)],
+)
+annotations_router_v1 = APIRouter(
+    prefix="/api/v1",
+    tags=["批注"],
+    dependencies=[Depends(require_auth)],
+)
+
+
+# ---------------------------------------------------------------------------
+# 多模态文件存储单例
+# ---------------------------------------------------------------------------
+
+_file_storage: DiskFileStorage | None = None
+
+
+def get_file_storage() -> DiskFileStorage:
+    """获取全局文件存储单例（DiskFileStorage）。
+
+    存储目录由环境变量 ``MULTIMODAL_STORAGE_DIR`` 控制，默认 ``./data/multimodal``。
+    """
+    global _file_storage  # noqa: PLW0603
+    if _file_storage is None:
+        _file_storage = DiskFileStorage()
+    return _file_storage
+
+
+# ---------------------------------------------------------------------------
+# 多模态文件上传端点
+# ---------------------------------------------------------------------------
+
+_MIME_TO_MEDIA: dict[str, str] = {
+    "image": "image",
+    "audio": "audio",
+    "video": "video",
+}
+
+
+def _infer_media_type(mime_type: str) -> str:
+    """从 MIME 类型推断媒体类型。
+
+    Args:
+        mime_type: 文件 MIME 类型（如 image/jpeg）
+
+    Returns:
+        MediaType 字符串值（image/audio/video/document）
+    """
+    if not mime_type:
+        return "document"
+    category = mime_type.split("/", maxsplit=1)[0]
+    return _MIME_TO_MEDIA.get(category, "document")
+
+
+def _get_uploads_dir() -> str:
+    """获取上传文件目录（环境变量 UPLOADS_DIR 控制，默认 ./data/uploads）。"""
+    return os.environ.get("UPLOADS_DIR", "./data/uploads")
+
+
+@artifacts_router.post("/upload", summary="上传多模态文件")
+async def upload_file(
+    file: UploadFile = File(..., description="上传的文件"),
+    thread_id: str = Form(default="", description="关联的会话ID"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """上传多模态文件，返回文件信息和可访问 URL。
+
+    支持 multipart/form-data 上传，文件持久化到磁盘。
+    上传成功后通过 WebSocket 推送 ``multimedia_uploaded`` 事件。
+
+    Returns:
+        包含 file_id, filename, mime_type, media_type, size, url 的字典
+    """
+    content = await file.read()
+    file_id = uuid.uuid4().hex[:12]
+    mime_type = file.content_type or "application/octet-stream"
+    media_type = _infer_media_type(mime_type)
+    user_id = _user.get("sub", "")
+
+    # 1. 持久化文件二进制到 uploads 目录
+    uploads_dir = _get_uploads_dir()
+    os.makedirs(uploads_dir, exist_ok=True)  # noqa: PTH103
+    ext = os.path.splitext(file.filename or "")[1]  # noqa: PTH122
+    saved_filename = f"{file_id}{ext}"
+    file_path = os.path.join(uploads_dir, saved_filename)
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # 2. 构造可访问 URL（前端通过静态文件服务访问）
+    url = f"/uploads/{saved_filename}"
+
+    # 3. 存储元数据到 DiskFileStorage
+    attachment = AttachmentInfo(
+        file_id=file_id,
+        filename=file.filename or saved_filename,
+        mime_type=mime_type,
+        size=len(content),
+        media_type=MediaType(media_type),
+        url=url,
+    )
+    storage = get_file_storage()
+    await storage.save(file_id, attachment)
+
+    # 4. 推送 multimedia_uploaded WS 事件
+    await _push_upload_event(
+        user_id=user_id,
+        file_id=file_id,
+        filename=file.filename or saved_filename,
+        mime_type=mime_type,
+        media_type=media_type,
+        size=len(content),
+        url=url,
+        thread_id=thread_id,
+    )
+
+    logger.info(
+        "[upload] 文件上传成功 | file_id=%s filename=%s media_type=%s size=%d",
+        file_id, file.filename, media_type, len(content),
+    )
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename or saved_filename,
+        "mime_type": mime_type,
+        "media_type": media_type,
+        "size": len(content),
+        "url": url,
+    }
+
+
+async def _push_upload_event(
+    user_id: str,
+    file_id: str,
+    filename: str,
+    mime_type: str,
+    media_type: str,
+    size: int,
+    url: str,
+    thread_id: str = "",
+) -> None:
+    """推送 multimedia_uploaded WS 事件给用户。
+
+    通过 ws_interaction_notifier 的 send_to_user 方法推送。
+    推送失败不影响上传结果，仅记录日志。
+    """
+    event = {
+        "type": "multimedia_uploaded",
+        "data": {
+            "file_id": file_id,
+            "filename": filename,
+            "mime_type": mime_type,
+            "media_type": media_type,
+            "size": size,
+            "url": url,
+            "thread_id": thread_id,
+        },
+    }
+    try:
+        from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
+
+        await ws_interaction_notifier.send_to_user(user_id, event)
+    except Exception:
+        logger.warning("[upload] WS 推送 multimedia_uploaded 失败 | file_id=%s", file_id)
 
 
 # ---------------------------------------------------------------------------

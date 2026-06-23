@@ -16,10 +16,12 @@ https://open.feishu.cn/document/server-docs/event-subscription-guide/stream-mode
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import aiohttp
 
@@ -135,10 +137,8 @@ class FeishuStreamClient:
 
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._receive_task
-            except asyncio.CancelledError:
-                pass
             self._receive_task = None
 
         if self._session and not self._session.closed:

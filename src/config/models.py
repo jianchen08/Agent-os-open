@@ -41,13 +41,54 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 # src/config/models.py → 3 层 parent 到项目根
 _DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "models"
 
+# .env 文件路径（项目根目录）
+_ENV_FILE_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
+
+# 跟踪已加载的 .env 文件，避免重复加载
+_dotenv_loaded = False
+
+
+def _load_dotenv_once() -> None:
+    """加载项目根目录的 .env 文件到 os.environ（仅执行一次）。
+
+    优先级：.env 文件 > 系统环境变量（强制覆盖已有值）。
+
+    本项目以 .env 作为本地环境配置的唯一真相源。即便系统环境变量已存在
+    同名变量（如容器宿主／IDE 启动配置注入），.env 中的值也会将其覆盖，
+    确保用户通过编辑 .env 文件配置的密钥和选项能够生效。
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    _dotenv_loaded = True
+
+    if not _ENV_FILE_PATH.exists():
+        return
+
+    try:
+        with open(_ENV_FILE_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                # .env 强制覆盖系统环境变量（见 docstring 设计说明）
+                if key:
+                    os.environ[key] = value
+        logger.debug("已加载 .env 文件（强制覆盖）: %s", _ENV_FILE_PATH)
+    except Exception as exc:
+        logger.warning("加载 .env 文件失败: %s", exc)
+
 
 def _substitute_env_vars(value: Any) -> Any:
     """递归替换字典/列表/字符串中的环境变量占位符。
 
     将 ``${ENV_VAR}`` 格式的占位符替换为 ``os.environ.get("ENV_VAR", "")``。
-    若整个字符串就是一个占位符，替换后保留原始类型推导（空字符串视为空）；
-    若占位符是字符串的一部分，则做字符串替换。
+    若环境变量不存在，记录警告日志并替换为空字符串。
 
     Args:
         value: 待替换的值，可以是字典、列表、字符串或其他类型。
@@ -55,14 +96,25 @@ def _substitute_env_vars(value: Any) -> Any:
     Returns:
         替换后的值，类型与输入一致。
     """
+    # 确保 .env 已加载
+    _load_dotenv_once()
+
     if isinstance(value, str):
         def _replace(match: re.Match[str]) -> str:
             var_name = match.group(1)
-            return os.environ.get(var_name, "")
+            env_value = os.environ.get(var_name)
+            if env_value is None:
+                logger.warning(
+                    "环境变量 %s 未设置，对应配置项将为空。"
+                    "请在 .env 文件或系统环境变量中设置该值。",
+                    var_name,
+                )
+                return ""
+            return env_value
         return _ENV_VAR_PATTERN.sub(_replace, value)
-    elif isinstance(value, dict):
+    if isinstance(value, dict):
         return {k: _substitute_env_vars(v) for k, v in value.items()}
-    elif isinstance(value, list):
+    if isinstance(value, list):
         return [_substitute_env_vars(item) for item in value]
     return value
 
@@ -273,8 +325,13 @@ class ModelConfigLoader:
         # call_timeout: 优先模型配置，回退到 defaults 节
         defaults = self._load_llm_data().get("defaults", {})
         call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
+        # 首 token 超时：流式首 chunk 不来时强制超时的秒数（优先模型配置，回退 defaults）
+        first_token_timeout = model_conf.get(
+            "first_token_timeout", defaults.get("first_token_timeout", 60)
+        )
 
         return {
+            "model_id": model_id,
             "provider": provider_name,
             "model_name": model_conf.get("model_name", model_id),
             "api_base": api_base,
@@ -282,6 +339,7 @@ class ModelConfigLoader:
             "context_window": model_conf.get("context_window"),
             "default_params": default_params,
             "call_timeout": call_timeout,
+            "first_token_timeout": first_token_timeout,
         }
 
     def resolve_env_or_model(self, value: str, provider_name: str = "") -> str:
@@ -339,8 +397,7 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     1. ModelConfigLoader 实例缓存和模块级缓存
     2. LLMConfigManager 单例
     3. litellm.Router 和 Adapter 单例
-    4. LLMFactory 实例缓存和模块级单例
-    5. plugin_resolver 的 tier 缓存
+    4. plugin_resolver 的 tier 缓存
     """
     # 1. 清除 ModelConfigLoader 缓存
     invalidate_model_config_cache(config_dir)
@@ -353,17 +410,9 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     from llm.router_factory import reset_router
     reset_router()
 
-    # 4. 清除 LLMFactory 实例缓存和模块级单例（延迟导入）
-    import llm.factory as factory_mod
-    if factory_mod._llm_factory_instance is not None:
-        factory_mod._llm_factory_instance.clear_cache()
-        factory_mod._llm_factory_instance = None
-
-    # BUG-FIX-fix_20260530_config_not_take_effect:
-    # 清除 tier 缓存，使 defaults.tiers 变更后 resolve_tier 返回最新值
+    # 4. 清除 tier 缓存，使配置变更实时生效
     try:
         import pipeline.plugin_resolver as pr_mod
-        logger.info("[DIAG][invalidate] 清除 _tier_cache: %s", pr_mod._tier_cache)
         pr_mod._tier_cache.clear()
     except Exception:
         pass

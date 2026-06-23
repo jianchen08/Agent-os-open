@@ -320,7 +320,7 @@ class TagNetworkRetriever:
             tag_norm = _vector_norm(tag_vec)
             if tag_norm < 1e-9:
                 continue
-            sim = sum(q * t for q, t in zip(query_normalized, tag_vec)) / tag_norm
+            sim = sum(q * t for q, t in zip(query_normalized, tag_vec, strict=False)) / tag_norm
             similarities.append((tag_id, sim))
 
         similarities.sort(key=lambda x: x[1], reverse=True)
@@ -397,7 +397,7 @@ class TagNetworkRetriever:
             if not math.isfinite(score):
                 score = 0
 
-            context_vec = [c + t * score for c, t in zip(context_vec, tag_vec)]
+            context_vec = [c + t * score for c, t in zip(context_vec, tag_vec, strict=False)]
             total_score += score
 
         # 归一化上下文向量
@@ -412,7 +412,7 @@ class TagNetworkRetriever:
             return query_vector, {"total_score": 0}
 
         # 最终融合
-        fused = [(1 - tag_boost) * q + tag_boost * c for q, c in zip(query_vector, context_vec)]
+        fused = [(1 - tag_boost) * q + tag_boost * c for q, c in zip(query_vector, context_vec, strict=False)]
 
         # 单位化融合结果
         fused_mag = _vector_norm(fused)

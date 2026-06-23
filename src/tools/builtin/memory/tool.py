@@ -78,7 +78,7 @@ class MemoryTool(BuiltinTool):
             return self._memory_service
 
         # 降级：创建空壳 MemoryService（无存储，仅内存字典）
-        from memory.service import MemoryService
+        from memory.service import MemoryService  # noqa: PLC0415
         self._memory_service = MemoryService()
         logger.warning("[MemoryTool] memory_service 未注入，使用内存降级模式（重启数据丢失）")
         return self._memory_service
@@ -201,7 +201,7 @@ class MemoryTool(BuiltinTool):
             injected_params=["session_id", "_session", "_memory_service", "agent_config_id"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """执行记忆操作"""
         ms = self._get_memory_service(inputs)
         if ms is None:
@@ -216,20 +216,19 @@ class MemoryTool(BuiltinTool):
 
         if action == "store":
             return await self._store(inputs)
-        elif action == "retrieve":
+        if action == "retrieve":
             return await self._retrieve(inputs)
-        elif action == "import_text":
+        if action == "import_text":
             return await self._import_text(inputs)
-        elif action == "import_file":
+        if action == "import_file":
             return await self._import_file(inputs)
-        elif action == "update":
+        if action == "update":
             return await self._update(inputs)
-        elif action == "delete":
+        if action == "delete":
             return await self._delete(inputs)
-        elif action == "get_context":
+        if action == "get_context":
             return await self._get_context(inputs)
-        else:
-            return create_failure_result(f"未知操作: {action}")
+        return create_failure_result(f"未知操作: {action}")
 
     async def _store(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """存储记忆，自动将 agent_config_id 注入为标签"""
@@ -253,15 +252,14 @@ class MemoryTool(BuiltinTool):
                 )
                 result = await self._memory_service.store_episode(episode)
                 return create_success_result({"success": True, "episode_id": result})
-            else:
-                knowledge = Knowledge(
-                    user_id=self.SYSTEM_USER_ID,
-                    content=content,
-                    source_type="manual",
-                    extra_data={"tags": tags},
-                )
-                result = await self._memory_service.store_knowledge(knowledge)
-                return create_success_result({"success": True, "knowledge_id": result})
+            knowledge = Knowledge(
+                user_id=self.SYSTEM_USER_ID,
+                content=content,
+                source_type="manual",
+                extra_data={"tags": tags},
+            )
+            result = await self._memory_service.store_knowledge(knowledge)
+            return create_success_result({"success": True, "knowledge_id": result})
 
         except Exception as e:
             return create_failure_result(f"存储失败: {str(e)}")
@@ -318,24 +316,23 @@ class MemoryTool(BuiltinTool):
                         "source_count": len(results),
                     }
                 )
-            else:
-                return create_success_result(
-                    {
-                        "success": True,
-                        "inject_type": inject_type,
-                        "retrieval_method": retrieval_method,
-                        "filter": filter,
-                        "results": [
-                            {
-                                "id": str(r.id),
-                                "content": r.content,
-                                "score": r.score,
-                                "metadata": r.metadata,
-                            }
-                            for r in results
-                        ],
-                    }
-                )
+            return create_success_result(
+                {
+                    "success": True,
+                    "inject_type": inject_type,
+                    "retrieval_method": retrieval_method,
+                    "filter": filter,
+                    "results": [
+                        {
+                            "id": str(r.id),
+                            "content": r.content,
+                            "score": r.score,
+                            "metadata": r.metadata,
+                        }
+                        for r in results
+                    ],
+                }
+            )
 
         except Exception as e:
             return create_failure_result(f"检索失败: {str(e)}")
@@ -346,7 +343,7 @@ class MemoryTool(BuiltinTool):
             return content
         return content[:500] + "..."
 
-    async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """导入文本知识，自动将 agent_config_id 注入为标签"""
         content = inputs.get("content")
         name = inputs.get("name")
@@ -362,13 +359,6 @@ class MemoryTool(BuiltinTool):
         if not name:
             return create_failure_result("缺少 name 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit:
-        # 问题根因: _knowledge_importer 从未被注入（全代码库无 set_knowledge_importer 调用方），
-        #   导致 import_text/import_file/update/delete 全部返回"知识导入器未初始化"。
-        # 修复方案: 无 dedicated importer 时，降级使用 MemoryService 的 store_knowledge，
-        #   避免任务因工具不可用而失败。
-        # 影响范围: 记忆工具的 import/update/delete 操作。
-        # 修复日期: 2026-06-06
         if self._knowledge_importer:
             try:
                 result = await self._knowledge_importer.import_text(
@@ -385,8 +375,7 @@ class MemoryTool(BuiltinTool):
                             "file_path": result.file_path,
                         }
                     )
-                else:
-                    return create_failure_result(result.error or "导入失败")
+                return create_failure_result(result.error or "导入失败")
             except Exception as e:
                 return create_failure_result(f"导入文本失败: {str(e)}")
 
@@ -414,7 +403,7 @@ class MemoryTool(BuiltinTool):
         except Exception as e:
             return create_failure_result(f"导入文本失败（MemoryService降级）: {str(e)}")
 
-    async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """导入文件知识，自动将 agent_config_id 注入为标签"""
         file_path = inputs.get("file_path")
         tags = list(inputs.get("tags", []))
@@ -426,7 +415,6 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
         if self._knowledge_importer:
             try:
                 result = await self._knowledge_importer.import_file(
@@ -442,17 +430,16 @@ class MemoryTool(BuiltinTool):
                             "file_path": result.file_path,
                         }
                     )
-                else:
-                    return create_failure_result(result.error or "导入失败")
+                return create_failure_result(result.error or "导入失败")
             except Exception as e:
                 return create_failure_result(f"导入文件失败: {str(e)}")
 
         # 降级：读取文件内容后用 MemoryService 存储
-        import os as _os
-        if not _os.path.exists(file_path):
+        import os as _os  # noqa: PLC0415
+        if not _os.path.exists(file_path):  # noqa: PTH110
             return create_failure_result(f"文件不存在: {file_path}")
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 file_content = f.read()
         except Exception as e:
             return create_failure_result(f"读取文件失败: {str(e)}")
@@ -464,7 +451,7 @@ class MemoryTool(BuiltinTool):
                 content=file_content,
                 source_type="file_import",
                 extra_data={
-                    "name": _os.path.basename(file_path),
+                    "name": _os.path.basename(file_path),  # noqa: PTH119
                     "tags": tags,
                     "source_file": file_path,
                 },
@@ -484,7 +471,7 @@ class MemoryTool(BuiltinTool):
         except Exception as e:
             return create_failure_result(f"导入文件失败（MemoryService降级）: {str(e)}")
 
-    async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """更新知识"""
         file_path = inputs.get("file_path")
         new_content = inputs.get("content")
@@ -493,7 +480,6 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
         if self._knowledge_importer:
             try:
                 result = await self._knowledge_importer.update_knowledge(
@@ -510,8 +496,7 @@ class MemoryTool(BuiltinTool):
                             "file_path": result.file_path,
                         }
                     )
-                else:
-                    return create_failure_result(result.error or "更新失败")
+                return create_failure_result(result.error or "更新失败")
             except Exception as e:
                 return create_failure_result(f"更新失败: {str(e)}")
 
@@ -556,7 +541,6 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
         if self._knowledge_importer:
             try:
                 success = await self._knowledge_importer.delete_knowledge(

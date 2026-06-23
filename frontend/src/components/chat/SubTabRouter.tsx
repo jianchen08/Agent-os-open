@@ -135,7 +135,14 @@ export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
    * 路由失败 fallback
    *
    * 如果消息无法路由到目标 Tab（Tab 不存在或已关闭），
-   * 将消息显示在主 Tab，并发出通知提示用户。
+   * 仅通知用户路由失败，不再写入主 Tab 避免跨管道污染。
+   *
+   * BUG-FIX-fix_20260617_remove_cross_pipeline_fallback:
+   * 问题根因: 原代码将无法路由的消息写入主 Tab，子管道消息污染主管道，
+   *           且主管道可能已有该消息（通过其他路径），造成重复渲染。
+   * 修复方案: 删除 addMessageToTab 调用，仅保留用户通知。
+   * 影响范围: 消息路由失败处理
+   * 修复日期: 2026-06-17
    */
   const fallbackToMainTab = useCallback(
     (message: any, targetTabId: string) => {
@@ -144,24 +151,18 @@ export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
 
       reportedFailures.current.add(failureKey)
 
-      // 写入主 Tab
-      const mainTab = tabs.find((t) => t.agentLevel === 1)
-      if (mainTab) {
-        addMessageToTab(mainTab.id, message)
-      }
-
-      // 发出路由失败通知
+      // 发出路由失败通知，不再写入主 Tab（避免跨管道污染和重复）
       addNotification({
         category: 'alert',
         title: '消息路由失败',
-        message: `一条消息未能路由到目标标签页 (${targetTabId})，已显示在主标签页。`,
-        priority: 'normal',
+        message: `一条消息未能路由到目标标签页 (${targetTabId})，请刷新页面或切换到该标签查看。`,
+        priority: 'high',
         isBlocking: false,
         autoDismissMs: 8000,
         sourceId: targetTabId,
       })
     },
-    [tabs, addMessageToTab, addNotification],
+    [addNotification],
   )
 
   /**

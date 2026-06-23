@@ -187,42 +187,41 @@ class TriggerStateManager:
                     "last_execution_time"
                 ),
             }
-        else:
-            all_states = list(self._trigger_states.values())
+        all_states = list(self._trigger_states.values())
 
-            total_triggers = len(all_states)
-            active_triggers = sum(
-                1 for s in all_states if s.get("state") == LifecycleStatus.ACTIVE.value
-            )
-            error_triggers = sum(
-                1 for s in all_states if s.get("state") == LifecycleStatus.ERROR.value
-            )
-            inactive_triggers = sum(
-                1
-                for s in all_states
-                if s.get("state") == LifecycleStatus.INACTIVE.value
-            )
+        total_triggers = len(all_states)
+        active_triggers = sum(
+            1 for s in all_states if s.get("state") == LifecycleStatus.ACTIVE.value
+        )
+        error_triggers = sum(
+            1 for s in all_states if s.get("state") == LifecycleStatus.ERROR.value
+        )
+        inactive_triggers = sum(
+            1
+            for s in all_states
+            if s.get("state") == LifecycleStatus.INACTIVE.value
+        )
 
-            total_executions = sum(s.get("execution_count", 0) for s in all_states)
+        total_executions = sum(s.get("execution_count", 0) for s in all_states)
 
-            execution_times = [
-                s.get("metadata", {}).get("last_execution_time", 0)
-                for s in all_states
-                if s.get("metadata", {}).get("last_execution_time")
-            ]
-            avg_execution_time = (
-                sum(execution_times) / len(execution_times) if execution_times else 0
-            )
+        execution_times = [
+            s.get("metadata", {}).get("last_execution_time", 0)
+            for s in all_states
+            if s.get("metadata", {}).get("last_execution_time")
+        ]
+        avg_execution_time = (
+            sum(execution_times) / len(execution_times) if execution_times else 0
+        )
 
-            return {
-                "total_triggers": total_triggers,
-                "active_triggers": active_triggers,
-                "error_triggers": error_triggers,
-                "inactive_triggers": inactive_triggers,
-                "total_executions": total_executions,
-                "avg_execution_time": round(avg_execution_time, 3),
-                "generated_at": datetime.utcnow().isoformat(),
-            }
+        return {
+            "total_triggers": total_triggers,
+            "active_triggers": active_triggers,
+            "error_triggers": error_triggers,
+            "inactive_triggers": inactive_triggers,
+            "total_executions": total_executions,
+            "avg_execution_time": round(avg_execution_time, 3),
+            "generated_at": datetime.utcnow().isoformat(),
+        }
 
     async def cleanup_old_states(self, days: int = 30):
         """
@@ -295,7 +294,7 @@ class TriggerStateManager:
         Returns:
             内存使用统计
         """
-        import sys
+        import sys  # noqa: PLC0415
 
         total_states = len(self._trigger_states)
         memory_size = sys.getsizeof(self._trigger_states)

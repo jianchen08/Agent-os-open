@@ -46,7 +46,7 @@ class WindowInfoData:
     """
 
     title: str = ""
-    processName: str = ""
+    processName: str = ""  # noqa: N815
     x: int = 0
     y: int = 0
     width: int = 0
@@ -95,14 +95,23 @@ def _from_standard_format(raw: dict[str, Any]) -> WindowInfoData:
     """从标准 Electron WindowInfo 格式解析。
 
     字段：title, processName, x, y, width, height
+    兼容旧格式：app → processName, bounds → x/y/width/height
     """
+    process_name = raw.get("processName") or raw.get("app", "")
+    # 旧格式 bounds 嵌套：bounds.x / bounds.y / bounds.width / bounds.height
+    bounds = raw.get("bounds", {})
+    x = raw.get("x", bounds.get("x", 0))
+    y = raw.get("y", bounds.get("y", 0))
+    width = raw.get("width", bounds.get("width", 0))
+    height = raw.get("height", bounds.get("height", 0))
+
     return WindowInfoData(
         title=str(raw.get("title", "")),
-        processName=str(raw.get("processName", "")),
-        x=_safe_int(raw.get("x", 0)),
-        y=_safe_int(raw.get("y", 0)),
-        width=_safe_int(raw.get("width", 0)),
-        height=_safe_int(raw.get("height", 0)),
+        processName=str(process_name),
+        x=_safe_int(x),
+        y=_safe_int(y),
+        width=_safe_int(width),
+        height=_safe_int(height),
     )
 
 

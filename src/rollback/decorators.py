@@ -140,7 +140,7 @@ async def _capture_file_state(path_str: str) -> dict[str, Any] | None:
                 "modified": stat.st_mtime,
             }
 
-        elif path.is_dir():
+        if path.is_dir():
             return {
                 "exists": True,
                 "is_file": False,

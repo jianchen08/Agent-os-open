@@ -22,7 +22,6 @@ Output 插件按 priority 升序执行：
 | 2 | ErrorCheckPlugin | 系统级 | `end`, `next_llm` | Core 错误分析 + 可重试判断 |
 | 3 | TaskEvaluationPlugin | 系统级 | `end`, `next_llm` | 任务评估（完成指示/工具结果/评估指标） |
 | 4 | DuplicateCheckPlugin | 系统级 | `end` | 工具调用重复 + 输出内容重复 |
-| 5 | WaitForResultPlugin | 系统级（M11a） | — | 轮询等待子管道结果 |
 | 5 | FireAndForgetPlugin | 系统级（M11a） | — | 即发即忘，不等待子管道结果 |
 | 5 | EventCallbackPlugin | 系统级（M11a） | — | 事件驱动挂起等待 |
 | 6 | PendingToolsOutput | 系统级 | `next_tool` | 待执行工具（M3 已有） |
@@ -33,28 +32,12 @@ Output 插件按 priority 升序执行：
 
 ### 委派等待策略（M11a）
 
-跨管道路由后，父管道需要决定如何处理子管道的结果。三种策略互斥，由管道配置决定使用哪个：
+跨管道路由后，父管道需要决定如何处理子管道的结果。两种策略互斥，由管道配置决定使用哪个：
 
 | 策略 | 等待方式 | State 影响 | 适用场景 |
 |------|---------|-----------|---------|
-| WaitForResultPlugin | 轮询 registry.get_result() | 回写 DELEGATION_RESULT + DELEGATION_SCORE，超时设 DELEGATION_ERROR | 需要子管道结果才能继续 |
 | FireAndForgetPlugin | 不等待 | 无状态更新 | 不关心子管道结果 |
 | EventCallbackPlugin | 设 ENDED=True + WAIT_FOR | 管道挂起，外部恢复 | 异步事件恢复场景 |
-
-### WaitForResultPlugin 执行流程
-
-```
-execute(ctx)
-  → 检查 state[ROUTED_TO]
-  → 无 → 返回空 OutputResult
-  → 有 → 循环轮询 registry.get_result(routed_to)
-        → 有结果 → 回写 DELEGATION_RESULT + DELEGATION_SCORE
-        → 超时 → 设 DELEGATION_ERROR
-```
-
-- poll_interval 控制轮询间隔（默认 0.1s）
-- timeout 控制最大等待时间（默认 300s）
-- 结果中的 `score` 或 `delegation_score` 字段自动提取到 DELEGATION_SCORE
 
 ### EventCallbackPlugin 执行流程
 
@@ -78,7 +61,6 @@ execute(ctx)
 | ErrorCheckPlugin | `execution_status`, `error_analysis` | 无 |
 | TaskEvaluationPlugin | `evaluation.*` | 无 |
 | DuplicateCheckPlugin | `router.duplicate_count`, `router.repetitive_count` | 无 |
-| WaitForResultPlugin | DELEGATION_RESULT, DELEGATION_SCORE, DELEGATION_ERROR | PipelineRegistry |
 | FireAndForgetPlugin | — | 无 |
 | EventCallbackPlugin | ENDED, WAIT_FOR | EventBus |
 | PendingToolsOutput | — | 无 |
@@ -97,7 +79,6 @@ execute(ctx)
 | `error_check.py` | `ErrorCheckPlugin` | 错误检查 — Core 错误分析 + 可重试判断 |
 | `task_evaluation.py` | `TaskEvaluationPlugin` | 任务评估 — 完成指示/工具结果/评估指标 |
 | `duplicate_check.py` | `DuplicateCheckPlugin` | 重复检查 — 工具调用重复 + 输出内容重复 |
-| `wait_for_result.py` | `WaitForResultPlugin` | 轮询等待策略（M11a） |
 | `fire_and_forget.py` | `FireAndForgetPlugin` | 即发即忘策略（M11a） |
 | `event_callback.py` | `EventCallbackPlugin` | 事件驱动挂起策略（M11a） |
 | `pending_tools.py` | `PendingToolsOutput` | 待执行工具（M3 已有，next_tool 信号） |
@@ -108,16 +89,6 @@ execute(ctx)
 | `__init__.py` | — | 模块入口 |
 
 ### 委派策略插件接口详情
-
-#### WaitForResultPlugin
-
-| 属性/方法 | 类型 | 说明 |
-|----------|------|------|
-| `name` | `str` | "wait_for_result" |
-| `priority` | `int` | 5 |
-| `route_signals` | `list[str]` | []（关注所有信号） |
-| `__init__(registry, poll_interval=0.1, timeout=300.0)` | — | 构造函数 |
-| `execute(ctx)` | `async → OutputResult` | 轮询等待逻辑 |
 
 #### FireAndForgetPlugin
 
@@ -141,6 +112,5 @@ execute(ctx)
 ### 依赖
 
 - `pipeline.plugin`（IOutputPlugin, OutputResult, PluginContext）
-- `pipeline.types`（StateKeys）— WaitForResultPlugin, EventCallbackPlugin
-- `pipeline.registry`（PipelineRegistry）— WaitForResultPlugin
+- `pipeline.types`（StateKeys）— EventCallbackPlugin
 - `pipeline.event_bus`（EventBus）— EventCallbackPlugin

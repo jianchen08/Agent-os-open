@@ -258,7 +258,8 @@ class TestPipelineEngineFallbackGuard:
             max_iterations=1,
         )
 
-        with pytest.raises(ValueError, match="allow_default_fallback"):
+        # engine.py 已全面 fail-closed：错误消息为"禁止静默回退到默认 Agent"
+        with pytest.raises(ValueError, match="禁止静默回退到默认 Agent"):
             await engine.run(
                 user_input="测试",
                 agent_config=None,
@@ -266,49 +267,35 @@ class TestPipelineEngineFallbackGuard:
             )
 
     async def test_allows_none_agent_config_when_fallback_enabled(self):
-        """allow_default_fallback=True + agent_config=None → 正常回退（不报错）。"""
+        """全面禁止降级：即使 allow_default_fallback=True 也必须拒绝 None。
+
+        engine.py 不再认 allow_default_fallback=True 作为放行降级的开关，
+        agent_config=None 一律抛 ValueError。此用例锁定该行为（原"允许回退"
+        语义已被 P0-安全 禁止静默降级策略覆盖）。
+        """
         from pipeline.engine import PipelineEngine
-        from pipeline.types import RouteSignal, StateKeys
 
-        mock_core = MagicMock()
-        mock_core.execute = AsyncMock(return_value={StateKeys.RAW_RESULT: "ok"})
-        mock_core.error_policy = MagicMock()
-
-        mock_output = MagicMock()
-        mock_output.execute = AsyncMock(return_value=MagicMock(
-            state_updates={}, route_signal=RouteSignal(route_type="end", reason="test"),
-        ))
-        mock_output.error_policy = MagicMock()
-        mock_output.name = "test_output"
-        mock_output.priority = 50
-        mock_output.route_signals = []
-
+        mock_input_route = MagicMock()
+        mock_input_route.resolve = MagicMock(return_value=([], "core"))
+        mock_output_route = MagicMock()
+        mock_output_route.arbitrate = MagicMock(
+            return_value=MagicMock(route_type="end", reason="test")
+        )
         mock_registry = MagicMock()
-        mock_registry.get_core = MagicMock(return_value=mock_core)
-        mock_registry.get_output_plugins = MagicMock(return_value=[mock_output])
+        mock_registry.get_core = MagicMock(return_value=None)
+        mock_registry.get_output_plugins = MagicMock(return_value=[])
         mock_registry.get = MagicMock(return_value=None)
-        mock_registry._plugins = {}
-
-        from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
-
-        input_table = InputRouteTable([
-            InputRouteEntry(name="default", condition="True", target="core", plugins=[], priority=10),
-        ])
-        output_table = OutputRouteTable([
-            OutputRouteEntry(route_type="end", condition="True", priority=1),
-        ])
 
         engine = PipelineEngine(
-            input_route_table=input_table,
-            output_route_table=output_table,
+            input_route_table=mock_input_route,
+            output_route_table=mock_output_route,
             plugin_registry=mock_registry,
             max_iterations=1,
         )
 
-        state = await engine.run(
-            user_input="测试",
-            agent_config=None,
-            allow_default_fallback=True,
-        )
-
-        assert state.get(StateKeys.ENDED) is True
+        with pytest.raises(ValueError, match="禁止静默回退到默认 Agent"):
+            await engine.run(
+                user_input="测试",
+                agent_config=None,
+                allow_default_fallback=True,
+            )

@@ -101,8 +101,8 @@ class TestIsolationDecider:
             )
 
     @pytest.mark.asyncio
-    async def test_force_host_when_all_unavailable_allow(self):
-        """所有级别不可用但 fallback=allow 时强制使用 host。"""
+    async def test_all_unavailable_fallback_allow_raises_error(self):
+        """P0-安全: 所有级别不可用 + fallback=allow 时也必须报错，不允许静默降级。"""
         loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
         decider = IsolationDecider(policy_loader=loader)
         loader._default = ToolIsolationPolicy(
@@ -111,11 +111,11 @@ class TestIsolationDecider:
         )
 
         available = {IsolationLevel.HOST: False, IsolationLevel.CONTAINER: False}
-        policy = await decider.decide(
-            tool_name="flexible_tool",
-            available_providers=available,
-        )
-        assert policy.isolation == IsolationLevel.HOST
+        with pytest.raises(IsolationError, match="无可用降级目标"):
+            await decider.decide(
+                tool_name="flexible_tool",
+                available_providers=available,
+            )
 
     def test_resolve_by_tool_name(self):
         """精确工具名匹配。"""

@@ -9,13 +9,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from channels.api.deps import require_auth
 from config.models import get_model_config_loader
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/thinking-mode", tags=["思考模式"])
+router = APIRouter(
+    prefix="/api/v1/thinking-mode",
+    tags=["思考模式"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 def _get_llm_data() -> dict[str, Any]:

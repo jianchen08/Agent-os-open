@@ -16,18 +16,19 @@ ComfyUI 服务层
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from connectors.creative.comfyui import ComfyUIConnector
-from tools.interfaces import ProgressCallback
 from services.comfyui_history import (
     GenerationHistory,
     GenerationRecord,
     GenerationStatus,
 )
+from tools.interfaces import ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +120,10 @@ class ComfyUIService:
         if self._connector is None:
             return {"connected": False, "message": "未连接"}
 
-        for task_id, task in list(self._running_tasks.items()):
+        for _task_id, task in list(self._running_tasks.items()):
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         self._running_tasks.clear()
         self._task_progress.clear()
 
@@ -237,7 +236,7 @@ class ComfyUIService:
             按分类的模型列表
         """
         connector = self._require_connector()
-        from connectors.types import ConnectorAction
+        from connectors.types import ConnectorAction  # noqa: PLC0415
 
         action = ConnectorAction(action_type="list_models")
         result = await connector.execute_action(action)
@@ -280,7 +279,7 @@ class ComfyUIService:
 
         workflow = self._build_workflow(template, prompt, negative_prompt, kwargs)
 
-        from connectors.types import ConnectorAction
+        from connectors.types import ConnectorAction  # noqa: PLC0415
 
         action = ConnectorAction(
             action_type="generate_image",
@@ -319,7 +318,7 @@ class ComfyUIService:
         try:
             while True:
                 await asyncio.sleep(1.0)
-                from connectors.types import ConnectorAction
+                from connectors.types import ConnectorAction  # noqa: PLC0415
 
                 action = ConnectorAction(
                     action_type="get_progress",
@@ -337,8 +336,9 @@ class ComfyUIService:
 
                 self._task_progress[record_id] = result.output.get("progress", 0)
 
-            from connectors.types import ConnectorAction
-            from datetime import datetime, timezone
+            from datetime import datetime, timezone  # noqa: PLC0415
+
+            from connectors.types import ConnectorAction  # noqa: PLC0415
 
             action = ConnectorAction(
                 action_type="get_result",
@@ -437,13 +437,11 @@ class ComfyUIService:
             return False
 
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         if self._connector and self._connector.is_connected:
-            from connectors.types import ConnectorAction
+            from connectors.types import ConnectorAction  # noqa: PLC0415
 
             action = ConnectorAction(action_type="interrupt_task")
             await self._connector.execute_action(action)
@@ -471,7 +469,7 @@ _global_service: ComfyUIService | None = None
 
 def get_comfyui_service() -> ComfyUIService:
     """获取全局 ComfyUI 服务单例。"""
-    global _global_service
+    global _global_service  # noqa: PLW0603
     if _global_service is None:
         _global_service = ComfyUIService()
     return _global_service

@@ -78,24 +78,22 @@ class UnitConverter:
         # 从摄氏度转换到目标单位
         if to_unit == 'C':
             return celsius
-        elif to_unit == 'F':
+        if to_unit == 'F':
             return celsius * 9 / 5 + 32
-        elif to_unit == 'K':
+        if to_unit == 'K':
             return celsius + 273.15
-        else:
-            raise ValueError(f"不支持的温度单位: {to_unit}")
+        raise ValueError(f"不支持的温度单位: {to_unit}")
 
     @classmethod
     def convert(cls, value: float, from_unit: str, to_unit: str, category: str = 'length') -> float:
         """通用转换接口"""
         if category == 'length':
             return cls.convert_length(value, from_unit, to_unit)
-        elif category == 'weight':
+        if category == 'weight':
             return cls.convert_weight(value, from_unit, to_unit)
-        elif category == 'temperature':
+        if category == 'temperature':
             return cls.convert_temperature(value, from_unit, to_unit)
-        else:
-            raise ValueError(f"不支持的类别: {category}")
+        raise ValueError(f"不支持的类别: {category}")
 
 
 def main():

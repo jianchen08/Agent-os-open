@@ -1,4 +1,4 @@
-"""多模态能力注册表测试 - 验证新增模型能力注册正确"""
+"""多模态能力注册表测试 - 验证配置驱动的能力查询"""
 
 import pytest
 
@@ -6,72 +6,124 @@ from multimodal.capabilities import ModelCapabilityRegistry
 from multimodal.adapter import OpenAIVisionAdapter, DefaultAdapter
 
 
-class TestGLM5Capabilities:
-    """GLM-5 系列模型能力"""
+# 测试用 LLM 配置（镜像 llm.yaml 中实际配置的多模态模型）
+TEST_LLM_CONFIG = {
+    "models": {
+        "glm-5.2": {
+            "provider": "zhipu_coding",
+            "model_name": "glm-5.2",
+            "display_name": "GLM-5.2",
+            "context_window": 200000,
+            "multimodal": {
+                "supports_image": True,
+                "supported_image_types": [
+                    "image/jpeg", "image/png", "image/gif", "image/webp",
+                ],
+                "max_image_size": 20 * 1024 * 1024,
+            },
+        },
+        "minimax-m3": {
+            "provider": "minimax",
+            "model_name": "MiniMax-M3",
+            "display_name": "MiniMax-M3",
+            "multimodal": {
+                "supports_image": True,
+                "supports_video": True,
+                "supported_image_types": [
+                    "image/jpeg", "image/png", "image/gif", "image/webp",
+                ],
+                "max_image_size": 20 * 1024 * 1024,
+                "max_video_size": 100 * 1024 * 1024,
+            },
+        },
+        "deepseek-v4-flash": {
+            "provider": "deepseek",
+            "model_name": "deepseek-v4-flash",
+            "display_name": "DeepSeek V4 Flash",
+        },
+    },
+    "defaults": {"chat": "glm-5.2"},
+}
 
-    def test_glm51_supports_image(self):
-        cap = ModelCapabilityRegistry.get_capability("glm-5.1")
+
+@pytest.fixture
+def llm_config(monkeypatch):
+    """注入测试用 LLM 配置，隔离真实文件加载。"""
+    from src.config import llm_config as lc_module
+    mgr = lc_module.LLMConfigManager(config=TEST_LLM_CONFIG)
+    monkeypatch.setattr(lc_module, "get_llm_config", lambda: mgr)
+    return mgr
+
+
+class TestGLM52Capability:
+    """GLM-5.2 能力（从 llm.yaml multimodal 配置读取）"""
+
+    def test_supports_image(self, llm_config):
+        cap = ModelCapabilityRegistry.get_capability("glm-5.2")
         assert cap.supports_image is True
         assert "image/png" in cap.supported_image_types
         assert cap.max_image_size == 20 * 1024 * 1024
 
-    def test_glm5_turbo_supports_image(self):
-        cap = ModelCapabilityRegistry.get_capability("glm-5-turbo")
+    def test_multimodal_supported(self, llm_config):
+        assert ModelCapabilityRegistry.is_multimodal_supported("glm-5.2") is True
+
+    def test_no_video(self, llm_config):
+        cap = ModelCapabilityRegistry.get_capability("glm-5.2")
+        assert cap.supports_video is False
+
+
+class TestMiniMaxM3Capability:
+    """MiniMax-M3 支持 图片+视频，且 alias/model_name 双查都能命中"""
+
+    def test_supports_image_and_video_by_alias(self, llm_config):
+        cap = ModelCapabilityRegistry.get_capability("minimax-m3")
+        assert cap.supports_image is True
+        assert cap.supports_video is True
+        assert cap.max_video_size == 100 * 1024 * 1024
+
+    def test_lookup_by_model_name(self, llm_config):
+        """消费方可能传 model_name（MiniMax-M3）而非 alias（minimax-m3）"""
+        cap = ModelCapabilityRegistry.get_capability("MiniMax-M3")
         assert cap.supports_image is True
 
-    def test_glm51_multimodal_supported(self):
-        assert ModelCapabilityRegistry.is_multimodal_supported("glm-5.1") is True
-
-    def test_glm5_turbo_multimodal_supported(self):
-        assert ModelCapabilityRegistry.is_multimodal_supported("glm-5-turbo") is True
-
-    def test_glm51_provider_mapping(self):
-        adapter = ModelCapabilityRegistry.get_adapter_for_model("glm-5.1")
-        assert isinstance(adapter, OpenAIVisionAdapter)
-
-    def test_glm5_turbo_provider_mapping(self):
-        adapter = ModelCapabilityRegistry.get_adapter_for_model("glm-5-turbo")
-        assert isinstance(adapter, OpenAIVisionAdapter)
+    def test_multimodal_supported(self, llm_config):
+        assert ModelCapabilityRegistry.is_multimodal_supported("minimax-m3") is True
 
 
-class TestMiniMaxCapabilities:
-    """MiniMax M2.7 模型能力"""
+class TestDeepSeekNoImage:
+    """DeepSeek 未配 multimodal，默认不支持图片"""
 
-    def test_minimax_no_image(self):
-        cap = ModelCapabilityRegistry.get_capability("MiniMax-M2.7")
-        assert cap.supports_image is False
-        assert cap.supported_image_types == []
+    def test_not_multimodal(self, llm_config):
+        assert ModelCapabilityRegistry.is_multimodal_supported("deepseek-v4-flash") is False
 
-    def test_minimax_not_multimodal(self):
-        assert ModelCapabilityRegistry.is_multimodal_supported("MiniMax-M2.7") is False
-
-    def test_minimax_adapter_is_default(self):
-        adapter = ModelCapabilityRegistry.get_adapter("minimax")
-        assert isinstance(adapter, DefaultAdapter)
-
-
-class TestDeepSeekStillNoImage:
-    """DeepSeek 模型确认仍不支持图片"""
-
-    def test_deepseek_chat_no_image(self):
-        assert ModelCapabilityRegistry.is_multimodal_supported("deepseek-chat") is False
-
-    def test_deepseek_adapter_is_default(self):
+    def test_adapter_is_default(self, llm_config):
         adapter = ModelCapabilityRegistry.get_adapter("deepseek")
         assert isinstance(adapter, DefaultAdapter)
 
 
-class TestExistingModelsUnchanged:
-    """确认已有模型注册未被破坏"""
+class TestUnknownModel:
+    """未知模型回退默认空能力"""
 
-    @pytest.mark.parametrize("model", [
-        "gpt-4o", "claude-3-5-sonnet", "glm-4v", "gemini-1.5-pro",
-    ])
-    def test_still_supports_image(self, model):
-        assert ModelCapabilityRegistry.is_multimodal_supported(model) is True
-
-    def test_glm47_no_image(self):
-        assert ModelCapabilityRegistry.is_multimodal_supported("glm-4.7") is False
-
-    def test_unknown_model_defaults_no_image(self):
+    def test_not_multimodal(self, llm_config):
         assert ModelCapabilityRegistry.is_multimodal_supported("nonexistent-model") is False
+
+    def test_capability_defaults(self, llm_config):
+        cap = ModelCapabilityRegistry.get_capability("nonexistent-model")
+        assert cap.supports_image is False
+        assert cap.supported_image_types == []
+
+
+class TestAdapterForModel:
+    """get_adapter_for_model 通过 provider 映射到适配器"""
+
+    def test_glm52_adapter(self, llm_config, monkeypatch):
+        from src.llm import router_factory
+        monkeypatch.setattr(router_factory, "get_provider_for_model", lambda m: "zhipu_coding")
+        adapter = ModelCapabilityRegistry.get_adapter_for_model("glm-5.2")
+        assert isinstance(adapter, OpenAIVisionAdapter)
+
+    def test_deepseek_adapter(self, llm_config, monkeypatch):
+        from src.llm import router_factory
+        monkeypatch.setattr(router_factory, "get_provider_for_model", lambda m: "deepseek")
+        adapter = ModelCapabilityRegistry.get_adapter_for_model("deepseek-v4-flash")
+        assert isinstance(adapter, DefaultAdapter)

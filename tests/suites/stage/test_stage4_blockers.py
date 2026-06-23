@@ -479,7 +479,7 @@ class TestSecurityCheckEnhanced:
                 ],
             },
             config={},
-            _services={"human_interaction": mock_svc},
+            _services={"human_interaction_service": mock_svc},
         )
         result = await plugin.execute(ctx)
         assert result.state_updates["security.decision"]["allowed"] is True
@@ -506,7 +506,7 @@ class TestSecurityCheckEnhanced:
                 ],
             },
             config={},
-            _services={"human_interaction": mock_svc},
+            _services={"human_interaction_service": mock_svc},
         )
         result = await plugin.execute(ctx)
         assert result.state_updates["security.decision"]["allowed"] is False

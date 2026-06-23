@@ -31,7 +31,6 @@ Agent OS 的插件体系，按层级分为三大类：
 ### 委派等待策略（M11a）
 
 跨管道路由后，管道间平权，等待策略由 Output 插件决定：
-- **WaitForResultPlugin**：轮询 registry.get_result()，适合需要子管道结果的场景
 - **FireAndForgetPlugin**：不等待，适合不关心子管道结果的场景
 - **EventCallbackPlugin**：事件驱动挂起，适合异步事件恢复场景
 

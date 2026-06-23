@@ -362,10 +362,10 @@ class TestV4CascadeCleanup:
 
     @pytest.mark.asyncio
     async def test_delete_task_cascades_subtasks(self, task_service):
-        """V4-1.2: 有子任务的父任务执行软删除，数据保留。
+        """V4-1.2: 非容器父任务删除时硬删除并级联清理子任务。
 
-        代码分析结论（src/tasks/service.py L661-667）：
-        有子任务时标记 soft_deleted=True，不调用 _storage.delete。
+        delete_task 统一委托 hard_delete_task（判定口径 task_scope=container），
+        非 container 的父任务即使有子任务也走硬删除 + 级联清理，与工具层一致。
         """
         parent = await task_service.create_task("父任务")
         child1 = await task_service.create_task(
@@ -381,10 +381,11 @@ class TestV4CascadeCleanup:
         result = await task_service.delete_task(parent.id)
         assert result is True
 
-        # 父任务应被软删除（数据保留）
-        p = task_service.get_task(parent.id)
-        assert p is not None
-        assert p.metadata.get("soft_deleted") is True
+        # 父任务被硬删除（不再软删除保留）
+        assert task_service.get_task(parent.id) is None
+        # 子任务被级联删除
+        assert task_service.get_task(child1.id) is None
+        assert task_service.get_task(child2.id) is None
 
     @pytest.mark.asyncio
     async def test_delete_task_no_children_hard_delete(self, task_service):

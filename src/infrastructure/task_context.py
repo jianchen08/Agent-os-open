@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -76,15 +77,11 @@ class TaskExecutionContext:
         清理已创建的工作空间 + 删除任务记录 + 重置状态。
         """
         if self.lifecycle and self.ws_meta:
-            try:
+            with contextlib.suppress(Exception):
                 self.lifecycle.on_task_failed(self.workspace, self.ws_meta)
-            except Exception:
-                pass
         if task_service and self.task_id:
-            try:
+            with contextlib.suppress(Exception):
                 task_service.hard_delete_sync(self.task_id)
-            except Exception:
-                pass
         self.cleanup()
 
     def set_terminal(self) -> None:

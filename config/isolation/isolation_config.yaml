@@ -20,6 +20,8 @@ workspace:
     - "src"
     - "config"
     - "tests"
+    - "frontend"
+    - "skills"
     - "pyproject.toml"
     - "package.json"
     - "Cargo.toml"
@@ -37,12 +39,19 @@ workspace:
     - ".pytest_cache"
     - ".mypy_cache"
     - ".tox"
+    - "data"
   large_file_threshold_mb: 50
+  # BUG-FIX-fix_20260611_isolation_data:
+  #   移除 "data" — data/ 包含运行时状态（会话映射、记忆、任务数据），
+  #   不应通过 junction/symlink 暴露给 worktree，否则 git add -A 会通过
+  #   链接跟踪 data/ 文件，后续合并操作会破坏运行时数据。
+  #   参考: reports/worktree_merge_api_store_investigation.md 问题 #1
   worktree_link_patterns:
     - "assets"
     - "node_modules"
+    - "frontend/node_modules"
+    - ".env"
     - "vendor"
-    - "data"
 
   scenario_detection:
     auto_detect: true
@@ -65,8 +74,8 @@ coordinator:
   # 全局开关
   enabled: true  # 启用隔离系统
 
-  # 优雅降级：隔离失败时自动降级到宿主机
-  enable_fallback: true
+  # P0-安全: 禁止隔离降级，Docker 不可用时直接报错
+  enable_fallback: false
 
   # 默认隔离级别
   default_level: container  # host | container
@@ -94,8 +103,8 @@ providers:
   # Cua 提供者
   cua:
     enabled: true
-    # 镜像配置（使用预装了依赖的镜像）
-    image: "agent-runtime:latest"
+    # 镜像配置（使用 AgentOS 自定义镜像，预装工具链）
+    image: "agentos:latest"
     # 资源限制（优化后）
     limits:
       memory: "512m"
@@ -103,8 +112,8 @@ providers:
 
 # 策略配置
 policy:
-  # 是否启用优雅降级
-  enable_fallback: true
+  # P0-安全: 禁止隔离降级，Docker 不可用时直接报错
+  enable_fallback: false
 
   # 自定义策略（覆盖默认策略）
   # 格式: task_type 或 operation_type: isolation_level

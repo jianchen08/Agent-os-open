@@ -112,7 +112,7 @@ class StopCheckPlugin(IOutputPlugin):
         pipeline_id = ctx.state.get("pipeline_id", "?")
         elapsed = time.monotonic() - self._start_time
         raw_tc_count = len(ctx.state.get(StateKeys.RAW_TOOL_CALLS, []))
-        logger.info(
+        logger.debug(
             "[%s] pipeline=%s iter=%d max_iter=%d elapsed=%.1f/%d "
             "raw_tool_calls=%d start_time=%.2f",
             self.name, pipeline_id, iteration,

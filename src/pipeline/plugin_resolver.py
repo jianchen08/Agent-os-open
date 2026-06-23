@@ -141,9 +141,6 @@ def apply_agent_plugin_configs(
 
     plugins_config = agent_config.plugins
     if not hasattr(plugins_config, "enabled") or not plugins_config.enabled:
-        # BUG-FIX-fix_20260515_parent_agent_level:
-        # 即使没有 plugins.enabled 配置，也需要确保 context_build 的
-        # agent_level 与 Agent 实际层级一致。
         if hasattr(agent_config, "level"):
             _ensure_context_build_level(plugin_registry, agent_config)
         return
@@ -178,13 +175,11 @@ def apply_agent_plugin_configs(
                 name,
             )
 
-    # BUG-FIX-fix_20260515_parent_agent_level:
-    # for 循环处理完显式配置后，确保 context_build 的 agent_level 正确。
     if hasattr(agent_config, "level"):
         _ensure_context_build_level(plugin_registry, agent_config)
 
 
-def apply_agent_model_override(
+def apply_agent_model_override(  # noqa: PLR0912,PLR0915
     plugin_registry: Any,
     agent_config: Any | None,
     services: dict[str, Any],
@@ -205,23 +200,19 @@ def apply_agent_model_override(
     if not agent_config or not hasattr(agent_config, "model_name"):
         return
 
-    # BUG-FIX-fix_20260530_config_not_take_effect:
-    # 清除所有 ModelConfigLoader 的 YAML 缓存，确保直接编辑文件也能生效。
-    # services 中可能有 model_loader，同时 get_model_config_loader() 单例
-    # 也有自己的 _llm_data 缓存，两者都需要清除。
     _ml = services.get("model_loader") if services else None
     if _ml and hasattr(_ml, "_llm_data"):
         _ml._llm_data = None
     try:
-        from config.models import get_model_config_loader
+        from config.models import get_model_config_loader  # noqa: PLC0415
         _global_loader = get_model_config_loader()
         _global_loader._llm_data = None
     except Exception:
         pass
 
-    # BUG-FIX-fix_20260530_config_not_take_effect:
-    # agent_config.model_name 是初始化时从 tier 解析的旧值，
-    # 运行中改了 YAML 后不会更新。所以有 model_tier 时必须重新解析。
+    # 清除 tier 缓存，确保配置变更实时生效
+    _tier_cache.clear()
+
     model_id = None
     if hasattr(agent_config, "model_tier") and agent_config.model_tier:
         model_id = resolve_tier(agent_config.model_tier, services)
@@ -236,20 +227,13 @@ def apply_agent_model_override(
     if llm_call is None:
         return
 
-    # BUG-FIX-fix_20260523_provider_mismatch:
-    # 问题根因: Router 模式下切换模型时，仅更新了 _model 和 _context_window，
-    # 未同步更新 _provider 和 _api_base。当 research_agent 指定 minimax-m2.7 时，
-    # _provider 仍为上一个模型的 zhipu_coding，导致：
-    #   1. normalize_messages_for_provider 使用错误的 provider 参数
-    #   2. MiniMax 专属的 system 消息修复逻辑被跳过
-    #   3. 日志中 provider/api_base 信息误导排查
-    # 修复方案: 使用 get_llm_core_config 获取完整模型配置，同步更新所有字段。
     if getattr(llm_call, "_use_router", False):
-        llm_call._model = model_id
+        # Router 模式：model_id 做路由标识，model_name 做上游真实模型名
+        llm_call._model_id = model_id
         _resolved_loader = services.get("model_loader") if services else None
         if _resolved_loader is None:
             try:
-                from config.models import get_model_config_loader
+                from config.models import get_model_config_loader  # noqa: PLC0415
                 _resolved_loader = get_model_config_loader()
             except Exception:
                 _resolved_loader = None
@@ -257,6 +241,7 @@ def apply_agent_model_override(
             llm_conf = _resolved_loader.get_llm_core_config(model_id)
             if llm_conf:
                 llm_call._provider = llm_conf.get("provider", llm_call._provider)
+                llm_call._model = llm_conf.get("model_name", llm_call._model)
                 llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
                 llm_call._context_window = llm_conf.get("context_window")
         logger.info(
@@ -275,7 +260,7 @@ def apply_agent_model_override(
 
     if model_loader is None:
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             model_loader = get_model_config_loader()
         except Exception:
@@ -295,6 +280,7 @@ def apply_agent_model_override(
     # 直接更新属性，无需重建插件实例
     if hasattr(llm_call, "_config") and isinstance(llm_call._config, dict):
         llm_call._config.update(llm_conf)
+    llm_call._model_id = model_id
     llm_call._model = llm_conf.get("model_name", model_id)
     llm_call._provider = llm_conf.get("provider", llm_call._provider)
     llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
@@ -326,7 +312,7 @@ def resolve_tier(tier: str, services: dict[str, Any]) -> str:
     Returns:
         对应的模型标识字符串，未找到返回空字符串
     """
-    global _tier_cache
+    global _tier_cache  # noqa: PLW0602
 
     if tier in _tier_cache:
         return _tier_cache[tier]
@@ -334,7 +320,7 @@ def resolve_tier(tier: str, services: dict[str, Any]) -> str:
     model_loader = services.get("model_loader") if services else None
     if model_loader is None:
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             model_loader = get_model_config_loader()
         except Exception:

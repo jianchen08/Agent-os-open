@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class PipelineConfig:
     """管道配置数据类。
 
-    描述一个管道的完整配置，供 PipelineRegistry 创建子管道实例时使用。
+    描述一个管道的完整配置，供配置管理和回滚使用。
 
     Attributes:
         pipeline_id: 管道唯一标识

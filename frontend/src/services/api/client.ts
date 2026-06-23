@@ -18,22 +18,39 @@ import type { ApiError, RefreshResponse } from '../../types/api'
 /**
  * 令牌刷新状态管理
  * 防止多个请求同时刷新令牌
+ *
+ * BUG-FIX-fix_20260622_refresh_misclassify_logout:
+ * 订阅回调签名改为 (token | null)，null 表示刷新失败。
+ * 刷新失败时也通知订阅者，避免等待的请求 Promise 永不 resolve 导致卡死。
+ * （原代码因"任何失败都 logout→整页刷新"掩盖了此问题，改不 logout 后需显式处理。）
  */
 let isRefreshing = false
-let refreshSubscribers: Array<(token: string) => void> = []
+let refreshSubscribers: Array<(token: string | null) => void> = []
 
 /**
  * 订阅令牌刷新完成事件
+ * @param callback 刷新成功传新 token，失败传 null
  */
-function subscribeTokenRefresh(callback: (token: string) => void): void {
+function subscribeTokenRefresh(callback: (token: string | null) => void): void {
   refreshSubscribers.push(callback)
 }
 
 /**
- * 通知所有订阅者令牌已刷新
+ * 通知所有订阅者令牌已刷新（成功）
  */
 function onTokenRefreshed(token: string): void {
   refreshSubscribers.forEach((callback) => callback(token))
+  refreshSubscribers = []
+}
+
+/**
+ * 通知所有订阅者令牌刷新失败
+ *
+ * BUG-FIX-fix_20260622_refresh_misclassify_logout:
+ * 让等待中的请求收到失败信号并 reject，避免 Promise 永不 resolve。
+ */
+function notifyRefreshFailed(): void {
+  refreshSubscribers.forEach((callback) => callback(null))
   refreshSubscribers = []
 }
 
@@ -45,6 +62,12 @@ function onTokenRefreshed(token: string): void {
  * 修复方案: 在清除认证前先销毁 GrowthLoop 停止轮询
  *
  * Requirements: 2.4
+ *
+ * BUG-FIX-fix_20260622_workspace_state_loss:
+ * 问题根因: 此函数仅清理认证相关 key，不应触碰任何工作区状态
+ *          （LAST_ACTIVE_SESSION / pipeline-messages / agent-tabs 等）。
+ *          认证失效≠工作区状态失效，重登后需恢复原视图。
+ * 修复方案: 显式约束只清 4 个认证 key，禁止在此扩展清理工作区状态。
  */
 async function clearAuthAndRedirect(): Promise<void> {
   // BUG-FIX-fix_20260507_002: await 销毁自生长闭环再清理认证
@@ -57,7 +80,8 @@ async function clearAuthAndRedirect(): Promise<void> {
     // 模块未加载过，忽略
   }
 
-  // 清除 localStorage 中的令牌和认证数据
+  // 仅清除认证相关的 4 个 key，禁止清理任何工作区状态
+  // （LAST_ACTIVE_SESSION / pipeline-messages / agent-tabs / layout-mode 等保留，供重登后恢复）
   localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
   localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
   localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
@@ -72,9 +96,32 @@ async function clearAuthAndRedirect(): Promise<void> {
   })
 
   // 重定向到登录页（如果不在登录页）
+  // 注意：window.location.href 是整页刷新，会丢失内存中的 zustand 状态。
+  // 此处仅在「真正认证失效」时才到达，故整页刷新可接受。
   if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
     window.location.href = '/login'
   }
+}
+
+/**
+ * 判断 token 刷新错误是否为「真正认证失效」
+ *
+ * BUG-FIX-fix_20260622_refresh_misclassify_logout:
+ * 问题根因: 原刷新逻辑把任何刷新失败（含网络断开/超时/CORS/5xx）一律视为
+ *          认证过期并强制 logout，导致网络抖动期间用户被误踢出。
+ * 修复方案: 只有当刷新请求被后端明确拒绝（HTTP 401/403）时，才视为认证失效；
+ *          其他情况（无 response 的网络错误、超时、5xx 服务端错误）视为暂时性故障，
+ *          不登出，保留旧 token 让上层 retry/后续请求继续尝试。
+ * 影响范围: client.ts 401 拦截器、authStore.refreshToken、initializeAuth
+ */
+function isDefinitelyAuthFailure(error: unknown): boolean {
+  // axios 错误对象：有 response 且状态码明确为 401/403 → 真认证失效
+  const status = (error as AxiosError)?.response?.status
+  if (status === 401 || status === 403) {
+    return true
+  }
+  // 其余情况（无 response 的网络错误、超时 ERR_NETWORK/ETIMEDOUT、5xx）→ 暂时性故障
+  return false
 }
 
 /**
@@ -152,16 +199,29 @@ apiClient.interceptors.response.use(
       const isRefreshTokenRequest = originalRequest.url?.includes('/auth/refresh')
 
       if (isRefreshTokenRequest) {
-        // refresh_token 已失效，这是正常的认证过期场景
-        // 静默处理，不报告错误，直接清除认证状态并重定向
-        await clearAuthAndRedirect()
+        // BUG-FIX-fix_20260622_refresh_misclassify_logout:
+        // 问题根因: 原逻辑对刷新请求的任何错误都立即 logout，但刷新请求也可能因
+        //          网络断开/超时/5xx 失败，此时并非认证失效，误登出会丢失用户工作上下文。
+        // 修复方案: 仅当后端明确返回 401/403（真认证失效）才 logout；
+        //          网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，不登出。
+        if (isDefinitelyAuthFailure(error)) {
+          // refresh_token 真正失效，这是正常的认证过期场景
+          // 静默处理，不报告错误，直接清除认证状态并重定向
+          await clearAuthAndRedirect()
+        }
         return Promise.reject(error)
       }
 
       // 如果正在刷新令牌，等待刷新完成
       if (isRefreshing) {
-        return new Promise((resolve) => {
-          subscribeTokenRefresh((token: string) => {
+        return new Promise((resolve, reject) => {
+          subscribeTokenRefresh((token: string | null) => {
+            // BUG-FIX-fix_20260622_refresh_misclassify_logout:
+            // token 为 null 表示刷新失败，reject 让上层处理（重试或报错），避免 Promise 永挂。
+            if (!token) {
+              reject(error)
+              return
+            }
             if (originalRequest.headers) {
               originalRequest.headers.Authorization = `Bearer ${token}`
             }
@@ -217,11 +277,28 @@ apiClient.interceptors.response.use(
           return Promise.reject(error)
         }
       } catch (refreshError) {
-        // token刷新失败，清除认证信息并重定向
-        // Requirements: 2.4
+        // BUG-FIX-fix_20260622_refresh_misclassify_logout:
+        // 问题根因: 原逻辑对刷新请求的任何错误都立即 logout，但刷新请求也可能因
+        //          网络断开/超时/5xx 失败，此时并非认证失效，误登出会丢失用户工作上下文。
+        // 修复方案: 仅当后端明确返回 401/403（真认证失效）才 logout；
+        //          网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，保留旧 token。
         isRefreshing = false
-        refreshSubscribers = []
-        await clearAuthAndRedirect()
+
+        if (isDefinitelyAuthFailure(refreshError)) {
+          // refresh_token 真正失效（后端明确拒绝），清除认证信息并重定向
+          notifyRefreshFailed()
+          await clearAuthAndRedirect()
+        } else {
+          // 网络错误/超时/5xx：暂性故障，不登出，通知等待的请求失败（让其 reject 重试）
+          // 保留旧 token，让后续用户操作或 retry 机制继续尝试
+          notifyRefreshFailed()
+          reportError(
+            '网络异常，认证刷新暂时失败，请检查网络后重试',
+            ErrorType.NETWORK,
+            ErrorSeverity.WARNING,
+            { showToast: false },
+          )
+        }
         return Promise.reject(refreshError)
       }
     }

@@ -243,14 +243,16 @@ class TestFormatMessages:
         ])
         assert "【工具 1: search】" in result
 
-    def test_长内容工具消息截断(self) -> None:
-        """长内容的工具消息应截断。"""
+    def test_长内容工具消息完整保留(self) -> None:
+        """长内容的工具消息应完整保留（预算控制由调用方按批次切分）。"""
         compressor = ContextCompressor()
         long_content = "a" * 500
         result = compressor._format_messages([
             {"role": "tool", "content": long_content, "name": "tool"},
         ])
-        assert "..." in result
+        # 不应在 200 字符处被截断，应完整保留全部 500 字符
+        assert "..." not in result
+        assert long_content in result
 
     def test_空内容跳过(self) -> None:
         """空内容的消息应跳过。"""

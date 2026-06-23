@@ -228,15 +228,6 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
   })
 
   const toolCallCount = sorted.filter((p) => p.type === 'tool_call').length
-  // DEBUG: 打印每个 tool part 的详细信息
-  if (toolCallCount > 0) {
-    const toolParts = sorted.filter((p) => p.type === 'tool_call')
-    console.warn(
-      `[RENDER_PARTS] msgId=%s totalToolParts=%d | %s`,
-      message.id?.slice(0, 16), toolCallCount,
-      toolParts.map((p: any) => `${p.name}/${p.callId?.slice(0, 12)}:${p.state}`).join(', '),
-    )
-  }
   let toolCallIndex = 0
 
   for (let i = 0; i < sorted.length; i++) {

@@ -19,6 +19,16 @@ from infrastructure.session.models import SessionModel
 
 _log = logging.getLogger(__name__)
 
+# 本模块的 store 单例在 import 时即创建默认用户，其密码依赖环境变量。
+# 不同入口 import 顺序不可控（可能早于 app_factory 的 load_dotenv），
+# 故在此主动确保 .env 已加载，避免读到空环境变量而无法创建 admin。
+try:
+    from config.models import _load_dotenv_once  # noqa: PLC0415
+
+    _load_dotenv_once()
+except Exception:  # noqa: BLE001
+    _log.warning("加载 .env 失败，默认用户可能无法正确创建", exc_info=True)
+
 
 def _now_iso() -> str:
     """返回当前 UTC 时间的 ISO 格式字符串。"""
@@ -69,31 +79,34 @@ class MemoryStore:
         self._messages: dict[str, list[dict[str, Any]]] = {}
         self._persist_dir = persist_dir
         self._persist_lock = threading.Lock()
-        # BUG-FIX-fix_20260525_store_data_loss:
-        # 问题根因: _load_persisted_data 解析 store.json 失败后，内存中 threads 为空，
-        #           后续 _save_persisted_data 将空数据写入文件，覆盖磁盘上的原始数据，导致会话全部丢失。
-        # 修复方案: 增加 _load_failed 标志位，加载失败时设为 True，_save_persisted_data 检查此标志并拒绝写入。
-        # 影响范围: store.json 文件损坏或格式异常时的数据保护。
-        # 修复日期: 2026-05-25
         self._load_failed: bool = False
 
         self._create_default_users()
         self._load_persisted_data()
 
     def _create_default_users(self) -> None:
-        """创建演示用户和管理员用户。"""
-        self.users["demo"] = {
-            "id": "demo_user_001",
-            "username": "demo",
-            "password": "demo12345",
-            "email": "demo@example.com",
-            "role": "user",
-            "created_at": _now_iso(),
-        }
+        """创建默认管理员用户。
+
+        仅当显式配置了环境变量 DEFAULT_ADMIN_PASSWORD 时才创建 admin 账号，
+        密码使用 bcrypt 哈希存储，从不保存明文。
+        未配置时不创建任何默认用户，避免落入无人知晓的兜底密码陷阱。
+        """
+        import os  # noqa: PLC0415
+
+        from src.auth.password import hash_password  # noqa: PLC0415
+
+        admin_password = os.environ.get("DEFAULT_ADMIN_PASSWORD")
+        if not admin_password:
+            _log.warning(
+                "未配置 DEFAULT_ADMIN_PASSWORD，不创建默认 admin 账号。"
+                "请在 .env 中设置 DEFAULT_ADMIN_PASSWORD 后重启，否则 admin 登录将失败（401）。"
+            )
+            return
+
         self.users["admin"] = {
             "id": "admin_user_001",
             "username": "admin",
-            "password": "admin123",
+            "password": hash_password(admin_password),
             "email": "admin@example.com",
             "role": "admin",
             "created_at": _now_iso(),
@@ -114,16 +127,16 @@ class MemoryStore:
         path = self._persist_file()
         if not path:
             return
-        if not os.path.exists(path):
-            persist_dir = os.path.dirname(path)
-            if os.path.exists(persist_dir) and os.listdir(persist_dir):
+        if not os.path.exists(path):  # noqa: PTH110
+            persist_dir = os.path.dirname(path)  # noqa: PTH120
+            if os.path.exists(persist_dir) and os.listdir(persist_dir):  # noqa: PTH110,PTH208
                 _log.warning(
                     "store.json 不存在但 persist_dir 非空，可能数据丢失: %s",
                     persist_dir)
                 self._load_failed = True
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             for tid, tdata in data.get("threads", {}).items():
                 self.threads[tid] = tdata
@@ -139,11 +152,6 @@ class MemoryStore:
                 )
         except Exception as e:
             _log.error("持久化数据加载失败: %s [path=%s]", e, path, exc_info=True)
-            # BUG-FIX-fix_20260525_store_data_loss:
-            # 问题根因: 加载失败后 _load_failed 未设置，_save_persisted_data 仍会写入空数据。
-            # 修复方案: 在 except 分支设置 _load_failed = True，阻止后续写入。
-            # 影响范围: store.json 解析异常时的数据保护。
-            # 修复日期: 2026-05-25
             self._load_failed = True
         else:
             # 加载成功，清除失败标志
@@ -157,12 +165,6 @@ class MemoryStore:
         只持久化 threads 数据。SessionModel 在加载时从 thread 字段自动派生。
         消息数据由管道执行记录（YAML）独立管理。
         """
-        # BUG-FIX-fix_20260525_store_data_loss:
-        # 问题根因: 加载失败后内存 threads 为空，_save_persisted_data 仍将空数据写入文件，
-        #           覆盖磁盘上尚存的原始数据，导致所有会话记录丢失。
-        # 修复方案: 检查 _load_failed 标志，若加载曾失败则拒绝写入，防止覆盖。
-        # 影响范围: 所有触发持久化的操作（创建/更新/删除线程等）。
-        # 修复日期: 2026-05-25
         if self._load_failed:
             _log.error("持久化数据加载曾失败，禁止写入以防止覆盖旧数据。请手动检查 store.json 是否损坏。")
             return
@@ -172,30 +174,23 @@ class MemoryStore:
             return
         with self._persist_lock:
             try:
-                # BUG-FIX-fix_20260525_store_data_loss:
-                # 问题根因: 写入 store.json 过程中若发生异常（如磁盘满、进程崩溃），
-                #           可能导致文件损坏或变为空文件，且无可恢复的备份。
-                # 修复方案: 每次写入前将旧的 store.json 备份为 store.json.bak，
-                #           确保即使写入失败也能从备份恢复。
-                # 影响范围: 所有持久化写入操作。
-                # 修复日期: 2026-05-25
-                if path and os.path.exists(path):
+                if path and os.path.exists(path):  # noqa: PTH110
                     backup_path = path + ".bak"
                     try:
-                        import shutil
+                        import shutil  # noqa: PLC0415
                         shutil.copy2(path, backup_path)
                     except Exception:
                         _log.warning("备份 store.json 失败，继续写入")
 
                 data = {"threads": self.threads}
-                os.makedirs(os.path.dirname(path), exist_ok=True)
+                os.makedirs(os.path.dirname(path), exist_ok=True)  # noqa: PTH103,PTH120
                 tmp_path = path + ".tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                if os.path.exists(path):
-                    os.replace(tmp_path, path)
+                if os.path.exists(path):  # noqa: PTH110
+                    os.replace(tmp_path, path)  # noqa: PTH105
                 else:
-                    os.rename(tmp_path, path)
+                    os.rename(tmp_path, path)  # noqa: PTH104
             except Exception as e:
                 _log.warning("持久化保存失败: %s [path=%s]", e, path)
 
@@ -252,9 +247,11 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """创建新用户并存入内存。
 
+        密码使用 bcrypt 哈希存储，从不保存明文。
+
         Args:
             username: 用户名
-            password: 密码
+            password: 明文密码（将被哈希）
             email: 可选邮箱
 
         Returns:
@@ -266,11 +263,13 @@ class MemoryStore:
         if username in self.users:
             raise ValueError(f"用户名 '{username}' 已存在")
 
+        from src.auth.password import hash_password  # noqa: PLC0415
+
         user_id = uuid.uuid4().hex[:12]
         user = {
             "id": user_id,
             "username": username,
-            "password": password,
+            "password": hash_password(password),
             "email": email,
             "created_at": _now_iso(),
         }
@@ -541,13 +540,6 @@ class MemoryStore:
 
 
 # 模块级单例
-# BUG-FIX-fix_chat_history_lost_on_restart:
-# 问题根因: MemoryStore 未传入 persist_dir，导致启动时不加载 data/api_store/store.json，
-#           重启后所有线程和会话数据丢失，前端读取不到历史会话记录。
-# 修复方案: 传入 persist_dir 指向 data/api_store/，使 _load_persisted_data() 在初始化时
-#           自动加载 store.json 中持久化的线程数据。
-# 影响范围: 启动后会话列表为空、历史消息不可加载。
-# 修复日期: 2026-05-20
 store = MemoryStore(
     persist_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "api_store"),
 )

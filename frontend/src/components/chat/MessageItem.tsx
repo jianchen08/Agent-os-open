@@ -7,6 +7,7 @@
 
 import { Bell, Bot, Check, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -375,10 +376,28 @@ export const MessageItem = ({
 
               if (isUser) {
                 const userContent = renderContext.displayContent || message.content
-                if (!userContent) return null
+                const userAttachments = message.attachments || []
+                // 兼容两种字段命名：前端 Attachment.type 和后端持久化的 mime_type
+                const getAttMime = (att: { type?: string; mime_type?: string }) =>
+                  att.type || att.mime_type || ''
+                const imageAttachments = userAttachments
+                  .filter((att) => getAttMime(att).startsWith('image/'))
+                  .map((att, idx) => ({
+                    id: att.id || `img-${idx}`,
+                    url: att.url,
+                    title: att.name || '图片',
+                  }))
+                if (!userContent && imageAttachments.length === 0) return null
                 return (
                   <div className={bubbleCls} style={bubbleStyle}>
-                    <div className="whitespace-pre-wrap break-words text-sm">{userContent}</div>
+                    {userContent && (
+                      <div className="whitespace-pre-wrap break-words text-sm">{userContent}</div>
+                    )}
+                    {imageAttachments.length > 0 && (
+                      <div className="mt-2">
+                        <ImageGallery images={imageAttachments} columns={2} />
+                      </div>
+                    )}
                   </div>
                 )
               }

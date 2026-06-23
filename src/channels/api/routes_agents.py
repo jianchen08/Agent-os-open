@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -19,31 +19,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Agent 配置"])
 
-# 模块级缓存：惰性创建并加载 Agent 注册表
-_agent_registry: Any | None = None
-_registry_loaded: bool = False
-
 
 def _get_agent_registry() -> Any:
-    """惰性获取或创建 Agent 注册表，并从 config/agents/ 加载配置。
+    """获取全局 Agent 注册表单例。
+
+    通过 get_global_agent_registry_sync() 获取，配置从 config/agents/ 加载，
+    热重载由 PluginHotReloader 统一处理。
 
     Returns:
         AgentRegistry 实例，加载失败则返回 None
     """
-    global _agent_registry, _registry_loaded
-    if _registry_loaded:
-        return _agent_registry
-    _registry_loaded = True
     try:
-        from agents.registry import AgentRegistry
-        _agent_registry = AgentRegistry()
-        config_dir = Path("config/agents")
-        if config_dir.exists():
-            count = _agent_registry.load_directory(config_dir)
-            logger.info("从 %s 加载了 %d 个 Agent 配置", config_dir, count)
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+        return get_global_agent_registry_sync()
     except Exception as exc:
         logger.warning("Agent 注册表初始化失败: %s", exc)
-    return _agent_registry
+        return None
 
 
 def _config_to_response(cfg: Any) -> AgentResponse:
@@ -102,7 +93,7 @@ def list_agents(
     if category:
         configs = [c for c in configs if c.category == category]
     if level:
-        from agents.types import AgentLevel
+        from agents.types import AgentLevel  # noqa: PLC0415
         try:
             level_enum = AgentLevel(level)
             configs = [c for c in configs if c.level == level_enum]

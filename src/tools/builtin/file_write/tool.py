@@ -77,7 +77,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         return True, ""
 
     def _resolve_and_check(self, path_str: str) -> tuple[Path | None, str | None]:
-        """解析路径并执行 workspace 白名单检查。
+        """解析路径并执行统一的写权限检查。
 
         Returns:
             (resolved_path, error_message)
@@ -86,17 +86,11 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         """
         resolved = self.resolve_path(path_str)
 
-        # workspace 白名单：解析后的路径必须在 workspace 内
-        # 也允许绝对路径写入（向后兼容），但对相对路径穿越严格限制
-        original = Path(path_str)
-        if not original.is_absolute():
-            try:
-                resolved.relative_to(self._workspace.resolve())
-            except ValueError:
-                return None, (
-                    f"路径解析后超出 workspace 范围: "
-                    f"{resolved} 不在 {self._workspace.resolve()} 内"
-                )
+        # 统一写权限检查（按 agent 层级 + permission_policies 声明决策）
+        agent_level = getattr(self, "_agent_level", None)
+        ok, err = self.check_path_allowed(str(resolved), "write", agent_level)
+        if not ok:
+            return None, f"写权限拒绝: {err}"
 
         # 可疑路径 warning（不阻止，仅记录日志）
         self._warn_suspicious_path(path_str, resolved)
@@ -136,7 +130,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
     @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
-        from tools.types import ToolLevel
+        from tools.types import ToolLevel  # noqa: PLC0415
 
         return Tool(
             name="file_write",
@@ -197,12 +191,19 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
             category=ToolCategory.FILE,
             level=ToolLevel.USER,
             tags=["file", "edit", "write", "replace", "insert", "delete"],
-            injected_params=["workspace"],
+            injected_params=["workspace", "parent_agent_level"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行工具"""
         self._init_workspace(inputs)
+
+        # 解析 agent 层级供统一路径校验使用
+        raw_level = inputs.get("parent_agent_level", 1)
+        try:
+            self._agent_level = int(str(raw_level).upper().lstrip("L"))
+        except (ValueError, TypeError):
+            self._agent_level = 1
 
         # ---- 路径安全预检（所有 action 共享） ----
         path_str = inputs.get("path", "")
@@ -218,19 +219,18 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
         if action == "write":
             return await self._write(inputs)
-        elif action == "search_replace":
+        if action == "search_replace":
             return await self._search_replace(inputs)
-        elif action == "insert":
+        if action == "insert":
             return await self._insert(inputs)
-        elif action == "delete_lines":
+        if action == "delete_lines":
             return await self._delete_lines(inputs)
-        elif action == "append":
+        if action == "append":
             return await self._append(inputs)
-        else:
-            return create_failure_result(
-                error=f"不支持的操作: {action}",
-                error_code="INVALID_ACTION",
-            )
+        return create_failure_result(
+            error=f"不支持的操作: {action}",
+            error_code="INVALID_ACTION",
+        )
 
     def _create_backup(self, path: Path) -> Path | None:
         """创建备份文件"""
@@ -258,7 +258,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         except Exception:
             # 清理临时文件
             try:
-                import os
+                import os  # noqa: PLC0415
 
                 os.close(fd)
                 if Path(temp_path).exists():
@@ -267,7 +267,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 pass
             raise
 
-    async def _write(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _write(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911,PLR0912
         """写入操作"""
         try:
             path_str = inputs.get("path")
@@ -393,7 +393,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="WRITE_FAILED",
             )
 
-    async def _search_replace(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _search_replace(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """搜索替换操作"""
         try:
             path_str = inputs.get("path")
@@ -480,7 +480,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="SEARCH_REPLACE_FAILED",
             )
 
-    async def _insert(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _insert(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """插入操作"""
         try:
             path_str = inputs.get("path")
@@ -572,7 +572,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="INSERT_FAILED",
             )
 
-    async def _delete_lines(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _delete_lines(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911,PLR0912
         """删除行操作"""
         try:
             path_str = inputs.get("path")
@@ -680,7 +680,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="DELETE_FAILED",
             )
 
-    async def _append(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _append(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """追加操作"""
         try:
             path_str = inputs.get("path")

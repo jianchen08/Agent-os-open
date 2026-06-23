@@ -4,15 +4,15 @@
 优先使用 IsolationDecider 从 isolation_policy.yaml 决策隔离级别，
 task metadata 可覆盖决策结果。
 
-HOST 模式安全审批：
-- 决策为 host 执行后，调用 ApprovalDecisionEngine 判断是否需要审批
-- 危险工具（file_write、bash_execute 等）弹出 human_interaction 让用户确认
-- 只读工具（file_read、搜索等）免审批白名单
-- 用户拒绝则标记 blocked=True，阻断执行
+职责边界（SRP）：
+- 只管"执行环境"决策（container / host / denied）
+- 不做审批（审批归 security_check 插件）
+- 不写 security.decision（仅 security_check 写）
+- blocked 信号通过 isolation.blocked 表达
 
 State 命名空间：
     - execution_contexts : 各工具调用的执行上下文列表
-    - security.decision  : 安全决策（被阻止时设置）
+    - isolation.blocked   : 被策略阻止时设置（供路由拦截）
 """
 
 from __future__ import annotations
@@ -20,11 +20,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from isolation.decider import IsolationDecider
+from isolation.types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
-from isolation.decider import IsolationDecider
-from isolation.approval import ApprovalDecisionEngine, ApprovalContext
-from isolation.types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +39,7 @@ class IsolationGuard(IInputPlugin):
     2. IsolationDecider 基于 isolation_policy.yaml 策略决策
     3. Docker 不可用时根据策略的 fallback 字段降级
 
-    HOST 模式审批：
-    4. 决策为 host 后，ApprovalDecisionEngine 判断是否需要用户审批
-    5. 危险工具 → human_interaction 请求用户确认
-    6. 用户拒绝 → blocked=True
-
-    优先级：25（在参数注入之前，尽早决定执行环境）
+    优先级：40（在 level_guard 之后，security_check 之前）
     错误策略：SKIP（隔离决策失败不应阻断管道）
     """
 
@@ -62,7 +56,12 @@ class IsolationGuard(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
-        self._docker_available = self._config.get("docker_available", False)
+        # Docker 可用性：优先用配置，未配置则同步检测（避免永远默认 False）
+        if "docker_available" in self._config:
+            self._docker_available = self._config["docker_available"]
+        else:
+            # 启动时真正检测 Docker，不依赖外部注入
+            self._docker_available = self._detect_docker()
         if not self._docker_available:
             logger.warning(
                 "[%s] docker_available=False, tool isolation will be degraded to host execution",
@@ -70,8 +69,28 @@ class IsolationGuard(IInputPlugin):
             )
         self._force_host = self._config.get("force_host", False)
         self._decider = IsolationDecider()
-        self._approval_engine = ApprovalDecisionEngine()
         self._enabled_by_agent: bool = True
+
+    @staticmethod
+    def _detect_docker() -> bool:
+        """同步检测 Docker 是否可用（CLI 存在 + daemon 运行）。
+
+        用 subprocess.run 替代 asyncio subprocess，避免 Windows 静默失败。
+        """
+        import shutil  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
+        if not shutil.which("docker"):
+            return False
+        try:
+            # 用 docker version 替代 docker info（info 在某些 Docker Desktop 配置下会卡 stdin）
+            result = subprocess.run(  # noqa: PLW1510
+                ["docker", "version", "--format", "{{.Server.Version}}"],
+                capture_output=True,
+                timeout=15,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     @property
     def name(self) -> str:
@@ -81,14 +100,13 @@ class IsolationGuard(IInputPlugin):
     @property
     def priority(self) -> int:
         """插件执行优先级。"""
-        return self._config.get("priority", 25)
+        return self._config.get("priority", 40)
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """执行隔离环境决策。
 
         遍历当前管道状态中的工具调用列表，
-        为每个工具调用决定隔离级别和执行上下文，
-        并在 HOST 模式下进行安全审批检查。
+        为每个工具调用决定隔离级别和执行上下文。
 
         Args:
             ctx: 插件执行上下文
@@ -114,28 +132,19 @@ class IsolationGuard(IInputPlugin):
         execution_contexts = []
         for tc in tool_calls:
             tool_name = tc.get("name", "")
-            tool_args = tc.get("args", tc.get("arguments", {}))
-            context = await self._decide_isolation_with_approval(
-                tool_name, tool_args, ctx
-            )
+            context = self._decide_isolation(tool_name, ctx)
             execution_contexts.append(context)
 
         state_updates: dict[str, Any] = {
             "execution_contexts": execution_contexts,
         }
 
-        # BUG-FIX-fix_20260506_bash_security: 检测被策略阻止的工具调用
-        # 问题根因: fallback:deny 时仍降级到 host 执行，仅记录 warning 日志
-        # 修复方案: 被阻止时设置 security.decision 为 blocked，复用现有安全机制阻断执行
-        # 影响范围: bash_execute 等配置了 fallback:deny 的工具
+        # 被策略阻止的工具写入 isolation.blocked，供路由拦截
         blocked_tools = [c for c in execution_contexts if c.get("blocked")]
         if blocked_tools:
             tool_names = ", ".join(c["tool_name"] for c in blocked_tools)
-            state_updates["security.decision"] = {
-                "allowed": False,
-                "reason": f"隔离策略阻止或审批被拒绝: {tool_names}",
-                "tool": blocked_tools[0]["tool_name"],
-            }
+            state_updates["isolation.blocked"] = True
+            state_updates["isolation.block_reason"] = f"隔离策略阻止: {tool_names}"
             logger.warning(
                 "[IsolationGuard] 阻止工具执行 | tools=%s",
                 tool_names,
@@ -143,181 +152,14 @@ class IsolationGuard(IInputPlugin):
 
         return PluginResult(state_updates=state_updates)
 
-    async def _decide_isolation_with_approval(
-        self,
-        tool_name: str,
-        tool_args: dict[str, Any] | str,
-        ctx: PluginContext,
-    ) -> dict[str, Any]:
-        """决定工具的隔离级别，并在 HOST 模式下进行安全审批。
-
-        流程：
-        1. 调用 _decide_isolation 决定隔离级别
-        2. 如果 provider=host，调用 ApprovalDecisionEngine 检查是否需要审批
-        3. 如果需要审批，通过 human_interaction_service 请求用户确认
-        4. 用户拒绝或审批服务不可用时，按降级策略处理
-
-        Args:
-            tool_name: 工具名称
-            tool_args: 工具调用参数
-            ctx: 插件执行上下文
-
-        Returns:
-            执行上下文字典，可能包含 blocked=True
-        """
-        # 第一步：基础隔离决策
-        exec_context = self._decide_isolation(tool_name, ctx)
-
-        # 非 host 模式或已阻止的，直接返回
-        if exec_context.get("provider") != "host" or exec_context.get("blocked"):
-            return exec_context
-
-        # 第二步：HOST 模式安全审批
-        # 构建 tool_args 的标准化形式（可能是 str 或 dict）
-        if isinstance(tool_args, str):
-            import json
-            try:
-                tool_args = json.loads(tool_args)
-            except (json.JSONDecodeError, TypeError):
-                tool_args = {}
-
-        approval_ctx = ApprovalContext(
-            tool_name=tool_name,
-            inputs=tool_args if isinstance(tool_args, dict) else {},
-            isolation_level=IsolationLevel.HOST,
-            task_id=ctx.state.get(StateKeys.TASK_ID),
-        )
-
-        decision = await self._approval_engine.decide(approval_ctx)
-
-        # 更新上下文中的审批信息
-        exec_context["approval_decision"] = decision.decision_type
-        exec_context["approval_reason"] = decision.reason
-        exec_context["risk_score"] = decision.risk_score
-
-        if not decision.requires_approval:
-            logger.debug(
-                "[IsolationGuard] HOST 模式工具免审批 | tool=%s | reason=%s",
-                tool_name,
-                decision.reason,
-            )
-            return exec_context
-
-        # 第三步：需要审批 → 请求用户确认
-        approved = await self._request_user_approval(
-            tool_name, tool_args, decision, ctx
-        )
-
-        if approved:
-            exec_context["approval_status"] = "approved"
-            logger.info(
-                "[IsolationGuard] 用户已批准 HOST 模式危险工具 | tool=%s",
-                tool_name,
-            )
-            return exec_context
-        else:
-            exec_context["blocked"] = True
-            exec_context["block_reason"] = "user_denied"
-            exec_context["approval_status"] = "denied"
-            logger.warning(
-                "[IsolationGuard] 用户拒绝 HOST 模式危险工具 | tool=%s",
-                tool_name,
-            )
-            return exec_context
-
-    async def _request_user_approval(
-        self,
-        tool_name: str,
-        tool_args: dict[str, Any],
-        decision: Any,
-        ctx: PluginContext,
-    ) -> bool:
-        """通过 human_interaction_service 请求用户审批。
-
-        兼容 human_interaction_service 不可用的场景：
-        - 服务不可用时，按降级策略处理（危险工具默认拒绝）
-
-        Args:
-            tool_name: 工具名称
-            tool_args: 工具调用参数
-            decision: 审批决策
-            ctx: 插件执行上下文
-
-        Returns:
-            用户是否批准
-        """
-        try:
-            human_svc = ctx.get_service("human_interaction_service")
-        except (KeyError, AttributeError):
-            human_svc = None
-
-        if human_svc is None:
-            logger.warning(
-                "[IsolationGuard] human_interaction_service 不可用，"
-                "降级策略：危险工具默认拒绝 | tool=%s",
-                tool_name,
-            )
-            return False
-
-        try:
-            from human_interaction.models import Priority
-
-            # 构建审批描述
-            args_preview = ""
-            if isinstance(tool_args, dict):
-                cmd = tool_args.get("command") or tool_args.get("content") or tool_args.get("code")
-                if cmd:
-                    args_preview = str(cmd)[:200]
-
-            description = (
-                f"HOST 模式安全审批\n\n"
-                f"工具: {tool_name}\n"
-                f"风险等级: {decision.risk_score:.1f}\n"
-                f"风险因素: {', '.join(decision.risk_factors)}\n"
-                f"原因: {decision.reason}"
-            )
-            if args_preview:
-                description += f"\n\n操作内容预览:\n{args_preview}"
-
-            # 确定线程 ID
-            task_id = ctx.state.get(StateKeys.TASK_ID) or ""
-            session_id = ctx.state.get("session_id")
-
-            request_id = await human_svc.create_choice_request(
-                session_id=session_id or task_id,
-                thread_id=task_id,
-                tab_id="security_approval",
-                title=f"安全审批: {tool_name}",
-                description=description,
-                options=[
-                    {"id": "approve", "label": "批准执行", "description": "允许在 HOST 模式下执行此工具", "is_default": True},
-                    {"id": "deny", "label": "拒绝执行", "description": "阻止此工具执行", "is_destructive": True},
-                ],
-                timeout_seconds=120,
-                priority=Priority.HIGH if decision.risk_score >= 0.8 else Priority.NORMAL,
-                agent_id="isolation_guard",
-            )
-
-            response = await human_svc.wait_for_choice(request_id, timeout=120.0)
-
-            return response.get("response_type") == "approved"
-
-        except Exception as e:
-            logger.error(
-                "[IsolationGuard] 审批请求异常，降级为拒绝 | tool=%s | error=%s",
-                tool_name,
-                e,
-            )
-            return False
-
-    def _decide_isolation(self, tool_name: str, ctx: PluginContext) -> dict[str, Any]:
+    def _decide_isolation(self, tool_name: str, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """决定工具的隔离级别。
 
         规则（按优先级）：
-        1. 从 task metadata 读取 isolation_level 覆盖决策
-        2. 从 task metadata 读取 workspace 传入上下文
-        3. 使用 IsolationDecider 基于 isolation_policy.yaml 决策
-        4. Docker 不可用时根据策略 fallback 降级
+        1. 先查工具级 policy（isolation_policy.yaml）确定工具的隔离能力
+        2. task metadata 的 isolation_level 只允许降级（container→host），
+           不允许提升（host→container），避免把不支持容器的工具塞进容器
+        3. Docker 不可用时根据策略 fallback 降级
 
         Args:
             tool_name: 工具名称
@@ -330,43 +172,75 @@ class IsolationGuard(IInputPlugin):
         metadata_isolation = task_metadata.get("isolation_level")
         metadata_workspace = task_metadata.get("workspace")
 
+        # 先解析工具级 policy，作为决策基础
+        policy = self._decider.resolve(tool_name)
+        policy_isolation = policy.isolation
+
         if self._force_host:
+            # P0-安全: force_host 不能绕过 fallback:deny 策略
+            if policy.fallback == "deny" and policy_isolation == IsolationLevel.CONTAINER:
+                logger.warning(
+                    "[IsolationGuard] force_host 被策略阻止: "
+                    "工具 %s 要求容器隔离且禁止降级 | tool=%s",
+                    tool_name, tool_name,
+                )
+                return self._build_context(
+                    tool_name, "denied", "force_host_denied_by_policy",
+                    workspace=metadata_workspace,
+                    blocked=True,
+                )
             return self._build_context(
                 tool_name, "host", "force_host",
                 workspace=metadata_workspace,
             )
 
-        if metadata_isolation:
-            if metadata_isolation == "container" and self._docker_available:
-                return self._build_context(
-                    tool_name, "docker", "task_metadata",
-                    workspace=metadata_workspace,
-                )
-            if metadata_isolation == "container" and not self._docker_available:
+        # ── metadata 覆盖：只允许降级，不允许提升 ──
+        # policy 是 host 的工具（如 file_write/task_submit），即使 metadata
+        # 要求 container 也不路由到 docker（容器内没有工具代码，会报
+        # "[isolated] tool=xxx not supported in container"）。
+        if metadata_isolation and policy_isolation == IsolationLevel.CONTAINER:
+            # policy 允许容器的工具（如 bash_execute），metadata 可控制实际级别
+            if metadata_isolation == "container":
+                if self._docker_available:
+                    return self._build_context(
+                        tool_name, "docker", "task_metadata",
+                        workspace=metadata_workspace,
+                    )
+                # Docker 不可用时按 fallback 决策
+                if policy.fallback == "deny":
+                    logger.warning(
+                        "[IsolationGuard] metadata 要求容器但 Docker 不可用，"
+                        "策略禁止降级 | tool=%s",
+                        tool_name,
+                    )
+                    return self._build_context(
+                        tool_name, "denied", "task_metadata_fallback_denied",
+                        workspace=metadata_workspace,
+                        blocked=True,
+                    )
                 logger.info(
-                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，回退 host | tool=%s",
+                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，"
+                    "策略允许降级 | tool=%s",
                     tool_name,
                 )
                 return self._build_context(
                     tool_name, "host", "task_metadata_fallback",
                     workspace=metadata_workspace,
                 )
-            if metadata_isolation == "host":
-                return self._build_context(
-                    tool_name, "host", "task_metadata",
-                    workspace=metadata_workspace,
-                )
+            # metadata 强制 host → 降级
+            return self._build_context(
+                tool_name, "host", "task_metadata_downgrade",
+                workspace=metadata_workspace,
+            )
 
-        policy = self._decider.resolve(tool_name)
-        isolation = policy.isolation
-
-        if isolation.value == "container" and self._docker_available:
+        # ── 工具级 policy 决策（metadata 不适用或 policy 为 host）──
+        if policy_isolation == IsolationLevel.CONTAINER and self._docker_available:
             return self._build_context(
                 tool_name, "docker", "policy",
                 workspace=metadata_workspace,
             )
 
-        if isolation.value == "container" and not self._docker_available:
+        if policy_isolation == IsolationLevel.CONTAINER and not self._docker_available:
             if policy.fallback == "allow":
                 logger.info(
                     "[IsolationGuard] Docker 不可用，策略允许降级 | tool=%s",
@@ -397,7 +271,7 @@ class IsolationGuard(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        from pipeline.plugin import find_plugin_config
+        from pipeline.plugin import find_plugin_config  # noqa: PLC0415
 
         plugin_configs = ctx.state.get("plugin_configs", {})
         config = find_plugin_config("isolation_guard", plugin_configs)

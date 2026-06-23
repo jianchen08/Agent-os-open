@@ -111,12 +111,11 @@ class ToolCache(IInputPlugin):
                         self.name, cache_key[:12],
                     )
                     continue
-                else:
-                    del self._cache[cache_key]
-                    logger.debug(
-                        "[%s] Cache expired | key=%s",
-                        self.name, cache_key[:12],
-                    )
+                del self._cache[cache_key]
+                logger.debug(
+                    "[%s] Cache expired | key=%s",
+                    self.name, cache_key[:12],
+                )
 
             return PluginResult()
 

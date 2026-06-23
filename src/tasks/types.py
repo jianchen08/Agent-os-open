@@ -9,11 +9,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any
 
 from agents.types import AgentLevel
-from enum import IntEnum
 
 
 class TaskPriority(IntEnum):
@@ -32,20 +31,29 @@ class TaskStatus(Enum):
     7 种状态及其语义：
     - pending: 已创建，等待执行
     - running: 正在执行
-    - evaluating: 执行完成，正在评估
-    - completed: 评估通过，任务完成
-    - failed: 执行失败或评估不通过
-    - paused: 暂停执行
-    - cancelled: 用户主动取消，终态不可恢复
+    - evaluating: 评估中，任务正在评估执行结果
+    - stopped: 已停止（数据完好，可 continue 恢复；合并旧 suspended/cancelled）
+    - completed: 成功完成
+    - failed: 执行失败（可 continue 重试）
+    - timeout: 执行超时（可 continue 重试）
+
+    BUG-FIX-fix_20260607_missing_evaluating:
+    问题根因: TaskStatus 缺少 EVALUATING 状态，但 task_evaluate 工具、
+      child_task_guard 插件、task_recovery 等多处引用 TaskStatus.EVALUATING，
+      导致导入时 AttributeError，task_evaluate 工具无法注册，
+      LLM 无法调用评估，任务永远无法完成，最终被标记为"管道被中断"。
+    修复方案: 在 TaskStatus 中添加 EVALUATING 状态，同步更新状态转换规则。
+    影响范围: 所有使用 task_evaluate 工具的任务评估流程。
+    修复日期: 2026-06-07
     """
 
     PENDING = "pending"
     RUNNING = "running"
     EVALUATING = "evaluating"
+    STOPPED = "stopped"
     COMPLETED = "completed"
     FAILED = "failed"
-    SUSPENDED = "suspended"
-    CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
 
 
 @dataclass

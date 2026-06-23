@@ -21,7 +21,8 @@ Example::
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from channels.gateway.message_normalizer import MessageNormalizer
 from channels.gateway.session_bridge import SessionBridge
@@ -226,6 +227,13 @@ class ChannelGateway:
 
             # 通过适配器的 output_adapter 发送
             output_adapter = adapter.output_adapter
+            if output_adapter is None:
+                logger.error(
+                    "output_adapter 未初始化: channel=%s",
+                    response.channel_type,
+                )
+                return
+
             state = {
                 StateKeys.RAW_RESULT: response.content,
                 "_channel_user_id": "",

@@ -5,11 +5,13 @@
  * 主页包含完整的聊天界面：左侧会话列表 + 右侧聊天区域。
  */
 
-import { lazy, Suspense, useEffect, useState, useCallback } from 'react'
+import { lazy, Suspense, useEffect, useState, useCallback, useMemo } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { ChatContainer } from './components/chat/ChatContainer'
+import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
 import { AppHeader } from './components/layout/AppHeader'
 import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
+import { SessionEditModal } from './components/session/SessionEditModal'
 import { SessionList } from './components/session/SessionList'
 import { ROUTES } from './constants/routes'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
@@ -20,6 +22,8 @@ import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
+import { allocateNextSequence } from './services/websocket/streaming/handlers/utils'
+import { useAgentStore } from './stores/agentStore'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
 import { useInteractionStore } from './stores/interactionStore'
@@ -27,10 +31,10 @@ import { useLayoutModeStore } from './stores/layoutModeStore'
 import { usePipelineMessageStore } from './stores/pipelineMessageStore'
 import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
-import { useStreamingStore } from './stores/streamingStore'
 import { useUIStore } from './stores/uiStore'
 import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
+import type { Session } from './types'
 import type { ReactNode } from 'react'
 
 const ModulesSettingsPage = lazy(() =>
@@ -100,12 +104,52 @@ const PluginsSettingsPage = lazy(() =>
     default: m.PluginsSettingsPage,
   })),
 )
+const MemorySettingsPage = lazy(() =>
+  import('@/pages/settings/MemorySettingsPage').then((m) => ({
+    default: m.MemorySettingsPage,
+  })),
+)
+const IsolationSettingsPage = lazy(() =>
+  import('@/pages/settings/IsolationSettingsPage').then((m) => ({
+    default: m.IsolationSettingsPage,
+  })),
+)
+const SecuritySettingsPage = lazy(() =>
+  import('@/pages/settings/SecuritySettingsPage').then((m) => ({
+    default: m.SecuritySettingsPage,
+  })),
+)
+const EvaluationSettingsPage = lazy(() =>
+  import('@/pages/settings/EvaluationSettingsPage').then((m) => ({
+    default: m.EvaluationSettingsPage,
+  })),
+)
+const ExternalToolsSettingsPage = lazy(() =>
+  import('@/pages/settings/ExternalToolsSettingsPage').then((m) => ({
+    default: m.ExternalToolsSettingsPage,
+  })),
+)
+const PipelineSettingsPage = lazy(() =>
+  import('@/pages/settings/PipelineSettingsPage').then((m) => ({
+    default: m.PipelineSettingsPage,
+  })),
+)
+const ThemeSettingsPage = lazy(() =>
+  import('@/pages/settings/ThemeSettingsPage').then((m) => ({
+    default: m.ThemeSettingsPage,
+  })),
+)
 const TriggersPage = lazy(() =>
   import('@/pages/triggers/TriggersPage').then((m) => ({ default: m.TriggersPage })),
 )
 const KnowledgeBasePage = lazy(() =>
   import('@/pages/knowledge-base/KnowledgeBasePage').then((m) => ({
     default: m.KnowledgeBasePage,
+  })),
+)
+const GenericConfigRoute = lazy(() =>
+  import('@/pages/settings/GenericConfigRoute').then((m) => ({
+    default: m.GenericConfigRoute,
   })),
 )
 
@@ -147,7 +191,13 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
     return <Navigate to={ROUTES.LOGIN} replace />
   }
 
-  return children
+  return (
+    <>
+      {children}
+      {/* 全局交互浮层：在所有受保护页面中显示待处理交互 */}
+      <GlobalInteractionOverlay />
+    </>
+  )
 }
 
 // ============================================
@@ -215,24 +265,51 @@ function HomePage(): ReactNode {
   const toggleSessionStar = useSessionListStore((s) => s.toggleSessionStar)
   const toggleSessionPin = useSessionListStore((s) => s.toggleSessionPin)
   const renameSession = useSessionListStore((s) => s.renameSession)
+  const updateSessionAgent = useSessionListStore((s) => s.updateSessionAgent)
   const fetchSessions = useSessionListStore((s) => s.fetchSessions)
-  const stopStreamingForTab = useStreamingStore((s) => s.stopStreamingForTab)
 
   /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
 
-  /** 默认模型名 */
-  const [modelName, setModelName] = useState('glm-5.1')
+  /** 默认模型名（兜底，从配置 API 获取） */
+  const [defaultModel, setDefaultModel] = useState('')
 
-  // 加载默认模型配置
+  /**
+   * REQ-21: 模型名从当前会话绑定的 Agent 配置动态获取
+   *
+   * 优先级：当前会话 Agent 的 model > 配置默认模型
+   */
+  const agents = useAgentStore((s) => s.agents)
+  const fetchAgents = useAgentStore((s) => s.fetchAgents)
+
+  useEffect(() => {
+    fetchAgents().catch(() => {})
+  }, [fetchAgents])
+
+  // 兜底：加载默认模型配置
   useEffect(() => {
     fetch('/api/v1/config/llm/defaults')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.chat) setModelName(data.chat)
+        if (data?.chat) setDefaultModel(data.chat)
       })
       .catch(() => {})
   }, [])
+
+  const modelName = useMemo(() => {
+    if (activeSessionId) {
+      const session = sessions.find((s) => s.id === activeSessionId)
+      if (session?.agentId) {
+        const agent = agents.find(
+          (a) => a.id === session.agentId || a.configId === session.agentId,
+        )
+        if (agent?.model || agent?.config?.model) {
+          return agent.model || agent.config!.model!
+        }
+      }
+    }
+    return defaultModel
+  }, [activeSessionId, sessions, agents, defaultModel])
 
   /**
    * 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取）
@@ -342,17 +419,58 @@ function HomePage(): ReactNode {
       }
 
       const listStore = useSessionListStore.getState()
-      const sessions = listStore.sessions || []
+      const sessions = useSessionStore.getState().sessions || []
       const session = sessions.find(s => s.id === sid)
-      if (session && (!session.title || session.title.startsWith('新会话'))) {
-        listStore.renameSession(sid, params.content.slice(0, 50))
+      if (session && (session.title === '灵汐' || session.title === '新会话')) {
+        const title = params.content.replace(/\n/g, ' ').trim().slice(0, 30)
+        if (title) {
+          listStore.renameSession(sid, title)
+        }
       }
 
       const pipelineStore = usePipelineMessageStore.getState()
-      const activePipelineId = pipelineStore.activePipelineId
+      let activePipelineId = pipelineStore.activePipelineId
+
+      // BUG-FIX-fix_empty_pipeline_id_on_send:
+      // 问题根因: 页面刷新/会话恢复后 activePipelineId 可能为 null（zustand 内存 store 重置），
+      //   导致消息发送时 pipeline_id 为空，后端拒绝路由，用户体验为"发送消息没反应"。
+      // 修复方案: activePipelineId 为空时，从 session 数据中恢复 pipelineId 并激活管道。
+      // 影响范围: 消息发送链路
       if (!activePipelineId) {
-        console.warn('[handleSendMessage] activePipelineId is null, skipping')
-        return
+        const sessions = useSessionStore.getState().sessions
+        const session = sessions.find((s) => s.id === sid)
+        let fallbackPipelineId = session?.pipelineIds?.[0] || session?.activePipelineId
+        // sessionStore 中没有时，从 agentTabStore 持久化数据中获取 pipelineRunId
+        if (!fallbackPipelineId) {
+          try {
+            const raw = localStorage.getItem(`agent-tabs-${sid}`)
+            if (raw) {
+              const data = JSON.parse(raw)
+              const tab = data.tabs?.find((t: { agentLevel: number }) => t.agentLevel === 1) || data.tabs?.[0]
+              if (tab?.pipelineRunId) {
+                fallbackPipelineId = tab.pipelineRunId
+              }
+            }
+          } catch { /* 忽略解析错误 */ }
+        }
+        if (fallbackPipelineId) {
+          if (!pipelineStore.pipelines[fallbackPipelineId]) {
+            pipelineStore.registerPipeline({
+              pipelineId: fallbackPipelineId,
+              sessionId: sid,
+              level: 1,
+              tabId: null,
+              agentName: '',
+              status: 'idle',
+              parentId: null,
+              unreadCount: 0,
+            })
+          }
+          pipelineStore.activatePipeline(fallbackPipelineId)
+          activePipelineId = fallbackPipelineId
+        } else {
+          return
+        }
       }
 
       // BUG-FIX-fix_20260522_subtab_msg_to_main_pipeline:
@@ -363,13 +481,23 @@ function HomePage(): ReactNode {
 
       const existingMsgs = pipelineStore.getMessages(targetPipelineId)
 
+      const userMessageId = generateUUID()
       const userMessage: Message = {
-        id: generateUUID(),
+        id: userMessageId,
         sessionId: sid,
         role: 'user',
         content: params.content,
         timestamp: new Date().toISOString(),
+        sequence: allocateNextSequence(targetPipelineId),
+        status: 'completed',
+        clientMessageId: userMessageId,
         parentId: null,
+        attachments: params.attachments?.map((att) => ({
+          id: att.id,
+          name: att.name,
+          type: att.type,
+          url: att.url,
+        })),
       }
 
       pipelineStore.addMessage(targetPipelineId, userMessage)
@@ -390,8 +518,16 @@ function HomePage(): ReactNode {
           params.content,
           {
             enableThinking: params.enableThinking,
-            pipelineId: params.pipelineId,
+            pipelineId: targetPipelineId,
             clientMessageId: userMessage.id,
+            attachments: params.attachments?.map((att) => ({
+              file_id: att.id,
+              filename: att.name,
+              mime_type: att.type,
+              media_type: att.type?.startsWith('image/') ? 'image' : att.type?.startsWith('audio/') ? 'audio' : att.type?.startsWith('video/') ? 'video' : 'document',
+              size: att.size || 0,
+              url: att.url,
+            })),
           },
         )
       } catch {
@@ -412,10 +548,9 @@ function HomePage(): ReactNode {
     }
     if (currentPipelineId) {
       flushStreamChunkBuffer()
-      stopStreamingForTab(currentPipelineId)
       usePipelineMessageStore.getState().stopStreaming(currentPipelineId)
     }
-  }, [stopStreamingForTab])
+  }, [])
 
   /**
    * 登出并跳转到登录页
@@ -427,6 +562,34 @@ function HomePage(): ReactNode {
     await logout()
     navigate(ROUTES.LOGIN)
   }, [logout, navigate, disconnectWebSocket])
+
+  // ---- 编辑会话模态框（支持切换 Agent） ----
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
+
+  const handleEditSession = useCallback((session: Session) => {
+    setEditingSessionId(session.id)
+  }, [])
+
+  const handleCloseEditModal = useCallback(() => {
+    setEditingSessionId(null)
+  }, [])
+
+  const handleSaveEdit = useCallback(
+    async (sessionId: string, title: string, agentId: string | null) => {
+      try {
+        renameSession(sessionId, title)
+        await updateSessionAgent(sessionId, agentId)
+        setEditingSessionId(null)
+      } catch (error) {
+        console.error('保存编辑失败:', error)
+      }
+    },
+    [renameSession, updateSessionAgent],
+  )
+
+  const editingSession = editingSessionId
+    ? sessions.find((s) => s.id === editingSessionId) || null
+    : null
 
   // ---- Render sidebar content (shared between layouts) ----
   const sidebarContent = (
@@ -446,13 +609,17 @@ function HomePage(): ReactNode {
         deletingSessionIds={new Set<string>()}
         onSessionClick={handleSelectSession}
         onDeleteSession={(id) => { if (window.confirm('确定要删除此会话吗？')) deleteSession(id).catch(() => {}) }}
-        onEditSession={(session) => {
-          const newTitle = window.prompt('重命名会话', session.title)
-          if (newTitle?.trim()) renameSession(session.id, newTitle.trim())
-        }}
+        onEditSession={handleEditSession}
         onCopySession={(session) => copySession(session.id)}
         onStarSession={(id) => toggleSessionStar(id)}
         onPinSession={(id) => toggleSessionPin(id)}
+      />
+
+      <SessionEditModal
+        isOpen={!!editingSessionId}
+        session={editingSession}
+        onClose={handleCloseEditModal}
+        onSave={handleSaveEdit}
       />
     </>
   )
@@ -688,6 +855,86 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <PluginsSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_MEMORY,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <MemorySettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_ISOLATION,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <IsolationSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_SECURITY,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <SecuritySettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_EVALUATION,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <EvaluationSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_EXTERNAL_TOOLS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ExternalToolsSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_PIPELINE,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <PipelineSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_THEME,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ThemeSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: '/settings/generic/*',
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <GenericConfigRoute />
           </Suspense>
         </ProtectedRoute>
       ),

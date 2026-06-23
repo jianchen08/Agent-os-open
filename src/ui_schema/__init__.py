@@ -64,7 +64,7 @@ from ui_schema.types import (
     RenderingSpaceConfig,
     RenderingSpaceType,
 )
-from ui_schema.validator import SchemaValidator, VALID_WIDGET_TYPES
+from ui_schema.validator import VALID_WIDGET_TYPES, SchemaValidator
 
 __all__ = [
     # 解析/验证

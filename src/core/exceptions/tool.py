@@ -4,7 +4,7 @@ Tool 模块异常定义
 
 from typing import Any
 
-from src.core.exceptions.base import DomainException
+from core.exceptions.base import DomainException
 
 
 class ToolException(DomainException):
@@ -160,28 +160,31 @@ class MCPConnectionError(MCPException):
     """MCP 连接错误异常
 
     Attributes:
-        server_name: MCP 服务器名称
+        server_name: MCP 服务器名称（从 details 中提取，可能为空）
+        cause: 原始异常（可选）
     """
 
     def __init__(
         self,
-        server_name: str,
         message: str,
         details: dict[str, Any] | None = None,
+        cause: Exception | None = None,
     ):
         """初始化 MCP 连接错误异常
 
         Args:
-            server_name: MCP 服务器名称
-            message: 错误消息
-            details: 额外的错误详情（可选）
+            message: 错误消息（应包含服务器名等上下文）
+            details: 额外的错误详情（可选，通常包含 server/tool 等 key）
+            cause: 原始异常（可选）
         """
         error_details = details.copy() if details else {}
-        error_details["server_name"] = server_name
+        # 兼容历史 key：调用点用 "server"，旧定义用 "server_name"
+        server_name = error_details.get("server") or error_details.get("server_name")
         super().__init__(
-            f"MCP 服务器 '{server_name}' 连接失败: {message}",
+            message,
             code="MCP_CONNECTION_ERROR",
             details=error_details,
+            cause=cause,
         )
         self.server_name = server_name
 

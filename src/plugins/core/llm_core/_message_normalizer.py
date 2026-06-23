@@ -20,10 +20,11 @@ logger = logging.getLogger(__name__)
 
 # 增量扫描缓存：记录上次验证完成时各 provider 的消息数量
 # 使用 (provider, name, pipeline_id) 作为 key，避免不同管道共享缓存
+#
 _pairing_validated_len: dict[str, int] = {}
 
 
-def repair_json_string(s: str) -> str | None:
+def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
     """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。
 
     处理的常见问题：
@@ -172,7 +173,7 @@ def _is_valid_tool_call_id(tc_id: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
 
 
-def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
+def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  # noqa: PLR0912
     """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
 
     执行两项修正：
@@ -189,7 +190,7 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
     # id_remap: 记录非标准 id -> 新标准 id 的映射，用于同步修正 tool 消息
     id_remap: dict[str, str] = {}
 
-    for msg_idx, msg in enumerate(messages):
+    for _msg_idx, msg in enumerate(messages):
         if msg.get("role") != "assistant" or not msg.get("tool_calls"):
             continue
         raw_tcs = msg["tool_calls"]
@@ -246,10 +247,12 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
                 msg["tool_call_id"] = id_remap[tc_id]
 
 
-def _validate_tool_call_pairing(
+def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     messages: list[dict[str, Any]],
     provider: str,
     name: str,
+    *,
+    pipeline_id: str = "",
 ) -> list[dict[str, Any]]:
     """增量验证 tool_calls 和 tool result 的配对完整性。
 
@@ -267,13 +270,19 @@ def _validate_tool_call_pairing(
         messages: 消息列表
         provider: 提供商标识
         name: 插件名称
+        pipeline_id: 管道 ID，用于缓存隔离，避免并发管道共享缓存导致漏检
 
     Returns:
         修正后的消息列表
     """
-    cache_key = f"{provider}:{name}"
+    cache_key = f"{provider}:{name}:{pipeline_id}"
     cached_len = _pairing_validated_len.get(cache_key, 0)
     msg_count = len(messages)
+
+    # MiniMax 对配对极度严格，增量缓存一旦过期就漏检，触发 2013 错误。
+    # 每次全量扫描开销极小（线性遍历消息列表），但能根除缓存漂移风险。
+    if provider == "minimax":
+        cached_len = 0
 
     # 消息被截断/重建（数量比缓存少），重置缓存做全量扫描
     if msg_count < cached_len:
@@ -462,32 +471,53 @@ def _validate_tool_call_pairing(
     return final
 
 
-def reset_pairing_cache(provider: str = "", name: str = "") -> None:
+def reset_pairing_cache(
+    provider: str = "",
+    name: str = "",
+    *,
+    pipeline_id: str = "",
+) -> None:
     """重置 tool_call 配对验证缓存。
 
     当 LLM API 返回 tool_call 相关错误（如 tool call id invalid）时调用，
     强制下一次 normalize_messages_for_provider 执行全量扫描，而非增量扫描。
 
+    重置粒度（按参数精确度从粗到细）：
+    - 全部参数为空：清空所有缓存
+    - 仅 provider：清空该 provider 下所有缓存
+    - provider + name：清空该 provider:plugin 下所有 pipeline 的缓存
+    - provider + name + pipeline_id：精确清空单条缓存
+
     Args:
         provider: 提供商名称，空字符串表示重置所有
         name: 插件名称，空字符串表示重置指定 provider 的所有
+        pipeline_id: 管道 ID，空字符串表示重置该 provider:name 下所有管道
     """
     if not provider:
         _pairing_validated_len.clear()
         return
     if not name:
-        to_remove = [k for k in _pairing_validated_len if k.startswith(f"{provider}:")]
+        prefix = f"{provider}:"
+        to_remove = [k for k in _pairing_validated_len if k.startswith(prefix)]
         for k in to_remove:
             del _pairing_validated_len[k]
         return
-    _pairing_validated_len.pop(f"{provider}:{name}", None)
+    if not pipeline_id:
+        # pipeline_id 为空：清空该 provider:name 下所有管道（含历史无 pipeline_id 的 key）
+        prefix = f"{provider}:{name}:"
+        to_remove = [k for k in _pairing_validated_len if k.startswith(prefix)]
+        for k in to_remove:
+            del _pairing_validated_len[k]
+        return
+    _pairing_validated_len.pop(f"{provider}:{name}:{pipeline_id}", None)
 
 
-def normalize_messages_for_provider(
+def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     messages: list[dict[str, Any]],
     *,
     provider: str,
     name: str,
+    pipeline_id: str = "",
 ) -> list[dict[str, Any]]:
     """针对特定 LLM 提供商的消息格式修正。
 
@@ -505,6 +535,7 @@ def normalize_messages_for_provider(
         messages: 原始消息列表
         provider: LLM 提供商标识（如 openai、minimax）
         name: 插件名称，用于日志
+        pipeline_id: 管道 ID，用于配对校验缓存隔离
 
     Returns:
         修正后的消息列表
@@ -516,7 +547,9 @@ def normalize_messages_for_provider(
     # 确保每条 assistant(tool_calls) 后面跟齐所有 tool_call_id 对应的 tool 消息。
     # 消息历史在压缩/截断/执行记录恢复等场景下可能产生不配对消息，
     # 不同模型对此的容忍度不同，统一修复避免换模型时踩坑。
-    messages = _validate_tool_call_pairing(messages, provider, name)
+    messages = _validate_tool_call_pairing(
+        messages, provider, name, pipeline_id=pipeline_id,
+    )
 
     if provider != "minimax":
         return messages
@@ -633,18 +666,20 @@ def normalize_messages_for_provider(
             if intruders:
                 relocated_count += len(intruders)
                 result.extend(tool_group)
-                # 将非法消息转为 user 角色放在 tool 组之后
                 for intr in intruders:
                     if intr.get("role") not in ("user", "tool"):
                         moved = dict(intr)
                         moved["role"] = "user"
-                        moved["name"] = intr.get("role", "system")
+                        moved.pop("name", None)
+                        # 清除不兼容的字段
+                        moved.pop("tool_calls", None)
+                        moved.pop("tool_call_id", None)
                         result.append(moved)
                     else:
                         result.append(intr)
                 i = j
                 continue
-            elif tool_group:
+            if tool_group:
                 result.extend(tool_group)
                 i = j
                 continue

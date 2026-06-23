@@ -10,7 +10,7 @@ import asyncio
 import fnmatch
 import json
 import logging
-import os
+import os  # noqa: F401
 import re
 import subprocess
 from pathlib import Path
@@ -27,33 +27,15 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     ".workbuddy",
 })
 
-# 敏感系统目录黑名单（不允许搜索的路径前缀，小写规范形式）
-_SENSITIVE_DIRS_WINDOWS: tuple[str, ...] = (
-    "c:/windows",
-    "c:/windows/system32",
-    "c:/windows/syswow64",
-    "c:/program files",
-    "c:/program files (x86)",
-    "c:/$recycle.bin",
-    "c:/system volume information",
-)
-
-_SENSITIVE_DIRS_LINUX: tuple[str, ...] = (
-    "/etc",
-    "/proc",
-    "/sys",
-    "/boot",
-    "/dev",
-    "/run",
-)
-
 # 默认最大递归深度
 _DEFAULT_MAX_DEPTH: int = 20
 
-from tools.builtin.base import BuiltinTool
-from tools.builtin.shared import format_size
-from tools.builtin.workspace_aware import WorkspaceAwareMixin
-from tools.types import (
+# 敏感系统目录黑名单统一由共享模块维护（security_check 与本工具复用同一份）
+from isolation.sensitive_paths import is_sensitive_path  # noqa: E402
+from tools.builtin.base import BuiltinTool  # noqa: E402
+from tools.builtin.shared import format_size  # noqa: E402
+from tools.builtin.workspace_aware import WorkspaceAwareMixin  # noqa: E402
+from tools.types import (  # noqa: E402
     Tool,
     ToolCategory,
     ToolLevel,
@@ -80,20 +62,11 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
         """初始化搜索工具"""
         self.base_path = Path(base_path) if base_path else Path.cwd()
         self._original_base_path = self.base_path  # 永久保存构造时的原始路径
-        self.ripgrep_available = self._check_ripgrep()
-
-        if self.ripgrep_available:
-            logger.info("[Ripgrep] 检测到ripgrep，已启用高性能模式")
-        else:
-            logger.warning(
-                "[Search] ripgrep未安装，使用Python模式"
-                "（建议安装ripgrep以获得更好性能）"
-            )
 
     def _check_ripgrep(self) -> bool:
         """检查ripgrep是否可用"""
         try:
-            proc = subprocess.run(["rg", "--version"], capture_output=True, timeout=5)
+            proc = subprocess.run(["rg", "--version"], capture_output=True, timeout=5)  # noqa: PLW1510
             return proc.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
@@ -158,13 +131,20 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             category=ToolCategory.SEARCH,
             level=ToolLevel.USER,
             tags=["search", "code", "ripgrep", "performance", "filename"],
-            injected_params=["workspace"],
+            injected_params=["workspace", "parent_agent_level"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行搜索"""
         self._init_workspace(inputs)
         self.base_path = self._workspace
+
+        # 解析 agent 层级供后续校验使用
+        raw_level = inputs.get("parent_agent_level", 1)
+        try:
+            self._agent_level = int(str(raw_level).upper().lstrip("L"))
+        except (ValueError, TypeError):
+            self._agent_level = 1
 
         query = inputs.get("query")
         if not query:
@@ -183,16 +163,17 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
 
         if search_type == "filename":
             return await self._search_filename(inputs)
-        elif search_type == "text":
-            if self.ripgrep_available:
-                return await self._search_with_ripgrep(inputs)
-            else:
-                return await self._search_with_python(inputs)
-        else:
-            return create_failure_result(
-                error=f"不支持的搜索类型: {search_type}",
-                error_code="INVALID_SEARCH_TYPE",
-            )
+        if search_type == "text":
+            if not self._check_ripgrep():
+                return create_failure_result(
+                    error="ripgrep 未安装，无法执行搜索（请安装 ripgrep 后重试）",
+                    error_code="RIPGREP_NOT_AVAILABLE",
+                )
+            return await self._search_with_ripgrep(inputs)
+        return create_failure_result(
+            error=f"不支持的搜索类型: {search_type}",
+            error_code="INVALID_SEARCH_TYPE",
+        )
 
     def _validate_search_path(
         self, search_path_str: str, fallback_boundary: Path | None = None
@@ -200,52 +181,45 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
         """校验搜索路径安全性。
 
         返回 None 表示通过；返回 ToolResult 表示校验失败。
-        三层检查（按优先级）：
-        1. 路径存在性：给定路径必须真实存在
-        2. workspace 边界：强制限制在当前 workspace 内（或 fallback_boundary 内）
+
+        三道底线检查：
+        1. 权限范围：路径必须在当前策略允许的可读范围内（由 check_path_allowed 决策）
+        2. 路径存在性：给定路径必须真实存在
         3. 敏感系统目录黑名单：禁止搜索 OS 核心目录
+
+        Args:
+            search_path_str: 待校验的搜索路径
+            fallback_boundary: 历史遗留参数（保留签名兼容）
         """
         search_path = Path(search_path_str).resolve()
-        workspace = self.base_path.resolve()
 
-        # ── 检查 1：路径存在性（优先级最高，不存在就不需要做后续检查） ──
+        # ── 检查 1：权限范围（统一路径校验，按 agent 层级 + 读权限策略决策） ──
+        agent_level = getattr(self, "_agent_level", None)
+        ok, err = self.check_path_allowed(str(search_path), "read", agent_level)
+        if not ok:
+            return create_failure_result(
+                error=f"搜索路径超出允许范围: {search_path_str}（{err}）",
+                error_code="PATH_NOT_FOUND",
+            )
+
+        # ── 检查 2：路径存在性 ──
         if not search_path.exists():
             return create_failure_result(
                 error=f"搜索路径不存在: {search_path_str}",
                 error_code="PATH_NOT_FOUND",
             )
 
-        # ── 检查 2：workspace 边界（主边界 + 回退边界） ──
-        sp_str = str(search_path)
-        allowed_boundaries: list[Path] = [workspace]
-        if fallback_boundary is not None and fallback_boundary.resolve() != workspace:
-            allowed_boundaries.append(fallback_boundary.resolve())
-
-        is_allowed = any(
-            sp_str == str(b) or sp_str.startswith(str(b) + os.sep)
-            for b in allowed_boundaries
-        )
-        if not is_allowed:
+        # ── 检查 3：敏感系统目录黑名单（共享常量） ──
+        hit, matched = is_sensitive_path(str(search_path))
+        if hit:
             return create_failure_result(
-                error=f"搜索路径超出工作区边界: {search_path_str}（工作区: {workspace}）",
-                error_code="PATH_OUTSIDE_WORKSPACE",
+                error=f"禁止搜索系统目录: {search_path_str}（命中黑名单: {matched}）",
+                error_code="SENSITIVE_PATH_BLOCKED",
             )
-
-        # ── 检查 3：敏感系统目录黑名单 ──
-        sp_lower = sp_str.lower().replace("\\", "/")
-        sensitive_dirs = (
-            _SENSITIVE_DIRS_WINDOWS if os.name == "nt" else _SENSITIVE_DIRS_LINUX
-        )
-        for forbidden in sensitive_dirs:
-            if sp_lower == forbidden or sp_lower.startswith(forbidden + "/"):
-                return create_failure_result(
-                    error=f"禁止搜索系统目录: {search_path_str}（命中黑名单: {forbidden}）",
-                    error_code="SENSITIVE_PATH_BLOCKED",
-                )
 
         return None
 
-    async def _search_with_ripgrep(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _search_with_ripgrep(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0912,PLR0915
         """
         使用ripgrep进行搜索（高性能）
 
@@ -259,6 +233,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             context_lines = inputs.get("context_lines", 2)
             max_results = inputs.get("max_results", 100)
             use_regex = inputs.get("use_regex", False)
+            max_depth = inputs.get("max_depth", _DEFAULT_MAX_DEPTH)
 
             # 构建ripgrep命令
             cmd = [
@@ -282,16 +257,20 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             if file_pattern and file_pattern != "*":
                 cmd.extend(["-g", file_pattern])
 
-            # 正则表达式
+            # 最大递归深度（--max-depth 全称，兼容 rg 13.x；rg 15+ 才支持 -d 短写）
+            cmd.extend(["--max-depth", str(max_depth)])
+
+            # 正则表达式 / 字面量搜索
             if use_regex:
                 # ripgrep默认就是正则，不需要额外参数
                 pass
             else:
                 # 字面量搜索
                 cmd.append("--fixed-strings")
-
-            # BUG-FIX: 移除 --max-count，它限制的是每个文件的匹配数而非总结果数
-            # 改为在解析 stdout 时按总结果数截断
+                # 字面量查询含换行时，需开启 multiline 才能跨行匹配，
+                # 否则 rg 会报 "the literal is not allowed in a regex"
+                if "\n" in query or "\r" in query:
+                    cmd.append("-U")
 
             # 执行搜索
             process = await asyncio.create_subprocess_exec(
@@ -307,51 +286,70 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                     timeout=30.0,
                 )
 
-                if process.returncode != 0 and process.returncode != 1:
+                if process.returncode not in {0, 1}:
                     # 1表示没找到结果，这是正常的
                     error_msg = stderr.decode("utf-8", errors="replace")
+                    # rg 正则语法错误（exit 2，stderr 含 "regex parse error"）
+                    # 映射为 REGEX_ERROR，与历史错误码语义一致
+                    if "regex parse error" in error_msg:
+                        return create_failure_result(
+                            error=f"正则表达式错误: {error_msg}",
+                            error_code="REGEX_ERROR",
+                        )
                     return create_failure_result(
                         error=f"搜索失败: {error_msg}",
                         error_code="SEARCH_FAILED",
                     )
 
                 # 解析JSON输出
-                file_paths = []
-                line_numbers = []
-                contents = []
+                # rg --json 流顺序：[begin] (context-before)* match (context-after)* [end] [summary]
+                # max_results 限制 match 行数；context 行不计入上限，随匹配行一起返回。
+                # 达到上限后仍需 drain 当前 match 的 context-after，否则会丢失上下文。
+                file_paths: list[str] = []
+                line_numbers: list[int] = []
+                contents: list[str] = []
                 match_count = 0
+                # 达到 max_results 上限后置 True：不再采纳新 match，但继续消费
+                # 当前文件的尾部 context，遇到 begin/end/summary 时才安全停止
+                stop_accepting = False
 
                 for line in stdout.decode("utf-8", errors="replace").splitlines():
                     if not line.strip():
                         continue
 
-                    # BUG-FIX: 仅对 match 类型计数，context 行不限制
-                    if match_count >= max_results:
-                        break
-
                     try:
                         entry = json.loads(line)
-                        entry_type = entry.get("type")
-
-                        if entry_type == "match":
-                            match_count += 1
-                            data = entry.get("data", {})
-                            file_paths.append(data.get("path", {}).get("text", ""))
-                            line_numbers.append(data.get("line_number", 0))
-                            contents.append(data.get("lines", {}).get("text", "").strip())
-                        elif entry_type == "context":
-                            data = entry.get("data", {})
-                            file_paths.append(data.get("path", {}).get("text", ""))
-                            line_numbers.append(data.get("line_number", 0))
-                            contents.append(data.get("lines", {}).get("text", "").strip())
-
                     except json.JSONDecodeError:
                         continue
+                    entry_type = entry.get("type")
+
+                    # 已达 match 上限且遇到文件边界/流结束 → 当前 context 已 drain 完
+                    if stop_accepting and entry_type in {"begin", "end", "summary"}:
+                        break
+
+                    if entry_type == "match":
+                        if stop_accepting:
+                            # 上限已达，忽略后续 match（含其 context）
+                            continue
+                        match_count += 1
+                        data = entry.get("data", {})
+                        file_paths.append(data.get("path", {}).get("text", ""))
+                        line_numbers.append(data.get("line_number", 0))
+                        contents.append(data.get("lines", {}).get("text", "").strip())
+                        # 采纳该 match 后若已达上限，置位但继续 drain 它的 context-after
+                        if match_count >= max_results:
+                            stop_accepting = True
+                    elif entry_type == "context":
+                        data = entry.get("data", {})
+                        file_paths.append(data.get("path", {}).get("text", ""))
+                        line_numbers.append(data.get("line_number", 0))
+                        contents.append(data.get("lines", {}).get("text", "").strip())
 
                 return create_success_result(
                     data={
                         "query": query,
                         "engine": "ripgrep",
+                        "match_count": match_count,
                         "h": ["file_path", "line_number", "content"],
                         "d": [[file_paths[i], line_numbers[i], contents[i]] for i in range(len(file_paths))],
                         "c": len(file_paths),
@@ -372,126 +370,10 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
         except FileNotFoundError:
-            # ripgrep被卸载了，回退到Python模式
-            self.ripgrep_available = False
-            return await self._search_with_python(inputs)
-
-        except Exception as e:
-            logger.warning(f"ripgrep搜索异常，回退到Python模式: {str(e)}")
-            self.ripgrep_available = False
-            return await self._search_with_python(inputs)
-
-    async def _search_with_python(self, inputs: dict[str, Any]) -> ToolResult:
-        """
-        使用Python进行搜索（回退方案）
-
-        性能：比ripgrep慢，但功能完整
-        """
-        try:
-            query = inputs.get("query")
-            search_path = inputs.get("path", str(self.base_path))
-            file_pattern = inputs.get("file_pattern", "*")
-            case_sensitive = inputs.get("case_sensitive", False)
-            max_results = inputs.get("max_results", 100)
-            use_regex = inputs.get("use_regex", False)
-            context_lines = inputs.get("context_lines", 2)
-            max_depth = inputs.get("max_depth", _DEFAULT_MAX_DEPTH)
-
-            path = Path(search_path)
-            # 路径存在性已在 _validate_search_path 中检查，此处不再重复
-
-            # 编译搜索模式
-            flags = 0 if case_sensitive else re.IGNORECASE
-            try:
-                if use_regex:
-                    pattern = re.compile(query, flags)
-                else:
-                    pattern = re.compile(re.escape(query), flags)
-            except re.error as e:
-                return create_failure_result(
-                    error=f"正则表达式错误: {str(e)}",
-                    error_code="REGEX_ERROR",
-                )
-
-            # 搜索文件
-            file_paths: list[str] = []
-            line_numbers: list[int] = []
-            contents: list[str] = []
-            search_pattern = file_pattern if file_pattern != "*" else None
-
-            for file_path in path.rglob("*"):
-                # 跳过排除目录
-                if any(part in _SKIP_DIRS for part in file_path.parts):
-                    continue
-
-                # 深度限制
-                try:
-                    depth = len(file_path.relative_to(path).parts)
-                    if depth > max_depth:
-                        continue
-                except ValueError:
-                    continue
-
-                if search_pattern and not file_path.match(search_pattern):
-                    continue
-
-                if not file_path.is_file():
-                    continue
-
-                if file_path.stat().st_size > 1024 * 1024:
-                    continue
-
-                try:
-                    # 读取文件
-                    content = file_path.read_text(encoding="utf-8", errors="ignore")
-
-                    # 搜索匹配
-                    match_count = 0
-                    lines = content.splitlines()
-                    for line_num, line in enumerate(lines, 1):
-                        if pattern.search(line):
-                            match_count += 1
-                            # 添加匹配行
-                            rel_path = str(file_path.relative_to(path))
-                            file_paths.append(rel_path)
-                            line_numbers.append(line_num)
-                            contents.append(line.strip())
-
-                            # BUG-FIX: 收集前后 context_lines 行上下文（不计入 max_results）
-                            for offset in range(1, context_lines + 1):
-                                if line_num - 1 - offset >= 0:
-                                    file_paths.append(rel_path)
-                                    line_numbers.append(line_num - offset)
-                                    contents.append(lines[line_num - 1 - offset].strip())
-                                if line_num - 1 + offset < len(lines):
-                                    file_paths.append(rel_path)
-                                    line_numbers.append(line_num + offset)
-                                    contents.append(lines[line_num - 1 + offset].strip())
-
-                            if match_count >= max_results:
-                                break
-
-                except Exception:
-                    # 忽略无法读取的文件
-                    continue
-
-                if len(file_paths) >= max_results:
-                    break
-
-            # BUG-FIX: 返回格式与 ripgrep 一致，使用 h/d/c 紧凑格式
-            return create_success_result(
-                data={
-                    "query": query,
-                    "engine": "python",
-                    "h": ["file_path", "line_number", "content"],
-                    "d": [[file_paths[i], line_numbers[i], contents[i]] for i in range(len(file_paths))],
-                    "c": len(file_paths),
-                },
-                metadata={
-                    "action": "search_python",
-                    "file_pattern": file_pattern,
-                    "case_sensitive": case_sensitive,
-                },
+            # ripgrep 不在 PATH 中
+            return create_failure_result(
+                error="ripgrep 未安装，无法执行搜索（请安装 ripgrep 后重试）",
+                error_code="RIPGREP_NOT_AVAILABLE",
             )
 
         except Exception as e:
@@ -512,7 +394,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             return True
         return False
 
-    async def _search_filename(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _search_filename(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0912
         """文件名搜索，支持 glob 通配符 (*, ?, []) 和正则表达式"""
         try:
             query = inputs.get("query")
@@ -525,7 +407,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             # 路径存在性已在 _validate_search_path 中检查
 
             # 确定匹配策略（优先级: regex > glob > substring）
-            _GLOB_CHARS = frozenset("*?[]")
+            _GLOB_CHARS = frozenset("*?[]")  # noqa: N806
             has_glob = any(c in query for c in _GLOB_CHARS)
 
             if use_regex:
@@ -547,7 +429,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             file_sizes: list[str] = []
             file_paths: list[str] = []
 
-            # 递归搜索（跳过排除目录 + 深度限制）
+            # 递归搜索（跳过排除目录 + 深度限制 + 不可访问路径静默跳过）
             for fp in search_path.rglob("*"):
                 if len(file_names) >= max_results:
                     break
@@ -555,27 +437,31 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 if self._should_skip_dir(fp, search_path, max_depth):
                     continue
 
-                if fp.is_file():
-                    file_name = fp.name
-                    compare_name = file_name if case_sensitive else file_name.lower()
+                try:
+                    if fp.is_file():
+                        file_name = fp.name
+                        compare_name = file_name if case_sensitive else file_name.lower()
 
-                    matched = False
-                    if match_mode == "regex":
-                        matched = bool(pattern.search(compare_name))
-                    elif match_mode == "glob":
-                        matched = fnmatch.fnmatch(compare_name, query if case_sensitive else query.lower())
-                    else:  # substring
-                        search_query = query if case_sensitive else query.lower()
-                        matched = search_query in compare_name
+                        matched = False
+                        if match_mode == "regex":
+                            matched = bool(pattern.search(compare_name))
+                        elif match_mode == "glob":
+                            matched = fnmatch.fnmatch(compare_name, query if case_sensitive else query.lower())
+                        else:  # substring
+                            search_query = query if case_sensitive else query.lower()
+                            matched = search_query in compare_name
 
-                    if matched:
-                        try:
-                            stat = fp.stat()
-                            file_names.append(file_name)
-                            file_sizes.append(format_size(stat.st_size))
-                            file_paths.append(str(fp.relative_to(search_path)))
-                        except Exception:
-                            continue
+                        if matched:
+                            try:
+                                stat = fp.stat()
+                                file_names.append(file_name)
+                                file_sizes.append(format_size(stat.st_size))
+                                file_paths.append(str(fp.relative_to(search_path)))
+                            except Exception:
+                                continue
+                except OSError:
+                    # 跳过不可访问的路径（跨容器目录权限、死链接等）
+                    continue
 
             return create_success_result(
                 data={

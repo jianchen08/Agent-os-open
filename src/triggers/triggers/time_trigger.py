@@ -5,7 +5,7 @@
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from apscheduler.triggers.cron import CronTrigger as APSchedulerCronTrigger
 from apscheduler.triggers.date import DateTrigger as APSchedulerDateTrigger
@@ -66,7 +66,7 @@ class TimeTrigger(BaseTrigger):
         return await self.execute_actions(
             context={
                 "trigger_type": "time",
-                "triggered_at": datetime.utcnow().isoformat(),
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
             }
         )
 
@@ -81,12 +81,11 @@ class TimeTrigger(BaseTrigger):
 
         if schedule_type == "cron":
             return self._get_cron_trigger()
-        elif schedule_type == "interval":
+        if schedule_type == "interval":
             return self._get_interval_trigger()
-        elif schedule_type == "date":
+        if schedule_type == "date":
             return self._get_date_trigger()
-        else:
-            raise ValueError(f"不支持的调度类型: {schedule_type}")
+        raise ValueError(f"不支持的调度类型: {schedule_type}")
 
     def _get_cron_trigger(self) -> APSchedulerCronTrigger:
         """
@@ -103,7 +102,7 @@ class TimeTrigger(BaseTrigger):
         # 支持标准 5 段或 6 段 Cron 表达式
         # 分 时 日 月 周 [年]
         try:
-            return APSchedulerCronTrigger.from_crontab(expression)
+            return APSchedulerCronTrigger.from_crontab(expression, timezone=timezone.utc)
         except Exception as e:
             # 如果不是标准 crontab 格式，尝试手动解析
             logger.debug(f"Crontab 解析失败: {e}，尝试手动解析")
@@ -114,6 +113,7 @@ class TimeTrigger(BaseTrigger):
                 day=self.schedule_config.get("day", "*"),
                 month=self.schedule_config.get("month", "*"),
                 day_of_week=self.schedule_config.get("day_of_week", "*"),
+                timezone=timezone.utc,
             )
 
     def _get_interval_trigger(self) -> APSchedulerIntervalTrigger:
@@ -154,15 +154,15 @@ class TimeTrigger(BaseTrigger):
             run_date = datetime.fromisoformat(run_date_str)
 
             # 检查时间是否已过期
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if run_date < now:
                 logger.warning(f"时间触发器 {self.id} 的执行时间已过期: {run_date_str}")
                 # 对于过期的单次触发器，返回一个永远不会触发的触发器
                 # 设置为一个很远的未来时间
-                run_date = datetime(2099, 12, 31, 23, 59, 59)
+                run_date = datetime(2099, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
         except ValueError as e:
-            raise ValueError(f"无效的日期时间格式: {run_date_str}, {e}")
+            raise ValueError(f"无效的日期时间格式: {run_date_str}, {e}")  # noqa: B904
 
         return APSchedulerDateTrigger(run_date=run_date)
 
@@ -175,7 +175,7 @@ class TimeTrigger(BaseTrigger):
         """
         try:
             trigger = self.get_apscheduler_trigger()
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             next_time = trigger.get_next_fire_time(None, now)
             return next_time
         except Exception as e:

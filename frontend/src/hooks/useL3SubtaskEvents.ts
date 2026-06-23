@@ -99,7 +99,6 @@ export function useL3SubtaskEvents(
         return newMap
       })
 
-      console.log('[L3SubtaskEvents] 子任务开始:', event.subtaskId, event.name)
     },
     [taskId],
   )
@@ -164,7 +163,6 @@ export function useL3SubtaskEvents(
         return newMap
       })
 
-      console.log('[L3SubtaskEvents] 子任务完成:', event.subtaskId, event.success ? '成功' : '失败')
     },
     [taskId],
   )

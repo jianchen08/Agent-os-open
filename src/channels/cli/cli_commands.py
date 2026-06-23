@@ -22,13 +22,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -484,7 +488,7 @@ class SlashCommandRegistry:
             agent_name = getattr(agent_config, "display_name", agent_name)
             level = getattr(agent_config, "level", None)
             if level:
-                agent_level = level.value if hasattr(level, "value") else str(level)
+                agent_level = safe_enum_value(level)
 
         # 服务状态
         svc_status: list[tuple[str, str]] = []
@@ -497,10 +501,8 @@ class SlashCommandRegistry:
         tool_count = 0
         tool_registry = services.get("tool_registry")
         if tool_registry is not None:
-            try:
+            with contextlib.suppress(Exception):
                 tool_count = len(tool_registry.list_tools())
-            except Exception:
-                pass
 
         # 输出
         self._console.print(Panel(
@@ -573,7 +575,7 @@ class SlashCommandRegistry:
         self._console.print(f"[green][OK] 思考过程显示: {state_str}[/green]")
         return CommandResult(state_updates={"show_thinking": new_val})
 
-    async def _cmd_restore(self, args: str, ctx: dict[str, Any]) -> CommandResult:
+    async def _cmd_restore(self, args: str, ctx: dict[str, Any]) -> CommandResult:  # noqa: PLR0911
         """从检查点恢复管道状态。"""
         services = ctx.get("services", {})
         pipeline_recovery = services.get("pipeline_recovery")
@@ -623,9 +625,8 @@ class SlashCommandRegistry:
                         return await self._do_restore(
                             pipeline_recovery, str(selected.get("pipeline_id", "")), ctx,
                         )
-                    else:
-                        self._console.print(f"[red]无效索引: {idx}，范围 1-{len(checkpoints)}[/red]")
-                        return CommandResult()
+                    self._console.print(f"[red]无效索引: {idx}，范围 1-{len(checkpoints)}[/red]")
+                    return CommandResult()
                 except ValueError:
                     # 参数当作 pipeline_id 处理
                     return await self._do_restore(pipeline_recovery, args.strip(), ctx)
@@ -717,7 +718,7 @@ def parse_inline_shortcuts(text: str) -> tuple[str, dict[str, Any]]:
     Returns:
         (处理后的文本, 附加状态字典)
     """
-    import re
+    import re  # noqa: PLC0415
 
     extras: dict[str, Any] = {
         "file_refs": [],

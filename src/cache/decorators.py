@@ -58,10 +58,7 @@ def cached_function(
             cache = get_global_cache()
 
             # 生成缓存键
-            if key_generator:
-                cache_key = key_generator(*args, **kwargs)
-            else:
-                cache_key = cache_key_generator(*args, **kwargs)
+            cache_key = key_generator(*args, **kwargs) if key_generator else cache_key_generator(*args, **kwargs)
 
             if key_prefix:
                 cache_key = f"{key_prefix}:{cache_key}"
@@ -86,10 +83,7 @@ def cached_function(
                 cache = get_global_cache()
 
                 # 生成缓存键
-                if key_generator:
-                    cache_key = key_generator(*args, **kwargs)
-                else:
-                    cache_key = cache_key_generator(*args, **kwargs)
+                cache_key = key_generator(*args, **kwargs) if key_generator else cache_key_generator(*args, **kwargs)
 
                 if key_prefix:
                     cache_key = f"{key_prefix}:{cache_key}"
@@ -118,8 +112,7 @@ def cached_function(
         # 根据函数类型返回对应的包装器
         if asyncio.iscoroutinefunction(func):
             return async_wrapper
-        else:
-            return sync_wrapper
+        return sync_wrapper
 
     return decorator
 
@@ -186,7 +179,6 @@ def invalidate_cache(pattern: str):
         # 根据函数类型返回对应的包装器
         if asyncio.iscoroutinefunction(func):
             return async_wrapper
-        else:
-            return sync_wrapper
+        return sync_wrapper
 
     return decorator

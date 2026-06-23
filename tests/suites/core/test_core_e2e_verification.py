@@ -39,10 +39,9 @@ class TestRegion1TaskCreation:
 
     @pytest.fixture
     def service(self):
-        from tasks.storage import TaskStorage
         from tasks.service import TaskService
-        storage = TaskStorage()  # 内存模式
-        return TaskService(storage=storage)
+        # 门面模式（task_id=None），自动初始化内存存储
+        return TaskService(task_id=None, data_dir=None)
 
     def test_create_basic_task(self, service):
         """创建基本任务，验证 title/description/status 正确。"""

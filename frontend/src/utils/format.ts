@@ -105,44 +105,6 @@ export function formatDate(
 }
 
 /**
- * 截断文本
- * @param text - 原始文本
- * @param maxLength - 最大长度
- * @param ellipsis - 省略符号
- * @returns 截断后的文本
- */
-export function truncateText(text: string, maxLength: number, ellipsis: string = '...'): string {
-  if (text.length <= maxLength) {
-    return text
-  }
-  return text.slice(0, maxLength - ellipsis.length) + ellipsis
-}
-
-/**
- * 高亮搜索关键词
- * @param text - 原始文本
- * @param keyword - 搜索关键词
- * @returns 包含高亮标记的文本
- */
-export function highlightKeyword(text: string, keyword: string): string {
-  if (!keyword) {
-    return text
-  }
-
-  const regex = new RegExp(`(${escapeRegExp(keyword)})`, 'gi')
-  return text.replace(regex, '<mark>$1</mark>')
-}
-
-/**
- * 转义正则表达式特殊字符
- * @param str - 原始字符串
- * @returns 转义后的字符串
- */
-export function escapeRegExp(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-/**
  * 格式化文件大小
  * @param bytes - 字节数
  * @returns 格式化后的文件大小字符串

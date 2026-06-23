@@ -140,43 +140,6 @@ class TestPipelineEngineRegression:
         assert len(engine._suspended_state["messages"]) == 2
 
 
-class TestPipelineRegistryRegression:
-    """验证 PipelineRegistry 的提交/路由/释放功能。"""
-
-    def _make_registry(self) -> Any:
-        from pipeline.registry import PipelineRegistry
-        return PipelineRegistry()
-
-    def test_submit_and_get(self) -> None:
-        """提交管道后应能查询到。"""
-        reg = self._make_registry()
-        pid = reg.submit("test_target", {"key": "value"})
-        assert pid.startswith("pipeline-")
-        info = reg._pipelines.get(pid)
-        assert info is not None
-        assert info["target"] == "test_target"
-        assert info["config"] == {"key": "value"}
-
-    def test_route_to_creates_pipeline(self) -> None:
-        """route_to 应创建新管道并返回 ID。"""
-        reg = self._make_registry()
-        pid = reg.route_to("downstream", {"data": "abc"})
-        assert pid is not None
-        assert reg._pipelines[pid]["target"] == "downstream"
-
-    def test_release_pipeline(self) -> None:
-        """release 应将管道状态标记为 released。"""
-        reg = self._make_registry()
-        pid = reg.submit("target", {})
-        reg.release(pid)
-        assert reg._pipelines[pid]["status"] == "released"
-
-    def test_release_nonexistent_no_error(self) -> None:
-        """释放不存在的管道不应报错。"""
-        reg = self._make_registry()
-        reg.release("nonexistent-id")  # 不应抛异常
-
-
 # ===========================================================================
 # 2. 插件系统(Plugins)回归测试
 # ===========================================================================

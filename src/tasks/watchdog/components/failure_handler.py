@@ -479,19 +479,18 @@ class FailureHandler:
                 "action": "retry",
                 "retry_count": retry_count + 1,
             }
-        else:
-            if self.project_controller:
-                await self.project_controller.pause_project(
-                    root_task.id,
-                    f"任务 {task_id} 失败，达到最大重试次数",
-                )
+        if self.project_controller:
+            await self.project_controller.pause_project(
+                root_task.id,
+                f"任务 {task_id} 失败，达到最大重试次数",
+            )
 
-            return {
-                "project_id": root_task.id,
-                "task_id": task_id,
-                "action": "paused",
-                "reason": "max_retries_exceeded",
-            }
+        return {
+            "project_id": root_task.id,
+            "task_id": task_id,
+            "action": "paused",
+            "reason": "max_retries_exceeded",
+        }
 
     async def should_retry(self, task: Task) -> bool:
         """

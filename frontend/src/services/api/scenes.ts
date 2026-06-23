@@ -142,7 +142,7 @@ export interface SceneTemplateListResponse {
  * @returns 创建的场景数据
  */
 export async function createScene(request: CreateSceneRequest): Promise<Scene> {
-  const response = await apiClient.post<Scene>('/api/scenes', request)
+  const response = await apiClient.post<Scene>('/api/v1/scenes', request)
   return response.data
 }
 
@@ -152,7 +152,7 @@ export async function createScene(request: CreateSceneRequest): Promise<Scene> {
  * @returns 场景列表
  */
 export async function listScenes(): Promise<SceneListResponse> {
-  const response = await apiClient.get<SceneListResponse>('/api/scenes')
+  const response = await apiClient.get<SceneListResponse>('/api/v1/scenes')
   return response.data
 }
 
@@ -163,7 +163,7 @@ export async function listScenes(): Promise<SceneListResponse> {
  * @returns 场景数据
  */
 export async function getScene(sceneId: string): Promise<Scene> {
-  const response = await apiClient.get<Scene>(`/api/scenes/${sceneId}`)
+  const response = await apiClient.get<Scene>(`/api/v1/scenes/${sceneId}`)
   return response.data
 }
 
@@ -178,7 +178,7 @@ export async function updateScene(
   sceneId: string,
   request: UpdateSceneRequest,
 ): Promise<Scene> {
-  const response = await apiClient.put<Scene>(`/api/scenes/${sceneId}`, request)
+  const response = await apiClient.put<Scene>(`/api/v1/scenes/${sceneId}`, request)
   return response.data
 }
 
@@ -192,7 +192,7 @@ export async function deleteScene(
   sceneId: string,
 ): Promise<{ success: boolean; message: string }> {
   const response = await apiClient.delete<{ success: boolean; message: string }>(
-    `/api/scenes/${sceneId}`,
+    `/api/v1/scenes/${sceneId}`,
   )
   return response.data
 }
@@ -205,7 +205,7 @@ export async function deleteScene(
  */
 export async function switchScene(sceneId: string): Promise<Scene> {
   const response = await apiClient.post<Scene>(
-    `/api/scenes/${sceneId}/switch`,
+    `/api/v1/scenes/${sceneId}/switch`,
   )
   return response.data
 }
@@ -217,7 +217,7 @@ export async function switchScene(sceneId: string): Promise<Scene> {
  */
 export async function getSceneTemplates(): Promise<SceneTemplateListResponse> {
   const response = await apiClient.get<SceneTemplateListResponse>(
-    '/api/scenes/templates',
+    '/api/v1/scenes/templates',
   )
   return response.data
 }

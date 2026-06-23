@@ -136,18 +136,17 @@ class HostProvider(IsolationProvider):
 
         if op_type == "command":
             return await self._execute_command(operation, context)
-        elif op_type == "file_operation":
+        if op_type == "file_operation":
             return await self._execute_file_op(operation, context)
-        elif op_type == "python_code":
+        if op_type == "python_code":
             return await self._execute_python_code(operation)
-        else:
-            return ExecutionResult(
-                success=False,
-                output=None,
-                error=f"不支持的操作类型: {op_type}",
-            )
+        return ExecutionResult(
+            success=False,
+            output=None,
+            error=f"不支持的操作类型: {op_type}",
+        )
 
-    async def _execute_command(
+    async def _execute_command(  # noqa: PLR0911
         self, operation: dict[str, Any], context: IsolationContext | None = None
     ) -> ExecutionResult:
         """执行Shell命令"""
@@ -169,10 +168,7 @@ class HostProvider(IsolationProvider):
             is_windows = platform.system() == "Windows"
 
             # 如果是 Windows，使用 cmd /c
-            if is_windows:
-                full_command = f'cmd /c "{command}"'
-            else:
-                full_command = command
+            full_command = f'cmd /c "{command}"' if is_windows else command
 
             # 创建进程
             process = await asyncio.create_subprocess_shell(
@@ -240,7 +236,7 @@ class HostProvider(IsolationProvider):
                 error=f"执行命令失败: {str(e)}",
             )
 
-    async def _execute_file_op(
+    async def _execute_file_op(  # noqa: PLR0911
         self, operation: dict[str, Any], context: IsolationContext | None = None
     ) -> ExecutionResult:
         """执行文件操作"""
@@ -259,7 +255,7 @@ class HostProvider(IsolationProvider):
                     content = f.read()
                 return ExecutionResult(success=True, output=content)
 
-            elif op == "write":
+            if op == "write":
                 content = operation.get("content")
                 # 确保目录存在
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -267,20 +263,19 @@ class HostProvider(IsolationProvider):
                     f.write(content)
                 return ExecutionResult(success=True, output=None)
 
-            elif op == "delete":
-                os.remove(path)
+            if op == "delete":
+                os.remove(path)  # noqa: PTH107
                 return ExecutionResult(success=True, output=None)
 
-            elif op == "exists":
-                exists = os.path.exists(path)
+            if op == "exists":
+                exists = os.path.exists(path)  # noqa: PTH110
                 return ExecutionResult(success=True, output={"exists": exists})
 
-            else:
-                return ExecutionResult(
-                    success=False,
-                    output=None,
-                    error=f"不支持的文件操作: {op}",
-                )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=f"不支持的文件操作: {op}",
+            )
 
         except Exception as e:
             return ExecutionResult(
@@ -292,7 +287,7 @@ class HostProvider(IsolationProvider):
     async def _execute_python_code(self, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Python 代码"""
         try:
-            from src.core.sandbox import CodeSandbox
+            from src.core.sandbox import CodeSandbox  # noqa: PLC0415
 
             code = operation.get("code")
             context = operation.get("context")
@@ -306,7 +301,7 @@ class HostProvider(IsolationProvider):
                 )
 
             # 创建沙箱
-            from src.core.sandbox import SandboxConfig
+            from src.core.sandbox import SandboxConfig  # noqa: PLC0415
 
             config = SandboxConfig(timeout_seconds=timeout)
             sandbox = CodeSandbox(config)

@@ -1,6 +1,6 @@
 """模板系统公共 API。
 
-提供模板加载、渲染和注册管理的统一入口。
+提供模板加载和注册管理的统一入口。
 模板本质是上下文注入——把模板内容读到管道 state 中，
 由 prompt_build 组装到系统提示词里，Agent 按模板格式输出。
 
@@ -10,13 +10,11 @@
     EvaluationDimension: 评估维度数据类
     TemplateSpec: 模板完整规格数据类
     TemplateLoader: 模板加载器
-    TemplateRenderer: 模板渲染器
     TemplateRegistry: 模板注册表
 """
 
 from .loader import TemplateLoader
 from .registry import TemplateRegistry
-from .renderer import TemplateRenderer
 from .types import (
     EvaluationDimension,
     TemplateSection,
@@ -28,7 +26,6 @@ __all__ = [
     "EvaluationDimension",
     "TemplateLoader",
     "TemplateRegistry",
-    "TemplateRenderer",
     "TemplateSection",
     "TemplateSpec",
     "TemplateType",

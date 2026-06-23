@@ -260,12 +260,11 @@ class SkillRegistry:
             if exact:
                 if query_lower and query_lower != skill.skill_name.lower():
                     continue
-            elif query_lower:
-                if (
-                    query_lower not in skill.skill_name.lower()
-                    and query_lower not in skill.description.lower()
-                ):
-                    continue
+            elif query_lower and (
+                query_lower not in skill.skill_name.lower()
+                and query_lower not in skill.description.lower()
+            ):
+                continue
 
             results.append(skill)
             if len(results) >= limit:
@@ -363,7 +362,7 @@ _global_registry: SkillRegistry | None = None
 
 def get_global_skill_registry() -> SkillRegistry | None:
     """获取全局 Skill 注册表（懒加载单例）。"""
-    global _global_registry
+    global _global_registry  # noqa: PLW0603
     if _global_registry is None:
         try:
             _global_registry = SkillRegistry()

@@ -47,9 +47,9 @@ class FormatManager:
         target = fmt or self._default_format
         if target == ToolFormat.JSON:
             return self._to_json(data)
-        elif target == ToolFormat.YAML:
+        if target == ToolFormat.YAML:
             return self._to_yaml(data)
-        elif target == ToolFormat.XML:
+        if target == ToolFormat.XML:
             return self._to_xml(data)
         return self._to_json(data)
 
@@ -68,20 +68,14 @@ class FormatManager:
         if target == ToolFormat.JSON:
             return json_tools
 
-        elif target == ToolFormat.YAML:
-            if names:
-                filtered = [
-                    t for t in json_tools
-                    if t.get("function", {}).get("name") in names
-                ]
-            else:
-                filtered = json_tools
+        if target == ToolFormat.YAML:
+            filtered = [t for t in json_tools if t.get("function", {}).get("name") in names] if names else json_tools
 
             return yaml.dump(
                 {"tools": filtered}, default_flow_style=False, allow_unicode=True
             )
 
-        elif target == ToolFormat.XML:
+        if target == ToolFormat.XML:
             root = ET.Element("tools")
             for t in json_tools:
                 func = t.get("function", {})
@@ -108,31 +102,31 @@ class FormatManager:
         return ET.tostring(root, encoding="unicode")
 
     @staticmethod
-    def _build_xml(parent: ET.Element, data: Any) -> None:
+    def _build_xml(parent: ET.Element, data: Any) -> None:  # noqa: PLR0911
         if data is None:
             parent.set("nil", "true")
-            return None
+            return
         if isinstance(data, bool):
             parent.text = "true" if data else "false"
-            return None
+            return
         if isinstance(data, (int, float)):
             parent.text = str(data)
-            return None
+            return
         if isinstance(data, str):
             parent.text = data
-            return None
+            return
         if isinstance(data, dict):
             for key, value in data.items():
                 child = ET.SubElement(parent, _safe_xml_tag(key))
                 FormatManager._build_xml(child, value)
-            return None
+            return
         if isinstance(data, (list, tuple)):
             for item in data:
                 child = ET.SubElement(parent, "item")
                 FormatManager._build_xml(child, item)
-            return None
+            return
         parent.text = str(data)
-        return None
+        return
 
 
 def _safe_xml_tag(name: str) -> str:
@@ -147,7 +141,7 @@ _instance: FormatManager | None = None
 
 
 def get_format_manager() -> FormatManager:
-    global _instance
+    global _instance  # noqa: PLW0603
     if _instance is None:
         _instance = FormatManager()
     return _instance

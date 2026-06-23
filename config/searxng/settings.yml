@@ -9,7 +9,7 @@ search:
     - json
 
 server:
-  secret_key: "agent_search_2026"
+  secret_key: ${SEARXNG_SECRET_KEY:-agent_search_2026}
   limiter: false
   image_proxy: false
 

@@ -13,7 +13,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from core.results import ToolExecutionResult
 from tools.types import Tool
@@ -29,7 +29,15 @@ class BuiltinTool(ABC):
     所有内置工具应继承此类，实现：
     - get_tool_definition(): 返回工具定义
     - execute(): 执行工具
+
+    类属性:
+        run_on_main_loop: 是否在主事件循环直接执行（默认 False=to_thread）。
+            True 适用于纯异步工具（如 bash_execute），避免每次调用创建
+            独立事件循环导致的跨循环问题。
     """
+
+    # 纯异步工具设为 True，表示不需要 to_thread 隔离执行
+    run_on_main_loop: ClassVar[bool] = False
 
     @staticmethod
     @abstractmethod

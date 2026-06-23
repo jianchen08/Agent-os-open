@@ -105,7 +105,7 @@ class AgentRegistry:
         Returns:
             成功加载返回 AgentConfig，否则返回 None。
         """
-        from .loader import AgentConfigLoader
+        from .loader import AgentConfigLoader  # noqa: PLC0415
 
         yaml_path = self._find_yaml_by_filename(config_id)
         if yaml_path is None:
@@ -259,7 +259,7 @@ class AgentRegistry:
         Returns:
             成功加载的配置数量。
         """
-        from .loader import AgentConfigLoader
+        from .loader import AgentConfigLoader  # noqa: PLC0415
 
         dir_path = Path(dir_path)
         self._config_dir = dir_path
@@ -269,7 +269,7 @@ class AgentRegistry:
             try:
                 self.register(config)
                 if hasattr(config, "__yaml_path__"):
-                    self._scanned_files.add(str(getattr(config, "__yaml_path__")))
+                    self._scanned_files.add(str(config.__yaml_path__))
             except ValueError as e:
                 logger.warning("跳过无效配置 %s: %s", config.config_id, e)
 
@@ -295,6 +295,42 @@ class AgentRegistry:
             del self._configs[config_id]
             return True
         return False
+
+    def reload_agent(self, config_id: str) -> AgentConfig | None:
+        """从磁盘重新加载指定 Agent 的配置。
+
+        Args:
+            config_id: 配置唯一标识。
+
+        Returns:
+            更新后的 AgentConfig 实例，未找到返回 None。
+        """
+        if self._config_dir is None or not self._config_dir.exists():
+            return None
+
+        yaml_path = self._find_yaml_by_filename(config_id)
+        if yaml_path is None:
+            yaml_path = self._find_yaml_by_content(config_id)
+
+        if yaml_path is None:
+            return None
+
+        from .loader import AgentConfigLoader  # noqa: PLC0415
+
+        try:
+            config = AgentConfigLoader.load_from_yaml(yaml_path)
+            self.register(config)
+            self._scanned_files.add(str(yaml_path))
+            logger.info("热更新 Agent 配置: %s (from %s)", config.config_id, yaml_path)
+            return config
+        except (FileNotFoundError, ValueError) as e:
+            # 捕获具体异常（backend_rules §5.3 禁止 except Exception），
+            # 加载失败通常是文件缺失或 YAML 解析错误，记录完整堆栈供排查。
+            logger.warning(
+                "热更新 Agent 配置失败: %s (from %s): %s",
+                config_id, yaml_path, e, exc_info=True,
+            )
+            return None
 
     def count(self) -> int:
         """返回已注册的 Agent 配置数量。

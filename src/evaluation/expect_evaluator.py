@@ -28,7 +28,8 @@
 
 import logging
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +68,8 @@ class ExpectConditionEvaluator:
         "not_equals": lambda a, b: a != b,
         "contains": lambda a, b: b in a if isinstance(a, str) else False,
         "not_contains": lambda a, b: b not in a if isinstance(a, str) else True,
-        "is_true": lambda a, b: bool(a) is True,
-        "is_false": lambda a, b: bool(a) is False,
+        "is_true": lambda a, b: bool(a) is True,  # noqa: ARG005
+        "is_false": lambda a, b: bool(a) is False,  # noqa: ARG005
         "greater_than": lambda a, b: a > b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "less_than": lambda a, b: a < b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "in": lambda a, b: a in b if isinstance(b, (list, tuple, set)) else False,
@@ -294,9 +295,8 @@ class ExpectConditionEvaluator:
             errors.append(f"不支持的运算符: {operator}")
 
         # 检查 value 字段（is_true 和 is_false 不需要 value）
-        if operator not in ("is_true", "is_false"):
-            if "value" not in condition:
-                errors.append(f"运算符 {operator} 需要 value 字段")
+        if operator not in ("is_true", "is_false") and "value" not in condition:
+            errors.append(f"运算符 {operator} 需要 value 字段")
 
         return errors
 
@@ -340,7 +340,7 @@ def get_expect_evaluator() -> ExpectConditionEvaluator:
     Returns:
         ExpectConditionEvaluator 实例
     """
-    global _expect_evaluator
+    global _expect_evaluator  # noqa: PLW0603
     if _expect_evaluator is None:
         _expect_evaluator = ExpectConditionEvaluator()
     return _expect_evaluator
@@ -352,5 +352,5 @@ def reset_expect_evaluator() -> None:
 
     主要用于测试场景。
     """
-    global _expect_evaluator
+    global _expect_evaluator  # noqa: PLW0603
     _expect_evaluator = None

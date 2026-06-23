@@ -13,7 +13,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from connectors.types import ConnectorInfo
+from .types import ConnectorInfo
 
 if TYPE_CHECKING:
     from connectors.base import BaseConnector

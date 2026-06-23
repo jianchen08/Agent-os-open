@@ -1,0 +1,130 @@
+# task_manage 工具定义（OpenAI function calling 格式）
+# 6 个操作：get / continue / stop / delete / complete / fail
+
+name: task_manage
+description: |
+  任务管理工具：用于查询和控制任务的生命周期。
+
+  ## 6 个操作
+  - **get**：查询任务。不传 task_id → 返回列表简表；传 task_id → 返回单个任务详情
+  - **continue**：继续执行。可重试失败任务、恢复已停止任务、向运行中任务注入指令
+  - **stop**：停止任务。统一进入 stopped 状态（数据完好，可 continue 恢复）
+  - **delete**：彻底删除任务
+  - **complete**：标记容器任务完成（仅L1）
+  - **fail**：标记容器任务失败（仅L1）
+
+  ## continue 的四种行为
+  - 运行中任务 + message：注入指令（不改变状态）
+  - 失败/超时任务：重试（自动继承管道+空间）
+  - 失败/超时任务 + message：重试 + 注入指令
+  - 已停止任务：恢复执行
+
+  ## 权限
+  - L1：默认只显示自己提交的任务；传 show_all=true 可递归查看当前会话所有任务
+  - L2：只能管理自己提交的子任务
+
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - get
+        - continue
+        - stop
+        - delete
+        - complete
+        - fail
+      description: |
+        操作类型：
+        - get：查询任务。不传 task_id 返回列表简表，传 task_id 返回详情
+        - continue：继续执行（重试/恢复/注入指令）
+        - stop：停止任务（统一进入 stopped 状态）
+        - delete：删除任务
+        - complete：标记容器完成（仅L1）
+        - fail：标记容器失败（仅L1）
+
+    task_id:
+      type: string
+      description: |
+        目标任务 ID。
+        - get：不传返回列表，传入返回详情
+        - continue/stop/delete：必填（与 task_ids 二选一）
+        - complete/fail：必填
+
+    task_ids:
+      type: array
+      items:
+        type: string
+      description: 批量任务 ID 列表（与 task_id 二选一）。适用于 continue/stop/delete 操作
+
+    task_scope:
+      type: string
+      enum:
+        - all
+        - container
+        - non_container
+      description: 任务范围过滤（get 列表模式时生效）
+      default: all
+
+    status:
+      type: string
+      enum:
+        - pending
+        - running
+        - stopped
+        - completed
+        - failed
+        - timeout
+      description: 按状态筛选（get 列表模式时生效）
+
+    message:
+      type: string
+      description: |
+        注入的指令内容（continue 操作时可选）。
+        - 不传：纯重试/恢复，无额外指令
+        - 传入：注入指令，子任务下一轮会看到此消息
+
+    reason:
+      type: string
+      description: 操作原因说明（stop/delete 时推荐填写）
+
+    container_reason:
+      type: string
+      description: 容器操作原因（complete/fail 操作时填写）
+
+    include_details:
+      type: boolean
+      description: 是否包含详细信息（get 详情模式生效）。设为 true 时返回 recent_activities 和 elapsed_seconds
+      default: false
+
+    include_agent_calls:
+      type: boolean
+      description: 是否只返回工具调用类型的活动记录（get 详情模式生效，自动启用详细信息）
+      default: false
+
+    parent_task_id:
+      type: string
+      description: 父任务 ID（get 列表模式时传入可筛选该容器下的子任务）
+
+    project_id:
+      type: string
+      description: 项目 ID，用于筛选特定项目的任务
+
+    session_id:
+      type: string
+      description: 会话 ID，用于筛选特定会话的任务
+
+    limit:
+      type: integer
+      description: 返回数量限制，默认 50，最大 100
+      default: 50
+      maximum: 100
+
+    show_all:
+      type: boolean
+      description: 是否显示当前会话的所有任务（含子任务的子任务）。默认 false，L1 只显示自己提交的任务。仅 L1 生效。
+      default: false
+
+  required:
+    - action

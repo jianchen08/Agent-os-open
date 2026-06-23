@@ -6,8 +6,8 @@ VSCode 连接器模块
 - VSCodeChannel: VSCode 消息通道
 """
 
-from connectors.vscode.channel import VSCodeChannel
-from connectors.vscode.connector import VSCodeConnector
+from .channel import VSCodeChannel
+from .connector import VSCodeConnector
 
 __all__ = [
     "VSCodeConnector",

@@ -28,7 +28,14 @@ export function ModulesSettingsPage() {
   const activeReg = modules.find((m) => m.schema.identity.id === activeModule)
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
+          &larr; 返回设置
+        </a>
+        <h1 className="ml-4 text-base font-semibold">模块设置</h1>
+      </header>
+      <div className="flex flex-1 overflow-hidden">
       {/* 模块列表 */}
       <div className="border-border w-64 overflow-y-auto border-r">
         <div className="text-foreground border-border border-b p-4 text-sm font-medium">
@@ -91,6 +98,7 @@ export function ModulesSettingsPage() {
             选择左侧模块查看配置
           </div>
         )}
+      </div>
       </div>
     </div>
   )

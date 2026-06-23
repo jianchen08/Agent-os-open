@@ -5,11 +5,10 @@
  */
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 import { generateUUID } from '@/utils/uuid'
 
-import { terminatePipeline } from './handlers/utils'
+import { allocateNextSequence, terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
 
 /**
@@ -20,48 +19,17 @@ export function handleStateChange(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
   const threadId = eventData?.data?.thread_id || eventData?.thread_id
 
-  if (status === 'suspended' && pipelineId) {
+  // BUG-FIX-fix_20260617_state_change_whitelist:
+  // 问题根因: 原代码只处理 status === 'suspended'，遗漏 stopped/finished/failed/completed，
+  //   导致用户点"停止生成"或管道异常终止时，前端 streamingState 永远不被清理，UI 永久转圈。
+  // 修复方案: 扩展终态白名单，所有终态都调用 terminatePipeline 清理 streamingState。
+  // 影响范围: 停止按钮、异常终止、正常完成等场景的 streaming 清理
+  // 修复日期: 2026-06-17
+  const TERMINAL_STATUSES = ['suspended', 'stopped', 'finished', 'failed', 'completed', 'cancelled']
+  if (pipelineId && TERMINAL_STATUSES.includes(status)) {
     terminatePipeline(pipelineId, threadId)
-    loggers.sessionStore.info('[STATE_CHANGE] pipeline suspended → streaming cleaned: pipeline=%s', pipelineId)
+    loggers.sessionStore.info('[STATE_CHANGE] pipeline %s → streaming cleaned: pipeline=%s', status, pipelineId)
   }
-}
-
-/**
- * 重连后补漏轮询：fetchMessages 失败或返回空时，启动定时轮询
- * 直到 streaming 状态结束或超时（最多 3 分钟）
- */
-function _startReconnectPolling(
-  pipelineId: string,
-  sessionId: string,
-  initialCursor: number,
-  logger: ReturnType<typeof loggers.sessionStore>,
-): void {
-  const startTime = Date.now()
-
-  const pollTimer = setInterval(() => {
-    const pipelineStore = usePipelineMessageStore.getState()
-
-    // streaming 已结束，停止轮询
-    if (!pipelineStore.isStreaming(pipelineId)) {
-      clearInterval(pollTimer)
-      return
-    }
-
-    // 超过最大轮询时长，停止轮询
-    if (Date.now() - startTime > RECONNECT_POLL_MAX_DURATION_MS) {
-      logger.warn('[streaming] 重连补漏轮询超时: pipelineId=%s', pipelineId)
-      clearInterval(pollTimer)
-      return
-    }
-
-    const bottomCursor = pipelineStore.getBottomCursor(pipelineId)
-    pipelineStore.fetchMessages(pipelineId, {
-      after_sequence: bottomCursor,
-      threadId: sessionId,
-    }).catch((err) => {
-      logger.warn('[streaming] 重连补漏轮询失败: pipelineId=%s err=%s', pipelineId, err)
-    })
-  }, RECONNECT_POLL_INTERVAL_MS)
 }
 
 /**
@@ -73,7 +41,6 @@ function _startReconnectPolling(
 export function handleReconnected(): void {
   const pipelineStore = usePipelineMessageStore.getState()
   const streamingState = pipelineStore.streamingState
-  const streamingStore = useStreamingStore.getState()
   const logger = loggers.sessionStore
 
   logger.info('[streaming] WS 重连，清理残留状态，streaming 管道数=%d', Object.keys(streamingState).length)
@@ -92,27 +59,46 @@ export function handleReconnected(): void {
     }
   }
 
-  // 清理 streamingStore 中不再 streaming 的 tab
-  const streamingTabs = streamingStore.streamingTabs
-  for (const tabId of Object.keys(streamingTabs)) {
-    if (!streamingState[tabId]?.isStreaming) {
-      streamingStore.setStreamingForTab(tabId, false)
+  // 为 streaming 管道补漏
+  const streamingPipelineIds = Object.keys(streamingState).filter(
+    (pipelineId) => streamingState[pipelineId]?.isStreaming,
+  )
+  // BUG-FIX-fix_20260621_streaming_state_leak:
+  // 问题根因: 原代码仅跳过补漏 fetch，未调用 terminatePipeline 清理 streamingState，
+  //   导致旧 isStreaming=true 残留。用户发新消息时 stream_start 到达，
+  //   streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
+  // 修复方案: 对每个 streaming 管道调用 terminatePipeline 清理 streamingState，
+  //   同时将残留的 streaming 占位消息标记为 completed（避免 UI 永久转圈）。
+  // 影响范围: WS 重连后发送消息无 AI 回复的偶发 Bug
+  // 修复日期: 2026-06-21
+  for (const pipelineId of streamingPipelineIds) {
+    // 将残留的 streaming 占位消息标记为 completed，避免 UI 永久转圈
+    const messages = pipelineStore.messagesByPipeline[pipelineId] || []
+    for (const msg of messages as any[]) {
+      if (msg.role === 'assistant' && msg.status === 'streaming') {
+        pipelineStore.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+      }
     }
+    // 清理 streamingState（同时处理 threadId）
+    const threadId = pipelineStore.pipelineSessionMap[pipelineId]
+    terminatePipeline(pipelineId, threadId !== pipelineId ? threadId : undefined)
+    logger.info('[streaming] 终止残留流式管道 %s，清理 streamingState', pipelineId.slice(0, 12))
   }
 
-  // 为 streaming 管道补漏
-  for (const pipelineId of Object.keys(streamingState)) {
-    if (!streamingState[pipelineId]?.isStreaming) continue
-    const bottomCursor = pipelineStore.getBottomCursor(pipelineId)
-    const sessionId = pipelineStore.pipelineSessionMap[pipelineId]
-    if (sessionId) {
-      pipelineStore.fetchMessages(pipelineId, {
-        after_sequence: bottomCursor,
-        threadId: sessionId,
-      }).catch((err) => {
-        logger.warn('[streaming] 重连补漏失败: pipelineId=%s err=%s', pipelineId, err)
-      })
-    }
+  // BUG-FIX-fix_20260617_streaming_gap_no_notify:
+  // 问题根因: WS 重连后跳过流式管道补漏 fetch，断连期间流式消息永久丢失，
+  //          且用户无任何感知。
+  // 修复方案: 补漏 fetch 存在竞态风险无法安全实现，至少通知用户流式消息可能丢失，
+  //          引导用户手动检查或刷新。
+  if (streamingPipelineIds.length > 0) {
+    useNotificationStore.getState().addNotification({
+      title: '流式消息可能丢失',
+      message: `WebSocket 重连期间有 ${streamingPipelineIds.length} 个流式管道可能丢失消息，请检查相关会话或手动刷新`,
+      priority: 'high',
+      category: 'alert',
+      isBlocking: false,
+      autoDismissMs: 10000,
+    })
   }
 }
 
@@ -152,13 +138,16 @@ export function handleSystemNotification(eventData: any): void {
       return m.content === content
     })
     if (alreadyExists) {
-      console.warn('[系统通知] notification_id 缺失，使用内容去重: %.40s', content.slice(0, 40))
+      // BUG-FIX-M03: WS handler 层 console 残留
+      // 问题根因: 降级去重路径用 console.warn 记录。
+      // 修复方案: 改用正式 logger.warn。
+      loggers.websocket.warn('[系统通知] notification_id 缺失，使用内容去重: %.40s', content.slice(0, 40))
       return
     }
   }
 
-  console.warn(
-    `[MSG-LIFE] ★ 系统通知创建: pipeline=%s content=%.40s`,
+  loggers.websocket.debug(
+    '[MSG-LIFE] 系统通知创建: pipeline=%s content=%.40s',
     pipelineId.slice(0, 12), content.slice(0, 40),
   )
 
@@ -167,6 +156,7 @@ export function handleSystemNotification(eventData: any): void {
     role: 'system',
     content,
     timestamp: new Date().toISOString(),
+    sequence: allocateNextSequence(pipelineId, data?.sequence),
     parts: [
       {
         type: 'system',

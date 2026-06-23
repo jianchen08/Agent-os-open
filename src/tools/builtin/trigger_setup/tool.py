@@ -203,7 +203,7 @@ class TriggerSetupTool(BuiltinTool):
             ],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912
         """执行触发器设置或取消"""
         action = inputs.get("action", "setup")
         pipeline_id = inputs.get("pipeline_id")
@@ -255,27 +255,26 @@ class TriggerSetupTool(BuiltinTool):
                 return await self._setup_delay_trigger(
                     inputs, execution_id, pipeline_id, message
                 )
-            elif trigger_type == "schedule":
+            if trigger_type == "schedule":
                 return await self._setup_schedule_trigger(
                     inputs, execution_id, pipeline_id, message
                 )
-            elif trigger_type == "interval":
+            if trigger_type == "interval":
                 return await self._setup_interval_trigger(
                     inputs, execution_id, pipeline_id, message
                 )
-            elif trigger_type == "event":
+            if trigger_type == "event":
                 return await self._setup_event_trigger(
                     inputs, execution_id, pipeline_id, message
                 )
-            elif trigger_type == "condition":
+            if trigger_type == "condition":
                 return await self._setup_condition_trigger(
                     inputs, execution_id, pipeline_id, message
                 )
-            else:
-                return create_failure_result(
-                    error=f"不支持的触发类型: {trigger_type}",
-                    error_code="INVALID_TRIGGER_TYPE",
-                )
+            return create_failure_result(
+                error=f"不支持的触发类型: {trigger_type}",
+                error_code="INVALID_TRIGGER_TYPE",
+            )
 
         except Exception as e:
             logger.error(f"[TriggerSetupTool] 设置触发器失败: {e}", exc_info=True)

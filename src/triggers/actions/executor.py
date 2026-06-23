@@ -148,7 +148,7 @@ class ActionExecutor:
         self, user_id: str, title: str, message: str, priority: str
     ):
         try:
-            from src.api.services.notification_service import NotificationService
+            from src.api.services.notification_service import NotificationService  # noqa: PLC0415
 
             if user_id:
                 service = NotificationService()
@@ -206,7 +206,7 @@ class ActionExecutor:
             try:
                 template = Template(str(body))
                 rendered = template.render(**context)
-                import json
+                import json  # noqa: PLC0415
 
                 body = json.loads(rendered)
             except Exception as e:
@@ -277,10 +277,7 @@ class ActionExecutor:
                 error="Max retries exceeded",
             )
 
-        if exponential_backoff:
-            actual_delay = delay_seconds * (2**current_retries)
-        else:
-            actual_delay = delay_seconds
+        actual_delay = delay_seconds * 2 ** current_retries if exponential_backoff else delay_seconds
 
         retry_info = {
             "task_id": task_id,
@@ -338,21 +335,19 @@ class ActionExecutor:
                         message=f"任务 {task_id} 已标记为 {status}",
                         data={"task_id": task_id, "status": status, "result": result},
                     )
-                else:
-                    error_msg = update_result.get("error", "未知错误")
-                    return ExecutionResult(
-                        success=False,
-                        message=f"更新任务状态失败: {error_msg}",
-                        error=error_msg,
-                    )
-            else:
-                logger.warning("任务管理器服务未注册，仅记录日志")
-                logger.info(f"任务完成(降级): {task_id}, 状态: {status}")
+                error_msg = update_result.get("error", "未知错误")
                 return ExecutionResult(
-                    success=True,
-                    message=f"任务 {task_id} 已标记为 {status} (降级模式)",
-                    data={"task_id": task_id, "status": status, "result": result},
+                    success=False,
+                    message=f"更新任务状态失败: {error_msg}",
+                    error=error_msg,
                 )
+            logger.warning("任务管理器服务未注册，仅记录日志")
+            logger.info(f"任务完成(降级): {task_id}, 状态: {status}")
+            return ExecutionResult(
+                success=True,
+                message=f"任务 {task_id} 已标记为 {status} (降级模式)",
+                data={"task_id": task_id, "status": status, "result": result},
+            )
 
         except Exception as e:
             logger.error(f"执行任务完成动作失败: {e}")

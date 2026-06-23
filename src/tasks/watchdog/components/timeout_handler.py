@@ -180,10 +180,7 @@ class TimeoutHandler:
                 )
 
         # 无活动
-        if updated_at:
-            age_seconds = (now - updated_at).total_seconds()
-        else:
-            age_seconds = None
+        age_seconds = (now - updated_at).total_seconds() if updated_at else None
 
         return TaskActivityStatus(
             is_active=False,
@@ -289,45 +286,44 @@ class TimeoutHandler:
                 "retry_count": retry_count + 1,
                 "max_retries": max_retries,
             }
-        else:
-            # 超过最大重试次数，标记为失败
-            task_metadata["failed_at"] = datetime.now().isoformat()
-            task_metadata["failure_reason"] = "timeout_max_retries_exceeded"
+        # 超过最大重试次数，标记为失败
+        task_metadata["failed_at"] = datetime.now().isoformat()
+        task_metadata["failure_reason"] = "timeout_max_retries_exceeded"
 
-            await session.execute(
-                update(Task)
-                .where(Task.id == task_id)
-                .values(
-                    status="failed",
-                    task_metadata=task_metadata,
-                    updated_at=datetime.now(),
-                )
+        await session.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(
+                status="failed",
+                task_metadata=task_metadata,
+                updated_at=datetime.now(),
             )
-            await session.commit()
+        )
+        await session.commit()
 
-            logger.error(f"任务 {task_id} 超时失败，已达到最大重试次数")
+        logger.error(f"任务 {task_id} 超时失败，已达到最大重试次数")
 
-            # 发送通知
-            if self.notification_callback:
-                try:
-                    await self.notification_callback(
-                        task_id=task_id,
-                        project_id=task.parent_task_id,
-                        event="task_timeout_failed",
-                        message="任务超时失败，已达到最大重试次数",
-                        details={
-                            "retry_count": retry_count,
-                            "max_retries": max_retries,
-                        },
-                    )
-                except Exception as e:
-                    logger.error(f"发送通知失败: {e}")
+        # 发送通知
+        if self.notification_callback:
+            try:
+                await self.notification_callback(
+                    task_id=task_id,
+                    project_id=task.parent_task_id,
+                    event="task_timeout_failed",
+                    message="任务超时失败，已达到最大重试次数",
+                    details={
+                        "retry_count": retry_count,
+                        "max_retries": max_retries,
+                    },
+                )
+            except Exception as e:
+                logger.error(f"发送通知失败: {e}")
 
-            return {
-                "task_id": task_id,
-                "action": "failed",
-                "reason": "max_retries_exceeded",
-            }
+        return {
+            "task_id": task_id,
+            "action": "failed",
+            "reason": "max_retries_exceeded",
+        }
 
     async def check_task_health_with_activity(
         self,

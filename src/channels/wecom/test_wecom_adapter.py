@@ -19,17 +19,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from channels.wecom.crypto import WecomCrypto
-from channels.wecom.stream_client import WeComStreamClient
+from channels.gateway.message_normalizer import MessageNormalizer
+from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
 from channels.wecom.adapter import (
     WeComAdapter,
     WeComInputAdapter,
     WeComOutputAdapter,
     _extract_wecom_text,
 )
-from channels.gateway.message_normalizer import MessageNormalizer
-from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
-
+from channels.wecom.crypto import WecomCrypto
+from channels.wecom.stream_client import WeComStreamClient
 
 # ── 测试用常量 ──────────────────────────────────────
 
@@ -108,8 +107,8 @@ class TestWecomCrypto:
         corp_id_bytes = CORP_ID.encode("utf-8")
         plaintext = random_bytes + msg_len + msg_bytes + corp_id_bytes
 
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.primitives import padding as sym_padding
+        from cryptography.hazmat.primitives import padding as sym_padding  # noqa: PLC0415
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
 
         padder = sym_padding.PKCS7(128).padder()
         padded = padder.update(plaintext) + padder.finalize()
@@ -131,8 +130,8 @@ class TestWecomCrypto:
         wrong_corp = b"wrong_corp_id"
         plaintext = random_bytes + msg_len + msg_bytes + wrong_corp
 
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.primitives import padding as sym_padding
+        from cryptography.hazmat.primitives import padding as sym_padding  # noqa: PLC0415
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
 
         padder = sym_padding.PKCS7(128).padder()
         padded = padder.update(plaintext) + padder.finalize()
@@ -150,7 +149,7 @@ class TestWecomCrypto:
 
     def test_decrypt_invalid_xml(self) -> None:
         """解密无效 XML 抛出 ValueError。"""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             self.crypto.decrypt_message("not valid xml")
 
 
@@ -490,7 +489,7 @@ class TestWeComAdapter:
 
         # 从加密 XML 中提取参数
         root = ET.fromstring(encrypted_xml)
-        root.find("Encrypt").text
+        root.find("Encrypt").text  # noqa: B018
         timestamp = root.find("TimeStamp").text
         nonce = root.find("Nonce").text
         signature = root.find("MsgSignature").text
@@ -528,8 +527,8 @@ class TestWeComAdapter:
         corp_id_bytes = CORP_ID.encode("utf-8")
         plaintext = random_bytes + msg_len + msg_bytes + corp_id_bytes
 
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.primitives import padding as sym_padding
+        from cryptography.hazmat.primitives import padding as sym_padding  # noqa: PLC0415
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
 
         padder = sym_padding.PKCS7(128).padder()
         padded = padder.update(plaintext) + padder.finalize()

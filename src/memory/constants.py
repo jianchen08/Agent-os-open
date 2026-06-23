@@ -25,7 +25,6 @@ class TokenBudget:
 
     CRITICAL_THRESHOLD = 0.90
     WARNING_THRESHOLD = 0.80
-    COMPRESS_TRIGGER_RATIO = 0.50
     DEFAULT_BUDGET = 100000
 
 
@@ -51,7 +50,6 @@ class MemoryTypeConst:
 class Compression:
     """记忆压缩相关常量。"""
 
-    TRIGGER_RATIO = 0.50
     OPTIMAL_THRESHOLD = 0.50
     DEFAULT_COMPRESSOR = "ratio"
     MIN_COMPRESS_SIZE = 1000

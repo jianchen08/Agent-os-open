@@ -427,16 +427,18 @@ async def test_templates():
     except Exception as e:
         record("Templates", "浠庣洰褰曞姞杞芥ā鏉?, "PART", "鍔犺浇澶辫触", traceback.format_exc())
 
-    # TemplateRenderer.render 鎺ュ彈 TemplateSpec 鍜?variables
+    # TemplateRenderer.render — templates.renderer 已在死代码清理中删除，跳过
     try:
         from templates.renderer import TemplateRenderer
         from templates.types import TemplateSpec, TemplateType
         renderer = TemplateRenderer()
         spec = TemplateSpec(name="test_render", template_type=TemplateType.CONSUMABLE, raw_content="Hello {name}!", placeholders=["name"])
         rendered = renderer.render(spec, variables={"name": "Agent OS"})
-        record("Templates", "妯℃澘娓叉煋", "PASS", f"娓叉煋缁撴灉: '{rendered}'")
+        record("Templates", "模板渲染", "PASS", f"渲染结果: ''{rendered}''")
+    except (ImportError, ModuleNotFoundError):
+        record("Templates", "模板渲染", "SKIP", "templates.renderer 已在死代码清理中删除")
     except Exception as e:
-        record("Templates", "妯℃澘娓叉煋", "FAIL", "娓叉煋澶辫触", traceback.format_exc())
+        record("Templates", "模板渲染", "FAIL", "渲染失败", traceback.format_exc())
 
     try:
         from templates.registry import TemplateRegistry
@@ -513,11 +515,11 @@ async def test_triggers():
 async def test_config_reload():
     print("\n" + "=" * 60 + "\n10. 閰嶇疆鐑噸杞絓n" + "=" * 60)
     try:
-        from config.reload import ConfigReloader
-        reloader = ConfigReloader()
-        record("ConfigReload", "ConfigReloader瀹炰緥鍖?, "PASS", "ConfigReloader() 瀹炰緥鍖栨垚鍔?)
+        from config.config_center import get_config_center
+        center = get_config_center()
+        record("ConfigReload", "ConfigCenter瀹炰緥鍖?, "PASS", "ConfigCenter() 瀹炰緥鍖栨垚鍔?)
     except Exception as e:
-        record("ConfigReload", "ConfigReloader", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc())
+        record("ConfigReload", "ConfigCenter", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc())
 
     try:
         from config.schema import ConfigSchemaValidator
@@ -556,88 +558,6 @@ async def test_config_reload():
             record("ConfigReload", "鐩綍鎵归噺鏍￠獙", "PART", "pipelines 鐩綍涓嶅瓨鍦?)
     except Exception as e:
         record("ConfigReload", "鐩綍鎵归噺鏍￠獙", "PART", "鏍￠獙澶辫触", traceback.format_exc())
-
-
-# ============================================================================
-# 11. 璺ㄧ閬撹矾鐢?(M11a)
-# ============================================================================
-async def test_cross_pipeline():
-    print("\n" + "=" * 60 + "\n11. 璺ㄧ閬撹矾鐢?(M11a)\n" + "=" * 60)
-    try:
-        from pipeline.registry import PipelineRegistry
-        preg = PipelineRegistry()
-        record("CrossPipeline", "PipelineRegistry瀹炰緥鍖?, "PASS", "PipelineRegistry() 瀹炰緥鍖栨垚鍔?)
-    except Exception as e:
-        record("CrossPipeline", "PipelineRegistry", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc()); return
-
-    # RouteSignal DELEGATE - target 瀛楁涓嶆槸 target_pipeline
-    try:
-        from pipeline.types import RouteSignal
-        sig = RouteSignal(route_type="delegate", target="research", reason="闇€瑕佺爺绌惰兘鍔?)
-        record("CrossPipeline", "DELEGATE璺敱淇″彿", "PASS", f"RouteSignal(route_type='delegate', target='research')")
-    except Exception as e:
-        record("CrossPipeline", "DELEGATE璺敱淇″彿", "FAIL", "鍒涘缓澶辫触", traceback.format_exc())
-
-    # 濮旀淳绛栫暐鎻掍欢 鈥?绫诲悕鏄?WaitForResultPlugin, FireAndForgetPlugin, EventCallbackPlugin
-    strategy_results = {}
-    for name, cls_name in [("WaitForResultPlugin", "wait_for_result"), ("FireAndForgetPlugin", "fire_and_forget"), ("EventCallbackPlugin", "event_callback")]:
-        try:
-            mod = __import__(f"agent_os.plugins.output.{cls_name}", fromlist=[name])
-            cls = getattr(mod, name)
-            # WaitForResultPlugin 闇€瑕?registry 鍙傛暟
-            # WaitForResultPlugin 闇€瑕?registry 鍙傛暟, EventCallbackPlugin 闇€瑕?event_bus
-            if name == "WaitForResultPlugin":
-                from pipeline.registry import PipelineRegistry
-                instance = cls(registry=PipelineRegistry())
-            elif name == "EventCallbackPlugin":
-                from pipeline.event_bus import EventBus
-                instance = cls(event_bus=EventBus())
-            else:
-                instance = cls()
-            strategy_results[name] = instance
-            record("CrossPipeline", f"{name}绛栫暐鎻掍欢", "PASS", f"name={instance.name}")
-        except Exception as e:
-            record("CrossPipeline", f"{name}绛栫暐鎻掍欢", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc())
-
-    # PipelineRegistry 浣跨敤 submit/route_to (M1鍏煎) 鎴?route (M11a)
-    try:
-        from pipeline.registry import PipelineRegistry
-        preg = PipelineRegistry()
-        # M1 鍏煎: submit + route_to
-        pid = preg.submit("research", config={"description": "鐮旂┒绠￠亾"})
-        record("CrossPipeline", "PipelineRegistry.submit", "PASS", f"鎻愪氦绠￠亾: id={pid}")
-        rid = preg.route_to("research", context={"task": "閲忓瓙璁＄畻"})
-        record("CrossPipeline", "PipelineRegistry.route_to", "PASS", f"璺敱鍒? id={rid}")
-    except Exception as e:
-        record("CrossPipeline", "PipelineRegistry璺敱", "FAIL", "璺敱澶辫触", traceback.format_exc())
-
-    # 瀛愮閬撳疄闄呮墽琛?鈥?浣跨敤鐙珛 PipelineEngine
-    try:
-        from pipeline.engine import PipelineEngine
-        from pipeline.registry import PluginRegistry
-        from pipeline.route import InputRouteTable, OutputRouteTable, InputRouteEntry, OutputRouteEntry
-        from pipeline.plugin import ICorePlugin
-        from pipeline.types import ErrorPolicy, create_initial_state
-
-        class _SubEchoCore(ICorePlugin):
-            """娴嬭瘯鐢ㄥ瓙绠￠亾 Echo 鏍稿績鎻掍欢銆?""
-            error_policy = ErrorPolicy.ABORT
-            @property
-            def name(self): return "sub_echo_core"
-            @property
-            def priority(self): return 50
-            async def execute(self, ctx):
-                return {"raw_result": f"Echo: {ctx.state.get('user_input', '')}"}
-
-        sub_reg = PluginRegistry(); sub_reg.register_core("llm_call", _SubEchoCore())
-        sub_it = InputRouteTable([InputRouteEntry(name="default", condition="True", target="core", plugins=[], priority=10)])
-        sub_ot = OutputRouteTable([OutputRouteEntry(route_type="end", condition="True", priority=99)])
-        sub_engine = PipelineEngine(input_route_table=sub_it, output_route_table=sub_ot, plugin_registry=sub_reg)
-        state = create_initial_state(user_input="鐮旂┒閲忓瓙璁＄畻")
-        result = await sub_engine.run(state)
-        record("CrossPipeline", "瀛愮閬撳疄闄呮墽琛?, "PASS", f"raw_result='{result.get('raw_result')}', iteration={result.get('iteration')}")
-    except Exception as e:
-        record("CrossPipeline", "瀛愮閬撳疄闄呮墽琛?, "FAIL", "鎵ц澶辫触", traceback.format_exc())
 
 
 # ============================================================================
@@ -698,31 +618,6 @@ async def test_websocket():
 # ============================================================================
 async def test_infrastructure():
     print("\n" + "=" * 60 + "\n13. 鍩虹璁炬柦\n" + "=" * 60)
-    try:
-        from infrastructure.scheduler import Scheduler
-        sched = Scheduler()
-        record("Infrastructure", "Scheduler瀹炰緥鍖?, "PASS", "Scheduler() 瀹炰緥鍖栨垚鍔?)
-    except Exception as e:
-        record("Infrastructure", "Scheduler", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc())
-
-    # ConcurrencyController 浣跨敤 provider_max/model_max/agent_max
-    try:
-        from infrastructure.concurrency import ConcurrencyController
-        cc = ConcurrencyController(config={"provider_max": 3, "model_max": 5, "agent_max": 10})
-        record("Infrastructure", "ConcurrencyController瀹炰緥鍖?, "PASS", "ConcurrencyController 瀹炰緥鍖栨垚鍔?)
-    except Exception as e:
-        record("Infrastructure", "ConcurrencyController", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc())
-
-    # acquire 鍙帴鍙?level 鍙傛暟
-    try:
-        from infrastructure.concurrency import ConcurrencyController
-        cc = ConcurrencyController()
-        async with cc.acquire("provider"):
-            pass
-        record("Infrastructure", "ConcurrencyController骞跺彂鑾峰彇", "PASS", "acquire('provider') 鎴愬姛")
-    except Exception as e:
-        record("Infrastructure", "ConcurrencyController骞跺彂鑾峰彇", "FAIL", "鑾峰彇澶辫触", traceback.format_exc())
-
     try:
         from infrastructure.resource import ResourceManager
         rm = ResourceManager()
@@ -814,7 +709,6 @@ async def run_all_tests():
     await test_templates()
     await test_triggers()
     await test_config_reload()
-    await test_cross_pipeline()
     await test_websocket()
     await test_infrastructure()
     await test_memory()

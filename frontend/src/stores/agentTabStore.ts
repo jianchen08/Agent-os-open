@@ -32,8 +32,17 @@ import type { AgentTab } from '@/types/task'
 function getMainPipelineId(sessionId: string): string | null {
   const sessions = useSessionStore.getState().sessions
   const session = sessions.find((s) => s.id === sessionId)
-  // pipelineIds[0] 是按创建顺序的第一个管道，固定为主管道
-  return session?.pipelineIds?.[0] || session?.activePipelineId || null
+  // BUG-FIX-fix_20260617_remove_main_pipeline_fallback:
+  // 问题根因: 原代码用 session.activePipelineId 作为主管道 fallback，
+  //          但 activePipelineId 在派生过子 Tab 时会指向子管道，作为主管道兜底是语义错误。
+  // 修复方案: 只用 pipelineIds[0]，缺失时记 warn 返回 null 由调用方处理。
+  // 影响范围: 主管道 ID 解析
+  // 修复日期: 2026-06-17
+  const mainPid = session?.pipelineIds?.[0]
+  if (!mainPid) {
+    console.warn('[getMainPipelineId] 主管道缺失: sessionId=%s pipelineIds=%o', sessionId, session?.pipelineIds)
+  }
+  return mainPid ?? null
 }
 
 /** localStorage 存储键前缀 */
@@ -676,21 +685,18 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (prevActiveTabId === tabId) return
 
     const pipelineStore = usePipelineMessageStore.getState()
-    // 统一通过 tab.pipelineRunId 激活管道（主标签和子标签逻辑一致）
-    let effectivePipelineId = tab.pipelineRunId
+    // BUG-FIX-fix_20260617_remove_pipeline_fallback:
+    // 问题根因: tab.pipelineRunId 为空时从 pipelineTabMap 反向查找是脏数据兜底，
+    //          会用错误的 pipelineId 路由到错误管道。Tab 数据不完整本就是 bug，应报错。
+    // 修复方案: 直接用 tab.pipelineRunId，缺失时记 error 并中止切换，不写入 store。
+    // 影响范围: Tab 切换路径
+    // 修复日期: 2026-06-17
+    const effectivePipelineId = tab.pipelineRunId
     if (!effectivePipelineId) {
-      for (const [pid, tid] of Object.entries(get().pipelineTabMap)) {
-        if (tid === tabId) {
-          effectivePipelineId = pid
-          break
-        }
-      }
+      console.error('[switchToTab] Tab 数据损坏：pipelineRunId 为空，中止切换: tabId=%s', tabId)
+      return  // 中止切换，避免用错误 pipelineId 路由
     }
-    if (effectivePipelineId) {
-      pipelineStore.activatePipeline(effectivePipelineId)
-    } else {
-      console.warn(`[AgentTabStore] switchToTab: 无法解析 pipelineId, tabId=${tabId}`)
-    }
+    pipelineStore.activatePipeline(effectivePipelineId)
 
     set({ activeTabId: tabId })
     get().clearTabUnread(tabId)
@@ -939,24 +945,15 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const tab = state.tabs.find((t) => t.id === tabId)
     if (!tab || !state.currentSessionId) return
 
-    let effectivePipelineId = pipelineRunId || tab.pipelineRunId
+    // BUG-FIX-fix_20260617_remove_pipeline_fallback:
+    // 问题根因: 同 switchToTab，pipelineTabMap 反向查找是脏数据兜底，
+    //          会用错误的 pipelineId 加载错误管道的消息。
+    // 修复方案: 直接用 pipelineRunId 参数或 tab.pipelineRunId，缺失时报错返回。
+    // 影响范围: Tab 消息加载路径
+    // 修复日期: 2026-06-17
+    const effectivePipelineId = pipelineRunId || tab.pipelineRunId
     if (!effectivePipelineId) {
-      // tab.pipelineRunId 为空说明创建 Tab 时数据不完整，从 pipelineTabMap 反向查找作为兜底
-      console.warn('[agentTabStore] tab.pipelineRunId 为空，反向查找 pipelineId: tabId=%s', tabId)
-      for (const [pid, tid] of Object.entries(state.pipelineTabMap)) {
-        if (tid === tabId) {
-          effectivePipelineId = pid
-          break
-        }
-      }
-    }
-    // 无法确定 pipelineId 时跳过，避免用错误 ID 加载数据
-    if (!effectivePipelineId) {
-      console.error('[agentTabStore] 无法确定 pipelineId，跳过消息加载: tabId=%s', tabId)
-      return
-    }
-    if (!effectivePipelineId) {
-      console.warn('[AgentTabStore.loadTabMessages] 无法解析 pipelineId, tabId=', tabId)
+      console.error('[loadTabMessages] Tab 数据损坏：pipelineRunId 为空，跳过加载: tabId=%s', tabId)
       return
     }
 
@@ -988,7 +985,14 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       //          切换回来时 activatePipeline 即可恢复显示，无需重新获取。
       // 影响范围: 标签切换、会话切换时的流式输出连续性
       // 修复日期: 2026-05-15
-      if (!pipelineStore.isStreaming(effectivePipelineId)) {
+      //
+      // BUG-FIX-fix_20260614_stale_streaming_blocks_history:
+      // 问题根因: 与 sessionListStore.setActiveSession 不同，此处无 existingCount 兜底。
+      //          当 isStreaming 卡 true（stale，如后端崩溃未正确发 stream_end）时，
+      //          切换 tab 永远不拉历史，用户看到"加载了记录但没显示"（bug 1）。
+      // 修复方案: 补 existingCount <= 1 兜底，与 sessionListStore 对齐。
+      const _existingCount = (pipelineStore.messagesByPipeline[effectivePipelineId] || []).length
+      if (!pipelineStore.isStreaming(effectivePipelineId) || _existingCount <= 1) {
         await pipelineStore.fetchMessages(effectivePipelineId, { threadId: state.currentSessionId })
       }
 

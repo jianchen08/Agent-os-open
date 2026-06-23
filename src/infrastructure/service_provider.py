@@ -4,7 +4,8 @@
 """
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,17 @@ class ServiceProvider:
             服务实例，未找到返回 None
         """
         return self._services.get(name)
+
+    def get_all_services(self) -> dict[str, Any]:
+        """获取所有已注册服务的字典副本。
+
+        用于需要批量传递 services 的场景（如管道引擎创建），
+        避免外部直接访问 ``_services`` 私有属性。
+
+        Returns:
+            服务名称到实例的映射字典（浅拷贝）
+        """
+        return dict(self._services)
 
     def get_or_create(self, name: str, factory: Callable[[], Any]) -> Any | None:
         """获取或创建服务实例。

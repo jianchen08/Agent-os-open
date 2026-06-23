@@ -10,13 +10,17 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 
 from channels.api.deps import APIError, require_auth
-from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/external", tags=["外部系统"])
+router = APIRouter(
+    prefix="/api/v1/external",
+    tags=["外部系统"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 # ============================================================
@@ -43,14 +47,14 @@ class ExternalChatResponse(BaseModel):
 
 def _get_agent_registry() -> Any:
     """从 ServiceProvider 获取全局 AgentRegistry 实例。"""
-    from infrastructure.service_provider import get_service_provider
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
     return get_service_provider().get("agent_registry")
 
 
 def _get_pipeline_factory() -> Any:
     """从 ServiceProvider 获取管道工厂（创建 PipelineEngine 的可调用对象）。"""
-    from infrastructure.service_provider import get_service_provider
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
     return get_service_provider().get("pipeline_factory")
 
@@ -121,7 +125,6 @@ async def external_chat(
         state = await engine.run(
             user_input=body.message,
             agent_config=agent_config,
-            allow_default_fallback=False,
         )
     except Exception as exc:
         logger.error("管道执行失败 (agent=%s): %s", body.agent_id, exc)

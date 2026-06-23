@@ -591,7 +591,11 @@ class TestTaskServiceDelete:
 
     @pytest.mark.asyncio
     async def test_delete_root_task_with_subtasks(self) -> None:
-        """删除根任务时软删除（有子任务时）。"""
+        """删除非容器根任务时硬删除并级联清理子任务。
+
+        delete_task 统一委托 hard_delete_task，判定口径为 task_scope=container。
+        非 container 的根任务即使有子任务也走硬删除 + 级联清理，与工具层一致。
+        """
         root = await self.svc.create_task(title="根任务")
         child1 = await self.svc.create_task(
             title="子任务1",
@@ -604,13 +608,14 @@ class TestTaskServiceDelete:
         await self.svc.start_task(child1.id)
         await self.svc.start_task(child2.id)
 
-        # delete_task 对有子任务的根任务执行软删除
+        # delete_task 委托 hard_delete_task 执行硬删除 + 级联清理
         await self.svc.delete_task(root.id)
 
-        # 根任务仍存在（软删除）
-        fetched_root = self.svc.get_task(root.id)
-        assert fetched_root is not None
-        assert fetched_root.metadata.get("soft_deleted") is True
+        # 根任务被硬删除（不再软删除保留）
+        assert self.svc.get_task(root.id) is None
+        # 子任务被级联删除
+        assert self.svc.get_task(child1.id) is None
+        assert self.svc.get_task(child2.id) is None
 
 
 # ═══════════════════════════════════════════════════════════

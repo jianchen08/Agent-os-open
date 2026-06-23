@@ -29,7 +29,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-
 # ---- 间距梯度 ----
 
 class SpacingScale(BaseModel):
@@ -626,7 +625,7 @@ def validate_token_values(tokens: DesignTokens) -> list[str]:
     spacing_values = [spacing.xs, spacing.sm, spacing.md, spacing.lg, spacing.xl, spacing.xxl]
     spacing_names = ["xs", "sm", "md", "lg", "xl", "xxl"]
 
-    for name, value in zip(spacing_names, spacing_values):
+    for name, value in zip(spacing_names, spacing_values, strict=False):
         if spacing.unit > 0 and value % spacing.unit != 0:
             errors.append(
                 f"spacing.{name}={value} 不是基础单位 {spacing.unit}px 的倍数"

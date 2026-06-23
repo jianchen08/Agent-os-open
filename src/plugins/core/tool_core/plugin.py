@@ -5,7 +5,7 @@
 - 逐个执行已注册的工具函数
 - 使用 asyncio.wait_for 设置超时保护
 - 收集执行结果并写入 state
-- 支持 IsolationExecutor 在 Docker 容器中执行
+- 支持 IsolationManager 在 Docker 容器中执行 bash_execute
 """
 
 from __future__ import annotations
@@ -16,16 +16,13 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Callable, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any  # noqa: F401
 
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
 from tools.format_manager import get_format_manager
 from tools.registry import ToolRegistry
-
-if TYPE_CHECKING:
-    from isolation.executor import IsolationExecutor
-
 
 # ---------------------------------------------------------------------------
 # asyncio 工具执行器 — 修复 _cancel_all_tasks 级联取消
@@ -85,7 +82,6 @@ class ToolCore(ICorePlugin):
         _tools: 已注册的工具函数映射，键为工具名，值为可调用对象
         _tool_registry: 外部工具注册表引用（可选，用于批量注册）
         _default_timeout: 工具执行默认超时时间（秒）
-        _isolation_executor: 隔离执行器实例（可选，用于 Docker 容器执行）
     """
 
     error_policy = ErrorPolicy.RETRY
@@ -102,7 +98,6 @@ class ToolCore(ICorePlugin):
         self._tool_registry: ToolRegistry | None = None
         self._default_timeout: float = self._config.get("timeout", 30.0)
         self._tool_timeouts: dict[str, float] = self._config.get("tool_timeouts", {})
-        self._isolation_executor: IsolationExecutor | None = None
 
     @property
     def name(self) -> str:
@@ -142,19 +137,6 @@ class ToolCore(ICorePlugin):
                     "[%s] Tool imported from registry: %s",
                     self.name, tool_def.name,
                 )
-
-    def set_isolation_executor(self, executor: IsolationExecutor) -> None:
-        """设置隔离执行器。
-
-        注入 IsolationExecutor 实例后，ToolCore 将优先通过
-        执行器执行工具，根据 state["execution_contexts"] 中的
-        隔离决策在 Docker 或宿主机中执行。
-
-        Args:
-            executor: IsolationExecutor 实例
-        """
-        self._isolation_executor = executor
-        logger.info("[%s] IsolationExecutor 已注入", self.name)
 
     def _get_schema_timeout_default(self, tool_name: str) -> float | None:
         """从工具 schema 中获取 timeout_seconds 的默认值。
@@ -241,7 +223,129 @@ class ToolCore(ICorePlugin):
 
         return str(result)
 
-    async def _execute_single_tool(
+    def _check_tool_blocked(
+        self, tool_name: str, state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """统一工具拦截检查：被策略拦截的工具返回失败结果，否则返回 None。
+
+        工具级拦截（权限/隔离/安全）应转为「工具失败结果」返回给 LLM，
+        让 LLM 看到该工具不可用并自行调整策略，而不是在 input 路由层用
+        target=end 终结整个管道（那会把单次工具越权放大成任务失败）。
+
+        检查三类决策（由对应 input 插件写入 state）：
+        - security.level_decision (level_guard)：Agent 层级越权
+        - isolation.blocked / execution_contexts[blocked] (isolation_guard)：隔离策略
+        - security.decision (security_check)：安全检查
+
+        Args:
+            tool_name: 工具名称
+            state: 管道状态字典
+
+        Returns:
+            被拦截时返回失败结果 dict（success=False），未被拦截返回 None
+        """
+        # level_guard 越权拦截
+        level_decision = state.get("security.level_decision")
+        if isinstance(level_decision, dict) and level_decision.get("allowed") is False:
+            blocked = level_decision.get("blocked_tools") or []
+            if tool_name in blocked or not blocked:
+                reason = level_decision.get("reason", "权限不足")
+                logger.warning("[tool_core] 工具 %s 被 level_guard 拦截: %s", tool_name, reason)
+                return {
+                    "tool_name": tool_name,
+                    "success": False,
+                    "error": f"工具被权限策略拦截: {reason}",
+                    "duration_ms": 0,
+                }
+
+        # isolation_guard 拦截：execution_contexts 中标记 blocked 的工具
+        for ctx_entry in state.get("execution_contexts", []):
+            if ctx_entry.get("tool_name") == tool_name and ctx_entry.get("blocked"):
+                reason = ctx_entry.get("reason", "隔离策略阻止")
+                logger.warning("[tool_core] 工具 %s 被 isolation_guard 拦截: %s", tool_name, reason)
+                return {
+                    "tool_name": tool_name,
+                    "success": False,
+                    "error": f"工具被隔离策略拦截: {reason}",
+                    "duration_ms": 0,
+                }
+
+        # security_check 拦截
+        sec_decision = state.get("security.decision")
+        if isinstance(sec_decision, dict) and sec_decision.get("allowed") is False:
+            reason = sec_decision.get("reason", "安全检查拦截")
+            logger.warning("[tool_core] 工具 %s 被 security_check 拦截: %s", tool_name, reason)
+            return {
+                "tool_name": tool_name,
+                "success": False,
+                "error": f"工具被安全检查拦截: {reason}",
+                "duration_ms": 0,
+            }
+
+        return None
+
+    async def _execute_in_isolated_container(
+        self,
+        state: dict[str, Any],
+        tool_args: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        """在 IsolationManager 管理的 Docker 容器中执行 bash_execute。
+
+        通过 IsolationManager 的根任务复用机制，同根任务的子任务
+        共享一个容器，避免创建大量冗余容器。
+
+        Args:
+            state: 管道状态（含 task_id, workspace 等）
+            tool_args: 工具参数（command 字段）
+            timeout: 超时时间（秒）
+
+        Returns:
+            与 ToolCore 期望一致的 dict: {tool_name, success, data/error, duration_ms}
+        """
+        import time as _time  # noqa: PLC0415
+
+        from isolation.manager import get_isolation_manager  # noqa: PLC0415
+        from isolation.types import TaskType  # noqa: PLC0415
+
+        task_id = state.get("task_id", "unknown")
+        workspace = state.get("workspace")
+
+        operation = {
+            "type": "command",
+            "command": tool_args.get("command", ""),
+            "timeout": timeout,
+            "working_dir": "/workspace",
+        }
+
+        manager = await get_isolation_manager()
+        _start = _time.monotonic()
+        exec_result = await manager.execute_in_isolation(
+            task_id=task_id,
+            task_type=TaskType.ATOMIC,
+            operation=operation,
+            workspace=workspace,
+            tool_name="bash_execute",
+        )
+        duration_ms = (_time.monotonic() - _start) * 1000
+
+        if exec_result.success:
+            output = exec_result.output
+            data = output.get("stdout", "") if isinstance(output, dict) else str(output or "")
+            return {
+                "tool_name": "bash_execute",
+                "success": True,
+                "data": data,
+                "duration_ms": round(duration_ms, 1),
+            }
+        return {
+            "tool_name": "bash_execute",
+            "success": False,
+            "error": exec_result.error or "容器执行失败",
+            "duration_ms": round(duration_ms, 1),
+        }
+
+    async def _execute_single_tool(  # noqa: PLR0912,PLR0915
         self,
         tool_name: str,
         tool_args: dict[str, Any],
@@ -312,49 +416,22 @@ class ToolCore(ICorePlugin):
 
         start = time.monotonic()
 
-        # DIAG: check if pipeline task is already being cancelled
-        _cur_task = asyncio.current_task()
-        if _cur_task and _cur_task.cancelling() > 0:
-            logger.warning(
-                "[%s] Task already cancelling before tool '%s'! "
-                "cancelling=%d",
-                self.name, tool_name, _cur_task.cancelling(),
+        try:
+            handler_for_check = self._tool_registry.get_handler(tool_name) if self._tool_registry else None
+            tool_self = handler_for_check.__self__ if handler_for_check and hasattr(handler_for_check, '__self__') else None
+            _is_main_loop = (
+                tool_name in ("human_interaction", "bash_execute")
+                or (tool_self is not None and getattr(tool_self, 'run_on_main_loop', False))
             )
 
-        try:
-            # BUG-FIX-fix_20260523_tool_blocking:
-            # 问题根因: async工具（如enhanced_search）内部执行同步阻塞操作（rglob/read_text），
-            #   直接await会在主事件循环中运行，阻塞整个循环。
-            #   导致: 1) drain_loop/WebSocket无法推送事件，前端卡死
-            #         2) asyncio.wait_for的定时器回调无法执行，超时机制完全失效
-            # 修复方案: 所有工具（同步+异步）统一通过asyncio.to_thread在线程中执行。
-            #   异步工具通过asyncio.run()创建独立事件循环，隔离阻塞操作。
-            #   主事件循环保持空闲，可正常处理超时定时器和其他异步任务。
-            #
-            # BUG-FIX-fix_20260525_human_interaction_cross_loop:
-            # 问题根因: human_interaction 内部使用 asyncio.Event.wait() 等待前端响应，
-            #   asyncio.to_thread + asyncio.run() 创建了独立事件循环，
-            #   Event.set() 在主事件循环中调用，无法唤醒独立循环中的 Event.wait()。
-            #   导致 human_interaction 永远等到 tool_core 的 wait_for 超时才返回。
-            # 修复方案: 对 human_interaction 这类纯异步（无阻塞操作）的工具，
-            #   直接 await 执行，不经过 to_thread。
-            #
-            # BUG-FIX-fix_20260601_asyncio_cascade_cancel:
-            # 问题根因: asyncio.run() 的 Runner.__exit__ 调用 _cancel_all_tasks(loop)
-            #   取消事件循环中**所有**任务。当工具执行期间创建了嵌套管道引擎时
-            #   （如 task_submit/task_manage），这些引擎会被级联取消，
-            #   导致所有子任务因 "sink dead" 被终止。
-            # 修复方案: 使用 _asyncio_tool_runner() 替代 asyncio.run()，
-            #   只运行工具协程并返回，不调用 _cancel_all_tasks()。
-            _is_human_interaction = (tool_name == "human_interaction")
-            if inspect.iscoroutinefunction(func) and not _is_human_interaction:
+            if inspect.iscoroutinefunction(func) and not _is_main_loop:
                 raw_result = await asyncio.wait_for(
                     asyncio.to_thread(
                         _asyncio_tool_runner, func, tool_args,
                     ),
                     timeout=timeout,
                 )
-            elif inspect.iscoroutinefunction(func) and _is_human_interaction:
+            elif inspect.iscoroutinefunction(func) and _is_main_loop:
                 raw_result = await asyncio.wait_for(func(tool_args), timeout=timeout)
             else:
                 raw_result = await asyncio.wait_for(
@@ -419,10 +496,6 @@ class ToolCore(ICorePlugin):
                 "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
                 self.name, tool_name, duration_ms, timeout,
             )
-            # BUG-FIX-fix_20260605_human_interaction_timeout_msg:
-            # 问题根因: human_interaction 外层超时时返回通用 "Tool timed after Xs"
-            #           错误信息，LLM 无法理解"人类未交互"，可能误判为通过。
-            # 修复方案: human_interaction 超时返回明确的人类未交互信息。
             if tool_name == "human_interaction":
                 error_msg = (
                     f"人类交互超时（等待了{timeout:.0f}秒），"
@@ -479,7 +552,7 @@ class ToolCore(ICorePlugin):
         成功后缓存到本地注册表供后续调用。
         """
         try:
-            from tools.auto_loader import get_tool_auto_loader
+            from tools.auto_loader import get_tool_auto_loader  # noqa: PLC0415
 
             auto_loader = get_tool_auto_loader()
             if auto_loader is None:
@@ -504,7 +577,7 @@ class ToolCore(ICorePlugin):
             logger.warning("[%s] 自动加载工具失败: %s — %s", self.name, tool_name, e)
             return None
 
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行工具调用。
 
         从 state["raw_tool_calls"] 读取工具调用列表，逐个执行，
@@ -546,7 +619,7 @@ class ToolCore(ICorePlugin):
                     tool_args = json.loads(tool_args)
                 except (json.JSONDecodeError, TypeError):
                     # 尝试容错修复 JSON（MiniMax 等模型返回格式不稳定）
-                    from plugins.core.llm_core import _repair_json_string
+                    from plugins.core.llm_core import _repair_json_string  # noqa: PLC0415
                     repaired = _repair_json_string(tool_args)
                     if repaired is not None:
                         logger.info(
@@ -585,10 +658,6 @@ class ToolCore(ICorePlugin):
             if not isinstance(tool_args, dict):
                 tool_args = {}
 
-            # 允许工具通过 timeout_seconds 参数覆盖默认超时
-            # human_interaction 除外：它内部自行管理超时（wait_for_choice），
-            # 外层必须使用 _tool_timeouts 中配置的固定值（1800s），避免 LLM 传入的
-            # 小 timeout_seconds 导致 asyncio.wait_for 先于内部超时杀掉工具。
             timeout = self._default_timeout
             if tool_name in self._tool_timeouts:
                 timeout = self._tool_timeouts[tool_name]
@@ -604,16 +673,46 @@ class ToolCore(ICorePlugin):
                 if schema_default is not None:
                     timeout = schema_default
 
-            # 优先通过隔离执行器执行（human_interaction 除外，需在主事件循环 await）
-            if self._isolation_executor is not None and tool_name != "human_interaction":
+            # 统一工具拦截检查：被权限/隔离/安全策略拦截的工具转为失败结果，
+            # 让 LLM 自行调整，而不是终结整个管道。
+            _blocked_result = self._check_tool_blocked(tool_name, ctx.state)
+            if _blocked_result is not None:
+                if on_chunk:
+                    on_chunk({
+                        "type": "tool_start",
+                        "tool_name": tool_name,
+                        "args": tool_args,
+                        "call_id": tc_call_id,
+                    })
+                    on_chunk({
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": _blocked_result.get("error", ""),
+                        "success": False,
+                        "duration_ms": 0,
+                        "call_id": tc_call_id,
+                    })
+                results.append(_blocked_result)
+                last_result_text = f"Error: {_blocked_result['error']}"
+                continue
+
+            # 根据 execution_contexts 决定执行路径
+            # provider=docker → 容器执行；provider=host → 宿主机执行
+            execution_contexts = ctx.state.get("execution_contexts", [])
+            ctx_entry = next((c for c in execution_contexts if c.get("tool_name") == tool_name), None)
+            use_docker = (
+                ctx_entry is not None
+                and ctx_entry.get("provider") == "docker"
+                and not ctx_entry.get("blocked", False)
+            )
+
+            logger.info("[tool_core] tool=%s use_docker=%s", tool_name, use_docker)
+            if use_docker and tool_name == "bash_execute":
                 if on_chunk:
                     on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})
-                func = self._get_tool(tool_name)
-                result = await self._isolation_executor.execute_tool(
+                result = await self._execute_in_isolated_container(
                     state=ctx.state,
-                    tool_name=tool_name,
                     tool_args=tool_args,
-                    tool_func=func,  # type: ignore[arg-type]
                     timeout=timeout,
                 )
                 if on_chunk:
@@ -636,10 +735,7 @@ class ToolCore(ICorePlugin):
             results.append(result)
 
             # 最后一个工具的结果用于 LLM 上下文
-            if result["success"]:
-                last_result_text = str(result["data"])
-            else:
-                last_result_text = f"Error: {result['error']}"
+            last_result_text = str(result["data"]) if result["success"] else f"Error: {result['error']}"
 
         logger.info(
             "[%s] Executed %d tool(s): %s",
@@ -658,10 +754,12 @@ class ToolCore(ICorePlugin):
         # 如果没有 assistant tool_calls 消息，先构建 assistant tool_calls 消息
         # 预先解析 tool_call_id 列表，确保 assistant 消息和 tool 结果使用一致的 id
         tc_ids: list[str] = []
-        for i, tc in enumerate(tool_calls):
+        for i, tc in enumerate(tool_calls):  # noqa: B007
             tc_ids.append(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
 
         if not has_tool_call_msg and tool_calls:
+            # 从 state 取 reasoning_content（与 LLMCore 保持一致，统一存）
+            _rc_for_rebuild = ctx.state.get(StateKeys.RAW_THINKING)
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": "",
@@ -671,16 +769,17 @@ class ToolCore(ICorePlugin):
                         "type": "function",
                         "function": {
                             "name": tc.get("name", ""),
-                            "arguments": {
-                                k: v for k, v in (tc.get("args") or tc.get("arguments") or {}).items()
-                                if not k.startswith("_")
-                            } if isinstance(tc.get("args") or tc.get("arguments"), dict)
-                            else tc.get("args", tc.get("arguments", "")),
+                            # arguments 必须是 JSON 字符串（OpenAI API 规范），
+                            # 与 LLMCore 保持一致：直接透传原始值，不做 dict 转换。
+                            # 历史问题：曾把 args(dict) 直接放入 arguments，触发 400。
+                            "arguments": tc.get("args", tc.get("arguments", "")),
                         },
                     }
                     for i, tc in enumerate(tool_calls)
                 ],
             }
+            if _rc_for_rebuild:
+                assistant_msg["reasoning_content"] = _rc_for_rebuild
             current_messages.append(assistant_msg)
 
         # 追加 tool 结果消息
@@ -715,8 +814,43 @@ class ToolCore(ICorePlugin):
                 if isinstance(_img, dict) and _img.get("base64"):
                     pending_images.append(_img)
 
+        # MM-3/MM-5: 从工具返回的 metadata.multimodal_content 收集多模态内容
+        for _r in results:
+            _meta = _r.get("metadata", {})
+            if not isinstance(_meta, dict):
+                continue
+            _mm_content = _meta.get("multimodal_content")
+            if not isinstance(_mm_content, list):
+                continue
+            for _block in _mm_content:
+                if not isinstance(_block, dict):
+                    continue
+                if _block.get("type") == "image_url":
+                    _url = (_block.get("image_url") or {}).get("url", "")
+                    if _url.startswith("data:") and ";base64," in _url:
+                        _mime_part, _b64_part = _url[5:].split(";base64,", 1)
+                        pending_images.append({
+                            "base64": _b64_part,
+                            "mime_type": _mime_part,
+                            "path": "",
+                        })
+
+        # MM-4b: 工具产生多模态结果时推送 tool_multimedia_result WS 事件
+        if pending_images and on_chunk:
+            on_chunk({
+                "type": "tool_multimedia_result",
+                "count": len(pending_images),
+                "multimedia": [
+                    {
+                        "mime_type": _img.get("mime_type", "image/png"),
+                        "path": _img.get("path", ""),
+                    }
+                    for _img in pending_images
+                ],
+            })
+
         if pending_images:
-            from multimodal.capabilities import ModelCapabilityRegistry
+            from multimodal.capabilities import ModelCapabilityRegistry  # noqa: PLC0415
             _model_name = ctx.state.get("llm_model", "")
             _supports_vision = ModelCapabilityRegistry.is_multimodal_supported(
                 _model_name
@@ -766,11 +900,6 @@ class ToolCore(ICorePlugin):
                     ),
                 })
 
-        # BUG-FIX-fix_20260418_all_tools_failed
-        # 问题根因: 工具全部失败时 raw_error 始终为 None，导致 error_check 插件
-        #           无法识别，Output 插件链无 route_signal，管道异常退出
-        # 修复方案: 检测所有工具失败的情况，设置 raw_error 让 error_check 能处理
-        # 影响范围: 所有工具执行流程
         all_failed = results and all(not r.get("success") for r in results)
         raw_error = None
         if all_failed:
@@ -780,7 +909,6 @@ class ToolCore(ICorePlugin):
             )
             raw_error = f"所有工具执行失败: {error_summary}"
 
-        # BUG-FIX-fix_20260418_task_inject: 检测 task_failed 标记，直接结束管道
         has_task_failed = False
         for r in results:
             tool_data = r.get("data", {})
@@ -801,15 +929,15 @@ class ToolCore(ICorePlugin):
             tool_data = r.get("data", {})
             if not isinstance(tool_data, dict):
                 continue
-            # BUG-FIX: metadata 可能从 ToolExecutionResult 传递到 r["metadata"]，
-            # 也可能嵌套在 tool_data（normalized output）中，两个位置都要检查。
             meta = tool_data.get("metadata") or r.get("metadata", {})
             if isinstance(meta, dict) and meta.get("action") == "task_submit":
                 tid = tool_data.get("task_id")
                 if tid and tid not in submitted_task_ids:
                     submitted_task_ids.append(tid)
             tool_name = r.get("tool_name", "")
-            if tool_name == "task_evaluate" and tool_data.get("overall_passed") is True:
+            if tool_name == "task_evaluate" \
+                    and isinstance(meta, dict) \
+                    and meta.get("result") == "completed":
                 evaluation_completed = True
             if tool_name == "human_interaction":
                 conv_flag = tool_data.get("conversation_mode")
@@ -837,6 +965,13 @@ class ToolCore(ICorePlugin):
         if has_task_failed:
             return_dict[StateKeys.ENDED] = True
         if conversation_activated:
-            return_dict[StateKeys.CONVERSATION_MODE] = True
+            # 直接路由信号：告诉管道仲裁器"立即 wait"。
+            # _execute_core_and_route 取出此信号与 Output 插件信号一起仲裁，
+            # wait(priority=10) 优先于 next_llm(priority=50)，管道立即挂起。
+            # 用户消息到达后 inject_message 唤醒 → 工具结果 + 用户消息一起发 LLM。
+            return_dict["_pending_route_signal"] = {
+                "route_type": "wait",
+                "reason": "human_interaction: user arrived, entering conversation",
+            }
 
         return return_dict

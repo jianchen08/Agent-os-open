@@ -4,7 +4,7 @@ rules:
   - name: "dangerous_commands"
     tools: ["*"]
     params: ["command", "cmd"]
-    action: block
+    action: needs_approval
     patterns:
       - type: keyword
         value: "rm -rf"
@@ -198,3 +198,20 @@ rules:
     patterns:
       - type: regex
         value: "^(?!git\\s).+"
+
+  # ── 参数白名单：安全命令直接放行，不弹审批 ──
+  # 危险工具（如 bash_execute）的参数如果命中白名单，视为安全操作直接放行。
+  # 用正则前缀匹配：命令以这些开头 = 安全。
+  - name: "safe_commands"
+    tools: ["bash_execute"]
+    params: ["command", "cmd"]
+    action: allow
+    patterns:
+      - type: regex
+        value: "^\\s*(ls|cat|echo|pwd|whoami|date|wc|head|tail|grep|find|which|file|stat|du|df|env|printenv)\\s"
+      - type: regex
+        value: "^\\s*(git status|git log|git diff|git show|git branch)\\s"
+      - type: regex
+        value: "^\\s*(python --version|node --version|npm --version)\\s*"
+      - type: regex
+        value: "^\\s*(pip list|pip show)\\s"

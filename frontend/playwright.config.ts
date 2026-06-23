@@ -2,7 +2,8 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'comprehensive-e2e.spec.ts',
+  // 匹配 e2e 目录下所有 spec 文件（含 journey、page、feature 等测试）
+  testMatch: '**/*.spec.ts',
   fullyParallel: false,
   forbidOnly: false,
   retries: 0,

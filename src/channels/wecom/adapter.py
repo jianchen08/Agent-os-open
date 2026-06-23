@@ -5,7 +5,7 @@
 
 采用组合模式（与 FeishuAdapter/DingTalkAdapter 一致）：
 - WeComInputAdapter: 从消息队列获取消息
-- WeComOutputAdapter: 通过 HTTP API 发送消息
+- WeComOutputAdapter: 通过 HTTP API 发送消息（见 output_adapter.py）
 - WeComAdapter: 组合入口，管理生命周期 + 处理回调
 """
 
@@ -14,13 +14,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-import xml.etree.ElementTree as ET
 from typing import Any
 
+from channels.base_combo_adapter import BaseComboAdapter
 from channels.input_adapter import IInputAdapter
-from channels.output_adapter import IOutputAdapter
-from channels.wecom.stream_client import WeComStreamClient
 from channels.wecom.crypto import WecomCrypto
+from channels.wecom.helpers import (
+    _extract_encrypt,
+    _extract_wecom_text,
+    _parse_message_xml,
+)
+from channels.wecom.output_adapter import WeComOutputAdapter  # noqa: F401 re-export
+from channels.wecom.stream_client import WeComStreamClient
 from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
@@ -97,81 +102,7 @@ class WeComInputAdapter(IInputAdapter):
         }
 
 
-class WeComOutputAdapter(IOutputAdapter):
-    """企业微信输出适配器。
-
-    通过企业微信 HTTP API 发送管道处理结果。
-
-    Attributes:
-        _stream_client: 企业微信客户端
-        _channel_user_id: 当前消息的目标用户 ID
-        _accumulated_text: 流式累积的文本
-    """
-
-    def __init__(self, stream_client: WeComStreamClient) -> None:
-        """初始化企业微信输出适配器。
-
-        Args:
-            stream_client: 企业微信客户端实例
-        """
-        self._stream_client = stream_client
-        self._channel_user_id: str = ""
-        self._accumulated_text: str = ""
-
-    def set_channel_user_id(self, user_id: str) -> None:
-        """设置当前消息的目标用户 ID。
-
-        Args:
-            user_id: 企业微信用户 UserID
-        """
-        self._channel_user_id = user_id
-
-    async def send(self, state: dict[str, Any]) -> None:
-        """输出管道最终 state 到企业微信。
-
-        Args:
-            state: 管道最终 state 字典
-        """
-        user_id = state.get("_channel_user_id", self._channel_user_id)
-        if not user_id:
-            logger.warning("No user_id for wecom output, skipping")
-            return
-
-        # 处理错误
-        error = state.get(StateKeys.RAW_ERROR)
-        if error:
-            await self._stream_client.send_message(
-                user_id, f"❌ 错误: {error}"
-            )
-            return
-
-        # 发送正常结果
-        result = state.get(StateKeys.RAW_RESULT, "")
-        if result:
-            await self._stream_client.send_message(user_id, str(result))
-
-    async def send_stream(self, chunk: dict[str, Any]) -> None:
-        """流式输出 chunk 到企业微信。
-
-        企业微信不支持逐 token 流式推送，因此累积文本，
-        在流结束时一次性发送。
-
-        Args:
-            chunk: 流式数据块
-        """
-        text = chunk.get("text", "")
-        self._accumulated_text += text
-
-        # 如果标记了 flush 或 stream end，发送累积内容
-        if chunk.get("flush", False) or chunk.get("type") == "end":
-            if self._channel_user_id and self._accumulated_text:
-                await self._stream_client.send_message(
-                    self._channel_user_id, self._accumulated_text
-                )
-                self._accumulated_text = ""
-
-
-class WeComAdapter:
+class WeComAdapter(BaseComboAdapter):
     """企业微信通道适配器（组合模式）。
 
     组合 WeComInputAdapter 和 WeComOutputAdapter，
@@ -273,7 +204,7 @@ class WeComAdapter:
             解密后的消息内容（用于验证）或空字符串
         """
         # 解析 XML 获取加密内容
-        encrypt_content = self._extract_encrypt(body)
+        encrypt_content = _extract_encrypt(body)
 
         # 验证签名
         if not self.crypto.verify_signature(
@@ -290,7 +221,7 @@ class WeComAdapter:
             return ""
 
         # 解析解密后的 XML
-        message = self._parse_message_xml(decrypted_xml)
+        message = _parse_message_xml(decrypted_xml)
         if not message:
             return decrypted_xml
 
@@ -324,77 +255,3 @@ class WeComAdapter:
             return ""
 
         return self.crypto.decrypt_echo(echostr)
-
-    # ── 内部方法 ──────────────────────────────────────
-
-    @staticmethod
-    def _extract_encrypt(xml_str: str) -> str:
-        """从加密 XML 中提取 Encrypt 字段。
-
-        Args:
-            xml_str: 加密消息 XML
-
-        Returns:
-            Encrypt 字段内容
-        """
-        try:
-            root = ET.fromstring(xml_str)
-            encrypt_node = root.find("Encrypt")
-            if encrypt_node is not None and encrypt_node.text:
-                return encrypt_node.text
-        except ET.ParseError:
-            pass
-        return ""
-
-    @staticmethod
-    def _parse_message_xml(xml_str: str) -> dict[str, Any]:
-        """解析企业微信消息 XML 为字典。
-
-        Args:
-            xml_str: 解密后的消息 XML
-
-        Returns:
-            消息字段字典
-        """
-        try:
-            root = ET.fromstring(xml_str)
-            result: dict[str, Any] = {}
-            for child in root:
-                result[child.tag] = child.text or ""
-            return result
-        except ET.ParseError:
-            logger.warning("Failed to parse WeCom message XML")
-            return {}
-
-
-def _extract_wecom_text(
-    msg_type: str,
-    content: str,
-    raw: dict[str, Any],
-) -> str:
-    """从企业微信消息中提取文本。
-
-    Args:
-        msg_type: 消息类型
-        content: 消息内容字段
-        raw: 完整消息字典
-
-    Returns:
-        提取的纯文本
-    """
-    if msg_type == "text":
-        return content
-    if msg_type == "image":
-        return raw.get("PicUrl", "[图片]")
-    if msg_type == "voice":
-        recognition = raw.get("Recognition", "")
-        return recognition if recognition else "[语音]"
-    if msg_type == "video" or msg_type == "shortvideo":
-        return "[视频]"
-    if msg_type == "location":
-        label = raw.get("Label", "")
-        return f"[位置] {label}" if label else "[位置]"
-    if msg_type == "link":
-        return raw.get("Description", content)
-    # 其他类型降级
-    return content or str(raw)

@@ -33,15 +33,14 @@ def inject(**dependencies: str):
             container = kwargs.get("container")
             if not container:
                 # 尝试从全局容器获取
-                from src.core.di import get_global_container
+                from src.core.di import get_global_container  # noqa: PLC0415
 
                 container = get_global_container()
 
             # 注入依赖
             for param_name, service_name in dependencies.items():
-                if param_name not in kwargs:
-                    if container and container.has(service_name):
-                        kwargs[param_name] = container.get(service_name)
+                if param_name not in kwargs and container and container.has(service_name):
+                    kwargs[param_name] = container.get(service_name)
 
             return func(*args, **kwargs)
 
@@ -65,7 +64,7 @@ def singleton(service_name: str | None = None):
 
     def decorator(cls: type) -> type:
         # 注册到全局容器
-        from src.core.di import get_global_container
+        from src.core.di import get_global_container  # noqa: PLC0415
 
         container = get_global_container()
         name = service_name or cls.__name__
@@ -93,7 +92,7 @@ def transient(service_name: str | None = None):
 
     def decorator(cls: type) -> type:
         # 注册到全局容器
-        from src.core.di import get_global_container
+        from src.core.di import get_global_container  # noqa: PLC0415
 
         container = get_global_container()
         name = service_name or cls.__name__
@@ -121,7 +120,7 @@ def scoped(service_name: str | None = None):
 
     def decorator(cls: type) -> type:
         # 注册到全局容器
-        from src.core.di import get_global_container
+        from src.core.di import get_global_container  # noqa: PLC0415
 
         container = get_global_container()
         name = service_name or cls.__name__
@@ -161,15 +160,14 @@ def inject_method(**dependencies: str):
                     container = self.container
                 else:
                     # 尝试从全局容器获取
-                    from src.core.di import get_global_container
+                    from src.core.di import get_global_container  # noqa: PLC0415
 
                     container = get_global_container()
 
             # 注入依赖
             for param_name, service_name in dependencies.items():
-                if param_name not in kwargs:
-                    if container and container.has(service_name):
-                        kwargs[param_name] = container.get(service_name)
+                if param_name not in kwargs and container and container.has(service_name):
+                    kwargs[param_name] = container.get(service_name)
 
             return method(self, *args, **kwargs)
 

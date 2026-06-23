@@ -77,7 +77,7 @@ class PauseGuardPlugin(IInputPlugin):
         route_signal = updates.pop("__route_signal__", None)
         return PluginResult(state_updates=updates, route_signal=route_signal)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行暂停检查逻辑。
 
         Args:
@@ -111,10 +111,10 @@ class PauseGuardPlugin(IInputPlugin):
             return {"pause_guard.checked": {"paused": False, "reason": "task not found"}}
 
         # 检查任务是否暂停
-        from tasks.types import TaskStatus
-        from pipeline.types import RouteSignal
+        from pipeline.types import RouteSignal  # noqa: PLC0415
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
-        if task.status == TaskStatus.SUSPENDED:
+        if task.status == TaskStatus.STOPPED:
             logger.info("[%s] Task %s is paused, suspending pipeline", self.name, task_id)
             return {
                 "pause_guard.checked": {"paused": True, "reason": "task paused", "task_id": task_id},

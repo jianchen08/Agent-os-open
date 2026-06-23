@@ -67,15 +67,12 @@ def load_adapter_configs(
     """
     path = Path(config_path) if config_path else _ADAPTER_CONFIG_PATH
 
-    if not path.exists():
-        logger.warning("[AdapterConfig] 配置文件不存在: %s", path)
-        return {}
-
     try:
-        import yaml
-
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        from config.config_center import get_config_center  # noqa: PLC0415
+        rel = str(path).replace("\\", "/")
+        if "config/" in rel:
+            rel = rel[rel.index("config/") + len("config/"):]
+        data = get_config_center().get(rel) or {}
     except Exception as exc:
         logger.error("[AdapterConfig] 配置加载失败: %s", exc)
         return {}

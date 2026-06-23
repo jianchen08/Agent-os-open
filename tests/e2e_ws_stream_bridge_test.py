@@ -23,7 +23,7 @@ MAX_GLOBAL_TIMEOUT = 120
 
 async def e2e_test():
     thread_id = "e2e-stream-bridge-test"
-    uri = f"ws://localhost:8888/ws/{thread_id}"
+    uri = f"ws://localhost:8988/ws/{thread_id}"
     print("=== E2E WebSocket 流式桥接测试 ===")
     print(f"连接: {uri}")
 

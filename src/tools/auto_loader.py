@@ -107,9 +107,8 @@ class ToolAutoLoader:
             return None
 
         try:
-            from sqlalchemy import select
-
-            from db.models import ToolLibrary
+            from db.models import ToolLibrary  # noqa: PLC0415
+            from sqlalchemy import select  # noqa: PLC0415
 
             result = await self._db_session.execute(
                 select(ToolLibrary).where(ToolLibrary.name == tool_name)
@@ -154,10 +153,7 @@ class ToolAutoLoader:
 
         # 解析分类
         category: ToolCategory | None = None
-        if db_tool.category:
-            category = ToolCategory(db_tool.category)
-        else:
-            category = ToolCategory.SYSTEM
+        category = ToolCategory(db_tool.category) if db_tool.category else ToolCategory.SYSTEM
 
         # 解析级别
         level = ToolLevel.USER
@@ -213,7 +209,7 @@ class ToolAutoLoader:
 
         self._tool_guides[tool_name] = "\n\n".join(guide_parts)
 
-    async def _load_from_python_code(self, tool_name: str) -> Tool | None:
+    async def _load_from_python_code(self, tool_name: str) -> Tool | None:  # noqa: PLR0912
         """从 Python 代码动态加载工具（使用文件索引加速查找）。
 
         加载成功后注册到 ToolRegistry 并标记为动态工具，
@@ -471,10 +467,7 @@ class ToolAutoLoader:
             return True
         if query in tool.description.lower():
             return True
-        for tag in tool.tags:
-            if query in tag.lower():
-                return True
-        return False
+        return any(query in tag.lower() for tag in tool.tags)
 
     async def _search_database_tools(
         self,
@@ -486,9 +479,8 @@ class ToolAutoLoader:
             return []
 
         try:
-            from sqlalchemy import or_, select
-
-            from db.models import ToolLibrary
+            from db.models import ToolLibrary  # noqa: PLC0415
+            from sqlalchemy import or_, select  # noqa: PLC0415
 
             # 使用 ilike 进行模糊搜索
             stmt = (

@@ -1,22 +1,15 @@
-"""
-Agent 层级控制器
+"""Agent 层级控制器
 
 三层 Agent 双层指挥系统：
 - L1 主 Agent: 全局调度者，管理 Project 和 Task
 - L2 Sub Agent: 任务调度者，分解任务并调度 L3
 - L3 执行 Agent: 纯粹执行者，不调度、不澄清
-
-迁移说明：
-- 原位置: src/tasks/agent_level_controller.py
-- 新位置: src/agents/level_controller.py
-- 迁移时间: 2026-02-27
-- 迁移原因: AgentLevelController 控制 Agent 层级，应归属 agents 模块
 """
 
 import logging
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any, TypedDict
 
 import yaml
@@ -121,15 +114,13 @@ class LevelController:
         Returns:
             工具权限配置字典
         """
-        config_path = Path(self.TOOL_PERMISSIONS_CONFIG)
-        if not config_path.exists():
-            self.logger.info("工具权限配置文件不存在，使用默认配置")
-            return self._get_default_permissions()
-
         try:
-            with open(config_path, encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-                return config.get("tool_permissions", {})
+            from config.config_center import get_config_center  # noqa: PLC0415
+            config = get_config_center().get("tool_permissions.yaml") or {}
+            if not config:
+                self.logger.info("工具权限配置文件不存在，使用默认配置")
+                return self._get_default_permissions()
+            return config.get("tool_permissions", {})
         except yaml.YAMLError as e:
             self.logger.warning("工具权限配置文件解析失败: %s", e)
             return self._get_default_permissions()
@@ -144,51 +135,6 @@ class LevelController:
             "L2": {"allowed": ["*"]},
             "L3": {"denied": list(self.DEFAULT_RESTRICTED_TOOLS)},
         }
-
-    def get_restricted_tools(self, agent_level: int | None = None) -> set:
-        """
-        获取受限工具集合
-
-        Args:
-            agent_level: Agent 层级，默认返回 L3 的受限工具
-
-        Returns:
-            受限工具名称集合
-        """
-        if agent_level is None:
-            # 默认返回 L3 的受限工具（向后兼容）
-            agent_level = 3
-
-        level_key = f"L{agent_level}"
-        level_config = self._tool_permissions.get(level_key, {})
-
-        # 如果配置了 denied 列表，返回该列表
-        denied = level_config.get("denied", [])
-        if denied:
-            return set(denied)
-
-        # 如果配置了 allowed: ["*"]，则无受限工具
-        allowed = level_config.get("allowed", [])
-        if "*" in allowed:
-            return set()
-
-        # 默认返回空集合
-        return set()
-
-    def get_available_tools(
-        self, agent_level: int, all_tools: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """根据层级返回可用工具列表"""
-        try:
-            AgentLevel(agent_level)
-        except ValueError:
-            return []
-
-        restricted = self.get_restricted_tools(agent_level)
-        if restricted:
-            return [t for t in all_tools if t.get("name") not in restricted]
-
-        return all_tools
 
     def can_submit_task(self, agent_level: int) -> bool:
         """判断是否可以提交子任务"""
@@ -377,7 +323,3 @@ class LevelController:
             )
 
         return ValidationResult(passed=True)
-
-
-# 向后兼容别名
-AgentLevelController = LevelController

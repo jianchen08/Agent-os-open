@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 浏览器搜索工具 - 基于 Playwright 的开箱即用浏览器搜索与网页抓取
 
@@ -14,9 +13,10 @@
 """
 
 import asyncio
+import contextlib
 import logging
 import random
-import re
+import re  # noqa: F401
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -81,7 +81,6 @@ class BrowserSearchTool(BuiltinTool):
     _playwright: Any = None
     _browser: Any = None
     _context: Any = None
-    # BUG-FIX: 添加 asyncio.Lock 防止并发调用 _ensure_browser 导致重复启动浏览器
     _lock: asyncio.Lock = asyncio.Lock()
 
     # ── 工具定义 ──────────────────────────────────────────────────────
@@ -172,7 +171,6 @@ class BrowserSearchTool(BuiltinTool):
 
     async def _ensure_browser(self) -> tuple[Any, Any]:
         """确保浏览器实例已启动，返回 (context, page)"""
-        # BUG-FIX: 使用 asyncio.Lock 保护并发调用，防止重复启动浏览器
         async with self._lock:
             if self._browser is None or not self._browser.is_connected():
                 await self._launch_browser()
@@ -182,7 +180,7 @@ class BrowserSearchTool(BuiltinTool):
     async def _launch_browser(self) -> None:
         """启动 Playwright 浏览器（懒初始化）"""
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import async_playwright  # noqa: PLC0415
         except ImportError as exc:
             raise ImportError(
                 "Playwright 未安装。请运行: pip install playwright && playwright install chromium"
@@ -199,7 +197,6 @@ class BrowserSearchTool(BuiltinTool):
             ],
         )
         self._context = await self._browser.new_context(
-            # BUG-FIX: 从 UA 池中随机选择，而非始终使用 USER_AGENTS[0]
             user_agent=random.choice(USER_AGENTS),
             viewport={"width": 1920, "height": 1080},
             locale="zh-CN",
@@ -304,7 +301,6 @@ class BrowserSearchTool(BuiltinTool):
 
     def _build_search_url(self, query: str, engine: str) -> str:
         """构建搜索引擎 URL"""
-        # BUG-FIX: 使用 quote_plus 进行完整的 URL 编码，而非仅替换空格
         encoded = quote_plus(query)
         if engine == "bing":
             return f"https://www.bing.com/search?q={encoded}&setlang=zh-CN"
@@ -437,10 +433,8 @@ class BrowserSearchTool(BuiltinTool):
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
 
             # 等待网络空闲（确保JS动态内容加载）
-            try:
+            with contextlib.suppress(Exception):
                 await page.wait_for_load_state("networkidle", timeout=min(timeout, 10000))
-            except Exception:
-                pass
 
             # 额外等待（用于延迟加载的内容）
             if wait_seconds > 0:

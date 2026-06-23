@@ -31,13 +31,13 @@ def get_all_builtin_tools() -> list[Any]:
     通过 DynamicToolLoader 自动扫描 builtin 目录发现工具类。
     需要依赖注入的工具（如 session）自动跳过，由 register_core_tools 处理。
     """
-    import importlib
-    import logging
+    import importlib  # noqa: PLC0415
+    import logging  # noqa: PLC0415
 
     _logger = logging.getLogger(__name__)
 
-    from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
-    from tools.registry import ToolRegistry
+    from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader  # noqa: PLC0415
+    from tools.registry import ToolRegistry  # noqa: PLC0415
 
     loader = get_dynamic_tool_loader()
     if loader is None:
@@ -54,7 +54,7 @@ def get_all_builtin_tools() -> list[Any]:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
 
-            import inspect
+            import inspect  # noqa: PLC0415
             sig = inspect.signature(cls.__init__)
             required_params = [
                 p for p in sig.parameters.values()
@@ -76,7 +76,7 @@ def get_all_builtin_tools() -> list[Any]:
             _logger.debug(f"[内置工具] 跳过 {tool_name}: {e}")
 
     try:
-        from .lsp_tools.tool import LSPTools
+        from .lsp_tools.tool import LSPTools  # noqa: PLC0415
         tools.extend(LSPTools.get_tools())
     except Exception as e:
         _logger.debug(f"[内置工具] 跳过 LSPTools: {e}")
@@ -87,10 +87,10 @@ def get_all_builtin_tools() -> list[Any]:
 def get_all_builtin_tools_with_session() -> list[Any]:
     """获取需要数据库会话的内置工具类（不实例化）"""
     # 延迟导入需要数据库会话的工具
-    from .memory.tool import MemoryTool
-    from .task.tool import TaskTool
-    from .task_evaluate.tool import TaskEvaluateTool
-    from .task_submit.tool import TaskSubmitTool
+    from .memory.tool import MemoryTool  # noqa: PLC0415
+    from .task.tool import TaskTool  # noqa: PLC0415
+    from .task_evaluate.tool import TaskEvaluateTool  # noqa: PLC0415
+    from .task_submit.tool import TaskSubmitTool  # noqa: PLC0415
 
     return [
         MemoryTool,
@@ -100,14 +100,14 @@ def get_all_builtin_tools_with_session() -> list[Any]:
     ]
 
 
-def register_all_builtin_tools(
+def register_all_builtin_tools(  # noqa: PLR0912,PLR0915
     registry: Any,
     session: Any | None = None,
     evaluator_callback: Callable | None = None,
     skip_existing: bool = True,
 ) -> list:
     """注册所有内置工具到注册表"""
-    import logging
+    import logging  # noqa: PLC0415
 
     logger = logging.getLogger(__name__)
     names = []
@@ -132,7 +132,7 @@ def register_all_builtin_tools(
                     handler=tool_item.execute,
                 )
             else:
-                from tools.types import Tool
+                from tools.types import Tool  # noqa: PLC0415
 
                 if isinstance(tool_item, Tool):
                     tool_name = tool_item.name
@@ -143,7 +143,7 @@ def register_all_builtin_tools(
                         logger.debug(f"[内置工具注册] 工具已存在，跳过: {tool_name}")
                         continue
 
-                    from .lsp_tools.tool import LSPTools
+                    from .lsp_tools.tool import LSPTools  # noqa: PLC0415
 
                     lsp_instance = LSPTools()
                     handler_map = {
@@ -174,10 +174,10 @@ def register_all_builtin_tools(
 
     # 2. 如果提供了会话，注册需要会话的工具
     if session is not None:
-        from .memory.tool import MemoryTool
-        from .task.tool import TaskTool
-        from .task_evaluate.tool import TaskEvaluateTool
-        from .task_submit.tool import TaskSubmitTool
+        from .memory.tool import MemoryTool  # noqa: PLC0415
+        from .task.tool import TaskTool  # noqa: PLC0415
+        from .task_evaluate.tool import TaskEvaluateTool  # noqa: PLC0415
+        from .task_submit.tool import TaskSubmitTool  # noqa: PLC0415
 
         # 2.1 注册 TaskSubmitTool
         if skip_existing and registry.has("task_submit") and registry.get_handler("task_submit") is not None:
@@ -260,16 +260,16 @@ def register_all_builtin_tools(
     return names
 
 
-def register_core_tools(
+def register_core_tools(  # noqa: PLR0912,PLR0915
     registry: Any,
     session: Any | None = None,
     evaluator_callback: Callable | None = None,
     skip_existing: bool = True,
 ) -> list:
     """只注册核心系统工具到注册表（用于应用启动时的预热）"""
-    import logging
+    import logging  # noqa: PLC0415
 
-    from tools.loader import CORE_SYSTEM_TOOLS
+    from tools.loader import CORE_SYSTEM_TOOLS  # noqa: PLC0415
 
     logger = logging.getLogger(__name__)
     names = []
@@ -277,16 +277,16 @@ def register_core_tools(
     failed = []
 
     # 延迟导入核心工具类
-    from .bash import BashTool
-    from .enhanced_search.tool import EnhancedSearchTool
-    from .file_read.tool import FileReadTool
-    from .file_write.tool import FileWriteTool
-    from .lsp_tools.tool import LSPTools
-    from .resource_merge.tool import ResourceMergeTool
-    from .resource_search.tool import ResourceSearchTool
-    from .web.tool import WebTool
-    from .web_search_mcp.tool import WebSearchMCPTool
-    from .human_interaction.tool import HumanInteractionTool
+    from .bash import BashTool  # noqa: PLC0415
+    from .enhanced_search.tool import EnhancedSearchTool  # noqa: PLC0415
+    from .file_read.tool import FileReadTool  # noqa: PLC0415
+    from .file_write.tool import FileWriteTool  # noqa: PLC0415
+    from .human_interaction.tool import HumanInteractionTool  # noqa: PLC0415
+    from .lsp_tools.tool import LSPTools  # noqa: PLC0415
+    from .resource_merge.tool import ResourceMergeTool  # noqa: PLC0415
+    from .resource_search.tool import ResourceSearchTool  # noqa: PLC0415
+    from .web.tool import WebTool  # noqa: PLC0415
+    from .web_search_mcp.tool import WebSearchMCPTool  # noqa: PLC0415
 
     core_tool_map = {
         "bash_execute": BashTool,
@@ -332,14 +332,6 @@ def register_core_tools(
             continue
 
         # 处理需要 session 的工具
-        # BUG-FIX-fix_20260316_task_manage_not_found
-        # 问题根因: 原代码只注册工具定义，没有注册 handler，导致执行时找不到处理函数
-        # 修复方案: 当 session 存在时，实例化工具并注册 handler
-        # 注意：工具名称必须与 Tool.get_tool_definition() 中的 name 字段一致
-        # - task_submit -> TaskSubmitTool (name="task_submit")
-        # - task_manage -> TaskTool (name="task_manage")
-        # - task_evaluate -> TaskEvaluateTool (name="task_evaluate")
-        # - memory -> MemoryTool (name="memory")
         if tool_name in ["task_submit", "task_manage", "task_evaluate", "memory"]:
             tool_import_map = {
                 "task_submit": ("tools.builtin.task_submit", "TaskSubmitTool"),
@@ -350,7 +342,7 @@ def register_core_tools(
             module_path, class_name = tool_import_map[tool_name]
             tool_class = None
             try:
-                import importlib
+                import importlib  # noqa: PLC0415
                 mod = importlib.import_module(module_path)
                 tool_class = getattr(mod, class_name)
             except ImportError as _import_err:
@@ -404,10 +396,7 @@ def register_core_tools(
 
         try:
             # resource_search 需要 tool_registry 参数以支持动态工具加载
-            if tool_name == "resource_search":
-                tool_instance = tool_class(tool_registry=registry)
-            else:
-                tool_instance = tool_class()
+            tool_instance = tool_class(tool_registry=registry) if tool_name == "resource_search" else tool_class()
             tool = tool_instance.get_tool_definition()
             name = registry.register_with_handler(
                 tool=tool,

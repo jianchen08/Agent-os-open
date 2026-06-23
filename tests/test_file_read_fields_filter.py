@@ -309,7 +309,7 @@ class TestExtractFieldsEndToEnd:
         content = path.read_text(encoding="utf-8")
         result = self.tool._extract_fields(content, path, ["records{record_id=r1}"])
         assert result.success
-        assert result.data["records{record_id=r1}"]["content"] == "hello"
+        assert result.output["records{record_id=r1}"]["content"] == "hello"
 
     @pytest.mark.asyncio
     async def test_json_filter_with_subfield(self):
@@ -326,7 +326,7 @@ class TestExtractFieldsEndToEnd:
             content, path, ["records{iteration=10}.thinking_content"]
         )
         assert result.success
-        assert result.data["records{iteration=10}.thinking_content"] == "thought-10"
+        assert result.output["records{iteration=10}.thinking_content"] == "thought-10"
 
     @pytest.mark.asyncio
     async def test_yaml_filter_multiple_match(self):
@@ -342,7 +342,7 @@ class TestExtractFieldsEndToEnd:
         content = path.read_text(encoding="utf-8")
         result = self.tool._extract_fields(content, path, ["items{type=error}"])
         assert result.success
-        matched = result.data["items{type=error}"]
+        matched = result.output["items{type=error}"]
         assert isinstance(matched, list)
         assert len(matched) == 2
         assert matched[0]["msg"] == "e1"
@@ -358,8 +358,8 @@ class TestExtractFieldsEndToEnd:
             content, path, ["summary.total_tokens", "summary.model"]
         )
         assert result.success
-        assert result.data["summary.total_tokens"] == 100
-        assert result.data["summary.model"] == "gpt-4"
+        assert result.output["summary.total_tokens"] == 100
+        assert result.output["summary.model"] == "gpt-4"
 
     @pytest.mark.asyncio
     async def test_yaml_mixed_fields(self):
@@ -376,8 +376,8 @@ class TestExtractFieldsEndToEnd:
             content, path, ["name", "records{record_id=r1}.content"]
         )
         assert result.success
-        assert result.data["name"] == "test-session"
-        assert result.data["records{record_id=r1}.content"] == "hello"
+        assert result.output["name"] == "test-session"
+        assert result.output["records{record_id=r1}.content"] == "hello"
 
     @pytest.mark.asyncio
     async def test_json_filter_no_match_skipped(self):
@@ -389,4 +389,4 @@ class TestExtractFieldsEndToEnd:
             content, path, ["records{id=nonexistent}"]
         )
         assert result.success
-        assert "records{id=nonexistent}" not in result.data
+        assert "records{id=nonexistent}" not in result.output

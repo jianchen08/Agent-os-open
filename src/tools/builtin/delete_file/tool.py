@@ -6,9 +6,10 @@
 - DeleteFileTool：文件删除工具类
 """
 
+import contextlib
 import os
-import stat
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from tools.types import (
     Tool,
     ToolCategory,
     ToolLevel,
+    ToolResult,
     ToolSource,
     create_failure_result,
     create_success_result,
@@ -175,7 +177,7 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
         """删除单个文件"""
         if force:
             # 移除只读属性
-            os.chmod(path, stat.S_IWRITE)
+            os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
         path.unlink()
 
     async def _delete_directory(self, path: Path, recursive: bool, force: bool):
@@ -192,14 +194,10 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
     def _make_writable(self, path: Path):
         """递归设置目录和文件为可写状态"""
         if path.is_dir():
-            try:
-                os.chmod(path, stat.S_IWRITE | stat.S_IXUSR)
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                os.chmod(path, stat.S_IWRITE | stat.S_IXUSR)  # noqa: PTH101
             for child in path.iterdir():
                 self._make_writable(child)
         else:
-            try:
-                os.chmod(path, stat.S_IWRITE)
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                os.chmod(path, stat.S_IWRITE)  # noqa: PTH101

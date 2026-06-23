@@ -88,7 +88,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
     @staticmethod
     def get_tool_definition() -> Tool:
-        from tools.types import ToolLevel
+        from tools.types import ToolLevel  # noqa: PLC0415
 
         return Tool(
             name="file_read",
@@ -159,7 +159,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
         # 单文件模式
         return await self._read_file(inputs)
-    
+
     async def _read_files(self, inputs: dict[str, Any], paths: list[str]) -> ToolResult:
         """批量读取文件，每个文件独立返回结果"""
         results = []
@@ -183,11 +183,11 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 "data": result.output if result.success else None,
                 "error": result.error if not result.success else None,
             })
-        
+
         # 汇总结果
         success_count = sum(1 for r in results if r["success"])
         failed_count = len(results) - success_count
-        
+
         return create_success_result(
             data={
                 "results": results,
@@ -200,7 +200,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             metadata={"action": "batch_read_files"},
         )
 
-    async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         try:
             path_str = inputs.get("path")
             if not path_str:
@@ -301,7 +301,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         # 使用 deque 只保留最后 tail 行
         def _scan_tail() -> tuple[int, list[str]]:
             nonlocal total_lines
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     total_lines += 1
                     tail_lines.append(line.rstrip("\n"))
@@ -363,7 +363,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         def _read_range() -> tuple[int, list[str]]:
             total = 0
             collected: list[str] = []
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     total += 1
                     if total >= start:
@@ -521,7 +521,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         return segments
 
     @staticmethod
-    def _resolve_segment(current: Any, seg: tuple) -> Any:
+    def _resolve_segment(current: Any, seg: tuple) -> Any:  # noqa: PLR0911,PLR0912
         """执行单个路径段操作，支持键访问和列表筛选。
 
         对于 filter 段，在列表中按 key=value 筛选：
@@ -576,10 +576,9 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
             if len(matched) == 0:
                 return None
-            elif len(matched) == 1:
+            if len(matched) == 1:
                 return matched[0]
-            else:
-                return matched
+            return matched
 
         return None
 

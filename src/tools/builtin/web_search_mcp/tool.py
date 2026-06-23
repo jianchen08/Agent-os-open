@@ -10,10 +10,10 @@ Network Search Tool (Based on mcp-webgate)
 特性：BM25 重排序、HTML 去噪、URL 去重、上下文保护、纯 HTTP 抓取（无浏览器依赖）
 """
 
+import importlib.util
 import logging
-import os
-import shutil
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
 from typing import Any
 
 from tools.builtin.base import BuiltinTool
@@ -30,60 +30,92 @@ from tools.types import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SEARXNG_URL = "http://localhost:8080"
+
+def _resolve_bing_server():
+    """向上搜索找到 mcp-servers/bing-search/server.py"""
+    from pathlib import Path as _P  # noqa: N814,PLC0415
+
+    # 1. 从当前模块向上搜索（适用于宿主机和容器）
+    try:
+        here = _P(__file__).resolve()
+        for _ in range(10):
+            here = here.parent
+            p = here / "mcp-servers" / "bing-search" / "server.py"
+            if p.exists():
+                return str(p)
+    except Exception:
+        pass
+    # 2. 容器内固定路径（/app/mcp-servers/ 由 docker-compose volume 挂载）
+    p = _P("/app/mcp-servers/bing-search/server.py")
+    if p.exists():
+        return str(p)
+    # 3. CWD 相对路径
+    p = _P("mcp-servers/bing-search/server.py")
+    if p.exists():
+        return str(p)
+    return None
 
 
-def _get_webgate_command() -> tuple[str, list[str]]:
-    """获取 mcp-webgate 启动命令，优先 uvx，回退 pip 安装的模块"""
+def _get_search_command() -> tuple[str, list[str]]:
+    """获取搜索引擎 MCP server 启动命令。
+
+    容器内: 优先用 mcp-webgate 命令（pip --user 安装,全功能），
+    宿主机: python -m mcp_webgate。
+    都没装则降级到 bing-search。
+    """
+    import shutil  # noqa: PLC0415
+    from pathlib import Path as _P  # noqa: N814,PLC0415
+
+    # 容器内全局安装路径(优先,所有用户可访问)
+    global_bin = "/usr/local/bin/mcp-webgate"
+    if _P(global_bin).exists():
+        return (global_bin, [])
+
+    # 容器内 pip --user 安装路径(后退)
+    user_bin = "/home/appuser/.local/bin/mcp-webgate"
+    if _P(user_bin).exists():
+        return (user_bin, [])
+
+    # 宿主机: python -m (需要有 __main__.py, 3.14 可行)
+    if importlib.util.find_spec("mcp_webgate") is not None:
+        return (sys.executable, ["-m", "mcp_webgate"])
+
+    # PATH 上的 mcp-webgate
     if shutil.which("mcp-webgate"):
         return ("mcp-webgate", [])
-    if shutil.which("uvx"):
-        return ("uvx", ["mcp-webgate"])
-    return (os.sys.executable or "python", ["-m", "mcp_webgate"])
+
+    # 兜底: bing-search
+    bing = _resolve_bing_server()
+    if bing is not None:
+        return (sys.executable, [bing])
+
+    return (sys.executable, ["-m", "mcp_webgate"])
 
 
 @dataclass
 class WebSearchMCPConfig:
-    """Network Search MCP Config (mcp-webgate)"""
+    """搜索 MCP 配置"""
 
     max_results: int = 10
-    timeout: int = 30
-
-    enable_dedup: bool = True
-    enable_filter: bool = True
-    enable_ranking: bool = True
-    similarity_threshold: float = 0.85
-
-    blocked_domains: list[str] = field(default_factory=list)
-    blocked_keywords: list[str] = field(default_factory=list)
-
-    searxng_url: str = field(
-        default_factory=lambda: os.environ.get(
-            "WEBGATE_SEARXNG_URL", _DEFAULT_SEARXNG_URL
-        )
-    )
-
-    max_query_budget: int = 32000
-    max_result_length: int = 8000
-    search_timeout: int = 8
-    mcp_overall_timeout: float = 135.0
+    mcp_overall_timeout: float = 90.0
+    fetch_timeout: int = 8
+    searxng_url: str = "http://localhost:8080"
 
 
 class WebSearchMCPTool(BuiltinTool):
     """
-    Network Search Tool (Based on mcp-webgate)
+    网络搜索工具。
 
-    mcp-webgate 核心能力：
-    - BM25 关键词重排序（始终启用，零成本）
-    - HTML 去噪：移除菜单、脚本、广告、页脚，只保留正文
-    - URL 去重 + 二进制文件过滤
-    - 上下文保护：硬限制输出大小，防止上下文洪泛
-    - 并行抓取 + 指数退避重试
-    - 纯 HTTP 抓取，无 Playwright 浏览器依赖
+    后端自动选择：
+    - mcp-webgate（主力，需 pip install mcp-webgate + SearXNG Docker）
+      全功能：BM25 重排序、HTML 去噪、URL 去重、内容抓取、上下文保护
+    - bing-search（兜底，纯 Python 标准库，零外部依赖）
+      基础功能：搜索 + 摘要 + URL 去重，直连 bing.com
 
-    工具映射：
-    - full/search 模式 → webgate_query（搜索+抓取+清洗+BM25排序）
-    - content_only 模式 → webgate_fetch（单页抓取+清洗）
+    搜索模式：
+    - full → 搜索 + 抓取页面内容 + 清洗 + 排序（mcp-webgate）或搜索+摘要（bing-search）
+    - summary → 仅搜索摘要
+    - content_only → 提取指定 URL 页面内容（仅 mcp-webgate 支持）
     """
 
     def __init__(self, config: WebSearchMCPConfig | None = None):
@@ -91,29 +123,20 @@ class WebSearchMCPTool(BuiltinTool):
         self.config = config or WebSearchMCPConfig()
 
     def _build_server_config(self) -> MCPServerConfig:
-        """构建 MCP 服务器配置"""
-        cmd, base_args = _get_webgate_command()
-
+        """构建 MCP 服务器配置，自动适配容器/宿主机环境"""
+        cmd, args = _get_search_command()
+        # 容器内用 Docker 服务名，宿主机用 localhost
+        bing = _resolve_bing_server()
+        searxng_host = "searxng" if (bing and bing.startswith("/app/")) else "localhost"
+        searxng_url = f"http://{searxng_host}:8080"
         env_vars = {
             "WEBGATE_DEFAULT_BACKEND": "searxng",
-            "WEBGATE_SEARXNG_URL": self.config.searxng_url,
-            "WEBGATE_MAX_QUERY_BUDGET": str(self.config.max_query_budget),
-            "WEBGATE_MAX_RESULT_LENGTH": str(self.config.max_result_length),
+            "WEBGATE_SEARXNG_URL": searxng_url,
+            "WEBGATE_SEARCH_TIMEOUT": str(self.config.fetch_timeout),
             "WEBGATE_RESULTS_PER_QUERY": str(self.config.max_results),
-            "WEBGATE_SEARCH_TIMEOUT": str(self.config.search_timeout),
-            "WEBGATE_MAX_TOTAL_RESULTS": "20",
-            "WEBGATE_OVERSAMPLING_FACTOR": "2",
+            "WEBGATE_MAX_QUERY_BUDGET": "32000",
         }
-
-        if self.config.blocked_domains:
-            env_vars["WEBGATE_BLOCKED_DOMAINS"] = ",".join(self.config.blocked_domains)
-
-        return MCPServerConfig(
-            name="webgate",
-            command=cmd,
-            args=base_args,
-            env=env_vars,
-        )
+        return MCPServerConfig(name="web-search", command=cmd, args=args, env=env_vars)
 
     async def cleanup(self):
         """清理资源（保留接口兼容，不再持有共享 loader）"""
@@ -193,126 +216,177 @@ class WebSearchMCPTool(BuiltinTool):
             )
 
         max_results = inputs.get("max_results", self.config.max_results)
-        search_mode = inputs.get("search_mode", "full")
+        # 安全值转换：LLM 可能传字符串类型
+        try:
+            max_results = int(max_results)
+        except (ValueError, TypeError):
+            max_results = self.config.max_results
         max_results = min(max(max_results, 1), 10)
+        search_mode = str(inputs.get("search_mode", "full"))
 
         server_config = self._build_server_config()
 
-        # BUG-FIX: 每次调用创建独立 loader，避免共享 MCP 连接的并发冲突
         loader = MCPToolLoader()
         try:
             return await self._do_search(loader, server_config, query, max_results, search_mode)
         finally:
             await loader.disconnect_all()
 
-    async def _do_search(
-        self,
-        loader: MCPToolLoader,
-        server_config: MCPServerConfig,
-        query: str,
-        max_results: int,
-        search_mode: str,
+    async def _do_search(  # noqa: PLR0911,PLR0912
+        self, loader: MCPToolLoader, server_config: MCPServerConfig,
+        query: str, max_results: int, search_mode: str,
     ) -> ToolResult:
-        """使用独立 loader 执行实际搜索"""
-        try:
-            if search_mode in ("full", "summary"):
-                num_results = (
-                    max_results
-                    if search_mode == "full"
-                    else min(max_results, 5)
-                )
-                result = await loader.call_tool(
-                    server_config,
-                    "webgate_query",
-                    {
-                        "queries": query,
-                        "num_results_per_query": num_results,
-                    },
-                    timeout=60.0,
-                    overall_timeout=self.config.mcp_overall_timeout,
-                )
-            elif search_mode == "content_only":
-                result = await loader.call_tool(
-                    server_config,
-                    "webgate_fetch",
-                    {
-                        "url": query,
-                        "max_chars": self.config.max_query_budget,
-                    },
-                    timeout=60.0,
-                    overall_timeout=self.config.mcp_overall_timeout,
-                )
-            else:
-                return create_failure_result(
-                    error=f"不支持的搜索模式: {search_mode}",  # BUG-FIX: 统一中文错误信息
-                    error_code="INVALID_MODE",
-                )
+        """执行搜索，mcp-webgate 失败时自动降级到 bing-search"""
+        import json  # noqa: F401,PLC0415
+        import traceback  # noqa: F401,PLC0415
 
-            parsed_result = self._extract_mcp_content(result)
-            if isinstance(parsed_result, dict):
-                search_results = self._parse_webgate_result(
-                    parsed_result, query, search_mode
-                )
+        is_webgate = (
+            "mcp_webgate" in str(server_config.args)
+            or "mcp-webgate" in str(server_config.command)
+        )
+        original_backend = "mcp-webgate" if is_webgate else "bing-search"
+
+        try:
+            if is_webgate:
+                if search_mode in ("full", "summary"):
+                    tool_name = "webgate_query"
+                    mcp_args = {"queries": query, "num_results_per_query": max_results}
+                elif search_mode == "content_only":
+                    tool_name = "webgate_fetch"
+                    mcp_args = {"url": query}
+                else:
+                    return create_failure_result(error=f"不支持的模式: {search_mode}", error_code="INVALID_MODE")
             else:
+                if search_mode == "content_only":
+                    return create_failure_result(
+                        error="content_only 需要 mcp-webgate 后端（pip install mcp-webgate + Docker SearXNG）",
+                        error_code="UNSUPPORTED_MODE")
+                tool_name = "web_search"
+                mcp_args = {"query": query, "max_results": max_results}
+
+            result = await loader.call_tool(
+                server_config, tool_name, mcp_args,
+                timeout=60.0, overall_timeout=self.config.mcp_overall_timeout,
+            )
+            parsed = self._extract_mcp_content(result)
+
+            if is_webgate and isinstance(parsed, dict):
+                search_results = self._parse_webgate_minimal(parsed, query, search_mode)
+                # 后端不可用检测：fetched=0 且 failed=0 → SearXNG 没响应
+                stats = search_results.get("stats", {})
+                if (search_results.get("total", 0) == 0
+                        and stats.get("fetched", 0) == 0
+                        and stats.get("failed", 0) == 0):
+                    logger.warning("mcp-webgate 后端无响应（fetched=0 failed=0），降级到 bing-search")
+                    return await self._fallback_bing_search(loader, query, max_results, search_mode)
+            elif isinstance(parsed, dict):
                 search_results = {
-                    "query": query,
-                    "results": [],
-                    "total": 0,
-                    "raw_result": str(parsed_result),
+                    "query": parsed.get("query", query),
+                    "results": parsed.get("results", []),
+                    "total": parsed.get("total", 0),
                     "mode": search_mode,
                 }
+            else:
+                search_results = {"query": query, "results": [], "total": 0, "mode": search_mode}
 
-            # 检测后端不可用的静默失败：
-            # full/summary 模式下 fetched=0 且 failed=0 说明后端完全没响应
-            if search_mode in ("full", "summary") and search_results.get("total", 0) == 0:
-                stats = search_results.get("stats", {})
-                if stats.get("fetched", 0) == 0 and stats.get("failed", 0) == 0:
-                    return create_failure_result(
-                        error=(
-                            f"搜索后端无响应，请检查 SearXNG 是否运行："
-                            f"{self.config.searxng_url}\n"
-                            f"提示：docker start searxng 或 docker run -p 8080:8080 searxng/searxng"
-                        ),
-                        error_code="BACKEND_UNREACHABLE",
-                    )
+            if search_results.get("total", 0) == 0:
+                return create_failure_result(error=f"未找到结果（关键词: {query}）", error_code="NO_RESULTS")
 
             return create_success_result(
                 data=search_results,
-                metadata={
-                    "backend": "mcp-webgate",
-                    "search_mode": search_mode,
-                    "mcp_server": "webgate",
-                },
+                metadata={"backend": original_backend, "search_mode": search_mode},
             )
 
         except Exception as e:
-            # BUG-FIX: 使用模块级 logger，移除函数内 import logging
-            logger.exception("Web Search MCP call failed")
+            logger.warning(f"搜索失败 | backend={original_backend} | query={query[:60]} | error={e}")
+            # ── 自动降级：mcp-webgate 挂了就用 bing-search ──
+            if is_webgate:
+                logger.info("mcp-webgate 不可用，降级到 bing-search")
+                return await self._fallback_bing_search(loader, query, max_results, search_mode)
+            return create_failure_result(error=f"搜索失败: {e}", error_code="SEARCH_FAILED")
 
-            error_msg = str(e)
-            if "MCP_CONNECTION_ERROR" in error_msg or "连接失败" in error_msg:
-                error_msg = (
-                    f"MCP 服务器连接失败，请检查：\n"
-                    f"1. uvx 是否已安装（pip install uv）\n"
-                    f"2. mcp-webgate 是否可用（uvx mcp-webgate --help）\n"
-                    f"3. SearXNG 是否运行（{self.config.searxng_url}）\n"
-                    f"原始错误: {str(e)}"
-                )
-            elif "MCP 初始化失败" in error_msg:
-                error_msg = (
-                    f"MCP 服务器初始化失败，可能是协议版本不兼容\n"
-                    f"原始错误: {str(e)}"
-                )
+    async def _fallback_bing_search(
+        self, loader: MCPToolLoader, query: str, max_results: int, search_mode: str,
+    ) -> ToolResult:
+        """降级到 bing-search（纯 Python，零依赖）"""
+        # 向上搜索项目根，找到 mcp-servers/bing-search/server.py
+        server_py = _resolve_bing_server()
+        if server_py is None:
+            return create_failure_result(error="[fallback] bing-search server.py 未找到", error_code="FALLBACK_MISSING")
 
-            return create_failure_result(
-                error=f"搜索失败: {error_msg}",  # BUG-FIX: 统一中文错误信息
-                error_code="MCP_CALL_FAILED",
+        fallback_cfg = MCPServerConfig(
+            name="bing-fallback", command=sys.executable, args=[server_py]
+        )
+        try:
+            result = await loader.call_tool(
+                fallback_cfg, "web_search",
+                {"query": query, "max_results": max_results},
+                timeout=30.0, overall_timeout=45.0,
             )
+            parsed = self._extract_mcp_content(result)
+            if isinstance(parsed, dict):
+                search_results = {
+                    "query": parsed.get("query", query),
+                    "results": parsed.get("results", []),
+                    "total": parsed.get("total", 0),
+                    "mode": search_mode,
+                }
+            else:
+                search_results = {"query": query, "results": [], "total": 0, "mode": search_mode}
+
+            if search_results.get("total", 0) == 0:
+                return create_failure_result(error=f"[fallback] 未找到结果（关键词: {query}）", error_code="NO_RESULTS")
+            return create_success_result(
+                data=search_results,
+                metadata={"backend": "bing-search(fallback)", "search_mode": search_mode},
+            )
+        except Exception as e2:
+            logger.exception("bing-search 降级也失败")
+            # 携带 error 类型名，便于区分 UnicodeDecodeError（编码）/ TimeoutError
+            # （超时）/ MCPConnectionError（子进程）等不同根因
+            err_type = type(e2).__name__
+            return create_failure_result(
+                error=f"[fallback] 搜索失败 ({err_type}): {e2}",
+                error_code="SEARCH_FAILED",
+            )
+
+    # ── 精简版 webgate 结果解析（仅提取 sources + snippets → 统一 results 格式）──
+
+    @staticmethod
+    def _parse_webgate_minimal(result: dict[str, Any], query: str, mode: str) -> dict[str, Any]:
+        """将 mcp-webgate 的 {sources, snippet_pool, stats} 转统一格式"""
+        results: list[dict[str, Any]] = []
+        # sources（已抓取+清洗的页面）
+        for i, src in enumerate(result.get("sources", []) or []):
+            content = src.get("content", "")
+            results.append({
+                "title": src.get("title", ""),
+                "url": src.get("url", ""),
+                "snippet": src.get("snippet", content[:200] if content else ""),
+                "content": content if not src.get("truncated") else content + "...",
+                "index": i,
+            })
+        # snippet_pool（未抓取的补充摘要）
+        offset = len(results)
+        for i, snip in enumerate(result.get("snippet_pool", []) or []):
+            results.append({
+                "title": snip.get("title", ""),
+                "url": snip.get("url", ""),
+                "snippet": snip.get("snippet", ""),
+                "index": offset + i,
+            })
+        return {
+            "query": result.get("queries", query) if isinstance(result.get("queries"), str) else query,
+            "results": results,
+            "total": len(results),
+            "mode": mode,
+            "stats": result.get("stats", {}),
+        }
 
     @staticmethod
     def _extract_mcp_content(result: Any) -> Any:
         """从 MCP 标准返回格式中提取实际数据"""
-        import json
+        import json  # noqa: PLC0415
 
         if not isinstance(result, dict):
             return result
@@ -334,159 +408,16 @@ class WebSearchMCPTool(BuiltinTool):
         return result
 
     @staticmethod
-    def _normalize_url(url: str) -> str:
-        """规范化 URL：去除 trailing slash、统一小写"""
-        return url.rstrip("/").lower()
-
-    def _dedup_results(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """基于 URL 和内容前缀去重，去重后重新计算连续 index"""
-        if not self.config.enable_dedup or not results:
-            return results
-
-        seen_urls: set[str] = set()
-        seen_snippets: set[str] = set()
-        deduped: list[dict[str, Any]] = []
-
-        for item in results:
-            norm_url = self._normalize_url(item.get("url", ""))
-            snippet_prefix = item.get("snippet", "")[:200]
-
-            if norm_url and norm_url in seen_urls:
-                continue
-            if snippet_prefix and snippet_prefix in seen_snippets:
-                continue
-
-            if norm_url:
-                seen_urls.add(norm_url)
-            if snippet_prefix:
-                seen_snippets.add(snippet_prefix)
-            deduped.append(item)
-
-        for i, item in enumerate(deduped):
-            item["index"] = i
-
-        return deduped
-
-    @staticmethod
     def _smart_truncate(text: str, max_len: int = 500) -> str:
-        """智能截断文本，在最近的句子/标点处截断，避免在句子中间断裂
-
-        BUG-FIX: 替代 text[:500] 硬截断，防止在句子中间截断导致信息不完整
-        """
+        """智能截断文本，在最近的句子/标点处截断"""
         if len(text) <= max_len:
             return text
         truncated = text[:max_len]
         for sep in ("。", ".", "！", "!", "\n", "；", ";"):
             last = truncated.rfind(sep)
             if last > max_len * 0.5:
-                return truncated[:last + 1] + "..."
+                return truncated[: last + 1] + "..."
         return truncated + "..."
-
-    def _parse_webgate_result(
-        self, result: dict[str, Any], query: str, search_mode: str
-    ) -> dict[str, Any]:
-        """解析 mcp-webgate 返回结果"""
-        formatted_results = []
-
-        if search_mode == "content_only":
-            url = result.get("url", query)
-            title = result.get("title", "")
-            text = result.get("text", "")
-            char_count = result.get("char_count", len(text))
-            truncated = result.get("truncated", False)
-
-            return {
-                "query": query,
-                "results": [
-                    {
-                        "url": url,
-                        "title": title,
-                        "snippet": self._smart_truncate(text, 500),  # BUG-FIX: 智能截断替代硬截断
-                        "content": text,
-                        "char_count": char_count,
-                        "truncated": truncated,
-                        "source": "mcp-webgate",
-                        "index": 0,
-                    }
-                ],
-                "total": 1,
-                "raw_total": 1,
-                "processed": True,
-                "mode": search_mode,
-            }
-
-        if "summary" in result:
-            summary = result.get("summary", "")
-            citations = result.get("citations", [])
-            stats = result.get("stats", {})
-
-            citation_results = []
-            for i, cit in enumerate(citations):
-                citation_results.append(
-                    {
-                        "url": cit.get("url", ""),
-                        "title": cit.get("title", ""),
-                        "snippet": self._smart_truncate(summary, 500) if i == 0 else cit.get("title", ""),  # BUG-FIX: 智能截断替代硬截断
-                        "source": "mcp-webgate",
-                        "index": i,
-                    }
-                )
-
-            citation_results = self._dedup_results(citation_results)
-
-            return {
-                "query": query,
-                "results": citation_results,
-                "total": len(citation_results),
-                "raw_total": stats.get("fetched", 0),
-                "processed": True,
-                "mode": search_mode,
-            }
-
-        sources = result.get("sources", [])
-        for i, source in enumerate(sources):
-            if isinstance(source, dict):
-                content = source.get("content", "")
-                formatted_results.append(
-                    {
-                        "url": source.get("url", ""),
-                        "title": source.get("title", ""),
-                        "snippet": (
-                            self._smart_truncate(content, 500) if content else source.get("title", "")  # BUG-FIX: 智能截断替代硬截断
-                        ),
-                        "content": content,
-                        "truncated": source.get("truncated", False),
-                        "source": "mcp-webgate",
-                        "index": i,
-                    }
-                )
-
-        snippet_pool = result.get("snippet_pool", [])
-        for i, snip in enumerate(snippet_pool):
-            if isinstance(snip, dict):
-                formatted_results.append(
-                    {
-                        "url": snip.get("url", ""),
-                        "title": snip.get("title", ""),
-                        "snippet": self._smart_truncate(snip.get("snippet", ""), 500),  # BUG-FIX: 智能截断替代硬截断
-                        "source": "mcp-webgate-snippet",
-                        "index": len(sources) + i,
-                    }
-                )
-
-        formatted_results = self._dedup_results(formatted_results)
-
-        stats = result.get("stats", {})
-
-        return {
-            "query": query,
-            "results": formatted_results,
-            "total": len(formatted_results),
-            "raw_total": stats.get("fetched", len(sources)),
-            "processed": True,
-            "mode": search_mode,
-            "stats": stats,
-        }
 
 
 async def web_search_mcp(

@@ -9,7 +9,7 @@
 
 import logging
 import math
-from typing import Any, Union
+from typing import Any, Union  # noqa: F401
 
 from core.results import ToolExecutionResult
 from tools.builtin.base import BuiltinTool
@@ -59,7 +59,7 @@ class ScientificCalculatorTool(BuiltinTool):
         "log10": math.log10,
         "log2": math.log2,
         # 幂和根
-        "pow": lambda x, exp: math.pow(x, exp),
+        "pow": math.pow,
         "sqrt": math.sqrt,
         "cbrt": lambda x: math.copysign(abs(x) ** (1/3), x),
         # 其他数学函数
@@ -132,9 +132,9 @@ class ScientificCalculatorTool(BuiltinTool):
     def _evaluate_single_operation(
         self,
         func: str,
-        value: Union[int, float],
+        value: int | float,
         values: list = None
-    ) -> Union[int, float]:
+    ) -> int | float:
         """求值单个数学函数"""
         # 处理常量
         if func.lower() in self.CONSTANTS:
@@ -166,7 +166,7 @@ class ScientificCalculatorTool(BuiltinTool):
         # 单参数函数
         return op_func(value)
 
-    def _safe_eval(self, expression: str) -> Union[int, float]:
+    def _safe_eval(self, expression: str) -> int | float:
         """安全地计算数学表达式"""
         # 替换常量
         expr = expression.lower()
@@ -214,7 +214,7 @@ class ScientificCalculatorTool(BuiltinTool):
         result = eval(expr, {"__builtins__": {}}, allowed_names)
         return result
 
-    async def execute(
+    async def execute(  # noqa: PLR0911,PLR0912
         self,
         inputs: dict[str, Any],
         context: Any = None,
@@ -237,10 +237,7 @@ class ScientificCalculatorTool(BuiltinTool):
 
                 # 格式化结果
                 if isinstance(result, float):
-                    if result == int(result):
-                        result = int(result)
-                    else:
-                        result = round(result, 10)
+                    result = int(result) if result == int(result) else round(result, 10)
 
                 return create_success_result(
                     data={
@@ -250,7 +247,7 @@ class ScientificCalculatorTool(BuiltinTool):
                     metadata={"action": "scientific_calculator"},
                 )
 
-            elif operation == "evaluate":
+            if operation == "evaluate":
                 # 求值单个函数
                 func = inputs.get("func")
                 value = inputs.get("value")
@@ -287,10 +284,7 @@ class ScientificCalculatorTool(BuiltinTool):
                             error="计算结果为无穷大",
                             metadata={"action": "scientific_calculator"},
                         )
-                    if result == int(result):
-                        result = int(result)
-                    else:
-                        result = round(result, 10)
+                    result = int(result) if result == int(result) else round(result, 10)
 
                 return create_success_result(
                     data={
@@ -301,11 +295,10 @@ class ScientificCalculatorTool(BuiltinTool):
                     metadata={"action": "scientific_calculator"},
                 )
 
-            else:
-                return create_failure_result(
-                    error=f"不支持的运算类型: {operation}",
-                    metadata={"action": "scientific_calculator"},
-                )
+            return create_failure_result(
+                error=f"不支持的运算类型: {operation}",
+                metadata={"action": "scientific_calculator"},
+            )
 
         except ZeroDivisionError:
             logger.error("[科学计算器] 除零错误")

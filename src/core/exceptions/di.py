@@ -4,7 +4,7 @@ DI 模块异常定义
 
 from typing import Any
 
-from src.core.exceptions.base import SystemException
+from core.exceptions.base import SystemException
 
 
 class DIException(SystemException):

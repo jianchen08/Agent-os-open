@@ -8,36 +8,40 @@
 import { Loader2 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import {
   getContextWindowConfig,
   updateContextWindowConfig,
   resetContextWindowConfig,
-  type ContextWindowConfig,
 } from '@/services/api/config'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
-/** 完整上下文配置（含 YAML 中的预算层级） */
-interface FullContextConfig extends ContextWindowConfig {
-  budgets: Record<string, number>
+/**
+ * 完整上下文配置（页面使用的本地类型，与后端 YAML 一一对应）
+ *
+ * 复用 ContextWindowConfig 的所有字段， budgets 仍以 Record 形式存储。
+ */
+interface FullContextConfig {
+  version: string
   compress_trigger_ratio: number
+  budgets: Record<string, number>
+  include_tools_description_in_prompt: boolean
+  stability: Record<string, string>
+  layer_order: string[]
   compression: {
     enabled: boolean
     model: string
     layer_trigger_ratio: number
     max_turn_ratio: number
   }
-  layer_order: string[]
+  custom_layers: Record<string, unknown>
 }
 
-/** 默认配置 */
+/** 默认配置（与后端 _DEFAULT_CONTEXT_WINDOW 保持同步） */
 const DEFAULT_FULL_CONFIG: FullContextConfig = {
-  max_context_length: 128000,
-  reserved_system_messages: 5,
-  reserved_recent_messages: 10,
-  summary_threshold: 0.7,
+  version: '2.0',
+  compress_trigger_ratio: 0.55,
   budgets: {
     system_prompt: 0.06,
     tools_description: 0.0,
@@ -50,13 +54,8 @@ const DEFAULT_FULL_CONFIG: FullContextConfig = {
     retrieval: 0.05,
     response_reserve: 0.14,
   },
-  compress_trigger_ratio: 0.5,
-  compression: {
-    enabled: true,
-    model: '',
-    layer_trigger_ratio: 0.8,
-    max_turn_ratio: 0.5,
-  },
+  include_tools_description_in_prompt: false,
+  stability: {},
   layer_order: [
     'system_prompt',
     'tools_description',
@@ -67,6 +66,13 @@ const DEFAULT_FULL_CONFIG: FullContextConfig = {
     'recent',
     'dynamic_variables',
   ],
+  compression: {
+    enabled: true,
+    model: '',
+    layer_trigger_ratio: 0.8,
+    max_turn_ratio: 0.5,
+  },
+  custom_layers: {},
 }
 
 /** 层级中文标签 */
@@ -104,7 +110,10 @@ export function ContextWindowSettingsPage() {
         setConfig({ ...DEFAULT_FULL_CONFIG, ...data })
       })
       .catch(() => {
-        if (cancelled) {
+        // BUG-FIX-fix_20260617_catch_condition:
+        // 问题根因: 原代码 if (cancelled) 条件写反，导致组件卸载后才设置错误，未卸载时反而吞掉错误。
+        // 修复方案: 改为 if (!cancelled)，与同文件 .then/.finally 中的取消判断方向一致。
+        if (!cancelled) {
           setLoadError('无法连接服务器，显示默认配置')
         }
       })
@@ -115,14 +124,6 @@ export function ContextWindowSettingsPage() {
       cancelled = true
     }
   }, [])
-
-  // 更新基础字段
-  const updateField = useCallback(
-    <K extends keyof ContextWindowConfig>(key: K, value: ContextWindowConfig[K]) => {
-      setConfig((prev) => ({ ...prev, [key]: value }))
-    },
-    [],
-  )
 
   // 更新预算
   const updateBudget = useCallback((layer: string, value: number) => {
@@ -146,17 +147,18 @@ export function ContextWindowSettingsPage() {
     [],
   )
 
-  // 保存
+  // 保存完整配置到后端
   const handleSave = useCallback(async () => {
     setSaveState('saving')
     try {
-      const saved = await updateContextWindowConfig({
-        max_context_length: config.max_context_length,
-        reserved_system_messages: config.reserved_system_messages,
-        reserved_recent_messages: config.reserved_recent_messages,
-        summary_threshold: config.summary_threshold,
-      })
-      setConfig((prev) => ({ ...prev, ...saved }))
+      const payload = {
+        compress_trigger_ratio: config.compress_trigger_ratio,
+        budgets: config.budgets,
+        compression: config.compression,
+        layer_order: config.layer_order,
+      }
+      const saved = await updateContextWindowConfig(payload)
+      setConfig({ ...DEFAULT_FULL_CONFIG, ...saved })
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2000)
     } catch {
@@ -199,62 +201,6 @@ export function ContextWindowSettingsPage() {
           {loadError}
         </div>
       )}
-
-      {/* 基础配置 */}
-      <Section title="基础配置">
-        <FieldRow label="最大上下文长度" htmlFor="ctx-max-len">
-          <Input
-            id="ctx-max-len"
-            type="number"
-            min={1000}
-            max={2000000}
-            value={config.max_context_length}
-            onChange={(e) => updateField('max_context_length', Number(e.target.value))}
-            aria-label="最大上下文长度"
-          />
-          <span className="text-muted-foreground mt-1 text-xs">
-            {(config.max_context_length / 1000).toFixed(0)}K tokens
-          </span>
-        </FieldRow>
-        <FieldRow label="保留系统消息数" htmlFor="ctx-sys-msg">
-          <Input
-            id="ctx-sys-msg"
-            type="number"
-            min={0}
-            max={50}
-            value={config.reserved_system_messages}
-            onChange={(e) => updateField('reserved_system_messages', Number(e.target.value))}
-            aria-label="保留系统消息数"
-          />
-        </FieldRow>
-        <FieldRow label="保留最近消息数" htmlFor="ctx-recent-msg">
-          <Input
-            id="ctx-recent-msg"
-            type="number"
-            min={1}
-            max={100}
-            value={config.reserved_recent_messages}
-            onChange={(e) => updateField('reserved_recent_messages', Number(e.target.value))}
-            aria-label="保留最近消息数"
-          />
-        </FieldRow>
-        <FieldRow label="摘要触发阈值" htmlFor="ctx-summary">
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              id="ctx-summary"
-              aria-label="摘要触发阈值"
-              min={0.1}
-              max={1}
-              step={0.05}
-              value={config.summary_threshold}
-              onChange={(e) => updateField('summary_threshold', Number(e.target.value))}
-              className="bg-border accent-primary h-2 flex-1 appearance-none rounded-full"
-            />
-            <span className="min-w-[40px] text-right text-sm">{config.summary_threshold}</span>
-          </div>
-        </FieldRow>
-      </Section>
 
       {/* 记忆层级配置 */}
       <Section title="记忆层级">
@@ -329,6 +275,32 @@ export function ContextWindowSettingsPage() {
 
       {/* 压缩配置 */}
       <Section title="压缩设置">
+        <FieldRow label="全局压缩触发比例" htmlFor="ctx-compress-trigger">
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              id="ctx-compress-trigger"
+              aria-label="全局压缩触发比例"
+              min={0.5}
+              max={0.6}
+              step={0.01}
+              value={config.compress_trigger_ratio}
+              onChange={(e) =>
+                setConfig((prev) => ({
+                  ...prev,
+                  compress_trigger_ratio: Number(e.target.value),
+                }))
+              }
+              className="bg-border accent-primary h-2 flex-1 appearance-none rounded-full"
+            />
+            <span className="min-w-[40px] text-right text-sm">
+              {config.compress_trigger_ratio}
+            </span>
+          </div>
+          <span className="text-muted-foreground mt-1 text-xs">
+            上下文占用达到此比例时触发压缩（0.55 = 55%）
+          </span>
+        </FieldRow>
         <FieldRow label="启用压缩" htmlFor="comp-enabled">
           <label className="flex cursor-pointer items-center gap-2">
             <input
@@ -341,7 +313,7 @@ export function ContextWindowSettingsPage() {
             <span className="text-sm">启用自动压缩</span>
           </label>
         </FieldRow>
-        <FieldRow label="压缩触发比例" htmlFor="comp-trigger">
+        <FieldRow label="单层触发比例" htmlFor="comp-trigger">
           <div className="flex items-center gap-3">
             <input
               type="range"

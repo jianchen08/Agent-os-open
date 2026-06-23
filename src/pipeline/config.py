@@ -64,9 +64,9 @@ def _resolve_env_vars_in_value(
                 except Exception:
                     pass
         return result
-    elif isinstance(value, dict):
+    if isinstance(value, dict):
         return {k: _resolve_env_vars_in_value(v, model_loader) for k, v in value.items()}
-    elif isinstance(value, list):
+    if isinstance(value, list):
         return [_resolve_env_vars_in_value(item, model_loader) for item in value]
     return value
 
@@ -191,7 +191,6 @@ def load_pipeline_config(
             target=entry_data.get("target", "core"),
             plugins=entry_data.get("plugins", []),
             priority=entry_data.get("priority", 0),
-            result=entry_data.get("result"),
         ))
     input_route_table = InputRouteTable(input_entries)
 
@@ -327,7 +326,7 @@ def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
     return plugin_cls
 
 
-def build_plugin_registry(
+def build_plugin_registry(  # noqa: PLR0912,PLR0915
     config: PipelineConfig,
     model_loader: Any | None = None,
     router: Any | None = None,
@@ -352,8 +351,26 @@ def build_plugin_registry(
     registry = PluginRegistry()
     type_slot = PluginTypeSlot()
 
+    # 收集所有需要注册的插件配置
+    # 1. config.plugins（顶层 plugins 字段，带 config 的完整配置）
+    # 2. input_routes / output_routes 里引用的插件名（字符串格式，需转成配置）
+    all_plugin_confs = list(config.plugins)
+    _seen_plugin_ids = {p.get("class") or p.get("name") for p in all_plugin_confs if isinstance(p, dict)}
+
+    for route in config.input_route_table.entries:
+        for plugin_name in route.plugins:
+            if plugin_name not in _seen_plugin_ids:
+                all_plugin_confs.append({"name": plugin_name})
+                _seen_plugin_ids.add(plugin_name)
+
+    for route in config.output_route_table.entries:
+        for plugin_name in getattr(route, "plugins", []):
+            if plugin_name not in _seen_plugin_ids:
+                all_plugin_confs.append({"name": plugin_name})
+                _seen_plugin_ids.add(plugin_name)
+
     # 注册普通插件（Input / Output）
-    for plugin_conf in config.plugins:
+    for plugin_conf in all_plugin_confs:
         plugin_config = plugin_conf.get("config", {})
         plugin_id = plugin_conf.get("class", "") or plugin_conf.get("name", "")
 
@@ -432,7 +449,7 @@ def build_plugin_registry(
             plugin_cls = _import_class(class_path)
             # llm_call: 优先使用 KeyPoolAdapter（按 key 粒度并发控制）
             if core_type == "llm_call" and model_loader is not None:
-                from llm.router_factory import get_or_create_adapter
+                from llm.router_factory import get_or_create_adapter  # noqa: PLC0415
                 _adapter = get_or_create_adapter(model_loader)
                 core_instance: ICorePlugin = plugin_cls(config=plugin_config, adapter=_adapter)
             elif core_type == "llm_call" and router is not None:

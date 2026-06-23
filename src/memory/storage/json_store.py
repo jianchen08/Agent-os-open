@@ -193,7 +193,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         Returns:
             Episode 实例
         """
-        from datetime import datetime, UTC
+        from datetime import UTC, datetime  # noqa: PLC0415
 
         created_at = data.get("created_at")
         if isinstance(created_at, str):
@@ -225,7 +225,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         Returns:
             Knowledge 实例
         """
-        from datetime import datetime, UTC
+        from datetime import UTC, datetime  # noqa: PLC0415
 
         created_at = data.get("created_at")
         if isinstance(created_at, str):
@@ -269,12 +269,11 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
             self._save_episode_to_disk(entry)
             self._episode_ids.add(entry.id)
             return entry.id
-        elif isinstance(entry, Knowledge):
+        if isinstance(entry, Knowledge):
             self._save_knowledge_to_disk(entry)
             self._knowledge_ids.add(entry.id)
             return entry.id
-        else:
-            raise ValueError(f"不支持的类型: {type(entry)}")
+        raise ValueError(f"不支持的类型: {type(entry)}")
 
     async def load(
         self, entry_id: str, memory_type: str = "episode",
@@ -290,7 +289,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         """
         if memory_type == "episode":
             return self._read_episode_from_disk(entry_id)
-        elif memory_type == "semantic":
+        if memory_type == "semantic":
             return self._read_knowledge_from_disk(entry_id)
         return None
 
@@ -313,19 +312,13 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
                 file_path.unlink()
             self._episode_ids.discard(entry_id)
             return True
-        elif memory_type == "semantic" and entry_id in self._knowledge_ids:
+        if memory_type == "semantic" and entry_id in self._knowledge_ids or entry_id in self._knowledge_ids:
             file_path = self._knowledge_dir / f"{entry_id}.json"
             if file_path.exists():
                 file_path.unlink()
             self._knowledge_ids.discard(entry_id)
             return True
-        elif entry_id in self._knowledge_ids:
-            file_path = self._knowledge_dir / f"{entry_id}.json"
-            if file_path.exists():
-                file_path.unlink()
-            self._knowledge_ids.discard(entry_id)
-            return True
-        elif entry_id in self._episode_ids:
+        if entry_id in self._episode_ids:
             file_path = self._episodes_dir / f"{entry_id}.json"
             if file_path.exists():
                 file_path.unlink()

@@ -11,6 +11,7 @@ State 命名空间:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -38,21 +39,58 @@ class ContextWindowGuardPlugin(IInputPlugin):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化上下文窗口守卫插件。
 
+        配置优先级（高→低）：
+          ① Agent YAML plugins.enabled.context_window_guard.trigger_ratio
+             （由 plugin_resolver 合并进 config，或由 _apply_runtime_config 从 ctx.state 读）
+          ② Pipeline YAML plugins.context_window_guard.config.trigger_ratio
+             （即本 __init__ 收到的 config 参数）
+          ③ System YAML config/system/context_window_config.yaml 的 compress_trigger_ratio
+          ④ 代码硬编码默认 0.55
+
         Args:
-            config: 插件配置字典，支持以下键：
+            config: 插件配置字典（来自 pipeline yaml），支持以下键：
                 - enabled: 是否启用（默认 True）
-                - trigger_ratio: 触发压缩的阈值比例（默认 0.5）
+                - trigger_ratio: 触发压缩的阈值比例（不配则继承 system yaml）
                 - compression_model: 压缩专用模型 ID（如 minimax-m3），
                   为空时回退到 llm.yaml 的 defaults.compression，再为空则用主模型
         """
         self._config = config or {}
-        self._trigger_ratio = self._config.get("trigger_ratio", 0.5)
+        self._trigger_ratio = self._resolve_trigger_ratio(self._config.get("trigger_ratio"))
         self._compression_model: str | None = self._resolve_compression_model(
             self._config.get("compression_model"),
         )
         # 实例级追踪：插件可能被重复实例化，state 不一定跨迭代持久化
         # 用实例变量做主存储，ctx.state 做辅助（重启恢复场景）
         self._tracked_msg_count: int = 0
+
+    @staticmethod
+    def _resolve_trigger_ratio(explicit: float | None) -> float:
+        """解析 trigger_ratio：pipeline 显式值 → system yaml → 代码默认。
+
+        三层覆盖链路中 ②→③ 的衔接：当 pipeline yaml 没配 trigger_ratio 时，
+        从 system 的 context_window_config.yaml 继承 compress_trigger_ratio。
+
+        Args:
+            explicit: pipeline yaml 显式配置的 trigger_ratio（可能为 None）
+
+        Returns:
+            最终生效的 trigger_ratio
+        """
+        # ② Pipeline 显式配置优先
+        if explicit is not None:
+            return explicit
+
+        # ③ System YAML fallback
+        try:
+            from memory.context_compressor import CompressionConfig  # noqa: PLC0415
+
+            sys_config = CompressionConfig.from_yaml_config(context_window=128000)
+            return sys_config.compress_trigger_ratio
+        except Exception:
+            pass
+
+        # ④ 代码默认（见 config.defaults.COMPRESS_TRIGGER_RATIO）
+        return 0.55
 
     @staticmethod
     def _resolve_compression_model(explicit: str | None) -> str | None:
@@ -67,7 +105,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if explicit:
             return explicit
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             loader = get_model_config_loader()
             defaults = loader._load_llm_data().get("defaults", {})
@@ -87,6 +125,34 @@ class ContextWindowGuardPlugin(IInputPlugin):
     def priority(self) -> int:
         """插件执行优先级，在 prompt_build 之前执行。"""
         return self._config.get("priority", 5)
+
+    # ------------------------------------------------------------------
+    # Agent 级运行时配置覆盖
+    # ------------------------------------------------------------------
+
+    def _apply_runtime_config(self, ctx: PluginContext) -> None:
+        """从 Agent 配置覆盖运行时参数。
+
+        三层覆盖链路（高优先级覆盖低优先级）：
+          ① Agent YAML (plugins.enabled.context_window_guard.{key})
+          ② Pipeline YAML (plugins.context_window_guard.config.{key})
+          ③ 代码默认值
+
+        Agent 覆盖通过两条路径生效：
+        - 路径 A：plugin_resolver.apply_agent_plugin_configs() 已用合并后的
+          config 重新构造本插件实例（_config 已含 agent override），构造时
+          _trigger_ratio 已正确。此方法处理路径 B。
+        - 路径 B：ctx.state 中可能携带 agent 注入的运行时覆盖（与 stop_check
+          等插件从 ctx.state 读 max_iterations 同一机制）。
+
+        本方法读 ctx.state 里的 context_guard.trigger_ratio（如有）覆盖 _trigger_ratio。
+
+        Args:
+            ctx: 插件执行上下文
+        """
+        state_ratio = ctx.state.get("context_guard.trigger_ratio")
+        if state_ratio is not None:
+            self._trigger_ratio = state_ratio
 
     # ------------------------------------------------------------------
     # Token 估算（统一算法：len//2）
@@ -121,7 +187,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             track_usage = ctx.state.get("track.llm_usage", {})
             prev_input = track_usage.get("input_tokens", 0)
             if prev_input > 0:
-                logger.info(
+                logger.debug(
                     "[%s] 估算: llm_usage 为空，从 track 回退: prev_input=%d",
                     self.name, prev_input,
                 )
@@ -134,7 +200,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             current_non_sys = sum(1 for m in messages if m.get("role") != "system")
 
             if current_non_sys <= tracked:
-                logger.info(
+                logger.debug(
                     "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
                     self.name, prev_input, prev_input, tracked, current_non_sys,
                 )
@@ -145,7 +211,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             delta_tokens = sum(self._estimate_msg_tokens(m) for m in delta_msgs)
 
             effective = prev_input + delta_tokens
-            logger.info(
+            logger.debug(
                 "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d, delta_count=%d)",
                 self.name, effective, prev_input, delta_tokens, tracked, current_non_sys, len(delta_msgs),
             )
@@ -154,7 +220,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 策略 2：压缩块拼接估算
         assembled = await self._estimate_assembled_tokens(ctx, messages)
         if assembled >= 0:
-            logger.info(
+            logger.debug(
                 "[%s] 估算(压缩块拼接): %d tokens, msg_count=%d",
                 self.name, assembled, len(messages),
             )
@@ -162,7 +228,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # 策略 3：全量字符估算（最后手段）
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
-        logger.info(
+        logger.debug(
             "[%s] 估算(全量字符): %d tokens, msg_count=%d",
             self.name, estimated, len(messages),
         )
@@ -237,7 +303,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 主入口
     # ------------------------------------------------------------------
 
-    async def execute(self, ctx: PluginContext) -> PluginResult:
+    async def execute(self, ctx: PluginContext) -> PluginResult:  # noqa: PLR0911
         """检查上下文大小并在超阈值时触发记忆系统压缩。
 
         Args:
@@ -246,6 +312,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         Returns:
             包含压缩后 messages 的插件执行结果
         """
+        # Agent 级覆盖：从 ctx.state 读 agent YAML 中 plugins.enabled.context_window_guard 的配置
+        self._apply_runtime_config(ctx)
+
         context_window = ctx.state.get("context_window")
         if not context_window:
             if not self._warned_no_context_window:
@@ -278,7 +347,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 阈值检查
         estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
         trigger_tokens = int(context_window * self._trigger_ratio)
-        logger.info(
+        logger.debug(
             "[%s] 阈值检查: estimated=%d, trigger=%d, context_window=%d, "
             "ratio=%.2f, msg_count=%d, service=%s",
             self.name, estimated_tokens, trigger_tokens, context_window,
@@ -314,13 +383,11 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 前端压缩进度通知
         _on_chunk = ctx.state.get("on_chunk")
         if _on_chunk:
-            try:
+            with contextlib.suppress(Exception):
                 _on_chunk({
                     "type": "compression_start",
                     "pipeline_id": ctx.state.get("pipeline_id", ""),
                 })
-            except Exception:
-                pass
 
         # 调用压缩
         logger.info("[%s] 开始调用 compress_messages ...", self.name)
@@ -376,7 +443,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 辅助方法
     # ------------------------------------------------------------------
 
-    async def _trim_covered_messages(
+    async def _trim_covered_messages(  # noqa: PLR0911
         self, ctx: PluginContext, messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """裁剪被已有压缩块覆盖的旧消息（重启场景）。
@@ -460,12 +527,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
         except (KeyError, AttributeError):
             pass
 
-        from memory.memory_context_service import MemoryContextService
+        from memory.memory_context_service import MemoryContextService  # noqa: PLC0415
 
         try:
             context_window = ctx.state.get("context_window", 128000)
             return MemoryContextService(
-                config={"context_window": context_window, "compress_trigger_ratio": 0.5},
+                config={"context_window": context_window, "compress_trigger_ratio": 0.55},  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
             )
         except Exception:
             return None
@@ -481,18 +548,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
         chunk_service = None
         memory_service = None
         llm_core = None
-        try:
+        with contextlib.suppress(KeyError, AttributeError):
             chunk_service = ctx.get_service("chunk_service")
-        except (KeyError, AttributeError):
-            pass
-        try:
+        with contextlib.suppress(KeyError, AttributeError):
             memory_service = ctx.get_service("memory_service")
-        except (KeyError, AttributeError):
-            pass
-        try:
+        with contextlib.suppress(KeyError, AttributeError):
             llm_core = ctx.get_service("llm_core")
-        except (KeyError, AttributeError):
-            pass
 
         try:
             service.setup(

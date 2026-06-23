@@ -28,15 +28,91 @@ export function handleSubAgentCreated(eventData: any) {
   )
   if (!taskId || !pipelineId) return
 
-  const tabId = `sub-${parentId || taskId}`
+  // BUG-FIX-fix_20260607_cross_task_tab_jump:
+  // 问题根因: tabId 使用 parentId 生成（sub-${parentId}），同父管道的多个子任务共享同一个 tabId，
+  //          导致 registerPipelineTab 互相覆盖，点击标签时跳转到对方任务的会话。
+  //          而 navigateToPipeline 使用 sub-${pipelineId} 生成 tabId，每个管道唯一，
+  //          两处不一致导致映射错乱。
+  // 修复方案: 统一使用 pipelineId 生成 tabId（sub-${pipelineId}），与 navigateToPipeline 保持一致，
+  //          确保每个子管道有独立的标签页。
+  // 影响范围: 同一会话下多个子任务的标签页跳转
+  // 修复日期: 2026-06-07
+  const tabId = `sub-${pipelineId}`
   const pStore = pipelineStore.getState()
   const agentTabStore = useAgentTabStore.getState()
 
-  const sessionId =
-    data.sessionId
-    || pStore.pipelineSessionMap[parentId || pStore.activePipelineId || '']
-    || useSessionStore.getState().activeSessionId
-    || ''
+  // BUG-FIX-fix_20260607_cross_session_pipeline_jump:
+  // 问题根因: 后端 sub_agent_created 事件不包含 sessionId，原回退链依赖
+  //          activeSessionId，当用户正在查看其他会话时，新管道会被注册到错误的会话，
+  //          导致 pipelineSessionMap 映射错乱，点击标签跳转到对方任务的会话。
+  // 修复方案: 优先使用后端新增的 parentPipelineId 字段查找父管道所属会话，
+  //          再遍历 session.pipelineIds 兜底。找不到时不注册 pipelineMeta，
+  //          仅注册 pipelineTabMap 映射，让紧随其后的 stream_start 用
+  //          threadId（后端 WS 事件自带的会话 ID）正确注册 pipelineMeta。
+  // 影响范围: 不同会话的子任务标签页跳转准确性
+  // 修复日期: 2026-06-07
+  const parentPipelineId = data.parentPipelineId
+  let sessionId = ''
+
+  _debugLogger.info(
+    '[SUB_AGENT_CREATED] 开始查找 sessionId: pipelineId=%s parentPipelineId=%s activeSessionId=%s',
+    pipelineId, parentPipelineId, useSessionStore.getState().activeSessionId,
+  )
+
+  // 优先级1: 通过 parentPipelineId 在 pipelineSessionMap 中查找父管道所属会话
+  if (parentPipelineId && pStore.pipelineSessionMap[parentPipelineId]) {
+    sessionId = pStore.pipelineSessionMap[parentPipelineId]
+    _debugLogger.info(
+      '[SUB_AGENT_CREATED] 优先级1 命中 pipelineSessionMap: sessionId=%s',
+      sessionId,
+    )
+  }
+
+  // 优先级2: 遍历所有 session.pipelineIds 查找父管道所属会话
+  if (!sessionId && parentPipelineId) {
+    const sessions = useSessionStore.getState().sessions
+    const found = sessions.find(s => s.pipelineIds?.includes(parentPipelineId))
+    if (found) {
+      sessionId = found.id
+      _debugLogger.info(
+        '[SUB_AGENT_CREATED] 优先级2 命中 session.pipelineIds: sessionId=%s',
+        sessionId,
+      )
+    }
+  }
+
+  // BUG-FIX-fix_20260621_sub_agent_session_fallback:
+  // 问题根因: 原代码在找不到 sessionId 时跳过 registerPipeline，依赖 stream_start 兜底。
+  //          但如果 stream_start 丢失或解析失败，pipelineSessionMap 永远不会被注册，
+  //          导致 findPipelineLocation 三级查找都失败，用户点击子管道时报错"找不到管道归属"。
+  // 修复方案: 子管道和父管道一定属于同一个 session，找不到 sessionId 时使用 parentPipelineId
+  //          的 sessionId 作为 fallback。如果 parentPipelineId 也找不到，使用 activeSessionId。
+  // 影响范围: 子管道创建时 pipelineSessionMap 的注册
+  // 修复日期: 2026-06-21
+  if (!sessionId && parentPipelineId) {
+    // 优先级3: parentPipelineId 存在但 pipelineSessionMap 和 session.pipelineIds 都没找到，
+    // 使用 activeSessionId 作为 fallback（子管道通常属于当前活跃会话）
+    sessionId = useSessionStore.getState().activeSessionId || ''
+    if (sessionId) {
+      _debugLogger.info(
+        '[SUB_AGENT_CREATED] 使用 activeSessionId 作为 fallback: pipelineId=%s sessionId=%s',
+        pipelineId, sessionId,
+      )
+    }
+  }
+
+  // 注册 pipeline→tab 映射（不依赖 sessionId，所有会话都注册，用于 WebSocket 消息路由）
+  agentTabStore.registerPipelineTab(pipelineId, tabId)
+
+  // 无法确定会话归属时不注册 pipelineMeta，避免写入错误的 pipelineSessionMap 映射。
+  // 紧随其后的 stream_start 事件会用 threadId（后端 WS 自带的会话 ID）正确注册。
+  if (!sessionId) {
+    _debugLogger.warn(
+      `[SUB_AGENT_CREATED] 无法确定管道所属会话，跳过 pipelineMeta 注册: pipelineId=%s parentPipelineId=%s`,
+      pipelineId, parentPipelineId,
+    )
+    return
+  }
 
   // BUG-FIX-fix_20260528_cross_pipeline_jump:
   // 问题根因: registerPipeline(含 sessionId) 放在 registerPipelineTab/openSubAgentTab 之后，
@@ -59,7 +135,4 @@ export function handleSubAgentCreated(eventData: any) {
       unreadCount: 0,
     })
   }
-
-  // 注册 pipeline→tab 映射（所有会话都注册，用于 WebSocket 消息路由）
-  agentTabStore.registerPipelineTab(pipelineId, tabId)
 }

@@ -733,5 +733,91 @@ async def _run_all():
     print(f"\n=== {len(tests) + 1} e2e tests ALL PASSED ===")
 
 
+class TestRegisterSequencePreservation:
+    """BUG-FIX-fix_20260606_register_seq_reset 回归测试。
+
+    验证 engine.unregister → register 过程中 msg_sequence 不会重置为 0。
+    修复位置: engine.py 中保存/恢复 _preserved_msg_sequence。
+    """
+
+    def test_unregister_register_preserves_sequence_via_engine(self):
+        """模拟 engine.run() 的 unregister → register 流程：手动保存恢复 msg_sequence。"""
+        registry = get_engine_registry()
+        pid = "seq-test-pipe-001"
+
+        # 1. 注册并递增 sequence
+        entry = registry.register(pid, FakeEngine(pid))
+        entry.init_sequence(100)
+        assert entry.next_sequence() == 101
+        assert entry.next_sequence() == 102
+        assert entry.msg_sequence == 102
+
+        # 2. 模拟 engine.run() 的保存流程
+        old_entry = registry.get(pid)
+        assert old_entry is not None
+        preserved_msg_sequence = old_entry.msg_sequence
+        # engine.run() 先 unregister
+        registry.unregister(pid)
+        assert registry.get(pid) is None
+
+        # 3. 模拟 _run_loop 中的 register（existing=None）
+        new_entry = registry.register(pid, FakeEngine(pid))
+        # 4. 模拟 engine.run() 的恢复流程
+        if preserved_msg_sequence > 0:
+            new_entry.init_sequence(preserved_msg_sequence)
+
+        # 5. msg_sequence 应恢复，而非归零
+        assert new_entry.msg_sequence == 102, (
+            f"msg_sequence 应为 102（恢复旧值），实际为 {new_entry.msg_sequence}"
+        )
+        assert new_entry.next_sequence() == 103
+        assert new_entry.next_sequence() == 104
+
+        registry.unregister(pid)
+
+    def test_first_register_no_existing(self):
+        """首次 register（无旧 entry）时不报错。"""
+        registry = get_engine_registry()
+        pid = "seq-test-first-register"
+        registry._engines.pop(pid, None)
+
+        entry = registry.register(pid, FakeEngine(pid))
+        assert entry.msg_sequence >= 0
+
+        registry.unregister(pid)
+
+    def test_register_preserves_bridge_and_sequence_via_engine(self):
+        """模拟 engine.run() 的完整保存/恢复：bridge 和 msg_sequence 都保留。"""
+        registry = get_engine_registry()
+        pid = "seq-test-bridge-pipe"
+
+        # 1. 初始注册，设置 bridge 和 sequence
+        entry = registry.register(pid, FakeEngine(pid))
+        entry.init_sequence(500)
+        entry.next_sequence()  # 501
+        mock_bridge = MagicMock()
+        entry.bridge = mock_bridge
+
+        # 2. 模拟 engine.run() 的保存流程
+        old_entry = registry.get(pid)
+        preserved_bridge = old_entry.bridge
+        preserved_msg_sequence = old_entry.msg_sequence
+        registry.unregister(pid)
+
+        # 3. register（existing=None）
+        new_entry = registry.register(pid, FakeEngine(pid))
+        # 模拟 engine 恢复逻辑
+        if preserved_bridge is not None and new_entry.bridge is None:
+            new_entry.bridge = preserved_bridge
+        if preserved_msg_sequence > 0:
+            new_entry.init_sequence(preserved_msg_sequence)
+
+        # 4. bridge 和 sequence 都应保留
+        assert new_entry.bridge is mock_bridge
+        assert new_entry.msg_sequence == 501
+
+        registry.unregister(pid)
+
+
 if __name__ == "__main__":
     asyncio.run(_run_all())

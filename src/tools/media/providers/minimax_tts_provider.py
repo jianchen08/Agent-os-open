@@ -190,19 +190,18 @@ class MiniMaxTTSProvider(MediaProvider):
             "Content-Type": "application/json",
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"MiniMax TTS API 调用失败 (status={resp.status}): {error_text}"
-                    )
-                result = await resp.json()
+        async with aiohttp.ClientSession() as session, session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"MiniMax TTS API 调用失败 (status={resp.status}): {error_text}"
+                )
+            result = await resp.json()
 
         base_resp = result.get("base_resp", {})
         if base_resp.get("status_code", 0) != 0:

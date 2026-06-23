@@ -64,6 +64,8 @@ interface InteractionState {
   pendingInteractions: PendingInteraction[]
   /** 全局浮层中打开的交互请求 ID */
   globalOpenRequestId: string | null
+  /** 全局浮层是否最小化 */
+  isMinimized: boolean
 
   /** 添加待处理交互 */
   addInteraction: (data: Omit<PendingInteraction, 'status'>) => void
@@ -81,11 +83,16 @@ interface InteractionState {
   getEnteredForPipeline: (pipelineId: string) => PendingInteraction | undefined
   /** 打开全局交互浮层 */
   setGlobalOpenRequestId: (id: string | null) => void
+  /** 切换最小化状态 */
+  toggleMinimized: () => void
+  /** 设置最小化状态 */
+  setMinimized: (minimized: boolean) => void
 }
 
 export const useInteractionStore = create<InteractionState>()((set, get) => ({
   pendingInteractions: [],
   globalOpenRequestId: null,
+  isMinimized: false,
 
   addInteraction: (data) => {
     set((state) => {
@@ -181,5 +188,13 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
 
   setGlobalOpenRequestId: (id) => {
     set({ globalOpenRequestId: id })
+  },
+
+  toggleMinimized: () => {
+    set((state) => ({ isMinimized: !state.isMinimized }))
+  },
+
+  setMinimized: (minimized) => {
+    set({ isMinimized: minimized })
   },
 }))

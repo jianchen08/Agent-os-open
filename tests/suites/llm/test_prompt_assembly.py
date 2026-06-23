@@ -4,16 +4,16 @@
     Input 插件链:
         message_inject → context_build → memory_read → tool_schema → prompt_build
     Core 插件:
-        LLMCore._build_messages() 从 system_message + messages 组装
-        (dynamic_vars 已改为 system role，合并到 system_message 中)
+        LLMCore._build_messages() 从 system_message + compression_messages + messages + dynamic_vars 组装
+        (dynamic_vars 作为独立 system 消息追加在末尾，不合并进 system_message)
 
 测试覆盖：
-    1. prompt_build 只产出 state["system_message"]，不含历史和动态变量
+    1. prompt_build 只产出 state["system_message"]（纯 prompt），不含历史和动态变量
     2. prompt_build 按 layer_order 顺序组装（system_prompt → static_vars → knowledge → memory → L3 → L2 → L1）
     3. prompt_build 默认不拼入 tools_description（走 function calling）
     4. tool_schema 默认不写 prompt.tool_descriptions
-    5. LLMCore._build_messages 从两来源组装（system_message 含 dynamic_vars + history）
-    6. LLMCore._build_messages 动态变量合并到 system_message 而非作为独立 user 消息追加
+    5. LLMCore._build_messages 从多来源组装（system_message + compression + history + dynamic_vars）
+    6. LLMCore._build_messages 动态变量作为独立 system 消息追加在末尾，不合并进 system_message
     7. LLMCore 只将 assistant 回复追加到 state["messages"]（不包含 system/dynamic）
     8. 完整链路：message_inject → prompt_build → LLMCore._build_messages
 """
@@ -226,13 +226,31 @@ class TestPromptBuildLayerOrder:
         ctx = make_ctx(state, chunk_service=chunk_service)
 
         result = await plugin.execute(ctx)
-        content = result.state_updates["system_message"]["content"]
 
-        # 验证三层都存在且顺序正确：关键词 → L2 → L1
-        kw_pos = content.index("历史关键词索引")
-        l2_pos = content.index("三元组摘要")
-        l1_pos = content.index("八段摘要")
-        assert kw_pos < l2_pos < l1_pos
+        # 压缩层作为独立消息输出在 compression_messages（而非 system_message.content）
+        compression_msgs = result.state_updates.get("compression_messages", [])
+        assert compression_msgs, "compression_messages 不应为空"
+
+        # 验证存在的层级按正确顺序排列：keywords → L2 → L1
+        # 预算充足时某些层级可能不出现，只验证存在的层级顺序
+        def _find_level(msgs: list, marker: str) -> int:
+            """查找包含 marker 的消息索引，不存在返回 -1。"""
+            for i, m in enumerate(msgs):
+                if marker in m.get("content", ""):
+                    return i
+            return -1
+
+        kw_pos = _find_level(compression_msgs, 'level="KEYWORDS"')
+        l2_pos = _find_level(compression_msgs, 'level="L2"')
+        l1_pos = _find_level(compression_msgs, 'level="L1"')
+        assert l1_pos >= 0, "至少应有 L1 压缩块"
+
+        if kw_pos >= 0 and l2_pos >= 0:
+            assert kw_pos < l2_pos, "keywords 应在 L2 之前"
+        if l2_pos >= 0 and l1_pos >= 0:
+            assert l2_pos < l1_pos, "L2 应在 L1 之前"
+        if kw_pos >= 0 and l1_pos >= 0:
+            assert kw_pos < l1_pos, "keywords 应在 L1 之前"
 
 
 # ══════════════════════════════════════════════════
@@ -343,7 +361,7 @@ class TestPromptBuildFolderInjection:
         state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree", "branch": "task/test"}
         state["workspace"] = "."  # 模拟实际场景：workspace 是相对值, 真实路径在 ws_meta
         state["context.static_vars"] = [
-            {"type": "folder", "name": "空路径目录", "path": ""}
+            {"type": "path", "name": "空路径目录", "path": ""}
         ]
         ctx = make_ctx(state)
 
@@ -355,11 +373,8 @@ class TestPromptBuildFolderInjection:
         assert "不应出现" not in content
 
     @pytest.mark.asyncio
-    async def test_folder_relative_path_joined_with_ws_meta_path(self, tmp_path) -> None:
-        """相对路径与 state["ws_meta"]["path"] 拼接，读取目录下文件。
-
-        模拟实际 worktree 场景：state["workspace"] 是 ``.``，真实路径在 ws_meta.path。
-        """
+    async def test_folder_relative_path_joined_with_workspace(self, tmp_path) -> None:
+        """文件夹相对路径与 state["workspace"] 拼接，读取目录下文件。"""
         docs = tmp_path / "docs"
         docs.mkdir()
         (docs / "a.md").write_text("文档A", encoding="utf-8")
@@ -367,16 +382,9 @@ class TestPromptBuildFolderInjection:
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {
-            "path": str(tmp_path),
-            "mode": "worktree",
-            "branch": "task/2eee5194e20f",
-            "project_root": str(tmp_path.parent),
-        }
-        # 故意把 workspace 设为相对值, 验证实现会忽略它、直接用 ws_meta.path
-        state["workspace"] = "."
+        state["workspace"] = str(tmp_path)  # engine.run(workspace=ws_meta.path) 注入
         state["context.static_vars"] = [
-            {"type": "folder", "name": "项目文档", "path": "docs"}
+            {"type": "path", "name": "项目文档", "path": "docs"}
         ]
         ctx = make_ctx(state)
 
@@ -391,26 +399,49 @@ class TestPromptBuildFolderInjection:
         assert "--- b.md ---" in content
 
     @pytest.mark.asyncio
-    async def test_folder_no_ws_meta_returns_empty(self, tmp_path) -> None:
-        """无 ws_meta.path 时，相对路径直接跳过（不读 workspace，也不读 CWD）。"""
-        # 在 workspace 与 CWD 下都放同名目录, 验证两个都不会被注入
+    async def test_folder_no_ws_meta_and_no_workspace_returns_empty(self, tmp_path) -> None:
+        """无 ws_meta.path 且无 workspace 时返回空（不读 CWD）。"""
+        # 在 CWD 下放同名目录, 验证不会去 CWD 找
         (tmp_path / "docs").mkdir()
         (tmp_path / "docs" / "a.md").write_text("不应出现", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
+        state.pop("workspace", None)
         state.pop("ws_meta", None)
         state["context.static_vars"] = [
-            {"type": "folder", "name": "无ws_meta", "path": "docs"}
+            {"type": "path", "name": "无base", "path": "docs"}
         ]
         ctx = make_ctx(state)
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        assert "无ws_meta" not in content
+        assert "无base" not in content
         assert "不应出现" not in content
+
+    @pytest.mark.asyncio
+    async def test_folder_workspace_fallback(self, tmp_path) -> None:
+        """ws_meta.path 缺失时回退到 state["workspace"]（engine.run 传入）。"""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "readme.md").write_text("workspace 回退成功", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        # 无 ws_meta，但有 workspace
+        state.pop("ws_meta", None)
+        state["workspace"] = str(tmp_path)
+        state["context.static_vars"] = [
+            {"type": "path", "name": "回退测试", "path": "docs"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "回退测试" in content
+        assert "workspace 回退成功" in content
 
     @pytest.mark.asyncio
     async def test_folder_absolute_path_used_as_is(self, tmp_path) -> None:
@@ -426,7 +457,7 @@ class TestPromptBuildFolderInjection:
         (tmp_path / "unrelated").mkdir()
         state["workspace"] = str(tmp_path / "unrelated")
         state["context.static_vars"] = [
-            {"type": "folder", "name": "外部文档", "path": str(docs)}
+            {"type": "path", "name": "外部文档", "path": str(docs)}
         ]
         ctx = make_ctx(state)
 
@@ -451,7 +482,7 @@ class TestPromptBuildFolderInjection:
         state["workspace"] = "."
         state["context.static_vars"] = [
             {
-                "type": "folder",
+                "type": "path",
                 "name": "仅Markdown",
                 "path": "docs",
                 "extensions": [".md"],
@@ -482,7 +513,7 @@ class TestPromptBuildFolderInjection:
         state.pop("workspace", None)
         state.pop("ws_meta", None)
         state["context.static_vars"] = [
-            {"type": "folder", "name": "无base", "path": "cwd_fake"}
+            {"type": "path", "name": "无base", "path": "cwd_fake"}
         ]
         ctx = make_ctx(state)
 
@@ -502,7 +533,7 @@ class TestPromptBuildFolderInjection:
         state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
         state["workspace"] = "."
         state["context.static_vars"] = [
-            {"type": "folder", "name": "不存在的目录", "path": "missing"}
+            {"type": "path", "name": "不存在的目录", "path": "missing"}
         ]
         ctx = make_ctx(state)
 
@@ -514,25 +545,26 @@ class TestPromptBuildFolderInjection:
 
 
 # ══════════════════════════════════════════════════
-# 3.6 prompt_build path 类型（同样拼接 ws_meta.path）
+# 3.6 prompt_build path 类型（文件用 project_root 解析）
 # ══════════════════════════════════════════════════
 
 
 class TestPromptBuildPathInjection:
-    """path 类型静态变量注入：相对路径同样拼接 ws_meta.path（worktree 路径）。
+    """path 类型静态变量注入：文件（相对路径）用 project_root 解析。
 
-    与 folder 类型共享同一条 base 解析规则（**只认 ws_meta.path，无任何回退**）：
-        1. 相对路径必须拼 ``state["ws_meta"]["path"]``（worktree 路径）
-        2. 缺失 ws_meta → 跳过
-        3. 绝对路径直接使用
-        4. 严禁回退到 ``state["workspace"]`` 或 CWD
+    路径解析规则（**互斥，无回退**）：
+        1. 文件相对路径 → 拼接 ``project_root``（state 或 services）
+        2. 文件夹相对路径 → 拼接 ``ws_meta.path``（由 TestPromptBuildFolderInjection 覆盖）
+        3. 两者互斥：文件不读 ws_meta.path，文件夹不读 project_root
+        4. 缺失 project_root → 返回空，**绝不**用 CWD 解析
+        5. 绝对路径直接使用
     """
 
     @pytest.mark.asyncio
-    async def test_path_no_cwd_fallback_returns_empty(
+    async def test_path_no_project_root_returns_empty(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """无 ws_meta 也无 workspace 时，相对路径绝不回退到 CWD，应返回空。"""
+        """无 project_root（state 和 services 均无）时，相对路径绝不回退到 CWD。"""
         cwd_file = tmp_path / "rules.md"
         cwd_file.write_text("CWD 内容, 不应被注入", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
@@ -544,7 +576,7 @@ class TestPromptBuildPathInjection:
         state["context.static_vars"] = [
             {"type": "path", "name": "无base", "path": "rules.md"}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state)  # 不传 services → project_root 为空
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -554,22 +586,17 @@ class TestPromptBuildPathInjection:
         assert "不应被注入" not in content
 
     @pytest.mark.asyncio
-    async def test_path_relative_joined_with_ws_meta_path(self, tmp_path) -> None:
-        """相对路径与 state["ws_meta"]["path"] 拼接，读取单个文件。"""
+    async def test_path_relative_joined_with_project_root(self, tmp_path) -> None:
+        """文件相对路径与 project_root（services）拼接，读取单个文件。"""
         (tmp_path / "rules.md").write_text("## 项目规范\n1. 必须有类型注解", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {
-            "path": str(tmp_path),
-            "mode": "worktree",
-            "branch": "task/2eee5194e20f",
-        }
-        state["workspace"] = "."  # 实际场景 workspace 是相对值
         state["context.static_vars"] = [
             {"type": "path", "name": "项目规则", "path": "rules.md"}
         ]
-        ctx = make_ctx(state)
+        # 通过 services 提供 project_root（模拟实际运行时 Application 注入）
+        ctx = make_ctx(state, project_root=str(tmp_path))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -578,20 +605,18 @@ class TestPromptBuildPathInjection:
         assert "类型注解" in content
 
     @pytest.mark.asyncio
-    async def test_path_nested_relative_joined_with_ws_meta_path(self, tmp_path) -> None:
-        """多层相对路径（如 docs/sub/spec.md）也能正确拼接到 ws_meta.path。"""
+    async def test_path_nested_relative_joined_with_project_root(self, tmp_path) -> None:
+        """多层相对路径（如 docs/sub/spec.md）也能正确拼接到 project_root。"""
         nested = tmp_path / "docs" / "sub"
         nested.mkdir(parents=True)
         (nested / "spec.md").write_text("嵌套规范", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
-        state["workspace"] = "."
         state["context.static_vars"] = [
             {"type": "path", "name": "嵌套规则", "path": "docs/sub/spec.md"}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root=str(tmp_path))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -600,21 +625,20 @@ class TestPromptBuildPathInjection:
 
     @pytest.mark.asyncio
     async def test_path_absolute_used_as_is(self, tmp_path) -> None:
-        """绝对路径直接使用，不与 ws_meta.path 拼接。"""
+        """绝对路径直接使用，不与 project_root 拼接。"""
         external = tmp_path / "external"
         external.mkdir()
         (external / "info.md").write_text("外部信息", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        # 故意把 ws_meta / workspace 指到无关目录，确认不影响绝对路径
+        # 故意把 project_root / ws_meta 指到无关目录，确认不影响绝对路径
         state["ws_meta"] = {"path": str(tmp_path / "unrelated"), "mode": "worktree"}
         (tmp_path / "unrelated").mkdir()
-        state["workspace"] = str(tmp_path / "unrelated")
         state["context.static_vars"] = [
             {"type": "path", "name": "外部文档", "path": str(external / "info.md")}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root=str(tmp_path / "unrelated"))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -622,23 +646,24 @@ class TestPromptBuildPathInjection:
         assert "外部信息" in content
 
     @pytest.mark.asyncio
-    async def test_path_no_ws_meta_returns_empty(self, tmp_path) -> None:
-        """无 ws_meta.path 时，相对路径直接跳过（不读 workspace，也不读 CWD）。"""
+    async def test_path_file_not_via_ws_meta_path(self, tmp_path) -> None:
+        """文件即使在 ws_meta.path 下存在，也不通过 ws_meta.path 解析（互斥规则：文件只用 project_root）。"""
         (tmp_path / "rules.md").write_text("不应出现", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
-        state.pop("ws_meta", None)
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
+        state["workspace"] = "."
         state["context.static_vars"] = [
-            {"type": "path", "name": "无ws_meta", "path": "rules.md"}
+            {"type": "path", "name": "仅ws_meta", "path": "rules.md"}
         ]
+        # 不传 services → project_root 为空，且 ws_meta.path 不用于文件解析
         ctx = make_ctx(state)
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        assert "无ws_meta" not in content
+        assert "仅ws_meta" not in content
         assert "不应出现" not in content
 
     @pytest.mark.asyncio
@@ -650,7 +675,7 @@ class TestPromptBuildPathInjection:
         state["context.static_vars"] = [
             {"type": "path", "name": "空路径文件", "path": ""}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root="D:\\project")
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -659,15 +684,13 @@ class TestPromptBuildPathInjection:
 
     @pytest.mark.asyncio
     async def test_path_file_not_found_returns_empty(self, tmp_path) -> None:
-        """目标文件不存在时静默返回空（不抛错）。"""
+        """目标文件在 project_root 下不存在时静默返回空（不抛错）。"""
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
-        state["workspace"] = "."
         state["context.static_vars"] = [
             {"type": "path", "name": "不存在的文件", "path": "missing.md"}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root=str(tmp_path))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -766,7 +789,7 @@ class TestLLMCoreBuildMessages:
         assert messages[0]["content"] == "你是一个助手。"
 
     def test_history_in_middle(self) -> None:
-        """历史消息在 system_message 之后；dynamic_vars 已合并到 system_message 不再单独追加。"""
+        """历史消息在 system_message 之后；dynamic_vars 作为独立 system 消息追加在末尾。"""
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = {
             "system_message": {"role": "system", "content": "系统提示词"},
@@ -780,16 +803,20 @@ class TestLLMCoreBuildMessages:
 
         messages = core._build_messages(state)
 
-        # dynamic_vars 合并到 system_message 中，不再作为独立消息追加
+        # system_message 保持纯净，dynamic_vars 不污染它
         assert messages[0]["role"] == "system"
-        assert "系统提示词" in messages[0]["content"]
-        assert "动态变量内容" in messages[0]["content"]
+        assert messages[0]["content"] == "系统提示词"
+        assert "动态变量内容" not in messages[0]["content"]
         assert messages[1]["role"] == "user"
         assert messages[2]["role"] == "assistant"
         assert messages[3]["role"] == "user"
+        # dynamic_vars 作为独立 system 消息追加在末尾
+        assert messages[4]["role"] == "system"
+        assert messages[4]["name"] == "dynamic_context"
+        assert "动态变量内容" in messages[4]["content"]
 
     def test_dynamic_vars_last(self) -> None:
-        """动态变量合并到 system_message 中（作为 system role，不再作为 user 消息追加）。"""
+        """动态变量作为独立 system 消息追加在末尾（不合并进 system_message）。"""
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = {
             "system_message": {"role": "system", "content": "系统提示词"},
@@ -799,12 +826,14 @@ class TestLLMCoreBuildMessages:
 
         messages = core._build_messages(state)
 
-        # dynamic_vars 合并到 system_message 中
-        assert len(messages) == 2
+        # dynamic_vars 作为独立 system 消息追加在末尾
+        assert len(messages) == 3
         assert messages[0]["role"] == "system"
-        assert "系统提示词" in messages[0]["content"]
-        assert "日期" in messages[0]["content"]
+        assert messages[0]["content"] == "系统提示词"
         assert messages[1]["role"] == "user"
+        assert messages[2]["role"] == "system"
+        assert messages[2]["name"] == "dynamic_context"
+        assert "日期" in messages[2]["content"]
 
     def test_no_dynamic_vars(self) -> None:
         """没有 dynamic_vars 时不追加额外的 SystemMessage。"""
@@ -927,7 +956,7 @@ class TestFullAssemblyPipeline:
 
     @pytest.mark.asyncio
     async def test_full_pipeline_system_memory_history_dynamic(self) -> None:
-        """完整链路：dynamic_vars 合并到 system_message 中，history 随后。"""
+        """完整链路：dynamic_vars 作为独立 system 消息追加在末尾，history 在中间。"""
         prompt_plugin = PromptBuildPlugin(config={"include_static_vars": False, "include_compressed_layers": False})
         llm_core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
 
@@ -947,16 +976,19 @@ class TestFullAssemblyPipeline:
         # Step 2: LLMCore._build_messages 组装最终 messages
         final_messages = llm_core._build_messages(state)
 
-        # 验证: dynamic_vars 合并到 system_message 中
+        # 验证: dynamic_vars 作为独立 system 消息追加在末尾，不合并进 system_message
         assert final_messages[0]["role"] == "system"
         assert "你是一个有用的 AI 助手" in final_messages[0]["content"]
-        assert "日期" in final_messages[0]["content"]  # dynamic_vars 合并进来
+        assert "日期" not in final_messages[0]["content"]  # dynamic_vars 不进 system_message
 
         assert final_messages[1]["role"] == "user"
         assert final_messages[2]["role"] == "assistant"
 
-        # dynamic_vars 不再作为独立消息追加
-        assert len(final_messages) == 3
+        # dynamic_vars 作为独立 system 消息追加在末尾
+        assert len(final_messages) == 4
+        assert final_messages[3]["role"] == "system"
+        assert final_messages[3]["name"] == "dynamic_context"
+        assert "日期" in final_messages[3]["content"]
 
     @pytest.mark.asyncio
     async def test_full_pipeline_with_static_vars_and_compressed(self) -> None:
@@ -989,7 +1021,9 @@ class TestFullAssemblyPipeline:
         system_content = final_messages[0]["content"]
 
         assert "Agent OS" in system_content
-        assert "八段摘要" in system_content
+        # 压缩层作为独立消息在 final_messages 中（非 system_message）
+        all_content = "\n".join(m.get("content", "") for m in final_messages)
+        assert "过程摘要" in all_content
 
     @pytest.mark.asyncio
     async def test_full_pipeline_tools_in_function_calling_mode(self) -> None:
@@ -1067,7 +1101,7 @@ class TestFullAssemblyPipeline:
 
     @pytest.mark.asyncio
     async def test_layer_order_matches_old_code(self) -> None:
-        """验证 layer_order: 关键词 → L2 → L1 按预算溢出降级。"""
+        """验证 layer_order: system_message 层内顺序 + 压缩层独立消息追加。"""
         from datetime import datetime, UTC
 
         prompt_plugin = PromptBuildPlugin(config={
@@ -1075,6 +1109,7 @@ class TestFullAssemblyPipeline:
             "include_static_vars": True,
             "include_compressed_layers": True,
         })
+        llm_core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = make_base_state()
         state["pipeline_id"] = "test-pipeline-001"
         state["context_window"] = 500
@@ -1114,23 +1149,45 @@ class TestFullAssemblyPipeline:
         ctx = make_ctx(state, chunk_service=chunk_service)
 
         result = await prompt_plugin.execute(ctx)
-        content = result.state_updates["system_message"]["content"]
+        state.update(result.state_updates)
 
-        positions = {
-            "system_prompt": content.index("AI 助手"),
-            "tools": content.index("工具"),
-            "static_vars": content.index("静态变量"),
-            "knowledge": content.index("知识内容"),
-            "memory": content.index("记忆内容"),
-            "keywords": content.index("历史关键词索引"),
-            "l2": content.index("三元组摘要"),
-            "l1": content.index("八段摘要"),
+        # 1. system_message 内部顺序验证
+        system_content = state["system_message"]["content"]
+        sys_positions = {
+            "system_prompt": system_content.index("AI 助手"),
+            "tools": system_content.index("工具"),
+            "static_vars": system_content.index("静态变量"),
+            "knowledge": system_content.index("知识内容"),
+            "memory": system_content.index("记忆内容"),
         }
-
-        order = list(positions.values())
-        assert order == sorted(order), (
-            f"layer_order 不一致: {list(positions.keys())}"
+        sys_order = list(sys_positions.values())
+        assert sys_order == sorted(sys_order), (
+            f"system_message 层内顺序不一致: {list(sys_positions.keys())}"
         )
+
+        # 2. 压缩层独立消息顺序验证（keywords → L2 → L1）
+        compression_msgs = state.get("compression_messages", [])
+        assert compression_msgs, "compression_messages 不应为空"
+
+        def _find_level(msgs: list, marker: str) -> int:
+            for i, m in enumerate(msgs):
+                if marker in m.get("content", ""):
+                    return i
+            return -1
+
+        kw_pos = _find_level(compression_msgs, 'level="KEYWORDS"')
+        l2_pos = _find_level(compression_msgs, 'level="L2"')
+        l1_pos = _find_level(compression_msgs, 'level="L1"')
+        assert l1_pos >= 0, "至少应有 L1 压缩块"
+        if kw_pos >= 0 and l2_pos >= 0:
+            assert kw_pos < l2_pos, "keywords 应在 L2 之前"
+        if l2_pos >= 0 and l1_pos >= 0:
+            assert l2_pos < l1_pos, "L2 应在 L1 之前"
+
+        # 3. 最终消息列表顺序：system → compression → history
+        final_messages = llm_core._build_messages(state)
+        assert final_messages[0]["role"] == "system"
+        assert "过程摘要" in "\n".join(m.get("content", "") for m in final_messages)
 
 
 class TestRoutedVars:

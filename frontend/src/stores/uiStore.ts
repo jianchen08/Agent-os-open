@@ -10,11 +10,6 @@ import { uiStorage } from '@/utils/storage'
 import type { ApprovalRequest } from '@/types/models'
 
 /**
- * 主题类型
- */
-export type Theme = 'light' | 'dark'
-
-/**
  * 从 localStorage 读取初始折叠状态，读取失败时回退为默认值
  */
 function loadCollapsedState(
@@ -70,8 +65,6 @@ interface UIActions {
   setWorkspaceCollapsed: (collapsed: boolean) => void
   /** 设置消息搜索关键词 */
   setMessageSearchQuery: (query: string) => void
-  /** 初始化 UI 状态（从 localStorage 恢复） */
-  initializeUI: () => void
 }
 
 /**
@@ -124,32 +117,6 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
     set({ approvalDialog: null })
   },
 
-  /**
-   * 初始化 UI 状态（从 localStorage 恢复）
-   * @deprecated 状态现在在 store 创建时直接从 localStorage 读取，此方法保留仅为兼容
-   */
-  initializeUI: () => {
-    try {
-      const storedSidebarCollapsed = uiStorage.getSidebarCollapsed()
-      if (storedSidebarCollapsed !== null) {
-        set({ sidebarCollapsed: storedSidebarCollapsed })
-      }
-      const storedExecutionGraphCollapsed = uiStorage.getExecutionGraphCollapsed()
-      if (storedExecutionGraphCollapsed !== null) {
-        set({ executionGraphCollapsed: storedExecutionGraphCollapsed })
-      }
-      const storedTaskPanelCollapsed = uiStorage.getTaskPanelCollapsed()
-      if (storedTaskPanelCollapsed !== null) {
-        set({ taskPanelCollapsed: storedTaskPanelCollapsed })
-      }
-      const storedWorkspaceCollapsed = uiStorage.getWorkspaceCollapsed()
-      if (storedWorkspaceCollapsed !== null) {
-        set({ workspaceCollapsed: storedWorkspaceCollapsed })
-      }
-    } catch (error) {
-      console.error('初始化 UI 状态失败:', error)
-    }
-  },
   /**
    * 切换执行图面板折叠状态
    */

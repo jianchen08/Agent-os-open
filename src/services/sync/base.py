@@ -250,9 +250,8 @@ class YamlConfigSyncService(ABC):
                 setattr(entity, key, value)
             logger.info(f"[{log_prefix}同步] 更新: {config_id}")
             return "updated"
-        else:
-            # 创建
-            new_entity = entity_class(**entity_data)
-            session.add(new_entity)
-            logger.info(f"[{log_prefix}同步] 创建: {config_id}")
-            return "created"
+        # 创建
+        new_entity = entity_class(**entity_data)
+        session.add(new_entity)
+        logger.info(f"[{log_prefix}同步] 创建: {config_id}")
+        return "created"

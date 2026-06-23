@@ -9,9 +9,8 @@ import logging
 import os
 import subprocess
 import sys
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
@@ -32,13 +31,13 @@ def _get_connector_registry() -> Any:
     Returns:
         ConnectorRegistry 实例
     """
-    from connectors.registry import ConnectorRegistry
-    from infrastructure.service_provider import get_service_provider
+    from connectors.registry import ConnectorRegistry  # noqa: PLC0415
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
     provider = get_service_provider()
     return provider.get_or_create(
         "connector_registry",
-        lambda: ConnectorRegistry(),
+        ConnectorRegistry,
     )
 
 
@@ -80,7 +79,7 @@ async def open_file_in_ide(
             "file_path": file_path,
         }
 
-    from connectors.types import ConnectorAction
+    from connectors.types import ConnectorAction  # noqa: PLC0415
 
     params: dict[str, Any] = {"file_path": file_path}
     if line is not None:
@@ -172,15 +171,17 @@ async def get_file_content(
     raw_path = Path(path)
     project_root = _get_project_root()
 
-    # BUG-FIX-fix_20260603_file_card_open_fail:
-    # 问题根因: 工具卡片点击时，file_read 的参数可能是其他项目/容器的绝对路径
-    #           （如 D:\myproject\a7bb41e6210f\xxx.md），不在当前项目根范围内，
-    #           安全检查会拒绝。但用户只是想查看工具调用时读取的文件内容。
-    # 修复方案: 绝对路径直接使用，仅对相对路径做安全检查（防路径穿越）。
     if raw_path.is_absolute():
         full_path = raw_path.resolve()
     elif workspace_path_str:
-        full_path = (Path(workspace_path_str).resolve() / path).resolve()
+        workspace_root = Path(workspace_path_str).resolve()
+        full_path = (workspace_root / path).resolve()
+        # 相对路径 + 有工作空间时，确保不超出工作空间范围
+        if not full_path.is_relative_to(workspace_root):
+            return {
+                "success": False,
+                "message": "路径超出工作空间范围",
+            }
     else:
         full_path = (project_root / path).resolve()
         # 相对路径且无工作空间时，确保不超出项目根
@@ -196,7 +197,7 @@ async def get_file_content(
             "message": f"文件不存在或不是普通文件: {path}",
         }
 
-    MAX_SIZE = 10 * 1024 * 1024
+    MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
     file_size = full_path.stat().st_size
     if file_size > MAX_SIZE:
         return {
@@ -240,7 +241,7 @@ async def save_file_content(
     if not str(full_path).startswith(str(workspace_path)):
         return {"success": False, "message": "路径超出工作空间范围"}
 
-    MAX_SIZE = 10 * 1024 * 1024
+    MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
     if len(content.encode("utf-8")) > MAX_SIZE:
         return {"success": False, "message": f"内容过大（{len(content.encode('utf-8'))} 字节），超过 {MAX_SIZE // (1024*1024)}MB 限制"}
 
@@ -272,7 +273,7 @@ def _validate_path_in_workspace(workspace_path: Path, rel_path: str) -> Path | N
 
 
 @workspaces_router.post("/{container_task_id}/create-entry", summary="创建文件或文件夹")
-async def create_entry(
+async def create_entry(  # noqa: PLR0911
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -322,7 +323,7 @@ async def create_entry(
 
 
 @workspaces_router.delete("/{container_task_id}/entries", summary="删除文件或文件夹")
-async def delete_entry(
+async def delete_entry(  # noqa: PLR0911
     container_task_id: str,
     path: str = Query(..., description="要删除的文件或文件夹相对路径"),
     _user: dict = Depends(require_auth),
@@ -358,7 +359,7 @@ async def delete_entry(
 
     try:
         if full_path.is_dir():
-            import shutil
+            import shutil  # noqa: PLC0415
             shutil.rmtree(full_path)
         else:
             full_path.unlink()
@@ -370,7 +371,7 @@ async def delete_entry(
 
 
 @workspaces_router.post("/{container_task_id}/rename-entry", summary="重命名文件或文件夹")
-async def rename_entry(
+async def rename_entry(  # noqa: PLR0911
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -419,7 +420,7 @@ async def rename_entry(
         return {"success": False, "message": f"目标名称已存在: {new_name}"}
 
     # 计算新的相对路径
-    new_rel_path = str(Path(old_path).parent / new_name) if Path(old_path).parent != Path(".") else new_name
+    new_rel_path = str(Path(old_path).parent / new_name) if Path(old_path).parent != Path() else new_name
 
     try:
         full_old_path.rename(full_new_path)
@@ -435,7 +436,7 @@ async def rename_entry(
 
 
 @workspaces_router.post("/{container_task_id}/move-entry", summary="移动文件或文件夹")
-async def move_entry(
+async def move_entry(  # noqa: PLR0911
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -492,7 +493,7 @@ async def move_entry(
     new_rel_path = str(Path(destination_dir) / full_source.name)
 
     try:
-        import shutil
+        import shutil  # noqa: PLC0415
         shutil.move(str(full_source), str(dest_full_path))
         return {
             "success": True,
@@ -531,31 +532,38 @@ async def open_workspace_in_ide(
             "path": None,
         }
 
+    # 1.5 容器路径 → 宿主机路径转换
+    # 连接器（VSCode 扩展）和系统文件管理器运行在宿主机上，需要宿主机路径
+    host_path = _container_to_host_path(workspace_path)
+
     # 2. 查找支持 open_folder 能力的活跃连接器
     registry = _get_connector_registry()
     connector = registry.get_best_connector_for("open_folder")
 
     if connector is None:
         # 无 IDE 连接器时，fallback 到系统文件管理器
+        # 注意：_open_in_system_file_manager 在容器内运行，必须用容器路径
         opened = _open_in_system_file_manager(workspace_path)
         if opened:
             return {
                 "success": True,
                 "message": "已在系统文件管理器中打开工作空间",
-                "path": workspace_path,
+                "path": host_path,
             }
+        # 容器内无法打开文件管理器（无 explorer/xdg-open），
+        # 返回宿主机路径给前端，用户可手动复制到资源管理器打开
         return {
             "success": False,
             "message": "当前没有可用的 IDE 连接器，且无法启动系统文件管理器",
-            "path": workspace_path,
+            "path": host_path,
         }
 
     # 3. 通过连接器发送 open_folder 操作
-    from connectors.types import ConnectorAction
+    from connectors.types import ConnectorAction  # noqa: PLC0415
 
     action = ConnectorAction(
         action_type="open_folder",
-        parameters={"path": workspace_path},
+        parameters={"path": host_path},
     )
     try:
         result = await connector.execute_action(action)
@@ -563,19 +571,19 @@ async def open_workspace_in_ide(
             return {
                 "success": True,
                 "message": f"已在 {connector.connector_type} 中打开工作空间",
-                "path": workspace_path,
+                "path": host_path,
             }
         return {
             "success": False,
             "message": f"连接器执行失败: {result.error}",
-            "path": workspace_path,
+            "path": host_path,
         }
     except Exception as e:
         logger.warning("通过连接器打开工作空间失败: %s", e)
         return {
             "success": False,
             "message": f"打开工作空间失败: {e}",
-            "path": workspace_path,
+            "path": host_path,
         }
 
 
@@ -586,6 +594,17 @@ def _get_project_root() -> Path:
         项目根目录的 Path 对象
     """
     return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _container_to_host_path(container_path: str) -> str:
+    """容器路径 → 宿主机路径转换。
+
+    Agent 跑在宿主机时，工作空间路径本身就是宿主机路径（如 D:/myproject/xxx），
+    直接返回原路径即可。
+    """
+    return container_path
+
+    return container_path
 
 
 async def _resolve_workspace_path(container_task_id: str) -> str | None:
@@ -608,7 +627,7 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
         return str(_get_project_root())
 
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
         task_service = provider.get_or_create(

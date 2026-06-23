@@ -47,11 +47,10 @@ if TYPE_CHECKING:
     from core.runnable import ToolRunnable
 
 
+from tools.interfaces import ProgressCallback
+
 # 工具处理函数类型
 ToolHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, ToolExecutionResult]]
-
-# 进度回调函数类型
-ProgressCallback = Callable[[str, float, str | None], Coroutine[Any, Any, None]]
 
 # 日志
 logger = logging.getLogger(__name__)
@@ -113,7 +112,7 @@ class ToolExecutor(IToolExecutor):
 
         # 性能监控器
         try:
-            from monitoring import get_performance_monitor
+            from monitoring import get_performance_monitor  # noqa: PLC0415
 
             self._performance_monitor = get_performance_monitor()
         except ImportError:
@@ -175,7 +174,7 @@ class ToolExecutor(IToolExecutor):
     # 核心执行
     # ------------------------------------------------------------------
 
-    async def execute(
+    async def execute(  # noqa: PLR0912,PLR0915
         self,
         tool_name: str,
         inputs: dict[str, Any],
@@ -190,7 +189,7 @@ class ToolExecutor(IToolExecutor):
 
         # 生成工具调用 ID（如果未提供）
         if tool_call_id is None:
-            import uuid
+            import uuid  # noqa: PLC0415
 
             tool_call_id = str(uuid.uuid4())
 
@@ -242,7 +241,7 @@ class ToolExecutor(IToolExecutor):
 
         # 如果工具未注册，尝试动态加载
         if tool is None:
-            from tools.loader import get_dynamic_tool_loader
+            from tools.loader import get_dynamic_tool_loader  # noqa: PLC0415
 
             loader = get_dynamic_tool_loader()
             if loader is not None:
@@ -267,7 +266,8 @@ class ToolExecutor(IToolExecutor):
             f"category={tool.category}"
         )
 
-        self._check_tool_level_permission(tool, context.agent_level)
+        # 工具层级权限检查由 level_guard 插件统一处理（基于 tool_ids SSOT），
+        # executor 不再重复校验
 
         inputs = self._validate_inputs(tool, inputs)
         logger.debug(f"[ToolExecutor] 输入验证通过 | tool_name={tool_name}")
@@ -308,10 +308,9 @@ class ToolExecutor(IToolExecutor):
                         logger.warning(f"记录缓存命中指标失败: {e}")
 
                 return cached_result
-            else:
-                logger.debug(
-                    f"[ToolExecutor] 缓存未命中 | tool_name={tool_name} | tool_call_id={tool_call_id}"
-                )
+            logger.debug(
+                f"[ToolExecutor] 缓存未命中 | tool_name={tool_name} | tool_call_id={tool_call_id}"
+            )
         else:
             logger.debug(
                 f"[ToolExecutor] 缓存已禁用 | tool_name={tool_name} | tool_call_id={tool_call_id}"
@@ -500,12 +499,11 @@ class ToolExecutor(IToolExecutor):
                     f"success={raw_result.success}"
                 )
                 return raw_result
-            else:
-                logger.debug(
-                    f"[ToolExecutor._execute_runnable] 包装为 ToolExecutionResult | "
-                    f"result_type={type(raw_result).__name__}"
-                )
-                return create_success_result(data=raw_result)
+            logger.debug(
+                f"[ToolExecutor._execute_runnable] 包装为 ToolExecutionResult | "
+                f"result_type={type(raw_result).__name__}"
+            )
+            return create_success_result(data=raw_result)
 
         except TimeoutError:
             logger.warning(
@@ -587,7 +585,6 @@ class ToolExecutor(IToolExecutor):
             )
             raise ToolExecutionError(tool_name, str(e), cause=e) from e
 
-    # BUG-FIX-fix_20260422_context_overflow: 工具输出截断阈值，防止巨大输出撑爆 LLM 上下文窗口
     MAX_TOOL_OUTPUT_LENGTH = 100000  # 100K 字符
 
     def _finalize_result(
@@ -606,13 +603,12 @@ class ToolExecutor(IToolExecutor):
             result.metadata = {}
         result.metadata["duration_ms"] = duration_ms
 
-        # BUG-FIX-fix_20260422_context_overflow: 截断过大的工具输出，防止上下文窗口溢出
         result.output = self._truncate_output(result.output)
 
         # 输出结构验证：如果工具定义了 output_schema，验证输出是否符合
         if tool and tool.output_schema and result.success:
             try:
-                import jsonschema as _js
+                import jsonschema as _js  # noqa: PLC0415
                 _js.validate(instance=result.output, schema=tool.output_schema)
             except Exception as schema_err:
                 logger.warning(
@@ -702,10 +698,7 @@ class ToolExecutor(IToolExecutor):
                 return result
 
             # 使用当前结果作为下一个工具的输入
-            if isinstance(result.output, dict):
-                current_input = result.output
-            else:
-                current_input = {"data": result.output}
+            current_input = result.output if isinstance(result.output, dict) else {"data": result.output}
 
         return result
 
@@ -744,49 +737,8 @@ class ToolExecutor(IToolExecutor):
                 )
 
     # ------------------------------------------------------------------
-    # 权限检查
+    # 权限检查（已移除，由 level_guard 插件统一处理）
     # ------------------------------------------------------------------
-
-    def _check_tool_level_permission(self, tool: Tool, agent_level: int) -> None:
-        """检查工具级别权限（第二道防线）"""
-        from tools.types import ToolLevel
-
-        tool_level = getattr(tool, "level", None)
-        if tool_level is None:
-            return
-
-        if isinstance(tool_level, str):
-            try:
-                tool_level = ToolLevel(tool_level)
-            except ValueError:
-                return
-
-        has_permission = True
-        if tool_level == ToolLevel.L1_ONLY:
-            has_permission = agent_level == 1
-        elif tool_level == ToolLevel.L1_L2_ONLY:
-            has_permission = agent_level in (1, 2)
-
-        if not has_permission:
-            level_name = {1: "L1", 2: "L2", 3: "L3"}.get(agent_level, f"L{agent_level}")
-            error_msg = (
-                f"权限不足：工具 '{tool.name}' 需要 {tool_level.value} 权限，"
-                f"当前 Agent 为 {level_name}"
-            )
-            logger.error(
-                f"[ToolExecutor] 工具权限检查失败 | "
-                f"tool_name={tool.name} | "
-                f"tool_level={tool_level.value} | "
-                f"agent_level=L{agent_level}"
-            )
-            raise ToolExecutionError(tool.name, error_msg)
-
-        logger.debug(
-            f"[ToolExecutor] 工具权限检查通过 | "
-            f"tool_name={tool.name} | "
-            f"tool_level={tool_level.value if hasattr(tool_level, 'value') else tool_level} | "
-            f"agent_level=L{agent_level}"
-        )
 
     def set_runnable_first(self, enabled: bool) -> None:
         """设置是否优先使用 Runnable 模式"""

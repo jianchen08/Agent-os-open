@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.request
 import urllib.error
+import urllib.request
 from typing import Any
 
-from connectors.types import ConnectorContext, CursorPosition
+from ..types import ConnectorContext, CursorPosition
 
 logger = logging.getLogger(__name__)
 

@@ -2,24 +2,40 @@
 统一错误类型定义
 
 暴露接口：
-- get_error_message(error_code: str) -> str：get_error_message功能
-- get_error_severity(error_code: str) -> ErrorSeverity：get_error_severity功能
-- get_suggested_action(error_code: str) -> str | None：get_suggested_action功能
-- get_http_status(error_code: str) -> int：get_http_status功能
-- is_retryable_error(error_code: str) -> bool：is_retryable_error功能
-- create(cls, error_code: str, trace_id: str | None, details: dict[str, Any] | None, path: str | None, stack_trace: str | None) -> 'StandardError'：create功能
-- to_http_response(self) -> tuple[int, 'StandardError']：to_http_response功能
-- ErrorCode：ErrorCode类
-- StandardError：StandardError类
+- get_error_message(error_code: str) -> str
+- get_error_severity(error_code: str) -> ErrorSeverity
+- get_suggested_action(error_code: str) -> str | None
+- get_http_status(error_code: str) -> int
+- is_retryable_error(error_code: str) -> bool
+- create(cls, error_code: str, trace_id: str | None, details: dict[str, Any] | None, path: str | None, stack_trace: str | None) -> 'StandardError'
+- to_http_response(self) -> tuple[int, 'StandardError']
+- ErrorCode
+- StandardError
+- ErrorSeverity
 """
 
+import logging
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from .error_reporter import ErrorReporter, ErrorSeverity
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# 错误严重程度（原 error_reporter.py 内联）
+# ============================================================================
+
+
+class ErrorSeverity(str, Enum):
+    """错误严重程度"""
+
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
 
 # ============================================================================
 # 错误码规范
@@ -367,21 +383,22 @@ class StandardError(BaseModel):
         """创建标准错误响应"""
         # 生成 trace_id
         if trace_id is None:
-            trace_id = ErrorReporter.generate_trace_id()
+            trace_id = str(uuid4())
 
         # 获取错误信息
         message = ERROR_MESSAGES.get(error_code, "未知错误")
-        category = error_code.split("_")[0] if "_" in error_code else "UNKNOWN"
+        category = error_code.split("_", maxsplit=1)[0] if "_" in error_code else "UNKNOWN"
         severity = ERROR_SEVERITY.get(error_code, ErrorSeverity.ERROR).value
         suggested_action = SUGGESTED_ACTIONS.get(error_code)
 
-        # 上报错误
-        ErrorReporter.report(
-            error_code=error_code,
-            message=message,
-            context=details or {},
-            severity=ERROR_SEVERITY.get(error_code, ErrorSeverity.ERROR),
-        )
+        # 记录错误日志
+        severity_level = ERROR_SEVERITY.get(error_code, ErrorSeverity.ERROR)
+        if severity_level == ErrorSeverity.ERROR:
+            logger.error("[%s] %s", error_code, message)
+        elif severity_level == ErrorSeverity.WARNING:
+            logger.warning("[%s] %s", error_code, message)
+        else:
+            logger.info("[%s] %s", error_code, message)
 
         return cls(
             code=error_code,

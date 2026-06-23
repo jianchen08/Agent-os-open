@@ -98,6 +98,7 @@ class MemoryMaintenanceService:
         pipeline_engine: Any | None = None,
         config: MaintenanceConfig | dict[str, Any] | None = None,
         memory_service: Any = None,
+        task_lookup: Any | None = None,
     ) -> None:
         """初始化复盘驱动的记忆维护服务。
 
@@ -108,12 +109,17 @@ class MemoryMaintenanceService:
             pipeline_engine: 管道引擎实例（PipelineEngine），用于启动复盘管道
             config: 维护配置，支持 MaintenanceConfig 实例、配置字典或 None
             memory_service: 记忆服务门面实例（用于索引重建等操作）
+            task_lookup: 可选的任务反查回调，签名 (pipeline_run_id) -> dict | None。
+                把 pipeline_run_id 反查到目标 agent 和任务标题，供复盘经验产出带身份。
+                由 Application 装配时注入（闭包引用 task_service + root_map），
+                不传时经验产出不含 agent 身份。
         """
         self._storage = storage
         self._chunk_db = chunk_db
         self._knowledge_service = knowledge_service
         self._pipeline_engine = pipeline_engine
         self._memory_service = memory_service
+        self._task_lookup = task_lookup
 
         if config is None:
             self._config = MaintenanceConfig()
@@ -149,13 +155,14 @@ class MemoryMaintenanceService:
             ReviewEngine 实例
         """
         if self._review_engine is None:
-            from .review_engine import ReviewEngine
+            from .review_engine import ReviewEngine  # noqa: PLC0415
             # 注意：ReviewEngine.__init__ 不接受 config 参数
             self._review_engine = ReviewEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
                 knowledge_service=self._knowledge_service,
                 pipeline_engine=self._pipeline_engine,
+                task_lookup=self._task_lookup,
             )
         return self._review_engine
 
@@ -166,7 +173,7 @@ class MemoryMaintenanceService:
             CleanupEngine 实例
         """
         if self._cleanup_engine is None:
-            from .cleanup_engine import CleanupEngine
+            from .cleanup_engine import CleanupEngine  # noqa: PLC0415
             self._cleanup_engine = CleanupEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
@@ -192,8 +199,8 @@ class MemoryMaintenanceService:
             return []
 
         try:
-            from triggers import TriggerManager, TriggerConfig
-            from triggers.types import TriggerType
+            from triggers import TriggerConfig, TriggerManager  # noqa: PLC0415
+            from triggers.types import TriggerType  # noqa: PLC0415
         except ImportError:
             logger.warning(
                 "[Maintenance] TriggerManager 不可用，"
@@ -316,7 +323,7 @@ class MemoryMaintenanceService:
 
         # 独立判断：是否需要复盘
         if self.should_trigger_review():
-            review_result = await self.trigger_review_now(force=False)
+            review_result = await self.trigger_review_now()
             results["tasks"]["review"] = review_result
             # 同步统计
             now_review = review_result.get("reviewed_at") or datetime.now(UTC).isoformat()
@@ -343,15 +350,12 @@ class MemoryMaintenanceService:
         logger.info("[Maintenance] 维护巡检完成")
         return results
 
-    async def trigger_review_now(self, force: bool = False) -> dict[str, Any]:
+    async def trigger_review_now(self) -> dict[str, Any]:
         """立即触发复盘，处理所有 pending 的管道运行。
 
         直接调用 ReviewEngine.run_review 处理 ExecutionRecordStorage 中
         status=completed && review_status=pending 的管道，
         把错误经验写入 KnowledgeService（source_type=review_experience）。
-
-        Args:
-            force: 是否强制执行（当前实现下与 False 等效）
 
         Returns:
             复盘结果汇总
@@ -362,7 +366,6 @@ class MemoryMaintenanceService:
         started_at = datetime.now(UTC).isoformat()
         result: dict[str, Any] = {
             "started_at": started_at,
-            "force": force,
             "pending_count": len(pending),
             "pipelines_reviewed": 0,
             "experiences_saved": 0,
@@ -421,7 +424,7 @@ def _get_trigger_manager_safe() -> Any:
         TriggerManager 实例，不可用时返回 None
     """
     try:
-        from triggers import get_trigger_manager
+        from triggers import get_trigger_manager  # noqa: PLC0415
         return get_trigger_manager()
     except ImportError:
         return None

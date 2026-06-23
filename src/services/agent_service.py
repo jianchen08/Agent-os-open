@@ -17,6 +17,12 @@ from src.core.exceptions import NotFoundException, ValidationException
 from src.db.models import AgentConfig
 
 
+def _get_default_chat_model() -> str:
+    """获取默认对话模型别名（从 llm.yaml 读取）。"""
+    from src.config.llm_config import get_llm_config  # noqa: PLC0415
+    return get_llm_config().get_default_alias("chat")
+
+
 class AgentService:
     """Agent 服务类"""
 
@@ -145,7 +151,7 @@ class AgentService:
             "config_id": agent.config_id,
             "name": agent.name,
             "description": agent.description,
-            "model": agent.model_name or "glm-4-flash",
+            "model": agent.model_name or "glm-5.2",
             "system_prompt": agent.system_prompt or "",
             "tool_names": agent.tool_ids or [],
             "max_iterations": agent.max_iterations or 10,
@@ -182,7 +188,7 @@ class AgentService:
         config = config or {}
 
         # 生成 config_id
-        import uuid
+        import uuid  # noqa: PLC0415
 
         config_id = f"agent-{uuid.uuid4().hex[:8]}"
 
@@ -191,7 +197,7 @@ class AgentService:
             name=name,
             description=description,
             agent_type=agent_type,
-            model_name=config.get("model", "glm-4-flash"),
+            model_name=config.get("model") or _get_default_chat_model(),
             system_prompt=config.get("system_prompt", "你是一个有用的 AI 助手。"),
             tool_ids=config.get("tool_names", []),
             max_iterations=config.get("max_iterations", 10),
@@ -208,7 +214,7 @@ class AgentService:
 
         return self._agent_to_response_dict(agent)
 
-    async def update_agent(
+    async def update_agent(  # noqa: PLR0912
         self,
         agent_id: str,
         name: str | None = None,
@@ -350,9 +356,7 @@ class AgentService:
 
         # 确定整体状态
         total = len(agents)
-        if total == 0:
-            overall_status = "healthy"
-        elif unhealthy_count == 0:
+        if total == 0 or unhealthy_count == 0:
             overall_status = "healthy"
         elif healthy_count == 0:
             overall_status = "unhealthy"

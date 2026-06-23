@@ -11,8 +11,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 
 class PluginTypeSlot:
@@ -233,9 +234,7 @@ class PluginTypeSlot:
         return {
             "constants": dict(self._constants.get(namespace, {})),
             "enums": dict(self._enums.get(namespace, {})),
-            "state_keys": {
-                k: v for k, v in self._state_keys.get(namespace, {}).items()
-            },
+            "state_keys": dict(self._state_keys.get(namespace, {}).items()),
             "handlers": {
                 k: repr(v)
                 for k, v in self._handlers.get(namespace, {}).items()

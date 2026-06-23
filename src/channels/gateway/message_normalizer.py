@@ -14,7 +14,8 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
 
@@ -509,7 +510,7 @@ def _parse_dingtalk_content(msg_type: str, raw: dict[str, Any]) -> tuple[str, st
     return str(raw.get(msg_type, "")), "text"
 
 
-def _parse_wecom_content(
+def _parse_wecom_content(  # noqa: PLR0911
     msg_type: str, content: str, raw: dict[str, Any]
 ) -> tuple[str, str]:
     """解析企业微信消息内容。
@@ -541,7 +542,7 @@ def _parse_wecom_content(
     if msg_type == "voice":
         recognition = raw.get("Recognition", "")
         return recognition if recognition else "[语音]", content_type
-    if msg_type == "video" or msg_type == "shortvideo":
+    if msg_type in {"video", "shortvideo"}:
         return "[视频]", content_type
     if msg_type == "location":
         label = raw.get("Label", "")
@@ -566,7 +567,7 @@ def _parse_qq_content(raw: dict[str, Any]) -> tuple[str, str]:
     Returns:
         (文本内容, 标准化内容类型) 元组
     """
-    import re
+    import re  # noqa: PLC0415
 
     message = raw.get("message", "")
     raw.get("message_type", "private")

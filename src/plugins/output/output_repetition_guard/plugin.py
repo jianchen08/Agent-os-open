@@ -75,10 +75,17 @@ class OutputRepetitionGuard(IOutputPlugin):
             return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """核心工作逻辑，检测输出重复并生成对应的状态更新。"""
         # 管道已结束时跳过：post-end 阶段不应判定重复
         if ctx.state.get(StateKeys.ENDED, False):
+            return {}
+
+        # 仅在 llm_call 阶段判定：工具结果不是 LLM 输出，不参与重复判定。
+        # 若在 tool_execute 阶段触发，工具结果文本会被误判为"输出重复"，
+        # 并在 tool 消息后追加 system 提示，打断 assistant(tool_calls)→tool 序列。
+        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
+        if core_type != "llm_call":
             return {}
 
         raw_result = ctx.state.get(StateKeys.RAW_RESULT)
@@ -102,9 +109,7 @@ class OutputRepetitionGuard(IOutputPlugin):
         repeat_count = ctx.state.get("output.repeat_count", 0)
 
         is_repeat = False
-        if current_hash == last_hash:
-            is_repeat = True
-        elif last_text and self._compute_similarity(current_text, last_text) > self._similarity_threshold:
+        if current_hash == last_hash or last_text and self._compute_similarity(current_text, last_text) > self._similarity_threshold:
             is_repeat = True
 
         if is_repeat:
@@ -122,7 +127,7 @@ class OutputRepetitionGuard(IOutputPlugin):
 
         if repeat_count == 0:
             return updates
-        elif repeat_count <= 2:
+        if repeat_count <= 2:
             prompt = self._get_random_prompt_light()
             updates[StateKeys.RAW_RESULT] = ""
             updates["messages"] = self._add_system_prompt(ctx, prompt)
@@ -131,7 +136,7 @@ class OutputRepetitionGuard(IOutputPlugin):
                 reason=f"Output repeat detected ({repeat_count}), retry with light prompt",
             )
             return updates
-        elif repeat_count <= self._max_retries:
+        if repeat_count <= self._max_retries:
             prompt = self._get_random_prompt_strong()
             updates[StateKeys.RAW_RESULT] = ""
             updates["messages"] = self._add_system_prompt(ctx, prompt)
@@ -140,20 +145,19 @@ class OutputRepetitionGuard(IOutputPlugin):
                 reason=f"Output repeat detected ({repeat_count}), retry with strong prompt",
             )
             return updates
-        else:
-            updates["__route_signal__"] = RouteSignal(
-                route_type="decision",
-                reason=f"Output repeat exceeded max retries ({self._max_retries})",
-                payload={
-                    "decision_type": "agent",
-                    "repeat_count": repeat_count,
-                    "similarity_threshold": self._similarity_threshold,
-                    "used_light_prompts": self._used_light_prompts,
-                    "used_strong_prompts": self._used_strong_prompts,
-                    "suggested_action": "analyze_and_guide",
-                },
-            )
-            return updates
+        updates["__route_signal__"] = RouteSignal(
+            route_type="decision",
+            reason=f"Output repeat exceeded max retries ({self._max_retries})",
+            payload={
+                "decision_type": "agent",
+                "repeat_count": repeat_count,
+                "similarity_threshold": self._similarity_threshold,
+                "used_light_prompts": self._used_light_prompts,
+                "used_strong_prompts": self._used_strong_prompts,
+                "suggested_action": "analyze_and_guide",
+            },
+        )
+        return updates
 
     def _compute_similarity(self, text1: str, text2: str) -> float:
         """计算两段文本的相似度。

@@ -20,7 +20,6 @@ from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointMana
 
 if TYPE_CHECKING:
     from pipeline.engine import PipelineEngine
-    from pipeline.registry import PipelineRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -36,28 +35,27 @@ class PipelineRecovery:
 
     Attributes:
         checkpoint_manager: 检查点管理器实例
-        pipeline_registry: 管道注册表（可选，用于跨管道路由恢复）
     """
 
     def __init__(
         self,
         checkpoint_manager: PipelineCheckpointManager,
-        pipeline_registry: PipelineRegistry | None = None,
     ) -> None:
         """初始化管道恢复服务。
 
         Args:
             checkpoint_manager: 检查点管理器实例
-            pipeline_registry: 管道注册表（可选）
         """
         self.checkpoint_manager = checkpoint_manager
-        self.pipeline_registry = pipeline_registry
 
     async def recover(self, pipeline_id: str) -> dict[str, Any] | None:
         """恢复管道执行状态（动态状态 + Agent 配置合并）。
 
         从最新检查点加载动态状态，再从 Agent 配置文件加载静态配置，
         合并后返回完整的管道 state。
+
+        优先使用检查点中保存的 agent_config_id 恢复原始 Agent 配置，
+        仅当无法按 ID 查找时才回退到默认 Agent（并记录警告）。
 
         Args:
             pipeline_id: 管道 ID
@@ -73,7 +71,9 @@ class PipelineRecovery:
         saved_state = checkpoint_data.get("state", {})
         metadata = checkpoint_data.get("metadata", {})
 
-        base_state = self._load_agent_base_state()
+        # FIND-3 fix: 优先使用检查点中保存的 agent_config_id 恢复原始 Agent
+        agent_config_id = saved_state.get("agent_config_id")
+        base_state = self._load_agent_base_state(agent_config_id=agent_config_id)
 
         full_state = {**base_state, **saved_state}
 
@@ -149,29 +149,53 @@ class PipelineRecovery:
             "recovery_suggestion": suggestion,
         }
 
-    def _load_agent_base_state(self) -> dict[str, Any]:
+    def _load_agent_base_state(
+        self, agent_config_id: str | None = None,
+    ) -> dict[str, Any]:
         """从 Agent 配置文件加载静态基础状态。
 
-        通过 state_builder.load_default_agent 加载系统默认 Agent 配置，
-        调用其 to_state() 方法获取 system_prompt、constraints、tool_ids 等静态字段。
+        FIND-3 fix: 优先使用 agent_config_id 从 agent_registry 查找原始 Agent；
+        找不到原始 Agent 配置则返回空状态，禁止静默回退到默认 Agent（灵汐）。
+
+        Args:
+            agent_config_id: 检查点中保存的原始 Agent 配置 ID（可选）
 
         Returns:
             Agent 配置的状态字典，加载失败时返回空字典
         """
-        try:
-            from pipeline.state_builder import load_default_agent
+        # 优先按 ID 查找原始 Agent
+        if agent_config_id:
+            try:
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
-            agent_config = load_default_agent(None)
-            if agent_config and hasattr(agent_config, "to_state"):
-                base_state = agent_config.to_state()
-                logger.info(
-                    "Agent base state loaded from config: keys=%s",
-                    list(base_state.keys()),
+                provider = get_service_provider()
+                agent_registry = provider.get("agent_registry")
+                if agent_registry:
+                    agent_config = agent_registry.get(agent_config_id)
+                    if agent_config and hasattr(agent_config, "to_state"):
+                        base_state = agent_config.to_state()
+                        logger.info(
+                            "Agent base state loaded by config_id=%s, keys=%s",
+                            agent_config_id,
+                            list(base_state.keys()),
+                        )
+                        return base_state
+                    logger.warning(
+                        "agent_config_id=%s 在 registry 中未找到，将返回空状态（禁止静默回退到默认 Agent）",
+                        agent_config_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "按 agent_config_id=%s 加载失败，将返回空状态（禁止静默回退到默认 Agent）: %s",
+                    agent_config_id,
+                    exc,
                 )
-                return base_state
-        except Exception as exc:
-            logger.warning("Failed to load agent base state: %s", exc)
 
+        # 找不到原始 Agent 配置，返回空字典（禁止静默回退到默认 Agent）
+        logger.warning(
+            "agent_config_id=%s 未找到，返回空状态（禁止静默回退到默认 Agent）",
+            agent_config_id,
+        )
         return {}
 
     def _build_suggestion(self, phase: str, metadata: dict[str, Any]) -> str:
@@ -191,23 +215,22 @@ class PipelineRecovery:
                 f"管道在第 {iteration} 轮迭代时被挂起（suspended）。"
                 "建议使用 recover_and_resume 从挂起点恢复继续执行。"
             )
-        elif phase == "auto":
+        if phase == "auto":
             return (
                 f"管道在第 {iteration} 轮迭代时自动保存了检查点。"
                 "可以使用 recover 恢复状态，或 recover_and_resume 恢复并继续。"
             )
-        elif phase.startswith("pre_"):
+        if phase.startswith("pre_"):
             return (
                 f"管道在 {phase} 阶段（第 {iteration} 轮）保存了检查点。"
                 "建议从该阶段入口处重新执行。"
             )
-        elif phase.startswith("post_"):
+        if phase.startswith("post_"):
             return (
                 f"管道在 {phase} 阶段（第 {iteration} 轮）保存了检查点。"
                 "建议从下一阶段入口处恢复执行。"
             )
-        else:
-            return (
-                f"管道在第 {iteration} 轮迭代时保存了检查点（phase={phase}）。"
-                "可以使用 recover 恢复状态后手动处理。"
-            )
+        return (
+            f"管道在第 {iteration} 轮迭代时保存了检查点（phase={phase}）。"
+            "可以使用 recover 恢复状态后手动处理。"
+        )

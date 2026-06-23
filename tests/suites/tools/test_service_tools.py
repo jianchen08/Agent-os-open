@@ -531,16 +531,15 @@ class TestTaskSubmitToolValidation:
         assert result.success is False
         assert result.error_code == "MISSING_TARGET_ID"
 
-    async def test_short_term_missing_acceptance_criteria(self):
-        """测试短期任务缺少 acceptance_criteria 时返回 MISSING_METRICS 错误"""
+    async def test_short_term_missing_acceptance_criteria_not_blocked(self):
+        """测试短期任务缺少 acceptance_criteria 时不再被 MISSING_METRICS 校验拦截"""
         tool = _make_task_submit_tool()
         inputs = _short_term_inputs()
         del inputs["acceptance_criteria"]
 
         result = await tool.execute(inputs)
 
-        assert result.success is False
-        assert result.error_code == "MISSING_METRICS"
+        assert result.error_code != "MISSING_METRICS"
 
 
 class TestTaskSubmitToolShortTerm:

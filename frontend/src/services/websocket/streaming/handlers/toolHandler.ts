@@ -43,7 +43,13 @@ export function handleToolStart(eventData: any) {
 
   const toolName = eventData.tool_name || eventData.data?.tool_name || ''
   if (!toolName) {
-    console.warn('[TOOL_START] tool_name 缺失，跳过该工具调用', eventData)
+    // BUG-FIX-M03: WS handler 层 console 残留
+    // 问题根因: 数据异常（tool_name 缺失）用 console.warn 且打印整个 eventData。
+    // 修复方案: 改用正式 logger.warn，仅打印定位字段，避免泄露内部事件数据。
+    _debugLogger.warn(
+      '[TOOL_START] tool_name 缺失，跳过该工具调用: msgId=%s pipelineId=%s',
+      messageId?.slice(0, 12), pipelineId?.slice(0, 8),
+    )
     return
   }
   _debugLogger.debug(
@@ -57,17 +63,9 @@ export function handleToolStart(eventData: any) {
 
   /* ---- 去重：检查 parts[] 中是否已存在相同 call_id 的 tool_call part ---- */
   const parts: any[] = msg.parts || []
-  // DEBUG: 打印当前消息上所有已存在的 tool_call part，用于排查重复卡片
   const existingToolParts = parts.filter((p: any) => p.type === 'tool_call')
-  if (existingToolParts.length > 0) {
-    console.warn(
-      `[TOOL_DEDUP] creating tool=%s callId=%s msgId=%s | existing tools on this msg: %s`,
-      toolName, callId, messageId?.slice(0, 12),
-      existingToolParts.map((p: any) => `${p.name}/${p.callId?.slice(0, 12)}`).join(', '),
-    )
-  }
   if (parts.some((p: any) => p.type === 'tool_call' && p.callId === callId)) {
-    console.warn(`[TOOL_DEDUP] SKIPPED duplicate: tool=%s callId=%s`, toolName, callId)
+    _debugLogger.debug('[TOOL_DEDUP] SKIPPED duplicate: tool=%s callId=%s', toolName, callId?.slice(0, 12))
     return
   }
 
@@ -84,9 +82,9 @@ export function handleToolStart(eventData: any) {
   }
 
   /* ---- 追加 tool_call part ---- */
-  console.warn(
-    `[TOOL_CREATE] tool=%s callId=%s msgId=%s totalToolParts=%d`,
-    toolName, callId, messageId?.slice(0, 12), existingToolParts.length + 1,
+  _debugLogger.debug(
+    '[TOOL_CREATE] tool=%s callId=%s msgId=%s totalToolParts=%d',
+    toolName, callId?.slice(0, 12), messageId?.slice(0, 12), existingToolParts.length + 1,
   )
   pipelineStore.getState().appendPart(pipelineId, messageId, {
     type: 'tool_call',

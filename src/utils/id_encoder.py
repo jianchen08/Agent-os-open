@@ -137,10 +137,9 @@ def generate_task_id(
         # 生成主任务 ID
         encoded_index = encode_base36(task_index, 5)
         return f"{project_id}-t-{encoded_index}"
-    else:
-        # 生成子任务 ID
-        encoded_index = encode_base36(task_index, 5)
-        return f"{parent_task_id}-{encoded_index}"
+    # 生成子任务 ID
+    encoded_index = encode_base36(task_index, 5)
+    return f"{parent_task_id}-{encoded_index}"
 
 
 def generate_nested_id(
@@ -171,9 +170,8 @@ def generate_nested_id(
     if parent_id is None:
         # 根ID
         return f"{prefix}-{encoded_seq}"
-    else:
-        # 子ID：继承父ID的所有层级
-        return f"{parent_id}-{encoded_seq}"
+    # 子ID：继承父ID的所有层级
+    return f"{parent_id}-{encoded_seq}"
 
 
 def parse_nested_id(nested_id: str) -> dict[str, any]:

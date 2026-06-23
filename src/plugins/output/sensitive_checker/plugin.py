@@ -135,7 +135,7 @@ class SensitiveChecker(IOutputPlugin):
         """
         if isinstance(value, str):
             return self._sanitize_string(value)
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             sanitized = {}
             changed = False
             for k, v in value.items():
@@ -144,7 +144,7 @@ class SensitiveChecker(IOutputPlugin):
                     changed = True
                 sanitized[k] = new_v
             return sanitized if changed else value
-        elif isinstance(value, list):
+        if isinstance(value, list):
             sanitized = []
             changed = False
             for item in value:

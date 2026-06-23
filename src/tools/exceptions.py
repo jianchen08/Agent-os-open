@@ -58,11 +58,10 @@ class MCPException(ToolException):
 
 
 class MCPConnectionError(MCPException):
-    def __init__(self, server_name: str, message: str, details: dict = None):
+    def __init__(self, message: str, details: dict = None, cause: Exception = None):
         error_details = (details or {}).copy()
-        error_details["server_name"] = server_name
-        super().__init__(f"MCP 服务器 '{server_name}' 连接失败: {message}", code="MCP_CONNECTION_ERROR", details=error_details)
-        self.server_name = server_name
+        super().__init__(message, code="MCP_CONNECTION_ERROR", details=error_details, cause=cause)
+        self.server_name = error_details.get("server") or error_details.get("server_name")
 
 
 class MCPConfigError(MCPException):

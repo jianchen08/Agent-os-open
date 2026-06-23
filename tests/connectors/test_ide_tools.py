@@ -96,7 +96,7 @@ class TestIDEOpenFile:
 
         result = await tool.execute({"file_path": str(test_file)})
         assert result.success is True
-        assert result.data is not None
+        assert result.output is not None
 
     @pytest.mark.asyncio
     async def test_empty_file_path_returns_failure(self) -> None:
@@ -150,8 +150,8 @@ class TestIDEShowDiff:
             "new_content": "line2\n",
         })
         assert result.success is True
-        assert result.data is not None
-        assert "degraded" in str(result.data)
+        assert result.output is not None
+        assert "degraded" in str(result.output)
 
     @pytest.mark.asyncio
     async def test_empty_file_path_returns_failure(self) -> None:
@@ -201,7 +201,7 @@ class TestIDEGetSelection:
 
         result = await tool.execute({})
         assert result.success is True
-        assert result.data is not None
+        assert result.output is not None
 
     @pytest.mark.asyncio
     async def test_without_connector_returns_hint(self) -> None:
@@ -211,8 +211,8 @@ class TestIDEGetSelection:
 
         result = await tool.execute({})
         assert result.success is True
-        assert result.data is not None
-        assert "degraded" in str(result.data)
+        assert result.output is not None
+        assert "degraded" in str(result.output)
 
     @pytest.mark.asyncio
     async def test_connector_exception_falls_back(self) -> None:
@@ -224,4 +224,4 @@ class TestIDEGetSelection:
 
         result = await tool.execute({})
         assert result.success is True
-        assert "degraded" in str(result.data)
+        assert "degraded" in str(result.output)

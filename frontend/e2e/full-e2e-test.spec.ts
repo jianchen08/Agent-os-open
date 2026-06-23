@@ -9,7 +9,7 @@
 import { test, expect, Page } from '@playwright/test';
 
 const BASE_URL = process.env.FRONTEND_URL || process.env.REACT_APP_FRONTEND_URL || "http://localhost:5188";
-const API_BASE_URL = process.env.API_URL || process.env.REACT_APP_API_URL || "http://localhost:8888";
+const API_BASE_URL = process.env.API_URL || process.env.REACT_APP_API_URL || "http://localhost:8988";
 
 // 测试数据
 const testUser = {

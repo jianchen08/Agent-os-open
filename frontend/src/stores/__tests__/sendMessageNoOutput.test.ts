@@ -28,6 +28,7 @@ vi.mock('@/utils/logger', () => ({
 
 vi.mock('@/services/api/session', () => ({
   getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
+  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
 }))
 
 vi.mock('@/utils/retry', () => ({
@@ -210,13 +211,21 @@ describe('发送消息没有输出 bug 复现', () => {
     const streamMsgId = 'msg_stream_004'
     ensureStreamingPlaceholder(store, PIPELINE_A, streamMsgId)
 
-    store.updateMessage(PIPELINE_B, streamMsgId, { status: 'completed' } as any)
+	    // updateMessage 在 B 管道找不到消息 → upsert 创建新消息（不会影响 A 管道）
+	    store.updateMessage(PIPELINE_B, streamMsgId, { status: 'completed' } as any)
 
-    expect(logCalls.some(w => w.includes('message not found'))).toBe(true)
+	    // upsert 日志
+	    expect(logCalls.some(w => w.includes('updateMessage 未找到'))).toBe(true)
 
-    const msgsA = store.getMessages(PIPELINE_A)
-    expect(msgsA.find(m => m.id === streamMsgId)).toBeDefined()
-    expect(msgsA.find(m => m.id === streamMsgId)!.status).toBe('streaming')
+	    // A 管道的原消息不变
+	    const msgsA = store.getMessages(PIPELINE_A)
+	    expect(msgsA.find(m => m.id === streamMsgId)).toBeDefined()
+	    expect(msgsA.find(m => m.id === streamMsgId)!.status).toBe('streaming')
+
+	    // B 管道被 upsert 插入了新消息
+	    const msgsB = store.getMessages(PIPELINE_B)
+	    expect(msgsB.find(m => m.id === streamMsgId)).toBeDefined()
+	    expect(msgsB.find(m => m.id === streamMsgId)!.status).toBe('completed')
   })
 
   it('场景5: stream_start 缺失导致占位消息未创建，updateMessage 自动创建消息', () => {

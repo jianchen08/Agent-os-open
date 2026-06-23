@@ -9,6 +9,9 @@
 - 消息格式验证
 - 序列化/反序列化
 - WebSocket 和 HTTP API 使用相同结构
+
+NOTE: schemas.message 模块已在死代码清理中删除（0 外部生产引用）。
+此测试文件作为引用清理的一部分标记为 skip，待消息格式统一方案确定后再更新。
 """
 
 from __future__ import annotations
@@ -17,6 +20,9 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+
+# schemas.message 已作为死代码删除，整个测试文件 skip
+pytestmark = pytest.mark.skip(reason="schemas.message 已在死代码清理中删除，测试待更新")
 
 
 class TestMessageType:

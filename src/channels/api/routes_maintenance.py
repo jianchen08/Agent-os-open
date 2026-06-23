@@ -6,7 +6,7 @@
 
 该模块为独立模块，触发链路：
   POST /api/v1/maintenance/review
-    -> MaintenanceService.trigger_review_now(force)
+    -> MaintenanceService.trigger_review_now()
     -> ReviewEngine.get_pending_pipelines() / run_review(run_id)
     -> ExecutionRecordStorage + KnowledgeService 真实落盘
 """
@@ -17,19 +17,17 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends
+
+from channels.api.deps import require_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/maintenance", tags=["维护管理"])
-
-
-class ReviewTriggerRequest(BaseModel):
-    """手动触发复盘请求。"""
-
-    force: bool = Field(default=False, description="是否强制触发")
-    model_config = {"extra": "ignore"}
+router = APIRouter(
+    prefix="/api/v1/maintenance",
+    tags=["维护管理"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 def _get_maintenance_service() -> Any:
@@ -39,7 +37,7 @@ def _get_maintenance_service() -> Any:
         MemoryMaintenanceService 实例，服务不可用返回 None
     """
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         return provider.get("maintenance_service")
     except Exception as exc:
@@ -51,22 +49,15 @@ def _get_maintenance_service() -> Any:
 
 
 @router.post("/review", summary="手动触发复盘")
-async def trigger_review(
-    body: ReviewTriggerRequest | None = None,
-) -> dict[str, Any]:
+async def trigger_review() -> dict[str, Any]:
     """手动触发复盘。
 
     直接调用 ReviewEngine 处理所有 status=completed && review_status=pending
     的管道运行，产出经验并写入 KnowledgeService。
 
-    Args:
-        body: 复盘触发请求
-
     Returns:
         复盘执行结果
     """
-    force = body.force if body else False
-
     maintenance_service = _get_maintenance_service()
     if maintenance_service is None:
         return {"status": "error", "message": "MaintenanceService 不可用"}
@@ -80,7 +71,7 @@ async def trigger_review(
     async def _run() -> None:
         """异步执行复盘。"""
         try:
-            await maintenance_service.trigger_review_now(force=force)
+            await maintenance_service.trigger_review_now()
         except Exception as exc:
             logger.error("[手动复盘] 复盘执行失败: %s", exc, exc_info=True)
         finally:

@@ -332,7 +332,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # EPA 分析
     # ======================================================================
 
-    def _extract_epa(self, text: str) -> dict[str, list[str]]:
+    def _extract_epa(self, text: str) -> dict[str, list[str]]:  # noqa: PLR0912
         """EPA 分析：将文本分解为 Entity、Property、Action 三个维度。
 
         基于关键词和简单规则提取，不依赖 NLP 库。
@@ -409,10 +409,9 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
                 if lower not in seen_action:
                     seen_action.add(lower)
                     result["action"].append(lower)
-            else:
-                if lower not in seen_entity:
-                    seen_entity.add(lower)
-                    result["entity"].append(lower)
+            elif lower not in seen_entity:
+                seen_entity.add(lower)
+                result["entity"].append(lower)
 
         # ---------- 提取中文形容词/副词属性 ----------
         adj_patterns = re.findall(
@@ -449,7 +448,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
             item_epa = item.get("epa", {})
             if not item_epa:
                 # 没有 EPA 数据时，用 content 关键词匹配
-                content_terms = set(t.lower() for t in _extract_keywords(item.get("content", "")))
+                content_terms = {t.lower() for t in _extract_keywords(item.get("content", ""))}
                 overlap = query_terms & content_terms
                 if overlap:
                     score = len(overlap) / max(len(query_terms), 1)
@@ -504,7 +503,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
         if not candidates:
             return []
 
-        query_keywords = set(kw.lower() for kw in _extract_keywords(query))
+        query_keywords = {kw.lower() for kw in _extract_keywords(query)}
         query_epa = self._extract_epa(query)
         query_vec = self._get_query_embedding(query)
 
@@ -515,8 +514,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
             total = 0.0
 
             # --- 第 1 层：关键词匹配 ---
-            content_keywords = set(kw.lower() for kw in _extract_keywords(item.get("content", "")))
-            tag_set = set(t.lower() for t in item.get("tags", []))
+            content_keywords = {kw.lower() for kw in _extract_keywords(item.get("content", ""))}
+            tag_set = {t.lower() for t in item.get("tags", [])}
             all_kw = content_keywords | tag_set
 
             if query_keywords:
@@ -528,8 +527,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
             item_epa = item.get("epa", {})
             if item_epa:
                 for dim in ("entity", "property", "action"):
-                    q_terms = set(t.lower() for t in query_epa.get(dim, []))
-                    i_terms = set(t.lower() for t in item_epa.get(dim, []))
+                    q_terms = {t.lower() for t in query_epa.get(dim, [])}
+                    i_terms = {t.lower() for t in item_epa.get(dim, [])}
                     if q_terms and i_terms:
                         dim_overlap = q_terms & i_terms
                         if dim_overlap:
@@ -561,7 +560,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # 浪潮扩散
     # ======================================================================
 
-    def _wave_diffusion(
+    def _wave_diffusion(  # noqa: PLR0912
         self,
         initial_results: list[SearchResult],
         all_items: list[dict[str, Any]],
@@ -609,14 +608,14 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
 
                 # 邻居：related_ids + 共享 tag 的条目
                 neighbors = set(node.get("related_ids", []))
-                node_tags = set(t.lower() for t in node.get("tags", []))
+                node_tags = {t.lower() for t in node.get("tags", [])}
                 node_epa = node.get("epa", {})
 
                 for other_id, other in item_map.items():
                     if other_id in visited or other_id == node_id:
                         continue
                     # 通过 tag 关联
-                    other_tags = set(t.lower() for t in other.get("tags", []))
+                    other_tags = {t.lower() for t in other.get("tags", [])}
                     if node_tags and other_tags and (node_tags & other_tags):
                         neighbors.add(other_id)
                         continue
@@ -624,8 +623,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
                     other_epa = other.get("epa", {})
                     if node_epa and other_epa:
                         for dim in ("entity", "action"):
-                            n_set = set(t.lower() for t in node_epa.get(dim, []))
-                            o_set = set(t.lower() for t in other_epa.get(dim, []))
+                            n_set = {t.lower() for t in node_epa.get(dim, [])}
+                            o_set = {t.lower() for t in other_epa.get(dim, [])}
                             if n_set and o_set and (n_set & o_set):
                                 neighbors.add(other_id)
                                 break
@@ -704,7 +703,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
         Returns:
             匹配的搜索结果列表
         """
-        query_keywords = set(kw.lower() for kw in _extract_keywords(query))
+        query_keywords = {kw.lower() for kw in _extract_keywords(query)}
         if not query_keywords:
             return []
 
@@ -712,8 +711,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
         for item in candidates:
             content = item.get("content", "")
             tags = item.get("tags", [])
-            content_kw = set(kw.lower() for kw in _extract_keywords(content))
-            tag_set = set(t.lower() for t in tags)
+            content_kw = {kw.lower() for kw in _extract_keywords(content)}
+            tag_set = {t.lower() for t in tags}
             all_kw = content_kw | tag_set
             overlap = query_keywords & all_kw
 

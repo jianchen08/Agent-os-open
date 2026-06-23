@@ -120,13 +120,13 @@ def _register_agent(
         注册结果字典
     """
     try:
-        from agents.registry import AgentRegistry
-        from agents.types import AgentConfig, AgentLevel, AgentType
+        from agents.types import AgentConfig, AgentLevel, AgentType  # noqa: PLC0415
 
-        # 获取或创建 AgentRegistry（通过服务定位器）
+        # 获取或创建 AgentRegistry（通过服务定位器，回退到全局单例）
         registry = _get_service("agent_registry")
         if registry is None:
-            registry = AgentRegistry()
+            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+            registry = get_global_agent_registry_sync()
 
         # 检查是否已存在
         if not overwrite and registry.get(resource_id) is not None:
@@ -197,7 +197,7 @@ def _register_tool(
         注册结果字典
     """
     try:
-        from tools.registry import ToolRegistry
+        from tools.registry import ToolRegistry  # noqa: PLC0415
 
         registry = _get_service("tool_registry")
         if registry is None:
@@ -222,7 +222,7 @@ def _register_tool(
 
         if func_module and func_name:
             # 从模块路径加载
-            import importlib
+            import importlib  # noqa: PLC0415
 
             module = importlib.import_module(func_module)
             func = getattr(module, func_name)
@@ -279,7 +279,7 @@ def _register_template(
         注册结果字典
     """
     try:
-        from templates.registry import TemplateRegistry
+        from templates.registry import TemplateRegistry  # noqa: PLC0415
 
         registry = _get_service("template_registry")
         if registry is None:
@@ -296,7 +296,7 @@ def _register_template(
         # 如果提供了 raw_content，尝试用 TemplateLoader 解析
         raw_content = config.get("raw_content", "")
         if raw_content:
-            from templates.loader import TemplateLoader
+            from templates.loader import TemplateLoader  # noqa: PLC0415
 
             loader = TemplateLoader()
             try:
@@ -343,7 +343,7 @@ def _register_pipeline_config(
         注册结果字典
     """
     try:
-        from pipeline.config_store import PipelineConfig, PipelineConfigStore
+        from tools.tool_context import PipelineConfig, PipelineConfigStore  # noqa: PLC0415
 
         registry = _get_service("pipeline_config_store")
         if registry is None:
@@ -388,7 +388,7 @@ def _register_pipeline_config(
 
 def _build_template_spec(
     resource_id: str, config: dict[str, Any]
-) -> "TemplateSpec":
+) -> TemplateSpec:  # noqa: F821
     """从配置数据构建 TemplateSpec。
 
     当 raw_content 不可用或解析失败时使用。
@@ -400,7 +400,7 @@ def _build_template_spec(
     Returns:
         TemplateSpec 实例
     """
-    from templates.types import (
+    from templates.types import (  # noqa: PLC0415
         EvaluationDimension,
         TemplateSpec,
         TemplateType,
@@ -452,7 +452,7 @@ def _get_service(service_name: str) -> Any:
     """
     # 1. 尝试从 CLI 主程序获取服务
     try:
-        from channels.cli.cli_main import CLIMain
+        from channels.cli.cli_main import CLIMain  # noqa: PLC0415
 
         app = CLIMain.get_instance()
         if app is not None:

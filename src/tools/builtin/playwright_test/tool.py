@@ -267,7 +267,7 @@ class PlaywrightTestTool(BuiltinTool):
             # page.is_closed() 本身可能因 CDP 连接断开而失败
             if isinstance(e, ValueError):
                 raise
-            raise ValueError(
+            raise ValueError(  # noqa: B904
                 f"会话 {session_id} 的页面连接已断开（CDP 错误），"
                 f"请重新创建会话。原始错误: {e}"
             )
@@ -393,7 +393,7 @@ class PlaywrightTestTool(BuiltinTool):
                 )
             return create_failure_result(f"页面导航失败: {error_msg}")
 
-    async def _handle_interact(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _handle_interact(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912
         """处理元素交互"""
         try:
             session_id = inputs.get("session_id")
@@ -470,7 +470,7 @@ class PlaywrightTestTool(BuiltinTool):
             logger.error(f"元素交互失败: {e}")
             return create_failure_result(f"元素交互失败: {str(e)}")
 
-    async def _handle_capture_console(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _handle_capture_console(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912
         """处理 console 捕获"""
         try:
             session_id = inputs.get("session_id")
@@ -520,7 +520,7 @@ class PlaywrightTestTool(BuiltinTool):
 
             # 检查必须存在的消息关键词
             if assert_present:
-                present_found = {keyword: False for keyword in assert_present}
+                present_found = dict.fromkeys(assert_present, False)
                 for msg in console_messages:
                     for keyword in present_found:
                         if keyword.lower() in msg.get("text", "").lower():
@@ -550,7 +550,7 @@ class PlaywrightTestTool(BuiltinTool):
             logger.error(f"console 捕获失败: {e}")
             return create_failure_result(f"console 捕获失败: {str(e)}")
 
-    async def _handle_screenshot_compare(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _handle_screenshot_compare(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912
         """处理截图对比"""
         try:
             session_id = inputs.get("session_id")
@@ -595,13 +595,29 @@ class PlaywrightTestTool(BuiltinTool):
                 return create_failure_result(f"不支持的截图类型: {screenshot_action}")
 
             if result.get("success"):
-                return create_success_result(data={
-                    "session_id": session_id,
-                    "action": screenshot_action,
-                    **result,
-                })
-            else:
-                return create_failure_result(result.get("error", "截图操作失败"))
+                # MM-3: 截图结果附带多模态内容块，供管道引擎注入下一轮 LLM 调用
+                b64 = result.get("base64_data")
+                mime = result.get("mime_type", "image/png")
+                mm_content: list[dict[str, Any]] | None = None
+                if b64:
+                    mm_content = [{
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    }]
+
+                metadata: dict[str, Any] = {}
+                if mm_content:
+                    metadata["multimodal_content"] = mm_content
+
+                return create_success_result(
+                    data={
+                        "session_id": session_id,
+                        "action": screenshot_action,
+                        **result,
+                    },
+                    metadata=metadata if metadata else None,
+                )
+            return create_failure_result(result.get("error", "截图操作失败"))
         except ValueError:
             raise
         except Exception as e:
@@ -628,8 +644,7 @@ class PlaywrightTestTool(BuiltinTool):
                     "state_path": state_path,
                     "message": "浏览器状态保存成功",
                 })
-            else:
-                return create_failure_result(result.get("error", "保存浏览器状态失败"))
+            return create_failure_result(result.get("error", "保存浏览器状态失败"))
         except Exception as e:
             logger.error(f"保存浏览器状态失败: {e}")
             return create_failure_result(f"保存浏览器状态失败: {str(e)}")
@@ -731,8 +746,7 @@ class PlaywrightTestTool(BuiltinTool):
                     message += f"，状态已自动保存到: {auto_saved}"
                 result["message"] = message
                 return create_success_result(data=result)
-            else:
-                return create_failure_result(result.get("error", "关闭会话失败"))
+            return create_failure_result(result.get("error", "关闭会话失败"))
         except Exception as e:
             logger.error(f"关闭浏览器失败: {e}")
             return create_failure_result(f"关闭浏览器失败: {str(e)}")

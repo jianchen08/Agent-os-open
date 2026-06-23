@@ -1,72 +1,69 @@
 # =============================================================================
-# Agent OS — Docker Compose 生产配置
-# 使用方式: docker compose up -d
+# Agent OS — Docker Compose（Redis + Frontend）
+# Agent 在宿主机运行：python -m channels.websocket.app_factory
+#
+# 构建上下文说明：
+#   - frontend: context 为仓库根目录（.），以便 Dockerfile 读取 packages/ 离线包
+#   - redis: 直接使用 Docker Hub 镜像；首次拉取由 start_web.bat 带镜像前缀回退
 # =============================================================================
 
 services:
   # ---------------------------------------------------------------------------
-  # Agent OS 主服务
+  # 前端 (Python 静态文件服务器)
   # ---------------------------------------------------------------------------
-  agent:
+  frontend:
     build:
+      # 上下文设为仓库根目录，以便 COPY 根目录下的 packages/ 离线包
+      # Dockerfile 内的 COPY 路径已相应加上 frontend/ 前缀
       context: .
-      dockerfile: Dockerfile
-    container_name: agent-os
-    restart: unless-stopped
+      dockerfile: frontend/Dockerfile
+    image: agent-os-frontend:latest
+    container_name: agent-os-frontend-22404
+    # on-failure + 上层 deploy 限制：崩溃不再无限重启拉起，
+    # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
+    restart: on-failure
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "5289:5188"
     environment:
-      - APP_ENV=${APP_ENV:-production}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - API_PORT=8000
-      - API_HOST=0.0.0.0
-      - API_SECRET_KEY=${API_SECRET_KEY:-change-me-in-production}
-      - API_TOKEN_EXPIRE_HOURS=${API_TOKEN_EXPIRE_HOURS:-24}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=${REDIS_DB:-0}
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.openai.com/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
-      - MEMORY_BACKEND=${MEMORY_BACKEND:-memory}
-      - DATA_DIR=/app/data
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5188,http://localhost:5189}
-    volumes:
-      - ./config:/app/config:ro
-      - agent-data:/app/data
+      # Agent 跑在宿主机，前端通过 host.docker.internal 连接
+      - BACKEND_URL=http://host.docker.internal:8988
+      - BACKEND_WS_URL=ws://host.docker.internal:8988
     depends_on:
       redis:
         condition: service_healthy
     networks:
-      - agent-network
+      - agent-net-22404
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+        delay: 10s
+        window: 60s
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5188/health').read(); print('ok')"]
       interval: 30s
-      timeout: 10s
-      start_period: 40s
+      timeout: 5s
+      start_period: 10s
       retries: 3
 
   # ---------------------------------------------------------------------------
-  # Redis — 缓存与会话存储
+  # Redis
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: agent-os-redis
+    container_name: agent-os-redis-22404
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "6480:6379"
     command: >
       redis-server
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --appendonly yes
     volumes:
-      - redis-data:/data
+      - redis-data-22404:/data
     networks:
-      - agent-network
+      - agent-net-22404
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -74,18 +71,9 @@ services:
       start_period: 10s
       retries: 3
 
-# =============================================================================
-# 数据卷
-# =============================================================================
 volumes:
-  agent-data:
-    driver: local
-  redis-data:
-    driver: local
+  redis-data-22404:
 
-# =============================================================================
-# 网络
-# =============================================================================
 networks:
-  agent-network:
+  agent-net-22404:
     driver: bridge

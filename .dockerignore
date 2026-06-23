@@ -15,8 +15,8 @@ __pycache__
 *.so
 *.egg-info
 *.egg
-dist/
-build/
+/dist/
+/build/
 .eggs/
 
 # 虚拟环境
@@ -42,10 +42,11 @@ htmlcov/
 .ruff_cache/
 
 # Docker 相关（避免递归）
+# 注意：docker-entrypoint.sh 不能排除！后端 Dockerfile 要 COPY 它进镜像，
+# 排除会导致本地 build 时 COPY 失败。
 Dockerfile
 docker-compose*.yml
 .dockerignore
-docker-entrypoint.sh
 
 # 文档和报告
 docs/
@@ -53,9 +54,10 @@ docs/
 !README.md
 reports/
 
-# 前端构建产物（如需前端单独构建）
+# 前端构建产物
+# 注意：frontend/dist 不排除！当宿主机已 npm run build 产出 dist 时，
+# Dockerfile 直接 COPY 它，跳过容器内构建（容器内 node 在 WSL2 CPU 上有 V8 SIGILL）。
 frontend/node_modules/
-frontend/dist/
 frontend/.nuxt/
 
 # 临时和日志文件
@@ -64,8 +66,14 @@ logs/
 tmp/
 temp/
 
+# pytest 临时目录（Windows 上路径含特殊字符，会破坏构建上下文上传）
+pytest-of-*/
+.pytest_cache/
+
 # 脚本和工具（非运行时需要）
-scripts/
+# 注意：用 /scripts/ 仅匹配根目录的 scripts/，避免误排除 frontend/scripts/
+# （frontend/scripts/patch-lobehub-ui.mjs 是前端构建 postinstall 钩子依赖）
+/scripts/
 verify_*.py
 start_web.bat
 start_web.sh

@@ -82,20 +82,19 @@ class FileReverser(BaseReverser):
                 # 创建的逆操作：删除文件
                 return await self._reverse_create(target)
 
-            elif op_type == OperationType.UPDATE:
+            if op_type == OperationType.UPDATE:
                 # 更新的逆操作：恢复原内容
                 return await self._reverse_update(target, before_state)
 
-            elif op_type == OperationType.DELETE:
+            if op_type == OperationType.DELETE:
                 # 删除的逆操作：恢复文件
                 return await self._reverse_delete(target, before_state)
 
-            else:
-                return {
-                    "success": False,
-                    "message": f"不支持的操作类型: {op_type}",
-                    "details": {},
-                }
+            return {
+                "success": False,
+                "message": f"不支持的操作类型: {op_type}",
+                "details": {},
+            }
 
         except Exception as e:
             logger.error(f"文件逆操作失败: {e}")
@@ -210,18 +209,17 @@ class GitReverser(BaseReverser):
             if tool_name == "git_commit":
                 return await self._reverse_commit(before_state)
 
-            elif tool_name == "git_branch":
+            if tool_name == "git_branch":
                 return await self._reverse_branch(params)
 
-            elif tool_name == "git_stash":
+            if tool_name == "git_stash":
                 return await self._reverse_stash(before_state)
 
-            else:
-                return {
-                    "success": False,
-                    "message": f"不支持的 Git 操作: {tool_name}",
-                    "details": {},
-                }
+            return {
+                "success": False,
+                "message": f"不支持的 Git 操作: {tool_name}",
+                "details": {},
+            }
 
         except Exception as e:
             logger.error(f"Git 逆操作失败: {e}")
@@ -358,18 +356,17 @@ class APIReverser(BaseReverser):
 
         if action_type == "http":
             return await self._execute_http_reverse(reverse_action)
-        else:
-            return {
-                "success": False,
-                "message": f"不支持的逆操作类型: {action_type}",
-                "details": {},
-            }
+        return {
+            "success": False,
+            "message": f"不支持的逆操作类型: {action_type}",
+            "details": {},
+        }
 
     async def _execute_http_reverse(
         self, reverse_action: dict[str, Any]
     ) -> dict[str, Any]:
         """执行 HTTP 逆操作"""
-        import aiohttp
+        import aiohttp  # noqa: PLC0415
 
         method = reverse_action.get("method", "DELETE")
         url = reverse_action.get("url")
@@ -384,22 +381,20 @@ class APIReverser(BaseReverser):
             }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(
-                    method, url, headers=headers, json=body
-                ) as response:
-                    if response.status < 400:
-                        return {
-                            "success": True,
-                            "message": f"API 逆操作成功: {method} {url}",
-                            "details": {"status": response.status},
-                        }
-                    else:
-                        return {
-                            "success": False,
-                            "message": f"API 逆操作失败: {response.status}",
-                            "details": {"status": response.status},
-                        }
+            async with aiohttp.ClientSession() as session, session.request(
+                method, url, headers=headers, json=body
+            ) as response:
+                if response.status < 400:
+                    return {
+                        "success": True,
+                        "message": f"API 逆操作成功: {method} {url}",
+                        "details": {"status": response.status},
+                    }
+                return {
+                    "success": False,
+                    "message": f"API 逆操作失败: {response.status}",
+                    "details": {"status": response.status},
+                }
         except Exception as e:
             return {
                 "success": False,
@@ -487,7 +482,7 @@ _global_reverser_registry: ReverserRegistry | None = None
 
 def get_reverser_registry() -> ReverserRegistry:
     """获取全局逆操作器注册表"""
-    global _global_reverser_registry
+    global _global_reverser_registry  # noqa: PLW0603
     if _global_reverser_registry is None:
         _global_reverser_registry = ReverserRegistry()
     return _global_reverser_registry

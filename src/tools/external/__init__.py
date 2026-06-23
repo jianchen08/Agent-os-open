@@ -14,6 +14,46 @@
 
 from __future__ import annotations
 
+# 适配器
+from tools.external.adapter import ExternalToolAdapter
+
+# 配置管理
+from tools.external.config import ExternalToolConfigManager
+
+# 连接管理
+from tools.external.connection import ExternalToolConnection
+
+# 异常
+from tools.external.exceptions import (
+    ConfigError,
+    ConnectionError,
+    ExecutionError,
+    ExternalTimeoutError,
+    ExternalToolException,
+    SandboxError,
+    SecretError,
+)
+
+# 接口
+from tools.external.interfaces import (
+    IExternalToolAdapter,
+    IExternalToolConnection,
+    IExternalToolSandbox,
+    ISecretManager,
+)
+
+# 生命周期
+from tools.external.lifecycle import ExternalToolLifecycle
+
+# 注册表
+from tools.external.registry import ExternalToolRegistry
+
+# 沙箱执行
+from tools.external.sandbox import ExternalToolSandbox
+
+# 密钥管理
+from tools.external.secrets import ExternalToolSecretManager
+
 # 核心类型
 from tools.external.types import (
     AuthConfig,
@@ -25,46 +65,6 @@ from tools.external.types import (
     ProtocolType,
     RetryPolicy,
     SandboxResourceLimits,
-)
-
-# 接口
-from tools.external.interfaces import (
-    IExternalToolAdapter,
-    IExternalToolConnection,
-    IExternalToolSandbox,
-    ISecretManager,
-)
-
-# 适配器
-from tools.external.adapter import ExternalToolAdapter
-
-# 连接管理
-from tools.external.connection import ExternalToolConnection
-
-# 配置管理
-from tools.external.config import ExternalToolConfigManager
-
-# 密钥管理
-from tools.external.secrets import ExternalToolSecretManager
-
-# 沙箱执行
-from tools.external.sandbox import ExternalToolSandbox
-
-# 注册表
-from tools.external.registry import ExternalToolRegistry
-
-# 生命周期
-from tools.external.lifecycle import ExternalToolLifecycle
-
-# 异常
-from tools.external.exceptions import (
-    ConfigError,
-    ConnectionError,
-    ExecutionError,
-    ExternalTimeoutError,
-    ExternalToolException,
-    SandboxError,
-    SecretError,
 )
 
 __all__ = [

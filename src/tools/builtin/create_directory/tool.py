@@ -66,7 +66,7 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
             injected_params=["workspace"],
         )
 
-    async def execute(self, inputs: dict[str, Any]):
+    async def execute(self, inputs: dict[str, Any]):  # noqa: PLR0911
         """执行目录创建操作"""
         self._init_workspace(inputs)
 
@@ -97,16 +97,15 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
                         },
                         metadata={"action": "create_directory"},
                     )
-                elif path.is_dir():
+                if path.is_dir():
                     return create_failure_result(
                         error=f"目录已存在: {display_path}",
                         error_code="DIRECTORY_EXISTS",
                     )
-                else:
-                    return create_failure_result(
-                        error=f"路径已存在但不是目录: {display_path}",
-                        error_code="PATH_EXISTS_NOT_DIRECTORY",
-                    )
+                return create_failure_result(
+                    error=f"路径已存在但不是目录: {display_path}",
+                    error_code="PATH_EXISTS_NOT_DIRECTORY",
+                )
 
             # 创建目录
             path.mkdir(parents=parents, exist_ok=exist_ok)

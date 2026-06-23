@@ -94,6 +94,14 @@ interface BackendMessageResponse {
   toolResult?: unknown
   toolError?: string
   durationMs?: number
+  attachments?: Array<{
+    id?: string
+    name: string
+    type?: string
+    mime_type?: string
+    url: string
+    size?: number
+  }>
 }
 
 /**
@@ -258,9 +266,43 @@ function mapBackendMessageToMessage(
       ...backendMessage.metadata,
       ...(backendMessage.agentName ? { agentName: backendMessage.agentName } : {}),
     },
+    clientMessageId: (backendMessage.metadata?.client_message_id as string | undefined) ?? undefined,
+    attachments: backendMessage.attachments,
     thinking,
     parts: parts.length > 0 ? parts : undefined,
   }
+}
+
+/**
+ * 消除合并组内 part.sequence 的冲突，保留原始 sequence 优先
+ *
+ * 规则：
+ * 1. 保留每个 part 的原始 sequence（流式 Date.now() 大数 / API 局部小数）
+ * 2. 按 sequence 升序排列（保持时序，与渲染层排序一致）
+ * 3. 仅当出现 sequence 冲突（同值出现多次）或缺失时，对该 part 从组内
+ *    最大 sequence +1 续接，确保最终 sequence 单调且唯一
+ *
+ * 不破坏流式期间分配的大数 sequence，避免与未合并消息的 React key 碰撞。
+ *
+ * BUG-FIX-fix_20260622_part_sequence_collision
+ */
+function dedupePartSequences(parts: any[]): any[] {
+  if (parts.length <= 1) return parts
+  const sorted = [...parts].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+  const seen = new Set<number>()
+  let nextSeq = sorted.reduce((max, p) => Math.max(max, p.sequence ?? 0), 0)
+  for (const p of sorted) {
+    const seq = p.sequence
+    if (seq == null || seen.has(seq)) {
+      // 冲突或缺失：从组内最大 sequence +1 续接
+      nextSeq += 1
+      p.sequence = nextSeq
+      seen.add(nextSeq)
+    } else {
+      seen.add(seq)
+    }
+  }
+  return sorted
 }
 
 /**
@@ -271,8 +313,23 @@ function mapBackendMessageToMessage(
  *   assistant(tool_call) | tool(result) | tool(result) | assistant(text)
  * 此函数将 tool 消息的结果注入前一个 assistant 的 tool_call part，
  * 再合并连续的 assistant 消息，保证与流式路径一致。
+ *
+ * BUG-FIX-fix_20260617_prepend_boundary_merge:
+ * 导出此函数，供 pipelineMessageStore 在 prepend/initFromAPI 合并完整列表后调用，
+ * 确保跨 API 分页边界的连续 assistant 消息也能被正确合并。
+ *
+ * BUG-FIX-fix_20260622_part_sequence_collision:
+ * 问题根因: 原代码用全局计数器 globalSeq++ 重写所有 part 的 sequence，
+ *   破坏了流式期间按 Date.now() 分配的唯一 sequence，导致合并后与未合并消息的
+ *   part sequence 冲突，渲染层 React key 碰撞，出现「思考+文本+思考+文本」乱序
+ *   和文本气泡重复。
+ * 修复方案: 保留每个 part 的原始 sequence；仅当合并组内出现 sequence 冲突
+ *   （多条 API 消息各自的 parts 都从 0 起算导致同值）时，对冲突 part 在组内
+ *   从最大 sequence +1 续接。不破坏流式大数 sequence 的稳定性。
+ * 影响范围: 切换页面/向上翻页时连续 assistant 消息的 part 渲染稳定性
+ * 修复日期: 2026-06-22
  */
-function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
+export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
   // 第一遍：将夹在 assistant 之间的 tool 消息的结果注入 tool_call part
   const absorbed: Message[] = []
@@ -325,10 +382,8 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
       .map((m) => m.content)
       .filter((c) => c?.trim())
       .join('\n\n')
-    let globalSeq = 0
-    const mergedParts = group.flatMap((m) =>
-      (m.parts || []).map((p: any) => ({ ...p, sequence: globalSeq++ })),
-    )
+    // 保留每个 part 的原始 sequence（流式大数 / API 局部小数），仅消除组内冲突
+    const mergedParts = dedupePartSequences(group.flatMap((m) => (m.parts || []).map((p: any) => ({ ...p }))))
     if (!mergedContent && mergedParts.length === 0) {
       for (const m of group) result.push(m)
       continue
@@ -435,7 +490,6 @@ export async function getMessages(
   options: RetryOptions = {},
 ): Promise<{ messages: Message[]; total: number; has_more: boolean }> {
   // 参数验证
-  console.warn('[SESSION-API] getMessages 被调用: sessionId=%s pipelineRunId=%s', sessionId?.slice(0,12), filters?.pipelineRunId?.slice(0,12))
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {

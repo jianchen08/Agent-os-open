@@ -18,6 +18,7 @@ vi.mock('@/utils/logger', () => ({
 
 vi.mock('@/services/api/session', () => ({
   getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
+  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
 }))
 
 vi.mock('@/utils/retry', () => ({

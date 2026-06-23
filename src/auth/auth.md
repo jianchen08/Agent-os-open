@@ -175,9 +175,10 @@ Token 生成 → TokenManager
   - `async get_user_by_id(user_id: UUID) -> UserInDB | None`
 
 #### token.py
-职责：Token 管理
+职责：Token 管理（撤销存储优先使用 Redis，Redis 不可用时降级到内存）
 暴露接口：
 - `TokenManager`：Token 管理器类
+  - `__init__(secret_key, algorithm, access_token_expire_minutes, refresh_token_expire_days, redis_url)`
   - `create_token_pair(user_id: str, role: str) -> TokenPair`
   - `verify_token(token: str, token_type: str) -> TokenPayload`
   - `refresh_token_pair(refresh_token: str, role: str) -> TokenPair`
@@ -191,7 +192,7 @@ Token 生成 → TokenManager
 - `verify_password(plain_password: str, hashed_password: str) -> bool`：密码验证
 
 #### rbac.py
-职责：RBAC 权限控制
+职责：RBAC 权限控制（含资源级细粒度权限）
 暴露接口：
 - `Permission`：权限枚举
 - `Role`：角色枚举
@@ -200,6 +201,16 @@ Token 生成 → TokenManager
   - `has_permission(role: Role | str, permission: Permission) -> bool`
   - `check_permission(role: Role | str, permission: Permission) -> None`（无权限时抛出 PermissionDeniedError）
   - `add_resource_permission(resource: str, role: Role, permissions: set[Permission])`
+  - `has_resource_action_permission(role, resource, action) -> bool`（资源×操作权限矩阵检查）
+  - `check_resource_action_permission(role, resource, action) -> None`（无权限时抛出 PermissionDeniedError）
+
+#### permission_matrix.py
+职责：资源×操作权限矩阵（E-2 细化，从 3 个粗粒度角色扩展到资源级权限控制）
+暴露接口：
+- `Resource`：受控资源枚举（threads/tasks/agents/tools/config/memory/triggers/evaluation/users/workspaces/plugins/reviews/maintenance/artifacts）
+- `Action`：操作枚举（read/create/update/delete/manage/execute）
+- `RESOURCE_PERMISSION_MATRIX`：资源×角色→操作集合 权限矩阵
+- `has_resource_action_permission(role, resource, action) -> bool`
 
 #### models.py
 职责：数据模型定义
@@ -217,6 +228,7 @@ Token 生成 → TokenManager
 - `get_current_active_user(user: UserInDB) -> UserInDB`：获取活跃用户
 - `require_role(role: str) -> Callable`：角色要求装饰器
 - `require_permission(resource: str, action: str) -> Callable`：权限要求装饰器
+- `require_resource_action(resource: Resource, action: Action) -> Callable`：资源×操作权限检查依赖（E-2 细化）
 - `require_admin() -> Callable`：管理员要求装饰器
 
 #### exceptions.py

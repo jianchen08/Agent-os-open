@@ -9,11 +9,13 @@
 # 隔离环境按根任务共享，不是每个工具调用创建新环境
 
 # ============================================
-# 默认策略（未匹配到的工具走容器隔离，允许降级）
+# 默认策略（未匹配到的工具走宿主机执行）
+# 只有 bash_execute 需要/能在容器里执行（它是 shell 命令），
+# 其他工具是 Python 函数，容器里没有工具代码，必须走 host。
 # ============================================
 default:
-  isolation: container
-  execution: command_in_container
+  isolation: host
+  execution: host_direct
   fallback: allow
 
 # ============================================
@@ -25,7 +27,7 @@ tools:
   bash_execute:
     isolation: container
     execution: command_in_container
-    fallback: deny
+    fallback: allow
     disk_quota: "100m"
     network: restricted
 
@@ -69,33 +71,32 @@ tools:
 # ============================================
 categories:
   execution:
-    isolation: container
-    execution: command_in_container
-    fallback: deny
+    isolation: host
+    execution: host_direct
+    fallback: allow
   network:
-    isolation: container
-    execution: command_in_container
-    network: nat
+    isolation: host
+    execution: host_direct
     fallback: allow
   file:
-    isolation: container
-    execution: command_in_container
+    isolation: host
+    execution: host_direct
     fallback: allow
   search:
-    isolation: container
-    execution: command_in_container
+    isolation: host
+    execution: host_direct
     fallback: allow
   analysis:
-    isolation: container
-    execution: command_in_container
+    isolation: host
+    execution: host_direct
     fallback: allow
   system:
     isolation: host
     execution: host_direct
     fallback: allow
   evaluation:
-    isolation: container
-    execution: command_in_container
+    isolation: host
+    execution: host_direct
     fallback: allow
   task:
     isolation: host

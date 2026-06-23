@@ -696,7 +696,7 @@ class TestMessageOrdering:
     @pytest.mark.skip(reason="PipelineContext 类已移除")
     def test_pipeline_context_isolation(self):
         """验证不同管道之间的消息不串线。"""
-        from stream_handler import PipelineContext
+        from channels.websocket.stream_handler import PipelineContext
 
         mock_app = MagicMock()
         mock_engine_1 = MagicMock()
@@ -936,7 +936,7 @@ class TestWSInteractionNotifier:
 
     def test_register_and_unregister_global(self):
         """验证全局连接注册和注销。"""
-        from ws_handler import WebSocketInteractionNotifier
+        from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
         mock_ws = MagicMock()
@@ -949,7 +949,7 @@ class TestWSInteractionNotifier:
 
     def test_register_global_replaces_old(self):
         """验证新全局连接替换旧连接。"""
-        from ws_handler import WebSocketInteractionNotifier
+        from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
         old_ws = MagicMock()
@@ -962,7 +962,7 @@ class TestWSInteractionNotifier:
 
     def test_unregister_global_prevents_misdelete(self):
         """验证旧连接的 finally 不会误删新连接。"""
-        from ws_handler import WebSocketInteractionNotifier
+        from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
         old_ws = MagicMock()
@@ -991,7 +991,7 @@ class TestWSInteractionNotifier:
     @pytest.mark.asyncio
     async def test_send_to_thread_success(self):
         """验证向指定 thread 发送事件成功。"""
-        from ws_handler import WebSocketInteractionNotifier
+        from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
         mock_ws = AsyncMock()
@@ -1006,7 +1006,7 @@ class TestWSInteractionNotifier:
     @pytest.mark.asyncio
     async def test_send_to_thread_fallback_to_global(self):
         """验证 per-session 连接失败时回退到全局连接。"""
-        from ws_handler import WebSocketInteractionNotifier
+        from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
         mock_global_ws = AsyncMock()
@@ -1020,7 +1020,7 @@ class TestWSInteractionNotifier:
     @pytest.mark.asyncio
     async def test_cancel_fallback_on_user_response(self):
         """验证用户响应后自动确认任务被取消。"""
-        from ws_handler import WebSocketInteractionNotifier
+        from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
 

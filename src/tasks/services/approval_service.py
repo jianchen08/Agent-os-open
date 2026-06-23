@@ -26,9 +26,9 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.event_bus import EventType, ExecutionEvent, get_event_bus
 from human_interaction.models import Priority
 from human_interaction.service import get_human_interaction_service
+from src.core.event_bus import EventType, ExecutionEvent, get_event_bus
 from src.core.states import ExecutionStatus
 from src.db.models import Task
 from src.db.session_manager import managed_session
@@ -133,7 +133,7 @@ class TaskApprovalService:
                 "task_id=%s | request_id=%s", task_id, request_id
             )
 
-        from human_interaction.service import InteractionTimeoutError, InteractionCancelledError
+        from human_interaction.service import InteractionCancelledError, InteractionTimeoutError  # noqa: PLC0415
 
         try:
             response = await self._interaction_service.wait_for_choice(
@@ -313,7 +313,7 @@ class TaskApprovalService:
         )
 
         # 触发评估流程（延迟导入避免与 evaluation_service 循环依赖）
-        from src.tasks.services.evaluation_service import EvaluationService
+        from src.tasks.services.evaluation_service import EvaluationService  # noqa: PLC0415
 
         evaluation_service = EvaluationService(session=session)
         eval_results = [

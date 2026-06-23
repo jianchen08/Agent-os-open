@@ -16,20 +16,12 @@ from src.memory.maintenance.review_engine import (
     ReviewEngine,
 )
 
-pytestmark = pytest.mark.skip(
-    reason="ReviewEngine API 已重构为 register_pipeline/run_review 模型，"
-           "旧构造函数参数（storage/chunk_db/knowledge_service）和方法签名已移除"
-)
-
-try:
-    from src.memory.maintenance.review_engine import (
-        ChunkData,
-        ExecutionRecord,
-        PipelineRunSummary,
-        ReviewEngine,
-    )
-except ImportError:
-    pass
+# 说明：此文件原带一个 pytestmark skip，理由是"旧构造函数参数已移除"。
+# 经核验（inspect.signature(ReviewEngine.__init__)），当前 ReviewEngine 构造函数
+# 仍完整接受 storage/chunk_db/knowledge_service/pipeline_engine 参数，
+# run_review(run_id) 走完整版复盘流程也保留。该 skip 是误判，会让 15 个能真实
+# 测到经验提取/去重/状态流转/async 安全的测试失效，已移除。
+# 若日后真的重构掉这些参数，让本文件用例自然失败即可，不要再加 skip。
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +144,31 @@ class TestBug1SavedCountFix:
 
         run_id = "run-dedup"
         storage.get_summary.return_value = _make_summary(run_id=run_id)
-        storage.list_by_pipeline.return_value = [
+        # 注意：list_by_pipeline 返回 (records, has_more) 元组，实现侧用 [0] 解包。
+        # 早期版本误写为单 list，导致 run_review 拿不到 records 报 error。
+        storage.list_by_pipeline.return_value = ([
             _make_record(name="step_a", error="timeout"),
-        ]
+        ], False)
         chunk_db.find_by_pipeline = AsyncMock(return_value=[])
-        # 已存在一条相同内容的经验
-        existing_content = f"Pipeline {run_id} - step_a: timeout"
+
+        # 预置"已存在"的经验：用引擎自身的 _build_experience_content 生成，
+        # 这样当产出格式调整时，预期内容自动同步，避免测试与实现双重维护。
+        # 注意：用 getattr 安全访问，因为 review_engine 内部的 PipelineRunSummary
+        # 和 storage 版字段不完全一致（storage 版有 total_seconds，内部版没有）。
+        summary_obj = storage.get_summary.return_value
+        expected_new_content = ReviewEngine._build_experience_content(
+            run_id=run_id,
+            status=summary_obj.status,
+            error="timeout",
+            task="",  # _make_record 不含 user 消息，任务描述为空
+            iterations=getattr(summary_obj, "total_iterations", 0) or 0,
+            duration=getattr(summary_obj, "total_seconds", 0.0) or 0.0,
+            created_at=getattr(summary_obj, "created_at", "") or "",
+            source_name="step_a",
+        )
         ks.list_semantic_memory = AsyncMock(return_value={
             "items": [
-                {"content": existing_content, "source_type": "review_experience"},
+                {"content": expected_new_content, "source_type": "review_experience"},
             ],
             "total": 1,
         })
@@ -383,9 +391,10 @@ class TestIntegrationReviewFlow:
 
         run_id = "run-deep"
         storage.get_summary.return_value = _make_summary(run_id=run_id)
-        storage.list_by_pipeline.return_value = [
+        # 注意：list_by_pipeline 返回 (records, has_more) 元组，实现侧用 [0] 解包。
+        storage.list_by_pipeline.return_value = ([
             _make_record(name="step", error="some error"),
-        ]
+        ], False)
         chunk_db.find_by_pipeline = AsyncMock(return_value=[
             ChunkData(chunk_id="c1", pipeline_id=run_id, layer="summary", content="chunk content"),
         ])

@@ -115,7 +115,7 @@ class ErrorCheckPlugin(IOutputPlugin):
             return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行错误检查逻辑。
 
         检查顺序：raw_error → tool_missing → empty_response →
@@ -145,14 +145,12 @@ class ErrorCheckPlugin(IOutputPlugin):
         # 检查 LLM 回复中的知识不足指示
         if self._check_knowledge_insufficient:
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
-            if raw_result and self._is_knowledge_insufficient_response(raw_result):
+            if raw_result and self._is_knowledge_insufficient_response(raw_result):  # noqa: SIM102
                 # 结合记忆上下文判断
                 if self._is_knowledge_insufficient(ctx):
                     return self._handle_knowledge_insufficient(ctx)
 
         # 检查格式错误（但 LLM 返回 tool_calls 时不算格式错误）
-        # BUG-FIX: 工具执行结果(core_type=tool_execute)不是LLM生成的内容，
-        # 可能包含文件内容等，不能用LLM输出格式标准检查
         if self._check_format:
             core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
@@ -193,10 +191,6 @@ class ErrorCheckPlugin(IOutputPlugin):
         error_str = str(error)
         retry_count = ctx.state.get("retry.count", 0)
 
-        # BUG-FIX-fix_20260418_all_tools_failed
-        # 问题根因: 工具全部失败时没有专门的错误类别，导致可能被误判为不可重试
-        # 修复方案: 添加 all_tools_failed 类别，标记为可重试让 LLM 有机会降级处理
-        # 影响范围: 所有工具执行流程的错误检查
         category = "core_error"
         if self._check_tool_missing and self._is_tool_missing_error(error_str):
             category = "tool_missing"
@@ -230,22 +224,21 @@ class ErrorCheckPlugin(IOutputPlugin):
                     ),
                 ),
             }
-        else:
-            # 不可重试或重试用尽：产出 end 信号
-            return {
-                StateKeys.EXECUTION_STATUS: "failed",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason=(
-                        f"Non-retryable {category} or "
-                        f"max retries reached: "
-                        f"{error_str[:100]}"
-                    ),
+        # 不可重试或重试用尽：产出 end 信号
+        return {
+            StateKeys.EXECUTION_STATUS: "failed",
+            StateKeys.ERROR_ANALYSIS: analysis,
+            "error_check.last_error_type": category,
+            "error_check.consecutive_same_type": consecutive,
+            "__route_signal__": RouteSignal(
+                route_type="end",
+                reason=(
+                    f"Non-retryable {category} or "
+                    f"max retries reached: "
+                    f"{error_str[:100]}"
                 ),
-            }
+            ),
+        }
 
     def _handle_empty_response(self, ctx: PluginContext) -> dict[str, Any]:
         """处理空响应。
@@ -282,17 +275,16 @@ class ErrorCheckPlugin(IOutputPlugin):
                     ),
                 ),
             }
-        else:
-            return {
-                StateKeys.EXECUTION_STATUS: "failed",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason="Empty response after max retries",
-                ),
-            }
+        return {
+            StateKeys.EXECUTION_STATUS: "failed",
+            StateKeys.ERROR_ANALYSIS: analysis,
+            "error_check.last_error_type": category,
+            "error_check.consecutive_same_type": consecutive,
+            "__route_signal__": RouteSignal(
+                route_type="end",
+                reason="Empty response after max retries",
+            ),
+        }
 
     def _handle_format_error(self, ctx: PluginContext) -> dict[str, Any]:
         """处理格式错误。
@@ -329,17 +321,16 @@ class ErrorCheckPlugin(IOutputPlugin):
                     ),
                 ),
             }
-        else:
-            return {
-                StateKeys.EXECUTION_STATUS: "failed",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason="Format error after max retries",
-                ),
-            }
+        return {
+            StateKeys.EXECUTION_STATUS: "failed",
+            StateKeys.ERROR_ANALYSIS: analysis,
+            "error_check.last_error_type": category,
+            "error_check.consecutive_same_type": consecutive,
+            "__route_signal__": RouteSignal(
+                route_type="end",
+                reason="Format error after max retries",
+            ),
+        }
 
     def _is_empty_response(self, result: Any) -> bool:
         """检查是否为空响应。
@@ -352,9 +343,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         """
         if result is None:
             return True
-        if isinstance(result, str) and result.strip().lower() in self._EMPTY_RESPONSE_INDICATORS:
-            return True
-        return False
+        return bool(isinstance(result, str) and result.strip().lower() in self._EMPTY_RESPONSE_INDICATORS)
 
     def _track_consecutive_error(
         self, ctx: PluginContext, category: str,
@@ -500,9 +489,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         consecutive_same = ctx.state.get(
             "error_check.consecutive_same_type", 0,
         )
-        if consecutive_same >= 3:
-            return True
-        return False
+        return consecutive_same >= 3
 
     def _handle_knowledge_insufficient(self, ctx: PluginContext) -> dict[str, Any]:
         """处理知识不足。
@@ -542,17 +529,16 @@ class ErrorCheckPlugin(IOutputPlugin):
                     ),
                 ),
             }
-        else:
-            return {
-                StateKeys.EXECUTION_STATUS: "failed",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason="Knowledge insufficient after max retries",
-                ),
-            }
+        return {
+            StateKeys.EXECUTION_STATUS: "failed",
+            StateKeys.ERROR_ANALYSIS: analysis,
+            "error_check.last_error_type": category,
+            "error_check.consecutive_same_type": consecutive,
+            "__route_signal__": RouteSignal(
+                route_type="end",
+                reason="Knowledge insufficient after max retries",
+            ),
+        }
 
     def _handle_strategy_error(self, ctx: PluginContext) -> dict[str, Any]:
         """处理策略错误。

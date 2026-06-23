@@ -92,10 +92,9 @@ class CircuitBreaker(IInputPlugin):
 
         if self._state == self.CLOSED:
             return self._handle_closed(ctx)
-        elif self._state == self.OPEN:
+        if self._state == self.OPEN:
             return self._handle_open(ctx)
-        else:
-            return self._handle_half_open(ctx)
+        return self._handle_half_open(ctx)
 
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
         """从 ctx.state 读取 Agent 覆盖的运行时配置。
@@ -105,7 +104,7 @@ class CircuitBreaker(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        from pipeline.plugin import find_plugin_config
+        from pipeline.plugin import find_plugin_config  # noqa: PLC0415
 
         plugin_configs = ctx.state.get("plugin_configs", {})
         config = find_plugin_config("circuit_breaker", plugin_configs)

@@ -82,7 +82,7 @@ class AutoConfirmNotifier:
 
 def inject_auto_confirm():
     """注入自动确认通知器到全局人类交互服务。"""
-    from human_interaction import get_human_interaction_service
+    from human_interaction import get_human_interaction_service  # noqa: PLC0415
 
     notifier = AutoConfirmNotifier(confirm_delay=1.5)
     human_svc = get_human_interaction_service()
@@ -95,7 +95,7 @@ def _background_inject():
     """后台线程持续尝试注入，直到成功。"""
     for attempt in range(30):
         try:
-            from human_interaction import get_human_interaction_service
+            from human_interaction import get_human_interaction_service  # noqa: PLC0415
             svc = get_human_interaction_service()
             if svc is not None:
                 notifier = AutoConfirmNotifier(confirm_delay=1.5)
@@ -112,7 +112,7 @@ def _background_inject():
 
 
 def main():
-    import argparse
+    import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(description="Agent OS CLI (AutoConfirm)")
     parser.add_argument("--config", type=str, default=None)
@@ -125,7 +125,7 @@ def main():
     inject_thread = threading.Thread(target=_background_inject, daemon=True)
     inject_thread.start()
 
-    from channels.cli.cli_main import CLIApplication, setup_logging
+    from channels.cli.cli_main import CLIApplication, setup_logging  # noqa: PLC0415
     setup_logging(debug=args.debug)
 
     app = CLIApplication(streaming=not args.no_streaming)
@@ -144,7 +144,7 @@ def main():
             asyncio.run(app.run())
     finally:
         try:
-            from llm.adapter import cleanup_litellm_resources_sync
+            from llm.adapter import cleanup_litellm_resources_sync  # noqa: PLC0415
             cleanup_litellm_resources_sync()
         except Exception as exc:
             logger.debug("cleanup_litellm_resources_sync 失败: %s", exc)

@@ -41,28 +41,52 @@ export interface PipelineLocation {
  * @returns 管道位置信息，找不到返回 null
  */
 export async function findPipelineLocation(pipelineId: string): Promise<PipelineLocation | null> {
-  // 第一级：内存中的 pipelineSessionMap（最快）
   const pipelineStore = usePipelineMessageStore.getState()
-  const cachedSessionId = pipelineStore.pipelineSessionMap[pipelineId]
-  if (cachedSessionId) {
-    const tabStore = useAgentTabStore.getState()
-    // 统一查找：先查 pipelineTabMap，再查 tab.pipelineRunId
-    const tabId = tabStore.pipelineTabMap[pipelineId]
-      || tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id
-      || null
-    return { sessionId: cachedSessionId, pipelineId, tabId }
-  }
+  const tabStore = useAgentTabStore.getState()
+  // 统一查找 tabId：先查 pipelineTabMap，再查 tab.pipelineRunId
+  const resolveTabId = () =>
+    tabStore.pipelineTabMap[pipelineId]
+    || tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id
+    || null
 
-  // 第二级：遍历所有会话的 pipelineIds
+  // 第二级（提前执行）：遍历所有会话的 pipelineIds（后端权威数据）
   const sessions = useSessionStore.getState().sessions
+  let authoritativeSessionId: string | null = null
   for (const session of sessions) {
     if (session.pipelineIds && session.pipelineIds.includes(pipelineId)) {
-      const tabStore = useAgentTabStore.getState()
-      const tabId = tabStore.pipelineTabMap[pipelineId]
-        || tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id
-        || null
-      return { sessionId: session.id, pipelineId, tabId }
+      authoritativeSessionId = session.id
+      break
     }
+  }
+
+  // 第一级：内存中的 pipelineSessionMap（最快，但可能过时）
+  const cachedSessionId = pipelineStore.pipelineSessionMap[pipelineId]
+  if (cachedSessionId) {
+    // BUG-FIX-fix_20260607_stale_pipeline_session_map:
+    // 问题根因: pipelineSessionMap 可能因 handleSubAgentCreated 的 activeSessionId
+    //          回退而映射到错误会话，直接信任会导致跳转到对方任务的会话。
+    // 修复方案: 用 session.pipelineIds（后端权威数据）交叉校验，不一致时以后者为准
+    //          并修正 pipelineSessionMap 缓存，防止后续请求继续读到错误映射。
+    if (authoritativeSessionId && authoritativeSessionId !== cachedSessionId) {
+      // 缓存与权威数据不一致，修正缓存
+      pipelineStore.registerPipeline({
+        pipelineId,
+        sessionId: authoritativeSessionId,
+        level: 2,
+        tabId: resolveTabId(),
+        agentName: '',
+        status: 'running',
+        parentId: null,
+        unreadCount: 0,
+      })
+      return { sessionId: authoritativeSessionId, pipelineId, tabId: resolveTabId() }
+    }
+    return { sessionId: cachedSessionId, pipelineId, tabId: resolveTabId() }
+  }
+
+  // 第二级结果直接使用（已提前计算）
+  if (authoritativeSessionId) {
+    return { sessionId: authoritativeSessionId, pipelineId, tabId: resolveTabId() }
   }
 
   // 第三级：重新拉取会话列表后再查找（兜底）
@@ -115,12 +139,19 @@ export async function navigateToPipeline(
     return true
   }
 
-  // 定位管道（找不到时降级到当前会话）
+  // BUG-FIX-fix_20260620_remove_session_fallback:
+  // 问题根因: findPipelineLocation 找不到管道时降级到当前会话，
+  //          会在错误的会话下创建幽灵标签，子管道消息污染无关会话。
+  // 修复方案: 找不到管道归属时直接失败，不再降级到当前会话。
   const location = await findPipelineLocation(pipelineId)
-  const targetSessionId = location?.sessionId || currentSid
+  if (!location) {
+    console.error('[navigateToPipeline] 找不到管道归属，拒绝降级到当前会话: pipelineId=%s', pipelineId)
+    return false
+  }
+  const targetSessionId = location.sessionId
 
-  // 如果在其他会话，先切换会话（校验目标会话确实存在，避免 pipelineSessionMap 映射到错误会话）
-  if (location && targetSessionId !== currentSid) {
+  // 如果在其他会话，先切换会话
+  if (targetSessionId !== currentSid) {
     const sessions = useSessionStore.getState().sessions
     const sessionExists = sessions.some(s => s.id === targetSessionId)
     if (sessionExists) {
@@ -128,7 +159,11 @@ export async function navigateToPipeline(
       await useSessionListStore.getState().setActiveSession(targetSessionId)
       useAgentTabStore.getState().initSessionTabs(targetSessionId)
     }
-    // session 不存在时留在当前会话继续创建标签
+    // session 不存在时中止（数据不一致，拒绝在当前会话创建幽灵标签）
+    if (!sessionExists) {
+      console.error('[navigateToPipeline] 目标会话已不存在: sessionId=%s pipelineId=%s', targetSessionId, pipelineId)
+      return false
+    }
   }
 
   // 刷新 tabStore 引用（会话切换后状态已更新）

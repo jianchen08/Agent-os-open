@@ -21,7 +21,7 @@ _workspace_service: WorkspaceService | None = None
 
 def get_workspace_service() -> WorkspaceService:
     """获取全局工作空间服务单例。"""
-    global _workspace_service
+    global _workspace_service  # noqa: PLW0603
     if _workspace_service is None:
         _workspace_service = WorkspaceService()
     return _workspace_service
@@ -29,7 +29,7 @@ def get_workspace_service() -> WorkspaceService:
 
 def reset_workspace_service() -> None:
     """重置全局单例（测试用）。"""
-    global _workspace_service
+    global _workspace_service  # noqa: PLW0603
     _workspace_service = None
 
 
@@ -101,7 +101,7 @@ class WorkspaceService:
             return {"items": [], "total": 0}
 
         # 延迟导入避免循环依赖
-        from artifacts.artifact_service import get_artifact_service
+        from artifacts.artifact_service import get_artifact_service  # noqa: PLC0415
         artifact_service = get_artifact_service()
 
         items: list[dict[str, Any]] = []
@@ -133,7 +133,7 @@ class WorkspaceService:
         Returns:
             {"tree": [...]}
         """
-        if base_path and os.path.isdir(base_path):
+        if base_path and os.path.isdir(base_path):  # noqa: PTH112
             tree = await asyncio.to_thread(self._scan_directory, base_path, base_path)
         else:
             tree = []
@@ -142,7 +142,7 @@ class WorkspaceService:
         ws = self._workspaces.get(container_task_id)
         if ws:
             ws.file_tree = tree
-            from datetime import UTC, datetime
+            from datetime import UTC, datetime  # noqa: PLC0415
             ws.updated_at = datetime.now(UTC).isoformat()
 
         return {"tree": [n.to_dict() for n in tree]}
@@ -161,7 +161,7 @@ class WorkspaceService:
             容器任务 ID
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
             task_service = provider.get_or_create(
                 "task_service",
@@ -202,7 +202,7 @@ class WorkspaceService:
         使用 list_subtasks 递归查询，避免加载全部任务。
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
             task_service = provider.get_or_create(
                 "task_service",
@@ -255,18 +255,21 @@ class WorkspaceService:
             return []
 
         nodes: list[FileTreeNode] = []
-        # BUG-FIX-fix_20260523_001: 扩展异常捕获范围
-        # 问题根因: os.listdir 在 Windows 上对特殊设备路径可能抛出 OSError
-        #           而非 PermissionError，导致未捕获异常向上传播，API 返回 500。
-        # 修复方案: 同时捕获 PermissionError 和 OSError，确保任何文件系统级别的
-        #           访问错误都能被安全处理。
         try:
-            entries = sorted(os.listdir(path))
+            entries = sorted(os.listdir(path))  # noqa: PTH208
         except (PermissionError, OSError):
             return []
 
         for entry in entries:
-            if entry.startswith(".") or entry == "__pycache__":
+            # BUG-FIX-fix_20260623_hidden_files:
+            # 问题根因: 此前 entry.startswith(".") 把所有隐藏文件/目录
+            #           （.git、.env、.gitignore、.vscode 等）全部过滤掉，
+            #           导致前端文件树永远看不到这些文件。
+            # 修复方案: 不再按前缀过滤隐藏文件，始终返回给前端展示。
+            #          仅保留对文件浏览无用/有害的条目：
+            #          - __pycache__：Python 字节码缓存，无浏览价值
+            #          - Windows 保留设备名 / UNC 设备路径：避免误访问
+            if entry == "__pycache__":
                 continue
 
             stem = entry.split(".")[0].upper()
@@ -275,10 +278,6 @@ class WorkspaceService:
 
             full_path = os.path.join(path, entry)
 
-            # BUG-FIX-fix_20260523_001: 过滤 Windows 设备路径
-            # 问题根因: Windows 上 os.path.isdir 对设备路径（如 \\.\xxx）可能返回
-            #           True，导致递归调用 _scan_directory 时传入无效路径引发异常。
-            # 修复方案: 在 isdir 检查前，过滤以 \\.\ 开头的设备路径，跳过这些条目。
             if full_path.startswith("\\\\.\\"):
                 continue
 
@@ -287,7 +286,7 @@ class WorkspaceService:
             except ValueError:
                 continue
 
-            if os.path.isdir(full_path):
+            if os.path.isdir(full_path):  # noqa: PTH112
                 children = self._scan_directory(
                     full_path, base_path, max_depth, current_depth + 1
                 )

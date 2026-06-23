@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
+import yaml  # noqa: F401
 
 from isolation.types import IsolationLevel
 
@@ -52,16 +52,32 @@ class IsolationPolicyLoader:
         Args:
             config_path: 策略配置文件路径，为 None 时使用默认路径
         """
-        path = Path(config_path) if config_path else DEFAULT_POLICY_PATH
-        if not path.exists():
-            logger.warning(f"隔离策略配置文件不存在: {path}，使用默认策略（容器隔离）")
-            self._default = ToolIsolationPolicy()
-            self._tools: dict[str, ToolIsolationPolicy] = {}
-            self._categories: dict[str, ToolIsolationPolicy] = {}
-            return
+        self._config_path = Path(config_path) if config_path else DEFAULT_POLICY_PATH
+        self._config: dict = {}
+        self._default = ToolIsolationPolicy()
+        self._tools: dict[str, ToolIsolationPolicy] = {}
+        self._categories: dict[str, ToolIsolationPolicy] = {}
 
-        with open(path, "r", encoding="utf-8") as f:
-            self._config = yaml.safe_load(f) or {}
+        self._load_config()
+
+        # 注册 config_center watcher，实现热更新
+        self._register_watcher()
+
+    def _load_config(self) -> None:
+        """从 config_center 加载策略配置。"""
+        path = self._config_path
+        try:
+            from config.config_center import get_config_center  # noqa: PLC0415
+            rel = str(path).replace("\\", "/")
+            if "config/" in rel:
+                rel = rel[rel.index("config/") + len("config/"):]
+            self._config = get_config_center().get(rel) or {}
+        except Exception:
+            logger.warning(f"隔离策略配置加载失败: {path}，使用默认策略（容器隔离）")
+            self._default = ToolIsolationPolicy()
+            self._tools = {}
+            self._categories = {}
+            return
 
         self._default = self._parse_policy(self._config.get("default", {}))
         self._tools = {
@@ -74,6 +90,25 @@ class IsolationPolicyLoader:
             f"隔离策略加载完成: {len(self._tools)} 个工具策略, "
             f"{len(self._categories)} 个分类策略"
         )
+
+    def _register_watcher(self) -> None:
+        """注册 config_center watcher，配置变更时自动 reload。"""
+        try:
+            from config.config_center import get_config_center  # noqa: PLC0415
+            get_config_center().watch("isolation/", self._on_config_changed)
+            logger.debug("[IsolationPolicyLoader] 已注册 config_center watcher")
+        except Exception as e:
+            logger.warning(f"[IsolationPolicyLoader] 注册 watcher 失败: {e}")
+
+    def _on_config_changed(self, changed_path: str) -> None:
+        """config_center 回调：检测到 isolation_policy.yaml 变更时自动 reload。
+
+        Args:
+            changed_path: 变更的配置文件相对路径
+        """
+        if "isolation_policy" in changed_path:
+            logger.info("[IsolationPolicyLoader] 检测到策略配置变更，自动 reload")
+            self._load_config()
 
     def resolve(self, tool_name: str, category: str | None = None) -> ToolIsolationPolicy:
         """决策工具的隔离策略
@@ -128,5 +163,6 @@ class IsolationPolicyLoader:
         Args:
             config_path: 可选的新配置文件路径
         """
-        path = config_path or str(DEFAULT_POLICY_PATH)
-        self.__init__(path)
+        if config_path:
+            self._config_path = Path(config_path)
+        self._load_config()

@@ -103,6 +103,37 @@ init_data_dirs() {
 }
 
 # =============================================================================
+# BUG-FIX-fix_20260614_missing_git:
+# 容器空间初始化（git init / worktree / commit / merge）全链路依赖 git。
+# 基础镜像 python:3.11-slim 不含 git，启动时自动安装。
+# =============================================================================
+ensure_git() {
+    if command -v git &> /dev/null; then
+        log_info "git 已可用: $(git --version)"
+        return 0
+    fi
+    log_warn "git 未安装，正在自动安装（容器空间初始化必需）..."
+
+    # 需要 root 权限执行 apt-get。优先用 sudo，否则尝试直接执行（当以 root 运行时）。
+    local apt_cmd="apt-get update -qq && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
+    if [ "$(id -u)" = "0" ]; then
+        bash -c "$apt_cmd"
+    elif command -v sudo &> /dev/null; then
+        sudo bash -c "$apt_cmd"
+    else
+        log_error "git 安装失败：非 root 用户且 sudo 不可用，请以 root 运行或手动安装 git"
+        return 1
+    fi
+
+    if command -v git &> /dev/null; then
+        log_info "git 安装完成: $(git --version)"
+    else
+        log_error "git 安装失败，容器空间初始化将不可用"
+        return 1
+    fi
+}
+
+# =============================================================================
 # 函数：打印环境信息
 # =============================================================================
 print_env_info() {
@@ -133,7 +164,10 @@ main() {
     # 2. 初始化数据目录
     init_data_dirs
 
-    # 3. 启动主服务
+    # 3. 确保 git 可用（容器空间初始化依赖）
+    ensure_git
+
+    # 4. 启动主服务
     log_info "启动 Agent OS 服务..."
     exec "$@"
 }

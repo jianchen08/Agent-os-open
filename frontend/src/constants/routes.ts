@@ -22,6 +22,22 @@ export const ROUTES = {
   SETTINGS_COST: '/settings/cost',
   /** 插件设置 */
   SETTINGS_PLUGINS: '/settings/plugins',
+  /** 记忆配置 */
+  SETTINGS_MEMORY: '/settings/memory',
+  /** 隔离配置 */
+  SETTINGS_ISOLATION: '/settings/isolation',
+  /** 安全配置 */
+  SETTINGS_SECURITY: '/settings/security',
+  /** 评估配置 */
+  SETTINGS_EVALUATION: '/settings/evaluation',
+  /** 外部工具配置 */
+  SETTINGS_EXTERNAL_TOOLS: '/settings/external-tools',
+  /** 管道配置 */
+  SETTINGS_PIPELINE: '/settings/pipeline',
+  /** 主题设置 */
+  SETTINGS_THEME: '/settings/theme',
+  /** 通用配置页（动态路径，需拼 configPath 参数） */
+  SETTINGS_GENERIC: '/settings/generic',
   /** 工具页面 */
   TOOLS: '/tools',
   /** 智能体页面 */

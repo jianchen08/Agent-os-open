@@ -2,7 +2,7 @@
 连接器抽象基类
 
 定义所有连接器必须实现的标准接口，包括连接生命周期管理、
-上下文获取、操作执行和状态变更通知。
+上下文获取、操作执行、健康检查和状态变更通知。
 
 暴露接口：
 - BaseConnector: 连接器抽象基类
@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 
-from connectors.types import (
+from .types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,
@@ -23,12 +25,22 @@ from connectors.types import (
 
 logger = logging.getLogger(__name__)
 
+# 重连默认配置
+DEFAULT_MAX_RETRIES: int = 3
+DEFAULT_BASE_RETRY_DELAY: float = 1.0  # 秒
+
 
 class BaseConnector(ABC):
     """连接器抽象基类。
 
     所有 IDE 连接器必须继承此类并实现所有抽象方法。
     连接器负责在 Agent OS 和外部 IDE 之间建立双向通信通道。
+
+    提供标准接口：
+    - connect()/disconnect(): 连接生命周期
+    - health_check(): 健康检查（含指数退避重连）
+    - is_connected: 连接状态属性
+    - get_context()/execute_action(): 上下文获取和操作执行
 
     Attributes:
         _state: 当前连接器状态
@@ -66,6 +78,68 @@ class BaseConnector(ABC):
             当前状态枚举值
         """
         return self._state
+
+    async def health_check(self) -> bool:
+        """检查连接器是否健康。
+
+        默认实现基于 is_connected 属性。子类可重写以执行
+        更深入的检查（如发送 ping 请求）。
+
+        如果检查失败且连接器处于异常状态，会尝试指数退避重连。
+
+        Returns:
+            True 表示连接器可正常工作
+        """
+        if self.is_connected:
+            return True
+
+        # 不健康时尝试重连
+        if self._state == ConnectorState.ERROR:
+            try:
+                await self._reconnect_with_backoff()
+                return self.is_connected
+            except Exception as e:
+                self._logger.warning("健康检查重连失败: %s", e)
+                return False
+
+        return False
+
+    async def _reconnect_with_backoff(
+        self,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        base_delay: float = DEFAULT_BASE_RETRY_DELAY,
+    ) -> None:
+        """指数退避重连。
+
+        在连接异常时尝试重新建立连接，使用指数退避策略
+        避免对目标服务造成过大压力。
+
+        Args:
+            max_retries: 最大重试次数
+            base_delay: 基础延迟（秒），实际延迟为 base_delay * 2^attempt
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                await self.disconnect()
+                await self.connect()
+                self._logger.info(
+                    "重连成功 (尝试 %d/%d)", attempt, max_retries,
+                )
+                return
+            except Exception as e:
+                last_error = e
+                self._logger.warning(
+                    "重连失败 (尝试 %d/%d): %s", attempt, max_retries, e,
+                )
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    self._logger.info("等待 %.1f 秒后重试...", delay)
+                    await asyncio.sleep(delay)
+
+        msg = f"重连失败，已重试 {max_retries} 次: {last_error}"
+        self._logger.error(msg)
+        raise ConnectionError(msg)
 
     @abstractmethod
     async def get_context(self) -> ConnectorContext:
@@ -126,6 +200,23 @@ class BaseConnector(ABC):
             capabilities=[],
             priority=0,
         )
+
+    def get_status(self) -> dict[str, Any]:
+        """获取连接器状态信息。
+
+        Returns:
+            包含连接器状态的字典
+        """
+        return {
+            "type": self.connector_type,
+            "state": self._state.value,
+            "connected": self.is_connected,
+            "info": {
+                "display_name": self.get_info().display_name,
+                "capabilities": self.get_info().capabilities,
+                "priority": self.get_info().priority,
+            },
+        }
 
     def _set_state(self, state: ConnectorState) -> None:
         """设置连接器状态（内部方法）。

@@ -5,7 +5,7 @@
  * 消除各 handler 中的重复代码，确保 pipeline_id 唯一路由原则。
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
-import { useStreamingStore } from '@/stores/streamingStore'
+import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
@@ -29,42 +29,30 @@ export function extractMessageId(eventData: any): string | null {
 }
 
 /**
- * 统一启动管道流式状态（pipelineStore + streamingStore）
+ * 统一启动管道流式状态
  *
- * pipelineStore.streamingState 为唯一数据源，
- * streamingStore.setStreamingForTab 仅在 pipelineStore 操作后统一调用一次。
- * threadId 用于 streamingStore 的双 key 配对（UI tab 指示器），不参与消息路由。
+ * pipelineStore.streamingState 是唯一数据源。
  *
  * @param pipelineId - 管道 ID（唯一路由键）
  * @param messageId - 正在流式传输的消息 ID
- * @param threadId - 可选的会话 ID，用于 streamingStore tab 配对
  */
 export function startPipelineStreaming(
   pipelineId: string,
   messageId: string,
-  threadId?: string,
 ): void {
   pipelineStore.getState().startStreaming(pipelineId, messageId)
-  useStreamingStore.getState().setStreamingForTab(pipelineId, true)
-
-  // FIX: threadId 仅用于 streamingStore 双 key 配对，不参与消息路由
-  if (threadId && threadId !== pipelineId) {
-    useStreamingStore.getState().setStreamingForTab(threadId, true)
-  }
 }
 
 /**
- * 停止管道流式传输，同步清理 streamingStore 的 tab 状态
+ * 停止管道流式传输
  *
  * @param pipelineId - 管道 ID（唯一路由键）
- * @param threadId - 可选的会话 ID，用于清理 streamingStore tab 配对
+ * @param threadId - 可选的会话 ID，threadId 与 pipelineId 不同时一并清理
  */
 export function stopPipelineStreaming(pipelineId: string, threadId?: string): void {
   pipelineStore.getState().stopStreaming(pipelineId)
-  useStreamingStore.getState().setStreamingForTab(pipelineId, false)
-
   if (threadId && threadId !== pipelineId) {
-    useStreamingStore.getState().setStreamingForTab(threadId, false)
+    pipelineStore.getState().stopStreaming(threadId)
   }
 }
 
@@ -151,7 +139,10 @@ export function ensureStreamingPlaceholder(
     }
   }
 
-  const placeholderSeq = backendSequence ?? 0
+  // BUG-FIX-fix_20260615_user_msg_order:
+  // assistant 占位消息也要走本地 sequence 计数器（Math.max(后端 seq, 本地 max+1)），
+  // 否则后端 seq（小数字）会小于已分配的 user 消息 seq → assistant 排到 user 之前。
+  const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
 
   store.addMessage(pipelineId, {
     id: messageId,
@@ -160,7 +151,7 @@ export function ensureStreamingPlaceholder(
     content: '',
     timestamp: new Date().toISOString(),
     parentId: null,
-    sequence: placeholderSeq > 0 ? placeholderSeq : undefined,
+    sequence: placeholderSeq,
     status: 'streaming',
   } as any)
 }
@@ -185,25 +176,6 @@ export function terminatePipeline(pipelineId: string, threadId?: string): void {
 }
 
 /**
- * 清理消息中 streaming 状态的 parts（将 state 设为 done）
- *
- * 返回浅拷贝，不修改原始消息对象。如果 parts 无 streaming 状态，直接返回原对象。
- */
-export function clearStreamingParts(msg: any): any {
-  const parts = msg.parts || []
-  const hasStreaming = parts.some((p: any) => p.state === 'streaming')
-  if (hasStreaming) {
-    return {
-      ...msg,
-      parts: parts.map((p: any) =>
-        p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
-      ),
-    }
-  }
-  return msg
-}
-
-/**
  * 解析 pipelineId 并执行空值守卫 + warn 日志
  *
  * 返回 null 表示 pipelineId 为空，调用方应跳过处理。
@@ -211,7 +183,10 @@ export function clearStreamingParts(msg: any): any {
 export function resolveRequiredPipelineId(eventData: any, context: string): string | null {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) {
-    console.warn(`[streaming] ${context}: pipelineId 为空，跳过事件`)
+    // BUG-FIX-M03: WS handler 层 console 残留
+    // 问题根因: pipelineId 空值守卫用 console.warn 记录。
+    // 修复方案: 改用正式 logger.warn。
+    loggers.websocket.warn('[streaming] %s: pipelineId 为空，跳过事件', context)
     return null
   }
   return pipelineId

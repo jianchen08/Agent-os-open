@@ -196,17 +196,16 @@ class IDEDetector:
         name_lower = name.lower()
 
         # VSCode: 检查 "vscode", "visual studio code", 或 "code.exe"
-        if "vscode" in name_lower or "visual studio code" in name_lower or name_lower == "code.exe" or name_lower == "code":
+        if "vscode" in name_lower or "visual studio code" in name_lower or name_lower in {"code.exe", "code"}:
             return IDEType.VSCODE
-        elif (
+        if (
             "idea" in name_lower or "pycharm" in name_lower or "jetbrains" in name_lower
         ):
             return IDEType.JETBRAINS
-        elif "nvim" in name_lower or "neovim" in name_lower:
+        if "nvim" in name_lower or "neovim" in name_lower:
             return IDEType.NVIM
-        elif "emacs" in name_lower:
+        if "emacs" in name_lower:
             return IDEType.EMACS
-        elif "visual studio" in name_lower:
+        if "visual studio" in name_lower:
             return IDEType.VS
-        else:
-            return IDEType.UNKNOWN
+        return IDEType.UNKNOWN

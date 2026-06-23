@@ -1,0 +1,229 @@
+# ============================================================
+# CI/CD 流水线 — 灵汐系统
+# ============================================================
+#
+# 流程：代码提交 → Lint → 类型检查 → 自动测试 → 日志收集 → 结果报告 → Bug 定位
+#
+# 触发条件：
+#   - push 到 main / develop 分支
+#   - Pull Request 到 main / develop 分支
+#
+# 产出物：
+#   - Lint / 类型检查报告
+#   - 结构化测试报告（JSON + HTML）
+#   - 失败用例的 Bug 定位信息
+# ============================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.10"
+  REPORT_DIR: reports
+
+jobs:
+  # ── 阶段 1: Lint + 格式检查 ──────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Ruff Lint
+        run: |
+          echo "━━━ Ruff Lint ━━━"
+          mkdir -p reports
+          # 先生成 JSON 报告（允许有 lint 问题时仍生成报告文件）
+          ruff check src/ --config pyproject.toml --output-format=json > reports/ruff_results.json 2>/dev/null || true
+          # 门禁检查：lint 错误时 CI 失败
+          ruff check src/ --config pyproject.toml --output-format=github
+
+      - name: Ruff Format Check
+        run: |
+          echo "━━━ Ruff Format Check ━━━"
+          ruff format --check src/ --config pyproject.toml
+
+      - name: YAML Config Syntax Check
+        run: |
+          echo "━━━ YAML Config Syntax (config/) ━━━"
+          # agent 高频产出 config/**/*.yaml，但此前 CI 从不校验它们，
+          # 坏 yaml 能直接混入仓库。这里对所有 config 下的 yaml 做语法校验。
+          pip install pyyaml
+          python - <<'PY'
+          import sys, glob, yaml
+          failures = []
+          files = glob.glob("config/**/*.yaml", recursive=True) + glob.glob("config/**/*.yml", recursive=True)
+          for f in files:
+              try:
+                  list(yaml.safe_load_all(open(f, encoding="utf-8")))
+              except Exception as e:
+                  failures.append(f"{f}: {e}")
+          print(f"校验 {len(files)} 个 YAML 文件")
+          if failures:
+              print("❌ YAML 语法错误：")
+              for x in failures:
+                  print("  -", x)
+              sys.exit(1)
+          print("✅ 全部 YAML 语法正确")
+          PY
+
+      - name: Upload Lint Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: reports/ruff_results.json
+          retention-days: 7
+
+  # ── 阶段 2: 类型检查 ────────────────────────────────────────
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Dependencies
+        run: |
+          pip install mypy
+          pip install -e ".[dev]" || pip install pyyaml rich aiohttp pydantic
+
+      - name: mypy Type Check
+        run: |
+          echo "━━━ mypy Type Check ━━━"
+          mypy src/ --config-file pyproject.toml --no-incremental
+
+  # ── 阶段 3: 单元测试 ────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Dependencies
+        run: |
+          pip install -e ".[dev]" || pip install pytest pytest-asyncio
+          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema
+
+      - name: Create Reports Directory
+        run: mkdir -p reports
+
+      - name: Run Tests with Report Generation
+        env:
+          LOG_LEVEL: WARNING
+          LOG_OUTPUT: console
+        run: |
+          echo "━━━ Running Tests ━━━"
+          # 显式指定纯单元测试目录跑（翻转旧逻辑：原来是 ignore 一大片，
+          # 导致 channels/tools/unit/test_utils 等核心单测全被排除，门禁形同虚设）。
+          # e2e/integration/suites/manual/electron/monitoring 需要真实环境/长耗时，
+          # 不进本 job，应由单独的集成测试 job 覆盖。
+          python -m pytest \
+            tests/unit \
+            tests/test_utils \
+            tests/core \
+            tests/tools \
+            tests/triggers \
+            tests/pipeline \
+            tests/multimodal \
+            --tb=long \
+            --no-header \
+            -q \
+            --ignore=tests/unit/test_routes_config_hot_reload.py \
+            --ignore=tests/unit/test_routes_config_regression.py \
+            --ignore=tests/tools/builtin/bash/test_encoding.py \
+            2>&1
+
+      - name: Generate Test Report
+        if: always()
+        run: |
+          echo "━━━ Report Files ━━━"
+          ls -la reports/ 2>/dev/null || echo "No reports directory"
+
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            reports/test_report.json
+            reports/test_report.html
+          retention-days: 14
+
+  # ── 阶段 4: 汇总报告 ────────────────────────────────────────
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, test]
+    if: always()
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: CI Summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  CI/CD 流水线执行完成"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Lint:         ${{ needs.lint.result }}"
+          echo "Type Check:   ${{ needs.typecheck.result }}"
+          echo "Tests:        ${{ needs.test.result }}"
+          echo ""
+          echo "产出物:"
+          echo "  - lint-results/ruff_results.json"
+          echo "  - test-reports/test_report.json"
+          echo "  - test-reports/test_report.html"
+          echo ""
+
+          # 显示测试报告摘要（如果存在）
+          if [ -f test-reports/test_report.json ]; then
+            echo "━━━ 测试报告摘要 ━━━"
+            python3 -c "
+          import json, sys
+          try:
+              data = json.load(open('test-reports/test_report.json'))
+              s = data.get('summary', {})
+              print(f\"  总计: {s.get('total', '?')}  通过: {s.get('passed', '?')}  失败: {s.get('failed', '?')}  跳过: {s.get('skipped', '?')}\")
+              print(f\"  通过率: {s.get('pass_rate', 0):.1%}\")
+              # 失败用例 bug 定位
+              for case in data.get('test_cases', []):
+                  if case.get('outcome') in ('failed', 'error') and case.get('bug_location'):
+                      bug = case['bug_location']
+                      for c in bug.get('candidates', [])[:2]:
+                          print(f\"  🎯 Bug候选: {c['file']}:{c['line']} in {c['function']}\")
+          except Exception as e:
+              print(f'  解析报告失败: {e}')
+          " 2>/dev/null || true
+          fi

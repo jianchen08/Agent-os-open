@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Callable
@@ -143,10 +144,8 @@ class PerformanceMonitor:
         self._shutdown_event.set()
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
-            except asyncio.CancelledError:
-                pass
         self._monitor_task = None
 
     async def _monitor_loop(self):
@@ -401,7 +400,7 @@ class PerformanceMonitor:
 
     def get_current_stats(self) -> dict[str, Any]:
         """获取当前统计信息（同步版本）"""
-        import asyncio
+        import asyncio  # noqa: PLC0415
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -409,8 +408,7 @@ class PerformanceMonitor:
                 asyncio.ensure_future(self._get_stats_async())
                 # 使用 run_coroutine_threadsafe 如果在线程中
                 return {}
-            else:
-                return loop.run_until_complete(self._get_stats_async())
+            return loop.run_until_complete(self._get_stats_async())
         except RuntimeError:
             return {}
 
@@ -543,7 +541,7 @@ def get_performance_monitor() -> PerformanceMonitor:
     Returns:
         PerformanceMonitor: 性能监控器实例
     """
-    global _performance_monitor
+    global _performance_monitor  # noqa: PLW0603
     if _performance_monitor is None:
         _performance_monitor = PerformanceMonitor()
     return _performance_monitor

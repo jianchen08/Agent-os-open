@@ -12,8 +12,9 @@ token 计数使用简化估算，LLM 调用通过注入的可调用对象实现�
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class CompressionConfig:
     """
 
     context_window: int = 128000
-    compress_trigger_ratio: float = 0.6
+    compress_trigger_ratio: float = 0.55  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
     l1_ratio: float = 0.08
     l2_ratio: float = 0.03
     recent_ratio: float = 0.10
@@ -62,18 +63,19 @@ class CompressionConfig:
     max_turn_ratio: float = 0.5
 
     @classmethod
-    def from_yaml_config(cls, context_window: int) -> "CompressionConfig":
-        """从 context_window_config.yaml 加载预算配置。"""
+    def from_yaml_config(cls, context_window: int) -> CompressionConfig:
+        """从 context_window_config.yaml 加载预算配置。
+
+        通过 ConfigCenter 读取（统一缓存 + 热重载），路径由 ConfigCenter 解析，
+        不再硬编码 Path(__file__).parent...
+        """
         try:
-            import yaml
-            from pathlib import Path
-            config_path = Path(__file__).parent.parent.parent / "config" / "system" / "context_window_config.yaml"
-            with open(config_path, "r", encoding="utf-8") as f:
-                yaml_data = yaml.safe_load(f)
+            from config.config_center import get_config_center  # noqa: PLC0415
+            yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
             budgets = yaml_data.get("budgets", {})
             return cls(
                 context_window=context_window,
-                compress_trigger_ratio=yaml_data.get("compress_trigger_ratio", 0.6),
+                compress_trigger_ratio=yaml_data.get("compress_trigger_ratio", 0.55),  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
                 l1_ratio=budgets.get("l1", 0.08),
                 l2_ratio=budgets.get("l2", 0.03),
                 recent_ratio=budgets.get("recent", 0.10),
@@ -308,7 +310,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         messages: list[dict[str, Any]],
         state_snapshot: str = "",
         recent_process_blocks: str = "",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """一次性完成 L1 + L2 + keywords + state_snapshot + memory_items 压缩。
 
         Args:
@@ -317,11 +319,11 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             recent_process_blocks: 最近的过程块样本（采样后的文本）
 
         Returns:
-            {"l1": str, "l2": str, "keywords": list[str],
-             "state_snapshot": dict, "memory_items": dict}
+            压缩结果字典；LLM 空响应或 JSON 解析失败时返回 None（fail-closed），
+            调用方应检查 None 以避免空内容被当成功保存。
 
         Raises:
-            RuntimeError: LLM 调用失败时
+            RuntimeError: LLM 调用过程异常时
         """
         if not messages:
             return {"l1": "", "l2": "", "keywords": [],
@@ -339,15 +341,14 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             response = await self._call_llm(prompt)
             if not response or not response.strip():
                 logger.warning("[ContextCompressor] LLM 返回空响应，跳过压缩")
-                return {"l1": "", "l2": "", "keywords": []}
+                return None
 
             raw_json = self._extract_json(response)
             if not raw_json or not raw_json.strip():
                 logger.warning("[ContextCompressor] JSON 提取结果为空，跳过压缩")
-                return {"l1": "", "l2": "", "keywords": [],
-                        "state_snapshot": {}, "memory_items": {}}
+                return None
 
-            import json
+            import json  # noqa: PLC0415
             try:
                 parsed = json.loads(raw_json)
             except json.JSONDecodeError as je:
@@ -355,8 +356,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
                     "[ContextCompressor] JSON 解析失败: %s | raw_json 前 200 字符: %s",
                     je, raw_json[:200],
                 )
-                return {"l1": "", "l2": "", "keywords": [],
-                        "state_snapshot": {}, "memory_items": {}}
+                return None
 
             l1_data = parsed.get("l1", {})
             l1_str = json.dumps(l1_data, ensure_ascii=False, indent=2) if l1_data else ""
@@ -413,24 +413,36 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         if estimated <= max_tokens:
             return text
 
-        import json
+        import json  # noqa: PLC0415
 
         max_chars = int(max_tokens * 1.5)
         truncated = text[:max_chars]
 
-        # 如果是 JSON，尝试保持结构完整
+        # 如果不是 JSON，直接返回字符截断
         try:
             json.loads(text)
-            # 找到最后一个完整的 key-value 对
-            last_comma = truncated.rfind(',\n')
-            if last_comma > 0:
-                truncated = text[:last_comma] + "\n}"
-            if json.loads(truncated):
-                return truncated
+        except (json.JSONDecodeError, ValueError):
+            return truncated
+
+        # 是 JSON：找一个安全的截断点（最后一个完整 key-value 后的逗号）
+        # 注意 last_comma 是在 truncated 里找的索引，必须用它切 truncated
+        last_comma = truncated.rfind(',\n')
+        if last_comma > 0:  # noqa: SIM108
+            safe = truncated[:last_comma] + "\n}"
+        else:
+            # 找不到安全的逗号（可能是单字段对象或截断点太靠前）
+            # 兜底：返回空对象，保证 JSON 合法
+            safe = "{}"
+
+        try:
+            parsed = json.loads(safe)
+            # 空对象 {} 合法但 falsy，必须用 isinstance 判定而非真值
+            if isinstance(parsed, dict):
+                return safe
         except (json.JSONDecodeError, ValueError):
             pass
 
-        return truncated
+        return "{}"
 
     def _extract_json(self, text: str) -> str:
         """从 LLM 响应中提取 JSON 并格式化。
@@ -443,8 +455,8 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         Returns:
             格式化后的 JSON 字符串
         """
-        import json
-        import re
+        import json  # noqa: PLC0415
+        import re  # noqa: PLC0415
 
         if not text:
             return text
@@ -491,8 +503,9 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
                 lines.append(f"【系统 {i}】\n{content}")
             elif role == "tool":
                 tool_name = msg.get("name", "unknown_tool")
-                content_preview = content[:200] + "..." if len(content) > 200 else content
-                lines.append(f"【工具 {i}: {tool_name}】\n{content_preview}")
+                # 完整保留工具结果：压缩需要看到完整内容才能产出高质量摘要。
+                # 预算控制由调用方按批次 token 总量切分，不在单条消息上砍。
+                lines.append(f"【工具 {i}: {tool_name}】\n{content}")
             else:
                 lines.append(f"【{role.upper()} {i}】\n{content}")
 

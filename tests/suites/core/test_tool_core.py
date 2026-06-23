@@ -322,6 +322,56 @@ class TestToolCore:
         assert len(tool_results) == 2
         assert all(r["success"] for r in tool_results)
 
+    @pytest.mark.asyncio
+    async def test_task_evaluate_completed_sets_flag(self) -> None:
+        """BUG-FIX-fix_20260615_eval_pipeline_not_end:
+        task_evaluate 评估通过（metadata.result='completed'）时，
+        ToolCore 应设置 task_evaluation_completed=True，使 child_task_guard
+        插件当轮发出 end 信号终止管道。
+
+        问题根因: 原代码读 tool_data.get('overall_passed')，但 slim 归一化后
+          overall_passed 落在 data['output'] 子层，顶层取不到，标志永远为 False。
+        修复方案: 与 stop_check 契约统一，读 metadata.result=='completed'。
+        """
+        from tools.types import create_success_result
+
+        core = ToolCore()
+        core.register_tool("task_evaluate", lambda args: create_success_result(
+            data={"task_id": "t1", "overall_passed": True, "metrics": []},
+            metadata={"action": "auto_complete", "result": "completed",
+                      "message": "评估通过，任务已完成"},
+        ))
+
+        ctx = self._make_ctx(
+            raw_tool_calls=[{"name": "task_evaluate", "args": {}}]
+        )
+        result = await core.execute(ctx)
+
+        assert result["task_evaluation_completed"] is True, (
+            "评估通过后未设置 task_evaluation_completed，child_task_guard 无法"
+            "当轮终止管道"
+        )
+
+    @pytest.mark.asyncio
+    async def test_task_evaluate_retry_not_sets_flag(self) -> None:
+        """评估未通过（metadata.result='retry'）时不应设置完成标志。"""
+        from tools.types import create_success_result
+
+        core = ToolCore()
+        core.register_tool("task_evaluate", lambda args: create_success_result(
+            data={"task_id": "t1", "overall_passed": False, "metrics": []},
+            metadata={"action": "auto_complete", "result": "retry",
+                      "message": "指标未达标，需修复"},
+        ))
+
+        ctx = self._make_ctx(
+            raw_tool_calls=[{"name": "task_evaluate", "args": {}}]
+        )
+        result = await core.execute(ctx)
+
+        assert "task_evaluation_completed" not in result, \
+            "评估未通过不应设置 task_evaluation_completed"
+
 
 # ═══════════════════════════════════════════════════════════
 # PendingToolsOutput

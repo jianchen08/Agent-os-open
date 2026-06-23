@@ -1,0 +1,18 @@
+'�超时的' is not recognized as an internal or external command,
+operable program or batch file.
+'卡在' is not recognized as an internal or external command,
+operable program or batch file.
+ Network container_036fa50daf44_agent-net-036fa Creating 
+ Network container_036fa50daf44_agent-net-036fa Created 
+ Container agent-os-redis-036fa Creating 
+ Container agent-os-redis-036fa Created 
+ Container agent-os-frontend-036fa Creating 
+ Container agent-os-frontend-036fa Created 
+ Container agent-os-redis-036fa Starting 
+ Container agent-os-redis-036fa Started 
+ Container agent-os-redis-036fa Waiting 
+ Container agent-os-redis-036fa Healthy 
+ Container agent-os-frontend-036fa Starting 
+ Container agent-os-frontend-036fa Started 
+'联，避免' is not recognized as an internal or external command,
+operable program or batch file.

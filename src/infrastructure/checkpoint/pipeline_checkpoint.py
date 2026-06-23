@@ -24,6 +24,9 @@ _DYNAMIC_STATE_KEYS: frozenset[str] = frozenset({
     "core_type",
     "conversation_mode",
     "conversation_round",
+    # FIND-3 fix: 保存原始 Agent 标识，恢复时按 ID 查找对应 Agent，
+    # 避免非灵汐 Agent 的检查点恢复后以灵汐身份运行。
+    "agent_config_id",
 })
 
 

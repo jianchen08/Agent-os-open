@@ -14,6 +14,10 @@ from __future__ import annotations
 import contextvars
 import copy as _copy
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pipeline.engine import PipelineEngine
 
 logger = logging.getLogger(__name__)
 

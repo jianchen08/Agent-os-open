@@ -20,14 +20,44 @@ router = APIRouter(prefix="/api/v1/tools", tags=["工具"])
 
 
 def _get_tool_registry() -> Any:
-    """惰性获取 ToolRegistry 单例。"""
+    """惰性获取全局 ToolRegistry 实例，未初始化时尝试同步加载。"""
     try:
-        from tools.registry import ToolRegistry
-        if ToolRegistry.has_instance():
-            return ToolRegistry.get_instance()
+        from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+
+        registry = get_global_tool_registry_sync()
+        _ensure_registry_loaded(registry)
+        return registry
     except (ImportError, Exception):
-        pass
+        logger.warning("[RoutesTools] 获取工具注册表失败", exc_info=True)
     return None
+
+
+def _ensure_registry_loaded(registry: Any) -> None:
+    """确保注册表中的工具已加载（懒加载兜底）。
+
+    当注册表为空时，通过 DynamicToolLoader 同步发现并加载所有可用工具，
+    解决应用启动异步初始化未完成时 API 返回空数据的问题。
+    """
+    if registry.count() > 0:
+        return
+
+    try:
+        from tools.loader import DynamicToolLoader, get_dynamic_tool_loader  # noqa: PLC0415
+
+        loader = get_dynamic_tool_loader()
+        if loader is None:
+            loader = DynamicToolLoader(registry)
+
+        available_tools = loader.get_available_tools()
+        if available_tools:
+            loader.ensure_loaded_sync(available_tools)
+            logger.info(
+                "[RoutesTools] 动态加载工具完成 | available=%d | loaded=%d",
+                len(available_tools),
+                registry.count(),
+            )
+    except Exception:
+        logger.warning("[RoutesTools] 动态加载工具失败", exc_info=True)
 
 
 def _tool_to_response(tool: Any) -> ToolResponse:
@@ -109,14 +139,14 @@ def list_tools(
         tools = registry.search(search)
     elif category:
         try:
-            from tools.types import ToolCategory
+            from tools.types import ToolCategory  # noqa: PLC0415
             cat_enum = ToolCategory(category)
             tools = registry.list_by_category(cat_enum)
         except (ValueError, AttributeError):
             tools = registry.list_all()
     elif source:
         try:
-            from tools.types import ToolSource
+            from tools.types import ToolSource  # noqa: PLC0415
             src_enum = ToolSource(source)
             tools = registry.list_by_source(src_enum)
         except (ValueError, AttributeError):

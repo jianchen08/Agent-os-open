@@ -23,8 +23,8 @@ import pytest
 
 def test_get_call_timeout_returns_default_when_config_unavailable():
     """配置加载失败时返回默认值 120 秒。"""
-    from stream_handler import _get_call_timeout
-    import stream_handler
+    from channels.websocket.stream_handler import _get_call_timeout
+    from channels.websocket import stream_handler
 
     stream_handler._cached_call_timeout = None
     with patch.dict("sys.modules", {}):
@@ -35,10 +35,10 @@ def test_get_call_timeout_returns_default_when_config_unavailable():
 
 def test_get_call_timeout_caches_result():
     """_get_call_timeout 只加载一次配置，后续返回缓存值。"""
-    import stream_handler
+    from channels.websocket import stream_handler
 
     stream_handler._cached_call_timeout = 300
-    from stream_handler import _get_call_timeout
+    from channels.websocket.stream_handler import _get_call_timeout
 
     assert _get_call_timeout() == 300
     stream_handler._cached_call_timeout = None

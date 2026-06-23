@@ -27,6 +27,27 @@ from tools.types import (
 class SchemaEvaluator:
     """Schema 评估器"""
 
+    # 文件扩展名 → 格式类型映射
+    _EXT_FORMAT_MAP: dict[str, str] = {
+        ".json": "json",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".md": "regex",
+        ".markdown": "regex",
+        ".txt": "regex",
+        ".toml": "yaml",
+        ".xml": "regex",
+        ".csv": "regex",
+        ".html": "regex",
+        ".css": "regex",
+        ".py": "regex",
+        ".js": "regex",
+        ".ts": "regex",
+        ".go": "regex",
+        ".rs": "regex",
+        ".java": "regex",
+    }
+
     @staticmethod
     def get_tool_definition() -> Tool:
         return Tool(
@@ -39,9 +60,9 @@ class SchemaEvaluator:
                     "path": {"type": "string", "description": "或指定文件路径"},
                     "format": {
                         "type": "string",
-                        "enum": ["json", "yaml", "schema", "regex"],
-                        "default": "json",
-                        "description": "验证格式类型：json/yaml/schema/regex",
+                        "enum": ["auto", "json", "yaml", "schema", "regex"],
+                        "default": "auto",
+                        "description": "验证格式类型：auto(自动检测)/json/yaml/schema/regex",
                     },
                     "schema": {"type": "object", "description": "JSON Schema"},
                     "patterns": {
@@ -62,11 +83,52 @@ class SchemaEvaluator:
             tags=["evaluator", "schema", "json", "yaml", "regex"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
+    def _detect_format(self, path: str | None, data: Any) -> str:
+        """根据文件扩展名或数据类型自动检测格式。
+
+        BUG-FIX-fix_20260607_format_valid_json_default:
+        问题根因: default_config 中 format 固定为 json，导致所有格式文件（YAML、Markdown等）
+                 都以 JSON 格式校验，非 JSON 文件必然失败。
+        修复方案: 新增 auto 格式类型，根据文件扩展名自动推断校验格式；
+                 有 path 时按扩展名映射，无 path 时按数据类型推断。
+        影响范围: 所有使用 format_valid 评估指标的任务评估
+
+        Args:
+            path: 文件路径（可能为 None）
+            data: 数据内容
+
+        Returns:
+            检测到的格式类型: json/yaml/regex
+        """
+        if path:
+            ext = Path(path).suffix.lower()
+            detected = self._EXT_FORMAT_MAP.get(ext)
+            if detected:
+                return detected
+
+        # 无 path 或扩展名未识别时，按数据类型推断
+        if isinstance(data, (dict, list)):
+            return "json"
+        if isinstance(data, str):
+            # 尝试 JSON 解析，成功则视为 JSON
+            try:
+                json.loads(data)
+                return "json"
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # YAML 内容检测：仅当文本包含 key: value 结构时才判定为 yaml
+            # （yaml.safe_load 过于宽松，纯文本也会解析成功）
+            if re.search(r"^\s*\w[\w.-]*\s*:\s*.+", data, re.MULTILINE):
+                return "yaml"
+
+        return "regex"
+
+    async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行格式验证"""
         data = inputs.get("data")
         path = inputs.get("path")
-        format_type = inputs.get("format", "json")
+        workspace = inputs.get("workspace")
+        format_type = inputs.get("format", "auto")
         schema = inputs.get("schema")
         patterns = inputs.get("patterns", [])
         pattern_mode = inputs.get("pattern_mode", "all")
@@ -74,7 +136,10 @@ class SchemaEvaluator:
         # 从文件读取数据
         if path and not data:
             try:
-                file_path = Path(path)
+                p = Path(path)
+                if not p.is_absolute() and workspace:
+                    p = Path(workspace) / p
+                file_path = p.resolve()
                 if not file_path.exists():
                     return create_success_result(
                         data={
@@ -90,20 +155,23 @@ class SchemaEvaluator:
         if data is None:
             return create_failure_result(error="数据不能为空")
 
+        # auto 格式：根据文件扩展名或数据类型自动检测
+        if format_type == "auto":
+            format_type = self._detect_format(path, data)
+
         try:
             # 如果提供了 schema，优先进行 schema 验证
             if schema is not None:
                 return await self._validate_schema(data, schema)
-            elif format_type == "json":
+            if format_type == "json":
                 return await self._validate_json(data)
-            elif format_type == "yaml":
+            if format_type == "yaml":
                 return await self._validate_yaml(data)
-            elif format_type == "schema":
+            if format_type == "schema":
                 return await self._validate_schema(data, schema)
-            elif format_type == "regex":
+            if format_type == "regex":
                 return await self._validate_regex(data, patterns, pattern_mode)
-            else:
-                return create_failure_result(error=f"不支持的格式: {format_type}")
+            return create_failure_result(error=f"不支持的格式: {format_type}")
         except Exception as e:
             return create_failure_result(error=f"验证失败: {str(e)}")
 

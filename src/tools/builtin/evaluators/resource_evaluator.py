@@ -261,10 +261,7 @@ class ResourceEvaluator:
         total = len(results)
         all_pass = all(r["passed"] for r in results)
 
-        if total > 0:
-            avg = sum(r.get("score", 0) for r in results) / total
-        else:
-            avg = 100
+        avg = sum(r.get("score", 0) for r in results) / total if total > 0 else 100
 
         fb = self._gen_feedback(results, rtype, all_pass)
 

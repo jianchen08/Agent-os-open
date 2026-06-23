@@ -107,10 +107,10 @@ export function KnowledgeBasePage() {
         apiClient.get<CategoryItem[]>(API_ENDPOINTS.KNOWLEDGE_BASE.CATEGORIES),
         apiClient.get<string[]>(API_ENDPOINTS.KNOWLEDGE_BASE.TAGS),
       ])
-      if (itemsRes.status === 'fulfilled') setItems(itemsRes.value.data)
+      if (itemsRes.status === 'fulfilled') setItems(Array.isArray(itemsRes.value.data) ? itemsRes.value.data : [])
       if (statsRes.status === 'fulfilled') setStats(statsRes.value.data)
-      if (catRes.status === 'fulfilled') setCategories(catRes.value.data)
-      if (tagsRes.status === 'fulfilled') setTags(tagsRes.value.data)
+      if (catRes.status === 'fulfilled') setCategories(Array.isArray(catRes.value.data) ? catRes.value.data : [])
+      if (tagsRes.status === 'fulfilled') setTags(Array.isArray(tagsRes.value.data) ? tagsRes.value.data : [])
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '加载数据失败'
       setError(message)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -132,10 +133,8 @@ class ExternalToolLifecycle:
             # 1. 停止监控
             if self._monitor_task and not self._monitor_task.done():
                 self._monitor_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await self._monitor_task
-                except asyncio.CancelledError:
-                    pass
                 self._monitor_task = None
 
             # 2. 断开所有连接

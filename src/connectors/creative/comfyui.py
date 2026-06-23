@@ -11,16 +11,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import aiohttp
 
-from connectors.base import BaseConnector
-from connectors.types import (
+from ..base import BaseConnector
+from ..types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,
@@ -232,10 +234,8 @@ class ComfyUIConnector(BaseConnector):
         """停止 WebSocket 进度监听。"""
         if self._ws_listener_task is not None:
             self._ws_listener_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._ws_listener_task
-            except asyncio.CancelledError:
-                pass
             self._ws_listener_task = None
 
         if self._ws is not None:
@@ -272,7 +272,7 @@ class ComfyUIConnector(BaseConnector):
     # 操作执行
     # ================================================================
 
-    async def execute_action(self, action: ConnectorAction) -> ActionResult:
+    async def execute_action(self, action: ConnectorAction) -> ActionResult:  # noqa: PLR0911
         """执行操作指令。"""
         if not self._session or not self.is_connected:
             return ActionResult(success=False, error="未连接到 ComfyUI")
@@ -280,22 +280,21 @@ class ComfyUIConnector(BaseConnector):
         try:
             if action.action_type == "generate_image":
                 return await self._submit_workflow(action.parameters)
-            elif action.action_type == "get_progress":
+            if action.action_type == "get_progress":
                 return await self._get_progress(action.parameters)
-            elif action.action_type == "get_result":
+            if action.action_type == "get_result":
                 return await self._get_result(action.parameters)
-            elif action.action_type == "list_models":
+            if action.action_type == "list_models":
                 return await self._list_models()
-            elif action.action_type == "capture_screenshot":
+            if action.action_type == "capture_screenshot":
                 return await self._capture_screenshot()
-            elif action.action_type == "interrupt_task":
+            if action.action_type == "interrupt_task":
                 return await self._interrupt_task()
-            elif action.action_type == "clear_queue":
+            if action.action_type == "clear_queue":
                 return await self._clear_queue()
-            elif action.action_type == "list_workflows":
+            if action.action_type == "list_workflows":
                 return self._list_workflow_templates()
-            else:
-                return ActionResult(success=False, error=f"不支持的操作: {action.action_type}")
+            return ActionResult(success=False, error=f"不支持的操作: {action.action_type}")
         except Exception as e:
             self._logger.error("执行操作失败: %s | error: %s", action.action_type, e)
             return ActionResult(success=False, error=str(e))
@@ -332,11 +331,10 @@ class ComfyUIConnector(BaseConnector):
                     success=True,
                     data={"prompt_id": prompt_id, "status": "submitted"},
                 )
-            else:
-                return ActionResult(
-                    success=False,
-                    error=result.get("error", {}).get("message", "提交失败"),
-                )
+            return ActionResult(
+                success=False,
+                error=result.get("error", {}).get("message", "提交失败"),
+            )
 
     async def _get_progress(self, params: dict[str, Any]) -> ActionResult:
         """获取生成进度。
@@ -384,7 +382,7 @@ class ComfyUIConnector(BaseConnector):
 
             outputs = history[prompt_id].get("outputs", {})
             images: list[str] = []
-            for node_id, node_output in outputs.items():
+            for _node_id, node_output in outputs.items():
                 for img in node_output.get("images", []):
                     filename = img.get("filename", "")
                     subfolder = img.get("subfolder", "")

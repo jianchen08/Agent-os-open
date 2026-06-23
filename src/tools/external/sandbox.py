@@ -113,7 +113,7 @@ class ExternalToolSandbox(IExternalToolSandbox):
 
         except asyncio.TimeoutError:
             sandbox["status"] = "error"
-            raise ExternalTimeoutError(
+            raise ExternalTimeoutError(  # noqa: B904
                 message=f"沙箱执行超时 ({effective_timeout}s)",
                 tool_name=sandbox["tool_name"],
                 timeout_seconds=effective_timeout,
@@ -225,16 +225,15 @@ class ExternalToolSandbox(IExternalToolSandbox):
             隔离环境对象（或 None）
         """
         try:
-            from isolation.manager import get_isolation_manager
-            from isolation.types import (
-                IsolationContext,
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
+            from isolation.types import (  # noqa: PLC0415
                 IsolationLevel,
                 OperationType,
                 TaskType,
             )
 
             manager = await get_isolation_manager()
-            context = IsolationContext(
+            env = await manager.get_or_create_environment(
                 task_id=sandbox_id,
                 task_type=TaskType.ATOMIC,
                 operation_type=OperationType.CODE_EXECUTION,
@@ -245,7 +244,6 @@ class ExternalToolSandbox(IExternalToolSandbox):
                     "memory_limit_mb": limits.memory_limit_mb,
                 },
             )
-            env = await manager.create_environment(context)
             return env
 
         except ImportError:
@@ -272,7 +270,7 @@ class ExternalToolSandbox(IExternalToolSandbox):
             执行结果
         """
         env = sandbox.get("env")
-        tool_name = sandbox["tool_name"]
+        sandbox["tool_name"]
 
         # 如果是模拟沙箱
         if isinstance(env, dict) and env.get("mock"):
@@ -284,13 +282,19 @@ class ExternalToolSandbox(IExternalToolSandbox):
 
         # 真实隔离环境
         try:
-            from isolation.manager import get_isolation_manager
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
+            from isolation.types import TaskType  # noqa: PLC0415
 
             manager = await get_isolation_manager()
-            result = await manager.execute_in_environment(
-                env_id=env.env_id,
-                operation="execute",
-                command=command,
+            operation = {
+                "type": "command",
+                "command": command,
+            }
+            result = await manager.execute_in_isolation(
+                task_id=sandbox_id,
+                task_type=TaskType.ATOMIC,
+                operation=operation,
+                tool_name=sandbox.get("tool_name"),
             )
 
             return {
@@ -309,7 +313,7 @@ class ExternalToolSandbox(IExternalToolSandbox):
     async def _destroy_isolation_environment(self, env: Any) -> None:
         """通过 isolation 模块销毁隔离环境。"""
         try:
-            from isolation.manager import get_isolation_manager
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
 
             manager = await get_isolation_manager()
             await manager.destroy_environment(env.env_id)

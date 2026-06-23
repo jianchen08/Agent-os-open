@@ -40,3 +40,29 @@ frontend/test-results/
 
 .claude/
 .workbuddy/
+
+# Windows shell 閲嶅畾鍚戜骇鐢熺殑鍧忔枃浠跺悕锛坣ul/NUL 閲嶅畾鍚?+ 璇甫鎷彿/缇庡厓绗︼級
+nul)
+nul)
+$null
+/frontend/$null
+
+# 涓存椂浜х墿/璋冭瘯杈撳嚭鐩綍锛堜笉搴旇繘浠撳簱锛?tmp*/
+/artifacts/
+/deliverables/
+/review/
+/findings/
+/e2e/
+/agent_os_hot_reload/
+/pytest-of-*/
+
+# 璋冭瘯浜х墿
+debug-*.md
+debug-*.log
+
+# 离线依赖包（二进制不进仓库，仅保留 .gitkeep 占位和 README）
+packages/wheels/*
+!packages/wheels/.gitkeep
+packages/npm-tarballs/*
+!packages/npm-tarballs/.gitkeep
+`n# 前端构建注入标记（本地生成）`n.frontend_built_at`n.frontend_built_at

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 服务器配置
     api_host: str = Field(default="localhost", validation_alias="API_HOST")
-    api_port: int = Field(default=8888, validation_alias="API_PORT")
+    api_port: int = Field(default=8988, validation_alias="API_PORT")
     frontend_port: int = Field(default=5188, validation_alias="FRONTEND_PORT")
 
     # 应用配置
@@ -27,9 +27,6 @@ class Settings(BaseSettings):
     )
 
     # 数据库连接池配置
-    # BUG-FIX-fix_20260226_210500_pool: 增加连接池大小
-    # 问题根因: 连接池耗尽导致任务执行失败
-    # 修复方案: 增加连接池大小和超时时间
     db_pool_size: int = Field(default=20, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=30, validation_alias="DB_MAX_OVERFLOW")
     db_pool_timeout: int = Field(default=60, validation_alias="DB_POOL_TIMEOUT")
@@ -65,7 +62,7 @@ class Settings(BaseSettings):
 
     # JWT 配置
     jwt_secret_key: str = Field(
-        default="your-secret-key-change-in-production",
+        default="dev-insecure-key-do-not-use-in-production",
         validation_alias="APP_JWT_SECRET_KEY",
     )
     jwt_algorithm: str = Field(default="HS256", validation_alias="APP_JWT_ALGORITHM")
@@ -188,7 +185,7 @@ def get_settings() -> Settings:
 
 def reset_settings() -> None:
     """重置配置实例（主要用于测试）"""
-    global settings
+    global settings  # noqa: PLW0603
     settings = Settings()
 
 

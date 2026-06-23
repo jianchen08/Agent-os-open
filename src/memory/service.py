@@ -23,7 +23,7 @@ from memory.types import (
     Episode,
     InjectType,
     Knowledge,
-    MemoryType,
+    MemoryType,  # noqa: F401
     RetrievalMethod,
     SearchResult,
 )
@@ -104,6 +104,8 @@ class MemoryService:
             "last_retrieval_at": None,
         }
 
+        self._ensure_default_retrievers()
+
     def register_retriever(self, method: str, retriever: IRetriever) -> None:
         """注册检索器。
 
@@ -112,6 +114,23 @@ class MemoryService:
             retriever: 检索器实例
         """
         self._retrievers[method] = retriever
+
+    def _ensure_default_retrievers(self) -> None:
+        """确保至少有 keyword 检索器可用。
+
+        BUG-FIX-REQ-5:
+        问题根因: MemoryService 构造后 _retrievers 为空，导致：
+          1. vector 检索器未注册，报错"检索器 vector 未注册"
+          2. keyword 检索器未注册，retrieve 返回空结果
+          即使刚存入的内容也搜不到。
+        修复方案: 构造后自动注册内置的 InMemoryKeywordRetriever。
+          vector 检索器需要外部 PG 向量数据库，保持手动注册。
+        影响范围: 所有使用 memory retrieve 的场景。
+        """
+        if "keyword" not in self._retrievers:
+            self._retrievers["keyword"] = _InMemoryKeywordRetriever(
+                self._episode_service, self._knowledge_service,
+            )
 
     # ============================================
     # 情景记忆操作 - 委托给 EpisodeService
@@ -392,12 +411,11 @@ class MemoryService:
 
         if inject_type_enum == InjectType.FULL:
             return await self._retrieve_full(user_id, filter, top_k)
-        elif inject_type_enum == InjectType.SUMMARY:
+        if inject_type_enum == InjectType.SUMMARY:
             return await self._retrieve_summary(user_id, filter, query, top_k)
-        else:
-            return await self._retrieve_by_method(
-                user_id, filter, retrieval_method_enum, query, top_k,
-            )
+        return await self._retrieve_by_method(
+            user_id, filter, retrieval_method_enum, query, top_k,
+        )
 
     async def _retrieve_full(
         self,
@@ -405,13 +423,41 @@ class MemoryService:
         filter: dict[str, Any],
         top_k: int,
     ) -> list[SearchResult]:
-        """全量注入 - 使用默认检索器返回筛选后的所有结果。"""
+        """全量注入 - 使用默认检索器返回筛选后的所有结果。
+
+        BUG-FIX-fix_20260620_retrieve_full_vector_unregistered:
+        问题根因: _default_method 默认取 vector_search.default_method='vector'，
+          但 vector 检索器在 vector_search.enabled=false 时不注册。full 模式
+          是兜底注入路径，检索器缺失时直接抛 ValueError 会让上层 prompt_build
+          插件崩溃，且因调用栈无 try 包裹，异常吞掉后协程行为不可预测，
+          是多次 prompt_build 卡死的强相关因素。
+        修复方案: full 模式下默认检索器不可用时，降级到任意已注册检索器
+          （优先 keyword），并打 WARNING 让降级可见；所有检索器都不可用时
+          返回空列表（full 语义允许空结果，不该阻断调用方）。
+        """
         method_name = self._default_method if isinstance(self._default_method, str) else "keyword"
         retriever = self._retrievers.get(method_name)
+
         if not retriever:
             available = list(self._retrievers.keys())
-            raise ValueError(
-                f"全量注入失败：检索器 '{method_name}' 未注册。可用检索器: {available}"
+            # 降级：full 是兜底注入，不该因检索器缺失崩溃。
+            # 优先用 keyword（_ensure_default_retrievers 保证注册），否则任取一个。
+            retriever = self._retrievers.get("keyword")
+            if retriever is None and available:
+                retriever = self._retrievers[available[0]]
+            if retriever is None:
+                logger.warning(
+                    "[MemoryService] 全量注入降级失败：无任何已注册检索器 "
+                    "(requested=%s)，返回空结果。请检查 memory_storage.yaml 配置。",
+                    method_name,
+                )
+                return []
+            logger.warning(
+                "[MemoryService] 全量注入降级：%s 检索器未注册，改用 %s "
+                "(available=%s)。如需向量检索请启用 vector_search 并注册 vector 检索器。",
+                method_name,
+                "keyword" if self._retrievers.get("keyword") is retriever else type(retriever).__name__,
+                available,
             )
 
         memory_type = filter.get("memory_type", "semantic")
@@ -820,7 +866,7 @@ class MemoryService:
         if self._embedding_service:
             if hasattr(self._embedding_service, "embed_text"):
                 return await self._embedding_service.embed_text(text)
-            elif hasattr(self._embedding_service, "embed"):
+            if hasattr(self._embedding_service, "embed"):
                 return await self._embedding_service.embed(text)
         return None
 
@@ -904,3 +950,110 @@ class MemoryService:
 
         logger.warning("[MemoryService] ChunkService 未注入，无法删除压缩块")
         return False
+
+
+class _InMemoryKeywordRetriever(IRetriever):
+    """内置关键词检索器 — 基于 EpisodeService 和 KnowledgeService 的内容进行简单文本匹配。
+
+    BUG-FIX-REQ-5:
+    问题根因: MemoryService._retrievers 默认为空，keyword 检索未注册，
+      导致 retrieve 时要么报"检索器未注册"，要么返回空结果。
+    修复方案: 提供内置的 keyword 检索器，在 __init__ 中自动注册，
+      无需外部依赖即可完成基本的关键词检索。
+    """
+
+    def __init__(
+        self,
+        episode_service: EpisodeService,
+        knowledge_service: KnowledgeService,
+    ) -> None:
+        self._episode_service = episode_service
+        self._knowledge_service = knowledge_service
+
+    async def retrieve(
+        self,
+        query: str,
+        user_id: str | None = None,
+        top_k: int = 5,
+        memory_type: str = "semantic",
+        filters: dict[str, Any] | None = None,
+    ) -> list[SearchResult]:
+        """基于关键词匹配的检索。
+
+        遍历情景记忆或知识条目，检查 query 是否出现在内容中，
+        返回匹配的 SearchResult 列表。
+        """
+        filters = filters or {}
+        results: list[SearchResult] = []
+        query_lower = query.lower()
+
+        if memory_type in ("episode", "all"):
+            results.extend(
+                await self._search_episodes(query_lower, user_id, top_k),
+            )
+
+        if memory_type in ("semantic", "all"):
+            results.extend(
+                await self._search_knowledge(query_lower, user_id, top_k),
+            )
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:top_k]
+
+    async def _search_episodes(
+        self,
+        query_lower: str,
+        user_id: str | None,
+        top_k: int,
+    ) -> list[SearchResult]:
+        """在情景记忆中搜索关键词。"""
+        results: list[SearchResult] = []
+        try:
+            episode_list = await self._episode_service.list_episodes(
+                user_id=user_id or "__all__", page_size=1000,
+            )
+            for item in episode_list.get("items", []):
+                content = (item.get("execution_summary") or item.get("intent_text", "")).lower()
+                if query_lower in content:
+                    results.append(SearchResult(
+                        id=item.get("id", ""),
+                        content=item.get("execution_summary") or item.get("intent_text", ""),
+                        score=1.0,
+                        memory_type="episode",
+                        metadata=item,
+                    ))
+        except Exception as e:
+            logger.warning("[KeywordRetriever] 搜索情景记忆失败: %s", e)
+        return results[:top_k]
+
+    async def _search_knowledge(
+        self,
+        query_lower: str,
+        user_id: str | None,
+        top_k: int,
+    ) -> list[SearchResult]:
+        """在知识库中搜索关键词。"""
+        results: list[SearchResult] = []
+        try:
+            knowledge_list = await self._knowledge_service._storage.find_by_user(
+                user_id or "__all__", limit=1000,
+            ) if self._knowledge_service._storage else []
+
+            for item in knowledge_list:
+                content = ""
+                if hasattr(item, "content"):
+                    content = item.content
+                elif isinstance(item, dict):
+                    content = item.get("content", "")
+                if query_lower in content.lower():
+                    k_id = item.id if hasattr(item, "id") else item.get("id", "")
+                    results.append(SearchResult(
+                        id=k_id,
+                        content=content,
+                        score=1.0,
+                        memory_type="semantic",
+                        metadata=item if isinstance(item, dict) else {},
+                    ))
+        except Exception as e:
+            logger.warning("[KeywordRetriever] 搜索知识库失败: %s", e)
+        return results[:top_k]

@@ -90,12 +90,11 @@ class ComfyUIProvider(MediaProvider):
             True 表示 API 可连接，False 表示不可连接
         """
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self._api_url}/system_stats",
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    return resp.status == 200
+            async with aiohttp.ClientSession() as session, session.get(
+                f"{self._api_url}/system_stats",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                return resp.status == 200
         except Exception:
             logger.debug("[ComfyUI] API 连接失败: %s", self._api_url)
             return False
@@ -287,22 +286,21 @@ class ComfyUIProvider(MediaProvider):
             RuntimeError: 提交失败
         """
         payload = {"prompt": workflow}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self._api_url}/prompt",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"ComfyUI 提交工作流失败 (status={resp.status}): {error_text}"
-                    )
-                result = await resp.json()
-                prompt_id: str = result.get("prompt_id", "")
-                if not prompt_id:
-                    raise RuntimeError("ComfyUI 返回无效的 prompt_id")
-                return prompt_id
+        async with aiohttp.ClientSession() as session, session.post(
+            f"{self._api_url}/prompt",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"ComfyUI 提交工作流失败 (status={resp.status}): {error_text}"
+                )
+            result = await resp.json()
+            prompt_id: str = result.get("prompt_id", "")
+            if not prompt_id:
+                raise RuntimeError("ComfyUI 返回无效的 prompt_id")
+            return prompt_id
 
     async def _poll_result(self, prompt_id: str) -> dict[str, Any]:
         """轮询等待 ComfyUI 工作流完成。
@@ -365,7 +363,7 @@ class ComfyUIProvider(MediaProvider):
         images: list[dict[str, Any]] = []
         outputs = history.get("outputs", {})
 
-        for node_id, node_output in outputs.items():
+        for _node_id, node_output in outputs.items():
             if "images" in node_output:
                 for img in node_output["images"]:
                     images.append(img)
@@ -395,17 +393,16 @@ class ComfyUIProvider(MediaProvider):
         if subfolder:
             params["subfolder"] = subfolder
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{self._api_url}/view",
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(
-                        f"下载图片失败 (status={resp.status}): {filename}"
-                    )
-                content = await resp.read()
+        async with aiohttp.ClientSession() as session, session.get(
+            f"{self._api_url}/view",
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"下载图片失败 (status={resp.status}): {filename}"
+                )
+            content = await resp.read()
 
         # 保存到本地
         output_path = self._output_dir / filename

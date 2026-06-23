@@ -12,9 +12,9 @@
 - GenericCreativeConnector: 通用创意软件连接器
 """
 
-from connectors.creative.comfyui import ComfyUIConnector
-from connectors.creative.game_engine import GameEngineConnector
-from connectors.creative.generic import GenericCreativeConnector
+from .comfyui import ComfyUIConnector
+from .game_engine import GameEngineConnector
+from .generic import GenericCreativeConnector
 
 __all__ = [
     "ComfyUIConnector",

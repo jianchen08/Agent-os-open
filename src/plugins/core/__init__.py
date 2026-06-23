@@ -7,10 +7,10 @@
 
 def __getattr__(name: str):
     if name == "LLMCore":
-        from plugins.core.llm_core.plugin import LLMCore
+        from plugins.core.llm_core.plugin import LLMCore  # noqa: PLC0415
         return LLMCore
     if name == "ToolCore":
-        from plugins.core.tool_core.plugin import ToolCore
+        from plugins.core.tool_core.plugin import ToolCore  # noqa: PLC0415
         return ToolCore
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

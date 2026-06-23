@@ -8,8 +8,8 @@
 
 import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo } from 'react'
-import ErrorBoundary from '@/components/ErrorBoundary'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
+import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
@@ -18,8 +18,6 @@ import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
-import { GlobalInteractionOverlay } from './GlobalInteractionOverlay'
-import { InteractionPanel } from './InteractionPanel'
 import { MessageList } from './MessageList'
 import { NotificationCenter } from './NotificationCenter'
 import { SubTabRouter } from './SubTabRouter'
@@ -118,6 +116,25 @@ export const ChatContainer = ({
   const activeTab = tabs.find((t) => t.id === activeTabId)
 
   /**
+   * 基于当前激活 Tab 的 agentId 解析模型名
+   *
+   * 所有管道（主/子）平权处理，统一按当前激活标签的 agent 配置获取模型。
+   * 模型随标签切换而变化；查不到时回退到会话级模型名。
+   */
+  const agents = useAgentStore((s) => s.agents)
+  const effectiveModelName = useMemo(() => {
+    if (activeTab?.agentId) {
+      const agent = agents.find(
+        (a) => a.id === activeTab.agentId || a.configId === activeTab.agentId,
+      )
+      if (agent?.model || agent?.config?.model) {
+        return agent.model || agent.config?.model || modelName
+      }
+    }
+    return modelName
+  }, [activeTab?.agentId, agents, modelName])
+
+  /**
    * 从 pipelineMessageStore 获取当前激活管道的消息
    *
    * 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责，
@@ -126,7 +143,8 @@ export const ChatContainer = ({
   const pipelineMessages = usePipelineMessageStore(
     (s) => {
       if (!s.activePipelineId) return EMPTY_MESSAGES
-      return s.messagesByPipeline[s.activePipelineId] ?? EMPTY_MESSAGES
+      const msgs = s.messagesByPipeline[s.activePipelineId] ?? EMPTY_MESSAGES
+      return msgs
     },
     (a, b) => {
       if (a === b) return true
@@ -181,7 +199,7 @@ export const ChatContainer = ({
   /**
    * 根据当前模型名获取动态 context_window
    */
-  const { contextWindow: modelContextWindow } = useModelContextInfo(modelName)
+  const { contextWindow: modelContextWindow } = useModelContextInfo(effectiveModelName)
 
   /**
    * 从 contextUsageStore 获取当前活跃管道的 token 使用量
@@ -297,9 +315,10 @@ export const ChatContainer = ({
       {/* BUG-FIX-fix_20260509_scroll_position: key 强制切换时重新挂载使 initialTopMostItemIndex 生效 */}
       <MessageList
         key={activeTabId || sessionId}
+        tabId={activeTabId || sessionId}
         messages={filteredMessages}
         isGenerating={effectiveIsGenerating}
-        modelName={modelName}
+        modelName={effectiveModelName}
         className="flex-1"
         hasMore={hasMoreMessages}
         isLoadingMore={isLoadingMoreMessages}
@@ -310,14 +329,6 @@ export const ChatContainer = ({
 
       {/* 子Tab路由增强（无UI，逻辑层） */}
       <SubTabRouter sessionId={sessionId} />
-
-      {/* 人类交互卡片 */}
-      <ErrorBoundary>
-        <InteractionPanel sessionId={sessionId} />
-      </ErrorBoundary>
-
-      {/* 全局交互浮层（从通知中心点击打开） */}
-      <GlobalInteractionOverlay />
 
       {/* 活跃投票面板 */}
       <ActiveVotingPanels sessionId={sessionId} />
@@ -342,9 +353,11 @@ export const ChatContainer = ({
           onStopGenerate={onStopGenerate}
           placeholder="输入消息，按 Enter 发送..."
           enableThinkingMode={true}
-          modelName={modelName}
+          modelName={effectiveModelName}
           currentTokenUsage={effectiveTokenCount}
           maxTokens={effectiveMaxTokens}
+          completionTokens={pipelineUsage?.completionTokens ?? 0}
+          totalTokens={pipelineUsage?.totalTokens ?? 0}
           thinkingMode={thinkingMode}
           toggleThinkingMode={toggleThinkingMode}
         />

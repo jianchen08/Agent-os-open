@@ -119,26 +119,25 @@ class TriggerRegistry:
             raise ValueError(f"触发器配置无效: {trigger_config.id}")
 
         # 对于时间触发器，检查是否已过期
-        if isinstance(trigger, TimeTrigger):
-            if trigger.schedule_config.get("type") == "date":
-                from datetime import datetime
+        if isinstance(trigger, TimeTrigger) and trigger.schedule_config.get("type") == "date":
+            from datetime import datetime  # noqa: PLC0415
 
-                run_date_str = trigger.schedule_config.get("datetime")
-                if run_date_str:
-                    try:
-                        run_date = datetime.fromisoformat(run_date_str)
-                        if run_date < datetime.utcnow():
-                            logger.warning(
-                                f"时间触发器 {trigger.id} 已过期 ({run_date_str})，自动禁用"
-                            )
-                            trigger.enabled = False
-                    except ValueError:
-                        logger.error(
-                            f"时间触发器 {trigger.id} 时间格式无效: {run_date_str}"
+            run_date_str = trigger.schedule_config.get("datetime")
+            if run_date_str:
+                try:
+                    run_date = datetime.fromisoformat(run_date_str)
+                    if run_date < datetime.utcnow():
+                        logger.warning(
+                            f"时间触发器 {trigger.id} 已过期 ({run_date_str})，自动禁用"
                         )
+                        trigger.enabled = False
+                except ValueError:
+                    logger.error(
+                        f"时间触发器 {trigger.id} 时间格式无效: {run_date_str}"
+                    )
 
         # 注册到事件总线（如果是事件触发器）
-        from src.core.event_bus.types import EventFilter, EventType
+        from src.core.event_bus.types import EventFilter, EventType  # noqa: PLC0415
 
         self._subscription_ids[trigger.id] = []
         if isinstance(trigger, (EventTrigger, ConditionTrigger)):
@@ -182,12 +181,11 @@ class TriggerRegistry:
         """
         if config.trigger_type == TriggerType.TIME:
             return TimeTrigger(config)
-        elif config.trigger_type == TriggerType.EVENT:
+        if config.trigger_type == TriggerType.EVENT:
             return EventTrigger(config)
-        elif config.trigger_type == TriggerType.CONDITION:
+        if config.trigger_type == TriggerType.CONDITION:
             return ConditionTrigger(config)
-        else:
-            raise ValueError(f"不支持的触发器类型: {config.trigger_type}")
+        raise ValueError(f"不支持的触发器类型: {config.trigger_type}")
 
     async def unregister_trigger(self, trigger_id: str) -> None:
         """

@@ -38,15 +38,15 @@ class ScreenshotManager:
         """
         try:
             if output_path is None:
-                import tempfile
-                import uuid
+                import tempfile  # noqa: PLC0415
+                import uuid  # noqa: PLC0415
                 output_path = os.path.join(
                     tempfile.gettempdir(),
                     f"playwright_screenshot_{uuid.uuid4().hex[:8]}.png"
                 )
 
             # 确保目录存在
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)  # noqa: PTH103,PTH120
 
             # 截图
             await page.screenshot(path=output_path, full_page=True)
@@ -92,15 +92,15 @@ class ScreenshotManager:
             await element.wait_for(timeout=5000)
 
             if output_path is None:
-                import tempfile
-                import uuid
+                import tempfile  # noqa: PLC0415
+                import uuid  # noqa: PLC0415
                 output_path = os.path.join(
                     tempfile.gettempdir(),
                     f"playwright_element_{uuid.uuid4().hex[:8]}.png"
                 )
 
             # 确保目录存在
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)  # noqa: PTH103,PTH120
 
             # 元素截图
             await element.screenshot(path=output_path)
@@ -141,16 +141,16 @@ class ScreenshotManager:
             对比结果
         """
         try:
-            from PIL import Image
-            import numpy as np
+            import numpy as np  # noqa: PLC0415
+            from PIL import Image  # noqa: PLC0415
 
             # 检查文件是否存在
-            if not os.path.exists(baseline_path):
+            if not os.path.exists(baseline_path):  # noqa: PTH110
                 return {
                     "success": False,
                     "error": f"基准图片不存在: {baseline_path}",
                 }
-            if not os.path.exists(current_path):
+            if not os.path.exists(current_path):  # noqa: PTH110
                 return {
                     "success": False,
                     "error": f"当前图片不存在: {current_path}",
@@ -223,10 +223,10 @@ class ScreenshotManager:
             保存结果
         """
         try:
-            import shutil
+            import shutil  # noqa: PLC0415
 
             # 确保目录存在
-            os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
+            os.makedirs(os.path.dirname(baseline_path), exist_ok=True)  # noqa: PTH103,PTH120
 
             # 复制图片
             shutil.copy2(image_path, baseline_path)

@@ -1,20 +1,21 @@
 """提示词构建 Input 插件 — 从旧代码 agents/prompt_builder.py 迁移。
 
-负责在管道循环的输入阶段组装 SystemMessage，
-按旧代码 layer_order 顺序拼接各层内容。
+负责在管道循环的输入阶段组装 SystemMessage 及相关消息。
 
 产出：
     - state["system_message"]: 一条 SystemMessage（不含历史消息和动态变量）
+    - state["compression_messages"]: 压缩层独立消息列表（L1/L2/KEYWORDS）
     - state["prompt.dynamic_vars"]: 动态变量消息 dict（LLMCore 直接追加在历史消息之后）
 
-构建顺序（与旧代码 context_window_config.yaml 的 layer_order 一致）：
-    1. system_prompt      <- state["context.system_prompt"]
-    2. tools_description  <- state["prompt.tool_descriptions"]（仅当开关开启时拼入）
-    3. static_vars        <- agent_config 或 state 读取
-    4. knowledge.context  <- 知识注入插件产出
+构建顺序（_build_system_content）：
+    1. system_prompt      <- state["context.system_prompt"]（占位符 {{xxx}} 在此替换）
+    2. language           <- config.language（语言指令，可选）
+    3. tools_description  <- state["prompt.tool_descriptions"]（仅当开关开启时拼入）
+    4. static_vars        <- agent_config 或 state 读取（知识检索统一为 tags/retrieval 类型）
     5. memory.retrieved   <- 记忆检索插件产出
-    6. l2_memory          <- 三元组摘要（从 ChunkService 读取，含关键词）
-    7. l1_memory          <- 八段摘要（从 ChunkService 读取，含关键词）
+
+注意：knowledge.context 已不再单独拼入（统一到 static_vars）；压缩层（L1/L2）作为
+compression_messages 独立消息输出，不合并到 system_message。
 """
 
 from __future__ import annotations
@@ -108,8 +109,9 @@ class PromptBuildPlugin(IInputPlugin):
 
         if type_name == "timestamp":
             return "timestamp", {"format": args_str} if args_str else {}
-        elif type_name == "path":
+        if type_name == "path":
             # {{path:文件或目录路径}} 或 {{path:目录路径|extensions=.md,.yaml}}
+            # （文件→注入单文件，目录→注入目录下所有顶层文件，两者共用同一套解析）
             params: dict[str, Any] = {}
             if "|" in args_str:
                 path_part, _, ext_part = args_str.partition("|")
@@ -121,14 +123,13 @@ class PromptBuildPlugin(IInputPlugin):
             else:
                 params["path"] = args_str
             return "path", params
-        elif type_name == "content":
+        if type_name == "content":
             return "content", {"content": args_str}
-        else:
-            params = {}
-            for pair in args_str.split("|"):
-                k, _, v = pair.partition("=")
-                params[k.strip()] = v.strip()
-            return type_name, params
+        params = {}
+        for pair in args_str.split("|"):
+            k, _, v = pair.partition("=")
+            params[k.strip()] = v.strip()
+        return type_name, params
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """构建 SystemMessage 并写入 state。
@@ -148,23 +149,67 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             要写入 state 的字段字典，含 system_message、compression_messages、dynamic_vars
         """
+        from datetime import datetime as _dt  # noqa: PLC0415
+        _t0 = _dt.now()
+
         updates: dict[str, Any] = {}
 
         # 按 layer_order 顺序组装系统消息内容（不含压缩块）
+        _s = _dt.now()
+        logger.debug("[%s] step=build_system_content BEGIN", self.name)
         system_content = await self._build_system_content(ctx)
+        logger.debug(
+            "[%s] step=build_system_content END | elapsed=%.3fs len=%d",
+            self.name, (_dt.now() - _s).total_seconds(), len(system_content),
+        )
 
         # 产出 SystemMessage（纯 prompt，永不变化）
         updates["system_message"] = {"role": "system", "content": system_content}
 
         # 加载压缩块和状态快照为独立消息
         if self._config.get("include_compressed_layers", True):
-            compression_msgs = await self._load_compression_messages(ctx)
+            _s = _dt.now()
+            logger.debug("[%s] step=load_compression_messages BEGIN", self.name)
+            try:
+                compression_msgs = await asyncio.wait_for(
+                    self._load_compression_messages(ctx), timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] load_compression_messages 超时(60s)！压缩块加载卡死，用空列表继续",
+                    self.name,
+                )
+                compression_msgs = []
+            logger.debug(
+                "[%s] step=load_compression_messages END | elapsed=%.3fs count=%d",
+                self.name, (_dt.now() - _s).total_seconds(), len(compression_msgs),
+            )
             updates["compression_messages"] = compression_msgs
 
         # 单独产出动态变量消息（由 LLMCore 直接追加在历史消息之后）
-        dynamic_vars_msg = await self._build_dynamic_vars(ctx)
+        _s = _dt.now()
+        logger.debug("[%s] step=build_dynamic_vars BEGIN", self.name)
+        try:
+            dynamic_vars_msg = await asyncio.wait_for(
+                self._build_dynamic_vars(ctx), timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "[%s] build_dynamic_vars 超时(30s)！动态变量构建卡死，用空继续",
+                self.name,
+            )
+            dynamic_vars_msg = ""
+        logger.debug(
+                "[%s] step=build_dynamic_vars END | elapsed=%.3fs empty=%s",
+            self.name, (_dt.now() - _s).total_seconds(), not dynamic_vars_msg,
+        )
         if dynamic_vars_msg:
             updates["prompt.dynamic_vars"] = dynamic_vars_msg
+
+        logger.debug(
+            "[%s] _do_work 全部完成 | total_elapsed=%.3fs",
+            self.name, (_dt.now() - _t0).total_seconds(),
+        )
 
         logger.debug(
             "[%s] SystemMessage built | content_len=%d | compression_msgs=%d | dynamic_vars=%s",
@@ -179,11 +224,9 @@ class PromptBuildPlugin(IInputPlugin):
         """按旧代码 layer_order 顺序组装系统消息内容。
 
         顺序：system_prompt -> tools_description -> static_vars ->
-              memory.retrieved -> l2_memory -> l1_memory
+              knowledge.context -> memory.retrieved
         不含 recent_messages 和 dynamic_vars。
-
-        知识检索已统一到 static_vars 的 tags/retrieval 类型中，
-        不再单独读取 knowledge.context。
+        压缩层（L2/L1/KEYWORDS）通过 compression_messages 独立消息输出。
 
         Args:
             ctx: 插件执行上下文
@@ -224,14 +267,19 @@ class PromptBuildPlugin(IInputPlugin):
             if static_vars_text:
                 parts.append(static_vars_text)
 
-        # 4. memory.retrieved（记忆检索插件产出）
+        # 4. knowledge.context（知识注入插件产出 —— 与 static_vars tags/retrieval 互补）
+        knowledge_context = ctx.state.get("knowledge.context", "")
+        if knowledge_context:
+            parts.append(knowledge_context)
+
+        # 5. memory.retrieved（记忆检索插件产出）
         memory_retrieved = ctx.state.get("memory.retrieved", "")
         if memory_retrieved:
             parts.append(memory_retrieved)
 
         return "\n\n".join(parts)
 
-    async def _resolve_single_var_content(
+    async def _resolve_single_var_content(  # noqa: PLR0912,PLR0915
         self, ctx: PluginContext, var_def: dict, session_id: str, constraints: dict,
     ) -> str:
         """解析单个变量的内容，供 _load_static_vars 和占位符替换共用。
@@ -254,11 +302,6 @@ class PromptBuildPlugin(IInputPlugin):
 
         content = ""
 
-        # BUG-FIX-fix_20260606_dynamic_vars_placeholder:
-        # 问题根因: YAML 中字符串占位符项（如 '{{path:...}}'）被 loader 解析为
-        #           type="placeholder" 的 dict，但 _resolve_single_var_content 未处理该类型，
-        #           导致 static_vars 中的占位符项也被静默跳过。
-        # 修复方案: 对 placeholder 类型，取 name 字段作为占位符文本进行解析。
         if var_type == "placeholder":
             placeholder_text = var_def.get("name", "")
             if placeholder_text and "{{" in placeholder_text:
@@ -279,11 +322,11 @@ class PromptBuildPlugin(IInputPlugin):
             content = "\n".join(rules_parts)
 
         elif var_type == "path":
-            # path 类型：文件 → 注入单文件（base=project_root）
-            #          目录 → 注入目录下所有文件（base=project_root，与文件一致）
-            # 每个注入项都用 XML 标签包裹，方便 LLM 识别来源
+            # path 类型：文件注入 → 注入项目文件（base=project_root）
+            # 绝对路径直接使用；相对路径基于 project_root 解析
+            # 若无 project_root 则跳过（防止误注入容器自身文件）
             file_path = var_def.get("path", "")
-            target = self._resolve_path_for_file(ctx, file_path)
+            target = self._resolve_target_path(ctx, file_path)
             if target is not None and target.is_file():
                 try:
                     text = await asyncio.to_thread(target.read_text, "utf-8")
@@ -295,27 +338,15 @@ class PromptBuildPlugin(IInputPlugin):
                         self.name, file_path, e,
                     )
             elif target is not None and target.is_dir():
-                # 目录 → 遍历读取（base=project_root，直接用已解析的 target）
+                # 目录 → 遍历读取（base=project_root）
                 dir_content = await self._read_dir_entries(target, var_def.get("extensions"))
                 if dir_content:
                     content = f'<files dir="{file_path}">\n{dir_content}\n</files>'
             else:
                 logger.debug(
-                    "[%s] path 类型变量跳过 | name=%s | path=%s",
+                    "[%s] path 类型变量跳过 | name=%s | path=%s | project_root=%s",
                     self.name, var_name, file_path,
-                )
-
-        elif var_type == "folder":
-            # folder（目录注入）：base=ws_meta.path，与 {{path:目录}} 共用 _read_dir_entries。
-            folder_path = var_def.get("path", "")
-            target = self._resolve_target_path(ctx, folder_path)
-            if target is not None and target.is_dir():
-                content = await self._read_dir_entries(target, var_def.get("extensions"))
-            else:
-                logger.debug(
-                    "[%s] folder 类型变量跳过 | name=%s | path=%s | ws_meta=%s",
-                    self.name, var_name, folder_path,
-                    bool((ctx.state.get("ws_meta") or {}).get("path")),
+                    bool(ctx.state.get("project_root") or (ctx._services or {}).get("project_root")),
                 )
 
         elif var_type in ("reference", "content", ""):
@@ -346,10 +377,7 @@ class PromptBuildPlugin(IInputPlugin):
                 results = await retriever.retrieve(query=content, top_k=var_def.get("top_k", 5))
                 if results:
                     retrieved_text = "\n".join(r.content for r in results if hasattr(r, "content"))
-                    if mode == "hybrid":
-                        content = f"{content}\n\n### 相关检索结果\n{retrieved_text}"
-                    else:
-                        content = retrieved_text
+                    content = f"{content}\n\n### 相关检索结果\n{retrieved_text}" if mode == "hybrid" else retrieved_text
             except (KeyError, Exception) as e:
                 logger.debug("[%s] 占位符向量检索跳过 | name=%s | error=%s", self.name, var_name, e)
 
@@ -399,51 +427,16 @@ class PromptBuildPlugin(IInputPlugin):
         return "\n\n".join(parts)
 
     def _resolve_target_path(self, ctx: PluginContext, rel_path: str) -> Path | None:
-        """把目录路径解析为最终目标 Path（base=ws_meta.path）。
+        """把相对路径解析为最终目标 Path。
 
-        Args:
-            ctx: 插件执行上下文。
-            rel_path: 相对路径。
-
-        Returns:
-            解析后的 Path，无法解析则返回 None。
-        """
-        if not rel_path or not rel_path.strip():
-            return None
-        p = Path(rel_path)
-        if p.is_absolute():
-            return p
-        ws_meta = ctx.state.get("ws_meta") or {}
-        base = ws_meta.get("path")
-        if not base:
-            return None
-        return Path(base) / rel_path
-
-    def _get_project_root(self, ctx: PluginContext) -> str:
-        """获取项目根目录路径。
-
-        优先级: state["project_root"] → ctx._services["project_root"] → ""
-
-        Returns:
-            项目根目录路径字符串
-        """
-        pr = ctx.state.get("project_root", "")
-        if not pr:
-            pr = (ctx._services or {}).get("project_root", "")
-        return str(pr) if pr else ""
-
-    def _resolve_path_for_file(self, ctx: PluginContext, rel_path: str) -> Path | None:
-        """把 path 类型（单文件注入）的路径解析为最终目标 Path 对象。
-
-        path 类型的 base 是 **项目根目录**（project_root），不是 ws_meta.path。
-        规则:
-            1. 空 path → 返回 None
-            2. 绝对路径 → 直用
-            3. 相对路径 → 拼 project_root；project_root 缺失则返回 None
+        互斥选择逻辑（不是先后也不是回退）：
+            - 文件：用 project_root 解析（项目文件注入）
+            - 文件夹：用 workspace 解析（state["workspace"] = ws_meta.path）
+            - 找不到就跳过
 
         Args:
             ctx: 插件执行上下文
-            rel_path: 静态变量声明的 path 字段
+            rel_path: 相对或绝对路径
 
         Returns:
             解析后的 Path，无法解析则返回 None
@@ -453,12 +446,29 @@ class PromptBuildPlugin(IInputPlugin):
         p = Path(rel_path)
         if p.is_absolute():
             return p
-        base = self._get_project_root(ctx)
-        if not base:
-            return None
-        return Path(base) / rel_path
 
-    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:
+        project_root = ctx.state.get("project_root", "")
+        if not project_root:
+            project_root = (ctx._services or {}).get("project_root", "")
+
+        # 文件夹 base：state["workspace"]（engine.run(workspace=ws_meta.path) 注入）
+        ws_path = ctx.state.get("workspace", "")
+
+        # 文件：用 project_root 解析
+        if project_root:
+            target = Path(project_root) / rel_path
+            if target.is_file():
+                return target
+
+        # 文件夹：用 ws_meta.path / workspace 解析（互斥，无回退到 project_root）
+        if ws_path:
+            target = Path(ws_path) / rel_path
+            if target.is_dir():
+                return target
+
+        return None
+
+    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:  # noqa: PLR0912
         """解析单个 {{占位符}} 并返回替换内容。
 
         将占位符语法转换为兼容的 var_def 字典，复用 _resolve_single_var_content。
@@ -486,10 +496,6 @@ class PromptBuildPlugin(IInputPlugin):
             return str(pr) if pr else ""
         elif var_type == "path":
             var_def = {"type": "path", "name": "path", "path": params["path"]}
-        elif var_type == "folder":
-            # {{folder:路径}} 占位符：路径是文件→注入单文件；路径是目录→注入目录下所有顶层文件
-            # base = project_root（与 {{path:...}} 一致；与 static_vars.items[].type:folder 用 ws_meta.path 不同）
-            var_def = {"type": "folder_placeholder", "name": "folder", "path": params.get("path", "")}
         elif var_type == "content":
             var_def = {"type": "content", "name": "content", "content": params["content"]}
         elif var_type == "timestamp":
@@ -542,8 +548,34 @@ class PromptBuildPlugin(IInputPlugin):
         if not matches:
             return text
 
-        for match in matches:
-            content = await self._resolve_placeholder(ctx, match)
+        for idx, match in enumerate(matches):
+            # 逐步日志 + 超时保护：卡死时定位到具体哪个占位符，并 fail 而非永久挂起
+            # （历史多次出现 prompt_build 协程永久挂起拖垮整个进程的僵尸引擎问题）
+            from datetime import datetime as _ph_t  # noqa: PLC0415
+            _ph_s = _ph_t.now()
+            logger.debug(
+                "[%s] resolve_placeholder BEGIN | idx=%d/%d | %s",
+                self.name, idx + 1, len(matches),
+                match[:80] + ("..." if len(match) > 80 else ""),
+            )
+            try:
+                content = await asyncio.wait_for(
+                    self._resolve_placeholder(ctx, match),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] resolve_placeholder 超时(30s)！占位符解析卡死，"
+                    "跳过此占位符避免永久挂起 | idx=%d/%d | placeholder=%s",
+                    self.name, idx + 1, len(matches),
+                    match[:120],
+                )
+                content = ""
+            logger.debug(
+                "[%s] resolve_placeholder END | idx=%d | elapsed=%.3fs | len=%d",
+                self.name, idx + 1, (_ph_t.now() - _ph_s).total_seconds(),
+                len(content) if content else 0,
+            )
             placeholder = "{{" + match + "}}"
             text = text.replace(placeholder, content)
 
@@ -571,6 +603,8 @@ class PromptBuildPlugin(IInputPlugin):
         if not static_vars_def:
             return ""
 
+        from datetime import datetime as _rt  # noqa: PLC0415
+
         parts: list[str] = []
         session_id = ctx.state.get("context.session_id", "")
         constraints = ctx.state.get("constraints", {})
@@ -592,7 +626,18 @@ class PromptBuildPlugin(IInputPlugin):
 
             var_name = var_def.get("name", var_def.get("type", ""))
 
+            # 逐变量加边界日志：卡死时定位到具体哪个静态变量（path/tags/retrieval）
+            _sv_t = _rt.now()
+            logger.debug(
+                "[%s] static_var BEGIN | name=%s type=%s",
+                self.name, var_name, var_def.get("type", ""),
+            )
             content = await self._resolve_single_var_content(ctx, var_def, session_id, constraints)
+            logger.debug(
+                "[%s] static_var END | name=%s | elapsed=%.3fs len=%d",
+                self.name, var_name, (_rt.now() - _sv_t).total_seconds(),
+                len(content) if content else 0,
+            )
 
             if content:
                 parts.append(f"### {var_name}\n{content}")
@@ -639,6 +684,15 @@ class PromptBuildPlugin(IInputPlugin):
 
         user_id = ctx.state.get("user_id", "")
 
+        # 检索调用是 prompt_build 卡死的头号嫌疑点：此处 await 若永不返回，
+        # 整个 prompt_build 协程永久挂起、零日志（与历史多次卡死现象一致）。
+        # 加 BEGIN/END 边界日志，下次卡死时可精确定位是否卡在 retrieve。
+        from datetime import datetime as _rt  # noqa: PLC0415
+        _rt_s = _rt.now()
+        logger.debug(
+            "[%s] memory_service.retrieve BEGIN | tags=%s top_k=%d method=%s",
+            self.name, tags, top_k, "keyword",
+        )
         results = await memory_service.retrieve(
             user_id=user_id,
             filter={"tags": tags, "memory_type": "semantic"},
@@ -646,6 +700,11 @@ class PromptBuildPlugin(IInputPlugin):
             retrieval_method="keyword",
             query=" ".join(tags),
             top_k=top_k,
+        )
+        logger.debug(
+            "[%s] memory_service.retrieve END | elapsed=%.3fs results=%d",
+            self.name, (_rt.now() - _rt_s).total_seconds(),
+            len(results) if results else 0,
         )
 
         if not results:
@@ -691,7 +750,7 @@ class PromptBuildPlugin(IInputPlugin):
                 file_path = matched.get("path", "")
                 if file_path:
                     try:
-                        from pathlib import Path
+                        from pathlib import Path  # noqa: PLC0415
                         p = Path(file_path)
                         if p.exists():
                             return await asyncio.to_thread(p.read_text, "utf-8")
@@ -704,7 +763,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         return ""
 
-    async def _load_compression_messages(
+    async def _load_compression_messages(  # noqa: PLR0912,PLR0915
         self,
         ctx: PluginContext,
     ) -> list[dict[str, Any]]:
@@ -723,7 +782,7 @@ class PromptBuildPlugin(IInputPlugin):
         except KeyError:
             return messages
 
-        from pipeline.types import StateKeys
+        from pipeline.types import StateKeys  # noqa: PLC0415
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         if not pipeline_run_id:
             return messages
@@ -743,7 +802,7 @@ class PromptBuildPlugin(IInputPlugin):
             return messages
 
         # ── 预算计算 ──
-        from memory.context_compressor import CompressionConfig
+        from memory.context_compressor import CompressionConfig  # noqa: PLC0415
         context_window = ctx.state.get("context_window", 128000)
         config = CompressionConfig.from_yaml_config(context_window)
         budgets = config.get_budgets()
@@ -766,7 +825,7 @@ class PromptBuildPlugin(IInputPlugin):
         l1_budget = min(budgets["L1"], int(available * config.l1_ratio / comp_total_ratio))
         l2_budget = min(budgets["L2"], available - l1_budget)
 
-        logger.info(
+        logger.debug(
             "[%s] 预算: window=%d trigger=%d 已用=%d(sys=%d+msg=%d) "
             "可用=%d → L1=%d L2=%d",
             self.name, context_window, trigger_tokens,
@@ -788,12 +847,14 @@ class PromptBuildPlugin(IInputPlugin):
             deduped.append(chunk)
             high_water = chunk.sequence_start
 
-        # ── 预算分配：新→老，L1→L2→丢弃 ──
-        sorted_chunks = sorted(deduped, key=lambda c: c.created_at, reverse=True)
+        # ── 预算分配：新→老，L1→L2→keywords 兜底 ──
+        # 用 sequence_end 排序：自增整数，语义绝对可靠，不受跨进程/容器时钟漂移影响
+        sorted_chunks = sorted(deduped, key=lambda c: c.sequence_end, reverse=True)
         l1_used = 0
         l2_used = 0
         l1_blocks: list = []
         l2_blocks: list = []
+        dropped_keywords: list[tuple[str, list[str]]] = []  # (seq, keywords) 被丢弃块的兜底
 
         for chunk in sorted_chunks:
             l1_content = chunk.content or ""
@@ -810,11 +871,15 @@ class PromptBuildPlugin(IInputPlugin):
             elif l2_budget > 0 and l2_used + l2_tokens <= l2_budget and l2_content:
                 l2_blocks.append((seq, l2_content, keywords))
                 l2_used += l2_tokens
-            # else: 丢弃（keywords 在 state_snapshot.key_entities 兜底）
+            elif keywords:
+                # keywords 兜底档：L1/L2 都放不下时，至少保留关键词索引供检索
+                dropped_keywords.append((seq, keywords))
+            # else: 完全无内容且无 keywords，真正丢弃
 
         # ── 组装消息：L2(老→新) → L1(老→新) ──
         l2_blocks.reverse()
         l1_blocks.reverse()
+        dropped_keywords.reverse()  # 老→新，与上面一致
 
         for seq, content, _kw in l2_blocks:
             messages.append({
@@ -834,13 +899,28 @@ class PromptBuildPlugin(IInputPlugin):
                           f'</compressed>',
             })
 
+        # keywords 兜底块：被丢弃的 L1/L2 块至少保留关键词索引
+        if dropped_keywords:
+            index_lines = []
+            for seq, kws in dropped_keywords:
+                top_kws = ", ".join(kws[:5])  # 每块最多 5 个关键词，控制体积
+                index_lines.append(f'[seq {seq}] {top_kws}')
+            messages.append({
+                "role": "system",
+                "name": "compressed",
+                "content": '<compressed level="KEYWORDS">\n'
+                          '## 已降级块的关键词索引（L1/L2 预算不足，仅保留关键词）\n'
+                          + "\n".join(index_lines) + '\n'
+                          '</compressed>',
+            })
+
         # ── 状态快照（含 keywords 合并）──
         state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id, chunk_service)
         messages.extend(state_msgs)
 
-        logger.info(
-            "[%s] 压缩消息: L1=%d块 L2=%d块 state_snapshot=%s",
-            self.name, len(l1_blocks), len(l2_blocks),
+        logger.debug(
+            "[%s] 压缩消息: L1=%d块 L2=%d块 keywords兜底=%d块 state_snapshot=%s",
+            self.name, len(l1_blocks), len(l2_blocks), len(dropped_keywords),
             "有" if state_msgs else "无",
         )
         return messages
@@ -874,7 +954,7 @@ class PromptBuildPlugin(IInputPlugin):
             return 0
         return max(1, len(text) // 2)
 
-    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:
+    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:  # noqa: PLR0912,PLR0915
         """构建动态变量消息。
 
         产出完整的消息 dict（含 role/name/content），
@@ -915,11 +995,6 @@ class PromptBuildPlugin(IInputPlugin):
                 var_type = var_def.get("type", "")
                 var_name = var_def.get("name", var_type)
 
-                # BUG-FIX-fix_20260606_dynamic_vars_placeholder:
-                # 问题根因: YAML 中字符串占位符项（如 '{{timestamp:...}}'）被 loader 解析为
-                #           type="placeholder" 的 dict，但 _build_dynamic_vars 未处理该类型，
-                #           导致占位符项被静默跳过，动态变量始终为空。
-                # 修复方案: 对 placeholder 类型，取 name 字段作为占位符文本调用 _resolve_placeholders。
                 if var_type == "placeholder":
                     placeholder_text = var_def.get("name", "")
                     if placeholder_text:

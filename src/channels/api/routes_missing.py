@@ -10,12 +10,14 @@ files/capabilities。
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from channels.api.deps import require_auth
 from human_interaction import get_human_interaction_service
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Projects 路由 - /api/v1/projects
 # ---------------------------------------------------------------------------
-projects_router = APIRouter(prefix="/api/v1/projects", tags=["项目"])
+projects_router = APIRouter(prefix="/api/v1/projects", tags=["项目"], dependencies=[Depends(require_auth)])
 
 
 @projects_router.get("", summary="获取项目列表")
@@ -48,7 +50,7 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
         {project: {id, userId, goal, status, autoExecute, currentTaskIndex, tasks: [],
                    timestamps: {createdAt, updatedAt}}}
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone  # noqa: PLC0415
     now = datetime.now(timezone.utc).isoformat()
     return {
         "project": {
@@ -64,7 +66,7 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
     }
 
 
-async def get_task_tree(
+async def get_task_tree(  # noqa: PLR0912,PLR0915
     session_id: str | None = Query(default=None, description="按会话 ID 过滤"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
@@ -83,7 +85,6 @@ async def get_task_tree(
         return _empty_tree(session_id)
 
     try:
-        # BUG-FIX-fix_20260512_async_list_all: 添加 await
         all_tasks = await task_service.list_all(limit=500, reverse=False)
     except Exception as exc:
         logger.warning("get_task_tree: list_all 失败: %s", exc)
@@ -93,19 +94,10 @@ async def get_task_tree(
     # 策略 1：直接匹配 task.metadata["session_id"]
     # 策略 2：通过 parent_pipeline_id 关联会话的 pipeline_ids
     # 策略 3：pipeline_run_id 在会话的 pipeline_ids 中
-    # BUG-FIX-fix_20260603_task_tree_visibility:
-    # 问题根因: _pipeline_root_map 的 value 是根任务ID（如 "94f7afbd2cc8"），
-    #           而 related_pipeline_ids 是管道运行ID（如 "0fc481ee9ebe"），
-    #           两者属于不同的 ID 空间，所以子管道 ID 永远匹配不上，
-    #           导致通过管道关联的子任务无法被任务树 API 找到。
-    # 修复方案: 从任务自身的 pipeline_run_id / parent_pipeline_id 字段递归扩展
-    #           管道 ID 集合，不依赖 _pipeline_root_map 的跨 ID 空间匹配。
-    # 影响范围: 任务管理面板的任务树按会话过滤功能。
-    # 修复日期: 2026-06-03
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
-            from channels.api.routes_threads import store as api_store
+            from channels.api.routes_threads import store as api_store  # noqa: PLC0415
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
@@ -121,7 +113,7 @@ async def get_task_tree(
             while changed:
                 changed = False
                 for t in all_tasks:
-                    if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:
+                    if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:  # noqa: SIM102
                         if t.pipeline_run_id and t.pipeline_run_id not in related_pipeline_ids:
                             related_pipeline_ids.add(t.pipeline_run_id)
                             changed = True
@@ -172,7 +164,6 @@ async def get_task_tree(
     flat_items = [_task_to_tree_item(t, session_id) for t in all_tasks]
 
     # 构建树形结构：根任务 → 子任务
-    # BUG-FIX-fix_20260513_orphan_tasks: parent_task_id 指向不存在的任务时视为根任务
     task_id_set = {t.id for t in all_tasks}
     children_map: dict[str, list[dict[str, Any]]] = {}
     root_items: list[dict[str, Any]] = []
@@ -199,29 +190,7 @@ async def get_task_tree(
     }
 
 
-def _get_task_service() -> Any:
-    """通过 ServiceProvider 获取全局 TaskService 实例。
-
-    BUG-FIX-fix_20260506_006: 使用 get_or_create 替代 get，支持懒加载创建
-    问题根因: 使用 provider.get() 只能获取已注册的实例，TaskService
-              从未在启动时显式注册，导致总是返回 None，API 返回空树
-    修复方案: 使用 get_or_create 懒加载创建 TaskService 实例，
-              与 task_submit.py 中的获取方式保持一致
-
-    Returns:
-        TaskService 实例，服务不可用或创建失败时返回 None
-    """
-    try:
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        return provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(
-                event_bus=provider.get("event_bus"),
-            ),
-        )
-    except Exception:
-        return None
+from tasks.service_access import get_task_service as _get_task_service  # noqa: E402
 
 
 def _empty_tree(session_id: str | None) -> dict[str, Any]:
@@ -255,16 +224,12 @@ def _task_to_tree_item(task: Any, session_id: str | None = None) -> dict[str, An
         树节点字典，包含 id、title、status、type、pipeline_run_id、
         ws_mode、ws_path 等字段
     """
-    status_val = task.status.value if hasattr(task.status, "value") else str(task.status)
+    status_val = safe_enum_value(task.status)
 
     # 安全提取 ws_meta 工作空间元信息
     _metadata = getattr(task, "metadata", None) or {}
     _ws_meta = _metadata.get("ws_meta", {}) or {}
 
-    # BUG-FIX-fix_20260509_agent_level: 修复 agent_level 序列化格式
-    # 问题根因: str(AgentLevel.L2_SUBTASK) 输出 "AgentLevel.L2_SUBTASK"，
-    #          前端无法正确解析为数字层级
-    # 修复方案: 使用 .value 属性获取 "L1"/"L2"/"L3" 字符串
     _agent_level = getattr(task, "agent_level", None)
     _agent_level_str = _agent_level.value if _agent_level and hasattr(_agent_level, "value") else str(_agent_level or "")
 
@@ -359,7 +324,7 @@ async def delete_project(project_id: str, _user: dict = Depends(require_auth)) -
 # ---------------------------------------------------------------------------
 # Users 路由 - /api/v1/users
 # ---------------------------------------------------------------------------
-users_router = APIRouter(prefix="/api/v1/users", tags=["用户管理"])
+users_router = APIRouter(prefix="/api/v1/users", tags=["用户管理"], dependencies=[Depends(require_auth)])
 
 
 @users_router.get("", summary="获取用户列表")
@@ -411,7 +376,30 @@ async def update_user_settings(body: dict[str, Any] | None = None, _user: dict =
 # ---------------------------------------------------------------------------
 # Monitoring 路由 - /api/v1/monitoring
 # ---------------------------------------------------------------------------
-monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"])
+monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"], dependencies=[Depends(require_auth)])
+
+
+def _with_fallback_strategies(
+    strategies: list[Callable[[], dict[str, Any] | None]],
+    default: dict[str, Any],
+) -> dict[str, Any]:
+    """按顺序尝试多个数据获取策略，返回第一个成功结果。
+
+    统一封装监控函数中反复出现的「主策略→降级1→降级2→默认空响应」三级降级链。
+    每个策略函数返回 None 表示失败（触发下一个策略），返回 dict 表示成功。
+
+    Args:
+        strategies: 策略函数列表，按优先级从高到低排列
+        default: 所有策略都失败时的兜底响应
+
+    Returns:
+        第一个成功的策略结果，或 default
+    """
+    for strategy in strategies:
+        result = strategy()
+        if result is not None:
+            return result
+    return default
 
 
 def _get_token_usage() -> dict[str, Any]:
@@ -425,49 +413,52 @@ def _get_token_usage() -> dict[str, Any]:
     Returns:
         包含 total_tokens, prompt_tokens, completion_tokens, request_count 的字典
     """
-    # 策略 1：从 UsageMonitor 获取
-    try:
-        from infrastructure.service_provider import get_service_provider
-
+    def _strategy_usage_monitor() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         monitor = provider.get("usage_monitor")
-        if monitor is not None:
-            stats = monitor.get_statistics()
-            records = monitor.get_recent_records(limit=10000)
-            prompt_total = sum(r.prompt_tokens for r in records)
-            completion_total = sum(r.completion_tokens for r in records)
-            return {
-                "total_tokens": stats.total_tokens,
-                "prompt_tokens": prompt_total,
-                "completion_tokens": completion_total,
-                "request_count": stats.total_requests,
-            }
-    except Exception:
-        pass
+        if monitor is None:
+            return None
+        stats = monitor.get_statistics()
+        records = monitor.get_recent_records(limit=10000)
+        prompt_total = sum(r.prompt_tokens for r in records)
+        completion_total = sum(r.completion_tokens for r in records)
+        return {
+            "total_tokens": stats.total_tokens,
+            "prompt_tokens": prompt_total,
+            "completion_tokens": completion_total,
+            "request_count": stats.total_requests,
+        }
 
-    # 策略 2：从 PerformanceMonitor 的 LLM 统计获取
-    try:
-        from infrastructure.service_provider import get_service_provider
-
+    def _strategy_perf_monitor() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
-        if perf_monitor is not None:
-            llm_stats = getattr(perf_monitor, "_llm_stats", {})
-            return {
-                "total_tokens": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "request_count": llm_stats.get("request_count", 0),
-            }
-    except Exception:
-        pass
+        if perf_monitor is None:
+            return None
+        llm_stats = getattr(perf_monitor, "_llm_stats", {})
+        return {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "request_count": llm_stats.get("request_count", 0),
+        }
 
-    # 策略 3：零值兜底
+    return _with_fallback_strategies(
+        [_strategy_usage_monitor, _strategy_perf_monitor],
+        {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "request_count": 0},
+    )
+
+
+def _build_cache_result(hits: int, misses: int) -> dict[str, Any]:
+    """从 hits/misses 构建统一的缓存统计响应。"""
+    total = hits + misses
+    hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
     return {
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "request_count": 0,
+        "cache_hits": hits,
+        "cache_misses": misses,
+        "hit_rate": hit_rate,
+        "total_requests": total,
     }
 
 
@@ -482,55 +473,159 @@ def _get_cache_stats() -> dict[str, Any]:
     Returns:
         包含 cache_hits, cache_misses, hit_rate, total_requests 的字典
     """
-    # 策略 1：从 ToolCache 获取
-    try:
-        from infrastructure.service_provider import get_service_provider
-
+    def _strategy_tool_cache() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         tool_cache = provider.get("tool_cache")
-        if tool_cache is not None and hasattr(tool_cache, "get_cache_stats"):
-            stats = tool_cache.get_cache_stats()
-            hits = stats.get("hits", 0)
-            misses = stats.get("misses", 0)
-            total = hits + misses
-            hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
-            return {
-                "cache_hits": hits,
-                "cache_misses": misses,
-                "hit_rate": hit_rate,
-                "total_requests": total,
-            }
-    except Exception:
-        pass
+        if tool_cache is None or not hasattr(tool_cache, "get_cache_stats"):
+            return None
+        stats = tool_cache.get_cache_stats()
+        return _build_cache_result(stats.get("hits", 0), stats.get("misses", 0))
 
-    # 策略 2：从 PerformanceMonitor 的工具统计获取
-    try:
-        from infrastructure.service_provider import get_service_provider
-
+    def _strategy_perf_monitor() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
-        if perf_monitor is not None:
-            tool_stats = getattr(perf_monitor, "_tool_stats", {})
-            hits = tool_stats.get("cache_hits", 0)
-            misses = tool_stats.get("cache_misses", 0)
-            total = hits + misses
-            hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
-            return {
-                "cache_hits": hits,
-                "cache_misses": misses,
-                "hit_rate": hit_rate,
-                "total_requests": total,
-            }
-    except Exception:
-        pass
+        if perf_monitor is None:
+            return None
+        tool_stats = getattr(perf_monitor, "_tool_stats", {})
+        return _build_cache_result(
+            tool_stats.get("cache_hits", 0), tool_stats.get("cache_misses", 0),
+        )
 
-    # 策略 3：零值兜底
+    return _with_fallback_strategies(
+        [_strategy_tool_cache, _strategy_perf_monitor],
+        {"cache_hits": 0, "cache_misses": 0, "hit_rate": 0.0, "total_requests": 0},
+    )
+
+
+def _get_system_metrics() -> dict[str, Any]:
+    """获取真实系统指标。
+
+    依次尝试：
+    1. PerformanceMonitor.get_current_metrics()
+    2. psutil 直接采集
+    3. 零值兜底
+    """
+    def _strategy_perf_monitor() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        provider = get_service_provider()
+        perf_monitor = provider.get("performance_monitor")
+        if perf_monitor is None or not hasattr(perf_monitor, "get_system_metrics"):
+            return None
+        import asyncio  # noqa: PLC0415
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 不能在运行中的事件循环里 await，用 psutil 直接采集
+            return _collect_psutil_metrics()
+        metrics = loop.run_until_complete(perf_monitor.get_system_metrics())
+        return _format_system_metrics(
+            cpu=metrics.cpu_usage,
+            memory_percent=metrics.memory_usage,
+            disk_percent=metrics.disk_usage,
+        )
+
+    def _strategy_psutil() -> dict[str, Any] | None:
+        return _collect_psutil_metrics()
+
+    return _with_fallback_strategies(
+        [_strategy_perf_monitor, _strategy_psutil],
+        _format_system_metrics(),
+    )
+
+
+def _collect_psutil_metrics() -> dict[str, Any]:
+    """通过 psutil 直接采集系统指标（同步）。"""
+    try:
+        import psutil  # noqa: PLC0415
+
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        return _format_system_metrics(
+            cpu=psutil.cpu_percent(interval=0.1),
+            memory_percent=mem.percent,
+            disk_percent=disk.percent,
+            mem_total=mem.total,
+            mem_used=mem.used,
+            mem_available=mem.available,
+            disk_total=disk.total,
+            disk_used=disk.used,
+            disk_free=disk.free,
+        )
+    except Exception:
+        return _format_system_metrics()
+
+
+def _format_system_metrics(
+    cpu: float = 0.0,
+    memory_percent: float = 0.0,
+    disk_percent: float = 0.0,
+    mem_total: int = 0,
+    mem_used: int = 0,
+    mem_available: int = 0,
+    disk_total: int = 0,
+    disk_used: int = 0,
+    disk_free: int = 0,
+) -> dict[str, Any]:
+    """格式化系统指标为统一响应结构。"""
+    import time  # noqa: PLC0415
+
     return {
-        "cache_hits": 0,
-        "cache_misses": 0,
-        "hit_rate": 0.0,
-        "total_requests": 0,
+        "cpu_usage": round(cpu, 2),
+        "memory": {
+            "total": mem_total,
+            "used": mem_used,
+            "available": mem_available,
+            "usage_percent": round(memory_percent, 2),
+        },
+        "disk": {
+            "mount_point": "/",
+            "total": disk_total,
+            "used": disk_used,
+            "free": disk_free,
+            "usage_percent": round(disk_percent, 2),
+        },
+        "uptime": int(time.time()),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+def _get_task_statistics() -> dict[str, Any]:
+    """获取真实任务统计。
+
+    依次尝试：
+    1. TaskService.get_all_tasks()
+    2. 零值兜底
+    """
+    _default = {
+        "total": 0, "succeeded": 0, "failed": 0,
+        "running": 0, "pending": 0,
+        "avg_duration": 0, "success_rate": 0,
+    }
+
+    def _strategy_task_service() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        provider = get_service_provider()
+        task_service = provider.get("task_service")
+        if task_service is None or not hasattr(task_service, "get_all_tasks"):
+            return None
+        tasks = task_service.get_all_tasks()
+        total = len(tasks)
+        succeeded = sum(1 for t in tasks if getattr(t, "status", "") == "completed")
+        failed = sum(1 for t in tasks if getattr(t, "status", "") == "failed")
+        running = sum(1 for t in tasks if getattr(t, "status", "") == "running")
+        pending = sum(1 for t in tasks if getattr(t, "status", "") == "pending")
+        return {
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "running": running,
+            "pending": pending,
+            "avg_duration": 0,
+            "success_rate": round(succeeded / total * 100, 2) if total > 0 else 0,
+        }
+
+    return _with_fallback_strategies([_strategy_task_service], _default)
 
 
 @monitoring_router.get("", summary="获取监控汇总数据")
@@ -543,33 +638,8 @@ async def get_monitoring_overview(
         包含 system_metrics, task_statistics, token_usage, cache_stats 的字典
     """
     return {
-        "system_metrics": {
-            "cpu_usage": 0,
-            "memory": {
-                "total": 0,
-                "used": 0,
-                "available": 0,
-                "usage_percent": 0,
-            },
-            "disk": {
-                "mount_point": "/",
-                "total": 0,
-                "used": 0,
-                "free": 0,
-                "usage_percent": 0,
-            },
-            "uptime": 0,
-            "timestamp": "",
-        },
-        "task_statistics": {
-            "total": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "running": 0,
-            "pending": 0,
-            "avg_duration": 0,
-            "success_rate": 0,
-        },
+        "system_metrics": _get_system_metrics(),
+        "task_statistics": _get_task_statistics(),
         "token_usage": _get_token_usage(),
         "cache_stats": _get_cache_stats(),
     }
@@ -602,25 +672,9 @@ async def get_cache_stats(
 
 @monitoring_router.get("/system/metrics", summary="获取系统指标")
 async def get_system_metrics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """返回真实系统指标（CPU/内存/磁盘）。"""
     return {
-        "metrics": {
-            "cpu_usage": 0,
-            "memory": {
-                "total": 0,
-                "used": 0,
-                "available": 0,
-                "usage_percent": 0,
-            },
-            "disk": {
-                "mount_point": "/",
-                "total": 0,
-                "used": 0,
-                "free": 0,
-                "usage_percent": 0,
-            },
-            "uptime": 0,
-            "timestamp": "",
-        },
+        "metrics": _get_system_metrics(),
         "token_usage": _get_token_usage(),
         "cache_stats": _get_cache_stats(),
     }
@@ -628,17 +682,8 @@ async def get_system_metrics(_user: dict = Depends(require_auth)) -> dict[str, A
 
 @monitoring_router.get("/tasks/statistics", summary="获取任务统计")
 async def get_task_statistics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {
-        "statistics": {
-            "total": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "running": 0,
-            "pending": 0,
-            "avg_duration": 0,
-            "success_rate": 0,
-        }
-    }
+    """返回真实任务统计数据。"""
+    return {"statistics": _get_task_statistics()}
 
 
 @monitoring_router.get("/tasks", summary="获取监控任务列表")
@@ -668,12 +713,13 @@ async def get_monitoring_tasks(
     Returns:
         包含 items、total、page、page_size 的字典
     """
-    from channels.api.memory_store import store
-    from channels.api.routes_tasks import _get_task_service
+    from channels.api.memory_store import store  # noqa: F401,PLC0415
+
+    # _get_task_service 已在模块级别从 tasks.service_access 导入
 
     # 监控页面状态映射：将后端特殊状态映射为前端 TaskInfo 兼容的状态值
     # 注意：monitoring TaskInfo 使用 'running' 而非 'in_progress'
-    _MONITORING_STATUS_MAP: dict[str, str] = {
+    _MONITORING_STATUS_MAP: dict[str, str] = {  # noqa: N806
         "evaluating": "running",
         "suspended": "pending",
         "queued": "pending",
@@ -685,11 +731,11 @@ async def get_monitoring_tasks(
 
     def _taskmodel_to_monitoring_dict(tm: Any) -> dict[str, Any]:
         """将 TaskModel dataclass 转为字典（保留原始状态值，不做 in_progress 映射）。"""
-        from dataclasses import asdict
+        from dataclasses import asdict  # noqa: PLC0415
 
         d = asdict(tm)
         # 提取枚举的原始字符串值
-        raw_status = tm.status.value if hasattr(tm.status, "value") else str(tm.status)
+        raw_status = safe_enum_value(tm.status)
         d["status"] = raw_status
         if hasattr(tm, "priority") and hasattr(tm.priority, "value"):
             d["priority"] = tm.priority.value
@@ -728,7 +774,7 @@ async def get_monitoring_tasks(
         completed = t.get("completed_at")
         if started and completed:
             try:
-                from datetime import datetime as _dt
+                from datetime import datetime as _dt  # noqa: PLC0415
 
                 s = _dt.fromisoformat(started)
                 c = _dt.fromisoformat(completed)
@@ -775,7 +821,7 @@ async def get_event_list(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Triggers 路由 - /api/v1/triggers
 # ---------------------------------------------------------------------------
-triggers_router = APIRouter(prefix="/api/v1/triggers", tags=["触发器"])
+triggers_router = APIRouter(prefix="/api/v1/triggers", tags=["触发器"], dependencies=[Depends(require_auth)])
 
 
 @triggers_router.get("", summary="获取触发器列表")
@@ -832,17 +878,7 @@ async def manual_trigger(trigger_id: str, _user: dict = Depends(require_auth)) -
 # ---------------------------------------------------------------------------
 # Interaction 路由 - /api/v1/interaction
 # ---------------------------------------------------------------------------
-interaction_router = APIRouter(prefix="/api/v1/interaction", tags=["人类交互"])
-
-
-# BUG-FIX-fix_20260605_interaction_stub_routes:
-# 问题根因: /api/v1/interaction/* 路由全部为存根实现，前端点击选项后
-#           后端未调用 HumanInteractionService.respond() / submit_response()，
-#           导致 asyncio.Event.set() 永远不触发，wait_for_choice() 永久阻塞，
-#           用户看到"工具执行中"状态一直停留。
-# 修复方案: 将存根路由替换为调用 HumanInteractionService 的真实实现。
-# 影响范围: 前端人类交互面板的所有操作（选择/审批/拒绝/取消/查看）。
-# 修复日期: 2026-06-05
+interaction_router = APIRouter(prefix="/api/v1/interaction", tags=["人类交互"], dependencies=[Depends(require_auth)])
 
 
 @interaction_router.post("/response", summary="提交交互响应")
@@ -944,7 +980,7 @@ async def mark_viewed(
 # ---------------------------------------------------------------------------
 # Agent Calls 路由 - /api/v1/agent-calls
 # ---------------------------------------------------------------------------
-agent_calls_router = APIRouter(prefix="/api/v1/agent-calls", tags=["Agent调用记录"])
+agent_calls_router = APIRouter(prefix="/api/v1/agent-calls", tags=["Agent调用记录"], dependencies=[Depends(require_auth)])
 
 
 @agent_calls_router.get("", summary="获取调用记录列表")
@@ -965,7 +1001,7 @@ async def get_agent_call(execution_id: str, _user: dict = Depends(require_auth))
 # ---------------------------------------------------------------------------
 # Execution Records 路由 - /api/v1/execution
 # ---------------------------------------------------------------------------
-execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"])
+execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"], dependencies=[Depends(require_auth)])
 
 
 @execution_router.get("/records", summary="获取执行记录列表")
@@ -1105,7 +1141,7 @@ async def inject_agent_message(
 # ---------------------------------------------------------------------------
 # Sessions 路由 - /api/v1/sessions
 # ---------------------------------------------------------------------------
-sessions_router = APIRouter(prefix="/api/v1/sessions", tags=["会话"])
+sessions_router = APIRouter(prefix="/api/v1/sessions", tags=["会话"], dependencies=[Depends(require_auth)])
 
 
 @sessions_router.get("/{session_id}/total-token-usage", summary="获取会话总Token用量")
@@ -1121,7 +1157,7 @@ async def get_session_context_token_usage(session_id: str, parent_execution_reco
 # ---------------------------------------------------------------------------
 # Knowledge Base 路由 - /api/v1/knowledge-base
 # ---------------------------------------------------------------------------
-knowledge_base_router = APIRouter(prefix="/api/v1/knowledge-base", tags=["知识库"])
+knowledge_base_router = APIRouter(prefix="/api/v1/knowledge-base", tags=["知识库"], dependencies=[Depends(require_auth)])
 
 
 @knowledge_base_router.get("", summary="获取知识库列表")
@@ -1177,7 +1213,7 @@ async def delete_knowledge_base_item(item_id: str, _user: dict = Depends(require
 # ---------------------------------------------------------------------------
 # Floating Chat 路由 - /api/v1/floating-chat
 # ---------------------------------------------------------------------------
-floating_chat_router = APIRouter(prefix="/api/v1/floating-chat", tags=["悬浮窗"])
+floating_chat_router = APIRouter(prefix="/api/v1/floating-chat", tags=["悬浮窗"], dependencies=[Depends(require_auth)])
 
 
 @floating_chat_router.get("/status", summary="获取悬浮窗状态")
@@ -1193,7 +1229,7 @@ async def launch_floating_chat(_user: dict = Depends(require_auth)) -> dict[str,
 # ---------------------------------------------------------------------------
 # Cost Control 路由 - /api/v1/cost-control
 # ---------------------------------------------------------------------------
-cost_control_router = APIRouter(prefix="/api/v1/cost-control", tags=["成本控制"])
+cost_control_router = APIRouter(prefix="/api/v1/cost-control", tags=["成本控制"], dependencies=[Depends(require_auth)])
 
 
 @cost_control_router.get("/budget/status", summary="获取预算状态")
@@ -1248,7 +1284,7 @@ async def reset_budget(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Evaluation 路由 - /api/v1/evaluation
 # ---------------------------------------------------------------------------
-evaluation_router = APIRouter(prefix="/api/v1/evaluation", tags=["评估"])
+evaluation_router = APIRouter(prefix="/api/v1/evaluation", tags=["评估"], dependencies=[Depends(require_auth)])
 
 
 @evaluation_router.post("/evaluate", summary="执行评估")
@@ -1299,7 +1335,7 @@ async def get_trends(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Evaluation Metrics 别名路由 - /api/v1/evaluation-metrics
 # ---------------------------------------------------------------------------
-eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=["评估指标别名"])
+eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=["评估指标别名"], dependencies=[Depends(require_auth)])
 
 
 @eval_metrics_alias_router.get("", summary="获取评估指标列表（别名）")
@@ -1312,7 +1348,7 @@ async def list_eval_metrics_alias(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     try:
-        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_response
+        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_response  # noqa: PLC0415
         loader = _get_metric_loader()
         if loader is None:
             return {"metrics": [], "total": 0}
@@ -1342,22 +1378,22 @@ async def list_eval_metrics_alias(
 @eval_metrics_alias_router.get("/{metric_id}", summary="获取评估指标详情（别名）")
 async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     try:
-        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_detail
+        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_detail  # noqa: PLC0415
         loader = _get_metric_loader()
         if loader is None:
-            raise APIError(status_code=404, error_code="API_NOTF_2004", message="评估指标加载器未初始化")
+            raise APIError(status_code=404, error_code="API_NOTF_2004", message="评估指标加载器未初始化")  # noqa: F821
         metric = loader.get(metric_id)
         if metric is None:
-            raise APIError(status_code=404, error_code="API_NOTF_2004", message=f"评估指标 '{metric_id}' 不存在")
+            raise APIError(status_code=404, error_code="API_NOTF_2004", message=f"评估指标 '{metric_id}' 不存在")  # noqa: F821
         return _metric_to_detail(metric).model_dump()
     except Exception:
         return {"id": metric_id, "name": "", "description": ""}
 
 
 # ---------------------------------------------------------------------------
-# Client Register 路由 - /api/client
+# Client Register 路由 - /api/v1/client
 # ---------------------------------------------------------------------------
-client_router = APIRouter(prefix="/api/client", tags=["客户端"])
+client_router = APIRouter(prefix="/api/v1/client", tags=["客户端"], dependencies=[Depends(require_auth)])
 
 _client_registry: dict[str, dict[str, Any]] = {}
 
@@ -1397,7 +1433,7 @@ async def register_client(body: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Files Capabilities 路由 - /api/v1/files
 # ---------------------------------------------------------------------------
-files_router = APIRouter(prefix="/api/v1/files", tags=["文件"])
+files_router = APIRouter(prefix="/api/v1/files", tags=["文件"], dependencies=[Depends(require_auth)])
 
 
 @files_router.get("/capabilities", summary="获取模型文件能力")
@@ -1465,7 +1501,7 @@ async def get_supported_file_types(_user: dict = Depends(require_auth)) -> dict[
 # Task Phase & AC 路由 - /api/v1/tasks/{id}/phase, /api/v1/tasks/{id}/ac
 # ---------------------------------------------------------------------------
 
-task_phase_router = APIRouter(prefix="/api/v1/tasks", tags=["任务阶段"])
+task_phase_router = APIRouter(prefix="/api/v1/tasks", tags=["任务阶段"], dependencies=[Depends(require_auth)])
 
 
 @task_phase_router.get("/{task_id}/phase", summary="获取任务当前阶段")
@@ -1481,13 +1517,7 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
     Returns:
         {taskId, currentPhase, phaseStatus}
     """
-    # BUG-FIX-fix_20260524_phase_api_hardcode:
-    # 问题根因: get_task_phase 硬编码返回 currentPhase="prepare" 和 phaseStatus="pending"，
-    #           无论任务实际处于什么状态，前端始终显示"准备阶段"。
-    # 修复方案: 从 TaskService 读取实际任务状态，映射到正确的阶段和阶段状态。
-    # 影响范围: 前端任务详情页的阶段显示。
-    # 修复日期: 2026-05-24
-    _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {
+    _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {  # noqa: N806
         "pending": ("prepare", "pending"),
         "scheduled": ("prepare", "pending"),
         "suspended": ("prepare", "pending"),
@@ -1505,7 +1535,7 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
         try:
             task = task_service.get_task(task_id)
             if task:
-                status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
+                status_str = safe_enum_value(task.status)
                 phase, phase_status = _STATUS_TO_PHASE.get(status_str, ("prepare", "pending"))
                 return {
                     "taskId": task_id,

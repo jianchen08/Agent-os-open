@@ -12,7 +12,7 @@
 6. 外部网络真实下载测试（可选）
 """
 
-import asyncio
+import asyncio  # noqa: F401
 import hashlib
 import json
 import os
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from .tool import DownloadTool, _sanitize_filename, _validate_url, _is_private_ip
+from .tool import DownloadTool, _is_private_ip, _sanitize_filename, _validate_url
 
 # ─── 本地 HTTP 测试服务器 ────────────────────────────
 
@@ -217,7 +217,7 @@ async def test_resume_download(tool, download_dir, test_server):
     expected_hash = test_server["medium_sha256"]
     expected_size = len(test_server["medium_data"])
 
-    import httpx
+    import httpx  # noqa: PLC0415
 
     # Step 1: 手动下载第 0 个分片，模拟中断
     segment_size = 4 * 1024 * 1024  # 4MB per segment

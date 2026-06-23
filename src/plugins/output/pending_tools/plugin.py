@@ -74,7 +74,7 @@ class PendingToolsOutput(IOutputPlugin):
 
         if not tool_calls:
             has_key = StateKeys.RAW_TOOL_CALLS in ctx.state
-            logger.info(
+            logger.debug(
                 "[%s] pipeline=%s iter=%d NO tool calls | "
                 "key_exists=%s raw_result=%s",
                 self.name, pipeline_id, iteration,
@@ -83,7 +83,7 @@ class PendingToolsOutput(IOutputPlugin):
             return OutputResult()
 
         tool_names = [tc.get("name", "unknown") for tc in tool_calls]
-        logger.info(
+        logger.debug(
             "[%s] pipeline=%s iter=%d Detected %d pending tool call(s): %s",
             self.name, pipeline_id, iteration, len(tool_calls), tool_names,
         )

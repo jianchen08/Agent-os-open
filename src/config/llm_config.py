@@ -102,6 +102,11 @@ class LLMConfigManager:
             alias = self._defaults.chat
         return self.get_model(alias)
 
+    def get_default_alias(self, purpose: str = "chat") -> str:
+        """获取指定用途默认模型的别名（alias 字符串）。"""
+        alias = getattr(self._defaults, purpose, None)
+        return alias or self._defaults.chat
+
     def get_provider(self, name: str) -> ProviderConfig:
         """
         获取提供商配置
@@ -154,6 +159,27 @@ class LLMConfigManager:
     def has_model(self, alias: str) -> bool:
         """检查模型是否存在"""
         return alias in self._models
+
+    def find_model_by_name_or_alias(self, identifier: str) -> ModelConfig | None:
+        """按 alias 或 model_name 查找模型配置。
+
+        消费方传入的标识可能是 llm.yaml 的 alias（如 minimax-m3），
+        也可能是底层 model_name（如 MiniMax-M3）。此方法统一两者，
+        避免下游模块各自实现遍历逻辑（信息泄漏，code_reviewer §0.2 散点检查）。
+
+        Args:
+            identifier: alias 或 model_name
+
+        Returns:
+            ModelConfig 实例，未找到返回 None
+        """
+        if self.has_model(identifier):
+            return self.get_model(identifier)
+        for alias in self.list_models():
+            m = self.get_model(alias)
+            if m.model_name == identifier:
+                return m
+        return None
 
     def has_provider(self, name: str) -> bool:
         """检查提供商是否存在"""
@@ -299,26 +325,25 @@ class LLMConfigManager:
         """
         if key == "models":
             return {alias: model.__dict__ for alias, model in self._models.items()}
-        elif key == "providers":
+        if key == "providers":
             return {
                 name: provider.__dict__ for name, provider in self._providers.items()
             }
-        elif key == "embeddings":
+        if key == "embeddings":
             return {name: emb.__dict__ for name, emb in self._embeddings.items()}
-        elif key == "defaults":
+        if key == "defaults":
             return self._defaults.__dict__
-        elif key.startswith("model:"):
+        if key.startswith("model:"):
             # 获取单个模型: model:deepseek-chat
             model_alias = key.split(":", 1)[1]
             model = self.get_model(model_alias)
             return model.__dict__
-        elif key.startswith("provider:"):
+        if key.startswith("provider:"):
             # 获取单个提供商: provider:deepseek
             provider_name = key.split(":", 1)[1]
             provider = self.get_provider(provider_name)
             return provider.__dict__
-        else:
-            raise KeyError(f"未知的配置键: {key}")
+        raise KeyError(f"未知的配置键: {key}")
 
     def save(self, key: str, config: dict[str, Any]) -> None:
         """
@@ -366,9 +391,9 @@ class LLMConfigManager:
         """
         keys = ["models", "providers", "embeddings", "defaults"]
         # 添加所有模型键
-        keys.extend([f"model:{alias}" for alias in self._models.keys()])
+        keys.extend([f"model:{alias}" for alias in self._models])
         # 添加所有提供商键
-        keys.extend([f"provider:{name}" for name in self._providers.keys()])
+        keys.extend([f"provider:{name}" for name in self._providers])
         return keys
 
     def has_key(self, key: str) -> bool:
@@ -416,7 +441,7 @@ def get_llm_config() -> LLMConfigManager:
     Returns:
         LLMConfigManager 实例
     """
-    global _llm_config_instance
+    global _llm_config_instance  # noqa: PLW0603
     if _llm_config_instance is None:
         _llm_config_instance = LLMConfigManager()
     return _llm_config_instance
@@ -442,5 +467,5 @@ def get_model_context_window(model_alias: str) -> int:
 
 def reset_llm_config() -> None:
     """重置 LLM 配置单例（用于测试）"""
-    global _llm_config_instance
+    global _llm_config_instance  # noqa: PLW0603
     _llm_config_instance = None

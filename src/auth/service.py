@@ -7,15 +7,15 @@
 from typing import Any, Protocol
 from uuid import UUID
 
+from src.auth.models import UserCreate, UserInDB
+from src.auth.password import hash_password, verify_password
+from src.auth.token import TokenManager
 from src.core.exceptions.auth import (
     InvalidCredentialsError,
     UserExistsError,
     UserInactiveError,
     UserNotFoundError,
 )
-from src.auth.models import UserCreate, UserInDB
-from src.auth.password import hash_password, verify_password
-from src.auth.token import TokenManager
 
 
 class UserRepository(Protocol):
@@ -115,7 +115,7 @@ class AuthService:
             raise UserInactiveError()
 
         # 更新最后登录时间
-        try:
+        try:  # noqa: SIM105
             await self.user_repository.update_last_login(user.id)
         except Exception:
             pass  # 忽略更新失败

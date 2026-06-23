@@ -252,7 +252,7 @@ def get_global_propagator() -> ResultPropagator:
     Returns:
         全局传播器
     """
-    global _global_propagator
+    global _global_propagator  # noqa: PLW0603
     if _global_propagator is None:
         _global_propagator = ResultPropagator()
     return _global_propagator
@@ -265,5 +265,5 @@ def set_global_propagator(propagator: ResultPropagator) -> None:
     Args:
         propagator: 传播器实例
     """
-    global _global_propagator
+    global _global_propagator  # noqa: PLW0603
     _global_propagator = propagator

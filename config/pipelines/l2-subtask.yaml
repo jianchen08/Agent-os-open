@@ -10,6 +10,10 @@ pipeline:
   pre:
     # 子任务工具执行时使用容器隔离
     tool_execute:
+      - plugin: isolation_guard
+        priority: 25
+        config:
+          docker_available: true    # 强制启用 Docker 隔离检测
       - plugin: security_check
         priority: 70
         config:

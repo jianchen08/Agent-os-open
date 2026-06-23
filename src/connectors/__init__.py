@@ -7,6 +7,7 @@
 - BaseConnector: 连接器抽象基类
 - ConnectorRegistry: 连接器注册表
 - DegradationManager: 降级管理器
+- ConfigSubscriberMixin: ConfigCenter 配置订阅混入类
 - ConnectorContext: 连接器上下文数据
 - ConnectorAction: 操作指令
 - ActionResult: 操作结果
@@ -18,15 +19,16 @@
 - get_adapter_status_summary: 获取适配器状态摘要
 """
 
-from connectors.adapter_config import (
+from .adapter_config import (
     AdapterConfig,
     get_adapter_status_summary,
     load_adapter_configs,
 )
-from connectors.base import BaseConnector
-from connectors.degradation import DegradationManager
-from connectors.registry import ConnectorRegistry
-from connectors.types import (
+from .base import BaseConnector
+from .config_mixin import ConfigSubscriberMixin
+from .degradation import DegradationManager
+from .registry import ConnectorRegistry
+from .types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,
@@ -42,6 +44,8 @@ __all__ = [
     "ConnectorRegistry",
     # 降级管理
     "DegradationManager",
+    # 配置订阅
+    "ConfigSubscriberMixin",
     # 适配器配置
     "AdapterConfig",
     "load_adapter_configs",

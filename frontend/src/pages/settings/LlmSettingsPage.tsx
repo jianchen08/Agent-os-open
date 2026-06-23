@@ -69,8 +69,8 @@ export function LlmSettingsPage() {
   })
 
   // 加载配置
-  // NOTE: apiClient uses baseURL='http://localhost:8888' (absolute URL) which bypasses the
-  // Vite dev server proxy (configured at vite.config.ts to proxy /api -> localhost:8888).
+  // NOTE: apiClient uses baseURL='http://localhost:8988' (absolute URL) which bypasses the
+  // Vite dev server proxy (configured at vite.config.ts to proxy /api -> localhost:8988).
   // In dev this works because CORS is typically permissive on localhost, but in production
   // the API and frontend must be served from the same origin, or CORS headers must be set.
   // If you see "无法连接服务器" errors in the browser, check the browser console for

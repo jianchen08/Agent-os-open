@@ -218,7 +218,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         overwrite: bool = False,
     ) -> str:
         """直接注册 ToolRunnable"""
-        from tools.mcp_adapter import runnable_to_mcp_tool
+        from tools.mcp_adapter import runnable_to_mcp_tool  # noqa: PLC0415
 
         name = runnable.name
         if not name:
@@ -275,13 +275,13 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
     def _try_load_tool_on_demand(self, name: str) -> None:
         """按需从内置工具类中加载工具"""
-        import logging
+        import logging  # noqa: PLC0415
 
         logger = logging.getLogger(__name__)
 
         try:
-            from tools.builtin import get_all_builtin_tools
-            from tools.types import Tool
+            from tools.builtin import get_all_builtin_tools  # noqa: PLC0415
+            from tools.types import Tool  # noqa: PLC0415
 
             all_tools = get_all_builtin_tools()
 
@@ -302,7 +302,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                         return
                 elif isinstance(tool_item, Tool):
                     if tool_item.name == name:
-                        from tools.builtin.lsp_tools import LSPTools
+                        from tools.builtin.lsp_tools import LSPTools  # noqa: PLC0415
                         lsp_instance = LSPTools()
                         handler_map = {
                             "lsp_definition": lsp_instance._lsp_definition,
@@ -326,7 +326,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
     def _update_usage_stats(self, name: str) -> None:
         """更新工具使用统计"""
-        import time
+        import time  # noqa: PLC0415
 
         # 更新使用次数
         self._usage_count[name] = self._usage_count.get(name, 0) + 1
@@ -344,13 +344,13 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         if len(self._items) <= self._max_tools:
             return
 
-        import logging
+        import logging  # noqa: PLC0415
 
         logger = logging.getLogger(__name__)
 
         # 获取核心工具列表（不能卸载）
         try:
-            from tools.loader import CORE_SYSTEM_TOOLS
+            from tools.loader import CORE_SYSTEM_TOOLS  # noqa: PLC0415
 
             core_tools = set(CORE_SYSTEM_TOOLS)
         except ImportError:
@@ -358,7 +358,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
         # 找出可以卸载的工具（非核心工具）
         unloadable_tools = [
-            name for name in self._items.keys() if name not in core_tools
+            name for name in self._items if name not in core_tools
         ]
 
         if not unloadable_tools:
@@ -399,7 +399,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                 "usage_count": self._usage_count.get(name, 0),
                 "last_used": self._last_used.get(name, 0),
             }
-            for name in self._items.keys()
+            for name in self._items
         }
 
     def get_runnable(self, name: str) -> Optional["ToolRunnable"]:
@@ -472,21 +472,15 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
     def get_tools_for_llm(self, names: list[str] | None = None) -> list[dict[str, Any]]:
         """获取 LLM 可用的工具描述列表"""
-        if names is None:
-            tools = list(self._items.values())
-        else:
-            tools = [self._items[n] for n in names if n in self._items]
+        tools = list(self._items.values()) if names is None else [self._items[n] for n in names if n in self._items]
 
         return [tool.to_llm_format() for tool in tools]
 
     def get_tools_for_llm_yaml(self, names: list[str] | None = None) -> str:
         """获取 LLM 可用的 YAML 格式工具描述（节省 token）"""
-        import yaml
+        import yaml  # noqa: PLC0415
 
-        if names is None:
-            tools = list(self._items.values())
-        else:
-            tools = [self._items[n] for n in names if n in self._items]
+        tools = list(self._items.values()) if names is None else [self._items[n] for n in names if n in self._items]
 
         # 构建工具列表的简化描述（复用 Tool._simplify_schema）
         tools_desc = []
@@ -506,7 +500,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self, format_type: str | None = None, names: list[str] | None = None
     ) -> list[dict[str, Any]] | str:
         """获取指定格式的 LLM 工具描述（统一接口）"""
-        from tools.format_manager import ToolFormat, get_format_manager
+        from tools.format_manager import ToolFormat, get_format_manager  # noqa: PLC0415
 
         # 获取 JSON 格式工具列表
         json_tools = self.get_tools_for_llm(names)
@@ -515,22 +509,18 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
             # 使用全局格式管理器的当前设置
             manager = get_format_manager()
             return manager.get_tools_for_llm(json_tools, names=names)
-        else:
-            # 使用指定格式
-            try:
-                target_format = ToolFormat(format_type.lower())
-                manager = get_format_manager()
-                return manager.get_tools_for_llm(json_tools, target_format, names)
-            except ValueError:
-                # 无效格式，返回 JSON
-                return json_tools
+        # 使用指定格式
+        try:
+            target_format = ToolFormat(format_type.lower())
+            manager = get_format_manager()
+            return manager.get_tools_for_llm(json_tools, target_format, names)
+        except ValueError:
+            # 无效格式，返回 JSON
+            return json_tools
 
     def get_tools_for_mcp(self, names: list[str] | None = None) -> list[dict[str, Any]]:
         """获取 MCP 格式的工具列表"""
-        if names is None:
-            tools = list(self._items.values())
-        else:
-            tools = [self._items[n] for n in names if n in self._items]
+        tools = list(self._items.values()) if names is None else [self._items[n] for n in names if n in self._items]
 
         return [tool.to_mcp_format() for tool in tools]
 

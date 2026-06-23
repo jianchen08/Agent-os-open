@@ -63,7 +63,7 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
         """本插件关注所有路由信号。"""
         return []
 
-    async def execute(self, ctx: PluginContext) -> OutputResult:
+    async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911
         """执行经验沉淀逻辑。
 
         检查任务是否完成，如果完成则从 ChunkData 提炼知识并存储。
@@ -171,16 +171,15 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
                     "knowledge_ids": knowledge_ids,
                 },
             )
-        else:
-            logger.debug(
-                "[%s] 经验沉淀失败 | pipeline_run_id=%s | chunks=%d | errors=%d",
-                self.name, pipeline_run_id, len(chunks), len(errors),
-            )
-            return OutputResult(
-                state_updates={
-                    "experience_consolidated": False,
-                },
-            )
+        logger.debug(
+            "[%s] 经验沉淀失败 | pipeline_run_id=%s | chunks=%d | errors=%d",
+            self.name, pipeline_run_id, len(chunks), len(errors),
+        )
+        return OutputResult(
+            state_updates={
+                "experience_consolidated": False,
+            },
+        )
 
     @staticmethod
     def _extract_knowledge_content(chunk: Any) -> str:

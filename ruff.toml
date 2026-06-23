@@ -1,0 +1,74 @@
+# ============================================================
+# Ruff 配置（REQ-13）— lint + format
+# 与 pyproject.toml [tool.ruff] 保持同步
+# ============================================================
+
+# 行长度配置
+line-length = 120
+# 目标 Python 版本
+target-version = "py310"
+# 排除的目录
+extend-exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    "frontend",
+    "electron",
+    "mcp-servers",
+    "node_modules",
+]
+
+[lint]
+# 默认规则集 + 项目常用规则
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort（导入排序）
+    "B",    # flake8-bugbear（常见 bug）
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade（现代化语法）
+    "N",    # pep8-naming
+    "SIM",  # flake8-simplify
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+    "ERA",  # eradicate（注释代码）
+    "PL",   # pylint
+]
+# 忽略部分严格规则（避免一次性报大量错误）
+ignore = [
+    "E501",   # 行长度由 line-length 控制
+    "B008",   # 函数调用作为默认参数（FastAPI Depends 等）
+    "PLR0913", # 参数过多
+    "PLR2004", # magic value
+    "ARG001", # 未使用的方法参数（接口需要）
+    "ARG002", # 同上
+    "PTH118", # os.path 已被项目大量使用
+    "PTH123", # 同上
+    "ERA001", # 注释代码（可能是有意为之）
+    "RET504", # 过多 return
+    "N818",   # 异常类名不以 Error 结尾
+]
+# 允许自动修复
+fixable = ["ALL"]
+unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]  # __init__.py 允许未使用 import
+"tests/**" = ["B011", "PT009", "PT027"]  # 测试文件允许 assert
+"src/channels/cli/**" = ["T201"]  # CLI 允许 print
+
+[lint.isort]
+known-first-party = ["src"]
+combine-as-imports = true
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

@@ -67,21 +67,20 @@ class SmitheryAdapter(PlatformAdapter):
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.warning(
-                            "[smithery] 搜索请求失败: status=%d url=%s",
-                            resp.status, resp.url,
-                        )
-                        return []
+            async with aiohttp.ClientSession() as session, session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "[smithery] 搜索请求失败: status=%d url=%s",
+                        resp.status, resp.url,
+                    )
+                    return []
 
-                    body = await resp.json()
+                body = await resp.json()
 
         except aiohttp.ClientError as e:
             logger.warning("[smithery] 网络请求异常: %s", e)

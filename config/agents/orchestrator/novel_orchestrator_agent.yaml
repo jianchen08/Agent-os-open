@@ -81,6 +81,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
+  - '{{path:config/rules/dispatcher_rules.md}}'
 tool_ids:
 - file_read
 - file_write
@@ -103,6 +104,8 @@ hard_constraints:
 - 下级 Agent 映射表已列出所有团队成员，提交任务时直接用映射表中的 Agent ID，禁止用 resource_search 搜索 Agent
 - 不读取子任务产出物的具体内容，只通过 task_manage 跟踪状态
 - 不做快照合并和changelog处理，状态存档由写作Agent自行管理
+- 上下文继承约束（L1/L2通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间，这会导致上下文断裂
+- L2 自做与派发判断标准：编排报告、一致性检查结论、质量审核判定属于编排职责产出，必须自己做，禁止派发给 L3。章节写作、设定构建、情节编排属于具体执行产出，向下派发给 L3 执行。判断标准：产出是报告/结论 → 自己做；产出是创作内容 → 派发
 soft_constraints:
 - 优先保持创作风格的连贯性
 - 写作层启动前必须完成文风锚定，确保有参考原文可用

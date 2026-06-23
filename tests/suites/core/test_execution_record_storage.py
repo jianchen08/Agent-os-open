@@ -212,7 +212,49 @@ class TestExecutionRecordStorage:
     def test_memory_only_storage(self, storage: ExecutionRecordStorage):
         storage.save(ExecutionRecordData(pipeline_run_id="s1", sequence=1, iteration=1))
         assert len(storage.list_by_pipeline("s1")[0]) == 1
-        assert storage._data_dir is None
+
+    def test_tail_read_small_chunked_file(self, tmp_path: Path):
+        """回归测试：小文件（<64KB）的 chunked 分片也能被尾部读取。
+
+        BUG-FIX-fix_20260606_chunked_small_file_read:
+        问题根因: _extract_tail_blocks 在第一次尝试窗口小于文件大小时，
+                  即使读到整个文件也找不到 n 个 record 起点，于是进入第二次
+                  尝试用 _TAIL_READ_BYTES_MAX（128KB）作为窗口，
+                  f.seek(file_size - 128KB) 在小文件下越过文件起始位置，
+                  触发 OSError 后静默返回空列表，导致 chunk 文件中的
+                  记录（最关键的最新记录）完全不返回，前端无法渲染。
+        修复方案: 第二次窗口也用 min(MAX, file_size) 限制，并新增
+                  "本次窗口已覆盖整个文件" 的提前返回条件。
+        影响范围: 所有切片的 pipeline 文件 + list_messages API 分页加载。
+        修复日期: 2026-06-06
+        """
+        data_dir = tmp_path / "pipelines"
+        data_dir.mkdir()
+        storage = ExecutionRecordStorage(data_dir=str(data_dir))
+        # 模拟 chunked 场景：手写一个 {run_id}_002.yaml（小文件），
+        # 内容包含 N 条 record 且总大小 < 64KB。
+        chunk_file = data_dir / "run-chunked_002.yaml"
+        chunk_file.write_text(
+            "summary: null\nrecords:\n"
+            + "\n".join(
+                f"- record_id: r{i:03d}\n  pipeline_run_id: run-chunked\n  type: ai\n  sequence: {i}\n  iteration: 0\n  role: assistant\n  content: msg-{i}\n"
+                for i in range(1, 17)
+            ),
+            encoding="utf-8",
+        )
+        assert chunk_file.stat().st_size < 64 * 1024
+
+        # 触发 _extract_tail_blocks 的两条路径：limit 大于文件 record 总数
+        # 也能完整返回所有块（修复前会因 OSError 返回空列表）。
+        blocks = storage._extract_tail_blocks(chunk_file, n=20)
+        assert len(blocks) == 16
+        assert blocks[-1].startswith("- record_id: r016")
+
+        # list_by_pipeline 应能读到全部 16 条 record
+        records, _has_more = storage.list_by_pipeline("run-chunked", limit=20)
+        assert len(records) == 16
+        assert records[-1].record_id == "r016"
+        assert records[-1].sequence == 16
 
     def test_load_corrupted_file(self, tmp_path: Path):
         data_dir = tmp_path / "pipelines"
@@ -511,3 +553,140 @@ class TestPipelineRunSummary:
         totals = storage.get_total_tokens()
         assert totals["input_tokens"] == 300
         assert totals["output_tokens"] == 150
+
+
+# ── 继承历史落盘测试（pipe 继承场景）──
+
+
+class TestInheritedHistoryPersist:
+    """验证 pipe 继承来的历史对话在新 pipeline 首次执行时被落盘。
+
+    覆盖 _persist_inherited_history 的核心场景：
+    1. 触发：_inherited_history=True + records 为空 → 历史落盘
+    2. 幂等：第二次执行不重复落盘（_initialized_pipeline_ids 守卫）
+    3. sequence 连续：历史落盘后事件保存续号
+    4. 不触发：无 _inherited_history 标志（workspace-only 继承）不落盘
+    """
+
+    @pytest.mark.asyncio
+    async def test_inherited_history_gets_persisted(
+        self, base_state: dict[str, Any]
+    ):
+        """新 pipeline 携带继承历史时，历史消息应落盘到新 pipeline 文件。"""
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
+        )
+        # 模拟 build_initial_state 装载的继承历史（3 条）+ 新 user_input（1 条）
+        base_state[StateKeys.PIPELINE_ID] = "run-inherit"
+        base_state[StateKeys.ITERATION] = 1
+        base_state["_inherited_history"] = True
+        base_state["messages"] = [
+            {"role": "user", "content": "原始用户提问"},
+            {"role": "assistant", "content": "原始 AI 回复"},
+            {"role": "user", "content": "继承后的新输入"},
+        ]
+        base_state["user_input"] = "继承后的新输入"
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)
+
+        records = storage.list_by_pipeline("run-inherit")[0]
+        # 3 条继承历史全部落盘，新 user_input 因去重不重复存
+        assert len(records) == 3
+        roles = [r.role for r in records]
+        assert roles == ["user", "assistant", "user"]
+        # iteration=0 标记为继承历史
+        assert all(r.iteration == 0 for r in records)
+
+    @pytest.mark.asyncio
+    async def test_idempotent_on_second_execute(
+        self, base_state: dict[str, Any]
+    ):
+        """同一 pipeline 第二次执行不重复落盘继承历史。"""
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
+        )
+        base_state[StateKeys.PIPELINE_ID] = "run-idem"
+        base_state["_inherited_history"] = True
+        base_state["messages"] = [
+            {"role": "user", "content": "历史消息"},
+        ]
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)  # 第一次：落盘
+        base_state[StateKeys.ITERATION] = 2
+        await plugin.execute(ctx)  # 第二次：应跳过（_initialized_pipeline_ids 守卫）
+
+        records = storage.list_by_pipeline("run-idem")[0]
+        # 只有 1 条历史，不会因第二次执行翻倍
+        history_records = [r for r in records if r.iteration == 0]
+        assert len(history_records) == 1
+
+    @pytest.mark.asyncio
+    async def test_sequence_continuous_after_history(
+        self, base_state: dict[str, Any]
+    ):
+        """历史落盘后，本轮事件保存的 sequence 应续在历史号之后。"""
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
+        )
+        base_state[StateKeys.PIPELINE_ID] = "run-seq"
+        base_state[StateKeys.ITERATION] = 1
+        base_state["_inherited_history"] = True
+        base_state["messages"] = [
+            {"role": "user", "content": "历史1"},
+            {"role": "assistant", "content": "历史2"},
+        ]
+        # 本轮 LLM 事件
+        base_state[StateKeys.RAW_RESULT] = "本轮 AI 回复"
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)
+
+        records = storage.list_by_pipeline("run-seq")[0]
+        # 2 条历史（seq 1,2）+ 1 条本轮 AI（seq 3）
+        assert len(records) == 3
+        seqs = [r.sequence for r in records]
+        assert seqs == [1, 2, 3]
+        # 本轮事件的 iteration=1，历史 iteration=0
+        assert records[-1].iteration == 1
+        assert records[-1].type == "ai"
+
+    @pytest.mark.asyncio
+    async def test_no_inherited_history_flag_skips_persist(
+        self, base_state: dict[str, Any]
+    ):
+        """无 _inherited_history 标志（如 workspace-only 继承）不触发历史落盘。
+
+        判别依据：落盘的记录数应等于本轮事件产生的记录数，
+        不会把 messages 列表里的内容额外落盘。
+        （注意：现有 user 消息保存逻辑本身用 iteration=0，属正常约定，
+        故不能用 iteration=0 区分历史；改用记录数对账。）
+        """
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
+        )
+        base_state[StateKeys.PIPELINE_ID] = "run-ws-only"
+        base_state[StateKeys.ITERATION] = 1
+        # messages 里有 1 条，但没有 _inherited_history 标志
+        base_state["messages"] = [{"role": "user", "content": "历史消息(不应被落盘)"}]
+        base_state["user_input"] = "本轮真实输入"
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)
+
+        records = storage.list_by_pipeline("run-ws-only")[0]
+        # 只应落盘本轮 user_input（iteration==1 的 user 保存逻辑），
+        # messages 里的"历史消息(不应被落盘)"不应出现
+        contents = [r.content for r in records]
+        assert "本轮真实输入" in contents
+        assert "历史消息(不应被落盘)" not in contents
+

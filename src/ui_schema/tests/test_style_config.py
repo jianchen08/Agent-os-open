@@ -11,14 +11,12 @@
 
 from __future__ import annotations
 
-
 from ui_schema.style_config import (
     BreakpointConfig,
     ModuleStyleConfig,
     SceneStyleConfig,
     validate_style_config,
 )
-
 
 # ============================================================
 # ModuleStyleConfig 测试

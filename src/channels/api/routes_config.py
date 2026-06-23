@@ -12,22 +12,74 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
+from channels.api.deps import APIError, require_auth
+from config.config_center import get_config_center
 from config.models import invalidate_all_llm_caches
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/config", tags=["配置管理"])
+router = APIRouter(
+    prefix="/api/v1/config",
+    tags=["配置管理"],
+    dependencies=[Depends(require_auth)],
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_CONFIG_MODELS_DIR = _PROJECT_ROOT / "config" / "models"
-_CONFIG_SYSTEM_DIR = _PROJECT_ROOT / "config" / "system"
+_CONFIG_ROOT = _PROJECT_ROOT / "config"
+_CONFIG_MODELS_DIR = _CONFIG_ROOT / "models"
+_CONFIG_SYSTEM_DIR = _CONFIG_ROOT / "system"
 
 _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
 _CONTEXT_WINDOW_YAML = _CONFIG_SYSTEM_DIR / "context_window_config.yaml"
 _API_YAML = _CONFIG_SYSTEM_DIR / "api_config.yaml"
 _CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
+
+
+# ---------------------------------------------------------------------------
+# Pydantic Schema 模型（S-2: 替代裸 dict[str, Any] 请求体，限制可写入字段）
+# ---------------------------------------------------------------------------
+
+class LlmDefaultsUpdateRequest(BaseModel):
+    """LLM 默认模型配置更新请求。"""
+    chat: str | None = None
+    embedding: str | None = None
+    tiers: dict[str, Any] | None = None
+
+
+class ModelAddRequest(BaseModel):
+    """添加模型请求，key 为模型 ID，value 为模型配置。"""
+    models: dict[str, dict[str, Any]] = Field(description="模型 ID → 配置")
+
+
+class ModelConfigUpdateRequest(BaseModel):
+    """单模型配置更新请求，允许任意字段（透传合并到现有配置）。"""
+    config: dict[str, Any] = Field(description="模型配置字段")
+
+
+class ProviderConfigUpdateRequest(BaseModel):
+    """提供商配置更新请求，允许任意字段（透传合并到现有配置）。"""
+    config: dict[str, Any] = Field(description="提供商配置字段")
+
+
+class ContextWindowUpdateRequest(BaseModel):
+    """上下文窗口配置更新请求，仅允许白名单字段。"""
+    max_context_length: int | None = None
+    compress_trigger_ratio: float | None = None
+    budgets: dict[str, Any] | None = None
+    compression: dict[str, Any] | None = None
+    layer_order: list[str] | None = None
+    include_tools_description_in_prompt: bool | None = None
+    static_vars: dict[str, Any] | None = None
+    dynamic_vars: dict[str, Any] | None = None
+    custom_layers: dict[str, Any] | None = None
+
+
+class GenericConfigUpdateRequest(BaseModel):
+    """通用配置更新请求，data 为完整配置内容（白名单校验路径）。"""
+    data: dict[str, Any] = Field(description="配置文件完整内容")
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +97,12 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+
+    # 通知 ConfigCenter 重载（best-effort：单例懒加载，失败仅记录不影响写入）
+    try:
+        get_config_center().reload(str(path))
+    except Exception:
+        logger.warning("ConfigCenter reload 失败: %s", path, exc_info=True)
 
 
 def _mask_key(key: str) -> str:
@@ -122,18 +180,19 @@ def get_defaults() -> dict[str, Any]:
 
 
 @router.put("/llm/defaults", summary="更新默认模型配置")
-def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
+def save_defaults(body: LlmDefaultsUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     if "defaults" not in data:
         data["defaults"] = {}
-    for key in ("chat", "embedding"):
-        if key in body:
-            data["defaults"][key] = body[key]
-    if "tiers" in body:
-        data["defaults"]["tiers"] = body["tiers"]
+    if body.chat is not None:
+        data["defaults"]["chat"] = body.chat
+    if body.embedding is not None:
+        data["defaults"]["embedding"] = body.embedding
+    if body.tiers is not None:
+        data["defaults"]["tiers"] = body.tiers
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
-    logger.info("LLM 默认配置已更新: %s", body)
+    logger.info("LLM 默认配置已更新: %s", body.model_dump(exclude_none=True))
     return {
         "chat": data["defaults"].get("chat", ""),
         "embedding": data["defaults"].get("embedding", ""),
@@ -142,24 +201,24 @@ def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/llm/models", summary="添加模型")
-def add_model(body: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def add_model(body: ModelAddRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
-    for model_id, model_conf in body.items():
+    for model_id, model_conf in body.models.items():
         models[model_id] = model_conf
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
-    logger.info("添加模型: %s", list(body.keys()))
+    logger.info("添加模型: %s", list(body.models.keys()))
     return {"models": models}
 
 
 @router.put("/llm/models/{model_id}", summary="更新模型配置")
-def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def update_model(model_id: str, body: ModelConfigUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
     if model_id not in models:
         raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
-    models[model_id].update(body)
+    models[model_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("更新模型配置: %s", model_id)
@@ -180,12 +239,12 @@ def delete_model(model_id: str) -> dict[str, Any]:
 
 
 @router.put("/llm/providers/{provider_id}", summary="更新提供商配置")
-def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def update_provider(provider_id: str, body: ProviderConfigUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     providers = data.setdefault("providers", {})
     if provider_id not in providers:
         providers[provider_id] = {}
-    providers[provider_id].update(body)
+    providers[provider_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("更新提供商配置: %s", provider_id)
@@ -198,7 +257,7 @@ def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
 
 _DEFAULT_CONTEXT_WINDOW: dict[str, Any] = {
     "version": "2.0",
-    "compress_trigger_ratio": 0.5,
+    "compress_trigger_ratio": 0.55,
     "budgets": {
         "system_prompt": 0.06,
         "tools_description": 0.0,
@@ -211,40 +270,66 @@ _DEFAULT_CONTEXT_WINDOW: dict[str, Any] = {
         "retrieval": 0.05,
         "response_reserve": 0.14,
     },
+    "include_tools_description_in_prompt": False,
+    "templates": {},
+    "stability": {
+        "system_prompt": "stable",
+        "tools_description": "stable",
+        "static_vars": "stable",
+        "l3_memory": "semi_stable",
+        "l2_memory": "semi_stable",
+        "l1_memory": "semi_stable",
+        "recent_messages": "dynamic",
+        "dynamic_vars": "dynamic",
+    },
+    "budget_mapping": {},
+    "layer_order": [
+        "system_prompt",
+        "tools_description",
+        "static_vars",
+        "l3",
+        "l2",
+        "l1",
+        "recent",
+        "dynamic_variables",
+    ],
+    "static_vars": {"enabled": True, "sources": []},
+    "dynamic_vars": {
+        "enabled": True,
+        "vars": ["Date", "Time", "Knowledge", "Retrieval", "Rules"],
+        "rules": {"enabled": True, "hard_constraints": [], "max_rules": 10},
+    },
+    "compression": {
+        "enabled": True,
+        "model": "",
+        "layer_trigger_ratio": 0.8,
+        "max_turn_ratio": 0.5,
+    },
+    "custom_layers": {},
 }
 
 
 @router.get("/context-window", summary="获取上下文窗口配置")
 def get_context_window_config() -> dict[str, Any]:
-    data = _read_yaml(_CONTEXT_WINDOW_YAML)
-    budgets = data.get("budgets", {})
-    return {
-        "max_context_length": data.get("max_context_length", 200000),
-        "reserved_system_messages": data.get("reserved_system_messages", 3),
-        "reserved_recent_messages": data.get("reserved_recent_messages", 10),
-        "summary_threshold": data.get("compress_trigger_ratio", 0.5),
-        "budgets": budgets,
-        "version": data.get("version", "2.0"),
-        "stability": data.get("stability", {}),
-        "compression": data.get("compression", {}),
-    }
+    """返回完整的上下文窗口配置，字段与 YAML 文件一一对应。"""
+    return _read_yaml(_CONTEXT_WINDOW_YAML)
 
 
 @router.put("/context-window", summary="更新上下文窗口配置")
-def update_context_window_config(body: dict[str, Any]) -> dict[str, Any]:
+def update_context_window_config(body: ContextWindowUpdateRequest) -> dict[str, Any]:
+    """合并前端提交的字段到现有配置，支持 budgets/compression 等嵌套对象。"""
     data = _read_yaml(_CONTEXT_WINDOW_YAML)
-    if "max_context_length" in body:
-        data["max_context_length"] = body["max_context_length"]
-    if "reserved_system_messages" in body:
-        data["reserved_system_messages"] = body["reserved_system_messages"]
-    if "reserved_recent_messages" in body:
-        data["reserved_recent_messages"] = body["reserved_recent_messages"]
-    if "summary_threshold" in body:
-        data["compress_trigger_ratio"] = body["summary_threshold"]
-    if "budgets" in body:
-        data["budgets"] = body["budgets"]
+    _EDITABLE_KEYS = {  # noqa: N806
+        "max_context_length", "compress_trigger_ratio", "budgets", "compression", "layer_order",
+        "include_tools_description_in_prompt", "static_vars", "dynamic_vars",
+        "custom_layers",
+    }
+    body_data = body.model_dump(exclude_none=True)
+    for key in _EDITABLE_KEYS:
+        if key in body_data:
+            data[key] = body_data[key]
     _write_yaml(_CONTEXT_WINDOW_YAML, data)
-    logger.info("上下文窗口配置已更新")
+    logger.info("上下文窗口配置已更新: %s", list(body_data.keys()))
     return get_context_window_config()
 
 
@@ -265,7 +350,7 @@ def get_api_config() -> dict[str, Any]:
         return _read_yaml(_API_YAML)
     return {
         "endpoint": {
-            "base_url": "http://localhost:8888",
+            "base_url": "http://localhost:8988",
             "version": "v1",
             "timeout": 30,
         },
@@ -280,10 +365,10 @@ def get_api_config() -> dict[str, Any]:
 
 
 @router.put("/api", summary="更新 API 配置")
-def save_api_config(body: dict[str, Any]) -> dict[str, Any]:
-    _write_yaml(_API_YAML, body)
+def save_api_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    _write_yaml(_API_YAML, body.data)
     logger.info("API 配置已更新")
-    return body
+    return body.data
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +405,10 @@ def get_concurrency_config() -> dict[str, Any]:
 
 
 @router.put("/concurrency", summary="更新并发配置")
-def save_concurrency_config(body: dict[str, Any]) -> dict[str, Any]:
-    _write_yaml(_CONCURRENCY_YAML, body)
+def save_concurrency_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    _write_yaml(_CONCURRENCY_YAML, body.data)
     logger.info("并发配置已更新")
-    return body
+    return body.data
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +446,122 @@ def get_cost_control_config() -> dict[str, Any]:
 
 
 @router.put("/cost-control", summary="更新成本控制配置")
-def save_cost_control_config(body: dict[str, Any]) -> dict[str, Any]:
-    _write_yaml(_COST_CONTROL_YAML, body)
+def save_cost_control_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    _write_yaml(_COST_CONTROL_YAML, body.data)
     logger.info("成本控制配置已更新")
-    return body
+    return body.data
+
+
+# ---------------------------------------------------------------------------
+# 通用配置端点（白名单模式，供前端 GenericConfigPage 使用）
+# ---------------------------------------------------------------------------
+
+_GENERIC_CONFIG_WHITELIST: dict[str, Path] = {
+    "system/memory_storage": _CONFIG_SYSTEM_DIR / "memory_storage.yaml",
+    "system/editor_config": _CONFIG_SYSTEM_DIR / "editor_config.yaml",
+    "system/long_term_task": _CONFIG_SYSTEM_DIR / "long_term_task.yaml",
+    "models/media_providers": _CONFIG_MODELS_DIR / "media_providers.yaml",
+    "isolation/isolation_config": _CONFIG_ROOT / "isolation" / "isolation_config.yaml",
+    "isolation/isolation_policy": _CONFIG_ROOT / "isolation" / "isolation_policy.yaml",
+    "isolation/security_rules": _CONFIG_ROOT / "isolation" / "security_rules.yaml",
+    "isolation/approval": _CONFIG_ROOT / "isolation" / "approval.yaml",
+    "evaluation/evaluation_metrics": _CONFIG_ROOT / "evaluation" / "evaluation_metrics.yaml",
+    "capability_adapters": _CONFIG_ROOT / "capability_adapters.yaml",
+    "external_tools/default": _CONFIG_ROOT / "external_tools" / "default.yaml",
+    "external_tools/godot": _CONFIG_ROOT / "external_tools" / "godot.yaml",
+    "external_tools/vscode": _CONFIG_ROOT / "external_tools" / "vscode.yaml",
+    "pipelines/default": _CONFIG_ROOT / "pipelines" / "default.yaml",
+    "pipelines/l1-main": _CONFIG_ROOT / "pipelines" / "l1-main.yaml",
+    "pipelines/l2-evaluator": _CONFIG_ROOT / "pipelines" / "l2-evaluator.yaml",
+    "pipelines/l2-subtask": _CONFIG_ROOT / "pipelines" / "l2-subtask.yaml",
+}
+
+
+@router.get("/generic/{config_path:path}", summary="获取通用配置")
+def get_generic_config(config_path: str) -> dict[str, Any]:
+    """根据路径读取 YAML 配置文件（白名单校验）。"""
+    if config_path not in _GENERIC_CONFIG_WHITELIST:
+        raise HTTPException(status_code=404, detail=f"未知配置路径: {config_path}")
+    return _read_yaml(_GENERIC_CONFIG_WHITELIST[config_path])
+
+
+@router.put("/generic/{config_path:path}", summary="更新通用配置")
+def save_generic_config(config_path: str, body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    """根据路径写入 YAML 配置文件（白名单校验），并触发 config_center reload。"""
+    if config_path not in _GENERIC_CONFIG_WHITELIST:
+        raise HTTPException(status_code=404, detail=f"未知配置路径: {config_path}")
+    file_path = _GENERIC_CONFIG_WHITELIST[config_path]
+    _write_yaml(file_path, body.data)
+
+    # 触发 config_center reload，使 watcher 生效（热更新）
+    try:
+        from config.config_center import get_config_center  # noqa: PLC0415
+        rel = str(file_path).replace("\\", "/")
+        if "config/" in rel:
+            rel = rel[rel.index("config/") + len("config/"):]
+        get_config_center().reload(rel)
+        logger.info("通用配置已更新并触发 reload: %s", config_path)
+    except Exception as e:
+        logger.warning("通用配置 reload 失败: %s | error=%s", config_path, e)
+
+    return body.data
+
+# ---------------------------------------------------------------------------
+# 手动热重载端点
+# ---------------------------------------------------------------------------
+
+# 仅允许 YAML 配置文件触发重载（防止任意文件触发，backend_rules §5.1）
+_ALLOWED_RELOAD_EXTS = {".yaml", ".yml"}
+
+
+@router.post(
+    "/configs/{config_path:path}:reload",
+    summary="手动重载配置",
+    dependencies=[Depends(require_auth)],
+)
+def reload_config(config_path: str) -> dict[str, Any]:
+    """手动触发配置文件重载。
+
+    调用 ConfigCenter.reload() 重新读取并应用配置。
+
+    Raises:
+        APIError: 403 路径越界 / 400 类型不允许 / 404 不存在 / 400 解析失败
+    """
+    resolved = (_CONFIG_ROOT / config_path).resolve()
+    try:
+        resolved.relative_to(_CONFIG_ROOT.resolve())
+    except ValueError:
+        raise APIError(
+            status_code=403,
+            error_code="CFG_PERM_4001",
+            message="路径不在允许的配置目录内",
+        ) from None  # GE-8: relative_to 抛 ValueError，显式断链
+
+    if resolved.suffix.lower() not in _ALLOWED_RELOAD_EXTS:
+        raise APIError(
+            status_code=400,
+            error_code="CFG_TYPE_4002",
+            message=f"仅支持 YAML 配置文件，得到: {resolved.suffix}",
+        )
+
+    try:
+        result = get_config_center().reload(str(resolved))
+    except FileNotFoundError as e:
+        raise APIError(
+            status_code=404,
+            error_code="CFG_NOTF_4004",
+            message=f"配置文件不存在: {config_path}",
+        ) from e
+    except ValueError as e:
+        raise APIError(
+            status_code=400,
+            error_code="CFG_PARSE_4005",
+            message=str(e),
+        ) from e
+
+    # 字段白名单：只返回可公开的元数据，过滤 ConfigCenter 内部字段（GE-7）
+    return {
+        "config_path": config_path,
+        "config_type": result.get("config_type"),
+        "success": result.get("success", False),
+    }

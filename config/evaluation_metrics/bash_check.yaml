@@ -74,7 +74,7 @@ when_to_use:
   - 构建检查（pip install -e . / npm run build）
   - 安装检查（pip audit / npm audit）
   - 覆盖率检查（pytest --cov=src --cov-fail-under=80）
-  - 端口/服务检查（curl http://localhost:8888/health）
+  - 端口/服务检查（curl http://localhost:8988/health）
   - 数据库检查（数据库CLI命令）
   - 环境版本检查（python --version）
 when_not_use:
@@ -94,7 +94,7 @@ examples:
       command: pip audit
     description: "安全审计"
   - params:
-      command: curl -s http://localhost:8888/health
+      command: curl -s http://localhost:8988/health
     description: "服务健康检查"
 caveats:
   - 命令由执行 Agent 在任务上下文中提供，评估阶段只负责执行和判断

@@ -4,6 +4,7 @@ Cua Docker 隔离提供者
 使用 Docker SDK 创建容器进行隔离
 """
 
+import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -57,13 +58,13 @@ class CuaProvider(IsolationProvider):
         """
         try:
             # 尝试导入 docker
-            import importlib
+            import importlib  # noqa: PLC0415
 
             if importlib.util.find_spec("docker") is None:
                 return False, "Docker SDK 未安装。请运行: pip install docker"
 
             # 尝试连接 Docker daemon
-            import docker
+            import docker  # noqa: PLC0415
 
             client = docker.from_env()
             client.ping()
@@ -75,10 +76,9 @@ class CuaProvider(IsolationProvider):
             error_msg = str(e)
             if "ConnectionRefusedError" in error_msg or "connect" in error_msg.lower():
                 return False, "Docker 未运行。请启动 Docker Desktop 或 Docker daemon"
-            elif "timeout" in error_msg.lower():
+            if "timeout" in error_msg.lower():
                 return False, "Docker 响应超时。请检查 Docker 服务状态"
-            else:
-                return False, f"Docker 不可用: {error_msg}"
+            return False, f"Docker 不可用: {error_msg}"
 
     async def create_environment(
         self, context: IsolationContext
@@ -100,7 +100,7 @@ class CuaProvider(IsolationProvider):
             raise RuntimeError(f"Docker 不可用: {error}")
 
         try:
-            import docker
+            import docker  # noqa: PLC0415
 
             # 初始化 Docker 客户端
             if self._docker_client is None:
@@ -151,7 +151,7 @@ class CuaProvider(IsolationProvider):
 
         except Exception as e:
             logger.error(f"创建 Docker 容器失败: {e}", exc_info=True)
-            raise RuntimeError(f"创建 Docker 容器失败: {str(e)}")
+            raise RuntimeError(f"创建 Docker 容器失败: {str(e)}")  # noqa: B904
 
     async def destroy_environment(self, env_id: str) -> None:
         """销毁容器
@@ -201,16 +201,15 @@ class CuaProvider(IsolationProvider):
 
             if op_type == "command":
                 return await self._execute_command(container, operation)
-            elif op_type == "python_code":
+            if op_type == "python_code":
                 return await self._execute_python_code(container, operation)
-            elif op_type == "file_operation":
+            if op_type == "file_operation":
                 return await self._execute_file_op(container, operation)
-            else:
-                return ExecutionResult(
-                    success=False,
-                    output=None,
-                    error=f"不支持的操作类型: {op_type}",
-                )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=f"不支持的操作类型: {op_type}",
+            )
 
         except Exception as e:
             logger.error(f"在容器中执行操作失败: {e}", exc_info=True)
@@ -327,7 +326,7 @@ class CuaProvider(IsolationProvider):
 
                 return ExecutionResult(success=True, output={"exists": exists})
 
-            elif op == "delete":
+            if op == "delete":
                 # 删除文件
                 exit_code, output = container.exec_run(f"rm -f {path}", demux=True)
 
@@ -337,12 +336,11 @@ class CuaProvider(IsolationProvider):
                     error=None if exit_code == 0 else "删除失败",
                 )
 
-            else:
-                return ExecutionResult(
-                    success=False,
-                    output=None,
-                    error=f"不支持的文件操作: {op}",
-                )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=f"不支持的文件操作: {op}",
+            )
 
         except Exception as e:
             return ExecutionResult(
@@ -392,7 +390,5 @@ class CuaProvider(IsolationProvider):
     def __del__(self):
         """析构函数，清理资源"""
         if self._docker_client:
-            try:
+            with contextlib.suppress(Exception):
                 self._docker_client.close()
-            except Exception:
-                pass

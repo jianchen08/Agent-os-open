@@ -14,7 +14,6 @@
 3. **插件调度**：按优先级执行插件链，支持错误策略（ABORT/SKIP/RETRY/FALLBACK）
 4. **暂停/恢复**：支持管道挂起与外部唤醒
 5. **配置驱动**：从 YAML 文件加载管道配置并动态实例化插件
-6. **跨管道路由**：通过 PipelineRegistry 实现管道间平权路由
 
 ## 逻辑
 
@@ -61,7 +60,6 @@ IPlugin (ABC)
 | next_llm | 下一轮调用 LLM | state["core_type"] = "llm_call" |
 | next_tool | 下一轮执行工具 | state["core_type"] = "tool_execute" |
 | end | 管道结束 | state["ended"] = True |
-| delegate | 委派到子管道 | pipeline_registry.route() |
 | wait | 管道挂起 | 保存 state 快照，await 唤醒事件 |
 
 ### 插件执行链
@@ -126,7 +124,7 @@ run(user_input, agent_config)
 | `chain.py` | PluginChain | 插件执行链（排序 + 错误策略） |
 | `route.py` | InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable | 路由表（输入可叠加 + 输出互斥优先级） |
 | `engine.py` | PipelineEngine | 管道引擎（核心循环 + 暂停/恢复 + Agent 注入） |
-| `registry.py` | PluginRegistry, PipelineRegistry, RoutingRecord | 插件与管道注册表 |
+| `registry.py` | PluginRegistry, EngineRegistry, get_engine_registry | 插件与引擎注册表 |
 | `config.py` | PipelineConfig, PipelineConfigBuilder | 管道配置加载与构建 |
 | `config_store.py` | PipelineConfigStore | 管道配置存储（pipeline_id → PipelineConfig） |
 | `condition_parser.py` | parse_condition | 安全条件表达式解析器（替代 eval） |

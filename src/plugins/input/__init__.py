@@ -19,9 +19,9 @@ from plugins.input.prompt_build.plugin import PromptBuildPlugin
 from plugins.input.reasoning_check.plugin import ReasoningCheckPlugin
 from plugins.input.security_check.plugin import SecurityCheckPlugin
 from plugins.input.tool_cache.plugin import ToolCache
-from plugins.input.tool_schema.plugin import ToolSchemaPlugin
 from plugins.input.tool_call_guard.plugin import ToolCallGuard
 from plugins.input.tool_context.plugin import ToolContextPlugin
+from plugins.input.tool_schema.plugin import ToolSchemaPlugin
 from plugins.input.tool_schema_validator.plugin import ToolSchemaValidator
 
 __all__ = [

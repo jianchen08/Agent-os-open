@@ -136,9 +136,9 @@ class E2BProvider(IsolationProvider):
 
                 # 清理临时目录
                 try:
-                    import shutil
+                    import shutil  # noqa: PLC0415
 
-                    if os.path.exists(work_dir):
+                    if os.path.exists(work_dir):  # noqa: PTH110
                         shutil.rmtree(work_dir)
                         logger.info(f"清理沙箱工作目录: {work_dir}")
                 except Exception as e:
@@ -174,14 +174,13 @@ class E2BProvider(IsolationProvider):
 
             if op_type == "python_code":
                 return await self._execute_python_code(env, operation)
-            elif op_type == "command":
+            if op_type == "command":
                 return await self._execute_command(env, operation)
-            else:
-                return ExecutionResult(
-                    success=False,
-                    output=None,
-                    error=f"不支持的操作类型: {op_type}",
-                )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=f"不支持的操作类型: {op_type}",
+            )
 
         except Exception as e:
             logger.error(f"在沙箱中执行操作失败: {e}", exc_info=True)
@@ -221,10 +220,7 @@ class E2BProvider(IsolationProvider):
                 f.write(code)
 
             # 构建执行命令
-            if platform.system() == "Windows":
-                python_cmd = "python"
-            else:
-                python_cmd = "python3"
+            python_cmd = "python" if platform.system() == "Windows" else "python3"
 
             command = [python_cmd, code_file]
 
@@ -306,10 +302,7 @@ class E2BProvider(IsolationProvider):
             is_windows = platform.system() == "Windows"
 
             # 如果是 Windows，使用 cmd /c
-            if is_windows:
-                full_command = f'cmd /c "{command}"'
-            else:
-                full_command = command
+            full_command = f'cmd /c "{command}"' if is_windows else command
 
             # 创建进程
             process = await asyncio.create_subprocess_shell(
@@ -381,7 +374,6 @@ class E2BProvider(IsolationProvider):
 
         # 检查工作目录是否存在
         work_dir = env.provider_info.get("work_dir")
-        if work_dir and os.path.exists(work_dir):
+        if work_dir and os.path.exists(work_dir):  # noqa: PTH110
             return EnvironmentStatus(env.status)
-        else:
-            return EnvironmentStatus.STOPPED
+        return EnvironmentStatus.STOPPED

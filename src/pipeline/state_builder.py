@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 
 from pipeline.types import StateKeys, TargetType
@@ -27,6 +27,7 @@ def build_initial_state(
     pipeline_id: str,
     services: dict[str, Any],
     extra_state: dict[str, Any],
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """构建管道初始状态字典。
 
@@ -39,6 +40,7 @@ def build_initial_state(
         pipeline_id: 管道唯一标识，用于恢复历史记录
         services: 服务字典（包含 execution_record_storage 等）
         extra_state: 额外状态键值对
+        attachments: 附件列表（图片/文件等）
 
     Returns:
         管道初始状态字典
@@ -53,15 +55,23 @@ def build_initial_state(
         StateKeys.ENDED: False,
         "user_input": user_input,
         "messages": resolved_history,
+        StateKeys.ATTACHMENTS: attachments or [],
     }
+
+    # 标记本次管道是否携带继承来的历史对话（pipe 继承）。
+    # 判据：调用方显式传入了非空 conversation_history。
+    # workspace 继承不触碰消息，不会置真；两者组合继承时只要走了 pipe 就为真。
+    # engine._persist_inherited_history 据此把装载的历史落盘到新 pipeline 文件，
+    # 避免继承历史只活在内存里、管道结束后丢失（且使新管道可二次重试）。
+    state["_inherited_history"] = bool(conversation_history)
 
     if user_input:
         _last = resolved_history[-1] if resolved_history else {}
         if not (_last.get("role") == "user" and _last.get("content") == user_input):
             state["messages"].append({"role": "user", "content": user_input})
-            logger.info("[StateBuilder] appended user_input to messages (dedup skipped)")
+            logger.debug("[StateBuilder] appended user_input to messages (dedup skipped)")
         else:
-            logger.info("[StateBuilder] dedup: skipped appending user_input (last msg is same)")
+            logger.debug("[StateBuilder] dedup: skipped appending user_input (last msg is same)")
 
     if agent_config and hasattr(agent_config, "to_state"):
         agent_state = agent_config.to_state()
@@ -106,7 +116,6 @@ def resolve_conversation_history(
         return []
 
     history: list[dict[str, Any]] = []
-    # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
     _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
     for r in records:
         role = r.role or _type_to_role.get(r.type, "user")
@@ -122,14 +131,14 @@ def resolve_conversation_history(
             msg["tool_input"] = r.tool_input
         if getattr(r, "tool_calls_json", None):
             try:
-                import json as _json
+                import json as _json  # noqa: PLC0415
 
                 msg["tool_calls"] = _json.loads(r.tool_calls_json)
             except (ValueError, TypeError):
                 pass
         history.append(msg)
 
-    from infrastructure.task_worker import _reconstruct_tool_calls
+    from infrastructure.task_worker import _reconstruct_tool_calls  # noqa: PLC0415
 
     _reconstruct_tool_calls(history)
 
@@ -139,51 +148,3 @@ def resolve_conversation_history(
         pipeline_id,
     )
     return history
-
-
-def load_default_agent(agent_registry: Any | None) -> Any | None:
-    """加载系统默认 Agent 配置。
-
-    优先使用传入的 agent_registry；
-    如果没有传入，则内部创建 AgentRegistry。
-
-    优先级：
-    1. config/agents/default.yaml
-    2. config/agents/lingxi.yaml
-    3. 返回空配置（Engine 内部用默认值兜底）
-
-    Args:
-        agent_registry: 已注入的 AgentRegistry 实例，可为 None
-
-    Returns:
-        AgentConfig 实例，未找到返回 None
-    """
-    if agent_registry is not None:
-        registry = agent_registry
-    else:
-        from agents.registry import AgentRegistry
-        from agents.types import AgentLevel
-
-        project_root = Path(__file__).resolve().parent.parent.parent
-        agent_config_dir = project_root / "config" / "agents"
-
-        if not agent_config_dir.exists():
-            return None
-
-        registry = AgentRegistry()
-        count = registry.load_directory(agent_config_dir)
-        if count == 0:
-            return None
-
-    from agents.types import AgentLevel
-
-    for candidate in ["default", "lingxi"]:
-        config = registry.get(candidate)
-        if config:
-            return config
-
-    l1_agents = registry.find_by_level(AgentLevel.L1_MAIN)
-    if l1_agents:
-        return l1_agents[0]
-
-    return None

@@ -1,6 +1,12 @@
 """
 增强版 Bash 命令执行工具
 
+提供：
+- 支持长时间运行的进程（30秒阈值 + 回调机制）
+- 支持交互式输入（确认、密码等）
+- 智能日志压缩（3-5行摘要）
+- 自适应编码转换（Windows CMD GBK / Git Bash UTF-8 自动识别）
+
 暴露接口：
 - check(self, command: str) -> tuple[bool, bool, str | None]：check功能
 - get_tool_definition() -> Tool：get_tool_definition功能
@@ -41,9 +47,6 @@ class SecurityChecker:
     """
 
     # 危险命令正则模式（防止命令注入绕过）
-    # BUG-FIX-fix_20260324_143000_security: 使用正则表达式替代简单字符串匹配
-    # 问题根因: 原实现使用简单字符串包含检测，容易被管道符、命令替换、分号等方式绕过
-    # 修复方案: 使用正则表达式模式匹配，检测词边界、管道、命令替换等危险结构
     DANGEROUS_PATTERNS: ClassVar[list[str]] = [
         r"\brm\s+-rf\b",           # rm -rf（词边界匹配）
         r"\brm\s+-rf\s+/",         # rm -rf /（明确删除根目录）
@@ -51,8 +54,6 @@ class SecurityChecker:
         r"\|\s*sh\b",              # 管道到 sh
         r"\|\s*zsh\b",             # 管道到 zsh
         r"\|\s*fish\b",            # 管道到 fish
-        r"\$\([^)]+\)",            # $() 命令替换
-        r"`[^`]+`",                # `` 反引号命令替换
         r";\s*rm\b",               # 分号连接 rm
         r";\s*del\b",              # 分号连接 del
         r";\s*format\b",           # 分号连接 format
@@ -82,6 +83,8 @@ class SecurityChecker:
         "copy ",
         ">",
         ">>",
+        "$(",      # 命令替换（脚本常用，不应阻断）
+        "`",       # 反引号命令替换
     ]
 
     def __init__(self, allowed_commands: list[str] | None = None):
@@ -135,6 +138,10 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
     注意：隔离决策由上层 IsolationCoordinator 统一处理，
     本工具只负责在宿主机上执行命令。
     """
+
+    # 在主事件循环直接执行，避免 to_thread 每次创建独立循环
+    # 导致的 execute/input/terminate 跨循环问题
+    run_on_main_loop: ClassVar[bool] = True
 
     # 默认超时时间（秒）
     DEFAULT_TIMEOUT: ClassVar[int] = 30
@@ -420,10 +427,6 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     summary = self.process_manager.get_summary(pid)
 
                     if summary:
-                        # BUG-FIX-fix_20260324_143000_elapsed: 修复时间计算错误
-                        # 问题根因: 使用本次轮询时间 elapsed，而非进程总运行时间
-                        # 修复方案: 使用 time.time() - proc_info.start_time 计算进程总运行时间
-                        # 影响范围: 进程超时返回的 elapsed 值
                         return create_success_result(
                             data={
                                 "status": "running",
@@ -471,11 +474,10 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                         "warning": warning,
                     },
                 )
-            else:
-                return create_failure_result(
-                    error="无法获取进程摘要",
-                    error_code="SUMMARY_ERROR",
-                )
+            return create_failure_result(
+                error="无法获取进程摘要",
+                error_code="SUMMARY_ERROR",
+            )
 
         except Exception as e:
             return create_failure_result(
@@ -483,7 +485,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="EXECUTION_FAILED",
             )
 
-    async def _handle_continue(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _handle_continue(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """处理 continue 操作"""
         pid = inputs.get("pid")
         if not pid:
@@ -532,10 +534,6 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 # 再次触发回调
                 summary = self.process_manager.get_summary(pid)
 
-                # BUG-FIX-fix_20260324_143000_elapsed: 修复时间计算错误
-                # 问题根因: 混淆计算 elapsed + (time.time() - proc_info.start_time)，导致重复累加
-                # 修复方案: 使用 time.time() - proc_info.start_time 计算进程总运行时间
-                # 影响范围: continue 操作超时返回的 elapsed 值
                 return create_success_result(
                     data={
                         "status": "running",
@@ -661,13 +659,15 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="PROCESS_NOT_FOUND",
             )
 
-        # 获取摘要
+        # 获取摘要 + 实际输出
         summary = self.process_manager.get_summary(pid)
+        output = self.process_manager.get_output(pid)
 
         return create_success_result(
             data={
                 "status": proc_info.status,
                 "pid": pid,
+                "output": output,  # 完整输出文本
                 "summary": summary.get("summary", []) if summary else [],
                 "warnings": summary.get("warnings", 0) if summary else 0,
                 "errors": summary.get("errors", 0) if summary else 0,

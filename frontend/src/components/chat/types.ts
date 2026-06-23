@@ -75,10 +75,14 @@ export interface ChatContainerProps {
   onSendMessage: (params: SendMessageParams) => Promise<void>
   /** 停止生成回调 */
   onStopGenerate?: () => void
-  /** 当前 Token 使用量 */
+  /** 当前 Token 使用量（prompt tokens） */
   currentTokenUsage?: number
   /** 最大 Token 限制 */
   maxTokens?: number
+  /** 上一轮生成的 completion tokens */
+  completionTokens?: number
+  /** 上一轮总 tokens */
+  totalTokens?: number
   /** 模型名称 */
   modelName?: string
   /** 思考模式状态 */
@@ -171,8 +175,9 @@ export interface PendingFile {
     file_id: string
     filename: string
     mime_type: string
-    file_type: string
-    base64_data?: string
+    media_type: string
+    size: number
+    url: string
   }
 }
 
@@ -200,10 +205,14 @@ export interface ChatInputProps {
   enableDragDrop?: boolean
   /** 模型名称（用于文件上传） */
   modelName?: string
-  /** 当前 Token 使用量 */
+  /** 当前 Token 使用量（prompt tokens） */
   currentTokenUsage?: number
   /** 最大 Token 限制 */
   maxTokens?: number
+  /** 上一轮生成的 completion tokens */
+  completionTokens?: number
+  /** 上一轮总 tokens */
+  totalTokens?: number
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
   /** 思考模式状态 */

@@ -9,6 +9,7 @@ Redis Streams 事件总线实现
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -183,10 +184,8 @@ class RedisStreamsEventBus(EventBusBase):
         # 取消所有消费者任务
         for task in self._consumer_tasks.values():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
         self._consumer_tasks.clear()
         self._subscriptions.clear()
@@ -251,7 +250,7 @@ class RedisStreamsEventBus(EventBusBase):
         Returns:
             消息 ID
         """
-        import os
+        import os  # noqa: PLC0415
 
         # 检查是否在测试环境中，如果是，使用直接发布
         if os.environ.get("PYTEST_CURRENT_TEST"):
@@ -331,7 +330,7 @@ class RedisStreamsEventBus(EventBusBase):
         await self._notify_local_subscribers(event)
 
         # 记录到死信队列（可选）
-        try:
+        try:  # noqa: SIM105
             await self._send_to_dead_letter_queue(event, str(last_error))
         except Exception:
             pass  # 死信队列失败不影响本地通知
@@ -364,7 +363,7 @@ class RedisStreamsEventBus(EventBusBase):
             await self._process_batch()
         else:
             # 检查是否在测试环境中，如果是，立即处理批次
-            import os
+            import os  # noqa: PLC0415
 
             if os.environ.get("PYTEST_CURRENT_TEST"):
                 await self._process_batch()
@@ -388,7 +387,7 @@ class RedisStreamsEventBus(EventBusBase):
                 0.1, lambda: asyncio.create_task(self._process_batch())
             )
 
-    async def _process_batch(self) -> None:
+    async def _process_batch(self) -> None:  # noqa: PLR0912
         """
         处理批处理队列中的事件
         """
@@ -474,10 +473,8 @@ class RedisStreamsEventBus(EventBusBase):
                 except Exception as notify_error:
                     logger.error(f"通知本地订阅者失败: {notify_error}")
                 # 尝试发送到死信队列
-                try:
+                with contextlib.suppress(Exception):
                     await self._send_to_dead_letter_queue(event, str(e))
-                except Exception:
-                    pass
                 self._record_publish_metrics(start_time, False)
 
     async def _notify_local_subscribers(self, event: ExecutionEvent) -> None:
@@ -689,10 +686,7 @@ class RedisStreamsEventBus(EventBusBase):
         redis = await self._ensure_redis()
 
         # 选择流
-        if session_id:
-            stream = self._get_session_stream(session_id)
-        else:
-            stream = self.main_stream
+        stream = self._get_session_stream(session_id) if session_id else self.main_stream
 
         # 设置时间范围
         start = start_time or "-"

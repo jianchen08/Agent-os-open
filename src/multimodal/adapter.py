@@ -141,7 +141,7 @@ class ClaudeVisionAdapter(MultimodalAdapter):
 
         for attachment in attachments:
             # 只处理图片类型
-            if attachment.media_type == MediaType.IMAGE:
+            if attachment.media_type == MediaType.IMAGE:  # noqa: SIM102
                 # 使用base64数据
                 if attachment.base64_data:
                     messages.append({

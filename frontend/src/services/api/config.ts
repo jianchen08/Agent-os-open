@@ -92,17 +92,49 @@ export interface LLMConfigResponse {
 }
 
 /**
+ * 压缩配置子项
+ */
+export interface CompressionConfig {
+  /** 是否启用压缩 */
+  enabled: boolean
+  /** 压缩使用的模型（空则跟随主模型） */
+  model: string
+  /** 单层压缩触发比例 */
+  layer_trigger_ratio: number
+  /** 单轮次最大压缩比例 */
+  max_turn_ratio: number
+}
+
+/**
  * 上下文窗口配置类型
+ *
+ * 与后端 config/system/context_window_config.yaml 一一对应
  */
 export interface ContextWindowConfig {
-  /** 最大上下文长度 */
-  max_context_length: number
-  /** 保留的系统消息数 */
-  reserved_system_messages: number
-  /** 保留的最近消息数 */
-  reserved_recent_messages: number
-  /** 摘要阈值 */
-  summary_threshold: number
+  /** 配置版本 */
+  version: string
+  /** 压缩触发比例（占用达到此比例时触发压缩） */
+  compress_trigger_ratio: number
+  /** 各层 Token 预算分配（百分比，总和 = 1.0） */
+  budgets: Record<string, number>
+  /** 是否在 prompt 中包含工具描述 */
+  include_tools_description_in_prompt: boolean
+  /** 各层稳定性标记 */
+  stability: Record<string, string>
+  /** 层级顺序 */
+  layer_order: string[]
+  /** 静态变量配置 */
+  static_vars: { enabled: boolean; sources: string[] }
+  /** 动态变量配置 */
+  dynamic_vars: {
+    enabled: boolean
+    vars: string[]
+    rules: { enabled: boolean; hard_constraints: string[]; max_rules: number }
+  }
+  /** 压缩设置 */
+  compression: CompressionConfig
+  /** 自定义层 */
+  custom_layers: Record<string, unknown>
 }
 
 export async function getLLMConfig(options: RetryOptions = {}): Promise<LLMConfigResponse> {
@@ -426,6 +458,50 @@ export async function saveCostControlConfig(
     const response = await apiClient.put<CostControlConfigResponse>(
       API_ENDPOINTS.CONFIG.COST_CONTROL_UPDATE,
       config,
+    )
+    return response.data
+  }, options)
+}
+
+
+// ---------------------------------------------------------------------------
+// 通用配置（供 GenericConfigPage 使用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 获取通用配置
+ *
+ * @param configPath 配置路径（白名单中的 key，如 "system/memory_storage"）
+ * @param options 重试选项
+ */
+export async function getGenericConfig(
+  configPath: string,
+  options: RetryOptions = {},
+): Promise<Record<string, unknown>> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<Record<string, unknown>>(
+      API_ENDPOINTS.CONFIG.GENERIC_GET(configPath),
+    )
+    return response.data
+  }, options)
+}
+
+/**
+ * 保存通用配置
+ *
+ * @param configPath 配置路径
+ * @param data 完整配置数据
+ * @param options 重试选项
+ */
+export async function saveGenericConfig(
+  configPath: string,
+  data: Record<string, unknown>,
+  options: RetryOptions = {},
+): Promise<Record<string, unknown>> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.put<Record<string, unknown>>(
+      API_ENDPOINTS.CONFIG.GENERIC_UPDATE(configPath),
+      data,
     )
     return response.data
   }, options)

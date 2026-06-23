@@ -259,12 +259,7 @@ class AgentConfig:
         """
         state: dict[str, Any] = {}
 
-        # BUG-FIX-fix_20260515_parent_agent_level:
-        # 将 Agent 层级写入 state，确保 ParamInjectPlugin 能读到 agent_level
-        # 并注入为 parent_agent_level 参数到 task_submit 等工具。
-        # 此前 agent_level 仅由 ContextBuildPlugin 通过插件配置设置，
-        # 若 agent YAML 未配置 plugins.enabled.context_build.agent_level，
-        # 则 state 中缺失该值导致 parent_agent_level 注入失败。
+        # 将 Agent 层级写入 state，供 ParamInjectPlugin 注入 parent_agent_level
         state["agent_level"] = self.level.value
 
         if self.config_id:
@@ -340,11 +335,7 @@ class AgentConfig:
         if self.max_reminders:
             state["max_reminders"] = self.max_reminders
 
-        # BUG-FIX-fix_20260425_timeout_neg1:
-        # 问题根因: timeout_seconds=-1（无限制）时，原条件 `self.timeout_seconds and self.timeout_seconds > 0`
-        #           会将 -1 过滤掉（-1 and False → False），导致 state 中无此键，
-        #           stop_check 插件使用默认值 600s，主管道被错误超时终止。
-        # 修复方案: 使用 `is not None and != 0` 判断，允许 -1 通过。
+        # 允许 timeout_seconds=-1（无限制）通过
         if self.timeout_seconds is not None and self.timeout_seconds != 0:
             state["timeout_seconds"] = self.timeout_seconds
 

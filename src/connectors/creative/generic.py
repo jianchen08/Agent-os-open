@@ -15,8 +15,9 @@ from typing import Any
 
 import aiohttp
 
-from connectors.base import BaseConnector
-from connectors.types import (
+from ..base import BaseConnector
+from ..config_mixin import ConfigSubscriberMixin
+from ..types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,
@@ -27,7 +28,7 @@ from connectors.types import (
 logger = logging.getLogger(__name__)
 
 
-class GenericCreativeConnector(BaseConnector):
+class GenericCreativeConnector(BaseConnector, ConfigSubscriberMixin):
     """通用创意软件连接器。
 
     可配置的通用连接器，通过 HTTP REST API 连接外部创作软件：
@@ -95,6 +96,7 @@ class GenericCreativeConnector(BaseConnector):
 
     async def disconnect(self) -> None:
         """断开连接。"""
+        self.unsubscribe_config()
         if self._session:
             await self._session.close()
             self._session = None
@@ -124,11 +126,10 @@ class GenericCreativeConnector(BaseConnector):
         try:
             if action.action_type == "capture_screenshot":
                 return await self._capture_screenshot(action.parameters)
-            elif action.action_type == "execute_command":
+            if action.action_type == "execute_command":
                 return await self._execute_command(action.parameters)
-            else:
-                # 通用操作：直接转发到 API
-                return await self._forward_action(action)
+            # 通用操作：直接转发到 API
+            return await self._forward_action(action)
         except Exception as e:
             return ActionResult(success=False, error=str(e))
 
@@ -167,3 +168,18 @@ class GenericCreativeConnector(BaseConnector):
         ) as resp:
             data = await resp.json()
             return ActionResult(success=resp.status == 200, data=data)
+
+    def _on_config_changed(
+        self, event_type: str, file_path: str, context: dict[str, Any],
+    ) -> None:
+        """配置变更回调：记录日志。
+
+        Args:
+            event_type: 事件类型
+            file_path: 变更文件路径
+            context: 变更上下文
+        """
+        self._logger.info(
+            "%s 配置变更: event=%s, path=%s",
+            self._name, event_type, file_path,
+        )

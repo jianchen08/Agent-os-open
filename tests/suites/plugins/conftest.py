@@ -54,8 +54,8 @@ def _get_plugin_classes():
 
     input_modules = {
         "tool_call_guard": os.path.join(input_dir, "tool_call_guard.py"),
-        "security_check": os.path.join(input_dir, "security_check.py"),
-        "isolation_guard": os.path.join(input_dir, "isolation_guard.py"),
+        "security_check": os.path.join(input_dir, "security_check", "plugin.py"),
+        "isolation_guard": os.path.join(input_dir, "isolation_guard", "plugin.py"),
         "level_guard": os.path.join(input_dir, "level_guard.py"),
         "cost_control": os.path.join(input_dir, "cost_control.py"),
         "tool_schema_validator": os.path.join(input_dir, "tool_schema_validator.py"),

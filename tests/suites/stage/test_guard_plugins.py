@@ -42,7 +42,8 @@ class TestLevelGuardPlugin:
         """测试插件名称和优先级。"""
         plugin = LevelGuardPlugin()
         assert plugin.name == "level_guard"
-        assert plugin.priority == 65
+        # 重构后 priority 从 65 改为 20（基于 tool_ids SSOT）
+        assert plugin.priority == 20
         assert plugin.error_policy == ErrorPolicy.ABORT
 
     def test_custom_priority(self):
@@ -71,11 +72,13 @@ class TestLevelGuardPlugin:
 
     @pytest.mark.asyncio
     async def test_l1_allowed_basic_tools(self):
-        """L1 可以调用基础工具（task_submit, resource_search 等）。"""
+        """L1 可以调用基础工具（在 tool_ids SSOT 授权集合内）。"""
         plugin = LevelGuardPlugin()
         state = create_initial_state()
         state[StateKeys.AGENT_LEVEL] = "l1_main"
         state[StateKeys.CORE_TYPE] = "tool_execute"
+        # 新逻辑：授权来源是 state["tool_ids"]（SSOT）
+        state["tool_ids"] = ["task_submit", "resource_search"]
         state[StateKeys.RAW_TOOL_CALLS] = [
             {"name": "task_submit", "args": {}},
             {"name": "resource_search", "args": {}},
@@ -86,28 +89,52 @@ class TestLevelGuardPlugin:
         assert decision["allowed"] is True
 
     @pytest.mark.asyncio
-    async def test_l1_blocked_dangerous_tool(self):
-        """L1 不能调用不在允许列表中的工具。"""
+    async def test_l1_blocked_unauthorized_task_tool(self):
+        """L1 不能调用不在 tool_ids 授权集合中的任务类工具（硬限制）。"""
         plugin = LevelGuardPlugin()
         state = create_initial_state()
         state[StateKeys.AGENT_LEVEL] = "l1_main"
         state[StateKeys.CORE_TYPE] = "tool_execute"
+        # task_manage 不在 tool_ids 中
+        state["tool_ids"] = ["task_submit", "resource_search"]
         state[StateKeys.RAW_TOOL_CALLS] = [
-            {"name": "bash", "args": {"command": "rm -rf /"}},
+            {"name": "task_manage", "args": {"action": "get"}},
         ]
         ctx = PluginContext(state=state)
         result = await plugin.execute(ctx)
         decision = result.state_updates["security.level_decision"]
         assert decision["allowed"] is False
-        assert "bash" in decision["blocked_tools"]
+        assert "task_manage" in decision["blocked_tools"]
+
+    @pytest.mark.asyncio
+    async def test_non_task_tool_soft_allowed(self):
+        """非任务类工具（如 bash/file_write）软放行：不在 tool_ids 也不拦截。
+
+        软限制由 tool_schema 可见性过滤 + 提示词约束兜底，level_guard 不硬拦。
+        """
+        plugin = LevelGuardPlugin()
+        state = create_initial_state()
+        state[StateKeys.AGENT_LEVEL] = "l1_main"
+        state[StateKeys.CORE_TYPE] = "tool_execute"
+        # bash / file_write 都不在 tool_ids 中
+        state["tool_ids"] = ["task_submit", "resource_search"]
+        state[StateKeys.RAW_TOOL_CALLS] = [
+            {"name": "bash", "args": {"command": "echo hi"}},
+            {"name": "file_write", "args": {"path": "/tmp/x", "content": "y"}},
+        ]
+        ctx = PluginContext(state=state)
+        result = await plugin.execute(ctx)
+        decision = result.state_updates["security.level_decision"]
+        assert decision["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_l2_more_tools_than_l1(self):
-        """L2 可以调用比 L1 更多的工具（包括 write_file）。"""
+        """L2 的 tool_ids 包含 write_file，可以调用。"""
         plugin = LevelGuardPlugin()
         state = create_initial_state()
         state[StateKeys.AGENT_LEVEL] = "l2_subtask"
         state[StateKeys.CORE_TYPE] = "tool_execute"
+        state["tool_ids"] = ["write_file", "read_file"]
         state[StateKeys.RAW_TOOL_CALLS] = [
             {"name": "write_file", "args": {"path": "/tmp/test.txt", "content": "hi"}},
         ]
@@ -118,11 +145,12 @@ class TestLevelGuardPlugin:
 
     @pytest.mark.asyncio
     async def test_l3_full_access(self):
-        """L3 拥有完全访问权限，不受限。"""
+        """L3 的 tool_ids 包含该工具，可以调用。"""
         plugin = LevelGuardPlugin()
         state = create_initial_state()
         state[StateKeys.AGENT_LEVEL] = "l3_atomic"
         state[StateKeys.CORE_TYPE] = "tool_execute"
+        state["tool_ids"] = ["any_dangerous_tool"]
         state[StateKeys.RAW_TOOL_CALLS] = [
             {"name": "any_dangerous_tool", "args": {}},
         ]
@@ -133,15 +161,13 @@ class TestLevelGuardPlugin:
 
     @pytest.mark.asyncio
     async def test_custom_allowed_list(self):
-        """自定义允许列表覆盖默认值。"""
-        plugin = LevelGuardPlugin({
-            "l1_allowed": ["read_file"],
-            "l2_allowed": ["read_file", "write_file"],
-        })
+        """tool_ids 未包含的工具会被拦截。"""
+        plugin = LevelGuardPlugin()
         state = create_initial_state()
         state[StateKeys.AGENT_LEVEL] = "l1_main"
         state[StateKeys.CORE_TYPE] = "tool_execute"
-        # task_submit 不在自定义 l1_allowed 中
+        # tool_ids 只包含 read_file
+        state["tool_ids"] = ["read_file"]
         state[StateKeys.RAW_TOOL_CALLS] = [
             {"name": "task_submit", "args": {}},
         ]
@@ -152,21 +178,25 @@ class TestLevelGuardPlugin:
 
     @pytest.mark.asyncio
     async def test_mixed_allowed_and_blocked(self):
-        """混合调用：部分允许、部分拦截。"""
+        """混合调用：任务类工具部分允许、部分拦截；非任务工具不参与拦截判断。"""
         plugin = LevelGuardPlugin()
         state = create_initial_state()
         state[StateKeys.AGENT_LEVEL] = "l1_main"
         state[StateKeys.CORE_TYPE] = "tool_execute"
+        # tool_ids 只授权 task_submit
+        state["tool_ids"] = ["task_submit"]
         state[StateKeys.RAW_TOOL_CALLS] = [
-            {"name": "task_submit", "args": {}},  # 允许
-            {"name": "bash", "args": {}},  # 拦截
+            {"name": "task_submit", "args": {}},  # 任务类工具，允许
+            {"name": "task_manage", "args": {}},  # 任务类工具，拦截
+            {"name": "bash", "args": {}},  # 非任务工具，软放行（不计入 blocked）
         ]
         ctx = PluginContext(state=state)
         result = await plugin.execute(ctx)
         decision = result.state_updates["security.level_decision"]
         assert decision["allowed"] is False
-        assert "bash" in decision["blocked_tools"]
+        assert "task_manage" in decision["blocked_tools"]
         assert "task_submit" not in decision["blocked_tools"]
+        assert "bash" not in decision["blocked_tools"]
 
     @pytest.mark.asyncio
     async def test_no_tool_calls_passes(self):

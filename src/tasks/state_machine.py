@@ -102,18 +102,15 @@ class SimpleStateMachine:
 # 旧代码中引用 TaskStateMachine，统一指向 SimpleStateMachine
 TaskStateMachine = SimpleStateMachine
 
-# 预定义的任务状态转换规则
+# 预定义的任务状态转换规则（7 种状态）
 _TASK_TRANSITIONS: dict[str, list[str]] = {
-    "pending": ["scheduled", "running", "cancelled", "suspended"],
-    "scheduled": ["running", "cancelled"],
-    "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled"],
-    "evaluating": ["completed", "failed", "running", "cancelled"],
-    "suspended": ["running", "cancelled", "timeout", "pending"],
-    "blocked": ["running", "cancelled", "failed"],
+    "pending": ["running", "stopped", "completed", "failed"],
+    "running": ["evaluating", "completed", "failed", "stopped", "timeout"],
+    "evaluating": ["running", "completed", "failed", "stopped"],
+    "stopped": ["running", "pending"],
     "completed": ["pending"],
-    "failed": ["pending"],
-    "cancelled": [],
-    "timeout": ["running", "cancelled", "failed"],
+    "failed": ["pending", "running"],
+    "timeout": ["running", "pending", "failed"],
 }
 
 

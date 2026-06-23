@@ -32,7 +32,7 @@ def sanitize_for_terminal(text: str) -> str:
     如果终端编码为 UTF-8，直接通过所有字符（包括 emoji）。
     如果终端编码为 GBK 等有限编码，替换不兼容字符为 ?。
     """
-    import sys
+    import sys  # noqa: PLC0415
 
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
     normalized = encoding.lower().replace("-", "").replace("_", "")
@@ -89,7 +89,7 @@ class StatusBarRenderer:
         self.completed_task_count: int = 0
         self.failed_task_count: int = 0
 
-    def update(
+    def update(  # noqa: PLR0912
         self,
         agent_name: str | None = None,
         model_name: str | None = None,
@@ -153,7 +153,7 @@ class StatusBarRenderer:
         if failed_task_count is not None:
             self.failed_task_count = failed_task_count
 
-    def render(self) -> Text:
+    def render(self) -> Text:  # noqa: PLR0912,PLR0915
         """渲染状态栏文本。
 
         左侧显示：模式标签、Agent名称、模型、轮次、上下文占用。
@@ -220,7 +220,7 @@ class StatusBarRenderer:
 
         # 构建带右对齐的完整行
         try:
-            from shutil import get_terminal_size
+            from shutil import get_terminal_size  # noqa: PLC0415
             term_width = get_terminal_size().columns
             if term_width < 40:
                 term_width = 80
@@ -289,7 +289,7 @@ class CLIOutputAdapter(IOutputAdapter):
             self._console = console
         else:
             try:
-                from shutil import get_terminal_size
+                from shutil import get_terminal_size  # noqa: PLC0415
                 detected_width = get_terminal_size().columns
                 width = detected_width if detected_width >= 40 else 80
             except Exception:

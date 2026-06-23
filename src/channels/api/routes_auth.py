@@ -16,6 +16,8 @@ from channels.api.auth import (
     get_current_user,
     verify_token,
 )
+from channels.api.deps import _extract_token
+from channels.api.memory_store import store
 from channels.api.models import (
     LoginRequest,
     RefreshRequest,
@@ -23,7 +25,7 @@ from channels.api.models import (
     TokenResponse,
     UserResponse,
 )
-from channels.api.memory_store import store
+from src.auth.password import verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +68,11 @@ def login(request: LoginRequest) -> TokenResponse:
         HTTPException: 用户名或密码错误
     """
     user = store.get_user_by_username(request.username)
-    if user is None or user["password"] != request.password:
+    # 使用 bcrypt 验证密码，禁止明文比对
+    stored_password = user.get("password", "") if user else ""
+    if not user or not stored_password or not verify_password(
+        request.password, stored_password
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -126,15 +132,13 @@ def register(request: RegisterRequest) -> TokenResponse:
 @router.get("/me", response_model=UserResponse, summary="获取当前用户信息")
 def get_me(
     authorization: str = Header(default=""),
-    token: str = "",
 ) -> UserResponse:
     """通过 Bearer token 获取当前用户信息。
 
-    支持 Authorization: Bearer <token> 头和 ?token= query 参数。
+    从 Authorization: Bearer <token> 头提取认证凭据。
 
     Args:
         authorization: Authorization 请求头
-        token: Query 参数中的 token（备选）
 
     Returns:
         UserResponse 用户信息
@@ -142,12 +146,8 @@ def get_me(
     Raises:
         HTTPException: token 无效
     """
-    # 优先从 Authorization 头提取 Bearer token
-    actual_token = ""
-    if authorization and authorization.startswith("Bearer "):
-        actual_token = authorization[7:]
-    elif token:
-        actual_token = token
+    # 从 Authorization 头提取 Bearer token
+    actual_token = _extract_token(authorization)
 
     if not actual_token:
         raise HTTPException(
@@ -182,19 +182,16 @@ def get_me(
 @router.post("/refresh", response_model=TokenResponse, summary="刷新令牌")
 def refresh_token(
     authorization: str = Header(default=""),
-    token: str = "",
     body: RefreshRequest | None = None,
 ) -> TokenResponse:
     """使用 refresh token 获取新的 access token。
 
-    支持三种方式传递 refresh token：
+    支持两种方式传递 refresh token：
     1. Authorization: Bearer <token> 头
-    2. ?token=<token> query 参数
-    3. JSON body: {"refresh_token": "<token>"}
+    2. JSON body: {"refresh_token": "<token>"}
 
     Args:
         authorization: Authorization 请求头
-        token: Query 参数中的 refresh token
         body: JSON body 中的 refresh_token
 
     Returns:
@@ -203,12 +200,8 @@ def refresh_token(
     Raises:
         HTTPException: refresh token 无效或已撤销
     """
-    actual_token = ""
-    if authorization and authorization.startswith("Bearer "):
-        actual_token = authorization[7:]
-    elif token:
-        actual_token = token
-    elif body and body.refresh_token:
+    actual_token = _extract_token(authorization)
+    if not actual_token and body and body.refresh_token:
         actual_token = body.refresh_token
 
     if not actual_token:
@@ -224,7 +217,7 @@ def refresh_token(
             detail="refresh token 已被撤销",
         )
 
-    payload = verify_token(actual_token)
+    payload = verify_token(actual_token, token_type="refresh")
     if payload is None or payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -265,27 +258,21 @@ def refresh_token(
 @router.post("/logout", summary="用户登出")
 def logout(
     authorization: str = Header(default=""),
-    token: str = "",
     body: RefreshRequest | None = None,
 ) -> dict[str, str]:
     """登出用户，撤销 refresh token。
 
-    支持 Authorization 头、query 参数和 JSON body。
+    支持 Authorization 头和 JSON body。
 
     Args:
         authorization: Authorization 请求头
-        token: Query 参数中的 refresh token
         body: JSON body 中的 refresh_token
 
     Returns:
         登出成功消息
     """
-    actual_token = ""
-    if authorization and authorization.startswith("Bearer "):
-        actual_token = authorization[7:]
-    elif token:
-        actual_token = token
-    elif body and body.refresh_token:
+    actual_token = _extract_token(authorization)
+    if not actual_token and body and body.refresh_token:
         actual_token = body.refresh_token
 
     if actual_token:

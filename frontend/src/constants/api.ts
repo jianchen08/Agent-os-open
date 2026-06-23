@@ -124,6 +124,9 @@ export const API_ENDPOINTS = {
     COST_CONTROL_GET: '/api/v1/config/cost-control',
     /** 更新成本控制配置 */
     COST_CONTROL_UPDATE: '/api/v1/config/cost-control',
+    /** 通用配置（动态路径） */
+    GENERIC_GET: (path: string) => `/api/v1/config/generic/${path}`,
+    GENERIC_UPDATE: (path: string) => `/api/v1/config/generic/${path}`,
   },
   /** 工具相关 - 对应后端 /api/v1/tools/* */
   TOOLS: {

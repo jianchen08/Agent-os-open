@@ -117,7 +117,7 @@ export const ThinkingDisplay: FC<{
 
 
   return (
-    <div className="border-border/50 bg-background/60 my-2 overflow-hidden rounded-lg border">
+    <div className="border-border/50 bg-background/60 overflow-hidden rounded-lg border">
       {/* 头部 */}
       <div
         className="hover:bg-muted/30 flex cursor-pointer items-center gap-2 px-3 py-2 transition-colors"

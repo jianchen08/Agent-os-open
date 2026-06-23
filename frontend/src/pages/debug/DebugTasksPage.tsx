@@ -8,6 +8,8 @@ import { useState, useEffect, useCallback } from 'react'
 import { Play } from 'lucide-react'
 import { getTaskList } from '@/services/api/monitoring'
 import { resumeTask } from '@/services/api/tasks'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import type { TaskInfo } from '@/types/monitoring'
 
 /** 任务状态选项 */
@@ -91,6 +93,27 @@ export function DebugTasksPage() {
   useEffect(() => {
     fetchTasks(page)
   }, [page, fetchTasks])
+
+  /**
+   * 监听任务状态变更 WS 事件，自动刷新当前列表
+   *
+   * BUG-FIX-fix_20260618_tasktree_refresh:
+   * 问题根因: 原依赖 taskStore 的 statusOverrides 增量覆盖，现已统一改为事件驱动重新拉取，
+   *          与 useRealtimeEvents 中的 task_status_changed / task_status_update 处理对齐。
+   * 影响范围: 调试任务页面的实时刷新
+   * 修复日期: 2026-06-18
+   */
+  useEffect(() => {
+    const handleStatusChange = () => {
+      fetchTasks(page, statusFilter || undefined)
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange as any)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange as any)
+    return () => {
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleStatusChange as any)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleStatusChange as any)
+    }
+  }, [fetchTasks, page, statusFilter])
 
   /** 状态过滤变更 */
   const handleStatusChange = (status: string) => {
@@ -190,47 +213,52 @@ export function DebugTasksPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {tasks.map((task) => (
-                    <tr key={task.id} className="hover:bg-accent/20 border-t">
-                      <td className="max-w-[200px] truncate px-4 py-2">
-                        {task.intent || task.name || task.id}
-                      </td>
-                      <td className="px-4 py-2">
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
-                        >
-                          {getTaskStatusLabel(task.status)}
-                        </span>
-                      </td>
-                      <td className="text-muted-foreground max-w-[200px] truncate px-4 py-2 text-xs">
-                        {task.error || task.description || task.current_step || '--'}
-                      </td>
-                      <td className="text-muted-foreground px-4 py-2 text-xs">
-                        {new Date(task.created_at).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2">
-                        {task.status === 'suspended' && (
-                          <button
-                            onClick={() => handleResume(task.id)}
-                            disabled={resumingIds.has(task.id)}
-                            className="inline-flex items-center gap-1 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
+                  {tasks.map((task) => {
+                    return (
+                      <tr
+                        key={task.id}
+                        className="border-t hover:bg-accent/20"
+                      >
+                        <td className="max-w-[200px] truncate px-4 py-2">
+                          {task.intent || task.name || task.id}
+                        </td>
+                        <td className="px-4 py-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs transition-colors duration-300 ${getTaskStatusStyle(task.status)}`}
                           >
-                            {resumingIds.has(task.id) ? (
-                              <>
-                                <div className="h-3 w-3 animate-spin rounded-full border border-primary border-t-transparent" />
-                                恢复中...
-                              </>
-                            ) : (
-                              <>
-                                <Play className="h-3 w-3" />
-                                恢复
-                              </>
-                            )}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                            {getTaskStatusLabel(task.status)}
+                          </span>
+                        </td>
+                        <td className="text-muted-foreground max-w-[200px] truncate px-4 py-2 text-xs">
+                          {task.error || task.description || task.current_step || '--'}
+                        </td>
+                        <td className="text-muted-foreground px-4 py-2 text-xs">
+                          {new Date(task.created_at).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2">
+                          {task.status === 'suspended' && (
+                            <button
+                              onClick={() => handleResume(task.id)}
+                              disabled={resumingIds.has(task.id)}
+                              className="inline-flex items-center gap-1 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
+                            >
+                              {resumingIds.has(task.id) ? (
+                                <>
+                                  <div className="h-3 w-3 animate-spin rounded-full border border-primary border-t-transparent" />
+                                  恢复中...
+                                </>
+                              ) : (
+                                <>
+                                  <Play className="h-3 w-3" />
+                                  恢复
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

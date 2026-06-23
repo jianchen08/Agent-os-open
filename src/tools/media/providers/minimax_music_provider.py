@@ -166,19 +166,18 @@ class MiniMaxMusicProvider(MediaProvider):
             "Content-Type": "application/json",
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"MiniMax 音乐生成任务提交失败 (status={resp.status}): {error_text}"
-                    )
-                result = await resp.json()
+        async with aiohttp.ClientSession() as session, session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"MiniMax 音乐生成任务提交失败 (status={resp.status}): {error_text}"
+                )
+            result = await resp.json()
 
         base_resp = result.get("base_resp", {})
         if base_resp.get("status_code", 0) != 0:
@@ -258,14 +257,13 @@ class MiniMaxMusicProvider(MediaProvider):
         Raises:
             RuntimeError: 下载失败
         """
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                audio_url,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"下载音乐文件失败 (status={resp.status})")
-                content = await resp.read()
+        async with aiohttp.ClientSession() as session, session.get(
+            audio_url,
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"下载音乐文件失败 (status={resp.status})")
+            content = await resp.read()
 
         filename = f"minimax_music_{uuid.uuid4().hex[:8]}.mp3"
         output_path = self._output_dir / filename

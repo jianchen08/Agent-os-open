@@ -253,7 +253,7 @@ class ConfigSchemaValidator:
         return results
 
     @staticmethod
-    def _detect_config_type(path: Path, data: dict[str, Any]) -> str:
+    def _detect_config_type(path: Path, data: dict[str, Any]) -> str:  # noqa: PLR0911
         """根据文件路径和内容自动检测配置类型。
 
         检测规则：

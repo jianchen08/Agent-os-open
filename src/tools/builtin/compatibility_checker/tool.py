@@ -9,6 +9,7 @@
 from typing import Any
 
 from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
     ToolCategory,
@@ -17,8 +18,6 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
-
-from tools.builtin.base import BuiltinTool
 
 
 class CompatibilityCheckerTool(BuiltinTool):

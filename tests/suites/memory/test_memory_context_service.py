@@ -34,7 +34,7 @@ class TestMemoryContextServiceInit:
         """不传配置时应使用默认值。"""
         svc = MemoryContextService()
         assert svc._config["context_window"] == 128000
-        assert svc._config["compress_trigger_ratio"] == 0.5
+        assert svc._config["compress_trigger_ratio"] == 0.55
 
     def test_有配置时覆盖默认值(self) -> None:
         """传入配置应覆盖默认值。"""
@@ -49,9 +49,9 @@ class TestMemoryContextServiceInit:
         assert svc._config["context_window"] == 128000
 
     def test_配置校验_缺少compress_trigger_ratio时用默认值(self) -> None:
-        """配置缺少 compress_trigger_ratio 时应使用默认值 0.5。"""
+        """配置缺少 compress_trigger_ratio 时应使用默认值 0.55。"""
         svc = MemoryContextService(config={"context_window": 128000})
-        assert svc._config["compress_trigger_ratio"] == 0.5
+        assert svc._config["compress_trigger_ratio"] == 0.55
 
     def test_注入compressor(self) -> None:
         """注入自定义压缩器。"""

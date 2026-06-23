@@ -15,8 +15,8 @@ from typing import Any
 
 import aiohttp
 
-from connectors.base import BaseConnector
-from connectors.types import (
+from ..base import BaseConnector
+from ..types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,
@@ -122,7 +122,7 @@ class GameEngineConnector(BaseConnector):
         except Exception as e:
             return ConnectorContext(metadata={"error": str(e)})
 
-    async def execute_action(self, action: ConnectorAction) -> ActionResult:
+    async def execute_action(self, action: ConnectorAction) -> ActionResult:  # noqa: PLR0911
         """执行操作指令。"""
         if not self._session or not self.is_connected:
             return ActionResult(success=False, error="未连接到 Game Engine")
@@ -130,22 +130,21 @@ class GameEngineConnector(BaseConnector):
         try:
             if action.action_type == "capture_screenshot":
                 return await self._capture_screenshot(action.parameters)
-            elif action.action_type == "get_scene_info":
+            if action.action_type == "get_scene_info":
                 return await self._get_scene_info()
-            elif action.action_type == "list_assets":
+            if action.action_type == "list_assets":
                 return await self._list_assets(action.parameters)
-            elif action.action_type == "import_asset":
+            if action.action_type == "import_asset":
                 return await self._import_asset(action.parameters)
-            elif action.action_type == "get_selection":
+            if action.action_type == "get_selection":
                 return await self._get_selection()
-            elif action.action_type == "execute_command":
+            if action.action_type == "execute_command":
                 return await self._execute_command(action.parameters)
-            elif action.action_type == "play_preview":
+            if action.action_type == "play_preview":
                 return await self._play_preview()
-            elif action.action_type == "stop_preview":
+            if action.action_type == "stop_preview":
                 return await self._stop_preview()
-            else:
-                return ActionResult(success=False, error=f"不支持的操作: {action.action_type}")
+            return ActionResult(success=False, error=f"不支持的操作: {action.action_type}")
         except Exception as e:
             return ActionResult(success=False, error=str(e))
 

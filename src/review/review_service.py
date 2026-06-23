@@ -20,7 +20,7 @@ _review_service: ReviewService | None = None
 
 def get_review_service() -> ReviewService:
     """获取全局审批服务单例。"""
-    global _review_service
+    global _review_service  # noqa: PLW0603
     if _review_service is None:
         _review_service = ReviewService()
     return _review_service
@@ -28,7 +28,7 @@ def get_review_service() -> ReviewService:
 
 def reset_review_service() -> None:
     """重置全局单例（测试用）。"""
-    global _review_service
+    global _review_service  # noqa: PLW0603
     _review_service = None
 
 
@@ -165,7 +165,7 @@ class ReviewService:
         self._feedbacks[review_id] = feedback
 
         # 更新审批状态
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime  # noqa: PLC0415
         now = datetime.now(UTC).isoformat()
 
         if response_type == "approved":
@@ -204,7 +204,7 @@ class ReviewService:
         if not review or review.status != ReviewStatus.PENDING:
             return False
 
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime  # noqa: PLC0415
         review.status = ReviewStatus.IN_REVIEW
         review.reviewed_at = datetime.now(UTC).isoformat()
         review.updated_at = datetime.now(UTC).isoformat()
@@ -225,7 +225,7 @@ class ReviewService:
         if review.status in (ReviewStatus.APPROVED, ReviewStatus.REJECTED, ReviewStatus.TIMEOUT):
             return False
 
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime  # noqa: PLC0415
         review.status = ReviewStatus.CANCELLED
         review.updated_at = datetime.now(UTC).isoformat()
         review.completed_at = datetime.now(UTC).isoformat()
@@ -317,7 +317,7 @@ class ReviewService:
         """处理审批超时。"""
         review = self._reviews.get(review_id)
         if review:
-            from datetime import UTC, datetime
+            from datetime import UTC, datetime  # noqa: PLC0415
             review.status = ReviewStatus.TIMEOUT
             review.updated_at = datetime.now(UTC).isoformat()
             review.completed_at = datetime.now(UTC).isoformat()

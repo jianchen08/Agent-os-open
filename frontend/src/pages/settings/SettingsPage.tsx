@@ -1,8 +1,11 @@
 /**
  * 设置中心页面
  *
- * 展示卡片网格链接到各设置子页面
+ * 展示卡片网格链接到各设置子页面，包括专用设置页和通用配置页。
  */
+
+import { Link } from 'react-router-dom'
+import { CONFIG_GROUPS } from '@/constants/genericConfigs'
 
 /** 设置项配置 */
 interface SettingCard {
@@ -12,13 +15,19 @@ interface SettingCard {
   icon: string
 }
 
-/** 所有设置项 */
+/** 基础设置页（有独立页面的配置） */
 const SETTINGS_CARDS: SettingCard[] = [
   {
     title: '模块设置',
     description: '管理已安装模块的配置',
     href: '/settings/modules',
     icon: '🧩',
+  },
+  {
+    title: '主题设置',
+    description: '切换界面主题和显示模式',
+    href: '/settings/theme',
+    icon: '🎨',
   },
   {
     title: 'API 配置',
@@ -36,7 +45,7 @@ const SETTINGS_CARDS: SettingCard[] = [
     title: '上下文窗口',
     description: '管理上下文窗口大小和策略',
     href: '/settings/context',
-    icon: '📐',
+    icon: '📏',
   },
   {
     title: '并发配置',
@@ -50,7 +59,22 @@ const SETTINGS_CARDS: SettingCard[] = [
     href: '/settings/cost',
     icon: '💰',
   },
+  {
+    title: '插件设置',
+    description: '管理插件配置',
+    href: '/settings/plugins',
+    icon: '🔌',
+  },
 ]
+
+/**
+ * REQ-19 补充的配置页面已合并到 CONFIG_GROUPS 通用配置分组中。
+ *
+ * 原先此处有 EXTENDED_SETTINGS_CARDS 数组，使用 CategoryConfigPage 组件。
+ * 为避免与 CONFIG_GROUPS 中的相同配置路径重复显示，已将 EXTENDED_SETTINGS_CARDS 移除。
+ * CategoryConfigPage 路由（/settings/memory 等）仍保留在 router.tsx 中，但设置中心
+ * 统一通过 CONFIG_GROUPS → /settings/generic/* 访问。
+ */
 
 /**
  * 设置中心页面组件
@@ -59,26 +83,63 @@ export function SettingsPage() {
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
       <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
+        <Link to="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
-        </a>
+        </Link>
         <h1 className="ml-4 text-base font-semibold">设置中心</h1>
       </header>
       <main className="flex-1 overflow-y-auto p-3 sm:p-6">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {SETTINGS_CARDS.map((card) => (
-            <a
-              key={card.href}
-              href={card.href}
-              className="bg-card hover:bg-accent/50 block rounded-lg border p-5 transition-colors"
-            >
-              <div className="mb-2 text-2xl">{card.icon}</div>
-              <h3 className="mb-1 text-sm font-semibold">{card.title}</h3>
-              <p className="text-muted-foreground text-xs">{card.description}</p>
-            </a>
-          ))}
-        </div>
+        {/* 基础设置 */}
+        <section className="mb-8">
+          <h2 className="text-foreground mb-4 text-sm font-semibold">基础设置</h2>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {SETTINGS_CARDS.map((card) => (
+              <SettingCardLink key={card.href} card={card} />
+            ))}
+          </div>
+        </section>
+
+        {/* 通用配置分组 */}
+        {CONFIG_GROUPS.map((group) => (
+          <section key={group.name} className="mb-8">
+            <h2 className="text-foreground mb-4 text-sm font-semibold">{group.name}</h2>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {group.items.map((item) => (
+                <SettingCardLink
+                  key={item.configPath}
+                  card={{
+                    title: item.title,
+                    description: item.description,
+                    href: `/settings/generic/${item.configPath}`,
+                    icon: item.icon,
+                  }}
+                />
+              ))}
+            </div>
+          </section>
+        ))}
       </main>
     </div>
+  )
+}
+
+/**
+ * 设置卡片链接
+ *
+ * BUG-FIX-fix_20260610_config_nav:
+ * 问题根因: 使用 <a href> 触发全页面重载，导致 React 状态丢失（含认证状态），
+ *          initializeAuth() 重新执行时若 token 刷新失败则 clearAuthAndRedirect() → 跳回主页。
+ * 修复方案: 改用 React Router <Link to>，实现 SPA 导航不刷新页面。
+ */
+function SettingCardLink({ card }: { card: SettingCard }) {
+  return (
+    <Link
+      to={card.href}
+      className="bg-card hover:bg-accent/50 block rounded-lg border p-5 transition-colors"
+    >
+      <div className="mb-2 text-2xl">{card.icon}</div>
+      <h3 className="mb-1 text-sm font-semibold">{card.title}</h3>
+      <p className="text-muted-foreground text-xs">{card.description}</p>
+    </Link>
   )
 }

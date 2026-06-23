@@ -286,15 +286,14 @@ class ResourceMergeTool(BuiltinTool):
 
         if merge_strategy == "copy":
             return await self._merge_copy(inputs, workspace)
-        elif merge_strategy in ("git_merge", "git_merge_no_ff"):
+        if merge_strategy in ("git_merge", "git_merge_no_ff"):
             return await self._git_merge(inputs, workspace)
-        else:
-            return create_failure_result(
-                error=f"不支持的合并策略: {merge_strategy}",
-                error_code="INVALID_MERGE_STRATEGY",
-            )
+        return create_failure_result(
+            error=f"不支持的合并策略: {merge_strategy}",
+            error_code="INVALID_MERGE_STRATEGY",
+        )
 
-    async def _merge_copy(
+    async def _merge_copy(  # noqa: PLR0912
         self, inputs: dict[str, Any], workspace: Path
     ) -> ToolResult:
         """通过文件复制方式将 workspace 变更合并到目标目录
@@ -314,10 +313,7 @@ class ResourceMergeTool(BuiltinTool):
             target_dir_str = inputs.get("target_dir")
             target_files = inputs.get("target_files", [])
 
-            if target_dir_str:
-                target_dir = self._resolve_path(target_dir_str)
-            else:
-                target_dir = self.base_path
+            target_dir = self._resolve_path(target_dir_str) if target_dir_str else self.base_path
 
             is_worktree = await self._git_helpers.is_worktree(workspace)
 
@@ -345,11 +341,10 @@ class ResourceMergeTool(BuiltinTool):
                             parts = line.strip().split("\t", 1)
                             if len(parts) == 2:
                                 changed_files.append(parts[1])
+            elif target_files:
+                changed_files = target_files
             else:
-                if target_files:
-                    changed_files = target_files
-                else:
-                    changed_files = self._scan_workspace_files(workspace)
+                changed_files = self._scan_workspace_files(workspace)
 
             merged_files: list[str] = []
             change_report: dict[str, list[str]] = {
@@ -372,10 +367,9 @@ class ResourceMergeTool(BuiltinTool):
                         change_report["modified"].append(file_rel_path)
                     else:
                         change_report["added"].append(file_rel_path)
-                else:
-                    if dst.exists():
-                        dst.unlink()
-                        change_report["deleted"].append(file_rel_path)
+                elif dst.exists():
+                    dst.unlink()
+                    change_report["deleted"].append(file_rel_path)
 
             logger.info(
                 "ResourceMerge merge: mode=%s, workspace=%s, target=%s, merged=%d files",
@@ -400,7 +394,7 @@ class ResourceMergeTool(BuiltinTool):
                 error_code="MERGE_FAILED",
             )
 
-    async def _git_merge(
+    async def _git_merge(  # noqa: PLR0911
         self, inputs: dict[str, Any], workspace: Path
     ) -> ToolResult:
         """通过 git merge 策略将 workspace 分支合并到主仓库
@@ -646,7 +640,7 @@ class ResourceMergeTool(BuiltinTool):
         """cleanup 操作：移除 worktree 并删除分支"""
 
         def _remove_readonly_func(func, path, _):
-            os.chmod(path, stat.S_IWRITE)
+            os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
             func(path)
 
         try:

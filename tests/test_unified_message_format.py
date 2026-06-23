@@ -9,6 +9,9 @@
 - 消息格式化工具函数（create_message/format_timestamp/validate_message）
 - 状态字段统一使用 MessageType 枚举值
 - 边界场景：空消息内容、未知消息类型、超长内容、无效时间戳
+
+NOTE: schemas.message 模块已在死代码清理中删除（0 外部生产引用）。
+此测试文件作为引用清理的一部分标记为 skip，待消息格式统一方案确定后再更新。
 """
 
 from __future__ import annotations
@@ -18,6 +21,9 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+# schemas.message 已作为死代码删除，整个测试文件 skip
+pytestmark = pytest.mark.skip(reason="schemas.message 已在死代码清理中删除，测试待更新")
 
 
 # =============================================================================

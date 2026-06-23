@@ -16,12 +16,14 @@ https://open.dingtalk.com/document/orgapp/stream-mode-protocol
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import time
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import aiohttp
 
@@ -139,10 +141,8 @@ class DingTalkStreamClient:
 
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._receive_task
-            except asyncio.CancelledError:
-                pass
             self._receive_task = None
 
         if self._session and not self._session.closed:
@@ -265,7 +265,7 @@ class DingTalkStreamClient:
             string_to_sign.encode("utf-8"),
             hashlib.sha256,
         ).digest()
-        import base64
+        import base64  # noqa: PLC0415
         return base64.b64encode(hmac_code).decode("utf-8")
 
     async def _receive_loop(self) -> None:

@@ -38,7 +38,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
-import type { Session } from '@/types'
+import type { Session } from '@/types/models'
 
 interface SessionListProps {
   /** 会话列表数据 */
@@ -172,7 +172,7 @@ const SessionItem = memo<SessionItemProps>(
                   }}
                 >
                   <Edit3 className="mr-2 h-4 w-4" />
-                  编辑
+                  编辑会话
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={(e) => {

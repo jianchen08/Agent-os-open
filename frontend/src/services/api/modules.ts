@@ -9,7 +9,7 @@ import apiClient from './client'
  * 获取所有模块的 UI Schema
  */
 export async function getModuleUISchemas() {
-  const response = await apiClient.get('/api/modules/ui')
+  const response = await apiClient.get('/api/v1/modules/ui')
   return response.data
 }
 
@@ -22,6 +22,6 @@ export async function registerClientCapabilities(capabilities: {
   clientType: string
   version: string
 }) {
-  const response = await apiClient.post('/api/client/register', capabilities)
+  const response = await apiClient.post('/api/v1/client/register', capabilities)
   return response.data
 }

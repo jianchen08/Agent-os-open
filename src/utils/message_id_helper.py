@@ -148,7 +148,7 @@ async def generate_task_id(
     Raises:
         IDGenerationError: 无法生成唯一ID时抛出
     """
-    from src.db.models import Task
+    from src.db.models import Task  # noqa: PLC0415
 
     if parent_task_id:
         result = await db.execute(
@@ -170,7 +170,7 @@ async def generate_task_id(
     new_seq = (decode_base36(max_id.split("-")[-1]) + 1) if max_id else 1
 
     max_attempts = 10
-    for attempt in range(max_attempts):
+    for _attempt in range(max_attempts):
         task_id = f"{base_id}-{encode_base36(new_seq, 5)}"
         existing = await db.execute(select(Task.id).where(Task.id == task_id))
         if not existing.scalar_one_or_none():

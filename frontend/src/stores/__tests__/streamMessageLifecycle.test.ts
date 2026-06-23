@@ -16,6 +16,8 @@ vi.mock('@/utils/logger', () => ({
 
 vi.mock('@/services/api/session', () => ({
   getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
+  // 导出真实的 mergeConsecutiveAssistantMessages（纯函数，无需 mock）
+  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
 }))
 
 vi.mock('@/utils/retry', () => ({
@@ -257,8 +259,8 @@ describe('stream 消息生命周期', () => {
     })
   })
 
-  describe('场景6: 消息 ID 格式差异去重', () => {
-    it('相同 sequence 的 assistant 消息应被识别为同一条', () => {
+  describe('场景6: 不同 ID 的消息不因 sequence 相同而合并（减法：已移除 sequence+role 模糊去重）', () => {
+    it('不同 ID 的 assistant 消息即使 sequence 相同也应保持独立', () => {
       const store = usePipelineMessageStore.getState()
 
       // WS 创建的占位符
@@ -273,7 +275,7 @@ describe('stream 消息生命周期', () => {
         status: 'streaming',
       })
 
-      // API 返回同 sequence 但不同 ID
+      // API 返回同 sequence 但不同 ID → 应为独立消息，不合并
       store.addMessage(PIPELINE_ID, {
         id: 'api-different-id',
         sessionId: SESSION_ID,
@@ -285,18 +287,26 @@ describe('stream 消息生命周期', () => {
         status: 'completed',
       })
 
-      // 不应该有两条
+      // 两条消息应独立存在
       const msgs = store.getMessages(PIPELINE_ID)
       const assistantMsgs = msgs.filter((m) => m.role === 'assistant')
-      expect(assistantMsgs.length).toBeLessThanOrEqual(2)
+      expect(assistantMsgs).toHaveLength(2)
 
-      // 原始 WS 消息应该能通过原始 ID 找到
+      // WS 消息应能通过原始 ID 找到
       const wsMsg = msgs.find((m) => m.id === MESSAGE_ID)
-      // 如果去重生效，wsMsg 可能被更新了
-      // 关键: stream_end 用 MESSAGE_ID updateMessage 时必须能找到
+      expect(wsMsg).toBeDefined()
+      expect(wsMsg!.status).toBe('streaming')
+
+      // API 消息也应独立存在
+      const apiMsg = msgs.find((m) => m.id === 'api-different-id')
+      expect(apiMsg).toBeDefined()
+      expect(apiMsg!.status).toBe('completed')
+
+      // stream_end 用 MESSAGE_ID updateMessage 时必须能找到
       store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
       const afterUpdate = store.getMessages(PIPELINE_ID).find((m) => m.id === MESSAGE_ID)
       expect(afterUpdate).toBeDefined()
+      expect(afterUpdate!.status).toBe('completed')
     })
   })
 })

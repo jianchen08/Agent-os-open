@@ -13,38 +13,33 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE_ROOT = ".ai_workspaces"
-_config_path = Path("config/isolation/isolation_config.yaml")
+
+
+def _load_isolation_config() -> dict:
+    """通过 ConfigCenter 读取 isolation 配置（统一缓存）。"""
+    try:
+        from config.config_center import get_config_center  # noqa: PLC0415
+        return get_config_center().get("isolation/isolation_config.yaml") or {}
+    except Exception as e:
+        logger.warning(f"读取 isolation 配置失败 | error={e}")
+        return {}
 
 
 def get_workspace_config_root() -> str:
     """从配置文件读取工作空间根目录，读取失败则返回默认值"""
-    try:
-        import yaml
-
-        if _config_path.exists():
-            with open(_config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-            root = config.get("workspace", {}).get("root")
-            if root:
-                return str(root)
-    except Exception as e:
-        logger.warning(f"读取工作空间配置失败，使用默认值 | error={e}")
+    config = _load_isolation_config()
+    root = config.get("workspace", {}).get("root")
+    if root:
+        return str(root)
     return _DEFAULT_WORKSPACE_ROOT
 
 
 def get_isolation_level() -> str:
     """从配置文件读取隔离级别，读取失败则返回默认值 container"""
-    try:
-        import yaml
-
-        if _config_path.exists():
-            with open(_config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-            level = config.get("coordinator", {}).get("default_level")
-            if level:
-                return str(level)
-    except Exception as e:
-        logger.warning(f"读取隔离级别配置失败 | error={e}")
+    config = _load_isolation_config()
+    level = config.get("coordinator", {}).get("default_level")
+    if level:
+        return str(level)
     return "container"
 
 
@@ -68,12 +63,10 @@ def _is_absolute_path(path_str: str) -> bool:
     p = Path(path_str)
     if p.is_absolute():
         return True
-    if path_str.startswith("/") and not path_str.startswith("//"):
-        return True
-    return False
+    return bool(path_str.startswith("/") and not path_str.startswith("//"))
 
 
-def resolve_workspace(
+def resolve_workspace(  # noqa: PLR0911
     task_id: str,
     task_workspace: str | None,
     parent_resolved_workspace: str | None = None,
@@ -105,8 +98,6 @@ def resolve_workspace(
     """
     root = config_root or get_workspace_config_root()
 
-    # BUG-FIX-fix_20260422_workspace_nesting: 统一路径分隔符为正斜杠，
-    # 避免 LLM 传入反斜杠路径导致 startswith / == 比较失败，产生双重嵌套
     root = root.replace("\\", "/")
     if task_workspace:
         task_workspace = task_workspace.replace("\\", "/")
@@ -125,42 +116,35 @@ def resolve_workspace(
             )
             return task_workspace
         return f"{root}/{task_workspace}"
-    else:
-        # shared 模式：子任务直接复用父 workspace，不创建独立子目录
-        if nesting_mode == "shared":
-            logger.debug(
-                f"[resolve_workspace] shared 模式，子任务复用父工作空间 | "
-                f"task_id={task_id}, parent_workspace={parent_resolved_workspace}"
-            )
-            return parent_resolved_workspace
+    # shared 模式：子任务直接复用父 workspace，不创建独立子目录
+    if nesting_mode == "shared":
+        logger.debug(
+            f"[resolve_workspace] shared 模式，子任务复用父工作空间 | "
+            f"task_id={task_id}, parent_workspace={parent_resolved_workspace}"
+        )
+        return parent_resolved_workspace
 
-        if task_workspace:
-            # BUG-FIX-fix_20260420_workspace_abs_path:
-            # 问题根因: 子任务分支缺少绝对路径检查，当 task_workspace 是绝对路径(如
-            # D:\Jianguoyun\Agent os\.ai_workspaces\xxx)时，不以相对的 parent/root 前缀
-            # 开头，直接走到拼接逻辑，导致生成
-            # .ai_workspaces/parent/D:\Jianguoyun\Agent os\.ai_workspaces\xxx 这样的错误路径
-            # 修复方案: 增加绝对路径检查，与根任务分支(第76行)保持一致
-            if _is_absolute_path(task_workspace):
-                logger.debug(
-                    f"[resolve_workspace] 子任务 task_workspace 是绝对路径，直接返回 | "
-                    f"task_workspace={task_workspace}"
-                )
-                return task_workspace
-            if task_workspace.startswith(f"{parent_resolved_workspace}/") or task_workspace == parent_resolved_workspace:
-                logger.debug(
-                    f"[resolve_workspace] 子任务 task_workspace 已包含父路径前缀，直接返回 | "
-                    f"task_workspace={task_workspace}"
-                )
-                return task_workspace
-            if task_workspace.startswith(f"{root}/"):
-                logger.debug(
-                    f"[resolve_workspace] 子任务 task_workspace 已包含 root 前缀，直接返回 | "
-                    f"task_workspace={task_workspace}"
-                )
-                return task_workspace
-            return f"{parent_resolved_workspace}/{task_workspace}"
-        return f"{parent_resolved_workspace}/{task_id}"
+    if task_workspace:
+        if _is_absolute_path(task_workspace):
+            logger.debug(
+                f"[resolve_workspace] 子任务 task_workspace 是绝对路径，直接返回 | "
+                f"task_workspace={task_workspace}"
+            )
+            return task_workspace
+        if task_workspace.startswith(f"{parent_resolved_workspace}/") or task_workspace == parent_resolved_workspace:
+            logger.debug(
+                f"[resolve_workspace] 子任务 task_workspace 已包含父路径前缀，直接返回 | "
+                f"task_workspace={task_workspace}"
+            )
+            return task_workspace
+        if task_workspace.startswith(f"{root}/"):
+            logger.debug(
+                f"[resolve_workspace] 子任务 task_workspace 已包含 root 前缀，直接返回 | "
+                f"task_workspace={task_workspace}"
+            )
+            return task_workspace
+        return f"{parent_resolved_workspace}/{task_workspace}"
+    return f"{parent_resolved_workspace}/{task_id}"
 
 
 async def resolve_workspace_chain(
@@ -187,7 +171,7 @@ async def resolve_workspace_chain(
     Returns:
         解析后的工作空间路径字符串
     """
-    from src.db.models import Task
+    from src.db.models import Task  # noqa: PLC0415
 
     task = await session.get(Task, task_id)
     if not task:

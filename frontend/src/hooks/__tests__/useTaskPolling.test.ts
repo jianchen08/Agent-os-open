@@ -3,7 +3,6 @@
  *
  * 验证轮询机制的核心行为：
  * - 定时调用 fetchTasks 刷新任务状态
- * - 所有任务进入终态时自动停止轮询
  * - 组件卸载时清理定时器
  * - 页面不可见时暂停轮询
  * - enabled=false 时不启动轮询
@@ -38,25 +37,22 @@ function makeTask(id: string, status: string) {
   return { id, status, tags: ['long-term'], title: `Task ${id}` }
 }
 
-/** 终态集合 */
-const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'timeout']
-
 /**
  * 手动驱动 hook 逻辑的工具。
  *
  * 由于 useTaskPolling 内部使用 useEffect/setInterval，
  * 在 vitest jsdom 中需要通过 act + fake timers 驱动。
- * 这里抽取核心轮询逻辑为纯函数以便直接测试判定条件。
+ * 这里抽取核心轮询逻辑为纯函数以便直接测试。
+ *
+ * 轮询不因任务进入终态而停止（与源码行为一致），stopped 仅由显式 stop() 置位。
  */
 function createPollingController(options: {
   interval?: number
   enabled?: boolean
-  isTerminal?: (status: string) => boolean
 }) {
   const {
     interval = 5000,
     enabled = true,
-    isTerminal = (s: string) => TERMINAL_STATUSES.includes(s),
   } = options
 
   let timerId: ReturnType<typeof setInterval> | null = null
@@ -67,12 +63,6 @@ function createPollingController(options: {
     if (stopped || !enabled) return
     callLog.push(Date.now())
     mockFetchTasks()
-
-    // 检查是否应该停止：所有任务处于终态
-    const tasks = (mockStoreState.tasks as Array<{ status: string }>) || []
-    if (tasks.length > 0 && tasks.every((t) => isTerminal(t.status))) {
-      stop()
-    }
   }
 
   const start = () => {
@@ -130,24 +120,25 @@ describe('useTaskPolling - 核心轮询逻辑', () => {
     })
   })
 
-  describe('终态自动停止', () => {
-    it('所有任务进入终态后应停止轮询', () => {
+  describe('终态后轮询行为', () => {
+    it('所有任务进入终态后应继续轮询（fallback 不自动停止）', () => {
       mockStoreState.tasks = [makeTask('1', 'completed'), makeTask('2', 'failed')]
 
       const controller = createPollingController({ interval: 3000 })
       controller.start()
 
-      // 第一次 tick 后发现全部终态，自动停止
       vi.advanceTimersByTime(3000)
       expect(mockFetchTasks).toHaveBeenCalledTimes(1)
-      expect(controller.getStopped()).toBe(true)
+      expect(controller.getStopped()).toBe(false)
 
-      // 再快进，不应再调用
+      // 再快进，轮询继续——fallback 的价值在于实时链路失效时仍能恢复
       vi.advanceTimersByTime(6000)
-      expect(mockFetchTasks).toHaveBeenCalledTimes(1)
+      expect(mockFetchTasks).toHaveBeenCalledTimes(3)
+
+      controller.stop()
     })
 
-    it('部分任务仍在进行中时不应停止', () => {
+    it('部分任务仍在进行中时持续轮询', () => {
       mockStoreState.tasks = [makeTask('1', 'completed'), makeTask('2', 'running')]
 
       const controller = createPollingController({ interval: 3000 })

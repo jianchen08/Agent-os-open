@@ -178,13 +178,14 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 f"检测到重复工具调用{tool_desc}，已跳过执行。"
                 f"请不要再次使用相同的工具和参数，请尝试其他方法。"
             )
+            stripped = self._strip_trailing_tool_call_assistant(ctx)
             self._inject_warning(ctx, warning)
             updates[StateKeys.RAW_TOOL_CALLS] = []
             updates["router.duplicate_count"] = 0
             updates["router.duplicate_intercepts"] = intercepts + 1
             logger.info(
-                "[%s] Duplicate tool calls intercepted | count=%d intercepts=%d tool=%s",
-                self.name, count, intercepts + 1, tool_desc,
+                "[%s] Duplicate tool calls intercepted | count=%d intercepts=%d tool=%s stripped_assistants=%d",
+                self.name, count, intercepts + 1, tool_desc, stripped,
             )
             updates["__route_signal__"] = RouteSignal(
                 route_type="next_llm",
@@ -320,26 +321,102 @@ class DuplicateCheckPlugin(IOutputPlugin):
         return "、".join(parts)
 
     def _inject_warning(self, ctx: PluginContext, message: str) -> None:
-        """向消息列表注入强警告（第二级拦截时使用）。
+        """注入强警告（第二级拦截时使用）。
+
+        安全合并策略（参照 llm_error_recovery 范本）：不追加独立的 system
+        消息，而是合并进末尾消息的 content，避免打断 assistant(tool_calls)
+        → tool 消息序列导致引擎中断。
+
+        - 末尾为 tool/assistant → 合并进其 content
+        - 末尾为空或其他 → 追加一条 role=user（此时无 tool_calls 配对问题）
 
         Args:
             ctx: 插件执行上下文
             message: 警告消息内容
         """
+        self._merge_into_messages(ctx, f"[DuplicateCheck] {message}")
+
+    def _strip_trailing_tool_call_assistant(self, ctx: PluginContext) -> int:
+        """移除 messages 末尾连续的 assistant(tool_calls) 消息。
+
+        BUG-FIX-fix_20260614_orphan_tool_result:
+        Level-2 拦截会清空 RAW_TOOL_CALLS，但 llm_core 已 append 的
+        assistant(tool_calls) 仍残留 → 永远等不到 tool result → 未配对消息。
+        本方法在拦截时同步移除这些 assistant 消息，撤销本次工具调用意图。
+
+        从末尾向前剥离：只移除 role=assistant 且带 tool_calls 的消息，
+        遇到普通 assistant 文本消息或其他角色时停止。
+
+        Args:
+            ctx: 插件执行上下文
+
+        Returns:
+            被移除的 assistant(tool_calls) 消息数量
+        """
         messages = list(ctx.state.get("messages", []))
-        messages.append({"role": "system", "content": f"[DuplicateCheck] {message}"})
-        ctx.state["messages"] = messages
+        stripped = 0
+        while messages:
+            last = messages[-1]
+            if (
+                last.get("role") == "assistant"
+                and last.get("tool_calls")
+            ):
+                messages.pop()
+                stripped += 1
+                continue
+            break
+        if stripped:
+            ctx.state["messages"] = messages
+        return stripped
 
     def _inject_hint(self, ctx: PluginContext, message: str) -> None:
-        """向消息列表注入软提示（第一级早期提示时使用）。
+        """注入软提示（第一级早期提示时使用）。
+
+        安全合并策略：不追加独立的 system 消息（那会插在 assistant(tool_calls)
+        与 tool 之间打断序列、导致引擎中断），而是合并进末尾消息的 content。
 
         Args:
             ctx: 插件执行上下文
             message: 提示消息内容
         """
+        self._merge_into_messages(ctx, f"[DuplicateCheck] {message}")
+
+    def _merge_into_messages(self, ctx: PluginContext, content: str) -> None:
+        """把提醒内容安全地合并进 messages，不打断 assistant(tool_calls)→tool 序列。
+
+        合并规则（参照 llm_error_recovery 范本）：
+        - 末尾为 tool 或 assistant 消息 → 合并进其 content（保持序列完整）
+        - 末尾为 system 消息 → 合并进其 content
+        - messages 为空或末尾为 user → 追加 role=user（无 tool_calls 配对问题）
+
+        Args:
+            ctx: 插件执行上下文
+            content: 要合并/追加的提醒文本
+        """
         messages = list(ctx.state.get("messages", []))
-        messages.append({"role": "system", "content": f"[DuplicateCheck] {message}"})
+
+        if not messages:
+            messages.append({"role": "user", "content": content})
+            ctx.state["messages"] = messages
+            return
+
+        last = messages[-1]
+        last_role = last.get("role")
+
+        if last_role in ("tool", "assistant", "system"):
+            # 合并进末尾消息 content，保持 assistant(tool_calls)→tool 序列完整
+            merged = dict(last)
+            original = merged.get("content") or ""
+            merged["content"] = (
+                f"{original}\n\n{content}" if original else content
+            )
+            messages[-1] = merged
+        else:
+            # 末尾为 user（或其它无配对约束的角色）→ 追加 user
+            messages.append({"role": "user", "content": content})
+
         ctx.state["messages"] = messages
+
 
     def _check_duplicate_calls(self, ctx: PluginContext) -> dict[str, Any]:
         """检查工具调用重复。

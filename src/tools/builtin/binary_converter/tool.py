@@ -73,7 +73,7 @@ def is_convertible_binary(path: Path) -> bool:
     return category in ("document", "image")
 
 
-def convert_binary_to_markdown(path: Path) -> ToolResult:
+def convert_binary_to_markdown(path: Path) -> ToolResult:  # noqa: PLR0911
     """将二进制文件转换为 Markdown 文本。
 
     使用 markitdown 库进行转换。如果 markitdown 未安装，
@@ -109,7 +109,7 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:
 
     # 检查 markitdown 是否可用
     try:
-        from markitdown import MarkItDown
+        from markitdown import MarkItDown  # noqa: PLC0415
     except ImportError:
         return create_failure_result(
             error=f"无法转换文件 {path.name}：需要安装 markitdown 库。\n"
@@ -154,9 +154,8 @@ def _format_size(size_bytes: int) -> str:
     """格式化文件大小"""
     if size_bytes < 1024:
         return f"{size_bytes}B"
-    elif size_bytes < 1024 * 1024:
+    if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f}KB"
-    elif size_bytes < 1024 * 1024 * 1024:
+    if size_bytes < 1024 * 1024 * 1024:
         return f"{size_bytes / (1024 * 1024):.1f}MB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f}GB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f}GB"

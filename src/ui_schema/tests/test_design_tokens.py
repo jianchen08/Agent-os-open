@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-
 from ui_schema.design_tokens import (
     BorderRadiusScale,
     ColorPalette,
@@ -26,7 +25,6 @@ from ui_schema.design_tokens import (
     tokens_to_css_variables,
     validate_token_values,
 )
-
 
 # ============================================================
 # SpacingScale 间距梯度测试

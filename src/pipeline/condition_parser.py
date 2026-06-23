@@ -113,7 +113,7 @@ class _Parser:
             return not bool(operand)
         return self._parse_comparison()
 
-    def _parse_comparison(self) -> Any:
+    def _parse_comparison(self) -> Any:  # noqa: PLR0911
         left = self._parse_primary()
         tok = self._peek()
         if tok is None:
@@ -126,11 +126,11 @@ class _Parser:
 
         if tok[1] == "is_empty":
             self._advance()
-            return left is None or left == "" or left == [] or left == {}
+            return left is None or left in ("", [], {})
 
         if tok[1] == "is_not_empty":
             self._advance()
-            return left is not None and left != "" and left != [] and left != {}
+            return left is not None and left not in ("", [], {})
 
         if tok[1] == "in":
             self._advance()
@@ -159,7 +159,7 @@ class _Parser:
             return left <= right
         raise ValueError(f"Unknown operator: {op}")
 
-    def _parse_primary(self) -> Any:
+    def _parse_primary(self) -> Any:  # noqa: PLR0912
         tok = self._peek()
         if tok is None:
             raise ValueError("Unexpected end of expression")
@@ -189,10 +189,7 @@ class _Parser:
                     self._advance()
                     key = self._parse_primary()
                     self._expect("BRACKET")
-                    if isinstance(value, dict) and isinstance(key, (str, int)):
-                        value = value.get(key)
-                    else:
-                        value = None
+                    value = value.get(key) if isinstance(value, dict) and isinstance(key, (str, int)) else None
                 # 点号访问：value.property 或 value.method(args)
                 elif self._peek()[0] == "DOT":
                     self._advance()  # 消耗 DOT
@@ -207,19 +204,15 @@ class _Parser:
                         args = self._parse_call_args()
                         self._expect("RPAREN")
                         if attr_name == "get" and isinstance(value, dict):
-                            if len(args) >= 1:
-                                value = value.get(args[0], args[1] if len(args) >= 2 else None)
-                            else:
-                                value = None
+                            value = value.get(args[0], args[1] if len(args) >= 2 else None) if len(args) >= 1 else None
                         else:
                             # 不支持的方法调用，返回 None
                             value = None
+                    # 属性访问：等价于 value["attr_name"]
+                    elif isinstance(value, dict):
+                        value = value.get(attr_name)
                     else:
-                        # 属性访问：等价于 value["attr_name"]
-                        if isinstance(value, dict):
-                            value = value.get(attr_name)
-                        else:
-                            value = None
+                        value = None
                 else:
                     break
             return value

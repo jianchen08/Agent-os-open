@@ -15,7 +15,7 @@ export enum WebSocketStatus {
 
 /**
  * 从 API_BASE_URL 派生 WebSocket URL
- * http://localhost:8888 -> ws://localhost:8888
+ * http://localhost:8988 -> ws://localhost:8988
  * https://example.com -> wss://example.com
  * 空字符串 -> 从当前页面 location 派生（适用于 Vite 代理模式）
  */
@@ -93,6 +93,8 @@ export const WS_SERVER_EVENTS = {
   TASK_CANCELLED: 'task_cancelled',
   /** 任务状态实时更新 */
   TASK_STATUS_UPDATE: 'task_status_update',
+  /** 任务状态变更（实时推送） */
+  TASK_STATUS_CHANGED: 'task_status_changed',
   /** 任务删除 */
   TASK_DELETED: 'task_deleted',
   /** 错误 */

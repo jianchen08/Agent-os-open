@@ -61,11 +61,13 @@ def _parse_server_config(
 
 
 def _parse_yaml(path: Path) -> dict[str, list[BackendConfig]]:
-    """解析 YAML 配置文件为后端配置字典"""
-    import yaml
+    """解析 YAML 配置文件为后端配置字典（通过 ConfigCenter 统一缓存）"""
+    from config.config_center import get_config_center  # noqa: PLC0415
 
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    rel = str(path).replace("\\", "/")
+    if "config/" in rel:
+        rel = rel[rel.index("config/") + len("config/"):]
+    data = get_config_center().get(rel) or {}
 
     adapters_raw = data.get("adapters", {})
     result: dict[str, list[BackendConfig]] = {}
@@ -115,7 +117,7 @@ class CapabilityAdapterConfig:
         cls, config_path: str | Path | None = None
     ) -> dict[str, list[BackendConfig]]:
         """加载配置（每次读取文件，支持热更新）"""
-        global _parse_cache
+        global _parse_cache  # noqa: PLW0603
 
         path = Path(config_path) if config_path else _DEFAULT_CONFIG_PATH
 

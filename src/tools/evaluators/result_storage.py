@@ -65,9 +65,8 @@ class EvaluationResultStorage:
                     f"(passed={result.passed}, score={result.score})"
                 )
                 return metric.get("id", "")
-            else:
-                logger.warning(f"评估指标不存在: {result.metric_name}")
-                return ""
+            logger.warning(f"评估指标不存在: {result.metric_name}")
+            return ""
 
         except Exception as e:
             logger.error(f"记录评估结果失败: {e}")

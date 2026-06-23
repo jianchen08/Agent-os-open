@@ -14,6 +14,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -112,10 +113,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         target_loop = self._pending_event_loops.get(request_id)
         current_loop: asyncio.AbstractEventLoop | None = None
-        try:
+        with contextlib.suppress(RuntimeError):
             current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
 
         if (
             target_loop is not None
@@ -189,6 +188,7 @@ class HumanInteractionService(IHumanInteractionService):
         agent_id: str | None = None,
         file_paths: list[str] | None = None,
         agent_level: str | None = None,
+        pipeline_id: str | None = None,
     ) -> str:
         """创建选择模式请求，返回 request_id。"""
         request_id = str(uuid4())
@@ -212,6 +212,7 @@ class HumanInteractionService(IHumanInteractionService):
                 "timeout_reminded": False,
                 "file_paths": file_paths,
                 **({"agent_level": agent_level} if agent_level else {}),
+                **({"pipeline_id": pipeline_id} if pipeline_id else {}),
             },
         )
         self._requests[request_id] = record
@@ -243,6 +244,7 @@ class HumanInteractionService(IHumanInteractionService):
         agent_id: str | None = None,
         file_paths: list[str] | None = None,
         agent_level: str | None = None,
+        pipeline_id: str | None = None,
     ) -> str:
         """创建对话模式请求，返回 request_id。"""
         request_id = str(uuid4())
@@ -262,6 +264,7 @@ class HumanInteractionService(IHumanInteractionService):
                 "suggestions": suggestions,
                 "file_paths": file_paths,
                 **({"agent_level": agent_level} if agent_level else {}),
+                **({"pipeline_id": pipeline_id} if pipeline_id else {}),
             },
         )
         self._requests[request_id] = record
@@ -741,7 +744,7 @@ _service_instance: HumanInteractionService | None = None
 
 def get_human_interaction_service() -> HumanInteractionService:
     """获取服务单例。"""
-    global _service_instance
+    global _service_instance  # noqa: PLW0603
     if _service_instance is None:
         _service_instance = HumanInteractionService()
     return _service_instance
@@ -749,11 +752,11 @@ def get_human_interaction_service() -> HumanInteractionService:
 
 def set_human_interaction_service(service: HumanInteractionService) -> None:
     """设置服务单例。"""
-    global _service_instance
+    global _service_instance  # noqa: PLW0603
     _service_instance = service
 
 
 def reset_human_interaction_service() -> None:
     """重置服务单例（用于测试）。"""
-    global _service_instance
+    global _service_instance  # noqa: PLW0603
     _service_instance = None

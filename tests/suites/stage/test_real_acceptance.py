@@ -4,7 +4,6 @@
 - M1：管道框架 — 端到端运行完整管道
 - M2：LLMCore — 调用真实 LLM（由 test_integration_llm.py 覆盖）
 - M3：工具系统 — 真实工具注册+执行+LLM联动（由 test_integration_llm.py 覆盖）
-- M4：调度器+并发控制 — 真实异步调度
 - M5a：任务系统 — 状态机真实流转+JSON存储
 - M5b：评估系统 — YAML加载+评估执行+TaskService联动
 - M6：全量插件 — 插件链真实执行
@@ -40,10 +39,6 @@ from pipeline.types import (
     StateKeys,
     create_initial_state,
 )
-
-# M4
-from infrastructure.concurrency import ConcurrencyController
-from infrastructure.scheduler import Scheduler
 
 # M5a — 依赖 sqlalchemy（tasks/state_machine.py 顶层导入 sqlalchemy）
 # 如果 sqlalchemy 未安装，这些测试将被跳过
@@ -249,80 +244,6 @@ class TestM1PipelineReal:
 
         # 验证 Output 插件被执行了
         assert SignalOutput.executed, "Output 插件应被执行"
-
-
-# ---------------------------------------------------------------------------
-# M4 真实验收：调度器 + 并发控制
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestM4SchedulerReal:
-    """M4 真实验收 — 调度器真实异步调度。"""
-
-    async def test_scheduler_priority_ordering(self) -> None:
-        """调度器按优先级排序执行。
-
-        验收标准：高优先级项先被取出。
-        """
-        scheduler = Scheduler()
-        await scheduler.submit("低优先级", priority=9)
-        await scheduler.submit("高优先级", priority=1)
-        await scheduler.submit("中优先级", priority=5)
-
-        first = await scheduler.pick_next()
-        second = await scheduler.pick_next()
-        third = await scheduler.pick_next()
-
-        assert first == "高优先级", f"第一个应是高优先级，实际: {first}"
-        assert second == "中优先级", f"第二个应是中优先级，实际: {second}"
-        assert third == "低优先级", f"第三个应是低优先级，实际: {third}"
-
-    async def test_scheduler_empty_queue(self) -> None:
-        """空队列返回 None。"""
-        scheduler = Scheduler()
-        result = await scheduler.pick_next()
-        assert result is None
-
-    async def test_scheduler_pending_count(self) -> None:
-        """队列计数正确。"""
-        scheduler = Scheduler()
-        assert scheduler.pending_count == 0
-
-        await scheduler.submit("task1", priority=1)
-        await scheduler.submit("task2", priority=2)
-        assert scheduler.pending_count == 2
-
-        await scheduler.pick_next()
-        assert scheduler.pending_count == 1
-
-    async def test_concurrency_controller_real_acquire(self) -> None:
-        """并发控制器真实信号量获取/释放。"""
-        controller = ConcurrencyController(config={"agent_max": 2})
-        assert controller.available["agent"] == 2
-
-        results: list[str] = []
-
-        async def worker(name: str, delay: float) -> None:
-            async with controller.acquire("agent"):
-                results.append(f"{name}_start")
-                await asyncio.sleep(delay)
-                results.append(f"{name}_end")
-
-        await asyncio.gather(
-            worker("w1", 0.1),
-            worker("w2", 0.1),
-            worker("w3", 0.1),
-        )
-
-        assert len(results) == 6, f"应有6个事件，实际: {len(results)}"
-
-    async def test_concurrency_controller_invalid_level(self) -> None:
-        """无效并发级别抛出 ValueError。"""
-        controller = ConcurrencyController()
-        with pytest.raises(ValueError, match="Unknown concurrency level"):
-            async with controller.acquire("invalid_level"):
-                pass
 
 
 # ---------------------------------------------------------------------------

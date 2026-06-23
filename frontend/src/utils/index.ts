@@ -6,9 +6,6 @@
 export {
   formatDate,
   formatRelativeTime,
-  truncateText,
-  highlightKeyword,
-  escapeRegExp,
   formatFileSize,
   formatNumber,
 } from './format'
@@ -32,7 +29,7 @@ export { storage, authStorage, uiStorage, STORAGE_KEYS } from './storage'
 export type { StorageKey } from './storage'
 
 // 导出数据映射工具
-export { mapThreadToSession, mapThreadsToSessions, mapSessionToThread } from './mappers'
+export { mapThreadToSession } from './mappers'
 
 // 导出消息类型判断工具
 export { checkIsSystemMessage } from './messageType'

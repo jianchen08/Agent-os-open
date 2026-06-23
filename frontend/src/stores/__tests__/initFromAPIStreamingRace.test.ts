@@ -17,6 +17,7 @@ vi.mock('@/utils/logger', () => ({
 
 vi.mock('@/services/api/session', () => ({
   getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
+  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
 }))
 
 vi.mock('@/utils/retry', () => ({
@@ -131,18 +132,21 @@ describe('initFromAPI 吃掉 streaming 消息', () => {
     expect(afterUpdate).toBeDefined()
   })
 
-  it('场景C: 用户消息通过 WS user_input 回来，和前端本地创建的重复', () => {
+  it('场景C: 乐观 user 消息通过 clientMessageId 对账去重', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 前端创建用户消息（handleSendMessage）
-    store.addMessage(PIPELINE_ID, msg('client-user-1', 1, { role: 'user', content: 'hello' }))
+    // 前端创建乐观用户消息（带 clientMessageId）
+    store.addMessage(PIPELINE_ID, msg('client-user-1', 1, { role: 'user', content: 'hello', clientMessageId: 'client-user-1' }))
 
-    // 后端也推送了同一条用户消息（不同 ID，同 sequence）
-    store.addMessage(PIPELINE_ID, msg('server-user-1', 1, { role: 'user', content: 'hello' }))
+    // 后端 initFromAPI 返回同一条消息（不同后端 id，相同 clientMessageId）
+    store.initFromAPI(PIPELINE_ID, [
+      msg('server-user-1', 1, { role: 'user', content: 'hello', clientMessageId: 'client-user-1' }),
+    ])
 
-    // 应该只有 1 条（去重）
+    // 对账后应只有 1 条（后端权威版本替换乐观版本）
     const userMsgs = store.getMessages(PIPELINE_ID).filter(m => m.role === 'user')
     expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].id).toBe('server-user-1')
 
     // streaming 占位符
     store.startStreaming(PIPELINE_ID, MESSAGE_ID)

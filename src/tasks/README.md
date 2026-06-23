@@ -34,11 +34,15 @@ Agent OS 需要统一的任务生命周期管理：
 - `calculate(subtask_statuses)` 和 `calculate_from_tasks(tasks)` 两种入口
 - 无子任务返回 0.0
 
-### 服务层 (service.py)
+### 服务层 (service.py + Mixin 拆分)
 - 依赖注入组合：StateMachine + TaskStorage + ProgressCalculator
 - 可选注入：scheduler / concurrency（来自 infrastructure 层）
 - 提供完整生命周期操作：create / start / pause / resume / fail / move_to_evaluating / complete_evaluation
 - 查询：get_task / list_by_status / list_subtasks / get_progress
+- **拆分架构**：service.py 为门面类（164行），通过多重继承组合 3 个 Mixin：
+  - `_task_crud.py`：创建、查询、字段更新与基础删除
+  - `_task_state.py`：状态转换、幽灵清理与评估完成
+  - `_task_cleanup.py`：工作空间清理、级联删除与容器管理
 
 ## 结构
 
@@ -46,20 +50,26 @@ Agent OS 需要统一的任务生命周期管理：
 
 | 文件 | 行数 | 用途 |
 |------|------|------|
-| `tasks/__init__.py` | 20 | 导出所有公共类型与服务 |
+| `tasks/__init__.py` | 10 | 导出所有公共类型与服务 |
 | `tasks/types.py` | 121 | TaskStatus, AC, TaskModel, create_task |
 | `tasks/state_machine.py` | 100 | StateMachine + InvalidTransitionError |
 | `tasks/storage.py` | 174 | TaskStorage JSON 持久化 |
-| `tasks/progress.py` | 50 | ProgressCalculator |
-| `tasks/service.py` | 190 | TaskService 业务编排 |
-| `tests/test_tasks.py` | ~250 | M5a 单元测试 |
+| `tasks/service.py` | 164 | TaskService 门面类（组合 Mixin） |
+| `tasks/_task_crud.py` | 336 | CRUD Mixin：创建/查询/更新/删除 |
+| `tasks/_task_state.py` | 625 | 状态 Mixin：状态转换/幽灵清理/评估 |
+| `tasks/_task_cleanup.py` | 609 | 清理 Mixin：工作空间/级联/容器删除 |
+| `tasks/timer_manager.py` | 500+ | 任务超时定时器管理 |
+| `tasks/workspace.py` | 70 | 任务工作空间辅助 |
+| `tasks/services/` | 目录 | 数据库版本的服务层（独立体系） |
 
 ### 依赖关系
 
 ```
-TaskService → StateMachine (状态转换)
+TaskService → _TaskCrudMixin (数据操作)
+            → _TaskStateMixin (状态转换)
+            → _TaskCleanupMixin (资源清理)
+            → StateMachine (状态机校验)
             → TaskStorage (持久化)
-            → ProgressCalculator (进度)
             → pipeline.types (AgentLevel, TaskPriority, 复用枚举)
 
 TaskModel → pipeline.types (AgentLevel, TaskPriority)

@@ -21,8 +21,8 @@ import struct
 import time
 import xml.etree.ElementTree as ET
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as sym_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ class WecomCrypto:
         Returns:
             加密后的完整回复 XML 字符串
         """
-        import os
+        import os  # noqa: PLC0415
 
         # 构造明文：random(16) + msg_len(4) + msg + corp_id
         random_bytes = os.urandom(16)

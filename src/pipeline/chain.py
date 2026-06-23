@@ -23,7 +23,7 @@ def _deep_update(target: dict, updates: dict) -> None:
     """将 updates 合并到 target，展开点号键为嵌套字典结构。
 
     插件的 state_updates 中使用点号键（如 "security.decision"），
-    但条件解析器和 format_result 按嵌套字典访问（state["security"]["decision"]）。
+    但条件解析器按嵌套字典访问（state["security"]["decision"]）。
     此函数将 "security.decision" 展开为 target["security"]["decision"]，
     使两种访问方式都能正确工作。
 
@@ -117,12 +117,12 @@ class PluginChain:
             插件执行结果
         """
         start = time.monotonic()
-        logger.info("[%s] started", plugin.name)
+        logger.debug("[%s] started", plugin.name)
 
         try:
             raw_result = await plugin.execute(ctx)
             elapsed = time.monotonic() - start
-            logger.info("[%s] success (%.3fs)", plugin.name, elapsed)
+            logger.debug("[%s] success (%.3fs)", plugin.name, elapsed)
 
             # ICorePlugin 返回 dict，需要包装为 PluginResult
             if isinstance(raw_result, dict):
@@ -134,7 +134,7 @@ class PluginChain:
             logger.error("[%s] error (%.3fs): %s", plugin.name, elapsed, exc)
             return await self._handle_error(plugin, ctx, exc)
 
-    async def _handle_error(
+    async def _handle_error(  # noqa: PLR0911
         self, plugin: IPlugin, ctx: PluginContext, exc: Exception
     ) -> PluginResult:
         """根据插件错误策略处理异常。
@@ -156,6 +156,28 @@ class PluginChain:
         if policy == ErrorPolicy.SKIP:
             logger.warning("[%s] SKIP: %s", plugin.name, exc)
             return PluginResult()
+
+        if policy == ErrorPolicy.FALLBACK:
+            fallback = getattr(plugin, "fallback_state", None)
+            logger.info("[%s] FALLBACK: using fallback_state=%s", plugin.name, fallback)
+            if isinstance(fallback, dict):
+                return PluginResult(state_updates=fallback)
+            return PluginResult()
+
+        if policy == ErrorPolicy.RETRY:
+            max_retries = getattr(plugin, "max_retries", 3)
+            for attempt in range(1, max_retries + 1):
+                logger.info("[%s] RETRY attempt %d/%d", plugin.name, attempt, max_retries)
+                try:
+                    raw_result = await plugin.execute(ctx)
+                    logger.info("[%s] retry success on attempt %d", plugin.name, attempt)
+                    if isinstance(raw_result, dict):
+                        return PluginResult(state_updates=raw_result)
+                    return raw_result
+                except Exception as retry_exc:
+                    logger.warning("[%s] retry %d failed: %s", plugin.name, attempt, retry_exc)
+            logger.error("[%s] RETRY exhausted after %d attempts", plugin.name, max_retries)
+            return PluginResult(error=exc, skip_remaining=True)
 
         # 未知策略，默认 ABORT
         logger.error("[%s] Unknown error policy %s, defaulting to ABORT: %s", plugin.name, policy, exc)

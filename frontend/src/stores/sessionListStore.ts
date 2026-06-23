@@ -10,15 +10,15 @@ import {
   updateSessionAgent as updateSessionAgentApi,
   updateSession as updateSessionApi,
 } from '@/services/api/session'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { loggers } from '@/utils/logger'
 import { uiStorage, STORAGE_KEYS } from '@/utils/storage'
 import { useAgentStore } from './agentStore'
 import { useAgentTabStore } from './agentTabStore'
 import { useLayoutModeStore } from './layoutModeStore'
+import { useNotificationStore } from './notificationStore'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
-import { useStreamingStore } from './streamingStore'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import type { Session } from '@/types/models'
 
 const logger = loggers.sessionStore
@@ -39,6 +39,8 @@ interface SessionListState {
   renameSession: (sessionId: string, newTitle: string) => void
   searchSessions: (keyword: string) => Session[]
   copySession: (sessionId: string) => Promise<Session>
+  /** 首次 AI 回复完成后，根据首条用户消息自动重命名会话 */
+  autoRenameSessionIfNeeded: (sessionId: string, pipelineId: string) => void
 }
 
 /** 默认主 Agent 名称 */
@@ -184,12 +186,8 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       }
 
       // 3. 停止所有管道的流式传输
-      const streamingStore = useStreamingStore.getState()
       for (const pipelineId of allPipelineIds) {
-        const tabId = useAgentTabStore.getState().getTabIdByPipeline(pipelineId)
-        if (tabId) {
-          streamingStore.stopStreamingForTab(tabId)
-        }
+        pipelineStore.stopStreaming(pipelineId)
       }
 
       // 4. 清理 pipelineMessageStore 中所有相关管道的数据
@@ -310,10 +308,17 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     if (fetchData) {
       try {
-        // BUG-FIX-fix_20260605_main_pipeline_use_pipeline_ids_first:
-        // 主管道固定为 session.pipelineIds[0]（按创建顺序的第一个），
-        // 不用 session.activePipelineId（派生过子 Tab 时它会指向子管道）。
-        const pipelineId = session?.pipelineIds?.[0] || session?.activePipelineId
+        // BUG-FIX-fix_20260617_remove_main_pipeline_fallback:
+        // 问题根因: 原代码用 session.activePipelineId 作为主管道 fallback，
+        //          但 activePipelineId 在派生过子 Tab 时会指向子管道，作为主管道兜底是语义错误，
+        //          会导致 fetchMessages 用错误的 pipelineId 加载消息。
+        // 修复方案: 只用 session.pipelineIds[0] 作为主管道，缺失时记 error 并跳过加载。
+        // 影响范围: 会话切换时的消息加载
+        // 修复日期: 2026-06-17
+        const pipelineId = session?.pipelineIds?.[0]
+        if (!pipelineId) {
+          console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session?.pipelineIds)
+        }
         if (pipelineId) {
           // BUG-FIX-fix_20260515_streaming_interrupt:
           // 问题根因: 切换回正在流式输出的会话时，fetchMessages -> initFromAPI
@@ -392,6 +397,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
   toggleSessionStar: (sessionId: string) => {
     const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
     const newStarred = !session?.starred
+    const prevStarred = session?.starred
 
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((session) =>
@@ -405,17 +411,34 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       ),
     }))
 
-    // 持久化到后端 metadata
+    // BUG-FIX-fix_20260617_optimistic_no_rollback:
+    // 问题根因: 原代码同步失败仅 logger.error，不回滚 UI 不告知用户，
+    //          导致 UI 显示与后端不一致，用户误以为操作成功。
+    // 修复方案: 失败时回滚乐观更新（恢复原值）并通过通知告知用户。
     updateSessionApi(sessionId, {
       metadata: { starred: newStarred },
     }).catch((error) => {
       logger.error('星标同步失败:', error)
+      useSessionStore.setState((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, starred: prevStarred } : s,
+        ),
+      }))
+      useNotificationStore.getState().addNotification({
+        title: '操作同步失败',
+        message: '星标状态同步失败，已恢复原状态',
+        priority: 'normal',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 5000,
+      })
     })
   },
 
   toggleSessionPin: (sessionId: string) => {
     const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
     const newPinned = !session?.pinned
+    const prevPinned = session?.pinned
 
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((session) =>
@@ -428,11 +451,26 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       ),
     }))
 
-    // 持久化到后端 metadata
+    // BUG-FIX-fix_20260617_optimistic_no_rollback:
+    // 问题根因: 原代码同步失败仅 logger.error，不回滚 UI 不告知用户。
+    // 修复方案: 失败时回滚乐观更新（恢复原值）并通过通知告知用户。
     updateSessionApi(sessionId, {
       metadata: { pinned: newPinned },
     }).catch((error) => {
       logger.error('置顶同步失败:', error)
+      useSessionStore.setState((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, pinned: prevPinned } : s,
+        ),
+      }))
+      useNotificationStore.getState().addNotification({
+        title: '操作同步失败',
+        message: '置顶状态同步失败，已恢复原状态',
+        priority: 'normal',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 5000,
+      })
     })
   },
 
@@ -440,21 +478,45 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     if (!newTitle.trim()) {
       return
     }
+    const trimmedTitle = newTitle.trim()
+    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const prevTitle = session?.title
+    const prevUpdatedAt = session?.updatedAt
+
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? {
               ...session,
-              title: newTitle.trim(),
+              title: trimmedTitle,
               updatedAt: new Date().toISOString(),
             }
           : session,
       ),
     }))
     try {
-      await updateSessionApi(sessionId, { title: newTitle.trim() })
+      await updateSessionApi(sessionId, { title: trimmedTitle })
     } catch (error) {
+      // BUG-FIX-fix_20260617_optimistic_no_rollback:
+      // 问题根因: 原代码 catch 仅 logger.error，不回滚 UI 不告知用户，
+      //          导致 UI 显示新标题但后端仍是旧标题。
+      // 修复方案: 失败时回滚乐观更新（恢复原标题）并通过通知告知用户。
       logger.error('重命名会话失败:', error)
+      useSessionStore.setState((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId
+            ? { ...s, title: prevTitle, updatedAt: prevUpdatedAt }
+            : s,
+        ),
+      }))
+      useNotificationStore.getState().addNotification({
+        title: '操作同步失败',
+        message: '重命名同步失败，已恢复原标题',
+        priority: 'normal',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 5000,
+      })
     }
   },
 
@@ -491,5 +553,52 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     })
 
     return newSession
+  },
+
+  /**
+   * 首次 AI 回复完成后，根据首条用户消息自动重命名会话。
+   *
+   * 条件：会话标题仍为默认值（generateSessionTitle 返回的值）时才触发，
+   * 用户手动重命名过的会话不会被覆盖。
+   */
+  autoRenameSessionIfNeeded: (sessionId: string, pipelineId: string) => {
+    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    if (!session) return
+
+    // 仅当标题仍为默认值时才自动重命名
+    if (session.title !== DEFAULT_AGENT_NAME) return
+
+    const pipelineStore = usePipelineMessageStore.getState()
+    const messages = pipelineStore.getMessages(pipelineId)
+    if (!messages || messages.length === 0) return
+
+    // 找到第一条 role=user 的消息
+    const firstUserMsg = messages.find(
+      (m: import('@/types/models').Message) => m.role === 'user',
+    )
+    if (!firstUserMsg) return
+
+    // 从 parts 中提取文本内容，优先使用 parts；fallback 到 content 字段
+    let userText = ''
+    if (firstUserMsg.parts && firstUserMsg.parts.length > 0) {
+      const textParts = firstUserMsg.parts.filter(
+        (p: import('@/types/messageParts').MessagePart) => p.type === 'text',
+      )
+      userText = textParts.map((p: any) => p.content || '').join('').trim()
+    }
+    if (!userText) {
+      userText = (firstUserMsg.content || '').trim()
+    }
+    if (!userText) return
+
+    // 截取前 30 个字符，避免标题过长
+    const maxTitleLength = 30
+    let title = userText.replace(/\n/g, ' ').trim()
+    if (title.length > maxTitleLength) {
+      title = title.slice(0, maxTitleLength) + '…'
+    }
+    if (!title) return
+
+    get().renameSession(sessionId, title)
   },
 }))

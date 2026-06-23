@@ -101,7 +101,7 @@ class DelegateDepthGuardPlugin(IOutputPlugin):
 
         # 检查是否有 delegate 路由信号
         # 本插件只在有 delegate 信号时触发深度检查
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
+        ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
         routed_to = ctx.state.get(StateKeys.ROUTED_TO, None)
 
         # 如果已经路由了（delegate 已发生），递增深度

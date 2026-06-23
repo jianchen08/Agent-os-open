@@ -45,7 +45,6 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
 
   const handleRespondText = useCallback(
     async (requestId: string, text: string) => {
-      console.log('[InteractionPanel] handleRespondText | requestId=%s | text=%s | submittingId=%s', requestId, text.slice(0, 30), submittingId)
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       dismissInteraction(requestId)

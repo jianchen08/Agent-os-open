@@ -1,30 +1,14 @@
-"""
-统一 Runnable 抽象
+"""统一 Runnable 抽象。
 
 暴露接口：
-- create_tool_runnable(name: str, description: str, handler: ToolHandler, input_schema: dict[str, Any] | None) -> ToolRunnable：create_tool_runnable功能
-- create_agent_runnable(name: str, description: str, agent_config: dict[str, Any] | None) -> AgentRunnable：create_agent_runnable功能
-- compose_sequence() -> CompositeRunnable：compose_sequence功能
-- compose_parallel() -> CompositeRunnable：compose_parallel功能
-- invoke(self, input: str | dict[str, Any], config: RunnableConfig | None) -> Any：invoke功能
-- get_metadata(self) -> RunnableMetadata：get_metadata功能
-- tool_input_schema(self) -> dict[str, Any]：tool_input_schema功能
-- tool_output_schema(self) -> dict[str, Any] | None：tool_output_schema功能
-- get_metadata(self) -> RunnableMetadata：get_metadata功能
-- to_mcp_format(self) -> dict[str, Any]：to_mcp_format功能
-- to_llm_format(self) -> dict[str, Any]：to_llm_format功能
-- to_llm_yaml_format(self) -> str：to_llm_yaml_format功能
-- get_metadata(self) -> RunnableMetadata：get_metadata功能
-- bind_agent_loop(self, agent_loop: Any) -> 'AgentRunnable'：bind_agent_loop功能
-- get_metadata(self) -> RunnableMetadata：get_metadata功能
-- RunnableType：RunnableType类
-- RunnableStatus：RunnableStatus类
-- RunnableMetadata：RunnableMetadata类
-- RunnableResult：RunnableResult类
-- YamlRunnable：YamlRunnable类
-- ToolRunnable：ToolRunnable类
-- AgentRunnable：AgentRunnable类
-- CompositeRunnable：CompositeRunnable类
+- create_tool_runnable(name, description, handler, input_schema) -> ToolRunnable
+- YamlRunnable / ToolRunnable：可执行单元基类与工具实现
+- RunnableMetadata / RunnableResult / RunnableType / RunnableStatus：元数据与结果类型
+
+注：AgentRunnable / CompositeRunnable 及其工厂函数（compose_sequence /
+compose_parallel / create_agent_runnable）已移除——经全仓库扫描确认无任何
+调用方，属遗留死代码。Agent 执行链路改由 pipeline/engine + AgentConfig
+直接驱动，无需 Runnable 体系包装。
 """
 
 from collections.abc import Callable, Coroutine
@@ -32,12 +16,6 @@ from enum import Enum
 from typing import Any
 
 import yaml
-from langchain_core.runnables import (
-    Runnable,
-    RunnableConfig,
-    RunnableLambda,
-    RunnableParallel,
-)
 from pydantic import BaseModel, Field
 
 # ============================================
@@ -93,20 +71,19 @@ class RunnableResult(BaseModel):
 # ============================================
 
 
-class YamlRunnable(Runnable[str | dict[str, Any], Any]):
-    """
-    支持 YAML 输入的 Runnable 基类
+class YamlRunnable:
+    """支持 YAML 输入的 Runnable 基类。
 
     特性：
     - 自动检测输入格式（YAML 字符串或字典）
     - YAML 字符串自动解析为字典
-    - 继承 LangChain Runnable，支持 | 管道组合
+    - 提供 invoke/ainvoke 同步异步执行入口
     """
 
     def invoke(
         self,
         input: str | dict[str, Any],
-        config: RunnableConfig | None = None,
+        config: dict[str, Any] | None = None,
     ) -> Any:
         """同步执行"""
         parsed_input = self._parse_input(input)
@@ -115,7 +92,7 @@ class YamlRunnable(Runnable[str | dict[str, Any], Any]):
     async def ainvoke(
         self,
         input: str | dict[str, Any],
-        config: RunnableConfig | None = None,
+        config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """异步执行"""
@@ -142,8 +119,7 @@ class YamlRunnable(Runnable[str | dict[str, Any], Any]):
 
     def _execute(self, input: dict[str, Any]) -> Any:
         """同步执行实现（子类可覆盖）"""
-        # 默认调用异步方法
-        import asyncio
+        import asyncio  # noqa: PLC0415
 
         try:
             loop = asyncio.get_running_loop()
@@ -152,7 +128,7 @@ class YamlRunnable(Runnable[str | dict[str, Any], Any]):
 
         if loop and loop.is_running():
             # 在异步上下文中，创建新任务
-            import concurrent.futures
+            import concurrent.futures  # noqa: PLC0415
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(asyncio.run, self._aexecute(input))
@@ -184,8 +160,7 @@ ToolHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
 
 class ToolRunnable(YamlRunnable):
-    """
-    工具 Runnable
+    """工具 Runnable。
 
     将工具处理函数包装为 Runnable，支持：
     - YAML/字典输入
@@ -258,8 +233,6 @@ class ToolRunnable(YamlRunnable):
 
     def to_llm_yaml_format(self) -> str:
         """转换为 LLM 可用的 YAML 格式工具描述（节省 token）"""
-        import yaml
-
         # 构建简化的工具描述
         tool_desc = {
             "name": self.name,
@@ -308,137 +281,6 @@ class ToolRunnable(YamlRunnable):
 
 
 # ============================================
-# Agent Runnable
-# ============================================
-
-
-class AgentRunnable(YamlRunnable):
-    """
-    Agent Runnable
-
-    将 Agent 包装为 Runnable，支持：
-    - YAML/字典输入
-    - 管道组合
-    - 与 Tool/Workflow 任意组合
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        agent_config: dict[str, Any] | None = None,
-        agent_loop: Any | None = None,
-    ):
-        """初始化 Agent Runnable"""
-        self.name = name
-        self.description = description
-        self.agent_config = agent_config or {}
-        self._agent_loop = agent_loop
-
-    async def _aexecute(self, input: dict[str, Any]) -> Any:
-        """异步执行 Agent"""
-        if self._agent_loop is None:
-            raise ValueError("AgentLoop 未初始化")
-
-        # 提取用户输入
-        user_input = input.get("input") or input.get("query") or str(input)
-
-        # 执行 Agent
-        result = await self._agent_loop.execute(
-            user_input,
-            stream=False,
-            executor_id=self.name,
-            executor_name=f"AgentRunnable-{self.name}",
-        )
-
-        return {
-            "success": result.success,
-            "output": result.output,
-            "error": result.error,
-            "iterations": result.iterations,
-        }
-
-    def get_metadata(self) -> RunnableMetadata:
-        """获取元数据"""
-        return RunnableMetadata(
-            name=self.name,
-            description=self.description,
-            runnable_type=RunnableType.AGENT,
-            extra=self.agent_config,
-        )
-
-    def bind_agent_loop(self, agent_loop: Any) -> "AgentRunnable":
-        """绑定 AgentLoop 实例"""
-        self._agent_loop = agent_loop
-        return self
-
-
-# ============================================
-# 组合 Runnable
-# ============================================
-
-
-class CompositeRunnable(YamlRunnable):
-    """
-    组合 Runnable
-
-    支持将多个 Runnable 组合为一个，提供：
-    - 顺序执行（管道）
-    - 并行执行
-    - 条件分支
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        runnables: list[YamlRunnable],
-        mode: str = "sequence",  # sequence | parallel
-    ):
-        """初始化组合 Runnable"""
-        self.name = name
-        self.description = description
-        self.runnables = runnables
-        self.mode = mode
-
-        # 构建内部组合
-        if mode == "parallel":
-            self._inner = RunnableParallel(
-                **{f"step_{i}": r for i, r in enumerate(runnables)}
-            )
-        else:
-            # 顺序组合
-            if len(runnables) == 0:
-                self._inner = RunnableLambda(lambda x: x)
-            elif len(runnables) == 1:
-                self._inner = runnables[0]
-            else:
-                self._inner = runnables[0]
-                for r in runnables[1:]:
-                    self._inner = self._inner | r
-
-    async def _aexecute(self, input: dict[str, Any]) -> Any:
-        """异步执行组合"""
-        return await self._inner.ainvoke(input)
-
-    def _execute(self, input: dict[str, Any]) -> Any:
-        """同步执行组合"""
-        return self._inner.invoke(input)
-
-    def get_metadata(self) -> RunnableMetadata:
-        """获取元数据"""
-        return RunnableMetadata(
-            name=self.name,
-            description=self.description,
-            runnable_type=RunnableType.COMPOSITE,
-            extra={
-                "mode": self.mode,
-                "steps": [r.get_metadata().model_dump() for r in self.runnables],
-            },
-        )
-
-
-# ============================================
 # 工厂函数
 # ============================================
 
@@ -455,41 +297,4 @@ def create_tool_runnable(
         description=description,
         handler=handler,
         input_schema=input_schema,
-    )
-
-
-def create_agent_runnable(
-    name: str,
-    description: str,
-    agent_config: dict[str, Any] | None = None,
-) -> AgentRunnable:
-    """创建 Agent Runnable"""
-    return AgentRunnable(
-        name=name,
-        description=description,
-        agent_config=agent_config,
-    )
-
-
-def compose_sequence(
-    *runnables: YamlRunnable, name: str = "sequence"
-) -> CompositeRunnable:
-    """顺序组合多个 Runnable"""
-    return CompositeRunnable(
-        name=name,
-        description=f"顺序执行 {len(runnables)} 个步骤",
-        runnables=list(runnables),
-        mode="sequence",
-    )
-
-
-def compose_parallel(
-    *runnables: YamlRunnable, name: str = "parallel"
-) -> CompositeRunnable:
-    """并行组合多个 Runnable"""
-    return CompositeRunnable(
-        name=name,
-        description=f"并行执行 {len(runnables)} 个步骤",
-        runnables=list(runnables),
-        mode="parallel",
     )

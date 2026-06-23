@@ -82,8 +82,8 @@ class IDEShowDiffTool(BuiltinTool):
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行显示差异操作。"""
-        from connectors.degradation import DegradationManager
-        from connectors.types import ConnectorAction
+        from connectors.degradation import DegradationManager  # noqa: PLC0415
+        from connectors.types import ConnectorAction  # noqa: PLC0415
 
         file_path = inputs.get("file_path", "")
         original_content = inputs.get("original_content", "")
@@ -133,7 +133,7 @@ class IDEShowDiffTool(BuiltinTool):
             },
         )
         if result.success:
-            return create_success_result(data=result.output)
+            return create_success_result(data=result.data)
         return create_failure_result(error=result.error or "降级执行失败")
 
     def _get_active_connector(self) -> Any:

@@ -14,8 +14,10 @@
  */
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { loggers } from '@/utils/logger'
 
 import {
+  handleGlobalError,
   handleNewMessage,
   handleStreamChunk,
   handleStreamEnd,
@@ -45,10 +47,9 @@ const _handlers: Record<string, (data: any) => void> = {}
 function _logEvent(eventType: string, data: any): void {
   if (eventType === 'stream_chunk' || eventType === 'stream_keepalive' || eventType === 'thinking_chunk') return
   const pid = resolvePipelineId(data)
-  // WS 事件字段名因事件类型而异，此处仅用于日志
   const mid = data.message_id || data.data?.message_id || data.data?.id || ''
   const content = data.data?.content || data.content || ''
-  console.warn(
+  loggers.websocket.debug(
     `[WS-EVENT] ${eventType.padEnd(22)} pid=${(pid?.slice(0, 12) || '-').padEnd(12)} mid=${(mid?.slice(0, 12) || '-').padEnd(12)} contentLen=${content.length}`,
   )
 }
@@ -69,6 +70,10 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.STREAM_CHUNK] = _logWrap(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk)
   _handlers[WS_SERVER_EVENTS.STREAM_END] = _logWrap(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd)
   _handlers[WS_SERVER_EVENTS.STREAM_ERROR] = _logWrap(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError)
+  // BUG-FIX-M01: 注册通用 ERROR 事件 handler
+  // 问题根因: ERROR 事件此前无 handler，后端 error 被静默丢弃。
+  // 修复方案: 绑定 handleGlobalError，解析错误并通知用户、终止相关 streaming。
+  _handlers[WS_SERVER_EVENTS.ERROR] = _logWrap(WS_SERVER_EVENTS.ERROR, handleGlobalError)
   _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = _logWrap(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
   _handlers[WS_SERVER_EVENTS.THINKING_START] = _logWrap(WS_SERVER_EVENTS.THINKING_START, handleThinkingStart)
   _handlers[WS_SERVER_EVENTS.THINKING_CHUNK] = _logWrap(WS_SERVER_EVENTS.THINKING_CHUNK, handleThinkingChunk)

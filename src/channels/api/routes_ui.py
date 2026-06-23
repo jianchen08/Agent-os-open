@@ -1,15 +1,15 @@
 """UI Schema API 路由。
 
 提供模块 UI Schema 的查询接口：
-- ``GET /api/modules/ui`` - 返回所有启用模块的 UI Schema 列表
-- ``GET /api/modules/ui/{module_id}`` - 返回指定模块的 UI Schema
+- ``GET /api/v1/modules/ui`` - 返回所有启用模块的 UI Schema 列表
+- ``GET /api/v1/modules/ui/{module_id}`` - 返回指定模块的 UI Schema
 
 同时根据模块 YAML 中的 ``data:`` 声明自动注册 CRUD 路由：
-- ``GET    /api/modules/{module_id}/data/{collection}`` - 列表查询
-- ``GET    /api/modules/{module_id}/data/{collection}/{record_id}`` - 单条查询
-- ``POST   /api/modules/{module_id}/data/{collection}`` - 创建记录
-- ``PUT    /api/modules/{module_id}/data/{collection}/{record_id}`` - 更新记录
-- ``DELETE /api/modules/{module_id}/data/{collection}/{record_id}`` - 删除记录
+- ``GET    /api/v1/modules/{module_id}/data/{collection}`` - 列表查询
+- ``GET    /api/v1/modules/{module_id}/data/{collection}/{record_id}`` - 单条查询
+- ``POST   /api/v1/modules/{module_id}/data/{collection}`` - 创建记录
+- ``PUT    /api/v1/modules/{module_id}/data/{collection}/{record_id}`` - 更新记录
+- ``DELETE /api/v1/modules/{module_id}/data/{collection}/{record_id}`` - 删除记录
 
 支持按客户端能力过滤（query param ``client_type``）。
 """
@@ -28,7 +28,7 @@ from ui_schema.types import ModuleUISchema
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/modules/ui", tags=["UI Schema"])
+router = APIRouter(prefix="/api/v1/modules/ui", tags=["UI Schema"])
 
 _schema_parser: Any | None = None
 _last_scan_time: float = 0
@@ -46,9 +46,9 @@ def _get_schema_parser() -> Any:
     Returns:
         SchemaParser 实例
     """
-    global _schema_parser, _last_scan_time
+    global _schema_parser, _last_scan_time  # noqa: PLW0603
 
-    from ui_schema.parser import SchemaParser
+    from ui_schema.parser import SchemaParser  # noqa: PLC0415
 
     if _schema_parser is None:
         _schema_parser = SchemaParser()
@@ -230,11 +230,11 @@ def get_module_data_router() -> APIRouter:
     Returns:
         包含模块数据路由的 APIRouter
     """
-    global _module_data_router
+    global _module_data_router  # noqa: PLW0603
     if _module_data_router is not None:
         return _module_data_router
 
-    _module_data_router = APIRouter(prefix="/api/modules", tags=["模块数据"])
+    _module_data_router = APIRouter(prefix="/api/v1/modules", tags=["模块数据"])
 
     @_module_data_router.get(
         "/task-manager/data/tree",
@@ -247,7 +247,7 @@ def get_module_data_router() -> APIRouter:
         """通过通用数据协议获取任务树。
 
         与 /api/v1/projects/tree 功能完全一致，
-        但使用 /api/modules/{module_id}/data/{collection} 路径格式，
+        但使用 /api/v1/modules/{module_id}/data/{collection} 路径格式，
         符合通用数据协议规范，供前端 FileTreeWidget 通过
         task-manager://tree 协议访问。
 
@@ -257,7 +257,7 @@ def get_module_data_router() -> APIRouter:
         Returns:
             包含 children（树形结构）、items（扁平列表）、total 的字典
         """
-        from channels.api.routes_missing import get_task_tree
+        from channels.api.routes_missing import get_task_tree  # noqa: PLC0415
         return await get_task_tree(session_id=session_id, _user=_user)
 
     return _module_data_router
@@ -279,7 +279,7 @@ def register_data_crud_routes() -> list[Any]:
     Returns:
         生成的 APIRouter 列表，需要通过 app.include_router 注册。
     """
-    global _crud_generator, _crud_routers_loaded
+    global _crud_generator, _crud_routers_loaded  # noqa: PLW0603
     if _crud_routers_loaded:
         if _crud_generator is None:
             return []
@@ -297,7 +297,7 @@ def register_data_crud_routes() -> list[Any]:
             logger.info("未发现任何 data 声明，跳过 CRUD 路由注册")
             return []
 
-        from ui_schema.auto_crud import AutoCRUDGenerator
+        from ui_schema.auto_crud import AutoCRUDGenerator  # noqa: PLC0415
 
         _crud_generator = AutoCRUDGenerator()
 

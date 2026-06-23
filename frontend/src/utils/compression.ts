@@ -171,7 +171,6 @@ export class MessageCompressor {
       enabled: false, // 强制禁用压缩
     }
 
-    console.log('[MessageCompressor] 配置已更新（压缩功能已禁用）:', this.config)
   }
 
   /**

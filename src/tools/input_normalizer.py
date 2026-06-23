@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any
@@ -31,7 +32,7 @@ def normalize_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def normalize_input_types(
+def normalize_input_types(  # noqa: PLR0912
     inputs: dict[str, Any], schema: dict[str, Any]
 ) -> dict[str, Any]:
     """规范化输入参数类型，修复 LLM 返回的类型不一致问题。"""
@@ -104,7 +105,7 @@ def try_parse_json_string(value: str) -> dict | None:
     return None
 
 
-def normalize_nested_object(
+def normalize_nested_object(  # noqa: PLR0912
     obj: dict[str, Any], schema: dict[str, Any]
 ) -> None:
     """递归规范化嵌套对象中的字符串类型字段。"""
@@ -134,15 +135,11 @@ def normalize_nested_object(
                     elif lower in ("false", "0", "no"):
                         obj[key] = False
                 elif expected == "integer":
-                    try:
+                    with contextlib.suppress(ValueError):
                         obj[key] = int(value)
-                    except ValueError:
-                        pass
                 elif expected == "number":
-                    try:
+                    with contextlib.suppress(ValueError):
                         obj[key] = float(value)
-                    except ValueError:
-                        pass
 
         elif isinstance(value, dict):
             prop_schema = nested_props.get(key)
@@ -152,7 +149,7 @@ def normalize_nested_object(
                 normalize_nested_object(value, prop_schema)
 
 
-def fix_task_submit_inputs(inputs: dict[str, Any]) -> None:
+def fix_task_submit_inputs(inputs: dict[str, Any]) -> None:  # noqa: PLR0912
     """自动修复 task_submit 工具的常见 LLM 输入错误。"""
 
     fix_object_field(inputs, "acceptance_criteria")
@@ -190,7 +187,7 @@ def fix_task_submit_inputs(inputs: dict[str, Any]) -> None:
             except (json.JSONDecodeError, TypeError):
                 inputs["goal"] = {"title": goal[:50] if len(goal) > 50 else goal}
                 logger.info(
-                    f"[fix_task_submit_inputs] goal 从字符串转为 {{title: ...}}"
+                    "[fix_task_submit_inputs] goal 从字符串转为 {title: ...}"
                 )
                 return
 
@@ -272,7 +269,7 @@ def fix_acceptance_criteria_inputs(inputs: dict[str, Any]) -> None:
             )
 
 
-def fix_object_field(inputs: dict[str, Any], field_name: str) -> None:
+def fix_object_field(inputs: dict[str, Any], field_name: str) -> None:  # noqa: PLR0912
     """修复 LLM 将 object 类型字段传为 JSON 字符串的问题。"""
     if field_name not in inputs:
         return
@@ -296,7 +293,7 @@ def fix_object_field(inputs: dict[str, Any], field_name: str) -> None:
                     f"[fix_object_field] {field_name} 从字符串解析为对象"
                 )
                 return
-            elif isinstance(parsed, list):
+            if isinstance(parsed, list):
                 logger.warning(
                     f"[fix_object_field] {field_name} 解析为列表而非对象，移除该字段"
                 )

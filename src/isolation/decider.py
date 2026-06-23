@@ -114,22 +114,15 @@ class IsolationDecider:
                         isolation=level,
                         execution="host_direct",
                     )
-                else:
-                    raise IsolationError(
-                        f"工具 {tool_name} 的隔离级别 {policy.isolation.value} 不可用，"
-                        f"且策略禁止降级（fallback={policy.fallback}）"
-                    )
+                raise IsolationError(
+                    f"工具 {tool_name} 的隔离级别 {policy.isolation.value} 不可用，"
+                    f"且策略禁止降级（fallback={policy.fallback}）"
+                )
 
-        # 没有可用的降级目标
-        if policy.fallback == "allow":
-            logger.warning(
-                f"工具 {tool_name} 无可用隔离级别，强制使用 HOST 执行"
-            )
-            return replace(policy, isolation=IsolationLevel.HOST, execution="host_direct")
-
+        # 没有可用的降级目标 — 无论 fallback 值如何，都不允许静默降级到不可用的隔离级别
         raise IsolationError(
             f"工具 {tool_name} 的隔离级别 {policy.isolation.value} 不可用，"
-            f"且无可用降级目标"
+            f"且无可用降级目标（fallback={policy.fallback}）"
         )
 
     def resolve(self, tool_name: str, tool_category: str | None = None) -> ToolIsolationPolicy:

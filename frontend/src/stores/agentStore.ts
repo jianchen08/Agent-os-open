@@ -112,7 +112,7 @@ export const useAgentStore = create<AgentState>((set) => ({
       // 后端 AgentListResponse 使用 items 字段
       const rawAgents = data.items || []
       const mappedAgents = rawAgents.map((agent: Record<string, unknown>) => ({
-        id: agent.id,
+        id: agent.id || agent.config_id,
         configId: agent.config_id,
         name: agent.name,
         description: agent.description || '',

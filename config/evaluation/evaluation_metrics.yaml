@@ -33,33 +33,6 @@ metrics:
       required: [path]
     tags: [file, existence, content]
 
-  # ========== 格式验证 ==========
-  - name: format_valid
-    description: 数据格式验证（JSON/YAML/Schema）
-    category: schema
-    evaluator_type: tool
-    evaluator_id: schema_evaluator
-    level: 2  # 格式层级
-    includes: [file_check]  # 包含文件存在检查
-    requires: []  # 无前置依赖
-    input_schema:
-      type: object
-      properties:
-        data:
-          description: 要验证的数据（字符串或对象）
-        path:
-          type: string
-          description: 或指定文件路径
-        format:
-          type: string
-          enum: [json, yaml, schema]
-          description: 验证格式类型
-          default: json
-        schema:
-          type: object
-          description: JSON Schema（format=schema 时使用）
-    tags: [schema, json, yaml, validation]
-
   # ========== 语义检查 ==========
   - name: semantic_check
     description: 语义检查（意图覆盖、匹配、幻觉）

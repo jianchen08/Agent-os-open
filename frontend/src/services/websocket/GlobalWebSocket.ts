@@ -10,6 +10,7 @@
 
 import { buildGlobalWebSocketUrl } from '@/constants/websocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useAuthStore } from '@/stores/authStore'
 import { loggers } from '@/utils/logger'
 
 const _wsLogger = loggers.websocket
@@ -91,7 +92,10 @@ class GlobalWebSocketService {
 
     this._connectionTimeoutTimer = setTimeout(() => {
       if (this._status === 'connecting') {
-        console.warn('[GlobalWS] 连接超时，关闭并重连')
+        // BUG-FIX-M03: WS handler 层 console 残留
+        // 问题根因: 连接级异常用 console.warn 记录。
+        // 修复方案: 改用正式 logger.warn（_wsLogger），生产环境统一记录。
+        _wsLogger.warn('[GlobalWS] 连接超时，关闭并重连')
         if (this.ws) {
           this.ws.onclose = null
           this.ws.onerror = null
@@ -271,12 +275,15 @@ class GlobalWebSocketService {
         const payload = JSON.stringify(msg)
         // 发送前检查缓冲区，超过阈值则延迟发送避免积压
         if (this.ws.bufferedAmount > SEND_BUFFER_THRESHOLD) {
-          console.warn('[GlobalWS] bufferedAmount 超过阈值，消息入队延迟发送')
+          _wsLogger.warn('[GlobalWS] bufferedAmount 超过阈值，消息入队延迟发送')
           this._enqueueIfNotDuplicate(msg)
           return
         }
         this.ws.send(payload)
-      } catch {
+        _wsLogger.debug('[GlobalWS] 已发送: type=%s thread=%s', msg.type, (msg as any).thread_id?.slice(0, 12))
+      } catch (err) {
+        _wsLogger.warn('[GlobalWS] ws.send 失败，消息入队: type=%s readyState=%s error=%s',
+          msg.type, this.ws?.readyState, err instanceof Error ? err.message : String(err))
         this._enqueueIfNotDuplicate(msg)
       }
     } else {
@@ -337,7 +344,7 @@ class GlobalWebSocketService {
         this._send({ type: 'heartbeat', timestamp: Date.now() })
         this._clearHeartbeatTimeout()
         this._heartbeatTimeoutTimer = setTimeout(() => {
-          console.warn('[GlobalWS] 心跳超时，连接可能已断开，主动关闭重连')
+          _wsLogger.warn('[GlobalWS] 心跳超时，连接可能已断开，主动关闭重连')
           if (this.ws) {
             this.ws.close(4001, '心跳超时')
           }
@@ -385,8 +392,38 @@ class GlobalWebSocketService {
     }
     this._reconnectAttempts++
     console.info('[GlobalWS] %dms 后重连（第 %d 次）', delay, this._reconnectAttempts)
-    this._reconnectTimer = setTimeout(() => {
+    this._reconnectTimer = setTimeout(async () => {
       if (!this._disposed && this._token) {
+        // BUG-FIX-fix_20260614_expired_token_reconnect_loop:
+        // 问题根因: token 过期后 WS 被后端拒绝 (403)，前端重连时用同一个过期 token
+        //   无限重试 → 前端输出卡在半路时无法恢复连接 → 流式数据断流。
+        // 修复方案: 重连前检查 token 是否过期，过期则先刷新再连接。
+        //
+        // BUG-FIX-fix_20260622_workspace_state_loss:
+        // 问题根因: 早期 refreshToken 失败会内部调用 logout()，导致 WS 重连风暴期间
+        //   （网络抖动 → 多次重连 → 多次刷新尝试 → 任一失败即 logout）
+        //   用户被强制踢出登录并丢失工作区状态。
+        // 修复方案: 配合 authStore.refreshToken 已不再自杀（P0-1.2），此处 catch
+        //   仅记日志并用旧 token 继续重连，**绝不触发 logout**。
+        //   真正认证失效（refresh_token 被 401/403 拒绝）由 client.ts 拦截器在
+        //   下一次 API 请求时统一处理，WS 路径不参与登出决策。
+        try {
+          const authStore = useAuthStore.getState()
+          if (authStore.checkTokenExpiration()) {
+            _wsLogger.info('[GlobalWS] Token 已过期，刷新后再重连')
+            await authStore.refreshToken()
+            const newToken = authStore.token
+            if (newToken && newToken !== this._token) {
+              this._token = newToken
+              _wsLogger.info('[GlobalWS] Token 已刷新')
+            }
+          }
+        } catch {
+          // 刷新失败（网络错误/超时/5xx/真认证失效），仍尝试用旧 token 重连。
+          // 注意：此处不调用 logout，避免重连风暴期间误踢用户。
+          // 后端会拒绝无效 token 并关闭 WS，前端按指数退避继续重试，直到 token 刷新成功。
+          _wsLogger.warn('[GlobalWS] Token 刷新失败，尝试用旧 token 重连（不登出）')
+        }
         this.connect(this._token)
       }
     }, delay)

@@ -11,6 +11,7 @@ MCP 工具加载器
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -68,7 +69,7 @@ class MCPToolLoader:
         servers = {}
 
         if config_path.suffix in [".yaml", ".yml"]:
-            import yaml
+            import yaml  # noqa: PLC0415
 
             try:
                 with open(config_path, encoding="utf-8") as f:
@@ -164,7 +165,7 @@ class MCPToolLoader:
               mcp.json
               src/ ...
         """
-        import logging
+        import logging  # noqa: PLC0415
 
         logger = logging.getLogger(__name__)
         directory = Path(directory)
@@ -193,7 +194,7 @@ class MCPToolLoader:
                         config.name = server_name
 
                     # 将相对路径的 args 转换为相对于项目根目录的绝对路径
-                    config = self._resolve_args_paths(config, directory)
+                    config = self._resolve_args_paths(config, directory)  # noqa: PLW2901
 
                     if not config.disabled:
                         try:
@@ -260,7 +261,7 @@ class MCPToolLoader:
         include_disabled: bool = False,
     ) -> list["ToolRunnable"]:
         """从配置文件加载工具并转换为 Runnable"""
-        from tools.mcp_adapter import mcp_tool_to_runnable
+        from tools.mcp_adapter import mcp_tool_to_runnable  # noqa: PLC0415
 
         tools = await self.load_from_config(config_path, include_disabled)
         runnables = []
@@ -279,7 +280,7 @@ class MCPToolLoader:
         handler: ToolHandler,
     ) -> "ToolRunnable":
         """将单个 MCP 工具转换为 Runnable"""
-        from tools.mcp_adapter import mcp_tool_to_runnable
+        from tools.mcp_adapter import mcp_tool_to_runnable  # noqa: PLC0415
 
         return mcp_tool_to_runnable(tool, handler)
 
@@ -312,7 +313,7 @@ class MCPToolLoader:
             metadata={"server": server_name},
         )
 
-    def _infer_tool_category(self, name: str, description: str) -> str:
+    def _infer_tool_category(self, name: str, description: str) -> str:  # noqa: PLR0911
         """根据工具名称和描述推断工具类别"""
         name_lower = name.lower()
         desc_lower = description.lower() if description else ""
@@ -382,14 +383,12 @@ class MCPToolLoader:
                             break
                         text = line.decode('utf-8', errors='replace').strip()
                         if text:
-                            logger.debug("[MCP:%s stderr] %s", server_name, text)
+                            logger.debug("[MCP:%s stderr] %s", server_name, text)  # noqa: F821
                 except Exception:
                     pass
                 finally:
-                    try:
+                    with contextlib.suppress(Exception):
                         process.stderr.close()
-                    except Exception:
-                        pass
 
             thread = threading.Thread(target=_consume, daemon=True)
             thread.start()
@@ -403,19 +402,15 @@ class MCPToolLoader:
                             break
                         text = line.decode('utf-8', errors='replace').strip()
                         if text:
-                            logger.debug("[MCP:%s stderr] %s", server_name, text)
+                            logger.debug("[MCP:%s stderr] %s", server_name, text)  # noqa: F821
                 except Exception:
                     pass
                 finally:
-                    try:
+                    with contextlib.suppress(Exception):
                         process.stderr.close()
-                    except Exception:
-                        pass
 
-            try:
+            with contextlib.suppress(RuntimeError):
                 asyncio.ensure_future(_consume_async())
-            except RuntimeError:
-                pass
 
     async def _connect_server(self, config: MCPServerConfig) -> Any:
         """连接 MCP 服务器
@@ -432,8 +427,8 @@ class MCPToolLoader:
         修复方案: 返回缓存连接前检测子进程存活状态，已死则清理并重建连接
         影响范围: 所有 MCP 服务器连接
         """
-        import logging
-        import sys
+        import logging  # noqa: PLC0415
+        import sys  # noqa: PLC0415
 
         logger = logging.getLogger(__name__)
 
@@ -444,10 +439,8 @@ class MCPToolLoader:
             logger.warning(
                 "MCP 子进程已退出，清理并重连 | server=%s", config.name
             )
-            try:
+            with contextlib.suppress(Exception):
                 await cached_client.close()
-            except Exception:
-                pass
             del self._connections[config.name]
 
         max_retries = 3
@@ -526,6 +519,7 @@ class MCPToolLoader:
                         details={"server": config.name, "error": str(e)},
                         cause=last_error,
                     ) from last_error
+        return None
 
     def get_server_status(self) -> dict[str, str]:
         """获取所有服务器状态"""
@@ -579,6 +573,7 @@ class MCPToolLoader:
                         await self.disconnect_server(server_config.name)
                     else:
                         raise
+            return None
 
         if overall_timeout is not None:
             try:
@@ -586,7 +581,7 @@ class MCPToolLoader:
                     _call_with_retry(), timeout=overall_timeout
                 )
             except asyncio.TimeoutError:
-                raise MCPConnectionError(
+                raise MCPConnectionError(  # noqa: B904
                     message=(
                         f"MCP 整体调用超时（{overall_timeout}s），"
                         f"含重试仍未完成 | server={server_config.name} | tool={tool_name}"

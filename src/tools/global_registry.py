@@ -26,7 +26,7 @@ _initialized = False
 
 def get_global_tool_registry_sync() -> ToolRegistry:
     """同步获取全局工具注册表（向后兼容）"""
-    global _global_tool_registry
+    global _global_tool_registry  # noqa: PLW0603
 
     if _global_tool_registry is None:
         logger.warning(
@@ -43,7 +43,7 @@ async def get_global_tool_registry(
     session: Any | None = None,
 ) -> ToolRegistry:
     """获取全局工具注册表（懒加载）"""
-    global _global_tool_registry, _initialized
+    global _global_tool_registry, _initialized  # noqa: PLW0603
 
     if _global_tool_registry is None or force_reload:
         async with _registry_lock:
@@ -53,8 +53,8 @@ async def get_global_tool_registry(
                     "[GlobalRegistry] 初始化全局工具注册表（只注册核心工具）..."
                 )
 
-                from tools.builtin import register_core_tools
-                from tools.loader import init_dynamic_tool_loader
+                from tools.builtin import register_core_tools  # noqa: PLC0415
+                from tools.loader import init_dynamic_tool_loader  # noqa: PLC0415
 
                 _global_tool_registry = ToolRegistry()
 
@@ -115,7 +115,7 @@ def _sync_initialize_builtin_tools(registry: ToolRegistry) -> None:
     """同步初始化核心系统工具到注册表"""
     core_tools = []
     try:
-        from tools.builtin import get_all_builtin_tools
+        from tools.builtin import get_all_builtin_tools  # noqa: PLC0415
 
         # 获取所有工具实例，筛选系统级别的核心工具
         all_tools = get_all_builtin_tools()
@@ -152,7 +152,7 @@ async def initialize_tools_async(
     """异步初始化工具到注册表"""
     # 1. 加载内置工具（主要工具来源）
     try:
-        from tools.builtin import register_all_builtin_tools
+        from tools.builtin import register_all_builtin_tools  # noqa: PLC0415
 
         # 传递 session，确保 task_submit 等工具能正确注册
         builtin_names = register_all_builtin_tools(
@@ -167,7 +167,7 @@ async def initialize_tools_async(
 
     # 2. 加载 MCP 工具（自动扫描 mcp-servers/ 目录）
     try:
-        from tools.mcp_loader import MCPToolLoader
+        from tools.mcp_loader import MCPToolLoader  # noqa: PLC0415
 
         loader = MCPToolLoader()
         mcp_count = 0

@@ -21,8 +21,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-class MockWebSocket:
-    """用于测试的 WebSocket 模拟对象。"""
+class WebSocketPeer:
+    """WebSocket 连接端点的最小抽象。
+
+    描述生产环境中实际 WebSocket 连接（如 aiohttp.web.WebSocketResponse）
+    的公共接口：send_text / close。同时可在测试中作为轻量替代。
+    """
 
     def __init__(self, user_id: str = "test_user") -> None:
         self.user_id = user_id
@@ -30,18 +34,22 @@ class MockWebSocket:
         self._closed = False
 
     async def send_text(self, message: str) -> None:
-        """模拟发送文本消息。"""
+        """发送文本消息。"""
         if self._closed:
             raise RuntimeError("WebSocket is closed")
         self.sent_messages.append(message)
 
     async def close(self) -> None:
-        """模拟关闭连接。"""
+        """关闭连接。"""
         self._closed = True
 
     @property
     def is_closed(self) -> bool:
         return self._closed
+
+
+# N1-cleanup: 向后兼容别名，供现有测试代码引用
+MockWebSocket = WebSocketPeer
 
 
 class _SendItem:
@@ -67,8 +75,8 @@ class WebSocketManager:
     SEND_QUEUE_MAXSIZE = 5000  # 发送队列最大长度，防止内存无限增长
 
     def __init__(self) -> None:
-        self._global_connections: dict[str, MockWebSocket] = {}
-        self._active_connections: dict[str, list[MockWebSocket]] = {}
+        self._global_connections: dict[str, WebSocketPeer] = {}
+        self._active_connections: dict[str, list[WebSocketPeer]] = {}
         self._heartbeat_timestamps: dict[str, float] = {}
 
         # FEATURE-20260521-ws-queue: 发送队列和后台任务
@@ -117,7 +125,7 @@ class WebSocketManager:
         """实际执行向会话发送（在后台循环中调用）。"""
         conns = self._active_connections.get(thread_id, [])
         if conns:
-            stale: list[MockWebSocket] = []
+            stale: list[WebSocketPeer] = []
             for ws in conns:
                 try:
                     await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
@@ -138,7 +146,7 @@ class WebSocketManager:
 
         return False
 
-    def register_global(self, user_id: str, ws: MockWebSocket) -> None:
+    def register_global(self, user_id: str, ws: WebSocketPeer) -> None:
         """注册全局 WebSocket 连接。"""
         self._global_connections[user_id] = ws
         self._heartbeat_timestamps[user_id] = time.time()
@@ -149,14 +157,14 @@ class WebSocketManager:
         self._global_connections.pop(user_id, None)
         self._heartbeat_timestamps.pop(user_id, None)
 
-    def register_session(self, thread_id: str, ws: MockWebSocket) -> None:
+    def register_session(self, thread_id: str, ws: WebSocketPeer) -> None:
         """注册会话 WebSocket 连接。"""
         if thread_id not in self._active_connections:
             self._active_connections[thread_id] = []
         self._active_connections[thread_id].append(ws)
         logger.info("[WS] 会话连接注册: thread=%s", thread_id[:12])
 
-    def unregister_session(self, thread_id: str, ws: MockWebSocket) -> None:
+    def unregister_session(self, thread_id: str, ws: WebSocketPeer) -> None:
         """注销会话 WebSocket 连接。"""
         conns = self._active_connections.get(thread_id, [])
         if ws in conns:
@@ -220,6 +228,6 @@ class WebSocketManager:
         """当前会话连接数。"""
         return sum(len(v) for v in self._active_connections.values())
 
-    def get_global_websocket(self, user_id: str) -> MockWebSocket | None:
+    def get_global_websocket(self, user_id: str) -> WebSocketPeer | None:
         """获取指定用户的全局 WebSocket 连接。"""
         return self._global_connections.get(user_id)

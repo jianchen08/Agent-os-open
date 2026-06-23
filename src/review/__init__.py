@@ -5,8 +5,8 @@
 同时提供多模态媒体审阅（图片/视频）功能。
 """
 
-from review.media_reviewer import ImageReviewer, VideoReviewer
 from review.media_review_service import MediaReviewService
+from review.media_reviewer import ImageReviewer, VideoReviewer
 from review.models import (
     ImageReviewResult,
     MediaReviewConfig,

@@ -18,12 +18,13 @@ from plugins.input import (
     PromptBuildPlugin,
     ReasoningCheckPlugin,
     SecurityCheckPlugin,
-    ToolCallGuard,
     ToolCache,
+    ToolCallGuard,
     ToolContextPlugin,
     ToolSchemaPlugin,
     ToolSchemaValidator,
 )
+
 # Lazy import for hot-reload to avoid circular imports at module level
 # Use: from plugins.hot_reload import PluginHotReloader
 
@@ -34,7 +35,7 @@ def get_hot_reloader():
     Returns:
         PluginHotReloader class.
     """
-    from plugins.hot_reload import PluginHotReloader
+    from plugins.hot_reload import PluginHotReloader  # noqa: PLC0415
     return PluginHotReloader
 
 

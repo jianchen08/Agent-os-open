@@ -7,7 +7,6 @@
 """
 
 from isolation.decider import IsolationDecider, IsolationError
-from isolation.executor import IsolationExecutor
 from isolation.manager import IsolationManager, get_isolation_manager
 from isolation.permission_checker import PermissionChecker, check_write_permission
 from isolation.permission_policy import (
@@ -20,7 +19,6 @@ from isolation.permission_policy import (
 )
 from isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
 from isolation.providers.base import IsolationProvider
-from isolation.workspace import get_workspace_config_root, resolve_workspace, resolve_workspace_chain
 from isolation.types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -30,6 +28,7 @@ from isolation.types import (
     OperationType,
     TaskType,
 )
+from isolation.workspace import get_workspace_config_root, resolve_workspace, resolve_workspace_chain
 
 __all__ = [
     # 类型
@@ -48,7 +47,6 @@ __all__ = [
     "IsolationPolicyLoader",
     "ToolIsolationPolicy",
     "IsolationProvider",
-    "IsolationExecutor",
     # 权限策略
     "PermissionScope",
     "PermissionPolicyType",

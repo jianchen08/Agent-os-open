@@ -245,6 +245,7 @@ system_prompt: |
 #   |---|---|---|---|
 #   | "rules" | 注入硬约束和软约束 | 会话开始时注入约束规则 | 每轮强化提醒约束规则 |
 #   | "path" | 读取文件内容并注入 | 注入模板、规则文档等 | 每轮重新读取（文件可能变化） |
+#   | "folder" | 读取文件夹下所有文件内容并注入 | 注入项目规则目录、代码目录等 | 每轮重新读取（文件可能变化，可通过 extensions 过滤） |
 #   | "timestamp" | 注入当前时间戳 | 会话开始时的时间 | 每轮最新时间（推荐） |
 #   | "session" | 注入会话信息 | 会话基本信息 | 每轮最新会话状态 |
 #   | "agent" | 注入 Agent 自身信息 | Agent 配置信息 | 每轮 Agent 状态 |
@@ -334,19 +335,14 @@ system_prompt: |
 #   | skills/skill-devops/SKILL.md | DevOps 运维（构建 Docker 镜像等） |
 #   | skills/skill-tool-output-optimize/SKILL.md | 工具输出优化（清理、收集、验证） |
 #
-# ===== 知识库注入 =====
-#   - knowledge_name: "xxx"      # 按名称注入知识库
-#     inject_type: "full"        # 注入方式: full(全量)/summary(摘要)/retrieval(检索)
-#   - tags: ["xxx"]              # 按标签检索知识库
-#     inject_type: "retrieval"
-#     top_k: 5                   # 检索数量
-#
-# ===== 动态检索 =====
-#   动态变量支持基于当前上下文的动态检索：
-#   - type: "knowledge_retrieval"  # 根据当前对话内容动态检索相关知识
-#     top_k: 3
-#   - type: "context_summary"      # 动态生成当前上下文摘要
-#     max_length: 500
+# ===== 知识库注入（通过 ContextVarItem 的 tags 检索）=====
+#   放在 static_vars.items 或 dynamic_vars.items 中：
+#   - name: "领域知识"              # 显示名称
+#     tags: ["domain_knowledge"]    # 按标签检索知识库
+#     inject_type: "retrieval"      # 注入方式: full(全量)/summary(摘要)/retrieval(检索)
+#     top_k: 5                      # 检索数量
+#     memory_type: "knowledge"      # 可选：记忆类型（knowledge/episode）
+#     memory_layer: "l2"            # 可选：记忆层级（l1/l2/l3）
 #
 # ===== 工具索引（仅配置了 resource_search 的 Agent 使用）=====
 #   通过 content 字段直接注入工具简短描述列表，让 Agent 知道有哪些工具可按需加载。
@@ -358,7 +354,8 @@ system_prompt: |
 #   全量内置工具清单（根据 Agent 已绑定的工具，从中筛选未绑定的填入）：
 #   | 工具名 | 说明 |
 #   |---|---|
-#   | file_read | 读取文件内容、列出目录结构 |
+#   | file_read | 读取文件内容 |
+#   | list_directory | 列出目录内容（文件列表、大小、类型） |
 #   | file_write | 创建、写入、编辑文件内容 |
 #   | bash_execute | 执行Shell命令 |
 #   | enhanced_search | 在文件中搜索文本、代码或文件名 |
@@ -420,8 +417,10 @@ static_vars:
 #     enabled: true
 #     items:
 #       - type: "rules"
-#       - knowledge_name: "domain_knowledge"
-#         inject_type: "full"
+#       - name: "领域知识"
+#         tags: ["domain_knowledge"]
+#         inject_type: "retrieval"
+#         top_k: 5
 #       - name: "项目规则"
 #         type: "path"
 #         path: "docs/project_rules.md"
@@ -498,14 +497,16 @@ dynamic_vars:
 #     items:
 #       - type: "timestamp"           # 每轮最新时间
 #       - type: "rules"               # 每轮强化约束
-#       - type: "knowledge_retrieval" # 动态检索相关知识
+#       - name: "动态知识检索"         # 按标签动态检索知识库
+#         tags: ["current_context"]
+#         inject_type: "retrieval"
 #         top_k: 3
 #       - path: "runtime_status.md"   # 每轮重新读取（文件可能变化）
 #         name: "运行时状态"
 #
 # ===== 动态变量使用原则（谨慎）=====
 #   动态变量每轮注入到消息末尾。以下原则仅针对**规则约束类**动态变量（如"决策检查点"），
-#   其他类型（timestamp、knowledge_retrieval 等）不受此限制。
+#   其他类型（timestamp、tags 检索等）不受此限制。
 #
 #   1. **规则约束只放最关键的**：最多 1-2 条核心行为约束，不要放长篇规则
 #   2. **一句话最佳**：决策检查点最好是一句话，不超过 2 条
@@ -692,24 +693,42 @@ output_schema:
 #         type: "string"
 #         enum: ["success", "failed"]
 
+# ==================== 上下文变量配置 ====================
+
+context_variables:
+  key: "value"
+# 【可选】上下文变量配置
+# - 类型: object (dict)
+# - 作用: 存储键值对形式的上下文变量，供运行时 state 注入使用
+# - 与 static_vars/dynamic_vars 的区别:
+#   - static_vars/dynamic_vars: 结构化注入（支持 rules/path/folder/timestamp 等类型），由 PromptBuildPlugin 和 LLMCore 消费
+#   - context_variables: 简单的键值对存储，由 load_from_yaml 直接解析为 dict，按需从 state 中读取
+# - 示例:
+#   context_variables:
+#     preferred_language: "zh-CN"
+#     output_format: "structured"
+#     max_depth: 3
+
 # ==================== 产出物定义 ====================
+#
+# 产出物分为两类：
+#
+# **实际产出**：任务的最终交付物（代码、配置、文档等），是任务目标本身
+# **报告产出**：给上级查看的执行过程报告（编排报告、审查报告、调试报告等）
 #
 # 不同层级的 Agent 产出物定义：
 #
 # ===== L1 (main) =====
 #   无产出物（只负责分解和调度，不产出文件）
-#   但需在"常用 Agent 映射"表中列出各 Agent 的产出物摘要，便于派发任务时设置验收标准。
+#   但需在"常用 Agent 映射"表中列出各 Agent 的实际产出和报告产出摘要，便于派发任务时设置验收标准。
 #
 # ===== L2 (orchestrator) =====
-#   根据具体任务定义产出物：
-#   - 如果任务由下层 Agent 生成产出物，可将下层产出物作为本层产出物
-#   - 如果需要整合下层产出物，可定义整合后的产出物
-#   - 示例：solution_planning_agent 的产出物是 "方案文档" 和 "任务链"
+#   报告产出为主：编排报告、审查结论等
+#   实际产出：方案文档、任务链、检查点设计等编排产出
 #
 # ===== L3 (specialized/atomic) =====
-#   根据具体任务定义产出物：
-#   - 必须明确定义产出物名称、路径、类型
-#   - 示例：research_agent 的产出物是 "调研报告"
+#   实际产出为主：代码文件、配置文件、调研报告等
+#   报告产出：视任务而定（如调试报告）
 #
 # ===== 映射表体现 =====
 #   L1 主 Agent 应在 static_vars 中配置"常用 Agent 映射"表，格式如下：
@@ -717,10 +736,14 @@ output_schema:
 #     type: "reference"
 #     content: |
 #       ## 常用 Agent 映射
-#       | 场景 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
-#       |------|-------|------|-----------|----------|----------|
-#       | 调研/分析 | research_agent | ... | `docs/{title}_research_report.md` | container | file_check, semantic_check(重要任务可选) |
-#       | Agent创建 | resource_manager_agent | ... | 视资源类型而定 | host | file_check, semantic_check(重要任务) |
+#       | Agent ID | 实际产出 | 报告产出 | 命名规则 | 隔离级别 | 推荐指标 |
+#       |----------|---------|---------|----------|----------|----------|
+#       | research_agent | 调研报告 | - | docs/working/{title}_research_report.md | container | file_check |
+#       | solution_planning_agent | 方案文档、任务链、检查点 | - | docs/working/{title}_solution.md, docs/tasks/, docs/working/{title}_checkpoints.md | container | file_check |
+#       | resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/resource_generation_report.md | host | file_check |
+#       | code_writer_agent | 代码文件、测试文件 | - | 由任务决定 | container | file_check, format_valid |
+#       | code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
+#       | test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |
 #       ### 隔离规则
 #       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
 #       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
@@ -746,20 +769,22 @@ deliverables:
 #       description: 产出物描述
 #       template_source: 模板来源（可选: "knowledge"）
 #       template_name: 模板名称（可选）
-#       output_path: 输出路径（支持 {title} 等模板变量和 {{workspace}}/{{task_id}}/{{agent_id}} 等运行时占位符，格式: {{workspace}}/docs/{title}_{产出物类型}.md）
+#       output_path: 输出路径（支持 {title} 等模板变量和 {{workspace}}/{{task_id}}/{{agent_id}} 等运行时占位符，格式: {{workspace}}/docs/working/{title}_{产出物类型}.md）
 #       type: 文件类型（如 "markdown", "json", "python"）
 #       required: 是否必须产出
+#       category: 产出物类别（"actual" 实际产出 或 "report" 报告产出）
 # - 示例:
 #   deliverables:
 #     - name: "research_report"
 #       description: "调研报告文件"
 #       template_source: "knowledge"
 #       template_name: "research_report"
-#       output_path: "{{workspace}}/docs/{title}_research_report.md"
+#       output_path: "{{workspace}}/docs/working/{title}_research_report.md"
 #       type: "markdown"
 #       required: true
+#       category: "actual"
 # - 决策建议:
-#   - L1 Agent: 无需定义 deliverables，但需在映射表中体现各 Agent 的产出物摘要
+#   - L1 Agent: 无需定义 deliverables，但需在映射表中体现各 Agent 的实际产出和报告产出摘要
 #   - L2/L3 Agent: 根据任务产出定义 deliverables，产出物信息将被 L1 映射表引用
 
 # ==================== 推荐评估指标 ====================
@@ -927,50 +952,6 @@ timeout_seconds: {timeout_seconds}
 #       context_compress:
 #         context_window: 64000    # 覆盖默认的 128K 上下文窗口
 #         compress_trigger_ratio: 0.6
-
-# ==================== 提示词结构配置 ====================
-#
-# 控制提示词的分层组装顺序和各层是否包含。
-# 仅 L1 主 Agent 需要配置此字段，L2/L3 使用默认配置即可。
-#
-# 默认组装顺序（不配置 prompt_structure 时）：
-#   system_prompt → tools_description → static_vars → memory → recent_messages → dynamic_vars
-
-# prompt_structure:
-#   include_system_prompt: true
-#   include_tools_description: true
-#   include_static_vars: true
-#   include_memory_l1: true
-#   include_memory_l2: true
-#   include_memory_l3: true
-#   include_recent_messages: true
-#   include_dynamic_vars: true
-#   layer_order:
-#     - "system_prompt"
-#     - "tools_description"
-#     - "static_vars"
-#     - "l3_memory"
-#     - "l2_memory"
-#     - "l1_memory"
-#     - "recent_messages"
-#     - "dynamic_vars"
-# 【可选】提示词结构配置
-# - 类型: object
-# - 作用: 控制提示词的分层组装顺序和各层是否包含
-# - 使用场景: 仅 L1 主 Agent 需要自定义，L2/L3 使用默认即可
-# - 结构:
-#   prompt_structure:
-#     include_*: boolean          # 控制各层是否包含（默认全 true）
-#     layer_order: list[string]   # 自定义组装顺序
-# - 可用层:
-#   | 层名 | 内容 |
-#   |---|---|
-#   | system_prompt | 系统提示词 |
-#   | tools_description | 工具描述 |
-#   | static_vars | 静态变量 |
-#   | l1/l2/l3_memory | 各层级记忆 |
-#   | recent_messages | 最近对话消息 |
-#   | dynamic_vars | 动态变量 |
 
 # ==================== 标签配置 ====================
 

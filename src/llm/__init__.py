@@ -9,7 +9,6 @@ from llm.router_factory import (
     build_router,
     get_key_pool,
     get_or_create_router,
-    reset_router,
 )
 
 __all__ = [
@@ -22,5 +21,4 @@ __all__ = [
     "build_router",
     "get_key_pool",
     "get_or_create_router",
-    "reset_router",
 ]

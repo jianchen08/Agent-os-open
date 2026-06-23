@@ -1,10 +1,9 @@
 export { useAuthStore } from './authStore'
 export { useSessionStore } from './sessionStore'
 export { useSessionListStore } from './sessionListStore'
-export { useStreamingStore } from './streamingStore'
 export { initializeTheme, useThemeStore } from './themeStore'
 export type { ThemeActions, ThemeMode, ThemeState } from './themeStore'
-export { useUIStore, type Theme } from './uiStore'
+export { useUIStore } from './uiStore'
 export { useAgentTabStore } from './agentTabStore'
 export type { AgentTab } from '@/types/task'
 

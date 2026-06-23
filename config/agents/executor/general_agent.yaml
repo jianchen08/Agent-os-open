@@ -109,9 +109,6 @@ tool_ids:
 - memory
 - task_evaluate
 - human_interaction
-- design_generate
-- playwright_test
-- design_review
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物

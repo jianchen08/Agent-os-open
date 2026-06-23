@@ -20,8 +20,11 @@ def resolve_task_workspace(task: Any) -> str | None:
     同步写入内存 task 对象，包含 git worktree 的实际绝对路径。
     如果 metadata 中缺失，先从 lifecycle 恢复到内存。
 
-    子任务的 Agent 在父工作空间的 {task_id}/ 子目录下工作，
-    因此对于有 parent_task_id 的任务，自动追加 task.id。
+    ws_meta.path 已由 WorkspaceLifecycleManager 正确设置：
+    - shared 模式：子任务共享父工作空间（path 即为父空间路径）
+    - worktree 模式：子任务有独立的 worktree 路径
+    - plain 模式：子任务有独立的目录路径
+    因此直接使用 ws_meta.path，不再额外拼接 task.id。
 
     Args:
         task: TaskModel 实例，需有 id, metadata, parent_task_id 属性
@@ -47,11 +50,6 @@ def resolve_task_workspace(task: Any) -> str | None:
     if not p.is_absolute():
         p = Path.cwd() / p
 
-    # 子任务：Agent 在父工作空间的 {task_id}/ 子目录下操作
-    parent_id = getattr(task, "parent_task_id", None)
-    if parent_id:
-        p = p / task.id
-
     return str(p)
 
 
@@ -60,15 +58,18 @@ def _restore_from_lifecycle(task: Any, metadata: dict) -> None:
 
     持久化到 task.metadata 后，后续读取直接从任务数据获取，
     不再需要查找 lifecycle。
+
+    BUG-FIX-fix_20260618_lifecycle_not_in_provider:
+    原实现通过 provider.get("services") 获取 lifecycle，但 ServiceProvider
+    从未注册 "services" key，导致本函数永远是空操作。现直接通过
+    provider.get("workspace_lifecycle_manager") 获取（lifecycle 已在
+    TaskWorker._init_lifecycle 注册到 ServiceProvider）。
     """
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
-        services = provider.get("services") if provider else None
-        if not services:
-            return
-        lifecycle = services.get("workspace_lifecycle_manager")
+        lifecycle = provider.get("workspace_lifecycle_manager") if provider else None
         if not lifecycle:
             return
 

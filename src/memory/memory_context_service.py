@@ -18,7 +18,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from memory.context_compressor import CompressionConfig, ContextCompressor
 
@@ -68,7 +69,7 @@ class MemoryContextService:
             config.get("context_window", 128000) if config else 128000,
         )
         self._compressor = compressor or ContextCompressor(config=compression_config)
-        self._config = config or {"context_window": 128000, "compress_trigger_ratio": 0.5}
+        self._config = config or {"context_window": 128000, "compress_trigger_ratio": 0.55}  # 0.55 见 config.defaults.COMPRESS_TRIGGER_RATIO
         self._llm_call_fn: LLMCallFn | None = llm_call_fn
 
         # 内存存储：{session_id: {"L0": [messages], "L1": str, "L2": str}}
@@ -99,7 +100,7 @@ class MemoryContextService:
         """验证配置完整性，缺失字段用默认值填充。"""
         defaults = {
             "context_window": 128000,
-            "compress_trigger_ratio": 0.5,
+            "compress_trigger_ratio": 0.55,  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
         }
         for key, default in defaults.items():
             if key not in self._config:
@@ -151,7 +152,7 @@ class MemoryContextService:
         self,
         messages: list[dict[str, Any]],
         context_window: int,
-        trigger_ratio: float = 0.6,
+        trigger_ratio: float = 0.55,  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
         state_snapshot: str = "",
         recent_process_blocks: str = "",
         save_chunk_fn: Callable[..., Awaitable[None]] | None = None,
@@ -414,8 +415,10 @@ class MemoryContextService:
                 )
                 if snapshots:
                     state_snapshot = snapshots[0].content or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "[MemoryContextService] 加载 state_snapshot 失败: %s", e,
+                )
 
             try:
                 chunks = await self._chunk_service.find_by_pipeline(
@@ -436,8 +439,10 @@ class MemoryContextService:
                         f"[{chunk.sequence_start}-{chunk.sequence_end}] {chunk.content}"
                         for chunk in samples
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "[MemoryContextService] 加载 L1 过程块失败: %s", e,
+                )
 
         return {"state_snapshot": state_snapshot, "process_blocks": process_blocks}
 
@@ -445,14 +450,14 @@ class MemoryContextService:
     # 压缩结果持久化
     # ------------------------------------------------------------------
 
-    async def _save_compression_result(
+    async def _save_compression_result(  # noqa: PLR0912,PLR0915
         self, old_msgs: list[dict[str, Any]], comp_result: dict[str, Any],
     ) -> None:
         """保存压缩块到 ChunkService + 覆盖状态快照 + 写入长期记忆。"""
         if not self._chunk_service or not self._pipeline_id:
             return
 
-        from memory.types import ChunkData
+        from memory.types import ChunkData  # noqa: PLC0415
 
         l1_content = comp_result.get("l1", "")
         l2_content = comp_result.get("l2", "")
@@ -462,11 +467,6 @@ class MemoryContextService:
         msg_count = len(old_msgs)
         context_window = self._config.get("context_window", 0)
 
-        # BUG-FIX: sequence 范围直接从被压缩消息的 _record_sequence 取实际值，
-        # 而非从已有块递增。重启后压缩同一批消息时，已有块的
-        # sequence_end 会被累加（如 1-1027, 1028-2089），
-        # 但实际覆盖的是同一批消息，导致多个块范围"不重叠"的假象。
-        # 正确做法：直接用消息自身的 sequence 字段。
         sequences = [
             m["_record_sequence"] for m in old_msgs
             if "_record_sequence" in m and isinstance(m["_record_sequence"], int)
@@ -531,7 +531,7 @@ class MemoryContextService:
             except Exception:
                 pass
 
-            import json
+            import json  # noqa: PLC0415
             ss_content = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
             snapshot_chunk = ChunkData(
                 pipeline_run_id=self._pipeline_id,
@@ -547,31 +547,30 @@ class MemoryContextService:
             await self._chunk_service.save(snapshot_chunk)
 
         # memory_items → memory_service
-        if memory_items and any(v for v in memory_items.values() if v and v != "null"):
-            if self._memory_service:
-                try:
-                    tag_map = {
-                        "user_profile_updates": "user_profile",
-                        "project_knowledge_updates": "project_knowledge",
-                        "experience_updates": "experience",
-                    }
-                    extracted = 0
-                    for key, value in memory_items.items():
-                        if value and value != "null":
-                            await self._memory_service.add_memory(
-                                user_id=self._user_id,
-                                memory_type="semantic",
-                                tags=[tag_map.get(key, key)],
-                                content=value,
-                                source="compression",
-                            )
-                            extracted += 1
-                    if extracted:
-                        logger.info(
-                            "[MemoryContextService] 长期记忆提取: %d 条", extracted,
+        if memory_items and any(v for v in memory_items.values() if v and v != "null") and self._memory_service:
+            try:
+                tag_map = {
+                    "user_profile_updates": "user_profile",
+                    "project_knowledge_updates": "project_knowledge",
+                    "experience_updates": "experience",
+                }
+                extracted = 0
+                for key, value in memory_items.items():
+                    if value and value != "null":
+                        await self._memory_service.add_memory(
+                            user_id=self._user_id,
+                            memory_type="semantic",
+                            tags=[tag_map.get(key, key)],
+                            content=value,
+                            source="compression",
                         )
-                except Exception as exc:
-                    logger.warning("[MemoryContextService] 长期记忆写入失败: %s", exc)
+                        extracted += 1
+                if extracted:
+                    logger.info(
+                        "[MemoryContextService] 长期记忆提取: %d 条", extracted,
+                    )
+            except Exception as exc:
+                logger.warning("[MemoryContextService] 长期记忆写入失败: %s", exc)
 
         logger.info(
             "[MemoryContextService] 压缩块已保存: L1_id=%s (%d字符), "
@@ -593,8 +592,8 @@ class MemoryContextService:
         """
         # 优先：通过 router_factory 获取共享 Adapter（统一通道）
         try:
-            from config.models import get_model_config_loader
-            from llm.router_factory import get_or_create_adapter
+            from config.models import get_model_config_loader  # noqa: PLC0415
+            from llm.router_factory import get_or_create_adapter  # noqa: PLC0415
 
             loader = get_model_config_loader()
             adapter = get_or_create_adapter(loader)
@@ -605,7 +604,7 @@ class MemoryContextService:
                 if model_conf:
                     provider = model_conf.get("provider", "")
                     bare_name = model_conf.get("model_name", model_id)
-                    from llm.router_factory import _get_litellm_model_string
+                    from llm.router_factory import _get_litellm_model_string  # noqa: PLC0415
                     litellm_model = _get_litellm_model_string(provider, bare_name)
 
                     async def _call_via_shared_adapter(prompt: str) -> str:
@@ -655,7 +654,7 @@ class MemoryContextService:
         if not self._compression_model_id:
             return None
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
             loader = get_model_config_loader()
             conf = loader.get_llm_core_config(self._compression_model_id)
             if conf and conf.get("context_window"):
@@ -744,6 +743,10 @@ class MemoryContextService:
             )
         except Exception as exc:
             logger.warning("[MemoryContextService] 压缩失败: %s", exc)
+            return None
+
+        # compress_all 失败时返回 None（LLM 空响应/JSON 解析失败），跳过保存
+        if result is None:
             return None
 
         l1 = result.get("l1", "")

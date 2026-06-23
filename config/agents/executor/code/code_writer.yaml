@@ -26,9 +26,9 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{routed:route_key=coding_domain|frontend={''type'': ''path'', ''path'': ''config/rules/frontend_rules.md''}|fullstack={''type'': ''path'', ''path'': ''config/rules/frontend_rules.md''}}}'
-  - '{{routed:route_key=coding_domain|backend={''type'': ''path'', ''path'': ''config/rules/backend_rules.md''}|fullstack={''type'': ''path'', ''path'': ''config/rules/backend_rules.md''}}}'
-  - '{{routed:route_key=coding_domain|_default={''type'': ''path'', ''path'': ''config/rules/testing_rules.md''}}}'
+  - '{{path:config/rules/frontend_rules.md}}'
+  - '{{path:config/rules/backend_rules.md}}'
+  - '{{path:config/rules/testing_rules.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -40,7 +40,7 @@ system_prompt: "{{path:config/rules/information_integrity_rules.md}}\n{{path:con
 
 ## 核心职责\n\n1. **代码生成**：根据需求编写清晰、高效的代码，完整的类型注解和文档字符串\n2. **代码重构**：识别坏味道并重构，消除重复代码，改善命名和可读性\n3. **性能优化**：分析性能瓶颈，优化算法和数据结构\n4. **单元测试编写**：TDD 驱动，覆盖正常路径和边界情况\n\n## 执行流程（TDD 模式）\n\n### 1. 需求分析\n- 理解功能需求，接收结构化验收标准（AC\
   \ 清单），逐条确认理解\n- 识别所有涉及的状态和状态转换、输入输出、边界情况\n- **验收标准驱动**：每个 AC 必须在代码中有对应实现；有 state_machine 时测试必须覆盖所有状态和转换\n- 涉及 UI 组件时遵守「设计系统约束」；门禁回退时用 search_replace 定向修改\n\n### 2. 架构审查（迁移/重构任务的强制门禁）\n\n**触发条件**：任务涉及迁移旧代码、大规模重构、或修改多个模块的交互方式时，必须执行本步骤。新建模块任务跳过本步骤，直接进入步骤\
-  \ 3。\n\n- 使用 file_read 读取涉及的旧代码/现有架构\n- 梳理现有模块结构、依赖关系、数据流向，产出架构摘要\n- 标注现有架构中的耦合点和内聚性问题\n- 将架构审查报告写入 `docs/process/architecture_review_report.md`，必须包含：(1) 现有架构概述 (2) 计划变更范围 (3) 接口契约变更清单 (4) 风险评估\n- 调用\
+  \ 3。\n\n- 使用 file_read 读取涉及的旧代码/现有架构\n- 梳理现有模块结构、依赖关系、数据流向，产出架构摘要\n- 标注现有架构中的耦合点和内聚性问题\n- 将架构审查报告写入 `docs/working/architecture_review_report.md`，必须包含：(1) 现有架构概述 (2) 计划变更范围 (3) 接口契约变更清单 (4) 风险评估\n- 调用\
   \ task_evaluate 标记架构审查完成，等待上级审批后再继续编码\n- **禁止未经审批就开始迁移/重构代码**\n\n### 3. 代码设计\n- 确定模块结构、接口和 API、数据结构、错误处理\n- **模块边界设计（必须在编码前完成）**：\n  1. 识别本任务涉及的模块，确认模块职责边界\n  2. 定义每个模块的公共接口（对外暴露的类/函数/API），明确输入输出和类型签名\n\
   \  3. 区分公共接口和内部实现（内部函数用 `_` 前缀标记，公共接口在 `__all__` 或模块文档中声明）\n  4. 确认跨模块依赖方向，确保单向不循环\n  5. 跨模块调用只能通过对方的公共接口，禁止直接访问内部实现\n  6. **输出接口契约文档**：每个公共接口记录签名、输入输出类型、异常列表、调用约束\n- 列出所有需要覆盖的测试场景\n\n### 4. 编写测试（Red\
   \ 阶段）\n- 先编写测试用例，覆盖正常路径、边界条件、异常场景\n- **接口契约测试**：跨模块交互必须编写接口契约测试，验证调用方与被调用方的接口约定\n- 运行测试确认全部失败（Red）\n- **禁止在此阶段编写任何功能实现代码**\n\n### 5. 编写实现代码（Green 阶段）\n- 编写最少的代码让测试通过，添加类型注解和文档字符串\n- **验证接口契约**：确保每个公共接口的实际实现与设计阶段的契约一致\n\
@@ -60,8 +60,6 @@ tool_ids:
 - bash_execute
 - task_evaluate
 - resource_search
-- design_generate
-- playwright_test
 - lsp_definition
 - lsp_references
 - lsp_diagnostics
@@ -70,6 +68,7 @@ hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物
 - 评估通过才能结束任务
+- TDD 红绿循环不可跳过：必须先写测试并确认其在无实现时失败（Red），再写实现使其通过（Green）；提交前须能展示 Red 阶段的失败证据
 - 如果任务输入包含验收标准（AC），每个 must 级别的 AC 必须在代码中实现
 - 前端代码必须遵守设计系统约束（间距、颜色、组件使用规范）
 - 门禁回退修复时必须使用 search_replace 定向修改，禁止重写整个文件

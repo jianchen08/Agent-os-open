@@ -10,12 +10,12 @@ Web 操作工具
 
 import logging
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-import yaml
+import yaml  # noqa: F401
 
 from core.results import ToolExecutionResult
 from tools.builtin.base import BuiltinTool
@@ -71,15 +71,14 @@ class WebTool(BuiltinTool):
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "WebTool":
-        """从配置文件创建 WebTool 实例"""
-        path = Path(config_path or cls.DEFAULT_CONFIG_PATH)
-        if not path.exists():
-            logger.warning(f"[WebTool] 配置文件不存在: {path}，使用默认配置")
-            return cls()
-
+        """从配置文件创建 WebTool 实例（通过 ConfigCenter 统一缓存）"""
+        from config.config_center import get_config_center  # noqa: PLC0415
+        rel = (config_path or cls.DEFAULT_CONFIG_PATH).replace("config/", "", 1)
         try:
-            with open(path, encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
+            config = get_config_center().get(rel) or {}
+            if not config:
+                logger.warning(f"[WebTool] 配置不存在: {rel}，使用默认配置")
+                return cls()
 
             instance = cls(
                 timeout=config.get("timeout", 30),
@@ -175,15 +174,14 @@ class WebTool(BuiltinTool):
 
         if action == "get":
             return await self._http_get(inputs)
-        elif action == "post":
+        if action == "post":
             return await self._http_post(inputs)
-        elif action == "fetch":
+        if action == "fetch":
             return await self._fetch_page(inputs)
-        else:
-            return create_failure_result(
-                error=f"不支持的操作: {action}",
-                error_code="INVALID_ACTION",
-            )
+        return create_failure_result(
+            error=f"不支持的操作: {action}",
+            error_code="INVALID_ACTION",
+        )
 
     @staticmethod
     def _http_recovery_hint(status_code: int) -> str:
@@ -209,9 +207,6 @@ class WebTool(BuiltinTool):
                 return False, f"不支持的协议: {parsed.scheme}"
 
             # 检查禁止域名（支持子域名匹配）
-            # BUG-FIX-fix_20260316: 修复域名检查逻辑误判问题
-            # 问题根因: 使用 `in` 操作符会误判，如 blocked="spam.com" 会匹配 "notspam.com"
-            # 修复方案: 使用精确匹配或子域名后缀匹配
             for blocked in self.blocked_domains:
                 if domain == blocked or domain.endswith("." + blocked):
                     return False, f"域名在禁止列表中: {domain}"
@@ -230,7 +225,7 @@ class WebTool(BuiltinTool):
         except Exception as e:
             return False, f"URL 解析失败: {str(e)}"
 
-    async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """HTTP GET 请求"""
         try:
             url = inputs["url"]
@@ -271,7 +266,7 @@ class WebTool(BuiltinTool):
                     text = content.decode("utf-8", errors="ignore")
                     if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
                         try:
-                            import trafilatura
+                            import trafilatura  # noqa: PLC0415
                             extracted = trafilatura.extract(
                                 text,
                                 include_tables=True,
@@ -279,10 +274,7 @@ class WebTool(BuiltinTool):
                                 include_formatting=False,
                                 favor_precision=True,
                             )
-                            if extracted:
-                                data = extracted
-                            else:
-                                data = text[:2000]
+                            data = extracted or text[:2000]
                         except Exception:
                             data = text[:2000]
                     else:
@@ -319,7 +311,7 @@ class WebTool(BuiltinTool):
                 error_code="GET_FAILED",
             )
 
-    async def _http_post(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _http_post(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """HTTP POST 请求"""
         try:
             url = inputs["url"]
@@ -362,7 +354,7 @@ class WebTool(BuiltinTool):
                     text = content.decode("utf-8", errors="ignore")
                     if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
                         try:
-                            import trafilatura
+                            import trafilatura  # noqa: PLC0415
                             extracted = trafilatura.extract(
                                 text,
                                 include_tables=True,
@@ -370,10 +362,7 @@ class WebTool(BuiltinTool):
                                 include_formatting=False,
                                 favor_precision=True,
                             )
-                            if extracted:
-                                data = extracted
-                            else:
-                                data = text[:2000]
+                            data = extracted or text[:2000]
                         except Exception:
                             data = text[:2000]
                     else:
@@ -410,7 +399,7 @@ class WebTool(BuiltinTool):
                 error_code="POST_FAILED",
             )
 
-    async def _fetch_page(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _fetch_page(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """抓取网页内容"""
         try:
             url = inputs["url"]
@@ -450,7 +439,7 @@ class WebTool(BuiltinTool):
 
                 # 如果需要提取文本
                 if extract_text:
-                    import trafilatura
+                    import trafilatura  # noqa: PLC0415
 
                     extracted = trafilatura.extract(
                         html_text,

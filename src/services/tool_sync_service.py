@@ -74,15 +74,14 @@ class ToolSyncService:
             await self._session.flush()
             logger.info(f"[工具同步] 新增工具: {tool.name}")
             return db_tool.id
-        elif existing.checksum != checksum:
+        if existing.checksum != checksum:
             # 更新现有记录
             await self._update_db_tool(existing, tool, checksum)
             logger.info(f"[工具同步] 更新工具: {tool.name}")
             return existing.id
-        else:
-            # 无需更新
-            logger.debug(f"[工具同步] 工具未变更: {tool.name}")
-            return existing.id
+        # 无需更新
+        logger.debug(f"[工具同步] 工具未变更: {tool.name}")
+        return existing.id
 
     async def sync_all_builtin_tools(self) -> SyncResult:
         """
@@ -96,7 +95,7 @@ class ToolSyncService:
         Returns:
             同步结果
         """
-        from src.tools.builtin import get_all_builtin_tools
+        from src.tools.builtin import get_all_builtin_tools  # noqa: PLC0415
 
         result = SyncResult(
             added=[], updated=[], deprecated=[], unchanged=[], errors=[]
@@ -351,7 +350,7 @@ class ToolSyncService:
         Returns:
             工具定义
         """
-        from src.tools.types import ToolCategory, ToolLevel
+        from src.tools.types import ToolCategory, ToolLevel  # noqa: PLC0415
 
         # 解析 examples
         examples = []

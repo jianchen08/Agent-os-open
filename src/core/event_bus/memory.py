@@ -31,7 +31,7 @@ _DEBUG_LOG_FILE = "debug_event_delivery.log"
 
 def _debug_log(msg: str) -> None:
     """写入调试日志到专用文件，避免被控制台输出截断。"""
-    import datetime
+    import datetime  # noqa: PLC0415
     try:
         with open(_DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {msg}\n")
@@ -107,10 +107,10 @@ class InMemoryEventBus(EventBusBase):
         """
         _debug_log(f"publish | event_type={event.event_type.value} | priority={event.priority.value} | HIGH_threshold={EventPriority.HIGH.value}")
         if event.priority.value >= EventPriority.HIGH.value:
-            _debug_log(f"publish -> _publish_direct (HIGH priority)")
+            _debug_log("publish -> _publish_direct (HIGH priority)")
             return await self._publish_direct(event)
 
-        _debug_log(f"publish -> _publish_batch (normal priority)")
+        _debug_log("publish -> _publish_batch (normal priority)")
         return await self._publish_batch(event)
 
     async def _publish_direct(self, event: ExecutionEvent) -> str:
@@ -166,7 +166,7 @@ class InMemoryEventBus(EventBusBase):
             await self._process_batch()
         else:
             # 检查是否在测试环境中，如果是，立即处理批次
-            import os
+            import os  # noqa: PLC0415
 
             if os.environ.get("PYTEST_CURRENT_TEST"):
                 await self._process_batch()
@@ -230,7 +230,7 @@ class InMemoryEventBus(EventBusBase):
         except Exception as e:
             logger.error(f"处理批处理队列失败: {e}")
             # 记录失败指标
-            for event in batch:
+            for event in batch:  # noqa: B007
                 self._record_publish_metrics(start_time, False)
 
     async def _notify_subscribers(self, event: ExecutionEvent) -> None:
@@ -398,9 +398,9 @@ class InMemoryEventBus(EventBusBase):
                 return True
             if subscription.filter.event_types:
                 for et in subscription.filter.event_types:
-                    if et.value == normalized or et.value == event_type:
+                    if et.value in (normalized, event_type):
                         return True
-            if subscription.filter.custom_event_types:
+            if subscription.filter.custom_event_types:  # noqa: SIM102
                 if event_type in subscription.filter.custom_event_types or normalized in subscription.filter.custom_event_types:
                     return True
         return False

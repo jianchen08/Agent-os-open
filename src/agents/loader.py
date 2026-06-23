@@ -260,7 +260,7 @@ class AgentConfigLoader:
             raise FileNotFoundError(f"Agent 配置文件不存在: {path}")
 
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
         except yaml.YAMLError as e:
             raise ValueError(f"YAML 解析失败 ({path}): {e}") from e

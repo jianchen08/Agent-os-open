@@ -10,8 +10,9 @@ import copy
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from pipeline.config_store import PipelineConfigStore
 
@@ -321,7 +322,7 @@ class RollbackManager:
             raise ValueError("config_store 未配置，无法应用配置")
 
         # 构建 PipelineConfig 实例
-        from pipeline.config_store import PipelineConfig
+        from pipeline.config_store import PipelineConfig  # noqa: PLC0415
 
         # 如果 config_data 已经是完整的配置，尝试直接构建 PipelineConfig
         if isinstance(config_data, dict):

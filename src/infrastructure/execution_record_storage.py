@@ -13,14 +13,15 @@ token 用量、耗时和错误信息。按 pipeline_run_id 拆分为独立 YAML 
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
@@ -67,15 +68,15 @@ class ExecutionRecordData:
     thinking_content: str | None = None
     tool_calls_json: str | None = None
 
-    # BUG-FIX-fix_20260606_file_opener_container_task_id:
-    # 问题根因: container_task_id 仅在 WebSocket 流式推送时存在，
-    #           页面刷新后从历史 API 加载消息时丢失，
-    #           导致 fileOpener fallback 到 _local，无法正确解析工作空间内的文件路径。
-    # 修复方案: 在 ExecutionRecordData 中新增 container_task_id 字段并持久化，
-    #           序列化时注入到 tool_calls 中，前端恢复到 ToolCallPart。
     container_task_id: str | None = None
 
     error: str | None = None
+
+    # 前端乐观消息 ID，用于 API 历史加载时与本地临时消息对账（消除重复/丢失）
+    client_message_id: str | None = None
+
+    # 附件信息（JSON 序列化存储）
+    attachments_json: str | None = None
 
     created_at: str = ""
 
@@ -95,13 +96,6 @@ class PipelineRunSummary:
     """
 
     run_id: str = ""
-    # BUG-FIX-fix_pipeline_thread_association:
-    # 问题根因: 管道运行后生成的 YAML 文件没有存储 thread_id，
-    #           导致 7/9 个管道文件是"无主"的，无法被任何 thread 加载。
-    # 修复方案: 在 PipelineRunSummary 中新增 thread_id 字段，
-    #           管道运行时将 thread_id 写入 summary 并持久化到 YAML。
-    # 影响范围: list_messages、get_thread_detail 等消息查询接口的管道关联逻辑。
-    # 修复日期: 2026-05-05
     thread_id: str = ""
 
     total_iterations: int = 0
@@ -183,6 +177,11 @@ class ExecutionRecordStorage:
                     recs = data.get("records") or []
                     self._records_in_active_file[pipeline_run_id] = len(recs)
             except Exception:
+                logger.warning(
+                    "活跃分片记录数检测失败，设为 0: pipeline=%s, file=%s",
+                    pipeline_run_id,
+                    getattr(active_file, "name", "?"),
+                )
                 self._records_in_active_file[pipeline_run_id] = 0
         self._loaded_pipelines.add(pipeline_run_id)
 
@@ -253,11 +252,6 @@ class ExecutionRecordStorage:
 
         if not file_path.exists():
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            # BUG-FIX-fix_yaml_records_parse_error:
-            # 问题根因: 使用 "records: []" (flow 空序列) 后再追加 "- record_id: ..."
-            #           会产生无效 YAML，导致 yaml.safe_load 抛出 ParserError，
-            #           重启后整个文件被跳过，summary 和 records 全部丢失。
-            # 修复方案: 使用 "records:" (block 序列头)，后续追加的 "- ..." 能正确解析。
             file_path.write_text(
                 new_summary_text + "\nrecords:\n",
                 encoding="utf-8",
@@ -265,12 +259,7 @@ class ExecutionRecordStorage:
             return
 
         text = file_path.read_text(encoding="utf-8")
-        # BUG-FIX-fix_20260525_records_truncated_by_summary:
-        # 问题根因: 使用 text.find("\nrecords:") 搜索，如果任何 record 的
-        #   content/thinking_content 包含 "\nrecords:" 模式，会匹配到错误位置，
-        #   导致 _update_summary_in_file 截断 records 段。
-        # 修复方案: 使用正则匹配文件顶层的 "records:" 行（行首无缩进），
-        #   排除 record 内容中的嵌套匹配。
+        # 使用正则匹配文件顶层的 "records:" 行，排除 record 内容中的嵌套匹配
         _records_marker = re.search(r'^records:', text, re.MULTILINE)
         if _records_marker is None:
             logger.warning("YAML 文件格式异常，无法定位 records 段: %s", file_path.name)
@@ -308,9 +297,7 @@ class ExecutionRecordStorage:
     def _load_pipeline_file(self, yaml_file: Path) -> None:
         try:
             text = yaml_file.read_text(encoding="utf-8")
-            # BUG-FIX-fix_yaml_records_parse_error:
-            # 修复已有的损坏文件：将 "records: []" 替换为 "records:"，
-            # 使后续追加的 "- record_id: ..." 序列项能被正确解析。
+            # 修复损坏文件：将 "records: []" 替换为 "records:"
             text = _fix_records_empty_flow(text)
             data = yaml.safe_load(text)
             if not isinstance(data, dict):
@@ -354,7 +341,7 @@ class ExecutionRecordStorage:
         """
         try:
             text = yaml_file.read_text(encoding="utf-8")
-            # BUG-FIX-fix_yaml_records_parse_error: 同 _load_pipeline_file
+            # 同 _load_pipeline_file 的修复逻辑
             text = _fix_records_empty_flow(text)
             data = yaml.safe_load(text)
             if not isinstance(data, dict):
@@ -516,7 +503,7 @@ class ExecutionRecordStorage:
         limit: int | None = None,
         before_sequence: int | None = None,
         after_sequence: int | None = None,
-    ) -> tuple[list["ExecutionRecordData"], bool]:
+    ) -> tuple[list[ExecutionRecordData], bool]:
         """
         加载指定管道的执行记录（支持游标分页）。
 
@@ -576,7 +563,7 @@ class ExecutionRecordStorage:
         before_sequence: int | None,
         after_sequence: int | None,
         limit: int | None = None,
-    ) -> tuple[list["ExecutionRecordData"], bool]:
+    ) -> tuple[list[ExecutionRecordData], bool]:
         """全量加载指定管道的 records，支持游标分页和 limit 截断。
 
         Args:
@@ -755,11 +742,13 @@ class ExecutionRecordStorage:
             return []
 
         pattern = "\n- "
-        read_size = min(self._TAIL_READ_BYTES, file_size)
+        # 两次尝试的窗口都必须用 min(MAX, file_size) 限制，
+        # 避免小文件（<窗口大小）下第二次 seek 越过文件起始位置触发 OSError。
+        first_window = min(self._TAIL_READ_BYTES, file_size)
+        second_window = min(self._TAIL_READ_BYTES_MAX, file_size)
         blocks: list[str] = []
 
-        # 两次尝试：第一次用默认窗口，窗口内起点不足则扩大到最大窗口
-        for attempt_size in (read_size, self._TAIL_READ_BYTES_MAX):
+        for attempt_size in (first_window, second_window):
             try:
                 with open(yaml_file, "rb") as f:
                     f.seek(file_size - attempt_size)
@@ -769,16 +758,19 @@ class ExecutionRecordStorage:
             tail_text = tail_bytes.decode("utf-8", errors="replace")
 
             indices = [i for i in range(len(tail_text)) if tail_text.startswith(pattern, i)]
-            # 第一次窗口找到足够起点就停；否则扩大窗口再试一次
-            if len(indices) >= n or attempt_size >= self._TAIL_READ_BYTES_MAX:
+            # 满足任一条件则返回已找到的块：
+            # 1) 已找到足够多的 record 起点；
+            # 2) 本次窗口已覆盖整个文件（读不到更多）；
+            # 3) 已用最大窗口重试。
+            enough = len(indices) >= n
+            full_file_covered = attempt_size >= file_size
+            max_window_reached = attempt_size >= self._TAIL_READ_BYTES_MAX
+            if enough or full_file_covered or max_window_reached:
                 take = min(n, len(indices))
                 start_indices = indices[-take:] if take > 0 else []
                 for i, start in enumerate(start_indices):
                     block_start = start + 1  # 跳过 \n，保留 "- "
-                    if i + 1 < len(start_indices):
-                        block_end = start_indices[i + 1]
-                    else:
-                        block_end = len(tail_text)
+                    block_end = start_indices[i + 1] if i + 1 < len(start_indices) else len(tail_text)
                     block = tail_text[block_start:block_end].rstrip()
                     if block:
                         blocks.append(block)
@@ -786,7 +778,7 @@ class ExecutionRecordStorage:
 
         return blocks
 
-    def read_records_from_tail(
+    def read_records_from_tail(  # noqa: PLR0911,PLR0912
         self,
         pipeline_run_id: str,
         limit: int,
@@ -901,9 +893,7 @@ class ExecutionRecordStorage:
     @staticmethod
     def _record_to_message(record: ExecutionRecordData) -> dict[str, Any]:
         """将 ExecutionRecordData 转换为 message dict 格式。"""
-        # BUG-FIX-fix_20260530_role_mapping: 优先基于 record.type 映射 role，
-        # 避免 role 为空字符串时回退为 "user" 导致 type=ai+tool_calls 的消息
-        # 被错误标记为 role=user（与 routes_threads.py 的正确实现保持一致）
+        # 优先基于 record.type 映射 role
         _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
         role = record.role or _type_to_role.get(record.type, "user")
         msg: dict[str, Any] = {
@@ -980,9 +970,7 @@ class ExecutionRecordStorage:
     def update_summary(self, pipeline_run_id: str, updates: dict[str, Any]) -> None:
         """更新指定管道运行的 summary 字段并持久化到磁盘。
 
-        BUG-FIX-fix_pipeline_thread_association:
-        用于在管道运行过程中/结束后将 thread_id 等关联信息写入 summary，
-        确保管道 YAML 文件与 thread 之间的关联关系被正确持久化。
+        将 thread_id 等关联信息写入 summary。
 
         Args:
             pipeline_run_id: 管道运行 ID
@@ -1008,9 +996,7 @@ class ExecutionRecordStorage:
     def list_all_summaries(self) -> list[PipelineRunSummary]:
         """返回所有已加载的管道运行摘要列表（不做数量限制）。
 
-        BUG-FIX-fix_pipeline_thread_association:
-        用于扫描所有管道文件，根据 summary.thread_id 反查
-        属于某个 thread 的所有 pipeline_run_id。
+        根据 summary.thread_id 反查属于某个 thread 的所有 pipeline_run_id。
 
         性能优化: 使用 _load_all_summaries_only 仅加载 summary 部分，
         并通过 _all_summaries_loaded 标记避免重复解析。

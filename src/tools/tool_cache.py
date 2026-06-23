@@ -8,11 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 
-import yaml
+import yaml  # noqa: F401
 from pydantic import BaseModel, Field
+
 from core.results import ToolExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,13 @@ class ToolCacheConfig(BaseModel):
 
     @classmethod
     def load_from_file(cls, path: str = "config/builtin_tools_config.yaml"):
-        """从配置文件加载"""
-        config_path = Path(path)
-        if not config_path.exists():
+        """从配置文件加载（通过 ConfigCenter 统一缓存）"""
+        try:
+            from config.config_center import get_config_center  # noqa: PLC0415
+            rel = path.replace("config/", "", 1) if path.startswith("config/") else path
+            data = get_config_center().get(rel) or {}
+        except Exception:
             return cls()
-
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
 
         # 处理不同的配置文件格式
         if isinstance(data, list):
@@ -86,7 +87,7 @@ class ToolCache:
         """获取缓存实例（延迟初始化）。"""
         if self._cache is None and self._cache_config.enabled:
             try:
-                from cache.multi_level_cache import get_global_cache
+                from cache.multi_level_cache import get_global_cache  # noqa: PLC0415
 
                 self._cache = get_global_cache()
             except ImportError:
@@ -131,10 +132,7 @@ class ToolCache:
         if tool_name in no_cache_tools:
             return False
 
-        if _contains_sensitive_info(inputs):
-            return False
-
-        return True
+        return not _contains_sensitive_info(inputs)
 
     async def get_cached_result(
         self, tool_name: str, inputs: dict[str, Any]

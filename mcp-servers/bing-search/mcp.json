@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bing-search": {
+      "command": "python",
+      "args": ["server.py"]
+    }
+  }
+}

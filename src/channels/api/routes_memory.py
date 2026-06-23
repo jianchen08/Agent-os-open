@@ -11,11 +11,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from channels.api.deps import APIError, require_auth, validate_pagination
+from channels.api.memory_store import store
 from channels.api.models import (
     MemoryListResponse,
     MemoryResponse,
 )
-from channels.api.memory_store import store
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -123,19 +124,15 @@ class ExternalToolConnection(IExternalToolConnection):
             # 取消心跳任务
             if self._heartbeat_task and not self._heartbeat_task.done():
                 self._heartbeat_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await self._heartbeat_task
-                except asyncio.CancelledError:
-                    pass
                 self._heartbeat_task = None
 
             # 取消重连任务
             if self._reconnect_task and not self._reconnect_task.done():
                 self._reconnect_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await self._reconnect_task
-                except asyncio.CancelledError:
-                    pass
                 self._reconnect_task = None
 
             # 关闭 WebSocket
@@ -163,7 +160,7 @@ class ExternalToolConnection(IExternalToolConnection):
         try:
             if self._config.protocol == ProtocolType.HTTP:
                 return await self._health_check_http()
-            elif self._config.protocol == ProtocolType.WEBSOCKET:
+            if self._config.protocol == ProtocolType.WEBSOCKET:
                 return await self._health_check_websocket()
             return False
         except Exception as e:
@@ -205,13 +202,12 @@ class ExternalToolConnection(IExternalToolConnection):
         try:
             if self._config.protocol == ProtocolType.HTTP:
                 return await self._send_http(operation, payload, effective_timeout)
-            elif self._config.protocol == ProtocolType.WEBSOCKET:
+            if self._config.protocol == ProtocolType.WEBSOCKET:
                 return await self._send_websocket(operation, payload, effective_timeout)
-            else:
-                raise ConnectionError(
-                    message=f"不支持的协议: {self._config.protocol}",
-                    tool_name=self._config.name,
-                )
+            raise ConnectionError(
+                message=f"不支持的协议: {self._config.protocol}",
+                tool_name=self._config.name,
+            )
         except asyncio.TimeoutError as e:
             raise ExternalTimeoutError(
                 message=f"请求超时 ({effective_timeout}s) | op={operation}",

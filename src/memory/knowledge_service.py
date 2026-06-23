@@ -15,7 +15,7 @@ import math
 from typing import Any
 
 from memory.ports import ISemanticStorage
-from memory.types import Knowledge, SearchResult, MemoryType
+from memory.types import Knowledge, MemoryType, SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def _is_mock(obj: Any) -> bool:
         是否为 Mock 对象
     """
     try:
-        from unittest.mock import Mock, MagicMock
+        from unittest.mock import MagicMock, Mock  # noqa: PLC0415
         return isinstance(obj, (Mock, MagicMock))
     except ImportError:
         return False
@@ -437,7 +437,7 @@ class KnowledgeService:
         if len(vec_a) != len(vec_b) or not vec_a:
             return 0.0
 
-        dot_product = sum(a * b for a, b in zip(vec_a, vec_b))
+        dot_product = sum(a * b for a, b in zip(vec_a, vec_b, strict=False))
         norm_a = math.sqrt(sum(a * a for a in vec_a))
         norm_b = math.sqrt(sum(b * b for b in vec_b))
 

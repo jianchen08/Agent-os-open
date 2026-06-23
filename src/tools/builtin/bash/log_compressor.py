@@ -66,7 +66,7 @@ class LogCompressor:
         """初始化日志压缩器"""
         self.max_lines = max_lines
 
-    def detect_output_type(self, command: str, lines: list[str]) -> OutputType:
+    def detect_output_type(self, command: str, lines: list[str]) -> OutputType:  # noqa: PLR0911
         """检测输出类型"""
         cmd_lower = command.lower()
 
@@ -81,18 +81,18 @@ class LogCompressor:
             line_lower = line.lower()
             if "npm" in line_lower and ("install" in line_lower or "package" in line_lower):
                 return OutputType.NPM_INSTALL
-            elif "pip" in line_lower and "install" in line_lower:
+            if "pip" in line_lower and "install" in line_lower:
                 return OutputType.PIP_INSTALL
-            elif "docker" in line_lower and "build" in line_lower:
+            if "docker" in line_lower and "build" in line_lower:
                 return OutputType.DOCKER_BUILD
-            elif "pytest" in line_lower or "test session starts" in line_lower:
+            if "pytest" in line_lower or "test session starts" in line_lower:
                 return OutputType.PYTEST
-            elif any(x in line_lower for x in ["compiling", "linking", "building"]):
+            if any(x in line_lower for x in ["compiling", "linking", "building"]):
                 return OutputType.COMPILATION
 
         return OutputType.GENERAL
 
-    def extract_progress(self, lines: list[str], output_type: OutputType) -> str | None:
+    def extract_progress(self, lines: list[str], output_type: OutputType) -> str | None:  # noqa: PLR0912
         """提取进度信息"""
         # 从最近50行查找进度
         recent_lines = lines[-50:] if len(lines) > 50 else lines
@@ -124,7 +124,7 @@ class LogCompressor:
                 if match:
                     if pattern_type == "计数" and len(match.groups()) >= 2:
                         return f"{match.group(1)}/{match.group(2)}"
-                    elif pattern_type == "百分比":
+                    if pattern_type == "百分比":
                         return match.group(1) + "%"
 
         return None

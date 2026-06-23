@@ -12,20 +12,20 @@ TaskWorker 只负责启动子管道，子管道中的 Agent 通过 task_evaluate
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid as _uuid
 from typing import Any
 
-from isolation.workspace_lifecycle import WorkspaceLifecycleManager
-
+from infrastructure.task_context import TaskExecutionContext
 from infrastructure.task_evaluation_builder import TaskEvaluationBuilderMixin
 from infrastructure.task_executor import TaskExecutorMixin
 from infrastructure.task_idle_timer import TaskIdleTimerMixin
 from infrastructure.task_notifier import TaskNotifierMixin
 from infrastructure.task_post_pipeline import TaskPostPipelineMixin
-from infrastructure.task_context import TaskExecutionContext
 from infrastructure.task_recovery import TaskRecoveryMixin
+from isolation.workspace_lifecycle import WorkspaceLifecycleManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _reconstruct_tool_calls(messages: list[dict[str, Any]]) -> None:
     Args:
         messages: 恢复的对话历史消息列表（原地修改）
     """
-    import logging as _logging
+    import logging as _logging  # noqa: PLC0415
     _log = _logging.getLogger(__name__)
 
     i = 0
@@ -176,7 +176,7 @@ class TaskWorker(
 
         # 通过 ServiceProvider 注册全局引用，供 task_manage cancel 调用
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             get_service_provider().register("task_worker", self)
         except Exception:
             logger.warning("TaskWorker: ServiceProvider 注册失败，不阻塞启动", exc_info=True)
@@ -203,17 +203,15 @@ class TaskWorker(
                   不依赖外部 services 注入，lifecycle 是 TaskWorker 自身的职责。
         """
         try:
-            from pathlib import Path as _Path
-            from tools.builtin.resource_merge import ResourceMergeTool
+            from pathlib import Path as _Path  # noqa: PLC0415
+
+            from tools.builtin.resource_merge import ResourceMergeTool  # noqa: PLC0415
 
             project_root = str(_Path.cwd())
             resource_merge = ResourceMergeTool(base_path=project_root)
 
-            iso_config: dict[str, Any] = {}
-            config_path = _Path("config/isolation/isolation_config.yaml")
-            if config_path.exists():
-                import yaml
-                iso_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            from config.config_center import get_config_center  # noqa: PLC0415
+            iso_config: dict[str, Any] = get_config_center().get("isolation/isolation_config.yaml") or {}
 
             ws_meta_store: dict[str, Any] = {}
 
@@ -225,6 +223,16 @@ class TaskWorker(
                 base_path=project_root,
             )
             self._services["workspace_lifecycle_manager"] = lifecycle
+            # 注册到 ServiceProvider，供 task_evaluate / _task_cleanup 等跨模块
+            # 通过 provider.get("workspace_lifecycle_manager") 获取同一实例。
+            try:
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                get_service_provider().register("workspace_lifecycle_manager", lifecycle)
+            except Exception:
+                logger.warning(
+                    "TaskWorker: workspace_lifecycle_manager 注册到 ServiceProvider 失败，不阻塞",
+                    exc_info=True,
+                )
             logger.info(
                 "TaskWorker: WorkspaceLifecycleManager initialized, base_path=%s",
                 project_root,
@@ -260,26 +268,18 @@ class TaskWorker(
         for bg_task in list(self._tasks):
             if not bg_task.done():
                 bg_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await bg_task
-                except asyncio.CancelledError:
-                    pass
         self._tasks.clear()
 
-        # BUG-FIX-fix_20260523_stop_state:
-        # 将仍在 running/pending 的任务标记为 paused（而非 failed），
-        # 以便重启后用户可通过前端 resume 或 agent retry 恢复执行。
         if self._task_service:
             try:
-                from tasks.types import TaskStatus
+                from tasks.types import TaskStatus  # noqa: PLC0415
                 remaining_ids = list(self._contexts.keys())
                 for tid in remaining_ids:
                     try:
                         task = self._task_service.get_task(tid)
-                        if task and (task.status == TaskStatus.RUNNING or task.status == TaskStatus.PENDING):
-                            # BUG-FIX-fix_20260603_pause_metadata:
-                            # 传入 paused_by="system" 以区分用户手动暂停。
-                            # 重启时只恢复系统暂停的任务，用户暂停的保持 SUSPENDED。
+                        if task and (task.status in (TaskStatus.RUNNING, TaskStatus.PENDING)):
                             await self._task_service.pause_task(tid, paused_by="system")
                             logger.info("TaskWorker.stop: task %s marked as paused (system)", tid)
                     except Exception as e:
@@ -336,16 +336,7 @@ class TaskWorker(
             except Exception as e:
                 logger.error("TaskWorker: 执行失败 | task=%s | error=%s", td.get("task_id"), e)
                 self._contexts.pop(td.get("task_id"), None)  # 启动失败时清理
-            # BUG-FIX-fix_20260601_isolated_engine:
-            # 正常路径（fire-and-forget）不再在此处 pop context。
-            # context 由 _cleanup_after_engine 回调在引擎完成后负责清理。
 
-        # BUG-FIX-fix_20260524_submit_task_loop:
-        # ToolCore 通过 asyncio.to_thread + asyncio.run 在工作线程执行工具，
-        # 导致 submit_task 可能从非主事件循环的线程调用。
-        # asyncio.create_task 会在当前线程的临时事件循环上创建任务，
-        # asyncio.run 结束后临时循环关闭，任务被丢弃。
-        # 修复：检测是否在主循环线程中，若不在则用 call_soon_threadsafe 调度。
         loop = self._main_loop
         if loop is None or loop.is_closed():
             logger.error("TaskWorker: 主事件循环不可用 | task=%s", task_id)
@@ -356,7 +347,7 @@ class TaskWorker(
             bg_task = loop.create_task(_run_and_cleanup(task_data, context))
             self._tasks.add(bg_task)
             context.bg_task = bg_task
-            bg_task.add_done_callback(lambda t: self._tasks.discard(t))
+            bg_task.add_done_callback(self._tasks.discard)
 
         try:
             running_loop = asyncio.get_running_loop()

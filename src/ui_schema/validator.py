@@ -161,12 +161,11 @@ class SchemaValidator:
             errors: 错误列表，会就地追加。
         """
         for action in schema.actions:
-            if action.api is not None:
-                if not _API_ENDPOINT_PATTERN.match(action.api):
-                    errors.append(
-                        f"action '{action.id}' 的 API 端点格式不合法: "
-                        f"'{action.api}'，应以 /api/ 开头且路径段合法"
-                    )
+            if action.api is not None and not _API_ENDPOINT_PATTERN.match(action.api):
+                errors.append(
+                    f"action '{action.id}' 的 API 端点格式不合法: "
+                    f"'{action.api}'，应以 /api/ 开头且路径段合法"
+                )
             self._validate_action_id(action, errors)
 
     def _validate_action_id(

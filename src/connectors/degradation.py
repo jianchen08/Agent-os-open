@@ -13,7 +13,7 @@ import difflib
 import logging
 from typing import Any
 
-from connectors.types import ActionResult
+from .types import ActionResult
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class DegradationManager:
             )
 
         try:
-            from pathlib import Path
+            from pathlib import Path  # noqa: PLC0415
 
             path = Path(file_path)
             if not path.exists():

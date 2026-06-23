@@ -1,6 +1,5 @@
 @echo off
 setlocal enabledelayedexpansion
-chcp 65001 >nul 2>&1
 title Agent OS - Web Channel (Production)
 
 cd /d "%~dp0"
@@ -11,52 +10,52 @@ set "PORTS_FILE=%ROOT%\.ports"
 set "PROJECT_ID="
 for /f "delims=" %%h in ('powershell -NoProfile -Command "[System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes('%ROOT%'))).Replace('-','').Substring(0,8).ToLower()"') do set "PROJECT_ID=%%h"
 
-echo %date% %time% 生产构建启动脚本开始 >> "%LOG%"
+echo %date% %time% Production build startup script started >> "%LOG%"
 
 echo ========================================
 echo   Agent OS Web Channel (Production)
 echo ========================================
 echo.
-echo 项目目录: %ROOT%
-echo %date% %time% 脚本启动 >> "%LOG%"
+echo Project dir: %ROOT%
+echo %date% %time% Script started >> "%LOG%"
 
-:: 检查 Python
+:: Check Python
 where python >nul 2>&1 || (
-    echo [ERROR] 未找到 Python，请先安装 Python
+    echo [ERROR] Python not found. Please install Python first.
     pause
     exit /b 1
 )
 
-:: 检查 Node
+:: Check Node
 where node >nul 2>&1 || (
-    echo [ERROR] 未找到 Node.js，请先安装 Node.js
+    echo [ERROR] Node.js not found. Please install Node.js first.
     pause
     exit /b 1
 )
 
-:: ========== 检查 pip ==========
+:: ========== Check pip ==========
 python -m pip --version >nul 2>&1 || (
-    echo [ERROR] pip 未找到，请重新安装 Python 并确保勾选 pip
+    echo [ERROR] pip not found. Please reinstall Python and make sure pip is checked.
     pause
     exit /b 1
 )
 
-:: ========== 安装 Python 依赖 ==========
+:: ========== Install Python dependencies ==========
 call :install_python_deps
 
-:: ========== 确保 Docker 和 Redis 就绪 ==========
+:: ========== Ensure Docker and Redis are ready ==========
 call :ensure_docker_and_redis
 
-:: ========== 关闭当前项目的旧实例 ==========
+:: ========== Stop old instances of the current project ==========
 call :stop_project_instance
 
-:: ========== 查找可用端口 ==========
-echo [INFO] 正在查找可用端口...
+:: ========== Find available ports ==========
+echo [INFO] Finding available ports...
 
-set "BACKEND_PORT=8888"
+set "BACKEND_PORT=8988"
 call :find_available_port BACKEND_PORT
 if !errorlevel! neq 0 (
-    echo [ERROR] 无法找到可用的后端端口
+    echo [ERROR] Cannot find an available backend port
     pause
     exit /b 1
 )
@@ -64,181 +63,181 @@ if !errorlevel! neq 0 (
 set "FRONTEND_PORT=5188"
 call :find_available_port FRONTEND_PORT
 if !errorlevel! neq 0 (
-    echo [ERROR] 无法找到可用的前端端口
+    echo [ERROR] Cannot find an available frontend port
     pause
     exit /b 1
 )
 
-echo [OK] 后端端口: !BACKEND_PORT!
-echo [OK] 前端端口: !FRONTEND_PORT!
-echo [OK] 项目标识: !PROJECT_ID!
+echo [OK] Backend port: !BACKEND_PORT!
+echo [OK] Frontend port: !FRONTEND_PORT!
+echo [OK] Project id: !PROJECT_ID!
 
-:: 保存端口到项目目录的 .ports 文件
+:: Save ports to the project's .ports file
 echo BACKEND_PORT=!BACKEND_PORT!> "%PORTS_FILE%"
 echo FRONTEND_PORT=!FRONTEND_PORT!>> "%PORTS_FILE%"
 echo PROJECT_ROOT=!ROOT!>> "%PORTS_FILE%"
 echo PROJECT_ID=!PROJECT_ID!>> "%PORTS_FILE%"
 echo REDIS_HOST_PORT=!REDIS_HOST_PORT!>> "%PORTS_FILE%"
-echo [INFO] 端口信息已保存到 %PORTS_FILE%
+echo [INFO] Port info saved to %PORTS_FILE%
 
-:: ========== 安装前端依赖 ==========
+:: ========== Install frontend dependencies ==========
 if not exist "frontend\node_modules" (
-    echo [INFO] 前端依赖未安装，正在安装...
+    echo [INFO] Frontend deps not installed, installing...
     pushd frontend && npm install && popd
     echo.
 )
 
-:: ========== 构建前端 ==========
-echo [1/3] 构建前端生产包 (vite build)...
+:: ========== Build frontend ==========
+echo [1/3] Building frontend production bundle (vite build)...
 pushd frontend
 call npx vite build
 if !errorlevel! neq 0 (
-    echo [ERROR] 前端构建失败，请检查代码
+    echo [ERROR] Frontend build failed, please check the code
     popd
     pause
     exit /b 1
 )
 popd
-echo [OK] 前端构建完成
+echo [OK] Frontend build complete
 echo.
 
-:: ========== 启动后端 ==========
-echo [2/3] 启动后端服务器 (FastAPI + WebSocket :!BACKEND_PORT!)...
+:: ========== Start backend ==========
+echo [2/3] Starting backend server (FastAPI + WebSocket :!BACKEND_PORT!)...
 start "Agent OS Backend - !PROJECT_ID!" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& set REDIS_PORT=!REDIS_HOST_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& python app_factory.py"
 
-:: ========== 启动前端预览服务器 ==========
-echo [3/3] 启动前端生产服务器 (Vite Preview :!FRONTEND_PORT!)...
+:: ========== Start frontend preview server ==========
+echo [3/3] Starting frontend production server (Vite Preview :!FRONTEND_PORT!)...
 start "Agent OS Frontend (Prod) - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=&& set _AO_PROJECT_ID=!PROJECT_ID!&& npx vite preview --host 0.0.0.0 --port !FRONTEND_PORT!"
 
-:: ========== 等待前端就绪 ==========
-echo [INFO] 等待前端服务就绪...
+:: ========== Wait for frontend ready ==========
+echo [INFO] Waiting for frontend to be ready...
 set "FRONTEND_READY=0"
 for /L %%i in (1,1,30) do (
     if "!FRONTEND_READY!"=="0" (
         curl -s -o nul http://localhost:!FRONTEND_PORT! >nul 2>&1
         if !errorlevel! == 0 (
             set "FRONTEND_READY=1"
-            echo [OK] 前端已就绪
+            echo [OK] Frontend ready
         ) else (
             timeout /t 1 /nobreak >nul
         )
     )
 )
 if "!FRONTEND_READY!"=="0" (
-    echo [WARN] 前端未在 30 秒内就绪，尝试打开浏览器...
+    echo [WARN] Frontend not ready within 30s, attempting to open the browser...
 )
 
-:: 获取前端进程 PID
+:: Get the frontend process PID
 set "FRONTEND_PID="
 for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!FRONTEND_PORT! " ^| findstr "LISTENING"') do set "FRONTEND_PID=%%p"
 
-:: 更新 .ports 文件，追加 PID 信息
+:: Append PID info to the .ports file
 echo BACKEND_PID=!BACKEND_PID!>> "%PORTS_FILE%"
 echo FRONTEND_PID=!FRONTEND_PID!>> "%PORTS_FILE%"
 
 echo.
 echo ========================================
-echo   服务已启动 (Production Mode):
-echo %date% %time% 脚本完成 >> "%LOG%"
-echo   后端: http://localhost:!BACKEND_PORT!
-echo   前端: http://localhost:!FRONTEND_PORT!
-echo   API 文档: http://localhost:!BACKEND_PORT!/docs
+echo   Services started (Production Mode):
+echo %date% %time% Script finished >> "%LOG%"
+echo   Backend:  http://localhost:!BACKEND_PORT!
+echo   Frontend: http://localhost:!FRONTEND_PORT!
+echo   API docs: http://localhost:!BACKEND_PORT!/docs
 echo.
-echo   模式: 生产构建 (vite build + preview)
-echo   项目目录: %ROOT%
-echo   端口文件: %PORTS_FILE%
-echo   关闭此窗口不会停止服务
-echo   使用 stop_web.bat 停止本项目的服务
+echo   Mode: production build (vite build + preview)
+echo   Project dir: %ROOT%
+echo   Ports file:  %PORTS_FILE%
+echo   Closing this window will NOT stop the services
+echo   Use stop_web.bat to stop this project's services
 echo ========================================
 echo.
 pause
 goto :eof
 
 
-:: ========== 子程序：安装 Python 依赖 ==========
+:: ========== Subroutine: install Python dependencies ==========
 :install_python_deps
 if not exist "%ROOT%\requirements.txt" (
-    echo [WARN] requirements.txt 未找到，跳过依赖安装
+    echo [WARN] requirements.txt not found, skipping dependency install
     exit /b 0
 )
 
 if exist "%ROOT%\.py_deps_installed" (
-    echo [OK] Python 依赖已安装（如需重装请删除 .py_deps_installed）
+    echo [OK] Python deps already installed (delete .py_deps_installed to reinstall)
     exit /b 0
 )
 
 echo.
 echo [INFO] ========================================
-echo [INFO] 首次运行，正在安装 Python 依赖...
-echo [INFO] 这可能需要几分钟，请耐心等待
+echo [INFO] First run, installing Python dependencies...
+echo [INFO] This may take a few minutes, please wait
 echo [INFO] ========================================
 echo.
 
 python -m pip install --upgrade pip --quiet >nul 2>&1
 
-echo [INFO] 执行: pip install -r requirements.txt
+echo [INFO] Running: pip install -r requirements.txt
 python -m pip install -r "%ROOT%\requirements.txt" --disable-pip-version-check 2>"%ROOT%\pip_err.tmp"
 set "PIP_RC=!errorlevel!"
 if !PIP_RC! equ 0 (
     del "%ROOT%\pip_err.tmp" 2>nul
     echo. > "%ROOT%\.py_deps_installed"
-    echo [OK] Python 依赖安装完成
+    echo [OK] Python dependencies installed
     exit /b 0
 )
 
-echo [WARN] 安装失败（错误码: !PIP_RC!），正在尝试修复...
+echo [WARN] Install failed (code: !PIP_RC!), attempting to fix...
 
 if not exist "%ROOT%\pip_err.tmp" (
-    echo [WARN] Python 依赖安装失败
-    echo [INFO] 请手动执行: python -m pip install -r requirements.txt
-    echo [INFO] 将尝试继续启动...
+    echo [WARN] Python dependency install failed
+    echo [INFO] Please run manually: python -m pip install -r requirements.txt
+    echo [INFO] Will try to continue starting...
     exit /b 0
 )
 
-:: 策略1: 权限不足 → --user 模式（非虚拟环境下）
+:: Strategy 1: permission denied -> --user mode (non-venv only)
 findstr /r /i "PermissionError Access.is.denied" "%ROOT%\pip_err.tmp" >nul 2>&1
 if !errorlevel! equ 0 if not defined VIRTUAL_ENV (
-    echo [INFO] 检测到权限问题，使用 --user 模式重试...
+    echo [INFO] Detected a permission issue, retrying with --user mode...
     python -m pip install -r "%ROOT%\requirements.txt" --user --disable-pip-version-check 2>nul
     if !errorlevel! equ 0 (
         del "%ROOT%\pip_err.tmp" 2>nul
         echo. > "%ROOT%\.py_deps_installed"
-        echo [OK] Python 依赖安装完成（--user 模式）
+        echo [OK] Python dependencies installed (--user mode)
         exit /b 0
     )
 )
 
-:: 策略2: SSL/网络问题 → 跳过证书验证
+:: Strategy 2: SSL/network issue -> skip cert verification
 findstr /r /i "SSL CERTIFICATE Could.not.fetch" "%ROOT%\pip_err.tmp" >nul 2>&1
 if !errorlevel! equ 0 (
-    echo [INFO] 检测到网络或 SSL 问题，跳过证书验证重试...
+    echo [INFO] Detected a network or SSL issue, retrying with cert verification skipped...
     python -m pip install -r "%ROOT%\requirements.txt" --trusted-host pypi.org --trusted-host files.pythonhosted.org --disable-pip-version-check 2>nul
     if !errorlevel! equ 0 (
         del "%ROOT%\pip_err.tmp" 2>nul
         echo. > "%ROOT%\.py_deps_installed"
-        echo [OK] Python 依赖安装完成（跳过 SSL 验证）
+        echo [OK] Python dependencies installed (SSL verification skipped)
         exit /b 0
     )
 )
 
 del "%ROOT%\pip_err.tmp" 2>nul
-echo [WARN] Python 依赖自动安装失败
-echo [INFO] 请手动执行: python -m pip install -r requirements.txt
-echo [INFO] 将尝试继续启动...
+echo [WARN] Python dependency auto-install failed
+echo [INFO] Please run manually: python -m pip install -r requirements.txt
+echo [INFO] Will try to continue starting...
 exit /b 0
 
 
-:: ========== 子程序：确保 Docker 和 Redis 就绪 ==========
+:: ========== Subroutine: ensure Docker and Redis are ready ==========
 :ensure_docker_and_redis
 where docker >nul 2>&1 || (
-    echo [WARN] 未找到 Docker，跳过 Docker/Redis 检查
+    echo [WARN] Docker not found, skipping Docker/Redis check
     exit /b 0
 )
 
 docker info >nul 2>&1
 if !errorlevel! equ 0 goto :docker_already_running
 
-echo [INFO] Docker 未启动，正在尝试启动 Docker Desktop...
+echo [INFO] Docker not started, trying to start Docker Desktop...
 set "DOCKER_DESKTOP="
 if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
     set "DOCKER_DESKTOP=C:\Program Files\Docker\Docker\Docker Desktop.exe"
@@ -251,26 +250,26 @@ if not defined DOCKER_DESKTOP if exist "%LOCALAPPDATA%\Docker\wsl\Docker Desktop
 )
 
 if not defined DOCKER_DESKTOP (
-    echo [WARN] 未找到 Docker Desktop，跳过 Docker/Redis 检查
+    echo [WARN] Docker Desktop not found, skipping Docker/Redis check
     exit /b 0
 )
 
 start "" "!DOCKER_DESKTOP!"
-echo [INFO] 正在等待 Docker Desktop 启动...
+echo [INFO] Waiting for Docker Desktop to start...
 set "DOCKER_READY=0"
 for /L %%i in (1,1,60) do (
     if "!DOCKER_READY!"=="0" (
         docker info >nul 2>&1
         if !errorlevel! equ 0 (
             set "DOCKER_READY=1"
-            echo [OK] Docker Desktop 已启动
+            echo [OK] Docker Desktop started
         ) else (
             timeout /t 3 /nobreak >nul
         )
     )
 )
 if "!DOCKER_READY!"=="0" (
-    echo [WARN] Docker Desktop 未能在 3 分钟内启动，继续启动
+    echo [WARN] Docker Desktop did not start within 3 minutes, continuing anyway
     exit /b 0
 )
 
@@ -278,57 +277,57 @@ if "!DOCKER_READY!"=="0" (
 set "REDIS_RUNNING=0"
 for /f "usebackq" %%c in (`docker ps -q -f "name=agent-os-redis-!PROJECT_ID!" 2^>nul`) do set "REDIS_RUNNING=1"
 if "!REDIS_RUNNING!"=="1" (
-    echo [OK] Redis 容器已运行
+    echo [OK] Redis container already running
     exit /b 0
 )
 
 set "REDIS_EXISTS=0"
 for /f "usebackq" %%c in (`docker ps -a -q -f "name=agent-os-redis-!PROJECT_ID!" 2^>nul`) do set "REDIS_EXISTS=1"
 if "!REDIS_EXISTS!"=="1" (
-    echo [INFO] Redis 容器已存在但未运行，正在启动...
+    echo [INFO] Redis container exists but not running, starting...
     docker start agent-os-redis-!PROJECT_ID! >nul 2>&1
     if !errorlevel! equ 0 (
-        echo [OK] Redis 容器已启动
+        echo [OK] Redis container started
         exit /b 0
     )
 )
 
-echo [INFO] 正在启动 Redis 容器 (agent-os-redis-!PROJECT_ID!)...
+echo [INFO] Starting Redis container (agent-os-redis-!PROJECT_ID!)...
 set "REDIS_HOST_PORT=6379"
 call :find_available_port REDIS_HOST_PORT
 docker run -d --name "agent-os-redis-!PROJECT_ID!" --restart unless-stopped -p !REDIS_HOST_PORT!:6379 redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes >nul 2>&1
 if !errorlevel! neq 0 (
-    echo [WARN] Redis 容器启动失败，继续启动
+    echo [WARN] Redis container failed to start, continuing anyway
     exit /b 0
 )
 
-echo [INFO] 等待 Redis 就绪...
+echo [INFO] Waiting for Redis to be ready...
 set "REDIS_READY=0"
 for /L %%i in (1,1,20) do (
     if "!REDIS_READY!"=="0" (
         docker exec agent-os-redis-!PROJECT_ID! redis-cli ping >nul 2>&1
         if !errorlevel! equ 0 (
             set "REDIS_READY=1"
-            echo [OK] Redis 已就绪
+            echo [OK] Redis ready
         ) else (
             timeout /t 1 /nobreak >nul
         )
     )
 )
 if "!REDIS_READY!"=="0" (
-    echo [WARN] Redis 未能在 20 秒内就绪，继续启动
+    echo [WARN] Redis not ready within 20s, continuing anyway
 )
 exit /b 0
 
 
-:: ========== 子程序：查找可用端口 ==========
+:: ========== Subroutine: find an available port ==========
 :find_available_port
 set "PORT_VAR=%~1"
 set "TEST_PORT=!%PORT_VAR%!"
 set /a "MAX_PORT=TEST_PORT+100"
 :port_check_loop
 if !TEST_PORT! gtr !MAX_PORT! (
-    echo [ERROR] 在端口 !%PORT_VAR%!-!MAX_PORT! 范围内没有可用端口
+    echo [ERROR] No available port in range !%PORT_VAR%!-!MAX_PORT!
     exit /b 1
 )
 netstat -aon 2>nul | findstr ":!TEST_PORT! " | findstr "LISTENING" >nul 2>&1
@@ -340,11 +339,11 @@ set "%PORT_VAR%=!TEST_PORT!"
 exit /b 0
 
 
-:: ========== 子程序：停止当前项目的旧实例 ==========
+:: ========== Subroutine: stop old instances of the current project ==========
 :stop_project_instance
 if not exist "%PORTS_FILE%" exit /b 0
 
-echo [INFO] 检测到本项目的旧实例，正在检查...
+echo [INFO] Old instance of this project detected, checking...
 
 set "OLD_BACKEND_PORT="
 set "OLD_FRONTEND_PORT="
@@ -363,7 +362,7 @@ for /f "usebackq tokens=1,2 delims==" %%a in ("%PORTS_FILE%") do (
 
 if defined OLD_PROJECT_ROOT (
     if /i not "!ROOT!"=="!OLD_PROJECT_ROOT!" (
-        echo [INFO] 端口文件属于其他项目目录 [!OLD_PROJECT_ROOT!]，跳过关闭
+        echo [INFO] Ports file belongs to another project dir [!OLD_PROJECT_ROOT!], skipping stop
         del "%PORTS_FILE%" 2>nul
         exit /b 0
     )
@@ -372,7 +371,7 @@ if defined OLD_PROJECT_ROOT (
 if not defined OLD_BACKEND_PORT goto :skip_stop_backend
 set "KILLED_BACKEND=0"
 for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_BACKEND_PORT! " ^| findstr "LISTENING"') do (
-    echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
+    echo [INFO] Stopping old backend process PID=%%p port !OLD_BACKEND_PORT!
     taskkill /F /PID %%p >nul 2>&1
     set "KILLED_BACKEND=1"
 )
@@ -381,7 +380,7 @@ for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_BACKEND_PORT! "
 if not defined OLD_FRONTEND_PORT goto :skip_stop_frontend
 set "KILLED_FRONTEND=0"
 for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_FRONTEND_PORT! " ^| findstr "LISTENING"') do (
-    echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
+    echo [INFO] Stopping old frontend process PID=%%p port !OLD_FRONTEND_PORT!
     taskkill /F /PID %%p >nul 2>&1
     set "KILLED_FRONTEND=1"
 )
@@ -389,5 +388,5 @@ for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_FRONTEND_PORT! 
 
 timeout /t 2 /nobreak >nul
 del "%PORTS_FILE%" 2>nul
-echo [OK] 旧实例检查完成
+echo [OK] Old instance check complete
 exit /b 0

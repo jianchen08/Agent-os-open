@@ -355,14 +355,14 @@ class TestGetToolDefinition:
 
     def test_tool_definition_exists(self) -> None:
         """image_generate 工具定义应存在。"""
-        from tools.builtin.image_generate import ImageGenerateTool
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
 
         tool_def = ImageGenerateTool.get_tool_definition()
         assert tool_def.name == "image_generate"
 
     def test_tool_definition_has_required_params(self) -> None:
         """工具定义应包含 prompt 必填参数。"""
-        from tools.builtin.image_generate import ImageGenerateTool
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
 
         tool_def = ImageGenerateTool.get_tool_definition()
         schema = tool_def.input_schema
@@ -373,7 +373,7 @@ class TestGetToolDefinition:
 
     def test_tool_definition_has_optional_params(self) -> None:
         """工具定义应包含可选参数。"""
-        from tools.builtin.image_generate import ImageGenerateTool
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
 
         tool_def = ImageGenerateTool.get_tool_definition()
         properties = tool_def.input_schema["properties"]
@@ -387,8 +387,8 @@ class TestGetToolDefinition:
 
     def test_tool_source_is_builtin(self) -> None:
         """工具来源应为 BUILTIN。"""
-        from tools.builtin.image_generate import ImageGenerateTool
-        from tools.types import ToolSource
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
+        from tools.types import ToolSource  # noqa: PLC0415
 
         tool_def = ImageGenerateTool.get_tool_definition()
         assert tool_def.source == ToolSource.BUILTIN
@@ -400,7 +400,7 @@ class TestImageGenerateExecution:
     @pytest.mark.asyncio
     async def test_execute_success(self) -> None:
         """成功执行应返回 ToolExecutionResult。"""
-        from tools.builtin.image_generate import ImageGenerateTool
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
 
         # 创建 mock registry 并注入到 tool
         mock_registry = MagicMock()
@@ -424,7 +424,7 @@ class TestImageGenerateExecution:
     @pytest.mark.asyncio
     async def test_execute_missing_prompt(self) -> None:
         """缺少 prompt 参数应返回失败结果。"""
-        from tools.builtin.image_generate import ImageGenerateTool
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
 
         mock_registry = MagicMock()
         tool = ImageGenerateTool(registry=mock_registry)
@@ -436,7 +436,7 @@ class TestImageGenerateExecution:
     @pytest.mark.asyncio
     async def test_execute_all_providers_failed(self) -> None:
         """所有 Provider 失败应返回失败结果。"""
-        from tools.builtin.image_generate import ImageGenerateTool
+        from tools.builtin.image_generate import ImageGenerateTool  # noqa: PLC0415
 
         mock_registry = MagicMock()
         mock_chain = AsyncMock()

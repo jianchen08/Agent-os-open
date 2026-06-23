@@ -17,30 +17,36 @@ State 命名空间：
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
 import urllib.parse
 from typing import Any
 
-import yaml
-
-from human_interaction.models import Priority, ResponseType
+from human_interaction.models import Priority, ResponseType  # noqa: F401
 from human_interaction.service import (
     InteractionCancelledError,
     InteractionDeniedError,
     InteractionTimeoutError,
 )
-
+from isolation.policy import IsolationPolicyLoader
+from isolation.sensitive_paths import is_sensitive_path
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
 
 logger = logging.getLogger(__name__)
 
 # 项目根目录：src/plugins/input/ → 向上 4 级到项目根
-_PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100,PTH120
 )
+
+# 隔离策略加载器（模块级单例，构造时即从 isolation_policy.yaml 缓存）。
+# Host 模式审批以 policy.execution 为单一事实源：
+#   command_in_container → 命令执行类，HOST 降级需用户审批
+#   host_direct          → 内部 API 工具，免审批
+_policy_loader = IsolationPolicyLoader()
 
 
 class SecurityCheckPlugin(IInputPlugin):
@@ -102,23 +108,20 @@ class SecurityCheckPlugin(IInputPlugin):
         if "rules" in self._config and self._config["rules"]:
             return self._config["rules"]
 
-        # 从 YAML 文件加载
+        # 从 YAML 文件加载（通过 ConfigCenter 统一缓存）
+        # 注意：ConfigCenter.get() 内部已捕获 yaml.YAMLError 和 IO 错误，
+        # 这里只需兜底防御 ConfigCenter 抛出意外异常（如未初始化）。
         rules_path = self._config.get("rules_path", "config/isolation/security_rules.yaml")
-        # 将相对路径转换为基于项目根目录的绝对路径
-        if not os.path.isabs(rules_path):
-            rules_path = os.path.join(_PROJECT_ROOT, rules_path)
+        rel = rules_path.replace("config/", "", 1) if rules_path.startswith("config/") else rules_path
         try:
-            with open(rules_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+            from config.config_center import get_config_center  # noqa: PLC0415
+            data = get_config_center().get(rel)
             if data and "rules" in data:
                 return data["rules"]
             logger.warning("[%s] No rules found in %s", self.name, rules_path)
             return []
-        except FileNotFoundError:
-            logger.warning("[%s] Rules file not found: %s", self.name, rules_path)
-            return []
-        except yaml.YAMLError as e:
-            logger.error("[%s] Failed to parse rules file: %s", self.name, e)
+        except Exception:
+            logger.warning("[%s] Rules file load failed: %s", self.name, rules_path)
             return []
 
     @property
@@ -153,13 +156,20 @@ class SecurityCheckPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行安全检查逻辑。
 
-        检查顺序：
-        1. 路径遍历检测（内置）
-        2. 工作目录边界检查（内置）
-        3. 配置规则匹配（通用引擎）
+        Host 模式统一规则：不限制工作目录边界（不管路径），只保留三道底线：
+        1. 基础安全检查（路径遍历 / 敏感系统目录黑名单）→ 任何模式都必须执行，
+           这是防注入、防触碰 OS 核心目录的底线，容器不能绕过
+        2. 容器模式（provider=docker）→ 基础检查通过后一路绿灯
+        3. host 模式按工具是否危险决定：
+           - 非危险工具 → 放行
+           - 危险工具（command_in_container 或声明了 dangerous_operations）：
+             参数命中白名单（action=allow）→ 放行
+             参数命中黑名单（action=block）→ 软拦截反馈 LLM
+             参数需要审批（action=needs_approval）→ 弹审批
+             危险工具的未知参数 → 弹审批（兜底）
 
         Args:
             ctx: 插件执行上下文
@@ -181,75 +191,77 @@ class SecurityCheckPlugin(IInputPlugin):
         if not tool_calls:
             return {"security.decision": {"allowed": True, "reason": "no tool calls to check"}}
 
-        # 逐个检查工具调用
+        # 判断执行模式
+        execution_contexts = ctx.state.get("execution_contexts", [])
+        all_docker = bool(execution_contexts) and all(
+            c.get("provider") == "docker" for c in execution_contexts
+        )
+
+        # ── 第一道：基础安全检查（路径遍历 + 敏感系统目录黑名单）──
+        # 任何模式都必须执行，这是防注入、防触碰 OS 核心目录的底线。
+        # host 模式不再做工作目录越界检查（不管路径）。
+        # 违规时软拦截——反馈给 LLM 让它改正，不杀引擎。
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
 
-            # 1. 路径遍历检测（内置，检查 6 个路径参数）
+            # 1. 路径遍历检测
             traversal_reason = self._check_path_traversal(args)
             if traversal_reason:
                 logger.warning(
                     "[%s] Blocked path traversal | tool=%s | reason=%s",
                     self.name, tool_name, traversal_reason,
                 )
-                decision = {"allowed": False, "reason": traversal_reason, "tool": tool_name}
-                return {"security.decision": decision}
+                return self._soft_block(ctx, tool_name, f"路径遍历攻击被拦截: {traversal_reason}")
 
-            # 2. 工作目录边界检查（内置，优先从 state 动态获取 workspace）
-            # 动态获取 workspace：优先使用 state 中的值（支持 worktree 模式），
-            # 回退到配置中的静态值
-            workspace = ctx.state.get("workspace", self._workspace)
-            if workspace:
-                workspace_reason = self._check_workspace_boundary(args, workspace)
-                if workspace_reason:
-                    logger.warning(
-                        "[%s] Blocked out-of-workspace access | tool=%s | reason=%s",
-                        self.name, tool_name, workspace_reason,
-                    )
-                    decision = {"allowed": False, "reason": workspace_reason, "tool": tool_name}
-                    return {"security.decision": decision}
+            # 2. 敏感系统目录黑名单（禁止触碰 OS 核心目录）
+            sensitive_reason = self._check_sensitive_paths(args)
+            if sensitive_reason:
+                logger.warning(
+                    "[%s] Blocked sensitive system path | tool=%s | reason=%s",
+                    self.name, tool_name, sensitive_reason,
+                )
+                return self._soft_block(ctx, tool_name, f"敏感系统目录被拦截: {sensitive_reason}")
 
-            # 3. 配置规则匹配（通用引擎）
+        # ── 第二道：按模式分流 ──
+
+        # 容器模式：基础检查通过 → 一路绿灯
+        if all_docker:
+            logger.info("[%s] 容器模式，基础检查通过，放行", self.name)
+            return {"security.decision": {"allowed": True, "reason": "container mode, base checks passed"}}
+
+        # host 模式：逐个检查工具调用的参数
+        for tc in tool_calls:
+            tool_name = tc.get("name", "")
+            args = tc.get("args", {})
+
+            # 判定是否危险工具：
+            # - policy.execution == command_in_container（bash 等命令执行类）
+            # - 或工具声明了 dangerous_operations（delete/move/copy/file_write 等）
+            is_dangerous_tool = self._is_dangerous_tool(ctx, tool_name)
+
+            # 非危险工具 → 直接放行
+            if not is_dangerous_tool:
+                continue
+
+            # ── 危险工具：参数命中白名单才放行，否则一律审批 ──
             action, rule_name = self._match_rules(tool_name, args)
-            if action == "block":
-                logger.warning(
-                    "[%s] Blocked by rule '%s' | tool=%s",
-                    self.name, rule_name, tool_name,
+            if action == "allow":
+                logger.info(
+                    "[%s] 危险工具参数命中白名单，放行 | tool=%s | rule=%s",
+                    self.name, tool_name, rule_name,
                 )
-                decision = {
-                    "allowed": False,
-                    "reason": f"Blocked by security rule: {rule_name}",
-                    "tool": tool_name,
-                }
-                return {"security.decision": decision}
+                continue
 
-            if action == "needs_approval":
-                logger.warning(
-                    "[%s] Needs approval by rule '%s' | tool=%s",
-                    self.name, rule_name, tool_name,
-                )
-                return await self._await_approval(
-                    ctx, tool_name, rule_name
-                )
-
-        # 4. Host模式审批：非白名单工具需要用户确认
-        host_contexts = [
-            c for c in ctx.state.get("execution_contexts", [])
-            if c.get("provider") == "host"
-        ]
-        if host_contexts:
-            _HOST_SAFE_TOOLS = frozenset({
-                "file_read", "enhanced_search", "code_search", "resource_search",
-                "list_directory", "memory", "task_manage", "task_evaluate",
-                "human_interaction", "collect_tool_info",
-            })
-            for tc in tool_calls:
-                tool_name = tc.get("name", "")
-                if tool_name not in _HOST_SAFE_TOOLS:
-                    return await self._await_approval(
-                        ctx, tool_name, "host_mode_dangerous_operation"
-                    )
+            # 未命中白名单 → 一律弹审批
+            reason = "参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
+            logger.warning(
+                "[%s] 危险工具参数未命中白名单，弹审批 | tool=%s | rule=%s",
+                self.name, tool_name, rule_name or "none",
+            )
+            return await self._await_approval(
+                ctx, tool_name, reason
+            )
 
         return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
 
@@ -262,7 +274,10 @@ class SecurityCheckPlugin(IInputPlugin):
         """等待用户审批并返回审批结果。
 
         通过 human_interaction 服务创建审批请求并 await 等待用户响应。
-        审批通过后写入 allowed=True，拒绝/超时/取消后写入 allowed=False。
+        优先用 engine 注入的服务（ctx.get_service），取不到时回退到
+        全局单例 get_human_interaction_service()（覆盖 websocket 等未注入
+        服务的场景）。审批通过后写入 allowed=True，
+        拒绝/超时/取消后写入 allowed=False。
 
         Args:
             ctx: 插件执行上下文
@@ -272,30 +287,24 @@ class SecurityCheckPlugin(IInputPlugin):
         Returns:
             安全决策结果字典
         """
+        # 优先用 engine 注入的服务（测试可 mock），回退全局单例
         try:
-            interaction_svc = ctx.get_service("human_interaction")
+            interaction_svc = ctx.get_service("human_interaction_service")
         except KeyError:
-            interaction_svc = None
-        if interaction_svc is None:
-            logger.error(
-                "[%s] Approval required but no human_interaction service available, blocking",
-                self.name,
-            )
-            return {
-                "security.decision": {
-                    "allowed": False,
-                    "reason": f"Needs approval by security rule: {rule_name} (no approval service)",
-                    "tool": tool_name,
-                },
-            }
+            from human_interaction import get_human_interaction_service  # noqa: PLC0415
+            interaction_svc = get_human_interaction_service()
+
+        # 提取工具调用的具体参数，显示给用户审批
+        tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
+        args_preview = self._format_args_for_approval(tool_calls, tool_name)
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
         request_id = await interaction_svc.create_choice_request(
             session_id=session_id,
             thread_id=session_id,
             tab_id="",
-            title="安全审批请求",
-            description=f"工具 {tool_name} 触发安全规则 {rule_name}，需要您的审批才能继续执行。",
+            title=f"安全审批: {tool_name}",
+            description=args_preview,
             options=[
                 {"value": "approved", "label": "允许执行"},
                 {"value": "denied", "label": "拒绝执行"},
@@ -311,11 +320,16 @@ class SecurityCheckPlugin(IInputPlugin):
         try:
             result = await interaction_svc.wait_for_choice(request_id)
             response_type = result.get("response_type", "")
+            # response_type 表示响应类型（answered/denied/cancelled），
+            # 用户的具体选择在 selected_option 字段中。
+            # DENIED 和 CANCELLED 已由 wait_for_choice 抛异常处理，
+            # 到这里 response_type 通常是 "answered"，需检查 selected_option。
+            selected_option = result.get("selected_option", "")
 
-            if response_type == ResponseType.APPROVED.value:
+            if selected_option == "approved":
                 logger.info(
-                    "[%s] Approval granted | request_id=%s | tool=%s",
-                    self.name, request_id, tool_name,
+                    "[%s] Approval granted | request_id=%s | tool=%s | option=%s",
+                    self.name, request_id, tool_name, selected_option,
                 )
                 return {
                     "security.decision": {
@@ -326,68 +340,151 @@ class SecurityCheckPlugin(IInputPlugin):
                 }
 
             logger.warning(
-                "[%s] Approval denied | request_id=%s | tool=%s | response=%s",
-                self.name, request_id, tool_name, response_type,
+                "[%s] Approval denied | request_id=%s | tool=%s | response=%s | option=%s",
+                self.name, request_id, tool_name, response_type, selected_option,
             )
-            return {
-                "security.decision": {
-                    "allowed": False,
-                    "reason": f"Approval {response_type}: {rule_name}",
-                    "tool": tool_name,
-                },
-            }
+            # 审批拒绝属于软拦截——用户主观选择拒绝，不应结束管道，
+            # 而是把拒绝结果作为 tool_result 返回给 LLM，让 LLM 决定下一步。
+            return self._soft_block(ctx, tool_name, f"用户拒绝执行: {rule_name}")
 
         except InteractionDeniedError as e:
             logger.warning(
                 "[%s] Approval denied (exception) | request_id=%s | tool=%s | reason=%s",
                 self.name, request_id, tool_name, e.reason,
             )
-            return {
-                "security.decision": {
-                    "allowed": False,
-                    "reason": f"Approval denied: {e.reason or rule_name}",
-                    "tool": tool_name,
-                },
-            }
+            return self._soft_block(ctx, tool_name, f"用户拒绝执行: {e.reason or rule_name}")
 
         except InteractionTimeoutError:
             logger.warning(
                 "[%s] Approval timed out | request_id=%s | tool=%s",
                 self.name, request_id, tool_name,
             )
-            return {
-                "security.decision": {
-                    "allowed": False,
-                    "reason": f"Approval timed out: {rule_name}",
-                    "tool": tool_name,
-                },
-            }
+            return self._soft_block(ctx, tool_name, f"审批超时未响应: {rule_name}")
 
         except InteractionCancelledError as e:
             logger.warning(
                 "[%s] Approval cancelled | request_id=%s | tool=%s | reason=%s",
                 self.name, request_id, tool_name, e.reason,
             )
-            return {
-                "security.decision": {
-                    "allowed": False,
-                    "reason": f"Approval cancelled: {e.reason or rule_name}",
-                    "tool": tool_name,
-                },
-            }
+            return self._soft_block(ctx, tool_name, f"审批被取消: {e.reason or rule_name}")
 
         except Exception as e:
             logger.error(
                 "[%s] Approval error | request_id=%s | tool=%s | error=%s",
                 self.name, request_id, tool_name, e,
             )
-            return {
-                "security.decision": {
-                    "allowed": False,
-                    "reason": f"Approval error: {e}",
-                    "tool": tool_name,
-                },
-            }
+            return self._soft_block(ctx, tool_name, f"审批服务异常: {e}")
+
+    def _soft_block(
+        self, ctx: PluginContext, tool_name: str, reason: str,
+    ) -> dict[str, Any]:
+        """软拦截：把拒绝原因作为 tool_result 返回给 LLM，不结束管道。
+
+        审批拒绝/超时/取消属于用户主观行为，不应直接结束整个管道。
+        通过清空 raw_tool_calls + 注入拒绝 tool_result，让管道走到 output
+        路由的 next_llm 分支，LLM 收到拒绝反馈后自行决定下一步策略。
+
+        Args:
+            ctx: 插件执行上下文
+            tool_name: 被拒绝的工具名称
+            reason: 拒绝原因
+
+        Returns:
+            状态更新字典（raw_tool_calls 清空，tool_results 注入拒绝结果）
+        """
+        tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
+        rejected_results: list[dict[str, Any]] = []
+        for tc in tool_calls:
+            tc_name = tc.get("name", "")
+            tc_call_id = tc.get("id")
+            rejected_results.append({
+                "tool_name": tc_name,
+                "success": False,
+                "error": f"[审批拒绝] {reason}" if tc_name == tool_name else f"[关联拒绝] {reason}",
+                "call_id": tc_call_id,
+            })
+
+        logger.info(
+            "[%s] Soft-block: 审批拒绝转为 tool_result 反馈给 LLM | tool=%s",
+            self.name, tool_name,
+        )
+        return {
+            StateKeys.RAW_TOOL_CALLS: [],
+            StateKeys.TOOL_RESULTS: rejected_results,
+            StateKeys.RAW_RESULT: f"工具 {tool_name} 被拒绝: {reason}",
+            "security.decision": {"allowed": True, "reason": f"soft_block: {reason}", "tool": tool_name},
+        }
+
+    @staticmethod
+    def _format_args_for_approval(tool_calls: list[dict[str, Any]], triggered_tool: str) -> str:  # noqa: ARG004,PLR0912
+        """格式化工具调用参数，生成审批描述（含具体命令/路径/内容）。
+
+        Args:
+            tool_calls: 当前轮次的工具调用列表
+            triggered_tool: 触发审批的工具名
+
+        Returns:
+            格式化的审批描述文本，包含工具名 + 具体操作内容预览
+        """
+        lines = ["请审批以下工具执行请求：", ""]
+
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args", tc.get("arguments", {}))
+
+            # args 可能是 JSON 字符串
+            if isinstance(args, str):
+                import json  # noqa: PLC0415
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+
+            if not isinstance(args, dict):
+                args = {}
+
+            lines.append(f"工具: {name}")
+
+            # 提取关键参数：命令、路径、代码等
+            # 命令类（bash_execute 等）
+            cmd = args.get("command") or args.get("cmd")
+            if cmd:
+                # 限制长度，避免超长命令刷屏
+                cmd_preview = str(cmd)[:500]
+                if len(str(cmd)) > 500:
+                    cmd_preview += "\n... (命令过长，已截断)"
+                lines.append(f"命令:\n{cmd_preview}")
+
+            # 路径类（file_write/read/delete 等）
+            for path_key in ("path", "file_path", "directory", "dest", "target", "output_path", "working_dir"):
+                val = args.get(path_key)
+                if val:
+                    lines.append(f"{path_key}: {val}")
+
+            # 文件写入内容
+            content = args.get("content")
+            if content:
+                content_preview = str(content)[:300]
+                if len(str(content)) > 300:
+                    content_preview += "\n... (内容过长，已截断)"
+                lines.append(f"内容预览:\n{content_preview}")
+
+            # 代码类
+            code = args.get("code")
+            if code:
+                code_preview = str(code)[:300]
+                if len(str(code)) > 300:
+                    code_preview += "\n... (代码过长，已截断)"
+                lines.append(f"代码预览:\n{code_preview}")
+
+            # URL 类
+            url = args.get("url")
+            if url:
+                lines.append(f"URL: {url}")
+
+            lines.append("")
+
+        return "\n".join(lines).strip()
 
     def _match_rules(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
         """通用规则匹配引擎。
@@ -454,7 +551,7 @@ class SecurityCheckPlugin(IInputPlugin):
         检测 ../ 等路径遍历模式，防止通过相对路径绕过工作目录限制。
         使用 Path.resolve() 解析绝对路径，同时检测 URL 编码绕过和符号链接。
         """
-        from pathlib import Path
+        from pathlib import Path  # noqa: PLC0415
 
         for key in self._path_params:
             if key not in args:
@@ -514,19 +611,15 @@ class SecurityCheckPlugin(IInputPlugin):
         if not effective_workspace:
             return ""
 
-        # BUG-FIX-fix_20260506_bash_security: 支持多基路径边界检查
-        # 问题根因: working_dir 参数未被检查；Skill 脚本路径在 workspace 外被阻止
-        # 修复方案: 新增 working_dir 参数检查；支持 allowed_base_paths 多基路径
-        # 影响范围: bash_execute 的 working_dir 参数、Skill 脚本执行路径
         allowed_bases = [os.path.realpath(effective_workspace)]
         for extra in self._allowed_base_paths:
-            abs_extra = extra if os.path.isabs(extra) else os.path.join(_PROJECT_ROOT, extra)
+            abs_extra = extra if os.path.isabs(extra) else os.path.join(_PROJECT_ROOT, extra)  # noqa: PTH117
             allowed_bases.append(os.path.realpath(abs_extra))
 
         for key in self._path_params:
             if key in args:
                 path = str(args[key])
-                if os.path.isabs(path):
+                if os.path.isabs(path):  # noqa: PTH117
                     real_path = os.path.normcase(os.path.realpath(path))
                     if not any(
                         real_path == os.path.normcase(base) or real_path.startswith(os.path.normcase(base) + os.sep)
@@ -535,3 +628,92 @@ class SecurityCheckPlugin(IInputPlugin):
                         return f"Path outside allowed boundaries: {path}"
 
         return ""
+
+    def _check_sensitive_paths(self, args: dict[str, Any]) -> str:
+        """检查路径参数是否命中敏感系统目录黑名单（内置安全机制）。
+
+        Host 模式不再限制工作目录边界，但 OS 核心目录（Windows 的
+        C:/Windows/System32、Linux 的 /etc /proc 等）始终禁止触碰。
+        使用共享的 is_sensitive_path 统一判定。
+
+        Args:
+            args: 工具参数
+
+        Returns:
+            拦截原因字符串，空字符串表示通过
+        """
+        for key in self._path_params:
+            if key in args:
+                value = args[key]
+                if not isinstance(value, str):
+                    continue
+                hit, matched = is_sensitive_path(value)
+                if hit:
+                    return f"Path hits sensitive system dir: {value} (matched: {matched})"
+        return ""
+
+    def _is_dangerous_tool(self, ctx: PluginContext, tool_name: str) -> bool:
+        """判定工具是否属于危险工具（host 模式下需要参数审批把关）。
+
+        双轨判定（满足任一即为危险工具）：
+        1. policy.execution == "command_in_container" —— bash 等命令执行类
+           （容器不可用时降级到 host，命令任意性高，必须审批）
+        2. 工具声明了 dangerous_operations —— delete_file/move_file/copy_file/
+           file_write 等破坏性操作工具
+
+        tool_definition 从 tool_registry 服务获取；registry 不可用时回退到
+        只看 policy.execution（保持原有兜底行为）。
+
+        Args:
+            ctx: 插件执行上下文
+            tool_name: 工具名称
+
+        Returns:
+            是否为危险工具
+        """
+        # 轨道 1：命令执行类（policy.execution 判定）
+        policy = _policy_loader.resolve(tool_name)
+        if policy.execution == "command_in_container":
+            return True
+
+        # 轨道 2：声明了 dangerous_operations 的工具
+        dangerous_ops = self._get_dangerous_operations(ctx, tool_name)
+        return bool(dangerous_ops)
+
+    @staticmethod
+    def _get_dangerous_operations(
+        ctx: PluginContext, tool_name: str
+    ) -> list[str]:
+        """从 tool_registry 获取工具声明的 dangerous_operations。
+
+        优先用 engine 注入的 tool_registry 服务，取不到时回退全局单例。
+        registry 不可用或工具不存在时返回空列表（兜底，不影响主流程）。
+
+        Args:
+            ctx: 插件执行上下文
+            tool_name: 工具名称
+
+        Returns:
+            工具声明的 dangerous_operations 列表，无声明或不可用时为空列表
+        """
+        registry = None
+        with contextlib.suppress(KeyError):
+            registry = ctx.get_service("tool_registry")
+
+        if registry is None:
+            try:
+                from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+                registry = get_global_tool_registry_sync()
+            except Exception:
+                return []
+
+        try:
+            tool_def = registry.get(tool_name)
+        except Exception:
+            return []
+
+        if tool_def is None:
+            return []
+
+        return getattr(tool_def, "dangerous_operations", None) or []
+

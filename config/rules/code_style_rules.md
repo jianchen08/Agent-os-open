@@ -13,14 +13,7 @@
 
 ## 二、命名规范
 
-| 类型 | 风格 | 示例 |
-|------|------|------|
-| 模块 | snake_case | `data_loader.py` |
-| 函数/方法 | snake_case | `def load_config():` |
-| 类 | PascalCase | `class AgentConfig:` |
-| 常量 | UPPER_SNAKE | `MAX_RETRIES = 3` |
-| 私有属性 | _前缀 | `self._buffer` |
-| 包 | snake_case | `pipeline/` |
+> 见「命名规范」。
 
 ---
 
@@ -69,17 +62,10 @@ class Foo:
 
 ---
 
-## 五、Windows 文本替换
+## 五、禁止行为
 
-- 优先用 `search_replace` 或 Python 脚本，禁止用 sed/awk（换行符和编码问题）
-- 批量替换时先 dry_run 预览，一次性替换，始终指定 `encoding="utf-8"`
+> 通用禁止行为见「反模式清单」和「错误处理铁律」。以下为补充项：
 
----
-
-## 六、禁止行为
-
-- 禁止硬编码配置值（使用配置文件或常量）
-- 禁止忽略异常（空 `except` 块必须至少 `logger.debug`）
 - 禁止全局可变状态
 - 禁止循环导入
-- 禁止在 Windows 下使用 sed/awk 做文本替换
+- 禁止在 Windows 下使用 sed/awk 做文本替换（换行符和编码问题，优先用 `search_replace` 或 Python 脚本）

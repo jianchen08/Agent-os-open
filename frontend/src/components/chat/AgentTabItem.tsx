@@ -3,6 +3,10 @@
  *
  * 显示单个 Agent 标签页
  * 支持主 Tab（L1，不可关闭）和子 Tab（L2/L3，可关闭）
+ *
+ * 注意：Agent 切换功能位于会话列表三点菜单（SessionList），
+ *       模型名显示位于对话栏 header（ChatContainer），
+ *       标签栏仅负责 Tab 导航。
  */
 
 import { X } from 'lucide-react'
@@ -123,6 +127,8 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
       >
         {getStatusIcon(tab.status)}
       </span>
+
+      {getAgentLevelBadge(tab.agentLevel)}
 
       <span className="truncate text-sm font-medium">{tab.name}</span>
 

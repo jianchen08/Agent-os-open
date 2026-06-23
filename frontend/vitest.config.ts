@@ -31,7 +31,7 @@ export default defineConfig({
     // 引入 @testing-library/jest-dom 扩展匹配器
     setupFiles: ['./src/test/setup.ts'],
     // 测试文件匹配模式
-    include: ['src/**/*.test.{ts,tsx}'],
+    include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}'],
     exclude: ['node_modules', 'dist'],
     // 全局 API（describe, it, expect 等）
     globals: true,
