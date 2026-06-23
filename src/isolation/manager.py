@@ -36,7 +36,7 @@ def _load_provider_config() -> dict[str, Any]:
         from config.config_center import get_config_center  # noqa: PLC0415
         config = get_config_center().get("isolation/isolation_config.yaml") or {}
         providers_config = config.get("providers", {})
-        logger.info("[IsolationManager] 从 ConfigCenter 加载提供者配置")
+        logger.debug("[IsolationManager] 从 ConfigCenter 加载提供者配置")
         return providers_config
     except Exception as e:
         logger.warning(f"[IsolationManager] 加载配置文件失败: {e}，使用默认配置")
@@ -90,7 +90,7 @@ def _create_providers_from_config(
                 "network_mode": docker_config.get("network_mode", "bridge"),
             },
         )
-        logger.info(
+        logger.debug(
             "[IsolationManager] 创建 DockerProvider: image=%s memory=%s cpu=%s swap=%s pids=%s"
             " (source=%s)",
             docker_config.get("image", "agentos:latest"),
@@ -183,7 +183,7 @@ class IsolationManager:
         # 清理 Docker 镜像/构建缓存（异步不阻塞启动）
         asyncio.ensure_future(self._prune_docker_images())
 
-        logger.info("隔离环境管理器已启动")
+        logger.debug("隔离环境管理器已启动")
 
     async def _resume_containers(self):  # noqa: PLR0912
         """恢复未完成任务的容器，清理已完成/不存在任务的容器
@@ -219,7 +219,7 @@ class IsolationManager:
 
                 # 仅当成功加载活跃 workspace 时才执行销毁逻辑，避免 fail-open 误销毁在用容器
                 if active_ws_keys is not None and ws_key not in active_ws_keys:
-                    logger.info(
+                    logger.debug(
                         f"[IsolationManager] workspace {ws_key} 无活跃任务，"
                         f"销毁容器: {container.name}"
                     )
@@ -248,7 +248,7 @@ class IsolationManager:
 
                     workspace_dir = Path(workspace_path)
                     if not workspace_dir.exists():
-                        logger.info(
+                        logger.debug(
                             f"[IsolationManager] 工作空间目录不存在，正在创建: {workspace_path}"
                         )
                         workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +256,7 @@ class IsolationManager:
                 if container.status == "exited":
                     try:
                         container.start()
-                        logger.info(f"[IsolationManager] 已恢复容器: {container.name}")
+                        logger.debug(f"[IsolationManager] 已恢复容器: {container.name}")
                         resumed_count += 1
                     except DockerException as e:
                         logger.warning(
@@ -264,9 +264,9 @@ class IsolationManager:
                         )
 
             if resumed_count > 0:
-                logger.info(f"[IsolationManager] 共恢复 {resumed_count} 个容器")
+                logger.debug(f"[IsolationManager] 共恢复 {resumed_count} 个容器")
             if destroyed_count > 0:
-                logger.info(f"[IsolationManager] 共销毁 {destroyed_count} 个无效容器")
+                logger.debug(f"[IsolationManager] 共销毁 {destroyed_count} 个无效容器")
 
             client.close()
 
@@ -300,7 +300,7 @@ class IsolationManager:
                 ),
             )
             if rc == 0:
-                logger.info("[IsolationManager] Docker 悬挂镜像已清理")
+                logger.debug("[IsolationManager] Docker 悬挂镜像已清理")
             else:
                 err = stderr.decode("utf-8", errors="replace") if stderr else ""
                 logger.debug(
@@ -318,7 +318,7 @@ class IsolationManager:
                 ),
             )
             if rc2 == 0:
-                logger.info("[IsolationManager] Docker 过期构建缓存已清理")
+                logger.debug("[IsolationManager] Docker 过期构建缓存已清理")
             else:
                 err2 = stderr2.decode("utf-8", errors="replace") if stderr2 else ""
                 logger.debug(
@@ -381,7 +381,7 @@ class IsolationManager:
 
         await self._stop_containers()
 
-        logger.info("隔离环境管理器已停止")
+        logger.debug("隔离环境管理器已停止")
 
     async def _stop_containers(self):
         """停止所有活跃任务的容器（不删除）
@@ -413,7 +413,7 @@ class IsolationManager:
                 if container.status == "running":
                     try:
                         container.stop(timeout=5)
-                        logger.info(f"[IsolationManager] 已停止容器: {container.name}")
+                        logger.debug(f"[IsolationManager] 已停止容器: {container.name}")
                         stopped_count += 1
                     except DockerException as e:
                         logger.warning(
@@ -421,7 +421,7 @@ class IsolationManager:
                         )
 
             if stopped_count > 0:
-                logger.info(f"[IsolationManager] 共停止 {stopped_count} 个容器")
+                logger.debug(f"[IsolationManager] 共停止 {stopped_count} 个容器")
 
             client.close()
 
@@ -447,7 +447,7 @@ class IsolationManager:
         ws_key = PurePath(workspace).name if workspace else task_id
         container_name = self._workspace_to_container_name(workspace, task_id)
 
-        logger.info(
+        logger.debug(
             f"[IsolationManager] 任务 {task_id} 的 workspace={workspace}，容器名称: {container_name}"
         )
 
@@ -457,7 +457,7 @@ class IsolationManager:
             existing = self._environments.get(env_id)
             if existing and existing.status == EnvironmentStatus.READY.value:
                 existing.last_used_at = datetime.now(UTC).isoformat()
-                logger.info(
+                logger.debug(
                     f"[IsolationManager] 复用 workspace 容器: {container_name} (env_id={env_id})"
                 )
                 return existing
@@ -473,7 +473,7 @@ class IsolationManager:
             provider = self._providers.get(existing_env.level)
             if provider is not None:
                 provider._environments[existing_env.env_id] = existing_env
-            logger.info(f"[IsolationManager] 恢复已有容器: {container_name}")
+            logger.debug(f"[IsolationManager] 恢复已有容器: {container_name}")
             return existing_env
 
         # 4. 检查是否可以复用父级环境
@@ -489,7 +489,7 @@ class IsolationManager:
         if isolation_level:
             level = isolation_level
             requires_approval = level == IsolationLevel.HOST
-            logger.info(
+            logger.debug(
                 f"使用指定的隔离级别: {level.value} (requires_approval={requires_approval})"
             )
         else:
@@ -504,7 +504,7 @@ class IsolationManager:
             )
             level = policy.isolation
             requires_approval = policy.approval
-            logger.info(
+            logger.debug(
                 f"为任务 {task_id} 选择隔离级别: {level.value} (requires_approval={requires_approval})"
                 f"(tool_name={tool_name}, task_type={task_type.value}, operation_type={operation_type.value if operation_type else None})"
             )
@@ -561,7 +561,7 @@ class IsolationManager:
         self._environments[env.env_id] = env
         self._workspace_env_map[ws_key] = env.env_id
 
-        logger.info(
+        logger.debug(
             f"创建新隔离环境: {env.env_id} (level={level.value}, container_name={container_name})"
         )
         return env
@@ -576,7 +576,7 @@ class IsolationManager:
             repo: 任务仓储实例（如 TaskService._storage，TaskStorage）
         """
         self._task_repository = repo
-        logger.info("[IsolationManager] task_repository 已注入，按 workspace 管理容器")
+        logger.debug("[IsolationManager] task_repository 已注入，按 workspace 管理容器")
 
     @staticmethod
     def _workspace_to_container_name(workspace: str | None, task_id: str) -> str:
@@ -617,7 +617,7 @@ class IsolationManager:
 
                 if container.status == "exited":
                     container.start()
-                    logger.info(
+                    logger.debug(
                         f"[IsolationManager] 已恢复停止的容器: {container_name}"
                     )
 
@@ -636,11 +636,11 @@ class IsolationManager:
 
                     workspace_dir = Path(workspace_path)
                     if not workspace_dir.exists():
-                        logger.info(
+                        logger.debug(
                             f"[IsolationManager] 工作空间目录不存在，正在创建: {workspace_path}"
                         )
                         workspace_dir.mkdir(parents=True, exist_ok=True)
-                        logger.info(
+                        logger.debug(
                             f"[IsolationManager] 已创建工作空间目录: {workspace_path}"
                         )
 
@@ -693,7 +693,7 @@ class IsolationManager:
 
         env_id = self._workspace_env_map.get(ws_key)
         if env_id:
-            logger.info(
+            logger.debug(
                 f"[IsolationManager] 任务 {task_id} (workspace {ws_key}) "
                 f"通过内存映射销毁容器 {env_id}"
             )
@@ -725,13 +725,13 @@ class IsolationManager:
             return
 
         if ws_key in active_ws_keys:
-            logger.info(
+            logger.debug(
                 f"[IsolationManager] 任务 {task_id} 终态，但 workspace {ws_key} "
                 f"仍有活跃任务，保留容器"
             )
             return
 
-        logger.info(
+        logger.debug(
             f"[IsolationManager] 任务 {task_id} 终态且 workspace {ws_key} "
             f"无活跃任务，销毁容器"
         )
@@ -787,7 +787,7 @@ class IsolationManager:
                 container = client.containers.get(container_name)
                 container.stop(timeout=5)
                 container.remove()
-                logger.info(
+                logger.debug(
                     f"[IsolationManager] 已通过 Docker API 删除容器: {container_name}"
                 )
             except NotFound:
@@ -809,7 +809,7 @@ class IsolationManager:
             logger.warning(f"尝试销毁不存在的环境: {env_id}")
             return
 
-        logger.info(f"销毁隔离环境: {env_id}")
+        logger.debug(f"销毁隔离环境: {env_id}")
 
         provider = self._providers.get(env.level)
         if provider:

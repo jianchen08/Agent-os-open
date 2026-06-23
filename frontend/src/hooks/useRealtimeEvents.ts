@@ -340,6 +340,7 @@ export function useRealtimeEvents(): void {
 
     // Task lifecycle events
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
 
     // Module schema update events (event-driven, replaces polling)

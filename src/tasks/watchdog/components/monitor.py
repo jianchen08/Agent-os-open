@@ -141,7 +141,7 @@ class TaskMonitor:
 
         self._running = True
         self._task = asyncio.create_task(self._monitor_loop())
-        logger.info(
+        logger.debug(
             f"任务监控器已启动，"
             f"检查间隔: {self.check_interval}s，"
             f"任务超时: {self.task_timeout}s，"
@@ -157,7 +157,7 @@ class TaskMonitor:
                 await self._task
             self._task = None
         self._heartbeats.clear()
-        logger.info("任务监控器已停止")
+        logger.debug("任务监控器已停止")
 
     async def _monitor_loop(self) -> None:
         """监控循环"""
@@ -179,7 +179,7 @@ class TaskMonitor:
                 try:
                     reminded_tasks = await self.evaluation_reminder_service.check_and_remind()
                     if reminded_tasks:
-                        logger.info(f"已发送 {len(reminded_tasks)} 个评估提醒")
+                        logger.debug(f"已发送 {len(reminded_tasks)} 个评估提醒")
                 except Exception as e:
                     logger.error(f"检查评估提醒时出错: {e}")
 
@@ -212,7 +212,7 @@ class TaskMonitor:
             if not root_tasks:
                 return {"checked": 0, "triggered": 0, "projects": []}
 
-            logger.info(f"检查 {len(root_tasks)} 个自动执行项目")
+            logger.debug(f"检查 {len(root_tasks)} 个自动执行项目")
 
             triggered_count = 0
             project_results = []
@@ -260,7 +260,7 @@ class TaskMonitor:
 
         for prep_task in prep_tasks:
             try:
-                logger.info(f"检测到长期任务准备任务 {prep_task.id}，创建根任务")
+                logger.debug(f"检测到长期任务准备任务 {prep_task.id}，创建根任务")
                 await self._create_root_task_for_preparation(session, prep_task)
             except Exception as e:
                 logger.error(
@@ -309,7 +309,7 @@ class TaskMonitor:
         else:
             root_task_id = root_execution_record_id
 
-        logger.info(f"[Watchdog] 生成根任务ID | root_task_id={root_task_id}")
+        logger.debug(f"[Watchdog] 生成根任务ID | root_task_id={root_task_id}")
 
         # 创建根任务
         now = datetime.now(UTC)
@@ -369,7 +369,7 @@ class TaskMonitor:
 
         await session.commit()
 
-        logger.info(
+        logger.debug(
             f"[Watchdog] 根任务已创建 | "
             f"root_task_id={root_task_id} | "
             f"prep_task_id={prep_task.id}"
@@ -411,13 +411,13 @@ class TaskMonitor:
 
             if is_preparation_task:
                 # 准备任务完成，更新根任务的评估指标
-                logger.info(
+                logger.debug(
                     f"项目 {project_id} 的准备任务 {task_id} 已完成，更新根任务评估指标"
                 )
                 await self._update_root_task_metrics(session, root_task, current_task)
 
             # 当前任务已完成，触发下一个任务
-            logger.info(
+            logger.debug(
                 f"项目 {project_id} 的当前任务 {task_id} 已完成，触发下一个任务"
             )
             return await self.trigger_component.trigger_next_task(project_id)
@@ -482,7 +482,7 @@ class TaskMonitor:
         Returns:
             处理结果
         """
-        logger.info(
+        logger.debug(
             f"项目 {project_id} 的任务 {task_id} 状态为 pending，自动启动任务"
         )
 
@@ -499,7 +499,7 @@ class TaskMonitor:
                 if isinstance(result, dict):
                     status = result.get("status", "unknown")
                     if status == "success":
-                        logger.info(f"已触发任务 {task_id} 的启动回调")
+                        logger.debug(f"已触发任务 {task_id} 的启动回调")
                         # 创建计时器
                         await self._create_task_timer(task_id, project_id)
                         return {
@@ -510,7 +510,7 @@ class TaskMonitor:
                         }
                     if status == "deferred":
                         # 服务未就绪，任务已加入待处理队列
-                        logger.info(
+                        logger.debug(
                             f"任务 {task_id} 已加入待处理队列，等待执行服务就绪"
                         )
                         return {
@@ -541,7 +541,7 @@ class TaskMonitor:
                         "callback_result": result,
                     }
                 # 回调没有返回结果，假设成功
-                logger.info(f"已触发任务 {task_id} 的启动回调")
+                logger.debug(f"已触发任务 {task_id} 的启动回调")
                 # 创建计时器
                 await self._create_task_timer(task_id, project_id)
                 return {
@@ -588,7 +588,7 @@ class TaskMonitor:
                 callback=self._timer_timeout_callback,
                 root_task_id=root_task_id,
             )
-            logger.info(
+            logger.debug(
                 f"已为任务 {task_id} 创建计时器，"
                 f"超时时间: {self._timer_manager.task_max_duration}s"
             )
@@ -707,7 +707,7 @@ class TaskMonitor:
                 )
             )
             await session.commit()
-            logger.info(
+            logger.debug(
                 f"项目 {project_id} 所有子任务已完成，等待 task_evaluate 工具完成根任务"
             )
 
@@ -736,7 +736,7 @@ class TaskMonitor:
             # 1. 从 task_metadata 中获取
             if "root_task_evaluation_metrics" in task_metadata:
                 evaluation_metrics = task_metadata["root_task_evaluation_metrics"]
-                logger.info(
+                logger.debug(
                     f"从准备任务 metadata 中提取到评估指标: {evaluation_metrics}"
                 )
 
@@ -748,7 +748,7 @@ class TaskMonitor:
                     and "root_task_evaluation_metrics" in output
                 ):
                     evaluation_metrics = output["root_task_evaluation_metrics"]
-                    logger.info(
+                    logger.debug(
                         f"从准备任务 output 中提取到评估指标: {evaluation_metrics}"
                     )
 
@@ -772,7 +772,7 @@ class TaskMonitor:
 
                 if all_metrics:
                     evaluation_metrics = list(all_metrics)
-                    logger.info(
+                    logger.debug(
                         f"从 {len(subtasks)} 个子任务中聚合评估指标: {evaluation_metrics}"
                     )
 
@@ -790,7 +790,7 @@ class TaskMonitor:
                 )
                 await session.commit()
 
-                logger.info(
+                logger.debug(
                     f"根任务 {root_task.id} 的评估指标已更新: {evaluation_metrics}"
                 )
             else:
@@ -922,7 +922,7 @@ class TaskMonitor:
                 if root_task_id:
                     root_task = await session.get(Task, root_task_id)
                     if root_task:
-                        logger.info(
+                        logger.debug(
                             f"准备任务 {task_id} 完成，更新根任务 {root_task_id} 评估指标"
                         )
                         await self._update_root_task_metrics(session, root_task, task)
@@ -931,7 +931,7 @@ class TaskMonitor:
             if task.parent_task_id:
                 next_task = await self._get_current_task(session, task.parent_task_id)
                 if next_task and next_task.status == "pending":
-                    logger.info(f"任务 {task_id} 完成，触发下一个任务 {next_task.id}")
+                    logger.debug(f"任务 {task_id} 完成，触发下一个任务 {next_task.id}")
                     # 发布任务提交事件（触发执行）
                     await self._event_bus.publish(
                         ExecutionEvent(
@@ -972,4 +972,4 @@ class TaskMonitor:
                     task_metadata["auto_execute"] = False
                     task.task_metadata = task_metadata
                     await session.commit()
-                    logger.info(f"根任务 {task_id} 已停止自动执行")
+                    logger.debug(f"根任务 {task_id} 已停止自动执行")

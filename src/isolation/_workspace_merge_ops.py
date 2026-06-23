@@ -75,7 +75,7 @@ class _MergeOpsMixin:
         """
         mode = ws_meta.get("mode", "")
         if mode == "plain":
-            logger.info("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
+            logger.debug("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
             return {"success": True, "action": "none"}
         project_root = ws_meta.get("project_root", "")
         lock = self._get_merge_lock(project_root)
@@ -95,7 +95,7 @@ class _MergeOpsMixin:
                     verified, verify_detail = self._verify_merge_result(
                         workspace, project_root, ws_meta, result)
                     if verified:
-                        logger.info(
+                        logger.debug(
                             "[WorkspaceLifecycle] 合并验证通过 (attempt %d): task_id=%s, method=%s",
                             attempt, task_id, result.get("method"))
                         self._cleanup_worktree(
@@ -119,7 +119,7 @@ class _MergeOpsMixin:
                 result["success"] = False
                 return result
             if mode == "shared":
-                logger.info("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
+                logger.debug("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
                 return {"success": True, "action": "none"}
             logger.warning("[WorkspaceLifecycle] 未知 mode: %s, task_id=%s", mode, task_id)
             return {"success": False, "error": f"未知工作模式: {mode}"}
@@ -209,14 +209,14 @@ class _MergeOpsMixin:
                 if tag_task_id and merge_method == "git_merge":
                     tag = f"task-merge/{tag_task_id[:8]}"
                     self._run_git("tag", tag, branch, cwd=project_root)
-                    logger.info("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
+                    logger.debug("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
                 self._run_git("worktree", "prune", cwd=project_root)
                 self._run_git("branch", "-D", branch, cwd=project_root)
         ws_path = Path(workspace).resolve()
         if ws_path.exists() and "__wt_" in ws_path.name:
             try:
                 _force_rmtree(str(ws_path))
-                logger.info("[WorkspaceLifecycle] 强制清理残留 worktree 目录: %s", workspace)
+                logger.debug("[WorkspaceLifecycle] 强制清理残留 worktree 目录: %s", workspace)
             except OSError as e:
                 logger.warning("[WorkspaceLifecycle] 强制清理 worktree 目录失败: %s, %s", workspace, e)
 
@@ -226,19 +226,19 @@ class _MergeOpsMixin:
         """评估失败：reject_count >= max_retries 时回滚，否则允许重试"""
         mode = ws_meta.get("mode", "")
         if mode == "plain":
-            logger.info("[WorkspaceLifecycle] plain 模式评估失败: task_id=%s", task_id)
+            logger.debug("[WorkspaceLifecycle] plain 模式评估失败: task_id=%s", task_id)
             return {"success": True, "action": "none"}
         if mode == "shared":
-            logger.info("[WorkspaceLifecycle] shared 模式评估失败: task_id=%s", task_id)
+            logger.debug("[WorkspaceLifecycle] shared 模式评估失败: task_id=%s", task_id)
             return {"success": True, "action": "none"}
         reject_count = ws_meta.get("reject_count", 0) + 1
         max_retries = ws_meta.get("max_retries", self._config.get("max_retries", 3))
         ws_meta["reject_count"] = reject_count
         self._ws_meta_store[task_id] = ws_meta
         if reject_count >= max_retries:
-            logger.info("[WorkspaceLifecycle] 评估失败超限，回滚: task_id=%s, count=%d", task_id, reject_count)
+            logger.debug("[WorkspaceLifecycle] 评估失败超限，回滚: task_id=%s, count=%d", task_id, reject_count)
             return self.on_task_failed(workspace, ws_meta)
-        logger.info("[WorkspaceLifecycle] 评估失败，重试: task_id=%s, count=%d/%d", task_id, reject_count, max_retries)
+        logger.debug("[WorkspaceLifecycle] 评估失败，重试: task_id=%s, count=%d/%d", task_id, reject_count, max_retries)
         return {"success": True, "action": "retry", "reject_count": reject_count}
 
     # ── 8. 任务异常回滚 ──────────────────────────────────────────
@@ -254,13 +254,13 @@ class _MergeOpsMixin:
             return {"success": False, "error": f"工作空间不存在: {workspace}"}
         mode = ws_meta.get("mode", "")
         if mode == "plain":
-            logger.info("[WorkspaceLifecycle] plain 模式，跳过: %s", workspace)
+            logger.debug("[WorkspaceLifecycle] plain 模式，跳过: %s", workspace)
             return {"success": True, "action": "none"}
         if mode == "shared":
-            logger.info("[WorkspaceLifecycle] shared 模式，跳过: %s", workspace)
+            logger.debug("[WorkspaceLifecycle] shared 模式，跳过: %s", workspace)
             return {"success": True, "action": "none"}
         if mode == "worktree":
-            logger.info("[WorkspaceLifecycle] worktree 失败保留（不清理）: %s", workspace)
+            logger.debug("[WorkspaceLifecycle] worktree 失败保留（不清理）: %s", workspace)
             return {"success": True, "action": "none"}
         logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，跳过: %s", mode, workspace)
         return {"success": True, "action": "none"}
@@ -431,7 +431,7 @@ class _MergeOpsMixin:
         if not unstaged_lines:
             return
 
-        logger.info(
+        logger.debug(
             "[WorkspaceLifecycle] 清理 %d 个 unstaged 变更: project_root=%s",
             len(unstaged_lines), project_root,
         )

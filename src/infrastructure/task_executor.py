@@ -110,7 +110,7 @@ class TaskExecutorMixin:
 
         task_id = task_data.get("task_id", "unknown")
 
-        logger.info("TaskWorker: _execute_background_task 开始 | task=%s", task_id)
+        logger.debug("TaskWorker: _execute_background_task 开始 | task=%s", task_id)
 
 
 
@@ -164,7 +164,7 @@ class TaskExecutorMixin:
 
             if task is not None and task.metadata.get("task_scope") == "container":
 
-                logger.info("TaskWorker: 跳过容器任务 %s", task_id)
+                logger.debug("TaskWorker: 跳过容器任务 %s", task_id)
 
                 await self._handle_container_task(task_id, task, task_data, task_service)
 
@@ -192,13 +192,13 @@ class TaskExecutorMixin:
 
                 if current_task and current_task.status.value == "running":
 
-                    logger.info("TaskWorker: task %s already running, skip start", task_id)
+                    logger.debug("TaskWorker: task %s already running, skip start", task_id)
 
                 else:
 
                     await task_service.start_task(task_id)
 
-                    logger.info("TaskWorker: task %s started", task_id)
+                    logger.debug("TaskWorker: task %s started", task_id)
 
             except Exception as e:
 
@@ -222,7 +222,7 @@ class TaskExecutorMixin:
 
             full_input = ctx.full_input
 
-            logger.info(
+            logger.debug(
 
                 "TaskWorker: full_input 来自 _prepared_context | task=%s | input_len=%d",
 
@@ -236,7 +236,7 @@ class TaskExecutorMixin:
 
             description = task_data.get("description", "")
 
-            logger.info(
+            logger.debug(
 
                 "TaskWorker: 构建 full_input | task=%s | user_input_len=%d | desc_len=%d | has_desc=%s",
 
@@ -306,7 +306,7 @@ class TaskExecutorMixin:
 
                     workspace = ws_meta.get("path", workspace)
 
-                    logger.info(
+                    logger.debug(
 
                         "TaskWorker: 复用 task_submit 阶段初始化的工作空间: task_id=%s, mode=%s, path=%s",
 
@@ -609,7 +609,7 @@ class TaskExecutorMixin:
 
                         await asyncio.wait_for(_ctx.terminal_event.wait(), timeout=terminal_wait_timeout)
 
-                        logger.info("TaskWorker: task %s reached terminal state", _task_id)
+                        logger.debug("TaskWorker: task %s reached terminal state", _task_id)
 
                     except asyncio.TimeoutError:
 
@@ -643,7 +643,7 @@ class TaskExecutorMixin:
 
                     self._contexts.pop(_task_id, None)
 
-                    logger.info("TaskWorker: pipeline done | task=%s", _task_id)
+                    logger.debug("TaskWorker: pipeline done | task=%s", _task_id)
 
 
 
@@ -663,7 +663,7 @@ class TaskExecutorMixin:
 
                              f"history_len={len(conversation_history)}\n")
 
-                logger.info(
+                logger.debug(
 
                     "TaskWorker: 从历史恢复启动管道（主循环）| task=%s | history_len=%d | pipeline=%s",
 
@@ -807,7 +807,7 @@ class TaskExecutorMixin:
 
         except asyncio.CancelledError:
 
-            logger.info("TaskWorker: task %s cancelled", task_id)
+            logger.debug("TaskWorker: task %s cancelled", task_id)
 
             ctx.cleanup(timer_manager)
 
@@ -892,7 +892,7 @@ class TaskExecutorMixin:
 
         if isinstance(_existing_ws_meta, dict) and _existing_ws_meta.get("path"):
 
-            logger.info(
+            logger.debug(
 
                 "TaskWorker: 容器复用 task_submit 阶段初始化的工作空间: task_id=%s, path=%s",
 
@@ -1034,7 +1034,7 @@ class TaskExecutorMixin:
 
         agent_registry = self._services.get("agent_registry")
 
-        logger.info(
+        logger.debug(
 
             "TaskWorker: _load_agent_config | task=%s, target=%s, registry=%s, keys=%s",
 
@@ -1130,7 +1130,7 @@ class TaskExecutorMixin:
 
             if _parent_refreshed and _parent_refreshed.metadata.get("container_workspace"):
 
-                logger.info(
+                logger.debug(
 
                     "TaskWorker: 父容器工作空间已就绪: parent=%s, waited=%.1fs",
 
@@ -1192,7 +1192,7 @@ class TaskExecutorMixin:
 
             await task_service.bind_pipeline_run(task_id, pipeline_id)
 
-            logger.info(
+            logger.debug(
 
                 "TaskWorker: bound task %s to pipeline_run %s (early binding)",
 
@@ -1237,7 +1237,7 @@ class TaskExecutorMixin:
 
                         _api_store.set_session(thread_id, session)
 
-                        logger.info(
+                        logger.debug(
 
                             "TaskWorker: registered sub-pipeline %s to api_store session %s",
 
@@ -1317,7 +1317,7 @@ class TaskExecutorMixin:
 
             await self._arm_idle_timer(task_id, timer_manager)
 
-            logger.info(
+            logger.debug(
 
                 "TaskWorker: idle 计时器已注册: task_id=%s, timeout=%ds",
 
@@ -1449,7 +1449,7 @@ class TaskExecutorMixin:
 
 
 
-            logger.info(
+            logger.debug(
 
                 "TaskWorker: restored %d messages from pipeline records "
 
@@ -1629,7 +1629,7 @@ class TaskExecutorMixin:
 
 
 
-        logger.info(
+        logger.debug(
 
             "TaskWorker.cancel_pipeline: task=%s pipeline=%s cancelled=%s",
 
