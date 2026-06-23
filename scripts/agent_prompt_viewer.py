@@ -474,6 +474,22 @@ def _build_inject_map(system_message, yaml_data):
     return inject_map
 
 
+def _render_nav_items(cat_agents: list[dict]) -> str:
+    """渲染单一分类下的 nav-item 列表（避免 f-string 中含有反斜杠）。"""
+    sq = "'"
+    parts = []
+    for a in cat_agents:
+        cid = a["config_id"]
+        name = a["name"]
+        level = a["level"]
+        parts.append(
+            f'<div class="nav-item" data-agent="{cid}" '
+            f'onclick="showAgent({sq}{cid}{sq})">'
+            f'{name} <span class="level">{level}</span></div>'
+        )
+    return " ".join(parts)
+
+
 def generate_html(agents: list[dict], workspace_path: str) -> str:
     """生成 HTML 查看页面。
 
@@ -503,12 +519,7 @@ def generate_html(agents: list[dict], workspace_path: str) -> str:
                     <span class="count">{len(cat_agents)}</span>
                 </div>
                 <div class="nav-group-items" id="{cat_id}">
-                    {" ".join(
-                        f'<div class="nav-item" data-agent="{a["config_id"]}" '
-                        f'onclick="showAgent(\'{a["config_id"]}\')">'
-                        f'{a["name"]} <span class="level">{a["level"]}</span></div>'
-                        for a in cat_agents
-                    )}
+                    {_render_nav_items(cat_agents)}
                 </div>
             </div>
         """
