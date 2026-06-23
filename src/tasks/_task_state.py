@@ -264,12 +264,19 @@ class _TaskStateMixin:
 
         await self._emit_state_change(task_id, old_status, "evaluating")
 
-    async def fail_task(self, task_id: str, reason: str = "") -> None:
+    async def fail_task(
+        self,
+        task_id: str,
+        reason: str = "",
+        extra_meta: dict | None = None,
+    ) -> None:
         """将任务标记为失败。
 
         Args:
             task_id: 任务 ID
             reason: 失败原因
+            extra_meta: 额外的结构化元数据（如错误类型统计），合并进 task.metadata。
+                        供 watchdog/通知器/前端等任意消费方取用。
         """
         if self._storage is None:
             return
@@ -283,6 +290,8 @@ class _TaskStateMixin:
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.FAILED
         task.updated_at = datetime.now().isoformat()
+        if extra_meta:
+            task.metadata.update(extra_meta)
         if reason:
             task.metadata["fail_reason"] = reason
             # 追加而非覆盖，保留完整错误链

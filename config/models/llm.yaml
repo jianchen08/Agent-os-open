@@ -167,7 +167,7 @@ defaults:
   tiers:
     large: glm-5.2-yichengc
     medium: glm-5.2-yichengc
-    small: glm-5.2
+    small: glm-5.2-yichengc
     fallback_chain:
       chat:
       - deepseek-v4-pro

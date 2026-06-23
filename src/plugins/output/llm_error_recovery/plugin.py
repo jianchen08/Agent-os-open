@@ -94,11 +94,11 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
             # 清除错误信息，避免重复处理
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # infrastructure_error / unknown 类型不追加提示：
-        # 认证/权限/连接/key 耗尽/限流/配额等基础设施错误，LLM 无法通过调整操作修复。
-        # 追加面向 LLM 的提示无意义（浪费一轮调用并在 messages 中堆砌无效内容）。
-        # 直接清除错误信息，由 error_check 插件的路由决策接管。
-        if error_type in ("infrastructure_error", "unknown"):
+        # bad_request：LLM 有能力修复（如非法工具参数），构建恢复提示。
+        # 其余（rate_limit/quota_exhausted/auth_failed/service_down/network/
+        # server_error/unknown）属于基础设施错误，LLM 无法通过调整操作修复，
+        # 追加面向 LLM 的提示无意义。直接清除，由 error_check 路由决策接管。
+        if error_type != "bad_request":
             logger.warning(
                 "LLM error recovery: %s detected, "
                 "skipping hint (LLM cannot fix this) | error=%s",
@@ -106,7 +106,7 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
             )
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # llm_fixable：LLM 有能力修复（如非法工具参数），构建恢复提示
+        # bad_request：LLM 有能力修复（如非法工具参数），构建恢复提示
         hint = self._build_llm_error_hint(error_msg)
         messages = list(ctx.state.get("messages", []))
 

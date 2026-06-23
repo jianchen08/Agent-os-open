@@ -130,7 +130,7 @@ def load_tasks(tasks_dir: Path) -> list[Task]:
 
 
 def load_project_docs(project_dir: Path) -> list[dict[str, str]]:
-    """加载项目文档（仅取标题和前几行摘要）。"""
+    """加载项目文档（读全文，供点击后渲染）。"""
     docs: list[dict[str, str]] = []
     if not project_dir.exists():
         return docs
@@ -144,6 +144,7 @@ def load_project_docs(project_dir: Path) -> list[dict[str, str]]:
         docs.append({
             "name": title_m.group(1).strip() if title_m else f.stem,
             "path": str(f),
+            "body": text,
             "preview": text[:200].replace("\n", " ").strip(),
         })
     return docs
@@ -191,6 +192,92 @@ _STATUS_STYLE = {
 
 def _esc(s: str) -> str:
     return html.escape(str(s))
+
+
+def markdown_to_html(md: str) -> str:
+    """极简 Markdown → HTML 渲染（无外部依赖）。
+
+    支持：标题(#/##/###)、无序列表(-/*)、有序列表(1.)、代码块(```)、
+    行内代码(`code`)、加粗(**x**)、段落。够展示项目文档，复杂语法降级为纯文本。
+    """
+    # 先按代码块切分，代码块内不转义内部 markdown
+    parts = re.split(r"```(\w*)\n(.*?)```", md, flags=re.DOTALL)
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        chunk = parts[i]
+        if i + 1 < len(parts) and i % 3 == 0:
+            # chunk 是普通文本段
+            out.append(_render_md_block(chunk))
+            # parts[i+1] = 语言, parts[i+2] = 代码内容
+            if i + 2 < len(parts):
+                code = _esc(parts[i + 2])
+                out.append(f'<pre><code>{code}</code></pre>')
+            i += 3
+        else:
+            out.append(_render_md_block(chunk))
+            i += 1
+    return "\n".join(out)
+
+
+def _render_md_block(text: str) -> str:
+    """渲染非代码块的 markdown 文本（标题/列表/段落/行内）。"""
+    lines = text.split("\n")
+    out: list[str] = []
+    in_ul = False
+    in_ol = False
+
+    def close_lists() -> None:
+        nonlocal in_ul, in_ol
+        if in_ul:
+            out.append("</ul>")
+            in_ul = False
+        if in_ol:
+            out.append("</ol>")
+            in_ol = False
+
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            close_lists()
+            continue
+        # 标题
+        m = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if m:
+            close_lists()
+            level = len(m.group(1))
+            out.append(f"<h{level}>{_inline(stripped[m.end(1)+1:])}</h{level}>")
+            continue
+        # 无序列表
+        if re.match(r"^[-*+]\s+", stripped):
+            if not in_ul:
+                close_lists()
+                out.append("<ul>")
+                in_ul = True
+            out.append(f"<li>{_inline(stripped[2:].strip())}</li>")
+            continue
+        # 有序列表
+        if re.match(r"^\d+\.\s+", stripped):
+            if not in_ol:
+                close_lists()
+                out.append("<ol>")
+                in_ol = True
+            out.append(f"<li>{_inline(re.sub(r'^\d+\.\s+', '', stripped))}</li>")
+            continue
+        # 普通段落
+        close_lists()
+        out.append(f"<p>{_inline(stripped)}</p>")
+    close_lists()
+    return "\n".join(out)
+
+
+def _inline(text: str) -> str:
+    """行内渲染：行内代码、加粗。"""
+    t = _esc(text)
+    t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
+    t = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
+    return t
 
 
 def render_svg_graph(tasks: list[Task], layers: dict[str, int]) -> str:
@@ -304,6 +391,20 @@ def render_html(
         ensure_ascii=False,
     )
 
+    # 项目文档数据（正文已在加载时读全，渲染交给 JS 侧的 markdownToHtml）
+    docs_json = json.dumps(
+        [
+            {
+                "name": d["name"],
+                "path": d["path"],
+                "body": d["body"],
+                "html": markdown_to_html(d["body"]),
+            }
+            for d in project_docs
+        ],
+        ensure_ascii=False,
+    )
+
     rows = []
     for t in tasks:
         icon, color, bg = _STATUS_STYLE.get(t.status, _STATUS_STYLE["pending"])
@@ -321,10 +422,12 @@ def render_html(
         )
 
     doc_items = "\n".join(
-        f'<div class="doc-card"><div class="doc-name">{_esc(d["name"])}</div>'
+        f'<div class="doc-card" onclick="showDoc({i})">'
+        f'<div class="doc-name">{_esc(d["name"])}</div>'
         f'<div class="doc-path"><code>{_esc(d["path"])}</code></div>'
-        f'<div class="doc-preview">{_esc(d["preview"])}…</div></div>'
-        for d in project_docs
+        f'<div class="doc-preview">{_esc(d["preview"])}…</div>'
+        f'<div class="doc-click-hint">点击查看全文 →</div></div>'
+        for i, d in enumerate(project_docs)
     ) or '<p class="empty">无项目文档</p>'
 
     graph_svg = render_svg_graph(tasks, layers)
@@ -370,21 +473,37 @@ def render_html(
   .node-id {{ font-size: 12px; font-weight: 600; fill: var(--text); }}
   .dep-edge {{ stroke: #94a3b8; stroke-width: 1.5; fill: none; }}
   .doc-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }}
-  .doc-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }}
+  .doc-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+              cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }}
+  .doc-card:hover {{ border-color: var(--accent); box-shadow: 0 2px 8px rgba(37,99,235,0.12); }}
   .doc-name {{ font-weight: 600; margin-bottom: 4px; }}
   .doc-path {{ font-size: 11px; color: var(--muted); margin-bottom: 6px; }}
   .doc-preview {{ font-size: 12px; color: var(--muted); }}
+  .doc-click-hint {{ font-size: 11px; color: var(--accent); margin-top: 8px; font-weight: 600; }}
   .empty {{ color: var(--muted); font-style: italic; padding: 12px; }}
-  /* 详情抽屉 */
+  /* 详情抽屉：固定头部 + 独立可滚动内容区，保证长内容能滚 */
   #drawer {{ position: fixed; top: 0; right: -520px; width: 500px; height: 100vh; background: var(--card);
-             box-shadow: -4px 0 16px rgba(0,0,0,0.1); transition: right 0.25s; padding: 24px;
-             overflow-y: auto; z-index: 100; border-left: 1px solid var(--border); }}
+             box-shadow: -4px 0 16px rgba(0,0,0,0.1); transition: right 0.25s;
+             display: flex; flex-direction: column; z-index: 100; border-left: 1px solid var(--border); }}
   #drawer.open {{ right: 0; }}
   #overlay {{ position: fixed; inset: 0; background: rgba(0,0,0,0.3); opacity: 0; pointer-events: none;
               transition: opacity 0.25s; z-index: 99; }}
   #overlay.open {{ opacity: 1; pointer-events: auto; }}
-  .drawer-close {{ position: absolute; top: 16px; right: 16px; cursor: pointer; font-size: 20px; color: var(--muted); }}
+  /* 头部：固定不滚，含关闭按钮 */
+  .drawer-header {{ position: relative; flex: 0 0 auto; padding: 20px 24px 12px; border-bottom: 1px solid var(--border); }}
+  .drawer-close {{ position: absolute; top: 16px; right: 16px; cursor: pointer; font-size: 22px; color: var(--muted); line-height: 1; }}
+  .drawer-close:hover {{ color: var(--text); }}
+  /* 内容区：独立滚动，padding 在此 */
+  #drawer-content {{ flex: 1 1 auto; overflow-y: auto; padding: 20px 24px; min-height: 0; }}
   .drawer-body {{ white-space: pre-wrap; font-size: 13px; }}
+  .drawer-body h1,.drawer-body h2,.drawer-body h3 {{ margin: 16px 0 8px; white-space: normal; }}
+  .drawer-body h1 {{ font-size: 18px; }} .drawer-body h2 {{ font-size: 16px; }} .drawer-body h3 {{ font-size: 14px; }}
+  .drawer-body ul,.drawer-body ol {{ margin: 6px 0; padding-left: 22px; white-space: normal; }}
+  .drawer-body li {{ margin: 3px 0; }}
+  .drawer-body pre {{ background: #f1f5f9; padding: 10px; border-radius: 6px; overflow-x: auto; white-space: pre; font-size: 12px; }}
+  .drawer-body code {{ background: #f1f5f9; padding: 1px 5px; border-radius: 3px; font-size: 12px; }}
+  .drawer-body pre code {{ background: none; padding: 0; }}
+  .drawer-body p {{ margin: 6px 0; white-space: normal; }}
   .drawer-meta {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }}
   .meta-chip {{ background: #f1f5f9; padding: 2px 8px; border-radius: 12px; font-size: 12px; }}
 </style>
@@ -419,17 +538,26 @@ def render_html(
 
   <div id="overlay" onclick="closeDrawer()"></div>
   <div id="drawer">
-    <span class="drawer-close" onclick="closeDrawer()">✕</span>
+    <div class="drawer-header">
+      <span class="drawer-title" style="font-size:13px;color:var(--muted);font-weight:600;">详情</span>
+      <span class="drawer-close" onclick="closeDrawer()">✕</span>
+    </div>
     <div id="drawer-content"></div>
   </div>
 
 <script>
 const TASKS = {tasks_json};
+const DOCS = {docs_json};
+function openDrawer(html) {{
+  document.getElementById('drawer-content').innerHTML = html;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('overlay').classList.add('open');
+}}
 function showTask(id) {{
   const t = TASKS.find(x => x.id === id);
   if (!t) return;
   const deps = t.depends_on.length ? t.depends_on.join(', ') : '无';
-  document.getElementById('drawer-content').innerHTML = `
+  openDrawer(`
     <h2 style="margin-top:0">${{t.name || t.id}}</h2>
     <div class="drawer-meta">
       <span class="meta-chip"><code>${{t.id}}</code></span>
@@ -438,9 +566,18 @@ function showTask(id) {{
       <span class="meta-chip">依赖: ${{deps}}</span>
     </div>
     <div class="drawer-body">${{t.body || '（无正文）'}}</div>
-  `;
-  document.getElementById('drawer').classList.add('open');
-  document.getElementById('overlay').classList.add('open');
+  `);
+}}
+function showDoc(index) {{
+  const d = DOCS[index];
+  if (!d) return;
+  openDrawer(`
+    <h2 style="margin-top:0">${{d.name}}</h2>
+    <div class="drawer-meta">
+      <span class="meta-chip"><code>${{d.path}}</code></span>
+    </div>
+    <div class="drawer-body">${{d.html || d.body}}</div>
+  `);
 }}
 function closeDrawer() {{
   document.getElementById('drawer').classList.remove('open');

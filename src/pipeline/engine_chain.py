@@ -149,25 +149,14 @@ def _handle_core_error(
     error_msg_lower = str(exc).lower()
 
     # 判断是否为可恢复错误（不计入连续错误）
-    _transient_keywords = (
-        "overloaded", "529", "rate_limit",
-        "rate limit", "timeout", "timed out",
-        "503", "502", "connection",
-    )
-    is_transient = any(kw in error_msg_lower for kw in _transient_keywords)
-
-    _fixable_keywords = (
-        "context window exceeds",
-        "context_length_exceeded",
-        "context length",
-        "invalid function arguments",
-        "invalid params",
-    )
-    is_fixable = (
-        any(kw in error_msg_lower for kw in _fixable_keywords)
-        or ("max_tokens" in error_msg_lower and "exceed" in error_msg_lower)
-        or ("token" in error_msg_lower and "limit" in error_msg_lower)
-    )
+    # 基于 error_classifier 的 ErrorKind 派生，替代旧的字符串嗅探：
+    # transient = 临时性错误（限流/服务不可用/网络），不应计入连续错误强制结束
+    # fixable = LLM 可自行修复的错误（参数错误），也不计入
+    from llm.error_classifier import classify_error  # noqa: PLC0415
+    _info = classify_error(exc)
+    _transient_kinds = ("rate_limit", "service_down", "network", "server_error")
+    is_transient = _info.kind.value in _transient_kinds
+    is_fixable = _info.kind.value == "bad_request"
 
     should_count = core_type == "llm_call" and not is_transient and not is_fixable
 
@@ -187,42 +176,29 @@ def _handle_core_error(
 
     # 构建 llm_error_info（仅 llm_call 类型）
     if core_type == "llm_call":
-        _build_llm_error_info(state, str(exc), core_type)
+        _build_llm_error_info(state, exc, core_type)
 
 
 def _build_llm_error_info(
-    state: dict[str, Any], error_msg: str, core_type: str,
+    state: dict[str, Any], exc: Exception, core_type: str,
 ) -> None:
-    """构建 llm_error_info 字典并存入 state，由 llm_error_recovery 插件处理。
+    """构建 llm_error_info 字典并存入 state，并追加到错误历史。
 
-    错误分类优先级：infrastructure > context_overflow > llm_fixable > unknown。
-    infrastructure_error 类（认证/权限/连接/key 耗尽）LLM 无法通过调整操作修复，
-    不应追加面向 LLM 的恢复提示。
+    用统一的 error_classifier.classify_error 做分类（替代旧的字符串嗅探），
+    ErrorKind 决定 transient/fixable 语义，供 engine_chain 计数和
+    llm_error_recovery 插件按类型分支处理。
+
+    同时把每轮错误追加到 state[LLM_ERROR_HISTORY]，作为单一数据源，
+    task_post_pipeline / track / watchdog 等任意消费方都从这里取统计。
     """
+    from llm.error_classifier import classify_error  # noqa: PLC0415
+
+    info = classify_error(exc)
+    error_msg = str(exc)
     error_lower = error_msg.lower()
 
-    is_infrastructure = (
-        "authentication" in error_lower
-        or "autherror" in error_lower
-        or "permission" in error_lower
-        or "api_key" in error_lower
-        or "api key" in error_lower
-        or "connection refused" in error_lower
-        or "connection reset" in error_lower
-        or "connection error" in error_lower
-        or "refused" in error_lower
-        or "key 均失败" in error_msg
-        or "key不可用" in error_msg
-        or "rate limit" in error_lower
-        or "ratelimiterror" in error_lower
-        or "budgetexceeded" in error_lower
-        or "budget exceeded" in error_lower
-        or "insufficient" in error_lower
-        or "上限" in error_msg
-        or "额度" in error_msg
-        or "用完" in error_msg
-    )
-
+    # context_overflow 是业务约束（上下文超长），不在 ErrorKind 里，
+    # 就地判定后覆盖 error_type（优先级高于 ErrorKind）。
     is_context_overflow = (
         "context window exceeds" in error_lower
         or "context_length_exceeded" in error_lower
@@ -231,25 +207,26 @@ def _build_llm_error_info(
         or ("token" in error_lower and "limit" in error_lower)
     )
 
-    is_llm_fixable = (
-        "invalid function arguments" in error_lower
-        or "invalid params" in error_lower
-    )
-
-    if is_infrastructure:
-        error_type = "infrastructure_error"
-    elif is_context_overflow:
+    if is_context_overflow:
         error_type = "context_overflow"
-    elif is_llm_fixable:
-        error_type = "llm_fixable"
     else:
-        error_type = "unknown"
+        error_type = info.kind.value
 
     state["llm_error_info"] = {
         "error_msg": error_msg,
         "error_type": error_type,
         "core_type": core_type,
     }
+
+    # 追加到错误历史（单一数据源，任意消费方可读）
+    from datetime import datetime  # noqa: PLC0415
+    history = state.setdefault(StateKeys.LLM_ERROR_HISTORY, [])
+    history.append({
+        "iteration": state.get(StateKeys.ITERATION, 0),
+        "kind": error_type,
+        "msg": error_msg[:200],
+        "ts": datetime.now().isoformat(),
+    })
 
 
 async def execute_output_chain(

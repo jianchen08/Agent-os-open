@@ -175,6 +175,14 @@ class TaskPostPipelineMixin:
             stop_reason or "(none)",
         )
 
+        # 统计 LLM 错误类型分布（从 pipeline state 的单一数据源取）
+        # 供 task metadata、watchdog、通知器等任意消费方使用
+        from collections import Counter  # noqa: PLC0415
+        error_history = pipeline_state.get("llm_error_history", []) if pipeline_state else []
+        error_kinds: dict[str, int] = {}
+        if error_history:
+            error_kinds = dict(Counter(h["kind"] for h in error_history))
+
         # 根据实际原因构建精确的错误信息
         parts: list[str] = []
         hit_max_iter = (
@@ -219,6 +227,9 @@ class TaskPostPipelineMixin:
 
         if error_analysis:
             parts.append(f"错误分析: {error_analysis}")
+        if error_kinds:
+            summary = "、".join(f"{k}:{v}次" for k, v in sorted(error_kinds.items(), key=lambda x: -x[1]))
+            parts.append(f"错误统计: {summary}")
         if task_complete is False:
             parts.append("Agent 标记任务未完成")
 
@@ -243,6 +254,7 @@ class TaskPostPipelineMixin:
         if task_service:
             await task_service.fail_task(
                 task_id, error_msg,
+                extra_meta={"error_kinds": error_kinds} if error_kinds else None,
             )
             logger.info(
                 "TaskWorker: task %s marked failed after pipeline exit: %s",

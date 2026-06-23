@@ -37,6 +37,7 @@ class StateKeys:
     TOOL_RESULTS = "tool_results"
     EXECUTION_STATUS = "execution_status"
     ERROR_ANALYSIS = "error_analysis"
+    LLM_ERROR_HISTORY = "llm_error_history"
     TASK_COMPLETE = "task_complete"
     SHOULD_STOP = "should_stop"
     APPROVAL_REQUIRED = "approval_required"
@@ -102,6 +103,7 @@ def create_initial_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.TOOL_RESULTS: [],
         StateKeys.EXECUTION_STATUS: "pending",
         StateKeys.ERROR_ANALYSIS: None,
+        StateKeys.LLM_ERROR_HISTORY: [],
         StateKeys.TASK_COMPLETE: False,
         StateKeys.SHOULD_STOP: False,
         StateKeys.APPROVAL_REQUIRED: False,
