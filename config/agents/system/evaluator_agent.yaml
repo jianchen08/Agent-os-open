@@ -11,7 +11,7 @@ description: '通用评估专家，负责对任务产出物进行语义级别的
 agent_type: system
 category: system
 level: L3
-model_name: minimax-m3
+model_name: minimax-m3-guangfang
 tags:
 - evaluation
 - evaluator

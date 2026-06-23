@@ -167,7 +167,7 @@ defaults:
   tiers:
     large: glm-5.2-yichengc
     medium: glm-5.2-yichengc
-    small: minimax-m3-guangfang
+    small: glm-5.2-yichengc
     fallback_chain:
       chat:
       - deepseek-v4-pro
@@ -231,8 +231,8 @@ providers:
     keys:
     - id: yichengc_main
       api_key: ${YICHENGC_API_KEY}
-      max_concurrent: 5
-      rpm: 60
+      max_concurrent: 2
+      rpm: 5
       token_quota: 0
 embeddings: {}
 concurrency:
