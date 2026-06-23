@@ -11,7 +11,7 @@ description: '复盘分析专家，负责对管道执行记录进行深度复盘
 agent_type: system
 category: system
 level: L3
-model_tier: large
+model_tier: small
 tags:
 - review
 - maintenance
