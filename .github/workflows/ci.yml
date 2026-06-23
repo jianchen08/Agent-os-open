@@ -61,6 +61,30 @@ jobs:
           echo "━━━ Ruff Format Check ━━━"
           ruff format --check src/ --config pyproject.toml
 
+      - name: YAML Config Syntax Check
+        run: |
+          echo "━━━ YAML Config Syntax (config/) ━━━"
+          # agent 高频产出 config/**/*.yaml，但此前 CI 从不校验它们，
+          # 坏 yaml 能直接混入仓库。这里对所有 config 下的 yaml 做语法校验。
+          pip install pyyaml
+          python - <<'PY'
+          import sys, glob, yaml
+          failures = []
+          files = glob.glob("config/**/*.yaml", recursive=True) + glob.glob("config/**/*.yml", recursive=True)
+          for f in files:
+              try:
+                  list(yaml.safe_load_all(open(f, encoding="utf-8")))
+              except Exception as e:
+                  failures.append(f"{f}: {e}")
+          print(f"校验 {len(files)} 个 YAML 文件")
+          if failures:
+              print("❌ YAML 语法错误：")
+              for x in failures:
+                  print("  -", x)
+              sys.exit(1)
+          print("✅ 全部 YAML 语法正确")
+          PY
+
       - name: Upload Lint Results
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,21 +145,24 @@ jobs:
           LOG_OUTPUT: console
         run: |
           echo "━━━ Running Tests ━━━"
-          python -m pytest tests/ \
+          # 显式指定纯单元测试目录跑（翻转旧逻辑：原来是 ignore 一大片，
+          # 导致 channels/tools/unit/test_utils 等核心单测全被排除，门禁形同虚设）。
+          # e2e/integration/suites/manual/electron/monitoring 需要真实环境/长耗时，
+          # 不进本 job，应由单独的集成测试 job 覆盖。
+          python -m pytest \
+            tests/unit \
+            tests/test_utils \
+            tests/core \
+            tests/tools \
+            tests/triggers \
+            tests/pipeline \
+            tests/multimodal \
             --tb=long \
             --no-header \
             -q \
-            --ignore=tests/suites \
-            --ignore=tests/integration \
-            --ignore=tests/e2e \
-            --ignore=tests/manual \
-            --ignore=tests/electron \
-            --ignore=tests/monitoring \
-            --ignore=tests/tools \
-            --ignore=tests/unit \
-            --ignore=tests/channels \
-            --ignore=tests/connectors \
-            --ignore=tests/test_utils \
+            --ignore=tests/unit/test_routes_config_hot_reload.py \
+            --ignore=tests/unit/test_routes_config_regression.py \
+            --ignore=tests/tools/builtin/bash/test_encoding.py \
             2>&1
 
       - name: Generate Test Report

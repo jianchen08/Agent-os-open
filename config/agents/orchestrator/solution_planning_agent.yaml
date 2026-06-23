@@ -113,14 +113,19 @@ system_prompt: |
   executor: {执行者 agent_id}
   depends_on: [{依赖的 task_id 列表}]
   status: pending
+  # 任务级验收标准（机读，唯一真相源，执行阶段不可改，改须回 L1 修订方案）
+  acceptance_criteria:
+    - id: AC-{序号}
+      statement: {可二值判定的验收条件}
+      must: true
+      traces_to: AC-{方案级AC编号}   # 追溯到方案文档 §四 的方案级 AC
   ---
 
   ## 目标
   {描述预期成果和目标状态，不规定实现方法}
 
   ## 验收标准
-  - AC-1: {验收条件}
-  - AC-2: {验收条件}
+  - AC-{序号}（traces_to: AC-{方案级编号}）: {验收条件}
 
   ## 方案上下文
   {该任务需要的上下文信息、关键决策摘要、技术要点、相关文档路径}

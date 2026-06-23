@@ -149,7 +149,11 @@ function renderFragment(
     }
 
     case 'tool_call':
-      return renderToolCall ? renderToolCall(fragment) : DefaultToolCallRenderer(fragment)
+      return (
+        <div key={fragment.key}>
+          {renderToolCall ? renderToolCall(fragment) : DefaultToolCallRenderer(fragment)}
+        </div>
+      )
 
     case 'system': {
       const styles = SYSTEM_LEVEL_STYLES[fragment.level]
@@ -202,7 +206,7 @@ function MessageContentRendererBase({
   }
 
   return (
-    <div className={cn('message-content-renderer', className)}>
+    <div className={cn('message-content-renderer space-y-3', className)}>
       {fragments.map((fragment) =>
         renderFragment(fragment, isStreaming, renderText, renderToolCall, searchQuery),
       )}

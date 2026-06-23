@@ -33,7 +33,9 @@ document = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["src/tests"]
+# 指向实际存在的测试根目录（原值 "src/tests" 不存在，导致 pytest 默认配置落空）。
+# CI 显式列出子目录跑纯单测；本地全量跑可用 `pytest tests/`。
+testpaths = ["tests"]
 markers = [
     "integration: LLM integration tests (require --run-integration)",
 ]
