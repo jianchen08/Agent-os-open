@@ -1822,7 +1822,7 @@ class PipelineEngine:
 
                         break
 
-                    logger.info(
+                    logger.debug(
 
                         "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
 
