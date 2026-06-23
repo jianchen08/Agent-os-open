@@ -1,0 +1,25 @@
+# 语音识别（ASR）Provider 配置
+# YAML 驱动切换，修改 default_provider 即可切换服务商，不改代码
+#
+# 说明：
+# - api_key 支持 ${ENV_VAR} 占位符，运行时从环境变量读取
+# - 采用 OpenAI 兼容契约 POST /audio/transcriptions，切换服务商成本最低
+# - 未配置 api_key（环境变量未设置）时，enabled 自动降为 False，
+#   前端语音输入会收到友好提示而非崩溃
+
+asr:
+  enabled: true
+  default_provider: glm
+  providers:
+    # 智谱 GLM-ASR（默认，复用已有 ZHIPU_API_KEY）
+    glm:
+      api_base: "https://open.bigmodel.cn/api/paas/v4"
+      api_key: "${ZHIPU_API_KEY}"
+      model: "glm-asr-v1"
+      language: "zh-CN"
+    # 示例：将来切换到讯飞，取消注释并改 default_provider 为 xfyun
+    # xfyun:
+    #   api_base: "https://raasr.xfyun.cn/v2/api"
+    #   api_key: "${XFYUN_API_KEY}"
+    #   model: ""
+    #   language: "zh-CN"

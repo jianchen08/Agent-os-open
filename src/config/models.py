@@ -325,8 +325,13 @@ class ModelConfigLoader:
         # call_timeout: 优先模型配置，回退到 defaults 节
         defaults = self._load_llm_data().get("defaults", {})
         call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
+        # 首 token 超时：流式首 chunk 不来时强制超时的秒数（优先模型配置，回退 defaults）
+        first_token_timeout = model_conf.get(
+            "first_token_timeout", defaults.get("first_token_timeout", 60)
+        )
 
         return {
+            "model_id": model_id,
             "provider": provider_name,
             "model_name": model_conf.get("model_name", model_id),
             "api_base": api_base,
@@ -334,6 +339,7 @@ class ModelConfigLoader:
             "context_window": model_conf.get("context_window"),
             "default_params": default_params,
             "call_timeout": call_timeout,
+            "first_token_timeout": first_token_timeout,
         }
 
     def resolve_env_or_model(self, value: str, provider_name: str = "") -> str:

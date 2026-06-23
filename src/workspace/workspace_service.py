@@ -261,7 +261,15 @@ class WorkspaceService:
             return []
 
         for entry in entries:
-            if entry.startswith(".") or entry == "__pycache__":
+            # BUG-FIX-fix_20260623_hidden_files:
+            # 问题根因: 此前 entry.startswith(".") 把所有隐藏文件/目录
+            #           （.git、.env、.gitignore、.vscode 等）全部过滤掉，
+            #           导致前端文件树永远看不到这些文件。
+            # 修复方案: 不再按前缀过滤隐藏文件，始终返回给前端展示。
+            #          仅保留对文件浏览无用/有害的条目：
+            #          - __pycache__：Python 字节码缓存，无浏览价值
+            #          - Windows 保留设备名 / UNC 设备路径：避免误访问
+            if entry == "__pycache__":
                 continue
 
             stem = entry.split(".")[0].upper()

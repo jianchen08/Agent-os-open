@@ -56,6 +56,7 @@ from .adapter import (
     MultimodalAdapter,
     OpenAIVisionAdapter,
 )
+from .asr import ASRConfig, ASRService, get_asr_service, reset_asr_service
 
 # 能力注册表
 from .capabilities import ModelCapabilityRegistry
@@ -87,6 +88,11 @@ __all__ = [
     "DefaultAdapter",
     # 注册表
     "ModelCapabilityRegistry",
+    # ASR 语音识别
+    "ASRConfig",
+    "ASRService",
+    "get_asr_service",
+    "reset_asr_service",
     # 存储
     "IFileStorage",
     "DiskFileStorage",

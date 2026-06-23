@@ -18,6 +18,16 @@ import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorR
 /** Markdown 扩展名集合 */
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
 
+/**
+ * SyntaxHighlighter 行级样式
+ *
+ * 修复 react-syntax-highlighter@16 在同时开启 showLineNumbers + wrapLongLines 时的
+ * 缩进/空白塌陷问题：每行容器会被加上 `display: flex`，导致行内前导空格（缩进）
+ * 被当成普通空白折叠，yaml 等缩进敏感语言就会"挤成一块一块的"。
+ * 这里通过 lineProps 给每个行 span 强制 pre-wrap，保留缩进与换行。
+ */
+const HIGHLIGHTER_LINE_PROPS = { style: { whiteSpace: 'pre-wrap' } } as const
+
 /** 大文件阈值（1MB） */
 const LARGE_FILE_THRESHOLD = 1_000_000
 
@@ -411,6 +421,7 @@ export function CodeEditor({
             style={oneDark}
             showLineNumbers={true}
             wrapLongLines={true}
+            lineProps={HIGHLIGHTER_LINE_PROPS}
             customStyle={{
               margin: 0,
               borderRadius: 0,
@@ -535,6 +546,7 @@ export function CodeEditor({
               style={oneDark}
               showLineNumbers={true}
               wrapLongLines={true}
+              lineProps={HIGHLIGHTER_LINE_PROPS}
               customStyle={{
                 margin: 0,
                 borderRadius: 0,

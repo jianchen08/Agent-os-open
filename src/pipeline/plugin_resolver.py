@@ -210,6 +210,9 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
     except Exception:
         pass
 
+    # 清除 tier 缓存，确保配置变更实时生效
+    _tier_cache.clear()
+
     model_id = None
     if hasattr(agent_config, "model_tier") and agent_config.model_tier:
         model_id = resolve_tier(agent_config.model_tier, services)
@@ -225,7 +228,8 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
         return
 
     if getattr(llm_call, "_use_router", False):
-        llm_call._model = model_id
+        # Router 模式：model_id 做路由标识，model_name 做上游真实模型名
+        llm_call._model_id = model_id
         _resolved_loader = services.get("model_loader") if services else None
         if _resolved_loader is None:
             try:
@@ -237,6 +241,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
             llm_conf = _resolved_loader.get_llm_core_config(model_id)
             if llm_conf:
                 llm_call._provider = llm_conf.get("provider", llm_call._provider)
+                llm_call._model = llm_conf.get("model_name", llm_call._model)
                 llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
                 llm_call._context_window = llm_conf.get("context_window")
         logger.info(
@@ -275,6 +280,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
     # 直接更新属性，无需重建插件实例
     if hasattr(llm_call, "_config") and isinstance(llm_call._config, dict):
         llm_call._config.update(llm_conf)
+    llm_call._model_id = model_id
     llm_call._model = llm_conf.get("model_name", model_id)
     llm_call._provider = llm_conf.get("provider", llm_call._provider)
     llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base

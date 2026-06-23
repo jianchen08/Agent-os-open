@@ -37,8 +37,6 @@ export function WorkspacePanel({
   onFullscreen,
   isFullscreen,
 }: WorkspacePanelProps) {
-  const activeTab = tabs.find((t) => t.isActive)
-
   const handleTabWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     const el = e.currentTarget
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -103,13 +101,30 @@ export function WorkspacePanel({
       </div>
 
       {/* Tab 内容 */}
-      <div className="flex-1 overflow-auto">
-        {activeTab ? (
-          renderTabContent(activeTab)
-        ) : (
+      {/* BUG-FIX-fix_20260623_tab_reload:
+          问题根因: 此前只渲染 activeTab 的内容，切换标签时旧标签被卸载、
+                    新标签重新挂载，导致文件树每次切换都重新请求 API、
+                    丢失已加载的数据和展开状态。
+          修复方案: 渲染所有标签内容，非激活标签用 hidden（display:none）隐藏，
+                    保持各标签组件实例挂载不变，切换时只切换可见性，
+                    从而保留每个标签的内部状态（文件树数据、展开节点、滚动位置等）。
+                  注意: renderTabContent 以 tab.id 为 key，保证每个标签对应
+                    稳定的 React 节点，避免因列表重排导致意外重挂载。 */}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {tabs.length === 0 ? (
           <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
             选择一个标签页
           </div>
+        ) : (
+          tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={tab.isActive ? 'h-full' : 'hidden'}
+              aria-hidden={!tab.isActive}
+            >
+              {renderTabContent(tab)}
+            </div>
+          ))
         )}
       </div>
     </div>

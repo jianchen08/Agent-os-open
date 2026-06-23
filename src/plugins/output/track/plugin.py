@@ -159,6 +159,38 @@ class TrackPlugin(IOutputPlugin):
         self._local_sequences[pipeline_run_id] = current
         return current
 
+    def _resolve_ai_record_id(
+        self, pipeline_run_id: str, preset_record_id: str,
+    ) -> str:
+        """解析 AI 记录的 record_id，保证与前端 stream_start 下发的 message_id 一致。
+
+        BUG-FIX-fix_20260623_ai_record_id_broken:
+        问题根因: 此前 `_has_prev_ai` 分支在多轮 iteration / resume 场景下把
+          preset_record_id 置空，让 storage 自动生成新 id。但 resume 时 bridge
+          已发新的 stream_start（携带新 message_id），前端据此创建占位符，
+          落库 id 与占位符 id 不一致 → 切 Tab/补漏拉回 API 消息后两者共存，
+          表现为"流式气泡下多出一个固定气泡"（同一逻辑消息渲染两遍）。
+        修复方案: 始终从 bridge 取当前 turn 的权威 message_id 作为 record_id
+          （bridge 是单一权威源，每轮 emit_start 都刷新 message_id）。
+          bridge 不可用时回退到 state.preset_ai_record_id，再回退到 preset_record_id。
+          不再用 `_has_prev_ai` 让 id 失效——id 契约是硬约束，不分轮次。
+        影响范围: 多轮 iteration / resume 场景下消息 id 一致性（消除前端重复渲染）
+        """
+        try:
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            entry = get_engine_registry().get(pipeline_run_id)
+            if entry is not None and entry.bridge is not None:
+                bridge_id = getattr(entry.bridge, "message_id", "") or ""
+                if bridge_id:
+                    return bridge_id
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "TrackPlugin._resolve_ai_record_id: bridge 不可用 pipeline=%s err=%s — 使用 preset fallback",
+                pipeline_run_id[:12], exc,
+            )
+        # bridge 不可用 → 用调用方传入的 preset（state.preset_ai_record_id）兜底
+        return preset_record_id
+
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """收集追踪统计信息。
 
@@ -429,17 +461,13 @@ class TrackPlugin(IOutputPlugin):
             if raw_tool_calls:
                 with contextlib.suppress(TypeError, ValueError):
                     _tool_calls_json = json.dumps(raw_tool_calls, ensure_ascii=False, default=str)
-            # 优先使用 bridge.emit_start 预设的 record_id（写入 state.preset_ai_record_id），
-            # 保证前端 stream_start 下发的 message_id === 持久化的 record_id（硬约束）。
-            # 只有第一轮 iteration 使用 preset_ai_record_id，后续由自动生成新 ID
-            _has_prev_ai = ctx.state.get("track.last_ai_sequence") is not None
-            if _has_prev_ai:  # noqa: SIM108
-                # 后续 iteration：不复用 preset_ai_record_id，让 storage 自动生成新 ID
-                preset_record_id = ""
-            else:
-                preset_record_id = ctx.state.get("preset_ai_record_id") or ""
+            # 解析 AI 记录 record_id：始终与前端 stream_start 的 message_id 对齐（id 契约硬约束）。
+            # state.preset_ai_record_id 由 bridge.emit_start 写入，作为 bridge 不可用时的 fallback。
+            # 见 _resolve_ai_record_id 的 BUG-FIX 说明（修复多轮/resume 场景 id 断裂导致的重复渲染）。
+            preset_record_id = ctx.state.get("preset_ai_record_id") or ""
+            ai_record_id = self._resolve_ai_record_id(pipeline_run_id, preset_record_id)
             ai_record = ExecutionRecordData(
-                record_id=preset_record_id,
+                record_id=ai_record_id,
                 pipeline_run_id=pipeline_run_id,
                 type="ai",
                 sequence=self._next_sequence(pipeline_run_id),

@@ -15,27 +15,38 @@ from llm.key_pool import KeyPool, KeySlot
 
 logger = logging.getLogger(__name__)
 
-# provider 名称 → litellm 前缀
-_PROVIDER_MAP: dict[str, str] = {
-    "openai": "openai",
-    "minimax": "minimax",
-    "anthropic": "anthropic",
-    "azure": "azure",
-    "zhipu_coding": "zai",
-    "zhipu": "zai",
-}
-
 # 模块级单例缓存
 _router_instance: litellm.Router | None = None
 _adapter_instance: Any = None
 _key_pools: dict[str, KeyPool] = {}
 # model_id → provider 映射（由 build_router 填充）
 _model_to_provider: dict[str, str] = {}
+# model_id → model_name 映射（由 build_router 填充）
+# KeyPoolAdapter 直连时用 model_id 路由到正确 provider，再反查 model_name 拼成
+# litellm model 字符串发给上游（model_id 不是真实模型名，不能直接发给 API）
+_model_to_name: dict[str, str] = {}
+# provider 名称 → litellm 前缀映射（由 build_router 从 llm.yaml providers.type 填充）
+_provider_type_map: dict[str, str] = {}
+
+
+def get_litellm_prefix(provider_name: str) -> str:
+    """获取 provider 对应的 litellm 前缀（从配置动态读取）。
+
+    优先从 _provider_type_map（llm.yaml providers.type 字段）查找，
+    未命中则回退到 provider_name 本身。
+
+    Args:
+        provider_name: 配置中的 provider 名称（如 "apigo"、"zhipu_coding"）
+
+    Returns:
+        litellm 模型字符串前缀（如 "openai"、"zai"）
+    """
+    return _provider_type_map.get(provider_name, provider_name)
 
 
 def _get_litellm_model_string(provider: str, model_name: str) -> str:
     """计算 litellm 格式的模型标识字符串。"""
-    prefix = _PROVIDER_MAP.get(provider, provider)
+    prefix = get_litellm_prefix(provider)
     return f"{prefix}/{model_name}"
 
 
@@ -205,11 +216,21 @@ def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
 
 def build_router(model_loader: Any) -> litellm.Router:
     """构建 litellm.Router 实例。"""
-    global _key_pools, _model_to_provider  # noqa: PLW0602
+    global _key_pools, _model_to_provider, _provider_type_map  # noqa: PLW0602
 
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
     call_timeout = defaults.get("call_timeout", 600)
+
+    # 从 providers.type 字段构建 provider → litellm 前缀映射
+    _provider_type_map.clear()
+    for provider_name, provider_conf in llm_data.get("providers", {}).items():
+        if isinstance(provider_conf, dict) and "type" in provider_conf:
+            _provider_type_map[provider_name] = provider_conf["type"]
+            logger.info(
+                "[Router] provider %s → litellm prefix: %s",
+                provider_name, provider_conf["type"],
+            )
 
     provider_keys = _parse_provider_keys(llm_data)
     model_list = build_model_list(model_loader, provider_keys)
@@ -217,10 +238,14 @@ def build_router(model_loader: Any) -> litellm.Router:
 
     # 构建 model_id → provider 映射
     _model_to_provider.clear()
+    # 构建 model_id → model_name 映射（KeyPoolAdapter 直连时反查真实模型名用）
+    _model_to_name.clear()
     for model_id, model_conf in llm_data.get("models", {}).items():
         provider = model_conf.get("provider", "")
+        model_name = model_conf.get("model_name", model_id)
         if provider:
             _model_to_provider[model_id] = provider
+        _model_to_name[model_id] = model_name
 
     # 构建 KeyPools（仅用于统计展示）
     for prov_name, slots in provider_keys.items():
@@ -255,6 +280,16 @@ def get_key_pool(provider_name: str) -> KeyPool | None:
 def get_provider_for_model(model_id: str) -> str:
     """根据 model_id 查找 provider 名称（如 glm-5.1 → zhipu_coding）。"""
     return _model_to_provider.get(model_id, "")
+
+
+def get_model_name_for_id(model_id: str) -> str:
+    """根据 model_id 反查 model_name（如 deepseek-v4-pro-apigo → deepseek-v4-pro）。
+
+    model_id 是 yaml key，用作路由标识；model_name 是发给上游 API 的真实模型名。
+    KeyPoolAdapter 直连时用 model_id 路由到正确 provider，再反查 model_name 拼
+    litellm 模型字符串。
+    """
+    return _model_to_name.get(model_id, model_id)
 
 
 def build_adapter(model_loader: Any) -> Any:
@@ -310,5 +345,7 @@ def reset_router() -> None:
     _adapter_instance = None
     _key_pools.clear()
     _model_to_provider.clear()
+    _model_to_name.clear()
+    _provider_type_map.clear()
     logger.info("[Router] 模块级单例已重置")
 

@@ -166,6 +166,12 @@ class LLMCore(ICorePlugin):
         """
         self._config = config or {}
         self._provider: str = self._config.get("provider", "openai")
+        # model_id（yaml key，如 deepseek-v4-pro-apigo）：路由标识，
+        # 传给 Router/KeyPool 做 deployment 匹配，保证不同 provider 的同名模型隔离。
+        # model_name（yaml 的 model_name，如 deepseek-v4-pro）：发给上游的真实模型名，
+        # 直连模式拼 litellm model 字符串用。
+        # 两者必须分开：model_name 重名时（官方与 apigo 同底模），靠 model_id 区分路由。
+        self._model_id: str = self._config.get("model_id", "")
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
@@ -182,6 +188,11 @@ class LLMCore(ICorePlugin):
         )
         self._call_timeout: float = float(
             self._config.get("call_timeout", 300)
+        )
+        # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 60s）。
+        # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
+        self._first_token_timeout: float = float(
+            self._config.get("first_token_timeout", 60)
         )
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
@@ -491,7 +502,11 @@ class LLMCore(ICorePlugin):
                     break
 
         # 5. 动态变量（每轮变化的上下文：时间戳、session_id 等）
-        #    合并到 system_message 末尾，避免作为独立 user 消息污染对话历史
+        #    作为独立 system 消息追加在末尾，绝不合并进 messages[0]（system_message）。
+        #    system_message 必须保持纯 prompt、永不变化（prompt cache 命中依赖此不变性），
+        #    而 dynamic_vars 含时间戳等每轮变化的内容，合并进去会破坏 cache 并污染系统提示词。
+        #    也不必担心污染对话历史：该消息 role=system name=dynamic_context，
+        #    与 user/assistant 历史段物理隔离。
         dynamic_vars_msg = state.get("prompt.dynamic_vars")
         if dynamic_vars_msg:
             if isinstance(dynamic_vars_msg, dict):
@@ -499,14 +514,11 @@ class LLMCore(ICorePlugin):
             else:
                 content = str(dynamic_vars_msg)
             if content:
-                if messages and messages[0].get("role") == "system":
-                    messages[0]["content"] = messages[0]["content"] + "\n\n" + content
-                else:
-                    messages.append({
-                        "role": "system",
-                        "name": "dynamic_context",
-                        "content": content,
-                    })
+                messages.append({
+                    "role": "system",
+                    "name": "dynamic_context",
+                    "content": content,
+                })
 
         return messages
 
@@ -552,19 +564,31 @@ class LLMCore(ICorePlugin):
 
         LiteLLM 使用 "provider/model" 格式路由到不同的 LLM 提供商。
 
+        优先用 router_factory 的动态映射（读 llm.yaml 的 providers.type 字段），
+        命中自定义 provider（如 apigo → openai）。未命中（router 未初始化的测试
+        场景）回退到内置常见提供商映射，保持兼容。
+
         Returns:
             LiteLLM 模型标识字符串
         """
-        # 常见提供商映射
-        provider_map = {
-            "openai": "openai",
-            "minimax": "minimax",
-            "anthropic": "anthropic",
-            "azure": "azure",
-            "zhipu_coding": "zai",
-            "zhipu": "zai",
-        }
-        provider_prefix = provider_map.get(self._provider, self._provider)
+        provider_prefix = ""
+        try:
+            from llm.router_factory import get_litellm_prefix  # noqa: PLC0415
+            provider_prefix = get_litellm_prefix(self._provider)
+        except Exception:  # noqa: BLE001
+            provider_prefix = ""
+
+        # 动态映射未命中（空或返回原名）→ 回退到内置映射
+        if not provider_prefix or provider_prefix == self._provider:
+            provider_map = {
+                "openai": "openai",
+                "minimax": "minimax",
+                "anthropic": "anthropic",
+                "azure": "azure",
+                "zhipu_coding": "zai",
+                "zhipu": "zai",
+            }
+            provider_prefix = provider_map.get(self._provider, self._provider)
         return f"{provider_prefix}/{self._model}"
 
     async def _call_llm(  # noqa: PLR0912
@@ -651,9 +675,11 @@ class LLMCore(ICorePlugin):
                 )
 
         if self._use_router:
-            # Router 路径：model 用路由别名，凭证和重试由 Router 管理
+            # Router 路径：model 用 yaml key（model_id）做 deployment 匹配，
+            # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。
+            # _model_id 为空（旧 config）时回退到 _model，保持兼容。
             kwargs: dict[str, Any] = {
-                "model": self._model,
+                "model": self._model_id or self._model,
                 "messages": normalized_messages,
                 **self._default_params,
             }
@@ -694,6 +720,7 @@ class LLMCore(ICorePlugin):
                 stream=stream,
                 on_chunk=on_chunk,
                 inter_chunk_timeout=self._call_timeout,
+                first_chunk_timeout=self._first_token_timeout,
                 **kwargs,
             )
         except asyncio.TimeoutError:

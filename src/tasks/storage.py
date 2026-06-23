@@ -217,6 +217,14 @@ class TaskStorage:
         from agents.types import AgentLevel  # noqa: PLC0415
         from tasks.types import TaskPriority  # noqa: PLC0415
 
+        # 兼容历史脏数据：description 曾被 LLM 写成 list，反序列化时归一化为 str，
+        # 否则 API 层 TaskResponse.description（pydantic 强制 str）校验失败。
+        raw_desc = data.get("description", "")
+        if not isinstance(raw_desc, str):
+            data["description"] = "\n".join(
+                str(item) for item in raw_desc
+            ) if isinstance(raw_desc, (list, tuple)) else str(raw_desc)
+
         if isinstance(data.get("status"), str):
             data["status"] = TaskStatus(data["status"])
         if isinstance(data.get("priority"), int) and not isinstance(data["priority"], TaskPriority):

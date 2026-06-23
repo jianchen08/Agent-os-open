@@ -87,6 +87,27 @@ def _extract_thinking_from_content(content: str | None) -> tuple[str | None, str
     return thinking if thinking else None, cleaned if cleaned else None
 
 
+def _move_to_extra_body(kwargs: dict[str, Any], keys: tuple[str, ...]) -> None:
+    """把指定的 kwargs 挪进 extra_body，让 litellm/OpenAI SDK 原样透传给上游。
+
+    litellm 的 openai provider 对部分参数（reasoning_effort、thinking 等）会
+    主动拦截或丢弃，但这些参数经 OpenAI 兼容中转端（如 apigo）时上游能接受。
+    extra_body 是 OpenAI SDK 的官方透传通道，litellm 把它原样合并进请求 body。
+
+    仅移动 kwargs 中已存在的 key；不存在的跳过。原地修改 kwargs。
+
+    Args:
+        kwargs: litellm 调用参数字典（原地修改）
+        keys: 需要挪进 extra_body 的参数名
+    """
+    extra = dict(kwargs.get("extra_body") or {})
+    for k in keys:
+        if k in kwargs:
+            extra[k] = kwargs.pop(k)
+    if extra:
+        kwargs["extra_body"] = extra
+
+
 # ---------------------------------------------------------------------------
 # 数据类型
 # ---------------------------------------------------------------------------
@@ -242,6 +263,15 @@ class _BaseLiteLLMAdapter:
         # 弹出 adapter 专属参数（不发给 litellm / API）
         kwargs.pop("reasoning_retention", None)
 
+        # 自定义 OpenAI 兼容端点（openai/ 前缀，如 apigo 中转）：
+        # litellm 的 openai provider 不认 reasoning_effort/thinking 等 deepseek
+        # 专有参数（会抛 UnsupportedParamsError 或被 drop_params 丢弃）。但中转
+        # 端上游本身能接受它们（实测 apigo 返回 200），所以挪进 extra_body
+        # 透传——OpenAI SDK 原生通道，litellm 会原样塞进请求 body。
+        # 原生支持的 provider（deepseek/、minimax/ 等）不进这里，参数照常直传。
+        if model.lower().startswith("openai/"):
+            _move_to_extra_body(kwargs, ("reasoning_effort", "thinking"))
+
         if stream:
             return await self._call_streaming(
                 model, messages, tools=tools, on_chunk=on_chunk, **kwargs
@@ -283,7 +313,10 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
-        response = await self._do_completion(**call_kwargs)
+        # drop_params 与流式路径对齐：openai provider 不接受 thinking /
+        # reasoning_effort 等 deepseek/anthropic 专有参数（自定义中转端点经
+        # type=openai 接入时常见），不丢会抛 UnsupportedParamsError。
+        response = await self._do_completion(**call_kwargs, drop_params=True)
 
         choice = response.choices[0]
         result_text = choice.message.content
@@ -340,6 +373,12 @@ class _BaseLiteLLMAdapter:
         **kwargs: Any,
     ) -> LLMResponse:
         """流式调用 LLM。"""
+        # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死。
+        # 必须在构造 call_kwargs 之前 pop 出来，否则会被 **kwargs 塞进
+        # litellm 请求参数（litellm 不识别这两个 key）。
+        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
+        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
+
         call_kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -350,6 +389,17 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
+        # BUG-FIX-fix_20260623_first_chunk_timeout:
+        # 原实现把 call_kwargs["timeout"] 写在 _do_completion 之后（对已发出的
+        # 请求无效），导致首 chunk 不来时 asyncio.wait_for 的 cancel 传不到
+        # httpx C 层 socket recv()，流式调用永久卡死（实测卡 5~10 分钟不超时）。
+        # 修复：在发请求之前就把 timeout 传给 litellm → httpx.Timeout(read=N)，
+        # 让 socket 层强制超时。litellm 的 timeout 是核心参数（router_factory.py
+        # 已用 float 传过），drop_params=True 不会丢弃它。
+        # 首 chunk 阶段是卡死高发点，用更短的 first_chunk_timeout 让建连/首字节
+        # 卡住时必超时；后续 chunk 由 asyncio.wait_for(inter_chunk_timeout) 控制。
+        call_kwargs["timeout"] = first_chunk_timeout
+
         response = await self._do_completion(**call_kwargs, drop_params=True)
 
         result_parts: list[str] = []
@@ -357,16 +407,6 @@ class _BaseLiteLLMAdapter:
         tool_calls_map: dict[int, dict[str, Any]] = {}
         stream_usage: dict[str, Any] | None = None
         _stream_start: float = _time.monotonic()
-
-        # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死
-        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
-        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
-
-        # BUG-FIX-fix_20260606_socket_level_timeout:
-        # asyncio.wait_for 的 cancel 无法中断 httpx 在 C 层的 socket recv()，
-        # 导致流式调用在 API 不响应时永久卡死。解决：将 inter_chunk_timeout
-        # 透传给 litellm → httpx.Timeout(read=N)，在 socket 层面强制超时。
-        call_kwargs["timeout"] = inter_chunk_timeout
 
         stream_repetition = False
         thinking_truncated = False
@@ -978,20 +1018,28 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         """用指定 slot 的 key 直接调用 litellm.acompletion。
 
         不经过 Router，直接构建 litellm 参数，确保使用 slot 的 key。
+
+        关键：kwargs["model"] 此时是 model_id（yaml key），不是 model_name。
+        需要反查 model_name 来拼 litellm 模型字符串（如 apigo/MiniMax-M3 → openai/MiniMax-M3），
+        因为上游 API 只认 model_name，不认内部 model_id。
         """
         from llm.router_factory import (  # noqa: PLC0415
-            _PROVIDER_MAP,
+            get_litellm_prefix,
+            get_model_name_for_id,
             get_provider_for_model,
         )
 
         model_id = kwargs.get("model", "")
         # 去掉 litellm 前缀（"zai/glm-5.1" → "glm-5.1"）
-        bare_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
+        bare = model_id.split("/", 1)[1] if "/" in model_id else model_id
 
         # 查 provider → 构建 litellm 模型字符串
-        provider = get_provider_for_model(bare_model)
-        prefix = _PROVIDER_MAP.get(provider, provider) if provider else ""
-        litellm_model = f"{prefix}/{bare_model}" if prefix else bare_model
+        provider = get_provider_for_model(bare)
+        prefix = get_litellm_prefix(provider) if provider else ""
+        # 反查 model_name（yaml 的 model_name 字段），而非直接用 model_id
+        # 例: bare="deepseek-v4-pro-apigo" → model_name="deepseek-v4-pro"
+        model_name = get_model_name_for_id(bare)
+        litellm_model = f"{prefix}/{model_name}" if prefix else model_name
 
         # 构建 kwargs：用 slot 的凭证，去掉 model 让 litellm_params 里的生效
         input_kwargs = {k: v for k, v in kwargs.items() if k not in ("model",)}

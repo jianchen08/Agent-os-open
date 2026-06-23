@@ -41,8 +41,10 @@ export interface UseVoiceInputOptions {
   continuous?: boolean
   /** 录音完成回调 */
   onRecordingComplete?: (blob: Blob) => void
-  /** 转写完成回调 */
+  /** 转写完成回调（已确认的最终文字） */
   onTranscriptionComplete?: (text: string) => void
+  /** 实时临时识别结果回调（未确认的中间文字，用于实时显示） */
+  onInterimResult?: (interim: string) => void
   /** 错误回调 */
   onError?: (error: VoiceInputError) => void
 }
@@ -59,6 +61,10 @@ export interface UseVoiceInputReturn {
   isTranscribing: boolean
   /** 实时转写文本 */
   transcript: string
+  /** 当前录音时长（秒），仅在录音中递增 */
+  recordingDuration: number
+  /** 当前识别模式：browser 浏览器原生识别；server-asr 服务端 ASR 降级 */
+  mode: 'browser' | 'server-asr'
   /** 错误信息 */
   error: VoiceInputError | null
   /** 开始录音 */
@@ -87,6 +93,8 @@ export interface VoiceInputButtonProps {
   onClick?: () => void
   /** 自定义类名 */
   className?: string
+  /** 录音时长（秒），用于按钮动画节律，不影响布局 */
+  recordingDuration?: number
 }
 
 /**

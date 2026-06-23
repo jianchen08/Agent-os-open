@@ -49,10 +49,6 @@ function _logEvent(eventType: string, data: any): void {
   const pid = resolvePipelineId(data)
   const mid = data.message_id || data.data?.message_id || data.data?.id || ''
   const content = data.data?.content || data.content || ''
-  const partsLen = data.data?.parts?.length ?? data.parts?.length ?? 0
-  // #region debug-point F:ws-event-trace
-  try { fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"chat-scroll-render",runId:"pre",hypothesisId:"F",location:"WS:index.ts",msg:"[WS] "+eventType,data:{pid:pid?.slice(0,12),mid:mid?.slice(0,12),cLen:content.length,pLen:partsLen,status:data.data?.status||""},ts:Date.now()})}).catch(()=>{}); } catch {}
-  // #endregion
   loggers.websocket.debug(
     `[WS-EVENT] ${eventType.padEnd(22)} pid=${(pid?.slice(0, 12) || '-').padEnd(12)} mid=${(mid?.slice(0, 12) || '-').padEnd(12)} contentLen=${content.length}`,
   )

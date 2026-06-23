@@ -205,6 +205,21 @@ export function handleStreamEnd(eventData: any) {
       const msg = msgs.find((m: any) => m.id === messageId)
 
       if (msg) {
+        // 同步后端权威 sequence（final_sequence）
+        //
+        // stream_start 不携带 sequence，占位消息的 sequence 是前端自算的 localMax+1，
+        // 与后端真实序号不一致。stream_end 携带 final_sequence，必须在此同步到占位消息，
+        // 否则后续 initFromAPI（刷新/切Tab/补漏）按 role::seq 指纹去重时会失败，
+        // 把同一逻辑消息识别为两条 → 末尾气泡重复渲染。
+        //
+        // 与 handleNewMessage 的 sequence 同步路径对齐，消除两条终止路径的不对称。
+        const finalSeq = eventData?.data?.final_sequence ?? eventData?.final_sequence
+        if (finalSeq != null && finalSeq !== msg.sequence) {
+          pipelineStore.getState().updateMessage(pipelineId, messageId, {
+            sequence: finalSeq,
+          } as any)
+        }
+
         // 后端发送了完整 parts[] → 合并而非覆盖
         // BUG-FIX-fix_20260617_stream_end_overwrite:
         // 问题根因: stream_end 的 serverParts 只包含最后一轮 iteration 的内容（后端 state

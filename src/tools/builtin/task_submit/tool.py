@@ -126,6 +126,30 @@ def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
     return None
 
 
+def _normalize_description(value: Any) -> str:
+    """将 LLM 返回的 description 归一化为 str。
+
+    LLM 偶尔会把多行文本写成数组（如 ``["line1", ""]``），而 ``TaskModel`` 是
+    dataclass 无运行时类型校验，list 会被静默持久化，最终在 API 层
+    ``TaskResponse.description``（pydantic 强制 str）校验失败导致 500。
+    在入口归一化，避免脏数据落盘，同时让 ``len(description)`` 超长检查生效。
+
+    Args:
+        value: LLM 返回的原始 description 值
+
+    Returns:
+        归一化后的字符串；None 返回空串；list/tuple 用换行连接；
+        其他非 str 类型转为字符串。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(item) for item in value)
+    return str(value)
+
+
 class TaskSubmitTool(BuiltinTool):
     """任务提交工具。
 
@@ -481,7 +505,7 @@ class TaskSubmitTool(BuiltinTool):
 
         target_type = inputs.get("target_type")
         target_id = inputs.get("target_id")
-        description = goal.get("description", "")
+        description = _normalize_description(goal.get("description", ""))
         acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
 
@@ -1027,7 +1051,7 @@ class TaskSubmitTool(BuiltinTool):
             )
 
         try:
-            description = goal.get("description", "")
+            description = _normalize_description(goal.get("description", ""))
             pipeline_id = inputs.get("pipeline_id")
             task = await task_service.create_task(
                 title=goal["title"],

@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { persist, createJSONStorage } from 'zustand/middleware'
 import { getMessages as apiGetMessages, mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
@@ -64,6 +64,52 @@ function trimMessagesForPersistence(
  * 并发去重：跟踪正在进行的 fetch 请求，避免同一 pipelineId 重复请求
  */
 const _fetchingPipelines = new Map<string, Promise<void>>()
+
+/**
+ * 容错持久化 storage
+ *
+ * BUG-FIX-fix_20260623_persist_quota_blocks_business:
+ * 问题根因: zustand persist 在 set/api.setState 路径同步调用 storage.setItem，
+ *   localStorage 配额满时抛 QuotaExceededError，异常冒泡到 addMessage/initFromAPI/
+ *   fetchMessages，阻断消息加载（用户看到"加载失败"且新消息不显示）。
+ * 修复方案: 自定义 storage 包装 localStorage.setItem，捕获并吞掉写入异常，
+ *   持久化失败仅记录一次 warn（防刷屏），内存 state 与业务流程不受影响。
+ *   getItem/removeItem 同样保护，避免读取/清理阶段的异常外泄。
+ * 影响范围: localStorage 配额耗尽时消息加载、流式更新的可用性
+ * 修复日期: 2026-06-23
+ */
+const _persistQuotaWarned = { current: false }
+const tolerantJsonStorage = createJSONStorage(() => ({
+  getItem: (name) => {
+    try {
+      return window.localStorage.getItem(name)
+    } catch {
+      return null
+    }
+  },
+  setItem: (name, value) => {
+    try {
+      window.localStorage.setItem(name, value)
+    } catch (err) {
+      // 配额满或禁用：仅记录一次 warn，避免每次 set 都刷屏
+      if (!_persistQuotaWarned.current) {
+        _persistQuotaWarned.current = true
+        logger.warn(
+          '[pipelineMessageStore] 持久化失败（localStorage 配额耗尽或不可用），'
+          + '本次会话内消息仅保存在内存，刷新后将从 API 重新加载: err=%s',
+          err,
+        )
+      }
+    }
+  },
+  removeItem: (name) => {
+    try {
+      window.localStorage.removeItem(name)
+    } catch {
+      /* 忽略清理失败 */
+    }
+  },
+}))
 
 /**
  * 管道元数据
@@ -340,21 +386,40 @@ function mergeApiWithExisting(
       apiByClientId.set(m.clientMessageId, m)
     }
   }
-  // 指纹集合：覆盖 WS UUID 与 API hex id 不一致但实际为同一条消息的场景（如 AI 消息）
-  const apiFingerprints = new Set(sorted.map((m) => makeMessageFingerprint(m)))
 
-  // 本地独有的消息（API 没有的）：正在流式或未持久化的乐观消息
+  // 本地独有的消息（API 没有的）：只保留正在 streaming 的占位消息
+  // （等流式完成后由 stream_end/new_message 收尾）。
+  // 其余本地消息（含 completed 历史、乐观 user 消息）一律以 API 权威数据为准：
+  // API 没有就丢弃——它们是 persist 残留的脏数据或 sequence 错位的旧副本，
+  // 保留会导致与 API 版本并存的重复渲染。
+  // BUG-FIX-fix_20260623_local_completed_msg_orphan:
+  // 问题根因: 原逻辑对 API 未匹配上的本地 completed 消息执行 return true（保留），
+  //   导致 localStorage 残留的旧消息（sequence 与后端错位）每次刷新都被恢复保留，
+  //   与 API 权威消息并存 → 末尾气泡重复渲染。
+  // 修复方案: 非 streaming 的本地消息 API 未匹配上则丢弃（return false）。
+  //   乐观 user 消息在 API 持久化前的极短窗口可能消失，但 initFromAPI 完成后立即恢复，
+  //   远好于重复渲染。
   const localOnly = existing.filter((m) => {
     if (apiIds.has(m.id)) return false
     if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
-    // 指纹匹配：同 role+sequence 视为同一条消息（覆盖 WS UUID vs API hex 场景）
-    if (apiFingerprints.has(makeMessageFingerprint(m))) return false
-    return true
+    // 只有正在 streaming 的占位消息需要保留（维持 stream_end/new_message 的 id 更新契约）
+    if (isStreamingMessage(m)) return true
+    // 其余本地消息：API 没有就以 API 为准丢弃
+    return false
   })
 
   if (localOnly.length === 0) {
     return { finalMessages: sorted, preservedCount: 0 }
   }
+
+  // 保留的 streaming 占位符与 API 同指纹消息视为同一条，从 sorted 移除避免重复
+  const streamingPlaceholderFingerprints = new Set(
+    localOnly.filter((m) => isStreamingMessage(m)).map((m) => makeMessageFingerprint(m)),
+  )
+  const dedupedSorted =
+    streamingPlaceholderFingerprints.size > 0
+      ? sorted.filter((m) => !streamingPlaceholderFingerprints.has(makeMessageFingerprint(m)))
+      : sorted
 
   // BUG-FIX-fix_20260623_refresh_order:
   // 问题根因: 原代码用 [...sorted, ...localOnly] 直接末尾拼接，未按 sequence
@@ -368,7 +433,7 @@ function mergeApiWithExisting(
   // 影响范围: 页面刷新、会话切换后消息顺序
   // 修复日期: 2026-06-23
   const sortedLocalOnly = [...localOnly].sort(compareMessages)
-  return { finalMessages: mergeSorted(sorted, sortedLocalOnly), preservedCount: localOnly.length }
+  return { finalMessages: mergeSorted(dedupedSorted, sortedLocalOnly), preservedCount: localOnly.length }
 }
 
 /**
@@ -454,11 +519,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       const pipelineMessages = state.messagesByPipeline[pipelineId] || []
       const realMessageId = (message as Message & { message_id?: string }).message_id || message.id
 
-      // #region debug-point G:add-message
-      try { fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"chat-scroll-render",runId:"pre",hypothesisId:"G",location:"store:addMessage",msg:"[ADD] "+message.role,data:{pid:pipelineId?.slice(0,12),mid:realMessageId?.slice(0,12),role:message.role,seq:message.sequence,status:message.status,total:pipelineMessages.length+1},ts:Date.now()})}).catch(()=>{}); } catch {}
-      // #endregion
-
-      let existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
+      const existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
 
       let updatedMessages: Message[]
       let unreadChanged = false
@@ -555,13 +616,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         )
         return state
       }
-
-      const oldMsg = pipelineMessages[messageIndex]
-      console.warn(
-        `[MSG-LIFE] ★ updateMessage: id=%s oldStatus=%s → newStatus=%s oldContentLen=%d → newContentLen=%d`,
-        messageId?.slice(0, 12), oldMsg.status, (partial as any).status || oldMsg.status,
-        (oldMsg.content || '').length, ((partial as any).content ?? (oldMsg.content || '')).length,
-      )
 
       const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
@@ -698,9 +752,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       finalMessages = filterBlankMessages(finalMessages)
 
       const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
-      // #region debug-point B:init-result
-      try { fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"chat-scroll-render",runId:"pre",hypothesisId:"B",location:"pipelineMessageStore.ts:initFromAPI",msg:"[DEBUG] initFromAPI result",data:{pipelineId:pipelineId?.slice(0,12),apiMsgs:sorted.length,existing:existing?.length||0,afterMerge:finalMessages.length,msgs:finalMessages.map(m=>({id:m.id?.slice(0,8),role:m.role[0],seq:m.sequence,cLen:(m.content||'').length,pLen:(m.parts||[]).length}))},ts:Date.now()})}).catch(()=>{}); } catch {}
-      // #endregion
       const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
 
       logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d preserved=%d',
@@ -764,9 +815,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       merged = filterBlankMessages(merged)
       const topCursor = merged[0]?.sequence ?? 0
-      // #region debug-point A:prepend-result
-      try { fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"chat-scroll-render",runId:"pre",hypothesisId:"A",location:"pipelineMessageStore.ts:prepend",msg:"[DEBUG] prepend result",data:{pipelineId:pipelineId?.slice(0,12),newMsgs:newMsgs.length,beforeMerge:existing.length+newMsgs.length,afterMerge:merged.length,msgs:merged.map(m=>({id:m.id?.slice(0,8),role:m.role[0],seq:m.sequence,cLen:(m.content||'').length,pLen:(m.parts||[]).length}))},ts:Date.now()})}).catch(()=>{}); } catch {}
-      // #endregion
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
@@ -855,7 +903,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {
-    console.warn('[STORE] fetchMessages: pipeline=%s before=%s after=%s', pipelineId?.slice(0,12), options?.before_sequence, options?.after_sequence)
     if (pipelineId.startsWith('temp-')) {
       get().initFromAPI(pipelineId, [])
       return
@@ -904,9 +951,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         })
 
         const rawMessages: Message[] = apiResult.messages || []
-        // DEBUG: 确认 has_more 是否正确传递
-        console.warn('[fetchMessages] API result: msgs=%d has_more=%s', rawMessages.length, apiResult.has_more)
-        // FIX: 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端不再额外过滤 parentId
+        // 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端不再额外过滤 parentId
         const mainMessages = rawMessages
 
         if (options?.after_sequence !== undefined) {
@@ -1143,6 +1188,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   {
     name: 'pipeline-messages',
     version: 1,
+    // 容错 storage：localStorage 配额满时吞掉 setItem 异常，不阻断业务
+    storage: tolerantJsonStorage,
     // 仅持久化核心数据，排除运行时状态
     partialize: (state) => ({
       messagesByPipeline: trimMessagesForPersistence(state.messagesByPipeline),
@@ -1156,9 +1203,41 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
+      // 恢复的消息中所有 status='streaming' 的占位符强制标记为 completed。
+      // BUG-FIX-fix_20260623_orphan_streaming_persist:
+      // 问题根因: 上次会话 AI 回复进行中（占位符 status='streaming'）时刷新/关闭，
+      //   persist 存下了 streaming 占位符。重新打开后它被原样恢复，但管道级
+      //   streamingState 已重置为空——这条占位符成了 orphan streaming。
+      //   initFromAPI 时它走 isStreamingMessage() return true 被保留，与 API 返回的
+      //   completed 权威消息并存 → AI 气泡重复渲染（user 消息已修复但 AI 仍重复）。
+      // 修复方案: 与 streamingState 同理，恢复时不信任消息内的运行时状态。
+      //   把所有恢复消息的 status='streaming' 改为 'completed'，parts 内
+      //   state='streaming'/'calling' 的 part 改为 'done'。这样 orphan 占位符要么被
+      //   initFromAPI 用 id/clientMessageId 匹配上（API 已有真实版本），
+      //   要么走 return false 丢弃，不再保留为孤儿。
+      const cleanedMessages: Record<string, Message[]> = {}
+      if (p.messagesByPipeline) {
+        for (const [pid, msgs] of Object.entries(p.messagesByPipeline)) {
+          if (!msgs) continue
+          cleanedMessages[pid] = msgs.map((m) => {
+            if (m.status === 'streaming') {
+              const cleanedParts = (m.parts || []).map((part) => {
+                const state = (part as { state?: string }).state
+                if (state === 'streaming' || state === 'calling') {
+                  return { ...part, state: 'done' } as MessagePart
+                }
+                return part
+              })
+              return { ...m, status: 'completed' as const, parts: cleanedParts }
+            }
+            return m
+          })
+        }
+      }
       return {
         ...current,
         ...p,
+        messagesByPipeline: cleanedMessages,
         // 运行时状态强制重置（不信任持久化值）
         streamingState: {},
         isLoadingOlderByPipeline: {},
