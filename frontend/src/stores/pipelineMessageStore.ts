@@ -25,20 +25,6 @@ const logger = loggers.sessionStore
 const PERSIST_MAX_MESSAGES_PER_PIPELINE = 50
 
 /**
- * 乐观消息的"宽限期"
- *
- * BUG-FIX-fix_20260623_optimistic_user_msg_vanish:
- * mergeApiWithExisting 合并 API 与本地消息时，未被 API 命中的本地 user 消息
- * 若在此时间窗口内（且带 clientMessageId）则保留为乐观消息，
- * 等待后端持久化后下一次 fetch 由 clientMessageId 对账替换。
- * 超过此窗口仍未被 API 命中视为脏数据丢弃。
- *
- * 取值 30s：覆盖正常后端持久化延迟（通常 <1s），同时短于 persist
- * 残留消息的常见时间间隔，避免误保留旧脏数据。
- */
-const OPTIMISTIC_MSG_GRACE_MS = 30_000
-
-/**
  * 持久化数据的有效期策略说明（非强制 TTL）
  *
  * BUG-FIX-fix_20260622_workspace_state_loss:
@@ -401,37 +387,23 @@ function mergeApiWithExisting(
     }
   }
 
-  // 本地独有的消息（API 没有的）保留策略：
-  // 1. 正在 streaming 的占位消息 — 必须保留（等 stream_end/new_message 收尾）
-  // 2. 刚发送的乐观 user 消息（30s 窗口内，带 clientMessageId） — 保留，
-  //    因为后端可能尚未持久化，API 尚未返回。
-  // 3. 其余本地消息（completed 历史、persist 残留的脏数据） — 丢弃，
-  //    以 API 权威数据为准。
-  //
+  // 本地独有的消息（API 没有的）：只保留正在 streaming 的占位消息
+  // （等流式完成后由 stream_end/new_message 收尾）。
+  // 其余本地消息（含 completed 历史、乐观 user 消息）一律以 API 权威数据为准：
+  // API 没有就丢弃——它们是 persist 残留的脏数据或 sequence 错位的旧副本，
+  // 保留会导致与 API 版本并存的重复渲染。
   // BUG-FIX-fix_20260623_local_completed_msg_orphan:
-  //   非 streaming 的本地消息 API 未匹配上则丢弃（return false），
-  //   防止 localStorage 残留的旧消息每次刷新被恢复保留导致重复渲染。
-  //
-  // BUG-FIX-fix_20260623_optimistic_user_msg_vanish:
-  //   问题根因: 上述"全部丢弃"策略会误杀刚发送的乐观 user 消息——
-  //     用户发消息 → addMessage(乐观 user) → fetchMessages/initFromAPI 被触发
-  //     （WS 重连 / Tab 切换 / 会话切换）→ 后端尚未持久化 user 消息 →
-  //     API 返回数据不含该消息 → 乐观消息被丢弃 → 用户消息消失，
-  //     表现为"发送的消息不显示，刷新后才出现"。
-  //   修复方案: 带 clientMessageId 的 user 消息在 OPTIMISTIC_MSG_GRACE_MS（30s）
-  //     时间窗口内保留，覆盖后端持久化的正常延迟。
-  //     persist 残留的旧消息不满足时间条件（timestamp 远超 30s），仍被丢弃，
-  //     不重新引入重复渲染。
+  // 问题根因: 原逻辑对 API 未匹配上的本地 completed 消息执行 return true（保留），
+  //   导致 localStorage 残留的旧消息（sequence 与后端错位）每次刷新都被恢复保留，
+  //   与 API 权威消息并存 → 末尾气泡重复渲染。
+  // 修复方案: 非 streaming 的本地消息 API 未匹配上则丢弃（return false）。
+  //   乐观 user 消息在 API 持久化前的极短窗口可能消失，但 initFromAPI 完成后立即恢复，
+  //   远好于重复渲染。
   const localOnly = existing.filter((m) => {
     if (apiIds.has(m.id)) return false
     if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
-    // 正在 streaming 的占位消息必须保留
+    // 只有正在 streaming 的占位消息需要保留（维持 stream_end/new_message 的 id 更新契约）
     if (isStreamingMessage(m)) return true
-    // 乐观 user 消息在持久化窗口内保留（刚发送、后端可能尚未写入）
-    if (m.role === 'user' && m.clientMessageId) {
-      const createdTime = new Date(m.timestamp).getTime()
-      if (Date.now() - createdTime < OPTIMISTIC_MSG_GRACE_MS) return true
-    }
     // 其余本地消息：API 没有就以 API 为准丢弃
     return false
   })
