@@ -1212,13 +1212,27 @@ class TaskSubmitTool(BuiltinTool):
         fn = lifecycle.init_container_workspace if is_container else lifecycle.on_task_start
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, fn, task.id, workspace, task_data)
+            ws_meta = await loop.run_in_executor(None, fn, task.id, workspace, task_data)
         except Exception as ws_err:
             logger.error(
                 "[TaskSubmit] 工作空间初始化失败 | task_id=%s | container=%s | error=%s",
                 task.id, is_container, ws_err,
             )
             return task, f"工作空间初始化失败: {ws_err}"
+
+        # on_task_start 内部已调 _persist_ws_meta 写入 task.metadata；
+        # init_container_workspace 只写内存 _ws_meta_store，不持久化，
+        # 需要在此手动写入 task.metadata 以便后续统一读取。
+        if is_container and isinstance(ws_meta, dict) and ws_meta.get("path"):
+            task.metadata = task.metadata or {}
+            task.metadata["ws_meta"] = ws_meta
+            try:
+                await task_service.save_task(task)
+            except Exception as save_err:
+                logger.warning(
+                    "[TaskSubmit] 容器 ws_meta 持久化失败 (non-fatal) | task_id=%s | error=%s",
+                    task.id, save_err,
+                )
 
         # 重新读取 task 获取 lifecycle 写入的最新 metadata（含 ws_meta）
         refreshed = task_service.get_task(task.id)
