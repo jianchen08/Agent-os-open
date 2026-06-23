@@ -302,14 +302,16 @@ async def _start_idle_engine(
     # 修复：与 agent 身份恢复同源，从注册表 tags 补全 task_id/workspace。
     # tags 由管道创建者（task_executor 等）注册时写入，是上下文的权威来源。
     # 调用方显式传入的有效值优先（不覆盖）。
-    if not task_id or not workspace:
-        _ctx_entry = _registry.get(pipeline_id)
-        if _ctx_entry and getattr(_ctx_entry, "tags", None):
-            _tags = _ctx_entry.tags
-            if not task_id:
-                task_id = _tags.get("task_id", "") or ""
-            if not workspace:
-                workspace = _tags.get("workspace", "") or ""
+    _tags_entry = _registry.get(pipeline_id)
+    _tags = getattr(_tags_entry, "tags", None) or {}
+    if not task_id:
+        task_id = _tags.get("task_id", "") or ""
+    if not workspace:
+        workspace = _tags.get("workspace", "") or ""
+    # user_id / session_id 随上下文同源恢复，播种到管道 state
+    # （task_submit 继承身份、task_status_update / task_status_changed 定位投递目标）
+    _ctx_user_id = _tags.get("user_id", "") or ""
+    _ctx_session_id = _tags.get("session_id", "") or ""
 
     # Phase 1 改造：仅创建/复用 bridge，engine 主动 emit 事件，不再启动 drain_loop。
     bridge = _registry.ensure_bridge(
@@ -324,6 +326,8 @@ async def _start_idle_engine(
         streaming=True, on_chunk=None,
         client_message_id=client_message_id,
         attachments=attachments,
+        user_id=_ctx_user_id,
+        session_id=_ctx_session_id,
     ))
     _idle_entry = _registry.get(pipeline_id)
     if _idle_entry:

@@ -210,7 +210,17 @@ class TaskNotifierMixin:
 
 
 
-            if _notifier and _user_id:
+            if not _user_id:
+
+                logger.error(
+
+                    "TaskWorker: task metadata 缺 user_id，task_status_update 无法按用户投递 | task=%s",
+
+                    task_id,
+
+                )
+
+            elif _notifier:
 
                 await _notifier.send_to_user(_user_id, {
 

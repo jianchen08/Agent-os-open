@@ -140,6 +140,10 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
 
             thread_id = task.metadata.get("session_id") if task.metadata else None
             if not thread_id:
+                logger.error(
+                    "[TaskService] task metadata 缺 session_id，task_status_changed 未推送 | task=%s",
+                    task_id[:12] if task_id else "",
+                )
                 return
 
             from api.websocket.message_bus import SourceType, get_message_bus  # noqa: PLC0415

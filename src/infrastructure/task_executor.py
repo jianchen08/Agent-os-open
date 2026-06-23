@@ -156,6 +156,44 @@ class TaskExecutorMixin:
 
 
 
+        # 从 task.metadata 提取上下文身份（user_id / session_id），播种到管道 state 与
+
+        # registry tags。确保子任务 task_submit 能继承并写入自身 metadata，
+
+        # task_status_update / task_status_changed 推送链路不再因身份缺失而静默。
+
+        _ctx_user_id = ""
+
+        _ctx_session_id = ""
+
+        if task_service:
+
+            _ctx_task = task_service.get_task(task_id)
+
+            if _ctx_task and _ctx_task.metadata:
+
+                _ctx_user_id = _ctx_task.metadata.get("user_id", "") or ""
+
+                _ctx_session_id = _ctx_task.metadata.get("session_id", "") or ""
+
+        # session_id 回退到当前管道注册时记录的 WS thread_id（权威投递目标）
+
+        if not _ctx_session_id:
+
+            _ctx_session_id = _ws_thread_id
+
+        if not _ctx_user_id:
+
+            logger.error(
+
+                "TaskWorker: task metadata 缺 user_id，管道 state 无法播种用户身份 | task=%s",
+
+                task_id,
+
+            )
+
+
+
         # ── 0. 容器任务处理 ──
 
         if task_service:
@@ -434,6 +472,12 @@ class TaskExecutorMixin:
 
                     "agent_id": target_id or "",
 
+                    # user_id / session_id：上下文身份，供 _start_idle_engine 恢复并播种 state
+
+                    "user_id": _ctx_user_id,
+
+                    "session_id": _ctx_session_id,
+
                 },
 
                 input_route_table=self._input_route_table,
@@ -688,6 +732,10 @@ class TaskExecutorMixin:
                     streaming=True,
 
                     on_chunk=None,
+
+                    user_id=_ctx_user_id,
+
+                    session_id=_ctx_session_id,
 
                 ))
 
