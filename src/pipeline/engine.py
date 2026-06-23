@@ -1888,7 +1888,7 @@ class PipelineEngine:
 
             if not _pending_input:
 
-                logger.info(
+                logger.debug(
 
                     "[Engine] 管道唤醒但 suspended_state 无新内容，"
 
@@ -1926,7 +1926,7 @@ class PipelineEngine:
 
             self.save_streaming_context(state)
 
-            logger.info("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
+            logger.debug("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
 
 
 
