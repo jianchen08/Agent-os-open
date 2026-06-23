@@ -462,7 +462,7 @@ class PipelineEngine:
 
         self._suspended_state = None
 
-        logger.debug(
+        logger.info(
 
             "Pipeline resuming from suspended state (iteration=%d)",
 
@@ -702,11 +702,11 @@ class PipelineEngine:
 
                 if resumed:
 
-                    logger.debug("=== Pipeline iteration %d (resumed) ===", iteration)
+                    logger.info("=== Pipeline iteration %d (resumed) ===", iteration)
 
                 else:
 
-                    logger.debug("=== Pipeline iteration %d ===", iteration)
+                    logger.info("=== Pipeline iteration %d ===", iteration)
 
 
 
@@ -940,7 +940,7 @@ class PipelineEngine:
 
             self._last_state = state
 
-            logger.debug(
+            logger.info(
 
                 "[Engine] 引擎停止: pipeline=%s iteration=%d ended=%s "
 
@@ -1278,7 +1278,7 @@ class PipelineEngine:
 
             _model_info += ")"
 
-            logger.debug("Model: %s", _model_info)
+            logger.info("Model: %s", _model_info)
 
 
 
@@ -1728,7 +1728,7 @@ class PipelineEngine:
 
             self._inject_notifications_to_suspended_state(pending_notifications)
 
-            logger.debug(
+            logger.info(
 
                 "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: pipeline=%s",
 
@@ -1738,7 +1738,7 @@ class PipelineEngine:
 
         else:
 
-            logger.debug(
+            logger.info(
 
                 "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
 
@@ -1800,7 +1800,7 @@ class PipelineEngine:
 
                         self._inject_notifications_to_suspended_state(pending_notifications)
 
-                        logger.debug(
+                        logger.info(
 
                             "[Engine] 管道超时后发现 %d 条通知，唤醒: pipeline=%s",
 
@@ -1812,7 +1812,7 @@ class PipelineEngine:
 
                     if self._check_children_terminal(state):
 
-                        logger.debug(
+                        logger.info(
 
                             "[Engine] 管道超时后发现子任务已终态，唤醒: pipeline=%s",
 
@@ -1822,7 +1822,7 @@ class PipelineEngine:
 
                         break
 
-                    logger.debug(
+                    logger.info(
 
                         "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
 
@@ -1888,7 +1888,7 @@ class PipelineEngine:
 
             if not _pending_input:
 
-                logger.debug(
+                logger.info(
 
                     "[Engine] 管道唤醒但 suspended_state 无新内容，"
 
@@ -1926,7 +1926,7 @@ class PipelineEngine:
 
             self.save_streaming_context(state)
 
-            logger.debug("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
+            logger.info("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
 
 
 
@@ -1950,7 +1950,7 @@ class PipelineEngine:
 
             return True
 
-        logger.debug("[Engine] 管道被唤醒但无 suspended_state: pipeline=%s", pipeline_id)
+        logger.info("[Engine] 管道被唤醒但无 suspended_state: pipeline=%s", pipeline_id)
 
         return False
 

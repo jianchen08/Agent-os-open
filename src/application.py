@@ -65,15 +65,15 @@ class Application:
             tool_registry = ToolRegistry()
             self._register_basic_tools(tool_registry)
             services["tool_registry"] = tool_registry
-            logger.debug("服务已: tool_registry (%d 个基础工具)", tool_registry.count())
+            logger.info("服务已创建: tool_registry (%d 个基础工具)", tool_registry.count())
 
             from tools.auto_loader import init_tool_auto_loader  # noqa: PLC0415
 
             init_tool_auto_loader(tool_registry)
-            logger.debug("ToolAutoLoader 已初始化")
+            logger.info("ToolAutoLoader 已初始化")
         except Exception as exc:
             logger.warning("创建 tool_registry 服务失败: %s", exc)
-        logger.debug("[STARTUP] 1.ToolRegistry: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 1.ToolRegistry: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 1.5 MediaProviderRegistry ────────────────────
@@ -82,10 +82,10 @@ class Application:
 
             media_registry = MediaProviderRegistry()
             config_path = self.project_root / "config" / "models" / "media_providers.yaml"
-            logger.debug("[STARTUP] MediaProviderRegistry config_path=%s exists=%s", config_path, config_path.exists())
+            logger.info("[STARTUP] MediaProviderRegistry config_path=%s exists=%s", config_path, config_path.exists())
             if config_path.exists():
                 media_registry.load_config(config_path)
-                logger.debug("[STARTUP] MediaProviderRegistry config loaded, registering providers...")
+                logger.info("[STARTUP] MediaProviderRegistry config loaded, registering providers...")
                 self._register_media_providers(media_registry)
             services["media_provider_registry"] = media_registry
             logger.info(
@@ -102,7 +102,7 @@ class Application:
             from memory.storage.json_store import JsonMemoryStore  # noqa: PLC0415
 
             json_store = JsonMemoryStore()
-            logger.debug("服务已: JsonMemoryStore")
+            logger.info("服务已创建: JsonMemoryStore")
         except Exception as exc:
             logger.warning("创建 JsonMemoryStore 失败: %s", exc)
 
@@ -129,10 +129,10 @@ class Application:
                     embedding_fn=embedding_fn,
                 )
                 asyncio.get_event_loop().run_until_complete(vector_retriever.ensure_tables())
-                logger.debug("服务已: PgVectorRetriever")
+                logger.info("服务已创建: PgVectorRetriever")
         except Exception as exc:
             logger.info("PgVectorRetriever 不可用，降级到 keyword 检索: %s", exc)
-        logger.debug("[STARTUP] 3.PgVector: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 3.PgVector: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         retrievers: dict[str, Any] = {}
@@ -144,10 +144,10 @@ class Application:
 
         if vector_retriever is not None:
             services["retriever"] = vector_retriever
-            logger.debug("服务已: retriever (vector)")
+            logger.info("服务已创建: retriever (vector)")
         elif memory_store is not None and hasattr(memory_store, "search"):
             services["retriever"] = memory_store
-            logger.debug("服务已: retriever (memory_store)")
+            logger.info("服务已创建: retriever (memory_store)")
 
         # ── 4. TagService + ChunkService ─────────────────
         tag_service: Any = None
@@ -162,10 +162,10 @@ class Application:
                 data_dir=str(self.project_root / "data" / "memory"),
             )
             services["tag_service"] = tag_service
-            logger.debug("服务已: tag_service")
+            logger.info("服务已创建: tag_service")
         except Exception as exc:
             logger.warning("创建 tag_service 失败: %s", exc)
-        logger.debug("[STARTUP] 4.TagService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 4.TagService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         try:
@@ -178,10 +178,10 @@ class Application:
                 data_dir=str(self.project_root / "data" / "memory"),
             )
             services["chunk_service"] = chunk_service
-            logger.debug("服务已: chunk_service")
+            logger.info("服务已创建: chunk_service")
         except Exception as exc:
             logger.warning("创建 chunk_service 失败: %s", exc)
-        logger.debug("[STARTUP] 4.5.ChunkService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 4.5.ChunkService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 5. MemoryContextService ──────────────────────
@@ -204,10 +204,10 @@ class Application:
                 },
             )
             services["context_service"] = context_service
-            logger.debug("服务已: context_service (context_window=%d)", _ctx_window)
+            logger.info("服务已创建: context_service (context_window=%d)", _ctx_window)
         except Exception as exc:
             logger.warning("创建 context_service 失败: %s", exc)
-        logger.debug("[STARTUP] 5.ContextService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 5.ContextService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 6. TagNetworkRetriever ───────────────────────
@@ -216,10 +216,10 @@ class Application:
 
             tag_network_retriever = TagNetworkRetriever(config=TagNetworkConfig())
             services["tag_network_retriever"] = tag_network_retriever
-            logger.debug("服务已: tag_network_retriever")
+            logger.info("服务已创建: tag_network_retriever")
         except Exception as exc:
             logger.warning("创建 tag_network_retriever 失败: %s", exc)
-        logger.debug("[STARTUP] 6.TagNetwork: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 6.TagNetwork: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 7. MemoryService ─────────────────────────────
@@ -235,10 +235,10 @@ class Application:
                 tag_service=tag_service,
             )
             services["memory_service"] = memory_service
-            logger.debug("服务已: memory_service (retrievers=%s)", list(retrievers.keys()))
+            logger.info("服务已创建: memory_service (retrievers=%s)", list(retrievers.keys()))
         except Exception as exc:
             logger.warning("创建 memory_service 失败: %s", exc)
-        logger.debug("[STARTUP] 7.MemoryService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 7.MemoryService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 8. ExecutionRecordStorage ────────────────────
@@ -248,7 +248,7 @@ class Application:
             services["execution_record_storage"] = ExecutionRecordStorage(
                 data_dir=str(self.project_root / "data" / "pipelines")
             )
-            logger.debug("服务已: execution_record_storage")
+            logger.info("服务已创建: execution_record_storage")
         except Exception as exc:
             logger.warning("创建 execution_record_storage 服务失败: %s", exc)
 
@@ -308,7 +308,7 @@ class Application:
             services["maintenance_service"] = _maintenance_service
             # 注册维护触发器
             _maintenance_service.register_triggers()
-            logger.debug("服务已: maintenance_service (enabled=%s)", _maintenance_config.get("enabled", False))
+            logger.info("服务已创建: maintenance_service (enabled=%s)", _maintenance_config.get("enabled", False))
         except Exception as exc:
             logger.warning("创建 maintenance_service 服务失败: %s", exc)
 
@@ -319,7 +319,7 @@ class Application:
 
             event_bus = get_event_bus()
             services["event_bus"] = event_bus
-            logger.debug("服务已: event_bus (core singleton)")
+            logger.info("服务已创建: event_bus (core singleton)")
         except Exception as exc:
             logger.warning("创建 event_bus 服务失败: %s", exc, exc_info=True)
 
@@ -329,7 +329,7 @@ class Application:
 
             task_service = TaskService(event_bus=services.get("event_bus"))
             services["task_service"] = task_service
-            logger.debug("服务已: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
+            logger.info("服务已创建: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
 
             # 注入 task_repository 到 IsolationManager，启用按 workspace 销毁容器
             # 用同步版本：asyncio.get_event_loop().run_until_complete() 在 Python 3.12+
@@ -352,14 +352,14 @@ class Application:
 
             timer_manager = TimerManager.get_instance()
             services["timer_manager"] = timer_manager
-            logger.debug("服务已: timer_manager")
+            logger.info("服务已创建: timer_manager")
         except Exception as exc:
             logger.warning("创建 timer_manager 失败: %s", exc)
 
         # ── 13. AgentRegistry ────────────────────────────
         if agent_registry is not None:
             services["agent_registry"] = agent_registry
-            logger.debug("服务已: agent_registry")
+            logger.info("服务已注入: agent_registry")
 
         # ── 14. PipelineCheckpointManager + PipelineRecovery ──
         try:
@@ -370,7 +370,7 @@ class Application:
             recovery = PipelineRecovery(checkpoint_manager)
             services["checkpoint_manager"] = checkpoint_manager
             services["pipeline_recovery"] = recovery
-            logger.debug("服务已: checkpoint_manager, pipeline_recovery")
+            logger.info("服务已创建: checkpoint_manager, pipeline_recovery")
         except Exception as exc:
             logger.warning("创建 checkpoint 服务失败: %s", exc)
 
@@ -380,7 +380,7 @@ class Application:
 
             session_dir = self.project_root / "data" / "sessions"
             services["session_service"] = SessionService(session_dir=session_dir)
-            logger.debug("服务已: session_service")
+            logger.info("服务已创建: session_service")
         except Exception as exc:
             logger.warning("创建 session_service 失败: %s", exc)
 
@@ -389,9 +389,9 @@ class Application:
         if gateway is not None:
             gateway.services = services
             services["channel_gateway"] = gateway
-            logger.debug("服务已: channel_gateway")
+            logger.info("服务已创建: channel_gateway")
 
-        logger.debug("[STARTUP] 8-16.rest: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 8-16.rest: %.2fs", _time.monotonic() - _t0)
 
         # ── 17. api_store（会话存储）─────────────────────
         # 注入 channels.api.memory_store.store 单例到 services，
@@ -400,7 +400,7 @@ class Application:
         try:
             from channels.api.memory_store import store as _api_store  # noqa: PLC0415
             services["api_store"] = _api_store
-            logger.debug("服务已: api_store")
+            logger.info("服务已注入: api_store")
         except Exception as exc:
             logger.warning("注入 api_store 失败: %s", exc)
 
@@ -427,7 +427,7 @@ class Application:
             from channels.gateway.channel_gateway import ChannelGateway  # noqa: PLC0415
 
             gateway = ChannelGateway()
-            logger.debug("ChannelGateway 通过 Application 创建完成")
+            logger.info("ChannelGateway 通过 Application 创建完成")
             return gateway
         except Exception as exc:
             logger.warning("创建 ChannelGateway 失败: %s", exc)
@@ -693,7 +693,7 @@ class Application:
             services=svc,
             checkpoint_manager=checkpoint_mgr,
         )
-        logger.debug("PipelineEngine 通过 Application 创建完成")
+        logger.info("PipelineEngine 通过 Application 创建完成")
         return engine
 
     def create_task_worker(
@@ -720,7 +720,7 @@ class Application:
 
                 event_bus = get_event_bus()
                 svc["event_bus"] = event_bus
-                logger.debug("event_bus 懒创建成功 (core singleton)")
+                logger.info("event_bus 懒创建成功 (core singleton)")
             except Exception as exc:
                 logger.error("event_bus 懒创建失败: %s", exc)
                 return None
@@ -732,7 +732,7 @@ class Application:
                 from tasks.service import TaskService  # noqa: PLC0415
                 task_service = TaskService(event_bus=event_bus)
                 svc["task_service"] = task_service
-                logger.debug("task_service 懒创建成功")
+                logger.info("task_service 懒创建成功")
             except Exception as exc:
                 logger.error("task_service 懒创建失败: %s", exc)
                 return None
@@ -745,7 +745,7 @@ class Application:
             services=svc,
             event_bus=event_bus,
         )
-        logger.debug("TaskWorker 通过 Application 创建完成")
+        logger.info("TaskWorker 通过 Application 创建完成")
         return task_worker
 
     def create_pipeline_factory(
