@@ -192,10 +192,15 @@ def build_model_list(
 
 
 def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
-    """从 llm.yaml 的 defaults.fallback_chain 构建 Router fallbacks。"""
+    """从 llm.yaml 的 defaults.tiers.fallback_chain 构建 Router fallbacks。
+
+    BUG-FIX: 原来读 defaults.fallback_chain，但 yaml 里 fallback_chain
+    放在 defaults.tiers.fallback_chain 下，导致始终读空，fallback 永不生效。
+    """
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
-    fallback_chain = defaults.get("fallback_chain", {})
+    tiers = defaults.get("tiers", {})
+    fallback_chain = tiers.get("fallback_chain", {})
 
     merged: dict[str, list[str]] = {}
     for model_type, fallback_ids in fallback_chain.items():

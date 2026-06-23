@@ -21,6 +21,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import litellm
 
+from llm.error_classifier import ErrorKind, classify_error
+
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
@@ -873,90 +875,52 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     if slot.api_base:
                         key_kwargs.setdefault("api_base", slot.api_base)
 
-                    if key_kwargs.get("stream"):
-                        result = await self._direct_call_with_slot(
-                            slot=slot, **key_kwargs
-                        )
-                    else:
-                        result = await self._direct_call_with_slot(
-                            slot=slot, **key_kwargs
-                        )
+                    result = await self._direct_call_with_slot(
+                        slot=slot, **key_kwargs
+                    )
 
                     slot.on_success()
                     return result
-                except litellm.AuthenticationError as exc:
-                    # 认证失败：冷却该 key，用其他 key 重试
-                    slot.on_rate_limit(retry_after=300)
-                    logger.error(
-                        "[KeyPoolAdapter] 认证失败 → key=%s 冷却 300s"
-                        "，尝试其他 key (attempt %d/%d): %s",
-                        slot.key_id, attempt + 1, max_retries, exc,
-                    )
-                    last_exc = exc
-                    # 不要 raise，继续循环尝试下一个 key
-                except litellm.RateLimitError as exc:
-                    # 429 限流：冷却该 key，尝试其他 key
-                    slot.on_rate_limit()
-                    last_exc = exc
-                except litellm.BudgetExceededError as exc:
-                    # 配额耗尽（如"每周/每月使用上限"）：冷却该 key，尝试其他 key
-                    slot.on_rate_limit(retry_after=3600.0)
-                    logger.warning(
-                        "[KeyPoolAdapter] 配额耗尽 → key=%s 冷却 3600s"
-                        "，尝试其他 key (attempt %d/%d): %s",
-                        slot.key_id, attempt + 1, max_retries, exc,
-                    )
-                    last_exc = exc
-                except litellm.Timeout as exc:
-                    last_exc = exc
-                    # 超时：不冷却 key（不是 key 的问题），但换 key 重试
-                    # 不同 key 可能对应不同服务节点，超时可能是节点问题
-                    logger.warning(
-                        "[KeyPoolAdapter] Timeout → key=%s"
-                        "，尝试其他 key (attempt %d/%d): %s",
-                        slot.key_id, attempt + 1, max_retries, exc,
-                    )
                 except asyncio.CancelledError:
                     # 用户取消：不冷却，直接抛
                     raise
-                except litellm.InternalServerError as exc:
-                    slot.on_rate_limit()
-                    logger.warning(
-                        "[KeyPoolAdapter] InternalServerError"
-                        " → key=%s 冷却: %s",
-                        slot.key_id, exc,
-                    )
-                    last_exc = exc
-                except litellm.BadRequestError as exc:
-                    # 400：通常是请求参数错误，但如果错误消息包含配额相关关键词
-                    # （如 DeepSeek 的 "Insufficient Balance"），也应轮转 key
-                    _msg = str(exc).lower()
-                    _quota_keywords = (
-                        "insufficient", "balance", "quota", "exceeded",
-                        "limit", "额度", "上限", "用完", "余额", "不足",
-                    )
-                    if any(kw in _msg for kw in _quota_keywords):
-                        slot.on_rate_limit(retry_after=3600.0)
+                except Exception as exc:
+                    # 统一异常处理：先翻译成 ErrorInfo，再按 kind 决策
+                    info = classify_error(exc)
+
+                    # BAD_REQUEST 是不可恢复的参数错误，直接抛（不换 key）
+                    if info.kind == ErrorKind.BAD_REQUEST:
                         logger.warning(
-                            "[KeyPoolAdapter] 疑似配额耗尽 (400) → key=%s 冷却"
-                            "，尝试其他 key (attempt %d/%d): %s",
-                            slot.key_id, attempt + 1, max_retries, exc,
+                            "[KeyPoolAdapter] BAD_REQUEST 不可恢复 → key=%s: %s",
+                            slot.key_id, str(exc)[:200],
+                        )
+                        raise
+
+                    # SERVICE_DOWN：退避重试同一 key（上游临时挂，换 key 没意义）
+                    if info.kind == ErrorKind.SERVICE_DOWN:
+                        backoff = min(2.0 * (2 ** slot._consecutive_down), 16.0)
+                        logger.warning(
+                            "[KeyPoolAdapter] SERVICE_DOWN → key=%s 退避 %.1fs 重试"
+                            " (attempt %d/%d): %s",
+                            slot.key_id, backoff, attempt + 1, max_retries,
+                            str(exc)[:150],
+                        )
+                        slot.handle_error(info)
+                        await asyncio.sleep(backoff)
+                        last_exc = exc
+                        # 注意：不 release，因为要重试同一 key——但 acquire_slot 已占信号量，
+                        # 这里需先释放再重新获取以避免死锁
+                        # 简化：SERVICE_DOWN 也走换 key 路径（释放后 select 会再选回它，
+                        # 因为没冷却）。重试逻辑交给下一轮 attempt。
+                        # → 实际效果：换 key 重试，但 slot 记录了连续 down 次数
+                    else:
+                        # 其他可恢复错误：交给 KeySlot 统一策略处理（冷却/降级/不冷却）
+                        slot.handle_error(info)
+                        logger.info(
+                            "[KeyPoolAdapter] %s → key=%s 处理 (attempt %d/%d)",
+                            info.kind.value, slot.key_id, attempt + 1, max_retries,
                         )
                         last_exc = exc
-                    else:
-                        # 真正的请求参数错误 → 不轮转
-                        raise
-                except Exception as exc:
-                    # 其他所有异常（含 PermissionDeniedError、ServiceUnavailableError、
-                    # APIConnectionError 等 API 错误，以及可能的未分类配额错误）：
-                    # 冷却当前 key 并尝试下一个。只有所有 key 都失败才最终抛异常。
-                    slot.on_rate_limit()
-                    logger.warning(
-                        "[KeyPoolAdapter] 未分类错误 → key=%s 冷却 type=%s"
-                        "，尝试其他 key (attempt %d/%d): %s",
-                        slot.key_id, type(exc).__name__, attempt + 1, max_retries, exc,
-                    )
-                    last_exc = exc
                 finally:
                     slot.release()
         except KeyPoolExhaustedError as exc:
