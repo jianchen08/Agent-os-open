@@ -398,9 +398,20 @@ class _BaseLiteLLMAdapter:
         # 修复：在发请求之前就把 timeout 传给 litellm → httpx.Timeout(read=N)，
         # 让 socket 层强制超时。litellm 的 timeout 是核心参数（router_factory.py
         # 已用 float 传过），drop_params=True 不会丢弃它。
-        # 首 chunk 阶段是卡死高发点，用更短的 first_chunk_timeout 让建连/首字节
-        # 卡住时必超时；后续 chunk 由 asyncio.wait_for(inter_chunk_timeout) 控制。
-        call_kwargs["timeout"] = first_chunk_timeout
+        #
+        # BUG-FIX-fix_20260625_httpx_timeout_too_short:
+        # 历史实现把 call_kwargs["timeout"] 设成 first_chunk_timeout（默认 60s），
+        # 但 httpx 的 read timeout 作用于流式连接的【每一次】 socket 读取，不只是
+        # 首 chunk。结果：LLM 流式输出中途如果两次 chunk 之间间隔 > 60s（长文
+        # 档生成、思考停顿、网络抖动），httpx 层就把连接掐断，adapter 的
+        # inter_chunk_timeout（300s）根本等不到。
+        # 日志证据（af11896959d1 iter=5）：最后 chunk 02:42:22 → 60s 沉默 →
+        # 02:43:22 连接断，raw_result=None，整条方案文档输出丢失。
+        #
+        # 正确做法：httpx read timeout 取 inter_chunk_timeout（两个 chunk 之间
+        # 允许的最大间隔），首 chunk 的快速超时由下方 asyncio.wait_for
+        # (first_chunk_timeout) 单独负责。这样流式输出能容忍合理的思考停顿。
+        call_kwargs["timeout"] = inter_chunk_timeout
 
         response = await self._do_completion(**call_kwargs, drop_params=True)
 
