@@ -237,7 +237,8 @@ class KeySlot:
         - RATE_LIMIT: 冷却 + 并发降级 1 级
         - QUOTA_EXHAUSTED: 长冷却 3600s
         - AUTH_FAILED: 长冷却 300s
-        - SERVICE_DOWN: 连续次数计数（交给 adapter 做退避重试），累计 3 次后降级
+        - SERVICE_DOWN: 连续次数计数，第 2 次起置递增短冷却（让 select() 暂时绕开），
+          累计 3 次后并发降级
         - SERVER_ERROR: 冷却 + 换 key
         - NETWORK: 仅换 key，不冷却（不是 key 的错）
         - BAD_REQUEST / UNKNOWN: 不处理（由调用方决定 raise）
@@ -269,17 +270,30 @@ class KeySlot:
             )
         elif kind == ErrorKind.SERVICE_DOWN:
             self._consecutive_down += 1
-            # 连续 3 次 503 才降级（偶发抖动不算）
-            if self._consecutive_down >= 3:
+            n = self._consecutive_down
+            # 第 1 次当偶发抖动容忍，不冷却（让 adapter 立即退避重试）。
+            # 从第 2 次起置递增短冷却，让 is_cooling=True，select() 暂时绕开
+            # 这个 key（否则单 key 场景下 select() 会无限选回它，陷入
+            # 「选坏 key → 503 → 退避 → 又选回」死循环）。冷却时长指数退避
+            # 封顶 60s，避免长冷却后忘记恢复。
+            if n >= 2:
+                cool = min(10.0 * (2 ** (n - 2)), 60.0)
+                self._cooling_until = _time.monotonic() + cool
+                logger.info(
+                    "[KeySlot] %s SERVICE_DOWN 连续 %d 次，冷却 %.0fs",
+                    self.key_id, n, cool,
+                )
+            # 累计 3 次确认非偶发，并发降级
+            if n >= 3:
                 self._reduce_concurrency()
                 logger.warning(
                     "[KeySlot] %s SERVICE_DOWN 连续 %d 次，并发降级",
-                    self.key_id, self._consecutive_down,
+                    self.key_id, n,
                 )
             else:
                 logger.info(
                     "[KeySlot] %s SERVICE_DOWN 第 %d 次（adapter 退避重试）",
-                    self.key_id, self._consecutive_down,
+                    self.key_id, n,
                 )
         elif kind == ErrorKind.SERVER_ERROR:
             self._cooling_until = _time.monotonic() + 5.0
