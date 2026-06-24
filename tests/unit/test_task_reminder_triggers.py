@@ -226,3 +226,36 @@ class TestNoInfiniteLoopRegression:
         )
         r2 = await plugin.execute(ctx2)
         assert r2.route_signal is None, "LLM 开始调工具后不该再催"
+
+    @pytest.mark.asyncio
+    async def test_empty_output_with_history_text_no_reminder(self) -> None:
+        """本轮 LLM 输出为空（流式截断/调用失败）+ 历史有旧 assistant 文本 → 不触发。
+
+        BUG-FIX-fix_20260625_reminder_on_empty_output:
+        日志 af11896959d1 iter=5 现场：raw_result=None, raw_tool_calls=[]，
+        但 messages 历史里有旧的 assistant 文本。旧逻辑用 _last_assistant_has_text
+        回退把历史文本当成本轮输出 → 误触发 reminder → 死循环。
+        修复后：本轮空输出不该被 reminder 当成"光说不练"。
+        """
+        plugin = TaskReminder({"max_reminders": 8})
+        svc = _mock_task_service(has_subtasks=False)
+        ctx = _make_ctx(
+            _make_state(
+                agent_level="L3",
+                raw_tool_calls=[],       # 本轮没调工具
+                raw_result=None,          # 本轮无输出（流式截断）
+                evaluate_reminder_count=0,
+                # messages 里有历史 assistant 文本（模拟真实场景）
+                messages=[
+                    {"role": "user", "content": "运行 E2E 测试"},
+                    {"role": "assistant", "content": "我已经分析完测试结果..."},
+                ],
+            ),
+            svc,
+        )
+
+        result = await plugin.execute(ctx)
+
+        assert result.route_signal is None, (
+            "本轮 LLM 输出为空时，不该用历史旧文本伪装成有输出而触发 reminder"
+        )

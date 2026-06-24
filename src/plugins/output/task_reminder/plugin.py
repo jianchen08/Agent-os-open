@@ -142,7 +142,17 @@ class TaskReminder(IOutputPlugin):
         has_tool_calls = bool(raw_tool_calls)
         has_text = bool(raw_result and str(raw_result).strip())
 
-        if not has_text and not has_tool_calls:
+        # BUG-FIX-fix_20260625_reminder_on_empty_output:
+        # 历史逻辑在 has_text 和 has_tool_calls 同时为 False（本轮 LLM 无输出，
+        # 如流式截断/调用失败）时，回退到 _last_assistant_has_text 去历史消息
+        # 里捞旧文本，把"本轮空输出"误判成"有文本输出"，从而触发 reminder。
+        # 这会导致 LLM 一旦某轮输出为空就被 reminder 反复催促，形成死循环。
+        #
+        # 回退逻辑只保留它原本的用途：本轮 LLM 返回了 tool_calls 但文本被
+        # output_repetition_guard 等前置插件清空（has_tool_calls=True 且 has_text=False）
+        # 时，从 messages 里确认 LLM 确实输出过文本（用于评估模式判定）。
+        # 绝不在本轮完全无输出时用历史文本伪装成有输出。
+        if not has_text and has_tool_calls:
             has_text = self._last_assistant_has_text(state)
 
         # 评估模式：追踪连续仅工具调用/空输出次数，达到阈值后强制注入提醒
