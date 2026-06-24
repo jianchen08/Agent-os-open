@@ -214,8 +214,28 @@ class WebSocketInteractionNotifier:
         self._global_connections[user_id] = websocket
         logger.info("[GlobalWS] 全局连接已注册: user=%s, 总连接数=%d", user_id[:12], len(self._global_connections))
         try:
+            # BUG-FIX-fix_20260625_reconnect_no_active_connections:
+            # 原实现只遍历 _active_connections.keys() 恢复 pipeline 输出，但断连的
+            # finally 块（app_factory.py:594-599）会把空连接列表从 _active_connections
+            # 里删掉。于是重连时 _active_connections 是空的 → 没有任何 tid 可恢复 →
+            # 正在运行的 pipeline 的 output_sink 永远指向已断开的旧 WS → 后续流式 chunk
+            # 全部 send_to_thread 返回 False → 表现为「连接断了消息就没了」。
+            # 修复方案: 除了 _active_connections，再从 engine registry 查找所有正在运行/
+            #   挂起的 pipeline，逐个恢复其 sink。registry 不随 WS 断连清空，是可靠来源。
+            resumed_tids: set[str] = set()
             for tid in list(self._active_connections.keys()):
                 self._resume_pipeline_for_thread(tid)
+                resumed_tids.add(tid)
+            # 补充: 从 registry 恢复 _active_connections 里没有的活跃 pipeline
+            try:
+                from pipeline.registry import get_engine_registry  # noqa: PLC0415
+                _reg = get_engine_registry()
+                for _pid, _entry in list(_reg.all_entries().items()):
+                    if _entry.thread_id and _entry.thread_id not in resumed_tids:
+                        self._resume_pipeline_for_thread(_entry.thread_id)
+                        resumed_tids.add(_entry.thread_id)
+            except Exception:
+                logger.debug("[WS-Reconnect] registry 补充恢复失败（非致命）", exc_info=True)
         except Exception as _exc:
             logger.debug("[WS-Reconnect] 全局连接恢复 pipeline 失败: %s", _exc)
 
