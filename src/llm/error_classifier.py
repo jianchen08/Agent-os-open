@@ -69,48 +69,22 @@ _RATE_LIMIT_KEYWORDS = (
 
 
 def _extract_retry_after(exc: BaseException) -> float | None:
-    """从异常里提取 Retry-After 建议秒数。
-
-    三个来源，按可靠性排序：
-    1. 异常对象的 retry_after 属性（litellm 部分异常直接带）
-    2. response headers 的 Retry-After 头（标准 HTTP）
-    3. response body 里的 retry_after 字段（Cloudflare/网关层常放这里）
-    """
-    # 1. 异常属性
-    for attr in ("retry_after",):
+    """从异常里提取 Retry-After 建议秒数（litellm 部分异常会带）。"""
+    for attr in ("retry_after", "response_headers"):
         val = getattr(exc, attr, None)
         if isinstance(val, (int, float)) and val > 0:
             return float(val)
-
+    # 从 response headers 的 Retry-After 提取
     resp = getattr(exc, "response", None)
-    if resp is None:
-        return None
-
-    # 2. response headers
-    headers = getattr(resp, "headers", None)
-    if headers:
-        ra = headers.get("retry-after") or headers.get("Retry-After")
-        if ra:
-            try:
-                return float(ra)
-            except (TypeError, ValueError):
-                pass
-
-    # 3. response body（Cloudflare/网关层把 retry_after 放 body 里）
-    try:
-        body = None
-        if hasattr(resp, "json"):
-            try:
-                body = resp.json()
-            except Exception:
-                body = None
-        if isinstance(body, dict):
-            ra = body.get("retry_after") or body.get("retry-after")
-            if isinstance(ra, (int, float)) and ra > 0:
-                return float(ra)
-    except Exception:
-        pass
-
+    if resp is not None:
+        headers = getattr(resp, "headers", None)
+        if headers:
+            ra = headers.get("retry-after") or headers.get("Retry-After")
+            if ra:
+                try:
+                    return float(ra)
+                except (TypeError, ValueError):
+                    pass
     return None
 
 
@@ -210,23 +184,10 @@ def classify_error(exc: BaseException) -> ErrorInfo:
         return ErrorInfo(ErrorKind.NETWORK, retry_after, exc)
 
     if "ServiceUnavailableError" in type_name:
-        # 503 家族：多数上游临时抖动 → SERVICE_DOWN；但中转站（如 yichengc）
-        # 会把 RPM 限流也包成 503（消息含 "group requests-per-minute limit
-        # exceeded"）。限流必须按 RATE_LIMIT 处理（冷却 + 并发降级），否则
-        # SERVICE_DOWN 不冷却 key，会无限选回同一个被限流的 key 死循环。
-        # 先嗅探消息体，命中限流特征则归 RATE_LIMIT。
-        if any(kw in msg for kw in _RATE_LIMIT_KEYWORDS):
-            return ErrorInfo(ErrorKind.RATE_LIMIT, retry_after, exc)
         return ErrorInfo(ErrorKind.SERVICE_DOWN, retry_after, exc)
 
     if "InternalServerError" in type_name:
         # 500 家族：多数上游抖动，按 SERVICE_DOWN 重试更合理
-        return ErrorInfo(ErrorKind.SERVICE_DOWN, retry_after, exc)
-
-    # Cloudflare/网关层错误：502 BadGateway、504 GatewayTimeout
-    # 这些异常类型不在 litellm 标准层次里，但中转站常返回（Cloudflare 前置时）。
-    # retry_after 通常在响应 body 里（Cloudflare 会给 retryable + retry_after）。
-    if "BadGateway" in type_name or "GatewayTimeout" in type_name:
         return ErrorInfo(ErrorKind.SERVICE_DOWN, retry_after, exc)
 
     # 2. BadRequestError（400）需进一步判定：配额类 → QUOTA，否则真参数错
@@ -242,7 +203,7 @@ def classify_error(exc: BaseException) -> ErrorInfo:
     if any(kw in msg for kw in _RATE_LIMIT_KEYWORDS):
         return ErrorInfo(ErrorKind.RATE_LIMIT, retry_after, exc)
 
-    if "service temporarily unavailable" in msg or "503" in msg or "502" in msg or "bad gateway" in msg or "badgateway" in msg:
+    if "service temporarily unavailable" in msg or "503" in msg:
         return ErrorInfo(ErrorKind.SERVICE_DOWN, retry_after, exc)
 
     if "timeout" in msg or "timed out" in msg:

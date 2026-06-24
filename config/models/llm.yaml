@@ -168,7 +168,10 @@ defaults:
     large: glm-5.2-yichengc
     medium: glm-5.2-yichengc
     small: glm-5.2-yichengc
-    fallback_chain: {}
+    fallback_chain:
+      chat:
+      - deepseek-v4-pro
+      - minimax-m3-guangfang
 providers:
   zhipu_coding:
     type: zai

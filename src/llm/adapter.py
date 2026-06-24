@@ -896,10 +896,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                         )
                         raise
 
-                    # SERVICE_DOWN：上游临时挂，退避后重试。
-                    # handle_error 会从第 2 次起给 key 置短冷却，所以 finally 的
-                    # release + 下一轮 acquire_slot 中，select() 会暂时绕开这个
-                    # key（单 key 场景则等到冷却到期再重试），避免无限选回坏 key。
+                    # SERVICE_DOWN：退避重试同一 key（上游临时挂，换 key 没意义）
                     if info.kind == ErrorKind.SERVICE_DOWN:
                         backoff = min(2.0 * (2 ** slot._consecutive_down), 16.0)
                         logger.warning(
@@ -911,6 +908,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                         slot.handle_error(info)
                         await asyncio.sleep(backoff)
                         last_exc = exc
+                        # 注意：不 release，因为要重试同一 key——但 acquire_slot 已占信号量，
+                        # 这里需先释放再重新获取以避免死锁
+                        # 简化：SERVICE_DOWN 也走换 key 路径（释放后 select 会再选回它，
+                        # 因为没冷却）。重试逻辑交给下一轮 attempt。
+                        # → 实际效果：换 key 重试，但 slot 记录了连续 down 次数
                     else:
                         # 其他可恢复错误：交给 KeySlot 统一策略处理（冷却/降级/不冷却）
                         slot.handle_error(info)

@@ -781,7 +781,15 @@ class TaskTool(BuiltinTool):
 
     async def _get_all_tasks(self, limit: int = 5) -> list[TaskModel]:
 
-        """获取全部任务列表。
+        """获取全部任务列表（按创建时间倒序）。
+
+
+
+        注意：limit 在过滤前应用，会丢弃较老的任务。当列表查询需要做权限/范围/
+
+        状态过滤时，应改用 _list_all_tasks_sorted() 拉全量再在外层过滤后截断，
+
+        避免「截断窗口落在被过滤掉的老任务上 → 过滤后为空」的 bug。
 
 
 
@@ -799,7 +807,25 @@ class TaskTool(BuiltinTool):
 
         service = self._get_task_service()
 
-        return await service.list_all(limit=limit)
+        return await service.list_all(limit=limit, reverse=True)
+
+
+
+    async def _list_all_tasks_sorted(self) -> list[TaskModel]:
+
+        """拉取存储内全部任务，按创建时间倒序返回（不做截断）。
+
+
+
+        Returns:
+
+            任务模型列表（按 created_at 降序）
+
+        """
+
+        service = self._get_task_service()
+
+        return await service.list_all(limit=10_000, reverse=True)
 
 
 
@@ -1077,8 +1103,6 @@ class TaskTool(BuiltinTool):
 
             status_filter = inputs.get("status")
 
-            inputs.get("session_id")
-
             pipeline_id = inputs.get("pipeline_id")
 
             user_parent_task_id = inputs.get("parent_task_id")
@@ -1089,7 +1113,15 @@ class TaskTool(BuiltinTool):
 
 
 
-            tasks = await self._get_all_tasks(limit)
+            # BUG-FIX(list_empty)：原实现先按 limit 截断再过滤，且 list_all 未启用
+
+            # reverse，导致拿到的是「最老的 N 条」而非「最新的 N 条」；当当前 session
+
+            # 的任务集中在新创建批次时，截断后被全部过滤掉，返回空列表。
+
+            # 正确顺序：拉全量 → 过滤 → 排序（list_all 已做）→ 末端截断。
+
+            tasks = await self._list_all_tasks_sorted()
 
 
 
@@ -1168,6 +1200,16 @@ class TaskTool(BuiltinTool):
 
 
                 filtered.append(task)
+
+
+
+            # 末端截断：在所有过滤维度都通过之后才应用 limit，避免截断窗口
+
+            # 落在被过滤掉的老任务上导致返回空集合（见 BUG-FIX(list_empty)）。
+
+            if limit and len(filtered) > limit:
+
+                filtered = filtered[:limit]
 
 
 
