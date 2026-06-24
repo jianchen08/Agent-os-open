@@ -39,6 +39,34 @@ const PERSIST_MAX_MESSAGES_PER_PIPELINE = 50
 const OPTIMISTIC_MSG_GRACE_MS = 30_000
 
 /**
+ * 判断本地独有消息（API 未返回的）是否落在「刚生成、后端可能尚未持久化」的宽限期内。
+ *
+ * BUG-FIX-fix_20260624_ai_msg_vanish:
+ * 与乐观 user 消息（fix_20260623_optimistic_user_msg_vanish）同源问题——
+ * AI 回复 stream_end/finalizeMessage 后 status 由 'streaming' 变 'completed'，
+ * isStreamingMessage() 随即返回 false。此时若 initFromAPI 被并发触发
+ * （WS 重连 / Tab 切换 / 会话切换）且后端尚未持久化该 AI 消息，
+ * API 返回列表不含它 → 走 return false 被丢弃 → 最新几条 AI 回复消失，
+ * 刷新后才重新出现，表现与 user 消息完全一致。
+ *
+ * 每类消息用单一字段判定「乐观窗口起点」：
+ *   - user 消息用 timestamp：乐观消息由 addMessage 创建（不写 _lastUpdated），
+ *     timestamp 即发送时刻。
+ *   - assistant 消息用 _lastUpdated：stream_end 的 finalize/updateMessage 必写此字段，
+ *     即「刚完成」时刻。persist 残留的旧 AI 消息 _lastUpdated 为上次会话值或缺失，
+ *     均不满足窗口条件，被正确丢弃，不重新引入重复渲染。
+ */
+function isWithinOptimisticGrace(m: Message): boolean {
+  if (m.role === 'user' && m.clientMessageId) {
+    return Date.now() - new Date(m.timestamp).getTime() < OPTIMISTIC_MSG_GRACE_MS
+  }
+  if (m.role === 'assistant' && typeof m._lastUpdated === 'number') {
+    return Date.now() - m._lastUpdated < OPTIMISTIC_MSG_GRACE_MS
+  }
+  return false
+}
+
+/**
  * 持久化数据的有效期策略说明（非强制 TTL）
  *
  * BUG-FIX-fix_20260622_workspace_state_loss:
@@ -510,16 +538,22 @@ function mergeApiWithExisting(
   //     时间窗口内保留，覆盖后端持久化的正常延迟。
   //     persist 残留的旧消息不满足时间条件（timestamp 远超 30s），仍被丢弃，
   //     不重新引入重复渲染。
+  //
+  // BUG-FIX-fix_20260624_ai_msg_vanish:
+  //   问题根因: 同源问题影响 AI 消息。AI 回复 stream_end/finalize 后 status 变为
+  //     'completed'，isStreamingMessage() 返回 false，不再受「streaming 占位符保留」保护。
+  //     此时若 initFromAPI 并发触发且后端尚未持久化该 AI 消息，API 不含它 → 走
+  //     return false 被丢弃 → 最新几条 AI 回复消失，刷新后才出现（与 user 消息同症状）。
+  //   修复方案: 宽限期守卫扩展到刚 finalize 完成的 assistant 消息，由 isWithinOptimisticGrace
+  //     统一判定。AI 消息无 clientMessageId，改用 _lastUpdated（finalize 写入）界定「刚完成」。
+  //     后续 initFromAPI 通过 role::seq 指纹去重用 API 权威版本替换，不引入重复。
   const localOnly = existing.filter((m) => {
     if (apiIds.has(m.id)) return false
     if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
     // 正在 streaming 的占位消息必须保留
     if (isStreamingMessage(m)) return true
-    // 乐观 user 消息在持久化窗口内保留（刚发送、后端可能尚未写入）
-    if (m.role === 'user' && m.clientMessageId) {
-      const createdTime = new Date(m.timestamp).getTime()
-      if (Date.now() - createdTime < OPTIMISTIC_MSG_GRACE_MS) return true
-    }
+    // 乐观/刚完成的消息在持久化窗口内保留（后端可能尚未写入）
+    if (isWithinOptimisticGrace(m)) return true
     // 其余本地消息：API 没有就以 API 为准丢弃
     return false
   })
@@ -528,14 +562,20 @@ function mergeApiWithExisting(
     return { finalMessages: sorted, preservedCount: 0 }
   }
 
-  // 保留的 streaming 占位符与 API 同指纹消息视为同一条，从 sorted 移除避免重复
-  const streamingPlaceholderFingerprints = new Set(
-    localOnly.filter((m) => isStreamingMessage(m)).map((m) => makeMessageFingerprint(m)),
-  )
-  const dedupedSorted =
-    streamingPlaceholderFingerprints.size > 0
-      ? sorted.filter((m) => !streamingPlaceholderFingerprints.has(makeMessageFingerprint(m)))
-      : sorted
+  // localOnly 保留的消息若与 API 同 role::seq 指纹，视为同一条逻辑消息，
+  // 从 sorted 移除 API 重复项，保留 localOnly 版本（流式占位符 / 乐观版本）。
+  //
+  // BUG-FIX-fix_20260617_ai_msg_dup_render:
+  //   streaming 占位符与 API 权威消息 id 不同（WS UUID vs API hex），靠 role::seq
+  //   指纹识别为同一条，避免切换 Tab 时 AI 气泡重复渲染。
+  // BUG-FIX-fix_20260624_ai_msg_vanish:
+  //   宽限期保留的 completed assistant 消息同理——后端已持久化时 API 会返回同 seq
+  //   权威版本，此时去重只留一份，避免「保留乐观版 + API 版」并存成两条。
+  //   后端未持久化时 API 不含该指纹，localOnly 版本正常保留，等待下次 fetch 对账。
+  const localOnlyFingerprints = new Set(localOnly.map((m) => makeMessageFingerprint(m)))
+  const dedupedSorted = localOnlyFingerprints.size
+    ? sorted.filter((m) => !localOnlyFingerprints.has(makeMessageFingerprint(m)))
+    : sorted
 
   // BUG-FIX-fix_20260623_refresh_order:
   // 问题根因: 原代码用 [...sorted, ...localOnly] 直接末尾拼接，未按 sequence

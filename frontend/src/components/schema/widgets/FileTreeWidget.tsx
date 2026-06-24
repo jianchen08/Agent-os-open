@@ -1413,9 +1413,14 @@ function TreeNode({
   /** 是否有操作按钮需要显示 */
   const hasActions = hasPipeline || hasWorkspace
 
+  // 失败/完成/暂停等非活跃任务统一使用 opacity-80（0.8 不透明度）。
+  // 注意：opacity 仅作用于"当前节点行"的 div，不能加在包住子节点的外层 div 上，
+  // 否则 TreeNode 递归时父子 opacity 会乘法叠加（0.8 × 0.8 × ...），
+  // 导致越深的子节点越透明、越看不清。
+  const inactiveOpacityClass = showEnabledToggle && !isEnabled ? 'opacity-80' : ''
+
   return (
     <div
-      className={showEnabledToggle && !isEnabled ? 'opacity-50' : ''}
       onContextMenu={(e) => onContextMenu?.(e, node)}
     >
       <div
@@ -1423,7 +1428,7 @@ function TreeNode({
           isSelected
             ? 'bg-accent/50 border-l-2 border-l-status-info'
             : 'border-l-2 border-l-transparent'
-        }`}
+        } ${inactiveOpacityClass}`}
         style={{ paddingLeft: `${depth * 20 + 8}px` }}
         onClick={handleClick}
       >

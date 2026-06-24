@@ -4,10 +4,13 @@
 根据评估指标配置的 expect.conditions 进行条件判断，支持多种运算符和逻辑组合。
 
 核心功能：
-1. 支持 11 种运算符：is_true, is_false, equals, not_equals, in, not_in, contains,
-   gt, lt, gte, lte
+1. 支持运算符（含长名/短名别名）：equals, not_equals, contains, not_contains,
+   is_true, is_false, greater_than/gt, less_than/lt, gte, lte, in, not_in, matches
 2. 支持嵌套字段路径访问（如 result.success）
 3. 支持 and/or 逻辑组合
+
+运算符命名兼容两套写法：长名（greater_than）与需求文档短名（gt）均可使用，
+便于历史验收标准配置与需求文档约定共存。
 
 使用示例:
     >>> from src.evaluation.expect_evaluator import ExpectConditionEvaluator
@@ -40,18 +43,20 @@ class ExpectConditionEvaluator:
 
     根据评估指标配置的 expect.conditions 进行条件判断。
 
-    支持的运算符（11 种，与需求文档一致）：
-    - is_true: 为真
-    - is_false: 为假
+    支持的运算符（长名与短名别名等价）：
     - equals: 等于
     - not_equals: 不等于
-    - in: 在列表中
-    - not_in: 不在列表中
-    - contains: 字符串/列表包含
-    - gt: 大于
-    - lt: 小于
+    - contains: 包含（字符串/列表）
+    - not_contains: 不包含
+    - is_true: 为真
+    - is_false: 为假
+    - greater_than / gt: 大于
+    - less_than / lt: 小于
     - gte: 大于等于
     - lte: 小于等于
+    - in: 在列表中
+    - not_in: 不在列表中
+    - matches: 正则匹配
 
     Example:
         >>> evaluator = ExpectConditionEvaluator()
@@ -62,19 +67,23 @@ class ExpectConditionEvaluator:
         >>> assert result["passed"] is True
     """
 
-    # 运算符映射表（11 种标准操作符，与需求文档一致）
+    # 运算符映射表（长名 + 短名别名共存；contains 兼容字符串与列表）
     OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
-        "is_true": lambda a, b: bool(a) is True,  # noqa: ARG005
-        "is_false": lambda a, b: bool(a) is False,  # noqa: ARG005
         "equals": lambda a, b: a == b,
         "not_equals": lambda a, b: a != b,
-        "in": lambda a, b: a in b if isinstance(b, (list, tuple, set)) else False,
-        "not_in": lambda a, b: a not in b if isinstance(b, (list, tuple, set)) else True,
         "contains": lambda a, b: b in a if isinstance(a, (str, list)) else False,
+        "not_contains": lambda a, b: b not in a if isinstance(a, str) else True,
+        "is_true": lambda a, b: bool(a) is True,  # noqa: ARG005
+        "is_false": lambda a, b: bool(a) is False,  # noqa: ARG005
+        "greater_than": lambda a, b: a > b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "gt": lambda a, b: a > b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
+        "less_than": lambda a, b: a < b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "lt": lambda a, b: a < b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "gte": lambda a, b: a >= b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "lte": lambda a, b: a <= b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
+        "in": lambda a, b: a in b if isinstance(b, (list, tuple, set)) else False,
+        "not_in": lambda a, b: a not in b if isinstance(b, (list, tuple, set)) else True,
+        "matches": lambda a, b: bool(re.match(b, str(a))) if isinstance(a, str) else False,
     }
 
     def evaluate(self, result: dict[str, Any], expect: dict[str, Any]) -> dict[str, Any]:

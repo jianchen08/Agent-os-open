@@ -1769,7 +1769,7 @@ class TaskExecutorMixin:
 
 
 
-        容器的完成/失败由主 Agent 通过 complete_container / fail_container 决定，
+        容器的完成/失败由主 Agent 通过 task_manage(action="change", status=...) 决定，
 
         系统不做自动判定。
 

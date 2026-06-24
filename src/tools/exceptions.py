@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.exceptions.base import DomainException
+from src.core.exceptions.base import DomainException
 
 
 class ToolException(DomainException):

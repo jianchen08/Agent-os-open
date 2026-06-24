@@ -10,6 +10,61 @@ import { loggers } from '@/utils/logger'
 import { resolvePipelineId } from '../router'
 
 /**
+ * 合并本地流式累积的 parts 与后端 stream_end/new_message 下发的 serverParts。
+ *
+ * BUG-FIX-fix_20260624_stream_overwrite_regression:
+ * 问题根因: 前一版（fix_20260617_stream_end_overwrite / fix_20260617_new_msg_overwrite）
+ *   用「parts 数组长度」决定保留本地还是 server：localParts.length > serverParts.length
+ *   ? localParts : serverParts。但后端 _build_parts_from_state 从 state.raw_thinking /
+ *   raw_tool_calls / raw_result 构建 parts，而 state 这些字段在每轮 LLM 迭代中被覆盖，
+ *   所以 serverParts 只反映「最后一轮」的内容，且其数量与轮次数毫无关系。
+ *   一旦 serverParts 数量 ≥ 本地累积的多轮 parts，本地完整的流式内容（前几轮思考、
+ *   工具调用）就被末轮残缺的 serverParts 整体覆盖 —— 用户表现为「流式输出过程中
+ *   已经显示的内容突然变了/消失了」。
+ *
+ * 正确语义: 本地 parts 由 thinking_start/chunk、stream_chunk、tool_call 等事件
+ *   逐个 append 累积，是逐事件的完整真相；serverParts 是末轮残缺快照。因此
+ *   本地有实质内容时必须优先保留本地，serverParts 仅作兜底。
+ *
+ * 兜底场景: 本地 parts 为空或全部无内容（极端情况：所有流式事件丢失、纯 new_message
+ *   注入的消息），此时 serverParts 是唯一内容来源。
+ *
+ * content 校准: server 的 full_content（来自 state.raw_result，最终完整文本）是可靠的，
+ *   本地 content 是逐 chunk 拼接的。若 server 的更长，说明本地拼接有缺失，用它校准。
+ *
+ * @returns 合并后的 { parts, content }
+ */
+export function mergeStreamingParts(
+  localParts: any[] | undefined,
+  serverParts: any[] | undefined,
+  serverFullContent?: string,
+  localContent?: string,
+): { parts: any[]; content: string } {
+  const hasLocalContent =
+    !!localParts &&
+    localParts.length > 0 &&
+    localParts.some(
+      (p) =>
+        (p.type === 'text' && p.content) ||
+        (p.type === 'thinking' && p.content) ||
+        p.type === 'tool_call' ||
+        (p.type === 'system' && p.content),
+    )
+
+  // 本地有完整流式内容 → 优先保留本地 parts，避免被末轮残缺 serverParts 覆盖
+  const parts = hasLocalContent ? localParts! : serverParts && serverParts.length > 0 ? serverParts : []
+
+  // content 校准：server 的 full_content 更长时采用（本地逐 chunk 拼接可能不完整）
+  const currentContent = localContent || ''
+  const content =
+    serverFullContent && serverFullContent.length > currentContent.length
+      ? serverFullContent
+      : currentContent
+
+  return { parts, content }
+}
+
+/**
  * 从事件数据中提取消息 ID
  *
  * 统一处理 message_id 的多种来源，避免各 handler 重复写
