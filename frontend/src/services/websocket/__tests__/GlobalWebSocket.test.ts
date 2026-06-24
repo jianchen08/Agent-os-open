@@ -25,6 +25,24 @@ vi.mock('@/stores/layoutModeStore', () => ({
   },
 }))
 
+// Mock useAuthStore：默认 token 未过期，让普通重连测试走指数退避路径
+// （1006+未连接过的兜底逻辑仅在 checkTokenExpiration()=true 时才触发）
+const mockCheckTokenExpiration = vi.fn(() => false)
+const mockRefreshToken = vi.fn(async () => {})
+vi.mock('@/stores/authStore', () => ({
+  useAuthStore: {
+    getState: () => ({
+      checkTokenExpiration: mockCheckTokenExpiration,
+      refreshToken: mockRefreshToken,
+      token: 'test-token',
+    }),
+  },
+  isAuthFailureFromError: () => false,
+}))
+vi.mock('@/services/authCallbacks', () => ({
+  triggerAuthExpired: vi.fn(),
+}))
+
 // Mock logger
 vi.mock('@/utils/logger', () => ({
   loggers: {
