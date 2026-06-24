@@ -70,7 +70,6 @@ const handleEdit = () => emit('edit', props.userId);
 
 | 原则 | 说明 | 优先级 |
 |------|------|--------|
-| 单一职责 | 组件只做一件事 | 高 |
 | 受控组件 | 表单值受 state 控制 | 高 |
 | Props 校验 | 使用 TypeScript 或 PropTypes | 高 |
 | 组件拆分阈值 | 超过 150 行考虑拆分 | 中 |
@@ -184,7 +183,6 @@ export const userApi = {
 | 大文件组件（>500行） | 拆分为小组件 |
 | 魔法数字/字符串 | 定义常量 |
 | 未处理的 Promise | async/await + try-catch |
-| any 类型滥用 | 使用具体类型或 unknown |
 
 ### 6.2 状态管理
 

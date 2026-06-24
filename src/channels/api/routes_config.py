@@ -111,6 +111,14 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}{'*' * 8}{key[-4:]}"
 
 
+def _is_masked_key(key: str) -> bool:
+    """检查值是否为脱敏后的 API Key（含 ******** 掩码标记）。
+
+    防止前端将 GET 返回的脱敏值原样 PUT 回来覆盖明文密钥。
+    """
+    return bool(key) and "********" in key
+
+
 # ---------------------------------------------------------------------------
 # LLM 配置
 # ---------------------------------------------------------------------------
@@ -241,10 +249,15 @@ def delete_model(model_id: str) -> dict[str, Any]:
 @router.put("/llm/providers/{provider_id}", summary="更新提供商配置")
 def update_provider(provider_id: str, body: ProviderConfigUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
-    providers = data.setdefault("providers", {})
+    providers = data.get("providers", {})
     if provider_id not in providers:
-        providers[provider_id] = {}
-    providers[provider_id].update(body.config)
+        raise HTTPException(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
+    # 过滤脱敏值：防止前端将 GET 返回的掩码 key 覆盖明文密钥
+    safe_config = {
+        k: v for k, v in body.config.items()
+        if not (k == "api_key" and isinstance(v, str) and _is_masked_key(v))
+    }
+    providers[provider_id].update(safe_config)
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("更新提供商配置: %s", provider_id)
