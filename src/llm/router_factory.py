@@ -32,8 +32,11 @@ _provider_type_map: dict[str, str] = {}
 def get_litellm_prefix(provider_name: str) -> str:
     """获取 provider 对应的 litellm 前缀（从配置动态读取）。
 
-    优先从 _provider_type_map（llm.yaml providers.type 字段）查找，
-    未命中则回退到 provider_name 本身。
+    优先从 _provider_type_map（llm.yaml providers.type 字段）查找。
+    若映射为空（reset_router() 后未重建，或独立调用未走 build_router），
+    则懒加载从 yaml 重建，避免回退到 provider_name 本身——provider 名
+    （如 yichengc/apigo）不是 litellm 合法前缀，直接用会导致注册成
+    "yichengc/glm-5.2" 这种 litellm 无法路由的非法字符串。
 
     Args:
         provider_name: 配置中的 provider 名称（如 "apigo"、"zhipu_coding"）
@@ -41,7 +44,32 @@ def get_litellm_prefix(provider_name: str) -> str:
     Returns:
         litellm 模型字符串前缀（如 "openai"、"zai"）
     """
+    if provider_name in _provider_type_map:
+        return _provider_type_map[provider_name]
+    # 映射为空或缺失：懒加载重建，绝不回退到 provider_name 本身（非法前缀）
+    _ensure_provider_type_map_loaded()
     return _provider_type_map.get(provider_name, provider_name)
+
+
+def _ensure_provider_type_map_loaded() -> None:
+    """懒加载 _provider_type_map（若为空则从 yaml 重建）。
+
+    应对 reset_router() 清空映射后的窗口期，以及 adapter/llm_core 等独立
+    调用 get_litellm_prefix 的场景，保证总能拿到 provider.type 配置。
+    """
+    if _provider_type_map:
+        return
+    try:
+        from config.models import get_model_config_loader  # noqa: PLC0415
+
+        loader = get_model_config_loader()
+        llm_data = loader._load_llm_data()
+        for pn, pc in llm_data.get("providers", {}).items():
+            if isinstance(pc, dict) and "type" in pc:
+                _provider_type_map[pn] = pc["type"]
+    except Exception:  # noqa: BLE001
+        # 加载失败不抛：调用方拿到 provider_name 兜底，至少不比原来更差
+        logger.warning("[Router] 懒加载 provider_type_map 失败", exc_info=True)
 
 
 def _get_litellm_model_string(provider: str, model_name: str) -> str:
