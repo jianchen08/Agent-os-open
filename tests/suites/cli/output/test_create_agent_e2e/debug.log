@@ -1,0 +1,1005 @@
+2026-04-20 12:18:43,247 [pipeline.event_bus] DEBUG: Subscribed to task.submitted: _on_task_submitted
+2026-04-20 12:18:43,248 [pipeline.event_bus] DEBUG: Subscribed to task_state_changed: _on_task_state_changed
+2026-04-20 12:18:43,248 [infrastructure.task_worker] INFO: TaskWorker started (event-driven background task processor)
+2026-04-20 12:18:43,249 [pipeline.engine] INFO: === Pipeline iteration 1 ===
+2026-04-20 12:18:43,250 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:18:43,250 [pipeline.event_bus] DEBUG: Subscribed to task_state_changed: _on_state_changed
+2026-04-20 12:18:43,250 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:18:43,251 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:18:48,289 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:18:48,290 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:18:48,294 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['resource_search'])], ended=False
+2026-04-20 12:18:48,294 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['resource_search']
+2026-04-20 12:18:48,294 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:18:48,294 [pipeline.engine] INFO: === Pipeline iteration 2 ===
+2026-04-20 12:18:48,295 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:18:48,296 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:18:48,296 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:18:48,494 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:18:48,494 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:18:48,498 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:18:48,498 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:18:48,498 [pipeline.engine] INFO: === Pipeline iteration 3 ===
+2026-04-20 12:18:48,499 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:18:48,499 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:18:48,500 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:18:55,144 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:18:55,144 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:18:55,148 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['resource_search'])], ended=False
+2026-04-20 12:18:55,148 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['resource_search']
+2026-04-20 12:18:55,148 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:18:55,148 [pipeline.engine] INFO: === Pipeline iteration 4 ===
+2026-04-20 12:18:55,149 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:18:55,150 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:18:55,150 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:18:55,150 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:18:55,150 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:18:55,155 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:18:55,155 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:18:55,155 [pipeline.engine] INFO: === Pipeline iteration 5 ===
+2026-04-20 12:18:55,157 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:18:55,157 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:18:55,157 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:01,945 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:01,946 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:01,951 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_submit'])], ended=False
+2026-04-20 12:19:01,951 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_submit']
+2026-04-20 12:19:01,951 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:01,951 [pipeline.engine] INFO: === Pipeline iteration 6 ===
+2026-04-20 12:19:01,953 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:01,953 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:01,954 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:01,954 [tools.builtin.task_submit] INFO: [TaskSubmit] 开始执行 | task_scope=short_term | parent_agent_level=1
+2026-04-20 12:19:01,954 [tools.builtin.task_submit] WARNING: [TaskSubmit] acceptance_criteria 类型异常: str，重置为空 dict 以触发自动补全
+2026-04-20 12:19:01,963 [tools.builtin.task_submit] INFO: [TaskSubmit] 从 resource_manager_agent.yaml 加载了 2 个推荐指标
+2026-04-20 12:19:01,963 [tools.builtin.task_submit] INFO: [TaskSubmit] 自动补全验收标准 | target_id=resource_manager_agent | metrics=['file_check', 'semantic_check']
+2026-04-20 12:19:01,963 [tools.builtin.task_submit] INFO: [TaskSubmit] 短期任务 | target_type=agent | target_id=resource_manager_agent
+2026-04-20 12:19:01,963 [tools.builtin.task_submit] DEBUG: [TaskSubmit] 任务详情 | title=创建 e2e_time_agent 时间助手 Agent | metric_count=2
+2026-04-20 12:19:01,965 [pipeline.event_bus] DEBUG: Emitting event task.submitted to 1 subscribers
+2026-04-20 12:19:01,965 [infrastructure.task_worker] INFO: TaskWorker received task: 56ac6be45d6b
+2026-04-20 12:19:01,965 [tools.builtin.task_submit] INFO: [TaskSubmit] 事件已发布 | task_id=56ac6be45d6b
+2026-04-20 12:19:01,965 [tools.builtin.task_submit] INFO: [TaskSubmit] 任务提交成功 | task_id=56ac6be45d6b | title=创建 e2e_time_agent 时间助手 Agent
+2026-04-20 12:19:01,966 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:01,966 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:01,972 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:01,972 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:01,972 [pipeline.engine] INFO: === Pipeline iteration 7 ===
+2026-04-20 12:19:01,974 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:01,974 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:01,974 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:01,975 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 2 subscribers
+2026-04-20 12:19:01,979 [infrastructure.task_worker] INFO: TaskWorker: task 56ac6be45d6b started
+2026-04-20 12:19:01,980 [infrastructure.task_worker] INFO: TaskWorker: idle 计时器已注册: task_id=56ac6be45d6b, timeout=1200s
+2026-04-20 12:19:01,989 [infrastructure.task_worker] INFO: TaskWorker: bound task 56ac6be45d6b to pipeline_run fb8211fb70b1 (early binding)
+2026-04-20 12:19:01,990 [pipeline.engine] INFO: === Pipeline iteration 1 ===
+2026-04-20 12:19:01,990 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:01,990 [pipeline.event_bus] DEBUG: Subscribed to task_state_changed: _on_state_changed
+2026-04-20 12:19:02,079 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:02,079 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:02,079 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 3 subscribers
+2026-04-20 12:19:07,720 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:07,721 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:07,726 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(3 tool call(s) pending: ['resource_search', 'resource_search)], ended=False
+2026-04-20 12:19:07,726 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=3 tool call(s) pending: ['resource_search', 'resource_search', 'file_read']
+2026-04-20 12:19:07,726 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:07,726 [pipeline.engine] INFO: === Pipeline iteration 2 ===
+2026-04-20 12:19:07,726 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:07,726 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:07,727 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:07,731 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:07,732 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:07,773 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:07,774 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:07,774 [pipeline.engine] INFO: === Pipeline iteration 3 ===
+2026-04-20 12:19:07,774 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:07,774 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:07,774 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:09,037 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:09,037 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:09,044 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:09,045 [pipeline.engine] WARNING: No route signals after LLM response (iter=7), ending pipeline. output_plugins_count=7, raw_tool_calls=0, ended=False
+2026-04-20 12:19:09,052 [pipeline.engine] DEBUG: Post-end output chain failed (non-critical): 'PluginChain' object has no attribute 'results'
+2026-04-20 12:19:18,808 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:18,808 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:18,845 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(2 tool call(s) pending: ['resource_merge', 'file_read'])], ended=False
+2026-04-20 12:19:18,845 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=2 tool call(s) pending: ['resource_merge', 'file_read']
+2026-04-20 12:19:18,845 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:18,846 [pipeline.engine] INFO: === Pipeline iteration 4 ===
+2026-04-20 12:19:18,846 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:18,846 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:18,846 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:19,625 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:19,625 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:19,701 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:19,701 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:19,701 [pipeline.engine] INFO: === Pipeline iteration 5 ===
+2026-04-20 12:19:19,701 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:19,702 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:19,702 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:29,216 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:29,217 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:29,257 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:19:29,257 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:19:29,257 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:29,257 [pipeline.engine] INFO: === Pipeline iteration 6 ===
+2026-04-20 12:19:29,257 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:29,258 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:29,258 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:29,260 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:29,260 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:29,306 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:29,306 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:29,306 [pipeline.engine] INFO: === Pipeline iteration 7 ===
+2026-04-20 12:19:29,307 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:29,307 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:29,307 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:43,025 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:43,025 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:43,072 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_submit'])], ended=False
+2026-04-20 12:19:43,072 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_submit']
+2026-04-20 12:19:43,072 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:43,072 [pipeline.engine] INFO: === Pipeline iteration 8 ===
+2026-04-20 12:19:43,072 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:43,073 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:43,073 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:43,073 [tools.builtin.task_submit] INFO: [TaskSubmit] 开始执行 | task_scope=short_term | parent_agent_level=1
+2026-04-20 12:19:43,073 [tools.builtin.task_submit] INFO: [TaskSubmit] 自动注入 parent_task_id=56ac6be45d6b (来自管道所属任务)
+2026-04-20 12:19:43,073 [tools.builtin.task_submit] INFO: [TaskSubmit] 短期任务 | target_type=agent | target_id=agent_maker
+2026-04-20 12:19:43,073 [tools.builtin.task_submit] DEBUG: [TaskSubmit] 任务详情 | title=生成 e2e_time_agent 时间助手 Agent | metric_count=2
+2026-04-20 12:19:43,075 [pipeline.event_bus] DEBUG: Emitting event task.submitted to 1 subscribers
+2026-04-20 12:19:43,075 [infrastructure.task_worker] INFO: TaskWorker received task: 879e7fa38c5e
+2026-04-20 12:19:43,076 [tools.builtin.task_submit] INFO: [TaskSubmit] 事件已发布 | task_id=879e7fa38c5e
+2026-04-20 12:19:43,076 [tools.builtin.task_submit] INFO: [TaskSubmit] 任务提交成功 | task_id=879e7fa38c5e | title=生成 e2e_time_agent 时间助手 Agent
+2026-04-20 12:19:43,076 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:43,076 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:43,126 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:43,126 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:43,126 [pipeline.engine] INFO: === Pipeline iteration 9 ===
+2026-04-20 12:19:43,126 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:43,127 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:43,127 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:43,127 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 3 subscribers
+2026-04-20 12:19:43,133 [infrastructure.task_worker] INFO: TaskWorker: task 879e7fa38c5e started
+2026-04-20 12:19:43,133 [infrastructure.task_worker] INFO: TaskWorker: idle 计时器已注册: task_id=879e7fa38c5e, timeout=1200s
+2026-04-20 12:19:43,147 [infrastructure.task_worker] INFO: TaskWorker: bound task 879e7fa38c5e to pipeline_run 8173117be3f7 (early binding)
+2026-04-20 12:19:43,147 [pipeline.engine] INFO: === Pipeline iteration 1 ===
+2026-04-20 12:19:43,148 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:43,148 [pipeline.event_bus] DEBUG: Subscribed to task_state_changed: _on_state_changed
+2026-04-20 12:19:43,148 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:43,148 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:43,150 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 4 subscribers
+2026-04-20 12:19:47,312 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:47,312 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:47,317 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:19:47,317 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:19:47,317 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:47,318 [pipeline.engine] INFO: === Pipeline iteration 2 ===
+2026-04-20 12:19:47,318 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:47,318 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:47,318 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:47,320 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:47,320 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:47,323 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:47,323 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:47,323 [pipeline.engine] INFO: === Pipeline iteration 3 ===
+2026-04-20 12:19:47,323 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:47,324 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:47,324 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:48,612 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:48,612 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:48,660 [pipeline.engine] INFO: Output chain: 7 plugins, 2 signals [wait(child_task_guard: active children, suspend pipeline), next_llm(task_reminder: text_only output, reminder #1)], ended=False
+2026-04-20 12:19:48,660 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #1
+2026-04-20 12:19:48,660 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:19:48,660 [pipeline.engine] INFO: === Pipeline iteration 10 ===
+2026-04-20 12:19:48,660 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:48,660 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:48,661 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:50,474 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:50,474 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:50,482 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['resource_search'])], ended=False
+2026-04-20 12:19:50,482 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['resource_search']
+2026-04-20 12:19:50,483 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:50,483 [pipeline.engine] INFO: === Pipeline iteration 4 ===
+2026-04-20 12:19:50,483 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:50,483 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:50,484 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:50,484 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:50,484 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:50,489 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:50,489 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:50,489 [pipeline.engine] INFO: === Pipeline iteration 5 ===
+2026-04-20 12:19:50,489 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:50,490 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:50,490 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:52,762 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:52,763 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:52,768 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:19:52,768 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:19:52,768 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:52,768 [pipeline.engine] INFO: === Pipeline iteration 6 ===
+2026-04-20 12:19:52,768 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:52,769 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:52,769 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:52,772 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:52,772 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:52,778 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:52,778 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:52,778 [pipeline.engine] INFO: === Pipeline iteration 7 ===
+2026-04-20 12:19:52,779 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:52,779 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:52,779 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:54,228 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:54,228 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:54,277 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:19:54,277 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:19:54,277 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:54,277 [pipeline.engine] INFO: === Pipeline iteration 11 ===
+2026-04-20 12:19:54,277 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:54,278 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:54,278 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:54,278 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:54,278 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:54,329 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:54,330 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:54,330 [pipeline.engine] INFO: === Pipeline iteration 12 ===
+2026-04-20 12:19:54,330 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:54,330 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:54,330 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:55,390 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:55,390 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:55,396 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:19:55,397 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:19:55,397 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:55,397 [pipeline.engine] INFO: === Pipeline iteration 8 ===
+2026-04-20 12:19:55,397 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:55,397 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:55,398 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:55,400 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:55,400 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:55,407 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:55,407 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:55,407 [pipeline.engine] INFO: === Pipeline iteration 9 ===
+2026-04-20 12:19:55,407 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:55,408 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:55,408 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:57,113 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:57,113 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:57,121 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:19:57,121 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:19:57,121 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:57,121 [pipeline.engine] INFO: === Pipeline iteration 10 ===
+2026-04-20 12:19:57,121 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:57,122 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:57,122 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:57,126 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:57,126 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:57,135 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:57,135 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:57,135 [pipeline.engine] INFO: === Pipeline iteration 11 ===
+2026-04-20 12:19:57,135 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:57,136 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:57,136 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:59,206 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:59,206 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:59,258 [pipeline.engine] INFO: Output chain: 7 plugins, 2 signals [wait(child_task_guard: active children, suspend pipeline), next_llm(task_reminder: text_only output, reminder #2)], ended=False
+2026-04-20 12:19:59,259 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #2
+2026-04-20 12:19:59,259 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:19:59,259 [pipeline.engine] INFO: === Pipeline iteration 13 ===
+2026-04-20 12:19:59,259 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:59,259 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:59,259 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:19:59,746 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:19:59,746 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:59,756 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(2 tool call(s) pending: ['file_read', 'file_read'])], ended=False
+2026-04-20 12:19:59,756 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=2 tool call(s) pending: ['file_read', 'file_read']
+2026-04-20 12:19:59,756 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:19:59,756 [pipeline.engine] INFO: === Pipeline iteration 12 ===
+2026-04-20 12:19:59,756 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:19:59,757 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:59,757 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:19:59,768 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:19:59,768 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:19:59,860 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:19:59,860 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:19:59,860 [pipeline.engine] INFO: === Pipeline iteration 13 ===
+2026-04-20 12:19:59,860 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:19:59,861 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:19:59,861 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:02,978 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:02,978 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:03,031 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:20:03,031 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:20:03,031 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:03,031 [pipeline.engine] INFO: === Pipeline iteration 14 ===
+2026-04-20 12:20:03,031 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:03,032 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:03,032 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:03,032 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:03,032 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:03,087 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:03,088 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:03,088 [pipeline.engine] INFO: === Pipeline iteration 15 ===
+2026-04-20 12:20:03,088 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:03,088 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:03,088 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:06,272 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:06,272 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:06,324 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:20:06,324 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:20:06,324 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:06,325 [pipeline.engine] INFO: === Pipeline iteration 14 ===
+2026-04-20 12:20:06,325 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:06,325 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:06,325 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:06,327 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:06,327 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:06,382 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:06,383 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:06,383 [pipeline.engine] INFO: === Pipeline iteration 15 ===
+2026-04-20 12:20:06,383 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:06,383 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:06,384 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:11,326 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:11,326 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:11,378 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:20:11,379 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:20:11,379 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:11,379 [pipeline.engine] INFO: === Pipeline iteration 16 ===
+2026-04-20 12:20:11,379 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:11,379 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:11,380 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:11,382 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:11,382 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:11,436 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:11,436 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:11,436 [pipeline.engine] INFO: === Pipeline iteration 17 ===
+2026-04-20 12:20:11,436 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:11,437 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:11,437 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:12,922 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:12,922 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:12,978 [pipeline.engine] INFO: Output chain: 7 plugins, 2 signals [wait(child_task_guard: active children, suspend pipeline), next_llm(task_reminder: text_only output, reminder #3)], ended=False
+2026-04-20 12:20:12,978 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #3
+2026-04-20 12:20:12,978 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:20:12,978 [pipeline.engine] INFO: === Pipeline iteration 16 ===
+2026-04-20 12:20:12,978 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:12,979 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:12,979 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:17,382 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:17,382 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:17,437 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:20:17,438 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:20:17,438 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:17,438 [pipeline.engine] INFO: === Pipeline iteration 17 ===
+2026-04-20 12:20:17,438 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:17,438 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:17,438 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:17,439 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:17,439 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:17,496 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:17,497 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:17,497 [pipeline.engine] INFO: === Pipeline iteration 18 ===
+2026-04-20 12:20:17,497 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:17,497 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:17,497 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:21,753 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:21,753 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:21,813 [pipeline.engine] INFO: Output chain: 7 plugins, 2 signals [wait(child_task_guard: active children, suspend pipeline), next_llm(task_reminder: text_only output, reminder #4)], ended=False
+2026-04-20 12:20:21,813 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #4
+2026-04-20 12:20:21,813 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:20:21,813 [pipeline.engine] INFO: === Pipeline iteration 19 ===
+2026-04-20 12:20:21,813 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:21,814 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:21,814 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:26,138 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:26,139 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:26,199 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:20:26,199 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:20:26,199 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:26,199 [pipeline.engine] INFO: === Pipeline iteration 20 ===
+2026-04-20 12:20:26,199 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:26,200 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:26,200 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:26,200 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:26,200 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:26,263 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:26,263 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:26,263 [pipeline.engine] INFO: === Pipeline iteration 21 ===
+2026-04-20 12:20:26,263 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:26,264 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:26,264 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:26,459 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:26,459 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:26,515 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_write'])], ended=False
+2026-04-20 12:20:26,515 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_write']
+2026-04-20 12:20:26,515 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:26,515 [pipeline.engine] INFO: === Pipeline iteration 18 ===
+2026-04-20 12:20:26,515 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:26,516 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:26,516 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:26,519 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:26,519 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:26,574 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:26,574 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:26,574 [pipeline.engine] INFO: === Pipeline iteration 19 ===
+2026-04-20 12:20:26,574 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:26,575 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:26,575 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:31,228 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:31,228 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:31,286 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(2 tool call(s) pending: ['file_read', 'file_read'])], ended=False
+2026-04-20 12:20:31,286 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=2 tool call(s) pending: ['file_read', 'file_read']
+2026-04-20 12:20:31,286 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:31,286 [pipeline.engine] INFO: === Pipeline iteration 20 ===
+2026-04-20 12:20:31,286 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:31,287 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:31,287 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:31,297 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:31,298 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:31,414 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:31,414 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:31,414 [pipeline.engine] INFO: === Pipeline iteration 21 ===
+2026-04-20 12:20:31,414 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:31,415 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:31,415 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:31,783 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:31,783 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:31,845 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:20:31,845 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:20:31,846 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:31,846 [pipeline.engine] INFO: === Pipeline iteration 22 ===
+2026-04-20 12:20:31,846 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:31,846 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:31,846 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:31,847 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:31,847 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:31,912 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:31,912 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:31,912 [pipeline.engine] INFO: === Pipeline iteration 23 ===
+2026-04-20 12:20:31,912 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:31,912 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:31,913 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:36,142 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:36,142 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:36,215 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:20:36,215 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:20:36,215 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:36,215 [pipeline.engine] INFO: === Pipeline iteration 24 ===
+2026-04-20 12:20:36,215 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:36,215 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:36,216 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:36,216 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:36,216 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:36,279 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:36,280 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:36,280 [pipeline.engine] INFO: === Pipeline iteration 25 ===
+2026-04-20 12:20:36,280 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:36,280 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:36,280 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:44,504 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:44,505 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:44,570 [pipeline.engine] INFO: Output chain: 7 plugins, 2 signals [wait(child_task_guard: active children, suspend pipeline), next_llm(task_reminder: text_only output, reminder #5)], ended=False
+2026-04-20 12:20:44,570 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #5
+2026-04-20 12:20:44,570 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:20:44,570 [pipeline.engine] INFO: === Pipeline iteration 26 ===
+2026-04-20 12:20:44,570 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:44,571 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:44,571 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:48,807 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:48,807 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:48,873 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:20:48,873 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:20:48,873 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:48,873 [pipeline.engine] INFO: === Pipeline iteration 27 ===
+2026-04-20 12:20:48,873 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:48,874 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:48,874 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:48,874 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:48,874 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:48,942 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:48,942 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:48,943 [pipeline.engine] INFO: === Pipeline iteration 28 ===
+2026-04-20 12:20:48,943 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:48,943 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:48,943 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:49,336 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:49,336 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:49,399 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_write'])], ended=False
+2026-04-20 12:20:49,400 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_write']
+2026-04-20 12:20:49,400 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:49,400 [pipeline.engine] INFO: === Pipeline iteration 22 ===
+2026-04-20 12:20:49,400 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:49,400 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:49,401 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:49,402 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:49,402 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:49,463 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:49,463 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:49,463 [pipeline.engine] INFO: === Pipeline iteration 23 ===
+2026-04-20 12:20:49,463 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:49,464 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:49,464 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:53,847 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:53,847 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:53,908 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:20:53,908 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:20:53,908 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:53,908 [pipeline.engine] INFO: === Pipeline iteration 24 ===
+2026-04-20 12:20:53,908 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:53,909 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:53,909 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:53,918 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:53,918 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:53,981 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:53,981 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:53,981 [pipeline.engine] INFO: === Pipeline iteration 25 ===
+2026-04-20 12:20:53,981 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:53,982 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:53,982 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:55,455 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:55,455 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:55,523 [pipeline.engine] INFO: Output chain: 7 plugins, 2 signals [wait(child_task_guard: active children, suspend pipeline), next_llm(task_reminder: text_only output, reminder #6)], ended=False
+2026-04-20 12:20:55,523 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #6
+2026-04-20 12:20:55,523 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:20:55,523 [pipeline.engine] INFO: === Pipeline iteration 29 ===
+2026-04-20 12:20:55,523 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:55,524 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:55,524 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:58,057 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:58,057 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:58,121 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:20:58,121 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:20:58,122 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:58,122 [pipeline.engine] INFO: === Pipeline iteration 26 ===
+2026-04-20 12:20:58,122 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:58,122 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:58,123 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:58,147 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:58,147 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:58,211 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:58,212 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:58,212 [pipeline.engine] INFO: === Pipeline iteration 27 ===
+2026-04-20 12:20:58,212 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:58,212 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:58,213 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:20:58,213 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 4 subscribers
+2026-04-20 12:20:58,215 [infrastructure.task_worker] DEBUG: TaskWorker: terminal event set for task 879e7fa38c5e (completed)
+2026-04-20 12:20:59,396 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:20:59,396 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:59,466 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:20:59,466 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:20:59,466 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:20:59,467 [pipeline.engine] INFO: === Pipeline iteration 30 ===
+2026-04-20 12:20:59,467 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:20:59,467 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:59,467 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:20:59,468 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:20:59,468 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:20:59,609 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:20:59,609 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:20:59,610 [pipeline.engine] INFO: === Pipeline iteration 31 ===
+2026-04-20 12:20:59,610 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:20:59,610 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:20:59,610 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:05,283 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:05,284 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:05,357 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(2 tool call(s) pending: ['file_read', 'file_read'])], ended=False
+2026-04-20 12:21:05,357 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=2 tool call(s) pending: ['file_read', 'file_read']
+2026-04-20 12:21:05,357 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:05,357 [pipeline.engine] INFO: === Pipeline iteration 32 ===
+2026-04-20 12:21:05,357 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:05,358 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:05,358 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:05,360 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:05,360 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:05,507 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:05,507 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:05,508 [pipeline.engine] INFO: === Pipeline iteration 33 ===
+2026-04-20 12:21:05,508 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:05,508 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:05,508 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:10,364 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:10,365 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:10,443 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:21:10,443 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:21:10,443 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:10,443 [pipeline.engine] INFO: === Pipeline iteration 34 ===
+2026-04-20 12:21:10,443 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:10,443 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:10,444 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:10,445 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:10,445 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:10,524 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:10,524 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:10,524 [pipeline.engine] INFO: === Pipeline iteration 35 ===
+2026-04-20 12:21:10,524 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:10,525 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:10,525 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:11,447 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:11,447 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:11,512 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #1)], ended=False
+2026-04-20 12:21:11,512 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #1
+2026-04-20 12:21:11,512 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:21:11,512 [pipeline.engine] INFO: === Pipeline iteration 28 ===
+2026-04-20 12:21:11,512 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:11,513 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:11,513 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:14,579 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:14,579 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:14,657 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:21:14,657 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:21:14,657 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:14,657 [pipeline.engine] INFO: === Pipeline iteration 36 ===
+2026-04-20 12:21:14,657 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:14,658 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:14,658 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:14,659 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:14,659 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:14,739 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:14,739 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:14,739 [pipeline.engine] INFO: === Pipeline iteration 37 ===
+2026-04-20 12:21:14,740 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:14,740 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:14,740 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:19,502 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:19,502 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:19,584 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['resource_merge'])], ended=False
+2026-04-20 12:21:19,584 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['resource_merge']
+2026-04-20 12:21:19,584 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:19,584 [pipeline.engine] INFO: === Pipeline iteration 38 ===
+2026-04-20 12:21:19,585 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:19,585 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:19,585 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:19,586 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:19,586 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:19,668 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:19,668 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:19,668 [pipeline.engine] INFO: === Pipeline iteration 39 ===
+2026-04-20 12:21:19,668 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:19,669 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:19,669 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:23,729 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:23,729 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:23,797 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:21:23,797 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:21:23,797 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:23,798 [pipeline.engine] INFO: === Pipeline iteration 29 ===
+2026-04-20 12:21:23,798 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:23,798 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:23,798 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:23,802 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:23,802 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:23,869 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:23,870 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:23,870 [pipeline.engine] INFO: === Pipeline iteration 30 ===
+2026-04-20 12:21:23,870 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:23,870 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:23,871 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:25,405 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:25,405 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:25,487 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['resource_merge'])], ended=False
+2026-04-20 12:21:25,487 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['resource_merge']
+2026-04-20 12:21:25,487 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:25,487 [pipeline.engine] INFO: === Pipeline iteration 40 ===
+2026-04-20 12:21:25,487 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:25,488 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:25,488 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:25,615 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:25,615 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:25,699 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:25,699 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:25,699 [pipeline.engine] INFO: === Pipeline iteration 41 ===
+2026-04-20 12:21:25,699 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:25,700 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:25,700 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:31,818 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:31,818 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:31,886 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #2)], ended=False
+2026-04-20 12:21:31,886 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #2
+2026-04-20 12:21:31,886 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:21:31,886 [pipeline.engine] INFO: === Pipeline iteration 31 ===
+2026-04-20 12:21:31,886 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:31,887 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:31,887 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:37,972 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:37,972 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:38,041 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #3)], ended=False
+2026-04-20 12:21:38,042 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #3
+2026-04-20 12:21:38,042 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:21:38,042 [pipeline.engine] INFO: === Pipeline iteration 32 ===
+2026-04-20 12:21:38,042 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:38,042 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:38,043 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:44,676 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:44,676 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:44,758 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(2 tool call(s) pending: ['file_read', 'file_read'])], ended=False
+2026-04-20 12:21:44,758 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=2 tool call(s) pending: ['file_read', 'file_read']
+2026-04-20 12:21:44,758 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:44,758 [pipeline.engine] INFO: === Pipeline iteration 42 ===
+2026-04-20 12:21:44,758 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:44,759 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:44,759 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:44,761 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:44,761 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:44,931 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:44,931 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:44,931 [pipeline.engine] INFO: === Pipeline iteration 43 ===
+2026-04-20 12:21:44,931 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:44,932 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:44,932 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:45,149 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:45,150 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:45,218 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:21:45,219 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:21:45,219 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:45,219 [pipeline.engine] INFO: === Pipeline iteration 33 ===
+2026-04-20 12:21:45,219 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:45,219 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:45,220 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:45,223 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:45,223 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:45,293 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:45,293 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:45,293 [pipeline.engine] INFO: === Pipeline iteration 34 ===
+2026-04-20 12:21:45,293 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:45,293 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:45,294 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:49,671 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:49,672 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:49,761 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:21:49,761 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:21:49,761 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:49,762 [pipeline.engine] INFO: === Pipeline iteration 44 ===
+2026-04-20 12:21:49,762 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:49,762 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:49,762 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:49,763 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:49,763 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:49,853 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:49,853 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:49,853 [pipeline.engine] INFO: === Pipeline iteration 45 ===
+2026-04-20 12:21:49,853 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:49,854 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:49,854 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:52,495 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:52,495 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:52,570 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #4)], ended=False
+2026-04-20 12:21:52,570 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #4
+2026-04-20 12:21:52,570 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:21:52,570 [pipeline.engine] INFO: === Pipeline iteration 35 ===
+2026-04-20 12:21:52,571 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:52,571 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:52,571 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:58,138 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:21:58,139 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:58,228 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:21:58,228 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:21:58,228 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:21:58,228 [pipeline.engine] INFO: === Pipeline iteration 46 ===
+2026-04-20 12:21:58,228 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:21:58,229 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:58,229 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:21:58,237 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:21:58,237 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:21:58,329 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:21:58,330 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:21:58,330 [pipeline.engine] INFO: === Pipeline iteration 47 ===
+2026-04-20 12:21:58,330 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:21:58,330 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:21:58,330 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:21:58,331 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 4 subscribers
+2026-04-20 12:21:58,333 [infrastructure.task_worker] DEBUG: TaskWorker: terminal event set for task 56ac6be45d6b (completed)
+2026-04-20 12:22:02,127 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:02,127 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:02,197 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #5)], ended=False
+2026-04-20 12:22:02,198 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #5
+2026-04-20 12:22:02,198 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:22:02,198 [pipeline.engine] INFO: === Pipeline iteration 36 ===
+2026-04-20 12:22:02,198 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:02,198 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:02,199 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:05,630 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:05,630 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:05,721 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(2 tool call(s) pending: ['task_evaluate', 'task_evaluate'])], ended=False
+2026-04-20 12:22:05,721 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=2 tool call(s) pending: ['task_evaluate', 'task_evaluate']
+2026-04-20 12:22:05,721 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:05,722 [pipeline.engine] INFO: === Pipeline iteration 48 ===
+2026-04-20 12:22:05,722 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:05,722 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:05,722 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:05,728 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:05,728 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:05,909 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:22:05,909 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:22:05,909 [pipeline.engine] INFO: === Pipeline iteration 49 ===
+2026-04-20 12:22:05,910 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:05,910 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:05,910 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:12,012 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:12,012 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:12,084 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:22:12,084 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:22:12,084 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:12,084 [pipeline.engine] INFO: === Pipeline iteration 37 ===
+2026-04-20 12:22:12,084 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:12,085 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:12,085 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:12,089 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:12,089 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:12,160 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:22:12,160 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:22:12,160 [pipeline.engine] INFO: === Pipeline iteration 38 ===
+2026-04-20 12:22:12,161 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:12,161 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:12,161 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:15,074 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:15,074 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:15,167 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #7)], ended=False
+2026-04-20 12:22:15,168 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #7
+2026-04-20 12:22:15,168 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:22:15,168 [pipeline.engine] INFO: === Pipeline iteration 50 ===
+2026-04-20 12:22:15,168 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:15,168 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:15,168 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:16,020 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:16,020 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:16,092 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #6)], ended=False
+2026-04-20 12:22:16,092 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #6
+2026-04-20 12:22:16,092 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:22:16,092 [pipeline.engine] INFO: === Pipeline iteration 39 ===
+2026-04-20 12:22:16,093 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:16,093 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:16,093 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:19,681 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:19,681 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:19,774 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_manage'])], ended=False
+2026-04-20 12:22:19,774 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_manage']
+2026-04-20 12:22:19,774 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:19,774 [pipeline.engine] INFO: === Pipeline iteration 51 ===
+2026-04-20 12:22:19,774 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:19,775 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:19,775 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:19,776 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:19,776 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:19,872 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:22:19,872 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:22:19,872 [pipeline.engine] INFO: === Pipeline iteration 52 ===
+2026-04-20 12:22:19,872 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:19,873 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:19,873 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:28,976 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:28,976 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:29,050 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:22:29,051 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:22:29,051 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:29,051 [pipeline.engine] INFO: === Pipeline iteration 40 ===
+2026-04-20 12:22:29,051 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:29,052 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:29,052 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:29,055 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:29,055 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:29,129 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:22:29,129 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:22:29,129 [pipeline.engine] INFO: === Pipeline iteration 41 ===
+2026-04-20 12:22:29,129 [pi2026-04-20 12:22:31,685 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:31,685 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:31,800 [pipeline.en2026-04-20 12:22:32,644 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:32,645 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:32,719 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_llm(task_reminder: text_only output, reminder #7)], ended=False
+2026-04-20 12:22:32,719 [pipeline.engine] INFO: Route arbitrated: type=next_llm, target=None, reason=task_reminder: text_only output, reminder #7
+2026-04-20 12:22:32,719 [pipeline.engine] INFO: Route applied: next_llm
+2026-04-20 12:22:32,719 [pipeline.engine] INFO: === Pipeline iteration 42 ===
+2026-04-20 12:22:32,719 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:32,720 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:32,720 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:35,013 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:35,013 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:35,111 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:22:35,111 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:22:35,111 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:222026-04-20 12:22:37,186 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:37,186 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:37,300 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['bash_execute'])], ended=False
+2026-04-20 12:22:37,300 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['bash_execute']
+2026-04-20 12:22:37,300 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:37,300 [pipeline.engine] INFO: === Pipeline iteration 93 ===
+2026-04-20 12:22:37,300 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:37,301 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:37,301 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:37,829 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:37,829 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'expe2026-04-20 12:22:40,362 [infrastructure.task_worker] WARNING: TaskWorker.stop() CALLER TRACEBACK:
+  File "C:\Users\jc\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\_pytest\runner.py", line 179, in pytest_runtest_call
+    item.runtest()
+  File "C:\Users\jc\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pytest_asyncio\plugin.py", line 469, in runtest
+    super().runtest()
+  File "C:\Users\jc\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\_pytest\python.py", line 1720, in runtest
+    self.ihook.pytest_pyfunc_call(pyfuncitem=self)
+  File "C:\Users\jc\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return 2026-04-20 12:22:43,316 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:43,316 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:43,433 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['file_read'])], ended=False
+2026-04-20 12:22:43,433 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['file_read']
+2026-04-20 12:22:43,433 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:43,434 [pipeline.engine] INFO: === Pipeline iteration 95 ===
+2026-04-20 12:22:43,434 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:43,434 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:43,434 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:43,436 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:43,436 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:43,555 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:22:43,555 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:22:43,555 [pipeline.engine] INFO: === Pipeline iteration 96 ===
+2026-04-20 12:22:43,555 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:43,556 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:43,556 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:22:52,812 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:22:52,812 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:52,936 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['bash_execute'])], ended=False
+2026-04-20 12:22:52,936 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['bash_execute']
+2026-04-20 12:22:52,936 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:22:52,936 [pipeline.engine] INFO: === Pipeline iteration 97 ===
+2026-04-20 12:22:52,936 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:22:52,937 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:52,937 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:22:53,980 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:22:53,980 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:22:54,101 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:22:54,101 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:22:54,101 [pipeline.engine] INFO: === Pipeline iteration 98 ===
+2026-04-20 12:22:54,101 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:22:54,102 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:22:54,102 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:23:10,644 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:23:10,644 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:23:10,765 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['bash_execute'])], ended=False
+2026-04-20 12:23:10,766 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['bash_execute']
+2026-04-20 12:23:10,766 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:23:10,766 [pipeline.engine] INFO: === Pipeline iteration 99 ===
+2026-04-20 12:23:10,766 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:23:10,766 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:23:10,767 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:23:11,304 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:23:11,304 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:23:11,426 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:23:11,426 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:23:11,426 [pipeline.engine] INFO: === Pipeline iteration 100 ===
+2026-04-20 12:23:11,426 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:23:11,427 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:23:11,427 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:23:17,030 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:23:17,031 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:23:17,152 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['bash_execute'])], ended=False
+2026-04-20 12:23:17,152 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['bash_execute']
+2026-04-20 12:23:17,152 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:23:17,152 [pipeline.engine] INFO: === Pipeline iteration 101 ===
+2026-04-20 12:23:17,152 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:23:17,153 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:23:17,153 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:23:17,689 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:23:17,689 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:23:17,811 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:23:17,811 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:23:17,812 [pipeline.engine] INFO: === Pipeline iteration 102 ===
+2026-04-20 12:23:17,812 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:23:17,812 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:23:17,812 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:23:28,815 [pipeline.engine] DEBUG: Core plugin executed: core_type=llm_call
+2026-04-20 12:23:28,816 [pipeline.engine] DEBUG: Output plugins for core_type=llm_call: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:23:28,939 [pipeline.engine] INFO: Output chain: 7 plugins, 1 signals [next_tool(1 tool call(s) pending: ['task_evaluate'])], ended=False
+2026-04-20 12:23:28,939 [pipeline.engine] INFO: Route arbitrated: type=next_tool, target=None, reason=1 tool call(s) pending: ['task_evaluate']
+2026-04-20 12:23:28,939 [pipeline.engine] INFO: Route applied: next_tool, target=None
+2026-04-20 12:23:28,939 [pipeline.engine] INFO: === Pipeline iteration 103 ===
+2026-04-20 12:23:28,939 [pipeline.engine] INFO: Input route resolved plugins: ['task_event_receiver', 'param_inject', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build', 'isolation_guard', 'level_guard', 'security_check']
+2026-04-20 12:23:28,940 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:23:28,940 [pipeline.engine] INFO: Input route resolved target: core (entry=tool_execute)
+2026-04-20 12:23:28,964 [pipeline.engine] DEBUG: Core plugin executed: core_type=tool_execute
+2026-04-20 12:23:28,964 [pipeline.engine] DEBUG: Output plugins for core_type=tool_execute: ['pending_tools', 'track', 'context_compress', 'memory_write', 'child_task_guard', 'experience_consolidator', 'task_reminder']
+2026-04-20 12:23:29,088 [pipeline.engine] INFO: Output chain: 7 plugins, 0 signals [none], ended=False
+2026-04-20 12:23:29,088 [pipeline.engine] DEBUG: No route signals after tool execution, defaulting to next_llm
+2026-04-20 12:23:29,088 [pipeline.engine] INFO: === Pipeline iteration 104 ===
+2026-04-20 12:23:29,088 [pipeline.engine] INFO: Input route resolved plugins: ['message_inject', 'task_event_receiver', 'tool_schema', 'memory_read', 'knowledge_inject', 'prompt_build']
+2026-04-20 12:23:29,089 [pipeline.engine] DEBUG: Input chain completed: 6 results
+2026-04-20 12:23:29,089 [pipeline.engine] INFO: Input route resolved target: core (entry=llm_call)
+2026-04-20 12:23:29,090 [pipeline.event_bus] DEBUG: Emitting event task_state_changed to 3 subscribers
+2026-04-20 12:23:29,093 [infrastructure.task_worker] DEBUG: TaskWorker: terminal event set for task 33fcf89f4d81 (completed)
+2026-04-20 12:23:29,097 [infrastructure.task_worker] INFO: TaskWorker stopped
