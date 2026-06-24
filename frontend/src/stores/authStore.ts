@@ -383,11 +383,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         //          - initializeAuth：仅 401/403 才 logout，网络错误保留旧 token 继续尝试
         //          - GlobalWebSocket：刷新成功用新 token 重连，真失效(401/403) 才登出
         // 影响范围: 所有 refreshToken 调用路径（client.ts / initializeAuth / WS 重连）
-        try {
-          const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
-          destroyGrowthLoop()
-        } catch {
-          // 动态导入失败，忽略
+        // BUG-FIX-fix_20260624_refresh_destroy_growthloop:
+        // 问题根因: 任何刷新失败都无条件 destroyGrowthLoop，把已加载的
+        //          workspaceTabs/dockItems/schemaRegistry 全清空。但网络抖动/超时/
+        //          5xx 等暂时性故障不应清工作区（见上方 20260622 注释的设计意图），
+        //          否则用户网络抖一下工作区就空了，且无自动重建路径。
+        // 修复方案: 仅当「真正认证失效（401/403）」才 destroyGrowthLoop；
+        //          暂时性故障保留工作区状态，等调用方决策（保留旧 token 重试等）。
+        if (isAuthFailureFromError(error)) {
+          try {
+            const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
+            destroyGrowthLoop()
+          } catch {
+            // 动态导入失败，忽略
+          }
         }
         // 刷新失败，抛出错误让调用方决策，不主动 logout。
         // 用 cause 保留原始错误，调用方可通过 isAuthFailureFromError 判断错误类型。
@@ -440,7 +449,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
               // 刷新成功，获取用户信息
               await get().fetchCurrentUser()
-              set({ isInitializing: false })
+              // BUG-FIX-fix_20260624_refresh_no_isauthenticated:
+              // 问题根因: refresh 成功分支只 set isInitializing:false，没有设置
+              //          isAuthenticated:true。main.tsx 在 initializeAuth 后判定
+              //          isAuthenticated 是否为 true 才调用 initializeGrowthLoop()，
+              //          导致 access_token 过期（走此分支）刷新成功后工作区标签
+              //          不重建，持续显示"工作区为空 — 模块激活后自动出现"。
+              // 修复方案: 与 token 未过期分支一致，显式设置 isAuthenticated:true。
+              set({ isAuthenticated: true, isInitializing: false })
               return
             } catch (refreshError) {
               // BUG-FIX-fix_20260622_refresh_misclassify_logout:

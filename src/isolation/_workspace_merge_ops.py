@@ -47,15 +47,36 @@ class _MergeOpsMixin:
     # ── 5. 评估前保存 ────────────────────────────────────────────
 
     def on_before_evaluate(self, workspace: str, ws_meta: dict | None = None) -> dict:
-        """评估前保存：git add -A + git commit（plain 模式跳过 git 操作）"""
+        """评估前保存：git add -A + git commit。
+
+        - worktree 模式：在 worktree 内 commit（带 task 分支隔离）。
+        - plain / shared（host 模式）：在项目目录的当前分支上 commit，
+          使用任务自己的 task_id 作 message，避免被后续任务的 auto-save 抢走 commit 归属。
+        """
         ws_path = Path(workspace)
         if not ws_path.exists():
             return {"success": False, "error": f"工作空间不存在: {workspace}"}
         mode = (ws_meta or {}).get("mode", "")
-        if mode == "plain":
-            return {"success": True, "commit_hash": None, "has_changes": True}
-        if mode == "shared":
-            return {"success": True, "commit_hash": None, "has_changes": True}
+        # host 模式（plain/shared 都属于 host 流程，区别仅在路径来源）：
+        # 直接在当前分支上 commit，commit message 引用 task_id，保留可追溯性。
+        if mode in ("plain", "shared"):
+            task_id = (ws_meta or {}).get("task_id", "")
+            project_root = (ws_meta or {}).get("project_root", "") or workspace
+            proj_path = Path(project_root)
+            if not proj_path.exists() or not (proj_path / ".git").exists():
+                # 非 git 仓库的 plain 模式（无 task_id 的纯目录）保持旧行为
+                return {"success": True, "commit_hash": None, "has_changes": True}
+            self._ensure_git_user(proj_path)
+            msg_suffix = f" (task {task_id})" if task_id else ""
+            commit_hash = self._git_add_commit_if_dirty(
+                proj_path, f"checkpoint: before evaluate{msg_suffix}"
+            )
+            rc, status, _ = self._run_git("status", "--porcelain", cwd=proj_path)
+            return {
+                "success": True,
+                "commit_hash": commit_hash,
+                "has_changes": bool(status and status.strip()),
+            }
         self._ensure_git_user(ws_path)
         commit_hash = self._git_add_commit_if_dirty(ws_path, "checkpoint: before evaluate")
         rc, status, _ = self._run_git("status", "--porcelain", cwd=ws_path)

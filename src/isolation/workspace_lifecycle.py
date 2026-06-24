@@ -270,13 +270,21 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             return meta
 
         # ── Host isolation mode ──
+        # host 模式不建 worktree、不切分支，但通过 task_id + project_root
+        # 让 on_before_evaluate 把产出 commit 到当前分支，
+        # 避免改动被后续任务的 auto-save 混入错误的 commit message。
         _isolation_mode = (task_data.get("isolation_mode", "")
                            or self._config.get("coordinator", {}).get("default_level", ""))
         if _isolation_mode == "host":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
             if host_path:
-                meta = {"mode": "plain", "path": host_path}
+                meta = {
+                    "mode": "plain",
+                    "path": host_path,
+                    "task_id": task_id,
+                    "project_root": host_path,
+                }
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
                     "[WorkspaceLifecycle] host 隔离模式: 直接操作目录 "
@@ -344,6 +352,8 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 logger.warning("[WorkspaceLifecycle] 工作空间初始化异常", exc_info=True)
 
         # HOST 模式：直接操作项目目录，不创建 worktree 隔离
+        # 同上：保留 task_id + project_root，供 on_before_evaluate 用准确的
+        # commit message 提交，避免被其他任务的 auto-save 顺手带走。
         isolation_level = task_data.get("isolation_level", "")
         if isolation_level == "host":
             scenario, project_root = self._detect_scenario(workspace, task_data)
@@ -354,6 +364,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 "mode": "shared",
                 "path": str(root_path),
                 "project_root": str(root_path),
+                "task_id": task_id,
             }
             self._ws_meta_store[task_id] = meta
             logger.debug(
@@ -404,9 +415,12 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                         f"项目空间初始化失败（已有 .git 但无提交记录）: "
                         f"task_id={task_id}, path={root_path}")
             elif self._guard_root_branch(root_path):
+                # 此 auto-save 提交的是项目根目录上残留的脏改动，
+                # 来源可能是用户、其他 host 任务、上一次中断的执行——不是当前任务。
+                # 用中性 message，避免给本任务"贴上"不属于它的改动。
                 self._git_add_commit_if_dirty(
                     root_path,
-                    f"chore: auto-save before worktree for task {task_id}")
+                    "chore: auto-save dirty working tree before worktree creation")
             else:
                 logger.warning(
                     "[WorkspaceLifecycle] 跳过项目根目录 auto-save: "
