@@ -948,7 +948,9 @@ class TaskNotifierMixin:
 
                     "taskId": task_id,
 
-                    "agentId": task_id,
+                    "agentId": target_id or task_id,
+
+                    "agentConfigId": target_id,
 
                     "pipelineId": pipeline_id,
 

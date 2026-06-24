@@ -5,7 +5,7 @@
  * 主页包含完整的聊天界面：左侧会话列表 + 右侧聊天区域。
  */
 
-import { lazy, Suspense, useEffect, useState, useCallback, useMemo } from 'react'
+import { lazy, Suspense, useEffect, useState, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { ChatContainer } from './components/chat/ChatContainer'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
@@ -271,45 +271,12 @@ function HomePage(): ReactNode {
   /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
 
-  /** 默认模型名（兜底，从配置 API 获取） */
-  const [defaultModel, setDefaultModel] = useState('')
-
-  /**
-   * REQ-21: 模型名从当前会话绑定的 Agent 配置动态获取
-   *
-   * 优先级：当前会话 Agent 的 model > 配置默认模型
-   */
-  const agents = useAgentStore((s) => s.agents)
+  /** 确保 Agent 配置列表已加载（ChatContainer 按 activeTab.agentId 解析当前管道模型） */
   const fetchAgents = useAgentStore((s) => s.fetchAgents)
 
   useEffect(() => {
     fetchAgents().catch(() => {})
   }, [fetchAgents])
-
-  // 兜底：加载默认模型配置
-  useEffect(() => {
-    fetch('/api/v1/config/llm/defaults')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.chat) setDefaultModel(data.chat)
-      })
-      .catch(() => {})
-  }, [])
-
-  const modelName = useMemo(() => {
-    if (activeSessionId) {
-      const session = sessions.find((s) => s.id === activeSessionId)
-      if (session?.agentId) {
-        const agent = agents.find(
-          (a) => a.id === session.agentId || a.configId === session.agentId,
-        )
-        if (agent?.model || agent?.config?.model) {
-          return agent.model || agent.config!.model!
-        }
-      }
-    }
-    return defaultModel
-  }, [activeSessionId, sessions, agents, defaultModel])
 
   /**
    * 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取）
@@ -632,7 +599,6 @@ function HomePage(): ReactNode {
       // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
       // 此 prop 仅作兼容保留，实际不影响输入框状态
       isGenerating={false}
-      modelName={modelName}
       onSendMessage={handleSendMessage}
       onStopGenerate={handleStopGenerate}
       hasMoreMessages={hasMoreMessages}

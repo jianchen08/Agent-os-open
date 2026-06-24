@@ -137,6 +137,9 @@ class AgentResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     is_active: bool = True
     version: str = "1.0.0"
+    # 解析后的实际模型标识：model_tier 解析优先，model_name 兜底
+    # 与运行时 apply_agent_model_override 解析逻辑保持一致，供前端显示当前管道模型
+    model: str = ""
 
 
 class AgentListResponse(BaseModel):
