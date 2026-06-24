@@ -6,6 +6,15 @@
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# 环境变量 — 必须在任何项目 import 之前设置，避免 litellm 初始化时网络调用
+# ---------------------------------------------------------------------------
+
+import os
+
+# 禁止 litellm 从 GitHub 拉取远程 model cost map（网络超时约 10s）
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 from typing import Any
 
 import pytest
@@ -20,44 +29,109 @@ DEMO_CREDENTIALS = {"username": "demo", "password": "demo12345"}
 
 
 # ---------------------------------------------------------------------------
+# _reset_rate_limiter — 每个测试前重置限流器（autouse）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter() -> Any:
+    """每个测试前清空限流器状态，防止测试间相互干扰。
+
+    tiered_rate_limiter 是模块级单例，AUTH 类别限制 10 次/60 秒。
+    87 个 E2E 测试大量调用登录接口，不重置会触发 429。
+    """
+    from channels.api.rate_limiter import tiered_rate_limiter
+
+    tiered_rate_limiter._hits.clear()
+    yield
+    tiered_rate_limiter._hits.clear()
+
+
+# ---------------------------------------------------------------------------
 # test_app — 注入 FastAPI app 实例
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+def _ensure_demo_user() -> None:
+    """确保 store 中存在 demo 用户（测试种子数据）。
+
+    如果 demo 用户不存在则创建，已存在则跳过。
+    """
+    from channels.api.memory_store import store
+
+    if "demo" not in store.users:
+        store.create_user(
+            username="demo",
+            password=DEMO_CREDENTIALS["password"],
+            email="demo@example.com",
+        )
+
+
+@pytest.fixture(scope="session")
 def test_app() -> Any:
     """创建配置好的 FastAPI app 实例（仅 REST API，不含 WebSocket）。
 
-    用于纯 HTTP API 级别的 E2E 测试（认证、配置、任务 CRUD）。
+    session 级别复用：FastAPI app 初始化加载 litellm/router/tokenizers/插件链等
+    重资源，function 级别重建会导致内存累积和 OOM 段错误（容器仅 1.3GB RAM）。
+    app 本身无状态，TestClient 保持 function 级别即可实现测试隔离。
 
     Returns:
         FastAPI 应用实例
     """
     from channels.api.app import create_app
 
-    return create_app()
+    app = create_app()
+    _ensure_demo_user()
+    return app
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def test_app_with_ws() -> Any:
     """创建合并了 WebSocket 功能的 FastAPI app 实例。
 
-    用于需要 WebSocket 端点的 E2E 测试（对话流程等）。
+    session 级别复用（同 test_app 理由）。
+    跳过管道引擎初始化（litellm/tokenizers 加载约 7s），
+    WS 测试只需连接/心跳协议层，不需要真实 AI 管道。
 
     Returns:
         FastAPI 应用实例（含 /ws 和 /ws/chat 路由）
     """
+    import channels.websocket.app_factory as af
+
+    # 用轻量 Mock 替换 _init_pipeline_context，跳过 litellm/router 初始化
+    class _MockCtx:
+        available = False
+        pipeline_config = None
+        plugin_registry = None
+        services = None
+        _engines = {}
+
+        def get_or_create_engine(self, _pipeline_id: str) -> None:
+            return None
+
+    _original_init = getattr(af, "_init_pipeline_context", None)
+    af._init_pipeline_context = lambda: _MockCtx()  # type: ignore[assignment]
+
     from channels.websocket.app_factory import create_combined_app
 
-    return create_combined_app()
+    try:
+        app = create_combined_app()
+    finally:
+        if _original_init is not None:
+            af._init_pipeline_context = _original_init  # type: ignore[assignment]
+
+    _ensure_demo_user()
+    return app
 
 
 # ---------------------------------------------------------------------------
 # test_client — FastAPI TestClient
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def test_client(test_app: Any) -> TestClient:
-    """提供 FastAPI TestClient，用于 REST API 请求。
+    """提供 FastAPI TestClient，用于 REST API 请求（session 级别复用）。
+
+    session 级别复用 TestClient 避免 auth_token 重复 bcrypt 登录（约180ms/次）。
+    测试间状态隔离通过 UUID 唯一数据和 _reset_rate_limiter autouse fixture 保证。
 
     Args:
         test_app: FastAPI 应用实例
@@ -68,9 +142,9 @@ def test_client(test_app: Any) -> TestClient:
     return TestClient(test_app)
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def ws_test_client(test_app_with_ws: Any) -> TestClient:
-    """提供包含 WebSocket 路由的 FastAPI TestClient。
+    """提供包含 WebSocket 路由的 FastAPI TestClient（session 级别复用）。
 
     基于 create_combined_app() 创建，包含 /ws 和 /ws/chat 路由。
     用于 WebSocket 级别的 E2E 测试（对话流程等）。
@@ -88,11 +162,12 @@ def ws_test_client(test_app_with_ws: Any) -> TestClient:
 # auth_token — 获取认证 token
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def auth_token(test_client: TestClient) -> str:
-    """登录 demo 用户并返回 access_token。
+    """登录 demo 用户并返回 access_token（session 级别复用）。
 
     通过 /api/v1/auth/login 登录内置 demo 用户。
+    session 级别复用避免每次测试重复 bcrypt 哈希（约180ms/次）。
 
     Returns:
         access_token 字符串
@@ -102,9 +177,9 @@ def auth_token(test_client: TestClient) -> str:
     return resp.json()["access_token"]
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def auth_headers(auth_token: str) -> dict[str, str]:
-    """提供 Authorization 请求头。
+    """提供 Authorization 请求头（session 级别复用）。
 
     Returns:
         包含 Bearer token 的请求头字典
@@ -116,7 +191,7 @@ def auth_headers(auth_token: str) -> dict[str, str]:
 # available_agent_id — 获取可用 Agent ID（跨测试文件共享）
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def available_agent_id(
     test_client: TestClient,
     auth_headers: dict[str, str],

@@ -26,7 +26,7 @@ import os
 
 _DEFAULT_CORS_ORIGINS = os.environ.get(
     "CORS_ORIGINS",
-    "http://localhost:5188,http://localhost:5289,http://localhost:5173",
+    "http://localhost:5188,http://localhost:5289,http://localhost:5290,http://localhost:5173",
 ).split(",")
 
 # 应用启动时间

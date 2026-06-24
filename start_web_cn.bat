@@ -194,14 +194,14 @@ if not exist ".py_deps_installed" (
 :: 4. Agent（宿主机）
 :: ===========================================================================
 echo [INFO] 启动 Agent...
-start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6480/0&& "%PYEXE%" -m channels.websocket.app_factory"
+start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=8989&& set REDIS_URL=redis://localhost:6480/0&& "%PYEXE%" -m channels.websocket.app_factory"
 
 echo.
 echo ========================================
 echo   启动完成
 echo ========================================
-echo   后端: http://localhost:8988
-echo   前端: http://localhost:5289
+echo   后端: http://localhost:8989
+echo   前端: http://localhost:5290
 echo   停止: 关闭 Agent 窗口 + docker compose down
 echo ========================================
 pause

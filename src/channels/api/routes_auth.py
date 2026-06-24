@@ -276,7 +276,7 @@ def logout(
         actual_token = body.refresh_token
 
     if actual_token:
-        payload = verify_token(actual_token)
+        payload = verify_token(actual_token, token_type="refresh")
         if payload and payload.get("type") == "refresh":
             store.revoke_refresh_token(actual_token)
 

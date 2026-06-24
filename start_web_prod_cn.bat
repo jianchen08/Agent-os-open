@@ -53,7 +53,7 @@ call :stop_project_instance
 :: ========== 查找可用端口 ==========
 echo [INFO] 正在查找可用端口...
 
-set "BACKEND_PORT=8988"
+set "BACKEND_PORT=8989"
 call :find_available_port BACKEND_PORT
 if !errorlevel! neq 0 (
     echo [ERROR] 无法找到可用的后端端口
@@ -61,7 +61,7 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-set "FRONTEND_PORT=5188"
+set "FRONTEND_PORT=5290"
 call :find_available_port FRONTEND_PORT
 if !errorlevel! neq 0 (
     echo [ERROR] 无法找到可用的前端端口

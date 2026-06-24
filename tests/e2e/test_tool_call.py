@@ -261,3 +261,137 @@ async def test_bash_write_file_then_read(
     assert "created by bash" in read_content, (
         f"读回内容应包含 'created by bash'，得到: {read_content!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# memory store → memory retrieve 回环（补充场景 3）
+# ---------------------------------------------------------------------------
+
+def test_memory_store_retrieve_roundtrip() -> None:
+    """memory store → memory retrieve 数据一致性。
+
+    通过 MemoryStore 单例（与 API 路由共用同一实例）存储一条记忆，
+    再通过 search_memories 关键词检索验证命中。
+
+    MemoryTool 的 retrieve 依赖注入的 retriever（向量/关键词），
+    在 E2E 测试环境（无 DB）中不可用。MemoryStore 内置关键词搜索，
+    且是 routes_memory 的实际后端，因此直接测试它更忠实于 E2E 语义。
+
+    验证点：
+    - store.create_memory 存储成功，返回包含 id 的 dict
+    - store.search_memories 关键词检索命中刚存储的记忆
+    - 检索结果 content 包含原始内容
+    """
+    from channels.api.memory_store import store
+
+    unique_content = "e2e_memory_roundtrip_unique_marker_xyz789"
+
+    # --- Arrange & Act: 存储语义记忆 ---
+    memory = store.create_memory(
+        content=f"Roundtrip verification: {unique_content}",
+        memory_type="semantic",
+        tags=["e2e_test", "roundtrip"],
+    )
+
+    # --- Assert: 存储成功 ---
+    assert "id" in memory, f"create_memory 返回缺少 id: {memory}"
+    assert memory["content"].endswith(unique_content)
+
+    # --- Act: 关键词检索 ---
+    results = store.search_memories(query=unique_content, top_k=5)
+
+    # --- Assert: 检索命中 ---
+    assert len(results) > 0, "关键词检索应命中刚存储的记忆"
+
+    found = any(
+        unique_content in item.get("content", "")
+        for item in results
+    )
+    assert found, (
+        f"检索结果应包含刚存储的内容 '{unique_content}'，"
+        f"实际结果: {[item.get('content', '')[:50] for item in results]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# enhanced_search 基本搜索（补充场景 3）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def search_tool(tmp_path: Path) -> Any:
+    """提供 EnhancedSearchTool 实例，工作目录隔离到 tmp_path。
+
+    Args:
+        tmp_path: pytest 临时路径
+
+    Returns:
+        EnhancedSearchTool 实例
+    """
+    from tools.builtin.enhanced_search.tool import EnhancedSearchTool
+
+    return EnhancedSearchTool(base_path=str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_enhanced_search_basic(
+    search_tool: Any,
+    file_write_tool: Any,
+    tmp_path: Path,
+) -> None:
+    """enhanced_search 搜索结果包含关键词。
+
+    先写入包含特定关键词的文件，再用 enhanced_search 搜索，
+    验证搜索结果命中该文件。
+
+    依赖 ripgrep，未安装时跳过。
+
+    验证点：
+    - 先 file_write 创建包含特定关键词的文件
+    - enhanced_search 搜索该关键词返回成功
+    - 搜索结果中包含目标文件路径或关键词内容
+    """
+    if not search_tool._check_ripgrep():
+        pytest.skip("ripgrep 未安装，跳过 enhanced_search E2E 测试")
+
+    search_keyword = "e2e_search_unique_marker_42"
+    test_file = tmp_path / "search_target.txt"
+
+    # --- Arrange: 写入包含关键词的文件 ---
+    await file_write_tool.execute({
+        "action": "write",
+        "path": str(test_file),
+        "content": f"Line 1: some content\nLine 2: {search_keyword}\nLine 3: more content\n",
+    })
+
+    # --- Act: 搜索关键词 ---
+    result = await search_tool.execute({
+        "query": search_keyword,
+        "search_type": "text",
+        "path": str(tmp_path),
+        "file_pattern": "*.txt",
+        "context_lines": 0,
+        "max_results": 10,
+    })
+
+    # --- Assert: 搜索命中 ---
+    assert result.success, f"enhanced_search 失败: {result}"
+
+    output = result.output if hasattr(result, "output") else result.data
+    if isinstance(output, dict):
+        contents = output.get("contents", [])
+        file_paths = output.get("file_paths", [])
+    else:
+        contents = []
+        file_paths = []
+
+    # 验证搜索结果包含关键词
+    found_in_contents = any(
+        search_keyword in line for line in contents
+    )
+    found_in_paths = any(
+        "search_target.txt" in fp for fp in file_paths
+    )
+    assert found_in_contents or found_in_paths, (
+        f"搜索结果应包含关键词 '{search_keyword}' 或目标文件，"
+        f"contents: {contents}, file_paths: {file_paths}"
+    )

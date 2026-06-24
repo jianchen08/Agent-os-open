@@ -3,15 +3,15 @@
 
 变更背景：
   三个端口统一 +100 偏移以避免冲突：
-    后端    : 8888 → 8988
-    前端(宿主机): 5189 → 5289（容器内部 5188 不变）
+    后端    : 8888 → 8988 → 8989
+    前端(宿主机): 5189 → 5289 → 5290（容器内部 5188 不变）
     Redis(宿主机): 6380 → 6480（容器内部 6379 不变）
 
 验证范围：
   1. docker-compose.yml 端口映射正确
-  2. docker-compose.yml 中 BACKEND_URL / BACKEND_WS_URL 端口为 8988
+  2. docker-compose.yml 中 BACKEND_URL / BACKEND_WS_URL 端口为 8989
   3. start_web_cn.bat 中引用的端口正确
-  4. config/system/api_config.yaml 中 base_url 端口为 8988
+  4. config/system/api_config.yaml 中 base_url 端口为 8989
   5. 容器内部端口未被修改（5188 / 6379）
   6. 旧端口不再作为服务端口出现
 """
@@ -23,13 +23,17 @@ import pytest
 # ---------------------------------------------------------------------------
 # 常量：新端口 / 旧端口 / 容器内部端口
 # ---------------------------------------------------------------------------
-NEW_BACKEND_PORT = "8988"
-NEW_FRONTEND_HOST_PORT = "5289"
+NEW_BACKEND_PORT = "8989"
+NEW_FRONTEND_HOST_PORT = "5290"
 NEW_REDIS_HOST_PORT = "6480"
 
 OLD_BACKEND_PORT = "8888"
 OLD_FRONTEND_HOST_PORT = "5189"
 OLD_REDIS_HOST_PORT = "6380"
+
+# 上一次迁移的端口（8988/5289）也不应再出现
+PREV_BACKEND_PORT = "8988"
+PREV_FRONTEND_HOST_PORT = "5289"
 
 CONTAINER_FRONTEND_PORT = "5188"
 CONTAINER_REDIS_PORT = "6379"
@@ -59,16 +63,16 @@ class TestDockerComposePortMapping:
         return _read_file("docker-compose.yml")
 
     def test_frontend_port_mapping(self, content):
-        """前端端口映射应为 5289:5188（宿主机:容器）"""
-        assert '"5289:5188"' in content, "前端端口映射应为 5289:5188"
+        """前端端口映射应为 5290:5188（宿主机:容器）"""
+        assert '"5290:5188"' in content, "前端端口映射应为 5290:5188"
 
     def test_redis_port_mapping(self, content):
         """Redis 端口映射应为 6480:6379（宿主机:容器）"""
         assert '"6480:6379"' in content, "Redis 端口映射应为 6480:6379"
 
     def test_no_old_frontend_host_port_in_mapping(self, content):
-        """旧的前端宿主机端口 5189 不应出现在端口映射中"""
-        assert '"5189:' not in content, "旧的 5189: 端口映射仍然存在"
+        """旧的前端宿主机端口 5289 不应出现在端口映射中"""
+        assert '"5289:' not in content, "旧的 5289: 端口映射仍然存在"
 
     def test_no_old_redis_host_port_in_mapping(self, content):
         """旧的 Redis 宿主机端口 6380 不应出现在端口映射中"""
@@ -86,20 +90,20 @@ class TestDockerComposeBackendUrl:
         return _read_file("docker-compose.yml")
 
     def test_backend_url_port(self, content):
-        """BACKEND_URL 应使用端口 8988"""
-        assert "BACKEND_URL=http://host.docker.internal:8988" in content, (
-            "BACKEND_URL 应指向后端端口 8988"
+        """BACKEND_URL 应使用端口 8989"""
+        assert "BACKEND_URL=http://host.docker.internal:8989" in content, (
+            "BACKEND_URL 应指向后端端口 8989"
         )
 
     def test_backend_ws_url_port(self, content):
-        """BACKEND_WS_URL 应使用端口 8988"""
-        assert "BACKEND_WS_URL=ws://host.docker.internal:8988" in content, (
-            "BACKEND_WS_URL 应指向后端端口 8988"
+        """BACKEND_WS_URL 应使用端口 8989"""
+        assert "BACKEND_WS_URL=ws://host.docker.internal:8989" in content, (
+            "BACKEND_WS_URL 应指向后端端口 8989"
         )
 
     def test_no_old_backend_port_in_urls(self, content):
-        """旧后端端口 8888 不应出现在 URL 配置中"""
-        assert ":8888" not in content, "旧的 8888 后端端口仍存在于 docker-compose.yml"
+        """旧后端端口 8988 不应出现在 URL 配置中"""
+        assert ":8988" not in content, "旧的 8988 后端端口仍存在于 docker-compose.yml"
 
 
 # ---------------------------------------------------------------------------
@@ -119,15 +123,15 @@ class TestStartWebCnBat:
         )
 
     def test_display_backend_url(self, content):
-        """启动完成提示中的后端 URL 应使用端口 8988"""
-        assert "http://localhost:8988" in content, (
-            "启动脚本中后端 URL 应使用端口 8988"
+        """启动完成提示中的后端 URL 应使用端口 8989"""
+        assert "http://localhost:8989" in content, (
+            "启动脚本中后端 URL 应使用端口 8989"
         )
 
     def test_display_frontend_url(self, content):
-        """启动完成提示中的前端 URL 应使用端口 5289"""
-        assert "http://localhost:5289" in content, (
-            "启动脚本中前端 URL 应使用端口 5289"
+        """启动完成提示中的前端 URL 应使用端口 5290"""
+        assert "http://localhost:5290" in content, (
+            "启动脚本中前端 URL 应使用端口 5290"
         )
 
     def test_no_old_redis_port(self, content):
@@ -135,12 +139,12 @@ class TestStartWebCnBat:
         assert "localhost:6380" not in content, "旧的 6380 Redis 端口仍存在于启动脚本"
 
     def test_no_old_backend_port(self, content):
-        """旧后端端口 8888 不应出现在启动脚本中"""
-        assert "localhost:8888" not in content, "旧的 8888 后端端口仍存在于启动脚本"
+        """旧后端端口 8988 不应出现在启动脚本中"""
+        assert "localhost:8988" not in content, "旧的 8988 后端端口仍存在于启动脚本"
 
     def test_no_old_frontend_port(self, content):
-        """旧前端端口 5189 不应出现在启动脚本中"""
-        assert "localhost:5189" not in content, "旧的 5189 前端端口仍存在于启动脚本"
+        """旧前端端口 5289 不应出现在启动脚本中"""
+        assert "localhost:5289" not in content, "旧的 5289 前端端口仍存在于启动脚本"
 
 
 # ---------------------------------------------------------------------------
@@ -154,14 +158,14 @@ class TestApiConfig:
         return _read_file("config/system/api_config.yaml")
 
     def test_base_url_port(self, content):
-        """base_url 应使用端口 8988"""
-        assert "base_url: http://localhost:8988" in content, (
-            "api_config.yaml 中 base_url 应使用端口 8988"
+        """base_url 应使用端口 8989"""
+        assert "base_url: http://localhost:8989" in content, (
+            "api_config.yaml 中 base_url 应使用端口 8989"
         )
 
     def test_no_old_backend_port(self, content):
-        """旧后端端口 8888 不应出现在 api_config.yaml 中"""
-        assert "8888" not in content, "旧的 8888 端口仍存在于 api_config.yaml"
+        """旧后端端口 8988 不应出现在 api_config.yaml 中"""
+        assert "8988" not in content, "旧的 8988 端口仍存在于 api_config.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +181,7 @@ class TestContainerInternalPorts:
     def test_frontend_container_port_unchanged(self, content):
         """前端容器内部端口仍为 5188"""
         # 端口映射中的容器端口
-        assert '"5289:5188"' in content, "前端端口映射中容器端口应为 5188"
+        assert '"5290:5188"' in content, "前端端口映射中容器端口应为 5188"
         # healthcheck 中的 localhost 端口（容器内部访问）
         assert "localhost:5188" in content, "healthcheck 中前端容器端口应为 5188"
 
@@ -190,7 +194,7 @@ class TestContainerInternalPorts:
 # 6. 旧端口在关键配置文件中不再作为服务端口出现
 # ---------------------------------------------------------------------------
 class TestNoOldPortsInKeyConfigs:
-    """验证旧端口（8888/5189/6380）不再作为服务端口出现在关键配置文件中"""
+    """验证旧端口（8988/5289/6380）不再作为服务端口出现在关键配置文件中"""
 
     @pytest.mark.parametrize("rel_path", [
         "docker-compose.yml",
@@ -198,13 +202,10 @@ class TestNoOldPortsInKeyConfigs:
         "config/system/api_config.yaml",
     ])
     def test_no_old_backend_port_as_service(self, rel_path):
-        """旧后端端口 8888 不应作为服务端口出现在关键配置中"""
+        """旧后端端口 8988 不应作为服务端口出现在关键配置中"""
         content = _read_file(rel_path)
-        # 检查 8888 出现在端口上下文中（:8888 或 =8888 或 localhost:8888）
-        port_patterns = [":8888", "8888", "port.*8888"]
-        matches = [p for p in port_patterns if p in content]
-        assert not matches, (
-            f"{rel_path} 中仍然包含旧后端端口 8888（匹配模式: {matches}）"
+        assert "8988" not in content, (
+            f"{rel_path} 中仍然包含旧后端端口 8988"
         )
 
     @pytest.mark.parametrize("rel_path", [
@@ -212,10 +213,10 @@ class TestNoOldPortsInKeyConfigs:
         "start_web_cn.bat",
     ])
     def test_no_old_frontend_host_port(self, rel_path):
-        """旧前端宿主机端口 5189 不应出现在关键配置中"""
+        """旧前端宿主机端口 5289 不应出现在关键配置中"""
         content = _read_file(rel_path)
-        assert "5189" not in content, (
-            f"{rel_path} 中仍然包含旧前端宿主机端口 5189"
+        assert "5289" not in content, (
+            f"{rel_path} 中仍然包含旧前端宿主机端口 5289"
         )
 
     @pytest.mark.parametrize("rel_path", [

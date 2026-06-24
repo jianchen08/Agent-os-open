@@ -52,7 +52,7 @@ call :stop_project_instance
 :: ========== Find available ports ==========
 echo [INFO] Finding available ports...
 
-set "BACKEND_PORT=8988"
+set "BACKEND_PORT=8989"
 call :find_available_port BACKEND_PORT
 if !errorlevel! neq 0 (
     echo [ERROR] Cannot find an available backend port
@@ -60,7 +60,7 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-set "FRONTEND_PORT=5188"
+set "FRONTEND_PORT=5290"
 call :find_available_port FRONTEND_PORT
 if !errorlevel! neq 0 (
     echo [ERROR] Cannot find an available frontend port

@@ -252,7 +252,7 @@ def test_task_list_filter_by_status(
     )
 
     resp = test_client.get(
-        "/api/v1/tasks/?status=completed",
+        "/api/v1/tasks/?status=completed&limit=100",
         headers=auth_headers,
     )
     assert resp.status_code == 200

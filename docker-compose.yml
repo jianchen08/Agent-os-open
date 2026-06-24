@@ -23,11 +23,11 @@ services:
     # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
     restart: on-failure
     ports:
-      - "5289:5188"
+      - "5290:5188"
     environment:
       # Agent 跑在宿主机，前端通过 host.docker.internal 连接
-      - BACKEND_URL=http://host.docker.internal:8988
-      - BACKEND_WS_URL=ws://host.docker.internal:8988
+      - BACKEND_URL=http://host.docker.internal:8989
+      - BACKEND_WS_URL=ws://host.docker.internal:8989
     depends_on:
       redis:
         condition: service_healthy

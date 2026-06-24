@@ -79,23 +79,23 @@ if not exist "frontend\node_modules" (
 echo.
 
 :: ===========================================================================
-:: 5. Start backend (port 8988, in-memory fallback mode, no Redis needed)
+:: 5. Start backend (port 8989, in-memory fallback mode, no Redis needed)
 :: ===========================================================================
-echo [INFO] Starting backend (port 8988, no Redis dependency, auto in-memory mode)...
-start "Agent OS Backend (local)" /D "%cd%" cmd /k "set PYTHONPATH=src&& "%PYEXE%" -m channels.websocket.app_factory"
+echo [INFO] Starting backend (port 8989, no Redis dependency, auto in-memory mode)...
+start "Agent OS Backend (local)" /D "%cd%" cmd /k "set PYTHONPATH=src&& set BACKEND_PORT=8989&& "%PYEXE%" -m channels.websocket.app_factory"
 
 :: ===========================================================================
-:: 6. Start frontend (vite dev server, port 5289, proxy to 8988)
+:: 6. Start frontend (vite dev server, port 5290, proxy to 8989)
 :: ===========================================================================
-echo [INFO] Starting frontend (vite dev server, port 5289)...
-start "Agent OS Frontend (local)" /D "%cd%\frontend" cmd /k "set VITE_API_BASE_URL=http://localhost:8988&& set VITE_WS_BASE_URL=ws://localhost:8988&& npm run dev"
+echo [INFO] Starting frontend (vite dev server, port 5290)...
+start "Agent OS Frontend (local)" /D "%cd%\frontend" cmd /k "set VITE_API_BASE_URL=http://localhost:8989&& set VITE_WS_BASE_URL=ws://localhost:8989&& npm run dev"
 
 echo.
 echo ========================================
 echo   Startup complete
 echo ========================================
-echo   Backend:  http://localhost:8988
-echo   Frontend: http://localhost:5289
+echo   Backend:  http://localhost:8989
+echo   Frontend: http://localhost:5290
 echo   Mode:    local (no Docker / Redis in-memory fallback)
 echo   Stop:    close the two popped-up windows
 echo ========================================

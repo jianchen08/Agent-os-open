@@ -10,7 +10,8 @@ wait_for_event_type() 等便捷 API，消除后续 E2E 用例中的重复 WS 操
 from __future__ import annotations
 
 import logging
-import signal
+import queue
+import threading
 import time
 from typing import Any, Self
 
@@ -68,8 +69,9 @@ class WSTestClient:
     def receive_json(self, timeout_seconds: float = 10.0) -> dict[str, Any]:
         """接收并解析 JSON 格式的 WebSocket 消息（含 wall-clock 超时保护）。
 
-        使用 SIGALRM 实现 wall-clock 超时，防止服务端不发送事件时测试永久挂起。
-        仅支持 Unix 平台（Linux/macOS）。
+        使用线程 + queue 实现 wall-clock 超时，防止服务端不发送事件时测试永久挂起。
+        相比 SIGALRM 方案，线程方案与 C 扩展（litellm/tokenizers 等）兼容，
+        不会在全量测试套件中触发段错误。
 
         Args:
             timeout_seconds: 单次接收的最大等待秒数
@@ -81,24 +83,28 @@ class WSTestClient:
             TimeoutError: 超过 timeout_seconds 未收到消息
             WebSocketDisconnect: 连接已断开
         """
-        if not hasattr(signal, "SIGALRM"):
-            # Windows fallback：直接阻塞接收（测试环境通常为 Linux）
-            event = self._ws.receive_json()
-            self._events.append(event)
-            return event
+        result_queue: queue.Queue[Any] = queue.Queue()
 
-        def _alarm_handler(signum: int, frame: Any) -> None:
-            raise TimeoutError(f"接收消息超时（{timeout_seconds}s）")
+        def _do_receive() -> None:
+            try:
+                event = self._ws.receive_json()
+                result_queue.put(("ok", event))
+            except Exception as exc:
+                result_queue.put(("err", exc))
 
-        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        worker = threading.Thread(target=_do_receive, daemon=True)
+        worker.start()
+
         try:
-            event = self._ws.receive_json()
-            self._events.append(event)
-            return event
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, old_handler)
+            status, payload = result_queue.get(timeout=timeout_seconds)
+        except queue.Empty:
+            raise TimeoutError(f"接收消息超时（{timeout_seconds}s）") from None
+
+        if status == "err":
+            raise payload
+
+        self._events.append(payload)
+        return payload
 
     def wait_for_event_type(
         self,

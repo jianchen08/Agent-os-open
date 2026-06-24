@@ -34,7 +34,6 @@ except ImportError:
 
 from contextlib import asynccontextmanager
 
-import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from channels.api.app import create_app
@@ -621,6 +620,8 @@ def main() -> None:
 
     如果指定端口被占用，自动查找下一个可用端口。
     """
+    import uvicorn  # noqa: PLC0415 — 延迟导入，仅启动服务器时需要
+
     parser = argparse.ArgumentParser(description="Agent OS 服务器")
     parser.add_argument("--port", type=int, default=None, help="后端服务端口")
     args = parser.parse_args()
