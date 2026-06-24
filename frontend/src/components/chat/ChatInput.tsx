@@ -852,7 +852,7 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 模型名和 Token 统计 */}
+            {/* 模型名和 Token 统计：模型无效时如实显示「模型无效」，不用默认值冒充 */}
             {modelName ? (
               <div className="bg-primary/10 border-primary/20 hidden h-8 items-center gap-2 rounded-lg border px-3 text-xs sm:flex">
                 <Database className="text-primary h-3.5 w-3.5" />
@@ -883,7 +883,12 @@ export const ChatInput = ({
                   </>
                 )}
               </div>
-            ) : null}
+            ) : (
+              <div className="hidden h-8 items-center gap-2 rounded-lg border border-muted/20 px-3 text-xs text-muted-foreground sm:flex">
+                <AlertCircle className="h-3.5 w-3.5" />
+                <span>模型无效</span>
+              </div>
+            )}
           </div>
 
           {/* 发送/停止按钮 */}

@@ -45,6 +45,20 @@ function getMainPipelineId(sessionId: string): string | null {
   return mainPid ?? null
 }
 
+/**
+ * 获取主管道对应的主 Agent ID
+ *
+ * 后端创建会话时默认回填 agent_id="lingxi"（routes_threads.py）。
+ * 主 Tab 的 agentId 指向它，使主管道与子管道走完全相同的模型解析路径
+ * （ChatContainer 的 effectiveModelName 统一按 activeTab.agentId 查 agent.model），
+ * 不再用全局默认模型兜底冒充当前管道模型。
+ */
+function getMainAgentId(sessionId: string): string {
+  const sessions = useSessionStore.getState().sessions
+  const session = sessions.find((s) => s.id === sessionId)
+  return session?.agentId || 'lingxi'
+}
+
 /** localStorage 存储键前缀 */
 const STORAGE_KEY_PREFIX = 'agent-tabs-'
 /** 每个 Tab 缓存到 localStorage 的最大消息条数 */
@@ -274,16 +288,18 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
     const mainPipelineId = getMainPipelineId(sessionId)
+    const mainAgentId = getMainAgentId(sessionId)
 
     let tabs: AgentTab[]
     let activeTabId: string | null
 
     if (saved && saved.tabs.length > 0) {
       // 主管道 pipelineRunId 始终用 session 提供的最新 ID（与 fetchMessages 一致）
+      // agentId 同步为 session 的主 agent（消除旧缓存写死的空串）
       // 子 Tab 缺 pipelineRunId 时保持 undefined（不污染）
       tabs = saved.tabs.map((tab) => {
         if (tab.agentLevel === 1) {
-          return { ...tab, pipelineRunId: mainPipelineId || undefined }
+          return { ...tab, pipelineRunId: mainPipelineId || undefined, agentId: mainAgentId }
         }
         return tab
       })
@@ -292,7 +308,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       // 新会话：建主 Tab
       const mainTab: AgentTab = {
         id: `main-${sessionId}`,
-        agentId: '', agentName: '主Agent', agentLevel: 1,
+        agentId: mainAgentId, agentName: '主Agent', agentLevel: 1,
         taskId: undefined, parentRecordId: undefined,
         pipelineRunId: mainPipelineId || undefined,
         path: ['主Agent'], status: 'running', hasUnread: false,

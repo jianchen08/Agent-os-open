@@ -37,6 +37,30 @@ def _get_agent_registry() -> Any:
         return None
 
 
+def _resolve_agent_model(cfg: Any) -> str:
+    """解析 Agent 配置对应的实际模型标识。
+
+    与运行时 apply_agent_model_override 解析逻辑保持一致：
+    model_tier 解析优先（从 llm.yaml defaults.tiers），model_name 兜底。
+
+    Args:
+        cfg: AgentConfig dataclass
+
+    Returns:
+        模型标识字符串，解析失败返回空字符串
+    """
+    model_id = ""
+    if getattr(cfg, "model_tier", ""):
+        try:
+            from pipeline.plugin_resolver import resolve_tier  # noqa: PLC0415
+            model_id = resolve_tier(cfg.model_tier, {})
+        except Exception as exc:
+            logger.warning("解析 model_tier=%r 失败: %s", cfg.model_tier, exc)
+    if not model_id:
+        model_id = getattr(cfg, "model_name", "") or ""
+    return model_id
+
+
 def _config_to_response(cfg: Any) -> AgentResponse:
     """将 AgentConfig dataclass 转为 AgentResponse。"""
     return AgentResponse(
@@ -58,6 +82,7 @@ def _config_to_response(cfg: Any) -> AgentResponse:
         tags=cfg.tags,
         is_active=cfg.is_active,
         version=cfg.version,
+        model=_resolve_agent_model(cfg),
     )
 
 
