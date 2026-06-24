@@ -1700,6 +1700,15 @@ class PipelineEngine:
 
                 logger.debug("on_chunk pipeline_suspended 回调失败（非致命）")
 
+        # BUG-FIX-fix_20260624_chunk_drain_before_suspend:
+        # 问题根因: LLM 流式 chunk 通过 _chunk_queue 异步投递，_chunk_consumer 协程
+        #   独立消费。engine 在 LLM 返回后立刻 emit_suspend → _stream_started=False，
+        #   但 queue 里残留的 chunk（thinking_end、最终 text）还没被 consumer 取出，
+        #   取出时 bridge 已关闭流式 → 全部丢弃 → 用户看到回复突然中断。
+        # 修复方案: emit_suspend 前 drain chunk queue，确保所有已入队的 chunk 都被
+        #   消费完毕。带 2s 超时兜底，防止 consumer 卡死导致管道永久挂起。
+        await self._drain_chunk_queue(timeout=2.0)
+
         # Phase 1: 推送 emit_suspend（本轮流式完成）
 
         if self._bridge is not None:
@@ -2337,6 +2346,37 @@ class PipelineEngine:
                     exc, self._pipeline_id[:12],
 
                 )
+
+
+
+    async def _drain_chunk_queue(self, timeout: float = 2.0) -> None:
+
+        """等待 chunk queue 清空，确保 emit_suspend 前所有流式 chunk 已投递。
+
+        BUG-FIX-fix_20260624_chunk_drain_before_suspend 的配套方法。
+
+        每 5ms 让出一次事件循环，让 _chunk_consumer 协程有机会取出并投递 queue 里
+        残留的 chunk。带超时兜底，防止 consumer 卡住时管道永久挂起。
+
+        Args:
+            timeout: 最长等待秒数（默认 2s）
+        """
+        import time as _time  # noqa: PLC0415
+
+        queue = self._chunk_queue
+        if queue is None:
+            return
+        deadline = _time.monotonic() + timeout
+        while not queue.empty():
+            if _time.monotonic() > deadline:
+                remaining = queue.qsize()
+                if remaining:
+                    logger.warning(
+                        "[Engine] chunk queue drain 超时，仍有 %d 个 chunk 未消费: pipeline=%s",
+                        remaining, self._pipeline_id[:12],
+                    )
+                return
+            await asyncio.sleep(0.005)
 
 
 

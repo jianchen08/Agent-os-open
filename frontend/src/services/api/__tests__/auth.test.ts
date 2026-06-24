@@ -202,10 +202,12 @@ describe('认证API', () => {
       expect(result.access_token).toBe('new-access-token')
       expect(result.refresh_token).toBe('new-refresh-token')
 
-      // 验证API调用（使用新的请求格式）
-      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/auth/refresh', {
-        refresh_token: 'old-refresh-token',
-      })
+      // 验证API调用（使用新的请求格式，refresh 请求显式清除 Authorization 头）
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/api/v1/auth/refresh',
+        { refresh_token: 'old-refresh-token' },
+        { headers: { Authorization: '' } },
+      )
     })
 
     it('应该在refresh token无效时抛出错误', async () => {

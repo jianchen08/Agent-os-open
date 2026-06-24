@@ -14,7 +14,10 @@ import { isRetryableError } from '../../utils/retry'
 import { triggerAuthExpired } from '../authCallbacks'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
 import type { ApiError } from '../../types/api'
-import { useAuthStore } from '@/stores/authStore'
+
+// NOTE: useAuthStore 通过运行时动态 import 引入，避免与 authStore.ts → auth.ts → client.ts
+// 构成静态循环依赖（vitest/vite 在 transform 阶段解析静态 import 会失败）。
+// 互斥锁仍由 authStore.refreshToken 的模块级 refreshInFlight 提供，所有调用方共享。
 
 /**
  * 清除认证信息并重定向到登录页
@@ -108,6 +111,16 @@ apiClient.interceptors.request.use(
 
     // 如果token存在，添加到请求头
     if (token && config.headers) {
+      // BUG-FIX-fix_20260624_refresh_header_overrides_body:
+      // 某些请求（如 /auth/refresh）显式声明不带 access token（Authorization 设为空字符串），
+      // 拦截器必须尊重这个声明，不覆盖。否则 refresh token 走 body，access token 却通过
+      // 头抢先被后端读取，导致「期望 refresh 类型」401。
+      const existing = config.headers.Authorization
+      if (existing === '') {
+        // 请求方明确要求不带 Authorization 头，删除它
+        delete config.headers.Authorization
+        return config
+      }
       config.headers.Authorization = `Bearer ${token}`
     }
 
@@ -171,6 +184,8 @@ apiClient.interceptors.response.use(
         // 刷新统一委托 authStore.refreshToken（单一互斥源）。
         // 并发的 401 请求会共享同一个 in-flight refresh，后端只被调用一次，
         // 消除 refresh_token 单次轮换被并发击穿导致的 race。
+        // 动态 import 打破静态循环依赖（见文件顶部注释）。
+        const { useAuthStore } = await import('@/stores/authStore')
         await useAuthStore.getState().refreshToken()
 
         // 刷新成功后从 localStorage 读最新 access token 重放原请求

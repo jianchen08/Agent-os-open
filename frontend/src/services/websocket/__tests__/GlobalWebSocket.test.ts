@@ -461,9 +461,11 @@ describe('GlobalWebSocketService', () => {
       // 注意：由于 HEARTBEAT_INTERVAL === HEARTBEAT_TIMEOUT === 30s，
       // interval 回调内 _clearHeartbeatTimeout() 总是在 setInterval 触发时先执行，
       // 清除上一轮的 timeout，导致 timeout 永远不会被触发（两者同时到期时 interval 优先）。
-      // 因此此处直接模拟心跳超时导致的 ws.close(4001) 行为，
+      // 因此此处直接模拟心跳超时导致的 ws.close(2002) 行为，
       // 验证 onclose 对心跳超时关闭的处理是否正确。
-      ws.close(4001, '心跳超时')
+      // 心跳超时使用 code=2002（TIMEOUT），与认证拒绝 code=4001 区分（见
+      // BUG-FIX-fix_20260624_ws_reconnect_dead_loop）：心跳超时走普通重连，不触发 token 刷新。
+      ws.close(2002, '心跳超时')
 
       // ws.close(4001) → onclose → _scheduleReconnect → status = 'reconnecting'
       expect(service.status).toBe('reconnecting')

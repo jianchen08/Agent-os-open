@@ -15,6 +15,7 @@ from channels.api.auth import (
     create_refresh_token,
     get_current_user,
     verify_token,
+    _get_token_manager,
 )
 from channels.api.deps import _extract_token
 from channels.api.memory_store import store
@@ -187,11 +188,20 @@ def refresh_token(
     """使用 refresh token 获取新的 access token。
 
     支持两种方式传递 refresh token：
-    1. Authorization: Bearer <token> 头
-    2. JSON body: {"refresh_token": "<token>"}
+    1. JSON body: {"refresh_token": "<token>"}（推荐，前端默认走此路径）
+    2. Authorization: Bearer <token> 头（向后兼容）
+
+    BUG-FIX-fix_20260624_refresh_header_overrides_body:
+    问题根因: 原实现优先读 Authorization 头，再读 body。但前端 axios 请求拦截器对
+              所有请求（含 /auth/refresh）统一注入 Authorization: Bearer <access_token>，
+              导致 body 里正确的 refresh_token 被头里的 access_token 覆盖，
+              后端 verify_token(access_token, token_type="refresh") 因 type 不符
+              报「期望 refresh 类型的令牌」401。
+    修复方案: body 优先于 header。refresh token 本就不应通过 Authorization 头传递
+              （header 是 access token 的位置），body 里的 refresh_token 才是权威来源。
 
     Args:
-        authorization: Authorization 请求头
+        authorization: Authorization 请求头（向后兼容）
         body: JSON body 中的 refresh_token
 
     Returns:
@@ -200,9 +210,12 @@ def refresh_token(
     Raises:
         HTTPException: refresh token 无效或已撤销
     """
-    actual_token = _extract_token(authorization)
-    if not actual_token and body and body.refresh_token:
+    # body 优先于 header（见上方 BUG-FIX-fix_20260624_refresh_header_overrides_body）
+    actual_token = ""
+    if body and body.refresh_token:
         actual_token = body.refresh_token
+    if not actual_token:
+        actual_token = _extract_token(authorization)
 
     if not actual_token:
         raise HTTPException(
@@ -210,8 +223,9 @@ def refresh_token(
             detail="缺少 refresh token",
         )
 
-    # 检查是否已被撤销
-    if store.is_token_revoked(actual_token):
+    # 检查是否已被撤销（统一走 TokenManager，P2.2）
+    token_manager = _get_token_manager()
+    if token_manager._is_token_revoked(actual_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="refresh token 已被撤销",
@@ -240,8 +254,8 @@ def refresh_token(
             detail="用户不存在",
         )
 
-    # 撤销旧的 refresh token
-    store.revoke_refresh_token(actual_token)
+    # 撤销旧的 refresh token（统一走 TokenManager → Redis，P2.2）
+    token_manager.revoke_token(actual_token)
 
     # 生成新 token
     token_data = {"sub": user_id, "username": username}
@@ -260,7 +274,11 @@ def logout(
     authorization: str = Header(default=""),
     body: RefreshRequest | None = None,
 ) -> dict[str, str]:
-    """登出用户，撤销 refresh token。
+    """登出用户，撤销 refresh token 并使该用户所有已签发 token 立即失效。
+
+    BUG-FIX-fix_20260624_logout_revoke_access:
+    原实现只撤销 refresh token，已签发的 access token 仍 30 分钟有效（安全硬伤）。
+    现改为同时调 revoke_all_user_tokens，登出后 access token 立即失效。
 
     支持 Authorization 头和 JSON body。
 
@@ -275,9 +293,17 @@ def logout(
     if not actual_token and body and body.refresh_token:
         actual_token = body.refresh_token
 
+    token_manager = _get_token_manager()
+
     if actual_token:
         payload = verify_token(actual_token, token_type="refresh")
         if payload and payload.get("type") == "refresh":
-            store.revoke_refresh_token(actual_token)
+            # 撤销 refresh token（P2.2 统一到 TokenManager）
+            token_manager.revoke_token(actual_token)
+            # 撤销该用户所有已签发 token（含 access token，P2.3）
+            # revoke_all_user_tokens 按 iat 时间戳判定，会令所有更早签发的 token 失效
+            user_id = payload.get("sub")
+            if user_id:
+                token_manager.revoke_all_user_tokens(user_id)
 
     return {"message": "登出成功"}

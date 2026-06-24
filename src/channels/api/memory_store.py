@@ -70,7 +70,7 @@ class MemoryStore:
         self.users: dict[str, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
-        self.refresh_tokens: set[str] = set()
+        # refresh_tokens 已移除：token 撤销统一走 TokenManager（Redis），见 P2.2。
         self.sessions: dict[str, SessionModel] = {}
         # 用户线程索引：user_id -> thread_id 列表，加速 get_user_threads 查询
         self._user_thread_index: dict[str, list[str]] = {}
@@ -530,13 +530,9 @@ class MemoryStore:
         del self.memories[mem_id]
         return True
 
-    def revoke_refresh_token(self, token: str) -> None:
-        """将 refresh token 加入撤销列表。"""
-        self.refresh_tokens.add(token)
-
-    def is_token_revoked(self, token: str) -> bool:
-        """检查 refresh token 是否已被撤销。"""
-        return token in self.refresh_tokens
+    # revoke_refresh_token / is_token_revoked 已移除：
+    # token 撤销统一走 TokenManager（Redis），见 P2.2。
+    # routes_auth.py 现直接调 _get_token_manager().revoke_token / _is_token_revoked。
 
 
 # 模块级单例
