@@ -213,7 +213,13 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
     app = create_app(lifespan=_combined_lifespan)
 
     # WebSocket 连接管理
-    active_connections: dict[str, list[WebSocket]] = {}
+    # BUG-FIX-fix_20260624_ws_double_ledger:
+    # 历史上这里维护了一个本地 active_connections，与
+    # ws_interaction_notifier._active_connections 是两本独立账本，
+    # 清理逻辑分裂导致：本地清掉了 notifier 还残留 / 反之亦然，
+    # 体感上是「连接看起来活着但收不到推送」或「死连接还被推消息」。
+    # 现在直接复用 notifier 内部字典，单源真理。
+    active_connections: dict[str, list[WebSocket]] = ws_interaction_notifier._active_connections
 
     # 每个 thread_id 的对话历史
     conversation_histories: dict[str, list[dict[str, Any]]] = {}
@@ -255,7 +261,18 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 "data": {"status": "connected", "mode": "global", "user_id": user_id},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }))
-        except Exception:
+        except WebSocketDisconnect:
+            # BUG-FIX-fix_20260624_confirmation_disconnect:
+            # 前端刚 accept 就刷新页面的常见竞态：accept 成功 → send 时对端已关。
+            # 这是正常断开（不是异常），用 info 记录不污染 ERROR 日志。
+            logger.info("[GlobalWS] 客户端在握手确认前已断开: user=%s", user_id[:12])
+            ws_interaction_notifier.unregister_global(user_id, websocket)
+            return
+        except Exception as exc:
+            logger.error(
+                "[GlobalWS] 发送 connection_confirmation 失败: user=%s err=%s",
+                user_id[:12], exc,
+            )
             ws_interaction_notifier.unregister_global(user_id, websocket)
             return
 
@@ -548,14 +565,22 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         except Exception as exc:
             logger.error("[GlobalWS] 消息循环异常: user=%s err=%s", user_id[:12], exc)
         finally:
+            # BUG-FIX-fix_20260624_ws_double_ledger:
+            # active_connections 现已直接复用 notifier._active_connections，
+            # 这里只剩两件事：注销全局连接 + 清理 notifier 内的所有 thread 残留，
+            # 顺带清理跟随退出的会话历史（conversation_histories 仍是本地字典）。
             ws_interaction_notifier.unregister_global(user_id, websocket)
+            removed_tids: list[str] = []
             for tid in list(active_connections.keys()):
                 if websocket in active_connections.get(tid, []):
                     active_connections[tid] = [c for c in active_connections[tid] if c != websocket]
                     if not active_connections[tid]:
-                        del active_connections[tid]
-                        conversation_histories.pop(tid, None)
+                        removed_tids.append(tid)
             ws_interaction_notifier.unregister_all_for_ws(websocket)
+            for tid in removed_tids:
+                # unregister_all_for_ws 已经把空列表从 _active_connections 删了，
+                # 这里仅同步清理本地 conversation_histories。
+                conversation_histories.pop(tid, None)
 
     # 挂载媒体文件静态服务（必须放在所有路由注册之后）
     mount_media_static_files(app)

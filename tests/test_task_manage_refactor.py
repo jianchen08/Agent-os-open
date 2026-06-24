@@ -173,10 +173,11 @@ class TestTaskStateMachineTransitions:
 class TestTaskManageSchema:
     """验证 task_manage 工具的 action enum 定义。"""
 
-    EXPECTED_ACTIONS = {"get", "continue", "stop", "delete", "complete", "fail"}
+    EXPECTED_ACTIONS = {"get", "continue", "stop", "delete", "change"}
     OLD_ACTIONS = {
         "retry", "inject", "resume", "pause", "cancel",
         "update", "resume_completed", "complete_container", "fail_container",
+        "complete", "fail",
         "list", "status",
     }
 
@@ -195,8 +196,8 @@ class TestTaskManageSchema:
         tool_def = TaskTool.get_tool_definition()
         return tool_def.input_schema
 
-    def test_yaml_action_enum_has_6_actions(self, yaml_schema):
-        """YAML schema 的 action enum 应恰好包含 6 个操作。"""
+    def test_yaml_action_enum_has_5_actions(self, yaml_schema):
+        """YAML schema 的 action enum 应恰好包含 5 个操作。"""
         action_enum = yaml_schema["parameters"]["properties"]["action"]["enum"]
         assert set(action_enum) == self.EXPECTED_ACTIONS, (
             f"YAML action enum 不匹配: "

@@ -951,7 +951,11 @@ class TestCleanupTaskResources:
 
 
 class TestCompleteContainerIntegration:
-    """_complete_container 调用清理的集成测试。"""
+    """_change_status(status=completed) 调用清理的集成测试。
+
+    change action 替代了旧的 complete/fail，仅对容器任务生效。
+    status=completed 时调用 _cleanup_subtask_worktrees。
+    """
 
     @pytest.fixture
     def tool(self):
@@ -959,8 +963,8 @@ class TestCompleteContainerIntegration:
         return _make_tool()
 
     @pytest.mark.asyncio
-    async def test_complete_container_calls_cleanup_before_transition(self, tool):
-        """测试：容器完成时在状态转换之前调用 worktree 清理。"""
+    async def test_change_completed_calls_cleanup_before_transition(self, tool):
+        """测试：change(status=completed) 时在状态转换之前调用 worktree 清理。"""
         container = _make_container(task_id="cnt-001", workspace="/ws/cnt-001")
         subtasks = [
             _make_subtask("sub-001", workspace="/ws/worktrees/sub-001"),
@@ -990,17 +994,18 @@ class TestCompleteContainerIntegration:
                 new_callable=AsyncMock,
             ) as mock_cleanup,
         ):
-            result = await tool._complete_container(
-                {"task_id": "cnt-001"}, parent_agent_level=1
+            result = await tool._change_status(
+                {"task_id": "cnt-001", "status": "completed"}, parent_agent_level=1
             )
 
+        assert result.success is True
         # 验证清理被调用
         mock_cleanup.assert_called_once_with(container, subtasks)
         # 验证状态转换被调用
         mock_service.force_transition.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_complete_container_cleanup_failure_non_fatal(self, tool):
+    async def test_change_completed_cleanup_failure_non_fatal(self, tool):
         """测试：清理失败不阻塞容器完成。"""
         container = _make_container(task_id="cnt-002", workspace="/ws/cnt-002")
         subtasks = [
@@ -1022,18 +1027,19 @@ class TestCompleteContainerIntegration:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await tool._complete_container(
-                {"task_id": "cnt-002"}, parent_agent_level=1
+            result = await tool._change_status(
+                {"task_id": "cnt-002", "status": "completed"}, parent_agent_level=1
             )
 
         # 即使清理失败，状态转换仍被调用
+        assert result.success is True
         mock_service.force_transition.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_complete_container_permission_denied(self, tool):
-        """测试：非 L1 Agent 不能执行容器完成操作。"""
-        result = await tool._complete_container(
-            {"task_id": "cnt-001"}, parent_agent_level=2
+    async def test_change_permission_denied(self, tool):
+        """测试：非 L1 Agent 不能执行容器状态变更。"""
+        result = await tool._change_status(
+            {"task_id": "cnt-001", "status": "completed"}, parent_agent_level=2
         )
 
         # L2 无权限
@@ -1041,48 +1047,95 @@ class TestCompleteContainerIntegration:
         assert "PERMISSION_DENIED" in (result.error_code or "")
 
     @pytest.mark.asyncio
-    async def test_complete_container_missing_task_id(self, tool):
+    async def test_change_missing_task_id(self, tool):
         """测试：缺少 task_id 参数时报错。"""
-        result = await tool._complete_container(
-            {}, parent_agent_level=1
+        result = await tool._change_status(
+            {"status": "completed"}, parent_agent_level=1
         )
 
         assert result.success is False
         assert "MISSING_TASK_ID" in (result.error_code or "")
 
     @pytest.mark.asyncio
-    async def test_complete_container_task_not_found(self, tool):
+    async def test_change_missing_status(self, tool):
+        """测试：change 操作缺少 status 参数时报错。"""
+        container = _make_container(task_id="cnt-006")
+        mock_service = MagicMock()
+        mock_service.get_task.return_value = container
+
+        with patch.object(tool, "_get_task_service", return_value=mock_service):
+            result = await tool._change_status(
+                {"task_id": "cnt-006"}, parent_agent_level=1
+            )
+
+        assert result.success is False
+        assert "MISSING_STATUS" in (result.error_code or "")
+
+    @pytest.mark.asyncio
+    async def test_change_task_not_found(self, tool):
         """测试：任务不存在时报错。"""
         mock_service = MagicMock()
         mock_service.get_task.return_value = None
 
         with patch.object(tool, "_get_task_service", return_value=mock_service):
-            result = await tool._complete_container(
-                {"task_id": "nonexistent"}, parent_agent_level=1
+            result = await tool._change_status(
+                {"task_id": "nonexistent", "status": "completed"}, parent_agent_level=1
             )
 
         assert result.success is False
         assert "TASK_NOT_FOUND" in (result.error_code or "")
 
     @pytest.mark.asyncio
-    async def test_complete_container_not_a_container(self, tool):
-        """测试：非容器任务（无子任务）不能使用容器操作。"""
-        container = _make_container(task_id="cnt-003")
+    async def test_change_rejects_non_container(self, tool):
+        """测试：非容器任务（task_scope != container）不能使用 change 操作。
+
+        修复回归：此前用 list_subtasks 是否为空判断容器，空容器被误判。
+        现改用 task_scope 字段判断。本测试验证：非容器任务（即使有子任务）也被拒绝。
+        """
+        # 非容器任务：task_scope 不是 container（但有子任务，模拟旧 bug 场景）
+        non_container = _make_container(task_id="cnt-003")
+        non_container.metadata = {"task_scope": "non_container"}  # 改为非容器
         mock_service = MagicMock()
-        mock_service.get_task.return_value = container
-        mock_service.list_subtasks.return_value = []  # 无子任务
+        mock_service.get_task.return_value = non_container
+        mock_service.list_subtasks.return_value = [_make_subtask("sub-001")]  # 有子任务
 
         with patch.object(tool, "_get_task_service", return_value=mock_service):
-            result = await tool._complete_container(
-                {"task_id": "cnt-003"}, parent_agent_level=1
+            result = await tool._change_status(
+                {"task_id": "cnt-003", "status": "completed"}, parent_agent_level=1
             )
 
         assert result.success is False
         assert "NOT_A_CONTAINER" in (result.error_code or "")
 
     @pytest.mark.asyncio
-    async def test_complete_container_wrong_status(self, tool):
-        """测试：非 PENDING 状态的容器不能标记完成。"""
+    async def test_change_empty_container_ok(self, tool):
+        """测试：空容器（无子任务但 task_scope=container）可正常 change。
+
+        这是核心 bug 修复验证：旧逻辑用 list_subtasks 判断容器，空容器被误报
+        NOT_A_CONTAINER。新逻辑用 task_scope 判断，空容器能正常变更状态。
+        """
+        container = _make_container(task_id="cnt-empty")  # task_scope=container
+        mock_service = MagicMock()
+        mock_service.get_task.return_value = container
+        mock_service.list_subtasks.return_value = []  # 无子任务
+        mock_service.force_transition = AsyncMock()
+        mock_service.save_task = AsyncMock()
+
+        with patch.object(tool, "_get_task_service", return_value=mock_service):
+            result = await tool._change_status(
+                {"task_id": "cnt-empty", "status": "failed"}, parent_agent_level=1
+            )
+
+        assert result.success is True
+        mock_service.force_transition.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_change_any_status_allowed(self, tool):
+        """测试：容器可从任意状态变更到任意状态（不再有 PENDING/RUNNING 白名单）。
+
+        取代旧的 test_complete_container_wrong_status（原断言 INVALID_STATUS）。
+        现在已 completed 的容器仍能再次 change。
+        """
         container = _make_container(task_id="cnt-004")
         container.status = TaskStatus.COMPLETED  # 已经完成
         subtasks = [_make_subtask("sub-001")]
@@ -1090,17 +1143,30 @@ class TestCompleteContainerIntegration:
         mock_service = MagicMock()
         mock_service.get_task.return_value = container
         mock_service.list_subtasks.return_value = subtasks
+        mock_service.force_transition = AsyncMock()
+        mock_service.save_task = AsyncMock()
 
-        with patch.object(tool, "_get_task_service", return_value=mock_service):
-            result = await tool._complete_container(
-                {"task_id": "cnt-004"}, parent_agent_level=1
+        with (
+            patch.object(tool, "_get_task_service", return_value=mock_service),
+            patch.object(
+                mock_service,
+                "_cleanup_subtask_worktrees",
+                return_value={
+                    "total_subtasks": 1, "cleaned_count": 0, "skipped_count": 0,
+                    "error_count": 0, "errors": [],
+                },
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await tool._change_status(
+                {"task_id": "cnt-004", "status": "completed"}, parent_agent_level=1
             )
 
-        assert result.success is False
-        assert "INVALID_STATUS" in (result.error_code or "")
+        # 已完成容器再次 change 成功（不再拒绝）
+        assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_complete_container_cleanup_info_in_result(self, tool):
+    async def test_change_completed_cleanup_info_in_result(self, tool):
         """测试：容器完成结果中包含清理信息。"""
         container = _make_container(task_id="cnt-005", workspace="/ws/cnt-005")
         subtasks = [
@@ -1130,11 +1196,11 @@ class TestCompleteContainerIntegration:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await tool._complete_container(
-                {"task_id": "cnt-005"}, parent_agent_level=1
+            result = await tool._change_status(
+                {"task_id": "cnt-005", "status": "completed"}, parent_agent_level=1
             )
 
         assert result.success is True
         # 结果中包含清理信息
-        assert "cleanup" in result.data
-        assert result.data["cleanup"]["cleaned_count"] == 1
+        assert "cleanup" in result.output
+        assert result.output["cleanup"]["cleaned_count"] == 1

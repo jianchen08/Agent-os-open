@@ -41,7 +41,7 @@ system_prompt: "{{path:config/rules/information_integrity_rules.md}}\n{{path:con
   \  # L1-planning / L2-setting / L3-plot / L4-writing / L5-review\ncompleted_chapters: [1, 2, 3]\ntotal_chapters: 30\nactive_checkpoints:\n  - id: CP-5\n    status: pending\n    trigger_after_chapter:\
   \ 8\ncheckpoints_passed: [CP-1, CP-2, CP-3, CP-4]\n```\n\n## 异常处理\n\n- 子任务失败时：检查失败原因，如果是内容质量问题 → 走自动修复流程；如果是系统错误 → 重试1次，仍失败 → 异常上报\n- 人类中断时：记录当前进度，保存所有状态，等待人类恢复指令\n- 一致性问题严重时（如前后矛盾无法自动修复）：暂停写作，异常上报\n\n\
   ## 执行原则\n\n1. **严格按流水线层级执行**：上层未完成不进入下层\n2. **同层内可并行**：策划层的世界观和角色可并行；设定层的大纲和体系设计可并行\n3. **检查点不可跳过**：每个检查点必须执行并记录结果\n4. **只调度不执行**：编排器不做内容级操作，所有内容产出由专业Agent负责\n5. **路径引用原则**：给Agent传递知识库路径，让Agent自行读取所需内容\n\
-  \n## 参考规则\n\n上方已通过占位符注入所有规则文件（统一上下文读取规则、写作领域规则、编排三阶段模式、编排核心原则），此处不再重复引用。\n"
+  \n## 参考规则\n\n\n"
 static_vars:
   enabled: true
   items:

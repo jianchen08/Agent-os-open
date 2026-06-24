@@ -1,23 +1,28 @@
 # task_manage 工具定义（OpenAI function calling 格式）
-# 6 个操作：get / continue / stop / delete / complete / fail
+# 5 个操作：get / continue / stop / delete / change
 
 name: task_manage
 description: |
   任务管理工具：用于查询和控制任务的生命周期。
 
-  ## 6 个操作
+  ## 5 个操作
   - **get**：查询任务。不传 task_id → 返回列表简表；传 task_id → 返回单个任务详情
-  - **continue**：继续执行。可重试失败任务、恢复已停止任务、向运行中任务注入指令
-  - **stop**：停止任务。统一进入 stopped 状态（数据完好，可 continue 恢复）
+  - **continue**：继续执行（针对非容器任务）。可重试失败任务、恢复已停止任务、向运行中任务注入指令
+  - **stop**：停止任务（针对非容器任务）。统一进入 stopped 状态（数据完好，可 continue 恢复）
   - **delete**：彻底删除任务
-  - **complete**：标记容器任务完成（仅L1）
-  - **fail**：标记容器任务失败（仅L1）
+  - **change**：变更容器任务状态（仅L1，仅容器任务）。容器只是子任务的集合，无执行体，
+    状态可自由变更。通过 status 参数指定目标状态；status=completed 时会清理子任务 worktree。
 
   ## continue 的四种行为
   - 运行中任务 + message：注入指令（不改变状态）
   - 失败/超时任务：重试（自动继承管道+空间）
   - 失败/超时任务 + message：重试 + 注入指令
   - 已停止任务：恢复执行
+
+  ## change 说明
+  - 仅限 L1 主 Agent，仅对容器任务（task_scope=container）生效
+  - 容器状态可自由切换到任意目标状态（completed/failed/pending/running/stopped/timeout）
+  - status=completed：清理子任务 worktree；其它状态：纯改状态字段
 
   ## 权限
   - L1：默认只显示自己提交的任务；传 show_all=true 可递归查看当前会话所有任务
@@ -33,16 +38,14 @@ parameters:
         - continue
         - stop
         - delete
-        - complete
-        - fail
+        - change
       description: |
         操作类型：
         - get：查询任务。不传 task_id 返回列表简表，传 task_id 返回详情
-        - continue：继续执行（重试/恢复/注入指令）
-        - stop：停止任务（统一进入 stopped 状态）
+        - continue：继续执行（重试/恢复/注入指令，针对非容器任务）
+        - stop：停止任务（统一进入 stopped 状态，针对非容器任务）
         - delete：删除任务
-        - complete：标记容器完成（仅L1）
-        - fail：标记容器失败（仅L1）
+        - change：变更容器任务状态（仅L1，仅容器任务），需配合 status 指定目标状态
 
     task_id:
       type: string
@@ -50,7 +53,7 @@ parameters:
         目标任务 ID。
         - get：不传返回列表，传入返回详情
         - continue/stop/delete：必填（与 task_ids 二选一）
-        - complete/fail：必填
+        - change：必填
 
     task_ids:
       type: array
@@ -76,7 +79,10 @@ parameters:
         - completed
         - failed
         - timeout
-      description: 按状态筛选（get 列表模式时生效）
+      description: |
+        双重用途：
+        - get 列表模式：按状态筛选
+        - change 操作：目标状态（必填），如 completed/failed/pending/running/stopped/timeout
 
     message:
       type: string
@@ -91,7 +97,7 @@ parameters:
 
     container_reason:
       type: string
-      description: 容器操作原因（complete/fail 操作时填写）
+      description: 容器操作原因（change 操作时填写，记录到任务 metadata）
 
     include_details:
       type: boolean

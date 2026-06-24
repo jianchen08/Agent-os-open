@@ -55,12 +55,14 @@ class TaskReminder(IOutputPlugin):
     async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911,PLR0912,PLR0915
         """执行任务评估提醒检测。
 
-        条件：
+        触发条件（BUG-FIX-fix_20260624_task_reminder_loop）：
         1. core_type 为 llm_call（仅 LLM 输出阶段，非工具执行后）
         2. 有 task_id（在任务上下文中）
-        3. LLM 只输出了纯文本（raw_tool_calls 为空）
-        4. 提醒次数未超限
-        5. 冷却期已过
+        3. **非 L1 调度层**：L1 的纯文本输出是正常调度汇报，不该被催
+        4. **任务没有活跃下级**：有下级任务说明在等子任务，不该催当前任务
+        5. **LLM 这一轮没调工具（只输出纯文本）**：正在调工具说明有进展，不催；
+           只在 LLM"光说不练"时才提醒它该提交 task_evaluate 了
+        6. 提醒次数未超限
 
         满足条件时注入系统提醒消息到 messages，触发 next_llm。
         """
@@ -82,6 +84,17 @@ class TaskReminder(IOutputPlugin):
             logger.debug(
                 "TaskReminder[iter=%s]: skip, no task_id in state",
                 iteration,
+            )
+            return OutputResult()
+
+        # ── 规则 3：L1 调度层永不触发 ──
+        # L1（灵汐）是调度层，它的纯文本输出是正常的调度/沟通汇报，
+        # 不代表"忘了提交评估"。reminder 只对叶子执行者有意义。
+        agent_level = state.get("agent_level", "")
+        if agent_level == "L1":
+            logger.debug(
+                "TaskReminder[iter=%s][task=%s]: skip, L1 调度层不触发 reminder",
+                iteration, task_id,
             )
             return OutputResult()
 
@@ -111,6 +124,16 @@ class TaskReminder(IOutputPlugin):
                         )
             except Exception:
                 pass
+
+        # ── 规则 4：有活跃下级任务时不触发（提前到最前面）──
+        # 任务有活跃子任务说明在等子任务完成，当前任务的纯文本输出
+        # 是正常的等待/协调行为，不该被催提交评估。
+        if await self._has_active_children(task_id, ctx):
+            logger.info(
+                "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
+                iteration, task_id,
+            )
+            return OutputResult()
 
         evaluation_mode = self._is_evaluation_mode(state)
 
@@ -212,12 +235,7 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        if await self._has_active_children(task_id, ctx):
-            logger.info(
-                "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
-                iteration, task_id,
-            )
-            return OutputResult()
+        # 注：_has_active_children 已在 execute 入口提前检查，此处不再重复。
 
         reminder_count = state.get("evaluate_reminder_count", 0)
         if reminder_count >= self._max_reminders:

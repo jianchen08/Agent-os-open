@@ -131,15 +131,16 @@ describe('乐观 user 消息宽限期', () => {
     expect(userMsgs[0].id).toBe('server-uuid-3')
   })
 
-  it('场景4: 无 clientMessageId 的本地消息不享受宽限期（直接丢弃）', () => {
+  it('场景4: persist 残留的旧 assistant 消息（超宽限期）被丢弃', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 本地消息无 clientMessageId（如 persist 恢复的旧 assistant 消息）
+    // persist 残留的旧 assistant 消息：timestamp 为 2 分钟前，远超 30s 宽限期
+    // （addMessage 不写 _lastUpdated，isWithinOptimisticGrace fallback 到 timestamp 判定）
     const noClientMsg = makeMsg('no-client-4', 1, {
       role: 'assistant',
       content: 'old assistant',
       status: 'completed',
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(Date.now() - 120_000).toISOString(), // 2 分钟前
     })
     store.addMessage(PIPELINE_ID, noClientMsg)
 
@@ -148,7 +149,7 @@ describe('乐观 user 消息宽限期', () => {
       makeMsg('api-user-4', 1, { role: 'user', content: 'question' }),
     ])
 
-    // 无 clientMessageId 的消息应被丢弃
+    // 超宽限期的旧 assistant 消息应被丢弃（不在窗口内）
     const msgs = store.getMessages(PIPELINE_ID)
     expect(msgs.find((m) => m.id === 'no-client-4')).toBeUndefined()
   })

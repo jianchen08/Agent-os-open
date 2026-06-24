@@ -10,7 +10,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { extractMessageId, extractThreadId, terminatePipeline } from './utils'
+import { extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
 
 /**
  * 处理新消息事件
@@ -47,29 +47,23 @@ export function handleNewMessage(eventData: any) {
   // 问题根因: 后端 new_message 的 parts 只包含最后一轮 iteration 的内容（state.raw_thinking
   //   /raw_tool_calls/raw_result 每轮被覆盖）。用 serverParts 完整替换会导致流式过程中
   //   增量构建的前几轮 thinking/text/tool 内容全部丢失，用户只看到最后一轮的 AI 回复。
-  // 修复方案: 合并本地已有 parts 和 server parts。本地 parts 保留（流式增量内容），
-  //   server parts 补充缺失的部分。如果 server parts 有内容则用它（后端权威），
-  //   否则保留本地。
+  // BUG-FIX-fix_20260624_stream_overwrite_regression:
+  //   上一版用「parts 数组长度」判断，长度不可靠，会覆盖本地完整流式累积。改为本地优先。
+  //   详见 mergeStreamingParts。
   if (serverParts && Array.isArray(serverParts)) {
-    const updatedContent = data?.content != null ? data.content : existingMsg.content
-
-    // 合并策略：server parts 有实质内容时用 server（权威），否则保留本地流式 parts
     const localParts = existingMsg.parts || []
-    const serverHasContent = serverParts.length > 0 && serverParts.some(
-      (p: any) => (p.type === 'text' && p.content) || (p.type === 'thinking' && p.content) || (p.type === 'tool_call')
+    const { parts: finalParts, content } = mergeStreamingParts(
+      localParts, serverParts, data?.content, existingMsg.content,
     )
-    const finalParts = serverHasContent
-      ? (localParts.length > serverParts.length ? localParts : serverParts)
-      : localParts
 
-    if (!updatedContent && !finalParts.length) {
+    if (!content && !finalParts.length) {
       loggers.websocket.warn(
         '[MSG_READY] content 和 parts 均为空，消息将无内容: msgId=%s pipelineId=%s',
         messageId?.slice(0, 12), pipelineId?.slice(0, 12),
       )
     }
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
-      content: updatedContent || existingMsg.content,
+      content,
       parts: finalParts.length > 0 ? finalParts : undefined,
       status: 'completed',
       sequence: backendSeq ?? existingMsg.sequence,

@@ -190,8 +190,27 @@ class TestErrorCheckPlugin:
 
     @pytest.mark.asyncio
     async def test_max_retries_exceeded(self, ctx, base_state):
-        """测试重试次数用尽返回 end 信号。"""
+        """测试重试次数用尽返回 wait 信号（临时错误挂起等待，idle 兜底）。
+
+        BUG-FIX-fix_20260624_transient_no_end:
+        临时错误（TimeoutError 属 network 类）重试耗尽后应产 wait 挂起等待，
+        而非 end 终止管道。上游 LLM 抖动恢复后可继续，由 idle 总超时兜底。
+        永久错误（auth/quota/bad_request）才走 end。
+        """
         base_state[StateKeys.RAW_ERROR] = "TimeoutError: connection timed out"
+        base_state["retry.count"] = 3
+        plugin = ErrorCheckPlugin({"max_retries": 3})
+        result = await plugin.execute(ctx)
+
+        assert result.route_signal is not None
+        assert result.route_signal.route_type == "wait"
+
+    @pytest.mark.asyncio
+    async def test_permanent_error_max_retries_yields_end(self, ctx, base_state):
+        """永久错误（auth）重试耗尽仍返回 end 信号。"""
+        base_state[StateKeys.RAW_ERROR] = (
+            "AuthenticationError: invalid api key"
+        )
         base_state["retry.count"] = 3
         plugin = ErrorCheckPlugin({"max_retries": 3})
         result = await plugin.execute(ctx)

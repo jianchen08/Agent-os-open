@@ -4,7 +4,7 @@ task_manage 简化重构功能验证脚本（可独立运行）
 验证内容：
 1. TaskStatus 枚举 6 种状态
 2. 状态转换矩阵覆盖所有合法/非法转换
-3. task_manage action 简化为 get/continue/stop/delete/complete/fail
+3. task_manage action 简化为 get/continue/stop/delete/change
 4. continue 合并 retry+inject+resume（message 参数可选）
 5. stop 合并 pause+cancel（统一设 STOPPED，操作名=状态名）
 6. src/tools/task_manage.yaml schema 与代码一致
@@ -134,13 +134,14 @@ def step3_yaml_schema():
     with open(yaml_path, "r", encoding="utf-8") as f:
         yaml_data = yaml.safe_load(f)
 
-    expected_actions = {"get", "continue", "stop", "delete", "complete", "fail"}
+    expected_actions = {"get", "continue", "stop", "delete", "change"}
     yaml_actions = set(yaml_data["parameters"]["properties"]["action"]["enum"])
-    check(yaml_actions == expected_actions, "YAML action enum 包含 6 个操作",
+    check(yaml_actions == expected_actions, "YAML action enum 包含 5 个操作",
           f"缺失={expected_actions - yaml_actions}, 多余={yaml_actions - expected_actions}")
 
     old_actions = {"retry", "inject", "resume", "pause", "cancel", "update",
-                   "resume_completed", "complete_container", "fail_container", "list", "status"}
+                   "resume_completed", "complete_container", "fail_container",
+                   "complete", "fail", "list", "status"}
     for old in old_actions:
         check(old not in yaml_actions, f"YAML 不含旧 action: {old}")
 
@@ -209,7 +210,7 @@ def step6_stop_logic():
     for old in ['"retry"', '"inject"', '"pause"', '"cancel"', '"resume"', '"update"']:
         check(old not in exec_source, f"execute() 不含旧 action: {old}")
 
-    for new in ['"get"', '"continue"', '"stop"', '"delete"', '"complete"', '"fail"']:
+    for new in ['"get"', '"continue"', '"stop"', '"delete"', '"change"']:
         check(new in exec_source, f"execute() 含新 action: {new}")
 
 

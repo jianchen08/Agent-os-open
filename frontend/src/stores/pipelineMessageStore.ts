@@ -39,6 +39,34 @@ const PERSIST_MAX_MESSAGES_PER_PIPELINE = 50
 const OPTIMISTIC_MSG_GRACE_MS = 30_000
 
 /**
+ * 判断本地独有消息（API 未返回的）是否落在「刚生成、后端可能尚未持久化」的宽限期内。
+ *
+ * BUG-FIX-fix_20260624_ai_msg_vanish:
+ * 与乐观 user 消息（fix_20260623_optimistic_user_msg_vanish）同源问题——
+ * AI 回复 stream_end/finalizeMessage 后 status 由 'streaming' 变 'completed'，
+ * isStreamingMessage() 随即返回 false。此时若 initFromAPI 被并发触发
+ * （WS 重连 / Tab 切换 / 会话切换）且后端尚未持久化该 AI 消息，
+ * API 返回列表不含它 → 走 return false 被丢弃 → 最新几条 AI 回复消失，
+ * 刷新后才重新出现，表现与 user 消息完全一致。
+ *
+ * 每类消息用单一字段判定「乐观窗口起点」：
+ *   - user 消息用 timestamp：乐观消息由 addMessage 创建（不写 _lastUpdated），
+ *     timestamp 即发送时刻。
+ *   - assistant 消息用 _lastUpdated：stream_end 的 finalize/updateMessage 必写此字段，
+ *     即「刚完成」时刻。persist 残留的旧 AI 消息 _lastUpdated 为上次会话值或缺失，
+ *     均不满足窗口条件，被正确丢弃，不重新引入重复渲染。
+ */
+function isWithinOptimisticGrace(m: Message): boolean {
+  if (m.role === 'user' && m.clientMessageId) {
+    return Date.now() - new Date(m.timestamp).getTime() < OPTIMISTIC_MSG_GRACE_MS
+  }
+  if (m.role === 'assistant' && typeof m._lastUpdated === 'number') {
+    return Date.now() - m._lastUpdated < OPTIMISTIC_MSG_GRACE_MS
+  }
+  return false
+}
+
+/**
  * 持久化数据的有效期策略说明（非强制 TTL）
  *
  * BUG-FIX-fix_20260622_workspace_state_loss:
@@ -75,12 +103,38 @@ function trimMessagesForPersistence(
 }
 
 /**
+ * 单个管道在「内存」中保留的最大消息条数
+ *
+ * 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的
+ * messagesByPipeline 此前没有上限，长会话 + 向上翻页只增不减。叠加
+ * MessageList 全量渲染（已弃用虚拟列表）与 persist 每次 set 全量序列化，
+ * 最终撑爆浏览器内存 → V8 抛 Out of Memory、tab 崩溃、WS 随之断开
+ * （后端表现为"前端连不上"）。
+ *
+ * 取 300：覆盖日常长会话与多次翻页，仅在极端长会话触发；超出时丢弃
+ * sequence 最小的（最老）消息，它们仍可从 API 重新加载（向上翻页恢复）。
+ */
+const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 300
+
+/**
+ * 限制单管道内存消息数，防止无限增长导致浏览器 OOM。
+ *
+ * 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次
+ * length 比较（early return），零额外开销。正常翻页（每批 ~50 条）不会
+ * 触及 300 上限；极端长会话退化为"最近窗口"，配合 API 翻页兜底。
+ */
+function capMessagesForMemory(msgs: Message[]): Message[] {
+  if (msgs.length <= MAX_MESSAGES_PER_PIPELINE_IN_MEMORY) return msgs
+  return [...msgs].sort(compareMessages).slice(-MAX_MESSAGES_PER_PIPELINE_IN_MEMORY)
+}
+
+/**
  * 并发去重：跟踪正在进行的 fetch 请求，避免同一 pipelineId 重复请求
  */
 const _fetchingPipelines = new Map<string, Promise<void>>()
 
 /**
- * 容错持久化 storage
+ * 容错 + 节流持久化 storage
  *
  * BUG-FIX-fix_20260623_persist_quota_blocks_business:
  * 问题根因: zustand persist 在 set/api.setState 路径同步调用 storage.setItem，
@@ -88,11 +142,74 @@ const _fetchingPipelines = new Map<string, Promise<void>>()
  *   fetchMessages，阻断消息加载（用户看到"加载失败"且新消息不显示）。
  * 修复方案: 自定义 storage 包装 localStorage.setItem，捕获并吞掉写入异常，
  *   持久化失败仅记录一次 warn（防刷屏），内存 state 与业务流程不受影响。
- *   getItem/removeItem 同样保护，避免读取/清理阶段的异常外泄。
- * 影响范围: localStorage 配额耗尽时消息加载、流式更新的可用性
- * 修复日期: 2026-06-23
+ *
+ * BUG-FIX-fix_20260624_persist_throttle_oom:
+ * 问题根因: 流式输出期间 appendToPart 高频触发 store set，persist 随之对整个
+ *   messagesByPipeline 做 JSON.stringify + 同步写 localStorage（阻塞主线程）。
+ *   单条超长回复流式时每帧一次的大对象序列化是内存与主线程峰值的主要来源，
+ *   叠加全量渲染，直接把浏览器推到 Out of Memory。
+ * 修复方案: setItem 改为 trailing 节流 + maxWait 上限。窗口内持续到达的写入
+ *   反复推迟落盘并合并为最后一次（流式每帧的中间态本就不可信）；但持续高频
+ *   写入超过 maxWait 后强制落盘一次，保证长流式不会无限积压在缓冲。
+ *   内存 state 不受影响（已即时更新），仅延迟落盘。节流窗口内刷新会丢失
+ *   该窗口的持久化，但刷新后由 initFromAPI 从 API 重新加载权威数据。
+ * 影响范围: 流式输出期间的主线程占用与内存峰值；持久化时效性（延迟至多 5s）
+ * 修复日期: 2026-06-24
  */
+const PERSIST_THROTTLE_MS = 1000
+// 持续高频写入时强制落盘的上限：避免长流式（>1s）期间缓冲永远推迟落盘。
+// 取 5s：远大于单帧间隔，能合并绝大部分流式抖动；又足够短，崩溃时最多丢 5s。
+const PERSIST_MAX_WAIT_MS = 5000
 const _persistQuotaWarned = { current: false }
+// 节流缓冲：只缓存最新一次 (name, value)。本 store 仅一个持久化 key，
+// 流式期间多次 set 合并为最后一次，trailing 定时器统一落盘。
+const _persistBuffer: { name: string; value: string } = { name: '', value: '' }
+let _persistTimer: ReturnType<typeof setTimeout> | null = null
+// 首次进入当前节流窗口的时刻：用于判断是否已达 maxWait 需强制落盘
+let _persistWindowStartedAt = 0
+
+/** 实际落盘（容错）：取出缓冲的最后一次写入执行，失败仅记一次 warn */
+function _writePersisted(): void {
+  _persistTimer = null
+  _persistWindowStartedAt = 0
+  const { name, value } = _persistBuffer
+  _persistBuffer.name = ''
+  _persistBuffer.value = ''
+  if (!name) return
+  try {
+    window.localStorage.setItem(name, value)
+  } catch (err) {
+    // 配额满或禁用：仅记录一次 warn，避免每次 set 都刷屏
+    if (!_persistQuotaWarned.current) {
+      _persistQuotaWarned.current = true
+      logger.warn(
+        '[pipelineMessageStore] 持久化失败（localStorage 配额耗尽或不可用），'
+        + '本次会话内消息仅保存在内存，刷新后将从 API 重新加载: err=%s',
+        err,
+      )
+    }
+  }
+}
+
+/**
+ * 调度一次节流落盘。
+ * - 窗口内已有挂起写入：推迟到当前窗口结束（合并）；
+ * - 已超 maxWait：立即落盘，不再推迟（防长流式积压）；
+ * - 无挂起写入：开启新窗口。
+ */
+function _schedulePersist(): void {
+  if (_persistTimer !== null) {
+    // 持续高频：若已达 maxWait 上限则强制落盘，否则保持现有 trailing 定时器
+    if (Date.now() - _persistWindowStartedAt >= PERSIST_MAX_WAIT_MS) {
+      clearTimeout(_persistTimer)
+      _writePersisted()
+    }
+    return
+  }
+  _persistWindowStartedAt = Date.now()
+  _persistTimer = setTimeout(_writePersisted, PERSIST_THROTTLE_MS)
+}
+
 const tolerantJsonStorage = createJSONStorage(() => ({
   getItem: (name) => {
     try {
@@ -102,21 +219,20 @@ const tolerantJsonStorage = createJSONStorage(() => ({
     }
   },
   setItem: (name, value) => {
-    try {
-      window.localStorage.setItem(name, value)
-    } catch (err) {
-      // 配额满或禁用：仅记录一次 warn，避免每次 set 都刷屏
-      if (!_persistQuotaWarned.current) {
-        _persistQuotaWarned.current = true
-        logger.warn(
-          '[pipelineMessageStore] 持久化失败（localStorage 配额耗尽或不可用），'
-          + '本次会话内消息仅保存在内存，刷新后将从 API 重新加载: err=%s',
-          err,
-        )
-      }
-    }
+    // 节流：缓存最新写入，trailing 定时器到点统一落盘，避免高频 set 同步写盘
+    _persistBuffer.name = name
+    _persistBuffer.value = value
+    _schedulePersist()
   },
   removeItem: (name) => {
+    // 清理时取消挂起的节流写入，避免 remove 后又被 trailing 写回
+    if (_persistTimer !== null) {
+      clearTimeout(_persistTimer)
+      _persistTimer = null
+    }
+    _persistWindowStartedAt = 0
+    _persistBuffer.name = ''
+    _persistBuffer.value = ''
     try {
       window.localStorage.removeItem(name)
     } catch {
@@ -422,16 +538,22 @@ function mergeApiWithExisting(
   //     时间窗口内保留，覆盖后端持久化的正常延迟。
   //     persist 残留的旧消息不满足时间条件（timestamp 远超 30s），仍被丢弃，
   //     不重新引入重复渲染。
+  //
+  // BUG-FIX-fix_20260624_ai_msg_vanish:
+  //   问题根因: 同源问题影响 AI 消息。AI 回复 stream_end/finalize 后 status 变为
+  //     'completed'，isStreamingMessage() 返回 false，不再受「streaming 占位符保留」保护。
+  //     此时若 initFromAPI 并发触发且后端尚未持久化该 AI 消息，API 不含它 → 走
+  //     return false 被丢弃 → 最新几条 AI 回复消失，刷新后才出现（与 user 消息同症状）。
+  //   修复方案: 宽限期守卫扩展到刚 finalize 完成的 assistant 消息，由 isWithinOptimisticGrace
+  //     统一判定。AI 消息无 clientMessageId，改用 _lastUpdated（finalize 写入）界定「刚完成」。
+  //     后续 initFromAPI 通过 role::seq 指纹去重用 API 权威版本替换，不引入重复。
   const localOnly = existing.filter((m) => {
     if (apiIds.has(m.id)) return false
     if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
     // 正在 streaming 的占位消息必须保留
     if (isStreamingMessage(m)) return true
-    // 乐观 user 消息在持久化窗口内保留（刚发送、后端可能尚未写入）
-    if (m.role === 'user' && m.clientMessageId) {
-      const createdTime = new Date(m.timestamp).getTime()
-      if (Date.now() - createdTime < OPTIMISTIC_MSG_GRACE_MS) return true
-    }
+    // 乐观/刚完成的消息在持久化窗口内保留（后端可能尚未写入）
+    if (isWithinOptimisticGrace(m)) return true
     // 其余本地消息：API 没有就以 API 为准丢弃
     return false
   })
@@ -440,14 +562,20 @@ function mergeApiWithExisting(
     return { finalMessages: sorted, preservedCount: 0 }
   }
 
-  // 保留的 streaming 占位符与 API 同指纹消息视为同一条，从 sorted 移除避免重复
-  const streamingPlaceholderFingerprints = new Set(
-    localOnly.filter((m) => isStreamingMessage(m)).map((m) => makeMessageFingerprint(m)),
-  )
-  const dedupedSorted =
-    streamingPlaceholderFingerprints.size > 0
-      ? sorted.filter((m) => !streamingPlaceholderFingerprints.has(makeMessageFingerprint(m)))
-      : sorted
+  // localOnly 保留的消息若与 API 同 role::seq 指纹，视为同一条逻辑消息，
+  // 从 sorted 移除 API 重复项，保留 localOnly 版本（流式占位符 / 乐观版本）。
+  //
+  // BUG-FIX-fix_20260617_ai_msg_dup_render:
+  //   streaming 占位符与 API 权威消息 id 不同（WS UUID vs API hex），靠 role::seq
+  //   指纹识别为同一条，避免切换 Tab 时 AI 气泡重复渲染。
+  // BUG-FIX-fix_20260624_ai_msg_vanish:
+  //   宽限期保留的 completed assistant 消息同理——后端已持久化时 API 会返回同 seq
+  //   权威版本，此时去重只留一份，避免「保留乐观版 + API 版」并存成两条。
+  //   后端未持久化时 API 不含该指纹，localOnly 版本正常保留，等待下次 fetch 对账。
+  const localOnlyFingerprints = new Set(localOnly.map((m) => makeMessageFingerprint(m)))
+  const dedupedSorted = localOnlyFingerprints.size
+    ? sorted.filter((m) => !localOnlyFingerprints.has(makeMessageFingerprint(m)))
+    : sorted
 
   // BUG-FIX-fix_20260623_refresh_order:
   // 问题根因: 原代码用 [...sorted, ...localOnly] 直接末尾拼接，未按 sequence
@@ -587,7 +715,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
+          // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
+          [pipelineId]: capMessagesForMemory(updatedMessages),
         },
         pipelines: newPipelines,
         bottomCursorsByPipeline: newBottomCursors,
@@ -778,6 +907,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       finalMessages = mergePreservingStreaming(finalMessages)
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       finalMessages = filterBlankMessages(finalMessages)
+      // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
+      finalMessages = capMessagesForMemory(finalMessages)
 
       const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
       const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
@@ -842,6 +973,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       merged = mergePreservingStreaming(merged)
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       merged = filterBlankMessages(merged)
+      // 内存封顶：翻页累计超量时丢弃最老消息，防止撑爆内存（OOM）
+      merged = capMessagesForMemory(merged)
       const topCursor = merged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {
@@ -880,7 +1013,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
-          [pipelineId]: merged,
+          // 内存封顶：超量时丢弃最老消息，防止撑爆内存（OOM）
+          [pipelineId]: capMessagesForMemory(merged),
         },
         bottomCursorsByPipeline: {
           ...state.bottomCursorsByPipeline,

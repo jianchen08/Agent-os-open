@@ -170,6 +170,103 @@ describe('mergeConsecutiveAssistantMessages', () => {
     })
   })
 
+  describe('跨消息 part 逻辑顺序（fix_20260624_thinking_text_split）', () => {
+    it('两条 assistant 各有 thinking+text 时，思考紧跟其回复（不被全局排序打散）', () => {
+      // 复现 fix_20260622 引入的回归：多条 API 消息各自 parts 从 0 起算，
+      // 旧版 dedupePartSequences 全局按 sequence 数值排序，把所有 thinking 聚到前面、
+      // 所有 text 聚到后面，思考内容与所属回复「分家」。
+      const messages: Message[] = [
+        msg('ai-1', {
+          content: '回复A',
+          sequence: 1,
+          parts: [
+            { type: 'thinking', content: 'A的思考', state: 'done', sequence: 0 } as any,
+            { type: 'text', content: '回复A', state: 'done', sequence: 1 } as any,
+          ],
+        }),
+        msg('ai-2', {
+          content: '回复B',
+          sequence: 2,
+          parts: [
+            { type: 'thinking', content: 'B的思考', state: 'done', sequence: 0 } as any,
+            { type: 'text', content: '回复B', state: 'done', sequence: 1 } as any,
+          ],
+        }),
+      ]
+
+      const merged = mergeConsecutiveAssistantMessages(messages)
+      expect(merged).toHaveLength(1)
+      const parts = merged[0].parts as any[]
+
+      // 逻辑顺序：A的思考 → 回复A → B的思考 → 回复B（思考紧跟其回复）
+      expect(parts.map((p) => `${p.type}:${p.content}`)).toEqual([
+        'thinking:A的思考',
+        'text:回复A',
+        'thinking:B的思考',
+        'text:回复B',
+      ])
+      // sequence 单调递增，渲染层按数值排序后与逻辑顺序一致
+      const seqs = parts.map((p) => p.sequence as number)
+      for (let i = 1; i < seqs.length; i++) {
+        expect(seqs[i]).toBeGreaterThan(seqs[i - 1])
+      }
+    })
+
+    it('含 tool_call 的跨消息顺序：思考→工具→文本 各自归位', () => {
+      const messages: Message[] = [
+        msg('ai-1', {
+          content: '回复A',
+          sequence: 1,
+          parts: [
+            { type: 'thinking', content: 'A思考', state: 'done', sequence: 0 } as any,
+            { type: 'text', content: '回复A', state: 'done', sequence: 1 } as any,
+          ],
+        }),
+        msg('ai-2', {
+          content: '回复B',
+          sequence: 2,
+          parts: [
+            { type: 'thinking', content: 'B思考', state: 'done', sequence: 0 } as any,
+            { type: 'tool_call', callId: 'tc-1', name: 'search', args: {}, state: 'done', sequence: 1 } as any,
+            { type: 'text', content: '回复B', state: 'done', sequence: 2 } as any,
+          ],
+        }),
+      ]
+
+      const merged = mergeConsecutiveAssistantMessages(messages)
+      expect(merged).toHaveLength(1)
+      const parts = merged[0].parts as any[]
+
+      // 期望顺序：A思考 → 回复A → B思考 → 工具 → 回复B
+      expect(parts.map((p) => `${p.type}:${p.content || p.name || ''}`)).toEqual([
+        'thinking:A思考',
+        'text:回复A',
+        'thinking:B思考',
+        'tool_call:search',
+        'text:回复B',
+      ])
+    })
+
+    it('流式大数 sequence（无冲突）原样保留，顺序不变', () => {
+      // 回归保护 fix_20260622：流式消息 parts 用 Date.now() 大数，不冲突时不应被改动
+      const flowSeq = Date.now()
+      const messages: Message[] = [
+        msg('ai-1', {
+          content: '回复',
+          sequence: 1,
+          parts: [
+            { type: 'thinking', content: '思考', state: 'done', sequence: flowSeq } as any,
+            { type: 'text', content: '回复', state: 'done', sequence: flowSeq + 1 } as any,
+          ],
+        }),
+      ]
+
+      const merged = mergeConsecutiveAssistantMessages(messages)
+      const parts = merged[0].parts as any[]
+      expect(parts.map((p) => p.sequence)).toEqual([flowSeq, flowSeq + 1])
+    })
+  })
+
   describe('tool_call 吸收', () => {
     it('将 tool 消息的结果注入前一个 assistant 的 tool_call part', () => {
       const messages: Message[] = [
