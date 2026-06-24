@@ -167,11 +167,7 @@ defaults:
   tiers:
     large: glm-5.2-yichengc
     medium: glm-5.2-yichengc
-    small: glm-5.2-yichengc
-    # 默认聊天模型 glm-5.2-yichengc 不配 fallback：
-    # 中转站限流时由 KeyPool 冷却/换 key 机制处理，不在模型层 fallback
-    # 到 deepseek/minimax（避免路由前缀不一致导致的额外失败）。
-    # 如需为某模型启用 fallback，在此添加 `chat: [模型id...]`。
+    small: minimax-m3-guangfang
     fallback_chain: {}
 providers:
   zhipu_coding:

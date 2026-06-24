@@ -33,6 +33,7 @@ _CONFIG_MODELS_DIR = _CONFIG_ROOT / "models"
 _CONFIG_SYSTEM_DIR = _CONFIG_ROOT / "system"
 
 _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
+_ENV_FILE = _PROJECT_ROOT / ".env"
 _CONTEXT_WINDOW_YAML = _CONFIG_SYSTEM_DIR / "context_window_config.yaml"
 _API_YAML = _CONFIG_SYSTEM_DIR / "api_config.yaml"
 _CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
@@ -62,6 +63,16 @@ class ModelConfigUpdateRequest(BaseModel):
 class ProviderConfigUpdateRequest(BaseModel):
     """提供商配置更新请求，允许任意字段（透传合并到现有配置）。"""
     config: dict[str, Any] = Field(description="提供商配置字段")
+
+
+class ProviderCreateRequest(BaseModel):
+    """创建提供商请求，包含 provider_id 和完整配置。
+
+    若 config 中包含 ``api_key``，将自动写入 .env 文件，
+    llm.yaml 中对应 key 改为 ``${PROVIDER_ID_UPPER}_API_KEY`` 引用格式。
+    """
+    provider_id: str = Field(description="提供商唯一标识（如 deepseek）")
+    config: dict[str, Any] = Field(description="提供商完整配置")
 
 
 class ContextWindowUpdateRequest(BaseModel):
@@ -111,12 +122,64 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}{'*' * 8}{key[-4:]}"
 
 
-def _is_masked_key(key: str) -> bool:
-    """检查值是否为脱敏后的 API Key（含 ******** 掩码标记）。
+# ---------------------------------------------------------------------------
+# .env 文件读写工具
+# ---------------------------------------------------------------------------
 
-    防止前端将 GET 返回的脱敏值原样 PUT 回来覆盖明文密钥。
+def _read_env_file(path: Path) -> dict[str, str]:
+    """读取 .env 文件，返回 key=value 字典（跳过注释和空行）。
+
+    Args:
+        path: .env 文件路径
+
+    Returns:
+        变量名字典；文件不存在时返回空字典
     """
-    return bool(key) and "********" in key
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" in stripped:
+            key, _, value = stripped.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
+def _update_env_var(path: Path, var_name: str, var_value: str) -> None:
+    """在 .env 文件中更新或添加一个环境变量，保留已有内容和注释。
+
+    文件不存在时创建。同名变量更新值，新变量追加到文件末尾。
+
+    Args:
+        path: .env 文件路径
+        var_name: 变量名（如 ``DEEPSEEK_API_KEY``）
+        var_value: 变量值
+    """
+    existing = _read_env_file(path)
+    existing[var_name] = var_value
+
+    lines: list[str] = []
+    if path.exists():
+        current_vars = set(existing.keys())
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.partition("=")[0].strip()
+                if key in current_vars:
+                    lines.append(f"{key}={existing[key]}")
+                    current_vars.discard(key)
+                    continue
+            lines.append(line)
+        for key in current_vars:
+            lines.append(f"{key}={existing[key]}")
+    else:
+        lines.append(f"{var_name}={var_value}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -126,14 +189,15 @@ def _is_masked_key(key: str) -> bool:
 @router.get("/llm", summary="获取完整 LLM 配置")
 def get_llm_config() -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
-    # 脱敏 providers 中的 api_key
+    # 脱敏 providers 中 keys 数组的 api_key
     providers = data.get("providers", {})
     masked = {}
     for pid, pconf in providers.items():
-        masked[pid] = {
-            **pconf,
-            "api_key": _mask_key(pconf.get("api_key", "")),
-        }
+        m = copy.deepcopy(pconf)
+        for key_entry in m.get("keys", []):
+            if "api_key" in key_entry:
+                key_entry["api_key"] = _mask_key(key_entry["api_key"])
+        masked[pid] = m
     # 脱敏 models 中的 api_key
     models = data.get("models", {})
     masked_models = {}
@@ -156,9 +220,11 @@ def get_providers() -> dict[str, Any]:
     providers = data.get("providers", {})
     result = {}
     for pid, pconf in providers.items():
+        keys = pconf.get("keys", [])
+        first_key = keys[0] if keys else {}
         result[pid] = {
             "api_base": pconf.get("api_base", ""),
-            "has_key": bool(pconf.get("api_key")),
+            "has_key": bool(first_key.get("api_key")),
         }
     return {"providers": result}
 
@@ -246,21 +312,63 @@ def delete_model(model_id: str) -> dict[str, Any]:
     return {"models": models}
 
 
+@router.post("/llm/providers", summary="添加提供商")
+def add_provider(body: ProviderCreateRequest) -> dict[str, Any]:
+    """创建新 provider。
+
+    若 config 中包含 ``api_key``，将 key 写入项目根目录 .env 文件，
+    llm.yaml 中对应 ``keys[0].api_key`` 改为 ``${PROVIDER_ID_UPPER}_API_KEY`` 引用格式。
+
+    Raises:
+        HTTPException 409: provider_id 已存在
+    """
+    data = _read_yaml(_LLM_YAML)
+    providers = data.setdefault("providers", {})
+    if body.provider_id in providers:
+        raise HTTPException(status_code=409, detail=f"提供商 '{body.provider_id}' 已存在")
+
+    provider_config = copy.deepcopy(body.config)
+    raw_api_key = provider_config.pop("api_key", None)
+    if raw_api_key:
+        env_var_name = f"{body.provider_id.upper()}_API_KEY"
+        _update_env_var(_ENV_FILE, env_var_name, raw_api_key)
+        provider_config["keys"] = [{"id": f"{body.provider_id}_main", "api_key": f"${{{env_var_name}}}"}]
+
+    providers[body.provider_id] = provider_config
+    _write_yaml(_LLM_YAML, data)
+    invalidate_all_llm_caches()
+    logger.info("添加提供商: %s", body.provider_id)
+    return {"providers": providers}
+
+
 @router.put("/llm/providers/{provider_id}", summary="更新提供商配置")
 def update_provider(provider_id: str, body: ProviderConfigUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     providers = data.get("providers", {})
     if provider_id not in providers:
         raise HTTPException(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
-    # 过滤脱敏值：防止前端将 GET 返回的掩码 key 覆盖明文密钥
-    safe_config = {
-        k: v for k, v in body.config.items()
-        if not (k == "api_key" and isinstance(v, str) and _is_masked_key(v))
-    }
-    providers[provider_id].update(safe_config)
+    providers[provider_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("更新提供商配置: %s", provider_id)
+    return {"providers": providers}
+
+
+@router.delete("/llm/providers/{provider_id}", summary="删除提供商")
+def delete_provider(provider_id: str) -> dict[str, Any]:
+    """删除指定 provider。
+
+    Raises:
+        HTTPException 404: provider_id 不存在
+    """
+    data = _read_yaml(_LLM_YAML)
+    providers = data.get("providers", {})
+    if provider_id not in providers:
+        raise HTTPException(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
+    del providers[provider_id]
+    _write_yaml(_LLM_YAML, data)
+    invalidate_all_llm_caches()
+    logger.info("删除提供商: %s", provider_id)
     return {"providers": providers}
 
 
@@ -470,6 +578,10 @@ def save_cost_control_config(body: GenericConfigUpdateRequest) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 _GENERIC_CONFIG_WHITELIST: dict[str, Path] = {
+    "system/api_config": _CONFIG_SYSTEM_DIR / "api_config.yaml",
+    "system/concurrency_config": _CONFIG_SYSTEM_DIR / "concurrency_config.yaml",
+    "system/context_window_config": _CONFIG_SYSTEM_DIR / "context_window_config.yaml",
+    "system/cost_control": _CONFIG_SYSTEM_DIR / "cost_control.yaml",
     "system/memory_storage": _CONFIG_SYSTEM_DIR / "memory_storage.yaml",
     "system/editor_config": _CONFIG_SYSTEM_DIR / "editor_config.yaml",
     "system/long_term_task": _CONFIG_SYSTEM_DIR / "long_term_task.yaml",
