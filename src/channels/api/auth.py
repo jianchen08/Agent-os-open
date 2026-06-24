@@ -17,10 +17,26 @@ logger = logging.getLogger(__name__)
 
 # 密钥配置 — DEBT: 统一使用 Settings.jwt_secret_key。ceiling: channels/api/auth.py 仍保留独立常量。
 # upgrade: 全部路由认证迁移到 TokenManager 后删除此模块。
+from src.auth.token import TokenManager
 from src.config.settings import get_settings
 
 ALGORITHM = "HS256"
 SECRET_KEY = get_settings().jwt_secret_key
+
+
+# 模块级 TokenManager 单例（P2.4）。
+# 历史上 verify_token 每次调用都新建 TokenManager（含一次 Redis ping/连接），
+# 高频认证路径上造成连接抖动。改为模块级单例，复用 Redis 连接池。
+# 同时作为统一撤销入口供 routes_auth 调用（P2.2/P2.3）。
+def _get_token_manager() -> TokenManager:
+    """返回模块级 TokenManager 单例（惰性初始化）。"""
+    global _token_manager
+    if _token_manager is None:
+        _token_manager = TokenManager(secret_key=SECRET_KEY)
+    return _token_manager
+
+
+_token_manager: TokenManager | None = None
 
 
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
@@ -79,10 +95,7 @@ def verify_token(token: str, token_type: str = "access") -> dict[str, Any] | Non
     try:
         import jwt as _jwt
 
-        from src.auth.token import TokenManager
-        from src.config.settings import get_settings
-
-        manager = TokenManager(secret_key=get_settings().jwt_secret_key)
+        manager = _get_token_manager()
         # 先用 TokenManager 验证（含撤销检查），再 decode 获取完整 payload
         manager.verify_token(token, token_type=token_type)
         # 验证通过后，decode 获取完整 payload（含 username 等自定义字段）

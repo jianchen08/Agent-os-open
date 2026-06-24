@@ -133,6 +133,14 @@ export async function refreshToken(
     const response = await apiClient.post<RefreshResponse>(
       API_ENDPOINTS.AUTH.REFRESH_TOKEN,
       requestData,
+      {
+        // BUG-FIX-fix_20260624_refresh_header_overrides_body:
+        // refresh 请求显式清除 Authorization 头。client.ts 的请求拦截器会对所有请求
+        // 注入 Authorization: Bearer <access_token>，若不覆盖，后端旧逻辑会从头里
+        // 取到 access token（type=access）→ 误判为「期望 refresh 类型」401。
+        // refresh token 走 body 传递，Authorization 头应留空。
+        headers: { Authorization: '' },
+      },
     )
     return response.data
   }, options)

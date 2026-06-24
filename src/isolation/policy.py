@@ -100,14 +100,21 @@ class IsolationPolicyLoader:
         except Exception as e:
             logger.warning(f"[IsolationPolicyLoader] 注册 watcher 失败: {e}")
 
-    def _on_config_changed(self, changed_path: str) -> None:
+    def _on_config_changed(
+        self, event_type: str, file_path: str, context: dict | None = None,
+    ) -> None:
         """config_center 回调：检测到 isolation_policy.yaml 变更时自动 reload。
 
         Args:
-            changed_path: 变更的配置文件相对路径
+            event_type: 事件类型（created/modified/deleted）
+            file_path: 变更的配置文件路径
+            context: 变更上下文（可选）
         """
-        if "isolation_policy" in changed_path:
-            logger.info("[IsolationPolicyLoader] 检测到策略配置变更，自动 reload")
+        if "isolation_policy" in file_path:
+            logger.info(
+                "[IsolationPolicyLoader] 检测到策略配置变更(%s)，自动 reload: %s",
+                event_type, file_path,
+            )
             self._load_config()
 
     def resolve(self, tool_name: str, category: str | None = None) -> ToolIsolationPolicy:
