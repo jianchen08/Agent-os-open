@@ -146,24 +146,34 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
                 )
                 return
 
-            from api.websocket.message_bus import SourceType, get_message_bus  # noqa: PLC0415
-            from api.websocket.message_types import create_task_status_changed_message  # noqa: PLC0415
+            # BUG-FIX-fix_20260625_task_status_changed_no_module_api:
+            # 问题根因: 原实现 from api.websocket.message_bus import ... 引用了不存在的
+            #   api 包（No module named 'api'），导致 task_status_changed 事件永远推送失败。
+            #   前端 useRealtimeEvents 订阅了 task_status_changed 但永远收不到，
+            #   任务树/工作区在工具调用循环期间不刷新，表现为「消息闪一下就没了」。
+            # 修复方案: 改用 ws_interaction_notifier.send_to_user（与 task_notifier.py
+            #   推送 task_status_update 相同的有效路径），直接通过全局 WS 连接投递。
+            from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
 
-            message = create_task_status_changed_message(
-                task_id=task_id,
-                status=new_status,
-                previous_status=old_status,
-                title=task.title or "",
-                updated_at=task.updated_at or "",
-            )
+            _user_id = (task.metadata.get("user_id") if task.metadata else "") or ""
+            if not _user_id:
+                logger.debug(
+                    "[TaskService] task metadata 缺 user_id，task_status_changed 未推送 | task=%s",
+                    task_id[:12] if task_id else "",
+                )
+                return
 
-            bus = get_message_bus()
-            await bus.emit(
-                thread_id,
-                message,
-                source_type=SourceType.SYSTEM,
-                source_id=f"task:{task_id}",
-            )
+            await ws_interaction_notifier.send_to_user(_user_id, {
+                "type": "task_status_changed",
+                "data": {
+                    "task_id": task_id,
+                    "status": new_status,
+                    "previous_status": old_status,
+                    "title": task.title or "",
+                    "updated_at": task.updated_at or "",
+                    "thread_id": thread_id,
+                },
+            })
         except Exception as exc:
             logger.debug(
                 "[TaskService] task_status_changed 推送失败（非致命）task_id=%s: %s",
