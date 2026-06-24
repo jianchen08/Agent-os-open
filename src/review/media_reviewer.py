@@ -12,8 +12,14 @@ import logging
 import os
 from pathlib import Path
 
-import av
-from PIL import Image
+try:
+    import av  # PyAV — 可选依赖，仅视频审阅功能需要
+except ImportError:
+    av = None  # type: ignore[assignment]
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
 
 from review.models import (
     ImageReviewResult,

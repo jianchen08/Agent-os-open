@@ -68,6 +68,8 @@ class BridgeEventsMixin:
                 }))
             await self._send_event(self._make_event("thinking_chunk", {
                 "content": content,
+                "sequence": self._next_part_seq(),
+                "step_type": chunk.get("step_type", ""),
             }))
 
         elif chunk_type == "thinking_end":

@@ -103,64 +103,6 @@ def search_memories(
     return MemoryListResponse(items=items, total=len(items))
 
 
-@router.get(
-    "/{memory_id}",
-    response_model=MemoryResponse,
-    summary="获取记忆详情",
-)
-def get_memory(
-    memory_id: str,
-    _user: dict = Depends(require_auth),
-) -> MemoryResponse:
-    """获取指定记忆条目的详情。
-
-    Args:
-        memory_id: 记忆 ID
-
-    Returns:
-        MemoryResponse 记忆详情
-
-    Raises:
-        APIError: 记忆不存在 (404)
-    """
-    memory = store.get_memory(memory_id)
-    if memory is None:
-        raise APIError(
-            status_code=404,
-            error_code="MEM_NOTF_5001",
-            message="未找到相关记忆",
-        )
-    return _memory_to_response(memory)
-
-
-@router.delete(
-    "/{memory_id}",
-    summary="删除记忆",
-)
-def delete_memory(
-    memory_id: str,
-    _user: dict = Depends(require_auth),
-) -> dict[str, str]:
-    """删除指定记忆条目。
-
-    Args:
-        memory_id: 记忆 ID
-
-    Returns:
-        删除成功消息
-
-    Raises:
-        APIError: 记忆不存在 (404)
-    """
-    deleted = store.delete_memory(memory_id)
-    if not deleted:
-        raise APIError(
-            status_code=404,
-            error_code="MEM_NOTF_5001",
-            message="未找到相关记忆",
-        )
-    return {"message": "记忆已删除"}
-
 # ---------------------------------------------------------------------------
 # 情景记忆端点
 # ---------------------------------------------------------------------------
@@ -274,3 +216,67 @@ def search_memories_post(
     results = store.search_memories(query=query, top_k=top_k)
     items = [_memory_to_response(m) for m in results]
     return MemoryListResponse(items=items, total=len(items))
+
+
+# ---------------------------------------------------------------------------
+# 动态路径端点 — 必须放在所有固定路径之后，否则 /stats、/semantic 等会被 {memory_id} 捕获
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{memory_id}",
+    response_model=MemoryResponse,
+    summary="获取记忆详情",
+)
+def get_memory(
+    memory_id: str,
+    _user: dict = Depends(require_auth),
+) -> MemoryResponse:
+    """获取指定记忆条目的详情。
+
+    Args:
+        memory_id: 记忆 ID
+
+    Returns:
+        MemoryResponse 记忆详情
+
+    Raises:
+        APIError: 记忆不存在 (404)
+    """
+    memory = store.get_memory(memory_id)
+    if memory is None:
+        raise APIError(
+            status_code=404,
+            error_code="MEM_NOTF_5001",
+            message="未找到相关记忆",
+        )
+    return _memory_to_response(memory)
+
+
+@router.delete(
+    "/{memory_id}",
+    summary="删除记忆",
+)
+def delete_memory(
+    memory_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, str]:
+    """删除指定记忆条目。
+
+    Args:
+        memory_id: 记忆 ID
+
+    Returns:
+        删除成功消息
+
+    Raises:
+        APIError: 记忆不存在 (404)
+    """
+    deleted = store.delete_memory(memory_id)
+    if not deleted:
+        raise APIError(
+            status_code=404,
+            error_code="MEM_NOTF_5001",
+            message="未找到相关记忆",
+        )
+    return {"message": "记忆已删除"}

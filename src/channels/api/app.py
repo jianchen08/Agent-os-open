@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from typing import Any
@@ -22,11 +23,9 @@ logger = logging.getLogger(__name__)
 
 # DEBT: CORS 允许源应通过配置文件或环境变量管理。ceiling: 当前硬编码开发环境源。
 # upgrade: 增加 CORS_ORIGINS 环境变量支持，生产环境严格限制。
-import os
-
 _DEFAULT_CORS_ORIGINS = os.environ.get(
     "CORS_ORIGINS",
-    "http://localhost:5188,http://localhost:5289,http://localhost:5173",
+    "http://localhost:5188,http://localhost:5289,http://localhost:5290,http://localhost:5173",
 ).split(",")
 
 # 应用启动时间
@@ -233,6 +232,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
         annotations_router_v1,
         artifacts_router,
     )
+    from channels.api.routes_asr import asr_router  # noqa: PLC0415
     from channels.api.routes_missing import (  # noqa: PLC0415
         agent_calls_router,
         client_router,
@@ -253,7 +253,6 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     )
     from channels.api.routes_reviews import reviews_router  # noqa: PLC0415
     from channels.api.routes_workspaces import workspaces_router  # noqa: PLC0415
-    from channels.api.routes_asr import asr_router  # noqa: PLC0415
 
     app.include_router(projects_router)
     app.include_router(users_router)
@@ -285,6 +284,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     from channels.api.routes_comfyui import router as comfyui_router  # noqa: PLC0415
 
     app.include_router(comfyui_router)
+
+    # ---- 场景管理路由 ----
+    from channels.api.routes_scene import router as scene_router  # noqa: PLC0415
+
+    app.include_router(scene_router)
 
     # ---- 维护管理路由 ----
     from channels.api.routes_maintenance import router as maintenance_router  # noqa: PLC0415

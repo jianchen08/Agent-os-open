@@ -322,7 +322,7 @@ class ReviewEngine:
                 await self._knowledge_service.create_knowledge(
                     user_id="system",
                     content=content,
-                    source_type="review_experience",
+                    source_type="experience",
                 )
                 saved_counts["experiences"] += 1
 
@@ -340,7 +340,7 @@ class ReviewEngine:
                     await self._knowledge_service.create_knowledge(
                         user_id="system",
                         content=content,
-                        source_type="review_experience",
+                        source_type="experience",
                     )
                     saved_counts["experiences"] += 1
 
@@ -370,7 +370,7 @@ class ReviewEngine:
             }
 
     async def _load_existing_experiences(self) -> set[str] | None:
-        """加载已有经验，按 source_type='review_experience' 过滤。
+        """加载已有经验，按 source_type='experience' 过滤。
 
         Returns:
             已有经验内容集合；加载失败时返回 None（fail-closed），
@@ -382,7 +382,7 @@ class ReviewEngine:
             return {
                 item["content"]
                 for item in items
-                if item.get("source_type") == "review_experience"
+                if item.get("source_type") == "experience"
             }
         except Exception as e:
             # fail-closed：返回 None 让调用方跳过经验存储，避免空集合导致去重失效
@@ -483,7 +483,7 @@ class ReviewEngine:
             try:
                 chunks = await self._chunk_db.find_by_pipeline(run_id)
                 for chunk in chunks:
-                    chunk.extra_data["reviewed"] = True
+                    chunk.extra_data["review_status"] = "completed"
                     self._chunk_db.save_chunk(chunk)
             except Exception:
                 logger.warning("Failed to update chunk reviewed flags for %s", run_id)

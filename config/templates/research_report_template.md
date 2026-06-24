@@ -9,7 +9,6 @@
 - **调研类型**: {research_type}
 - **调研目标**: {research_goal}
 - **调研时间**: {date}
-- **严格度等级**: {rigor_level: systematic / standard / rapid}
 - **调研问题**: {research_questions 摘要}
 
 ---

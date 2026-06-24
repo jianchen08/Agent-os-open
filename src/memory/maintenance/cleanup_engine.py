@@ -100,12 +100,12 @@ class CleanupEngine:
         for summary in summaries:
             try:
                 age_days = self._get_pipeline_age_days(summary, now)
-                review_status = self._get_review_status(summary.run_id)
+                review_status = await self._get_review_status(summary.run_id)
 
                 should_delete_l0 = False
                 should_delete_l1 = False
 
-                if review_status == "reviewed":
+                if review_status == "completed":
                     # 已复盘：根据年龄和容量决定
                     if age_days > self._config.cleanup_min_age_days:
                         should_delete_l0 = True
@@ -124,7 +124,7 @@ class CleanupEngine:
                         )
                         try:
                             if review_engine is not None:
-                                await review_engine._review_single_pipeline(summary.run_id)
+                                await review_engine.run_review(summary.run_id)
                         except Exception as e:
                             logger.warning(
                                 "[Maintenance] 单条复盘失败 | pipeline=%s | error=%s",
@@ -215,7 +215,7 @@ class CleanupEngine:
     # 复盘状态双源读取
     # ============================================
 
-    def _get_review_status(self, pipeline_id: str) -> str:
+    async def _get_review_status(self, pipeline_id: str) -> str:
         """双源读取复盘状态。
 
         L0 summary 优先，L0 不存在则读 L1 块元数据。
@@ -224,7 +224,7 @@ class CleanupEngine:
             pipeline_id: 管道运行 ID
 
         Returns:
-            复盘状态："pending"、"reviewed" 或 "deleted"
+            复盘状态："pending"、"completed" 或 "deleted"
         """
         # 优先从 L0 summary 读取
         summary = self._storage.get_summary(pipeline_id)
@@ -233,10 +233,7 @@ class CleanupEngine:
 
         # L0 已删，从 L1 块读取
         try:
-            import asyncio  # noqa: PLC0415
-            chunks = asyncio.get_event_loop().run_until_complete(
-                self._chunk_db.find_by_pipeline(pipeline_id),
-            )
+            chunks = await self._chunk_db.find_by_pipeline(pipeline_id)
             if chunks:
                 extra = getattr(chunks[0], "extra_data", None)
                 if isinstance(extra, dict):
