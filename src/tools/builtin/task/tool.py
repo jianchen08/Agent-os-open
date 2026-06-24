@@ -61,9 +61,7 @@ class TaskTool(BuiltinTool):
 
     - delete：删除任务
 
-    - complete：容器完成（L1，旧 complete_container）
-
-    - fail：容器失败（L1，旧 fail_container）
+    - change：变更容器任务状态（L1，用 status 参数指定目标状态；合并旧 complete_container/fail_container）
 
 
 
@@ -331,7 +329,7 @@ class TaskTool(BuiltinTool):
 
                         "type": "string",
 
-                        "enum": ["get", "continue", "stop", "delete", "complete", "fail"],
+                        "enum": ["get", "continue", "stop", "delete", "change"],
 
                         "description": (
 
@@ -339,15 +337,19 @@ class TaskTool(BuiltinTool):
 
                             "- get：查询任务。不传 task_id 返回列表简表，传 task_id 返回详情\n"
 
-                            "- continue：继续执行（重试/恢复/注入指令）\n"
+                            "- continue：继续执行（重试/恢复/注入指令，针对非容器任务）\n"
 
-                            "- stop：停止任务（统一进入 stopped 状态）\n"
+                            "- stop：停止任务（统一进入 stopped 状态，针对非容器任务）\n"
 
                             "- delete：删除任务\n"
 
-                            "- complete：标记容器完成（仅L1）\n"
+                            "- change：变更容器任务状态（仅L1，仅容器任务）。"
 
-                            "- fail：标记容器失败（仅L1）"
+                            "通过 status 参数指定目标状态，容器只是子任务集合，"
+
+                            "状态可自由变更（completed/failed/pending/running/stopped/timeout）。"
+
+                            "status=completed 时会清理子任务 worktree。"
 
                         ),
 
@@ -403,7 +405,11 @@ class TaskTool(BuiltinTool):
 
                         ],
 
-                        "description": "按状态筛选（get 列表模式时生效）",
+                        "description": (
+                            "双重用途：\n"
+                            "- get 列表模式：按状态筛选\n"
+                            "- change 操作：目标状态（必填），如 completed/failed/pending/running/stopped/timeout"
+                        ),
 
                     },
 
@@ -445,7 +451,7 @@ class TaskTool(BuiltinTool):
 
                         "type": "string",
 
-                        "description": "容器操作原因（complete/fail 操作时填写）",
+                        "description": "容器操作原因（change 操作时填写，记录到任务 metadata）",
 
                     },
 
@@ -545,9 +551,7 @@ class TaskTool(BuiltinTool):
 
                         "delete": 0,
 
-                        "complete": 1,
-
-                        "fail": 1,
+                        "change": 1,
 
                     },
 
@@ -639,13 +643,9 @@ class TaskTool(BuiltinTool):
 
             return await self._delete_task(inputs, parent_agent_level)
 
-        if action == "complete":
+        if action == "change":
 
-            return await self._complete_task(inputs, parent_agent_level)
-
-        if action == "fail":
-
-            return await self._fail_task(inputs, parent_agent_level)
+            return await self._change_status(inputs, parent_agent_level)
 
         return create_failure_result(
 
@@ -2155,31 +2155,41 @@ class TaskTool(BuiltinTool):
 
 
 
-    # ── complete：标记容器完成（L1，旧 complete_container）──
+    # ── change：变更容器任务状态（L1）──
 
 
 
-    async def _complete_task(  # noqa: PLR0911
+    async def _change_status(  # noqa: PLR0911
 
         self, inputs: dict[str, Any], parent_agent_level: int
 
     ) -> ToolExecutionResult:
 
-        """标记容器任务完成。
+        """变更容器任务状态。
 
+        仅限 L1 主 Agent 调用，且仅对容器任务（task_scope == "container"）生效。
 
+        容器只是子任务的集合，本身无执行体，因此状态可自由变更到任意目标状态
 
-        仅限 L1 主 Agent 调用。将 PENDING 状态的容器标记为 COMPLETED。
+        （completed/failed/pending/running/stopped/timeout），不受状态机约束。
 
+        修复说明：此前用 list_subtasks 是否为空判断容器，空容器会被误判为
 
+        非容器（NOT_A_CONTAINER）。现改用 task_scope 字段判断，与 _delete_task
+
+        等处一致。
+
+        副作用：仅当目标状态为 completed 时，清理子任务 worktree
+
+        （_cleanup_subtask_worktrees），避免容器完成后残留工作空间目录。
+
+        其它状态变更纯改状态字段，不触发管道/工作空间副作用。
 
         Args:
 
-            inputs: 工具输入参数，需含 task_id
+            inputs: 工具输入参数，需含 task_id 和 status
 
             parent_agent_level: 父 Agent 层级
-
-
 
         Returns:
 
@@ -2187,15 +2197,11 @@ class TaskTool(BuiltinTool):
 
         """
 
-        from datetime import datetime  # noqa: PLC0415
-
-
-
         if parent_agent_level != 1:
 
             return create_failure_result(
 
-                error="容器操作仅限 L1 主 Agent 执行",
+                error="容器状态变更仅限 L1 主 Agent 执行",
 
                 error_code="PERMISSION_DENIED",
 
@@ -2209,7 +2215,7 @@ class TaskTool(BuiltinTool):
 
             return create_failure_result(
 
-                error="complete 操作必须提供 task_id",
+                error="change 操作必须提供 task_id",
 
                 error_code="MISSING_TASK_ID",
 
@@ -2241,13 +2247,15 @@ class TaskTool(BuiltinTool):
 
 
 
-        subtasks = service.list_subtasks(task_id)
+        # 用 task_scope 字段判断容器（修复：不再用 list_subtasks 是否为空判断）
 
-        if not subtasks:
+        is_container = (task.metadata or {}).get("task_scope") == "container"
+
+        if not is_container:
 
             return create_failure_result(
 
-                error=f"任务 {task_id} 不是容器任务（无子任务），不能使用容器操作",
+                error=f"任务 {task_id} 不是容器任务（task_scope != container），change 仅用于容器任务",
 
                 error_code="NOT_A_CONTAINER",
 
@@ -2255,299 +2263,133 @@ class TaskTool(BuiltinTool):
 
 
 
-        if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        # 目标状态必填
+
+        target_status_raw = inputs.get("status")
+
+        if not target_status_raw:
 
             return create_failure_result(
 
-                error=f"容器当前状态为 {task.status.value}，只能操作 PENDING 或 RUNNING 状态的容器",
+                error="change 操作必须提供 status（目标状态）",
 
-                error_code="INVALID_STATUS",
+                error_code="MISSING_STATUS",
 
             )
 
 
 
+        from datetime import datetime  # noqa: PLC0415
+
+
+
         reason = inputs.get("container_reason", inputs.get("reason", ""))
 
-
-
-        # 清理子任务的 worktree（在状态转换之前执行）
+        target_status = target_status_raw
 
         cleanup_info: dict[str, Any] = {}
 
+
+
+        # 仅 completed 时清理子任务 worktree，其它状态纯改
+
+        if target_status == TaskStatus.COMPLETED.value or target_status == TaskStatus.COMPLETED:
+
+            subtasks = service.list_subtasks(task_id)
+
+            try:
+
+                cleanup_info = await service._cleanup_subtask_worktrees(task, subtasks)
+
+            except Exception as e:
+
+                logger.warning(
+
+                    "[TaskTool] 容器 %s 子任务 worktree 清理异常 (non-fatal): %s",
+
+                    task_id, e,
+
+                )
+
+                cleanup_info = {
+
+                    "total_subtasks": len(subtasks),
+
+                    "cleaned_count": 0,
+
+                    "skipped_count": 0,
+
+                    "error_count": 1,
+
+                    "errors": [str(e)],
+
+                }
+
+
+
         try:
 
-            cleanup_info = await service._cleanup_subtask_worktrees(task, subtasks)
+            await service.force_transition(task.id, target_status)
 
-        except Exception as e:
+            task.completed_at = datetime.now().isoformat()
 
-            logger.warning(
+            if reason:
 
-                "[TaskTool] 容器 %s 子任务 worktree 清理异常 (non-fatal): %s",
+                if task.metadata is None:
 
-                task_id, e,
+                    task.metadata = {}
 
-            )
+                task.metadata["container_reason"] = reason
 
-            cleanup_info = {
+            await service.save_task(task)
 
-                "total_subtasks": len(subtasks),
+            logger.info("[TaskTool] 容器状态变更: %s → %s — %s", task_id, target_status, reason)
 
-                "cleaned_count": 0,
+            result_data: dict[str, Any] = {
 
-                "skipped_count": 0,
+                "task_id": task.id,
 
-                "error_count": 1,
+                "status": str(target_status),
 
-                "errors": [str(e)],
+                "message": f"容器 {task_id} 状态已变更为 {target_status}",
 
             }
 
+            if cleanup_info:
 
-
-        try:
-
-            await service.force_transition(task.id, TaskStatus.COMPLETED)
-
-            task.completed_at = datetime.now().isoformat()
-
-            await service.save_task(task)
-
-            logger.info("[TaskTool] 容器已完成: %s — %s", task_id, reason)
+                result_data["cleanup"] = cleanup_info
 
             return create_success_result(
 
-                data={
+                data=result_data,
 
-                    "task_id": task.id,
-
-                    "status": "completed",
-
-                    "message": f"容器 {task_id} 已标记为完成",
-
-                    "subtask_count": len(subtasks),
-
-                    "completed_subtasks": sum(
-
-                        1 for s in subtasks if s.status == TaskStatus.COMPLETED
-
-                    ),
-
-                    "cleanup": cleanup_info,
-
-                },
-
-                metadata={"action": "complete_task"},
+                metadata={"action": "change_status"},
 
             )
+
+
 
         except InvalidTransitionError as e:
 
             return create_failure_result(
 
-                error=f"容器完成失败（状态转换不合法）: {e}",
+                error=f"容器状态变更失败（状态转换不合法）: {e}",
 
                 error_code="INVALID_TRANSITION",
 
             )
 
-        except Exception as e:
 
-            logger.error("[TaskTool] 容器完成失败: %s", e)
-
-            return create_failure_result(
-
-                error=f"容器完成失败: {str(e)}",
-
-                error_code="CONTAINER_COMPLETE_FAILED",
-
-            )
-
-
-
-    # ── fail：标记容器失败（L1，旧 fail_container）──
-
-
-
-    async def _fail_task(  # noqa: PLR0911
-
-        self, inputs: dict[str, Any], parent_agent_level: int
-
-    ) -> ToolExecutionResult:
-
-        """标记容器任务失败。
-
-
-
-        仅限 L1 主 Agent 调用。将 PENDING 状态的容器标记为 FAILED。
-
-
-
-        Args:
-
-            inputs: 工具输入参数，需含 task_id 和 container_reason
-
-            parent_agent_level: 父 Agent 层级
-
-
-
-        Returns:
-
-            操作结果或错误
-
-        """
-
-        from datetime import datetime  # noqa: PLC0415
-
-
-
-        if parent_agent_level != 1:
-
-            return create_failure_result(
-
-                error="容器操作仅限 L1 主 Agent 执行",
-
-                error_code="PERMISSION_DENIED",
-
-            )
-
-
-
-        task_id = inputs.get("task_id")
-
-        if not task_id:
-
-            return create_failure_result(
-
-                error="fail 操作必须提供 task_id",
-
-                error_code="MISSING_TASK_ID",
-
-            )
-
-
-
-        reason = inputs.get("container_reason", inputs.get("reason", ""))
-
-        if not reason:
-
-            return create_failure_result(
-
-                error="fail 操作必须提供 container_reason 说明失败原因",
-
-                error_code="MISSING_REASON",
-
-            )
-
-
-
-        try:
-
-            service = self._get_task_service()
-
-        except RuntimeError as e:
-
-            return create_failure_result(error=str(e), error_code="SERVICE_UNAVAILABLE")
-
-
-
-        task = service.get_task(task_id)
-
-        if task is None:
-
-            return create_failure_result(
-
-                error=f"任务不存在: {task_id}",
-
-                error_code="TASK_NOT_FOUND",
-
-            )
-
-
-
-        subtasks = service.list_subtasks(task_id)
-
-        if not subtasks:
-
-            return create_failure_result(
-
-                error=f"任务 {task_id} 不是容器任务（无子任务），不能使用容器操作",
-
-                error_code="NOT_A_CONTAINER",
-
-            )
-
-
-
-        if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
-
-            return create_failure_result(
-
-                error=f"容器当前状态为 {task.status.value}，只能操作 PENDING 或 RUNNING 状态的容器",
-
-                error_code="INVALID_STATUS",
-
-            )
-
-
-
-        reason = inputs.get("container_reason", inputs.get("reason", ""))
-
-
-
-        try:
-
-            await service.force_transition(task.id, TaskStatus.FAILED)
-
-            task.completed_at = datetime.now().isoformat()
-
-            task.metadata = task.metadata or {}
-
-            task.metadata["container_reason"] = reason
-
-            await service.save_task(task)
-
-            logger.info("[TaskTool] 容器已失败: %s — %s", task_id, reason)
-
-            return create_success_result(
-
-                data={
-
-                    "task_id": task.id,
-
-                    "status": "failed",
-
-                    "message": f"容器 {task_id} 已标记为失败",
-
-                    "reason": reason,
-
-                    "subtask_count": len(subtasks),
-
-                },
-
-                metadata={"action": "fail_task"},
-
-            )
-
-        except InvalidTransitionError as e:
-
-            return create_failure_result(
-
-                error=f"容器失败操作失败（状态转换不合法）: {e}",
-
-                error_code="INVALID_TRANSITION",
-
-            )
 
         except Exception as e:
 
-            logger.error("[TaskTool] 容器失败操作失败: %s", e)
+            logger.error("[TaskTool] 容器状态变更失败: %s", e)
 
             return create_failure_result(
 
-                error=f"容器失败操作失败: {str(e)}",
+                error=f"容器状态变更失败: {str(e)}",
 
-                error_code="CONTAINER_FAIL_FAILED",
+                error_code="CONTAINER_CHANGE_FAILED",
 
             )
 
