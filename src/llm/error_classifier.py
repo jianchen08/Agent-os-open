@@ -210,6 +210,13 @@ def classify_error(exc: BaseException) -> ErrorInfo:
         return ErrorInfo(ErrorKind.NETWORK, retry_after, exc)
 
     if "ServiceUnavailableError" in type_name:
+        # 503 家族：多数上游临时抖动 → SERVICE_DOWN；但中转站（如 yichengc）
+        # 会把 RPM 限流也包成 503（消息含 "group requests-per-minute limit
+        # exceeded"）。限流必须按 RATE_LIMIT 处理（冷却 + 并发降级），否则
+        # SERVICE_DOWN 不冷却 key，会无限选回同一个被限流的 key 死循环。
+        # 先嗅探消息体，命中限流特征则归 RATE_LIMIT。
+        if any(kw in msg for kw in _RATE_LIMIT_KEYWORDS):
+            return ErrorInfo(ErrorKind.RATE_LIMIT, retry_after, exc)
         return ErrorInfo(ErrorKind.SERVICE_DOWN, retry_after, exc)
 
     if "InternalServerError" in type_name:
