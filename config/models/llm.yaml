@@ -159,14 +159,18 @@ models:
       - image/webp
       max_image_size: 20971520
 defaults:
-  chat: glm-5.2-yichengc
+  chat: glm-5.2
   embedding: embedding-3
-  call_timeout: 300
+  # inter-chunk 超时：流式输出两个 chunk 之间允许的最大间隔。
+  # 历史 300s 太短——长文档生成/方案编写中途思考停顿超过 5 分钟就被掐断，
+  # 导致 raw_result=None + reminder 误触发死循环。
+  # 调到 1200s（20分钟），让复杂任务（方案编写、工具调用规划）有充足时间。
+  call_timeout: 1200
   first_token_timeout: 60
   compression: minimax-m3-guangfang
   tiers:
-    large: glm-5.2-yichengc
-    medium: glm-5.2-yichengc
+    large: glm-5.2
+    medium: glm-5.2
     small: minimax-m3-guangfang
     fallback_chain: {}
 providers:
