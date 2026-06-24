@@ -240,15 +240,26 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
     async def websocket_chat_global(websocket: WebSocket) -> None:  # noqa: PLR0912,PLR0915
         """全局单连接 WebSocket 端点（v3 协议）。"""
         token = websocket.query_params.get("token", "")
+        # BUG-FIX-fix_20260625_ws_handshake_close_code_lost:
+        # 问题根因: 原实现在 accept() 之前 close(code=4001)。Starlette 在握手阶段
+        #   拒绝时，浏览器拿不到 WebSocket close frame，只收到 HTTP 403，
+        #   ws.onclose 的 event.code 是 1006（Abnormal Closure）而非 4001。
+        #   前端 GlobalWebSocket._scheduleReconnect 据此判断是否需要刷新 token，
+        #   但 1006 !== 4001 → 认证拒绝被误判为普通断连 → 用过期 token 死循环重连。
+        # 修复方案: token 校验失败时先 accept()，再 close(4001)。这样 close frame
+        #   能正确送达浏览器，前端 event.code===4001 判断成立，触发 token 刷新。
         if not token:
+            await websocket.accept()
             await websocket.close(code=4001, reason="全局连接需要 token 认证")
             return
         payload = verify_token(token)
         if payload is None:
+            await websocket.accept()
             await websocket.close(code=4001, reason="Token 无效或已过期")
             return
         user_id = payload.get("sub", "")
         if not user_id:
+            await websocket.accept()
             await websocket.close(code=4001, reason="Token 中缺少用户标识")
             return
 

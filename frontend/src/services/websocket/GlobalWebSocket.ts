@@ -177,7 +177,20 @@ class GlobalWebSocketService {
         // 后端在 token 无效/过期时以 code=4001 关闭连接（见 app_factory.py:244/248）。
         // 把 close code 传给重连逻辑：4001 = 认证被拒，需先刷新 token 再连；
         // 其他 code（网络断开、心跳超时等）= 正常重连，无需触碰 token。
-        this._scheduleReconnect(event.code === 4001)
+        //
+        // BUG-FIX-fix_20260625_ws_handshake_close_code_lost:
+        // 后端旧实现在 accept() 前 close(4001)，浏览器拿到的是 HTTP 403 + close code 1006
+        // 而非 4001，导致认证拒绝被误判为普通断连。后端已改为 accept() 后 close(4001)，
+        // 正常情况下前端能收到 4001。但某些代理/网关可能吞掉 close code 导致 1006，
+        // 故对 1006 + 从未连接过 + 本地 token 确实已过期 三者同时成立时，
+        // 也视为认证拒绝。token 未过期时（如服务端宕机）仍走普通指数退避。
+        let authRejected = event.code === 4001
+        if (!authRejected && event.code === 1006 && !wasConnected) {
+          // 仅当本地判定 token 已过期时才怀疑认证拒绝
+          const { checkTokenExpiration } = useAuthStore.getState()
+          authRejected = checkTokenExpiration()
+        }
+        this._scheduleReconnect(authRejected)
       }
     }
   }
