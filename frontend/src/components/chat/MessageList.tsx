@@ -3,14 +3,23 @@
  *
  * 显示消息列表，支持自动滚动、分页加载和加载状态。
  *
- * BUG-FIX-fix_20260617_virtuoso_scroll_break:
- * 问题根因: Virtuoso 虚拟列表在动态高度场景下布局崩溃，滚动后只有一个气泡
- *   重复、其余消失、大片空白。原因是 Virtuoso 的 item 高度测量与 React 重渲染
- *   时序冲突，特别是在 messages 数组引用频繁变化时。
- * 修复方案: 临时弃用 Virtuoso，改用原生 div + overflow-y:auto。
- *   消息量在数百条以内时原生渲染性能足够，且无虚拟化布局风险。
- * 影响范围: 消息列表滚动和渲染稳定性
- * 修复日期: 2026-06-17
+ * BUG-FIX-fix_20260624_scroll_jitter_rewrite:
+ * 问题根因: 此前手写了一大套滚动 effect（isFollowingBottom + ResizeObserver
+ *   + Scroll Anchoring + 流式钉底...），多 effect 互相打架、时序无法稳定，
+ *   叠加 MessageItem 缺 memo 导致流式期间整列全量重渲染（40-60次/秒），
+ *   算好的 scrollTop 下一帧就被新渲染冲掉 → 滚动条乱跳。
+ * 修复方案（路线B）:
+ *   1. MessageItem 加 React.memo（见 MessageItem.tsx）：历史消息不再随流式重渲染，
+ *      scrollTop 设好后不被冲掉。
+ *   2. 本组件大幅删减手写滚动逻辑，只保留最小职责：
+ *      - 首次进入钉底、切 Tab 缓存/恢复 scrollTop
+ *      - 用户发消息/流式期间跟随底部
+ *      - 到顶触发加载更多
+ *   3. 向上加载更多（prepend）不跳交给浏览器原生 CSS `overflow-anchor: auto`
+ *      （微博/Twitter 同款机制，2019 年起全浏览器支持，Electron/Tauri 100% 兼容），
+ *      不再手写任何锚点逻辑。
+ * 影响范围: 消息列表滚动稳定性、流式渲染性能
+ * 修复日期: 2026-06-24
  */
 
 import { Loader2 } from 'lucide-react'
@@ -22,9 +31,8 @@ import type { MessageListProps } from './types'
  * 每个 Tab 的滚动位置缓存
  *
  * 切换 Tab 时 MessageList 因 key 变化被销毁重建（见 ChatContainer 的
- * <MessageList key={activeTabId || sessionId}>），内部 useRef 全部重置。
- * 卸载前把 scrollTop 写入这里，重新挂载时读出恢复。
- * 内存级缓存，不跨页面刷新（仅跨同会话的卸载-重建，与原设计一致）。
+ * <MessageList key={activeTabId || sessionId}>），卸载前把 scrollTop 写入这里，
+ * 重新挂载时读出恢复。内存级缓存，不跨页面刷新。
  */
 const scrollTopCache = new Map<string, number>()
 
@@ -59,27 +67,27 @@ export const MessageList = ({
   tabId,
 }: ExtendedMessageListProps) => {
   const scrollRef = useRef<HTMLDivElement>(null)
-  /** 内容子容器：ResizeObserver observe 它（内容撑高才触发，滚动容器自身高度不变） */
-  const contentRef = useRef<HTMLDivElement>(null)
-  /**
-   * 是否"跟随底部"——决定新内容/异步高度变化时是否把视图钉在底部。
-   *
-   * 设计意图（对齐微信/ChatGPT 等标准聊天软件）：
-   *   初始 = true（点进去直接在底部看最新消息）
-   *   用户主动上滑 → 置 false（停止跟随，用户在翻历史）
-   *   用户滑回底部附近 → 置 true（恢复跟随）
-   *   底部追加新消息（用户发消息/收到回复）→ 强制置 true（弹到最下面）
-   *
-   * 用 ref 驱动（不走 state），避免滚动事件风暴触发 React 重渲染。
-   */
-  const isFollowingBottom = useRef(true)
+  /** 是否在底部附近（跟随底部） */
+  const isNearBottom = useRef(true)
+  /** 是否在顶部附近（触发加载更多） */
   const isNearTop = useRef(false)
+  /** 首次滚动是否完成 */
   const initialScrollDone = useRef(false)
   const prevGenerating = useRef(false)
-  /** prepend 加载更多前的滚动锚点（用于加载后恢复视口位置） */
-  const prependAnchor = useRef<{ el: HTMLElement; offset: number } | null>(null)
+  /** 上一帧消息数量，用于判断是新消息追加还是 prepend 历史 */
   const lastMessageCount = useRef(messages.length)
-  const lastMinSequence = useRef<number | undefined>(undefined)
+  /**
+   * "钉底 observer"：无缓存首次进入时挂上，持续把 scrollTop 钉在底部。
+   * 用途：抵消 initFromAPI 在首次加载后异步重建 DOM 把滚动位置冲回顶部的行为。
+   * 用户主动上滑（isNearBottom=false）后断开，把控制权交还用户。
+   */
+  const bottomObserverRef = useRef<ResizeObserver | null>(null)
+  /**
+   * 最近一次真实 scrollTop（onScroll 实时记录）。
+   * 切 Tab 卸载时 React 会先清空消息 DOM（scrollHeight/scrollTop 归 0），
+   * 此时读 DOM 拿到的是垃圾值 0；改读此 ref 拿到用户最后的真实位置。
+   */
+  const lastScrollTopRef = useRef(0)
 
   /** 渲染单个消息项 */
   const renderItem = useCallback(
@@ -100,167 +108,125 @@ export const MessageList = ({
     [isGenerating, modelName, searchQuery],
   )
 
-  /** 把滚动位置钉到最底部（立即、无动画，用于校正） */
+  /** 把滚动位置钉到最底部 */
   const pinToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el) {
+      // eslint-disable-next-line no-console
+      console.log('[scroll-debug] pinToBottom: scrollHeight=%d clientHeight=%d', el.scrollHeight, el.clientHeight)
       el.scrollTop = el.scrollHeight
+      // 程序设置 scrollTop 不触发 onScroll，手动同步缓存用 ref
+      lastScrollTopRef.current = el.scrollHeight
     }
   }, [])
 
   /**
    * 滚动事件处理
    *
-   * 核心职责：根据用户滚动位置更新 isFollowingBottom（跟随状态），
-   * 到顶部触发加载更多。注意——这里只更新 ref，不触发重渲染。
+   * 只更新 ref（不触发重渲染）：跟随底部状态 + 到顶触发加载更多 +
+   * 实时记录 scrollTop 供切 Tab 缓存（卸载时 DOM 已被清空，读不到准确值）。
    */
-  const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    const target = e.currentTarget
-    const { scrollTop, scrollHeight, clientHeight } = target
-    const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-    // 用户滑回底部附近 → 恢复跟随；主动上滑 → 停止跟随
-    isFollowingBottom.current = distanceFromBottom <= 150
-    isNearTop.current = scrollTop <= 150
+  const onScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      const target = e.currentTarget
+      const { scrollTop, scrollHeight, clientHeight } = target
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+      isNearBottom.current = distanceFromBottom <= 150
+      isNearTop.current = scrollTop <= 150
+      // 实时记录：卸载时 DOM 内容已被 React 清空（scrollHeight=0），读 DOM 拿到的是 0
+      lastScrollTopRef.current = scrollTop
 
-    // 到达顶部触发加载更多
-    if (isNearTop.current && hasMore && !isLoadingMore && onLoadMore) {
-      onLoadMore()
-    }
-  }, [hasMore, isLoadingMore, onLoadMore])
+      // 用户主动上滑 → 停止钉底跟随，断开 observer 把控制权交给用户
+      if (!isNearBottom.current && bottomObserverRef.current) {
+        bottomObserverRef.current.disconnect()
+        bottomObserverRef.current = null
+      }
+
+      if (isNearTop.current && hasMore && !isLoadingMore && onLoadMore) {
+        onLoadMore()
+      }
+    },
+    [hasMore, isLoadingMore, onLoadMore],
+  )
 
   /**
-   * BUG-FIX-fix_20260624_scroll_jitter:
-   * 问题根因: 原实现用 scrollTop = scrollHeight + 固定 setTimeout 猜测内容高度，
-   *   但消息内 Markdown 渲染、代码高亮、图片加载都是异步的，scrollHeight 会持续
-   *   增大。固定延迟设置的 scrollTop 用的是旧高度，内容继续撑高后位置就变成了
-   *   "中间"，表现为反复跳动（弹到底→内容撑高→停在中间→新内容→再跳）。
-   * 修复方案: 切 Tab 进入时先尝试恢复缓存位置；无缓存则默认跟随底部。
-   *   真正的"钉底"交给下面的 ResizeObserver 持续校正（内容高度一变就重钉），
-   *   不再依赖固定延迟猜测高度。
+   * 首次加载：恢复缓存位置或钉到底部
+   *
+   * 有缓存（之前在此 Tab 翻过历史）→ 恢复并停止跟随；
+   * 无缓存 → 钉到底部（看最新消息）。
+   *
+   * BUG-FIX-fix_20260625_switch_to_top:
+   * 问题根因: 首次钉底后，loadTabMessages→initFromAPI 仍会异步重建消息数组并重渲
+   *   DOM，浏览器把滚动位置重置到顶部，而首次 effect 因 initialScrollDone 已置 true
+   *   不再运行 → 视图停在顶部。之前 ResizeObserver 在 2 帧稳定后断开，错过了这次重建。
+   * 修复方案: 无缓存钉底时挂一个持续工作的 ResizeObserver（存入 bottomObserverRef），
+   *   内容高度一变（含 initFromAPI 重建）就重新钉底；用户主动上滑时 onScroll 检测到
+   *   isNearBottom=false 并断开 observer，把控制权交给用户。memo 已消除全量重渲染，
+   *   observer 不会再与重渲染冲突。
    */
   useEffect(() => {
     if (messages.length === 0 || initialScrollDone.current) return
     initialScrollDone.current = true
 
-    // 有缓存（用户之前在这个 Tab 翻过历史）→ 恢复并停止跟随
     const cached = tabId ? scrollTopCache.get(tabId) : undefined
-    if (cached !== undefined && scrollRef.current) {
-      isFollowingBottom.current = false
-      // 延迟到下一帧，确保 DOM 已按最新 messages 渲染后再定位
+    // eslint-disable-next-line no-console
+    console.log('[scroll-debug] 首次加载 tabId=%s messagesLen=%d cached=%s', tabId, messages.length, cached)
+    // 缓存恢复：直接定位，不需要 observer 校正（停在用户离开的位置）
+    if (cached !== undefined) {
+      isNearBottom.current = false
       requestAnimationFrame(() => {
         if (scrollRef.current) {
+          // eslint-disable-next-line no-console
+          console.log('[scroll-debug] 恢复缓存 scrollTop=%d -> 设为 %d', scrollRef.current.scrollTop, cached)
           scrollRef.current.scrollTop = cached
+          // 程序设置不触发 onScroll，手动同步
+          lastScrollTopRef.current = cached
         }
       })
       return
     }
 
-    // 无缓存 → 跟随底部，立即钉一次（后续由 ResizeObserver 持续校正）
-    isFollowingBottom.current = true
-    requestAnimationFrame(pinToBottom)
-  }, [messages.length, tabId, pinToBottom])
-
-  /**
-   * ResizeObserver：内容高度变化时，若仍在跟随底部则重新钉底
-   *
-   * 这是消除"反复跳动"的关键。Markdown/代码块/图片异步渲染撑高内容时，
-   * observer 触发 → 只要用户没主动上滑（isFollowingBottom=true）→ 立即重钉底部，
-   * 视觉上始终稳定在底部，不会停在中间。
-   *
-   * 注意 observe 的是 contentRef（内容子容器）而非 scrollRef：滚动容器
-   * overflow-y:auto 自身高度固定，内容撑高时它不触发；内容容器才会变高。
-   */
-  useEffect(() => {
-    const el = contentRef.current
+    // 无缓存钉底：持续 observer 校正，抵消 initFromAPI 重建 DOM 把滚动冲回顶部
+    const el = scrollRef.current
     if (!el) return
-
+    requestAnimationFrame(pinToBottom)
+    // 清理上一次残留的 observer（切 Tab 重建时）
+    if (bottomObserverRef.current) {
+      bottomObserverRef.current.disconnect()
+    }
     const ro = new ResizeObserver(() => {
-      if (isFollowingBottom.current) {
+      // 用户已上滑则停止钉底（onScroll 会负责断开，这里兜底）
+      if (isNearBottom.current) {
         pinToBottom()
       }
     })
+    bottomObserverRef.current = ro
     ro.observe(el)
-    return () => ro.disconnect()
-  }, [pinToBottom, messages.length])
+    return () => {
+      ro.disconnect()
+      if (bottomObserverRef.current === ro) {
+        bottomObserverRef.current = null
+      }
+    }
+  }, [messages.length, tabId, pinToBottom])
 
   /**
-   * 区分"底部追加新消息"与"顶部 prepend 历史消息"，分别处理：
+   * 底部追加新消息 → 跟随底部
    *
-   * BUG-FIX-fix_20260624_prepend_jump_to_bottom:
-   * 问题根因: 原逻辑只看 messages.length 增加，prepend 加载历史时 length 也会增加，
-   *   导致 isFollowingBottom 被强制置 true 并钉底 → 用户向上翻历史加载更多后视图
-   *   弹到最下面。正确行为应是加载完历史后停在原位（Scroll Anchoring）。
-   * 修复方案: 用最小 sequence 是否变小判断 prepend（历史消息 sequence 更小）。
-   *   - prepend：不做任何滚动，交给下面的锚点恢复 effect 把视口拉回原位。
-   *   - 底部追加新消息：强制跟随 + 钉底（弹到最下面）。
+   * 仅在已首次定位后、消息数量增加且仍在底部附近时钉底。
+   * 用户上滑（isNearBottom=false）时不强行拉回；prepend 加载历史虽也增 length，
+   * 但 overflow-anchor 保持视口 + 此处 isNearBottom 多为 false，不会误钉底。
    */
-  const currentMinSeq = messages.length > 0
-    ? Math.min(...messages.map((m) => m.sequence ?? 0))
-    : undefined
   useEffect(() => {
-    if (messages.length > lastMessageCount.current) {
-      const isPrepend =
-        lastMinSequence.current !== undefined &&
-        currentMinSeq !== undefined &&
-        currentMinSeq < lastMinSequence.current
-
-      if (!isPrepend) {
-        // 底部追加新消息 → 弹到最下面
-        isFollowingBottom.current = true
-        requestAnimationFrame(pinToBottom)
-      }
-      // prepend 情况交给 Scroll Anchoring effect 处理，这里不动 isFollowingBottom
+    if (initialScrollDone.current && messages.length > lastMessageCount.current && isNearBottom.current) {
+      requestAnimationFrame(pinToBottom)
     }
     lastMessageCount.current = messages.length
-    lastMinSequence.current = currentMinSeq
-  }, [messages.length, currentMinSeq, pinToBottom])
+  }, [messages.length, pinToBottom])
 
-  /**
-   * Scroll Anchoring：向上加载更多（prepend）时保持视口位置稳定
-   *
-   * 开始加载前记录"当前视口顶部第一个消息元素 + 它距视口顶的偏移"，
-   * 加载完成后（isLoadingMore 从 true→false）把该锚点元素拉回原偏移位置。
-   * 这样加载历史只是"把上面的内容刷出来"，视图停在原处，不跳动。
-   */
+  /** 流式输出期间持续跟随底部 */
   useEffect(() => {
-    // isLoadingMore 刚变 true：记录锚点（加载前的视口顶部消息）
-    if (isLoadingMore && scrollRef.current && contentRef.current && !prependAnchor.current) {
-      const container = scrollRef.current
-      const containerTop = container.getBoundingClientRect().top
-      // 在内容容器里找第一个出现在视口内的消息项
-      const items = contentRef.current.querySelectorAll('[data-testid="message-item"]')
-      let anchorEl: HTMLElement | null = null
-      for (const item of items) {
-        const rect = (item as HTMLElement).getBoundingClientRect()
-        if (rect.bottom >= containerTop) {
-          anchorEl = item as HTMLElement
-          break
-        }
-      }
-      if (anchorEl) {
-        prependAnchor.current = {
-          el: anchorEl,
-          offset: anchorEl.getBoundingClientRect().top - containerTop,
-        }
-      }
-    }
-
-    // isLoadingMore 从 true→false：加载完成，恢复锚点位置
-    if (!isLoadingMore && prependAnchor.current && scrollRef.current) {
-      const { el, offset } = prependAnchor.current
-      const containerTop = scrollRef.current.getBoundingClientRect().top
-      const elTop = el.getBoundingClientRect().top
-      // 把锚点元素拉回原来的 offset 位置
-      scrollRef.current.scrollTop += elTop - containerTop - offset
-      // 加载历史后用户在翻历史，保持停止跟随
-      isFollowingBottom.current = false
-      prependAnchor.current = null
-    }
-  }, [isLoadingMore, messages.length])
-
-  /** 流式输出期间持续钉底（跟随底部时） */
-  useEffect(() => {
-    if (isGenerating && isFollowingBottom.current) {
+    if (isGenerating && isNearBottom.current) {
       requestAnimationFrame(pinToBottom)
     }
   }, [isGenerating, messages, pinToBottom])
@@ -268,24 +234,33 @@ export const MessageList = ({
   /** 流式结束后钉底一次（代码块语法高亮等延迟渲染完成后） */
   useEffect(() => {
     if (prevGenerating.current && !isGenerating) {
-      isFollowingBottom.current = true
       const timer = setTimeout(pinToBottom, 300)
       return () => clearTimeout(timer)
     }
     prevGenerating.current = isGenerating
   }, [isGenerating, pinToBottom])
 
-  /** 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
+  /**
+   * 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
    *
-   * effect 运行时（commit 后）scrollRef.current 有效，闭包捕获 DOM 引用。
-   * 不在 cleanup 里直接读 ref：卸载时 React 先 detach ref（置 null）再跑
-   * passive effect cleanup，cleanup 里 scrollRef.current 已为 null。
+   * effect 运行时（commit 后）闭包捕获 DOM 引用；不在 cleanup 里直接读 ref，
+   * 因为卸载时 React 先 detach ref（置 null）再跑 passive effect cleanup。
+   */
+  /**
+   * 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
+   *
+   * BUG-FIX-fix_20260625_unload_stale_scrolltop:
+   * 问题根因: 切 Tab 卸载时 React 先清空消息 DOM（scrollHeight/scrollTop 归 0），
+   *   再跑 cleanup。此时读 el.scrollTop 拿到的是垃圾值 0，存进缓存 → 切回时恢复到顶部。
+   * 修复方案: 读 onScroll 实时记录的 lastScrollTopRef（用户最后的真实滚动位置），
+   *   不读已被清空的 DOM。
    */
   useEffect(() => {
-    const el = scrollRef.current
     return () => {
-      if (tabId && el) {
-        scrollTopCache.set(tabId, el.scrollTop)
+      if (tabId) {
+        // eslint-disable-next-line no-console
+        console.log('[scroll-debug] 卸载缓存 tabId=%s lastScrollTop=%d', tabId, lastScrollTopRef.current)
+        scrollTopCache.set(tabId, lastScrollTopRef.current)
       }
     }
   }, [tabId])
@@ -318,40 +293,38 @@ export const MessageList = ({
       ref={scrollRef}
       onScroll={onScroll}
       className={`min-h-0 flex-1 overflow-y-auto ${className}`}
+      style={{ overflowAnchor: 'auto' }}
       data-testid="message-list"
     >
-      {/* 内容子容器：ResizeObserver observe 它（内容撑高才触发，滚动容器自身高度固定） */}
-      <div ref={contentRef}>
-        {/* 加载更多头部 */}
-        {hasMore && (
-          <div className="flex items-center justify-center py-4">
-            {isLoadingMore ? (
-              <div className="text-muted-foreground flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span className="text-sm">加载历史消息...</span>
-              </div>
-            ) : (
-              <div className="text-muted-foreground text-sm">向上滚动加载更多</div>
-            )}
-          </div>
-        )}
-
-        {/* 消息列表 */}
-        {messages.map((message, index) => renderItem(message, index))}
-
-        {/* 底部加载占位 */}
-        {isGenerating && messages[messages.length - 1]?.role === 'user' && (
-          <div className="flex items-start gap-3 px-4 py-3">
-            <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
-              <Loader2 className="text-primary h-4 w-4 animate-spin" />
+      {/* 加载更多头部 */}
+      {hasMore && (
+        <div className="flex items-center justify-center py-4">
+          {isLoadingMore ? (
+            <div className="text-muted-foreground flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span className="text-sm">加载历史消息...</span>
             </div>
-            <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
-              <span className="text-muted-foreground text-sm">思考中...</span>
-            </div>
+          ) : (
+            <div className="text-muted-foreground text-sm">向上滚动加载更多</div>
+          )}
+        </div>
+      )}
+
+      {/* 消息列表 */}
+      {messages.map((message, index) => renderItem(message, index))}
+
+      {/* 底部加载占位 */}
+      {isGenerating && messages[messages.length - 1]?.role === 'user' && (
+        <div className="flex items-start gap-3 px-4 py-3">
+          <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
+            <Loader2 className="text-primary h-4 w-4 animate-spin" />
           </div>
-        )}
-        <div className="h-4" />
-      </div>
+          <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
+            <span className="text-muted-foreground text-sm">思考中...</span>
+          </div>
+        </div>
+      )}
+      <div className="h-4" />
     </div>
   )
 }
