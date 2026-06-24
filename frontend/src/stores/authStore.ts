@@ -73,6 +73,21 @@ interface AuthState {
 }
 
 /**
+ * 令牌刷新互斥锁（in-flight Promise）
+ *
+ * BUG-FIX-fix_20260624_concurrent_refresh_race:
+ * 问题根因: 前端有三条刷新路径（axios 拦截器 / GlobalWebSocket 重连 / initializeAuth），
+ *          各自独立发起 POST /auth/refresh。后端 refresh 是单次轮换（用完即撤销），
+ *          并发 race 时必然有一个请求拿到已撤销的 refresh_token → 401，
+ *          进而导致 WS 重连拿不到新 token → 403 死循环、推送中断。
+ * 修复方案: 用模块级 Promise 作为单一刷新源。所有调用方共享同一个 in-flight refresh：
+ *          首个调用创建 Promise，并发的后续调用直接 await 同一个 Promise，
+ *          全部完成后清空。后端只会被调用一次，race 消除。
+ * 影响范围: client.ts 拦截器、GlobalWebSocket._scheduleReconnect、initializeAuth
+ */
+let refreshInFlight: Promise<void> | null = null
+
+/**
  * 将后端用户信息响应映射为前端User模型
  */
 function mapUserInfoToUser(userInfo: UserInfoResponse): User {
@@ -310,63 +325,82 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   /**
-   * 刷新令牌
+   * 刷新令牌（单一互斥源）
    *
    * 调用后端 POST /api/v1/auth/refresh 端点刷新访问令牌。
+   *
+   * BUG-FIX-fix_20260624_concurrent_refresh_race:
+   * 此函数是全局唯一的刷新入口。并发的后续调用会直接 await 同一个 in-flight
+   * refreshInFlight，后端只会被调用一次，消除并发 race 导致的 refresh_token
+   * 单次轮换击穿问题。调用方：client.ts 拦截器、GlobalWebSocket 重连、initializeAuth。
    *
    * Requirements: 2.3
    */
   refreshToken: async () => {
-    const currentRefreshToken =
-      get().refreshTokenValue || localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
-
-    if (!currentRefreshToken) {
-      throw new Error('没有可刷新的令牌')
+    // 已有 in-flight 刷新：复用，不重复打后端
+    if (refreshInFlight) {
+      return refreshInFlight
     }
 
-    try {
-      // 调用真实API刷新令牌
-      const response: RefreshResponse = await authApi.refreshToken(currentRefreshToken)
+    refreshInFlight = (async () => {
+      const currentRefreshToken =
+        get().refreshTokenValue || localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
 
-      // 计算新的token过期时间
-      const expiryTime = Date.now() + response.expires_in * 1000
-
-      // 持久化到localStorage（使用 STORAGE_KEYS 常量）
-      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, response.access_token)
-      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, expiryTime.toString())
-
-      // 如果返回了新的refresh_token，也更新它
-      if (response.refresh_token) {
-        localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, response.refresh_token)
+      if (!currentRefreshToken) {
+        throw new Error('没有可刷新的令牌')
       }
 
-      // 更新状态
-      set({
-        token: response.access_token,
-        refreshTokenValue: response.refresh_token || currentRefreshToken,
-      })
-    } catch (error: unknown) {
-      // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-      // 问题根因: 原 refreshToken 失败时直接 await get().logout()，导致以下场景被误踢出：
-      //   1. WebSocket 重连时检测到 token 过期 → 调 refreshToken → 网络抖动刷新失败 → logout
-      //   2. 网络断开/超时/CORS/5xx 期间任何刷新尝试失败 → logout
-      //   3. 后端临时重启 → 刷新请求失败 → logout
-      // 修复方案: refreshToken 失败时不再主动 logout，只抛出错误。
-      //          由调用方根据错误类型（401/403 vs 网络错误）决定是否 logout：
-      //          - client.ts 拦截器：仅 401/403 才 clearAuthAndRedirect
-      //          - initializeAuth：仅 401/403 才 logout，网络错误保留旧 token 继续尝试
-      //          - GlobalWebSocket：刷新失败用旧 token 继续重连，绝不触发 logout
-      // 影响范围: 所有 refreshToken 调用路径（client.ts / initializeAuth / WS 重连）
       try {
-        const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
-        destroyGrowthLoop()
-      } catch {
-        // 动态导入失败，忽略
+        // 调用真实API刷新令牌
+        const response: RefreshResponse = await authApi.refreshToken(currentRefreshToken)
+
+        // 计算新的token过期时间
+        const expiryTime = Date.now() + response.expires_in * 1000
+
+        // 持久化到localStorage（使用 STORAGE_KEYS 常量）
+        localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, response.access_token)
+        localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, expiryTime.toString())
+
+        // 如果返回了新的refresh_token，也更新它
+        if (response.refresh_token) {
+          localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, response.refresh_token)
+        }
+
+        // 更新状态
+        set({
+          token: response.access_token,
+          refreshTokenValue: response.refresh_token || currentRefreshToken,
+        })
+      } catch (error: unknown) {
+        // BUG-FIX-fix_20260622_refresh_misclassify_logout:
+        // 问题根因: 原 refreshToken 失败时直接 await get().logout()，导致以下场景被误踢出：
+        //   1. WebSocket 重连时检测到 token 过期 → 调 refreshToken → 网络抖动刷新失败 → logout
+        //   2. 网络断开/超时/CORS/5xx 期间任何刷新尝试失败 → logout
+        //   3. 后端临时重启 → 刷新请求失败 → logout
+        // 修复方案: refreshToken 失败时不再主动 logout，只抛出错误。
+        //          由调用方根据错误类型（401/403 vs 网络错误）决定是否 logout：
+        //          - client.ts 拦截器：仅 401/403 才 clearAuthAndRedirect
+        //          - initializeAuth：仅 401/403 才 logout，网络错误保留旧 token 继续尝试
+        //          - GlobalWebSocket：刷新成功用新 token 重连，真失效(401/403) 才登出
+        // 影响范围: 所有 refreshToken 调用路径（client.ts / initializeAuth / WS 重连）
+        try {
+          const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
+          destroyGrowthLoop()
+        } catch {
+          // 动态导入失败，忽略
+        }
+        // 刷新失败，抛出错误让调用方决策，不主动 logout。
+        // 用 cause 保留原始错误，调用方可通过 isAuthFailureFromError 判断错误类型。
+        throw new Error('令牌刷新失败，请重新登录', { cause: error })
       }
-      // 刷新失败，抛出错误让调用方决策，不主动 logout。
-      // 用 cause 保留原始错误，调用方可通过 isAuthFailureFromError 判断错误类型。
-      throw new Error('令牌刷新失败，请重新登录', { cause: error })
-    }
+    })()
+
+    // 无论成功失败都清空 in-flight，允许下次重新尝试
+    refreshInFlight.finally(() => {
+      refreshInFlight = null
+    })
+
+    return refreshInFlight
   },
 
   /**

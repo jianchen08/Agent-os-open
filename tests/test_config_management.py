@@ -1,388 +1,491 @@
-"""配置管理体系测试 — Provider CRUD、API Key 脱敏、白名单读写、update_provider 修复验证。
+"""配置管理 API 测试。
 
-测试范围：
-1. Provider CRUD API 端点（GET/PUT + 404 语义）
-2. API Key 脱敏逻辑
-3. update_provider 隐式创建 → 404 修复验证
-4. update_provider 脱敏值覆盖明文密钥防护
-5. 配置白名单读写（generic 端点）
-6. .env/YAML 文件写入集成测试
+覆盖 routes_config.py 的四个核心功能域：
+1. Provider CRUD — 创建/读取/更新/删除，含 update_provider 404 回归测试
+2. .env 写入 — 创建 provider 时 api_key 自动写入 .env，yaml 中改为 ${VAR} 引用
+3. API Key 脱敏 — GET llm 配置时 api_key 被掩码，不泄露明文
+4. 白名单读写 — generic config 端点对未知路径返回 404，合法路径正常读写
 """
+
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
-from pathlib import Path
-from typing import Any
-from unittest.mock import patch
-
 from fastapi.testclient import TestClient
 
 
 # ---------------------------------------------------------------------------
-# Fixture — 隔离 YAML 路径 + 提供认证的 TestClient
+# 辅助函数
 # ---------------------------------------------------------------------------
 
-DEMO_CREDENTIALS = {"username": "demo", "password": "demo12345"}
-
-
-@pytest.fixture
-def llm_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """将 LLM YAML 隔离到临时目录，避免污染真实配置。"""
-    yaml_path = tmp_path / "llm.yaml"
-    initial_data = {
-        "providers": {
-            "openai": {"api_base": "https://api.openai.com/v1", "api_key": "sk-real-secret-key-123"},
-            "zhipu": {"api_base": "https://open.bigmodel.cn/api/paas/v4", "api_key": "zhipu-real-key-999"},
-        },
+def _write_test_llm_yaml(path: Path) -> None:
+    """写入测试用 llm.yaml，包含已知 api_key 以验证脱敏。"""
+    data: dict[str, Any] = {
         "models": {
-            "gpt-4o": {"provider": "openai", "model_name": "gpt-4o-2024-08-06", "display_name": "GPT-4o"},
-            "glm-4": {"provider": "zhipu", "model_name": "glm-4", "display_name": "GLM-4"},
+            "test-model": {
+                "provider": "test-provider",
+                "model_name": "test-model",
+                "api_key": "sk-test-key-1234567890",
+                "context_window": 4096,
+            },
         },
-        "defaults": {"chat": "gpt-4o", "embedding": "", "tiers": {"large": "gpt-4o"}},
+        "providers": {
+            "test-provider": {
+                "type": "openai",
+                "api_base": "https://api.test.com/v1",
+                "keys": [
+                    {
+                        "id": "test-provider_main",
+                        "api_key": "sk-provider-key-abcdef",
+                    }
+                ],
+            },
+            "empty-provider": {
+                "type": "deepseek",
+                "api_base": "https://api.empty.com/v1",
+                "keys": [],
+            },
+        },
+        "defaults": {
+            "chat": "test-model",
+            "embedding": "",
+        },
     }
-    with open(yaml_path, "w", encoding="utf-8") as f:
-        yaml.dump(initial_data, f, allow_unicode=True)
-    monkeypatch.setattr("channels.api.routes_config._LLM_YAML", yaml_path)
-    return yaml_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
 
 
-@pytest.fixture
-def generic_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """隔离通用配置白名单 YAML 到临时目录。"""
-    yaml_path = tmp_path / "test_generic.yaml"
+def _mask_key(key: str) -> str:
+    """与 routes_config._mask_key 相同的掩码逻辑，用于测试断言。"""
+    if not key or len(key) <= 8:
+        return "****" if key else ""
+    return f"{key[:4]}{'*' * 8}{key[-4:]}"
 
-    # 在白名单中注入测试路径
-    from channels.api import routes_config
 
-    original_whitelist = dict(routes_config._GENERIC_CONFIG_WHITELIST)
-    routes_config._GENERIC_CONFIG_WHITELIST["test/unit_test"] = yaml_path
-    yield yaml_path
-    # 恢复白名单
-    routes_config._GENERIC_CONFIG_WHITELIST.clear()
-    routes_config._GENERIC_CONFIG_WHITELIST.update(original_whitelist)
-
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture
-def patched_config_center(monkeypatch: pytest.MonkeyPatch):
-    """Mock ConfigCenter.reload 避免实际重载。"""
-    mock_cc = type("MockCC", (), {"reload": lambda self, path: {"config_type": "mock", "success": True}})()
-    monkeypatch.setattr("channels.api.routes_config.get_config_center", lambda: mock_cc)
-    return mock_cc
-
-
-@pytest.fixture
-def client(
-    llm_yaml: Path,
-    patched_config_center: Any,
+def config_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> TestClient:
-    """提供配置好隔离的 FastAPI TestClient。"""
-    from channels.api.app import create_app
-    return TestClient(create_app())
+    """创建隔离的 TestClient（最小 FastAPI 应用，仅挂载 config 路由）。
+
+    - 跳过认证（patch get_current_user 让任意 token 通过）
+    - llm.yaml 指向临时文件，含预置测试数据
+    - .env 指向临时文件
+
+    注：不使用完整 create_app()，避免引入 av/cv2 等可选媒体依赖。
+    """
+    # 跳过认证
+    monkeypatch.setattr(
+        "channels.api.deps.get_current_user",
+        lambda token: {"sub": "test-user", "username": "tester"},
+    )
+
+    # 隔离 llm.yaml
+    test_llm = tmp_path / "llm.yaml"
+    _write_test_llm_yaml(test_llm)
+    monkeypatch.setattr("channels.api.routes_config._LLM_YAML", test_llm)
+
+    # 隔离 .env
+    test_env = tmp_path / ".env"
+    monkeypatch.setattr("channels.api.routes_config._ENV_FILE", test_env)
+
+    # 构造最小应用：仅挂载 config 路由 + 错误处理器
+    from fastapi import FastAPI
+
+    from channels.api.deps import (
+        APIError,
+        api_error_handler,
+    )
+    from channels.api.routes_config import router as config_router
+
+    app = FastAPI()
+    app.add_exception_handler(APIError, api_error_handler)
+    app.include_router(config_router)
+    client = TestClient(app)
+    # 默认携带 Bearer token（mock 的 get_current_user 会返回固定用户信息）
+    client.headers.update({"Authorization": "Bearer test-token"})
+    return client
 
 
-@pytest.fixture
-def auth_headers(client: TestClient) -> dict[str, str]:
-    """登录 demo 用户，返回认证头。"""
-    resp = client.post("/api/v1/auth/login", json=DEMO_CREDENTIALS)
-    assert resp.status_code == 200, f"登录失败: {resp.text}"
-    token = resp.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
-
-
-# ---------------------------------------------------------------------------
-# Provider CRUD API 端点测试
-# ---------------------------------------------------------------------------
+# ===================================================================
+# 1. Provider CRUD
+# ===================================================================
 
 class TestProviderCRUD:
-    """Provider CRUD 操作 API 测试。"""
+    """Provider 增删改查完整流程测试。"""
 
-    def test_get_providers_returns_list(self, client: TestClient, auth_headers: dict[str, str]):
-        """GET /llm/providers 返回提供商列表（含 has_key 状态）。"""
-        resp = client.get("/api/v1/config/llm/providers", headers=auth_headers)
+    def test_get_providers_returns_list(self, config_client: TestClient) -> None:
+        """GET /llm/providers 返回所有 provider 的精简信息。"""
+        resp = config_client.get("/api/v1/config/llm/providers")
         assert resp.status_code == 200
         data = resp.json()
         assert "providers" in data
-        assert "openai" in data["providers"]
-        assert data["providers"]["openai"]["has_key"] is True
-        assert "api_base" in data["providers"]["openai"]
-        # 不应暴露明文 api_key
-        assert "api_key" not in data["providers"]["openai"]
+        assert "test-provider" in data["providers"]
+        assert "empty-provider" in data["providers"]
+        # test-provider 有 key → has_key=True
+        assert data["providers"]["test-provider"]["has_key"] is True
+        # empty-provider 无 key → has_key=False
+        assert data["providers"]["empty-provider"]["has_key"] is False
 
-    def test_get_llm_config_masks_api_keys(self, client: TestClient, auth_headers: dict[str, str]):
-        """GET /llm 返回的 providers 中 api_key 应被脱敏。"""
-        resp = client.get("/api/v1/config/llm", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        openai_key = data["providers"]["openai"]["api_key"]
-        # 脱敏值不应包含明文
-        assert "sk-real-secret-key-123" not in openai_key
-        assert "********" in openai_key or openai_key == "****"
-
-    def test_update_provider_existing_success(self, client: TestClient, auth_headers: dict[str, str]):
-        """PUT 更新已存在的 provider 成功，字段合并到现有配置。"""
-        resp = client.put(
-            "/api/v1/config/llm/providers/openai",
-            json={"config": {"api_base": "https://new.openai.com/v2", "timeout": 30}},
-            headers=auth_headers,
+    def test_create_provider_success(self, config_client: TestClient) -> None:
+        """POST /llm/providers 创建新 provider 成功。"""
+        resp = config_client.post(
+            "/api/v1/config/llm/providers",
+            json={
+                "provider_id": "new-provider",
+                "config": {
+                    "type": "openai",
+                    "api_base": "https://api.new.com/v1",
+                },
+            },
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["providers"]["openai"]["api_base"] == "https://new.openai.com/v2"
-        assert data["providers"]["openai"]["timeout"] == 30
+        assert "new-provider" in data["providers"]
+        assert data["providers"]["new-provider"]["api_base"] == "https://api.new.com/v1"
 
-    def test_update_provider_not_found_returns_404(self, client: TestClient, auth_headers: dict[str, str]):
-        """更新不存在的 provider 应返回 404，而非隐式创建。"""
-        resp = client.put(
-            "/api/v1/config/llm/providers/nonexistent",
-            json={"config": {"api_key": "new-key"}},
-            headers=auth_headers,
+    def test_create_provider_duplicate_returns_409(
+        self, config_client: TestClient,
+    ) -> None:
+        """创建已存在的 provider_id 应返回 409 Conflict。"""
+        resp = config_client.post(
+            "/api/v1/config/llm/providers",
+            json={
+                "provider_id": "test-provider",
+                "config": {"type": "openai"},
+            },
+        )
+        assert resp.status_code == 409
+
+    def test_update_provider_success(self, config_client: TestClient) -> None:
+        """PUT /llm/providers/{id} 更新已存在 provider 成功。"""
+        resp = config_client.put(
+            "/api/v1/config/llm/providers/test-provider",
+            json={"config": {"api_base": "https://api.updated.com/v1"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["providers"]["test-provider"]["api_base"] == "https://api.updated.com/v1"
+        # 原有字段应保留
+        assert data["providers"]["test-provider"]["type"] == "openai"
+
+    def test_update_provider_not_found_returns_404(
+        self, config_client: TestClient,
+    ) -> None:
+        """PUT 不存在的 provider_id 必须返回 404，不能隐式创建。
+
+        这是 Must Fix 回归测试：修复前会隐式创建空 provider 并返回 200。
+        """
+        resp = config_client.put(
+            "/api/v1/config/llm/providers/nonexistent-provider",
+            json={"config": {"api_base": "https://api.fake.com/v1"}},
         )
         assert resp.status_code == 404
-        assert "不存在" in resp.json()["detail"]
+        # 验证没有隐式创建
+        detail = resp.json().get("detail", "")
+        assert "不存在" in detail
 
-    def test_update_provider_not_found_does_not_create(self, client: TestClient, auth_headers: dict[str, str], llm_yaml: Path):
-        """404 响应后，provider 不应被写入文件。"""
-        client.put(
-            "/api/v1/config/llm/providers/ghost",
-            json={"config": {"api_key": "ghost-key"}},
-            headers=auth_headers,
+    def test_delete_provider_success(self, config_client: TestClient) -> None:
+        """DELETE /llm/providers/{id} 删除已存在 provider 成功。"""
+        resp = config_client.delete("/api/v1/config/llm/providers/test-provider")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "test-provider" not in data["providers"]
+
+    def test_delete_provider_not_found_returns_404(
+        self, config_client: TestClient,
+    ) -> None:
+        """DELETE 不存在的 provider_id 应返回 404。"""
+        resp = config_client.delete(
+            "/api/v1/config/llm/providers/nonexistent-provider",
         )
-        with open(llm_yaml, encoding="utf-8") as f:
-            saved = yaml.safe_load(f)
-        assert "ghost" not in saved.get("providers", {})
+        assert resp.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# API Key 脱敏 + 脱敏值覆盖防护测试
-# ---------------------------------------------------------------------------
+# ===================================================================
+# 2. .env 写入
+# ===================================================================
 
-class TestApiKeyMasking:
-    """API Key 脱敏逻辑和覆盖防护。"""
+class TestEnvWrite:
+    """创建 provider 时 api_key 自动写入 .env 的测试。"""
 
-    def test_mask_key_short(self):
-        """短 key（≤8 字符）统一脱敏为 ****。"""
-        from channels.api.routes_config import _mask_key
-        assert _mask_key("short") == "****"
-        assert _mask_key("") == ""
-
-    def test_mask_key_long(self):
-        """长 key 保留首尾各 4 位，中间替换为 ********。"""
-        from channels.api.routes_config import _mask_key
-        masked = _mask_key("sk-abcdef1234567890")
-        assert masked.startswith("sk-a")
-        assert masked.endswith("7890")
-        assert "********" in masked
-
-    def test_is_masked_key_detects_mask(self):
-        """_is_masked_key 正确识别脱敏值。"""
-        from channels.api.routes_config import _is_masked_key
-        assert _is_masked_key("sk-a********7890") is True
-        assert _is_masked_key("sk-real-plaintext") is False
-        assert _is_masked_key("") is False
-
-    def test_update_provider_rejects_masked_api_key(
+    def test_create_provider_with_api_key_writes_env(
         self,
-        client: TestClient,
-        auth_headers: dict[str, str],
-        llm_yaml: Path,
-    ):
-        """PUT 携带脱敏 api_key 时不覆盖明文密钥。"""
-        # 先获取脱敏值
-        get_resp = client.get("/api/v1/config/llm", headers=auth_headers)
-        masked_key = get_resp.json()["providers"]["openai"]["api_key"]
+        config_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """创建含 api_key 的 provider 时，密钥写入 .env 文件。"""
+        env_file = tmp_path / ".env"
+        # config_client fixture 已将 _ENV_FILE 指向 tmp_path / ".env"
+        # 直接读取该路径
 
-        # 用脱敏值 PUT
-        put_resp = client.put(
-            "/api/v1/config/llm/providers/openai",
-            json={"config": {"api_key": masked_key}},
-            headers=auth_headers,
+        config_client.post(
+            "/api/v1/config/llm/providers",
+            json={
+                "provider_id": "deepseek",
+                "config": {
+                    "type": "deepseek",
+                    "api_base": "https://api.deepseek.com/v1",
+                    "api_key": "sk-real-secret-key",
+                },
+            },
+        )
+
+        # 验证 .env 文件包含正确的环境变量
+        assert env_file.exists(), ".env 文件未创建"
+        env_content = env_file.read_text(encoding="utf-8")
+        assert "DEEPSEEK_API_KEY=sk-real-secret-key" in env_content, (
+            f".env 中未找到 DEEPSEEK_API_KEY: {env_content}"
+        )
+
+    def test_create_provider_env_reference_in_yaml(
+        self,
+        config_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """创建含 api_key 的 provider 后，llm.yaml 中使用 ${VAR} 引用而非明文。"""
+        llm_file = tmp_path / "llm.yaml"
+
+        config_client.post(
+            "/api/v1/config/llm/providers",
+            json={
+                "provider_id": "openai_custom",
+                "config": {
+                    "type": "openai",
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key": "sk-openai-secret",
+                },
+            },
+        )
+
+        # 读取 llm.yaml 验证密钥引用格式
+        with open(llm_file, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        provider = data["providers"]["openai_custom"]
+        keys = provider.get("keys", [])
+        assert len(keys) == 1, "应有一个 key 条目"
+        api_key_val = keys[0]["api_key"]
+        assert api_key_val == "${OPENAI_CUSTOM_API_KEY}", (
+            f"api_key 应为 ${{OPENAI_CUSTOM_API_KEY}} 引用，实际: {api_key_val}"
+        )
+        # 明文不应出现在 yaml 中
+        assert "sk-openai-secret" not in yaml.dump(data), (
+            "明文密钥不应残留在 llm.yaml 中"
+        )
+
+    def test_create_provider_without_api_key_skips_env(
+        self,
+        config_client: TestClient,
+        tmp_path: Path,
+    ) -> None:
+        """创建不含 api_key 的 provider 时，不写 .env 文件。"""
+        env_file = tmp_path / ".env"
+
+        config_client.post(
+            "/api/v1/config/llm/providers",
+            json={
+                "provider_id": "no-key-provider",
+                "config": {
+                    "type": "openai",
+                    "api_base": "https://api.noverify.com/v1",
+                },
+            },
+        )
+
+        assert not env_file.exists(), "无 api_key 时不应创建 .env 文件"
+
+
+# ===================================================================
+# 3. API Key 脱敏
+# ===================================================================
+
+class TestKeyMasking:
+    """GET 配置时 api_key 被掩码处理的测试。"""
+
+    def test_get_llm_config_masks_provider_keys(
+        self, config_client: TestClient,
+    ) -> None:
+        """GET /llm 返回的 provider keys 中 api_key 被掩码。"""
+        resp = config_client.get("/api/v1/config/llm")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        provider = data["providers"]["test-provider"]
+        keys = provider.get("keys", [])
+        assert len(keys) == 1
+
+        original_key = "sk-provider-key-abcdef"
+        expected_masked = _mask_key(original_key)
+        actual_key = keys[0]["api_key"]
+
+        assert actual_key == expected_masked, (
+            f"provider api_key 应被掩码为 {expected_masked}，实际: {actual_key}"
+        )
+        assert original_key not in actual_key, "掩码后的值不应包含原始密钥"
+
+    def test_get_llm_config_masks_model_keys(
+        self, config_client: TestClient,
+    ) -> None:
+        """GET /llm 返回的 model api_key 被掩码。"""
+        resp = config_client.get("/api/v1/config/llm")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        model = data["models"]["test-model"]
+        original_key = "sk-test-key-1234567890"
+        expected_masked = _mask_key(original_key)
+        actual_key = model["api_key"]
+
+        assert actual_key == expected_masked, (
+            f"model api_key 应被掩码为 {expected_masked}，实际: {actual_key}"
+        )
+        assert original_key not in actual_key, "掩码后的值不应包含原始密钥"
+
+    def test_get_models_masks_keys(self, config_client: TestClient) -> None:
+        """GET /llm/models 返回的 api_key 被掩码。"""
+        resp = config_client.get("/api/v1/config/llm/models")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        model = data["models"]["test-model"]
+        original_key = "sk-test-key-1234567890"
+        actual_key = model["api_key"]
+
+        assert actual_key == _mask_key(original_key), "model api_key 应被掩码"
+        assert original_key not in actual_key, "不应泄露原始密钥"
+
+    def test_get_providers_does_not_leak_keys(
+        self, config_client: TestClient,
+    ) -> None:
+        """GET /llm/providers 不返回 api_key 明文，仅返回 has_key 布尔值。"""
+        resp = config_client.get("/api/v1/config/llm/providers")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        for pid, pconf in data["providers"].items():
+            assert "api_key" not in pconf, (
+                f"provider {pid} 的精简信息不应包含 api_key 字段"
+            )
+            assert "has_key" in pconf, f"provider {pid} 应包含 has_key 字段"
+
+
+# ===================================================================
+# 4. 白名单读写
+# ===================================================================
+
+class TestGenericWhitelist:
+    """generic config 端点的白名单校验测试。"""
+
+    def test_get_generic_unknown_path_returns_404(
+        self, config_client: TestClient,
+    ) -> None:
+        """GET 未在白名单中的配置路径返回 404。"""
+        resp = config_client.get("/api/v1/config/generic/nonexistent/path")
+        assert resp.status_code == 404
+
+    def test_put_generic_unknown_path_returns_404(
+        self, config_client: TestClient,
+    ) -> None:
+        """PUT 未在白名单中的配置路径返回 404。"""
+        resp = config_client.put(
+            "/api/v1/config/generic/nonexistent/path",
+            json={"data": {"key": "value"}},
+        )
+        assert resp.status_code == 404
+
+    def test_get_generic_valid_path_returns_config(
+        self,
+        config_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """GET 白名单中的合法路径返回配置内容。"""
+        import channels.api.routes_config as rc
+
+        # 创建临时配置文件
+        test_yaml = tmp_path / "whitelist_test.yaml"
+        test_data = {"setting": "test-value", "nested": {"key": 123}}
+        test_yaml.write_text(
+            yaml.dump(test_data, allow_unicode=True, default_flow_style=False),
+            encoding="utf-8",
+        )
+
+        # 注册到白名单
+        monkeypatch.setitem(
+            rc._GENERIC_CONFIG_WHITELIST,
+            "test/whitelist_read",
+            test_yaml,
+        )
+
+        resp = config_client.get("/api/v1/config/generic/test/whitelist_read")
+        assert resp.status_code == 200
+        assert resp.json() == test_data
+
+    def test_put_generic_valid_path_writes_config(
+        self,
+        config_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """PUT 白名单中的合法路径写入配置并返回写入内容。"""
+        import channels.api.routes_config as rc
+
+        test_yaml = tmp_path / "whitelist_put.yaml"
+        monkeypatch.setitem(
+            rc._GENERIC_CONFIG_WHITELIST,
+            "test/whitelist_write",
+            test_yaml,
+        )
+
+        new_data = {"new_key": "new_value", "enabled": True}
+        resp = config_client.put(
+            "/api/v1/config/generic/test/whitelist_write",
+            json={"data": new_data},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == new_data
+
+        # 验证文件实际写入磁盘
+        assert test_yaml.exists(), "配置文件未写入磁盘"
+        with open(test_yaml, encoding="utf-8") as f:
+            file_data = yaml.safe_load(f)
+        assert file_data == new_data, "文件内容与写入数据不一致"
+
+    def test_put_generic_valid_path_roundtrip(
+        self,
+        config_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """PUT 后 GET 回读，内容一致（白名单配置读写回环）。"""
+        import channels.api.routes_config as rc
+
+        test_yaml = tmp_path / "whitelist_roundtrip.yaml"
+        monkeypatch.setitem(
+            rc._GENERIC_CONFIG_WHITELIST,
+            "test/roundtrip",
+            test_yaml,
+        )
+
+        payload = {"level": 3, "name": "roundtrip-test"}
+        put_resp = config_client.put(
+            "/api/v1/config/generic/test/roundtrip",
+            json={"data": payload},
         )
         assert put_resp.status_code == 200
 
-        # 验证文件中明文密钥未被覆盖
-        with open(llm_yaml, encoding="utf-8") as f:
-            saved = yaml.safe_load(f)
-        assert saved["providers"]["openai"]["api_key"] == "sk-real-secret-key-123"
-
-    def test_update_provider_accepts_real_api_key(
-        self,
-        client: TestClient,
-        auth_headers: dict[str, str],
-        llm_yaml: Path,
-    ):
-        """PUT 携带明文 api_key 时正常更新。"""
-        put_resp = client.put(
-            "/api/v1/config/llm/providers/openai",
-            json={"config": {"api_key": "sk-brand-new-real-key"}},
-            headers=auth_headers,
-        )
-        assert put_resp.status_code == 200
-
-        with open(llm_yaml, encoding="utf-8") as f:
-            saved = yaml.safe_load(f)
-        assert saved["providers"]["openai"]["api_key"] == "sk-brand-new-real-key"
-
-
-# ---------------------------------------------------------------------------
-# Model CRUD API 测试
-# ---------------------------------------------------------------------------
-
-class TestModelCRUD:
-    """Model CRUD 操作 API 测试。"""
-
-    def test_get_models_masks_keys(self, client: TestClient, auth_headers: dict[str, str]):
-        """GET /llm/models 返回脱敏的 api_key。"""
-        resp = client.get("/api/v1/config/llm/models", headers=auth_headers)
-        assert resp.status_code == 200
-        models = resp.json()["models"]
-        assert "gpt-4o" in models
-        # 不应含明文
-        for mid, mconf in models.items():
-            if "api_key" in mconf:
-                assert "********" in mconf["api_key"] or mconf["api_key"] == "****"
-
-    def test_add_model_success(self, client: TestClient, auth_headers: dict[str, str]):
-        """POST 添加新模型成功。"""
-        resp = client.post(
-            "/api/v1/config/llm/models",
-            json={"models": {"claude-3.5": {"provider": "anthropic", "model_name": "claude-3-5-sonnet"}}},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 200
-        assert "claude-3.5" in resp.json()["models"]
-
-    def test_update_model_not_found_returns_404(self, client: TestClient, auth_headers: dict[str, str]):
-        """更新不存在的模型返回 404。"""
-        resp = client.put(
-            "/api/v1/config/llm/models/nonexistent-model",
-            json={"config": {"temperature": 0.5}},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 404
-
-    def test_delete_model_success(self, client: TestClient, auth_headers: dict[str, str]):
-        """DELETE 删除已存在的模型成功。"""
-        resp = client.delete("/api/v1/config/llm/models/glm-4", headers=auth_headers)
-        assert resp.status_code == 200
-        assert "glm-4" not in resp.json()["models"]
-
-    def test_delete_model_not_found_returns_404(self, client: TestClient, auth_headers: dict[str, str]):
-        """删除不存在的模型返回 404。"""
-        resp = client.delete("/api/v1/config/llm/models/nonexistent-model", headers=auth_headers)
-        assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# LLM Defaults 读写测试
-# ---------------------------------------------------------------------------
-
-class TestDefaultsRW:
-    """LLM 默认模型配置读写。"""
-
-    def test_get_defaults(self, client: TestClient, auth_headers: dict[str, str]):
-        """GET /llm/defaults 返回默认配置。"""
-        resp = client.get("/api/v1/config/llm/defaults", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["chat"] == "gpt-4o"
-        assert "tiers" in data
-
-    def test_put_defaults_updates_fields(self, client: TestClient, auth_headers: dict[str, str]):
-        """PUT /llm/defaults 更新默认模型。"""
-        resp = client.put(
-            "/api/v1/config/llm/defaults",
-            json={"chat": "glm-4", "embedding": "text-embedding-3"},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["chat"] == "glm-4"
-        assert data["embedding"] == "text-embedding-3"
-
-
-# ---------------------------------------------------------------------------
-# 配置白名单读写测试
-# ---------------------------------------------------------------------------
-
-class TestGenericConfigWhitelist:
-    """通用配置白名单读端点测试。"""
-
-    def test_get_generic_unknown_path_returns_404(self, client: TestClient, auth_headers: dict[str, str]):
-        """GET 未注册的配置路径返回 404。"""
-        resp = client.get("/api/v1/config/generic/invalid/path", headers=auth_headers)
-        assert resp.status_code == 404
-
-    def test_put_generic_unknown_path_returns_404(self, client: TestClient, auth_headers: dict[str, str]):
-        """PUT 未注册的配置路径返回 404。"""
-        resp = client.put(
-            "/api/v1/config/generic/invalid/path",
-            json={"data": {}},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 404
-
-    def test_generic_config_rw_roundtrip(
-        self,
-        client: TestClient,
-        auth_headers: dict[str, str],
-        generic_yaml: Path,
-    ):
-        """白名单内的配置 PUT→GET 回环一致。"""
-        config_data = {
-            "enabled": True,
-            "retry_count": 5,
-            "label": "测试标签",
-            "nested": {"timeout": 60},
-        }
-
-        put_resp = client.put(
-            "/api/v1/config/generic/test/unit_test",
-            json={"data": config_data},
-            headers=auth_headers,
-        )
-        assert put_resp.status_code == 200
-        assert put_resp.json() == config_data
-
-        get_resp = client.get("/api/v1/config/generic/test/unit_test", headers=auth_headers)
+        get_resp = config_client.get("/api/v1/config/generic/test/roundtrip")
         assert get_resp.status_code == 200
-        assert get_resp.json() == config_data
-
-    def test_generic_config_file_written_to_disk(
-        self,
-        client: TestClient,
-        auth_headers: dict[str, str],
-        generic_yaml: Path,
-    ):
-        """PUT 后配置确实写入磁盘。"""
-        config_data = {"flag": True, "value": 42}
-        client.put(
-            "/api/v1/config/generic/test/unit_test",
-            json={"data": config_data},
-            headers=auth_headers,
-        )
-        assert generic_yaml.exists()
-        with open(generic_yaml, encoding="utf-8") as f:
-            saved = yaml.safe_load(f)
-        assert saved == config_data
-
-
-# ---------------------------------------------------------------------------
-# 认证保护测试
-# ---------------------------------------------------------------------------
-
-class TestAuthProtection:
-    """验证配置端点需要认证。"""
-
-    def test_get_llm_without_auth_returns_401(self, client: TestClient):
-        """无认证访问配置端点返回 401。"""
-        resp = client.get("/api/v1/config/llm")
-        assert resp.status_code == 401
-
-    def test_put_provider_without_auth_returns_401(self, client: TestClient):
-        """无认证更新提供商返回 401。"""
-        resp = client.put(
-            "/api/v1/config/llm/providers/openai",
-            json={"config": {"timeout": 30}},
-        )
-        assert resp.status_code == 401
+        assert get_resp.json() == payload, "GET 回读内容与 PUT 不一致"

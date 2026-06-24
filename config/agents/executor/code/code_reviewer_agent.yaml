@@ -18,6 +18,12 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   {{path:config/rules/per_domain/coding_domain_rules.md}}
 
+  {{path:config/rules/frontend_rules.md}}
+
+  {{path:config/rules/backend_rules.md}}
+
+  {{path:config/rules/per_agent/design_system_constraints.md}}
+
   {{path:.project/}}
 
 
@@ -134,28 +140,10 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   - **设计系统合规**（前端任务）
 
 
-  ## 审查报告必须包含
+  ## 审查报告
 
-  1. 概述
 
-  2. **物理保险检查结果**（5项自动检查的通过/失败状态）
-
-  3. **静态扫描指标**（量化数据）
-
-  4. **需求追溯审查结果**（每行新增代码的需求依据，无依据代码列表）
-
-  5. **架构边界四问审查结果**（散点/分叉点/信息泄漏/变化方向的检查结果）
-
-  6. 维度审查发现的问题
-
-  7. **细节清单核对结果**（通过数/总数、通过率、未通过项列表）
-
-  8. **验收标准核对结果**（每个 AC 的实现状态）
-
-  9. 改进建议
-
-  10. 总结（含审查结论）
-
+  按 code_analysis_report_template.md 模板输出报告（含概述、审查结论、物理保险检查结果、静态扫描指标、需求追溯、架构边界四问、维度审查、细节清单核对、验收标准核对、发现问题、总结等章节）。
 
   ## 细节清单通过率判定
 
@@ -171,16 +159,12 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   {{path:config/rules/per_agent/detail_review_checklist.md}}
 
-  {{path:config/rules/per_agent/design_system_constraints.md}}
-
   '
 static_vars:
   enabled: true
   items:
   - '{{rules}}'
   - '{{path:config/templates/code_analysis_report_template.md}}'
-  - '{{path:config/rules/frontend_rules.md}}'
-  - '{{path:config/rules/backend_rules.md}}'
 dynamic_vars:
   enabled: true
   items:

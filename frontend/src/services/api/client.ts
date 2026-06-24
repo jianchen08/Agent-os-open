@@ -8,51 +8,13 @@
  */
 
 import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
-import { API_BASE_URL, API_TIMEOUT, API_ENDPOINTS } from '../../constants/api'
+import { API_BASE_URL, API_TIMEOUT } from '../../constants/api'
 import { STORAGE_KEYS } from '../../constants/storage'
 import { isRetryableError } from '../../utils/retry'
 import { triggerAuthExpired } from '../authCallbacks'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
-import type { ApiError, RefreshResponse } from '../../types/api'
-
-/**
- * 令牌刷新状态管理
- * 防止多个请求同时刷新令牌
- *
- * BUG-FIX-fix_20260622_refresh_misclassify_logout:
- * 订阅回调签名改为 (token | null)，null 表示刷新失败。
- * 刷新失败时也通知订阅者，避免等待的请求 Promise 永不 resolve 导致卡死。
- * （原代码因"任何失败都 logout→整页刷新"掩盖了此问题，改不 logout 后需显式处理。）
- */
-let isRefreshing = false
-let refreshSubscribers: Array<(token: string | null) => void> = []
-
-/**
- * 订阅令牌刷新完成事件
- * @param callback 刷新成功传新 token，失败传 null
- */
-function subscribeTokenRefresh(callback: (token: string | null) => void): void {
-  refreshSubscribers.push(callback)
-}
-
-/**
- * 通知所有订阅者令牌已刷新（成功）
- */
-function onTokenRefreshed(token: string): void {
-  refreshSubscribers.forEach((callback) => callback(token))
-  refreshSubscribers = []
-}
-
-/**
- * 通知所有订阅者令牌刷新失败
- *
- * BUG-FIX-fix_20260622_refresh_misclassify_logout:
- * 让等待中的请求收到失败信号并 reject，避免 Promise 永不 resolve。
- */
-function notifyRefreshFailed(): void {
-  refreshSubscribers.forEach((callback) => callback(null))
-  refreshSubscribers = []
-}
+import type { ApiError } from '../../types/api'
+import { useAuthStore } from '@/stores/authStore'
 
 /**
  * 清除认证信息并重定向到登录页
@@ -189,109 +151,41 @@ apiClient.interceptors.response.use(
     // 如果是401错误且未重试过，尝试刷新token
     // Requirements: 2.3
     if (error.response?.status === 401 && !originalRequest._retry) {
-      // BUG-FIX-fix_20260401_143000_token_revoked
-      // 问题根因: 当 refresh_token 失效时，前端会报告错误到控制台，但这实际上是正常的认证过期场景
-      // 修复方案: 对 /auth/refresh 端点的 401 错误进行特殊处理，静默处理而不报告错误
-      // 影响范围: 前端认证模块、用户体验
-      // 修复日期: 2026-04-01
-
-      // 检查是否是 refresh_token 刷新失败
+      // 检查是否是 refresh_token 刷新请求本身失败
       const isRefreshTokenRequest = originalRequest.url?.includes('/auth/refresh')
 
       if (isRefreshTokenRequest) {
-        // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-        // 问题根因: 原逻辑对刷新请求的任何错误都立即 logout，但刷新请求也可能因
-        //          网络断开/超时/5xx 失败，此时并非认证失效，误登出会丢失用户工作上下文。
-        // 修复方案: 仅当后端明确返回 401/403（真认证失效）才 logout；
-        //          网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，不登出。
+        // refresh 请求自身 401：refresh_token 真正失效。
+        // 静默处理，不报告错误，直接清除认证状态并重定向。
         if (isDefinitelyAuthFailure(error)) {
-          // refresh_token 真正失效，这是正常的认证过期场景
-          // 静默处理，不报告错误，直接清除认证状态并重定向
           await clearAuthAndRedirect()
         }
         return Promise.reject(error)
       }
 
-      // 如果正在刷新令牌，等待刷新完成
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          subscribeTokenRefresh((token: string | null) => {
-            // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-            // token 为 null 表示刷新失败，reject 让上层处理（重试或报错），避免 Promise 永挂。
-            if (!token) {
-              reject(error)
-              return
-            }
-            if (originalRequest.headers) {
-              originalRequest.headers.Authorization = `Bearer ${token}`
-            }
-            resolve(apiClient(originalRequest))
-          })
-        })
-      }
-
+      // 标记已重试，避免无限循环
       originalRequest._retry = true
-      isRefreshing = true
 
       try {
-        // 尝试刷新token
-        const storedRefreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+        // BUG-FIX-fix_20260624_concurrent_refresh_race:
+        // 刷新统一委托 authStore.refreshToken（单一互斥源）。
+        // 并发的 401 请求会共享同一个 in-flight refresh，后端只被调用一次，
+        // 消除 refresh_token 单次轮换被并发击穿导致的 race。
+        await useAuthStore.getState().refreshToken()
 
-        if (storedRefreshToken) {
-          // 使用与后端一致的请求格式
-          const response = await axios.post<RefreshResponse>(
-            `${API_BASE_URL}${API_ENDPOINTS.AUTH.REFRESH_TOKEN}`,
-            { refresh_token: storedRefreshToken },
-            {
-              headers: {
-                'Content-Type': 'application/json',
-              },
-            },
-          )
-
-          const { access_token, refresh_token } = response.data
-
-          // 保存新 token 到 localStorage
-          // Requirements: 2.2
-          localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, access_token)
-          if (refresh_token) {
-            localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refresh_token)
-          }
-
-          // 通知所有等待的请求
-          onTokenRefreshed(access_token)
-          isRefreshing = false
-
-          // 更新原请求的token
-          if (originalRequest.headers) {
-            originalRequest.headers.Authorization = `Bearer ${access_token}`
-          }
-
-          // 重试原请求
-          return apiClient(originalRequest)
-        } else {
-          // 没有refresh_token，清除认证信息并重定向
-          // Requirements: 2.4
-          isRefreshing = false
-          await clearAuthAndRedirect()
-          return Promise.reject(error)
+        // 刷新成功后从 localStorage 读最新 access token 重放原请求
+        const newToken = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+        if (newToken && originalRequest.headers) {
+          originalRequest.headers.Authorization = `Bearer ${newToken}`
         }
+        return apiClient(originalRequest)
       } catch (refreshError) {
         // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-        // 问题根因: 原逻辑对刷新请求的任何错误都立即 logout，但刷新请求也可能因
-        //          网络断开/超时/5xx 失败，此时并非认证失效，误登出会丢失用户工作上下文。
-        // 修复方案: 仅当后端明确返回 401/403（真认证失效）才 logout；
-        //          网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，保留旧 token。
-        isRefreshing = false
-
+        // 仅当后端明确返回 401/403（真认证失效）才 logout；
+        // 网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，保留旧 token。
         if (isDefinitelyAuthFailure(refreshError)) {
-          // refresh_token 真正失效（后端明确拒绝），清除认证信息并重定向
-          notifyRefreshFailed()
           await clearAuthAndRedirect()
         } else {
-          // 网络错误/超时/5xx：暂性故障，不登出，通知等待的请求失败（让其 reject 重试）
-          // 保留旧 token，让后续用户操作或 retry 机制继续尝试
-          notifyRefreshFailed()
           reportError(
             '网络异常，认证刷新暂时失败，请检查网络后重试',
             ErrorType.NETWORK,
