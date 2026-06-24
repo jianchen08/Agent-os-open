@@ -6,36 +6,17 @@
  * - 有消息时正确渲染消息项
  * - isGenerating 状态下显示思考中提示
  * - 传入不同 props 的渲染行为
+ * - 首次钉底、切 Tab 缓存恢复、底部追加跟随
+ *
+ * 注：浏览器原生 overflow-anchor（加载更多不跳）是纯 CSS，jsdom 不实现 CSS 引擎，
+ * 这部分靠浏览器实测，单测不覆盖。
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import React from 'react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { MessageList } from '../MessageList'
+import type { ExtendedMessageListProps } from '../MessageList'
 import type { Message } from '@/types/models'
-
-// Mock Virtuoso（避免浏览器环境依赖）
-vi.mock('react-virtuoso', () => ({
-  Virtuoso: ({ data, itemContent }: { data: Message[]; itemContent: (index: number) => React.ReactNode }) => (
-    <div data-testid="virtuoso-mock">
-      {data.map((_: unknown, i: number) => (
-        <div key={i} data-testid={`virtuoso-item-${i}`}>{itemContent(i)}</div>
-      ))}
-    </div>
-  ),
-}))
-
-// Mock useMessageScroll hook
-vi.mock('../hooks/useMessageScroll', () => ({
-  useMessageScroll: () => ({
-    virtuosoRef: { current: null },
-    containerRef: { current: null },
-    shouldFollowOutput: true,
-    onScroll: vi.fn(),
-    handleStartReached: vi.fn(),
-    HeaderComponent: () => null,
-    initialTopMostItemIndex: 0,
-  }),
-}))
 
 // Mock MessageItem（避免深入渲染依赖）
 vi.mock('../MessageItem', () => ({
@@ -46,9 +27,6 @@ vi.mock('../MessageItem', () => ({
     </div>
   ),
 }))
-
-import { MessageList } from '../MessageList'
-import type { ExtendedMessageListProps } from '../MessageList'
 
 /** 创建测试用 Message 对象 */
 function makeMessage(overrides: Partial<Message> = {}): Message {
@@ -63,6 +41,59 @@ function makeMessage(overrides: Partial<Message> = {}): Message {
     ...overrides,
   }
 }
+
+/**
+ * 给 DOM 元素打补丁，模拟滚动尺寸
+ *
+ * jsdom 默认 scrollHeight/scrollTop 为 0 且写入 scrollTop 不生效，
+ * 用 getter/setter 覆盖以便断言 MessageList 的滚动逻辑。
+ */
+function mockScrollMetrics(el: HTMLElement, scrollHeight: number, clientHeight = 200) {
+  // 保留已有 scrollTop：更新 scrollHeight 时不应重置滚动位置
+  const prevTop = (Object.getOwnPropertyDescriptor(el, 'scrollTop')?.get as (() => number) | undefined)?.()
+  let currentScrollTop = prevTop ?? 0
+  Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+  Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => clientHeight })
+  Object.defineProperty(el, 'scrollTop', {
+    configurable: true,
+    get: () => currentScrollTop,
+    set: (v: number) => {
+      currentScrollTop = v
+    },
+  })
+  return el
+}
+
+/**
+ * requestAnimationFrame polyfill
+ *
+ * MessageList 用 rAF 异步设置 scrollTop。jsdom 不提供，测试里进队列后手动 flush，
+ * 贴近真实异步行为且断言可控。
+ */
+let rafQueue: FrameRequestCallback[] = []
+function flushRaf() {
+  const pending = rafQueue
+  rafQueue = []
+  for (const cb of pending) cb(0)
+}
+
+beforeEach(() => {
+  rafQueue = []
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+    rafQueue.push(cb)
+    return 0
+  })
+  // MessageList 首次加载用 ResizeObserver 持续校正钉底，jsdom 不提供，需 polyfill
+  vi.stubGlobal('ResizeObserver', class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  })
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 describe('MessageList', () => {
   const defaultProps: ExtendedMessageListProps = {
@@ -94,12 +125,6 @@ describe('MessageList', () => {
       const messages = [makeMessage({ id: 'msg-1' })]
       render(<MessageList {...defaultProps} messages={messages} />)
       expect(screen.getByTestId('message-list')).toBeInTheDocument()
-    })
-
-    it('渲染 Virtuoso 虚拟列表', () => {
-      const messages = [makeMessage({ id: 'msg-1' })]
-      render(<MessageList {...defaultProps} messages={messages} />)
-      expect(screen.getByTestId('virtuoso-mock')).toBeInTheDocument()
     })
 
     it('渲染多条消息', () => {
@@ -162,6 +187,104 @@ describe('MessageList', () => {
       render(<MessageList {...defaultProps} messages={messages} modelName="gpt-4" />)
       // MessageItem mock 渲染了消息内容
       expect(screen.getByTestId('message-item-msg-1')).toBeInTheDocument()
+    })
+  })
+
+  describe('滚动行为', () => {
+    afterEach(() => {
+      cleanup()
+    })
+
+    it('无缓存时首次加载钉到最底部', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      const { container } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="no-cache" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+
+      expect(listEl.scrollTop).toBe(1000)
+    })
+
+    it('卸载后重新挂载同一 Tab 恢复缓存的滚动位置', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      const tabId = 'restore'
+
+      // 第一次挂载：无缓存 → 钉到底部（1000）
+      const { container, unmount } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 模拟用户向上滚动到中间（需派发 scroll 事件，onScroll 才会记录 scrollTop）
+      listEl.scrollTop = 400
+      fireEvent.scroll(listEl)
+
+      // 卸载：触发 cleanup 写入缓存
+      unmount()
+
+      // 重新挂载同一 Tab
+      const { container: container2 } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl2, 1000)
+      flushRaf()
+
+      // 恢复到缓存的 400
+      expect(listEl2.scrollTop).toBe(400)
+    })
+
+    it('切换到不同 Tab 不受其他 Tab 缓存影响', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+
+      // Tab A 滚到中间后卸载
+      const { container, unmount } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="tab-A" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+      unmount()
+
+      // 切到全新的 Tab B：无缓存 → 钉到底
+      const { container: container2 } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="tab-B" />,
+      )
+      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl2, 1000)
+      flushRaf()
+
+      expect(listEl2.scrollTop).toBe(1000)
+    })
+
+    it('底部追加新消息时跟随到底部', () => {
+      const initialMessages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={initialMessages} tabId="append" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 追加新消息（底部）
+      const appended = [
+        ...initialMessages,
+        makeMessage({ id: 'msg-2', sequence: 2 }),
+      ]
+      mockScrollMetrics(listEl, 1200)
+      rerender(<MessageList {...defaultProps} messages={appended} tabId="append" />)
+      flushRaf()
+
+      // 跟随到底部（1200）
+      expect(listEl.scrollTop).toBe(1200)
     })
   })
 })

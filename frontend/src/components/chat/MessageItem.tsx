@@ -6,7 +6,7 @@
  */
 
 import { Bell, Bot, Check, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -111,7 +111,7 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
 /**
  * 消息项组件
  */
-export const MessageItem = ({
+export const MessageItem = memo(function MessageItem({
   message,
   isLast = false,
   isGenerating = false,
@@ -119,7 +119,7 @@ export const MessageItem = ({
   modelName,
   className = '',
   searchQuery,
-}: MessageItemProps) => {
+}: MessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
 
@@ -480,4 +480,4 @@ export const MessageItem = ({
       </div>
     </div>
   )
-}
+})
