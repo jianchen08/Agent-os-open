@@ -32,6 +32,8 @@ tool_ids:
 - memory
 - list_directory
 - human_interaction
+- create_directory
+- enhanced_search
 hard_constraints:
 - 信息收集任务必须派发给 research_agent，禁止自行执行信息搜索
 - 研究结论必须有分析依据和论证过程，禁止仅罗列事实不给判断
@@ -51,17 +53,17 @@ soft_constraints:
 deliverables:
 - name: research_report
   description: 深度研究报告，包含问题建模、多维度分析、方案论证、风险评估、结论建议、引用溯源表和审计日志
-  output_path: '{{workspace}}/docs/{title}_synthesis_report.md'
+  output_path: '{{workspace}}/docs/working/{title}_synthesis_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/{title}_synthesis_report.md'
+    path: '{{workspace}}/docs/working/{title}_synthesis_report.md'
 - metric_id: format_valid
   default_params:
-    path: '{{workspace}}/docs/{title}_synthesis_report.md'
+    path: '{{workspace}}/docs/working/{title}_synthesis_report.md'
     type: markdown
 input_schema:
   type: object
@@ -95,7 +97,7 @@ output_schema:
   properties:
     research_report_path:
       type: string
-      description: '综合研究报告文件路径，格式: docs/{title}_synthesis_report.md'
+      description: '综合研究报告文件路径，格式: docs/working/{title}_synthesis_report.md'
     research_domain:
       type: string
       description: 实际识别的研究领域

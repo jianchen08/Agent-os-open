@@ -216,7 +216,8 @@ class TaskPostPipelineMixin:
             parts.append(
                 f"管道被中断(可能原因: 进程重启或被强制终止)"
                 f"(iterations={iteration_count}/{max_iter},"
-                f" ended={ended})"
+                f" ended={ended},"
+                f" pipeline={pipeline_id[:12] if isinstance(pipeline_id, str) else pipeline_id})"
             )
         else:
             # 其他未知原因

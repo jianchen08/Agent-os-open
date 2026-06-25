@@ -1348,7 +1348,19 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
 
                     for tc in raw_calls:
 
-                        args = tc.get("arguments", tc.get("args", {}))
+                        # 兼容两种 tool_call 序列化格式：
+                        # 1. 扁平格式（LLMCore 的 RAW_TOOL_CALLS 落盘）：
+                        #    {"id", "name", "arguments"/"args"}
+                        # 2. OpenAI 嵌套格式（pipe 继承历史经 _reconstruct_tool_calls
+                        #    重建后落盘到 tool_calls_json，再随继承记录落盘）：
+                        #    {"id", "type": "function", "function": {"name", "arguments"}}
+                        #    顶层没有 name/arguments，必须下钻到 function.*。
+                        # BUG-FIX-fix_20260625_inherit_tool_card_empty:
+                        #   问题根因: 原代码只读扁平顶层 name/arguments，继承记录是嵌套
+                        #   结构时 tool_name=""/tool_args={}，前端工具卡片渲染为空。
+                        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+
+                        args = tc.get("arguments", fn.get("arguments", tc.get("args", {})))
 
                         if isinstance(args, str):
 
@@ -1364,7 +1376,7 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
 
                             "call_id": tc.get("id", tc.get("call_id", "")),
 
-                            "tool_name": tc.get("name", tc.get("tool_name", "")),
+                            "tool_name": tc.get("name", fn.get("name", tc.get("tool_name", ""))),
 
                             "tool_args": args if isinstance(args, dict) else {"raw": args},
 

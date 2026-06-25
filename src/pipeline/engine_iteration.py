@@ -108,7 +108,7 @@ async def _dispatch_input_target(
         IterationAction.CONTINUE 继续迭代；IterationAction.BREAK 结束循环。
     """
     target, matched_entry = engine.input_route_table.resolve_target(state)
-    logger.info(
+    logger.debug(
         "Input route resolved target: %s (entry=%s)",
         target, matched_entry.name if matched_entry else "none",
     )
@@ -268,7 +268,7 @@ async def _execute_core_and_route(
         return IterationAction.BREAK if _no_route_action == "end" else IterationAction.CONTINUE
 
     resolved = engine.output_route_table.arbitrate(route_signals, state)
-    logger.info(
+    logger.debug(
         "Route arbitrated: type=%s, target=%s, reason=%s",
         resolved.route_type, resolved.target, resolved.reason,
     )

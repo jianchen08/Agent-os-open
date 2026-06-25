@@ -66,3 +66,9 @@ packages/wheels/*
 packages/npm-tarballs/*
 !packages/npm-tarballs/.gitkeep
 `n# 前端构建注入标记（本地生成）`n.frontend_built_at`n.frontend_built_at
+
+# 鏈湴涓存椂鑴氭湰/璋冭瘯浜х墿锛堜笉杩涗粨搴擄級
+_fix_leaks.py
+_parse_probe.ps1
+_verify.ps1
+_vrf_review.py

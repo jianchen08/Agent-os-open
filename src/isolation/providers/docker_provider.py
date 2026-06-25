@@ -121,6 +121,32 @@ class DockerProvider(IsolationProvider):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _run)
 
+    def _make_error_environment(
+        self,
+        context: IsolationContext,
+        now: datetime,
+        error_msg: str,
+    ) -> IsolationEnvironment:
+        """构造一个错误状态的容器环境并注册。
+
+        容器创建失败、或工作空间挂载校验失败时复用：无 container_id，
+        使用带 task_id 的合成 env_id 兜底；后续 execute_in_environment
+        会据 status=ERROR 直接返回 provider_info["error"]，不再尝试执行。
+        """
+        env_id = f"docker-{context.task_id}"
+        env = IsolationEnvironment(
+            env_id=env_id,
+            level=IsolationLevel.CONTAINER,
+            provider_type="docker",
+            status=EnvironmentStatus.ERROR.value,
+            context=context,
+            provider_info={"error": error_msg},
+            created_at=now.isoformat(),
+            last_used_at=now.isoformat(),
+        )
+        self._environments[env_id] = env
+        return env
+
     async def create_environment(
         self,
         context: IsolationContext,
@@ -138,6 +164,31 @@ class DockerProvider(IsolationProvider):
         now = datetime.now(UTC)
         name = container_name
 
+        # 工作空间挂载校验：容器隔离的工作空间只能来自任务数据解析出来的路径。
+        # 缺失或宿主机路径不存在即为功能错误——拒绝创建无挂载容器，避免命令落到
+        # 空/不存在的目录却以 exit 0 静默通过（表现为“目录看不到”）。
+        # 不做任何“换个目录挂载”的变通：挂载点对不上本身就是错误。
+        # BUG-FIX-fix_20260625_isolated_no_workspace
+        if self._workspace_mount:
+            ws_path = context.workspace
+            if not ws_path:
+                logger.error(
+                    "[DockerProvider] 拒绝创建容器：工作空间为空（无法挂载） | task=%s",
+                    context.task_id,
+                )
+                return self._make_error_environment(
+                    context, now, "工作空间为空，无法挂载到容器",
+                )
+            from pathlib import Path  # noqa: PLC0415
+            if not Path(ws_path).exists():
+                logger.error(
+                    "[DockerProvider] 拒绝创建容器：工作空间路径不存在 | task=%s | path=%s",
+                    context.task_id, ws_path,
+                )
+                return self._make_error_environment(
+                    context, now, f"工作空间路径不存在: {ws_path}",
+                )
+
         # 构建 docker run 命令参数
         run_args = self._build_run_args(name, context)
 
@@ -153,20 +204,8 @@ class DockerProvider(IsolationProvider):
         if rc != 0:
             error_msg = stderr.decode("utf-8", errors="replace")
             logger.error("[DockerProvider] 创建容器失败 | error=%s", error_msg)
-            # 创建失败时无 container_id，使用带 task_id 的合成 ID 兜底
-            fallback_env_id = f"docker-{context.task_id}"
-            env = IsolationEnvironment(
-                env_id=fallback_env_id,
-                level=IsolationLevel.CONTAINER,
-                provider_type="docker",
-                status=EnvironmentStatus.ERROR.value,
-                context=context,
-                provider_info={"error": error_msg},
-                created_at=now.isoformat(),
-                last_used_at=now.isoformat(),
-            )
-            self._environments[fallback_env_id] = env
-            return env
+            # 创建失败时无 container_id，复用错误环境构造（与挂载校验失败同源）
+            return self._make_error_environment(context, now, error_msg)
 
         container_id = stdout.decode("utf-8", errors="replace").strip()
 
@@ -243,6 +282,14 @@ class DockerProvider(IsolationProvider):
         if not env:
             return ExecutionResult(
                 success=False, output=None, error=f"环境不存在: {env_id}",
+            )
+
+        # 创建失败的环境（如工作空间未挂载校验未过）直接返回其错误，
+        # 不再尝试执行——否则会以模糊的“容器ID不存在”掩盖真实原因。
+        if env.status == EnvironmentStatus.ERROR.value:
+            return ExecutionResult(
+                success=False, output=None,
+                error=env.provider_info.get("error", "容器环境处于错误状态"),
             )
 
         container_id = env.provider_info.get("container_id")

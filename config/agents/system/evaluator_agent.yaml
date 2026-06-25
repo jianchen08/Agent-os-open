@@ -50,14 +50,14 @@ soft_constraints:
 deliverables:
 - name: evaluation_report
   description: JSON格式的评估结论
-  output_path: '{{workspace}}/evaluation_report.json'
+  output_path: '{{workspace}}/docs/working/evaluation_report.json'
   type: json
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/evaluation_report.json'
+    path: '{{workspace}}/docs/working/evaluation_report.json'
 metadata:
   author: System
   created_at: '2026-05-20'

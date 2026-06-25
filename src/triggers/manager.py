@@ -221,7 +221,7 @@ class TriggerManager:
 
 
 
-            logger.info(
+            logger.debug(
 
                 f"事件触发器触发: {trigger.trigger_id} "
 
@@ -419,7 +419,7 @@ class TriggerManager:
 
 
 
-                logger.info(
+                logger.debug(
 
                     f"触发器触发: {trigger.trigger_id} "
 

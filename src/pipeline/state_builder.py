@@ -58,13 +58,6 @@ def build_initial_state(
         StateKeys.ATTACHMENTS: attachments or [],
     }
 
-    # 标记本次管道是否携带继承来的历史对话（pipe 继承）。
-    # 判据：调用方显式传入了非空 conversation_history。
-    # workspace 继承不触碰消息，不会置真；两者组合继承时只要走了 pipe 就为真。
-    # engine._persist_inherited_history 据此把装载的历史落盘到新 pipeline 文件，
-    # 避免继承历史只活在内存里、管道结束后丢失（且使新管道可二次重试）。
-    state["_inherited_history"] = bool(conversation_history)
-
     if user_input:
         _last = resolved_history[-1] if resolved_history else {}
         if not (_last.get("role") == "user" and _last.get("content") == user_input):

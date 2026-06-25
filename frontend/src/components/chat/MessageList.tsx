@@ -50,6 +50,8 @@ export interface ExtendedMessageListProps extends MessageListProps {
   sessionId?: string
   /** 当前 Tab ID，用于缓存/恢复滚动位置 */
   tabId?: string
+  /** 当前 Tab 关联的任务 ID，用于工具卡片打开文件解析工作区 */
+  taskId?: string
 }
 
 /**
@@ -65,12 +67,20 @@ export const MessageList = ({
   onLoadMore,
   searchQuery,
   tabId,
+  taskId,
 }: ExtendedMessageListProps) => {
   const scrollRef = useRef<HTMLDivElement>(null)
-  /** 是否在底部附近（跟随底部） */
+  /** 是否在底部附近（距底部 150px 内） */
   const isNearBottom = useRef(true)
   /** 是否在顶部附近（触发加载更多） */
   const isNearTop = useRef(false)
+  /**
+   * 是否"跟随底部"——决定流式/新内容时是否把视图钉在底部。
+   * 初始 true（看最新消息）；用户主动上滑 → false（停止跟随，翻历史）；
+   * 用户滚回底部附近 → true（恢复跟随）。
+   * 这是控制流式钉底的关键：用户上滑必须立即停止跟随，否则滚不动。
+   */
+  const isFollowingBottom = useRef(true)
   /** 首次滚动是否完成 */
   const initialScrollDone = useRef(false)
   const prevGenerating = useRef(false)
@@ -101,11 +111,12 @@ export const MessageList = ({
             isGenerating={isGenerating && isLast}
             modelName={modelName}
             searchQuery={searchQuery}
+            taskId={taskId}
           />
         </div>
       )
     },
-    [isGenerating, modelName, searchQuery],
+    [isGenerating, modelName, searchQuery, taskId],
   )
 
   /** 把滚动位置钉到最底部 */
@@ -123,23 +134,35 @@ export const MessageList = ({
   /**
    * 滚动事件处理
    *
-   * 只更新 ref（不触发重渲染）：跟随底部状态 + 到顶触发加载更多 +
-   * 实时记录 scrollTop 供切 Tab 缓存（卸载时 DOM 已被清空，读不到准确值）。
+   * BUG-FIX-fix_20260625_streaming_cannot_scroll:
+   * 问题根因: 流式期间 ResizeObserver + 流式 effect 高频钉底，用户往上滚一点
+   *   （还没离开 150px 阈值）下一帧就被拉回底部 → "滚不动"。
+   * 修复方案: 用 scrollTop 方向判断用户意图——只要用户往上滚（scrollTop 变小），
+   *   立即停止跟随（isFollowingBottom=false）并断开钉底 observer，把控制权完全交给用户。
+   *   不再等"离开底部 150px"才停。滚回底部附近时恢复跟随。
    */
   const onScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
       const target = e.currentTarget
       const { scrollTop, scrollHeight, clientHeight } = target
       const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+      const prevScrollTop = lastScrollTopRef.current
       isNearBottom.current = distanceFromBottom <= 150
       isNearTop.current = scrollTop <= 150
       // 实时记录：卸载时 DOM 内容已被 React 清空（scrollHeight=0），读 DOM 拿到的是 0
       lastScrollTopRef.current = scrollTop
 
-      // 用户主动上滑 → 停止钉底跟随，断开 observer 把控制权交给用户
-      if (!isNearBottom.current && bottomObserverRef.current) {
-        bottomObserverRef.current.disconnect()
-        bottomObserverRef.current = null
+      // 用户主动上滑（scrollTop 变小）→ 立即停止跟随，断开钉底 observer
+      if (scrollTop < prevScrollTop - 1) {
+        isFollowingBottom.current = false
+        if (bottomObserverRef.current) {
+          bottomObserverRef.current.disconnect()
+          bottomObserverRef.current = null
+        }
+      }
+      // 用户滚回底部附近 → 恢复跟随
+      if (isNearBottom.current) {
+        isFollowingBottom.current = true
       }
 
       if (isNearTop.current && hasMore && !isLoadingMore && onLoadMore) {
@@ -195,8 +218,8 @@ export const MessageList = ({
       bottomObserverRef.current.disconnect()
     }
     const ro = new ResizeObserver(() => {
-      // 用户已上滑则停止钉底（onScroll 会负责断开，这里兜底）
-      if (isNearBottom.current) {
+      // 仍在跟随底部才钉底（用户上滑后 isFollowingBottom=false，onScroll 已断开，这里兜底）
+      if (isFollowingBottom.current) {
         pinToBottom()
       }
     })
@@ -213,27 +236,26 @@ export const MessageList = ({
   /**
    * 底部追加新消息 → 跟随底部
    *
-   * 仅在已首次定位后、消息数量增加且仍在底部附近时钉底。
-   * 用户上滑（isNearBottom=false）时不强行拉回；prepend 加载历史虽也增 length，
-   * 但 overflow-anchor 保持视口 + 此处 isNearBottom 多为 false，不会误钉底。
+   * 仅在已首次定位后、消息数量增加且仍在跟随底部时钉底。
+   * 用户上滑（isFollowingBottom=false）时不强行拉回。
    */
   useEffect(() => {
-    if (initialScrollDone.current && messages.length > lastMessageCount.current && isNearBottom.current) {
+    if (initialScrollDone.current && messages.length > lastMessageCount.current && isFollowingBottom.current) {
       requestAnimationFrame(pinToBottom)
     }
     lastMessageCount.current = messages.length
   }, [messages.length, pinToBottom])
 
-  /** 流式输出期间持续跟随底部 */
+  /** 流式输出期间持续跟随底部（用户上滑后 isFollowingBottom=false，不再钉底） */
   useEffect(() => {
-    if (isGenerating && isNearBottom.current) {
+    if (isGenerating && isFollowingBottom.current) {
       requestAnimationFrame(pinToBottom)
     }
   }, [isGenerating, messages, pinToBottom])
 
-  /** 流式结束后钉底一次（代码块语法高亮等延迟渲染完成后） */
+  /** 流式结束后钉底一次（仅当仍在跟随底部时，否则用户在翻历史不打扰） */
   useEffect(() => {
-    if (prevGenerating.current && !isGenerating) {
+    if (prevGenerating.current && !isGenerating && isFollowingBottom.current) {
       const timer = setTimeout(pinToBottom, 300)
       return () => clearTimeout(timer)
     }

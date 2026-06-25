@@ -7,12 +7,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# 全局持有正在运行的复盘后台任务引用，防止 fire-and-forget task 被 GC 回收
+# key 为 task 的 id()，value 为 asyncio.Task
+_RUNNING_REVIEW_TASKS: dict[int, asyncio.Task] = {}
 
 
 @dataclass
@@ -403,6 +408,336 @@ class MemoryMaintenanceService:
             result["pipelines_reviewed"], result["experiences_saved"],
         )
         return result
+
+    # ============================================
+    # LLM 复盘编排（由 trigger_review 工具触发）
+    # ============================================
+
+    REVIEW_AGENT_ID = "review_agent"
+
+    async def trigger_llm_review(
+        self, parent_pipeline_id: str, limit: int = 5,
+    ) -> dict[str, Any]:
+        """启动 LLM 复盘管道并返回。不阻塞调用方，复盘在后台运行。
+
+        这是 trigger_review 工具的唯一调用入口。工具只负责获取服务并调用此方法，
+        复盘的全生命周期（注册管道→注入消息→等待完成→持久化→通知）在此编排。
+
+        Args:
+            parent_pipeline_id: 调用方父管道 ID（用于回写完成通知）
+            limit: 待复盘管道数量上限
+
+        Returns:
+            提交结果，含 status（submitted / already_running / skipped_nested）
+        """
+        # 防自循环：复盘管道内不允许二次触发
+        if self._is_review_pipeline(parent_pipeline_id):
+            logger.info(
+                "[Maintenance] 拒绝复盘管道内的二次触发（防自循环）: parent=%s",
+                parent_pipeline_id[:12],
+            )
+            return {"status": "skipped_nested", "message": "复盘管道内不允许再次触发复盘"}
+
+        if getattr(self, "_review_running", False):
+            return {"status": "already_running", "message": "复盘正在执行中，请稍后再试"}
+
+        self._review_running = True
+
+        # 创建后台 task 并持有引用防 GC
+        _task = asyncio.create_task(self._run_llm_review_task(parent_pipeline_id, limit))
+        _RUNNING_REVIEW_TASKS[id(_task)] = _task
+        _task.add_done_callback(lambda t: _RUNNING_REVIEW_TASKS.pop(id(t), None))
+
+        return {"status": "submitted", "message": "复盘任务已提交，完成后会通知您结果。"}
+
+    def _is_review_pipeline(self, pipeline_id: str) -> bool:
+        """检查给定 pipeline 是否已是复盘链路上的管道（source=tool_review）。"""
+        try:
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            entry = get_engine_registry().get(pipeline_id)
+            tags = getattr(entry, "tags", {}) or {} if entry else {}
+            return tags.get("source") == "tool_review"
+        except Exception:
+            return False
+
+    async def _run_llm_review_task(self, parent_pipeline_id: str, limit: int) -> None:
+        """LLM 复盘后台任务：编排整个复盘流程。"""
+        child_pipeline_id = ""
+        try:
+            # 1. 收集待复盘管道列表
+            targets = self._collect_review_targets(parent_pipeline_id, limit)
+            logger.info(
+                "[Maintenance] 收集待复盘管道 parent=%s targets=%d",
+                parent_pipeline_id[:12], len(targets),
+            )
+
+            # 2. 尝试启动 review_agent 管道做 LLM 深度复盘
+            child_pipeline_id, launched = await self._try_launch_review_agent(targets)
+            if not launched:
+                # 3. 保底：直接走 ReviewEngine
+                result = await self.trigger_review_now()
+                logger.info(
+                    "[Maintenance] 直接复盘完成 (reviewed=%d, experiences=%d)",
+                    result.get("pipelines_reviewed", 0),
+                    result.get("experiences_saved", 0),
+                )
+                await self._notify_parent(
+                    parent_pipeline_id, "completed",
+                    f"复盘完成：分析了 {result.get('pipelines_reviewed', 0)} 个管道，"
+                    f"提取 {result.get('experiences_saved', 0)} 条经验。",
+                )
+                return
+
+            # 4. LLM 路径：等待 review_agent 产出报告
+            report_text = await self._await_child_report(child_pipeline_id)
+            if report_text:
+                # 5. 持久化报告
+                await self._persist_review_result(child_pipeline_id, report_text)
+                # 6. 通知父管道
+                brief = report_text[:200].replace("\n", " ").strip()
+                await self._notify_parent(
+                    parent_pipeline_id, "completed",
+                    f"复盘管道 {child_pipeline_id[:12]} 已产出报告（已存入知识库和 docs/working/）。"
+                    + (f" 报告摘要：{brief}" if brief else ""),
+                )
+            else:
+                await self._notify_parent(
+                    parent_pipeline_id, "completed",
+                    f"复盘管道 {child_pipeline_id[:12]} 已执行完成，但未提取到报告内容。",
+                )
+
+        except Exception as exc:
+            logger.error("[Maintenance] 复盘执行失败: %s", exc, exc_info=True)
+            await self._notify_parent(
+                parent_pipeline_id, "failed",
+                f"复盘执行失败: {exc}",
+            )
+        finally:
+            self._review_running = False
+
+    def _collect_review_targets(self, parent_pipeline_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        """收集待复盘管道列表。"""
+        targets: list[dict[str, Any]] = []
+        try:
+            review_engine = self._get_review_engine()
+            pending = review_engine.get_pending_pipelines()
+            for summary in pending:
+                item: dict[str, Any] = {
+                    "run_id": summary.run_id,
+                    "status": getattr(summary, "status", "") or "",
+                    "total_records": getattr(summary, "total_records", 0),
+                    "total_iterations": getattr(summary, "total_iterations", 0),
+                    "error": getattr(summary, "error", "") or "",
+                    "agent_id": "",
+                    "task_title": "",
+                }
+                if self._task_lookup is not None:
+                    try:
+                        info = self._task_lookup(summary.run_id) or {}
+                        item["agent_id"] = info.get("agent", "") or ""
+                        item["task_title"] = (info.get("title", "") or "")[:80]
+                    except Exception:
+                        pass
+                targets.append(item)
+            targets.sort(key=lambda t: (
+                0 if t.get("status") == "failed" else 1,
+                -(t.get("total_records", 0)),
+            ))
+            targets = targets[:limit]
+        except Exception as exc:
+            logger.warning("[Maintenance] 收集待复盘管道失败: %s", exc)
+        return targets
+
+    async def _try_launch_review_agent(
+        self, targets: list[dict[str, Any]],
+    ) -> tuple[str, bool]:
+        """注册 review_agent 管道并注入消息，启动 LLM 复盘。
+
+        Returns:
+            (子 pipeline_id, 是否成功启动)
+        """
+        try:
+            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+            from tools.tool_context import MessageType, PipelineMessage, emit, get_engine_registry  # noqa: PLC0415
+
+            agent_config = get_global_agent_registry_sync().get(self.REVIEW_AGENT_ID)
+            if agent_config is None:
+                logger.info("[Maintenance] review_agent 配置不存在，降级到直接复盘")
+                return "", False
+
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            registry = get_engine_registry()
+            provider = get_service_provider()
+            entry = registry.register_pipeline(
+                tags={"source": "tool_review"},
+                input_route_table=provider.get("input_route_table"),
+                output_route_table=provider.get("output_route_table"),
+                plugin_registry=provider.get("plugin_registry"),
+                services=provider.get_all_services(),
+            )
+            if entry is None:
+                logger.warning("[Maintenance] 管道注册失败，降级到直接复盘")
+                return "", False
+
+            pipeline_id = entry.engine.pipeline_id
+
+            # 构造消息内容
+            if targets:
+                targets_str = "\n".join(
+                    f"- pipeline_run_id={t['run_id']} (status={t.get('status','?')}, "
+                    f"records={t.get('total_records','?')}, iters={t.get('total_iterations','?')}, "
+                    f"agent={t.get('agent_id','?')}, task={t.get('task_title','?')}"
+                    + (f", error={t.get('error','')[:60]}" if t.get('error') else "")
+                    + ")"
+                    for t in targets
+                )
+                content = (
+                    f"[工具触发复盘] 请分析以下管道的执行记录，产出经验和改进建议。\n\n"
+                    f"待复盘管道列表（failed 优先，共 {len(targets)} 个）：\n{targets_str}\n\n"
+                    f"请用 read_execution_detail(level=skeleton, pipeline_run_id=...) 逐个查看骨架，"
+                    f"对失败/异常的做 5 Whys 根因分析，产出结构化复盘报告。"
+                )
+            else:
+                content = (
+                    f"[工具触发复盘] 当前无 pending 的执行记录可供复盘。"
+                    f"请用 read_execution_detail 查看最近的管道执行记录并产出分析报告。"
+                )
+
+            msg = PipelineMessage(
+                type=MessageType.CHAT,
+                content=content,
+                pipeline_id=pipeline_id,
+                metadata={"source": "tool_review"},
+            )
+            result = await emit(msg, agent_config=agent_config)
+            logger.info("[Maintenance] LLM 复盘管道已提交 (pipeline=%s, success=%s)", pipeline_id, result.success)
+            return pipeline_id, bool(result.success)
+
+        except Exception as exc:
+            logger.warning("[Maintenance] LLM 复盘管道提交失败，降级到直接复盘: %s", exc)
+            return "", False
+
+    async def _await_child_report(self, child_pid: str) -> str:
+        """轮询等待子复盘管道产出报告（挂起或 engine done 即视为已产出）。
+
+        Args:
+            child_pid: 子复盘管道 ID
+
+        Returns:
+            复盘报告完整内容，未产出则返回空字符串
+        """
+        if not child_pid:
+            return ""
+
+        try:
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            registry = get_engine_registry()
+            entry = registry.get(child_pid)
+            if entry is None:
+                return ""
+
+            engine_task = getattr(entry, "engine_task", None)
+            if engine_task is None:
+                return ""
+
+            # 轮询：每 15s 检查引擎是否挂起，最多 40 次(600s)
+            for _ in range(40):
+                await asyncio.sleep(15)
+                child_engine = getattr(entry, "engine", None)
+                if child_engine is not None and getattr(child_engine, "is_suspended", False):
+                    break
+                if engine_task.done():
+                    break
+
+            # 提取报告内容
+            return self._collect_child_report(child_pid)
+
+        except Exception as exc:
+            logger.warning("[Maintenance] 等待子复盘管道报告失败: %s", exc)
+            return ""
+
+    def _collect_child_report(self, child_pid: str) -> str:
+        """从子复盘管道的执行记录提取最后一条 AI 文本（完整报告）。"""
+        try:
+            review_engine = self._get_review_engine()
+            storage = getattr(review_engine, "_storage", None)
+            if storage is None:
+                return ""
+            records, _ = storage.list_by_pipeline(child_pid)
+            for r in reversed(records):
+                if getattr(r, "type", "") == "ai" and getattr(r, "content", ""):
+                    return r.content.strip()
+            return ""
+        except Exception:
+            return ""
+
+    async def _persist_review_result(self, child_pipeline_id: str, report_text: str) -> None:
+        """将复盘报告持久化到 KnowledgeService + Markdown 文件。"""
+        if not report_text:
+            return
+
+        # 1. 写入 KnowledgeService
+        try:
+            if self._knowledge_service is not None:
+                await self._knowledge_service.create_knowledge(
+                    user_id="system",
+                    content=(
+                        f"## 复盘报告（pipeline={child_pipeline_id}）\n\n"
+                        f"{report_text[:5000]}"
+                    ),
+                    source_type="review_experience",
+                    extra_data={"pipeline_run_id": child_pipeline_id},
+                )
+                logger.info("[Maintenance] 复盘报告已写入 KnowledgeService: pipeline=%s", child_pipeline_id[:12])
+            else:
+                logger.info("[Maintenance] knowledge_service 不可用，跳过知识库写入")
+        except Exception as exc:
+            logger.warning("[Maintenance] 写入 KnowledgeService 失败: %s", exc)
+
+        # 2. 写 review_report_{id}.md 文件
+        try:
+            import os as _os  # noqa: PLC0415
+            from datetime import datetime as _dt  # noqa: PLC0415
+
+            _report_dir = _os.path.join(_os.getcwd(), "docs", "working")
+            _os.makedirs(_report_dir, exist_ok=True)
+            _path = _os.path.join(_report_dir, f"review_report_{child_pipeline_id}.md")
+            with open(_path, "w", encoding="utf-8") as _f:
+                _f.write(
+                    f"# 复盘报告\n\n"
+                    f"- **复盘流水 ID**: {child_pipeline_id}\n"
+                    f"- **生成时间**: {_dt.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"- **状态**: completed\n\n"
+                    f"---\n\n{report_text}\n"
+                )
+            logger.info("[Maintenance] review_report.md 已写入: %s", _path)
+        except Exception as exc:
+            logger.warning("[Maintenance] 写报告文件失败: %s", exc)
+
+    async def _notify_parent(
+        self, parent_pid: str, status: str, summary: str,
+    ) -> None:
+        """复盘完成后，向父管道回写完成通知。"""
+        if not parent_pid:
+            return
+        try:
+            from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
+            from pipeline.message_types import (  # noqa: PLC0415
+                MessageType, PipelineMessage,
+            )
+            msg = PipelineMessage(
+                type=MessageType.CHAT,
+                content=f"[复盘完成] {summary}",
+                pipeline_id=parent_pid,
+                metadata={"source": "tool_review"},
+            )
+            await send_pipeline_message(msg)
+            logger.info(
+                "[Maintenance] 已通知父管道复盘结果: parent=%s status=%s",
+                parent_pid[:12], status,
+            )
+        except Exception as exc:
+            logger.warning("[Maintenance] 通知父管道失败: %s", exc)
 
     # ============================================
     # 统计

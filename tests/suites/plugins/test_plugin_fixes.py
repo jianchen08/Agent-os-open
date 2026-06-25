@@ -177,7 +177,6 @@ class TestIsolationGuard:
         mock_policy = MagicMock()
         mock_policy.isolation = MagicMock()
         mock_policy.isolation.value = "host"
-        mock_policy.fallback = "allow"
         plugin._decider.resolve = MagicMock(return_value=mock_policy)
 
         # 工具调用无 name 键

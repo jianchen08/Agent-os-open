@@ -96,7 +96,7 @@ class BridgeEventsMixin:
                 return
             self._sent_tool_starts.add(_call_id)
             _seq = self._next_part_seq()
-            logger.info(
+            logger.debug(
                 "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
                 _tool_name, _call_id, _seq, self.pipeline_id[:12],
             )

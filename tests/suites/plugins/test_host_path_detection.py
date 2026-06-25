@@ -51,12 +51,11 @@ def _make_isolation_guard(config=None):
 
 
 def _mock_container_policy(plugin):
-    """模拟 isolation=container、fallback=allow 的策略（bash_execute 默认配置）。"""
+    """模拟 isolation=container 的策略（bash_execute 默认配置）。"""
     from isolation.types import IsolationLevel
 
     mock_policy = MagicMock()
     mock_policy.isolation = IsolationLevel.CONTAINER
-    mock_policy.fallback = "allow"
     plugin._decider.resolve = MagicMock(return_value=mock_policy)
     return plugin
 
@@ -313,7 +312,6 @@ class TestIsolationGuardHostPathRouting:
 
         mock_policy = MagicMock()
         mock_policy.isolation = IsolationLevel.HOST
-        mock_policy.fallback = "allow"
         guard._decider.resolve = MagicMock(return_value=mock_policy)
 
         ctx = _make_ctx({

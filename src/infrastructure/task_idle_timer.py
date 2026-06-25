@@ -90,12 +90,12 @@ class TaskIdleTimerMixin:
                     getattr(timer_manager, "idle_threshold", "?")
                     if timer_manager else "?"
                 )
+                _reason = self._build_idle_fail_reason(
+                    task_id, task_service, threshold,
+                )
                 loop = asyncio.get_running_loop()
                 _fail_task = loop.create_task(
-                    task_service.fail_task(
-                        task_id,
-                        f"idle: 管道已退出且无活跃子任务 ({threshold}s)",
-                    )
+                    task_service.fail_task(task_id, _reason)
                 )
                 # fail_task 是 fire-and-forget 协程，内部若抛异常（如
                 # _emit_state_change / _notify_suspended_pipelines 失败）
@@ -137,6 +137,79 @@ class TaskIdleTimerMixin:
                     "TaskWorker: [IDLE-TIMEOUT] 无事件循环，"
                     "无法重建计时器: task_id=%s", task_id,
                 )
+
+    def _build_idle_fail_reason(
+        self,
+        task_id: str,
+        task_service: Any,
+        threshold: Any,
+    ) -> str:
+        """构建 idle 失败原因，附带引擎最后状态与任务 error。
+
+        原 fail_task 仅写死 "idle: 管道已退出且无活跃子任务"，不含任何
+        可定位上下文，真实失败原因（LLM 错误 / 工具异常 / 上一轮
+        task.error）无法透传。此处从引擎 last_state 与 task.error 提取
+        关键诊断信息追加，使失败可见、可定位。
+
+        idle 触发时引擎已正常退出（_run_loop 走完 finally），last_state
+        为完整快照；若引擎已从注册表注销，则降级为仅用 task.error。
+
+        Args:
+            task_id: 任务 ID
+            task_service: 任务服务实例
+            threshold: idle 超时阈值（秒）
+
+        Returns:
+            含上下文的失败原因字符串；无可用上下文时回退原写死文案。
+        """
+        reason = f"idle: 管道已退出且无活跃子任务 ({threshold}s)"
+        hints: list[str] = []
+
+        # 引擎 last_state：raw_error / stop_reason / ended / iteration
+        try:
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            entries = get_engine_registry().find_by_tag("task_id", task_id)
+            engine = next(
+                (getattr(e, "engine", None) for e in entries if e),
+                None,
+            )
+            if engine is not None:
+                state = getattr(engine, "last_state", None) or {}
+                raw_error = state.get("raw_error")
+                stop_reason = state.get("router.stop_reason", "")
+                iteration = state.get("iteration")
+                max_iter = state.get("max_iterations")
+                ended = state.get("ended")
+                if raw_error:
+                    hints.append(f"最后错误={raw_error}")
+                if stop_reason:
+                    hints.append(f"停止原因={stop_reason}")
+                if iteration is not None:
+                    hints.append(f"迭代={iteration}/{max_iter}")
+                if isinstance(ended, bool) and not ended:
+                    hints.append("ended=False(引擎未正常收尾)")
+        except Exception as exc:
+            logger.debug(
+                "TaskWorker: [IDLE-CTX] 收集引擎 last_state 失败: "
+                "task_id=%s error=%s", task_id, exc,
+            )
+
+        # task.error：上一轮可能已写入失败原因
+        try:
+            task = task_service.get_task(task_id) if task_service else None
+            if task is not None:
+                err = getattr(task, "error", "") or ""
+                if err:
+                    hints.append(f"任务error={err[:300]}")
+        except Exception as exc:
+            logger.debug(
+                "TaskWorker: [IDLE-CTX] 读取 task.error 失败: "
+                "task_id=%s error=%s", task_id, exc,
+            )
+
+        if hints:
+            reason = f"{reason} | " + "，".join(hints)
+        return reason
 
     def _log_fail_task_exception(self, task_future: Any, task_id: str) -> None:
         """fail_task 协程完成回调：捕获并打印协程内部异常。
@@ -452,7 +525,7 @@ class TaskIdleTimerMixin:
 
         try:
             await self._arm_idle_timer(task_id, timer_manager)
-            logger.info(
+            logger.debug(
                 "TaskWorker: [IDLE-RESET] 计时器已重置（新轮迭代开始）: "
                 "task_id=%s threshold=%ss",
                 task_id, getattr(timer_manager, 'idle_threshold', '?'),

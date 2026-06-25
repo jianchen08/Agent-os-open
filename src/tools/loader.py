@@ -222,7 +222,7 @@ class DynamicToolLoader:
         if tool_name not in self._tool_modules:
             raise ToolNotFoundError(tool_name)
 
-        logger.info(f"[动态加载] 开始加载工具 | tool_name={tool_name}")
+        logger.debug(f"[动态加载] 开始加载工具 | tool_name={tool_name}")
 
         # 标记正在加载
         self._loading[tool_name] = True
@@ -274,7 +274,7 @@ class DynamicToolLoader:
             # 标记已加载
             self._loaded.add(tool_name)
 
-            logger.info(
+            logger.debug(
                 f"[动态加载] 工具加载成功 | "
                 f"tool_name={tool_name} | registered_name={registered_name}"
             )
@@ -342,7 +342,7 @@ class DynamicToolLoader:
         if tool_name not in self._tool_modules:
             raise ToolNotFoundError(tool_name)
 
-        logger.info(f"[动态加载-同步] 开始加载工具 | tool_name={tool_name}")
+        logger.debug(f"[动态加载-同步] 开始加载工具 | tool_name={tool_name}")
 
         self._loading[tool_name] = True
 
@@ -380,7 +380,7 @@ class DynamicToolLoader:
 
             self._loaded.add(tool_name)
 
-            logger.info(
+            logger.debug(
                 f"[动态加载-同步] 工具加载成功 | "
                 f"tool_name={tool_name} | registered_name={registered_name}"
             )

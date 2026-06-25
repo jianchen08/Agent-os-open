@@ -190,6 +190,10 @@ class ToolCore(ICorePlugin):
         "_session": "db_session",
         "_memory_service": "memory_service",
         "_retriever": "retriever",
+        # BUG-FIX-fix_20260625_read_execution_detail_no_storage:
+        # read_execution_detail 声明需要 storage 但 map 里没有对应映射，
+        # 导致复盘 agent 拿不到 ExecutionRecordStorage，永远报"未注入"。
+        "_storage": "execution_record_storage",
     }
 
     @staticmethod
@@ -310,6 +314,30 @@ class ToolCore(ICorePlugin):
 
         task_id = state.get("task_id", "unknown")
         workspace = state.get("workspace")
+
+        # 容器隔离必须挂载工作空间：workspace 只认任务数据解析出来的路径，
+        # 取不到即为功能错误——绝不静默创建无挂载容器去执行。否则命令会落到
+        # 空/不存在的 /workspace 目录且 exit 0，表现为“目录看不到”却无任何报错，
+        # 极难排查。
+        # BUG-FIX-fix_20260625_isolated_no_workspace
+        if not workspace:
+            logger.error(
+                "[tool_core] bash_execute 容器隔离被拒绝：state 中无 workspace | "
+                "task=%s | has_task_id=%s | pipeline_id=%s",
+                task_id,
+                bool(state.get("task_id")),
+                state.get("pipeline_id", "?"),
+            )
+            return {
+                "tool_name": "bash_execute",
+                "success": False,
+                "error": (
+                    "工作空间未解析（state 中无 workspace），拒绝在容器中执行命令。"
+                    "工作空间只能来自任务数据，请检查任务工作空间初始化链路"
+                    "（task_executor → ws_meta → state）。"
+                ),
+                "duration_ms": 0,
+            }
 
         operation = {
             "type": "command",
@@ -706,7 +734,7 @@ class ToolCore(ICorePlugin):
                 and not ctx_entry.get("blocked", False)
             )
 
-            logger.info("[tool_core] tool=%s use_docker=%s", tool_name, use_docker)
+            logger.debug("[tool_core] tool=%s use_docker=%s", tool_name, use_docker)
             if use_docker and tool_name == "bash_execute":
                 if on_chunk:
                     on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})

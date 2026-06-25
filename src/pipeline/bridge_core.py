@@ -300,7 +300,7 @@ class BridgeCore:
             state: 管道状态字典
         """
         await self._close_thinking_if_active(None)
-        logger.info(
+        logger.debug(
             "[Bridge] emit_suspend: msg=%s pipeline=%s",
             self.message_id[:12], self.pipeline_id[:12],
         )

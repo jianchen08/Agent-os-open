@@ -1,7 +1,7 @@
 """Bash 安全修复测试 — fix_20260506_bash_security。
 
 测试覆盖：
-- Bug 1: IsolationGuard fallback:deny 真正阻止执行
+- Bug 1: IsolationGuard 容器不可用时阻止执行（不再降级）
 - Bug 2: working_dir 参数加入路径边界检查
 - Bug 3: allowed_base_paths 多基路径支持（Skill 脚本）
 - 额外: startswith 边界 bug 修复、Windows 大小写修复
@@ -40,12 +40,12 @@ def _make_ctx(state=None, services=None):
 
 
 # ============================================================================
-# Bug 1: IsolationGuard fallback:deny 阻止执行
+# Bug 1: IsolationGuard 容器不可用时阻止执行（不降级）
 # ============================================================================
 
 
-class TestFallbackDenyBlocked:
-    """Bug 1: fallback:deny 时应真正阻止执行，而非静默降级到 host。"""
+class TestContainerUnavailableBlocked:
+    """Bug 1: 容器隔离工具在 Docker 不可用时应阻止执行，不降级到 host。"""
 
     def _make_plugin(self, config=None):
         """创建 IsolationGuard 实例（Docker 不可用）。"""
@@ -53,20 +53,20 @@ class TestFallbackDenyBlocked:
         with patch("isolation.decider.IsolationDecider"):
             return mod.IsolationGuard(config=config)
 
-    def _mock_deny_policy(self, plugin):
-        """模拟 fallback:deny 的策略。"""
+    def _mock_container_policy(self, plugin):
+        """模拟要求容器隔离的策略（不再有 fallback 字段）。"""
+        from isolation.types import IsolationLevel
+
         mock_policy = MagicMock()
-        mock_policy.isolation = MagicMock()
-        mock_policy.isolation.value = "container"
-        mock_policy.fallback = "deny"
+        mock_policy.isolation = IsolationLevel.CONTAINER
         plugin._decider.resolve = MagicMock(return_value=mock_policy)
         return plugin
 
     @pytest.mark.asyncio
-    async def test_deny_sets_blocked_context(self):
-        """fallback:deny + Docker 不可用 → 返回 blocked=True 的上下文。"""
+    async def test_container_unavailable_sets_blocked_context(self):
+        """容器隔离 + Docker 不可用 → 返回 blocked=True 的上下文。"""
         plugin = self._make_plugin(config={"docker_available": False})
-        self._mock_deny_policy(plugin)
+        self._mock_container_policy(plugin)
 
         ctx = _make_ctx({
             StateKeys.CORE_TYPE: "tool_execute",
@@ -80,13 +80,13 @@ class TestFallbackDenyBlocked:
         assert contexts[0].get("blocked") is True
         assert contexts[0].get("provider") == "denied"
         assert contexts[0].get("level") == "denied"
-        assert contexts[0].get("reason") == "policy_fallback_denied"
+        assert contexts[0].get("reason") == "docker_unavailable_container_required"
 
     @pytest.mark.asyncio
-    async def test_deny_sets_security_decision_blocked(self):
-        """fallback:deny 应设置 isolation.blocked = True。"""
+    async def test_container_unavailable_sets_isolation_blocked(self):
+        """容器隔离 + Docker 不可用 → 设置 isolation.blocked = True。"""
         plugin = self._make_plugin(config={"docker_available": False})
-        self._mock_deny_policy(plugin)
+        self._mock_container_policy(plugin)
 
         ctx = _make_ctx({
             StateKeys.CORE_TYPE: "tool_execute",
@@ -95,45 +95,19 @@ class TestFallbackDenyBlocked:
 
         result = await plugin.execute(ctx)
 
-        # 重构后 isolation_guard 改写 isolation.blocked，不再写 security.decision
         assert result.state_updates.get("isolation.blocked") is True
         reason = result.state_updates.get("isolation.block_reason", "").lower()
-        assert any(kw in reason for kw in ("fallback", "deny", "阻止", "拒绝", "bash_execute"))
-
-    @pytest.mark.asyncio
-    async def test_allow_fallback_still_works(self):
-        """fallback:allow 仍应正常降级到 host。"""
-        plugin = self._make_plugin(config={"docker_available": False})
-
-        mock_policy = MagicMock()
-        mock_policy.isolation = MagicMock()
-        mock_policy.isolation.value = "container"
-        mock_policy.fallback = "allow"
-        plugin._decider.resolve = MagicMock(return_value=mock_policy)
-
-        # 使用 SAFE_TOOLS 白名单内的工具（如 file_read）避免被审批引擎拦截
-        ctx = _make_ctx({
-            StateKeys.CORE_TYPE: "tool_execute",
-            StateKeys.RAW_TOOL_CALLS: [{"name": "file_read", "args": {}}],
-        })
-
-        result = await plugin.execute(ctx)
-
-        contexts = result.state_updates.get("execution_contexts", [])
-        assert len(contexts) == 1
-        assert contexts[0].get("blocked") is not True
-        assert contexts[0].get("provider") == "host"
-        assert result.state_updates.get("security.decision") is None
+        assert "bash_execute" in reason
 
     @pytest.mark.asyncio
     async def test_docker_available_no_block(self):
-        """Docker 可用时 fallback:deny 不应触发阻止。"""
+        """Docker 可用时容器隔离工具正常路由到 docker。"""
+        from isolation.types import IsolationLevel
+
         plugin = self._make_plugin(config={"docker_available": True})
 
         mock_policy = MagicMock()
-        mock_policy.isolation = MagicMock()
-        mock_policy.isolation.value = "container"
-        mock_policy.fallback = "deny"
+        mock_policy.isolation = IsolationLevel.CONTAINER
         plugin._decider.resolve = MagicMock(return_value=mock_policy)
 
         ctx = _make_ctx({
@@ -356,12 +330,12 @@ class TestIsolationGuardSecurityCheckIntegration:
     @pytest.mark.asyncio
     async def test_isolation_guard_blocked_skips_security_check(self):
         """IsolationGuard 已阻止时设置 isolation.blocked=True。"""
+        from isolation.types import IsolationLevel
+
         guard = self._make_isolation_guard(config={"docker_available": False})
 
         mock_policy = MagicMock()
-        mock_policy.isolation = MagicMock()
-        mock_policy.isolation.value = "container"
-        mock_policy.fallback = "deny"
+        mock_policy.isolation = IsolationLevel.CONTAINER
         guard._decider.resolve = MagicMock(return_value=mock_policy)
 
         ctx = _make_ctx({

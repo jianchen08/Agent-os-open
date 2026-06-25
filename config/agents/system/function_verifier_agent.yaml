@@ -123,14 +123,14 @@ deliverables:
   required: true
 - name: verification_report
   description: 功能验证报告（Markdown，含验证结论、工具能力评估、用户旅程结果、不可验证项）
-  output_path: '{{workspace}}/function_verify_report.md'
+  output_path: '{{workspace}}/docs/working/function_verify_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/function_verify_report.md'
+    path: '{{workspace}}/docs/working/function_verify_report.md'
 - metric_id: semantic_check
   default_params:
     criteria: 验证报告必须包含 tool_capability_assessment、semantic_evaluation、user_journey 字段，且验证场景与用户真实使用一致

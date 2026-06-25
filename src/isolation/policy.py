@@ -35,7 +35,6 @@ class ToolIsolationPolicy:
     network: str | None = None
     checkpoint: bool = False
     approval: bool = False
-    fallback: str = "deny"
     disk_quota: str | None = None
 
 
@@ -152,7 +151,6 @@ class IsolationPolicyLoader:
             network=data.get("network"),
             checkpoint=data.get("checkpoint", False),
             approval=data.get("approval", False),
-            fallback=data.get("fallback", "deny"),
             disk_quota=data.get("disk_quota"),
         )
 

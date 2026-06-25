@@ -319,6 +319,17 @@ class _MergeOpsMixin:
             return {"success": False,
                     "error": f"无法获取当前分支: rc={rc}, "
                              f"output={current_branch!r}"}
+        # 校验待合并分支存在：worktree 模式下 branch 来自 ws_meta，
+        # 子任务 inherit 父任务工作空间时可能复用已被清理的分支引用
+        # （分支已删但元数据仍在），此时 git merge 会报模糊的
+        # "not something we can merge"，提前校验给出明确根因。
+        rc_v, _, verify_err = self._run_git(
+            "rev-parse", "--verify", f"{branch}^{{commit}}", cwd=proj_path)
+        if rc_v != 0:
+            return {"success": False,
+                    "error": f"待合并分支不存在(branch={branch})，"
+                             f"可能继承自已清理的父任务 worktree: "
+                             f"{verify_err[:200] if verify_err else 'unknown'}"}
         rc_pre, pre_merge_head, _ = self._run_git(
             "rev-parse", "HEAD", cwd=proj_path)
         rc, _, stderr = self._run_git(

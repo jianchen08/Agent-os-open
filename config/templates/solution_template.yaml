@@ -1,12 +1,20 @@
 # 方案与任务链模板 (YAML 结构化格式)
 #
-# 本模板定义方案规划 Agent 的产出结构。
-# 顶层分为两段：
-#   - solution: 方案内容（供人类确认）
-#   - task_chain: 任务链（供 L1 派发用）
+# 【v5.0 产出模型变更 — 本模板为 legacy 参考骨架】
+# 当前方案规划 Agent 的产出拆成三类，职责不重叠：
+#   ① .project/ 项目文档：稳定真相源（架构决策/API契约/领域模型），方案阶段定稿
+#   ② docs/{title}_solution.md：方案总纲，只讲 why（本模板的 solution 段仅对应此 why 层）
+#   ③ docs/tasks/：自包含任务文件，含执行方案与设计，拿到即可开工
+#
+# 各领域的产出形状（.project/ 该有哪些文件、任务文件结构）以对应 Skill 的
+# 「产出物拆分约定」为准（skills/skill-solution-*/SKILL.md）。
+#
+# 本模板顶层的 solution 段保留为「why 层总纲」的字段参考；
+# 其中 implementation_plan.detailed_design、task_chain 等装具体设计/步骤的字段，
+# 在新模型下应下沉到 .project/ 或任务文件，不再放在 solution.md。
+# 以下内容作为字段级参考保留，不再作为强制产出结构。
 #
 # 所有字段说明以 YAML 注释形式给出。
-# 填写时删除占位符 {xxx}，替换为实际内容。
 # 标注 [必填] 的字段必须填写，[可选] 按需填写，[按需] 根据场景决定。
 #
 # 核心设计原则：

@@ -486,7 +486,7 @@ class TaskNotifierMixin:
 
         else:
 
-            err_hint = f": {error[:100]}" if error else ""
+            err_hint = f": {error[:300]}" if error else ""
 
             if retry_count > 0 and retry_count >= max_retries:
 

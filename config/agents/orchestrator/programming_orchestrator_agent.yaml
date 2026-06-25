@@ -54,6 +54,8 @@ tool_ids:
 - list_directory
 - memory
 - human_interaction
+- create_directory
+- enhanced_search
 hard_constraints:
 - 必须先执行需求结构化，再进入执行流程
 - 门禁通过 task_submit 附带评估指标实现，禁止自行判定门禁结果
@@ -209,14 +211,14 @@ deliverables:
   description: 编程任务编排执行报告，必须按 programming_execution_report_template.md 模板填写结构化修复清单
   template_source: knowledge
   template_name: config/templates/programming_execution_report_template.md
-  output_path: '{{workspace}}/programming_orchestration_report.md'
+  output_path: '{{workspace}}/docs/working/programming_orchestration_report.md'
   type: markdown
   required: false
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/programming_orchestration_report.md'
+    path: '{{workspace}}/docs/working/programming_orchestration_report.md'
 version: 3.0.0
 is_active: true
 status: active

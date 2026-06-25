@@ -567,7 +567,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 compression_model_id=self._compression_model,
                 model_name=model_name,
             )
-            logger.info(
+            logger.debug(
                 "[%s] setup 完成: chunk_service=%s, memory_service=%s, llm_core=%s, "
                 "compression_model=%s, pipeline_id=%s",
                 self.name,

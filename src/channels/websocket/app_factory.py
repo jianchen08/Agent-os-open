@@ -296,7 +296,9 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     continue
 
                 msg_type = msg_data.get("type", "")
-                logger.info("[GlobalWS] 收到消息: type=%s thread_id=%s user=%s", msg_type, msg_data.get("thread_id", "")[:12], user_id[:12])
+                # heartbeat 高频轮询，不记日志
+                if msg_type != "heartbeat":
+                    logger.info("[GlobalWS] 收到消息: type=%s thread_id=%s user=%s", msg_type, msg_data.get("thread_id", "")[:12], user_id[:12])
 
                 if msg_type == "heartbeat":
                     await websocket.send_text(json.dumps({
@@ -461,17 +463,15 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                                         "[GlobalWS] 交互请求记录 | request_id=%s | session_id=%s | status=%s",
                                         request_id, pipeline_id, request_record.get("status"),
                                     )
-                                    if pipeline_id and not pipeline_id.startswith("__eval__"):
-                                        from pipeline.message_bus import _find_engine  # noqa: PLC0415
-                                        engine, _ = _find_engine(pipeline_id)
-                                        if engine and hasattr(engine, "wake"):
-                                            engine.wake()
-                                            logger.info(
-                                                "[GlobalWS] 用户交互响应已处理，唤醒 pipeline | "
-                                                "request_id=%s | pipeline_id=%s",
-                                                request_id, pipeline_id,
-                                            )
-                                    elif pipeline_id.startswith("__eval__"):
+                                    # human_interaction 工具为阻塞执行：工具内部 wait_for_choice()
+                                    # 由 respond() → submit_response() → _set_event_threadsafe() 直接唤醒，
+                                    # 工具返回后引擎自然进入下一轮，无需此处额外 wake()。
+                                    # conversation 模式下，工具返回 conversation_mode=True 后引擎才挂起，
+                                    # 此时应等待用户在对话标签页发新消息（经 send_pipeline_message 注入）唤醒。
+                                    # 旧逻辑在此处用"进入标签页"的 approved 响应直接 wake()，会提前唤醒且不
+                                    # 携带用户消息，既触发一次空转 LLM 调用，又导致用户随后发送的消息无法注入。
+                                    # BUG-FIX-fix_20260625_conversation_wake_loses_user_input
+                                    if pipeline_id and pipeline_id.startswith("__eval__"):
                                         logger.info(
                                             "[GlobalWS] 评估交互响应已处理（纯Event，无管道唤醒） | "
                                             "request_id=%s | session_id=%s",
@@ -530,6 +530,18 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                                 # 重置引擎运行状态：停止输出不注销引擎，保留注册表条目。
                                 # _find_engine 检查 _run_started，重置后引擎回到 idle 态，
                                 # 重发消息时走 _start_idle_engine（用自带 _agent_config）。
+                                # BUG-FIX-fix_20260625_zombie_suspended_engine:
+                                #   若停止时引擎正挂在 suspend（wait 路由/等子任务），_run_loop
+                                #   被 cancel 后不会清 _suspended_state。仅复位 _run_started 不够——
+                                #   _find_engine 先判 is_suspended，会把它当"挂起中"返回，重发消息
+                                #   走 wake 路径注入一个 engine_task 已死的僵尸，消息永久堆积。
+                                #   故必须同时清空 _suspended_state / _wake_event / _engine_loop。
+                                if hasattr(_eng, "_suspended_state"):
+                                    _eng._suspended_state = None
+                                if hasattr(_eng, "_wake_event"):
+                                    _eng._wake_event = None
+                                if hasattr(_eng, "_engine_loop"):
+                                    _eng._engine_loop = None
                                 if hasattr(_eng, "_run_started"):
                                     _eng._run_started = False
                                 logger.info("[GlobalWS] 已停止引擎: pipeline=%s", _pid[:12])

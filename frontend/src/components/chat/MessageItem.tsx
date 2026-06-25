@@ -119,6 +119,7 @@ export const MessageItem = memo(function MessageItem({
   modelName,
   className = '',
   searchQuery,
+  taskId,
 }: MessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
@@ -189,6 +190,7 @@ export const MessageItem = memo(function MessageItem({
     isLast,
     isGenerating,
     versionContent,
+    taskId,
   })
 
   /** 工具消息独立渲染 */

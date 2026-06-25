@@ -140,6 +140,10 @@ tool_ids:
 - list_directory
 - human_interaction
 - memory
+- copy_file
+- move_file
+- delete_file
+- enhanced_search
 hard_constraints:
 - 下级 Agent 映射表已列出所有团队成员，提交任务时直接用映射表中的 Agent ID，禁止用 resource_search 搜索 Agent
 - 不得操作任务范围外的资源

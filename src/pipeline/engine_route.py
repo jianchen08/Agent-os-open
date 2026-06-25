@@ -117,14 +117,14 @@ async def apply_route(  # noqa: PLR0911
             return True
 
         state[StateKeys.CORE_TYPE] = "llm_call"
-        logger.info("Route applied: next_llm")
+        logger.debug("Route applied: next_llm")
         return False
 
     if route_type == "next_tool":
         state[StateKeys.CORE_TYPE] = "tool_execute"
         if route.target:
             state["tool_name"] = route.target
-        logger.info("Route applied: next_tool, target=%s", route.target)
+        logger.debug("Route applied: next_tool, target=%s", route.target)
         return False
 
     if route_type == "end":
@@ -134,12 +134,12 @@ async def apply_route(  # noqa: PLR0911
             logger.info("[Engine] route=end 但有待处理通知，取消结束: %s", route.reason)
             return False
         state[StateKeys.ENDED] = True
-        logger.info("Route applied: end, reason=%s", route.reason)
+        logger.debug("Route applied: end, reason=%s", route.reason)
         return False
 
     if route_type == "wait":
         state[StateKeys.ENDED] = False
-        logger.info("Route applied: wait, pipeline suspended")
+        logger.debug("Route applied: wait, pipeline suspended")
         # 恢复逻辑已内置到 _suspend_and_wait
         restored = await engine.suspend_and_wait(state)
         if restored:
