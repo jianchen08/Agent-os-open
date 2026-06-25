@@ -72,3 +72,11 @@ _fix_leaks.py
 _parse_probe.ps1
 _verify.ps1
 _vrf_review.py
+
+# 调试日志/运行时产物（不进仓库）
+.dbg/
+src/logs/
+*_debug.log
+_paste_debug.log
+*.ndjson
+docs/working/*_checkpoints.md
