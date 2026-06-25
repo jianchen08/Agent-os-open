@@ -5,6 +5,13 @@
 # 构建上下文说明：
 #   - frontend: context 为仓库根目录（.），以便 Dockerfile 读取 packages/ 离线包
 #   - redis: 直接使用 Docker Hub 镜像；首次拉取由 start_web.bat 带镜像前缀回退
+#
+# 项目隔离说明：
+#   - 启动脚本设置 COMPOSE_PROJECT_NAME=agent-os-${PROJECT_TAG}，
+#     Docker Compose 自动按项目名隔离网络/卷/默认容器名。
+#   - PROJECT_TAG 由启动脚本计算（项目目录 MD5 前 8 位）。
+#   - 显式 container_name 仍用 ${PROJECT_TAG} 后缀，便于脚本 findstr 匹配。
+#   - 未设置 PROJECT_TAG 时回退 "default"，避免直接 docker compose up 报错。
 # =============================================================================
 
 services:
@@ -14,25 +21,24 @@ services:
   frontend:
     build:
       # 上下文设为仓库根目录，以便 COPY 根目录下的 packages/ 离线包
-      # Dockerfile 内的 COPY 路径已相应加上 frontend/ 前缀
       context: .
       dockerfile: frontend/Dockerfile
-    image: agent-os-frontend:latest
-    container_name: agent-os-frontend-22404
-    # on-failure + 上层 deploy 限制：崩溃不再无限重启拉起，
+    image: agent-os-frontend:${PROJECT_TAG:-default}
+    container_name: agent-os-frontend-${PROJECT_TAG:-default}
+    # on-failure + deploy 限制：崩溃不再无限重启拉起，
     # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
     restart: on-failure
     ports:
-      - "5290:5188"
+      - "${FRONTEND_HOST_PORT:-5289}:5188"
     environment:
       # Agent 跑在宿主机，前端通过 host.docker.internal 连接
-      - BACKEND_URL=http://host.docker.internal:8989
-      - BACKEND_WS_URL=ws://host.docker.internal:8989
+      - BACKEND_URL=http://host.docker.internal:${BACKEND_HOST_PORT:-8988}
+      - BACKEND_WS_URL=ws://host.docker.internal:${BACKEND_HOST_PORT:-8988}
     depends_on:
       redis:
         condition: service_healthy
     networks:
-      - agent-net-22404
+      - agent-net
     deploy:
       restart_policy:
         condition: on-failure
@@ -51,19 +57,19 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: agent-os-redis-22404
+    container_name: agent-os-redis-${PROJECT_TAG:-default}
     restart: unless-stopped
     ports:
-      - "6480:6379"
+      - "${REDIS_HOST_PORT:-6480}:6379"
     command: >
       redis-server
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --appendonly yes
     volumes:
-      - redis-data-22404:/data
+      - redis-data:/data
     networks:
-      - agent-net-22404
+      - agent-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -72,8 +78,8 @@ services:
       retries: 3
 
 volumes:
-  redis-data-22404:
+  redis-data:
 
 networks:
-  agent-net-22404:
+  agent-net:
     driver: bridge
