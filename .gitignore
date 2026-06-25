@@ -80,3 +80,10 @@ src/logs/
 _paste_debug.log
 *.ndjson
 docs/working/*_checkpoints.md
+
+# 工具运行状态/产物（不进仓库）
+.workbuddy/
+.playwright-cli/
+verify_after_fix.png
+viewer.out.txt
+todo.md
