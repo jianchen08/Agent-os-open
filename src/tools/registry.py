@@ -82,8 +82,13 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 已知的工具名称（用于按需加载判断）
         self._known_tool_names: set[str] = set()
 
-        # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）
-        self._dynamic_tool_names: set[str] = set()
+        # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）。
+        # BUG-FIX-fix_20260625_dynamic_tool_global_leak:
+        # 原实现是单个全局 set，导致 A 管道 resource_search 加载的工具
+        # 会泄漏到 B 管道（如 review_agent 子管道错误继承父管道加载的
+        # trigger_review / web_search）。改为按 pipeline_id 分组隔离。
+        # key="" 兼容无 pipeline_id 上下文（启动期/测试）的全局调用。
+        self._dynamic_tool_names: dict[str, set[str]] = {}
 
         # Schema 动态丰富器注册表（tool_name -> enricher callable）
         self._schema_enrichers: dict[str, Callable] = {}
@@ -107,24 +112,46 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._max_tools = max_tools
         self._unload_threshold = unload_threshold
 
-    def mark_dynamic(self, name: str) -> None:
+    def mark_dynamic(self, name: str, pipeline_id: str = "") -> None:
         """将工具标记为动态加载的工具。
 
         由 ToolAutoLoader 在运行时动态加载工具后调用，
         ToolSchemaPlugin 会查询此集合来决定向 LLM 展示哪些额外工具。
 
+        BUG-FIX-fix_20260625_dynamic_tool_global_leak:
+        动态工具状态按 pipeline_id 隔离。pipeline_id 为空时尝试从
+        _current_pipeline_id contextvar 获取，仍为空则归到全局 "" 桶
+        （兼容启动期/测试场景）。
+
         Args:
             name: 工具名称
+            pipeline_id: 所属管道 ID，留空则从 contextvar 自动获取
         """
-        self._dynamic_tool_names.add(name)
+        if not pipeline_id:
+            pipeline_id = self._current_pid()
+        self._dynamic_tool_names.setdefault(pipeline_id, set()).add(name)
 
-    def get_dynamic_tool_names(self) -> set[str]:
-        """获取所有动态加载的工具名称集合。
+    def get_dynamic_tool_names(self, pipeline_id: str = "") -> set[str]:
+        """获取指定管道动态加载的工具名称集合。
+
+        Args:
+            pipeline_id: 所属管道 ID，留空则从 contextvar 自动获取
 
         Returns:
-            动态加载的工具名称集合
+            该管道动态加载的工具名称集合（无则空集合）
         """
-        return self._dynamic_tool_names
+        if not pipeline_id:
+            pipeline_id = self._current_pid()
+        return self._dynamic_tool_names.get(pipeline_id, set())
+
+    @staticmethod
+    def _current_pid() -> str:
+        """从 contextvar 获取当前 pipeline_id（隔离动态工具状态用）。"""
+        try:
+            from pipeline.engine_state import _current_pipeline_id  # noqa: PLC0415
+            return _current_pipeline_id.get() or ""
+        except Exception:
+            return ""
 
     def register_schema_enricher(
         self, tool_name: str, enricher: Callable[[Any, dict[str, Any]], Any]
@@ -435,7 +462,9 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 清理相关数据
         self._handlers.pop(name, None)
         self._runnables.pop(name, None)
-        self._dynamic_tool_names.discard(name)
+        # 从所有管道的动态工具集合中移除（dict[pipeline_id, set] 结构）
+        for _pid_set in self._dynamic_tool_names.values():
+            _pid_set.discard(name)
         self._schema_enrichers.pop(name, None)
 
         return tool

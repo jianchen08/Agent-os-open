@@ -1,6 +1,0 @@
-21:08:10 [pipeline.engine] INFO: === Pipeline iteration 1 ===
-21:08:10 [pipeline.chain] INFO: [mock_output] started
-21:08:10 [pipeline.chain] INFO: [mock_output] success (0.000s)
-21:08:10 [pipeline.chain] INFO: [mock_output] started
-21:08:10 [pipeline.chain] INFO: [mock_output] success (0.000s)
-21:08:10 [pipeline.engine] INFO: [Engine] 引擎停止: pipeline=eb78e4373ded iteration=1 ended=True raw_error=(none)

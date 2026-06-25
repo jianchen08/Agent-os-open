@@ -244,7 +244,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
                 llm_call._model = llm_conf.get("model_name", llm_call._model)
                 llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
                 llm_call._context_window = llm_conf.get("context_window")
-        logger.info(
+        logger.debug(
             "[apply_agent_model_override] Router 模式切换模型: %s (provider=%s, api_base=%s, context_window=%s)",
             model_id,
             llm_call._provider,
@@ -287,7 +287,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
     llm_call._api_key = llm_conf.get("api_key") or llm_call._api_key
     llm_call._context_window = llm_conf.get("context_window")
     llm_call._default_params = llm_conf.get("default_params", llm_call._default_params)
-    logger.info(
+    logger.debug(
         "[apply_agent_model_override] Agent %s 使用模型: %s (provider=%s, context_window=%s)",
         getattr(agent_config, "config_id", "?"),
         llm_conf.get("model_name"),

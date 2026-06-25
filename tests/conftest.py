@@ -45,13 +45,6 @@ collect_ignore = [
     "suites/core/test_core_e2e_verification.py",
     # conftest 中缺少 MockAgentConfig（预存在导入错误）：
     "suites/core/test_deep_integration.py",
-    # 预先存在的导入/运行问题（与本次数据层改动无关）：
-    "unit/test_evaluation.py",              # src.evaluation 内部导入路径问题
-    "suites/cli/test_human_interaction_cli.py",  # UnboundLocalError
-    "unit/test_plugin_hot_reload.py",       # watchdog 模块缺失
-    "channels/test_routes_workspaces.py",   # pytest 内部 Signature 错误
-    # e2e 测试全部需要外部服务（后端/数据库/WebSocket），CI 环境不可用：
-    "e2e",
 ]
 
 # ── 报告输出目录 ──────────────────────────────────────────

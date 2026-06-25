@@ -1,7 +1,0 @@
-21:08:10 [pipeline.engine] INFO: === Pipeline iteration 1 ===
-21:08:10 [pipeline.chain] INFO: [mock_output] started
-21:08:10 [pipeline.chain] INFO: [mock_output] success (0.000s)
-21:08:10 [pipeline.engine] INFO: [Engine] 管道挂起，等待唤醒: pipeline=fa3e2665fddb, watching_tasks=[]
-21:18:10 [pipeline.engine] INFO: [Engine] 管道等待超时(600s)无新通知，重新挂起 (round=1/50): pipeline=fa3e2665fddb
-21:28:10 [pipeline.engine] INFO: [Engine] 管道等待超时(600s)无新通知，重新挂起 (round=2/50): pipeline=fa3e2665fddb
-21:38:10 [pipeline.engine] INFO: [Engine] 管道等待超时(600s)无新通知，重新挂起 (round=3/50): pipeline=fa3e2665fddb

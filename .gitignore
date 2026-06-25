@@ -1,30 +1,26 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 *.bak
 *.egg-info/
 .mypy_cache/
-.pytest_cache/
-
-# Node
 node_modules/
-
-# 环境变量（敏感信息）
 .env
-.env.local
-.env.*.local
-frontend/.env.local
+*.log
+.tox/
+NUL
+nul
+.ports
+.py_deps_installed
 
-# 数据库
 data/
 database.db
 *.db
 *.sqlite3
 
-# 运行时工作空间
 .ai_workspaces/
 
-# 构建产物
 dist-electron/
 dist/
 build/
@@ -32,41 +28,30 @@ coverage/
 .coverage
 htmlcov/
 
-# 临时文件
 *.tmp
 .tmp_*
-*.heapsnapshot
-*.json.gz
 
-# 测试截图与产物
 e2e_screenshots/
 verify_screenshots/
 frontend/test-results/
 
-# IDE/工具
+*.heapsnapshot
+*.json.gz
+
 .claude/
 .workbuddy/
-.dbg/
-.ports
-.py_deps_installed
-.ruff_cache/
-.playwright-cli/
-.frontend_src_hash
 
-# Windows shell 重定向产生的坏文件名（nul/NUL 重定向 + 引号/美元符）
-nul
-NUL
+# Windows shell 重定向产生的坏文件名（nul/NUL 重定�?+ 误带括号/美元符）
+nul)
 nul)
 $null
 /frontend/$null
 
-# 临时产物/调试输出目录（不应进仓库）
+# 临时产物/调试输出目录（不应进仓库�?tmp*/
 /artifacts/
 /deliverables/
 /review/
 /findings/
-/reports/
-/logs/
 /e2e/
 /agent_os_hot_reload/
 /pytest-of-*/
@@ -75,14 +60,23 @@ $null
 debug-*.md
 debug-*.log
 
-# 离线依赖包（二进制不进仓库，仅保留 .gitkeep 占位和 README）
+# �����������������Ʋ����ֿ⣬������ .gitkeep ռλ�� README��
 packages/wheels/*
 !packages/wheels/.gitkeep
 packages/npm-tarballs/*
 !packages/npm-tarballs/.gitkeep
+`n# ǰ�˹���ע���ǣ��������ɣ�`n.frontend_built_at`n.frontend_built_at
 
-# 前端构建注入标记（本地生成）
-.frontend_built_at
+# 本地临时脚本/调试产物（不进仓库）
+_fix_leaks.py
+_parse_probe.ps1
+_verify.ps1
+_vrf_review.py
 
-# TypeScript 增量构建缓存
-*.tsbuildinfo
+# 调试日志/运行时产物（不进仓库）
+.dbg/
+src/logs/
+*_debug.log
+_paste_debug.log
+*.ndjson
+docs/working/*_checkpoints.md

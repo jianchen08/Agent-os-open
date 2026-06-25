@@ -406,13 +406,33 @@ def _get_token_usage() -> dict[str, Any]:
     """获取全局 token 用量统计。
 
     从 infrastructure 层获取真实数据，依次尝试：
-    1. ServiceProvider 中注册的 UsageMonitor
-    2. PerformanceMonitor 中的 LLM 统计
-    3. 零值兜底
+    1. ExecutionRecordStorage 中汇总的 PipelineRunSummary（已注册、有真实数据）
+    2. ServiceProvider 中注册的 UsageMonitor（预留，当前未注册）
+    3. PerformanceMonitor 中的 LLM 统计（预留，当前未注册）
+    4. 零值兜底
 
     Returns:
         包含 total_tokens, prompt_tokens, completion_tokens, request_count 的字典
     """
+    def _strategy_execution_record_storage() -> dict[str, Any] | None:
+        from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
+        storage = get_execution_record_storage()
+        if storage is None:
+            return None
+        tokens = storage.get_total_tokens()
+        # tokens 格式: {"input_tokens": N, "output_tokens": N, "total_tokens": N, "cached_tokens": N}
+        total = tokens.get("total_tokens", 0)
+        if total == 0 and not tokens:
+            return None
+        # request_count 用管道运行次数近似（每个 summary 对应一次完整管道运行）
+        summaries = storage.list_all_summaries()
+        return {
+            "total_tokens": total,
+            "prompt_tokens": tokens.get("input_tokens", 0),
+            "completion_tokens": tokens.get("output_tokens", 0),
+            "request_count": len(summaries),
+        }
+
     def _strategy_usage_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
@@ -445,7 +465,7 @@ def _get_token_usage() -> dict[str, Any]:
         }
 
     return _with_fallback_strategies(
-        [_strategy_usage_monitor, _strategy_perf_monitor],
+        [_strategy_execution_record_storage, _strategy_usage_monitor, _strategy_perf_monitor],
         {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "request_count": 0},
     )
 

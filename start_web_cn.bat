@@ -13,15 +13,14 @@ echo 项目目录: %cd%
 echo.
 
 :: ===========================================================================
-:: 0. 项目隔离配置（与 docker-compose.yml 的 ${PROJECT_TAG} 等变量对齐）
-::    每个项目目录独立一套端口/容器名，多套环境可并存而不冲突。
-::    docker compose 解析 ${VAR} 时优先取 shell 环境变量，故此处 set 即生效。
+:: 0. 清理上次残留的宿主机进程（避免端口/资源占用导致重复启动失败）
+::    只关闭与本项目相关的进程：后端入口(channels.websocket.app_factory)、
+::    以及可执行文件位于项目目录下的进程。
+::    Docker 容器内的服务不受影响。详见 cleanup_processes.ps1
 :: ===========================================================================
-set "PROJECT_TAG=34749"
-set "COMPOSE_PROJECT_NAME=agent-os-34749"
-set "FRONTEND_HOST_PORT=5290"
-set "REDIS_HOST_PORT=6481"
-set "BACKEND_HOST_PORT=8989"
+echo [INFO] 清理上次残留进程...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_processes.ps1"
+echo.
 
 :: ===========================================================================
 :: 1. 检查 Docker（本项目必须有 Docker）
@@ -107,24 +106,24 @@ echo [OK] Docker 就绪
 :: 镜像加速源拉取，很快。
 echo [INFO] 启动 Docker 服务...
 :: 检查容器是否已存在（包括停止的容器），存在则直接启动，避免冲突
-docker ps -a --format "{{.Names}}" | findstr "agent-os-redis-!PROJECT_TAG!" >nul 2>&1
+docker ps -a --format "{{.Names}}" | findstr "agent-os-redis-22404" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 复用已有容器 agent-os-redis-!PROJECT_TAG!
-    docker start agent-os-redis-!PROJECT_TAG! >nul 2>&1
+    echo [OK] 复用已有容器 agent-os-redis-22404
+    docker start agent-os-redis-22404 >nul 2>&1
 ) else (
     docker compose up -d --no-recreate redis
 )
-docker ps -a --format "{{.Names}}" | findstr "agent-os-frontend-!PROJECT_TAG!" >nul 2>&1
+docker ps -a --format "{{.Names}}" | findstr "agent-os-frontend-22404" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 复用已有容器 agent-os-frontend-!PROJECT_TAG!
-    docker start agent-os-frontend-!PROJECT_TAG! >nul 2>&1
+    echo [OK] 复用已有容器 agent-os-frontend-22404
+    docker start agent-os-frontend-22404 >nul 2>&1
 ) else (
     docker compose up -d --no-recreate frontend
 )
 echo [OK] Docker 服务已启动
 
 :: 前端代码更新：镜像存在时检查 src 是否有更新，有则构建并注入运行中的容器
-docker image inspect agent-os-frontend:!PROJECT_TAG! >nul 2>&1
+docker image inspect agent-os-frontend:latest >nul 2>&1
 if errorlevel 1 (
     echo [INFO] 前端镜像不存在，需要首次构建（需要网络拉取基础镜像）
     echo [INFO] 尝试构建...
@@ -205,14 +204,14 @@ if not exist ".py_deps_installed" (
 :: 4. Agent（宿主机）
 :: ===========================================================================
 echo [INFO] 启动 Agent...
-start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_HOST_PORT!&& set REDIS_URL=redis://localhost:!REDIS_HOST_PORT!/0&& "%PYEXE%" -m channels.websocket.app_factory"
+start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6480/0&& "%PYEXE%" -m channels.websocket.app_factory"
 
 echo.
 echo ========================================
 echo   启动完成
 echo ========================================
-echo   后端: http://localhost:!BACKEND_HOST_PORT!
-echo   前端: http://localhost:!FRONTEND_HOST_PORT!
+echo   后端: http://localhost:8988
+echo   前端: http://localhost:5289
 echo   停止: 关闭 Agent 窗口 + docker compose down
 echo ========================================
 pause

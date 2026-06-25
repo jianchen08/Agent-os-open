@@ -88,7 +88,12 @@ deliverables:
   required: false
 - name: api_test_report
   description: API测试报告（仅涉及API端点测试时产出）
-  output_path: '{{workspace}}/api_test_report.md'
+  output_path: '{{workspace}}/docs/working/api_test_report.md'
+  type: markdown
+  required: false
+- name: bugfix_report
+  description: Bug 修复报告（Bug 修复任务必须产出，含问题定位/根因/修复方案/回归测试结果）
+  output_path: '{{workspace}}/docs/working/{title}_bugfix_report.md'
   type: markdown
   required: false
 recommended_metrics:

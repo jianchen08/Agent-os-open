@@ -69,7 +69,7 @@ class ChildTaskGuard(IOutputPlugin):
         core_type = state.get("core_type", "")
 
         if state.get("task_evaluation_completed"):
-            logger.info(
+            logger.debug(
                 "ChildTaskGuard[iter=%s]: task evaluation passed, "
                 "emitting end signal to terminate pipeline",
                 iteration,
@@ -110,7 +110,7 @@ class ChildTaskGuard(IOutputPlugin):
             )
             return OutputResult()
 
-        logger.info(
+        logger.debug(
             "ChildTaskGuard[iter=%s][pipeline=%s]: ACTIVE children found (%s), "
             "suspending pipeline (wait signal), child_ids=%s",
             iteration, pipeline_id[:8] if pipeline_id else "none", core_type,

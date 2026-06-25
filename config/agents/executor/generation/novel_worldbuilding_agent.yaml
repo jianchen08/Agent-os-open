@@ -181,7 +181,7 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   ## 参考规则
 
 
-  上方已通过占位符注入统一上下文读取规则和写作领域规则，此处不再重复引用。
+
 
   '
 static_vars:
@@ -198,6 +198,11 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
+- list_directory
+- create_directory
+- copy_file
+- delete_file
+- enhanced_search
 hard_constraints:
 - 必须严格按四层构建法（基础设定→势力分布→历史背景→独特元素）的顺序构建世界观
 - 所有设定必须与《创作方向书》中的题材类型和核心设定保持一致

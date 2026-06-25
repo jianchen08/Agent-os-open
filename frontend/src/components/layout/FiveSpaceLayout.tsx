@@ -25,10 +25,7 @@ import apiClient from '@/services/api/client'
 import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { schemaRegistry } from '@/services/schema/registry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
-import { useChatInputStore } from '@/stores/chatInputStore'
-import { getFileReviewData, removeFileReviewData, registerFileReview } from '@/stores/fileReviewRegistry'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -40,7 +37,6 @@ import { DockBar } from './DockBar'
 import { FloatingWindowManager } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { WorkspacePanel } from './WorkspacePanel'
-import { FileReviewTab } from '../review/FileReviewTab'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
@@ -186,13 +182,10 @@ export function FiveSpaceLayout({
   }, [])
 
   /**
-   * 处理工作区 Tab 关闭，对文件审批类型 Tab 进行额外的数据清理
+   * 处理工作区 Tab 关闭，清理 fileEditorRegistry 中对应的文件内容缓存
    */
   const handleCloseTab = useCallback((tabId: string) => {
     const tab = useLayoutModeStore.getState().workspaceTabs.find(t => t.id === tabId)
-    if (tab?.moduleId === '__file_review__') {
-      removeFileReviewData(tabId)
-    }
     if (tab?.moduleId === '__file_editor__') {
       removeFileEditorData(tabId)
     }
@@ -390,99 +383,12 @@ export function FiveSpaceLayout({
 
       // 文件审批标签渲染
       if (tab.moduleId === '__file_review__') {
-        const reviewData = getFileReviewData(tab.id)
-        if (!reviewData) {
-          return (
-            <div className="flex h-full flex-col items-center justify-center p-4">
-              <div className="text-muted-foreground text-sm">审批数据已过期</div>
-            </div>
-          )
-        }
-        const handleSendMessage = (message: string, quotedText?: string, quotedFile?: string) => {
-          if (quotedText) {
-            const insertText = quotedFile
-              ? `「${quotedFile}:\n${quotedText}」`
-              : `「${quotedText}」`
-            useChatInputStore.getState().requestInsert(insertText)
-            return
-          }
-          if (message) {
-            // BUG-FIX-fix_20260511_interaction_response_lost:
-            // 问题根因: reviewData.pipelineId 可能为空，且不是 WebSocket 连接池的 key
-            // 修复方案: 优先使用 sessionId 或当前活跃会话 ID
-            const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
-            if (sid) {
-              globalWS.sendInteractionResponse(sid, reviewData.requestId, {
-                response_type: 'approved',
-                feedback: message,
-              })
-            }
-          }
-        }
-        const handleOpenFolder = async () => {
-          const containerId = reviewData.containerTaskId
-          if (!containerId) return
-          try {
-            await apiClient.post(`/api/v1/workspaces/${containerId}/open`)
-          } catch {
-            // 静默失败
-          }
-        }
-        /**
-         * 保存文件内容到后端
-         * 调用 PUT /api/v1/workspaces/{containerId}/file-content 接口
-         */
-        const handleSaveFile = async (filePath: string, content: string): Promise<boolean> => {
-          const containerId = reviewData.containerTaskId
-          if (!containerId) return false
-          try {
-            const resp = await apiClient.put(
-              `/api/v1/workspaces/${containerId}/file-content`,
-              { content },
-              { params: { path: filePath } },
-            )
-            return resp.data?.success ?? false
-          } catch {
-            return false
-          }
-        }
-        const filePaths = Object.keys(reviewData.fileContents)
-        const allHtml = filePaths.length > 0 && filePaths.every(
-          (fp: string) => fp.toLowerCase().endsWith('.html') || fp.toLowerCase().endsWith('.htm')
-        )
-        const firstHtmlPath = allHtml ? filePaths[0] : ''
-        const firstHtmlContent = allHtml ? reviewData.fileContents[firstHtmlPath] : ''
-        const firstHtmlName = firstHtmlPath.split(/[\\/]/).pop() ?? firstHtmlPath
-
+        // BUG-FIX-fix_20260625_workspace_tabs_persist:
+        // 历史遗留分支：交互附带文件不再创建 __file_review__ 类型 Tab，
+        // 现在统一走 __file_editor__。此处只做兼容旧持久化数据，显示提示让用户关闭。
         return (
-          <div className="relative h-full">
-            {reviewData.containerTaskId && (
-              <button
-                className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border bg-background/80 px-2 py-1 text-xs text-muted-foreground backdrop-blur-sm transition-colors hover:bg-accent hover:text-foreground"
-                onClick={handleOpenFolder}
-                title="在系统文件管理器中打开"
-              >
-                <FolderOpen className="h-3.5 w-3.5" />
-                打开文件夹
-              </button>
-            )}
-            {allHtml ? (
-              <HtmlPreviewWidget
-                html={firstHtmlContent}
-                filePath={firstHtmlPath}
-                title={firstHtmlName}
-                containerTaskId={reviewData.containerTaskId}
-              />
-            ) : (
-              <FileReviewTab
-                fileContents={reviewData.fileContents}
-                requestId={reviewData.requestId}
-                mode={reviewData.mode}
-                title={reviewData.title}
-                onSendMessage={handleSendMessage}
-                onSaveFile={handleSaveFile}
-              />
-            )}
+          <div className="flex h-full flex-col items-center justify-center p-4">
+            <div className="text-muted-foreground text-sm">此审阅 Tab 已过期，请关闭</div>
           </div>
         )
       }

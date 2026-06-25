@@ -87,7 +87,7 @@ class ModuleManager {
     )
     const hasWorkspaceTab = useLayoutModeStore
       .getState()
-      .workspaceTabs.some((t) => t.moduleId && t.moduleId !== '__file_editor__' && t.moduleId !== '__file_review__')
+      .workspaceTabs.some((t) => t.moduleId && t.moduleId !== '__file_editor__')
 
     if (hasWorkspaceModule && !hasWorkspaceTab) {
       loggers.websocket.info('检测到模块已注册但工作区 tab 缺失，触发兜底同步')
@@ -107,7 +107,7 @@ class ModuleManager {
     if (!this.isAuthenticated()) return
     const hasWorkspaceTab = useLayoutModeStore
       .getState()
-      .workspaceTabs.some((t) => t.moduleId && t.moduleId !== '__file_editor__' && t.moduleId !== '__file_review__')
+      .workspaceTabs.some((t) => t.moduleId && t.moduleId !== '__file_editor__')
     if (!hasWorkspaceTab) {
       loggers.websocket.info('WS 重连后工作区 tab 缺失，重新拉取模块')
       try {

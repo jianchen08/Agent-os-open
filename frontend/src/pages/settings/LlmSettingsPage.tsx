@@ -4,7 +4,7 @@
  * 配置大语言模型参数：默认模型选择、Temperature、Max Tokens、Fallback 模型、模型列表管理
  */
 
-import { Loader2, RefreshCw } from 'lucide-react'
+import { Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,6 +22,8 @@ import {
   saveLLMDefaults,
   addModel,
   deleteModel,
+  addProvider,
+  deleteProvider,
   updateProviderConfig,
   type LLMConfigResponse,
   type ModelConfig,
@@ -67,6 +69,12 @@ export function LlmSettingsPage() {
     model_name: '',
     display_name: '',
   })
+
+  // 新提供商表单
+  const [newProviderId, setNewProviderId] = useState('')
+  const [newProviderType, setNewProviderType] = useState('openai')
+  const [newProviderApiBase, setNewProviderApiBase] = useState('')
+  const [newProviderApiKey, setNewProviderApiKey] = useState('')
 
   // 加载配置
   // NOTE: apiClient uses baseURL='http://localhost:8988' (absolute URL) which bypasses the
@@ -166,10 +174,45 @@ export function LlmSettingsPage() {
     }
   }, [])
 
-  // 更新提供商 API Key
-  const handleUpdateApiKey = useCallback(async (providerId: string, apiKey: string) => {
+  // 更新提供商 API Key（更新 keys[0].api_key）
+  const handleUpdateApiKey = useCallback(
+    async (providerId: string, apiKey: string, provider: ProviderConfig) => {
+      try {
+        const firstKey = provider.keys?.[0] ?? { id: `${providerId}_main` }
+        const updatedKeys = [{ ...firstKey, api_key: apiKey }]
+        const providers = await updateProviderConfig(providerId, { keys: updatedKeys })
+        setConfig((prev) => (prev ? { ...prev, providers } : prev))
+      } catch {
+        // 静默处理
+      }
+    },
+    [],
+  )
+
+  // 添加提供商
+  const handleAddProvider = useCallback(async () => {
+    if (!newProviderId.trim()) return
     try {
-      const providers = await updateProviderConfig(providerId, { api_key: apiKey })
+      const config: { type: string; api_base?: string; api_key?: string } = {
+        type: newProviderType,
+      }
+      if (newProviderApiBase.trim()) config.api_base = newProviderApiBase.trim()
+      if (newProviderApiKey.trim()) config.api_key = newProviderApiKey.trim()
+      const providers = await addProvider(newProviderId.trim(), config)
+      setConfig((prev) => (prev ? { ...prev, providers } : prev))
+      setNewProviderId('')
+      setNewProviderType('openai')
+      setNewProviderApiBase('')
+      setNewProviderApiKey('')
+    } catch {
+      // 静默处理
+    }
+  }, [newProviderId, newProviderType, newProviderApiBase, newProviderApiKey])
+
+  // 删除提供商
+  const handleDeleteProvider = useCallback(async (providerId: string) => {
+    try {
+      const providers = await deleteProvider(providerId)
       setConfig((prev) => (prev ? { ...prev, providers } : prev))
     } catch {
       // 静默处理
@@ -512,6 +555,47 @@ export function LlmSettingsPage() {
                     placeholder="如: GPT-4o"
                   />
                 </FieldRow>
+                <FieldRow label="API Base" htmlFor="new-model-apibase">
+                  <Input
+                    id="new-model-apibase"
+                    value={newModelConfig.api_base ?? ''}
+                    onChange={(e) =>
+                      setNewModelConfig((prev) => ({ ...prev, api_base: e.target.value || undefined }))
+                    }
+                    placeholder="可选，留空则使用 provider 的 api_base"
+                  />
+                </FieldRow>
+                <FieldRow label="上下文窗口" htmlFor="new-model-ctx">
+                  <Input
+                    id="new-model-ctx"
+                    type="number"
+                    min={0}
+                    value={newModelConfig.context_window ?? ''}
+                    onChange={(e) =>
+                      setNewModelConfig((prev) => ({
+                        ...prev,
+                        context_window: e.target.value ? Number(e.target.value) : undefined,
+                      }))
+                    }
+                    placeholder="如: 128000"
+                  />
+                </FieldRow>
+                <FieldRow label="推理模型" htmlFor="new-model-reasoning">
+                  <div className="flex items-center pt-2">
+                    <input
+                      id="new-model-reasoning"
+                      type="checkbox"
+                      checked={newModelConfig.reasoning_model ?? false}
+                      onChange={(e) =>
+                        setNewModelConfig((prev) => ({ ...prev, reasoning_model: e.target.checked }))
+                      }
+                      className="border-border h-4 w-4 rounded"
+                    />
+                    <span className="text-muted-foreground ml-2 text-xs">
+                      勾选表示该模型支持 thinking/reasoning 能力
+                    </span>
+                  </div>
+                </FieldRow>
                 <Button size="sm" onClick={handleAddModel} disabled={!newModelId.trim()}>
                   添加模型
                 </Button>
@@ -536,11 +620,60 @@ export function LlmSettingsPage() {
                       providerId={id}
                       provider={provider}
                       onUpdateKey={handleUpdateApiKey}
+                      onDelete={handleDeleteProvider}
                     />
                   )
                 })}
               </div>
             )}
+
+            <div className="mt-4 border-t pt-4">
+              <h3 className="mb-3 text-sm font-semibold">添加提供商</h3>
+              <div className="space-y-2">
+                <FieldRow label="提供商 ID" htmlFor="new-provider-id">
+                  <Input
+                    id="new-provider-id"
+                    value={newProviderId}
+                    onChange={(e) => setNewProviderId(e.target.value)}
+                    placeholder="如: deepseek"
+                  />
+                </FieldRow>
+                <FieldRow label="类型" htmlFor="new-provider-type">
+                  <Select value={newProviderType} onValueChange={setNewProviderType}>
+                    <SelectTrigger id="new-provider-type">
+                      <SelectValue placeholder="选择类型" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="openai">openai</SelectItem>
+                      <SelectItem value="deepseek">deepseek</SelectItem>
+                      <SelectItem value="zai">zai</SelectItem>
+                      <SelectItem value="minimax">minimax</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FieldRow>
+                <FieldRow label="API Base" htmlFor="new-provider-apibase">
+                  <Input
+                    id="new-provider-apibase"
+                    value={newProviderApiBase}
+                    onChange={(e) => setNewProviderApiBase(e.target.value)}
+                    placeholder="如: https://api.deepseek.com/v1"
+                  />
+                </FieldRow>
+                <FieldRow label="API Key" htmlFor="new-provider-apikey">
+                  <Input
+                    id="new-provider-apikey"
+                    type="password"
+                    value={newProviderApiKey}
+                    onChange={(e) => setNewProviderApiKey(e.target.value)}
+                    placeholder="输入 API Key（自动写入 .env）"
+                  />
+                </FieldRow>
+                <Button size="sm" onClick={handleAddProvider} disabled={!newProviderId.trim()}>
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  添加提供商
+                </Button>
+              </div>
+            </div>
           </div>
         </TabsContent>
       </Tabs>
@@ -553,27 +686,43 @@ function ProviderCard({
   providerId,
   provider,
   onUpdateKey,
+  onDelete,
 }: {
   providerId: string
   provider: ProviderConfig
-  onUpdateKey: (id: string, key: string) => void
+  onUpdateKey: (id: string, key: string, provider: ProviderConfig) => void
+  onDelete: (id: string) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [apiKey, setApiKey] = useState('')
 
-  const maskedKey = provider.api_key
-    ? `${provider.api_key.slice(0, 4)}${'*'.repeat(12)}${provider.api_key.slice(-4)}`
-    : '未设置'
+  // 后端返回的 api_key 已脱敏，直接取第一个 key 的值用于展示
+  const firstKey = provider.keys?.[0]
+  const hasKey = Boolean(firstKey?.api_key)
+  const maskedKey = firstKey?.api_key ?? '未设置'
 
   return (
     <div className="bg-card space-y-2 rounded-lg border px-4 py-3">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-semibold">{providerId}</span>
-        <span
-          className={`rounded px-2 py-0.5 text-xs ${provider.api_key ? 'bg-status-success/10 text-status-success' : 'bg-status-error/10 text-status-error'}`}
-        >
-          {provider.api_key ? '已配置' : '未配置'}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">{providerId}</span>
+          {provider.type && (
+            <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 text-[10px] font-mono">
+              {provider.type}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`rounded px-2 py-0.5 text-xs ${hasKey ? 'bg-status-success/10 text-status-success' : 'bg-status-error/10 text-status-error'}`}
+          >
+            {hasKey ? '已配置' : '未配置'}
+          </span>
+          <Button variant="destructive" size="xs" onClick={() => onDelete(providerId)}>
+            <Trash2 className="mr-1 h-3 w-3" />
+            删除
+          </Button>
+        </div>
       </div>
       {provider.api_base && (
         <div className="text-muted-foreground text-xs">Base URL: {provider.api_base}</div>
@@ -591,7 +740,7 @@ function ProviderCard({
           <Button
             size="xs"
             onClick={() => {
-              onUpdateKey(providerId, apiKey)
+              onUpdateKey(providerId, apiKey, provider)
               setEditing(false)
             }}
           >

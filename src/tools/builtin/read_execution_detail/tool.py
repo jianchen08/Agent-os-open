@@ -96,7 +96,10 @@ class ReadExecutionDetailTool(BuiltinTool):
             category=ToolCategory.ANALYSIS,
             level=ToolLevel.L1_ONLY,
             tags=["execution", "analysis", "review"],
-            injected_params=["storage"],
+            # BUG-FIX-fix_20260625: 改为 _storage（带下划线前缀，符合
+            # tool_core._SERVICE_INJECT_MAP 约定），由 ToolCore 从
+            # ctx.services["execution_record_storage"] 自动注入。
+            injected_params=["_storage"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> Any:  # noqa: PLR0911
@@ -108,8 +111,9 @@ class ReadExecutionDetailTool(BuiltinTool):
         Returns:
             工具执行结果
         """
-        # 获取 storage 实例（优先使用注入的，否则使用构造函数传入的）
-        storage = inputs.get("storage") or self._storage
+        # 获取 storage 实例（优先使用注入的 _storage，否则构造函数传入的）
+        # tool_core 通过 _SERVICE_INJECT_MAP 注入 _storage=execution_record_storage
+        storage = inputs.get("_storage") or inputs.get("storage") or self._storage
         if storage is None:
             return create_failure_result(
                 error="ExecutionRecordStorage 未注入，无法查询执行记录",

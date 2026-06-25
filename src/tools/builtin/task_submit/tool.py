@@ -741,6 +741,21 @@ class TaskSubmitTool(BuiltinTool):
                         ),
                     )
                 from pathlib import Path  # noqa: PLC0415
+                # 同容器才能 inherit：源任务的工作空间必须属于当前容器，
+                # 否则跨容器继承会导致产出落到错误的容器、合并串台（bdcd592d 根因）。
+                _source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
+                _current_container = Path(__file__).resolve().parents[4]
+                if _source_root:
+                    try:
+                        Path(_source_root).resolve().relative_to(_current_container)
+                    except ValueError:
+                        return create_failure_result(
+                            error=(
+                                f"任务 {inherit_from} 属于其它容器({_source_root})，"
+                                f"不能跨容器继承工作空间。"
+                                f"请去掉 inherit_workspace_from 参数重新提交。"
+                            ),
+                        )
                 old_ws_path = old_ws_meta.get("path", "")
                 if not old_ws_path or not Path(old_ws_path).exists():
                     return create_failure_result(
@@ -750,6 +765,19 @@ class TaskSubmitTool(BuiltinTool):
                             "使用空工作空间开始。"
                         ),
                     )
+                # worktree 模式：目录在但 .git 没了 → 源 worktree 已被清理，
+                # 产物文件还在裸目录里但 git 身份（branch）已失效，继续 inherit
+                # 会在后续合并时找不到 branch 而失败（bdcd592d 串台事故根因）。
+                # 报错说明现状，让 agent 自行决定是否去该目录捞取已有产物。
+                if old_ws_meta.get("mode") == "worktree":
+                    if not (Path(old_ws_path) / ".git").exists():
+                        return create_failure_result(
+                            error=(
+                                f"任务 {inherit_from} 的工作空间: git 身份已失效,"
+                                f"目录里产物可能仍在可手动读取或者处理: {old_ws_path}。"
+                                f"请去掉 inherit_workspace_from 参数重新提交。"
+                            ),
+                        )
                 workspace = old_ws_path
                 _inherit_resolved = True
                 logger.info(
@@ -938,6 +966,47 @@ class TaskSubmitTool(BuiltinTool):
         if ws_err:
             await task_service.hard_delete(task.id)
             return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
+
+        # ── 7.5 pipe 继承：同步 clone 源管道历史 ──
+        # 历史准备（clone）必须在 submit 返回前完成：clone 失败则任务提交失败，
+        # 让父 LLM 知道子任务起不来。预生成 pipeline_id 并 clone 到目标管道，
+        # task_executor 复用该 id（不再重复 clone）。
+        if _inherit_pipe_pipeline_id:
+            import uuid as _uuid  # noqa: PLC0415
+            _pre_pipeline_id = _uuid.uuid4().hex[:12]
+            try:
+                exec_storage = get_service_provider().get("execution_record_storage")
+                if exec_storage:
+                    # root_task_id 必须与 task_executor._bind_pipeline_run 的
+                    # register_pipeline(pipeline_id, root_id) 一致，否则引擎注册时
+                    # 会触发文件迁移，导致 clone 文件和引擎读取文件分裂。
+                    _root_task_id = ""
+                    if task_service:
+                        _root_task_id = task_service.get_root_task_id(task.id) or ""
+                    exec_storage.clone_pipeline_records(
+                        source_pipeline_id=_inherit_pipe_pipeline_id,
+                        target_pipeline_id=_pre_pipeline_id,
+                        new_container_task_id=task.id,
+                        root_task_id=_root_task_id,
+                    )
+                    # clone 成功：把预生成 id 传给 task_executor 复用
+                    task_data["_pre_pipeline_id"] = _pre_pipeline_id
+                    logger.info(
+                        "[TaskSubmit] pipe 继承历史 clone 完成 | task=%s | src=%s | dst=%s | root=%s",
+                        task.id, _inherit_pipe_pipeline_id[:12], _pre_pipeline_id[:12],
+                        _root_task_id[:12] if _root_task_id else "(none)",
+                    )
+            except Exception as clone_exc:
+                # clone 失败：清理任务记录，返回失败给父 LLM
+                logger.error(
+                    "[TaskSubmit] pipe 继承历史 clone 失败 | task=%s | error=%s",
+                    task.id, clone_exc, exc_info=True,
+                )
+                await task_service.hard_delete(task.id)
+                return create_failure_result(
+                    error=f"继承管道历史失败：{clone_exc}",
+                    error_code="INHERIT_PIPE_FAILED",
+                )
 
         if not task_worker.submit_task(task_data):
             await task_service.hard_delete(task.id)

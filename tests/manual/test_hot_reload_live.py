@@ -27,12 +27,7 @@ import yaml
 from agents.loader import AgentConfigLoader
 from agents.registry import AgentRegistry
 from agents.types import AgentLevel
-try:
-    from plugins.hot_reload import PluginHotReloader, ReloadEvent
-except ImportError:
-    # watchdog 模块缺失时跳过，不阻断 pytest 收集
-    import pytest
-    pytestmark = pytest.mark.skip(reason="watchdog 模块未安装")
+from plugins.hot_reload import PluginHotReloader, ReloadEvent
 
 
 PASS = "\033[92m✓ PASS\033[0m"

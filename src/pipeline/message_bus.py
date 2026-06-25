@@ -50,6 +50,23 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     if entry is None:
         return None, ""
     engine = entry.engine
+
+    # BUG-FIX-fix_20260625_zombie_suspended_engine:
+    # cancelled-while-suspend（用户点"停止"时引擎挂在 wait/子任务上是最常见路径，
+    # 也可来自 task_executor/watchdog 等任何 cancel）会留下 is_suspended=True 或
+    # is_running=True 但 engine_task 已终止的"僵尸"条目。此时 inject_message 的 wake
+    # 无人 await，消息永久堆积，前端表现为"发消息半天没反应"。
+    # 检测到死任务 → 重置为 idle，让下面的判定走 _start_idle_engine 重启，
+    # 重启后首轮 consume_pending_notifications 会消费堆积的 _inject_queue。
+    if _is_engine_task_dead(entry) and (engine.is_suspended or engine.is_running):
+        logger.warning(
+            "[MessageBus] 检测到僵尸引擎（%s 但 engine_task 已终止），"
+            "重置为 idle 重启: pipeline=%s queue=%d",
+            "suspended" if engine.is_suspended else "running",
+            pipeline_id[:12], engine.inject_queue_size,
+        )
+        _reset_engine_for_restart(engine)
+
     # BUG-FIX-fix_20260524_msg_render: 增加 running/suspended 状态检查
     if engine.is_suspended:
         return engine, "suspended"
@@ -58,6 +75,29 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     if engine.is_idle:
         return engine, "idle"
     return None, ""
+
+
+def _is_engine_task_dead(entry: Any) -> bool:
+    """引擎主循环任务是否已终止（None 或 done）。
+
+    engine_task 为 asyncio.Task（REFACTOR-20260614 起 engine 在主循环运行），
+    done() 为 True 表示 run() 已返回（正常结束 / 异常 / 取消）。
+    """
+    _task = getattr(entry, "engine_task", None)
+    return _task is None or _task.done()
+
+
+def _reset_engine_for_restart(engine: Any) -> None:
+    """将僵尸引擎重置为可被 run() 重新启动的 idle 状态。
+
+    清理挂起快照与唤醒事件、复位运行/启动标志，使 is_idle 返回 True，
+    从而让 _find_engine 返回 idle → _inject_to_engine 走 _start_idle_engine。
+    """
+    engine._suspended_state = None
+    engine._wake_event = None
+    engine._engine_loop = None
+    engine._running = False
+    engine._run_started = False
 
 
 async def _auto_complete_interaction(pipeline_id: str) -> None:

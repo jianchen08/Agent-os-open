@@ -173,7 +173,8 @@ class IsolationGuard(IInputPlugin):
         1. 先查工具级 policy（isolation_policy.yaml）确定工具的隔离能力
         2. task metadata 的 isolation_level 只允许降级（container→host），
            不允许提升（host→container），避免把不支持容器的工具塞进容器
-        3. Docker 不可用时根据策略 fallback 降级
+        3. Docker 不可用时：要求容器的工具一律拒绝（返回 blocked），
+           不降级到 host——降级会让属于其它容器/工作区的任务静默落到本进程执行
         4. 命令含宿主路径（如 D:/...、C:\\...）时，即使 policy 要求容器，
            也路由到 host 执行——容器内没有宿主路径，进了容器必然报
            "No such file or directory"。路由到 host 后由 security_check
@@ -196,11 +197,12 @@ class IsolationGuard(IInputPlugin):
         policy_isolation = policy.isolation
 
         if self._force_host:
-            # P0-安全: force_host 不能绕过 fallback:deny 策略
-            if policy.fallback == "deny" and policy_isolation == IsolationLevel.CONTAINER:
+            # P0-安全: force_host 不能把要求容器隔离的工具放到宿主机执行，
+            # 一律拒绝（不降级）。force_host 仅对本身就走 host 的工具有效。
+            if policy_isolation == IsolationLevel.CONTAINER:
                 logger.warning(
-                    "[IsolationGuard] force_host 被策略阻止: "
-                    "工具 %s 要求容器隔离且禁止降级 | tool=%s",
+                    "[IsolationGuard] force_host 被拒绝: "
+                    "工具 %s 要求容器隔离，不降级到 host | tool=%s",
                     tool_name, tool_name,
                 )
                 return self._build_context(
@@ -225,26 +227,15 @@ class IsolationGuard(IInputPlugin):
                         tool_name, "docker", "task_metadata",
                         workspace=metadata_workspace,
                     )
-                # Docker 不可用时按 fallback 决策
-                if policy.fallback == "deny":
-                    logger.warning(
-                        "[IsolationGuard] metadata 要求容器但 Docker 不可用，"
-                        "策略禁止降级 | tool=%s",
-                        tool_name,
-                    )
-                    return self._build_context(
-                        tool_name, "denied", "task_metadata_fallback_denied",
-                        workspace=metadata_workspace,
-                        blocked=True,
-                    )
-                logger.info(
-                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，"
-                    "策略允许降级 | tool=%s",
+                # Docker 不可用：要求容器即拒绝，不降级到 host
+                logger.warning(
+                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，拒绝执行 | tool=%s",
                     tool_name,
                 )
                 return self._build_context(
-                    tool_name, "host", "task_metadata_fallback",
+                    tool_name, "denied", "docker_unavailable_container_required",
                     workspace=metadata_workspace,
+                    blocked=True,
                 )
             # metadata 强制 host → 降级
             return self._build_context(
@@ -274,21 +265,13 @@ class IsolationGuard(IInputPlugin):
             )
 
         if policy_isolation == IsolationLevel.CONTAINER and not self._docker_available:
-            if policy.fallback == "allow":
-                logger.info(
-                    "[IsolationGuard] Docker 不可用，策略允许降级 | tool=%s",
-                    tool_name,
-                )
-                return self._build_context(
-                    tool_name, "host", "policy_fallback",
-                    workspace=metadata_workspace,
-                )
+            # 要求容器但 Docker 不可用：一律拒绝，不降级
             logger.warning(
-                "[IsolationGuard] Docker 不可用且策略禁止降级，阻止执行 | tool=%s",
+                "[IsolationGuard] Docker 不可用且工具要求容器隔离，拒绝执行 | tool=%s",
                 tool_name,
             )
             return self._build_context(
-                tool_name, "denied", "policy_fallback_denied",
+                tool_name, "denied", "docker_unavailable_container_required",
                 workspace=metadata_workspace,
                 blocked=True,
             )

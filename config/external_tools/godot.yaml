@@ -22,7 +22,7 @@ retry_policy:
 # 认证（可选）
 auth:
   type: api_key
-  secret_key: ${GODOT_API_KEY:-}
+  secret_key: godot_api_key
 
 # 连接池
 max_connections: 3

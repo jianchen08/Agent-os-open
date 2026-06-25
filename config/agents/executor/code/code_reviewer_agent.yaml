@@ -203,14 +203,14 @@ soft_constraints:
 deliverables:
 - name: review_report
   description: 代码审查报告（含静态扫描指标 + 逻辑审查结论）
-  output_path: '{{workspace}}/review_report.md'
+  output_path: '{{workspace}}/docs/working/{title}_review_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/review_report.md'
+    path: '{{workspace}}/docs/working/{title}_review_report.md'
 - metric_id: semantic_check
   default_params:
     criteria:

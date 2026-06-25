@@ -7,12 +7,13 @@
  * @module components/workspace/CodeEditor
  */
 
-import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw } from 'lucide-react'
+import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 import { cn } from '@/lib/utils'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorRegistry'
 
 /** Markdown 扩展名集合 */
@@ -139,6 +140,111 @@ export interface CodeEditorProps {
   autoRefresh?: AutoRefreshConfig
 }
 
+// ────────────────────────────────────────────
+// 选中引用浮动按钮：辅助工具
+// ────────────────────────────────────────────
+
+/** 浮动「引用」按钮样式（一次性注入到 document.head） */
+let _floatingQuoteStyleInjected = false
+function injectFloatingQuoteStyles(): void {
+  if (_floatingQuoteStyleInjected || typeof document === 'undefined') return
+  _floatingQuoteStyleInjected = true
+  const style = document.createElement('style')
+  style.textContent = `@keyframes floatingQuoteIn{from{opacity:0;transform:translate(-50%,-100%) scale(0.95)}to{opacity:1;transform:translate(-50%,-100%) scale(1)}}`
+  document.head.appendChild(style)
+}
+
+/**
+ * 从代码内容中检测选中文字所在的函数名
+ *
+ * 从选中起始行向上逐行扫描，匹配常见函数/类定义模式（JS/TS/Python/Go/Rust 等）。
+ * 用于生成更精确的引用上下文，如 `src/main.py:fetchUser(L42)`。
+ */
+function detectFunctionName(code: string, targetLine: number): string | null {
+  const lines = code.split('\n')
+  const startLine = Math.max(0, Math.min(targetLine - 1, lines.length - 1))
+  const patterns: RegExp[] = [
+    /(?:export\s+)?(?:async\s+)?function\s+(\w+)/,
+    /(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\))?\s*=>/,
+    /(?:export\s+)?class\s+(\w+)/,
+    /(?:public|private|protected)\s+(?:async\s+)?(?:static\s+)?(\w+)\s*\(/,
+    /def\s+(\w+)/,
+    /func\s+(\w+)/,
+    /fn\s+(\w+)/,
+  ]
+  for (let i = startLine; i >= 0; i--) {
+    const line = lines[i]
+    for (const pattern of patterns) {
+      const match = line.match(pattern)
+      if (match) return match[1]
+    }
+  }
+  return null
+}
+
+/** 浮动按钮状态 */
+interface FloatingQuoteState {
+  visible: boolean
+  selectedText: string
+  lineRange: { start: number; end: number } | null
+  position: { x: number; y: number }
+}
+
+const FLOATING_QUOTE_INITIAL: FloatingQuoteState = {
+  visible: false,
+  selectedText: '',
+  lineRange: null,
+  position: { x: 0, y: 0 },
+}
+
+/**
+ * 浮动「引用」按钮（Notion / Google Docs 风格）
+ *
+ * 选中文字时弹出，点击「引用」把内容塞到 Chat 输入框；按 Esc 关闭。
+ */
+function FloatingQuoteButton({
+  position,
+  onQuote,
+  onClose,
+}: {
+  position: { x: number; y: number }
+  onQuote: () => void
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="pointer-events-auto absolute z-50"
+      style={{
+        left: position.x,
+        top: position.y,
+        transform: 'translate(-50%, -100%)',
+        animation: 'floatingQuoteIn 150ms ease-out',
+      }}
+    >
+      <div
+        className="flex items-center gap-1 rounded-lg border border-[var(--floating-quote-border,rgba(255,255,255,0.1))] bg-[var(--floating-quote-bg,#2a2a2a)] px-1.5 py-1 shadow-[var(--floating-quote-shadow,0_4px_12px_rgba(0,0,0,0.3))]"
+      >
+        <button
+          onClick={onQuote}
+          className="flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium text-[var(--floating-quote-text,#fff)] transition-colors hover:bg-[var(--floating-quote-hover-bg,rgba(255,255,255,0.1))]"
+          title="引用到对话 (Enter)"
+        >
+          <Quote className="h-3.5 w-3.5" />
+          <span>引用</span>
+        </button>
+        <button
+          onClick={onClose}
+          className="flex h-5 w-5 items-center justify-center rounded text-xs text-[var(--floating-quote-text,#fff)] opacity-60 transition-opacity hover:opacity-100"
+          title="关闭 (Esc)"
+          aria-label="关闭"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /**
  * 从文件名提取扩展名
  *
@@ -240,6 +346,136 @@ export function CodeEditor({
 
   /** 内容容器的 ref，用于保存和恢复滚动位置 */
   const contentContainerRef = useRef<HTMLDivElement>(null)
+
+  // ────────────────────────────────────────────
+  // 选中引用浮动按钮
+  // ────────────────────────────────────────────
+  //
+  // 用户在预览模式 / 只读模式下选中文字时，弹出「引用」按钮；
+  // 点击后把带行号和函数名的格式化文本塞进 Chat 输入框（chatInputStore.requestInsert）。
+  // 注意：编辑模式（textarea）使用浏览器原生选择/复制，不挂浮动按钮，避免遮挡编辑光标。
+  const requestInsert = useChatInputStore((s) => s.requestInsert)
+  const [floatingQuote, setFloatingQuote] = useState<FloatingQuoteState>(FLOATING_QUOTE_INITIAL)
+  const justSelectedRef = useRef(false)
+
+  useEffect(() => {
+    injectFloatingQuoteStyles()
+  }, [])
+
+  /** 处理预览区文字选中，计算行号范围并弹出浮动按钮 */
+  const handlePreviewMouseUp = useCallback(() => {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return
+    const selectedText = selection.toString().trim()
+    if (!selectedText) return
+    const container = contentContainerRef.current
+    if (!container) return
+    const range = selection.getRangeAt(0)
+    const rect = range.getBoundingClientRect()
+    const containerRect = container.getBoundingClientRect()
+
+    // 1) 优先用 DOM 选区计算行号（适用于 SyntaxHighlighter 多 span 的结构）
+    let lineRange: { start: number; end: number } | null = null
+    try {
+      const preRange = document.createRange()
+      preRange.selectNodeContents(container)
+      preRange.setEnd(range.startContainer, range.startOffset)
+      const textBefore = preRange.toString()
+      const startLine = (textBefore.match(/\n/g) || []).length + 1
+      const fullText = textBefore + selectedText
+      const endLine = (fullText.match(/\n/g) || []).length + 1
+      lineRange = { start: startLine, end: endLine }
+    } catch {
+      /* DOM 异常，fallback 到文本匹配 */
+    }
+
+    // 2) DOM 选区失败时，用 indexOf 在 localContent 中定位
+    if (!lineRange) {
+      const sourceIndex = localContent.indexOf(selectedText)
+      if (sourceIndex >= 0) {
+        const before = localContent.substring(0, sourceIndex)
+        const startLine = (before.match(/\n/g) || []).length + 1
+        const including = localContent.substring(0, sourceIndex + selectedText.length)
+        const endLine = (including.match(/\n/g) || []).length + 1
+        lineRange = { start: startLine, end: endLine }
+      }
+    }
+
+    justSelectedRef.current = true
+    setFloatingQuote({
+      visible: true,
+      selectedText,
+      lineRange,
+      position: {
+        x: rect.left - containerRect.left + rect.width / 2 + container.scrollLeft,
+        y: rect.top - containerRect.top - 8 + container.scrollTop,
+      },
+    })
+  }, [localContent])
+
+  /** 点击预览区空白处关闭浮动按钮（但跳过刚刚的选中事件，避免选中后立即被关闭） */
+  const handlePreviewClick = useCallback(() => {
+    if (justSelectedRef.current) {
+      justSelectedRef.current = false
+      return
+    }
+    if (floatingQuote.visible) {
+      setFloatingQuote((prev) => ({ ...prev, visible: false }))
+    }
+  }, [floatingQuote.visible])
+
+  /** 引用选中文字到 Chat 输入框 */
+  const handleQuote = useCallback(() => {
+    if (!floatingQuote.selectedText) return
+    const lineRange = floatingQuote.lineRange
+    const funcName = lineRange ? detectFunctionName(localContent, lineRange.start) : null
+    const lineInfo = lineRange
+      ? lineRange.start === lineRange.end
+        ? `L${lineRange.start}`
+        : `L${lineRange.start}-${lineRange.end}`
+      : ''
+
+    let quotedFileInfo: string
+    if (funcName && lineInfo) {
+      quotedFileInfo = `${filePath}:${funcName}(${lineInfo})`
+    } else if (funcName) {
+      quotedFileInfo = `${filePath}:${funcName}`
+    } else if (lineInfo) {
+      quotedFileInfo = `${filePath}:${lineInfo}`
+    } else {
+      quotedFileInfo = filePath
+    }
+
+    let formattedQuotedText = floatingQuote.selectedText
+    if (lineRange) {
+      formattedQuotedText = floatingQuote.selectedText
+        .split('\n')
+        .map((line, i) => `L${lineRange.start + i}: ${line}`)
+        .join('\n')
+    }
+
+    // 引用文本格式：「${quotedFileInfo}:\n${quotedText}」
+    requestInsert(`「${quotedFileInfo}:\n${formattedQuotedText}」`)
+    setFloatingQuote((prev) => ({ ...prev, visible: false }))
+    window.getSelection()?.removeAllRanges()
+  }, [floatingQuote.selectedText, floatingQuote.lineRange, filePath, localContent, requestInsert])
+
+  /** Esc 关闭浮动按钮 */
+  useEffect(() => {
+    if (!floatingQuote.visible) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setFloatingQuote((prev) => ({ ...prev, visible: false }))
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [floatingQuote.visible])
+
+  /** 当切换文件时重置浮动按钮 */
+  useEffect(() => {
+    setFloatingQuote(FLOATING_QUOTE_INITIAL)
+  }, [filePath])
 
   /** 当外部 content 变化时同步（如文件重新加载） */
   useEffect(() => {
@@ -415,7 +651,12 @@ export function CodeEditor({
           <span className="text-foreground text-sm font-medium">{fileName}</span>
           <span className="text-muted-foreground ml-2 text-xs">（只读预览）</span>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div
+          ref={contentContainerRef}
+          className="relative min-h-0 flex-1 overflow-auto"
+          onMouseUp={handlePreviewMouseUp}
+          onClick={handlePreviewClick}
+        >
           <SyntaxHighlighter
             language={language}
             style={oneDark}
@@ -438,6 +679,13 @@ export function CodeEditor({
           >
             {localContent}
           </SyntaxHighlighter>
+          {floatingQuote.visible && (
+            <FloatingQuoteButton
+              position={floatingQuote.position}
+              onQuote={handleQuote}
+              onClose={() => setFloatingQuote((prev) => ({ ...prev, visible: false }))}
+            />
+          )}
         </div>
       </div>
     )
@@ -536,11 +784,28 @@ export function CodeEditor({
       {isPreview ? (
         /* 预览模式：Markdown 文件使用 LobeChatMarkdown 渲染，其他使用 SyntaxHighlighter */
         isMarkdownFile ? (
-          <div ref={contentContainerRef} className="prose prose-sm dark:prose-invert max-w-none min-h-0 flex-1 overflow-auto p-4">
+          <div
+            ref={contentContainerRef}
+            className="prose prose-sm dark:prose-invert max-w-none min-h-0 flex-1 overflow-auto p-4 relative"
+            onMouseUp={handlePreviewMouseUp}
+            onClick={handlePreviewClick}
+          >
             <LobeChatMarkdown content={localContent} />
+            {floatingQuote.visible && (
+              <FloatingQuoteButton
+                position={floatingQuote.position}
+                onQuote={handleQuote}
+                onClose={() => setFloatingQuote((prev) => ({ ...prev, visible: false }))}
+              />
+            )}
           </div>
         ) : (
-          <div ref={contentContainerRef} className="min-h-0 flex-1 overflow-auto">
+          <div
+            ref={contentContainerRef}
+            className="relative min-h-0 flex-1 overflow-auto"
+            onMouseUp={handlePreviewMouseUp}
+            onClick={handlePreviewClick}
+          >
             <SyntaxHighlighter
               language={language}
               style={oneDark}
@@ -563,6 +828,13 @@ export function CodeEditor({
             >
               {localContent}
             </SyntaxHighlighter>
+            {floatingQuote.visible && (
+              <FloatingQuoteButton
+                position={floatingQuote.position}
+                onQuote={handleQuote}
+                onClose={() => setFloatingQuote((prev) => ({ ...prev, visible: false }))}
+              />
+            )}
           </div>
         )
       ) : (

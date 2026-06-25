@@ -42,7 +42,7 @@ soft_constraints:
 deliverables:
 - name: review_report
   description: JSON格式的复盘报告
-  output_path: '{{workspace}}/review_report.json'
+  output_path: '{{workspace}}/docs/working/review_report.json'
   type: json
   required: true
 tool_ids:

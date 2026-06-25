@@ -365,17 +365,6 @@ class TrackPlugin(IOutputPlugin):
             self._initialized_pipeline_ids.add(pipeline_run_id)
             existing = storage.list_by_pipeline(pipeline_run_id)[0]
 
-            # pipe 继承历史落盘：新 pipeline 还没有任何记录、但 state.messages 里
-            # 装载了源管道的继承历史时（state._inherited_history 置真），把这些历史
-            # 补存进新 pipeline 文件。继承历史是 build_initial_state 阶段装载的，
-            # 不经过 LLM/工具执行事件，下方事件驱动保存逻辑看不到，默认会丢失。
-            # 补存后新 pipeline 文件包含完整历史，可二次重试/被再次继承。
-            # 顺序：先落盘（占 sequence 号）→ 再对齐计数器，保证 sequence 连续。
-            if not existing and ctx.state.get("_inherited_history"):
-                self._persist_inherited_history(ctx, storage, pipeline_run_id, container_task_id)
-                # 落盘后重新查一次，使下方 sequence 对齐基于已写入的历史记录
-                existing = storage.list_by_pipeline(pipeline_run_id)[0]
-
             if existing:
                 max_seq = max(r.sequence for r in existing)
                 # 更新本地计数器（关键：确保 fallback 路径从正确值开始）
@@ -466,6 +455,17 @@ class TrackPlugin(IOutputPlugin):
             # 见 _resolve_ai_record_id 的 BUG-FIX 说明（修复多轮/resume 场景 id 断裂导致的重复渲染）。
             preset_record_id = ctx.state.get("preset_ai_record_id") or ""
             ai_record_id = self._resolve_ai_record_id(pipeline_run_id, preset_record_id)
+            # BUG-FIX-fix_20260625_ai_record_id_duplicate:
+            # 问题根因: 一个 run() 包含多轮 LLM 迭代（while 循环），bridge.message_id
+            #   在整个 run 期间不变（一个气泡），但每轮迭代都会落盘一条 ai 记录。
+            #   若所有 ai 记录共用同一 record_id，storage._records dict 会互相覆盖，
+            #   导致 list_by_pipeline 回读时丢失中间轮次的 ai 记录 → tool 结果变孤儿
+            #   → normalize 清理 → 继承/重试时历史残缺。
+            # 修复方案: 首轮迭代（iteration==1）用裸 message_id（保持前端 id 契约），
+            #   后续迭代追加 #iteration 后缀保证唯一。前端按 sequence 渲染消息，
+            #   record_id 仅作 React key，带后缀不影响渲染。
+            if iteration > 1:
+                ai_record_id = f"{ai_record_id}#{iteration}"
             ai_record = ExecutionRecordData(
                 record_id=ai_record_id,
                 pipeline_run_id=pipeline_run_id,
@@ -552,107 +552,6 @@ class TrackPlugin(IOutputPlugin):
                         storage.save(tool_record)
                     except Exception:
                         logger.exception("工具执行记录持久化失败")
-
-    def _persist_inherited_history(
-        self,
-        ctx: PluginContext,
-        storage: ExecutionRecordStorage,
-        pipeline_run_id: str,
-        container_task_id: str,
-    ) -> None:
-        """把 pipe 继承来的历史对话落盘到新 pipeline 文件。
-
-        触发条件（由调用方保证）：新 pipeline 还没有任何记录，且
-        state._inherited_history 为真（build_initial_state 在装载源管道历史时置真）。
-
-        这些历史消息在 build_initial_state 阶段被装入 state.messages，
-        但不经过 LLM/工具执行事件，_try_persist_record 的事件驱动保存逻辑
-        看不到它们，默认不会落盘。本方法补做一次对账式落盘，使新 pipeline
-        文件包含完整历史，可二次重试/被再次继承。
-
-        设计要点：
-        1. sequence 共享计数器：每条历史消息递增占用 sequence 号，
-           后续事件驱动保存会自然续号，保证 sequence 单调连续。
-        2. iteration=0：标记为继承历史，与本轮执行事件（iteration>=1）区分，
-           便于将来统计/过滤。
-        3. role→type 映射：与 _restore_conversation_history / resolve_conversation_history
-           保持一致的反向映射，保证读回结构一致。
-        4. 同步 _last_saved_user_input：若历史末尾含 user 消息（build_initial_state
-           追加的新输入），标记之，使下方 iteration==1 的 user 保存自动跳过重复。
-
-        Args:
-            ctx: 插件执行上下文（读取 state.messages）
-            storage: 执行记录存储后端
-            pipeline_run_id: 当前新 pipeline ID
-            container_task_id: 容器任务 ID（可空）
-        """
-        messages = ctx.state.get("messages") or []
-        if not messages:
-            return
-
-        # 共享 sequence 计数器：与事件驱动保存共用同一计数器，保证连续
-        try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
-            _entry = get_engine_registry().get(pipeline_run_id)
-        except Exception:
-            _entry = None
-
-        _role_to_type = {
-            "user": "user", "assistant": "ai",
-            "tool": "tool", "system": "system",
-        }
-
-        saved_count = 0
-        _last_user_content = ""
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role", "user")
-            rec_type = _role_to_type.get(role, "user")
-
-            # 分配 sequence：优先共享计数器，registry 不可用时用本地计数器 fallback
-            if _entry is not None:
-                seq = _entry.next_sequence()
-            else:
-                seq = self._local_sequences.get(pipeline_run_id, 0) + 1
-                self._local_sequences[pipeline_run_id] = seq
-
-            # 序列化 tool_calls（assistant 消息的函数调用）
-            tool_calls_json = None
-            _tc = msg.get("tool_calls")
-            if _tc:
-                with contextlib.suppress(TypeError, ValueError):
-                    tool_calls_json = json.dumps(_tc, ensure_ascii=False, default=str)
-
-            record = ExecutionRecordData(
-                pipeline_run_id=pipeline_run_id,
-                type=rec_type,
-                sequence=seq,
-                iteration=0,  # 0 = 继承历史，区分本轮执行事件
-                role=role,
-                content=str(msg.get("content", "") or ""),
-                name=msg.get("name"),
-                tool_call_id=msg.get("tool_call_id"),
-                tool_input=msg.get("tool_input"),
-                tool_calls_json=tool_calls_json,
-                container_task_id=container_task_id or None,
-            )
-            try:
-                storage.save(record)
-                saved_count += 1
-                if role == "user":
-                    _last_user_content = str(msg.get("content", "") or "")
-            except Exception:
-                logger.exception("继承历史记录持久化失败: seq=%d", seq)
-
-        # 同步去重标志：避免下方 iteration==1 的 user 保存重复写最后一条 user
-        if _last_user_content:
-            self._last_saved_user_input = _last_user_content
-
-        logger.debug(
-            "TrackPlugin: 继承历史落盘完成 | pipeline=%s | saved=%d | total_msgs=%d",
-            pipeline_run_id[:12], saved_count, len(messages),
-        )
 
     @staticmethod
     def _extract_injected_content(current: str, previous: str) -> str:

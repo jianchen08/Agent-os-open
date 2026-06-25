@@ -436,6 +436,10 @@ class TaskExecutorMixin:
 
         _inherit_pipe_pipeline_id = task_data.get("_inherit_pipe_pipeline_id")
 
+        # task_submit 预生成的 pipeline_id（pipe 继承时已同步 clone 好历史到该管道）。
+        # 引擎复用它，避免重复 clone；None 表示非继承或 task_submit 未预生成。
+        _pre_pipeline_id = task_data.get("_pre_pipeline_id")
+
 
 
         # ── 5. 注册管道 + 发送任务输入 ──
@@ -454,7 +458,7 @@ class TaskExecutorMixin:
 
             _reg_result = _registry.register_pipeline(
 
-                pipeline_id=existing_pipeline_id or "",
+                pipeline_id=existing_pipeline_id or _pre_pipeline_id or "",
 
                 thread_id=_ws_thread_id or "",
 
@@ -528,11 +532,18 @@ class TaskExecutorMixin:
 
 
 
-            # pipe 继承：优先使用重试的 pipeline_id
+            # pipe 继承：物理拷贝源管道 records → 引擎自加载（和重试同路）
 
-            _history_pipeline_id = existing_pipeline_id or _inherit_pipe_pipeline_id
+            if _inherit_pipe_pipeline_id and not existing_pipeline_id:
 
-            conversation_history = await self._restore_conversation_history(_history_pipeline_id)
+                # 历史已由 task_submit 同步 clone 到 _pre_pipeline_id（=pipeline_id），
+                # 引擎经 resolve_conversation_history 从存储自加载，无需再 clone。
+
+                conversation_history = None
+
+            else:
+
+                conversation_history = await self._restore_conversation_history(existing_pipeline_id)
 
 
 
@@ -607,7 +618,7 @@ class TaskExecutorMixin:
 
                     # 获取管道最终状态
 
-                    _pipeline_state = getattr(_engine_ref, '_last_state', None)
+                    _pipeline_state = getattr(_engine_ref, 'last_state', None)
 
 
 

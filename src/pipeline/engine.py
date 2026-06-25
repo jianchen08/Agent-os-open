@@ -1626,6 +1626,21 @@ class PipelineEngine:
 
 
 
+    @property
+
+    def last_state(self) -> dict[str, Any] | None:
+
+        """管道最近一次运行结束后的状态快照。
+
+        引擎 ``_run_loop`` 走完（正常 / 取消 / 异常）后在 finally 中赋值。
+        供任务侧诊断失败原因（raw_error / ended / iteration 等），
+        避免外部直接访问私有 ``_last_state``。
+        """
+
+        return self._last_state
+
+
+
     # ------------------------------------------------------------------
 
     # 挂起/恢复

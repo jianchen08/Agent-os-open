@@ -91,7 +91,7 @@ class PluginChain:
 
             # 跳过剩余插件
             if result.skip_remaining:
-                logger.info(
+                logger.debug(
                     "[%s] skip_remaining=True, skipping remaining plugins",
                     plugin.name,
                 )

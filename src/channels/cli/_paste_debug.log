@@ -1,7 +1,0 @@
-[15:31:55] reader put: 'budui1'
-[15:31:55] first line: 'budui1'
-[15:31:55] drain start, isatty=True
-[15:31:55] drain: reader started=True, eof=False, qsize=0
-[15:31:55] drain read: None
-[15:31:55] drain done: 0 extra lines
-[15:31:55] after drain: 1 lines total

@@ -39,7 +39,6 @@ def _policy(execution: str, isolation: IsolationLevel = IsolationLevel.HOST) -> 
     return ToolIsolationPolicy(
         isolation=isolation,
         execution=execution,
-        fallback="allow",
     )
 
 
@@ -223,7 +222,7 @@ def _make_guard_with_policy(docker_available=False, force_host=False, tools=None
         # 注入自定义策略（不依赖 yaml 加载）
         loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
         loader._default = ToolIsolationPolicy(
-            isolation=IsolationLevel.CONTAINER, fallback="deny",
+            isolation=IsolationLevel.CONTAINER,
         )
         loader._tools = dict(tools)
     else:

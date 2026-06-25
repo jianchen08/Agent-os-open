@@ -2,7 +2,7 @@
  * ChatInput 全局桥接 Store
  *
  * 职责一：解决跨组件向 ChatInput 插入文本的问题。
- * 外部组件（如 FileReviewTab）调用 requestInsert 写入待插入文本，
+ * 外部组件（如 CodeEditor 的选中引用浮动按钮）调用 requestInsert 写入待插入文本，
  * ChatInput 组件订阅 pendingInsert 消费后调用 consumeInsert 清空。
  *
  * 职责二：草稿保存功能。

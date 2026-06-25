@@ -30,34 +30,10 @@ const SETTINGS_CARDS: SettingCard[] = [
     icon: '🎨',
   },
   {
-    title: 'API 配置',
-    description: '管理外部 API 密钥和端点',
-    href: '/settings/api',
-    icon: '🔑',
-  },
-  {
     title: 'LLM 配置',
     description: '配置大语言模型参数',
     href: '/settings/llm',
     icon: '🤖',
-  },
-  {
-    title: '上下文窗口',
-    description: '管理上下文窗口大小和策略',
-    href: '/settings/context',
-    icon: '📏',
-  },
-  {
-    title: '并发配置',
-    description: '设置任务并发数和队列参数',
-    href: '/settings/concurrency',
-    icon: '⚡',
-  },
-  {
-    title: '成本控制',
-    description: 'Token 用量限制和预算管理',
-    href: '/settings/cost',
-    icon: '💰',
   },
   {
     title: '插件设置',

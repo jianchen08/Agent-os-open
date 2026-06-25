@@ -323,7 +323,7 @@ class TimerManager:
         )
 
         self._timers[task_id] = timer
-        logger.info("创建计时器: task_id=%s, timeout=%ss", task_id, timeout)
+        logger.debug("创建计时器: task_id=%s, timeout=%ss", task_id, timeout)
 
         return timer
 
@@ -370,7 +370,7 @@ class TimerManager:
         )
 
         self._timers[task_id] = new_timer
-        logger.info("重置计时器: task_id=%s, timeout=%ss", task_id, timeout)
+        logger.debug("重置计时器: task_id=%s, timeout=%ss", task_id, timeout)
 
         return new_timer
 
@@ -395,7 +395,7 @@ class TimerManager:
 
         timer.status = TimerStatus.CANCELLED
         del self._timers[task_id]
-        logger.info("取消计时器: task_id=%s", task_id)
+        logger.debug("取消计时器: task_id=%s", task_id)
 
         return True
 
