@@ -1,0 +1,71 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - button "隐藏侧边栏" [ref=e6]:
+          - img [ref=e7]
+        - heading "SuperTerminal" [level=1] [ref=e10]
+      - generic [ref=e11]:
+        - navigation [ref=e12]:
+          - button "工具" [ref=e13]
+          - button "智能体" [ref=e14]
+          - button "监控" [ref=e15]
+          - button "记忆" [ref=e16]
+          - button "设置" [ref=e17]
+          - button "调试" [ref=e18]
+        - generic [ref=e20]:
+          - button "切换到浅色模式" [ref=e21]:
+            - img [ref=e22]
+          - button "更多主题选项" [ref=e24]:
+            - img [ref=e25]
+      - generic [ref=e31]:
+        - button "Connected" [ref=e34]:
+          - generic [ref=e36]: Connected
+        - button "Five-space" [ref=e37]:
+          - img [ref=e38]
+          - generic [ref=e43]: Five-space
+        - generic [ref=e44]: test
+        - button "退出登录" [ref=e45]:
+          - img [ref=e46]
+    - generic [ref=e49]:
+      - complementary [ref=e50]:
+        - button "+ 新会话" [ref=e52]
+        - generic [ref=e54]:
+          - generic [ref=e55]: 全部会话
+          - 'button "会话: 灵汐" [ref=e67]':
+            - img [ref=e68]
+            - generic [ref=e70]: 灵汐
+            - button "更多操作" [ref=e72]:
+              - img [ref=e73]
+      - main [ref=e56]:
+        - generic [ref=e77]:
+          - generic [ref=e79]:
+            - generic [ref=e80]: 💬
+            - paragraph [ref=e81]: 开始新的对话
+            - paragraph [ref=e82]: 发送消息开始与 AI 助手交流
+          - generic [ref=e83]:
+            - button "通知中心" [ref=e85]:
+              - img
+            - region "聊天输入区域" [ref=e86]:
+              - generic [ref=e87]:
+                - textbox "消息输入" [ref=e88]:
+                  - /placeholder: Enter 发送 · Shift+Enter 换行 · 支持拖拽上传
+                - generic [ref=e89]:
+                  - generic [ref=e90]:
+                    - button "添加附件" [ref=e91]:
+                      - img
+                    - button "语音输入" [ref=e93]:
+                      - img
+                    - button "点击启用思考模式 (minimax-m3)" [ref=e94]:
+                      - img
+                      - generic [ref=e95]: 普通模式
+                    - generic [ref=e96]:
+                      - img [ref=e97]
+                      - generic [ref=e101]: minimax-m3
+                      - generic [ref=e102]: "|"
+                      - generic [ref=e104]: "0"
+                      - generic [ref=e105]: /
+                      - generic [ref=e106]: 1,048,576
+                  - button "发送消息" [disabled]:
+                    - img
+  - region "Notifications alt+T"

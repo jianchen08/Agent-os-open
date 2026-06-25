@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>消息发送/注入/渲染全链路审查报告</title>
+<style>
+:root { --bg: #fff; --fg: #1a1a2e; --accent: #3b82f6; --warn: #f59e0b; --err: #ef4444; --ok: #22c55e; --border: #d1d5db; --code-bg: #f3f4f6; --card-bg: #fafafa; }
+* { box-sizing: border-box; }
+body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; max-width: 1400px; margin: 0 auto; padding: 2rem; color: var(--fg); line-height: 1.7; background: var(--bg); font-size: 14px; }
+h1 { font-size: 2rem; border-bottom: 3px solid var(--accent); padding-bottom: 0.5rem; }
+h2 { font-size: 1.5rem; margin-top: 2.5rem; color: var(--accent); border-left: 4px solid var(--accent); padding-left: 1rem; }
+h3 { font-size: 1.15rem; margin: 2rem 0 1rem; color: #374151; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }
+th, td { border: 1px solid var(--border); padding: 0.55rem 0.7rem; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; white-space: nowrap; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; }
+.badge-ok { background: #dcfce7; color: #166534; } .badge-warn { background: #fef3c7; color: #92400e; } .badge-err { background: #fee2e2; color: #991b1b; } .badge-info { background: #dbeafe; color: #1e40af; }
+.problem-card { border: 2px solid var(--err); border-radius: 8px; padding: 1rem; margin: 1rem 0; background: #fef2f2; }
+.problem-card h4 { margin: 0 0 0.5rem; color: #dc2626; }
+.improvement-card { border: 2px solid var(--ok); border-radius: 8px; padding: 1rem; margin: 1rem 0; background: #f0fdf4; }
+.improvement-card h4 { margin: 0 0 0.5rem; color: #16a34a; }
+code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+pre { background: #1e1e2e; color: #cdd6f4; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+pre code { background: none; padding: 0; color: inherit; }
+.toc { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+.toc a { color: var(--accent); text-decoration: none; }
+.toc ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+/* Flowchart */
+.flow { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; overflow-x: auto; font-size: 0.85em; }
+.flow-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.flow-row.center { justify-content: center; }
+.flow-row.between { justify-content: space-between; }
+.flow-row.nowrap { flex-wrap: nowrap; }
+.flow-node { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; font-weight: 500; text-align: center; white-space: nowrap; }
+.flow-node.block { display: flex; flex-direction: column; white-space: normal; min-width: 120px; text-align: center; }
+.flow-node.blue { background: #dbeafe; border: 1.5px solid #93c5fd; color: #1e40af; }
+.flow-node.yellow { background: #fef3c7; border: 1.5px solid #fcd34d; color: #92400e; }
+.flow-node.green { background: #dcfce7; border: 1.5px solid #86efac; color: #166534; }
+.flow-node.red { background: #fee2e2; border: 1.5px solid #fca5a5; color: #991b1b; }
+.flow-node.gray { background: #f3f4f6; border: 1.5px solid #d1d5db; color: #374151; }
+.flow-node.purple { background: #f3e8ff; border: 1.5px solid #d8b4fe; color: #7c3aed; }
+.flow-node.diamond { border-radius: 2px; transform: rotate(0deg); min-width: 80px; }
+.flow-arrow { display: inline-flex; align-items: center; padding: 0 4px; color: #9ca3af; font-weight: bold; font-size: 1.2em; }
+.flow-arrow.down { flex-direction: column; }
+.flow-group { border: 1.5px dashed var(--border); border-radius: 8px; padding: 0.8rem; margin: 0.5rem 0; background: rgba(0,0,0,0.01); }
+.flow-group-title { font-size: 0.8em; color: #6b7280; margin-bottom: 0.4rem; font-weight: 600; }
+.flow-label { font-size: 0.75em; color: #9ca3af; font-style: italic; }
+.flow-gap { width: 24px; display: inline-block; }
+/* color boxes for legend */
+.legend { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; font-size: 0.8em; }
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
+.pipe { color: #9ca3af; margin: 0 4px; }
+</style>
+</head>
+<body>
+
+<h1>&#128269; 消息发送/注入/渲染全链路审查报告</h1>
+
+<p><strong>项目：</strong>Agent OS &nbsp;|&nbsp; <strong>审查日期：</strong>2026-06-02 &nbsp;|&nbsp; <strong>范围：</strong>前后端完整消息链路</p>
+
+<div class="toc">
+  <strong>&#128211; 目录</strong>
+  <ol>
+    <li><a href="#sec1">总览：消息流转全景图</a></li>
+    <li><a href="#sec2">用户消息发送链路（前端 → 后端）</a></li>
+    <li><a href="#sec3">后端消息接收与路由（send_pipeline_message）</a></li>
+    <li><a href="#sec4">Engine 消息注入与消费</a></li>
+    <li><a href="#sec5">Stream Bridge 流式事件生成</a></li>
+    <li><a href="#sec6">系统通知/注入链路（非用户消息）</a></li>
+    <li><a href="#sec7">前端消息接收与渲染</a></li>
+    <li><a href="#sec8">问题清单汇总</a></li>
+    <li><a href="#sec9">简化与改进方案</a></li>
+    <li><a href="#sec10">实际日志问题分析（2026-06-03 执行记录）</a></li>
+  </ol>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="sec1">1. 总览：消息流转全景图</h2>
+
+<div class="flow">
+
+<div class="flow-group">
+  <div class="flow-group-title">&#x1F5A5; 前端 (React + TypeScript)</div>
+  <div class="flow-row center">
+    <span class="flow-node blue">ChatInput 输入框</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">router.tsx<br>handleSendMessage</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">创建本地<br>user Message</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">pipelineMessageStore<br>.addMessage</span>
+  </div>
+  <div class="flow-row center" style="margin-top:4px">
+    <span class="flow-node blue">GlobalWebSocket<br>.sendUserInput</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">WS 连接<br>/ 队列 / 去重</span>
+    <span class="flow-arrow">↓</span>
+  </div>
+</div>
+
+<div class="flow-row center"><span class="flow-label">ws:// 协议</span></div>
+
+<div class="flow-group">
+  <div class="flow-group-title">&#x2699; 后端 (Python + aiohttp)</div>
+  <div class="flow-row center">
+    <span class="flow-node gray">WebSocketServer<br>_process_text_message</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">on_message Handler<br>app_factory.py</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node yellow">pipeline/message_bus.py<br><b>send_pipeline_message</b></span>
+  </div>
+</div>
+
+<div class="flow-row center"><span class="flow-arrow">↓</span></div>
+
+<div class="flow-group">
+  <div class="flow-group-title">&#x1F504; Pipeline Engine — 4 种注入路径</div>
+  <div class="flow-row between">
+    <span class="flow-node green block">idle<br><small>创建 sink+bridge<br>独立线程 run</small></span>
+    <span class="flow-node yellow block">running<br><small>inject_message<br>→ pending_notifications</small></span>
+    <span class="flow-node purple block">suspended<br><small>inject_message<br>→ wake 路径</small></span>
+    <span class="flow-node red block">no engine<br><small>_try_revive<br>从历史恢复</small></span>
+  </div>
+  <div class="flow-row center" style="margin-top:6px">
+    <span class="flow-arrow">↓</span>
+    <span class="flow-node gray" style="font-weight:700">Engine._run_loop</span>
+    <span class="flow-arrow">↓</span>
+  </div>
+</div>
+
+<div class="flow-group">
+  <div class="flow-group-title">&#x1F4E1; Stream Bridge</div>
+  <div class="flow-row center">
+    <span class="flow-node green">PipelineStreamBridge<br>.on_chunk</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">asyncio.Queue</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">drain_loop<br>异步消费</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node yellow">格式化事件<br>stream_start/chunk<br>thinking/tool/end</span>
+  </div>
+</div>
+
+<div class="flow-row center"><span class="flow-arrow">↓</span></div>
+
+<div class="flow-group">
+  <div class="flow-group-title">&#x1F4E8; WebSocket 推送</div>
+  <div class="flow-row center">
+    <span class="flow-node red">TargetedSink<br>.send_event</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">ws_interaction_notifier<br>.send_to_thread</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">WS 连接 → 前端</span>
+  </div>
+</div>
+
+<div class="flow-group">
+  <div class="flow-group-title">&#x1F3A8; 前端接收与渲染</div>
+  <div class="flow-row center">
+    <span class="flow-node blue">GlobalWebSocket<br>_handleMessage</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">事件分发<br>_emit(type,data)</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">10+ 处理器<br>stream/thinking/tool<br>message/lifecycle</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">pipelineMessageStore<br>更新 parts[]</span>
+  </div>
+  <div class="flow-row center" style="margin-top:6px">
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">React 重渲染</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">MessageList<br>虚拟滚动</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">MessageItem</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node green">ContentRenderer<br>Markdown/Thinking<br>ActivityCard/System</span>
+  </div>
+</div>
+
+<div class="legend" style="margin-top:1rem">
+  <div class="legend-item"><span class="legend-swatch" style="background:#dbeafe"></span> 前端</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#fef3c7"></span> 核心路由</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#dcfce7"></span> 流式生成</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#fee2e2"></span> 推送/错误</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#f3f4f6"></span> 基础设施</div>
+</div>
+</div>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec2">2. 用户消息发送链路（前端 → 后端）</h2>
+
+<div class="flow">
+
+<div class="flow-group">
+  <div class="flow-group-title">用户输入</div>
+  <div class="flow-row center">
+    <span class="flow-node blue block">用户输入文本 + Enter</span>
+  </div>
+  <div class="flow-row center"><span class="flow-arrow">↓</span></div>
+  <div class="flow-row center">
+    <span class="flow-node gray diamond">ChatInput<br>模式?</span>
+  </div>
+  <div class="flow-row between" style="max-width:300px;margin:4px auto">
+    <span class="flow-node gray">full<br><small>文件/语音/思考</small></span>
+    <span class="flow-node gray">compact<br><small>仅文本</small></span>
+  </div>
+  <div class="flow-row center"><span class="flow-arrow">↓</span></div>
+  <div class="flow-row center">
+    <span class="flow-node gray">ChatContainer.onSendMessage</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">router.tsx<br><b>handleSendMessage</b></span>
+  </div>
+</div>
+
+<div class="flow-group">
+  <div class="flow-group-title">handleSendMessage 核心逻辑</div>
+  <div class="flow-row center nowrap" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node blue">确定 targetPipelineId</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">创建 userMessage<br>id=UUID, role='user'</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node yellow">pipelineStore<br>.addMessage</span>
+  </div>
+  <div class="flow-row center" style="margin-top:6px">
+    <span class="flow-node gray diamond">交互中?</span>
+  </div>
+  <div class="flow-row between" style="max-width:380px;margin:4px auto">
+    <span class="flow-node warn" style="background:#fef3c7;border-color:#fcd34d">是 → sendInteractionResponse</span>
+    <span class="flow-node gray">否 → sendUserInput 直接发送</span>
+  </div>
+</div>
+
+<div class="flow-group">
+  <div class="flow-group-title">GlobalWebSocket.sendUserInput → _send</div>
+  <div class="flow-row center nowrap" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node blue">构造 PendingMessage<br>type:'user_input'<br>thread_id, content<br>pipeline_id</span>
+    <span class="flow-arrow">↓</span>
+  </div>
+  <div class="flow-row center">
+    <span class="flow-node gray diamond">连接状态?</span>
+  </div>
+  <div class="flow-row between" style="max-width:500px;margin:4px auto">
+    <div style="text-align:center">
+      <span class="flow-node green">connected</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node gray diamond">buffer &gt; 1MB?</span><br>
+      <span class="flow-arrow">↓ 否</span>
+      <span class="flow-node green">ws.send(JSON)</span><br>
+      <span class="flow-arrow">↓ 是</span>
+      <span class="flow-node yellow">入队 + 去重</span>
+    </div>
+    <div style="text-align:center">
+      <span class="flow-node red">disconnected</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node yellow">入发送队列<br>_enqueueIfNotDuplicate</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node gray">等待 _flushQueue<br>重连后批量发送</span>
+    </div>
+  </div>
+</div>
+
+<div class="flow-row center">
+  <span class="flow-node green block">→ 到达后端 WebSocketServer</span>
+</div>
+
+</div>
+
+<h3>分支与 Fallback 标注</h3>
+<table>
+<tr><th>分支点</th><th>条件</th><th>行为</th><th>风险</th></tr>
+<tr><td>ChatInput 模式</td><td>full / compact</td><td>full 支持文件/语音/思考；compact 仅文本</td><td><span class="badge badge-ok">OK</span></td></tr>
+<tr><td>交互中判断</td><td>enteredInteraction 非空</td><td>先自动完成交互请求，再发消息</td><td><span class="badge badge-warn">&#9888; 自动完成可能不期望</span></td></tr>
+<tr><td>连接断开</td><td>status != connected</td><td>消息入发送队列，等待重连后 flush</td><td><span class="badge badge-warn">&#9888; 队列无上限，重连雪崩</span></td></tr>
+<tr><td>缓冲区满</td><td>bufferedAmount &gt; 1MB</td><td>消息入队延迟发送</td><td><span class="badge badge-ok">OK</span></td></tr>
+<tr><td>重复消息</td><td>同 thread_id+type+clientMsgId</td><td>跳过入队</td><td><span class="badge badge-ok">OK</span></td></tr>
+<tr><td>clientMessageId 为空</td><td>opts?.clientMessageId=""</td><td>去重 key 退化为 thread_id+type+""</td><td><span class="badge badge-err">&#128308; 去重 key 退化</span></td></tr>
+</table>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec3">3. 后端消息接收与路由（send_pipeline_message）</h2>
+
+<p>这是整个系统最复杂的函数，包含了 <b>4 种注入路径</b> + <b>系统通知特殊处理</b>。</p>
+
+<div class="flow">
+
+<div class="flow-group">
+  <div class="flow-group-title">入口验证</div>
+  <div class="flow-row center">
+    <span class="flow-node yellow block">send_pipeline_message<br>pipeline/message_bus.py</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray diamond">pipeline_id<br>为空?</span>
+    <span class="flow-arrow" style="margin:0 0.5rem">是 →</span>
+    <span class="flow-node red">FAIL</span>
+    <span class="flow-arrow" style="margin:0 0.5rem">否 →</span>
+    <span class="flow-node gray diamond">message<br>仅空白?</span>
+    <span class="flow-arrow" style="margin:0 0.5rem">是 →</span>
+    <span class="flow-node red">FAIL</span>
+  </div>
+  <div class="flow-row center" style="margin-top:4px">
+    <span class="flow-arrow">否 →</span>
+    <span class="flow-node gray">提取 source<br>metadata.source 或 'user'</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">获取 _event_sink<br>3 级 fallback</span>
+  </div>
+</div>
+
+<div class="flow-group" style="border-color:#fca5a5;background:#fef2f2">
+  <div class="flow-group-title" style="color:#dc2626">&#x26A0; 系统通知处理 (source=system/trigger) — 4 条降级路径</div>
+  <div class="flow-row center">
+    <span class="flow-node gray diamond">bridge<br>正在流式?</span>
+  </div>
+  <div class="flow-row between" style="margin:4px auto">
+    <div style="text-align:center;flex:1">
+      <span class="flow-node yellow">是: stream_started=true</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node yellow">&#x2460; 缓冲到 bridge<br>_pending_notifications<br>stream_end 后刷出</span>
+    </div>
+    <div style="text-align:center;flex:1">
+      <span class="flow-node gray">否: 非流式</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node gray diamond">_event_sink 存在?</span><br>
+      <span style="display:block;margin-top:4px">
+        <span class="flow-arrow">是 →</span>
+        <span class="flow-node green">&#x2461; 立即推送<br>system_notification</span><br>
+        <span class="flow-arrow">否 →</span>
+        <span class="flow-node yellow">&#x2462; fallback:<br>send_frontend_event</span><br>
+        <span class="flow-arrow">失败 →</span>
+        <span class="flow-node red">&#x2463; 放弃 — 通知丢失</span>
+      </span>
+    </div>
+  </div>
+</div>
+
+<div class="flow-row center" style="margin-top:10px">
+  <span class="flow-arrow">↓ 所有路径汇聚</span>
+</div>
+
+<div class="flow-group" style="border-color:#93c5fd;background:#eff6ff">
+  <div class="flow-group-title">_find_engine 状态判定</div>
+  <div class="flow-row center nowrap" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node gray">Registry.get</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray diamond">is_suspended?</span>
+    <span class="flow-arrow" style="margin:0 4px">是</span>
+    <span class="flow-node purple">suspended</span>
+    <span class="flow-arrow" style="margin:0 4px">否</span>
+    <span class="flow-node gray diamond">is_running?</span>
+    <span class="flow-arrow" style="margin:0 4px">是</span>
+    <span class="flow-node yellow">running</span>
+    <span class="flow-arrow" style="margin:0 4px">否</span>
+    <span class="flow-node gray diamond">_run_started?</span>
+    <span class="flow-arrow" style="margin:0 4px">false</span>
+    <span class="flow-node green">idle</span>
+    <span class="flow-arrow" style="margin:0 4px">true</span>
+    <span class="flow-node red">None (已结束)</span>
+</div>
+</div>
+
+<div class="flow-row center" style="margin:10px 0">
+  <span class="flow-node gray diamond" style="font-size:1.1em;padding:8px 16px">引擎状态?</span>
+</div>
+
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+  <!-- 路径1: Idle -->
+  <div class="flow-group" style="flex:1;min-width:200px;background:#eff6ff">
+    <div class="flow-group-title">&#x2776; idle 引擎</div>
+    <div style="text-align:center;font-size:0.82em">
+      <span class="flow-node green">创建 TargetedSink</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node green">ensure_bridge →<br>PipelineStreamBridge</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node yellow">run_in_executor<br>独立线程启动 engine.run()</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node green">_start_bg_drain<br>启动 drain_loop</span><br>
+      <span class="flow-label">source=user 时发 pipeline_received<br>(前端忽略)</span>
+    </div>
+  </div>
+
+  <!-- 路径2: Running / Suspended -->
+  <div class="flow-group" style="flex:1;min-width:200px;background:#fefce8">
+    <div class="flow-group-title">&#x2777; running / suspended</div>
+    <div style="text-align:center;font-size:0.82em">
+      <span class="flow-node yellow">engine.inject_message<br>(message, source)</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node gray">suspended 或 source=system?</span><br>
+      <span class="flow-arrow">是 ↓</span>
+      <span class="flow-node green">ensure_bridge<br>确保 drain_loop 运行</span><br>
+      <span class="flow-arrow">否 ↓</span>
+      <span class="flow-node yellow">_auto_complete_interaction<br>(running + user)</span>
+    </div>
+  </div>
+
+  <!-- 路径3: No Engine -->
+  <div class="flow-group" style="flex:1;min-width:200px;background:#f0fdf4">
+    <div class="flow-group-title">&#x2778; 无引擎 → revive</div>
+    <div style="text-align:center;font-size:0.82em">
+      <span class="flow-node green">_try_revive_pipeline</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node gray">_load_history_from_storage</span><br>
+      <span class="flow-arrow">↓ 有历史</span>
+      <span class="flow-node yellow">registry.revive_pipeline<br>+ _run_engine_in_thread</span><br>
+      <span class="flow-arrow">↓</span>
+      <span class="flow-node green">_start_bg_drain</span><br>
+      <span class="flow-arrow">↓ 无历史</span>
+      <span class="flow-node red">FAIL</span>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<h3>关键问题标注</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: 系统通知路径与引擎消息注入的时序竞态</h4>
+  <p><strong>现象：</strong>系统通知（如子任务完成）先推送 WS 事件创建前端气泡，然后才调用 <code>engine.inject_message()</code>。如果引擎在 running 状态且下一轮迭代未开始，前端看到通知但 AI 不知道。</p>
+  <p><strong>根本原因：</strong>非 user 来源的消息分两阶段处理：先推送 system_notification（约第270行），再调用 inject_message（约第373行）。两者无同步保障。</p>
+</div>
+
+<div class="problem-card">
+  <h4>&#128308; P0: system_notification 降级路径过多</h4>
+  <p>非 user 来源有 4 条降级路径：&#x2460; bridge 缓冲 → &#x2461; event_sink 推送 → &#x2462; send_frontend_event fallback → &#x2463; 放弃。每条路径的 level 计算和 notificationType 拼接略有不一致。</p>
+</div>
+
+<div class="problem-card">
+  <h4>&#128993; P1: pipeline_received 事件前端被忽略</h4>
+  <p>后端在 source='user' 时发送 pipeline_received，但前端 handlePipelineReceived 看见 source='user' 直接 return。这个事件在所有用户场景都是空操作。</p>
+</div>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec4">4. Engine 消息注入与消费</h2>
+
+<div class="flow">
+
+<div style="display:flex;gap:12px;flex-wrap:wrap">
+
+<div class="flow-group" style="flex:1;min-width:280px;background:#eff6ff">
+  <div class="flow-group-title">engine.inject_message(message, source)</div>
+  <div style="font-size:0.84em;text-align:center">
+    <span class="flow-node gray diamond">message 空?</span><br>
+    <span class="flow-arrow">是 →</span>
+    <span class="flow-node red">拒绝</span><br>
+    <span class="flow-arrow">否 ↓</span><br>
+    <span class="flow-node gray diamond">is_suspended?</span><br>
+    <div style="display:flex;gap:4px;margin-top:4px">
+      <div style="flex:1">
+        <span class="flow-node purple">是</span><br>
+        <span style="font-size:0.8em">写入 suspended_state<br>前置拼接 user_input<br>追加到 messages</span><br>
+        <span class="flow-arrow">↓</span><br>
+        <span class="flow-node green">wake_event.set()</span>
+      </div>
+      <div style="flex:1">
+        <span class="flow-node yellow">否</span><br>
+        <span style="font-size:0.8em">追加到<br>_pending_notifications</span><br>
+        <span class="flow-arrow">↓</span><br>
+        <span class="flow-node gray diamond">source=user?</span><br>
+        <span class="flow-arrow">是 → cancel 交互</span><br>
+        <span class="flow-arrow">否 → 系统通知跳过</span><br>
+        <span class="flow-arrow">↓</span><br>
+        <span class="flow-node green">wake_event.set()</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="flow-group" style="flex:1;min-width:280px;background:#fefce8">
+  <div class="flow-group-title">consume_pending_notifications()</div>
+  <div style="font-size:0.84em;text-align:center">
+    <span class="flow-node gray">两个消费时机</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray">时机1: 每轮迭代开头 (L378)</span><br>
+    <span class="flow-node gray">时机2: target='end' 时 (L415)</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray">清空列表并返回</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node yellow">过滤空字符串<br>拼接到 state.user_input<br>设置 CORE_TYPE='llm_call'</span>
+  </div>
+</div>
+
+<div class="flow-group" style="flex:1;min-width:280px;background:#f0fdf4">
+  <div class="flow-group-title">_suspend_and_wait 挂起循环</div>
+  <div style="font-size:0.84em;text-align:center">
+    <span class="flow-node gray">路由信号=wait → 挂起</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray">保存 _suspended_state</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray">消费残留通知 → 有则立即返回</span><br>
+    <span class="flow-arrow">↓ 无</span><br>
+    <span class="flow-node green">等待 wake_event (600s x 50轮)</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray">唤醒检查:<br>wake_event / 新通知 / 子任务终态</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node yellow">超 50 轮强制唤醒</span>
+  </div>
+</div>
+
+</div>
+
+</div>
+
+<h3>问题标注</h3>
+
+<div class="problem-card">
+  <h4>&#128993; P1: inject_message 的 running 与 suspended 路径行为不对称</h4>
+  <p>suspended 路径将消息前置拼接（<code>f"{message}\n{existing}"</code>），running 路径只是追加列表。多条通知的拼接顺序可能不保证。</p>
+</div>
+
+<div class="problem-card">
+  <h4>&#128993; P1: _pending_notifications 丢失元数据</h4>
+  <p><code>list[str]</code> 只存文本，不存 source/timestamp/priority。消费时所有通知被平等拼接到 user_input。</p>
+</div>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec5">5. Stream Bridge 流式事件生成</h2>
+
+<div class="flow">
+
+<div class="flow-group">
+  <div class="flow-group-title">on_chunk 入口 + DRAIN-AUTOFIX</div>
+  <div class="flow-row center nowrap" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node blue">Engine LLM 输出<br>→ on_chunk 回调</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node green">PipelineStreamBridge<br>.on_chunk(chunk)</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">queue.put_nowait</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node gray">chunk_event.set()</span>
+  </div>
+  <div class="flow-row center" style="margin-top:8px">
+    <span class="flow-node gray diamond">DRAIN-AUTOFIX:<br>drain_loop 运行?</span>
+  </div>
+  <div class="flow-row between" style="max-width:500px;margin:4px auto">
+    <div style="text-align:center">
+      <span class="flow-node red">sink dead</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node red">静默丢弃<br>清空队列</span>
+    </div>
+    <div style="text-align:center">
+      <span class="flow-node yellow">sink alive 但<br>drain 不运行</span><br>
+      <span class="flow-arrow">↓</span><br>
+      <span class="flow-node yellow">自动 _start_bg_drain<br>重启 drain_loop</span>
+    </div>
+    <div style="text-align:center">
+      <span class="flow-node green">正常运行</span><br>
+      <span class="flow-arrow">↓</span>
+      <span class="flow-node green">继续</span>
+    </div>
+  </div>
+</div>
+
+<div class="flow-group" style="background:#fefce8">
+  <div class="flow-group-title">drain_loop 主循环 — 8 种 chunk 类型处理</div>
+  
+  <div class="flow-row center" style="margin-bottom:4px">
+    <span class="flow-node gray">循环: engine_task 未完成 或 queue 不空</span>
+  </div>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+    <div style="flex:1;min-width:200px">
+      <div class="flow-group-title" style="color:#dc2626">退出条件</div>
+      <div style="font-size:0.8em">
+        &#x25B6; sink.is_dead → stream_end(connection_lost) → 通知引擎停止<br>
+        &#x25B6; 引擎 suspended 1秒 → 挂起退出<br>
+        &#x25B6; LLM 活动超时 → stream_end(timed_out) → 刷通知<br>
+        &#x25B6; chunk=None 哨兵 → 正常退出<br>
+        &#x25B6; engine_task.done + queue.empty → 正常退出
+      </div>
+    </div>
+    <div style="flex:1;min-width:200px">
+      <div class="flow-group-title" style="color:#2563eb">运行时保活</div>
+      <div style="font-size:0.8em">
+        &#x25B6; 每 5s 发送 stream_keepalive<br>
+        &#x25B6; heartbeat_callback (可选)<br>
+        &#x25B6; 挂起期间不计入 call_timeout
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-group-title" style="margin-top:8px">chunk 类型 → 事件映射</div>
+  <div style="display:flex;gap:4px;flex-wrap:wrap;font-size:0.82em">
+    <span class="flow-node green"><b>text</b> → stream_chunk</span>
+    <span class="flow-node blue"><b>thinking</b> → thinking_start + thinking_chunk</span>
+    <span class="flow-node yellow"><b>tool_call</b> → tool_start</span>
+    <span class="flow-node yellow"><b>tool_start</b> → tool_start (关闭 thinking)</span>
+    <span class="flow-node gray"><b>tool_result</b> → tool_result (清空文本累积)</span>
+    <span class="flow-node purple"><b>pipeline_suspended</b> → state_change(suspended)</span>
+    <span class="flow-node red"><b>system</b> → 缓冲到 _pending_notifications</span>
+    <span class="flow-node gray"><b>iteration</b> → iteration 事件</span>
+    <span class="flow-node gray"><b>thinking_end</b> → thinking_end</span>
+  </div>
+
+  <div class="flow-row center" style="margin-top:10px">
+    <span class="flow-node green block">正常退出 → 关闭 thinking<br>→ stream_end → 刷出缓冲通知<br>→ send_new_message</span>
+  </div>
+</div>
+
+</div>
+
+<h3>问题标注</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: DRAIN-AUTOFIX 与 drain_loop 竞态</h4>
+  <p>on_chunk（同步回调）的 AUTOFIX 检查与 drain_loop（异步任务）退出之间存在 TOCTOU 窗口。sink death 检测与 drain_loop 退出非原子。</p>
+</div>
+
+<div class="problem-card">
+  <h4>&#128993; P1: tool_call / tool_start 双通道</h4>
+  <p>_handle_chunk 同时处理 tool_call（LLM adapter）和 tool_start（执行层）两种类型，call_id 生成逻辑不同。</p>
+</div>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec6">6. 系统通知/注入链路（非用户消息）</h2>
+
+<div class="flow">
+
+<div class="flow-group">
+  <div class="flow-group-title">6 种系统消息来源 → 统一入口 send_pipeline_message</div>
+  <div class="flow-row center nowrap" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node purple">TaskNotifier<br><small>子任务完成/失败</small></span>
+    <span class="flow-node blue">TaskIdleTimer<br><small>空闲超时提醒</small></span>
+    <span class="flow-node gray">TaskReminder<br><small>LLM 无工具调用</small></span>
+  </div>
+  <div class="flow-row center" style="margin-top:4px">
+    <span class="flow-node green">Trigger Manager<br><small>定时触发器</small></span>
+    <span class="flow-node yellow">ConversationMode<br><small>对话模式切换</small></span>
+    <span class="flow-node gray">CLI/API/飞书<br><small>多渠道消息</small></span>
+  </div>
+  <div class="flow-row center" style="margin-top:6px">
+    <span class="flow-arrow">↓</span>
+    <span class="flow-node yellow block" style="font-size:1em">send_pipeline_message<br>metadata={'source':'system'}</span>
+  </div>
+</div>
+
+<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
+
+<div class="flow-group" style="flex:1;min-width:280px;background:#fef2f2">
+  <div class="flow-group-title" style="color:#dc2626">&#x1F4E8; 前端可见通知路径</div>
+  <div style="font-size:0.84em;text-align:center">
+    <span class="flow-node red">非 user 来源</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray diamond">流式中?</span><br>
+    <span style="display:inline-block;margin:4px">
+      <span class="flow-arrow">是 →</span> <span class="flow-node yellow">缓冲到 bridge<br>_pending_notifications</span><br>
+      <span class="flow-arrow">否 →</span> <span class="flow-node green">直接推送<br>system_notification WS</span>
+    </span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node blue">前端 handleSystemNotification</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node blue">创建 system 气泡<br>精确内容去重</span>
+  </div>
+</div>
+
+<div class="flow-group" style="flex:1;min-width:280px;background:#eff6ff">
+  <div class="flow-group-title">&#x1F9E0; 引擎内部通知路径</div>
+  <div style="font-size:0.84em;text-align:center">
+    <span class="flow-node yellow">engine.inject_message</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray diamond">引擎状态?</span><br>
+    <span style="display:inline-block;margin:4px">
+      <span class="flow-arrow">suspended →</span> <span class="flow-node purple">写 suspended_state + wake</span><br>
+      <span class="flow-arrow">running →</span> <span class="flow-node yellow">追加 _pending_notifications</span>
+    </span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node green">_run_loop 下次消费</span><br>
+    <span class="flow-arrow">↓</span><br>
+    <span class="flow-node gray">拼接到 user_input<br>注入 LLM messages</span>
+  </div>
+</div>
+
+</div>
+
+<div class="flow-row center" style="margin-top:8px">
+  <span class="flow-node red block">&#x26A0; 时序竞态: 前端气泡可能先于 AI 看到通知</span>
+</div>
+
+</div>
+
+<table>
+<tr><th>来源</th><th>触发条件</th><th>通知文本示例</th><th>到前端路径</th></tr>
+<tr><td>子任务完成</td><td>任务 completed/failed</td><td>"[系统通知] 子任务 'xxx' 已完成"</td><td>send_pipeline_message → system_notification WS</td></tr>
+<tr><td>空闲超时提醒</td><td>无活动超阈值</td><td>空闲超时提醒</td><td>同上</td></tr>
+<tr><td><b>&#x26A0; 任务评估提醒</b></td><td>LLM 无工具调用</td><td>系统提醒消息</td><td><b>不走 WS 气泡，直接注入 LLM messages</b></td></tr>
+<tr><td>触发器</td><td>定时触发</td><td>触发器消息</td><td>send_pipeline_message → WS</td></tr>
+<tr><td>人工审批</td><td>用户点击审批</td><td>审批决策</td><td>直接注入 engine，不推气泡</td></tr>
+</table>
+
+<h3>问题标注</h3>
+<div class="problem-card"><h4>&#128308; P0: 通知前后端路径不同步</h4><p>子任务完成 → &#x2460; 立即推送 WS → &#x2461; engine.inject_message。如果引擎在 LLM 调用中，&#x2461; 要到下一轮才消费，但 &#x2460; 已显示。</p></div>
+<div class="problem-card"><h4>&#128993; P1: 前端去重仅精确内容匹配</h4><p>动态内容（时间戳、ID）导致重复气泡。</p></div>
+<div class="problem-card"><h4>&#128993; P1: 任务提醒不走通知气泡</h4><p>与子任务完成通知行为不一致。</p></div>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec7">7. 前端消息接收与渲染</h2>
+
+<div class="flow">
+
+<div class="flow-group">
+  <div class="flow-group-title">WebSocket 事件分发（10+ 处理器）</div>
+  <div class="flow-row center nowrap" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node blue">WebSocket onmessage</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">_handleMessage</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node blue">JSON.parse → _emit(type,data)</span>
+  </div>
+</div>
+
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+
+<div class="flow-group" style="flex:1;min-width:160px">
+  <div class="flow-group-title">流式 (streamHandler)</div>
+  <div style="font-size:0.78em">
+    <b>start</b> → 注册管道 + 占位符<br>
+    <b>chunk</b> → RAF 批处理 → appendToPart<br>
+    <b>end</b> → flushBuffer → finalize<br>
+    <b>error</b> → 标记 error + 通知<br>
+    <b>keepalive</b> → 重置超时
+  </div>
+</div>
+
+<div class="flow-group" style="flex:1;min-width:140px">
+  <div class="flow-group-title">思考 (thinkingHandler)</div>
+  <div style="font-size:0.78em">
+    <b>start</b> → appendPart(thinking)<br>
+    <b>chunk</b> → appendToPart<br>
+    <b>end</b> → state='done'
+  </div>
+</div>
+
+<div class="flow-group" style="flex:1;min-width:140px">
+  <div class="flow-group-title">工具 (toolHandler)</div>
+  <div style="font-size:0.78em">
+    <b>start</b> → appendPart(tool_call)<br>
+    <b>result</b> → findPartIndex + update
+  </div>
+</div>
+
+<div class="flow-group" style="flex:1;min-width:160px">
+  <div class="flow-group-title">消息确认 (messageHandler)</div>
+  <div style="font-size:0.78em">
+    <b>new_message</b> → status='completed'<br>
+    更新 sequence<br>
+    清理孤儿占位符<br>
+    不存在时重建
+  </div>
+</div>
+
+<div class="flow-group" style="flex:2;min-width:250px">
+  <div class="flow-group-title">其他事件 (lifecycleHandlers)</div>
+  <div style="font-size:0.78em">
+    <b>system_notification</b> → system 气泡 + 去重<br>
+    <b>sub_agent_created</b> → 注册管道 + Tab<br>
+    <b>state_change</b> → suspended 清理<br>
+    <b>重连补漏</b> → 4 条 fallback (streamingState → messagesByPipeline → stuckMsgs → sessionId)
+  </div>
+</div>
+
+</div>
+
+<div class="flow-row center" style="margin-top:10px">
+  <span class="flow-arrow">↓ 所有事件处理器 →</span>
+  <span class="flow-node blue">pipelineMessageStore 更新 parts[]</span>
+  <span class="flow-arrow">→</span>
+  <span class="flow-node gray">React 重渲染</span>
+</div>
+
+<div class="flow-group" style="margin-top:8px;background:#f0fdf4">
+  <div class="flow-group-title">Part 渲染分发</div>
+  <div class="flow-row between" style="flex-wrap:wrap;justify-content:center">
+    <span class="flow-node green">text → LobeChatMarkdown<br><small>(优先) 或 Streamdown</small></span>
+    <span class="flow-node blue">thinking → ThinkingDisplay<br><small>折叠/展开动画</small></span>
+    <span class="flow-node yellow">tool_call → ActivityCard<br><small>工具名+参数+结果+耗时</small></span>
+    <span class="flow-node purple">system → 级别颜色<br><small>info/warning/error + 图标</small></span>
+  </div>
+</div>
+
+</div>
+
+<h3>流式性能优化：RAF 批处理</h3>
+<div class="flow">
+  <div style="display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap">
+    <div class="flow-group" style="flex:1;min-width:220px;background:#eff6ff">
+      <div class="flow-group-title">RAF 批处理</div>
+      <div style="text-align:center;font-size:0.84em">
+        stream_chunk → _chunkBuffer Map<br>
+        → _scheduleFlush (requestAnimationFrame)<br>
+        → 同一帧内合并 → _flushChunks<br>
+        → 单次 store 更新 appendToPart
+      </div>
+    </div>
+    <div class="flow-group" style="flex:1;min-width:220px;background:#fefce8">
+      <div class="flow-group-title">流式结束</div>
+      <div style="text-align:center;font-size:0.84em">
+        stream_end → flushStreamChunkBuffer<br>
+        (强制刷写残留 chunk)<br>
+        → finalizeMessage<br>
+        (所有 streaming parts → done)
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3>问题标注</h3>
+<div class="problem-card"><h4>&#128308; P0: stream_end / new_message 竞态 (三重防御)</h4><p>stream_end 保留空占位符 → new_message 没来 → 孤儿清理。或 stream_end 移除 → new_message 后到 → 从事件重建。设计上应为两阶段确认，非兜底补丁。</p></div>
+<div class="problem-card"><h4>&#128308; P0: 重连补漏 4 条 fallback</h4><p>streamingState → messagesByPipeline → stuckMsgs 清理 → sessionId (pipelineSessionMap → agentTabStore → currentSessionId → 清理)。多轮 Bug 修复叠加的补丁塔。</p></div>
+<div class="problem-card"><h4>&#128993; P1: 双 Markdown 渲染器</h4><p>LobeChatMarkdown + Streamdown 并存，切换条件不明确。</p></div>
+<div class="problem-card"><h4>&#128993; P1: 120s chunk 超时盲定时器</h4><p>不感知后端 LLM 是否真的在生成，DeepSeek V4 长静默期易误判。</p></div>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec8">8. 问题清单汇总</h2>
+
+<table>
+<tr><th>#</th><th>严重度</th><th>位置</th><th>问题</th><th>影响</th></tr>
+<tr><td>P0-1</td><td><span class="badge badge-err">&#128308;</span></td><td>message_bus.py</td><td>系统通知到前端(AI)两条独立路径，时序不同步</td><td>用户看到通知但 AI 不知道</td></tr>
+<tr><td>P0-2</td><td><span class="badge badge-err">&#128308;</span></td><td>stream_bridge.py</td><td>DRAIN-AUTOFIX 与 drain_loop 退出有 TOCTOU 竞态</td><td>死循环或 chunk 丢失</td></tr>
+<tr><td>P0-3</td><td><span class="badge badge-err">&#128308;</span></td><td>streamHandler + messageHandler</td><td>stream_end / new_message 竞态需三重防御</td><td>消息丢失、孤儿占位符</td></tr>
+<tr><td>P0-4</td><td><span class="badge badge-err">&#128308;</span></td><td>lifecycleHandlers.ts</td><td>重连补漏 4 条 sessionId fallback</td><td>维护困难，补丁塔</td></tr>
+<tr><td>P0-5</td><td><span class="badge badge-err">&#128308;</span></td><td>message_bus.py</td><td>系统通知 4 条降级路径</td><td>行为不一致</td></tr>
+<tr><td>P1-1</td><td><span class="badge badge-warn">&#128993;</span></td><td>engine.py</td><td>_pending_notifications 丢失元数据</td><td>无法按优先级消费</td></tr>
+<tr><td>P1-2</td><td><span class="badge badge-warn">&#128993;</span></td><td>engine.py</td><td>running/suspended 注入路径行为不对称</td><td>消息顺序不保证</td></tr>
+<tr><td>P1-3</td><td><span class="badge badge-warn">&#128993;</span></td><td>stream_bridge.py</td><td>tool_call / tool_start 双通道 call_id 不一致</td><td>工具卡片去重失效</td></tr>
+<tr><td>P1-4</td><td><span class="badge badge-warn">&#128993;</span></td><td>lifecycleHandlers.ts</td><td>系统通知去重仅精确内容匹配</td><td>动态内容重复气泡</td></tr>
+<tr><td>P1-5</td><td><span class="badge badge-warn">&#128993;</span></td><td>task_reminder</td><td>任务提醒不走通知气泡</td><td>用户感知混乱</td></tr>
+<tr><td>P1-6</td><td><span class="badge badge-warn">&#128993;</span></td><td>message_bus.py</td><td>pipeline_received 事件所有场景空操作</td><td>浪费资源</td></tr>
+<tr><td>P1-7</td><td><span class="badge badge-warn">&#128993;</span></td><td>streamHandler.ts</td><td>120s chunk 超时盲定时器</td><td>长静默期误判</td></tr>
+<tr><td>P2-1</td><td><span class="badge badge-ok">&#128994;</span></td><td>ContentRenderer</td><td>两个 Markdown 渲染器并存</td><td>渲染不一致</td></tr>
+<tr><td>P2-2</td><td><span class="badge badge-ok">&#128994;</span></td><td>GlobalWebSocket.ts</td><td>clientMessageId 为空去重 key 退化</td><td>低概率重复</td></tr>
+</table>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec9">9. 简化与改进方案</h2>
+
+<h3>9.1 架构简化</h3>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案1：合并系统通知的两条路径 (P0-1)</h4>
+  <p><strong>当前：</strong>系统消息 → &#x2460; 推送 WS + &#x2461; inject_message（两条路径无同步）</p>
+  <p><strong>改进：</strong>先注入引擎 → 引擎确认后 → 再推送前端</p>
+  <pre><code># 新流程
+async def send_pipeline_message(...):
+    engine.inject_message(message, source=source)  # 1. 先注入
+    engine_seq = await engine.confirm_queued()      # 2. 等待确认
+    if source != "user":
+        await _send_system_notification(pipeline_id, message, engine_seq)  # 3. 再前端</code></pre>
+</div>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案2：消除 pipeline_received 空操作 (P1-6)</h4>
+  <p>删除 <code>_send_received_event</code> 和 <code>handlePipelineReceived</code>。</p>
+</div>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案3：stream_end/new_message 改为可靠两阶段确认 (P0-3)</h4>
+  <p><strong>改进：</strong>stream_end 携带 <code>message_persisted:true</code>。后端先持久化再发 stream_end。前端收到 stream_end 直接标记 completed，不再依赖 new_message。</p>
+  <pre><code># 后端 drain_loop 退出
+await bridge.send_new_message(content)  # 先持久化
+await bridge._send_event(stream_end)    # 再发终止 → 前端直接 completed</code></pre>
+</div>
+
+<h3>9.2 代码简化</h3>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案4：系统通知降级路径合并 (P0-5)</h4>
+  <pre><code># 简化为单一出口
+if source != "user":
+    await send_frontend_event(pipeline_id, {
+        "type": "system_notification",
+        "data": {"content": message, "pipeline_id": pipeline_id, ...}
+    })</code></pre>
+  <p>流式缓冲逻辑移到 send_frontend_event 内部统一处理。</p>
+</div>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案5：_pending_notifications 结构化 (P1-1/P1-2)</h4>
+  <pre><code>@dataclass
+class Notification:
+    content: str; source: str; timestamp: float
+    priority: int; notification_id: str  # 去重 key</code></pre>
+</div>
+
+<h3>9.3 其他改进</h3>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案6：重连补漏改为后端主动推送 (P0-4)</h4>
+  <p>后端 WS Server 重连时主动检查 pipeline 状态并发送 missed_messages 事件。前端不再自己推理 state。</p>
+</div>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案7：统一 Markdown 渲染器 (P2-1)</h4>
+  <p>只保留 LobeChatMarkdown，评估 Streamdown 是否可替代。</p>
+</div>
+
+<div class="improvement-card">
+  <h4>&#9989; 方案8：chunk 超时改为后端感知 (P1-7)</h4>
+  <p>前端不设盲定时器，依赖后端 stream_keepalive。N 秒无保活才判定超时。</p>
+</div>
+
+<h3>优先级建议</h3>
+
+<table>
+<tr><th>优先级</th><th>方案</th><th>复杂度</th><th>收益</th><th>风险</th></tr>
+<tr><td><span class="badge badge-err">P0</span></td><td>方案3：stream_end/new_message 协议简化</td><td>中</td><td>极高 — 消除三重防御</td><td>中</td></tr>
+<tr><td><span class="badge badge-err">P0</span></td><td>方案4：系统通知降级路径合并</td><td>低</td><td>高 — 消除行为不一致</td><td>低</td></tr>
+<tr><td><span class="badge badge-err">P0</span></td><td>方案1：系统通知前后端同步</td><td>高</td><td>极高 — 解决根本竞态</td><td>高</td></tr>
+<tr><td><span class="badge badge-warn">P1</span></td><td>方案6：重连补漏后端推送</td><td>高</td><td>高 — 简化前端</td><td>中</td></tr>
+<tr><td><span class="badge badge-warn">P1</span></td><td>方案5：通知结构化</td><td>低</td><td>中 — 为后续铺路</td><td>低</td></tr>
+<tr><td><span class="badge badge-ok">P2</span></td><td>方案2/7/8：空操作/渲染器/超时</td><td>低</td><td>中 — 代码整洁</td><td>低</td></tr>
+</table>
+
+<hr>
+
+<!-- ====================================================================== -->
+<h2 id="sec10">10. 实际日志问题分析（2026-06-03 执行记录）</h2>
+
+<p>以下分析基于项目 <code>logs/</code> 目录下实际运行时产生的日志文件。</p>
+
+<h3>10.1 日志结构概览</h3>
+
+<table>
+<tr><th>目录</th><th>文件数</th><th>内容</th><th>状态</th></tr>
+<tr><td><code>logs/pipeline/</code></td><td>12 个</td><td>管道完整执行日志（含工具调用详情、LLM 消息）</td><td><span class="badge badge-ok">&#x2705; 活跃</span></td></tr>
+<tr><td><code>logs/error/</code></td><td>12 个</td><td>管道错误日志（ERROR/WARNING 级别）</td><td><span class="badge badge-warn">&#x26A0; 6/12 为空</span></td></tr>
+<tr><td><code>logs/task/</code></td><td>12 个</td><td>任务定时器超时与状态变更日志</td><td><span class="badge badge-warn">&#x26A0; 6/12 为空</span></td></tr>
+<tr><td><code>logs/bash/</code></td><td>空</td><td>Bash 命令日志</td><td><span class="badge badge-err">&#x274C; 未启用</span></td></tr>
+</table>
+
+<p><strong>问题：</strong>12 个 pipeline 实例中有 6 个的 error/task 日志为空（43e7ec, 6f7102, a70647, dc5a13, ef94573e），说明这些管道的错误没有被分类记录到独立文件中。</p>
+
+<h3>10.2 核心错误链 — LLM API 调用持续失败</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: Minimax M3 API "tool call id is invalid (2013)" 循环失败</h4>
+  <p><strong>现象：</strong>从 20:09:22 到 20:16:35，Minimax API 持续返回 <code>tool call id is invalid (2013)</code> 错误，每条间隔约 5-10 秒，共产生约 24 次重试，全部失败。</p>
+  <p><strong>时间线（以 pipeline_36d6cba2afcd 为例）：</strong></p>
+  <table>
+    <tr><th>时间</th><th>错误信息</th><th>重试</th></tr>
+    <tr><td>20:09:22</td><td>tool call result does not follow tool call</td><td>第 1 次</td></tr>
+    <tr><td>20:09:43</td><td>tool call id is invalid (2013)</td><td>第 2 次</td></tr>
+    <tr><td>20:09:54</td><td>tool call id is invalid (2013)</td><td>第 3 次</td></tr>
+    <tr><td>20:10:12</td><td>tool call id is invalid (2013)</td><td>第 4 次</td></tr>
+    <tr><td>20:10:17</td><td>tool call id is invalid (2013)</td><td>第 5 次</td></tr>
+    <tr><td>20:10:35</td><td>tool call id is invalid (2013)</td><td>第 6 次</td></tr>
+    <tr><td>20:10:47</td><td>tool call id is invalid (2013)</td><td>第 7 次</td></tr>
+    <tr><td>20:10:52</td><td>tool call id is invalid (2013)</td><td>第 8 次</td></tr>
+    <tr><td>20:11:02</td><td>tool call id is invalid (2013)</td><td>第 9 次</td></tr>
+  </table>
+  <p><strong>根因推断：</strong></p>
+  <ol>
+    <li>LLM 产生了 tool_call 但没有等到 tool_result 就继续输出下一个 assistant message → Minimax 报 <code>tool call result does not follow tool call</code></li>
+    <li>message_normalizer 检测到"不完整的 assistant message"，移除后重新发送 → 移除过程中 tool_call_id 被破坏 → Minimax 报 <code>tool call id is invalid</code></li>
+    <li>一旦进入这个循环，所有后续请求都因 tool_call_id 无效而失败，无法自愈</li>
+  </ol>
+  <p><strong>日志中的 warning 证据：</strong></p>
+  <pre><code>[llm_core] minimax tool_call pairing: removing incomplete assistant message
+(missing tool results: {'call_9978e1e5f9f84ddc82e0fa1e', 'call_11476f2f0bbd47468ef548fc'})
+[llm_core] minimax tool_call pairing: removed 1 incomplete assistant messages
+(tool execution was interrupted, no result available)</code></pre>
+  <p>这两个 warning 在 3 个不同管道中反复出现（36d6cba, 4d5a01f, a3e8f37），说明是系统性 bug。</p>
+</div>
+
+<h3>10.3 子任务执行超时连环失败</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: 3 个子任务持续超时，5 分钟一轮循环</h4>
+  <p><strong>现象：</strong>同一批子任务在 18:53 - 19:28 期间持续超时，每 5 分钟触发一次：</p>
+  <table>
+    <tr><th>task_id</th><th>任务</th><th>超时次数</th><th>时间范围</th></tr>
+    <tr><td>3ca33f0cd3ed</td><td>早期批次子任务</td><td>8 次</td><td>18:53 - 19:28</td></tr>
+    <tr><td>9f55c104483a</td><td>含 task_evaluate auto_complete</td><td>8 次</td><td>18:53 - 19:28</td></tr>
+    <tr><td>e52788a8db6a</td><td>审查边界场景与异常处理</td><td>8 次</td><td>18:53 - 19:28</td></tr>
+  </table>
+  <p><strong>暴露的问题：</strong></p>
+  <ol>
+    <li>系统重启后（约 19:41），旧子任务状态仍为 running，但没有自动恢复机制将它们重置</li>
+    <li>任务 e52788a8db6a 超时 8 次后仍未被标记为最终失败</li>
+    <li>新批次子任务 b707c7fb 和 00d59821 在 20:15 重试后仍失败，根因是 LLM tool call id 错误</li>
+  </ol>
+</div>
+
+<h3>10.4 系统通知重复发送</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: 同一子任务失败通知被多次注入引擎</h4>
+  <p><strong>日志证据（pipeline_4d5a01fadcee.log L347-356）：</strong></p>
+  <pre><code>MSG-34: [系统通知] 子任务 '追踪消息全生命周期代码路径' (ID: b707c7fb0258) failed ❌
+MSG-35: [系统通知] 子任务 '审查任务状态机与调度机制' (ID: 00d5982118f9) failed ❌
+MSG-36: [系统通知] 子任务 '审查任务状态机与调度机制' (ID: 00d5982118f9) failed ❌  ← 重复！
+MSG-37: [系统通知] 子任务 '追踪消息全生命周期代码路径' (ID: b707c7fb0258) failed ❌  ← 重复！</code></pre>
+  <p><strong>后果：</strong>task_notifier 对同一失败事件发送了两次通知，两次都被 inject_message 注入引擎的 _pending_notifications，LLM 看到重复通知后产生混乱。</p>
+</div>
+
+<h3>10.5 日志缺失与诊断盲区</h3>
+
+<div class="problem-card">
+  <h4>&#128993; P1: 关键诊断日志虽已实施但实际未触发</h4>
+  <p>通过 grep 搜索所有 <code>logs/pipeline/*.log</code> 发现：</p>
+  <ol>
+    <li><strong>无 CancelledError 日志</strong>：搜索不到 <code>CancelledError</code> 或 <code>RAW_ERROR</code> — 说明管道中断路径绕过了 engine.py 的异常捕获</li>
+    <li><strong>无引擎退出摘要</strong>：搜索不到 <code>_run_loop finally</code> — 说明引擎的 finally 块可能未执行</li>
+    <li><strong>无 task_post_pipeline 诊断</strong>：搜索不到 <code>_fail_after_pipeline_exit</code> — 说明任务失败判断走了不同的代码路径</li>
+    <li><strong>5 个 error 日志为空</strong>：这些管道的 WARNING/ERROR 没有被分类写入</li>
+  </ol>
+  <p><strong>结论：</strong>之前补充的 5 处日志点在本次执行中全部未触发，说明管道中断的实际路径可能不同于预期（可能是在 LLM 重试耗尽后直接失败，而非被 CancelledError 中断）。</p>
+</div>
+
+<h3>10.6 计时器频繁重置性能问题</h3>
+
+<div class="problem-card">
+  <h4>&#128993; P1: 同一任务 ID 的计时器在 1 秒内被取消并重建多次</h4>
+  <p><strong>日志模式（pipeline_dc5a13d60437.log）：</strong></p>
+  <pre><code>19:42:53 取消计时器: task_id=5b07fbf6d133
+19:42:53 创建计时器: task_id=5b07fbf6d133, timeout=300.0s
+19:42:53 取消计时器: task_id=5b07fbf6d133  ← 同一秒内！
+19:42:53 创建计时器: task_id=5b07fbf6d133, timeout=300.0s  ← 同一秒内！</code></pre>
+  <p>同一任务的计时器在毫秒级被反复取消并重建，可能是每个 LLM 迭代都触发计时器重置。</p>
+</div>
+
+<h3>10.7 日志覆盖缺失汇总</h3>
+
+<table>
+<tr><th>缺失日志</th><th>严重度</th><th>影响</th><th>状态</th></tr>
+<tr><td>引擎 CancelledError 触发来源</td><td><span class="badge badge-err">P0</span></td><td>无法区分用户取消/超时/进程重启</td><td>已实施但未触发</td></tr>
+<tr><td>引擎退出状态摘要 (_run_loop finally)</td><td><span class="badge badge-err">P0</span></td><td>无法确认引擎退出时状态是否正确保存</td><td>已实施但未触发</td></tr>
+<tr><td>task_post_pipeline 诊断信息</td><td><span class="badge badge-err">P0</span></td><td>无法追踪任务失败根因</td><td>已实施但未触发</td></tr>
+<tr><td>drain_loop 异常退出 traceback</td><td><span class="badge badge-warn">P1</span></td><td>无法定位 drain_loop 崩溃原因</td><td>已实施但未触发</td></tr>
+<tr><td>应用启动/关闭 pid 和 loop_id</td><td><span class="badge badge-warn">P1</span></td><td>无法关联管道中断与进程重启</td><td>已实施但未触发</td></tr>
+<tr><td>子任务失败通知去重日志</td><td><span class="badge badge-err">P0</span></td><td>重复通知导致 LLM 困惑</td><td>❌ 未实施</td></tr>
+<tr><td>LLM API 错误分类与重试决策日志</td><td><span class="badge badge-warn">P1</span></td><td>tool call id 错误被误分类为可重试</td><td>❌ 未实施</td></tr>
+<tr><td>message_normalizer 移除 tool_call 的原因</td><td><span class="badge badge-warn">P1</span></td><td>无法追踪为何 tool_call 不完整</td><td>❌ 未实施</td></tr>
+</table>
+
+<h3>10.8 总结：本次执行暴露的 3 个根因</h3>
+
+<table>
+<tr><th>#</th><th>根因</th><th>直接后果</th><th>当前防护</th></tr>
+<tr><td>1</td><td><b>Minimax tool call id 循环失败</b><br>LLM 产生不完整 tool_call → normalizer 移除带偏 id → 后续请求全部因 tool call id invalid 而失败</td><td>主任务所有子任务全部失败，LLM 无法继续执行</td><td>重试耗尽后失败，无自愈能力</td></tr>
+<tr><td>2</td><td><b>子任务超时无自动恢复</b><br>系统重启后旧子任务状态残留，新批次子任务因 LLM 失败而无法推进</td><td>大量僵尸子任务持续耗尽资源</td><td>5 分钟超时检测，但无自动重置</td></tr>
+<tr><td>3</td><td><b>系统通知重复注入</b><br>task_notifier 对同一事件发送多次通知</td><td>LLM 上下文被重复通知污染</td><td>无去重机制</td></tr>
+</table>
+
+<hr>
+
+<h2>附录：关键文件清单</h2>
+
+<table>
+<tr><th>层级</th><th>文件</th><th>核心职责</th></tr>
+<tr><td rowspan="5">前端发送</td><td><code>ChatInput.tsx</code></td><td>用户输入 UI</td></tr>
+<tr><td><code>router.tsx</code></td><td>handleSendMessage 编排</td></tr>
+<tr><td><code>GlobalWebSocket.ts</code></td><td>WS 连接/队列/去重/重连</td></tr>
+<tr><td><code>pipelineMessageStore.ts</code></td><td>消息 store（parts 操作）</td></tr>
+<tr><td><code>constants/websocket.ts</code></td><td>事件类型常量</td></tr>
+<tr><td rowspan="4">后端路由</td><td><code>websocket/server.py</code></td><td>WS 服务器 + 消息分发</td></tr>
+<tr><td><code>pipeline/message_bus.py</code></td><td>统一消息注入入口（核心）</td></tr>
+<tr><td><code>pipeline/engine.py</code></td><td>消息消费 + 挂起/恢复</td></tr>
+<tr><td><code>pipeline/stream_bridge.py</code></td><td>流式事件生成 + 推送</td></tr>
+<tr><td rowspan="4">后端通知</td><td><code>task_notifier.py</code></td><td>子任务完成通知</td></tr>
+<tr><td><code>task_idle_timer.py</code></td><td>空闲超时提醒</td></tr>
+<tr><td><code>task_reminder/plugin.py</code></td><td>任务评估提醒</td></tr>
+<tr><td><code>triggers/manager.py</code></td><td>定时触发器</td></tr>
+<tr><td rowspan="6">前端接收</td><td><code>handlers/streamHandler.ts</code></td><td>流式事件处理</td></tr>
+<tr><td><code>handlers/messageHandler.ts</code></td><td>new_message 确认</td></tr>
+<tr><td><code>lifecycleHandlers.ts</code></td><td>重连补漏/超时/系统通知</td></tr>
+<tr><td><code>chunkTimeout.ts</code></td><td>120s chunk 超时</td></tr>
+<tr><td><code>MessageContentRenderer.tsx</code></td><td>消息内容分发渲染</td></tr>
+<tr><td><code>useMessageRender.tsx</code></td><td>parts → fragments 转换</td></tr>
+</table>
+
+<hr>
+<p style="text-align:center;color:var(--accent);font-size:0.9rem;">
+  &#128203; 审查完成 — 共识别 16 个架构问题 + 8 个改进方案 + 日志分析发现 8 个新问题（3 个根因）
+</p>
+</body>
+</html>
