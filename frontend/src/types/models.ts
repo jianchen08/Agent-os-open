@@ -192,8 +192,6 @@ export interface Message {
   id: string
   /** 所属会话ID */
   sessionId: string
-  /** 父消息ID（用于执行记录层级关系） */
-  parentId?: string
   /** 消息序号（用于排序，从数据库执行记录的 sequence 字段获取） */
   sequence: number
   /** 消息角色 */

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
 
 # ============================================================
 # 请求/响应模型
@@ -96,6 +97,24 @@ class MessageListResponse(BaseModel):
     has_more: bool = Field(default=False, description="是否还有更多历史消息")
 
 
+class ToolCallItem(BaseModel):
+    """工具调用项（toolCalls[] 子项），字段统一 camelCase 与前端对齐。
+
+    消除历史契约混乱：后端构造子项曾用 snake_case（call_id/tool_name/tool_args），
+    前端被迫用 ``tc.callId || tc.call_id`` hack 兼容。统一为 camelCase 单一命名。
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    callId: str = ""  # noqa: N815
+    toolName: str = ""  # noqa: N815
+    toolArgs: dict[str, Any] | None = None  # noqa: N815
+    status: str = "completed"
+    result: Any = None
+    error: str | None = None
+    durationMs: int | None = None  # noqa: N815
+    containerTaskId: str | None = None  # noqa: N815
+
+
 class MessageResponse(BaseModel):
     """消息响应模型，字段名与前端 mapBackendMessageToMessage 对齐。"""
     id: str
@@ -104,9 +123,8 @@ class MessageResponse(BaseModel):
     content: str
     timestamp: str
     sequence: int = 0
-    parentId: str | None = None  # noqa: N815
     metadata: dict[str, Any] | None = None
-    toolCalls: list[dict[str, Any]] | None = None  # noqa: N815
+    toolCalls: list[ToolCallItem] | None = None  # noqa: N815
     toolCallId: str | None = None  # noqa: N815
     toolName: str | None = None  # noqa: N815
     toolArgs: dict[str, Any] | None = None  # noqa: N815

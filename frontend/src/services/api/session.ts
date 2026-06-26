@@ -78,7 +78,6 @@ interface ThreadCreateResponse {
 interface BackendMessageResponse {
   id: string
   thread_id: string
-  parentId?: string
   sequence?: number
   role: string
   content: string
@@ -141,7 +140,6 @@ function mapBackendMessageToMessage(
     return {
       id: backendMessage.id,
       sessionId: sessionId,
-      parentId: backendMessage.parentId,
       sequence: backendMessage.sequence ?? 0,
       role: 'tool',
       content: backendMessage.content,
@@ -160,21 +158,17 @@ function mapBackendMessageToMessage(
 
   let toolCalls: MessageToolCall[] | undefined
   if (backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)) {
-    // BUG-FIX-fix_20260604_tool_card_empty:
-    // 问题根因: 后端 routes_threads.py 构建 tool_calls 时使用 snake_case 键名
-    //   (call_id/tool_name/tool_args)，但前端映射用了 camelCase (tc.callId/tc.toolName)，
-    //   字段名不匹配导致 callId/toolName 全为空字符串，工具卡片无法渲染。
-    // 修复方案: 兼容 snake_case (后端返回) 和 camelCase (历史数据) 双名
+    // 后端 toolCalls[] 子项已统一为 camelCase（ToolCallItem 模型）。
+    // 映射到前端 MessageToolCall（snake_case 内部表示）。
     toolCalls = backendMessage.toolCalls.map((tc) => ({
-      call_id: (tc.callId || tc.call_id || '') as string,
-      tool_name: (tc.toolName || tc.tool_name || '') as string,
-      tool_args: ((tc.toolArgs || tc.tool_args || {}) as Record<string, unknown>),
+      call_id: (tc.callId || '') as string,
+      tool_name: (tc.toolName || '') as string,
+      tool_args: ((tc.toolArgs || {}) as Record<string, unknown>),
       status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
       result: tc.result,
       error: tc.error as string | undefined,
       duration_ms: tc.durationMs as number | undefined,
-      // BUG-FIX-fix_20260606_file_opener_container_task_id:
-      containerTaskId: (tc.container_task_id || tc.containerTaskId) as string | undefined,
+      containerTaskId: tc.containerTaskId as string | undefined,
     }))
   }
 
@@ -256,7 +250,6 @@ function mapBackendMessageToMessage(
   return {
     id: backendMessage.id,
     sessionId: sessionId,
-    parentId: backendMessage.parentId,
     sequence: backendMessage.sequence,
     role: effectiveRole,
     content: backendMessage.content,
