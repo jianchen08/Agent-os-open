@@ -644,21 +644,6 @@ def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
     raise RuntimeError(f"在端口 {start_port}-{start_port + 99} 范围内没有可用端口")
 
 
-def _cleanup_ghost_running_tasks() -> int:
-    """清理服务重启后残留的幽灵任务。
-
-    委托给 TaskService.cleanup_ghost_tasks() 静态方法，
-    app_factory.py 只负责传入数据目录，不持有任务生命周期逻辑。
-    """
-    import asyncio  # noqa: PLC0415
-
-    from tasks.service import TaskService  # noqa: PLC0415
-
-    _data_dir = str(Path(__file__).resolve().parents[3] / "data" / "tasks")
-    cleaned, cascaded = asyncio.run(TaskService.cleanup_ghost_tasks(_data_dir))
-    return cleaned
-
-
 def main() -> None:
     """主函数，启动 uvicorn 服务器。
 
@@ -689,9 +674,6 @@ def main() -> None:
     logger.info("健康检查: http://localhost:%d/health", actual_port)
 
     os.environ["BACKEND_PORT"] = str(actual_port)
-
-    # 启动前清理幽灵 running 任务（引擎已死但 YAML 仍为 running）
-    _cleanup_ghost_running_tasks()
 
     app = create_combined_app()
     uvicorn.run(
