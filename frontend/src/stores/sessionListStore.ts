@@ -320,27 +320,9 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
           console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session?.pipelineIds)
         }
         if (pipelineId) {
-          // BUG-FIX-fix_20260515_streaming_interrupt:
-          // 问题根因: 切换回正在流式输出的会话时，fetchMessages -> initFromAPI
-          //          会用后端 API 数据覆盖本地的流式消息，导致流式输出中断。
-          // 修复方案: 管道正在流式传输时跳过 API 请求，保留本地流式数据。
-          // 影响范围: 会话切换时的流式输出连续性
-          // 修复日期: 2026-05-15
-          //
-          // BUG-FIX-fix_20260528_refresh_streaming_only_one_msg:
-          // 问题根因: 页面刷新后 WS 重连，后端继续发送流式事件（stream_start），
-          //          在用户点击会话之前就创建了流式占位消息并设置 streamingState。
-          //          用户点击时 isStreaming 返回 true，fetchMessages 被跳过，
-          //          历史消息未加载，只显示一条流式占位消息。
-          // 修复方案: 即使管道正在流式传输，如果本地消息数量极少（<=1，仅占位消息），
-          //          仍然调用 fetchMessages 加载历史消息，initFromAPI 的合并逻辑会保留流式消息。
-          // 影响范围: 页面刷新后进入正在输出的会话时的消息显示
-          // 修复日期: 2026-05-28
-          const pipelineStore = usePipelineMessageStore.getState()
-          const existingCount = (pipelineStore.messagesByPipeline[pipelineId] || []).length
-          if (!pipelineStore.isStreaming(pipelineId) || existingCount <= 1) {
-            await pipelineStore.fetchMessages(pipelineId, { threadId: id })
-          }
+          // 统一加载入口：流式保护 + 双游标决策（init/after_sequence）已收敛到
+          // loadPipelineMessages 内部，会话切换走默认 mode='auto'。
+          await usePipelineMessageStore.getState().loadPipelineMessages(pipelineId, { threadId: id })
         }
       } catch (error) {
         console.error('[setActiveSession] 加载会话数据失败:', error)

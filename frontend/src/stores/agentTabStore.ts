@@ -8,7 +8,7 @@
  * - 每个 Tab 独立的消息列表
  * - localStorage 持久化（按会话存储标签状态）
  *
- * 消息读写统一走 pipelineMessageStore，tabMessages 仅作为空壳保留（避免破坏类型）。
+ * 消息读写统一走 pipelineMessageStore，本 store 不再持有消息缓存。
  */
 
 import { create } from 'zustand'
@@ -61,10 +61,6 @@ function getMainAgentId(sessionId: string): string {
 
 /** localStorage 存储键前缀 */
 const STORAGE_KEY_PREFIX = 'agent-tabs-'
-/** 每个 Tab 缓存到 localStorage 的最大消息条数 */
-const MAX_CACHED_MESSAGES_PER_TAB = 50
-/** 降级策略：消息截取数量的递减阶梯 */
-const MESSAGE_LIMIT_STEPS = [MAX_CACHED_MESSAGES_PER_TAB, 10, 0]
 
 /**
  * 获取会话对应的存储键
@@ -100,59 +96,44 @@ function cleanupExpiredSessionData(currentSessionId: string): void {
 }
 
 /**
- * 尝试用指定消息数量限制保存数据到 localStorage
+ * 尝试保存标签状态到 localStorage
  */
-function trySaveWithLimit(
+function trySaveTabs(
   sessionId: string,
   tabs: AgentTab[],
   activeTabId: string | null,
-  tabMessages: Record<string, any[]>,
   pipelineTabMap: Record<string, string>,
-  messageLimit: number,
 ): boolean {
-  const cachedMessages: Record<string, any[]> = {}
-  if (messageLimit > 0) {
-    for (const tabId of Object.keys(tabMessages)) {
-      const msgs = tabMessages[tabId] || []
-      if (msgs.length > 0) {
-        cachedMessages[tabId] = msgs.slice(-messageLimit)
-      }
-    }
-  }
-  const data = { tabs, activeTabId, tabMessages: cachedMessages, pipelineTabMap, savedAt: Date.now() }
+  const data = { tabs, activeTabId, pipelineTabMap, savedAt: Date.now() }
   localStorage.setItem(getStorageKey(sessionId), JSON.stringify(data))
   return true
 }
 
 /**
- * 保存标签状态到 localStorage（包含最近 N 条消息缓存和 pipeline 映射）
+ * 保存标签状态到 localStorage（标签 + pipeline 映射）。
  *
- * 采用渐进式降级策略应对 QuotaExceededError：
- * 1. 按 50 → 10 → 0 递减消息数量重试
- * 2. 仍失败则清理其他会话的旧数据后重试
+ * 降级策略：写入遇 QuotaExceededError 时清理其他会话旧数据后重试一次。
+ * 注：消息缓存由 pipelineMessageStore 独立 persist，此处不再缓存 tabMessages。
  */
 function saveTabsToStorage(
   sessionId: string,
   tabs: AgentTab[],
   activeTabId: string | null,
-  tabMessages: Record<string, any[]>,
   pipelineTabMap: Record<string, string>,
 ): void {
-  for (const limit of MESSAGE_LIMIT_STEPS) {
-    try {
-      trySaveWithLimit(sessionId, tabs, activeTabId, tabMessages, pipelineTabMap, limit)
+  try {
+    trySaveTabs(sessionId, tabs, activeTabId, pipelineTabMap)
+    return
+  } catch (e) {
+    if (!(e instanceof DOMException && e.name === 'QuotaExceededError')) {
+      console.warn('[AgentTabStore] 保存标签状态失败', e)
       return
-    } catch (e) {
-      if (!(e instanceof DOMException && e.name === 'QuotaExceededError')) {
-        console.warn('[AgentTabStore] 保存标签状态失败', e)
-        return
-      }
     }
   }
 
   try {
     cleanupExpiredSessionData(sessionId)
-    trySaveWithLimit(sessionId, tabs, activeTabId, tabMessages, pipelineTabMap, 0)
+    trySaveTabs(sessionId, tabs, activeTabId, pipelineTabMap)
     return
   } catch {
     // 清理后仍然失败，放弃本次保存
@@ -162,11 +143,12 @@ function saveTabsToStorage(
 }
 
 /**
- * 从 localStorage 加载标签状态（含缓存消息和 pipeline 映射）
+ * 从 localStorage 加载标签状态（标签 + pipeline 映射）。
+ * 旧版本写入的 tabMessages 字段会被自然忽略（不再读取）。
  */
 function loadTabsFromStorage(
   sessionId: string,
-): { tabs: AgentTab[]; activeTabId: string | null; tabMessages: Record<string, any[]>; pipelineTabMap: Record<string, string> } | null {
+): { tabs: AgentTab[]; activeTabId: string | null; pipelineTabMap: Record<string, string> } | null {
   try {
     const raw = localStorage.getItem(getStorageKey(sessionId))
     if (!raw) return null
@@ -179,7 +161,6 @@ function loadTabsFromStorage(
     return {
       tabs: data.tabs || [],
       activeTabId: data.activeTabId || null,
-      tabMessages: data.tabMessages || {},
       pipelineTabMap: data.pipelineTabMap || {},
     }
   } catch (e) {
@@ -196,8 +177,6 @@ interface AgentTabState {
   tabs: AgentTab[]
   /** 当前活跃 Tab ID */
   activeTabId: string | null
-  /** 每个 Tab 的消息映射(tabId -> messages) —— 空壳，实际数据在 pipelineMessageStore */
-  tabMessages: Record<string, any[]>
   /** 每个 Tab 的消息加载状态（防止并发重复加载） */
   tabMessagesLoading: Record<string, boolean>
   /** 每个 Tab 的未读消息计数(tabId -> count) */
@@ -271,7 +250,6 @@ interface AgentTabState {
 export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   tabs: [],
   activeTabId: null,
-  tabMessages: {},
   tabMessagesLoading: {},
   unreadCounts: {},
   currentSessionId: null,
@@ -330,7 +308,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       currentSessionId: sessionId,
       tabs,
       activeTabId,
-      tabMessages: {},
       tabMessagesLoading: {},
       unreadCounts: {},
       pipelineTabMap: newPipelineTabMap,
@@ -364,27 +341,14 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   },
 
   /**
-   * 保存当前标签状态到 localStorage
-   * 从 pipelineMessageStore 读取消息构建缓存，而非 tabMessages
+   * 保存当前标签状态到 localStorage（仅标签 + pipeline 映射）。
+   * 消息由 pipelineMessageStore 独立 persist，不在此缓存。
    */
   saveCurrentTabs: () => {
     const { currentSessionId, tabs, activeTabId, pipelineTabMap } = get()
     if (!currentSessionId) return
 
-    const pipelineStore = usePipelineMessageStore.getState()
-    const cachedMessages: Record<string, any[]> = {}
-
-    for (const tab of tabs) {
-      const pid = tab.pipelineRunId
-      if (pid) {
-        const msgs = pipelineStore.getMessages(pid)
-        if (msgs.length > 0) {
-          cachedMessages[tab.id] = msgs.slice(-MAX_CACHED_MESSAGES_PER_TAB)
-        }
-      }
-    }
-
-    saveTabsToStorage(currentSessionId, tabs, activeTabId, cachedMessages, pipelineTabMap)
+    saveTabsToStorage(currentSessionId, tabs, activeTabId, pipelineTabMap)
   },
 
   /**
@@ -503,8 +467,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   },
 
   /**
-   * 添加消息到指定 Tab
-   * 消息写入 pipelineMessageStore 而非 tabMessages
+   * 添加消息到指定 Tab（消息写入 pipelineMessageStore）
    */
   addMessageToTab: (tabId, message) => {
     const { tabs, pipelineTabMap, activeTabId } = get()
@@ -672,8 +635,10 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         const mainPipelineId = getMainPipelineId(currentSessionId)
         if (mainPipelineId) {
           pipelineStore.activatePipeline(mainPipelineId)
+          // 统一加载入口：仅当本地无消息时拉历史（mode='auto'，未初始化走全量）。
+          // 不 await，保持 fire-and-forget 行为。
           if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
-            pipelineStore.fetchMessages(mainPipelineId, { threadId: currentSessionId })
+            void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
           }
         }
       }
@@ -992,24 +957,24 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         })
       }
 
-      // BUG-FIX-fix_20260515_streaming_interrupt:
-      // 问题根因: 切换标签/会话时 loadTabMessages 无条件调用 fetchMessages -> initFromAPI，
-      //          后端 API 返回的数据（可能是已完成状态）会覆盖正在流式传输的消息，
-      //          导致流式输出中断、内容丢失、状态错误。
-      // 修复方案: 管道正在流式传输时跳过 API 请求，保留本地的流式数据。
-      //          流式数据由 WebSocket 全局事件处理器持续更新，不受组件挂载/卸载影响。
-      //          切换回来时 activatePipeline 即可恢复显示，无需重新获取。
-      // 影响范围: 标签切换、会话切换时的流式输出连续性
-      // 修复日期: 2026-05-15
-      //
-      // BUG-FIX-fix_20260614_stale_streaming_blocks_history:
-      // 问题根因: 与 sessionListStore.setActiveSession 不同，此处无 existingCount 兜底。
-      //          当 isStreaming 卡 true（stale，如后端崩溃未正确发 stream_end）时，
-      //          切换 tab 永远不拉历史，用户看到"加载了记录但没显示"（bug 1）。
-      // 修复方案: 补 existingCount <= 1 兜底，与 sessionListStore 对齐。
-      const _existingCount = (pipelineStore.messagesByPipeline[effectivePipelineId] || []).length
-      if (!pipelineStore.isStreaming(effectivePipelineId) || _existingCount <= 1) {
-        await pipelineStore.fetchMessages(effectivePipelineId, { threadId: state.currentSessionId })
+      // 统一加载入口：流式保护 + 双游标决策收敛到 loadPipelineMessages，
+      // 子 Tab 切换也享受增量补漏（mode='auto'），与主会话切换行为一致。
+      const result = await pipelineStore.loadPipelineMessages(effectivePipelineId, {
+        threadId: state.currentSessionId,
+      })
+      if (!result.ok) {
+        const error = result.error as any
+        const is404 =
+          error?.response?.status === 404 ||
+          error?.message?.includes('404') ||
+          error?.code === '404'
+        if (is404) {
+          console.debug(
+            `[AgentTabStore.loadTabMessages] 子Tab消息暂不可用 (404) | tabId: ${tabId}`,
+          )
+        } else {
+          console.error('[AgentTabStore.loadTabMessages] 加载子Tab消息失败:', error)
+        }
       }
 
       if (get().activeTabId === tabId) {
@@ -1017,19 +982,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       }
 
       get().saveCurrentTabs()
-    } catch (error: any) {
-      const is404 =
-        error?.response?.status === 404 ||
-        error?.message?.includes('404') ||
-        error?.code === '404'
-
-      if (is404) {
-        console.debug(
-          `[AgentTabStore.loadTabMessages] 子Tab消息暂不可用 (404) | tabId: ${tabId}`,
-        )
-      } else {
-        console.error('[AgentTabStore.loadTabMessages] 加载子Tab消息失败:', error)
-      }
     } finally {
       set((s) => ({
         tabMessagesLoading: { ...s.tabMessagesLoading, [tabId]: false },

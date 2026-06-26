@@ -184,9 +184,19 @@ describe('pipelineMessageStore', () => {
       expect(usePipelineMessageStore.getState().isInitialized('pipe-1')).toBe(false)
     })
 
-    it('initFromAPI 后返回 true', () => {
+    it('空数组 initFromAPI 后仍返回 false（空初始化不算已加载，count<=1）', () => {
       const store = usePipelineMessageStore.getState()
       store.initFromAPI('pipe-1', [])
+      // 空数组：count=0、bottomCursor=0 → 未初始化，下次应走全量而非增量补漏
+      expect(store.isInitialized('pipe-1')).toBe(false)
+    })
+
+    it('加载多条消息（bottomCursor>0 且 count>1）后返回 true', () => {
+      const store = usePipelineMessageStore.getState()
+      store.initFromAPI('pipe-1', [
+        { id: 'm1', role: 'user', content: 'q', sequence: 1, timestamp: '2026-01-01T00:00:00Z' } as any,
+        { id: 'm2', role: 'assistant', content: 'a', sequence: 2, timestamp: '2026-01-01T00:00:01Z' } as any,
+      ])
       expect(store.isInitialized('pipe-1')).toBe(true)
     })
   })

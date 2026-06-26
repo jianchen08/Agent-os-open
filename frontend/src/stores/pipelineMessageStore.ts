@@ -332,11 +332,29 @@ interface PipelineMessageState {
   /** 判断指定管道是否还有更早的消息 */
   hasMoreOlder: (pipelineId: string) => boolean
 
-  /** 直接从 API 加载指定管道的历史消息 */
+  /** 直接从 API 加载指定管道的历史消息（底层，吞异常已修复，调用方应优先用 loadPipelineMessages） */
   fetchMessages: (
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => Promise<void>
+  /**
+   * 加载管道消息的统一入口（收敛所有加载场景的流式保护、双游标决策）。
+   * 4 个加载场景（会话切换 / 子 Tab 切换 / 关 Tab 回主 / WS 重连补漏）都应调用本方法，
+   * 不直接调 fetchMessages，以避免保护规则不一致导致流式中断 / 白屏。
+   * - mode='auto'（默认）：按 isInitialized 决定全量 init 还是 after_sequence 增量补漏
+   * - mode='init'：强制全量冷启动
+   * - mode='backfill'：强制 after_sequence 增量补漏（用于 WS 重连）
+   * - skipStreamingCheck：WS 重连场景必须无条件补漏（刷新后 isStreaming=false）
+   * 返回 {ok, error}，调用方决定通知策略；底层 fetchMessages 失败会 re-throw
+   */
+  loadPipelineMessages: (
+    pipelineId: string,
+    options: {
+      threadId: string
+      mode?: 'auto' | 'init' | 'backfill'
+      skipStreamingCheck?: boolean
+    },
+  ) => Promise<{ ok: boolean; error?: unknown }>
 
   // ==================== Parts 统一修改方法 ====================
 
@@ -1039,10 +1057,15 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   },
 
   /**
-   * 判断指定管道是否已初始化
+   * 判断指定管道是否已成功加载过消息（可走增量补漏而非全量）。
+   * 权威定义：bottomCursor>0（已确认最大 sequence）且已有 >1 条消息。
+   * 区分"空壳占位/单条乐观消息"与"真正加载过历史"。
    */
   isInitialized: (pipelineId: string) => {
-    return pipelineId in get().messagesByPipeline
+    const state = get()
+    const count = (state.messagesByPipeline[pipelineId] || []).length
+    const bottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
+    return bottomCursor > 0 && count > 1
   },
 
   /**
@@ -1136,6 +1159,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
             pipelineId, err,
           )
         }
+        // 重新抛出，让上层调用方（loadPipelineMessages）能感知失败并决定通知策略。
+        // 不在此处吞异常，否则所有调用方的 catch/then 分支永远拿不到错误。
+        throw err
       } finally {
         _fetchingPipelines.delete(dedupeKey)
         // BUG-FIX-fix_20260529_scroll_load_more:
@@ -1165,6 +1191,41 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     _fetchingPipelines.set(dedupeKey, fetchPromise)
 
     return fetchPromise
+  },
+
+  /**
+   * 加载管道消息的统一入口。收敛所有加载场景的流式保护 + 双游标决策。
+   * 详见接口声明处的注释。
+   */
+  loadPipelineMessages: async (pipelineId, options) => {
+    const { threadId, mode = 'auto', skipStreamingCheck = false } = options
+    const state = get()
+    const existingCount = (state.messagesByPipeline[pipelineId] || []).length
+
+    // 流式保护：流式输出中且已有实质消息时跳过，避免 API 覆盖流式状态。
+    // WS 重连场景传 skipStreamingCheck=true 无条件补漏（刷新后 isStreaming=false）。
+    if (!skipStreamingCheck && state.isStreaming(pipelineId) && existingCount > 1) {
+      return { ok: true }
+    }
+
+    // 模式决策（统一权威定义 isInitialized）：
+    // - mode='auto'：已初始化走增量补漏，否则全量冷启动
+    // - mode='init'：强制全量
+    // - mode='backfill'：强制增量补漏
+    const isInit = mode === 'init'
+      || (mode === 'auto' && !state.isInitialized(pipelineId))
+
+    try {
+      if (isInit) {
+        await state.fetchMessages(pipelineId, { threadId })
+      } else {
+        const bottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
+        await state.fetchMessages(pipelineId, { threadId, after_sequence: bottomCursor })
+      }
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error }
+    }
   },
 
   // ==================== Parts 统一修改方法 ====================

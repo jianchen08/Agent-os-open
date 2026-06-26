@@ -123,8 +123,6 @@ export const MessageList = ({
   const pinToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el) {
-      // eslint-disable-next-line no-console
-      console.log('[scroll-debug] pinToBottom: scrollHeight=%d clientHeight=%d', el.scrollHeight, el.clientHeight)
       el.scrollTop = el.scrollHeight
       // 程序设置 scrollTop 不触发 onScroll，手动同步缓存用 ref
       lastScrollTopRef.current = el.scrollHeight
@@ -192,15 +190,11 @@ export const MessageList = ({
     initialScrollDone.current = true
 
     const cached = tabId ? scrollTopCache.get(tabId) : undefined
-    // eslint-disable-next-line no-console
-    console.log('[scroll-debug] 首次加载 tabId=%s messagesLen=%d cached=%s', tabId, messages.length, cached)
     // 缓存恢复：直接定位，不需要 observer 校正（停在用户离开的位置）
     if (cached !== undefined) {
       isNearBottom.current = false
       requestAnimationFrame(() => {
         if (scrollRef.current) {
-          // eslint-disable-next-line no-console
-          console.log('[scroll-debug] 恢复缓存 scrollTop=%d -> 设为 %d', scrollRef.current.scrollTop, cached)
           scrollRef.current.scrollTop = cached
           // 程序设置不触发 onScroll，手动同步
           lastScrollTopRef.current = cached
@@ -280,8 +274,6 @@ export const MessageList = ({
   useEffect(() => {
     return () => {
       if (tabId) {
-        // eslint-disable-next-line no-console
-        console.log('[scroll-debug] 卸载缓存 tabId=%s lastScrollTop=%d', tabId, lastScrollTopRef.current)
         scrollTopCache.set(tabId, lastScrollTopRef.current)
       }
     }

@@ -72,26 +72,35 @@ export function useRealtimeEvents(): void {
       lastFetchTimeRef.current = now
 
       const { activeSessionId } = useSessionStore.getState()
-      // FIX: 用 activePipelineId 而非 sessionId 调 fetchMessages
-      const activePipelineId = usePipelineMessageStore.getState().activePipelineId
-      if (activeSessionId && activePipelineId) {
-        // 总是获取最新消息，不管是否正在流式输出
-        // handleReconnected 会处理流式状态的恢复
-        // BUG-FIX-fix_20260617_silent_fetch_catch:
-        // 问题根因: 原代码 .catch(() => {}) 静默吞异常，WS 重连后消息补漏失败用户无感知。
-        // 修复方案: 失败时通过 notification store 通知用户消息同步失败。
+      // 双游标补漏：WS 重连后，对所有有 bottomCursor 的管道走 after_sequence 增量补漏，
+      // 只拉断线期间缺失的新消息，天然不重复。延后一帧执行（外层 requestAnimationFrame），
+      // 确保 lifecycleHandlers 的 handleReconnected 先清理完残留 streaming 占位。
+      const store = usePipelineMessageStore.getState()
+      const pipelinesToBackfill: string[] = []
+      for (const [pid, cursor] of Object.entries(store.bottomCursorsByPipeline)) {
+        if (cursor > 0) pipelinesToBackfill.push(pid)
+      }
+      // 统一加载入口：WS 重连必须无条件补漏（skipStreamingCheck=true，刷新后 isStreaming=false），
+      // 强制 mode='backfill' 走 after_sequence 增量。失败时通知用户。
+      for (const pid of pipelinesToBackfill) {
         usePipelineMessageStore
           .getState()
-          .fetchMessages(activePipelineId, { threadId: activeSessionId })
-          .catch(() => {
-            useNotificationStore.getState().addNotification({
-              title: '消息同步失败',
-              message: 'WebSocket 重连后消息同步失败，请手动刷新页面',
-              priority: 'high',
-              category: 'error',
-              isBlocking: false,
-              autoDismissMs: 8000,
-            })
+          .loadPipelineMessages(pid, {
+            threadId: activeSessionId || '',
+            mode: 'backfill',
+            skipStreamingCheck: true,
+          })
+          .then((result) => {
+            if (!result.ok) {
+              useNotificationStore.getState().addNotification({
+                title: '消息同步失败',
+                message: 'WebSocket 重连后消息同步失败，请手动刷新页面',
+                priority: 'high',
+                category: 'error',
+                isBlocking: false,
+                autoDismissMs: 8000,
+              })
+            }
           })
       }
 
