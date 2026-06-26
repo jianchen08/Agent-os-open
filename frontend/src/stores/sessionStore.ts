@@ -2,8 +2,7 @@ import { create } from 'zustand'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WebSocketStatus } from '@/constants/websocket'
 import { loggers } from '@/utils/logger'
-import { usePipelineMessageStore } from './pipelineMessageStore'
-import type { Message, Session } from '@/types/models'
+import type { Session } from '@/types/models'
 
 const logger = loggers.sessionStore
 
@@ -17,7 +16,6 @@ interface SessionState {
   forceReconnect: boolean
   _wsUnsubscribers: { cleanup: () => void } | null
 
-  updateMessageFields: (sessionId: string, messageId: string, updates: Partial<Message>) => void
   connectWebSocket: (sessionId: string, token: string) => void
   disconnectWebSocket: () => void
   clearError: () => void
@@ -32,10 +30,6 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   wsStatus: WebSocketStatus.DISCONNECTED,
   forceReconnect: false,
   _wsUnsubscribers: null,
-
-  updateMessageFields: (sessionId: string, messageId: string, updates: Partial<Message>) => {
-    usePipelineMessageStore.getState().updateMessage(sessionId, messageId, updates)
-  },
 
   connectWebSocket: (sessionId: string, token: string) => {
     const { _wsUnsubscribers: prevUnsubscribers } = get()
