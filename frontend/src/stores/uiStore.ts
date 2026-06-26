@@ -32,8 +32,6 @@ interface UIState {
   sidebarCollapsed: boolean
   /** 审批对话框数据 */
   approvalDialog: ApprovalRequest | null
-  /** 执行图面板是否折叠 */
-  executionGraphCollapsed: boolean
   /** 任务状态面板是否折叠 */
   taskPanelCollapsed: boolean
   /** 工作区面板是否折叠 */
@@ -51,10 +49,6 @@ interface UIActions {
   showApprovalDialog: (approval: ApprovalRequest) => void
   /** 隐藏审批对话框 */
   hideApprovalDialog: () => void
-  /** 切换执行图面板 */
-  toggleExecutionGraph: () => void
-  /** 设置执行图面板状态 */
-  setExecutionGraphCollapsed: (collapsed: boolean) => void
   /** 切换任务状态面板 */
   toggleTaskPanel: () => void
   /** 设置任务状态面板状态 */
@@ -76,10 +70,6 @@ interface UIActions {
 export const useUIStore = create<UIState & UIActions>((set) => ({
   sidebarCollapsed: loadCollapsedState(uiStorage.getSidebarCollapsed, false),
   approvalDialog: null,
-  executionGraphCollapsed: loadCollapsedState(
-    uiStorage.getExecutionGraphCollapsed,
-    false,
-  ),
   taskPanelCollapsed: loadCollapsedState(uiStorage.getTaskPanelCollapsed, false),
   workspaceCollapsed: loadCollapsedState(uiStorage.getWorkspaceCollapsed, false),
   messageSearchQuery: '',
@@ -117,23 +107,6 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
     set({ approvalDialog: null })
   },
 
-  /**
-   * 切换执行图面板折叠状态
-   */
-  toggleExecutionGraph: () => {
-    set((state) => {
-      const newCollapsed = !state.executionGraphCollapsed
-      uiStorage.setExecutionGraphCollapsed(newCollapsed)
-      return { executionGraphCollapsed: newCollapsed }
-    })
-  },
-  /**
-   * 设置执行图面板状态
-   */
-  setExecutionGraphCollapsed: (collapsed: boolean) => {
-    uiStorage.setExecutionGraphCollapsed(collapsed)
-    set({ executionGraphCollapsed: collapsed })
-  },
   /**
    * 切换任务状态面板折叠状态
    */

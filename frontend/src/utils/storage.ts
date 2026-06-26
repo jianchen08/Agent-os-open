@@ -262,22 +262,6 @@ export const uiStorage = {
   },
 
   /**
-   * 保存执行图面板状态
-   * @param collapsed - 是否折叠
-   */
-  setExecutionGraphCollapsed(collapsed: boolean): void {
-    storage.setItem(STORAGE_KEYS.EXECUTION_GRAPH_COLLAPSED, collapsed)
-  },
-
-  /**
-   * 获取执行图面板状态
-   * @returns 是否折叠或null
-   */
-  getExecutionGraphCollapsed(): boolean | null {
-    return storage.getItem<boolean>(STORAGE_KEYS.EXECUTION_GRAPH_COLLAPSED)
-  },
-
-  /**
    * 保存任务状态面板状态
    * @param collapsed - 是否折叠
    */

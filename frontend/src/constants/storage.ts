@@ -33,8 +33,6 @@ export const STORAGE_KEYS = {
   LAST_ACTIVE_SESSION: 'last_active_session',
   /** Agent 偏好设置 - Requirements: 13.2, 13.4, 13.5 */
   AGENT_PREFERENCES: 'agent_preferences',
-  /** 执行图面板折叠状态 */
-  EXECUTION_GRAPH_COLLAPSED: 'execution_graph_collapsed',
   /** 任务状态面板折叠状态 */
   TASK_PANEL_COLLAPSED: 'task_panel_collapsed',
   /** 工作区面板折叠状态 */
