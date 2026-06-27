@@ -159,6 +159,11 @@ class ExecutionRecordStorage:
         # 标记是否已通过 _load_all_summaries_only 加载过全部 summary（避免重复解析）
         self._all_summaries_loaded: bool = False
         self._records_in_active_file: dict[str, int] = {}
+        # 全局 token 用量汇总缓存：避免每次刷新监控页都全量解析 11MB YAML。
+        # _totals_cache: {run_id -> {input/output/cached/total}_tokens}，按 run_id 细分
+        # 以便 save_summary 时只增量更新对应 run_id，无需重新汇总。
+        self._totals_file = self._data_dir / "_pipeline_totals.json" if self._data_dir else None
+        self._totals_cache: dict[str, dict[str, int]] = self._load_totals_cache()
 
     def _load_all(self) -> None:
         if not self._data_dir:
@@ -307,6 +312,54 @@ class ExecutionRecordStorage:
             logger.warning("管道映射文件损坏，使用空映射: %s", self._map_file)
             self._pipeline_root_map = {}
 
+    def _load_totals_cache(self) -> dict[str, dict[str, int]]:
+        """加载全局 token 用量汇总缓存文件。
+
+        缓存格式: {pipeline_run_id: {"input_tokens": N, "output_tokens": N, ...}}。
+        损坏时回退为空 dict，由后续 save_summary / get_total_tokens 重建。
+        """
+        if not self._totals_file or not self._totals_file.exists():
+            return {}
+        try:
+            return json.loads(self._totals_file.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("token 用量缓存文件损坏，重建: %s", self._totals_file)
+            return {}
+
+    def _persist_totals_cache(self) -> None:
+        """把 _totals_cache 落盘（原子写）。"""
+        if not self._totals_file:
+            return
+        try:
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._totals_file.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(self._totals_cache, ensure_ascii=False), encoding="utf-8",
+            )
+            tmp.replace(self._totals_file)
+        except Exception:
+            logger.warning("token 用量缓存落盘失败")
+
+    def _ensure_totals_cached(self) -> None:
+        """确保 _totals_cache 覆盖所有 summary。
+
+        若缓存为空但磁盘有 summary 文件，说明是首次启动或缓存丢失，
+        此时触发一次 summaries-only 加载重建缓存（比全量解析 records 快）。
+        """
+        if not self._data_dir:
+            return
+        # 缓存已有数据且与内存 summary 数量一致，无需重建
+        if self._totals_cache and len(self._totals_cache) >= len(self._summaries):
+            return
+        if not self._all_summaries_loaded:
+            self._load_all_summaries_only()
+            self._all_summaries_loaded = True
+        # 从内存 summary 重建缓存
+        for summary in self._summaries.values():
+            self._totals_cache[summary.run_id] = dict(summary.total_tokens)
+        if self._totals_cache:
+            self._persist_totals_cache()
+
     def _load_pipeline_file(self, yaml_file: Path) -> None:
         try:
             text = yaml_file.read_text(encoding="utf-8")
@@ -349,13 +402,27 @@ class ExecutionRecordStorage:
     def _load_summary_only(self, yaml_file: Path) -> None:
         """从单个 YAML 文件中仅解析 summary 部分，跳过 records。
 
+        关键优化：summary 段后是可能长达数 MB 的对话 records，逐行读取到
+        顶格 `records:` 行即停止，再用 yaml.safe_load 只解析这一小段，
+        避免把整个文件读进内存做全量解析（冷启动从 4s+ 降到亚秒级）。
+
         Args:
             yaml_file: YAML 文件路径
         """
         try:
-            text = yaml_file.read_text(encoding="utf-8")
-            # 同 _load_pipeline_file 的修复逻辑
-            text = _fix_records_empty_flow(text)
+            header_lines: list[str] = []
+            with yaml_file.open(encoding="utf-8") as fh:
+                for line in fh:
+                    # 顶格 records: 是 summary 段的终点
+                    if line.startswith("records:"):
+                        break
+                    header_lines.append(line)
+                    # 安全上限：summary 段不会超过几百行，超出说明文件结构异常
+                    if len(header_lines) > 2000:
+                        break
+            if not header_lines:
+                return
+            text = _fix_records_empty_flow("".join(header_lines))
             data = yaml.safe_load(text)
             if not isinstance(data, dict):
                 return
@@ -1122,6 +1189,9 @@ class ExecutionRecordStorage:
         self._loaded_pipelines.add(summary.run_id)
         self._update_summary_in_file(summary.run_id)
         self._all_summaries_loaded = False
+        # 增量更新全局 token 用量缓存：新管道加入、已有管道覆盖最新值
+        self._totals_cache[summary.run_id] = dict(summary.total_tokens)
+        self._persist_totals_cache()
         logger.debug("保存管道摘要: %s (iterations=%d, status=%s)",
                       summary.run_id, summary.total_iterations, summary.status)
         return summary.run_id
@@ -1220,11 +1290,15 @@ class ExecutionRecordStorage:
         return summaries[:limit]
 
     def get_total_tokens(self) -> dict[str, int]:
-        if self._data_dir and not self._loaded_pipelines:
-            self._load_all()
+        """汇总所有管道的累计 token 用量。
+
+        优先读 _totals_cache（持久化 + 内存），命中则亚秒级返回；
+        缓存缺失时触发 summaries-only 加载重建（不解析 records）。
+        """
+        self._ensure_totals_cached()
         total: dict[str, int] = {}
-        for summary in self._summaries.values():
-            for key, value in summary.total_tokens.items():
+        for tokens in self._totals_cache.values():
+            for key, value in tokens.items():
                 total[key] = total.get(key, 0) + value
         return total
 

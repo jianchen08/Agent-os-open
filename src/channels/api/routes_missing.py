@@ -483,40 +483,29 @@ def _build_cache_result(hits: int, misses: int) -> dict[str, Any]:
 
 
 def _get_cache_stats() -> dict[str, Any]:
-    """获取缓存命中率统计。
+    """获取 LLM prompt cache 命中率统计。
 
-    依次尝试：
-    1. ToolCache.get_cache_stats()
-    2. PerformanceMonitor._tool_stats 中的缓存数据
-    3. 零值兜底
+    直接取 ExecutionRecordStorage 中汇总的 cached_tokens / input_tokens：
+    - cache_hits  = cached_tokens（input 中命中 prompt cache 的部分）
+    - cache_misses = input_tokens - cached_tokens
+    - hit_rate   = cache_hits / (hits + misses)
 
     Returns:
         包含 cache_hits, cache_misses, hit_rate, total_requests 的字典
     """
-    def _strategy_tool_cache() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-        provider = get_service_provider()
-        tool_cache = provider.get("tool_cache")
-        if tool_cache is None or not hasattr(tool_cache, "get_cache_stats"):
-            return None
-        stats = tool_cache.get_cache_stats()
-        return _build_cache_result(stats.get("hits", 0), stats.get("misses", 0))
+    from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
 
-    def _strategy_perf_monitor() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-        provider = get_service_provider()
-        perf_monitor = provider.get("performance_monitor")
-        if perf_monitor is None:
-            return None
-        tool_stats = getattr(perf_monitor, "_tool_stats", {})
-        return _build_cache_result(
-            tool_stats.get("cache_hits", 0), tool_stats.get("cache_misses", 0),
-        )
+    storage = get_execution_record_storage()
+    if storage is None:
+        return {"cache_hits": 0, "cache_misses": 0, "hit_rate": 0.0, "total_requests": 0}
 
-    return _with_fallback_strategies(
-        [_strategy_tool_cache, _strategy_perf_monitor],
-        {"cache_hits": 0, "cache_misses": 0, "hit_rate": 0.0, "total_requests": 0},
-    )
+    tokens = storage.get_total_tokens()
+    input_tokens = tokens.get("input_tokens", 0)
+    cached_tokens = tokens.get("cached_tokens", 0)
+    # cached_tokens 是 input_tokens 中命中 prompt cache 的部分
+    hits = cached_tokens
+    misses = max(input_tokens - cached_tokens, 0)
+    return _build_cache_result(hits, misses)
 
 
 def _get_system_metrics() -> dict[str, Any]:
