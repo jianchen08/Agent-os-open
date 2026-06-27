@@ -6,6 +6,7 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { Artifact } from '@/types/artifact'
 import type { Workspace, FileTreeNode } from '@/types/workspace'
 import { apiClient } from '@/services/api/client'
@@ -226,6 +227,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
     {
       name: 'workspace-store',
       version: 1,
+      // 配额满时吞掉 QuotaExceededError，避免 toggleExpand 等 action 崩溃
+      storage: createTolerantStorage(),
       partialize: (state) => ({
         workspaces: state.workspaces,
         activeWorkspaceId: state.activeWorkspaceId,

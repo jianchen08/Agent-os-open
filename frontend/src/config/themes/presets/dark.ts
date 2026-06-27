@@ -13,49 +13,50 @@ export const darkTheme: ThemeConfig = {
   category: 'dark',
 
   colors: {
-    primary: '#3b82f6',
-    secondary: '#6366f1',
-    accent: '#8b5cf6',
+    // 基于 Radix slate-dark 中性层 + indigo-dark 强调：多层灰造深度，避免纯黑刺眼
+    primary: '#3e63dd',
+    secondary: '#435db1',
+    accent: '#9eb1ff',
 
     background: {
-      main: '#0f172a',
-      card: '#1e293b',
-      sidebar: '#1e293b',
-      input: '#334155',
-      elevated: '#1e293b',
+      main: '#111113',
+      card: '#18191b',
+      sidebar: '#18191b',
+      input: '#272a2d',
+      elevated: '#212225',
     },
 
     text: {
-      primary: '#f8fafc', // 保持高对比度
-      secondary: '#cbd5e1', // 从 #94a3b8 提亮，对比度从 5.4:1 提升到 7.2:1
-      muted: '#94a3b8', // 从 #64748b 提亮，对比度从 3.2:1 提升到 5.4:1
-      disabled: '#64748b', // 从 #475569 提亮，对比度从 2.1:1 提升到 3.2:1
+      primary: '#edeef0',
+      secondary: '#b0b4ba',
+      muted: '#777b84',
+      disabled: '#5a6169',
     },
 
     border: {
-      default: 'rgba(255, 255, 255, 0.12)', // 从 0.08 增加，提高可见度
-      hover: 'rgba(255, 255, 255, 0.20)', // 从 0.15 增加，提高可见度
-      active: 'rgba(59, 130, 246, 0.5)', // 从 0.4 增加，提高可见度
+      default: 'rgba(255, 255, 255, 0.10)',
+      hover: 'rgba(255, 255, 255, 0.18)',
+      active: 'rgba(62, 99, 221, 0.55)',
     },
 
     status: {
-      success: '#10b981',
-      warning: '#f59e0b',
-      error: '#ef4444',
-      info: '#3b82f6',
-      running: '#00f0ff',
-      pending: '#94a3b8',
+      success: '#0bd8b6',
+      warning: '#ffc53d',
+      error: '#ff6b6b',
+      info: '#9eb1ff',
+      running: '#4ccce6',
+      pending: '#777b84',
     },
 
     bubble: {
-      user_bg: '#2563eb',
+      user_bg: '#3e63dd',
       user_text: '#ffffff',
-      user_radius: '1.5rem 1.5rem 1.5rem 0.25rem',
-      user_shadow: '0 4px 12px rgba(59, 130, 246, 0.3)',
-      ai_bg: '#334155',
-      ai_text: '#f1f5f9',
-      ai_radius: '1rem 1rem 1rem 0.25rem',
-      ai_shadow: '0 2px 8px rgba(0, 0, 0, 0.2)',
+      user_radius: '1rem 1rem 1rem 0.25rem',
+      user_shadow: '0 4px 12px rgba(62, 99, 221, 0.28)',
+      ai_bg: '#212225',
+      ai_text: '#edeef0',
+      ai_radius: '0.875rem 0.875rem 0.875rem 0.25rem',
+      ai_shadow: '0 2px 8px rgba(0, 0, 0, 0.25)',
       ai_border: '1px solid rgba(255, 255, 255, 0.08)',
     },
   },
@@ -122,28 +123,28 @@ export const darkTheme: ThemeConfig = {
       textureOpacity: 0.1,
       variants: {
         primary: {
-          bg: 'rgba(59, 130, 246, 0.15)',
-          text: '#93c5fd',
-          border: 'rgba(59, 130, 246, 0.3)',
-          hoverBg: 'rgba(59, 130, 246, 0.25)',
+          bg: '#3e63dd',
+          text: '#ffffff',
+          border: 'transparent',
+          hoverBg: '#5472e4',
         },
         secondary: {
-          bg: 'rgba(255,255,255,0.08)',
-          text: '#cbd5e1',
-          border: 'rgba(255,255,255,0.15)',
-          hoverBg: 'rgba(255,255,255,0.12)',
+          bg: 'rgba(158, 177, 255, 0.12)',
+          text: '#9eb1ff',
+          border: 'rgba(158, 177, 255, 0.25)',
+          hoverBg: 'rgba(158, 177, 255, 0.18)',
         },
         ghost: {
           bg: 'transparent',
-          text: '#94a3b8',
+          text: '#b0b4ba',
           border: 'transparent',
-          hoverBg: 'rgba(255,255,255,0.05)',
+          hoverBg: 'rgba(255, 255, 255, 0.06)',
         },
         destructive: {
-          bg: 'rgba(239, 68, 68, 0.15)',
-          text: '#fca5a5',
-          border: 'rgba(239, 68, 68, 0.3)',
-          hoverBg: 'rgba(239, 68, 68, 0.25)',
+          bg: 'rgba(255, 107, 107, 0.15)',
+          text: '#ff9b9b',
+          border: 'rgba(255, 107, 107, 0.35)',
+          hoverBg: 'rgba(255, 107, 107, 0.25)',
         },
       },
     },
@@ -268,7 +269,7 @@ export const darkTheme: ThemeConfig = {
     glassmorphism: true,
     animations: true,
     transitionDuration: 200,
-    transitionEasing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+    transitionEasing: 'cubic-bezier(0.32, 0, 0.67, 0)',
   },
 
   backgrounds: {

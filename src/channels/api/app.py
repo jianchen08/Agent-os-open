@@ -198,6 +198,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
         router as thinking_mode_router,
     )
     from channels.api.routes_threads import router as threads_router  # noqa: PLC0415
+    from channels.api.routes_themes import router as themes_router  # noqa: PLC0415
     from channels.api.routes_tools import router as tools_router  # noqa: PLC0415
     from channels.api.routes_ui import router as ui_router  # noqa: PLC0415
 
@@ -211,6 +212,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     app.include_router(plugins_router)
     app.include_router(config_router)
     app.include_router(thinking_mode_router)
+    app.include_router(themes_router)
     app.include_router(ui_router)
 
     # ---- 外部系统路由 ----

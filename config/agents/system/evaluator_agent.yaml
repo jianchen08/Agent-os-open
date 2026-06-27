@@ -37,6 +37,11 @@ status: active
 max_iterations: 500
 max_reminders: 3
 timeout_seconds: 1200
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      evaluation_mode: true
 hard_constraints:
 - 评估必须基于实际内容，禁止空洞评价
 - 评分必须有依据，反馈要具体

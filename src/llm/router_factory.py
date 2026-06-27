@@ -22,7 +22,6 @@ _LLM_DIRECT_HOSTS = (
     "open.bigmodel.cn",
     "api.deepseek.com",
     "api.minimaxi.com",
-    "cn.apigocn.top",
     "ai.1cc.ai",
 )
 

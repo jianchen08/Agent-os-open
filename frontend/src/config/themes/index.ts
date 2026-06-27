@@ -8,8 +8,6 @@ import { darkTheme } from './presets/dark'
 import { deepSpaceTheme } from './presets/deep-space'
 import { highContrastTheme } from './presets/high-contrast'
 import { lightTheme } from './presets/light'
-import { modernDarkTheme } from './presets/modern-dark'
-import { modernLightTheme } from './presets/modern-light'
 import { oceanBreezeTheme } from './presets/ocean-breeze'
 import type { ThemeInfo, ThemeConfig } from '@/types/theme'
 
@@ -18,8 +16,6 @@ export { darkTheme } from './presets/dark'
 export { lightTheme } from './presets/light'
 export { deepSpaceTheme } from './presets/deep-space'
 export { oceanBreezeTheme } from './presets/ocean-breeze'
-export { modernDarkTheme } from './presets/modern-dark'
-export { modernLightTheme } from './presets/modern-light'
 export { highContrastTheme } from './presets/high-contrast'
 
 /**
@@ -32,8 +28,6 @@ export const presetThemes: Record<string, ThemeConfig> = {
   light: lightTheme,
   'deep-space': deepSpaceTheme,
   'ocean-breeze': oceanBreezeTheme,
-  'modern-dark': modernDarkTheme,
-  'modern-light': modernLightTheme,
   'high-contrast': highContrastTheme,
 }
 
@@ -68,34 +62,6 @@ export const themeList: ThemeInfo[] = [
       surface: '#f8fafc',
       text: '#0f172a',
       accent: '#7c3aed',
-    },
-  },
-
-  // 现代主题
-  {
-    id: 'modern-dark',
-    name: '现代深色',
-    description: '优雅护眼的深色主题，适合夜间工作和长时间编程',
-    category: 'dark',
-    preview: {
-      primary: '#3b82f6',
-      background: '#0f172a',
-      surface: '#1e293b',
-      text: '#f8fafc',
-      accent: '#00d4ff',
-    },
-  },
-  {
-    id: 'modern-light',
-    name: '现代浅色',
-    description: '简洁清新的浅色主题，适合日间办公使用',
-    category: 'light',
-    preview: {
-      primary: '#2563eb',
-      background: '#ffffff',
-      surface: '#f8fafc',
-      text: '#0f172a',
-      accent: '#3b82f6',
     },
   },
 

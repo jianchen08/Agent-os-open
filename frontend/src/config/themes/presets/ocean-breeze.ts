@@ -14,50 +14,51 @@ export const oceanBreezeTheme: ThemeConfig = {
   category: 'light',
 
   colors: {
-    primary: '#0891b2',
-    secondary: '#06b6d4',
-    accent: '#22d3ee',
+    // 海洋微风灵魂：Radix teal 青绿 + sky 天蓝，清新治愈，层次从浅到深
+    primary: '#0d9b8a',
+    secondary: '#00749e',
+    accent: '#0eb39e',
 
     background: {
-      main: 'linear-gradient(135deg, #f0fdff 0%, #e6fffa 50%, #ccfbf1 100%)',
-      card: 'rgba(240, 253, 255, 0.8)',
-      sidebar: 'rgba(230, 255, 250, 0.95)',
-      input: '#e6fffa',
+      main: 'linear-gradient(135deg, #f3fbf9 0%, #e1f6fd 50%, #e0f8f3 100%)',
+      card: 'rgba(243, 251, 249, 0.85)',
+      sidebar: 'rgba(241, 250, 253, 0.95)',
+      input: '#e1f6fd',
       elevated: 'rgba(255, 255, 255, 0.9)',
     },
 
     text: {
-      primary: '#0f172a',
-      secondary: '#0f766e',
-      muted: '#115e59',
-      disabled: '#14b8a6',
+      primary: '#0d3d38',
+      secondary: '#0d3d38',
+      muted: '#3d7585',
+      disabled: '#6a8a85',
     },
 
     border: {
-      default: 'rgba(8, 145, 178, 0.2)',
-      hover: 'rgba(8, 145, 178, 0.3)',
-      active: 'rgba(8, 145, 178, 0.4)',
+      default: 'rgba(13, 155, 154, 0.18)',
+      hover: 'rgba(13, 155, 154, 0.3)',
+      active: 'rgba(13, 155, 154, 0.45)',
     },
 
     status: {
-      success: '#059669',
-      warning: '#d97706',
-      error: '#dc2626',
-      info: '#0891b2',
-      running: '#22d3ee',
-      pending: '#67e8f9',
+      success: '#0d3d38',
+      warning: '#8a5408',
+      error: '#c0392b',
+      info: '#00749e',
+      running: '#0eb39e',
+      pending: '#3d7585',
     },
 
     bubble: {
-      user_bg: 'linear-gradient(135deg, #99f6e4 0%, #5eead4 50%, #2dd4bf 100%)',
-      user_text: '#0f172a',
-      user_radius: '1.5rem 1.5rem 1.5rem 0.25rem',
-      user_shadow: '0 4px 14px rgba(13, 148, 136, 0.2)',
-      ai_bg: '#e6fffa',
-      ai_text: '#0f172a',
-      ai_radius: '1.25rem 1.25rem 1.25rem 0.25rem',
-      ai_shadow: '0 2px 8px rgba(8, 145, 178, 0.08)',
-      ai_border: '1px solid rgba(8, 145, 178, 0.15)',
+      user_bg: 'linear-gradient(135deg, #045468 0%, #023b37 50%, #084843 100%)',
+      user_text: '#ffffff',
+      user_radius: '1.25rem 1.25rem 1.25rem 0.25rem',
+      user_shadow: '0 4px 14px rgba(13, 155, 154, 0.25)',
+      ai_bg: '#e1f6fd',
+      ai_text: '#0d3d38',
+      ai_radius: '1.125rem 1.125rem 1.125rem 0.25rem',
+      ai_shadow: '0 2px 8px rgba(0, 116, 158, 0.08)',
+      ai_border: '1px solid rgba(13, 155, 154, 0.15)',
     },
   },
 
@@ -268,8 +269,8 @@ export const oceanBreezeTheme: ThemeConfig = {
   effects: {
     glassmorphism: true,
     animations: true,
-    transitionDuration: 400,
-    transitionEasing: 'cubic-bezier(0.23, 1, 0.32, 1)',
+    transitionDuration: 300,
+    transitionEasing: 'cubic-bezier(0.34, 1.56, 0.64, 1)',
   },
 
   backgrounds: {

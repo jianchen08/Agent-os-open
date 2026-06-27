@@ -13,49 +13,50 @@ export const lightTheme: ThemeConfig = {
   category: 'light',
 
   colors: {
-    primary: '#2563eb',
-    secondary: '#4f46e5',
-    accent: '#7c3aed',
+    // 基于 Radix slate 浅中性 + 同色系蓝：克制干净，层次由浅到深
+    primary: '#3e63dd',
+    secondary: '#5472e4',
+    accent: '#9eb1ff',
 
     background: {
-      main: '#ffffff',
+      main: '#fcfcfd',
       card: '#ffffff',
-      sidebar: '#f8fafc',
-      input: '#f1f5f9',
+      sidebar: '#f9f9fb',
+      input: '#f0f0f3',
       elevated: '#ffffff',
     },
 
     text: {
-      primary: '#0f172a',
-      secondary: '#475569',
-      muted: '#64748b',
-      disabled: '#94a3b8',
+      primary: '#1c2024',
+      secondary: '#60646c',
+      muted: '#80838d',
+      disabled: '#8b8d98',
     },
 
     border: {
       default: 'rgba(0, 0, 0, 0.08)',
-      hover: 'rgba(0, 0, 0, 0.15)',
-      active: 'rgba(37, 99, 235, 0.4)',
+      hover: 'rgba(0, 0, 0, 0.14)',
+      active: 'rgba(62, 99, 221, 0.45)',
     },
 
     status: {
-      success: '#059669',
-      warning: '#d97706',
+      success: '#0d3d38',
+      warning: '#a8650b',
       error: '#dc2626',
-      info: '#2563eb',
-      running: '#0891b2',
-      pending: '#64748b',
+      info: '#3e63dd',
+      running: '#00749e',
+      pending: '#80838d',
     },
 
     bubble: {
-      user_bg: '#2563eb',
+      user_bg: '#3e63dd',
       user_text: '#ffffff',
-      user_radius: '1.5rem 1.5rem 1.5rem 0.25rem',
-      user_shadow: '0 4px 12px rgba(37, 99, 235, 0.25)',
-      ai_bg: '#e2e8f0',
-      ai_text: '#0f172a',
-      ai_radius: '1rem 1rem 1rem 0.25rem',
-      ai_shadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
+      user_radius: '1rem 1rem 1rem 0.25rem',
+      user_shadow: '0 4px 12px rgba(62, 99, 221, 0.22)',
+      ai_bg: '#f0f0f3',
+      ai_text: '#1c2024',
+      ai_radius: '0.875rem 0.875rem 0.875rem 0.25rem',
+      ai_shadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
       ai_border: '1px solid rgba(0, 0, 0, 0.06)',
     },
   },
@@ -122,22 +123,22 @@ export const lightTheme: ThemeConfig = {
       textureOpacity: 0,
       variants: {
         primary: {
-          bg: '#2563eb',
+          bg: '#3e63dd',
           text: '#ffffff',
           border: 'transparent',
-          hoverBg: '#1d4ed8',
+          hoverBg: '#304384',
         },
         secondary: {
-          bg: '#f1f5f9',
-          text: '#0f172a',
-          border: '#e2e8f0',
-          hoverBg: '#e2e8f0',
+          bg: '#f0f0f3',
+          text: '#1c2024',
+          border: '#e0e1e6',
+          hoverBg: '#e0e1e6',
         },
         ghost: {
           bg: 'transparent',
-          text: '#475569',
+          text: '#60646c',
           border: 'transparent',
-          hoverBg: 'rgba(0,0,0,0.05)',
+          hoverBg: 'rgba(0, 0, 0, 0.05)',
         },
         destructive: {
           bg: '#dc2626',
@@ -268,7 +269,7 @@ export const lightTheme: ThemeConfig = {
     glassmorphism: false,
     animations: true,
     transitionDuration: 200,
-    transitionEasing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+    transitionEasing: 'cubic-bezier(0.32, 0, 0.67, 0)',
   },
 
   backgrounds: {

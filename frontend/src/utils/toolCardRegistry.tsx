@@ -7,7 +7,7 @@
  * @module toolCardRegistry
  */
 
-import { Copy, FileText, Globe, Target, Terminal, Trash2 } from 'lucide-react'
+import { Copy, FileEdit, FileText, Globe, Target, Terminal } from 'lucide-react'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -26,6 +26,8 @@ export interface ToolCardConfig {
   buildDetails?: (toolCall: MessageToolCall) => ActivityDetailBlock[]
   /** 构建操作按钮（传入 toolCall，返回操作按钮列表） */
   buildActions?: (toolCall: MessageToolCall) => ActivityAction[]
+  /** 构建头部增删行数徽标（如 file_write 的 +X -Y），返回 undefined 则不展示 */
+  buildDiffStat?: (toolCall: MessageToolCall) => { added: number; removed: number } | undefined
   /** 自定义样式类名 */
   className?: string
   /** 运行状态的自定义颜色（CSS 色值），用于区分阻塞等待用户的工具 */
@@ -107,6 +109,10 @@ export function enhanceActivityWithToolConfig(
 
   if (config.buildDetails) {
     enhanced.details = config.buildDetails(toolCall)
+  }
+
+  if (config.buildDiffStat) {
+    enhanced.diffStat = config.buildDiffStat(toolCall)
   }
 
   if (config.buildActions) {
@@ -347,14 +353,41 @@ registerToolCard({
   },
 })
 
+/**
+ * 从 file_write 工具结果中解析 diff 数据（added/removed 行数 + 旧/新内容）
+ *
+ * 后端 _diff_extras 在成功结果里附带：
+ * - added / removed：始终存在
+ * - old_content / new_content：内容体积在阈值内时存在；超过则置 diff_omitted=true
+ */
+function extractWriteDiff(
+  tc: MessageToolCall,
+): { added: number; removed: number; oldContent?: string; newContent?: string } | undefined {
+  if (!tc.result) return undefined
+  const parsed = safeParseResult(tc.result)
+  if (!parsed) return undefined
+  // 仅在 added/removed 同时存在时视为有效 diff 统计
+  if (typeof parsed.added !== 'number' || typeof parsed.removed !== 'number') return undefined
+  return {
+    added: parsed.added as number,
+    removed: parsed.removed as number,
+    oldContent: typeof parsed.old_content === 'string' ? (parsed.old_content as string) : undefined,
+    newContent: typeof parsed.new_content === 'string' ? (parsed.new_content as string) : undefined,
+  }
+}
+
 registerToolCard({
   name: 'file_write',
-  icon: <Trash2 className="h-4 w-4" />,
+  icon: <FileEdit className="h-4 w-4" />,
   hasFilePath: true,
   formatTitle: (tc) => {
     const path = extractFilePath(tc)
     const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
     return `写入 ${fileName}`
+  },
+  buildDiffStat: (tc) => {
+    const diff = extractWriteDiff(tc)
+    return diff ? { added: diff.added, removed: diff.removed } : undefined
   },
   buildDetails: (tc) => {
     const path = extractFilePath(tc)
@@ -370,18 +403,34 @@ registerToolCard({
       })
     }
 
-    const args = tc.tool_args as Record<string, unknown> | null
-    if (args?.content) {
-      const contentStr =
-        typeof args.content === 'string' ? args.content : JSON.stringify(args.content, null, 2)
+    // 展开查看 diff：后端返回了 old/new 正文时才展示
+    const diff = extractWriteDiff(tc)
+    if (diff && diff.oldContent !== undefined && diff.newContent !== undefined) {
       details.push({
-        id: 'content',
-        label: '写入内容',
-        content: contentStr,
-        contentType: 'code',
+        id: 'diff',
+        label: '差异对比',
+        content: '',
+        contentType: 'diff',
         collapsible: true,
         defaultExpanded: false,
+        diffOld: diff.oldContent,
+        diffNew: diff.newContent,
       })
+    } else {
+      // 无 diff 正文时（如 append 优化路径），退回展示写入内容
+      const args = tc.tool_args as Record<string, unknown> | null
+      if (args?.content) {
+        const contentStr =
+          typeof args.content === 'string' ? args.content : JSON.stringify(args.content, null, 2)
+        details.push({
+          id: 'content',
+          label: '写入内容',
+          content: contentStr,
+          contentType: 'code',
+          collapsible: true,
+          defaultExpanded: false,
+        })
+      }
     }
 
     return details

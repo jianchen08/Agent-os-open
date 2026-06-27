@@ -415,6 +415,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 "[%s] 压缩完成: %d -> %d 条消息",
                 self.name, len(messages), len(compressed),
             )
+            # 压缩只搬运消息不格式化，会原样保留历史段里的 raw 格式 tool_calls
+            # （缺 type / 扁平结构，来自执行记录/state 恢复的脏数据）。
+            # 写回 state 前强制标准化，否则后续发上游会报"工具类型不能为空"
+            # / "messages 参数非法"（实测 glm/zhipu 必 400）。
+            # normalizer 的 _normalize_tool_calls_in_messages 是纯函数全量修复，
+            # 同时同步配对的 tool result，不破坏配对。
+            self._standardize_tool_calls(compressed)
             post_compress_count = sum(
                 1 for m in compressed if m.get("role") != "system"
             )
@@ -442,6 +449,24 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _standardize_tool_calls(self, messages: list[dict[str, Any]]) -> None:
+        """压缩写回前把 tool_calls 标准化为 OpenAI API 格式。
+
+        委托给 normalizer 的公共入口 standardize_tool_calls_in_messages
+        （纯函数全量修复，同步配对的 tool result）。延迟 import 避免
+        input 插件模块加载期耦合 core 插件模块。
+        """
+        try:
+            from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
+                standardize_tool_calls_in_messages,
+            )
+            standardize_tool_calls_in_messages(messages)
+        except Exception as exc:
+            logger.warning(
+                "[%s] tool_calls 标准化失败（不阻塞写回）: %s",
+                self.name, exc,
+            )
 
     async def _trim_covered_messages(  # noqa: PLR0911
         self, ctx: PluginContext, messages: list[dict[str, Any]],

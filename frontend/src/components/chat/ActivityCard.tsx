@@ -18,6 +18,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { useState } from 'react'
+import { TextDiffView } from '@/components/approval'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
@@ -196,6 +197,16 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
           </pre>
         )
 
+      case 'diff':
+        return (
+          <div className="bg-muted/30 overflow-x-auto rounded">
+            <TextDiffView
+              oldContent={block.diffOld ?? ''}
+              newContent={block.diffNew ?? ''}
+            />
+          </div>
+        )
+
       case 'markdown':
         return (
           <div className="bg-muted/30 max-w-none rounded p-2 text-xs">
@@ -317,6 +328,14 @@ const ActivityCard: FC<ActivityCardProps> = ({
         {activity.durationMs && (
           <span className="text-muted-foreground/70 flex-shrink-0">
             {formatDuration(activity.durationMs)}
+          </span>
+        )}
+
+        {/* 增删行数徽标（如 file_write 的 +X -Y），颜色跟随主题 status 语义色 */}
+        {activity.diffStat && (
+          <span className="flex flex-shrink-0 items-center gap-1 font-mono text-xs">
+            <span className="text-status-success">+{activity.diffStat.added}</span>
+            <span className="text-status-error">-{activity.diffStat.removed}</span>
           </span>
         )}
 

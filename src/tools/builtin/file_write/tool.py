@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import difflib
 import logging
 import re
 import shutil
@@ -24,6 +25,38 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
+
+
+# 工具卡片 diff 展示的内容体积上限（字节）；超过则只返回增删行数，省略正文
+_DIFF_CONTENT_MAX = 100_000
+
+
+def _diff_extras(
+    old_content: str | None, new_content: str, *, include_content: bool = True
+) -> dict[str, Any]:
+    """计算 old→new 的增删行数，并在体积允许时附带原文供前端渲染 diff。
+
+    - old_content 为 None 表示无法获取旧内容（如 append 优化路径），按纯新增处理。
+    - include_content=False 时只返回增删行数（不带 old/new 正文）。
+    """
+    old = old_content or ""
+    matcher = difflib.SequenceMatcher(
+        None, old.splitlines(), new_content.splitlines(), autojunk=False
+    )
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("delete", "replace"):
+            removed += i2 - i1
+        if tag in ("insert", "replace"):
+            added += j2 - j1
+
+    extras: dict[str, Any] = {"added": added, "removed": removed}
+    if include_content and len(old) + len(new_content) <= _DIFF_CONTENT_MAX:
+        extras["old_content"] = old
+        extras["new_content"] = new_content
+    else:
+        extras["diff_omitted"] = True
+    return extras
 
 
 class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
@@ -299,6 +332,14 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 if create_backup and path.exists():
                     backup_path = self._create_backup(path)
 
+                # 读取旧内容用于 diff 统计（文件已存在时）
+                old_content = ""
+                if path.exists() and path.is_file():
+                    try:
+                        old_content = path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        old_content = path.read_text(encoding="gbk", errors="ignore")
+
                 self._atomic_write(path, content)
 
                 lines_affected = len(content.splitlines()) if content else 0
@@ -308,6 +349,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                         "file": display_path,
                         "lines": lines_affected,
                         "backup": backup_path.name if backup_path else None,
+                        **_diff_extras(old_content, content or ""),
                     },
                     metadata={"action": "write"},
                 )
@@ -383,6 +425,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                         "file": display_path,
                         "lines": lines_affected,
                         "backup": backup_path.name if backup_path else None,
+                        **_diff_extras(original_content, new_content),
                     },
                     metadata={"action": "write"},
                 )
@@ -470,6 +513,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     "file": display_path,
                     "replacements": lines_affected,
                     "backup": backup_path.name if backup_path else None,
+                    **_diff_extras(original_content, new_content),
                 },
                 metadata={"action": "search_replace"},
             )
@@ -562,6 +606,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     "inserted_at": line,
                     "lines": len(insert_lines),
                     "backup": backup_path.name if backup_path else None,
+                    **_diff_extras(original_content, new_content),
                 },
                 metadata={"action": "insert"},
             )
@@ -670,6 +715,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     "deleted_lines": f"{start_line}-{end_line}",
                     "count": lines_affected,
                     "backup": backup_path.name if backup_path else None,
+                    **_diff_extras(original_content, new_content),
                 },
                 metadata={"action": "delete_lines"},
             )
@@ -719,6 +765,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                         "file": display_path,
                         "lines": lines_affected,
                         "backup": backup_path.name if backup_path else None,
+                        **_diff_extras("", content or ""),
                     },
                     metadata={"action": "append"},
                 )
@@ -760,6 +807,8 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     "file": display_path,
                     "lines": lines_affected,
                     "backup": backup_path.name if backup_path else None,
+                    # append 优化路径不读取整文件，仅给纯新增统计，不附带 diff 正文
+                    **_diff_extras(None, content or "", include_content=False),
                 },
                 metadata={"action": "append"},
             )

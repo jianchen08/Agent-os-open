@@ -163,7 +163,7 @@ export const ThinkingDisplay: FC<{
           ref={scrollRef}
           onScroll={handleScroll}
           className="thinking-text-content border-border/50 space-y-3 overflow-y-auto border-t px-3 py-2"
-          style={{ ...thinkingTextStyle, maxHeight: '50vh' }}
+          style={{ ...thinkingTextStyle, maxHeight: '33vh' }}
         >
           {/* 思考步骤列表 */}
           {thinking.steps && thinking.steps.length > 0 && (

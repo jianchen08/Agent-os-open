@@ -37,6 +37,7 @@ export type DetailContentType =
   | 'json' // JSON 数据
   | 'code' // 代码块
   | 'markdown' // Markdown
+  | 'diff' // 差异对比（oldContent/newContent 渲染为统一 diff 视图）
 
 /**
  * 活动操作类型
@@ -66,6 +67,10 @@ export interface ActivityDetailBlock {
   collapsible?: boolean
   /** 默认是否展开 */
   defaultExpanded?: boolean
+  /** 差异对比旧内容（仅 contentType='diff' 时有效） */
+  diffOld?: string
+  /** 差异对比新内容（仅 contentType='diff' 时有效） */
+  diffNew?: string
 }
 
 /**
@@ -122,6 +127,8 @@ export interface ActivityData {
   partialOutput?: string[]
   /** 详情区块列表 */
   details?: ActivityDetailBlock[]
+  /** 头部展示的增删行数徽标（如 file_write 的 +X -Y） */
+  diffStat?: { added: number; removed: number }
   /** 错误信息 */
   error?: string
   /** 时间戳 */

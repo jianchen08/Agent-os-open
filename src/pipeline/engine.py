@@ -626,13 +626,15 @@ class PipelineEngine:
 
                 _reg_entry.engine_task = self._preserved_engine_task
 
-            logger.debug(
+            if self._preserved_engine_task is not None:
 
-                "[Engine] 恢复 preserved engine_task: pipeline=%s has_task=%s",
+                logger.debug(
 
-                pipeline_run_id[:12], not self._preserved_engine_task.done(),
+                    "[Engine] 恢复 preserved engine_task: pipeline=%s has_task=%s",
 
-            )
+                    pipeline_run_id[:12], not self._preserved_engine_task.done(),
+
+                )
 
         self._preserved_bridge = None
 

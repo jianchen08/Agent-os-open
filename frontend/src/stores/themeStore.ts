@@ -6,8 +6,13 @@
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
 import { themeList } from '@/config/themes'
-import { getPresetTheme, applyTheme as applyThemeToDOM } from '@/services/themeService'
+import {
+  getPresetTheme,
+  applyTheme as applyThemeToDOM,
+  fetchDynamicThemes,
+} from '@/services/themeService'
 import { ThemeStorageService, mergeTheme } from '@/services/themeStorage'
 import type { ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
 
@@ -92,6 +97,30 @@ function generateTextureCSS(texture: ThemeConfig['backgrounds']['texture']): str
     default:
       return 'none'
   }
+}
+
+/**
+ * 应用用户动效偏好（ThemePreferences）覆盖主题默认 effects
+ *
+ * 优先级：系统 prefers-reduced-motion > 用户 reducedMotion > 用户 enableAnimations > 主题 effects
+ * 任一为「减少/关闭」则强制过渡时长归零，让无障碍偏好真正生效。
+ */
+function applyMotionPreferences(root: HTMLElement): void {
+  const prefs = ThemeStorageService.getPreferences()
+  const reduceMotion =
+    prefs.reducedMotion ||
+    !prefs.enableAnimations ||
+    (typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+
+  if (reduceMotion) {
+    root.style.setProperty('--transition-fast', '0ms')
+    root.style.setProperty('--transition-base', '0ms')
+    root.style.setProperty('--transition-slow', '0ms')
+  }
+
+  // 毛玻璃：用户明确关闭则移除 backdrop-filter（与主题 card.style 解耦）
+  root.classList.toggle('no-glassmorphism', !prefs.enableGlassmorphism)
 }
 
 export const useThemeStore = create<ThemeState & ThemeActions>()(
@@ -236,12 +265,18 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       applyTheme: () => {
         const { themeConfig } = get()
         if (!themeConfig) return
-        // 使用优化后的批量应用方法
+        // 使用优化后的批量应用方法（含 effects → 全局过渡/动画变量）
         applyThemeToDOM(themeConfig)
 
         const root = document.documentElement
         const body = document.body
         const { backgrounds } = themeConfig
+
+        // === 用户偏好覆盖（ThemePreferences）===
+        // 主题 effects 是默认值，用户偏好是最终决定权：
+        // reducedMotion / enableAnimations=false → 强制过渡归零（无障碍）
+        // enableGlassmorphism=false → 关闭毛玻璃（覆盖主题 card.style:'glass'）
+        applyMotionPreferences(root)
 
         // 背景图片
         if (backgrounds.image?.enabled && backgrounds.image?.url) {
@@ -266,6 +301,8 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
     }),
     {
       name: 'theme-storage',
+      // 配额满时吞掉 QuotaExceededError，避免 setMode/setTheme 等 action 崩溃
+      storage: createTolerantStorage(),
       partialize: (state) => ({
         mode: state.mode,
         currentThemeId: state.currentThemeId,
@@ -280,7 +317,12 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
 export async function initializeTheme() {
   const store = useThemeStore.getState()
 
-  // 更新可用主题列表
+  // 先拉取动态主题（后端无状态清单 → fetch JSON → 存 localStorage），
+  // 必须在 updateAvailableThemes 之前完成，否则新主题不会被合并进列表。
+  // 内部已做降级：后端不可达时静默返回，不影响内置 preset。
+  await fetchDynamicThemes()
+
+  // 更新可用主题列表（preset + localStorage 用户主题，含上一步加载的动态主题）
   store.updateAvailableThemes()
 
   // 解析当前主题

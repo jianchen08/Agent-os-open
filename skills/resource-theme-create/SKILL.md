@@ -1,18 +1,27 @@
 ---
 name: 创建主题
-description: 创建或修改前端 UI 主题时加载。主题配置规范：ThemeConfig 结构（colors/components/effects/backgrounds 四大支柱）、命名约定、预设文件 + index.ts 注册流程、validateThemeConfig 校验规则、避开后端孤儿 design_tokens 系统。
+description: 创建或修改前端 UI 主题时加载。主题配置规范：ThemeConfig 结构（colors/components/effects/backgrounds 四大支柱）、命名约定、预设文件 + index.ts 注册流程、validateThemeConfig 校验规则、配色对比度/无障碍/美观设计要求。主题由配置自动读取，无需注册、无需资源搜索。
 ---
 
 # 创建主题
 
-## 一、先认清：项目里有两套"主题"，只创建前端这套
+## 〇、定位：主题是"配置自动读取"资源，不注册、不搜索
 
-| 系统 | 位置 | 状态 | 是否创建 |
-|------|------|------|----------|
-| **前端主题系统（本规范对象）** | `frontend/src/config/themes/` + `frontend/src/types/theme.ts` | ✅ 实际在用，7 个预设主题，已接入 DOM/shadcn | ✅ 在此创建 |
-| 后端 design_tokens（孤儿） | `src/ui_schema/design_tokens.py` + `style_config.py` | ⚠️ 零外部引用，`ThemeName` 仅 light/dark | ❌ 不要碰 |
+| 问题 | 答案 | 原因 |
+|------|------|------|
+| 主题要不要 `register_resource` 注册？ | **不要** | 前端 `index.ts` 的 `presetThemes` 映射表即注册中心，放进去就自动被发现 |
+| 主题要不要 `resource_search` 搜索？ | **不要** | 主题不是后端 Registry 资源，搜索工具只管 agent/tool/skill |
+| 谁用这个技能？ | **资源管理 Agent** | 在用户要新增/改主题时加载本技能执行 |
 
-**判定依据**：后端 `design_tokens.py` 在 `ui_schema/` 之外无任何消费方（grep 验证），前端主题系统才是真实生效的视觉主题来源。本技能只处理前者。
+> **不要改 `register_resource` / `resource_search` 去加 theme 类型。** 那是给后端动态资源用的通道，主题走配置直读，两套机制不该混。
+
+## 一、唯一主题系统在前端（后端那套已清理）
+
+| 系统 | 位置 | 状态 |
+|------|------|------|
+| **前端主题系统（本规范对象）** | `frontend/src/config/themes/` + `frontend/src/types/theme.ts` | ✅ 实际在用，7 个预设主题，接入 DOM/shadcn |
+
+> 历史上后端曾有一套 `design_tokens` / `style_config`，零消费方，已删除。**主题只在前端做。**
 
 ## 二、主题文件放哪、叫什么
 
@@ -107,13 +116,52 @@ export const presetThemes = { /* ... */ 'my-theme': myTheme }  // ③ 加入映�
 - [ ] `colors` 含 primary/secondary/accent + background/text/border 子对象
 - [ ] `components` / `effects` / `backgrounds` 三个对象齐全
 
-## 五、命名与配色建议
+## 五、配色：对比度 / 无障碍 / 美观（核心质量门禁）
 
-- ID 见名知意：`{意境}-{明暗}` 或 `{意象}`，如 `forest-dark`、`sakura`
-- 同一主题内 `accent` 与 `primary` 形成对比但同色系和谐
-- `dark` 类别：背景用深色（`#0xxxxx`），文字浅色；`light` 类别反之
-- 状态色 `success/warning/error/info` 跨主题保持语义一致（绿/橙/红/蓝），不要乱改语义
-- 无障碍主题（如 `high-contrast`）category 用 `special`，可加 `accessibility: true`
+颜色是主题的灵魂，也是最易翻车的地方。下面是硬性门禁，**任一不过即主题不合格**。
+
+### 5.1 对比度门禁（WCAG 2.1，必须自检）
+
+文字色与其背景色的对比度（contrast ratio）必须达标。计算公式：取两色相对亮度，`(L1+0.05)/(L2+0.05)`，范围 1~21（写法 `4.5:1`）。
+
+| 元素 | 文本规模 | AA（常规目标） | AAA（高标准，参考 `high-contrast` 主题） |
+|------|----------|----------------|------|
+| **正文文字**（`text.primary` on `background.main`） | 正常 < 18px | ≥ 4.5:1 | ≥ 7:1 |
+| **大号文字/标题** | ≥ 18px 或 ≥ 14px 粗体 | ≥ 3:1 | ≥ 4.5:1 |
+| **次要文字**（`text.secondary` on bg） | — | ≥ 4.5:1（同正文） | ≥ 7:1 |
+| **辅助/静默文字**（`text.muted` on bg） | — | ≥ 3:1 | ≥ 4.5:1 |
+| **状态色文字**（success/warning/error on bg） | — | ≥ 4.5:1 | ≥ 7:1 |
+| **图标/边框/占位**（`border.default`/`text.disabled` on bg） | 非文字 | ≥ 3:1（可见即可） | ≥ 3:1 |
+
+**自检方法**：对每对"前景 on 背景"，用对比度工具核对。可用：
+- 在线：WebAIM Contrast Checker
+- 命令行：本仓库可写一个一次性校验脚本，逐对算 ratio 并断言阈值（创建主题时建议附带跑一遍）
+
+> 关键配对要逐一查（不要只查 `primary on bg`）：`text.primary/secondary/muted/disabled` on `background.main`，`bubble.user_text on bubble.user_bg`，`bubble.ai_text on bubble.ai_bg`，各 `status.*` on bg。
+
+### 5.2 明暗一致性（不要做"半暗半亮"主题）
+
+- `category: 'dark'` → 所有背景字段（`main/card/sidebar/input/elevated`）用深色（如 `#0xxxxx` 系），文字用浅色（接近白）
+- `category: 'light'` → 所有背景用浅色（接近白），文字用深色（如 `#1xxxxx` 系）
+- **层级关系**：`main` 最深/最浅（基调） → `card`/`elevated` 提亮/压暗一档 → `input` 介于二者之间。层次不能塌成一片
+- dark 主题里 `text.disabled`（如 `#808080`）on 深色背景对比度常不够，注意往浅调
+
+### 5.3 色彩美观与和谐
+
+- **同色系和谐**：`primary`/`secondary`/`accent` 取同色相不同明度/饱和度，避免三色互相打架。可用 HSL 微调：固定 H，调 S/L
+- **主次分明**：`primary` 是绝对主角，`secondary`/`accent` 仅作点缀（按钮次要态、强调高亮），面积上 primary 占主导
+- **状态色语义固定，不要改语义**：`success=绿` `warning=橙/黄` `error=红` `info=蓝`，跨主题保持语义一致，只调明暗适配底色
+- **渐变要协调**：`background.main` 或 `bubble.*_bg` 用 `linear-gradient` 时，取同色系两端，避免彩虹
+- **避免荧光色大面积铺**：纯 `#00ff00`/`#ff00ff` 等饱和原色只适合 `high-contrast` 这类特殊主题，常规主题应降饱和（如 `#059669` 而非 `#00ff00`）
+
+### 5.4 无障碍专项（参考 `high-contrast` 主题）
+
+| 场景 | 要求 |
+|------|------|
+| 常规主题 | 至少达 **AA**；交互态（hover/active/focus）额外可见 |
+| 无障碍主题（`category: 'special'` + `accessibility: true`） | 达 **AAA**；圆角可归零（`high-contrast` 把 borderRadius 全设 0）；加 `accessibility_config`（contrastRatio/focusIndicator/reducedMotion/largeText） |
+| 焦点可见性 | 输入框 `input.focusBorder` + `focusGlow` 要与背景对比度 ≥ 3:1，键盘用户能看清聚焦位置 |
+| 动效偏好 | 系统级 `prefers-reduced-motion` 由前端 store 处理；主题的 `effects.animations` 不要挡这条路径 |
 
 ## 六、不要做的事
 
@@ -126,10 +174,11 @@ export const presetThemes = { /* ... */ 'my-theme': myTheme }  // ③ 加入映�
 
 创建主题后逐项核对：
 - [ ] 预设文件 `frontend/src/config/themes/presets/{id}.ts` 存在，导出 `{camelCase}Theme`
-- [ ] `index.ts` 三处注册齐全（import / re-export / presetThemes + themeList）
+- [ ] `index.ts` 三处注册齐全（import / re-export / presetThemes + themeList）—— **不需要 register_resource / resource_search**
 - [ ] `id` 与文件名一致、全局唯一、kebab-case
 - [ ] colors/components/effects/backgrounds 四大顶层字段齐全
-- [ ] category 取值合法（light/dark/special/base）
+- [ ] category 取值合法（light/dark/special/base），明暗一致（dark 全深色/light 全浅色）
 - [ ] 通过 `validateThemeConfig`（必填项无缺失）
+- [ ] **对比度自检**：正文 ≥ 4.5:1（AA），大号/图标 ≥ 3:1；无障碍主题 ≥ 7:1（AAA）。逐对核查 text/bubble/status on 各 background
+- [ ] 配色美观：primary 主导、同色系和谐、状态色语义不乱
 - [ ] 前端类型检查通过：在 `frontend/` 下 `npx tsc --noEmit` 无新增报错
-- [ ] 配色无硬编码冲突：状态色语义正确、明暗对比可读

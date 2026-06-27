@@ -2,19 +2,20 @@
  * 主题服务
  *
  * 提供主题应用、合并等工具函数
- * 主题配置完全由前端管理，无后端依赖
+ * 主题配置由前端管理：预设主题打包进 bundle，动态主题通过后端无状态清单
+ * （/api/v1/themes/manifest）发现后 fetch JSON 存入 localStorage。
  */
 
+import { API_ENDPOINTS } from '@/constants/api'
 import {
   darkTheme,
   lightTheme,
   deepSpaceTheme,
   oceanBreezeTheme,
-  modernDarkTheme,
-  modernLightTheme,
   highContrastTheme,
 } from '@/config/themes'
-import { mergeTheme as mergeUserTheme } from '@/services/themeStorage'
+import apiClient from '@/services/api/client'
+import { ThemeStorageService, mergeTheme as mergeUserTheme } from '@/services/themeStorage'
 import type { ThemeConfig } from '@/types/theme'
 
 /**
@@ -29,8 +30,6 @@ export function getPresetTheme(themeId: string): ThemeConfig | null {
     light: lightTheme,
     'deep-space': deepSpaceTheme,
     'ocean-breeze': oceanBreezeTheme,
-    'modern-dark': modernDarkTheme,
-    'modern-light': modernLightTheme,
     'high-contrast': highContrastTheme,
   }
   return presetThemes[themeId] || null
@@ -380,6 +379,21 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--input: ${colorToHsl(c.background.input)}`)
   vars.push(`--ring: ${colorToHsl(c.primary)}`)
 
+  // === 视觉效果（effects）→ 全局过渡/动画语义变量 ===
+  // effects.transitionDuration 是主题级过渡时长基准；effects.animations=false 时
+  // 全站过渡归零（无障碍主题如 high-contrast 据此关闭动画）。
+  // 组件统一引用 var(--transition-*) / var(--transition-easing)，由 effects 单点驱动。
+  const fx = config.effects
+  const duration = fx?.transitionDuration ?? 200
+  const easing = fx?.transitionEasing ?? 'cubic-bezier(0.4, 0, 0.2, 1)'
+  const motion = fx?.animations ?? true
+  vars.push(`--transition-easing: ${easing}`)
+  // animations=false → 时长归零；否则按 fast/base/slow = 0.6x / 1x / 1.5x 派生三档
+  const d = motion ? duration : 0
+  vars.push(`--transition-fast: ${Math.round(d * 0.6)}ms ${easing}`)
+  vars.push(`--transition-base: ${d}ms ${easing}`)
+  vars.push(`--transition-slow: ${Math.round(d * 1.5)}ms ${easing}`)
+
   return vars.join('; ')
 }
 
@@ -458,6 +472,61 @@ export function clearTheme(): void {
  */
 export function mergeTheme(base: ThemeConfig, custom: Partial<ThemeConfig>): ThemeConfig {
   return mergeUserTheme(base, custom)
+}
+
+/**
+ * 动态主题清单条目（后端 /api/v1/themes/manifest 返回的单项）
+ */
+interface ThemeManifestItem {
+  id: string
+  name: string
+  url: string
+}
+
+/**
+ * 拉取并加载动态主题（自动发现，无需用户点导入）
+ *
+ * 流程：
+ * 1. GET /api/v1/themes/manifest 拿清单（后端无状态扫描 public/themes/*.json）
+ * 2. 对每个条目 fetch 其 JSON 内容
+ * 3. 调现成的 ThemeStorageService.importTheme 存入 localStorage
+ *
+ * 失败容错：清单拉取失败或单个主题 fetch/导入失败，只 console.warn 不抛出，
+ * 保证后端不可达时前端降级到内置 preset（符合「失败兜底不影响整体」原则）。
+ *
+ * 幂等：importTheme 内部按 id 去重，重复加载只更新不新增。
+ */
+export async function fetchDynamicThemes(): Promise<void> {
+  let manifest: ThemeManifestItem[]
+  try {
+    const { data } = await apiClient.get<ThemeManifestItem[]>(API_ENDPOINTS.THEMES.MANIFEST)
+    manifest = data
+  } catch (err) {
+    // 后端不可达：静默降级，不影响现有 preset + localStorage 主题
+    console.warn('[themeService] 动态主题清单拉取失败，降级到内置主题', err)
+    return
+  }
+
+  if (!Array.isArray(manifest) || manifest.length === 0) {
+    return
+  }
+
+  await Promise.all(
+    manifest.map(async (item) => {
+      try {
+        const resp = await fetch(item.url)
+        if (!resp.ok) {
+          console.warn(`[themeService] 主题 ${item.id} 加载失败: HTTP ${resp.status}`)
+          return
+        }
+        const configJson = await resp.text()
+        // 复用 importTheme 的校验 + 存储逻辑（按 id 去重）
+        ThemeStorageService.importTheme(configJson)
+      } catch (err) {
+        console.warn(`[themeService] 主题 ${item.id} 导入失败，跳过`, err)
+      }
+    }),
+  )
 }
 
 /**

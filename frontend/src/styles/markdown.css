@@ -11,7 +11,9 @@
 .markdown-content {
   font-size: 0.9375rem;
   line-height: 1.7;
-  color: hsl(var(--foreground));
+  /* 继承所在容器的文字色（气泡用 --bubble-*-text，页面用 --foreground）。
+     不要硬连 --foreground：否则在深色用户气泡里会用错文字色导致看不见。 */
+  color: inherit;
   word-wrap: break-word;
   overflow-wrap: break-word;
   /* 防止内容溢出 */
@@ -27,7 +29,7 @@
   font-weight: 700;
   margin-top: 1.5rem;
   margin-bottom: 1rem;
-  color: hsl(var(--foreground));
+  color: inherit;
   border-bottom: 1px solid hsl(var(--border));
   padding-bottom: 0.5rem;
 }
@@ -41,7 +43,7 @@
   font-weight: 600;
   margin-top: 1.25rem;
   margin-bottom: 0.75rem;
-  color: hsl(var(--foreground));
+  color: inherit;
 }
 
 .markdown-content .md-h2:first-child {
@@ -53,7 +55,7 @@
   font-weight: 600;
   margin-top: 1rem;
   margin-bottom: 0.5rem;
-  color: hsl(var(--foreground));
+  color: inherit;
 }
 
 .markdown-content .md-h3:first-child {
@@ -65,7 +67,7 @@
   font-weight: 600;
   margin-top: 0.75rem;
   margin-bottom: 0.5rem;
-  color: hsl(var(--foreground));
+  color: inherit;
 }
 
 .markdown-content .md-h4:first-child {
@@ -90,7 +92,7 @@
 
 .markdown-content .md-strong {
   font-weight: 600;
-  color: hsl(var(--foreground));
+  color: inherit;
 }
 
 .markdown-content .md-em {
@@ -295,7 +297,7 @@
 
 .markdown-content .katex {
   font-size: 1.1em;
-  color: hsl(var(--foreground));
+  color: inherit;
 }
 
 /* BUG-FIX-fix_20260313_katex_whitespace: 修复 KaTeX 公式渲染后页面下方空白问题

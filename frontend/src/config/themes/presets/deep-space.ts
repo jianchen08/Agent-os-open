@@ -14,51 +14,52 @@ export const deepSpaceTheme: ThemeConfig = {
   category: 'dark',
 
   colors: {
-    primary: '#00f0ff',
-    secondary: '#7c3aed',
-    accent: '#f59e0b',
+    // 赛博朋克灵魂：Radix cyan-dark 冰青霓虹 + indigo-dark 深空底，锐利科技感
+    primary: '#00a2c7',
+    secondary: '#11809c',
+    accent: '#4ccce6',
 
     background: {
-      main: 'radial-gradient(circle at 20% 80%, #1e1b4b 0%, #0f172a 40%, #020617 100%)',
-      card: 'rgba(15, 23, 42, 0.7)',
-      sidebar: 'rgba(30, 27, 75, 0.8)',
-      input: 'rgba(15, 23, 42, 0.6)',
-      elevated: 'rgba(30, 41, 59, 0.8)',
+      main: 'radial-gradient(circle at 20% 80%, #182449 0%, #0b161a 45%, #050a0c 100%)',
+      card: 'rgba(16, 27, 32, 0.85)',
+      sidebar: 'rgba(20, 23, 38, 0.95)',
+      input: 'rgba(8, 44, 54, 0.8)',
+      elevated: 'rgba(24, 36, 49, 0.9)',
     },
 
     text: {
-      primary: '#f8fafc', // 保持高对比度
-      secondary: '#22d3ee', // 从 #00f0ff 调暗，提高可读性
-      muted: '#a5f3fc', // 从 #94a3b8 提亮，对比度 >= 4.5:1
-      disabled: '#64748b', // 从 #475569 提亮，对比度 >= 3:1
+      primary: '#b6ecf7',
+      secondary: '#4ccce6',
+      muted: '#6e8a96',
+      disabled: '#777b84',
     },
 
     border: {
-      default: 'rgba(0, 240, 255, 0.25)', // 从 0.2 增加
-      hover: 'rgba(0, 240, 255, 0.45)', // 从 0.4 增加
-      active: 'rgba(0, 240, 255, 0.65)', // 从 0.6 增加
+      default: 'rgba(76, 204, 230, 0.18)',
+      hover: 'rgba(76, 204, 230, 0.38)',
+      active: 'rgba(76, 204, 230, 0.6)',
     },
 
     status: {
-      success: '#10b981',
-      warning: '#f59e0b',
-      error: '#ef4444',
-      info: '#00f0ff',
-      running: '#00f0ff',
-      pending: '#7c3aed',
+      success: '#0bd8b6',
+      warning: '#ffc53d',
+      error: '#ff6b6b',
+      info: '#4ccce6',
+      running: '#4ccce6',
+      pending: '#5472e4',
     },
 
     bubble: {
-      user_bg: 'linear-gradient(135deg, #00f0ff 0%, #0891b2 100%)',
-      user_text: '#020617',
-      user_radius: '0.5rem 0.5rem 0.5rem 0.125rem',
-      user_shadow: '0 0 15px rgba(0, 240, 255, 0.4), 0 0 30px rgba(0, 240, 255, 0.15)',
-      user_border: '1px solid rgba(0, 240, 255, 0.4)',
-      ai_bg: '#1e293b',
-      ai_text: '#f8fafc',
-      ai_radius: '0.375rem 0.375rem 0.375rem 0.125rem',
-      ai_shadow: '0 0 10px rgba(0, 240, 255, 0.1)',
-      ai_border: '1px solid rgba(0, 240, 255, 0.2)',
+      user_bg: 'linear-gradient(135deg, #045468 0%, #023b37 100%)',
+      user_text: '#b6ecf7',
+      user_radius: '0.375rem 0.375rem 0.375rem 0.125rem',
+      user_shadow: '0 0 15px rgba(76, 204, 230, 0.35), 0 0 30px rgba(0, 162, 199, 0.15)',
+      user_border: '1px solid rgba(76, 204, 230, 0.4)',
+      ai_bg: 'rgba(16, 27, 32, 0.9)',
+      ai_text: '#b6ecf7',
+      ai_radius: '0.25rem 0.25rem 0.25rem 0.125rem',
+      ai_shadow: '0 0 10px rgba(76, 204, 230, 0.12)',
+      ai_border: '1px solid rgba(76, 204, 230, 0.2)',
     },
   },
 
@@ -267,10 +268,10 @@ export const deepSpaceTheme: ThemeConfig = {
   },
 
   effects: {
-    glassmorphism: false,
+    glassmorphism: true,
     animations: true,
-    transitionDuration: 200,
-    transitionEasing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+    transitionDuration: 250,
+    transitionEasing: 'cubic-bezier(0.16, 1, 0.3, 1)',
   },
 
   backgrounds: {

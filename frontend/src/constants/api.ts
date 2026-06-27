@@ -292,7 +292,11 @@ export const API_ENDPOINTS = {
     /** 思考模式服务健康检查 */
     HEALTH: '/api/v1/thinking-mode/health',
   },
-  // 主题管理相关已移除 - 主题系统完全前端化
+  /** 主题管理 - 无状态清单接口（后端只扫目录返回元数据，主题内容仍归前端） */
+  THEMES: {
+    /** 动态主题清单（扫描 public/themes/*.json，返回 id/name/url） */
+    MANIFEST: '/api/v1/themes/manifest',
+  },
   /** 成本控制相关 - 对应后端 /api/v1/cost-control/* */
   COST_CONTROL: {
     /** 获取预算状态 */

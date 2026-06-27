@@ -258,6 +258,23 @@ def _is_valid_tool_call_id(tc_id: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
 
 
+def standardize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
+    """标准化 tool_calls 为 OpenAI API 格式（公共入口）。
+
+    薄包装：委托给 _normalize_tool_calls_in_messages。供压缩写回等
+    非 LLM 调用路径在写入 history 前复用，确保不会把内部 raw 格式
+    （缺 type / 扁平结构）固化进 recent 段，否则后续发上游会报
+    "工具类型不能为空" / "messages 参数非法"（实测 glm/zhipu 必 400）。
+
+    原地修改 messages：结构修复 + tool_call_id 标准化（同步修正配对的
+    tool result 的 tool_call_id，保持配对完整）。
+
+    Args:
+        messages: 消息列表（原地修改）
+    """
+    _normalize_tool_calls_in_messages(messages)
+
+
 def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  # noqa: PLR0912
     """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
 

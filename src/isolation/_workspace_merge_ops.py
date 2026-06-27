@@ -390,9 +390,13 @@ class _MergeOpsMixin:
                 return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
 
         if method == "git_merge" and branch:
+            # --diff-filter=AMRC 只校验应到达目标的文件（新增/修改/重命名新路径/复制），
+            # 排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
+            # 会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
             rc, diff_out, _ = self._run_git(
                 "-c", "core.quotepath=false",
-                "diff", "--name-only", branch + "~1", branch, cwd=proj_path)
+                "diff", "--name-only", "--diff-filter=AMRC",
+                branch + "~1", branch, cwd=proj_path)
             if rc == 0 and diff_out.strip():
                 branch_files = set(diff_out.strip().splitlines())
                 missing = []

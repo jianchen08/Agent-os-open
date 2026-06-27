@@ -310,7 +310,7 @@ export const MessageItem = memo(function MessageItem({
           <div
             className="w-full max-w-full p-3"
             style={{
-              backgroundColor: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
+              background: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
               color: isUser ? 'var(--bubble-user-text)' : 'var(--bubble-ai-text)',
               borderRadius: isUser
                 ? 'var(--bubble-user-radius, 1.5rem)'
@@ -344,7 +344,10 @@ export const MessageItem = memo(function MessageItem({
                 修复方案: 非流式且无内容时跳过整个气泡渲染。 */}
             {(() => {
               const bubbleStyle = {
-                backgroundColor: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
+                // 用 background 而非 backgroundColor：bubble-*-bg 可能是纯色，
+                // 也可能是 linear-gradient()（如 ocean-breeze/deep-space 用户气泡）。
+                // background-color 遇到渐变值会忽略整条声明 → 背景透明 → 白字看不见。
+                background: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
                 color: isUser ? 'var(--bubble-user-text)' : 'var(--bubble-ai-text)',
                 borderRadius: isSystemMessage
                   ? 'var(--bubble-ai-radius, 1rem)'

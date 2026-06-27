@@ -193,3 +193,34 @@
 .animation-delay-300 {
   animation-delay: 300ms;
 }
+
+/**
+ * 无障碍：尊重系统「减少动态效果」偏好（WCAG 2.1 SC 2.3.3）
+ *
+ * 注意：主题 effects.animations=false 已通过 --transition-base:0ms 让过渡归零；
+ * 这里再针对系统级 prefers-reduced-motion 做兜底，关闭所有非必要动画，
+ * 即使主题本身开了动画，也尊重用户系统设置。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/**
+ * 用户偏好「关闭毛玻璃」（ThemePreferences.enableGlassmorphism=false）
+ *
+ * 由 themeStore 在 <html> 上切换 .no-glassmorphism 类，覆盖主题 card.style:'glass'
+ * 的 backdrop-filter，让用户能全局关闭毛玻璃（性能/可读性考量）。
+ */
+html.no-glassmorphism *,
+html.no-glassmorphism *::before,
+html.no-glassmorphism *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}

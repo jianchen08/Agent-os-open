@@ -129,6 +129,37 @@ class TestMergeVerifyFix:
         assert verified is False
         assert "不存在" in detail
 
+    def test_git_merge_with_deleted_files_not_misjudged(self, tmp_path):
+        """git_merge 合并含删除文件的任务不应被验证逻辑误判为失败
+
+        回归 BUG-fix_20260628_merge_verify_deleted_files:
+        原验证用 `git diff --name-only` 取改动文件后逐个 exists() 校验，
+        不区分增/改/删 → 任务正确删除的废弃文件合并后本就不存在，
+        被误判为「文件未到达目标」，重组/清理类任务必然合并失败（重试也无解）。
+        """
+        proj, wt_dir = _setup_project(tmp_path)
+        # worktree 删除一个已跟踪文件（模拟任务清理废弃模块）
+        (wt_dir / "new_file.txt").unlink()
+        git("add", "-A", cwd=wt_dir)
+        git("commit", "-m", "remove deprecated file", cwd=wt_dir)
+
+        lifecycle = _make_lifecycle(str(proj))
+        ws_meta = {
+            "mode": "worktree",
+            "path": str(wt_dir),
+            "branch": "task/test1",
+            "project_root": str(proj),
+        }
+        result = lifecycle.on_eval_passed("test_del", str(wt_dir), ws_meta)
+
+        assert result["success"] is True, result
+        assert result["method"] == "git_merge"
+        # 删除已生效
+        assert not (proj / "new_file.txt").exists()
+        # 修改已生效
+        assert (proj / "hello.txt").read_text() == "hello modified"
+        assert not wt_dir.exists(), "worktree 应被清理"
+
     def test_on_eval_passed_retries_on_verify_fail(self, tmp_path):
         """验证失败时重试，最终 worktree 保留不清理"""
         proj, wt_dir = _setup_project(tmp_path)

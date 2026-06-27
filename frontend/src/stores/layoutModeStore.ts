@@ -8,6 +8,7 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
 import type { ReactNode } from 'react'
 
@@ -259,6 +260,8 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
     }),
     {
       name: 'layout-mode',
+      // 配额满时吞掉 QuotaExceededError，避免 toggleMode 等 action 崩溃
+      storage: createTolerantStorage(),
       // BUG-FIX-fix_20260625_workspace_tabs_persist:
       // 问题根因: 此前 partialize 只保存 mode，workspaceTabs 整组刷新即丢，
       //          所有打开的文件/工具 Tab 都需重新打开，体验差。

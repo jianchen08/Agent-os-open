@@ -7,6 +7,7 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
 import * as longTermTaskApi from '@/services/api/longTermTasks'
 import type { Task } from '@/types/task'
 
@@ -235,6 +236,8 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
     }),
     {
       name: 'long-term-task-storage',
+      // 配额满时吞掉 QuotaExceededError，避免 updateTask/deleteTask 等 action 崩溃
+      storage: createTolerantStorage(),
       partialize: (state) => ({
         tasks: state.tasks,
         activeTaskId: state.activeTaskId,
