@@ -21,6 +21,11 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  # 全链路真实 LLM e2e：手动触发 + 每日定时（慢、需密钥、依赖外部 LLM 网络，
+  # 不阻塞 PR；隔离层 e2e 已由下方 e2e job 覆盖）
+  workflow_dispatch:
+  schedule:
+    - cron: "0 18 * * *"  # 每日 UTC 02:00（北京时间 10:00）
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -181,11 +186,98 @@ jobs:
             reports/test_report.html
           retention-days: 14
 
+  # ── 阶段 3b: E2E 测试（WS 真实链路）─────────────────────────
+  # 单独 job：需要 TestClient 启动完整 app（含 WS），较慢且重，与纯单测分离。
+  # 覆盖 send/stop/信号等真实链路，防止 mock 单测漏掉的运行时 bug
+  # （如 app_factory 作用域 bug：单测 mock 了内部，真实 WS 才暴露）。
+  # 无测试用户凭证时 auth_token fixture 自动 skip，不会让 CI 红。
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Dependencies
+        run: |
+          pip install -e ".[dev]" || pip install pytest pytest-asyncio httpx
+          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema uvicorn fastapi
+
+      - name: Run E2E Tests (WS real link)
+        env:
+          LOG_LEVEL: WARNING
+          LOG_OUTPUT: console
+          PYTHONPATH: src
+        run: |
+          echo "━━━ Running E2E Tests ━━━"
+          # 暂时排除 pre-existing 失败的 test_auth/test_chat_flow（凭证 fixture 未加降级），
+          # 待后续统一修复 auth fixture 后移除 ignore。先纳入本次新增的 send/stop/信号 e2e。
+          python -m pytest tests/e2e \
+            --tb=long \
+            --no-header \
+            -q \
+            --ignore=tests/e2e/test_auth.py \
+            --ignore=tests/e2e/test_chat_flow.py \
+            2>&1
+
+  # ── 阶段 3c: 全链路真实 LLM 复盘 e2e ────────────────────────
+  # 独立 job：连真实 LLM、耗时数分钟、依赖外部网络与密钥。
+  # 仅手动(workflow_dispatch)/nightly(schedule)触发，普通 push/PR 时跳过，
+  # 不阻塞 PR 主链路（隔离层 e2e 已在上方 e2e job 覆盖改造正确性）。
+  # 验证 B 路径：触发复盘→tags.agent_id 驱动引擎→review_agent LLM 分析→报告落盘。
+  llm-e2e:
+    name: LLM E2E (Review)
+    runs-on: ubuntu-latest
+    needs: [lint]
+    # push/PR 时不跑（避免拖慢 PR、外部 LLM 抖动误红屏）
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Dependencies
+        run: |
+          pip install -e ".[dev]" || pip install pytest pytest-asyncio httpx
+          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema uvicorn fastapi
+
+      - name: Run Review B-Path Full E2E
+        env:
+          LOG_LEVEL: WARNING
+          LOG_OUTPUT: console
+          PYTHONPATH: src
+          RUN_LLM_E2E: "1"
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          echo "━━━ Running Review B-Path LLM E2E ━━━"
+          # 仅跑全链路 LLM 复盘测试（带 requires_api marker，门控 RUN_LLM_E2E=1）
+          # 测试内部会临时把 small tier 指向 glm-5.2，跑完还原
+          python -m pytest tests/e2e/test_review_b_path_llm_e2e.py \
+            -m requires_api \
+            --tb=long \
+            --no-header \
+            -q \
+            2>&1
+
   # ── 阶段 4: 汇总报告 ────────────────────────────────────────
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, test]
+    needs: [lint, typecheck, test, e2e]
     if: always()
     steps:
       - name: Download All Artifacts
@@ -200,6 +292,7 @@ jobs:
           echo "Lint:         ${{ needs.lint.result }}"
           echo "Type Check:   ${{ needs.typecheck.result }}"
           echo "Tests:        ${{ needs.test.result }}"
+          echo "E2E Tests:    ${{ needs.e2e.result }}"
           echo ""
           echo "产出物:"
           echo "  - lint-results/ruff_results.json"

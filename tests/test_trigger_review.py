@@ -1,28 +1,27 @@
-"""复盘系统触发链路与接口契约测试。
+"""复盘系统 B 路径触发链路与接口契约测试。
 
-测试目标：锁定复盘系统"能触发、能执行、接口稳定"这三件事，防止后续重构
-悄悄破坏触发链路或改掉对外方法签名。
+测试目标：锁定 B 路径（trigger_llm_review → review_agent LLM 深度复盘）
+的"能触发、能查询、接口稳定"三件事，防止后续重构悄悄破坏触发链路。
 
 覆盖范围：
-1. ReviewEngine 简化版复盘（内存 pipeline）——核心逻辑契约
-2. TriggerReviewTool 触发链路——服务不可用/正在运行/不满足条件/正常提交 四条分支
-3. MemoryMaintenanceService 真实接口契约——构造签名、should_trigger_review、get_stats
+1. ReviewEngine 查询层——get_pending_pipelines 过滤、get_summary、mark_reviewed
+2. TriggerReviewTool 触发链路——服务不可用 / 正常提交 / 内存执行（无父管道）
+3. MemoryMaintenanceService 接口契约——构造签名、trigger_llm_review、get_stats
 
-历史说明：本文件原有一组用例依赖 scripts/trigger_review.py（该脚本从未存在于仓库）
-和 service.trigger_review()（该方法不存在，真实方法为 trigger_review_now），
-属于测不存在的契约，已替换为对真实接口的契约测试。
+历史说明：原文件测的是 A 路径（trigger_review_now / should_trigger_review /
+_count_pending_records / 内存 run_review()），这些已随 A 路径删除，
+全部替换为对 B 路径真实接口的契约测试。
 """
 from __future__ import annotations
 
 import asyncio
 import inspect
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.memory.maintenance.review_engine import (
-    ErrorRecord,
-    Pipeline,
+    PipelineRunSummary,
     ReviewEngine,
     ReviewStatus,
 )
@@ -31,71 +30,27 @@ from tools.builtin.trigger_review.tool import TriggerReviewTool
 
 
 # ---------------------------------------------------------------------------
-# ReviewEngine 简化版复盘契约（内存 pipeline）
+# 工具函数
 # ---------------------------------------------------------------------------
 
-
-def _build_pending_pipelines() -> list[Pipeline]:
-    """构造 3 个 pending pipeline：001 含 2 错误、002 含 1 错误、003 无错误。"""
-    return [
-        Pipeline(pipeline_id="pipeline-001", errors=[
-            ErrorRecord("err-001", "timeout", "API 调用超时", "2026-05-28T08:00:00Z"),
-            ErrorRecord("err-002", "connection", "数据库连接断开", "2026-05-28T08:01:00Z"),
-        ]),
-        Pipeline(pipeline_id="pipeline-002", errors=[
-            ErrorRecord("err-003", "validation", "参数格式不正确", "2026-05-28T08:05:00Z"),
-        ]),
-        Pipeline(pipeline_id="pipeline-003", errors=[]),
-    ]
-
-
-class TestReviewEngineSimpleFlow:
-    """ReviewEngine 简化版复盘流程契约。"""
-
-    def test_processes_all_pending_pipelines(self):
-        """所有 pending pipeline 都被处理（total_pending=3, processed=3）。"""
-        engine = ReviewEngine()
-        engine.register_pipelines(_build_pending_pipelines())
-        result = engine.run_review()
-
-        assert result["total_pending"] == 3
-        assert result["processed"] == 3
-
-    def test_experience_extraction_counts(self):
-        """经验提取数量按错误数计算：001→2, 002→1, 003→0。"""
-        engine = ReviewEngine()
-        engine.register_pipelines(_build_pending_pipelines())
-        result = engine.run_review()
-
-        pr = result["pipeline_results"]
-        assert pr[0]["pipeline_id"] == "pipeline-001"
-        assert pr[0]["experience_count"] == 2
-        assert pr[1]["pipeline_id"] == "pipeline-002"
-        assert pr[1]["experience_count"] == 1
-        assert pr[2]["pipeline_id"] == "pipeline-003"
-        assert pr[2]["experience_count"] == 0
-
-    def test_status_transitions_to_completed(self):
-        """复盘完成后所有 pipeline 状态流转为 completed。"""
-        engine = ReviewEngine()
-        pipelines = _build_pending_pipelines()
-        engine.register_pipelines(pipelines)
-        engine.run_review()
-
-        for p in pipelines:
-            assert p.status == ReviewStatus.COMPLETED
-
-
-# ---------------------------------------------------------------------------
-# TriggerReviewTool 触发链路契约
-# ---------------------------------------------------------------------------
-
-
-def _make_service_provider(maintenance_service):
-    """构造 service provider，get('maintenance_service') 返回给定实例。"""
-    provider = MagicMock()
-    provider.get.return_value = maintenance_service
-    return provider
+def _make_summary(
+    run_id: str = "run-001",
+    status: str = "completed",
+    review_status: str = "pending",
+    **overrides,
+) -> PipelineRunSummary:
+    """创建 PipelineRunSummary 测试 fixture。"""
+    defaults = dict(
+        run_id=run_id,
+        total_records=5,
+        total_iterations=3,
+        created_at="2026-01-01T00:00:00",
+        status=status,
+        error="",
+        review_status=review_status,
+    )
+    defaults.update(overrides)
+    return PipelineRunSummary(**defaults)
 
 
 def _run(coro):
@@ -107,14 +62,126 @@ def _run(coro):
         loop.close()
 
 
+# ---------------------------------------------------------------------------
+# ReviewEngine 查询层契约
+# ---------------------------------------------------------------------------
+
+
+class TestReviewEngineQueryLayer:
+    """ReviewEngine 查询层契约：get_pending_pipelines 过滤、get_summary、mark_reviewed。
+
+    A 路径删除后，ReviewEngine 只剩查询/标记能力，复盘执行交给 B 路径。
+    """
+
+    def test_get_pending_filters_by_status_and_review_status(self):
+        """只返回 status=已结束 且 review_status=pending 的管道。"""
+        storage = MagicMock()
+        storage.list_all_summaries.return_value = [
+            _make_summary(run_id="run-ok-1", status="success", review_status="pending"),
+            _make_summary(run_id="run-ok-2", status="failed", review_status="pending"),
+            _make_summary(run_id="run-done", status="success", review_status="completed"),
+            _make_summary(run_id="run-running", status="running", review_status="pending"),
+        ]
+        engine = ReviewEngine(storage=storage)
+
+        pending = engine.get_pending_pipelines()
+
+        assert {s.run_id for s in pending} == {"run-ok-1", "run-ok-2"}
+
+    def test_get_pending_returns_empty_when_no_storage(self):
+        """storage 为 None 时返回空列表（内存模式已随 A 路径删除）。"""
+        engine = ReviewEngine(storage=None)
+        assert engine.get_pending_pipelines() == []
+
+    def test_get_summary_delegates_to_storage(self):
+        """get_summary 委托给 storage。"""
+        storage = MagicMock()
+        expected = _make_summary(run_id="run-x")
+        storage.get_summary.return_value = expected
+        engine = ReviewEngine(storage=storage)
+
+        assert engine.get_summary("run-x") is expected
+        storage.get_summary.assert_called_once_with("run-x")
+
+    def test_get_summary_returns_none_when_no_storage(self):
+        """storage 为 None 时 get_summary 返回 None。"""
+        engine = ReviewEngine(storage=None)
+        assert engine.get_summary("run-x") is None
+
+    @pytest.mark.asyncio
+    async def test_mark_reviewed_updates_summary_completed(self):
+        """mark_reviewed 默认把 review_status 标记为 completed。"""
+        storage = MagicMock()
+        chunk_db = MagicMock()
+        chunk_db.find_by_pipeline = AsyncMock(return_value=[])
+        engine = ReviewEngine(storage=storage, chunk_db=chunk_db)
+
+        await engine.mark_reviewed("run-1")
+
+        storage.update_summary.assert_called_once_with(
+            "run-1", {"review_status": "completed"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_mark_reviewed_failed_when_failed_flag(self):
+        """failed=True 时标记为 failed。"""
+        storage = MagicMock()
+        chunk_db = MagicMock()
+        chunk_db.find_by_pipeline = AsyncMock(return_value=[])
+        engine = ReviewEngine(storage=storage, chunk_db=chunk_db)
+
+        await engine.mark_reviewed("run-1", failed=True)
+
+        storage.update_summary.assert_called_once_with(
+            "run-1", {"review_status": "failed"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_mark_reviewed_updates_chunk_flags(self):
+        """mark_reviewed 同步更新 chunk 的 review_status 标记。"""
+        storage = MagicMock()
+        chunk = MagicMock()
+        chunk.extra_data = {"reviewed": False}
+        chunk_db = MagicMock()
+        chunk_db.find_by_pipeline = AsyncMock(return_value=[chunk])
+        engine = ReviewEngine(storage=storage, chunk_db=chunk_db)
+
+        await engine.mark_reviewed("run-1")
+
+        assert chunk.extra_data["review_status"] == "completed"
+        chunk_db.save_chunk.assert_called_once_with(chunk)
+
+    @pytest.mark.asyncio
+    async def test_mark_reviewed_swallows_chunk_error(self):
+        """chunk 操作异常不阻止 summary 更新。"""
+        storage = MagicMock()
+        chunk_db = MagicMock()
+        chunk_db.find_by_pipeline = AsyncMock(side_effect=RuntimeError("disk error"))
+        engine = ReviewEngine(storage=storage, chunk_db=chunk_db)
+
+        await engine.mark_reviewed("run-1")
+
+        storage.update_summary.assert_called_once_with(
+            "run-1", {"review_status": "completed"}
+        )
+
+
+# ---------------------------------------------------------------------------
+# TriggerReviewTool 触发链路契约（B 路径）
+# ---------------------------------------------------------------------------
+
+
+def _make_service_provider(maintenance_service):
+    """构造 service provider，get('maintenance_service') 返回给定实例。"""
+    provider = MagicMock()
+    provider.get.return_value = maintenance_service
+    return provider
+
+
 class TestTriggerReviewToolBranches:
-    """trigger_review 工具的 4 条触发分支契约。
+    """trigger_review 工具触发分支契约。
 
-    对应"用户说帮我复盘 → Agent 调用 trigger_review 工具"的真实路径，
-    覆盖：服务不可用、正在运行、不满足条件、正常提交四种情形。
-
-    注意：ToolExecutionResult 把 create_success_result(data=...) 的 data 存到
-    .output 字段（非 .data），按真实结构断言。
+    对应"用户说帮我复盘 → Agent 调用 trigger_review 工具"的真实 B 路径。
     """
 
     def test_returns_failure_when_service_unavailable(self, monkeypatch):
@@ -132,10 +199,37 @@ class TestTriggerReviewToolBranches:
         assert result.success is False
         assert result.error_code == "SERVICE_UNAVAILABLE"
 
-    def test_returns_already_running_when_review_in_progress(self, monkeypatch):
-        """分支2：_review_running=True → already_running，不重复触发。"""
+    def test_submits_review_task(self, monkeypatch):
+        """分支2：正常提交 → submitted。
+
+        execute() 读 _current_pipeline_id（此处为空），调 trigger_llm_review，
+        返回 success，data.output.status == submitted。
+        """
+        service = MagicMock()
+        service.trigger_llm_review = AsyncMock(return_value={
+            "status": "submitted",
+            "message": "复盘任务已提交，完成后会通知您结果。",
+        })
+        monkeypatch.setattr(
+            "infrastructure.service_provider.get_service_provider",
+            lambda: _make_service_provider(service),
+        )
+
+        tool = TriggerReviewTool()
+        result = _run(tool.execute({}))
+
+        assert result.success is True
+        assert result.output["status"] == "submitted"
+        service.trigger_llm_review.assert_awaited_once()
+
+    def test_returns_already_running_when_in_progress(self, monkeypatch):
+        """分支3：_review_running=True → already_running，不重复触发。"""
         service = MagicMock()
         service._review_running = True
+        service.trigger_llm_review = AsyncMock(return_value={
+            "status": "already_running",
+            "message": "复盘正在执行中，请稍后再试",
+        })
         monkeypatch.setattr(
             "infrastructure.service_provider.get_service_provider",
             lambda: _make_service_provider(service),
@@ -147,49 +241,6 @@ class TestTriggerReviewToolBranches:
         assert result.success is True
         assert result.output["status"] == "already_running"
 
-    def test_returns_skipped_when_trigger_condition_not_met(self, monkeypatch):
-        """分支3：非强制 + 不满足触发条件 → skipped，并返回 pending 数。"""
-        review_engine = MagicMock()
-        review_engine._count_pending_records.return_value = 5
-        service = MagicMock()
-        service._review_running = False
-        service.should_trigger_review.return_value = False
-        service._get_review_engine.return_value = review_engine
-        monkeypatch.setattr(
-            "infrastructure.service_provider.get_service_provider",
-            lambda: _make_service_provider(service),
-        )
-
-        tool = TriggerReviewTool()
-        result = _run(tool.execute({"force": False}))
-
-        assert result.success is True
-        assert result.output["status"] == "skipped"
-        assert result.output["pending_records"] == 5
-
-    def test_submits_when_condition_met(self, monkeypatch):
-        """分支4：满足条件 → submitted。
-
-        防回归要点：提交后 _review_running 置 True，后台任务跑完 finally 复位。
-        execute() 同步返回 submitted 即视为触发成功；后台任务内部的
-        load_agent_config / send_pipeline_message 是运行时组件，被 tool.py
-        的 except Exception 兜底，单测里无需 patch 也无需等待其完成
-        （它挂在 _run 创建并关闭的循环上，循环关闭时被清理）。
-        """
-        service = MagicMock()
-        service._review_running = False
-        service.should_trigger_review.return_value = True
-        monkeypatch.setattr(
-            "infrastructure.service_provider.get_service_provider",
-            lambda: _make_service_provider(service),
-        )
-
-        tool = TriggerReviewTool()
-        result = _run(tool.execute({"force": False}))
-
-        assert result.success is True
-        assert result.output["status"] == "submitted"
-
 
 # ---------------------------------------------------------------------------
 # MemoryMaintenanceService 接口契约（防回归）
@@ -197,12 +248,7 @@ class TestTriggerReviewToolBranches:
 
 
 class TestMemoryMaintenanceServiceContract:
-    """锁定 MemoryMaintenanceService 对外接口签名，防止重构悄悄改契约。
-
-    存在意义：历史上出现过 service.trigger_review() 这种"测不存在方法"
-    的用例混进测试文件却没人发现，说明接口契约没有真正被守护。
-    这里显式锁定真实方法名和构造签名。
-    """
+    """锁定 MemoryMaintenanceService 对外接口签名，防止重构悄悄改契约。"""
 
     def test_init_requires_three_dependencies(self):
         """构造函数必须要求 storage/chunk_db/knowledge_service 三个必填依赖。"""
@@ -213,17 +259,21 @@ class TestMemoryMaintenanceServiceContract:
         }
         assert {"storage", "chunk_db", "knowledge_service"} <= required
 
-    def test_exposes_trigger_review_now_not_trigger_review(self):
-        """对外方法名是 trigger_review_now；历史上误用的 trigger_review 不应存在。"""
-        assert hasattr(MemoryMaintenanceService, "trigger_review_now")
-        assert callable(MemoryMaintenanceService.trigger_review_now)
-        assert not hasattr(MemoryMaintenanceService, "trigger_review"), (
-            "trigger_review 是历史误用的不存在方法，不应出现在真实接口上"
-        )
+    def test_exposes_trigger_llm_review(self):
+        """对外复盘入口是 trigger_llm_review（B 路径）。"""
+        assert hasattr(MemoryMaintenanceService, "trigger_llm_review")
+        assert callable(MemoryMaintenanceService.trigger_llm_review)
 
-    def test_exposes_should_trigger_review_and_get_stats(self):
-        """触发判断与统计查询方法必须存在。"""
-        assert callable(MemoryMaintenanceService.should_trigger_review)
+    def test_a_path_methods_removed(self):
+        """A 路径方法已删除，不应再出现。"""
+        assert not hasattr(MemoryMaintenanceService, "trigger_review_now")
+        assert not hasattr(MemoryMaintenanceService, "should_trigger_review")
+        assert not hasattr(MemoryMaintenanceService, "run_maintenance")
+
+    def test_exposes_run_cleanup_and_get_stats(self):
+        """清理巡检入口和统计查询方法必须存在。"""
+        assert callable(MemoryMaintenanceService.run_cleanup)
+        assert callable(MemoryMaintenanceService.should_trigger_cleanup)
         assert callable(MemoryMaintenanceService.get_stats)
 
     def test_get_stats_returns_initial_counters(self):
@@ -237,32 +287,12 @@ class TestMemoryMaintenanceServiceContract:
         assert stats["total_pipelines_reviewed"] == 0
         assert stats["total_experiences_saved"] == 0
 
-    async def test_trigger_review_now_returns_result_dict_when_no_pending(self):
-        """trigger_review_now 在无 pending 时也应返回结构化结果。"""
-        storage = MagicMock()
-        storage.list_all_summaries.return_value = []
-        service = MemoryMaintenanceService(
-            storage=storage,
-            chunk_db=MagicMock(),
-            knowledge_service=MagicMock(),
-        )
 
-        result = await service.trigger_review_now(force=False)
+class TestReviewStatusEnum:
+    """ReviewStatus 枚举值与存储层 review_status 字段对齐。"""
 
-        assert result["force"] is False
-        assert result["pending_count"] == 0
-        assert result["pipelines_reviewed"] == 0
-        assert "started_at" in result
-        assert "completed_at" in result
-
-    def test_should_trigger_review_false_when_no_pending_and_no_history(self):
-        """无 pending 且无 last_review_at 记录时不应触发。"""
-        storage = MagicMock()
-        storage.list_all_summaries.return_value = []
-        service = MemoryMaintenanceService(
-            storage=storage,
-            chunk_db=MagicMock(),
-            knowledge_service=MagicMock(),
-        )
-
-        assert service.should_trigger_review() is False
+    def test_enum_values(self):
+        assert ReviewStatus.PENDING.value == "pending"
+        assert ReviewStatus.IN_PROGRESS.value == "in_progress"
+        assert ReviewStatus.COMPLETED.value == "completed"
+        assert ReviewStatus.FAILED.value == "failed"

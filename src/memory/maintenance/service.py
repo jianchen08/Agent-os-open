@@ -1,5 +1,8 @@
 """维护主服务 —— 调度、触发器、配置、入口。
 
+复盘执行统一收敛到 B 路径（trigger_llm_review → review_agent LLM 深度分析）。
+历史上存在的 A 路径（trigger_review_now 模板化经验提取 / 定时复盘触发器）已删除。
+
 暴露接口：
 - MaintenanceConfig: 维护配置数据类
 - MemoryMaintenanceService: 记忆维护服务（门面类，委托 review_engine / cleanup_engine）
@@ -26,9 +29,7 @@ class MaintenanceConfig:
 
     Attributes:
         enabled: 是否启用自动维护触发器
-        review_min_records: 积累多少条新执行记录后触发复盘
-        review_max_interval: 最迟多久触发一次复盘（秒）
-        skeleton_budget_percent: 骨架占上下文窗口的百分比
+        skeleton_budget_percent: 骨架占上下文窗口的百分比（保留给 review_agent 读记录用）
         records_per_skeleton_token: 每条执行记录在骨架中约占的 token 数
         max_records_per_review: 单次复盘最大处理记录数
         cleanup_check_interval: 清理巡检间隔（秒）
@@ -36,11 +37,8 @@ class MaintenanceConfig:
         cleanup_capacity_threshold: 容量使用率超过此值时提前清理
         cleanup_early_age_days: 容量紧张时，多少天以上的已复盘数据可清理
     """
-
     enabled: bool = False
-    # 复盘配置
-    review_min_records: int = 500
-    review_max_interval: int = 604800       # 7 天
+    # 复盘配置（B 路径只保留预算相关项，不再有定时触发）
     skeleton_budget_percent: int = 15
     records_per_skeleton_token: int = 15
     max_records_per_review: int = 2000
@@ -82,25 +80,26 @@ class MaintenanceConfig:
 class MemoryMaintenanceService:
     """复盘驱动的记忆维护服务。
 
-    负责两个独立的维护周期：
-    1. 复盘周期：分析管道执行记录，产出经验/改进建议，存入 Knowledge
-    2. 清理周期：根据复盘状态、数据年龄和容量压力，分层清理数据
+    两个维护职责：
+    1. 复盘（B 路径）：trigger_review 工具触发 → 启动 review_agent 做 LLM 深度复盘
+       → 产出报告 → 持久化 + 通知父管道
+    2. 清理：定时巡检，按复盘状态/数据年龄/容量压力分层清理数据
 
     Attributes:
         _storage: 执行记录存储（ExecutionRecordStorage）
         _chunk_db: 压缩块服务（ChunkService）
         _knowledge_service: 知识服务（KnowledgeService）
-        _pipeline_engine: 管道引擎（PipelineEngine），用于启动复盘管道
         _config: 维护配置
         _stats: 维护操作统计
     """
+
+    REVIEW_AGENT_ID = "review_agent"
 
     def __init__(
         self,
         storage: Any,
         chunk_db: Any,
         knowledge_service: Any,
-        pipeline_engine: Any | None = None,
         config: MaintenanceConfig | dict[str, Any] | None = None,
         memory_service: Any = None,
         task_lookup: Any | None = None,
@@ -111,18 +110,16 @@ class MemoryMaintenanceService:
             storage: 执行记录存储实例（ExecutionRecordStorage）
             chunk_db: 压缩块服务实例（ChunkService）
             knowledge_service: 知识服务实例（KnowledgeService）
-            pipeline_engine: 管道引擎实例（PipelineEngine），用于启动复盘管道
             config: 维护配置，支持 MaintenanceConfig 实例、配置字典或 None
             memory_service: 记忆服务门面实例（用于索引重建等操作）
             task_lookup: 可选的任务反查回调，签名 (pipeline_run_id) -> dict | None。
-                把 pipeline_run_id 反查到目标 agent 和任务标题，供复盘经验产出带身份。
+                把 pipeline_run_id 反查到目标 agent 和任务标题，供复盘报告带身份。
                 由 Application 装配时注入（闭包引用 task_service + root_map），
-                不传时经验产出不含 agent 身份。
+                不传时复盘报告不含 agent 身份。
         """
         self._storage = storage
         self._chunk_db = chunk_db
         self._knowledge_service = knowledge_service
-        self._pipeline_engine = pipeline_engine
         self._memory_service = memory_service
         self._task_lookup = task_lookup
 
@@ -149,6 +146,11 @@ class MemoryMaintenanceService:
         self._review_engine: Any | None = None
         self._cleanup_engine: Any | None = None
 
+        # 复盘管道的触发来源（单次复盘周期内有效，由 _run_llm_review_task 设定）。
+        # 用于注册复盘管道时打 tags 溯源：parent_pipeline / session_id。
+        self._current_parent_pipeline: str = ""
+        self._current_trigger_session: str = ""
+
     # ============================================
     # 子引擎访问（延迟初始化）
     # ============================================
@@ -161,12 +163,10 @@ class MemoryMaintenanceService:
         """
         if self._review_engine is None:
             from .review_engine import ReviewEngine  # noqa: PLC0415
-            # 注意：ReviewEngine.__init__ 不接受 config 参数
             self._review_engine = ReviewEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
                 knowledge_service=self._knowledge_service,
-                pipeline_engine=self._pipeline_engine,
                 task_lookup=self._task_lookup,
             )
         return self._review_engine
@@ -192,9 +192,10 @@ class MemoryMaintenanceService:
     # ============================================
 
     def register_triggers(self) -> list[str]:
-        """向 TriggerManager 注册统一的维护触发器。
+        """向 TriggerManager 注册清理巡检触发器。
 
-        只注册一个定时触发器，周期性检查是否需要复盘或清理。
+        复盘不再走定时触发（A 路径已删除），统一由 trigger_review 工具按需触发。
+        这里只注册一个定时清理触发器。
 
         Returns:
             注册的触发器 ID 列表
@@ -219,21 +220,16 @@ class MemoryMaintenanceService:
 
         registered: list[str] = []
 
-        # 注册统一维护触发器（每 6 小时检查一次）
-        check_interval = min(
-            self._config.cleanup_check_interval,
-            self._config.review_max_interval,
-            21600,  # 最长 6 小时检查一次
-        )
+        # 注册清理巡检触发器（按配置间隔）
         trigger_id = "memory_maintenance_check"
         trigger_manager.register(TriggerConfig(
             trigger_id=trigger_id,
-            name="记忆维护巡检（复盘+清理）",
+            name="记忆维护巡检（清理）",
             trigger_type=TriggerType.INTERVAL,
-            interval_seconds=check_interval,
-            action="memory_maintenance.run_maintenance",
+            interval_seconds=self._config.cleanup_check_interval,
+            action="memory_maintenance.run_cleanup",
             max_fires=0,
-            metadata={"maintenance_type": "review_and_cleanup"},
+            metadata={"maintenance_type": "cleanup"},
         ))
         registered.append(trigger_id)
 
@@ -241,52 +237,43 @@ class MemoryMaintenanceService:
             "[Maintenance] 已注册 %d 个维护触发器: %s (间隔=%ds)",
             len(registered),
             registered,
-            check_interval,
+            self._config.cleanup_check_interval,
         )
         return registered
 
     # ============================================
-    # 触发条件判断
+    # 清理巡检入口（供触发器调用）
     # ============================================
 
-    def should_trigger_review(self) -> bool:
-        """判断是否应该触发复盘。
+    async def run_cleanup(self) -> dict[str, Any]:
+        """执行清理巡检（供定时触发器调用）。
 
-        满足以下任一条件即触发：
-        1. 存在 status=completed 且 review_status=pending 的管道运行
-        2. 距上次复盘超过 review_max_interval
+        不再触发复盘（A 路径已删除）。仅按复盘状态/年龄/容量清理数据。
 
         Returns:
-            是否应该触发复盘
+            清理结果字典
         """
-        # 条件1：存在 pending 的管道运行
-        try:
-            pending = self._get_review_engine().get_pending_pipelines()
-            if pending:
-                logger.info(
-                    "[Maintenance] 触发复盘：发现 %d 个待复盘管道运行",
-                    len(pending),
-                )
-                return True
-        except Exception as exc:
-            logger.warning("[Maintenance] 检查 pending pipelines 失败: %s", exc)
+        results: dict[str, Any] = {
+            "started_at": datetime.now(UTC).isoformat(),
+            "status": "running",
+            "tasks": {},
+        }
 
-        # 条件2：距上次复盘超过最大间隔
-        last_review = self._stats.get("last_review_at")
-        if last_review:
-            try:
-                last_time = datetime.fromisoformat(last_review)
-                elapsed = (datetime.now(UTC) - last_time).total_seconds()
-                if elapsed >= self._config.review_max_interval:
-                    logger.info(
-                        "[Maintenance] 触发复盘：距上次复盘 %.0f 秒 >= %d 秒",
-                        elapsed, self._config.review_max_interval,
-                    )
-                    return True
-            except (ValueError, TypeError):
-                pass
+        if self.should_trigger_cleanup():
+            cleanup_result = await self._get_cleanup_engine().cleanup_by_age_and_capacity(
+                review_engine=self._get_review_engine(),
+            )
+            results["tasks"]["cleanup"] = cleanup_result
+            now_cleanup = cleanup_result.get("cleaned_at") or datetime.now(UTC).isoformat()
+            self._stats["last_cleanup_at"] = now_cleanup
+            self._stats["cleanup_count"] += 1
+            self._stats["total_pipelines_cleaned"] += cleanup_result.get("l0_deleted", 0)
 
-        return False
+        results["completed_at"] = datetime.now(UTC).isoformat()
+        results["status"] = "completed"
+
+        logger.info("[Maintenance] 清理巡检完成")
+        return results
 
     def should_trigger_cleanup(self) -> bool:
         """判断是否应该触发清理。
@@ -311,109 +298,8 @@ class MemoryMaintenanceService:
         return False
 
     # ============================================
-    # 统一维护入口
+    # LLM 复盘编排（B 路径，由 trigger_review 工具触发）
     # ============================================
-
-    async def run_maintenance(self) -> dict[str, Any]:
-        """执行维护（复盘和清理独立运行）。
-
-        Returns:
-            维护结果字典
-        """
-        results: dict[str, Any] = {
-            "started_at": datetime.now(UTC).isoformat(),
-            "status": "running",
-            "tasks": {},
-        }
-
-        # 独立判断：是否需要复盘
-        if self.should_trigger_review():
-            review_result = await self.trigger_review_now()
-            results["tasks"]["review"] = review_result
-            # 同步统计
-            now_review = review_result.get("reviewed_at") or datetime.now(UTC).isoformat()
-            self._stats["last_review_at"] = now_review
-            self._stats["review_count"] += 1
-            self._stats["total_pipelines_reviewed"] += review_result.get("pipelines_reviewed", 0)
-            self._stats["total_experiences_saved"] += review_result.get("experiences_saved", 0)
-
-        # 独立判断：是否需要清理
-        if self.should_trigger_cleanup():
-            cleanup_result = await self._get_cleanup_engine().cleanup_by_age_and_capacity(
-                review_engine=self._get_review_engine(),
-            )
-            results["tasks"]["cleanup"] = cleanup_result
-            # 同步统计
-            now_cleanup = cleanup_result.get("cleaned_at") or datetime.now(UTC).isoformat()
-            self._stats["last_cleanup_at"] = now_cleanup
-            self._stats["cleanup_count"] += 1
-            self._stats["total_pipelines_cleaned"] += cleanup_result.get("l0_deleted", 0)
-
-        results["completed_at"] = datetime.now(UTC).isoformat()
-        results["status"] = "completed"
-
-        logger.info("[Maintenance] 维护巡检完成")
-        return results
-
-    async def trigger_review_now(self) -> dict[str, Any]:
-        """立即触发复盘，处理所有 pending 的管道运行。
-
-        直接调用 ReviewEngine.run_review 处理 ExecutionRecordStorage 中
-        status=completed && review_status=pending 的管道，
-        把错误经验写入 KnowledgeService（source_type=review_experience）。
-
-        Returns:
-            复盘结果汇总
-        """
-        review_engine = self._get_review_engine()
-        pending = review_engine.get_pending_pipelines()
-
-        started_at = datetime.now(UTC).isoformat()
-        result: dict[str, Any] = {
-            "started_at": started_at,
-            "pending_count": len(pending),
-            "pipelines_reviewed": 0,
-            "experiences_saved": 0,
-            "details": [],
-        }
-
-        for summary in pending:
-            try:
-                pr = await review_engine.run_review(summary.run_id)
-                ok = pr.get("status") == "success"
-                exp_count = pr.get("experience_count", 0) if ok else 0
-                result["details"].append({
-                    "run_id": summary.run_id,
-                    "status": pr.get("status"),
-                    "experiences": exp_count,
-                    "records_analyzed": pr.get("records_analyzed", 0),
-                })
-                if ok:
-                    result["pipelines_reviewed"] += 1
-                    result["experiences_saved"] += exp_count
-            except Exception as exc:
-                logger.warning(
-                    "[Maintenance] 复盘单管道失败 | run_id=%s | err=%s",
-                    summary.run_id, exc,
-                )
-                result["details"].append({
-                    "run_id": summary.run_id,
-                    "status": "error",
-                    "error": str(exc),
-                })
-
-        result["completed_at"] = datetime.now(UTC).isoformat()
-        logger.info(
-            "[Maintenance] 复盘完成 | reviewed=%d | experiences=%d",
-            result["pipelines_reviewed"], result["experiences_saved"],
-        )
-        return result
-
-    # ============================================
-    # LLM 复盘编排（由 trigger_review 工具触发）
-    # ============================================
-
-    REVIEW_AGENT_ID = "review_agent"
 
     async def trigger_llm_review(
         self, parent_pipeline_id: str, limit: int = 5,
@@ -422,6 +308,9 @@ class MemoryMaintenanceService:
 
         这是 trigger_review 工具的唯一调用入口。工具只负责获取服务并调用此方法，
         复盘的全生命周期（注册管道→注入消息→等待完成→持久化→通知）在此编排。
+
+        复盘是 B 路径唯一的真相源。若 review_agent 启动失败，直接判失败并通知，
+        不再降级到模板提取（A 路径已删除）。
 
         Args:
             parent_pipeline_id: 调用方父管道 ID（用于回写完成通知）
@@ -461,9 +350,18 @@ class MemoryMaintenanceService:
             return False
 
     async def _run_llm_review_task(self, parent_pipeline_id: str, limit: int) -> None:
-        """LLM 复盘后台任务：编排整个复盘流程。"""
+        """LLM 复盘后台任务：编排整个复盘流程。
+
+        流程：收集待复盘 → 启动 review_agent → 等报告 → 持久化 → 通知。
+        review_agent 启动失败直接判失败通知，不降级（A 路径已删除）。
+        """
         child_pipeline_id = ""
         try:
+            # 0. 解析触发来源（父管道的 agent/会话），供复盘管道 tags 溯源
+            origin = self._resolve_trigger_origin(parent_pipeline_id)
+            self._current_parent_pipeline = parent_pipeline_id
+            self._current_trigger_session = origin.get("trigger_session", "")
+
             # 1. 收集待复盘管道列表
             targets = self._collect_review_targets(parent_pipeline_id, limit)
             logger.info(
@@ -471,28 +369,28 @@ class MemoryMaintenanceService:
                 parent_pipeline_id[:12], len(targets),
             )
 
-            # 2. 尝试启动 review_agent 管道做 LLM 深度复盘
+            # 2. 启动 review_agent 管道做 LLM 深度复盘
             child_pipeline_id, launched = await self._try_launch_review_agent(targets)
             if not launched:
-                # 3. 保底：直接走 ReviewEngine
-                result = await self.trigger_review_now()
-                logger.info(
-                    "[Maintenance] 直接复盘完成 (reviewed=%d, experiences=%d)",
-                    result.get("pipelines_reviewed", 0),
-                    result.get("experiences_saved", 0),
+                # A 路径已删除：启动失败直接判失败并通知父管道
+                logger.warning(
+                    "[Maintenance] review_agent 启动失败，复盘未执行: parent=%s",
+                    parent_pipeline_id[:12],
                 )
                 await self._notify_parent(
-                    parent_pipeline_id, "completed",
-                    f"复盘完成：分析了 {result.get('pipelines_reviewed', 0)} 个管道，"
-                    f"提取 {result.get('experiences_saved', 0)} 条经验。",
+                    parent_pipeline_id, "failed",
+                    "复盘启动失败：review_agent 管道未能启动（配置缺失或注册失败）。"
+                    "请检查 review_agent 配置后重试。",
                 )
                 return
 
-            # 4. LLM 路径：等待 review_agent 产出报告
+            # 3. 等待 review_agent 产出报告
             report_text = await self._await_child_report(child_pipeline_id)
             if report_text:
-                # 5. 持久化报告
+                # 4. 持久化报告
                 await self._persist_review_result(child_pipeline_id, report_text)
+                # 5. 标记被复盘的 pending 管道为已复盘
+                await self._mark_targets_reviewed(targets)
                 # 6. 通知父管道
                 brief = report_text[:200].replace("\n", " ").strip()
                 await self._notify_parent(
@@ -501,8 +399,10 @@ class MemoryMaintenanceService:
                     + (f" 报告摘要：{brief}" if brief else ""),
                 )
             else:
+                # 有执行但未产出报告：标记为 failed，通知父管道
+                await self._mark_targets_reviewed(targets, failed=True)
                 await self._notify_parent(
-                    parent_pipeline_id, "completed",
+                    parent_pipeline_id, "failed",
                     f"复盘管道 {child_pipeline_id[:12]} 已执行完成，但未提取到报告内容。",
                 )
 
@@ -548,35 +448,107 @@ class MemoryMaintenanceService:
             logger.warning("[Maintenance] 收集待复盘管道失败: %s", exc)
         return targets
 
+    async def _mark_targets_reviewed(
+        self, targets: list[dict[str, Any]], *, failed: bool = False,
+    ) -> None:
+        """把本次复盘覆盖的 pending 管道标记为已复盘。
+
+        Args:
+            targets: _collect_review_targets 返回的待复盘列表
+            failed: True 时标记为 failed（未产出报告），默认 completed
+        """
+        review_engine = self._get_review_engine()
+        for t in targets:
+            run_id = t.get("run_id", "")
+            if not run_id:
+                continue
+            try:
+                await review_engine.mark_reviewed(run_id, failed=failed)
+            except Exception as exc:
+                logger.warning(
+                    "[Maintenance] 标记管道已复盘失败 | run_id=%s | err=%s",
+                    run_id[:12], exc,
+                )
+        # 更新统计
+        self._stats["last_review_at"] = datetime.now(UTC).isoformat()
+        self._stats["review_count"] += 1
+        self._stats["total_pipelines_reviewed"] += len(targets)
+
+    def _resolve_trigger_origin(self, parent_pipeline_id: str) -> dict[str, str]:
+        """从父管道注册表 tags 反查触发来源（复盘是被谁、在哪个会话拉起的）。
+
+        沿用现有 tags 命名约定：agent_id / session_id / parent_pipeline。
+        父管道不在注册表（如 API 手动触发 parent=""）时返回空值，不阻断复盘。
+
+        Returns:
+            {"trigger_agent": ..., "trigger_session": ..., "trigger_tool": ...}
+        """
+        origin: dict[str, str] = {
+            "trigger_agent": "",
+            "trigger_session": "",
+            "trigger_tool": "trigger_review",
+        }
+        if not parent_pipeline_id:
+            return origin
+        try:
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            entry = get_engine_registry().get(parent_pipeline_id)
+            tags = getattr(entry, "tags", {}) or {} if entry else {}
+            origin["trigger_agent"] = tags.get("agent_id", "") or ""
+            origin["trigger_session"] = tags.get("session_id", "") or ""
+        except Exception:
+            pass
+        return origin
+
     async def _try_launch_review_agent(
         self, targets: list[dict[str, Any]],
     ) -> tuple[str, bool]:
         """注册 review_agent 管道并注入消息，启动 LLM 复盘。
 
+        agent 身份与触发来源经 tags 写入注册表（沿用现有约定），
+        引擎首次启动时由 _start_idle_engine 从 tags.agent_id 解析 agent，
+        不再 load agent_config 后 emit(agent_config=...)。
+
+        Args:
+            targets: 待复盘目标列表
+            parent_pipeline_id: 调用方父管道（打 source 溯源用）
+
         Returns:
             (子 pipeline_id, 是否成功启动)
         """
         try:
-            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
             from tools.tool_context import MessageType, PipelineMessage, emit, get_engine_registry  # noqa: PLC0415
 
-            agent_config = get_global_agent_registry_sync().get(self.REVIEW_AGENT_ID)
-            if agent_config is None:
-                logger.info("[Maintenance] review_agent 配置不存在，降级到直接复盘")
+            # 前置校验：review_agent 配置必须存在，否则 tags.agent_id 反查会失败
+            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+            if get_global_agent_registry_sync().get(self.REVIEW_AGENT_ID) is None:
+                logger.warning("[Maintenance] review_agent 配置不存在")
                 return "", False
 
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             registry = get_engine_registry()
             provider = get_service_provider()
+
+            # 触发来源溯源（沿用现有 tags 命名，不自创字段）：
+            # - agent_id：复盘管道自身跑哪个 agent（review_agent）
+            # - source：来源标记，已有约定值 tool_review
+            # - parent_pipeline：调用方父管道（与 task_executor 命名一致）
+            # - session_id：触发会话（API 手动触发时为空）
+            tags = {
+                "agent_id": self.REVIEW_AGENT_ID,
+                "source": "tool_review",
+                "parent_pipeline": self._current_parent_pipeline,
+                "session_id": self._current_trigger_session,
+            }
             entry = registry.register_pipeline(
-                tags={"source": "tool_review"},
+                tags=tags,
                 input_route_table=provider.get("input_route_table"),
                 output_route_table=provider.get("output_route_table"),
                 plugin_registry=provider.get("plugin_registry"),
                 services=provider.get_all_services(),
             )
             if entry is None:
-                logger.warning("[Maintenance] 管道注册失败，降级到直接复盘")
+                logger.warning("[Maintenance] 管道注册失败")
                 return "", False
 
             pipeline_id = entry.engine.pipeline_id
@@ -594,8 +566,12 @@ class MemoryMaintenanceService:
                 content = (
                     f"[工具触发复盘] 请分析以下管道的执行记录，产出经验和改进建议。\n\n"
                     f"待复盘管道列表（failed 优先，共 {len(targets)} 个）：\n{targets_str}\n\n"
-                    f"请用 read_execution_detail(level=skeleton, pipeline_run_id=...) 逐个查看骨架，"
-                    f"对失败/异常的做 5 Whys 根因分析，产出结构化复盘报告。"
+                    f"分析要求：\n"
+                    f"1. 先用 read_execution_detail(level=skeleton, pipeline_run_id=...) 逐个查看骨架；\n"
+                    f"2. 【必须】分析每个管道时，先看用户最初下达的指令（type=user 的记录）"
+                    f"和后续的人类交互/反馈——脱离用户意图的根因分析没有意义；\n"
+                    f"3. 对失败/异常的 iteration 做 5 Whys 根因分析（找根因不找症状）；\n"
+                    f"4. 产出结构化复盘报告（JSON：summary + experiences + improvements）。"
                 )
             else:
                 content = (
@@ -609,12 +585,13 @@ class MemoryMaintenanceService:
                 pipeline_id=pipeline_id,
                 metadata={"source": "tool_review"},
             )
-            result = await emit(msg, agent_config=agent_config)
+            # agent 身份已在 tags.agent_id 注册，引擎启动时自动解析，无需传 agent_config
+            result = await emit(msg)
             logger.info("[Maintenance] LLM 复盘管道已提交 (pipeline=%s, success=%s)", pipeline_id, result.success)
             return pipeline_id, bool(result.success)
 
         except Exception as exc:
-            logger.warning("[Maintenance] LLM 复盘管道提交失败，降级到直接复盘: %s", exc)
+            logger.warning("[Maintenance] LLM 复盘管道提交失败: %s", exc)
             return "", False
 
     async def _await_child_report(self, child_pid: str) -> str:
@@ -659,8 +636,7 @@ class MemoryMaintenanceService:
     def _collect_child_report(self, child_pid: str) -> str:
         """从子复盘管道的执行记录提取最后一条 AI 文本（完整报告）。"""
         try:
-            review_engine = self._get_review_engine()
-            storage = getattr(review_engine, "_storage", None)
+            storage = self._storage
             if storage is None:
                 return ""
             records, _ = storage.list_by_pipeline(child_pid)
@@ -713,6 +689,9 @@ class MemoryMaintenanceService:
             logger.info("[Maintenance] review_report.md 已写入: %s", _path)
         except Exception as exc:
             logger.warning("[Maintenance] 写报告文件失败: %s", exc)
+
+        # 3. 更新经验统计
+        self._stats["total_experiences_saved"] += 1
 
     async def _notify_parent(
         self, parent_pid: str, status: str, summary: str,

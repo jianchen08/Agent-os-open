@@ -252,16 +252,27 @@ class ReadExecutionDetailTool(BuiltinTool):
         # 模拟 L1 摘要：从该 iteration 的记录中提取关键信息
         ai_records = [r for r in target_records if r.type == "ai"]
         tool_records = [r for r in target_records if r.type == "tool"]
+        user_records = [r for r in target_records if r.type in ("user", "human")]
         error_records = [r for r in target_records if r.error]
 
         # 构建 L1 风格的八段摘要
+        # user_inputs 必须先于 ai_actions：复盘需先理解用户意图/人类交互，
+        # 才能判断 agent 后续动作是否偏离目标。
         summary_sections = {
             "iteration": iteration,
+            "user_inputs": [],
             "ai_actions": [],
             "tool_calls_summary": [],
             "errors": [],
             "key_decisions": [],
         }
+
+        # 用户输入/人类交互摘要（复盘根因分析的必要上下文）
+        for r in user_records:
+            action = {"type": r.type, "name": r.name or "user"}
+            if r.content:
+                action["content_preview"] = r.content[:300]
+            summary_sections["user_inputs"].append(action)
 
         # AI 记录摘要
         for r in ai_records:

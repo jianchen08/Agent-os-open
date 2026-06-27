@@ -52,14 +52,14 @@ class CleanupEngine:
 
     async def cleanup_by_age_and_capacity(  # noqa: PLR0912
         self,
-        review_engine: Any | None = None,
+        review_engine: Any | None = None,  # noqa: ARG002  # 保留签名兼容 service 调用
     ) -> dict[str, Any]:
         """根据年龄和容量清理数据。
 
         清理决策 = 复盘状态 x 年龄 x 容量压力：
         - 已复盘 + age > 30天 → 删除
         - 已复盘 + age > 7天 + 容量紧张 → 删除
-        - 未复盘 + age > 30天 → 先复盘再删除
+        - 未复盘 + age > 30天 → 直接删除（A 路径删除后不再"先复盘再清理"）
         - 其他 → 不动
 
         清理层级（优先删大的）：
@@ -69,7 +69,8 @@ class CleanupEngine:
         4. Knowledge 永不删除
 
         Args:
-            review_engine: 复盘引擎实例（用于对未复盘的老管道执行单条复盘）
+            review_engine: 历史参数，保留签名兼容，当前不再使用
+                （清理不再触发复盘，A 路径已删除）。
 
         Returns:
             清理结果字典
@@ -115,22 +116,9 @@ class CleanupEngine:
                         # 容量紧张但不算很老，只删 L0
 
                 elif review_status == "pending":  # noqa: SIM102
-                    # 未复盘：不能盲目删
+                    # 未复盘：A 路径删除后不再"先复盘再清理"，直接按年龄判断。
+                    # 很老（>cleanup_min_age_days）还没复盘，视为无价值，直接删 L0+L1。
                     if age_days > self._config.cleanup_min_age_days:
-                        # 很老还没复盘，先复盘再清理
-                        logger.info(
-                            "[Maintenance] 管道 %s 已 %d 天未复盘，触发单条复盘",
-                            summary.run_id[:12], age_days,
-                        )
-                        try:
-                            if review_engine is not None:
-                                await review_engine.run_review(summary.run_id)
-                        except Exception as e:
-                            logger.warning(
-                                "[Maintenance] 单条复盘失败 | pipeline=%s | error=%s",
-                                summary.run_id[:12], e,
-                            )
-                            continue
                         should_delete_l0 = True
                         should_delete_l1 = True
 
