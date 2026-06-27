@@ -97,6 +97,35 @@ class ToolSchemaValidator(IInputPlugin):
         """插件执行优先级。"""
         return self._config.get("priority", 30)
 
+    @staticmethod
+    def _get_tool_definitions(ctx: PluginContext) -> dict[str, Any]:
+        """获取 {工具名: 定义} 映射。
+
+        优先从 tool_registry 服务取权威定义（与 tool_schema 插件同一来源），
+        registry 取不到时回退 state["_tool_definitions"]（兼容测试夹具）。
+        """
+        registry = None
+        try:
+            registry = ctx.get_service("tool_registry")
+        except Exception:  # noqa: BLE001
+            registry = None
+
+        defs: dict[str, Any] = {}
+        if registry is not None:
+            try:
+                for tool in registry.list_all():
+                    defs[tool.name] = {"input_schema": tool.input_schema}
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[tool_schema_validator] registry.list_all() 失败，"
+                    "回退到 state[_tool_definitions]"
+                )
+                defs = {}
+
+        if not defs:
+            defs = ctx.state.get("_tool_definitions", {}) or {}
+        return defs
+
     async def execute(self, ctx: PluginContext) -> PluginResult:  # noqa: PLR0912,PLR0915
         """执行 Schema 验证与自动修复。
 
@@ -117,16 +146,26 @@ class ToolSchemaValidator(IInputPlugin):
         if not tool_calls:
             return PluginResult()
 
-        tool_definitions = ctx.state.get("_tool_definitions", {})
+        tool_definitions = self._get_tool_definitions(ctx)
         schema_errors: list[dict[str, Any]] = []
         validated_calls: list[dict[str, Any]] = []
         all_fix_messages: list[dict[str, Any]] = []
         state_updates: dict[str, Any] = {}
 
+        # 本轮输出是否被 max_tokens 截断（finish_reason=length，由 llm_core 写入）。
+        # 截断时 tool_call 的 arguments 可能不完整 → 校验缺失字段时给出「文件太大」
+        # 语义的精准提示，引导模型分块/重试，而非放任残缺参数漏进工具。
+        output_truncated = bool(ctx.state.get("output_truncated", False))
+
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
             tc_call_id = tc.get("id", "")
+            # 本调用是否被截断：结构性标记（param_inject 修复时打，可靠）
+            # 或本轮 finish_reason=length（依赖代理返回，辅助）。任一命中即判截断。
+            tc_truncated = bool(
+                tc.get("_args_truncated", False) or output_truncated
+            )
 
             # ── 阶段 0: arguments JSON 截断检测 ──
             # LLM 生成 tool_call 时可能截断 arguments JSON 字符串，
@@ -199,15 +238,50 @@ class ToolSchemaValidator(IInputPlugin):
                 # 修复后再次验证
                 re_errors = self._validate_args(fixed_args, input_schema)
                 if re_errors:
+                    # 参数校验失败（缺 required / 类型不匹配且无法修复）：
+                    # 拦截该调用并注入 role=tool 诊断消息——保持 assistant(tool_calls)
+                    # →tool 消息序列完整，同时把缺失明细反馈给 LLM。
+                    # 截断场景额外提示「文件太大请分块」，让模型改用 append 续写。
                     schema_errors.append({
                         "tool": tool_name,
                         "errors": re_errors,
                         "attempted_fixes": fix_messages,
                     })
+                    missing = [
+                        e.split(":", 1)[1].strip()
+                        for e in re_errors
+                        if e.startswith("Missing required field:")
+                    ]
+                    truncated_hint = ""
+                    if tc_truncated and missing:
+                        truncated_hint = (
+                            " 本次输出因达到 max_tokens 被截断，疑似上述必填字段在"
+                            "截断中丢失（文件/参数过大）。建议拆分为多次小批量调用："
+                            "如 file_write 先写入前半部分，再用 action=append 续写后续内容。"
+                        )
+                    messages = list(ctx.state.get("messages", []))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_call_id,
+                        "content": json.dumps({
+                            "success": False,
+                            "error": (
+                                f"工具 {tool_name} 参数校验失败："
+                                + "; ".join(re_errors)
+                                + "。请补齐/修正对应参数后重新调用。"
+                                + truncated_hint
+                            ),
+                            "error_code": "SCHEMA_VALIDATION_FAILED",
+                            "validation_errors": re_errors,
+                            "output_truncated": tc_truncated,
+                        }, ensure_ascii=False),
+                    })
+                    state_updates["messages"] = messages
                     logger.warning(
-                        "[%s] Schema validation still failed after fix | tool=%s | errors=%s",
-                        self.name, tool_name, re_errors,
+                        "[%s] Schema validation failed, blocked call | tool=%s | errors=%s | truncated=%s",
+                        self.name, tool_name, re_errors, tc_truncated,
                     )
+                    continue
                 else:
                     # 修复成功，用修复后的参数替换原始参数
                     fixed_tc = dict(tc)
@@ -352,8 +426,10 @@ class ToolSchemaValidator(IInputPlugin):
             pass
 
         # 尝试修复
-        from plugins.core.llm_core import _repair_json_string  # noqa: PLC0415
-        repaired = _repair_json_string(args)
+        from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
+            repair_json_string,
+        )
+        repaired = repair_json_string(args)
         if repaired is None:
             # 完全无法修复 → 不是截断场景，交给 tool_core 处理
             return None

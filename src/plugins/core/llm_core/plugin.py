@@ -267,6 +267,10 @@ class LLMCore(ICorePlugin):
             result_text = response.text
             tool_calls = response.tool_calls
             thinking_text = response.thinking_text
+            # 输出截断信号：finish_reason=="length" 表示命中 max_tokens，
+            # tool_call 的 arguments JSON 可能不完整。供下游识别截断、
+            # 在写入结果中提示模型续写，避免留下半截文件。
+            output_truncated = response.finish_reason == "length"
 
             # 流式重复检测：模型在流式输出中陷入重复循环
             if response.stream_repetition:
@@ -437,6 +441,7 @@ class LLMCore(ICorePlugin):
                 "llm_model": self._model,
                 "llm_provider": self._provider,
                 "llm_api_base": self._api_base,
+                "output_truncated": output_truncated,
             }
 
         except Exception as exc:
@@ -723,6 +728,14 @@ class LLMCore(ICorePlugin):
         logger.info(
             "[%s] Calling LLM: model=%s, provider=%s, api_base=%s, streaming=%s",
             self.name, model_str, self._provider, api_base, stream,
+        )
+        # TEMP-DEBUG tool_stream 透传诊断：真实运行时 kwargs 里到底有没有
+        _dp_keys = sorted(self._default_params.keys())
+        logger.info(
+            "[TEMP-DEBUG][%s] default_params keys=%s extra_body=%s "
+            "kwargs.extra_body=%s kwargs.tool_stream=%s",
+            self.name, _dp_keys, self._default_params.get("extra_body"),
+            kwargs.get("extra_body"), kwargs.get("tool_stream"),
         )
 
         try:

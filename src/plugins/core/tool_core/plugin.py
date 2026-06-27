@@ -870,6 +870,10 @@ class ToolCore(ICorePlugin):
             current_messages.append(assistant_msg)
 
         # 追加 tool 结果消息
+        # 输出被 max_tokens 截断时（finish_reason=length）：已执行的工具（如 file_write）
+        # 其参数可能不完整，成功写入的文件实际是「半截内容」——在结果里如实标注，
+        # 并引导模型用 append 续写而非 write 覆盖，避免覆盖丢失已写入部分。
+        output_truncated = bool(ctx.state.get("output_truncated", False))
         for i, result in enumerate(results):
             tc_id = tc_ids[i] if i < len(tc_ids) else f"call_{uuid.uuid4().hex[:8]}"
             result_data = result.get("data", result.get("error", ""))
@@ -877,10 +881,28 @@ class ToolCore(ICorePlugin):
                 content_str = get_format_manager().serialize(result_data)
             except (TypeError, ValueError):
                 content_str = str(result_data)
+            if result.get("success"):
+                content = content_str
+                if output_truncated:
+                    tool_name = result.get("tool_name", "")
+                    written_lines = None
+                    if isinstance(result_data, dict):
+                        written_lines = result_data.get("lines")
+                    note = (
+                        f"⚠️ 本次输出因达到 max_tokens 被截断，结果可能基于不完整参数。"
+                        f" 已写入 {written_lines} 行。"
+                        if written_lines is not None
+                        else "⚠️ 本次输出因达到 max_tokens 被截断，结果可能基于不完整参数。"
+                    )
+                    if tool_name in ("file_write", "file_append"):
+                        note += " 如内容未写完，请用 file_write(action=append) 追加续写，勿用 write 覆盖。"
+                    content = f"{content}\n\n{note}"
+            else:
+                content = f"Error: {result.get('error', 'unknown')}"
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc_id,
-                "content": content_str if result.get("success") else f"Error: {result.get('error', 'unknown')}",
+                "content": content,
             }
             current_messages.append(tool_msg)
 

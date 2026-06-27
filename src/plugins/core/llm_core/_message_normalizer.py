@@ -113,28 +113,13 @@ def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # 尝试 5: 截断修复 — 补全缺失的右括号
-    open_curly = s.count("{") - s.count("}")
-    open_bracket = s.count("[") - s.count("]")
-    if open_curly > 0 or open_bracket > 0:
-        candidate = s + "]" * max(0, open_bracket) + "}" * max(0, open_curly)
-        try:
-            json.loads(candidate)
-            return candidate
-        except (json.JSONDecodeError, TypeError):
-            # 截断可能导致 value 不完整，尝试去掉最后一个不完整的 key:value
-            # 例如 {"key1": "value1", "key2": "val → {"key1": "value1"}
-            last_comma = candidate.rfind(",")
-            if last_comma > 0:
-                candidate2 = candidate[:last_comma]
-                open_c2 = candidate2.count("{") - candidate2.count("}")
-                open_b2 = candidate2.count("[") - candidate2.count("]")
-                candidate2 += "]" * max(0, open_b2) + "}" * max(0, open_c2)
-                try:
-                    json.loads(candidate2)
-                    return candidate2
-                except (json.JSONDecodeError, TypeError):
-                    pass
+    # 尝试 5: 截断修复 — 状态机闭合，尽量保留完整字段（含半截字符串值）
+    # 旧方案用 count("{") 粗暴补括号、再用 rfind(",") 砍掉最后一个字段，
+    # 会把「字符串内部截断」（如 content 值没收尾引号）误判并砍掉完整字段。
+    # 新方案先闭合未结束的字符串再补括号，仅在尾部确为不完整字段时才回退边界。
+    repaired = _repair_truncation(s)
+    if repaired is not None:
+        return repaired
 
     # 尝试 6: 去掉注释 (// 和 /* */)
     fixed = re.sub(r"//.*?$", "", s, flags=re.MULTILINE)
@@ -144,6 +129,106 @@ def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
         try:
             json.loads(fixed)
             return fixed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None
+
+
+def _repair_truncation(s: str) -> str | None:
+    """修复被截断的 JSON：闭合未结束的字符串并补全括号，尽量保留完整字段。
+
+    与旧的 ``count("{") + rfind(",")`` 方案不同，本函数用状态机扫描，
+    区分「字符串内截断」与「结构截断」：
+    - 字符串内截断（如 content 值的引号没收尾）→ 先闭合引号，**保留该半截值**，
+      再补全括号。这样 action/path 等短字段和（半截的）content 都不被丢弃。
+    - 仅当闭合后仍非法（尾部确为不完整的 key 或缺值的字段）时，才回退到
+      最后一个完整字段边界，丢弃那个本就不完整的尾部。
+
+    Args:
+        s: 被截断、前面尝试（直接解析/提取首个对象/去尾逗号/单引号）均失败的字符串。
+
+    Returns:
+        修复后可被 ``json.loads`` 解析的字符串；无法修复时返回 None。
+    """
+    in_string = False
+    escape_next = False
+    stack: list[str] = []
+    last_complete_idx = -1  # 顶层对象内最后一个逗号 = 完整字段边界
+
+    for i, c in enumerate(s):
+        if in_string:
+            if escape_next:
+                escape_next = False
+            elif c == "\\":
+                escape_next = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+        elif c == "{":
+            stack.append("{")
+        elif c == "[":
+            stack.append("[")
+        elif c == "}" and stack and stack[-1] == "{":
+            stack.pop()
+        elif c == "]" and stack and stack[-1] == "[":
+            stack.pop()
+        elif c == "," and len(stack) <= 1:
+            last_complete_idx = i
+
+    if not stack:
+        return None  # 无未闭合结构，不是截断场景
+
+    def _close_braces(prefix: str) -> str:
+        """为 prefix 补全当前未闭合的括号（按结构栈逆序）。"""
+        st: list[str] = []
+        in_s = False
+        esc = False
+        for ch in prefix:
+            if in_s:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_s = False
+                continue
+            if ch == '"':
+                in_s = True
+            elif ch in "{[":
+                st.append(ch)
+            elif ch == "}" and st and st[-1] == "{":
+                st.pop()
+            elif ch == "]" and st and st[-1] == "[":
+                st.pop()
+        return prefix + "".join("}" if ch == "{" else "]" for ch in reversed(st))
+
+    # 步骤 1：若截断在字符串内部，闭合引号（先处理结尾悬空的反斜杠）
+    if in_string:
+        closed = s[:-1] if escape_next else s
+        candidate = _close_braces(closed + '"')
+        try:
+            json.loads(candidate)
+            return candidate
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 步骤 2：仅补全括号（字符串都已闭合、只缺右括号）→ 零字段丢失
+    candidate = _close_braces(s)
+    try:
+        json.loads(candidate)
+        return candidate
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 步骤 3：回退到最后一个完整字段边界，丢弃不完整的尾部
+    if last_complete_idx > 0:
+        candidate = _close_braces(s[:last_complete_idx])
+        try:
+            json.loads(candidate)
+            return candidate
         except (json.JSONDecodeError, TypeError):
             pass
 

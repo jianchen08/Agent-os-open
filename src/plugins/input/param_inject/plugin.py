@@ -136,17 +136,34 @@ class ParamInjectPlugin(IInputPlugin):
                 except (json.JSONDecodeError, TypeError):
                     tool_name = injected_tc.get("name", "?")
                     logger.warning(
-                        "[%s] 工具 %s 的 arguments JSON 解析失败，"
-                        "长度=%d，前200字符: %s",
+                        "[%s] 工具 %s 的 arguments JSON 解析失败（疑似输出被 "
+                        "max_tokens 截断），长度=%d，前200字符: %s",
                         self.name, tool_name,
                         len(raw_args), raw_args[:200],
                     )
-                    # 诊断：打印 repr 和 hex，精确定位转义层级
-                    logger.warning(
-                        "[%s] arguments repr前100: %s",
-                        self.name, repr(raw_args[:100]),
+                    # 截断修复：用 repair_json_string 尽量保住完整字段
+                    # （含半截 content）。旧实现直接 raw_args={} 会把半截内容
+                    # 全部丢失，导致下游验证器/tool_core 拿不到任何内容，
+                    # 只能返回模糊的 "不支持的操作: None"。
+                    from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
+                        repair_json_string,
                     )
-                    raw_args = {}
+                    repaired = repair_json_string(raw_args)
+                    if repaired is not None:
+                        try:
+                            raw_args = json.loads(repaired)
+                        except (json.JSONDecodeError, TypeError):
+                            raw_args = {}
+                        # 打结构性截断标记：不依赖代理返回 finish_reason，
+                        # 供 tool_schema_validator 识别并提示「文件太大请分块」
+                        injected_tc["_args_truncated"] = True
+                        logger.info(
+                            "[%s] 工具 %s 截断修复成功，已保住可用字段 %s",
+                            self.name, tool_name,
+                            list(raw_args.keys()) if isinstance(raw_args, dict) else [],
+                        )
+                    else:
+                        raw_args = {}
             if not isinstance(raw_args, dict):
                 raw_args = {}
             args = dict(raw_args)
