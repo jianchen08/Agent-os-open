@@ -1581,7 +1581,46 @@ class TaskTool(BuiltinTool):
 
         await service.resume_task(task.id)
 
+        # 触发 TaskWorker 重新执行（resume 只改状态，不启动执行）。
+        # 复用 retry 场景的 task_data 构造。_execute_background_task 会从
+        # task.pipeline_run_id 取 existing_pipeline_id 复用管道。
+        target_id = task.metadata.get("target_id", "") or task.agent_name or ""
+        _ws_meta = task.metadata.get("ws_meta", {})
+        _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
 
+        execution_warning = None
+        try:
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            task_worker = get_service_provider().get("task_worker")
+            if task_worker:
+                task_data = {
+                    "task_id": task.id,
+                    "pipeline_id": task.parent_pipeline_id or "",
+                    "pipeline_run_id": task.pipeline_run_id or "",
+                    "target_type": task.target_type or "agent",
+                    "target_id": target_id,
+                    "user_input": task.title,
+                    "description": task.description,
+                    "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
+                    "workspace": _workspace,
+                    "isolation_level": task.metadata.get("isolation_level", ""),
+                    "_prepared_context": {
+                        "workspace": _workspace,
+                        "ws_meta": _ws_meta,
+                        "full_input": task.title,
+                        "isolation_mode": task.metadata.get("isolation_level", ""),
+                        "has_explicit_workspace": True,
+                        "agent_config_validated": True,
+                    },
+                }
+                if not task_worker.submit_task(task_data):
+                    execution_warning = "后台执行器未启动，任务已恢复但不会自动执行"
+                else:
+                    logger.info("[TaskTool] resume 已提交到 TaskWorker: task_id=%s", task.id)
+            else:
+                execution_warning = "后台执行器不可用，任务已恢复但不会自动执行"
+        except Exception as submit_exc:
+            execution_warning = f"提交执行失败: {submit_exc}"
 
         result_data: dict[str, Any] = {
 
@@ -1598,6 +1637,9 @@ class TaskTool(BuiltinTool):
         if message:
 
             result_data["message_injected"] = True
+
+        if execution_warning:
+            result_data["execution_warning"] = execution_warning
 
 
 
