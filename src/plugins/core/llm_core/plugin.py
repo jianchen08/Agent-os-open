@@ -194,6 +194,12 @@ class LLMCore(ICorePlugin):
         self._first_token_timeout: float = float(
             self._config.get("first_token_timeout", 60)
         )
+        # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（默认 600s）。
+        # 与 call_timeout 分离：call_timeout 用于非流式整体超时，此处用于流式
+        # inter-chunk 静默（每个 chunk 到达即重置，活跃推理不误触发）。
+        self._stream_idle_timeout: float = float(
+            self._config.get("stream_idle_timeout", 600)
+        )
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
             self.max_retries = self._config["max_retries"]
@@ -348,6 +354,13 @@ class LLMCore(ICorePlugin):
                         self.name, tc.get("name", "?"),
                         str(tc.get("args", tc.get("arguments", "")))[:200],
                     )
+                    # 诊断：arguments repr，定位转义层级（adapter 返回时是否已双重转义）
+                    _tc_args_raw = tc.get("args", tc.get("arguments", ""))
+                    if isinstance(_tc_args_raw, str) and len(_tc_args_raw) > 100:
+                        logger.debug(
+                            "[%s] tool_call arguments repr前80: %s",
+                            self.name, repr(_tc_args_raw[:80]),
+                        )
 
             # LLMCore 生产的 assistant 回复，由 LLMCore 负责 append 到 messages
             # 只追加对话历史部分（不含 system_message 和 dynamic_vars），
@@ -719,7 +732,7 @@ class LLMCore(ICorePlugin):
                 tools=tool_schemas or None,
                 stream=stream,
                 on_chunk=on_chunk,
-                inter_chunk_timeout=self._call_timeout,
+                inter_chunk_timeout=self._stream_idle_timeout,
                 first_chunk_timeout=self._first_token_timeout,
                 **kwargs,
             )

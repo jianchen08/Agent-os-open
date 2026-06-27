@@ -1181,7 +1181,11 @@ class PipelineEngine:
 
 
 
-            log_mode = "a" if resumed else "w"
+            # 文件名已按 pipeline_run_id（注册表 ID）唯一命名，同一引擎无论
+            # 首次运行 / resume / 停止后重启，日志都追加进同一个文件，不覆盖。
+            # 只要引擎为该 ID 运行，其日志就持续归档到 pipeline_{id}.log 尾部。
+            # （resumed 标志此前用 "w" 覆盖重启场景，会丢失同 ID 历史日志，已废弃。）
+            log_mode = "a"
 
             _log_fmt = logging.Formatter(
 
@@ -1500,6 +1504,22 @@ class PipelineEngine:
                 with contextlib.suppress(Exception):
 
                     _lg.removeHandler(_h)
+
+
+
+        # BUG-FIX-fix_20260627_log_missing_after_restart:
+
+        # handler 已全部关闭移除，必须同步重置守卫标志，否则引擎被复用重启时
+
+        # _setup_pipeline_logging 的防重复守卫(_logging_pipeline_id == pipeline_run_id)
+
+        # 会误判"已配置"直接 return，不重建 handler → 日志不写文件。
+
+        # 触发路径：停止生成只 cancel engine_task 不删 entry(register 复用同一 engine)，下次
+
+        # 发消息走 _start_idle_engine → 同一 engine.run() → pipeline_id 不变 → 守卫命中。
+
+        self._logging_pipeline_id = None
 
 
 

@@ -9,7 +9,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
+import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -86,11 +86,13 @@ export function handleThinkingStart(eventData: any) {
   _thinkingTimeoutMap.set(messageId, timer)
 
   // 通过 parts[] 统一方法追加 thinking part
+  // sequence fallback: 缺失时用 part 级 max+1，保证思考排在已渲染内容之后、
+  // 不被 Date.now() 大数推到末尾（详见 allocatePartSequence）。
   pipelineStore.getState().appendPart(pipelineId, messageId, {
     type: 'thinking',
     content: '',
     state: 'streaming',
-    sequence: eventData.data?.sequence ?? Date.now(),
+    sequence: eventData.data?.sequence ?? allocatePartSequence(pipelineId, messageId),
   })
 }
 
@@ -139,7 +141,7 @@ export function handleThinkingChunk(eventData: any) {
       type: 'thinking',
       content: chunk,
       state: 'streaming',
-      sequence: eventData.data?.sequence ?? Date.now(),
+      sequence: eventData.data?.sequence ?? allocatePartSequence(pipelineId, messageId),
     })
   }
 }

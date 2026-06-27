@@ -131,6 +131,35 @@ export function allocateNextSequence(pipelineId: string, backendSequence?: numbe
 }
 
 /**
+ * 分配 Part 级 sequence 的 fallback 值（后端事件未携带 sequence 时）。
+ *
+ * 渲染层 buildFragmentsFromParts 按 part.sequence 数值升序渲染。若 fallback 用
+ * Date.now()（毫秒大数），缺失 sequence 的 part 会必然排到所有后端小整数
+ * sequence 的 part 之后——例如思考 part 被排到正文文本下方，呈现"思考顺序错乱"。
+ *
+ * 正确语义：fallback 必须保持与已有 parts 的相对顺序，取当前消息 parts 的
+ * 最大 sequence + 1，使新创建的 part 紧跟在已渲染内容之后（与流式到达顺序一致）。
+ *
+ * BUG-FIX-fix_20260627_thinking_render_order:
+ *   问题根因: thinkingHandler / streamHandler 在后端 sequence 缺失时用 Date.now()
+ *   作 fallback，导致思考 part 排到文本 part 之后（刷新后依旧，因同一数据源）。
+ *   修复方案: 用 part 级 max+1 替代 Date.now()，保持相对顺序。
+ *
+ * @param pipelineId - 管道 ID
+ * @param messageId - 消息 ID
+ * @returns 当前消息 parts 最大 sequence + 1（无 parts 时返回 0）
+ */
+export function allocatePartSequence(pipelineId: string, messageId: string): number {
+  const msgs = pipelineStore.getState().getMessages(pipelineId)
+  const msg = msgs.find((m: any) => m.id === messageId)
+  const parts = msg?.parts || []
+  const maxSeq = parts.reduce(
+    (max: number, p: any) => Math.max(max, typeof p.sequence === 'number' ? p.sequence : 0), 0,
+  )
+  return maxSeq + 1
+}
+
+/**
  * 确保流式占位符消息存在
  *
  * 合并 startStreaming + setStreamingForTab + addMessage 三步操作，

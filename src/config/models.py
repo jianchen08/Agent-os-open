@@ -329,6 +329,10 @@ class ModelConfigLoader:
         first_token_timeout = model_conf.get(
             "first_token_timeout", defaults.get("first_token_timeout", 60)
         )
+        # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（优先模型配置，回退 defaults）
+        stream_idle_timeout = model_conf.get(
+            "stream_idle_timeout", defaults.get("stream_idle_timeout", 600)
+        )
 
         return {
             "model_id": model_id,
@@ -340,6 +344,7 @@ class ModelConfigLoader:
             "default_params": default_params,
             "call_timeout": call_timeout,
             "first_token_timeout": first_token_timeout,
+            "stream_idle_timeout": stream_idle_timeout,
         }
 
     def resolve_env_or_model(self, value: str, provider_name: str = "") -> str:

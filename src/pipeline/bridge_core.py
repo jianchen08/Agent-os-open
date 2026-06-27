@@ -83,6 +83,13 @@ class BridgeCore:
         self._llm_seen_call_ids: set[str] = set()
         self._part_seq: int = 0
         self._emit_start_time: float = 0.0
+        # 当前流式 part 块追踪：sequence 按「块」分配而非「chunk」。
+        # 同一连续块（如一段思考的所有 token、一段正文的所有 token）共享一个 sequence，
+        # 块类型切换（thinking↔text 等）或遇到独立 part（tool/notification）时分配新 sequence。
+        # 修复根因：原实现每个 chunk 递增 _part_seq，导致长思考把计数器推高，后续正文/二次
+        # 思考的 sequence 与前面正文数值范围重叠交错，前端按 sequence 排序时思考被排到正文下方。
+        self._current_chunk_type: str | None = None
+        self._current_block_seq: int = 0
 
     # ------------------------------------------------------------------
     # sequence（保留，用于 system_notification 等消息级序号）
@@ -109,6 +116,33 @@ class BridgeCore:
         """Part 级 sequence，本地递增，仅用于前端 parts 排序。"""
         self._part_seq += 1
         return self._part_seq
+
+    def _seq_for_block(self, block_type: str) -> int:
+        """按 part 块分配 sequence：同一连续块的 chunk 共享一个 sequence。
+
+        流式连续块（一段思考、一段正文）由多个 chunk 组成，这些 chunk 应渲染为同一个
+        part，故共享同一个 sequence。仅当块类型切换（thinking↔text）时才分配新 sequence，
+        使 sequence 数值能正确表达「块」的先后顺序，供前端排序。
+
+        修复根因：原实现每个 chunk 都递增 _part_seq。长思考（几百 token）把计数器推到
+        几十上百，后续正文从此高值起步；若工具后又有二次思考，其 sequence 会落入正文
+        区间，前端按数值排序导致思考与正文交错、思考排到正文下方。
+
+        Args:
+            block_type: 当前块的类型标识（如 "thinking" / "text"）。
+
+        Returns:
+            当前块的 sequence（块内所有 chunk 复用同一值）。
+        """
+        if self._current_chunk_type != block_type:
+            self._current_chunk_type = block_type
+            self._current_block_seq = self._next_part_seq()
+        return self._current_block_seq
+
+    def _reset_current_block(self) -> None:
+        """重置当前流式块追踪：遇到独立 part（tool/notification）后强制下个 chunk 开新块。"""
+        self._current_chunk_type = None
+        self._current_block_seq = 0
 
     # ------------------------------------------------------------------
     # 事件构造与发送
@@ -187,6 +221,7 @@ class BridgeCore:
         self._llm_seen_call_ids = set()
         self._part_seq = 0
         self._emit_start_time = time.monotonic()
+        self._reset_current_block()
         # 写入 state，供 TrackPlugin 用作 record_id（与 stream_start 下发的 ID 一致）
         if state is not None:
             state["preset_ai_record_id"] = self.message_id
@@ -468,6 +503,7 @@ class BridgeCore:
         self._sent_tool_starts = set()
         self._llm_seen_call_ids = set()
         self._part_seq = 0
+        self._reset_current_block()
 
     def stop(self) -> None:
         """[DEPRECATED] 停止 drain_loop。

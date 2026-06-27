@@ -373,9 +373,15 @@ def render_html(
     for t in tasks:
         all_ac.update(t.ac_ids)
 
-    # 任务详情数据（JSON 给 JS）
+    # 任务详情数据（JSON 给 JS）。body 在 Python 端预渲染成 html，避免 JS 端再渲染。
+    # 正文里常含 ```代码块```、`行内代码`、`</script>` 示例，必须把 < 转义成 \u003c，
+    # 否则字面 </script> 会截断 <script> 块；反引号交给 JS 端用普通字符串拼接处理。
     import json
-    tasks_json = json.dumps(
+
+    def _safe_json(obj: Any) -> str:
+        return json.dumps(obj, ensure_ascii=False).replace("<", "\\u003c")
+
+    tasks_json = _safe_json(
         [
             {
                 "id": t.task_id,
@@ -385,14 +391,14 @@ def render_html(
                 "depends_on": t.depends_on,
                 "ac_ids": t.ac_ids,
                 "body": t.body,
+                "html": markdown_to_html(t.body),
             }
             for t in tasks
-        ],
-        ensure_ascii=False,
+        ]
     )
 
-    # 项目文档数据（正文已在加载时读全，渲染交给 JS 侧的 markdownToHtml）
-    docs_json = json.dumps(
+    # 项目文档数据（正文已在加载时读全，html 预渲染）
+    docs_json = _safe_json(
         [
             {
                 "name": d["name"],
@@ -401,8 +407,7 @@ def render_html(
                 "html": markdown_to_html(d["body"]),
             }
             for d in project_docs
-        ],
-        ensure_ascii=False,
+        ]
     )
 
     rows = []
@@ -548,36 +553,41 @@ def render_html(
 <script>
 const TASKS = {tasks_json};
 const DOCS = {docs_json};
-function openDrawer(html) {{
-  document.getElementById('drawer-content').innerHTML = html;
+// 文本转义：textContent->innerHTML，防止标题/状态等动态文本里的 < > & 破坏 DOM。
+// 正文 html 字段是 Python 端预渲染的安全 HTML，不走 esc，直接拼入 innerHTML。
+function esc(s) {{
+  const d = document.createElement('div');
+  d.textContent = (s === null || s === undefined) ? '' : String(s);
+  return d.innerHTML;
+}}
+function openDrawer(content) {{
+  document.getElementById('drawer-content').innerHTML = content;
   document.getElementById('drawer').classList.add('open');
   document.getElementById('overlay').classList.add('open');
 }}
+// 用普通字符串拼接构造抽屉内容，不用反引号模板字符串：
+// 正文里大量 ``` 代码块反引号会提前终止模板字符串导致整个脚本语法错误、点击不渲染。
 function showTask(id) {{
   const t = TASKS.find(x => x.id === id);
   if (!t) return;
   const deps = t.depends_on.length ? t.depends_on.join(', ') : '无';
-  openDrawer(`
-    <h2 style="margin-top:0">${{t.name || t.id}}</h2>
-    <div class="drawer-meta">
-      <span class="meta-chip"><code>${{t.id}}</code></span>
-      <span class="meta-chip">执行者: ${{t.executor || '—'}}</span>
-      <span class="meta-chip">状态: ${{t.status}}</span>
-      <span class="meta-chip">依赖: ${{deps}}</span>
-    </div>
-    <div class="drawer-body">${{t.body || '（无正文）'}}</div>
-  `);
+  const head = '<h2 style="margin-top:0">' + esc(t.name || t.id) + '</h2>'
+    + '<div class="drawer-meta">'
+    + '<span class="meta-chip"><code>' + esc(t.id) + '</code></span>'
+    + '<span class="meta-chip">执行者: ' + esc(t.executor || '—') + '</span>'
+    + '<span class="meta-chip">状态: ' + esc(t.status) + '</span>'
+    + '<span class="meta-chip">依赖: ' + esc(deps) + '</span>'
+    + '</div>';
+  const body = '<div class="drawer-body">' + (t.html || esc(t.body) || '（无正文）') + '</div>';
+  openDrawer(head + body);
 }}
 function showDoc(index) {{
   const d = DOCS[index];
   if (!d) return;
-  openDrawer(`
-    <h2 style="margin-top:0">${{d.name}}</h2>
-    <div class="drawer-meta">
-      <span class="meta-chip"><code>${{d.path}}</code></span>
-    </div>
-    <div class="drawer-body">${{d.html || d.body}}</div>
-  `);
+  const head = '<h2 style="margin-top:0">' + esc(d.name) + '</h2>'
+    + '<div class="drawer-meta"><span class="meta-chip"><code>' + esc(d.path) + '</code></span></div>';
+  const body = '<div class="drawer-body">' + (d.html || esc(d.body)) + '</div>';
+  openDrawer(head + body);
 }}
 function closeDrawer() {{
   document.getElementById('drawer').classList.remove('open');

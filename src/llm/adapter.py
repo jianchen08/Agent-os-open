@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time as _time
@@ -307,9 +308,20 @@ class _BaseLiteLLMAdapter:
         **kwargs: Any,
     ) -> LLMResponse:
         """非流式调用 LLM。"""
+        # 流式专属参数对非流式无意义，pop 出来不传给 litellm（与流式路径对齐）。
+        # inter_chunk_timeout 是 plugin 传入的 call_timeout，复用为非流式整体超时。
+        call_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
+        kwargs.pop("first_chunk_timeout", None)
+        kwargs.pop("max_thinking_chars", None)
+
+        # BUG-FIX-fix_20260627_timeout_needs_float:
+        # 非流式路径若不传 timeout，litellm 用 Router 默认（yaml call_timeout，
+        # 历史是 int）或自身默认 int，传给 zai 触发
+        # "Timeout needs to be a float"。显式设 float，与流式路径（3600.0）对齐。
         call_kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
+            "timeout": call_timeout,
             **kwargs,
         }
         if tools:
@@ -379,7 +391,12 @@ class _BaseLiteLLMAdapter:
         # 必须在构造 call_kwargs 之前 pop 出来，否则会被 **kwargs 塞进
         # litellm 请求参数（litellm 不识别这两个 key）。
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
-        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
+        # inter-chunk 静默超时：连续 N 秒收不到任何 chunk 即判定上游/传输静默，
+        # 抛 litellm.Timeout 中断死等。每个 chunk 到达即重置计时器（见下方主循环
+        # asyncio.wait_for），故活跃推理（reasoning 持续吐 chunk）永不触发，只有
+        # 真正静默（连接挂起/上游冻结）才在 N 秒后掐断。生产由插件传入 stream_idle_timeout
+        # 覆盖；此处默认 600s 为直连/测试调用兜底。
+        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 600))
 
         call_kwargs: dict[str, Any] = {
             "model": model,
@@ -408,10 +425,11 @@ class _BaseLiteLLMAdapter:
         # 日志证据（af11896959d1 iter=5）：最后 chunk 02:42:22 → 60s 沉默 →
         # 02:43:22 连接断，raw_result=None，整条方案文档输出丢失。
         #
-        # 正确做法：httpx read timeout 取 inter_chunk_timeout（两个 chunk 之间
-        # 允许的最大间隔），首 chunk 的快速超时由下方 asyncio.wait_for
-        # (first_chunk_timeout) 单独负责。这样流式输出能容忍合理的思考停顿。
-        call_kwargs["timeout"] = inter_chunk_timeout
+        # 流式 read timeout：设一个很大的值，避免 reasoning 组装 tool_call 时
+        # 的数分钟静默期被 socket read timeout 误杀。glm-5.2 的 tool_call 整块
+        # 输出，thinking 结束到 tool_call 到达之间有正常静默期。
+        # zai provider 只接受 float，用大数近似"不超时"。
+        call_kwargs["timeout"] = 3600.0
 
         response = await self._do_completion(**call_kwargs, drop_params=True)
 
@@ -420,12 +438,25 @@ class _BaseLiteLLMAdapter:
         tool_calls_map: dict[int, dict[str, Any]] = {}
         stream_usage: dict[str, Any] | None = None
         _stream_start: float = _time.monotonic()
+        # inter-chunk 静默追踪：每个 chunk 到达即更新 _last_chunk_monotonic，
+        # 心跳据此量化"距上个 chunk 多久"，是区分"上游不发"与"接收端卡死"的关键。
+        _last_chunk_monotonic: float = _stream_start
+        _chunks_received: int = 0
+        # litellm CustomStreamWrapper 的底层流对象（openai/zai 路径即 httpx.Response）。
+        # 心跳日志读其 is_closed 作为半死 TCP 的廉价（不可靠但便宜）附加信号。
+        _completion_stream: Any = getattr(response, "completion_stream", None)
+        # 心跳探针任务句柄（首 chunk 后启动，finally 中取消）。
+        _heartbeat_task: asyncio.Task[None] | None = None
 
         stream_repetition = False
         thinking_truncated = False
         _max_thinking_chars = int(
             kwargs.pop("max_thinking_chars", 180000)
         )
+        # 接收端点诊断：统计 tool_calls 字段从 API 到达次数，定位丢失环节
+        _recv_seq = 0
+        _recv_tc_count = 0
+        _finish_reason: str | None = None
 
         # BUG-FIX-fix_20260529_minimax_thinking_stream:
         # 流式 <think/> 标签状态机。MiniMax 等模型的思考内容通过 <think/> 标签
@@ -678,13 +709,13 @@ class _BaseLiteLLMAdapter:
                                 _arg_len = len(
                                     tool_calls_map[idx]["arguments"]
                                 )
-                                if _arg_len <= 50 or _arg_len % 500 == 0:
-                                    _stream_logger.debug(
-                                        "[STREAM][TOOL_CALL] #%d args +%d → %d chars",
-                                        idx,
-                                        len(tc.function.arguments),
-                                        _arg_len,
-                                    )
+                                _stream_logger.debug(
+                                    "[STREAM][TOOL_CALL] #%d args +%d → %d chars: %s",
+                                    idx,
+                                    len(tc.function.arguments),
+                                    _arg_len,
+                                    repr(tc.function.arguments[:100]),
+                                )
 
                     if on_chunk:
                         on_chunk({
@@ -695,8 +726,62 @@ class _BaseLiteLLMAdapter:
 
             # 处理首个 chunk
             await _process_chunk(chunk)
+            _last_chunk_monotonic = _time.monotonic()
+            _chunks_received += 1
+            # 启动心跳探针：流静默时持续打 idle 时长 + stream_closed，
+            # 证明接收协程存活（排除接收端死锁），并量化上游/传输静默时长。
+            # 沿用 process_manager._watchdog_loop 的 create_task + CancelledError 退出范式。
+            _heartbeat_task = asyncio.create_task(
+                self._stream_heartbeat(
+                    model, inter_chunk_timeout,
+                    lambda: (_time.monotonic() - _last_chunk_monotonic),
+                    lambda: _chunks_received,
+                    _completion_stream,
+                )
+            )
+            # 接收端点诊断（首个 chunk）
+            _recv_seq += 1
+            try:
+                _rc0 = chunk.choices[0] if chunk.choices else None
+                if _rc0 is not None:
+                    _d0 = getattr(_rc0, "delta", None)
+                    _fr0 = getattr(_rc0, "finish_reason", None)
+                    _tc0 = getattr(_d0, "tool_calls", None) if _d0 else None
+                    if _tc0:
+                        _recv_tc_count += 1
+                        _tc_summary0 = []
+                        for _tci in _tc0:
+                            _fn0 = getattr(_tci, "function", None)
+                            _tc_name0 = getattr(_fn0, "name", "?") if _fn0 else "?"
+                            _tc_args0 = getattr(_fn0, "arguments", "") if _fn0 else ""
+                            _tc_summary0.append(f"{_tc_name0}(args={len(_tc_args0)}c)")
+                        _stream_logger.debug(
+                            "[STREAM][RECV] #%d tool_calls 到达(首chunk, %d个): %s",
+                            _recv_seq, len(_tc0),
+                            ", ".join(_tc_summary0),
+                        )
+                    if _fr0:
+                        _finish_reason = _fr0
+                        _stream_logger.debug(
+                            "[STREAM][RECV] #%d finish=%s (首chunk, 累计tc=%d)",
+                            _recv_seq, _fr0, _recv_tc_count,
+                        )
+            except Exception:
+                pass
 
-            # 后续 chunk：带 inter-chunk 超时，防止连接僵死
+            # 后续 chunk：用 asyncio.wait_for 包裹 __anext__()，连续 inter_chunk_timeout
+            # 秒收不到任何 chunk 即抛 litellm.Timeout 中断死等。
+            #
+            # 关键设计：wait_for 是【逐次】超时——每个 chunk 到达就重新计时。活跃推理
+            # 的 reasoning/text chunk 间隔远小于 timeout（实测 <1s），故永不误触发；只有
+            # 真正静默（上游连接挂起/服务端冻结，连心跳都不发的死连接）才会累计满 timeout。
+            # 这避开了 BUG-FIX-fix_20260625_httpx_timeout_too_short 的覆辙——那次是【固定】
+            # 60s per-read 误杀了正常的多分钟 reasoning 间隙；本方案 per-iteration 重置，
+            # 活跃流不受影响。
+            #
+            # 注意：glm-5.2 的 tool_call 虽是紧跟 reasoning 的整块输出（实测间隙≈0），
+            # 但仍依赖 reasoning 阶段持续吐 chunk 维持计时器存活；若 reasoning 也静默
+            # 满 timeout，说明连接已挂，应中断。
             while True:
                 try:
                     chunk = await asyncio.wait_for(
@@ -705,23 +790,61 @@ class _BaseLiteLLMAdapter:
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
+                    _idle = _time.monotonic() - _last_chunk_monotonic
                     logger.warning(
-                        "[%s] STREAM TIMEOUT: inter-chunk 超时 (%.0fs)"
-                        " model=%s chunks_received=%d",
-                        type(self).__name__, inter_chunk_timeout, model,
-                        len(result_parts) + len(thinking_parts),
+                        "[%s] STREAM TIMEOUT: inter-chunk 静默超时 (%.0fs)"
+                        " 距上个 chunk #%d 已静默 %.0fs model=%s",
+                        type(self).__name__, inter_chunk_timeout,
+                        _chunks_received, _idle, model,
                     )
                     raise litellm.Timeout(  # noqa: B904
                         message=(
                             "Stream inter-chunk timeout:"
-                            f" no data for {inter_chunk_timeout:.0f}s"
+                            f" no data for {_idle:.0f}s"
+                            f" (last chunk #{_chunks_received}, timeout={inter_chunk_timeout:.0f}s)"
                         ),
                         model=model,
                         llm_provider="zai",
                     )
+                _last_chunk_monotonic = _time.monotonic()
+                _chunks_received += 1
                 if await _process_chunk(chunk):
                     break
+                # ── 接收端点诊断：每个 chunk 检查 delta.tool_calls 是否到达 ──
+                _recv_seq += 1
+                try:
+                    _rc = chunk.choices[0] if chunk.choices else None
+                    if _rc is not None:
+                        _d = getattr(_rc, "delta", None)
+                        _fr = getattr(_rc, "finish_reason", None)
+                        _tc = getattr(_d, "tool_calls", None) if _d else None
+                        if _tc:
+                            _recv_tc_count += 1
+                            # 打印完整 tool_call 内容（name + arguments 长度 + 预览）
+                            _tc_summary = []
+                            for _tci in _tc:
+                                _fn = getattr(_tci, "function", None)
+                                _tc_name = getattr(_fn, "name", "?") if _fn else "?"
+                                _tc_args = getattr(_fn, "arguments", "") if _fn else ""
+                                _tc_summary.append(f"{_tc_name}(args={len(_tc_args)}c)")
+                            _stream_logger.debug(
+                                "[STREAM][RECV] #%d tool_calls 到达(%d个): %s",
+                                _recv_seq, len(_tc),
+                                ", ".join(_tc_summary),
+                            )
+                            _finish_reason = _fr
+                            _stream_logger.debug(
+                                "[STREAM][RECV] #%d finish=%s (累计tc=%d)",
+                                _recv_seq, _fr, _recv_tc_count,
+                            )
+                except Exception:
+                    pass
         finally:
+            # 取消心跳探针任务（避免任务泄漏：超时/异常/正常结束都要清理）
+            if _heartbeat_task is not None and not _heartbeat_task.done():
+                _heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await _heartbeat_task
             # 确保超时或异常时关闭 async iterator，释放 HTTP 连接
             if hasattr(response, "aclose"):
                 await response.aclose()
@@ -735,13 +858,19 @@ class _BaseLiteLLMAdapter:
         _comp_tokens = (stream_usage or {}).get("completion_tokens", 0)
         _speed = (_comp_tokens / _stream_elapsed) if _stream_elapsed > 0 and _comp_tokens else 0
         _stream_logger.debug(
-            "[STREAM][DONE] text=%d chars thinking=%d chars "
+            "[STREAM][DONE] finish=%s text=%d chars thinking=%d chars "
             "chunks=%d tool_calls=%d "
             "tokens=%d elapsed=%.2fs speed=%.1f tok/s",
+            _finish_reason,
             len(result_text or ""), len(thinking_text or ""),
             len(result_parts) + len(thinking_parts),
             len(tool_calls),
             _comp_tokens, _stream_elapsed, _speed,
+        )
+        # 接收端点汇总：API 端实际送达的 tool_calls chunk 数 vs 最终解析数
+        _stream_logger.debug(
+            "[STREAM][STATS] recv_chunks=%d recv_tc=%d parsed_tc=%d",
+            _recv_seq, _recv_tc_count, len(tool_calls),
         )
 
         return LLMResponse(
@@ -752,6 +881,54 @@ class _BaseLiteLLMAdapter:
             stream_repetition=stream_repetition,
             thinking_truncated=thinking_truncated,
         )
+
+    async def _stream_heartbeat(
+        self,
+        model: str,
+        inter_chunk_timeout: float,
+        idle_getter: Callable[[], float],
+        chunks_getter: Callable[[], int],
+        completion_stream: Any,
+    ) -> None:
+        """流式心跳探针：周期性打 idle 时长 + stream_closed 信号。
+
+        诊断目标（区分"上游/API 端不发"vs"我们接收端卡死"）：
+          - 心跳持续输出 → 接收协程存活，非接收端死锁；
+          - idle 时长持续增长 → 上游/传输静默（接收端在等，没人发）；
+          - idle 在心跳间隔(30s)附近震荡 → 正常活跃流。
+
+        idle 接近 timeout/2 时升级为 WARNING，使静默即将触发超时时醒目可见。
+        stream_closed 取底层 httpx Response.is_closed（对静默半死 TCP 仍可能为
+        False，仅作廉价附加信号，不可靠不独断）。
+
+        沿用 process_manager._watchdog_loop 的范式：CancelledError 单独捕获并退出，
+        其他异常吞掉保持循环存活。由 _call_streaming 的 finally 负责取消。
+
+        Args:
+            model: 模型标识（日志用）
+            inter_chunk_timeout: inter-chunk 静默超时阈值（用于决定日志级别）
+            idle_getter: 返回距上个 chunk 的秒数（闭包读 _last_chunk_monotonic）
+            chunks_getter: 返回累计收到的 chunk 数（闭包读 _chunks_received）
+            completion_stream: litellm 底层流对象（读 is_closed）
+        """
+        half = inter_chunk_timeout / 2
+        try:
+            while True:
+                await asyncio.sleep(30.0)
+                idle = idle_getter()
+                received = chunks_getter()
+                closed = (
+                    getattr(completion_stream, "is_closed", None)
+                    if completion_stream is not None else None
+                )
+                _stream_logger.log(
+                    logging.WARNING if idle >= half else logging.DEBUG,
+                    "[STREAM][HEARTBEAT] idle=%.0fs since chunk #%d total=%d "
+                    "stream_closed=%s model=%s",
+                    idle, received, received, closed, model,
+                )
+        except asyncio.CancelledError:
+            pass
 
     def _parse_tool_calls(self, raw_tool_calls: Any) -> list[dict[str, Any]]:
         """解析非流式响应中的 tool_calls。"""

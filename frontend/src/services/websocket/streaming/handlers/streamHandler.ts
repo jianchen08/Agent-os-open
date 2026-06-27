@@ -14,7 +14,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
+import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -50,7 +50,9 @@ function _flushChunks(): void {
         type: 'text',
         content: '',
         state: 'streaming',
-        sequence: entry.firstSequence ?? Date.now(),
+        // sequence fallback: 缺失时用 part 级 max+1，避免 Date.now() 大数
+        // 把文本推到思考 part 之后（详见 allocatePartSequence）。
+        sequence: entry.firstSequence ?? allocatePartSequence(entry.pipelineId, entry.messageId),
       })
       partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
     }

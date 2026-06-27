@@ -23,6 +23,38 @@ from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
+# bad_request 中 LLM 确实能通过调整操作修复的关键词（白名单）。
+# 命中其一才追加恢复提示，其余 bad_request 一律不喂给 LLM（默认安全）。
+_FIXABLE_BAD_REQUEST_KEYWORDS = (
+    "invalid function arguments",
+    "invalid params",
+)
+
+
+def _is_bad_request_fixable(error_msg: str) -> bool:
+    """判断 bad_request 错误是否 LLM 真能通过调整操作修复。
+
+    白名单默认安全：只有工具参数 JSON 格式错（invalid function arguments /
+    invalid params）或工具调用序列破坏（tool id ... not found）这类 LLM 改
+    参数就能修的才返回 True。其余 bad_request（如 timeout 类型错
+    "Timeout needs to be a float"、1000 条输入限制、context_length_exceeded、
+    max_tokens 超限）LLM 改参数也修不了，返回 False，避免把错误文本塞进
+    对话历史污染上下文。
+
+    Args:
+        error_msg: 原始错误信息字符串
+
+    Returns:
+        是否可修复（True 才追加恢复提示到 messages）
+    """
+    lower = error_msg.lower()
+    if any(kw in lower for kw in _FIXABLE_BAD_REQUEST_KEYWORDS):
+        return True
+    # tool id not found：消息序列被破坏（工具调用与结果失配），LLM 重发调用可修
+    if "tool id" in lower and "not found" in lower:
+        return True
+    return False
+
 
 class LLMErrorRecoveryPlugin(IOutputPlugin):
     """LLM 错误恢复 Output 插件。
@@ -106,7 +138,20 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
             )
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # bad_request：LLM 有能力修复（如非法工具参数），构建恢复提示
+        # 白名单默认安全：bad_request 还要再判定"LLM 是否真能修"。
+        # 只有工具参数 JSON 错 / tool id 序列破坏这类改参数就能修的才喂；
+        # 其余 bad_request（如 "Timeout needs to be a float"、1000 条输入限制、
+        # context_length_exceeded、max_tokens 超限）是 API 层面错误，LLM 改参数
+        # 也修不了，喂进去只会污染对话历史。不喂，清除错误信息由 error_check 接管。
+        if not _is_bad_request_fixable(error_msg):
+            logger.info(
+                "LLM error recovery: bad_request 非可修复类型，跳过提示"
+                "（不喂 LLM） | error=%s",
+                error_msg[:200],
+            )
+            return OutputResult(state_updates={"llm_error_info": None})
+
+        # 可修复的 bad_request：构建恢复提示
         hint = self._build_llm_error_hint(error_msg)
         messages = list(ctx.state.get("messages", []))
 

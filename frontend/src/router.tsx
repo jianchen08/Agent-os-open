@@ -570,17 +570,19 @@ function HomePage(): ReactNode {
         </button>
       </div>
 
-      <SessionList
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        deletingSessionIds={new Set<string>()}
-        onSessionClick={handleSelectSession}
-        onDeleteSession={(id) => { if (window.confirm('确定要删除此会话吗？')) deleteSession(id).catch(() => {}) }}
-        onEditSession={handleEditSession}
-        onCopySession={(session) => copySession(session.id)}
-        onStarSession={(id) => toggleSessionStar(id)}
-        onPinSession={(id) => toggleSessionPin(id)}
-      />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SessionList
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          deletingSessionIds={new Set<string>()}
+          onSessionClick={handleSelectSession}
+          onDeleteSession={(id) => { if (window.confirm('确定要删除此会话吗？')) deleteSession(id).catch(() => {}) }}
+          onEditSession={handleEditSession}
+          onCopySession={(session) => copySession(session.id)}
+          onStarSession={(id) => toggleSessionStar(id)}
+          onPinSession={(id) => toggleSessionPin(id)}
+        />
+      </div>
 
       <SessionEditModal
         isOpen={!!editingSessionId}

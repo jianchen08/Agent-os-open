@@ -186,6 +186,43 @@ class TestExecutionRecordStorage:
         deleted = storage.delete_by_session("nonexistent")
         assert deleted == 0
 
+    def test_delete_by_session_lazy_loaded_disk_files(self, tmp_path: Path):
+        """回归测试：懒加载/服务重启场景下 delete_by_session 必须删除磁盘文件。
+
+        BUG-FIX-fix_20260627_delete_lazy_loaded:
+        问题根因: delete_by_session 缺少 _ensure_loaded 调用。ExecutionRecordStorage
+                  采用懒加载（构造函数不调 _load_all），self._records 仅在访问时
+                  由 _ensure_loaded 填充。服务重启后或会话消息从未被读取时，
+                  self._records 对该 pipeline 为空，导致文件清理守卫
+                  `if to_delete` 失败，磁盘 YAML、子目录、_pipeline_root_map
+                  全部残留——表现为"前端删除会话后后端文件从未删除"。
+        复现方式: 写入磁盘文件后，新建一个指向同目录的 storage 实例模拟服务
+                  重启（此时新实例 self._records 为空），调用 delete_by_session。
+        修复方案: 在 delete_by_session 顶部调用 _ensure_loaded(session_id)，
+                  与 list_by_session/count_by_session 等所有兄弟访问器保持一致。
+        """
+        data_dir = tmp_path / "pipelines"
+        storage = ExecutionRecordStorage(data_dir=str(data_dir))
+        for i in range(5):
+            storage.save(ExecutionRecordData(
+                pipeline_run_id="run-001",
+                sequence=i,
+                iteration=i,
+            ))
+        yaml_file = data_dir / "run-001.yaml"
+        assert yaml_file.exists()
+
+        # 模拟服务重启：新实例的 self._records 为空（懒加载未触发）
+        restarted = ExecutionRecordStorage(data_dir=str(data_dir))
+        assert len(restarted._records) == 0  # noqa: SLF001 — 验证懒加载前提成立
+
+        deleted = restarted.delete_by_session("run-001")
+
+        # 返回值反映磁盘真实记录数（而非空的内存缓存）
+        assert deleted == 5
+        # 磁盘文件必须被实际删除
+        assert not yaml_file.exists()
+
     def test_yaml_persistence(self, tmp_path: Path):
         data_dir = tmp_path / "pipelines"
         storage = ExecutionRecordStorage(data_dir=str(data_dir))

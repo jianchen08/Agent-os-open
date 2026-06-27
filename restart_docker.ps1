@@ -20,14 +20,18 @@ $doRestart = $false
 if ($Yes) {
     $doRestart = $true
 } else {
+    # Use Read-Host instead of $host.UI.PromptForChoice: PromptForChoice throws a
+    # ChoiceDescription->SwitchParameter binding error when this script is invoked
+    # non-interactively via "powershell -File" from start_web_cn.bat, which made
+    # the auto-recovery path unreachable. Read-Host reads from the parent console
+    # (cmd window) reliably and needs no host-specific parameter binding.
     try {
         if ($null -ne $host.UI -and $null -ne $host.UI.RawUI) {
-            $title = 'Docker daemon hung'
-            $msg  = "Docker daemon is not responding (hung).`n`nRestarting Docker will STOP all currently running containers.`n`nRestart Docker now?"
-            $yes  = New-Object System.Management.Automation.Host.ChoiceDescription '&Yes', 'Restart Docker now'
-            $no   = New-Object System.Management.Automation.Host.ChoiceDescription '&No',  'Do not restart; exit'
-            $choice = $host.UI.PromptForChoice($title, $msg, @($yes, $no), 0)
-            if ($choice -eq 0) { $doRestart = $true }
+            Write-Host ''
+            Write-Host 'Docker daemon is not responding (hung).'
+            Write-Host 'Restarting Docker will STOP all currently running containers.'
+            $ans = Read-Host 'Restart Docker now? [y/N]'
+            if ($ans -and $ans.Trim() -match '^[yY]') { $doRestart = $true }
         }
     } catch {
         Write-Host "[restart_docker] no interactive host available: $($_.Exception.Message)"

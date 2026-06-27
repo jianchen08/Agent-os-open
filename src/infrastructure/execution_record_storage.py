@@ -489,6 +489,11 @@ class ExecutionRecordStorage:
         )
 
     def delete_by_session(self, session_id: str) -> int:
+        # 懒加载：先从磁盘读入该 pipeline 的全部记录，否则服务重启后（或会话
+        # 消息从未被访问过时）self._records 为空，下面的文件清理守卫
+        # `if to_delete` 会失败，导致磁盘 YAML/子目录/_pipeline_root_map 残留。
+        # 与 list_by_session/count_by_session 等所有兄弟访问器保持一致。
+        self._ensure_loaded(session_id)
         to_delete = [
             rid for rid, r in self._records.items()
             if r.pipeline_run_id == session_id

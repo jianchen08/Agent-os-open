@@ -316,7 +316,13 @@ def build_router(model_loader: Any) -> litellm.Router:
 
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
-    call_timeout = defaults.get("call_timeout", 600)
+    # BUG-FIX-fix_20260627_timeout_needs_float:
+    # yaml defaults.call_timeout 是 int（如 120），经 Router 的 timeout/
+    # stream_timeout 传给 zai provider 时，zai 严格 isinstance(timeout, float)
+    # 校验失败 → BadRequestError "Timeout needs to be a float or httpx.Timeout"。
+    # 此处强制 float，让所有经 Router 的调用（router.acompletion / fallback）
+    # 都传 float 给上游。
+    call_timeout = float(defaults.get("call_timeout", 600))
 
     # 从 providers.type 字段构建 provider → litellm 前缀映射
     _provider_type_map.clear()

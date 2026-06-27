@@ -141,6 +141,11 @@ class ParamInjectPlugin(IInputPlugin):
                         self.name, tool_name,
                         len(raw_args), raw_args[:200],
                     )
+                    # 诊断：打印 repr 和 hex，精确定位转义层级
+                    logger.warning(
+                        "[%s] arguments repr前100: %s",
+                        self.name, repr(raw_args[:100]),
+                    )
                     raw_args = {}
             if not isinstance(raw_args, dict):
                 raw_args = {}

@@ -40,6 +40,8 @@ class BridgeEventsMixin:
             await self._send_event(self._make_event("thinking_end", {
                 "duration_ms": duration_ms,
             }))
+            # 思考块结束：重置块追踪，使后续（正文或新思考）开新 sequence 块。
+            self._reset_current_block()
 
     async def _handle_chunk(self, chunk: dict) -> None:  # noqa: PLR0912
         """处理单个 chunk 事件，转换为前端协议格式并发送。
@@ -55,20 +57,23 @@ class BridgeEventsMixin:
 
         if chunk_type == "text" and content:
             # 推送 stream_chunk（不累加，完整内容由 emit_finish 从 state 推送）
+            # sequence 按 part 块分配：同一段正文的连续 chunk 共享一个 sequence，
+            # 避免长输出把计数器推高导致与后续/其它 part 的 sequence 交错（见 _seq_for_block）。
             await self._send_event(self._make_event("stream_chunk", {
                 "content": content,
-                "sequence": self._next_part_seq(),
+                "sequence": self._seq_for_block("text"),
             }))
 
         elif chunk_type == "thinking" and content:
+            # 同一段思考的连续 chunk 共享一个 sequence（块级）。
             if not self._thinking_active:
                 self._thinking_active = True
                 await self._send_event(self._make_event("thinking_start", {
-                    "sequence": self._next_part_seq(),
+                    "sequence": self._seq_for_block("thinking"),
                 }))
             await self._send_event(self._make_event("thinking_chunk", {
                 "content": content,
-                "sequence": self._next_part_seq(),
+                "sequence": self._current_block_seq,
                 "step_type": chunk.get("step_type", ""),
             }))
 
@@ -96,6 +101,7 @@ class BridgeEventsMixin:
                 return
             self._sent_tool_starts.add(_call_id)
             _seq = self._next_part_seq()
+            self._reset_current_block()
             logger.debug(
                 "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
                 _tool_name, _call_id, _seq, self.pipeline_id[:12],
@@ -116,6 +122,7 @@ class BridgeEventsMixin:
                 "multimedia": chunk.get("multimedia", []),
                 "sequence": self._next_part_seq(),
             }))
+            self._reset_current_block()
 
         elif chunk_type == "iteration":
             await self._close_thinking_if_active(None)
@@ -132,6 +139,7 @@ class BridgeEventsMixin:
                 "notification_id": chunk.get("notification_id", ""),
                 "sequence": chunk.get("sequence", 0),
             }))
+            self._reset_current_block()
 
     async def _handle_tool_result(self, chunk: dict) -> None:
         """处理 tool_result chunk，自动补发缺失的 tool_start。"""
@@ -148,6 +156,7 @@ class BridgeEventsMixin:
                 "call_id": chunk.get("call_id"),
                 "sequence": self._next_part_seq(),
             }))
+            self._reset_current_block()
         await self._send_event(self._make_event("tool_result", {
             "tool_name": chunk.get("tool_name", "unknown"),
             "success": chunk.get("success", True),
