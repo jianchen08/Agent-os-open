@@ -1069,25 +1069,18 @@ class TaskExecutorMixin:
 
     ) -> Any | None:
 
-        """加载 AgentConfig，失败时标记任务失败并返回 None。"""
+        """加载 AgentConfig，失败时标记任务失败并返回 None。
+
+        target_id 为空时（主管道任务无 target_id）回退默认 agent（lingxi），
+        而非直接失败——主管道任务 resume 后也需要能继续执行。
+        """
 
         if not target_id:
 
-            logger.error("TaskWorker: task %s has no target_id, failing", task_id)
+            # 主管道任务无 target_id，回退默认 agent（与会话模块创建会话时一致）
+            target_id = "lingxi"
 
-            if task_service:
-
-                await task_service.fail_task(
-
-                    task_id,
-
-                    "任务缺少 target_id（目标 Agent），无法执行。"
-
-                    "请检查 task_submit 是否正确指定了 target_id。",
-
-                )
-
-            return None
+            logger.info("TaskWorker: task %s 无 target_id，回退默认 agent=%s", task_id, target_id)
 
 
 

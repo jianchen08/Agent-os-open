@@ -124,8 +124,12 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         try:
             from channels.api.routes_threads import restore_session_pipelines  # noqa: PLC0415
             _session_count = restore_session_pipelines()
+            if _session_count:
+                logger.info("[Lifespan] 会话管道恢复: 已注册 %d 个主管道", _session_count)
+            else:
+                logger.warning("[Lifespan] 会话管道恢复: 0 个（检查 api_store 数据或 restore_session_pipelines）")
         except Exception as exc:
-            logger.debug("restore_session_pipelines skipped: %s", exc)
+            logger.warning("[Lifespan] restore_session_pipelines 失败: %s", exc, exc_info=True)
 
         try:
             from triggers.manager import get_trigger_manager  # noqa: PLC0415
