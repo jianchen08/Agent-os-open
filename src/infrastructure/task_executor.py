@@ -726,53 +726,38 @@ class TaskExecutorMixin:
 
                 )
 
-                # engine.run() 作为协程在主事件循环中运行
+                # I4：外部不直接调 engine.run()，统一走 send_pipeline_message。
+                # send 内部启动引擎（_start_idle_engine → ensure_future(engine.run)），
+                # 并把 engine_task 写到 entry。这里从 entry 拿 engine_task 绑 done_callback。
+                from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
+                from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
 
-                engine_future = asyncio.ensure_future(engine.run(
-
-                    user_input="",
-
+                _history_msg = PipelineMessage(
+                    type=MessageType.CHAT,
+                    content="",
+                    pipeline_id=pipeline_id,
+                    thread_id=_ws_thread_id or "",
+                )
+                _history_result = await send_pipeline_message(
+                    _history_msg,
+                    output_sink=_sink,
                     agent_config=agent_config,
-
                     conversation_history=conversation_history,
-
                     task_id=task_id,
-
                     workspace=workspace,
+                )
 
-                    streaming=True,
+                if not _history_result.success:
+                    logger.error("TaskWorker: 历史恢复消息注入失败 task=%s error=%s", task_id, _history_result.error)
+                    return
 
-                    on_chunk=None,
-
-                    user_id=_ctx_user_id,
-
-                    session_id=_ctx_session_id,
-
-                ))
-
-                engine_future.add_done_callback(_on_engine_done)
-
-
-
-                # Phase 1: drain_loop 已删除，engine 主动 emit 推送事件。
-
-                # _start_bg_drain 为兼容空实现，保留调用仅为不破坏导入链。
-
-                from pipeline.message_bus import _start_bg_drain  # noqa: PLC0415
-
-                _start_bg_drain(pipeline_id, _sink, engine, engine_task=engine_future)
-
-                # engine_future (concurrent.futures.Future) 有 .done() 方法，
-
-                # drain_loop 通过它判断引擎是否结束，避免死循环空转
-
+                # send 已启动引擎，从 entry 拿 engine_task 绑 done_callback（任务编排需要）
                 from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
                 _entry = get_engine_registry().get(pipeline_id)
+                engine_future = _entry.engine_task if _entry else None
 
-                if _entry:
-
-                    _entry.engine_task = engine_future
+                if engine_future is not None:
+                    engine_future.add_done_callback(_on_engine_done)
 
             else:
 
