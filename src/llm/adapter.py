@@ -128,6 +128,9 @@ class LLMResponse:
         thinking_truncated: 思考内容是否因过长被截断
         stream_truncated: 流式响应是否被 API 侧超时异常截断
             （如推理模型 thinking 正常但正文极少 token 后 SSE 超时）
+        finish_reason: LLM 返回的结束原因（stop/length/tool_calls…）。
+            ``length`` 表示因命中 max_tokens 被截断，此时 tool_call 的
+            arguments JSON 可能不完整，下游需据此识别并处理截断。
     """
 
     text: str | None = None
@@ -136,6 +139,7 @@ class LLMResponse:
     usage: dict[str, Any] | None = None
     stream_repetition: bool = False
     thinking_truncated: bool = False
+    finish_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +379,7 @@ class _BaseLiteLLMAdapter:
             tool_calls=tool_calls,
             thinking_text=thinking_text,
             usage=usage,
+            finish_reason=getattr(choice, "finish_reason", None),
         )
 
     async def _call_streaming(  # noqa: PLR0915
@@ -880,6 +885,7 @@ class _BaseLiteLLMAdapter:
             usage=stream_usage,
             stream_repetition=stream_repetition,
             thinking_truncated=thinking_truncated,
+            finish_reason=_finish_reason,
         )
 
     async def _stream_heartbeat(

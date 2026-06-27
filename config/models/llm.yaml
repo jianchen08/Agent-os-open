@@ -12,6 +12,8 @@ models:
       thinking:
         type: enabled
       reasoning_effort: max
+      extra_body:
+        tool_stream: true
     multimodal:
       supports_image: true
       supported_image_types:
@@ -138,6 +140,8 @@ models:
       thinking:
         type: enabled
       reasoning_effort: max
+      extra_body:
+        tool_stream: true
     multimodal:
       supports_image: true
       supported_image_types:
@@ -159,6 +163,8 @@ models:
       thinking:
         type: enabled
       reasoning_effort: max
+      extra_body:
+        tool_stream: true
     multimodal:
       supports_image: true
       supported_image_types:
@@ -175,8 +181,8 @@ defaults:
   stream_idle_timeout: 600
   compression: minimax-m3-guangfang
   tiers:
-    large: glm-5.2
-    medium: glm-5.2
+    large: glm-5.2-yichengc
+    medium: glm-5.2-yichengc
     small: glm-5.2-yichengc
     fallback_chain: {}
 providers:
