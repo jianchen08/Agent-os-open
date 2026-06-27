@@ -105,7 +105,7 @@ def _record_tc(trace: dict[str, Any], chunk_no: int, idx: int,
 # A. 直连 httpx SSE
 # ---------------------------------------------------------------------------
 
-async def run_direct() -> dict[str, Any]:
+async def run_direct(*, tool_stream: bool = False) -> dict[str, Any]:
     import httpx
 
     url = API_BASE + "chat/completions"
@@ -118,11 +118,14 @@ async def run_direct() -> dict[str, Any]:
         "stream_options": {"include_usage": True},
         "max_tokens": MAX_TOKENS,
     }
+    if tool_stream:
+        body["tool_stream"] = True
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
     trace = new_trace()
+    trace["tool_stream"] = tool_stream
     t0 = time.monotonic()
     timeout = httpx.Timeout(300.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -294,19 +297,19 @@ async def main() -> None:
     for run in range(1, args.runs + 1):
         print(f"\n---------- 第 {run}/{args.runs} 轮 ----------")
 
-        print("\n[A] 直连 httpx SSE（上游真实分块）...")
+        print("\n[A-OFF] 直连 httpx SSE（无 tool_stream）...")
         try:
-            tr_a = await run_direct()
-            print(summarize("A 直连 httpx", tr_a))
+            tr_a = await run_direct(tool_stream=False)
+            print(summarize("A 直连 httpx (tool_stream=off)", tr_a))
         except Exception as exc:  # noqa: BLE001
-            print(f"  [A] 失败: {type(exc).__name__}: {exc}")
+            print(f"  [A-OFF] 失败: {type(exc).__name__}: {exc}")
 
-        print("\n[B] 项目客户端 litellm zai/glm-5.2（litellm 层）...")
+        print("\n[A-ON] 直连 httpx SSE（tool_stream=true）...")
         try:
-            tr_b = await run_via_adapter()
-            print(summarize("B 项目客户端(litellm)", tr_b))
+            tr_a2 = await run_direct(tool_stream=True)
+            print(summarize("A 直连 httpx (tool_stream=on)", tr_a2))
         except Exception as exc:  # noqa: BLE001
-            print(f"  [B] 失败: {type(exc).__name__}: {exc}")
+            print(f"  [A-ON] 失败: {type(exc).__name__}: {exc}")
 
     print("\n" + "=" * 70)
     print("判定要点：arguments 是分 1 段（整块）还是多段（分 chunk）。")

@@ -1207,4 +1207,14 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         # 禁用 litellm 内部重试：由 KeyPoolAdapter 自己用不同 key 重试
         input_kwargs["num_retries"] = 0
 
+        # TEMP-DEBUG tool_stream 透传诊断：真实 KeyPool 路径发请求前的最终 kwargs
+        _ik = input_kwargs
+        logger.warning(
+            "[TEMP-DEBUG][KeyPoolAdapter] 发请求前 model=%s api_base=%s "
+            "stream=%s extra_body=%s tool_stream=%s drop_params=%s tools=%d",
+            _ik.get("model"), _ik.get("api_base"), _ik.get("stream"),
+            _ik.get("extra_body"), _ik.get("tool_stream"),
+            _ik.get("drop_params"), len(_ik.get("tools") or []),
+        )
+
         return await litellm.acompletion(**input_kwargs)
