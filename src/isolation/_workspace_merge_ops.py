@@ -443,10 +443,15 @@ class _MergeOpsMixin:
 
 
     def _cleanup_unstaged_changes(self, project_root: str) -> None:
-        """清理 project_root 中的 unstaged 变更。
+        """检测合并后 project_root 的 unstaged 变更，只记录警告，绝不自动丢弃。
 
-        合并后可能残留 unstaged 的修改（如 merge 产生的备份文件），
-        通过 git checkout 恢复到干净状态。
+        BUG-FIX-fix_20260627_unstaged_data_loss:
+        原实现用 `git checkout -- .` 无差别丢弃所有 unstaged 修改，
+        会抹掉两类不该丢的改动：① task 运行期间用户/外部对 project_root
+        已跟踪文件的修改；② auto-save 因 git add 失败而残留的脏改动
+        （这些改动从未进入 task 分支，丢弃即永久丢失）。
+        合并成功后工作区本应干净（git merge 同步 index 与工作区）；
+        若仍有 unstaged，说明是被外部改动，必须保留由人工确认，不得自动覆盖。
         """
         proj_path = Path(project_root)
         if not proj_path.exists():
@@ -463,10 +468,12 @@ class _MergeOpsMixin:
         if not unstaged_lines:
             return
 
-        logger.debug(
-            "[WorkspaceLifecycle] 清理 %d 个 unstaged 变更: project_root=%s",
+        # 安全契约：此处只告警不修改工作区。曾用 `git checkout -- .` 静默丢弃，
+        # 导致用户改动丢失。见上方 BUG-FIX 注释。
+        logger.warning(
+            "[WorkspaceLifecycle] 合并后检测到 %d 个 unstaged 变更，已保留未丢弃（避免数据丢失）: "
+            "project_root=%s, 文件=%s",
             len(unstaged_lines), project_root,
+            [line.strip() for line in unstaged_lines[:10]],
         )
-        # 恢复 unstaged 的修改到 HEAD 状态
-        self._run_git("checkout", "--", ".", cwd=proj_path)
 

@@ -240,6 +240,11 @@ class _MockMergeOps:
             return self._git_responses[key]
         return (0, "", "")
 
+    def _git_add_commit_if_dirty(self, cwd, message):
+        """Mock：记录 auto-save 提交调用。真实实现的成败由调用方用
+        _git_responses['status --porcelain -uno'] 模拟残留脏改动体现。"""
+        self._git_calls.append({"args": ("_git_add_commit_if_dirty", message), "cwd": str(cwd)})
+
     def _get_workspace_root(self):
         return Path(self._config.get("workspace", {}).get("root", "/tmp/test_ws"))
 
@@ -257,12 +262,22 @@ class _MockMergeOps:
         _method = getattr(_MergeOpsMixin, _method_name)
         locals()[_method_name] = _method
 
+    # 从 _GitOpsMixin 导入 auto-save 安全校验（BUG-FIX-fix_20260627_autosave_silent_loss）
+    from isolation._workspace_git_ops import _GitOpsMixin
+    locals()["_autosave_before_worktree"] = _GitOpsMixin._autosave_before_worktree
+
 
 class TestCleanupUnstagedChanges:
-    """P1: 合并后 unstaged 修改清理。"""
+    """合并后 unstaged 修改处理。
 
-    def test_cleanup_unstaged_changes_calls_git_checkout(self, tmp_path):
-        """P1: 有 unstaged 修改时调用 git checkout 恢复。"""
+    安全契约（BUG-FIX-fix_20260627_unstaged_data_loss）：
+    合并后检测到 unstaged 变更时只记录警告，绝不调用 `git checkout -- .`
+    丢弃——那些改动可能来自 task 运行期间用户/外部对 project_root 的修改，
+    或 auto-save 提交失败残留的脏改动，丢弃即永久丢失。
+    """
+
+    def test_cleanup_unstaged_changes_does_not_discard(self, tmp_path):
+        """有 unstaged 修改时只告警，不调用 git checkout 丢弃。"""
         ops = _MockMergeOps()
         ops._git_responses["status --porcelain"] = (
             0, " M src/main.py\n D src/old.py\n", ""
@@ -270,14 +285,17 @@ class TestCleanupUnstagedChanges:
 
         ops._cleanup_unstaged_changes(str(tmp_path))
 
+        # 核心安全断言：任何情况下都不得调用 checkout 丢弃工作区改动
         checkout_calls = [
             c for c in ops._git_calls
             if c["args"] == ("checkout", "--", ".")
         ]
-        assert len(checkout_calls) == 1
+        assert len(checkout_calls) == 0
+        # 只做了一次 status 检测，未触发任何写操作
+        assert all(c["args"][0] != "checkout" for c in ops._git_calls)
 
     def test_cleanup_no_unstaged_skips_checkout(self, tmp_path):
-        """P1: 无 unstaged 修改时不调用 git checkout。"""
+        """无 unstaged 修改时不调用 git checkout。"""
         ops = _MockMergeOps()
         ops._git_responses["status --porcelain"] = (0, "", "")
 
@@ -290,7 +308,7 @@ class TestCleanupUnstagedChanges:
         assert len(checkout_calls) == 0
 
     def test_cleanup_only_staged_skips_checkout(self, tmp_path):
-        """P1: 只有 staged 修改（无 unstaged）时不调用 git checkout。"""
+        """只有 staged 修改（无 unstaged）时不调用 git checkout。"""
         ops = _MockMergeOps()
         ops._git_responses["status --porcelain"] = (
             0, "M  src/main.py\nA  src/new.py\n", ""
@@ -305,13 +323,13 @@ class TestCleanupUnstagedChanges:
         assert len(checkout_calls) == 0
 
     def test_cleanup_nonexistent_path_skips(self):
-        """P1: project_root 不存在时直接跳过。"""
+        """project_root 不存在时直接跳过。"""
         ops = _MockMergeOps()
         ops._cleanup_unstaged_changes("/nonexistent/path/xyz")
         assert len(ops._git_calls) == 0
 
     def test_cleanup_git_status_fails_skips(self, tmp_path):
-        """P1: git status 命令失败时跳过清理。"""
+        """git status 命令失败时跳过清理。"""
         ops = _MockMergeOps()
         ops._git_responses["status --porcelain"] = (-1, "", "error")
 
@@ -322,6 +340,61 @@ class TestCleanupUnstagedChanges:
             if c["args"] == ("checkout", "--", ".")
         ]
         assert len(checkout_calls) == 0
+
+
+class TestAutosaveBeforeWorktree:
+    """auto-save 安全校验（BUG-FIX-fix_20260627_autosave_silent_loss）。
+
+    安全契约：worktree 创建前 auto-save 若未能把脏改动提交干净，
+    必须中断 worktree 创建，绝不让未提交的改动随旧 HEAD 进入 task 分支
+    而在合并后丢失。宁可任务失败，也不丢数据。
+    """
+
+    def test_abort_when_dirty_after_autosave(self, tmp_path):
+        """auto-save 后仍残留已跟踪脏改动 → 抛 RuntimeError 中断。"""
+        ops = _MockMergeOps()
+        # 模拟 _git_add_commit_if_dirty 提交失败：已跟踪文件仍 dirty
+        ops._git_responses["status --porcelain -uno"] = (
+            0, " M src/main.py\n", ""
+        )
+
+        with pytest.raises(RuntimeError, match="auto-save 失败"):
+            ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")
+
+    def test_proceed_when_clean_after_autosave(self, tmp_path):
+        """auto-save 后工作区干净 → 正常放行，不抛异常。"""
+        ops = _MockMergeOps()
+        ops._git_responses["status --porcelain -uno"] = (0, "", "")
+
+        ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")  # 不抛
+
+        # 确实触发了 auto-save 提交
+        autosave_calls = [
+            c for c in ops._git_calls
+            if c["args"][0] == "_git_add_commit_if_dirty"
+        ]
+        assert len(autosave_calls) == 1
+
+    def test_proceed_when_status_check_fails(self, tmp_path):
+        """状态校验命令本身失败 → 放行不阻塞（避免 git 偶发故障放大成任务失败）。"""
+        ops = _MockMergeOps()
+        ops._git_responses["status --porcelain -uno"] = (-1, "", "error")
+
+        ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")  # 不抛
+
+    def test_abort_message_identifies_task(self, tmp_path):
+        """中断信息包含 task_id 和路径，便于定位。"""
+        ops = _MockMergeOps()
+        ops._git_responses["status --porcelain -uno"] = (
+            0, " M src/critical.py\n", ""
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            ops._autosave_before_worktree(tmp_path, "msg", "task-ZZZ")
+
+        msg = str(exc_info.value)
+        assert "task-ZZZ" in msg
+        assert "src/critical.py" in msg
 
 
 class TestWorktreeDestroyOnlyAfterMerge:

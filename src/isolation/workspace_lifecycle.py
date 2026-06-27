@@ -311,8 +311,9 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     raise RuntimeError(
                         f"容器空间初始化失败（已有 .git 但无提交记录）: {container_path}")
             elif self._guard_root_branch(container_path):
-                self._git_add_commit_if_dirty(container_path,
-                                              f"chore: auto-save before subtask {task_id}")
+                self._autosave_before_worktree(
+                    container_path,
+                    f"chore: auto-save before subtask {task_id}", task_id)
             else:
                 logger.warning("[WorkspaceLifecycle] 跳过容器空间 auto-save: 分支守卫检测到变更")
 
@@ -418,9 +419,10 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 # 此 auto-save 提交的是项目根目录上残留的脏改动，
                 # 来源可能是用户、其他 host 任务、上一次中断的执行——不是当前任务。
                 # 用中性 message，避免给本任务"贴上"不属于它的改动。
-                self._git_add_commit_if_dirty(
+                self._autosave_before_worktree(
                     root_path,
-                    "chore: auto-save dirty working tree before worktree creation")
+                    "chore: auto-save dirty working tree before worktree creation",
+                    task_id)
             else:
                 logger.warning(
                     "[WorkspaceLifecycle] 跳过项目根目录 auto-save: "

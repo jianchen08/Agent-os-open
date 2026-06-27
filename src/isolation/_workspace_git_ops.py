@@ -330,6 +330,35 @@ class _GitOpsMixin:
         _, h, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
         return h.strip() if h else None
 
+    def _autosave_before_worktree(self, cwd: Path, message: str, task_id: str) -> None:
+        """worktree 创建前的 auto-save，提交失败时中断以保护数据。
+
+        BUG-FIX-fix_20260627_autosave_silent_loss:
+        `_git_add_commit_if_dirty` 在 git add/commit 失败时返回 None，
+        与"无变更"无法区分；auto-save 调用方曾忽略返回值静默继续建 worktree。
+        一旦脏改动未能提交，worktree 会基于旧 HEAD 创建（不含这些改动），
+        合并回 project_root 后这些改动就永久丢失。
+        此处 auto-save 后强制校验工作区已干净：残留已跟踪脏改动即视为致命错误，
+        中断 worktree 创建——宁可任务失败，也不丢数据。
+        """
+        self._git_add_commit_if_dirty(cwd, message)
+        # 只校验已跟踪文件（-uno 忽略 untracked）：已跟踪文件修改丢失才是
+        # 不可逆真损失；untracked 独立于 git，不受 worktree/merge 流程影响，
+        # 且运行时生成的 .gitignore 文件（日志等）会让全量 status 误报。
+        rc, status, _ = self._run_git("status", "--porcelain", "-uno", cwd=cwd)
+        if rc == 0 and status.strip():
+            dirty = [line.strip() for line in status.splitlines() if line.strip()]
+            raise RuntimeError(
+                f"auto-save 失败：工作区仍存在未提交的已跟踪变更，"
+                f"为避免数据丢失中止 worktree 创建。task_id={task_id}, "
+                f"path={cwd}, 文件={dirty[:10]}")
+        if rc != 0:
+            # 校验命令本身失败不应阻塞任务启动（避免 git 偶发故障放大成任务失败），
+            # 但必须留下告警便于排查。
+            logger.warning(
+                "[WorkspaceLifecycle] auto-save 后状态校验命令失败，无法确认工作区干净（放行）: "
+                "task_id=%s, path=%s", task_id, cwd)
+
     def _git_add_tracked_and_commit(self, cwd: Path, message: str) -> str | None:
         """只提交已跟踪文件的修改，不添加未跟踪文件。返回 commit hash 或 None。"""
         self._remove_index_lock(cwd)
