@@ -92,6 +92,65 @@ class TaskExecutorMixin:
 
 
 
+    async def restore_running_pipelines(self) -> int:
+        """持有者职责：启动时重新注册 running/pending 任务对应的管道。
+
+        替代原 pipeline_reviver.restore_pipelines_on_startup。任务系统是任务管道的
+        持有者，重启后由持有者扫描自身持久化存储（task_service）重建注册表，
+        而非由路由模块（reviver）越权恢复。
+
+        Returns:
+            恢复（注册）的管道数量。
+        """
+        task_service = getattr(self, "_task_service", None)
+        if not task_service:
+            logger.info("[TaskExecutor] restore_running_pipelines: task_service 不可用，跳过")
+            return 0
+
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        registry = get_engine_registry()
+        provider = get_service_provider()
+        input_route_table = provider.get("input_route_table")
+        output_route_table = provider.get("output_route_table")
+        plugin_registry = provider.get("plugin_registry")
+        services = provider.get_all_services()
+
+        restored = 0
+        for status in ("running", "pending"):
+            try:
+                tasks = task_service.list_tasks(status=status) if hasattr(task_service, "list_tasks") else []
+            except Exception as exc:
+                logger.debug("restore_running_pipelines list_tasks 失败 (status=%s): %s", status, exc)
+                continue
+
+            for task in tasks:
+                pipeline_id = task.get("pipeline_id") if isinstance(task, dict) else getattr(task, "pipeline_id", None)
+                if not pipeline_id or registry.get(pipeline_id):
+                    continue
+                tags = {
+                    "mode": "interactive",
+                    "task_id": task.get("task_id", "") if isinstance(task, dict) else getattr(task, "task_id", ""),
+                    "source": "startup_restore",
+                }
+                entry = registry.register_pipeline(
+                    pipeline_id=pipeline_id,
+                    tags=tags,
+                    input_route_table=input_route_table,
+                    output_route_table=output_route_table,
+                    plugin_registry=plugin_registry,
+                    services=services,
+                )
+                if entry:
+                    restored += 1
+                    logger.info("[TaskExecutor] 启动恢复: pipeline=%s status=%s", pipeline_id[:12], status)
+
+        if restored:
+            logger.info("[TaskExecutor] restore_running_pipelines 完成: 恢复 %d 个管道", restored)
+        return restored
+
+
+
     async def _execute_background_task(self, task_data: dict[str, Any], ctx: TaskExecutionContext) -> None:  # noqa: PLR0911,PLR0912,PLR0915
 
         """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。

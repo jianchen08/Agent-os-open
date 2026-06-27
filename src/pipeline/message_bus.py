@@ -7,10 +7,14 @@ agent 由数据源决定，不在此解析。
 公共接口:
     send_pipeline_message: 统一入口，接受 PipelineMessage 对象
     InjectResult: 注入结果数据类
-    restore_pipelines_on_startup: 启动恢复
+    stop: 持有者级别的管道终结（原子级联）
 
-实现已拆分到子模块：
-- pipeline_reviver.py: 管道复活与启动恢复
+设计原则（I1-I6）：
+- 注册表是引擎生命唯一权威；send 遇未注册直接拒绝（不建引擎）
+- CONTROL 信号走 state（pending_signals），由插件自治处理
+- 引擎死亡是注册表内部自治（lazy 重建）；启动恢复由持有者（TaskWorker）负责
+
+实现拆分：
 - drain_manager.py: Drain 生命周期管理（Sink 创建、drain 启停）
 """
 from __future__ import annotations
@@ -26,6 +30,7 @@ if TYPE_CHECKING:
     from pipeline.sink import IOutputSink
 
 from pipeline.message_types import (
+    MessageType,
     PipelineMessage,
     PipelineRequest,
 )
@@ -44,30 +49,18 @@ class InjectResult:
 
 
 def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
-    """查找目标管道引擎实例。返回 (engine, state) 元组。"""
+    """查找目标管道引擎实例。返回 (engine, state) 元组。
+
+    I3 改造：僵尸引擎检测已删除。引擎死亡是注册表内部自治事务，
+    由 entry.ensure_engine 在内部 lazy 重建保证可用性。
+    本函数只做"查注册表 + 报状态"，不穿透引擎私有成员。
+    """
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return None, ""
     engine = entry.engine
 
-    # BUG-FIX-fix_20260625_zombie_suspended_engine:
-    # cancelled-while-suspend（用户点"停止"时引擎挂在 wait/子任务上是最常见路径，
-    # 也可来自 task_executor/watchdog 等任何 cancel）会留下 is_suspended=True 或
-    # is_running=True 但 engine_task 已终止的"僵尸"条目。此时 inject_message 的 wake
-    # 无人 await，消息永久堆积，前端表现为"发消息半天没反应"。
-    # 检测到死任务 → 重置为 idle，让下面的判定走 _start_idle_engine 重启，
-    # 重启后首轮 consume_pending_notifications 会消费堆积的 _inject_queue。
-    if _is_engine_task_dead(entry) and (engine.is_suspended or engine.is_running):
-        logger.warning(
-            "[MessageBus] 检测到僵尸引擎（%s 但 engine_task 已终止），"
-            "重置为 idle 重启: pipeline=%s queue=%d",
-            "suspended" if engine.is_suspended else "running",
-            pipeline_id[:12], engine.inject_queue_size,
-        )
-        _reset_engine_for_restart(engine)
-
-    # BUG-FIX-fix_20260524_msg_render: 增加 running/suspended 状态检查
     if engine.is_suspended:
         return engine, "suspended"
     if engine.is_running:
@@ -75,29 +68,6 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     if engine.is_idle:
         return engine, "idle"
     return None, ""
-
-
-def _is_engine_task_dead(entry: Any) -> bool:
-    """引擎主循环任务是否已终止（None 或 done）。
-
-    engine_task 为 asyncio.Task（REFACTOR-20260614 起 engine 在主循环运行），
-    done() 为 True 表示 run() 已返回（正常结束 / 异常 / 取消）。
-    """
-    _task = getattr(entry, "engine_task", None)
-    return _task is None or _task.done()
-
-
-def _reset_engine_for_restart(engine: Any) -> None:
-    """将僵尸引擎重置为可被 run() 重新启动的 idle 状态。
-
-    清理挂起快照与唤醒事件、复位运行/启动标志，使 is_idle 返回 True，
-    从而让 _find_engine 返回 idle → _inject_to_engine 走 _start_idle_engine。
-    """
-    engine._suspended_state = None
-    engine._wake_event = None
-    engine._engine_loop = None
-    engine._running = False
-    engine._run_started = False
 
 
 async def _auto_complete_interaction(pipeline_id: str) -> None:
@@ -174,6 +144,11 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
     if content is not None and len(content) > 0 and not content.strip():
         return InjectResult(success=False, error="message 不能仅包含空白字符", method="failed")
 
+    # I6：CONTROL 信号分流。停止生成等控制信号走信号投递，不进 inject 队列。
+    # 信号内容承载在 metadata（开放式 tags，插件自定义 signal_type 等）。
+    if msg.type == MessageType.CONTROL:
+        return await _deliver_control_signal(pipeline_id, msg)
+
     engine, state = _find_engine(pipeline_id)
 
     # BUG-FIX-fix_20260531_sink_dead_thread_id_lost: 主动更新 registry 中缺失的 thread_id
@@ -195,16 +170,50 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
             attachments=attachments,
         )
 
-    logger.warning("[MessageBus] 引擎未找到，尝试 revive | pipeline=%s", pipeline_id[:12])
-    return await _revive_pipeline_message(
-        pipeline_id, content,
-        agent_config=request.agent_config, workspace=request.workspace,
-        task_id=request.task_id, conversation_history=request.conversation_history,
-        streaming=request.streaming, on_chunk=None,
-        output_sink=request.output_sink, thread_id=thread_id,
-        client_message_id=client_message_id,
-        attachments=attachments,
+    # I4：未注册直接拒绝，不建引擎。这是持有者的责任——持有者必须保证
+    # 发消息前 entry 已在注册表（首次 register，重启后重新 register）。
+    # 原来的 revive 自动重建会掩盖"持有者未正确恢复注册表"的 bug，已删除。
+    logger.warning(
+        "[MessageBus] 管道未注册，拒绝消息（持有者未 register）: pipeline=%s",
+        pipeline_id[:12],
     )
+    return InjectResult(
+        success=False,
+        error=f"管道 {pipeline_id[:12]} 未注册，无法发送消息（请联系持有者先 register）",
+        method="rejected",
+        pipeline_id=pipeline_id,
+    )
+
+
+async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> InjectResult:
+    """I6：投递控制信号到引擎（不进 inject 队列，不删 entry）。
+
+    信号内容承载在 msg.metadata（开放式 tags，如 signal_type=stop_generation）。
+    引擎通过 deliver_signal 将信号写入 state 并投递给当前插件。
+    未注册的管道拒绝信号（I4：send 不建引擎）。
+    """
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+    entry = get_engine_registry().get(pipeline_id)
+    if entry is None:
+        return InjectResult(
+            success=False, error="管道未注册，无法投递信号", method="rejected",
+            pipeline_id=pipeline_id,
+        )
+    engine = entry.engine
+    # 引擎暴露 deliver_signal 才支持信号机制；否则降级为日志
+    if hasattr(engine, "deliver_signal"):
+        try:
+            engine.deliver_signal(msg.metadata or {})
+        except Exception as exc:
+            logger.warning("[MessageBus] 信号投递失败: pipeline=%s err=%s", pipeline_id[:12], exc)
+            return InjectResult(success=False, error=str(exc), method="failed", pipeline_id=pipeline_id)
+        logger.info(
+            "[MessageBus] 信号已投递: pipeline=%s signal_type=%s",
+            pipeline_id[:12], (msg.metadata or {}).get("signal_type", "?"),
+        )
+        return InjectResult(success=True, method="signal", pipeline_id=pipeline_id)
+    logger.debug("[MessageBus] 引擎不支持信号投递（无 deliver_signal）: pipeline=%s", pipeline_id[:12])
+    return InjectResult(success=False, error="引擎不支持信号投递", method="rejected", pipeline_id=pipeline_id)
 
 
 async def _inject_to_engine(
@@ -379,38 +388,8 @@ async def _start_idle_engine(
 # REFACTOR-20260614: _run_engine_in_thread 已删除。
 # engine.run() 现在直接由 asyncio.ensure_future 调用。
 
-
-async def _revive_pipeline_message(
-    pipeline_id: str, message: str, *,
-    agent_config: AgentConfig | None = None, workspace: str = "", task_id: str = "",
-    conversation_history: list[dict] | None = None, streaming: bool = False,
-    on_chunk: Callable | None = None, output_sink: IOutputSink | None = None,
-    thread_id: str = "", client_message_id: str = "", **kwargs: Any,
-) -> InjectResult:
-    """走 revive 路径的消息注入。"""
-    from pipeline.drain_manager import create_sink  # noqa: PLC0415
-    revive_bridge = None
-    _revive_sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
-    if _revive_sink is not None:
-        from pipeline.stream_bridge import PipelineStreamBridge  # noqa: PLC0415
-        revive_bridge = PipelineStreamBridge(
-            pipeline_id=pipeline_id, output_sink=_revive_sink,
-        )
-
-    from pipeline.pipeline_reviver import try_revive_pipeline  # noqa: PLC0415
-    revive_result = await try_revive_pipeline(
-        pipeline_id, message, agent_config=agent_config, workspace=workspace,
-        task_id=task_id, conversation_history=conversation_history,
-        streaming=streaming or (revive_bridge is not None),
-        on_chunk=None,
-        revive_bridge=revive_bridge, **kwargs,
-    )
-
-    if revive_result.success and revive_bridge is not None:
-        from pipeline.registry import get_engine_registry  # noqa: PLC0415
-        get_engine_registry().set_bridge(pipeline_id, revive_bridge)
-        revive_result.bridge = revive_bridge
-    return revive_result
+# _revive_pipeline_message 已删除：send 遇到未注册管道直接拒绝（I4），
+# 不再走自动 revive。引擎重建是持有者的责任（register）。
 
 
 # ---------------------------------------------------------------------------
@@ -421,10 +400,11 @@ from pipeline.drain_manager import (  # noqa: E402, F401
     restart_drain as _restart_drain,  # noqa: F401
     start_bg_drain as _start_bg_drain,  # noqa: F401
 )
-from pipeline.pipeline_reviver import restore_pipelines_on_startup  # noqa: E402
+# restore_pipelines_on_startup re-export 已删除：启动恢复移交持有者
+# （TaskWorker.restore_running_pipelines），路由模块不再越权恢复。
 
-# 兼容别名：旧测试 patch("pipeline.message_bus._try_revive_pipeline") 需要此名称
-_try_revive_pipeline = _revive_pipeline_message
+# 兼容别名已删除：_try_revive_pipeline / _revive_pipeline_message 不再存在，
+# 旧测试 patch 此名称将失败（这些测试随 revive 路径一并清理）。
 
 async def emit(
     message: PipelineMessage,
@@ -445,9 +425,48 @@ async def emit(
     return await send_pipeline_message(message, **kwargs)
 
 
+async def stop(pipeline_id: str) -> InjectResult:
+    """唯一停止入口（I1 原子级联）。
+
+    持有者级别的管道终结：cancel engine_task → 停 bridge → 移除 entry。
+    用户点"停止生成"不走本函数，走 send(CONTROL) 信号路径（不删 entry）。
+    本函数彻底移除 entry，下次发消息将走 register 重建。
+
+    Args:
+        pipeline_id: 要停止的管道 ID。
+
+    Returns:
+        InjectResult 注入结果。
+    """
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+    entry = get_engine_registry().get(pipeline_id)
+    if entry is None:
+        return InjectResult(success=False, error="管道未注册", method="rejected", pipeline_id=pipeline_id)
+
+    # ① cancel engine_task（真正停 run 协程）
+    if entry.engine_task is not None and not entry.engine_task.done():
+        entry.engine_task.cancel()
+    # ② 停 bridge（如有）
+    if entry.bridge is not None:
+        try:
+            entry.bridge.stop()
+        except Exception as exc:
+            logger.debug("[MessageBus] bridge.stop 失败（非致命）: %s", exc)
+    # ③ 引擎公开清理（不穿透私有成员）
+    if hasattr(entry.engine, "cleanup"):
+        try:
+            await entry.engine.cleanup()
+        except Exception as exc:
+            logger.debug("[MessageBus] engine.cleanup 失败（非致命）: %s", exc)
+    # ④ 移除 entry（I1：注册表无 = 引擎不存在）
+    get_engine_registry().unregister(pipeline_id)
+    logger.info("[MessageBus] 管道已停止: pipeline=%s", pipeline_id[:12])
+    return InjectResult(success=True, method="stop", pipeline_id=pipeline_id)
+
+
 __all__ = [
     "InjectResult",
     "send_pipeline_message",
     "emit",
-    "restore_pipelines_on_startup",
+    "stop",
 ]

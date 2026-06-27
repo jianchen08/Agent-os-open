@@ -178,6 +178,11 @@ class PipelineEngine:
 
         self._suspended_state: dict[str, Any] | None = None
 
+        # 流式 chunk 队列与消费者（run 启动时创建，cleanup 释放）。init 必须预置 None，
+        # 否则从未 run 的引擎调 cleanup() 会 AttributeError。
+        self._chunk_queue: asyncio.Queue | None = None
+        self._chunk_consumer_task: asyncio.Task | None = None
+
         self._checkpoint_manager = checkpoint_manager
 
         self._pipeline_id: str = _uuid.uuid4().hex[:12]
@@ -381,13 +386,12 @@ class PipelineEngine:
 
 
         if agent_config is None:
-
+            agent_config = self._load_config_from_tags()
+        if agent_config is None:
             raise ValueError(
-
-                "PipelineEngine.run() 收到 agent_config=None，"
-
-                "禁止静默回退到默认 Agent。调用方必须显式传入 agent_config。"
-
+                "PipelineEngine.run() 无法确定 Agent 配置：既未显式传入 "
+                "agent_config，也无法从注册表 tags 解析 agent_id。"
+                "禁止静默回退到默认 Agent。"
             )
 
 
@@ -425,6 +429,34 @@ class PipelineEngine:
 
 
         return await self._run_loop(state, resumed=False)
+
+
+
+    def _load_config_from_tags(self) -> Any | None:
+        """从注册表 entry.tags 加载 agent_config（I5：一切上下文皆 tags）。
+
+        当调用方未显式传入 agent_config 时，引擎从注册表中自己的 entry.tags
+        读取 agent_id，再通过 agent_registry 解析为 AgentConfig。
+        这是 agent 身份的唯一兜底来源，与 register 时写入的 tags 同源。
+
+        Returns:
+            AgentConfig 实例；entry 不存在、tags 无 agent_id、或解析失败时返回 None。
+        """
+        try:
+            from pipeline.engine_registry import get_engine_registry  # noqa: PLC0415
+            entry = get_engine_registry().get(self._pipeline_id)
+            if entry is None:
+                return None
+            agent_id = entry.tags.get("agent_id", "")
+            if not agent_id or self._agent_registry is None:
+                return None
+            return self._agent_registry.get(agent_id)
+        except Exception as exc:
+            logger.debug(
+                "[Engine] 从 tags 加载 agent_config 失败 (pipeline=%s): %s",
+                self._pipeline_id[:12], exc,
+            )
+            return None
 
 
 
@@ -2007,6 +2039,61 @@ class PipelineEngine:
         替代外部模块通过 getattr(engine, "_run_started") 访问私有属性。
         """
         return not self._run_started
+
+    def deliver_signal(self, signal_tags: dict[str, Any]) -> None:
+        """I6：投递控制信号到管道 state（开放式 tags，插件自治处理）。
+
+        信号内容承载在 signal_tags（如 signal_type=stop_generation 及插件自定义键）。
+        按类型写入 state["pending_signals"]（同类型覆盖，防累积泄漏）。
+        插件在 execute 时自行从 state 读取并处理，由插件决定清理时机。
+
+        本方法不解释信号语义，不中断正在进行的 await——它是无语义的
+        "写 state"机制；具体动作（停 LLM、设路由）由插件读取 state 后执行。
+
+        Args:
+            signal_tags: 信号标签字典，至少应含 signal_type 键。
+        """
+        if not signal_tags:
+            return
+        state = self.last_state
+        if state is None:
+            logger.debug(
+                "[Engine] 信号投递时 state 尚未初始化（引擎未 run），忽略: pipeline=%s",
+                self._pipeline_id[:12],
+            )
+            return
+        bucket = state.setdefault("pending_signals", {})
+        bucket[signal_tags.get("signal_type", "_default")] = signal_tags
+        logger.debug(
+            "[Engine] 信号已写入 state: pipeline=%s signal_type=%s",
+            self._pipeline_id[:12], signal_tags.get("signal_type", "?"),
+        )
+
+    async def cleanup(self) -> None:
+        """公开清理接口（供 message_bus.stop 调用）。
+
+        释放引擎级资源：关闭流式 chunk 消费协程、释放 chunk_service 缓存。
+        不触碰注册表（entry 移除是 stop 的职责），不访问自身 _ 私有状态机
+        （区别于已删除的 zombie 重置）。
+        """
+        # 关闭流式 chunk 消费协程
+        if self._chunk_queue is not None and self._chunk_consumer_task is not None:
+            try:
+                self._chunk_queue.put_nowait(None)
+                await asyncio.wait_for(self._chunk_consumer_task, timeout=2.0)
+            except Exception:
+                self._chunk_consumer_task.cancel()
+            self._chunk_queue = None
+            self._chunk_consumer_task = None
+
+        # 释放 chunk_service 内存缓存
+        try:
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            _cs = get_service_provider().get_service("chunk_service")
+            if _cs:
+                await _cs.evict_pipeline(self._pipeline_id)
+        except Exception as exc:
+            logger.debug("[Engine] cleanup: chunk_service.evict_pipeline 失败（非致命）: %s", exc)
 
     @property
     def agent_config(self) -> Any:

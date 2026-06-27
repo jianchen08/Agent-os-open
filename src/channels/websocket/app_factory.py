@@ -115,13 +115,17 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 except Exception as exc:
                     logger.warning("TaskWorker start failed (app startup): %s", exc, exc_info=True)
 
+        # 持有者启动恢复：TaskWorker 扫描 running/pending 任务重新注册管道。
+        # 替代原 pipeline_reviver.restore_pipelines_on_startup（已删除）。
+        # 任务系统是任务管道的持有者，恢复由持有者负责。
         try:
-            from pipeline.message_bus import restore_pipelines_on_startup  # noqa: PLC0415
-            count = await restore_pipelines_on_startup()
-            if count:
-                logger.info("启动恢复: 已恢复 %d 个管道", count)
+            tw_restore = getattr(stream_handler, "_task_worker", None)
+            if tw_restore and hasattr(tw_restore, "restore_running_pipelines"):
+                _task_pipe_count = await tw_restore.restore_running_pipelines()
+                if _task_pipe_count:
+                    logger.info("启动恢复: TaskWorker 已恢复 %d 个任务管道", _task_pipe_count)
         except Exception as exc:
-            logger.debug("restore_pipelines_on_startup skipped: %s", exc)
+            logger.debug("TaskWorker restore_running_pipelines skipped: %s", exc)
 
         # 会话系统启动恢复：从 api_store 注册所有会话管道（含 agent_id）
         try:
@@ -514,39 +518,18 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                         continue
                     _all_pipeline_ids: set[str] = {_pipeline_id}
                     try:
-                        from pipeline.message_bus import _find_engine  # noqa: PLC0415
-                        from pipeline.registry import get_engine_registry as _get_reg  # noqa: PLC0415
+                        # 用户停止生成 = 控制信号（非终结引擎生命）。
+                        # 走 message_bus 信号路径：写 state["pending_signals"]，由插件读取处理。
+                        # 不再穿透引擎私有成员（_suspended_state/_wake_event/_run_started）——
+                        # 那是反模式，已由 I3 内部自治 + 信号机制取代。
+                        from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
+                        # 标注 signal_type 供插件识别（metadata 复用，data 里已有 type=stop_generation）
+                        _stop_msg.metadata.setdefault("signal_type", "stop_generation")
                         for _pid in _all_pipeline_ids:
-                            # 即时停止后台 drain_loop（bridge.stop 哨兵 + task.cancel）
-                            _get_reg().cancel_drain_task(_pid)
-                            _eng, _st = _find_engine(_pid)
-                            if _eng:
-                                # 取消引擎的挂起状态
-                                if hasattr(_eng, "_suspended_state") and _eng._suspended_state is not None:
-                                    _eng._suspended_state["ended"] = True
-                                # 唤醒引擎使其退出挂起等待
-                                if hasattr(_eng, "_wake_event") and _eng._wake_event is not None:
-                                    _eng._wake_event.set()
-                                # 重置引擎运行状态：停止输出不注销引擎，保留注册表条目。
-                                # _find_engine 检查 _run_started，重置后引擎回到 idle 态，
-                                # 重发消息时走 _start_idle_engine（用自带 _agent_config）。
-                                # BUG-FIX-fix_20260625_zombie_suspended_engine:
-                                #   若停止时引擎正挂在 suspend（wait 路由/等子任务），_run_loop
-                                #   被 cancel 后不会清 _suspended_state。仅复位 _run_started 不够——
-                                #   _find_engine 先判 is_suspended，会把它当"挂起中"返回，重发消息
-                                #   走 wake 路径注入一个 engine_task 已死的僵尸，消息永久堆积。
-                                #   故必须同时清空 _suspended_state / _wake_event / _engine_loop。
-                                if hasattr(_eng, "_suspended_state"):
-                                    _eng._suspended_state = None
-                                if hasattr(_eng, "_wake_event"):
-                                    _eng._wake_event = None
-                                if hasattr(_eng, "_engine_loop"):
-                                    _eng._engine_loop = None
-                                if hasattr(_eng, "_run_started"):
-                                    _eng._run_started = False
-                                logger.info("[GlobalWS] 已停止引擎: pipeline=%s", _pid[:12])
+                            await send_pipeline_message(_stop_msg)
+                            logger.info("[GlobalWS] 已投递停止信号: pipeline=%s", _pid[:12])
                     except Exception as _eng_err:
-                        logger.warning("[GlobalWS] 取消管道引擎时出错: %s", _eng_err)
+                        logger.warning("[GlobalWS] 投递停止信号出错: %s", _eng_err)
 
                     # 3. 尝试取消 TaskWorker 中与该 thread_id 关联的后台任务
                     try:
