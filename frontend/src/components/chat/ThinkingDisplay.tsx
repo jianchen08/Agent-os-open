@@ -5,7 +5,7 @@
  */
 
 import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from 'lucide-react'
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type { ThinkingContent, ThinkingStep } from '@/types/models'
@@ -114,6 +114,24 @@ export const ThinkingDisplay: FC<{
 }> = ({ thinking, defaultExpanded = false }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
+  // 流式思考内容贴底跟随：展开时定位到最新；用户上滑看历史时暂停跟随，滑回底部后恢复
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const stickToBottom = useRef(true)
+  const stepsCount = thinking.steps?.length ?? 0
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    // 距底部 28px 内视为"贴底"，恢复跟随
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 28
+  }, [])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || !expanded) return
+    if (stickToBottom.current) el.scrollTop = el.scrollHeight
+  }, [expanded, thinking.content, thinking.isThinking, stepsCount])
+
 
 
   return (
@@ -142,8 +160,10 @@ export const ThinkingDisplay: FC<{
       {/* 内容区域 */}
       {expanded && (
         <div
-          className="thinking-text-content border-border/50 space-y-3 border-t px-3 py-2"
-          style={thinkingTextStyle}
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="thinking-text-content border-border/50 space-y-3 overflow-y-auto border-t px-3 py-2"
+          style={{ ...thinkingTextStyle, maxHeight: '50vh' }}
         >
           {/* 思考步骤列表 */}
           {thinking.steps && thinking.steps.length > 0 && (
