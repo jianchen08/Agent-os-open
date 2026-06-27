@@ -418,8 +418,9 @@ from pipeline.drain_manager import (  # noqa: E402, F401
     restart_drain as _restart_drain,  # noqa: F401
     start_bg_drain as _start_bg_drain,  # noqa: F401
 )
-# restore_pipelines_on_startup re-export 已删除：启动恢复移交持有者
-# （TaskWorker.restore_running_pipelines），路由模块不再越权恢复。
+# restore_pipelines_on_startup re-export 已删除：启动恢复由各持有者负责
+# （会话模块 restore_session_pipelines 注册主管道；TaskWorker._recover_running_tasks
+#  将 running/pending 任务标记 suspended）。路由模块不越权恢复。
 
 # 兼容别名已删除：_try_revive_pipeline / _revive_pipeline_message 不再存在，
 # 旧测试 patch 此名称将失败（这些测试随 revive 路径一并清理）。
