@@ -90,7 +90,6 @@ class EvaluationEngine:
         loader: MetricLoader,
         expect_evaluator: ExpectEvaluator | None = None,
         tool_registry: Any | None = None,
-        pipeline_factory: Callable[[], Any] | None = None,
         agent_registry: Any | None = None,
         main_loop: Any | None = None,
     ) -> None:
@@ -100,7 +99,6 @@ class EvaluationEngine:
             loader: 指标加载器（必须已加载指标）
             expect_evaluator: 期望值评估器，None 时创建默认实例
             tool_registry: 工具注册表，None 时工具型评估器 fallback 到 Mock
-            pipeline_factory: 创建 PipelineEngine 实例的可调用对象
             agent_registry: AgentRegistry 实例，用于获取 evaluator_agent 配置
             main_loop: 主事件循环引用，human_interaction 等需要与主循环
                        交互的工具通过 run_coroutine_threadsafe 回调
@@ -108,7 +106,6 @@ class EvaluationEngine:
         self._loader = loader
         self._expect_evaluator = expect_evaluator or ExpectEvaluator()
         self._tool_registry = tool_registry
-        self._pipeline_factory = pipeline_factory
         self._agent_registry = agent_registry
         self._main_loop = main_loop
         self._evaluators: dict[MetricType, EvaluatorFunc] = {
@@ -601,11 +598,12 @@ class EvaluationEngine:
     ) -> dict[str, Any]:
         """Agent 型评估器 — 创建子管道运行 evaluator_agent。
 
-        通过 pipeline_factory 创建独立的 PipelineEngine，加载 evaluator_agent
-        配置，运行评估管道。管道中的 task_reminder 插件（评估者模式）会自动
-        在 Agent 未输出正确格式时发送提醒。
+        通过 EngineRegistry.register_pipeline 创建独立的 PipelineEngine（I1：
+        引擎必须经注册表创建），加载 evaluator_agent 配置运行评估管道。
+        管道中的 task_reminder 插件（评估者模式）会自动在 Agent 未输出正确
+        格式时发送提醒。
 
-        当 pipeline_factory 或 agent_registry 不可用时，fallback 到 Mock。
+        当 agent_registry 不可用时，fallback 到 Mock。
 
         Args:
             metric_def: 指标定义
@@ -616,11 +614,6 @@ class EvaluationEngine:
         """
         evaluator_id = metric_def.evaluator_id
 
-        if self._pipeline_factory is None:
-            raise RuntimeError(
-                f"Agent evaluation requires pipeline_factory but it is None. "
-                f"Metric: {metric_def.id}, evaluator: {evaluator_id}"
-            )
         if self._agent_registry is None:
             raise RuntimeError(
                 f"Agent evaluation requires agent_registry but it is None. "
@@ -654,9 +647,24 @@ class EvaluationEngine:
         try:
 
             async def _run_eval_pipeline() -> dict[str, Any]:
-                engine = self._pipeline_factory()
-                _captured_pid[0] = engine.pipeline_id
+                # 通过注册表创建管道（I1：engine 必须经 register_pipeline 入注册表）。
+                # 外部不私自 new 引擎（原 self._pipeline_factory() 产生野引擎）。
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                from pipeline.registry import get_engine_registry  # noqa: PLC0415
                 from pathlib import Path  # noqa: PLC0415
+
+                _provider = get_service_provider()
+                _entry = get_engine_registry().register_pipeline(
+                    tags={"agent_id": evaluator_id, "source": "evaluation"},
+                    input_route_table=_provider.get("input_route_table"),
+                    output_route_table=_provider.get("output_route_table"),
+                    plugin_registry=_provider.get("plugin_registry"),
+                    services=_provider.get_all_services(),
+                )
+                if _entry is None:
+                    raise RuntimeError("评估管道注册失败（路由表/插件注册表不可用）")
+                engine = _entry.engine
+                _captured_pid[0] = engine.pipeline_id
                 project_root = _resolve_eval_project_root(
                     task_id, params,
                 ) or str(

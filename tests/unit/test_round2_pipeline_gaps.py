@@ -90,12 +90,22 @@ class TestConditionParser:
         assert result is True
 
     def test_safe_non_eval(self, parser):
-        """确保解析器不使用原生 eval（安全审查）"""
+        """确保解析器不使用原生 eval（安全审查）。
+
+        用 AST 检测而非字符串匹配：源码 docstring 里"替换 eval()"的说明文字会被
+        朴素字符串匹配误判为使用了 eval。AST 检测只看真实的 Call 节点。
+        """
+        import ast
         module = sys.modules.get("src.pipeline.condition_parser")
-        if module:
-            source = open(module.__file__).read()
-            assert "eval(" not in source.replace("parse_condition", ""), \
-                "条件解析器不应使用原生 eval"
+        if not module:
+            pytest.skip("condition_parser 模块未找到")
+        tree = ast.parse(open(module.__file__, encoding="utf-8").read())
+        dangerous = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in ("eval", "exec", "compile"):
+                    dangerous.add(node.func.id)
+        assert not dangerous, f"条件解析器不应调用 {dangerous}（代码注入风险）"
 
     def test_in_expression(self, parser):
         """in 表达式"""
@@ -143,25 +153,25 @@ class TestInputRouteTable:
 
     @pytest.fixture
     def route_table(self):
-        """创建输入路由表"""
+        """创建输入路由表（用构造期 entries 传入，源码无 add 方法）"""
         try:
             from src.pipeline.route import InputRouteTable, InputRouteEntry
-            table = InputRouteTable()
-            table.add(InputRouteEntry(
-                name="trigger_inject",
-                condition="state.trigger_data is not None",
-                target="core",
-                plugins=["TriggerInject"],
-                priority=5
-            ))
-            table.add(InputRouteEntry(
-                name="context_build",
-                condition="True",
-                target="core",
-                plugins=["ContextBuild"],
-                priority=10
-            ))
-            return table
+            return InputRouteTable(entries=[
+                InputRouteEntry(
+                    name="trigger_inject",
+                    condition="state.trigger_data is not None",
+                    target="core",
+                    plugins=["TriggerInject"],
+                    priority=5,
+                ),
+                InputRouteEntry(
+                    name="context_build",
+                    condition="True",
+                    target="core",
+                    plugins=["ContextBuild"],
+                    priority=10,
+                ),
+            ])
         except ImportError:
             pytest.skip("route 模块未找到")
 
@@ -178,23 +188,24 @@ class TestInputRouteTable:
         assert "ContextBuild" in plugins
 
     def test_resolve_target_core(self, route_table):
-        """target 返回 core"""
-        target = route_table.resolve_target({"trigger_data": "hello"})
+        """target 返回 core（resolve_target 返回 (target, entry) 元组）"""
+        target, _entry = route_table.resolve_target({"trigger_data": "hello"})
         assert target == "core"
 
     def test_resolve_target_end(self, route_table):
         """target 返回 end"""
         try:
             from src.pipeline.route import InputRouteTable, InputRouteEntry
-            table = InputRouteTable()
-            table.add(InputRouteEntry(
-                name="end_route",
-                condition="state.ended",
-                target="end",
-                plugins=["FinalOutput"],
-                priority=99
-            ))
-            target = table.resolve_target({"ended": True})
+            table = InputRouteTable(entries=[
+                InputRouteEntry(
+                    name="end_route",
+                    condition="state.ended",
+                    target="end",
+                    plugins=["FinalOutput"],
+                    priority=99,
+                ),
+            ])
+            target, _entry = table.resolve_target({"ended": True})
             assert target == "end"
         except ImportError:
             pytest.skip("route 模块未找到")
@@ -209,23 +220,25 @@ class TestOutputRouteTable:
 
     @pytest.fixture
     def route_table(self):
-        """创建输出路由表"""
+        """创建输出路由表（用构造期 entries 传入，源码无 add 方法）"""
         try:
             from src.pipeline.route import OutputRouteTable, OutputRouteEntry
-            table = OutputRouteTable()
-            table.add(OutputRouteEntry(
-                route_type="next_llm",
-                condition="state.raw_tool_calls is None or state.raw_tool_calls == []",
-                priority=6,
-                target_core="llm_call"
-            ))
-            table.add(OutputRouteEntry(
-                route_type="next_tool",
-                condition="state.raw_tool_calls is not None and state.raw_tool_calls != []",
-                priority=6,
-                target_core="tool_execute"
-            ))
-            return table
+            return OutputRouteTable(entries=[
+                OutputRouteEntry(
+                    name="to_llm",
+                    route_type="next_llm",
+                    condition="state.raw_tool_calls is None or state.raw_tool_calls == []",
+                    priority=6,
+                    target_core="llm_call",
+                ),
+                OutputRouteEntry(
+                    name="to_tool",
+                    route_type="next_tool",
+                    condition="state.raw_tool_calls is not None and state.raw_tool_calls != []",
+                    priority=6,
+                    target_core="tool_execute",
+                ),
+            ])
         except ImportError:
             pytest.skip("route 模块未找到")
 
@@ -334,11 +347,15 @@ class TestPluginPriority:
             class MockPlugin(IInputPlugin):
                 def __init__(self, name, priority):
                     self._name = name
-                    self.priority = priority
+                    self._priority = priority
 
                 @property
                 def name(self):
                     return self._name
+
+                @property
+                def priority(self):
+                    return self._priority
 
                 async def execute(self, ctx):
                     from src.pipeline.plugin import PluginResult

@@ -275,6 +275,105 @@ class TestRegisterThenSend:
         mock_engine.inject_message.assert_called_once()
         assert result.success is True
 
+
+# ===========================================================================
+# run_once 测试：send+等结束+读 state+可选 stop 包装
+# ===========================================================================
+
+
+class TestRunOnce:
+    """run_once 同步执行拿结果的单元测试。
+
+    run_once 不负责 register（持有者职责）。测试预先注册 mock entry。
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_once_returns_state_after_send(self):
+        """已注册管道 → send 成功 → 等结束 → 返回 last_state → 默认 stop。"""
+        from pipeline.message_bus import run_once
+
+        mock_engine = MagicMock()
+        mock_engine.pipeline_id = "run-once-1"
+        mock_engine.last_state = {"raw_result": "done"}
+        mock_engine.is_idle = True
+        mock_engine.is_running = False
+        mock_engine.is_suspended = False
+
+        registry = get_engine_registry()
+        registry._engines.clear()
+        registry.register("run-once-1", mock_engine)
+        try:
+            with (
+                patch("pipeline.message_bus.send_pipeline_message", new_callable=AsyncMock) as mock_send,
+                patch("pipeline.message_bus.stop", new_callable=AsyncMock) as mock_stop,
+            ):
+                mock_send.return_value = InjectResult(success=True, method="start", pipeline_id="run-once-1")
+                result, state = await run_once(
+                    PipelineMessage(type=MessageType.CHAT, content="hi", pipeline_id="run-once-1"),
+                )
+
+            assert result.success is True
+            assert state == {"raw_result": "done"}
+            mock_send.assert_awaited_once()
+            mock_stop.assert_awaited_once()  # cleanup=True 默认调 stop
+        finally:
+            registry._engines.clear()
+
+    @pytest.mark.asyncio
+    async def test_run_once_no_cleanup_skips_stop(self):
+        """cleanup=False → 不调 stop（复用场景）。"""
+        from pipeline.message_bus import run_once
+
+        mock_engine = MagicMock()
+        mock_engine.pipeline_id = "run-once-2"
+        mock_engine.last_state = {"iteration": 5}
+        mock_engine.is_idle = True
+        mock_engine.is_running = False
+        mock_engine.is_suspended = False
+
+        registry = get_engine_registry()
+        registry._engines.clear()
+        registry.register("run-once-2", mock_engine)
+        try:
+            with (
+                patch("pipeline.message_bus.send_pipeline_message", new_callable=AsyncMock) as mock_send,
+                patch("pipeline.message_bus.stop", new_callable=AsyncMock) as mock_stop,
+            ):
+                mock_send.return_value = InjectResult(success=True, method="start", pipeline_id="run-once-2")
+                result, state = await run_once(
+                    PipelineMessage(type=MessageType.CHAT, content="hi", pipeline_id="run-once-2"),
+                    cleanup=False,
+                )
+
+            assert result.success is True
+            assert state == {"iteration": 5}
+            mock_stop.assert_not_awaited()  # cleanup=False 不调 stop
+        finally:
+            registry._engines.clear()
+
+    @pytest.mark.asyncio
+    async def test_run_once_send_rejected_returns_empty_state(self):
+        """send 被拒绝（如未注册）→ 返回 (rejected, 空字典)。"""
+        from pipeline.message_bus import run_once
+
+        registry = get_engine_registry()
+        registry._engines.clear()
+        try:
+            # 不注册任何引擎，send 会拒绝
+            with patch("pipeline.message_bus.send_pipeline_message", new_callable=AsyncMock) as mock_send:
+                mock_send.return_value = InjectResult(
+                    success=False, error="管道未注册", method="rejected", pipeline_id="ghost-1",
+                )
+                result, state = await run_once(
+                    PipelineMessage(type=MessageType.CHAT, content="hi", pipeline_id="ghost-1"),
+                )
+
+            assert result.success is False
+            assert result.method == "rejected"
+            assert state == {}
+        finally:
+            registry._engines.clear()
+
     @pytest.mark.asyncio
     async def test_send_to_unregistered_pipeline_fails(self):
         """验证发消息给未注册管道失败（I4：send 不建引擎，直接拒绝）。

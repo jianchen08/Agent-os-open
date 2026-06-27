@@ -970,6 +970,13 @@ class PipelineEngine:
 
             self._running = False
 
+            # I3：复位 _run_started，使 is_idle 返回 True。
+            # 引擎正常结束后 entry 保留（不再 unregister），下次 send 命中 entry
+            # 时 _find_engine 需返回 idle 才能走 _start_idle_engine 重启。
+            # 若不复位，is_idle=False 且非 running/suspended，_find_engine 返回 None，
+            # send 误判为未注册而拒绝。
+            self._run_started = False
+
             self._last_state = state
 
             logger.debug(
@@ -1510,13 +1517,12 @@ class PipelineEngine:
 
                 _cl_entry.engine_task = None
 
-            # 正常结束（非 cancel）时才注销。Cancel 时保留条目让重发消息走 idle 重启。
-
-            _raw_error = state.get(StateKeys.RAW_ERROR)
-
-            if not _raw_error or "cancelled" not in str(_raw_error).lower():
-
-                get_engine_registry().unregister(_cp_pipeline_id)
+            # I3：引擎正常结束不再 unregister 自身。entry 保留，下次 send 走 idle 重启。
+            # 原逻辑"正常结束就 unregister"会导致：子任务管道跑完一轮后引擎消失，
+            # 但 task 仍 running，用户在任务标签页续发消息时报"未注册"。
+            # 引擎生命由注册表/持有者管理（stop 显式移除），引擎自身不主动注销。
+            # Cancel 时同样保留（原逻辑），现统一为都保留。
+            # 引擎实际资源释放由 message_bus.stop / entry.ensure_engine 负责。
 
             # 释放 chunk_service 内存缓存
 
@@ -2047,27 +2053,86 @@ class PipelineEngine:
         按类型写入 state["pending_signals"]（同类型覆盖，防累积泄漏）。
         插件在 execute 时自行从 state 读取并处理，由插件决定清理时机。
 
-        本方法不解释信号语义，不中断正在进行的 await——它是无语义的
-        "写 state"机制；具体动作（停 LLM、设路由）由插件读取 state 后执行。
+        特殊处理：stop_generation 信号除了写 state，还立即 cancel engine_task，
+        中断正在进行的 LLM await（否则用户点停止要等当前 LLM 调用跑完才生效）。
+        cancel 后 run() 的 finally 会发 state_change(stopped)，引擎进 idle 待命。
 
         Args:
             signal_tags: 信号标签字典，至少应含 signal_type 键。
         """
         if not signal_tags:
             return
-        state = self.last_state
+        signal_type = signal_tags.get("signal_type", "")
+
+        # stop_generation 必须无条件立即中断 engine_task，不能以 last_state 为门控。
+        # _last_state 仅在 _run_loop 的 finally（run 结束时）写入，引擎运行中——尤其
+        # 首次 run——其值为 None。原先 `if state is None: return` 会让运行中投递的停止
+        # 信号永远到不了 _interrupt_engine_task，engine_task 不被 cancel，LLM 调用跑到
+        # 自然结束才"停止"。是否真有 await 在进行，由 _interrupt_engine_task 内部按
+        # engine_task 存活与否判定（None/已 done 即 no-op），不依赖 last_state。
+        if signal_type == "stop_generation":
+            self._interrupt_engine_task()
+
+        # 信号留痕到 state（供插件下一轮从 pending_signals 读取并自治处理）。
+        # 运行中用实时 _current_state（last_state 此时还是 None）；引擎从未 run 时
+        # 两者皆无，跳过留痕（中断已在上面按需执行，与 state 无关）。
+        state = self._current_state or self.last_state
         if state is None:
             logger.debug(
-                "[Engine] 信号投递时 state 尚未初始化（引擎未 run），忽略: pipeline=%s",
-                self._pipeline_id[:12],
+                "[Engine] 信号留痕跳过（state 尚未初始化）: pipeline=%s signal_type=%s",
+                self._pipeline_id[:12], signal_type or "?",
             )
             return
         bucket = state.setdefault("pending_signals", {})
-        bucket[signal_tags.get("signal_type", "_default")] = signal_tags
+        bucket[signal_type or "_default"] = signal_tags
         logger.debug(
             "[Engine] 信号已写入 state: pipeline=%s signal_type=%s",
-            self._pipeline_id[:12], signal_tags.get("signal_type", "?"),
+            self._pipeline_id[:12], signal_type or "?",
         )
+
+    def _interrupt_engine_task(self) -> None:
+        """立即中断当前 engine_task（打断进行中的 LLM await）。
+
+        供 deliver_signal 处理 stop_generation 时调用：仅写 state 无法中断
+        正在 await 的 LLM 调用，用户点停止会无响应直到当前轮跑完。
+        cancel engine_task 让 run() 抛 CancelledError，其 finally 会发
+        state_change(stopped)，引擎进 idle 待命（entry 不移除，可重发消息）。
+
+        engine_task 由 message_bus._start_idle_engine 注册到 entry，引擎自身
+        不持有，故经注册表 entry 取（不访问自身私有状态机）。
+        """
+        try:
+            from pipeline.engine_registry import get_engine_registry  # noqa: PLC0415
+            entry = get_engine_registry().get(self._pipeline_id)
+            if entry is None:
+                logger.info(
+                    "[Engine] interrupt: entry 不存在（未注册）: pipeline=%s",
+                    self._pipeline_id[:12],
+                )
+                return
+            if entry.engine_task is None:
+                logger.info(
+                    "[Engine] interrupt: engine_task 为 None（未启动 run 或已复位）"
+                    ": pipeline=%s engine.is_running=%s engine.is_idle=%s",
+                    self._pipeline_id[:12], self.is_running, self.is_idle,
+                )
+                return
+            if entry.engine_task.done():
+                logger.info(
+                    "[Engine] interrupt: engine_task 已 done（run 已结束）: pipeline=%s",
+                    self._pipeline_id[:12],
+                )
+                return
+            entry.engine_task.cancel()
+            logger.info(
+                "[Engine] 已中断 engine_task（停止生成）: pipeline=%s",
+                self._pipeline_id[:12],
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Engine] interrupt engine_task 失败（非致命）: pipeline=%s err=%s",
+                self._pipeline_id[:12], exc,
+            )
 
     async def cleanup(self) -> None:
         """公开清理接口（供 message_bus.stop 调用）。
@@ -2349,6 +2414,24 @@ class PipelineEngine:
 
 
 
+    def _is_stop_signal_active(self) -> bool:
+        """协作式停止检查：state 中是否存在未消费的 stop_generation 信号。
+
+        deliver_signal 收到 stop_generation 时会写入 _current_state["pending_signals"]
+        （运行中）或 last_state["pending_signals"]（resume 场景）。本方法供
+        _on_chunk_adapter 在每个流式 chunk 回调时轮询，命中即触发协作式中断。
+
+        读实时 state（_current_state，run 期间每轮迭代更新），不依赖 last_state
+        （run 结束才赋值，运行中为 None）。
+        """
+        state = self._current_state or self.last_state
+        if not state:
+            return False
+        pending = state.get("pending_signals") or {}
+        return "stop_generation" in pending
+
+
+
     def _on_chunk_adapter(self, chunk: dict) -> None:
 
         """同步→异步适配器：LLM 适配器的 on_chunk 是同步回调。
@@ -2361,6 +2444,32 @@ class PipelineEngine:
 
 
 
+        协作式停止兜底：当 stop_generation 信号已写入 state（deliver_signal），
+
+        且当前 await 不可中断（httpx C 层 socket recv 实测卡死，见 adapter.py BUG 注释），
+
+        cancel engine_task 无法打断。此时本回调是唯一可靠的停止检查点：每个流式 chunk
+
+        都会同步调用它，命中信号即 raise CancelledError。
+
+
+
+        为什么用 raise CancelledError 而非返回 "stop"：adapter 的 on_chunk 返回 "stop"
+
+        语义已被"流式重复检测"占用（会设 stream_repetition=True，llm_core 误判为重复
+
+        而重试）。本回调与 adapter 流式循环同在 engine_task 协程栈内（_run_loop →
+
+        llm_core.execute → _call_llm → adapter.completion 同步调 on_chunk），raise
+
+        CancelledError 会冒泡到 _run_loop 的 except CancelledError，复用既有的停止
+
+        清理路径（emit_error + mark_failed + finally 复位 idle），无需新增字段或分支。
+
+        与 cancel 互补：cancel 负责打断 await，协作式负责 httpx 不可中断时的兜底。
+
+
+
         失败隔离：推送失败只 log warning，不影响 engine 运行。
 
 
@@ -2370,6 +2479,18 @@ class PipelineEngine:
             chunk: LLM 适配器回调的 chunk 字典
 
         """
+
+        # 协作式停止：每个 chunk 都检查 stop_generation 信号。命中即 raise。
+
+        # 信号消费/清理由插件下一轮自治处理，这里仅做中断判定（只读不删）。
+
+        if self._is_stop_signal_active():
+            logger.info(
+                "[Engine] on_chunk 检测到 stop_generation 信号，协作式中断流式"
+                ": pipeline=%s chunk_type=%s",
+                self._pipeline_id[:12], chunk.get("type", "?"),
+            )
+            raise asyncio.CancelledError("stop_generation signal")
 
         if self._bridge is None or self._chunk_queue is None:
 

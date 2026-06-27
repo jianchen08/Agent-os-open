@@ -52,13 +52,6 @@ def _get_agent_registry() -> Any:
     return get_service_provider().get("agent_registry")
 
 
-def _get_pipeline_factory() -> Any:
-    """从 ServiceProvider 获取管道工厂（创建 PipelineEngine 的可调用对象）。"""
-    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-    return get_service_provider().get("pipeline_factory")
-
-
 # ============================================================
 # 端点
 # ============================================================
@@ -101,31 +94,44 @@ async def external_chat(
             message=f"Agent '{body.agent_id}' 不存在",
         )
 
-    # 2. 获取管道工厂，创建引擎
-    pipeline_factory = _get_pipeline_factory()
-    if pipeline_factory is None:
+    # 2. 持有者注册管道（API 入口是这次执行的持有者），再 run_once 执行拿结果。
+    # 外部全程不持有 engine 引用：register 写 entry，run_once 内部经 entry 访问。
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+    from pipeline.message_bus import run_once  # noqa: PLC0415
+    from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
+
+    provider = get_service_provider()
+    entry = get_engine_registry().register_pipeline(
+        tags={"agent_id": body.agent_id, "source": "external_chat"},
+        input_route_table=provider.get("input_route_table"),
+        output_route_table=provider.get("output_route_table"),
+        plugin_registry=provider.get("plugin_registry"),
+        services=provider.get_all_services(),
+    )
+    if entry is None:
         raise APIError(
             status_code=503,
             error_code="EXT_CHAT_003",
-            message="Pipeline 工厂服务不可用",
+            message="管道注册失败（路由表/插件注册表不可用）",
         )
 
     try:
-        engine = pipeline_factory()
-    except Exception as exc:
-        logger.error("创建 PipelineEngine 失败: %s", exc)
-        raise APIError(
-            status_code=500,
-            error_code="EXT_CHAT_004",
-            message="管道引擎创建失败",
-        ) from exc
-
-    # 3. 同步执行管道
-    try:
-        state = await engine.run(
-            user_input=body.message,
-            agent_config=agent_config,
+        inject_result, state = await run_once(
+            PipelineMessage(
+                type=MessageType.CHAT,
+                content=body.message,
+                pipeline_id=entry.engine.pipeline_id,
+            ),
         )
+        if not inject_result.success:
+            raise APIError(
+                status_code=500,
+                error_code="EXT_CHAT_005",
+                message=f"管道执行失败: {inject_result.error}",
+            )
+    except APIError:
+        raise
     except Exception as exc:
         logger.error("管道执行失败 (agent=%s): %s", body.agent_id, exc)
         raise APIError(
@@ -134,7 +140,7 @@ async def external_chat(
             message="Agent 管道执行失败",
         ) from exc
 
-    # 4. 提取结果
+    # 3. 提取结果
     raw_result = state.get("raw_result", "")
     reply = str(raw_result) if raw_result is not None else ""
 

@@ -165,8 +165,8 @@ defaults:
   first_token_timeout: 60
   compression: minimax-m3-guangfang
   tiers:
-    large: glm-5.2
-    medium: glm-5.2-yichengc
+    large: minimax-m3-guangfang
+    medium: minimax-m3-guangfang
     small: minimax-m3-guangfang
     fallback_chain: {}
 providers:

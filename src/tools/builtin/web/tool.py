@@ -34,6 +34,17 @@ logger = logging.getLogger(__name__)
 for _traf_logger in ("trafilatura", "trafilatura.utils", "trafilatura.core"):
     logging.getLogger(_traf_logger).setLevel(logging.CRITICAL)
 
+# 默认请求头：注入浏览器 UA，避免 httpx 默认的 python-httpx UA 被反爬网站 403 拒绝。
+# 合并优先级：模块默认头 < 构造期 default_headers（fetch.yaml/调用方）< 单次请求 headers。
+_DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
 
 class WebTool(BuiltinTool):
     """
@@ -54,6 +65,7 @@ class WebTool(BuiltinTool):
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         verify_ssl: bool = True,
+        default_headers: dict[str, str] | None = None,
     ):
         """初始化 Web 工具"""
         self.timeout = timeout
@@ -61,6 +73,11 @@ class WebTool(BuiltinTool):
         self.allowed_domains = set(allowed_domains) if allowed_domains else None
         self.blocked_domains = set(blocked_domains or [])
         self.verify_ssl = verify_ssl
+        # 合并默认头：先复制模块默认头，再用构造期传入的覆盖/新增（不改原常量）。
+        # 单次请求 headers 在 _merge_headers 中再次覆盖。
+        self._default_headers: dict[str, str] = dict(_DEFAULT_HEADERS)
+        if default_headers:
+            self._default_headers.update(default_headers)
         self._proxy_url: str | None = None
         # Check proxy environment variables
         for env_var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
@@ -85,6 +102,7 @@ class WebTool(BuiltinTool):
                 allowed_domains=config.get("allowed_domains"),
                 blocked_domains=config.get("blocked_domains"),
                 verify_ssl=config.get("verify_ssl", True),
+                default_headers=config.get("default_headers"),
             )
 
             logger.info(
@@ -225,11 +243,25 @@ class WebTool(BuiltinTool):
         except Exception as e:
             return False, f"URL 解析失败: {str(e)}"
 
+    def _merge_headers(self, caller_headers: dict[str, Any] | None) -> dict[str, str]:
+        """合并请求头：默认头 + 调用方传入（调用方优先）。
+
+        Args:
+            caller_headers: 单次请求传入的 headers（可为空/None）。
+
+        Returns:
+            合并后的 headers 字典。默认头打底，调用方同 key 覆盖、新 key 追加。
+        """
+        merged = dict(self._default_headers)
+        if caller_headers:
+            merged.update(caller_headers)
+        return merged
+
     async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """HTTP GET 请求"""
         try:
             url = inputs["url"]
-            headers = inputs.get("headers", {})
+            headers = self._merge_headers(inputs.get("headers"))
             params = inputs.get("params", {})
             timeout = inputs.get("timeout", self.timeout)
 
@@ -315,7 +347,7 @@ class WebTool(BuiltinTool):
         """HTTP POST 请求"""
         try:
             url = inputs["url"]
-            headers = inputs.get("headers", {})
+            headers = self._merge_headers(inputs.get("headers"))
             data = inputs.get("data", {})
             params = inputs.get("params", {})
             timeout = inputs.get("timeout", self.timeout)
@@ -403,7 +435,7 @@ class WebTool(BuiltinTool):
         """抓取网页内容"""
         try:
             url = inputs["url"]
-            headers = inputs.get("headers", {})
+            headers = self._merge_headers(inputs.get("headers"))
             timeout = inputs.get("timeout", self.timeout)
             extract_text = inputs.get("extract_text", True)
 

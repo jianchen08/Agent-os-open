@@ -7,6 +7,7 @@ litellm Router 自动负载均衡、冷却和 failover。
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import litellm
@@ -14,6 +15,64 @@ import litellm
 from llm.key_pool import KeyPool, KeySlot
 
 logger = logging.getLogger(__name__)
+
+# LLM 出口要直连的域名白名单（用于 NO_PROXY 兜底，确保即使开了 trust_env 也不走代理）。
+# 与 llm.yaml 中各 provider 的 api_base 对应。
+_LLM_DIRECT_HOSTS = (
+    "open.bigmodel.cn",
+    "api.deepseek.com",
+    "api.minimaxi.com",
+    "cn.apigocn.top",
+    "ai.1cc.ai",
+)
+
+# 进程内代理环境变量名（httpx / aiohttp / requests 三家都读这些）。
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+)
+
+
+def disable_llm_proxy() -> None:
+    """强制 LLM 调用直连，与本机系统代理解耦。
+
+    背景：宿主机代理客户端（Clash/V2Ray 等）会向 Windows 注册表写入
+    系统代理（如 127.0.0.1:7993）。litellm 底层的 httpx 默认 trust_env=True，
+    会读 HTTP(S)_PROXY 环境变量；aiohttp 在 aiohttp_trust_env=True 时同样读取。
+    结果是 LLM 请求被转发到本地代理端口——代理开着时 TLS 链路被破坏
+    (报 api.xxx:443 ssl)，代理关掉时端口无人监听 (报 connection refused)，
+    两种现象随代理开关反复横跳。
+
+    本函数在 Router 首次构建时执行一次，从两个层面钉死直连：
+    1. 清空进程内 *_PROXY 环境变量 → httpx/aiohttp/requests 均不再走代理；
+    2. 设置 litellm.aiohttp_trust_env=False → 即便环境变量被外部恢复，
+       aiohttp 也不读系统代理；
+    3. 用 NO_PROXY 列出 LLM 域名作为兜底 → 即使上层强制开启代理，
+       这些域名仍直连。
+
+    该函数幂等，可安全重复调用。
+    """
+    # 1. 清空进程内代理环境变量（httpx/aiohttp/requests 三家共用）
+    for var in _PROXY_ENV_VARS:
+        os.environ.pop(var, None)
+
+    # 2. 关闭 litellm 的 aiohttp trust_env（默认已是 False，显式设以防被外部改动）
+    litellm.aiohttp_trust_env = False
+    # 双保险：litellm 提供的禁用开关
+    litellm.disable_aiohttp_trust_env = True
+
+    # 3. NO_PROXY 兜底：列出所有 LLM 直连域名（NO_PROXY 支持逗号分隔列表）
+    existing_no_proxy = os.environ.get("NO_PROXY", "")
+    hosts_to_add = [h for h in _LLM_DIRECT_HOSTS if h not in existing_no_proxy]
+    if hosts_to_add:
+        merged = ",".join(filter(None, [existing_no_proxy, *hosts_to_add]))
+        os.environ["NO_PROXY"] = merged
+        os.environ["no_proxy"] = merged
+
+    logger.info(
+        "[Router] LLM 出口已强制直连 (proxy env cleared, aiohttp_trust_env=False, "
+        "NO_PROXY=%s)", os.environ.get("NO_PROXY"),
+    )
 
 # 模块级单例缓存
 _router_instance: litellm.Router | None = None
@@ -250,6 +309,10 @@ def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
 def build_router(model_loader: Any) -> litellm.Router:
     """构建 litellm.Router 实例。"""
     global _key_pools, _model_to_provider, _provider_type_map  # noqa: PLW0602
+
+    # 钉死 LLM 出口直连：清掉进程内代理 env + 关 aiohttp trust_env + NO_PROXY 兜底。
+    # 放在 Router 首次构建处执行一次，从源头与宿主机系统代理解耦。
+    disable_llm_proxy()
 
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})

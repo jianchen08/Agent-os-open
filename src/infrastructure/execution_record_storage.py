@@ -31,6 +31,19 @@ _DEFAULT_SUMMARY_MAX_LEN = 500
 _MAX_RECORDS_PER_FILE = 500
 
 
+def _record_key(record: ExecutionRecordData) -> str:
+    """构造 _records dict 的组合 key：record_id::sequence。
+
+    同一 record_id（如多轮 LLM 迭代共享 bridge message_id 的 ai 记录）的不同
+    sequence 记录各自占一个 dict 槽，避免互相覆盖。record_id 字段本身保持
+    与 WS message_id 一致的裸 hex（id 契约），由 sequence 区分同一逻辑消息的
+    多条落盘记录。
+
+    sequence 在管道内单调递增唯一；缺失时退化为 0（与历史脏数据兼容）。
+    """
+    return f"{record.record_id}::{record.sequence}"
+
+
 def _fix_records_empty_flow(text: str) -> str:
     """修复 YAML 中 records: [] 后追加序列项导致的解析错误。
 
@@ -311,7 +324,7 @@ class ExecutionRecordStorage:
                 for record_dict in records_list:
                     if isinstance(record_dict, dict):
                         record = self._dict_to_record(record_dict)
-                        self._records[record.record_id] = record
+                        self._records[_record_key(record)] = record
         except Exception:
             logger.warning("管道文件损坏，跳过: %s", yaml_file.name)
 
@@ -438,7 +451,11 @@ class ExecutionRecordStorage:
             record.record_id = uuid.uuid4().hex[:12]
         if not record.created_at:
             record.created_at = datetime.now().isoformat()
-        self._records[record.record_id] = record
+        # 组合 key：record_id::sequence。同一 record_id（如多轮迭代共享 bridge
+        # message_id 的 ai 记录）的不同 sequence 记录各自占一个槽，不再互相覆盖。
+        # 这样 record_id 字段保持与 WS message_id 一致的裸 hex（id 契约），
+        # 不再需要给多轮记录加 #iteration 后缀来强行唯一化。
+        self._records[_record_key(record)] = record
         if record.pipeline_run_id:
             self._loaded_pipelines.add(record.pipeline_run_id)
             self._append_record_to_file(record)
@@ -448,7 +465,12 @@ class ExecutionRecordStorage:
         return record.record_id
 
     def get(self, record_id: str) -> ExecutionRecordData | None:
-        return self._records.get(record_id)
+        # 组合 key（record_id::sequence）后，record_id 不再是 dict key。
+        # 全项目无调用方，保留接口向后兼容：返回该 record_id 的第一条记录。
+        for r in self._records.values():
+            if r.record_id == record_id:
+                return r
+        return None
 
     def list_by_session(
         self, session_id: str, limit: int = 50

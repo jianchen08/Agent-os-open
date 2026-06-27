@@ -13,7 +13,6 @@ import json  # noqa: F401
 import logging
 import os  # noqa: F401
 import sys  # noqa: F401
-import time
 import uuid  # noqa: F401
 from dataclasses import dataclass, field  # noqa: F401
 from datetime import datetime, timezone  # noqa: F401
@@ -33,22 +32,21 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 class PipelineContext:
-    """管道引擎上下文，按 pipeline_id 管理独立的引擎实例。
+    """管道引擎上下文（启动期共享配置容器）。
 
     由 ``_init_pipeline_context()`` 创建，在 WebSocket 处理中通过
-    ``_pipeline_ctx`` 全局变量访问。
+    ``_pipeline_ctx`` 全局变量访问。持有启动期共享的 pipeline_config /
+    plugin_registry / services，供初始化使用。
 
-    每调用 ``get_or_create_engine(pipeline_id)`` 时，若该 pipeline_id
-    尚无引擎实例，则基于共享的 pipeline_config / plugin_registry / services
-    创建一个新的 PipelineEngine，确保管道之间状态完全隔离。
+    引擎实例的生命周期由 EngineRegistry 统一管理（I1），本类不再缓存引擎。
 
     Attributes:
-        engine: 默认 PipelineEngine 实例（向后兼容）
-        agent_config: 默认 Agent 配置（灵汐）
+        engine: 默认 PipelineEngine 实例（启动期，向后兼容）
+        agent_config: 默认 Agent 配置
         services: 共享服务字典
         available: 是否成功初始化
-        pipeline_config: 管道配置（用于创建新引擎）
-        plugin_registry: 插件注册表（用于创建新引擎）
+        pipeline_config: 管道配置
+        plugin_registry: 插件注册表
     """
 
     def __init__(
@@ -79,80 +77,11 @@ class PipelineContext:
         self.pipeline_config = pipeline_config
         self.plugin_registry = plugin_registry
         self.app = app
-        self._engines: dict[str, Any] = {}
-        self._engine_last_active: dict[str, float] = {}
         if engine is not None:
             engine._pipeline_id = ""
             self.engine = engine
-
-    def get_or_create_engine(self, pipeline_id: str) -> Any:
-        """获取或创建指定 pipeline_id 的独立引擎实例。
-
-        每个 pipeline_id 对应一个独立的 PipelineEngine 实例，
-        确保管道之间状态完全隔离，通知不会串线。
-        """
-        if pipeline_id in self._engines:
-            self._engine_last_active[pipeline_id] = time.monotonic()
-            return self._engines[pipeline_id]
-        new_engine = self.app.create_pipeline_engine(
-            self.pipeline_config,
-            self.plugin_registry,
-            self.services,
-        )
-        new_engine._pipeline_id = pipeline_id
-        self._engines[pipeline_id] = new_engine
-        self._engine_last_active[pipeline_id] = time.monotonic()
-        return new_engine
-
-    def cleanup_engine(self, pipeline_id: str) -> bool:
-        """清理指定 pipeline_id 的引擎实例，释放资源。
-
-        BUG-FIX-fix_20260523_engine_memory_leak:
-        问题根因: _engines 字典只增不减，长时间运行后引擎实例累积导致内存泄漏。
-        修复方案: 提供显式清理方法，在引擎完成或管道挂起超时后调用。
-
-        Args:
-            pipeline_id: 要清理的管道 ID
-
-        Returns:
-            是否成功清理（True 表示该引擎存在并已被移除）
-        """
-        engine = self._engines.pop(pipeline_id, None)
-        self._engine_last_active.pop(pipeline_id, None)
-        if engine is not None:
-            logger.info(
-                "cleanup_engine: 已清理引擎 pipeline=%s, 剩余引擎数=%d",
-                pipeline_id[:12], len(self._engines),
-            )
-            return True
-        return False
-
-    def cleanup_idle_engines(self, max_age_seconds: float = 3600) -> int:
-        """清理所有超过指定时间未活跃的引擎实例。
-
-        BUG-FIX-fix_20260523_engine_memory_leak:
-        遍历所有引擎，清理超过 max_age_seconds 未被 get_or_create_engine 访问的实例。
-
-        Args:
-            max_age_seconds: 最大空闲秒数，默认 3600（1小时）
-
-        Returns:
-            清理的引擎数量
-        """
-        now = time.monotonic()
-        to_remove = [
-            pid for pid, last_active in self._engine_last_active.items()
-            if (now - last_active) > max_age_seconds
-        ]
-        for pid in to_remove:
-            self._engines.pop(pid, None)
-            self._engine_last_active.pop(pid, None)
-        if to_remove:
-            logger.info(
-                "cleanup_idle_engines: 清理 %d 个空闲引擎（阈值=%.0fs）, 剩余=%d",
-                len(to_remove), max_age_seconds, len(self._engines),
-            )
-        return len(to_remove)
+        # _engines 第二套注册表缓存已删除（遗留死代码，无外部调用方）。
+        # 引擎生命唯一由 EngineRegistry 管理（I1）。
 
 
 # 全局管道上下文（延迟初始化）

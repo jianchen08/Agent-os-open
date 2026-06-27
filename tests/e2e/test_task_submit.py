@@ -5,15 +5,42 @@
 
 由于完整任务执行依赖管道引擎和 LLM，本测试聚焦 API 层面的
 任务 CRUD 和状态转换验证，不触发实际 Agent 执行。
+
+数据清理：所有测试创建的任务由 created_tasks fixture 在 teardown 统一删除，
+避免污染 DB（DELETE /api/v1/tasks/{id}）。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
-# 内部辅助 — 创建任务并返回 ID
+# 数据清理 fixture — 收集创建的 task_id，teardown 统一删除
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def created_tasks(test_client: Any, auth_headers: dict[str, str]) -> list[str]:
+    """收集测试创建的 task_id，teardown 时批量删除（防 DB 污染）。
+
+    用法：测试里 _create_task(...) 后把 id append 进 created_tasks。
+    """
+    task_ids: list[str] = []
+
+    yield task_ids
+
+    # teardown：尽力删除，失败不阻断（任务可能已被测试自身删除）
+    for tid in task_ids:
+        try:
+            test_client.delete(f"/api/v1/tasks/{tid}", headers=auth_headers)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 内部辅助 — 创建任务并返回 ID（自动登记到 created_tasks 清理）
 # ---------------------------------------------------------------------------
 
 def _create_task(
@@ -21,6 +48,7 @@ def _create_task(
     auth_headers: dict[str, str],
     agent_id: str,
     title: str = "E2E 测试任务",
+    created_tasks: list[str] | None = None,
     **extra: Any,
 ) -> str:
     """创建任务并返回任务 ID（供需要 task_id 的测试函数复用）。
@@ -30,6 +58,7 @@ def _create_task(
         auth_headers: 认证请求头
         agent_id: Agent ID
         title: 任务标题
+        created_tasks: 清理列表（非 None 时登记 id 供 teardown 删除）
         **extra: 额外字段（如 priority、tags）
 
     Returns:
@@ -39,7 +68,10 @@ def _create_task(
     payload.update(extra)
     resp = test_client.post("/api/v1/tasks/", json=payload, headers=auth_headers)
     assert resp.status_code == 201, f"创建任务失败: {resp.text}"
-    return resp.json()["id"]
+    task_id = resp.json()["id"]
+    if created_tasks is not None:
+        created_tasks.append(task_id)
+    return task_id
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +122,7 @@ def test_create_task_pending(
     test_client: Any,
     auth_headers: dict[str, str],
     available_agent_id: str,
+    created_tasks: list[str],
 ) -> None:
     """创建任务，初始状态为 pending。
 
@@ -115,12 +148,14 @@ def test_create_task_pending(
     assert task["status"] == "pending", f"初始状态应为 pending，得到 {task['status']}"
     assert task["title"] == "E2E 测试任务"
     assert task["id"], "任务 ID 不应为空"
+    created_tasks.append(task["id"])
 
 
 def test_get_task_detail(
     test_client: Any,
     auth_headers: dict[str, str],
     available_agent_id: str,
+    created_tasks: list[str],
 ) -> None:
     """获取任务详情。
 
@@ -130,7 +165,8 @@ def test_get_task_detail(
     - 返回的 task id 与创建时一致
     """
     task_id = _create_task(
-        test_client, auth_headers, available_agent_id, title="查询测试"
+        test_client, auth_headers, available_agent_id, title="查询测试",
+        created_tasks=created_tasks,
     )
 
     resp = test_client.get(f"/api/v1/tasks/{task_id}", headers=auth_headers)
@@ -158,6 +194,7 @@ def test_task_status_transitions(
     test_client: Any,
     auth_headers: dict[str, str],
     available_agent_id: str,
+    created_tasks: list[str],
 ) -> None:
     """任务状态转换：pending → running → completed。
 
@@ -168,7 +205,8 @@ def test_task_status_transitions(
     - 每次 GET 验证状态正确
     """
     task_id = _create_task(
-        test_client, auth_headers, available_agent_id, title="状态转换测试"
+        test_client, auth_headers, available_agent_id, title="状态转换测试",
+        created_tasks=created_tasks,
     )
 
     # 验证初始状态
@@ -203,6 +241,7 @@ def test_task_list_with_pagination(
     test_client: Any,
     auth_headers: dict[str, str],
     available_agent_id: str,
+    created_tasks: list[str],
 ) -> None:
     """任务列表分页查询。
 
@@ -213,7 +252,8 @@ def test_task_list_with_pagination(
     """
     for i in range(3):
         _create_task(
-            test_client, auth_headers, available_agent_id, title=f"分页测试 {i}"
+            test_client, auth_headers, available_agent_id, title=f"分页测试 {i}",
+            created_tasks=created_tasks,
         )
 
     resp = test_client.get(
@@ -233,6 +273,7 @@ def test_task_list_filter_by_status(
     test_client: Any,
     auth_headers: dict[str, str],
     available_agent_id: str,
+    created_tasks: list[str],
 ) -> None:
     """任务列表按状态筛选。
 
@@ -242,7 +283,8 @@ def test_task_list_filter_by_status(
     - GET /api/v1/tasks/?status=completed 返回包含该任务
     """
     task_id = _create_task(
-        test_client, auth_headers, available_agent_id, title="筛选测试"
+        test_client, auth_headers, available_agent_id, title="筛选测试",
+        created_tasks=created_tasks,
     )
 
     test_client.patch(

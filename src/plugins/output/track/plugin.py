@@ -455,17 +455,17 @@ class TrackPlugin(IOutputPlugin):
             # 见 _resolve_ai_record_id 的 BUG-FIX 说明（修复多轮/resume 场景 id 断裂导致的重复渲染）。
             preset_record_id = ctx.state.get("preset_ai_record_id") or ""
             ai_record_id = self._resolve_ai_record_id(pipeline_run_id, preset_record_id)
-            # BUG-FIX-fix_20260625_ai_record_id_duplicate:
-            # 问题根因: 一个 run() 包含多轮 LLM 迭代（while 循环），bridge.message_id
-            #   在整个 run 期间不变（一个气泡），但每轮迭代都会落盘一条 ai 记录。
-            #   若所有 ai 记录共用同一 record_id，storage._records dict 会互相覆盖，
-            #   导致 list_by_pipeline 回读时丢失中间轮次的 ai 记录 → tool 结果变孤儿
-            #   → normalize 清理 → 继承/重试时历史残缺。
-            # 修复方案: 首轮迭代（iteration==1）用裸 message_id（保持前端 id 契约），
-            #   后续迭代追加 #iteration 后缀保证唯一。前端按 sequence 渲染消息，
-            #   record_id 仅作 React key，带后缀不影响渲染。
-            if iteration > 1:
-                ai_record_id = f"{ai_record_id}#{iteration}"
+            # BUG-FIX-fix_20260625_ai_record_id_duplicate（已修订）:
+            #   一个 run() 包含多轮 LLM 迭代（while 循环），bridge.message_id 在整个
+            #   run 期间不变（一个气泡），但每轮迭代都会落盘一条 ai 记录。原方案给
+            #   iteration>1 的记录追加 #iteration 后缀以避免 storage._records dict 互相
+            #   覆盖。但这破坏了 id 契约——record_id 与前端 stream_start 下发的裸
+            #   message_id 不一致，导致前端 initFromAPI 精确 id 对账失败，乐观占位符
+            #   （虚高 sequence）无法被 API 权威消息替换而残留，表现为「流式气泡下
+            #   多出一个固定气泡 / 旧消息卡在列表底部」。
+            # 修订方案: record_id 始终保持裸 message_id（与前端 id 契约一致）；
+            #   同 record_id 多轮记录的覆盖问题改由 ExecutionRecordStorage 的组合 key
+            #   （record_id::sequence）解决，不再在此处加后缀。
             ai_record = ExecutionRecordData(
                 record_id=ai_record_id,
                 pipeline_run_id=pipeline_run_id,

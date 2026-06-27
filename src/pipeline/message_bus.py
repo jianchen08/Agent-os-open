@@ -200,6 +200,24 @@ async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> Inj
             pipeline_id=pipeline_id,
         )
     engine = entry.engine
+    # 诊断：投递停止信号前打印 engine_task 归属与引擎运行状态。
+    # 这一步以前是诊断盲区（_interrupt_engine_task 三分支全是 debug 级，INFO 日志看不到
+    # cancel 到底走了 None/done/取消哪条）。在这里提前打印，复现时能直接定位
+    # "信号投递了但没停"到底卡在哪一环。
+    _et = entry.engine_task
+    _et_state = (
+        "None" if _et is None
+        else ("done" if _et.done() else "active")
+    )
+    logger.info(
+        "[MessageBus] 停止信号投递诊断: pipeline=%s signal_type=%s "
+        "engine.is_running=%s engine.is_idle=%s engine_task=%s "
+        "engine_id=%d",
+        pipeline_id[:12], (msg.metadata or {}).get("signal_type", "?"),
+        getattr(engine, "is_running", "?"),
+        getattr(engine, "is_idle", "?"),
+        _et_state, id(engine),
+    )
     # 引擎暴露 deliver_signal 才支持信号机制；否则降级为日志
     if hasattr(engine, "deliver_signal"):
         try:
@@ -464,9 +482,59 @@ async def stop(pipeline_id: str) -> InjectResult:
     return InjectResult(success=True, method="stop", pipeline_id=pipeline_id)
 
 
+async def run_once(
+    message: PipelineMessage,
+    *,
+    cleanup: bool = True,
+) -> tuple[InjectResult, dict[str, Any]]:
+    """同步执行并拿结果：send → 等引擎结束 → 读 final state → (可选 stop)。
+
+    供"执行一次拿结果"的同步场景（API/CLI 单次/评估）复用。包装"等结束+读状态"
+    的等待逻辑，使用者不必直接接触 entry/engine 引用。
+
+    前置条件：message.pipeline_id 对应的管道必须已由持有者注册（I4）。
+    未注册时 send 会拒绝——本函数不负责 register（那是持有者的职责）。
+
+    Args:
+        message: 消息对象（pipeline_id 必须指向已注册管道）。
+        cleanup: 是否在执行后 stop 清理。一次性场景传 True，复用场景传 False。
+
+    Returns:
+        (InjectResult, final_state)：注入结果与引擎最终状态字典。
+        注入失败（如未注册）时 final_state 为空字典。
+    """
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
+    registry = get_engine_registry()
+    pipeline_id = message.pipeline_id
+
+    # ① send（触发 run；未注册则 send 拒绝，由持有者负责 register）
+    inject_result = await send_pipeline_message(message)
+    if not inject_result.success:
+        return (inject_result, {})
+
+    # ② 等引擎主循环结束（经 entry 访问 engine_task，使用者不持有 engine）
+    entry = registry.get(pipeline_id)
+    if entry is not None and entry.engine_task is not None:
+        await entry.engine_task
+
+    # ③ 读 final state（经 entry 访问，使用者不持有 engine）
+    final_state = entry.engine.last_state if entry is not None else {}
+
+    # ④ 可选 stop 清理（一次性场景）
+    if cleanup:
+        try:
+            await stop(pipeline_id)
+        except Exception as exc:
+            logger.debug("[MessageBus] run_once cleanup 失败（非致命）: %s", exc)
+
+    return (inject_result, final_state)
+
+
 __all__ = [
     "InjectResult",
     "send_pipeline_message",
     "emit",
     "stop",
+    "run_once",
 ]

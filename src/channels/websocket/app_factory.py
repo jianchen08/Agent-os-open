@@ -115,17 +115,10 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 except Exception as exc:
                     logger.warning("TaskWorker start failed (app startup): %s", exc, exc_info=True)
 
-        # 持有者启动恢复：TaskWorker 扫描 running/pending 任务重新注册管道。
-        # 替代原 pipeline_reviver.restore_pipelines_on_startup（已删除）。
-        # 任务系统是任务管道的持有者，恢复由持有者负责。
-        try:
-            tw_restore = getattr(stream_handler, "_task_worker", None)
-            if tw_restore and hasattr(tw_restore, "restore_running_pipelines"):
-                _task_pipe_count = await tw_restore.restore_running_pipelines()
-                if _task_pipe_count:
-                    logger.info("启动恢复: TaskWorker 已恢复 %d 个任务管道", _task_pipe_count)
-        except Exception as exc:
-            logger.debug("TaskWorker restore_running_pipelines skipped: %s", exc)
+        # 启动时不注册任何管道：注册是明确的调用方行为（任务管理工具启动任务时）。
+        # 重启后的 running/pending 任务由 TaskWorker._recover_running_tasks 标记为
+        # suspended（执行被中断），等用户明确恢复时再由调用方 register。
+        # 原来的 restore_running_pipelines 自动注册已删除（与 pause 语义冲突）。
 
         # 会话系统启动恢复：从 api_store 注册所有会话管道（含 agent_id）
         try:
@@ -522,8 +515,8 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                         # 走 message_bus 信号路径：写 state["pending_signals"]，由插件读取处理。
                         # 不再穿透引擎私有成员（_suspended_state/_wake_event/_run_started）——
                         # 那是反模式，已由 I3 内部自治 + 信号机制取代。
-                        from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
-                        # 标注 signal_type 供插件识别（metadata 复用，data 里已有 type=stop_generation）
+                        # send_pipeline_message 用模块级 import（行 50），勿在此函数内重复
+                        # import，否则会制造作用域 bug（426 行 user_input 分支引用被误判局部）。
                         _stop_msg.metadata.setdefault("signal_type", "stop_generation")
                         for _pid in _all_pipeline_ids:
                             await send_pipeline_message(_stop_msg)

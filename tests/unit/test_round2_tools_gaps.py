@@ -41,68 +41,56 @@ class TestToolDefinition:
 
 
 class TestToolRegistry:
-    """F-TOOL-01/02: 工具注册与查找"""
+    """F-TOOL-01/02: 工具注册与查找
+
+    源码 ToolRegistry.register 接收 Tool 对象（非 name=/func= 散参）。
+    register 重复抛 ToolAlreadyExistsError；get 不存在抛 ToolNotFoundError。
+    """
+
+    @staticmethod
+    def _make_tool(name: str, description: str = "A test tool"):
+        from src.tools.types import Tool, ToolSource
+        return Tool(
+            name=name,
+            description=description,
+            input_schema={"type": "object", "properties": {}},
+            source=ToolSource.CODE,
+        )
 
     def test_registry_register_and_get(self):
         """注册工具后可通过名称查找"""
-        try:
-            from src.tools.registry import ToolRegistry
-            registry = ToolRegistry()
-
-            def dummy_handler(**kwargs):
-                return {"status": "ok"}
-
-            registry.register(
-                name="test_tool",
-                func=dummy_handler,
-                schema={"type": "object", "properties": {}},
-                description="A test tool"
-            )
-            td = registry.get("test_tool")
-            assert td.name == "test_tool"
-        except ImportError:
-            pytest.skip("ToolRegistry 模块路径不同")
+        from src.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        registry.register(self._make_tool("test_tool"))
+        td = registry.get("test_tool")
+        assert td.name == "test_tool"
 
     def test_registry_get_nonexistent(self):
-        """查找不存在的工具应抛出 KeyError"""
-        try:
-            from src.tools.registry import ToolRegistry
-            registry = ToolRegistry()
-            with pytest.raises(KeyError):
-                registry.get("nonexistent_tool_xyz")
-        except ImportError:
-            pytest.skip("ToolRegistry 模块路径不同")
+        """查找不存在的工具应抛 ToolNotFoundError"""
+        from core.exceptions import ToolNotFoundError
+        from src.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        with pytest.raises(ToolNotFoundError):
+            registry.get("nonexistent_tool_xyz")
 
     def test_registry_has(self):
         """has() 方法正确返回布尔值"""
-        try:
-            from src.tools.registry import ToolRegistry
-            registry = ToolRegistry()
-
-            registry.register(
-                name="exists_tool",
-                func=lambda **kw: None,
-                schema={},
-                description="test"
-            )
-            assert registry.has("exists_tool") is True
-            assert registry.has("not_exists") is False
-        except ImportError:
-            pytest.skip("ToolRegistry 模块路径不同")
+        from src.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        registry.register(self._make_tool("exists_tool"))
+        assert registry.has("exists_tool") is True
+        assert registry.has("not_exists") is False
 
     def test_registry_list_tools(self):
-        """list_tools 返回所有已注册工具"""
-        try:
-            from src.tools.registry import ToolRegistry
-            registry = ToolRegistry()
-            registry.register("t1", lambda **kw: None, {}, "desc1")
-            registry.register("t2", lambda **kw: None, {}, "desc2")
-            tools = registry.list_tools()
-            names = [t.name for t in tools]
-            assert "t1" in names
-            assert "t2" in names
-        except ImportError:
-            pytest.skip("ToolRegistry 模块路径不同")
+        """list_all 返回所有已注册工具"""
+        from src.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        registry.register(self._make_tool("t1"))
+        registry.register(self._make_tool("t2"))
+        tools = registry.list_all()
+        names = [t.name for t in tools]
+        assert "t1" in names
+        assert "t2" in names
 
 
 class TestToolForLLM:
@@ -110,26 +98,24 @@ class TestToolForLLM:
 
     def test_get_tools_for_llm_format(self):
         """get_tools_for_llm 返回 OpenAI function calling 格式"""
-        try:
-            from src.tools.registry import ToolRegistry
-            registry = ToolRegistry()
-            registry.register(
-                name="file_read",
-                func=lambda **kw: None,
-                schema={
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                },
-                description="Read file"
-            )
-            tools_for_llm = registry.get_tools_for_llm()
-            assert len(tools_for_llm) >= 1
-            # OpenAI 格式有 function 字段
-            first = tools_for_llm[0]
-            assert "function" in first or "name" in first
-        except ImportError:
-            pytest.skip("ToolRegistry 模块路径不同")
+        from src.tools.registry import ToolRegistry
+        from src.tools.types import Tool, ToolSource
+        registry = ToolRegistry()
+        registry.register(Tool(
+            name="file_read",
+            description="Read file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            source=ToolSource.CODE,
+        ))
+        tools_for_llm = registry.get_tools_for_llm()
+        assert len(tools_for_llm) >= 1
+        # OpenAI 格式有 function 字段
+        first = tools_for_llm[0]
+        assert "function" in first or "name" in first
 
 
 class TestToolErrorPolicy:

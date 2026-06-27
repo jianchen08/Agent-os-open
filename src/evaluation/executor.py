@@ -48,10 +48,9 @@ class EvaluationExecutor:
         loader: MetricLoader | None = None,
         engine: EvaluationEngine | None = None,
         mapper: ResultMapper | None = None,
-        tool_registry: Any | None = None,
-        pipeline_factory: Any | None = None,
-        agent_registry: Any | None = None,
-        main_loop: Any | None = None,
+        tool_registry: Any = None,
+        agent_registry: Any = None,
+        main_loop: Any = None,
     ) -> None:
         """初始化评估执行器。
 
@@ -61,7 +60,6 @@ class EvaluationExecutor:
             engine: 评估引擎，None 时根据 loader 和其他参数创建默认实例
             mapper: 结果映射器，None 时创建默认实例
             tool_registry: 工具注册表，传递给 EvaluationEngine 用于真实工具调用
-            pipeline_factory: 创建 PipelineEngine 的工厂，传递给 EvaluationEngine
             agent_registry: AgentRegistry 实例，传递给 EvaluationEngine
             main_loop: 主事件循环引用，传递给 EvaluationEngine
         """
@@ -70,7 +68,6 @@ class EvaluationExecutor:
         self._engine = engine or EvaluationEngine(
             loader=self._loader,
             tool_registry=tool_registry,
-            pipeline_factory=pipeline_factory,
             agent_registry=agent_registry,
             main_loop=main_loop,
         )

@@ -10,6 +10,8 @@
     state["has_tool_calls"] == True       — 布尔比较
     state["error"] is_empty               — 空值检查
     state["error"] is_not_empty           — 非空检查
+    state["error"] is None                — None 检查
+    state["error"] is not None            — 非 None 检查
     a == 1 and b != 2                     — 布尔 and
     a == 1 or b == 2                      — 布尔 or
     not a                                 — 布尔取反
@@ -26,8 +28,8 @@ logger = logging.getLogger(__name__)
 _TOKEN_PATTERNS = [
     ("STRING", r'"[^"]*"|\'[^\']*\''),
     ("NUMBER", r"-?\d+\.?\d*"),
-    ("BOOL", r"\bTrue\b|\bFalse\b"),
-    ("KEYWORD", r"\band\b|\bor\b|\bnot\b|\bin\b|\bis_empty\b|\bis_not_empty\b|\bnot_in\b"),
+    ("BOOL", r"\bTrue\b|\bFalse\b|\bNone\b"),
+    ("KEYWORD", r"\band\b|\bor\b|\bnot\b|\bin\b|\bis_empty\b|\bis_not_empty\b|\bnot_in\b|\bis\b"),
     ("OP", r"!=|==|>=|<=|>|<"),
     ("BRACKET", r"\[|\]"),
     ("LPAREN", r"\("),
@@ -132,6 +134,18 @@ class _Parser:
             self._advance()
             return left is not None and left not in ("", [], {})
 
+        # is None / is not None：身份比较，常用于判断字段是否未设置。
+        # 语法 state["x"] is None / state["x"] is not None。
+        if tok[1] == "is":
+            self._advance()
+            negated = False
+            if self._peek() and self._peek()[1] == "not":
+                self._advance()
+                negated = True
+            right = self._parse_primary()
+            result = left is right if not negated else left is not right
+            return result
+
         if tok[1] == "in":
             self._advance()
             right = self._parse_primary()
@@ -165,7 +179,10 @@ class _Parser:
             raise ValueError("Unexpected end of expression")
 
         if tok[0] == "BOOL":
-            return self._advance()[1] == "True"
+            value = self._advance()[1]
+            if value == "None":
+                return None
+            return value == "True"
 
         if tok[0] == "NUMBER":
             value = self._advance()[1]

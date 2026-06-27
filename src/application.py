@@ -681,20 +681,25 @@ class Application:
         plugin_registry: Any,
         services: dict[str, Any] | None = None,
     ) -> Any:
-        """创建 PipelineEngine 实例。"""
-        from pipeline.engine import PipelineEngine  # noqa: PLC0415
+        """创建并注册 PipelineEngine 实例（经 EngineRegistry，I1）。
+
+        所有引擎必须经注册表创建——外部不私自 new 引擎。本方法封装
+        register_pipeline，下游拿到的 engine 已在注册表中。
+        """
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
         svc = services or self.services
-        checkpoint_mgr = svc.get("checkpoint_manager")
-        engine = PipelineEngine(
+        entry = get_engine_registry().register_pipeline(
             input_route_table=pipeline_config.input_route_table,
             output_route_table=pipeline_config.output_route_table,
             plugin_registry=plugin_registry,
             services=svc,
-            checkpoint_manager=checkpoint_mgr,
         )
-        logger.debug("PipelineEngine 通过 Application 创建完成")
-        return engine
+        if entry is None:
+            logger.warning("create_pipeline_engine: register_pipeline 失败（四件套缺失）")
+            return None
+        logger.debug("PipelineEngine 经注册表创建完成: pid=%s", entry.engine.pipeline_id[:12])
+        return entry.engine
 
     def create_task_worker(
         self,
@@ -753,16 +758,24 @@ class Application:
         pipeline_config: Any,
         plugin_registry: Any,
     ) -> Callable[[], Any]:
-        """创建 PipelineEngine 工厂函数。"""
-        from pipeline.engine import PipelineEngine  # noqa: PLC0415
+        """创建 PipelineEngine 工厂函数（经 EngineRegistry，I1）。
+
+        factory() 每次调用都经 register_pipeline 创建并注册新引擎，
+        不再私自 new 野引擎。下游（evaluation 等）拿到的 engine 已在注册表。
+        """
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
         def factory() -> Any:
-            return PipelineEngine(
+            entry = get_engine_registry().register_pipeline(
                 input_route_table=pipeline_config.input_route_table,
                 output_route_table=pipeline_config.output_route_table,
                 plugin_registry=plugin_registry,
                 services=self.services,
             )
+            if entry is None:
+                logger.warning("pipeline_factory: register_pipeline 失败（四件套缺失）")
+                return None
+            return entry.engine
 
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415

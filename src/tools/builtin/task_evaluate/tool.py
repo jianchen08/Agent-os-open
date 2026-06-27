@@ -894,7 +894,6 @@ class TaskEvaluateTool(BuiltinTool):
 
         from evaluation.executor import EvaluationExecutor  # noqa: PLC0415
 
-        pipeline_factory = self._get_pipeline_factory()
         agent_registry = self._get_agent_registry()
         tool_registry = self._get_tool_registry()
 
@@ -915,49 +914,10 @@ class TaskEvaluateTool(BuiltinTool):
 
         return EvaluationExecutor(
             task_service=task_service,
-            pipeline_factory=pipeline_factory,
             agent_registry=agent_registry,
             tool_registry=tool_registry,
             main_loop=main_loop,
         )
-
-    @staticmethod
-    def _get_pipeline_factory() -> Any:
-        """获取管道工厂（创建 PipelineEngine 的可调用对象）。
-
-        通过 ServiceProvider 统一获取，保留从 _agent_os_services 构建的兜底逻辑。
-        """
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-        provider = get_service_provider()
-        factory = provider.get("pipeline_factory")
-        if factory is not None:
-            return factory
-
-        # 兜底：从 _agent_os_services 构建 pipeline factory
-        services = provider.get("services")
-        if services is None:
-            return None
-
-        try:
-            from tools.tool_context import PipelineEngine  # noqa: PLC0415
-
-            input_routes = services.get("input_route_table")
-            output_routes = services.get("output_route_table")
-            plugin_registry = services.get("plugin_registry")
-
-            if input_routes and output_routes and plugin_registry:
-                def _factory():
-                    return PipelineEngine(
-                        input_route_table=input_routes,
-                        output_route_table=output_routes,
-                        plugin_registry=plugin_registry,
-                        services=services,
-                    )
-                return _factory
-        except Exception:
-            pass
-
-        return None
 
     @staticmethod
     def _get_agent_registry() -> Any:

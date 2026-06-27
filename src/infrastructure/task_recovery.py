@@ -254,15 +254,14 @@ class TaskRecoveryMixin:
         # 3. 构建 input_params
         input_params = self._build_recovery_input_params(task, metric_ids)
 
-        # 4. 创建 EvaluationExecutor
-        pipeline_factory = self._services.get("pipeline_factory")
+        # 4. 创建 EvaluationExecutor（evaluation 链已不再需要 pipeline_factory，
+        #    引擎经 EngineRegistry.register_pipeline 创建）
         agent_registry = self._services.get("agent_registry")
         tool_registry = self._services.get("tool_registry")
 
         loop = _asyncio.get_running_loop()
         executor = EvaluationExecutor(
             task_service=self._task_service,
-            pipeline_factory=pipeline_factory,
             agent_registry=agent_registry,
             tool_registry=tool_registry,
             main_loop=loop,

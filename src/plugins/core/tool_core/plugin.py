@@ -61,6 +61,40 @@ def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
         # 它们有自己的生命周期管理（通过 asyncio.to_thread 独立事件循环）
         loop.close()
 
+
+def _recover_workspace_from_task(state: dict[str, Any], task_id: str) -> str | None:
+    """state 中 workspace 缺失时，从任务数据反查恢复。
+
+    workspace 经 engine.run(workspace=...) → extra_state → state 注入，但观测到
+    在任务运行中途（如 human_interaction 交互、消息注入后）会从 state 丢失。
+    task_id 通常仍在 state 中，task.metadata.ws_meta.path 持久存活（不被运行
+    状态变更清除），是恢复 workspace 的可靠来源。
+
+    Args:
+        state: 管道状态字典
+        task_id: 当前任务 ID（state 中读取，可能为 "unknown" 占位）
+
+    Returns:
+        解析出的工作空间绝对路径；无法解析返回 None
+    """
+    if not task_id or task_id == "unknown":
+        return None
+    try:
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from tasks.workspace import resolve_task_workspace  # noqa: PLC0415
+
+        provider = get_service_provider()
+        task_service = provider.get("task_service") if provider else None
+        if not task_service:
+            return None
+        task = task_service.get_task(task_id)  # noqa: SLF001
+        if task is None:
+            return None
+        return resolve_task_workspace(task)
+    except Exception:
+        return None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -320,13 +354,38 @@ class ToolCore(ICorePlugin):
         # 空/不存在的 /workspace 目录且 exit 0，表现为“目录看不到”却无任何报错，
         # 极难排查。
         # BUG-FIX-fix_20260625_isolated_no_workspace
+        # BUG-FIX-fix_20260627_workspace_lost_midrun:
+        # 观测到 workspace 在任务运行中途从 state 丢失（如 human_interaction
+        # 交互/消息注入后），而非仅发生在 revive/idle 启动路径。治标：此处按需
+        # 用 state 中仍存的 task_id 反查 task.metadata.ws_meta.path 恢复，
+        # 覆盖所有丢失路径。治本仍需定位 state 重建清空 workspace 的精确环节。
         if not workspace:
+            workspace = _recover_workspace_from_task(state, task_id)
+            if workspace:
+                logger.warning(
+                    "[tool_core] bash_execute workspace 在运行中丢失，已从任务数据恢复 | "
+                    "task=%s | pipeline_id=%s | ws=%s",
+                    task_id, state.get("pipeline_id", "?"), workspace,
+                )
+
+        if not workspace:
+            # 诊断：打出报错现场全貌，定位 workspace 是在哪条链路丢失的。
+            # use_docker 由 execution_contexts 决定（isolation_guard 写入）；
+            # workspace 应经 engine.run(workspace=...) → extra_state → state。
+            _exec_ctxs = state.get("execution_contexts", [])
+            _bash_ctx = next((c for c in _exec_ctxs if c.get("tool_name") == "bash_execute"), None)
             logger.error(
                 "[tool_core] bash_execute 容器隔离被拒绝：state 中无 workspace | "
-                "task=%s | has_task_id=%s | pipeline_id=%s",
+                "task=%s | has_task_id=%s | pipeline_id=%s | "
+                "ws_meta_keys=%s | has_session_id=%s | provider=%s | "
+                "state_top_keys=%s",
                 task_id,
                 bool(state.get("task_id")),
                 state.get("pipeline_id", "?"),
+                list((state.get("ws_meta") or {}).keys()) if isinstance(state.get("ws_meta"), dict) else state.get("ws_meta"),
+                bool(state.get("session_id")),
+                _bash_ctx.get("provider") if _bash_ctx else "no_ctx",
+                sorted(k for k in state if not k.startswith("_"))[:15],
             )
             return {
                 "tool_name": "bash_execute",
