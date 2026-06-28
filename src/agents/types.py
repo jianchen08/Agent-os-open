@@ -387,4 +387,40 @@ class AgentConfig:
             for i, c in enumerate(self.soft_constraints, 1):
                 parts.append(f"{i}. {c}")
 
+        parts.append(self._environment_context_block())
         return "\n".join(parts)
+
+    @staticmethod
+    def _environment_context_block() -> str:
+        """运行时探测并生成环境信息块，拼入系统提示词。
+
+        让 Agent 知道当前运行的宿主环境（OS/架构/shell）和容器执行环境，
+        从而写出符合当前环境的命令——而非依赖命令翻译。
+        容器执行环境恒为 Linux（cua 镜像基于 python:slim），跨机器一致；
+        宿主环境按运行时探测，部署到不同机器自动适配。
+        结果按进程缓存（环境不会在进程内变化）。
+        """
+        cached = getattr(AgentConfig, "_env_block_cache", None)  # noqa: PLC0415
+        if cached is not None:
+            return cached
+
+        import platform  # noqa: PLC0415
+        import shutil  # noqa: PLC0415
+
+        os_name = platform.system() or "unknown"
+        machine = platform.machine() or "unknown"
+        # 识别 shell：优先探测，失败则按 OS 给默认值
+        if os_name == "Windows":
+            shell = "cmd" if shutil.which("cmd") else "powershell"
+        else:
+            shell = "bash" if shutil.which("bash") else "sh"
+
+        block = (
+            "\n## 当前运行环境\n"
+            f"- 宿主操作系统: {os_name} {machine}\n"
+            f"- 宿主 Shell: {shell}\n"
+            "- 容器执行环境: Linux (sh -c), 容器内请写 POSIX 命令\n"
+            "- 请写符合当前环境的命令; 宿主机操作写宿主命令, 容器内操作写 POSIX 命令\n"
+        )
+        AgentConfig._env_block_cache = block  # type: ignore[attr-defined]
+        return block

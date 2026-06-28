@@ -61,6 +61,12 @@ class DockerProvider(IsolationProvider):
         self._workspace_mount = self._config.get("workspace_mount", True)
         self._environments: dict[str, IsolationEnvironment] = {}
         self._docker_available: bool | None = None
+        # docker CLI 调用并发上限：防止多任务同时 create/start/exec/inspect
+        # 打爆 daemon（尤其 WSL2 后端，daemon GIL/锁耗尽会假死冻死整个事件循环）。
+        # 默认 4，可经 config.max_docker_concurrency 覆盖。
+        import asyncio  # noqa: PLC0415
+        self._max_docker_concurrency = int(self._config.get("max_docker_concurrency", 4))
+        self._docker_sem = asyncio.Semaphore(self._max_docker_concurrency)
 
     def get_level(self) -> IsolationLevel:
         """获取隔离级别。"""
@@ -104,6 +110,8 @@ class DockerProvider(IsolationProvider):
         """统一执行命令（同步 subprocess + 线程池）。
 
         替代 asyncio.create_subprocess_exec，避免 Windows asyncio subprocess 静默失败。
+        通过全局信号量限制并发 docker CLI 调用数，防止连接风暴压垮 daemon
+        （多任务同时 create/start/exec 会让 daemon 锁耗尽，触发假死）。
 
         Args:
             args: 命令参数列表（如 ["docker", "exec", container, "sh", "-c", cmd]）
@@ -119,7 +127,8 @@ class DockerProvider(IsolationProvider):
             return proc.returncode, proc.stdout, proc.stderr
 
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _run)
+        async with self._docker_sem:
+            return await loop.run_in_executor(None, _run)
 
     def _make_error_environment(
         self,

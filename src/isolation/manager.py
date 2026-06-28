@@ -180,10 +180,48 @@ class IsolationManager:
 
         await self._resume_containers()
 
-        # 清理 Docker 镜像/构建缓存（异步不阻塞启动）
-        asyncio.ensure_future(self._prune_docker_images())
+        # 清理 Docker 镜像/构建缓存（异步不阻塞启动）。
+        # 限频：距上次清理不足 24h 则跳过，避免频繁启动管理器时反复对 daemon
+        # 施加全局持锁重操作（image/builder prune 会遍历所有镜像层），
+        # 加剧 WSL2 后端的 ext4.vhdx 锁死与 daemon 假死风险。
+        if self._should_prune():
+            asyncio.ensure_future(self._prune_docker_images())
+        else:
+            logger.debug("[IsolationManager] 跳过镜像清理（距上次不足 24h）")
 
         logger.debug("隔离环境管理器已启动")
+
+    _PRUNE_INTERVAL_SEC = 24 * 3600
+    _PRUNE_MARK_FILE = ".docker_prune_last"
+
+    def _should_prune(self) -> bool:
+        """是否应该执行镜像清理（距上次清理超 24h）。
+
+        用项目根的持久化标记文件记录上次清理时间，跨进程重启有效，
+        避免每次启动管理器就触发一次全局 prune。
+        """
+        from pathlib import Path  # noqa: PLC0415
+        import time  # noqa: PLC0415
+
+        mark = Path(self._PRUNE_MARK_FILE)
+        try:
+            last = mark.read_text(encoding="utf-8").strip()
+            if last and (time.time() - float(last)) < self._PRUNE_INTERVAL_SEC:
+                return False
+        except (FileNotFoundError, ValueError):
+            pass
+        except Exception:
+            logger.warning("[IsolationManager] 读取 prune 标记失败，执行清理", exc_info=True)
+        return True
+
+    def _mark_prune_done(self) -> None:
+        """记录本次清理完成的时间戳。"""
+        import time  # noqa: PLC0415
+        try:
+            with open(self._PRUNE_MARK_FILE, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception:
+            logger.warning("[IsolationManager] 写入 prune 标记失败", exc_info=True)
 
     async def _run_docker_sync(
         self, sync_fn: Any, *, timeout: float, op_name: str,
@@ -359,6 +397,9 @@ class IsolationManager:
                     "[IsolationManager] builder prune 跳过: %s",
                     err2.strip()[:200],
                 )
+
+            # 记录本次清理时间戳（即使部分跳过也算尝试过，限频防反复触发）
+            self._mark_prune_done()
 
         except FileNotFoundError:
             logger.debug("[IsolationManager] Docker CLI 不可用，跳过镜像清理")
