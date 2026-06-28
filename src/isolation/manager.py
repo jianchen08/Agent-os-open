@@ -185,6 +185,37 @@ class IsolationManager:
 
         logger.debug("隔离环境管理器已启动")
 
+    async def _run_docker_sync(
+        self, sync_fn: Any, *, timeout: float, op_name: str,
+    ) -> Any:
+        """在线程池执行同步 Docker SDK 调用，硬超时兜底防 daemon 假死。
+
+        docker Python SDK 的 HTTP 调用默认 socket 无超时，daemon 假死
+        （挂起不响应、不抛错）时会永久阻塞；这些调用若直接跑在事件循环
+        线程，会冻死整个 asyncio 事件循环（所有任务停摆，只能强杀进程）。
+        此处把同步调用丢进线程池 + asyncio.wait_for 硬超时兜底：
+        超时返回 None；异常透传由调用方按语义处理。
+
+        Args:
+            sync_fn: 同步可调用对象（封装一次完整的 docker SDK 交互）
+            timeout: 硬超时秒数
+            op_name: 操作名（日志标识）
+
+        Returns:
+            sync_fn 的返回值；超时返回 None；异常透传。
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, sync_fn), timeout=timeout,
+            )
+        except TimeoutError:
+            logger.warning(
+                f"[IsolationManager] {op_name} 超时({timeout}s)，"
+                f"daemon 可能假死，放弃操作"
+            )
+            return None
+
     async def _resume_containers(self):  # noqa: PLR0912
         """恢复未完成任务的容器，清理已完成/不存在任务的容器
 
@@ -199,7 +230,10 @@ class IsolationManager:
 
             import docker  # noqa: PLC0415
 
-            client = docker.from_env()
+            # timeout=10：daemon 假死时 HTTP 调用 10s 后超时抛异常，
+            # 避免永久阻塞冻死事件循环（本方法结构含循环+await，
+            # 不做完整线程池拆分，靠 socket 超时兜底）
+            client = docker.from_env(timeout=10)
             containers = client.containers.list(all=True)
 
             active_ws_keys = await self._load_active_workspace_keys()
@@ -394,7 +428,8 @@ class IsolationManager:
 
             import docker  # noqa: PLC0415
 
-            client = docker.from_env()
+            # timeout=10：daemon 假死时 HTTP 调用 10s 后超时抛异常，避免永久阻塞
+            client = docker.from_env(timeout=10)
             containers = client.containers.list(all=True)
 
             active_ws_keys = await self._load_active_workspace_keys()
@@ -604,80 +639,110 @@ class IsolationManager:
     async def _find_existing_container(
         self, container_name: str
     ) -> IsolationEnvironment | None:
-        """查找已存在的容器"""
+        """查找已存在的容器（异步外壳：线程池+硬超时防 daemon 假死阻塞）。
+
+        同步实现见 _find_existing_container_sync；超时/异常均返回 None，
+        不冻死事件循环。
+        """
         try:
-            from docker.errors import NotFound  # noqa: PLC0415
-
-            import docker  # noqa: PLC0415
-
-            client = docker.from_env()
-
-            try:
-                container = client.containers.get(container_name)
-
-                if container.status == "exited":
-                    container.start()
-                    logger.debug(
-                        f"[IsolationManager] 已恢复停止的容器: {container_name}"
-                    )
-
-                workspace_path = None
-                mounts = container.attrs.get("Mounts", [])
-                for mount in mounts:
-                    if (
-                        mount.get("Destination") == "/workspace"
-                        and mount.get("Type") == "bind"
-                    ):
-                        workspace_path = mount.get("Source")
-                        break
-
-                if workspace_path:
-                    from pathlib import Path  # noqa: PLC0415
-
-                    workspace_dir = Path(workspace_path)
-                    if not workspace_dir.exists():
-                        logger.debug(
-                            f"[IsolationManager] 工作空间目录不存在，正在创建: {workspace_path}"
-                        )
-                        workspace_dir.mkdir(parents=True, exist_ok=True)
-                        logger.debug(
-                            f"[IsolationManager] 已创建工作空间目录: {workspace_path}"
-                        )
-
-                now = datetime.now(UTC)
-
-                # 统一使用 container_name 作为 env_id（与 create_environment 一致），
-                # 同一 workspace 对应同一 container_name，env_id 稳定不变。
-                env = IsolationEnvironment(
-                    env_id=container_name,
-                    level=IsolationLevel.CONTAINER,
-                    provider_type="cua",
-                    status=EnvironmentStatus.READY.value,
-                    context=IsolationContext(
-                        task_id=container_name.replace(self.CONTAINER_NAME_PREFIX, ""),
-                        task_type=TaskType.ATOMIC,
-                        is_root_task=True,
-                        isolation_level=IsolationLevel.CONTAINER,
-                    ),
-                    provider_info={
-                        "container_id": container.id,
-                        "container_name": container_name,
-                        "workspace_root": workspace_path,
-                    },
-                    created_at=now.isoformat(),
-                    last_used_at=now.isoformat(),
-                )
-
-                client.close()
-                return env
-
-            except NotFound:
-                client.close()
-                return None
-
+            return await self._run_docker_sync(
+                lambda: self._find_existing_container_sync(container_name),
+                timeout=15, op_name="find_existing_container",
+            )
         except Exception as e:
             logger.warning(f"[IsolationManager] 查找容器失败: {e}")
             return None
+
+    def _find_existing_container_sync(
+        self, container_name: str
+    ) -> IsolationEnvironment | None:
+        """查找已存在容器的同步实现（由 _run_docker_sync 在线程池执行）。
+
+        - running → 返回 READY 环境
+        - created/exited → 尝试 start；失败（如挂载脏路径）删容器返回 None
+        - NotFound → None
+        """
+        from docker.errors import DockerException, NotFound  # noqa: PLC0415
+
+        import docker  # noqa: PLC0415
+
+        client = docker.from_env(timeout=10)
+        try:
+            container = client.containers.get(container_name)
+
+            # 仅 running 可直接复用；created/exited 需启动。
+            # 启动失败（如 created 卡死在挂载脏路径）→ 删除容器返回 None，
+            # 让上层走新建路径（create_environment 内含 start 失败重建重试）。
+            if container.status != "running":
+                try:
+                    container.start()
+                    container.reload()
+                    logger.debug(
+                        f"[IsolationManager] 已恢复停止的容器: {container_name}"
+                    )
+                except DockerException as e:
+                    logger.warning(
+                        f"[IsolationManager] 恢复容器失败，将重建: "
+                        f"{container_name}, 错误: {e}"
+                    )
+                    try:
+                        container.remove(force=True)
+                    except DockerException:
+                        pass
+                    return None
+
+            workspace_path = None
+            mounts = container.attrs.get("Mounts", [])
+            for mount in mounts:
+                if (
+                    mount.get("Destination") == "/workspace"
+                    and mount.get("Type") == "bind"
+                ):
+                    workspace_path = mount.get("Source")
+                    break
+
+            if workspace_path:
+                from pathlib import Path  # noqa: PLC0415
+
+                workspace_dir = Path(workspace_path)
+                if not workspace_dir.exists():
+                    logger.debug(
+                        f"[IsolationManager] 工作空间目录不存在，正在创建: {workspace_path}"
+                    )
+                    workspace_dir.mkdir(parents=True, exist_ok=True)
+                    logger.debug(
+                        f"[IsolationManager] 已创建工作空间目录: {workspace_path}"
+                    )
+
+            now = datetime.now(UTC)
+
+            # 统一使用 container_name 作为 env_id（与 create_environment 一致），
+            # 同一 workspace 对应同一 container_name，env_id 稳定不变。
+            env = IsolationEnvironment(
+                env_id=container_name,
+                level=IsolationLevel.CONTAINER,
+                provider_type="cua",
+                status=EnvironmentStatus.READY.value,
+                context=IsolationContext(
+                    task_id=container_name.replace(self.CONTAINER_NAME_PREFIX, ""),
+                    task_type=TaskType.ATOMIC,
+                    is_root_task=True,
+                    isolation_level=IsolationLevel.CONTAINER,
+                ),
+                provider_info={
+                    "container_id": container.id,
+                    "container_name": container_name,
+                    "workspace_root": workspace_path,
+                },
+                created_at=now.isoformat(),
+                last_used_at=now.isoformat(),
+            )
+            return env
+
+        except NotFound:
+            return None
+        finally:
+            client.close()
 
     async def destroy_by_task_id(self, task_id: str, success: bool = True) -> None:
         """根据任务 ID 销毁关联的隔离容器（强制销毁）
@@ -775,14 +840,27 @@ class IsolationManager:
         return None
 
     async def _destroy_container_by_name(self, ws_key: str) -> None:
-        """通过 Docker API 直接查找并删除容器"""
+        """通过 Docker API 直接查找并删除容器（异步外壳：线程池+硬超时防阻塞）。"""
         container_name = f"{self.CONTAINER_NAME_PREFIX}{ws_key}"
         try:
-            from docker.errors import NotFound  # noqa: PLC0415
+            await self._run_docker_sync(
+                lambda: self._destroy_container_by_name_sync(container_name),
+                timeout=15, op_name="destroy_container",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[IsolationManager] 通过 Docker API 删除容器失败: "
+                f"{container_name}, error={e}"
+            )
 
-            import docker  # noqa: PLC0415
+    def _destroy_container_by_name_sync(self, container_name: str) -> None:
+        """删除容器的同步实现（由 _run_docker_sync 在线程池执行）。"""
+        from docker.errors import NotFound  # noqa: PLC0415
 
-            client = docker.from_env()
+        import docker  # noqa: PLC0415
+
+        client = docker.from_env(timeout=10)
+        try:
             try:
                 container = client.containers.get(container_name)
                 container.stop(timeout=5)
@@ -794,13 +872,8 @@ class IsolationManager:
                 logger.debug(
                     f"[IsolationManager] 容器不存在，无需删除: {container_name}"
                 )
-            finally:
-                client.close()
-        except Exception as e:
-            logger.warning(
-                f"[IsolationManager] 通过 Docker API 删除容器失败: "
-                f"{container_name}, error={e}"
-            )
+        finally:
+            client.close()
 
     async def destroy_environment(self, env_id: str, success: bool = True) -> None:
         """销毁隔离环境"""
@@ -845,18 +918,22 @@ class IsolationManager:
         tool_name: str | None = None,
     ) -> ExecutionResult:
         """在隔离环境中执行操作"""
+        # 复用/重建环境所需入参（执行前自愈重建时复用）
+        rebuild_kwargs: dict[str, Any] = {
+            "task_id": task_id, "task_type": task_type,
+            "operation_type": operation_type, "parent_env_id": parent_env_id,
+            "workspace": workspace, "parent_workspace": parent_workspace,
+            "is_root_task": is_root_task, "isolation_level": isolation_level,
+            "parent_task_id": parent_task_id, "tool_name": tool_name,
+        }
+
         # 获取或创建环境
-        env = await self.get_or_create_environment(
-            task_id=task_id,
-            task_type=task_type,
-            operation_type=operation_type,
-            parent_env_id=parent_env_id,
-            workspace=workspace,
-            parent_workspace=parent_workspace,
-            is_root_task=is_root_task,
-            isolation_level=isolation_level,
-            parent_task_id=parent_task_id,
-            tool_name=tool_name,
+        env = await self.get_or_create_environment(**rebuild_kwargs)
+
+        # 执行前健康检查：容器非就绪(created/exited/dead)时透明自愈重建一次，
+        # 避免 docker start 失败被吞后，用卡死的容器执行导致 "is not running"。
+        env = await self._ensure_env_healthy_or_rebuild(
+            env, rebuild_kwargs=rebuild_kwargs,
         )
 
         logger.debug(
@@ -887,6 +964,61 @@ class IsolationManager:
                 output=None,
                 error=f"执行操作失败: {str(e)}",
             )
+
+    async def _ensure_env_healthy_or_rebuild(
+        self,
+        env: IsolationEnvironment,
+        *,
+        rebuild_kwargs: dict[str, Any],
+    ) -> IsolationEnvironment:
+        """执行前确保容器健康；异常态(created/exited/dead)时透明重建。
+
+        DockerProvider.create_environment 曾丢弃 docker start 返回值，start 失败
+        （WSL2 挂载脏路径）后容器卡在 created，却被标记 READY，导致后续 docker
+        exec 报 "container is not running"。此处用 docker inspect 复核真实状态，
+        非 READY 即销毁重建，对调用方透明。重建走 get_or_create_environment →
+        create_environment（已含 start 失败删除+重试）。
+
+        单次调用最多重建一次：重建返回的新 env 不再二次检查，直接交付执行；
+        重建失败返回原 env，执行将以错误告终，不形成循环。
+
+        Args:
+            env: 当前环境
+            rebuild_kwargs: get_or_create_environment 的入参（用于重建）
+
+        Returns:
+            READY 的环境；重建失败时返回原 env。
+        """
+        provider = self._providers.get(env.level)
+        if provider is None:
+            return env
+        try:
+            status = await provider.get_environment_status(env.env_id)
+        except Exception as e:
+            logger.warning(f"[IsolationManager] 健康检查失败，按原环境执行: {e}")
+            return env
+        if status == EnvironmentStatus.READY:
+            return env
+
+        logger.info(
+            f"[IsolationManager] 容器非就绪，触发自愈重建 | "
+            f"env={env.env_id} | status={status.value}"
+        )
+        try:
+            await self.destroy_environment(env.env_id, success=False)
+        except Exception as e:
+            logger.warning(f"[IsolationManager] 自愈前销毁旧环境失败: {e}")
+
+        try:
+            new_env = await self.get_or_create_environment(**rebuild_kwargs)
+            logger.info(
+                f"[IsolationManager] 自愈重建完成 | "
+                f"old={env.env_id} | new={new_env.env_id}"
+            )
+            return new_env
+        except Exception as e:
+            logger.error(f"[IsolationManager] 自愈重建失败，返回原环境: {e}")
+            return env
 
     async def get_environment(self, env_id: str) -> IsolationEnvironment | None:
         """获取环境"""

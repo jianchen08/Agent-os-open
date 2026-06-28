@@ -189,32 +189,21 @@ class DockerProvider(IsolationProvider):
                     context, now, f"工作空间路径不存在: {ws_path}",
                 )
 
-        # 构建 docker run 命令参数
+        # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）
         run_args = self._build_run_args(name, context)
 
         # 拉取镜像（如果本地不存在）
         await self._ensure_image()
 
-        # 创建容器
-        # _build_run_args 已包含 IMAGE 与 COMMAND，无需再追加 self._image
-        rc, stdout, stderr = await self._run_cmd(
-            ["docker", "create", *run_args], timeout=30
-        )
-
-        if rc != 0:
-            error_msg = stderr.decode("utf-8", errors="replace")
-            logger.error("[DockerProvider] 创建容器失败 | error=%s", error_msg)
-            # 创建失败时无 container_id，复用错误环境构造（与挂载校验失败同源）
+        # 创建并启动容器；start 失败时删除卡死容器并重建重试一次（见 _create_and_start）
+        container_id, error_msg = await self._create_and_start(name, run_args)
+        if not container_id:
+            logger.error("[DockerProvider] 容器创建/启动失败 | error=%s", error_msg)
             return self._make_error_environment(context, now, error_msg)
-
-        container_id = stdout.decode("utf-8", errors="replace").strip()
 
         # 统一使用 container_name 作为 env_id（由 workspace 决定），
         # 保证同一 workspace 无论容器是否重建，env_id 始终一致。
         env_id = container_name
-
-        # 启动容器
-        await self._run_cmd(["docker", "start", container_id], timeout=15)
 
         env = IsolationEnvironment(
             env_id=env_id,
@@ -239,6 +228,84 @@ class DockerProvider(IsolationProvider):
             container_id[:12], container_name,
         )
         return env
+
+    async def _create_one(self, run_args: list[str]) -> tuple[str, str]:
+        """执行 docker create。
+
+        Args:
+            run_args: docker create 参数（含 IMAGE 与 COMMAND）
+
+        Returns:
+            (container_id, error)。成功时 error 为空；失败时 container_id 为空。
+        """
+        rc, stdout, stderr = await self._run_cmd(
+            ["docker", "create", *run_args], timeout=30
+        )
+        if rc != 0:
+            return "", stderr.decode("utf-8", errors="replace")
+        return stdout.decode("utf-8", errors="replace").strip(), ""
+
+    async def _start_one(self, container_id: str) -> tuple[bool, str]:
+        """执行 docker start。
+
+        Returns:
+            (是否成功, error)。成功时 error 为空。
+        """
+        rc, _, stderr = await self._run_cmd(
+            ["docker", "start", container_id], timeout=15
+        )
+        if rc == 0:
+            return True, ""
+        return False, stderr.decode("utf-8", errors="replace")
+
+    async def _create_and_start(
+        self, name: str, run_args: list[str],
+    ) -> tuple[str, str]:
+        """创建并启动容器；start 失败时删除卡死容器并重建重试一次。
+
+        Docker Desktop (WSL2) 的 bind-mount 代理路径在 start 时才建立，
+        频繁创建/删除容器会使该路径进入脏状态（mkdir: file exists），
+        导致 start 失败、容器卡在 created(exit 128)。删除卡死容器后脏
+        路径常自愈，故重试一次。仍失败时清理并返回空 container_id，
+        由调用方标记 ERROR 环境（不再误标 READY 触发后续 "is not running"）。
+        整机反复卡死时需运维手段：wsl --shutdown 后重启 Docker Desktop。
+
+        Args:
+            name: 容器名（日志用）
+            run_args: docker create 参数
+
+        Returns:
+            (container_id, error)。成功时 error 为空；失败时 container_id 为空。
+        """
+        container_id, err = await self._create_one(run_args)
+        if not container_id:
+            return "", err
+
+        ok, start_err = await self._start_one(container_id)
+        if ok:
+            return container_id, ""
+
+        # start 失败：删除卡死容器（释放脏挂载路径）后重建重试一次
+        logger.warning(
+            "[DockerProvider] 容器启动失败，删除后重建重试 | name=%s | id=%s | error=%s",
+            name, container_id[:12], start_err,
+        )
+        await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
+
+        container_id, err = await self._create_one(run_args)
+        if not container_id:
+            return "", err
+        ok, start_err = await self._start_one(container_id)
+        if ok:
+            return container_id, ""
+
+        # 重试仍失败：清理并返回错误
+        await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
+        logger.error(
+            "[DockerProvider] 容器启动重试仍失败 | name=%s | error=%s",
+            name, start_err or err,
+        )
+        return "", start_err or err
 
     async def destroy_environment(self, env_id: str, success: bool = True) -> None:
         """销毁 Docker 容器环境。

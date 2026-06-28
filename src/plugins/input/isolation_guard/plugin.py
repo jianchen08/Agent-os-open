@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from isolation.decider import IsolationDecider
@@ -46,6 +47,10 @@ class IsolationGuard(IInputPlugin):
 
     error_policy = ErrorPolicy.SKIP
 
+    # Docker 可用性复检冷却窗口（秒）：仅自动检测来源在不可用时按此间隔复检，
+    # 避免每次工具调用都 spawn subprocess 探测 daemon。
+    _RECHECK_COOLDOWN = 30.0
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化隔离环境守卫插件。
 
@@ -57,12 +62,19 @@ class IsolationGuard(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
-        # Docker 可用性：优先用配置，未配置则同步检测（避免永远默认 False）
+        # Docker 可用性来源：配置显式指定（_docker_auto=False，信任不刷新）
+        # vs 自动检测（_docker_auto=True，execute 入口按冷却窗口复检）。
+        # 区分来源是为了避免：启动那一刻 daemon 假死被永久钉死为 False，
+        # 此后即便 daemon 恢复、容器都在跑也无效——必须重启进程才解除。
         if "docker_available" in self._config:
             self._docker_available = self._config["docker_available"]
+            self._docker_auto = False
         else:
             # 启动时真正检测 Docker，不依赖外部注入
             self._docker_available = self._detect_docker()
+            self._docker_auto = True
+        # 上次检测时间（自动检测来源按冷却窗口复检用）
+        self._docker_checked_at = time.monotonic()
         if not self._docker_available:
             logger.warning(
                 "[%s] docker_available=False, tool isolation will be degraded to host execution",
@@ -119,6 +131,18 @@ class IsolationGuard(IInputPlugin):
 
         if not self._enabled or not self._enabled_by_agent:
             return PluginResult()
+
+        # 可用性复检：仅自动检测来源 + 当前不可用 + 越过冷却窗口时重新探测。
+        # daemon 启动那一刻假死被钉死为 False 后，恢复后无需重启进程即可解除。
+        if self._docker_auto and not self._docker_available:
+            now = time.monotonic()
+            if now - self._docker_checked_at >= self._RECHECK_COOLDOWN:
+                self._docker_available = self._detect_docker()
+                self._docker_checked_at = now
+                if self._docker_available:
+                    logger.info(
+                        "[%s] Docker 可用性复检通过，解除 host 降级", self.name,
+                    )
 
         state = ctx.state
         core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
