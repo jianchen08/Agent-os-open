@@ -162,6 +162,7 @@ jobs:
             tests/triggers \
             tests/pipeline \
             tests/multimodal \
+            tests/suites/core \
             --tb=long \
             --no-header \
             -q \

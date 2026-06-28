@@ -112,6 +112,7 @@ export function FiveSpaceLayout({
   // Store state
   const floatingWindows = useLayoutModeStore((s) => s.floatingWindows)
   const workspaceTabs = useLayoutModeStore((s) => s.workspaceTabs)
+  const visitedTabIds = useLayoutModeStore((s) => s.visitedTabIds)
   const dockItems = useLayoutModeStore((s) => s.dockItems)
   const fullscreenActive = useLayoutModeStore((s) => s.fullscreenActive)
   const fullscreenTitle = useLayoutModeStore((s) => s.fullscreenTitle)
@@ -582,6 +583,7 @@ export function FiveSpaceLayout({
               renderTabContent={renderTabContent}
               onFullscreen={toggleWorkspaceFullscreen}
               isFullscreen={true}
+              visitedTabIds={visitedTabIds}
             />
           </div>
         </>
@@ -676,6 +678,7 @@ export function FiveSpaceLayout({
                       renderTabContent={renderTabContent}
                       onFullscreen={toggleWorkspaceFullscreen}
                       isFullscreen={false}
+                      visitedTabIds={visitedTabIds}
                     />
                   </section>
                 </Splitter.Panel>
@@ -728,6 +731,7 @@ export function FiveSpaceLayout({
                   renderTabContent={renderTabContent}
                   onFullscreen={toggleWorkspaceFullscreen}
                   isFullscreen={false}
+                  visitedTabIds={visitedTabIds}
                 />
               </div>
             </div>

@@ -79,7 +79,7 @@ models:
       temperature: 0.7
       max_tokens: 100000
       thinking:
-        type: enabled
+        type: adaptive
     multimodal:
       supports_image: true
       supports_video: true
@@ -123,7 +123,7 @@ defaults:
   tiers:
     large: glm-5.2-yichengc
     medium: glm-5.2-yichengc
-    small: minimax-m3-guangfang
+    small: glm-5.2-yichengc
     fallback_chain: {}
 providers:
   zhipu_coding:

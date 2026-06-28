@@ -148,6 +148,8 @@ export interface MessageToolCall {
   status: ToolCallStatus
   /** 调用结果 */
   result?: unknown
+  /** 结构化完整结果数据（后端 tool_result 事件的 result_data），供工具卡片渲染 diff 等 */
+  resultData?: unknown
   /** 错误信息 */
   error?: string
   /** 开始时间 */

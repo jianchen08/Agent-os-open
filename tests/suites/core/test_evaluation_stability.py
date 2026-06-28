@@ -48,18 +48,6 @@ def mock_agent_registry():
     return MockAgentRegistry(configs=[agent_config])
 
 
-@pytest.fixture
-def mock_pipeline_factory():
-    """创建 Mock 管道工厂。"""
-    factory = MagicMock()
-    mock_pipeline = MagicMock()
-    mock_result = MagicMock()
-    mock_result.output_text = '{"evaluation_result": {"passed": true, "score": 90, "feedback": "OK"}}'
-    mock_pipeline.run.return_value = mock_result
-    factory.create.return_value = mock_pipeline
-    return factory
-
-
 # ---------------------------------------------------------------------------
 # A1. 评估结果解析（6 个测试）
 # ---------------------------------------------------------------------------
@@ -225,7 +213,7 @@ def test_find_agent_by_name_fallback(mock_agent_registry):
 
 @pytest.mark.core
 @pytest.mark.unit
-async def test_find_agent_not_found(metric_def, mock_pipeline_factory):
+async def test_find_agent_not_found(metric_def):
     """验证空注册表中查找 Agent 时抛出 RuntimeError。"""
     from tests.suites.conftest import MockAgentRegistry
 
@@ -233,7 +221,6 @@ async def test_find_agent_not_found(metric_def, mock_pipeline_factory):
     loader = MagicMock()
     engine = EvaluationEngine(
         loader=loader,
-        pipeline_factory=mock_pipeline_factory,
         agent_registry=empty_registry,
     )
 
@@ -242,33 +229,17 @@ async def test_find_agent_not_found(metric_def, mock_pipeline_factory):
 
 
 # ---------------------------------------------------------------------------
-# A4. 评估前置条件校验（3 个测试）
+# A4. 评估前置条件校验（2 个测试）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.core
 @pytest.mark.unit
-async def test_evaluate_agent_pipeline_factory_none_raises(metric_def, mock_agent_registry):
-    """验证 pipeline_factory 为 None 时调用 Agent 评估器抛出 RuntimeError。"""
-    loader = MagicMock()
-    engine = EvaluationEngine(
-        loader=loader,
-        pipeline_factory=None,
-        agent_registry=mock_agent_registry,
-    )
-
-    with pytest.raises(RuntimeError, match="Agent evaluation requires pipeline_factory but it is None"):
-        await engine._evaluate_agent(metric_def, {})
-
-
-@pytest.mark.core
-@pytest.mark.unit
-async def test_evaluate_agent_registry_none_raises(metric_def, mock_pipeline_factory):
+async def test_evaluate_agent_registry_none_raises(metric_def):
     """验证 agent_registry 为 None 时调用 Agent 评估器抛出 RuntimeError。"""
     loader = MagicMock()
     engine = EvaluationEngine(
         loader=loader,
-        pipeline_factory=mock_pipeline_factory,
         agent_registry=None,
     )
 
@@ -278,7 +249,7 @@ async def test_evaluate_agent_registry_none_raises(metric_def, mock_pipeline_fac
 
 @pytest.mark.core
 @pytest.mark.unit
-async def test_evaluate_agent_not_found_raises(metric_def, mock_pipeline_factory):
+async def test_evaluate_agent_not_found_raises(metric_def):
     """验证 Agent 在注册表中不存在时调用评估器抛出包含 evaluator_id 的 RuntimeError。"""
     from tests.suites.conftest import MockAgentRegistry
 
@@ -286,7 +257,6 @@ async def test_evaluate_agent_not_found_raises(metric_def, mock_pipeline_factory
     loader = MagicMock()
     engine = EvaluationEngine(
         loader=loader,
-        pipeline_factory=mock_pipeline_factory,
         agent_registry=empty_registry,
     )
 

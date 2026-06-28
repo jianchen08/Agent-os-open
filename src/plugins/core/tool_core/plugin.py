@@ -549,6 +549,9 @@ class ToolCore(ICorePlugin):
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": display_result,
+                    # 结构化完整数据（含 diff 的 added/removed/old_content/new_content），
+                    # 流式 result 为截断字符串仅供预览；result_data 供前端工具卡片渲染。
+                    "result_data": normalized,
                     "success": True,
                     "duration_ms": round(duration_ms, 1),
                 })
@@ -808,6 +811,7 @@ class ToolCore(ICorePlugin):
                         "type": "tool_result",
                         "tool_name": tool_name,
                         "result": str(display_data)[:200] if display_data else "",
+                        "result_data": display_data,
                         "success": result.get("success", True),
                         "duration_ms": result.get("duration_ms", 0),
                         "call_id": tc_call_id,

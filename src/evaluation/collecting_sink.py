@@ -43,7 +43,14 @@ class CollectingSink:
         self._content_parts: list[str] = []
         self._final_content: str | None = None
         self._error: str | None = None
-        self._done = asyncio.get_event_loop().create_future()
+        # future 懒创建：CollectingSink 可能在无事件循环时被实例化，
+        # 而 send_event / result 一定在异步上下文里调用。
+        self._done: asyncio.Future[None] | None = None
+
+    def _get_done(self) -> asyncio.Future[None]:
+        if self._done is None:
+            self._done = asyncio.get_running_loop().create_future()
+        return self._done
 
     @property
     def sink_id(self) -> str:
@@ -86,9 +93,14 @@ class CollectingSink:
         return True
 
     def _resolve_done(self) -> None:
-        """单次 resolve；后续重复终止事件被幂等忽略。"""
-        if not self._done.done():
-            self._done.set_result(None)
+        """单次 resolve；后续重复终止事件被幂等忽略。
+
+        send_event 一定在异步上下文里被调用（bridge 推事件），故此处
+        _get_done() 能安全取到 running loop 创建的 future。
+        """
+        done = self._get_done()
+        if not done.done():
+            done.set_result(None)
 
     async def result(self, *, timeout: float | None = None) -> tuple[str | None, str | None]:
         """await 到评估管道终止，返回 (raw_result, error)。
@@ -103,9 +115,9 @@ class CollectingSink:
             (raw_result, error)：正常结束 error=None；出错 raw_result 可能仍为 chunk 累积值。
         """
         if timeout is not None:
-            await asyncio.wait_for(asyncio.shield(self._done), timeout=timeout)
+            await asyncio.wait_for(asyncio.shield(self._get_done()), timeout=timeout)
         else:
-            await self._done
+            await self._get_done()
         raw = self._final_content
         if raw is None and self._content_parts:
             raw = "".join(self._content_parts)

@@ -41,14 +41,19 @@ class TriggerReviewTool(BuiltinTool):
         return Tool(
             name="trigger_review",
             description=(
-                "提交复盘任务，分析最近的管道执行记录，"
-                "产出经验和改进建议。完成后自动通知结果。"
+                "提交一次异步复盘：启动 review_agent 对最近的管道执行记录做深度分析，"
+                "产出经验教训和改进建议，完成后自动通知调用方。无需任何输入参数。"
             ),
             input_schema={"type": "object", "properties": {}},
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
             tags=["review", "maintenance", "system"],
+            when_to_use=[
+                "刚跑完一批任务（尤其出现过失败或反复重试），想沉淀经验教训时",
+                "用户明确要求「复盘」「总结经验」「分析失败原因」时",
+                "阶段性收尾，想把本次执行的得失固化为可复用知识时",
+            ],
         )
 
     async def execute(self, inputs: dict[str, Any]):

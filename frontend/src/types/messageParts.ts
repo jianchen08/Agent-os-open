@@ -42,6 +42,9 @@ export interface ToolCallPart {
   args: Record<string, unknown>
   state: ToolCallPartState
   result?: unknown
+  /** 结构化完整结果数据（后端 tool_result 事件的 result_data），供工具卡片渲染 diff 等；
+   *  result 字段为截断预览字符串，resultData 携带完整结构 */
+  resultData?: unknown
   error?: string
   durationMs?: number
   sequence: number

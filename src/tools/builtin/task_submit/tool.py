@@ -594,13 +594,6 @@ class TaskSubmitTool(BuiltinTool):
             )
             del inputs["workspace"]
 
-        if parent_task_id and inputs.get("isolation_level"):
-            logger.info(
-                "[TaskSubmit] 子任务清除 LLM 传入的 isolation_level | parent_task_id=%s | isolation_level=%s",
-                parent_task_id, inputs["isolation_level"],
-            )
-            del inputs["isolation_level"]
-
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
             # BUG-DIAG-fix_20260619_l2_parent_task_id_lost:
@@ -870,6 +863,44 @@ class TaskSubmitTool(BuiltinTool):
                 error="任务服务不可用，请检查系统配置",
                 error_code="SERVICE_UNAVAILABLE",
             )
+
+        # ── 5.5 解析子任务隔离模式（继承规则）──
+        # 源空间（workspace）沿父任务链解析，与隔离模式无关；此处只决定隔离模式：
+        # - 父任务是 container（容器任务）→ 直接子任务不继承，使用默认隔离（container）模式，
+        #   清除 LLM 传入值。
+        # - 父任务非 container（含容器孙任务、非容器根任务的子任务）→ 子任务继承直接父任务的
+        #   isolation_level，一律忽略 LLM 显式传入的值（隔离模式为系统控制项）。
+        # 最终「实际 ws」由隔离模式决定：host → 源空间本身；container → 源空间的 worktree。
+        if parent_task_id:
+            _parent_task = None
+            try:
+                _parent_task = task_service.get_task(parent_task_id)
+            except Exception:
+                pass
+            _parent_meta = (_parent_task.metadata or {}) if _parent_task else {}
+            _parent_scope = _parent_meta.get("task_scope", "non_container")
+
+            if _parent_scope == "container":
+                # 容器直接子任务：清除 LLM 值 → 走默认隔离模式
+                if inputs.get("isolation_level"):
+                    logger.info(
+                        "[TaskSubmit] 容器直接子任务不继承 isolation_level，清除 LLM 值 | "
+                        "parent_task_id=%s | isolation_level=%s",
+                        parent_task_id, inputs["isolation_level"],
+                    )
+                    del inputs["isolation_level"]
+            else:
+                # 非容器父任务的子任务：继承父任务 isolation_level，忽略 LLM 值
+                _parent_iso = _parent_meta.get("isolation_level")
+                if inputs.get("isolation_level"):
+                    logger.info(
+                        "[TaskSubmit] 非容器子任务忽略 LLM 传入的 isolation_level，改为继承父任务 | "
+                        "parent_task_id=%s | llm_value=%s | inherited=%s",
+                        parent_task_id, inputs["isolation_level"], _parent_iso,
+                    )
+                    del inputs["isolation_level"]
+                if _parent_iso:
+                    inputs["isolation_level"] = _parent_iso
 
         # ── 6. 创建任务 ──
         raw_priority = inputs.get("priority", 5)
@@ -1489,6 +1520,7 @@ class TaskSubmitTool(BuiltinTool):
         1. target_id 对应的 agent 配置必须存在于 registry 或磁盘
         2. 目标 agent 不能是 L1 级别（L1 是主调度层，不能作为子任务执行者）
         3. 目标 agent 的级别不能与提交者同级或更高（应向下委托）
+        4. 目标 agent 必须处于启用状态（is_active=true），已禁用的 agent 不能作为执行者
 
         Args:
             target_id: 目标 Agent ID
@@ -1499,6 +1531,9 @@ class TaskSubmitTool(BuiltinTool):
         """
         agent_level_str = ""
         agent_level = 0
+        # 目标 Agent 是否启用（is_active）。两条查找路径都要拿到它，
+        # 用于在级别校验后统一拦截派发给已禁用 Agent 的任务。
+        is_active = True
 
         agent_config = self._get_agent_config_from_registry(target_id)
 
@@ -1507,12 +1542,15 @@ class TaskSubmitTool(BuiltinTool):
             level_map = {"L1": 1, "L2": 2, "L3": 3}
             agent_level = level_map.get(level_value, 0)
             agent_level_str = level_value
+            is_active = getattr(agent_config, "is_active", True)
         else:
             logger.warning(
                 "[TaskSubmit] Agent '%s' 未在 registry 中找到，回退到磁盘文件查找",
                 target_id,
             )
-            found, agent_level_str, agent_level = self._lookup_agent_from_disk(target_id)
+            found, agent_level_str, agent_level, is_active = (
+                self._lookup_agent_from_disk(target_id)
+            )
             if not found:
                 return (
                     False,
@@ -1537,6 +1575,14 @@ class TaskSubmitTool(BuiltinTool):
                 f"不能作为 L{parent_agent_level} Agent 的下级执行者。"
                 f"任务委托应向下流动：L1→L2→L3，请选择级别更低（L{parent_agent_level + 1}+）的 Agent。",
                 "TARGET_AGENT_LEVEL_INVALID",
+            )
+
+        if not is_active:
+            return (
+                False,
+                f"目标 Agent '{target_id}' 已禁用（is_active=false），不能作为任务执行者。"
+                f"请使用映射表中已启用的 Agent ID。",
+                "TARGET_AGENT_INACTIVE",
             )
 
         return (True, "", "")
@@ -1567,7 +1613,7 @@ class TaskSubmitTool(BuiltinTool):
         return None
 
     @staticmethod
-    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int]:
+    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool]:
         """从磁盘 YAML 文件查找 Agent 配置（回退方案）。
 
         当 agent_registry 中找不到目标 Agent 时，尝试从磁盘文件查找。
@@ -1576,7 +1622,7 @@ class TaskSubmitTool(BuiltinTool):
             target_id: 目标 Agent ID
 
         Returns:
-            (是否找到, 级别字符串, 级别数字) 元组
+            (是否找到, 级别字符串, 级别数字, 是否启用) 元组
         """
         from pathlib import Path  # noqa: PLC0415
 
@@ -1602,18 +1648,19 @@ class TaskSubmitTool(BuiltinTool):
                     continue
 
         if not yaml_path or not yaml_path.exists():
-            return (False, "", 0)
+            return (False, "", 0, True)
 
         try:
             with open(yaml_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
         except Exception:
-            return (False, "", 0)
+            return (False, "", 0, True)
 
         agent_level_str = config.get("level", "")
         level_map = {"L1": 1, "L2": 2, "L3": 3}
         agent_level = level_map.get(agent_level_str, 0)
-        return (True, agent_level_str, agent_level)
+        is_active = config.get("is_active", True)
+        return (True, agent_level_str, agent_level, is_active)
 
     def _auto_fill_criteria(  # noqa: PLR0912,PLR0915
         self,

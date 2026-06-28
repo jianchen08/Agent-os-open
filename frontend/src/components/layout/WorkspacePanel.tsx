@@ -5,7 +5,8 @@
  */
 
 import { Maximize2, Minimize2 } from 'lucide-react'
-import React, { useCallback } from 'react'
+import React from 'react'
+import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import type { WorkspaceTab } from '@/types/layout'
 
 /** 工作区面板属性 */
@@ -22,6 +23,13 @@ interface WorkspacePanelProps {
   onFullscreen?: () => void
   /** 是否处于全屏状态 */
   isFullscreen?: boolean
+  /**
+   * 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略
+   *
+   * PERF-fix_20260628_workspace_tab_freeze: 只有当前激活 Tab 或曾访问过的 Tab
+   * 才渲染真实内容，其余 Tab 渲染空占位不挂载，避免刷新后所有重型 Tab 全量挂载卡死。
+   */
+  visitedTabIds?: string[]
 }
 
 /**
@@ -36,14 +44,16 @@ export function WorkspacePanel({
   renderTabContent,
   onFullscreen,
   isFullscreen,
+  visitedTabIds,
 }: WorkspacePanelProps) {
-  const handleTabWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+  // 以非被动方式绑定 wheel，使 preventDefault() 生效（React 默认的 onWheel 是被动的）
+  const tabScrollRef = useNonPassiveWheel<HTMLDivElement>((e) => {
     const el = e.currentTarget
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       e.preventDefault()
       el.scrollLeft += e.deltaY
     }
-  }, [])
+  })
 
   if (tabs.length === 0) {
     return (
@@ -57,7 +67,7 @@ export function WorkspacePanel({
     <div className="flex h-full flex-col">
       {/* Tab 栏 */}
       <div className="border-border flex flex-shrink-0 items-center border-b">
-        <div onWheel={handleTabWheel} className="flex min-w-0 flex-1 items-center overflow-x-auto">
+        <div ref={tabScrollRef} className="flex min-w-0 flex-1 items-center overflow-x-auto">
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -101,30 +111,43 @@ export function WorkspacePanel({
       </div>
 
       {/* Tab 内容 */}
-      {/* BUG-FIX-fix_20260623_tab_reload:
-          问题根因: 此前只渲染 activeTab 的内容，切换标签时旧标签被卸载、
-                    新标签重新挂载，导致文件树每次切换都重新请求 API、
-                    丢失已加载的数据和展开状态。
-          修复方案: 渲染所有标签内容，非激活标签用 hidden（display:none）隐藏，
-                    保持各标签组件实例挂载不变，切换时只切换可见性，
-                    从而保留每个标签的内部状态（文件树数据、展开节点、滚动位置等）。
-                  注意: renderTabContent 以 tab.id 为 key，保证每个标签对应
-                    稳定的 React 节点，避免因列表重排导致意外重挂载。 */}
+      {/* PERF-fix_20260628_workspace_tab_freeze:
+          问题根因: 此前为修「切换 Tab 丢状态」bug（fix_20260623_tab_reload），
+            渲染所有 Tab 内容、非激活 Tab 用 hidden（display:none）隐藏。但
+            display:none 只省布局，不省 JS 执行和 DOM 构建。叠加 workspaceTabs
+            持久化，刷新后所有曾打开的 Tab 全量恢复并一次性挂载——N 个
+            FileTreeWidget（mount 即发 /file-tree）、CodeEditor（SyntaxHighlighter
+            全量高亮）、HtmlPreviewWidget iframe 同时跑，主线程被占满 → 加载卡死。
+          修复方案: 「懒挂载 + 已访问保活」——
+            - 当前激活 Tab 或曾访问过的 Tab（visitedTabIds）才渲染真实内容；
+            - 未访问过的 Tab 渲染空占位，不调用 renderTabContent，首次点开才挂载。
+          兼容旧 bug: 已访问过的非激活 Tab 仍用 hidden 隐藏保活，切换回来不重新
+            请求 API、不重新高亮、保留滚动/展开状态（同 fix_20260623_tab_reload 的目标）。
+            激活 Tab 强制渲染（isActive || visited），即便 visitedTabIds 为空也保证可见。
+          注意: renderTabContent 以 tab.id 为 key，保证每个标签对应稳定的 React 节点。 */}
       <div className="min-h-0 flex-1 overflow-hidden">
         {tabs.length === 0 ? (
           <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
             选择一个标签页
           </div>
         ) : (
-          tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={tab.isActive ? 'h-full' : 'hidden'}
-              aria-hidden={!tab.isActive}
-            >
-              {renderTabContent(tab)}
-            </div>
-          ))
+          tabs.map((tab) => {
+            // 激活 Tab 或已访问过的 Tab 才渲染真实内容；其余 Tab 懒挂载，避免首屏卡死
+            const shouldRender =
+              tab.isActive || (visitedTabIds ?? []).includes(tab.id)
+            if (!shouldRender) {
+              return <div key={tab.id} aria-hidden="true" />
+            }
+            return (
+              <div
+                key={tab.id}
+                className={tab.isActive ? 'h-full' : 'hidden'}
+                aria-hidden={!tab.isActive}
+              >
+                {renderTabContent(tab)}
+              </div>
+            )
+          })
         )}
       </div>
     </div>

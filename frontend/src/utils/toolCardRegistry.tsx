@@ -356,6 +356,10 @@ registerToolCard({
 /**
  * 从 file_write 工具结果中解析 diff 数据（added/removed 行数 + 旧/新内容）
  *
+ * 数据来源优先级：
+ * 1. tc.resultData —— 后端 tool_result 事件携带的结构化完整数据（流式实时路径）
+ * 2. tc.result —— 历史消息/兜底，可能为 dict 或 JSON 字符串
+ *
  * 后端 _diff_extras 在成功结果里附带：
  * - added / removed：始终存在
  * - old_content / new_content：内容体积在阈值内时存在；超过则置 diff_omitted=true
@@ -363,8 +367,10 @@ registerToolCard({
 function extractWriteDiff(
   tc: MessageToolCall,
 ): { added: number; removed: number; oldContent?: string; newContent?: string } | undefined {
-  if (!tc.result) return undefined
-  const parsed = safeParseResult(tc.result)
+  // 优先用结构化 resultData（流式实时数据，未截断）
+  const source = tc.resultData ?? tc.result
+  if (!source) return undefined
+  const parsed = safeParseResult(source)
   if (!parsed) return undefined
   // 仅在 added/removed 同时存在时视为有效 diff 统计
   if (typeof parsed.added !== 'number' || typeof parsed.removed !== 'number') return undefined

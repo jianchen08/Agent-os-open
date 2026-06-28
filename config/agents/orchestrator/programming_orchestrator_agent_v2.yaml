@@ -121,22 +121,20 @@ static_vars:
   - name: 可扩展资源索引（技能 + 工具）
     content: |-
       ## 可扩展资源索引
-      以下资源未直接加载，通过 resource_search 搜索后加载使用：技能返回 SKILL.md 全文（skill_content），阅读后按其流程执行；工具自动注入到当前会话，下一轮即可直接调用。
 
-      ### 技能（resource_type="skill"，本编排器自执行编码/调试时必加载）
-      加载方式：resource_search(resource_type="skill", query="<技能名>", mode="detailed")。
-      ⚠️ 关键坑：detailed 模式开启精确匹配，query 必须用 SKILL.md frontmatter 的 name 字段（下表「搜索名」列），用目录名（英文）搜不到。
+      ### 技能（本编排器自执行编码/调试时必加载）
+      使用规则：按下表匹配后**直接 file_read 读取对应 SKILL.md**，**不需要**调用 resource_search 搜技能。读到全文后按其中的执行流程操作。
 
-      | 目录名 | 搜索名（query 应填，frontmatter name） | 用途 | 何时加载 |
-      |--------|----------------------------------------|------|----------|
-      | code-implement | 代码实现 | 编码+测试主流程（TDD 红绿循环、模块边界设计、风险分级） | 路径 A/C 必加载 |
-      | code-frontend | 前端编码 | 前端技术栈规范与流程（组件/样式/状态管理/API/E2E） | 前端/全栈任务与 code-implement 同时加载 |
-      | code-backend | 后端编码 | 后端技术栈规范与流程（API 设计/数据库/错误处理/端点测试） | 后端/全栈任务与 code-implement 同时加载 |
-      | code-debug | 代码调试 | 调试修复（确认需要→复现→定位根因→修复→回归，含修复熔断） | 路径 B 必加载；A/C 测试失败时切换 |
+      | 技能 | 用途 | 何时加载 | 文件路径 |
+      |------|------|----------|----------|
+      | code-implement | 编码+测试主流程（TDD 红绿循环、模块边界设计、风险分级） | 路径 A/C 必加载 | skills/code-implement/SKILL.md |
+      | code-frontend | 前端技术栈规范与流程（组件/样式/状态管理/API/E2E） | 前端/全栈任务与 code-implement 同时加载 | skills/code-frontend/SKILL.md |
+      | code-backend | 后端技术栈规范与流程（API 设计/数据库/错误处理/端点测试） | 后端/全栈任务与 code-implement 同时加载 | skills/code-backend/SKILL.md |
+      | code-debug | 调试修复（确认需要→复现→定位根因→修复→回归，含修复熔断） | 路径 B 必加载；A/C 测试失败时切换 | skills/code-debug/SKILL.md |
 
       标准加载示例（路径 A 编码前）：
-      resource_search(resource_type="skill", query="代码实现", mode="detailed")
-      → 返回 skill_content 全文 → 阅读后按其执行流程编码 + 测试。
+      file_read(path="skills/code-implement/SKILL.md")
+      → 读取全文 → 按其执行流程编码 + 测试。
 
       ### 工具（resource_type="tool"）
       - yaml_validate: 验证 YAML 配置文件
@@ -179,9 +177,8 @@ hard_constraints:
 - 编码类任务的功能验证为必选（外包 function_verifier_agent），不可跳过，不可自己验自己
 - 功能验证未通过时必须附带失败场景证据回退修复
 - 需求结构化时必须执行模块归属分析，按模块分组 AC，明确模块间接口和依赖方向
-- 进入路径 A/C 前，必须先调用 resource_search(resource_type="skill", query="代码实现", mode="detailed") 加载 code-implement 技能，阅读返回的 skill_content 后按其流程执行；前端/全栈任务再加载 query="前端编码"，后端/全栈任务再加载 query="后端编码"。未加载技能直接写代码视为流程违规
-- 进入路径 B 或 A/C 测试失败时，必须先调用 resource_search(resource_type="skill", query="代码调试", mode="detailed") 加载 code-debug 技能后执行
-- ⚠️ resource_search 搜技能时 query 必须用 SKILL.md frontmatter 的中文名（代码实现/前端编码/后端编码/代码调试），用英文目录名搜不到
+- 进入路径 A/C 前，必须先 file_read 读取 skills/code-implement/SKILL.md 加载 code-implement 技能，阅读后按其流程执行；前端/全栈任务再 file_read 读取 skills/code-frontend/SKILL.md，后端/全栈任务再 file_read 读取 skills/code-backend/SKILL.md。未加载技能直接写代码视为流程违规
+- 进入路径 B 或 A/C 测试失败时，必须先 file_read 读取 skills/code-debug/SKILL.md 加载 code-debug 技能后执行
 - 重派 code_reviewer_agent / function_verifier_agent 做回归时，必须使用 inherit pipe（from=原任务ID, mode=pipe）继承上轮上下文，goal 必须包含"复验上轮 Must Fix + 增量审本次修复范围"两点
 - 回归上限：审查/验证各最多 3 轮，超过必须升级（架构审查 / human_interaction），禁止无限回归
 - research_agent 只能在 code_reviewer 报告标记 needs_research=true 时触发，禁止作为默认环节每次都派
@@ -327,7 +324,7 @@ recommended_metrics:
     action: read
     path: '{{workspace}}/docs/working/programming_orchestration_report.md'
 version: 2.0.0
-is_active: false
+is_active: true
 status: active
 max_iterations: 400
 max_reminders: 5
@@ -349,7 +346,6 @@ metadata:
   author: System
   created_at: '2026-06-26'
   updated_at: '2026-06-26'
-  variant_of: programming_orchestrator_agent
   capabilities:
   - requirement_structuring
   - self_coding

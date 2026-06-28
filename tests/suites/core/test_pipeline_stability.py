@@ -1,12 +1,15 @@
 """套件 D：管道执行稳定性测试。
 
 覆盖范围：
-- D1: ThreadPoolExecutor 在 _evaluate_agent 中避免嵌套 event loop
 - D2: evaluator_agent.yaml max_iterations 配置约束
 - D3: evaluator_agent.yaml plugins 配置正确加载
 - D4: evaluator_agent.yaml tool_ids 完整性验证
 - D5: input_adapter run_in_executor 不阻塞事件循环
-- D6: PipelineEngine.run() extra_state 参数传递
+- D6: build_initial_state extra_state 参数传递
+
+注：原 D1（_evaluate_agent 经 ThreadPoolExecutor 避免嵌套 event loop）已删除——
+该架构随 I1~I5 不变量重构移除（评估改走 send + CollectingSink，不再 ThreadPoolExecutor
++ asyncio.run 嵌套，也不再有 pipeline_factory）。
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -25,57 +28,13 @@ EVALUATOR_YAML = PROJECT_ROOT / "config" / "agents" / "system" / "evaluator_agen
 
 @pytest.mark.core
 @pytest.mark.unit
-async def test_sub_pipeline_in_thread_pool_executor(
-    metric_def,
-    mock_agent_registry,
-):
-    """验证在已有 running event loop 中调用 _evaluate_agent 使用 ThreadPoolExecutor 而不抛 RuntimeError。
-
-    当 _evaluate_agent 检测到当前已有 running event loop 时，
-    应通过 ThreadPoolExecutor + asyncio.run 在新线程中运行子管道，
-    而非直接嵌套 asyncio.run 导致 RuntimeError。
-    """
-    from evaluation.engine import EvaluationEngine
-
-    loader = MagicMock()
-
-    eval_output = (
-        "## 评估完成\n\n"
-        "```json\n"
-        '{"evaluation_result": {"passed": true, "score": 95, "feedback": "评估通过"}}\n'
-        "```\n"
-    )
-    mock_engine = MagicMock()
-    mock_engine.run = AsyncMock(
-        return_value={
-            "raw_result": eval_output,
-            "final_output": eval_output,
-        },
-    )
-    pipeline_factory = MagicMock(return_value=mock_engine)
-
-    engine = EvaluationEngine(
-        loader=loader,
-        pipeline_factory=pipeline_factory,
-        agent_registry=mock_agent_registry,
-    )
-
-    result = engine._evaluate_agent(
-        metric_def=metric_def,
-        params={"criteria": "报告包含核心概念"},
-    )
-
-    assert result is not None
-    assert result.get("passed") is True
-    assert result.get("score") == 95
-
-
-@pytest.mark.core
-@pytest.mark.unit
 def test_max_iterations_enforced():
-    """验证 evaluator_agent.yaml 中 max_iterations 等于 15。"""
+    """验证 evaluator_agent.yaml 中 max_iterations 等于 500。
+
+    评估是推理型任务，允许足够迭代轮次完成多维度评分 + 证据收集。
+    """
     config = yaml.safe_load(EVALUATOR_YAML.read_text(encoding="utf-8"))
-    assert config["max_iterations"] == 15
+    assert config["max_iterations"] == 500
 
 
 @pytest.mark.core
@@ -91,8 +50,11 @@ def test_evaluator_agent_config_loaded():
 @pytest.mark.core
 @pytest.mark.unit
 def test_evaluator_agent_tool_ids_available():
-    """验证 evaluator_agent.yaml 中 tool_ids 包含所需的工具。"""
-    expected_tools = ["file_read", "bash_execute", "enhanced_search"]
+    """验证 evaluator_agent.yaml 中 tool_ids 包含评估所需的核心工具。
+
+    evaluator 是推理型评估者，只读产出物进行分析，核心工具为 file_read。
+    """
+    expected_tools = ["file_read"]
     config = yaml.safe_load(EVALUATOR_YAML.read_text(encoding="utf-8"))
     tool_ids = config["tool_ids"]
     for tool in expected_tools:
@@ -136,23 +98,19 @@ async def test_event_loop_not_blocked_by_input_adapter():
 @pytest.mark.core
 @pytest.mark.unit
 async def test_pipeline_state_passed_through():
-    """验证 PipelineEngine.run() 的 extra_state 参数正确注入到管道 state。
+    """验证 build_initial_state 的 extra_state 参数正确注入到管道 state。
 
-    通过 _build_initial_state 方法验证 task_id、workspace 等
+    通过模块级公开函数 build_initial_state 验证 task_id、workspace 等
     extra_state 参数被正确合并到管道初始状态字典中。
     """
-    from pipeline.engine import PipelineEngine
+    from pipeline.state_builder import build_initial_state
 
-    engine = PipelineEngine(
-        input_route_table=MagicMock(),
-        output_route_table=MagicMock(),
-        plugin_registry=MagicMock(),
-    )
-
-    state = engine._build_initial_state(
+    state = build_initial_state(
         user_input="test",
         agent_config=None,
         conversation_history=None,
+        pipeline_id="__eval__test",
+        services={},
         extra_state={
             "task_id": "__eval__test",
             "workspace": ".ai_workspaces/test",

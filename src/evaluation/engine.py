@@ -17,12 +17,11 @@ tool 类型评估器通过注入 ToolRegistry 实现真实工具调用；
 from __future__ import annotations
 
 import logging
-import os
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from evaluation.collecting_sink import CollectingSink
 from evaluation.expect import ExpectEvaluator
 from evaluation.loader import MetricLoader
 from evaluation.types import (
@@ -44,25 +43,6 @@ _TYPE_PRIORITY: dict[MetricType, int] = {
     MetricType.AGENT: 2,
     MetricType.HUMAN: 3,
 }
-
-
-@contextmanager
-def _chdir(path: str | Path) -> Iterator[None]:
-    """临时切换进程工作目录。
-
-    评估器子管道运行期间将 cwd 切到任务 workspace，使评估 Agent 用相对路径
-    即可读到任务产出（评估器空间 = 任务空间）。3.10 无 contextlib.chdir，此处自实现。
-    """
-    previous = Path.cwd()
-    target = Path(path).resolve()
-    if target == previous:
-        yield
-        return
-    os.chdir(target)
-    try:
-        yield
-    finally:
-        os.chdir(previous)
 
 
 class EvaluationEngine:
@@ -641,83 +621,93 @@ class EvaluationEngine:
 
         eval_prompt = self._build_agent_eval_prompt(metric_def, params)
 
-        # 在 pipeline 运行前捕获 engine ID，确保异常时也能注册管道记录
-        _captured_pid: list[str] = [""]
+        # 评估子管道走标准 send 路径（I1~I5 不变量）：
+        # 外部只 register + send + 经注册表读公开状态，不持有 engine 引用、
+        # 不调 engine.run。evaluator_agent 的 plugin_configs（如
+        # task_reminder.evaluation_mode）由 agent YAML 的 plugins.enabled 配置，
+        # to_state() 自动注入 state，不再运行时硬编码。
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
+        _provider = get_service_provider()
+        _registry = get_engine_registry()
+
+        # workspace：让 evaluator 的 file_read 工具读到任务产出（相对路径基于
+        # state["workspace"]，见 WorkspaceAwareMixin）。写进 tags，
+        # _start_idle_engine 会兜底注入 engine.run。
+        workspace = _resolve_eval_project_root(task_id, params) or ""
+
+        _entry = _registry.register_pipeline(
+            tags={
+                "agent_id": evaluator_id,
+                "source": "evaluation",
+                "workspace": workspace,
+            },
+            input_route_table=_provider.get("input_route_table"),
+            output_route_table=_provider.get("output_route_table"),
+            plugin_registry=_provider.get("plugin_registry"),
+            services=_provider.get_all_services(),
+        )
+        if _entry is None:
+            raise RuntimeError("评估管道注册失败（路由表/插件注册表不可用）")
+        pipeline_id = _entry.engine.pipeline_id
+
+        # 评估管道创建后立即注册到根任务子目录（与 task_worker 主管道对称）
+        EvaluationEngine._pre_register_eval_pipeline(pipeline_id, task_id)
+
+        _sink = CollectingSink(pipeline_id=pipeline_id)
 
         try:
-
-            async def _run_eval_pipeline() -> dict[str, Any]:
-                # 通过注册表创建管道（I1：engine 必须经 register_pipeline 入注册表）。
-                # 外部不私自 new 引擎（原 self._pipeline_factory() 产生野引擎）。
-                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-                from pipeline.registry import get_engine_registry  # noqa: PLC0415
-                from pathlib import Path  # noqa: PLC0415
-
-                _provider = get_service_provider()
-                _entry = get_engine_registry().register_pipeline(
-                    tags={"agent_id": evaluator_id, "source": "evaluation"},
-                    input_route_table=_provider.get("input_route_table"),
-                    output_route_table=_provider.get("output_route_table"),
-                    plugin_registry=_provider.get("plugin_registry"),
-                    services=_provider.get_all_services(),
-                )
-                if _entry is None:
-                    raise RuntimeError("评估管道注册失败（路由表/插件注册表不可用）")
-                engine = _entry.engine
-                _captured_pid[0] = engine.pipeline_id
-                project_root = _resolve_eval_project_root(
-                    task_id, params,
-                ) or str(
-                    Path(__file__).resolve().parent.parent.parent
-                )
-                _plugin_configs = {
-                    "task_reminder": {"evaluation_mode": True},
-                }
-
-                # 评估管道创建后立即注册到根任务子目录
-                # 确保即使管道运行异常，记录文件也会分组（与 task_worker 对主管道的做法一致）
-                EvaluationEngine._pre_register_eval_pipeline(
-                    engine.pipeline_id, task_id,
-                )
-
-                # 评估器空间与任务空间保持一致：子管道运行期间 cwd 切到任务 workspace，
-                # 评估 Agent 用相对路径即可读到任务产出文件（如 docs/xxx_report.md）。
-                # 之前 cwd 停留在进程主目录，worktree/shared 模式下相对路径读不到产出。
-                with _chdir(project_root):
-                    state = await engine.run(
-                        user_input=eval_prompt,
-                        agent_config=agent_config,
-                        task_id=f"__eval__{metric_def.id}",
-                        project_root=project_root,
-                        workspace=project_root,
-                        plugin_configs=_plugin_configs,
-                    )
-                return state
-
-            pipeline_state = await _run_eval_pipeline()
-
-            # 提取子管道 ID
-            _pipeline_run_id = pipeline_state.get(
-                "pipeline_id", ""
+            from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
+            from pipeline.message_types import (  # noqa: PLC0415
+                MessageSource,
+                MessageType,
+                PipelineMessage,
             )
 
-            raw_output = pipeline_state.get("raw_result", "")
-            final_output = pipeline_state.get(
-                "final_output", raw_output
+            msg = PipelineMessage(
+                type=MessageType.CHAT,
+                content=eval_prompt,
+                source=MessageSource.SYSTEM,
+                pipeline_id=pipeline_id,
+                metadata={"source": MessageSource.SYSTEM.value},
             )
-            output_text = str(final_output) if final_output else ""
+            inject_result = await send_pipeline_message(
+                msg, agent_config=agent_config, output_sink=_sink,
+                workspace=workspace,
+                task_id=f"__eval__{metric_def.id}",
+            )
+            if not inject_result.success:
+                raise RuntimeError(
+                    f"评估消息注入失败: {inject_result.error or inject_result.method}"
+                )
+
+            # 阻塞等待 evaluator_agent 流式结束。evaluator_agent.timeout_seconds
+            # （evaluator YAML，由 stop_check 插件执行）是真实超时安全阀；
+            # 此处取一个略大于它的上限作为 await 兜底，防止 stop_check 失效时
+            # 评估挂死整个 evaluate() 调用。
+            _await_timeout = (
+                float(getattr(agent_config, "timeout_seconds", 0) or 0)
+                + 60
+            ) or None
+            output_text, sink_error = await _sink.result(timeout=_await_timeout)
 
             logger.info(
                 "Agent evaluation raw output: metric=%s, pipeline=%s, "
-                "raw_result type=%s len=%d, final_output type=%s len=%d, "
                 "output_text len=%d first200=%s",
-                metric_def.id, _pipeline_run_id,
-                type(raw_output).__name__, len(str(raw_output)),
-                type(final_output).__name__, len(str(final_output)) if final_output else 0,
-                len(output_text), output_text[:200],
+                metric_def.id, pipeline_id,
+                len(output_text or ""), (output_text or "")[:200],
             )
 
-            eval_result = self._parse_evaluation_result(output_text)
+            if sink_error:
+                return {
+                    "passed": False,
+                    "score": 0.0,
+                    "feedback": f"评估管道流式错误: {sink_error}",
+                    "pipeline_run_id": pipeline_id,
+                }
+
+            eval_result = self._parse_evaluation_result(output_text or "")
             if eval_result is not None:
                 logger.info(
                     "Agent evaluation completed: %s -> passed=%s, score=%s",
@@ -725,21 +715,20 @@ class EvaluationEngine:
                     eval_result.get("passed"),
                     eval_result.get("score"),
                 )
-                eval_result["pipeline_run_id"] = _pipeline_run_id
+                eval_result["pipeline_run_id"] = pipeline_id
                 return eval_result
 
-            stop_reason = pipeline_state.get(
-                "router.stop_reason", ""
-            )
-            max_reminders = pipeline_state.get(
-                "evaluate_reminder_count", 0
-            )
+            # JSON 未解析出来：从注册表 entry.engine.last_state（公开 property）
+            # 读终止原因，给出细分失败反馈。经注册表访问，不穿透私有成员。
+            _state = self._read_eval_state(pipeline_id)
+            stop_reason = _state.get("router.stop_reason", "")
+            max_reminders = _state.get("evaluate_reminder_count", 0)
             if "timeout" in stop_reason:
                 return {
                     "passed": False,
                     "score": 0.0,
                     "feedback": f"评估管道超时（指标: {metric_def.id}）: {stop_reason}",
-                    "pipeline_run_id": _pipeline_run_id,
+                    "pipeline_run_id": pipeline_id,
                 }
             if max_reminders > 0:
                 return {
@@ -749,7 +738,7 @@ class EvaluationEngine:
                         f"evaluator_agent 经 {max_reminders}"
                         " 次提醒后仍未输出有效评估结论"
                     ),
-                    "pipeline_run_id": _pipeline_run_id,
+                    "pipeline_run_id": pipeline_id,
                 }
             return {
                 "passed": False,
@@ -758,7 +747,7 @@ class EvaluationEngine:
                     "evaluator_agent 未能输出有效的"
                     " evaluation_result JSON"
                 ),
-                "pipeline_run_id": _pipeline_run_id,
+                "pipeline_run_id": pipeline_id,
             }
 
         except Exception as e:
@@ -770,8 +759,34 @@ class EvaluationEngine:
                 "passed": False,
                 "score": 0.0,
                 "feedback": f"评估管道执行异常: {e}",
-                "pipeline_run_id": _captured_pid[0] or None,
+                "pipeline_run_id": pipeline_id,
             }
+        finally:
+            # 一次性评估：无论成功失败都终结管道（cancel engine_task + 停 bridge
+            # + engine.cleanup + unregister），避免 entry 在 registry 堆积。
+            from pipeline.message_bus import stop as _stop_pipeline  # noqa: PLC0415
+            try:
+                await _stop_pipeline(pipeline_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Eval pipeline stop failed (non-critical): %s", exc,
+                )
+
+    @staticmethod
+    def _read_eval_state(pipeline_id: str) -> dict[str, Any]:
+        """从注册表读评估管道的 last_state（公开 property）。
+
+        经 get_engine_registry().get(pipeline_id).engine.last_state 访问，
+        不穿透私有成员。entry 或 engine 不存在时返回空 dict。
+        """
+        try:
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            entry = get_engine_registry().get(pipeline_id)
+            if entry is None or entry.engine is None:
+                return {}
+            return getattr(entry.engine, "last_state", None) or {}
+        except Exception:
+            return {}
 
     @staticmethod
     def _parse_evaluation_result(text: str) -> dict[str, Any] | None:

@@ -444,7 +444,7 @@ task_chain:
 #     - id: "T1"
 #       name: "用户认证模块"
 #       description: "实现用户注册/登录/权限管理功能"
-#       recommended_executor: "programming_orchestrator_agent"
+#       recommended_executor: "programming_orchestrator_agent_v2"
 #       executor_level: "L2"
 #       resource_status: "已有"
 #       dependencies: []

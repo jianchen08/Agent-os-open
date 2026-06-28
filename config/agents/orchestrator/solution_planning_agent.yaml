@@ -15,7 +15,6 @@ system_prompt: |
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/processes/orchestrator_three_phase_pattern.md}}
-  {{path:.project/}}
 
   # 你是方案规划助手
 

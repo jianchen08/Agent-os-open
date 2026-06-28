@@ -7,6 +7,7 @@
 
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import { AgentTabItem } from './AgentTabItem'
 import type { AgentTab as AgentTabType } from '@/types/task'
 
@@ -72,7 +73,7 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
     el.scrollBy({ left: direction === 'left' ? -150 : 150, behavior: 'smooth' })
   }, [])
 
-  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+  const handleWheel = useCallback((e: WheelEvent) => {
     const el = scrollContainerRef.current
     if (!el) return
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -80,6 +81,17 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
       el.scrollLeft += e.deltaY
     }
   }, [])
+
+  // 以非被动方式绑定 wheel，使 preventDefault() 生效（React 默认的 onWheel 是被动的）
+  const wheelRef = useNonPassiveWheel<HTMLDivElement>(handleWheel)
+  // 复用 scrollContainerRef，把 ref 同时分给滚动状态逻辑与非被动 wheel 监听
+  const setScrollRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      scrollContainerRef.current = el
+      wheelRef(el)
+    },
+    [wheelRef],
+  )
 
   const handleTabClose = useCallback(
     (tabId: string) => {
@@ -92,8 +104,7 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
     <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2">
       {/* Tab 列表 */}
       <div
-        ref={scrollContainerRef}
-        onWheel={handleWheel}
+        ref={setScrollRef}
         className="scrollbar-hide flex flex-1 items-center gap-1.5 overflow-x-auto"
       >
         {tabs.map((tab) => (

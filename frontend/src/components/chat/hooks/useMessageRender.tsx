@@ -282,6 +282,7 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
                     ? 'cancelled'
                     : 'pending',
           result: part.result,
+          resultData: part.resultData,
           error: part.error,
           duration_ms: part.durationMs,
           progress: part.progress,

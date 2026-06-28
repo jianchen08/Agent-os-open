@@ -132,6 +132,9 @@ export function handleToolResult(eventData: any) {
     const updates: Record<string, unknown> = {
       state: (eventData.success ?? eventData.data?.success ?? true) === false ? 'error' : 'done',
       result: eventData.result ?? eventData.data?.result,
+      // 后端在 tool_result 事件携带的结构化完整数据（含 diff 的 added/removed/old_content/new_content），
+      // 流式 result 字段为截断字符串仅供预览；result_data 供工具卡片渲染 +/- 徽标与展开 diff。
+      resultData: eventData.result_data ?? eventData.data?.result_data,
       error: eventData.error ?? eventData.data?.error,
       durationMs: eventData.duration_ms ?? eventData.data?.duration_ms,
     }

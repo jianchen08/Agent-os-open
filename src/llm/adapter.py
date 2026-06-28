@@ -436,7 +436,64 @@ class _BaseLiteLLMAdapter:
         # zai provider 只接受 float，用大数近似"不超时"。
         call_kwargs["timeout"] = 3600.0
 
-        response = await self._do_completion(**call_kwargs, drop_params=True)
+        # BUG-FIX-fix_20260628_connect_phase_hang:
+        # 历史实现把 first_chunk_timeout 的 asyncio.wait_for 仅包在首个
+        # aiter.__anext__() 上（见下方），保护不到 _do_completion() 自身。
+        # 流式下 _do_completion 在上游"半死连接"时（TCP 建连成功、请求已发出，
+        # 但上游既不回数据也不断开）会卡在 litellm.acompletion 的建连/等响应头
+        # 阶段——既不是 429（限流会回完整响应），也不是连接错误（连接已建立），
+        # 而 first_chunk_timeout 因 _do_completion 尚未返回而无法启动，请求静默
+        # 挂死，只能等满 1 小时的 httpx timeout。
+        # 日志证据（0b883e12f74d Calling@10:16:10）：卡在 "选用 key" 之后、
+        # "发请求前" 之前，无 STREAM TIMEOUT、无任何错误，纯静默。
+        # 修复：把 first_chunk_timeout 的 wait_for 上提，同时包住 _do_completion
+        # 和首 chunk 读取——首字节超时统一覆盖"建连→等响应头→首字节"全过程。
+
+        async def _open_and_first_chunk() -> tuple[Any, Any]:
+            """建连并读取首个 chunk，供外层 wait_for 统一限时。
+
+            首个 chunk 读取若抛异常（含 wait_for 超时注入的 CancelledError），
+            必须关闭 stream——既为释放 HTTP 连接，也为触发 _bind_release_to_stream
+            绑定的 slot.release()，避免并发许可泄漏（建连超时是高频场景）。
+            """
+            resp = await self._do_completion(**call_kwargs, drop_params=True)
+            try:
+                first = await resp.__aiter__().__anext__()
+            except BaseException:
+                # 超时/异常/取消：关闭流，触发绑定的 release。aclose 自身的任何
+                # 异常（含 CancelledError）都不应掩盖/替换原始异常，故全量抑制。
+                aclose = getattr(resp, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except BaseException:
+                        pass
+                raise
+            return resp, first
+
+        first_chunk: Any = None
+        try:
+            response, first_chunk = await asyncio.wait_for(
+                _open_and_first_chunk(), timeout=first_chunk_timeout
+            )
+        except StopAsyncIteration:
+            # 空流：_do_completion 返回的流没有任何 chunk，直接返回空响应。
+            # 此时 response 未绑定，无需 aclose。
+            return LLMResponse()
+        except asyncio.TimeoutError:
+            logger.error(
+                "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs)"
+                " 含建连阶段 model=%s",
+                type(self).__name__, first_chunk_timeout, model,
+            )
+            raise litellm.Timeout(  # noqa: B904
+                message=(
+                    "Stream first chunk timeout (incl. connect):"
+                    f" no response for {first_chunk_timeout:.0f}s"
+                ),
+                model=model,
+                llm_provider="zai",
+            )
 
         result_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -472,28 +529,9 @@ class _BaseLiteLLMAdapter:
 
         aiter = response.__aiter__()
         try:
-            # 首个 chunk：检测连接是否建立，超时说明被限流或网络异常
-            try:
-                chunk = await asyncio.wait_for(
-                    aiter.__anext__(), timeout=first_chunk_timeout
-                )
-            except StopAsyncIteration:
-                # 空流，直接返回
-                return LLMResponse()
-            except asyncio.TimeoutError:
-                logger.error(
-                    "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs)"
-                    " model=%s",
-                    type(self).__name__, first_chunk_timeout, model,
-                )
-                raise litellm.Timeout(  # noqa: B904
-                    message=(
-                        "Stream first chunk timeout:"
-                        f" no data for {first_chunk_timeout:.0f}s"
-                    ),
-                    model=model,
-                    llm_provider="zai",
-                )
+            # 首个 chunk 已在 _open_and_first_chunk 内读取（含建连阶段的超时保护，
+            # 见上方 BUG-FIX-fix_20260628_connect_phase_hang）。此处直接处理它。
+            chunk = first_chunk
 
             # 边收边处理，保持真正的流式
             # _process_chunk 内联处理每个 chunk
@@ -1063,6 +1101,19 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     "[KeyPoolAdapter] provider=%s 选用 key=%s (api_key=%s...) attempt=%d/%d",
                     provider_name, slot.key_id, slot.api_key[:6], attempt + 1, max_retries,
                 )
+                # BUG-FIX-fix_20260628_release_before_stream_consumed:
+                # 流式路径下 _direct_call_with_slot 返回的是惰性 stream wrapper
+                # （litellm CustomStreamWrapper），真正的流式传输（建连→首字节→逐
+                # chunk 读取）发生在调用方 _call_streaming 消费该对象期间，而非
+                # _do_completion 返回之前。原实现的 finally: slot.release() 在
+                # stream wrapper 返回时立即释放信号量，导致 max_concurrent 形同虚设
+                # ——信号量只计量了"拿到 stream 对象"的毫秒级瞬间，未覆盖秒~分钟级
+                # 的流式传输。日志证据：yichengc key max_concurrent=7，但峰值在途
+                # 占用达 73 个，PrioritySemaphore 全天零排队。
+                # 修复：流式返回时把 release 推迟到 stream.aclose（由 _call_streaming
+                # 的 finally 在流消费完毕后调用）；非流式返回的是已完成的 ModelResponse，
+                # 保持原有 finally 立即 release。用 _defer_release 标志区分两条路径。
+                _defer_release = False
                 try:
                     key_kwargs = dict(kwargs)
                     key_kwargs["api_key"] = slot.api_key
@@ -1074,6 +1125,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     )
 
                     slot.on_success()
+                    # 流式返回值是 async iterator（CustomStreamWrapper），其流式
+                    # 传输尚未发生——把 release 绑定到 aclose，由消费方在流结束后触发。
+                    if hasattr(result, "__aiter__"):
+                        _defer_release = True
+                        self._bind_release_to_stream(result, slot)
                     return result
                 except asyncio.CancelledError:
                     # 用户取消：不冷却，直接抛
@@ -1114,7 +1170,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                         )
                         last_exc = exc
                 finally:
-                    slot.release()
+                    # 流式成功路径已把 release 延迟到 stream.aclose，这里跳过；
+                    # 其余路径（异常/非流式成功）立即释放，保证换 key 重试时槽位归还。
+                    if not _defer_release:
+                        slot.release()
         except KeyPoolExhaustedError as exc:
             # 所有 key 不可用且等待超时：不可恢复的资源耗尽，
             # 转成业务可读的 RateLimitError，保留原始异常链（backend_rules §3.1）。
@@ -1168,13 +1227,35 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         router = get_or_create_router(model_loader)
         return await router.acompletion(**kwargs)
 
+    @staticmethod
+    def _bind_release_to_stream(stream: Any, slot: Any) -> None:
+        """把 slot.release() 绑定到 stream.aclose()，流关闭时释放并发许可。
+
+        流式调用返回的 stream wrapper（litellm CustomStreamWrapper）是惰性对象，
+        真正的流式传输发生在调用方消费它期间。信号量许可必须覆盖整段传输，
+        故 release 推迟到 stream 被关闭（_call_streaming 的 finally 调用 aclose）。
+
+        用一次性标志保证 release 只执行一次（litellm 可能多次调用 aclose）。
+        """
+        original_aclose = getattr(stream, "aclose", None)
+        released = False
+
+        async def _aclose_with_release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                slot.release()
+            if original_aclose is not None:
+                await original_aclose()
+
+        stream.aclose = _aclose_with_release  # type: ignore[method-assign]
+
     async def _direct_call_with_slot(
         self, slot: Any, **kwargs: Any
     ) -> Any:
         """用指定 slot 的 key 直接调用 litellm.acompletion。
 
         不经过 Router，直接构建 litellm 参数，确保使用 slot 的 key。
-
         关键：kwargs["model"] 此时是 model_id（yaml key），不是 model_name。
         需要反查 model_name 来拼 litellm 模型字符串（如 apigo/MiniMax-M3 → openai/MiniMax-M3），
         因为上游 API 只认 model_name，不认内部 model_id。

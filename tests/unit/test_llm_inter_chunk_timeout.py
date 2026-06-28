@@ -158,6 +158,42 @@ async def test_first_chunk_silence_raises_timeout() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b. 建连阶段(_do_completion 自身)卡死 → 同样抛 litellm.Timeout
+# ---------------------------------------------------------------------------
+# BUG-FIX-fix_20260628_connect_phase_hang 的回归契约：
+# 历史 first_chunk_timeout 的 wait_for 只包 aiter.__anext__()，保护不到
+# _do_completion() 自身。当上游"半死连接"（TCP 建连成功、请求已发出，但上游
+# 既不回数据也不断开）时，_do_completion 卡在 litellm.acompletion 的建连/等
+# 响应头阶段，first_chunk_timeout 因 _do_completion 未返回而无法启动，请求静默
+# 挂死。修复后 wait_for 同时包住 _do_completion，建连阶段卡死同样触发超时。
+
+@pytest.mark.asyncio
+async def test_connect_phase_hang_raises_timeout() -> None:
+    """_do_completion 自身卡死(建连/等响应头阶段) → first chunk timeout 必触发。"""
+    adapter = LiteLLMAdapter()
+
+    # _do_completion 卡住不返回（模拟上游半死连接，建连后永远等不到响应头）
+    hang_forever = asyncio.Future()  # 永不 resolve
+
+    async def _hang(**_kw: Any) -> Any:
+        return await hang_forever
+
+    adapter._do_completion = _hang  # type: ignore[assignment]
+
+    with pytest.raises(litellm.Timeout) as exc_info:
+        await adapter.completion(
+            model="zai/glm-5.2",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            inter_chunk_timeout=100.0,
+            first_chunk_timeout=1.0,   # _do_completion 卡 1s 必触发
+        )
+
+    msg = exc_info.value.message or ""
+    assert "first chunk timeout" in msg, f"message 应说明首 chunk 超时: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
 # 4. 心跳探针任务在结束时不泄漏（正常 + 异常两条路径）
 # ---------------------------------------------------------------------------
 

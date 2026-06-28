@@ -39,6 +39,7 @@ import {
   X,
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 
 // 缩放范围
 const MIN_SCALE = 0.5
@@ -153,7 +154,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
     }, [lightboxIndex, images.length, resetTransform])
 
     /** 滚轮缩放 */
-    const handleWheel = useCallback((e: React.WheelEvent) => {
+    const handleWheel = useCallback((e: WheelEvent) => {
       e.preventDefault()
       setScale((prev) => {
         const delta = e.deltaY < 0 ? SCALE_STEP : -SCALE_STEP
@@ -163,6 +164,9 @@ export const ImageGallery = memo<ImageGalleryProps>(
         return next
       })
     }, [])
+
+    // 以非被动方式绑定 wheel，使 preventDefault() 生效（React 默认的 onWheel 是被动的）
+    const wheelRef = useNonPassiveWheel<HTMLDivElement>(handleWheel)
 
     /** 拖动开始 */
     const handleMouseDown = useCallback(
@@ -377,9 +381,9 @@ export const ImageGallery = memo<ImageGalleryProps>(
 
             {/* 图像展示 */}
             <div
+              ref={wheelRef}
               className="relative flex max-h-[85vh] max-w-[85vw] flex-col items-center"
               onClick={(e) => e.stopPropagation()}
-              onWheel={handleWheel}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
