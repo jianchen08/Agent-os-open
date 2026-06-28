@@ -38,6 +38,10 @@
 
 - 单轮迭代调度 → pipeline/engine_iteration.py
 
+- 流式输出（出口）→ pipeline/engine_streaming.py
+  （bridge 绑定、chunk 队列/消费者/keepalive 协程、流式上下文、终止事件透传。
+   流式输出是引擎的 output port 而非内部职责，通过 self._streaming 委托，保持单向依赖。）
+
 """
 
 
@@ -64,10 +68,6 @@ from pipeline.engine_iteration import IterationAction, run_iteration  # noqa: F4
 from pipeline.engine_route import (  # noqa: F401
     apply_route,
     resolve_output_plugins,
-)
-from pipeline.engine_state import (  # noqa: F401
-    _current_pipeline_id,
-    _PipelineLogFilter,
 )
 from pipeline.plugin_resolver import apply_agent_model_override
 from pipeline.registry import PluginRegistry, get_engine_registry
@@ -178,11 +178,6 @@ class PipelineEngine:
 
         self._suspended_state: dict[str, Any] | None = None
 
-        # 流式 chunk 队列与消费者（run 启动时创建，cleanup 释放）。init 必须预置 None，
-        # 否则从未 run 的引擎调 cleanup() 会 AttributeError。
-        self._chunk_queue: asyncio.Queue | None = None
-        self._chunk_consumer_task: asyncio.Task | None = None
-
         self._checkpoint_manager = checkpoint_manager
 
         self._pipeline_id: str = _uuid.uuid4().hex[:12]
@@ -197,10 +192,6 @@ class PipelineEngine:
 
         self._max_consecutive_core_errors: int = 3
 
-        self._streaming_on_chunk: Any = None
-
-        self._streaming_flag: bool = False
-
         self._last_state: dict[str, Any] | None = None
 
         self._current_state: dict[str, Any] | None = None
@@ -211,15 +202,18 @@ class PipelineEngine:
 
         self._run_started: bool = False
 
-        # Phase 1: bridge 引用，engine 主动 emit 推送事件
+        # 流式输出口（output port）：bridge、chunk 队列、消费者/keepalive 协程、
+        # 流式上下文全部委托给 StreamingOutput，引擎核心不再持有这些传输层状态。
+        # stop_check 回调注入协作式停止判定，保持单向依赖（streaming 不反向依赖引擎）。
+        from pipeline.engine_streaming import StreamingOutput  # noqa: PLC0415
+        self._streaming: StreamingOutput = StreamingOutput(
+            self._pipeline_id, self._is_stop_signal_active,
+        )
 
-        self._bridge: Any = None
-
-        # Phase 1: chunk 有序队列 + 单消费者协程，避免 create_task 并发导致 chunk 乱序
-
-        self._chunk_queue: asyncio.Queue[dict | None] | None = None
-
-        self._chunk_consumer_task: asyncio.Task[None] | None = None
+        # per-pipeline 日志管理（横切基础设施）：FileHandler 创建/关闭、contextvar 绑定、
+        # 防重复守卫全部委托给 PipelineLogger，引擎核心不再持有日志层细节。
+        from pipeline.engine_logging import PipelineLogger  # noqa: PLC0415
+        self._pipeline_logger: PipelineLogger = PipelineLogger()
 
         self._preserved_bridge: Any = None
 
@@ -303,9 +297,7 @@ class PipelineEngine:
 
         self._wake_event = None
 
-        self._streaming_flag = False
-
-        self._streaming_on_chunk = None
+        self._streaming.reset_for_run()
 
 
 
@@ -554,9 +546,8 @@ class PipelineEngine:
 
         """
 
-        _pipeline_log_handler = None
-
-        _pipeline_loggers: list[logging.Logger] = []
+        # per-run contextvar token，供 finally 重置（日志 contextvar 由 PipelineLogger 管理）
+        _pipeline_id_token: contextvars.Token | None = None
 
         self._running = True
 
@@ -592,7 +583,7 @@ class PipelineEngine:
 
         self._pipeline_id = pipeline_run_id
 
-        _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
+        _pipeline_id_token = self._pipeline_logger.bind_context(pipeline_run_id)
 
         # 重置连续错误计数器
 
@@ -602,11 +593,11 @@ class PipelineEngine:
 
         if not resumed:
 
-            self.save_streaming_context(state)
+            self._streaming.save_context(state)
 
         else:
 
-            self.restore_streaming_context(state)
+            self._streaming.restore_context(state)
 
         # 引擎不自我注册——注册是创建者的职责。只恢复 preserved 属性到已有 entry。
 
@@ -660,13 +651,13 @@ class PipelineEngine:
 
         # resume 是新的一轮流式输出，需要新的 stream_start + 新的 message_id。
 
-        self._bridge = self._get_bridge()
+        self._streaming.attach_bridge(self._get_bridge())
 
-        if self._bridge is not None:
+        if self._streaming.bridge is not None:
 
             try:
 
-                await self._emit_start_if_bridge(state)
+                await self._streaming.start(state)
 
             except Exception as _emit_start_exc:
 
@@ -680,17 +671,7 @@ class PipelineEngine:
 
         try:
 
-            self._setup_pipeline_logging(pipeline_run_id, resumed, _pipeline_loggers)
-
-            if _pipeline_loggers:
-
-                _pipeline_log_handler = _pipeline_loggers[0].handlers[-1] if _pipeline_loggers[0].handlers else None
-
-
-
-            # 重新获取 log_handler（_setup_pipeline_logging 可能修改列表）
-
-            _pipeline_log_handler = self._get_last_file_handler(_pipeline_loggers)
+            self._pipeline_logger.setup(pipeline_run_id, resumed)
 
 
 
@@ -746,7 +727,7 @@ class PipelineEngine:
 
                 # 显示当前使用的模型信息
 
-                self._log_model_info()
+                self._pipeline_logger.model_info(self.plugin_registry)
 
 
 
@@ -834,11 +815,11 @@ class PipelineEngine:
 
             # Phase 1: 正常完成时推送 emit_finish
 
-            if self._bridge is not None:
+            if self._streaming.bridge is not None:
 
                 try:
 
-                    await self._bridge.emit_finish(state)
+                    await self._streaming.emit_finish(state)
 
                 except Exception as _emit_exc:
 
@@ -886,11 +867,11 @@ class PipelineEngine:
 
             # Phase 1: 推送 emit_error
 
-            if self._bridge is not None:
+            if self._streaming.bridge is not None:
 
                 with contextlib.suppress(Exception):
 
-                    await self._bridge.emit_error(
+                    await self._streaming.emit_error(
 
                         RuntimeError(f"Pipeline cancelled ({_cancel_source})")
 
@@ -935,11 +916,11 @@ class PipelineEngine:
 
             # Phase 1: 推送 emit_error
 
-            if self._bridge is not None:
+            if self._streaming.bridge is not None:
 
                 with contextlib.suppress(Exception):
 
-                    await self._bridge.emit_error(exc)
+                    await self._streaming.emit_error(exc)
 
 
             # 构造含上下文的错误信息，写入任务 error 字段
@@ -999,9 +980,7 @@ class PipelineEngine:
 
             await self._cleanup_run_loop(
 
-                state, _pipeline_log_handler, _pipeline_loggers,
-
-                _pipeline_id_token,
+                state, _pipeline_id_token,
 
             )
 
@@ -1014,318 +993,6 @@ class PipelineEngine:
     # ------------------------------------------------------------------
 
     # _run_loop 辅助方法
-
-    # ------------------------------------------------------------------
-
-
-
-    # ------------------------------------------------------------------
-
-    # 管道日志过滤器 — 任务执行事件独立输出
-
-    # ------------------------------------------------------------------
-
-    _TASK_LOG_LOGGERS: tuple[str, ...] = (
-
-        "tools.builtin.task_submit",
-
-        "tools.builtin.task_manage",
-
-        "tools.builtin.task_evaluate",
-
-        "infrastructure.task_worker",
-
-        "tasks",
-
-    )
-
-
-
-    class _TaskLogFilter(logging.Filter):
-
-        """只放行任务执行相关的日志（task_submit/task_manage/task_evaluate/worker）。"""
-
-
-
-        def __init__(self, pipeline_id: str) -> None:
-
-            super().__init__()
-
-            self.pipeline_id = pipeline_id
-
-
-
-        def filter(self, record: logging.LogRecord) -> bool:
-
-            if _current_pipeline_id.get() != self.pipeline_id:
-
-                return False
-
-            return any(
-
-                record.name.startswith(prefix)
-
-                for prefix in PipelineEngine._TASK_LOG_LOGGERS
-
-            )
-
-
-
-    # ------------------------------------------------------------------
-
-    # 管道日志设置
-
-    # ------------------------------------------------------------------
-
-
-
-    @staticmethod
-
-    def _create_log_handler(
-
-        file_path: str,
-
-        mode: str,
-
-        level: int,
-
-        formatter: logging.Formatter,
-
-        filters: list[Any],
-
-    ) -> logging.FileHandler:
-
-        """创建配置好的 FileHandler（工厂函数，统一日志 Handler 创建逻辑）。
-
-        Args:
-
-            file_path: 日志文件路径
-
-            mode: 文件打开模式（"w" 覆盖 / "a" 追加）
-
-            level: 日志级别
-
-            formatter: 日志格式化器
-
-            filters: 过滤器列表
-
-        Returns:
-
-            配置完成的 FileHandler 实例
-
-        """
-
-        handler = logging.FileHandler(file_path, encoding="utf-8", mode=mode)
-
-        handler.setLevel(level)
-
-        handler.setFormatter(formatter)
-
-        for f in filters:
-
-            handler.addFilter(f)
-
-        return handler
-
-
-
-    def _setup_pipeline_logging(
-
-        self,
-
-        pipeline_run_id: str,
-
-        resumed: bool,
-
-        pipeline_loggers: list[logging.Logger],
-
-    ) -> None:
-
-        """为当前管道设置独立日志文件，按类型分文件夹存储。
-
-
-
-        目录结构：
-
-          logs/pipeline/  — 主日志（DEBUG~INFO，不含 WARNING+）
-
-          logs/error/     — 错误日志（WARNING 及以上）
-
-          logs/task/      — 任务执行日志（task_submit/manage/evaluate/worker）
-
-        """
-
-        try:
-
-            # 防止 resume 时重复添加 Handler
-
-            if hasattr(self, '_logging_pipeline_id') and self._logging_pipeline_id == pipeline_run_id:
-
-                return
-
-            self._logging_pipeline_id = pipeline_run_id
-
-
-
-            _log_base = Path.cwd() / "logs"
-
-            _pipeline_dir = _log_base / "pipeline"
-
-            _error_dir = _log_base / "error"
-
-            _task_dir = _log_base / "task"
-
-            _pipeline_dir.mkdir(parents=True, exist_ok=True)
-
-            _error_dir.mkdir(parents=True, exist_ok=True)
-
-            _task_dir.mkdir(parents=True, exist_ok=True)
-
-
-
-            # 文件名已按 pipeline_run_id（注册表 ID）唯一命名，同一引擎无论
-            # 首次运行 / resume / 停止后重启，日志都追加进同一个文件，不覆盖。
-            # 只要引擎为该 ID 运行，其日志就持续归档到 pipeline_{id}.log 尾部。
-            # （resumed 标志此前用 "w" 覆盖重启场景，会丢失同 ID 历史日志，已废弃。）
-            log_mode = "a"
-
-            _log_fmt = logging.Formatter(
-
-                "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-
-                datefmt="%H:%M:%S",
-
-            )
-
-            _pipeline_filter = _PipelineLogFilter(pipeline_run_id)
-
-
-
-            # ---- 1. 主日志（DEBUG~INFO，排除 WARNING+，避免与 error 重复） ----
-
-            _main_handler = self._create_log_handler(
-
-                str(_pipeline_dir / f"pipeline_{pipeline_run_id}.log"),
-
-                log_mode, logging.DEBUG, _log_fmt,
-
-                [_pipeline_filter, lambda r: r.levelno < logging.WARNING],
-
-            )
-
-
-
-            # ---- 2. 错误/中断/警告日志（WARNING+ 级别，独立文件夹） ----
-
-            _error_handler = self._create_log_handler(
-
-                str(_error_dir / f"pipeline_{pipeline_run_id}.log"),
-
-                log_mode, logging.WARNING, _log_fmt,
-
-                [_pipeline_filter],
-
-            )
-
-
-
-            # ---- 3. 任务执行日志（独立文件夹） ----
-
-            _task_handler = self._create_log_handler(
-
-                str(_task_dir / f"pipeline_{pipeline_run_id}.log"),
-
-                log_mode, logging.DEBUG, _log_fmt,
-
-                [self._TaskLogFilter(pipeline_run_id)],
-
-            )
-
-
-
-            _all_loggers = [
-
-                "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
-
-                "pipeline.route", "pipeline.config", "pipeline.registry",
-
-                "pipeline.stream_bridge",
-
-                "plugins.core", "plugins.input", "plugins.output",
-
-                "infrastructure.task_worker", "tasks",
-
-                "tools.builtin", "evaluation",
-
-                "llm.adapter", "llm.adapter._stream",
-
-                "triggers.manager",
-
-                "pipeline.message_bus",
-
-                "src.core.event_bus",
-
-            ]
-
-            for _ln in _all_loggers:
-
-                _lg = logging.getLogger(_ln)
-
-                if _lg.level == logging.NOTSET:
-
-                    _lg.setLevel(logging.DEBUG)
-
-                _lg.addHandler(_main_handler)
-
-                _lg.addHandler(_error_handler)
-
-                _lg.addHandler(_task_handler)
-
-                pipeline_loggers.append(_lg)
-
-        except Exception as exc:
-
-            logger.info("管道日志器配置失败（非致命）: %s", exc)
-
-
-
-    @staticmethod
-
-    def _get_last_file_handler(loggers: list[logging.Logger]) -> logging.FileHandler | None:
-
-        """从日志器列表中获取最后一个 FileHandler（即当前管道的）。"""
-
-        for _lg in reversed(loggers):
-
-            for _h in reversed(_lg.handlers):
-
-                if isinstance(_h, logging.FileHandler):
-
-                    return _h
-
-        return None
-
-
-
-    def _log_model_info(self) -> None:
-
-        """显示当前 LLM 模型信息。"""
-
-        _llm_core_iter = self.plugin_registry.get_core("llm_call")
-
-        if _llm_core_iter and hasattr(_llm_core_iter, "_model"):
-
-            _model_info = f"{_llm_core_iter._model} (provider={_llm_core_iter._provider}"
-
-            if getattr(_llm_core_iter, "_api_base", None):
-
-                _model_info += f", api_base={_llm_core_iter._api_base}"
-
-            _model_info += ")"
-
-            logger.debug("Model: %s", _model_info)
-
-
 
     def _emit_iteration_event(self, state: dict[str, Any], iteration: int) -> None:
 
@@ -1439,93 +1106,27 @@ class PipelineEngine:
 
         state: dict[str, Any],
 
-        log_handler: logging.FileHandler | None,
-
-        loggers: list[logging.Logger],
-
-        pipeline_id_token: contextvars.Token,
+        pipeline_id_token: contextvars.Token | None,
 
     ) -> None:
 
         """清理 _run_loop 的资源和注册。
 
-
-
-        关闭所有为当前管道创建的 FileHandler（主日志/错误日志/任务日志），
-
-        并从所有 logger 中移除，防止 handler 泄漏和文件句柄泄漏。
-
+        关闭流式协程、per-pipeline 日志 FileHandler 并重置 contextvar，
+        清理 EngineRegistry 注册与 chunk_service 缓存。日志 handler 的
+        关闭/守卫重置、contextvar 重置委托给 PipelineLogger。
         """
 
-        # Phase 1: 优雅关闭 chunk_consumer 协程
+        # Phase 1: 优雅关闭流式消费者 + keepalive 协程（防泄漏），委托给流式输出口
+        await self._streaming.shutdown()
 
-        if self._chunk_queue is not None and self._chunk_consumer_task is not None:
+        # 关闭 per-pipeline 日志 FileHandler + 重置防重复守卫（防 handler 泄漏 +
+        # 引擎复用重启时日志不写文件，见 PipelineLogger.teardown 的 BUG 注释）。
+        self._pipeline_logger.teardown()
 
-            try:
-
-                self._chunk_queue.put_nowait(None)
-
-                await asyncio.wait_for(self._chunk_consumer_task, timeout=2.0)
-
-            except Exception:
-
-                self._chunk_consumer_task.cancel()
-
-            self._chunk_queue = None
-
-            self._chunk_consumer_task = None
-
-
-
-        # 收集所有需要关闭的 FileHandler（可能有多个：主日志+错误日志+任务日志）
-
-        _handlers_to_close: list[logging.FileHandler] = []
-
-        _seen: set[int] = set()
-
-        for _lg in loggers:
-
-            for _h in _lg.handlers:
-
-                if isinstance(_h, logging.FileHandler) and id(_h) not in _seen:
-
-                    _seen.add(id(_h))
-
-                    _handlers_to_close.append(_h)
-
-
-
-        for _h in _handlers_to_close:
-
-            with contextlib.suppress(Exception):
-
-                _h.close()
-
-            for _lg in loggers:
-
-                with contextlib.suppress(Exception):
-
-                    _lg.removeHandler(_h)
-
-
-
-        # BUG-FIX-fix_20260627_log_missing_after_restart:
-
-        # handler 已全部关闭移除，必须同步重置守卫标志，否则引擎被复用重启时
-
-        # _setup_pipeline_logging 的防重复守卫(_logging_pipeline_id == pipeline_run_id)
-
-        # 会误判"已配置"直接 return，不重建 handler → 日志不写文件。
-
-        # 触发路径：停止生成只 cancel engine_task 不删 entry(register 复用同一 engine)，下次
-
-        # 发消息走 _start_idle_engine → 同一 engine.run() → pipeline_id 不变 → 守卫命中。
-
-        self._logging_pipeline_id = None
-
-
-
-        _current_pipeline_id.reset(pipeline_id_token)
+        # 重置 contextvar（_current_pipeline_id），必须用 setup 时 bind_context 返回的 token
+        if pipeline_id_token is not None:
+            self._pipeline_logger.reset_context(pipeline_id_token)
 
         # 清理 EngineRegistry 注册
 
@@ -1601,6 +1202,9 @@ class PipelineEngine:
         """设置管道 ID（供 registry 和会话恢复使用）。"""
 
         self._pipeline_id = value
+
+        # 同步到流式输出口（日志/事件信封要用 pipeline_id）
+        self._streaming._pipeline_id = value
 
 
 
@@ -1776,21 +1380,21 @@ class PipelineEngine:
                 logger.debug("on_chunk pipeline_suspended 回调失败（非致命）")
 
         # BUG-FIX-fix_20260624_chunk_drain_before_suspend:
-        # 问题根因: LLM 流式 chunk 通过 _chunk_queue 异步投递，_chunk_consumer 协程
-        #   独立消费。engine 在 LLM 返回后立刻 emit_suspend → _stream_started=False，
+        # 问题根因: LLM 流式 chunk 通过 chunk queue 异步投递，消费者协程独立消费。
+        #   engine 在 LLM 返回后立刻 emit_suspend → _stream_started=False，
         #   但 queue 里残留的 chunk（thinking_end、最终 text）还没被 consumer 取出，
         #   取出时 bridge 已关闭流式 → 全部丢弃 → 用户看到回复突然中断。
         # 修复方案: emit_suspend 前 drain chunk queue，确保所有已入队的 chunk 都被
         #   消费完毕。带 2s 超时兜底，防止 consumer 卡死导致管道永久挂起。
-        await self._drain_chunk_queue(timeout=2.0)
+        await self._streaming.drain(timeout=2.0)
 
         # Phase 1: 推送 emit_suspend（本轮流式完成）
 
-        if self._bridge is not None:
+        if self._streaming.bridge is not None:
 
             try:
 
-                await self._bridge.emit_suspend(state)
+                await self._streaming.emit_suspend(state)
 
             except Exception as _emit_exc:
 
@@ -2008,7 +1612,7 @@ class PipelineEngine:
 
             self._suspended_state = None
 
-            self.save_streaming_context(state)
+            self._streaming.save_context(state)
 
             logger.debug("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
 
@@ -2022,11 +1626,11 @@ class PipelineEngine:
 
             # emit_start 内部会调 _start_new_turn 生成新 message_id（新 turn = 新消息）。
 
-            if self._bridge is not None:
+            if self._streaming.bridge is not None:
 
                 try:
 
-                    await self._bridge.emit_start(state)
+                    await self._streaming.emit_start(state)
 
                 except Exception as _emit_exc:
 
@@ -2163,15 +1767,8 @@ class PipelineEngine:
         不触碰注册表（entry 移除是 stop 的职责），不访问自身 _ 私有状态机
         （区别于已删除的 zombie 重置）。
         """
-        # 关闭流式 chunk 消费协程
-        if self._chunk_queue is not None and self._chunk_consumer_task is not None:
-            try:
-                self._chunk_queue.put_nowait(None)
-                await asyncio.wait_for(self._chunk_consumer_task, timeout=2.0)
-            except Exception:
-                self._chunk_consumer_task.cancel()
-            self._chunk_queue = None
-            self._chunk_consumer_task = None
+        # 关闭流式消费者 + keepalive 协程（防泄漏），委托给流式输出口
+        await self._streaming.shutdown()
 
         # 释放 chunk_service 内存缓存
         try:
@@ -2451,257 +2048,6 @@ class PipelineEngine:
             return False
         pending = state.get("pending_signals") or {}
         return "stop_generation" in pending
-
-
-
-    def _on_chunk_adapter(self, chunk: dict) -> None:
-
-        """同步→异步适配器：LLM 适配器的 on_chunk 是同步回调。
-
-
-
-        Phase 1 改造：engine 内部做 1 次同步→异步适配，
-
-        通过 asyncio.Queue 保证 chunk FIFO 有序投递到 bridge.emit_chunk。
-
-
-
-        协作式停止兜底：当 stop_generation 信号已写入 state（deliver_signal），
-
-        且当前 await 不可中断（httpx C 层 socket recv 实测卡死，见 adapter.py BUG 注释），
-
-        cancel engine_task 无法打断。此时本回调是唯一可靠的停止检查点：每个流式 chunk
-
-        都会同步调用它，命中信号即 raise CancelledError。
-
-
-
-        为什么用 raise CancelledError 而非返回 "stop"：adapter 的 on_chunk 返回 "stop"
-
-        语义已被"流式重复检测"占用（会设 stream_repetition=True，llm_core 误判为重复
-
-        而重试）。本回调与 adapter 流式循环同在 engine_task 协程栈内（_run_loop →
-
-        llm_core.execute → _call_llm → adapter.completion 同步调 on_chunk），raise
-
-        CancelledError 会冒泡到 _run_loop 的 except CancelledError，复用既有的停止
-
-        清理路径（emit_error + mark_failed + finally 复位 idle），无需新增字段或分支。
-
-        与 cancel 互补：cancel 负责打断 await，协作式负责 httpx 不可中断时的兜底。
-
-
-
-        失败隔离：推送失败只 log warning，不影响 engine 运行。
-
-
-
-        Args:
-
-            chunk: LLM 适配器回调的 chunk 字典
-
-        """
-
-        # 协作式停止：每个 chunk 都检查 stop_generation 信号。命中即 raise。
-
-        # 信号消费/清理由插件下一轮自治处理，这里仅做中断判定（只读不删）。
-
-        if self._is_stop_signal_active():
-            logger.info(
-                "[Engine] on_chunk 检测到 stop_generation 信号，协作式中断流式"
-                ": pipeline=%s chunk_type=%s",
-                self._pipeline_id[:12], chunk.get("type", "?"),
-            )
-            raise asyncio.CancelledError("stop_generation signal")
-
-        if self._bridge is None or self._chunk_queue is None:
-
-            return
-
-        try:
-
-            self._chunk_queue.put_nowait(chunk)
-
-        except asyncio.QueueFull:
-
-            logger.warning(
-
-                "[Engine] chunk queue 满，丢弃 chunk: pipeline=%s",
-
-                self._pipeline_id[:12],
-
-            )
-
-        except Exception as exc:
-
-            logger.debug(
-
-                "[Engine] on_chunk_adapter 入队失败: %s pipeline=%s",
-
-                exc, self._pipeline_id[:12],
-
-            )
-
-
-
-    async def _chunk_consumer(self) -> None:
-
-        """单消费者协程：从 Queue 取 chunk，FIFO 有序调用 bridge.emit_chunk。
-
-
-
-        保证 thinking_start → thinking_chunk → thinking_end 等多事件 chunk 的时序正确。
-
-        """
-
-        bridge = self._bridge
-
-        queue = self._chunk_queue
-
-        if bridge is None or queue is None:
-
-            return
-
-        while True:
-
-            try:
-
-                chunk = await queue.get()
-
-            except asyncio.CancelledError:
-
-                break
-
-            if chunk is None:
-
-                # 哨兵值，通知退出
-
-                break
-
-            try:
-
-                await bridge.emit_chunk(chunk)
-
-            except Exception as exc:
-
-                logger.warning(
-
-                    "[Engine] chunk_consumer emit_chunk 失败（非致命）: %s pipeline=%s",
-
-                    exc, self._pipeline_id[:12],
-
-                )
-
-
-
-    async def _drain_chunk_queue(self, timeout: float = 2.0) -> None:
-
-        """等待 chunk queue 清空，确保 emit_suspend 前所有流式 chunk 已投递。
-
-        BUG-FIX-fix_20260624_chunk_drain_before_suspend 的配套方法。
-
-        每 5ms 让出一次事件循环，让 _chunk_consumer 协程有机会取出并投递 queue 里
-        残留的 chunk。带超时兜底，防止 consumer 卡住时管道永久挂起。
-
-        Args:
-            timeout: 最长等待秒数（默认 2s）
-        """
-        import time as _time  # noqa: PLC0415
-
-        queue = self._chunk_queue
-        if queue is None:
-            return
-        deadline = _time.monotonic() + timeout
-        while not queue.empty():
-            if _time.monotonic() > deadline:
-                remaining = queue.qsize()
-                if remaining:
-                    logger.warning(
-                        "[Engine] chunk queue drain 超时，仍有 %d 个 chunk 未消费: pipeline=%s",
-                        remaining, self._pipeline_id[:12],
-                    )
-                return
-            await asyncio.sleep(0.005)
-
-
-
-    async def _emit_start_if_bridge(self, state: dict[str, Any]) -> None:
-
-        """如果有 bridge，发送 emit_start 并安装 on_chunk 适配器。
-
-
-
-        在首次迭代前调用，确保 bridge 就绪后立即推送 stream_start。
-
-        启动单消费者协程保证 chunk 有序投递。
-
-        """
-
-        bridge = self._bridge
-
-        if bridge is None:
-
-            return
-
-        await bridge.emit_start(state)
-
-        # 安装 on_chunk 适配器到 state（LLM 适配器会读取 state["on_chunk"]）
-
-        # 启动 chunk 有序队列 + 单消费者协程
-
-        if self._chunk_queue is None:
-
-            self._chunk_queue = asyncio.Queue(maxsize=10000)
-
-        if self._chunk_consumer_task is None or self._chunk_consumer_task.done():
-
-            self._chunk_consumer_task = asyncio.create_task(self._chunk_consumer())
-
-        if state.get("on_chunk") is None:
-
-            state["on_chunk"] = self._on_chunk_adapter
-
-            state["streaming"] = True
-
-            self._streaming_on_chunk = self._on_chunk_adapter
-
-            self._streaming_flag = True
-
-
-
-    def save_streaming_context(self, state: dict[str, Any]) -> None:
-
-        """从 state 保存流式上下文。"""
-
-        on_chunk = state.get("on_chunk")
-
-        if on_chunk is not None:
-
-            self._streaming_on_chunk = on_chunk
-
-            self._streaming_flag = state.get("streaming", True)
-
-
-
-    def restore_streaming_context(self, state: dict[str, Any]) -> None:
-
-        """恢复流式上下文到 state。"""
-
-        if self._streaming_on_chunk is not None and "on_chunk" not in state:
-
-            state["on_chunk"] = self._streaming_on_chunk
-
-            state["streaming"] = self._streaming_flag
-
-
-
-    def set_streaming_context(self, on_chunk: Any, streaming: bool = True) -> None:
-
-        """外部设置流式上下文（替代直接写 _saved_on_chunk）。"""
-
-        self._streaming_on_chunk = on_chunk
-
-        self._streaming_flag = streaming
 
 
 

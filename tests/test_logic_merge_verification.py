@@ -398,9 +398,10 @@ class TestB4CreateLogHandler:
     """B-4: _create_log_handler() FileHandler 工厂验证。"""
 
     @pytest.fixture(autouse=True)
-    def _import_class(self):
-        from pipeline.engine import PipelineEngine
-        self._PipelineEngine = PipelineEngine
+    def _import_factory(self):
+        # _create_log_handler 已从 PipelineEngine 静态方法迁移到 engine_logging 模块函数
+        from pipeline.engine_logging import _create_log_handler
+        self._create_log_handler = _create_log_handler
 
     def _create_handler(self, tmp_path, **overrides):
         """创建 handler 并在测试后自动关闭。"""
@@ -412,7 +413,7 @@ class TestB4CreateLogHandler:
             filters=[],
         )
         defaults.update(overrides)
-        handler = self._PipelineEngine._create_log_handler(**defaults)
+        handler = self._create_log_handler(**defaults)
         yield handler
         handler.close()
 
@@ -491,7 +492,7 @@ class TestB4CreateLogHandler:
         (tmp_path / "task").mkdir(parents=True, exist_ok=True)
 
         _pipeline_filter = MagicMock(spec=logging.Filter)
-        main_handler = self._PipelineEngine._create_log_handler(
+        main_handler = self._create_log_handler(
             file_path=str(tmp_path / f"pipeline_{pipeline_id}.log"),
             mode="w",
             level=logging.DEBUG,
@@ -503,7 +504,7 @@ class TestB4CreateLogHandler:
         main_handler.close()
 
         # 2. 错误日志: WARNING, 仅 pipeline_filter
-        error_handler = self._PipelineEngine._create_log_handler(
+        error_handler = self._create_log_handler(
             file_path=str(tmp_path / "error" / f"pipeline_{pipeline_id}.log"),
             mode="w",
             level=logging.WARNING,
@@ -516,7 +517,7 @@ class TestB4CreateLogHandler:
 
         # 3. 任务日志: DEBUG, 仅 task_filter
         _task_filter = MagicMock(spec=logging.Filter)
-        task_handler = self._PipelineEngine._create_log_handler(
+        task_handler = self._create_log_handler(
             file_path=str(tmp_path / "task" / f"pipeline_{pipeline_id}.log"),
             mode="w",
             level=logging.DEBUG,

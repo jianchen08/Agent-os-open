@@ -516,7 +516,7 @@ class BridgeCore:
     def on_chunk(self) -> Any:
         """[DEPRECATED] bridge 不再提供 on_chunk 回调。
 
-        Phase 1 改造：on_chunk 由 engine 内部 _on_chunk_adapter 处理。
+        Phase 1 改造：on_chunk 由引擎流式输出口 StreamingOutput（engine._streaming）处理。
         保留此 property 仅为防止旧代码 AttributeError。
         """
         return None

@@ -384,7 +384,8 @@ async def _start_idle_engine(
     bridge = _registry.ensure_bridge(
         pipeline_id, _sink, engine=engine,
     )
-    # Phase 1: on_chunk 由 engine 内部 _on_chunk_adapter 处理，不再从 bridge 读取。
+    # Phase 1: on_chunk 由引擎的流式输出口 StreamingOutput（engine._streaming）处理，
+    # 不再从 bridge 读取。详见 pipeline/engine_streaming.py。
     # REFACTOR-20260614: engine 在主循环运行，不再创建独立线程。
     engine_future = asyncio.ensure_future(engine.run(
         user_input=message, agent_config=_resolved_agent,

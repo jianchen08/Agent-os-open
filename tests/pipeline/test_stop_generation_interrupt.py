@@ -235,7 +235,11 @@ class TestCooperativeStopViaOnChunk:
         assert engine._is_stop_signal_active() is True
 
     def test_on_chunk_raises_cancelled_when_stop_signal_active(self) -> None:
-        """信号命中时，_on_chunk_adapter raise CancelledError 中断流式。"""
+        """信号命中时，on_chunk raise CancelledError 中断流式。
+
+        on_chunk 现位于流式输出口 StreamingOutput（engine._streaming），
+        通过 stop_check 回调注入的 _is_stop_signal_active 做协作式中断判定。
+        """
         engine = _make_engine("coop-2")
         engine._current_state = {
             "iteration": 1,
@@ -243,19 +247,19 @@ class TestCooperativeStopViaOnChunk:
         }
 
         with pytest.raises(asyncio.CancelledError):
-            engine._on_chunk_adapter({"type": "text", "content": "x"})
+            engine._streaming._on_chunk({"type": "text", "content": "x"})
 
     def test_on_chunk_no_signal_enqueues_normally(self) -> None:
-        """无停止信号时，_on_chunk_adapter 正常入队（不破坏原有流式功能）。"""
+        """无停止信号时，on_chunk 正常入队（不破坏原有流式功能）。"""
         engine = _make_engine("coop-3")
         engine._current_state = {"iteration": 1}  # 无 pending_signals
-        # 装配 chunk queue（_on_chunk_adapter 依赖它）
-        engine._chunk_queue = asyncio.Queue()
-        engine._bridge = MagicMock()  # 非空 bridge
+        # 装配 chunk queue + bridge（on_chunk 依赖它们，均在 StreamingOutput 内）
+        engine._streaming._chunk_queue = asyncio.Queue()
+        engine._streaming._bridge = MagicMock()  # 非空 bridge
 
-        engine._on_chunk_adapter({"type": "text", "content": "hello"})
+        engine._streaming._on_chunk({"type": "text", "content": "hello"})
 
-        assert engine._chunk_queue.qsize() == 1, "无停止信号时 chunk 应正常入队"
+        assert engine._streaming._chunk_queue.qsize() == 1, "无停止信号时 chunk 应正常入队"
 
     def test_on_chunk_signal_only_read_not_consumed(self) -> None:
         """协作式停止只读信号不删除（消费/清理由插件下一轮自治处理）。"""
@@ -266,7 +270,7 @@ class TestCooperativeStopViaOnChunk:
         }
 
         with pytest.raises(asyncio.CancelledError):
-            engine._on_chunk_adapter({"type": "text", "content": "x"})
+            engine._streaming._on_chunk({"type": "text", "content": "x"})
 
         # 信号仍在（未被协作式路径消费）
         assert "stop_generation" in engine._current_state["pending_signals"]
