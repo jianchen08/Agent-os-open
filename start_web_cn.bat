@@ -13,38 +13,69 @@ echo 项目目录: %cd%
 echo.
 
 REM ===========================================================================
-REM WSL docker 模式：自动刷新 DOCKER_HOST（WSL 的 IP 每次重启可能变化）
-REM 检测是否装了 WSL 原生 docker，是则获取当前 IP 更新 DOCKER_HOST。
-REM 这样用户无需手动同步，双击本脚本即可。
+REM WSL native docker mode (replaces Docker Desktop)
+REM 1. Keep WSL alive (prevent suspend that kills containers)
+REM 2. Ensure dockerd running (systemd managed)
+REM 3. Start project containers
+REM 4. Setup netsh portproxy (Windows localhost -> WSL container ports)
+REM All automatic, no manual steps.
 REM ===========================================================================
 wsl -d Ubuntu -u root -- echo wsl_ok >nul 2>&1
 if not errorlevel 1 (
-    REM 获取 WSL eth0 的 172.x IP（避免 PowerShell 的 $_ 在某些环境被转义）
+    echo [INFO] WSL docker mode detected
+
+    REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
+    powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
+
+    REM 2. Ensure dockerd running.
+    REM    NOTE: systemd has a bug on this machine that periodically stops docker.service.
+    REM    So we bypass systemd: check if dockerd process alive, if not start it directly.
+    wsl -d Ubuntu -u root -- bash -c "if ! pgrep -x dockerd >/dev/null 2>&1; then pkill -9 dockerd 2>/dev/null; rm -f /var/run/docker.pid; nohup dockerd >/tmp/dockerd.log 2>&1 & sleep 6; fi; for i in 1 2 3 4 5; do docker version --format '{{.Server.Version}}' 2>/dev/null | grep -q '^[0-9]' && break; sleep 2; done" >nul 2>&1
+
+    REM 3. Get WSL IP (NAT mode, may change on restart)
     for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do (
         set "WSL_IP=%%i"
     )
+
     if defined WSL_IP (
-        set "DOCKER_HOST=tcp://!WSL_IP!:2375"
-        echo [OK] WSL docker: !DOCKER_HOST!
+        echo [OK] WSL IP: !WSL_IP!
+
+        REM 4. Setup netsh portproxy for Windows -> WSL port forwarding
+        REM    Forwards Windows localhost:PORT -> WSL_IP:PORT (container port mapping)
+        REM    Needs admin; if not admin, try and warn on failure.
+        echo [INFO] Setting up port forwarding (needs admin)...
+        powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy add v4tov4 listenport=5289 listenaddress=127.0.0.1 connectport=5289 connectaddress=!WSL_IP!; netsh interface portproxy add v4tov4 listenport=6480 listenaddress=127.0.0.1 connectport=6480 connectaddress=!WSL_IP!; netsh interface portproxy add v4tov4 listenport=8988 listenaddress=127.0.0.1 connectport=8988 connectaddress=!WSL_IP!'" 2>nul
+        echo [OK] Port forwarding configured
+
+        REM 5. Start project containers (compose up)
+        echo [INFO] Starting project containers...
+        wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && docker compose up -d 2>&1 | tail -3"
+        echo [OK] Containers started
+
+        REM Skip Docker Desktop checks below, go straight to Python/Agent
+        echo.
+        echo [INFO] Skipping Docker Desktop checks (using WSL native docker)
+        goto :start_python
     )
 )
+echo [INFO] No WSL docker found, falling back to Docker Desktop mode
 
 :: ===========================================================================
-REM 0. 清理上次残留的宿主机进程（避免端口/资源占用导致重复启动失败）
-REM 只关闭与本项目相关的进程：后端入口(channels.websocket.app_factory)、
-REM 以及可执行文件位于项目目录下的进程。
-REM Docker 容器内的服务不受影响。详见 cleanup_processes.ps1
+
+
+
+
 :: ===========================================================================
 echo [INFO] 清理上次残留进程...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_processes.ps1"
 echo.
 
 :: ===========================================================================
-REM 1. 检查 Docker（本项目必须有 Docker）
+
 ::
-REM 注意：docker info 在 daemon 假死时会无限期阻塞（不是返回失败码），
-REM 直接调用会导致脚本永久卡住。这里用独立的 check_docker.ps1 做带超时的
-REM 健康检查（每次最多等 90 秒），避免阻塞。
+
+
+
 :: ===========================================================================
 where docker >nul 2>&1
 if errorlevel 1 (
@@ -54,24 +85,24 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM daemon 健康检查（带 90 秒超时，给 Docker Desktop 冷启动足够时间）
+
 :check_daemon
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_docker.ps1" -Timeout 90 >nul 2>&1
 set "DAEMON_STATUS=!errorlevel!"
 if "!DAEMON_STATUS!"=="0" goto :docker_ready
 
-REM 退出码: 0=就绪 1=未就绪(启动中) 3=超时(假死)
+
 if "!DAEMON_STATUS!"=="3" goto :daemon_hung
 
-REM --- daemon 未就绪（状态 1）：正在启动，继续等待 ---
-REM 首次进入等待时启动 docker daemon
+
+
 if not defined DOCKER_WAIT_COUNT (
     if defined WSL_IP (
-        REM WSL docker 模式：启动 WSL 里的 docker 服务
+
         echo [INFO] 启动 WSL docker 服务...
         wsl -d Ubuntu -u root -- bash -c "systemctl start docker 2>/dev/null" >nul 2>&1
     ) else (
-        REM Docker Desktop 模式：启动 Docker Desktop
+
         echo [INFO] 正在启动 Docker Desktop...
         start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
     )
@@ -79,13 +110,13 @@ if not defined DOCKER_WAIT_COUNT (
 )
 
 set /a "DOCKER_WAIT_COUNT+=1"
-REM 最多等待 4 轮（每轮含 90 秒探测 + 10 秒间隔，约 7 分钟）
+
 if !DOCKER_WAIT_COUNT! gtr 4 goto :daemon_failed
 echo [INFO] 等待 Docker daemon 就绪... (!DOCKER_WAIT_COUNT!/4)
 timeout /t 10 /nobreak >nul
 goto :check_daemon
 
-REM --- daemon 假死（状态 3）：触发自动恢复，而不是干等 ---
+
 :daemon_hung
 echo [WARN] docker daemon 90 秒内无响应（假死，非启动中）。
 if defined DAEMON_RESTARTED (
@@ -93,7 +124,7 @@ if defined DAEMON_RESTARTED (
     goto :daemon_failed
 )
 if defined WSL_IP (
-    REM WSL docker 模式：直接重启 WSL docker 服务（比 restart_docker.ps1 快）
+
     echo [INFO] 重启 WSL docker 服务...
     wsl -d Ubuntu -u root -- bash -c "systemctl restart docker 2>/dev/null" >nul 2>&1
     set "DAEMON_RESTARTED=1"
@@ -130,14 +161,14 @@ exit /b 1
 echo [OK] Docker 就绪
 
 :: ===========================================================================
-REM 2. Docker 服务（Redis + Frontend）
+
 :: ===========================================================================
-REM 基础镜像仅在重新构建前端时才需要。
-REM 一旦 agent-os-frontend:latest 已存在，compose up 不再需要它们。
-REM 这里跳过预热。docker compose up 若缺 redis 会通过 daemon.json 配置的
-REM 镜像加速源拉取，很快。
+
+
+
+
 echo [INFO] 启动 Docker 服务...
-REM 检查容器是否已存在（包括停止的容器），存在则直接启动，避免冲突
+
 docker ps -a --format "{{.Names}}" | findstr "agent-os-redis-22404" >nul 2>&1
 if not errorlevel 1 (
     echo [OK] 复用已有容器 agent-os-redis-22404
@@ -154,7 +185,7 @@ if not errorlevel 1 (
 )
 echo [OK] Docker 服务已启动
 
-REM 前端代码更新：镜像存在时检查 src 是否有更新，有则构建并注入运行中的容器
+
 docker image inspect agent-os-frontend:latest >nul 2>&1
 if errorlevel 1 (
     echo [INFO] 前端镜像不存在，需要首次构建（需要网络拉取基础镜像）
@@ -180,19 +211,20 @@ if errorlevel 1 (
 )
 
 :: ===========================================================================
-REM 3. Python + 依赖（优先 3.12，避免 3.14 asyncio subprocess bug）
+:start_python
+
 :: ===========================================================================
 set "PYEXE="
 
-REM 方式1：查找带版本号的命令别名（python312/python311/python313）
+
 for %%v in (312 311 313) do (
     for /f "delims=" %%p in ('where python%%v 2^>nul') do (
         if not defined PYEXE set "PYEXE=%%p"
     )
 )
 
-REM 方式2：探测常见安装路径（where python312 在多数机器找不到，需路径兜底）
-REM 用 set 预存路径 + if exist 串联，避免 for 循环里 %ProgramFiles(x86)% 括号转义问题
+
+
 set "P312A=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 set "P312B=%ProgramFiles%\Python312\python.exe"
 set "P311A=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
@@ -206,7 +238,7 @@ if not defined PYEXE if exist "%P311B%" set "PYEXE=%P311B%"
 if not defined PYEXE if exist "%P313A%" set "PYEXE=%P313A%"
 if not defined PYEXE if exist "%P313B%" set "PYEXE=%P313B%"
 
-REM 方式3：最后回退到默认 python（可能是 3.14，有 asyncio subprocess bug 风险）
+
 if not defined PYEXE (
     where python >nul 2>&1
     if not errorlevel 1 for /f "delims=" %%p in ('where python') do (
@@ -233,7 +265,7 @@ if not exist ".py_deps_installed" (
 )
 
 :: ===========================================================================
-REM 4. Agent（宿主机）
+
 :: ===========================================================================
 echo [INFO] 启动 Agent...
 start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6480/0&& "%PYEXE%" -m channels.websocket.app_factory"
@@ -251,18 +283,18 @@ exit /b 0
 
 
 :: ===========================================================================
-REM 子程序：拉取镜像（本地优先，缺失走多镜像链回退）
-REM 用法: call :pull_image_with_fallback "image:tag"
-REM 策略:
-REM 1) 本地已存在 → 跳过
-REM 2) docker pull <image>（Docker Hub）
-REM 3) docker pull <daocloud 镜像> → docker tag 回原名
-REM 4) 全部失败 → 仅告警，不阻断（让 compose/build 自己再试）
+
+
+
+
+
+
+
 :: ===========================================================================
 :pull_image_with_fallback
 set "IMG=%~1"
 
-REM 本地已有则跳过
+
 docker image inspect "%IMG%" >nul 2>&1
 if not errorlevel 1 (
     echo [OK] 本地已有镜像: %IMG%
@@ -276,7 +308,7 @@ if not errorlevel 1 (
     exit /b 0
 )
 
-REM 回退：daocloud 镜像加速 + tag 回原名
+
 echo [WARN] Docker Hub 拉取失败，尝试 daocloud 镜像...
 docker pull "docker.m.daocloud.io/library/%IMG%" >nul 2>&1
 if errorlevel 1 (
