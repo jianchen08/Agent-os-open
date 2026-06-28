@@ -23,6 +23,14 @@ from utils.enum_utils import safe_enum_value
 
 T = TypeVar("T")  # 输出数据类型
 
+# slim（给 LLM 的）模式下，从 output 字典中剔除的大体积字段名集合。
+# 这些字段是给前端 UI 渲染用的，不应整段回灌进 LLM 上下文：
+# - old_content / new_content：file_write 的 diff 正文（老/新文件全文，
+#   单次最多 _DIFF_CONTENT_MAX≈100KB），LLM 已知自己写了什么，回写原文纯属冗余。
+# - diff_omitted：是否因体积超限省略了 diff 正文，对 LLM 无意义。
+# 注意：仅当 output 为 dict 时生效；非 dict 类型（str/list 等）原样保留。
+_SLIM_OUTPUT_EXCLUDE = frozenset({"old_content", "new_content", "diff_omitted"})
+
 
 class ExecutionResult(BaseModel, Generic[T]):
     """执行结果基类
@@ -185,7 +193,19 @@ class ExecutionResult(BaseModel, Generic[T]):
                     result["error_code"] = self.error_code
             else:
                 if self.output is not None:
-                    result["output"] = self._serialize_output()
+                    serialized = self._serialize_output()
+                    # slim 模式剔除 output 内的大体积 diff 正文：
+                    # old_content/new_content 是 file_write 供前端卡片渲染的完整文件
+                    # 文本（老/新内容，单次最多 _DIFF_CONTENT_MAX），它们对 LLM 无信息
+                    # 增益（模型刚发起这次写入，已知自己写了什么），但会让写入原文
+                    # 整段回灌进上下文。此处只保留 added/removed 等统计量给 LLM。
+                    # diff_omitted 同样无意义，一并剔除。
+                    if isinstance(serialized, dict):
+                        serialized = {
+                            k: v for k, v in serialized.items()
+                            if k not in _SLIM_OUTPUT_EXCLUDE
+                        }
+                    result["output"] = serialized
                 if self.metadata:
                     # slim 模式排除大体积字段，避免 base64 污染 LLM 文本上下文
                     _slim_exclude = {"action", "multimodal_content"}

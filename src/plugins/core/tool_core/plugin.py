@@ -545,13 +545,18 @@ class ToolCore(ICorePlugin):
                 result["metadata"] = raw_result.metadata
             if _wrapped_chunk:
                 display_result = str(normalized)[:200] if normalized else ""
+                # result_data 供前端工具卡片渲染（含 diff 正文 old_content/new_content），
+                # 必须用 full 版（slim=False）：slim 版已剔除这些大体积字段（只给 LLM）。
+                # data（回 LLM 上下文的那份，见下方 result["data"]）保持 slim，避免写入
+                # 原文整段回灌进模型上下文。
+                display_data = self._normalize_tool_result(raw_result, slim=False)
                 _wrapped_chunk({
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": display_result,
                     # 结构化完整数据（含 diff 的 added/removed/old_content/new_content），
                     # 流式 result 为截断字符串仅供预览；result_data 供前端工具卡片渲染。
-                    "result_data": normalized,
+                    "result_data": display_data,
                     "success": True,
                     "duration_ms": round(duration_ms, 1),
                 })
