@@ -116,9 +116,9 @@ models:
 defaults:
   chat: glm-5.2
   embedding: embedding-3
-  call_timeout: 120
+  call_timeout: 600
   first_token_timeout: 60
-  stream_idle_timeout: 600
+  stream_idle_timeout: 180
   compression: minimax-m3-guangfang
   tiers:
     large: glm-5.2-yichengc
