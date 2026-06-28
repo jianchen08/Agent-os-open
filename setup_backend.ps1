@@ -53,7 +53,11 @@ function Test-HyperVEnabled {
     }
 }
 
-# Read Docker Desktop current backend (True=WSL2, False=Hyper-V)
+# Read Docker Desktop current backend.
+# Returns a hashtable:
+#   @{ Status='wsl2'|'hyperv'; File=<path> }   - config found with backend field
+#   @{ Status='no-field'; File=<path> }        - config found but no backend field (new DD)
+#   $null                                       - config file not found at all
 function Get-DockerBackend {
     $paths = @(
         "$env:APPDATA\Docker\settings-store.json",
@@ -64,10 +68,12 @@ function Get-DockerBackend {
             try {
                 $cfg = Get-Content $p -Raw -ErrorAction Stop | ConvertFrom-Json
                 if ($cfg.PSObject.Properties.Name -contains 'wslEngineEnabled') {
-                    return @{ IsWSL2 = [bool]$cfg.wslEngineEnabled; File = $p }
+                    return @{ Status = ($(if ([bool]$cfg.wslEngineEnabled) { 'wsl2' } else { 'hyperv' })); File = $p }
                 }
+                # config exists but has no backend field: new Docker Desktop version
+                return @{ Status = 'no-field'; File = $p }
             } catch {
-                Write-Warn2 "Read Docker config failed, skip backend detection: $p"
+                Write-Warn2 "Read Docker config failed: $p"
             }
         }
     }
@@ -162,25 +168,50 @@ if (-not $hvEnabled) {
 
 # 4. Switch Docker Desktop backend to Hyper-V
 $current = Get-DockerBackend
-if ($current) {
-    if (-not $current.IsWSL2) {
-        Write-Step "Docker Desktop already on Hyper-V backend, no switch needed."
-        if ($script:NeedReboot) {
-            Write-Host "[setup_backend] Reboot needed for Hyper-V to take effect." -ForegroundColor Yellow
-            exit 1
-        }
-        exit 0
-    }
-    if ($script:NeedReboot) {
-        Write-Step "Writing Hyper-V config before reboot, will auto-apply after reboot."
-    } else {
-        Write-Step "Switching Docker Desktop backend: WSL2 -> Hyper-V..."
-    }
-    Set-DockerBackendHyperV -SettingsFile $current.File | Out-Null
-} else {
+if ($null -eq $current) {
+    # config file missing: Docker Desktop not started yet, or never initialized
     Write-Warn2 "Docker Desktop config not found, may not be started yet."
     Write-Warn2 "Start Docker Desktop once to init, then re-run this script."
+    Write-Step "Backend selection skipped - please verify in Docker Desktop GUI."
+    exit 0
 }
+
+if ($current.Status -eq 'no-field') {
+    # New Docker Desktop: config has no backend field. Cannot switch via file.
+    # Don't claim success - tell user to check GUI explicitly.
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host " NOTE: Cannot switch backend via config file" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host "This Docker Desktop version has no backend field in settings."
+    Write-Host "Hyper-V feature is enabled on this machine."
+    Write-Host "To use Hyper-V backend (more stable than WSL2), check Docker Desktop:"
+    Write-Host "  Settings -> General -> 'Use the WSL 2 based engine'"
+    Write-Host "  If the checkbox exists, uncheck it and Apply & Restart."
+    Write-Host "  If the checkbox does NOT exist, this version forces WSL2."
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Step "Backend selection done - manual GUI check required."
+    exit 0
+}
+
+# Backend field exists (older Docker Desktop with wslEngineEnabled)
+if ($current.Status -eq 'hyperv') {
+    Write-Step "Docker Desktop already on Hyper-V backend, no switch needed."
+    if ($script:NeedReboot) {
+        Write-Host "[setup_backend] Reboot needed for Hyper-V to take effect." -ForegroundColor Yellow
+        exit 1
+    }
+    exit 0
+}
+
+# Currently WSL2, switch to Hyper-V
+if ($script:NeedReboot) {
+    Write-Step "Writing Hyper-V config before reboot, will auto-apply after reboot."
+} else {
+    Write-Step "Switching Docker Desktop backend: WSL2 -> Hyper-V..."
+}
+Set-DockerBackendHyperV -SettingsFile $current.File | Out-Null
 
 # 5. If Hyper-V feature was just enabled, reboot needed
 if ($script:NeedReboot) {
