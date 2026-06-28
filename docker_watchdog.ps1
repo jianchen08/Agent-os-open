@@ -1,29 +1,36 @@
 #Requires -Version 5.1
-# Docker Daemon Watchdog - auto-capture full state on hang/slowdown.
+# Docker Daemon Watchdog - auto-capture full state on hang + auto-recover.
 #
 # Problem: Docker Desktop (WSL2) hangs periodically; the hang is intermittent
 #          and you cannot manually grab logs at that moment, so root cause is lost.
-# Solution: this script runs persistently, probes daemon responsiveness; the
-#           moment it slows down beyond threshold (hang precursor), it dumps ALL
-#           state (docker ps/logs/info, container status, WSL status, key procs)
-#           to a timestamped file for post-mortem analysis. Multiple hangs
-#           accumulate multiple dump files.
+# Solution: runs persistently, probes daemon responsiveness; on slowdown/timeout it
+#           dumps ALL state (docker ps/logs/info, container logs, WSL status, key
+#           procs with DOUBLE CPU SAMPLING, host log errors) + AUTO-RECOVERS by
+#           invoking restart_docker.ps1.
+#
+# CPU double-sampling: on hang, sample high-CPU procs twice (1.5s apart), compute
+#           real CPU delta + memory delta. This distinguishes:
+#             - CPU up, mem flat = tight loop (busy spin)
+#             - CPU up, mem up   = leak / goroutine storm
+#             - CPU flat         = lock contention (spinning on lock, not burning CPU)
 #
 # Usage:
 #   Foreground: powershell -ExecutionPolicy Bypass -File docker_watchdog.ps1
-#   Background: register as scheduled task / launch from start_web_cn.bat
+#   Register as scheduled task / launch from start_web_cn.bat for persistence.
 #
 # Params:
-#   -ProbeInterval  : seconds between probes (default 15; do not go too low)
-#   -SlowThreshold  : seconds considered slow (default 8; > this = hang precursor)
-#   -DumpDir        : dir for dump files (default .\docker_watchdog_dumps)
-#   -MaxDumps       : max dump files kept (default 20; oldest deleted)
+#   -ProbeInterval   : seconds between probes (default 15)
+#   -SlowThreshold   : seconds considered slow (default 8; > this = hang precursor)
+#   -DumpDir         : dir for dump files (default .\docker_watchdog_dumps)
+#   -MaxDumps        : max dump files kept (default 20)
+#   -NoAutoRecover   : if set, only dump without invoking restart_docker.ps1
 
 param(
     [int]$ProbeInterval = 15,
     [int]$SlowThreshold = 8,
     [string]$DumpDir = ".\docker_watchdog_dumps",
-    [int]$MaxDumps = 20
+    [int]$MaxDumps = 20,
+    [switch]$NoAutoRecover
 )
 
 $ErrorActionPreference = 'Continue'
@@ -32,15 +39,20 @@ if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir | O
 
 $script:LastDumpTime = [DateTime]::MinValue
 $script:DumpCount = 0
+# Monotonic recovery cooldown: do not restart docker more than once per 5 min
+$script:LastRecoverTime = [DateTime]::MinValue
+
+# Path to restart_docker.ps1 (same dir as this script)
+$script:RestartScript = Join-Path $PSScriptRoot 'restart_docker.ps1'
 
 function Write-WLog([string]$msg) {
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     Write-Host "[$ts] $msg"
 }
 
-# Lightweight daemon probe: docker version with 12s hard timeout to avoid self-block.
+# Lightweight daemon probe: docker version with 12s hard timeout.
+# Returns: response ms (ok) / -1 (slow/timeout) / -2 (failed)
 function Test-DaemonResponsive {
-    # Returns: response ms (ok) / -1 (slow/timeout) / -2 (failed)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'docker'
     $psi.Arguments = 'version --format {{.Server.Version}}'
@@ -70,9 +82,70 @@ function Test-DaemonResponsive {
     }
 }
 
-# Dump all diagnostic info to a single timestamped file.
+# Sample a single process: returns TotalProcessorTime (ticks) + WorkingSet64.
+function Get-ProcSnapshot([System.Diagnostics.Process]$p) {
+    try {
+        $p.Refresh()
+        return @{ Cpu = $p.TotalProcessorTime.Ticks; Mem = $p.WorkingSet64; Valid = $true }
+    } catch {
+        return @{ Cpu = 0; Mem = 0; Valid = $false }
+    }
+}
+
+# Sample the key Docker/WSL processes TWICE (1.5s apart) to compute real CPU delta.
+# This distinguishes busy-spin (CPU climbs, mem flat) from leak (both climb) from
+# lock-contention (CPU flat, process appears busy but burns nothing).
+function Sample-HotProcs {
+    $names = @('com.docker.backend','Docker Desktop','com.docker.build','vmmem','wslservice')
+    $samples = @{}
+    $t1 = Get-Date
+    foreach ($n in $names) {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
+            $samples[$_.Id] = @{ Name=$n; S1=(Get-ProcSnapshot $_) }
+        }
+    }
+    Start-Sleep -Milliseconds 1500
+    $t2 = Get-Date
+    $dtSec = ($t2 - $t1).TotalSeconds
+    foreach ($n in $names) {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($samples.ContainsKey($_.Id)) {
+                $s2 = Get-ProcSnapshot $_
+                $s1 = $samples[$_.Id].S1
+                if ($s1.Valid -and $s2.Valid) {
+                    # CPU delta as percentage of one core over the interval
+                    $cpuTicks = $s2.Cpu - $s1.Cpu
+                    $cpuPct = [math]::Round(($cpuTicks / [TimeSpan]::TicksPerSecond) / $dtSec * 100, 1)
+                    $memDeltaMB = [math]::Round(($s2.Mem - $s1.Mem) / 1MB, 1)
+                    $memMB = [int]($s2.Mem / 1MB)
+                    $samples[$_.Id].CpuPct = $cpuPct
+                    $samples[$_.Id].MemMB = $memMB
+                    $samples[$_.Id].MemDeltaMB = $memDeltaMB
+                }
+            }
+        }
+    }
+    return $samples
+}
+
+# Classify a hot process based on its sampled deltas.
+function Classify-Proc([hashtable]$s) {
+    if (-not $s.ContainsKey('CpuPct')) { return "unmeasured" }
+    $cpu = $s.CpuPct
+    $memDelta = $s.MemDeltaMB
+    if ($cpu -gt 50 -and [math]::Abs($memDelta) -lt 5) {
+        return "BUSY-SPIN (tight loop: high CPU, mem flat) -> likely Docker bug"
+    }
+    if ($cpu -gt 50 -and $memDelta -gt 5) {
+        return "LEAK/STORM (CPU+mem both climbing) -> resource leak"
+    }
+    if ($cpu -lt 10) {
+        return "LOCK-CONTENTION (low CPU, process waits on lock)"
+    }
+    return "busy (CPU=$cpu%, memDelta=${memDelta}MB) -> under load"
+}
+
 function Invoke-FullDump([string]$reason) {
-    # cooldown 60s to avoid duplicate dumps for the same hang
     $now = Get-Date
     if (($now - $script:LastDumpTime).TotalSeconds -lt 60) { return }
     $script:LastDumpTime = $now
@@ -120,15 +193,19 @@ function Invoke-FullDump([string]$reason) {
         }
     } catch { Add-Ln "(failed: $_)" }
 
-    Add-Sec "4. key processes (Docker/WSL)"
+    # KEY: double CPU sampling on Docker/WSL processes
+    Add-Sec "4. HOT PROCESS CPU SAMPLING (1.5s apart)"
     try {
-        $procs = @('Docker Desktop','com.docker.backend','com.docker.build','vmmem','wslservice','wslhost')
-        foreach ($p in $procs) {
-            Get-Process -Name $p -ErrorAction SilentlyContinue | ForEach-Object {
-                Add-Ln ("{0,-30} PID={1,-8} CPU={2,-10} MEM={3}MB" -f $_.Name, $_.Id, $_.CPU, [int]($_.WorkingSet64/1MB))
-            }
+        $hot = Sample-HotProcs
+        foreach ($pidKey in $hot.Keys) {
+            $s = $hot[$pidKey]
+            $verdict = Classify-Proc $s
+            $cpu = if ($s.ContainsKey('CpuPct')) { $s.CpuPct } else { '?' }
+            $mem = if ($s.ContainsKey('MemMB')) { $s.MemMB } else { '?' }
+            $memD = if ($s.ContainsKey('MemDeltaMB')) { $s.MemDeltaMB } else { '?' }
+            Add-Ln ("{0,-30} PID={1,-8} CPU={2}% MEM={3}MB memDelta={4}MB -> {5}" -f $s.Name, $pidKey, $cpu, $mem, $memD, $verdict)
         }
-    } catch { Add-Ln "(failed: $_)" }
+    } catch { Add-Ln "(sampling failed: $_)" }
 
     Add-Sec "5. wsl --status"
     try {
@@ -141,7 +218,7 @@ function Invoke-FullDump([string]$reason) {
         $os = Get-CimInstance Win32_OperatingSystem
         Add-Ln ("TotalMem: {0}MB, Free: {1}MB" -f [int]($os.TotalVisibleMemorySize/1024), [int]($os.FreePhysicalMemory/1024))
         $cpu = (Get-CimInstance Win32_Processor).LoadPercentage
-        Add-Ln "CPU load: $cpu%"
+        Add-Ln "System CPU load: $cpu%"
     } catch { Add-Ln "(failed: $_)" }
 
     Add-Sec "7. Docker Desktop host log (recent errors)"
@@ -159,16 +236,44 @@ function Invoke-FullDump([string]$reason) {
     $sb.ToString() | Out-File -FilePath $dumpFile -Encoding UTF8
     Write-WLog "Dump complete: $dumpFile"
 
-    Get-ChildItem $DumpDir -Filter "dump_*.txt" | Sort-Object LastWriteTime |
-        Select-Object -First ($script:DumpCount - $MaxDumps) |
-        Where-Object { $_ -ne $null } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    # cleanup old dumps
+    $dumps = @(Get-ChildItem $DumpDir -Filter "dump_*.txt" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
+    if ($dumps.Count -gt $MaxDumps) {
+        $dumps | Select-Object -First ($dumps.Count - $MaxDumps) | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Auto-recover: invoke restart_docker.ps1 -Yes to revive the daemon.
+function Invoke-AutoRecover([string]$reason) {
+    if ($NoAutoRecover) {
+        Write-WLog "Auto-recover disabled (-NoAutoRecover). Manual recovery required."
+        return
+    }
+    $now = Get-Date
+    if (($now - $script:LastRecoverTime).TotalSeconds -lt 300) {
+        Write-WLog "Auto-recover skipped (cooldown 300s, last recover recent)."
+        return
+    }
+    $script:LastRecoverTime = $now
+    if (-not (Test-Path $script:RestartScript)) {
+        Write-WLog "Auto-recover: restart_docker.ps1 not found at $($script:RestartScript). Skip."
+        return
+    }
+    Write-WLog "AUTO-RECOVER: invoking restart_docker.ps1 -Yes (reason: $reason) ..."
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $script:RestartScript -Yes 2>&1 | ForEach-Object {
+            if ($_ -match 'ready|Started|fail') { Write-WLog "  recover: $_" }
+        }
+        Write-WLog "AUTO-RECOVER: restart_docker.ps1 finished."
+    } catch {
+        Write-WLog "AUTO-RECOVER failed: $_"
+    }
 }
 
 # ===========================================================================
 # Main loop
 # ===========================================================================
-Write-WLog "Docker Watchdog started | probe=${ProbeInterval}s | slow=${SlowThreshold}s | dir=$DumpDir"
+Write-WLog "Docker Watchdog started | probe=${ProbeInterval}s | slow=${SlowThreshold}s | autoRecover=$(-not $NoAutoRecover)"
 Write-WLog "Watching... (Ctrl+C to stop)"
 
 $healthyCount = 0
@@ -187,11 +292,16 @@ while ($true) {
             }
         }
     } elseif ($ms -eq -1) {
-        Write-WLog "CRITICAL daemon no response in 12s (hung) - dumping"
+        Write-WLog "CRITICAL daemon no response in 12s (hung) - dumping + auto-recover"
         Invoke-FullDump -reason "daemon timeout >12s (hung)"
+        Invoke-AutoRecover -reason "daemon timeout >12s"
+        # after recover, reset healthy counter
+        $healthyCount = 0
     } else {
-        Write-WLog "ERROR docker command failed - dumping"
+        Write-WLog "ERROR docker command failed - dumping + auto-recover"
         Invoke-FullDump -reason "docker command failed (daemon down?)"
+        Invoke-AutoRecover -reason "docker command failed"
+        $healthyCount = 0
     }
 
     Start-Sleep -Seconds $ProbeInterval
