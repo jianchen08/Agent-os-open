@@ -82,6 +82,36 @@ function Test-DaemonResponsive {
     }
 }
 
+# Run an external command with a hard timeout. Returns stdout+stderr lines,
+# or a single "(timeout)" line if it did not finish in time.
+# CRITICAL: during a daemon hang, bare `& docker ps` blocks forever. Every
+# docker call inside dump MUST go through this to avoid the watchdog itself
+# hanging and never reaching auto-recover.
+function Invoke-WithTimeout([string]$exe, [string]$arguments, [int]$timeoutMs = 5000) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = $arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if ($proc.WaitForExit($timeoutMs)) {
+            $out = $proc.StandardOutput.ReadToEnd()
+            $err = $proc.StandardError.ReadToEnd()
+            if ($out) { return $out -split "`r?`n" }
+            if ($err) { return $err -split "`r?`n" }
+            return @()
+        } else {
+            try { $proc.Kill() } catch {}
+            return @("(timeout ${timeoutMs}ms)")
+        }
+    } catch {
+        return @("(failed: $_)")
+    }
+}
+
 # Sample a single process: returns TotalProcessorTime (ticks) + WorkingSet64.
 function Get-ProcSnapshot([System.Diagnostics.Process]$p) {
     try {
@@ -170,28 +200,23 @@ function Invoke-FullDump([string]$reason) {
     Add-Ln "Host: $env:COMPUTERNAME"
 
     Add-Sec "1. docker ps -a"
-    try {
-        $ps = & docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}" 2>&1
-        $ps | ForEach-Object { Add-Ln $_ }
-    } catch { Add-Ln "(failed: $_)" }
+    $lines = Invoke-WithTimeout 'docker' 'ps -a --format "table {{.Names}}\t{{.Status}}"' 5000
+    $lines | ForEach-Object { Add-Ln $_ }
 
     Add-Sec "2. docker info"
-    try {
-        $info = & docker info 2>&1 | Select-Object -First 30
-        $info | ForEach-Object { Add-Ln $_ }
-    } catch { Add-Ln "(failed: $_)" }
+    $lines = Invoke-WithTimeout 'docker' 'info' 5000
+    $lines | Select-Object -First 30 | ForEach-Object { Add-Ln $_ }
 
     Add-Sec "3. container logs (last 20 lines each)"
-    try {
-        $containers = & docker ps -a --format "{{.Names}}" 2>&1
-        foreach ($c in $containers) {
-            if ($c -and $c -notmatch '^(NAMES|Error|error)') {
-                Add-Ln "--- $c ---"
-                $logs = & docker logs --tail 20 $c 2>&1
-                $logs | ForEach-Object { Add-Ln $_ }
-            }
+    # container names from section 1 reuse; re-fetch with timeout to be safe
+    $names = Invoke-WithTimeout 'docker' 'ps -a --format "{{.Names}}"' 5000
+    foreach ($c in $names) {
+        if ($c -and $c -notmatch '^(NAMES|Error|error|timeout|failed)') {
+            Add-Ln "--- $c ---"
+            $clogs = Invoke-WithTimeout 'docker' "logs --tail 20 $c" 5000
+            $clogs | ForEach-Object { Add-Ln $_ }
         }
-    } catch { Add-Ln "(failed: $_)" }
+    }
 
     # KEY: double CPU sampling on Docker/WSL processes
     Add-Sec "4. HOT PROCESS CPU SAMPLING (1.5s apart)"
@@ -292,15 +317,17 @@ while ($true) {
             }
         }
     } elseif ($ms -eq -1) {
-        Write-WLog "CRITICAL daemon no response in 12s (hung) - dumping + auto-recover"
-        Invoke-FullDump -reason "daemon timeout >12s (hung)"
-        Invoke-AutoRecover -reason "daemon timeout >12s"
-        # after recover, reset healthy counter
+        Write-WLog "CRITICAL daemon no response in 12s (hung) - RECOVER FIRST, then dump"
+        # ORDER MATTERS: recover before dump. During a hang, docker commands block
+        # even with timeout, and recovery is the priority. Dump after recover can
+        # capture real container logs instead of 500 errors.
+        Invoke-AutoRecover -reason "daemon timeout >12s (hung)"
+        Invoke-FullDump -reason "daemon timeout >12s (hung) [post-recover dump]"
         $healthyCount = 0
     } else {
-        Write-WLog "ERROR docker command failed - dumping + auto-recover"
-        Invoke-FullDump -reason "docker command failed (daemon down?)"
-        Invoke-AutoRecover -reason "docker command failed"
+        Write-WLog "ERROR docker command failed - RECOVER FIRST, then dump"
+        Invoke-AutoRecover -reason "docker command failed (daemon down?)"
+        Invoke-FullDump -reason "docker command failed (daemon down?) [post-recover dump]"
         $healthyCount = 0
     }
 
