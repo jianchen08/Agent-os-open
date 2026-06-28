@@ -67,6 +67,47 @@ class DockerProvider(IsolationProvider):
         import asyncio  # noqa: PLC0415
         self._max_docker_concurrency = int(self._config.get("max_docker_concurrency", 4))
         self._docker_sem = asyncio.Semaphore(self._max_docker_concurrency)
+        # WSL docker 模式缓存：DOCKER_HOST 指向 WSL2/TCP 时为 True（需 Windows→WSL 路径转换）
+        self._wsl_docker_cache: bool | None = None
+
+    def _is_wsl_docker(self) -> bool:
+        """判断 docker daemon 是否在 WSL2 Linux 里（非 Docker Desktop）。
+
+        判断依据：DOCKER_HOST 环境变量被设置（指向 TCP/Unix socket）说明
+        Agent 显式连接了远程/WSL 里的 daemon，而非 Docker Desktop 默认的命名管道。
+        Docker Desktop 时 DOCKER_HOST 通常未设置（走默认 npipe）。
+        结果按进程缓存。
+        """
+        import os  # noqa: PLC0415
+        if self._wsl_docker_cache is not None:
+            return self._wsl_docker_cache
+        docker_host = os.environ.get("DOCKER_HOST", "")
+        # 指向 tcp:// 或 unix:// = 远程/WSL daemon；npipe/空 = Docker Desktop
+        self._wsl_docker_cache = bool(docker_host) and (
+            docker_host.startswith("tcp://")
+            or docker_host.startswith("unix://")
+            or docker_host.startswith("ssh://")
+        )
+        return self._wsl_docker_cache
+
+    def _resolve_mount_path(self, workspace: str | None) -> str:
+        """把 Windows 工作空间路径转换为 docker daemon 能识别的路径。
+
+        Docker Desktop(daemon 在 Windows): 直接用原路径 D:\\...
+        WSL2 原生 docker(daemon 在 Linux): D:\\myproject\\x → /mnt/d/myproject/x
+        """
+        if not workspace:
+            return ""
+        if not self._is_wsl_docker():
+            return workspace
+        # Windows 路径 → WSL 路径: D:\myproject\xxx -> /mnt/d/myproject/xxx
+        import re  # noqa: PLC0415
+        m = re.match(r'^([A-Za-z]):[\\/](.*)$', workspace.replace('\\', '/'))
+        if not m:
+            return workspace  # 非标准 Windows 路径，原样返回
+        drive = m.group(1).lower()
+        rest = m.group(2)
+        return f"/mnt/{drive}/{rest}"
 
     def get_level(self) -> IsolationLevel:
         """获取隔离级别。"""
@@ -179,7 +220,7 @@ class DockerProvider(IsolationProvider):
         # 不做任何“换个目录挂载”的变通：挂载点对不上本身就是错误。
         # BUG-FIX-fix_20260625_isolated_no_workspace
         if self._workspace_mount:
-            ws_path = context.workspace
+            ws_path = self._resolve_mount_path(context.workspace)
             if not ws_path:
                 logger.error(
                     "[DockerProvider] 拒绝创建容器：工作空间为空（无法挂载） | task=%s",
@@ -189,13 +230,16 @@ class DockerProvider(IsolationProvider):
                     context, now, "工作空间为空，无法挂载到容器",
                 )
             from pathlib import Path  # noqa: PLC0415
-            if not Path(ws_path).exists():
+            # 路径校验：docker daemon 在 Linux 时校验 /mnt/x 转换后路径；
+            # 在 Windows(Docker Desktop) 时校验原 Windows 路径。
+            check_path = ws_path if self._is_wsl_docker() else (context.workspace or "")
+            if check_path and not Path(check_path).exists():
                 logger.error(
                     "[DockerProvider] 拒绝创建容器：工作空间路径不存在 | task=%s | path=%s",
-                    context.task_id, ws_path,
+                    context.task_id, check_path,
                 )
                 return self._make_error_environment(
-                    context, now, f"工作空间路径不存在: {ws_path}",
+                    context, now, f"工作空间路径不存在: {check_path}",
                 )
 
         # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）
@@ -453,9 +497,10 @@ class DockerProvider(IsolationProvider):
             "-i", "-t",
         ]
 
-        # 挂载工作目录
+        # 挂载工作目录（WSL docker 时用转换后的 /mnt/x 路径）
         if self._workspace_mount and context.workspace:
-            args.extend(["-v", f"{context.workspace}:/workspace"])
+            mount_src = self._resolve_mount_path(context.workspace)
+            args.extend(["-v", f"{mount_src}:/workspace"])
 
         # IMAGE 必须在 COMMAND 之前（docker create 语法要求）
         args.append(self._image)
