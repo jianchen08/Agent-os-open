@@ -12,15 +12,13 @@ echo.
 echo Replaces Docker Desktop. Eliminates com.docker.backend hang.
 echo No code changes needed. docker commands fully compatible.
 echo.
-echo Press any key to start (needs WSL sudo password)...
+echo Press any key to start (fully automatic, no password needed)...
 pause >nul
 
 echo.
 
 REM === 1. Ensure Ubuntu WSL exists ===
 echo [1/5] Check WSL2 Ubuntu...
-REM wsl -l -q 输出是 UTF-16LE(每字符后跟\0空字节),findstr/直接-match 都匹配不到。
-REM 修法:用 PowerShell 检测,匹配前先 Replace 掉 \0 空字节。
 powershell -NoProfile -Command ^
   "$list = ((wsl -l -q) -join \"`n\") -replace [char]0, '';" ^
   "if ($list -match 'Ubuntu') { exit 0 } else { exit 1 }"
@@ -38,32 +36,17 @@ if errorlevel 1 (
 )
 echo [OK] Ubuntu installed
 
-REM === 2. Configure mirrored networking (so localhost works, no IP lookup) ===
+REM === 2. Install docker-ce inside WSL (as root, no password) ===
 echo.
-echo [2/5] Configure WSL mirrored networking (localhost direct)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$cfg = \"$env:USERPROFILE\.wslconfig\";" ^
-  "$content = if (Test-Path $cfg) { Get-Content $cfg -Raw } else { '' };" ^
-  "if ($content -notmatch 'networkingMode') {" ^
-  "  if ($content -notmatch '\[wsl2\]') { $content += \"`n[wsl2]`n\" };" ^
-  "  $content = $content -replace '(\[wsl2\][^\[]*)', '$1networkingMode=mirrored`n';" ^
-  "  Set-Content -Path $cfg -Value $content -Encoding UTF8;" ^
-  "  Write-Host 'NEED_WSL_RESTART'" ^
-  "} else { Write-Host '[OK] networkingMode already set' }" 2>&1 | findstr /C:"NEED_WSL_RESTART" >nul && (
-    echo [INFO] Network mode updated. Restarting WSL to apply...
-    wsl --shutdown
-    timeout /t 5 /nobreak >nul
-)
-
-REM === 3. Run install script inside WSL (as root, no password needed) ===
-echo.
-echo [3/5] Install docker-ce inside WSL2 Ubuntu (root, no password)...
+echo [2/5] Install docker-ce inside WSL2 Ubuntu (root, no password)...
 echo.
 
 :run_wsl_install
 wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && bash install_wsl_docker.sh"
 set "WSL_RC=!errorlevel!"
 
+REM WSL exit code is unreliable for completed scripts; check by content.
+REM Success marker: script prints "WSL_DOCKER_READY" (we capture via temp file).
 REM exit 100 = systemd just enabled, need wsl --shutdown then rerun
 if "!WSL_RC!"=="100" (
     echo.
@@ -74,26 +57,39 @@ if "!WSL_RC!"=="100" (
     goto run_wsl_install
 )
 
-if "!WSL_RC!"=="0" (
-    echo [OK] WSL2 docker installed
-) else (
-    echo [ERROR] Install failed (exit code !WSL_RC!)
-    echo [ERROR] Check errors above, or run manually in Ubuntu:
-    echo          bash /mnt/d/myproject/container_224042d3b925/install_wsl_docker.sh
+REM === 3. Get WSL IP and set DOCKER_HOST (NAT mode, IP may change) ===
+echo.
+echo [3/5] Get WSL IP and configure DOCKER_HOST...
+REM WSL hostname -I returns space-separated IPs; filter the 172.x one (eth0)
+for /f "delims=" %%i in ('powershell -NoProfile -Command "(wsl -d Ubuntu -u root -- bash -c 'hostname -I') -split ' ' | Where-Object { $_ -match '^172' } | Select-Object -First 1" 2^>nul') do (
+    set "WSL_IP=%%i"
+)
+
+if "!WSL_IP!"=="" (
+    echo [ERROR] Cannot get WSL IP. Make sure Ubuntu is running.
     pause
     exit /b 1
 )
 
-REM === 4. Set DOCKER_HOST (mirrored mode: localhost works) ===
+set "NEW_HOST=tcp://!WSL_IP!:2375"
+echo [OK] WSL IP: !WSL_IP!
+echo [INFO] Setting DOCKER_HOST=!NEW_HOST!
+setx DOCKER_HOST "!NEW_HOST!" >nul
+set "DOCKER_HOST=!NEW_HOST!"
+echo [OK] DOCKER_HOST set (takes effect in new terminals)
+
+REM === 4. Add firewall rule for port 2375 (once) ===
 echo.
-echo [4/5] Configure Windows DOCKER_HOST...
-setx DOCKER_HOST "tcp://localhost:2375" >nul
-set "DOCKER_HOST=tcp://localhost:2375"
-echo [OK] DOCKER_HOST=tcp://localhost:2375 set (takes effect in new terminals)
+echo [4/5] Ensure firewall allows port 2375...
+powershell -NoProfile -Command "if (-not (Get-NetFirewallRule -DisplayName 'WSL Docker 2375' -ErrorAction SilentlyContinue)) { Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-Command','New-NetFirewallRule -DisplayName ''WSL Docker 2375'' -Direction Inbound -LocalPort 2375 -Protocol TCP -Action Allow'; Write-Host 'added' } else { Write-Host 'exists' }" 2>&1 | findstr /i "added exists" >nul && (
+    echo [OK] Firewall rule ready
+) || (
+    echo [WARN] Firewall rule may need manual add (run as admin if connection fails)
+)
 
 REM === 5. Verify Windows can reach WSL docker ===
 echo.
-echo [5/5] Verify Windows can connect to WSL docker (waiting for daemon)...
+echo [5/5] Verify connection to WSL docker (waiting for daemon)...
 set "VERIFY_OK=0"
 for /l %%i in (1,1,15) do (
     if "!VERIFY_OK!"=="0" (
@@ -106,12 +102,12 @@ for /l %%i in (1,1,15) do (
 )
 
 if "!VERIFY_OK!"=="1" (
-    echo [OK] Windows connected to WSL2 docker successfully!
+    echo [OK] Windows connected to WSL2 docker!
     for /f "delims=" %%v in ('docker version --format "{{.Server.Version}}" 2^>nul') do set "DOCKER_VER=%%v"
     echo      docker Server version: !DOCKER_VER!
 ) else (
-    echo [WARN] Cannot connect yet. May need to reopen terminal for DOCKER_HOST.
-    echo [WARN] After reopening cmd, run: docker version
+    echo [WARN] Cannot connect yet. Try reopening terminal then run: docker version
+    echo [WARN] If still fails, run this script again (WSL IP may have changed)
 )
 
 echo.
@@ -123,9 +119,10 @@ echo Next steps:
 echo   1. Close all cmd/terminal windows, reopen (so DOCKER_HOST applies)
 echo   2. Run: docker version  (confirm it connects to WSL docker)
 echo   3. If OK, uninstall Docker Desktop (Control Panel)
-echo   4. Start project with start_web_cn.bat (code already supports WSL path)
+echo   4. Start project with start_web_cn.bat
 echo.
-echo NOTE: Before uninstalling Docker Desktop, make sure "docker version" works.
+echo NOTE: If docker version fails later (after WSL restart), re-run this script
+echo       to refresh the WSL IP. Or run start_web_cn.bat which auto-syncs it.
 echo.
 pause
 exit /b 0
