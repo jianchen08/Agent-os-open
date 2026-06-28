@@ -19,7 +19,11 @@ echo.
 
 REM === 1. Ensure Ubuntu WSL exists ===
 echo [1/5] Check WSL2 Ubuntu...
-wsl -l -v 2>nul | findstr /i "Ubuntu" >nul
+REM wsl -l -q 输出是 UTF-16LE(每字符后跟\0空字节),findstr/直接-match 都匹配不到。
+REM 修法:用 PowerShell 检测,匹配前先 Replace 掉 \0 空字节。
+powershell -NoProfile -Command ^
+  "$list = ((wsl -l -q) -join \"`n\") -replace [char]0, '';" ^
+  "if ($list -match 'Ubuntu') { exit 0 } else { exit 1 }"
 if errorlevel 1 (
     echo [INFO] Ubuntu not found, installing...
     wsl --install -d Ubuntu
