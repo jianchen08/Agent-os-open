@@ -12,6 +12,22 @@ echo.
 echo 项目目录: %cd%
 echo.
 
+REM ===========================================================================
+REM WSL docker 模式：自动刷新 DOCKER_HOST（WSL 的 IP 每次重启可能变化）
+REM 检测是否装了 WSL 原生 docker，是则获取当前 IP 更新 DOCKER_HOST。
+REM 这样用户无需手动同步，双击本脚本即可。
+REM ===========================================================================
+wsl -d Ubuntu -u root -- echo wsl_ok >nul 2>&1
+if not errorlevel 1 (
+    for /f "delims=" %%i in ('powershell -NoProfile -Command "(wsl -d Ubuntu -u root -- bash -c 'hostname -I 2>/dev/null') -split ' ' | Where-Object { $_ -match '^172' } | Select-Object -First 1" 2^>nul') do (
+        set "WSL_IP=%%i"
+    )
+    if defined WSL_IP (
+        set "DOCKER_HOST=tcp://!WSL_IP!:2375"
+        echo [OK] WSL docker: !DOCKER_HOST!
+    )
+)
+
 :: ===========================================================================
 REM 0. 清理上次残留的宿主机进程（避免端口/资源占用导致重复启动失败）
 REM 只关闭与本项目相关的进程：后端入口(channels.websocket.app_factory)、
@@ -47,10 +63,17 @@ REM 退出码: 0=就绪 1=未就绪(启动中) 3=超时(假死)
 if "!DAEMON_STATUS!"=="3" goto :daemon_hung
 
 REM --- daemon 未就绪（状态 1）：正在启动，继续等待 ---
-REM 首次进入等待时启动 Docker Desktop
+REM 首次进入等待时启动 docker daemon
 if not defined DOCKER_WAIT_COUNT (
-    echo [INFO] 正在启动 Docker Desktop...
-    start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
+    if defined WSL_IP (
+        REM WSL docker 模式：启动 WSL 里的 docker 服务
+        echo [INFO] 启动 WSL docker 服务...
+        wsl -d Ubuntu -u root -- bash -c "systemctl start docker 2>/dev/null" >nul 2>&1
+    ) else (
+        REM Docker Desktop 模式：启动 Docker Desktop
+        echo [INFO] 正在启动 Docker Desktop...
+        start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
+    )
     set "DOCKER_WAIT_COUNT=0"
 )
 
@@ -67,6 +90,14 @@ echo [WARN] docker daemon 90 秒内无响应（假死，非启动中）。
 if defined DAEMON_RESTARTED (
     echo [WARN] 自动重启已尝试过一次，daemon 仍然假死，放弃。
     goto :daemon_failed
+)
+if defined WSL_IP (
+    REM WSL docker 模式：直接重启 WSL docker 服务（比 restart_docker.ps1 快）
+    echo [INFO] 重启 WSL docker 服务...
+    wsl -d Ubuntu -u root -- bash -c "systemctl restart docker 2>/dev/null" >nul 2>&1
+    set "DAEMON_RESTARTED=1"
+    timeout /t 5 /nobreak >nul
+    goto :check_daemon
 )
 echo [INFO] 启动自动恢复（会弹确认框，因为会停掉运行中的容器）...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0restart_docker.ps1"
