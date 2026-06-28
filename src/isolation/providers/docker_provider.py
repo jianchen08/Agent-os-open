@@ -230,17 +230,21 @@ class DockerProvider(IsolationProvider):
                     context, now, "工作空间为空，无法挂载到容器",
                 )
             from pathlib import Path  # noqa: PLC0415
-            # 路径校验：docker daemon 在 Linux 时校验 /mnt/x 转换后路径；
-            # 在 Windows(Docker Desktop) 时校验原 Windows 路径。
-            check_path = ws_path if self._is_wsl_docker() else (context.workspace or "")
-            if check_path and not Path(check_path).exists():
-                logger.error(
-                    "[DockerProvider] 拒绝创建容器：工作空间路径不存在 | task=%s | path=%s",
-                    context.task_id, check_path,
-                )
-                return self._make_error_environment(
-                    context, now, f"工作空间路径不存在: {check_path}",
-                )
+            # 路径校验：
+            # - Docker Desktop(daemon 在 Windows): 校验原 Windows 路径
+            # - WSL docker(daemon 在 Linux): Agent 在 Windows,无法用 Path() 校验
+            #   WSL 路径(/mnt/d/...在 Windows 不存在),跳过宿主校验,交给 docker
+            #   daemon 在挂载时校验(挂载不存在路径 docker 会报错)
+            if not self._is_wsl_docker():
+                check_path = context.workspace or ""
+                if check_path and not Path(check_path).exists():
+                    logger.error(
+                        "[DockerProvider] 拒绝创建容器：工作空间路径不存在 | task=%s | path=%s",
+                        context.task_id, check_path,
+                    )
+                    return self._make_error_environment(
+                        context, now, f"工作空间路径不存在: {check_path}",
+                    )
 
         # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）
         run_args = self._build_run_args(name, context)
