@@ -29,7 +29,7 @@ if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
     ok "systemd 已在运行"
 else
     info "写入 /etc/wsl.conf 开启 systemd..."
-    sudo tee /etc/wsl.conf > /dev/null << 'EOF'
+    tee /etc/wsl.conf > /dev/null << 'EOF'
 [boot]
 systemd=true
 EOF
@@ -43,19 +43,19 @@ if command -v dockerd &>/dev/null; then
     ok "docker-ce 已安装: $(dockerd --version | awk '{print $3}')"
 else
     info "配置 apt 源(阿里云镜像)..."
-    sudo apt-get update -y
-    sudo apt-get install -y ca-certificates curl gnupg lsb-release
+    apt-get update -y
+    apt-get install -y ca-certificates curl gnupg lsb-release
     DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
-    sudo install -m 0755 -d /etc/apt/keyrings
+    install -m 0755 -d /etc/apt/keyrings
     if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
-        curl -fsSL "${DOCKER_REPO}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        sudo chmod a+r /etc/apt/keyrings/docker.gpg
+        curl -fsSL "${DOCKER_REPO}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
     fi
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} $(lsb_release -cs) stable" \
-        | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    sudo apt-get update -y
+        | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt-get update -y
     info "安装 docker-ce..."
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     ok "docker-ce 安装完成"
 fi
 
@@ -64,8 +64,8 @@ step "3/5 配置 docker TCP 监听(localhost:2375)"
 # daemon.json 配置：开 TCP 监听，localhost:2375(镜像网络模式下 Windows 可直连)
 DAEMON_JSON="/etc/docker/daemon.json"
 # 国内镜像加速 + TCP 监听 + 日志限制(防日志膨胀)
-sudo mkdir -p /etc/docker
-sudo tee "$DAEMON_JSON" > /dev/null << 'EOF'
+mkdir -p /etc/docker
+tee "$DAEMON_JSON" > /dev/null << 'EOF'
 {
   "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2375"],
   "registry-mirrors": [
@@ -80,38 +80,45 @@ sudo tee "$DAEMON_JSON" > /dev/null << 'EOF'
 }
 EOF
 # 覆盖 systemd 的默认 -H fd://（否则 hosts 冲突 daemon 起不来）
-sudo mkdir -p /etc/systemd/system/docker.service.d
-sudo tee /etc/systemd/system/docker.service.d/override.conf > /dev/null << 'EOF'
+mkdir -p /etc/systemd/system/docker.service.d
+tee /etc/systemd/system/docker.service.d/override.conf > /dev/null << 'EOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dockerd
 EOF
-sudo systemctl daemon-reload
+systemctl daemon-reload
 ok "daemon.json 已配置(TCP:2375 + 镜像加速)"
 
 # ── 4. docker 组 + 启动 ──
 step "4/5 启动 docker 服务"
-if ! groups | grep -q docker; then
-    sudo usermod -aG docker "$USER" || true
+# 把真实的普通用户(UID 1000)加入 docker 组,root 跑时 $USER 不准
+REAL_USER=$(awk -F: '$3==1000{print $1}' /etc/passwd)
+if [ -n "$REAL_USER" ]; then
+    if ! groups "$REAL_USER" | grep -q docker; then
+        usermod -aG docker "$REAL_USER" || true
+        info "用户 $REAL_USER 已加入 docker 组"
+    else
+        info "用户 $REAL_USER 已在 docker 组"
+    fi
 fi
-sudo systemctl enable docker
-sudo systemctl restart docker
+systemctl enable docker
+systemctl restart docker
 sleep 2
-if sudo systemctl is-active --quiet docker; then
+if systemctl is-active --quiet docker; then
     ok "docker 服务运行中"
 else
     err "docker 服务启动失败"
-    sudo systemctl status docker --no-pager | tail -15
+    systemctl status docker --no-pager | tail -15
     exit 1
 fi
 
 # ── 5. 验证 ──
 step "5/5 验证"
 info "docker 版本:"
-sudo docker version --format '  Server: {{.Server.Version}}'
+docker version --format '  Server: {{.Server.Version}}'
 
 info "TCP 监听(确认 2375 开了):"
-if sudo ss -tlnp 2>/dev/null | grep -q ":2375"; then
+if ss -tlnp 2>/dev/null | grep -q ":2375"; then
     ok "TCP 2375 正在监听"
 else
     warn "TCP 2375 未监听(Windows 可能连不上)"
@@ -119,7 +126,7 @@ fi
 
 info "挂载 /mnt/d 测试(关键:验证能访问 Windows 项目):"
 PROJ="/mnt/d/myproject/container_224042d3b925"
-if sudo docker run --rm -v "${PROJ}:/workspace" alpine sh -c "test -f /workspace/install_wsl_docker.sh && echo MOUNT_OK" 2>/dev/null | grep -q MOUNT_OK; then
+if docker run --rm -v "${PROJ}:/workspace" alpine sh -c "test -f /workspace/install_wsl_docker.sh && echo MOUNT_OK" 2>/dev/null | grep -q MOUNT_OK; then
     ok "挂载 /mnt/d 成功，容器能访问 Windows 项目"
 else
     warn "挂载测试未通过(项目路径可能不同，不影响 docker 本身)"

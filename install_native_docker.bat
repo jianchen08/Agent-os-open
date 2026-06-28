@@ -55,14 +55,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     timeout /t 5 /nobreak >nul
 )
 
-REM === 3. Run install script inside WSL ===
+REM === 3. Run install script inside WSL (as root, no password needed) ===
 echo.
-echo [3/5] Install docker-ce inside WSL2 Ubuntu...
-echo [INFO] If prompted for password, enter your WSL Ubuntu user password
+echo [3/5] Install docker-ce inside WSL2 Ubuntu (root, no password)...
 echo.
 
 :run_wsl_install
-wsl -d Ubuntu -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && bash install_wsl_docker.sh"
+wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && bash install_wsl_docker.sh"
 set "WSL_RC=!errorlevel!"
 
 REM exit 100 = systemd just enabled, need wsl --shutdown then rerun
