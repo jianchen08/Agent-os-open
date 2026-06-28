@@ -494,6 +494,40 @@ describe('GlobalWebSocketService', () => {
 
       disconnect()
     })
+
+    it('心跳超时应给 ack 留容错：30~45s 内收到 ack 不应断连（BUG-FIX-fix_20260628_heartbeat_zero_margin）', async () => {
+      // 历史问题: HEARTBEAT_TIMEOUT === HEARTBEAT_INTERVAL === 30s，零容错。
+      //   后端 ack 稍慢（事件循环繁忙、网络抖动）就误判连接死亡 → 频繁误断。
+      //   LLM 流式期间后端事件循环负载高，heartbeat_ack 响应极易突破 30s。
+      // 修复: TIMEOUT 提到 45s，明确大于 INTERVAL，给 ack 留容错。
+      // 回归契约: 在 30s（INTERVAL）之后、45s（TIMEOUT）之前收到 heartbeat_ack，
+      //   连接必须仍然存活（ws.close 未因超时被调用）。
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      // 推进 30s → 心跳发出，超时定时器启动（45s 后到期）
+      vi.advanceTimersByTime(30000)
+      const closeCallsBefore = ws.close.mock.calls.length
+
+      // 再推进 10s（累计距心跳发送 10s，距超时还有 5s）→ 模拟 ack 稍慢但仍在容错内
+      vi.advanceTimersByTime(10000)
+      if (ws.onmessage) {
+        ws.onmessage({ data: JSON.stringify({ type: 'heartbeat_ack' }) })
+      }
+
+      // ack 清除超时后，再推进超过原 30s 阈值（验证旧 30s 零容错已不复存在）
+      vi.advanceTimersByTime(35000)
+
+      // 容错窗口内收到 ack：连接不应因心跳超时被关闭
+      expect(service.status).toBe('connected')
+      expect(ws.close.mock.calls.length).toBe(closeCallsBefore)
+
+      disconnect()
+    })
   })
 
   // ──────────────────────────────────────────────

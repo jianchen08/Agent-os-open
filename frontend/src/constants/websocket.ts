@@ -253,8 +253,8 @@ export const WS_RECONNECT_CONFIG = {
 export const WS_HEARTBEAT_CONFIG = {
   /** 心跳间隔（毫秒） */
   INTERVAL: 30000,
-  /** 心跳超时（毫秒）- 必须小于 INTERVAL，否则会导致连接被错误关闭 */
-  TIMEOUT: 10000,
+  /** 心跳超时（毫秒）- 必须大于 INTERVAL，给 ack 留容错，否则 ack 稍慢就误断连 */
+  TIMEOUT: 45000,
 } as const
 
 /**

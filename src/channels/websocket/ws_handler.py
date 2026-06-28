@@ -281,6 +281,17 @@ class WebSocketInteractionNotifier:
         前端刷新后重新连接时，查找该 thread_id 关联的正在运行的 pipeline，
         更新其 bridge 的 output_sink 为新的活跃连接，确保后续输出能续接到前端。
 
+        BUG-FIX-fix_20260628_reconnect_lost_when_thread_id_empty:
+        历史实现有两个致命缺口，导致断连后输出永久接不回（前端"卡死"）：
+          1) 匹配条件只认 entry.thread_id == thread_id。但 sink 早创建时会被锁死成
+             "no-thread"（entry.thread_id 为空），重连时永远匹配不到 → 旧 sink 不换 →
+             引擎还在跑但输出永远送不到前端。补一个 entry.tags["session_id"] 兜底匹配
+             （_start_idle_engine 启动时已把 session_id 写进 tags，是可靠的同源标识）。
+          2) 只在旧 sink is_dead（连续失败 5 次）时才替换。但重连本就是"新连接接管"，
+             旧 sink 必然指向已断开的连接，没必要等死。改为只要旧 sink 存在就重建。
+        同时去掉 break：同 session 下可能有多个活跃 pipeline（主管道+子任务），
+        全部恢复，而非只恢复第一个。
+
         Args:
             thread_id: 目标会话的 thread_id
         """
@@ -291,9 +302,14 @@ class WebSocketInteractionNotifier:
         except Exception:
             return
 
-        # 遍历所有注册表条目，查找与该 thread_id 关联的活跃 pipeline
+        # 遍历所有注册表条目，查找与该 thread_id 关联的活跃 pipeline。
+        # 匹配来源：entry.thread_id 优先，为空时用 tags["session_id"] 兜底
+        # （见上方 BUG-FIX-fix_20260628_reconnect_lost_when_thread_id_empty）。
         for pipeline_id, entry in list(registry._engines.items()):
-            if entry.thread_id != thread_id:
+            _matched_tid = entry.thread_id if entry.thread_id else (
+                (entry.tags or {}).get("session_id", "") if entry.tags else ""
+            )
+            if _matched_tid != thread_id:
                 continue
             if entry.engine is None:
                 continue
@@ -303,22 +319,23 @@ class WebSocketInteractionNotifier:
             if not _engine_running and not _engine_suspended:
                 continue
 
-            # 找到活跃的 pipeline，更新其 sink
+            # 找到活跃的 pipeline，无条件把 sink 切到新连接。
+            # 重连即"新连接接管"，旧 sink 必然指向已断开连接，直接重建即可，
+            # 不必等连续失败判 dead（见上方 BUG-FIX 注释）。
             if entry.bridge is not None:
-                _old_sink = getattr(entry.bridge, 'output_sink', None)
-                _old_dead = getattr(_old_sink, 'is_dead', False) if _old_sink is not None else False
-                if _old_dead:
-                    # 创建新的 TargetedSink，使用当前 notifier 和 thread_id
-                    _new_sink = create_targeted_sink(self, thread_id)
+                # 补全 entry.thread_id（历史为空时），避免后续 send_to_thread 仍走 no-thread 回退
+                if not entry.thread_id and thread_id:
+                    entry.thread_id = thread_id
+                _new_sink = create_targeted_sink(self, thread_id)
+                if _new_sink is not None:
                     entry.bridge.output_sink = _new_sink
                     logger.info(
                         "[WS-Reconnect] 已恢复 pipeline 输出: pipeline=%s thread=%s "
-                        "(替换 dead sink)",
+                        "(重建 sink)",
                         pipeline_id[:12], thread_id[:12],
                     )
-                    # Phase 1: drain_loop 已删除，engine 主动 emit 推送。
-                    # sink 已替换，无需重启 drain。
-            break  # 只恢复第一个匹配的 pipeline
+                # Phase 1: drain_loop 已删除，engine 主动 emit 推送。
+                # sink 已替换，无需重启 drain。
 
     def unregister_global(self, user_id: str, websocket: WebSocket = None) -> None:
         """注销全局连接。只有当传入的 websocket 是当前注册的连接时才删除，防止新连接被旧连接的 finally 块误删。"""

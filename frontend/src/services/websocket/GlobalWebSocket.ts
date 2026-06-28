@@ -29,7 +29,13 @@ const RECONNECT_BASE_DELAY = 4_000
 const RECONNECT_MAX_DELAY = 60_000
 const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
-const HEARTBEAT_TIMEOUT = 30_000
+// BUG-FIX-fix_20260628_heartbeat_zero_margin:
+// 历史值 30_000 == HEARTBEAT_INTERVAL，零容错：后端 ack 稍慢（事件循环繁忙、
+// 大 payload 序列化、网络抖动）就会误判连接死了 → 主动 close(2002) 重连。
+// LLM 流式期间后端事件循环负载高（chunk_consumer + json.dumps 推送），
+// heartbeat_ack 响应极易突破 30s → 频繁误断。提到 45s，明确大于 INTERVAL，
+// 给 ack 留容错，同时仍能在真实连接死亡时及时重连。
+const HEARTBEAT_TIMEOUT = 45_000
 const CONNECTION_TIMEOUT = 15_000
 
 /** 发送缓冲区阈值：超过此值延迟发送（1MB） */
