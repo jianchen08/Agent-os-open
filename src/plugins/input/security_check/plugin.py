@@ -159,14 +159,15 @@ class SecurityCheckPlugin(IInputPlugin):
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行安全检查逻辑。
 
-        Host 模式统一规则：不限制工作目录边界（不管路径），只保留三道底线：
+        隔离即放行，裸操作才审批：
         1. 基础安全检查（路径遍历 / 敏感系统目录黑名单）→ 任何模式都必须执行，
-           这是防注入、防触碰 OS 核心目录的底线，容器不能绕过
-        2. 容器模式（provider=docker）→ 基础检查通过后一路绿灯
-        3. host 模式按工具是否危险决定：
+           这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
+        2. 已隔离（docker 容器，或 ws_meta.mode 为 worktree/project_root/branch）
+           → 基础检查通过后一路绿灯（操作的是独立副本，不污染原项目）
+        3. 裸操作（host/shared/plain，无隔离副本）按工具是否危险决定：
            - 非危险工具 → 放行
            - 危险工具（command_in_container 或声明了 dangerous_operations）：
-             参数命中白名单（action=allow）→ 放行
+             参数命中白名单（action=allow）→ 放行（allow 优先于其它规则）
              参数命中黑名单（action=block）→ 软拦截反馈 LLM
              参数需要审批（action=needs_approval）→ 弹审批
              危险工具的未知参数 → 弹审批（兜底）
@@ -193,9 +194,6 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # 判断执行模式
         execution_contexts = ctx.state.get("execution_contexts", [])
-        all_docker = bool(execution_contexts) and all(
-            c.get("provider") == "docker" for c in execution_contexts
-        )
 
         # ── 第一道：基础安全检查（路径遍历 + 敏感系统目录黑名单）──
         # 任何模式都必须执行，这是防注入、防触碰 OS 核心目录的底线。
@@ -225,12 +223,14 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第二道：按模式分流 ──
 
-        # 容器模式：基础检查通过 → 一路绿灯
-        if all_docker:
-            logger.info("[%s] 容器模式，基础检查通过，放行", self.name)
-            return {"security.decision": {"allowed": True, "reason": "container mode, base checks passed"}}
+        # 已隔离即放行：docker 容器或 ws_meta.mode 为隔离副本（worktree/project_root/branch）
+        # 直接读任务的隔离真相，不靠 provider==docker 反推——worktree 等隔离模式下
+        # 文件工具 provider 仍是 host，但它们操作的已是独立 git 副本，无需审批。
+        if self._is_isolated(ctx, execution_contexts):
+            logger.info("[%s] 已隔离（容器/worktree），基础检查通过，放行", self.name)
+            return {"security.decision": {"allowed": True, "reason": "isolated workspace, base checks passed"}}
 
-        # host 模式：逐个检查工具调用的参数
+        # 裸操作（host/shared/plain）：逐个检查工具调用的参数
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
@@ -493,16 +493,24 @@ class SecurityCheckPlugin(IInputPlugin):
         规则的 tools 为 ["*"] 或包含当前工具名时适用。
         支持关键词子串匹配（大小写不敏感）和正则匹配两种模式。
 
+        优先级：allow > block / needs_approval。
+        先扫一遍所有规则，命中 action=allow 即立即放行（白名单优先，
+        避免 dangerous_commands 抢先于 safe_commands 误伤安全命令，
+        如 `wc -l ... 2>/dev/null` 被 2>/dev/null 关键词误判）。
+        无 allow 命中时，返回首个 block/needs_approval 规则。
+
         Args:
             tool_name: 工具名称
             args: 工具参数字典
 
         Returns:
             元组 (action, rule_name)：
-            - action 为 "block" 或 "needs_approval" 表示匹配到规则
+            - action 为 "allow" 表示白名单命中（放行）
+            - action 为 "block" 或 "needs_approval" 表示匹配到拦截/审批规则
             - action 为空字符串表示未匹配到任何规则
             - rule_name 为匹配到的规则名称
         """
+        first_reject: tuple[str, str] = ("", "")
         for rule in self._rules:
             # 检查工具是否匹配
             tools = rule.get("tools", [])
@@ -541,9 +549,15 @@ class SecurityCheckPlugin(IInputPlugin):
 
                     if matched:
                         action = rule.get("action", "block")
-                        return (action, rule.get("name", "unknown"))
+                        rule_name = rule.get("name", "unknown")
+                        # allow 白名单优先：命中即放行，不再查其它规则
+                        if action == "allow":
+                            return (action, rule_name)
+                        # 记录首个拦截/审批规则，无 allow 命中时返回它
+                        if not first_reject[0]:
+                            first_reject = (action, rule_name)
 
-        return ("", "")
+        return first_reject
 
     def _check_path_traversal(self, args: dict[str, Any]) -> str:
         """检查路径遍历攻击（增强版）。
@@ -679,6 +693,74 @@ class SecurityCheckPlugin(IInputPlugin):
         # 轨道 2：声明了 dangerous_operations 的工具
         dangerous_ops = self._get_dangerous_operations(ctx, tool_name)
         return bool(dangerous_ops)
+
+    # worktree/project_root/branch 都是独立 git 副本，操作不污染原项目。
+    # shared(host 直接操作项目目录)/plain(空目录) 是裸操作，必须审批。
+    _ISOLATED_WS_MODES: frozenset[str] = frozenset({"worktree", "project_root", "branch"})
+
+    def _is_isolated(self, ctx: PluginContext, execution_contexts: list[dict[str, Any]]) -> bool:
+        """判断当前任务是否在隔离环境中执行。
+
+        隔离真相有两个来源（满足任一即隔离）：
+        1. docker 容器：所有工具 execution_contexts 的 provider 均为 docker
+        2. 工作空间隔离副本：task.metadata.ws_meta.mode ∈ {worktree, project_root, branch}
+
+        不靠 provider==docker 单一反推——worktree 等模式下文件工具 provider 仍是 host，
+        但它们操作的是独立 git 副本，应与 docker 同等放行。
+
+        Args:
+            ctx: 插件执行上下文
+            execution_contexts: isolation_guard 写入的工具执行上下文列表
+
+        Returns:
+            True=已隔离（放行），False=裸操作（危险工具需审批）
+        """
+        # 来源 1：docker 容器（保留原判定）
+        if execution_contexts and all(
+            c.get("provider") == "docker" for c in execution_contexts
+        ):
+            return True
+
+        # 来源 2：工作空间隔离副本（直接读任务隔离真相）
+        ws_mode = self._get_ws_mode(ctx)
+        return ws_mode in self._ISOLATED_WS_MODES
+
+    def _get_ws_mode(self, ctx: PluginContext) -> str:
+        """从当前任务的 ws_meta.mode 读取工作空间隔离模式。
+
+        通过 task_id → task_service → task.metadata.ws_meta 取值，
+        与 isolation_guard._get_task_metadata 同一模式。取不到时返回空串，
+        调用方按未隔离（需审批）处理。
+
+        Args:
+            ctx: 插件执行上下文
+
+        Returns:
+            ws_meta.mode 值（如 worktree/project_root/shared/plain），不可用时为空串
+        """
+        task_id = ctx.state.get(StateKeys.TASK_ID, "")
+        if not task_id:
+            return ""
+
+        try:
+            task_service = ctx.get_service("task_service")
+        except KeyError:
+            return ""
+
+        try:
+            task = task_service.get_task(task_id)
+        except Exception as e:
+            logger.debug(
+                "[%s] 读取 task ws_meta 失败 | task_id=%s | error=%s",
+                self.name, task_id, e,
+            )
+            return ""
+
+        if task and task.metadata:
+            ws_meta = task.metadata.get("ws_meta")
+            if isinstance(ws_meta, dict):
+                return ws_meta.get("mode", "") or ""
+        return ""
 
     @staticmethod
     def _get_dangerous_operations(

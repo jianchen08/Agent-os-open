@@ -92,8 +92,6 @@ rules:
         value: "LD_PRELOAD"
       - type: keyword
         value: "no-preserve-root"
-      - type: keyword
-        value: "2>/dev/null"
       - type: regex
         value: "\\brm\\s+(-\\w*r\\w*f\\w*|-\\w*f\\w*r\\w*)"
       - type: regex
