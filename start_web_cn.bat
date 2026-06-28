@@ -14,50 +14,50 @@ echo.
 
 REM ===========================================================================
 REM WSL native docker mode (replaces Docker Desktop)
-REM 1. Keep WSL alive (prevent suspend that kills containers)
-REM 2. Ensure dockerd running (systemd managed)
-REM 3. Start project containers
-REM 4. Setup netsh portproxy (Windows localhost -> WSL container ports)
-REM All automatic, no manual steps.
+REM Bypasses systemd (which has a bug that periodically stops docker.service).
+REM Uses goto-based flow (cmd nested if-blocks break on special chars).
 REM ===========================================================================
 wsl -d Ubuntu -u root -- echo wsl_ok >nul 2>&1
-if not errorlevel 1 (
-    echo [INFO] WSL docker mode detected
+if errorlevel 1 goto :no_wsl_docker
 
-    REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
-    powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
+echo [INFO] WSL docker mode detected
 
-    REM 2. Ensure dockerd running.
-    REM    NOTE: systemd has a bug on this machine that periodically stops docker.service.
-    REM    So we bypass systemd: check if dockerd process alive, if not start it directly.
-    wsl -d Ubuntu -u root -- bash -c "if ! pgrep -x dockerd >/dev/null 2>&1; then pkill -9 dockerd 2>/dev/null; rm -f /var/run/docker.pid; nohup dockerd >/tmp/dockerd.log 2>&1 & sleep 6; fi; for i in 1 2 3 4 5; do docker version --format '{{.Server.Version}}' 2>/dev/null | grep -q '^[0-9]' && break; sleep 2; done" >nul 2>&1
+REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
+powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
 
-    REM 3. Get WSL IP (NAT mode, may change on restart)
-    for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do (
-        set "WSL_IP=%%i"
-    )
+REM 2. Ensure dockerd running (bypass systemd: start dockerd directly)
+wsl -d Ubuntu -u root -- bash -c "if ! pgrep -x dockerd >/dev/null 2>&1; then pkill -9 dockerd 2>/dev/null; rm -f /var/run/docker.pid; nohup dockerd >/tmp/dockerd.log 2>&1 & sleep 6; fi; for i in 1 2 3 4 5 6 7 8; do docker version --format '{{.Server.Version}}' 2>/dev/null | grep -q '^[0-9]' && break; sleep 2; done" >nul 2>&1
 
-    if defined WSL_IP (
-        echo [OK] WSL IP: !WSL_IP!
+REM 2b. Ensure docker compose plugin accessible (symlink to cli-plugins)
+wsl -d Ubuntu -u root -- bash -c "mkdir -p /usr/lib/docker/cli-plugins /root/.docker/cli-plugins; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose 2>/dev/null; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /root/.docker/cli-plugins/docker-compose 2>/dev/null" >nul 2>&1
 
-        REM 4. Setup netsh portproxy for Windows -> WSL port forwarding
-        REM    Forwards Windows localhost:PORT -> WSL_IP:PORT (container port mapping)
-        REM    Needs admin; if not admin, try and warn on failure.
-        echo [INFO] Setting up port forwarding (needs admin)...
-        powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy add v4tov4 listenport=5289 listenaddress=127.0.0.1 connectport=5289 connectaddress=!WSL_IP!; netsh interface portproxy add v4tov4 listenport=6480 listenaddress=127.0.0.1 connectport=6480 connectaddress=!WSL_IP!; netsh interface portproxy add v4tov4 listenport=8988 listenaddress=127.0.0.1 connectport=8988 connectaddress=!WSL_IP!'" 2>nul
-        echo [OK] Port forwarding configured
+REM 3. Get WSL IP (NAT mode, may change on restart)
+set "WSL_IP="
+for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do set "WSL_IP=%%i"
 
-        REM 5. Start project containers (compose up)
-        echo [INFO] Starting project containers...
-        wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && docker compose up -d 2>&1 | tail -3"
-        echo [OK] Containers started
-
-        REM Skip Docker Desktop checks below, go straight to Python/Agent
-        echo.
-        echo [INFO] Skipping Docker Desktop checks (using WSL native docker)
-        goto :start_python
-    )
+if not defined WSL_IP (
+    echo [ERROR] Cannot get WSL IP
+    goto :no_wsl_docker
 )
+
+echo [OK] WSL IP: %WSL_IP%
+
+REM 4. Setup netsh portproxy (Windows localhost -> WSL container ports)
+REM    reset first to avoid duplicate rules from repeated runs
+echo [INFO] Setting up port forwarding...
+powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy reset; netsh interface portproxy add v4tov4 listenport=5289 listenaddress=0.0.0.0 connectport=5289 connectaddress=%WSL_IP%; netsh interface portproxy add v4tov4 listenport=6480 listenaddress=0.0.0.0 connectport=6480 connectaddress=%WSL_IP%'" 2>nul
+echo [OK] Port forwarding configured
+
+REM 5. Start project containers
+echo [INFO] Starting project containers...
+wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && docker compose up -d 2>&1 | tail -3 && echo 'waiting containers...' && sleep 8"
+echo [OK] Containers started
+
+echo.
+echo [INFO] Skipping Docker Desktop checks (using WSL native docker)
+goto :start_python
+
+:no_wsl_docker
 echo [INFO] No WSL docker found, falling back to Docker Desktop mode
 
 :: ===========================================================================
