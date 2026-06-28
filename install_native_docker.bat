@@ -60,8 +60,8 @@ if "!WSL_RC!"=="100" (
 REM === 3. Get WSL IP and set DOCKER_HOST (NAT mode, IP may change) ===
 echo.
 echo [3/5] Get WSL IP and configure DOCKER_HOST...
-REM WSL hostname -I returns space-separated IPs; filter the 172.x one (eth0)
-for /f "delims=" %%i in ('powershell -NoProfile -Command "(wsl -d Ubuntu -u root -- bash -c 'hostname -I') -split ' ' | Where-Object { $_ -match '^172' } | Select-Object -First 1" 2^>nul') do (
+REM hostname -I 第一个 token 就是 eth0 的 172.x IP
+for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do (
     set "WSL_IP=%%i"
 )
 

@@ -19,7 +19,8 @@ REM 这样用户无需手动同步，双击本脚本即可。
 REM ===========================================================================
 wsl -d Ubuntu -u root -- echo wsl_ok >nul 2>&1
 if not errorlevel 1 (
-    for /f "delims=" %%i in ('powershell -NoProfile -Command "(wsl -d Ubuntu -u root -- bash -c 'hostname -I 2>/dev/null') -split ' ' | Where-Object { $_ -match '^172' } | Select-Object -First 1" 2^>nul') do (
+    REM 获取 WSL eth0 的 172.x IP（避免 PowerShell 的 $_ 在某些环境被转义）
+    for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do (
         set "WSL_IP=%%i"
     )
     if defined WSL_IP (
