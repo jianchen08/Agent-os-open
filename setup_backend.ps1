@@ -85,7 +85,13 @@ function Set-DockerBackendHyperV {
     param([string]$SettingsFile)
     try {
         $cfg = Get-Content $SettingsFile -Raw -ErrorAction Stop | ConvertFrom-Json
-        $cfg.wslEngineEnabled = $false
+        # PSCustomObject 不能直接给不存在的属性赋值,用 Add-Member -Force
+        # (字段缺失时 Docker Desktop 用默认值 WSL2=true,需主动写入 false)
+        if ($cfg.PSObject.Properties.Name -contains 'wslEngineEnabled') {
+            $cfg.wslEngineEnabled = $false
+        } else {
+            $cfg | Add-Member -MemberType NoteProperty -Name 'wslEngineEnabled' -Value $false
+        }
         $cfg | ConvertTo-Json -Depth 20 | Set-Content $SettingsFile -Encoding UTF8
         Write-Step "Configured Docker Desktop to use Hyper-V backend: $SettingsFile"
         return $true
@@ -93,6 +99,63 @@ function Set-DockerBackendHyperV {
         Write-Warn2 "Write Docker backend config failed: $($_.Exception.Message)"
         return $false
     }
+}
+
+$script:DD_EXE = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+
+function Stop-DockerDesktop {
+    "Quit Docker Desktop gracefully, force-kill if needed, then shut down WSL."
+    Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue | ForEach-Object {
+        try { $_.CloseMainWindow() | Out-Null } catch {}
+    }
+    $deadline = (Get-Date).AddSeconds(15)
+    while (((Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue).Count -gt 0) -and ((Get-Date) -lt $deadline)) {
+        Start-Sleep -Milliseconds 800
+    }
+    # force-kill stubborn processes
+    $procs = @('Docker Desktop','com.docker.backend','com.docker.build','com.docker.service','docker','vpnkit','com.docker.gui')
+    foreach ($n in $procs) {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    # shut down WSL backend (only relevant when switching away from WSL2)
+    & wsl --shutdown 2>$null
+    Start-Sleep -Seconds 3
+}
+
+function Start-DockerDesktop {
+    if (Test-Path $script:DD_EXE) {
+        Start-Process -FilePath $script:DD_EXE | Out-Null
+    } else {
+        Write-Warn2 "Docker Desktop.exe not found at default path; please start manually."
+    }
+}
+
+function Wait-DockerReady {
+    param([int]$TimeoutSec = 120)
+    "Poll docker info until daemon answers or timeout."
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'docker'
+        $psi.Arguments = 'info -f {{.ServerVersion}}'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        try {
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            if ($proc.WaitForExit(8000) -and $proc.ExitCode -eq 0) {
+                $out = $proc.StandardOutput.ReadToEnd()
+                if ($out -and $out.Trim() -match '^\d') { return $true }
+            } else {
+                try { $proc.Kill() } catch {}
+            }
+        } catch {}
+        Start-Sleep -Seconds 3
+    }
+    return $false
 }
 
 # ===========================================================================
@@ -177,21 +240,25 @@ if ($null -eq $current) {
 }
 
 if ($current.Status -eq 'no-field') {
-    # New Docker Desktop: config has no backend field. Cannot switch via file.
-    # Don't claim success - tell user to check GUI explicitly.
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Yellow
-    Write-Host " NOTE: Cannot switch backend via config file" -ForegroundColor Yellow
-    Write-Host "========================================" -ForegroundColor Yellow
-    Write-Host "This Docker Desktop version has no backend field in settings."
-    Write-Host "Hyper-V feature is enabled on this machine."
-    Write-Host "To use Hyper-V backend (more stable than WSL2), check Docker Desktop:"
-    Write-Host "  Settings -> General -> 'Use the WSL 2 based engine'"
-    Write-Host "  If the checkbox exists, uncheck it and Apply & Restart."
-    Write-Host "  If the checkbox does NOT exist, this version forces WSL2."
-    Write-Host "========================================" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Step "Backend selection done - manual GUI check required."
+    # Docker Desktop 没有把 wslEngineEnabled 显式写入配置(默认值 WSL2=true 不落盘)。
+    # 查证:手动写入 wslEngineEnabled=false + 重启 Docker Desktop 即切到 Hyper-V 后端。
+    # 参考: https://medium.com/code-kings/docker-how-to-switch-between-hyper-v-and-wsl-directly-in-the-settings-json-file
+    Write-Step "Config has no backend field - writing wslEngineEnabled=false to switch to Hyper-V."
+    $written = Set-DockerBackendHyperV -SettingsFile $current.File
+    if (-not $written) {
+        Write-Err2 "Failed to write backend config. Please switch manually in Docker Desktop GUI."
+        exit 2
+    }
+    Write-Step "Stopping Docker Desktop to apply new backend..."
+    Stop-DockerDesktop
+    Write-Step "Starting Docker Desktop with Hyper-V backend..."
+    Start-DockerDesktop
+    $ready = Wait-DockerReady -TimeoutSec 120
+    if (-not $ready) {
+        Write-Warn2 "Docker Desktop did not become ready in 120s. Please start it manually."
+        exit 2
+    }
+    Write-Step "Docker Desktop restarted with Hyper-V backend."
     exit 0
 }
 
