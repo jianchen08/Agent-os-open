@@ -347,11 +347,15 @@ class TestIsolationGuardSecurityCheckIntegration:
         # 重构后 isolation_guard 写 isolation.blocked，不再写 security.decision
         assert guard_result.state_updates.get("isolation.blocked") is True
 
-        # SecurityCheck 的幂等检查读 security.decision，独立于 isolation.blocked
-        # 这里验证 SecurityCheck 自身的幂等行为：已有 security.decision 时跳过
+        # SecurityCheck 不再因残留 security.decision 跳过本轮检查。
+        # 修复前：execute() 开头有"已有 decision 就 return 空结果"的幂等检查，
+        # 导致第一轮审批通过后后续所有工具调用（含硬底线检查）全部被跳过。
+        # 修复后：每轮独立检查；此处无工具调用，走到"no tool calls to check"放行。
         security = self._make_security_check()
         ctx_after = _make_ctx({
             "security": {"decision": {"allowed": True, "reason": "already checked"}},
         })
         sec_result = await security.execute(ctx_after)
-        assert sec_result.state_updates == {}
+        # 不再返回空结果——残留 decision 不短路，按本轮 state 独立判定
+        decision = sec_result.state_updates.get("security.decision", {})
+        assert decision.get("allowed") is True

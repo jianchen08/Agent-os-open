@@ -92,6 +92,12 @@ class SecurityCheckPlugin(IInputPlugin):
         ])
         self._allowed_base_paths = self._config.get("allowed_base_paths", ["skills"])
 
+        # 本管道内已记忆"通过"的命令指纹集合。
+        # 作用域为单管道实例：每个 PipelineEngine 创建时 fork() 出独立插件实例
+        # （registry.py fork 对每个插件深拷贝重建），新实例集合为空，天然按管道隔离，
+        # 跨管道/跨会话不泄漏。仅记忆用户选择"本管道内同命令免批"的精确指纹，拒绝绝不记忆。
+        self._approved_signatures: set[str] = set()
+
         # 加载安全规则
         self._rules = self._load_rules()
 
@@ -147,12 +153,10 @@ class SecurityCheckPlugin(IInputPlugin):
             包含安全决策状态更新的插件执行结果。
             如果检查不通过，会设置 security.decision 为 blocked。
         """
-        # 幂等检查：如果已有安全决策则跳过，避免 YAML 继承场景下重复执行
-        # state 中 security.decision 已展开为嵌套字典 state["security"]["decision"]
-        security_decision = ctx.state.get("security", {}).get("decision")
-        if security_decision:
-            return PluginResult()
-
+        # 每轮工具调用独立检查：state 跨轮复用，security.decision 一旦写入会永久驻留，
+        # 若在此处按"已有决策就跳过"短路，会导致第一轮审批通过后后续所有工具调用
+        # （含路径遍历、敏感目录等硬底线）全部被跳过，安全闸门失效。
+        # 历史上此处曾有一段基于 state 缓存的幂等检查，已删除。
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
@@ -253,14 +257,23 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
                 continue
 
-            # 未命中白名单 → 一律弹审批
+            # 命中本管道内已记忆的命令指纹 → 放行（用户此前选了"同命令免批"）
+            signature = self._make_signature(tool_name, args)
+            if signature and signature in self._approved_signatures:
+                logger.info(
+                    "[%s] 危险工具命中本管道已记忆指纹，放行 | tool=%s",
+                    self.name, tool_name,
+                )
+                continue
+
+            # 未命中白名单/记忆指纹 → 一律弹审批
             reason = "参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
             logger.warning(
                 "[%s] 危险工具参数未命中白名单，弹审批 | tool=%s | rule=%s",
                 self.name, tool_name, rule_name or "none",
             )
             return await self._await_approval(
-                ctx, tool_name, reason
+                ctx, tool_name, reason, signature=signature,
             )
 
         return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
@@ -270,19 +283,28 @@ class SecurityCheckPlugin(IInputPlugin):
         ctx: PluginContext,
         tool_name: str,
         rule_name: str,
+        *,
+        signature: str | None = None,
     ) -> dict[str, Any]:
         """等待用户审批并返回审批结果。
 
         通过 human_interaction 服务创建审批请求并 await 等待用户响应。
         优先用 engine 注入的服务（ctx.get_service），取不到时回退到
         全局单例 get_human_interaction_service()（覆盖 websocket 等未注入
-        服务的场景）。审批通过后写入 allowed=True，
-        拒绝/超时/取消后写入 allowed=False。
+        服务的场景）。审批通过后写入 allowed=True；
+        拒绝/超时/取消走 _soft_block（软拦截，反馈给 LLM）。
+
+        三个审批选项：
+        - approved_once   : 仅本次执行通过（不记忆指纹）
+        - approved_remember: 本管道内同命令（同工具+同指纹）后续免审批；
+                            仅当 signature 非空时记忆，无指纹的命令退化为"仅本次"
+        - denied          : 拒绝（软拦截）
 
         Args:
             ctx: 插件执行上下文
             tool_name: 触发审批的工具名称
-            rule_name: 触发审批的规则名称
+            rule_name: 触发审批的规则/原因描述
+            signature: 当前命令的归一化指纹，用于"同命令免批"记忆；None 表示无法记忆
 
         Returns:
             安全决策结果字典
@@ -299,25 +321,33 @@ class SecurityCheckPlugin(IInputPlugin):
         args_preview = self._format_args_for_approval(tool_calls, tool_name)
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
-        request_id = await interaction_svc.create_choice_request(
-            session_id=session_id,
-            thread_id=session_id,
-            tab_id="",
-            title=f"安全审批: {tool_name}",
-            description=args_preview,
-            options=[
-                {"value": "approved", "label": "允许执行"},
-                {"value": "denied", "label": "拒绝执行"},
-            ],
-            priority=Priority.HIGH,
-        )
-
-        logger.info(
-            "[%s] Approval request created | request_id=%s | tool=%s | rule=%s",
-            self.name, request_id, tool_name, rule_name,
-        )
-
+        # request_id 预初始化：create_choice_request 抛异常时尚未赋值，
+        # 但 except 链日志需引用它，占位为 "-" 表示请求未创建成功。
+        request_id = "-"
+        # try 覆盖整个审批交互（创建请求 + 等待响应）：
+        # 创建请求阶段（create_choice_request）抛异常（如服务不可用）同样要软拦截，
+        # 而非上抛导致 PluginChain ABORT 结束管道。历史上 try 仅包裹 wait_for_choice，
+        # 导致"服务不可用"时异常逃逸。
         try:
+            request_id = await interaction_svc.create_choice_request(
+                session_id=session_id,
+                thread_id=session_id,
+                tab_id="",
+                title=f"安全审批: {tool_name}",
+                description=args_preview,
+                options=[
+                    {"value": "approved_once", "label": "仅本次执行"},
+                    {"value": "approved_remember", "label": "本管道内同命令免批"},
+                    {"value": "denied", "label": "拒绝执行"},
+                ],
+                priority=Priority.HIGH,
+            )
+
+            logger.info(
+                "[%s] Approval request created | request_id=%s | tool=%s | rule=%s",
+                self.name, request_id, tool_name, rule_name,
+            )
+
             result = await interaction_svc.wait_for_choice(request_id)
             response_type = result.get("response_type", "")
             # response_type 表示响应类型（answered/denied/cancelled），
@@ -326,11 +356,20 @@ class SecurityCheckPlugin(IInputPlugin):
             # 到这里 response_type 通常是 "answered"，需检查 selected_option。
             selected_option = result.get("selected_option", "")
 
-            if selected_option == "approved":
-                logger.info(
-                    "[%s] Approval granted | request_id=%s | tool=%s | option=%s",
-                    self.name, request_id, tool_name, selected_option,
-                )
+            if selected_option in ("approved_once", "approved_remember"):
+                # "同命令免批"：记忆精确指纹，本管道内同工具+同命令后续免审批。
+                # 仅当指纹可计算时才记忆；无指纹（如无法归一化的参数）退化为"仅本次"。
+                if selected_option == "approved_remember" and signature:
+                    self._approved_signatures.add(signature)
+                    logger.info(
+                        "[%s] Approval granted (remember signature) | request_id=%s | tool=%s | sig=%s",
+                        self.name, request_id, tool_name, signature,
+                    )
+                else:
+                    logger.info(
+                        "[%s] Approval granted (once) | request_id=%s | tool=%s | option=%s",
+                        self.name, request_id, tool_name, selected_option,
+                    )
                 return {
                     "security.decision": {
                         "allowed": True,
@@ -374,6 +413,55 @@ class SecurityCheckPlugin(IInputPlugin):
                 self.name, request_id, tool_name, e,
             )
             return self._soft_block(ctx, tool_name, f"审批服务异常: {e}")
+
+    def _make_signature(self, tool_name: str, args: dict[str, Any]) -> str | None:
+        """计算命令指纹，用于"本管道内同命令免批"记忆。
+
+        指纹 = 工具名 + 关键参数（命令/路径/内容/代码）的归一化字符串的 sha256 短摘要。
+
+        安全边界（关键）：
+        - 精确匹配，不做前缀/语义模糊。命令仅做空白归一化（统一连续空白为单空格、
+          去首尾），不替换路径、不截断、不解析重排。保证 "rm -rf /tmp/x" ≠ "rm -rf /"。
+        - 命令前后差异（哪怕只多一个空格）也会产生不同指纹 → 用户重审，宁可多问。
+        - 无任何关键参数可归一化时返回 None，调用方退化为"仅本次"。
+
+        Args:
+            tool_name: 工具名称
+            args: 工具参数字典
+
+        Returns:
+            形如 "tool_name:ab12cd34" 的指纹；无法计算返回 None
+        """
+        import hashlib  # noqa: PLC0415
+
+        # 提取关键参数：与 _format_args_for_approval 一致的参数集合
+        parts: list[str] = [tool_name]
+
+        cmd = args.get("command") or args.get("cmd")
+        if isinstance(cmd, str) and cmd.strip():
+            # 仅空白归一化：连续空白→单空格，去首尾。不改命令语义。
+            parts.append("command=" + " ".join(cmd.split()))
+
+        code = args.get("code")
+        if isinstance(code, str) and code.strip():
+            parts.append("code=" + " ".join(code.split()))
+
+        content = args.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append("content=" + " ".join(content.split()))
+
+        for path_key in ("path", "file_path", "directory", "dest", "target", "output_path", "working_dir"):
+            val = args.get(path_key)
+            if isinstance(val, str) and val.strip():
+                parts.append(f"{path_key}={val.strip()}")
+
+        # 只有工具名、无任何关键参数 → 无法稳定记忆，返回 None
+        if len(parts) == 1:
+            return None
+
+        digest_source = "|".join(parts)
+        digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
+        return f"{tool_name}:{digest}"
 
     def _soft_block(
         self, ctx: PluginContext, tool_name: str, reason: str,
