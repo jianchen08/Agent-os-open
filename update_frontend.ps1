@@ -104,6 +104,17 @@ try {
     }
 
     # 5. Inject into container (container must be running at this point)
+    # BUG-FIX-fix_20260628_docker_cp_silent_failure:
+    # 问题根因: docker cp 偶发"退出码 0 但未真正写入容器可写层"(疑似运行中容器
+    #   文件锁/时机问题)。原逻辑仅靠 $LASTEXITCODE 判定成功,导致 cp 假成功时
+    #   脚本误报 [OK] —— 宿主机已构建新代码、容器内仍是旧 dist,前端改动不生效
+    #   且无任何告警。
+    # 修复方案: cp 后对比"宿主机 dist 与容器内 /app/dist"的入口 JS hash,
+    #   不一致即视为假成功:重试一次 cp,仍失败则明确报错退出(exit 1)。
+    #   实现"状态可感知",杜绝静默失败。
+    # 注意: 不在容器内跑 grep —— PowerShell->docker exec->sh 三层引号传递会让
+    #       正则里的双引号被吞掉。改用 docker exec cat 读回 index.html + PowerShell
+    #       regex 提取,宿主机与容器两侧共用同一正则(scriptBlock),逻辑对称可靠。
     $ErrorActionPreference = 'Continue'
     & docker cp "$distDir/." "${containerName}:/app/dist/" 2>&1 | Out-Null
     $cpExit = $LASTEXITCODE
@@ -112,6 +123,48 @@ try {
         Write-Host '[WARN] docker cp failed, container may not be running yet'
         exit 0
     }
+
+    # 验证 cp 是否真正生效:对比 index.html 引用的入口 JS hash(退出码 0 不代表文件已写入)
+    $extractEntryJs = {
+        param([string]$content)
+        ([regex]::Match($content, 'assets/index-[^"]+\.js')).Value
+    }
+    $hostIndex = Join-Path $distDir 'index.html'
+    $hostHash = & $extractEntryJs (Get-Content $hostIndex -Raw)
+    $containerHash = & $extractEntryJs ((docker exec $containerName cat /app/dist/index.html 2>$null) -join "`n")
+    if ($containerHash -ne $hostHash) {
+        Write-Host "[WARN] docker cp 假成功(退出码0但容器内未更新),重试一次... 宿主机=$hostHash 容器=$containerHash"
+        & docker cp "$distDir/." "${containerName}:/app/dist/" 2>&1 | Out-Null
+        $containerHash = & $extractEntryJs ((docker exec $containerName cat /app/dist/index.html 2>$null) -join "`n")
+        if ($containerHash -ne $hostHash) {
+            Write-Host "[WARN] docker cp 重试后容器内仍为旧文件,降级重建镜像...(宿主机=$hostHash 容器=$containerHash)"
+            # BUG-FIX-fix_20260629_cp_fallback_rebuild:
+            # 问题: docker cp 偶发假成功且重试无效(容器可写层文件锁/容器被外部
+            #   并发会话用旧镜像重建等)。cp 失败时若只 exit 1 放弃,容器将永久
+            #   跑旧代码,前端改动始终不生效(start_web_cn.bat 镜像存在时只走本 cp 路径)。
+            # 修复: cp 重试仍失败 → docker compose up -d --build frontend 重建镜像,
+            #   把宿主机最新 dist 烧进镜像层(Dockerfile 路径A: COPY frontend/dist)。
+            #   重建后容器内 dist 必然是新的,从根上消除"容器跑旧代码"。
+            & docker compose up -d --build frontend 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[ERROR] 镜像重建也失败,放弃。请手动检查 docker compose build frontend"
+                exit 1
+            }
+            # 重建后容器已用新镜像重启,直接确认并跳过后续 cp 路径的 restart
+            $containerHash = & $extractEntryJs ((docker exec $containerName cat /app/dist/index.html 2>$null) -join "`n")
+            if ($containerHash -ne $hostHash) {
+                Write-Host "[ERROR] 镜像重建后容器内入口 JS 仍不匹配(宿主机=$hostHash 容器=$containerHash)"
+                exit 1
+            }
+            Write-Host "[OK] 镜像重建成功,容器内入口 JS 已更新: $containerHash"
+            Get-Date | Out-File -FilePath $markFile -Encoding ascii
+            if ($currentHash) {
+                $currentHash | Out-File -FilePath $hashFile -Encoding ascii
+            }
+            exit 0
+        }
+    }
+    Write-Host "[OK] 容器内入口 JS 已更新: $containerHash"
 
     & docker restart $containerName 2>&1 | Out-Null
     Get-Date | Out-File -FilePath $markFile -Encoding ascii
