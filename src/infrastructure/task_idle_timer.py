@@ -272,6 +272,33 @@ class TaskIdleTimerMixin:
                 )
                 return False
             for entry in entries:
+                # BUG-FIX-fix_20260629_waiting_recovery_deadlock:
+                # 引擎进入 EXECUTION_STATUS=waiting_recovery 后会在
+                # wake_event.wait 永久挂起（无主动唤醒源），但 is_running
+                # 仍为 True、engine_task 也未 done。原 _engine_is_running
+                # 一律判"在跑"→ idle_timer 永远不 fail，pipeline 死挂数小时。
+                # 现在 error_check 已不再产 waiting_recovery（10 次后直接
+                # failed），此处仅保留兜底：若仍有遗留代码路径走出 wait 信号
+                # 并把 EXECUTION_STATUS 写为 waiting_recovery，idle_timer 会
+                # 在 idle_threshold 周期内识别并 fail，避免再次死挂。
+                if entry.engine is not None:
+                    try:
+                        last_state = getattr(entry.engine, "last_state", None) or {}
+                        from pipeline.types import StateKeys  # noqa: PLC0415
+                        exec_status = last_state.get(
+                            StateKeys.EXECUTION_STATUS, ""
+                        )
+                        if exec_status == "waiting_recovery":
+                            logger.warning(
+                                "TaskWorker: [IDLE-CHECK] 引擎处于 "
+                                "waiting_recovery 状态，判定为 idle 兜底: "
+                                "task_id=%s pipeline=%s",
+                                task_id,
+                                getattr(entry.engine, "pipeline_id", "?")[:12],
+                            )
+                            return False
+                    except Exception:
+                        pass
                 # 检查 engine_task Future（concurrent.futures.Future）
                 if entry.engine_task is not None:
                     try:
