@@ -1434,7 +1434,19 @@ class PipelineEngine:
 
             )
 
-            max_wait_rounds = 50
+            # BUG-FIX-fix_20260629_suspend_semantics_split:
+            # 挂起有两种语义，行为完全不同：
+            #   A. watching_tasks 非空（等子任务终态）：
+            #      合法挂起，定期 _check_children_terminal 检查子任务是否完成。
+            #      上限 6 轮 × 600s = 60 分钟（覆盖一般子任务执行时长）。
+            #   B. watching_tasks 空（管道纯静默 / waiting_recovery 等异常路径）：
+            #      没有外部唤醒源，长等无意义。1 轮 600s 内若无注入即结束，
+            #      让 pipeline 走正常 fail 流程，由 idle_timer / 父任务感知。
+            # 这样避免了 4 个 pipeline 在 watching_tasks=[] 时 8h 死挂的死锁。
+            if self._watching_task_ids:
+                max_wait_rounds = 6
+            else:
+                max_wait_rounds = 1
 
             # BUG-FIX-fix_20260603_wake_event_threadsafe:
 
@@ -1514,9 +1526,10 @@ class PipelineEngine:
 
                         "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
 
-                        "(round=%d/%d): pipeline=%s",
+                        "(round=%d/%d, watching=%s): pipeline=%s",
 
-                        wait_round + 1, max_wait_rounds, pipeline_id,
+                        wait_round + 1, max_wait_rounds,
+                        self._watching_task_ids, pipeline_id,
 
                     )
 
@@ -1526,11 +1539,26 @@ class PipelineEngine:
 
                 logger.warning(
 
-                    "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
+                    "[Engine] 管道等待超过 %d 轮 (watching_tasks=%s)，"
+                    "%s: pipeline=%s",
 
-                    max_wait_rounds, pipeline_id,
+                    max_wait_rounds,
+                    self._watching_task_ids,
+                    "无活动结束管道" if not self._watching_task_ids
+                    else "强制唤醒",
+                    pipeline_id,
 
                 )
+
+                # watching_tasks 为空：纯静默 → 直接退出 _suspend_and_wait，
+                # 返回 False 让 _run_loop 结束，pipeline 进入 fail 流程；
+                # watching_tasks 非空：60min 仍未终态，强制唤醒走原路径让
+                # 上层重新评估（旧行为）。
+                if not self._watching_task_ids:
+                    self._wake_event = None
+                    self._engine_loop = None
+                    self._suspended_state = None
+                    return False
 
 
 
