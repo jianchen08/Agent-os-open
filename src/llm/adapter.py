@@ -395,7 +395,7 @@ class _BaseLiteLLMAdapter:
         # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死。
         # 必须在构造 call_kwargs 之前 pop 出来，否则会被 **kwargs 塞进
         # litellm 请求参数（litellm 不识别这两个 key）。
-        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
+        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 120))
         # inter-chunk 静默超时：连续 N 秒收不到任何 chunk 即判定上游/传输静默，
         # 抛 litellm.Timeout 中断死等。每个 chunk 到达即重置计时器（见下方主循环
         # asyncio.wait_for），故活跃推理（reasoning 持续吐 chunk）永不触发，只有
