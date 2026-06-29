@@ -48,6 +48,9 @@ class TaskExecutionContext:
         self.suspended_engine: Any = None
         self.resume_requested: bool = False
         self.idle_timer_registered: bool = False
+        # 任务总超时硬墙的 asyncio.TimerHandle 引用，cleanup 时取消。
+        # 由 task_executor 在启动阶段按 agent_level 设置（L1=None 不创建）。
+        self.total_timeout_handle: Any = None
 
         self.workspace: str = ""
         self.ws_meta: dict[str, Any] = {}
@@ -70,6 +73,11 @@ class TaskExecutionContext:
             except RuntimeError:
                 pass
         self.idle_timer_registered = False
+        # 取消任务总超时硬墙计时器（不依赖 timer_manager，直接 cancel handle）
+        if self.total_timeout_handle is not None:
+            with contextlib.suppress(Exception):
+                self.total_timeout_handle.cancel()
+            self.total_timeout_handle = None
 
     def rollback(self, task_service: Any = None) -> None:
         """准备阶段失败时的完整回滚。

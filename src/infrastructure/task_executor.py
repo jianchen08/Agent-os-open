@@ -530,6 +530,12 @@ class TaskExecutorMixin:
 
                 return
 
+            # 注册任务总超时硬墙（独立于 idle，活跃也强制 fail）
+            # L1 主 Agent 不限制；L2/L3 按配置 task_max_duration_by_level 取值。
+            self._register_total_timeout(
+                task_id, task_data, task_service, timer_manager, ctx,
+            )
+
 
 
             # pipe 继承：物理拷贝源管道 records → 引擎自加载（和重试同路）
@@ -1387,6 +1393,95 @@ class TaskExecutorMixin:
             ctx.set_terminal()
 
             return False
+
+
+
+    def _register_total_timeout(
+        self,
+        task_id: str,
+        task_data: dict[str, Any],
+        task_service: Any,
+        timer_manager: Any,
+        ctx: TaskExecutionContext,
+    ) -> None:
+        """注册任务总超时硬墙（按 agent_level 分级配置）。
+
+        与 idle_timer 互相独立：
+          - idle_timer 检测"无心跳"，活跃即可续期；
+          - total_timeout 是从 started_at 起的硬时限，活跃也不豁免。
+
+        分级（默认值见 TimerManager.DEFAULT_CONFIG.timeout.task_max_duration_by_level）：
+          - L1 主 Agent：None → 不创建硬墙（主对话长跑允许）
+          - L2 子任务 Agent：9000s = 2.5h
+          - L3 原子工具 Agent：3600s = 1h
+
+        到点回调：fail_task(reason="total_timeout: 超过 L? 总执行时间 Xs")，
+        通过 ctx.total_timeout_handle 在 cleanup 时取消。
+
+        Args:
+            task_id: 任务 ID
+            task_data: 任务数据字典（取 agent_level）
+            task_service: 任务服务
+            timer_manager: 计时器管理器（提供 task_max_duration_for_level）
+            ctx: 任务执行上下文
+        """
+        if timer_manager is None:
+            return
+        agent_level = str(task_data.get("agent_level", "")) or "L3"
+        try:
+            duration = timer_manager.task_max_duration_for_level(agent_level)
+        except Exception as exc:
+            logger.warning(
+                "TaskWorker: 取 task_max_duration_for_level 失败，跳过总超时: "
+                "task_id=%s agent_level=%s error=%s",
+                task_id, agent_level, exc,
+            )
+            return
+        if duration is None or duration <= 0:
+            logger.debug(
+                "TaskWorker: 任务总超时未启用（L1 或未配置）: "
+                "task_id=%s agent_level=%s",
+                task_id, agent_level,
+            )
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def _on_total_timeout() -> None:
+            """总超时硬墙到点：直接 fail_task，无视活跃状态。"""
+            logger.warning(
+                "TaskWorker: [TOTAL-TIMEOUT] 任务总执行时间到点，"
+                "强制 fail: task_id=%s agent_level=%s duration=%ss",
+                task_id, agent_level, duration,
+            )
+            try:
+                _reason = (
+                    f"total_timeout: 超过 {agent_level} 总执行时间 "
+                    f"{duration}s"
+                )
+                _fut = loop.create_task(
+                    task_service.fail_task(task_id, _reason)
+                )
+                _fut.add_done_callback(
+                    lambda fut, tid=task_id: self._log_fail_task_exception(fut, tid)
+                )
+                if ctx is not None:
+                    ctx.set_terminal()
+                    ctx.cleanup(timer_manager)
+            except Exception as exc:
+                logger.error(
+                    "TaskWorker: [TOTAL-TIMEOUT] fail 处理失败: "
+                    "task_id=%s error=%s", task_id, exc,
+                )
+
+        ctx.total_timeout_handle = loop.call_later(
+            float(duration), _on_total_timeout,
+        )
+        logger.info(
+            "TaskWorker: 任务总超时硬墙已注册: "
+            "task_id=%s agent_level=%s duration=%ss",
+            task_id, agent_level, duration,
+        )
 
 
 

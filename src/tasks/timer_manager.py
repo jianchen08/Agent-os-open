@@ -127,6 +127,17 @@ class TimerManager:
 
     DEFAULT_CONFIG = {
         "timeout": {
+            # 任务总执行时间硬墙（独立于 idle，活跃也强制 fail）。按 agent_level 分级：
+            #   L1 (主 Agent)：不限制（None 表示不创建总超时计时器）
+            #   L2 (子任务 Agent)：9000s = 2.5h
+            #   L3 (原子工具 Agent)：3600s = 1h
+            # 由 _arm_total_timer 在任务启动时按 task.agent_level 选取。
+            "task_max_duration_by_level": {
+                "L1": None,
+                "L2": 9000,
+                "L3": 3600,
+            },
+            # 兼容兜底：未知 agent_level 或未传时使用此值
             "task_max_duration": 3600,
             "idle_threshold": 600,
             "project_max_duration": 86400,
@@ -239,7 +250,24 @@ class TimerManager:
 
     @property
     def task_max_duration(self) -> int:
-        """获取单个任务最大执行时间（秒）"""
+        """获取单个任务最大执行时间（秒），未分级时的兜底默认值。
+
+        分级配置见 task_max_duration_for_level()。
+        """
+        return self._config["timeout"]["task_max_duration"]
+
+    def task_max_duration_for_level(self, agent_level: str | None) -> int | None:
+        """按 agent_level 取任务总超时（秒）。
+
+        Args:
+            agent_level: "L1" / "L2" / "L3" 或 None
+
+        Returns:
+            秒数；返回 None 表示该层级无总超时限制（如 L1 主 Agent）。
+        """
+        level_map = self._config["timeout"].get("task_max_duration_by_level", {})
+        if agent_level and agent_level in level_map:
+            return level_map[agent_level]
         return self._config["timeout"]["task_max_duration"]
 
     @property
