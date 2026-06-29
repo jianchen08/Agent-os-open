@@ -531,9 +531,11 @@ class TaskExecutorMixin:
                 return
 
             # 注册任务总超时硬墙（独立于 idle，活跃也强制 fail）
-            # L1 主 Agent 不限制；L2/L3 按配置 task_max_duration_by_level 取值。
+            # 优先级：per-agent AgentConfig.timeout_seconds（>0 生效，-1=不限）
+            #         > 按 agent_level fallback（L1 不限 / L2 9000s / L3 3600s）
             self._register_total_timeout(
-                task_id, task_data, task_service, timer_manager, ctx,
+                task_id, task_data, agent_config,
+                task_service, timer_manager, ctx,
             )
 
 
@@ -1400,48 +1402,78 @@ class TaskExecutorMixin:
         self,
         task_id: str,
         task_data: dict[str, Any],
+        agent_config: Any,
         task_service: Any,
         timer_manager: Any,
         ctx: TaskExecutionContext,
     ) -> None:
-        """注册任务总超时硬墙（按 agent_level 分级配置）。
+        """注册任务总超时硬墙（per-agent 优先，按 agent_level fallback）。
 
         与 idle_timer 互相独立：
           - idle_timer 检测"无心跳"，活跃即可续期；
           - total_timeout 是从 started_at 起的硬时限，活跃也不豁免。
 
-        分级（默认值见 TimerManager.DEFAULT_CONFIG.timeout.task_max_duration_by_level）：
-          - L1 主 Agent：None → 不创建硬墙（主对话长跑允许）
-          - L2 子任务 Agent：9000s = 2.5h
-          - L3 原子工具 Agent：3600s = 1h
+        超时来源优先级：
+          1. per-agent AgentConfig.timeout_seconds
+             - > 0：生效（用户在 agent.yaml 里为某个 agent 单独配置的硬墙）
+             - == -1 或缺省：表示"不限"，跳过该 agent 的总超时
+          2. 按 agent_level fallback（TimerManager.task_max_duration_by_level）
+             - L1 主 Agent：None → 不限制（主对话长跑允许）
+             - L2 子任务 Agent：9000s = 2.5h
+             - L3 原子工具 Agent：3600s = 1h
 
-        到点回调：fail_task(reason="total_timeout: 超过 L? 总执行时间 Xs")，
-        通过 ctx.total_timeout_handle 在 cleanup 时取消。
+        到点回调：fail_task(reason="total_timeout: 超过总执行时间 Xs
+        (agent=<name>/level=<L?>)")，通过 ctx.total_timeout_handle 在
+        cleanup 时取消。
 
         Args:
             task_id: 任务 ID
             task_data: 任务数据字典（取 agent_level）
+            agent_config: AgentConfig 实例（提供 timeout_seconds / level / name）
             task_service: 任务服务
             timer_manager: 计时器管理器（提供 task_max_duration_for_level）
             ctx: 任务执行上下文
         """
         if timer_manager is None:
             return
+
         agent_level = str(task_data.get("agent_level", "")) or "L3"
-        try:
-            duration = timer_manager.task_max_duration_for_level(agent_level)
-        except Exception as exc:
-            logger.warning(
-                "TaskWorker: 取 task_max_duration_for_level 失败，跳过总超时: "
-                "task_id=%s agent_level=%s error=%s",
-                task_id, agent_level, exc,
+        # 来源优先级 1：per-agent AgentConfig.timeout_seconds
+        # AgentConfig 约定 -1 = 不限，>0 = 显式硬墙，0/None = 未配置（走 fallback）
+        agent_timeout = (
+            getattr(agent_config, "timeout_seconds", None)
+            if agent_config is not None else None
+        )
+        if agent_timeout is not None and agent_timeout == -1:
+            # agent 显式声明不限：完全跳过总超时（即使是 L3 也不 fallback）
+            logger.debug(
+                "TaskWorker: 任务总超时不启用（agent.timeout_seconds=-1）: "
+                "task_id=%s agent_level=%s agent=%s",
+                task_id, agent_level,
+                getattr(agent_config, "name", "?"),
             )
             return
+        if agent_timeout is not None and agent_timeout > 0:
+            duration: int | float | None = float(agent_timeout)
+            source = f"agent={getattr(agent_config, 'name', '?') or agent_level}"
+        else:
+            # 来源优先级 2：按 agent_level fallback
+            try:
+                duration = timer_manager.task_max_duration_for_level(agent_level)
+            except Exception as exc:
+                logger.warning(
+                    "TaskWorker: 取 task_max_duration_for_level 失败，跳过总超时: "
+                    "task_id=%s agent_level=%s error=%s",
+                    task_id, agent_level, exc,
+                )
+                return
+            source = f"level={agent_level}"
+
         if duration is None or duration <= 0:
             logger.debug(
-                "TaskWorker: 任务总超时未启用（L1 或未配置）: "
-                "task_id=%s agent_level=%s",
-                task_id, agent_level,
+                "TaskWorker: 任务总超时未启用（agent 或 level 配置为不限）: "
+                "task_id=%s agent_level=%s agent_timeout=%s",
+                task_id, agent_level, agent_timeout,
             )
             return
 
@@ -1451,13 +1483,12 @@ class TaskExecutorMixin:
             """总超时硬墙到点：直接 fail_task，无视活跃状态。"""
             logger.warning(
                 "TaskWorker: [TOTAL-TIMEOUT] 任务总执行时间到点，"
-                "强制 fail: task_id=%s agent_level=%s duration=%ss",
-                task_id, agent_level, duration,
+                "强制 fail: task_id=%s %s duration=%ss",
+                task_id, source, duration,
             )
             try:
                 _reason = (
-                    f"total_timeout: 超过 {agent_level} 总执行时间 "
-                    f"{duration}s"
+                    f"total_timeout: 超过总执行时间 {duration}s ({source})"
                 )
                 _fut = loop.create_task(
                     task_service.fail_task(task_id, _reason)
@@ -1479,8 +1510,8 @@ class TaskExecutorMixin:
         )
         logger.info(
             "TaskWorker: 任务总超时硬墙已注册: "
-            "task_id=%s agent_level=%s duration=%ss",
-            task_id, agent_level, duration,
+            "task_id=%s %s duration=%ss",
+            task_id, source, duration,
         )
 
 

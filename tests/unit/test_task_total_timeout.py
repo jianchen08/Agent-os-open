@@ -77,11 +77,62 @@ class TestTotalTimeoutHandleOnCtx:
 
 
 class TestRegisterTotalTimeout:
-    """_register_total_timeout 行为：按 level 决定是否创建，到点 fail_task。"""
+    """_register_total_timeout 行为：per-agent 优先，level fallback。"""
 
     @pytest.mark.asyncio
-    async def test_l1_skips_registration(self) -> None:
-        """L1 → task_max_duration_for_level=None → 不注册计时器。"""
+    async def test_agent_timeout_minus_one_skips_even_if_level_l2(self) -> None:
+        """agent.timeout_seconds=-1（不限）→ 即便 L2 fallback=9000s 也不注册。"""
+        from infrastructure.task_executor import TaskExecutorMixin
+
+        class _Holder(TaskExecutorMixin):
+            pass
+
+        holder = _Holder()
+        ctx = TaskExecutionContext("t-unsuppressed")
+        mgr = TimerManager()
+        agent = MagicMock(timeout_seconds=-1, name="my_agent")
+        holder._register_total_timeout(
+            "t-unsuppressed", {"agent_level": "L2"}, agent, MagicMock(), mgr, ctx,
+        )
+        assert ctx.total_timeout_handle is None
+
+    @pytest.mark.asyncio
+    async def test_agent_timeout_positive_overrides_level(self) -> None:
+        """agent.timeout_seconds=120 → 用 120s 而非 L3 fallback 的 3600s。
+
+        通过 call_later 注册的 TimerHandle._when（绝对时间戳）减当前 loop
+        时间，换算回 duration 验证。
+        """
+        from infrastructure.task_executor import TaskExecutorMixin
+
+        class _Holder(TaskExecutorMixin):
+            pass
+
+        holder = _Holder()
+        ctx = TaskExecutionContext("t-override")
+        mgr = TimerManager()
+        agent = MagicMock(timeout_seconds=120, name="custom_agent")
+        holder._register_total_timeout(
+            "t-override", {"agent_level": "L3"}, agent, MagicMock(), mgr, ctx,
+        )
+        try:
+            handle = ctx.total_timeout_handle
+            assert handle is not None
+            # call_later 的 TimerHandle 暴露 _when（绝对单调时间），换算 duration
+            loop = asyncio.get_running_loop()
+            duration_approx = handle._when - loop.time()
+            # 120s 左右，远小于 L3 fallback 的 3600s
+            assert 100 <= duration_approx <= 130, (
+                f"agent.timeout_seconds 应覆盖 level fallback，"
+                f"实际 duration={duration_approx}"
+            )
+        finally:
+            if ctx.total_timeout_handle:
+                ctx.total_timeout_handle.cancel()
+
+    @pytest.mark.asyncio
+    async def test_l1_skips_registration_no_agent(self) -> None:
+        """无 agent_config + L1 → task_max_duration_for_level=None → 不注册。"""
         from infrastructure.task_executor import TaskExecutorMixin
 
         class _Holder(TaskExecutorMixin):
@@ -91,13 +142,13 @@ class TestRegisterTotalTimeout:
         ctx = TaskExecutionContext("t-l1")
         mgr = TimerManager()
         holder._register_total_timeout(
-            "t-l1", {"agent_level": "L1"}, MagicMock(), mgr, ctx,
+            "t-l1", {"agent_level": "L1"}, None, MagicMock(), mgr, ctx,
         )
         assert ctx.total_timeout_handle is None
 
     @pytest.mark.asyncio
-    async def test_l3_registers_handle(self) -> None:
-        """L3 → 注册 3600s 计时器，ctx.total_timeout_handle 不为 None。"""
+    async def test_l3_registers_handle_no_agent(self) -> None:
+        """无 agent_config + L3 → 用 fallback 3600s。"""
         from infrastructure.task_executor import TaskExecutorMixin
 
         class _Holder(TaskExecutorMixin):
@@ -107,7 +158,7 @@ class TestRegisterTotalTimeout:
         ctx = TaskExecutionContext("t-l3")
         mgr = TimerManager()
         holder._register_total_timeout(
-            "t-l3", {"agent_level": "L3"}, MagicMock(), mgr, ctx,
+            "t-l3", {"agent_level": "L3"}, None, MagicMock(), mgr, ctx,
         )
         try:
             assert ctx.total_timeout_handle is not None
@@ -142,7 +193,7 @@ class TestRegisterTotalTimeout:
         ts.fail_task = _fail_task
 
         holder._register_total_timeout(
-            "t-fast", {"agent_level": "L3"}, ts, mgr, ctx,
+            "t-fast", {"agent_level": "L3"}, None, ts, mgr, ctx,
         )
         # 等待回调触发 + 异步 fail_task 完成
         await asyncio.sleep(0.15)
