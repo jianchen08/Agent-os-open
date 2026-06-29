@@ -336,9 +336,9 @@ class SecurityCheckPlugin(IInputPlugin):
                 title=f"安全审批: {tool_name}",
                 description=args_preview,
                 options=[
-                    {"value": "approved_once", "label": "仅本次执行"},
-                    {"value": "approved_remember", "label": "本管道内同命令免批"},
-                    {"value": "denied", "label": "拒绝执行"},
+                    {"id": "approved_once", "label": "仅本次执行"},
+                    {"id": "approved_remember", "label": "本管道内同命令免批"},
+                    {"id": "denied", "label": "拒绝执行"},
                 ],
                 priority=Priority.HIGH,
             )
