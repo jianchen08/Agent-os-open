@@ -217,22 +217,56 @@ class _MergeOpsMixin:
         原逻辑无论合并方式（git_merge 或 copy_merge）都打 tag。
         copy_merge 时 commit graph 上没有真正的 merge 关系，tag 指向的提交
         在分支删除后变成孤儿提交。修复: 只在 git_merge 成功时打 tag。
+
+        BUG-FIX-fix_20260628_cleanup_silent_skip:
+        问题根因: 原逻辑用 `if project_root.exists():` 包裹整个清理块，
+          ws_meta.project_root 为空/路径不对时，worktree remove 与 branch -D
+          被静默跳过，无任何日志 —— worktree 目录与 task 分支就此泄漏堆积。
+        修复方案: project_root 缺失时显式 warning，并用 worktree 目录自身反查
+          仓库根（git -C <workspace> rev-parse --show-toplevel）兜底；
+          仍定位不到仓库才放弃，并记录错误。绝不静默放过。
         """
         project_root = Path(ws_meta.get("project_root", ""))
         branch = ws_meta.get("branch", "")
-        if project_root.exists():
-            try:
-                self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
-            except Exception as e:
-                logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
-                self._run_git("worktree", "prune", cwd=project_root)
-            if branch:
-                if tag_task_id and merge_method == "git_merge":
-                    tag = f"task-merge/{tag_task_id[:8]}"
-                    self._run_git("tag", tag, branch, cwd=project_root)
-                    logger.debug("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
-                self._run_git("worktree", "prune", cwd=project_root)
-                self._run_git("branch", "-D", branch, cwd=project_root)
+
+        # project_root 缺失时，从 worktree 目录自身反查仓库根兜底，避免静默跳过
+        if not project_root.exists():
+            logger.warning(
+                "[WorkspaceLifecycle] project_root 无效或缺失: %r，尝试从 worktree 反查仓库根: %s",
+                str(project_root), workspace,
+            )
+            ws_path = Path(workspace)
+            if ws_path.exists():
+                rc, out, err = self._run_git(
+                    "rev-parse", "--show-toplevel", cwd=str(ws_path),
+                )
+                if rc == 0 and out.strip():
+                    project_root = Path(out.strip())
+                    logger.debug("[WorkspaceLifecycle] 已反查仓库根: %s", project_root)
+                else:
+                    logger.warning(
+                        "[WorkspaceLifecycle] 反查仓库根失败(rc=%s): %s，放弃清理: %s",
+                        rc, err.strip(), workspace,
+                    )
+                    return
+            else:
+                logger.warning(
+                    "[WorkspaceLifecycle] worktree 目录不存在，跳过清理: %s", workspace,
+                )
+                return
+
+        try:
+            self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
+        except Exception as e:
+            logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
+            self._run_git("worktree", "prune", cwd=project_root)
+        if branch:
+            if tag_task_id and merge_method == "git_merge":
+                tag = f"task-merge/{tag_task_id[:8]}"
+                self._run_git("tag", tag, branch, cwd=project_root)
+                logger.debug("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
+            self._run_git("worktree", "prune", cwd=project_root)
+            self._run_git("branch", "-D", branch, cwd=project_root)
         ws_path = Path(workspace).resolve()
         if ws_path.exists() and "__wt_" in ws_path.name:
             try:
@@ -332,7 +366,7 @@ class _MergeOpsMixin:
                              f"{verify_err[:200] if verify_err else 'unknown'}"}
         rc_pre, pre_merge_head, _ = self._run_git(
             "rev-parse", "HEAD", cwd=proj_path)
-        rc, _, stderr = self._run_git(
+        rc, stdout, stderr = self._run_git(
             "merge", branch, cwd=proj_path)
         if rc == 0:
             result = {"success": True, "action": "merged",
@@ -341,9 +375,23 @@ class _MergeOpsMixin:
                 result["pre_merge_head"] = pre_merge_head.strip()
             return result
         self._run_git("merge", "--abort", cwd=proj_path)
+        # BUG-FIX-fix_20260629_merge_error_swallowed:
+        # git merge 失败时 stderr 常为空（fast-forward 失败、ref 不可解析、
+        # dirty index 等把提示打到 stdout 或无输出），原逻辑仅取 stderr 且为空
+        # 时直接写成 "unknown"，丢失 rc 与 stdout，导致合并失败根因无法定位。
+        # 修复: 保留 rc，stderr/stdout 双取，全空时显式标注，并单独记一条日志
+        # （isolation logger 现已挂入 per-pipeline 文件 handler）。
+        detail = (stderr or stdout or "").strip()
+        if not detail:
+            detail = "无输出(stderr/stdout 均为空，可能是 dirty index 或 ref 不可解析)"
+        logger.warning(
+            "[WorkspaceLifecycle] git merge 失败: branch=%s, rc=%s, "
+            "pre_merge_head=%s, detail=%s",
+            branch, rc, pre_merge_head.strip() or "<unknown>", detail[:300],
+        )
         return {"success": False,
-                "error": f"git merge 失败(branch={branch}): "
-                         f"{stderr[:300] if stderr else 'unknown'}"}
+                "error": f"git merge 失败(branch={branch}, rc={rc}): "
+                         f"{detail[:300]}"}
 
 
     # def _copy_merge(self, workspace: str, target_dir: str,
@@ -390,39 +438,55 @@ class _MergeOpsMixin:
                 return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
 
         if method == "git_merge" and branch:
-            # --diff-filter=AMRC 只校验应到达目标的文件（新增/修改/重命名新路径/复制），
-            # 排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
-            # 会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
-            rc, diff_out, _ = self._run_git(
-                "-c", "core.quotepath=false",
-                "diff", "--name-only", "--diff-filter=AMRC",
-                branch + "~1", branch, cwd=proj_path)
-            if rc == 0 and diff_out.strip():
-                branch_files = set(diff_out.strip().splitlines())
-                missing = []
-                for f in branch_files:
-                    f_stripped = f.strip().strip('"')
-                    target = proj_path / f_stripped
-                    if not target.exists():
-                        # 模糊匹配：在同名目录下搜索文件名包含目标名的文件
-                        # 处理 git 输出编码不一致导致路径不完全匹配的情况
-                        parent = target.parent
-                        target_name = target.name
-                        found = False
-                        if parent.exists() and target_name:
-                            try:
-                                for existing in parent.iterdir():
-                                    if existing.name == target_name:
-                                        found = True
-                                        break
-                            except OSError:
-                                pass
-                        if not found:
-                            missing.append(f_stripped)
-                    if len(missing) >= 10:
-                        break
-                if missing:
-                    return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
+            # BUG-FIX-fix_20260629_verify_diff_base:
+            # 旧逻辑用 `branch~1..branch` 作 diff 基准，只比分支【最后一次 commit】
+            # 的增量，与「这些文件是否真正到达合并目标 project_root」无关：分支有多个
+            # commit、含重命名/编码路径时，会把已正确合并的文件误判为「未到达目标」
+            # （实测报「6 文件未到目标」但实际已合并，最终靠手动 resource_merge 救回）。
+            # 修复: 改用 `pre_merge_head..HEAD`——合并目标相对合并前 HEAD 的实际增量，
+            # 精确反映本次合并把哪些文件带入了 project_root。pre_merge_head 由
+            # _safe_merge 在合并成功后写入 merge_result；缺失时基准不可靠，强行校验
+            # 只会重复旧误判，故记录 warning 后跳过文件级校验（commit graph 校验仍生效）。
+            pre_merge_head = merge_result.get("pre_merge_head", "")
+            if not pre_merge_head:
+                logger.warning(
+                    "[WorkspaceLifecycle] 合并验证缺少 pre_merge_head 基准，"
+                    "跳过文件级校验（仅 commit graph 校验）: branch=%s", branch,
+                )
+            else:
+                # --diff-filter=AMRC 只校验应到达目标的文件（新增/修改/重命名新路径/复制），
+                # 排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
+                # 会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
+                rc, diff_out, _ = self._run_git(
+                    "-c", "core.quotepath=false",
+                    "diff", "--name-only", "--diff-filter=AMRC",
+                    f"{pre_merge_head}..HEAD", cwd=proj_path)
+                if rc == 0 and diff_out.strip():
+                    branch_files = set(diff_out.strip().splitlines())
+                    missing = []
+                    for f in branch_files:
+                        f_stripped = f.strip().strip('"')
+                        target = proj_path / f_stripped
+                        if not target.exists():
+                            # 模糊匹配：在同名目录下搜索文件名包含目标名的文件
+                            # 处理 git 输出编码不一致导致路径不完全匹配的情况
+                            parent = target.parent
+                            target_name = target.name
+                            found = False
+                            if parent.exists() and target_name:
+                                try:
+                                    for existing in parent.iterdir():
+                                        if existing.name == target_name:
+                                            found = True
+                                            break
+                                except OSError:
+                                    pass
+                            if not found:
+                                missing.append(f_stripped)
+                        if len(missing) >= 10:
+                            break
+                    if missing:
+                        return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
 
         return True, "验证通过"
 

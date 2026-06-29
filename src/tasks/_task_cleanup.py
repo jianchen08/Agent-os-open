@@ -148,6 +148,15 @@ class _TaskCleanupMixin:
     ) -> None:
         """移除 git worktree 并清理对应分支。
 
+        BUG-FIX-fix_20260628_remove_worktree_branch_leak:
+        问题根因: 原实现只执行 `git worktree remove`，从不清除 worktree 关联的
+          task 分支。任务取消/失败走本路径清理时，worktree 目录删了但分支永久残留，
+          导致 task/* 分支随任务无限堆积（本仓库历史已堆积 20+ 个僵尸分支）。
+        修复方案: remove 前用 `git -C <workspace> rev-parse --abbrev-ref HEAD`
+          反查 worktree 当前分支名（detached 时为空则跳过），remove 成功后补
+          `git branch -D` 删除。反查在 remove 之前，因为删后工作区就没了。
+          不改调用链签名，改动收敛在函数内部。
+
         Args:
             workspace_path: worktree 的工作空间路径
             cleanup_results: 清理结果字典，用于记录错误信息
@@ -160,6 +169,19 @@ class _TaskCleanupMixin:
             else:
                 main_repo = workspace_path.parent
 
+            # remove 前反查分支名：detach 状态下返回 HEAD，此时无分支可删，跳过
+            branch_to_delete = ""
+            branch_probe = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(workspace_path),
+                capture_output=True,
+                text=True,
+            )
+            if branch_probe.returncode == 0:
+                branch_to_delete = branch_probe.stdout.strip()
+            if not branch_to_delete or branch_to_delete == "HEAD":
+                branch_to_delete = ""
+
             subprocess.run(
                 ["git", "worktree", "remove", str(workspace_path), "--force"],
                 cwd=str(main_repo),
@@ -169,6 +191,28 @@ class _TaskCleanupMixin:
             )
             logger.info("[TaskService] 已通过 git worktree remove 清理 worktree: %s", workspace_path)
             cleanup_results["workspace_cleaned"] = True
+
+            # 删除 worktree 关联分支，止住 task/* 僵尸分支堆积
+            if branch_to_delete:
+                branch_del = subprocess.run(
+                    ["git", "branch", "-D", branch_to_delete],
+                    cwd=str(main_repo),
+                    capture_output=True,
+                    text=True,
+                )
+                if branch_del.returncode == 0:
+                    logger.info(
+                        "[TaskService] 已删除 worktree 关联分支: %s (源: %s)",
+                        branch_to_delete, workspace_path,
+                    )
+                else:
+                    cleanup_results["errors"].append(
+                        f"删除分支失败: {branch_to_delete} — {branch_del.stderr.strip() or 'unknown'}"
+                    )
+                    logger.warning(
+                        "[TaskService] 删除分支失败: %s, stderr: %s",
+                        branch_to_delete, branch_del.stderr,
+                    )
         except subprocess.CalledProcessError as e:
             cleanup_results["errors"].append(
                 f"git worktree remove 失败: {e.stderr.strip() if e.stderr else str(e)}"

@@ -794,7 +794,12 @@ class TestRemoveWorktree:
         return _make_service()
 
     def test_remove_worktree_success(self, service, tmp_path):
-        """测试：正常读取 .git 文件并执行 git worktree remove。"""
+        """测试：正常读取 .git 文件并执行 git worktree remove + 删除关联分支。
+
+        BUG-FIX-fix_20260628_remove_worktree_branch_leak 配套:
+        _remove_worktree 现在会先反查 worktree 当前分支，remove 成功后删分支。
+        本测试验证完整三步调用：rev-parse 反查 → worktree remove → branch -D。
+        """
         # 模拟 worktree 目录结构
         ws_dir = tmp_path / "worktree-ws"
         ws_dir.mkdir()
@@ -811,15 +816,46 @@ class TestRemoveWorktree:
         cleanup_results: dict[str, Any] = {"errors": []}
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            # rev-parse 反查返回真实分支名 → 触发 branch -D
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="task/abc123\n", stderr=""),  # rev-parse
+                MagicMock(returncode=0, stdout="", stderr=""),               # worktree remove
+                MagicMock(returncode=0, stdout="", stderr=""),               # branch -D
+            ]
             service._remove_worktree(ws_dir, cleanup_results)
 
-        # 验证 git worktree remove 被调用
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args
-        assert "worktree" in call_args[0][0]
-        assert "remove" in call_args[0][0]
-        assert str(ws_dir) in call_args[0][0]
+        # 验证三次调用：反查分支 → worktree remove → 删分支
+        assert mock_run.call_count == 3
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert cmds[0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+        assert "worktree" in cmds[1] and "remove" in cmds[1] and str(ws_dir) in cmds[1]
+        assert cmds[2] == ["git", "branch", "-D", "task/abc123"]
+        assert cleanup_results["workspace_cleaned"] is True
+
+    def test_remove_worktree_detached_skips_branch_delete(self, service, tmp_path):
+        """测试：detach 状态(无分支名)时只 remove worktree，不调 branch -D。"""
+        ws_dir = tmp_path / "worktree-ws"
+        ws_dir.mkdir()
+        main_repo = tmp_path / "main-repo"
+        main_repo.mkdir()
+        git_worktrees_dir = main_repo / ".git" / "worktrees" / "wt-001"
+        git_worktrees_dir.mkdir(parents=True)
+        git_file = ws_dir / ".git"
+        git_file.write_text(f"gitdir: {git_worktrees_dir}", encoding="utf-8")
+
+        cleanup_results: dict[str, Any] = {"errors": []}
+
+        with patch("subprocess.run") as mock_run:
+            # rev-parse 返回 HEAD = detach 状态，无分支可删
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="HEAD\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),
+            ]
+            service._remove_worktree(ws_dir, cleanup_results)
+
+        assert mock_run.call_count == 2  # 反查 + remove，无 branch -D
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert "worktree" in cmds[1] and "remove" in cmds[1]
         assert cleanup_results["workspace_cleaned"] is True
 
     def test_remove_worktree_git_failure(self, service, tmp_path):
