@@ -132,13 +132,13 @@ providers:
     keys:
     - id: zhipu_coding_main
       api_key: ${ZHIPU_API_KEY}
-      max_concurrent: 7
-      rpm: 120
+      max_concurrent: 3
+      rpm: 10
       token_quota: 0
     - id: zhipu_coding_2
       api_key: ${ZHIPU_API_KEY_2}
       max_concurrent: 3
-      rpm: 150
+      rpm: 10
       token_quota: 0
   zhipu:
     type: zai
@@ -146,11 +146,13 @@ providers:
     keys:
     - id: zhipu_main
       api_key: ${ZHIPU_API_KEY}
-      rpm: 120
+      max_concurrent: 3
+      rpm: 10
       token_quota: 0
     - id: zhipu_2
       api_key: ${ZHIPU_API_KEY_2}
-      rpm: 20
+      max_concurrent: 3
+      rpm: 10
       token_quota: 0
   deepseek:
     type: deepseek
@@ -158,7 +160,8 @@ providers:
     keys:
     - id: deepseek_main
       api_key: ${DEEPSEEK_API_KEY}
-      rpm: 30
+      max_concurrent: 3
+      rpm: 10
       token_quota: 0
   minimax:
     type: minimax
@@ -166,8 +169,8 @@ providers:
     keys:
     - id: minimax_main
       api_key: ${MINIMAX_API_KEY}
-      max_concurrent: 5
-      rpm: 0
+      max_concurrent: 3
+      rpm: 10
       token_quota: 0
   yichengc:
     type: openai
@@ -176,7 +179,7 @@ providers:
     - id: yichengc_main
       api_key: ${YICHENGC_API_KEY}
       max_concurrent: 3
-      rpm: 0
+      rpm: 6
       token_quota: 0
 embeddings: {}
 concurrency:

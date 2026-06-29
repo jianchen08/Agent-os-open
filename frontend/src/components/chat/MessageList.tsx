@@ -24,8 +24,11 @@
 
 import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useRef } from 'react'
+import { logger as loggerService } from '@/utils/logger'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
+
+const logger = loggerService.module('MessageList')
 
 /**
  * 每个 Tab 的滚动位置缓存
@@ -87,11 +90,11 @@ export const MessageList = ({
   /** 上一帧消息数量，用于判断是新消息追加还是 prepend 历史 */
   const lastMessageCount = useRef(messages.length)
   /**
-   * "钉底 observer"：无缓存首次进入时挂上，持续把 scrollTop 钉在底部。
-   * 用途：抵消 initFromAPI 在首次加载后异步重建 DOM 把滚动位置冲回顶部的行为。
-   * 用户主动上滑（isNearBottom=false）后断开，把控制权交还用户。
+   * 内容容器 ref：包裹所有消息，尺寸随内容增高。
+   * ResizeObserver 监听它（而非滚动容器——滚动容器 flex-1 尺寸固定，监听不到
+   * 内容 scrollHeight 变化），在内容变化时重新钉底。详见 contentResize effect。
    */
-  const bottomObserverRef = useRef<ResizeObserver | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   /**
    * 最近一次真实 scrollTop（onScroll 实时记录）。
    * 切 Tab 卸载时 React 会先清空消息 DOM（scrollHeight/scrollTop 归 0），
@@ -150,13 +153,10 @@ export const MessageList = ({
       // 实时记录：卸载时 DOM 内容已被 React 清空（scrollHeight=0），读 DOM 拿到的是 0
       lastScrollTopRef.current = scrollTop
 
-      // 用户主动上滑（scrollTop 变小）→ 立即停止跟随，断开钉底 observer
+      // 用户主动上滑（scrollTop 变小）→ 立即停止跟随。
+      // contentResize observer 内部判断 isFollowingBottom，停止跟随后不再钉底。
       if (scrollTop < prevScrollTop - 1) {
         isFollowingBottom.current = false
-        if (bottomObserverRef.current) {
-          bottomObserverRef.current.disconnect()
-          bottomObserverRef.current = null
-        }
       }
       // 用户滚回底部附近 → 恢复跟随
       if (isNearBottom.current) {
@@ -176,14 +176,8 @@ export const MessageList = ({
    * 有缓存（之前在此 Tab 翻过历史）→ 恢复并停止跟随；
    * 无缓存 → 钉到底部（看最新消息）。
    *
-   * BUG-FIX-fix_20260625_switch_to_top:
-   * 问题根因: 首次钉底后，loadTabMessages→initFromAPI 仍会异步重建消息数组并重渲
-   *   DOM，浏览器把滚动位置重置到顶部，而首次 effect 因 initialScrollDone 已置 true
-   *   不再运行 → 视图停在顶部。之前 ResizeObserver 在 2 帧稳定后断开，错过了这次重建。
-   * 修复方案: 无缓存钉底时挂一个持续工作的 ResizeObserver（存入 bottomObserverRef），
-   *   内容高度一变（含 initFromAPI 重建）就重新钉底；用户主动上滑时 onScroll 检测到
-   *   isNearBottom=false 并断开 observer，把控制权交给用户。memo 已消除全量重渲染，
-   *   observer 不会再与重渲染冲突。
+   * 持续校正（initFromAPI 重建等内容高度变化时重新钉底）由下方 contentResize
+   * effect 负责，本 effect 只做一次性首次定位。
    */
   useEffect(() => {
     if (messages.length === 0 || initialScrollDone.current) return
@@ -203,29 +197,52 @@ export const MessageList = ({
       return
     }
 
-    // 无缓存钉底：持续 observer 校正，抵消 initFromAPI 重建 DOM 把滚动冲回顶部
+    // 无缓存钉底：首次定位到底部
     const el = scrollRef.current
     if (!el) return
-    requestAnimationFrame(pinToBottom)
-    // 清理上一次残留的 observer（切 Tab 重建时）
-    if (bottomObserverRef.current) {
-      bottomObserverRef.current.disconnect()
-    }
+    requestAnimationFrame(() => {
+      pinToBottom()
+      logger.debug(
+        '[首次钉底] tabId=%s msgs=%d scrollHeight=%d clientHeight=%d',
+        tabId ?? '?', messages.length, el.scrollHeight, el.clientHeight,
+      )
+    })
+  }, [messages.length, tabId, pinToBottom])
+
+  /**
+   * 持续跟随底部：内容高度变化时重新钉底。
+   *
+   * BUG-FIX-fix_20260629_enter_stuck_in_middle:
+   * 问题根因: 进入页面时 persist 快照先渲染并钉底（存的本来就是最新 50 条，数据没问题），
+   *   随后 initFromAPI 异步从后端拉权威消息重建数组——经 mergeConsecutiveAssistantMessages
+   *   （合并连续 assistant 气泡）、filterBlankMessages（删空白）后内容高度变化。但原"跟随
+   *   底部"逻辑只在「消息条数增加」时重新钉底（messages.length > lastMessageCount），
+   *   而 initFromAPI 的合并常使条数减少或不变 → 不触发钉底 → 视图停在快照渲染高度的
+   *   「中间」，而非最新消息底部。原有的 ResizeObserver 又 observe 滚动容器（flex-1
+   *   尺寸固定），监听不到内容 scrollHeight 变化，形同虚设。
+   * 修复方案: 新增独立 effect，用 ResizeObserver 监听【内容容器】（随消息内容增高），
+   *   只要仍在跟随底部（isFollowingBottom）内容一变就钉底。覆盖 initFromAPI 重建、
+   *   流式增长、markdown/代码块异步渲染等所有内容高度变化场景。用户上滑后
+   *   isFollowingBottom=false，observer 触发也不钉底，把控制权交给用户。
+   *
+   * 依赖含 messages.length：messages 从空→非空时 contentRef 才挂载，需要重跑本 effect
+   * 挂上 observer。之后 contentRef 持续存在，length 变化时 disconnect+observe 同一节点，
+   * 开销可忽略。
+   *
+   * 影响范围: 进入页面冷加载重建后的滚动定位（停在中间）
+   * 修复日期: 2026-06-29
+   */
+  useEffect(() => {
+    const content = contentRef.current
+    if (!content) return
     const ro = new ResizeObserver(() => {
-      // 仍在跟随底部才钉底（用户上滑后 isFollowingBottom=false，onScroll 已断开，这里兜底）
       if (isFollowingBottom.current) {
         pinToBottom()
       }
     })
-    bottomObserverRef.current = ro
-    ro.observe(el)
-    return () => {
-      ro.disconnect()
-      if (bottomObserverRef.current === ro) {
-        bottomObserverRef.current = null
-      }
-    }
-  }, [messages.length, tabId, pinToBottom])
+    ro.observe(content)
+    return () => ro.disconnect()
+  }, [pinToBottom, messages.length])
 
   /**
    * 底部追加新消息 → 跟随底部
@@ -310,35 +327,37 @@ export const MessageList = ({
       style={{ overflowAnchor: 'auto' }}
       data-testid="message-list"
     >
-      {/* 加载更多头部 */}
-      {hasMore && (
-        <div className="flex items-center justify-center py-4">
-          {isLoadingMore ? (
-            <div className="text-muted-foreground flex items-center gap-2">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-sm">加载历史消息...</span>
+      <div ref={contentRef}>
+        {/* 加载更多头部 */}
+        {hasMore && (
+          <div className="flex items-center justify-center py-4">
+            {isLoadingMore ? (
+              <div className="text-muted-foreground flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span className="text-sm">加载历史消息...</span>
+              </div>
+            ) : (
+              <div className="text-muted-foreground text-sm">向上滚动加载更多</div>
+            )}
+          </div>
+        )}
+
+        {/* 消息列表 */}
+        {messages.map((message, index) => renderItem(message, index))}
+
+        {/* 底部加载占位 */}
+        {isGenerating && messages[messages.length - 1]?.role === 'user' && (
+          <div className="flex items-start gap-3 px-4 py-3">
+            <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
+              <Loader2 className="text-primary h-4 w-4 animate-spin" />
             </div>
-          ) : (
-            <div className="text-muted-foreground text-sm">向上滚动加载更多</div>
-          )}
-        </div>
-      )}
-
-      {/* 消息列表 */}
-      {messages.map((message, index) => renderItem(message, index))}
-
-      {/* 底部加载占位 */}
-      {isGenerating && messages[messages.length - 1]?.role === 'user' && (
-        <div className="flex items-start gap-3 px-4 py-3">
-          <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
-            <Loader2 className="text-primary h-4 w-4 animate-spin" />
+            <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
+              <span className="text-muted-foreground text-sm">思考中...</span>
+            </div>
           </div>
-          <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
-            <span className="text-muted-foreground text-sm">思考中...</span>
-          </div>
-        </div>
-      )}
-      <div className="h-4" />
+        )}
+        <div className="h-4" />
+      </div>
     </div>
   )
 }

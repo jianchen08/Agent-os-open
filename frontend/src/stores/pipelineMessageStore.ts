@@ -595,19 +595,22 @@ function mergeApiWithExisting(
     ? sorted.filter((m) => !localOnlyFingerprints.has(makeMessageFingerprint(m)))
     : sorted
 
-  // BUG-FIX-fix_20260623_refresh_order:
-  // 问题根因: 原代码用 [...sorted, ...localOnly] 直接末尾拼接，未按 sequence
-  //   合并排序。刷新后 persist 恢复的 localOnly 消息（旧 sequence）会被错误地
-  //   排到所有 API 返回的新消息之后，导致页面刷新后消息顺序错乱、与后端数据不一致。
-  // 修复方案: 用 mergeSorted 按 sequence 升序归并 API 权威消息与本地独有消息，
-  //   与 appendMessages/prependMessages 保持一致。initFromAPI 后续的
-  //   mergePreservingStreaming/filterBlankMessages 不改变顺序，最终渲染顺序正确。
-  //   注意：mergeSorted 要求两个输入各自升序，localOnly 来自 existing（可能无序，
-  //   如 persist 恢复或并发写入），需先排序。
-  // 影响范围: 页面刷新、会话切换后消息顺序
-  // 修复日期: 2026-06-23
-  const sortedLocalOnly = [...localOnly].sort(compareMessages)
-  return { finalMessages: mergeSorted(dedupedSorted, sortedLocalOnly), preservedCount: localOnly.length }
+  // localOnly 必须【保持到达顺序追加到 API 权威消息末尾】，不能按 sequence 归并。
+  //
+  // BUG-FIX-fix_20260623_refresh_order 曾把末尾拼接改成 mergeSorted 按 sequence
+  //   归并，为防 persist 残留的旧消息污染顺序。但 fix_20260623_local_completed_msg_orphan
+  //   已让 persist 残留在 localOnly 过滤时被丢弃（return false），归并失去了防的对象。
+  //   归并反而引入新 bug：localOnly 只剩 streaming 占位 / optimistic grace 两类，
+  //   其 sequence 不可靠——流式占位 sequence 是前端自算 localMax+1（stream_start 不带
+  //   sequence），与后端权威 sequence（API 返回的 TrackPlugin 计数）错位时，归并会把
+  //   流式占位/最新消息插到错误位置，表现为「偶尔下一条输出跑到消息最上面」。
+  //
+  // BUG-FIX-fix_20260627_message_order_jump_top（撤销归并，恢复末尾追加）:
+  //   原则：API 权威消息 sequence 可靠（TrackPlugin ≥1 单调递增）→ 该按 sequence 排序
+  //        （dedupedSorted 已排好）；localOnly sequence 不可靠 → 该保持到达顺序。
+  //   localOnly 来自 existing.filter(...)（见上方 localOnly 过滤），天然保留 store 原有
+  //   相对顺序（=流式到达顺序），无需 sort。末尾追加符合「流式无脑渲染到最下面」语义。
+  return { finalMessages: [...dedupedSorted, ...localOnly], preservedCount: localOnly.length }
 }
 
 /**

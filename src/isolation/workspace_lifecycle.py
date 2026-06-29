@@ -187,6 +187,14 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         meta = {"mode": "shared", "path": parent_path,
                 "parent_workspace": workspace,
                 "project_root": parent_meta.get("project_root", "")}
+
+        # 子任务物理上就在父任务的隔离副本目录里跑，但 mode 必须保持 shared——
+        # merge/cleanup 只认 mode==worktree，子任务不能独立合并或清理父 worktree。
+        # 此处标记 inherited_isolated 让 security_check 据此放行（与父任务同等的隔离判定），
+        # 解耦「审批放行」与「merge/cleanup owner 责任」这两个正交语义。
+        if parent_meta.get("mode", "") in ("worktree", "project_root", "branch"):
+            meta["inherited_isolated"] = True
+
         self._ws_meta_store[task_id] = meta
         return meta
 

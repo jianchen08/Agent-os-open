@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,34 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from agents.types import AgentConfig
     from pipeline.sink import IOutputSink
+
+# ---------------------------------------------------------------------------
+# 延迟追踪 logger（独立文件 logs/ws_trace.log，单条消息全链路时序）
+# BUG-FIX-fix_20260628_ws_latency_trace:
+# 复现用户报告"交互通知/消息延迟 4-5s"。在 WS→引擎注入链路打时间戳，
+# 与客户端发送时刻对比定位延迟段。独立文件避免被主日志刷屏淹没。
+# ---------------------------------------------------------------------------
+_trace_logger = logging.getLogger("ws_latency_trace")
+if not _trace_logger.handlers:
+    import os as _os
+    from pathlib import Path as _Path
+    _trace_fh = logging.FileHandler(
+        _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "logs", "ws_trace.log"),
+        encoding="utf-8",
+    )
+    _trace_fh.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d | %(message)s", "%H:%M:%S"))
+    _trace_logger.addHandler(_trace_fh)
+    _trace_logger.setLevel(logging.INFO)
+    _trace_logger.propagate = False
+
+
+def _t() -> float:
+    """当前 epoch 秒（毫秒精度），用于算各段耗时。"""
+    return _time.time()
+
+
+def _trace(stage: str, pipeline_id: str, extra: str = "") -> None:
+    _trace_logger.info("stage=%s pid=%s %s", stage, pipeline_id[:12], extra)
 
 from pipeline.message_types import (
     MessageType,
@@ -137,7 +166,11 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
     client_message_id = msg.client_message_id
     attachments = msg.attachments
 
+    # T2: 消息进入路由（WS 收到后、引擎注入前）
+    _trace("T2_inject_request_enter", pipeline_id, f"state_pre=?" )
+
     if not pipeline_id:
+        _trace("T2_reject_no_pid", pipeline_id or "(empty)")
         return InjectResult(success=False, error="pipeline_id 不能为空", method="failed")
 
     # 仅拦截非空但纯空白的消息
@@ -299,9 +332,12 @@ async def _inject_to_engine(
             await _auto_complete_interaction(pipeline_id)
 
         logger.info("[MessageBus] 消息已注入 | pipeline=%s method=%s", pipeline_id[:12], method)
+        # T3: 引擎注入完成（消息已进引擎队列，引擎将开始处理）
+        _trace("T3_inject_done", pipeline_id, f"method={method} state={state}")
         return InjectResult(success=True, method=method, pipeline_id=pipeline_id, bridge=None)
     except Exception as exc:
         logger.warning("[MessageBus] 消息注入失败: %s", exc)
+        _trace("T3_inject_failed", pipeline_id, f"err={exc}")
         return InjectResult(success=False, error=str(exc), method="failed", pipeline_id=pipeline_id)
 
 

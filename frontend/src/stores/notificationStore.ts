@@ -36,7 +36,7 @@ interface NotificationState {
   // ---- Actions ----
 
   /** 添加通知 */
-  addNotification: (data: Omit<NotificationItem, 'id' | 'isRead' | 'timestamp'>) => string
+  addNotification: (data: Omit<NotificationItem, 'id' | 'isRead' | 'timestamp'> & { id?: string }) => string
   /** 批量添加通知 */
   addNotifications: (items: Array<Omit<NotificationItem, 'id' | 'isRead' | 'timestamp'>>) => string[]
   /** 移除通知 */

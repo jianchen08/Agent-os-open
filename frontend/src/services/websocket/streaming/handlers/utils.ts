@@ -4,10 +4,43 @@
  * 统一抽取的消息 ID 提取、流式占位符创建、Streaming 状态管理，
  * 消除各 handler 中的重复代码，确保 pipeline_id 唯一路由原则。
  */
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
+
+/**
+ * 判断 pipeline 是否"被关注"——前端是否需要处理它的流式事件。
+ *
+ * BUG-FIX-fix_20260628_inactive_pipeline_amplification:
+ * 问题根因: 全局单连接模式下，后端并发任务（多个 L3 子任务同时跑）时，所有 pipeline
+ *   的流式事件（chunk/thinking/start/end）都涌进同一个 WS 连接。前端 handler 无条件
+ *   为每个事件创建占位符 + 写 store，即使该 pipeline 用户根本没开标签页。
+ *   e2e 实测：60 秒内 1000+ 个别人 pipeline 的事件为幽灵管道创建 store 条目，
+ *   触发大量无意义的 zustand set / persist / 重渲染，挤占主线程，用户自己的消息
+ *   延迟 4-5 秒甚至更久才响应。
+ * 修复方案: 流式事件入口（chunk/start 等）先判断 pipeline 是否被关注，不被关注的
+ *   直接丢弃，不写 store、不进 RAF 缓冲。关注判据（任一满足）：
+ *   1. 是当前 activePipelineId（用户正在看的管道）
+ *   2. 已在 pipelineStore.pipelines 注册（用户曾交互，或会话切换时预注册）
+ *   3. 在 agentTabStore.tabs 中有对应标签页（用户打开过的子管道）
+ *   终止事件（stream_end/error/state_change）不过滤——它们是轻量的，且必须清理
+ *   可能残留的 streamingState，过滤会导致状态泄漏。
+ * 影响范围: 多 pipeline 并发时的前端主线程占用与渲染压力
+ * 修复日期: 2026-06-28
+ */
+export function isPipelineRelevant(pipelineId: string): boolean {
+  if (!pipelineId) return false
+  const state = pipelineStore.getState()
+  // 判据 1: 当前活跃管道
+  if (state.activePipelineId === pipelineId) return true
+  // 判据 2: 已注册的管道（用户交互过/会话切换预注册过）
+  if (state.pipelines[pipelineId]) return true
+  // 判据 3: 用户打开的标签页对应的管道
+  const tabs = useAgentTabStore.getState().tabs
+  return tabs.some((t) => t.pipelineRunId === pipelineId)
+}
 
 /**
  * 合并本地流式累积的 parts 与后端 stream_end/new_message 下发的 serverParts。

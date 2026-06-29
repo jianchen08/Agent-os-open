@@ -14,7 +14,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
+import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId, isPipelineRelevant, mergeStreamingParts, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -26,6 +26,8 @@ const _chunkBuffer = new Map<string, {
   pipelineId: string
   messageId: string
   firstSequence?: number
+  /** 首个 chunk 接收时刻（Date.now），用于算 flush→store 渲染延迟（④段） */
+  _recvTs?: number
 }>()
 let _flushRafId: number | null = null
 
@@ -39,6 +41,10 @@ function _flushChunks(): void {
 
   const entries = [..._chunkBuffer.values()]
   _chunkBuffer.clear()
+  // ④段追踪：记录本帧 flush 的 chunk 数量与时刻（store 落盘 ≈ 渲染触发）
+  // 与后端 __send_ts / 前端 RECV 对比，定位"收到→渲染"的延迟
+  let flushTraceCount = 0
+  const flushTraceStart = (entries[0] as any)?._recvTs as number | undefined
 
   for (const entry of entries) {
     const combinedContent = entry.chunks.join('')
@@ -58,6 +64,17 @@ function _flushChunks(): void {
     }
     if (partIndex >= 0) {
       pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
+      flushTraceCount++
+    }
+  }
+
+  // ④段日志：本帧 flush 写入 store 的 chunk 数 + 距最早接收的延迟
+  if (flushTraceCount > 0 && flushTraceStart) {
+    const renderDelay = Date.now() - flushTraceStart
+    if (renderDelay > 500) {
+      _debugLogger.warn(
+        `[WS_TRACE] 💾 FLUSH→STORE chunks=${flushTraceCount} render_delay=${renderDelay}ms (⚠️渲染延迟)`,
+      )
     }
   }
 }
@@ -96,20 +113,17 @@ export function handleStreamStart(eventData: any) {
     )
     return
   }
+  // 过滤非活跃 pipeline：用户没开标签页的管道不创建占位符/不写 store
+  // （见 isPipelineRelevant 的 BUG-FIX 注释）
+  if (!isPipelineRelevant(pipelineId)) {
+    return
+  }
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
   const threadId = extractThreadId(eventData)
 
   const pipelineState = pipelineStore.getState()
-  if (!pipelineState.pipelines[pipelineId]) {
-    const sessionId = threadId || useSessionStore.getState().activeSessionId || ''
-    pipelineState.registerPipeline({ pipelineId, sessionId })
-    _debugLogger.info(
-      `[STREAM_START] auto-registered unknown pipeline: pipelineId=%s sessionId=%s`,
-      pipelineId.slice(0, 12), sessionId?.slice(0, 12) || 'null',
-    )
-  }
 
   const currentActivePipelineId = pipelineStore.getState().activePipelineId
   _debugLogger.info(
@@ -144,6 +158,11 @@ export function handleStreamChunk(eventData: any) {
     )
     return
   }
+  // 过滤非活跃 pipeline：别人的 chunk 不缓冲、不写 store
+  // （见 isPipelineRelevant 的 BUG-FIX 注释）
+  if (!isPipelineRelevant(pipelineId)) {
+    return
+  }
   const messageId = extractMessageId(eventData)
   const content = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId) return
@@ -166,7 +185,7 @@ export function handleStreamChunk(eventData: any) {
   if (existing) {
     existing.chunks.push(content)
   } else {
-    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId, firstSequence: sequence })
+    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId, firstSequence: sequence, _recvTs: Date.now() })
   }
   _scheduleFlush()
 }

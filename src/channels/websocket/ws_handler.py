@@ -13,10 +13,68 @@ import contextlib
 import json
 import logging
 import os
+import time
 
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
+
+
+def _trace_id(event_data: dict) -> str:
+    """从事件提取用于关联前后端日志的追踪标识（message_id / request_id）。"""
+    data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
+    return (
+        data.get("message_id")
+        or data.get("request_id")
+        or event_data.get("message_id")
+        or "?"
+    )
+
+
+def _trace_type(event_data: dict) -> str:
+    """事件类型短名，用于日志。"""
+    return event_data.get("type", "?")
+
+
+def _ws_trace_enabled() -> bool:
+    """是否开启逐次发送的 WS 探针日志。
+
+    默认关闭：流式输出（thinking_chunk / streaming_chunk）逐 token 触发发送，
+    每次发送会打一对 INFO（SEND_START / SEND_DONE），常开会把控制台刷爆。
+    仅在排查"流式静默期断连 / send_text 耗时"等问题时通过环境变量
+    ``WS_TRACE_ENABLED=1`` 临时打开。
+    """
+    return os.environ.get("WS_TRACE_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+
+
+# 模块级常量：进程启动时读一次，运行时不在热路径上反复解析环境变量。
+_WS_TRACE_ENABLED = _ws_trace_enabled()
+
+
+def _log_send_start(event_data: dict, target: str) -> float:
+    """在 ws.send_text 调用前打日志，返回起始时刻（用于算 send_text 耗时）。
+
+    未开启 WS 探针时返回 0.0 并跳过计时，避免在流式热路径上做无用功。
+    """
+    if not _WS_TRACE_ENABLED:
+        return 0.0
+    t0 = time.time()
+    logger.info(
+        "[WS_TRACE] >>> SEND_START type=%s id=%s target=%s t=%.3f",
+        _trace_type(event_data), _trace_id(event_data)[:12], target, t0,
+    )
+    return t0
+
+
+def _log_send_done(event_data: dict, target: str, t0: float, ok: bool) -> None:
+    """在 ws.send_text 返回后打日志，含 send_text 自身耗时。"""
+    if not _WS_TRACE_ENABLED:
+        return
+    elapsed_ms = (time.time() - t0) * 1000 if t0 else 0.0
+    logger.info(
+        "[WS_TRACE] <<< SEND_DONE  type=%s id=%s target=%s ok=%s send_cost=%.1fms",
+        _trace_type(event_data), _trace_id(event_data)[:12], target, ok, elapsed_ms,
+    )
 
 
 def _resolve_send_timeout() -> float:
@@ -142,25 +200,32 @@ class WebSocketInteractionNotifier:
             },
         }
 
+        payload_obj["__send_ts"] = time.time() * 1000
         payload = json.dumps(payload_obj, ensure_ascii=False)
         sent = False
         if conns:
             for ws in conns:
+                t0 = _log_send_start(payload_obj, f"notif-active:{thread_id[:12]}")
                 try:
                     await ws.send_text(payload)
                     sent = True
+                    _log_send_done(payload_obj, f"notif-active:{thread_id[:12]}", t0, True)
                 except Exception:
+                    _log_send_done(payload_obj, f"notif-active:{thread_id[:12]}", t0, False)
                     logger.debug(
                         "[WSNotifier] 发送交互请求失败，连接可能已断开"
                     )
 
         if not sent:
             for user_id, ws in list(self._global_connections.items()):
+                t0 = _log_send_start(payload_obj, f"notif-global:{user_id[:12]}")
                 try:
                     await ws.send_text(json.dumps(payload_obj, ensure_ascii=False))
                     sent = True
+                    _log_send_done(payload_obj, f"notif-global:{user_id[:12]}", t0, True)
                     break
                 except Exception:
+                    _log_send_done(payload_obj, f"notif-global:{user_id[:12]}", t0, False)
                     self._global_connections.pop(user_id, None)
 
         if sent:
@@ -423,15 +488,19 @@ class WebSocketInteractionNotifier:
         """
         conns = self._active_connections.get(thread_id, [])
         if conns:
+            event_data["__send_ts"] = time.time() * 1000
             payload = json.dumps(event_data, ensure_ascii=False)
             stale: list = []
             sent_any = False
             for ws in conns:
+                t0 = _log_send_start(event_data, f"active:{thread_id[:12]}")
                 try:
                     await asyncio.wait_for(ws.send_text(payload), timeout=_SEND_TIMEOUT_SECONDS)
                     sent_any = True
+                    _log_send_done(event_data, f"active:{thread_id[:12]}", t0, True)
                 except (asyncio.TimeoutError, Exception):
                     stale.append(ws)
+                    _log_send_done(event_data, f"active:{thread_id[:12]}", t0, False)
             if stale:
                 self._active_connections[thread_id] = [
                     c for c in conns if c not in stale
@@ -442,14 +511,18 @@ class WebSocketInteractionNotifier:
                 return True
 
         # 回退全局连接
+        event_data["__send_ts"] = time.time() * 1000
         for user_id, ws in list(self._global_connections.items()):
+            t0 = _log_send_start(event_data, f"global:{user_id[:12]}")
             try:
                 await asyncio.wait_for(
                     ws.send_text(json.dumps(event_data, ensure_ascii=False)),
                     timeout=_SEND_TIMEOUT_SECONDS,
                 )
+                _log_send_done(event_data, f"global:{user_id[:12]}", t0, True)
                 return True
             except (asyncio.TimeoutError, Exception):
+                _log_send_done(event_data, f"global:{user_id[:12]}", t0, False)
                 self._global_connections.pop(user_id, None)
 
         return False

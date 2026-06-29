@@ -300,6 +300,18 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 # heartbeat 高频轮询，不记日志
                 if msg_type != "heartbeat":
                     logger.info("[GlobalWS] 收到消息: type=%s thread_id=%s user=%s", msg_type, msg_data.get("thread_id", "")[:12], user_id[:12])
+                # T1: WS 收到用户输入的精确时刻（延迟追踪链路起点）
+                # 与 logs/ws_trace.log 的 T2/T3 对比，定位 WS 接收→引擎注入的延迟
+                # 注意：前端消息结构是 {type, data:{pipeline_id, thread_id}}，字段在 data 子层
+                if msg_type == "user_input":
+                    try:
+                        from pipeline.message_bus import _trace
+                        _inner = msg_data.get("data", {}) if isinstance(msg_data.get("data"), dict) else {}
+                        _trace("T1_ws_received",
+                               _inner.get("pipeline_id") or msg_data.get("pipeline_id") or "?",
+                               f"thread_id={(_inner.get('thread_id') or msg_data.get('thread_id') or '')[:12]}")
+                    except Exception:
+                        pass
 
                 if msg_type == "heartbeat":
                     await websocket.send_text(json.dumps({
@@ -389,9 +401,11 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                         if _existing_entry and not _existing_entry.thread_id:
                             _existing_entry.thread_id = thread_id
 
-                    # 注册表没条目时不拦阻——转发给 send_pipeline_message，
-                    # 由其内部 revive 逻辑重建（任务系统从 task 数据拿 agent，
-                    # 会话系统从 api_store 拿 agent）。路口只转发不注册。
+                    # 注册表没条目时路口不拦阻、只转发给 send_pipeline_message。
+                    # send 按 I4 原则处理：entry 存在则转发，不存在则拒绝
+                    # （"管道未注册，请联系持有者先 register"）。持有者（task_executor
+                    # register_pipeline / 会话注册）负责首次注册与重启恢复，
+                    # send 不自动 revive（pipeline_reviver 已在本分支删除）。
 
                     # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
                     # 管道已存在时（跳过了 register_pipeline），确保 thread_id 被更新。
@@ -420,12 +434,22 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                             _ws_task_id = _entry_for_task.tags.get("task_id", "") or ""
 
                     # ── 统一入口转发（只转发，不传 agent_config）──
+                    try:
+                        from pipeline.message_bus import _trace as _mb_trace
+                        _mb_trace("T1.5_pre_send", _target_pid, f"task_id={_ws_task_id[:8] if _ws_task_id else '(empty)'}")
+                    except Exception:
+                        pass
                     _result = await send_pipeline_message(
                         _pipeline_msg,
                         output_sink=_sink,
                         conversation_history=_history if _history else None,
                         task_id=_ws_task_id,
                     )
+                    try:
+                        from pipeline.message_bus import _trace as _mb_trace2
+                        _mb_trace2("T2.5_post_send", _target_pid, f"success={_result.success} method={_result.method} err={_result.error or ''}"[:80])
+                    except Exception:
+                        pass
 
                     if _result.success:
                         continue
@@ -528,35 +552,16 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     except Exception as _eng_err:
                         logger.warning("[GlobalWS] 投递停止信号出错: %s", _eng_err)
 
-                    # 3. 尝试取消 TaskWorker 中与该 thread_id 关联的后台任务
-                    try:
-                        tw = getattr(stream_handler, "_task_worker", None)
-                        if tw and hasattr(tw, "_task_id_to_bg_task") and hasattr(tw, "_task_service"):
-                            _task_svc = getattr(tw, "_task_service", None)
-                            if _task_svc:
-                                # 遍历活跃任务，查找与 thread_id 关联的 task
-                                for _active_tid in list(getattr(tw, "_active_tasks", set())):
-                                    try:
-                                        _t = _task_svc.get_task(_active_tid)
-                                        if _t:
-                                            # 通过 task 的 pipeline_run_id 或 parent_pipeline_id
-                                            # 关联到 thread_id 对应的管道
-                                            _t_pipeline = getattr(_t, "pipeline_run_id", "") or ""
-                                            _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
-                                            if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
-                                                # BUG-FIX-fix_20260522_stop_generation_pipeline:
-                                                #   在取消管道前先调用 fail_task 标记任务失败，
-                                                #   确保任务状态被正确更新，而非仅中断执行。
-                                                try:
-                                                    await _task_svc.fail_task(_active_tid, reason=f"用户取消: {_stop_msg.metadata.get('reason', 'stop_generation')}")
-                                                except Exception as _ft_err:
-                                                    logger.warning("[GlobalWS] fail_task 失败(仍将继续取消): task=%s, err=%s", _active_tid[:12], _ft_err)
-                                                tw.cancel_pipeline(_active_tid)
-                                                logger.info("[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12])
-                                    except Exception:
-                                        pass
-                    except Exception as _tw_err:
-                        logger.warning("[GlobalWS] 取消 TaskWorker 任务时出错: %s", _tw_err)
+                    # BUG-FIX-fix_20260629_stop_generation_unregisters_pipeline:
+                    # 删除原"fail_task + cancel_pipeline"块。删 revive 前，main 的
+                    # send 遇未注册管道会自动 revive 重建，所以这里删 entry 后续发消息
+                    # 仍能恢复。本分支删 revive 后这条路径变成致命：cancel_pipeline →
+                    # message_bus.stop() 删掉 entry，用户在同一标签页再发消息时 send
+                    # 命中 I4（未注册直接拒绝）→ 报"未注册，无法发送消息"。
+                    # 停止生成的正确语义由上面的 CONTROL 信号路径独占完成：
+                    # deliver_signal → 中断当前轮 → 引擎进 idle（entry 保留，下次 send
+                    # 走 _start_idle_engine 重启）。cancel_pipeline / fail_task 是
+                    # "取消任务"的持有者级终结，不属于"停止生成"。
 
                     await websocket.send_text(json.dumps({
                         "type": "state_change",

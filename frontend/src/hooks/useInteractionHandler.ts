@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { API_ENDPOINTS } from '@/constants/api'
 import { ROUTES } from '@/constants/routes'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
@@ -24,6 +25,32 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 
 /** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
 let _isSubscribed = false
+
+/**
+ * 模块级标志位：防止 StrictMode 双渲染 / 多组件挂载时重复触发刷新后的待审批恢复。
+ * 与 _isSubscribed 同模式，仅在本进程页面生命周期内有效。
+ */
+let _isRestored = false
+
+/**
+ * 把后端 /interaction/pending 返回的 record（字段在 message_data 内层）
+ * 包装成 WS interaction_request 事件的 payload 形状（字段拍平进 data），
+ * 从而直接复用 parseInteractionEvent，零重复解析逻辑。
+ *
+ * record: {id, session_id, message_data:{interaction_mode, title, ...}}
+ * → {type:'interaction_request', data:{request_id, interaction_mode, ..., session_id}}
+ */
+function recordToEventPayload(record: Record<string, unknown>): Record<string, unknown> {
+  const msgData = (record.message_data as Record<string, unknown>) || {}
+  return {
+    type: 'interaction_request',
+    data: {
+      ...msgData,
+      request_id: record.id,
+      session_id: record.session_id,
+    },
+  }
+}
 
 /**
  * 从 WebSocket interaction_request 事件数据解析为 PendingInteraction
@@ -313,6 +340,57 @@ export function useInteractionHandler(sessionId: string | undefined) {
       _isSubscribed = false
     }
   }, [addInteraction, dismissInteraction])
+
+  // 刷新后恢复：页面刷新会丢失内存中的待审批卡片与通知，但后端 /interaction/pending
+  // 仍保留 PENDING 请求（进程内内存）。挂载时拉取一次，按 mode 分流回 store。
+  // 与 WS 实时推送的分流逻辑保持一致；addInteraction/addNotification 均按 id 去重，
+  // 因此恢复与 WS 推送并发安全。
+  useEffect(() => {
+    if (_isRestored) return
+    _isRestored = true
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        const resp = await apiClient.get(API_ENDPOINTS.INTERACTION.PENDING)
+        if (cancelled) return
+        const items = (resp.data?.items as Record<string, unknown>[]) || []
+        if (items.length === 0) return
+
+        for (const record of items) {
+          const parsed = await parseInteractionEvent(recordToEventPayload(record))
+          if (!parsed) continue
+          // 已存在则跳过（WS 推送可能已先到）
+          const exists = useInteractionStore
+            .getState()
+            .pendingInteractions.some((i) => i.requestId === parsed.requestId)
+          if (exists) continue
+
+          if (parsed.mode === 'notification') {
+            // 恢复的通知用稳定 id（派生自 request_id）避免重复；不设 autoDismiss，
+            // 不让恢复的历史通知被倒计时干掉；不播放声音（刷新恢复不刷屏）。
+            useNotificationStore.getState().addNotification({
+              id: `restored-${parsed.requestId}`,
+              title: parsed.title || '人类交互请求',
+              message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
+              priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
+              category: 'alert',
+              isBlocking: false,
+            })
+          } else {
+            addInteraction(parsed)
+          }
+        }
+      } catch (err) {
+        // 恢复失败不阻塞页面，仅记录；WS 实时推送不受影响
+        console.warn('[InteractionHandler] 恢复待审批请求失败:', err)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [addInteraction])
 
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {

@@ -44,7 +44,14 @@ def _make_storage_with_data():
         "total_tokens": 1500,
         "cached_tokens": 100,
     }
-    storage.list_all_summaries.return_value = [MagicMock(), MagicMock(), MagicMock()]
+    # 三条管道，各自跑了 5/3/2 轮迭代（每轮迭代 = 一次 LLM 调用），
+    # 故真实 LLM 请求数 = 5+3+2 = 10，而非管道运行数 3。
+    def _summary(iters):
+        s = MagicMock()
+        s.total_iterations = iters
+        return s
+
+    storage.list_all_summaries.return_value = [_summary(5), _summary(3), _summary(2)]
     return storage
 
 
@@ -69,7 +76,9 @@ class TestGetTokenUsageFromStorage:
         assert result["total_tokens"] == 1500, f"expected 1500, got {result['total_tokens']}"
         assert result["prompt_tokens"] == 1000, f"expected 1000, got {result['prompt_tokens']}"
         assert result["completion_tokens"] == 500, f"expected 500, got {result['completion_tokens']}"
-        assert result["request_count"] >= 1, f"expected >= 1, got {result['request_count']}"
+        # request_count 是各管道迭代次数之和（每轮迭代 = 一次 LLM 调用），
+        # 而非管道运行数。三条管道迭代 5+3+2 = 10 次请求。
+        assert result["request_count"] == 10, f"expected 10, got {result['request_count']}"
 
     def test_returns_zero_when_storage_empty(self, monkeypatch):
         """测试: 当 ExecutionRecordStorage 无数据时，返回零值。"""

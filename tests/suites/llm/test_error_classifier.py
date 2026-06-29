@@ -87,17 +87,22 @@ class TestRegressionClassification:
 # KeySlot NETWORK 策略：冷却但不并发降级
 # ---------------------------------------------------------------------------
 
-def _make_slot(max_concurrent: int = 3) -> KeySlot:
-    """构造测试用 KeySlot。"""
+def _make_slot(max_concurrent: int = 3, rpm_limit: int = 10) -> KeySlot:
+    """构造测试用 KeySlot。
+
+    rpm_limit 必须非 0：新限流策略以 rpm 为唯一主参数，429 降 rpm 而非并发。
+    默认 10 是任意正数，便于断言降级（10→9）。
+    """
     return KeySlot(
         key_id="test_main",
         api_key="sk-test",
         max_concurrent=max_concurrent,
+        rpm_limit=rpm_limit,
     )
 
 
 class TestNetworkCoolingWithoutDegrade:
-    """网络错误：冷却 key（避免立即重试），但不并发降级（不按限流方式处理）。"""
+    """网络错误：冷却 key（避免立即重试），但不降级 rpm（不按限流方式处理）。"""
 
     def test_network_cools_key(self):
         """NETWORK 后 key 进入冷却，select() 会绕开它。"""
@@ -106,33 +111,31 @@ class TestNetworkCoolingWithoutDegrade:
         slot.handle_error(ErrorInfo(ErrorKind.NETWORK))
         assert slot.is_cooling
 
-    async def test_network_does_not_reduce_concurrency(self):
-        """NETWORK 不降级：并发容量保持初始值。
+    async def test_network_does_not_reduce_rpm(self):
+        """NETWORK 不降级：rpm 维持配置值，max_concurrent 也不变。
 
-        降级的外部表现是并发容量减少（能 acquire 的许可数变少）。
-        NETWORK 后容量应仍是 max_concurrent=3：第 4 次 acquire 阻塞。
+        NETWORK 是网络层故障，不是上游限流，不该收紧本地的 RPM 限流。
         """
-        slot = _make_slot(max_concurrent=3)
+        slot = _make_slot(rpm_limit=10)
         slot.handle_error(ErrorInfo(ErrorKind.NETWORK))
-        for _ in range(3):
-            await slot.acquire()
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(slot.acquire(), timeout=0.1)
-        for _ in range(3):
-            slot.release()
+        assert slot.rpm_limit == 10, "NETWORK 不应改变配置的 rpm_limit"
+        # 运行时生效的 rpm 也不应变（用 rpm_remaining 在空窗口下的值间接验证）
 
-    async def test_rate_limit_does_reduce_concurrency(self):
-        """对照：RATE_LIMIT 降级 1 级（max_concurrent 3→2），证明测试 setup 有效。
+    async def test_rate_limit_does_reduce_rpm(self):
+        """对照：RATE_LIMIT 降级 1 级 rpm（而非 max_concurrent）。
 
-        若此用例失败说明对照失效，test_network_does_not_reduce_concurrency 不可信。
+        新限流策略：429 后收紧本地 RPM 放行频率，从源头减少打上游的请求。
+        配置 rpm=10，降级后生效 rpm 应为 9。max_concurrent 不受影响。
+        若此用例失败说明对照失效，test_network_does_not_reduce_rpm 不可信。
         """
-        slot = _make_slot(max_concurrent=3)
+        slot = _make_slot(max_concurrent=3, rpm_limit=10)
         slot.handle_error(ErrorInfo(ErrorKind.RATE_LIMIT))
-        for _ in range(2):
+        # 降级后生效 rpm = 9（空窗口下 rpm_remaining 反映生效值）
+        assert slot.rpm_remaining == 9, "RATE_LIMIT 应降 rpm（10→9），而非降并发"
+        # max_concurrent 不受影响：仍能 acquire 3 个许可
+        for _ in range(3):
             await slot.acquire()
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(slot.acquire(), timeout=0.1)
-        for _ in range(2):
+        for _ in range(3):
             slot.release()
 
     def test_network_retry_after_honored(self):

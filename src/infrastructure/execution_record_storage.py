@@ -964,20 +964,20 @@ class ExecutionRecordStorage:
             logger.warning("分片文件损坏，跳过加载: %s - %s", file_path.name, exc)
             return []
 
-    # 尾部读取窗口大小：64KB 足够覆盖 20-50 条 record（按平均 2KB/record 估算）
-    _TAIL_READ_BYTES = 64 * 1024
-    # 扩大窗口上限：128KB，足够覆盖单条超大 record
-    _TAIL_READ_BYTES_MAX = 128 * 1024
+    # 尾部读取窗口大小：128KB 起始；不够时每次再补 128KB（补充循环），
+    # 直到凑够需要的条数或覆盖整个文件（按平均 2KB/record 估算，128KB 约 60 条）。
+    _TAIL_READ_BYTES = 128 * 1024
 
     def _extract_tail_blocks(self, yaml_file: Path, n: int) -> list[str]:
         """从单个 YAML 分片文件尾部提取最后 n 个 record 的文本块（不解 YAML）。
 
         FEATURE-tail_read:
         算法说明:
-          1. 读取文件末尾固定字节窗口（64KB），反序列化量从全文件降到 KB 级。
+          1. 读取文件末尾字节窗口（起始 128KB），反序列化量从全文件降到 KB 级。
           2. 在窗口内按 "\n- " 切分序列项起点（continuation 行是缩进，不含 "- "），
              取最后 n 个起点作为 record 块边界。
-          3. 若窗口内 - 起点少于 n 个（边界不够），扩大窗口重试一次。
+          3. 若窗口内 - 起点少于 n 个（边界不够），每次再补 128KB 继续向前扩展，
+             直到凑够 n 个起点或已覆盖整个文件。
 
         YAML 序列项结构:
           records:
@@ -1006,16 +1006,18 @@ class ExecutionRecordStorage:
             return []
 
         pattern = "\n- "
-        # 两次尝试的窗口都必须用 min(MAX, file_size) 限制，
-        # 避免小文件（<窗口大小）下第二次 seek 越过文件起始位置触发 OSError。
-        first_window = min(self._TAIL_READ_BYTES, file_size)
-        second_window = min(self._TAIL_READ_BYTES_MAX, file_size)
+        # 窗口每次必须用 min(step, file_size) 限制，
+        # 避免小文件（<窗口大小）下 seek 越过文件起始位置触发 OSError。
+        step = self._TAIL_READ_BYTES
+        window = min(step, file_size)
         blocks: list[str] = []
 
-        for attempt_size in (first_window, second_window):
+        # 补充循环：起始窗口 128KB，不够就每次再向前扩 128KB，
+        # 直到凑够 n 个 record 起点、或已覆盖整个文件为止。
+        while True:
             try:
                 with open(yaml_file, "rb") as f:
-                    f.seek(file_size - attempt_size)
+                    f.seek(file_size - window)
                     tail_bytes = f.read()
             except OSError:
                 return blocks
@@ -1024,12 +1026,10 @@ class ExecutionRecordStorage:
             indices = [i for i in range(len(tail_text)) if tail_text.startswith(pattern, i)]
             # 满足任一条件则返回已找到的块：
             # 1) 已找到足够多的 record 起点；
-            # 2) 本次窗口已覆盖整个文件（读不到更多）；
-            # 3) 已用最大窗口重试。
+            # 2) 本次窗口已覆盖整个文件（读不到更多）。
             enough = len(indices) >= n
-            full_file_covered = attempt_size >= file_size
-            max_window_reached = attempt_size >= self._TAIL_READ_BYTES_MAX
-            if enough or full_file_covered or max_window_reached:
+            full_file_covered = window >= file_size
+            if enough or full_file_covered:
                 take = min(n, len(indices))
                 start_indices = indices[-take:] if take > 0 else []
                 for i, start in enumerate(start_indices):
@@ -1040,7 +1040,10 @@ class ExecutionRecordStorage:
                         blocks.append(block)
                 return blocks
 
-        return blocks
+            # 不够且文件尚未读完：窗口再扩 128KB 继续
+            if window >= file_size:
+                return blocks
+            window = min(window + step, file_size)
 
     def read_records_from_tail(  # noqa: PLR0911,PLR0912
         self,
@@ -1053,8 +1056,8 @@ class ExecutionRecordStorage:
 
         FEATURE-tail_read:
         性能优化: 主管道单文件 1.3MB / 500 条 record 时，全量 yaml.safe_load
-        需 4-5s；本方法只读末尾 64KB 窗口，单次解析 ~20 条 record，
-        加载时间降到 0.3-0.8s（5-10x 提升）。
+        需 4-5s；本方法只读末尾字节窗口（起始 128KB，不够再补 128KB），
+        仅解析需要的 N 条 record，加载时间降到 0.3-0.8s（5-10x 提升）。
 
         算法:
           1. 倒序遍历所有分片文件（最新的分片 part 编号最大），
@@ -1102,21 +1105,16 @@ class ExecutionRecordStorage:
             if needed <= 0:
                 has_more = True
                 break
+            # _extract_tail_blocks 内部已会补充循环扩展窗口，
+            # 直到凑够 needed 或覆盖整个文件，此处不再需要窗口上限判断。
             blocks = self._extract_tail_blocks(part_file, needed)
             collected_blocks.extend(blocks)
             # 当前分片已提供足够块，说明更早分片可能还有更早 record
             if len(blocks) >= needed:
                 has_more = True
                 break
-            # 提取的块数不足，检查是否因读取窗口限制导致
-            # 如果文件大于最大读取窗口，窗口外可能还有更多 record
-            try:
-                file_size = part_file.stat().st_size
-            except OSError:
-                file_size = 0
-            if file_size > self._TAIL_READ_BYTES_MAX:
-                has_more = True
-                break
+            # 当前分片整文件都不够 needed：继续读更早分片补齐；
+            # 若已是最后一个分片，循环正常结束，has_more 保持 False。
 
         if not collected_blocks:
             return [], False

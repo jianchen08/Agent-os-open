@@ -1110,11 +1110,15 @@ class PipelineEngine:
 
     ) -> None:
 
-        """清理 _run_loop 的资源和注册。
+        """清理 _run_loop 的资源。
 
         关闭流式协程、per-pipeline 日志 FileHandler 并重置 contextvar，
-        清理 EngineRegistry 注册与 chunk_service 缓存。日志 handler 的
-        关闭/守卫重置、contextvar 重置委托给 PipelineLogger。
+        释放 chunk_service 缓存。日志 handler 的关闭/守卫重置、contextvar
+        重置委托给 PipelineLogger。
+
+        注意：本方法不 unregister EngineRegistry。I3 后引擎正常/取消结束都保留
+        entry（entry.engine_task 置 None），下次 send 走 _start_idle_engine 重启。
+        entry 的真正移除由持有者级 message_bus.stop 负责（任务终态/删会话）。
         """
 
         # Phase 1: 优雅关闭流式消费者 + keepalive 协程（防泄漏），委托给流式输出口

@@ -151,6 +151,16 @@ vi.mock('@/constants/websocket', () => ({
 }))
 
 // ---------------------------------------------------------------------------
+//  Mock: apiClient（useInteractionHandler 恢复逻辑调用 /interaction/pending）
+//  返回空列表，使刷新恢复 effect 干净走完，不触发真实网络请求或循环依赖加载。
+// ---------------------------------------------------------------------------
+vi.mock('@/services/api/client', () => ({
+  default: {
+    get: vi.fn().mockResolvedValue({ data: { items: [], total: 0 } }),
+  },
+}))
+
+// ---------------------------------------------------------------------------
 //  Mock: formatDuration
 // ---------------------------------------------------------------------------
 vi.mock('@/types/activity', async (importOriginal) => {

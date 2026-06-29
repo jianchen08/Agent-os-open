@@ -286,5 +286,81 @@ describe('MessageList', () => {
       // 跟随到底部（1200）
       expect(listEl.scrollTop).toBe(1200)
     })
+
+    /**
+     * 可手动触发回调的 ResizeObserver mock
+     *
+     * jsdom 不实现 ResizeObserver，beforeEach stub 的是空实现（验证不了"内容变化
+     * 触发钉底"）。这两个测试需要手动触发回调，模拟内容容器尺寸变化。
+     */
+    function makeTriggerableResizeObserver() {
+      const ref: { cb: (() => void) | null } = { cb: null }
+      vi.stubGlobal('ResizeObserver', class {
+        constructor(cb: () => void) { ref.cb = cb }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      })
+      return ref
+    }
+
+    it('initFromAPI 重建（条数减少、内容变高）后，内容变化触发钉底回到底部', () => {
+      // 复现 fix_20260629_enter_stuck_in_middle：进入页面 persist 钉底后，initFromAPI
+      // 异步重建合并气泡使条数减少，原逻辑因"条数未增加"不钉底 → 停在中间。
+      const ro = makeTriggerableResizeObserver()
+
+      // 首次：3 条消息钉底（模拟 persist 快照恢复后挂载）
+      const messages = [
+        makeMessage({ id: 'msg-1', sequence: 1 }),
+        makeMessage({ id: 'msg-2', sequence: 2 }),
+        makeMessage({ id: 'msg-3', sequence: 3 }),
+      ]
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="rebuild" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 模拟 initFromAPI 重建：合并连续 assistant 后条数减少（3→1），单条内容更高
+      const rebuilt = [makeMessage({ id: 'msg-merged', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={rebuilt} tabId="rebuild" />)
+      mockScrollMetrics(listEl, 1500)
+
+      // 重建后条数减少，原"条数增加才钉底"逻辑不会触发；scrollTop 仍停在旧底部
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 内容容器尺寸变化触发 contentResize observer → 钉回底部（修复后行为）
+      ro.cb?.()
+      expect(listEl.scrollTop).toBe(1500)
+    })
+
+    it('用户上滑后内容变化不钉底，不打扰翻历史', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="scroll-up" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 用户上滑到中间（onScroll 把 isFollowingBottom 置 false）
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+
+      // 内容变高（流式增长 / 重建）
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="scroll-up" />)
+      mockScrollMetrics(listEl, 1200)
+
+      ro.cb?.()
+
+      // 不被拉回底部，停留在用户的滚动位置
+      expect(listEl.scrollTop).toBe(300)
+    })
   })
 })

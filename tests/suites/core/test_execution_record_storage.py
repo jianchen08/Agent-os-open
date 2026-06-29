@@ -294,6 +294,52 @@ class TestExecutionRecordStorage:
         assert records[-1].record_id == "r016"
         assert records[-1].sequence == 16
 
+    def test_tail_read_large_file_supplements_window_to_fill_limit(self, tmp_path: Path):
+        """回归测试：大文件 + 偏大 record，补充循环扩展窗口凑够 limit。
+
+        BUG（fix tail-read-shortfall）:
+            首次加载走尾部固定窗口读取。原实现窗口上限 128KB 且只重试一次，
+            当 record 偏大（长 AI 回复 / 大 tool 输出，>2.6KB/条）时，
+            128KB 装不下前端要的 50 条，循环会提前 break，返回不足 50 条；
+            又因 records 非空不触发 fallback，前端首屏显示条数偏少。
+
+        修复方案: _extract_tail_blocks 改为补充循环，起始 128KB，不够每次
+                  再向前扩 128KB，直到凑够 n 个起点或覆盖整个文件。
+        修复日期: 2026-06-29
+        """
+        data_dir = tmp_path / "pipelines"
+        data_dir.mkdir()
+        storage = ExecutionRecordStorage(data_dir=str(data_dir))
+
+        # 80 条 record，每条 content ~4KB → 单条 record YAML 文本 > 4KB，
+        # 128KB 起始窗口仅能装 ~30 条，远不够 limit=50，必须扩展窗口才能凑够。
+        padding = "x" * 4000
+        big_run = data_dir / "run-big.yaml"
+        big_run.write_text(
+            "summary: null\nrecords:\n"
+            + "\n".join(
+                f"- record_id: r{i:03d}\n  pipeline_run_id: run-big\n  type: ai\n"
+                f"  sequence: {i}\n  iteration: 0\n  role: assistant\n"
+                f"  content: {padding}-{i}\n"
+                for i in range(1, 81)
+            ),
+            encoding="utf-8",
+        )
+        # 文件足够大（>256KB），单次 128KB 窗口必装不下 50 条
+        assert big_run.stat().st_size > 256 * 1024
+
+        # _extract_tail_blocks 直接调用：n=50 时应扩展窗口凑够 50 个块
+        blocks = storage._extract_tail_blocks(big_run, n=50)
+        assert len(blocks) == 50
+        assert blocks[-1].startswith("- record_id: r080")
+
+        # limit=50：补充循环应扩展窗口直到凑够 50 条（sequence 31..80）
+        records, has_more = storage.list_by_pipeline("run-big", limit=50)
+        assert len(records) == 50
+        assert [r.sequence for r in records] == list(range(31, 81))
+        # 还有更早记录（1..30），故 has_more=True
+        assert has_more is True
+
     def test_load_corrupted_file(self, tmp_path: Path):
         data_dir = tmp_path / "pipelines"
         data_dir.mkdir()

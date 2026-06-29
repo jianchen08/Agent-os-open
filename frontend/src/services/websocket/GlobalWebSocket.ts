@@ -146,6 +146,27 @@ class GlobalWebSocketService {
         if (data.type === 'heartbeat_ack') {
           this._handleHeartbeatAck()
         }
+        // 延迟追踪：后端在 payload 注入 __send_ts（epoch ms），
+        // 这里算"收到时刻 - 发送时刻"。忽略心跳/连接确认等无业务语义事件。
+        const sendTs = data.__send_ts ?? data.data?.__send_ts
+        if (typeof sendTs === 'number' && data.type && data.type !== 'heartbeat_ack') {
+          const recvTs = Date.now()
+          const latency = recvTs - sendTs
+          const traceId =
+            (data.data?.message_id as string)?.slice(0, 12) ||
+            (data.data?.request_id as string)?.slice(0, 12) ||
+            'null'
+          // >500ms 视为异常延迟，用 warn 突出；正常用 debug 避免刷屏
+          if (latency > 500) {
+            _wsLogger.warn(
+              `[WS_TRACE] <<< RECV type=${data.type} id=${traceId} latency=${latency}ms (⚠️异常)`,
+            )
+          } else {
+            _wsLogger.debug(
+              `[WS_TRACE] <<< RECV type=${data.type} id=${traceId} latency=${latency}ms`,
+            )
+          }
+        }
         _wsLogger.debug(
           `[WS_RAW] type=${data.type} pipeline_id=${data.data?.pipeline_id?.slice(0, 12) || 'null'} message_id=${data.data?.message_id?.slice(0, 12) || 'null'}`,
         )

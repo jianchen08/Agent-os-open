@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 
 # 需要挂 per-pipeline FileHandler 的日志器清单（引擎核心 + 插件 + 工具 + LLM 等）。
 # 放模块级常量，与引擎类解耦。
+#
+# BUG-FIX-fix_20260629_isolation_log_missing:
+# 原清单不含 isolation，导致 worktree 合并/清理（isolation._workspace_merge_ops /
+# isolation.workspace_lifecycle）的重试、验证、根因 WARNING/ERROR 全部漏在
+# pipeline/error/task 日志之外（只走 root 的 console handler）。排查合并失败时
+# 只能看到末端 task_evaluate 那句被压缩成 "unknown" 的 ERROR。isolation 作为父
+# logger 加入后，靠 Python logging 层级传播覆盖所有 isolation.* 子模块。
 _PIPELINE_LOGGERS: tuple[str, ...] = (
     "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
     "pipeline.route", "pipeline.config", "pipeline.registry",
@@ -46,6 +53,7 @@ _PIPELINE_LOGGERS: tuple[str, ...] = (
     "triggers.manager",
     "pipeline.message_bus",
     "src.core.event_bus",
+    "isolation",
 )
 
 # 任务执行日志放行的 logger 前缀（task_submit/manage/evaluate/worker）。

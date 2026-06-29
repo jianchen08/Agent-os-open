@@ -103,3 +103,75 @@ describe('file_write 工具卡片 diff（流式 resultData 路径）', () => {
     expect(enhanced.details?.find((d) => d.contentType === 'diff')).toBeUndefined()
   })
 })
+
+/**
+ * 真实后端结构验证：to_dict() 把工具 data 包装在 output 子层下。
+ * 后端 tool_core 流式 result_data 实际形态（slim=False）：
+ *   { status, success, output: { added, removed, old_content, new_content, ... } }
+ * 这组测试确保展开后的「差异对比」详情块能正确携带 old/new 正文，
+ * 否则 TextDiffView 拿不到内容、展开后空白。
+ */
+describe('file_write diff（后端真实 output 包装结构）', () => {
+  it('resultData 为 output 包装结构 → 生成 diffStat + diff 详情块（含 old/new 正文）', () => {
+    const toolCall: MessageToolCall = {
+      call_id: 'call_real',
+      tool_name: 'file_write',
+      tool_args: { action: 'write', path: '/app/real.py', content: 'new\n' },
+      status: 'completed',
+      resultData: {
+        status: 'completed',
+        success: true,
+        output: {
+          file: '/app/real.py',
+          lines: 2,
+          added: 2,
+          removed: 1,
+          old_content: 'old line 1\nold line 2\n',
+          new_content: 'old line 1\nNEW line\nextra\n',
+        },
+      },
+    }
+
+    const enhanced = enhanceActivityWithToolConfig(makeBaseActivity('file_write'), toolCall)
+
+    // 徽标统计正确
+    expect(enhanced.diffStat).toEqual({ added: 2, removed: 1 })
+
+    // 展开后的差异对比块存在，且携带 old/new 正文
+    const diffBlock = enhanced.details?.find((d) => d.contentType === 'diff')
+    expect(diffBlock).toBeDefined()
+    expect(diffBlock?.diffOld).toBe('old line 1\nold line 2\n')
+    expect(diffBlock?.diffNew).toBe('old line 1\nNEW line\nextra\n')
+  })
+
+  it('output 包装但缺少 old/new 正文（如 append 已存在文件路径）→ 退回写入内容块', () => {
+    const toolCall: MessageToolCall = {
+      call_id: 'call_append',
+      tool_name: 'file_write',
+      tool_args: { action: 'append', path: '/app/log.txt', content: 'appended\n' },
+      status: 'completed',
+      resultData: {
+        status: 'completed',
+        success: true,
+        output: {
+          file: '/app/log.txt',
+          lines: 1,
+          added: 1,
+          removed: 0,
+          diff_omitted: true,
+        },
+      },
+    }
+
+    const enhanced = enhanceActivityWithToolConfig(makeBaseActivity('file_write'), toolCall)
+
+    // 徽标仍有统计
+    expect(enhanced.diffStat).toEqual({ added: 1, removed: 0 })
+    // 没有 diff 块（缺正文），退回显示写入内容
+    const diffBlock = enhanced.details?.find((d) => d.contentType === 'diff')
+    expect(diffBlock).toBeUndefined()
+    const contentBlock = enhanced.details?.find((d) => d.id === 'content')
+    expect(contentBlock).toBeDefined()
+    expect(contentBlock?.content).toBe('appended\n')
+  })
+})

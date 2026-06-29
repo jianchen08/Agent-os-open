@@ -333,7 +333,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
 
         {/* 增删行数徽标（如 file_write 的 +X -Y），颜色跟随主题 status 语义色 */}
         {activity.diffStat && (
-          <span className="flex flex-shrink-0 items-center gap-1 font-mono text-xs">
+          <span className="ml-2 flex flex-shrink-0 items-center gap-2 font-mono text-xs font-semibold">
             <span className="text-status-success">+{activity.diffStat.added}</span>
             <span className="text-status-error">-{activity.diffStat.removed}</span>
           </span>

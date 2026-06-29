@@ -9,7 +9,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
+import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId, isPipelineRelevant } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -48,6 +48,8 @@ function clearThinkingTimeout(messageId: string): void {
 export function handleThinkingStart(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
+  // 过滤非活跃 pipeline：别人的 thinking 不创建占位符/不写 store
+  if (!isPipelineRelevant(pipelineId)) return
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
@@ -109,6 +111,8 @@ export function handleThinkingChunk(eventData: any) {
     )
     return
   }
+  // 过滤非活跃 pipeline：别人的 thinking_chunk 不缓冲、不写 store
+  if (!isPipelineRelevant(pipelineId)) return
   const messageId = extractMessageId(eventData)
   const chunk = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId || !chunk) return

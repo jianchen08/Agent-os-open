@@ -424,13 +424,21 @@ def _get_token_usage() -> dict[str, Any]:
         total = tokens.get("total_tokens", 0)
         if total == 0 and not tokens:
             return None
-        # request_count 用管道运行次数近似（每个 summary 对应一次完整管道运行）
+        # request_count = 各管道迭代次数之和。管道每轮迭代对应一次 LLM 调用
+        # （engine 在迭代循环开头递增 StateKeys.ITERATION），所以迭代总数即
+        # 真实 LLM 请求数。老实现误用 len(summaries)（管道运行数）当请求数，
+        # 导致监控页把"202 次管道运行"显示成"202 次请求"，严重虚低。
         summaries = storage.list_all_summaries()
+        request_count = 0
+        for summary in summaries:
+            iters = getattr(summary, "total_iterations", 0)
+            if isinstance(iters, int) and iters > 0:
+                request_count += iters
         return {
             "total_tokens": total,
             "prompt_tokens": tokens.get("input_tokens", 0),
             "completion_tokens": tokens.get("output_tokens", 0),
-            "request_count": len(summaries),
+            "request_count": request_count,
         }
 
     def _strategy_usage_monitor() -> dict[str, Any] | None:

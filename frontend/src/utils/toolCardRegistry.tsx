@@ -372,13 +372,21 @@ function extractWriteDiff(
   if (!source) return undefined
   const parsed = safeParseResult(source)
   if (!parsed) return undefined
+  // 后端 to_dict() 把工具 data 包装在 output 子层下，即
+  //   { status, success, output: { added, removed, old_content, new_content, ... } }
+  // 历史消息 / 部分 mock 数据也可能是扁平结构（added 在顶层）。
+  // 此处同时兼容两种：优先扁平，否则取 output 子层。
+  const data =
+    typeof parsed.output === 'object' && parsed.output !== null
+      ? (parsed.output as Record<string, unknown>)
+      : parsed
   // 仅在 added/removed 同时存在时视为有效 diff 统计
-  if (typeof parsed.added !== 'number' || typeof parsed.removed !== 'number') return undefined
+  if (typeof data.added !== 'number' || typeof data.removed !== 'number') return undefined
   return {
-    added: parsed.added as number,
-    removed: parsed.removed as number,
-    oldContent: typeof parsed.old_content === 'string' ? (parsed.old_content as string) : undefined,
-    newContent: typeof parsed.new_content === 'string' ? (parsed.new_content as string) : undefined,
+    added: data.added as number,
+    removed: data.removed as number,
+    oldContent: typeof data.old_content === 'string' ? (data.old_content as string) : undefined,
+    newContent: typeof data.new_content === 'string' ? (data.new_content as string) : undefined,
   }
 }
 
@@ -418,7 +426,9 @@ registerToolCard({
         content: '',
         contentType: 'diff',
         collapsible: true,
-        defaultExpanded: false,
+        // 卡片展开后默认显示差异内容（删除行红/新增行绿），
+        // 避免双重折叠让用户以为"展开后看不到内容"
+        defaultExpanded: true,
         diffOld: diff.oldContent,
         diffNew: diff.newContent,
       })

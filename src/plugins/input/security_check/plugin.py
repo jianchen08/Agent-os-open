@@ -789,9 +789,13 @@ class SecurityCheckPlugin(IInputPlugin):
     def _is_isolated(self, ctx: PluginContext, execution_contexts: list[dict[str, Any]]) -> bool:
         """判断当前任务是否在隔离环境中执行。
 
-        隔离真相有两个来源（满足任一即隔离）：
+        隔离真相有三个来源（满足任一即隔离）：
         1. docker 容器：所有工具 execution_contexts 的 provider 均为 docker
         2. 工作空间隔离副本：task.metadata.ws_meta.mode ∈ {worktree, project_root, branch}
+        3. 隔离继承：子任务共享父任务的隔离副本目录，其 ws_meta 携带
+           inherited_isolated 标记（由 workspace_lifecycle._start_subtask 写入）。
+           子任务 mode 保持 shared 以免触发独立 merge/cleanup，但其操作同样落在
+           隔离副本内，应与父任务同等放行。
 
         不靠 provider==docker 单一反推——worktree 等模式下文件工具 provider 仍是 host，
         但它们操作的是独立 git 副本，应与 docker 同等放行。
@@ -809,31 +813,36 @@ class SecurityCheckPlugin(IInputPlugin):
         ):
             return True
 
-        # 来源 2：工作空间隔离副本（直接读任务隔离真相）
-        ws_mode = self._get_ws_mode(ctx)
+        # 来源 2/3：工作空间隔离真相（直接读任务 ws_meta）
+        ws_meta = self._get_ws_meta(ctx)
+        # 来源 3：子任务继承了父任务的隔离副本
+        if ws_meta and ws_meta.get("inherited_isolated"):
+            return True
+        # 来源 2：本任务自身即为隔离副本
+        ws_mode = (ws_meta or {}).get("mode", "")
         return ws_mode in self._ISOLATED_WS_MODES
 
-    def _get_ws_mode(self, ctx: PluginContext) -> str:
-        """从当前任务的 ws_meta.mode 读取工作空间隔离模式。
+    def _get_ws_meta(self, ctx: PluginContext) -> dict[str, Any] | None:
+        """读取当前任务的完整 ws_meta 字典。
 
         通过 task_id → task_service → task.metadata.ws_meta 取值，
-        与 isolation_guard._get_task_metadata 同一模式。取不到时返回空串，
+        与 isolation_guard._get_task_metadata 同一模式。取不到时返回 None，
         调用方按未隔离（需审批）处理。
 
         Args:
             ctx: 插件执行上下文
 
         Returns:
-            ws_meta.mode 值（如 worktree/project_root/shared/plain），不可用时为空串
+            ws_meta 字典（含 mode / inherited_isolated 等），不可用时为 None
         """
         task_id = ctx.state.get(StateKeys.TASK_ID, "")
         if not task_id:
-            return ""
+            return None
 
         try:
             task_service = ctx.get_service("task_service")
         except KeyError:
-            return ""
+            return None
 
         try:
             task = task_service.get_task(task_id)
@@ -842,13 +851,24 @@ class SecurityCheckPlugin(IInputPlugin):
                 "[%s] 读取 task ws_meta 失败 | task_id=%s | error=%s",
                 self.name, task_id, e,
             )
-            return ""
+            return None
 
         if task and task.metadata:
             ws_meta = task.metadata.get("ws_meta")
             if isinstance(ws_meta, dict):
-                return ws_meta.get("mode", "") or ""
-        return ""
+                return ws_meta
+        return None
+
+    def _get_ws_mode(self, ctx: PluginContext) -> str:
+        """从当前任务的 ws_meta.mode 读取工作空间隔离模式（_get_ws_meta 的薄封装）。
+
+        Args:
+            ctx: 插件执行上下文
+
+        Returns:
+            ws_meta.mode 值（如 worktree/project_root/shared/plain），不可用时为空串
+        """
+        return (self._get_ws_meta(ctx) or {}).get("mode", "") or ""
 
     @staticmethod
     def _get_dangerous_operations(
