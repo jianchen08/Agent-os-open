@@ -5,11 +5,14 @@ title Agent OS
 
 cd /d "%~dp0"
 
-REM 可移植：把脚本所在目录转成 WSL 路径（基于脚本自身位置，不硬编码项目绝对路径）。
-REM 注意：%cd% 是反斜杠，直接传给 wsl/shell 会被转义吃掉，必须先转成正斜杠。
+REM Portable: derive WSL path from script's own location (no hardcoded project path).
+REM Note: %cd% uses backslashes; wsl/shell would eat them, so convert to slashes first.
 set "WIN_DIR=%cd%"
 set "WIN_DIR=%WIN_DIR:\=/%"
 for /f "delims=" %%i in ('wsl -d Ubuntu wslpath -u "%WIN_DIR%" 2^>nul') do set "WSL_DIR=%%i"
+
+REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
+if not defined SHUTDOWN_RETRY set "SHUTDOWN_RETRY=0"
 
 echo ========================================
 echo   Agent OS 启动
@@ -28,6 +31,19 @@ if errorlevel 1 goto :no_wsl_docker
 
 echo [INFO] WSL docker mode detected
 
+:wsl_setup
+REM 0. WSL 内核健康度预热：检测 D 状态死锁污染，避免后续 pgrep/docker 探活被传染卡死。
+REM    上层 timeout 25s 兜底（探针正常 <3s；若读 /proc 也卡死，timeout 会强杀）。
+echo [INFO] 检查 WSL 内核健康度...
+wsl -d Ubuntu -u root -- bash -c "timeout 25 %WSL_DIR%/wsl_health_probe.sh %WSL_DIR%" 2>&1
+set "HEALTH_RC=!errorlevel!"
+if "!HEALTH_RC!"=="0" goto :wsl_alive_ok
+if "!HEALTH_RC!"=="8" goto :wsl_polluted
+REM timeout 强杀返回 124，或其它异常 -> 视同污染
+echo [WARN] 健康探针异常 (rc=!HEALTH_RC!)，按内核污染处理
+goto :wsl_polluted
+
+:wsl_alive_ok
 REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
 powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
 
@@ -66,16 +82,37 @@ pause
 exit /b 1
 
 :cgroup_stuck
-echo.
-echo [FATAL] 检测到 WSL cgroup 残留（D 状态内核线程未释放），脚本无法自愈。
-echo [FATAL] 请在 Windows 执行:
-echo [FATAL]     wsl --shutdown
-echo [FATAL] 等待约 10 秒后重新双击本脚本。
-pause
-exit /b 7
+set "REASON=容器清理/启动受阻（cgroup 或 task 残留）"
+goto :auto_shutdown
+
+:wsl_polluted
+set "REASON=WSL 内核被 D 状态死锁污染"
+
+:auto_shutdown
+set /a "SHUTDOWN_RETRY+=1"
+if !SHUTDOWN_RETRY! gtr 3 (
+    echo [ERROR] 已自动 wsl --shutdown 重试 !SHUTDOWN_RETRY! 次仍失败，放弃。
+    echo [ERROR] 原因: !REASON!
+    echo [ERROR] 请手动执行 wsl --shutdown，等待 10 秒后重新双击本脚本。
+    pause
+    exit /b 7
+)
+echo [WARN] !REASON!，自动 wsl --shutdown 后重试 ^(第 !SHUTDOWN_RETRY!/3 次^)...
+wsl --shutdown
+echo [INFO] 等待 WSL 内核完全退出 ^(~10s^)...
+timeout /t 10 /nobreak >nul
+echo [INFO] 重新初始化 WSL 环境...
+goto :wsl_setup
 
 :containers_ok
 echo [OK] Containers started
+
+REM Frontend code auto-update (same flow as Docker Desktop mode).
+REM Windows docker CLI reaches WSL daemon via DOCKER_HOST=tcp://<WSL_IP>:2375;
+REM WSL IP may change after wsl --shutdown, so bind to current %WSL_IP%.
+echo [INFO] 检查前端代码更新...
+set "DOCKER_HOST=tcp://%WSL_IP%:2375"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_frontend.ps1"
 
 echo.
 echo [INFO] Skipping Docker Desktop checks (using WSL native docker)

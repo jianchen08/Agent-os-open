@@ -25,6 +25,27 @@ if ! docker ps >/dev/null 2>&1; then
     exit 1
 fi
 
+# 清理上轮残留的任务容器（cua- 前缀），只保留 frontend + redis。
+# 这些容器由 agent 任务运行时（IsolationManager）按需创建，重启时丢弃安全，系统会重建。
+# 注意：若容器内进程处于 D 状态（WSL2 内核死锁），docker rm -f 会卡住/失败，
+# 此时返回 7，由上层 start_web_cn.bat 自动 wsl --shutdown 重启内核后重试。
+echo "[INFO] 清理上轮任务容器（cua- 前缀，仅保留 frontend + redis）..."
+stuck=0
+cua_list="$(docker ps -a --format '{{.Names}}' | grep '^cua-' || true)"
+while IFS= read -r cname; do
+    [ -z "$cname" ] && continue
+    if timeout 30 docker rm -f "$cname" >/dev/null 2>&1; then
+        echo "  [OK] removed $cname"
+    else
+        echo "  [WARN] 清理 $cname 失败/超时（疑似内核 D 状态死锁）"
+        stuck=1
+    fi
+done <<< "$cua_list"
+if [ "$stuck" -ne 0 ]; then
+    echo "[FATAL] 任务容器清理受阻，需 wsl --shutdown 重启内核后重试。"
+    exit 7
+fi
+
 echo "[INFO] docker compose up -d"
 out="$(docker compose up -d 2>&1)"
 rc=$?
