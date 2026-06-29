@@ -52,14 +52,16 @@ services:
   redis:
     image: redis:7-alpine
     container_name: agent-os-redis-22404
-    restart: unless-stopped
+    # on-failure：与 frontend 一致，崩溃不无限重启，避免反复触发 WSL2 容器停止路径的内核卡死。
+    restart: on-failure
     ports:
       - "6480:6379"
     command: >
       redis-server
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
-      --appendonly yes
+      --appendonly no
+      --save ""
     volumes:
       - redis-data-22404:/data
     networks:

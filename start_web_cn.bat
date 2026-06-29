@@ -5,6 +5,12 @@ title Agent OS
 
 cd /d "%~dp0"
 
+REM 可移植：把脚本所在目录转成 WSL 路径（基于脚本自身位置，不硬编码项目绝对路径）。
+REM 注意：%cd% 是反斜杠，直接传给 wsl/shell 会被转义吃掉，必须先转成正斜杠。
+set "WIN_DIR=%cd%"
+set "WIN_DIR=%WIN_DIR:\=/%"
+for /f "delims=" %%i in ('wsl -d Ubuntu wslpath -u "%WIN_DIR%" 2^>nul') do set "WSL_DIR=%%i"
+
 echo ========================================
 echo   Agent OS 启动
 echo ========================================
@@ -26,7 +32,7 @@ REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
 powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
 
 REM 2. Ensure dockerd running (bypass systemd: start dockerd directly)
-wsl -d Ubuntu -u root -- bash -c "if ! pgrep -x dockerd >/dev/null 2>&1; then pkill -9 dockerd 2>/dev/null; rm -f /var/run/docker.pid; nohup dockerd >/tmp/dockerd.log 2>&1 & sleep 6; fi; for i in 1 2 3 4 5 6 7 8; do docker version --format '{{.Server.Version}}' 2>/dev/null | grep -q '^[0-9]' && break; sleep 2; done" >nul 2>&1
+wsl -d Ubuntu -u root -- bash -c "if ! pgrep -x dockerd >/dev/null 2>&1; then pkill -TERM dockerd 2>/dev/null; sleep 2; pkill -9 dockerd 2>/dev/null; rm -f /var/run/docker.pid; nohup dockerd >/tmp/dockerd.log 2>&1 & sleep 6; fi; for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/docker.sock ] && docker ps >/dev/null 2>&1 && break; sleep 2; done" >nul 2>&1
 
 REM 2b. Ensure docker compose plugin accessible (symlink to cli-plugins)
 wsl -d Ubuntu -u root -- bash -c "mkdir -p /usr/lib/docker/cli-plugins /root/.docker/cli-plugins; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose 2>/dev/null; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /root/.docker/cli-plugins/docker-compose 2>/dev/null" >nul 2>&1
@@ -48,9 +54,27 @@ echo [INFO] Setting up port forwarding...
 powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy reset; netsh interface portproxy add v4tov4 listenport=5289 listenaddress=0.0.0.0 connectport=5289 connectaddress=%WSL_IP%; netsh interface portproxy add v4tov4 listenport=6480 listenaddress=0.0.0.0 connectport=6480 connectaddress=%WSL_IP%'" 2>nul
 echo [OK] Port forwarding configured
 
-REM 5. Start project containers
+REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 echo [INFO] Starting project containers...
-wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && docker compose up -d 2>&1 | tail -3 && echo 'waiting containers...' && sleep 8"
+wsl -d Ubuntu -u root -- bash -c "%WSL_DIR%/wsl_ensure_containers.sh %WSL_DIR%"
+set "CONTAINERS_RC=!errorlevel!"
+if "!CONTAINERS_RC!"=="0" goto :containers_ok
+if "!CONTAINERS_RC!"=="7" goto :cgroup_stuck
+echo [ERROR] 容器启动失败 (rc=!CONTAINERS_RC!)，详见上方输出
+echo [ERROR] 可尝试: wsl --shutdown 后重新运行本脚本
+pause
+exit /b 1
+
+:cgroup_stuck
+echo.
+echo [FATAL] 检测到 WSL cgroup 残留（D 状态内核线程未释放），脚本无法自愈。
+echo [FATAL] 请在 Windows 执行:
+echo [FATAL]     wsl --shutdown
+echo [FATAL] 等待约 10 秒后重新双击本脚本。
+pause
+exit /b 7
+
+:containers_ok
 echo [OK] Containers started
 
 echo.
