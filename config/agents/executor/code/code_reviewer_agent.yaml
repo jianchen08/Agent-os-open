@@ -227,7 +227,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 1200
 plugins:
   disabled: []
   enabled:

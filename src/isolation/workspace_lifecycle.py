@@ -201,10 +201,17 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
     # ── 技能文件复制 ──────────────────────────────────────────────
 
     def _copy_skills_to_workspace(self, ws_path: str) -> None:
-        """将项目 skills/ 目录复制到工作空间。
+        """将项目 skills/ 目录复制到工作空间（按技能粒度增量同步）。
 
         任务启动时调用一次，让 Agent 在 host / worktree / Docker 容器
         所有模式下都能通过 skills/<技能名>/scripts/*.py 访问技能脚本。
+
+        BUG-FIX-fix_20260629_skills_stale_snapshot:
+        问题根因: 原「skills_dst 已存在即整体跳过」是全有或全无判定。容器创建
+                  后编排器新增的技能永远进不来，技能快照被冻结在容器首次复制
+                  时刻（实测：容器卡在 8 个技能，07 个新技能后续才加始终缺失）。
+        修复方案: 改为按技能子目录粒度增量同步——目标已存在的技能保持原样，
+                  只补齐缺失项，幂等且低成本。
 
         Args:
             ws_path: 工作空间绝对路径（来自 ws_meta["path"]）
@@ -224,22 +231,26 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 skills_dst,
             )
             return
-        if skills_dst.exists():
+        skills_dst.mkdir(parents=True, exist_ok=True)
+        copied: list[str] = []
+        for skill_src in skills_src.iterdir():
+            if not skill_src.is_dir():
+                continue
+            skill_dst = skills_dst / skill_src.name
+            if skill_dst.exists():
+                continue  # 已有技能保持原样，仅补齐缺失项
+            try:
+                shutil.copytree(skill_src, skill_dst, symlinks=True)
+                copied.append(skill_src.name)
+            except Exception as exc:
+                logger.warning(
+                    "[WorkspaceLifecycle] 技能复制失败: %s → %s | error=%s",
+                    skill_src, skill_dst, exc,
+                )
+        if copied:
             logger.debug(
-                "[WorkspaceLifecycle] 技能已存在，跳过复制: %s",
-                skills_dst,
-            )
-            return
-        try:
-            shutil.copytree(skills_src, skills_dst, symlinks=True)
-            logger.debug(
-                "[WorkspaceLifecycle] 技能已复制: %s → %s",
-                skills_src, skills_dst,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[WorkspaceLifecycle] 技能复制失败: %s → %s | error=%s",
-                skills_src, skills_dst, exc,
+                "[WorkspaceLifecycle] 技能已增量同步: %s → %s | new=%s",
+                skills_src, skills_dst, copied,
             )
 
     def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:  # noqa: PLR0912,PLR0915

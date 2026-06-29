@@ -120,7 +120,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S (%A)}}'
   - '{{path:config/rules/execution_review_rules.md}}'
-  - '{{path:config/rules/dispatcher_rules_l1.md}}'
+  - '{{path:config/rules/dispatcher_rules_exec.md}}'
 tool_ids:
 - task_submit
 - task_manage

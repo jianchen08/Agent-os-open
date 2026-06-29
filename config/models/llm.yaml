@@ -132,12 +132,12 @@ providers:
     keys:
     - id: zhipu_coding_main
       api_key: ${ZHIPU_API_KEY}
-      max_concurrent: 3
+      max_concurrent: 6
       rpm: 10
       token_quota: 0
     - id: zhipu_coding_2
       api_key: ${ZHIPU_API_KEY_2}
-      max_concurrent: 3
+      max_concurrent: 6
       rpm: 10
       token_quota: 0
   zhipu:
@@ -146,12 +146,12 @@ providers:
     keys:
     - id: zhipu_main
       api_key: ${ZHIPU_API_KEY}
-      max_concurrent: 3
+      max_concurrent: 6
       rpm: 10
       token_quota: 0
     - id: zhipu_2
       api_key: ${ZHIPU_API_KEY_2}
-      max_concurrent: 3
+      max_concurrent: 6
       rpm: 10
       token_quota: 0
   deepseek:
@@ -160,7 +160,7 @@ providers:
     keys:
     - id: deepseek_main
       api_key: ${DEEPSEEK_API_KEY}
-      max_concurrent: 3
+      max_concurrent: 6
       rpm: 10
       token_quota: 0
   minimax:
@@ -169,7 +169,7 @@ providers:
     keys:
     - id: minimax_main
       api_key: ${MINIMAX_API_KEY}
-      max_concurrent: 3
+      max_concurrent: 6
       rpm: 10
       token_quota: 0
   yichengc:
@@ -178,8 +178,8 @@ providers:
     keys:
     - id: yichengc_main
       api_key: ${YICHENGC_API_KEY}
-      max_concurrent: 3
-      rpm: 6
+      max_concurrent: 6
+      rpm: 12
       token_quota: 0
 embeddings: {}
 concurrency:
