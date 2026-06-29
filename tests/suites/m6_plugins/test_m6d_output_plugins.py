@@ -166,16 +166,22 @@ class TestErrorCheckPlugin:
 
     @pytest.mark.asyncio
     async def test_retryable_error_returns_next_llm(self, ctx, base_state):
-        """测试可重试错误返回 next_llm 信号。"""
+        """测试可重试错误返回 next_llm 信号。
+
+        BUG-FIX-fix_20260629_transient_no_recovery: RateLimitError 现在被分类为
+        临时错误（transient），走独立计数 retry.transient_count，而不是
+        retry.count；这里改为校验 transient_count 即可。
+        """
         base_state[StateKeys.RAW_ERROR] = "RateLimitError: too many requests"
         base_state["retry.count"] = 0
-        plugin = ErrorCheckPlugin({"max_retries": 3})
+        base_state["retry.transient_count"] = 0
+        plugin = ErrorCheckPlugin({"max_retries": 3, "transient_max_retries": 3})
         result = await plugin.execute(ctx)
 
         assert result.route_signal is not None
         assert result.route_signal.route_type == "next_llm"
         assert result.state_updates[StateKeys.EXECUTION_STATUS] == "needs_retry"
-        assert result.state_updates["retry.count"] == 1
+        assert result.state_updates["retry.transient_count"] == 1
 
     @pytest.mark.asyncio
     async def test_non_retryable_error_returns_end(self, ctx, base_state):
@@ -190,20 +196,25 @@ class TestErrorCheckPlugin:
 
     @pytest.mark.asyncio
     async def test_max_retries_exceeded(self, ctx, base_state):
-        """测试重试次数用尽返回 wait 信号（临时错误挂起等待，idle 兜底）。
+        """临时错误重试上限耗尽 → end + failed（不再 wait/waiting_recovery）。
 
-        BUG-FIX-fix_20260624_transient_no_end:
-        临时错误（TimeoutError 属 network 类）重试耗尽后应产 wait 挂起等待，
-        而非 end 终止管道。上游 LLM 抖动恢复后可继续，由 idle 总超时兜底。
-        永久错误（auth/quota/bad_request）才走 end。
+        BUG-FIX-fix_20260629_transient_no_recovery:
+        旧实现：3 次重试耗尽 → wait 挂起等待"恢复"，但 wait 没有主动唤醒源
+        会无限挂起 → pipeline 死挂数小时。
+        新实现：临时错误独立计数到 transient_max_retries（默认 10），耗尽
+        直接 failed，由 task 失败链通知父任务，避免死挂。
         """
         base_state[StateKeys.RAW_ERROR] = "TimeoutError: connection timed out"
-        base_state["retry.count"] = 3
-        plugin = ErrorCheckPlugin({"max_retries": 3})
+        base_state["retry.count"] = 0
+        base_state["retry.transient_count"] = 3
+        plugin = ErrorCheckPlugin(
+            {"max_retries": 3, "transient_max_retries": 3}
+        )
         result = await plugin.execute(ctx)
 
         assert result.route_signal is not None
-        assert result.route_signal.route_type == "wait"
+        assert result.route_signal.route_type == "end"
+        assert result.state_updates[StateKeys.EXECUTION_STATUS] == "failed"
 
     @pytest.mark.asyncio
     async def test_permanent_error_max_retries_yields_end(self, ctx, base_state):

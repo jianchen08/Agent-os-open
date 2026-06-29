@@ -65,7 +65,8 @@ class ErrorCheckPlugin(IOutputPlugin):
 
         Args:
             config: 插件配置字典，支持以下键：
-                - max_retries: 最大重试次数（默认 3）
+                - max_retries: 业务错误最大重试次数（默认 3）
+                - transient_max_retries: 临时错误最大重试次数（默认 10）
                 - check_empty_response: 是否检查空响应（默认 True）
                 - check_format_error: 是否检查格式错误（默认 True）
                 - check_tool_missing: 是否检查工具缺失（默认 True）
@@ -74,6 +75,13 @@ class ErrorCheckPlugin(IOutputPlugin):
         """
         self._config = config or {}
         self._max_retries = self._config.get("max_retries", 3)
+        # BUG-FIX-fix_20260629_transient_no_recovery:
+        # 旧实现临时错误（network/timeout/503/429）只重试 3 次，耗尽后产 `wait`
+        # 信号挂起等"恢复"，但 wait_event 没有任何主动唤醒源——上游恢复后没人
+        # 来 set，整条 pipeline 死挂 8+ 小时。新策略：临时错误单独计数，重试
+        # 10 次（覆盖一般上游抖动 ~10-20 分钟），仍失败则直接 failed，让父任务
+        # 走正常的 child_terminal 通知 → retry / 上抛失败链。
+        self._transient_max_retries = self._config.get("transient_max_retries", 10)
         self._check_empty = self._config.get("check_empty_response", True)
         self._check_format = self._config.get("check_format_error", True)
         self._check_tool_missing = self._config.get("check_tool_missing", True)
@@ -181,12 +189,13 @@ class ErrorCheckPlugin(IOutputPlugin):
         - tool_missing: 工具不存在或未注册
         - 其他: core_error（网络/超时/认证等）
 
-        错误处理分层（BUG-FIX-fix_20260624_transient_no_end）：
+        错误处理分层（BUG-FIX-fix_20260629_transient_no_recovery）：
         - **临时错误**（service_down / rate_limit / network / server_error）：
-          先 next_llm 短退避重试 _max_retries 次；耗尽后产 **wait** 信号
-          挂起等待（suspend_and_wait），由 idle 总超时兜底，绝不直接 end。
-          上游 LLM 抖动是常态，错误就等下次能调用时再调用，不应导致整条
-          pipeline 退出、子任务 failed、主管道死等。
+          走独立计数 `retry.transient_count`，next_llm 重试 _transient_max_retries
+          次（默认 10）。耗尽后 **直接 failed**（route=end），由 task 失败链
+          通知父任务。不再 route=wait——wait 没有主动唤醒源，会无限挂起。
+        - **业务可重试错误**（empty_response / format_error 等）：
+          走 _max_retries（默认 3）的旧路径，next_llm 重试。
         - **永久错误**（auth/quota/bad_request/strategy_error）：
           保持原 end 行为，这些是 LLM 无法自行恢复的。
 
@@ -199,6 +208,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         """
         error_str = str(error)
         retry_count = ctx.state.get("retry.count", 0)
+        transient_count = ctx.state.get("retry.transient_count", 0)
 
         category = "core_error"
         if self._check_tool_missing and self._is_tool_missing_error(error_str):
@@ -217,10 +227,55 @@ class ErrorCheckPlugin(IOutputPlugin):
             "category": category,
             "retry_count": retry_count,
             "transient": is_transient,
+            "transient_count": transient_count,
         }
 
+        # 临时错误单独走更大重试上限的路径（默认 10 次），上游短暂抖动期间持续重试。
+        # 与业务错误的 retry.count 分开计数，避免互相干扰。
+        if is_transient and retryable:
+            if transient_count < self._transient_max_retries:
+                return {
+                    StateKeys.EXECUTION_STATUS: "needs_retry",
+                    StateKeys.ERROR_ANALYSIS: analysis,
+                    "retry.transient_count": transient_count + 1,
+                    "error_check.last_error_type": category,
+                    "error_check.consecutive_same_type": consecutive,
+                    "__route_signal__": RouteSignal(
+                        route_type="next_llm",
+                        reason=(
+                            f"Transient {category} "
+                            f"(attempt {transient_count + 1}/"
+                            f"{self._transient_max_retries}): "
+                            f"{error_str[:100]}"
+                        ),
+                    ),
+                }
+            # 临时错误重试到上限：直接 failed，由 task 失败链通知父任务。
+            # 不再 route=wait 挂起等"恢复"——wait 没有主动唤醒源会死挂。
+            logger.warning(
+                "[error_check] 临时错误重试上限耗尽，置为 failed "
+                "(category=%s transient=%d/%d): %s",
+                category, transient_count, self._transient_max_retries,
+                error_str[:150],
+            )
+            return {
+                StateKeys.EXECUTION_STATUS: "failed",
+                StateKeys.ERROR_ANALYSIS: analysis,
+                "error_check.last_error_type": category,
+                "error_check.consecutive_same_type": consecutive,
+                "__route_signal__": RouteSignal(
+                    route_type="end",
+                    reason=(
+                        f"Transient {category} exhausted "
+                        f"({transient_count}/"
+                        f"{self._transient_max_retries}): "
+                        f"{error_str[:100]}"
+                    ),
+                ),
+            }
+
         if retryable and retry_count < self._max_retries:
-            # 可重试：产出 next_llm 信号
+            # 非临时但可重试的业务错误：走原 max_retries 路径
             return {
                 StateKeys.EXECUTION_STATUS: "needs_retry",
                 StateKeys.ERROR_ANALYSIS: analysis,
@@ -234,30 +289,6 @@ class ErrorCheckPlugin(IOutputPlugin):
                         f"(attempt {retry_count + 1}/"
                         f"{self._max_retries}): "
                         f"{error_str[:100]}"
-                    ),
-                ),
-            }
-
-        # 临时错误重试耗尽：挂起等待，由 idle 总超时兜底，绝不直接 end。
-        # 这样上游 LLM 恢复后（被触发器/新消息/重发唤醒），pipeline 能继续，
-        # 不会出现"子任务 failed → 主管道死等"的死锁链。
-        if is_transient:
-            logger.warning(
-                "[error_check] 临时错误重试耗尽，挂起等待恢复 "
-                "(category=%s retry=%d/%d): %s",
-                category, retry_count, self._max_retries, error_str[:150],
-            )
-            return {
-                StateKeys.EXECUTION_STATUS: "waiting_recovery",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="wait",
-                    reason=(
-                        f"Transient {category} exhausted retries "
-                        f"({retry_count}/{self._max_retries}), "
-                        f"suspending for recovery: {error_str[:80]}"
                     ),
                 ),
             }
