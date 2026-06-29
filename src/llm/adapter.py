@@ -477,9 +477,27 @@ class _BaseLiteLLMAdapter:
                 _open_and_first_chunk(), timeout=first_chunk_timeout
             )
         except StopAsyncIteration:
-            # 空流：_do_completion 返回的流没有任何 chunk，直接返回空响应。
-            # 此时 response 未绑定，无需 aclose。
-            return LLMResponse()
+            # 空流：服务端建连成功、HTTP 200，但流体一打开即 EOF（零 chunk）。
+            # 这不是"模型正常返回空内容"，而是首 token 永远不会到来——
+            # 与"等满 first_chunk_timeout 仍无首 token"是同一语义（首字节失败），
+            # 故纳入首 token 检测，复用 first chunk 超时的恢复链路。
+            # 日志证据（f56f6211bdc5 iter=7）：Calling@10:01:09 选用 key 后
+            # adapter 层 17s 零 [STREAM] 事件，raw_result=None 空转，msg 冻结，
+            # 直至 total_timeout 兜底——根因即此空流被当成空成功吞掉。
+            # resp 已在 _open_and_first_chunk 内部 aclose，此处无需再关。
+            logger.warning(
+                "[%s] STREAM EMPTY: 首字节即空流 (建连成功但零 chunk)"
+                " model=%s，按首 token 失败处理",
+                type(self).__name__, model,
+            )
+            raise litellm.Timeout(  # noqa: B904
+                message=(
+                    "Stream first chunk empty: server returned 200"
+                    " but zero chunks (premature EOF)"
+                ),
+                model=model,
+                llm_provider="zai",
+            )
         except asyncio.TimeoutError:
             logger.error(
                 "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs)"

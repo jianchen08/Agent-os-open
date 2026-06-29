@@ -254,3 +254,60 @@ async def test_heartbeat_cancelled_on_timeout() -> None:
         if id(t) not in before and not t.done()
     ]
     assert not new_pending, f"超时后不应残留悬挂任务（心跳泄漏）: {new_pending}"
+
+
+# ---------------------------------------------------------------------------
+# 5. 首字节即空流(建连成功但零 chunk / StopAsyncIteration) → 纳入首 token 检测
+# ---------------------------------------------------------------------------
+# 回归契约：服务端返回 HTTP 200 但流体打开即 EOF（零 chunk）时，首个
+# __anext__() 立即抛 StopAsyncIteration。这是"首 token 永远不会到来"的另一种
+# 表现，必须与 first chunk 超时同语义——抛 litellm.Timeout 走恢复链路，而非
+# 返回空 LLMResponse() 当成功吞掉（否则上层 raw_result=None 空转、msg 冻结，
+# 形成死循环直至 total_timeout 兜底）。
+# 日志证据：f56f6211bdc5 / f93755e82b8f / 3027a1b754b0 多个 L3 任务 CALL 无 DONE
+# 无 FAIL，chunk_timeouts=0，msg 恒定。
+
+@pytest.mark.asyncio
+async def test_empty_stream_treated_as_first_chunk_failure() -> None:
+    """首 __anext__() 即 StopAsyncIteration(零 chunk 空流) → 抛 litellm.Timeout。"""
+    # seq 为空：第一个 __anext__() 立即抛 StopAsyncIteration
+    stream = _FakeStream([])
+    adapter = _adapter_returning(stream)
+
+    with pytest.raises(litellm.Timeout) as exc_info:
+        await adapter.completion(
+            model="zai/glm-5.2",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            inter_chunk_timeout=100.0,
+            first_chunk_timeout=10.0,   # 远大于空流返回耗时，证明不是靠超时触发
+        )
+
+    msg = exc_info.value.message or ""
+    assert "empty" in msg.lower(), (
+        f"message 应说明是空流（首字节即空）而非普通超时: {msg!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_does_not_wait_full_timeout() -> None:
+    """空流应立即失败，不应等满 first_chunk_timeout（区别于首字节卡死超时）。"""
+    stream = _FakeStream([])
+    adapter = _adapter_returning(stream)
+
+    loop = asyncio.get_event_loop()
+    t0 = loop.time()
+    with pytest.raises(litellm.Timeout):
+        await adapter.completion(
+            model="zai/glm-5.2",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            inter_chunk_timeout=100.0,
+            first_chunk_timeout=5.0,
+        )
+    elapsed = loop.time() - t0
+
+    # 空流秒级返回，绝不该接近 5s 超时阈值
+    assert elapsed < 1.0, (
+        f"空流应立即失败，实际耗时 {elapsed:.2f}s（疑似退化成等满超时）"
+    )
