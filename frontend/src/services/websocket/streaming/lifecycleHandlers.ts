@@ -1,8 +1,4 @@
-/**
- * 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知）
- *
- * 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
- */
+/** 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。 */
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
@@ -11,20 +7,12 @@ import { generateUUID } from '@/utils/uuid'
 import { allocateNextSequence, terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
 
-/**
- * 处理 STATE_CHANGE 事件
- */
+/** 处理 STATE_CHANGE 事件 */
 export function handleStateChange(eventData: any): void {
   const status = eventData?.data?.status || eventData?.status
   const pipelineId = resolvePipelineId(eventData)
   const threadId = eventData?.data?.thread_id || eventData?.thread_id
 
-  // BUG-FIX-fix_20260617_state_change_whitelist:
-  // 问题根因: 原代码只处理 status === 'suspended'，遗漏 stopped/finished/failed/completed，
-  //   导致用户点"停止生成"或管道异常终止时，前端 streamingState 永远不被清理，UI 永久转圈。
-  // 修复方案: 扩展终态白名单，所有终态都调用 terminatePipeline 清理 streamingState。
-  // 影响范围: 停止按钮、异常终止、正常完成等场景的 streaming 清理
-  // 修复日期: 2026-06-17
   const TERMINAL_STATUSES = ['suspended', 'stopped', 'finished', 'failed', 'completed', 'cancelled']
   if (pipelineId && TERMINAL_STATUSES.includes(status)) {
     terminatePipeline(pipelineId, threadId)
@@ -32,12 +20,7 @@ export function handleStateChange(eventData: any): void {
   }
 }
 
-/**
- * 处理 WS 重连补漏
- *
- * 后端 session_manager 通过 missed_messages 事件主动推送补偿光标。
- * 前端只做必要的清理（stuck streaming parts）和基于 streamingState 的 fetch。
- */
+/** 处理 WS 重连补漏 后端 session_manager 通过 missed_messages 事件主动推送补偿光标。 */
 export function handleReconnected(): void {
   const pipelineStore = usePipelineMessageStore.getState()
   const streamingState = pipelineStore.streamingState
@@ -63,14 +46,7 @@ export function handleReconnected(): void {
   const streamingPipelineIds = Object.keys(streamingState).filter(
     (pipelineId) => streamingState[pipelineId]?.isStreaming,
   )
-  // BUG-FIX-fix_20260621_streaming_state_leak:
-  // 问题根因: 原代码仅跳过补漏 fetch，未调用 terminatePipeline 清理 streamingState，
-  //   导致旧 isStreaming=true 残留。用户发新消息时 stream_start 到达，
-  //   streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
-  // 修复方案: 对每个 streaming 管道调用 terminatePipeline 清理 streamingState，
-  //   同时将残留的 streaming 占位消息标记为 completed（避免 UI 永久转圈）。
-  // 影响范围: WS 重连后发送消息无 AI 回复的偶发 Bug
-  // 修复日期: 2026-06-21
+  // streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
   for (const pipelineId of streamingPipelineIds) {
     // 将残留的 streaming 占位消息标记为 completed，避免 UI 永久转圈
     const messages = pipelineStore.messagesByPipeline[pipelineId] || []
@@ -85,11 +61,6 @@ export function handleReconnected(): void {
     logger.info('[streaming] 终止残留流式管道 %s，清理 streamingState', pipelineId.slice(0, 12))
   }
 
-  // BUG-FIX-fix_20260617_streaming_gap_no_notify:
-  // 问题根因: WS 重连后跳过流式管道补漏 fetch，断连期间流式消息永久丢失，
-  //          且用户无任何感知。
-  // 修复方案: 补漏 fetch 存在竞态风险无法安全实现，至少通知用户流式消息可能丢失，
-  //          引导用户手动检查或刷新。
   if (streamingPipelineIds.length > 0) {
     useNotificationStore.getState().addNotification({
       title: '流式消息可能丢失',
@@ -102,14 +73,7 @@ export function handleReconnected(): void {
   }
 }
 
-/**
- * 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知）
- *
- * 系统消息气泡的唯一创建入口。后端通过 send_frontend_event 发送
- * system_notification WS 事件，此处接收并添加到管道消息列表。
- *
- * 去重策略：精确内容匹配（不使用 includes，避免相似内容被误判为重复）。
- */
+/** 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知） 系统消息气泡的唯一创建入口。后端通过 send_frontend_event 发送 */
 export function handleSystemNotification(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
   const data = eventData?.data || eventData
@@ -138,9 +102,7 @@ export function handleSystemNotification(eventData: any): void {
       return m.content === content
     })
     if (alreadyExists) {
-      // BUG-FIX-M03: WS handler 层 console 残留
-      // 问题根因: 降级去重路径用 console.warn 记录。
-      // 修复方案: 改用正式 logger.warn。
+      // -M03: WS handler 层 console 残留
       loggers.websocket.warn('[系统通知] notification_id 缺失，使用内容去重: %.40s', content.slice(0, 40))
       return
     }

@@ -1,9 +1,4 @@
-/**
- * GlobalWebSocket 单元测试
- *
- * 测试全局 WebSocket 服务的重连参数、状态转换、心跳机制。
- * 使用 vi.useFakeTimers 控制时间以避免真实等待。
- */
+/** GlobalWebSocket 单元测试 测试全局 WebSocket 服务的重连参数、状态转换、心跳机制。 */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
@@ -115,10 +110,7 @@ beforeEach(async () => {
 
 // ── 辅助函数 ──
 
-/**
- * 创建一个新的 GlobalWebSocketService 实例
- * 因为 globalWS 是模块级单例，测试需要刷新模块来获取干净实例
- */
+/** 创建一个新的 GlobalWebSocketService 实例 因为 globalWS 是模块级单例，测试需要刷新模块来获取干净实例 */
 async function createService(): Promise<{
   service: any
   connect: (token: string) => void
@@ -163,18 +155,14 @@ async function createService(): Promise<{
   }
 }
 
-/**
- * 模拟成功连接：先触发 connect → 推进 timer → 触发 onopen
- */
+/** 模拟成功连接：先触发 connect → 推进 timer → 触发 onopen */
 function simulateSuccessfulOpen(ws: MockWebSocketInstance): void {
   if (ws.onopen) {
     ws.onopen({})
   }
 }
 
-/**
- * 模拟连接关闭
- */
+/** 模拟连接关闭 */
 function simulateClose(ws: MockWebSocketInstance, code: number = 1000, reason: string = ''): void {
   if (ws.onclose) {
     ws.onclose({ code, reason })
@@ -482,7 +470,7 @@ describe('GlobalWebSocketService', () => {
       // 因此此处直接模拟心跳超时导致的 ws.close(2002) 行为，
       // 验证 onclose 对心跳超时关闭的处理是否正确。
       // 心跳超时使用 code=2002（TIMEOUT），与认证拒绝 code=4001 区分（见
-      // BUG-FIX-fix_20260624_ws_reconnect_dead_loop）：心跳超时走普通重连，不触发 token 刷新。
+      // ）：心跳超时走普通重连，不触发 token 刷新。
       ws.close(2002, '心跳超时')
 
       // ws.close(4001) → onclose → _scheduleReconnect → status = 'reconnecting'
@@ -495,13 +483,11 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
-    it('心跳超时应给 ack 留容错：30~45s 内收到 ack 不应断连（BUG-FIX-fix_20260628_heartbeat_zero_margin）', async () => {
-      // 历史问题: HEARTBEAT_TIMEOUT === HEARTBEAT_INTERVAL === 30s，零容错。
-      //   后端 ack 稍慢（事件循环繁忙、网络抖动）就误判连接死亡 → 频繁误断。
-      //   LLM 流式期间后端事件循环负载高，heartbeat_ack 响应极易突破 30s。
+    it('心跳超时应给 ack 留容错：30~45s 内收到 ack 不应断连', async () => {
+      // LLM 流式期间后端事件循环负载高，heartbeat_ack 响应极易突破 30s。
       // 修复: TIMEOUT 提到 45s，明确大于 INTERVAL，给 ack 留容错。
       // 回归契约: 在 30s（INTERVAL）之后、45s（TIMEOUT）之前收到 heartbeat_ack，
-      //   连接必须仍然存活（ws.close 未因超时被调用）。
+      // 连接必须仍然存活（ws.close 未因超时被调用）。
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
@@ -658,9 +644,7 @@ describe('GlobalWebSocketService', () => {
   // 7. sendCancel pipelineId 参数测试
   // ──────────────────────────────────────────────
   describe('sendCancel - pipelineId 参数', () => {
-    /**
-     * 辅助函数：建立连接并返回最近一次 WS 实例
-     */
+    /** 辅助函数：建立连接并返回最近一次 WS 实例 */
     async function setupConnected() {
       const { service, connect, getLatestWs, disconnect } = await createService()
       connect('test-token')
@@ -670,9 +654,7 @@ describe('GlobalWebSocketService', () => {
       return { service, ws, disconnect }
     }
 
-    /**
-     * 辅助函数：从 ws.send 的调用记录中提取所有已发送消息的解析结果
-     */
+    /** 辅助函数：从 ws.send 的调用记录中提取所有已发送消息的解析结果 */
     function getSentMessages(ws: MockWebSocketInstance) {
       return ws.send.mock.calls.map((call: string[]) => {
         try { return JSON.parse(call[0]) } catch { return null }

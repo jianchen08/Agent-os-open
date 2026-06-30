@@ -1,8 +1,4 @@
-/**
- * UI Schema 解析器
- *
- * 解析后端模块的 UI Schema，输出类型安全的解析结果
- */
+/** UI Schema 解析器 解析后端模块的 UI Schema，输出类型安全的解析结果 */
 
 import type {
   ModuleUISchema,
@@ -11,12 +7,7 @@ import type {
   ResolvedDataSource,
 } from '@/types/schema'
 
-/**
- * 解析模块 UI Schema
- *
- * @param schema - 原始模块 Schema 对象
- * @returns 包含解析结果和时间戳的 ParsedSchema
- */
+/** 解析模块 UI Schema */
 export function parseSchema(schema: ModuleUISchema): ParsedSchema {
   return {
     raw: schema,
@@ -29,12 +20,7 @@ export function parseSchema(schema: ModuleUISchema): ParsedSchema {
   }
 }
 
-/**
- * 计算 Schema 版本哈希
- *
- * @param schema - 模块 Schema 对象
- * @returns 基于 Schema 内容计算的哈希字符串
- */
+/** 计算 Schema 版本哈希 */
 function computeSchemaHash(schema: ModuleUISchema): string {
   const raw = JSON.stringify(schema)
   let hash = 0
@@ -46,14 +32,7 @@ function computeSchemaHash(schema: ModuleUISchema): string {
   return hash.toString(36)
 }
 
-/**
- * 解析数据源引用
- * 格式：module://collection 或 module://collection?param=value
- *
- * @param ref - 数据源引用字符串
- * @returns 解析后的 DataSourceRef 对象
- * @throws 当引用格式无效时抛出错误
- */
+/** 解析数据源引用 格式：module://collection 或 module://collection?param=value */
 export function parseDataSourceRef(ref: string): DataSourceRef {
   const match = ref.match(/^([\w-]+):\/\/([^\?]+)(?:\?(.+))?$/)
   if (!match) {
@@ -77,22 +56,12 @@ export function parseDataSourceRef(ref: string): DataSourceRef {
   }
 }
 
-/**
- * 解析数据源引用为 API 端点
- *
- * @param ref - 数据源引用对象
- * @returns 包含端点、方法和参数的 ResolvedDataSource
- */
+/** 解析数据源引用为 API 端点 */
 export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
   let endpoint: string
 
-  // BUG-FIX-fix_20260512_001: workspace:// 协议特殊处理
-  // 问题根因: resolveDataSource 将所有协议统一解析为 /api/modules/{moduleId}/data/{collection}，
-  //           导致 workspace://{containerId} 被解析为 /api/modules/workspace/data/{containerId}，
-  //           该端点不存在，返回 404。
-  // 修复方案: 对 workspace:// 协议单独映射到 /api/v1/workspaces/{containerId}/file-tree
-  // 影响范围: 工作区面板文件树加载
-  // 修复日期: 2026-05-12
+ // workspace:// 协议特殊处理
+  // 该端点不存在，返回 404。
   if (ref.moduleId === 'workspace') {
     endpoint = `/api/v1/workspaces/${ref.collection}/file-tree`
   } else {
@@ -116,12 +85,7 @@ export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
   }
 }
 
-/**
- * 验证 Schema 格式
- *
- * @param schema - 待验证的 Schema 对象
- * @returns 类型谓词，判断是否为有效的 ModuleUISchema
- */
+/** 验证 Schema 格式 */
 export function validateSchema(schema: unknown): schema is ModuleUISchema {
   if (!schema || typeof schema !== 'object') return false
   const s = schema as Record<string, unknown>

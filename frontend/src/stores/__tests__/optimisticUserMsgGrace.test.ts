@@ -1,9 +1,4 @@
-/**
- * 乐观 user 消息宽限期保留测试
- *
- * BUG-FIX-fix_20260623_optimistic_user_msg_vanish:
- * 验证刚发送的乐观 user 消息在后端尚未持久化时（initFromAPI 未返回）不会被丢弃。
- */
+/** 乐观 user 消息宽限期保留测试 */
 import { describe, it, expect, beforeEach } from 'vitest'
 import { usePipelineMessageStore } from '../pipelineMessageStore'
 import type { Message } from '@/types/models'

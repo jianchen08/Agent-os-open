@@ -1,13 +1,4 @@
-"""任务服务模块 — 门面模式组合类。
-
-将 TaskService 的职责按以下 Mixin 拆分：
-- _TaskCrudMixin: 创建、查询、字段更新与基础删除
-- _TaskStateMixin: 状态转换、幽灵清理与评估完成
-- _TaskCleanupMixin: 工作空间清理、级联删除与容器管理
-
-本文件保留 TaskService 门面类（__init__ + 事件回调），
-通过多重继承组合三个 Mixin，所有公共接口不变。
-"""
+"""任务服务模块 — 门面模式组合类。"""
 
 from __future__ import annotations
 
@@ -28,26 +19,13 @@ StateChangeCallback = Callable[[str, str, str], Awaitable[None]]
 
 
 def _default_data_dir() -> str:
-    """推断任务 YAML 数据目录。
-
-    service.py 位于 src/tasks/，data 目录位于项目根目录下 data/tasks/。
-    """
+    """推断任务 YAML 数据目录。"""
     # src/tasks/service.py → src/tasks/ → src/ → project_root/
     return str(Path(__file__).resolve().parent.parent.parent / "data" / "tasks")
 
 
 class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
-    """任务服务类。
-
-    门面模式服务，通过多重继承组合 CRUD / 状态转换 / 资源清理三个 Mixin，
-    提供全部任务的 CRUD 和状态操作。
-
-    Args:
-        task_id: 任务 ID（保留参数，兼容外部调用签名）
-        initial_state: 初始状态（已弃用，保留参数签名兼容）
-        event_bus: 可选的事件总线实例，用于发布任务状态变更事件
-        data_dir: YAML 存储目录（门面模式使用，None 时自动推断）
-    """
+    """任务服务类。"""
 
     def __init__(
         self,
@@ -69,19 +47,11 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
             self._storage = TaskStorage(data_dir=_dir)
 
     def register_state_callback(self, callback: StateChangeCallback) -> None:
-        """注册任务状态变更回调函数。
-
-        Args:
-            callback: 异步回调函数，签名为 async (task_id, old_status, new_status) -> None
-        """
+        """注册任务状态变更回调函数。"""
         self._state_callbacks.append(callback)
 
     def unregister_state_callback(self, callback: StateChangeCallback) -> None:
-        """注销任务状态变更回调函数。
-
-        Args:
-            callback: 之前注册的回调函数
-        """
+        """注销任务状态变更回调函数。"""
         if callback in self._state_callbacks:
             self._state_callbacks.remove(callback)
 
@@ -91,13 +61,7 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         old_status: str,
         new_status: str,
     ) -> None:
-        """通知所有注册的回调函数任务状态已变更，并通过 WebSocket 推送事件。
-
-        Args:
-            task_id: 任务 ID
-            old_status: 原状态
-            new_status: 新状态
-        """
+        """通知所有注册的回调函数任务状态已变更，并通过 WebSocket 推送事件。"""
         # 绑定日志上下文，使后续日志自动携带 task_id
         from src.core.logging import LogContext  # noqa: PLC0415
         LogContext.bind(task_id=task_id)
@@ -146,13 +110,6 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
                 )
                 return
 
-            # BUG-FIX-fix_20260625_task_status_changed_no_module_api:
-            # 问题根因: 原实现 from api.websocket.message_bus import ... 引用了不存在的
-            #   api 包（No module named 'api'），导致 task_status_changed 事件永远推送失败。
-            #   前端 useRealtimeEvents 订阅了 task_status_changed 但永远收不到，
-            #   任务树/工作区在工具调用循环期间不刷新，表现为「消息闪一下就没了」。
-            # 修复方案: 改用 ws_interaction_notifier.send_to_user（与 task_notifier.py
-            #   推送 task_status_update 相同的有效路径），直接通过全局 WS 连接投递。
             from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
 
             _user_id = (task.metadata.get("user_id") if task.metadata else "") or ""

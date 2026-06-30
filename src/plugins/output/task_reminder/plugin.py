@@ -1,10 +1,4 @@
-"""任务评估提醒 Output 插件。
-
-在 LLM 只输出纯文本（没有工具调用）时，注入系统提醒消息，
-触发新一轮 LLM 调用，提醒大模型提交评估或输出评估结果。
-
-对应旧代码的 should_continue → TaskEvaluationStrategy → evaluate_reminder_node 流程。
-"""
+"""任务评估提醒 Output 插件。"""
 
 from __future__ import annotations
 
@@ -20,19 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class TaskReminder(IOutputPlugin):
-    """任务评估提醒 Output 插件。
-
-    检测 LLM 只输出纯文本（没有工具调用）时，根据任务模式注入不同的提醒消息，
-    并通过 route_signal=next_llm 触发新一轮 LLM 调用。
-
-    两种模式：
-    - 执行者模式（默认）：提醒"完成任务后使用 task_evaluate 工具提交评估"
-    - 评估者模式（evaluation_mode=True）：提醒"输出结构化的评估结果"
-
-    Attributes:
-        max_reminders: 最大提醒次数（默认 3）
-        cooldown_seconds: 提醒冷却秒数（默认 300）
-    """
+    """任务评估提醒 Output 插件。"""
 
     error_policy = ErrorPolicy.SKIP
 
@@ -53,19 +35,7 @@ class TaskReminder(IOutputPlugin):
         return self._config.get("priority", 35)
 
     async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911,PLR0912,PLR0915
-        """执行任务评估提醒检测。
-
-        触发条件（BUG-FIX-fix_20260624_task_reminder_loop）：
-        1. core_type 为 llm_call（仅 LLM 输出阶段，非工具执行后）
-        2. 有 task_id（在任务上下文中）
-        3. **非 L1 调度层**：L1 的纯文本输出是正常调度汇报，不该被催
-        4. **任务没有活跃下级**：有下级任务说明在等子任务，不该催当前任务
-        5. **LLM 这一轮没调工具（只输出纯文本）**：正在调工具说明有进展，不催；
-           只在 LLM"光说不练"时才提醒它该提交 task_evaluate 了
-        6. 提醒次数未超限
-
-        满足条件时注入系统提醒消息到 messages，触发 next_llm。
-        """
+        """执行任务评估提醒检测。"""
         self._apply_runtime_config(ctx)
 
         state = ctx.state
@@ -142,16 +112,6 @@ class TaskReminder(IOutputPlugin):
         has_tool_calls = bool(raw_tool_calls)
         has_text = bool(raw_result and str(raw_result).strip())
 
-        # BUG-FIX-fix_20260625_reminder_on_empty_output:
-        # 历史逻辑在 has_text 和 has_tool_calls 同时为 False（本轮 LLM 无输出，
-        # 如流式截断/调用失败）时，回退到 _last_assistant_has_text 去历史消息
-        # 里捞旧文本，把"本轮空输出"误判成"有文本输出"，从而触发 reminder。
-        # 这会导致 LLM 一旦某轮输出为空就被 reminder 反复催促，形成死循环。
-        #
-        # 回退逻辑只保留它原本的用途：本轮 LLM 返回了 tool_calls 但文本被
-        # output_repetition_guard 等前置插件清空（has_tool_calls=True 且 has_text=False）
-        # 时，从 messages 里确认 LLM 确实输出过文本（用于评估模式判定）。
-        # 绝不在本轮完全无输出时用历史文本伪装成有输出。
         if not has_text and has_tool_calls:
             has_text = self._last_assistant_has_text(state)
 
@@ -286,18 +246,7 @@ class TaskReminder(IOutputPlugin):
 
     @staticmethod
     def _detect_evaluation_result_json(text: str) -> dict[str, Any] | None:
-        """检测文本中是否包含有效的 evaluation_result JSON。
-
-        从文本中提取所有 JSON 候选块，尝试解析并检查是否包含
-        evaluation_result 或直接的 passed/score 字段。
-
-        Args:
-            text: LLM 输出的原始文本
-
-        Returns:
-            解析后的评估结果字典（含 passed/score/feedback/suggestions），
-            未检测到时返回 None
-        """
+        """检测文本中是否包含有效的 evaluation_result JSON。"""
         candidates = []
 
         brace_depth = 0
@@ -365,17 +314,7 @@ class TaskReminder(IOutputPlugin):
 
     @staticmethod
     def _last_assistant_has_text(state: dict[str, Any]) -> bool:
-        """检查 messages 中最后一条 assistant 消息是否有文本内容。
-
-        当 output_repetition_guard 等前置插件清空 raw_result 后，
-        messages 中仍保留 LLM 的原始文本输出，作为回退检测手段。
-
-        Args:
-            state: 管道状态字典
-
-        Returns:
-            最后一条 assistant 消息是否有非空文本
-        """
+        """检查 messages 中最后一条 assistant 消息是否有文本内容。"""
         messages = state.get("messages", [])
         for msg in reversed(messages):
             if isinstance(msg, dict) and msg.get("role") == "assistant":
@@ -386,24 +325,11 @@ class TaskReminder(IOutputPlugin):
         return False
 
     def _is_evaluation_mode(self, state: dict[str, Any]) -> bool:
-        """判断当前是否为评估者模式。
-
-        由 agent YAML 中 plugins.enabled.task_reminder.evaluation_mode
-        控制，通过 PipelineEngine._apply_agent_plugin_configs 合并到
-        插件构造配置。
-        """
+        """判断当前是否为评估者模式。"""
         return bool(self._evaluation_mode)
 
     def _build_reminder(self, state: dict[str, Any], count: int) -> str:
-        """根据任务模式构建提醒内容。
-
-        Args:
-            state: 管道状态字典
-            count: 当前提醒次数
-
-        Returns:
-            提醒消息字符串
-        """
+        """根据任务模式构建提醒内容。"""
         task_id = state.get("task_id", "")
 
         if self._is_evaluation_mode(state):
@@ -442,14 +368,7 @@ class TaskReminder(IOutputPlugin):
         return "\n".join(parts)
 
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从 Agent 配置覆盖运行时参数。
-
-        优先使用 Agent YAML 中配置的 max_reminders / max_iterations
-        覆盖构造时的默认值。
-
-        Args:
-            ctx: 插件执行上下文
-        """
+        """从 Agent 配置覆盖运行时参数。"""
         agent_max_reminders = ctx.state.get("max_reminders")
         if agent_max_reminders is not None and agent_max_reminders > 0:
             self._max_reminders = agent_max_reminders

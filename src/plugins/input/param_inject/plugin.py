@@ -1,14 +1,4 @@
-"""参数注入 Input 插件。
-
-负责在管道循环的输入阶段为工具调用注入运行时参数，
-包括会话 ID、用户信息、时间戳等上下文参数，
-以及工具特定的默认参数填充。
-
-M6b 阶段：从旧代码 isolation/tools.py 的参数预处理逻辑迁移。
-
-State 命名空间：
-    - tool.params_injected : 本插件标记参数已注入
-"""
+"""参数注入 Input 插件。"""
 
 from __future__ import annotations
 
@@ -26,15 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_project_root() -> Path | None:
-    """推导 Agent OS 项目根目录。
-
-    从本文件（param_inject.py）向上逐级查找，找到同时包含
-    config/ 和 src/ 目录的祖先目录即为项目根目录。
-    结果会被缓存到模块级变量以避免重复计算。
-
-    Returns:
-        项目根目录的 Path 对象，未找到时返回 None
-    """
+    """推导 Agent OS 项目根目录。"""
     if _resolve_project_root._cached is not None:
         return _resolve_project_root._cached
 
@@ -51,31 +33,12 @@ _resolve_project_root._cached: Path | None = None
 
 
 class ParamInjectPlugin(IInputPlugin):
-    """参数注入 Input 插件。
-
-    在工具执行前为工具调用参数注入运行时上下文信息，
-    例如会话 ID、用户 ID、时间戳等。同时支持为特定工具
-    填充默认参数值。
-
-    优先级：20（准备级，在安全检查之前完成参数注入）
-    错误策略：ABORT（参数注入失败工具无法执行）
-
-    Attributes:
-        _config: 插件配置字典
-    """
+    """参数注入 Input 插件。"""
 
     error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
-        """初始化参数注入插件。
-
-        Args:
-            config: 插件配置字典，支持以下键：
-                - inject_session_id: 是否注入会话 ID（默认 True）
-                - inject_user_id: 是否注入用户 ID（默认 True）
-                - inject_timestamp: 是否注入时间戳（默认 True）
-                - default_params: 工具默认参数映射 {tool_name: {param: value}}
-        """
+        """初始化参数注入插件。"""
         self._config = config or {}
         self._inject_session_id = self._config.get("inject_session_id", True)
         self._inject_user_id = self._config.get("inject_user_id", True)
@@ -93,28 +56,12 @@ class ParamInjectPlugin(IInputPlugin):
         return self._config.get("priority", 20)
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
-        """执行参数注入。
-
-        为 state 中的工具调用参数注入运行时上下文信息。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            包含注入参数状态更新的插件执行结果
-        """
+        """执行参数注入。"""
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
-        """执行参数注入逻辑。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            更新后的工具调用参数字典
-        """
+        """执行参数注入逻辑。"""
         updates: dict[str, Any] = {}
 
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
@@ -182,13 +129,7 @@ class ParamInjectPlugin(IInputPlugin):
             if self._inject_timestamp and "timestamp" not in args:
                 args["timestamp"] = datetime.now(UTC).isoformat()
 
-            # BUG-FIX-fix_20260418_task_inject: 注入 task_id
-            # 问题根因: task_evaluate 声明 injected_params=["task_id"] 但实际注入链断裂
-            # 修复方案: 在 ParamInjectPlugin 中补充 task_id 注入，从 state 获取
-            # 影响范围: 所有声明 injected_params 含 task_id 的工具
-            #
-            # BUG-FIX-fix_20260619_l2_parent_task_id_lost:
-            # 原条件 `if "task_id" not in args` 在 LLM 传入空值
+            # 注入 task_id
             # （task_id=null/""）时仍判定为「已存在」而跳过注入，
             # 导致 L2 task_submit 拿不到 parent_task_id，报
             # L2_REQUIRES_PARENT_TASK。注入参数是系统权威值，

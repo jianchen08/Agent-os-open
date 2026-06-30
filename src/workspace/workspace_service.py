@@ -1,8 +1,4 @@
-"""工作空间服务。
-
-提供容器任务级别的工作空间管理，聚合展示文档目录和制品。
-纯内存存储。
-"""
+"""工作空间服务。"""
 
 from __future__ import annotations
 
@@ -34,11 +30,7 @@ def reset_workspace_service() -> None:
 
 
 class WorkspaceService:
-    """工作空间服务（纯内存版）。
-
-    使用内存 dict 存储 Workspace，
-    支持容器任务解析、文件树生成和制品聚合。
-    """
+    """工作空间服务（纯内存版）。"""
 
     def __init__(self) -> None:
         self._workspaces: dict[str, Workspace] = {}
@@ -50,19 +42,7 @@ class WorkspaceService:
         title: str = "",
         description: str = "",
     ) -> Workspace:
-        """获取或创建工作空间。
-
-        按 container_task_id 查找，不存在则创建。
-
-        Args:
-            container_task_id: 容器任务 ID
-            session_id: 关联会话 ID
-            title: 工作空间标题
-            description: 工作空间描述
-
-        Returns:
-            Workspace 实例
-        """
+        """获取或创建工作空间。"""
         ws = self._workspaces.get(container_task_id)
         if ws:
             return ws
@@ -89,13 +69,7 @@ class WorkspaceService:
         self,
         container_task_id: str,
     ) -> dict[str, Any]:
-        """聚合工作空间下所有制品。
-
-        通过容器任务找到其下所有子任务，再聚合所有制品。
-
-        Returns:
-            {"items": [...], "total": int}
-        """
+        """聚合工作空间下所有制品。"""
         ws = self._workspaces.get(container_task_id)
         if not ws:
             return {"items": [], "total": 0}
@@ -122,17 +96,7 @@ class WorkspaceService:
         container_task_id: str,
         base_path: str | None = None,
     ) -> dict[str, Any]:
-        """生成文件目录树。
-
-        扫描沙盒目录动态生成文件树结构。
-
-        Args:
-            container_task_id: 容器任务 ID
-            base_path: 扫描的基础路径（可选）
-
-        Returns:
-            {"tree": [...]}
-        """
+        """生成文件目录树。"""
         if base_path and os.path.isdir(base_path):  # noqa: PTH112
             tree = await asyncio.to_thread(self._scan_directory, base_path, base_path)
         else:
@@ -148,18 +112,7 @@ class WorkspaceService:
         return {"tree": [n.to_dict() for n in tree]}
 
     async def resolve_container_task(self, task_id: str) -> str:
-        """解析任务到容器任务。
-
-        策略：
-        1. 任务本身是容器任务（无 parent_task_id 或 metadata.is_container=true）
-        2. 向上递归查找根任务
-
-        Args:
-            task_id: 任务 ID
-
-        Returns:
-            容器任务 ID
-        """
+        """解析任务到容器任务。"""
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
@@ -197,10 +150,7 @@ class WorkspaceService:
             return task_id
 
     async def _get_child_task_ids(self, container_task_id: str) -> set[str]:
-        """获取容器任务下所有子任务 ID。
-
-        使用 list_subtasks 递归查询，避免加载全部任务。
-        """
+        """获取容器任务下所有子任务 ID。"""
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
@@ -240,17 +190,7 @@ class WorkspaceService:
         max_depth: int = 5,
         current_depth: int = 0,
     ) -> list[FileTreeNode]:
-        """扫描目录生成文件树。
-
-        Args:
-            path: 当前扫描路径
-            base_path: 根路径（用于计算相对路径）
-            max_depth: 最大扫描深度
-            current_depth: 当前深度
-
-        Returns:
-            FileTreeNode 列表
-        """
+        """扫描目录生成文件树。"""
         if current_depth >= max_depth:
             return []
 
@@ -261,14 +201,6 @@ class WorkspaceService:
             return []
 
         for entry in entries:
-            # BUG-FIX-fix_20260623_hidden_files:
-            # 问题根因: 此前 entry.startswith(".") 把所有隐藏文件/目录
-            #           （.git、.env、.gitignore、.vscode 等）全部过滤掉，
-            #           导致前端文件树永远看不到这些文件。
-            # 修复方案: 不再按前缀过滤隐藏文件，始终返回给前端展示。
-            #          仅保留对文件浏览无用/有害的条目：
-            #          - __pycache__：Python 字节码缓存，无浏览价值
-            #          - Windows 保留设备名 / UNC 设备路径：避免误访问
             if entry == "__pycache__":
                 continue
 

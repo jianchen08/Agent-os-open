@@ -1,19 +1,13 @@
-/**
- * 重试工具函数
- */
+/** 重试工具函数 */
 
-/**
- * 重试选项接口（兼容API调用）
- */
+/** 重试选项接口（兼容API调用） */
 export interface RetryOptions {
   retry?: boolean
   maxRetries?: number
   retryDelay?: number
 }
 
-/**
- * 判断错误是否可重试
- */
+/** 判断错误是否可重试 */
 export function isRetryableError(error: any): boolean {
   if (!error) return false
 
@@ -31,7 +25,6 @@ export function isRetryableError(error: any): boolean {
 
   const status = error.response?.status ?? error.status
   if (status) {
-    // BUG-FIX-fix_20260512_429_retry:
     // 将 429（请求过于频繁）也视为可重试错误
     return status === 429 || (status >= 500 && status < 600)
   }
@@ -39,16 +32,12 @@ export function isRetryableError(error: any): boolean {
   return false
 }
 
-/**
- * 延迟函数
- */
+/** 延迟函数 */
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/**
- * 重试装饰器
- */
+/** 重试装饰器 */
 export async function retry<T>(
   fn: () => Promise<T>,
   options: {
@@ -79,9 +68,7 @@ export async function retry<T>(
   throw lastError
 }
 
-/**
- * 带重试的请求包装器（兼容现有API调用）
- */
+/** 带重试的请求包装器（兼容现有API调用） */
 export async function requestWithRetry<T>(
   requestFn: () => Promise<T>,
   options: RetryOptions = {},

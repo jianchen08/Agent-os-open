@@ -1,17 +1,4 @@
-"""后台任务执行 Mixin。
-
-
-
-负责后台任务的完整执行生命周期：PipelineEngine 创建、执行、
-
-挂起/恢复、超时处理、管道取消等。
-
-
-
-从 task_worker.py 拆分而出，降低原文件复杂度。
-
-"""
-
+"""后台任务执行 Mixin。"""
 
 
 from __future__ import annotations
@@ -31,7 +18,6 @@ if TYPE_CHECKING:
     from infrastructure.protocols import MemoryStoreProtocol
 
 
-
 from infrastructure.task_context import TaskExecutionContext
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
 from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F401
@@ -39,29 +25,12 @@ from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F
 logger = logging.getLogger(__name__)
 
 
-
-
-
 # _run_engine_isolated 已删除：engine.run() 作为 asyncio.Task 在主事件循环中运行
-
-
-
 
 
 class TaskExecutorMixin:
 
-    """后台任务执行混入类。
-
-
-
-    提供 _execute_background_task、cancel_pipeline、_resolve_task_workspace
-
-    及管道执行辅助方法，由 TaskWorker 通过多继承组合使用。
-
-    idle 计时器相关方法由 TaskIdleTimerMixin 提供。
-
-    """
-
+    """后台任务执行混入类。"""
 
 
     def _resolve_isolation_mode(self, task_data: dict[str, Any], task_obj: Any = None) -> str:
@@ -91,27 +60,14 @@ class TaskExecutorMixin:
         return ""
 
 
-
     async def _execute_background_task(self, task_data: dict[str, Any], ctx: TaskExecutionContext) -> None:  # noqa: PLR0911,PLR0912,PLR0915
 
-        """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。
-
-
-
-        Args:
-
-            task_data: 任务提交事件中的数据字典
-
-            ctx: 任务执行上下文
-
-        """
-
+        """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。"""
 
 
         task_id = task_data.get("task_id", "unknown")
 
         logger.debug("TaskWorker: _execute_background_task 开始 | task=%s", task_id)
-
 
 
         # 从 services / 注入参数获取 WS 上下文
@@ -135,7 +91,6 @@ class TaskExecutorMixin:
         _parent_pipeline_id = task_data.get("pipeline_id", "")
 
 
-
         # 尝试从注册表获取当前管道的 thread_id
 
         if _parent_pipeline_id:
@@ -149,11 +104,9 @@ class TaskExecutorMixin:
                 _ws_thread_id = _entry.thread_id or ""
 
 
-
         target_id = task_data.get("target_id", "")
 
         task_service = self._task_service
-
 
 
         # 从 task.metadata 提取上下文身份（user_id / session_id），播种到管道 state 与
@@ -193,7 +146,6 @@ class TaskExecutorMixin:
             )
 
 
-
         # ── 0. 容器任务处理 ──
 
         if task_service:
@@ -209,7 +161,6 @@ class TaskExecutorMixin:
                 return
 
 
-
         # ── 1. 加载 AgentConfig ──
 
         agent_config = await self._load_agent_config(task_id, target_id, task_service)
@@ -217,7 +168,6 @@ class TaskExecutorMixin:
         if agent_config is None:
 
             return
-
 
 
         # ── 2. 启动任务 (pending → running) ──
@@ -245,7 +195,6 @@ class TaskExecutorMixin:
                 await task_service.fail_task(task_id, f"启动失败: {e}")
 
                 return
-
 
 
         # ── 3. 构建完整的 user_input ──
@@ -291,11 +240,9 @@ class TaskExecutorMixin:
             task_data["_has_explicit_workspace"] = bool(explicit_workspace)
 
 
-
             # HOST模式支持：将 isolation_level 传递给 lifecycle，用于工作空间创建决策
 
             task_obj = self._task_service.get_task(task_id) if self._task_service else None
-
 
 
             # ── 注入隔离模式配置 ──
@@ -303,7 +250,6 @@ class TaskExecutorMixin:
             # 优先使用 LLM 传入的 isolation_level
 
             task_data["isolation_mode"] = self._resolve_isolation_mode(task_data, task_obj)
-
 
 
             if task_obj and task_obj.metadata:
@@ -315,11 +261,9 @@ class TaskExecutorMixin:
                     task_data["isolation_level"] = iso_level
 
 
-
             # ── 3.x.0 等待父容器工作空间就绪（解决竞态条件） ──
 
             await self._wait_for_parent_container(task_id, task_service)
-
 
 
             # ── 3.x 生命周期钩子：任务启动 + 工作空间状态注入 ──
@@ -395,7 +339,6 @@ class TaskExecutorMixin:
                     return
 
 
-
             # ── 3.x 构建完整输入 ──
 
             full_input = await self._build_full_task_input(
@@ -417,7 +360,6 @@ class TaskExecutorMixin:
             )
 
 
-
         # ── 4.5 检查是否已有 pipeline_run_id（重试时复用） ──
 
         existing_pipeline_id = None
@@ -431,7 +373,6 @@ class TaskExecutorMixin:
                 existing_pipeline_id = _task_for_id.pipeline_run_id
 
 
-
         # pipe 继承：从源任务的 pipeline 恢复对话历史
 
         _inherit_pipe_pipeline_id = task_data.get("_inherit_pipe_pipeline_id")
@@ -439,7 +380,6 @@ class TaskExecutorMixin:
         # task_submit 预生成的 pipeline_id（pipe 继承时已同步 clone 好历史到该管道）。
         # 引擎复用它，避免重复 clone；None 表示非继承或 task_submit 未预生成。
         _pre_pipeline_id = task_data.get("_pre_pipeline_id")
-
 
 
         # ── 5. 注册管道 + 发送任务输入 ──
@@ -451,9 +391,7 @@ class TaskExecutorMixin:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
 
-
             _registry = get_engine_registry()
-
 
 
             _reg_result = _registry.register_pipeline(
@@ -501,11 +439,9 @@ class TaskExecutorMixin:
                 return
 
 
-
             engine = _reg_result.engine
 
             pipeline_id = engine.pipeline_id
-
 
 
             # 记录引擎实例 id，供 cleanup 回调判断是否仍是同一引擎
@@ -513,11 +449,9 @@ class TaskExecutorMixin:
             ctx._active_engine_id = id(engine)
 
 
-
             await self._bind_pipeline_run(task_id, pipeline_id, task_service, _ws_thread_id)
 
             await self._send_sub_agent_created_event(task_id, target_id, pipeline_id, task_data)
-
 
 
             ctx.idle_timer_registered = await self._register_idle_timer(
@@ -529,15 +463,6 @@ class TaskExecutorMixin:
             if not ctx.idle_timer_registered and timer_manager:
 
                 return
-
-            # 注册任务总超时硬墙（独立于 idle，活跃也强制 fail）
-            # 优先级：per-agent AgentConfig.timeout_seconds（>0 生效，-1=不限）
-            #         > 按 agent_level fallback（L1 不限 / L2 9000s / L3 3600s）
-            self._register_total_timeout(
-                task_id, task_data, agent_config,
-                task_service, timer_manager, ctx,
-            )
-
 
 
             # pipe 继承：物理拷贝源管道 records → 引擎自加载（和重试同路）
@@ -554,20 +479,16 @@ class TaskExecutorMixin:
                 conversation_history = await self._restore_conversation_history(existing_pipeline_id)
 
 
-
             from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
             from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
-
 
 
             _sink = create_targeted_sink(_notifier, _ws_thread_id)
 
 
-
             # ── 启动管道引擎（fire-and-forget）──
 
             _main_loop = asyncio.get_running_loop()
-
 
 
             def _on_engine_done(future: concurrent.futures.Future) -> None:
@@ -599,7 +520,6 @@ class TaskExecutorMixin:
                 )
 
 
-
             async def _cleanup_after_engine(
 
                 _task_id: str,
@@ -629,7 +549,6 @@ class TaskExecutorMixin:
                     _pipeline_state = getattr(_engine_ref, 'last_state', None)
 
 
-
                     # 比较引擎实例 id，避免旧引擎 cleanup 误标记新管道任务
 
                     _skip_state_check = False
@@ -649,7 +568,6 @@ class TaskExecutorMixin:
                         )
 
                         _skip_state_check = True
-
 
 
                     if not _skip_state_check:
@@ -690,24 +608,10 @@ class TaskExecutorMixin:
 
                     _ctx.cleanup(_timer_mgr)
 
-                    # BUG-FIX-fix_20260619_worktree_destroyed_on_retry:
-
-                    # 不在引擎结束时调用 lifecycle.on_task_cleanup。
-
-                    # 该方法会无条件 git worktree remove + 删分支 + 扫删所有 __wt_ 孤儿目录，
-
-                    # 导致任务失败后重试时 worktree 已被销毁、无法复用（重试必然失败）。
-
-                    # worktree 的唯一销毁点应在「评估通过 + 合并完成」后，
-
-                    # 由 on_eval_passed → _cleanup_worktree 负责。
-
-                    # 从 TaskWorker 的 _contexts 中移除（fire-and-forget 不再由 _run_and_cleanup 负责）
 
                     self._contexts.pop(_task_id, None)
 
                     logger.debug("TaskWorker: pipeline done | task=%s", _task_id)
-
 
 
             if conversation_history:
@@ -802,7 +706,6 @@ class TaskExecutorMixin:
                     return
 
 
-
                 from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
 
                 _pipe_msg = PipelineMessage(
@@ -834,13 +737,11 @@ class TaskExecutorMixin:
                 )
 
 
-
                 if not _msg_result.success:
 
                     logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
 
                     return
-
 
 
                 # send_pipeline_message 已启动引擎（run_in_executor），引擎自身有完整
@@ -850,11 +751,9 @@ class TaskExecutorMixin:
                 # _mark_task_failed_on_engine_exit。不需要外部注册清理回调。
 
 
-
             # fire-and-forget: 不阻塞等待引擎完成
 
             # ctx 和 _contexts 由引擎内部机制 + task_worker._run_and_cleanup 兜底清理
-
 
 
         except asyncio.CancelledError:
@@ -864,7 +763,6 @@ class TaskExecutorMixin:
             ctx.cleanup(timer_manager)
 
             raise
-
 
 
         except Exception as exc:
@@ -904,13 +802,11 @@ class TaskExecutorMixin:
             return
 
 
-
         # fire-and-forget: 引擎在独立线程中运行，不阻塞等待
 
         # 管道完成后的 _check_post_pipeline_state + terminal_event.wait()
 
         # 已移至 _cleanup_after_engine 回调，由 engine_future.add_done_callback 触发
-
 
 
     # ───────────────────────────────────────────────────────────────────
@@ -920,17 +816,13 @@ class TaskExecutorMixin:
     # ───────────────────────────────────────────────────────────────────
 
 
-
     async def _handle_container_task(
 
         self, task_id: str, task: Any, task_data: dict, task_service: Any,
 
     ) -> None:
 
-        """处理容器任务：容器工作空间已在 task_submit 阶段初始化，此处仅复用校验。
-
-        若 ws_meta 已存在（正常流程），跳过初始化；仅在异常缺失时兜底重建。
-        """
+        """处理容器任务：容器工作空间已在 task_submit 阶段初始化，此处仅复用校验。"""
 
         lifecycle: WorkspaceLifecycleManager | None = (
 
@@ -969,7 +861,6 @@ class TaskExecutorMixin:
             await task_service.fail_task(task_id, "容器空间初始化失败：WorkspaceLifecycleManager 不可用")
 
             return
-
 
 
         _CONTAINER_INIT_RETRIES = 3  # noqa: N806
@@ -1035,7 +926,6 @@ class TaskExecutorMixin:
                 )
 
 
-
         if not _init_ok:
 
             logger.error(
@@ -1055,18 +945,13 @@ class TaskExecutorMixin:
             )
 
 
-
     async def _load_agent_config(
 
         self, task_id: str, target_id: str, task_service: Any,
 
     ) -> Any | None:
 
-        """加载 AgentConfig，失败时标记任务失败并返回 None。
-
-        target_id 为空时（主管道任务无 target_id）回退默认 agent（lingxi），
-        而非直接失败——主管道任务 resume 后也需要能继续执行。
-        """
+        """加载 AgentConfig，失败时标记任务失败并返回 None。"""
 
         if not target_id:
 
@@ -1074,7 +959,6 @@ class TaskExecutorMixin:
             target_id = "lingxi"
 
             logger.info("TaskWorker: task %s 无 target_id，回退默认 agent=%s", task_id, target_id)
-
 
 
         agent_registry = self._services.get("agent_registry")
@@ -1096,7 +980,6 @@ class TaskExecutorMixin:
             logger.error("TaskWorker: agent_registry not found in services!")
 
             return None
-
 
 
         agent_config = agent_registry.get(target_id)
@@ -1126,9 +1009,7 @@ class TaskExecutorMixin:
             return None
 
 
-
         return agent_config
-
 
 
     async def _wait_for_parent_container(
@@ -1137,13 +1018,7 @@ class TaskExecutorMixin:
 
     ) -> None:
 
-        """等待父容器工作空间就绪（最多 30s）。
-
-
-
-        解决容器任务和子任务并行执行时的竞态条件。
-
-        """
+        """等待父容器工作空间就绪（最多 30s）。"""
 
         if not task_service:
 
@@ -1160,7 +1035,6 @@ class TaskExecutorMixin:
         if not (_parent and _parent.metadata.get("task_scope") == "container"):
 
             return
-
 
 
         _WAIT_INTERVAL = 1.0  # noqa: N806
@@ -1198,7 +1072,6 @@ class TaskExecutorMixin:
         )
 
 
-
     async def _bind_pipeline_run(
 
         self, task_id: str, pipeline_id: str, task_service: Any,
@@ -1207,25 +1080,7 @@ class TaskExecutorMixin:
 
     ) -> None:
 
-        """早期绑定 pipeline_run_id 到任务，并注册到 api_store 的会话映射。
-
-
-
-        BUG-FIX-fix_20260417_task_manage_records:
-
-        管道启动前立即绑定，确保运行中查询执行记录不为空。
-
-
-
-        BUG-FIX-fix_20260603_api_store_pipeline_mapping:
-
-        问题根因: 子任务的 pipeline_run_id 未写入 api_store 的 session.pipeline_ids，
-
-                  导致删除会话时无法通过 pipeline_ids 直接找到所有子管道。
-
-        修复方案: 在绑定管道时，将 pipeline_id 注册到 MemoryStore 对应会话的 pipeline_ids。
-
-        """
+        """早期绑定 pipeline_run_id 到任务，并注册到 api_store 的会话映射。"""
 
         if not task_service:
 
@@ -1233,7 +1088,7 @@ class TaskExecutorMixin:
 
         try:
 
-            # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
+            # bind_pipeline_run 现在是 async
 
             await task_service.bind_pipeline_run(task_id, pipeline_id)
 
@@ -1258,13 +1113,6 @@ class TaskExecutorMixin:
                     exec_storage.register_pipeline(pipeline_id, root_id)
 
 
-
-            # BUG-FIX-fix_20260603_api_store_pipeline_mapping:
-
-            # 将子管道 ID 注册到 api_store 的 session.pipeline_ids，
-
-            # 使 store.json 的 pipeline_ids 包含所有子管道，便于级联清理。
-
             if thread_id:
 
                 try:
@@ -1275,9 +1123,6 @@ class TaskExecutorMixin:
 
                     if session:
 
-                        # BUG-FIX-fix_20260622_subpipeline_overwrites_active:
-                        # 子管道（L2）注册时绝不能覆盖主管道的 active 指针，
-                        # 否则一旦子管道未落盘执行记录，会话历史将整体丢失。
                         session.register_pipeline(pipeline_id, set_active=False)
 
                         _api_store.set_session(thread_id, session)
@@ -1309,7 +1154,6 @@ class TaskExecutorMixin:
             )
 
 
-
     async def _register_idle_timer(
 
         self,
@@ -1324,35 +1168,7 @@ class TaskExecutorMixin:
 
     ) -> bool:
 
-        """注册 idle 计时器（任务启动阶段调用）。
-
-
-
-        底层调用 TaskIdleTimerMixin._arm_idle_timer 完成统一的
-
-        cancel+create 流程；注册失败会直接 fail_task 并标记终态，
-
-        避免管道在无 idle 监控的情况下"裸跑"。
-
-
-
-        Args:
-
-            task_id: 任务 ID
-
-            timer_manager: 计时器管理器实例（可为 None）
-
-            task_service: 任务服务实例，用于失败时回滚
-
-            ctx: 当前任务执行上下文
-
-
-
-        Returns:
-
-            True=成功注册或无需注册；False=注册失败（任务已 fail）
-
-        """
+        """注册 idle 计时器（任务启动阶段调用）。"""
 
         if not timer_manager:
 
@@ -1397,125 +1213,6 @@ class TaskExecutorMixin:
             return False
 
 
-
-    def _register_total_timeout(
-        self,
-        task_id: str,
-        task_data: dict[str, Any],
-        agent_config: Any,
-        task_service: Any,
-        timer_manager: Any,
-        ctx: TaskExecutionContext,
-    ) -> None:
-        """注册任务总超时硬墙（per-agent 优先，按 agent_level fallback）。
-
-        与 idle_timer 互相独立：
-          - idle_timer 检测"无心跳"，活跃即可续期；
-          - total_timeout 是从 started_at 起的硬时限，活跃也不豁免。
-
-        超时来源优先级：
-          1. per-agent AgentConfig.timeout_seconds
-             - > 0：生效（用户在 agent.yaml 里为某个 agent 单独配置的硬墙）
-             - == -1 或缺省：表示"不限"，跳过该 agent 的总超时
-          2. 按 agent_level fallback（TimerManager.task_max_duration_by_level）
-             - L1 主 Agent：None → 不限制（主对话长跑允许）
-             - L2 子任务 Agent：9000s = 2.5h
-             - L3 原子工具 Agent：3600s = 1h
-
-        到点回调：fail_task(reason="total_timeout: 超过总执行时间 Xs
-        (agent=<name>/level=<L?>)")，通过 ctx.total_timeout_handle 在
-        cleanup 时取消。
-
-        Args:
-            task_id: 任务 ID
-            task_data: 任务数据字典（取 agent_level）
-            agent_config: AgentConfig 实例（提供 timeout_seconds / level / name）
-            task_service: 任务服务
-            timer_manager: 计时器管理器（提供 task_max_duration_for_level）
-            ctx: 任务执行上下文
-        """
-        if timer_manager is None:
-            return
-
-        agent_level = str(task_data.get("agent_level", "")) or "L3"
-        # 来源优先级 1：per-agent AgentConfig.timeout_seconds
-        # AgentConfig 约定 -1 = 不限，>0 = 显式硬墙，0/None = 未配置（走 fallback）
-        agent_timeout = (
-            getattr(agent_config, "timeout_seconds", None)
-            if agent_config is not None else None
-        )
-        if agent_timeout is not None and agent_timeout == -1:
-            # agent 显式声明不限：完全跳过总超时（即使是 L3 也不 fallback）
-            logger.debug(
-                "TaskWorker: 任务总超时不启用（agent.timeout_seconds=-1）: "
-                "task_id=%s agent_level=%s agent=%s",
-                task_id, agent_level,
-                getattr(agent_config, "name", "?"),
-            )
-            return
-        if agent_timeout is not None and agent_timeout > 0:
-            duration: int | float | None = float(agent_timeout)
-            source = f"agent={getattr(agent_config, 'name', '?') or agent_level}"
-        else:
-            # 来源优先级 2：按 agent_level fallback
-            try:
-                duration = timer_manager.task_max_duration_for_level(agent_level)
-            except Exception as exc:
-                logger.warning(
-                    "TaskWorker: 取 task_max_duration_for_level 失败，跳过总超时: "
-                    "task_id=%s agent_level=%s error=%s",
-                    task_id, agent_level, exc,
-                )
-                return
-            source = f"level={agent_level}"
-
-        if duration is None or duration <= 0:
-            logger.debug(
-                "TaskWorker: 任务总超时未启用（agent 或 level 配置为不限）: "
-                "task_id=%s agent_level=%s agent_timeout=%s",
-                task_id, agent_level, agent_timeout,
-            )
-            return
-
-        loop = asyncio.get_running_loop()
-
-        def _on_total_timeout() -> None:
-            """总超时硬墙到点：直接 fail_task，无视活跃状态。"""
-            logger.warning(
-                "TaskWorker: [TOTAL-TIMEOUT] 任务总执行时间到点，"
-                "强制 fail: task_id=%s %s duration=%ss",
-                task_id, source, duration,
-            )
-            try:
-                _reason = (
-                    f"total_timeout: 超过总执行时间 {duration}s ({source})"
-                )
-                _fut = loop.create_task(
-                    task_service.fail_task(task_id, _reason)
-                )
-                _fut.add_done_callback(
-                    lambda fut, tid=task_id: self._log_fail_task_exception(fut, tid)
-                )
-                if ctx is not None:
-                    ctx.set_terminal()
-                    ctx.cleanup(timer_manager)
-            except Exception as exc:
-                logger.error(
-                    "TaskWorker: [TOTAL-TIMEOUT] fail 处理失败: "
-                    "task_id=%s error=%s", task_id, exc,
-                )
-
-        ctx.total_timeout_handle = loop.call_later(
-            float(duration), _on_total_timeout,
-        )
-        logger.info(
-            "TaskWorker: 任务总超时硬墙已注册: "
-            "task_id=%s %s duration=%ss",
-            task_id, source, duration,
-        )
-
-
-
     def _compute_pipeline_timeout(self, agent_config: Any) -> float:
 
         """计算管道执行超时时间（秒）。"""
@@ -1537,7 +1234,6 @@ class TaskExecutorMixin:
             pipeline_timeout = max(pipeline_timeout, float(agent_config.timeout_seconds))
 
         return pipeline_timeout
-
 
 
     async def _restore_conversation_history(
@@ -1568,7 +1264,7 @@ class TaskExecutorMixin:
 
             conversation_history: list[dict[str, Any]] = []
 
-            # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role，
+            # 基于 record.type 映射 role，
 
             # 避免 role 为空字符串时 assistant 消息被错误标记为 user
 
@@ -1603,13 +1299,11 @@ class TaskExecutorMixin:
                 conversation_history.append(msg)
 
 
-
             # 旧记录没有 tool_calls_json，需要从 tool 记录反向重建
 
             from infrastructure.task_worker import _reconstruct_tool_calls  # noqa: PLC0415
 
             _reconstruct_tool_calls(conversation_history)
-
 
 
             logger.debug(
@@ -1645,7 +1339,6 @@ class TaskExecutorMixin:
             return None
 
 
-
     # ───────────────────────────────────────────────────────────────────
 
     # 管道取消
@@ -1653,44 +1346,10 @@ class TaskExecutorMixin:
     # ───────────────────────────────────────────────────────────────────
 
 
-
     def cancel_pipeline(self, task_id: str) -> bool:  # noqa: PLR0912
 
-        """取消任务关联的运行中管道。
+        """取消任务关联的运行中管道。"""
 
-
-
-        由 task_manage cancel 操作调用，强制停止 PipelineEngine。
-
-        通过 EngineRegistry 查找引擎并唤醒，再取消 asyncio.Task。
-
-
-
-        Args:
-
-            task_id: 要取消的任务 ID
-
-
-
-        Returns:
-
-            是否成功发起取消（无运行中管道时返回 False）
-
-        """
-
-        # BUG-FIX-fix_20260524_cancel_container_pipeline:
-
-        # 问题根因: 容器任务的 pipeline_run_id 是父管道的 ID，
-
-        #           cancel_pipeline(container_task_id) 会错误地注销父管道引擎。
-
-        # 修复方案: 容器任务没有自己的管道引擎，跳过 pipeline_id 查找和引擎注销，
-
-        #           直接进入 context/bg_task 取消逻辑。
-
-        # 影响范围: 容器任务取消流程。
-
-        # 修复日期: 2026-05-24
 
         pipeline_id = None
 
@@ -1715,7 +1374,6 @@ class TaskExecutorMixin:
                 logger.warning("TaskWorker: cancel_pipeline 获取 pipeline_id 失败: task_id=%s", task_id, exc_info=True)
 
 
-
         if pipeline_id:
 
             # 任务取消 = 持有者终结管道生命。走 message_bus.stop 原子级联清理
@@ -1736,7 +1394,6 @@ class TaskExecutorMixin:
                 from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
                 get_engine_registry().unregister(pipeline_id)
-
 
 
         ctx = self._contexts.get(task_id)
@@ -1760,7 +1417,6 @@ class TaskExecutorMixin:
         self._cancel_idle_timer_async(task_id)
 
 
-
         cancelled_any = False
 
         if bg_task is not None and not bg_task.done():
@@ -1768,7 +1424,6 @@ class TaskExecutorMixin:
             bg_task.cancel()
 
             cancelled_any = True
-
 
 
         if not cancelled_any:
@@ -1792,7 +1447,6 @@ class TaskExecutorMixin:
                     cancelled_any = True
 
 
-
         logger.debug(
 
             "TaskWorker.cancel_pipeline: task=%s pipeline=%s cancelled=%s",
@@ -1804,13 +1458,11 @@ class TaskExecutorMixin:
         return cancelled_any
 
 
-
     # ───────────────────────────────────────────────────────────────────
 
     # 工作空间解析
 
     # ───────────────────────────────────────────────────────────────────
-
 
 
     def _resolve_task_workspace(
@@ -1819,28 +1471,9 @@ class TaskExecutorMixin:
 
     ) -> str:
 
-        """根据任务数据解析工作空间路径。
-
-
-
-        路径来源优先级：
-
-        1. 任务的 ws_meta（已有工作空间的工作任务）
-
-        2. 调用方显式传入的 task_workspace
-
-        3. 配置的 workspace.root + task_id（新任务）
-
-
-
-        所有路径统一使用 isolation_config.yaml 的 workspace.root 配置，
-
-        不存在硬编码的 .ai_workspaces fallback。
-
-        """
+        """根据任务数据解析工作空间路径。"""
 
         from tasks.workspace import resolve_task_workspace  # noqa: PLC0415
-
 
 
         task = self._task_service.get_task(task_id) if self._task_service else None
@@ -1854,11 +1487,9 @@ class TaskExecutorMixin:
                 return ws
 
 
-
         if task_workspace:
 
             return task_workspace
-
 
 
         # 新任务：从配置读取 workspace.root
@@ -1870,7 +1501,6 @@ class TaskExecutorMixin:
         return f"{root}/{task_id}"
 
 
-
     # ───────────────────────────────────────────────────────────────────
 
     # 容器过期检查（已禁用）
@@ -1878,18 +1508,8 @@ class TaskExecutorMixin:
     # ───────────────────────────────────────────────────────────────────
 
 
-
     async def _check_stale_containers(self) -> None:
 
-        """容器终态检查（已禁用超时自动判定）。
-
-
-
-        容器的完成/失败由主 Agent 通过 task_manage(action="change", status=...) 决定，
-
-        系统不做自动判定。
-
-        """
+        """容器终态检查（已禁用超时自动判定）。"""
 
         return
-

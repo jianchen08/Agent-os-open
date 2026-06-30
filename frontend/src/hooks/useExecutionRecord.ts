@@ -1,16 +1,10 @@
-/**
- * 执行记录查询 Hook
- *
- * 用于查询单个或多个执行记录，支持缓存和批量查询
- */
+/** 执行记录查询 Hook 用于查询单个或多个执行记录，支持缓存和批量查询 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ActivityData } from '@/types/activity'
 import { apiClient } from '@/services/api'
 
-/**
- * 执行记录数据（后端返回格式）
- */
+/** 执行记录数据（后端返回格式） */
 export interface ExecutionRecord {
   id: string
   session_id: string
@@ -31,14 +25,10 @@ export interface ExecutionRecord {
   depth?: number
 }
 
-/**
- * 执行记录缓存
- */
+/** 执行记录缓存 */
 const recordCache = new Map<string, ExecutionRecord>()
 
-/**
- * 将执行记录转换为活动卡片数据
- */
+/** 将执行记录转换为活动卡片数据 */
 export function executionRecordToActivity(record: ExecutionRecord): ActivityData {
   // 构建详情区块
   const details: ActivityData['details'] = []
@@ -124,9 +114,7 @@ export function executionRecordToActivity(record: ExecutionRecord): ActivityData
   }
 }
 
-/**
- * 查询单个执行记录
- */
+/** 查询单个执行记录 */
 async function fetchExecutionRecord(recordId: string): Promise<ExecutionRecord | null> {
   // 先检查缓存
   if (recordCache.has(recordId)) {
@@ -147,9 +135,7 @@ async function fetchExecutionRecord(recordId: string): Promise<ExecutionRecord |
   }
 }
 
-/**
- * 批量查询执行记录
- */
+/** 批量查询执行记录 */
 export async function fetchExecutionRecords(
   recordIds: string[],
 ): Promise<Map<string, ExecutionRecord>> {
@@ -181,23 +167,17 @@ export async function fetchExecutionRecords(
   return results
 }
 
-/**
- * 更新缓存中的执行记录
- */
+/** 更新缓存中的执行记录 */
 export function updateRecordCache(record: ExecutionRecord): void {
   recordCache.set(record.id, record)
 }
 
-/**
- * 清除执行记录缓存
- */
+/** 清除执行记录缓存 */
 export function clearRecordCache(): void {
   recordCache.clear()
 }
 
-/**
- * 单个执行记录查询 Hook
- */
+/** 单个执行记录查询 Hook */
 export function useExecutionRecord(recordId: string | null) {
   const [record, setRecord] = useState<ExecutionRecord | null>(null)
   const [activity, setActivity] = useState<ActivityData | null>(null)
@@ -245,9 +225,7 @@ export function useExecutionRecord(recordId: string | null) {
     }
   }, [recordId])
 
-  /**
-   * 手动刷新
-   */
+  /** 手动刷新 */
   const refresh = useCallback(async () => {
     if (!recordId) return
 
@@ -269,9 +247,7 @@ export function useExecutionRecord(recordId: string | null) {
   return { record, activity, loading, error, refresh }
 }
 
-/**
- * 多个执行记录查询 Hook
- */
+/** 多个执行记录查询 Hook */
 export function useExecutionRecords(recordIds: string[]) {
   const [records, setRecords] = useState<Map<string, ExecutionRecord>>(new Map())
   const [activities, setActivities] = useState<Map<string, ActivityData>>(new Map())
@@ -280,12 +256,6 @@ export function useExecutionRecords(recordIds: string[]) {
   // 使用 useMemo 缓存 recordIds 的字符串表示
   const recordIdsKey = useMemo(() => recordIds.join(','), [recordIds])
 
-  // BUG-FIX-fix_20260523_max_update_depth:
-  // 问题根因: recordIds 数组引用在 useEffect 依赖中，如果父组件传递内联数组，
-  //          每次渲染产生新引用导致 effect 无限触发。
-  // 修复方案: 使用 useRef 保存最新 recordIds，useEffect 只依赖稳定的 recordIdsKey。
-  // 影响范围: useExecutionRecords hook 调用方
-  // 修复日期: 2026-05-23
   const recordIdsRef = useRef(recordIds)
   useEffect(() => { recordIdsRef.current = recordIds }, [recordIds])
 

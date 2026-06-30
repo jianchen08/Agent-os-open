@@ -1,49 +1,4 @@
-"""管道引擎 — 核心循环和生命周期管理。
-
-
-
-实现核心的 while 循环执行逻辑：
-
-输入路由 → Input 插件链 → Core 插件 → Output 插件链 → 输出路由仲裁 → apply_route，
-
-直到管道结束或挂起。
-
-
-
-职责：
-
-- 管道生命周期：run() / resume() / wake()
-
-- 核心循环：_run_loop()
-
-- 挂起/恢复：_suspend_and_wait()
-
-
-
-已拆出的职责：
-
-- 状态构建 → pipeline/state_builder.py
-
-- 插件配置 → pipeline/plugin_resolver.py
-
-- 检查点管理 → pipeline/checkpoint.py
-
-- 消息注入/唤醒 → pipeline/message_bus.py
-
-- 状态管理/深拷贝 → pipeline/engine_state.py
-
-- 路由决策 → pipeline/engine_route.py
-
-- 插件链执行 → pipeline/engine_chain.py
-
-- 单轮迭代调度 → pipeline/engine_iteration.py
-
-- 流式输出（出口）→ pipeline/engine_streaming.py
-  （bridge 绑定、chunk 队列/消费者/keepalive 协程、流式上下文、终止事件透传。
-   流式输出是引擎的 output port 而非内部职责，通过 self._streaming 委托，保持单向依赖。）
-
-"""
-
+"""管道引擎 — 核心循环和生命周期管理。"""
 
 
 from __future__ import annotations
@@ -79,59 +34,12 @@ if TYPE_CHECKING:
     from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
 
 
-
 logger = logging.getLogger(__name__)
-
-
-
 
 
 class PipelineEngine:
 
-    """管道引擎。
-
-
-
-    核心循环：输入路由 → Input 链 → Core → Output 链 → 输出路由仲裁 → apply_route。
-
-    循环持续到 state["ended"] 为 True 或管道挂起。
-
-
-
-    暂停/恢复机制：
-
-    - 当路由信号为 wait 时，管道保存当前 state 到 _suspended_state 并挂起
-
-    - 调用 resume() 从 _suspended_state 恢复执行，继续循环
-
-
-
-    Agent 配置注入：
-
-    - run(user_input, agent_config) 直接接受用户输入和 Agent 配置
-
-    - Agent 配置通过 to_state() 转换为 state 注入字典
-
-    - 插件从 ctx.state["plugin_configs"] 读取自己的配置
-
-
-
-    Attributes:
-
-        input_route_table: 输入路由表
-
-        output_route_table: 输出路由表
-
-        plugin_registry: 插件注册表
-
-        _services: 服务实例字典，传递给 PluginContext
-
-        _suspended_state: 暂停时保存的管道状态快照
-
-        _checkpoint_manager: 管道检查点管理器（可选）
-
-    """
-
+    """管道引擎。"""
 
 
     def __init__(
@@ -236,7 +144,6 @@ class PipelineEngine:
         self._pending_client_message_id: str = ""
 
 
-
     async def run(
         self,
         user_input: str | None = None,
@@ -247,49 +154,7 @@ class PipelineEngine:
         **extra_state: Any,
     ) -> dict[str, Any]:
 
-        """执行管道。
-
-
-
-        支持两种调用方式：
-
-        1. 新方式：run(user_input="你好", agent_config=config)
-
-        2. 兼容方式：run(initial_state={"user_input": "你好", ...})
-
-
-
-        新方式中，Agent 配置通过 to_state() 自动注入到 state，
-
-        插件从 ctx.state 读取 system_prompt、tool_ids、constraints 等。
-
-
-
-        Args:
-
-            user_input: 用户输入文本
-
-            agent_config: Agent 配置实例，必须显式传入，禁止静默回退
-
-            conversation_history: 跨轮次对话历史（可选）
-
-            initial_state: 管道初始状态字典（兼容旧接口）
-
-            **extra_state: 额外注入的 state 键值对
-
-
-
-        Returns:
-
-            管道最终状态字典
-
-
-
-        Raises:
-
-            ValueError: agent_config 为 None 时抛出
-
-        """
+        """执行管道。"""
 
         # 每次新 run() 调用重置挂起状态，防止引擎复用时旧状态泄漏
 
@@ -298,7 +163,6 @@ class PipelineEngine:
         self._wake_event = None
 
         self._streaming.reset_for_run()
-
 
 
         # 保留当前 entry 中的 bridge 和 drain_task 引用，
@@ -338,11 +202,9 @@ class PipelineEngine:
         self._preserved_msg_sequence = _preserved_msg_sequence
 
 
-
         # pipeline_id 由引擎构造时确定，外部不可覆盖。
 
         extra_state["pipeline_id"] = self._pipeline_id
-
 
 
         raw_state = None
@@ -354,7 +216,6 @@ class PipelineEngine:
         elif isinstance(user_input, dict) and initial_state is None:
 
             raw_state = user_input
-
 
 
         if raw_state is not None:
@@ -376,7 +237,6 @@ class PipelineEngine:
             return await self._run_loop(state, resumed=False)
 
 
-
         if agent_config is None:
             agent_config = self._load_config_from_tags()
         if agent_config is None:
@@ -385,7 +245,6 @@ class PipelineEngine:
                 "agent_config，也无法从注册表 tags 解析 agent_id。"
                 "禁止静默回退到默认 Agent。"
             )
-
 
 
         from pipeline.state_builder import build_initial_state  # noqa: PLC0415
@@ -401,15 +260,12 @@ class PipelineEngine:
         )
 
 
-
         if agent_config and hasattr(agent_config, "max_iterations") and agent_config.max_iterations:
 
             self.max_iterations = agent_config.max_iterations
 
 
-
         self._agent_config = agent_config
-
 
 
         from pipeline.plugin_resolver import apply_agent_plugin_configs  # noqa: PLC0415
@@ -419,21 +275,11 @@ class PipelineEngine:
         apply_agent_model_override(self.plugin_registry, agent_config, self._services)
 
 
-
         return await self._run_loop(state, resumed=False)
 
 
-
     def _load_config_from_tags(self) -> Any | None:
-        """从注册表 entry.tags 加载 agent_config（I5：一切上下文皆 tags）。
-
-        当调用方未显式传入 agent_config 时，引擎从注册表中自己的 entry.tags
-        读取 agent_id，再通过 agent_registry 解析为 AgentConfig。
-        这是 agent 身份的唯一兜底来源，与 register 时写入的 tags 同源。
-
-        Returns:
-            AgentConfig 实例；entry 不存在、tags 无 agent_id、或解析失败时返回 None。
-        """
+        """从注册表 entry.tags 加载 agent_config（I5：一切上下文皆 tags）。"""
         try:
             from pipeline.engine_registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(self._pipeline_id)
@@ -451,35 +297,13 @@ class PipelineEngine:
             return None
 
 
-
     async def resume(self) -> dict[str, Any]:
 
-        """从暂停状态恢复管道执行。
-
-
-
-        使用 _suspended_state 中保存的状态快照恢复管道循环，
-
-        继续从暂停点执行直到管道结束或再次挂起。
-
-
-
-        Returns:
-
-            管道最终状态字典
-
-
-
-        Raises:
-
-            RuntimeError: 没有暂停状态可恢复时抛出
-
-        """
+        """从暂停状态恢复管道执行。"""
 
         if self._suspended_state is None:
 
             raise RuntimeError("No suspended state to resume from")
-
 
 
         saved_state = self._suspended_state
@@ -495,56 +319,12 @@ class PipelineEngine:
         )
 
 
-
         return await self._run_loop(saved_state, resumed=True)
-
 
 
     async def _run_loop(self, state: dict[str, Any], *, resumed: bool = False) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
 
-        """管道核心循环。
-
-
-
-        循环流程：
-
-        1. 递增迭代计数器
-
-        2. 第一步：解析插件列表
-
-        3. 获取 Input 插件 → PluginChain 执行
-
-        4. 第二步：用更新后的 state 解析 target
-
-        5. target == "end": 写入拦截原因到 RAW_RESULT，设 ended=True, break
-
-        6. target == "wait": break（挂起）
-
-        7. target == "core": 继续执行
-
-        8. 获取 Core 插件 → 执行，更新 state
-
-        9. 获取 Output 插件 → PluginChain 执行
-
-        10. 收集 route_signals
-
-        11. 输出路由表仲裁 → apply_route
-
-
-
-        Args:
-
-            state: 管道状态字典（原地修改）
-
-            resumed: 是否从暂停状态恢复，控制日志前缀
-
-
-
-        Returns:
-
-            管道最终状态字典
-
-        """
+        """管道核心循环。"""
 
         # per-run contextvar token，供 finally 重置（日志 contextvar 由 PipelineLogger 管理）
         _pipeline_id_token: contextvars.Token | None = None
@@ -552,7 +332,6 @@ class PipelineEngine:
         self._running = True
 
         self._run_start_time = _time.monotonic()
-
 
 
         # Phase 1: set_trace_id 接入现有日志追踪机制
@@ -568,7 +347,6 @@ class PipelineEngine:
             pass
 
 
-
         logger.info(
 
             "[Engine] 引擎启动: pipeline=%s task_id=%s",
@@ -579,7 +357,6 @@ class PipelineEngine:
 
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
 
-        # BUG-FIX-fix_20260513_pipeline_cross_talk:
 
         self._pipeline_id = pipeline_run_id
 
@@ -589,7 +366,6 @@ class PipelineEngine:
 
         self._consecutive_core_errors = 0
 
-        # BUG-FIX-fix_20260508_sub_pipeline_streaming:
 
         if not resumed:
 
@@ -644,7 +420,6 @@ class PipelineEngine:
         self._run_started = True
 
 
-
         # Phase 1: register 块完成后获取 bridge，发送 emit_start + 安装 on_chunk 适配器
 
         # resume 时也需 emit_start：emit_suspend 已发 stream_end 关闭上一轮，
@@ -668,11 +443,9 @@ class PipelineEngine:
                 )
 
 
-
         try:
 
             self._pipeline_logger.setup(pipeline_run_id, resumed)
-
 
 
             # context_window 需在首次迭代前注入 state
@@ -686,7 +459,6 @@ class PipelineEngine:
                     state["context_window"] = _llm_core._context_window
 
 
-
             while not state.get(StateKeys.ENDED, False):
 
                 # 1. 递增迭代计数器
@@ -696,11 +468,9 @@ class PipelineEngine:
                 iteration = state[StateKeys.ITERATION]
 
 
-
                 # 暴露当前状态供外部读取（如 TaskNotifierMixin 读取上下文使用率）
 
                 self._current_state = state
-
 
 
                 # 安全阀（-1 表示无限制）
@@ -714,7 +484,6 @@ class PipelineEngine:
                     break
 
 
-
                 if resumed:
 
                     logger.debug("=== Pipeline iteration %d (resumed) ===", iteration)
@@ -724,11 +493,9 @@ class PipelineEngine:
                     logger.debug("=== Pipeline iteration %d ===", iteration)
 
 
-
                 # 显示当前使用的模型信息
 
                 self._pipeline_logger.model_info(self.plugin_registry)
-
 
 
                 # 每次迭代刷新模型配置，确保运行中修改 YAML 后新配置生效
@@ -746,11 +513,9 @@ class PipelineEngine:
                     )
 
 
-
                 # 发射 iteration 事件
 
                 self._emit_iteration_event(state, iteration)  # type: ignore[arg-type]
-
 
 
                 # 自动保存检查点
@@ -768,7 +533,6 @@ class PipelineEngine:
                         # 检查点对崩溃恢复至关重要，失败时必须可见（warning 而非 debug）
 
                         logger.warning("Checkpoint auto-save failed: %s", exc)
-
 
 
                 # 主动重置 idle timer：每轮迭代开始时重置，
@@ -790,7 +554,6 @@ class PipelineEngine:
                         logger.debug("idle timer reset failed (non-critical): %s", _reset_exc)
 
 
-
                 # 单轮迭代调度：通知消费 → Input 链 → target 分发 →
 
                 # Core 执行 → Output 链 → 路由仲裁（engine_iteration.py）
@@ -802,7 +565,6 @@ class PipelineEngine:
                     break
 
 
-
             # 管道结束后，再执行一次 Output 链
 
             if state.get(StateKeys.ENDED, False):
@@ -810,7 +572,6 @@ class PipelineEngine:
                 state[StateKeys.ENDED] = True
 
                 await run_post_end_output_chain(self, state)
-
 
 
             # Phase 1: 正常完成时推送 emit_finish
@@ -828,7 +589,6 @@ class PipelineEngine:
                         "[Engine] emit_finish 失败（非致命）: %s", _emit_exc,
 
                     )
-
 
 
         except asyncio.CancelledError:
@@ -985,12 +745,8 @@ class PipelineEngine:
             )
 
 
-
         return state
 
-
-
-    # ------------------------------------------------------------------
 
     # _run_loop 辅助方法
 
@@ -1019,41 +775,19 @@ class PipelineEngine:
                 logger.debug("on_chunk iteration emit failed: %s", exc)
 
 
-
     async def _mark_task_failed_on_engine_exit(
 
         self, state: dict[str, Any], reason: str,
 
     ) -> None:
 
-        """引擎异常退出时，将关联的 running 任务标记为 failed。
-
-
-
-        BUG-FIX-fix_20260522_task_stuck_running:
-
-        问题根因: _run_loop 在 CancelledError/Exception 时只设了 state[ENDED]=True，
-
-                  不更新关联任务的 YAML 状态，导致引擎死了但任务仍为 status: running。
-
-        修复方案: 通过 pipeline_run_id 查找关联任务，调用 task_service.fail_task 标记失败。
-
-
-
-        Args:
-
-            state: 管道状态字典
-
-            reason: 失败原因
-
-        """
+        """引擎异常退出时，将关联的 running 任务标记为 failed。"""
 
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, "")
 
         if not pipeline_run_id:
 
             return
-
 
 
         task_service = self._services.get("task_service")
@@ -1069,7 +803,6 @@ class PipelineEngine:
             )
 
             return
-
 
 
         try:
@@ -1099,7 +832,6 @@ class PipelineEngine:
             )
 
 
-
     async def _cleanup_run_loop(  # noqa: PLR0912
 
         self,
@@ -1110,16 +842,7 @@ class PipelineEngine:
 
     ) -> None:
 
-        """清理 _run_loop 的资源。
-
-        关闭流式协程、per-pipeline 日志 FileHandler 并重置 contextvar，
-        释放 chunk_service 缓存。日志 handler 的关闭/守卫重置、contextvar
-        重置委托给 PipelineLogger。
-
-        注意：本方法不 unregister EngineRegistry。I3 后引擎正常/取消结束都保留
-        entry（entry.engine_task 置 None），下次 send 走 _start_idle_engine 重启。
-        entry 的真正移除由持有者级 message_bus.stop 负责（任务终态/删会话）。
-        """
+        """清理 _run_loop 的资源和注册。"""
 
         # Phase 1: 优雅关闭流式消费者 + keepalive 协程（防泄漏），委托给流式输出口
         await self._streaming.shutdown()
@@ -1180,13 +903,7 @@ class PipelineEngine:
                 logger.debug("Checkpoint cleanup failed (non-critical): %s", _cp_exc)
 
 
-
-    # ------------------------------------------------------------------
-
     # 属性
-
-    # ------------------------------------------------------------------
-
 
 
     @property
@@ -1196,7 +913,6 @@ class PipelineEngine:
         """管道唯一标识。"""
 
         return self._pipeline_id
-
 
 
     @pipeline_id.setter
@@ -1211,7 +927,6 @@ class PipelineEngine:
         self._streaming._pipeline_id = value
 
 
-
     @property
 
     def services(self) -> dict[str, Any]:
@@ -1221,27 +936,11 @@ class PipelineEngine:
         return self._services
 
 
-
     def update_services(self, services: dict[str, Any]) -> None:
 
-        """更新服务实例字典。
-
-
-
-        供 EngineRegistry 在引擎已注册时刷新 services，
-
-        避免外部直接修改 _services 私有属性。
-
-
-
-        Args:
-
-            services: 新的服务实例字典，完全替换现有值
-
-        """
+        """更新服务实例字典。"""
 
         self._services = services
-
 
 
     @property
@@ -1253,7 +952,6 @@ class PipelineEngine:
         return self._consecutive_core_errors
 
 
-
     @consecutive_core_errors.setter
 
     def consecutive_core_errors(self, value: int) -> None:
@@ -1261,7 +959,6 @@ class PipelineEngine:
         """设置连续 Core 错误计数。"""
 
         self._consecutive_core_errors = value
-
 
 
     @property
@@ -1273,7 +970,6 @@ class PipelineEngine:
         return self._max_consecutive_core_errors
 
 
-
     @property
 
     def is_running(self) -> bool:
@@ -1281,7 +977,6 @@ class PipelineEngine:
         """管道是否正在运行（非挂起、非完成）。"""
 
         return self._running
-
 
 
     @property
@@ -1293,77 +988,24 @@ class PipelineEngine:
         return self._suspended_state is not None
 
 
-
     @property
 
     def last_state(self) -> dict[str, Any] | None:
 
-        """管道最近一次运行结束后的状态快照。
-
-        引擎 ``_run_loop`` 走完（正常 / 取消 / 异常）后在 finally 中赋值。
-        供任务侧诊断失败原因（raw_error / ended / iteration 等），
-        避免外部直接访问私有 ``_last_state``。
-        """
+        """管道最近一次运行结束后的状态快照。"""
 
         return self._last_state
 
 
-
-    # ------------------------------------------------------------------
-
     # 挂起/恢复
-
-    # ------------------------------------------------------------------
-
 
 
     async def _suspend_and_wait(self, state: dict[str, Any]) -> bool:  # noqa: PLR0912,PLR0915
 
-        """挂起管道，等待外部通过 wake() 或 message_bus 唤醒。
-
-
-
-        管道挂起后不退出 _run_loop，而是 await 内部 _wake_event。
-
-        通过 pipeline.message_bus.send_pipeline_message() 注入消息并唤醒。
-
-
-
-        超时（600s）时检查是否有新通知：
-
-        - 有新通知：唤醒管道继续执行
-
-        - 无新通知：重新挂起等待，避免无意义的 LLM 调用循环
-
-
-
-        挂起时记录 submitted_task_ids，供外部判断该管道等待哪些任务。
-
-
-
-        BUG-FIX-fix_20260521_on_chunk_missing:
-
-        唤醒后统一从 _suspended_state 恢复 state（含 on_chunk / streaming），
-
-        避免调用方遗漏恢复字段。
-
-
-
-        Returns:
-
-            True 表示成功恢复（应继续循环），False 表示无恢复数据（应结束管道）。
-
-        """
+        """挂起管道，等待外部通过 wake() 或 message_bus 唤醒。"""
 
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
 
-        # BUG-FIX-fix_20260605_unify_pipeline_suspended_signal:
-
-        # 所有挂起路径最终都走到这里，统一在此处发 pipeline_suspended chunk。
-
-        # drain_loop 收到后视为"本轮流式完成"信号，发 stream_end 后退出。
-
-        # 不再在各调用方（engine_route / engine_chain / input_routes）分散 emit。
 
         _on_chunk_cb = state.get("on_chunk")
 
@@ -1383,13 +1025,6 @@ class PipelineEngine:
 
                 logger.debug("on_chunk pipeline_suspended 回调失败（非致命）")
 
-        # BUG-FIX-fix_20260624_chunk_drain_before_suspend:
-        # 问题根因: LLM 流式 chunk 通过 chunk queue 异步投递，消费者协程独立消费。
-        #   engine 在 LLM 返回后立刻 emit_suspend → _stream_started=False，
-        #   但 queue 里残留的 chunk（thinking_end、最终 text）还没被 consumer 取出，
-        #   取出时 bridge 已关闭流式 → 全部丢弃 → 用户看到回复突然中断。
-        # 修复方案: emit_suspend 前 drain chunk queue，确保所有已入队的 chunk 都被
-        #   消费完毕。带 2s 超时兜底，防止 consumer 卡死导致管道永久挂起。
         await self._streaming.drain(timeout=2.0)
 
         # Phase 1: 推送 emit_suspend（本轮流式完成）
@@ -1411,7 +1046,6 @@ class PipelineEngine:
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
 
         self._running = False
-
 
 
         pending_notifications = self.drain_inject_queue()
@@ -1438,33 +1072,11 @@ class PipelineEngine:
 
             )
 
-            # BUG-FIX-fix_20260629_suspend_semantics_split:
-            # 挂起有两种语义，行为完全不同：
-            #   A. watching_tasks 非空（等子任务终态）：
-            #      合法挂起，定期 _check_children_terminal 检查子任务是否完成。
-            #      上限 6 轮 × 600s = 60 分钟（覆盖一般子任务执行时长）。
-            #   B. watching_tasks 空（管道纯静默 / waiting_recovery 等异常路径）：
-            #      没有外部唤醒源，长等无意义。1 轮 600s 内若无注入即结束，
-            #      让 pipeline 走正常 fail 流程，由 idle_timer / 父任务感知。
-            # 这样避免了 4 个 pipeline 在 watching_tasks=[] 时 8h 死挂的死锁。
-            if self._watching_task_ids:
-                max_wait_rounds = 6
-            else:
-                max_wait_rounds = 1
+            max_wait_rounds = 50
 
-            # BUG-FIX-fix_20260603_wake_event_threadsafe:
-
-            # 捕获引擎线程的事件循环引用，供 inject_message 通过
-
-            # call_soon_threadsafe 安全地跨线程 set() wake_event。
 
             self._engine_loop = asyncio.get_running_loop()
 
-            # BUG-FIX-fix_20260604_wake_overwrite:
-
-            # 确保 _wake_event 存在（_run_loop:481 已创建，但其他调用路径可能为 None），
-
-            # 循环中不复用重建 Event，只 clear() 复用，避免覆盖已 set 的 Event。
 
             if self._wake_event is None:
 
@@ -1530,10 +1142,9 @@ class PipelineEngine:
 
                         "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
 
-                        "(round=%d/%d, watching=%s): pipeline=%s",
+                        "(round=%d/%d): pipeline=%s",
 
-                        wait_round + 1, max_wait_rounds,
-                        self._watching_task_ids, pipeline_id,
+                        wait_round + 1, max_wait_rounds, pipeline_id,
 
                     )
 
@@ -1543,27 +1154,11 @@ class PipelineEngine:
 
                 logger.warning(
 
-                    "[Engine] 管道等待超过 %d 轮 (watching_tasks=%s)，"
-                    "%s: pipeline=%s",
+                    "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
 
-                    max_wait_rounds,
-                    self._watching_task_ids,
-                    "无活动结束管道" if not self._watching_task_ids
-                    else "强制唤醒",
-                    pipeline_id,
+                    max_wait_rounds, pipeline_id,
 
                 )
-
-                # watching_tasks 为空：纯静默 → 直接退出 _suspend_and_wait，
-                # 返回 False 让 _run_loop 结束，pipeline 进入 fail 流程；
-                # watching_tasks 非空：60min 仍未终态，强制唤醒走原路径让
-                # 上层重新评估（旧行为）。
-                if not self._watching_task_ids:
-                    self._wake_event = None
-                    self._engine_loop = None
-                    self._suspended_state = None
-                    return False
-
 
 
         self._wake_event = None
@@ -1573,7 +1168,6 @@ class PipelineEngine:
         self._watching_task_ids = []
 
         self._running = True
-
 
 
         # 唤醒后先把 _inject_queue 里的消息写入 _suspended_state，
@@ -1591,18 +1185,8 @@ class PipelineEngine:
             self._inject_notifications_to_suspended_state(_queued)
 
 
-
         if self._suspended_state is not None:
 
-            # BUG-FIX-fix_20260525_idle_wake_empty_llm:
-
-            # 安全网: 唤醒后检查 suspended_state 中是否有实质性内容。
-
-            # 如果 user_input 为空，说明唤醒原因不是真实用户输入或系统通知，
-
-            # 而是 engine.resume() 或其他机制直接取走了旧 state。
-
-            # 此时应丢弃唤醒，返回 False 让 _run_loop 结束。
 
             _pending_input = self._suspended_state.get("user_input", "").strip()
 
@@ -1621,7 +1205,6 @@ class PipelineEngine:
                 self._suspended_state = None
 
                 return False
-
 
 
             state["user_input"] = self._suspended_state.get(
@@ -1649,7 +1232,6 @@ class PipelineEngine:
             logger.debug("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
 
 
-
             # Phase 1: resume 后重新 emit_start
 
             # emit_suspend 已发 stream_end 关闭上一轮（_stream_started=False），
@@ -1675,7 +1257,6 @@ class PipelineEngine:
         return False
 
 
-
     def drain_inject_queue(self) -> list[str]:
 
         """从 _inject_queue 取出所有待处理消息并清空。"""
@@ -1698,26 +1279,11 @@ class PipelineEngine:
         return len(self._inject_queue)
     @property
     def is_idle(self) -> bool:
-        """引擎是否处于 idle 状态（尚未启动 run）。
-
-        替代外部模块通过 getattr(engine, "_run_started") 访问私有属性。
-        """
+        """引擎是否处于 idle 状态（尚未启动 run）。"""
         return not self._run_started
 
     def deliver_signal(self, signal_tags: dict[str, Any]) -> None:
-        """I6：投递控制信号到管道 state（开放式 tags，插件自治处理）。
-
-        信号内容承载在 signal_tags（如 signal_type=stop_generation 及插件自定义键）。
-        按类型写入 state["pending_signals"]（同类型覆盖，防累积泄漏）。
-        插件在 execute 时自行从 state 读取并处理，由插件决定清理时机。
-
-        特殊处理：stop_generation 信号除了写 state，还立即 cancel engine_task，
-        中断正在进行的 LLM await（否则用户点停止要等当前 LLM 调用跑完才生效）。
-        cancel 后 run() 的 finally 会发 state_change(stopped)，引擎进 idle 待命。
-
-        Args:
-            signal_tags: 信号标签字典，至少应含 signal_type 键。
-        """
+        """I6：投递控制信号到管道 state（开放式 tags，插件自治处理）。"""
         if not signal_tags:
             return
         signal_type = signal_tags.get("signal_type", "")
@@ -1749,16 +1315,7 @@ class PipelineEngine:
         )
 
     def _interrupt_engine_task(self) -> None:
-        """立即中断当前 engine_task（打断进行中的 LLM await）。
-
-        供 deliver_signal 处理 stop_generation 时调用：仅写 state 无法中断
-        正在 await 的 LLM 调用，用户点停止会无响应直到当前轮跑完。
-        cancel engine_task 让 run() 抛 CancelledError，其 finally 会发
-        state_change(stopped)，引擎进 idle 待命（entry 不移除，可重发消息）。
-
-        engine_task 由 message_bus._start_idle_engine 注册到 entry，引擎自身
-        不持有，故经注册表 entry 取（不访问自身私有状态机）。
-        """
+        """立即中断当前 engine_task（打断进行中的 LLM await）。"""
         try:
             from pipeline.engine_registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(self._pipeline_id)
@@ -1793,12 +1350,7 @@ class PipelineEngine:
             )
 
     async def cleanup(self) -> None:
-        """公开清理接口（供 message_bus.stop 调用）。
-
-        释放引擎级资源：关闭流式 chunk 消费协程、释放 chunk_service 缓存。
-        不触碰注册表（entry 移除是 stop 的职责），不访问自身 _ 私有状态机
-        （区别于已删除的 zombie 重置）。
-        """
+        """公开清理接口（供 message_bus.stop 调用）。"""
         # 关闭流式消费者 + keepalive 协程（防泄漏），委托给流式输出口
         await self._streaming.shutdown()
 
@@ -1813,12 +1365,8 @@ class PipelineEngine:
 
     @property
     def agent_config(self) -> Any:
-        """当前绑定的 Agent 配置（只读公共接口）。
-
-        替代外部模块通过 getattr(engine, "_agent_config") 访问私有属性。
-        """
+        """当前绑定的 Agent 配置（只读公共接口）。"""
         return self._agent_config
-
 
 
     def _inject_notifications_to_suspended_state(self, notifications: list[str]) -> None:
@@ -1844,35 +1392,15 @@ class PipelineEngine:
                 )
 
 
-
     def _check_children_terminal(self, state: dict[str, Any]) -> bool:
 
-        """检查 submitted_task_ids 中的子任务是否全部已到达终态。
-
-
-
-        当管道因 child_task_guard 挂起时，submitted_task_ids 记录了活跃子任务。
-
-        如果所有子任务都已完成/失败/取消，管道应自动唤醒继续执行，
-
-        而不是无限等待。
-
-
-
-        BUG-FIX-fix_20260531_pipeline_infinite_loop:
-
-        确认所有子任务已终态后，清除 submitted_task_ids，
-
-        防止下一轮 iteration 挂起时再次被 _check_children_terminal 误判唤醒。
-
-        """
+        """检查 submitted_task_ids 中的子任务是否全部已到达终态。"""
 
         task_ids = state.get("submitted_task_ids", [])
 
         if not task_ids:
 
             return False
-
 
 
         try:
@@ -1894,9 +1422,7 @@ class PipelineEngine:
             return False
 
 
-
         terminal_statuses = {"completed", "failed", "cancelled"}
-
 
 
         for tid in task_ids:
@@ -1922,7 +1448,6 @@ class PipelineEngine:
                 return False
 
 
-
         logger.info(
 
             "[Engine] 所有子任务已终态: pipeline=%s task_ids=%s",
@@ -1936,25 +1461,15 @@ class PipelineEngine:
         return True
 
 
-
     def wake(self) -> None:
 
-        """唤醒挂起的管道（不注入消息）。
+        """唤醒挂起的管道（不注入消息）。"""
 
-
-
-        仅用于特殊场景（如 CLI 空输入唤醒）。
-
-        正常消息注入请使用 pipeline.message_bus.send_pipeline_message()。
-
-        """
-
-        # REFACTOR-20260614: engine 在主循环运行，直接 set Event。
+        # engine 在主循环运行，直接 set Event。
 
         if self._wake_event is not None:
 
             self._wake_event.set()
-
 
 
     def _suspend_copy_state(self, state: dict) -> dict:
@@ -1970,84 +1485,30 @@ class PipelineEngine:
         return new_state
 
 
-
     async def suspend_and_wait(self, state: dict[str, Any]) -> bool:
 
-        """保存状态快照并挂起管道，等待外部唤醒（公开入口）。
-
-
-
-        将 state 深拷贝保存到 _suspended_state，然后进入挂起等待。
-
-        外部模块（engine_chain、engine_route）统一调此方法，
-
-        代替直接操作 _suspended_state + _suspend_and_wait。
-
-
-
-        Args:
-
-            state: 当前管道状态字典
-
-
-
-        Returns:
-
-            True 表示成功恢复（应继续循环），False 表示无恢复数据（应结束管道）。
-
-        """
+        """保存状态快照并挂起管道，等待外部唤醒（公开入口）。"""
 
         self._suspended_state = self._suspend_copy_state(state)
 
         return await self._suspend_and_wait(state)
 
 
-
     async def resume_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
 
-        """从外部提供的状态快照恢复管道执行（检查点恢复专用）。
-
-
-
-        将 state 注入为 _suspended_state，然后执行 resume()。
-
-
-
-        Args:
-
-            state: 从检查点加载的管道状态字典
-
-
-
-        Returns:
-
-            管道最终状态字典
-
-        """
+        """从外部提供的状态快照恢复管道执行（检查点恢复专用）。"""
 
         self._suspended_state = state
 
         return await self.resume()
 
 
-
-    # ------------------------------------------------------------------
-
     # Phase 1: bridge 获取 + 同步→异步适配
-
-    # ------------------------------------------------------------------
-
 
 
     def _get_bridge(self) -> Any:
 
-        """从 registry 获取当前管道的 bridge 引用。
-
-
-
-        Phase 1 改造：engine 主动 emit，bridge 只做格式化 + 推送。
-
-        """
+        """从 registry 获取当前管道的 bridge 引用。"""
 
         try:
 
@@ -2064,23 +1525,13 @@ class PipelineEngine:
         return None
 
 
-
     def _is_stop_signal_active(self) -> bool:
-        """协作式停止检查：state 中是否存在未消费的 stop_generation 信号。
-
-        deliver_signal 收到 stop_generation 时会写入 _current_state["pending_signals"]
-        （运行中）或 last_state["pending_signals"]（resume 场景）。本方法供
-        _on_chunk_adapter 在每个流式 chunk 回调时轮询，命中即触发协作式中断。
-
-        读实时 state（_current_state，run 期间每轮迭代更新），不依赖 last_state
-        （run 结束才赋值，运行中为 None）。
-        """
+        """协作式停止检查：state 中是否存在未消费的 stop_generation 信号。"""
         state = self._current_state or self.last_state
         if not state:
             return False
         pending = state.get("pending_signals") or {}
         return "stop_generation" in pending
-
 
 
     def inject_message(self, message: str, *, source: str = "user", client_message_id: str = "") -> None:
@@ -2090,7 +1541,6 @@ class PipelineEngine:
         if not message or not message.strip():
 
             return
-
 
 
         self._inject_queue.append(message)
@@ -2110,7 +1560,6 @@ class PipelineEngine:
         )
 
 
-
         # 唤醒引擎
 
         if self._wake_event is not None:
@@ -2124,32 +1573,9 @@ class PipelineEngine:
                 self._wake_event.set()
 
 
-
     def _try_cancel_pending_interaction(self) -> None:
 
-        """尝试取消当前管道关联的 pending human_interaction 请求。
-
-
-
-        当新消息通过 notification 路径注入时，引擎可能正卡在
-
-        human_interaction 工具的 wait_for_choice() 上。此方法
-
-        通过取消 pending 请求来解除阻塞，使 _run_loop 能进入
-
-        下一轮迭代消费 notification。
-
-
-
-        BUG-FIX-fix_20260524_notification_stuck_by_human_interaction:
-
-        问题根因: human_interaction 工具通过 asyncio.Event.wait() 阻塞 _run_loop，
-
-          导致新消息的 notification 无法被消费，前端无限等待。
-
-        修复方案: inject_message 时自动取消 pending 交互请求，解除工具阻塞。
-
-        """
+        """尝试取消当前管道关联的 pending human_interaction 请求。"""
 
         try:
 
@@ -2178,7 +1604,6 @@ class PipelineEngine:
             pass
 
 
-
     async def save_checkpoint(self, phase: str = "manual") -> str | None:
 
         """保存管道检查点（委托到 pipeline.checkpoint）。"""
@@ -2198,7 +1623,6 @@ class PipelineEngine:
         )
 
 
-
     async def restore_from_checkpoint(self, checkpoint_id: str) -> bool:
 
         """从检查点恢复管道状态（委托到 pipeline.checkpoint）。"""
@@ -2212,4 +1636,3 @@ class PipelineEngine:
             self._suspended_state = state
 
         return success
-

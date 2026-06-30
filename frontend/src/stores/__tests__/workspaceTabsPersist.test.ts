@@ -1,13 +1,4 @@
-/**
- * fileEditorRegistry 与 layoutModeStore 工作区标签持久化的最小冒烟测试
- *
- * BUG-FIX-fix_20260625_workspace_tabs_persist:
- * 保护以下行为不被回归：
- *   1) registerFileEditor 同步写 localStorage
- *   2) removeFileEditorData 同步清理 localStorage
- *   3) updateFileEditorData 同步刷新 localStorage
- *   4) layoutModeStore 的 partialize/merge：workspaceTabs 持久化、运行时字段重置
- */
+/** fileEditorRegistry 与 layoutModeStore 工作区标签持久化的最小冒烟测试 */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 describe('workspaceTabsPersist', () => {

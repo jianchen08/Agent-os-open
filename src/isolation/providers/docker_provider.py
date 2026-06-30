@@ -1,9 +1,4 @@
-"""
-Docker 容器隔离提供者
-
-暴露接口：
-- DockerProvider：Docker 容器隔离提供者类
-"""
+"""Docker 容器隔离提供者"""
 
 import asyncio
 import json
@@ -25,30 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 class DockerProvider(IsolationProvider):
-    """Docker 容器隔离提供者。
-
-    在 Docker 容器内执行命令和操作，提供：
-    - 容器生命周期管理：创建、启动、停止、销毁
-    - 资源限制：CPU、内存、磁盘配额
-    - 网络隔离：可选的网络访问控制
-    - 文件系统隔离：容器内独立的文件系统
-
-    注意：需要安装 Docker 并确保 Docker daemon 正在运行。
-    """
+    """Docker 容器隔离提供者。"""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
-        """初始化 Docker 提供者。
-
-        Args:
-            config: 配置字典，支持以下键：
-                - image: 基础镜像名称（默认 agentos:latest）
-                - cpu_limit: CPU 限制（默认 "1.0"）
-                - memory_limit: 内存限制（默认 "512m"）
-                - memory_swap: swap 限制（默认等于 memory_limit，禁止 swap 放大）
-                - pids_limit: 进程数上限（默认 100，防 fork 炸弹）
-                - network_mode: 网络模式（默认 "bridge"）
-                - workspace_mount: 是否挂载工作目录（默认 True）
-        """
+        """初始化 Docker 提供者。"""
         self._config = config or {}
         self._image = self._config.get("image", "agentos:latest")
         self._cpu_limit = self._config.get("cpu_limit", "1.0")
@@ -71,13 +46,7 @@ class DockerProvider(IsolationProvider):
         self._wsl_docker_cache: bool | None = None
 
     def _is_wsl_docker(self) -> bool:
-        """判断 docker daemon 是否在 WSL2 Linux 里（非 Docker Desktop）。
-
-        判断依据：DOCKER_HOST 环境变量被设置（指向 TCP/Unix socket）说明
-        Agent 显式连接了远程/WSL 里的 daemon，而非 Docker Desktop 默认的命名管道。
-        Docker Desktop 时 DOCKER_HOST 通常未设置（走默认 npipe）。
-        结果按进程缓存。
-        """
+        """判断 docker daemon 是否在 WSL2 Linux 里（非 Docker Desktop）。"""
         import os  # noqa: PLC0415
         if self._wsl_docker_cache is not None:
             return self._wsl_docker_cache
@@ -91,11 +60,7 @@ class DockerProvider(IsolationProvider):
         return self._wsl_docker_cache
 
     def _resolve_mount_path(self, workspace: str | None) -> str:
-        """把 Windows 工作空间路径转换为 docker daemon 能识别的路径。
-
-        Docker Desktop(daemon 在 Windows): 直接用原路径 D:\\...
-        WSL2 原生 docker(daemon 在 Linux): D:\\myproject\\x → /mnt/d/myproject/x
-        """
+        """把 Windows 工作空间路径转换为 docker daemon 能识别的路径。"""
         if not workspace:
             return ""
         if not self._is_wsl_docker():
@@ -114,12 +79,7 @@ class DockerProvider(IsolationProvider):
         return IsolationLevel.CONTAINER
 
     async def is_available(self) -> tuple[bool, str | None]:
-        """检查 Docker 提供者是否可用。
-
-        检查 Docker CLI 是否安装且 daemon 是否运行。
-        用同步 subprocess + 线程池执行，避免 asyncio.create_subprocess_exec
-        在 Windows 上的静默失败问题（Python 3.12/3.14 已知问题）。
-        """
+        """检查 Docker 提供者是否可用。"""
         if not shutil.which("docker"):
             return False, "Docker CLI 未安装"
 
@@ -148,19 +108,7 @@ class DockerProvider(IsolationProvider):
             return False, f"Docker 检查失败: {e}"
 
     async def _run_cmd(self, args: list[str], timeout: float = 30) -> tuple[int, bytes, bytes]:
-        """统一执行命令（同步 subprocess + 线程池）。
-
-        替代 asyncio.create_subprocess_exec，避免 Windows asyncio subprocess 静默失败。
-        通过全局信号量限制并发 docker CLI 调用数，防止连接风暴压垮 daemon
-        （多任务同时 create/start/exec 会让 daemon 锁耗尽，触发假死）。
-
-        Args:
-            args: 命令参数列表（如 ["docker", "exec", container, "sh", "-c", cmd]）
-            timeout: 超时秒数
-
-        Returns:
-            (returncode, stdout_bytes, stderr_bytes)
-        """
+        """统一执行命令（同步 subprocess + 线程池）。"""
         import subprocess as _sp  # noqa: PLC0415
 
         def _run():
@@ -177,12 +125,7 @@ class DockerProvider(IsolationProvider):
         now: datetime,
         error_msg: str,
     ) -> IsolationEnvironment:
-        """构造一个错误状态的容器环境并注册。
-
-        容器创建失败、或工作空间挂载校验失败时复用：无 container_id，
-        使用带 task_id 的合成 env_id 兜底；后续 execute_in_environment
-        会据 status=ERROR 直接返回 provider_info["error"]，不再尝试执行。
-        """
+        """构造一个错误状态的容器环境并注册。"""
         env_id = f"docker-{context.task_id}"
         env = IsolationEnvironment(
             env_id=env_id,
@@ -202,15 +145,7 @@ class DockerProvider(IsolationProvider):
         context: IsolationContext,
         container_name: str,
     ) -> IsolationEnvironment:
-        """创建 Docker 容器环境。
-
-        Args:
-            context: 隔离上下文
-            container_name: 容器名称，由调用方统一确定（保证可复用/可销毁）。
-
-        Returns:
-            创建的隔离环境实例
-        """
+        """创建 Docker 容器环境。"""
         now = datetime.now(UTC)
         name = container_name
 
@@ -218,7 +153,6 @@ class DockerProvider(IsolationProvider):
         # 缺失或宿主机路径不存在即为功能错误——拒绝创建无挂载容器，避免命令落到
         # 空/不存在的目录却以 exit 0 静默通过（表现为“目录看不到”）。
         # 不做任何“换个目录挂载”的变通：挂载点对不上本身就是错误。
-        # BUG-FIX-fix_20260625_isolated_no_workspace
         if self._workspace_mount:
             ws_path = self._resolve_mount_path(context.workspace)
             if not ws_path:
@@ -287,14 +221,7 @@ class DockerProvider(IsolationProvider):
         return env
 
     async def _create_one(self, run_args: list[str]) -> tuple[str, str]:
-        """执行 docker create。
-
-        Args:
-            run_args: docker create 参数（含 IMAGE 与 COMMAND）
-
-        Returns:
-            (container_id, error)。成功时 error 为空；失败时 container_id 为空。
-        """
+        """执行 docker create。"""
         rc, stdout, stderr = await self._run_cmd(
             ["docker", "create", *run_args], timeout=30
         )
@@ -303,11 +230,7 @@ class DockerProvider(IsolationProvider):
         return stdout.decode("utf-8", errors="replace").strip(), ""
 
     async def _start_one(self, container_id: str) -> tuple[bool, str]:
-        """执行 docker start。
-
-        Returns:
-            (是否成功, error)。成功时 error 为空。
-        """
+        """执行 docker start。"""
         rc, _, stderr = await self._run_cmd(
             ["docker", "start", container_id], timeout=15
         )
@@ -318,22 +241,7 @@ class DockerProvider(IsolationProvider):
     async def _create_and_start(
         self, name: str, run_args: list[str],
     ) -> tuple[str, str]:
-        """创建并启动容器；start 失败时删除卡死容器并重建重试一次。
-
-        Docker Desktop (WSL2) 的 bind-mount 代理路径在 start 时才建立，
-        频繁创建/删除容器会使该路径进入脏状态（mkdir: file exists），
-        导致 start 失败、容器卡在 created(exit 128)。删除卡死容器后脏
-        路径常自愈，故重试一次。仍失败时清理并返回空 container_id，
-        由调用方标记 ERROR 环境（不再误标 READY 触发后续 "is not running"）。
-        整机反复卡死时需运维手段：wsl --shutdown 后重启 Docker Desktop。
-
-        Args:
-            name: 容器名（日志用）
-            run_args: docker create 参数
-
-        Returns:
-            (container_id, error)。成功时 error 为空；失败时 container_id 为空。
-        """
+        """创建并启动容器；start 失败时删除卡死容器并重建重试一次。"""
         container_id, err = await self._create_one(run_args)
         if not container_id:
             return "", err
@@ -365,12 +273,7 @@ class DockerProvider(IsolationProvider):
         return "", start_err or err
 
     async def destroy_environment(self, env_id: str, success: bool = True) -> None:
-        """销毁 Docker 容器环境。
-
-        Args:
-            env_id: 环境ID
-            success: 任务是否成功完成
-        """
+        """销毁 Docker 容器环境。"""
         env = self._environments.get(env_id)
         if not env:
             return
@@ -393,15 +296,7 @@ class DockerProvider(IsolationProvider):
     async def execute_in_environment(
         self, env_id: str, operation: dict[str, Any],
     ) -> ExecutionResult:
-        """在 Docker 容器中执行操作。
-
-        Args:
-            env_id: 环境ID
-            operation: 操作描述字典
-
-        Returns:
-            执行结果
-        """
+        """在 Docker 容器中执行操作。"""
         env = self._environments.get(env_id)
         if not env:
             return ExecutionResult(
@@ -433,14 +328,7 @@ class DockerProvider(IsolationProvider):
         )
 
     async def get_environment_status(self, env_id: str) -> EnvironmentStatus:
-        """获取容器环境状态。
-
-        Args:
-            env_id: 环境ID
-
-        Returns:
-            环境状态枚举值
-        """
+        """获取容器环境状态。"""
         env = self._environments.get(env_id)
         if not env:
             return EnvironmentStatus.STOPPED
@@ -470,20 +358,7 @@ class DockerProvider(IsolationProvider):
     def _build_run_args(
         self, container_name: str, context: IsolationContext,
     ) -> list[str]:
-        """构建 docker create 命令参数（含 IMAGE 与 COMMAND）。
-
-        Docker CLI 格式：docker create [OPTIONS] IMAGE [COMMAND] [ARG...]
-        IMAGE 必须出现在 COMMAND 之前，否则 Docker 会把 COMMAND 的首个
-        token（如 "sh"）误判为镜像名去拉取，导致 "Unable to find image
-        'sh:latest'" 错误。
-
-        Args:
-            container_name: 容器名称
-            context: 隔离上下文
-
-        Returns:
-            docker create 命令参数列表（OPTIONS + IMAGE + COMMAND）
-        """
+        """构建 docker create 命令参数（含 IMAGE 与 COMMAND）。"""
         args = [
             "--name", container_name,
             # --init: 使用 tini 作为 PID 1，回收 docker exec 产生的僵尸进程，
@@ -545,15 +420,7 @@ class DockerProvider(IsolationProvider):
     async def _exec_in_container(
         self, container_id: str, operation: dict[str, Any],
     ) -> ExecutionResult:
-        """在容器中执行命令。
-
-        Args:
-            container_id: 容器ID
-            operation: 操作描述字典
-
-        Returns:
-            执行结果
-        """
+        """在容器中执行命令。"""
         command = operation.get("command", "")
         timeout = operation.get("timeout", 30)
         working_dir = operation.get("working_dir", "/workspace")
@@ -601,15 +468,7 @@ class DockerProvider(IsolationProvider):
     async def _file_op_in_container(
         self, container_id: str, operation: dict[str, Any],
     ) -> ExecutionResult:
-        """在容器中执行文件操作。
-
-        Args:
-            container_id: 容器ID
-            operation: 操作描述字典
-
-        Returns:
-            执行结果
-        """
+        """在容器中执行文件操作。"""
         op = operation.get("operation")
         path = operation.get("path")
 
@@ -645,15 +504,7 @@ class DockerProvider(IsolationProvider):
     async def _read_container_file(
         self, container_id: str, path: str,
     ) -> str:
-        """从容器中读取文件内容。
-
-        Args:
-            container_id: 容器ID
-            path: 容器内文件路径
-
-        Returns:
-            文件内容字符串
-        """
+        """从容器中读取文件内容。"""
         _, stdout, _ = await self._run_cmd(
             ["docker", "exec", container_id, "cat", path], timeout=10
         )
@@ -662,13 +513,7 @@ class DockerProvider(IsolationProvider):
     async def _write_container_file(
         self, container_id: str, path: str, content: str,
     ) -> None:
-        """向容器中写入文件。
-
-        Args:
-            container_id: 容器ID
-            path: 容器内文件路径
-            content: 文件内容
-        """
+        """向容器中写入文件。"""
         # 确保目录存在
         dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
         await self._run_cmd(

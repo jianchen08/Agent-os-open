@@ -1,10 +1,3 @@
-/**
- * 复现 initFromAPI 吃掉 streaming 消息的 bug
- *
- * 真实场景：用户发消息 → stream_start 创建占位符 → ChatContainer effect 触发 fetchMessages
- * → fetchMessages 返回 API 数据（不含 streaming 消息）→ initFromAPI 合并时吃掉 streaming 消息
- * → stream_end 到达时 updateMessage 找不到消息
- */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
 

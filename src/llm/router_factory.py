@@ -1,8 +1,4 @@
-"""litellm.Router 工厂 — 从 llm.yaml 构建共享 Router 实例。
-
-多 key 场景下，为同一 model_name 注册多个 deployment（每个 key 一个），
-litellm Router 自动负载均衡、冷却和 failover。
-"""
+"""litellm.Router 工厂 — 从 llm.yaml 构建共享 Router 实例。"""
 
 from __future__ import annotations
 
@@ -33,24 +29,7 @@ _PROXY_ENV_VARS = (
 
 
 def disable_llm_proxy() -> None:
-    """强制 LLM 调用直连，与本机系统代理解耦。
-
-    背景：宿主机代理客户端（Clash/V2Ray 等）会向 Windows 注册表写入
-    系统代理（如 127.0.0.1:7993）。litellm 底层的 httpx 默认 trust_env=True，
-    会读 HTTP(S)_PROXY 环境变量；aiohttp 在 aiohttp_trust_env=True 时同样读取。
-    结果是 LLM 请求被转发到本地代理端口——代理开着时 TLS 链路被破坏
-    (报 api.xxx:443 ssl)，代理关掉时端口无人监听 (报 connection refused)，
-    两种现象随代理开关反复横跳。
-
-    本函数在 Router 首次构建时执行一次，从两个层面钉死直连：
-    1. 清空进程内 *_PROXY 环境变量 → httpx/aiohttp/requests 均不再走代理；
-    2. 设置 litellm.aiohttp_trust_env=False → 即便环境变量被外部恢复，
-       aiohttp 也不读系统代理；
-    3. 用 NO_PROXY 列出 LLM 域名作为兜底 → 即使上层强制开启代理，
-       这些域名仍直连。
-
-    该函数幂等，可安全重复调用。
-    """
+    """强制 LLM 调用直连，与本机系统代理解耦。"""
     # 1. 清空进程内代理环境变量（httpx/aiohttp/requests 三家共用）
     for var in _PROXY_ENV_VARS:
         os.environ.pop(var, None)
@@ -88,20 +67,7 @@ _provider_type_map: dict[str, str] = {}
 
 
 def get_litellm_prefix(provider_name: str) -> str:
-    """获取 provider 对应的 litellm 前缀（从配置动态读取）。
-
-    优先从 _provider_type_map（llm.yaml providers.type 字段）查找。
-    若映射为空（reset_router() 后未重建，或独立调用未走 build_router），
-    则懒加载从 yaml 重建，避免回退到 provider_name 本身——provider 名
-    （如 yichengc/apigo）不是 litellm 合法前缀，直接用会导致注册成
-    "yichengc/glm-5.2" 这种 litellm 无法路由的非法字符串。
-
-    Args:
-        provider_name: 配置中的 provider 名称（如 "apigo"、"zhipu_coding"）
-
-    Returns:
-        litellm 模型字符串前缀（如 "openai"、"zai"）
-    """
+    """获取 provider 对应的 litellm 前缀（从配置动态读取）。"""
     if provider_name in _provider_type_map:
         return _provider_type_map[provider_name]
     # 映射为空或缺失：懒加载重建，绝不回退到 provider_name 本身（非法前缀）
@@ -110,11 +76,7 @@ def get_litellm_prefix(provider_name: str) -> str:
 
 
 def _ensure_provider_type_map_loaded() -> None:
-    """懒加载 _provider_type_map（若为空则从 yaml 重建）。
-
-    应对 reset_router() 清空映射后的窗口期，以及 adapter/llm_core 等独立
-    调用 get_litellm_prefix 的场景，保证总能拿到 provider.type 配置。
-    """
+    """懒加载 _provider_type_map（若为空则从 yaml 重建）。"""
     if _provider_type_map:
         return
     try:
@@ -139,33 +101,7 @@ def _get_litellm_model_string(provider: str, model_name: str) -> str:
 def _parse_provider_keys(
     llm_data: dict[str, Any],
 ) -> dict[str, list[KeySlot]]:
-    """从 llm.yaml 的 providers 段解析所有 key。
-
-    支持两种配置格式：
-
-    多 key（新）::
-
-        providers:
-          zhipu_coding:
-            api_base: https://...
-            keys:
-              - id: key1
-                api_key: xxxx
-                rpm: 60
-              - id: key2
-                api_key: yyyy
-                rpm: 60
-
-    单 key（旧）::
-
-        providers:
-          zhipu_coding:
-            api_key: xxxx
-            api_base: https://...
-
-    Returns:
-        provider_name → [KeySlot, ...] 的映射
-    """
+    """从 llm.yaml 的 providers 段解析所有 key。"""
     providers_section = llm_data.get("providers", {})
 
     result: dict[str, list[KeySlot]] = {}
@@ -213,11 +149,7 @@ def build_model_list(
     model_loader: Any,
     provider_keys: dict[str, list[KeySlot]],
 ) -> list[dict[str, Any]]:
-    """从 llm.yaml 构建 Router model_list。
-
-    多 key provider: 为每个 key 注册一个 deployment（同一 model_name）。
-    litellm Router 自动负载均衡和 failover。
-    """
+    """从 llm.yaml 构建 Router model_list。"""
     llm_data = model_loader._load_llm_data()
     models_section = llm_data.get("models", {})
 
@@ -278,11 +210,7 @@ def build_model_list(
 
 
 def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
-    """从 llm.yaml 的 defaults.tiers.fallback_chain 构建 Router fallbacks。
-
-    BUG-FIX: 原来读 defaults.fallback_chain，但 yaml 里 fallback_chain
-    放在 defaults.tiers.fallback_chain 下，导致始终读空，fallback 永不生效。
-    """
+    """从 llm.yaml 的 defaults.tiers.fallback_chain 构建 Router fallbacks。"""
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
     tiers = defaults.get("tiers", {})
@@ -315,12 +243,6 @@ def build_router(model_loader: Any) -> litellm.Router:
 
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
-    # BUG-FIX-fix_20260627_timeout_needs_float:
-    # yaml defaults.call_timeout 是 int（如 120），经 Router 的 timeout/
-    # stream_timeout 传给 zai provider 时，zai 严格 isinstance(timeout, float)
-    # 校验失败 → BadRequestError "Timeout needs to be a float or httpx.Timeout"。
-    # 此处强制 float，让所有经 Router 的调用（router.acompletion / fallback）
-    # 都传 float 给上游。
     call_timeout = float(defaults.get("call_timeout", 600))
 
     # 从 providers.type 字段构建 provider → litellm 前缀映射
@@ -384,12 +306,7 @@ def get_provider_for_model(model_id: str) -> str:
 
 
 def get_model_name_for_id(model_id: str) -> str:
-    """根据 model_id 反查 model_name（如 deepseek-v4-pro-apigo → deepseek-v4-pro）。
-
-    model_id 是 yaml key，用作路由标识；model_name 是发给上游 API 的真实模型名。
-    KeyPoolAdapter 直连时用 model_id 路由到正确 provider，再反查 model_name 拼
-    litellm 模型字符串。
-    """
+    """根据 model_id 反查 model_name（如 deepseek-v4-pro-apigo → deepseek-v4-pro）。"""
     return _model_to_name.get(model_id, model_id)
 
 
@@ -431,16 +348,8 @@ def get_or_create_adapter(model_loader: Any) -> Any:
     return _adapter_instance
 
 
-
 def reset_router() -> None:
-    """重置 Router/Adapter 模块级单例，使配置变更后重新构建。
-
-    BUG-FIX-20260617: router_factory 在 REFACTOR-20260614 中删除了 reset_router，
-    但 config.models.invalidate_all_llm_caches() 仍通过延迟导入调用它，导致
-    LLM 配置热重载时抛出 ImportError（配置实际已保存成功）。
-    修复方案：恢复 reset_router，仅清除本模块的模块级单例，让下次调用
-    get_or_create_router / get_or_create_adapter 时按新配置重新构建。
-    """
+    """重置 Router/Adapter 模块级单例，使配置变更后重新构建。"""
     global _router_instance, _adapter_instance  # noqa: PLW0603
     _router_instance = None
     _adapter_instance = None
@@ -449,4 +358,3 @@ def reset_router() -> None:
     _model_to_name.clear()
     _provider_type_map.clear()
     logger.info("[Router] 模块级单例已重置")
-

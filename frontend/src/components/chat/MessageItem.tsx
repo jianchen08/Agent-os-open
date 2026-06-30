@@ -1,9 +1,4 @@
-/**
- * 消息项组件
- *
- * 显示单条消息，支持用户消息和 AI 消息的不同样式
- * 渲染顺序：thinking -> text -> toolCalls[]
- */
+/** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
 import { Bell, Bot, Check, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
 import { memo, useEffect, useRef, useState } from 'react'
@@ -22,9 +17,7 @@ import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
 import type { MessageItemProps } from './types'
 
-/**
- * 消息编辑组件
- */
+/** 消息编辑组件 */
 interface MessageEditorProps {
   content: string
   onSave: (newContent: string) => void
@@ -108,9 +101,7 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
   )
 }
 
-/**
- * 消息项组件
- */
+/** 消息项组件 */
 export const MessageItem = memo(function MessageItem({
   message,
   isLast = false,
@@ -130,12 +121,6 @@ export const MessageItem = memo(function MessageItem({
 
   const isSystemMessage = message.role === 'system'
 
-  // BUG-FIX-fix_20260523_max_update_depth:
-  // 问题根因: useSessionStore()/useAgentStore() 无 selector 全量订阅，
-  //          N 个 MessageItem 实例同时订阅，任何 store 变化触发所有实例重渲染。
-  // 修复方案: 改为精确 selector，只订阅需要的字段。
-  // 影响范围: 消息列表渲染性能
-  // 修复日期: 2026-05-23
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const isMessageStreaming = message.status === 'streaming'
 
@@ -336,12 +321,7 @@ export const MessageItem = memo(function MessageItem({
             {isAssistant && modelName && (
               <div className="text-muted-foreground mb-1 px-1 text-xs">{modelName}</div>
             )}
-            {/* BUG-FIX-fix_20260512_empty_bubble:
-                问题根因: 当助手消息 status 变为 completed 但 content 仍为空时，
-                isMessageStreaming=false 导致条件判断走到 else 分支，
-                MessageContentRenderer 对空 fragments 返回 null，
-                但气泡 div 仍渲染（带 padding、背景色、圆角），显示为空的小条条。
-                修复方案: 非流式且无内容时跳过整个气泡渲染。 */}
+            {/* 空内容消息跳过气泡渲染 */}
             {(() => {
               const bubbleStyle = {
                 // 用 background 而非 backgroundColor：bubble-*-bg 可能是纯色，
@@ -407,11 +387,7 @@ export const MessageItem = memo(function MessageItem({
                 )
               }
 
-              // BUG-FIX-fix_20260530_message_render_empty:
-              // 问题根因: 合并后的消息 parts 为 undefined 导致 fragments 为空，
-              //   但 displayContent 有值（来自 message.content），原代码直接 return null
-              //   导致消息不渲染。刷新后只有2条消息可见。
-              // 修复方案: fragments 为空时 fallback 到 displayContent 渲染纯文本。
+              // 导致消息不渲染。刷新后只有2条消息可见。
               const _rawFallback = renderContext.displayContent || message.content
               const _displayFallback = _rawFallback?.trim() ? _rawFallback : ''
 

@@ -1,10 +1,4 @@
-"""
-任务提交工具
-
-暴露接口：
-- get_tool_definition() -> Tool：工具定义
-- TaskSubmitTool：任务提交工具类
-"""
+"""任务提交工具"""
 
 import logging
 import os
@@ -63,19 +57,7 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
 
 
 def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
-    """验证目标空间路径的安全性。
-
-    检查规则：
-    1. 不能是磁盘根目录（如 ``C:\\``、``D:\\``、``/``）
-    2. 不能是系统危险目录（如 ``C:\\Windows``、``/etc``）
-    3. 不能是配置文件中的工作空间根目录
-
-    Args:
-        workspace: 用户提交的目标工作空间路径
-
-    Returns:
-        None 表示验证通过，否则返回错误消息字符串
-    """
+    """验证目标空间路径的安全性。"""
     if not workspace:
         return None
 
@@ -127,20 +109,7 @@ def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
 
 
 def _normalize_description(value: Any) -> str:
-    """将 LLM 返回的 description 归一化为 str。
-
-    LLM 偶尔会把多行文本写成数组（如 ``["line1", ""]``），而 ``TaskModel`` 是
-    dataclass 无运行时类型校验，list 会被静默持久化，最终在 API 层
-    ``TaskResponse.description``（pydantic 强制 str）校验失败导致 500。
-    在入口归一化，避免脏数据落盘，同时让 ``len(description)`` 超长检查生效。
-
-    Args:
-        value: LLM 返回的原始 description 值
-
-    Returns:
-        归一化后的字符串；None 返回空串；list/tuple 用换行连接；
-        其他非 str 类型转为字符串。
-    """
+    """将 LLM 返回的 description 归一化为 str。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -151,28 +120,14 @@ def _normalize_description(value: Any) -> str:
 
 
 class TaskSubmitTool(BuiltinTool):
-    """任务提交工具。
-
-    负责创建任务并通过 TaskWorker 提交后台执行。
-
-    依赖：
-    - TaskService：任务创建与存储（JSON 文件存储）
-    - TaskWorker：后台任务执行器
-    """
+    """任务提交工具。"""
 
     def __init__(self) -> None:
         """初始化任务提交工具"""
         self._task_service: Any = None
 
     def _get_task_service(self) -> Any:
-        """获取共享的 TaskService 实例。
-
-        委托到 tasks.service_access 公共接口，
-        支持缓存已获取的实例避免重复创建。
-
-        Returns:
-            TaskService 实例，创建失败时返回 None
-        """
+        """获取共享的 TaskService 实例。"""
         if self._task_service is not None:
             return self._task_service
         from tasks.service_access import get_task_service  # noqa: PLC0415
@@ -186,13 +141,7 @@ class TaskSubmitTool(BuiltinTool):
         """获取工具定义（标准 OpenAI Function Calling 格式）"""
         return Tool(
             name="task_submit",
-            description="""
-任务提交工具。将任务提交给指定的 Agent 执行，配置验收标准确保结果可验证。
-
-【示例】
-{"target_type": "agent", "target_id": "code_writer_agent", "goal": {"title": "实现用户登录"}, "acceptance_criteria": {"file_check": {"input_params": {"path": "src/auth/login.py"}}}}
-注意：target_id 应使用系统提供的 Agent 映射表中的专用 Agent ID，不要用 general_agent 替代。
-""".strip(),
+            description="""任务提交工具。将任务提交给指定的 Agent 执行，配置验收标准确保结果可验证。""".strip(),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -428,16 +377,7 @@ class TaskSubmitTool(BuiltinTool):
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912,PLR0915
-        """执行任务提交。
-
-        流程：
-        1. 参数验证（goal, target_type, target_id, acceptance_criteria）
-        2. 验证 parent_task_id 权限
-        3. 验证依赖任务存在
-        4. 使用 TaskService 创建任务（status=pending）
-        5. 通过 EventBus 发布 task.submitted 事件
-        6. 返回提交结果
-        """
+        """执行任务提交。"""
         import time as _time  # noqa: PLC0415
         _t0 = _time.monotonic()
         task_scope = inputs.get("task_scope", "non_container")
@@ -596,7 +536,6 @@ class TaskSubmitTool(BuiltinTool):
 
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
-            # BUG-DIAG-fix_20260619_l2_parent_task_id_lost:
             # L2 调 task_submit 时 parent_task_id 理应自动注入（来自 state["task_id"]）。
             # 此处触发说明注入链断裂。诊断字段定位断裂点：
             # - injected_task_id 空 → param_inject 没注入或 state["task_id"] 为空
@@ -1109,16 +1048,7 @@ class TaskSubmitTool(BuiltinTool):
         )
 
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
-        """处理容器任务提交。
-
-        容器任务不指定执行者，只创建一个 pending 状态的父任务框架。
-
-        Args:
-            inputs: 工具输入参数
-
-        Returns:
-            工具执行结果
-        """
+        """处理容器任务提交。"""
         goal = inputs.get("goal")
         parent_agent_level = inputs.get("parent_agent_level")
 
@@ -1187,8 +1117,6 @@ class TaskSubmitTool(BuiltinTool):
                         from channels.api.memory_store import store as api_store  # noqa: PLC0415
                         _session = api_store.get_session(_session_id)
                         if _session:
-                            # BUG-FIX-fix_20260622_subpipeline_overwrites_active:
-                            # 容器子管道注册时不覆盖主管道 active，避免会话历史丢失
                             _session.register_pipeline(pipeline_id, set_active=False)
                             api_store.set_session(_session_id, _session)
                     except Exception as _reg_exc:
@@ -1301,23 +1229,7 @@ class TaskSubmitTool(BuiltinTool):
         *,
         is_container: bool = False,
     ) -> tuple[Any, str | None]:
-        """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。
-
-        - 非容器：调 ``lifecycle.on_task_start``
-        - 容器：调 ``lifecycle.init_container_workspace``
-        通过 run_in_executor 在线程池执行，不阻塞事件循环和其他管道。
-
-        Args:
-            task: TaskModel 实例
-            workspace: 目标工作空间路径
-            task_data: 任务数据字典（isolation_mode 等决策字段）
-            task_service: TaskService 实例
-            is_container: 是否为容器任务
-
-        Returns:
-            (更新后的 task, None) 成功；(task, error_msg) 失败。
-            调用方负责在失败时 hard_delete。
-        """
+        """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。"""
         import asyncio  # noqa: PLC0415
 
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
@@ -1374,16 +1286,7 @@ class TaskSubmitTool(BuiltinTool):
     def _validate_parent_task_id(
         self, parent_agent_level: int, parent_task_id: str | None, task_scope: str
     ) -> bool:
-        """验证 parent_task_id 参数的使用权限。
-
-        Args:
-            parent_agent_level: 父 Agent 层级
-            parent_task_id: 用户指定的父任务 ID
-            task_scope: 任务范围
-
-        Returns:
-            验证是否通过
-        """
+        """验证 parent_task_id 参数的使用权限。"""
         if task_scope == "container":
             if parent_task_id is not None:
                 logger.warning("[TaskSubmit] 容器任务不能有父任务 | parent_task_id=%s", parent_task_id)
@@ -1407,16 +1310,7 @@ class TaskSubmitTool(BuiltinTool):
         return True
 
     def _check_dependencies_exist(self, dependencies: list[str]) -> list[str]:
-        """检查依赖任务是否存在。
-
-        通过 TaskService 查询每个依赖任务，返回不存在的 ID 列表。
-
-        Args:
-            dependencies: 依赖任务 ID 列表
-
-        Returns:
-            不存在的任务 ID 列表
-        """
+        """检查依赖任务是否存在。"""
         if not dependencies:
             return []
 
@@ -1437,19 +1331,7 @@ class TaskSubmitTool(BuiltinTool):
         goal: dict[str, Any],
         acceptance_criteria: dict[str, Any],
     ) -> dict[str, Any]:
-        """构建任务元数据。
-
-        将 acceptance_criteria、workspace、max_retries 等信息
-        存入 metadata 以便后续流程使用。
-
-        Args:
-            inputs: 工具输入参数
-            goal: 任务目标字典
-            acceptance_criteria: 验收标准字典
-
-        Returns:
-            合并后的元数据字典
-        """
+        """构建任务元数据。"""
         metadata: dict[str, Any] = {}
 
         # 存储验收标准（供 task_evaluate 使用）
@@ -1510,25 +1392,7 @@ class TaskSubmitTool(BuiltinTool):
         target_id: str,
         parent_agent_level: int,
     ) -> tuple[bool, str, str]:
-        """校验目标 Agent 是否存在且级别匹配。
-
-        优先从 agent_registry（内存）查找，与 TaskWorker 使用同一数据源，
-        确保校验通过时 TaskWorker 也一定能找到该 Agent。
-        如果 registry 不可用，回退到磁盘 YAML 文件查找。
-
-        规则：
-        1. target_id 对应的 agent 配置必须存在于 registry 或磁盘
-        2. 目标 agent 不能是 L1 级别（L1 是主调度层，不能作为子任务执行者）
-        3. 目标 agent 的级别不能与提交者同级或更高（应向下委托）
-        4. 目标 agent 必须处于启用状态（is_active=true），已禁用的 agent 不能作为执行者
-
-        Args:
-            target_id: 目标 Agent ID
-            parent_agent_level: 提交者（父任务）的 agent 级别（1=L1, 2=L2, 3=L3）
-
-        Returns:
-            (通过, 错误信息, 错误码) 元组。通过时错误信息为空字符串。
-        """
+        """校验目标 Agent 是否存在且级别匹配。"""
         agent_level_str = ""
         agent_level = 0
         # 目标 Agent 是否启用（is_active）。两条查找路径都要拿到它，
@@ -1588,16 +1452,7 @@ class TaskSubmitTool(BuiltinTool):
         return (True, "", "")
 
     def _get_agent_config_from_registry(self, target_id: str) -> Any | None:
-        """从 agent_registry 查找 Agent 配置。
-
-        与 TaskWorker 使用完全相同的数据源，确保校验和执行的一致性。
-
-        Args:
-            target_id: 目标 Agent ID
-
-        Returns:
-            AgentConfig 实例，未找到返回 None
-        """
+        """从 agent_registry 查找 Agent 配置。"""
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
@@ -1614,16 +1469,7 @@ class TaskSubmitTool(BuiltinTool):
 
     @staticmethod
     def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool]:
-        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。
-
-        当 agent_registry 中找不到目标 Agent 时，尝试从磁盘文件查找。
-
-        Args:
-            target_id: 目标 Agent ID
-
-        Returns:
-            (是否找到, 级别字符串, 级别数字, 是否启用) 元组
-        """
+        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。"""
         from pathlib import Path  # noqa: PLC0415
 
         import yaml  # noqa: PLC0415
@@ -1667,18 +1513,7 @@ class TaskSubmitTool(BuiltinTool):
         target_id: str,
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """从 agent 配置的 recommended_metrics 自动构建验收标准。
-
-        当 LLM 不传 acceptance_criteria 时，尝试从对应 agent 的 YAML 配置中
-        读取 recommended_metrics 并转换为 task_evaluate 可用的格式。
-
-        Args:
-            target_id: agent 配置 ID
-            context: 额外上下文（如 inputs/goal），用于替换模板变量
-
-        Returns:
-            验收标准字典，找不到时返回空 dict
-        """
+        """从 agent 配置的 recommended_metrics 自动构建验收标准。"""
         from pathlib import Path  # noqa: PLC0415
 
         import yaml  # noqa: PLC0415

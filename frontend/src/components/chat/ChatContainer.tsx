@@ -1,10 +1,4 @@
-/**
- * 聊天容器组件
- *
- * 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。
- * 支持 L1/L2/L3 多层 Agent Tab 切换，每个 Tab 独立维护消息列表。
- * 每个管道独立获取模型上下文窗口和 token 使用量。
- */
+/** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
 import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -27,17 +21,8 @@ import type { Message } from '@/types/models'
 
 const EMPTY_MESSAGES: Message[] = []
 
-/**
- * 合并连续的 assistant 消息
- *
- * 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。
- * 不区分流式/非流式，统一合并。组内有 streaming 消息时，合并结果保留 streaming 状态。
- */
-/**
- * 活跃投票面板列表
- *
- * 从 votingStore 获取当前会话的活跃投票并渲染。
- */
+/** 合并连续的 assistant 消息 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。 */
+/** 活跃投票面板列表 从 votingStore 获取当前会话的活跃投票并渲染。 */
 function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
   const votingSessions = useVotingStore((s) => s.votingSessions)
   const activeVotings = votingSessions.filter(
@@ -55,14 +40,7 @@ function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
   )
 }
 
-/**
- * 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式
- *
- * @param storeTabs - store 中的 AgentTab 列表
- * @param activeTabId - 当前激活的 Tab ID
- * @param unreadCounts - 未读计数映射
- * @returns AgentTabBar 兼容的 Tab 数据数组
- */
+/** 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式 */
 function mapStoreTabsToBarFormat(
   storeTabs: ReturnType<typeof useAgentTabStore.getState>['tabs'],
   activeTabId: string | null,
@@ -82,9 +60,7 @@ function mapStoreTabsToBarFormat(
   }))
 }
 
-/**
- * 聊天容器组件
- */
+/** 聊天容器组件 */
 export const ChatContainer = ({
   sessionId,
   isLoading = false,
@@ -114,18 +90,7 @@ export const ChatContainer = ({
   /** 当前激活 Tab（提前计算，供 pipelineMessages 选择器使用） */
   const activeTab = tabs.find((t) => t.id === activeTabId)
 
-  /**
-   * 基于当前激活 Tab 解析模型名
-   *
-   * 所有管道（主/子）平权处理，统一按当前标签的 agent 配置获取模型。
-   * 模型随标签切换而变化；查不到时返回空串，由下游如实显示「模型无效」，
-   * 绝不用全局默认模型冒充当前管道模型。
-   *
-   * 子管道 agent 标识有两个来源（按可靠性依次尝试）：
-   * 1. activeTab.agentId：主 Tab 指向主 agent config_id；子 Tab 可能是 task_id
-   *    （后端 sub_agent_created 事件已修正为下发 target_id，但旧缓存/导航路径可能残留 task_id）
-   * 2. pipelineMeta.agentName：子管道注册时为 target_id（真实 config_id），作兜底匹配键
-   */
+  /** 基于当前激活 Tab 解析模型名 所有管道（主/子）平权处理，统一按当前标签的 agent 配置获取模型。 */
   const agents = useAgentStore((s) => s.agents)
   /** 子管道对应的 agent config_id（来自 pipelineMeta.agentName，sub_agent_created 事件下发） */
   const pipelineAgentName = usePipelineMessageStore((s) => {
@@ -145,12 +110,7 @@ export const ChatContainer = ({
     return ''
   }, [activeTab?.agentId, pipelineAgentName, agents])
 
-  /**
-   * 从 pipelineMessageStore 获取当前激活管道的消息
-   *
-   * 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责，
-   * selector 只需读取 s.activePipelineId，不依赖 activeTab 做回退判断。
-   */
+  /** 从 pipelineMessageStore 获取当前激活管道的消息 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责， */
   const pipelineMessages = usePipelineMessageStore(
     (s) => {
       if (!s.activePipelineId) return EMPTY_MESSAGES
@@ -185,20 +145,9 @@ export const ChatContainer = ({
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
   const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
 
-  /**
-   * 当前标签对应管道是否正在流式输出
-   *
-   * 逻辑：当前标签 → 标签的 pipelineRunId → streamingState[pipelineId].isStreaming
-   * 子标签直接用 tab.pipelineRunId，主标签用 pipelineMessageStore.activePipelineId。
-   */
+  /** 当前标签对应管道是否正在流式输出 逻辑：当前标签 → 标签的 pipelineRunId → streamingState[pipelineId].isStreaming */
   const pipelineActiveId = usePipelineMessageStore((s) => s.activePipelineId)
   const currentTabPipelineId = activeTab?.pipelineRunId || pipelineActiveId
-  // BUG-FIX-fix_20260523_max_update_depth:
-  // 问题根因: streamingState 是对象，全量订阅导致任何 pipeline 的 streaming 状态变化
-  //          都会触发组件重渲染，配合其他 effect 可能产生无限循环。
-  // 修复方案: 改为精确选择器，只订阅当前 Tab 对应 pipeline 的 isStreaming 布尔值。
-  // 影响范围: ChatContainer 渲染性能，减少不必要的重渲染
-  // 修复日期: 2026-05-23
   const effectiveIsGenerating = usePipelineMessageStore(
     (s) => {
       const pid = activeTab?.pipelineRunId || s.activePipelineId
@@ -207,18 +156,10 @@ export const ChatContainer = ({
   )
 
 
-  /**
-   * 根据当前模型名获取动态 context_window
-   *
-   * 模型无效时 contextWindow=0，使下游进度条（maxTokens>0 才渲染）不显示假数据。
-   */
+  /** 根据当前模型名获取动态 context_window 模型无效时 contextWindow=0，使下游进度条（maxTokens>0 才渲染）不显示假数据。 */
   const { contextWindow: modelContextWindow } = useModelContextInfo(effectiveModelName)
 
-  /**
-   * 从 contextUsageStore 获取当前活跃管道的 token 使用量
-   *
-   * 每个管道（pipelineId）独立维护自己的 usage 数据。
-   */
+  /** 从 contextUsageStore 获取当前活跃管道的 token 使用量 每个管道（pipelineId）独立维护自己的 usage 数据。 */
   const currentPipelineId = currentTabPipelineId || ''
   const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
   const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
@@ -227,19 +168,12 @@ export const ChatContainer = ({
   const effectiveMaxTokens = modelContextWindow
   const effectiveTokenCount = effectiveTokenUsage
 
-  /**
-   * 统一消息源：只使用 pipelineMessageStore
-   *
-   * 所有消息（流式、API 加载、历史翻页）统一通过 pipelineMessageStore 管理，
-   * 不再使用外部传入的 messages prop 作为 fallback，消除双数据源不一致问题。
-   */
+  /** 统一消息源：只使用 pipelineMessageStore 所有消息（流式、API 加载、历史翻页）统一通过 pipelineMessageStore 管理， */
   const activeMessages = useMemo(() => {
     return pipelineMessages.filter((m: any) => m.role !== 'tool')
   }, [pipelineMessages])
 
-  /**
-   * 将 store Tab 映射为 AgentTabBar 所需格式
-   */
+  /** 将 store Tab 映射为 AgentTabBar 所需格式 */
   const barTabs = useMemo(
     () => mapStoreTabsToBarFormat(tabs, activeTabId, unreadCounts),
     [tabs, activeTabId, unreadCounts],
@@ -248,11 +182,7 @@ export const ChatContainer = ({
   /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */
   const showTabBar = tabs.length > 1
 
-  /**
-   * 处理 Tab 切换
-   *
-   * @param tabId - 目标 Tab ID
-   */
+  /** 处理 Tab 切换 */
   const handleTabChange = useCallback(
     (tabId: string) => {
       switchToTab(tabId)
@@ -260,11 +190,7 @@ export const ChatContainer = ({
     [switchToTab],
   )
 
-  /**
-   * 处理 Tab 关闭
-   *
-   * @param tabId - 要关闭的 Tab ID
-   */
+  /** 处理 Tab 关闭 */
   const handleTabClose = useCallback(
     (tabId: string) => {
       closeTab(tabId)
@@ -272,9 +198,7 @@ export const ChatContainer = ({
     [closeTab],
   )
 
-  /**
-   * 过滤消息
-   */
+  /** 过滤消息 */
   const filteredMessages = useMemo(() => {
     if (!searchQuery.trim()) {
       return activeMessages
@@ -325,7 +249,7 @@ export const ChatContainer = ({
       )}
 
       {/* 消息列表 */}
-      {/* BUG-FIX-fix_20260509_scroll_position: key 强制切换时重新挂载使 initialTopMostItemIndex 生效 */}
+      {/* key 强制切换时重新挂载使 initialTopMostItemIndex 生效 */}
       <MessageList
         key={activeTabId || sessionId}
         tabId={activeTabId || sessionId}
@@ -352,7 +276,7 @@ export const ChatContainer = ({
         <div className="absolute -top-10 right-2 z-10">
           <NotificationCenter />
         </div>
-        {/* BUG-FIX-fix_20260512_input_state_shared: key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
+        {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
         <ChatInput
           key={`input-${activeTabId || sessionId}`}
           draftKey={activeTabId || sessionId}

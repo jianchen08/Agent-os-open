@@ -1,14 +1,4 @@
-"""WebSocket 连接管理器。
-
-管理 WebSocket 连接的建立、心跳、消息推送和断开清理。
-支持全局连接和按 thread_id 分组的会话连接。
-
-FEATURE-20260521-ws-queue:
-设计决策:
-  - 引入 asyncio.Queue 作为发送缓冲区，避免同步等待 ws.send_text() 阻塞事件循环
-  - 独立后台任务 _sender_loop 批量消费队列，发送失败时自动清理失效连接
-  - send_to_user / send_to_thread 改为非阻塞入队，立即返回，提升高并发下的响应性
-"""
+"""WebSocket 连接管理器。"""
 
 from __future__ import annotations
 
@@ -22,11 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketPeer:
-    """WebSocket 连接端点的最小抽象。
-
-    描述生产环境中实际 WebSocket 连接（如 aiohttp.web.WebSocketResponse）
-    的公共接口：send_text / close。同时可在测试中作为轻量替代。
-    """
+    """WebSocket 连接端点的最小抽象。"""
 
     def __init__(self, user_id: str = "test_user") -> None:
         self.user_id = user_id
@@ -64,11 +50,7 @@ class _SendItem:
 
 
 class WebSocketManager:
-    """WebSocket 连接管理器。
-
-    管理全局连接和按会话分组的连接，支持心跳检测和消息推送。
-    通过后台发送队列解耦消息入队和实际发送，避免高并发时阻塞事件循环。
-    """
+    """WebSocket 连接管理器。"""
 
     HEARTBEAT_INTERVAL = 30  # 心跳间隔（秒）
     HEARTBEAT_TIMEOUT = 60   # 心跳超时（秒）
@@ -79,7 +61,7 @@ class WebSocketManager:
         self._active_connections: dict[str, list[WebSocketPeer]] = {}
         self._heartbeat_timestamps: dict[str, float] = {}
 
-        # FEATURE-20260521-ws-queue: 发送队列和后台任务
+        # 发送队列和后台任务
         self._send_queue: asyncio.Queue[_SendItem] = asyncio.Queue(
             maxsize=self.SEND_QUEUE_MAXSIZE,
         )
@@ -93,10 +75,7 @@ class WebSocketManager:
             )
 
     async def _sender_loop(self) -> None:
-        """后台发送循环，批量消费队列并实际发送消息。
-
-        独立运行，不阻塞调用方的事件循环调度。
-        """
+        """后台发送循环，批量消费队列并实际发送消息。"""
         while True:
             try:
                 item = await self._send_queue.get()
@@ -173,10 +152,7 @@ class WebSocketManager:
             self._active_connections.pop(thread_id, None)
 
     async def send_to_user(self, user_id: str, event: dict[str, Any]) -> bool:
-        """向指定用户推送事件（通过全局连接）。
-
-        FEATURE-20260521-ws-queue: 改为非阻塞入队，由后台任务实际发送。
-        """
+        """向指定用户推送事件（通过全局连接）。"""
         self._ensure_sender()
         ws = self._global_connections.get(user_id)
         if ws is None:
@@ -190,10 +166,7 @@ class WebSocketManager:
             return False
 
     async def send_to_thread(self, thread_id: str, event_data: dict[str, Any]) -> bool:
-        """向指定会话推送事件。
-
-        FEATURE-20260521-ws-queue: 改为非阻塞入队，由后台任务实际发送。
-        """
+        """向指定会话推送事件。"""
         self._ensure_sender()
         payload = json.dumps(event_data, ensure_ascii=False)
         try:

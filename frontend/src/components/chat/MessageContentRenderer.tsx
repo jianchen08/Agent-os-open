@@ -1,8 +1,4 @@
-/**
- * 消息内容渲染器
- *
- * 统一的消息内容渲染入口，根据片段类型分发到对应的渲染器
- */
+/** 消息内容渲染器 统一的消息内容渲染入口，根据片段类型分发到对应的渲染器 */
 
 import { memo } from 'react'
 import { AlertCircle, AlertTriangle, Info } from 'lucide-react'
@@ -15,15 +11,10 @@ import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { SystemLevel } from '@/types/messageParts'
 import type { ReactNode } from 'react'
 
-/**
- * 是否使用 LobeChat Markdown 组件
- * 注意：需要安装依赖 @lobehub/ui 和 motion
- */
+/** 是否使用 LobeChat Markdown 组件 注意：需要安装依赖 @lobehub/ui 和 motion */
 const USE_LOBECHAT_MARKDOWN = true
 
-/**
- * System notification style mapping by level
- */
+/** System notification style mapping by level */
 const SYSTEM_LEVEL_STYLES: Record<SystemLevel, { container: string; icon: string; text: string }> = {
   info: {
     container:
@@ -45,18 +36,14 @@ const SYSTEM_LEVEL_STYLES: Record<SystemLevel, { container: string; icon: string
   },
 }
 
-/**
- * System notification icon mapping by level
- */
+/** System notification icon mapping by level */
 const SYSTEM_LEVEL_ICONS: Record<SystemLevel, React.ElementType> = {
   info: Info,
   warning: AlertTriangle,
   error: AlertCircle,
 }
 
-/**
- * 消息内容渲染器 Props
- */
+/** 消息内容渲染器 Props */
 export interface MessageContentRendererProps {
   /** 渲染片段列表 */
   fragments: RenderFragment[]
@@ -72,23 +59,17 @@ export interface MessageContentRendererProps {
   searchQuery?: string
 }
 
-/**
- * 默认文本渲染器
- */
+/** 默认文本渲染器 */
 function DefaultTextRenderer(content: string, isStreaming: boolean): ReactNode {
   return <MarkdownRenderer content={content} isStreaming={isStreaming} />
 }
 
-/**
- * LobeChat 文本渲染器
- */
+/** LobeChat 文本渲染器 */
 function LobeChatTextRenderer(content: string, isStreaming: boolean): ReactNode {
   return <LobeChatMarkdown content={content} isStreaming={isStreaming} />
 }
 
-/**
- * 默认工具调用渲染器
- */
+/** 默认工具调用渲染器 */
 function DefaultToolCallRenderer(
   fragment: Extract<RenderFragment, { type: 'tool_call' }>,
 ): ReactNode {
@@ -109,9 +90,7 @@ function DefaultToolCallRenderer(
   )
 }
 
-/**
- * 渲染单个片段
- */
+/** 渲染单个片段 */
 function renderFragment(
   fragment: RenderFragment,
   isStreaming: boolean,
@@ -177,9 +156,7 @@ function renderFragment(
   }
 }
 
-/**
- * 高亮文本中的搜索关键词
- */
+/** 高亮文本中的搜索关键词 */
 function highlightText(text: string, query: string): string {
   if (!query.trim()) {
     return text
@@ -190,9 +167,7 @@ function highlightText(text: string, query: string): string {
   return text
 }
 
-/**
- * 消息内容渲染器基础组件
- */
+/** 消息内容渲染器基础组件 */
 function MessageContentRendererBase({
   fragments,
   isStreaming = false,
@@ -214,14 +189,7 @@ function MessageContentRendererBase({
   )
 }
 
-/**
- * 消息内容渲染器（带 memo 优化）
- *
- * BUG-FIX-fix_20260507_memo_comparison:
- * 问题根因: memo 比较函数只检查 text.content，不检查 toolCall 的 status/result
- *          和 thinking 的 content，导致工具完成后 ActivityCard 不更新。
- * 修复方案: 补全所有 fragment 类型的深度比较。
- */
+/** 消息内容渲染器（带 memo 优化） */
 export const MessageContentRenderer = memo(MessageContentRendererBase, (prev, next) => {
   if (prev.isStreaming !== next.isStreaming) {
     return false

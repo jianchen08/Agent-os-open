@@ -1,13 +1,4 @@
-/**
- * mergeConsecutiveAssistantMessages 纯函数测试
- *
- * 所有现有 store 测试将此函数 mock 为恒等，
- * 本测试使用真实实现覆盖合并逻辑。
- *
- * BUG-FIX-fix_20260622_part_sequence_collision:
- * 验证修复后 part.sequence 不被全局重编，
- * 流式大数 sequence 被保留，仅冲突时续接。
- */
+/** mergeConsecutiveAssistantMessages 纯函数测试 所有现有 store 测试将此函数 mock 为恒等， */
 
 import { describe, it, expect } from 'vitest'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
@@ -170,11 +161,9 @@ describe('mergeConsecutiveAssistantMessages', () => {
     })
   })
 
-  describe('跨消息 part 逻辑顺序（fix_20260624_thinking_text_split）', () => {
+  describe('跨消息 part 逻辑顺序', () => {
     it('两条 assistant 各有 thinking+text 时，思考紧跟其回复（不被全局排序打散）', () => {
-      // 复现 fix_20260622 引入的回归：多条 API 消息各自 parts 从 0 起算，
-      // 旧版 dedupePartSequences 全局按 sequence 数值排序，把所有 thinking 聚到前面、
-      // 所有 text 聚到后面，思考内容与所属回复「分家」。
+      // 多条 API 消息各自 parts 从 0 起算，旧版全局排序导致思考与回复「分家」
       const messages: Message[] = [
         msg('ai-1', {
           content: '回复A',
@@ -248,7 +237,7 @@ describe('mergeConsecutiveAssistantMessages', () => {
     })
 
     it('流式大数 sequence（无冲突）原样保留，顺序不变', () => {
-      // 回归保护 fix_20260622：流式消息 parts 用 Date.now() 大数，不冲突时不应被改动
+      // 流式消息 parts 用 Date.now() 大数，不冲突时不应被改动
       const flowSeq = Date.now()
       const messages: Message[] = [
         msg('ai-1', {

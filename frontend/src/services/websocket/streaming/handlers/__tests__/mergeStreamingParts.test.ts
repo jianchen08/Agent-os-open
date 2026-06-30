@@ -1,10 +1,4 @@
-/**
- * mergeStreamingParts 合并策略测试
- *
- * BUG-FIX-fix_20260624_stream_overwrite_regression:
- * 验证本地流式累积的完整 parts 不被后端末轮残缺 parts 覆盖，
- * 以及本地为空时的兜底和 content 校准行为。
- */
+/** mergeStreamingParts 合并策略测试 */
 import { describe, it, expect } from 'vitest'
 import { mergeStreamingParts } from '../utils'
 

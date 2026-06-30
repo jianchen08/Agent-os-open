@@ -1,12 +1,4 @@
-"""Tool Core 插件 — 工具执行核心（M3 完善）。
-
-负责执行 LLM 返回的工具调用：
-- 从 state["raw_tool_calls"] 读取工具调用列表
-- 逐个执行已注册的工具函数
-- 使用 asyncio.wait_for 设置超时保护
-- 收集执行结果并写入 state
-- 支持 IsolationManager 在 Docker 容器中执行 bash_execute
-"""
+"""Tool Core 插件 — 工具执行核心（M3 完善）。"""
 
 from __future__ import annotations
 
@@ -24,34 +16,10 @@ from pipeline.types import ErrorPolicy, StateKeys
 from tools.format_manager import get_format_manager
 from tools.registry import ToolRegistry
 
-# ---------------------------------------------------------------------------
 # asyncio 工具执行器 — 修复 _cancel_all_tasks 级联取消
-# ---------------------------------------------------------------------------
 
 def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
-    """在线程中运行异步工具函数，使用独立事件循环。
-
-    不使用 asyncio.run()，因为它的 Runner.__exit__ 会调用
-    _cancel_all_tasks(loop)，取消事件循环中的**所有**任务——
-    包括工具执行期间被间接创建的嵌套管道引擎。
-    这会导致子任务管道在工具返回后被级联终止。
-
-    改用 loop.run_until_complete() 直接运行工具协程并返回结果，
-    关闭循环前不强制取消任何后台任务。
-
-    Args:
-        func: 异步工具函数
-        tool_args: 工具参数字典
-
-    Returns:
-        工具函数返回值
-
-    Note:
-        BUG-FIX-fix_20260601_asyncio_cascade_cancel:
-        原代码: asyncio.run(fa(ta)) → Runner.__exit__ → _cancel_all_tasks(loop)
-        → 取消嵌套子管道引擎 → 所有子任务因 "sink dead" 被终止
-        修复: loop.run_until_complete() + 直接 close，不调用 _cancel_all_tasks
-    """
+    """在线程中运行异步工具函数，使用独立事件循环。"""
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(func(tool_args))
@@ -63,20 +31,7 @@ def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
 
 
 def _recover_workspace_from_task(state: dict[str, Any], task_id: str) -> str | None:
-    """state 中 workspace 缺失时，从任务数据反查恢复。
-
-    workspace 经 engine.run(workspace=...) → extra_state → state 注入，但观测到
-    在任务运行中途（如 human_interaction 交互、消息注入后）会从 state 丢失。
-    task_id 通常仍在 state 中，task.metadata.ws_meta.path 持久存活（不被运行
-    状态变更清除），是恢复 workspace 的可靠来源。
-
-    Args:
-        state: 管道状态字典
-        task_id: 当前任务 ID（state 中读取，可能为 "unknown" 占位）
-
-    Returns:
-        解析出的工作空间绝对路径；无法解析返回 None
-    """
+    """state 中 workspace 缺失时，从任务数据反查恢复。"""
     if not task_id or task_id == "unknown":
         return None
     try:
@@ -99,34 +54,12 @@ logger = logging.getLogger(__name__)
 
 
 class ToolCore(ICorePlugin):
-    """工具执行 Core — 从 raw_tool_calls 读取并执行工具调用。
-
-    执行流程：
-    1. 从 ctx.state["raw_tool_calls"] 获取待执行的工具调用列表
-    2. 逐个查找已注册的工具函数并执行
-    3. 使用 asyncio.wait_for 为每个调用设置超时保护
-    4. 收集所有结果（含成功/失败状态和耗时）
-    5. 将结果写入 state
-
-    Class Attributes:
-        error_policy: 错误策略为 RETRY（工具执行可重试）
-
-    Attributes:
-        _config: 插件配置字典
-        _tools: 已注册的工具函数映射，键为工具名，值为可调用对象
-        _tool_registry: 外部工具注册表引用（可选，用于批量注册）
-        _default_timeout: 工具执行默认超时时间（秒）
-    """
+    """工具执行 Core — 从 raw_tool_calls 读取并执行工具调用。"""
 
     error_policy = ErrorPolicy.RETRY
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
-        """初始化 Tool Core 插件。
-
-        Args:
-            config: 插件配置字典，支持以下键：
-                - timeout: 工具执行超时时间（秒），默认 30
-        """
+        """初始化 Tool Core 插件。"""
         self._config = config or {}
         self._tools: dict[str, Callable[..., Any]] = {}
         self._tool_registry: ToolRegistry | None = None
@@ -144,24 +77,12 @@ class ToolCore(ICorePlugin):
         return 50
 
     def register_tool(self, name: str, func: Callable[..., Any]) -> None:
-        """注册一个工具函数。
-
-        Args:
-            name: 工具名称，需与 LLM tool_calls 中的 name 匹配
-            func: 工具执行函数（同步或异步）
-        """
+        """注册一个工具函数。"""
         self._tools[name] = func
         logger.debug("[%s] Tool registered: %s", self.name, name)
 
     def register_tools_from_registry(self, registry: ToolRegistry) -> None:
-        """从 ToolRegistry 批量注册工具。
-
-        将 ToolRegistry 中所有已注册工具的处理函数导入到 ToolCore 中，
-        使 ToolCore 能够执行这些工具。
-
-        Args:
-            registry: 工具注册表实例
-        """
+        """从 ToolRegistry 批量注册工具。"""
         self._tool_registry = registry
         for tool_def in registry.list_all():
             handler = registry.get_handler(tool_def.name)
@@ -173,17 +94,7 @@ class ToolCore(ICorePlugin):
                 )
 
     def _get_schema_timeout_default(self, tool_name: str) -> float | None:
-        """从工具 schema 中获取 timeout_seconds 的默认值。
-
-        当 LLM 调用工具时未传递 timeout_seconds 参数，
-        从工具定义的 input_schema 中读取默认值作为 ToolCore 超时。
-
-        Args:
-            tool_name: 工具名称
-
-        Returns:
-            schema 中的默认超时秒数，无则返回 None
-        """
+        """从工具 schema 中获取 timeout_seconds 的默认值。"""
         if self._tool_registry is None:
             return None
         tool_def = self._tool_registry.get_optional(tool_name)
@@ -201,16 +112,7 @@ class ToolCore(ICorePlugin):
         return None
 
     def _get_tool(self, name: str) -> Callable[..., Any] | None:
-        """获取工具函数。
-
-        优先从本地注册表查找，然后从外部 ToolRegistry 查找。
-
-        Args:
-            name: 工具名称
-
-        Returns:
-            工具函数，未找到时返回 None
-        """
+        """获取工具函数。"""
         if name in self._tools:
             return self._tools[name]
         if self._tool_registry and self._tool_registry.has(name):
@@ -224,26 +126,12 @@ class ToolCore(ICorePlugin):
         "_session": "db_session",
         "_memory_service": "memory_service",
         "_retriever": "retriever",
-        # BUG-FIX-fix_20260625_read_execution_detail_no_storage:
-        # read_execution_detail 声明需要 storage 但 map 里没有对应映射，
-        # 导致复盘 agent 拿不到 ExecutionRecordStorage，永远报"未注入"。
         "_storage": "execution_record_storage",
     }
 
     @staticmethod
     def _normalize_tool_result(result: Any, slim: bool = False) -> Any:
-        """将工具返回值标准化为可 JSON 序列化的对象。
-
-        如果工具返回 ToolExecutionResult 实例，提取其 output/data 字段；
-        如果是 dict 或基础类型，直接返回；否则转为字符串。
-
-        Args:
-            result: 工具函数的原始返回值
-            slim: 精简模式，省略 LLM 不需要的冗余字段
-
-        Returns:
-            可 JSON 序列化的对象
-        """
+        """将工具返回值标准化为可 JSON 序列化的对象。"""
         if result is None:
             return None
 
@@ -264,24 +152,7 @@ class ToolCore(ICorePlugin):
     def _check_tool_blocked(
         self, tool_name: str, state: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """统一工具拦截检查：被策略拦截的工具返回失败结果，否则返回 None。
-
-        工具级拦截（权限/隔离/安全）应转为「工具失败结果」返回给 LLM，
-        让 LLM 看到该工具不可用并自行调整策略，而不是在 input 路由层用
-        target=end 终结整个管道（那会把单次工具越权放大成任务失败）。
-
-        检查三类决策（由对应 input 插件写入 state）：
-        - security.level_decision (level_guard)：Agent 层级越权
-        - isolation.blocked / execution_contexts[blocked] (isolation_guard)：隔离策略
-        - security.decision (security_check)：安全检查
-
-        Args:
-            tool_name: 工具名称
-            state: 管道状态字典
-
-        Returns:
-            被拦截时返回失败结果 dict（success=False），未被拦截返回 None
-        """
+        """统一工具拦截检查：被策略拦截的工具返回失败结果，否则返回 None。"""
         # level_guard 越权拦截
         level_decision = state.get("security.level_decision")
         if isinstance(level_decision, dict) and level_decision.get("allowed") is False:
@@ -328,19 +199,7 @@ class ToolCore(ICorePlugin):
         tool_args: dict[str, Any],
         timeout: float,
     ) -> dict[str, Any]:
-        """在 IsolationManager 管理的 Docker 容器中执行 bash_execute。
-
-        通过 IsolationManager 的根任务复用机制，同根任务的子任务
-        共享一个容器，避免创建大量冗余容器。
-
-        Args:
-            state: 管道状态（含 task_id, workspace 等）
-            tool_args: 工具参数（command 字段）
-            timeout: 超时时间（秒）
-
-        Returns:
-            与 ToolCore 期望一致的 dict: {tool_name, success, data/error, duration_ms}
-        """
+        """在 IsolationManager 管理的 Docker 容器中执行 bash_execute。"""
         import time as _time  # noqa: PLC0415
 
         from isolation.manager import get_isolation_manager  # noqa: PLC0415
@@ -353,12 +212,6 @@ class ToolCore(ICorePlugin):
         # 取不到即为功能错误——绝不静默创建无挂载容器去执行。否则命令会落到
         # 空/不存在的 /workspace 目录且 exit 0，表现为“目录看不到”却无任何报错，
         # 极难排查。
-        # BUG-FIX-fix_20260625_isolated_no_workspace
-        # BUG-FIX-fix_20260627_workspace_lost_midrun:
-        # 观测到 workspace 在任务运行中途从 state 丢失（如 human_interaction
-        # 交互/消息注入后），而非仅发生在 revive/idle 启动路径。治标：此处按需
-        # 用 state 中仍存的 task_id 反查 task.metadata.ws_meta.path 恢复，
-        # 覆盖所有丢失路径。治本仍需定位 state 重建清空 workspace 的精确环节。
         if not workspace:
             workspace = _recover_workspace_from_task(state, task_id)
             if workspace:
@@ -441,24 +294,7 @@ class ToolCore(ICorePlugin):
         on_chunk: Callable[[dict[str, Any]], Any] | None = None,
         call_id: str | None = None,
     ) -> dict[str, Any]:
-        """执行单个工具调用。
-
-        执行前自动将 services 中的依赖注入到 tool_args（仅注入
-        工具尚未提供的下划线前缀参数），使工具函数能获取
-        TaskService 等运行时依赖，无需 CLI 闭包包装。
-
-        执行完成后通过 on_chunk 发射 tool_result 事件，供 CLI 实时显示。
-
-        Args:
-            tool_name: 工具名称
-            tool_args: 工具调用参数
-            timeout: 执行超时时间（秒）
-            services: 管道共享服务字典（来自 ctx._services）
-            on_chunk: 流式事件回调（来自 CLI 的 on_chunk）
-
-        Returns:
-            工具执行结果字典，包含 tool_name、success、data/error、duration_ms
-        """
+        """执行单个工具调用。"""
         _wrapped_chunk = on_chunk
         if on_chunk and call_id:
             def _wrap(chunk: dict[str, Any]) -> Any:
@@ -641,11 +477,7 @@ class ToolCore(ICorePlugin):
             return result
 
     async def _try_auto_load_tool(self, tool_name: str) -> Callable[..., Any] | None:
-        """尝试自动加载未注册的工具。
-
-        通过 ToolAutoLoader 从数据库或 Python 文件加载工具，
-        成功后缓存到本地注册表供后续调用。
-        """
+        """尝试自动加载未注册的工具。"""
         try:
             from tools.auto_loader import get_tool_auto_loader  # noqa: PLC0415
 
@@ -673,21 +505,7 @@ class ToolCore(ICorePlugin):
             return None
 
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
-        """执行工具调用。
-
-        从 state["raw_tool_calls"] 读取工具调用列表，逐个执行，
-        收集结果后写入 state。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            核心执行结果字典，将合并到管道状态中，包含：
-            - tool_results: 工具执行结果列表
-            - raw_result: 最后一个工具的结果文本
-            - raw_error: 始终为 None（错误由各工具结果中的 error 字段表达）
-            - raw_tool_calls: 清空为空列表（已处理完毕）
-        """
+        """执行工具调用。"""
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
 
         if not tool_calls:
@@ -867,7 +685,6 @@ class ToolCore(ICorePlugin):
                             "name": tc.get("name", ""),
                             # arguments 必须是 JSON 字符串（OpenAI API 规范），
                             # 与 LLMCore 保持一致：直接透传原始值，不做 dict 转换。
-                            # 历史问题：曾把 args(dict) 直接放入 arguments，触发 400。
                             "arguments": tc.get("args", tc.get("arguments", "")),
                         },
                     }

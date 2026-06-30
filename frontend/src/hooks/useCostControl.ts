@@ -1,9 +1,4 @@
-/**
- * 成本控制 Hook
- *
- * 提供成本控制相关的 React Hook
- * 用于获取预算状态、使用统计、成本配置等信息
- */
+/** 成本控制 Hook 提供成本控制相关的 React Hook */
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
@@ -22,9 +17,7 @@ import type {
   CostReportResponse,
 } from '@/services/api/costControl'
 
-/**
- * 使用成本控制 Hook
- */
+/** 使用成本控制 Hook */
 export function useCostControl() {
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatusResponse | null>(null)
   const [usageStats, setUsageStats] = useState<UsageStatisticsResponse | null>(null)
@@ -33,9 +26,7 @@ export function useCostControl() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  /**
-   * 获取预算状态
-   */
+  /** 获取预算状态 */
   const fetchBudgetStatus = useCallback(
     async (params?: { task_id?: string; session_id?: string }) => {
       setIsLoading(true)
@@ -55,9 +46,7 @@ export function useCostControl() {
     [],
   )
 
-  /**
-   * 获取使用统计
-   */
+  /** 获取使用统计 */
   const fetchUsageStatistics = useCallback(async () => {
     setIsLoading(true)
     setError(null)
@@ -74,9 +63,7 @@ export function useCostControl() {
     }
   }, [])
 
-  /**
-   * 获取成本配置
-   */
+  /** 获取成本配置 */
   const fetchCostConfig = useCallback(async () => {
     setIsLoading(true)
     setError(null)
@@ -93,9 +80,7 @@ export function useCostControl() {
     }
   }, [])
 
-  /**
-   * 获取成本报表
-   */
+  /** 获取成本报表 */
   const fetchCostReport = useCallback(
     async (params?: { period?: 'daily' | 'weekly' | 'monthly' }) => {
       setIsLoading(true)
@@ -115,9 +100,7 @@ export function useCostControl() {
     [],
   )
 
-  /**
-   * 重置预算
-   */
+  /** 重置预算 */
   const resetBudgetData = useCallback(
     async (params?: { task_id?: string; session_id?: string }) => {
       setIsLoading(true)
@@ -138,9 +121,7 @@ export function useCostControl() {
     [fetchBudgetStatus],
   )
 
-  /**
-   * 刷新所有成本控制数据
-   */
+  /** 刷新所有成本控制数据 */
   const refreshAll = useCallback(async () => {
     setIsLoading(true)
     setError(null)
@@ -190,9 +171,7 @@ export function useCostControl() {
   }
 }
 
-/**
- * 使用预算状态 Hook
- */
+/** 使用预算状态 Hook */
 export function useBudgetStatus(
   params?: { task_id?: string; session_id?: string },
   autoFetch = true,
@@ -201,18 +180,10 @@ export function useBudgetStatus(
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // BUG-FIX-fix_20260523_max_update_depth:
-  // 问题根因: params 对象在 useCallback 依赖中，如果调用方传内联对象，
-  //          每次渲染产生新引用导致 fetchBudgetStatus 重建，触发 useEffect 无限循环。
-  // 修复方案: 使用 useRef 保存最新 params，useCallback 使用空依赖。
-  // 影响范围: useBudgetStatus hook 调用方
-  // 修复日期: 2026-05-23
   const paramsRef = useRef(params)
   useEffect(() => { paramsRef.current = params }, [params])
 
-  /**
-   * 获取预算状态
-   */
+  /** 获取预算状态 */
   const fetchBudgetStatus = useCallback(async () => {
     setIsLoading(true)
     setError(null)
@@ -243,17 +214,13 @@ export function useBudgetStatus(
   }
 }
 
-/**
- * 使用使用统计 Hook
- */
+/** 使用使用统计 Hook */
 export function useUsageStatistics(autoFetch = true, refreshInterval = 60000) {
   const [usageStats, setUsageStats] = useState<UsageStatisticsResponse | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  /**
-   * 获取使用统计
-   */
+  /** 获取使用统计 */
   const fetchUsageStatistics = useCallback(async () => {
     setIsLoading(true)
     setError(null)

@@ -1,10 +1,4 @@
-/**
- * AI 消息宽限期保留测试
- *
- * BUG-FIX-fix_20260624_ai_msg_vanish:
- * 验证刚 finalize 完成的 AI 消息（stream_end 后 status 变 'completed'）在后端
- * 尚未持久化时（initFromAPI 未返回）不会被丢弃。与乐观 user 消息同源问题。
- */
+/** AI 消息宽限期保留测试 */
 import { describe, it, expect, beforeEach } from 'vitest'
 import { usePipelineMessageStore } from '../pipelineMessageStore'
 import type { Message } from '@/types/models'

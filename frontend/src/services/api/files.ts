@@ -1,24 +1,8 @@
-/**
- * 文件上传 API 服务
- *
- * 提供文件上传和模型能力查询功能
- *
- * 暴露接口：
- * - uploadFile(file, modelName): FileUploadResponse - 上传文件
- * - getModelCapabilities(modelName): FileCapabilityResponse - 获取模型文件能力
- * - getSupportedTypes(): SupportedTypesResponse - 获取支持的文件类型
- * - validateFile(file, capabilities): 验证结果 - 验证文件是否可上传
- * - getFileCategory(mimeType): 文件分类 - 获取文件类型分类
- * - FileUploadResponse - 文件上传响应类型
- * - FileCapabilityResponse - 模型文件能力响应
- * - SupportedTypesResponse - 支持的文件类型响应
- */
+/** 文件上传 API 服务 提供文件上传和模型能力查询功能 */
 
 import apiClient from '@/services/api/client'
 
-/**
- * 文件上传响应
- */
+/** 文件上传响应 */
 export interface FileUploadResponse {
   /** 文件唯一标识 */
   file_id: string
@@ -34,9 +18,7 @@ export interface FileUploadResponse {
   url: string
 }
 
-/**
- * 模型文件能力响应（扩展版）
- */
+/** 模型文件能力响应（扩展版） */
 export interface FileCapabilityResponse {
   /** 模型名称 */
   model_name: string
@@ -75,9 +57,7 @@ export interface FileCapabilityResponse {
   is_multimodal?: boolean
 }
 
-/**
- * 支持的文件类型响应
- */
+/** 支持的文件类型响应 */
 export interface SupportedTypesResponse {
   /** 支持的图片类型 */
   image_types: Record<string, string[]>
@@ -89,9 +69,7 @@ export interface SupportedTypesResponse {
   max_document_size: number
 }
 
-/**
- * 上传文件
- */
+/** 上传文件 */
 export async function uploadFile(file: File, modelName?: string): Promise<FileUploadResponse> {
   const formData = new FormData()
   formData.append('file', file)
@@ -110,15 +88,7 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
   return response.data
 }
 
-/**
- * 获取模型文件能力
- *
- * BUG-FIX-fix_20260506_008: 静默处理 404，避免控制台报错
- * 问题根因: 后端未实现 /api/v1/files/capabilities 接口，
- *           导致 404 错误被全局拦截器 reportError 报错
- * 修复方案: 在 API 层静默处理 404，返回空能力对象
- * 影响范围: 不改变功能，capabilities 为 null 时使用默认配置
- */
+/** 获取模型文件能力 静默处理 404，避免控制台报错 */
 export async function getModelCapabilities(modelName: string): Promise<FileCapabilityResponse> {
   try {
     const response = await apiClient.get<FileCapabilityResponse>(`/api/v1/files/capabilities`, {
@@ -133,17 +103,13 @@ export async function getModelCapabilities(modelName: string): Promise<FileCapab
   }
 }
 
-/**
- * 获取支持的文件类型
- */
+/** 获取支持的文件类型 */
 export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
   const response = await apiClient.get<SupportedTypesResponse>('/files/supported-types')
   return response.data
 }
 
-/**
- * 验证文件是否可上传
- */
+/** 验证文件是否可上传 */
 export function validateFile(
   file: File,
   capabilities?: FileCapabilityResponse,
@@ -198,9 +164,7 @@ export function validateFile(
   return { valid: true }
 }
 
-/**
- * 获取文件类型分类
- */
+/** 获取文件类型分类 */
 export function getFileCategory(mimeType: string): 'image' | 'document' | 'audio' | 'unknown' {
   const imageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
   const documentTypes = ['application/pdf', 'text/plain', 'text/markdown', 'text/csv']

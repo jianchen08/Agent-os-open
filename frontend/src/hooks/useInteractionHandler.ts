@@ -1,13 +1,7 @@
-/**
- * useInteractionHandler Hook
- *
- * 业务编排层：订阅 WebSocket 交互事件 → 解析数据写入 store → 提供 actions 给 UI。
- * 单一职责：只处理人类交互相关逻辑。
- */
+/** useInteractionHandler Hook 业务编排层：订阅 WebSocket 交互事件 → 解析数据写入 store → 提供 actions 给 UI。 */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { API_ENDPOINTS } from '@/constants/api'
 import { ROUTES } from '@/constants/routes'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
@@ -26,37 +20,7 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 /** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
 let _isSubscribed = false
 
-/**
- * 模块级标志位：防止 StrictMode 双渲染 / 多组件挂载时重复触发刷新后的待审批恢复。
- * 与 _isSubscribed 同模式，仅在本进程页面生命周期内有效。
- */
-let _isRestored = false
-
-/**
- * 把后端 /interaction/pending 返回的 record（字段在 message_data 内层）
- * 包装成 WS interaction_request 事件的 payload 形状（字段拍平进 data），
- * 从而直接复用 parseInteractionEvent，零重复解析逻辑。
- *
- * record: {id, session_id, message_data:{interaction_mode, title, ...}}
- * → {type:'interaction_request', data:{request_id, interaction_mode, ..., session_id}}
- */
-function recordToEventPayload(record: Record<string, unknown>): Record<string, unknown> {
-  const msgData = (record.message_data as Record<string, unknown>) || {}
-  return {
-    type: 'interaction_request',
-    data: {
-      ...msgData,
-      request_id: record.id,
-      session_id: record.session_id,
-    },
-  }
-}
-
-/**
- * 从 WebSocket interaction_request 事件数据解析为 PendingInteraction
- * 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容
- * API 已改造为 fallback 到 cwd，不再依赖 container_task_id
- */
+/** 从 WebSocket interaction_request 事件数据解析为 PendingInteraction 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容 */
 async function parseInteractionEvent(
   data: Record<string, unknown>,
 ): Promise<Omit<PendingInteraction, 'status'> | null> {
@@ -174,12 +138,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
   }, [pendingInteractions, dismissInteraction])
 
-  // BUG-FIX-fix_20260531_interaction_duplicate:
-  // 问题根因: useInteractionHandler 被 InteractionPanel 和 GlobalInteractionOverlay
-  //   两个组件同时调用，导致 WebSocket 事件处理器注册两次，每个事件触发两次回调。
-  // 修复方案: 使用模块级标志位 _isSubscribed 确保全局只注册一次。
-  // 影响范围: WebSocket 交互事件订阅
-  // 修复日期: 2026-05-31
   useEffect(() => {
     if (_isSubscribed) return
     _isSubscribed = true
@@ -197,15 +155,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
       )
       if (existing) return
 
-      // BUG-FIX-fix_20260531_interaction_duplicate:
-      // 问题根因: 所有交互模式同时写入 interactionStore 和 notificationStore，
-      //   导致 notification 模式在聊天区域和通知中心重复显示，
-      //   choice/conversation 模式在通知中心产生冗余通知。
-      // 修复方案: 按交互模式分流 Store 写入：
-      //   - notification 模式：只写入 notificationStore（纯通知，不需要用户交互）
-      //   - choice/conversation 模式：只写入 interactionStore（交互卡片已在聊天区域展示）
-      // 影响范围: 人类交互请求的展示逻辑
-      // 修复日期: 2026-05-31
+      // choice/conversation 模式在通知中心产生冗余通知。
+      // - choice/conversation 模式：只写入 interactionStore（交互卡片已在聊天区域展示）
       if (parsed.mode === 'notification') {
         // notification 模式：只写入通知中心，不写入交互 Store
         const notifId = useNotificationStore.getState().addNotification({
@@ -221,12 +172,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
         addInteraction(parsed)
       }
 
-      // BUG-FIX-fix_20260617_silent_audio_catch:
-      // 问题根因: 原代码 playNotificationSound().catch(() => {}) 静默吞异常，
-      //          AI 请求人类交互时音频通知失败用户无感知。
-      // 修复方案: 音频失败时通过视觉通知兜底。notification 模式已通过上方
-      //          addNotification 通知用户，此处仅对 choice/conversation 模式补充视觉兜底，
-      //          避免重复通知。
+      // 避免重复通知。
       playNotificationSound().catch(() => {
         if (parsed.mode === 'notification') return
         useNotificationStore.getState().addNotification({
@@ -239,12 +185,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
         })
       })
 
-      // BUG-FIX-fix_20260625_workspace_tabs_persist:
-      // 问题根因: 交互附带的文件原走 __file_review__ 特殊 Tab，绑定 requestId/sessionId 写入
-      //          fileReviewRegistry，刷新页面后这套交互一次性数据无法恢复，整组 Tab 丢失。
-      // 修复方案: 与文件树点开文件统一为 __file_editor__ 类型，每个文件一个 Tab，
-      //          数据落 fileEditorRegistry（已 localStorage 持久化），刷新后 Tab 自然恢复。
-      //          tabId 形如 `file-${containerId}-${path}`，重复推送同一文件自动去重激活。
+      // tabId 形如 `file-${containerId}-${path}`，重复推送同一文件自动去重激活。
       if (parsed.fileContents && Object.keys(parsed.fileContents).length > 0) {
         const layoutStore = useLayoutModeStore.getState()
         const filePaths = Object.keys(parsed.fileContents)
@@ -340,57 +281,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
       _isSubscribed = false
     }
   }, [addInteraction, dismissInteraction])
-
-  // 刷新后恢复：页面刷新会丢失内存中的待审批卡片与通知，但后端 /interaction/pending
-  // 仍保留 PENDING 请求（进程内内存）。挂载时拉取一次，按 mode 分流回 store。
-  // 与 WS 实时推送的分流逻辑保持一致；addInteraction/addNotification 均按 id 去重，
-  // 因此恢复与 WS 推送并发安全。
-  useEffect(() => {
-    if (_isRestored) return
-    _isRestored = true
-
-    let cancelled = false
-    ;(async () => {
-      try {
-        const resp = await apiClient.get(API_ENDPOINTS.INTERACTION.PENDING)
-        if (cancelled) return
-        const items = (resp.data?.items as Record<string, unknown>[]) || []
-        if (items.length === 0) return
-
-        for (const record of items) {
-          const parsed = await parseInteractionEvent(recordToEventPayload(record))
-          if (!parsed) continue
-          // 已存在则跳过（WS 推送可能已先到）
-          const exists = useInteractionStore
-            .getState()
-            .pendingInteractions.some((i) => i.requestId === parsed.requestId)
-          if (exists) continue
-
-          if (parsed.mode === 'notification') {
-            // 恢复的通知用稳定 id（派生自 request_id）避免重复；不设 autoDismiss，
-            // 不让恢复的历史通知被倒计时干掉；不播放声音（刷新恢复不刷屏）。
-            useNotificationStore.getState().addNotification({
-              id: `restored-${parsed.requestId}`,
-              title: parsed.title || '人类交互请求',
-              message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
-              priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
-              category: 'alert',
-              isBlocking: false,
-            })
-          } else {
-            addInteraction(parsed)
-          }
-        }
-      } catch (err) {
-        // 恢复失败不阻塞页面，仅记录；WS 实时推送不受影响
-        console.warn('[InteractionHandler] 恢复待审批请求失败:', err)
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [addInteraction])
 
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {

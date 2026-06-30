@@ -1,25 +1,4 @@
-"""管道引擎的日志基础设施（per-pipeline 文件日志）。
-
-把"为每个管道建独立日志文件"这套基础设施从引擎核心拆出来：引擎只管
-"执行循环"，本模块负责按 pipeline_run_id 创建/关闭 FileHandler，并把
-contextvar（当前 pipeline_id）的生命周期收口在这里。
-
-为什么单独成模块（架构理由）：
-- 日志是【横切基础设施】，与"执行管道"零内聚。FileHandler 创建、目录布局、
-  日志器清单、过滤器、contextvar 绑定/重置，都是传输/采集层细节，不属于
-  引擎领域核心。混在 engine.py 是基础设施侵入领域层。
-- 引擎通过 self._pipeline_logger 委托，依赖方向单向：logger 不反向依赖引擎
-  内部状态（model_info 需要的 plugin_registry 作为参数注入，不持有引擎引用）。
-
-职责边界：
-- setup(pipeline_run_id)：按目录（logs/pipeline|error|task）建 3 个 FileHandler
-  挂到相关 logger，带防重复守卫（同 ID resume 不重建）。
-- bind_context / reset_context：_current_pipeline_id contextvar 的 set/reset，
-  供 _TaskLogFilter / _PipelineLogFilter 按 pipeline_id 过滤。
-- log_handler：取当前管道的最后一个 FileHandler（供调用方判断/透传）。
-- model_info(plugin_registry)：打印当前 LLM 模型（plugin_registry 参数注入）。
-- teardown()：关闭所有 FileHandler 并从 logger 移除，重置防重复守卫。
-"""
+"""管道引擎的日志基础设施（per-pipeline 文件日志）。"""
 from __future__ import annotations
 
 import contextlib
@@ -35,13 +14,6 @@ logger = logging.getLogger(__name__)
 
 # 需要挂 per-pipeline FileHandler 的日志器清单（引擎核心 + 插件 + 工具 + LLM 等）。
 # 放模块级常量，与引擎类解耦。
-#
-# BUG-FIX-fix_20260629_isolation_log_missing:
-# 原清单不含 isolation，导致 worktree 合并/清理（isolation._workspace_merge_ops /
-# isolation.workspace_lifecycle）的重试、验证、根因 WARNING/ERROR 全部漏在
-# pipeline/error/task 日志之外（只走 root 的 console handler）。排查合并失败时
-# 只能看到末端 task_evaluate 那句被压缩成 "unknown" 的 ERROR。isolation 作为父
-# logger 加入后，靠 Python logging 层级传播覆盖所有 isolation.* 子模块。
 _PIPELINE_LOGGERS: tuple[str, ...] = (
     "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
     "pipeline.route", "pipeline.config", "pipeline.registry",
@@ -53,7 +25,6 @@ _PIPELINE_LOGGERS: tuple[str, ...] = (
     "triggers.manager",
     "pipeline.message_bus",
     "src.core.event_bus",
-    "isolation",
 )
 
 # 任务执行日志放行的 logger 前缀（task_submit/manage/evaluate/worker）。
@@ -67,10 +38,7 @@ _TASK_LOG_LOGGERS: tuple[str, ...] = (
 
 
 class _TaskLogFilter(logging.Filter):
-    """只放行任务执行相关的日志（task_submit/task_manage/task_evaluate/worker）。
-
-    按 _current_pipeline_id contextvar 过滤，确保多管道并行时各管道任务日志不串。
-    """
+    """只放行任务执行相关的日志（task_submit/task_manage/task_evaluate/worker）。"""
 
     def __init__(self, pipeline_id: str) -> None:
         super().__init__()
@@ -89,18 +57,7 @@ def _create_log_handler(
     formatter: logging.Formatter,
     filters: list[Any],
 ) -> logging.FileHandler:
-    """创建配置好的 FileHandler（统一日志 Handler 创建逻辑）。
-
-    Args:
-        file_path: 日志文件路径
-        mode: 文件打开模式（"w" 覆盖 / "a" 追加）
-        level: 日志级别
-        formatter: 日志格式化器
-        filters: 过滤器列表
-
-    Returns:
-        配置完成的 FileHandler 实例
-    """
+    """创建配置好的 FileHandler（统一日志 Handler 创建逻辑）。"""
     handler = logging.FileHandler(file_path, encoding="utf-8", mode=mode)
     handler.setLevel(level)
     handler.setFormatter(formatter)
@@ -110,14 +67,7 @@ def _create_log_handler(
 
 
 class PipelineLogger:
-    """单个管道的文件日志管理器。
-
-    引擎在 _run_loop 开始时 setup + bind_context，结束时 teardown + reset_context。
-    持有当前管道的 logger 列表（供 teardown 关闭 handler），不持有引擎引用。
-
-    Args:
-        log_base: 日志根目录（默认 logs/，测试可注入临时目录）。
-    """
+    """单个管道的文件日志管理器。"""
 
     def __init__(self, *, log_base: Path | str = "logs") -> None:
         self._log_base = Path(log_base)
@@ -126,9 +76,7 @@ class PipelineLogger:
         # 当前 setup 挂了 handler 的 logger 列表（teardown 用）。
         self._pipeline_loggers: list[logging.Logger] = []
 
-    # ------------------------------------------------------------------
     # contextvar 绑定（_current_pipeline_id，供过滤器按 pipeline_id 区分）
-    # ------------------------------------------------------------------
 
     def bind_context(self, pipeline_run_id: str) -> contextvars.Token[str | None]:
         """绑定当前 pipeline_id 到 contextvar，返回 token 供 reset_context 用。"""
@@ -138,25 +86,10 @@ class PipelineLogger:
         """重置 contextvar（必须用 bind_context 返回的 token）。"""
         _current_pipeline_id.reset(token)
 
-    # ------------------------------------------------------------------
     # setup：按目录建 3 个 FileHandler 挂到相关 logger
-    # ------------------------------------------------------------------
 
     def setup(self, pipeline_run_id: str, resumed: bool = False) -> None:
-        """为当前管道设置独立日志文件，按类型分文件夹存储。
-
-        目录结构：
-          logs/pipeline/  — 主日志（DEBUG~INFO，不含 WARNING+）
-          logs/error/     — 错误日志（WARNING 及以上）
-          logs/task/      — 任务执行日志（task_submit/manage/evaluate/worker）
-
-        防重复守卫：同 pipeline_run_id（resume/停止后重启同 ID）直接 return，
-        避免重复挂 handler 导致日志重复写。teardown 会重置守卫。
-
-        Args:
-            pipeline_run_id: 管道运行 ID（用作文件名与过滤 key）
-            resumed: 预留参数（历史用于决定覆盖/追加，现统一追加，已不影响行为）
-        """
+        """为当前管道设置独立日志文件，按类型分文件夹存储。"""
         try:
             # 防止 resume 时重复添加 Handler
             if self._logging_pipeline_id == pipeline_run_id:
@@ -211,32 +144,21 @@ class PipelineLogger:
         except Exception as exc:
             logger.info("管道日志器配置失败（非致命）: %s", exc)
 
-    # ------------------------------------------------------------------
     # log_handler：取当前管道最后一个 FileHandler
-    # ------------------------------------------------------------------
 
     @property
     def log_handler(self) -> logging.FileHandler | None:
-        """当前 setup 挂载的最后一个 FileHandler（调用方判断/透传用）。
-
-        从 _pipeline_loggers 反向遍历找第一个 FileHandler（即最近 setup 挂的）。
-        """
+        """当前 setup 挂载的最后一个 FileHandler（调用方判断/透传用）。"""
         for lg in reversed(self._pipeline_loggers):
             for h in reversed(lg.handlers):
                 if isinstance(h, logging.FileHandler):
                     return h
         return None
 
-    # ------------------------------------------------------------------
     # model_info：打印当前 LLM 模型（plugin_registry 参数注入）
-    # ------------------------------------------------------------------
 
     def model_info(self, plugin_registry: Any) -> None:
-        """显示当前 LLM 模型信息。
-
-        Args:
-            plugin_registry: 引擎的插件注册表，用于取 llm_call 核心插件的模型/provider。
-        """
+        """显示当前 LLM 模型信息。"""
         llm_core = plugin_registry.get_core("llm_call")
         if llm_core and hasattr(llm_core, "_model"):
             model_info = f"{llm_core._model} (provider={llm_core._provider}"
@@ -245,19 +167,10 @@ class PipelineLogger:
             model_info += ")"
             logger.debug("Model: %s", model_info)
 
-    # ------------------------------------------------------------------
     # teardown：关闭 FileHandler 并从 logger 移除
-    # ------------------------------------------------------------------
 
     def teardown(self) -> None:
-        """关闭所有为当前管道创建的 FileHandler 并从 logger 移除，防泄漏。
-
-        BUG-FIX-fix_20260627_log_missing_after_restart:
-        handler 全部关闭移除后必须重置守卫标志，否则引擎复用重启时 setup 的防重复
-        守卫会误判"已配置"直接 return，不重建 handler → 日志不写文件。
-        触发路径：停止生成只 cancel engine_task 不删 entry（复用同一 engine），下次
-        发消息走 _start_idle_engine → 同一 engine.run() → pipeline_id 不变 → 守卫命中。
-        """
+        """关闭所有为当前管道创建的 FileHandler 并从 logger 移除，防泄漏。"""
         # 收集去重后的 FileHandler（同一 handler 挂在多个 logger 上）
         handlers_to_close: list[logging.FileHandler] = []
         seen: set[int] = set()
@@ -275,5 +188,5 @@ class PipelineLogger:
                     lg.removeHandler(h)
 
         self._pipeline_loggers = []
-        # 重置守卫，允许下次 setup 重建（见上方 BUG 注释）
+        # 重置守卫，允许下次 setup 重建
         self._logging_pipeline_id = None

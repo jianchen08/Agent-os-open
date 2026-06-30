@@ -1,7 +1,4 @@
-"""认证相关 API 路由。
-
-提供登录、注册、获取当前用户、刷新令牌、登出等接口。
-"""
+"""认证相关 API 路由。"""
 
 from __future__ import annotations
 
@@ -34,17 +31,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["认证"])
 
 
 def _get_user_id_from_bearer(credentials: HTTPAuthorizationCredentials) -> str:
-    """从 Bearer credentials 中提取用户 ID。
-
-    Args:
-        credentials: HTTP Authorization 凭据
-
-    Returns:
-        用户 ID 字符串
-
-    Raises:
-        HTTPException: token 无效或用户不存在
-    """
+    """从 Bearer credentials 中提取用户 ID。"""
     user_info = get_current_user(credentials.credentials)
     if user_info is None:
         raise HTTPException(
@@ -57,17 +44,7 @@ def _get_user_id_from_bearer(credentials: HTTPAuthorizationCredentials) -> str:
 
 @router.post("/login", response_model=TokenResponse, summary="用户登录")
 def login(request: LoginRequest) -> TokenResponse:
-    """验证用户名密码，返回 access token 和 refresh token。
-
-    Args:
-        request: 登录请求，包含用户名和密码
-
-    Returns:
-        TokenResponse 包含 access_token 和 refresh_token
-
-    Raises:
-        HTTPException: 用户名或密码错误
-    """
+    """验证用户名密码，返回 access token 和 refresh token。"""
     user = store.get_user_by_username(request.username)
     # 使用 bcrypt 验证密码，禁止明文比对
     stored_password = user.get("password", "") if user else ""
@@ -94,17 +71,7 @@ def login(request: LoginRequest) -> TokenResponse:
 
 @router.post("/register", response_model=TokenResponse, summary="用户注册")
 def register(request: RegisterRequest) -> TokenResponse:
-    """创建新用户并返回 token。
-
-    Args:
-        request: 注册请求，包含用户名、密码和可选邮箱
-
-    Returns:
-        TokenResponse 包含 access_token 和 refresh_token
-
-    Raises:
-        HTTPException: 用户名已存在
-    """
+    """创建新用户并返回 token。"""
     try:
         user = store.create_user(
             username=request.username,
@@ -134,19 +101,7 @@ def register(request: RegisterRequest) -> TokenResponse:
 def get_me(
     authorization: str = Header(default=""),
 ) -> UserResponse:
-    """通过 Bearer token 获取当前用户信息。
-
-    从 Authorization: Bearer <token> 头提取认证凭据。
-
-    Args:
-        authorization: Authorization 请求头
-
-    Returns:
-        UserResponse 用户信息
-
-    Raises:
-        HTTPException: token 无效
-    """
+    """通过 Bearer token 获取当前用户信息。"""
     # 从 Authorization 头提取 Bearer token
     actual_token = _extract_token(authorization)
 
@@ -185,32 +140,8 @@ def refresh_token(
     authorization: str = Header(default=""),
     body: RefreshRequest | None = None,
 ) -> TokenResponse:
-    """使用 refresh token 获取新的 access token。
-
-    支持两种方式传递 refresh token：
-    1. JSON body: {"refresh_token": "<token>"}（推荐，前端默认走此路径）
-    2. Authorization: Bearer <token> 头（向后兼容）
-
-    BUG-FIX-fix_20260624_refresh_header_overrides_body:
-    问题根因: 原实现优先读 Authorization 头，再读 body。但前端 axios 请求拦截器对
-              所有请求（含 /auth/refresh）统一注入 Authorization: Bearer <access_token>，
-              导致 body 里正确的 refresh_token 被头里的 access_token 覆盖，
-              后端 verify_token(access_token, token_type="refresh") 因 type 不符
-              报「期望 refresh 类型的令牌」401。
-    修复方案: body 优先于 header。refresh token 本就不应通过 Authorization 头传递
-              （header 是 access token 的位置），body 里的 refresh_token 才是权威来源。
-
-    Args:
-        authorization: Authorization 请求头（向后兼容）
-        body: JSON body 中的 refresh_token
-
-    Returns:
-        TokenResponse 新的 token 对
-
-    Raises:
-        HTTPException: refresh token 无效或已撤销
-    """
-    # body 优先于 header（见上方 BUG-FIX-fix_20260624_refresh_header_overrides_body）
+    """使用 refresh token 获取新的 access token。"""
+    # body 优先于 header
     actual_token = ""
     if body and body.refresh_token:
         actual_token = body.refresh_token
@@ -274,21 +205,7 @@ def logout(
     authorization: str = Header(default=""),
     body: RefreshRequest | None = None,
 ) -> dict[str, str]:
-    """登出用户，撤销 refresh token 并使该用户所有已签发 token 立即失效。
-
-    BUG-FIX-fix_20260624_logout_revoke_access:
-    原实现只撤销 refresh token，已签发的 access token 仍 30 分钟有效（安全硬伤）。
-    现改为同时调 revoke_all_user_tokens，登出后 access token 立即失效。
-
-    支持 Authorization 头和 JSON body。
-
-    Args:
-        authorization: Authorization 请求头
-        body: JSON body 中的 refresh_token
-
-    Returns:
-        登出成功消息
-    """
+    """登出用户，撤销 refresh token 并使该用户所有已签发 token 立即失效。"""
     actual_token = _extract_token(authorization)
     if not actual_token and body and body.refresh_token:
         actual_token = body.refresh_token

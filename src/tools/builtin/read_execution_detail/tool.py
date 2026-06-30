@@ -1,15 +1,4 @@
-"""
-执行记录查询工具（复盘专用）
-
-暴露接口：
-- get_tool_definition() -> Tool：获取工具定义
-- ReadExecutionDetailTool：执行记录查询工具类
-
-支持三层渐进披露：
-- skeleton（骨架）：每轮一行概览，快速了解全局流程
-- L1（压缩块）：查看覆盖该 iteration 的语义摘要
-- L0（原始记录）：查看原始记录的特定字段（thinking/tool_calls/error 等）
-"""
+"""执行记录查询工具（复盘专用）"""
 
 import json
 import logging
@@ -32,24 +21,10 @@ _CONTENT_MAX_LEN = 500
 
 
 class ReadExecutionDetailTool(BuiltinTool):
-    """执行记录查询工具（复盘专用）。
-
-    复盘 Agent 专用的执行记录查询工具，支持三层渐进披露：
-    - skeleton：每轮一行 + 锚点标记，纯规则生成，快速浏览全局
-    - L1：查看覆盖该 iteration 的 L1 压缩块（八段摘要）
-    - L0：查看原始记录的特定字段（thinking/tool_calls/error 等）
-
-    构造函数接收 ExecutionRecordStorage 实例（通过工具注册时注入），
-    从内存缓存读取数据，无需磁盘 IO。
-    """
+    """执行记录查询工具（复盘专用）。"""
 
     def __init__(self, storage: Any = None):
-        """初始化执行记录查询工具。
-
-        Args:
-            storage: ExecutionRecordStorage 实例，通过工具注册时注入。
-                     如果未提供，工具将在执行时尝试从 injected_params 获取。
-        """
+        """初始化执行记录查询工具。"""
         self._storage = storage
 
     @staticmethod
@@ -96,21 +71,12 @@ class ReadExecutionDetailTool(BuiltinTool):
             category=ToolCategory.ANALYSIS,
             level=ToolLevel.L1_ONLY,
             tags=["execution", "analysis", "review"],
-            # BUG-FIX-fix_20260625: 改为 _storage（带下划线前缀，符合
-            # tool_core._SERVICE_INJECT_MAP 约定），由 ToolCore 从
-            # ctx.services["execution_record_storage"] 自动注入。
+            # _storage 由 ToolCore 从 ctx.services["execution_record_storage"] 自动注入
             injected_params=["_storage"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> Any:  # noqa: PLR0911
-        """执行工具逻辑，根据 level 参数分派到对应的处理方法。
-
-        Args:
-            inputs: 工具输入参数，包含 pipeline_run_id、level、iteration、fields 等
-
-        Returns:
-            工具执行结果
-        """
+        """执行工具逻辑，根据 level 参数分派到对应的处理方法。"""
         # 获取 storage 实例（优先使用注入的 _storage，否则构造函数传入的）
         # tool_core 通过 _SERVICE_INJECT_MAP 注入 _storage=execution_record_storage
         storage = inputs.get("_storage") or inputs.get("storage") or self._storage
@@ -151,18 +117,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         )
 
     def _get_skeleton(self, storage: Any, pipeline_run_id: str) -> Any:
-        """生成骨架视图：每条执行记录压缩为一行。
-
-        遍历指定 pipeline 的所有执行记录，按 iteration 分组，
-        每条记录生成一行摘要文本，包括类型、名称和错误标记。
-
-        Args:
-            storage: ExecutionRecordStorage 实例
-            pipeline_run_id: 管道运行 ID
-
-        Returns:
-            骨架视图结果，包含 lines 列表和 total_iterations
-        """
+        """生成骨架视图：每条执行记录压缩为一行。"""
         records = storage.list_by_pipeline(pipeline_run_id)[0]
 
         if not records:
@@ -211,20 +166,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         inputs: dict[str, Any],
         pipeline_run_id: str,
     ) -> Any:
-        """查找覆盖目标 iteration 的 L1 压缩块。
-
-        根据 iteration 找到对应的 sequence 范围，再查找覆盖该范围的 L1 块。
-        当前实现通过 ExecutionRecordStorage 的数据模拟，
-        后续接入 ChunkDB 后可直接查询。
-
-        Args:
-            storage: ExecutionRecordStorage 实例
-            inputs: 工具输入参数，需包含 iteration
-            pipeline_run_id: 管道运行 ID
-
-        Returns:
-            L1 压缩块内容，或提示信息
-        """
+        """查找覆盖目标 iteration 的 L1 压缩块。"""
         iteration = inputs.get("iteration")
         if iteration is None:
             return create_failure_result(
@@ -325,24 +267,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         inputs: dict[str, Any],
         pipeline_run_id: str,
     ) -> Any:
-        """读取指定 iteration 的原始执行记录，按 fields 过滤返回。
-
-        从 ExecutionRecordStorage 的内存缓存按 iteration 过滤记录，
-        再按 fields 参数精确返回指定字段。
-        - fields=["thinking"] 只返回 thinking_content
-        - fields=["tool_calls"] 只返回 tool_calls_json（解析为 dict）
-        - fields=["content"] 只返回 content（截断到 500 字符）
-        - fields=["error"] 只返回 error
-        - fields=["all"] 或未指定返回全部字段
-
-        Args:
-            storage: ExecutionRecordStorage 实例
-            inputs: 工具输入参数，需包含 iteration，可选 fields
-            pipeline_run_id: 管道运行 ID
-
-        Returns:
-            按 fields 过滤后的原始记录列表
-        """
+        """读取指定 iteration 的原始执行记录，按 fields 过滤返回。"""
         iteration = inputs.get("iteration")
         if iteration is None:
             return create_failure_result(
@@ -386,19 +311,7 @@ class ReadExecutionDetailTool(BuiltinTool):
     def _filter_record_fields(
         self, record: Any, fields: list[str]
     ) -> dict[str, Any]:
-        """按 fields 列表过滤单条记录的字段。
-
-        支持的字段：thinking, content, tool_calls, tool_input, error, all。
-        content 字段截断到 500 字符控制 token 消耗。
-        tool_calls 字段将 JSON 字符串解析为字典返回。
-
-        Args:
-            record: ExecutionRecordData 实例
-            fields: 需要返回的字段列表
-
-        Returns:
-            过滤后的记录字典
-        """
+        """按 fields 列表过滤单条记录的字段。"""
         # 基础信息始终包含
         result: dict[str, Any] = {
             "record_id": record.record_id,
@@ -443,15 +356,7 @@ class ReadExecutionDetailTool(BuiltinTool):
 
     @staticmethod
     def _truncate_text(text: str | None, max_len: int) -> str | None:
-        """截断长文本，控制 token 消耗。
-
-        Args:
-            text: 原始文本
-            max_len: 最大字符长度
-
-        Returns:
-            截断后的文本，超出部分用省略号标记
-        """
+        """截断长文本，控制 token 消耗。"""
         if not text:
             return text
         if len(text) <= max_len:
@@ -460,14 +365,7 @@ class ReadExecutionDetailTool(BuiltinTool):
 
     @staticmethod
     def _parse_tool_calls(tool_calls_json: str | None) -> Any:
-        """解析 tool_calls JSON 字符串为字典/列表。
-
-        Args:
-            tool_calls_json: tool_calls 的 JSON 字符串
-
-        Returns:
-            解析后的字典/列表，解析失败返回原始字符串
-        """
+        """解析 tool_calls JSON 字符串为字典/列表。"""
         if not tool_calls_json:
             return None
         try:

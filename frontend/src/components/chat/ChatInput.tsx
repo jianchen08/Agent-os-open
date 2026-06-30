@@ -1,20 +1,4 @@
-/**
- * 统一的聊天输入组件
- *
- * 支持三种模式：
- * - full: 完整功能（文件上传、拖拽、附件预览）
- * - compact: 简化版（仅文本输入）
- * - smart: 智能版（根据执行状态切换按钮）
- *
- * 功能特性：
- * - 文本输入（Enter 发送，Shift+Enter 换行）
- * - 文件上传（支持图片和文档）
- * - 拖拽上传
- * - 附件预览和删除
- * - 上传状态管理
- * - 错误处理
- * - 执行状态控制
- */
+/** 统一的聊天输入组件 支持三种模式： */
 
 import {
   AlertCircle,
@@ -40,18 +24,14 @@ import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
 import type { ThinkingModeState } from '@/types/thinkingMode'
 
-/**
- * 格式化文件大小
- */
+/** 格式化文件大小 */
 const formatFileSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-/**
- * 格式化数字（添加千位分隔符）
- */
+/** 格式化数字（添加千位分隔符） */
 const formatNumber = (num: number): string => {
   return num.toLocaleString('en-US')
 }
@@ -65,9 +45,7 @@ const formatDuration = (seconds: number): string => {
   return `${m}:${s}`
 }
 
-/**
- * 附件预览组件
- */
+/** 附件预览组件 */
 const AttachmentPreview = ({
   attachment,
   onRemove,
@@ -131,9 +109,7 @@ const AttachmentPreview = ({
   )
 }
 
-/**
- * 统一的聊天输入组件
- */
+/** 统一的聊天输入组件 */
 export const ChatInput = ({
   mode = 'full',
   disabled = false,
@@ -196,9 +172,7 @@ export const ChatInput = ({
   const { capabilities } = useModelCapabilities(modelName)
   const supportsAudio = capabilities?.supportsAudio ?? false
 
-  /**
-   * 处理语音录音完成（模型支持音频时）
-   */
+  /** 处理语音录音完成（模型支持音频时） */
   const handleVoiceRecordingComplete = useCallback(
     async (audioBlob: Blob) => {
       const timestamp = Date.now()
@@ -257,22 +231,12 @@ export const ChatInput = ({
     [modelName],
   )
 
-  /**
-   * 提交（合并）当前未确认的临时语音文字到正文，并重置临时区间
-   *
-   * 作用：在用户键盘编辑、确认文字到达、停止录音等场景，把灰色临时文字
-   * 正式并入 text，避免区间错乱。
-   */
+  /** 提交（合并）当前未确认的临时语音文字到正文，并重置临时区间 作用：在用户键盘编辑、确认文字到达、停止录音等场景，把灰色临时文字 */
   const commitInterimVoice = useCallback(() => {
     interimVoiceStartRef.current = -1
   }, [])
 
-  /**
-   * 处理语音实时临时识别结果（模型不支持音频时）
-   *
-   * 将临时文字实时追加/替换到 text 末尾，区间由 interimVoiceStartRef 标记，
-   * 用户在输入框中可即时看到"正在说的话"。
-   */
+  /** 处理语音实时临时识别结果（模型不支持音频时） 将临时文字实时追加/替换到 text 末尾，区间由 interimVoiceStartRef 标记， */
   const handleVoiceInterim = useCallback(
     (interimText: string) => {
       if (!interimText) return
@@ -303,12 +267,7 @@ export const ChatInput = ({
     [],
   )
 
-  /**
-   * 处理语音转写完成（模型不支持音频时）
-   *
-   * final 到达时：若有未确认临时文字，先剔除临时区间，再追加确认文字；
-   * 否则按原逻辑直接拼接。
-   */
+  /** 处理语音转写完成（模型不支持音频时） final 到达时：若有未确认临时文字，先剔除临时区间，再追加确认文字； */
   const handleVoiceTranscriptionComplete = useCallback(
     (transcribedText: string) => {
       if (transcribedText.trim()) {
@@ -607,29 +566,7 @@ export const ChatInput = ({
     }
   }, [pendingFiles])
 
-  /**
-   * 消费外部插入文本（如引用功能注入的文本）
-   *
-   * BUG-FIX-fix_20260513_render_while_rendering:
-   * 问题根因: 使用 useChatInputStore((s) => s.pendingInsert) 在渲染期间订阅 store，
-   *          effect 中 consumeInsert() 将 pendingInsert 置为 null 时，
-   *          Zustand 通过 useSyncExternalStore 检测变化并触发另一个 ChatInput 实例的 setState，
-   *          导致 React 报 "Cannot update a component while rendering a different component" 警告。
-   * 修复方案: 改用 useChatInputStore.subscribe 在 effect 中监听 store 变化，
-   *          避免 useSyncExternalStore 在渲染阶段的级联更新；
-   *          同时将 saveDraft 从 setText updater 中移出，消除 state updater 中的副作用。
-   * 影响范围: ChatInput 的外部文本插入功能（如引用注入）
-   * 修复日期: 2026-05-13
-   *
-   * BUG-FIX-fix_20260513_duplicate_quote_insert:
-   * 问题根因: processInsert 中先调用 saveDraft() 再调用 consumeInsert()，
-   *          saveDraft() 改变 store state → 同步触发 subscribe 回调 →
-   *          此时 pendingInsert 仍为非 null → 再次调用 processInsert() → 无限递归，
-   *          导致引用文本被重复追加上百次直到栈溢出。
-   * 修复方案: 将 consumeInsert() 移至 saveDraft() 之前，确保 subscribe 回调触发时
-   *          pendingInsert 已被清空，回调直接 return 不再递归。
-   * 修复日期: 2026-05-13
-   */
+  /** 消费外部插入文本（如引用功能注入的文本） */
   useEffect(() => {
     const processInsert = (insertText: string) => {
       const currentText = textRef.current

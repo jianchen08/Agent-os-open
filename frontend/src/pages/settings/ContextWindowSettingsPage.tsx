@@ -1,9 +1,4 @@
-/**
- * 上下文窗口配置页面
- *
- * 管理上下文窗口大小、记忆层级配置、压缩设置、Token 预算分配
- * 对应后端 config/system/context_window_config.yaml
- */
+/** 上下文窗口配置页面 管理上下文窗口大小、记忆层级配置、压缩设置、Token 预算分配 */
 
 import { Loader2 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
@@ -17,11 +12,7 @@ import {
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
-/**
- * 完整上下文配置（页面使用的本地类型，与后端 YAML 一一对应）
- *
- * 复用 ContextWindowConfig 的所有字段， budgets 仍以 Record 形式存储。
- */
+/** 完整上下文配置（页面使用的本地类型，与后端 YAML 一一对应） 复用 ContextWindowConfig 的所有字段， budgets 仍以 Record 形式存储。 */
 interface FullContextConfig {
   version: string
   compress_trigger_ratio: number
@@ -89,9 +80,7 @@ const LAYER_LABELS: Record<string, string> = {
   response_reserve: '响应预留',
 }
 
-/**
- * 上下文窗口配置页面组件
- */
+/** 上下文窗口配置页面组件 */
 export function ContextWindowSettingsPage() {
   const [config, setConfig] = useState<FullContextConfig>(DEFAULT_FULL_CONFIG)
   const [isLoading, setIsLoading] = useState(true)
@@ -110,9 +99,6 @@ export function ContextWindowSettingsPage() {
         setConfig({ ...DEFAULT_FULL_CONFIG, ...data })
       })
       .catch(() => {
-        // BUG-FIX-fix_20260617_catch_condition:
-        // 问题根因: 原代码 if (cancelled) 条件写反，导致组件卸载后才设置错误，未卸载时反而吞掉错误。
-        // 修复方案: 改为 if (!cancelled)，与同文件 .then/.finally 中的取消判断方向一致。
         if (!cancelled) {
           setLoadError('无法连接服务器，显示默认配置')
         }
@@ -396,9 +382,7 @@ const BUDGET_COLORS: Record<string, string> = {
   response_reserve: '#ec4899',
 }
 
-/* ============================================ */
-/* 共享子组件                                    */
-/* ============================================ */
+/* 共享子组件 */
 
 function PageShell({
   title,

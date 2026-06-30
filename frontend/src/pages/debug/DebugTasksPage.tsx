@@ -1,8 +1,4 @@
-/**
- * 调试任务页面
- *
- * 展示任务列表，支持按状态过滤，支持暂停任务的恢复操作
- */
+/** 调试任务页面 展示任务列表，支持按状态过滤，支持暂停任务的恢复操作 */
 
 import { useState, useEffect, useCallback } from 'react'
 import { Play } from 'lucide-react'
@@ -23,9 +19,7 @@ const STATUS_OPTIONS = [
   { value: 'cancelled', label: '已取消' },
 ]
 
-/**
- * 获取任务状态样式
- */
+/** 获取任务状态样式 */
 function getTaskStatusStyle(status: string): string {
   switch (status) {
     case 'completed':
@@ -45,9 +39,7 @@ function getTaskStatusStyle(status: string): string {
   }
 }
 
-/**
- * 获取任务状态的中文标签
- */
+/** 获取任务状态的中文标签 */
 function getTaskStatusLabel(status: string): string {
   switch (status) {
     case 'pending': return '等待中'
@@ -60,9 +52,7 @@ function getTaskStatusLabel(status: string): string {
   }
 }
 
-/**
- * 调试任务页面组件
- */
+/** 调试任务页面组件 */
 export function DebugTasksPage() {
   const [tasks, setTasks] = useState<TaskInfo[]>([])
   const [total, setTotal] = useState(0)
@@ -73,9 +63,7 @@ export function DebugTasksPage() {
   const [resumingIds, setResumingIds] = useState<Set<string>>(new Set())
   const pageSize = 20
 
-  /**
-   * 加载任务列表
-   */
+  /** 加载任务列表 */
   const fetchTasks = useCallback(async (p: number, status?: string) => {
     setIsLoading(true)
     setError(null)
@@ -94,15 +82,7 @@ export function DebugTasksPage() {
     fetchTasks(page)
   }, [page, fetchTasks])
 
-  /**
-   * 监听任务状态变更 WS 事件，自动刷新当前列表
-   *
-   * BUG-FIX-fix_20260618_tasktree_refresh:
-   * 问题根因: 原依赖 taskStore 的 statusOverrides 增量覆盖，现已统一改为事件驱动重新拉取，
-   *          与 useRealtimeEvents 中的 task_status_changed / task_status_update 处理对齐。
-   * 影响范围: 调试任务页面的实时刷新
-   * 修复日期: 2026-06-18
-   */
+  /** 监听任务状态变更 WS 事件，自动刷新当前列表 */
   useEffect(() => {
     const handleStatusChange = () => {
       fetchTasks(page, statusFilter || undefined)
@@ -122,9 +102,7 @@ export function DebugTasksPage() {
     fetchTasks(1, status || undefined)
   }
 
-  /**
-   * 恢复任务
-   */
+  /** 恢复任务 */
   const handleResume = async (taskId: string) => {
     setResumingIds((prev) => new Set(prev).add(taskId))
     try {

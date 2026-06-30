@@ -1,8 +1,4 @@
-/**
- * Workspace Store
- *
- * 管理工作空间的加载和文件树展示。
- */
+/** Workspace Store 管理工作空间的加载和文件树展示。 */
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
@@ -74,8 +70,7 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   fetchWorkspace: async (containerTaskId) => {
     set({ loading: true, error: null })
     try {
-      // BUG-FIX-fix_20260622_workspace_state_loss:
-      // 改用 apiClient 替代裸 fetch，确保：
+      // // 改用 apiClient 替代裸 fetch，确保：
       // 1. 自动带 Authorization 头（请求拦截器）
       // 2. 401 时走统一的 token 刷新链路（避免认证失效时静默失败）
       // 3. 享受 5xx/429 重试机制
@@ -216,14 +211,9 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
     })
   },
 }),
-    // BUG-FIX-fix_20260622_workspace_state_loss:
-    // 问题根因: workspaceStore 全状态纯内存，整页刷新后 activeWorkspaceId、
-    //          expandedPaths（用户展开的目录）、selectedFilePath（选中的文件）全部丢失，
-    //          重登后用户需重新展开目录树、重新选中文件，体验差。
-    // 修复方案: persist 持久化 UI 导航状态。workspaces 缓存也持久化（含 fileTree），
-    //          下次进入时立即显示，后台 fetchFileTree 会用最新数据覆盖。
-    //          注意：loading/error 是运行时状态，不持久化。
-    //          expandedPaths 是 Set，需在 partialize/merge 做 数组↔Set 转换。
+    // 重登后用户需重新展开目录树、重新选中文件，体验差。
+    // 注意：loading/error 是运行时状态，不持久化。
+    // expandedPaths 是 Set，需在 partialize/merge 做 数组↔Set 转换。
     {
       name: 'workspace-store',
       version: 1,

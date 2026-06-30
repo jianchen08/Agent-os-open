@@ -1,22 +1,4 @@
-"""追踪统计 Output 插件 — 从旧代码 monitoring/ 迁移。
-
-负责在管道循环的输出阶段收集执行追踪和统计信息，
-包括 LLM token 用量、执行耗时、迭代计数等。
-
-M6c 阶段：从 monitoring/execution_monitor.py 和
-monitoring/usage_monitor.py 的核心逻辑迁移。
-
-M12c 阶段：增加执行记录持久化写入，通过
-ctx.get_service("execution_record_storage") 获取存储后端。
-
-M12d 阶段：改造为逐动作写入模式，每条 AI 回复和每个工具调用
-分别生成独立的 ExecutionRecordData 记录；管道结束时保存
-PipelineRunSummary 摘要。
-
-State 命名空间：
-    - track.llm_usage : 本插件写入的 LLM 用量统计
-    - track.execution_stats : 本插件写入的执行统计
-"""
+"""追踪统计 Output 插件 — 从旧代码 monitoring/ 迁移。"""
 
 from __future__ import annotations
 
@@ -38,40 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 class TrackPlugin(IOutputPlugin):
-    """追踪统计 Output 插件。
-
-    从旧代码 monitoring/ 模块迁移而来。收集管道执行的
-   追踪和统计信息，写入 state 供外部系统（如 WebSocket 进度推送）消费。
-
-    追踪信息包括：
-    1. LLM token 用量（输入/输出 token 数）
-    2. 执行耗时（每轮迭代耗时）
-    3. 迭代计数和状态统计
-
-    M12d 改造：
-    - 逐动作写入：每次 Output 插件链执行时，将 AI 回复和每个工具调用
-      分别持久化为独立的 ExecutionRecordData 记录。
-    - 管道摘要：管道循环结束后，保存 PipelineRunSummary 汇总信息。
-
-    优先级：15（副作用型，在 persist 之后）
-    错误策略：SKIP（追踪失败不影响当轮结果）
-
-    Attributes:
-        _config: 插件配置字典
-        _start_time: 插件创建时间，用于计算总耗时
-    """
+    """追踪统计 Output 插件。"""
 
     error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
-        """初始化追踪统计插件。
-
-        Args:
-            config: 插件配置字典，支持以下键：
-                - enabled: 是否启用追踪（默认 True）
-                - track_token_usage: 是否追踪 token 用量（默认 True）
-                - track_execution_time: 是否追踪执行时间（默认 True）
-        """
+        """初始化追踪统计插件。"""
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
         self._track_tokens = self._config.get("track_token_usage", True)
@@ -98,14 +52,7 @@ class TrackPlugin(IOutputPlugin):
         return []
 
     def _get_current_sequence(self, pipeline_run_id: str) -> int:
-        """获取当前消息的 sequence 值（只读，用于 summary 统计）。
-
-        Args:
-            pipeline_run_id: 管道 ID
-
-        Returns:
-            当前计数器值
-        """
+        """获取当前消息的 sequence 值（只读，用于 summary 统计）。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(pipeline_run_id)
@@ -116,18 +63,7 @@ class TrackPlugin(IOutputPlugin):
         return 0
 
     def _next_sequence(self, pipeline_run_id: str) -> int:
-        """获取下一条记录的 sequence。
-
-        优先从 PipelineEntry 共享计数器递增获取（与 WS 推送共享）。
-        若 registry entry 不可用（独立线程/引擎未注册等场景），
-        使用本地计数器 fallback，确保 sequence 单调递增。
-
-        Args:
-            pipeline_run_id: 管道 ID
-
-        Returns:
-            递增后的 sequence 值
-        """
+        """获取下一条记录的 sequence。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
             registry = get_engine_registry()
@@ -162,20 +98,7 @@ class TrackPlugin(IOutputPlugin):
     def _resolve_ai_record_id(
         self, pipeline_run_id: str, preset_record_id: str,
     ) -> str:
-        """解析 AI 记录的 record_id，保证与前端 stream_start 下发的 message_id 一致。
-
-        BUG-FIX-fix_20260623_ai_record_id_broken:
-        问题根因: 此前 `_has_prev_ai` 分支在多轮 iteration / resume 场景下把
-          preset_record_id 置空，让 storage 自动生成新 id。但 resume 时 bridge
-          已发新的 stream_start（携带新 message_id），前端据此创建占位符，
-          落库 id 与占位符 id 不一致 → 切 Tab/补漏拉回 API 消息后两者共存，
-          表现为"流式气泡下多出一个固定气泡"（同一逻辑消息渲染两遍）。
-        修复方案: 始终从 bridge 取当前 turn 的权威 message_id 作为 record_id
-          （bridge 是单一权威源，每轮 emit_start 都刷新 message_id）。
-          bridge 不可用时回退到 state.preset_ai_record_id，再回退到 preset_record_id。
-          不再用 `_has_prev_ai` 让 id 失效——id 契约是硬约束，不分轮次。
-        影响范围: 多轮 iteration / resume 场景下消息 id 一致性（消除前端重复渲染）
-        """
+        """解析 AI 记录的 record_id，保证与前端 stream_start 下发的 message_id 一致。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(pipeline_run_id)
@@ -192,32 +115,12 @@ class TrackPlugin(IOutputPlugin):
         return preset_record_id
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
-        """收集追踪统计信息。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            包含追踪信息状态更新的输出结果
-        """
+        """收集追踪统计信息。"""
         result = await self._do_work(ctx)
         return OutputResult(state_updates=result)
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
-        """执行追踪统计逻辑。
-
-        按以下顺序执行：
-        1. Token 用量追踪
-        2. 执行耗时追踪
-        3. 逐动作执行记录持久化
-        4. 管道结束时保存运行摘要
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            追踪信息字典
-        """
+        """执行追踪统计逻辑。"""
         if not self._enabled:
             return {}
 
@@ -256,14 +159,7 @@ class TrackPlugin(IOutputPlugin):
         return updates
 
     async def _try_notify_cost_update(self, ctx: PluginContext, usage: dict[str, Any]) -> None:
-        """通过 WebSocket 推送 Token 用量变更事件。
-
-        推送失败不影响主流程。
-
-        Args:
-            ctx: 插件执行上下文
-            usage: Token 用量字典
-        """
+        """通过 WebSocket 推送 Token 用量变更事件。"""
         try:
             from channels.websocket.ws_handler import ws_interaction_notifier as _notifier  # noqa: PLC0415
             if _notifier:
@@ -284,18 +180,7 @@ class TrackPlugin(IOutputPlugin):
             pass
 
     def _collect_token_usage(self, ctx: PluginContext) -> dict[str, Any]:
-        """收集 token 用量统计。
-
-        从 state 中读取 LLM 返回的 token 用量信息，
-        累加到跨迭代的总用量中。仅在 llm_call 轮累加，
-        tool_execute 轮跳过（此时 llm_usage 是上一轮残留值）。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            Token 用量字典
-        """
+        """收集 token 用量统计。"""
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
         current_usage = ctx.state.get("llm_usage", {})
 
@@ -328,19 +213,7 @@ class TrackPlugin(IOutputPlugin):
         }
 
     def _try_persist_record(self, ctx: PluginContext, elapsed: float) -> None:  # noqa: PLR0912,PLR0915
-        """将逐动作执行记录持久化到存储后端。
-
-        根据当前 core_type 分阶段写入：
-        - LLM Core 后：写 AI 回复记录（raw_result）
-        - Tool Core 后：写工具执行记录（tool_results，含实际执行结果）
-
-        工具记录只在 Tool Core 执行后才写入，避免 LLM Core 后工具未执行
-        导致 content/tool_input 为空的问题。
-
-        Args:
-            ctx: 插件执行上下文
-            elapsed: 本轮耗时（秒）
-        """
+        """将逐动作执行记录持久化到存储后端。"""
         try:
             storage = ctx.get_service("execution_record_storage")
         except KeyError:
@@ -452,10 +325,10 @@ class TrackPlugin(IOutputPlugin):
                     _tool_calls_json = json.dumps(raw_tool_calls, ensure_ascii=False, default=str)
             # 解析 AI 记录 record_id：始终与前端 stream_start 的 message_id 对齐（id 契约硬约束）。
             # state.preset_ai_record_id 由 bridge.emit_start 写入，作为 bridge 不可用时的 fallback。
-            # 见 _resolve_ai_record_id 的 BUG-FIX 说明（修复多轮/resume 场景 id 断裂导致的重复渲染）。
+            # 见 _resolve_ai_record_id 的 说明（修复多轮/resume 场景 id 断裂导致的重复渲染）。
             preset_record_id = ctx.state.get("preset_ai_record_id") or ""
             ai_record_id = self._resolve_ai_record_id(pipeline_run_id, preset_record_id)
-            # BUG-FIX-fix_20260625_ai_record_id_duplicate（已修订）:
+            # （已修订）
             #   一个 run() 包含多轮 LLM 迭代（while 循环），bridge.message_id 在整个
             #   run 期间不变（一个气泡），但每轮迭代都会落盘一条 ai 记录。原方案给
             #   iteration>1 的记录追加 #iteration 后缀以避免 storage._records dict 互相
@@ -555,23 +428,7 @@ class TrackPlugin(IOutputPlugin):
 
     @staticmethod
     def _extract_injected_content(current: str, previous: str) -> str:
-        """从变更的 user_input 中提取新注入的内容。
-
-        常见注入模式：
-        - _notify_suspended_pipelines 通过 send_pipeline_message 注入子任务通知
-
-        提取策略：
-        1. 若 previous 是 current 的后缀 → 返回前缀部分
-        2. 若 previous 是 current 的前缀 → 返回后缀部分
-        3. 否则返回完整 current（兜底）
-
-        Args:
-            current: 当前迭代的 user_input
-            previous: 上一次保存的 user_input
-
-        Returns:
-            提取出的新注入内容，无新内容时返回空字符串
-        """
+        """从变更的 user_input 中提取新注入的内容。"""
         if not current or not previous:
             return current or ""
 
@@ -589,16 +446,7 @@ class TrackPlugin(IOutputPlugin):
         return stripped_curr
 
     def _check_cache_anomaly(self, llm_usage: dict[str, Any], pipeline_id: str) -> None:
-        """检测缓存命中异常并输出警告。
-
-        理想情况下，每轮只有新增部分未命中缓存，
-        所有轮次的未命中总量 ≈ 最后一轮的 input_tokens。
-        若 (总未命中 - 末轮input) / 总input > 5%，说明缓存命中率异常低。
-
-        Args:
-            llm_usage: 累计 token 用量字典
-            pipeline_id: 管道 ID（用于日志）
-        """
+        """检测缓存命中异常并输出警告。"""
         total_input = llm_usage.get("total_input_tokens", 0)
         total_cached = llm_usage.get("total_cached_tokens", 0)
         last_input = llm_usage.get("last_input_tokens", 0)
@@ -620,14 +468,7 @@ class TrackPlugin(IOutputPlugin):
             )
 
     def save_pipeline_summary(self, ctx: PluginContext, elapsed_total: float) -> None:
-        """保存管道运行摘要。
-
-        在管道循环结束后调用，汇总本次管道运行的统计信息。
-
-        Args:
-            ctx: 插件执行上下文
-            elapsed_total: 总耗时（秒）
-        """
+        """保存管道运行摘要。"""
         try:
             storage = ctx.get_service("execution_record_storage")
         except KeyError:

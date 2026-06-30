@@ -1,12 +1,4 @@
-/**
- * 通用树形组件
- *
- * 根据 Schema 渲染树形结构，支持递归嵌套、展开/折叠、状态图标、
- * 进度条、选中高亮、搜索过滤等功能。
- * 可用于任务树、文件树、组织架构等树形数据展示场景。
- *
- * @module FileTreeWidget
- */
+/** 通用树形组件 根据 Schema 渲染树形结构，支持递归嵌套、展开/折叠、状态图标、 */
 
 import {
   ChevronRight,
@@ -40,31 +32,22 @@ import {
   type ContextMenuTreeNode,
 } from './FileTreeContextMenu'
 
-/**
- * 树展开状态的 localStorage 持久化工具
- */
+/** 树展开状态的 localStorage 持久化工具 */
 const TREE_EXPANDED_PREFIX = 'tree_expanded_'
 
-/**
- * 获取树展开状态的 localStorage key
- * @param treeKey - 树的唯一标识（sessionId + title）
- */
+/** 获取树展开状态的 localStorage key */
 function getExpandedStorageKey(treeKey: string): string {
   return `${TREE_EXPANDED_PREFIX}${treeKey}`
 }
 
-/**
- * 保存展开节点 ID 集合到 localStorage
- */
+/** 保存展开节点 ID 集合到 localStorage */
 function saveExpandedIds(treeKey: string, ids: Set<string>): void {
   try {
     localStorage.setItem(getExpandedStorageKey(treeKey), JSON.stringify([...ids]))
   } catch { /* ignore */ }
 }
 
-/**
- * 从 localStorage 读取展开节点 ID 集合
- */
+/** 从 localStorage 读取展开节点 ID 集合 */
 function loadExpandedIds(treeKey: string): Set<string> | null {
   try {
     const raw = localStorage.getItem(getExpandedStorageKey(treeKey))
@@ -167,11 +150,7 @@ const STATUS_FILTER_OPTIONS = [
   { value: 'blocked', label: '已阻塞' },
 ] as const
 
-/**
- * 活跃状态集合（running/pending/evaluating/planning）
- *
- * 用于默认筛选模式，仅显示正在执行的任务
- */
+/** 活跃状态集合（running/pending/evaluating/planning） 用于默认筛选模式，仅显示正在执行的任务 */
 const ACTIVE_STATUSES_FOR_FILTER = new Set([
   'running',
   'pending',
@@ -179,18 +158,7 @@ const ACTIVE_STATUSES_FOR_FILTER = new Set([
   'planning',
 ])
 
-/**
- * 递归按状态过滤树节点
- *
- * 过滤策略：保留自身或任意后代匹配状态的节点，保持树状结构不变。
- * 容器节点（有子节点）只要有一个后代匹配就会被保留。
- *
- * @param nodes       - 原始节点数组
- * @param statusValue - 目标状态值，空字符串表示不过滤，'__active__' 表示活跃状态集合
- * @param statusField - 状态字段名
- * @param childrenField - 子节点字段名
- * @returns 过滤后的节点数组
- */
+/** 递归按状态过滤树节点 过滤策略：保留自身或任意后代匹配状态的节点，保持树状结构不变。 */
 function filterNodesByStatus(
   nodes: TreeNodeData[],
   statusValue: string,
@@ -227,12 +195,7 @@ function filterNodesByStatus(
 }
 
 
-/**
- * 从 props 中提取树形组件配置
- *
- * @param rawProps - 原始组件属性
- * @returns 类型安全的树形组件配置
- */
+/** 从 props 中提取树形组件配置 */
 function extractTreeConfig(rawProps: Record<string, unknown>): TreeWidgetConfig {
   const nestedProps = rawProps.props
   if (typeof nestedProps === 'object' && nestedProps !== null) {
@@ -241,14 +204,7 @@ function extractTreeConfig(rawProps: Record<string, unknown>): TreeWidgetConfig 
   return rawProps as unknown as TreeWidgetConfig
 }
 
-/**
- * 从 props 中提取树节点数据
- *
- * 优先使用 props.data，其次使用 props.items
- *
- * @param rawProps - 原始组件属性
- * @returns 树节点数据数组
- */
+/** 从 props 中提取树节点数据 优先使用 props.data，其次使用 props.items */
 function extractTreeData(rawProps: Record<string, unknown>): TreeNodeData[] {
   const config = extractTreeConfig(rawProps)
   if (Array.isArray(config.data)) return config.data
@@ -257,27 +213,12 @@ function extractTreeData(rawProps: Record<string, unknown>): TreeNodeData[] {
   return []
 }
 
-/**
- * 获取节点指定字段的值
- *
- * @param node - 树节点
- * @param field - 字段名
- * @returns 字段值
- */
+/** 获取节点指定字段的值 */
 function getNodeField(node: TreeNodeData, field: string): unknown {
   return node[field]
 }
 
-/**
- * 获取节点稳定唯一标识
- *
- * 优先使用 node.id，其次使用 node.path（文件树场景），
- * 最后使用 node.title/node.name，确保每次渲染 ID 一致。
- * 避免使用 Math.random() 导致 expandedIds 无法匹配。
- *
- * @param node - 树节点
- * @returns 稳定的节点 ID 字符串
- */
+/** 获取节点稳定唯一标识 优先使用 node.id，其次使用 node.path（文件树场景）， */
 function getStableNodeId(node: TreeNodeData): string {
   if (node.id) return node.id
   const path = node.path as string | undefined
@@ -287,13 +228,7 @@ function getStableNodeId(node: TreeNodeData): string {
   return String(Math.random())
 }
 
-/**
- * 根据状态配置获取状态图标组件
- *
- * @param status - 节点状态
- * @param config - 状态配置映射
- * @returns 图标组件和颜色类名
- */
+/** 根据状态配置获取状态图标组件 */
 function getStatusIcon(
   status: string,
   config: Record<string, StatusConfigItem>,
@@ -322,12 +257,7 @@ function getStatusIcon(
   }
 }
 
-/**
- * 根据 text-* 颜色类名返回对应的半透明背景色类名，提高状态标签对比度
- *
- * @param colorClass - text-status-* 颜色类名
- * @returns bg-* 背景色类名
- */
+/** 根据 text-* 颜色类名返回对应的半透明背景色类名，提高状态标签对比度 */
 function statusBgClass(colorClass: string): string {
   const bgMap: Record<string, string> = {
     'text-status-success': 'bg-status-success/15',
@@ -340,15 +270,7 @@ function statusBgClass(colorClass: string): string {
   return bgMap[colorClass] ?? ''
 }
 
-/**
- * 递归收集所有节点 ID（用于初始展开）
- *
- * @param nodes - 树节点数组
- * @param childrenField - 子节点字段名
- * @param maxLevel - 最大展开层级（-1 表示全部）
- * @param currentLevel - 当前层级
- * @returns 需要展开的节点 ID 集合
- */
+/** 递归收集所有节点 ID（用于初始展开） */
 function collectExpandedIds(
   nodes: TreeNodeData[],
   childrenField: string,
@@ -374,15 +296,7 @@ function collectExpandedIds(
   return ids
 }
 
-/**
- * 递归收集节点及其所有后代节点的 ID
- *
- * 用于级联开关：当切换一个节点时，其所有子节点也需要同步切换
- *
- * @param nodes - 树节点数组
- * @param childrenField - 子节点字段名
- * @returns 所有后代节点 ID 的数组
- */
+/** 递归收集节点及其所有后代节点的 ID 用于级联开关：当切换一个节点时，其所有子节点也需要同步切换 */
 function collectDescendantIds(
   nodes: TreeNodeData[],
   childrenField: string,
@@ -399,14 +313,7 @@ function collectDescendantIds(
   return ids
 }
 
-/**
- * 在树中查找目标节点的直接子节点列表
- *
- * @param nodes - 树节点数组
- * @param targetId - 目标节点 ID
- * @param childrenField - 子节点字段名
- * @returns 目标节点的子节点数组，未找到则返回 null
- */
+/** 在树中查找目标节点的直接子节点列表 */
 function findChildrenById(
   nodes: TreeNodeData[],
   targetId: string,
@@ -426,15 +333,7 @@ function findChildrenById(
   return null
 }
 
-/**
- * 递归过滤匹配搜索关键词的节点
- *
- * @param nodes - 原始节点数组
- * @param keyword - 搜索关键词
- * @param titleField - 标题字段名
- * @param childrenField - 子节点字段名
- * @returns 过滤后的节点数组
- */
+/** 递归过滤匹配搜索关键词的节点 */
 function filterNodes(
   nodes: TreeNodeData[],
   keyword: string,
@@ -465,15 +364,7 @@ function filterNodes(
 /** 排序模式 */
 type SortMode = 'none' | 'name-asc' | 'name-desc' | 'type'
 
-/**
- * 递归排序树节点
- *
- * @param nodes - 待排序节点数组
- * @param mode - 排序模式
- * @param titleField - 标题字段名
- * @param childrenField - 子节点字段名
- * @returns 排序后的节点数组
- */
+/** 递归排序树节点 */
 function sortNodes(
   nodes: TreeNodeData[],
   mode: SortMode,
@@ -502,15 +393,7 @@ function sortNodes(
   })
 }
 
-/**
- * 通用树形组件
- *
- * 支持递归嵌套、展开/折叠动画、状态图标、进度条、
- * 选中高亮和搜索过滤，由 Schema 驱动渲染。
- *
- * @param rawProps - 组件属性（由 Schema 传入）
- * @returns 树形组件渲染结果
- */
+/** 通用树形组件 支持递归嵌套、展开/折叠动画、状态图标、进度条、 */
 export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const config = extractTreeConfig(rawProps)
   const allData = extractTreeData(rawProps)
@@ -554,11 +437,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const treeKey = `${sessionId ?? 'default'}_${title ?? 'untitled'}`
   /** 从 localStorage 恢复的展开状态（null 表示无保存记录，需用默认值） */
   const restoredExpandedIds = useMemo(() => loadExpandedIds(treeKey), [treeKey])
-  /**
-   * 刷新 key（WebSocket 连接状态变化时更新，触发任务树重新加载）
-   *
-   * BUG-FIX-fix_20260507_ws_reconnect_refresh
-   */
+  /** 刷新 key（WebSocket 连接状态变化时更新，触发任务树重新加载） */
   const refreshKey = (rawProps.refreshKey as string) ?? ''
 
   /** 远程加载的树数据（sessionId 驱动） */
@@ -570,9 +449,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   /** 标记是否已完成首次加载，用于区分首次加载与刷新，避免刷新时闪烁 loading */
   const hasLoadedRef = useRef(false)
 
-  /**
-   * 触发树数据刷新（暂停/恢复操作后调用）
-   */
+  /** 触发树数据刷新（暂停/恢复操作后调用） */
   const triggerRefresh = useCallback(() => {
     setInternalRefresh((prev) => prev + 1)
   }, [])
@@ -589,9 +466,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     ?? (rawProps.dataSource as string | undefined)?.replace('workspace://', '')?.split('/')[0]
     ?? ''
 
-  /**
-   * 将 TreeNodeData[] 转换为 ContextMenuTreeNode[]（供上下文菜单移动对话框使用）
-   */
+  /** 将 TreeNodeData[] 转换为 ContextMenuTreeNode[]（供上下文菜单移动对话框使用） */
   const toContextMenuTree = useCallback(
     (nodes: TreeNodeData[]): ContextMenuTreeNode[] =>
       nodes.map((n) => ({
@@ -614,9 +489,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
   const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
 
-  /**
-   * 处理节点右键菜单
-   */
+  /** 处理节点右键菜单 */
   const handleNodeContextMenu = useCallback(
     (e: React.MouseEvent, node: TreeNodeData) => {
       e.preventDefault()
@@ -643,9 +516,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     [containerTaskId, nodeTitleField, nodeChildrenField, effectiveData, toContextMenuTree, triggerRefresh],
   )
 
-  /**
-   * 处理空白区域右键菜单
-   */
+  /** 处理空白区域右键菜单 */
   const handleBlankContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault()
@@ -667,16 +538,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     [containerTaskId, effectiveData, toContextMenuTree, triggerRefresh],
   )
 
-  /**
-   * 从 API 加载任务树数据
-   *
-   * BUG-FIX-fix_20260512_flicker:
-   * 问题根因: 每次 WS 事件（execution_done、sub_agent_created 等）都会
-   *          bump workspaceDataVersion → refreshKey 变化 → 触发本 effect →
-   *          setIsLoadingRemote(true) 导致 loading 闪烁。
-   * 修复方案: 首次加载显示 loading；后续刷新（已有数据）时跳过 loading 状态切换，
-   *          并添加 500ms 防抖，合并短时间内的多次刷新请求为一次。
-   */
+  /** 从 API 加载任务树数据 */
   useEffect(() => {
     if (!rawProps.dataSource) {
       setRemoteTreeData([])
@@ -762,14 +624,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const prevDataRef = useRef<TreeNodeData[]>([])
   const hasInitializedRef = useRef(false)
 
-  /**
-   * treeKey 变更时重新从 localStorage 恢复展开状态
-   *
-   * 修复场景：sessionId 在组件挂载后才从 sessionStore 异步加载完成，
-   * 导致 treeKey 从 "default_任务书" 变为 "{sessionId}_任务书"。
-   * 此时需要用正确的 key 重新读取保存的展开状态，并跳过首次保存
-   * 以避免用临时展开状态覆盖正确的 localStorage 数据。
-   */
+  /** treeKey 变更时重新从 localStorage 恢复展开状态 修复场景：sessionId 在组件挂载后才从 sessionStore 异步加载完成， */
   const prevTreeKeyRef = useRef(treeKey)
   const skipNextSaveRef = useRef(false)
   useEffect(() => {
@@ -783,12 +638,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     seenNodeIdsRef.current = new Set()
   }, [treeKey])
 
-  /**
-   * 检测新提交的任务并自动开启开关。
-   *
-   * 逻辑：首次加载时仅记录所有任务 ID（不开启开关，重启后默认全部关闭）；
-   * 后续数据刷新时，发现新增的任务 ID 则自动开启其开关（新提交的任务直接运行）。
-   */
+  /** 检测新提交的任务并自动开启开关。 逻辑：首次加载时仅记录所有任务 ID（不开启开关，重启后默认全部关闭）； */
   useEffect(() => {
     if (effectiveData.length === 0) return
 
@@ -828,14 +678,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     knownTaskIdsRef.current = currentIds
   }, [effectiveData, nodeChildrenField])
 
-  /**
-   * 已出现过的节点 ID 集合（用于区分新老节点）
-   */
+  /** 已出现过的节点 ID 集合（用于区分新老节点） */
   const seenNodeIdsRef = useRef<Set<string>>(new Set())
 
-  /**
-   * 收集树中所有节点 ID
-   */
+  /** 收集树中所有节点 ID */
   const collectAllNodeIds = useCallback((nodes: TreeNodeData[]): Set<string> => {
     const ids = new Set<string>()
     const walk = (list: TreeNodeData[]) => {
@@ -849,14 +695,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     return ids
   }, [nodeChildrenField])
 
-  /**
-   * 当 effectiveData 变化时计算展开节点
-   *
-   * 策略：
-   * - 首次加载（localStorage 有记录）：直接使用保存的状态
-   * - 首次加载（localStorage 无记录）：按 expandLevel 配置设置默认展开
-   * - 数据刷新：老节点保持原状态，仅新节点按 expandLevel 设置默认展开状态
-   */
+  /** 当 effectiveData 变化时计算展开节点 策略： */
   useEffect(() => {
     if (effectiveData.length === 0) return
     if (effectiveData === prevDataRef.current) return
@@ -900,12 +739,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     })
   }, [effectiveData, nodeChildrenField, expandLevel, restoredExpandedIds, collectAllNodeIds])
 
-  /**
-   * 展开状态变化时自动持久化到 localStorage
-   *
-   * 当 treeKey 刚变更时跳过首次保存，避免用临时展开状态
-   * 覆盖 localStorage 中正确的持久化数据。
-   */
+  /** 展开状态变化时自动持久化到 localStorage 当 treeKey 刚变更时跳过首次保存，避免用临时展开状态 */
   useEffect(() => {
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false
@@ -948,11 +782,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     })
   }, [])
 
-  /**
-   * 切换节点展开/折叠状态
-   *
-   * @param nodeId - 节点 ID
-   */
+  /** 切换节点展开/折叠状态 */
   const handleToggle = useCallback((nodeId: string) => {
     setExpandedIds((prev) => {
       const next = new Set(prev)
@@ -965,37 +795,17 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     })
   }, [])
 
-  /**
-   * 处理节点选中
-   *
-   * @param nodeId - 节点 ID
-   */
+  /** 处理节点选中 */
   const handleSelect = useCallback((nodeId: string) => {
     setSelectedId(nodeId)
   }, [])
 
-  /**
-   * 处理搜索关键词变化
-   *
-   * @param e - 输入事件
-   */
+  /** 处理搜索关键词变化 */
   const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchKeyword(e.target.value)
   }, [])
 
-  /**
-   * 级联切换节点启用/禁用状态（调用后端 API + 刷新数据）
-   *
-   * 开关状态完全由后端任务状态驱动：
-   * - running/pending/evaluating → ON
-   * - paused/completed/failed → OFF
-   *
-   * 切换时调用后端 pause/resume API，成功后刷新树数据，
-   * UI 状态自然反映后端最新状态，不存在前后端不一致问题。
-   *
-   * @param nodeId - 目标节点 ID
-   * @param enabled - 目标启用状态
-   */
+  /** 级联切换节点启用/禁用状态（调用后端 API + 刷新数据） 开关状态完全由后端任务状态驱动： */
   const handleToggleEnabled = useCallback(
     async (nodeId: string, enabled: boolean) => {
       setTogglingIds((prev) => {
@@ -1024,9 +834,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
           await Promise.allSettled(descendantIds.map((id) => apiCall(id)))
         }
         triggerRefresh()
-      // BUG-FIX-fix_20260513_toggle_error_handling:
-      // 问题根因: catch 块为空，API 调用失败时用户无感知，UI 状态停留在乐观更新
-      // 修复方案: 添加 console.error 日志并调用 triggerRefresh 恢复 UI 状态
       } catch (err) {
         console.error('[FileTreeWidget] toggle enabled failed:', err)
         triggerRefresh()
@@ -1224,15 +1031,7 @@ interface TreeNodeProps {
   onContextMenu?: (e: React.MouseEvent, node: TreeNodeData) => void
 }
 
-/**
- * 树节点组件
- *
- * 递归渲染单个树节点及其子节点，处理展开/折叠动画、
- * 状态图标、进度条和选中高亮。
- *
- * @param props - 节点组件属性
- * @returns 树节点渲染结果
- */
+/** 树节点组件 递归渲染单个树节点及其子节点，处理展开/折叠动画、 */
 /** 优先级标签映射 */
 const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
   critical: { label: '紧急', color: 'text-red-500' },
@@ -1241,12 +1040,7 @@ const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
   low: { label: '低', color: 'text-muted-foreground/60' },
 }
 
-/**
- * 格式化时间戳为可读字符串
- *
- * @param value - 时间戳字符串或空值
- * @returns 格式化后的时间文本，如 "05-07 14:30"
- */
+/** 格式化时间戳为可读字符串 */
 function formatTime(value: string | null | undefined): string | null {
   if (!value) return null
   try {
@@ -1334,12 +1128,7 @@ function TreeNode({
     [nodeId, onToggle],
   )
 
-  /**
-   * 处理对话按钮点击
-   *
-   * 仅当节点拥有 pipeline_run_id 时才触发对话打开，
-   * 容器任务没有管道则不显示此按钮。
-   */
+  /** 处理对话按钮点击 仅当节点拥有 pipeline_run_id 时才触发对话打开， */
   const handleConversationClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()
@@ -1350,12 +1139,7 @@ function TreeNode({
     [onNodeClick, hasPipeline, node],
   )
 
-  /**
-   * 处理打开工作空间按钮点击
-   *
-   * 通过 component-based tab 创建文件树标签，数据由 FileTreeWidget
-   * 自身通过 dataSource 协议（workspace://{containerId}/file-tree）加载。
-   */
+  /** 处理打开工作空间按钮点击 通过 component-based tab 创建文件树标签，数据由 FileTreeWidget */
   const handleOpenWorkspace = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()
@@ -1385,11 +1169,7 @@ function TreeNode({
     [nodeId, wsPath, title],
   )
 
-  /**
-   * 处理开关切换点击
-   *
-   * 级联切换：将自身及所有下级子任务统一设置为新状态
-   */
+  /** 处理开关切换点击 级联切换：将自身及所有下级子任务统一设置为新状态 */
   const handleEnabledToggle = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()

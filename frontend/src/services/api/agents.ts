@@ -1,33 +1,11 @@
-/**
- * Agent 管理 API 服务
- *
- * 提供 Agent 配置的增删改查接口，与后端 /api/v1/agents/* 端点对齐
- *
- * 暴露接口：
- * - getAgents(params, options): AgentListResponse - 获取 Agent 列表
- * - getAgent(agentId, options): AgentResponse - 获取单个 Agent 详情
- * - createAgent(data, options): AgentResponse - 创建 Agent
- * - updateAgent(agentId, data, options): AgentResponse - 更新 Agent
- * - deleteAgent(agentId, options): void - 删除 Agent
- * - getDefaultAgent(options): AgentResponse - 获取默认 Agent
- * - AgentResponse - Agent 响应类型
- * - AgentListResponse - Agent 列表响应类型
- * - AgentCreateRequest - Agent 创建请求类型
- * - AgentUpdateRequest - Agent 更新请求类型
- * - GetAgentsParams - 获取 Agent 列表查询参数
- */
+/** Agent 管理 API 服务 提供 Agent 配置的增删改查接口，与后端 /api/v1/agents/* 端点对齐 */
 
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
 import type { RetryOptions } from '@/utils/retry'
 
-/**
- * Agent 响应类型（与后端 AgentResponse 对齐）
- *
- * FEATURE-20260316-001: 添加 level 字段支持
- * level 表示 Agent 等级（如 "L1"），用于标识 Agent 能力级别
- */
+/** Agent 响应类型（与后端 AgentResponse 对齐） */
 export interface AgentResponse {
   /** Agent ID */
   id: string
@@ -68,9 +46,7 @@ export interface AgentResponse {
   config?: Record<string, unknown>
 }
 
-/**
- * Agent 列表响应类型
- */
+/** Agent 列表响应类型 */
 export interface AgentListResponse {
   /** Agent 列表 */
   items: AgentResponse[]
@@ -82,11 +58,7 @@ export interface AgentListResponse {
   page_size: number
 }
 
-/**
- * Agent 创建请求类型（与后端 AgentCreateRequest 对齐）
- *
- * FEATURE-20260316-001: 添加 level 字段支持
- */
+/** Agent 创建请求类型（与后端 AgentCreateRequest 对齐） */
 export interface AgentCreateRequest {
   /** Agent 名称 */
   name: string
@@ -112,11 +84,7 @@ export interface AgentCreateRequest {
   metadata?: Record<string, unknown>
 }
 
-/**
- * Agent 更新请求类型（与后端 AgentUpdateRequest 对齐）
- *
- * FEATURE-20260316-001: 添加 level 字段支持
- */
+/** Agent 更新请求类型（与后端 AgentUpdateRequest 对齐） */
 export interface AgentUpdateRequest {
   /** Agent 名称 */
   name?: string
@@ -144,9 +112,7 @@ export interface AgentUpdateRequest {
   metadata?: Record<string, unknown>
 }
 
-/**
- * 获取 Agent 列表查询参数
- */
+/** 获取 Agent 列表查询参数 */
 export interface GetAgentsParams {
   /** 页码 */
   page?: number

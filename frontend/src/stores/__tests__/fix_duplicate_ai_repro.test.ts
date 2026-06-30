@@ -1,11 +1,4 @@
-/**
- * 复现测试：发送新消息后上一条 AI 回复重复
- *
- * Bug 场景：
- * - 现有消息序列：ai1 - user1 - ai2
- * - 发送 user2 后错误变成：ai1 - user1 - ai2 - user2 - ai2（ai2 重复）
- * - 期望：ai1 - user1 - ai2 - user2（等待 ai3）
- */
+/** 复现测试：发送新消息后上一条 AI 回复重复 Bug 场景： */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
 
@@ -218,12 +211,11 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
       m.content === 'ai2 reply' || (m.parts || []).some((p: any) => p.content === 'ai2 reply')
     )
     console.log('场景D ai2 reply 消息数:', ai2ReplyMsgs.length, ai2ReplyMsgs.map(m => m.id))
-    // BUG-FIX-fix_20260617_upsert_dup:
-    // 修复 updateMessage 指纹兜底后，同 role+seq 的消息不应被重复创建
+    // // 修复 updateMessage 指纹兜底后，同 role+seq 的消息不应被重复创建
     // 期望: ai2 reply 消息数应为 1（指纹匹配会找到已存在的 ai-2 并更新而非创建）
     // 注意：updateMessage partial.sequence 缺失时会落入最后兜底创建分支，此场景 partial 未传 sequence，
-    //       所以无法用指纹兜底，会创建第 5 条消息。但内容不应被识别为同一条。
-    //       此处断言保留原现象（2 条），等后续进一步完善 partial.sequence 传递链路后再收紧。
+    // 所以无法用指纹兜底，会创建第 5 条消息。但内容不应被识别为同一条。
+    // 此处断言保留原现象（2 条），等后续进一步完善 partial.sequence 传递链路后再收紧。
     expect(ai2ReplyMsgs.length).toBeLessThanOrEqual(2)
   })
 

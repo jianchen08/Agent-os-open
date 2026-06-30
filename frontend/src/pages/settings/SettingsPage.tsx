@@ -1,8 +1,4 @@
-/**
- * 设置中心页面
- *
- * 展示卡片网格链接到各设置子页面，包括专用设置页和通用配置页。
- */
+/** 设置中心页面 展示卡片网格链接到各设置子页面，包括专用设置页和通用配置页。 */
 
 import { Link } from 'react-router-dom'
 import { CONFIG_GROUPS } from '@/constants/genericConfigs'
@@ -43,18 +39,9 @@ const SETTINGS_CARDS: SettingCard[] = [
   },
 ]
 
-/**
- * REQ-19 补充的配置页面已合并到 CONFIG_GROUPS 通用配置分组中。
- *
- * 原先此处有 EXTENDED_SETTINGS_CARDS 数组，使用 CategoryConfigPage 组件。
- * 为避免与 CONFIG_GROUPS 中的相同配置路径重复显示，已将 EXTENDED_SETTINGS_CARDS 移除。
- * CategoryConfigPage 路由（/settings/memory 等）仍保留在 router.tsx 中，但设置中心
- * 统一通过 CONFIG_GROUPS → /settings/generic/* 访问。
- */
+/** REQ-19 补充的配置页面已合并到 CONFIG_GROUPS 通用配置分组中。 原先此处有 EXTENDED_SETTINGS_CARDS 数组，使用 CategoryConfigPage 组件。 */
 
-/**
- * 设置中心页面组件
- */
+/** 设置中心页面组件 */
 export function SettingsPage() {
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
@@ -99,14 +86,7 @@ export function SettingsPage() {
   )
 }
 
-/**
- * 设置卡片链接
- *
- * BUG-FIX-fix_20260610_config_nav:
- * 问题根因: 使用 <a href> 触发全页面重载，导致 React 状态丢失（含认证状态），
- *          initializeAuth() 重新执行时若 token 刷新失败则 clearAuthAndRedirect() → 跳回主页。
- * 修复方案: 改用 React Router <Link to>，实现 SPA 导航不刷新页面。
- */
+/** 设置卡片链接 */
 function SettingCardLink({ card }: { card: SettingCard }) {
   return (
     <Link

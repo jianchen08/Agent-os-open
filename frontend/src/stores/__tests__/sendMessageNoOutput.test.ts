@@ -1,9 +1,3 @@
-/**
- * 复现 "发送消息没有消息输出，但刷新后有" 的 bug
- *
- * 模拟多轮对话场景：历史消息很多 → 用户发消息 → stream_start/chunk/end
- * 验证 updateMessage 在各种场景下能否找到消息
- */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
 

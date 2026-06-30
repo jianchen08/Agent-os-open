@@ -1,14 +1,4 @@
-"""
-进程管理器
-
-暴露接口：
-- get_process_info(self, pid: int) -> ProcessInfo | None：获取进程信息（含懒惰清理）
-- get_output(self, pid: int) -> str：获取进程原始输出（含懒惰清理）
-- get_summary(self, pid: int) -> dict[str, Any] | None：获取进程摘要（含懒惰清理）
-- cleanup_finished(self)：清理已完成的进程记录
-- _cleanup_if_needed(self)：懒惰清理（内部方法，超过100个进程时触发）
-- ProcessManager：ProcessManager类
-"""
+"""进程管理器"""
 
 from __future__ import annotations
 
@@ -34,15 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class ProcessManager:
-    """
-    进程管理器
-
-    管理长时间运行的进程，支持：
-    - 进程跟踪
-    - 日志记录
-    - 输入发送
-    - 优雅终止
-    """
+    """进程管理器"""
 
     def __init__(self, log_dir: Path | None = None):
         """初始化进程管理器"""
@@ -169,9 +151,7 @@ class ProcessManager:
         use_wsl_direct = is_windows and self._is_wsl_command(command)
 
         # WSL 环境下自动将 Windows 路径转换为 WSL 路径
-        # FEATURE-20260617-wsl-path-convert: 当命令最终在 WSL 中执行时，
-        # 将 D:\path 等 Windows 路径自动转换为 /mnt/d/path，避免路径不互通。
-        # 可通过环境变量 AO_BASH_WSL_PATH_CONVERT=0 关闭。
+        # 将 D:\path 等 Windows 路径自动转换为 /mnt/d/path，可通过 AO_BASH_WSL_PATH_CONVERT=0 关闭
         path_convert_enabled = os.environ.get("AO_BASH_WSL_PATH_CONVERT", "1") != "0"
         if path_convert_enabled and (use_wsl_direct or use_wsl_bash):
             command = self._convert_windows_paths_for_wsl(command)
@@ -257,14 +237,7 @@ class ProcessManager:
     async def _read_output(self, pid: int, process: asyncio.subprocess.Process, log_file: Path):
         """异步读取进程输出"""
         async def read_stream(stream, prefix: str = ""):
-            """读取流并写入日志，使用自适应编码解码。
-
-            自适应解码策略（按优先级）：
-            1. UTF-8 严格解码（Git Bash / 现代工具）
-            2. 系统编码（Windows CMD GBK/CP936）
-            3. UTF-8 + replace 兜底
-            这样可以正确解码 Windows CMD 中文输出。
-            """
+            """读取流并写入日志，使用自适应编码解码。"""
             while True:
                 try:
                     line = await stream.readline()
@@ -388,12 +361,7 @@ class ProcessManager:
             return False, f"终止进程失败: {str(e)}"
 
     def get_process_info(self, pid: int) -> ProcessInfo | None:
-        """
-        获取进程信息，顺便清理已完成进程
-
-        BUG-FIX-fix_20260324_143000_process_cleanup
-        修复: 添加懒惰清理调用，防止进程信息无限增长
-        """
+        """获取进程信息，顺便清理已完成进程"""
         self._cleanup_if_needed()
         info = self.active_processes.get(pid)
         if info is not None and info.status == "running":
@@ -402,12 +370,7 @@ class ProcessManager:
         return info
 
     def get_output(self, pid: int) -> str:
-        """
-        获取进程原始输出
-
-        BUG-FIX-fix_20260324_143000_process_cleanup
-        修复: 添加懒惰清理调用，防止进程信息无限增长
-        """
+        """获取进程原始输出"""
         self._cleanup_if_needed()
         proc_info = self.active_processes.get(pid)
         if not proc_info:
@@ -421,12 +384,7 @@ class ProcessManager:
         return raw_output
 
     def get_summary(self, pid: int) -> dict[str, Any] | None:
-        """
-        获取进程摘要
-
-        BUG-FIX-fix_20260324_143000_process_cleanup
-        修复: 添加懒惰清理调用，防止进程信息无限增长
-        """
+        """获取进程摘要"""
         self._cleanup_if_needed()
         proc_info = self.active_processes.get(pid)
         if not proc_info:
@@ -453,15 +411,7 @@ class ProcessManager:
         }
 
     def _cleanup_if_needed(self):
-        """
-        需要时清理（懒惰策略）
-
-        BUG-FIX-fix_20260324_143000_process_cleanup
-        问题根因: cleanup_finished() 方法定义但从未被调用，导致 active_processes 无限增长
-        修复方案: 实现懒惰清理策略，在访问进程信息时检查并清理
-        影响范围: 内存管理、进程信息查询
-        修复日期: 2026-03-24
-        """
+        """需要时清理（懒惰策略）"""
         # 设置最大进程数限制
         MAX_PROCESSES = 100  # noqa: N806
 
@@ -486,23 +436,16 @@ class ProcessManager:
     # ── 访问追踪 ──────────────────────────────────────────────────
 
     def _touch_access(self, pid: int) -> None:
-        """记录进程被外部访问（看门狗据此判定是否孤儿）。
-
-        任何 get_process_info / get_output / get_summary / send_input 调用
-        都更新 last_access_time。合法长期进程（dev server / 下载）只要
-        Agent 周期性 continue/input/read_log 查看就不会被判孤儿。
-        """
+        """记录进程被外部访问（看门狗据此判定是否孤儿）。"""
         info = self.active_processes.get(pid)
         if info is not None:
             info.last_access_time = time.time()
 
     # ── 看门狗：监控失控进程 ──────────────────────────────────────
-    #
     # 解决问题：bash_execute 超时后返回 running 状态但不杀进程（设计意图，
     # 为了让 Agent 用 continue 续接长期任务）。但当 Agent 抛弃进程（拿到结果
     # 转去干别的）或 Agent 协程自身卡死时，进程成了孤儿无限运行，可能耗尽
     # 系统资源（如 find / 爆 900 万句柄拖垮 WSL/Docker）。
-    #
     # 看门狗后台周期采样所有 running 进程，满足任一条件直接杀（不通知 Agent）：
     #   1. 资源失控：句柄 > 阈值 且 连续 N 次采样都在增长
     #   2. 孤儿进程：running 超 30 分钟无任何外部访问
@@ -601,11 +544,7 @@ class ProcessManager:
         return None
 
     def _is_resource_out_of_control(self, samples: list[int]) -> bool:
-        """判定资源是否失控：超阈值 且 连续 N 次都在增长。
-
-        双条件避免误杀大型 build：build 句柄会飙高但很快回落（不满足"连续增长"），
-        find / 等失控命令句柄持续单调上涨（满足两个条件）。
-        """
+        """判定资源是否失控：超阈值 且 连续 N 次都在增长。"""
         rounds = self._handle_grow_rounds
         if len(samples) < rounds + 1:
             return False  # 采样不足，不判定
@@ -668,10 +607,7 @@ class ProcessManager:
 
     @staticmethod
     def _capture_stdin_fd(process: asyncio.subprocess.Process) -> int | None:
-        """从进程对象中捕获 stdin 管道的文件描述符。
-
-        用于 _raw_stdin_write 作为防御性后备写入通道。
-        """
+        """从进程对象中捕获 stdin 管道的文件描述符。"""
         try:
             stdin = process.stdin
             if stdin is None:
@@ -688,13 +624,7 @@ class ProcessManager:
 
     @staticmethod
     def _raw_stdin_write(data: bytes, proc_info: ProcessInfo) -> bool:
-        """使用原始管道句柄直写 stdin，完全绕过 asyncio。
-
-        Windows: PipeHandle.fileno() 返回原始 HANDLE，用 _winapi.WriteFile。
-        Unix: fileno() 返回 CRT fd，用 os.write。
-
-        返回 True 表示写入成功。
-        """
+        """使用原始管道句柄直写 stdin，完全绕过 asyncio。"""
         fd = proc_info.stdin_fd
         if fd is None:
             return False
@@ -731,7 +661,6 @@ class ProcessManager:
 
     # ── Windows 路径转 WSL 路径支持 ───────────────────────────────
 
-    # FEATURE-20260617-wsl-path-convert:
     # 匹配命令中的 Windows 风格绝对路径，用于在 WSL 执行前自动转换。
     # 支持：D:\path, D:/path, \\?\D:\path, \\wsl$\Distro\path, \\wsl.localhost\Distro\path
     # 不匹配：相对路径、环境变量、网络共享 \\server\share、Unix 路径。
@@ -763,18 +692,7 @@ class ProcessManager:
 
     @classmethod
     def _parse_wsl_args(cls, command: str) -> list[str]:
-        """解析 WSL 命令行参数，始终使用 bash -c 包装以保留 shell 变量展开。
-
-        从完整命令中剥离 wsl/wsl.exe 前缀，分离 WSL 自身标志，
-        剩余命令部分始终通过 bash -c 执行，确保 $VAR、管道、重定向
-        等 shell 特性在 WSL 内正常工作。
-
-        Args:
-            command: 完整 WSL 命令字符串，如 "wsl -d Ubuntu ls -la"
-
-        Returns:
-            参数列表，如 ["wsl", "-d", "Ubuntu", "bash", "-c", "ls -la"]
-        """
+        """解析 WSL 命令行参数，始终使用 bash -c 包装以保留 shell 变量展开。"""
         stripped = cls._WSL_COMMAND_RE.sub("", command).strip()
         if not stripped:
             return ["wsl"]
@@ -815,17 +733,7 @@ class ProcessManager:
 
     @classmethod
     def _join_for_bash_c(cls, tokens: list[str]) -> str:
-        """将 token 列表拼接为 bash -c 的命令字符串。
-
-        与 shlex.join 不同：保留 shell 元字符（$VAR, |, ;, && 等）
-        不做引号包裹，只对含空格/制表/换行的 token 使用 shlex.quote。
-
-        Args:
-            tokens: 命令的 token 列表
-
-        Returns:
-            适合传给 bash -c 的命令字符串
-        """
+        """将 token 列表拼接为 bash -c 的命令字符串。"""
         parts: list[str] = []
         for t in tokens:
             if any(c in t for c in (' ', '\t', '\n')):
@@ -842,19 +750,7 @@ class ProcessManager:
         working_dir: str | None,
         env: dict[str, str],
     ) -> asyncio.subprocess.Process:
-        """直接启动 WSL 进程，绕过 cmd.exe 和 bash。
-
-        使用 create_subprocess_exec("wsl", *args) 直连 wsl.exe，
-        避免 cmd.exe 对 WSL UTF-8 输出的编码污染。
-
-        Args:
-            command: 完整 WSL 命令字符串
-            working_dir: 工作目录
-            env: 环境变量
-
-        Returns:
-            asyncio subprocess 对象
-        """
+        """直接启动 WSL 进程，绕过 cmd.exe 和 bash。"""
         wsl_args = self._parse_wsl_args(command)
         logger.debug("WSL direct exec: %s", wsl_args)
 
@@ -875,32 +771,7 @@ class ProcessManager:
 
     @classmethod
     def _convert_windows_paths_for_wsl(cls, command: str) -> str:
-        """将命令中的 Windows 路径自动转换为 WSL 路径。
-
-        FEATURE-20260617-wsl-path-convert:
-        当 bash_execute 确定在 WSL 环境中执行命令时，调用本方法把命令字符串里
-        的 Windows 风格绝对路径转换为 WSL 可识别的路径，避免 Windows/WSL 文件
-        系统路径不互通导致命令失败。
-
-        支持转换：
-        - ``D:\\path\\to\\file`` → ``/mnt/d/path/to/file``
-        - ``D:/path/to/file`` → ``/mnt/d/path/to/file``
-        - ``\\\\?\\D:\\path`` → ``/mnt/d/path``
-        - ``\\\\wsl$\\Ubuntu\\home\\user`` → ``/home/user``
-        - ``\\\\wsl.localhost\\Ubuntu\\home\\user`` → ``/home/user``
-
-        不会转换：
-        - 相对路径：``./file``、``../dir``
-        - 环境变量路径：``$HOME/file``、``%USERPROFILE%\\file``
-        - 网络共享路径：``\\\\server\\share``
-        - 已经是 Unix 风格的路径：``/mnt/d/...``、``/home/...``
-
-        Args:
-            command: 原始命令字符串。
-
-        Returns:
-            转换后的命令字符串。如果当前不是 Windows 平台或命令为空，原样返回。
-        """
+        """将命令中的 Windows 路径自动转换为 WSL 路径。"""
         if not command or platform.system() != "Windows":
             return command
 
@@ -920,14 +791,7 @@ class ProcessManager:
 
     @classmethod
     def _convert_single_windows_path(cls, path: str) -> str:
-        """将单个 Windows 路径转换为 WSL 路径。
-
-        Args:
-            path: Windows 风格路径字符串。
-
-        Returns:
-            转换后的 WSL 路径字符串；无法识别时原样返回。
-        """
+        """将单个 Windows 路径转换为 WSL 路径。"""
         # Windows 长路径前缀 \\?\D:\path -> D:\path
         if path.startswith("\\\\?\\"):
             path = path[4:]

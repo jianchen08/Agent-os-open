@@ -1,11 +1,4 @@
-/**
- * 消息渲染 Hook
- *
- * 统一处理消息的渲染上下文
- * 支持文本和工具调用片段的混合渲染
- *
- * 渲染路径：parts[]（唯一数据源，按 sequence 排序）
- */
+/** 消息渲染 Hook 统一处理消息的渲染上下文 */
 
 import { Copy } from 'lucide-react'
 import { useMemo } from 'react'
@@ -13,9 +6,7 @@ import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/util
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
-/**
- * 渲染片段类型
- */
+/** 渲染片段类型 */
 export type RenderFragment =
   | {
       type: 'thinking'
@@ -46,9 +37,7 @@ export type RenderFragment =
       key: string
     }
 
-/**
- * 渲染上下文
- */
+/** 渲染上下文 */
 export interface MessageRenderContext {
   /** 渲染片段列表 */
   fragments: RenderFragment[]
@@ -60,9 +49,7 @@ export interface MessageRenderContext {
   displayContent: string
 }
 
-/**
- * 构建默认的详情区块
- */
+/** 构建默认的详情区块 */
 function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
   const details: ActivityDetailBlock[] = []
 
@@ -99,9 +86,7 @@ function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
   return details
 }
 
-/**
- * 构建默认的操作按钮
- */
+/** 构建默认的操作按钮 */
 function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   const actions: ActivityAction[] = [
     {
@@ -134,14 +119,7 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   return actions
 }
 
-/**
- * 从 ToolCallPart 构建 ActivityData（parts[] 路径专用）
- *
- * @param part - 工具调用 Part 数据
- * @param toolCall - 对应的 MessageToolCall 数据
- * @param index - 在 parts 数组中的索引（用于生成 fallback ID）
- * @returns ActivityData 活动数据
- */
+/** 从 ToolCallPart 构建 ActivityData（parts[] 路径专用） */
 function buildActivityFromToolPart(
   part: ToolCallPart,
   toolCall: MessageToolCall,
@@ -171,30 +149,8 @@ function buildActivityFromToolPart(
   }
 }
 
-/**
- * 从 Message.parts[] 构建渲染片段（优先路径）
- *
- * Traverses the parts array and converts each part type into the corresponding RenderFragment.
- * Supports text / thinking / tool_call / system types.
- *
- * @param message - 消息对象（必须包含 parts[]）
- * @returns RenderFragment[] 渲染片段列表
- */
-/**
- * 生成稳定的 part key，避免数组索引变化导致 React 重新创建 DOM
- *
- * BUG-FIX-fix_20260601_message_render_duplicate:
- * 问题根因: 原代码使用数组索引 `i` 作为 fragment key，当流式追加新 part 时，
- *          后续 part 的索引全部后移，导致所有已有 fragment 的 key 改变，
- *          React 销毁并重新创建 DOM，视觉上表现为消息内容重复/闪烁。
- * 修复方案: 使用 part 的固有属性生成稳定 key：
- *          - text: sequence + content hash
- *          - thinking: sequence + content hash
- *          - tool_call: callId（已天然唯一）
- *          - system: sequence + content hash
- * 影响范围: 流式消息渲染稳定性
- * 修复日期: 2026-06-01
- */
+/** 从 Message.parts[] 构建渲染片段（优先路径） Traverses the parts array and converts each part type into the corresponding RenderFragment. */
+/** 生成稳定的 part key，避免数组索引变化导致 React 重新创建 DOM */
 function makeStablePartKey(part: MessagePart, index: number): string {
   const seq = part.sequence ?? index
   switch (part.type) {
@@ -290,12 +246,7 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
           containerTaskId: part.containerTaskId,
         }
         // 构建 ActivityData 并应用工具卡片注册表增强
-        // BUG-FIX-fix_20260625_file_opener_wrong_task_id:
-        // 问题根因: 工具卡片打开文件时用 toolCall.containerTaskId（来自 record），
-        //   但该值在 pipe 继承落盘时会被改写成别的任务、在根任务 pipeline 里为 null，
-        //   导致后端 _resolve_workspace_path 解析到错误容器 → 文件不存在。
-        // 修复方案: 优先用当前 Tab 的 taskId（= 产生这些消息的任务），缺失时回退到
-        //   record 的 containerTaskId（主 Tab 场景），保持现有行为不退化。
+        // 导致后端 _resolve_workspace_path 解析到错误容器 → 文件不存在。
         const activity = enhanceActivityWithToolConfig(
           buildActivityFromToolPart(part, toolCall, i),
           toolCall,
@@ -346,9 +297,7 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
   return fragments
 }
 
-/**
- * Hook 选项
- */
+/** Hook 选项 */
 export interface UseMessageRenderOptions {
   /** 消息数据 */
   message: Message
@@ -362,22 +311,11 @@ export interface UseMessageRenderOptions {
   taskId?: string
 }
 
-/**
- * 消息渲染 Hook
- *
- * 渲染策略：parts[] 是唯一数据源（WS 消息和 API 消息均通过 parts 渲染）。
- * displayContent 从 fragments 派生，避免对 parts[] 二次遍历。
- */
+/** 消息渲染 Hook 渲染策略：parts[] 是唯一数据源（WS 消息和 API 消息均通过 parts 渲染）。 */
 export function useMessageRender(options: UseMessageRenderOptions): MessageRenderContext {
   const { message, isLast = false, isGenerating = false, versionContent, taskId } = options
 
-  /**
-   * 从 parts[] 构建渲染片段（唯一路径）
-   *
-   * 所有消息（WS 流式消息和 API 历史消息）在进入渲染前均已构建 parts[]，
-   * 不再需要 contentBlocks 或 content/toolCalls/thinking 的 fallback 路径。
-   * 依赖 message.parts 数组引用而非整个 message 对象，减少不必要的重计算。
-   */
+  /** 从 parts[] 构建渲染片段（唯一路径） 所有消息（WS 流式消息和 API 历史消息）在进入渲染前均已构建 parts[]， */
   const { fragments, displayContent } = useMemo(() => {
     if (message.parts && message.parts.length > 0) {
       const frags = buildFragmentsFromParts(message, taskId)
@@ -394,12 +332,7 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
       fragments: [],
       displayContent: versionContent ?? message.content,
     }
-    // BUG-FIX-fix_20260601_message_render_duplicate:
-    // 问题根因: 原依赖数组包含整个 message 对象，导致 message 任何属性变化
-    //   （如 status 从 streaming 变为 completed）都会触发 useMemo 重新计算，
-    //   即使 parts 和 content 没有变化，造成不必要的重渲染。
-    // 修复方案: 只依赖 message.parts 数组引用、message.content 和 versionContent，
-    //   不依赖整个 message 对象。
+    // 即使 parts 和 content 没有变化，造成不必要的重渲染。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.parts, message.content, versionContent, taskId])
 

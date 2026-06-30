@@ -1,9 +1,3 @@
-/**
- * 流式消息生命周期测试 - 复现 stream_end 时消息找不到的 bug
- *
- * 模拟完整流程：用户发消息 → stream_start → stream_chunk → stream_end
- * 验证每个阶段 store 中消息状态是否正确
- */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
 

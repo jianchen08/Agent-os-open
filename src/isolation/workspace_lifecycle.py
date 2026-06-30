@@ -1,13 +1,4 @@
-"""工作空间统一生命周期管理
-
-封装完整生命周期：初始化 -> 开发 -> 评估前保存 -> 评估通过合并/不通过重试 -> 清理。
-
-暴露接口：
-- WorkspaceLifecycleManager：工作空间生命周期管理器
-
-从 _workspace_git_ops._GitOpsMixin 和 _workspace_merge_ops._MergeOpsMixin 继承
-Git 操作和合并操作方法，本文件仅保留业务编排层代码。
-"""
+"""工作空间统一生命周期管理"""
 from __future__ import annotations
 
 import asyncio
@@ -29,30 +20,11 @@ __all__ = [
 
 
 class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
-    """工作空间统一生命周期管理器
-
-    场景A: 新项目（workspace 为空或路径不存在）
-    场景B: 已有项目无 .git（初始化 git 并提交现有文件）
-    场景C: 已有项目有 .git（通过 worktree 或 sparse-checkout 隔离）
-
-    四种工作模式: project_root / branch / worktree / shared
-
-    继承:
-        _GitOpsMixin: Git 命令封装和分支管理方法
-        _MergeOpsMixin: 合并、验证和清理方法
-    """
+    """工作空间统一生命周期管理器"""
 
     def __init__(self, resource_merge: Any, config: dict[str, Any],
                  task_tree: Any, ws_meta_store: Any, base_path: str):
-        """初始化工作空间生命周期管理器
-
-        Args:
-            resource_merge: ResourceMerge 工具实例，用于合并和回滚操作
-            config: isolation_config 配置字典
-            task_tree: 任务父子关系查询接口，需提供 get_parent_info(task_id) 方法
-            ws_meta_store: 工作空间元数据存储，需提供 get/set 方法
-            base_path: 主仓库根目录路径
-        """
+        """初始化工作空间生命周期管理器"""
         self._resource_merge = resource_merge
         self._config = config
         self._task_tree = task_tree
@@ -86,14 +58,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
 
     def init_container_workspace(self, container_task_id: str, workspace: str | None,
                                  task_data: dict) -> dict:
-        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）
-
-        BUG-FIX-fix_20260519_container_workspace_path:
-        规则：
-        - 有 workspace + host 模式 → 直接用 workspace（原空间）
-        - 有 workspace + 非 host 模式 → 在 ws_root 创建容器空间，从 workspace 复制
-        - 无 workspace → 在 ws_root 创建容器空间，空空间 + git init
-        """
+        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）"""
         isolation_mode = task_data.get("isolation_mode", "") or ""
         ws_base = self._get_workspace_root()
 
@@ -187,14 +152,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         meta = {"mode": "shared", "path": parent_path,
                 "parent_workspace": workspace,
                 "project_root": parent_meta.get("project_root", "")}
-
-        # 子任务物理上就在父任务的隔离副本目录里跑，但 mode 必须保持 shared——
-        # merge/cleanup 只认 mode==worktree，子任务不能独立合并或清理父 worktree。
-        # 此处标记 inherited_isolated 让 security_check 据此放行（与父任务同等的隔离判定），
-        # 解耦「审批放行」与「merge/cleanup owner 责任」这两个正交语义。
-        if parent_meta.get("mode", "") in ("worktree", "project_root", "branch"):
-            meta["inherited_isolated"] = True
-
         self._ws_meta_store[task_id] = meta
         return meta
 
@@ -205,16 +162,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
 
         任务启动时调用一次，让 Agent 在 host / worktree / Docker 容器
         所有模式下都能通过 skills/<技能名>/scripts/*.py 访问技能脚本。
-
-        BUG-FIX-fix_20260629_skills_stale_snapshot:
-        问题根因: 原「skills_dst 已存在即整体跳过」是全有或全无判定。容器创建
-                  后编排器新增的技能永远进不来，技能快照被冻结在容器首次复制
-                  时刻（实测：容器卡在 8 个技能，07 个新技能后续才加始终缺失）。
-        修复方案: 改为按技能子目录粒度增量同步——目标已存在的技能保持原样，
-                  只补齐缺失项，幂等且低成本。
-
-        Args:
-            ws_path: 工作空间绝对路径（来自 ws_meta["path"]）
         """
         skills_src = self._base_path / "skills"
         if not skills_src.exists() or not skills_src.is_dir():
@@ -254,21 +201,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
 
     def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:  # noqa: PLR0912,PLR0915
-        """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)
-
-        BUG-FIX-fix_20260422_scenario_detect_base_path:
-        问题根因: _detect_scenario 用 workspace（.ai_workspaces/xxx）做检测，
-                 该目录总是空的，导致总是走场景A（new_project），创建空 git 仓库，
-                 Agent 在空目录中无法读取项目文件，路径不对齐。
-        修复方案: 用 self._base_path（项目根目录）做场景检测，
-                 workspace 仅作为 worktree 的目标路径。
-
-        BUG-FIX-fix_20260423_index_lock:
-        问题根因: 场景C中 ws_dir 可能有残留的 .git（无提交）和 index.lock，
-                 导致 git add/commit 失败。
-        修复方案: 使用 _git_init_and_initial_commit 统一处理 init/add/commit，
-                 自动清理 index.lock 和空的 .git 目录。
-        """
+        """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)"""
         # ── inherit_workspace_from：直接复用旧任务的工作空间 ──
         # 继承原任务的 ws_meta（mode/branch/project_root），保持 worktree 生命周期
         if task_data.get("_inherit_workspace_resolved"):
@@ -468,19 +401,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
     # ── ws_meta 持久化与恢复 ────────────────────────────────────
 
     def _persist_ws_meta(self, task_id: str):
-        """将 ws_meta 持久化到 task.metadata["ws_meta"]
-
-        BUG-FIX-fix_20260524_save_task_not_awaited:
-        问题根因: _persist_ws_meta 是同步方法，但 self._task_tree.save_task(task) 是
-                  async 方法（TaskService.save_task），直接调用 async 函数不 await
-                  会导致 RuntimeWarning，协程也不会实际执行，ws_meta 无法持久化。
-        修复方案: 先立即更新内存中的 task 对象（确保后续 get_task 可获取），
-                  再使用 asyncio.create_task 异步持久化到文件。
-                  TaskStorage.save() 内部是同步的（dict 写入 + YAML 写文件），
-                  create_task 调度后会在事件循环的下一次微任务中立即完成。
-        影响范围: ws_meta 持久化到 task.metadata 的可靠性。
-        修复日期: 2026-05-24
-        """
+        """将 ws_meta 持久化到 task.metadata["ws_meta"]"""
         meta = self._ws_meta_store.get(task_id)
         if not meta:
             return

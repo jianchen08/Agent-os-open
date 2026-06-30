@@ -1,12 +1,4 @@
-/**
- * 全局单连接 WebSocket 服务
- *
- * 设计原则：
- * - 每个用户只维持一条 WS 连接，所有会话的消息通过消息体中的
- *   thread_id 和 pipeline_id 进行路由
- * - 路由失败时记录错误，不广播（广播是消息串扰的根因）
- * - 连接断开时自动重连（指数退避，初始 4 秒，最大 60 秒间隔）
- */
+/** 全局单连接 WebSocket 服务 设计原则： */
 
 import { buildGlobalWebSocketUrl } from '@/constants/websocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -29,8 +21,7 @@ const RECONNECT_BASE_DELAY = 4_000
 const RECONNECT_MAX_DELAY = 60_000
 const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
-// BUG-FIX-fix_20260628_heartbeat_zero_margin:
-// 历史值 30_000 == HEARTBEAT_INTERVAL，零容错：后端 ack 稍慢（事件循环繁忙、
+// // 历史值 30_000 == HEARTBEAT_INTERVAL，零容错：后端 ack 稍慢（事件循环繁忙、
 // 大 payload 序列化、网络抖动）就会误判连接死了 → 主动 close(2002) 重连。
 // LLM 流式期间后端事件循环负载高（chunk_consumer + json.dumps 推送），
 // heartbeat_ack 响应极易突破 30s → 频繁误断。提到 45s，明确大于 INTERVAL，
@@ -55,19 +46,7 @@ class GlobalWebSocketService {
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
-  /**
-   * 建立全局 WS 连接（登录后调用一次）
-   *
-   * BUG-FIX-fix_20260527_ws_dup_connect:
-   * 问题根因: connect() 使用 50ms setTimeout 延迟实际连接，导致幂等检查失效。
-   *          React StrictMode 下 useEffect 执行两次，两次 connect() 调用都在 setTimeout
-   *          触发前通过检查，最终建立两条 WebSocket 连接，触发后端踢掉旧连接的连锁反应，
-   *          导致 _status 事件频繁触发、组件级联重渲染、页面卡顿。
-   * 修复方案: 移除 setTimeout 延迟，直接同步调用 _doConnect()，使幂等检查（connecting 状态判断）
-   *          在同一事件循环内生效，确保相同 token 的重复调用被正确拦截。
-   * 影响范围: GlobalWebSocket 连接建立流程
-   * 修复日期: 2026-05-27
-   */
+  /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
     if (this._disposed) return
     if (this._status === 'connected' && this._token === token) return
@@ -99,9 +78,7 @@ class GlobalWebSocketService {
 
     this._connectionTimeoutTimer = setTimeout(() => {
       if (this._status === 'connecting') {
-        // BUG-FIX-M03: WS handler 层 console 残留
-        // 问题根因: 连接级异常用 console.warn 记录。
-        // 修复方案: 改用正式 logger.warn（_wsLogger），生产环境统一记录。
+        // -M03: WS handler 层 console 残留
         _wsLogger.warn('[GlobalWS] 连接超时，关闭并重连')
         if (this.ws) {
           this.ws.onclose = null
@@ -122,7 +99,7 @@ class GlobalWebSocketService {
         clearTimeout(this._connectionTimeoutTimer)
         this._connectionTimeoutTimer = null
       }
-      // FIX: 区分首次连接与重连，重连时额外 emit 'reconnected' 事件供 streaming handler 补漏
+      // 区分首次连接与重连，重连时额外 emit 'reconnected' 事件供 streaming handler 补漏
       const isReconnect = this._reconnectAttempts > 0
       _wsLogger.debug('[GlobalWS] connected %s', isReconnect ? '(reconnect)' : '')
       this._status = 'connected'
@@ -145,27 +122,6 @@ class GlobalWebSocketService {
         const data = JSON.parse(event.data)
         if (data.type === 'heartbeat_ack') {
           this._handleHeartbeatAck()
-        }
-        // 延迟追踪：后端在 payload 注入 __send_ts（epoch ms），
-        // 这里算"收到时刻 - 发送时刻"。忽略心跳/连接确认等无业务语义事件。
-        const sendTs = data.__send_ts ?? data.data?.__send_ts
-        if (typeof sendTs === 'number' && data.type && data.type !== 'heartbeat_ack') {
-          const recvTs = Date.now()
-          const latency = recvTs - sendTs
-          const traceId =
-            (data.data?.message_id as string)?.slice(0, 12) ||
-            (data.data?.request_id as string)?.slice(0, 12) ||
-            'null'
-          // >500ms 视为异常延迟，用 warn 突出；正常用 debug 避免刷屏
-          if (latency > 500) {
-            _wsLogger.warn(
-              `[WS_TRACE] <<< RECV type=${data.type} id=${traceId} latency=${latency}ms (⚠️异常)`,
-            )
-          } else {
-            _wsLogger.debug(
-              `[WS_TRACE] <<< RECV type=${data.type} id=${traceId} latency=${latency}ms`,
-            )
-          }
         }
         _wsLogger.debug(
           `[WS_RAW] type=${data.type} pipeline_id=${data.data?.pipeline_id?.slice(0, 12) || 'null'} message_id=${data.data?.message_id?.slice(0, 12) || 'null'}`,
@@ -200,13 +156,10 @@ class GlobalWebSocketService {
       }
 
       if (!this._disposed) {
-        // BUG-FIX-fix_20260624_ws_reconnect_dead_loop:
-        // 后端在 token 无效/过期时以 code=4001 关闭连接（见 app_factory.py:244/248）。
+        // // 后端在 token 无效/过期时以 code=4001 关闭连接（见 app_factory.py:244/248）。
         // 把 close code 传给重连逻辑：4001 = 认证被拒，需先刷新 token 再连；
         // 其他 code（网络断开、心跳超时等）= 正常重连，无需触碰 token。
-        //
-        // BUG-FIX-fix_20260625_ws_handshake_close_code_lost:
-        // 后端旧实现在 accept() 前 close(4001)，浏览器拿到的是 HTTP 403 + close code 1006
+        // // 后端旧实现在 accept() 前 close(4001)，浏览器拿到的是 HTTP 403 + close code 1006
         // 而非 4001，导致认证拒绝被误判为普通断连。后端已改为 accept() 后 close(4001)，
         // 正常情况下前端能收到 4001。但某些代理/网关可能吞掉 close code 导致 1006，
         // 故对 1006 + 从未连接过 + 本地 token 确实已过期 三者同时成立时，
@@ -269,7 +222,7 @@ class GlobalWebSocketService {
   }
 
   /** 取消生成 */
-  // BUG-FIX: 增加 pipelineId 参数，避免停止按钮误取消其他管道
+  // 增加 pipelineId 参数，避免停止按钮误取消其他管道
   sendCancel(threadId: string, reason?: string, pipelineId?: string): void {
     this._send({ type: 'stop_generation', thread_id: threadId, reason, pipeline_id: pipelineId })
   }
@@ -304,17 +257,7 @@ class GlobalWebSocketService {
 
   // ── 内部方法 ──
 
-  /**
-   * 发送消息（立即发送或加入队列）
-   *
-   * BUG-FIX-fix_20260523_queue_dup:
-   * 问题根因: ACK 超时重发或网络抖动时，相同消息可能多次入队，
-   *          _flushQueue 将多条相同消息同时发出。
-   * 修复方案: 入队前检查队列中是否已有相同 thread_id + type + client_message_id 的消息，
-   *          避免重复入队。
-   * 影响范围: 所有通过 WebSocket 发送的消息
-   * 修复日期: 2026-05-23
-   */
+  /** 发送消息（立即发送或加入队列） */
   private _send(msg: PendingMessage): void {
     if (this._status === 'connected' && this.ws) {
       try {
@@ -337,13 +280,7 @@ class GlobalWebSocketService {
     }
   }
 
-  /**
-   * 将消息加入发送队列（带去重检查）
-   *
-   * BUG-FIX-fix_20260523_queue_dup:
-   * 通过 thread_id + type + client_message_id 三元组判断是否重复，
-   * 避免同一消息多次入队导致连接后重复发送。
-   */
+  /** 将消息加入发送队列（带去重检查） */
   private _enqueueIfNotDuplicate(msg: PendingMessage): void {
     const isDuplicate = this._queue.some((queued) =>
       queued.type === msg.type
@@ -392,8 +329,7 @@ class GlobalWebSocketService {
         this._heartbeatTimeoutTimer = setTimeout(() => {
           _wsLogger.warn('[GlobalWS] 心跳超时，连接可能已断开，主动关闭重连')
           if (this.ws) {
-            // BUG-FIX-fix_20260624_ws_reconnect_dead_loop:
-            // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
+            // // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
             // 4001 已被后端用于「token 无效/过期」的认证拒绝（见 app_factory.py:244/248），
             // onclose 据此触发 token 刷新路径。若心跳超时也用 4001，会被误判为认证拒绝，
             // 在无 refresh token 的环境（测试/未登录）反复抛错。心跳超时属于网络层故障，
@@ -424,26 +360,7 @@ class GlobalWebSocketService {
     this._clearHeartbeatTimeout()
   }
 
-  /**
-   * 调度重连
-   *
-   * @param authRejected 后端是否因认证问题关闭连接（close code === 4001）。
-   *   - true：需先刷新 token 再连；刷新真失效则登出并停止重连。
-   *   - false（默认）：网络/心跳超时等普通断连，直接用当前 token 重连。
-   *
-   * BUG-FIX-fix_20260624_ws_reconnect_dead_loop:
-   * 问题根因: token 过期 → WS 握手被后端以 code=4001 关闭（客户端看到 HTTP 403）
-   *   → onclose → _scheduleReconnect → 检测过期 → refreshToken。若刷新失败（含
-   *   refresh_token 被 401 单次轮换击穿），旧实现 catch 块**用同一个过期 token 继续重连**
-   *   → 后端再 4001 → 再重连…死循环，连接永远建不起来 → 后端推送全部丢失。
-   *   这就是「推送不了」的根因。
-   * 修复方案: 用 close code 精确区分认证拒绝与普通断连；认证拒绝时必须刷新成功才连，
-   *   失败按错误类型分流：
-   *   - 真认证失效（refresh_token 被 401/403 拒绝）→ triggerAuthExpired 走登出，停止重连
-   *     （没有有效 token，连了也是 4001）。
-   *   - 瞬时故障（网络/超时/5xx）→ 不连、不登出，按指数退避等下一轮（下次再尝试刷新），
-   *     **绝不拿已知过期的旧 token 去连**，从源头切断 4001 死循环。
-   */
+  /** 调度重连 - true：需先刷新 token 再连；刷新真失效则登出并停止重连。 */
   private _scheduleReconnect(authRejected: boolean = false): void {
     if (this._disposed) return
 

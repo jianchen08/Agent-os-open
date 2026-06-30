@@ -1,12 +1,4 @@
-"""记忆服务门面。
-
-从旧代码 src/memory/service.py 搬迁。
-移除 SQLAlchemy 和特定 retriever 的硬依赖，
-通过注入接口实现三层决策检索模型。
-
-暴露接口：
-- MemoryService: 记忆服务门面
-"""
+"""记忆服务门面。"""
 
 from __future__ import annotations
 
@@ -32,24 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryService:
-    """记忆服务门面。
-
-    统一管理情景记忆、语义记忆和检索操作。
-
-    三层决策模型：
-    - 第一层：筛选条件（memory_type, knowledge_id/name, tags, session_id）
-    - 第二层：注入方式（full, retrieval, summary）
-    - 第三层：检索方法（vector, keyword, tagwave）
-
-    Attributes:
-        _episode_service: 情景记忆服务
-        _knowledge_service: 知识服务
-        _retrievers: 检索器字典（method -> IRetriever）
-        _embedding_service: 向量嵌入服务
-        _vector_retriever: 向量检索器（用于写入时同步索引）
-        _chunk_service: 压缩块服务
-        _tag_service: Tag 服务
-    """
+    """记忆服务门面。"""
 
     def __init__(
         self,
@@ -62,18 +37,7 @@ class MemoryService:
         tag_service: Any = None,
         config: dict[str, Any] | None = None,
     ) -> None:
-        """初始化记忆服务。
-
-        Args:
-            episode_storage: 情景记忆存储接口
-            semantic_storage: 语义记忆存储接口
-            retrievers: 检索器字典，key 为检索方法名
-            embedding_service: 向量嵌入服务（可选）
-            vector_retriever: 向量检索器（可选，写入时同步向量索引）
-            chunk_service: 压缩块服务（可选）
-            tag_service: Tag 服务（可选）
-            config: 服务配置（可选），支持 vector_search、maintenance 等子配置
-        """
+        """初始化记忆服务。"""
         self._episode_service = EpisodeService(episode_storage=episode_storage)
         self._knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
         self._retrievers: dict[str, IRetriever] = retrievers or {}
@@ -107,47 +71,20 @@ class MemoryService:
         self._ensure_default_retrievers()
 
     def register_retriever(self, method: str, retriever: IRetriever) -> None:
-        """注册检索器。
-
-        Args:
-            method: 检索方法名（vector/keyword/tagwave）
-            retriever: 检索器实例
-        """
+        """注册检索器。"""
         self._retrievers[method] = retriever
 
     def _ensure_default_retrievers(self) -> None:
-        """确保至少有 keyword 检索器可用。
-
-        BUG-FIX-REQ-5:
-        问题根因: MemoryService 构造后 _retrievers 为空，导致：
-          1. vector 检索器未注册，报错"检索器 vector 未注册"
-          2. keyword 检索器未注册，retrieve 返回空结果
-          即使刚存入的内容也搜不到。
-        修复方案: 构造后自动注册内置的 InMemoryKeywordRetriever。
-          vector 检索器需要外部 PG 向量数据库，保持手动注册。
-        影响范围: 所有使用 memory retrieve 的场景。
-        """
+        """确保至少有 keyword 检索器可用。"""
         if "keyword" not in self._retrievers:
             self._retrievers["keyword"] = _InMemoryKeywordRetriever(
                 self._episode_service, self._knowledge_service,
             )
 
-    # ============================================
     # 情景记忆操作 - 委托给 EpisodeService
-    # ============================================
 
     async def store_episode(self, episode: Episode) -> str:
-        """存储情景记忆。
-
-        如果存在 vector_retriever 且 episode.intent_vector 存在，
-        同步写入向量索引。
-
-        Args:
-            episode: 情景记忆实例
-
-        Returns:
-            存储的条目 ID
-        """
+        """存储情景记忆。"""
         entry_id = await self._episode_service.store_episode(episode)
 
         # 同步写向量索引
@@ -178,20 +115,7 @@ class MemoryService:
         final_score: float | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """创建情景记忆。
-
-        Args:
-            user_id: 用户 ID
-            intent_text: 意图文本
-            plan_dag: 执行计划 DAG
-            execution_summary: 执行摘要
-            evaluation_report: 评估报告
-            final_score: 最终得分
-            tags: 标签列表
-
-        Returns:
-            创建的情景记忆字典
-        """
+        """创建情景记忆。"""
         return await self._episode_service.create_episode(
             user_id=user_id,
             intent_text=intent_text,
@@ -203,15 +127,7 @@ class MemoryService:
         )
 
     async def get_episode(self, episode_id: str, user_id: str) -> dict[str, Any] | None:
-        """获取情景记忆。
-
-        Args:
-            episode_id: 情景记忆 ID
-            user_id: 用户 ID
-
-        Returns:
-            情景记忆字典
-        """
+        """获取情景记忆。"""
         return await self._episode_service.get_episode(
             episode_id=episode_id, user_id=user_id,
         )
@@ -222,46 +138,19 @@ class MemoryService:
         page: int = 1,
         page_size: int = 20,
     ) -> dict[str, Any]:
-        """获取情景记忆列表。
-
-        Args:
-            user_id: 用户 ID
-            page: 页码
-            page_size: 每页数量
-
-        Returns:
-            分页结果字典
-        """
+        """获取情景记忆列表。"""
         return await self._episode_service.list_episodes(
             user_id=user_id, page=page, page_size=page_size,
         )
 
     async def consolidate_episode(self, episode_id: str, summary: str) -> bool:
-        """整理情景记忆。
-
-        Args:
-            episode_id: 情景记忆 ID
-            summary: 执行摘要
-
-        Returns:
-            是否更新成功
-        """
+        """整理情景记忆。"""
         return await self._episode_service.consolidate_episode(
             episode_id=episode_id, summary=summary,
         )
 
     async def delete_episode(self, episode_id: str, user_id: str) -> bool:
-        """删除情景记忆。
-
-        如果存在 vector_retriever，同步删除向量索引。
-
-        Args:
-            episode_id: 情景记忆 ID
-            user_id: 用户 ID
-
-        Returns:
-            是否删除成功
-        """
+        """删除情景记忆。"""
         success = await self._episode_service.delete_episode(
             episode_id=episode_id, user_id=user_id,
         )
@@ -278,22 +167,10 @@ class MemoryService:
 
         return success
 
-    # ============================================
     # 知识记忆操作 - 委托给 KnowledgeService
-    # ============================================
 
     async def store_knowledge(self, knowledge: Knowledge) -> str:
-        """存储知识。
-
-        如果存在 vector_retriever 且 knowledge.embedding 存在，
-        同步写入向量索引。
-
-        Args:
-            knowledge: 知识实例
-
-        Returns:
-            存储的条目 ID
-        """
+        """存储知识。"""
         entry_id = await self._knowledge_service.store_knowledge(knowledge)
 
         # 同步写向量索引
@@ -321,45 +198,18 @@ class MemoryService:
         source_type: str,
         extra_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """创建知识。
-
-        Args:
-            user_id: 用户 ID
-            content: 知识内容
-            source_type: 来源类型
-            extra_data: 额外数据
-
-        Returns:
-            创建的知识字典
-        """
+        """创建知识。"""
         return await self._knowledge_service.create_knowledge(
             user_id=user_id, content=content,
             source_type=source_type, extra_data=extra_data,
         )
 
     async def list_semantic_memory(self, user_id: str) -> dict[str, Any]:
-        """获取语义记忆列表。
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            语义记忆列表字典
-        """
+        """获取语义记忆列表。"""
         return await self._knowledge_service.list_semantic_memory(user_id=user_id)
 
     async def delete_knowledge(self, knowledge_id: str, user_id: str) -> bool:
-        """删除知识。
-
-        如果存在 vector_retriever，同步删除向量索引。
-
-        Args:
-            knowledge_id: 知识 ID
-            user_id: 用户 ID
-
-        Returns:
-            是否删除成功
-        """
+        """删除知识。"""
         success = await self._knowledge_service.delete_knowledge(
             knowledge_id=knowledge_id, user_id=user_id,
         )
@@ -376,9 +226,7 @@ class MemoryService:
 
         return success
 
-    # ============================================
     # 统一检索接口 - 三层决策模型
-    # ============================================
 
     async def retrieve(
         self,
@@ -390,20 +238,7 @@ class MemoryService:
         query_vector: list[float] | None = None,
         top_k: int = 5,
     ) -> list[SearchResult]:
-        """统一检索入口 - 三层决策模型。
-
-        Args:
-            user_id: 用户 ID
-            filter: 筛选条件
-            inject_type: 注入方式 (full/retrieval/summary)
-            retrieval_method: 检索方法 (vector/keyword/tagwave)
-            query: 查询文本
-            query_vector: 查询向量
-            top_k: 返回数量
-
-        Returns:
-            搜索结果列表
-        """
+        """统一检索入口 - 三层决策模型。"""
         filter = filter or {}
 
         inject_type_enum = InjectType(inject_type)
@@ -423,18 +258,7 @@ class MemoryService:
         filter: dict[str, Any],
         top_k: int,
     ) -> list[SearchResult]:
-        """全量注入 - 使用默认检索器返回筛选后的所有结果。
-
-        BUG-FIX-fix_20260620_retrieve_full_vector_unregistered:
-        问题根因: _default_method 默认取 vector_search.default_method='vector'，
-          但 vector 检索器在 vector_search.enabled=false 时不注册。full 模式
-          是兜底注入路径，检索器缺失时直接抛 ValueError 会让上层 prompt_build
-          插件崩溃，且因调用栈无 try 包裹，异常吞掉后协程行为不可预测，
-          是多次 prompt_build 卡死的强相关因素。
-        修复方案: full 模式下默认检索器不可用时，降级到任意已注册检索器
-          （优先 keyword），并打 WARNING 让降级可见；所有检索器都不可用时
-          返回空列表（full 语义允许空结果，不该阻断调用方）。
-        """
+        """全量注入 - 使用默认检索器返回筛选后的所有结果。"""
         method_name = self._default_method if isinstance(self._default_method, str) else "keyword"
         retriever = self._retrievers.get(method_name)
 
@@ -493,12 +317,7 @@ class MemoryService:
         query: str | None,
         top_k: int,
     ) -> list[SearchResult]:
-        """按检索方法执行检索（第三层决策）。
-
-        检索器必须已通过 register_retriever() 或构造函数注入。
-        未注册的检索方法将直接报错，不会自动回退。
-        启用混合检索时，同时调用向量和关键词检索并按权重合并结果。
-        """
+        """按检索方法执行检索（第三层决策）。"""
         self._retrieval_stats["total_requests"] += 1
         self._retrieval_stats["last_retrieval_at"] = datetime.now(UTC).isoformat()
 
@@ -518,9 +337,6 @@ class MemoryService:
 
         retriever = self._retrievers.get(method_name)
         if not retriever:
-            # BUG-FIX-fix_20260623_vector_fallback_not_implemented:
-            # 配置了 fallback_to_keyword=True 时，vector/tagwave 检索器未注册
-            # 应降级到 keyword 检索而非直接抛 ValueError。
             if self._config.get("vector_search", {}).get("fallback_to_keyword", False):
                 fallback = self._retrievers.get("keyword")
                 if fallback:
@@ -564,18 +380,7 @@ class MemoryService:
         top_k: int,
         memory_type: str,
     ) -> list[SearchResult]:
-        """混合检索：同时使用向量检索和关键词检索，按权重合并结果。
-
-        Args:
-            user_id: 用户 ID
-            filter: 筛选条件
-            query: 查询文本
-            top_k: 返回数量
-            memory_type: 记忆类型
-
-        Returns:
-            合并后的搜索结果列表
-        """
+        """混合检索：同时使用向量检索和关键词检索，按权重合并结果。"""
         vector_results: list[SearchResult] = []
         keyword_results: list[SearchResult] = []
 
@@ -651,18 +456,7 @@ class MemoryService:
         top_k: int = 10,
         min_score: float | None = None,
     ) -> dict[str, Any]:
-        """搜索记忆。
-
-        Args:
-            user_id: 用户 ID
-            query: 查询文本
-            memory_types: 记忆类型列表
-            top_k: 返回数量
-            min_score: 最小得分阈值
-
-        Returns:
-            搜索结果字典
-        """
+        """搜索记忆。"""
         if min_score is None:
             min_score = Retrieval.MIN_SCORE
 
@@ -695,25 +489,11 @@ class MemoryService:
         return {"items": items[:top_k], "total": len(items), "query": query}
 
     async def consolidate(self, user_id: str) -> dict[str, Any]:
-        """记忆整合。
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            整合结果字典
-        """
+        """记忆整合。"""
         return {"success": True, "message": "记忆整合完成", "consolidated_count": 0}
 
     async def get_stats(self, user_id: str) -> dict[str, Any]:
-        """获取记忆统计。
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            统计信息字典
-        """
+        """获取记忆统计。"""
         episode_list = await self._episode_service.list_episodes(user_id, page_size=10000)
         knowledge_count = await self._knowledge_service.get_knowledge_count(user_id)
 
@@ -726,18 +506,10 @@ class MemoryService:
             "last_updated": datetime.now(UTC).isoformat(),
         }
 
-    # ============================================
     # 健康检查与统计
-    # ============================================
 
     async def health_check(self) -> dict[str, Any]:
-        """记忆系统健康检查。
-
-        报告记忆总数、向量覆盖率、存储后端状态和检索统计。
-
-        Returns:
-            健康检查报告字典
-        """
+        """记忆系统健康检查。"""
         now = datetime.now(UTC).isoformat()
 
         # 1. 统计记忆数量
@@ -854,11 +626,7 @@ class MemoryService:
         return report
 
     def get_retrieval_stats(self) -> dict[str, Any]:
-        """获取检索统计信息。
-
-        Returns:
-            检索统计字典
-        """
+        """获取检索统计信息。"""
         stats = self._retrieval_stats.copy()
         total = max(stats["total_requests"], 1)
         stats["hit_rate"] = (
@@ -870,14 +638,7 @@ class MemoryService:
         return stats
 
     async def get_embedding(self, text: str) -> list[float] | None:
-        """获取文本的嵌入向量。
-
-        Args:
-            text: 文本内容
-
-        Returns:
-            嵌入向量，服务不可用时返回 None
-        """
+        """获取文本的嵌入向量。"""
         if self._embedding_service:
             if hasattr(self._embedding_service, "embed_text"):
                 return await self._embedding_service.embed_text(text)
@@ -893,18 +654,7 @@ class MemoryService:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        """通用存储方法（供 MemoryWritePlugin 调用）。
-
-        Args:
-            user_id: 用户 ID
-            session_id: 会话 ID
-            category: 内容类别
-            content: 内容文本
-            metadata: 元数据
-
-        Returns:
-            存储的条目 ID
-        """
+        """通用存储方法（供 MemoryWritePlugin 调用）。"""
         metadata = metadata or {}
         tags = metadata.get("tags", [category])
 
@@ -917,19 +667,10 @@ class MemoryService:
         )
         return await self.store_episode(episode)
 
-    # ============================================
     # 压缩块操作 - 委托给 ChunkService
-    # ============================================
 
     async def store_chunk(self, chunk_data: ChunkData) -> str:
-        """存储压缩块。
-
-        Args:
-            chunk_data: 压缩块数据
-
-        Returns:
-            存储的压缩块 ID
-        """
+        """存储压缩块。"""
         if self._chunk_service:
             return await self._chunk_service.save(chunk_data)
 
@@ -937,14 +678,7 @@ class MemoryService:
         return chunk_data.id
 
     async def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
-        """获取压缩块。
-
-        Args:
-            chunk_id: 压缩块 ID
-
-        Returns:
-            压缩块字典
-        """
+        """获取压缩块。"""
         if self._chunk_service:
             chunk = await self._chunk_service.load(chunk_id)
             if chunk:
@@ -952,14 +686,7 @@ class MemoryService:
         return None
 
     async def delete_chunk(self, chunk_id: str) -> bool:
-        """删除压缩块。
-
-        Args:
-            chunk_id: 压缩块 ID
-
-        Returns:
-            是否删除成功
-        """
+        """删除压缩块。"""
         if self._chunk_service:
             return await self._chunk_service.delete(chunk_id)
 
@@ -968,14 +695,7 @@ class MemoryService:
 
 
 class _InMemoryKeywordRetriever(IRetriever):
-    """内置关键词检索器 — 基于 EpisodeService 和 KnowledgeService 的内容进行简单文本匹配。
-
-    BUG-FIX-REQ-5:
-    问题根因: MemoryService._retrievers 默认为空，keyword 检索未注册，
-      导致 retrieve 时要么报"检索器未注册"，要么返回空结果。
-    修复方案: 提供内置的 keyword 检索器，在 __init__ 中自动注册，
-      无需外部依赖即可完成基本的关键词检索。
-    """
+    """内置关键词检索器 — 基于 EpisodeService 和 KnowledgeService 的内容进行简单文本匹配。"""
 
     def __init__(
         self,
@@ -993,11 +713,7 @@ class _InMemoryKeywordRetriever(IRetriever):
         memory_type: str = "semantic",
         filters: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
-        """基于关键词匹配的检索。
-
-        遍历情景记忆或知识条目，检查 query 是否出现在内容中，
-        返回匹配的 SearchResult 列表。
-        """
+        """基于关键词匹配的检索。"""
         filters = filters or {}
         results: list[SearchResult] = []
         query_lower = query.lower()

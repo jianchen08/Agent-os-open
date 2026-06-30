@@ -1,25 +1,4 @@
-"""
-
-任务管理工具（简化版）
-
-
-
-暴露接口：
-
-- get_tool_definition() -> Tool：工具定义
-
-- TaskTool：任务管理工具类
-
-
-
-6 个操作：get / continue / stop / delete / complete / fail
-
-
-
-使用 tasks.service.TaskService（JSON 文件存储）进行任务 CRUD 和状态管理。
-
-"""
-
+"""任务管理工具（简化版）"""
 
 
 import logging
@@ -42,37 +21,9 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 
-
-
-
 class TaskTool(BuiltinTool):
 
-    """任务管理工具（简化版）。
-
-
-
-    6 个操作：
-
-    - get：查询任务（合并旧 get/list/status）
-
-    - continue：继续执行（合并旧 retry/inject/resume）
-
-    - stop：停止任务（合并旧 pause/cancel，统一设 STOPPED）
-
-    - delete：删除任务
-
-    - change：变更容器任务状态（L1，用 status 参数指定目标状态；合并旧 complete_container/fail_container）
-
-
-
-    权限规则：
-
-    - L1：默认只显示自己提交的任务；传 show_all=true 可递归查看当前会话所有任务（含子任务的子任务）
-
-    - L2：只能管理自己提交的子任务
-
-    """
-
+    """任务管理工具（简化版）。"""
 
 
     def __init__(self) -> None:
@@ -82,29 +33,15 @@ class TaskTool(BuiltinTool):
         self._task_service: TaskService | None = None
 
 
-
     def _get_execution_record_storage(self):
 
-        """获取全局 ExecutionRecordStorage 实例。
-
-
-
-        通过 ServiceProvider 统一获取。
-
-
-
-        Returns:
-
-            ExecutionRecordStorage 实例，获取失败时返回 None
-
-        """
+        """获取全局 ExecutionRecordStorage 实例。"""
 
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
 
         return provider.get("execution_record_storage")
-
 
 
     @staticmethod
@@ -128,7 +65,6 @@ class TaskTool(BuiltinTool):
             return (completed - started).total_seconds()
 
         return (datetime.now() - started).total_seconds()
-
 
 
     @staticmethod
@@ -156,7 +92,6 @@ class TaskTool(BuiltinTool):
         remain_minutes = minutes % 60
 
         return f"{hours}h{remain_minutes}m"
-
 
 
     def _get_latest_activity(self, task: TaskModel) -> dict | None:
@@ -188,7 +123,6 @@ class TaskTool(BuiltinTool):
             "at": latest.created_at,
 
         }
-
 
 
     def _get_recent_activities(self, task: TaskModel, limit: int = 5) -> list[dict]:
@@ -228,24 +162,9 @@ class TaskTool(BuiltinTool):
         ]
 
 
-
     def _get_task_service(self) -> TaskService:
 
-        """获取共享的 TaskService 实例。
-
-
-
-        Returns:
-
-            TaskService 实例
-
-
-
-        Raises:
-
-            RuntimeError: TaskService 创建失败
-
-        """
+        """获取共享的 TaskService 实例。"""
 
         if self._task_service is not None:
 
@@ -270,7 +189,6 @@ class TaskTool(BuiltinTool):
             return self._task_service
 
         raise RuntimeError("任务服务初始化失败")
-
 
 
     @staticmethod
@@ -562,29 +480,13 @@ class TaskTool(BuiltinTool):
         )
 
 
-
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
 
-        """执行任务管理操作。
-
-
-
-        Args:
-
-            inputs: 工具输入参数，必须包含 action 字段
-
-
-
-        Returns:
-
-            工具执行结果
-
-        """
+        """执行任务管理操作。"""
 
         action = inputs.get("action")
 
         parent_agent_level = inputs.get("parent_agent_level")
-
 
 
         if parent_agent_level is None:
@@ -598,7 +500,6 @@ class TaskTool(BuiltinTool):
                 error_code="MISSING_INJECTED_PARAM",
 
             )
-
 
 
         try:
@@ -616,7 +517,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         # 检查是否使用批量参数
 
         task_ids = inputs.get("task_ids")
@@ -624,7 +524,6 @@ class TaskTool(BuiltinTool):
         if task_ids and isinstance(task_ids, list) and action in ("continue", "stop", "delete"):
 
             return await self._batch_tasks(inputs, parent_agent_level)
-
 
 
         if action == "get":
@@ -656,7 +555,6 @@ class TaskTool(BuiltinTool):
         )
 
 
-
     @staticmethod
 
     def _check_permission(  # noqa: PLR0911
@@ -669,35 +567,7 @@ class TaskTool(BuiltinTool):
 
     ) -> tuple[bool, str | None]:
 
-        """检查任务操作权限。
-
-
-
-        L1 主 Agent 可查看和管理当前会话的所有任务（含子任务的子任务），
-
-        仅按 session_id 隔离，不检查 submitted_by_level。
-
-        L2 只能管理自己提交的子任务（通过 parent_task_id 校验）。
-
-        L3 禁止使用 task_manage 工具。
-
-
-
-        Args:
-
-            task: 任务模型
-
-            parent_agent_level: 父 Agent 层级
-
-            inputs: 工具输入参数
-
-
-
-        Returns:
-
-            (是否有权限, 错误消息)
-
-        """
+        """检查任务操作权限。"""
 
         if parent_agent_level == 1:
 
@@ -714,7 +584,6 @@ class TaskTool(BuiltinTool):
                 )
 
             return True, None
-
 
 
         if parent_agent_level == 2:
@@ -736,7 +605,6 @@ class TaskTool(BuiltinTool):
                 return True, None
 
 
-
             pipeline_id = inputs.get("pipeline_id")
 
             if pipeline_id:
@@ -752,7 +620,6 @@ class TaskTool(BuiltinTool):
                     )
 
                 return True, None
-
 
 
             parent_task_id = inputs.get("parent_task_id")
@@ -774,59 +641,25 @@ class TaskTool(BuiltinTool):
             return False, "L2 缺少 parent_task_id 参数，无法验证权限"
 
 
-
         return False, f"只有 L1 和 L2 Agent 能使用 task_manage 工具，当前层级：L{parent_agent_level}"
-
 
 
     async def _get_all_tasks(self, limit: int = 5) -> list[TaskModel]:
 
-        """获取全部任务列表（按创建时间倒序）。
-
-
-
-        注意：limit 在过滤前应用，会丢弃较老的任务。当列表查询需要做权限/范围/
-
-        状态过滤时，应改用 _list_all_tasks_sorted() 拉全量再在外层过滤后截断，
-
-        避免「截断窗口落在被过滤掉的老任务上 → 过滤后为空」的 bug。
-
-
-
-        Args:
-
-            limit: 返回数量限制
-
-
-
-        Returns:
-
-            任务模型列表（按创建时间倒序）
-
-        """
+        """获取全部任务列表（按创建时间倒序）。"""
 
         service = self._get_task_service()
 
         return await service.list_all(limit=limit, reverse=True)
 
 
-
     async def _list_all_tasks_sorted(self) -> list[TaskModel]:
 
-        """拉取存储内全部任务，按创建时间倒序返回（不做截断）。
-
-
-
-        Returns:
-
-            任务模型列表（按 created_at 降序）
-
-        """
+        """拉取存储内全部任务，按创建时间倒序返回（不做截断）。"""
 
         service = self._get_task_service()
 
         return await service.list_all(limit=10_000, reverse=True)
-
 
 
     def _task_to_dict(
@@ -835,29 +668,7 @@ class TaskTool(BuiltinTool):
 
     ) -> dict[str, Any]:
 
-        """将 TaskModel 转换为工具返回的字典格式。
-
-
-
-        精简策略：只返回 LLM 做决策需要的关键字段。
-
-
-
-        Args:
-
-            task: 任务模型
-
-            include_details: 是否包含详细活动信息
-
-            include_agent_calls: 是否只返回工具调用类型的活动记录
-
-
-
-        Returns:
-
-            可序列化的任务字典
-
-        """
+        """将 TaskModel 转换为工具返回的字典格式。"""
 
         result = {
 
@@ -870,7 +681,6 @@ class TaskTool(BuiltinTool):
             "error": task.error,
 
         }
-
 
 
         if task.metadata:
@@ -886,7 +696,6 @@ class TaskTool(BuiltinTool):
             if isinstance(ws_meta, dict) and ws_meta.get("path"):
 
                 result["resolved_workspace"] = ws_meta["path"]
-
 
 
             eval_summary = None
@@ -922,13 +731,11 @@ class TaskTool(BuiltinTool):
                 result["evaluation_summary"] = eval_summary
 
 
-
             fail_reason = metadata.get("fail_reason") or metadata.get("container_reason")
 
             if fail_reason:
 
                 result["fail_reason"] = fail_reason
-
 
 
             retry_count = metadata.get("retry_count")
@@ -942,7 +749,6 @@ class TaskTool(BuiltinTool):
             if max_retries is not None:
 
                 result["max_retries"] = max_retries
-
 
 
         if include_details or include_agent_calls:
@@ -960,9 +766,7 @@ class TaskTool(BuiltinTool):
         return result
 
 
-
     # ── get：查询任务（合并旧 get/list/status）──
-
 
 
     async def _get_task(
@@ -971,32 +775,9 @@ class TaskTool(BuiltinTool):
 
     ) -> ToolExecutionResult:
 
-        """查询任务。
-
-
-
-        - 传 task_id：返回单个任务详情
-
-        - 不传 task_id：返回任务列表简表
-
-
-
-        Args:
-
-            inputs: 工具输入参数
-
-            parent_agent_level: 父 Agent 层级
-
-
-
-        Returns:
-
-            任务详情、列表或错误结果
-
-        """
+        """查询任务。"""
 
         task_id = inputs.get("task_id")
-
 
 
         if task_id:
@@ -1004,7 +785,6 @@ class TaskTool(BuiltinTool):
             return await self._get_task_detail(inputs, parent_agent_level, task_id)
 
         return await self._get_task_list(inputs, parent_agent_level)
-
 
 
     async def _get_task_detail(
@@ -1022,7 +802,6 @@ class TaskTool(BuiltinTool):
             task = service.get_task(task_id)
 
 
-
             if not task:
 
                 return create_failure_result(
@@ -1032,7 +811,6 @@ class TaskTool(BuiltinTool):
                     error_code="TASK_NOT_FOUND",
 
                 )
-
 
 
             has_permission, error_msg = self._check_permission(
@@ -1052,7 +830,6 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             task_dict = self._task_to_dict(
 
                 task,
@@ -1066,7 +843,6 @@ class TaskTool(BuiltinTool):
             task_dict["hint"] = "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。"
 
 
-
             return create_success_result(
 
                 data=task_dict,
@@ -1074,7 +850,6 @@ class TaskTool(BuiltinTool):
                 metadata={"action": "get_task"},
 
             )
-
 
 
         except Exception as e:
@@ -1088,7 +863,6 @@ class TaskTool(BuiltinTool):
                 error_code="GET_FAILED",
 
             )
-
 
 
     async def _get_task_list(  # noqa: PLR0912,PLR0915
@@ -1112,8 +886,7 @@ class TaskTool(BuiltinTool):
             show_all = inputs.get("show_all", False)
 
 
-
-            # BUG-FIX(list_empty)：原实现先按 limit 截断再过滤，且 list_all 未启用
+            # (list_empty)：原实现先按 limit 截断再过滤，且 list_all 未启用
 
             # reverse，导致拿到的是「最老的 N 条」而非「最新的 N 条」；当当前 session
 
@@ -1122,7 +895,6 @@ class TaskTool(BuiltinTool):
             # 正确顺序：拉全量 → 过滤 → 排序（list_all 已做）→ 末端截断。
 
             tasks = await self._list_all_tasks_sorted()
-
 
 
             # 过滤
@@ -1134,7 +906,6 @@ class TaskTool(BuiltinTool):
                 if status_filter and task.status.value != status_filter:
 
                     continue
-
 
 
                 if parent_agent_level == 1:
@@ -1168,11 +939,9 @@ class TaskTool(BuiltinTool):
                             continue
 
 
-
                 if user_parent_task_id and task.parent_task_id != user_parent_task_id:
 
                     continue
-
 
 
                 task_scope = inputs.get("task_scope", "all")
@@ -1186,7 +955,6 @@ class TaskTool(BuiltinTool):
                         continue
 
 
-
                 project_id = inputs.get("project_id")
 
                 if project_id:
@@ -1198,19 +966,16 @@ class TaskTool(BuiltinTool):
                         continue
 
 
-
                 filtered.append(task)
-
 
 
             # 末端截断：在所有过滤维度都通过之后才应用 limit，避免截断窗口
 
-            # 落在被过滤掉的老任务上导致返回空集合（见 BUG-FIX(list_empty)）。
+            # 落在被过滤掉的老任务上导致返回空集合。
 
             if limit and len(filtered) > limit:
 
                 filtered = filtered[:limit]
-
 
 
             # 构建简表
@@ -1244,7 +1009,6 @@ class TaskTool(BuiltinTool):
                 elapsed_list.append(self._format_elapsed(self._calc_elapsed_seconds(t)))
 
 
-
             return create_success_result(
 
                 data={
@@ -1266,7 +1030,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         except Exception as e:
 
             logger.error("[TaskTool] 列出任务失败: %s", e)
@@ -1280,9 +1043,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-
     # ── continue：继续执行（合并旧 retry/inject/resume）──
-
 
 
     async def _continue_task(  # noqa: PLR0911
@@ -1291,35 +1052,7 @@ class TaskTool(BuiltinTool):
 
     ) -> ToolExecutionResult:
 
-        """继续执行任务。
-
-
-
-        根据当前状态自动选择行为：
-
-        - running + message：注入指令（不改变状态）
-
-        - stopped：恢复执行（stopped → running）
-
-        - failed/timeout：重试（→ pending，自动继承管道+空间）
-
-        - failed/timeout + message：重试 + 注入指令
-
-
-
-        Args:
-
-            inputs: 工具输入参数
-
-            parent_agent_level: 父 Agent 层级
-
-
-
-        Returns:
-
-            操作结果
-
-        """
+        """继续执行任务。"""
 
         try:
 
@@ -1336,11 +1069,9 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             service = self._get_task_service()
 
             task = service.get_task(task_id)
-
 
 
             if not task:
@@ -1352,7 +1083,6 @@ class TaskTool(BuiltinTool):
                     error_code="TASK_NOT_FOUND",
 
                 )
-
 
 
             has_permission, error_msg = self._check_permission(
@@ -1372,9 +1102,7 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             message = inputs.get("message", "")
-
 
 
             # ── 场景 1：运行中任务 → 注入指令 ──
@@ -1384,7 +1112,6 @@ class TaskTool(BuiltinTool):
                 return await self._inject_to_running(task, message, parent_agent_level)
 
 
-
             # ── 场景 2：已停止任务 → 恢复执行 ──
 
             if task.status == TaskStatus.STOPPED:
@@ -1392,13 +1119,11 @@ class TaskTool(BuiltinTool):
                 return await self._resume_from_stopped(task, message, service)
 
 
-
             # ── 场景 3：失败/超时任务 → 重试 ──
 
             if task.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT):
 
                 return await self._retry_from_terminal(task, message, service)
-
 
 
             return create_failure_result(
@@ -1410,7 +1135,6 @@ class TaskTool(BuiltinTool):
                 error_code="INVALID_STATUS",
 
             )
-
 
 
         except InvalidTransitionError as e:
@@ -1436,7 +1160,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
     async def _inject_to_running(
 
         self, task: TaskModel, message: str, parent_agent_level: int
@@ -1456,7 +1179,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         target_pipeline_id = task.pipeline_run_id
 
         if not target_pipeline_id:
@@ -1470,7 +1192,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         inject_result: dict[str, Any] = {
 
             "task_id": task.id,
@@ -1482,7 +1203,6 @@ class TaskTool(BuiltinTool):
             "message_preview": message[:100],
 
         }
-
 
 
         try:
@@ -1538,7 +1258,6 @@ class TaskTool(BuiltinTool):
             logger.warning("[TaskTool] 消息注入失败: %s", _wake_err)
 
 
-
         return create_success_result(
 
             data=inject_result,
@@ -1546,7 +1265,6 @@ class TaskTool(BuiltinTool):
             metadata={"action": "continue_inject"},
 
         )
-
 
 
     async def _resume_from_stopped(
@@ -1558,7 +1276,6 @@ class TaskTool(BuiltinTool):
         """从 stopped 状态恢复执行（continue 场景 2）。"""
 
         old_status = task.status.value
-
 
 
         if message:
@@ -1576,7 +1293,6 @@ class TaskTool(BuiltinTool):
                 task.id, message[:80],
 
             )
-
 
 
         await service.resume_task(task.id)
@@ -1642,7 +1358,6 @@ class TaskTool(BuiltinTool):
             result_data["execution_warning"] = execution_warning
 
 
-
         return create_success_result(
 
             data=result_data,
@@ -1650,7 +1365,6 @@ class TaskTool(BuiltinTool):
             metadata={"action": "continue_resume"},
 
         )
-
 
 
     async def _retry_from_terminal(  # noqa: PLR0912
@@ -1664,7 +1378,6 @@ class TaskTool(BuiltinTool):
         if not task.metadata:
 
             task.metadata = {}
-
 
 
         retry_count = task.metadata.get("retry_count", 0)
@@ -1688,9 +1401,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         old_status = task.status.value
-
 
 
         # 将纠正信息存入 metadata
@@ -1708,11 +1419,9 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         # 递增 retry_count
 
         task.metadata["retry_count"] = retry_count + 1
-
 
 
         # 利用状态机从 failed/timeout → pending
@@ -1722,7 +1431,6 @@ class TaskTool(BuiltinTool):
         task.error = None
 
         await service.save_task(task)
-
 
 
         # 通过 TaskWorker 重提交
@@ -1736,7 +1444,6 @@ class TaskTool(BuiltinTool):
         _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
 
 
-
         try:
 
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
@@ -1744,7 +1451,6 @@ class TaskTool(BuiltinTool):
             task_worker = get_service_provider().get("task_worker")
 
             if task_worker:
-
 
 
                 # 恢复 pipe 继承信息：从源任务获取 pipeline_run_id
@@ -1766,7 +1472,6 @@ class TaskTool(BuiltinTool):
                     except Exception:
 
                         pass
-
 
 
                 task_data = {
@@ -1814,7 +1519,6 @@ class TaskTool(BuiltinTool):
                     task_data["_inherit_pipe_pipeline_id"] = _inherit_pipe_pipeline_id
 
 
-
                 if not task_worker.submit_task(task_data):
 
                     execution_warning = "后台执行器未启动，任务已重置为 pending 但不会自动执行"
@@ -1832,7 +1536,6 @@ class TaskTool(BuiltinTool):
             logger.warning("[TaskTool] retry 提交任务失败: %s", submit_exc)
 
             execution_warning = f"任务提交失败: {submit_exc}"
-
 
 
         result_data: dict[str, Any] = {
@@ -1856,7 +1559,6 @@ class TaskTool(BuiltinTool):
             result_data["warning"] = execution_warning
 
 
-
         return create_success_result(
 
             data=result_data,
@@ -1866,9 +1568,7 @@ class TaskTool(BuiltinTool):
         )
 
 
-
     # ── stop：停止任务（合并旧 pause/cancel，统一设 STOPPED）──
-
 
 
     async def _stop_task(  # noqa: PLR0911
@@ -1877,29 +1577,7 @@ class TaskTool(BuiltinTool):
 
     ) -> ToolExecutionResult:
 
-        """停止任务（统一进入 stopped 状态）。
-
-
-
-        将 running/pending 等非终态任务设为 STOPPED，同时级联停止子任务。
-
-        stopped 状态数据完好，可通过 continue 恢复。
-
-
-
-        Args:
-
-            inputs: 工具输入参数
-
-            parent_agent_level: 父 Agent 层级
-
-
-
-        Returns:
-
-            停止结果或错误
-
-        """
+        """停止任务（统一进入 stopped 状态）。"""
 
         try:
 
@@ -1916,11 +1594,9 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             service = self._get_task_service()
 
             task = service.get_task(task_id)
-
 
 
             if not task:
@@ -1932,7 +1608,6 @@ class TaskTool(BuiltinTool):
                     error_code="TASK_NOT_FOUND",
 
                 )
-
 
 
             has_permission, error_msg = self._check_permission(
@@ -1950,7 +1625,6 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
 
                 )
-
 
 
             # 只有非终态任务可以停止
@@ -1972,7 +1646,6 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             if task.status == TaskStatus.STOPPED:
 
                 return create_failure_result(
@@ -1984,17 +1657,14 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             reason = inputs.get("reason", "用户请求停止")
 
             old_status = task.status.value
 
 
-
-            # BUG-FIX: pause_task 的参数是 paused_by 而非 reason
+            # pause_task 的参数是 paused_by 而非 reason
 
             await service.pause_task(task_id, paused_by=f"停止(用户): {reason}")
-
 
 
             # 级联停止子任务（仅对有子任务的任务）
@@ -2010,7 +1680,6 @@ class TaskTool(BuiltinTool):
             except Exception as cascade_err:
 
                 logger.warning("[TaskTool] 级联停止子任务失败 (non-fatal): %s", cascade_err)
-
 
 
             result_data: dict[str, Any] = {
@@ -2032,7 +1701,6 @@ class TaskTool(BuiltinTool):
                 result_data["cascaded_subtasks"] = cascaded
 
 
-
             return create_success_result(
 
                 data=result_data,
@@ -2040,7 +1708,6 @@ class TaskTool(BuiltinTool):
                 metadata={"action": "stop_task"},
 
             )
-
 
 
         except InvalidTransitionError as e:
@@ -2066,9 +1733,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-
     # ── delete：删除任务 ──
-
 
 
     async def _delete_task(
@@ -2077,31 +1742,7 @@ class TaskTool(BuiltinTool):
 
     ) -> ToolExecutionResult:
 
-        """删除任务，根据任务类型执行不同策略。
-
-
-
-        委托 TaskService 执行实际删除操作：
-
-          - 容器任务: 软删除（标记停止，保留数据）+ 级联清理子任务资源
-
-          - 非容器任务: 硬删除（级联清理 + 删除记录）
-
-
-
-        Args:
-
-            inputs: 工具输入参数
-
-            parent_agent_level: 父 Agent 层级
-
-
-
-        Returns:
-
-            删除结果或错误
-
-        """
+        """删除任务，根据任务类型执行不同策略。"""
 
         try:
 
@@ -2118,11 +1759,9 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             service = self._get_task_service()
 
             task = service.get_task(task_id)
-
 
 
             if not task:
@@ -2134,7 +1773,6 @@ class TaskTool(BuiltinTool):
                     error_code="TASK_NOT_FOUND",
 
                 )
-
 
 
             has_permission, error_msg = self._check_permission(
@@ -2154,9 +1792,7 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             reason = inputs.get("reason", "用户请求删除")
-
 
 
             if task.metadata.get("task_scope") == "container":
@@ -2182,7 +1818,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         except Exception as e:
 
             logger.error("[TaskTool] 删除任务失败: %s", e)
@@ -2196,9 +1831,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-
     # ── change：变更容器任务状态（L1）──
-
 
 
     async def _change_status(  # noqa: PLR0911
@@ -2207,37 +1840,7 @@ class TaskTool(BuiltinTool):
 
     ) -> ToolExecutionResult:
 
-        """变更容器任务状态。
-
-        仅限 L1 主 Agent 调用，且仅对容器任务（task_scope == "container"）生效。
-
-        容器只是子任务的集合，本身无执行体，因此状态可自由变更到任意目标状态
-
-        （completed/failed/pending/running/stopped/timeout），不受状态机约束。
-
-        修复说明：此前用 list_subtasks 是否为空判断容器，空容器会被误判为
-
-        非容器（NOT_A_CONTAINER）。现改用 task_scope 字段判断，与 _delete_task
-
-        等处一致。
-
-        副作用：仅当目标状态为 completed 时，清理子任务 worktree
-
-        （_cleanup_subtask_worktrees），避免容器完成后残留工作空间目录。
-
-        其它状态变更纯改状态字段，不触发管道/工作空间副作用。
-
-        Args:
-
-            inputs: 工具输入参数，需含 task_id 和 status
-
-            parent_agent_level: 父 Agent 层级
-
-        Returns:
-
-            操作结果或错误
-
-        """
+        """变更容器任务状态。"""
 
         if parent_agent_level != 1:
 
@@ -2248,7 +1851,6 @@ class TaskTool(BuiltinTool):
                 error_code="PERMISSION_DENIED",
 
             )
-
 
 
         task_id = inputs.get("task_id")
@@ -2264,7 +1866,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         try:
 
             service = self._get_task_service()
@@ -2272,7 +1873,6 @@ class TaskTool(BuiltinTool):
         except RuntimeError as e:
 
             return create_failure_result(error=str(e), error_code="SERVICE_UNAVAILABLE")
-
 
 
         task = service.get_task(task_id)
@@ -2286,7 +1886,6 @@ class TaskTool(BuiltinTool):
                 error_code="TASK_NOT_FOUND",
 
             )
-
 
 
         # 用 task_scope 字段判断容器（修复：不再用 list_subtasks 是否为空判断）
@@ -2304,7 +1903,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         # 目标状态必填
 
         target_status_raw = inputs.get("status")
@@ -2320,9 +1918,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         from datetime import datetime  # noqa: PLC0415
-
 
 
         reason = inputs.get("container_reason", inputs.get("reason", ""))
@@ -2330,7 +1926,6 @@ class TaskTool(BuiltinTool):
         target_status = target_status_raw
 
         cleanup_info: dict[str, Any] = {}
-
 
 
         # 仅 completed 时清理子任务 worktree，其它状态纯改
@@ -2366,7 +1961,6 @@ class TaskTool(BuiltinTool):
                     "errors": [str(e)],
 
                 }
-
 
 
         try:
@@ -2410,7 +2004,6 @@ class TaskTool(BuiltinTool):
             )
 
 
-
         except InvalidTransitionError as e:
 
             return create_failure_result(
@@ -2420,7 +2013,6 @@ class TaskTool(BuiltinTool):
                 error_code="INVALID_TRANSITION",
 
             )
-
 
 
         except Exception as e:
@@ -2436,9 +2028,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-
     # ── 批量操作 ──
-
 
 
     async def _batch_tasks(
@@ -2456,7 +2046,6 @@ class TaskTool(BuiltinTool):
         results = []
 
 
-
         for task_id in task_ids:
 
             file_inputs = dict(inputs)
@@ -2464,7 +2053,6 @@ class TaskTool(BuiltinTool):
             file_inputs["task_id"] = task_id
 
             file_inputs.pop("task_ids", None)
-
 
 
             if action == "continue":
@@ -2490,7 +2078,6 @@ class TaskTool(BuiltinTool):
                 )
 
 
-
             results.append({
 
                 "task_id": task_id,
@@ -2504,11 +2091,9 @@ class TaskTool(BuiltinTool):
             })
 
 
-
         success_count = sum(1 for r in results if r["success"])
 
         failed_count = len(results) - success_count
-
 
 
         return create_success_result(
@@ -2532,4 +2117,3 @@ class TaskTool(BuiltinTool):
             metadata={"action": f"batch_{action}"},
 
         )
-

@@ -1,9 +1,4 @@
-/**
- * 长期任务状态管理 Store
- *
- * 基于 Task API 实现，替代废弃的 projectStore
- * 使用标签 'long-term' 标识长期任务
- */
+/** 长期任务状态管理 Store 基于 Task API 实现，替代废弃的 projectStore */
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
@@ -11,9 +6,7 @@ import { createTolerantStorage } from '@/utils/tolerantStorage'
 import * as longTermTaskApi from '@/services/api/longTermTasks'
 import type { Task } from '@/types/task'
 
-/**
- * API 错误响应类型
- */
+/** API 错误响应类型 */
 interface ApiErrorResponse {
   response?: {
     data?: {
@@ -23,9 +16,7 @@ interface ApiErrorResponse {
   message?: string
 }
 
-/**
- * 提取错误消息
- */
+/** 提取错误消息 */
 function getErrorMessage(error: unknown, defaultMessage: string): string {
   if (error instanceof Error) {
     const apiError = error as ApiErrorResponse
@@ -34,9 +25,7 @@ function getErrorMessage(error: unknown, defaultMessage: string): string {
   return defaultMessage
 }
 
-/**
- * 长期任务 Store 状态接口
- */
+/** 长期任务 Store 状态接口 */
 interface LongTermTaskState {
   /** 长期任务列表 */
   tasks: Task[]
@@ -48,9 +37,7 @@ interface LongTermTaskState {
   error: string | null
 }
 
-/**
- * 长期任务 Store 操作接口
- */
+/** 长期任务 Store 操作接口 */
 interface LongTermTaskActions {
   /** 获取长期任务列表 */
   fetchTasks: () => Promise<void>
@@ -72,9 +59,7 @@ interface LongTermTaskActions {
   clearError: () => void
 }
 
-/**
- * 长期任务 Store
- */
+/** 长期任务 Store */
 export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActions>()(
   persist(
     (set, get) => ({
@@ -84,9 +69,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
       isLoading: false,
       error: null,
 
-      /**
-       * 获取长期任务列表
-       */
+      /** 获取长期任务列表 */
       fetchTasks: async () => {
         const state = get()
         if (state.isLoading) {
@@ -103,10 +86,6 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
             isLoading: false,
           })
         } catch (error) {
-          // BUG-FIX-fix_20260617_clear_tasks_on_error:
-          // 问题根因: 原代码失败时 set({ tasks: [] }) 清空已有任务列表，
-          //          导致用户丢失正在查看的任务数据，体验差且无法恢复。
-          // 修复方案: 保留旧 tasks 数据，仅设置 error 状态，让 UI 据此提示用户。
           const errorMessage = getErrorMessage(error, '获取长期任务列表失败')
           set({
             isLoading: false,
@@ -116,9 +95,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         }
       },
 
-      /**
-       * 切换自动执行开关
-       */
+      /** 切换自动执行开关 */
       toggleAutoExecute: async (taskId: string, enabled: boolean) => {
         set({ error: null })
 
@@ -135,9 +112,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         }
       },
 
-      /**
-       * 暂停长期任务
-       */
+      /** 暂停长期任务 */
       pauseTask: async (taskId: string) => {
         set({ error: null })
 
@@ -154,9 +129,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         }
       },
 
-      /**
-       * 恢复长期任务
-       */
+      /** 恢复长期任务 */
       resumeTask: async (taskId: string) => {
         set({ error: null })
 
@@ -173,16 +146,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         }
       },
 
-      /**
-       * 取消长期任务
-       *
-       * BUG-FIX-fix_20260523_cancel_task:
-       * 问题根因: 原代码将后端响应当作完整 Task 直接替换 store 中的任务，
-       *           但后端返回的是 TaskResponse（字段有限），导致 title/goal 等字段丢失。
-       * 修复方案: 将后端响应与现有任务数据合并，保留原有字段，仅更新变更的字段。
-       * 影响范围: 前端取消任务功能。
-       * 修复日期: 2026-05-23
-       */
+      /** 取消长期任务 */
       cancelTask: async (taskId: string, reason?: string) => {
         set({ error: null })
 
@@ -201,25 +165,19 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         }
       },
 
-      /**
-       * 设置活跃任务
-       */
+      /** 设置活跃任务 */
       setActiveTask: (taskId: string | null) => {
         set({ activeTaskId: taskId })
       },
 
-      /**
-       * 更新任务状态（用于 WebSocket 事件更新）
-       */
+      /** 更新任务状态（用于 WebSocket 事件更新） */
       updateTask: (taskId: string, updates: Partial<Task>) => {
         set((state) => ({
           tasks: state.tasks.map((task) => (task.id === taskId ? { ...task, ...updates } : task)),
         }))
       },
 
-      /**
-       * 删除任务
-       */
+      /** 删除任务 */
       deleteTask: (taskId: string) => {
         set((state) => ({
           tasks: state.tasks.filter((task) => task.id !== taskId),
@@ -227,9 +185,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         }))
       },
 
-      /**
-       * 清除错误信息
-       */
+      /** 清除错误信息 */
       clearError: () => {
         set({ error: null })
       },

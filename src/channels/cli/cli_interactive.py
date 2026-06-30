@@ -1,31 +1,4 @@
-"""CLI 交互模式模块。
-
-
-
-提供 CLIApplication 的交互 REPL 循环方法混入类，包含：
-
-- run: Claude Code 风格 CLI 交互主循环
-
-- 会话初始化、历史恢复
-
-- 后台管道完成处理、用户输入分发
-
-- REPL 清理
-
-
-
-关键设计：
-
-- run() 方法通过提取多个 helper 方法降低圈复杂度（原始 CC=115 → 各 helper < 20）
-
-- 所有 helper 操作 self._* 属性，无需跨实例传递状态
-
-
-
-由 CLIApplication 通过多重继承混入使用，不单独实例化。
-
-"""
-
+"""CLI 交互模式模块。"""
 
 
 from __future__ import annotations
@@ -42,13 +15,9 @@ from channels.cli.output_adapter import sanitize_for_terminal
 logger = logging.getLogger(__name__)
 
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 _SESSION_DIR = _PROJECT_ROOT / "data" / "session"
-
-
-
 
 
 class CLIInteractiveMixin:
@@ -56,18 +25,9 @@ class CLIInteractiveMixin:
     """CLIApplication 的交互 REPL 循环方法混入类。"""
 
 
-
     async def run(self) -> None:  # noqa: PLR0912,PLR0915
 
-        """运行 Claude Code 风格 CLI 交互主循环。
-
-
-
-        特性：斜杠命令、底部状态栏、流式输出、交互模式切换、
-
-        工具调用可视化、行内快捷语法。
-
-        """
+        """运行 Claude Code 风格 CLI 交互主循环。"""
 
         _run_t0 = _time.monotonic()
 
@@ -86,7 +46,6 @@ class CLIInteractiveMixin:
         model_name = self._get_model_name()
 
 
-
         self._output_adapter.show_startup_banner(
 
             agent_name, self._interaction_mode
@@ -94,9 +53,7 @@ class CLIInteractiveMixin:
         )
 
 
-
         await self._init_tag_network_retriever()
-
 
 
         _run_t2 = _time.monotonic()
@@ -106,7 +63,6 @@ class CLIInteractiveMixin:
             await self._task_worker.start()
 
             logger.info("Task worker started")
-
 
 
         try:
@@ -122,7 +78,6 @@ class CLIInteractiveMixin:
             pass
 
 
-
         logger.info(
 
             "[STARTUP] TaskWorker start: %.2fs",
@@ -130,7 +85,6 @@ class CLIInteractiveMixin:
             _time.monotonic() - _run_t2,
 
         )
-
 
 
         self._output_adapter.update_status_bar(
@@ -150,13 +104,11 @@ class CLIInteractiveMixin:
         )
 
 
-
         session, session_svc, conversation_history = (
 
             await self._repl_init_session(_run_t0)
 
         )
-
 
 
         _repl_iteration = 0
@@ -166,7 +118,6 @@ class CLIInteractiveMixin:
         while True:
 
             _repl_iteration += 1
-
 
 
             # --- 后台管道完成检查 ---
@@ -182,7 +133,6 @@ class CLIInteractiveMixin:
                 self._pipeline_initial_state = None
 
 
-
                 if getattr(self, "_last_was_text", False):
 
                     _sys.stdout.write("\n")
@@ -190,7 +140,6 @@ class CLIInteractiveMixin:
                     _sys.stdout.flush()
 
                     self._last_was_text = False
-
 
 
                 try:
@@ -216,13 +165,11 @@ class CLIInteractiveMixin:
                     )
 
 
-
             # 渲染状态栏提示符
 
             status_text = self._output_adapter.status_bar.render_simple()
 
             self._input_adapter._prompt_str = f"{status_text} > "
-
 
 
             # --- 子 Agent 交互请求处理 ---
@@ -242,7 +189,6 @@ class CLIInteractiveMixin:
                 self._input_adapter.drain_stdin()
 
 
-
             # === 等待输出结束 ===
 
             _pipeline_was_running = (
@@ -258,7 +204,6 @@ class CLIInteractiveMixin:
                 continue
 
 
-
             # === 显示提示符 ===
 
             if getattr(self, "_last_was_text", False):
@@ -272,7 +217,6 @@ class CLIInteractiveMixin:
             _sys.stdout.write(self._input_adapter.prompt_text())
 
             _sys.stdout.flush()
-
 
 
             # === 等待事件：用户输入 / 交互请求 / 管道完成 ===
@@ -338,7 +282,6 @@ class CLIInteractiveMixin:
                 continue
 
 
-
             if pipeline_done:
 
                 continue
@@ -346,7 +289,6 @@ class CLIInteractiveMixin:
             if initial_state is None:
 
                 continue
-
 
 
             # 多行粘贴反馈
@@ -362,7 +304,6 @@ class CLIInteractiveMixin:
                     "粘贴内容，正在处理...[/dim green]"
 
                 )
-
 
 
             # --- 处理退出信号 ---
@@ -382,7 +323,6 @@ class CLIInteractiveMixin:
                 continue
 
 
-
             # --- 空输入 — 检查待处理的交互请求 ---
 
             if initial_state.get("_is_empty"):
@@ -400,7 +340,6 @@ class CLIInteractiveMixin:
                     self._input_adapter.drain_stdin()
 
                 continue
-
 
 
             # --- 斜杠命令处理 ---
@@ -424,7 +363,6 @@ class CLIInteractiveMixin:
             if cmd_handled:
 
                 continue
-
 
 
             # --- Plan 模式：只显示规划 ---
@@ -456,7 +394,6 @@ class CLIInteractiveMixin:
                 continue
 
 
-
             # --- 管道已在运行 ---
 
             if (
@@ -474,7 +411,6 @@ class CLIInteractiveMixin:
                 continue
 
 
-
             # === 启动管道（后台运行，不阻塞提示符） ===
 
             self._repl_start_pipeline(
@@ -488,19 +424,10 @@ class CLIInteractiveMixin:
             continue
 
 
-
-        # while 循环已退出
-
         await self._repl_cleanup(_exit_reason, _repl_iteration)
 
 
-
-    # ------------------------------------------------------------------
-
     # run() 的 helper 方法
-
-    # ------------------------------------------------------------------
-
 
 
     async def _init_tag_network_retriever(self) -> None:
@@ -532,25 +459,15 @@ class CLIInteractiveMixin:
         )
 
 
-
     async def _repl_init_session(  # noqa: PLR0912
 
         self, _run_t0: float
 
     ) -> tuple[Any, Any, list[dict[str, Any]]]:
 
-        """初始化会话并恢复对话历史。
-
-
-
-        Returns:
-
-            (session, session_svc, conversation_history) 三元组
-
-        """
+        """初始化会话并恢复对话历史。"""
 
         console = self._output_adapter.console
-
 
 
         _run_t3 = _time.monotonic()
@@ -572,7 +489,6 @@ class CLIInteractiveMixin:
             _time.monotonic() - _run_t3,
 
         )
-
 
 
         # CLI 重启时恢复 pipeline_id
@@ -598,7 +514,6 @@ class CLIInteractiveMixin:
             session_svc._persist_session_state(session)
 
 
-
         # 跨轮次对话历史恢复
 
         _run_t4 = _time.monotonic()
@@ -606,7 +521,6 @@ class CLIInteractiveMixin:
         conversation_history: list[dict[str, Any]] = []
 
         restored = False
-
 
 
         if session.active_pipeline_id:
@@ -625,7 +539,7 @@ class CLIInteractiveMixin:
 
                     if prev_records:
 
-                        # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
+                        # 基于 record.type 映射 role
 
                         _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
 
@@ -668,7 +582,6 @@ class CLIInteractiveMixin:
                                     pass
 
                             conversation_history.append(msg)
-
 
 
                         from infrastructure.task_worker import (  # noqa: PLC0415
@@ -716,7 +629,6 @@ class CLIInteractiveMixin:
         )
 
 
-
         if restored:
 
             console.print(
@@ -730,9 +642,7 @@ class CLIInteractiveMixin:
             )
 
 
-
         return session, session_svc, conversation_history
-
 
 
     async def _repl_collect_pipeline_result(self) -> dict[str, Any]:
@@ -758,18 +668,9 @@ class CLIInteractiveMixin:
         return final_state
 
 
-
     async def _repl_wait_for_output(self, cli_notifier: Any) -> bool:
 
-        """等待管道输出结束。
-
-
-
-        Returns:
-
-            True 表示应回到循环顶部（管道已完成），False 表示继续显示提示符
-
-        """
+        """等待管道输出结束。"""
 
         _output_wait_start = _time.monotonic()
 
@@ -808,9 +709,7 @@ class CLIInteractiveMixin:
                 break
 
 
-
         return bool(self._pipeline_task is not None and self._pipeline_task.done())
-
 
 
     async def _repl_handle_should_stop(
@@ -819,15 +718,7 @@ class CLIInteractiveMixin:
 
     ) -> str:
 
-        """处理退出信号。管道运行中则阻止退出。
-
-
-
-        Returns:
-
-            退出原因字符串（空字符串表示不退出）
-
-        """
+        """处理退出信号。管道运行中则阻止退出。"""
 
         _pipeline_still_running = (
 
@@ -850,7 +741,6 @@ class CLIInteractiveMixin:
             return ""
 
 
-
         if (
 
             hasattr(self, "_task_worker")
@@ -864,9 +754,7 @@ class CLIInteractiveMixin:
             await self._task_worker.stop()
 
 
-
         self._print_task_summary(console)
-
 
 
         self._output_adapter.show_system_message(
@@ -876,7 +764,6 @@ class CLIInteractiveMixin:
         )
 
         return "should_stop (no pipeline)"
-
 
 
     def _print_task_summary(self, console: Any) -> None:
@@ -952,7 +839,6 @@ class CLIInteractiveMixin:
             logger.debug("任务状态汇总失败: %s", exc)
 
 
-
     async def _repl_handle_slash_commands(
 
         self,
@@ -969,15 +855,7 @@ class CLIInteractiveMixin:
 
     ) -> tuple[bool, str]:
 
-        """处理斜杠命令。
-
-
-
-        Returns:
-
-            (handled, exit_reason) — handled=True 表示已处理，exit_reason 非空表示应退出
-
-        """
+        """处理斜杠命令。"""
 
         # 新版斜杠命令结果
 
@@ -996,7 +874,6 @@ class CLIInteractiveMixin:
                 return True, "slash_result.should_exit"
 
             return True, ""
-
 
 
         # 旧版斜杠命令兼容
@@ -1068,9 +945,7 @@ class CLIInteractiveMixin:
             return True, ""
 
 
-
         return False, ""
-
 
 
     async def _repl_handle_pipeline_busy(
@@ -1098,7 +973,6 @@ class CLIInteractiveMixin:
             )
 
             return True
-
 
 
         # 通过统一入口注入消息
@@ -1151,7 +1025,6 @@ class CLIInteractiveMixin:
         return True
 
 
-
     def _repl_start_pipeline(
 
         self,
@@ -1177,7 +1050,6 @@ class CLIInteractiveMixin:
         if self._streaming:
 
             on_chunk = self._build_on_chunk_callback(console)
-
 
 
         task_stats = self._get_task_stats()
@@ -1207,7 +1079,6 @@ class CLIInteractiveMixin:
         )
 
 
-
         pipeline_id = self._engine.pipeline_id
 
         session.register_pipeline(pipeline_id)
@@ -1215,11 +1086,9 @@ class CLIInteractiveMixin:
         session_svc._persist_session_state(session)
 
 
-
-        # BUG-FIX: session_id 作为 thread_id 注入管道 state
+        # session_id 作为 thread_id 注入管道 state
 
         _thread_id = session.session_id if session else ""
-
 
 
         self._pipeline_task = asyncio.create_task(
@@ -1253,7 +1122,6 @@ class CLIInteractiveMixin:
         self._pipeline_initial_state = initial_state
 
 
-
     async def _run_sub_conversation_safe(
 
         self, console: Any, cli_notifier: Any, human_svc: Any, context: str,
@@ -1263,7 +1131,6 @@ class CLIInteractiveMixin:
         """安全执行子对话，处理异常和流式输出抑制。"""
 
         from channels.cli.cli_interaction import run_sub_conversation  # noqa: PLC0415
-
 
 
         self._suppress_streaming = True
@@ -1313,7 +1180,6 @@ class CLIInteractiveMixin:
                 self._streaming_buffer.clear()
 
 
-
     async def _repl_cleanup(
 
         self, _exit_reason: str, _repl_iteration: int,
@@ -1339,7 +1205,6 @@ class CLIInteractiveMixin:
         )
 
 
-
         for _t in list(self._bg_tasks):
 
             if not _t.done():
@@ -1353,7 +1218,6 @@ class CLIInteractiveMixin:
             self._bg_tasks.clear()
 
 
-
         try:
 
             from llm.adapter import cleanup_litellm_resources  # noqa: PLC0415
@@ -1363,4 +1227,3 @@ class CLIInteractiveMixin:
         except Exception:
 
             pass
-

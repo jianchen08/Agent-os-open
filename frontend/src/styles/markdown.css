@@ -300,15 +300,7 @@
   color: inherit;
 }
 
-/* BUG-FIX-fix_20260313_katex_whitespace: 修复 KaTeX 公式渲染后页面下方空白问题
- * 问题根因: KaTeX 的 .katex-mathml 元素使用 position: absolute 和 clip: rect()，
- *          但其位置计算可能导致元素延伸到页面可视区域之外，撑开页面高度
- *          特别是在某些浏览器（如 Edge）中，clip: rect() 的处理方式不同
- * 修复方案: 
- *          1. 确保 .katex-mathml 元素不会撑开页面高度
- *          2. 使用 overflow: hidden 确保裁剪生效
- *          3. 统一 line-height 避免额外垂直空间
- */
+/* KaTeX 公式渲染样式修正 */
 .markdown-content .katex {
   line-height: 1.5;
 }

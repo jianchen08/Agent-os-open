@@ -1,20 +1,4 @@
-/**
- * 会话和消息 API 服务
- *
- * 提供 getSessions、createSession、deleteSession、getMessages 接口，内部调用后端 Thread API，并使用数据映射函数转换响应
- *
- * Requirements: 3.1, 3.2, 3.3, 3.4
- *
- * 暴露接口：
- * - getSessions(options): Session[] - 获取会话列表
- * - createSession(options, retryOptions): Session - 创建新会话
- * - deleteSession(sessionId, options): void - 删除会话
- * - getMessages(sessionId, filters, options): Message[] - 获取会话消息列表（支持嵌套结构筛选）
- * - updateSessionAgent(sessionId, agentId, options): Session - 更新会话绑定的 Agent
- * - updateSession(sessionId, options): Session - 更新会话（标题和/或 Agent）
- * - CreateSessionOptions - 创建会话选项
- * - UpdateSessionOptions - 更新会话选项
- */
+/** 会话和消息 API 服务 提供 getSessions、createSession、deleteSession、getMessages 接口，内部调用后端 Thread API，并使用数据映射函数转换响应 */
 
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
@@ -26,9 +10,7 @@ import { checkIsSystemMessage } from '@/utils/messageType'
 import type { RetryOptions } from '@/utils/retry'
 // 注意：GetMessagesResponse已被BackendMessagesListResponse替代，用于直接映射后端响应
 
-/**
- * 后端线程列表响应类型
- */
+/** 后端线程列表响应类型 */
 interface ThreadListResponse {
   /** 线程列表 */
   threads: ThreadStateResponse[]
@@ -36,9 +18,7 @@ interface ThreadListResponse {
   total?: number
 }
 
-/**
- * 后端线程创建请求类型
- */
+/** 后端线程创建请求类型 */
 interface ThreadCreateRequest {
   /** 线程标题（可选） */
   title?: string
@@ -50,9 +30,7 @@ interface ThreadCreateRequest {
   agent_id?: string
 }
 
-/**
- * 后端线程创建响应类型
- */
+/** 后端线程创建响应类型 */
 interface ThreadCreateResponse {
   /** 线程ID */
   thread_id: string
@@ -72,9 +50,7 @@ interface ThreadCreateResponse {
   active_pipeline_id?: string | null
 }
 
-/**
- * 后端消息响应类型
- */
+/** 后端消息响应类型 */
 interface BackendMessageResponse {
   id: string
   thread_id: string
@@ -103,9 +79,7 @@ interface BackendMessageResponse {
   }>
 }
 
-/**
- * 后端消息列表响应类型
- */
+/** 后端消息列表响应类型 */
 interface BackendMessagesListResponse {
   /** 消息列表 */
   messages: BackendMessageResponse[]
@@ -113,9 +87,7 @@ interface BackendMessagesListResponse {
   total?: number
 }
 
-/**
- * 参数验证错误
- */
+/** 参数验证错误 */
 class ValidationError extends Error {
   constructor(message: string) {
     super(message)
@@ -123,9 +95,7 @@ class ValidationError extends Error {
   }
 }
 
-/**
- * 验证会话ID
- */
+/** 验证会话ID */
 function validateSessionId(sessionId: string): void {
   if (!sessionId || sessionId.trim().length === 0) {
     throw new ValidationError('会话ID不能为空')
@@ -172,11 +142,8 @@ function mapBackendMessageToMessage(
     }))
   }
 
-  // BUG-FIX-fix_20260406_thinking_missing: 从 metadata 中恢复思考内容
-  // 问题根因: mapBackendMessageToMessage 缺少 thinking 字段提取逻辑，
-  //           页面刷新后从 API 加载消息时，thinking 内容虽然在 metadata.thinking_content 中，
-  //           但没有被转换为 message.thinking 字段，导致思考内容不显示
-  // 修复方案: 与 toMessage 函数保持一致，从 metadata.thinking_content 提取并转换为 ThinkingContent 对象
+  // 从 metadata 中恢复思考内容
+  // 但没有被转换为 message.thinking 字段，导致思考内容不显示
   let thinking: Message['thinking'] = undefined
   const metadata = backendMessage.metadata
   if (metadata) {
@@ -233,18 +200,13 @@ function mapBackendMessageToMessage(
         result: tc.result,
         error: tc.error,
         sequence: seq++,
-        // BUG-FIX-fix_20260606_file_opener_container_task_id:
-        // 从后端 API 恢复 containerTaskId，确保历史消息加载后
+        // // 从后端 API 恢复 containerTaskId，确保历史消息加载后
         // 工具卡片的"打开文件"功能能正确解析工作空间路径。
         containerTaskId: tc.container_task_id || undefined,
       })
     }
   }
 
-  // BUG-FIX-fix_20260528_system_msg_render:
-  // 问题根因: 后端引擎将系统通知存储为 type='user'，API 返回 role='user'，
-  //           导致前端合并后系统消息丢失系统样式
-  // 修复方案: 当 isSystemMsg 为 true 时，将 role 修正为 'system'
   const effectiveRole = isSystemMsg ? 'system' : backendMessage.role as Message['role']
 
   return {
@@ -266,30 +228,7 @@ function mapBackendMessageToMessage(
   }
 }
 
-/**
- * 消除合并组内 part.sequence 的冲突，保持每条消息内 parts 的逻辑顺序
- *
- * 渲染层（buildFragmentsFromParts）按 part.sequence 数值升序渲染，
- * 因此合并后 parts 的 sequence 数值顺序必须等于其逻辑顺序（thinking→text→tool）。
- *
- * 两条约束：
- * 1. 单条消息内 parts 已是正确逻辑顺序，合并后不能因「全局数值排序」打散——
- *    多条 API 消息各自 parts 从 0 起算，若按数值排序会把所有 thinking 聚到前面、
- *    所有 text 聚到后面，思考内容与所属回复「分家」（见复现测试）。
- * 2. 不破坏流式期间分配的大数 sequence（Date.now()），避免与未合并消息的 React key 碰撞。
- *
- * 策略：按「消息分组」处理，每组保留内部 parts 的原始相对顺序；
- *   - 组内 sequence 无冲突（流式大数，单条消息）→ 原样保留；
- *   - 组内/跨组出现冲突（多条 API 消息各自从 0 起算）→ 从组内最大 sequence +1 续接，
- *     续接发生在出现冲突的具体 part 上，不打乱其它 part 的既有顺序。
- *
- * BUG-FIX-fix_20260622_part_sequence_collision:
- *   保留流式大数 sequence，不全局重编。
- * BUG-FIX-fix_20260624_thinking_text_split:
- *   问题根因: 上一版修复用全局数值排序去重，把「A.thinking(0),B.thinking(0),A.text(1),
- *     B.text(1)」排成 thinking×2→text×2，思考与回复分家。改为按消息分组顺序处理，
- *     保持每条消息内 parts 的原始相对顺序。
- */
+/** 消除合并组内 part.sequence 的冲突，保持每条消息内 parts 的逻辑顺序 渲染层（buildFragmentsFromParts）按 part.sequence 数值升序渲染， */
 function dedupePartSequences(partsByMessage: any[][]): any[] {
   const result: any[] = []
   const seen = new Set<number>()
@@ -316,30 +255,7 @@ function dedupePartSequences(partsByMessage: any[][]): any[] {
   return result
 }
 
-/**
- * 合并连续的 assistant 消息 + 吸收夹在中间的 tool 消息（仅用于历史 API 加载）
- *
- * 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData，
- * 工具结果更是存成独立的 type=tool 记录。API 返回格式为:
- *   assistant(tool_call) | tool(result) | tool(result) | assistant(text)
- * 此函数将 tool 消息的结果注入前一个 assistant 的 tool_call part，
- * 再合并连续的 assistant 消息，保证与流式路径一致。
- *
- * BUG-FIX-fix_20260617_prepend_boundary_merge:
- * 导出此函数，供 pipelineMessageStore 在 prepend/initFromAPI 合并完整列表后调用，
- * 确保跨 API 分页边界的连续 assistant 消息也能被正确合并。
- *
- * BUG-FIX-fix_20260622_part_sequence_collision:
- * 问题根因: 原代码用全局计数器 globalSeq++ 重写所有 part 的 sequence，
- *   破坏了流式期间按 Date.now() 分配的唯一 sequence，导致合并后与未合并消息的
- *   part sequence 冲突，渲染层 React key 碰撞，出现「思考+文本+思考+文本」乱序
- *   和文本气泡重复。
- * 修复方案: 保留每个 part 的原始 sequence；仅当合并组内出现 sequence 冲突
- *   （多条 API 消息各自的 parts 都从 0 起算导致同值）时，对冲突 part 在组内
- *   从最大 sequence +1 续接。不破坏流式大数 sequence 的稳定性。
- * 影响范围: 切换页面/向上翻页时连续 assistant 消息的 part 渲染稳定性
- * 修复日期: 2026-06-22
- */
+/** 合并连续的 assistant 消息 + 吸收夹在中间的 tool 消息（仅用于历史 API 加载） 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData， */
 export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
   // 第一遍：将夹在 assistant 之间的 tool 消息的结果注入 tool_call part
@@ -418,9 +334,7 @@ export async function getSessions(options: RetryOptions = {}): Promise<Session[]
       params: { session_type: 'main_pipeline', limit: 100 },
     })
 
-    // BUG-FIX-fix_20260513_sessions_empty: 后端返回 {threads: [...], total: N} 格式，非纯数组
-    // 问题根因: response.data 是对象而非数组，Array.isArray 判断为 false 导致 threads 为空
-    // 修复方案: 优先取 response.data.threads，兼容旧版纯数组格式
+    // 后端返回 {threads: [...], total: N} 格式，非纯数组
     const threads = Array.isArray(response.data)
       ? response.data
       : (response.data?.threads || [])
@@ -428,9 +342,7 @@ export async function getSessions(options: RetryOptions = {}): Promise<Session[]
   }, options)
 }
 
-/**
- * 创建会话选项
- */
+/** 创建会话选项 */
 export interface CreateSessionOptions {
   /** 会话标题（可选） */
   title?: string
@@ -537,9 +449,7 @@ export async function getMessages(
   }, options)
 }
 
-/**
- * 后端线程更新请求类型
- */
+/** 后端线程更新请求类型 */
 interface ThreadUpdateRequest {
   /** 用户意图/标题（可选） */
   intent?: string
@@ -549,9 +459,7 @@ interface ThreadUpdateRequest {
   metadata?: Record<string, unknown>
 }
 
-/**
- * 后端线程更新响应类型
- */
+/** 后端线程更新响应类型 */
 interface ThreadUpdateResponse {
   /** 线程ID */
   thread_id: string
@@ -586,9 +494,7 @@ export async function updateSessionAgent(
   }, options)
 }
 
-/**
- * 更新会话选项
- */
+/** 更新会话选项 */
 interface UpdateSessionOptions extends RetryOptions {
   /** 会话标题（可选） */
   title?: string

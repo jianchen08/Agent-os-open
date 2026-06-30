@@ -1,8 +1,4 @@
-/**
- * 组件注册初始化
- *
- * 将所有已实现的组件注册到 widgetRegistry
- */
+/** 组件注册初始化 将所有已实现的组件注册到 widgetRegistry */
 
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
@@ -18,15 +14,7 @@ import { widgetRegistry as composerRegistry } from './composer'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
 
-/**
- * 初始化所有预置组件注册
- *
- * BUG-FIX-fix_20260505_001: 同时注册到两套 Widget Registry
- * 问题根因: 组件只注册到 composer.tsx 的 widgetRegistry，RenderingEngine 使用的是 WidgetRegistry.ts 的 widgetRegistry
- * 修复方案: 遍历 widgets 时同时注册到两个 registry
- *
- * 将组件注册到 composer 的 registry（兼容旧代码）和 WidgetRegistry.ts 的 registry（RenderingEngine 使用）
- */
+/** 初始化所有预置组件注册 同时注册到两套 Widget Registry */
 export function initializeWidgets(): void {
   const widgets = [
     { name: 'form', component: FormWidget, spaces: ['chat', 'workspace'], fallback: undefined },

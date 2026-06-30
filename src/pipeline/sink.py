@@ -1,8 +1,4 @@
-"""输出目标抽象层。
-
-定义 IOutputSink 协议、TargetedSink 定向推送和 MultiChannelSink 多通道分发。
-将 engine 的输出抽象为统一的 Sink 接口，解耦 WebSocket 直连与多通道广播。
-"""
+"""输出目标抽象层。"""
 from __future__ import annotations
 
 import logging
@@ -12,9 +8,7 @@ from typing import Any, Protocol, runtime_checkable
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # 管道消息来源枚举
-# ---------------------------------------------------------------------------
 
 class EnvelopeSource(StrEnum):
     """管道消息来源标识。"""
@@ -25,9 +19,7 @@ class EnvelopeSource(StrEnum):
     ENGINE = "engine"
 
 
-# ---------------------------------------------------------------------------
 # IOutputSink 协议与实现
-# ---------------------------------------------------------------------------
 
 @runtime_checkable
 class IOutputSink(Protocol):
@@ -44,25 +36,7 @@ class IOutputSink(Protocol):
 
 
 class TargetedSink:
-    """定向输出目标，按 thread_id 直接路由事件到对应 WebSocket 连接。
-
-    路由失败时记录错误并返回 False，不广播。
-    广播是消息串扰的根因，已被删除。
-    后端执行为主，前端断连不干预引擎运行。
-
-    BUG-FIX-fix_20260625_sink_no_thread_dead_loop:
-    历史问题: pipeline 启动时若 thread_id 未就绪（注册表条目还没写入 thread_id，
-              或 sink 构造比 WS 连接早），sink 被锁死成 "no-thread"，后续即使
-              registry 补上了 thread_id，sink 也不会感知，每次推送都走 send_to_thread('')
-              的回退路径（仅靠全局连接兜底，WS 重连窗口期会推丢）。
-              ws_handler._resume_pipeline_for_thread 本该替换"死 sink"，但它检查
-              sink.is_dead，而 TargetedSink 根本没有这个属性 → 永远不替换。
-    修复方案:
-      1) 携带 pipeline_id：每次发送时，若 _thread_id 为空，从 registry 动态查找
-         当前 entry.thread_id，注入后再推送，避免 sink 早创建被锁死。
-      2) 加 is_dead 属性：连续失败超过阈值即视为死 sink，让 _resume_pipeline_for_thread
-         能正确识别并替换为新 sink。
-    """
+    """定向输出目标，按 thread_id 直接路由事件到对应 WebSocket 连接。"""
 
     # 连续推送失败次数达到该阈值时，日志级别由 WARNING 升级为 ERROR
     _FAILURE_THRESHOLD = 5
@@ -74,13 +48,7 @@ class TargetedSink:
         *,
         pipeline_id: str = "",
     ) -> None:
-        """初始化定向输出目标。
-
-        Args:
-            notifier: 具备 send_to_thread 和 send_to_user 方法的通知器对象
-            thread_id: 目标会话的 ws_thread_id（可为空，后续动态从 registry 查找）
-            pipeline_id: 管道 ID，用于 thread_id 为空时从 registry 兜底解析
-        """
+        """初始化定向输出目标。"""
         self._notifier = notifier
         self._thread_id = thread_id
         self._pipeline_id = pipeline_id
@@ -94,19 +62,11 @@ class TargetedSink:
 
     @property
     def is_dead(self) -> bool:
-        """sink 是否已"死"——连续失败达到阈值即视为死。
-
-        ws_handler._resume_pipeline_for_thread 据此判断是否需要替换 sink。
-        新 WS 连接进来后旧 sink 会被识别为 dead，由 notifier 注入新 sink 接管。
-        """
+        """sink 是否已"死"——连续失败达到阈值即视为死。"""
         return self._consecutive_failures >= self._FAILURE_THRESHOLD
 
     def _resolve_thread_id(self) -> str:
-        """动态解析当前应使用的 thread_id。
-
-        优先使用构造时传入的 _thread_id；为空时从 registry 按 pipeline_id 兜底查找。
-        这是修复"sink 早于 WS 创建导致永久 no-thread"的关键。
-        """
+        """动态解析当前应使用的 thread_id。"""
         if self._thread_id:
             return self._thread_id
         if not self._pipeline_id:
@@ -126,12 +86,7 @@ class TargetedSink:
         return ""
 
     def _record_failure(self, event: dict, *, exc_info: bool = False) -> None:
-        """记录一次推送失败，连续超过阈值时升级为 ERROR 日志。
-
-        Args:
-            event: 触发失败的事件字典，用于日志上下文
-            exc_info: 是否在日志中附带异常栈（异常路径应为 True）
-        """
+        """记录一次推送失败，连续超过阈值时升级为 ERROR 日志。"""
         self._consecutive_failures += 1
         level = (
             logging.ERROR
@@ -157,16 +112,9 @@ class TargetedSink:
             self._consecutive_failures = 0
 
     async def send_event(self, event: dict) -> bool:
-        """通过 WebSocket 推送事件。
-
-        Args:
-            event: 要发送的事件字典
-
-        Returns:
-            发送成功返回 True，失败返回 False
-        """
+        """通过 WebSocket 推送事件。"""
         # 动态解析 thread_id：构造时为空 → 此刻从 registry 兜底
-        # （见 BUG-FIX-fix_20260625_sink_no_thread_dead_loop）
+        # （见 ）
         target_tid = self._resolve_thread_id()
         try:
             ok = await self._notifier.send_to_thread(target_tid, event)
@@ -180,9 +128,7 @@ class TargetedSink:
             return False
 
 
-# ---------------------------------------------------------------------------
 # MultiChannelSink — 多通道输出分发
-# ---------------------------------------------------------------------------
 
 def create_targeted_sink(
     notifier: Any,
@@ -190,19 +136,7 @@ def create_targeted_sink(
     *,
     pipeline_id: str = "",
 ) -> TargetedSink | None:
-    """统一 TargetedSink 创建入口，消除散点。
-
-    当 notifier 为 None 或 thread_id 为空时返回 None（而非创建无效 sink）。
-    优先使用调用方传入的 thread_id，仅当为空时从 registry 兜底读取。
-
-    Args:
-        notifier: 具备 send_to_thread 的通知器对象
-        thread_id: 目标会话的 ws_thread_id
-        pipeline_id: 管道 ID，仅当 thread_id 为空时用于从 registry 兜底查找
-
-    Returns:
-        TargetedSink 实例，创建失败返回 None
-    """
+    """统一 TargetedSink 创建入口，消除散点。"""
     if not notifier:
         return None
 
@@ -226,16 +160,12 @@ def create_targeted_sink(
         )
 
     # 把 pipeline_id 传进 sink，便于 thread_id 后续到位后能动态解析
-    # （见 BUG-FIX-fix_20260625_sink_no_thread_dead_loop）
+    # （见 ）
     return TargetedSink(notifier, thread_id, pipeline_id=pipeline_id)
 
 
 class MultiChannelSink:
-    """多渠道输出分发器。将 bridge 产出的内部事件分发给所有注册的通道。
-
-    每个通道实现 IOutputSink 协议，由 MultiChannelSink 统一管理。
-    新增通道只需 register，不改 bridge 核心逻辑。
-    """
+    """多渠道输出分发器。将 bridge 产出的内部事件分发给所有注册的通道。"""
 
     def __init__(self) -> None:
         self._channels: dict[str, IOutputSink] = {}

@@ -1,13 +1,4 @@
-"""线程与消息相关 API 路由。
-
-
-
-提供线程的 CRUD 操作和消息查询接口，所有接口需要 Bearer token 认证。
-
-使用共享的 require_auth 依赖注入统一认证逻辑。
-
-"""
-
+"""线程与消息相关 API 路由。"""
 
 
 from __future__ import annotations
@@ -23,28 +14,9 @@ from channels.api.deps import APIError, require_auth, validate_pagination
 _recovered_user_ids: set[str] = set()
 
 
-
-
-
 def _notify_session_update(thread_id: str, action: str) -> None:
 
-    """通过 WebSocket 推送会话变更事件。
-
-
-
-    在会话 CRUD 操作后调用，通知前端刷新会话列表。
-
-    推送失败不影响主流程。
-
-
-
-    Args:
-
-        thread_id: 线程 ID
-
-        action: 操作类型（created / updated / deleted）
-
-    """
+    """通过 WebSocket 推送会话变更事件。"""
 
     try:
 
@@ -52,7 +24,6 @@ def _notify_session_update(thread_id: str, action: str) -> None:
 
         from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
         from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
-
 
 
         if ws_interaction_notifier and thread_id:
@@ -105,37 +76,19 @@ from infrastructure.session.session_service import SessionService  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-
 # Web API 层不持久化会话状态，使用无 session_dir 的 SessionService
 
 _session_svc = SessionService()
 
 
-
 router = APIRouter(prefix="/api/v1/threads", tags=["线程"])
-
-
-
 
 
 def _get_execution_record_storage() -> ExecutionRecordStorage | None:
 
-    """从 ServiceProvider 获取全局 ExecutionRecordStorage 实例。
-
-
-
-    当 ServiceProvider 中未注册时，使用 get_or_create 懒加载。
-
-
-
-    Returns:
-
-        ExecutionRecordStorage 实例，服务不可用返回 None
-
-    """
+    """从 ServiceProvider 获取全局 ExecutionRecordStorage 实例。"""
 
     provider = get_service_provider()
-
 
 
     # 1. 尝试从已注册服务获取
@@ -145,7 +98,6 @@ def _get_execution_record_storage() -> ExecutionRecordStorage | None:
     if storage is not None:
 
         return storage
-
 
 
     # 2. 懒加载 fallback：ServiceProvider 未注册时直接创建
@@ -163,20 +115,9 @@ def _get_execution_record_storage() -> ExecutionRecordStorage | None:
     )
 
 
-
-
-
 def _get_task_service() -> Any:
 
-    """通过 ServiceProvider 获取全局 TaskService 实例。
-
-
-
-    Returns:
-
-        TaskService 实例，服务不可用或创建失败时返回 None
-
-    """
+    """通过 ServiceProvider 获取全局 TaskService 实例。"""
 
     try:
 
@@ -197,18 +138,8 @@ def _get_task_service() -> Any:
         return None
 
 
-
 def _safe_get_service(service_name: str) -> Any:
-    """通过 ServiceProvider 安全获取服务实例，失败时返回 None。
-
-    封装 delete_thread 中反复出现的 try/get_service_provider/except 样板。
-
-    Args:
-        service_name: 服务在 ServiceProvider 中的注册名
-
-    Returns:
-        服务实例，服务不可用或创建失败时返回 None
-    """
+    """通过 ServiceProvider 安全获取服务实例，失败时返回 None。"""
     try:
         return get_service_provider().get(service_name)
     except Exception:
@@ -216,19 +147,7 @@ def _safe_get_service(service_name: str) -> Any:
 
 
 def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
-    """利用任务数据的 parent_pipeline_id 链，将 pipeline_ids 扩展为完整集合。
-
-    后端任务系统中，子任务的 parent_pipeline_id 指向父管道，
-    通过迭代扩展：已知管道 → 找到 parent_pipeline_id 匹配的任务 → 加入其 pipeline_run_id，
-    直到不动点。这样 session.pipeline_ids 就能覆盖所有子管道，
-    前端 findPipelineLocation 的 Level 2 查找即可直接命中。
-
-    Args:
-        pipeline_ids: 当前已知的管道 ID 列表
-
-    Returns:
-        扩展后的完整管道 ID 列表（包含所有子孙管道）
-    """
+    """利用任务数据的 parent_pipeline_id 链，将 pipeline_ids 扩展为完整集合。"""
     if not pipeline_ids:
         return []
 
@@ -247,25 +166,7 @@ def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
 def _expand_pipeline_ids_with_tasks(
     pipeline_ids: list[str], all_tasks: list[Any],
 ) -> list[str]:
-    """使用已获取的任务列表扩展 pipeline_ids（避免重复调用 get_all_tasks）。
-
-    Args:
-        pipeline_ids: 当前已知的管道 ID 列表
-        all_tasks: 所有任务对象列表
-
-    Returns:
-        扩展后的完整管道 ID 列表
-
-    BUG-FIX-fix_20260622_pipeline_ids_order_lost:
-    问题根因: 原实现用 set 收集后 list() 返回，set 无序导致主管道
-              （原始 pipeline_ids[0]）可能被排到任意位置。前端依赖
-              pipelineIds[0] 作为主管道（agentTabStore.getMainPipelineId），
-              顺序被打乱后主 Tab 会加载到子管道消息。
-    修复方案: 用 list + seen 集合去重，保持"原始顺序在前，扩展项追加在后"，
-              确保 pipeline_ids[0] 永远是主管道。
-    影响范围: 会话列表/详情的 pipeline_ids 顺序，前端主管道定位
-    修复日期: 2026-06-22
-    """
+    """使用已获取的任务列表扩展 pipeline_ids（避免重复调用 get_all_tasks）。"""
     if not pipeline_ids or not all_tasks:
         return list(pipeline_ids)
 
@@ -292,33 +193,9 @@ def _expand_pipeline_ids_with_tasks(
     return ordered
 
 
-
-
-
-
 def _build_thread_response(t: dict) -> ThreadResponse:
 
-    """将存储层的线程字典转换为前端期望的 ThreadResponse 格式。
-
-
-
-    字段映射：id -> thread_id, title -> intent,
-
-    并添加 current_state、agent_id、pipeline_ids 等字段。
-
-
-
-    Args:
-
-        t: 存储层返回的线程字典
-
-
-
-    Returns:
-
-        ThreadResponse 与前端 mapThreadToSession 格式对齐
-
-    """
+    """将存储层的线程字典转换为前端期望的 ThreadResponse 格式。"""
 
     return ThreadResponse(
 
@@ -347,9 +224,6 @@ def _build_thread_response(t: dict) -> ThreadResponse:
     )
 
 
-
-
-
 @router.get(
 
     "",
@@ -370,38 +244,12 @@ def list_threads(
 
 ) -> dict[str, Any]:
 
-    """获取当前用户的所有线程列表，支持分页。
-
-
-
-    支持按 session_type 过滤：
-
-    - 不传参数：返回所有线程
-
-    - session_type=main_pipeline：只返回主管道线程
-
-
-
-    分页参数：
-
-    - skip：偏移量，默认 0
-
-    - limit：每页数量，默认 20，最大 100
-
-
-
-    Returns:
-
-        包含 threads、total、skip、limit 的分页结果字典
-
-    """
+    """获取当前用户的所有线程列表，支持分页。"""
 
     from channels.api.models import ThreadListResponse  # noqa: PLC0415
 
 
-
     validate_pagination(limit, skip)
-
 
 
     threads = store.get_user_threads(_user["sub"])
@@ -415,7 +263,6 @@ def list_threads(
             if t.get("metadata", {}).get("session_type") == session_type
 
         ]
-
 
 
     total = len(threads)
@@ -441,7 +288,6 @@ def list_threads(
     thread_responses = [_build_thread_response(t) for t in expanded_page_items]
 
 
-
     return ThreadListResponse(
 
         threads=thread_responses,
@@ -453,9 +299,6 @@ def list_threads(
         limit=limit,
 
     ).model_dump()
-
-
-
 
 
 @router.post(
@@ -478,26 +321,11 @@ def create_thread(
 
 ) -> ThreadResponse:
 
-    """创建新线程。
-
-
-
-    Args:
-
-        body: 线程创建请求，包含可选标题
-
-
-
-    Returns:
-
-        ThreadResponse 新创建的线程
-
-    """
+    """创建新线程。"""
 
     # 前端默认创建会话是 lingxi（业务约定），未指定时用 lingxi
 
     _effective_agent_id = body.agent_id or "lingxi"
-
 
 
     # 自动标记为主管道会话（前端通过主界面创建的都是主管道）
@@ -507,7 +335,6 @@ def create_thread(
     if "session_type" not in merged_metadata:
 
         merged_metadata["session_type"] = "main_pipeline"
-
 
 
     thread = store.create_thread(
@@ -525,11 +352,9 @@ def create_thread(
     )
 
 
-
     # 创建新线程后，清除该用户的恢复缓存，以便下次列表请求时重新检查
 
     _recovered_user_ids.discard(_user["sub"])
-
 
 
     # 桥接基础设施层：以 thread_id 作为 session_id 创建 SessionModel
@@ -545,7 +370,6 @@ def create_thread(
     )
 
 
-
     # 创建会话时立即分配 pipeline_id，前端拿到后可直接激活管道
 
     # 后续消息处理时 Engine 会沿用这个 pipeline_id
@@ -559,7 +383,6 @@ def create_thread(
     store.set_session(thread["id"], session)
 
 
-
     # 会话系统作为创建者，注册管道到引擎注册表（tags 含 agent_id）。
 
     # 这是创建者的职责——谁创建谁注册。引擎层只管转发，不在此解析 agent。
@@ -567,17 +390,12 @@ def create_thread(
     _register_session_pipeline(pipeline_id, thread["id"], _effective_agent_id)
 
 
-
     thread["pipeline_ids"] = list(session.pipeline_ids)
 
     thread["active_pipeline_id"] = session.active_pipeline_id
 
 
-
     return _build_thread_response(thread)
-
-
-
 
 
 @router.get(
@@ -598,27 +416,7 @@ def get_thread(
 
 ) -> ThreadResponse:
 
-    """获取指定线程的详情。
-
-
-
-    Args:
-
-        thread_id: 线程 ID
-
-
-
-    Returns:
-
-        ThreadResponse 线程详情
-
-
-
-    Raises:
-
-        APIError: 线程不存在 (404)
-
-    """
+    """获取指定线程的详情。"""
 
     thread = store.get_thread(thread_id)
 
@@ -638,9 +436,6 @@ def get_thread(
     raw_ids = thread.get("pipeline_ids", []) or []
     expanded_ids = _expand_pipeline_ids_with_task_data(raw_ids)
     return _build_thread_response({**thread, "pipeline_ids": expanded_ids})
-
-
-
 
 
 @router.patch(
@@ -663,29 +458,7 @@ def update_thread(
 
 ) -> ThreadResponse:
 
-    """更新指定线程的标题。
-
-
-
-    Args:
-
-        thread_id: 线程 ID
-
-        body: 线程更新请求
-
-
-
-    Returns:
-
-        ThreadResponse 更新后的线程
-
-
-
-    Raises:
-
-        APIError: 线程不存在 (404)
-
-    """
+    """更新指定线程的标题。"""
 
     thread = store.update_thread(
 
@@ -714,9 +487,6 @@ def update_thread(
     return _build_thread_response(thread)
 
 
-
-
-
 @router.delete(
 
     "/{thread_id}",
@@ -733,48 +503,11 @@ def delete_thread(  # noqa: PLR0912
 
 ) -> dict[str, str]:
 
-    """删除指定线程及其所有消息和关联的管道执行记录。
-
-
-
-    清理范围包括:
-
-    - 线程数据、消息、关联会话
-
-    - 关联管道（含子管道）的执行记录（内存 + YAML 文件）
-
-    - 管道映射（含子管道映射）
-
-    - 管道检查点文件
-
-    - 关联任务（取消运行中任务 + 删除任务数据）
-
-    - 关联工作空间
-
-
-
-    Args:
-
-        thread_id: 线程 ID
-
-
-
-    Returns:
-
-        删除成功消息
-
-
-
-    Raises:
-
-        APIError: 线程不存在 (404)
-
-    """
+    """删除指定线程及其所有消息和关联的管道执行记录。"""
 
     session = store.get_session(thread_id)
 
     pipeline_ids = list(session.pipeline_ids) if session else []
-
 
 
     deleted = store.delete_thread(thread_id)
@@ -792,9 +525,7 @@ def delete_thread(  # noqa: PLR0912
         )
 
 
-
     _recovered_user_ids.discard(_user["sub"])
-
 
 
     # 迭代式收集关联管道（以 all_pipeline_ids 中每个 ID 匹配直到不动点）
@@ -806,11 +537,9 @@ def delete_thread(  # noqa: PLR0912
     prev_size = 0
 
 
-
     while len(all_pipeline_ids) > prev_size:
 
         prev_size = len(all_pipeline_ids)
-
 
 
         if exec_storage:
@@ -820,7 +549,6 @@ def delete_thread(  # noqa: PLR0912
                 if root_id in all_pipeline_ids or root_id == thread_id:
 
                     all_pipeline_ids.add(child_id)
-
 
 
         task_service = _safe_get_service("task_service")
@@ -844,7 +572,6 @@ def delete_thread(  # noqa: PLR0912
                             all_pipeline_ids.add(sub.pipeline_run_id)
 
 
-
     if exec_storage:
 
         for pid in all_pipeline_ids:
@@ -856,7 +583,6 @@ def delete_thread(  # noqa: PLR0912
             except Exception:
 
                 logger.warning("清理管道 %s 执行记录失败", pid, exc_info=True)
-
 
 
     try:
@@ -878,7 +604,6 @@ def delete_thread(  # noqa: PLR0912
         logger.warning("清理检查点文件失败", exc_info=True)
 
 
-
     task_service = _safe_get_service("task_service")
 
     if task_service:
@@ -896,7 +621,6 @@ def delete_thread(  # noqa: PLR0912
                     logger.warning("删除关联任务 %s 失败", task.id, exc_info=True)
 
 
-
     task_worker = _safe_get_service("task_worker")
 
     if task_worker:
@@ -908,13 +632,9 @@ def delete_thread(  # noqa: PLR0912
                 task_worker.cancel_pipeline(pid)
 
 
-
     _notify_session_update(thread_id, "deleted")
 
     return {"message": "线程已删除"}
-
-
-
 
 
 def _record_to_message_response(  # noqa: PLR0912,PLR0915
@@ -925,42 +645,14 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
 
 ) -> MessageResponse:
 
-    """将 ExecutionRecordData 转换为前端期望的 MessageResponse 格式。
-
-
-
-    映射管道执行记录的丰富字段到前端消息模型：
-
-    - type=user → role=user
-
-    - type=ai → role=assistant，含 thinking/toolCalls
-
-    - type=tool → role=tool，含 toolName/toolArgs/toolResult
-
-
-
-    Args:
-
-        record: ExecutionRecordData 实例
-
-        thread_id: 线程 ID
-
-
-
-    Returns:
-
-        MessageResponse 包含完整字段的响应
-
-    """
+    """将 ExecutionRecordData 转换为前端期望的 MessageResponse 格式。"""
 
     import json as _json  # noqa: PLC0415
-
 
 
     role_map = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
 
     role = role_map.get(record.type, record.role or "user")
-
 
 
     metadata: dict[str, Any] | None = None
@@ -978,7 +670,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
     tool_error: str | None = None
 
     agent_name: str | None = None
-
 
 
     _content_stripped = (record.content or "").lstrip()
@@ -1022,7 +713,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
         }
 
 
-
     if record.type == "ai":
 
         if record.thinking_content:
@@ -1058,9 +748,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
                         #    重建后落盘到 tool_calls_json，再随继承记录落盘）：
                         #    {"id", "type": "function", "function": {"name", "arguments"}}
                         #    顶层没有 name/arguments，必须下钻到 function.*。
-                        # BUG-FIX-fix_20260625_inherit_tool_card_empty:
-                        #   问题根因: 原代码只读扁平顶层 name/arguments，继承记录是嵌套
-                        #   结构时 tool_name=""/tool_args={}，前端工具卡片渲染为空。
                         fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
 
                         args = tc.get("arguments", fn.get("arguments", tc.get("args", {})))
@@ -1088,7 +775,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
                 pass
 
 
-
     elif record.type == "system":
 
         metadata = {
@@ -1104,7 +790,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
             "notification_type": (record.tool_input or {}).get("notificationType", "task_notification") if isinstance(record.tool_input, dict) else "task_notification",
 
         }
-
 
 
     elif record.type == "tool":
@@ -1152,7 +837,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
                 tool_result = content_str
 
 
-
     # 透传前端乐观消息 ID，供前端 initFromAPI 对账（消除重复/丢失）
 
     if getattr(record, "client_message_id", None):
@@ -1162,7 +846,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
             metadata = {}
 
         metadata["client_message_id"] = record.client_message_id
-
 
 
     # 恢复附件信息
@@ -1178,7 +861,6 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
         except (_json.JSONDecodeError, TypeError):
 
             pass
-
 
 
     return MessageResponse(
@@ -1222,33 +904,15 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
     )
 
 
-
-
-
 def _ensure_session(thread_id: str) -> SessionModel | None:
 
-    """确保 thread_id 对应的 session 存在，若不存在则从 thread 数据自动补建。
-
-
-
-    Args:
-
-        thread_id: 线程 ID
-
-
-
-    Returns:
-
-        SessionModel 实例，thread 不存在时返回 None
-
-    """
+    """确保 thread_id 对应的 session 存在，若不存在则从 thread 数据自动补建。"""
 
     session = store.get_session(thread_id)
 
     if session is not None:
 
         return session
-
 
 
     thread = store.get_thread(thread_id)
@@ -1258,7 +922,6 @@ def _ensure_session(thread_id: str) -> SessionModel | None:
         return None
 
 
-
     pipeline_ids = thread.get("pipeline_ids", [])
 
     active_pipeline_id = thread.get("active_pipeline_id", "")
@@ -1266,7 +929,6 @@ def _ensure_session(thread_id: str) -> SessionModel | None:
     created_at = thread.get("created_at", "")
 
     updated_at = thread.get("updated_at", "")
-
 
 
     session = SessionModel(
@@ -1290,15 +952,11 @@ def _ensure_session(thread_id: str) -> SessionModel | None:
     )
 
 
-
     # 改用 store.set_session() 自动同步 pipeline_ids 并触发持久化
 
     store.set_session(thread_id, session)
 
     return session
-
-
-
 
 
 def _try_recover_pipeline_ids(  # noqa: PLR0912
@@ -1311,40 +969,9 @@ def _try_recover_pipeline_ids(  # noqa: PLR0912
 
 ) -> list[str]:
 
-    """尝试从 ExecutionRecordStorage 恢复旧会话的 pipeline_ids。
-
-
-
-    恢复步骤:
-
-    1. 用 thread_id 作为 pipeline_run_id 直接查询
-
-    2. 扫描管道映射表查找以 thread_id 为根的子管道
-
-    3. 终极 fallback: 全量扫描 summary.thread_id 字段匹配
-
-    4. 恢复成功时自动修复 session 并持久化
-
-
-
-    Args:
-
-        thread_id: 线程 ID（旧系统中可能直接作为 pipeline_run_id 使用）
-
-        session: 当前会话模型（pipeline_ids 为空）
-
-        exec_storage: 执行记录存储实例
-
-
-
-    Returns:
-
-        恢复到的 pipeline_run_id 列表，恢复失败返回空列表
-
-    """
+    """尝试从 ExecutionRecordStorage 恢复旧会话的 pipeline_ids。"""
 
     recovered: list[str] = []
-
 
 
     # 1. 尝试 thread_id 作为 pipeline_run_id 直接查询
@@ -1360,7 +987,6 @@ def _try_recover_pipeline_ids(  # noqa: PLR0912
     except Exception:
 
         logger.warning("恢复旧会话管道记录失败: thread_id=%s", thread_id)
-
 
 
     # 2. 扫描管道映射表，查找以 thread_id 为根的子管道
@@ -1382,7 +1008,6 @@ def _try_recover_pipeline_ids(  # noqa: PLR0912
                 pass
 
 
-
     # 3. 终极 fallback: 扫描所有管道 YAML 文件的 summary.thread_id 字段
 
     if not recovered:
@@ -1402,7 +1027,6 @@ def _try_recover_pipeline_ids(  # noqa: PLR0912
         except Exception:
 
             logger.warning("扫描管道 summary 关联 thread_id 失败: thread_id=%s", thread_id)
-
 
 
     # 4. 恢复成功时自动修复 session 并持久化（合并而非覆盖 pipeline_ids）
@@ -1436,11 +1060,7 @@ def _try_recover_pipeline_ids(  # noqa: PLR0912
         )
 
 
-
     return recovered
-
-
-
 
 
 @router.get(
@@ -1467,68 +1087,9 @@ def list_messages(
 
 ) -> dict[str, Any]:
 
-    """获取指定线程的消息列表，支持倒序分页。
-
-
-
-    优先从 ExecutionRecordStorage 读取完整的管道执行记录，
-
-    包含 thinking、toolCalls、toolResult 等丰富字段。
-
-    当管道记录不可用时，回退到 MemoryStore 的基础消息。
-
-
-
-    当传入 pipeline_run_id 时，仅返回该管道运行实例的消息记录，
-
-    用于子任务标签页加载子管道的对话历史。
-
-
-
-    分页逻辑：
-
-    - 不传 before_sequence：返回最后 limit 条消息（倒序初始加载）
-
-    - 传 before_sequence：返回 sequence < before_sequence 的最后 limit 条消息
-
-    - 传 after_sequence：返回 sequence > after_sequence 的所有新消息（断线补漏）
-
-
-
-    before_sequence 和 after_sequence 互斥，不能同时使用。
-
-
-
-    Args:
-
-        thread_id: 线程 ID
-
-        pipeline_run_id: 可选，管道运行实例 ID
-
-        limit: 每页数量，默认 20，最大 100
-
-        before_sequence: 可选，游标分页的 sequence 边界（向前翻页）
-
-        after_sequence: 可选，断线补漏的 sequence 边界（返回此值之后的新消息）
-
-
-
-    Returns:
-
-        包含 messages、total、has_more 的字典
-
-
-
-    Raises:
-
-        HTTPException: before_sequence 和 after_sequence 同时使用时返回 400
-
-        APIError: 线程不存在 (404)
-
-    """
+    """获取指定线程的消息列表，支持倒序分页。"""
 
     from channels.api.models import MessageListResponse  # noqa: PLC0415
-
 
 
     # 打开会话时同步 agent_id 到注册表 tags（覆盖存量会话的缺失）
@@ -1544,7 +1105,6 @@ def list_messages(
             _sync_agent_to_registry_tags(thread_id, _aid)
 
 
-
     # before_sequence 和 after_sequence 不能同时使用
 
     if before_sequence is not None and after_sequence is not None:
@@ -1552,9 +1112,7 @@ def list_messages(
         raise HTTPException(status_code=400, detail="before_sequence 和 after_sequence 不能同时使用")
 
 
-
     exec_storage = _get_execution_record_storage()
-
 
 
     # FEATURE-pipeline_unify: 所有管道（主/子）统一走 pipelineRunId 路径加载消息。
@@ -1564,7 +1122,6 @@ def list_messages(
     # - 未传时 fallback 用 thread_id 作为 pipeline_run_id（兼容 thread_id == pipeline_run_id 的旧数据）
 
     target_pid = pipeline_run_id or thread_id
-
 
 
     if exec_storage and target_pid:
@@ -1590,7 +1147,6 @@ def list_messages(
             records, has_more = [], False
 
 
-
         msgs = [_record_to_message_response(r, thread_id) for r in records]
 
         return MessageListResponse(
@@ -1602,7 +1158,6 @@ def list_messages(
             has_more=has_more,
 
         ).model_dump()
-
 
 
     # exec_storage 不可用：尝试从 MemoryStore 的 _messages 读取（保持向后兼容）
@@ -1660,15 +1215,7 @@ def list_messages(
             ).model_dump()
 
 
-
     return MessageListResponse(messages=[], total=0, has_more=False).model_dump()
-
-
-
-
-
-
-
 
 
 @router.get(
@@ -1714,13 +1261,6 @@ def get_thread_state(
     }
 
 
-
-
-
-
-
-
-
 @router.patch(
 
     "/{thread_id}/agent",
@@ -1741,15 +1281,7 @@ def update_thread_agent(
 
 ) -> ThreadResponse:
 
-    """更新会话绑定的Agent，直接返回完整线程信息。
-
-
-
-    性能优化: PATCH 接口返回与 GET 线程详情相同的 ThreadResponse 格式，
-
-    前端无需在 PATCH 之后再发一次 GET 请求获取最新状态。
-
-    """
+    """更新会话绑定的Agent，直接返回完整线程信息。"""
 
     thread = store.get_thread(thread_id)
 
@@ -1802,24 +1334,9 @@ def update_thread_agent(
     return _build_thread_response(updated_thread)
 
 
-
-
-
-
-
-
-
 def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) -> None:
 
-    """创建者（会话系统）注册管道到引擎注册表，tags 含 agent_id。
-
-
-
-    会话系统从 api_store（持久化真源）读取 agent_id，None 时默认 lingxi。
-
-    这是「谁创建谁注册」的职责。引擎层只管转发，从 tags 读 agent_id。
-
-    """
+    """创建者（会话系统）注册管道到引擎注册表，tags 含 agent_id。"""
 
     import logging  # noqa: PLC0415
 
@@ -1928,22 +1445,9 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) 
         _logger.error("[session] 管道预注册异常: pipeline=%s error=%s", pipeline_id[:12], exc, exc_info=True)
 
 
-
-
-
 def restore_session_pipelines() -> int:
 
-    """启动时从 api_store 恢复所有会话的管道注册（会话系统职责）。
-
-
-
-    遍历 api_store 所有会话，给每个有 active_pipeline_id 的会话注册管道到
-
-    EngineRegistry，agent_id 从 api_store 读取。agent_id 为空的数据错误会话
-
-    跳过并记录。
-
-    """
+    """启动时从 api_store 恢复所有会话的管道注册（会话系统职责）。"""
 
     import logging  # noqa: PLC0415
 
@@ -1996,20 +1500,9 @@ def restore_session_pipelines() -> int:
     return _count
 
 
-
-
-
 def _sync_agent_to_registry_tags(thread_id: str, agent_id: str) -> None:
 
-    """会话系统同步 agent_id 到注册表 tags——覆盖存量会话的 agent_id 缺失。
-
-
-
-    按 thread_id 和 session_id 两种方式匹配 entry（旧 entry 可能没 thread_id
-
-    但有 session_id tag）。这是会话系统的职责，不是引擎层反查。
-
-    """
+    """会话系统同步 agent_id 到注册表 tags——覆盖存量会话的 agent_id 缺失。"""
 
     import logging  # noqa: PLC0415
 
@@ -2060,4 +1553,3 @@ def _sync_agent_to_registry_tags(thread_id: str, agent_id: str) -> None:
         _logger.warning("[session] 同步 agent_id 失败: thread=%s error=%s",
 
                         thread_id[:12], exc)
-

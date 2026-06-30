@@ -1,11 +1,4 @@
-/**
- * 代码编辑器组件
- *
- * 在工作区面板中提供带语法高亮的代码编辑功能。
- * 根据文件扩展名自动识别语言，支持保存、修改标记和大文件检测。
- *
- * @module components/workspace/CodeEditor
- */
+/** 代码编辑器组件 在工作区面板中提供带语法高亮的代码编辑功能。 */
 
 import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -19,14 +12,7 @@ import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorR
 /** Markdown 扩展名集合 */
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
 
-/**
- * SyntaxHighlighter 行级样式
- *
- * 修复 react-syntax-highlighter@16 在同时开启 showLineNumbers + wrapLongLines 时的
- * 缩进/空白塌陷问题：每行容器会被加上 `display: flex`，导致行内前导空格（缩进）
- * 被当成普通空白折叠，yaml 等缩进敏感语言就会"挤成一块一块的"。
- * 这里通过 lineProps 给每个行 span 强制 pre-wrap，保留缩进与换行。
- */
+/** SyntaxHighlighter 行级样式 修复 react-syntax-highlighter@16 在同时开启 showLineNumbers + wrapLongLines 时的 */
 const HIGHLIGHTER_LINE_PROPS = { style: { whiteSpace: 'pre-wrap' } } as const
 
 /** 大文件阈值（1MB） */
@@ -154,12 +140,7 @@ function injectFloatingQuoteStyles(): void {
   document.head.appendChild(style)
 }
 
-/**
- * 从代码内容中检测选中文字所在的函数名
- *
- * 从选中起始行向上逐行扫描，匹配常见函数/类定义模式（JS/TS/Python/Go/Rust 等）。
- * 用于生成更精确的引用上下文，如 `src/main.py:fetchUser(L42)`。
- */
+/** 从代码内容中检测选中文字所在的函数名 从选中起始行向上逐行扫描，匹配常见函数/类定义模式（JS/TS/Python/Go/Rust 等）。 */
 function detectFunctionName(code: string, targetLine: number): string | null {
   const lines = code.split('\n')
   const startLine = Math.max(0, Math.min(targetLine - 1, lines.length - 1))
@@ -197,11 +178,7 @@ const FLOATING_QUOTE_INITIAL: FloatingQuoteState = {
   position: { x: 0, y: 0 },
 }
 
-/**
- * 浮动「引用」按钮（Notion / Google Docs 风格）
- *
- * 选中文字时弹出，点击「引用」把内容塞到 Chat 输入框；按 Esc 关闭。
- */
+/** 浮动「引用」按钮（Notion / Google Docs 风格） 选中文字时弹出，点击「引用」把内容塞到 Chat 输入框；按 Esc 关闭。 */
 function FloatingQuoteButton({
   position,
   onQuote,
@@ -245,12 +222,7 @@ function FloatingQuoteButton({
   )
 }
 
-/**
- * 从文件名提取扩展名
- *
- * @param fileName - 文件名或文件路径
- * @returns 小写扩展名（如 ".py"），无扩展名返回整个文件名的小写
- */
+/** 从文件名提取扩展名 */
 function extractExtension(fileName: string): string {
   const lastSlash = Math.max(fileName.lastIndexOf('/'), fileName.lastIndexOf('\\'))
   const baseName = fileName.substring(lastSlash + 1)
@@ -267,39 +239,19 @@ function extractExtension(fileName: string): string {
   return baseName.substring(dotIndex).toLowerCase()
 }
 
-/**
- * 根据文件名获取 Prism 语言标识
- *
- * @param fileName - 文件名或文件路径
- * @returns Prism 语言标识（如 "python"），未知时返回 "text"
- */
+/** 根据文件名获取 Prism 语言标识 */
 function getLanguage(fileName: string): string {
   const ext = extractExtension(fileName)
   return EXTENSION_TO_LANGUAGE[ext] ?? 'text'
 }
 
-/**
- * 判断文件是否可编辑
- *
- * @param fileName - 文件名或文件路径
- * @returns 是否可编辑
- */
+/** 判断文件是否可编辑 */
 function isEditable(fileName: string): boolean {
   const ext = extractExtension(fileName)
   return EDITABLE_EXTENSIONS.has(ext)
 }
 
-/**
- * 代码编辑器组件
- *
- * 功能：
- * - 根据文件扩展名自动识别语言并应用语法高亮
- * - 支持基础文本编辑（输入、选择、复制粘贴）
- * - Ctrl+S 快捷键保存 + 保存按钮
- * - 未保存修改时显示星号标记
- * - 大文件（超过 1MB）提示无法编辑
- * - 只读模式下以语法高亮显示代码
- */
+/** 代码编辑器组件 功能： */
 export function CodeEditor({
   filePath,
   content: initialContent,
@@ -350,7 +302,6 @@ export function CodeEditor({
   // ────────────────────────────────────────────
   // 选中引用浮动按钮
   // ────────────────────────────────────────────
-  //
   // 用户在预览模式 / 只读模式下选中文字时，弹出「引用」按钮；
   // 点击后把带行号和函数名的格式化文本塞进 Chat 输入框（chatInputStore.requestInsert）。
   // 注意：编辑模式（textarea）使用浏览器原生选择/复制，不挂浮动按钮，避免遮挡编辑光标。
@@ -485,9 +436,7 @@ export function CodeEditor({
     setExternalChange(null)
   }, [initialContent])
 
-  /**
-   * 保存当前滚动位置
-   */
+  /** 保存当前滚动位置 */
   const saveScrollPosition = useCallback(() => {
     const container = contentContainerRef.current
     if (!container) return null
@@ -497,9 +446,7 @@ export function CodeEditor({
     }
   }, [])
 
-  /**
-   * 恢复滚动位置
-   */
+  /** 恢复滚动位置 */
   const restoreScrollPosition = useCallback((pos: { scrollTop: number; scrollLeft: number } | null) => {
     if (!pos) return
     const container = contentContainerRef.current
@@ -510,12 +457,7 @@ export function CodeEditor({
     })
   }, [])
 
-  /**
-   * 订阅文件外部变更事件
-   *
-   * 当文件被外部修改时，如果当前没有未保存的修改，自动同步新内容；
-   * 如果有未保存的修改，显示提示让用户选择是否覆盖。
-   */
+  /** 订阅文件外部变更事件 当文件被外部修改时，如果当前没有未保存的修改，自动同步新内容； */
   useEffect(() => {
     if (!tabId) return
 
@@ -537,11 +479,7 @@ export function CodeEditor({
     return () => unsubscribeFileChange(tabId, handleFileChange)
   }, [tabId, saveScrollPosition, restoreScrollPosition])
 
-  /**
-   * 处理外部变更覆盖
-   *
-   * 用户确认用外部修改覆盖当前未保存的内容。
-   */
+  /** 处理外部变更覆盖 用户确认用外部修改覆盖当前未保存的内容。 */
   const handleAcceptExternalChange = useCallback(() => {
     if (externalChange) {
       const scrollPos = saveScrollPosition()
@@ -553,11 +491,7 @@ export function CodeEditor({
     }
   }, [externalChange, saveScrollPosition, restoreScrollPosition])
 
-  /**
-   * 忽略外部变更
-   *
-   * 用户选择保留当前修改，忽略外部变更。
-   */
+  /** 忽略外部变更 用户选择保留当前修改，忽略外部变更。 */
   const handleIgnoreExternalChange = useCallback(() => {
     setExternalChange(null)
   }, [])

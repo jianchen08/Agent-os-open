@@ -1,16 +1,4 @@
-"""统一管道引擎注册表。
-
-
-
-EngineRegistry 单例管理引擎实例的注册、查找和生命周期。
-
-替代原先的三级查找（ServiceProvider.__running_engine_ +
-
-_GLOBAL_SUSPENDED_ENGINES + ServiceProvider.__suspended_engine_）和
-
-_pipeline_thread_map 映射表。
-
-"""
+"""统一管道引擎注册表。"""
 
 from __future__ import annotations
 
@@ -24,13 +12,9 @@ from pipeline.pipeline_entry import MAX_TAGS_PER_PIPELINE, PipelineEntry
 logger = logging.getLogger(__name__)
 
 
-
-
-
 class EngineRegistry:
 
     """统一管道引擎注册表（单例）。"""
-
 
 
     _instance: ClassVar[EngineRegistry | None] = None
@@ -38,11 +22,9 @@ class EngineRegistry:
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
 
-
     def __init__(self) -> None:
 
         self._engines: dict[str, PipelineEntry] = {}
-
 
 
     @classmethod
@@ -62,7 +44,6 @@ class EngineRegistry:
         return cls._instance
 
 
-
     def register(
 
         self,
@@ -77,13 +58,7 @@ class EngineRegistry:
 
     ) -> PipelineEntry:
 
-        """注册管道引擎实例。
-
-
-
-        如果同 pipeline_id 已有 entry，保留其 bridge 和 drain_task。
-
-        """
+        """注册管道引擎实例。"""
 
         existing = self._engines.get(pipeline_id)
 
@@ -142,7 +117,6 @@ class EngineRegistry:
         )
 
         return entry
-
 
 
     def register_pipeline(
@@ -230,7 +204,6 @@ class EngineRegistry:
         return self.register(engine.pipeline_id, engine, thread_id=thread_id, tags=tags)
 
 
-
     def revive_pipeline(
 
         self,
@@ -304,7 +277,6 @@ class EngineRegistry:
         return self.register(pipeline_id, engine, thread_id=thread_id, tags=tags)
 
 
-
     def unregister(self, pipeline_id: str) -> PipelineEntry | None:
 
         """注销管道引擎实例。"""
@@ -324,13 +296,11 @@ class EngineRegistry:
         return entry
 
 
-
     def get(self, pipeline_id: str) -> PipelineEntry | None:
 
         """根据 pipeline_id 查找管道条目。"""
 
         return self._engines.get(pipeline_id)
-
 
 
     def _resume_entry_sequence(self, entry: PipelineEntry, pipeline_id: str) -> None:
@@ -366,7 +336,6 @@ class EngineRegistry:
             )
 
 
-
     def get_bridge(self, pipeline_id: str) -> Any | None:
 
         """获取管道的活跃 bridge。"""
@@ -374,7 +343,6 @@ class EngineRegistry:
         entry = self._engines.get(pipeline_id)
 
         return entry.bridge if entry else None
-
 
 
     def set_bridge(self, pipeline_id: str, bridge: Any) -> None:
@@ -386,7 +354,6 @@ class EngineRegistry:
         if entry:
 
             entry.bridge = bridge
-
 
 
     def cancel_drain_task(self, pipeline_id: str) -> None:
@@ -409,16 +376,13 @@ class EngineRegistry:
 
         entry.drain_task = None
 
-        # REFACTOR-20260614: engine_task 现在是 asyncio.Task（主循环），可以真正取消。
-
-        # 之前是 concurrent.futures.Future（独立线程），cancel() 无法中断线程。
+        # engine_task 是 asyncio.Task（主循环），可以真正取消。
 
         if entry.engine_task is not None and not entry.engine_task.done():
 
             entry.engine_task.cancel()
 
             logger.info("[EngineRegistry] 已取消引擎任务: pipeline=%s", pipeline_id[:12])
-
 
 
     def ensure_bridge(
@@ -441,17 +405,7 @@ class EngineRegistry:
 
     ) -> Any | None:
 
-        """确保管道有活跃的 bridge，无则创建，有则复用并 reset。
-
-
-
-        Phase 1 改造：不再启动 drain_loop。engine 主动通过 bridge.emit_* 推送事件，
-
-        bridge 仅作为格式化与转发层。保留 ``auto_start_drain`` / ``engine_task`` 参数
-
-        仅为公共 API 签名兼容，调用方传入将被忽略。
-
-        """
+        """确保管道有活跃的 bridge，无则创建，有则复用并 reset。"""
 
         entry = self._engines.get(pipeline_id)
 
@@ -516,7 +470,6 @@ class EngineRegistry:
         return bridge
 
 
-
     def update_thread_id(self, pipeline_id: str, thread_id: str) -> None:
 
         """更新管道的 thread_id 映射。"""
@@ -528,7 +481,6 @@ class EngineRegistry:
             entry.thread_id = thread_id
 
 
-
     def get_thread_id(self, pipeline_id: str) -> str:
 
         """根据 pipeline_id 查找对应的 ws_thread_id。"""
@@ -536,7 +488,6 @@ class EngineRegistry:
         entry = self._engines.get(pipeline_id)
 
         return entry.thread_id if entry else ""
-
 
 
     def find_by_tag(self, *args: str) -> list[PipelineEntry]:
@@ -558,7 +509,6 @@ class EngineRegistry:
         ]
 
 
-
     def find_by_thread_id(self, thread_id: str) -> list[PipelineEntry]:
 
         """根据 thread_id 反查所有关联的管道条目。"""
@@ -572,7 +522,6 @@ class EngineRegistry:
         ]
 
 
-
     def all_entries(self) -> dict[str, PipelineEntry]:
 
         """返回所有已注册的管道条目（只读快照）。"""
@@ -580,12 +529,8 @@ class EngineRegistry:
         return dict(self._engines)
 
 
-
-
-
 def get_engine_registry() -> EngineRegistry:
 
     """获取全局 EngineRegistry 单例的便捷函数。"""
 
     return EngineRegistry.get_instance()
-

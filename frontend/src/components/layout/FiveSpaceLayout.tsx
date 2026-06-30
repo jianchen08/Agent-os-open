@@ -1,20 +1,4 @@
-/**
- * Five Space Layout Component
- *
- * Implements the five-rendering-space layout:
- *   Chat Panel (left) | Workspace Panel (right)
- *   Floating Windows (overlay)
- *   Dock Bar (bottom)
- *   Fullscreen Overlay
- *
- * Responsive design:
- * - Mobile: chat full-width, workspace hidden (accessible via dock)
- * - Tablet: chat 60%, workspace 40%
- * - Desktop+: chat 45%, workspace 55%
- *
- * Integrates with the existing layout sub-components:
- * - DockBar, FloatingWindowManager, FullscreenOverlay, WorkspacePanel, SplitPane
- */
+/** Five Space Layout Component Implements the five-rendering-space layout: */
 
 import { Minimize2, FolderOpen } from 'lucide-react'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
@@ -64,9 +48,7 @@ export interface FiveSpaceLayoutProps {
   onLogout?: () => void
 }
 
-/**
- * Get viewport breakpoint from width
- */
+/** Get viewport breakpoint from width */
 function getBreakpoint(
   width: number,
   breakpoints: { mobile: number; tablet: number; desktop: number; widescreen: number },
@@ -77,16 +59,7 @@ function getBreakpoint(
   return 'widescreen'
 }
 
-/**
- * Five Space Layout Component
- *
- * Arranges the UI into five rendering spaces:
- * 1. Chat Panel (left) - existing chat functionality
- * 2. Workspace Panel (right) - initially empty, will host schema-rendered content
- * 3. Floating Windows - draggable, resizable overlay windows
- * 4. Dock Bar - bottom bar with tool shortcuts and status indicators
- * 5. Fullscreen Overlay - for immersive interactions
- */
+/** Five Space Layout Component Arranges the UI into five rendering spaces: */
 export function FiveSpaceLayout({
   chatContent,
   sidebarContent,
@@ -138,12 +111,7 @@ export function FiveSpaceLayout({
     workspaceRefreshKeyRef.current = workspaceRefreshKey
   }, [workspaceRefreshKey])
 
-  /**
-   * 文件编辑器自动刷新逻辑
-   *
-   * 每 3 秒轮询检查已打开的文件编辑器 Tab 对应的文件是否被外部修改，
-   * 若内容变化则通过事件机制通知 CodeEditor 组件更新。
-   */
+  /** 文件编辑器自动刷新逻辑 每 3 秒轮询检查已打开的文件编辑器 Tab 对应的文件是否被外部修改， */
   useEffect(() => {
     const intervalMs = 3000
     const timer = setInterval(async () => {
@@ -182,9 +150,7 @@ export function FiveSpaceLayout({
     return () => clearInterval(timer)
   }, [])
 
-  /**
-   * 处理工作区 Tab 关闭，清理 fileEditorRegistry 中对应的文件内容缓存
-   */
+  /** 处理工作区 Tab 关闭，清理 fileEditorRegistry 中对应的文件内容缓存 */
   const handleCloseTab = useCallback((tabId: string) => {
     const tab = useLayoutModeStore.getState().workspaceTabs.find(t => t.id === tabId)
     if (tab?.moduleId === '__file_editor__') {
@@ -215,13 +181,6 @@ export function FiveSpaceLayout({
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  // BUG-FIX-fix_20260523_max_update_depth:
-  // 问题根因: effect 内调用 setSidebarCollapsed(true) 修改了 sidebarCollapsed，
-  //          而 sidebarCollapsed 又在依赖数组中，形成 effect → 修改依赖 → 重触发 → 无限循环。
-  // 修复方案: 从依赖数组移除 sidebarCollapsed，改用 useUIStore.getState() 读取当前值，
-  //          打破循环。
-  // 影响范围: FiveSpaceLayout 移动端初始化逻辑
-  // 修复日期: 2026-05-23
   useEffect(() => {
     if (!mobileInitRef.current && isMobile) {
       const currentCollapsed = useUIStore.getState().sidebarCollapsed
@@ -234,16 +193,7 @@ export function FiveSpaceLayout({
 
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
 
-  /**
-   * 处理任务树节点点击（对话按钮）。
-   *
-   * 通过全局管道导航服务（pipelineNavigator）实现跨会话跳转：
-   * 1. 获取节点的 pipelineRunId（核心标识）
-   * 2. navigateToPipeline 在所有会话中查找管道归属并跳转
-   * 3. 如果在其他会话 → 自动保存当前 Tab → 切换会话 → 创建/激活标签
-   *
-   * @param node - 被点击的树节点数据
-   */
+  /** 处理任务树节点点击（对话按钮）。 通过全局管道导航服务（pipelineNavigator）实现跨会话跳转： */
   const handleTaskNodeClick = useCallback(async (node: Record<string, unknown>) => {
     const taskId = (node.id as string) ?? ''
     const title = (node.title as string) ?? '子任务'
@@ -293,13 +243,7 @@ export function FiveSpaceLayout({
     return items
   }, [dockItems, isMobile])
 
-  /**
-   * 渲染工作区 Tab 内容
-   *
-   * BUG-FIX-fix_20260505_001: 连接 Schema 渲染链路
-   * 问题根因: renderTabContent 是纯占位符，不渲染真实内容
-   * 修复方案: 通过 schemaRegistry 查找模块 Schema，通过 widgetRegistry 查找组件，渲染真实内容
-   */
+ /** 渲染工作区 Tab 内容 连接 Schema 渲染链路 */
   const renderTabContent = useCallback(
     (tab: WorkspaceTab) => {
       // 文件编辑器/预览器标签渲染
@@ -384,8 +328,7 @@ export function FiveSpaceLayout({
 
       // 文件审批标签渲染
       if (tab.moduleId === '__file_review__') {
-        // BUG-FIX-fix_20260625_workspace_tabs_persist:
-        // 历史遗留分支：交互附带文件不再创建 __file_review__ 类型 Tab，
+        // // 历史遗留分支：交互附带文件不再创建 __file_review__ 类型 Tab，
         // 现在统一走 __file_editor__。此处只做兼容旧持久化数据，显示提示让用户关闭。
         return (
           <div className="flex h-full flex-col items-center justify-center p-4">
@@ -423,14 +366,7 @@ export function FiveSpaceLayout({
       if (tab.component) {
         const WidgetComponent = widgetRegistry.get(tab.component) ?? widgetRegistry.findFallback(tab.component)
         if (WidgetComponent) {
-          /**
-           * 处理工作空间文件树中的文件点击
-           *
-           * 加载文件内容并注册为文件编辑器 Tab，在工作区中以 CodeEditor 或 FilePreview 组件展示。
-           *
-           * @param filePath - 文件相对路径（如 src/main.py）
-           * @param fileName - 文件名（如 main.py）
-           */
+          /** 处理工作空间文件树中的文件点击 加载文件内容并注册为文件编辑器 Tab，在工作区中以 CodeEditor 或 FilePreview 组件展示。 */
           const handleFileClick = async (filePath: string, fileName: string) => {
             const containerId = tab.dataSource?.replace('workspace://', '') || ''
             if (!containerId) return

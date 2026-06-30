@@ -1,9 +1,4 @@
-/**
- * 认证状态管理Store
- *
- * 使用真实后端API进行认证操作。
- * Requirements: 2.1, 2.5, 2.6
- */
+/** 认证状态管理Store 使用真实后端API进行认证操作。 */
 
 import { create } from 'zustand'
 import { STORAGE_KEYS } from '../constants/storage'
@@ -12,18 +7,7 @@ import { registerAuthExpiredCallback } from '../services/authCallbacks'
 import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/api'
 import type { User } from '../types/models'
 
-/**
- * 判断错误是否为「真正认证失效」（应触发 logout）
- *
- * BUG-FIX-fix_20260622_refresh_misclassify_logout:
- * 与 client.ts 的 isDefinitelyAuthFailure 同义，供 authStore 内部使用。
- * 只有当请求被后端明确拒绝（HTTP 401/403）才视为认证失效；
- * 网络错误/超时/5xx/无 response 视为暂时性故障，不应 logout。
- *
- * 支持两种错误形态：
- * - axios 错误：直接读 error.response.status
- * - 被 refreshToken 包装的错误：读 error.cause.response.status（保留原始 cause）
- */
+/** 判断错误是否为「真正认证失效」（应触发 logout） */
 export function isAuthFailureFromError(error: unknown): boolean {
   if (!error) return false
   // 直接的 axios 错误
@@ -36,9 +20,7 @@ export function isAuthFailureFromError(error: unknown): boolean {
   return false
 }
 
-/**
- * 认证状态接口
- */
+/** 认证状态接口 */
 interface AuthState {
   /** 当前用户 */
   user: User | null
@@ -72,24 +54,10 @@ interface AuthState {
   clearError: () => void
 }
 
-/**
- * 令牌刷新互斥锁（in-flight Promise）
- *
- * BUG-FIX-fix_20260624_concurrent_refresh_race:
- * 问题根因: 前端有三条刷新路径（axios 拦截器 / GlobalWebSocket 重连 / initializeAuth），
- *          各自独立发起 POST /auth/refresh。后端 refresh 是单次轮换（用完即撤销），
- *          并发 race 时必然有一个请求拿到已撤销的 refresh_token → 401，
- *          进而导致 WS 重连拿不到新 token → 403 死循环、推送中断。
- * 修复方案: 用模块级 Promise 作为单一刷新源。所有调用方共享同一个 in-flight refresh：
- *          首个调用创建 Promise，并发的后续调用直接 await 同一个 Promise，
- *          全部完成后清空。后端只会被调用一次，race 消除。
- * 影响范围: client.ts 拦截器、GlobalWebSocket._scheduleReconnect、initializeAuth
- */
+/** 令牌刷新互斥锁（in-flight Promise） */
 let refreshInFlight: Promise<void> | null = null
 
-/**
- * 将后端用户信息响应映射为前端User模型
- */
+/** 将后端用户信息响应映射为前端User模型 */
 function mapUserInfoToUser(userInfo: UserInfoResponse): User {
   return {
     id: userInfo.id,
@@ -99,12 +67,7 @@ function mapUserInfoToUser(userInfo: UserInfoResponse): User {
   }
 }
 
-/**
- * 认证Store
- *
- * 使用真实后端API进行认证操作。
- * Requirements: 2.1, 2.5, 2.6
- */
+/** 认证Store 使用真实后端API进行认证操作。 */
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   token: null,
@@ -114,14 +77,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isInitializing: true, // 初始状态为true，表示正在初始化
   error: null,
 
-  /**
-   * 登录
-   *
-   * 调用后端 POST /api/v1/auth/login 端点进行认证。
-   * 成功后存储access_token和refresh_token到localStorage。
-   *
-   * Requirements: 2.1, 2.2
-   */
+  /** 登录 调用后端 POST /api/v1/auth/login 端点进行认证。 */
   login: async (username: string, password: string) => {
     // 验证输入
     if (!username || !password) {
@@ -163,11 +119,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         set({ user })
       } catch (_userError) {
-        // BUG-FIX-fix_20260617_unknown_user_persist:
-        // 问题根因: 原代码失败时持久化 id:'unknown' 用户到 localStorage，
-        //          导致后续从 localStorage 恢复时拿到无效用户信息，掩盖真实错误。
-        // 修复方案: 不持久化 unknown 用户，设置 error 提示用户重新登录，
-        //          清除已写入的 AUTH_USER 防止脏数据残留。
         localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
         const userError = _userError instanceof Error ? _userError.message : '获取用户信息失败'
         set({
@@ -176,9 +127,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         })
       }
 
-      // BUG-FIX-fix_20260507_002: 登录成功后 await restartGrowthLoop 确保模块就绪
-      // 问题根因: import().then() 不阻塞，页面渲染时模块尚未加载完成
-      // 修复方案: 使用 await 等待 restartGrowthLoop 完成
+ // 登录成功后 await restartGrowthLoop 确保模块就绪
       try {
         const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
         await restartGrowthLoop()
@@ -192,14 +141,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  /**
-   * 注册
-   *
-   * 调用后端 POST /api/v1/auth/register 端点创建账户。
-   * 注册成功后自动登录，获取并存储token。
-   *
-   * Requirements: 2.5
-   */
+  /** 注册 调用后端 POST /api/v1/auth/register 端点创建账户。 */
   register: async (username: string, password: string, email: string) => {
     // 验证输入
     if (!username || !password) {
@@ -254,9 +196,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ user: basicUser })
       }
 
-      // BUG-FIX-fix_20260507_002: 注册成功后 await restartGrowthLoop 确保模块就绪
-      // 问题根因: import().then() 不阻塞，页面渲染时模块尚未加载完成
-      // 修复方案: 使用 await 等待 restartGrowthLoop 完成
+ // 注册成功后 await restartGrowthLoop 确保模块就绪
       try {
         const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
         await restartGrowthLoop()
@@ -270,15 +210,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  /**
-   * 登出
-   *
-   * 调用后端 POST /api/v1/auth/logout 端点并清除本地令牌。
-   *
-   * Requirements: 2.6
-   */
+  /** 登出 调用后端 POST /api/v1/auth/logout 端点并清除本地令牌。 */
   logout: async () => {
-    // BUG-FIX-fix_20260507_002: 登出时 await destroyGrowthLoop 确保完全清理
+ // 登出时 await destroyGrowthLoop 确保完全清理
     try {
       const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
       destroyGrowthLoop()
@@ -304,15 +238,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
     localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
     localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
-    // BUG-FIX-fix_20260622_workspace_state_loss:
-    // 问题根因: 登出时删除 LAST_ACTIVE_SESSION 导致重登后无法自动恢复到原会话，
-    //          用户感受到"工作区状态丢失"。
-    // 修复方案: 登出只清认证 key，保留工作区状态（LAST_ACTIVE_SESSION、
-    //          pipeline-messages、agent-tabs、layout-mode 等）。
-    //          这些状态会在 sessionListStore.fetchSessions 恢复时被使用，
-    //          让重登后自动回到退出前的会话。
-    //          注：会话被主动删除时由 sessionListStore 单独清理此 key（合理）。
-    // localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION)  // ← 不再删除
+    // 这些状态会在 sessionListStore.fetchSessions 恢复时被使用，
+    // 让重登后自动回到退出前的会话。
+    // 注：会话被主动删除时由 sessionListStore 单独清理此 key（合理）。
+    // localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION) // ← 不再删除
 
     // 清除状态
     set({
@@ -324,18 +253,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     })
   },
 
-  /**
-   * 刷新令牌（单一互斥源）
-   *
-   * 调用后端 POST /api/v1/auth/refresh 端点刷新访问令牌。
-   *
-   * BUG-FIX-fix_20260624_concurrent_refresh_race:
-   * 此函数是全局唯一的刷新入口。并发的后续调用会直接 await 同一个 in-flight
-   * refreshInFlight，后端只会被调用一次，消除并发 race 导致的 refresh_token
-   * 单次轮换击穿问题。调用方：client.ts 拦截器、GlobalWebSocket 重连、initializeAuth。
-   *
-   * Requirements: 2.3
-   */
+  /** 刷新令牌（单一互斥源） 调用后端 POST /api/v1/auth/refresh 端点刷新访问令牌。 */
   refreshToken: async () => {
     // 已有 in-flight 刷新：复用，不重复打后端
     if (refreshInFlight) {
@@ -372,24 +290,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           refreshTokenValue: response.refresh_token || currentRefreshToken,
         })
       } catch (error: unknown) {
-        // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-        // 问题根因: 原 refreshToken 失败时直接 await get().logout()，导致以下场景被误踢出：
-        //   1. WebSocket 重连时检测到 token 过期 → 调 refreshToken → 网络抖动刷新失败 → logout
-        //   2. 网络断开/超时/CORS/5xx 期间任何刷新尝试失败 → logout
-        //   3. 后端临时重启 → 刷新请求失败 → logout
-        // 修复方案: refreshToken 失败时不再主动 logout，只抛出错误。
-        //          由调用方根据错误类型（401/403 vs 网络错误）决定是否 logout：
-        //          - client.ts 拦截器：仅 401/403 才 clearAuthAndRedirect
-        //          - initializeAuth：仅 401/403 才 logout，网络错误保留旧 token 继续尝试
-        //          - GlobalWebSocket：刷新成功用新 token 重连，真失效(401/403) 才登出
-        // 影响范围: 所有 refreshToken 调用路径（client.ts / initializeAuth / WS 重连）
-        // BUG-FIX-fix_20260624_refresh_destroy_growthloop:
-        // 问题根因: 任何刷新失败都无条件 destroyGrowthLoop，把已加载的
-        //          workspaceTabs/dockItems/schemaRegistry 全清空。但网络抖动/超时/
-        //          5xx 等暂时性故障不应清工作区（见上方 20260622 注释的设计意图），
-        //          否则用户网络抖一下工作区就空了，且无自动重建路径。
-        // 修复方案: 仅当「真正认证失效（401/403）」才 destroyGrowthLoop；
-        //          暂时性故障保留工作区状态，等调用方决策（保留旧 token 重试等）。
+        // refreshToken 失败时只抛错不主动 logout，由调用方按错误类型决策。
         if (isAuthFailureFromError(error)) {
           try {
             const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
@@ -412,11 +313,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return refreshInFlight
   },
 
-  /**
-   * 初始化认证状态（从localStorage恢复）
-   *
-   * 如果存储的token有效，恢复认证状态并获取最新用户信息。
-   */
+  /** 初始化认证状态（从localStorage恢复） 如果存储的token有效，恢复认证状态并获取最新用户信息。 */
   initializeAuth: async () => {
     try {
       const storedToken = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
@@ -449,22 +346,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
               // 刷新成功，获取用户信息
               await get().fetchCurrentUser()
-              // BUG-FIX-fix_20260624_refresh_no_isauthenticated:
-              // 问题根因: refresh 成功分支只 set isInitializing:false，没有设置
-              //          isAuthenticated:true。main.tsx 在 initializeAuth 后判定
-              //          isAuthenticated 是否为 true 才调用 initializeGrowthLoop()，
-              //          导致 access_token 过期（走此分支）刷新成功后工作区标签
-              //          不重建，持续显示"工作区为空 — 模块激活后自动出现"。
-              // 修复方案: 与 token 未过期分支一致，显式设置 isAuthenticated:true。
+              // isAuthenticated 是否为 true 才调用 initializeGrowthLoop()，
+              // 导致 access_token 过期（走此分支）刷新成功后工作区标签
+              // 不重建，持续显示"工作区为空 — 模块激活后自动出现"。
               set({ isAuthenticated: true, isInitializing: false })
               return
             } catch (refreshError) {
-              // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-              // 问题根因: 原逻辑对刷新失败的任何错误都 logout，但启动时若后端临时不可用
-              //          （网络抖动/重启/5xx），会被误判为认证失效并强制登出。
-              // 修复方案: 仅当后端明确返回 401/403（refresh_token 真失效）才 logout；
-              //          网络错误/超时/5xx 时保留旧 token，标记未认证但不清状态，
-              //          等用户下次操作或网络恢复后再尝试。
+              // 等用户下次操作或网络恢复后再尝试。
               if (isAuthFailureFromError(refreshError)) {
                 // refresh_token 真正失效，登出
                 await get().logout()
@@ -520,10 +408,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  /**
-   * 检查token是否过期
-   * @returns true表示已过期，false表示未过期
-   */
+  /** 检查token是否过期 */
   checkTokenExpiration: () => {
     try {
       const storedExpiry = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
@@ -548,11 +433,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  /**
-   * 获取当前用户信息
-   *
-   * 调用后端 GET /api/v1/auth/me 端点获取用户信息。
-   */
+  /** 获取当前用户信息 调用后端 GET /api/v1/auth/me 端点获取用户信息。 */
   fetchCurrentUser: async () => {
     const userInfo = await authApi.getCurrentUser()
     const user = mapUserInfoToUser(userInfo)
@@ -563,24 +444,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ user })
   },
 
-  /**
-   * 清除错误
-   */
+  /** 清除错误 */
   clearError: () => {
     set({ error: null })
   },
 }))
 
-/**
- * 注册认证过期回调
- *
- * 当 services/api/client.ts 检测到认证过期时，
- * 通过 authCallbacks 机制触发此回调，清除 store 状态。
- *
- * BUG-FIX-fix_20260506_001: 认证过期时同时销毁自生长闭环
- */
+/** 注册认证过期回调 当 services/api/client.ts 检测到认证过期时， */
 registerAuthExpiredCallback(async () => {
-  // BUG-FIX-fix_20260507_002: 认证过期时 await destroyGrowthLoop 确保完全清理
+ // 认证过期时 await destroyGrowthLoop 确保完全清理
   try {
     const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
     destroyGrowthLoop()

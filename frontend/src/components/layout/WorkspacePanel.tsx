@@ -1,8 +1,4 @@
-/**
- * 工作区面板
- *
- * 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附
- */
+/** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
 import { Maximize2, Minimize2 } from 'lucide-react'
 import React from 'react'
@@ -23,20 +19,11 @@ interface WorkspacePanelProps {
   onFullscreen?: () => void
   /** 是否处于全屏状态 */
   isFullscreen?: boolean
-  /**
-   * 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略
-   *
-   * PERF-fix_20260628_workspace_tab_freeze: 只有当前激活 Tab 或曾访问过的 Tab
-   * 才渲染真实内容，其余 Tab 渲染空占位不挂载，避免刷新后所有重型 Tab 全量挂载卡死。
-   */
+ /** 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略 PERF 只有当前激活 Tab 或曾访问过的 Tab */
   visitedTabIds?: string[]
 }
 
-/**
- * 工作区面板组件
- *
- * 显示 Tab 栏和对应的 Tab 内容区域
- */
+/** 工作区面板组件 显示 Tab 栏和对应的 Tab 内容区域 */
 export function WorkspacePanel({
   tabs,
   onTabChange,
@@ -110,21 +97,7 @@ export function WorkspacePanel({
         )}
       </div>
 
-      {/* Tab 内容 */}
-      {/* PERF-fix_20260628_workspace_tab_freeze:
-          问题根因: 此前为修「切换 Tab 丢状态」bug（fix_20260623_tab_reload），
-            渲染所有 Tab 内容、非激活 Tab 用 hidden（display:none）隐藏。但
-            display:none 只省布局，不省 JS 执行和 DOM 构建。叠加 workspaceTabs
-            持久化，刷新后所有曾打开的 Tab 全量恢复并一次性挂载——N 个
-            FileTreeWidget（mount 即发 /file-tree）、CodeEditor（SyntaxHighlighter
-            全量高亮）、HtmlPreviewWidget iframe 同时跑，主线程被占满 → 加载卡死。
-          修复方案: 「懒挂载 + 已访问保活」——
-            - 当前激活 Tab 或曾访问过的 Tab（visitedTabIds）才渲染真实内容；
-            - 未访问过的 Tab 渲染空占位，不调用 renderTabContent，首次点开才挂载。
-          兼容旧 bug: 已访问过的非激活 Tab 仍用 hidden 隐藏保活，切换回来不重新
-            请求 API、不重新高亮、保留滚动/展开状态（同 fix_20260623_tab_reload 的目标）。
-            激活 Tab 强制渲染（isActive || visited），即便 visitedTabIds 为空也保证可见。
-          注意: renderTabContent 以 tab.id 为 key，保证每个标签对应稳定的 React 节点。 */}
+      {/* Tab 内容 — 懒挂载：仅激活 Tab 或已访问 Tab 渲染真实内容 */}
       <div className="min-h-0 flex-1 overflow-hidden">
         {tabs.length === 0 ? (
           <div className="text-muted-foreground flex h-full items-center justify-center text-sm">

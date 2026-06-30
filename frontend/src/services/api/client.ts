@@ -1,11 +1,4 @@
-/**
- * API客户端配置
- *
- * 创建axios实例并配置请求/响应拦截器
- * 集成错误处理、令牌刷新和重试机制
- *
- * Requirements: 2.2, 2.3, 2.4
- */
+/** API客户端配置 创建axios实例并配置请求/响应拦截器 */
 
 import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { API_BASE_URL, API_TIMEOUT } from '../../constants/api'
@@ -19,25 +12,9 @@ import type { ApiError } from '../../types/api'
 // 构成静态循环依赖（vitest/vite 在 transform 阶段解析静态 import 会失败）。
 // 互斥锁仍由 authStore.refreshToken 的模块级 refreshInFlight 提供，所有调用方共享。
 
-/**
- * 清除认证信息并重定向到登录页
- *
- * BUG-FIX-fix_20260506_001: 增加停止自生长闭环轮询
- * 问题根因: clearAuthAndRedirect 未停止轮询导致 401 死循环
- * 修复方案: 在清除认证前先销毁 GrowthLoop 停止轮询
- *
- * Requirements: 2.4
- *
- * BUG-FIX-fix_20260622_workspace_state_loss:
- * 问题根因: 此函数仅清理认证相关 key，不应触碰任何工作区状态
- *          （LAST_ACTIVE_SESSION / pipeline-messages / agent-tabs 等）。
- *          认证失效≠工作区状态失效，重登后需恢复原视图。
- * 修复方案: 显式约束只清 4 个认证 key，禁止在此扩展清理工作区状态。
- */
+/** 清除认证信息并重定向到登录页 增加停止自生长闭环轮询 */
 async function clearAuthAndRedirect(): Promise<void> {
-  // BUG-FIX-fix_20260507_002: await 销毁自生长闭环再清理认证
-  // 问题根因: import().then() 异步销毁，后续 401 请求可能在销毁前发出
-  // 修复方案: 使用 await import() 确保销毁完成后再清理
+ // await 销毁自生长闭环再清理认证
   try {
     const { destroyGrowthLoop } = await import('../modules/GrowthLoop')
     destroyGrowthLoop()
@@ -68,17 +45,7 @@ async function clearAuthAndRedirect(): Promise<void> {
   }
 }
 
-/**
- * 判断 token 刷新错误是否为「真正认证失效」
- *
- * BUG-FIX-fix_20260622_refresh_misclassify_logout:
- * 问题根因: 原刷新逻辑把任何刷新失败（含网络断开/超时/CORS/5xx）一律视为
- *          认证过期并强制 logout，导致网络抖动期间用户被误踢出。
- * 修复方案: 只有当刷新请求被后端明确拒绝（HTTP 401/403）时，才视为认证失效；
- *          其他情况（无 response 的网络错误、超时、5xx 服务端错误）视为暂时性故障，
- *          不登出，保留旧 token 让上层 retry/后续请求继续尝试。
- * 影响范围: client.ts 401 拦截器、authStore.refreshToken、initializeAuth
- */
+/** 判断 token 刷新错误是否为「真正认证失效」 */
 function isDefinitelyAuthFailure(error: unknown): boolean {
   // axios 错误对象：有 response 且状态码明确为 401/403 → 真认证失效
   const status = (error as AxiosError)?.response?.status
@@ -89,9 +56,7 @@ function isDefinitelyAuthFailure(error: unknown): boolean {
   return false
 }
 
-/**
- * 创建axios实例
- */
+/** 创建axios实例 */
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: API_TIMEOUT,
@@ -100,10 +65,7 @@ const apiClient: AxiosInstance = axios.create({
   },
 })
 
-/**
- * 请求拦截器
- * 在请求发送前添加认证token
- */
+/** 请求拦截器 在请求发送前添加认证token */
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     // 直接从 localStorage 获取 access_token
@@ -111,8 +73,7 @@ apiClient.interceptors.request.use(
 
     // 如果token存在，添加到请求头
     if (token && config.headers) {
-      // BUG-FIX-fix_20260624_refresh_header_overrides_body:
-      // 某些请求（如 /auth/refresh）显式声明不带 access token（Authorization 设为空字符串），
+      // // 某些请求（如 /auth/refresh）显式声明不带 access token（Authorization 设为空字符串），
       // 拦截器必须尊重这个声明，不覆盖。否则 refresh token 走 body，access token 却通过
       // 头抢先被后端读取，导致「期望 refresh 类型」401。
       const existing = config.headers.Authorization
@@ -132,12 +93,7 @@ apiClient.interceptors.request.use(
   },
 )
 
-/**
- * 响应拦截器
- * 处理响应错误、token刷新和自动重试
- *
- * Requirements: 2.2, 2.3, 2.4
- */
+/** 响应拦截器 处理响应错误、token刷新和自动重试 */
 apiClient.interceptors.response.use(
   (response) => {
     // 成功响应直接返回
@@ -180,8 +136,7 @@ apiClient.interceptors.response.use(
       originalRequest._retry = true
 
       try {
-        // BUG-FIX-fix_20260624_concurrent_refresh_race:
-        // 刷新统一委托 authStore.refreshToken（单一互斥源）。
+        // // 刷新统一委托 authStore.refreshToken（单一互斥源）。
         // 并发的 401 请求会共享同一个 in-flight refresh，后端只被调用一次，
         // 消除 refresh_token 单次轮换被并发击穿导致的 race。
         // 动态 import 打破静态循环依赖（见文件顶部注释）。
@@ -195,8 +150,7 @@ apiClient.interceptors.response.use(
         }
         return apiClient(originalRequest)
       } catch (refreshError) {
-        // BUG-FIX-fix_20260622_refresh_misclassify_logout:
-        // 仅当后端明确返回 401/403（真认证失效）才 logout；
+        // // 仅当后端明确返回 401/403（真认证失效）才 logout；
         // 网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，保留旧 token。
         if (isDefinitelyAuthFailure(refreshError)) {
           await clearAuthAndRedirect()

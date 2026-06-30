@@ -1,9 +1,4 @@
-"""FastAPI 应用工厂和服务器入口。
-
-创建合并了 WebSocket 功能的 FastAPI 应用，提供服务器启动入口。
-
-从 start_server.py 拆分而来，保持向后兼容。
-"""
+"""FastAPI 应用工厂和服务器入口。"""
 
 from __future__ import annotations
 
@@ -62,7 +57,6 @@ _pipeline_ctx: PipelineContext | None = None
 _task_worker_started: bool = False
 
 
-
 def _get_call_timeout() -> float:
     """获取管道调用超时时间（秒）。"""
     try:
@@ -77,14 +71,7 @@ def _get_call_timeout() -> float:
 
 
 def create_combined_app() -> FastAPI:  # noqa: PLR0915
-    """创建合并了 WebSocket 功能的 FastAPI 应用。
-
-    将 WebSocket 路由注册到 FastAPI 中，实现单端口统一服务。
-    在应用创建时初始化管道引擎上下文。
-
-    Returns:
-        配置好的 FastAPI 应用实例
-    """
+    """创建合并了 WebSocket 功能的 FastAPI 应用。"""
     global _pipeline_ctx  # noqa: PLW0603
 
     # 初始化管道引擎上下文（需要在创建 lifespan 之前完成，因为 lifespan 中要用到 _task_worker）
@@ -96,10 +83,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
 
     @asynccontextmanager
     async def _combined_lifespan(app: FastAPI):  # noqa: PLR0912,PLR0915
-        """应用生命周期管理，替代已弃用的 on_event('startup')。
-
-        在应用启动时立即启动 TaskWorker，确保纯 API 场景下任务可正常执行。
-        """
+        """应用生命周期管理，替代已弃用的 on_event('startup')。"""
         global _task_worker_started  # noqa: PLW0603
         logger.info(
             "[Lifespan] 应用启动开始 | pid=%d | loop_id=%s",
@@ -118,7 +102,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         # 启动时不注册任何管道：注册是明确的调用方行为（任务管理工具启动任务时）。
         # 重启后的 running/pending 任务由 TaskWorker._recover_running_tasks 标记为
         # suspended（执行被中断），等用户明确恢复时再由调用方 register。
-        # 原来的 restore_running_pipelines 自动注册已删除（与 pause 语义冲突）。
 
         # 会话系统启动恢复：从 api_store 注册所有会话管道（含 agent_id）
         try:
@@ -149,7 +132,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
             # _running 置位完成，否则下游 PluginHotReloader 检测 is_running
             # 会因时序竞态拿到 False 而走 fallback 分支（双监听）。
             # 注意：禁止预置 center._running=True，那会让 start() 早退、
-            # watchfiles 监听循环永不启动（BUG-FIX-fix_20260614_config_center_running）。
+            # watchfiles 监听循环永不启动。
             asyncio.create_task(center.start())
             _config_center_started = await center.wait_ready(timeout=5.0)
             if _config_center_started:
@@ -202,24 +185,9 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 os.getpid(), id(asyncio.get_running_loop()),
             )
 
-    # BUG-FIX-fix_20260524_lifespan_not_called:
-    # 问题根因: 之前使用 app.router.lifespan_context = _combined_lifespan 设置 lifespan，
-    #          但这种方式在当前 FastAPI 版本中不会生效，uvicorn 启动时不会调用 lifespan。
-    #          导致 TaskWorker.start() 从未被调用，task.submitted 事件无人监听，
-    #          任务永远停留在 pending 状态。
-    # 修复方案: 将 lifespan 作为参数传递给 FastAPI() 构造函数（通过 create_app(lifespan=...)），
-    #          确保 uvicorn 在应用启动时正确调用 lifespan 上下文管理器。
-    # 影响范围: 所有通过前端提交的子任务（task_submit）
-    # 修复日期: 2026-05-24
     app = create_app(lifespan=_combined_lifespan)
 
     # WebSocket 连接管理
-    # BUG-FIX-fix_20260624_ws_double_ledger:
-    # 历史上这里维护了一个本地 active_connections，与
-    # ws_interaction_notifier._active_connections 是两本独立账本，
-    # 清理逻辑分裂导致：本地清掉了 notifier 还残留 / 反之亦然，
-    # 体感上是「连接看起来活着但收不到推送」或「死连接还被推消息」。
-    # 现在直接复用 notifier 内部字典，单源真理。
     active_connections: dict[str, list[WebSocket]] = ws_interaction_notifier._active_connections
 
     # 每个 thread_id 的对话历史
@@ -241,14 +209,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
     async def websocket_chat_global(websocket: WebSocket) -> None:  # noqa: PLR0912,PLR0915
         """全局单连接 WebSocket 端点（v3 协议）。"""
         token = websocket.query_params.get("token", "")
-        # BUG-FIX-fix_20260625_ws_handshake_close_code_lost:
-        # 问题根因: 原实现在 accept() 之前 close(code=4001)。Starlette 在握手阶段
-        #   拒绝时，浏览器拿不到 WebSocket close frame，只收到 HTTP 403，
-        #   ws.onclose 的 event.code 是 1006（Abnormal Closure）而非 4001。
-        #   前端 GlobalWebSocket._scheduleReconnect 据此判断是否需要刷新 token，
-        #   但 1006 !== 4001 → 认证拒绝被误判为普通断连 → 用过期 token 死循环重连。
-        # 修复方案: token 校验失败时先 accept()，再 close(4001)。这样 close frame
-        #   能正确送达浏览器，前端 event.code===4001 判断成立，触发 token 刷新。
         if not token:
             await websocket.accept()
             await websocket.close(code=4001, reason="全局连接需要 token 认证")
@@ -274,9 +234,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }))
         except WebSocketDisconnect:
-            # BUG-FIX-fix_20260624_confirmation_disconnect:
-            # 前端刚 accept 就刷新页面的常见竞态：accept 成功 → send 时对端已关。
-            # 这是正常断开（不是异常），用 info 记录不污染 ERROR 日志。
             logger.info("[GlobalWS] 客户端在握手确认前已断开: user=%s", user_id[:12])
             ws_interaction_notifier.unregister_global(user_id, websocket)
             return
@@ -300,18 +257,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 # heartbeat 高频轮询，不记日志
                 if msg_type != "heartbeat":
                     logger.info("[GlobalWS] 收到消息: type=%s thread_id=%s user=%s", msg_type, msg_data.get("thread_id", "")[:12], user_id[:12])
-                # T1: WS 收到用户输入的精确时刻（延迟追踪链路起点）
-                # 与 logs/ws_trace.log 的 T2/T3 对比，定位 WS 接收→引擎注入的延迟
-                # 注意：前端消息结构是 {type, data:{pipeline_id, thread_id}}，字段在 data 子层
-                if msg_type == "user_input":
-                    try:
-                        from pipeline.message_bus import _trace
-                        _inner = msg_data.get("data", {}) if isinstance(msg_data.get("data"), dict) else {}
-                        _trace("T1_ws_received",
-                               _inner.get("pipeline_id") or msg_data.get("pipeline_id") or "?",
-                               f"thread_id={(_inner.get('thread_id') or msg_data.get('thread_id') or '')[:12]}")
-                    except Exception:
-                        pass
 
                 if msg_type == "heartbeat":
                     await websocket.send_text(json.dumps({
@@ -337,11 +282,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 )
 
                 if msg_type == "user_input":
-                    # BUG-FIX-fix_20260511_task_worker_global_ws:
-                    # 问题根因: /ws/chat 全局端点缺少 TaskWorker 懒启动逻辑，
-                    #           导致通过全局 WS 提交的任务没有订阅者，
-                    #           pipeline_run_id 永远不会被绑定。
-                    # 修复方案: 添加与 /ws/chat/{thread_id} 相同的 TaskWorker 懒启动。
                     global _task_worker_started  # noqa: PLW0603
                     if not _task_worker_started:
                         _task_worker_started = True
@@ -394,21 +334,15 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     from pipeline.registry import get_engine_registry  # noqa: PLC0415
                     _registry = get_engine_registry()
 
-                    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
-                    # 重启后 registry 中 entry.thread_id 为空，需在此处补上。
                     if _target_pid and thread_id:
                         _existing_entry = _registry.get(_target_pid)
                         if _existing_entry and not _existing_entry.thread_id:
                             _existing_entry.thread_id = thread_id
 
-                    # 注册表没条目时路口不拦阻、只转发给 send_pipeline_message。
-                    # send 按 I4 原则处理：entry 存在则转发，不存在则拒绝
-                    # （"管道未注册，请联系持有者先 register"）。持有者（task_executor
-                    # register_pipeline / 会话注册）负责首次注册与重启恢复，
-                    # send 不自动 revive（pipeline_reviver 已在本分支删除）。
+                    # 注册表没条目时不拦阻——转发给 send_pipeline_message，
+                    # 由其内部 revive 逻辑重建（任务系统从 task 数据拿 agent，
+                    # 会话系统从 api_store 拿 agent）。路口只转发不注册。
 
-                    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
-                    # 管道已存在时（跳过了 register_pipeline），确保 thread_id 被更新。
                     if _target_pid:
                         _existing_entry = _registry.get(_target_pid)
                         if _existing_entry and not _existing_entry.thread_id:
@@ -419,14 +353,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     if not _pipeline_msg.thread_id:
                         _pipeline_msg.thread_id = thread_id
 
-                    # BUG-FIX-fix_20260619_ws_lost_task_id:
-                    # 前端「停止→再发送」走 WS 对话路径，WS 入口只转发消息，
-                    # 不知道当前会话属于哪个任务，原先未传 task_id，导致引擎
-                    # state[TASK_ID]=''，L2 task_submit 因拿不到 parent_task_id
-                    # 报 L2_REQUIRES_PARENT_TASK。
-                    # 修复：从注册表 tags 恢复 task_id（任务系统注册管道时写入，
-                    # 见 task_executor.py register_pipeline 的 tags["task_id"]）。
-                    # 会话类管道（非任务）tags 无 task_id，_ws_task_id 为空，行为不变。
                     _ws_task_id = ""
                     if _target_pid:
                         _entry_for_task = _registry.get(_target_pid)
@@ -434,22 +360,12 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                             _ws_task_id = _entry_for_task.tags.get("task_id", "") or ""
 
                     # ── 统一入口转发（只转发，不传 agent_config）──
-                    try:
-                        from pipeline.message_bus import _trace as _mb_trace
-                        _mb_trace("T1.5_pre_send", _target_pid, f"task_id={_ws_task_id[:8] if _ws_task_id else '(empty)'}")
-                    except Exception:
-                        pass
                     _result = await send_pipeline_message(
                         _pipeline_msg,
                         output_sink=_sink,
                         conversation_history=_history if _history else None,
                         task_id=_ws_task_id,
                     )
-                    try:
-                        from pipeline.message_bus import _trace as _mb_trace2
-                        _mb_trace2("T2.5_post_send", _target_pid, f"success={_result.success} method={_result.method} err={_result.error or ''}"[:80])
-                    except Exception:
-                        pass
 
                     if _result.success:
                         continue
@@ -495,7 +411,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                                     # 此时应等待用户在对话标签页发新消息（经 send_pipeline_message 注入）唤醒。
                                     # 旧逻辑在此处用"进入标签页"的 approved 响应直接 wake()，会提前唤醒且不
                                     # 携带用户消息，既触发一次空转 LLM 调用，又导致用户随后发送的消息无法注入。
-                                    # BUG-FIX-fix_20260625_conversation_wake_loses_user_input
                                     if pipeline_id and pipeline_id.startswith("__eval__"):
                                         logger.info(
                                             "[GlobalWS] 评估交互响应已处理（纯Event，无管道唤醒） | "
@@ -515,15 +430,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                         logger.warning("[GlobalWS] interaction_response 缺少 request_id")
                     continue
                 if msg_type == "stop_generation":
-                    # BUG-FIX-fix_20260512_stop_generation_global_ws:
-                    # 问题根因: 旧代码只发送假的 stopped 状态，没有实际取消流式任务
-                    #           和管道引擎运行，导致停止按钮无效。
-                    # 修复方案:
-                    #   1. 设置对应 thread_id 的 stop_event
-                    #   2. 取消对应 thread_id 的流式任务
-                    #   3. 尝试查找并取消关联的管道引擎
-                    #   4. 尝试取消 TaskWorker 中的关联后台任务
-                    #   5. 发送 state_change 回前端
                     logger.info("[GlobalWS] 用户请求停止生成: thread_id=%s user=%s", thread_id[:12], user_id[:12])
 
                     # 1. 通过 Registry 取消关联管道的 drain_task
@@ -552,16 +458,32 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     except Exception as _eng_err:
                         logger.warning("[GlobalWS] 投递停止信号出错: %s", _eng_err)
 
-                    # BUG-FIX-fix_20260629_stop_generation_unregisters_pipeline:
-                    # 删除原"fail_task + cancel_pipeline"块。删 revive 前，main 的
-                    # send 遇未注册管道会自动 revive 重建，所以这里删 entry 后续发消息
-                    # 仍能恢复。本分支删 revive 后这条路径变成致命：cancel_pipeline →
-                    # message_bus.stop() 删掉 entry，用户在同一标签页再发消息时 send
-                    # 命中 I4（未注册直接拒绝）→ 报"未注册，无法发送消息"。
-                    # 停止生成的正确语义由上面的 CONTROL 信号路径独占完成：
-                    # deliver_signal → 中断当前轮 → 引擎进 idle（entry 保留，下次 send
-                    # 走 _start_idle_engine 重启）。cancel_pipeline / fail_task 是
-                    # "取消任务"的持有者级终结，不属于"停止生成"。
+                    # 3. 尝试取消 TaskWorker 中与该 thread_id 关联的后台任务
+                    try:
+                        tw = getattr(stream_handler, "_task_worker", None)
+                        if tw and hasattr(tw, "_task_id_to_bg_task") and hasattr(tw, "_task_service"):
+                            _task_svc = getattr(tw, "_task_service", None)
+                            if _task_svc:
+                                # 遍历活跃任务，查找与 thread_id 关联的 task
+                                for _active_tid in list(getattr(tw, "_active_tasks", set())):
+                                    try:
+                                        _t = _task_svc.get_task(_active_tid)
+                                        if _t:
+                                            # 通过 task 的 pipeline_run_id 或 parent_pipeline_id
+                                            # 关联到 thread_id 对应的管道
+                                            _t_pipeline = getattr(_t, "pipeline_run_id", "") or ""
+                                            _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
+                                            if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
+                                                try:
+                                                    await _task_svc.fail_task(_active_tid, reason=f"用户取消: {_stop_msg.metadata.get('reason', 'stop_generation')}")
+                                                except Exception as _ft_err:
+                                                    logger.warning("[GlobalWS] fail_task 失败(仍将继续取消): task=%s, err=%s", _active_tid[:12], _ft_err)
+                                                tw.cancel_pipeline(_active_tid)
+                                                logger.info("[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12])
+                                    except Exception:
+                                        pass
+                    except Exception as _tw_err:
+                        logger.warning("[GlobalWS] 取消 TaskWorker 任务时出错: %s", _tw_err)
 
                     await websocket.send_text(json.dumps({
                         "type": "state_change",
@@ -573,10 +495,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         except Exception as exc:
             logger.error("[GlobalWS] 消息循环异常: user=%s err=%s", user_id[:12], exc)
         finally:
-            # BUG-FIX-fix_20260624_ws_double_ledger:
-            # active_connections 现已直接复用 notifier._active_connections，
-            # 这里只剩两件事：注销全局连接 + 清理 notifier 内的所有 thread 残留，
-            # 顺带清理跟随退出的会话历史（conversation_histories 仍是本地字典）。
             ws_interaction_notifier.unregister_global(user_id, websocket)
             removed_tids: list[str] = []
             for tid in list(active_connections.keys()):
@@ -596,28 +514,11 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
     return app
 
 
-
-# ---------------------------------------------------------------------------
 # 入口
-# ---------------------------------------------------------------------------
 
 
 def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
-    """从 start_port 开始查找可用端口。
-
-    通过尝试绑定端口来判断是否可用，如果指定端口被占用则依次递增，
-    最多搜索到 start_port + 100。
-
-    Args:
-        start_port: 起始端口号
-        host: 绑定地址，默认 0.0.0.0
-
-    Returns:
-        第一个可用的端口号
-
-    Raises:
-        RuntimeError: 在搜索范围内没有可用端口
-    """
+    """从 start_port 开始查找可用端口。"""
     for port in range(start_port, start_port + 100):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -630,15 +531,7 @@ def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
 
 
 def main() -> None:
-    """主函数，启动 uvicorn 服务器。
-
-    端口优先级：
-    1. 命令行参数 --port
-    2. 环境变量 BACKEND_PORT
-    3. 默认值 8988
-
-    如果指定端口被占用，自动查找下一个可用端口。
-    """
+    """主函数，启动 uvicorn 服务器。"""
     parser = argparse.ArgumentParser(description="Agent OS 服务器")
     parser.add_argument("--port", type=int, default=None, help="后端服务端口")
     args = parser.parse_args()

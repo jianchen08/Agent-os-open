@@ -1,6 +1,4 @@
-/**
- * 会话列表状态管理 Store
- */
+/** 会话列表状态管理 Store */
 
 import { create } from 'zustand'
 import {
@@ -46,9 +44,7 @@ interface SessionListState {
 /** 默认主 Agent 名称 */
 const DEFAULT_AGENT_NAME = '灵汐'
 
-/**
- * 生成默认会话标题，使用主 Agent 名称。
- */
+/** 生成默认会话标题，使用主 Agent 名称。 */
 const generateSessionTitle = (): string => {
   return DEFAULT_AGENT_NAME
 }
@@ -77,7 +73,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
           if (state.activeSessionId && validSessionIds.has(state.activeSessionId)) {
             newActiveSessionId = state.activeSessionId
           } else if (hadNoActiveSession) {
-            // BUG-FIX-fix_20260528_session_persist: 从 localStorage 恢复上次选中的会话
+            // 从 localStorage 恢复上次选中的会话
             const savedSessionId = uiStorage.getLastActiveSession()
             if (savedSessionId && validSessionIds.has(savedSessionId)) {
               newActiveSessionId = savedSessionId
@@ -92,7 +88,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
           }
         })
 
-        // BUG-FIX-fix_20260528_session_persist: 从 localStorage 恢复会话后触发完整的数据加载
+        // 从 localStorage 恢复会话后触发完整的数据加载
         if (hadNoActiveSession) {
           const restoredId = useSessionStore.getState().activeSessionId
           if (restoredId) {
@@ -152,17 +148,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }
   },
 
-  /**
-   * 删除会话（含完整清理）
-   *
-   * BUG-FIX-fix_20260513_delete_session:
-   * 问题根因: 删除会话时仅按 sessionId 清理，未遍历 pipelineSessionMap 找到所有子管道，
-   *          导致流式传输未终止、子管道数据残留、Agent Tab 状态未清理、后端进程未取消。
-   * 修复方案: 按顺序执行：发送取消信号 → 停止流式 → 查找所有管道 → 清理管道数据 →
-   *          清理 Agent Tab → 调用后端 API → 更新会话状态。
-   * 影响范围: 会话删除流程的所有 Store 状态
-   * 修复日期: 2026-05-13
-   */
+  /** 删除会话（含完整清理） */
   deleteSession: async (id: string) => {
     useSessionStore.setState((state) => ({
       deletingSessionIds: new Set(state.deletingSessionIds).add(id),
@@ -255,7 +241,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         }
       })
 
-      // BUG-FIX-fix_20260528_session_persist: 删除当前活跃会话时清理持久化的会话ID
+      // 删除当前活跃会话时清理持久化的会话ID
       if (!useSessionStore.getState().activeSessionId) {
         try { localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION) } catch (_e) { /* localStorage 清理失败不影响主流程 */ }
       }
@@ -281,18 +267,11 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       return
     }
 
-    // BUG-FIX-fix_20260604_stale_pipeline_id:
-    // 问题根因: setState 设 activeSessionId 触发 ChatContainer 渲染，
-    //          但 activatePipeline 还没跑，selector 短暂读到上一个会话的
-    //          s.activePipelineId，显示"老数据"（上一个会话的消息）。
-    // 修复方案: 在 setState 之前先调 initSessionTabs 同步激活管道，
-    //          确保 selector 首次渲染就读到正确的 activePipelineId。
-    // 影响范围: 会话切换时的消息显示时序
-    // 修复日期: 2026-06-04
+    // s.activePipelineId，显示"老数据"（上一个会话的消息）。
     useAgentTabStore.getState().initSessionTabs(id)
 
     useSessionStore.setState({ activeSessionId: id })
-    // BUG-FIX-fix_20260528_session_persist: 持久化当前活跃会话ID，页面刷新后可恢复
+    // 持久化当前活跃会话ID，页面刷新后可恢复
     uiStorage.setLastActiveSession(id)
 
     const session = sessions.find((s) => s.id === id)
@@ -308,13 +287,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     if (fetchData) {
       try {
-        // BUG-FIX-fix_20260617_remove_main_pipeline_fallback:
-        // 问题根因: 原代码用 session.activePipelineId 作为主管道 fallback，
-        //          但 activePipelineId 在派生过子 Tab 时会指向子管道，作为主管道兜底是语义错误，
-        //          会导致 fetchMessages 用错误的 pipelineId 加载消息。
-        // 修复方案: 只用 session.pipelineIds[0] 作为主管道，缺失时记 error 并跳过加载。
-        // 影响范围: 会话切换时的消息加载
-        // 修复日期: 2026-06-17
+        // 会导致 fetchMessages 用错误的 pipelineId 加载消息。
         const pipelineId = session?.pipelineIds?.[0]
         if (!pipelineId) {
           console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session?.pipelineIds)
@@ -328,14 +301,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         console.error('[setActiveSession] 加载会话数据失败:', error)
       }
 
-      // BUG-FIX-fix_20260521_tasklist_refresh:
-      // 问题根因: 切换会话时未调用 bumpWorkspaceDataVersion()，导致工作区组件
-      //          （包括 FileTreeWidget 渲染的任务列表）不会重新加载数据。
-      //          只有提交任务后 useRealtimeEvents 中才会触发刷新。
-      // 修复方案: 会话切换并加载数据后，主动触发工作区数据版本递增，通知所有依赖
-      //          workspaceRefreshKey 的组件重新加载对应会话的数据。
-      // 影响范围: 会话切换时的工作区（任务列表、文件树等）刷新行为
-      // 修复日期: 2026-05-21
+      // 只有提交任务后 useRealtimeEvents 中才会触发刷新。
       useLayoutModeStore.getState().bumpWorkspaceDataVersion()
     }
   },
@@ -393,10 +359,6 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       ),
     }))
 
-    // BUG-FIX-fix_20260617_optimistic_no_rollback:
-    // 问题根因: 原代码同步失败仅 logger.error，不回滚 UI 不告知用户，
-    //          导致 UI 显示与后端不一致，用户误以为操作成功。
-    // 修复方案: 失败时回滚乐观更新（恢复原值）并通过通知告知用户。
     updateSessionApi(sessionId, {
       metadata: { starred: newStarred },
     }).catch((error) => {
@@ -433,9 +395,6 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       ),
     }))
 
-    // BUG-FIX-fix_20260617_optimistic_no_rollback:
-    // 问题根因: 原代码同步失败仅 logger.error，不回滚 UI 不告知用户。
-    // 修复方案: 失败时回滚乐观更新（恢复原值）并通过通知告知用户。
     updateSessionApi(sessionId, {
       metadata: { pinned: newPinned },
     }).catch((error) => {
@@ -479,10 +438,6 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     try {
       await updateSessionApi(sessionId, { title: trimmedTitle })
     } catch (error) {
-      // BUG-FIX-fix_20260617_optimistic_no_rollback:
-      // 问题根因: 原代码 catch 仅 logger.error，不回滚 UI 不告知用户，
-      //          导致 UI 显示新标题但后端仍是旧标题。
-      // 修复方案: 失败时回滚乐观更新（恢复原标题）并通过通知告知用户。
       logger.error('重命名会话失败:', error)
       useSessionStore.setState((state) => ({
         sessions: state.sessions.map((s) =>
@@ -537,12 +492,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     return newSession
   },
 
-  /**
-   * 首次 AI 回复完成后，根据首条用户消息自动重命名会话。
-   *
-   * 条件：会话标题仍为默认值（generateSessionTitle 返回的值）时才触发，
-   * 用户手动重命名过的会话不会被覆盖。
-   */
+  /** 首次 AI 回复完成后，根据首条用户消息自动重命名会话。 条件：会话标题仍为默认值（generateSessionTitle 返回的值）时才触发， */
   autoRenameSessionIfNeeded: (sessionId: string, pipelineId: string) => {
     const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
     if (!session) return

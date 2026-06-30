@@ -1,12 +1,4 @@
-"""消息格式规范化模块 -- 针对 LLM 提供商的消息格式修正。
-
-职责：
-- 通用修正：确保 tool_calls 使用 OpenAI API 格式
-- MiniMax 专有修正：system 消息位置、tool result 配对、JSON 修复等
-- JSON 字符串修复工具
-
-从 llm_core/plugin.py 提取，供 LLMCore 在调用 LLM 前规范化消息格式。
-"""
+"""消息格式规范化模块 -- 针对 LLM 提供商的消息格式修正。"""
 
 from __future__ import annotations
 
@@ -20,27 +12,11 @@ logger = logging.getLogger(__name__)
 
 # 增量扫描缓存：记录上次验证完成时各 provider 的消息数量
 # 使用 (provider, name, pipeline_id) 作为 key，避免不同管道共享缓存
-#
 _pairing_validated_len: dict[str, int] = {}
 
 
 def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
-    """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。
-
-    处理的常见问题：
-    1. 尾部逗号 (trailing comma)
-    2. 单引号代替双引号
-    3. 未加引号的键名
-    4. 截断的 JSON（尝试补全括号）
-    5. 多余的换行或空白
-    6. JSON 前后有额外字符（如 markdown code block）
-
-    Args:
-        s: 待修复的 JSON 字符串
-
-    Returns:
-        修复后的 JSON 字符串，无法修复时返回 None
-    """
+    """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。"""
     if not s or not isinstance(s, str):
         return None
 
@@ -136,21 +112,7 @@ def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
 
 
 def _repair_truncation(s: str) -> str | None:
-    """修复被截断的 JSON：闭合未结束的字符串并补全括号，尽量保留完整字段。
-
-    与旧的 ``count("{") + rfind(",")`` 方案不同，本函数用状态机扫描，
-    区分「字符串内截断」与「结构截断」：
-    - 字符串内截断（如 content 值的引号没收尾）→ 先闭合引号，**保留该半截值**，
-      再补全括号。这样 action/path 等短字段和（半截的）content 都不被丢弃。
-    - 仅当闭合后仍非法（尾部确为不完整的 key 或缺值的字段）时，才回退到
-      最后一个完整字段边界，丢弃那个本就不完整的尾部。
-
-    Args:
-        s: 被截断、前面尝试（直接解析/提取首个对象/去尾逗号/单引号）均失败的字符串。
-
-    Returns:
-        修复后可被 ``json.loads`` 解析的字符串；无法修复时返回 None。
-    """
+    """修复被截断的 JSON：闭合未结束的字符串并补全括号，尽量保留完整字段。"""
     in_string = False
     escape_next = False
     stack: list[str] = []
@@ -236,18 +198,7 @@ def _repair_truncation(s: str) -> str | None:
 
 
 def _is_valid_tool_call_id(tc_id: str | None) -> bool:
-    """检查 tool_call_id 是否符合系统标准格式 call_<hex>。
-
-    系统内统一使用 call_<24位hex> 格式（如 call_b3982bf711c648b297524fe6）。
-    部分模型（如 MiniMax）可能返回 call_function_<base62>_<n> 等非标准格式，
-    MiniMax API 在回传时会拒绝这些非标准 id。
-
-    Args:
-        tc_id: 待检查的 tool_call_id
-
-    Returns:
-        是否符合标准格式
-    """
+    """检查 tool_call_id 是否符合系统标准格式 call_<hex>。"""
     if not tc_id or not isinstance(tc_id, str):
         return False
     # 标准格式: call_ + 仅含十六进制字符（至少1位）
@@ -259,36 +210,12 @@ def _is_valid_tool_call_id(tc_id: str | None) -> bool:
 
 
 def standardize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
-    """标准化 tool_calls 为 OpenAI API 格式（公共入口）。
-
-    薄包装：委托给 _normalize_tool_calls_in_messages。供压缩写回等
-    非 LLM 调用路径在写入 history 前复用，确保不会把内部 raw 格式
-    （缺 type / 扁平结构）固化进 recent 段，否则后续发上游会报
-    "工具类型不能为空" / "messages 参数非法"（实测 glm/zhipu 必 400）。
-
-    原地修改 messages：结构修复 + tool_call_id 标准化（同步修正配对的
-    tool result 的 tool_call_id，保持配对完整）。
-
-    Args:
-        messages: 消息列表（原地修改）
-    """
+    """标准化 tool_calls 为 OpenAI API 格式（公共入口）。"""
     _normalize_tool_calls_in_messages(messages)
 
 
 def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  # noqa: PLR0912
-    """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
-
-    执行两项修正：
-    1. 结构格式：确保 tool_calls 使用 OpenAI API 格式
-        内部 raw: {"id": "...", "name": "...", "arguments": "..."}
-        标准格式: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
-    2. ID 格式：确保所有 tool_call_id 符合系统标准 call_<hex> 格式。
-        部分模型返回非标准 id（如 call_function_xxx_1），统一替换为标准格式，
-        同时同步修正对应 tool 消息的 tool_call_id 以保持配对一致。
-
-    缺少 type 字段会导致智谱AI等 API 报"工具类型不能为空"。
-    非标准 tool_call_id 会导致 MiniMax API 报 "invalid params, tool call id is invalid"。
-    """
+    """确保 assistant 消息中的 tool_calls 使用统一的内部格式。"""
     # id_remap: 记录非标准 id -> 新标准 id 的映射，用于同步修正 tool 消息
     id_remap: dict[str, str] = {}
 
@@ -356,27 +283,7 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     *,
     pipeline_id: str = "",
 ) -> list[dict[str, Any]]:
-    """增量验证 tool_calls 和 tool result 的配对完整性。
-
-    DeepSeek 和 MiniMax 严格要求每条 assistant(tool_calls) 后面必须跟齐
-    所有 tool_call_id 对应的 tool 消息。消息历史在压缩/截断/执行记录恢复
-    等场景下可能产生不配对的消息，此函数负责清理和补全。
-
-    采用增量扫描：通过模块级缓存 _pairing_validated_len 记录上次验证完成时
-    的消息数量，下次只扫描新增部分，避免每次对整个消息列表做完整遍历。
-
-    Phase A: 移除孤立的 tool result（前面没有 assistant(tool_calls) 的）
-    Phase B: 清理不完整的 assistant(tool_calls)（后面缺少 tool result 的）
-
-    Args:
-        messages: 消息列表
-        provider: 提供商标识
-        name: 插件名称
-        pipeline_id: 管道 ID，用于缓存隔离，避免并发管道共享缓存导致漏检
-
-    Returns:
-        修正后的消息列表
-    """
+    """增量验证 tool_calls 和 tool result 的配对完整性。"""
     cache_key = f"{provider}:{name}:{pipeline_id}"
     cached_len = _pairing_validated_len.get(cache_key, 0)
     msg_count = len(messages)
@@ -579,22 +486,7 @@ def reset_pairing_cache(
     *,
     pipeline_id: str = "",
 ) -> None:
-    """重置 tool_call 配对验证缓存。
-
-    当 LLM API 返回 tool_call 相关错误（如 tool call id invalid）时调用，
-    强制下一次 normalize_messages_for_provider 执行全量扫描，而非增量扫描。
-
-    重置粒度（按参数精确度从粗到细）：
-    - 全部参数为空：清空所有缓存
-    - 仅 provider：清空该 provider 下所有缓存
-    - provider + name：清空该 provider:plugin 下所有 pipeline 的缓存
-    - provider + name + pipeline_id：精确清空单条缓存
-
-    Args:
-        provider: 提供商名称，空字符串表示重置所有
-        name: 插件名称，空字符串表示重置指定 provider 的所有
-        pipeline_id: 管道 ID，空字符串表示重置该 provider:name 下所有管道
-    """
+    """重置 tool_call 配对验证缓存。"""
     if not provider:
         _pairing_validated_len.clear()
         return
@@ -621,27 +513,7 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     name: str,
     pipeline_id: str = "",
 ) -> list[dict[str, Any]]:
-    """针对特定 LLM 提供商的消息格式修正。
-
-    通用修正（所有 provider）：
-    1. assistant 消息中的 tool_calls 从内部 raw 格式转为 OpenAI API 格式
-       （执行记录恢复的消息可能使用内部格式，缺少 type 字段，
-       导致智谱AI等 API 报"工具类型不能为空"）
-
-    MiniMax 专有修正：
-    1. 非首位 system 消息转为 user 角色（MiniMax 仅允许首位为 system）
-    2. assistant(tool_calls) 后只能紧跟 tool 消息，中间插入的非 tool
-       消息（如 TaskReminder 注入的 system/user）需移到 tool 消息组之后
-
-    Args:
-        messages: 原始消息列表
-        provider: LLM 提供商标识（如 openai、minimax）
-        name: 插件名称，用于日志
-        pipeline_id: 管道 ID，用于配对校验缓存隔离
-
-    Returns:
-        修正后的消息列表
-    """
+    """针对特定 LLM 提供商的消息格式修正。"""
     # 通用修正：确保 tool_calls 是 OpenAI API 格式
     _normalize_tool_calls_in_messages(messages)
 

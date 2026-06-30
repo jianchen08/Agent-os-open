@@ -1,8 +1,4 @@
-/**
- * 费用控制配置页面
- *
- * Token 用量限制和预算管理：预算限制、Token 用量追踪、费用告警、使用统计
- */
+/** 费用控制配置页面 Token 用量限制和预算管理：预算限制、Token 用量追踪、费用告警、使用统计 */
 
 import { Loader2 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
@@ -47,9 +43,7 @@ const DEFAULT_CONFIG: CostControlConfigResponse = {
   enabled: true,
 }
 
-/**
- * 费用控制配置页面组件
- */
+/** 费用控制配置页面组件 */
 export function CostSettingsPage() {
   const [config, setConfig] = useState<CostControlConfigResponse>(DEFAULT_CONFIG)
   const [budget, setBudget] = useState<BudgetStatusResponse | null>(null)
@@ -65,10 +59,6 @@ export function CostSettingsPage() {
     setIsLoading(true)
     setLoadError(null)
 
-    // BUG-FIX-fix_20260617_silent_catch:
-    // 问题根因: 原 Promise.all 中每个 promise 单独 .catch 消化错误返回默认值/ null，
-    //          导致外层 .catch 永远不会触发（死代码），加载失败被静默吞掉。
-    // 修复方案: 移除内层 .catch，让错误冒泡到外层 catch 触发 setLoadError。
     Promise.all([
       getCostControlConfig(),
       getBudgetStatus(),
@@ -457,10 +447,7 @@ export function CostSettingsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {/* BUG-FIX-fix_20260617_mock_fallback:
-                        问题根因: 原代码 (stats?.recent_records ?? MOCK_RECORDS) 在加载失败时
-                                  降级显示假数据，误导用户以为有真实记录。
-                        修复方案: stats 为 null 或无记录时显示空状态提示。 */}
+                    {/* 加载失败或无记录时显示空状态提示 */}
                     {stats?.recent_records?.length ? (
                       stats.recent_records.map((record, idx) => (
                         <tr key={idx} className="border-b last:border-b-0">
@@ -534,9 +521,7 @@ function ProtectionBadge({
   )
 }
 
-/* ============================================ */
-/* 共享子组件                                    */
-/* ============================================ */
+/* 共享子组件 */
 
 function PageShell({
   title,

@@ -1,35 +1,4 @@
-"""
-工具注册表
-
-暴露接口：
-- set_sync_service(self, sync_service: 'ToolSyncService') -> None：set_sync_service功能
-- configure_unload_policy(self, max_tools: int, unload_threshold: int) -> None：configure_unload_policy功能
-- register(self, tool: Tool, key: str | None, overwrite: bool) -> str：register功能
-- register_with_handler(self, tool: Tool, handler: ToolHandler, overwrite: bool) -> str：register_with_handler功能
-- register_runnable(self, runnable: 'ToolRunnable', overwrite: bool) -> str：register_runnable功能
-- bind_handler(self, name: str, handler: ToolHandler) -> None：bind_handler功能
-- get(self, name: str) -> Tool：get功能
-- get_optional(self, name: str) -> Tool | None：get_optional功能
-- get_usage_stats(self) -> dict[str, dict[str, Any]]：get_usage_stats功能
-- get_runnable(self, name: str) -> Optional['ToolRunnable']：get_runnable功能
-- get_handler(self, name: str) -> ToolHandler | None：get_handler功能
-- has(self, name: str) -> bool：has功能
-- has_handler(self, name: str) -> bool：has_handler功能
-- has_runnable(self, name: str) -> bool：has_runnable功能
-- unregister(self, name: str) -> Tool：unregister功能
-- list_all(self) -> list[Tool]：list_all功能
-- list_runnables(self) -> list['ToolRunnable']：list_runnables功能
-- list_by_category(self, category: ToolCategory) -> list[Tool]：list_by_category功能
-- list_by_source(self, source: ToolSource) -> list[Tool]：list_by_source功能
-- search(self, query: str) -> list[Tool]：search功能
-- get_tools_for_llm(self, names: list[str] | None) -> list[dict[str, Any]]：get_tools_for_llm功能
-- get_tools_for_llm_yaml(self, names: list[str] | None) -> str：get_tools_for_llm_yaml功能
-- get_tools_for_llm_format(self, format_type: str | None, names: list[str] | None) -> list[dict[str, Any]] | str：get_tools_for_llm_format功能
-- get_tools_for_mcp(self, names: list[str] | None) -> list[dict[str, Any]]：get_tools_for_mcp功能
-- count(self) -> int：count功能
-- clear(self) -> None：clear功能
-- ToolRegistry：ToolRegistry类
-"""
+"""工具注册表"""
 
 from collections.abc import Callable, Coroutine
 from typing import (
@@ -53,19 +22,7 @@ ToolHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
 
 class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
-    """
-    工具注册表
-
-    管理所有可用工具的注册、检索和查询，支持：
-    - Tool 定义管理（按需加载）
-    - ToolRunnable 管理
-    - 处理函数绑定
-    - 数据库同步（可选）
-
-    继承:
-        - SimpleRegistry: 提供注册表基础功能（register/unregister/get/has/list）
-        - IToolRegistry: 工具注册表接口契约
-    """
+    """工具注册表"""
 
     def __init__(
         self, sync_service: Optional["ToolSyncService"] = None, lazy_load: bool = True
@@ -83,11 +40,6 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._known_tool_names: set[str] = set()
 
         # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）。
-        # BUG-FIX-fix_20260625_dynamic_tool_global_leak:
-        # 原实现是单个全局 set，导致 A 管道 resource_search 加载的工具
-        # 会泄漏到 B 管道（如 review_agent 子管道错误继承父管道加载的
-        # trigger_review / web_search）。改为按 pipeline_id 分组隔离。
-        # key="" 兼容无 pipeline_id 上下文（启动期/测试）的全局调用。
         self._dynamic_tool_names: dict[str, set[str]] = {}
 
         # Schema 动态丰富器注册表（tool_name -> enricher callable）
@@ -113,33 +65,13 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._unload_threshold = unload_threshold
 
     def mark_dynamic(self, name: str, pipeline_id: str = "") -> None:
-        """将工具标记为动态加载的工具。
-
-        由 ToolAutoLoader 在运行时动态加载工具后调用，
-        ToolSchemaPlugin 会查询此集合来决定向 LLM 展示哪些额外工具。
-
-        BUG-FIX-fix_20260625_dynamic_tool_global_leak:
-        动态工具状态按 pipeline_id 隔离。pipeline_id 为空时尝试从
-        _current_pipeline_id contextvar 获取，仍为空则归到全局 "" 桶
-        （兼容启动期/测试场景）。
-
-        Args:
-            name: 工具名称
-            pipeline_id: 所属管道 ID，留空则从 contextvar 自动获取
-        """
+        """将工具标记为动态加载的工具。"""
         if not pipeline_id:
             pipeline_id = self._current_pid()
         self._dynamic_tool_names.setdefault(pipeline_id, set()).add(name)
 
     def get_dynamic_tool_names(self, pipeline_id: str = "") -> set[str]:
-        """获取指定管道动态加载的工具名称集合。
-
-        Args:
-            pipeline_id: 所属管道 ID，留空则从 contextvar 自动获取
-
-        Returns:
-            该管道动态加载的工具名称集合（无则空集合）
-        """
+        """获取指定管道动态加载的工具名称集合。"""
         if not pipeline_id:
             pipeline_id = self._current_pid()
         return self._dynamic_tool_names.get(pipeline_id, set())
@@ -156,26 +88,11 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
     def register_schema_enricher(
         self, tool_name: str, enricher: Callable[[Any, dict[str, Any]], Any]
     ) -> None:
-        """注册工具 Schema 动态丰富器。
-
-        丰富器在 ToolSchemaPlugin 每轮迭代生成 LLM schema 时被调用，
-        接收原始 Tool 对象和 services 字典，返回丰富后的 Tool 副本（深拷贝）。
-
-        Args:
-            tool_name: 工具名称
-            enricher: 丰富器函数，签名 (tool: Tool, services: dict) -> Tool
-        """
+        """注册工具 Schema 动态丰富器。"""
         self._schema_enrichers[tool_name] = enricher
 
     def get_schema_enricher(self, tool_name: str) -> Callable | None:
-        """获取工具的 Schema 动态丰富器。
-
-        Args:
-            tool_name: 工具名称
-
-        Returns:
-            丰富器函数，未注册时返回 None
-        """
+        """获取工具的 Schema 动态丰富器。"""
         return self._schema_enrichers.get(tool_name)
 
     def register(
@@ -365,9 +282,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._check_and_unload_if_needed()
 
     def _check_and_unload_if_needed(self) -> None:
-        """
-        检查工具数量，如果超过限制则卸载最少使用的工具
-        """
+        """检查工具数量，如果超过限制则卸载最少使用的工具"""
         if len(self._items) <= self._max_tools:
             return
 

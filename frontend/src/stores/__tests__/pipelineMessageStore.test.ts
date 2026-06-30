@@ -1,11 +1,4 @@
-/**
- * pipelineMessageStore 测试 - 消息去重、状态同步、initFromAPI 合并
- *
- * 验证：
- * - addMessage 正确插入消息
- * - updateMessage 更新指定消息
- * - initFromAPI 合并数据库消息，保留流式中间态
- */
+/** pipelineMessageStore 测试 - 消息去重、状态同步、initFromAPI 合并 验证： */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
 
@@ -131,17 +124,13 @@ describe('pipelineMessageStore', () => {
       expect(msgs[0].content).toBe('full content')
     })
 
-    // BUG-FIX-fix_20260623_local_completed_msg_orphan + fix_20260627_message_order_jump_top:
-    // persist 恢复的旧 completed 消息（API 未返回）既不是 streaming，也不在 optimistic grace
-    // 窗口内（user 无 clientMessageId、assistant 无 _lastUpdated）→ 在 localOnly 过滤时被丢弃，
-    // 以 API 权威数据为准。localOnly 只保留 streaming 占位 / grace 消息，其 sequence 不可靠
-    // （前端自算 localMax+1），故保持到达顺序追加而非按 sequence 归并。
-    // 这两条测试原断言「残留保留并按 sequence 升序合并」，与上述设计冲突，已更新为正确行为。
-    it('刷新后 persist 残留的 completed 旧消息被丢弃，以 API 为准', () => {
+    // 注意: 用 user/assistant 交替避免 mergeConsecutiveAssistantMessages 合并，
+    // 纯粹验证排序逻辑。
+    it('刷新后 localOnly 消息按 sequence 升序合并（不末尾拼接）', () => {
       const store = usePipelineMessageStore.getState()
-      // persist 残留：completed user 消息（无 clientMessageId → 不在 grace 窗口）
+      // 模拟 persist 恢复的旧消息（sequence=1，本地独有，API 未返回）
       store.addMessage('pipe-1', makeMsg('old-msg', 'old content', { sequence: 1, role: 'user', status: 'completed' }))
-      // API 返回最近的新消息（不含残留）
+      // API 返回最近的新消息（sequence 10、20、30，不含旧消息）
       store.initFromAPI('pipe-1', [
         makeMsg('api-10', 'msg10', { sequence: 10, role: 'assistant', status: 'completed' }),
         makeMsg('api-20', 'msg20', { sequence: 20, role: 'user', status: 'completed' }),
@@ -149,24 +138,27 @@ describe('pipelineMessageStore', () => {
       ])
 
       const msgs = store.getMessages('pipe-1')
-      // 残留被丢弃，只剩 API 权威 3 条，按 sequence 升序
-      expect(msgs.map(m => m.id)).toEqual(['api-10', 'api-20', 'api-30'])
+      // 4 条消息都在（去重后）
+      expect(msgs).toHaveLength(4)
+      // 关键：按 sequence 升序，旧消息在最前（修复前会被错误地排到末尾）
+      expect(msgs.map(m => m.sequence)).toEqual([1, 10, 20, 30])
+      expect(msgs[0].id).toBe('old-msg')
+      expect(msgs[3].id).toBe('api-30')
     })
 
-    it('persist 残留多条消息均被丢弃，API 数据按 sequence 升序', () => {
+    it('localOnly 含多条乱序消息时也正确排序', () => {
       const store = usePipelineMessageStore.getState()
-      // 多条 persist 残留（completed，不在 grace 窗口）
+      // persist 恢复的消息可能无序，用 user/assistant 严格交替避免相邻合并
+      // 最终 sequence 序列 [2,3,5,8] → 角色 [user, assistant, user, assistant]
       store.addMessage('pipe-1', makeMsg('local-5', 'c5', { sequence: 5, role: 'user', status: 'completed' }))
       store.addMessage('pipe-1', makeMsg('local-2', 'c2', { sequence: 2, role: 'user', status: 'completed' }))
-      // API 用 user/assistant 交替避免被 mergeConsecutiveAssistantMessages 合并
       store.initFromAPI('pipe-1', [
-        makeMsg('api-3', 'c3', { sequence: 3, role: 'user', status: 'completed' }),
         makeMsg('api-8', 'c8', { sequence: 8, role: 'assistant', status: 'completed' }),
+        makeMsg('api-3', 'c3', { sequence: 3, role: 'assistant', status: 'completed' }),
       ])
 
       const msgs = store.getMessages('pipe-1')
-      // 残留丢弃，只剩 API 2 条按 sequence 升序
-      expect(msgs.map(m => m.sequence)).toEqual([3, 8])
+      expect(msgs.map(m => m.sequence)).toEqual([2, 3, 5, 8])
     })
   })
 

@@ -1,10 +1,4 @@
-"""WebSocket 人类交互通知处理器。
-
-通过 WebSocket 将人类交互请求转发到前端，管理连接注册/注销、
-全局单连接模式、自动确认回退等功能。
-
-从 start_server.py 拆分而来，保持向后兼容。
-"""
+"""WebSocket 人类交互通知处理器。"""
 
 from __future__ import annotations
 
@@ -13,79 +7,14 @@ import contextlib
 import json
 import logging
 import os
-import time
 
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
 
-def _trace_id(event_data: dict) -> str:
-    """从事件提取用于关联前后端日志的追踪标识（message_id / request_id）。"""
-    data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
-    return (
-        data.get("message_id")
-        or data.get("request_id")
-        or event_data.get("message_id")
-        or "?"
-    )
-
-
-def _trace_type(event_data: dict) -> str:
-    """事件类型短名，用于日志。"""
-    return event_data.get("type", "?")
-
-
-def _ws_trace_enabled() -> bool:
-    """是否开启逐次发送的 WS 探针日志。
-
-    默认关闭：流式输出（thinking_chunk / streaming_chunk）逐 token 触发发送，
-    每次发送会打一对 INFO（SEND_START / SEND_DONE），常开会把控制台刷爆。
-    仅在排查"流式静默期断连 / send_text 耗时"等问题时通过环境变量
-    ``WS_TRACE_ENABLED=1`` 临时打开。
-    """
-    return os.environ.get("WS_TRACE_ENABLED", "").lower() in {"1", "true", "yes", "on"}
-
-
-# 模块级常量：进程启动时读一次，运行时不在热路径上反复解析环境变量。
-_WS_TRACE_ENABLED = _ws_trace_enabled()
-
-
-def _log_send_start(event_data: dict, target: str) -> float:
-    """在 ws.send_text 调用前打日志，返回起始时刻（用于算 send_text 耗时）。
-
-    未开启 WS 探针时返回 0.0 并跳过计时，避免在流式热路径上做无用功。
-    """
-    if not _WS_TRACE_ENABLED:
-        return 0.0
-    t0 = time.time()
-    logger.info(
-        "[WS_TRACE] >>> SEND_START type=%s id=%s target=%s t=%.3f",
-        _trace_type(event_data), _trace_id(event_data)[:12], target, t0,
-    )
-    return t0
-
-
-def _log_send_done(event_data: dict, target: str, t0: float, ok: bool) -> None:
-    """在 ws.send_text 返回后打日志，含 send_text 自身耗时。"""
-    if not _WS_TRACE_ENABLED:
-        return
-    elapsed_ms = (time.time() - t0) * 1000 if t0 else 0.0
-    logger.info(
-        "[WS_TRACE] <<< SEND_DONE  type=%s id=%s target=%s ok=%s send_cost=%.1fms",
-        _trace_type(event_data), _trace_id(event_data)[:12], target, ok, elapsed_ms,
-    )
-
-
 def _resolve_send_timeout() -> float:
-    """读取 WebSocket 发送超时（秒）。
-
-    优先级：环境变量 WS_SEND_TIMEOUT_SECONDS > 默认 30s。
-
-    BUG-FIX-fix_20260624_ws_send_timeout:
-    历史值硬编码 5s，流式高峰 / 大 payload 经常打不过去 → 连接被误判 stale 剔除，
-    后续推流静默失败。改为 30s 并可由环境变量覆盖。
-    """
+    """读取 WebSocket 发送超时（秒）。"""
     raw = os.environ.get("WS_SEND_TIMEOUT_SECONDS")
     if not raw:
         return 30.0
@@ -101,14 +30,7 @@ _SEND_TIMEOUT_SECONDS = _resolve_send_timeout()
 
 
 class WebSocketInteractionNotifier:
-    """通过 WebSocket 将人类交互请求转发到前端。
-
-    注册到 HumanInteractionService，当管道调用 human_interaction 工具时，
-    将请求通过 WebSocket 发送到前端，前端展示交互面板。
-    用户响应后，通过 interaction_response 消息提交回服务。
-
-    如果前端在 auto_confirm_delay 秒内未响应，自动批准（回退策略）。
-    """
+    """通过 WebSocket 将人类交互请求转发到前端。"""
 
     def __init__(self, auto_confirm_delay: float = 600.0) -> None:
         self._active_connections: dict[str, list[WebSocket]] = {}
@@ -200,32 +122,25 @@ class WebSocketInteractionNotifier:
             },
         }
 
-        payload_obj["__send_ts"] = time.time() * 1000
         payload = json.dumps(payload_obj, ensure_ascii=False)
         sent = False
         if conns:
             for ws in conns:
-                t0 = _log_send_start(payload_obj, f"notif-active:{thread_id[:12]}")
                 try:
                     await ws.send_text(payload)
                     sent = True
-                    _log_send_done(payload_obj, f"notif-active:{thread_id[:12]}", t0, True)
                 except Exception:
-                    _log_send_done(payload_obj, f"notif-active:{thread_id[:12]}", t0, False)
                     logger.debug(
                         "[WSNotifier] 发送交互请求失败，连接可能已断开"
                     )
 
         if not sent:
             for user_id, ws in list(self._global_connections.items()):
-                t0 = _log_send_start(payload_obj, f"notif-global:{user_id[:12]}")
                 try:
                     await ws.send_text(json.dumps(payload_obj, ensure_ascii=False))
                     sent = True
-                    _log_send_done(payload_obj, f"notif-global:{user_id[:12]}", t0, True)
                     break
                 except Exception:
-                    _log_send_done(payload_obj, f"notif-global:{user_id[:12]}", t0, False)
                     self._global_connections.pop(user_id, None)
 
         if sent:
@@ -255,15 +170,7 @@ class WebSocketInteractionNotifier:
     # ── 全局单连接模式方法 ──
 
     def register_global(self, user_id: str, websocket: WebSocket) -> None:
-        """注册全局单连接（新架构：每用户一个 WS 连接）。
-
-        BUG-FIX-fix_20260624_register_global_old_close:
-        历史实现用 ``asyncio.get_event_loop().create_task(...)`` 调度老连接的
-        close，在 Python 3.10+ 没有 running loop 时会拿到新建的临时 loop，
-        close 任务被丢进一个永不运行的 loop 里悬挂，老连接残留半开。
-        改为 ``asyncio.get_running_loop()``，如果当前线程没有 running loop
-        就退化为同步关闭（注册路径必然在 endpoint 协程内，正常路径有 loop）。
-        """
+        """注册全局单连接（新架构：每用户一个 WS 连接）。"""
         old = self._global_connections.get(user_id)
         if old is not None and old is not websocket:
             logger.info("[GlobalWS] 踢掉旧连接: user=%s", user_id[:12])
@@ -279,14 +186,6 @@ class WebSocketInteractionNotifier:
         self._global_connections[user_id] = websocket
         logger.info("[GlobalWS] 全局连接已注册: user=%s, 总连接数=%d", user_id[:12], len(self._global_connections))
         try:
-            # BUG-FIX-fix_20260625_reconnect_no_active_connections:
-            # 原实现只遍历 _active_connections.keys() 恢复 pipeline 输出，但断连的
-            # finally 块（app_factory.py:594-599）会把空连接列表从 _active_connections
-            # 里删掉。于是重连时 _active_connections 是空的 → 没有任何 tid 可恢复 →
-            # 正在运行的 pipeline 的 output_sink 永远指向已断开的旧 WS → 后续流式 chunk
-            # 全部 send_to_thread 返回 False → 表现为「连接断了消息就没了」。
-            # 修复方案: 除了 _active_connections，再从 engine registry 查找所有正在运行/
-            #   挂起的 pipeline，逐个恢复其 sink。registry 不随 WS 断连清空，是可靠来源。
             resumed_tids: set[str] = set()
             for tid in list(self._active_connections.keys()):
                 self._resume_pipeline_for_thread(tid)
@@ -306,11 +205,7 @@ class WebSocketInteractionNotifier:
 
     @staticmethod
     def _schedule_close(websocket: WebSocket, *, code: int, reason: str) -> None:
-        """安全地调度一个 WebSocket close 任务。
-
-        优先用当前 running loop；没有 running loop（例如同步测试场景）则尝试
-        在已有事件循环中调用 ``run_coroutine_threadsafe``；都不行就退化为
-        no-op，避免崩溃。"""
+        """安全地调度一个 WebSocket close 任务。"""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -340,26 +235,7 @@ class WebSocketInteractionNotifier:
             )
 
     def _resume_pipeline_for_thread(self, thread_id: str) -> None:
-        """恢复指定 thread_id 关联的活跃 pipeline 的 WebSocket 输出。
-
-        BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
-        前端刷新后重新连接时，查找该 thread_id 关联的正在运行的 pipeline，
-        更新其 bridge 的 output_sink 为新的活跃连接，确保后续输出能续接到前端。
-
-        BUG-FIX-fix_20260628_reconnect_lost_when_thread_id_empty:
-        历史实现有两个致命缺口，导致断连后输出永久接不回（前端"卡死"）：
-          1) 匹配条件只认 entry.thread_id == thread_id。但 sink 早创建时会被锁死成
-             "no-thread"（entry.thread_id 为空），重连时永远匹配不到 → 旧 sink 不换 →
-             引擎还在跑但输出永远送不到前端。补一个 entry.tags["session_id"] 兜底匹配
-             （_start_idle_engine 启动时已把 session_id 写进 tags，是可靠的同源标识）。
-          2) 只在旧 sink is_dead（连续失败 5 次）时才替换。但重连本就是"新连接接管"，
-             旧 sink 必然指向已断开的连接，没必要等死。改为只要旧 sink 存在就重建。
-        同时去掉 break：同 session 下可能有多个活跃 pipeline（主管道+子任务），
-        全部恢复，而非只恢复第一个。
-
-        Args:
-            thread_id: 目标会话的 thread_id
-        """
+        """恢复指定 thread_id 关联的活跃 pipeline 的 WebSocket 输出。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
             from pipeline.stream_bridge import TargetedSink, create_targeted_sink  # noqa: F401,PLC0415
@@ -369,7 +245,6 @@ class WebSocketInteractionNotifier:
 
         # 遍历所有注册表条目，查找与该 thread_id 关联的活跃 pipeline。
         # 匹配来源：entry.thread_id 优先，为空时用 tags["session_id"] 兜底
-        # （见上方 BUG-FIX-fix_20260628_reconnect_lost_when_thread_id_empty）。
         for pipeline_id, entry in list(registry._engines.items()):
             _matched_tid = entry.thread_id if entry.thread_id else (
                 (entry.tags or {}).get("session_id", "") if entry.tags else ""
@@ -386,7 +261,7 @@ class WebSocketInteractionNotifier:
 
             # 找到活跃的 pipeline，无条件把 sink 切到新连接。
             # 重连即"新连接接管"，旧 sink 必然指向已断开连接，直接重建即可，
-            # 不必等连续失败判 dead（见上方 BUG-FIX 注释）。
+            # 不必等连续失败判 dead。
             if entry.bridge is not None:
                 # 补全 entry.thread_id（历史为空时），避免后续 send_to_thread 仍走 no-thread 回退
                 if not entry.thread_id and thread_id:
@@ -458,14 +333,7 @@ class WebSocketInteractionNotifier:
             logger.debug("[WSNotifier] 自动确认回退失败: %s", exc)
 
     def cancel_fallback(self, request_id: str) -> None:
-        """取消指定请求的自动确认回退任务。
-
-        当用户在前端响应交互请求后调用，取消对应的 _auto_confirm_fallback
-        任务以避免不必要的资源浪费和潜在的竞争条件。
-
-        Args:
-            request_id: 要取消自动确认的请求 ID
-        """
+        """取消指定请求的自动确认回退任务。"""
         task = self._fallback_request_map.pop(request_id, None)
         if task and not task.done():
             task.cancel()
@@ -474,33 +342,18 @@ class WebSocketInteractionNotifier:
             )
 
     async def _send_event_to_thread(self, thread_id: str, event_data: dict) -> bool:
-        """统一发送事件到 thread_id 关联的连接，先活跃连接再全局连接。
-
-        封装完整的发送逻辑：先查 _active_connections 发给所有活跃连接，
-        失败则回退到 _global_connections。发送失败的连接会被清理。
-
-        Args:
-            thread_id: 目标会话的 thread_id
-            event_data: 完整的事件字典（将被 json.dumps 序列化）
-
-        Returns:
-            是否成功发送到至少一个连接
-        """
+        """统一发送事件到 thread_id 关联的连接，先活跃连接再全局连接。"""
         conns = self._active_connections.get(thread_id, [])
         if conns:
-            event_data["__send_ts"] = time.time() * 1000
             payload = json.dumps(event_data, ensure_ascii=False)
             stale: list = []
             sent_any = False
             for ws in conns:
-                t0 = _log_send_start(event_data, f"active:{thread_id[:12]}")
                 try:
                     await asyncio.wait_for(ws.send_text(payload), timeout=_SEND_TIMEOUT_SECONDS)
                     sent_any = True
-                    _log_send_done(event_data, f"active:{thread_id[:12]}", t0, True)
                 except (asyncio.TimeoutError, Exception):
                     stale.append(ws)
-                    _log_send_done(event_data, f"active:{thread_id[:12]}", t0, False)
             if stale:
                 self._active_connections[thread_id] = [
                     c for c in conns if c not in stale
@@ -511,35 +364,20 @@ class WebSocketInteractionNotifier:
                 return True
 
         # 回退全局连接
-        event_data["__send_ts"] = time.time() * 1000
         for user_id, ws in list(self._global_connections.items()):
-            t0 = _log_send_start(event_data, f"global:{user_id[:12]}")
             try:
                 await asyncio.wait_for(
                     ws.send_text(json.dumps(event_data, ensure_ascii=False)),
                     timeout=_SEND_TIMEOUT_SECONDS,
                 )
-                _log_send_done(event_data, f"global:{user_id[:12]}", t0, True)
                 return True
             except (asyncio.TimeoutError, Exception):
-                _log_send_done(event_data, f"global:{user_id[:12]}", t0, False)
                 self._global_connections.pop(user_id, None)
 
         return False
 
     async def send_to_thread(self, thread_id: str, event_data: dict) -> bool:
-        """向指定 thread_id 的最新活跃 WebSocket 连接发送事件。
-
-        优先查找 _active_connections（per-session 连接），
-        若无则回退到 _global_connections（全局单连接）。
-
-        Args:
-            thread_id: 目标会话的 thread_id
-            event_data: 完整的事件字典
-
-        Returns:
-            是否成功发送
-        """
+        """向指定 thread_id 的最新活跃 WebSocket 连接发送事件。"""
         ok = await self._send_event_to_thread(thread_id, event_data)
         if not ok:
             # thread_id 为空说明是后端任务（CLI/定时触发），没有前端连接是正常的，不打 warning

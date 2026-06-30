@@ -1,14 +1,4 @@
-"""
-Network Search Tool (Based on mcp-webgate)
-
-暴露接口：
-- get_tool_definition() -> Tool：get_tool_definition功能
-- WebSearchMCPConfig：WebSearchMCPConfig类
-- WebSearchMCPTool：WebSearchMCPTool类
-
-后端：mcp-webgate（Python MCP 服务器）
-特性：BM25 重排序、HTML 去噪、URL 去重、上下文保护、纯 HTTP 抓取（无浏览器依赖）
-"""
+"""Network Search Tool (Based on mcp-webgate)"""
 
 import importlib.util
 import logging
@@ -57,12 +47,7 @@ def _resolve_bing_server():
 
 
 def _get_search_command() -> tuple[str, list[str]]:
-    """获取搜索引擎 MCP server 启动命令。
-
-    容器内: 优先用 mcp-webgate 命令（pip --user 安装,全功能），
-    宿主机: python -m mcp_webgate。
-    都没装则降级到 bing-search。
-    """
+    """获取搜索引擎 MCP server 启动命令。"""
     import shutil  # noqa: PLC0415
     from pathlib import Path as _P  # noqa: N814,PLC0415
 
@@ -103,20 +88,7 @@ class WebSearchMCPConfig:
 
 
 class WebSearchMCPTool(BuiltinTool):
-    """
-    网络搜索工具。
-
-    后端自动选择：
-    - mcp-webgate（主力，需 pip install mcp-webgate + SearXNG Docker）
-      全功能：BM25 重排序、HTML 去噪、URL 去重、内容抓取、上下文保护
-    - bing-search（兜底，纯 Python 标准库，零外部依赖）
-      基础功能：搜索 + 摘要 + URL 去重，直连 bing.com
-
-    搜索模式：
-    - full → 搜索 + 抓取页面内容 + 清洗 + 排序（mcp-webgate）或搜索+摘要（bing-search）
-    - summary → 仅搜索摘要
-    - content_only → 提取指定 URL 页面内容（仅 mcp-webgate 支持）
-    """
+    """网络搜索工具。"""
 
     def __init__(self, config: WebSearchMCPConfig | None = None):
         """初始化搜索工具"""
@@ -197,21 +169,11 @@ class WebSearchMCPTool(BuiltinTool):
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        """执行搜索
-
-        BUG-FIX-fix_20260418_mcp_connection_conflict
-        问题根因: self.loader 是全局单例共享的 MCPToolLoader，当 LLM 一次返回多个
-                  web_search tool_calls 时，tool_core 串行调用 execute()，
-                  但所有调用共享同一个 MCP 子进程的 stdin/stdout，
-                  导致 readuntil() 并发冲突，所有调用都失败
-        修复方案: 每次 execute() 创建独立的 MCPToolLoader 实例，
-                  调用完毕后立即关闭连接，完全隔离 MCP 连接
-        影响范围: 所有 web_search MCP 工具调用
-        """
+        """执行搜索"""
         query = inputs.get("query", "").strip()
         if not query:
             return create_failure_result(
-                error="搜索关键词不能为空",  # BUG-FIX: 统一中文错误信息
+                error="搜索关键词不能为空",  # 统一中文错误信息
                 error_code="EMPTY_QUERY",
             )
 

@@ -1,10 +1,4 @@
-/**
- * InteractionPanel 容器组件
- *
- * 薄容器层：读取 interactionStore + 调用 useInteractionHandler，
- * 将数据和 actions 以 props 传递给 InteractionCard。
- * 自身不包含业务逻辑。
- */
+/** InteractionPanel 容器组件 薄容器层：读取 interactionStore + 调用 useInteractionHandler， */
 
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
@@ -20,8 +14,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
     useInteractionHandler(sessionId)
   const dismissInteraction = useInteractionStore((s) => s.dismissInteraction)
 
-  // BUG-FIX-fix_20260531_interaction_duplicate:
-  // 安全措施：过滤掉 notification 模式的交互，确保通知模式不在聊天区域的 InteractionCard 中显示
+  // // 安全措施：过滤掉 notification 模式的交互，确保通知模式不在聊天区域的 InteractionCard 中显示
   const nonNotificationInteractions = pendingInteractions.filter(
     (i) => i.mode !== 'notification',
   )

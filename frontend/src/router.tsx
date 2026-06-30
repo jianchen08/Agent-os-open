@@ -1,9 +1,4 @@
-/**
- * 路由配置
- *
- * 定义应用的所有路由，包含登录/注册和受保护的主页面。
- * 主页包含完整的聊天界面：左侧会话列表 + 右侧聊天区域。
- */
+/** 路由配置 定义应用的所有路由，包含登录/注册和受保护的主页面。 */
 
 import { lazy, Suspense, useEffect, useState, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
@@ -161,18 +156,9 @@ function isMobileViewport(): boolean {
   return typeof window !== 'undefined' && window.innerWidth < 768
 }
 
-// ============================================
 // 路由守卫
-// ============================================
 
-/**
- * 路由守卫组件
- *
- * 检查用户认证状态：
- * - 正在初始化时显示加载动画
- * - 未认证时重定向到登录页
- * - 已认证时渲染子组件
- */
+/** 路由守卫组件 检查用户认证状态： */
 function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
   const { isAuthenticated, isInitializing } = useAuthStore()
 
@@ -200,24 +186,9 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
   )
 }
 
-// ============================================
 // 聊天主页
-// ============================================
 
-/**
- * 聊天主页组件
- *
- * 登录后的主界面，包含：
- * - 顶部导航栏：应用标题、WebSocket 连接状态、用户信息、登出按钮
- * - 左侧面板：会话列表、新建会话按钮
- * - 右侧区域：聊天容器（ChatContainer）或欢迎页
- *
- * 核心流程：
- * 1. 组件挂载时获取会话列表
- * 2. 订阅 WebSocket 流式事件（stream_start/chunk/end、new_message）
- * 3. 用户选择或创建会话后，自动连接 WebSocket
- * 4. 用户发送消息通过 WebSocket 传输，流式响应实时更新
- */
+/** 聊天主页组件 登录后的主界面，包含： */
 function HomePage(): ReactNode {
   const navigate = useNavigate()
   const location = useLocation()
@@ -232,10 +203,6 @@ function HomePage(): ReactNode {
   useTaskPolling()
 
   // Layout mode toggle
-  // BUG-FIX-fix_20260513_workspace_two_clicks:
-  // 问题根因: toggleMode 只切换 mode 字段，不同步 workspaceCollapsed，
-  //          导致切换到 five-space 模式后工作区仍为折叠状态，需要再点一次展开
-  // 修复方案: 包装 toggleMode，切换到 five-space 时自动展开工作区面板
   const layoutMode = useLayoutModeStore((s) => s.mode)
   const rawToggleMode = useLayoutModeStore((s) => s.toggleMode)
   const toggleLayoutMode = useCallback(() => {
@@ -246,12 +213,6 @@ function HomePage(): ReactNode {
     }
   }, [rawToggleMode])
 
-  // BUG-FIX-fix_20260523_max_update_depth:
-  // 问题根因: useSessionStore()/useStreamingStore()/useSessionListStore() 无 selector 全量订阅，
-  //          流式输出期间 store 频繁更新导致 HomePage 全组件树级联重渲染。
-  // 修复方案: 改为精确 selector，只订阅需要的字段。
-  // 影响范围: HomePage 组件渲染性能
-  // 修复日期: 2026-05-23
   const sessions = useSessionStore((s) => s.sessions)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const wsStatus = useSessionStore((s) => s.wsStatus)
@@ -278,15 +239,7 @@ function HomePage(): ReactNode {
     fetchAgents().catch(() => {})
   }, [fetchAgents])
 
-  /**
-   * 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取）
-   *
-   * BUG-FIX-fix_20260522_msg_disappear:
-   * 问题根因: useMemo 内部使用 getState().getMessages() 直接读取快照，
-   *          不是响应式 selector，WS 事件更新 store 后组件不会重新渲染。
-   * 修复方案: 改为响应式 selector，直接订阅 messagesByPipeline 变化，
-   *          store 更新时组件自动重渲染。
-   */
+  /** 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取） */
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
 
   /** 当前活跃会话的分页状态（从 pipelineMessageStore 响应式读取） */
@@ -294,16 +247,12 @@ function HomePage(): ReactNode {
   const hasMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false)
   const isLoadingMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.isLoadingOlderByPipeline[activeKey] ?? false) : false)
 
-  // ------------------------------------------
   // 初始化：加载会话列表
-  // ------------------------------------------
   useEffect(() => {
     fetchSessions().catch(console.error)
   }, [fetchSessions])
 
-  // ------------------------------------------
   // 初始化全局流式事件处理器（不随组件卸载而销毁）
-  // ------------------------------------------
   useEffect(() => {
     initStreamingEvents()
     return () => {
@@ -311,10 +260,8 @@ function HomePage(): ReactNode {
     }
   }, [])
 
-  // ------------------------------------------
   // 页面刷新后恢复 WS 连接
   // 会话状态从 localStorage 恢复后需要重新建立全局 WS 连接
-  // ------------------------------------------
   useEffect(() => {
     const currentToken = useAuthStore.getState().token
     if (currentToken) {
@@ -331,14 +278,7 @@ function HomePage(): ReactNode {
     }
   }, [])
 
-  /**
-   * 选择会话
-   *
-   * 设置活跃会话并建立 WebSocket 连接。
-   * setActiveSession 会自动加载历史消息。
-   * 切换前保存当前会话的 Tab 状态，避免数据丢失。
-   * 移动端下选择会话后自动收起侧边栏。
-   */
+  /** 选择会话 设置活跃会话并建立 WebSocket 连接。 */
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
       // 保存当前会话的 Tab 状态到 localStorage
@@ -358,9 +298,7 @@ function HomePage(): ReactNode {
     [setActiveSession, connectWebSocket],
   )
 
-  /**
-   * 创建新会话并自动选中
-   */
+  /** 创建新会话并自动选中 */
   const handleCreateSession = useCallback(async () => {
     try {
       const newSession = await createSession()
@@ -370,12 +308,7 @@ function HomePage(): ReactNode {
     }
   }, [createSession, handleSelectSession])
 
-  /**
-   * 发送消息
-   *
-   * 1. 将用户消息添加到本地状态（主 Tab 写入 sessionStore，子 Tab 写入 agentTabStore）
-   * 2. 通过 WebSocket 发送用户输入，子 Tab 时携带 pipelineId 路由到对应管道
-   */
+  /** 发送消息 1. 将用户消息添加到本地状态（主 Tab 写入 sessionStore，子 Tab 写入 agentTabStore） */
   const handleSendMessage = useCallback(
     async (params: SendMessageParams) => {
       const { activeSessionId: sid } = useSessionStore.getState()
@@ -398,11 +331,7 @@ function HomePage(): ReactNode {
       const pipelineStore = usePipelineMessageStore.getState()
       let activePipelineId = pipelineStore.activePipelineId
 
-      // BUG-FIX-fix_empty_pipeline_id_on_send:
-      // 问题根因: 页面刷新/会话恢复后 activePipelineId 可能为 null（zustand 内存 store 重置），
-      //   导致消息发送时 pipeline_id 为空，后端拒绝路由，用户体验为"发送消息没反应"。
-      // 修复方案: activePipelineId 为空时，从 session 数据中恢复 pipelineId 并激活管道。
-      // 影响范围: 消息发送链路
+      // -fix_empty_pipeline_id_on_send:
       if (!activePipelineId) {
         const sessions = useSessionStore.getState().sessions
         const session = sessions.find((s) => s.id === sid)
@@ -440,10 +369,6 @@ function HomePage(): ReactNode {
         }
       }
 
-      // BUG-FIX-fix_20260522_subtab_msg_to_main_pipeline:
-      // 问题根因: 子Tab发消息时 params.pipelineId 是子管道ID，但 addMessage 始终用
-      //   activePipelineId（主管道），导致消息同时写入主管道的本地状态。
-      // 修复方案: 当 params.pipelineId 存在时（子Tab消息），用它作为本地写入目标。
       const targetPipelineId = params.pipelineId || activePipelineId
 
       const existingMsgs = pipelineStore.getMessages(targetPipelineId)
@@ -504,9 +429,7 @@ function HomePage(): ReactNode {
     [],
   )
 
-  /**
-   * 停止生成
-   */
+  /** 停止生成 */
   const handleStopGenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
     const currentPipelineId = usePipelineMessageStore.getState().activePipelineId
@@ -519,9 +442,7 @@ function HomePage(): ReactNode {
     }
   }, [])
 
-  /**
-   * 登出并跳转到登录页
-   */
+  /** 登出并跳转到登录页 */
   const handleLogout = useCallback(async () => {
     destroyStreamingEvents()
     disconnectWebSocket()
@@ -530,7 +451,7 @@ function HomePage(): ReactNode {
     navigate(ROUTES.LOGIN)
   }, [logout, navigate, disconnectWebSocket])
 
-  // ---- 编辑会话模态框（支持切换 Agent） ----
+  // 编辑会话模态框（支持切换 Agent）
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
 
   const handleEditSession = useCallback((session: Session) => {
@@ -558,7 +479,7 @@ function HomePage(): ReactNode {
     ? sessions.find((s) => s.id === editingSessionId) || null
     : null
 
-  // ---- Render sidebar content (shared between layouts) ----
+  // Render sidebar content (shared between layouts)
   const sidebarContent = (
     <>
       <div className="shrink-0 border-b p-2.5">
@@ -593,7 +514,7 @@ function HomePage(): ReactNode {
     </>
   )
 
-  // ---- Render chat content (shared between layouts) ----
+  // Render chat content (shared between layouts)
   const chatContent = activeSessionId ? (
     <ChatContainer
       sessionId={activeSessionId}
@@ -647,7 +568,7 @@ function HomePage(): ReactNode {
     </div>
   )
 
-  // ---- Five-space layout mode ----
+  // Five-space layout mode
   if (layoutMode === 'five-space') {
     return (
       <FiveSpaceLayout
@@ -661,7 +582,7 @@ function HomePage(): ReactNode {
     )
   }
 
-  // ---- Classic layout mode (original) ----
+  // Classic layout mode (original)
   return (
     <div className="bg-background text-foreground flex h-screen flex-col">
       <AppHeader
@@ -706,37 +627,9 @@ function HomePage(): ReactNode {
   )
 }
 
-// ============================================
 // 路由器创建
-// ============================================
 
-/**
- * 创建路由器实例
- *
- * 路由结构：
- * - / : 受保护的聊天主页（需登录）
- * - /settings : 设置中心（懒加载）
- * - /settings/modules : 模块设置页（懒加载）
- * - /settings/api : API 配置页（懒加载）
- * - /settings/llm : LLM 模型配置页（懒加载）
- * - /settings/context : 上下文窗口配置页（懒加载）
- * - /settings/concurrency : 并发控制配置页（懒加载）
- * - /settings/cost : 成本控制配置页（懒加载）
- * - /tools : 工具管理（懒加载）
- * - /agents : 智能体管理（懒加载）
- * - /monitoring : 系统监控（懒加载）
- * - /admin : 管理员面板（懒加载）
- * - /memory : 记忆管理（懒加载）
- * - /debug : 调试中心（懒加载）
- * - /debug/execution-records : 执行记录（懒加载）
- * - /debug/sessions : 调试会话（懒加载）
- * - /debug/tasks : 调试任务（懒加载）
- * - /debug/evaluation-metrics : 评估指标（懒加载）
- * - /debug/users : 调试用户（懒加载）
- * - /login : 登录页
- * - /register : 注册页
- * - * : 兜底重定向到首页
- */
+/** 创建路由器实例 路由结构： */
 export function createRouter() {
   return createBrowserRouter([
     {

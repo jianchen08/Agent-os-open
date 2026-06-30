@@ -1,17 +1,4 @@
-/**
- * 全局管道导航服务
- *
- * 在所有会话的所有管道中查找并跳转到目标管道。
- * pipeline_id 是全局唯一的路由键，一个 pipeline_id 在整个前端窗口中
- * 只对应一个标签页。
- *
- * 主管道和子管道没有区别，统一通过 pipeline_id 查找和跳转。
- *
- * 查找优先级：
- * 1. 当前已加载的 pipelineSessionMap（内存中最快）
- * 2. 所有会话的 Session.pipelineIds（前端已有数据）
- * 3. 后端 API 重新拉取会话列表（兜底）
- */
+/** 全局管道导航服务 在所有会话的所有管道中查找并跳转到目标管道。 */
 
 import { usePipelineMessageStore, type PipelineMeta } from '@/stores/pipelineMessageStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
@@ -29,17 +16,7 @@ export interface PipelineLocation {
   tabId: string | null
 }
 
-/**
- * 在所有会话中查找管道归属
- *
- * 查找优先级：
- * 1. 当前已加载的 pipelineSessionMap（内存中最快）
- * 2. 所有会话的 Session.pipelineIds（前端已有数据）
- * 3. 后端 API 重新拉取会话列表（兜底）
- *
- * @param pipelineId - 目标管道 ID
- * @returns 管道位置信息，找不到返回 null
- */
+/** 在所有会话中查找管道归属 查找优先级： */
 export async function findPipelineLocation(pipelineId: string): Promise<PipelineLocation | null> {
   const pipelineStore = usePipelineMessageStore.getState()
   const tabStore = useAgentTabStore.getState()
@@ -62,11 +39,6 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
   // 第一级：内存中的 pipelineSessionMap（最快，但可能过时）
   const cachedSessionId = pipelineStore.pipelineSessionMap[pipelineId]
   if (cachedSessionId) {
-    // BUG-FIX-fix_20260607_stale_pipeline_session_map:
-    // 问题根因: pipelineSessionMap 可能因 handleSubAgentCreated 的 activeSessionId
-    //          回退而映射到错误会话，直接信任会导致跳转到对方任务的会话。
-    // 修复方案: 用 session.pipelineIds（后端权威数据）交叉校验，不一致时以后者为准
-    //          并修正 pipelineSessionMap 缓存，防止后续请求继续读到错误映射。
     if (authoritativeSessionId && authoritativeSessionId !== cachedSessionId) {
       // 缓存与权威数据不一致，修正缓存
       pipelineStore.registerPipeline({
@@ -105,16 +77,7 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
   return null
 }
 
-/**
- * 全局导航到指定管道
- *
- * 统一逻辑：通过 pipeline_id 在所有会话的所有标签中查找，
- * 找到了就跳转，没有就创建。主管道和子管道没有区别。
- *
- * @param pipelineId - 目标管道 ID
- * @param options - 可选参数
- * @returns 是否导航成功
- */
+/** 全局导航到指定管道 统一逻辑：通过 pipeline_id 在所有会话的所有标签中查找， */
 export async function navigateToPipeline(
   pipelineId: string,
   options?: {
@@ -139,10 +102,6 @@ export async function navigateToPipeline(
     return true
   }
 
-  // BUG-FIX-fix_20260620_remove_session_fallback:
-  // 问题根因: findPipelineLocation 找不到管道时降级到当前会话，
-  //          会在错误的会话下创建幽灵标签，子管道消息污染无关会话。
-  // 修复方案: 找不到管道归属时直接失败，不再降级到当前会话。
   const location = await findPipelineLocation(pipelineId)
   if (!location) {
     console.error('[navigateToPipeline] 找不到管道归属，拒绝降级到当前会话: pipelineId=%s', pipelineId)
