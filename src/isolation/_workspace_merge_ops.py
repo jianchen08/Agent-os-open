@@ -171,22 +171,57 @@ class _MergeOpsMixin:
         self, workspace: str, ws_meta: dict, *, tag_task_id: str = "",
         merge_method: str = "",
     ):
-        """清理 worktree：删 worktree → 条件打 tag → 删分支"""
+        """清理 worktree：删 worktree → 条件打 tag → 删分支
+
+        BUG-FIX-fix_20260628_cleanup_silent_skip:
+        问题根因: 原逻辑用 `if project_root.exists():` 包裹整个清理块，
+          ws_meta.project_root 为空/路径不对时，worktree remove 与 branch -D
+          被静默跳过，无任何日志 —— worktree 目录与 task 分支就此泄漏堆积。
+        修复方案: project_root 缺失时显式 warning，并用 worktree 目录自身反查
+          仓库根（git -C <workspace> rev-parse --show-toplevel）兜底；
+          仍定位不到仓库才放弃，并记录错误。绝不静默放过。
+        """
         project_root = Path(ws_meta.get("project_root", ""))
         branch = ws_meta.get("branch", "")
-        if project_root.exists():
-            try:
-                self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
-            except Exception as e:
-                logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
-                self._run_git("worktree", "prune", cwd=project_root)
-            if branch:
-                if tag_task_id and merge_method == "git_merge":
-                    tag = f"task-merge/{tag_task_id[:8]}"
-                    self._run_git("tag", tag, branch, cwd=project_root)
-                    logger.debug("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
-                self._run_git("worktree", "prune", cwd=project_root)
-                self._run_git("branch", "-D", branch, cwd=project_root)
+
+        # project_root 缺失时，从 worktree 目录自身反查仓库根兜底，避免静默跳过
+        if not project_root.exists():
+            logger.warning(
+                "[WorkspaceLifecycle] project_root 无效或缺失: %r，尝试从 worktree 反查仓库根: %s",
+                str(project_root), workspace,
+            )
+            ws_path_probe = Path(workspace)
+            if ws_path_probe.exists():
+                rc, out, err = self._run_git(
+                    "rev-parse", "--show-toplevel", cwd=str(ws_path_probe),
+                )
+                if rc == 0 and out.strip():
+                    project_root = Path(out.strip())
+                    logger.debug("[WorkspaceLifecycle] 已反查仓库根: %s", project_root)
+                else:
+                    logger.warning(
+                        "[WorkspaceLifecycle] 反查仓库根失败(rc=%s): %s，放弃清理: %s",
+                        rc, err.strip(), workspace,
+                    )
+                    return
+            else:
+                logger.warning(
+                    "[WorkspaceLifecycle] worktree 目录不存在，跳过清理: %s", workspace,
+                )
+                return
+
+        try:
+            self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
+        except Exception as e:
+            logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
+            self._run_git("worktree", "prune", cwd=project_root)
+        if branch:
+            if tag_task_id and merge_method == "git_merge":
+                tag = f"task-merge/{tag_task_id[:8]}"
+                self._run_git("tag", tag, branch, cwd=project_root)
+                logger.debug("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
+            self._run_git("worktree", "prune", cwd=project_root)
+            self._run_git("branch", "-D", branch, cwd=project_root)
         ws_path = Path(workspace).resolve()
         if ws_path.exists() and "__wt_" in ws_path.name:
             try:
