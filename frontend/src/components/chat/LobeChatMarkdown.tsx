@@ -9,8 +9,9 @@
 
 import { ConfigProvider, Markdown } from '@lobehub/ui'
 import { motion } from 'motion/react'
-import { type FC, type ReactNode } from 'react'
+import { useMemo, type FC, type ReactNode } from 'react'
 
+import { preprocessSvgCodeBlocks } from './markdown/shared'
 import './LobeChatMarkdown.css'
 
 interface LobeChatMarkdownProps {
@@ -41,12 +42,17 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
   onDoubleClick,
   children,
 }) => {
+  const processedContent = useMemo(
+    () => preprocessSvgCodeBlocks(content),
+    [content],
+  )
+
   return (
     <ConfigProvider motion={motion}>
       <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick}>
         {children ?? (
-          <Markdown variant="chat" enableStream={false}>
-            {content}
+          <Markdown variant="chat" enableStream={false} enableMermaid={true}>
+            {processedContent}
           </Markdown>
         )}
         {isStreaming && <span className="md-cursor" />}
