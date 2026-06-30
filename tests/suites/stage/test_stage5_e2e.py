@@ -214,7 +214,7 @@ class TestKnowledgeInjectionE2E:
         assert isinstance(knowledge_context, str)
         assert "异常处理" in knowledge_context
 
-        # ── 步骤 4: PromptBuildPlugin 组装 system prompt ──
+        # ── 步骤 4: PromptBuildPlugin 组装 system prompt（不再自动注入记忆/知识）──
         prompt_state = create_initial_state(
             session_id="stage5-test-session",
             task_id="stage5-test-task",
@@ -229,11 +229,12 @@ class TestKnowledgeInjectionE2E:
         prompt_plugin = PromptBuildPlugin()
         prompt_result = await prompt_plugin.execute(prompt_ctx)
 
-        # 系统提示词包含知识注入内容（PromptBuildPlugin 产出 system_message dict）
+        # system_prompt 正常拼入（PromptBuildPlugin 产出 system_message dict）
         system_content = prompt_result.state_updates["system_message"]["content"]
-        assert "异常处理" in system_content
-        # 系统提示词包含记忆内容（PromptBuildPlugin 直接拼入 memory.retrieved 值）
-        assert "用户之前问过Python异常处理" in system_content
+        assert "你是一个AI助手" in system_content
+        # 记忆/知识不再无条件拼入（仅 static_vars opt-in；此处未配置 retrieval 变量）
+        assert "异常处理" not in system_content
+        assert "用户之前问过Python异常处理" not in system_content
 
     @pytest.mark.asyncio
     async def test_knowledge_inject_disabled_mode(

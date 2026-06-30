@@ -405,6 +405,34 @@ class TestAgentConfigLoader:
         with pytest.raises(FileNotFoundError, match="不存在"):
             AgentConfigLoader.load_from_directory("/nonexistent/dir")
 
+    def test_load_from_directory_strict_true_raises_on_syntax_error(
+        self, tmp_path: Path
+    ) -> None:
+        """strict=True（默认）时 YAML 语法错误必须上抛（fail-fast 契约守护）。"""
+        (tmp_path / "good.yaml").write_text(
+            "config_id: good_agent\nname: Good\nlevel: L3\n", encoding="utf-8"
+        )
+        # 与 test_yaml_error_chain 一致的坏缩进语法错误
+        (tmp_path / "bad.yaml").write_text(
+            "config_id: bad\nname: Bad\n  bad_indent: oops\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="YAML 解析失败"):
+            AgentConfigLoader.load_from_directory(tmp_path)
+
+    def test_load_from_directory_strict_false_isolates_syntax_error(
+        self, tmp_path: Path
+    ) -> None:
+        """strict=False 时语法错误按文件隔离：好配置照常加载，坏文件跳过。"""
+        (tmp_path / "good.yaml").write_text(
+            "config_id: good_agent\nname: Good\nlevel: L3\n", encoding="utf-8"
+        )
+        (tmp_path / "bad.yaml").write_text(
+            "config_id: bad\nname: Bad\n  bad_indent: oops\n", encoding="utf-8"
+        )
+        configs = AgentConfigLoader.load_from_directory(tmp_path, strict=False)
+        ids = {c.config_id for c in configs}
+        assert ids == {"good_agent"}
+
     def test_load_empty_yaml(self) -> None:
         """测试加载空 YAML 文件。"""
         temp_path = Path(tempfile.gettempdir()) / "test_empty_agent.yaml"
@@ -564,6 +592,20 @@ class TestAgentRegistry:
         assert count >= 3
         assert registry.get("test_main_agent") is not None
         assert registry.get("test_orchestrator_agent") is not None
+
+    def test_load_directory_isolates_bad_yaml(self, tmp_path: Path) -> None:
+        """单个坏 YAML 不应拖垮整体加载：好 agent 照常注册，坏文件跳过。"""
+        (tmp_path / "good.yaml").write_text(
+            "config_id: good_agent\nname: Good\nlevel: L3\n", encoding="utf-8"
+        )
+        (tmp_path / "bad.yaml").write_text(
+            "config_id: bad\nname: Bad\n  bad_indent: oops\n", encoding="utf-8"
+        )
+        registry = AgentRegistry()
+        count = registry.load_directory(tmp_path)
+        assert count == 1
+        assert registry.get("good_agent") is not None
+        assert registry.get("bad") is None
 
 
 # ============================================================================

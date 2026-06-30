@@ -253,6 +253,9 @@ class AgentRegistry:
 
         同时记录配置目录路径，后续 get() 未命中时可触发懒加载。
 
+        使用 strict=False：单个坏配置文件（含 YAML 语法错误）会被跳过并记录
+        warning，不影响其余 agent 加载，避免单个坏配置拖垮整个引擎初始化。
+
         Args:
             dir_path: YAML 配置目录路径。
 
@@ -264,7 +267,7 @@ class AgentRegistry:
         dir_path = Path(dir_path)
         self._config_dir = dir_path
 
-        configs = AgentConfigLoader.load_from_directory(dir_path)
+        configs = AgentConfigLoader.load_from_directory(dir_path, strict=False)
         for config in configs:
             try:
                 self.register(config)

@@ -137,15 +137,15 @@ class TestPromptBuildPlugin:
         assert "你是一个代码助手" in result.state_updates["system_message"]["content"]
 
     @pytest.mark.asyncio
-    async def test_includes_knowledge_context(self, ctx, base_state):
-        """测试知识注入内容包含在系统提示词中。"""
+    async def test_does_not_auto_inject_knowledge_context(self, ctx, base_state):
+        """knowledge.context 不再自动拼入系统提示词（仅 static_vars opt-in）。"""
         base_state["context.system_prompt"] = "System"
         base_state["knowledge.context"] = "这是知识库内容"
         plugin = PromptBuildPlugin()
         result = await plugin.execute(ctx)
 
         system = result.state_updates["system_message"]["content"]
-        assert "这是知识库内容" in system
+        assert "这是知识库内容" not in system
 
     @pytest.mark.asyncio
     async def test_includes_hard_constraints(self, ctx, base_state):
@@ -161,15 +161,15 @@ class TestPromptBuildPlugin:
         assert "不修改系统文件" in system
 
     @pytest.mark.asyncio
-    async def test_includes_memory_retrieved(self, ctx, base_state):
-        """测试记忆内容包含在系统提示词中。"""
+    async def test_does_not_auto_inject_memory_retrieved(self, ctx, base_state):
+        """memory.retrieved 不再自动拼入系统提示词。"""
         base_state["context.system_prompt"] = "System"
         base_state["memory.retrieved"] = "用户之前问过关于Python的问题"
         plugin = PromptBuildPlugin()
         result = await plugin.execute(ctx)
 
         system = result.state_updates["system_message"]["content"]
-        assert "用户之前问过关于Python的问题" in system
+        assert "用户之前问过关于Python的问题" not in system
 
     @pytest.mark.asyncio
     async def test_dynamic_vars(self, ctx, base_state):

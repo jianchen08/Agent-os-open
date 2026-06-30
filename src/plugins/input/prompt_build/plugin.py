@@ -11,11 +11,12 @@
     1. system_prompt      <- state["context.system_prompt"]（占位符 {{xxx}} 在此替换）
     2. language           <- config.language（语言指令，可选）
     3. tools_description  <- state["prompt.tool_descriptions"]（仅当开关开启时拼入）
-    4. static_vars        <- agent_config 或 state 读取（知识检索统一为 tags/retrieval 类型）
-    5. memory.retrieved   <- 记忆检索插件产出
+    4. static_vars        <- agent_config 或 state 读取（记忆/知识检索的唯一 opt-in 入口）
 
-注意：knowledge.context 已不再单独拼入（统一到 static_vars）；压缩层（L1/L2）作为
-compression_messages 独立消息输出，不合并到 system_message。
+注意：memory.retrieved / knowledge.context 不再无条件拼入 system_message —— 这两个 state
+仅供其他插件（如 error_check）使用；记忆/知识要进提示词，必须由 static_vars 显式声明
+retrieval/tags（走 _retrieve_by_tags）。压缩层（L1/L2）作为 compression_messages
+独立消息输出，不合并到 system_message。
 """
 
 from __future__ import annotations
@@ -221,12 +222,14 @@ class PromptBuildPlugin(IInputPlugin):
         return updates
 
     async def _build_system_content(self, ctx: PluginContext) -> str:
-        """按旧代码 layer_order 顺序组装系统消息内容。
+        """按 layer_order 顺序组装系统消息内容。
 
-        顺序：system_prompt -> tools_description -> static_vars ->
-              knowledge.context -> memory.retrieved
+        顺序：system_prompt -> language -> tools_description -> static_vars
         不含 recent_messages 和 dynamic_vars。
         压缩层（L2/L1/KEYWORDS）通过 compression_messages 独立消息输出。
+
+        记忆/知识不再自动拼入：memory.retrieved / knowledge.context 不在此追加，
+        注入提示词只能由 static_vars 声明 retrieval/tags opt-in（_retrieve_by_tags）。
 
         Args:
             ctx: 插件执行上下文
@@ -261,21 +264,15 @@ class PromptBuildPlugin(IInputPlugin):
             if tool_desc:
                 parts.append(tool_desc)
 
-        # 3. static_vars（含 rules/path/reference/tags 等类型，知识检索统一在此处理）
+        # 3. static_vars（含 rules/path/reference/tags 等，记忆/知识检索的唯一 opt-in 入口）
         if self._config.get("include_static_vars", True):
             static_vars_text = await self._load_static_vars(ctx)
             if static_vars_text:
                 parts.append(static_vars_text)
 
-        # 4. knowledge.context（知识注入插件产出 —— 与 static_vars tags/retrieval 互补）
-        knowledge_context = ctx.state.get("knowledge.context", "")
-        if knowledge_context:
-            parts.append(knowledge_context)
-
-        # 5. memory.retrieved（记忆检索插件产出）
-        memory_retrieved = ctx.state.get("memory.retrieved", "")
-        if memory_retrieved:
-            parts.append(memory_retrieved)
+        # 记忆/知识不再无条件追加到 system_message：memory.retrieved / knowledge.context
+        # 仅作为 state 供其他插件（如 error_check）使用；要进提示词必须由 static_vars
+        # 声明 retrieval/tags 显式 opt-in（走 _retrieve_by_tags）。
 
         return "\n\n".join(parts)
 

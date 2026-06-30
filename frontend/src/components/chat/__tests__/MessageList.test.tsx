@@ -348,7 +348,9 @@ describe('MessageList', () => {
       flushRaf()
       expect(listEl.scrollTop).toBe(1000)
 
-      // 用户上滑到中间（onScroll 把 isFollowingBottom 置 false）
+      // 用户上滑到中间（真实用户滚动是 wheel→scroll，wheel 置位 userScrolled，
+      // 随后 onScroll 据 userScrolled 判定为主动上滑，置 isFollowingBottom=false）
+      fireEvent.wheel(listEl, { deltaY: -100 })
       listEl.scrollTop = 300
       fireEvent.scroll(listEl)
 

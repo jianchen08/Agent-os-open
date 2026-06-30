@@ -98,6 +98,13 @@ class SecurityCheckPlugin(IInputPlugin):
         # 跨管道/跨会话不泄漏。仅记忆用户选择"本管道内同命令免批"的精确指纹，拒绝绝不记忆。
         self._approved_signatures: set[str] = set()
 
+        # 连续拒绝计数（按工具签名）：防止模型反复提交同一被拦请求导致死循环。
+        # 与 _approved_signatures 同作用域（单管道隔离）。一旦模型换了请求（签名变化），
+        # 新签名计数从 0 开始。偶发拒绝（1-2 次）靠 messages 写回反馈给模型改正；
+        # 达到阈值仍重复 → 模型无法自我纠正，终止任务（死循环最终防线）。
+        self._rejected_signatures: dict[str, int] = {}
+        self._reject_threshold = self._config.get("reject_threshold", 3)
+
         # 加载安全规则
         self._rules = self._load_rules()
 
@@ -468,9 +475,17 @@ class SecurityCheckPlugin(IInputPlugin):
     ) -> dict[str, Any]:
         """软拦截：把拒绝原因作为 tool_result 返回给 LLM，不结束管道。
 
-        审批拒绝/超时/取消属于用户主观行为，不应直接结束整个管道。
+        审批拒绝/路径遍历拦截等属于可恢复情况，不应直接结束整个管道。
         通过清空 raw_tool_calls + 注入拒绝 tool_result，让管道走到 output
         路由的 next_llm 分支，LLM 收到拒绝反馈后自行决定下一步策略。
+
+        关键：拒绝结果必须同步 append 为 role=tool 消息到 messages，且
+        tool_call_id 与被拒的 assistant(tool_calls) 配对。否则 messages 末尾
+        会留下无配对 tool 结果的孤儿 assistant，被 normalize Phase B 整条删除，
+        模型永远收不到拒绝反馈、反复重试同一请求 → 死循环。
+
+        连续拒绝保护：按工具签名计数，同一请求被连续拦截超阈值时，说明
+        模型无法自我纠正，直接终止管道并上报，避免无限重试。
 
         Args:
             ctx: 插件执行上下文
@@ -478,30 +493,92 @@ class SecurityCheckPlugin(IInputPlugin):
             reason: 拒绝原因
 
         Returns:
-            状态更新字典（raw_tool_calls 清空，tool_results 注入拒绝结果）
+            状态更新字典（raw_tool_calls 清空，tool_results 注入拒绝结果，
+            messages 追加配对的 tool 消息）
         """
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         rejected_results: list[dict[str, Any]] = []
+        # 同步把拒绝结果写回 messages：每个被拒 tool_call 对应一条 role=tool 消息，
+        # tool_call_id 必须与 assistant(tool_calls) 的 id 一致，才能通过
+        # normalize 的配对校验（否则 assistant 会被当孤儿删除）。
+        messages = list(ctx.state.get("messages", []))
         for tc in tool_calls:
             tc_name = tc.get("name", "")
             tc_call_id = tc.get("id")
+            block_reason = (
+                f"[审批拒绝] {reason}" if tc_name == tool_name
+                else f"[关联拒绝] {reason}"
+            )
             rejected_results.append({
                 "tool_name": tc_name,
                 "success": False,
-                "error": f"[审批拒绝] {reason}" if tc_name == tool_name else f"[关联拒绝] {reason}",
+                "error": block_reason,
                 "call_id": tc_call_id,
             })
+            if tc_call_id:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_call_id,
+                    "content": f"Error: {block_reason}",
+                })
 
-        logger.info(
-            "[%s] Soft-block: 审批拒绝转为 tool_result 反馈给 LLM | tool=%s",
-            self.name, tool_name,
-        )
-        return {
+        # 连续拒绝计数：同一工具签名被反复拦截时累加，换请求即重置。
+        signature = self._make_signature(tool_name, self._first_args(tool_calls, tool_name))
+        updates: dict[str, Any] = {
             StateKeys.RAW_TOOL_CALLS: [],
             StateKeys.TOOL_RESULTS: rejected_results,
             StateKeys.RAW_RESULT: f"工具 {tool_name} 被拒绝: {reason}",
+            "messages": messages,
             "security.decision": {"allowed": True, "reason": f"soft_block: {reason}", "tool": tool_name},
         }
+        if signature:
+            count = self._rejected_signatures.get(signature, 0) + 1
+            self._rejected_signatures[signature] = count
+            if count >= self._reject_threshold:
+                # 同一请求连续被拦超阈值：模型已陷入死循环、无法自我纠正。
+                # 明确终止管道并上报，而非无限重试。这是"工具重复上限"的最终防线：
+                # P0 的 messages 写回已保证偶发拒绝能反馈给模型改正；到这一步说明
+                # 模型无视反馈反复提交同一被拦请求，继续重试只会空耗资源。
+                fatal_reason = (
+                    f"工具 {tool_name} 连续被安全检查拦截 {count} 次"
+                    f"（阈值 {self._reject_threshold}），疑似死循环，终止任务"
+                )
+                logger.warning(
+                    "[%s] %s | sig=%s",
+                    self.name, fatal_reason, signature,
+                )
+                updates[StateKeys.RAW_RESULT] = fatal_reason
+                updates[StateKeys.RAW_ERROR] = fatal_reason
+                updates[StateKeys.ENDED] = True
+                # 重置该签名计数：管道即将结束，避免残留
+                self._rejected_signatures[signature] = 0
+
+        logger.info(
+            "[%s] Soft-block: 拒绝转为 tool_result 反馈给 LLM | tool=%s",
+            self.name, tool_name,
+        )
+        return updates
+
+    @staticmethod
+    def _first_args(
+        tool_calls: list[dict[str, Any]], tool_name: str,
+    ) -> dict[str, Any]:
+        """取出触发拒绝的工具调用参数，用于计算连续拒绝指纹。
+
+        Args:
+            tool_calls: 当前轮次的工具调用列表
+            tool_name: 触发拒绝的工具名称
+
+        Returns:
+            触发工具的 args 字典；找不到时返回空字典
+        """
+        for tc in tool_calls:
+            if tc.get("name", "") == tool_name:
+                args = tc.get("args", tc.get("arguments", {}))
+                if isinstance(args, str):
+                    return {}
+                return args if isinstance(args, dict) else {}
+        return {}
 
     @staticmethod
     def _format_args_for_approval(tool_calls: list[dict[str, Any]], triggered_tool: str) -> str:  # noqa: ARG004,PLR0912

@@ -1096,10 +1096,29 @@ class ExecutionRecordStorage:
 
         for part_file in part_files:
             if after_sequence is not None:
-                # 断线补漏：每个分片都参与收集，不受 limit 截断
+                # 断线补漏：只收集可能含 after_sequence 之后新 record 的分片。
+                # BUG-FIX-fix_20260630_backfill_full_scan:
+                # 原实现对每个分片都提取 _MAX_RECORDS_PER_FILE(500) 条，遍历所有分片
+                # → 全量读取 2.7MB → 单次请求 3-4s（用户感知"刷新加载慢"）。
+                # sequence 在分片间单调递增（实测 _004=1941-2210 > _003=1290-1940 > ...），
+                # after_sequence 之后的新 record 只可能在最新 1-2 个分片。
+                # 优化：从最新分片倒序读，一旦某分片所有 sequence 都 ≤ after_sequence，
+                # 更早分片更小 → 停止（不再读历史分片）。
                 blocks = self._extract_tail_blocks(part_file, per_part_cap)
-                collected_blocks.extend(blocks)
-                continue
+                if not blocks:
+                    continue
+                # 判断该分片是否含 > after_sequence 的 record：
+                # 解析 blocks 中所有 sequence，看是否有大于 after_sequence 的。
+                # blocks 是 YAML 文本块，这里用轻量正则提取 sequence 字段。
+                import re as _re  # noqa: PLC0415
+                block_text = "\n".join(blocks)
+                seqs = [int(m) for m in _re.findall(r"sequence:\s*(\d+)", block_text)]
+                part_has_new = any(s > after_sequence for s in seqs)
+                if part_has_new:
+                    collected_blocks.extend(blocks)
+                else:
+                    # 该分片无新 record，更早分片 sequence 更小，不会有新 record → 停止
+                    break
             # 初始加载 / 向上翻页：从尾部读，按需扩大
             needed = limit - len(collected_blocks)
             if needed <= 0:

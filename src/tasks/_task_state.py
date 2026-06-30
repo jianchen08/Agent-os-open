@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.tasks.state_machine import (
     _TASK_TRANSITIONS,
     InvalidTransitionError,
 )
 from utils.enum_utils import safe_enum_value
+
+if TYPE_CHECKING:
+    # 仅用于类型注解（运行时延迟求值，from __future__ import annotations）。
+    # 放在 TYPE_CHECKING 下避免与 types.py 的潜在循环导入。
+    from tasks.types import TaskModel
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +187,10 @@ class _TaskStateMixin:
         old_status = current
         task.status = TaskStatus.RUNNING
         task.updated_at = datetime.now().isoformat()
+        # resume 仅补设缺失的 started_at，不覆盖已有值：
+        # 暂停+恢复不应抹掉已运行时长（与 start_task 的幂等策略一致）。
+        if not task.started_at:
+            task.started_at = datetime.now().isoformat()
         if task.metadata:
             task.metadata.pop("paused_by", None)
         self._storage.save(task)
@@ -207,11 +216,14 @@ class _TaskStateMixin:
 
         return task
 
-    async def start_task(self, task_id: str) -> None:
+    async def start_task(self, task_id: str) -> TaskModel:
         """将任务从 pending 状态推进到 running。
 
         Args:
             task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel（与 resume_task 返回值契约统一）
 
         Raises:
             KeyError: 任务不存在
@@ -230,14 +242,21 @@ class _TaskStateMixin:
         if old_status not in ("pending", "running"):
             raise InvalidTransitionError(
                 old_status, "running",
-                f"不允许从 ''{old_status}'' 启动任务",
+                f"不允许从 '{old_status}' 启动任务",
             )
 
         task.status = TaskStatus.RUNNING
         task.updated_at = datetime.now().isoformat()
+        # BUG-FIX-fix_20260630_started_at_dead_field:
+        # started_at 此前从不赋值（全仓零赋值点），导致任务级耗时观测失效、
+        # 僵尸任务无时间戳依据。首次启动时记录起点；幂等（已存在则不覆盖，
+        # 避免 pending↔running 反复触发抹掉真实起点）。
+        if not task.started_at:
+            task.started_at = datetime.now().isoformat()
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "running")
+        return task
 
     async def move_to_evaluating(self, task_id: str) -> None:
         """将任务从 running 状态推进到 evaluating。
@@ -597,24 +616,30 @@ class _TaskStateMixin:
             task_id,
         )
 
-    async def reset_to_pending(self, task_id: str) -> None:
+    async def reset_to_pending(self, task_id: str) -> TaskModel | None:
         """将任务重置为 pending 状态（用于恢复/重试）。
 
         Args:
             task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel；storage 或任务不存在时返回 None（静默降级）
         """
         if self._storage is None:
-            return
+            return None
 
         task = self._storage.get(task_id)
         if task is None:
-            return
+            return None
 
         from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.PENDING
         task.updated_at = datetime.now().isoformat()
+        # reset 回到未执行态：清空 started_at，使下次 start 能重记起点。
+        task.started_at = None
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "pending")
+        return task

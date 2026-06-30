@@ -140,7 +140,7 @@ class TestResetToPending:
         svc.start_task(t.id)
         result = svc.reset_to_pending(t.id)
         assert result.status == TaskStatus.PENDING
-        assert result.started_at == ""
+        assert result.started_at is None
 
     def test_failed_to_pending(self) -> None:
         """FAILED -> PENDING（失败重试）。"""

@@ -155,7 +155,7 @@ class TestTaskLifecycleFailure:
         task = await task_service.reset_to_pending(task.id)
         assert task.status == TaskStatus.PENDING
         assert task.error == ""
-        assert task.started_at == ""
+        assert task.started_at is None
 
 
 # ── 4. 重试路径（打回重做） ──────────────────────────────────────────

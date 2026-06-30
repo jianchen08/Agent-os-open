@@ -1,0 +1,140 @@
+"""StreamHardTimeout 独立线程硬超时测试。
+
+背景：LLM 流式调用在底层 socket 阻塞时，所有 asyncio 级超时（wait_for、
+心跳协程）共享事件循环，loop 一冻全部失效。StreamHardTimeout 用独立
+threading 线程倒计时，到点强制关闭底层 stream，是 loop 冻住也能生效的
+兜底。
+
+本测试直接验证 watchdog 的行为契约，不依赖 adapter 内部实现。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from llm.stream_watchdog import StreamHardTimeout
+
+
+class _FakeStream:
+    """模拟 litellm 流对象：aclose 是 async，可追踪是否被调用。"""
+
+    def __init__(self) -> None:
+        self.aclose = AsyncMock(name="aclose")
+        self._closed = False
+
+    async def _aclose_impl(self) -> None:
+        self._closed = True
+
+
+def _make_fake_stream() -> _FakeStream:
+    s = _FakeStream()
+    s.aclose = AsyncMock(side_effect=s._aclose_impl)
+    return s
+
+
+class TestStreamHardTimeoutFires:
+    """到点未 disarm，应强制关闭 stream。"""
+
+    @pytest.mark.asyncio
+    async def test_fires_after_timeout_calls_aclose(self) -> None:
+        """超时后 watchdog 应在主 loop 调用 stream.aclose()。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        fired_event = threading.Event()
+        wd = StreamHardTimeout(stream, loop, timeout=0.3, on_fire=fired_event.set)
+
+        wd.arm()
+        # 等待 watchdog 触发（略大于 timeout）
+        assert fired_event.wait(timeout=2.0), "watchdog 未在超时后触发"
+        # on_fire 在独立线程触发；aclose 经 run_coroutine_threadsafe 回主 loop，
+        # 需让 loop 跑一会儿把 aclose 协程调度执行
+        await asyncio.sleep(0.1)
+        stream.aclose.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_does_not_block_event_loop(self) -> None:
+        """watchdog 在独立线程，主 loop 期间应能正常并发执行其他协程。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        wd = StreamHardTimeout(stream, loop, timeout=5.0)
+        wd.arm()
+        # 主 loop 不应被卡住：这段代码应几乎立即完成
+        started = time.monotonic()
+        await asyncio.sleep(0.05)
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.5, "watchdog 阻塞了事件循环"
+        wd.disarm()
+
+
+class TestStreamHardTimeoutDisarm:
+    """正常结束（disarm）后不应触发关闭。"""
+
+    @pytest.mark.asyncio
+    async def test_disarm_prevents_aclose(self) -> None:
+        """disarm 后即使等到 timeout，也不应调用 aclose。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        fired = threading.Event()
+        wd = StreamHardTimeout(stream, loop, timeout=0.2, on_fire=fired.set)
+
+        wd.arm()
+        wd.disarm()
+        # 远超 timeout
+        await asyncio.sleep(0.5)
+        assert not fired.is_set(), "disarm 后 watchdog 仍触发了"
+        stream.aclose.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disarm_is_idempotent(self) -> None:
+        """多次 disarm 不抛错（finally 块可能重复调用）。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        wd = StreamHardTimeout(stream, loop, timeout=1.0)
+        wd.arm()
+        wd.disarm()
+        wd.disarm()  # 不应抛异常
+        wd.disarm()
+
+    @pytest.mark.asyncio
+    async def test_arm_without_disarm_then_disarm_safe(self) -> None:
+        """arm 后立刻 disarm（首 chunk 即返回的快路径）安全。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        wd = StreamHardTimeout(stream, loop, timeout=10.0)
+        wd.arm()
+        wd.disarm()
+        await asyncio.sleep(0.01)
+        stream.aclose.assert_not_awaited()
+
+
+class TestStreamHardTimeoutRobustness:
+    """watchdog 自身永不抛错影响主流程。"""
+
+    @pytest.mark.asyncio
+    async def test_aclose_failure_does_not_raise(self) -> None:
+        """stream.aclose 抛异常时，watchdog 应吞掉，不传播到主流程。"""
+        stream = MagicMock()
+        stream.aclose = AsyncMock(side_effect=RuntimeError("boom"))
+        loop = asyncio.get_running_loop()
+        fired = threading.Event()
+        wd = StreamHardTimeout(stream, loop, timeout=0.2, on_fire=fired.set)
+        wd.arm()
+        assert fired.wait(timeout=2.0)
+        # 让 loop 处理 run_coroutine_threadsafe 的 aclose（会抛但被吞）
+        await asyncio.sleep(0.2)
+        stream.aclose.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_arm_is_idempotent(self) -> None:
+        """重复 arm 不创建多个线程。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        wd = StreamHardTimeout(stream, loop, timeout=5.0)
+        wd.arm()
+        wd.arm()  # 幂等，不应启动第二个线程
+        wd.disarm()

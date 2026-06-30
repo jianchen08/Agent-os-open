@@ -23,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 import litellm
 
 from llm.error_classifier import ErrorKind, classify_error
+from llm.stream_watchdog import StreamHardTimeout
 
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
@@ -527,6 +528,11 @@ class _BaseLiteLLMAdapter:
         _completion_stream: Any = getattr(response, "completion_stream", None)
         # 心跳探针任务句柄（首 chunk 后启动，finally 中取消）。
         _heartbeat_task: asyncio.Task[None] | None = None
+        # 独立线程硬超时句柄（首 chunk 后 arm，finally 中 disarm）。
+        # asyncio 心跳/inter_chunk wait_for 在 loop 被 socket 阻塞冻住时全部
+        # 失效（实测：僵死管道零 HEARTBEAT 日志）。watchdog 用 threading 线程
+        # 倒计时，到点强制 stream.aclose() 打破死锁，是 loop 冻住也能生效的兜底。
+        _hard_timeout: StreamHardTimeout | None = None
 
         stream_repetition = False
         thinking_truncated = False
@@ -800,6 +806,14 @@ class _BaseLiteLLMAdapter:
                     _completion_stream,
                 )
             )
+            # BUG-FIX-fix_20260630_stream_loop_freeze:
+            # 上述 asyncio 心跳/inter_chunk wait_for 共享同一 loop，一旦底层
+            # socket 阻塞冻住事件循环，全部失效（僵死管道零 HEARTBEAT 铁证）。
+            # 叠加独立线程硬超时：到点强制 aclose，loop 冻住也能打破死锁。
+            _hard_timeout = StreamHardTimeout(
+                response, asyncio.get_running_loop(), inter_chunk_timeout,
+            )
+            _hard_timeout.arm()
             # 接收端点诊断（首个 chunk）
             _recv_seq += 1
             try:
@@ -906,6 +920,9 @@ class _BaseLiteLLMAdapter:
                 _heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await _heartbeat_task
+            # 取消独立线程硬超时（正常结束时不触发强制关闭，幂等）
+            if _hard_timeout is not None:
+                _hard_timeout.disarm()
             # 确保超时或异常时关闭 async iterator，释放 HTTP 连接
             if hasattr(response, "aclose"):
                 await response.aclose()

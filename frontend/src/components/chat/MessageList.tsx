@@ -23,7 +23,7 @@
  */
 
 import { Loader2 } from 'lucide-react'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { logger as loggerService } from '@/utils/logger'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
@@ -86,6 +86,15 @@ export const MessageList = ({
   const isFollowingBottom = useRef(true)
   /** 首次滚动是否完成 */
   const initialScrollDone = useRef(false)
+  /**
+   * 用户是否通过真实手势（wheel/touch）滚动过。
+   * BUG-FIX-fix_20260630_reload_stuck_middle:
+   * 用于区分"用户主动上滑"与"程序性滚动"（高度变化导致 scrollTop 变小）。
+   * onScroll 对两者都会触发，但只有真实手势才算用户意图上滑。
+   * 刷新恢复时 initFromAPI 重建导致高度突减，浏览器程序性滚动会触发 onScroll，
+   * 若仅凭 scrollTop 方向判断会把 isFollowingBottom 误置 false → 不钉底 → 停中间。
+   */
+  const userScrolled = useRef(false)
   const prevGenerating = useRef(false)
   /** 上一帧消息数量，用于判断是新消息追加还是 prepend 历史 */
   const lastMessageCount = useRef(messages.length)
@@ -155,7 +164,11 @@ export const MessageList = ({
 
       // 用户主动上滑（scrollTop 变小）→ 立即停止跟随。
       // contentResize observer 内部判断 isFollowingBottom，停止跟随后不再钉底。
-      if (scrollTop < prevScrollTop - 1) {
+      // BUG-FIX-fix_20260630_reload_stuck_middle:
+      // 仅在用户通过真实手势（wheel/touch）滚动时才判定为"主动上滑"。
+      // 刷新恢复时 initFromAPI 重建导致高度突减，浏览器产生程序性滚动（无手势），
+      // 此时不应把 isFollowingBottom 置 false，否则后续 ResizeObserver 不钉底 → 停中间。
+      if (scrollTop < prevScrollTop - 1 && userScrolled.current) {
         isFollowingBottom.current = false
       }
       // 用户滚回底部附近 → 恢复跟随
@@ -179,7 +192,11 @@ export const MessageList = ({
    * 持续校正（initFromAPI 重建等内容高度变化时重新钉底）由下方 contentResize
    * effect 负责，本 effect 只做一次性首次定位。
    */
-  useEffect(() => {
+  // BUG-FIX-fix_20260630_first_scroll_useLayoutEffect:
+  // 原 useEffect 在 paint 后才跑，浏览器已先把 DOM 渲染在"中间"位置（ scrollTop 维持
+  // 上次相对位置），用户看到一帧中间态。改用 useLayoutEffect 在 paint 前同步钉底，
+  // 从根本上消除中间态闪烁。
+  useLayoutEffect(() => {
     if (messages.length === 0 || initialScrollDone.current) return
     initialScrollDone.current = true
 
@@ -190,7 +207,6 @@ export const MessageList = ({
       requestAnimationFrame(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollTop = cached
-          // 程序设置不触发 onScroll，手动同步
           lastScrollTopRef.current = cached
         }
       })
@@ -198,16 +214,52 @@ export const MessageList = ({
     }
 
     // 无缓存钉底：首次定位到底部
+    // BUG-FIX-fix_20260630_first_scroll_no_raf:
+    // 原把 pinToBottom 仅包在 RAF 里 → 浏览器先 paint 一帧（scrollTop 停在 persist
+    // 恢复的"之前位置"）→ 用户看到中间态 → RAF 才跳底。
+    // 修复: useLayoutEffect 阶段同步钉底 + RAF 钉底。
+    // BUG-FIX-fix_20260630_edge_scroll_linger:
+    // Edge（含部分配置/扩展的环境）即使 scrollRestoration=manual，仍会在刷新瞬间
+    // 把 scrollTop 停在旧位置，且 useLayoutEffect 的同步钉底被 Edge 的渲染时序推迟，
+    // 导致用户看到"先停旧位置再跳底"。Chrome 不复现（时序不同）。
+    // 兜底方案: 首次定位后启动 1.2s 的轮询钉底（每 50ms 一次），覆盖所有浏览器
+    // 渲染时序差异 + persist 异步 hydrate + markdown/代码块异步渲染导致的高度变化。
+    // 用户在此窗口内 wheel/touch 上滑会置 userScrolled，pinToBottom 内部据此跳过，
+    // 不会"抢"用户的滚动。
     const el = scrollRef.current
     if (!el) return
-    requestAnimationFrame(() => {
+    pinToBottom()
+    requestAnimationFrame(() => pinToBottom())
+    // 持续钉底兜底（覆盖 Edge 等浏览器的渲染时序差异）
+    // 用户在此窗口内 wheel/touch 上滑会置 userScrolled，此时停止强制钉底
+    let ticks = 0
+    const intervalId = window.setInterval(() => {
+      ticks++
+      if (userScrolled.current) {
+        window.clearInterval(intervalId)
+        return
+      }
       pinToBottom()
-      logger.debug(
-        '[首次钉底] tabId=%s msgs=%d scrollHeight=%d clientHeight=%d',
-        tabId ?? '?', messages.length, el.scrollHeight, el.clientHeight,
-      )
-    })
+      if (ticks >= 24) window.clearInterval(intervalId)  // 1.2s 后停止
+    }, 50)
   }, [messages.length, tabId, pinToBottom])
+
+  /**
+   * 注册真实手势监听（wheel/touch），区分用户主动滚动与程序性滚动。
+   * BUG-FIX-fix_20260630_reload_stuck_middle: 只有真实手势触发时 userScrolled 才置位，
+   * onScroll 据此判断是否为用户意图上滑。程序性滚动（高度变化导致）不置位。
+   */
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const markUserScroll = () => { userScrolled.current = true }
+    el.addEventListener('wheel', markUserScroll, { passive: true })
+    el.addEventListener('touchstart', markUserScroll, { passive: true })
+    return () => {
+      el.removeEventListener('wheel', markUserScroll)
+      el.removeEventListener('touchstart', markUserScroll)
+    }
+  }, [])
 
   /**
    * 持续跟随底部：内容高度变化时重新钉底。

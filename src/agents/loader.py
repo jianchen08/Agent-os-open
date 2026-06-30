@@ -361,17 +361,29 @@ class AgentConfigLoader:
         )
 
     @classmethod
-    def load_from_directory(cls, dir_path: str | Path) -> list[AgentConfig]:
+    def load_from_directory(
+        cls, dir_path: str | Path, *, strict: bool = True
+    ) -> list[AgentConfig]:
         """从目录递归加载所有 YAML Agent 配置。
+
+        单个文件的失败默认不中断整体加载（字段缺失等校验错误会被跳过）。
+        YAML **语法错误**默认上抛——这是经过 ``tests/test_yaml_error_chain.py``
+        守护的契约，便于发现配置写坏。
+
+        装配层（如 ``AgentRegistry.load_directory``）应传 ``strict=False``：
+        将语法错误也按文件隔离，避免单个坏配置拖垮整个引擎初始化。
 
         Args:
             dir_path: 目录路径。
+            strict: True（默认）时 YAML 语法错误上抛 ValueError，中断加载；
+                False 时任何单文件错误均跳过并记录 warning。
 
         Returns:
             AgentConfig 列表。
 
         Raises:
             FileNotFoundError: 目录不存在。
+            ValueError: ``strict=True`` 时遇到 YAML 语法错误。
         """
         dir_path = Path(dir_path)
         if not dir_path.exists():
@@ -388,8 +400,10 @@ class AgentConfigLoader:
                     "已加载 Agent 配置: %s (from %s)", config.config_id, yaml_file
                 )
             except ValueError as e:
-                # YAML 语法错误（load_from_yaml 已包装为 ValueError，通过 __cause__ 链识别）需上抛
-                if isinstance(e.__cause__, yaml.YAMLError):
+                # strict=True：YAML 语法错误（load_from_yaml 已包装为 ValueError，
+                # 通过 __cause__ 链识别）需上抛，保留 fail-fast 契约。
+                # strict=False：装配层使用，任何单文件错误（含语法错误）一律隔离。
+                if strict and isinstance(e.__cause__, yaml.YAMLError):
                     raise
                 logger.warning("跳过无效配置文件 %s: %s", yaml_file, e)
         return configs
@@ -409,13 +423,18 @@ class AgentConfigLoader:
         return await asyncio.to_thread(cls.load_from_yaml, path)
 
     @classmethod
-    async def load_from_directory_async(cls, dir_path: str | Path) -> list[AgentConfig]:
+    async def load_from_directory_async(
+        cls, dir_path: str | Path, *, strict: bool = True
+    ) -> list[AgentConfig]:
         """异步版本的 load_from_directory，将同步 I/O 卸载到线程池。
 
         Args:
             dir_path: 目录路径。
+            strict: 透传给 ``load_from_directory``，详见该方法说明。
 
         Returns:
             AgentConfig 列表。
         """
-        return await asyncio.to_thread(cls.load_from_directory, dir_path)
+        return await asyncio.to_thread(
+            cls.load_from_directory, dir_path, strict=strict
+        )

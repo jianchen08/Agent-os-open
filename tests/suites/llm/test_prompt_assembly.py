@@ -9,7 +9,8 @@
 
 测试覆盖：
     1. prompt_build 只产出 state["system_message"]（纯 prompt），不含历史和动态变量
-    2. prompt_build 按 layer_order 顺序组装（system_prompt → static_vars → knowledge → memory → L3 → L2 → L1）
+    2. prompt_build 按 layer_order 顺序组装（system_prompt → tools_description → static_vars）
+       记忆/知识不再自动拼入：仅 static_vars 配 retrieval/tags 时 opt-in（_retrieve_by_tags）
     3. prompt_build 默认不拼入 tools_description（走 function calling）
     4. tool_schema 默认不写 prompt.tool_descriptions
     5. LLMCore._build_messages 从多来源组装（system_message + compression + history + dynamic_vars）
@@ -153,8 +154,8 @@ class TestPromptBuildLayerOrder:
         assert "可用工具" in content
 
     @pytest.mark.asyncio
-    async def test_knowledge_context_included(self) -> None:
-        """knowledge.context 被拼入 system_message（在 static_vars 之后）。"""
+    async def test_knowledge_context_not_auto_injected(self) -> None:
+        """knowledge.context 不再无条件拼入 system_message（仅 static_vars opt-in）。"""
         plugin = PromptBuildPlugin(config={"include_static_vars": False, "include_compressed_layers": False})
         state = make_base_state()
         state["knowledge.context"] = "## 知识库\nPython 异常处理最佳实践"
@@ -163,12 +164,12 @@ class TestPromptBuildLayerOrder:
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        assert "知识库" in content
-        assert "Python 异常处理最佳实践" in content
+        assert "知识库" not in content
+        assert "Python 异常处理最佳实践" not in content
 
     @pytest.mark.asyncio
-    async def test_memory_retrieved_included(self) -> None:
-        """memory.retrieved 被拼入 system_message（在 knowledge 之后）。"""
+    async def test_memory_retrieved_not_auto_injected(self) -> None:
+        """memory.retrieved 不再无条件拼入 system_message。"""
         plugin = PromptBuildPlugin(config={"include_static_vars": False, "include_compressed_layers": False})
         state = make_base_state()
         state["knowledge.context"] = "知识内容"
@@ -178,9 +179,29 @@ class TestPromptBuildLayerOrder:
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        knowledge_pos = content.index("知识内容")
-        memory_pos = content.index("记忆检索")
-        assert memory_pos > knowledge_pos
+        assert "知识内容" not in content
+        assert "记忆检索" not in content
+
+    @pytest.mark.asyncio
+    async def test_memory_injected_via_retrieval_static_var(self) -> None:
+        """static_vars 配 type: retrieval + tags 时，记忆经 _retrieve_by_tags opt-in 进 prompt。"""
+        mock_memory_service = MagicMock()
+        mock_memory_service.retrieve = AsyncMock(
+            return_value=[MagicMock(content="用户偏好用 Python 处理数据")],
+        )
+        plugin = PromptBuildPlugin(config={"include_compressed_layers": False})
+        state = make_base_state()
+        state["user_id"] = "user-1"
+        state["context.static_vars"] = [
+            {"type": "retrieval", "name": "相关记忆", "tags": ["preference"], "top_k": 3},
+        ]
+        ctx = make_ctx(state, memory_service=mock_memory_service)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "用户偏好用 Python 处理数据" in content
+        mock_memory_service.retrieve.assert_called()
 
     @pytest.mark.asyncio
     async def test_compressed_layers_order_keywords_l2_l1(self) -> None:
@@ -961,8 +982,6 @@ class TestFullAssemblyPipeline:
         llm_core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
 
         state = make_base_state()
-        state["knowledge.context"] = "## 知识库\n项目使用 Python 开发"
-        state["memory.retrieved"] = "## 记忆检索\n上次讨论了架构设计"
         state["messages"] = [
             {"role": "user", "content": "帮我设计架构"},
             {"role": "assistant", "content": "好的，让我分析一下..."},
@@ -1115,8 +1134,6 @@ class TestFullAssemblyPipeline:
         state["context_window"] = 500
         state["prompt.tool_descriptions"] = "## 工具\n- search: 搜索"
         state["context.static_vars"] = [{"type": "content", "name": "项目", "value": "AgentOS"}]
-        state["knowledge.context"] = "知识内容"
-        state["memory.retrieved"] = "记忆内容"
 
         chunk_service = MagicMock()
         async def mock_find(pid, layer):
@@ -1157,8 +1174,6 @@ class TestFullAssemblyPipeline:
             "system_prompt": system_content.index("AI 助手"),
             "tools": system_content.index("工具"),
             "static_vars": system_content.index("静态变量"),
-            "knowledge": system_content.index("知识内容"),
-            "memory": system_content.index("记忆内容"),
         }
         sys_order = list(sys_positions.values())
         assert sys_order == sorted(sys_order), (

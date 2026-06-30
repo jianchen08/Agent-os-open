@@ -13,6 +13,16 @@ import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { openFile } from '@/services/fileOpener'
 import './index.css'
 
+// BUG-FIX-fix_20260630_reload_scroll_restore:
+// 浏览器默认 scrollRestoration='auto'，刷新时会在 DOMContentLoaded 阶段
+// 自动恢复上次的滚动位置（早于 React 渲染）。MessageList 的 pinToBottom
+// 即使在 useLayoutEffect 同步执行，也在浏览器恢复之后 → 用户看到先停在
+// "旧位置"，等 React 渲染 + pinToBottom 才跳底 → "先停再跳"中间态。
+// 设为 manual 禁用浏览器自动恢复，由应用代码（pinToBottom）完全接管定位。
+if ('scrollRestoration' in history) {
+  history.scrollRestoration = 'manual'
+}
+
 /**
  * 初始化应用
  *
