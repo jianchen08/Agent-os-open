@@ -104,7 +104,7 @@ plugins:
       enabled: true
       # trigger_ratio 不在此配置，从 config/system/context_window_config.yaml 的
       # compress_trigger_ratio 继承（三层覆盖：agent > pipeline > system > 默认）
-      compression_model: minimax-m3-guangfang
+      compression_model: minimax-m3
   - name: tool_schema
     config:
       enabled: true

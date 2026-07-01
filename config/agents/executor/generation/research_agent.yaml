@@ -1,7 +1,7 @@
 config_id: research_agent
 name: 调研专家
 description: "通用调研Agent，负责各类调研任务：\n- 根据调研目标制定调研计划\n- 搜索网络、现有资源、文档资料\n- 整理分析调研信息，自动标注信源等级\n- 输出结构化调研报告，结论-来源强制绑定\n  "
-model_name: minimax-m3-guangfang
+model_name: minimax-m3
 model_tier: small
 agent_type: specialized
 category: analysis
