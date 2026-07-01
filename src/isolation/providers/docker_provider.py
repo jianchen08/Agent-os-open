@@ -33,6 +33,12 @@ class DockerProvider(IsolationProvider):
         # pids 限制，防 fork 炸弹吃光系统进程表
         self._pids_limit = self._config.get("pids_limit", 100)
         self._network_mode = self._config.get("network_mode", "bridge")
+        # 发布端口(system-issue #3 escape hatch)：把容器端口映射到宿主。
+        # 容器内 agent 起的 server 若需被宿主/其它容器访问，配置如 ["8080:8080"]。
+        # 注意：仅在非 host 网络下生效；bridge(默认)正好满足。server 还必须绑
+        # 0.0.0.0（绑 127.0.0.1 时即使有 -p 映射，宿主仍打不通——已复现验证）。
+        # 默认空：主方案是「容器内 server + 浏览器同处容器自测」，无需映射。
+        self._publish_ports = list(self._config.get("publish_ports", []))
         self._workspace_mount = self._config.get("workspace_mount", True)
         self._environments: dict[str, IsolationEnvironment] = {}
         self._docker_available: bool | None = None
@@ -373,6 +379,12 @@ class DockerProvider(IsolationProvider):
             # 进程数上限，防 fork 炸弹吃光系统进程表
             "--pids-limit", str(self._pids_limit),
             "--network", self._network_mode,
+        ]
+        # 发布端口(system-issue #3 escape hatch)：把容器端口映射到宿主。
+        # 见 __init__ 中 self._publish_ports 的说明。
+        for port_spec in self._publish_ports:
+            args.extend(["-p", str(port_spec)])
+        args += [
             "-i", "-t",
         ]
 

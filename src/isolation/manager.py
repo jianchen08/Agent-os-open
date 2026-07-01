@@ -88,6 +88,8 @@ def _create_providers_from_config(
                 "memory_swap": memory_swap,
                 "pids_limit": pids_limit,
                 "network_mode": docker_config.get("network_mode", "bridge"),
+                # system-issue #3 escape hatch：容器端口映射到宿主，默认空。
+                "publish_ports": docker_config.get("publish_ports", []),
             },
         )
         logger.debug(
