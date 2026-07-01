@@ -35,12 +35,12 @@ def get_workspace_config_root() -> str:
 
 
 def get_isolation_level() -> str:
-    """从配置文件读取隔离级别，读取失败则返回默认值 container"""
+    """从配置文件读取隔离级别，读取失败则返回默认值 isolated"""
     config = _load_isolation_config()
     level = config.get("coordinator", {}).get("default_level")
     if level:
         return str(level)
-    return "container"
+    return "isolated"
 
 
 def resolve_container_workspace_path(workspace: str | None, task_id: str,
@@ -49,10 +49,10 @@ def resolve_container_workspace_path(workspace: str | None, task_id: str,
 
     BUG-FIX-fix_20260519_container_workspace_path:
     规则：
-    - 有 workspace + host 模式 → 返回 workspace（原空间）
+    - 有 workspace + non_isolated 模式 → 返回 workspace（原空间）
     - 其余所有情况 → 返回 ws_root/container_{task_id}（配置空间）
     """
-    if workspace and (isolation_mode or get_isolation_level()) == "host":
+    if workspace and (isolation_mode or get_isolation_level()) == "non_isolated":
         return workspace
     ws_root = get_workspace_config_root()
     return f"{ws_root}/container_{task_id}"

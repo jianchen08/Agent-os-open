@@ -168,14 +168,14 @@ class HealthChecker:
                 "status": "healthy",
                 "docker_available": True,
                 "active_environments": env_count,
-                "mode": "container",
+                "mode": "isolated",
             }
         return {
             "status": "degraded",
             "docker_available": False,
-            "detail": f"Docker 不可用: {reason}，工具将在宿主机执行",
+            "detail": f"Docker 不可用: {reason}，工具将在非隔离模式执行",
             "active_environments": env_count,
-            "mode": "host",
+            "mode": "non_isolated",
         }
 
     def full_check(self) -> dict[str, Any]:

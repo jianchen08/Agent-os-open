@@ -745,8 +745,8 @@ context_variables:
 #       | code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
 #       | test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |
 #       ### 隔离规则
-#       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
-#       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
+      #       - isolated（默认）：不指定 isolation_level，产出物自动在工作空间中
+      #       - non_isolated：必须指定 isolation_level="non_isolated"，Agent 直接操作项目路径
 #       ### 评估规则
 #       - Agent 评估器（semantic_check）会调用 LLM，有较高 token 成本
 #       - 重要任务（核心功能、影响项目质量、用户强调质量）→ 可用 semantic_check

@@ -62,10 +62,10 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         isolation_mode = task_data.get("isolation_mode", "") or ""
         ws_base = self._get_workspace_root()
 
-        if workspace and isolation_mode == "host":
+        if workspace and isolation_mode == "non_isolated":
             path = Path(workspace)
             self._ensure_dir_and_git(path)
-            logger.debug("[WorkspaceLifecycle] host模式复用原空间: task_id=%s, path=%s",
+            logger.debug("[WorkspaceLifecycle] non_isolated模式复用原空间: task_id=%s, path=%s",
                         container_task_id, path)
         else:
             path = ws_base / f"container_{container_task_id}"
@@ -123,14 +123,14 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         """子任务启动：通过 TaskService API 查找父任务，共享父工作空间"""
         _isolation_mode = (task_data.get("isolation_mode", "")
                            or self._config.get("coordinator", {}).get("default_level", ""))
-        if _isolation_mode == "host":
+        if _isolation_mode == "non_isolated":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
             if host_path:
                 meta = {"mode": "shared", "path": host_path}
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
-                    "[WorkspaceLifecycle] host 隔离模式(子任务): 共享目录 "
+                    "[WorkspaceLifecycle] non_isolated 隔离模式(子任务): 共享目录 "
                     "task_id=%s, path=%s, container_ws=%s",
                     task_id, host_path, container_ws,
                 )
@@ -221,13 +221,13 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             self._ws_meta_store[task_id] = meta
             return meta
 
-        # ── Host isolation mode ──
-        # host 模式不建 worktree、不切分支，但通过 task_id + project_root
+        # ── Non-isolated isolation mode ──
+        # non_isolated 模式不建 worktree、不切分支，但通过 task_id + project_root
         # 让 on_before_evaluate 把产出 commit 到当前分支，
         # 避免改动被后续任务的 auto-save 混入错误的 commit message。
         _isolation_mode = (task_data.get("isolation_mode", "")
                            or self._config.get("coordinator", {}).get("default_level", ""))
-        if _isolation_mode == "host":
+        if _isolation_mode == "non_isolated":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
             if host_path:
@@ -239,7 +239,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 }
                 self._ws_meta_store[task_id] = meta
                 logger.debug(
-                    "[WorkspaceLifecycle] host 隔离模式: 直接操作目录 "
+                    "[WorkspaceLifecycle] non_isolated 隔离模式: 直接操作目录 "
                     "task_id=%s, path=%s, container_ws=%s（无 git worktree/branch）",
                     task_id, host_path, container_ws,
                 )
@@ -304,11 +304,11 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             except Exception:
                 logger.warning("[WorkspaceLifecycle] 工作空间初始化异常", exc_info=True)
 
-        # HOST 模式：直接操作项目目录，不创建 worktree 隔离
+        # NON_ISOLATED 模式：直接操作项目目录，不创建 worktree 隔离
         # 同上：保留 task_id + project_root，供 on_before_evaluate 用准确的
         # commit message 提交，避免被其他任务的 auto-save 顺手带走。
         isolation_level = task_data.get("isolation_level", "")
-        if isolation_level == "host":
+        if isolation_level == "non_isolated":
             scenario, project_root = self._detect_scenario(workspace, task_data)
             root_path = Path(project_root)
             if not root_path.exists():
@@ -321,7 +321,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             }
             self._ws_meta_store[task_id] = meta
             logger.debug(
-                "[WorkspaceLifecycle] HOST模式: task_id=%s, 直接操作项目目录: %s",
+                "[WorkspaceLifecycle] NON_ISOLATED模式: task_id=%s, 直接操作项目目录: %s",
                 task_id,
                 root_path,
             )

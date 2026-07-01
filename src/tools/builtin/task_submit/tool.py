@@ -244,16 +244,16 @@ class TaskSubmitTool(BuiltinTool):
                             "不设置则创建空的工作空间。"
                             "非容器任务（子任务）：不设置时系统自动基于父容器空间创建 worktree；"
                             "传入目标项目路径时基于该项目创建 worktree。"
-                            "如需直接在目标项目目录工作（不隔离），设置 isolation_level 为 host。"
+                            "如需直接在目标项目目录工作（不隔离），设置 isolation_level 为 non_isolated。"
                         ),
                     },
                     "isolation_level": {
                         "type": "string",
-                        "enum": ["host", "container"],
+                        "enum": ["non_isolated", "isolated"],
                         "description": (
                             "隔离级别（可选，默认使用系统配置）。"
-                            "host：直接在原空间工作，不做隔离。适合在已有项目上直接修改。"
-                            "container：在隔离的工作空间中工作，不影响原项目。"
+                            "non_isolated：非隔离，直接在原空间工作。适合在已有项目上直接修改。"
+                            "isolated：隔离，在隔离的工作空间中工作，不影响原项目。"
                         ),
                     },
                     "inherit": {
@@ -805,11 +805,11 @@ class TaskSubmitTool(BuiltinTool):
 
         # ── 5.5 解析子任务隔离模式（继承规则）──
         # 源空间（workspace）沿父任务链解析，与隔离模式无关；此处只决定隔离模式：
-        # - 父任务是 container（容器任务）→ 直接子任务不继承，使用默认隔离（container）模式，
+        # - 父任务是 container（容器任务）→ 直接子任务不继承，使用默认隔离（isolated）模式，
         #   清除 LLM 传入值。
         # - 父任务非 container（含容器孙任务、非容器根任务的子任务）→ 子任务继承直接父任务的
         #   isolation_level，一律忽略 LLM 显式传入的值（隔离模式为系统控制项）。
-        # 最终「实际 ws」由隔离模式决定：host → 源空间本身；container → 源空间的 worktree。
+        # 最终「实际 ws」由隔离模式决定：non_isolated → 源空间本身；isolated → 源空间的 worktree。
         if parent_task_id:
             _parent_task = None
             try:
@@ -1239,7 +1239,7 @@ class TaskSubmitTool(BuiltinTool):
         if lifecycle is None:
             return task, "工作空间管理器不可用，任务提交失败"
 
-        # 注入 isolation_mode（lifecycle 内部依赖此字段决策 worktree/host 模式）
+        # 注入 isolation_mode（lifecycle 内部依赖此字段决策 worktree/non_isolated 模式）
         if "isolation_mode" not in task_data:
             iso_level = (task.metadata or {}).get("isolation_level", "")
             if iso_level:

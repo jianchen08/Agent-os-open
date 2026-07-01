@@ -21,12 +21,12 @@ class IsolationLevel(str, Enum):
     """隔离级别
 
     定义两种隔离级别：
-    - CONTAINER: Docker 容器隔离
-    - HOST: 直接执行（宿主机）
+    - CONTAINER: 隔离的工作空间（不影响原项目），字符串值 "isolated"
+    - HOST: 直接执行（在原空间工作，不做隔离），字符串值 "non_isolated"
     """
 
-    CONTAINER = "container"
-    HOST = "host"
+    CONTAINER = "isolated"
+    HOST = "non_isolated"
 
 
 class TaskType(str, Enum):
@@ -73,7 +73,7 @@ class IsolationContext:
     workspace: str | None = None  # 工作目录路径（相对路径或绝对路径）
     parent_workspace: str | None = None  # 父任务的工作目录（子任务时使用）
     is_root_task: bool = True  # 是否为根任务
-    isolation_level: IsolationLevel = IsolationLevel.CONTAINER  # 隔离级别
+    isolation_level: IsolationLevel = IsolationLevel.CONTAINER  # 隔离级别（默认隔离）
     requires_approval: bool = False  # 是否需要人工审批（HOST 模式需要）
     metadata: dict[str, Any] = field(default_factory=dict)
 

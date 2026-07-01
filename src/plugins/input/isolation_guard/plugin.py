@@ -195,8 +195,8 @@ class IsolationGuard(IInputPlugin):
 
         规则（按优先级）：
         1. 先查工具级 policy（isolation_policy.yaml）确定工具的隔离能力
-        2. task metadata 的 isolation_level 只允许降级（container→host），
-           不允许提升（host→container），避免把不支持容器的工具塞进容器
+        2. task metadata 的 isolation_level 只允许降级（isolated→non_isolated），
+           不允许提升（non_isolated→isolated），避免把不支持容器的工具塞进容器
         3. Docker 不可用时：要求容器的工具一律拒绝（返回 blocked），
            不降级到 host——降级会让属于其它容器/工作区的任务静默落到本进程执行
         4. 命令含宿主路径（如 D:/...、C:\\...）时，即使 policy 要求容器，
@@ -240,12 +240,12 @@ class IsolationGuard(IInputPlugin):
             )
 
         # ── metadata 覆盖：只允许降级，不允许提升 ──
-        # policy 是 host 的工具（如 file_write/task_submit），即使 metadata
-        # 要求 container 也不路由到 docker（容器内没有工具代码，会报
+        # policy 是 non_isolated 的工具（如 file_write/task_submit），即使 metadata
+        # 要求 isolated 也不路由到 docker（容器内没有工具代码，会报
         # "[isolated] tool=xxx not supported in container"）。
         if metadata_isolation and policy_isolation == IsolationLevel.CONTAINER:
             # policy 允许容器的工具（如 bash_execute），metadata 可控制实际级别
-            if metadata_isolation == "container":
+            if metadata_isolation == "isolated":
                 if self._docker_available:
                     return self._build_context(
                         tool_name, "docker", "task_metadata",
@@ -346,7 +346,7 @@ class IsolationGuard(IInputPlugin):
         context: dict[str, Any] = {
             "tool_name": tool_name,
             "provider": provider,
-            "level": "denied" if blocked else ("container" if provider == "docker" else "host"),
+            "level": "denied" if blocked else ("isolated" if provider == "docker" else "non_isolated"),
             "reason": reason,
         }
         if blocked:

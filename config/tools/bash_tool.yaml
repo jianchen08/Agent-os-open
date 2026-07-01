@@ -63,12 +63,12 @@ security:
 # 隔离配置
 isolation:
   enabled: true  # 默认启用隔离
-  default_level: "container"  # 默认隔离级别：host/container
+  default_level: "isolated"  # 默认隔离级别：non_isolated/isolated
   
   # 隔离级别映射
   level_mapping:
-    host: "直接执行（宿主机）"
-    container: "容器隔离（Docker）"
+    non_isolated: "非隔离（直接执行）"
+    isolated: "隔离（容器/Docker）"
 
 # 缓存配置
 cache:

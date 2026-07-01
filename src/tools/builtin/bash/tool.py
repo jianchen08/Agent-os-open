@@ -326,7 +326,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为
         # 安全检查由管道层 SecurityCheckPlugin 和 ApprovalDecisionEngine 统一处理
         warning = None
-        is_isolated = inputs.get("_isolation_provider") in ("docker", "container")
+        is_isolated = inputs.get("_isolation_provider") in ("docker", "isolated")
         if not is_isolated:
             is_safe, needs_warning, message = self.security.check(command)
             if not is_safe:

@@ -146,7 +146,7 @@ class IsolationPolicyLoader:
         if not data:
             return ToolIsolationPolicy()
         return ToolIsolationPolicy(
-            isolation=IsolationLevel(data.get("isolation", "container")),
+            isolation=IsolationLevel(data.get("isolation", "isolated")),
             execution=data.get("execution", "command_in_container"),
             network=data.get("network"),
             checkpoint=data.get("checkpoint", False),
