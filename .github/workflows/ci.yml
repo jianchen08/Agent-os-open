@@ -455,17 +455,24 @@ jobs:
 
       - name: Start Backend (FastAPI, in-memory mode)
         env:
-          PYTHONPATH: src
+          # sys.path 需同时含 src（让 from channels.* 可导入）和仓库根
+          # （让 from src.* 可导入，源码里两种导入风格混用）
           BACKEND_PORT: "8988"
           # 内存模式：不依赖外部 Redis，CI 友好
           API_STORE_BACKEND: memory
+          # 默认 admin 凭证：后端仅在配置 DEFAULT_ADMIN_PASSWORD 时才创建 admin
+          # 账号（无兜底密码设计）。e2e 测试用此凭证登录，弱密码仅限 CI 测试环境。
+          DEFAULT_ADMIN_PASSWORD: admin123456
         run: |
-          python -m channels.websocket.app_factory --port 8988 > backend.log 2>&1 &
+          # 不能用 `python -m`（if __name__=="__main__" 不触发，main() 不执行），
+          # 也不能直接 `python src/.../app_factory.py`（sys.path[0] 变成脚本目录，
+          # channels 包找不到）。用 python -c 显式设置 sys.path 后调用 main()。
+          python -c "import sys; sys.path[:0]=['src','.']; from channels.websocket.app_factory import main; main()" > backend.log 2>&1 &
           echo $! > backend.pid
-          # 等待后端就绪（最长 60s）
+          # 等待后端就绪（本地实测 ~8s，预留余量到 60s）
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8988/docs > /dev/null 2>&1; then
-              echo "✓ 后端已就绪 (port 8988)"
+            if curl -sf http://localhost:8988/health > /dev/null 2>&1; then
+              echo "✓ 后端已就绪 (port 8988, 第 ${i}s)"
               break
             fi
             if [ "$i" -eq 60 ]; then
