@@ -162,7 +162,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 流式占位先到
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG, _threadId: THREAD_ID }))
-    // 系统通知后到（瞬态 WS 事件，后端不持久化，刷新会消失）
+    // 系统通知后到
     handleSystemNotification(notificationEvent('任务完成'))
 
     // 流式期间 store 渲染顺序 = 到达顺序：user-1 → 占位 → 通知（在最下面）
@@ -170,17 +170,18 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(beforeIds[0]).toBe('user-1')
     expect(beforeIds[1]).toBe(MSG)
     expect(beforeIds[beforeIds.length - 1]).toMatch(/^sys_/)
+    const sysId = beforeIds[beforeIds.length - 1] as string
 
     // 切 Tab 触发 initFromAPI：API 只返回 user-1
-    // 系统通知是瞬态事件（既非 assistant streaming 也非带 clientMessageId 的 user），
-    // 不进 localOnly，刷新后消失（符合后端不持久化 system_notification 的设计）。
-    // 流式占位（assistant streaming）进 localOnly，保持到达顺序追加到 API 末尾。
+    // 系统通知是 AI 消息之间的结构分隔符，必须保留：即使后端不在历史 API 中返回，
+    // 刷新/切 Tab 后 system 仍留在列表里，作为前后 AI 气泡的边界，避免被错误合并。
+    // 流式占位（assistant streaming）与 system 一起进 localOnly，保持到达顺序追加到 API 末尾。
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
     ])
 
-    // 期望：API user-1 在前，流式占位保持到达顺序在末尾（不是按 sequence 归并插中间）
-    expect(ids()).toEqual(['user-1', MSG])
+    // 期望：API user-1 在前，localOnly（占位 + system）按到达顺序在末尾
+    expect(ids()).toEqual(['user-1', MSG, sysId])
   })
 
   it('场景3: 上级注入 user 消息占 sequence + 流式占位，刷新后不互相覆盖、顺序正确', () => {

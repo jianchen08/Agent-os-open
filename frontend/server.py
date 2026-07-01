@@ -138,21 +138,21 @@ async def proxy_api(request: Request, path: str):
 # ---------------------------------------------------------------------------
 # WebSocket 代理 → 后端容器
 # ---------------------------------------------------------------------------
-@app.websocket("/ws/{path:path}")
-async def proxy_websocket(websocket: WebSocket, path: str):
-    """将 /ws/* 请求代理到后端 WebSocket，保留路径和 query string"""
+async def _relay_websocket(websocket: WebSocket, path: str):
+    """WebSocket 双向转发核心（被 /ws 和 /ws/{path} 共享）"""
     await websocket.accept()
 
     # 构建后端 WS URL，保留完整路径和 query string（含 token）
-    backend_ws_url = f"{BACKEND_WS_URL}/ws/{path}"
+    backend_ws_url = f"{BACKEND_WS_URL}/ws"
+    if path:
+        backend_ws_url += f"/{path}"
     query_string = websocket.url.query
     if query_string:
         backend_ws_url += f"?{query_string}"
 
     try:
         async with websockets.connect(backend_ws_url) as backend_ws:
-            # 双向转发
-            async def client_to_backend():
+            async def _client_to_backend():
                 try:
                     while True:
                         data = await websocket.receive_text()
@@ -160,7 +160,7 @@ async def proxy_websocket(websocket: WebSocket, path: str):
                 except (WebSocketDisconnect, websockets.exceptions.ConnectionClosed):
                     pass
 
-            async def backend_to_client():
+            async def _backend_to_client():
                 try:
                     async for message in backend_ws:
                         await websocket.send_text(message)
@@ -168,8 +168,8 @@ async def proxy_websocket(websocket: WebSocket, path: str):
                     pass
 
             await asyncio.gather(
-                client_to_backend(),
-                backend_to_client(),
+                _client_to_backend(),
+                _backend_to_client(),
             )
     except Exception as e:
         print(f"[WS Proxy] 连接后端失败: {e}")
@@ -178,6 +178,18 @@ async def proxy_websocket(websocket: WebSocket, path: str):
             await websocket.close()
         except Exception:
             pass
+
+
+@app.websocket("/ws")
+async def proxy_websocket_root(websocket: WebSocket):
+    """将 /ws 代理到后端 WebSocket（无额外路径——前端浏览器直连的就是这个）"""
+    await _relay_websocket(websocket, "")
+
+
+@app.websocket("/ws/{path:path}")
+async def proxy_websocket(websocket: WebSocket, path: str):
+    """将 /ws/{path} 代理到后端 WebSocket，保留路径和 query string"""
+    await _relay_websocket(websocket, path)
 
 
 # ---------------------------------------------------------------------------
