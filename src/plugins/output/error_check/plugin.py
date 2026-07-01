@@ -145,9 +145,10 @@ class ErrorCheckPlugin(IOutputPlugin):
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
             raw_tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
             if not raw_tool_calls and self._is_empty_response(raw_result):
-                # 空响应 + 无记忆/知识 → 可能是知识不足
-                if self._check_knowledge_insufficient and self._is_knowledge_insufficient(ctx):
-                    return self._handle_knowledge_insufficient(ctx)
+                # 空响应直接归 empty_response（它有自己的重试语义）。
+                # 不在此用"无记忆/知识"抢判 knowledge_insufficient：默认配置下两个
+                # state 恒空，会导致空响应永远被吞、empty_response 成死分支。
+                # knowledge_insufficient 仅在 LLM 显式声明"我不知道"时判定（见下）。
                 return self._handle_empty_response(ctx)
 
         # 检查 LLM 回复中的知识不足指示
@@ -637,6 +638,11 @@ class ErrorCheckPlugin(IOutputPlugin):
     def _handle_knowledge_insufficient(self, ctx: PluginContext) -> dict[str, Any]:
         """处理知识不足。
 
+        memory.retrieved / knowledge.context 是否为空是确定性状态（由配置和
+        记忆库内容决定），重试时输入阶段拿到的还是同样的空值，根因不会自愈。
+        因此标记为不可重试，直接 failed —— 与 strategy_error 的"不可重试"语义一致，
+        避免无效重试空耗配额（历史：子任务曾因 retryable=True 反复重试 6 次仍失败）。
+
         Args:
             ctx: 插件执行上下文
 
@@ -647,7 +653,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         category = "knowledge_insufficient"
         consecutive = self._track_consecutive_error(ctx, category)
         analysis = {
-            "retryable": True,
+            "retryable": False,
             "reason": (
                 "Knowledge insufficient: no memory "
                 "or knowledge context available"
@@ -655,23 +661,6 @@ class ErrorCheckPlugin(IOutputPlugin):
             "category": category,
             "retry_count": retry_count,
         }
-
-        if retry_count < self._max_retries:
-            return {
-                StateKeys.EXECUTION_STATUS: "needs_retry",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "retry.count": retry_count + 1,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="next_llm",
-                    reason=(
-                        f"Knowledge insufficient, retry "
-                        f"{retry_count + 1}/"
-                        f"{self._max_retries}"
-                    ),
-                ),
-            }
         return {
             StateKeys.EXECUTION_STATUS: "failed",
             StateKeys.ERROR_ANALYSIS: analysis,
@@ -679,7 +668,7 @@ class ErrorCheckPlugin(IOutputPlugin):
             "error_check.consecutive_same_type": consecutive,
             "__route_signal__": RouteSignal(
                 route_type="end",
-                reason="Knowledge insufficient after max retries",
+                reason="Knowledge insufficient (not retryable: memory/knowledge absence is deterministic)",
             ),
         }
 
