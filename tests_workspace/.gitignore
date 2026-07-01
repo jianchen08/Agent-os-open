@@ -1,9 +1,0 @@
-data/
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-node_modules/
-.env
-*.log
-*.bak
