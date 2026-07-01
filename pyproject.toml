@@ -32,12 +32,30 @@ document = [
 ]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
-# 指向实际存在的测试根目录（原值 "src/tests" 不存在，导致 pytest 默认配置落空）。
+# 合并自原 pytest.ini（已删除），pyproject.toml 为唯一 pytest 配置来源。
 # CI 显式列出子目录跑纯单测；本地全量跑可用 `pytest tests/`。
+minversion = "7.0"
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+log_cli = false
+log_cli_level = "WARNING"
 markers = [
-    "integration: LLM integration tests (require --run-integration)",
+    "unit: 单元测试",
+    "integration: 集成测试",
+    "e2e: 端到端测试",
+    "slow: 慢速测试",
+    "requires_api: 需要真实 API 的测试",
+    "requires_redis: 需要 Redis 的测试",
+    "requires_db: 需要数据库的测试",
+    "offline: 可离线运行的测试",
+]
+filterwarnings = [
+    "ignore::sqlalchemy.exc.SADeprecationWarning",
+    "ignore::sqlalchemy.exc.SAWarning",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
 ]
 
 [tool.setuptools.packages.find]
