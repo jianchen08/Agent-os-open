@@ -672,45 +672,10 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
     agent_name: str | None = None
 
 
-    _content_stripped = (record.content or "").lstrip()
-
-    _is_system_user_msg = (
-
-        record.type == "user"
-
-        and _content_stripped
-
-        and (
-
-            _content_stripped.startswith("[系统提示]")
-
-            or _content_stripped.startswith("[系统通知]")
-
-            or _content_stripped.startswith("[系统提醒]")
-
-            or _content_stripped.startswith("[触发器通知]")
-
-        )
-
-    )
-
-    if _is_system_user_msg:
-
-        role = "system"
-
-        metadata = {
-
-            "record_type": "system",
-
-            "type": "system",
-
-            "sender_type": "system",
-
-            "notification_level": "info",
-
-            "notification_type": "system_notification",
-
-        }
+    # 系统通知记录在落盘时 type 已为 "system"（见 track 插件
+    # _extract_injected_content 分支），不再靠内容前缀反向识别。
+    # 历史数据中 type="user" 但带 [系统通知] 等前缀的记录，
+    # 刷新后按普通 user 文本渲染（内容不丢，仅样式折衷）。
 
 
     if record.type == "ai":
