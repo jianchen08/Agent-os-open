@@ -2,7 +2,7 @@
 
 规则（已与需求确认）：
 - 父任务是 container（容器任务，metadata.task_scope == "container"）→ 直接子任务
-  不继承 isolation_level，使用默认隔离（container）模式，清除 LLM 传入值。
+  不继承 isolation_level，使用默认隔离（isolated）模式，清除 LLM 传入值。
 - 父任务非 container（含容器孙任务、非容器根任务的子任务）→ 子任务继承直接父任务的
   isolation_level，一律忽略 LLM 显式传入的值（隔离模式为系统控制项）。
 
@@ -142,14 +142,14 @@ class TestContainerChildNoInherit:
 
     @pytest.mark.asyncio
     async def test_container_child_strips_llm_host(self):
-        """父任务 container（isolation_level=host），子任务 LLM 传 host → 子任务 metadata 无 isolation_level。"""
+        """父任务 container（isolation_level=non_isolated），子任务 LLM 传 non_isolated → 子任务 metadata 无 isolation_level。"""
         tool = TaskSubmitTool()
         parent_task = _make_parent_task(
-            task_scope="container", isolation_level="host",
+            task_scope="container", isolation_level="non_isolated",
         )
         inputs = _make_minimal_inputs(
             parent_task_id=parent_task.id,
-            isolation_level="host",
+            isolation_level="non_isolated",
         )
 
         result, mock_task_service = await _run_execute(tool, inputs, parent_task)
@@ -162,10 +162,10 @@ class TestContainerChildNoInherit:
 
     @pytest.mark.asyncio
     async def test_container_child_default_when_parent_host(self):
-        """父任务 container + isolation_level=host，子任务未传 → 子任务 metadata 无 isolation_level。"""
+        """父任务 container + isolation_level=non_isolated，子任务未传 → 子任务 metadata 无 isolation_level。"""
         tool = TaskSubmitTool()
         parent_task = _make_parent_task(
-            task_scope="container", isolation_level="host",
+            task_scope="container", isolation_level="non_isolated",
         )
         inputs = _make_minimal_inputs(parent_task_id=parent_task.id)
 
@@ -185,51 +185,51 @@ class TestNonContainerChildInherits:
 
     @pytest.mark.asyncio
     async def test_grandchild_inherits_host(self):
-        """父任务非 container + isolation_level=host → 子任务 metadata isolation_level=host。"""
+        """父任务非 container + isolation_level=non_isolated → 子任务 metadata isolation_level=non_isolated。"""
         tool = TaskSubmitTool()
         parent_task = _make_parent_task(
-            task_scope="non_container", isolation_level="host",
+            task_scope="non_container", isolation_level="non_isolated",
         )
         inputs = _make_minimal_inputs(parent_task_id=parent_task.id)
 
         result, mock_task_service = await _run_execute(tool, inputs, parent_task)
 
         metadata = mock_task_service.create_task.call_args.kwargs.get("metadata", {})
-        assert metadata.get("isolation_level") == "host", (
-            f"孙任务应继承父任务 isolation_level=host，实际 metadata: {metadata}"
+        assert metadata.get("isolation_level") == "non_isolated", (
+            f"孙任务应继承父任务 isolation_level=non_isolated，实际 metadata: {metadata}"
         )
 
     @pytest.mark.asyncio
     async def test_grandchild_inherits_container(self):
-        """父任务非 container + isolation_level=container → 子任务 metadata isolation_level=container。"""
+        """父任务非 container + isolation_level=isolated → 子任务 metadata isolation_level=isolated。"""
         tool = TaskSubmitTool()
         parent_task = _make_parent_task(
-            task_scope="non_container", isolation_level="container",
+            task_scope="non_container", isolation_level="isolated",
         )
         inputs = _make_minimal_inputs(parent_task_id=parent_task.id)
 
         result, mock_task_service = await _run_execute(tool, inputs, parent_task)
 
         metadata = mock_task_service.create_task.call_args.kwargs.get("metadata", {})
-        assert metadata.get("isolation_level") == "container"
+        assert metadata.get("isolation_level") == "isolated"
 
     @pytest.mark.asyncio
     async def test_grandchild_ignores_llm_value(self):
-        """父任务 isolation_level=container，LLM 传 host → 子任务继承 container，丢弃 host。"""
+        """父任务 isolation_level=isolated，LLM 传 non_isolated → 子任务继承 isolated，丢弃 non_isolated。"""
         tool = TaskSubmitTool()
         parent_task = _make_parent_task(
-            task_scope="non_container", isolation_level="container",
+            task_scope="non_container", isolation_level="isolated",
         )
         inputs = _make_minimal_inputs(
             parent_task_id=parent_task.id,
-            isolation_level="host",
+            isolation_level="non_isolated",
         )
 
         result, mock_task_service = await _run_execute(tool, inputs, parent_task)
 
         metadata = mock_task_service.create_task.call_args.kwargs.get("metadata", {})
-        assert metadata.get("isolation_level") == "container", (
-            f"孙任务应忽略 LLM 的 host 改为继承父任务 container，实际 metadata: {metadata}"
+        assert metadata.get("isolation_level") == "isolated", (
+            f"孙任务应忽略 LLM 的 non_isolated 改为继承父任务 isolated，实际 metadata: {metadata}"
         )
 
     @pytest.mark.asyncio
@@ -241,7 +241,7 @@ class TestNonContainerChildInherits:
         )
         inputs = _make_minimal_inputs(
             parent_task_id=parent_task.id,
-            isolation_level="host",
+            isolation_level="non_isolated",
         )
 
         result, mock_task_service = await _run_execute(tool, inputs, parent_task)

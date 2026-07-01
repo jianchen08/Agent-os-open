@@ -354,8 +354,8 @@ class TestIsolationTypes:
     """隔离系统类型定义验证。"""
 
     def test_isolation_level_values(self):
-        assert IsolationLevel.CONTAINER == "container"
-        assert IsolationLevel.HOST == "host"
+        assert IsolationLevel.CONTAINER == "isolated"
+        assert IsolationLevel.HOST == "non_isolated"
 
     def test_isolation_environment_defaults(self):
         from isolation.types import IsolationContext, IsolationEnvironment, TaskType

@@ -546,7 +546,7 @@ class TestInheritPipeConversationHistoryBug:
                 "inherit_pipe_from": "source_task_001",
                 "target_id": "test_agent",
                 "ws_meta": {"path": "/tmp/ws"},
-                "isolation_level": "host",
+                "isolation_level": "non_isolated",
                 "workspace": "/tmp/ws",
             },
             pipeline_run_id="current_pipeline_id",

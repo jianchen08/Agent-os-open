@@ -144,7 +144,7 @@ class TestContainerWorkspaceCopy:
         meta = lifecycle.init_container_workspace(
             container_task_id="container_host",
             workspace=str(source),
-            task_data={"isolation_mode": "host"},
+            task_data={"isolation_mode": "non_isolated"},
         )
 
         # host 模式 path 就是原空间

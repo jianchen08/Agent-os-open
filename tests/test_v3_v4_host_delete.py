@@ -1,8 +1,8 @@
 """
-V3+V4 验证测试：Host模式任务 + 删除任务
+V3+V4 验证测试：Non-isolated模式任务 + 删除任务
 
 验证覆盖：
-- V3-1: Host模式下worktree策略（不创建worktree，直接操作项目目录）
+- V3-1: Non-isolated模式下worktree策略（不创建worktree，直接操作项目目录）
 - V3-2: 危险操作审批（写入/执行类工具触发审批）
 - V3-3: 只读操作无弹窗（只读工具免审批）
 - V4-1: 后端级联清理范围（任务文件+子任务+管道+worktree）
@@ -54,59 +54,59 @@ def _make_wslm(tmp: str, config: dict | None = None):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# V3-1: Host模式 Worktree 策略验证
+# V3-1: Non-isolated模式 Worktree 策略验证
 # ═══════════════════════════════════════════════════════════════════
 
 class TestV3HostWorktreeStrategy:
-    """验证 Host 模式下不创建 worktree，直接操作项目目录。"""
+    """验证 Non-isolated 模式下不创建 worktree，直接操作项目目录。"""
 
     def test_host_mode_sets_plain_mode_no_worktree(self):
-        """V3-1.1: Host模式下workspace_lifecycle返回mode='plain'，不创建worktree。
+        """V3-1.1: Non-isolated模式下workspace_lifecycle返回mode='plain'，不创建worktree。
 
         代码分析结论（src/isolation/workspace_lifecycle.py L581-591）：
-        当 isolation_mode == 'host' 时，设置 meta = {"mode": "plain", "path": base_path}
+        当 isolation_mode == 'non_isolated' 时，设置 meta = {"mode": "plain", "path": base_path}
         不做任何 git worktree/branch 操作。
         """
         tmp = tempfile.mkdtemp()
         try:
-            mgr, _ = _make_wslm(tmp, config={"coordinator": {"default_level": "host"}})
-            task_data = {"isolation_mode": "host"}
+            mgr, _ = _make_wslm(tmp, config={"coordinator": {"default_level": "non_isolated"}})
+            task_data = {"isolation_mode": "non_isolated"}
             meta = mgr.on_task_start("test_host_task_001", tmp, task_data)
 
             assert meta["mode"] == "plain", (
-                f"Host模式应使用mode='plain'，实际: {meta['mode']}"
+                f"Non-isolated模式应使用mode='plain'，实际: {meta['mode']}"
             )
             assert meta["path"] == str(tmp), (
-                f"Host模式path应指向项目目录，实际: {meta['path']}"
+                f"Non-isolated模式path应指向项目目录，实际: {meta['path']}"
             )
             # 不应有 branch 或 worktree 相关字段
-            assert "branch" not in meta, "Host模式不应创建git分支"
-            assert "project_root" not in meta, "Host模式plain模式不应设置project_root"
+            assert "branch" not in meta, "Non-isolated模式不应创建git分支"
+            assert "project_root" not in meta, "Non-isolated模式plain模式不应设置project_root"
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_host_mode_subtask_shares_parent_workspace(self):
-        """V3-1.2: Host模式子任务共享父工作空间（mode='shared'）。
+        """V3-1.2: Non-isolated模式子任务共享父工作空间（mode='shared'）。
 
         代码分析结论（src/isolation/workspace_lifecycle.py L389-399）：
-        _start_subtask 中 isolation_mode == 'host' 时，
+        _start_subtask 中 isolation_mode == 'non_isolated' 时，
         meta = {"mode": "shared", "path": base_path}
         """
         tmp = tempfile.mkdtemp()
         try:
-            mgr, _ = _make_wslm(tmp, config={"coordinator": {"default_level": "host"}})
-            task_data = {"isolation_mode": "host"}
+            mgr, _ = _make_wslm(tmp, config={"coordinator": {"default_level": "non_isolated"}})
+            task_data = {"isolation_mode": "non_isolated"}
             meta = mgr._start_subtask("sub_task_001", tmp, task_data)
 
             assert meta["mode"] == "shared", (
-                f"Host模式子任务应使用mode='shared'，实际: {meta['mode']}"
+                f"Non-isolated模式子任务应使用mode='shared'，实际: {meta['mode']}"
             )
             assert meta["path"] == str(tmp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_host_mode_cleanup_is_noop_for_plain(self):
-        """V3-1.3: Host模式(plain)的cleanup_workspace是空操作。
+        """V3-1.3: Non-isolated模式(plain)的cleanup_workspace是空操作。
 
         代码分析结论（src/isolation/workspace_lifecycle.py L1194-1212）：
         cleanup_workspace 中 mode == 'plain' 时直接 pass，
@@ -132,7 +132,7 @@ class TestV3HostWorktreeStrategy:
     def test_container_mode_creates_worktree(self):
         """V3-1.4（对比参照）: 容器模式下创建worktree进行隔离。
 
-        代码分析结论：非Host模式通过 _worktree_add_with_repair 创建worktree，
+        代码分析结论：非Non-isolated模式通过 _worktree_add_with_repair 创建worktree，
         meta["mode"] = "worktree"，有branch字段。
         """
         tmp = tempfile.mkdtemp()
@@ -142,9 +142,9 @@ class TestV3HostWorktreeStrategy:
             task_data = {"_has_explicit_workspace": False}
             meta = mgr.on_task_start("container_task_001", tmp, task_data)
 
-            # 非host且无容器关联 → 走 plain 模式（因为没有.git）
+            # 非non-isolated且无容器关联 → 走 plain 模式（因为没有.git）
             assert meta["mode"] in ("plain", "worktree"), (
-                f"非Host模式预期worktree或plain（无git时），实际: {meta['mode']}"
+                f"isolated模式预期worktree或plain（无git时），实际: {meta['mode']}"
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -155,7 +155,7 @@ class TestV3HostWorktreeStrategy:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestV3DangerousOperationApproval:
-    """验证 Host 模式下危险操作触发审批。"""
+    """验证 Non-isolated 模式下危险操作触发审批。"""
 
     @pytest.fixture
     def engine(self):
@@ -163,7 +163,7 @@ class TestV3DangerousOperationApproval:
 
     @pytest.mark.asyncio
     async def test_host_mode_dangerous_tool_requires_approval(self, engine):
-        """V3-2.1: Host模式下危险工具（file_write/bash_execute等）需要审批。
+        """V3-2.1: Non-isolated模式下危险工具（file_write/bash_execute等）需要审批。
 
         代码分析结论（src/isolation/approval.py L319-333）：
         当 isolation_level == HOST 且 tool_safety == "dangerous" 时，
@@ -181,7 +181,7 @@ class TestV3DangerousOperationApproval:
             )
             decision = await engine.decide(ctx)
             assert decision.requires_approval is True, (
-                f"Host模式下工具 '{tool_name}' 应需要审批，实际: {decision.requires_approval}"
+                f"Non-isolated模式下工具 '{tool_name}' 应需要审批，实际: {decision.requires_approval}"
             )
             assert decision.decision_type == "NEEDS_APPROVAL"
             assert "HOST_MODE" in decision.risk_factors
@@ -189,10 +189,10 @@ class TestV3DangerousOperationApproval:
 
     @pytest.mark.asyncio
     async def test_host_mode_unknown_tool_requires_approval(self, engine):
-        """V3-2.2: Host模式下未知工具默认需要审批（安全优先）。
+        """V3-2.2: Non-isolated模式下未知工具默认需要审批（安全优先）。
 
         代码分析结论（src/isolation/approval.py L335-371）：
-        未知工具在Host模式下先检测危险操作，无则仍需审批。
+        未知工具在Non-isolated模式下先检测危险操作，无则仍需审批。
         """
         ctx = ApprovalContext(
             tool_name="custom_unknown_tool",
@@ -200,14 +200,14 @@ class TestV3DangerousOperationApproval:
         )
         decision = await engine.decide(ctx)
         assert decision.requires_approval is True, (
-            "Host模式下未知工具应需要审批（安全优先）"
+            "Non-isolated模式下未知工具应需要审批（安全优先）"
         )
         assert decision.decision_type == "NEEDS_APPROVAL"
         assert "HOST_MODE" in decision.risk_factors
 
     @pytest.mark.asyncio
     async def test_host_mode_unknown_tool_with_dangerous_op(self, engine):
-        """V3-2.3: Host模式下未知工具检测到危险操作时审批（更高风险分）。
+        """V3-2.3: Non-isolated模式下未知工具检测到危险操作时审批（更高风险分）。
 
         代码分析结论（src/isolation/approval.py L337-356）：
         未知工具+检测到危险操作 → risk_score=0.9, NEEDS_APPROVAL
@@ -266,7 +266,7 @@ class TestV3DangerousOperationApproval:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestV3ReadOnlyNoApproval:
-    """验证 Host 模式下只读工具免审批。"""
+    """验证 Non-isolated 模式下只读工具免审批。"""
 
     @pytest.fixture
     def engine(self):
@@ -274,7 +274,7 @@ class TestV3ReadOnlyNoApproval:
 
     @pytest.mark.asyncio
     async def test_host_mode_safe_tools_auto_approved(self, engine):
-        """V3-3.1: Host模式下安全工具（file_read/search等）自动批准，无需审批。
+        """V3-3.1: Non-isolated模式下安全工具（file_read/search等）自动批准，无需审批。
 
         代码分析结论（src/isolation/approval.py L303-317）：
         isolation_level == HOST 且 tool_safety == "safe" 时，
@@ -287,7 +287,7 @@ class TestV3ReadOnlyNoApproval:
             )
             decision = await engine.decide(ctx)
             assert decision.requires_approval is False, (
-                f"Host模式下安全工具 '{tool_name}' 不应需要审批"
+                f"Non-isolated模式下安全工具 '{tool_name}' 不应需要审批"
             )
             assert decision.decision_type == "AUTO_APPROVED"
             assert decision.risk_score <= 0.2, (
@@ -296,7 +296,7 @@ class TestV3ReadOnlyNoApproval:
 
     @pytest.mark.asyncio
     async def test_non_host_mode_all_auto_approved(self, engine):
-        """V3-3.2: 非Host模式（容器模式）下所有工具自动批准。
+        """V3-3.2: 非Non-isolated模式（容器模式）下所有工具自动批准。
 
         代码分析结论（src/isolation/approval.py L373-400）：
         非HOST模式 → 第3层决策 → requires_approval=False
@@ -507,7 +507,7 @@ class TestV4ContainerSpacePreservation:
 
     @pytest.mark.asyncio
     async def test_workspace_cleanup_plain_mode_is_noop(self, tmp_path):
-        """V4-2.4: Host/plain模式workspace清理不删除目录。
+        """V4-2.4: Non-isolated/plain模式workspace清理不删除目录。
 
         代码分析结论（src/isolation/workspace_lifecycle.py L1211-1212）：
         mode == 'plain' 时 cleanup_workspace 直接 pass。
@@ -654,7 +654,7 @@ class TestIsolationDecider:
         decider = IsolationDecider()
         policy = decider.resolve("bash_execute")
         # HOST级别确实需要审批
-        assert IsolationLevel.HOST.value == "host"
+        assert IsolationLevel.HOST.value == "non_isolated"
 
     def test_fallback_order_is_container_then_host(self):
         """IsolationDecider: 降级顺序为 CONTAINER → HOST。"""

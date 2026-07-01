@@ -149,7 +149,7 @@ class TestIsolationGuard:
         """应使用 ctx.get_service() 获取 task_service。"""
         mock_task_service = MagicMock()
         mock_task = MagicMock()
-        mock_task.metadata = {"isolation_level": "host", "workspace": "/tmp"}
+        mock_task.metadata = {"isolation_level": "non_isolated", "workspace": "/tmp"}
         mock_task_service.get_task.return_value = mock_task
 
         plugin = self._make_plugin()
@@ -176,7 +176,7 @@ class TestIsolationGuard:
         # 模拟 decider.resolve 返回值
         mock_policy = MagicMock()
         mock_policy.isolation = MagicMock()
-        mock_policy.isolation.value = "host"
+        mock_policy.isolation.value = "non_isolated"
         plugin._decider.resolve = MagicMock(return_value=mock_policy)
 
         # 工具调用无 name 键

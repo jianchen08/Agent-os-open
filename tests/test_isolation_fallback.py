@@ -135,10 +135,10 @@ class TestGuardMetadataPath:
     """metadata 路径在 Docker 不可用时一律 blocked。"""
 
     def test_metadata_container_docker_unavailable_blocked(self):
-        """metadata 要求 container + Docker 不可用 → blocked（不降级）。"""
+        """metadata 要求 isolated + Docker 不可用 → blocked（不降级）。"""
         guard = _make_guard(docker_available=False)
         ctx = _make_ctx(state={"task_id": "test-task"})
-        guard._get_task_metadata = lambda c: {"isolation_level": "container"}
+        guard._get_task_metadata = lambda c: {"isolation_level": "isolated"}
 
         result = guard._decide_isolation("bash_execute", ctx)
 
@@ -147,10 +147,10 @@ class TestGuardMetadataPath:
         assert "docker_unavailable" in result["reason"]
 
     def test_metadata_container_docker_available(self):
-        """metadata 要求 container + Docker 可用 → docker。"""
+        """metadata 要求 isolated + Docker 可用 → docker。"""
         guard = _make_guard(docker_available=True)
         ctx = _make_ctx(state={"task_id": "test-task"})
-        guard._get_task_metadata = lambda c: {"isolation_level": "container"}
+        guard._get_task_metadata = lambda c: {"isolation_level": "isolated"}
 
         result = guard._decide_isolation("bash_execute", ctx)
 
@@ -158,10 +158,10 @@ class TestGuardMetadataPath:
         assert result.get("blocked") is not True
 
     def test_metadata_host(self):
-        """metadata 要求 host → 直接 host（不检查 Docker 可用性）。"""
+        """metadata 要求 non_isolated → 直接 host（不检查 Docker 可用性）。"""
         guard = _make_guard(docker_available=False)
         ctx = _make_ctx(state={"task_id": "test-task"})
-        guard._get_task_metadata = lambda c: {"isolation_level": "host"}
+        guard._get_task_metadata = lambda c: {"isolation_level": "non_isolated"}
 
         result = guard._decide_isolation("bash_execute", ctx)
 
