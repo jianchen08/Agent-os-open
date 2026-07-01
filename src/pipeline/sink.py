@@ -47,11 +47,14 @@ class TargetedSink:
         thread_id: str,
         *,
         pipeline_id: str = "",
+        user_id: str = "",
     ) -> None:
         """初始化定向输出目标。"""
         self._notifier = notifier
         self._thread_id = thread_id
         self._pipeline_id = pipeline_id
+        # 注入的 user_id（优先级最高，避免每次反查 registry）
+        self._user_id = user_id
         # 连续失败计数：累积到阈值时升级日志级别，便于发现持续不可用的 sink
         self._consecutive_failures: int = 0
 
@@ -85,6 +88,37 @@ class TargetedSink:
             )
         return ""
 
+    def _resolve_user_id(self) -> str:
+        """解析发送目标 user_id：优先注入值 → thread→user 映射 → registry tags 反查。"""
+        # 1. 构造时注入的 user_id（最高优先级）
+        if self._user_id:
+            return self._user_id
+        # 2. notifier 维护的 thread→user 映射（重连后仍可用）
+        _mapped = getattr(self._notifier, "get_user_for_thread", None)
+        if _mapped is not None:
+            _tid = self._resolve_thread_id()
+            if _tid:
+                _uid = _mapped(_tid)
+                if _uid:
+                    self._user_id = _uid
+                    return _uid
+        # 3. registry tags 兜底反查
+        if self._pipeline_id:
+            try:
+                from pipeline.registry import get_engine_registry  # noqa: PLC0415
+                entry = get_engine_registry().get(self._pipeline_id)
+                if entry:
+                    _uid = (entry.tags or {}).get("user_id", "")
+                    if _uid:
+                        self._user_id = _uid
+                        return _uid
+            except Exception:
+                logger.debug(
+                    "TargetedSink._resolve_user_id: registry 查找失败 pipeline=%s",
+                    self._pipeline_id[:12], exc_info=True,
+                )
+        return ""
+
     def _record_failure(self, event: dict, *, exc_info: bool = False) -> None:
         """记录一次推送失败，连续超过阈值时升级为 ERROR 日志。"""
         self._consecutive_failures += 1
@@ -112,12 +146,14 @@ class TargetedSink:
             self._consecutive_failures = 0
 
     async def send_event(self, event: dict) -> bool:
-        """通过 WebSocket 推送事件。"""
-        # 动态解析 thread_id：构造时为空 → 此刻从 registry 兜底
-        # （见 ）
-        target_tid = self._resolve_thread_id()
+        """通过 WebSocket 推送事件（按 user_id 精确路由）。"""
+        user_id = self._resolve_user_id()
         try:
-            ok = await self._notifier.send_to_thread(target_tid, event)
+            if user_id and hasattr(self._notifier, "send_to_user"):
+                ok = await self._notifier.send_to_user(user_id, event)
+            else:
+                # 无 user_id 兜底：回退到 thread 路由（内部会按映射/广播处理）
+                ok = await self._notifier.send_to_thread(self._resolve_thread_id(), event)
             if not ok:
                 self._record_failure(event)
             else:
@@ -135,18 +171,22 @@ def create_targeted_sink(
     thread_id: str = "",
     *,
     pipeline_id: str = "",
+    user_id: str = "",
 ) -> TargetedSink | None:
     """统一 TargetedSink 创建入口，消除散点。"""
     if not notifier:
         return None
 
-    # 优先使用传入的 thread_id，仅当为空时从 registry 兜底
-    if not thread_id and pipeline_id:
+    # 优先使用传入的 thread_id / user_id，仅当为空时从 registry 兜底
+    if (not thread_id or not user_id) and pipeline_id:
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(pipeline_id)
             if entry:
-                thread_id = entry.thread_id
+                if not thread_id:
+                    thread_id = entry.thread_id
+                if not user_id:
+                    user_id = (entry.tags or {}).get("user_id", "")
         except Exception:
             logger.debug(
                 "create_targeted_sink: registry 查找失败 pipeline=%s",
@@ -159,9 +199,8 @@ def create_targeted_sink(
             pipeline_id[:12] if pipeline_id else "(无)",
         )
 
-    # 把 pipeline_id 传进 sink，便于 thread_id 后续到位后能动态解析
-    # （见 ）
-    return TargetedSink(notifier, thread_id, pipeline_id=pipeline_id)
+    # 把 pipeline_id / user_id 传进 sink，便于后续动态解析
+    return TargetedSink(notifier, thread_id, pipeline_id=pipeline_id, user_id=user_id)
 
 
 class MultiChannelSink:

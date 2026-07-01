@@ -187,9 +187,6 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
 
     app = create_app(lifespan=_combined_lifespan)
 
-    # WebSocket 连接管理
-    active_connections: dict[str, list[WebSocket]] = ws_interaction_notifier._active_connections
-
     # 每个 thread_id 的对话历史
     conversation_histories: dict[str, list[dict[str, Any]]] = {}
 
@@ -293,14 +290,12 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                         except Exception as exc:
                             logger.warning("TaskWorker start failed (global ws): %s", exc)
 
-                    if thread_id not in active_connections:
-                        active_connections[thread_id] = []
-                    if websocket not in active_connections[thread_id]:
-                        active_connections[thread_id].append(websocket)
                     if thread_id not in conversation_histories:
                         conversation_histories[thread_id] = []
 
-                    ws_interaction_notifier.register(thread_id, websocket)
+                    # 单连接架构：真正的 ws 注册在 register_global(user_id)；
+                    # 这里只建立 thread_id → user_id 逻辑映射，供流式发送路径反查。
+                    ws_interaction_notifier.register_thread_user(thread_id, user_id)
 
                     try:
                         _pipeline_msg = parse_frontend_message(msg_data)
@@ -327,7 +322,9 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     # - 主管道：会话映射 thread["agent_id"]（注册时写入 tags，重建时从会话读）
                     # - 子任务管道：任务数据 task.metadata["target_id"]
                     # 引擎 idle 重启用引擎自带 _agent_config；revive 从持久化数据重建。
-                    _sink = create_targeted_sink(ws_interaction_notifier, thread_id) if _pipeline_ctx and _pipeline_ctx.available else None
+                    _sink = create_targeted_sink(
+                        ws_interaction_notifier, thread_id, user_id=user_id,
+                    ) if _pipeline_ctx and _pipeline_ctx.available else None
 
                     _history = conversation_histories.get(thread_id, [])
 
@@ -495,17 +492,14 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         except Exception as exc:
             logger.error("[GlobalWS] 消息循环异常: user=%s err=%s", user_id[:12], exc)
         finally:
+            # 在清理前先反查该 user 名下的 thread（供 conversation_histories 清理）
+            removed_tids = [
+                tid for tid, uid in ws_interaction_notifier._thread_user_map.items()
+                if uid == user_id
+            ]
             ws_interaction_notifier.unregister_global(user_id, websocket)
-            removed_tids: list[str] = []
-            for tid in list(active_connections.keys()):
-                if websocket in active_connections.get(tid, []):
-                    active_connections[tid] = [c for c in active_connections[tid] if c != websocket]
-                    if not active_connections[tid]:
-                        removed_tids.append(tid)
             ws_interaction_notifier.unregister_all_for_ws(websocket)
             for tid in removed_tids:
-                # unregister_all_for_ws 已经把空列表从 _active_connections 删了，
-                # 这里仅同步清理本地 conversation_histories。
                 conversation_histories.pop(tid, None)
 
     # 挂载媒体文件静态服务（必须放在所有路由注册之后）

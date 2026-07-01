@@ -598,7 +598,7 @@ class _TaskCleanupMixin:
 
         await self.hard_delete(task_id)
 
-        # WebSocket 通知
+        # WebSocket 通知（按 user_id 精确路由，与 task_service 一致）
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             _provider = get_service_provider()
@@ -608,31 +608,18 @@ class _TaskCleanupMixin:
                     "type": "task_deleted",
                     "data": {"task_id": task_id, "title": task_title},
                 }
-                _parent_pid = getattr(task, "parent_pipeline_id", "") or ""
-                _ws_tid = ""
-                if _parent_pid and hasattr(_ws_notifier, "get_thread_for_pipeline"):
-                    _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pid)
-                if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
-                    await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
+                _user_id = (task.metadata.get("user_id") if task.metadata else "") or ""
+                if _user_id and hasattr(_ws_notifier, "send_to_user"):
+                    await _ws_notifier.send_to_user(_user_id, _ws_payload)
                     logger.debug(
-                        "[TaskService] task_deleted 已通过 send_to_thread 发送 | task_id=%s",
-                        task_id,
+                        "[TaskService] task_deleted 已通过 send_to_user 发送 | task_id=%s user=%s",
+                        task_id, _user_id[:12],
                     )
-                elif hasattr(_ws_notifier, "send_to_user"):
-                    _conns = getattr(_ws_notifier, "_active_connections", {})
-                    _global_conns = getattr(_ws_notifier, "_global_connections", {})
-                    if _conns or _global_conns:
-                        for _tid, _ws_list in _conns.items():
-                            for _ws in _ws_list:
-                                with contextlib.suppress(Exception):
-                                    await _ws.send_json(_ws_payload)
-                        for _uid, _ws_list in _global_conns.items():
-                            for _ws in _ws_list:
-                                with contextlib.suppress(Exception):
-                                    await _ws.send_json(_ws_payload)
-                        logger.debug(
-                            "[TaskService] task_deleted 已广播 | task_id=%s", task_id,
-                        )
+                else:
+                    logger.debug(
+                        "[TaskService] task metadata 缺 user_id，task_deleted 未推送 | task=%s",
+                        task_id[:12],
+                    )
         except Exception as _ws_exc:
             logger.warning("[TaskService] task_deleted 广播失败: %s", _ws_exc)
 

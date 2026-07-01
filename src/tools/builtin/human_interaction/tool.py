@@ -312,9 +312,10 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         request_id: str | None = None
         try:
+            _session_id = inputs.get("session_id") or pipeline_id
             request_id = await service.create_choice_request(
-                session_id=pipeline_id,
-                thread_id=pipeline_id,
+                session_id=_session_id,
+                thread_id=_session_id,
                 tab_id=pipeline_id,
                 title=title,
                 description=description,
@@ -323,7 +324,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 timeout_seconds=timeout_seconds,
                 priority=priority,
                 file_paths=file_paths,
-                user_id=None,
+                user_id=inputs.get("user_id"),
                 agent_id=pipeline_id,
                 agent_level=agent_level_str,
                 pipeline_id=pipeline_id,
@@ -452,16 +453,17 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         request_id: str | None = None
         try:
+            _session_id = inputs.get("session_id") or pipeline_id
             request_id = await service.create_conversation_request(
-                session_id=pipeline_id,
-                thread_id=pipeline_id,
+                session_id=_session_id,
+                thread_id=_session_id,
                 tab_id=pipeline_id,
                 title=title,
                 description=description,
                 initial_message=initial_message,
                 suggestions=suggestions,
                 file_paths=file_paths,
-                user_id=None,
+                user_id=inputs.get("user_id"),
                 agent_id=pipeline_id,
                 agent_level=agent_level_str,
                 pipeline_id=pipeline_id,
@@ -586,14 +588,16 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
 
         try:
+            _session_id = inputs.get("session_id") or pipeline_id
             request_id = await service.send_notification(
-                session_id=pipeline_id,
-                thread_id=pipeline_id,
+                session_id=_session_id,
+                thread_id=_session_id,
                 title=title,
                 message=description or initial_message or "",
                 priority=priority,
                 progress=progress,
                 agent_id=pipeline_id,
+                user_id=inputs.get("user_id"),
             )
 
             return create_success_result(

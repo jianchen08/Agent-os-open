@@ -143,6 +143,7 @@ class HumanInteractionService(IHumanInteractionService):
         progress: float | None = None,
         agent_id: str | None = None,
         file_paths: list[str] | None = None,
+        user_id: str | None = None,
     ) -> str:
         """发送非阻塞通知，不等待用户响应，立即返回 request_id。"""
         request_id = str(uuid4())
@@ -154,7 +155,7 @@ class HumanInteractionService(IHumanInteractionService):
             description=message,
             thread_id=thread_id,
             tab_id="",
-            user_id=None,
+            user_id=user_id,
             agent_id=agent_id,
             extra={
                 "progress": progress,

@@ -12,16 +12,13 @@ export { API_BASE_URL, API_ENDPOINTS, API_TIMEOUT, API_RETRY_COUNT, API_RETRY_DE
 // 导出WebSocket常量
 export {
   WS_BASE_URL,
-  WS_RECONNECT_CONFIG,
   WS_HEARTBEAT_CONFIG,
   WS_SERVER_EVENTS,
   WS_CLIENT_MESSAGES,
   APPROVAL_DECISIONS,
-  DEFAULT_RETRY_POLICY,
 } from './websocket'
 export type {
   WebSocketServerEventType,
   WebSocketClientMessageType,
   ApprovalDecisionType,
-  RetryPolicy,
 } from './websocket'

@@ -348,6 +348,7 @@ class SecurityCheckPlugin(IInputPlugin):
                     {"id": "denied", "label": "拒绝执行"},
                 ],
                 priority=Priority.HIGH,
+                user_id=ctx.state.get("user_id"),
             )
 
             logger.info(

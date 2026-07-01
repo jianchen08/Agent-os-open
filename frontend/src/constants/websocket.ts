@@ -173,8 +173,6 @@ export const WS_SERVER_EVENTS = {
   ITERATION_START: 'iteration_start',
   /** 迭代结束 */
   ITERATION_END: 'iteration_end',
-  /** 遗漏消息响应（重连后服务端发送） */
-  MISSED_MESSAGES: 'missed_messages',
   /** 会话更新（新建/删除/修改会话时推送） */
   SESSION_UPDATE: 'session_update',
   /** 成本更新（Token 用量变化时推送） */
@@ -207,8 +205,6 @@ export const WS_CLIENT_MESSAGES = {
   EXECUTION_CONTROL: 'execution_control',
   /** 消息 ACK 确认（确认收到关键消息） */
   MESSAGE_ACK: 'message_ack',
-  /** 请求遗漏消息（重连后请求断线期间的消息） */
-  REQUEST_MISSED: 'request_missed',
 } as const
 
 /**
@@ -232,20 +228,6 @@ export type WebSocketClientMessageType =
   (typeof WS_CLIENT_MESSAGES)[keyof typeof WS_CLIENT_MESSAGES]
 
 export type ApprovalDecisionType = (typeof APPROVAL_DECISIONS)[keyof typeof APPROVAL_DECISIONS]
-
-/**
- * WebSocket重连配置
- */
-export const WS_RECONNECT_CONFIG = {
-  /** 最大重连次数 */
-  MAX_RETRIES: 5,
-  /** 初始重连延迟（毫秒） */
-  INITIAL_DELAY: 1000,
-  /** 最大重连延迟（毫秒） */
-  MAX_DELAY: 30000,
-  /** 延迟增长因子（指数退避） */
-  BACKOFF_FACTOR: 2,
-} as const
 
 /**
  * WebSocket心跳配置
@@ -296,40 +278,6 @@ export enum WebSocketErrorCode {
   UNSUPPORTED_TYPE = 4003,
   /** 连接被新连接替换（不应重连） */
   CONNECTION_REPLACED = 4004,
-}
-
-/**
- * WebSocket重试策略接口
- */
-export interface RetryPolicy {
-  /** 最大重试次数 */
-  maxRetries: number
-  /** 初始重连延迟（毫秒） */
-  initialDelay: number
-  /** 最大重连延迟（毫秒） */
-  maxDelay: number
-  /** 延迟增长因子（指数退避） */
-  backoffFactor: number
-  /** 可重试的错误码集合 */
-  retryableErrors: Set<WebSocketErrorCode>
-}
-
-/**
- * 默认重试策略配置
- *
- * 可重试的错误：连接丢失、超时、服务端错误（临时性）
- * 不可重试的错误：认证失败、令牌过期、连接数超限、消息格式错误等
- */
-export const DEFAULT_RETRY_POLICY: RetryPolicy = {
-  maxRetries: 3,
-  initialDelay: 1000,
-  maxDelay: 30000,
-  backoffFactor: 2,
-  retryableErrors: new Set([
-    WebSocketErrorCode.CONNECTION_LOST,
-    WebSocketErrorCode.TIMEOUT,
-    WebSocketErrorCode.SERVER_ERROR,
-  ]),
 }
 
 /**
@@ -409,13 +357,6 @@ export interface MessageAckMessage {
   received_at: string
 }
 
-/** 请求遗漏消息（重连后请求断线期间的消息） */
-export interface RequestMissedMessage {
-  type: typeof WS_CLIENT_MESSAGES.REQUEST_MISSED
-  /** 前端最后收到的消息 request_id */
-  last_received_request_id: string
-}
-
 /** 客户端消息联合类型 */
 export type WebSocketClientMessage =
   | UserInputMessage
@@ -425,7 +366,6 @@ export type WebSocketClientMessage =
   | UserInputResponseMessage
   | ExecutionControlMessage
   | MessageAckMessage
-  | RequestMissedMessage
 
 /** 状态变更事件 */
 export interface StateChangeEvent {
@@ -633,17 +573,6 @@ export interface IterationEndEvent {
   thread_id?: string
 }
 
-/** 遗漏消息响应事件（重连后服务端发送断线期间的消息） */
-export interface MissedMessagesEvent {
-  type: typeof WS_SERVER_EVENTS.MISSED_MESSAGES
-  /** 遗漏的消息列表 */
-  messages: Array<Record<string, unknown>>
-  /** 总遗漏消息数量 */
-  total: number
-  /** 是否还有更多未发送的消息 */
-  has_more: boolean
-}
-
 /** 服务端事件联合类型 */
 export type WebSocketServerEvent =
   | StateChangeEvent
@@ -663,7 +592,6 @@ export type WebSocketServerEvent =
   | SchemaUpdatedEvent
   | IterationStartEvent
   | IterationEndEvent
-  | MissedMessagesEvent
   | SubAgentCreatedEvent
   | SubAgentWaitingInputEvent
   | SubAgentCompletedEvent

@@ -154,7 +154,8 @@ class TestSendTimeoutHonoured:
         notifier = mod.WebSocketInteractionNotifier()
         ws = MagicMock()
         ws.send_text = AsyncMock(return_value=None)
-        notifier._active_connections["t1"] = [ws]
+        notifier.register_global("u1", ws)
+        notifier.register_thread_user("t1", "u1")
 
         captured: list[float] = []
         real_wait_for = asyncio.wait_for

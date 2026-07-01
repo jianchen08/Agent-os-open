@@ -990,12 +990,13 @@ class TestWSInteractionNotifier:
 
     @pytest.mark.asyncio
     async def test_send_to_thread_success(self):
-        """验证向指定 thread 发送事件成功。"""
+        """验证向指定 thread 发送事件成功（通过 thread→user 映射路由）。"""
         from channels.websocket.ws_handler import WebSocketInteractionNotifier
 
         notifier = WebSocketInteractionNotifier()
         mock_ws = AsyncMock()
-        notifier._active_connections["thread_123"] = [mock_ws]
+        notifier.register_global("user_123", mock_ws)
+        notifier.register_thread_user("thread_123", "user_123")
 
         event = {"type": "test_event", "data": {"msg": "hello"}}
         result = await notifier.send_to_thread("thread_123", event)
