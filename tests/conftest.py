@@ -23,7 +23,6 @@ collect_ignore = [
     "test_directory_generator.py",
     "test_memory_metrics.py",
     "test_pgvector_store.py",
-    "test_state_evolution_levels.py",
     "test_task_submit_event_chain.py",
     "test_yaml_error_chain.py",
     # suites 下因源码重构导致的导入错误（需源码修复后移除）：
