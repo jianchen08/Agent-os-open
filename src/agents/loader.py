@@ -43,6 +43,15 @@ logger = logging.getLogger(__name__)
 # 环境变量占位符模式：${VAR_NAME}
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
+# agent_type 合法键集合（单一真相源）。
+# config/schema.py 与本模块的 _resolve_agent_type 必须以此为准，
+# 否则热重载校验会误拒 orchestrator/atomic 等编排/原子 Agent 配置。
+# 注意：_resolve_agent_type 对未知值降级为 SPECIALIZED（宽容运行），
+# 但 schema 校验应拒绝未知值（严格校验），故合法集合=映射键本身。
+VALID_AGENT_TYPE_KEYS: frozenset[str] = frozenset(
+    {"main", "orchestrator", "specialized", "atomic", "system"}
+)
+
 
 def _substitute_env_vars(value: Any) -> Any:
     """递归替换字典/列表/字符串中的环境变量占位符。

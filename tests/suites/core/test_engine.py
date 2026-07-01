@@ -244,6 +244,8 @@ class TestPipelineEngine:
                 nonlocal arbitrate_calls
                 arbitrate_calls += 1
                 if arbitrate_calls == 1:
+                    # 标记有新输入，避免 text-only 的 next_llm 被降级为 wait 挂起
+                    state["_has_new_llm_input"] = True
                     # 找到 next_llm 信号
                     for s in signals:
                         if s.route_type == "next_llm":
@@ -338,6 +340,9 @@ class TestPipelineEngine:
                 self.entries = []
 
             def arbitrate(self, signals, state):
+                # 标记有新输入，避免 apply_route 把 text-only 的 next_llm
+                # 误降级为 wait（生产中由 input 插件注入；测试模拟持续对话场景）
+                state["_has_new_llm_input"] = True
                 return RouteSignal(route_type="next_llm", reason="keep_going", target="llm_call")
 
         input_table = InputRouteTable([
@@ -389,6 +394,8 @@ class TestPipelineEngine:
                 nonlocal arbitrate_calls
                 arbitrate_calls += 1
                 if arbitrate_calls == 1:
+                    # 标记有新输入，避免 text-only 的 next_llm 被降级为 wait 挂起
+                    state["_has_new_llm_input"] = True
                     return RouteSignal(route_type="next_llm", reason="continue", target="llm_call")
                 return RouteSignal(route_type="end", reason="done")
 
@@ -473,7 +480,9 @@ class TestSuspendAndWaitPendingNotifications:
 
     @pytest.mark.asyncio
     async def test_pending_notifications_consumed_on_suspend(self):
-        """管道挂起时自动消费在挂起前入队的通知。"""
+        """管道挂起时自动消费挂起期间入队的通知。"""
+        import asyncio
+
         from pipeline.engine import PipelineEngine
 
         services: dict[str, Any] = {"__test__": True}
@@ -484,11 +493,6 @@ class TestSuspendAndWaitPendingNotifications:
             services=services,
         )
         pipeline_id = "test-pipe-123"
-
-        engine._pending_notifications = [
-            "[系统通知] 子任务 'A' failed",
-            "[系统通知] 子任务 'B' completed",
-        ]
 
         engine._suspended_state = {
             StateKeys.PIPELINE_ID: pipeline_id,
@@ -501,9 +505,18 @@ class TestSuspendAndWaitPendingNotifications:
             "submitted_task_ids": ["child-a", "child-b"],
         }
 
+        # 挂起后异步注入通知：inject_message 入 _inject_queue 并 set wake_event，
+        # _suspend_and_wait 唤醒后 drain_inject_queue 消费并注入 suspended_state。
+        async def _inject_after_suspend():
+            await asyncio.sleep(0.05)
+            engine.inject_message("[系统通知] 子任务 'A' failed")
+            engine.inject_message("[系统通知] 子任务 'B' completed")
+
+        asyncio.create_task(_inject_after_suspend())
         await engine._suspend_and_wait(state)
 
-        assert engine._pending_notifications == []
+        # inject_queue 应被 drain 清空
+        assert engine._inject_queue == []
         injected = state.get("user_input", "")
         assert "子任务 'A'" in injected
         assert "子任务 'B'" in injected
@@ -665,22 +678,22 @@ class TestEnginePublicInterface:
         engine.wake()
 
     def test_inject_message_when_not_suspended(self):
-        """inject_message() 在引擎未挂起时入队到 _pending_notifications。"""
+        """inject_message() 在引擎未挂起时入队到 _inject_queue。"""
         engine = _build_engine()
         engine.inject_message("test message", source="system")
-        assert len(engine._pending_notifications) == 1
-        assert engine._pending_notifications[0] == "test message"
+        assert len(engine._inject_queue) == 1
+        assert engine._inject_queue[0] == "test message"
 
     def test_consume_pending_notifications(self):
-        """consume_pending_notifications 原子消费并清空通知队列。"""
+        """drain_inject_queue 原子消费并清空通知队列。"""
         engine = _build_engine()
-        engine._pending_notifications = ["msg1", "msg2", "msg3"]
-        result = engine.consume_pending_notifications()
+        engine._inject_queue = ["msg1", "msg2", "msg3"]
+        result = engine.drain_inject_queue()
         assert result == ["msg1", "msg2", "msg3"]
-        assert engine._pending_notifications == []
+        assert engine._inject_queue == []
 
     def test_consume_pending_notifications_empty(self):
         """无通知时返回空列表。"""
         engine = _build_engine()
-        result = engine.consume_pending_notifications()
+        result = engine.drain_inject_queue()
         assert result == []

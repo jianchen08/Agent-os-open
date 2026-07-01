@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import time as _time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from llm.exceptions import KeyPoolExhaustedError
+
+if TYPE_CHECKING:
+    from llm.error_classifier import ErrorInfo
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +82,31 @@ class PrioritySemaphore:
             _priority_label(priority), priority, len(self._waiters), queue_desc,
         )
 
-        await fut
+        try:
+            await fut
+        except asyncio.CancelledError:
+            # 被取消（首字节超时 / 用户停止）时，必须把自己的 waiter 从队列移除，
+            # 否则 (priority, fut) 残留成死占位：release()/grow() 撞到死 future 时
+            # 既不唤醒任何活等待者、也不回填 _value，可用许可被凭空吞掉，
+            # 每发生一次永久 -1 → LLM 排队越积越多且无法自愈。
+            # 注意区分两种 done：
+            #   - fut.cancelled()：自己是被 cancel 的（没拿到许可）→ 仅移除，不转交
+            #   - fut 有 result：自己已被 release/grow 唤醒（许可已交给我）→
+            #     此刻被取消要转交给下一个活等待者，许可不能凭空消失
+            if fut.cancelled():
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove((priority, fut))
+            elif fut.done():
+                # 自己已被唤醒但被取消：把这份许可转交给下一个活等待者
+                self._wake_next()
+            raise
 
-    def release(self) -> None:
-        """释放一个许可。唤醒最高优先级的等待者。"""
-        if self._waiters and self._value < self._capacity:
-            # 容量未满且有等待者：交给等待者，不增加 _value
+    def _wake_next(self) -> None:
+        """唤醒队首第一个「活的、未完成」的等待者；跳过死 future。
+
+        若没有可唤醒的活等待者，则回填 _value（许可归还池）。
+        """
+        while self._waiters:
             w_priority, fut = self._waiters.pop(0)
             if not fut.done():
                 fut.set_result(None)
@@ -90,6 +114,21 @@ class PrioritySemaphore:
                     "[PrioritySemaphore] 唤醒等待者 | level=%s priority=%d | remaining_waiters=%d",
                     _priority_label(w_priority), w_priority, len(self._waiters),
                 )
+                return
+            # 死 future（被 cancel 的 waiter）：直接丢弃，继续找下一个活的
+            logger.debug(
+                "[PrioritySemaphore] 跳过死 waiter | remaining_waiters=%d",
+                len(self._waiters),
+            )
+        # 没有活等待者：回填许可到池
+        if self._value < self._capacity:
+            self._value += 1
+
+    def release(self) -> None:
+        """释放一个许可。唤醒最高优先级的等待者。"""
+        if self._waiters and self._value < self._capacity:
+            # 容量未满且有等待者：交给等待者，不增加 _value
+            self._wake_next()
         elif self._value < self._capacity:
             self._value += 1
 
@@ -109,11 +148,9 @@ class PrioritySemaphore:
     def grow(self) -> int:
         """扩大容量 1（弹性回升）。返回扩容后的新容量。"""
         self._capacity += 1
-        # 扩容后可立即满足一个等待者
+        # 扩容后可立即满足一个等待者（跳过死 waiter）
         if self._waiters:
-            w_priority, fut = self._waiters.pop(0)
-            if not fut.done():
-                fut.set_result(None)
+            self._wake_next()
         else:
             self._value += 1
         logger.info(
@@ -135,6 +172,9 @@ class KeySlot:
     token_quota: int = 0
 
     # 运行时状态
+    # rpm-as-primary-limiter: rpm 是限流主参数。遇 RATE_LIMIT 降 _rpm_effective（地板 1），
+    # on_success 升 _rpm_effective（封顶 rpm_limit）。max_concurrent 不再因限流而变。
+    _rpm_effective: int = 0
     _semaphore: PrioritySemaphore | None = field(default=None, repr=False)
     _request_timestamps: list[float] = field(default_factory=list, repr=False)
     _tokens_used: int = 0
@@ -155,12 +195,22 @@ class KeySlot:
 
     @property
     def rpm_remaining(self) -> int:
-        """当前窗口内剩余可用请求数。"""
+        """当前窗口内剩余可用请求数（按生效 rpm 上限扣减已发请求）。"""
         if self.rpm_limit <= 0:
             return 9999
         now = _time.monotonic()
         self._evict_old(now)
-        return max(0, self.rpm_limit - len(self._request_timestamps))
+        effective = self._effective_rpm()
+        return max(0, effective - len(self._request_timestamps))
+
+    def _effective_rpm(self) -> int:
+        """当前生效的 rpm 上限（被降级时小于 rpm_limit，最低 1；rpm_limit<=0 不限）。"""
+        if self.rpm_limit <= 0:
+            return 9999
+        # _rpm_effective<=0 表示尚未初始化（首次），按 rpm_limit 起步
+        if self._rpm_effective <= 0:
+            self._rpm_effective = self.rpm_limit
+        return self._rpm_effective
 
     @property
     def token_remaining(self) -> int:
@@ -182,21 +232,34 @@ class KeySlot:
         """选 key 时的评分，越高越优先选。"""
         if self.is_cooling:
             return -1.0
-        rpm_ratio = self.rpm_remaining / max(self.rpm_limit, 1)
+        rpm_ratio = self.rpm_remaining / max(self._effective_rpm(), 1)
         token_ratio = self.token_remaining / max(self.token_quota, 1)
         return rpm_ratio * 0.6 + token_ratio * 0.4
 
     def record_request(self) -> None:
-        """记录一次请求。"""
+        """记录一次请求（占一个 rpm 名额）。
+
+        必须在 acquire() 之前调用：select() 的 rpm_remaining>0 检查与 acquire() 之间
+        若不占名额，并发请求可同时通过检查绕过本地 RPM 限流，全部放行上游导致 429。
+        """
         now = _time.monotonic()
         self._evict_old(now)
         self._request_timestamps.append(now)
+
+    def release_request(self) -> None:
+        """归还最近一次 record_request 占的 rpm 名额。
+
+        用于 acquire() 排队中被 cancel（未真正打上游）的请求——这种请求
+        若不归还名额，会虚占 rpm 窗口 60s，导致正常请求被误判为 rpm 耗尽而排队。
+        """
+        if self._request_timestamps:
+            self._request_timestamps.pop()
 
     def record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
         """记录一次请求的 token 消耗。"""
         self._tokens_used += prompt_tokens + completion_tokens
 
-    def handle_error(self, info: "ErrorInfo") -> None:
+    def handle_error(self, info: ErrorInfo) -> None:
         """按统一错误类型应用策略（取代旧的 on_rate_limit 万能方法）。"""
         from llm.error_classifier import ErrorKind  # noqa: PLC0415
 
@@ -206,9 +269,12 @@ class KeySlot:
         if kind == ErrorKind.RATE_LIMIT:
             cool = retry_after if retry_after and retry_after > 0 else 5.0
             self._cooling_until = _time.monotonic() + cool
-            self._reduce_concurrency()
+            # rpm-as-primary-limiter: 限流主参数是 rpm，而非 max_concurrent。
+            # 429 后降 _rpm_effective（地板 1），max_concurrent 不变（避免误伤并发吞吐）。
+            self._reduce_rpm()
             logger.info(
-                "[KeySlot] %s RATE_LIMIT 冷却 %.1fs + 并发降级", self.key_id, cool,
+                "[KeySlot] %s RATE_LIMIT 冷却 %.1fs + rpm 降级 → %d",
+                self.key_id, cool, self._effective_rpm(),
             )
         elif kind == ErrorKind.QUOTA_EXHAUSTED:
             self._cooling_until = _time.monotonic() + 3600.0
@@ -261,9 +327,33 @@ class KeySlot:
             self.key_id, new_cap, self.max_concurrent,
         )
 
+    def _reduce_rpm(self) -> None:
+        """rpm 限流降级：_rpm_effective 减 1（地板 1，避免把限流关死）。
+
+        rpm_limit<=0（不限）时不降——避免把无限误降成有限。
+        """
+        if self.rpm_limit <= 0:
+            return
+        cur = self._effective_rpm()
+        if cur > 1:
+            self._rpm_effective = cur - 1
+
+    def _recover_rpm(self) -> None:
+        """rpm 限流回升：_rpm_effective 加 1（封顶 rpm_limit，不超发）。"""
+        if self.rpm_limit <= 0:
+            return
+        cur = self._effective_rpm()
+        if cur < self.rpm_limit:
+            self._rpm_effective = cur + 1
+
     def on_success(self) -> None:
-        """成功调用：恢复连续失败计数 + 并发回升 1 级（封顶到 max_concurrent）。"""
+        """成功调用：恢复连续失败计数 + rpm 回升 1 级（封顶 rpm_limit）。
+
+        并发回升：仅当并发曾被 SERVICE_DOWN 降级（capacity<max_concurrent）时才回升，
+        RATE_LIMIT 不动并发，故正常限流路径下 capacity==max_concurrent 不会触发 grow。
+        """
         self._consecutive_down = 0
+        self._recover_rpm()
         sem = self._get_semaphore()
         if sem.capacity < self.max_concurrent:
             new_cap = sem.grow()
@@ -304,15 +394,20 @@ class KeyPool:
         if available:
             return available[0]
 
-        # 所有 key 都进入 exhausted（冷却/RPM 满/配额耗尽）。
-        # 取第一个未冷却的：它最短时间后恢复，acquire_slot 会等待其信号量。
-        rpm_blocked = [s for s in self._slots if not s.is_cooling]
-        if rpm_blocked:
-            return rpm_blocked[0]
+        # 所有 key 都进入 exhausted。区分两种情况：
+        #   - 并发满（is_exhausted 仅因 token/rpm 满不成立，但信号量占满）：
+        #     返回未冷却的，acquire_slot 在 record_request 后等待信号量释放。
+        #   - rpm 真正耗尽（rpm_remaining<=0）：不能返回——否则 acquire_slot 会
+        #     再 record_request 占名额，rpm 限流形同虚设（5 并发全放行上游→429）。
+        #     返回 None 让 acquire_slot 等冷却/窗口滚动。
+        rpm_starved = [s for s in self._slots if not s.is_cooling and s.rpm_remaining > 0]
+        if rpm_starved:
+            return rpm_starved[0]
 
+        unavailable = self.get_unavailable_slots()
         logger.warning(
-            "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted)",
-            self.pool_id,
+            "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted): %s",
+            self.pool_id, unavailable,
         )
         return None
 
@@ -326,7 +421,13 @@ class KeyPool:
                 # 否则并发请求可同时通过 select() 的 rpm_remaining>0 检查，
                 # 绕过本地 RPM 限流，全部放行到上游导致 429。
                 slot.record_request()
-                await slot.acquire()
+                try:
+                    await slot.acquire()
+                except BaseException:
+                    # acquire 排队中被 cancel（首字节超时 / 用户停止）：请求
+                    # 未真正打上游，不该占 rpm 名额，归还避免虚占 60s 窗口。
+                    slot.release_request()
+                    raise
                 return slot
             if _time.monotonic() >= deadline:
                 unavailable = self.get_unavailable_slots()

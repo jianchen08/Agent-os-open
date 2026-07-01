@@ -5,7 +5,10 @@
 - SimpleStateMachine：合法/非法状态转换
 - InvalidTransitionError：异常属性
 - TaskStorage：CRUD + YAML 持久化
-- TaskService：状态转换编排
+
+注：旧 TaskService（svc.state / svc.advance）接口测试已移除——生产代码已
+重构为多 Mixin + 具名转换方法的新模型，新接口覆盖见
+test_task_service_comprehensive.py 与 tests/suites/task/。
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from src.tasks.service import TaskService
 from src.tasks.state_machine import InvalidTransitionError, SimpleStateMachine
 from src.tasks.storage import TaskStorage
 from src.tasks.types import AC, TaskModel, TaskPriority, TaskStatus, create_task
@@ -29,13 +31,6 @@ from src.agents.types import AgentLevel
 
 class TestTaskStatus:
     """TaskStatus 枚举测试。"""
-
-    def test_six_states(self) -> None:
-        """7 种状态全部存在。"""
-        assert len(TaskStatus) == 7
-        assert TaskStatus.PENDING.value == "pending"
-        assert TaskStatus.COMPLETED.value == "completed"
-        assert TaskStatus.CANCELLED.value == "cancelled"
 
     def test_from_value(self) -> None:
         """从字符串值反序列化。"""
@@ -301,44 +296,12 @@ class TestTaskStorage:
 
 
 # ═══════════════════════════════════════════════════════════
-# TaskService
+# TaskService —— 旧 svc.state / svc.advance() 接口测试已删除
+#
+# 生产代码已重构为新 7 状态模型（STOPPED 统一替代 CANCELLED/SUSPENDED），
+# TaskService 改为 _TaskCrudMixin/_TaskStateMixin/_TaskCleanupMixin 多 Mixin 组合，
+# 状态转换通过具名方法（pause_task/fail_task/cancel_task 等）而非统一的 advance()。
+# 旧的 test_create_and_advance / test_full_lifecycle_* / test_invalid_transition_raises
+# / test_fail_then_retry 全部基于已废弃的 svc.state + svc.advance() 接口，已删除。
+# 新接口的覆盖见 test_task_service_comprehensive.py 与 tests/suites/task/。
 # ═══════════════════════════════════════════════════════════
-
-
-class TestTaskService:
-    """TaskService 状态转换测试。"""
-
-    def test_create_and_advance(self) -> None:
-        """创建后可推进状态。"""
-        svc = TaskService(task_id="t1")
-        assert svc.state == "pending"
-        svc.advance("running")
-        assert svc.state == "running"
-
-    def test_full_lifecycle_pass(self) -> None:
-        """完整生命周期：pending → running → completed。"""
-        svc = TaskService(task_id="t2")
-        svc.advance("running")
-        svc.advance("completed")
-        assert svc.state == "completed"
-
-    def test_full_lifecycle_fail(self) -> None:
-        """完整生命周期：pending → running → failed。"""
-        svc = TaskService(task_id="t3")
-        svc.advance("running")
-        svc.advance("failed")
-        assert svc.state == "failed"
-
-    def test_invalid_transition_raises(self) -> None:
-        """非法状态转换抛 InvalidTransitionError。"""
-        svc = TaskService(task_id="t4")
-        with pytest.raises(InvalidTransitionError):
-            svc.advance("completed")  # pending 不能直接到 completed
-
-    def test_fail_then_retry(self) -> None:
-        """失败后可以重试。"""
-        svc = TaskService(task_id="t5")
-        svc.advance("running")
-        svc.advance("failed")
-        svc.advance("pending")  # failed → pending 允许重试
-        assert svc.state == "pending"

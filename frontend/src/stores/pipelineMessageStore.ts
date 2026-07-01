@@ -257,7 +257,12 @@ interface PipelineMessageState {
   findToolCallPartIndex: (pipelineId: string, messageId: string, callId: string) => number
 }
 
-/** 消息排序比较函数：先按 sequence 升序，再按 timestamp 升序 function filterBlankMessages(messages: Message[]): Message[] {
+/**
+ * BUG-FIX-fix_20260617_blank_message_filter:
+ * 过滤完全空白的 assistant 消息（无 content、无 parts、非 streaming）。
+ * 这些消息来自后端记录但不包含可渲染内容，渲染为空气泡。
+ */
+function filterBlankMessages(messages: Message[]): Message[] {
   return messages.filter((m) => {
     if (m.role !== 'assistant') return true
     if (m.status === 'streaming') return true
@@ -281,7 +286,7 @@ function isStreamingMessage(msg: Message): boolean {
   return false
 }
 
-/** 合并连续 assistant 消息，但保护流式消息不被卷入合并 流式消息作为分隔符：它本身不合并，且会打断其前后的连续 assistant 组。 */
+/** 合并连续 assistant 消息，用对话结构边界（user/system）和流式状态共同分割。 分隔符（硬边界）：user/system 消息——它们是 AI 消息之间的天然结构边界， */
 function mergePreservingStreaming(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
   const result: Message[] = []
@@ -294,7 +299,10 @@ function mergePreservingStreaming(messages: Message[]): Message[] {
     }
   }
   for (const msg of messages) {
-    if (isStreamingMessage(msg)) {
+    // user/system 是对话结构边界：AI 不能跨过它们与另一段 AI 合并
+    // （否则系统通知消失后，前后 AI 气泡被错误合并成一条）。
+    // 流式 assistant 状态未定，也不能进 segment 被合并。
+    if (msg.role === 'user' || msg.role === 'system' || isStreamingMessage(msg)) {
       flush()
       result.push(msg)
     } else {
@@ -386,6 +394,10 @@ function mergeApiWithExisting(
   const localOnly = existing.filter((m) => {
     if (apiIds.has(m.id)) return false
     if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
+    // 系统通知是 AI 消息之间的结构分隔符，必须保留：
+    // 后端 system_notification 是瞬态事件，通常不在消息历史 API 中返回，
+    // 若丢弃则刷新/切 Tab 后它消失，前后的 AI 气泡失去边界被合并成一条。
+    if (m.role === 'system') return true
     // 正在 streaming 的占位消息必须保留
     if (isStreamingMessage(m)) return true
     // 乐观/刚完成的消息在持久化窗口内保留（后端可能尚未写入）
@@ -803,7 +815,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return get().hasMoreOlderByPipeline[pipelineId] ?? false
   },
 
-  /* 将旧管道中最近的用户消息迁移到新管道 fetchMessages: async (
+  /** 将旧管道中最近的用户消息迁移到新管道 */
+  fetchMessages: async (
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {

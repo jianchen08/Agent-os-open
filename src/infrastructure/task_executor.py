@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from infrastructure.protocols import MemoryStoreProtocol
 
 
+from infrastructure.execution_record_storage import record_role_for_llm
 from infrastructure.task_context import TaskExecutionContext
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
 from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F401
@@ -465,6 +466,17 @@ class TaskExecutorMixin:
                 return
 
 
+            # 总超时硬墙：与 idle_timer 互相独立，从 started_at 起的硬时限（活跃也不豁免）。
+
+            # per-agent timeout_seconds 优先，否则按 agent_level 分级（L1 不限、L2 2.5h、L3 1h）。
+
+            self._register_total_timeout(
+
+                task_id, task_data, agent_config, task_service, timer_manager, ctx,
+
+            )
+
+
             # pipe 继承：物理拷贝源管道 records → 引擎自加载（和重试同路）
 
             if _inherit_pipe_pipeline_id and not existing_pipeline_id:
@@ -483,7 +495,7 @@ class TaskExecutorMixin:
             from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
 
 
-            _sink = create_targeted_sink(_notifier, _ws_thread_id)
+            _sink = create_targeted_sink(_notifier, _ws_thread_id, user_id=_ctx_user_id)
 
 
             # ── 启动管道引擎（fire-and-forget）──
@@ -1213,6 +1225,215 @@ class TaskExecutorMixin:
             return False
 
 
+    def _register_total_timeout(
+
+        self,
+
+        task_id: str,
+
+        task_data: dict[str, Any],
+
+        agent: Any,
+
+        task_service: Any,
+
+        timer_manager: Any,
+
+        ctx: TaskExecutionContext,
+
+    ) -> None:
+
+        """注册任务总超时硬墙（per-agent timeout_seconds 优先，否则按 agent_level 分级 fallback）。
+
+        与 idle_timer 互相独立：
+          - idle_timer 检测"无心跳"，活跃即可续期；
+          - total_timeout 是从 started_at 起的硬时限，活跃也不豁免。
+
+        duration 取值优先级：
+          1. agent.timeout_seconds（>0 用它；=-1 显式不限→不注册）
+          2. timer_manager.task_max_duration_for_level(agent_level)
+             - L1 → None → 不注册（主对话长跑允许）
+             - L2 → 9000s = 2.5h
+             - L3 → 3600s = 1h
+
+        到点回调：fail_task(reason="total_timeout: ...")，通过 ctx.total_timeout_handle
+        在 cleanup 时取消。
+        """
+
+        if timer_manager is None:
+
+            return
+
+        agent_level = str(task_data.get("agent_level", "")) or "L3"
+
+        # per-agent timeout_seconds 优先于 level fallback
+        if agent is not None:
+
+            try:
+
+                agent_timeout = getattr(agent, "timeout_seconds", None)
+
+            except Exception:
+
+                agent_timeout = None
+
+            if agent_timeout is not None:
+
+                if agent_timeout < 0:
+
+                    # 显式不限（-1）：即便 level fallback 有值也不注册
+                    logger.debug(
+
+                        "TaskWorker: 任务总超时被 agent 显式关闭: "
+
+                        "task_id=%s agent_level=%s timeout_seconds=%s",
+
+                        task_id, agent_level, agent_timeout,
+
+                    )
+
+                    return
+
+                duration: int | float | None = agent_timeout
+
+            else:
+
+                duration = self._level_total_duration(timer_manager, agent_level)
+
+        else:
+
+            duration = self._level_total_duration(timer_manager, agent_level)
+
+        if duration is None or duration <= 0:
+
+            logger.debug(
+
+                "TaskWorker: 任务总超时未启用（L1 或未配置）: "
+
+                "task_id=%s agent_level=%s",
+
+                task_id, agent_level,
+
+            )
+
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def _on_total_timeout() -> None:
+
+            """总超时硬墙到点：直接 fail_task，无视活跃状态。"""
+
+            logger.warning(
+
+                "TaskWorker: [TOTAL-TIMEOUT] 任务总执行时间到点，"
+
+                "强制 fail: task_id=%s agent_level=%s duration=%ss",
+
+                task_id, agent_level, duration,
+
+            )
+
+            try:
+
+                _reason = (
+
+                    f"total_timeout: 超过 {agent_level} 总执行时间 "
+
+                    f"{duration}s"
+
+                )
+
+                _fut = loop.create_task(
+
+                    task_service.fail_task(task_id, _reason)
+
+                )
+
+                _fut.add_done_callback(
+
+                    lambda fut, tid=task_id: self._log_fail_task_exc(fut, tid)
+
+                )
+
+                if ctx is not None:
+
+                    ctx.set_terminal()
+
+                    ctx.cleanup(timer_manager)
+
+            except Exception as exc:
+
+                logger.error(
+
+                    "TaskWorker: [TOTAL-TIMEOUT] fail 处理失败: "
+
+                    "task_id=%s error=%s", task_id, exc,
+
+                )
+
+        ctx.total_timeout_handle = loop.call_later(
+
+            float(duration), _on_total_timeout,
+
+        )
+
+        logger.info(
+
+            "TaskWorker: 任务总超时硬墙已注册: "
+
+            "task_id=%s agent_level=%s duration=%ss",
+
+            task_id, agent_level, duration,
+
+        )
+
+    @staticmethod
+
+    def _level_total_duration(timer_manager: Any, agent_level: str) -> int | float | None:
+
+        """从 timer_manager 取 level 分级总超时；失败返回 None。"""
+
+        try:
+
+            return timer_manager.task_max_duration_for_level(agent_level)
+
+        except Exception as exc:
+
+            logger.warning(
+
+                "TaskWorker: 取 task_max_duration_for_level 失败，跳过总超时: "
+
+                "agent_level=%s error=%s",
+
+                agent_level, exc,
+
+            )
+
+            return None
+
+    @staticmethod
+
+    def _log_fail_task_exc(fut: Any, task_id: str) -> None:
+
+        """fail_task 协程的 done 回调：记录未捕获异常（吞掉避免「never awaited」告警）。"""
+
+        if fut.cancelled():
+
+            return
+
+        exc = fut.exception()
+
+        if exc is not None:
+
+            logger.error(
+
+                "TaskWorker: [TOTAL-TIMEOUT] fail_task 异常: "
+
+                "task_id=%s error=%s", task_id, exc,
+
+            )
+
     def _compute_pipeline_timeout(self, agent_config: Any) -> float:
 
         """计算管道执行超时时间（秒）。"""
@@ -1268,11 +1489,11 @@ class TaskExecutorMixin:
 
             # 避免 role 为空字符串时 assistant 消息被错误标记为 user
 
-            _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
+            # （type==system 的注入通知由 record_role_for_llm 降级为 user）
 
             for r in prev_records:
 
-                role = r.role or _type_to_role.get(r.type, "user")
+                role = record_role_for_llm(r)
 
                 msg: dict[str, Any] = {"role": role, "content": r.content}
 

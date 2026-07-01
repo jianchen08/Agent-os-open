@@ -44,7 +44,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
-- '{{path:config/rules/dispatcher_rules_exec.md}}'
+  - '{{path:config/rules/dispatcher_rules_exec.md}}'
 tool_ids:
 - file_read
 - file_write

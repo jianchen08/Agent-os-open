@@ -81,9 +81,10 @@ class MockOutputPlugin(IOutputPlugin):
         task_complete = ctx.state.get("task_complete", False)
         if task_complete:
             signal = RouteSignal(route_type="end", reason="task completed")
-        else:
-            signal = RouteSignal(route_type="next_llm", reason="continue conversation")
-        return OutputResult(route_signal=signal)
+            return OutputResult(route_signal=signal)
+        # next_llm：标记有新输入，避免 apply_route 把 text-only 输出降级为 wait 挂起
+        signal = RouteSignal(route_type="next_llm", reason="continue conversation")
+        return OutputResult(route_signal=signal, state_updates={"_has_new_llm_input": True})
 
 
 async def test_engine():

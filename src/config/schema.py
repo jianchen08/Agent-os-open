@@ -21,11 +21,15 @@ from typing import Any
 
 import yaml
 
+from agents.loader import VALID_AGENT_TYPE_KEYS
+
 logger = logging.getLogger(__name__)
 
 # Agent 合法枚举值
 _VALID_AGENT_LEVELS: set[str] = {"L1", "L2", "L3"}
-_VALID_AGENT_TYPES: set[str] = {"main", "specialized", "system"}
+# agent_type 合法集合与 loader._resolve_agent_type 的映射键保持一致，
+# 防止热重载校验误拒 orchestrator/atomic 等编排/原子 Agent（单一真相源）。
+_VALID_AGENT_TYPES: set[str] = set(VALID_AGENT_TYPE_KEYS)
 
 # Model 合法必填字段
 _MODEL_REQUIRED_FIELDS: set[str] = {"provider", "model_name"}
@@ -130,7 +134,7 @@ class ConfigSchemaValidator:
         - ``config_id`` 必填且为字符串
         - ``name`` 必填且为字符串
         - ``level`` 若存在，必须为合法值（L1/L2/L3）
-        - ``agent_type`` 若存在，必须为合法值（main/specialized/system）
+        - ``agent_type`` 若存在，必须为合法值（与 loader 一致：main/orchestrator/specialized/atomic/system）
 
         Args:
             data: Agent 配置字典。

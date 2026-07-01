@@ -16,19 +16,14 @@
 from __future__ import annotations
 
 import tempfile
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agents.types import AgentLevel
-from tasks.service import TaskService
-from src.tasks.state_machine import SimpleStateMachine
 from src.tasks.state_machine import InvalidTransitionError
-from src.tasks.state_machine import _TASK_TRANSITIONS
+from tasks.service import TaskService
 from tasks.storage import TaskStorage
-from tasks.types import TaskModel, TaskPriority, TaskStatus, create_task
-
+from tasks.types import TaskPriority, TaskStatus, create_task
 
 # ═══════════════════════════════════════════════════════════
 # Helper
@@ -49,113 +44,14 @@ def _move_to_evaluating(svc: TaskService, task_id: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════
-# SimpleStateMachine — 状态转换全覆盖
+# SimpleStateMachine 状态转换全覆盖 —— 已移除
+#
+# 原 TestSimpleStateMachineTransitions 基于旧转换表（scheduled/paused/
+# suspended/blocked/cancelled 等状态），与当前 _TASK_TRANSITIONS（新 7 状态
+# 模型：stopped 统一替代 suspended/cancelled）不符，全部参数化用例失败。
+# 新转换表的覆盖由 SimpleStateMachine 自身的单元测试与
+# tests/suites/core/test_tasks.py::TestStateMachine 承担。
 # ═══════════════════════════════════════════════════════════
-
-class TestSimpleStateMachineTransitions:
-    """SimpleStateMachine 所有合法/非法转换全覆盖。
-
-    基于 _TASK_TRANSITIONS 定义的状态转换规则：
-    - pending → [scheduled, running, cancelled, paused]
-    - scheduled → [running, cancelled]
-    - running → [evaluating, completed, failed, suspended, blocked, cancelled, paused]
-    - evaluating → [completed, failed, running, cancelled]
-    - suspended → [running, cancelled, timeout]
-    - blocked → [running, cancelled, failed]
-    - completed → []
-    - failed → [pending]
-    - cancelled → []
-    - timeout → [running, cancelled, failed]
-    - paused → [pending, running, cancelled]
-    """
-
-    def setup_method(self) -> None:
-        """初始化状态机实例。"""
-        self.sm = SimpleStateMachine(
-            initial_state="pending",
-            transitions=_TASK_TRANSITIONS,
-        )
-
-    # ── 合法转换（参数化覆盖全部合法边）─────────────────
-
-    @pytest.mark.parametrize("from_s, to_s", [
-        ("pending", "scheduled"),
-        ("pending", "running"),
-        ("pending", "cancelled"),
-        ("pending", "suspended"),
-        ("scheduled", "running"),
-        ("scheduled", "cancelled"),
-        ("running", "evaluating"),
-        ("running", "completed"),
-        ("running", "failed"),
-        ("running", "suspended"),
-        ("running", "blocked"),
-        ("running", "cancelled"),
-        ("running", "suspended"),
-        ("evaluating", "completed"),
-        ("evaluating", "failed"),
-        ("evaluating", "running"),
-        ("evaluating", "cancelled"),
-        ("suspended", "running"),
-        ("suspended", "cancelled"),
-        ("suspended", "timeout"),
-        ("blocked", "running"),
-        ("blocked", "cancelled"),
-        ("blocked", "failed"),
-        ("failed", "pending"),
-        ("timeout", "running"),
-        ("timeout", "cancelled"),
-        ("timeout", "failed"),
-        ("suspended", "pending"),
-        ("suspended", "running"),
-        ("suspended", "cancelled"),
-    ])
-    def test_valid_transition(self, from_s: str, to_s: str) -> None:
-        """合法转换应成功。"""
-        sm = SimpleStateMachine(initial_state=from_s, transitions=_TASK_TRANSITIONS)
-        sm.transition(to_s)
-        assert sm.current_state == to_s
-
-    # ── 非法转换（采样关键场景）────────────────────────────
-
-    @pytest.mark.parametrize("from_s, to_s", [
-        ("completed", "running"),
-        ("completed", "failed"),
-        ("completed", "evaluating"),
-        ("failed", "running"),
-        ("failed", "completed"),
-        ("suspended", "completed"),
-        ("suspended", "evaluating"),
-        ("evaluating", "suspended"),
-        ("running", "pending"),
-        ("cancelled", "running"),
-        ("cancelled", "pending"),
-    ])
-    def test_invalid_transition_raises(
-        self, from_s: str, to_s: str,
-    ) -> None:
-        """非法转换应抛出 InvalidTransitionError。"""
-        sm = SimpleStateMachine(initial_state=from_s, transitions=_TASK_TRANSITIONS)
-        with pytest.raises(InvalidTransitionError) as exc_info:
-            sm.transition(to_s)
-        assert exc_info.value.current_state == from_s
-        assert exc_info.value.target_state == to_s
-
-    def test_can_transition_returns_bool(self) -> None:
-        """can_transition 对合法/非法返回正确的布尔值。"""
-        sm = SimpleStateMachine(initial_state="pending", transitions=_TASK_TRANSITIONS)
-        assert sm.can_transition("running") is True
-        assert sm.can_transition("suspended") is True
-        assert sm.can_transition("cancelled") is True
-
-        sm_completed = SimpleStateMachine(initial_state="completed", transitions=_TASK_TRANSITIONS)
-        assert sm_completed.can_transition("running") is False
-
-        sm_failed = SimpleStateMachine(initial_state="failed", transitions=_TASK_TRANSITIONS)
-        assert sm_failed.can_transition("pending") is True
-
-        sm_paused = SimpleStateMachine(initial_state="suspended", transitions=_TASK_TRANSITIONS)
-        assert sm_paused.can_transition("evaluating") is False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -391,15 +287,6 @@ class TestTaskServiceTransitions:
         await self.svc.complete_evaluation(task.id, passed=False)
         fetched = self.svc.get_task(task.id)
         assert fetched.status == TaskStatus.FAILED
-
-    @pytest.mark.asyncio
-    async def test_pause_task_success(self) -> None:
-        """running → suspended 成功。"""
-        task = await self.svc.create_task(title="暂停")
-        await self.svc.start_task(task.id)
-        await self.svc.pause_task(task.id)
-        fetched = self.svc.get_task(task.id)
-        assert fetched.status == TaskStatus.SUSPENDED
 
     @pytest.mark.asyncio
     async def test_resume_task_success(self) -> None:
@@ -651,9 +538,9 @@ class TestTaskServiceCascadeCancel:
 
         count = await self.svc.cancel_task_cascade(parent.id, reason="测试级联")
         assert count == 2
-        # cancel_task_cascade 使用 cancel_task，设为 CANCELLED
-        assert self.svc.get_task(child1.id).status == TaskStatus.CANCELLED
-        assert self.svc.get_task(child2.id).status == TaskStatus.CANCELLED
+        # cancel_task_cascade 使用 cancel_task，新模型统一设为 STOPPED（合并旧 cancelled/suspended）
+        assert self.svc.get_task(child1.id).status == TaskStatus.STOPPED
+        assert self.svc.get_task(child2.id).status == TaskStatus.STOPPED
 
     @pytest.mark.asyncio
     async def test_cascade_cancels_all_subtasks(self) -> None:
@@ -674,8 +561,8 @@ class TestTaskServiceCascadeCancel:
         count = await self.svc.cancel_task_cascade(parent.id, reason="测试")
         # cancel_task_cascade 不检查子任务状态，全部取消
         assert count == 2
-        assert self.svc.get_task(child_completed.id).status == TaskStatus.CANCELLED
-        assert self.svc.get_task(child_active.id).status == TaskStatus.CANCELLED
+        assert self.svc.get_task(child_completed.id).status == TaskStatus.STOPPED
+        assert self.svc.get_task(child_active.id).status == TaskStatus.STOPPED
 
     @pytest.mark.asyncio
     async def test_cascade_deeply_nested(self) -> None:
@@ -692,8 +579,8 @@ class TestTaskServiceCascadeCancel:
 
         count = await self.svc.cancel_task_cascade(root.id, reason="深层取消")
         assert count == 2
-        assert self.svc.get_task(child.id).status == TaskStatus.CANCELLED
-        assert self.svc.get_task(grandchild.id).status == TaskStatus.CANCELLED
+        assert self.svc.get_task(child.id).status == TaskStatus.STOPPED
+        assert self.svc.get_task(grandchild.id).status == TaskStatus.STOPPED
 
 
 # ═══════════════════════════════════════════════════════════
@@ -782,9 +669,8 @@ class TestTaskServiceTransitionHelpers:
         task = await self.svc.create_task(title="查询转换")
         transitions = self.svc.get_valid_transitions(task.id)
         assert "running" in transitions
-        assert "suspended" in transitions
-        assert "scheduled" in transitions
-        assert "cancelled" in transitions
+        # 新 7 状态模型：stopped 统一替代旧 suspended/scheduled/cancelled
+        assert "stopped" in transitions
 
     @pytest.mark.asyncio
     async def test_get_valid_transitions_running(self) -> None:
@@ -795,7 +681,8 @@ class TestTaskServiceTransitionHelpers:
         assert "completed" in transitions
         assert "failed" in transitions
         assert "evaluating" in transitions
-        assert "suspended" in transitions
+        # 新模型：stopped 替代旧 suspended
+        assert "stopped" in transitions
 
     def test_get_valid_transitions_nonexistent(self) -> None:
         """获取不存在的任务的转换列表返回空。"""
@@ -997,9 +884,9 @@ class TestTaskServiceEdgeCases:
         await self.svc.start_task(task.id)
         assert self.svc.get_task(task.id).status == TaskStatus.RUNNING
 
-        # running -> paused
+        # running -> paused（新模型 pause_task 设为 STOPPED）
         await self.svc.pause_task(task.id)
-        assert self.svc.get_task(task.id).status == TaskStatus.SUSPENDED
+        assert self.svc.get_task(task.id).status == TaskStatus.STOPPED
 
         # paused -> running (resume_task 将 suspended 恢复为 running)
         await self.svc.resume_task(task.id)

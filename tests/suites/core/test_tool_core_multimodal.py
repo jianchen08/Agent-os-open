@@ -33,9 +33,15 @@ class TestMultimodalImageHandling:
 
         ctx = _make_ctx(
             raw_tool_calls=[{"name": "screenshot", "args": {}}],
-            llm_model="glm-5.1",  # 支持视觉
+            llm_model="glm-5.2",  # 支持视觉
         )
-        result = await core.execute(ctx)
+        # 隔离配置加载：mock 视觉能力为 True，专注测插件分支逻辑
+        from unittest.mock import patch
+        with patch(
+            "multimodal.capabilities.ModelCapabilityRegistry.is_multimodal_supported",
+            return_value=True,
+        ):
+            result = await core.execute(ctx)
         messages = result["messages"]
 
         # 找到 tool_images 消息
@@ -87,7 +93,7 @@ class TestMultimodalImageHandling:
 
         ctx = _make_ctx(
             raw_tool_calls=[{"name": "echo", "args": {}}],
-            llm_model="glm-5.1",
+            llm_model="glm-5.2",
         )
         result = await core.execute(ctx)
         messages = result["messages"]
@@ -109,9 +115,14 @@ class TestMultimodalImageHandling:
 
         ctx = _make_ctx(
             raw_tool_calls=[{"name": "multi_shot", "args": {}}],
-            llm_model="glm-5.1",
+            llm_model="glm-5.2",
         )
-        result = await core.execute(ctx)
+        from unittest.mock import patch
+        with patch(
+            "multimodal.capabilities.ModelCapabilityRegistry.is_multimodal_supported",
+            return_value=True,
+        ):
+            result = await core.execute(ctx)
         messages = result["messages"]
 
         img_msgs = [m for m in messages if m.get("name") == "tool_images"]
@@ -158,7 +169,7 @@ class TestMultimodalImageHandling:
 
         ctx = _make_ctx(
             raw_tool_calls=[{"name": "screenshot", "args": {}}],
-            llm_model="glm-5.1",
+            llm_model="glm-5.2",
         )
         result = await core.execute(ctx)
 
