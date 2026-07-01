@@ -79,7 +79,7 @@ function validateDataType(data: any, typeName: string, expectedFields: Record<st
 test.describe('端到端测试 - 认证流程', () => {
   const authenticatedUser = {
     username: 'admin',  // 使用已知存在的用户
-    password: 'admin123456'
+    password: 'admin123'
   };
 
   test.beforeEach(async ({ page }) => {
@@ -205,7 +205,7 @@ test.describe('端到端测试 - 认证流程', () => {
 test.describe('端到端测试 - 仪表盘', () => {
   const authenticatedUser = {
     username: 'admin',
-    password: 'admin123456'
+    password: 'admin123'
   };
 
   test.beforeEach(async ({ page }) => {

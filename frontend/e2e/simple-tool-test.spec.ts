@@ -11,7 +11,7 @@ test.describe('简单工具卡片测试', () => {
     const loginResponse = await page.request.post('http://localhost:8988/api/v1/auth/login', {
       data: {
         username: 'admin',
-        password: 'admin123456'
+        password: 'admin123'
       }
     });
 

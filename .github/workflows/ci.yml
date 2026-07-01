@@ -462,7 +462,8 @@ jobs:
           API_STORE_BACKEND: memory
           # 默认 admin 凭证：后端仅在配置 DEFAULT_ADMIN_PASSWORD 时才创建 admin
           # 账号（无兜底密码设计）。e2e 测试用此凭证登录，弱密码仅限 CI 测试环境。
-          DEFAULT_ADMIN_PASSWORD: admin123456
+          # 与本地 .env 的 DEFAULT_ADMIN_PASSWORD=admin123 保持一致。
+          DEFAULT_ADMIN_PASSWORD: admin123
         run: |
           # 不能用 `python -m`（if __name__=="__main__" 不触发，main() 不执行），
           # 也不能直接 `python src/.../app_factory.py`（sys.path[0] 变成脚本目录，

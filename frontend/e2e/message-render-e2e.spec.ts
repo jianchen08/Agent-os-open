@@ -17,7 +17,7 @@ import { API_BASE, APP_URL } from './helpers/auth';
 // 公共常量 & 辅助函数
 // ---------------------------------------------------------------------------
 
-const LOGIN_CREDENTIALS = { username: 'admin', password: 'admin123456' };
+const LOGIN_CREDENTIALS = { username: 'admin', password: 'admin123' };
 const SCREENSHOT_DIR = 'test-results';
 
 /**

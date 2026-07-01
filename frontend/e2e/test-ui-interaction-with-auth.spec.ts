@@ -15,7 +15,7 @@ import { test, expect, Page } from '@playwright/test';
 const BASE_URL = 'http://localhost:5188';
 const TEST_USER = {
   username: 'admin',
-  password: 'admin123456'
+  password: 'admin123'
 };
 
 // 辅助函数：等待页面稳定
