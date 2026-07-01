@@ -1,0 +1,69 @@
+{
+  "reloadToIdleSec": 4.256,
+  "totalObserveSec": 14.271,
+  "msgCount": 13,
+  "requestCount": 13,
+  "slowRequestCount": 1,
+  "topSlow": [
+    {
+      "url": "/api/v1/threads/636c4a4e753b/messages?pipeline_run_id=c7dc5433b2d7&limit=50&after_sequence=2208",
+      "method": "GET",
+      "duration": 3472,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/tasks?skip=0&limit=100",
+      "method": "GET",
+      "duration": 213,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/files/capabilities?model_name=glm-5.2-yichengc",
+      "method": "GET",
+      "duration": 191,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/auth/me",
+      "method": "GET",
+      "duration": 94,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/agents?agent_type=main",
+      "method": "GET",
+      "duration": 89,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/files/capabilities?model_name=glm-5.2-yichengc",
+      "method": "GET",
+      "duration": 77,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/tasks?skip=0&limit=100",
+      "method": "GET",
+      "duration": 73,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/threads?session_type=main_pipeline&limit=100",
+      "method": "GET",
+      "duration": 69,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/modules/ui",
+      "method": "GET",
+      "duration": 65,
+      "status": 200
+    },
+    {
+      "url": "/api/v1/themes/manifest",
+      "method": "GET",
+      "duration": 50,
+      "status": 200
+    }
+  ]
+}
