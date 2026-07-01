@@ -21,11 +21,14 @@ from ui_schema.auth_types import AutoCRUDError
 
 logger = logging.getLogger(__name__)
 
-# DEBT: CORS 允许源应通过配置文件或环境变量管理。ceiling: 当前硬编码开发环境源。
-# upgrade: 增加 CORS_ORIGINS 环境变量支持，生产环境严格限制。
+# CORS 允许源通过环境变量 CORS_ORIGINS 管理（逗号分隔）。
+# 默认值覆盖本地开发 + Docker host 两种模式：
+#   - localhost:5188/5289/5290/5173 → 本地或端口转发访问
+#   - host.docker.internal:8988    → 前端容器内 server.py 代理 WebSocket 时，
+#      websockets 库按目标 URL 派生的 Origin（Starlette>=0.38 对 WS 做 Origin 检查）
 _DEFAULT_CORS_ORIGINS = os.environ.get(
     "CORS_ORIGINS",
-    "http://localhost:5188,http://localhost:5289,http://localhost:5290,http://localhost:5173",
+    "http://localhost:5188,http://localhost:5289,http://localhost:5290,http://localhost:5173,http://host.docker.internal:8988",
 ).split(",")
 
 # 应用启动时间
