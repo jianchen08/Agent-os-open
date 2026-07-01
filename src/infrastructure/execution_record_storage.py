@@ -100,6 +100,19 @@ class ExecutionRecordData:
             self.created_at = datetime.now().isoformat()
 
 
+def record_role_for_llm(record: ExecutionRecordData) -> str:
+    """把执行记录映射为喂给 LLM 的 role。
+
+    与渲染路径（routes_threads._record_to_message_response 用 type 优先、
+    system→system）不同：多数模型拒绝多轮穿插 system 消息，故 type=="system"
+    的注入通知在此显式降级为 "user"。其余 type 按 role/type 既有映射。
+    """
+    if record.type == "system":
+        return "user"
+    _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool"}
+    return record.role or _type_to_role.get(record.type, "user")
+
+
 @dataclass
 class PipelineRunSummary:
     """管道运行摘要（每次 pipeline_run 产生一条）。
@@ -1174,9 +1187,8 @@ class ExecutionRecordStorage:
     @staticmethod
     def _record_to_message(record: ExecutionRecordData) -> dict[str, Any]:
         """将 ExecutionRecordData 转换为 message dict 格式。"""
-        # 优先基于 record.type 映射 role
-        _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
-        role = record.role or _type_to_role.get(record.type, "user")
+        # 喂给 LLM 的 role：type==system 的注入通知降级为 user（见 record_role_for_llm）
+        role = record_role_for_llm(record)
         msg: dict[str, Any] = {
             "role": role,
             "content": record.content or "",

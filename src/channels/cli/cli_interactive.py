@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from channels.cli.output_adapter import sanitize_for_terminal
+from infrastructure.execution_record_storage import record_role_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -539,13 +540,11 @@ class CLIInteractiveMixin:
 
                     if prev_records:
 
-                        # 基于 record.type 映射 role
-
-                        _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
+                        # 基于 record.type 映射 role（type==system 的注入通知降级为 user）
 
                         for r in prev_records:
 
-                            role = r.role or _type_to_role.get(r.type, "user")
+                            role = record_role_for_llm(r)
 
                             msg: dict[str, Any] = {
 

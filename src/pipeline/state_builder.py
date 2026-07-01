@@ -15,6 +15,7 @@ import logging
 from pathlib import Path  # noqa: F401
 from typing import Any
 
+from infrastructure.execution_record_storage import record_role_for_llm
 from pipeline.types import StateKeys, TargetType
 
 logger = logging.getLogger(__name__)
@@ -109,9 +110,8 @@ def resolve_conversation_history(
         return []
 
     history: list[dict[str, Any]] = []
-    _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
     for r in records:
-        role = r.role or _type_to_role.get(r.type, "user")
+        role = record_role_for_llm(r)
         msg: dict[str, Any] = {"role": role, "content": r.content}
         # 保留执行记录的 sequence，用于压缩块记录实际消息范围
         if getattr(r, "sequence", 0) > 0:

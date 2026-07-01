@@ -294,12 +294,17 @@ class TrackPlugin(IOutputPlugin):
                 )
                 if new_content:
                     self._last_saved_user_input = user_input
+                    # type=system：这是 engine.inject_message 注入的子任务完成/
+                    # 触发器等系统通知（_extract_injected_content 抽取的增量段），
+                    # 不是用户原始输入。落盘如实记 role=system/type=system，渲染路径
+                    # 按此显示系统气泡；喂给 LLM 时由 record_role_for_llm 降级为 user
+                    # （多数模型不接受多轮穿插 system）。
                     notification_record = ExecutionRecordData(
                         pipeline_run_id=pipeline_run_id,
-                        type="user",
+                        type="system",
                         sequence=self._next_sequence(pipeline_run_id),
                         iteration=iteration,
-                        role="user",
+                        role="system",
                         content=new_content,
                         container_task_id=container_task_id or None,
                     )
