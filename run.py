@@ -57,7 +57,7 @@ def run_real(config_path: str | None = None):
     from channels.cli.cli_main import CLIApplication
     print("=" * 50)
     print("Agent OS CLI — 真实 LLM 模式")
-    print("（连接 MiniMax M2.7，需配置 API Key）")
+    print("（需配置 API Key）")
     print("输入 quit 或 exit 退出")
     print("=" * 50)
     app = CLIApplication()
@@ -80,7 +80,7 @@ def run_e2e():
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC_DIR)
     result = subprocess.run(
-        [sys.executable, str(PROJECT_ROOT / "e2e_test_runner.py")],
+        [sys.executable, "-m", "pytest", "tests/e2e", "--tb=short", "-q"],
         cwd=str(PROJECT_ROOT),
         env=env,
     )
@@ -106,14 +106,14 @@ def run_pytest(args: list[str] | None = None):
 
 
 def run_llm_test():
-    """运行真实 LLM 调用测试。"""
+    """运行真实 LLM 调用测试（带 requires_api marker）。"""
     print("=" * 50)
     print("Agent OS LLM 真实调用测试")
     print("=" * 50)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC_DIR)
     result = subprocess.run(
-        [sys.executable, str(PROJECT_ROOT / "real_cli_test.py")],
+        [sys.executable, "-m", "pytest", "-m", "requires_api", "--tb=short", "-q"],
         cwd=str(PROJECT_ROOT),
         env=env,
     )
