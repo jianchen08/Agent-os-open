@@ -130,22 +130,33 @@ class ReadExecutionDetailTool(BuiltinTool):
         for record in records:
             # 构建单行摘要：[iter {n}] {type} {name}
             parts = [f"[iter {record.iteration}]", record.type]
-
             if record.name:
                 parts.append(record.name)
+            line_head = " ".join(parts)
 
-            # 如果有 content，截取前 50 字符作为摘要
-            if record.content:
-                content_preview = record.content[:50].replace("\n", " ").strip()
-                if content_preview:
-                    parts.append(content_preview)
-
-            line = " ".join(parts)
-
-            # 如果有 error，追加错误标记
-            if record.error:
-                error_preview = record.error[:50].replace("\n", " ").strip()
-                line += f" -> error: {error_preview}"
+            # 用户消息：保留 content 原文（不截断），复盘需看用户原始指令/纠正
+            if record.type == "user":
+                content = self._safe_content_to_str(record.content).replace("\n", " ").strip()
+                line = f"{line_head}: {content}" if content else line_head
+            # 人类交互工具：完整保留输入（提问参数）和输出（用户决策）
+            elif record.name == "human_interaction":
+                segs = [line_head]
+                tool_input_str = self._safe_content_to_str(record.tool_input)
+                if tool_input_str:
+                    segs.append(f"输入: {tool_input_str}")
+                output_str = self._safe_content_to_str(record.content)
+                if output_str:
+                    segs.append(f"输出: {output_str}")
+                line = " | ".join(segs)
+            else:
+                # 普通记录（ai/普通 tool）：content 前 50 字预览 + error 标记
+                line = line_head
+                preview = self._safe_content_to_str(record.content)[:50].replace("\n", " ").strip()
+                if preview:
+                    line += f" {preview}"
+                if record.error:
+                    error_preview = record.error[:50].replace("\n", " ").strip()
+                    line += f" -> error: {error_preview}"
 
             lines.append(line)
 
@@ -362,6 +373,22 @@ class ReadExecutionDetailTool(BuiltinTool):
         if len(text) <= max_len:
             return text
         return text[:max_len] + f"...(truncated, total {len(text)} chars)"
+
+    @staticmethod
+    def _safe_content_to_str(content: Any) -> str:
+        """把 content（运行时可能是 str 或 dict）安全转为字符串。
+
+        ExecutionRecordData.content 声明为 str，但历史数据/外部写入会落成 dict，
+        裸切片会抛 TypeError。这里统一序列化：dict 走 json，降级兜底用 repr。
+        """
+        if not content:
+            return ""
+        if isinstance(content, str):
+            return content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(content)
 
     @staticmethod
     def _parse_tool_calls(tool_calls_json: str | None) -> Any:
