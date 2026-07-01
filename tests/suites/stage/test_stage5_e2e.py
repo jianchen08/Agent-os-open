@@ -569,12 +569,13 @@ class TestSelfDiagnosisE2E:
     async def test_knowledge_insufficient_diagnosis(self) -> None:
         """验证知识不足诊断。
 
-        当 LLM 反复返回空响应时，
-        结合 memory.retrieved 为空和 knowledge.context 为空，
-        判断为知识不足。
+        当 LLM 回复声明"无法回答/我不知道"，且 memory.retrieved 与
+        knowledge.context 均为空时，诊断为 knowledge_insufficient。
+        注意：空响应不再触发此分类（已归 empty_response）；必须 LLM 显式声明
+        知识不足，才会结合"无记忆/知识"判定。
         """
         state = create_initial_state()
-        state[StateKeys.RAW_RESULT] = ""
+        state[StateKeys.RAW_RESULT] = "抱歉，关于这个领域我无法回答，缺少相关信息"
         state["retry.count"] = 1  # 已经重试过一次
         state["memory.retrieved"] = []  # 无记忆检索结果
         state["knowledge.context"] = ""  # 无知识注入
@@ -587,8 +588,9 @@ class TestSelfDiagnosisE2E:
         analysis = result.state_updates[StateKeys.ERROR_ANALYSIS]
         assert analysis is not None
         assert analysis["category"] == "knowledge_insufficient"
-        # 知识不足可重试
-        assert analysis["retryable"] is True
+        # 知识不足不可重试：memory/knowledge 是否为空是确定性状态，重试根因不会自愈
+        assert analysis["retryable"] is False
+        assert result.state_updates[StateKeys.EXECUTION_STATUS] == "failed"
 
     @pytest.mark.asyncio
     async def test_knowledge_insufficient_from_llm_response(self) -> None:
@@ -610,7 +612,9 @@ class TestSelfDiagnosisE2E:
         analysis = result.state_updates[StateKeys.ERROR_ANALYSIS]
         assert analysis is not None
         assert analysis["category"] == "knowledge_insufficient"
-        assert analysis["retryable"] is True
+        # 知识不足不可重试（确定性状态，重试无意义）
+        assert analysis["retryable"] is False
+        assert result.state_updates[StateKeys.EXECUTION_STATUS] == "failed"
 
     @pytest.mark.asyncio
     async def test_strategy_error_diagnosis(self) -> None:
