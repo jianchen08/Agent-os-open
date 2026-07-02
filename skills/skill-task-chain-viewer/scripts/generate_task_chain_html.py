@@ -28,6 +28,7 @@ from typing import Any
 # ── frontmatter 解析（最小实现，不依赖第三方） ──────────────────────
 
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
+_OL_RE = re.compile(r"^\d+\.\s+")
 
 
 def _parse_yaml_block(text: str) -> dict[str, Any]:
@@ -263,7 +264,7 @@ def _render_md_block(text: str) -> str:
                 close_lists()
                 out.append("<ol>")
                 in_ol = True
-            out.append(f"<li>{_inline(re.sub(r'^\d+\.\s+', '', stripped))}</li>")
+            out.append(f"<li>{_inline(_OL_RE.sub('', stripped))}</li>")
             continue
         # 普通段落
         close_lists()
