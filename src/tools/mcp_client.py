@@ -171,17 +171,9 @@ class MCPClient:
     async def _read_response(self, timeout: float = 60.0) -> dict[str, Any]:
         """读取响应
 
-        BUG-FIX-fix_20260315_143000_mcp_session:
-        问题根因: MCP 服务器可能在 stdout 输出非 JSON 的日志信息
-        修复方案: 跳过非 JSON 行，只处理有效的 JSON-RPC 响应
-        影响范围: 所有 MCP 工具连接
-        修复日期: 2026-03-15
-
-        BUG-FIX-fix_20260407_timeout:
-        问题根因: readline() 无超时保护，MCP 无响应时会永远阻塞
-        修复方案: 使用 asyncio.wait_for 包装每次 readline 操作，超时后抛出 MCPConnectionError
-        影响范围: 所有 MCP 工具连接
-        修复日期: 2026-04-07
+        跳过 MCP 服务器在 stdout 输出的非 JSON 日志行，只处理有效的 JSON-RPC 响应。
+        每次 readline 用 asyncio.wait_for 包装，超时（默认 60s）后抛出 MCPConnectionError，
+        避免 MCP 无响应时永久阻塞。
         """
         if not self.process or not self.process.stdout:
             raise MCPConnectionError(
