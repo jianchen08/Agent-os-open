@@ -68,14 +68,11 @@ _MAX_MANUAL_COPY_DEPTH = 20
 def _safe_deepcopy(state: dict) -> dict:
     """安全复制 state，避免 RecursionError。
 
-    BUG-FIX-fix_20260510_pipeline_recursion:
-    问题根因: copy.deepcopy(state) 在 state 包含复杂对象时触发 RecursionError，
-    导致 _apply_route(wait) 崩溃，管道异常退出。
-    修复方案: 放弃 copy.deepcopy，改用逐键手动复制：
+    不使用 copy.deepcopy（在 state 包含复杂对象时会触发 RecursionError，导致
+    _apply_route(wait) 崩溃、管道异常退出），改用逐键手动复制：
     - JSON 安全类型 (str/int/float/bool/None) → 直接引用
     - list/dict → 递归手动复制（受深度限制保护）
     - 其他类型 → 浅拷贝或直接引用
-    影响范围: 所有管道的挂起/恢复机制
     """
     safe: dict = {}
     for k, v in state.items():

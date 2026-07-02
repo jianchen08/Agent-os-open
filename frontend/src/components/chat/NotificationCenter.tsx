@@ -115,8 +115,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
    * 面板打开时：临时解除 body overflow:hidden + 阻止 wheel 冒泡
    * 面板关闭时：恢复 body 原始 overflow
    *
-   * 这是解决滚轮无法滚动的关键修复：
-   * 浏览器合成器线程看到 body overflow:hidden 后会直接消费真实滚轮事件，
+   * 原理：浏览器合成器线程看到 body overflow:hidden 后会直接消费真实滚轮事件，
    * 不会传递到 JS 层。临时改为 overflow:visible 后合成器允许事件传递。
    * 同时阻止 wheel 冒泡，防止页面内容跟着滚动。
    */

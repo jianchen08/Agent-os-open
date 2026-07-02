@@ -59,11 +59,9 @@ def _restore_from_lifecycle(task: Any, metadata: dict) -> None:
     持久化到 task.metadata 后，后续读取直接从任务数据获取，
     不再需要查找 lifecycle。
 
-    BUG-FIX-fix_20260618_lifecycle_not_in_provider:
-    原实现通过 provider.get("services") 获取 lifecycle，但 ServiceProvider
-    从未注册 "services" key，导致本函数永远是空操作。现直接通过
-    provider.get("workspace_lifecycle_manager") 获取（lifecycle 已在
-    TaskWorker._init_lifecycle 注册到 ServiceProvider）。
+    直接通过 provider.get("workspace_lifecycle_manager") 获取 lifecycle
+    （lifecycle 已在 TaskWorker._init_lifecycle 注册到 ServiceProvider），
+    而非通过 provider.get("services")（ServiceProvider 从未注册 "services" key）。
     """
     try:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415

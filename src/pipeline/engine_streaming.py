@@ -207,7 +207,6 @@ class StreamingOutput:
     async def drain(self, timeout: float = 2.0) -> None:
         """等待 chunk queue 清空，确保 emit_suspend 前所有流式 chunk 已投递。
 
-        BUG-FIX-fix_20260624_chunk_drain_before_suspend 的配套方法。
         每 5ms 让出事件循环，让 _chunk_consumer 取出并投递 queue 里残留 chunk。
         带超时兜底，防止 consumer 卡住时管道永久挂起。
 
@@ -236,13 +235,12 @@ class StreamingOutput:
     async def _stream_keepalive_loop(self) -> None:
         """流式 keepalive 协程：长静默期周期性推 stream_keepalive 防断连。
 
-        BUG-FIX-fix_20260628_no_keepalive_disconnect:
-        历史问题: LLM reasoning 热身（glm-5.2 实测首 chunk 前静默 20~30s）、长 tool_call
-        组装期间，后端向该 pipeline 零事件输出，前端只能靠心跳确认连接存活。心跳窗口
-        边缘（ack 稍慢即误断），静默期一旦网络/调度抖动，前端判定连接死亡主动断连。
-        而 stream_keepalive 事件前端早有 handler（streaming/index.ts），却从未被后端发送。
-        修复方案: 流式活跃但 chunk 静默超过阈值时，每 _KEEPALIVE_INTERVAL 秒推一个
-        stream_keepalive，填补静默期。chunk 密集时（_on_chunk 持续重置基准）自动不发。
+        LLM reasoning 热身（glm-5.2 实测首 chunk 前静默 20~30s）、长 tool_call 组装期间，
+        后端向该 pipeline 零事件输出，前端只能靠心跳确认连接存活。心跳窗口边缘（ack 稍慢
+        即误断），静默期一旦网络/调度抖动，前端会判定连接死亡主动断连。
+        因此流式活跃但 chunk 静默超过阈值时，每 _KEEPALIVE_INTERVAL 秒推一个
+        stream_keepalive，填补静默期（stream_keepalive 事件前端已有 handler：
+        streaming/index.ts）。chunk 密集时（_on_chunk 持续重置基准）自动不发。
 
         与 _chunk_consumer 同生命周期：start 时启动，shutdown 取消。沿用 adapter
         _stream_heartbeat 的 CancelledError 退出范式。

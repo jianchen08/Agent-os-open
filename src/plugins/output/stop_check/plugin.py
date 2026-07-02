@@ -230,13 +230,10 @@ class StopCheckPlugin(IOutputPlugin):
         1. 从 state["task_status"] 读取（由外部插件注入的缓存值）
         2. 从 TaskService 查询任务的实际状态（兜底，防止 state 未被更新）
 
-        BUG-FIX-fix_20260522_stop_check_completed:
-        问题根因: 管道任务已到达终态（completed/failed），但 _check_task_canceled
-          只检查 canceled/deleted，不检查 completed/failed。且 state["task_status"]
-          从未被任何插件更新（task_event_receiver 只修改 user_input），
-          导致管道在任务完成后仍持续循环执行。
-        修复方案: 扩展终态检测范围包含 completed/failed，并新增从 TaskService
-          查询任务实际状态的兜底路径，确保无论 state 是否被更新都能检测到终态。
+        终态检测范围包含 completed/failed（不止 canceled/deleted），并从 TaskService
+        查询任务实际状态兜底，确保无论 state 是否被更新都能检测到终态，避免管道在任务
+        完成后仍持续循环执行（state["task_status"] 可能从未被任何插件更新，
+        task_event_receiver 只修改 user_input）。
 
         Args:
             ctx: 插件执行上下文
@@ -309,7 +306,6 @@ class StopCheckPlugin(IOutputPlugin):
         优先使用 Agent YAML 中配置的 max_iterations / timeout_seconds
         覆盖构造时的默认值。特殊值 -1 表示无限制。
 
-        BUG-FIX-fix_20260521_eval_timeout:
         重置 _start_time，防止共享插件实例在子管道（如评估管道）中
         因 elapsed 时间已超过 timeout_seconds 而误触发超时终止。
 

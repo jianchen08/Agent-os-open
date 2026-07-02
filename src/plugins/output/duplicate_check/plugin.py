@@ -339,10 +339,9 @@ class DuplicateCheckPlugin(IOutputPlugin):
     def _strip_trailing_tool_call_assistant(self, ctx: PluginContext) -> int:
         """移除 messages 末尾连续的 assistant(tool_calls) 消息。
 
-        BUG-FIX-fix_20260614_orphan_tool_result:
         Level-2 拦截会清空 RAW_TOOL_CALLS，但 llm_core 已 append 的
         assistant(tool_calls) 仍残留 → 永远等不到 tool result → 未配对消息。
-        本方法在拦截时同步移除这些 assistant 消息，撤销本次工具调用意图。
+        因此本方法在拦截时同步移除这些 assistant 消息，撤销本次工具调用意图。
 
         从末尾向前剥离：只移除 role=assistant 且带 tool_calls 的消息，
         遇到普通 assistant 文本消息或其他角色时停止。

@@ -148,14 +148,12 @@ class _TaskCleanupMixin:
     ) -> None:
         """移除 git worktree 并清理对应分支。
 
-        BUG-FIX-fix_20260628_remove_worktree_branch_leak:
-        问题根因: 原实现只执行 `git worktree remove`，从不清除 worktree 关联的
-          task 分支。任务取消/失败走本路径清理时，worktree 目录删了但分支永久残留，
-          导致 task/* 分支随任务无限堆积（本仓库历史已堆积 20+ 个僵尸分支）。
-        修复方案: remove 前用 `git -C <workspace> rev-parse --abbrev-ref HEAD`
-          反查 worktree 当前分支名（detached 时为空则跳过），remove 成功后补
-          `git branch -D` 删除。反查在 remove 之前，因为删后工作区就没了。
-          不改调用链签名，改动收敛在函数内部。
+        除了 `git worktree remove`，还要删除 worktree 关联的 task 分支，否则任务
+        取消/失败走本路径清理时 worktree 目录删了但分支永久残留，导致 task/* 分支
+        随任务无限堆积。
+        流程：remove 前用 `git -C <workspace> rev-parse --abbrev-ref HEAD` 反查
+        worktree 当前分支名（detached 时为空则跳过），remove 成功后补
+        `git branch -D` 删除。反查在 remove 之前，因为删后工作区就没了。
 
         Args:
             workspace_path: worktree 的工作空间路径

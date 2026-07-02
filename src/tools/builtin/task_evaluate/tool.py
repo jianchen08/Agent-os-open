@@ -198,9 +198,8 @@ class TaskEvaluateTool(BuiltinTool):
         通过 injected_params 获取 task_id 等运行时参数，
         通过 TaskService 获取任务数据，通过 EvaluationExecutor 执行评估。
 
-        BUG-FIX-fix_20260418_task_inject: 系统级错误直接标记任务失败
-        问题根因: INJECTION_ERROR/SERVICE_UNAVAILABLE 时 LLM 无意义重试
-        修复方案: 系统级错误直接 fail_task + 返回 task_failed 标记
+        系统级错误（INJECTION_ERROR/SERVICE_UNAVAILABLE）直接 fail_task + 返回
+        task_failed 标记，避免 LLM 无意义重试。
         """
         action = inputs.get("action", "auto_complete")
         task_id = inputs.get("task_id")
@@ -695,13 +694,11 @@ class TaskEvaluateTool(BuiltinTool):
             None 表示合并成功或不需要合并（plain/shared 模式），
             str 表示合并失败原因，调用方应据此标记任务 failed。
 
-        BUG-FIX-fix_20260618_merge_gate_dead_code:
-        原实现通过 provider.get("services") 获取 lifecycle，但 ServiceProvider
-        从未注册 "services" 这个 key（register_services 注册的是字典里每个独立
-        key），导致兜底永远拿不到 lifecycle → 永远 return None = 假装合并成功。
-        现改为直接 provider.get("workspace_lifecycle_manager")（lifecycle 已在
-        TaskWorker._init_lifecycle 注册到 ServiceProvider），并复用
+        通过 provider.get("workspace_lifecycle_manager") 直接获取 lifecycle
+        （lifecycle 已在 TaskWorker._init_lifecycle 注册到 ServiceProvider），并复用
         WorkspaceLifecycleManager.merge_worktree_before_complete 公共方法。
+        不用 provider.get("services")——ServiceProvider 从未注册 "services" 这个 key
+        （register_services 注册的是字典里每个独立 key）。
         """
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         lifecycle = get_service_provider().get("workspace_lifecycle_manager")
@@ -762,9 +759,7 @@ class TaskEvaluateTool(BuiltinTool):
         )
 
     async def _save_task(self, task_service: Any, task: Any) -> None:
-        """保存任务元数据更新。
-
-        BUG-FIX-fix_20260512_async_compat: 改为 async，因为 save_task 现在是 async。
+        """保存任务元数据更新（async，因 save_task 是 async）。"""
 
         Args:
             task_service: TaskService 实例

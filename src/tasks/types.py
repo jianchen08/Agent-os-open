@@ -37,14 +37,9 @@ class TaskStatus(Enum):
     - failed: 执行失败（可 continue 重试）
     - timeout: 执行超时（可 continue 重试）
 
-    BUG-FIX-fix_20260607_missing_evaluating:
-    问题根因: TaskStatus 缺少 EVALUATING 状态，但 task_evaluate 工具、
-      child_task_guard 插件、task_recovery 等多处引用 TaskStatus.EVALUATING，
-      导致导入时 AttributeError，task_evaluate 工具无法注册，
-      LLM 无法调用评估，任务永远无法完成，最终被标记为"管道被中断"。
-    修复方案: 在 TaskStatus 中添加 EVALUATING 状态，同步更新状态转换规则。
-    影响范围: 所有使用 task_evaluate 工具的任务评估流程。
-    修复日期: 2026-06-07
+    EVALUATING 状态供 task_evaluate 工具、child_task_guard 插件、task_recovery 等
+    多处引用（LLM 调用评估期间任务处于此状态），是所有使用 task_evaluate 工具的任务
+    评估流程所必需的。
     """
 
     PENDING = "pending"

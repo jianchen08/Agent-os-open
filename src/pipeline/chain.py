@@ -27,10 +27,9 @@ def _deep_update(target: dict, updates: dict) -> None:
     此函数将 "security.decision" 展开为 target["security"]["decision"]，
     使两种访问方式都能正确工作。
 
-    BUG-FIX-fix_20260606_dynamic_vars_deep_update:
-    同时保留顶层点号键（如 target["security.decision"]），
-    确保 state.get("security.decision") 也能正确访问。
-    之前只展开为嵌套结构，导致 state.get("prompt.dynamic_vars") 等调用返回 None。
+    展开为嵌套结构的同时保留顶层点号键（如 target["security.decision"]），
+    确保 state.get("security.decision") 也能正确访问（否则只展开为嵌套结构时
+    state.get("prompt.dynamic_vars") 等调用会返回 None）。
 
     Args:
         target: 目标 state 字典（原地修改）
