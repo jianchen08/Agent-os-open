@@ -3,23 +3,16 @@
  *
  * 显示消息列表，支持自动滚动、分页加载和加载状态。
  *
- * BUG-FIX-fix_20260624_scroll_jitter_rewrite:
- * 问题根因: 此前手写了一大套滚动 effect（isFollowingBottom + ResizeObserver
- *   + Scroll Anchoring + 流式钉底...），多 effect 互相打架、时序无法稳定，
- *   叠加 MessageItem 缺 memo 导致流式期间整列全量重渲染（40-60次/秒），
- *   算好的 scrollTop 下一帧就被新渲染冲掉 → 滚动条乱跳。
- * 修复方案（路线B）:
- *   1. MessageItem 加 React.memo（见 MessageItem.tsx）：历史消息不再随流式重渲染，
- *      scrollTop 设好后不被冲掉。
- *   2. 本组件大幅删减手写滚动逻辑，只保留最小职责：
+ * 滚动职责设计（最小职责原则）：
+ *   1. MessageItem 已用 React.memo 包裹（见 MessageItem.tsx）：历史消息不随流式
+ *      重渲染，避免算好的 scrollTop 被新渲染冲掉导致滚动条乱跳。
+ *   2. 本组件只保留最小滚动职责：
  *      - 首次进入钉底、切 Tab 缓存/恢复 scrollTop
  *      - 用户发消息/流式期间跟随底部
  *      - 到顶触发加载更多
- *   3. 向上加载更多（prepend）不跳交给浏览器原生 CSS `overflow-anchor: auto`
- *      （微博/Twitter 同款机制，2019 年起全浏览器支持，Electron/Tauri 100% 兼容），
- *      不再手写任何锚点逻辑。
- * 影响范围: 消息列表滚动稳定性、流式渲染性能
- * 修复日期: 2026-06-24
+ *   3. 向上加载更多（prepend）的不跳由浏览器原生 CSS `overflow-anchor: auto`
+ *      保证（微博/Twitter 同款机制，2019 年起全浏览器支持，Electron/Tauri 100% 兼容），
+ *      无需手写任何锚点逻辑。
  */
 
 import { Loader2 } from 'lucide-react'
@@ -88,7 +81,6 @@ export const MessageList = ({
   const initialScrollDone = useRef(false)
   /**
    * 用户是否通过真实手势（wheel/touch）滚动过。
-   * BUG-FIX-fix_20260630_reload_stuck_middle:
    * 用于区分"用户主动上滑"与"程序性滚动"（高度变化导致 scrollTop 变小）。
    * onScroll 对两者都会触发，但只有真实手势才算用户意图上滑。
    * 刷新恢复时 initFromAPI 重建导致高度突减，浏览器程序性滚动会触发 onScroll，
@@ -144,12 +136,10 @@ export const MessageList = ({
   /**
    * 滚动事件处理
    *
-   * BUG-FIX-fix_20260625_streaming_cannot_scroll:
-   * 问题根因: 流式期间 ResizeObserver + 流式 effect 高频钉底，用户往上滚一点
-   *   （还没离开 150px 阈值）下一帧就被拉回底部 → "滚不动"。
-   * 修复方案: 用 scrollTop 方向判断用户意图——只要用户往上滚（scrollTop 变小），
-   *   立即停止跟随（isFollowingBottom=false）并断开钉底 observer，把控制权完全交给用户。
-   *   不再等"离开底部 150px"才停。滚回底部附近时恢复跟随。
+   * 用 scrollTop 方向判断用户意图——只要用户往上滚（scrollTop 变小），
+   * 立即停止跟随（isFollowingBottom=false）并断开钉底 observer，把控制权完全交给用户。
+   * 不等"离开底部 150px"才停（流式期间若等过阈值才停，下一帧又会被钉底拉回，导致"滚不动"）。
+   * 滚回底部附近时恢复跟随。
    */
   const onScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
@@ -164,7 +154,6 @@ export const MessageList = ({
 
       // 用户主动上滑（scrollTop 变小）→ 立即停止跟随。
       // contentResize observer 内部判断 isFollowingBottom，停止跟随后不再钉底。
-      // BUG-FIX-fix_20260630_reload_stuck_middle:
       // 仅在用户通过真实手势（wheel/touch）滚动时才判定为"主动上滑"。
       // 刷新恢复时 initFromAPI 重建导致高度突减，浏览器产生程序性滚动（无手势），
       // 此时不应把 isFollowingBottom 置 false，否则后续 ResizeObserver 不钉底 → 停中间。
@@ -192,10 +181,9 @@ export const MessageList = ({
    * 持续校正（initFromAPI 重建等内容高度变化时重新钉底）由下方 contentResize
    * effect 负责，本 effect 只做一次性首次定位。
    */
-  // BUG-FIX-fix_20260630_first_scroll_useLayoutEffect:
-  // 原 useEffect 在 paint 后才跑，浏览器已先把 DOM 渲染在"中间"位置（ scrollTop 维持
-  // 上次相对位置），用户看到一帧中间态。改用 useLayoutEffect 在 paint 前同步钉底，
-  // 从根本上消除中间态闪烁。
+  // 用 useLayoutEffect 而非 useEffect 做首次定位：useLayoutEffect 在 paint 前同步钉底，
+  // 从根本上消除"中间态"闪烁（useEffect 在 paint 后才跑，浏览器已先把 DOM 渲染在
+  // 维持上次相对位置的"中间"位置，用户会看到一帧中间态）。
   useLayoutEffect(() => {
     if (messages.length === 0 || initialScrollDone.current) return
     initialScrollDone.current = true
@@ -214,15 +202,12 @@ export const MessageList = ({
     }
 
     // 无缓存钉底：首次定位到底部
-    // BUG-FIX-fix_20260630_first_scroll_no_raf:
-    // 原把 pinToBottom 仅包在 RAF 里 → 浏览器先 paint 一帧（scrollTop 停在 persist
-    // 恢复的"之前位置"）→ 用户看到中间态 → RAF 才跳底。
-    // 修复: useLayoutEffect 阶段同步钉底 + RAF 钉底。
-    // BUG-FIX-fix_20260630_edge_scroll_linger:
+    // useLayoutEffect 阶段同步钉底 + RAF 钉底双管齐下，避免仅靠 RAF 时浏览器先 paint
+    // 一帧（scrollTop 停在 persist 恢复的"之前位置"，用户看到中间态）再跳底。
     // Edge（含部分配置/扩展的环境）即使 scrollRestoration=manual，仍会在刷新瞬间
     // 把 scrollTop 停在旧位置，且 useLayoutEffect 的同步钉底被 Edge 的渲染时序推迟，
     // 导致用户看到"先停旧位置再跳底"。Chrome 不复现（时序不同）。
-    // 兜底方案: 首次定位后启动 1.2s 的轮询钉底（每 50ms 一次），覆盖所有浏览器
+    // 兜底: 首次定位后启动 1.2s 的轮询钉底（每 50ms 一次），覆盖所有浏览器
     // 渲染时序差异 + persist 异步 hydrate + markdown/代码块异步渲染导致的高度变化。
     // 用户在此窗口内 wheel/touch 上滑会置 userScrolled，pinToBottom 内部据此跳过，
     // 不会"抢"用户的滚动。
@@ -246,8 +231,8 @@ export const MessageList = ({
 
   /**
    * 注册真实手势监听（wheel/touch），区分用户主动滚动与程序性滚动。
-   * BUG-FIX-fix_20260630_reload_stuck_middle: 只有真实手势触发时 userScrolled 才置位，
-   * onScroll 据此判断是否为用户意图上滑。程序性滚动（高度变化导致）不置位。
+   * 只有真实手势触发时 userScrolled 才置位，onScroll 据此判断是否为用户意图上滑。
+   * 程序性滚动（高度变化导致）不置位。
    */
   useEffect(() => {
     const el = scrollRef.current
@@ -264,25 +249,17 @@ export const MessageList = ({
   /**
    * 持续跟随底部：内容高度变化时重新钉底。
    *
-   * BUG-FIX-fix_20260629_enter_stuck_in_middle:
-   * 问题根因: 进入页面时 persist 快照先渲染并钉底（存的本来就是最新 50 条，数据没问题），
-   *   随后 initFromAPI 异步从后端拉权威消息重建数组——经 mergeConsecutiveAssistantMessages
-   *   （合并连续 assistant 气泡）、filterBlankMessages（删空白）后内容高度变化。但原"跟随
-   *   底部"逻辑只在「消息条数增加」时重新钉底（messages.length > lastMessageCount），
-   *   而 initFromAPI 的合并常使条数减少或不变 → 不触发钉底 → 视图停在快照渲染高度的
-   *   「中间」，而非最新消息底部。原有的 ResizeObserver 又 observe 滚动容器（flex-1
-   *   尺寸固定），监听不到内容 scrollHeight 变化，形同虚设。
-   * 修复方案: 新增独立 effect，用 ResizeObserver 监听【内容容器】（随消息内容增高），
-   *   只要仍在跟随底部（isFollowingBottom）内容一变就钉底。覆盖 initFromAPI 重建、
-   *   流式增长、markdown/代码块异步渲染等所有内容高度变化场景。用户上滑后
-   *   isFollowingBottom=false，observer 触发也不钉底，把控制权交给用户。
+   * 用独立 effect 监听【内容容器】（随消息内容增高），只要仍在跟随底部
+   * （isFollowingBottom）内容一变就钉底。覆盖 initFromAPI 重建、流式增长、
+   * markdown/代码块异步渲染等所有内容高度变化场景——冷加载重建后内容高度变化
+   * （经 mergeConsecutiveAssistantMessages 合并、filterBlankMessages 删空白后常使
+   * 条数减少或不变），仅靠「消息条数增加才钉底」的逻辑无法触发，会导致视图停在
+   * 快照渲染高度的「中间」而非最新消息底部。用户上滑后 isFollowingBottom=false，
+   * observer 触发也不钉底，把控制权交给用户。
    *
    * 依赖含 messages.length：messages 从空→非空时 contentRef 才挂载，需要重跑本 effect
    * 挂上 observer。之后 contentRef 持续存在，length 变化时 disconnect+observe 同一节点，
    * 开销可忽略。
-   *
-   * 影响范围: 进入页面冷加载重建后的滚动定位（停在中间）
-   * 修复日期: 2026-06-29
    */
   useEffect(() => {
     const content = contentRef.current
@@ -328,17 +305,11 @@ export const MessageList = ({
   /**
    * 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
    *
+   * 读 onScroll 实时记录的 lastScrollTopRef（用户最后的真实滚动位置），而不读 DOM：
+   * 切 Tab 卸载时 React 先清空消息 DOM（scrollHeight/scrollTop 归 0），再跑 cleanup，
+   * 此时读 el.scrollTop 拿到的是垃圾值 0，存进缓存会导致切回时恢复到顶部。
    * effect 运行时（commit 后）闭包捕获 DOM 引用；不在 cleanup 里直接读 ref，
    * 因为卸载时 React 先 detach ref（置 null）再跑 passive effect cleanup。
-   */
-  /**
-   * 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
-   *
-   * BUG-FIX-fix_20260625_unload_stale_scrolltop:
-   * 问题根因: 切 Tab 卸载时 React 先清空消息 DOM（scrollHeight/scrollTop 归 0），
-   *   再跑 cleanup。此时读 el.scrollTop 拿到的是垃圾值 0，存进缓存 → 切回时恢复到顶部。
-   * 修复方案: 读 onScroll 实时记录的 lastScrollTopRef（用户最后的真实滚动位置），
-   *   不读已被清空的 DOM。
    */
   useEffect(() => {
     return () => {

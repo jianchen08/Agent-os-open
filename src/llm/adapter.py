@@ -61,11 +61,9 @@ _THINK_PATTERN_NO_GT = re.compile(
 def _extract_thinking_from_content(content: str | None) -> tuple[str | None, str | None]:
     """从 content 中提取 <think/> 标签内容，返回 (thinking_text, cleaned_content)。
 
-    BUG-FIX-fix_20260418_163500_think_extract
-    问题根因: MiniMax-M2.7 等推理模型的思考内容包裹在 <think/> 标签中
-    混在 content 字段返回，litellm 不会自动映射到 reasoning_content
-    修复方案: 手动解析 <think/> 标签，将思考内容与正文分离
-    影响范围: 所有未自动映射 reasoning_content 的推理模型
+    MiniMax-M2.7 等推理模型把思考内容包裹在 <think/> 标签中混在 content 字段返回，
+    litellm 不会自动映射到 reasoning_content，因此这里手动解析 <think/> 标签，
+    将思考内容与正文分离。
 
     支持两种标签格式：
     1. 标准 XML: <think\\n...\\n</think/> 或 <think type="x">...</think...>
@@ -319,9 +317,8 @@ class _BaseLiteLLMAdapter:
         kwargs.pop("first_chunk_timeout", None)
         kwargs.pop("max_thinking_chars", None)
 
-        # BUG-FIX-fix_20260627_timeout_needs_float:
-        # 非流式路径若不传 timeout，litellm 用 Router 默认（yaml call_timeout，
-        # 历史是 int）或自身默认 int，传给 zai 触发
+        # 非流式路径必须显式传 float 类型 timeout：litellm 的 Router 默认（yaml
+        # call_timeout，可能是 int）或自身默认 int，传给 zai 会触发
         # "Timeout needs to be a float"。显式设 float，与流式路径（3600.0）对齐。
         call_kwargs: dict[str, Any] = {
             "model": model,
@@ -414,22 +411,17 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
-        # BUG-FIX-fix_20260623_first_chunk_timeout:
-        # 原实现把 call_kwargs["timeout"] 写在 _do_completion 之后（对已发出的
-        # 请求无效），导致首 chunk 不来时 asyncio.wait_for 的 cancel 传不到
-        # httpx C 层 socket recv()，流式调用永久卡死（实测卡 5~10 分钟不超时）。
-        # 修复：在发请求之前就把 timeout 传给 litellm → httpx.Timeout(read=N)，
-        # 让 socket 层强制超时。litellm 的 timeout 是核心参数（router_factory.py
-        # 已用 float 传过），drop_params=True 不会丢弃它。
+        # 在发请求前设置 timeout，让 litellm → httpx.Timeout(read=N) 在 socket 层
+        # 强制超时；放在 _do_completion 之后设置对已发出的请求无效，会导致首 chunk
+        # 不来时 asyncio.wait_for 的 cancel 传不到 httpx C 层 socket recv()。
+        # litellm 的 timeout 是核心参数（router_factory.py 已用 float 传过），
+        # drop_params=True 不会丢弃它。
         #
-        # BUG-FIX-fix_20260625_httpx_timeout_too_short:
-        # 历史实现把 call_kwargs["timeout"] 设成 first_chunk_timeout（默认 60s），
-        # 但 httpx 的 read timeout 作用于流式连接的【每一次】 socket 读取，不只是
-        # 首 chunk。结果：LLM 流式输出中途如果两次 chunk 之间间隔 > 60s（长文
-        # 档生成、思考停顿、网络抖动），httpx 层就把连接掐断，adapter 的
-        # inter_chunk_timeout（300s）根本等不到。
-        # 日志证据（af11896959d1 iter=5）：最后 chunk 02:42:22 → 60s 沉默 →
-        # 02:43:22 连接断，raw_result=None，整条方案文档输出丢失。
+        # 注意 timeout 必须用大值，不能用 first_chunk_timeout（默认 60s）：
+        # httpx 的 read timeout 作用于流式连接的【每一次】 socket 读取，不只是首 chunk。
+        # 若设成 60s，LLM 流式输出中途两次 chunk 间隔 > 60s（长文档生成、思考停顿、
+        # 网络抖动）时 httpx 会把连接掐断，adapter 的 inter_chunk_timeout（300s）根本
+        # 等不到。
         #
         # 流式 read timeout：设一个很大的值，避免 reasoning 组装 tool_call 时
         # 的数分钟静默期被 socket read timeout 误杀。glm-5.2 的 tool_call 整块
@@ -437,18 +429,12 @@ class _BaseLiteLLMAdapter:
         # zai provider 只接受 float，用大数近似"不超时"。
         call_kwargs["timeout"] = 3600.0
 
-        # BUG-FIX-fix_20260628_connect_phase_hang:
-        # 历史实现把 first_chunk_timeout 的 asyncio.wait_for 仅包在首个
-        # aiter.__anext__() 上（见下方），保护不到 _do_completion() 自身。
-        # 流式下 _do_completion 在上游"半死连接"时（TCP 建连成功、请求已发出，
-        # 但上游既不回数据也不断开）会卡在 litellm.acompletion 的建连/等响应头
-        # 阶段——既不是 429（限流会回完整响应），也不是连接错误（连接已建立），
-        # 而 first_chunk_timeout 因 _do_completion 尚未返回而无法启动，请求静默
-        # 挂死，只能等满 1 小时的 httpx timeout。
-        # 日志证据（0b883e12f74d Calling@10:16:10）：卡在 "选用 key" 之后、
-        # "发请求前" 之前，无 STREAM TIMEOUT、无任何错误，纯静默。
-        # 修复：把 first_chunk_timeout 的 wait_for 上提，同时包住 _do_completion
-        # 和首 chunk 读取——首字节超时统一覆盖"建连→等响应头→首字节"全过程。
+        # 首字节超时统一覆盖"建连→等响应头→首字节"全过程：把 first_chunk_timeout 的
+        # wait_for 同时包住 _do_completion 和首 chunk 读取。
+        # 上游"半死连接"（TCP 建连成功、请求已发出，但上游既不回数据也不断开）会让
+        # _do_completion 卡在 litellm.acompletion 的建连/等响应头阶段——既不是 429，
+        # 也不是连接错误，若 wait_for 仅包首个 __anext__() 则因 _do_completion 尚未
+        # 返回而无法启动，请求会静默挂死直到 1 小时的 httpx timeout。
 
         async def _open_and_first_chunk() -> tuple[Any, Any]:
             """建连并读取首个 chunk，供外层 wait_for 统一限时。
@@ -544,7 +530,6 @@ class _BaseLiteLLMAdapter:
         _recv_tc_count = 0
         _finish_reason: str | None = None
 
-        # BUG-FIX-fix_20260529_minimax_thinking_stream:
         # 流式 <think/> 标签状态机。MiniMax 等模型的思考内容通过 <think/> 标签
         # 包裹在 delta.content 中返回（而非 delta.reasoning_content），且标签会
         # 跨多个 chunk 切分。状态机通过 "<think" / "</think" 字符串查找跟踪开/闭状态，
@@ -554,7 +539,7 @@ class _BaseLiteLLMAdapter:
         aiter = response.__aiter__()
         try:
             # 首个 chunk 已在 _open_and_first_chunk 内读取（含建连阶段的超时保护，
-            # 见上方 BUG-FIX-fix_20260628_connect_phase_hang）。此处直接处理它。
+            # 见上方首字节超时统一覆盖的说明）。此处直接处理它。
             chunk = first_chunk
 
             # 边收边处理，保持真正的流式
@@ -806,10 +791,9 @@ class _BaseLiteLLMAdapter:
                     _completion_stream,
                 )
             )
-            # BUG-FIX-fix_20260630_stream_loop_freeze:
-            # 上述 asyncio 心跳/inter_chunk wait_for 共享同一 loop，一旦底层
-            # socket 阻塞冻住事件循环，全部失效（僵死管道零 HEARTBEAT 铁证）。
-            # 叠加独立线程硬超时：到点强制 aclose，loop 冻住也能打破死锁。
+            # 独立线程硬超时兜底：上述 asyncio 心跳/inter_chunk wait_for 共享同一
+            # event loop，一旦底层 socket 阻塞冻住事件循环，全部失效（僵死管道零
+            # HEARTBEAT 即铁证）。硬超时到点强制 aclose，loop 冻住也能打破死锁。
             _hard_timeout = StreamHardTimeout(
                 response, asyncio.get_running_loop(), inter_chunk_timeout,
             )
@@ -850,9 +834,8 @@ class _BaseLiteLLMAdapter:
             # 关键设计：wait_for 是【逐次】超时——每个 chunk 到达就重新计时。活跃推理
             # 的 reasoning/text chunk 间隔远小于 timeout（实测 <1s），故永不误触发；只有
             # 真正静默（上游连接挂起/服务端冻结，连心跳都不发的死连接）才会累计满 timeout。
-            # 这避开了 BUG-FIX-fix_20260625_httpx_timeout_too_short 的覆辙——那次是【固定】
-            # 60s per-read 误杀了正常的多分钟 reasoning 间隙；本方案 per-iteration 重置，
-            # 活跃流不受影响。
+            # 用 per-iteration 重置（而非固定 60s per-read）避免误杀正常的多分钟 reasoning
+            # 间隙，活跃流不受影响。
             #
             # 注意：glm-5.2 的 tool_call 虽是紧跟 reasoning 的整块输出（实测间隙≈0），
             # 但仍依赖 reasoning 阶段持续吐 chunk 维持计时器存活；若 reasoning 也静默
@@ -1136,18 +1119,16 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     "[KeyPoolAdapter] provider=%s 选用 key=%s (api_key=%s...) attempt=%d/%d",
                     provider_name, slot.key_id, slot.api_key[:6], attempt + 1, max_retries,
                 )
-                # BUG-FIX-fix_20260628_release_before_stream_consumed:
+                # 信号量释放时机区分流式/非流式两条路径：
                 # 流式路径下 _direct_call_with_slot 返回的是惰性 stream wrapper
                 # （litellm CustomStreamWrapper），真正的流式传输（建连→首字节→逐
                 # chunk 读取）发生在调用方 _call_streaming 消费该对象期间，而非
-                # _do_completion 返回之前。原实现的 finally: slot.release() 在
-                # stream wrapper 返回时立即释放信号量，导致 max_concurrent 形同虚设
-                # ——信号量只计量了"拿到 stream 对象"的毫秒级瞬间，未覆盖秒~分钟级
-                # 的流式传输。日志证据：yichengc key max_concurrent=7，但峰值在途
-                # 占用达 73 个，PrioritySemaphore 全天零排队。
-                # 修复：流式返回时把 release 推迟到 stream.aclose（由 _call_streaming
-                # 的 finally 在流消费完毕后调用）；非流式返回的是已完成的 ModelResponse，
-                # 保持原有 finally 立即 release。用 _defer_release 标志区分两条路径。
+                # _do_completion 返回之前。因此流式返回时把 release 推迟到 stream.aclose
+                # （由 _call_streaming 的 finally 在流消费完毕后调用），否则在 stream
+                # wrapper 返回时立即释放会让 max_concurrent 形同虚设——只计量了"拿到
+                # stream 对象"的毫秒级瞬间，未覆盖秒~分钟级的流式传输。
+                # 非流式返回的是已完成的 ModelResponse，保持原有 finally 立即 release。
+                # 用 _defer_release 标志区分两条路径。
                 _defer_release = False
                 try:
                     key_kwargs = dict(kwargs)
@@ -1246,14 +1227,9 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
     async def _route_call(self, **kwargs: Any) -> Any:
         """无 KeyPool 时的回退路径，动态获取最新 Router。
 
-        BUG-FIX-fix_20260530_config_not_take_effect:
-        问题根因: self._router 是初始化时缓存的旧 Router 实例，
-                  前端修改模型配置后 invalidate_all_llm_caches() 清除了模块级单例，
-                  但 KeyPoolAdapter 仍持有旧 Router 引用，导致配置不生效。
-        修复方案: 每次调用时通过 get_or_create_router() 动态获取最新 Router，
-                  若模块级单例已被重置则自动从 YAML 重建。
-        影响范围: KeyPoolAdapter 的所有 LLM 调用路径
-        修复日期: 2026-05-30
+        不缓存 self._router，而是每次调用时通过 get_or_create_router() 动态获取最新
+        Router，若模块级单例已被重置（前端修改模型配置后 invalidate_all_llm_caches()
+        会清除）则自动从 YAML 重建，确保模型配置变更对 KeyPoolAdapter 立即生效。
         """
         from config.models import get_model_config_loader  # noqa: PLC0415
         from llm.router_factory import get_or_create_router  # noqa: PLC0415

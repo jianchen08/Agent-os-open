@@ -986,6 +986,14 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      {/* 新建根任务模态框 */}
+      <CreateTaskModal
+        isOpen={isCreateTaskOpen}
+        onClose={() => setIsCreateTaskOpen(false)}
+        sessionId={sessionId}
+        onCreated={triggerRefresh}
+      />
     </div>
   )
 }
@@ -1386,14 +1394,6 @@ function TreeNode({
 
         </div>
       )}
-
-      {/* 新建根任务模态框 */}
-      <CreateTaskModal
-        isOpen={isCreateTaskOpen}
-        onClose={() => setIsCreateTaskOpen(false)}
-        sessionId={sessionId}
-        onCreated={triggerRefresh}
-      />
     </div>
   )
 
