@@ -71,6 +71,7 @@ describe('loadPipelineMessages 统一加载入口', () => {
       bottomCursorsByPipeline: {},
       hasMoreOlderByPipeline: {},
       isLoadingOlderByPipeline: {},
+      reconciledByPipeline: {},
     })
   })
 
@@ -101,11 +102,12 @@ describe('loadPipelineMessages 统一加载入口', () => {
       pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
       agentName: '', status: 'running', parentId: null, unreadCount: 0,
     })
-    // 先全量 init 建立本地状态 + bottomCursor=2
+    // 先全量 init 建立本地状态 + bottomCursor=2，并标记已对账（模拟运行中状态）
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('u1', 1, { role: 'user', content: 'q' }),
       makeMsg('a1', 2, { content: 'a' }),
     ])
+    usePipelineMessageStore.setState({ reconciledByPipeline: { [PIPELINE_ID]: true } })
     expect(store.getBottomCursor(PIPELINE_ID)).toBe(2)
 
     // 补漏：API 返回 seq>2 的新消息
@@ -216,5 +218,112 @@ describe('loadPipelineMessages 统一加载入口', () => {
     // mode='init' 不传 after_sequence（强制全量）
     const callArg = mockGet.mock.calls[0][1]
     expect(callArg.params.after_sequence).toBeUndefined()
+  })
+
+  it('rehydrate 后（reconciled 缺失）即使 isInitialized=true 也走全量 init', async () => {
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({
+      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
+      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
+    })
+    // 模拟 rehydrate 后状态：本地有消息 + bottomCursor 已恢复，但 reconciledByPipeline 为空
+    // （merge 中重置为 {}）。此时 isInitialized=true，但未对账 → 必须走全量 init 而非增量补漏。
+    store.initFromAPI(PIPELINE_ID, [
+      makeMsg('u1', 1, { role: 'user', content: 'q' }),
+      makeMsg('a1', 2, { content: 'a' }),
+    ])
+    usePipelineMessageStore.setState({ reconciledByPipeline: {} })
+    expect(store.isInitialized(PIPELINE_ID)).toBe(true)
+    expect(usePipelineMessageStore.getState().reconciledByPipeline[PIPELINE_ID]).toBeFalsy()
+
+    setApiRecords([
+      { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
+      { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
+    ])
+
+    const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
+
+    expect(result.ok).toBe(true)
+    // 关键断言：未对账 → 全量请求，不传 after_sequence（增量补漏拉不到已加载区间内的空洞）
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    const callArg = mockGet.mock.calls[0][1]
+    expect(callArg.params.after_sequence).toBeUndefined()
+    // 对账成功后标记
+    expect(usePipelineMessageStore.getState().reconciledByPipeline[PIPELINE_ID]).toBe(true)
+  })
+
+  it('首次 auto 全量对账后，后续 auto 走 after_sequence 增量补漏', async () => {
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({
+      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
+      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
+    })
+
+    // 第一次 auto：未对账 → 全量 init
+    setApiRecords([
+      { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
+      { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
+    ])
+    await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
+    const firstCallArg = mockGet.mock.calls[0][1]
+    expect(firstCallArg.params.after_sequence).toBeUndefined()
+    expect(store.getBottomCursor(PIPELINE_ID)).toBe(2)
+
+    // 第二次 auto：已对账 → 增量补漏
+    setApiRecords([
+      { id: 'a2', sequence: 3, role: 'assistant', content: 'a2', timestamp: '2026-01-01T00:00:02Z' },
+    ])
+    await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
+    const secondCallArg = mockGet.mock.calls[1][1]
+    expect(secondCallArg.params.after_sequence).toBe(2)
+  })
+
+  it('流式断线空洞：rehydrate 后全量对账修正已加载区间内的缺失消息（核心回归）', async () => {
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({
+      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
+      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
+    })
+    // 模拟流式断线残留：本地有 seq1(user) + seq2(assistant 空气泡，WS 生成的 id，
+    // rehydrate 把 status:'streaming' 改为 'completed')。bottomCursor 被推到 2。
+    // 刷新后若走增量补漏 after_sequence=2，永远拉不到 seq≤2 的修正 + 断线期间后续消息。
+    usePipelineMessageStore.setState({
+      messagesByPipeline: {
+        [PIPELINE_ID]: [
+          makeMsg('u1', 1, { role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' }),
+          makeMsg('ws-stream-uuid-a1', 2, { content: '', status: 'completed', timestamp: '2026-01-01T00:00:01Z' }),
+        ],
+      },
+      bottomCursorsByPipeline: { [PIPELINE_ID]: 2 },
+      reconciledByPipeline: {},
+    })
+    expect(store.isInitialized(PIPELINE_ID)).toBe(true)
+
+    // 后端权威：seq2 实际有完整内容（修正空气泡），seq3-4 是断线期间用户继续对话的后续消息。
+    // 后端 id（hex）与本地 WS uuid 不同，靠 mergeApiWithExisting 丢弃本地残缺 + 指纹去重。
+    setApiRecords([
+      { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
+      { id: 'hex-a1', sequence: 2, role: 'assistant', content: '完整的AI回复', timestamp: '2026-01-01T00:00:01Z' },
+      { id: 'u2', sequence: 3, role: 'user', content: 'q2', timestamp: '2026-01-01T00:00:02Z' },
+      { id: 'hex-a2', sequence: 4, role: 'assistant', content: 'a2', timestamp: '2026-01-01T00:00:03Z' },
+    ])
+
+    const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
+
+    expect(result.ok).toBe(true)
+    // 必须走全量 init（无 after_sequence），否则补不到 seq2 的修正与 seq3-4 后续消息
+    const callArg = mockGet.mock.calls[0][1]
+    expect(callArg.params.after_sequence).toBeUndefined()
+
+    const msgs = store.getMessages(PIPELINE_ID)
+    const sequences = msgs.map((m) => m.sequence)
+    // 全量对账后 4 条消息全部到位
+    expect(sequences).toEqual([1, 2, 3, 4])
+    // seq2 内容被后端权威版本修正（不再是空气泡）
+    const fixedMsg = msgs.find((m) => m.sequence === 2)
+    expect(fixedMsg?.content).toBe('完整的AI回复')
+    // 指纹去重：不出现重复气泡（每个 sequence 只有一条）
+    expect(sequences.length).toBe(new Set(sequences).size)
+    expect(store.getBottomCursor(PIPELINE_ID)).toBe(4)
   })
 })

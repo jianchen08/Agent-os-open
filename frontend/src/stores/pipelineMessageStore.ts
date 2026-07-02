@@ -195,6 +195,9 @@ interface PipelineMessageState {
   hasMoreOlderByPipeline: Record<string, boolean>
   /** 是否正在加载更早的消息 */
   isLoadingOlderByPipeline: Record<string, boolean>
+  /** 运行时标记：本次会话已与后端全量对账过的 pipeline（不持久化，rehydrate 后重置）。
+   *  防止流式断线残留的不可信 bottomCursor 导致刷新后只走增量补漏、已加载区间内空洞永远补不上。 */
+  reconciledByPipeline: Record<string, boolean>
 
   /** 注册管道 */
   registerPipeline: (meta: PipelineMeta) => void
@@ -458,6 +461,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   bottomCursorsByPipeline: {},
   hasMoreOlderByPipeline: {},
   isLoadingOlderByPipeline: {},
+  reconciledByPipeline: {},
 
   /** 注册管道，建立 pipelineId 与元数据的映射 */
   registerPipeline: (meta: PipelineMeta) => {
@@ -939,15 +943,20 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     }
 
     // 模式决策（统一权威定义 isInitialized）：
-    // - mode='auto'：已初始化走增量补漏，否则全量冷启动
+    // - mode='auto'：未初始化 或 本次会话尚未与后端对账 → 全量冷启动；否则增量补漏
     // - mode='init'：强制全量
     // - mode='backfill'：强制增量补漏
+    // 对账（reconcile）标记是 runtime 值，rehydrate 后重置为空。因此应用重启后即使
+    // isInitialized=true（持久化的 bottomCursor 已恢复），首次 auto 也会走全量 initFromAPI，
+    // 用 role::seq 指纹去重修正流式断线造成的已加载区间内空洞。
     const isInit = mode === 'init'
-      || (mode === 'auto' && !state.isInitialized(pipelineId))
+      || (mode === 'auto' && (!state.isInitialized(pipelineId) || !state.reconciledByPipeline[pipelineId]))
 
     try {
       if (isInit) {
         await state.fetchMessages(pipelineId, { threadId })
+        // 全量对账成功后标记，后续 auto 切会话/切 Tab 走高效增量补漏。
+        set((s) => ({ reconciledByPipeline: { ...s.reconciledByPipeline, [pipelineId]: true } }))
       } else {
         const bottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
         await state.fetchMessages(pipelineId, { threadId, after_sequence: bottomCursor })
@@ -1188,6 +1197,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         // 运行时状态强制重置（不信任持久化值）
         streamingState: {},
         isLoadingOlderByPipeline: {},
+        // 重置对账标记：应用重启后持久化的 bottomCursor 不可信（可能来自流式断线时的乐观值），
+        // 所有 pipeline 必须重新全量对账，避免已加载区间内的空洞无法通过增量补漏修复。
+        reconciledByPipeline: {},
       }
     },
     // 迁移配套：消息缓存已迁 IndexedDB，旧 localStorage['pipeline-messages'] 不再读取。

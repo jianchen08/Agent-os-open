@@ -4,7 +4,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { extractMessageId } from './utils'
+import { allocatePartSequence, extractMessageId } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -74,7 +74,10 @@ export function handleToolStart(eventData: any) {
     name: toolName,
     args: eventData.args || eventData.data?.args || eventData.data?.tool_args || {},
     state: 'calling',
-    sequence: eventData.sequence ?? eventData.data?.sequence ?? Date.now(),
+    // sequence fallback: 缺失时用 part 级 max+1（与 thinking/text handler 一致），
+    // 保证工具卡片按到达顺序排在当前内容之后，不被 Date.now() 大数推到末尾，
+    // 否则后续流式文本会渲染到工具卡片上方（tool 卡片错误地常驻气泡底部）。
+    sequence: eventData.sequence ?? eventData.data?.sequence ?? allocatePartSequence(pipelineId, messageId),
     containerTaskId: eventData.container_task_id || eventData.data?.container_task_id || undefined,
   })
 }

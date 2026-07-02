@@ -253,6 +253,52 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   })
 
   // -----------------------------------------------------------------------
+  // 3.5 tool_call sequence fallback 回归（修复：常驻底部的工具卡片）
+  //    根因：toolHandler 曾用 Date.now() 作为 tool_call part 的 sequence fallback，
+  //    Date.now() 是天文数字，渲染层按 part.sequence 升序排序时把 tool_call 永久推到
+  //    末尾，导致后续流式文本渲染在工具卡片上方（工具卡片常驻气泡底部）。
+  //    修复后 fallback 用 allocatePartSequence（part 级 max+1），tool_call 排在创建时刻
+  //    的内容之后。本测试直接在渲染层验证排序语义。
+  // -----------------------------------------------------------------------
+  describe('tool_call sequence fallback 回归', () => {
+    it('tool_call 后续追加的 text 不应排到 tool_call 之前（渲染层按 sequence 升序）', () => {
+      // 模拟修复后状态：text(1) → tool_call(2, max+1) → text(3, max+1)
+      const message = createMessage({
+        parts: [
+          textPart('调用前', 1),
+          toolCallPart('tc-1', 'read_file', 'done', 2),
+          textPart('调用后', 3),
+        ],
+      })
+
+      const { result } = renderHook(() => useMessageRender({ message }))
+
+      const types = extractFragmentTypes(result.current.fragments)
+      // 工具卡片排在它之后的文本之前，不被推到末尾
+      expect(types).toEqual(['text', 'tool_call', 'text'])
+    })
+
+    it('若 tool_call sequence 被错误地设为天文数字（旧 Date.now() 行为），渲染时会被推到末尾——这是要规避的反例', () => {
+      // 反例：模拟旧 bug —— tool_call 用 Date.now() 量级的大数 sequence
+      const hugeSeq = Date.now()
+      const message = createMessage({
+        parts: [
+          textPart('调用前', 1),
+          toolCallPart('tc-1', 'read_file', 'done', hugeSeq),
+          textPart('调用后', 2),
+        ],
+      })
+
+      const { result } = renderHook(() => useMessageRender({ message }))
+
+      const types = extractFragmentTypes(result.current.fragments)
+      // 此场景下工具卡片被错误地推到末尾（正是旧 bug 的表现），
+      // 用以说明"fallback 必须用 max+1 而非 Date.now()"。
+      expect(types).toEqual(['text', 'text', 'tool_call'])
+    })
+  })
+
+  // -----------------------------------------------------------------------
   // 4. 动态 parts 更新
   // -----------------------------------------------------------------------
   describe('动态 parts 更新', () => {
