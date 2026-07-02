@@ -27,6 +27,7 @@
 - 🛠️ **40+ 内置工具** —— 文件、Shell、代码搜索、浏览器、网络、记忆、媒体生成、IDE 集成（实际 41 个 tool.py 实现）
 - 🌐 **多通道接入** —— Web、CLI、钉钉、飞书、QQ、企微、HTTP API 共享同一套内核
 - 📐 **MCP 协议兼容** —— 完整支持 Model Context Protocol，可接入任何 MCP 服务
+- 🔁 **复盘系统** —— 情景记忆积累到阈值或到达间隔时自动触发，由 `review_agent` 调用 LLM 深度复盘管道（失败时降级到 `ReviewEngine`），产出可复用经验并清理过期记忆（实现于 `src/memory/maintenance/{review_engine,service,cleanup_engine}.py` + `src/tools/builtin/trigger_review/` + `config/agents/system/review_agent.yaml`）
 
 ### 技术栈
 
@@ -52,7 +53,9 @@
 
 ### 3. 智能会话——不只聊天，更是"会思考的对话"
 
-流式响应 + 思考态实时展示 + 主动澄清 + 审批交互 + Schema 表单 + 投票面板 + 媒体时间线 + 思考模式开关。
+流式响应 + 思考态实时展示 + 主动澄清 + 审批交互 + Schema 表单。
+
+> **规划中（0.2.0+）**：投票面板、媒体时间线、思考模式开关等交互增强功能尚未在当前版本实现，详见 [ROADMAP.md](ROADMAP.md)。
 
 ### 4. 前端亮点——好看、好用、好定制
 7 套预设主题（含深空指挥台、深色、浅色、海洋微风等）、全量配置可视化、YAML 字段自动映射表单控件。
