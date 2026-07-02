@@ -1425,7 +1425,10 @@ class PipelineEngine:
             return False
 
 
-        terminal_statuses = {"completed", "failed", "cancelled"}
+        # TaskStatus 枚举仅有 STOPPED/COMPLETED/FAILED（无 cancelled）。
+        # cancel_task 产生的子任务状态为 stopped，必须纳入终态判定，
+        # 否则父管道在 child_task_guard 反复"挂起→超时唤醒→查子任务非终态→再挂起"死循环。
+        terminal_statuses = {"completed", "failed", "stopped"}
 
 
         for tid in task_ids:
@@ -1441,6 +1444,11 @@ class PipelineEngine:
                 status = task.status.value if hasattr(task.status, "value") else str(task.status)
 
                 if status not in terminal_statuses:
+
+                    logger.debug(
+                        "[Engine] 子任务未终态，继续等待: pipeline=%s task_id=%s status=%s",
+                        state.get(StateKeys.PIPELINE_ID, ""), tid, status,
+                    )
 
                     return False
 

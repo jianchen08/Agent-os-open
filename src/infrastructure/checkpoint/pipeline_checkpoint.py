@@ -27,6 +27,12 @@ _DYNAMIC_STATE_KEYS: frozenset[str] = frozenset({
     # FIND-3 fix: 保存原始 Agent 标识，恢复时按 ID 查找对应 Agent，
     # 避免非灵汐 Agent 的检查点恢复后以灵汐身份运行。
     "agent_config_id",
+    # 错误重试计数：suspend/resume 周期必须保留，否则 transient_max_retries
+    # 安全阀在恢复后归零，上游持续 timeout 时管道无限重试无法 failed。
+    "retry.count",
+    "retry.transient_count",
+    "error_check.last_error_type",
+    "error_check.consecutive_same_type",
 })
 
 

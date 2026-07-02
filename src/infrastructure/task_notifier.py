@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 
-_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+# TaskStatus 枚举仅有 STOPPED/COMPLETED/FAILED（无 cancelled）。
+# stopped 需纳入终态：cancel_task/pause_task 都 emit "stopped"，
+# 二者都需走终态副作用（terminal_event / _notify_suspended_pipelines）。
+# 是否停止引擎由下方 _is_cancel_stopped 进一步区分（pause 保留引擎待 resume）。
+_TERMINAL_STATES = frozenset({"completed", "failed", "stopped"})
 
 
 
@@ -69,6 +73,46 @@ class TaskNotifierMixin:
     由 TaskWorker 通过多继承组合使用。
 
     """
+
+
+
+    def _is_cancel_stopped(self, task_id: str) -> bool:
+
+        """判断 stopped 任务是被 cancel（应停引擎）还是 pause（应保留引擎）。
+
+        pause_task 设 metadata["paused_by"]（可恢复，resume_task 会 engine.wake）；
+        cancel_task 设 metadata["cancel_reason"]（不可恢复终态）。
+        TaskStatus 只有 STOPPED，二者都 emit "stopped"，靠 metadata 区分。
+
+        判定：有 cancel_reason 或无 paused_by → cancel（停引擎）；
+        有 paused_by → pause（保留引擎）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            True 表示应停止引擎（cancel 终态），False 表示保留引擎（pause 可恢复）
+        """
+
+        try:
+
+            task = self._task_service.get_task(task_id) if self._task_service else None
+
+        except Exception:
+
+            return True  # 查询失败按 cancel 处理，避免漏停导致引擎空转
+
+        if task is None:
+
+            return True
+
+        meta = getattr(task, "metadata", None) or {}
+
+        if meta.get("paused_by"):
+
+            return False  # pause 产生的 stopped，保留引擎待 resume
+
+        return True  # 无 paused_by 视为 cancel，停止引擎
 
 
 
@@ -120,9 +164,16 @@ class TaskNotifierMixin:
 
 
 
-            # 任务进入 cancelled/failed 终态时，终止关联管道引擎
+            # 任务进入终态时，终止关联管道引擎。
+            # failed → 必停；stopped → 仅 cancel_task 产生的（无 paused_by）才停，
+            # pause_task 产生的（有 paused_by）保留引擎待 resume_task 唤醒。
+            # 历史根因：TaskStatus 无 cancelled，cancel_task emit "stopped"，
+            # 旧代码判 ("cancelled","failed") 永远不匹配 stopped → 引擎空转。
+            _should_stop_engine = new_status == "failed" or (
+                new_status == "stopped" and self._is_cancel_stopped(task_id)
+            )
 
-            if new_status in ("cancelled", "failed"):
+            if _should_stop_engine:
 
                 try:
 
@@ -145,6 +196,16 @@ class TaskNotifierMixin:
                         task_id, new_status, _cp_exc,
 
                     )
+
+            elif new_status == "stopped":
+
+                logger.info(
+
+                    "TaskWorker: 任务 stopped 但为 pause（保留引擎待 resume）| task=%s",
+
+                    task_id,
+
+                )
 
 
 
