@@ -13,13 +13,9 @@
  *   - pipeline_id: 管道标识，用于前端消息路由到正确的 pipeline tab
  *   - thread_id: 会话标识，用于后端连接管理
  *
- * BUG-FIX-fix_20260523_router_threadid_fallback:
- * 问题根因: 在子管道场景下 thread_id 和 pipeline_id 不一致，回退到 _threadId
- *          会导致消息路由到错误的标签页。
- * 修复方案: 移除 _threadId 回退逻辑。当 pipeline_id 缺失时返回 null，
- *          由调用方 warn 并跳过，避免路由到错误位置。
- * 影响范围: 子管道消息路由准确性
- * 修复日期: 2026-05-23
+ * 注意：不回退到 _threadId。在子管道场景下 thread_id 和 pipeline_id 不一致，
+ * 回退到 _threadId 会导致消息路由到错误的标签页。因此当 pipeline_id 缺失时返回 null，
+ * 由调用方 warn 并跳过，避免路由到错误位置。
  */
 export function resolvePipelineId(eventData: any): string | null {
   // 优先级 1: data.pipeline_id（最精确的路由键）

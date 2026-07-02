@@ -1110,12 +1110,11 @@ class ExecutionRecordStorage:
         for part_file in part_files:
             if after_sequence is not None:
                 # 断线补漏：只收集可能含 after_sequence 之后新 record 的分片。
-                # BUG-FIX-fix_20260630_backfill_full_scan:
-                # 原实现对每个分片都提取 _MAX_RECORDS_PER_FILE(500) 条，遍历所有分片
-                # → 全量读取 2.7MB → 单次请求 3-4s（用户感知"刷新加载慢"）。
-                # sequence 在分片间单调递增（实测 _004=1941-2210 > _003=1290-1940 > ...），
-                # after_sequence 之后的新 record 只可能在最新 1-2 个分片。
-                # 优化：从最新分片倒序读，一旦某分片所有 sequence 都 ≤ after_sequence，
+                # 为避免对每个分片都提取 _MAX_RECORDS_PER_FILE(500) 条、遍历所有分片
+                # 造成全量读取（2.7MB，单次请求 3-4s，用户感知"刷新加载慢"），
+                # 利用 sequence 在分片间单调递增（实测 _004=1941-2210 > _003=1290-1940 > ...）
+                # 的特性：after_sequence 之后的新 record 只可能在最新 1-2 个分片。
+                # 因此从最新分片倒序读，一旦某分片所有 sequence 都 ≤ after_sequence，
                 # 更早分片更小 → 停止（不再读历史分片）。
                 blocks = self._extract_tail_blocks(part_file, per_part_cap)
                 if not blocks:

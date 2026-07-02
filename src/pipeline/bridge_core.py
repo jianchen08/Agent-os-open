@@ -86,8 +86,8 @@ class BridgeCore:
         # 当前流式 part 块追踪：sequence 按「块」分配而非「chunk」。
         # 同一连续块（如一段思考的所有 token、一段正文的所有 token）共享一个 sequence，
         # 块类型切换（thinking↔text 等）或遇到独立 part（tool/notification）时分配新 sequence。
-        # 修复根因：原实现每个 chunk 递增 _part_seq，导致长思考把计数器推高，后续正文/二次
-        # 思考的 sequence 与前面正文数值范围重叠交错，前端按 sequence 排序时思考被排到正文下方。
+        # 若每个 chunk 都递增 _part_seq，长思考会把计数器推高，后续正文/二次思考的 sequence
+        # 与前面正文数值范围重叠交错，前端按 sequence 排序时思考会被排到正文下方。
         self._current_chunk_type: str | None = None
         self._current_block_seq: int = 0
 
@@ -124,9 +124,9 @@ class BridgeCore:
         part，故共享同一个 sequence。仅当块类型切换（thinking↔text）时才分配新 sequence，
         使 sequence 数值能正确表达「块」的先后顺序，供前端排序。
 
-        修复根因：原实现每个 chunk 都递增 _part_seq。长思考（几百 token）把计数器推到
-        几十上百，后续正文从此高值起步；若工具后又有二次思考，其 sequence 会落入正文
-        区间，前端按数值排序导致思考与正文交错、思考排到正文下方。
+        若每个 chunk 都递增 _part_seq，长思考（几百 token）会把计数器推到几十上百，
+        后续正文从此高值起步；若工具后又有二次思考，其 sequence 会落入正文区间，
+        前端按数值排序会导致思考与正文交错、思考排到正文下方。
 
         Args:
             block_type: 当前块的类型标识（如 "thinking" / "text"）。

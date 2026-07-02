@@ -9,12 +9,10 @@
  * - 阻塞式通知模态框
  * - 全部已读 / 清空操作
  *
- * BUG-FIX-fix_20260522_notification_scroll_v2:
- *   根因：body/#root 的 overflow:hidden 导致浏览器合成器线程
- *   在处理真实鼠标滚轮时直接消费掉事件，不生成 JS wheel 事件。
- *   修复：面板打开时临时将 body overflow 改为 'visible'，
- *   同时阻止 wheel 事件冒泡到 body，防止触发页面抖动。
- *   面板关闭时恢复原始 overflow 值。
+ * 滚动处理：body/#root 的 overflow:hidden 会让浏览器合成器线程在处理真实鼠标滚轮时
+ * 直接消费掉事件、不生成 JS wheel 事件。因此面板打开时临时把 body overflow 改为
+ * 'visible'，同时阻止 wheel 事件冒泡到 body 防止触发页面抖动；面板关闭时恢复
+ * 原始 overflow 值。
  */
 
 import { Bell, BellOff, ChevronDown, ChevronRight, X } from 'lucide-react'

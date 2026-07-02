@@ -114,12 +114,11 @@ class _GitOpsMixin:
         except FileNotFoundError:
             return -1, "", "未找到 git 命令"
         except OSError as e:
-            # BUG-FIX-fix_20260630_run_git_cwd_missing:
             # Windows 上 cwd 不存在时 subprocess.run 抛 NotADirectoryError [WinError 267]。
-            # 原仅捕获 TimeoutExpired/FileNotFoundError，导致合并门控（_safe_merge →
-            # on_eval_passed → merge_worktree_before_complete）一路崩溃成
-            # "管道退出后评估执行失败: [WinError 267] 目录名称无效"，而非优雅判定为合并失败。
-            # 现返回错误码，让上层按 rc!=0 走合并失败分支（complete_evaluation(passed=False)）。
+            # 这里返回错误码而非抛异常，让上层按 rc!=0 走合并失败分支
+            # （complete_evaluation(passed=False)），避免合并门控
+            # （_safe_merge → on_eval_passed → merge_worktree_before_complete）
+            # 一路崩溃成"管道退出后评估执行失败: [WinError 267] 目录名称无效"。
             return -1, "", f"git 工作目录无效或不存在: {cwd} ({e})"
 
     def _get_merge_lock(self, project_root: str) -> threading.Lock:

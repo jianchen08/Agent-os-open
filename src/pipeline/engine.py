@@ -1072,8 +1072,7 @@ class PipelineEngine:
 
             )
 
-            # watching_tasks 语义切分（BUG-FIX-fix_20260629_suspend_semantics_split）：
-            # 避免 50 轮 × 600s ≈ 8.3h 的静默死挂。
+            # watching_tasks 语义切分：避免 50 轮 × 600s ≈ 8.3h 的静默死挂。
             # - 空：无子任务可等，1 轮 600s 无注入即 return False（管道结束 → fail）
             # - 非空：6 轮（约 60min）周期 _check_children_terminal，覆盖正常等子任务终态
             max_wait_rounds = 6 if self._watching_task_ids else 1

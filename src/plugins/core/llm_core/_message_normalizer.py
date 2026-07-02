@@ -425,10 +425,9 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
         )
 
     # ── Phase B: 清理不完整的 assistant(tool_calls) 消息 ──
-    # 修复：当 safety_start < scan_start 时，说明 validated 区域内有 assistant(tool_calls)
-    # 可能在之前的扫描中被误判为完整（或从未被 Phase B 检查过）。
-    # 必须从 safety_start 开始检查，而非 scan_start，确保所有未完整配对的
-    # assistant(tool_calls) 都能被清理。
+    # 从 safety_start 开始检查（当 safety_start < scan_start 时，validated 区域内
+    # 可能有 assistant(tool_calls) 在之前的扫描中被误判为完整或从未被 Phase B 检查过），
+    # 确保所有未完整配对的 assistant(tool_calls) 都能被清理。
     phase_b_start = safety_start if safety_start < scan_start else scan_start
     final: list[dict[str, Any]] = list(validated[:phase_b_start])
     removed_count = 0
@@ -594,9 +593,9 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
                             fn["arguments"] = "{}"
 
     # Phase 2: 重定位 assistant(tool_calls) 和 tool 之间的非法消息
-    # 修复：验证 tool_call_id 匹配。Phase B 的增量扫描可能遗漏不完整的
+    # 通过 tool_call_id 匹配来正确分组：Phase B 的增量扫描可能遗漏不完整的
     # assistant(tool_calls)，导致后续 assistant 的 tool results 被错误分配给
-    # 前面的不完整 assistant。必须通过 tool_call_id 匹配来正确分组。
+    # 前面的不完整 assistant。
     result: list[dict[str, Any]] = []
     i = 0
     while i < len(converted):

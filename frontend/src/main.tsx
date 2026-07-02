@@ -13,12 +13,10 @@ import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { openFile } from '@/services/fileOpener'
 import './index.css'
 
-// BUG-FIX-fix_20260630_reload_scroll_restore:
-// 浏览器默认 scrollRestoration='auto'，刷新时会在 DOMContentLoaded 阶段
-// 自动恢复上次的滚动位置（早于 React 渲染）。MessageList 的 pinToBottom
-// 即使在 useLayoutEffect 同步执行，也在浏览器恢复之后 → 用户看到先停在
-// "旧位置"，等 React 渲染 + pinToBottom 才跳底 → "先停再跳"中间态。
-// 设为 manual 禁用浏览器自动恢复，由应用代码（pinToBottom）完全接管定位。
+// 禁用浏览器刷新时自动恢复滚动位置：浏览器默认 scrollRestoration='auto'，
+// 刷新时会在 DOMContentLoaded 阶段（早于 React 渲染）自动恢复上次的滚动位置，
+// 而 MessageList 的 pinToBottom 即使在 useLayoutEffect 同步执行也在浏览器恢复之后，
+// 会导致用户看到"先停旧位置再跳底"的中间态。设为 manual 由应用代码完全接管定位。
 if ('scrollRestoration' in history) {
   history.scrollRestoration = 'manual'
 }
@@ -60,10 +58,9 @@ async function bootstrap() {
   const authStore = useAuthStore.getState()
   await authStore.initializeAuth()
 
-  // BUG-FIX-fix_20260507_003: 修复刷新后 GrowthLoop 不初始化的问题
-  // 问题根因: getState() 返回的是快照，initializeAuth() 通过 set() 更新 store 后，
-  //          旧快照的 isAuthenticated 仍为 false，导致 initializeGrowthLoop 永远不执行
-  // 修复方案: initializeAuth 完成后重新 getState() 获取最新认证状态
+  // initializeAuth() 通过 set() 更新 store，但上面 authStore 是 getState() 的快照，
+  // 其 isAuthenticated 仍为 false。这里重新 getState() 获取最新认证状态，
+  // 才能正确判断是否初始化 GrowthLoop。
   const freshAuthState = useAuthStore.getState()
   if (freshAuthState.isAuthenticated) {
     try {

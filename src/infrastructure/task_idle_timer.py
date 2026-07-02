@@ -249,11 +249,10 @@ class TaskIdleTimerMixin:
         通过 EngineRegistry 查找 task_id 对应的 PipelineEntry，
         检查 engine 的 is_running 标记 和 engine_task Future。
 
-        BUG-FIX-fix_20260602_idle_engine_detached:
-        TaskWorker 的 _execute_background_task 采用 fire-and-forget 模式：
-        _run_and_cleanup 包装器启动引擎后立即返回，bg_task.done() 在
-        引擎仍在运行时也会返回 True。is_actually_idle 仅依赖 bg_task
-        会导致误判——引擎正常等待 LLM 响应却被标记为 idle 并失败。
+        说明：TaskWorker 的 _execute_background_task 采用 fire-and-forget 模式，
+        _run_and_cleanup 包装器启动引擎后立即返回，bg_task.done() 在引擎仍在运行时
+        也会返回 True。因此 is_actually_idle 不能仅依赖 bg_task，否则会误判——
+        引擎正常等待 LLM 响应却被标记为 idle 并失败。
 
         Args:
             task_id: 任务 ID
@@ -272,14 +271,13 @@ class TaskIdleTimerMixin:
                 )
                 return False
             for entry in entries:
-                # BUG-FIX-fix_20260629_waiting_recovery_deadlock:
-                # 引擎进入 EXECUTION_STATUS=waiting_recovery 后会在
-                # wake_event.wait 永久挂起（无主动唤醒源），但 is_running
-                # 仍为 True、engine_task 也未 done。原 _engine_is_running
-                # 一律判"在跑"→ idle_timer 永远不 fail，pipeline 死挂数小时。
-                # 现在 error_check 已不再产 waiting_recovery（10 次后直接
-                # failed），此处仅保留兜底：若仍有遗留代码路径走出 wait 信号
-                # 并把 EXECUTION_STATUS 写为 waiting_recovery，idle_timer 会
+                # 兜底：识别 waiting_recovery 死挂状态。引擎进入
+                # EXECUTION_STATUS=waiting_recovery 后会在 wake_event.wait 永久挂起
+                # （无主动唤醒源），但 is_running 仍为 True、engine_task 也未 done。
+                # 仅凭 is_running/engine_task 一律判"在跑"会让 idle_timer 永远不 fail，
+                # pipeline 死挂数小时。现在 error_check 已不再产 waiting_recovery（10 次
+                # 后直接 failed），此处仅保留兜底：若仍有遗留代码路径走出 wait 信号并把
+                # EXECUTION_STATUS 写为 waiting_recovery，idle_timer 会
                 # 在 idle_threshold 周期内识别并 fail，避免再次死挂。
                 if entry.engine is not None:
                     try:

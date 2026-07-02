@@ -266,7 +266,6 @@ interface PipelineMessageState {
 }
 
 /**
- * BUG-FIX-fix_20260617_blank_message_filter:
  * 过滤完全空白的 assistant 消息（无 content、无 parts、非 streaming）。
  * 这些消息来自后端记录但不包含可渲染内容，渲染为空气泡。
  */

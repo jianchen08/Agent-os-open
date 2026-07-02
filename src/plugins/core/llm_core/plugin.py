@@ -191,10 +191,9 @@ class LLMCore(ICorePlugin):
         )
         # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 120s）。
         # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
-        # BUG-FIX-fix_20260629_first_token_timeout_60_too_short:
-        # 60s 在 yichengc/glm-5.2 等上游偶发慢节点下误判率高（曾观测连续 14 次
-        # 请求中 6 次首字节 60s 超时被判为失败），但实际节点并未宕机。120s 给
-        # 上游建连+负载均衡+冷启动留足余地，仍能在死连接时及时止损。
+        # 用 120s 而非 60s：yichengc/glm-5.2 等上游偶发慢节点下 60s 误判率高
+        # （曾观测连续 14 次请求中 6 次首字节 60s 超时被判为失败，但节点实际未宕机）。
+        # 120s 给上游建连+负载均衡+冷启动留足余地，仍能在死连接时及时止损。
         self._first_token_timeout: float = float(
             self._config.get("first_token_timeout", 120)
         )
