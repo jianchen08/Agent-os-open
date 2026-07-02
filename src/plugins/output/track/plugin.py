@@ -133,8 +133,8 @@ class TrackPlugin(IOutputPlugin):
             updates["track.llm_usage"] = usage
             # 写入标准累计 token 值，供 cost_control 插件读取
             updates["track.total_tokens"] = usage.get("total_tokens", 0)
-            # 推送 Token 用量变更事件到前端
-            await self._try_notify_cost_update(ctx, usage)
+            # 推送本轮单轮 token 用量到前端（输入框进度条实时显示）
+            await self._try_notify_cost_update(ctx)
 
         # 2. 执行耗时追踪
         elapsed = now - self._start_time
@@ -158,26 +158,56 @@ class TrackPlugin(IOutputPlugin):
 
         return updates
 
-    async def _try_notify_cost_update(self, ctx: PluginContext, usage: dict[str, Any]) -> None:
-        """通过 WebSocket 推送 Token 用量变更事件。"""
+    async def _try_notify_cost_update(self, ctx: PluginContext) -> None:
+        """推送本轮 LLM 调用的 token 用量（单轮值），供输入框进度条实时显示。
+
+        llm_usage 直接取自 state（llm_core 插件写入），是单轮 API 返回的用量，
+        天然对应当前 pipeline。pipeline_id 一并带出，供前端按 pipeline 分桶。
+        tool_execute 轮 llm_usage 为上一轮残留，跳过推送避免覆盖。
+        """
+        if ctx.state.get(StateKeys.CORE_TYPE) != "llm_call":
+            return
+        _dbg_usage = ctx.state.get("llm_usage") or {}
+        _dbg_not = None
+        try:
+            from channels.websocket.ws_handler import ws_interaction_notifier as _dbg_not  # noqa: PLC0415
+        except Exception:
+            pass
+        logger.info(
+            "[DIAG] _try_notify_cost_update: core=%s thread=%s notifier=%s llm_usage=%s",
+            ctx.state.get(StateKeys.CORE_TYPE),
+            bool(ctx.state.get("thread_id", "")),
+            bool(_dbg_not),
+            _dbg_usage,
+        )
         try:
             from channels.websocket.ws_handler import ws_interaction_notifier as _notifier  # noqa: PLC0415
             if _notifier:
                 _thread_id = ctx.state.get("thread_id", "")
                 if _thread_id:
+                    _llm_usage = ctx.state.get("llm_usage") or {}
+                    _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
                     from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
-                    _sink = create_targeted_sink(_notifier, _thread_id)
+                    _sink = create_targeted_sink(
+                        _notifier, _thread_id, pipeline_id=_pipeline_id,
+                    )
+                    logger.info(
+                        "[DIAG] cost_update sending: pipeline=%s sink=%s llm_usage=%s",
+                        _pipeline_id[:12], bool(_sink), _llm_usage,
+                    )
                     if _sink:
-                        await _sink.send_event({
+                        _ok = await _sink.send_event({
                             "type": "cost_update",
                             "data": {
-                                "total_tokens": usage.get("total_tokens", 0),
-                                "total_input_tokens": usage.get("total_input_tokens", 0),
-                                "total_output_tokens": usage.get("total_output_tokens", 0),
+                                "pipeline_id": _pipeline_id,
+                                "total_tokens": _llm_usage.get("total_tokens", 0),
+                                "input_tokens": _llm_usage.get("input_tokens", 0),
+                                "output_tokens": _llm_usage.get("output_tokens", 0),
                             },
                         })
-        except Exception:
-            pass
+                        logger.info("[DIAG] cost_update sent: ok=%s", _ok)
+        except Exception as _e:
+            logger.warning("[DIAG] cost_update 发送异常: %s", _e, exc_info=True)
 
     def _collect_token_usage(self, ctx: PluginContext) -> dict[str, Any]:
         """收集 token 用量统计。"""

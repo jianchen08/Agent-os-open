@@ -153,13 +153,16 @@ maintenance:
     trigger:
       min_records: 500            # 积累 500 条新执行记录后触发
       max_interval: 604800        # 或最迟 7 天触发一次
-    # 骨架预算：占上下文窗口的百分比
-    skeleton_budget_percent: 15   # 15% 的上下文用于骨架
-    # 128K 上下文 -> 19,200 token -> ~1,280 条记录骨架
-    # 32K 上下文 -> 4,800 token -> ~320 条记录骨架
+    # 骨架预算：占 review_agent 模型上下文窗口的百分比（10~20 区间）
+    # 窗口大小由装配时按 review_agent 的 model_tier 动态解析（见 application.py），
+    # 不写死——模型大自动多塞，模型小自动少塞。
+    skeleton_budget_percent: 15   # 15% 的模型上下文用于骨架
+    # 例：1M 窗口 -> 150,000 token -> ~10,000 条记录骨架；128K 窗口 -> 19,200 token -> ~1,280 条
     records_per_skeleton_token: 15  # 每条执行记录在骨架中约占 15 token
-    # 单次复盘最大执行记录数（防止一次处理太多）
-    max_records_per_review: 2000
+    # 单次复盘的管道数量上限（与骨架预算取更严的那个）。
+    # 受 review_agent 的 max_iterations/timeout 约束：10 管道 × ~5 轮迭代 ≈ 50 轮，
+    # 远低于 max_iterations=100，保证塞进去的都能真产出报告。配 5 就是 5，配 10 就是 10。
+    review_batch_limit: 10
 
   # 清理配置
   cleanup:

@@ -85,7 +85,6 @@ class TriggerReviewTool(BuiltinTool):
         parent_pipeline_id = _current_pipeline_id.get() or ""
         result = await maintenance_service.trigger_llm_review(
             parent_pipeline_id=parent_pipeline_id,
-            limit=5,
         )
 
         status = result.get("status", "submitted")

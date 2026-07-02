@@ -258,6 +258,20 @@ class Application:
 
             _maintenance_config = self._load_maintenance_config()
 
+            # 解析 review_agent 实际模型的上下文窗口，供复盘批次预算反推用。
+            # 复用 #5 ContextService 的 loader 写法：review_agent model_tier → tiers 映射 → model 别名 → context_window。
+            _review_ctx_window = 128000  # 兜底默认
+            try:
+                from config.models import get_model_config_loader as _get_loader  # noqa: PLC0415
+                _loader = _get_loader()
+                _tiers = _loader._load_llm_data().get("defaults", {}).get("tiers", {})
+                _review_model_alias = _tiers.get("small", "")  # review_agent.yaml: model_tier=small
+                if _review_model_alias:
+                    _llm_conf = _loader.get_llm_core_config(_review_model_alias) or {}
+                    _review_ctx_window = _llm_conf.get("context_window", 128000)
+            except Exception as _wexc:
+                logger.warning("[STARTUP] 解析 review_agent 上下文窗口失败，使用默认值: %s", _wexc)
+
             # 构造 task_lookup 回调：把 pipeline_run_id 反查到目标 agent 和任务标题。
             # 用延迟查找 task_service（它在本服务之后才创建），避免初始化顺序依赖。
             # 真实数据约 58% 的管道由任务系统创建可查到 agent，其余纯对话管道返回 None。
@@ -304,6 +318,7 @@ class Application:
                 config=_maintenance_config,
                 memory_service=memory_service,
                 task_lookup=_task_lookup,
+                review_context_window=_review_ctx_window,
             )
             services["maintenance_service"] = _maintenance_service
             # 注册维护触发器

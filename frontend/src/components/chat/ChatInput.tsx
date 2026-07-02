@@ -6,6 +6,8 @@ import {
   File as FileIcon,
   Image as ImageIcon,
   Loader2,
+  Maximize2,
+  Minimize2,
   Paperclip,
   Send,
   Square,
@@ -145,6 +147,7 @@ export const ChatInput = ({
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [isExpanded, setIsExpanded] = useState(false)
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -165,6 +168,31 @@ export const ChatInput = ({
       // 思考模式切换由外部控制
     })
 
+  /** 必须声明在使用它的回调（handleVoiceInterim / handleVoiceTranscriptionComplete 等）之前，
+   *  否则在依赖数组中访问会触发 TDZ（Cannot access ... before initialization）。
+   *  非展开态：随内容自适应，上限为视口高度的 1/3；展开态：固定高度，不随内容变化。*/
+  const adjustTextareaHeight = useCallback(() => {
+    if (isExpanded) return
+    const textarea = textareaRef.current
+    if (textarea) {
+      const maxHeight = typeof window !== 'undefined' ? window.innerHeight / 3 : 200
+      textarea.style.height = 'auto'
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
+    }
+  }, [isExpanded])
+
+  /** 展开：高度固定为聊天区域约 80%；收起：恢复 1/3 视口自适应 */
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    if (isExpanded) {
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 600
+      textarea.style.height = `${Math.round(vh * 0.8)}px`
+    } else {
+      adjustTextareaHeight()
+    }
+  }, [isExpanded, adjustTextareaHeight])
+
   /** 判断是否正在执行/生成 */
   const isExecuting = mode === 'smart' ? executionState === 'running' : isGenerating
 
@@ -180,7 +208,7 @@ export const ChatInput = ({
         type: audioBlob.type || 'audio/webm',
       })
 
-      const validation = validateFile(audioFile)
+      const validation = validateFile(audioFile, capabilities)
       if (!validation.valid) {
         setUploadError(validation.error || '音频文件验证失败')
         return
@@ -228,7 +256,7 @@ export const ChatInput = ({
         setUploadError(errorMessage)
       }
     },
-    [modelName],
+    [modelName, capabilities],
   )
 
   /** 提交（合并）当前未确认的临时语音文字到正文，并重置临时区间 作用：在用户键盘编辑、确认文字到达、停止录音等场景，把灰色临时文字 */
@@ -256,15 +284,9 @@ export const ChatInput = ({
         textRef.current = newText
         return newText
       })
-      setTimeout(() => {
-        const textarea = textareaRef.current
-        if (textarea) {
-          textarea.style.height = 'auto'
-          textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-        }
-      }, 0)
+      setTimeout(adjustTextareaHeight, 0)
     },
-    [],
+    [adjustTextareaHeight],
   )
 
   /** 处理语音转写完成（模型不支持音频时） final 到达时：若有未确认临时文字，先剔除临时区间，再追加确认文字； */
@@ -286,16 +308,10 @@ export const ChatInput = ({
           }
           return newText
         })
-        setTimeout(() => {
-          const textarea = textareaRef.current
-          if (textarea) {
-            textarea.style.height = 'auto'
-            textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-          }
-        }, 0)
+        setTimeout(adjustTextareaHeight, 0)
       }
     },
-    [draftKey],
+    [draftKey, adjustTextareaHeight],
   )
 
   /** 语音输入 Hook */
@@ -310,15 +326,6 @@ export const ChatInput = ({
       setUploadError(error.message)
     },
   })
-
-  /** 自动调整文本框高度 */
-  const adjustTextareaHeight = useCallback(() => {
-    const textarea = textareaRef.current
-    if (textarea) {
-      textarea.style.height = 'auto'
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-    }
-  }, [])
 
   /** 处理文本变化 */
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -338,6 +345,9 @@ export const ChatInput = ({
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
+    } else if (e.key === 'Escape' && isExpanded) {
+      e.preventDefault()
+      setIsExpanded(false)
     }
   }
 
@@ -395,7 +405,7 @@ export const ChatInput = ({
       const newPendingFiles: PendingFile[] = []
       for (let i = 0; i < files.length; i++) {
         const file = files[i]
-        const validation = validateFile(file)
+        const validation = validateFile(file, capabilities)
         if (!validation.valid) {
           setUploadError(validation.error || '文件验证失败')
           continue
@@ -416,7 +426,7 @@ export const ChatInput = ({
         uploadFileAsync(pf)
       }
     },
-    [enableFileUpload, uploadFileAsync],
+    [enableFileUpload, uploadFileAsync, capabilities],
   )
 
   /** 移除附件 */
@@ -485,6 +495,7 @@ export const ChatInput = ({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
+    setIsExpanded(false)
   }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingMode])
 
   /** 处理文件输入变化 */
@@ -578,12 +589,8 @@ export const ChatInput = ({
         useChatInputStore.getState().saveDraft(draftKey, newText)
       }
       setTimeout(() => {
-        const textarea = textareaRef.current
-        if (textarea) {
-          textarea.style.height = 'auto'
-          textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-          textarea.focus()
-        }
+        adjustTextareaHeight()
+        textareaRef.current?.focus()
       }, 0)
     }
 
@@ -597,7 +604,7 @@ export const ChatInput = ({
       processInsert(state.pendingInsert)
     })
     return unsubscribe
-  }, [draftKey])
+  }, [draftKey, adjustTextareaHeight])
 
   /** 组件卸载前保存当前文本到草稿 */
   useEffect(() => {
@@ -657,13 +664,27 @@ export const ChatInput = ({
       {/* 输入框容器 */}
       <div
         className={cn(
-          'rounded-2xl',
-          'bg-background/80 border-border/50 border',
-          'shadow-sm transition-shadow duration-200 hover:shadow-md',
-          'focus-within:ring-ring/50 focus-within:border-primary/50 focus-within:ring-2',
+          'relative rounded-2xl border',
+          'bg-background/80 border-border/50',
+          'shadow-sm transition-shadow duration-200',
+          isExpanded
+            ? 'shadow-md focus-within:border-primary/50'
+            : 'hover:shadow-md focus-within:ring-ring/50 focus-within:border-primary/50 focus-within:ring-2',
         )}
       >
-        {/* 附件预览区 */}
+        {/* 展开/收起编辑器按钮：固定在输入框右上角，悬浮于文本之上 */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground hover:bg-muted absolute top-2 right-2 z-10 h-8 w-8 rounded-lg"
+          onClick={() => setIsExpanded((v) => !v)}
+          aria-label={isExpanded ? '收起编辑器' : '展开编辑器'}
+          aria-expanded={isExpanded}
+          title={isExpanded ? '收起 (Esc)' : '展开为大编辑器'}
+          data-testid="chat-input-expand-toggle"
+        >
+          {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+        </Button>
         {(attachments.length > 0 || pendingFiles.length > 0) && (
           <div className="flex flex-wrap gap-2 px-3 pt-3 pb-2">
             {attachments.map((attachment) => (
@@ -726,10 +747,10 @@ export const ChatInput = ({
           aria-describedby={uploadError ? 'upload-error' : undefined}
           className={cn(
             'w-full resize-none',
-            'px-3 pt-3 pb-2',
+            'pl-3 pt-3 pb-2 pr-10',
             'border-0 outline-none focus:outline-none',
             'disabled:cursor-not-allowed disabled:opacity-50',
-            'max-h-[200px] min-h-[44px]',
+            isExpanded ? 'max-h-[80vh] min-h-[44px]' : 'max-h-[33vh] min-h-[44px]',
             'text-foreground placeholder:text-muted-foreground/40',
             'bg-transparent',
           )}
@@ -870,7 +891,6 @@ export const ChatInput = ({
           multiple
           className="hidden"
           onChange={handleFileInputChange}
-          accept={inputCapabilities.acceptedFileTypes || 'image/*,.pdf,.doc,.docx,.txt,.md'}
         />
       )}
     </div>

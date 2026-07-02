@@ -493,11 +493,72 @@ describe('sessionListStore', () => {
     })
 
     it('不存在的会话抛出错误', async () => {
-      useSessionStore.setState(() => ({ sessions: [] }))
+      useSessionStore.setState({ sessions: [] })
 
       await expect(
         useSessionListStore.getState().copySession('nonexistent'),
       ).rejects.toThrow('会话不存在')
+    })
+  })
+
+  // ── updateSessionAgent：切换 Agent 后同步主 Tab ──
+
+  describe('updateSessionAgent', () => {
+    it('当前活跃会话切换 Agent 后，同步刷新主 Tab 的 agentId', async () => {
+      const sessions = [makeSession({ id: 's1', agentId: 'old-agent' })]
+      useSessionStore.setState({ sessions })
+      mockUpdateSessionAgentApi.mockResolvedValue({
+        agentId: 'new-agent',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+      })
+
+      // 临时覆写 agentTabStore.getState，模拟当前会话已初始化主 Tab
+      const { useAgentTabStore } = await import('@/stores/agentTabStore')
+      const origGetState = useAgentTabStore.getState
+      const updateTab = vi.fn()
+      const saveCurrentTabs = vi.fn()
+      useAgentTabStore.getState = () => ({
+        currentSessionId: 's1',
+        tabs: [{ id: 'main-s1', agentLevel: 1, agentId: 'old-agent' }],
+        updateTab,
+        saveCurrentTabs,
+      }) as any
+
+      await useSessionListStore.getState().updateSessionAgent('s1', 'new-agent')
+
+      // 主 Tab 的 agentId 被同步为新值
+      expect(updateTab).toHaveBeenCalledWith('main-s1', { agentId: 'new-agent' })
+      expect(saveCurrentTabs).toHaveBeenCalled()
+
+      useAgentTabStore.getState = origGetState
+    })
+
+    it('非当前活跃会话切换 Agent 时，不触碰 agentTabStore', async () => {
+      const sessions = [makeSession({ id: 's1', agentId: 'old-agent' })]
+      useSessionStore.setState({ sessions })
+      mockUpdateSessionAgentApi.mockResolvedValue({
+        agentId: 'new-agent',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+      })
+
+      const { useAgentTabStore } = await import('@/stores/agentTabStore')
+      const origGetState = useAgentTabStore.getState
+      const updateTab = vi.fn()
+      const saveCurrentTabs = vi.fn()
+      // currentSessionId 指向另一个会话
+      useAgentTabStore.getState = () => ({
+        currentSessionId: 's-other',
+        tabs: [{ id: 'main-s-other', agentLevel: 1, agentId: 'x' }],
+        updateTab,
+        saveCurrentTabs,
+      }) as any
+
+      await useSessionListStore.getState().updateSessionAgent('s1', 'new-agent')
+
+      expect(updateTab).not.toHaveBeenCalled()
+      expect(saveCurrentTabs).not.toHaveBeenCalled()
+
+      useAgentTabStore.getState = origGetState
     })
   })
 })

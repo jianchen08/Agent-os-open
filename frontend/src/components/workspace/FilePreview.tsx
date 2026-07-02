@@ -90,6 +90,8 @@ export interface FilePreviewProps {
   containerTaskId: string
   /** 自定义类名 */
   className?: string
+  /** 附件直链 URL（如 /uploads/xxx.pdf）；存在时优先于 containerTaskId 拼接的 workspaces URL */
+  url?: string
 }
 
 /**
@@ -142,6 +144,7 @@ export function FilePreview({
   size,
   containerTaskId,
   className,
+  url,
 }: FilePreviewProps) {
   const [zoomLevel, setZoomLevel] = useState(100)
   const [rotation, setRotation] = useState(0)
@@ -159,9 +162,11 @@ export function FilePreview({
 
   /** 构建文件访问 URL（用于图片和 PDF） */
   const fileUrl = useMemo(() => {
+    // 附件直链优先（不依赖 workspaces API）
+    if (url) return url
     if (!containerTaskId) return ''
     return `/api/v1/workspaces/${containerTaskId}/file-content?path=${encodeURIComponent(filePath)}`
-  }, [containerTaskId, filePath])
+  }, [url, containerTaskId, filePath])
 
   const handleZoomIn = useCallback(() => {
     setZoomLevel((prev) => Math.min(prev + 25, 400))

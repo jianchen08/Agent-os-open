@@ -1,17 +1,36 @@
 /** 统一管道消息状态管理 Store 将 sessionStore.messages（主管道）和 agentTabStore.tabMessages（子管道）统一为 */
 
 import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
+import { persist } from 'zustand/middleware'
 import { getMessages as apiGetMessages, mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
+import { indexedDbStorage } from '@/utils/indexedDbStorage'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 
 const logger = loggers.sessionStore
 
-/** 每个管道持久化的最大消息条数 */
-const PERSIST_MAX_MESSAGES_PER_PIPELINE = 50
+/**
+ * 每个管道持久化的最大消息条数。
+ * 迁移到 IndexedDB（GB 级容量）后从 50 提升至 250，给单会话充足历史缓存。
+ * 内存上限 MAX_MESSAGES_PER_PIPELINE_IN_MEMORY=300 始终 ≥ 此值，避免「内存裁掉但还想落盘」的矛盾。
+ */
+const PERSIST_MAX_MESSAGES_PER_PIPELINE = 250
+
+/**
+ * 持久化数据的总体积上限（100 MB）。
+ * IndexedDB 容量充裕，但仍需上限防止无限增长吃满用户磁盘。
+ * 超过时按 LRU 淘汰最不活跃的管道（见 trimMessagesForPersistence），内存数据不动，
+ * 被淘汰管道刷新后从 API 重载。
+ */
+const PERSIST_MAX_TOTAL_BYTES = 100 * 1024 * 1024
+
+/** 导出供测试断言用（生产代码不应依赖具体数值） */
+export const _PERSIST_LIMITS = {
+  maxMessagesPerPipeline: PERSIST_MAX_MESSAGES_PER_PIPELINE,
+  maxTotalBytes: PERSIST_MAX_TOTAL_BYTES,
+} as const
 
 /** 乐观消息的"宽限期" */
 const OPTIMISTIC_MSG_GRACE_MS = 30_000
@@ -27,10 +46,8 @@ function isWithinOptimisticGrace(m: Message): boolean {
   return false
 }
 
-/** 持久化数据的有效期策略说明（非强制 TTL） */
-
 /** 裁剪每个 pipeline 的消息列表，仅保留最近 N 条用于持久化 */
-function trimMessagesForPersistence(
+function trimMessagesByCount(
   messagesByPipeline: Record<string, Message[]>,
 ): Record<string, Message[]> {
   const result: Record<string, Message[]> = {}
@@ -46,6 +63,78 @@ function trimMessagesForPersistence(
   return result
 }
 
+/**
+ * 计算持久化对象的字节体积（UTF-16 近似，与 localStorage 配额口径一致，足够用于阈值判断）。
+ * 逐管道累加，避免一次性 stringify 整个大对象造成额外开销。
+ */
+function estimatePersistedBytes(messagesByPipeline: Record<string, Message[]>): number {
+  let total = 0
+  for (const msgs of Object.values(messagesByPipeline)) {
+    if (!msgs || msgs.length === 0) continue
+    total += JSON.stringify(msgs).length
+  }
+  return total
+}
+
+/**
+ * 获取管道最近活跃时间：取该管道最新一条消息的 timestamp。
+ * 无消息或无时间戳返回 0（视为最不活跃，优先淘汰）。
+ */
+function pipelineLastActiveAt(msgs: Message[] | undefined): number {
+  if (!msgs || msgs.length === 0) return 0
+  let latest = 0
+  for (const m of msgs) {
+    const t = new Date(m.timestamp).getTime()
+    if (!Number.isNaN(t) && t > latest) latest = t
+  }
+  return latest
+}
+
+/**
+ * 持久化前的完整裁剪：先按单管道条数裁剪，再按全局总体积 LRU 淘汰最不活跃管道。
+ *
+ * LRU 排序规则：
+ * 1. activePipelineId 始终排首位（绝不淘汰当前活跃管道）；
+ * 2. 其余按最近活跃时间（最新消息 timestamp）降序，越久未活跃越靠后越先淘汰；
+ * 3. 体积未超 PERSIST_MAX_TOTAL_BYTES 时原样返回（全留）。
+ *
+ * 注意：仅影响落盘数据，内存中的 messagesByPipeline 不受影响；
+ * 被淘汰管道刷新后由 API 冷启动重新加载。
+ */
+export function trimMessagesForPersistence(
+  messagesByPipeline: Record<string, Message[]>,
+  activePipelineId: string | null,
+): Record<string, Message[]> {
+  const byCount = trimMessagesByCount(messagesByPipeline)
+
+  if (estimatePersistedBytes(byCount) <= PERSIST_MAX_TOTAL_BYTES) {
+    return byCount
+  }
+
+  // 体积超限：按活跃度升序排列（最不活跃在前，优先淘汰），活跃管道始终保留
+  const ranked = Object.entries(byCount).sort((a, b) => {
+    // 活跃管道强制排最后（最不易被淘汰）
+    if (a[0] === activePipelineId) return 1
+    if (b[0] === activePipelineId) return -1
+    return pipelineLastActiveAt(a[1]) - pipelineLastActiveAt(b[1])
+  })
+
+  // 从最不活跃的开始淘汰，直到总体积降到阈值内
+  const kept: Record<string, Message[]> = {}
+  let bytes = 0
+  // 倒序取（活跃度高的先入选），保证先保留最活跃的
+  for (let i = ranked.length - 1; i >= 0; i--) {
+    const [pid, msgs] = ranked[i]
+    const size = JSON.stringify(msgs).length
+    // 活跃管道无论是否超限都保留；其余管道加入后若导致超限则跳过（淘汰）
+    if (pid === activePipelineId || bytes + size <= PERSIST_MAX_TOTAL_BYTES) {
+      kept[pid] = msgs
+      bytes += size
+    }
+  }
+  return kept
+}
+
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
 const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 300
 
@@ -57,87 +146,6 @@ function capMessagesForMemory(msgs: Message[]): Message[] {
 
 /** 并发去重：跟踪正在进行的 fetch 请求，避免同一 pipelineId 重复请求 */
 const _fetchingPipelines = new Map<string, Promise<void>>()
-
-/** 容错 + 节流持久化 storage */
-const PERSIST_THROTTLE_MS = 1000
-// 持续高频写入时强制落盘的上限：避免长流式（>1s）期间缓冲永远推迟落盘。
-// 取 5s：远大于单帧间隔，能合并绝大部分流式抖动；又足够短，崩溃时最多丢 5s。
-const PERSIST_MAX_WAIT_MS = 5000
-const _persistQuotaWarned = { current: false }
-// 节流缓冲：只缓存最新一次 (name, value)。本 store 仅一个持久化 key，
-// 流式期间多次 set 合并为最后一次，trailing 定时器统一落盘。
-const _persistBuffer: { name: string; value: string } = { name: '', value: '' }
-let _persistTimer: ReturnType<typeof setTimeout> | null = null
-// 首次进入当前节流窗口的时刻：用于判断是否已达 maxWait 需强制落盘
-let _persistWindowStartedAt = 0
-
-/** 实际落盘（容错）：取出缓冲的最后一次写入执行，失败仅记一次 warn */
-function _writePersisted(): void {
-  _persistTimer = null
-  _persistWindowStartedAt = 0
-  const { name, value } = _persistBuffer
-  _persistBuffer.name = ''
-  _persistBuffer.value = ''
-  if (!name) return
-  try {
-    window.localStorage.setItem(name, value)
-  } catch (err) {
-    // 配额满或禁用：仅记录一次 warn，避免每次 set 都刷屏
-    if (!_persistQuotaWarned.current) {
-      _persistQuotaWarned.current = true
-      logger.warn(
-        '[pipelineMessageStore] 持久化失败（localStorage 配额耗尽或不可用），'
-        + '本次会话内消息仅保存在内存，刷新后将从 API 重新加载: err=%s',
-        err,
-      )
-    }
-  }
-}
-
-/** 调度一次节流落盘。 - 窗口内已有挂起写入：推迟到当前窗口结束（合并）； */
-function _schedulePersist(): void {
-  if (_persistTimer !== null) {
-    // 持续高频：若已达 maxWait 上限则强制落盘，否则保持现有 trailing 定时器
-    if (Date.now() - _persistWindowStartedAt >= PERSIST_MAX_WAIT_MS) {
-      clearTimeout(_persistTimer)
-      _writePersisted()
-    }
-    return
-  }
-  _persistWindowStartedAt = Date.now()
-  _persistTimer = setTimeout(_writePersisted, PERSIST_THROTTLE_MS)
-}
-
-const tolerantJsonStorage = createJSONStorage(() => ({
-  getItem: (name) => {
-    try {
-      return window.localStorage.getItem(name)
-    } catch {
-      return null
-    }
-  },
-  setItem: (name, value) => {
-    // 节流：缓存最新写入，trailing 定时器到点统一落盘，避免高频 set 同步写盘
-    _persistBuffer.name = name
-    _persistBuffer.value = value
-    _schedulePersist()
-  },
-  removeItem: (name) => {
-    // 清理时取消挂起的节流写入，避免 remove 后又被 trailing 写回
-    if (_persistTimer !== null) {
-      clearTimeout(_persistTimer)
-      _persistTimer = null
-    }
-    _persistWindowStartedAt = 0
-    _persistBuffer.name = ''
-    _persistBuffer.value = ''
-    try {
-      window.localStorage.removeItem(name)
-    } catch {
-      /* 忽略清理失败 */
-    }
-  },
-}))
 
 /** 管道元数据 */
 export interface PipelineMeta {
@@ -1110,23 +1118,41 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return msg.parts.findIndex((p) => p.type === 'tool_call' && (p as ToolCallPart).callId === callId)
   },
 }),
-  // - 每个 pipeline 限制 50 条消息防止 localStorage 溢出
-  // - 24 小时 TTL，过期数据由 API 重新加载覆盖
+  // 持久化策略（迁移到 IndexedDB 后）：
+  // - 单管道最多 250 条（PERSIST_MAX_MESSAGES_PER_PIPELINE）
+  // - 全局总体积上限 100 MB（PERSIST_MAX_TOTAL_BYTES），超限按 LRU 淘汰最不活跃管道
+  // - 无 TTL：被淘汰或缺失的管道由 API 冷启动重新加载覆盖
   {
     name: 'pipeline-messages',
     version: 1,
-    // 容错 storage：localStorage 配额满时吞掉 setItem 异常，不阻断业务
-    storage: tolerantJsonStorage,
-    // 仅持久化核心数据，排除运行时状态
-    partialize: (state) => ({
-      messagesByPipeline: trimMessagesForPersistence(state.messagesByPipeline),
-      pipelines: state.pipelines,
-      pipelineSessionMap: state.pipelineSessionMap,
-      activePipelineId: state.activePipelineId,
-      topCursorsByPipeline: state.topCursorsByPipeline,
-      bottomCursorsByPipeline: state.bottomCursorsByPipeline,
-      hasMoreOlderByPipeline: state.hasMoreOlderByPipeline,
-    }),
+    // IndexedDB storage：GB 级容量、异步不阻塞 UI；不可用时自动降级内存（见 indexedDbStorage）
+    storage: indexedDbStorage,
+    // 仅持久化核心数据，排除运行时状态。
+    // 先按条数 + 总体积 LRU 裁剪出保留的管道集合，再统一应用于消息/元数据/游标，保证一致性。
+    partialize: (state) => {
+      const keptMessages = trimMessagesForPersistence(
+        state.messagesByPipeline,
+        state.activePipelineId,
+      )
+      const keptPids = new Set(Object.keys(keptMessages))
+      const pickByKey = <V>(rec: Record<string, V>): Record<string, V> => {
+        if (!rec) return {}
+        const out: Record<string, V> = {}
+        for (const [k, v] of Object.entries(rec)) {
+          if (keptPids.has(k)) out[k] = v
+        }
+        return out
+      }
+      return {
+        messagesByPipeline: keptMessages,
+        pipelines: pickByKey(state.pipelines),
+        pipelineSessionMap: pickByKey(state.pipelineSessionMap),
+        activePipelineId: state.activePipelineId,
+        topCursorsByPipeline: pickByKey(state.topCursorsByPipeline),
+        bottomCursorsByPipeline: pickByKey(state.bottomCursorsByPipeline),
+        hasMoreOlderByPipeline: pickByKey(state.hasMoreOlderByPipeline),
+      }
+    },
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
@@ -1163,6 +1189,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         // 运行时状态强制重置（不信任持久化值）
         streamingState: {},
         isLoadingOlderByPipeline: {},
+      }
+    },
+    // 迁移配套：消息缓存已迁 IndexedDB，旧 localStorage['pipeline-messages'] 不再读取。
+    // rehydrate 完成后一次性清理旧 key，释放 localStorage 空间给 agentTabs 等使用。
+    onRehydrateStorage: () => () => {
+      try {
+        if (window.localStorage.getItem('pipeline-messages') !== null) {
+          window.localStorage.removeItem('pipeline-messages')
+        }
+      } catch {
+        // localStorage 不可用时忽略，不影响 rehydrate
       }
     },
   },

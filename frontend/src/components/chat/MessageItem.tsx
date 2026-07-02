@@ -1,12 +1,13 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
-import { Bell, Bot, Check, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
+import { Bell, Bot, Check, FileCode, FileText, FileIcon as FileGeneric, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
 import { memo, useEffect, useRef, useState } from 'react'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { ErrorType, reportError } from '@/services/errorReporting'
+import { openAttachment } from '@/services/attachmentOpener'
 import { useAgentStore } from '@/stores/agentStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -372,7 +373,13 @@ export const MessageItem = memo(function MessageItem({
                     url: att.url,
                     title: att.name || '图片',
                   }))
-                if (!userContent && imageAttachments.length === 0) return null
+                // 非图片附件（文本/文档/代码）：显示文件名 + 类型图标
+                const fileAttachments = userAttachments.filter(
+                  (att) => !getAttMime(att).startsWith('image/'),
+                )
+                if (!userContent && imageAttachments.length === 0 && fileAttachments.length === 0) {
+                  return null
+                }
                 return (
                   <div className={bubbleCls} style={bubbleStyle}>
                     {userContent && (
@@ -381,6 +388,44 @@ export const MessageItem = memo(function MessageItem({
                     {imageAttachments.length > 0 && (
                       <div className="mt-2">
                         <ImageGallery images={imageAttachments} columns={2} />
+                      </div>
+                    )}
+                    {fileAttachments.length > 0 && (
+                      <div className="mt-2 flex flex-col gap-1">
+                        {fileAttachments.map((att, idx) => {
+                          const mime = getAttMime(att)
+                          const isCode =
+                            mime.startsWith('text/x-') ||
+                            mime === 'application/json' ||
+                            mime === 'application/javascript' ||
+                            mime === 'application/x-yaml'
+                          const isTextLike =
+                            mime.startsWith('text/') ||
+                            mime === 'application/pdf' ||
+                            mime === 'application/msword' ||
+                            mime.startsWith('application/vnd.')
+                          // 代码→FileCode，文档/文本→FileText，其他→FileGeneric
+                          const Icon = isCode ? FileCode : isTextLike ? FileText : FileGeneric
+                          return (
+                            <button
+                              type="button"
+                              key={att.id || `file-${idx}`}
+                              onClick={() => {
+                                if (att.url) {
+                                  void openAttachment({
+                                    id: att.id,
+                                    name: att.name || '文件',
+                                    url: att.url,
+                                  })
+                                }
+                              }}
+                              className="bg-background/60 hover:bg-background flex w-full items-center gap-2 rounded-lg border border-border/30 px-2 py-1.5 text-left text-sm transition-colors"
+                            >
+                              <Icon className="text-muted-foreground h-4 w-4 shrink-0" />
+                              <span className="truncate">{att.name || '文件'}</span>
+                            </button>
+                          )
+                        })}
                       </div>
                     )}
                   </div>

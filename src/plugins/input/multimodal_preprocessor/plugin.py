@@ -122,6 +122,8 @@ class MultimodalPreprocessor(IInputPlugin):
         - 图片：转为 base64 data URL 的 image_url 块
         - 音频：当前模型不支持音频输入时，经 ASR 转写为文字 text 块
           （与图片走 image_url 对称，统一在多模态体系内处理音频）
+        - 文本/文档/代码：提取文本后作为 text 块，和用户消息一起发给 LLM
+          （任何模型都能接收文本，无需多模态能力声明）
 
         对于相对路径（如 /uploads/xxx），读取本地文件。
 
@@ -159,6 +161,14 @@ class MultimodalPreprocessor(IInputPlugin):
                 text = await self._audio_to_text(url, mime_type)
                 if text:
                     content_blocks.append({"type": "text", "text": text})
+                continue
+
+            # 处理文本/文档/代码类型：提取文本后拼进用户消息
+            # 非图片/音频/视频一律视为可提取文本的附件
+            if not mime_type.startswith("video/"):
+                text_content = await self._extract_text_from_attachment(url, mime_type)
+                if text_content:
+                    content_blocks.append({"type": "text", "text": text_content})
 
         return content_blocks
 
@@ -232,6 +242,127 @@ class MultimodalPreprocessor(IInputPlugin):
 
         logger.warning("[MultimodalPreprocessor] 不支持的音频来源: %s", url)
         return b""
+
+    async def _extract_text_from_attachment(self, url: str, mime_type: str) -> str:
+        """从文本/文档类附件提取文本内容。
+
+        纯文本类（text/*、json、xml、html、代码）直接按 UTF-8 解码；
+        二进制文档（pdf/docx/xlsx/pptx 等）经 markitdown 转 Markdown。
+        提取的文本会和用户消息一起发给 LLM（任何模型都能接收文本）。
+
+        失败时（文件不存在、markitdown 未安装、文件过大、转换失败）
+        记 warning 日志并返回空串，保持插件 SKIP 错误策略不阻断管道。
+
+        Args:
+            url: 附件 URL（如 /uploads/xxx.pdf）
+            mime_type: MIME 类型（用于判定提取路径）
+
+        Returns:
+            提取的文本内容；失败或无内容时返回空串
+        """
+        full_path = self._resolve_upload_path(url)
+        if not full_path or not os.path.isfile(full_path):
+            logger.warning("[MultimodalPreprocessor] 文本附件文件不存在: %s", url)
+            return ""
+
+        # 纯文本类：直接 UTF-8 解码
+        if self._is_plain_text_mime(mime_type):
+            try:
+                with open(full_path, "rb") as f:
+                    return f.read().decode("utf-8", errors="replace")
+            except OSError as exc:
+                logger.error(
+                    "[MultimodalPreprocessor] 读取文本附件失败: %s, %s", full_path, exc
+                )
+                return ""
+
+        # 二进制文档（pdf/docx/xlsx/pptx 等）：经 markitdown 转 Markdown
+        return self._convert_document_to_text(full_path)
+
+    def _resolve_upload_path(self, url: str) -> str:
+        """将附件 URL（如 /uploads/xxx）解析为本地磁盘绝对路径。
+
+        Args:
+            url: 附件 URL
+
+        Returns:
+            本地文件路径；非本地路径时返回空串
+        """
+        if not url.startswith("/"):
+            return ""
+        uploads_dir = os.environ.get("UPLOADS_DIR", "./data/uploads")
+        filename = os.path.basename(url)
+        return os.path.join(uploads_dir, filename)
+
+    @staticmethod
+    def _is_plain_text_mime(mime_type: str) -> bool:
+        """判断 MIME 类型是否为可直接 UTF-8 解码的纯文本类。
+
+        包括 text/* 以及常见的结构化文本/代码 MIME（json/xml/html/css/javascript）。
+        这些文件无需 markitdown，直接读取即可。
+
+        Args:
+            mime_type: MIME 类型
+
+        Returns:
+            是纯文本类返回 True
+        """
+        if mime_type.startswith("text/"):
+            return True
+        plain_text_mimes = {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/x-yaml",
+            "application/x-sh",
+        }
+        return mime_type in plain_text_mimes
+
+    def _convert_document_to_text(self, full_path: str) -> str:
+        """将二进制文档（pdf/docx/xlsx/pptx）转为文本。
+
+        复用 binary_converter 工具的 markitdown 转换能力。
+        markitdown 未安装、文件过大或转换失败时返回空串。
+
+        Args:
+            full_path: 文件绝对路径
+
+        Returns:
+            提取的文本；失败时返回空串
+        """
+        try:
+            from pathlib import Path  # noqa: PLC0415
+
+            from tools.builtin.binary_converter.tool import (  # noqa: PLC0415
+                convert_binary_to_markdown,
+            )
+        except ImportError:
+            logger.warning(
+                "[MultimodalPreprocessor] binary_converter 不可用，跳过文档附件提取"
+            )
+            return ""
+
+        try:
+            result = convert_binary_to_markdown(Path(full_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[MultimodalPreprocessor] 文档转换异常: %s, %s", full_path, exc
+            )
+            return ""
+
+        if not result.success:
+            logger.warning(
+                "[MultimodalPreprocessor] 文档转换失败: %s, code=%s, error=%s",
+                full_path,
+                result.error_code,
+                result.error,
+            )
+            return ""
+
+        output = result.output
+        if isinstance(output, dict):
+            return output.get("content", "") or ""
+        return ""
 
     def _local_file_to_data_url(self, file_path: str, mime_type: str) -> str:
         """将本地文件转为 base64 data URL。

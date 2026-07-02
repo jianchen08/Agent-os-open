@@ -81,6 +81,8 @@ class ModelCapabilityRegistry:
                 supports_video=mm.supports_video,
                 supports_document=mm.supports_document,
                 supported_image_types=list(mm.supported_image_types),
+                supported_audio_types=list(mm.supported_audio_types),
+                supported_video_types=list(mm.supported_video_types),
                 max_image_size=mm.max_image_size,
                 max_audio_size=mm.max_audio_size,
                 max_video_size=mm.max_video_size,

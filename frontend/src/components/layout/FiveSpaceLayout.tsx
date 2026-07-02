@@ -287,6 +287,7 @@ export function FiveSpaceLayout({
               content={editorData.content}
               size={editorData.size}
               containerTaskId={editorData.containerTaskId}
+              url={editorData.url}
             />
           )
         }
@@ -311,6 +312,7 @@ export function FiveSpaceLayout({
               content={editorData.content}
               size={editorData.size}
               containerTaskId={editorData.containerTaskId}
+              url={editorData.url}
             />
           )
         }

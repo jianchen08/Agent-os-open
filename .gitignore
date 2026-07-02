@@ -33,6 +33,13 @@ working/
 .workbuddy/
 .dbg/
 
+# ─── 内部敏感资料(绝对不能公开)───
+# 包含竞品分析、专利、个人简历等私人内容
+# 即使 docs/ 整体被忽略,这里再加一道显式兜底防误操作
+docs/working/private/
+docs/working/private/**
+/docs/working/private
+
 # ─── 测试 / 报告产物(可随时再生,不入库)───
 reports/
 test-results/
@@ -60,6 +67,8 @@ debug-*.log
 docker_watchdog_dumps/
 .playwright-cli/
 src/logs/
+# 根目录 logs/ 是运行时日志/截图/诊断产物，不入库
+/logs/
 
 # ─── 备份文件(含后缀变体 .bak_xxx)───
 *.bak

@@ -9,7 +9,7 @@ REM Portable: derive WSL path from script's own location (no hardcoded project p
 REM Note: %cd% uses backslashes; wsl/shell would eat them, so convert to slashes first.
 set "WIN_DIR=%cd%"
 set "WIN_DIR=%WIN_DIR:\=/%"
-for /f "delims=" %%i in ('wsl -d Ubuntu wslpath -u "%WIN_DIR%" 2^>nul') do set "WSL_DIR=%%i"
+for /f "delims=" %%i in ('wsl -d Ubuntu -u root -- bash -c "timeout 15 wslpath -u \"%WIN_DIR%\"" 2^>nul') do set "WSL_DIR=%%i"
 
 REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
 if not defined SHUTDOWN_RETRY set "SHUTDOWN_RETRY=0"
@@ -26,21 +26,23 @@ REM WSL native docker mode (replaces Docker Desktop)
 REM Bypasses systemd (which has a bug that periodically stops docker.service).
 REM Uses goto-based flow (cmd nested if-blocks break on special chars).
 REM ===========================================================================
-wsl -d Ubuntu -u root -- echo wsl_ok >nul 2>&1
+wsl -d Ubuntu -u root -- bash -c "timeout 30 echo wsl_ok" >nul 2>&1
 if errorlevel 1 goto :no_wsl_docker
 
 echo [INFO] WSL docker mode detected
 
 :wsl_setup
-REM 0. WSL 内核健康度预热：检测 D 状态死锁污染，避免后续 pgrep/docker 探活被传染卡死。
-REM    上层 timeout 25s 兜底（探针正常 <3s；若读 /proc 也卡死，timeout 会强杀）。
-echo [INFO] 检查 WSL 内核健康度...
-wsl -d Ubuntu -u root -- bash -c "timeout 25 %WSL_DIR%/wsl_health_probe.sh %WSL_DIR%" 2>&1
+REM 0. WSL kernel health pre-warm: detect D-state deadlock pollution so that
+REM    later pgrep/docker probes are not infected and hang.
+REM    Outer timeout 30s backstop (probe normally <3s; if even reading /proc
+REM    hangs, the timeout will force-kill it).
+echo [INFO] Checking WSL kernel health...
+wsl -d Ubuntu -u root -- bash -c "timeout 30 %WSL_DIR%/wsl_health_probe.sh %WSL_DIR%" 2>&1
 set "HEALTH_RC=!errorlevel!"
 if "!HEALTH_RC!"=="0" goto :wsl_alive_ok
 if "!HEALTH_RC!"=="8" goto :wsl_polluted
-REM timeout 强杀返回 124，或其它异常 -> 视同污染
-echo [WARN] 健康探针异常 (rc=!HEALTH_RC!)，按内核污染处理
+REM timeout force-kill returns 124, or other anomaly -> treat as pollution
+echo [WARN] health probe abnormal (rc=!HEALTH_RC!)，treat as kernel pollution
 goto :wsl_polluted
 
 :wsl_alive_ok
@@ -48,7 +50,17 @@ REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
 powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
 
 REM 2. Ensure dockerd running (bypass systemd: start dockerd directly)
-wsl -d Ubuntu -u root -- bash -c "if ! pgrep -x dockerd >/dev/null 2>&1; then pkill -TERM dockerd 2>/dev/null; sleep 2; pkill -9 dockerd 2>/dev/null; rm -f /var/run/docker.pid; nohup dockerd >/tmp/dockerd.log 2>&1 & sleep 6; fi; for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/docker.sock ] && docker ps >/dev/null 2>&1 && break; sleep 2; done" >nul 2>&1
+REM    Delegated to wsl_start_daemon.sh so that every pgrep/pkill/docker call
+REM    (which walk /proc and can hang on D-state deadlock) is wrapped in timeout.
+REM    Outer timeout 150s as backstop; rc=7 means kernel polluted -> wsl --shutdown.
+wsl -d Ubuntu -u root -- bash -c "timeout 150 %WSL_DIR%/wsl_start_daemon.sh"
+set "DAEMON_RC=!errorlevel!"
+if "!DAEMON_RC!"=="0" goto :daemon_ok
+if "!DAEMON_RC!"=="7" goto :wsl_polluted
+echo [ERROR] dockerd start failed (rc=!DAEMON_RC!)，详见上方输出
+goto :wsl_polluted
+
+:daemon_ok
 
 REM 2b. Ensure docker compose plugin accessible (symlink to cli-plugins)
 wsl -d Ubuntu -u root -- bash -c "mkdir -p /usr/lib/docker/cli-plugins /root/.docker/cli-plugins; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose 2>/dev/null; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /root/.docker/cli-plugins/docker-compose 2>/dev/null" >nul 2>&1
@@ -71,8 +83,9 @@ powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -Argu
 echo [OK] Port forwarding configured
 
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
+REM    Outer timeout 240s backstop; script internals also wrap every docker call.
 echo [INFO] Starting project containers...
-wsl -d Ubuntu -u root -- bash -c "%WSL_DIR%/wsl_ensure_containers.sh %WSL_DIR%"
+wsl -d Ubuntu -u root -- bash -c "timeout 240 %WSL_DIR%/wsl_ensure_containers.sh %WSL_DIR%"
 set "CONTAINERS_RC=!errorlevel!"
 if "!CONTAINERS_RC!"=="0" goto :containers_ok
 if "!CONTAINERS_RC!"=="7" goto :cgroup_stuck

@@ -26,12 +26,25 @@ function getMainAgentId(sessionId: string): string {
 /** localStorage 存储键前缀 */
 const STORAGE_KEY_PREFIX = 'agent-tabs-'
 
+/** 消息缓存旧 localStorage key（已迁移到 IndexedDB，残留于此则清理释放空间） */
+const LEGACY_PIPELINE_MESSAGES_KEY = 'pipeline-messages'
+
 /** 获取会话对应的存储键 */
 function getStorageKey(sessionId: string): string {
   return `${STORAGE_KEY_PREFIX}${sessionId}`
 }
 
-/** 清理其他会话的过期 localStorage 数据，释放空间 保留当前会话，按 savedAt 时间排序，优先清理最旧的数据 */
+/**
+ * 配额不足时清理 localStorage 释放空间。
+ *
+ * 两步：
+ * 1. 清理其他会话的过期 agent-tabs-* 数据（保留当前会话，按 savedAt 优先清最旧）；
+ * 2. 删除旧版残留的 pipeline-messages key（消息缓存已迁 IndexedDB，
+ *    localStorage 里这份是历史遗留，删掉可释放可观空间）。
+ *
+ * 注意：迁移后正常情况 pipeline-messages 已由 onRehydrateStorage 一次性清理，
+ * 此处作为兜底（如 IndexedDB 降级、rehydrate 未触发等边缘场景）。
+ */
 function cleanupExpiredSessionData(currentSessionId: string): void {
   const allKeys: { key: string; savedAt: number }[] = []
   for (let i = 0; i < localStorage.length; i++) {
@@ -51,6 +64,15 @@ function cleanupExpiredSessionData(currentSessionId: string): void {
   allKeys.sort((a, b) => a.savedAt - b.savedAt)
   for (const { key } of allKeys) {
     localStorage.removeItem(key)
+  }
+
+  // 清理旧版消息缓存残留（已迁 IndexedDB，此 key 不再使用）
+  try {
+    if (localStorage.getItem(LEGACY_PIPELINE_MESSAGES_KEY) !== null) {
+      localStorage.removeItem(LEGACY_PIPELINE_MESSAGES_KEY)
+    }
+  } catch {
+    // localStorage 不可用时忽略
   }
 }
 

@@ -177,6 +177,15 @@ jobs:
             -q \
             --deselect "tests/channels/test_routes_workspaces.py::TestWorkspaceServiceRegression::test_scan_directory_skips_hidden_and_pycache" \
             2>&1
+          # 本次新增的附件注入测试：tests/suites/plugins 目录存在既有红测
+          # （test_plugin_fixes/test_session_pipeline_downgrade），暂不整目录纳入，
+          # 仅精确纳入本次新增的 multimodal_preprocessor 文本注入测试。
+          python -m pytest \
+            tests/suites/plugins/test_multimodal_preprocessor_text.py \
+            --tb=long \
+            --no-header \
+            -q \
+            2>&1
 
       - name: Generate Test Report
         if: always()
@@ -447,6 +456,11 @@ jobs:
 
       - name: Build Frontend
         working-directory: frontend
+        # e2e 用 vite preview 提供 UI（无 dev proxy），故构建时必须注入后端地址，
+        # 否则前端 API_BASE_URL 为空、WS_BASE_URL 派生到 preview 端口，
+        # 导致 e2e 登录后 WS 永久 "Reconnecting..."、聊天界面无法加载。
+        env:
+          VITE_API_BASE_URL: http://localhost:8988
         run: npm run build
 
       - name: Install Playwright Browsers

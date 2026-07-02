@@ -15,6 +15,8 @@ class MultimodalCapabilityConfig(BaseModel):
     supports_video: bool = False
     supports_document: bool = False
     supported_image_types: list[str] = Field(default_factory=list)
+    supported_audio_types: list[str] = Field(default_factory=list)
+    supported_video_types: list[str] = Field(default_factory=list)
     max_image_size: int = 20 * 1024 * 1024
     max_audio_size: int = 25 * 1024 * 1024
     max_video_size: int = 100 * 1024 * 1024

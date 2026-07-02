@@ -15,11 +15,21 @@ cd "$PROJECT_DIR" 2>/dev/null || { echo "[ERROR] 项目目录不存在: $PROJECT
 
 # 防御：compose 前先确认 daemon 的 unix socket 真正可响应
 # （仅 docker version 走 TCP 也能通过，会掩盖 socket 未就绪的故障）
+# docker ps 遍历容器也会被 D 状态传染卡死，必须加 timeout；超时即判污染返回 7。
+socket_ready=0
 for i in $(seq 1 12); do
-    [ -S /run/docker.sock ] && docker ps >/dev/null 2>&1 && break
+    if timeout 8 docker ps >/dev/null 2>&1; then
+        socket_ready=1
+        break
+    fi
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+        echo "[WARN] docker ps 超时（疑似内核 D 状态污染）"
+        exit 7
+    fi
     sleep 2
 done
-if ! docker ps >/dev/null 2>&1; then
+if [ "$socket_ready" -ne 1 ]; then
     echo "[ERROR] docker daemon 不可用（/run/docker.sock 未就绪）"
     echo "[ERROR] 诊断: tail -30 /tmp/dockerd.log"
     exit 1
@@ -31,7 +41,17 @@ fi
 # 此时返回 7，由上层 start_web_cn.bat 自动 wsl --shutdown 重启内核后重试。
 echo "[INFO] 清理上轮任务容器（cua- 前缀，仅保留 frontend + redis）..."
 stuck=0
-cua_list="$(docker ps -a --format '{{.Names}}' | grep '^cua-' || true)"
+# 先把 docker ps -a 跑出来（带 timeout），再 grep；分开做才能正确捕获 timeout 退出码 124
+all_names="$(timeout 15 docker ps -a --format '{{.Names}}' 2>/dev/null)"
+rc=$?
+if [ "$rc" -eq 124 ]; then
+    echo "[WARN] docker ps -a 超时（疑似内核 D 状态污染）"
+    exit 7
+elif [ "$rc" -ne 0 ]; then
+    echo "[ERROR] docker ps -a 失败 (rc=$rc)"
+    exit "$rc"
+fi
+cua_list="$(printf '%s\n' "$all_names" | grep '^cua-' || true)"
 while IFS= read -r cname; do
     [ -z "$cname" ] && continue
     if timeout 30 docker rm -f "$cname" >/dev/null 2>&1; then
@@ -47,9 +67,15 @@ if [ "$stuck" -ne 0 ]; then
 fi
 
 echo "[INFO] docker compose up -d"
-out="$(docker compose up -d 2>&1)"
+out="$(timeout 120 docker compose up -d 2>&1)"
 rc=$?
 echo "$out" | tail -8
+
+# compose 超时（124）= 内核被 D 状态污染，daemon 不可响应，需 wsl --shutdown
+if [ "$rc" -eq 124 ]; then
+    echo "[WARN] docker compose 超时（疑似内核 D 状态污染）"
+    exit 7
+fi
 
 # 关键：不要让管道吞掉 compose 的退出码；明确判断失败原因
 if [ "$rc" -ne 0 ]; then
@@ -74,14 +100,14 @@ fi
 echo "[INFO] 等待容器进入 running ..."
 ok=0
 for i in $(seq 1 15); do
-    redis_up="$(docker ps --filter name=agent-os-redis-22404 --filter status=running --format '{{.Names}}')"
-    front_up="$(docker ps --filter name=agent-os-frontend-22404 --filter status=running --format '{{.Names}}')"
+    redis_up="$(timeout 8 docker ps --filter name=agent-os-redis-22404 --filter status=running --format '{{.Names}}' 2>/dev/null)"
+    front_up="$(timeout 8 docker ps --filter name=agent-os-frontend-22404 --filter status=running --format '{{.Names}}' 2>/dev/null)"
     if [ -n "$redis_up" ] && [ -n "$front_up" ]; then ok=1; break; fi
     sleep 2
 done
 
 echo "--- 实际运行状态 ---"
-docker ps --format '{{.Names}}\t{{.Status}}' | grep 'agent-os-' || true
+timeout 8 docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | grep 'agent-os-' || true
 if [ "$ok" -ne 1 ]; then
     echo "[WARN] 部分容器未进入 running（可能仍在构建或已失败），详见上方输出"
     exit 1

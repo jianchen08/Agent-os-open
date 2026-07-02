@@ -80,6 +80,8 @@ class ModelCapability(BaseModel):
         supports_video: 是否支持视频输入
         supports_document: 是否支持文档输入
         supported_image_types: 支持的图片MIME类型列表
+        supported_audio_types: 支持的音频MIME类型列表
+        supported_video_types: 支持的视频MIME类型列表
         supported_document_types: 支持的文档MIME类型列表
         max_image_size: 最大图片文件大小（字节），默认20MB
         max_audio_size: 最大音频文件大小（字节），默认25MB
@@ -103,6 +105,14 @@ class ModelCapability(BaseModel):
     supported_image_types: list[str] = Field(
         default_factory=list,
         description="支持的图片MIME类型"
+    )
+    supported_audio_types: list[str] = Field(
+        default_factory=list,
+        description="支持的音频MIME类型"
+    )
+    supported_video_types: list[str] = Field(
+        default_factory=list,
+        description="支持的视频MIME类型"
     )
     supported_document_types: list[str] = Field(
         default_factory=list,

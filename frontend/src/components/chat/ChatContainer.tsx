@@ -17,7 +17,7 @@ import { NotificationCenter } from './NotificationCenter'
 import { SubTabRouter } from './SubTabRouter'
 import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
-import type { Message } from '@/types/models'
+import type { Agent, Message } from '@/types/models'
 
 const EMPTY_MESSAGES: Message[] = []
 
@@ -40,24 +40,40 @@ function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
   )
 }
 
+/** 主 Tab 的显示名称：用 agentId 从 agents 列表实时解析真实名称。
+ *  主 Tab 的 agentName 在 agentTabStore 中被硬编码为 '主Agent'，且不随会话绑定
+ *  的 Agent 变化而更新；这里改为渲染层派生，确保切换 Agent 后按钮显示正确名称，
+ *  同时规避 fetchAgents 与 fetchSessions 并行加载导致的竞态（agents 后就绪时
+ *  组件已响应式订阅会自动重渲染）。 */
+function resolveMainTabName(agentId: string | undefined, agents: Agent[]): string {
+  if (!agentId) return '主Agent'
+  const matched = agents.find((a) => a.id === agentId || a.configId === agentId)
+  return matched?.name || '主Agent'
+}
+
 /** 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式 */
 function mapStoreTabsToBarFormat(
   storeTabs: ReturnType<typeof useAgentTabStore.getState>['tabs'],
   activeTabId: string | null,
   unreadCounts: Record<string, number>,
+  agents: Agent[],
 ) {
-  return storeTabs.map((tab) => ({
-    id: tab.id,
-    name: tab.agentName,
-    status: tab.status,
-    isActive: tab.id === activeTabId,
-    unreadCount: unreadCounts[tab.id] || 0,
-    canClose: tab.canClose,
-    agentLevel: tab.agentLevel,
-    agentName: tab.agentName,
-    taskId: tab.taskId,
-    path: tab.path,
-  }))
+  return storeTabs.map((tab) => {
+    // 主 Tab：按 agentId 实时解析名称；子 Tab：沿用动态生成的 agentName
+    const resolvedName = tab.agentLevel === 1 ? resolveMainTabName(tab.agentId, agents) : tab.agentName
+    return {
+      id: tab.id,
+      name: resolvedName,
+      status: tab.status,
+      isActive: tab.id === activeTabId,
+      unreadCount: unreadCounts[tab.id] || 0,
+      canClose: tab.canClose,
+      agentLevel: tab.agentLevel,
+      agentName: resolvedName,
+      taskId: tab.taskId,
+      path: tab.path,
+    }
+  })
 }
 
 /** 聊天容器组件 */
@@ -175,8 +191,8 @@ export const ChatContainer = ({
 
   /** 将 store Tab 映射为 AgentTabBar 所需格式 */
   const barTabs = useMemo(
-    () => mapStoreTabsToBarFormat(tabs, activeTabId, unreadCounts),
-    [tabs, activeTabId, unreadCounts],
+    () => mapStoreTabsToBarFormat(tabs, activeTabId, unreadCounts, agents),
+    [tabs, activeTabId, unreadCounts, agents],
   )
 
   /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */

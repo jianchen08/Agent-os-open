@@ -6,6 +6,10 @@
 
 /**
  * 模型多模态能力（后端返回的完整能力信息）
+ *
+ * 仅声明真正的多模态能力（图片/音频/视频）。
+ * 文本/文档/代码类附件无需声明能力——任何模型都能接收文本，
+ * 前端宽规则放行，后端提取文本后直接拼进用户消息。
  */
 export interface ModelCapabilities {
   /** 模型名称 */
@@ -35,22 +39,6 @@ export interface ModelCapabilities {
   /** 最大视频大小（字节） */
   maxVideoSize: number
 
-  // 文档能力
-  /** 是否支持文档 */
-  supportsDocument: boolean
-  /** 支持的文档 MIME 类型列表 */
-  supportedDocumentTypes: string[]
-  /** 最大文档大小（字节） */
-  maxDocumentSize: number
-
-  // 代码文件能力
-  /** 是否支持代码文件 */
-  supportsCode: boolean
-  /** 支持的代码文件 MIME 类型列表 */
-  supportedCodeTypes: string[]
-  /** 最大代码文件大小（字节） */
-  maxCodeSize: number
-
   // 便捷属性
   /** 是否为多模态模型 */
   isMultimodal: boolean
@@ -58,9 +46,13 @@ export interface ModelCapabilities {
 
 /**
  * 输入能力配置（用于控制输入组件的显示）
+ *
+ * 注意：文本/文档/代码类附件始终可上传（任何模型都能接收文本），
+ * 因此 showAttachmentButton 始终为 true——附件入口永不关闭。
+ * 图片/音频/视频按模型多模态能力控制。
  */
 export interface InputCapabilities {
-  /** 是否显示附件按钮 */
+  /** 是否显示附件按钮（始终 true，因为文本类附件永远支持） */
   showAttachmentButton: boolean
   /** 是否显示图片上传 */
   showImageUpload: boolean
@@ -68,29 +60,26 @@ export interface InputCapabilities {
   showAudioUpload: boolean
   /** 是否显示视频上传 */
   showVideoUpload: boolean
-  /** 是否显示文档上传 */
-  showDocumentUpload: boolean
   /** 是否支持粘贴图片 */
   canPasteImage: boolean
   /** 是否支持拖拽上传 */
   canDragDrop: boolean
-  /** 支持的文件类型（用于 file input 的 accept 属性） */
+  /** 支持的多模态文件类型（用于 file input 的 accept 属性，仅图片/音频/视频） */
   acceptedFileTypes: string
   /** 能力标签（用于 UI 显示） */
   capabilityTags: string[]
 }
 
 /**
- * 默认输入能力配置（无多模态能力）
+ * 默认输入能力配置（无多模态能力，但文本附件始终可用）
  */
 export const DEFAULT_INPUT_CAPABILITIES: InputCapabilities = {
-  showAttachmentButton: false,
+  showAttachmentButton: true,
   showImageUpload: false,
   showAudioUpload: false,
   showVideoUpload: false,
-  showDocumentUpload: false,
   canPasteImage: false,
-  canDragDrop: false,
+  canDragDrop: true,
   acceptedFileTypes: '',
   capabilityTags: [],
 }

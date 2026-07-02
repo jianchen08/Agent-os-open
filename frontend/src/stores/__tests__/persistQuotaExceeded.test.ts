@@ -1,10 +1,13 @@
 /**
- * 复现测试：persist 写入 localStorage 超配额时的 store 行为
+ * 复现测试：persist 写入失败时的 store 行为（业务不被阻断）
  *
- * Bug 场景：
- * - localStorage 配额已满，persist 的 setItem 抛 QuotaExceededError
- * - 期望：内存 state 仍正常更新，业务（addMessage/initFromAPI）不抛异常
- * - 实际（修复前）：异常冒泡到调用方，fetchMessages 误判为"加载失败"
+ * 迁移说明：消息缓存已从 localStorage 迁移到 IndexedDB（见 indexedDbStorage）。
+ * 本测试验证的不变量不变——持久化失败（无论是 localStorage 配额满，
+ * 还是 IndexedDB 不可用降级为内存）时，业务（addMessage/initFromAPI）不抛异常、
+ * 内存 state 正常更新。
+ *
+ * jsdom 无 IndexedDB，pipelineMessageStore 会自动降级内存模式（见 indexedDbStorage 的
+ * safeSet/safeGet），因此下列断言走的是「内存降级」路径，仍能验证业务不变性。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { Message } from '@/types/models'

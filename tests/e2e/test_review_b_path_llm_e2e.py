@@ -139,7 +139,7 @@ def test_b_path_full_chain_produces_report(tmp_path):
         loop = asyncio.new_event_loop()
         try:
             result = loop.run_until_complete(
-                maintenance_service.trigger_llm_review(parent_pipeline_id="", limit=5)
+                maintenance_service.trigger_llm_review(parent_pipeline_id="")
             )
             assert result.get("status") in ("submitted", "already_running"), \
                 f"复盘未提交: {result}"

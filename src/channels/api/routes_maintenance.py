@@ -66,9 +66,9 @@ async def trigger_review() -> dict[str, Any]:
         return {"status": "error", "message": "MaintenanceService 不可用"}
 
     # B 路径内部已做 _review_running 互斥与防自循环检查，直接调用即可
+    # 单批复盘多少个管道由 service 内部按 agent/status 分组 + 模型窗口预算反推决定
     result = await maintenance_service.trigger_llm_review(
         parent_pipeline_id="",
-        limit=5,
     )
 
     return {

@@ -27,12 +27,6 @@ function transformCapabilities(data: Record<string, unknown>): ModelCapabilities
     supportsVideo: data.supports_video as boolean,
     supportedVideoTypes: (data.supported_video_types as string[]) || [],
     maxVideoSize: (data.max_video_size as number) || 0,
-    supportsDocument: data.supports_document as boolean,
-    supportedDocumentTypes: (data.supported_document_types as string[]) || [],
-    maxDocumentSize: (data.max_document_size as number) || 0,
-    supportsCode: data.supports_code as boolean,
-    supportedCodeTypes: (data.supported_code_types as string[]) || [],
-    maxCodeSize: (data.max_code_size as number) || 0,
     isMultimodal: data.is_multimodal as boolean,
   }
 }
@@ -49,38 +43,34 @@ function computeInputCapabilities(capabilities: ModelCapabilities | null): Input
     supportsImage,
     supportsAudio,
     supportsVideo,
-    supportsDocument,
     supportedImageTypes,
     supportedAudioTypes,
     supportedVideoTypes,
-    supportedDocumentTypes,
   } = capabilities
 
-  // 计算是否显示附件按钮
-  const showAttachmentButton = supportsImage || supportsAudio || supportsVideo || supportsDocument
+  // 文本/文档/代码附件始终可上传（任何模型都能接收文本），
+  // 因此附件按钮始终显示；图片/音频/视频按多模态能力控制。
 
-  // 计算支持的文件类型
+  // accept 仅含图片/音频/视频的多模态类型；文本类不进 accept
+  // （accept 无法表达"任意文本"，且会限制用户选择文本文件）
   const acceptedTypes: string[] = []
   if (supportsImage) acceptedTypes.push(...supportedImageTypes)
   if (supportsAudio) acceptedTypes.push(...supportedAudioTypes)
   if (supportsVideo) acceptedTypes.push(...supportedVideoTypes)
-  if (supportsDocument) acceptedTypes.push(...supportedDocumentTypes)
 
-  // 计算能力标签
+  // 能力标签
   const capabilityTags: string[] = []
   if (supportsImage) capabilityTags.push('图片')
   if (supportsAudio) capabilityTags.push('音频')
   if (supportsVideo) capabilityTags.push('视频')
-  if (supportsDocument) capabilityTags.push('文档')
 
   return {
-    showAttachmentButton,
+    showAttachmentButton: true,
     showImageUpload: supportsImage,
     showAudioUpload: supportsAudio,
     showVideoUpload: supportsVideo,
-    showDocumentUpload: supportsDocument,
     canPasteImage: supportsImage,
-    canDragDrop: showAttachmentButton,
+    canDragDrop: true,
     acceptedFileTypes: acceptedTypes.join(','),
     capabilityTags,
   }

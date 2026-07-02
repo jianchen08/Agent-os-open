@@ -1,4 +1,5 @@
-/** 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。 */
+/** 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知 / 用量更新） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。 */
+import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
@@ -138,4 +139,25 @@ export function handleSystemNotification(eventData: any): void {
       notification_id: notificationId,  // Stage1: 保存notification_id用于去重
     },
   } as any)
+}
+
+/**
+ * 处理 COST_UPDATE 事件：写入本轮单轮 token 用量到 contextUsageStore。
+ *
+ * 后端 track 插件在每轮 llm_call 后推送（tool_execute 轮已跳过），
+ * payload = { pipeline_id, total_tokens, input_tokens, output_tokens }，
+ * 均为本轮 API 返回的单轮值。进度条据此按 pipeline 实时刷新。
+ */
+export function handleCostUpdate(eventData: any): void {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) return
+  const data = eventData?.data || eventData
+  const totalTokens = data?.total_tokens || 0
+  // 后端 tool_execute 轮已过滤，前端再兜底防 0 值覆盖
+  if (totalTokens <= 0) return
+  useContextUsageStore.getState().updateUsage(pipelineId, {
+    total_tokens: totalTokens,
+    input_tokens: data?.input_tokens || 0,
+    output_tokens: data?.output_tokens || 0,
+  })
 }

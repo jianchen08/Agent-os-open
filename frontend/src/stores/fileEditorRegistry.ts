@@ -22,6 +22,8 @@ export interface FileEditorData {
   containerTaskId: string
   /** 是否正在加载（运行时状态，不持久化） */
   loading?: boolean
+  /** 附件直链 URL（如 /uploads/xxx.pdf）；优先于 containerTaskId 拼接的 workspaces URL */
+  url?: string
 }
 
 /** 文件变更监听器回调类型 */

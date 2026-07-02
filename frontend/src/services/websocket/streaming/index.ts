@@ -19,7 +19,7 @@ import {
   handleToolStart,
   handleIteration,
 } from './handlers'
-import { handleReconnected, handleStateChange, handleSystemNotification } from './lifecycleHandlers'
+import { handleCostUpdate, handleReconnected, handleStateChange, handleSystemNotification } from './lifecycleHandlers'
 import { resolvePipelineId } from './router'
 
 let _initialized = false
@@ -64,6 +64,7 @@ export function initStreamingEvents(): void {
 
   _handlers[WS_SERVER_EVENTS.STATE_CHANGE] = _logWrap(WS_SERVER_EVENTS.STATE_CHANGE, handleStateChange)
   _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = _logWrap(WS_SERVER_EVENTS.SYSTEM_NOTIFICATION, handleSystemNotification)
+  _handlers[WS_SERVER_EVENTS.COST_UPDATE] = _logWrap(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
 
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)

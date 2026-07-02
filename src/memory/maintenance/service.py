@@ -29,9 +29,11 @@ class MaintenanceConfig:
 
     Attributes:
         enabled: 是否启用自动维护触发器
-        skeleton_budget_percent: 骨架占上下文窗口的百分比（保留给 review_agent 读记录用）
+        skeleton_budget_percent: 骨架占 review_agent 模型上下文窗口的百分比（10~20）
         records_per_skeleton_token: 每条执行记录在骨架中约占的 token 数
-        max_records_per_review: 单次复盘最大处理记录数
+        review_batch_limit: 单次复盘的管道数量上限（与 token 预算取 min）。
+            受 review_agent 的 max_iterations/timeout 约束，默认 10：
+            10 管道 × ~5 轮迭代 ≈ 50 轮，远低于 max_iterations=100，保证塞进去的都能真产出报告。
         cleanup_check_interval: 清理巡检间隔（秒）
         cleanup_min_age_days: 至少多少天才考虑清理
         cleanup_capacity_threshold: 容量使用率超过此值时提前清理
@@ -41,7 +43,7 @@ class MaintenanceConfig:
     # 复盘配置（B 路径只保留预算相关项，不再有定时触发）
     skeleton_budget_percent: int = 15
     records_per_skeleton_token: int = 15
-    max_records_per_review: int = 2000
+    review_batch_limit: int = 10  # 单批复盘管道数上限，与 token 预算取 min
     # 清理配置
     cleanup_check_interval: int = 86400     # 1 天
     cleanup_min_age_days: int = 30
@@ -103,6 +105,7 @@ class MemoryMaintenanceService:
         config: MaintenanceConfig | dict[str, Any] | None = None,
         memory_service: Any = None,
         task_lookup: Any | None = None,
+        review_context_window: int = 128000,
     ) -> None:
         """初始化复盘驱动的记忆维护服务。
 
@@ -116,12 +119,16 @@ class MemoryMaintenanceService:
                 把 pipeline_run_id 反查到目标 agent 和任务标题，供复盘报告带身份。
                 由 Application 装配时注入（闭包引用 task_service + root_map），
                 不传时复盘报告不含 agent 身份。
+            review_context_window: review_agent 实际模型的上下文窗口（tokens）。
+                装配时由 Application 按 review_agent 的 model_tier 解析后注入，
+                用于预算反推单批可塞多少管道。默认 128000 仅兜底。
         """
         self._storage = storage
         self._chunk_db = chunk_db
         self._knowledge_service = knowledge_service
         self._memory_service = memory_service
         self._task_lookup = task_lookup
+        self._review_context_window = review_context_window
 
         if config is None:
             self._config = MaintenanceConfig()
@@ -302,7 +309,7 @@ class MemoryMaintenanceService:
     # ============================================
 
     async def trigger_llm_review(
-        self, parent_pipeline_id: str, limit: int = 5,
+        self, parent_pipeline_id: str,
     ) -> dict[str, Any]:
         """启动 LLM 复盘管道并返回。不阻塞调用方，复盘在后台运行。
 
@@ -312,9 +319,12 @@ class MemoryMaintenanceService:
         复盘是 B 路径唯一的真相源。若 review_agent 启动失败，直接判失败并通知，
         不再降级到模板提取（A 路径已删除）。
 
+        单批复盘多少个管道不由参数决定，而由 _collect_review_targets 内部按
+        agent/status 分组 + 模型上下文预算反推（review_context_window ×
+        skeleton_budget_percent）自动截断。
+
         Args:
             parent_pipeline_id: 调用方父管道 ID（用于回写完成通知）
-            limit: 待复盘管道数量上限
 
         Returns:
             提交结果，含 status（submitted / already_running / skipped_nested）
@@ -333,7 +343,7 @@ class MemoryMaintenanceService:
         self._review_running = True
 
         # 创建后台 task 并持有引用防 GC
-        _task = asyncio.create_task(self._run_llm_review_task(parent_pipeline_id, limit))
+        _task = asyncio.create_task(self._run_llm_review_task(parent_pipeline_id))
         _RUNNING_REVIEW_TASKS[id(_task)] = _task
         _task.add_done_callback(lambda t: _RUNNING_REVIEW_TASKS.pop(id(t), None))
 
@@ -349,62 +359,75 @@ class MemoryMaintenanceService:
         except Exception:
             return False
 
-    async def _run_llm_review_task(self, parent_pipeline_id: str, limit: int) -> None:
-        """LLM 复盘后台任务：编排整个复盘流程。
+    async def _run_llm_review_task(self, parent_pipeline_id: str) -> None:
+        """LLM 复盘后台任务：编排多复盘管道串行执行。
 
-        流程：收集待复盘 → 启动 review_agent → 等报告 → 持久化 → 通知。
+        流程：收集全部 pending 目标 → 按预算切成多批（每批=一个复盘管道容量）
+        → 逐批串行起 review_agent 复盘管道 → 各自等报告/持久化/标记 → 通知。
+
+        串行而非并行的理由：max_concurrent_pipelines 全局限流，逐个起更稳妥，
+        且 LLM 成本可控、不挤压正常任务管道。复盘是后台异步任务，不阻塞用户。
+
         review_agent 启动失败直接判失败通知，不降级（A 路径已删除）。
         """
-        child_pipeline_id = ""
         try:
             # 0. 解析触发来源（父管道的 agent/会话），供复盘管道 tags 溯源
             origin = self._resolve_trigger_origin(parent_pipeline_id)
             self._current_parent_pipeline = parent_pipeline_id
             self._current_trigger_session = origin.get("trigger_session", "")
 
-            # 1. 收集待复盘管道列表
-            targets = self._collect_review_targets(parent_pipeline_id, limit)
+            # 1. 收集全部 pending 目标（按 agent/status 分组排序，不截断）
+            all_targets = self._collect_review_targets(parent_pipeline_id)
             logger.info(
-                "[Maintenance] 收集待复盘管道 parent=%s targets=%d",
-                parent_pipeline_id[:12], len(targets),
+                "[Maintenance] 收集待复盘目标 parent=%s targets=%d",
+                parent_pipeline_id[:12], len(all_targets),
             )
 
-            # 2. 启动 review_agent 管道做 LLM 深度复盘
-            child_pipeline_id, launched = await self._try_launch_review_agent(targets)
-            if not launched:
-                # A 路径已删除：启动失败直接判失败并通知父管道
-                logger.warning(
-                    "[Maintenance] review_agent 启动失败，复盘未执行: parent=%s",
-                    parent_pipeline_id[:12],
-                )
+            # 2. 按预算切成多个复盘批次（最多 review_batch_limit 批）
+            batches = self._split_targets_into_batches(all_targets)
+            if not batches:
                 await self._notify_parent(
                     parent_pipeline_id, "failed",
-                    "复盘启动失败：review_agent 管道未能启动（配置缺失或注册失败）。"
-                    "请检查 review_agent 配置后重试。",
+                    "无 pending 管道可复盘。",
                 )
                 return
 
-            # 3. 等待 review_agent 产出报告
-            report_text = await self._await_child_report(child_pipeline_id)
-            if report_text:
-                # 4. 持久化报告
-                await self._persist_review_result(child_pipeline_id, report_text)
-                # 5. 标记被复盘的 pending 管道为已复盘
-                await self._mark_targets_reviewed(targets)
-                # 6. 通知父管道
-                brief = report_text[:200].replace("\n", " ").strip()
-                await self._notify_parent(
-                    parent_pipeline_id, "completed",
-                    f"复盘管道 {child_pipeline_id[:12]} 已产出报告（已存入知识库和 docs/working/）。"
-                    + (f" 报告摘要：{brief}" if brief else ""),
-                )
-            else:
-                # 有执行但未产出报告：标记为 failed，通知父管道
-                await self._mark_targets_reviewed(targets, failed=True)
-                await self._notify_parent(
-                    parent_pipeline_id, "failed",
-                    f"复盘管道 {child_pipeline_id[:12]} 已执行完成，但未提取到报告内容。",
-                )
+            logger.info(
+                "[Maintenance] 切成 %d 个复盘批次（review_batch_limit=%d），共 %d 个目标",
+                len(batches), self._config.review_batch_limit,
+                sum(len(b) for b in batches),
+            )
+
+            # 3. 逐批串行起复盘管道
+            total_reviewed = 0
+            produced_reports = 0
+            for idx, batch in enumerate(batches, start=1):
+                child_pipeline_id, launched = await self._try_launch_review_agent(batch)
+                if not launched:
+                    # 该批启动失败：跳过，不中断后续批次
+                    logger.warning(
+                        "[Maintenance] 第 %d/%d 批复盘管道启动失败，跳过",
+                        idx, len(batches),
+                    )
+                    continue
+
+                report_text = await self._await_child_report(child_pipeline_id)
+                if report_text:
+                    await self._persist_review_result(child_pipeline_id, report_text)
+                    await self._mark_targets_reviewed(batch)
+                    total_reviewed += len(batch)
+                    produced_reports += 1
+                else:
+                    # 有执行但未产出报告：标记为 failed
+                    await self._mark_targets_reviewed(batch, failed=True)
+
+            # 4. 通知父管道：本次复盘管道数 + 目标数 + 剩余 pending
+            remaining = self._count_remaining_pending()
+            await self._notify_parent(
+                parent_pipeline_id, "completed",
+                f"复盘完成：本次启动 {len(batches)} 个复盘管道，产出 {produced_reports} 份报告，"
+                f"复盘 {total_reviewed} 个目标。还剩 {remaining} 个 pending 待复盘。",
+            )
 
         except Exception as exc:
             logger.error("[Maintenance] 复盘执行失败: %s", exc, exc_info=True)
@@ -415,8 +438,28 @@ class MemoryMaintenanceService:
         finally:
             self._review_running = False
 
-    def _collect_review_targets(self, parent_pipeline_id: str, limit: int = 5) -> list[dict[str, Any]]:
-        """收集待复盘管道列表。"""
+    def _count_remaining_pending(self) -> int:
+        """统计当前仍待复盘的管道数量（标记 reviewed 后调用，反映真实剩余）。"""
+        try:
+            return len(self._get_review_engine().get_pending_pipelines())
+        except Exception:
+            return 0
+
+    def _collect_review_targets(self, parent_pipeline_id: str) -> list[dict[str, Any]]:
+        """收集全部待复盘目标，做两级分组排序（不截断）。
+
+        分组排序：先按 agent_id 聚集（同一 agent 的管道连续），再按 status 聚集
+        （该 agent 内 failed 在前），最后 records 多的优先。
+
+        本方法只负责"取全部 + 排序"，不做预算截断。截成多个复盘批次的逻辑
+        由 _split_targets_into_batches 完成（每批 = 一个复盘管道的预算容量）。
+
+        Args:
+            parent_pipeline_id: 调用方父管道（保留签名兼容，当前未用于过滤）
+
+        Returns:
+            全部待复盘目标列表（已按 agent/status 分组排序，未截断）
+        """
         targets: list[dict[str, Any]] = []
         try:
             review_engine = self._get_review_engine()
@@ -439,14 +482,79 @@ class MemoryMaintenanceService:
                     except Exception:
                         pass
                 targets.append(item)
+            # 两级分组：先 agent_id 聚集，再 status（failed 先），再 records 多优先
             targets.sort(key=lambda t: (
+                t.get("agent_id") or "",
                 0 if t.get("status") == "failed" else 1,
                 -(t.get("total_records", 0)),
             ))
-            targets = targets[:limit]
         except Exception as exc:
             logger.warning("[Maintenance] 收集待复盘管道失败: %s", exc)
         return targets
+
+    def _select_targets_by_budget(
+        self, targets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """按骨架预算从前往后选目标，装满一个复盘管道的容量即停。
+
+        每个目标骨架成本 = total_records × records_per_skeleton_token。
+        目标短就多塞、长就少塞，纯按预算自适应——不设固定数量上限。
+        至少塞 1 个：即便首个就超预算，也先塞进去，保证一个复盘管道不空手。
+
+        注意：本方法只决定「一个复盘管道塞多少目标」，与「一次触发启动几个
+        复盘管道」（review_batch_limit，由触发编排层决定）是两个独立概念。
+
+        Args:
+            targets: 已按分组排好序的候选目标
+
+        Returns:
+            一个复盘管道预算内可塞的目标子集
+        """
+        budget_tokens = (
+            self._review_context_window * self._config.skeleton_budget_percent // 100
+        )
+        cost_per_token = self._config.records_per_skeleton_token
+        selected: list[dict[str, Any]] = []
+        used = 0
+        for t in targets:
+            cost = t.get("total_records", 0) * cost_per_token
+            if used + cost > budget_tokens and selected:
+                break
+            used += cost
+            selected.append(t)
+        return selected
+
+    def _split_targets_into_batches(
+        self, targets: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        """把已排序的全部目标按预算切成多个批次，每批 = 一个复盘管道的容量。
+
+        切批逻辑：循环用 _select_targets_by_budget 从剩余目标里取一批（装满一个
+        复盘管道的预算容量），取到的从候选池移除，直到候选池空或批数达
+        review_batch_limit。
+
+        两个独立概念的边界：
+        - 本方法决定「切成几批」→ 受 review_batch_limit 约束（一次触发起几个复盘管道）。
+        - _select_targets_by_budget 决定「每批塞多少目标」→ 纯按 token 预算自适应。
+
+        Args:
+            targets: 已按分组排好序的全部候选目标
+
+        Returns:
+            批次列表，每个批次是一个复盘管道要处理的目标子集；
+            批数受 review_batch_limit 约束，超出部分留待下次触发。
+        """
+        batches: list[list[dict[str, Any]]] = []
+        remaining = list(targets)
+        while remaining and len(batches) < self._config.review_batch_limit:
+            batch = self._select_targets_by_budget(remaining)
+            if not batch:
+                break
+            batches.append(batch)
+            # 从 remaining 移除本批已选目标（按 run_id 差集）
+            selected_ids = {t["run_id"] for t in batch}
+            remaining = [t for t in remaining if t["run_id"] not in selected_ids]
+        return batches
 
     async def _mark_targets_reviewed(
         self, targets: list[dict[str, Any]], *, failed: bool = False,
@@ -565,13 +673,17 @@ class MemoryMaintenanceService:
                 )
                 content = (
                     f"[工具触发复盘] 请分析以下管道的执行记录，产出经验和改进建议。\n\n"
-                    f"待复盘管道列表（failed 优先，共 {len(targets)} 个）：\n{targets_str}\n\n"
+                    f"待复盘管道列表（先按 agent 分组、再按 status 分组，共 {len(targets)} 个）：\n{targets_str}\n\n"
                     f"分析要求：\n"
                     f"1. 先用 read_execution_detail(level=skeleton, pipeline_run_id=...) 逐个查看骨架；\n"
                     f"2. 【必须】分析每个管道时，先看用户最初下达的指令（type=user 的记录）"
                     f"和后续的人类交互/反馈——脱离用户意图的根因分析没有意义；\n"
                     f"3. 对失败/异常的 iteration 做 5 Whys 根因分析（找根因不找症状）；\n"
-                    f"4. 产出结构化复盘报告（JSON：summary + experiences + improvements）。"
+                    f"4. 【必须】每个管道各产出一份独立的复盘报告，不要合并。"
+                    f"多管道时用 JSON 数组包裹 N 份报告："
+                    f"[\n  {{...管道A的 pipeline_run_id/summary/experiences/improvements...}},\n"
+                    f"  {{...管道B的...}}\n]\n"
+                    f"单管道时直接输出该管道一份报告对象即可。"
                 )
             else:
                 content = (
