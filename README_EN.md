@@ -38,7 +38,7 @@
 | Protocol | MCP (Model Context Protocol) |
 | Deployment | Docker / Docker Compose |
 
-> **Note**: `pyproject.toml` currently declares only 9 core dependencies (pyyaml / rich / aiohttp / watchdog / litellm / pydantic / jsonschema / simpleeval / python-lsp-server). FastAPI and Redis are imported in 25+ files but NOT declared in `pyproject.toml`. Install them manually (`pip install fastapi>=0.110 redis>=5.0`) or use the Docker image (recommended).
+> **Dependencies**: `pyproject.toml` declares 24 core runtime dependencies (including fastapi, redis, PyJWT, bcrypt, cryptography, httpx, sqlalchemy, etc.), mirrored in `requirements.txt` for the launch scripts. Run `pip install -e .` or `pip install -r requirements.txt` directly — no manual supplement needed.
 
 ---
 
@@ -68,54 +68,82 @@ Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itse
 
 ### Prerequisites
 
-- Python 3.10 (project `pyproject.toml` requires `requires-python = ">=3.10"`)
-- Node.js 18+ (for frontend dev, Vite 8 required)
-- Redis 7+ (token revocation + event bus)
-- Docker & Docker Compose (recommended)
+- Python 3.10+ (launch scripts auto-detect 3.11/3.12/3.13)
+- Node.js 18+ (for frontend build, Vite required)
+- Docker (frontend container + Redis container; backend runs on the host)
 
-### Option 1: Docker (Recommended)
+> **Architecture note**: `docker compose` only manages the frontend (static hosting) and Redis containers. The **backend FastAPI process runs on the host** (started via `python -m channels.websocket.app_factory`). The scripts below orchestrate all three parts.
 
-```bash
-# Clone the repository
-git clone https://github.com/AI-agent-system/Agent-os.git
-# Or Gitee mirror
-# git clone https://gitee.com/agentos/agent-os.git
+### Option 1: Windows One-Click (Recommended)
 
-cd Agent-os
+```bat
+:: 1. Configure environment
+copy .env.example .env
+::    Edit .env and fill in your LLM API keys (see config/models/llm.yaml)
 
-# Copy environment template
-cp .env.example .env
-# Edit .env and fill in your LLM API keys (see config/models/llm.yaml)
+:: 2. Configure Docker environment first (WSL2 + docker-ce, replaces Docker Desktop)
+::    Skip if Docker Desktop is already installed — jump to step 3
+install_native_docker.bat
 
-# Start
-docker compose up -d
+:: 3. Start the project (installs deps + launches backend/frontend/Redis)
+start_web_cn.bat
 
-# Access Web UI
-open http://localhost:8000
+:: Stop: close the "Agent OS Backend" window, then
+docker compose down
 ```
 
-### Option 2: Local Development
+After startup:
+- Web UI: http://localhost:5289
+- Backend API: http://localhost:8988 (docs at /docs)
+
+### Option 2: Linux / macOS One-Click
 
 ```bash
-# Backend
-cd src
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-# Supplement runtime deps not declared in pyproject.toml
-pip install fastapi>=0.110 redis>=5.0
+# 1. Configure environment
+cp .env.example .env
+# Edit .env and fill in your LLM API keys
 
-# Start Redis (if not running)
-redis-server
+# 2. One-click deploy (installs Docker + Python deps + builds images + starts + health check)
+chmod +x install.sh
+./install.sh            # full deploy (bootstrap + deploy)
+# or ./install.sh --deploy   # Docker already installed, skip bootstrap
 
-# Start backend
-python run.py
+# 3. Start in dev mode (backend + frontend dev server + Redis)
+./start_web.sh
 
-# Frontend (another terminal)
+# Stop
+./stop_web.sh
+```
+
+After startup:
+- Web UI: http://localhost:5188
+- Backend API: http://localhost:8988
+
+### Option 3: Manual Development
+
+For developers who skip the scripts and need fine-grained control.
+
+```bash
+# 1. Install dependencies (either works)
+pip install -e .              # via pyproject.toml (recommended)
+pip install -r requirements.txt  # via requirements.txt
+
+# 2. Start Redis (via Docker, port aligned with .env)
+docker run -d --name agent-os-redis -p 6480:6379 \
+    redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+# 3. Start backend (FastAPI + WebSocket)
+PYTHONPATH=src python -m channels.websocket.app_factory
+# Backend runs at http://localhost:8988
+
+# 4. Start frontend (another terminal)
 cd frontend
 npm install
 npm run dev
+# Frontend dev server runs at http://localhost:5188
 ```
+
+> **About CLI mode**: `python run.py demo` (echo) or `python run.py real` (real LLM) starts a command-line interaction, not a web service.
 
 ---
 

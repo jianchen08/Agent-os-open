@@ -39,7 +39,7 @@
 | 协议 | MCP（Model Context Protocol）|
 | 部署 | Docker / Docker Compose |
 
-> **注意**：`pyproject.toml` 当前仅声明 9 个核心依赖（pyyaml / rich / aiohttp / watchdog / litellm / pydantic / jsonschema / simpleeval / python-lsp-server），FastAPI 和 Redis 在 25+ 个文件中实际 import 但未在 `pyproject.toml` 声明。安装时需手动 `pip install fastapi>=0.110 redis>=5.0`，或使用 Docker 镜像（推荐）。
+> **依赖说明**：`pyproject.toml` 声明 24 个核心运行时依赖（含 fastapi、redis、PyJWT、bcrypt、cryptography、httpx、sqlalchemy 等），并通过 `requirements.txt` 镜像供启动脚本使用。直接 `pip install -e .` 或 `pip install -r requirements.txt` 即可，无需手动补装。
 
 ---
 
@@ -72,54 +72,82 @@
 
 ### 前置要求
 
-- Python 3.10（项目 `pyproject.toml` 要求 `requires-python = ">=3.10"`）
-- Node.js 18+（前端开发，Vite 8 要求）
-- Redis 7+（token 撤销 + 事件总线）
-- Docker & Docker Compose（推荐）
+- Python 3.10+（启动脚本自动探测 3.11/3.12/3.13）
+- Node.js 18+（前端构建，Vite 要求）
+- Docker（前端容器 + Redis 容器；后端运行在宿主机）
 
-### 方式一：Docker 一键启动（推荐）
+> **架构说明**：`docker compose` 只负责前端（静态托管）和 Redis 容器，**后端 FastAPI 进程运行在宿主机**（通过 `python -m channels.websocket.app_factory` 启动）。下方脚本会自动编排这三部分。
 
-```bash
-# 克隆仓库
-git clone https://github.com/AI-agent-system/Agent-os.git
-# 或 Gitee 镜像
-# git clone https://gitee.com/agentos/agent-os.git
+### 方式一：Windows 一键启动（推荐）
 
-cd Agent-os
+```bat
+:: 1. 配置环境变量
+copy .env.example .env
+::    编辑 .env，填入 LLM API Key（参考 config/models/llm.yaml）
 
-# 复制环境变量模板
-cp .env.example .env
-# 编辑 .env，填入你的 LLM API Key（参考 config/models/llm.yaml）
+:: 2. 首次配置 Docker 环境（WSL2 + docker-ce，替代 Docker Desktop）
+::    若已装 Docker Desktop 可跳过，直接执行第 3 步
+install_native_docker.bat
 
-# 启动
-docker compose up -d
+:: 3. 启动项目（自动装依赖 + 启动后端/前端/Redis）
+start_web_cn.bat
 
-# 访问 Web UI
-open http://localhost:8000
+:: 停止：关闭弹出的 "Agent OS Backend" 窗口，再执行
+docker compose down
 ```
 
-### 方式二：本地开发模式
+启动后：
+- Web UI：http://localhost:5289
+- 后端 API：http://localhost:8988 （API 文档：/docs）
+
+### 方式二：Linux / macOS 一键启动
 
 ```bash
-# 后端
-cd src
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-# 补充 pyproject.toml 未声明的运行时依赖
-pip install fastapi>=0.110 redis>=5.0
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入 LLM API Key
 
-# 启动 Redis（如未运行）
-redis-server
+# 2. 一键部署（装 Docker + Python 依赖 + 构建镜像 + 启动 + 健康检查）
+chmod +x install.sh
+./install.sh            # 完整部署（bootstrap + deploy）
+# 或 ./install.sh --deploy   # 已装好 Docker，跳过 bootstrap 直接部署
 
-# 启动后端
-python run.py
+# 3. 开发模式启动（后端 + 前端 dev server + Redis）
+./start_web.sh
 
-# 前端（另一个终端）
+# 停止
+./stop_web.sh
+```
+
+启动后：
+- Web UI：http://localhost:5188
+- 后端 API：http://localhost:8988
+
+### 方式三：手动开发模式
+
+适合不使用脚本、需要精细控制的开发者。
+
+```bash
+# 1. 安装依赖（任选其一）
+pip install -e .              # 走 pyproject.toml（推荐）
+pip install -r requirements.txt  # 走 requirements.txt
+
+# 2. 启动 Redis（Docker 方式，端口对齐 .env）
+docker run -d --name agent-os-redis -p 6480:6379 \
+    redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+# 3. 启动后端（FastAPI + WebSocket）
+PYTHONPATH=src python -m channels.websocket.app_factory
+# 后端运行在 http://localhost:8988
+
+# 4. 启动前端（另一个终端）
 cd frontend
 npm install
 npm run dev
+# 前端开发服务器运行在 http://localhost:5188
 ```
+
+> **关于 CLI 模式**：`python run.py demo`（echo 回显）或 `python run.py real`（真实 LLM）启动的是命令行交互，不启动 Web 服务。
 
 ---
 

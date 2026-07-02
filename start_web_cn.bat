@@ -330,10 +330,27 @@ echo [OK] Python: %PYEXE%
 
 if not exist ".py_deps_installed" (
     echo [INFO] 安装 Python 依赖...
-    "%PYEXE%" -m pip install -r requirements.txt 2>nul
-    if errorlevel 1 "%PYEXE%" -m pip install -r requirements.txt --user 2>nul
-    echo. > ".py_deps_installed"
-    echo [OK] 依赖安装完成
+    set "DEPS_OK=0"
+    "%PYEXE%" -m pip install -r requirements.txt 1>nul
+    if not errorlevel 1 (
+        set "DEPS_OK=1"
+    ) else (
+        echo [WARN] requirements.txt 安装失败，尝试 --user 模式...
+        "%PYEXE%" -m pip install -r requirements.txt --user 1>nul
+        if not errorlevel 1 set "DEPS_OK=1"
+    )
+    if "!DEPS_OK!"=="0" (
+        echo [WARN] requirements.txt 不可用，回退: pip install -e .
+        "%PYEXE%" -m pip install -e . 1>nul
+        if not errorlevel 1 set "DEPS_OK=1"
+    )
+    if "!DEPS_OK!"=="1" (
+        echo. > ".py_deps_installed"
+        echo [OK] 依赖安装完成
+    ) else (
+        echo [ERROR] Python 依赖安装失败，后端可能无法启动
+        echo [INFO] 请手动执行: pip install -r requirements.txt
+    )
 ) else (
     echo [OK] Python 依赖已安装
 )

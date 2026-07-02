@@ -38,11 +38,6 @@ fi
 
 # ========== 安装 Python 依赖 ==========
 install_python_deps() {
-    if [ ! -f "$PROJECT_ROOT/requirements.txt" ]; then
-        echo "[WARN] requirements.txt 未找到，跳过依赖安装"
-        return 0
-    fi
-
     if [ -f "$PROJECT_ROOT/.py_deps_installed" ]; then
         echo "[OK] Python 依赖已安装（如需重装请删除 .py_deps_installed）"
         return 0
@@ -57,22 +52,33 @@ install_python_deps() {
 
     python -m pip install --upgrade pip --quiet 2>/dev/null
 
-    echo "[INFO] 执行: pip install -r requirements.txt"
-    if python -m pip install -r "$PROJECT_ROOT/requirements.txt" --disable-pip-version-check 2>/dev/null; then
-        touch "$PROJECT_ROOT/.py_deps_installed"
-        echo "[OK] Python 依赖安装完成"
-        return 0
+    # 优先用 requirements.txt；失败时回退 pip install -e .（走 pyproject.toml）
+    if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
+        echo "[INFO] 执行: pip install -r requirements.txt"
+        if python -m pip install -r "$PROJECT_ROOT/requirements.txt" --disable-pip-version-check 2>/dev/null; then
+            touch "$PROJECT_ROOT/.py_deps_installed"
+            echo "[OK] Python 依赖安装完成"
+            return 0
+        fi
+        echo "[WARN] requirements.txt 安装失败，尝试 --user 模式..."
+        if python -m pip install -r "$PROJECT_ROOT/requirements.txt" --user --disable-pip-version-check 2>/dev/null; then
+            touch "$PROJECT_ROOT/.py_deps_installed"
+            echo "[OK] Python 依赖安装完成（--user 模式）"
+            return 0
+        fi
     fi
 
-    echo "[WARN] 安装失败，尝试 --user 模式..."
-    if python -m pip install -r "$PROJECT_ROOT/requirements.txt" --user --disable-pip-version-check 2>/dev/null; then
+    # 回退：用 pyproject.toml 安装（与 install.sh 一致）
+    echo "[WARN] requirements.txt 不可用，回退: pip install -e ."
+    if python -m pip install -e "$PROJECT_ROOT" --disable-pip-version-check 2>/dev/null; then
         touch "$PROJECT_ROOT/.py_deps_installed"
-        echo "[OK] Python 依赖安装完成（--user 模式）"
+        echo "[OK] Python 依赖安装完成（pyproject.toml）"
         return 0
     fi
 
     echo "[WARN] Python 依赖自动安装失败"
     echo "[INFO] 请手动执行: python -m pip install -r requirements.txt"
+    echo "[INFO] 或: python -m pip install -e ."
     echo "[INFO] 将尝试继续启动..."
     return 0
 }
@@ -276,7 +282,7 @@ echo "[1/2] 启动后端服务器 (FastAPI + WebSocket :$BACKEND_PORT)..."
 export BACKEND_PORT=$BACKEND_PORT
 export REDIS_PORT=${REDIS_HOST_PORT:-6379}
 export _AO_PROJECT_ID=$PROJECT_ID
-PYTHONPATH="$PROJECT_ROOT/src" python "$PROJECT_ROOT/app_factory.py" &
+PYTHONPATH="$PROJECT_ROOT/src" python -m channels.websocket.app_factory &
 BACKEND_PID=$!
 
 # ========== 启动前端 ==========
