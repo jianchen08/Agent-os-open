@@ -60,13 +60,9 @@ export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
    * 监听 pipelineTabMap 变化，验证所有 Tab 都有有效的映射。
    * 发现孤儿 Tab（有 parentRecordId 但无 pipeline 映射）时发出警告。
    *
-   * BUG-FIX-fix_20260523_max_update_depth:
-   * 问题根因: effect 内调用 registerPipelineTab 修改了 pipelineTabMap，
-   *          而 pipelineTabMap 又在依赖数组中，形成 effect → 修改依赖 → 重触发 → 无限循环。
-   * 修复方案: 从依赖数组移除 pipelineTabMap，使用 useRef 跟踪已注册的 pipeline，
-   *          避免重复注册，打破循环。
-   * 影响范围: SubTabRouter 组件渲染稳定性
-   * 修复日期: 2026-05-23
+   * 依赖数组刻意不含 pipelineTabMap（仅含 tabs 等）：effect 内调用 registerPipelineTab
+   * 会修改 pipelineTabMap，若它也在依赖数组中会形成 effect → 修改依赖 → 重触发 → 无限循环。
+   * 改用 useRef（registeredPipelines）跟踪已注册的 pipeline，避免重复注册，打破循环。
    */
   useEffect(() => {
     for (const tab of tabs) {
@@ -135,14 +131,8 @@ export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
    * 路由失败 fallback
    *
    * 如果消息无法路由到目标 Tab（Tab 不存在或已关闭），
-   * 仅通知用户路由失败，不再写入主 Tab 避免跨管道污染。
-   *
-   * BUG-FIX-fix_20260617_remove_cross_pipeline_fallback:
-   * 问题根因: 原代码将无法路由的消息写入主 Tab，子管道消息污染主管道，
-   *           且主管道可能已有该消息（通过其他路径），造成重复渲染。
-   * 修复方案: 删除 addMessageToTab 调用，仅保留用户通知。
-   * 影响范围: 消息路由失败处理
-   * 修复日期: 2026-06-17
+   * 仅通知用户路由失败，不写入主 Tab——否则子管道消息会污染主管道，
+   * 且主管道可能已有该消息（通过其他路径）造成重复渲染。
    */
   const fallbackToMainTab = useCallback(
     (message: any, targetTabId: string) => {
