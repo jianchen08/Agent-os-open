@@ -38,7 +38,7 @@
 - **三种注入方式** —— FULL（全量）/ RETRIEVAL（按需）/ SUMMARY（摘要）
 
 #### 复盘系统
-- **6 层级架构** —— 设计文档（972 行）+ Agent 配置 + 工具入口 + 复盘引擎 + 服务编排 + 清理引擎
+- **6 层级架构** —— Agent 配置 / 工具入口 / 复盘引擎 / 服务编排 / 清理引擎 / 设计文档
 - **双触发机制** —— 阈值触发（500 条记录）/ 间隔触发（7 天）/ 手动触发（agent 或用户）
 - **双路径降级** —— LLM 深度复盘管道优先，失败时降级到 ReviewEngine
 - **实施位置** —— `src/memory/maintenance/{review_engine,service,cleanup_engine}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml` + `docs/design/复盘系统设计.md`
