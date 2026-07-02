@@ -363,17 +363,23 @@ def register_core_tools(  # noqa: PLR0912,PLR0915
             if not tool_class:
                 continue
 
-            if skip_existing and registry.has(tool_name):
+            # 双重检查：定义存在且 handler 也存在才跳过。
+            # 若只查 has()，处于"有定义无 handler"状态（动态加载器会注册无 handler 的定义）
+            # 的工具会被错误跳过，导致执行时 "Tool not found"。
+            if skip_existing and registry.has(tool_name) and registry.get_handler(tool_name) is not None:
                 skipped.append(tool_name)
-                logger.debug(f"[核心工具注册] 工具已存在，跳过: {tool_name}")
+                logger.debug(f"[核心工具注册] 工具已存在且含handler，跳过: {tool_name}")
                 continue
 
             try:
                 tool_instance = tool_class()
                 tool_def = tool_instance.get_tool_definition()
+                # overwrite=True：工具可能已存在"无 handler 的定义"（动态加载器注册），
+                # 需覆盖以补上 handler，否则 register_with_handler 会因定义已存在而抛错。
                 name = registry.register_with_handler(
                     tool=tool_def,
                     handler=tool_instance.execute,
+                    overwrite=True,
                 )
                 names.append(name)
                 logger.info(f"[核心工具注册] {tool_name} 已注册（含handler），ID: {name}")

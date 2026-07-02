@@ -41,8 +41,19 @@ echo.
 echo [2/5] Install docker-ce inside WSL2 Ubuntu (root, no password)...
 echo.
 
+REM Resolve this directory's WSL path (no hardcoded path)
+set "WIN_DIR=%~dp0"
+set "WIN_DIR=%WIN_DIR:\=/%"
+for /f "delims=" %%p in ('wsl -d Ubuntu -u root -- wslpath -u "%WIN_DIR%" 2^>nul') do set "WSL_SCRIPT_DIR=%%p"
+if "!WSL_SCRIPT_DIR!"=="" (
+    echo [ERROR] Cannot resolve WSL path for script directory.
+    pause
+    exit /b 1
+)
+echo [INFO] Script dir in WSL: !WSL_SCRIPT_DIR!
+
 :run_wsl_install
-wsl -d Ubuntu -u root -- bash -c "cd /mnt/d/myproject/container_224042d3b925 && bash install_wsl_docker.sh"
+wsl -d Ubuntu -u root -- bash -c "cd '!WSL_SCRIPT_DIR!' && bash install_wsl_docker.sh"
 set "WSL_RC=!errorlevel!"
 
 REM WSL exit code is unreliable for completed scripts; check by content.

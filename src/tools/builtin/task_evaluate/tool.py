@@ -759,7 +759,7 @@ class TaskEvaluateTool(BuiltinTool):
         )
 
     async def _save_task(self, task_service: Any, task: Any) -> None:
-        """保存任务元数据更新（async，因 save_task 是 async）。"""
+        """保存任务元数据更新（async，因 save_task 是 async）。
 
         Args:
             task_service: TaskService 实例

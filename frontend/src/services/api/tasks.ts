@@ -240,7 +240,7 @@ export async function createRootTask(payload: {
   task_scope: 'container' | 'non_container'
   target_id?: string
   workspace?: string
-  isolation_level?: string
+  isolation_level?: '' | 'isolated' | 'non_isolated'
   inherit?: Record<string, unknown>
   thread_id: string
   parent_task_id?: string

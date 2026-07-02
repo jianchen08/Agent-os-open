@@ -7,8 +7,8 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
-[![Gitee Mirror](https://img.shields.io/badge/Gitee-Mirror-red.svg)](https://gitee.com)
-[![GitHub Primary](https://img.shields.io/badge/GitHub-Primary-black.svg)](https://github.com)
+[![Gitee Mirror](https://img.shields.io/badge/Gitee-Mirror-red.svg)](https://gitee.com/agentos/agent-os)
+[![GitHub Primary](https://img.shields.io/badge/GitHub-Primary-black.svg)](https://github.com/AI-agent-system/Agent-os)
 
 [中文](./README.md) | [English](#)
 

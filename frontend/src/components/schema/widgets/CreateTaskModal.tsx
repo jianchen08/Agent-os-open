@@ -27,10 +27,9 @@ interface CreateTaskModalProps {
 
 /** 隔离模式选项 */
 const ISOLATION_LEVELS = [
-  { value: '', label: '默认' },
-  { value: 'plain', label: '普通（共享主工作区）' },
-  { value: 'worktree', label: 'Git Worktree 隔离' },
-  { value: 'shared', label: '共享' },
+  { value: '', label: '默认（隔离）' },
+  { value: 'isolated', label: '隔离' },
+  { value: 'non_isolated', label: '非隔离' },
 ] as const
 
 /** 表单字段 input 通用样式（与 SessionEditModal 一致） */
