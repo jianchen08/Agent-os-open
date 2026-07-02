@@ -712,14 +712,9 @@ async def get_monitoring_tasks(
 ) -> dict[str, Any]:
     """获取监控任务列表，合并 MemoryStore 和 TaskStorage 数据源。
 
-    BUG-FIX-fix_20260523_monitoring_tasks_empty:
-    问题根因: 原实现是占位代码，始终返回空列表 {"items": [], "total": 0}，
-             导致前端 DebugTasksPage 和 MonitoringPage 任务列表不显示。
-    修复方案: 参照 routes_tasks.py 的 list_tasks 端点，从 MemoryStore 和
-              TaskStorage 两个数据源合并任务数据，支持 page/page_size 分页
-              和 status 筛选，返回前端 monitoring.ts TaskInfo 格式的数据。
-    影响范围: 前端 DebugTasksPage 和 MonitoringPage 任务列表显示。
-    修复日期: 2026-05-23
+    参照 routes_tasks.py 的 list_tasks 端点，从 MemoryStore 和 TaskStorage 两个数据源
+    合并任务数据，支持 page/page_size 分页和 status 筛选，返回前端 monitoring.ts
+    TaskInfo 格式的数据，供前端 DebugTasksPage 和 MonitoringPage 任务列表显示。
 
     Args:
         page: 页码（从1开始）

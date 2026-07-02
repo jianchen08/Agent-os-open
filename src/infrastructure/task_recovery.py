@@ -155,10 +155,8 @@ class TaskRecoveryMixin:
                                     result: dict | None = None) -> None:
         """评估通过后统一完成入口：worktree 模式先合并再 complete_evaluation。
 
-        BUG-FIX-fix_20260618_rerun_skip_merge:
-        原先 _rerun_evaluation 评估通过后直接 complete_evaluation(passed=True)，
-        完全绕过合并门控，导致走恢复路径的 worktree 任务产出永不合并。
-        现统一调用 lifecycle.merge_worktree_before_complete，合并失败则标记 failed。
+        评估通过后统一调用 lifecycle.merge_worktree_before_complete，合并失败则标记
+        failed，避免走恢复路径的 worktree 任务产出永不合并。
 
         Args:
             task_id: 任务 ID

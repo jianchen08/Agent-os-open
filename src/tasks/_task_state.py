@@ -247,10 +247,8 @@ class _TaskStateMixin:
 
         task.status = TaskStatus.RUNNING
         task.updated_at = datetime.now().isoformat()
-        # BUG-FIX-fix_20260630_started_at_dead_field:
-        # started_at 此前从不赋值（全仓零赋值点），导致任务级耗时观测失效、
-        # 僵尸任务无时间戳依据。首次启动时记录起点；幂等（已存在则不覆盖，
-        # 避免 pending↔running 反复触发抹掉真实起点）。
+        # 首次启动时记录 started_at 起点（用于任务级耗时观测、僵尸任务判定）；
+        # 幂等：已存在则不覆盖，避免 pending↔running 反复触发抹掉真实起点。
         if not task.started_at:
             task.started_at = datetime.now().isoformat()
         self._storage.save(task)

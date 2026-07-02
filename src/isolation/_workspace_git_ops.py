@@ -149,9 +149,8 @@ class _GitOpsMixin:
     def _resolve_main_branch(self, cwd: Path) -> str:
         """动态检测仓库的主分支名，优先尝试 main，回退到实际 HEAD 所在分支。
 
-        BUG-FIX-fix_20260425_main_branch:
-        git init 在不同平台/版本下默认分支名不同（main 或 master），
-        硬编码 'main' 会导致 checkout/merge 失败。
+        不能硬编码 'main'：git init 在不同平台/版本下默认分支名不同（main 或 master），
+        硬编码会导致 checkout/merge 失败。
         """
         rc, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
         if rc == 0 and out.strip():
@@ -184,11 +183,9 @@ class _GitOpsMixin:
     def _record_main_branch(self):
         """记录项目根目录的主分支，用于检测外部分支切换。
 
-        BUG-FIX-fix_20260512_worktree_base:
-        原逻辑只记录当前 HEAD 分支名，不验证是否为真正的主分支。
-        当用户在 feature 分支上启动任务时，worktree 会基于 feature 分支创建，
-        合并时 _resolve_main_branch 却硬找 main → 分支不匹配 → 降级为 copy_merge
-        → 旧文件覆盖新文件。现增加非主分支警告。
+        记录当前 HEAD 分支名并验证是否为真正的主分支：若用户在 feature 分支上启动
+        任务，worktree 会基于 feature 分支创建，合并时分支不匹配会降级为 copy_merge
+        导致旧文件覆盖新文件，因此对非主分支情况发出警告。
         """
         try:
             rc, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=self._base_path)
@@ -297,12 +294,9 @@ class _GitOpsMixin:
     def _git_add_commit_if_dirty(self, cwd: Path, message: str) -> str | None:
         """暂存并提交变更（如果有），返回 commit hash 或 None。
 
-        BUG-FIX-fix_20260526_slow_git_add:
-        问题根因: 原代码无条件执行 git add -A（遍历整个项目添加所有文件到 index），
-          即使项目无任何变更也要等待 add 完成，大项目耗时 5-15s。
-        修复方案: 先用 git status --porcelain 检查是否有变更，无变更直接返回。
-          有变更时才执行 git add -A + commit。
-        影响范围: 所有触发 _git_add_commit_if_dirty 的场景（任务启动前 auto-save）。
+        先用 git status --porcelain 检查是否有变更，无变更直接返回，避免无条件
+        执行 git add -A（遍历整个项目添加所有文件到 index，大项目耗时 5-15s）。
+        有变更时才执行 git add -A + commit。
         """
         self._remove_index_lock(cwd)
 
@@ -340,13 +334,10 @@ class _GitOpsMixin:
     def _autosave_before_worktree(self, cwd: Path, message: str, task_id: str) -> None:
         """worktree 创建前的 auto-save，提交失败时中断以保护数据。
 
-        BUG-FIX-fix_20260627_autosave_silent_loss:
-        `_git_add_commit_if_dirty` 在 git add/commit 失败时返回 None，
-        与"无变更"无法区分；auto-save 调用方曾忽略返回值静默继续建 worktree。
-        一旦脏改动未能提交，worktree 会基于旧 HEAD 创建（不含这些改动），
-        合并回 project_root 后这些改动就永久丢失。
-        此处 auto-save 后强制校验工作区已干净：残留已跟踪脏改动即视为致命错误，
-        中断 worktree 创建——宁可任务失败，也不丢数据。
+        auto-save 后强制校验工作区已干净：`_git_add_commit_if_dirty` 在 git add/commit
+        失败时返回 None，与"无变更"无法区分；若脏改动未能提交，worktree 会基于旧 HEAD
+        创建（不含这些改动），合并回 project_root 后这些改动就永久丢失。因此残留已跟踪
+        脏改动即视为致命错误，中断 worktree 创建——宁可任务失败，也不丢数据。
         """
         self._git_add_commit_if_dirty(cwd, message)
         # 只校验已跟踪文件（-uno 忽略 untracked）：已跟踪文件修改丢失才是
@@ -545,11 +536,9 @@ class _GitOpsMixin:
     def _setup_sparse_worktree(self, ws_dir: Path, project_root: Path, branch: str):
         """为大项目设置 sparse-checkout worktree，排除目录通过符号链接关联（Windows 用 junction point 降级）
 
-        BUG-FIX-fix_20260529_sparse_gitignore:
-        白名单必须包含 .gitignore 等基础设施文件。
-        如果 sparse checkout 不包含 .gitignore，worktree 分支上就没有这个文件，
-        git merge 时会把 project_root 的 .gitignore 当作"被删除"处理，
-        导致 .gitignore 丢失，后续 git add -A 会跟踪 data/ 等本应排除的目录。
+        白名单必须包含 .gitignore 等基础设施文件：如果 sparse checkout 不包含 .gitignore，
+        worktree 分支上就没有这个文件，git merge 时会把 project_root 的 .gitignore 当作
+        "被删除"处理，导致 .gitignore 丢失，后续 git add -A 会跟踪 data/ 等本应排除的目录。
         """
         self._run_git("worktree", "add", "--no-checkout", "-b", branch, str(ws_dir), cwd=project_root)
         self._run_git("sparse-checkout", "init", "--cone", cwd=ws_dir)
@@ -598,9 +587,8 @@ class _GitOpsMixin:
         return ("existing_project" if has_files else "new_project"), str(path)
 
     def _find_container_workspace(self, task_id: str) -> str | None:
-        """查找父容器任务的工作空间路径
+        """查找父容器任务的工作空间路径。
 
-        BUG-FIX-fix_20260425_container_workspace_init:
         先尝试 restore_ws_meta 从持久化恢复，再查找。
         """
         try:

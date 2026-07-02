@@ -24,9 +24,8 @@ def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
     try:
         return loop.run_until_complete(func(tool_args))
     finally:
-        # 关键修复点：不调用 _cancel_all_tasks()
-        # 工具工具返回后，嵌套管道引擎应继续独立运行
-        # 它们有自己的生命周期管理（通过 asyncio.to_thread 独立事件循环）
+        # 刻意不调用 _cancel_all_tasks()：工具返回后，嵌套管道引擎应继续独立运行，
+        # 它们有自己的生命周期管理（通过 asyncio.to_thread 独立事件循环）。
         loop.close()
 
 

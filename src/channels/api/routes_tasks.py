@@ -952,15 +952,7 @@ async def delete_task(
 
 ) -> dict[str, str]:
 
-    """删除指定任务，根据任务类型执行不同策略。
-
-
-
-    BUG-FIX-fix_20260514_task_delete_pipeline:
-
-    问题根因: 删除任务时未取消运行中的管道，且未区分容器子任务与根任务
-
-    修复方案:
+    """删除指定任务，根据任务类型执行不同策略：取消运行中的管道，并区分容器子任务与根任务。
 
       - 容器任务: 软删除（标记取消，保留数据）
 
@@ -1758,27 +1750,7 @@ async def cancel_task(
 
     """取消指定任务，同时取消运行中的管道并级联取消所有子任务。
 
-
-
-    BUG-FIX-fix_20260522_cancel_task_cascade:
-
-    问题根因: REST API 层缺少 cancel 端点，前端无法通过 HTTP 接口取消任务。
-
-    修复方案: 参照 pause_task / resume_task 端点的实现模式，新增 cancel 端点，
-
-              执行三步操作：
-
-              1. 将任务状态设为 failed 并记录取消原因
-
-              2. 取消该任务关联的 PipelineEngine 协程（停止 LLM 调用）
-
-              3. 级联取消所有子任务
-
-    影响范围: 任务管理 API，取消功能端点。
-
-    修复日期: 2026-05-22
-
-
+    实现模式参照 pause_task / resume_task 端点。
 
     执行三步操作：
 
@@ -1787,8 +1759,6 @@ async def cancel_task(
     2. 取消该任务关联的 PipelineEngine 协程（真正停止 LLM 调用）
 
     3. 级联取消所有子任务，避免子任务管道继续执行
-
-
 
     Args:
 

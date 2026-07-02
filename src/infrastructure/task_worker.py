@@ -195,12 +195,9 @@ class TaskWorker(
     def _init_lifecycle(self) -> None:
         """初始化 WorkspaceLifecycleManager 实例并注册到 services
 
-        BUG-FIX-fix_20260422_lifecycle_not_registered:
-        问题根因: WorkspaceLifecycleManager 从未被实例化，task_worker 中
-                  lifecycle 始终为 None，所有生命周期钩子（worktree 创建、
-                  合并、清理）被静默跳过，Agent 在空目录中无法读取项目文件。
-        修复方案: 在 TaskWorker.start() 中自行创建 lifecycle 实例，
-                  不依赖外部 services 注入，lifecycle 是 TaskWorker 自身的职责。
+        在 TaskWorker.start() 中自行创建 lifecycle 实例，不依赖外部 services 注入
+        （lifecycle 是 TaskWorker 自身的职责），确保所有生命周期钩子（worktree 创建、
+        合并、清理）能被正常执行。
         """
         try:
             from pathlib import Path as _Path  # noqa: PLC0415

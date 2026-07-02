@@ -75,12 +75,11 @@ class ErrorCheckPlugin(IOutputPlugin):
         """
         self._config = config or {}
         self._max_retries = self._config.get("max_retries", 3)
-        # BUG-FIX-fix_20260629_transient_no_recovery:
-        # 旧实现临时错误（network/timeout/503/429）只重试 3 次，耗尽后产 `wait`
-        # 信号挂起等"恢复"，但 wait_event 没有任何主动唤醒源——上游恢复后没人
-        # 来 set，整条 pipeline 死挂 8+ 小时。新策略：临时错误单独计数，重试
-        # 10 次（覆盖一般上游抖动 ~10-20 分钟），仍失败则直接 failed，让父任务
-        # 走正常的 child_terminal 通知 → retry / 上抛失败链。
+        # 临时错误（network/timeout/503/429）单独计数并重试：临时错误重试上限
+        # 高于一般错误（默认 10 次，覆盖一般上游抖动 ~10-20 分钟），仍失败则直接
+        # failed，让父任务走正常的 child_terminal 通知 → retry / 上抛失败链。
+        # 不采用"耗尽后挂起等恢复"的策略，否则 wait_event 没有主动唤醒源，
+        # 上游恢复后无人 set 会导致整条 pipeline 死挂。
         self._transient_max_retries = self._config.get("transient_max_retries", 10)
         self._check_empty = self._config.get("check_empty_response", True)
         self._check_format = self._config.get("check_format_error", True)
@@ -190,13 +189,13 @@ class ErrorCheckPlugin(IOutputPlugin):
         - tool_missing: 工具不存在或未注册
         - 其他: core_error（网络/超时/认证等）
 
-        错误处理分层（BUG-FIX-fix_20260629_transient_no_recovery）：
+        错误处理分层：
         - **临时错误**（service_down / rate_limit / network / server_error）：
           走独立计数 `retry.transient_count`，next_llm 重试 _transient_max_retries
           次（默认 10）。耗尽后 **直接 failed**（route=end），由 task 失败链
-          通知父任务。不再 route=wait——wait 没有主动唤醒源，会无限挂起。
+          通知父任务。不走 route=wait——wait 没有主动唤醒源，会无限挂起。
         - **业务可重试错误**（empty_response / format_error 等）：
-          走 _max_retries（默认 3）的旧路径，next_llm 重试。
+          走 _max_retries（默认 3），next_llm 重试。
         - **永久错误**（auth/quota/bad_request/strategy_error）：
           保持原 end 行为，这些是 LLM 无法自行恢复的。
 

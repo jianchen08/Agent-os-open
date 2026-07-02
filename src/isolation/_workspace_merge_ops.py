@@ -173,13 +173,10 @@ class _MergeOpsMixin:
     ):
         """清理 worktree：删 worktree → 条件打 tag → 删分支
 
-        BUG-FIX-fix_20260628_cleanup_silent_skip:
-        问题根因: 原逻辑用 `if project_root.exists():` 包裹整个清理块，
-          ws_meta.project_root 为空/路径不对时，worktree remove 与 branch -D
-          被静默跳过，无任何日志 —— worktree 目录与 task 分支就此泄漏堆积。
-        修复方案: project_root 缺失时显式 warning，并用 worktree 目录自身反查
-          仓库根（git -C <workspace> rev-parse --show-toplevel）兜底；
-          仍定位不到仓库才放弃，并记录错误。绝不静默放过。
+        project_root 缺失时不能静默跳过清理，否则 worktree 目录与 task 分支会泄漏堆积。
+        因此缺失时显式 warning，并用 worktree 目录自身反查仓库根
+        （git -C <workspace> rev-parse --show-toplevel）兜底；仍定位不到仓库才放弃，
+        并记录错误。
         """
         project_root = Path(ws_meta.get("project_root", ""))
         branch = ws_meta.get("branch", "")

@@ -886,13 +886,11 @@ class TaskTool(BuiltinTool):
             show_all = inputs.get("show_all", False)
 
 
-            # (list_empty)：原实现先按 limit 截断再过滤，且 list_all 未启用
+            # 列表顺序：先拉全量 → 过滤 → 排序（list_all 已做）→ 末端截断。
 
-            # reverse，导致拿到的是「最老的 N 条」而非「最新的 N 条」；当当前 session
+            # 不能先按 limit 截断再过滤：那样会拿到「最老的 N 条」而非「最新的 N 条」，
 
-            # 的任务集中在新创建批次时，截断后被全部过滤掉，返回空列表。
-
-            # 正确顺序：拉全量 → 过滤 → 排序（list_all 已做）→ 末端截断。
+            # 当当前 session 的任务集中在新创建批次时，截断后会被全部过滤掉返回空列表。
 
             tasks = await self._list_all_tasks_sorted()
 
@@ -1888,7 +1886,7 @@ class TaskTool(BuiltinTool):
             )
 
 
-        # 用 task_scope 字段判断容器（修复：不再用 list_subtasks 是否为空判断）
+        # 用 task_scope 字段判断是否为容器任务（而非用 list_subtasks 是否为空判断）。
 
         is_container = (task.metadata or {}).get("task_scope") == "container"
 

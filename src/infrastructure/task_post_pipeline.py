@@ -88,9 +88,8 @@ class TaskPostPipelineMixin:
     ) -> None:
         """有输出 → 转为 evaluating 并触发评估。
 
-        BUG-FIX-fix_20260510_evaluating_stuck:
-        move_to_evaluating 成功后，调用 _rerun_evaluation
-        触发实际评估执行（复用系统重启恢复的逻辑）。
+        move_to_evaluating 成功后，调用 _rerun_evaluation 触发实际评估执行
+        （复用系统重启恢复的逻辑），确保任务不会卡在 evaluating 状态。
         """
         logger.info(
             "TaskWorker: task %s still RUNNING after pipeline exit, "

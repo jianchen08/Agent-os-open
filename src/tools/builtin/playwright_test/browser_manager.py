@@ -227,7 +227,7 @@ class BrowserManager:
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
-            # === 关键修复：启动后立即进行 CDP 健康检查 ===
+            # === 启动后立即进行 CDP 健康检查 ===
             # 导航到 about:blank 验证 CDP transport 是否真正可用。
             # 如果浏览器进程因缺少系统库等原因立即崩溃，
             # page.goto() 会抛出 NoneType send 错误，在此处捕获可给出明确诊断。
