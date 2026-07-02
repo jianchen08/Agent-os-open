@@ -219,6 +219,8 @@ export const API_ENDPOINTS = {
     LIST: '/api/v1/tasks',
     /** 创建任务 */
     CREATE: '/api/v1/tasks',
+    /** 手动创建根任务（用户以 L1 身份发起，为 L2+ 提供 task 上下文） */
+    CREATE_ROOT: '/api/v1/tasks/root',
     /** 获取任务详情 */
     GET: (id: string) => `/api/v1/tasks/${id}`,
     /** 更新任务 */

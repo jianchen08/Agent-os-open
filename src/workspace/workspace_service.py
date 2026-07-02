@@ -201,7 +201,7 @@ class WorkspaceService:
             return []
 
         for entry in entries:
-            if entry == "__pycache__":
+            if entry == "__pycache__" or entry.startswith("."):
                 continue
 
             stem = entry.split(".")[0].upper()

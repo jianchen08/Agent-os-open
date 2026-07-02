@@ -19,10 +19,13 @@ import {
   MessageSquare,
   ExternalLink,
   ArrowUpDown,
+  Plus,
 } from 'lucide-react'
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask } from '@/services/api/tasks'
+import { Button } from '@/components/ui/button'
+import { CreateTaskModal } from './CreateTaskModal'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
@@ -454,6 +457,9 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     setInternalRefresh((prev) => prev + 1)
   }, [])
 
+  /** 新建根任务模态框开关 */
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
+
   /** 右键上下文菜单状态 */
   const [contextMenu, setContextMenu] = useState<{
     x: number
@@ -859,11 +865,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   if (effectiveData.length === 0 && !isLoadingRemote) {
     return (
       <div className="w-full rounded-lg border">
-        {title && (
-          <div className="border-b bg-muted/50 px-4 py-2">
-            <h3 className="text-foreground text-sm font-semibold">{title}</h3>
-          </div>
-        )}
         <div className="flex flex-col items-center justify-center p-8">
           <FolderTree className="text-muted-foreground mb-3 h-12 w-12" />
           <p className="text-muted-foreground text-sm">暂无树形数据</p>
@@ -875,32 +876,36 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   return (
     <div className="w-full rounded-lg border">
-      {/* 标题栏 */}
-      {title && (
-        <div className="border-b bg-muted/50 px-4 py-2">
-          <h3 className="text-foreground text-sm font-semibold">{title}</h3>
-        </div>
-      )}
-
       {/* 搜索框 + 排序 */}
 
       {/* 状态筛选器 */}
       {showStatusFilter && (
         <div className="border-b px-3 py-2">
-          <div className="flex flex-wrap items-center gap-1">
-            {STATUS_FILTER_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => setStatusFilter(opt.value)}
-                className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                  statusFilter === opt.value
-                    ? 'bg-primary/15 text-primary font-medium'
-                    : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center justify-between gap-1">
+            <div className="flex flex-wrap items-center gap-1">
+              {STATUS_FILTER_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setStatusFilter(opt.value)}
+                  className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+                    statusFilter === opt.value
+                      ? 'bg-primary/15 text-primary font-medium'
+                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => setIsCreateTaskOpen(true)}
+              title="新建根任务"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              新建任务
+            </Button>
           </div>
         </div>
       )}
@@ -1382,6 +1387,13 @@ function TreeNode({
         </div>
       )}
 
+      {/* 新建根任务模态框 */}
+      <CreateTaskModal
+        isOpen={isCreateTaskOpen}
+        onClose={() => setIsCreateTaskOpen(false)}
+        sessionId={sessionId}
+        onCreated={triggerRefresh}
+      />
     </div>
   )
 

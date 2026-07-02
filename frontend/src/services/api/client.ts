@@ -14,7 +14,6 @@ import type { ApiError } from '../../types/api'
 
 /** 清除认证信息并重定向到登录页 增加停止自生长闭环轮询 */
 async function clearAuthAndRedirect(): Promise<void> {
- // await 销毁自生长闭环再清理认证
   try {
     const { destroyGrowthLoop } = await import('../modules/GrowthLoop')
     destroyGrowthLoop()

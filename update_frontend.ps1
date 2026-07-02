@@ -1,4 +1,4 @@
-# Frontend update script: check if src changed, rebuild and inject into container
+﻿# Frontend update script: check if src changed, rebuild and inject into container
 # Called by start_web.bat to avoid bat quoting issues
 # Exit code: 0 = success (no update or updated), 1 = error
 
@@ -87,20 +87,34 @@ try {
     # Use npm.cmd (not npm.ps1) to avoid PowerShell wrapping node stderr as errors
     $npmCmd = 'npm.cmd'
 
-    if (-not (Test-Path 'node_modules')) {
-        Write-Host '[INFO] Installing frontend dependencies...'
+    # BUG-FIX-20260702_partial_node_modules:
+    # 问题根因: node_modules 目录可能存在但不完整（如 .bin/vite 链接缺失），
+    #   仅 Test-Path 'node_modules' 为真就跳过安装，导致后续 npm run build 找不到
+    #   vite 而失败。原逻辑对此失败 exit 0 静默跳过，但仍误写 hash 标记，
+    #   造成"指纹说已更新、dist 实际是旧产物"的死锁——每次重启都跳过重建。
+    # 修复方案: 用 vite 可执行文件的存在作为依赖完整性的权威信号；缺失即重装。
+    $viteBin = Join-Path $frontendDir 'node_modules\.bin\vite.cmd'
+    if (-not (Test-Path 'node_modules') -or -not (Test-Path $viteBin)) {
+        Write-Host '[INFO] Installing frontend dependencies (node_modules missing or incomplete)...'
         cmd /c "$npmCmd install 2>&1" | Out-Host
     }
 
     # 4. Build
     Write-Host '[INFO] Building frontend...'
-    $buildOutput = cmd /c "$npmCmd run build 2>&1"
-    $buildOutput | Out-Host
-    # Check if dist was actually produced (authoritative success signal)
     $distDir = Join-Path $frontendDir 'dist'
-    if (-not (Test-Path $distDir)) {
-        Write-Host '[WARN] Frontend build failed (no dist output), using old code in image'
-        exit 0
+
+    # BUG-FIX-20260702_build_failure_silent_exit:
+    # 问题根因: 原逻辑用 Test-Path $distDir(旧产物存在)当作"构建成功"信号,
+    #   构建失败时旧 dist 仍在 → 跳过失败分支 → 误把新 hash 写进标记文件。
+    #   下次启动指纹"一致"永不重建，前端改动永久不生效。
+    # 修复方案: 以 npm run build 的真实退出码为权威成功信号；失败则不写 hash、
+    #   明确报错退出（exit 1），让用户感知并手动修复，杜绝静默死锁。
+    cmd /c "$npmCmd run build 2>&1" | Out-Host
+    $buildExit = $LASTEXITCODE
+    if ($buildExit -ne 0 -or -not (Test-Path $distDir)) {
+        Write-Host "[ERROR] Frontend build failed (exit=$buildExit). NOT updating hash marker to avoid stale-dist lock."
+        Write-Host '[ERROR] 容器将继续使用旧前端代码。请修复构建错误后重新运行。'
+        exit 1
     }
 
     # 5. Inject into container (container must be running at this point)

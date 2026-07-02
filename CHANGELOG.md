@@ -83,10 +83,9 @@
 
 - 📖 [README.md](README.md) / [README_EN.md](README_EN.md)
 - 🏗️ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- 🗺️ [docs/ROADMAP.md](docs/ROADMAP.md)
+- 🗺️ [ROADMAP.md](ROADMAP.md)
 - 🤝 [CONTRIBUTING.md](CONTRIBUTING.md)
 - 📜 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- 🩞 [gitee_sync_guide.md](gitee_sync_guide.md)
 
 ### ⚠️ 已知限制
 
@@ -97,7 +96,7 @@
 - 部分 IM 适配器（飞书、企微）需要用户自行申请应用凭证
 - 文档的英文翻译覆盖率约 70%
 
-详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+详见 [ROADMAP.md](ROADMAP.md)。
 
 ### 🙏 致谢
 
@@ -111,5 +110,5 @@
 - **次版本号**：向下兼容的功能新增
 - **修订号**：向下兼容的 Bug 修复
 
-[未发布]: https://github.com/lingxi-agentos/lingxi-agentos/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/lingxi-agentos/lingxi-agentos/releases/tag/v0.1.0
+[未发布]: https://github.com/AI-agent-system/Agent-os/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/AI-agent-system/Agent-os/releases/tag/v0.1.0

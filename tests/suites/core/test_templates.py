@@ -3,8 +3,7 @@
 覆盖：
 1. types.py — 数据类创建、默认值、枚举值
 2. loader.py — Markdown 解析、元数据提取、占位符提取、章节解析、评估维度
-3. renderer.py — 占位符替换、缺失变量处理、HTML 注释保留
-4. registry.py — 注册/查找/筛选/批量加载
+3. registry.py — 注册/查找/筛选/批量加载
 """
 
 import tempfile
@@ -16,7 +15,6 @@ from templates import (
     EvaluationDimension,
     TemplateLoader,
     TemplateRegistry,
-    TemplateRenderer,
     TemplateSection,
     TemplateSpec,
     TemplateType,
@@ -315,99 +313,6 @@ class TestTemplateLoader:
         assert placeholders.count("name") == 1
         assert len(placeholders) == 2
 
-
-# ============================================================
-# renderer.py 测试
-# ============================================================
-
-
-class TestTemplateRenderer:
-    """TemplateRenderer 测试。"""
-
-    @pytest.fixture
-    def renderer(self) -> TemplateRenderer:
-        """创建渲染器实例。"""
-        return TemplateRenderer()
-
-    @pytest.fixture
-    def simple_spec(self) -> TemplateSpec:
-        """简单模板规格。"""
-        return TemplateSpec(
-            template_id="simple",
-            name="简单模板",
-            raw_content="# {title}\n\nHello, {name}!",
-            placeholders=["title", "name"],
-        )
-
-    def test_render_basic(
-        self, renderer: TemplateRenderer, simple_spec: TemplateSpec
-    ) -> None:
-        """基本占位符替换。"""
-        result = renderer.render(simple_spec, {"title": "测试", "name": "世界"})
-        assert "# 测试" in result
-        assert "Hello, 世界!" in result
-
-    def test_render_missing_variable_keeps_placeholder(
-        self, renderer: TemplateRenderer, simple_spec: TemplateSpec
-    ) -> None:
-        """缺失变量时保留占位符（非严格模式）。"""
-        result = renderer.render(simple_spec, {"title": "测试"})
-        assert "{name}" in result
-
-    def test_render_missing_variable_strict_raises(
-        self, renderer: TemplateRenderer, simple_spec: TemplateSpec
-    ) -> None:
-        """严格模式下缺失变量抛出 KeyError。"""
-        with pytest.raises(KeyError, match="缺失模板变量"):
-            renderer.render(simple_spec, {"title": "测试"}, strict=True)
-
-    def test_render_preserves_html_comments(
-        self, renderer: TemplateRenderer
-    ) -> None:
-        """渲染保留 HTML 注释块。"""
-        spec = TemplateSpec(
-            template_id="comment_test",
-            name="注释测试",
-            raw_content="<!-- {name} -->\n# {title}",
-            placeholders=["name", "title"],
-        )
-        result = renderer.render(spec, {"title": "测试", "name": "不应替换"})
-        # HTML 注释块内的占位符不应被替换
-        assert "{name}" in result
-        assert "# 测试" in result
-
-    def test_render_empty_variables(
-        self, renderer: TemplateRenderer
-    ) -> None:
-        """空变量字典保留所有占位符。"""
-        spec = TemplateSpec(
-            template_id="empty",
-            name="空测试",
-            raw_content="{a} and {b}",
-            placeholders=["a", "b"],
-        )
-        result = renderer.render(spec, {})
-        assert "{a}" in result
-        assert "{b}" in result
-
-    def test_render_research_template(
-        self, renderer: TemplateRenderer
-    ) -> None:
-        """渲染调研报告模板。"""
-        loader = TemplateLoader()
-        template_path = str(
-            Path(__file__).parent.parent
-            / "config"
-            / "templates"
-            / "research_report_template.md"
-        )
-        spec = loader.load_from_markdown(template_path)
-        result = renderer.render(
-            spec,
-            {"research_type": "technology", "date": "2026-04-11"},
-        )
-        assert "technology" in result
-        assert "2026-04-11" in result
 
 
 # ============================================================

@@ -2,8 +2,7 @@
 任务状态实时同步测试。
 
 覆盖范围：
-- create_task_status_changed_message：消息格式验证
-- _do_push_status_change_ws：MessageBus.emit 调用验证
+- _do_push_status_change_ws：ws_interaction_notifier.send_to_user 调用验证
 - 全部状态转换触发 WebSocket 推送（state_coverage=100%, transition_coverage=100%）
 - 回归验证：原有任务管理功能不受影响
 """
@@ -12,18 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from datetime import datetime
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agents.types import AgentLevel
-from api.websocket.message_types import create_task_status_changed_message
-from src.tasks.state_machine import InvalidTransitionError, _TASK_TRANSITIONS
+from tasks.state_machine import _TASK_TRANSITIONS
 from tasks.service import TaskService
-from tasks.storage import TaskStorage
-from tasks.types import TaskPriority, TaskStatus, create_task
+from tasks.types import TaskStatus
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -70,213 +64,154 @@ _ALL_TRANSITIONS: list[tuple[str, str]] = [
 ]
 
 
-# ═══════════════════════════════════════════════════════════════
-# 1. create_task_status_changed_message 消息格式验证
-# ═══════════════════════════════════════════════════════════════
-
-class TestCreateTaskStatusChangedMessage:
-    """验证 create_task_status_changed_message 工厂函数输出格式。"""
-
-    def test_message_type_is_task_status_changed(self):
-        """消息 type 字段必须为 task_status_changed。"""
-        msg = create_task_status_changed_message(
-            task_id="abc123",
-            status="running",
-            previous_status="pending",
-            title="测试任务",
-            updated_at="2026-01-01T00:00:00",
-        )
-        assert msg["type"] == "task_status_changed"
-
-    def test_message_data_contains_all_required_fields(self):
-        """data 字段必须包含 task_id/status/previous_status/title/updated_at。"""
-        msg = create_task_status_changed_message(
-            task_id="abc123",
-            status="running",
-            previous_status="pending",
-            title="测试任务",
-            updated_at="2026-01-01T00:00:00",
-        )
-        data = msg["data"]
-        assert data["task_id"] == "abc123"
-        assert data["status"] == "running"
-        assert data["previous_status"] == "pending"
-        assert data["title"] == "测试任务"
-        assert data["updated_at"] == "2026-01-01T00:00:00"
-
-    def test_message_data_has_exactly_5_fields(self):
-        """data 字段不应包含多余字段。"""
-        msg = create_task_status_changed_message(
-            task_id="x",
-            status="completed",
-            previous_status="evaluating",
-            title="t",
-            updated_at="now",
-        )
-        assert set(msg["data"].keys()) == {
-            "task_id", "status", "previous_status", "title", "updated_at",
-        }
-
-    def test_message_with_empty_title(self):
-        """title 为空字符串时仍应正确包含。"""
-        msg = create_task_status_changed_message(
-            task_id="x",
-            status="failed",
-            previous_status="running",
-            title="",
-            updated_at="now",
-        )
-        assert msg["data"]["title"] == ""
+# _do_push_status_change_ws 的 patch 目标：模块级单例的 send_to_user 方法。
+# service.py 内通过 `from channels.websocket.ws_handler import ws_interaction_notifier`
+# 导入该单例，因此 patch 目标必须是该单例的方法属性本身。
+_WS_SEND_PATCH = "channels.websocket.ws_handler.ws_interaction_notifier.send_to_user"
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2. _do_push_status_change_ws 调用 MessageBus.emit 验证
+# 1. _do_push_status_change_ws 调用 ws_interaction_notifier.send_to_user 验证
 # ═══════════════════════════════════════════════════════════════
 
 class TestDoPushStatusChangeWs:
-    """验证 _do_push_status_change_ws 正确调用 MessageBus.emit。
+    """验证 _do_push_status_change_ws 正确调用 ws_interaction_notifier.send_to_user。
 
-    注意：get_message_bus 在 _do_push_status_change_ws 内部通过
-    from api.websocket.message_bus import ... get_message_bus 导入，
-    因此 patch 目标为 api.websocket.message_bus.get_message_bus。
+    推送条件（service.py）：
+    1. self._storage 不为 None
+    2. task 存在
+    3. task.metadata 含 session_id（作为 thread_id）
+    4. task.metadata 含 user_id（作为 send_to_user 的目标）
+    任一缺失都不推送。
+
+    消息体（内联构造，6 字段）：type + data{task_id, status, previous_status,
+    title, updated_at, thread_id}。
     """
 
     @pytest.mark.asyncio
-    async def test_emit_called_with_correct_thread_id(self):
-        """emit 应使用 task.metadata.session_id 作为 thread_id。"""
+    async def test_send_to_user_called_with_correct_user_id(self):
+        """send_to_user 的第一个参数应为 task.metadata.user_id。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             await svc._do_push_status_change_ws(task.id, "pending", "running")
 
-            mock_bus.emit.assert_called_once()
-            call_args = mock_bus.emit.call_args
-            assert call_args[0][0] == "sess-001"
+            mock_send.assert_awaited_once()
+            user_id = mock_send.call_args.args[0]
+            assert user_id == "user-xyz"
 
     @pytest.mark.asyncio
-    async def test_emit_called_with_correct_message_format(self):
-        """emit 传递的消息应包含完整的 task_status_changed 格式。"""
+    async def test_send_to_user_event_has_correct_message_format(self):
+        """推送的 event dict 应包含完整的 task_status_changed 格式（6 字段）。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="测试标题", metadata={"session_id": "sess-001"},
+            title="测试标题",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             await svc._do_push_status_change_ws(task.id, "pending", "running")
 
-            call_args = mock_bus.emit.call_args
-            message = call_args[0][1]
-            assert message["type"] == "task_status_changed"
-            assert message["data"]["task_id"] == task.id
-            assert message["data"]["status"] == "running"
-            assert message["data"]["previous_status"] == "pending"
-            assert message["data"]["title"] == "测试标题"
-            assert "updated_at" in message["data"]
+            mock_send.assert_awaited_once()
+            event = mock_send.call_args.args[1]
+
+            assert event["type"] == "task_status_changed"
+            data = event["data"]
+            assert data["task_id"] == task.id
+            assert data["status"] == "running"
+            assert data["previous_status"] == "pending"
+            assert data["title"] == "测试标题"
+            assert data["thread_id"] == "sess-001"
+            assert "updated_at" in data  # 由 storage 填充，非空字符串
 
     @pytest.mark.asyncio
-    async def test_emit_source_type_is_system(self):
-        """emit 的 source_type 应为 SYSTEM。"""
-        from api.websocket.message_bus import SourceType
-
+    async def test_event_data_has_exactly_6_fields(self):
+        """data 字段应恰好包含 6 个字段，无多余字段。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
+            await svc._do_push_status_change_ws(task.id, "pending", "completed")
 
-            await svc._do_push_status_change_ws(task.id, "pending", "running")
-
-            call_args = mock_bus.emit.call_args
-            assert call_args[1]["source_type"] == SourceType.SYSTEM
-
-    @pytest.mark.asyncio
-    async def test_emit_source_id_contains_task_id(self):
-        """emit 的 source_id 应为 task:{task_id}。"""
-        svc = _make_service()
-        task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
-        )
-
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
-            await svc._do_push_status_change_ws(task.id, "pending", "running")
-
-            call_args = mock_bus.emit.call_args
-            assert call_args[1]["source_id"] == f"task:{task.id}"
+            event = mock_send.call_args.args[1]
+            assert set(event["data"].keys()) == {
+                "task_id", "status", "previous_status",
+                "title", "updated_at", "thread_id",
+            }
 
     @pytest.mark.asyncio
     async def test_no_push_when_no_session_id(self):
-        """任务没有 session_id 时不推送。"""
+        """任务没有 session_id（thread_id）时不推送。"""
         svc = _make_service()
-        task = await svc.create_task(title="t", metadata={})
+        task = await svc.create_task(
+            title="t",
+            metadata={"user_id": "user-xyz"},  # 缺 session_id
+        )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             await svc._do_push_status_change_ws(task.id, "pending", "running")
 
-            mock_bus.emit.assert_not_called()
+            mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_push_when_no_user_id(self):
+        """任务没有 user_id 时不推送（send_to_user 需要 user_id 路由）。"""
+        svc = _make_service()
+        task = await svc.create_task(
+            title="t",
+            metadata={"session_id": "sess-001"},  # 缺 user_id
+        )
+
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
+            await svc._do_push_status_change_ws(task.id, "pending", "running")
+
+            mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_push_when_task_not_found(self):
         """任务不存在时不推送。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             await svc._do_push_status_change_ws("nonexistent", "pending", "running")
 
-            mock_bus.emit.assert_not_called()
+            mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_push_when_no_storage(self):
         """无存储层时不推送。"""
         svc = TaskService(task_id="some-id")
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             await svc._do_push_status_change_ws("any", "pending", "running")
 
-            mock_bus.emit.assert_not_called()
+            mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_push_failure_is_non_fatal(self):
-        """推送失败不应抛出异常（非致命）。"""
+        """send_to_user 抛异常时应被抑制（非致命），不向调用方传播。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_bus.emit.side_effect = ConnectionError("连接断开")
-            mock_get_bus.return_value = mock_bus
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
+            mock_send.side_effect = ConnectionError("连接断开")
 
-            # 不应抛出异常
+            # 不应抛出异常（被 try/except 抑制）
             await svc._do_push_status_change_ws(task.id, "pending", "running")
 
 
 # ═══════════════════════════════════════════════════════════════
-# 3. 全部状态转换触发 WebSocket 推送
+# 2. 全部状态转换触发 WebSocket 推送
 # ═══════════════════════════════════════════════════════════════
 
 class TestAllStateTransitionsPushWs:
@@ -296,7 +231,7 @@ class TestAllStateTransitionsPushWs:
         svc = _make_service()
         task = await svc.create_task(
             title=f"测试 {from_status}->{to_status}",
-            metadata={"session_id": "sess-ws"},
+            metadata={"session_id": "sess-ws", "user_id": "user-ws"},
         )
         task_id = task.id
 
@@ -313,7 +248,7 @@ class TestAllStateTransitionsPushWs:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 4. 高层方法触发推送验证（验证端到端调用链）
+# 3. 高层方法触发推送验证（验证端到端调用链）
 # ═══════════════════════════════════════════════════════════════
 
 class TestHighLevelMethodsPushWs:
@@ -324,7 +259,8 @@ class TestHighLevelMethodsPushWs:
         """start_task 应推送 pending→running。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
 
         with patch.object(
@@ -338,7 +274,8 @@ class TestHighLevelMethodsPushWs:
         """complete_task 应推送 running→completed。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
 
@@ -353,7 +290,8 @@ class TestHighLevelMethodsPushWs:
         """fail_task 应推送 running→failed。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
 
@@ -368,7 +306,8 @@ class TestHighLevelMethodsPushWs:
         """move_to_evaluating 应推送 running→evaluating。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
 
@@ -383,7 +322,8 @@ class TestHighLevelMethodsPushWs:
         """pause_task 应推送 running→stopped。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
 
@@ -398,7 +338,8 @@ class TestHighLevelMethodsPushWs:
         """resume_task 应推送 stopped→running。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
         await svc.pause_task(task.id)
@@ -414,7 +355,8 @@ class TestHighLevelMethodsPushWs:
         """reset_to_pending 应推送 failed→pending。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
         await svc.fail_task(task.id, reason="测试")
@@ -430,7 +372,8 @@ class TestHighLevelMethodsPushWs:
         """delete_task 应推送 deleting→deleted。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
 
         with patch.object(
@@ -444,7 +387,8 @@ class TestHighLevelMethodsPushWs:
         """cancel_task 应推送当前状态→stopped。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
 
@@ -459,7 +403,8 @@ class TestHighLevelMethodsPushWs:
         """complete_evaluation(通过) 应推送 evaluating→completed。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
         await svc.move_to_evaluating(task.id)
@@ -475,7 +420,8 @@ class TestHighLevelMethodsPushWs:
         """complete_evaluation(未通过) 应推送 evaluating→failed。"""
         svc = _make_service()
         task = await svc.create_task(
-            title="t", metadata={"session_id": "sess-001"},
+            title="t",
+            metadata={"session_id": "sess-001", "user_id": "user-xyz"},
         )
         await svc.start_task(task.id)
         await svc.move_to_evaluating(task.id)
@@ -492,7 +438,7 @@ class TestHighLevelMethodsPushWs:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 5. _emit_state_change 回调机制验证
+# 4. _emit_state_change 回调机制验证
 # ═══════════════════════════════════════════════════════════════
 
 class TestEmitStateChangeCallbacks:
@@ -505,7 +451,10 @@ class TestEmitStateChangeCallbacks:
         callback = AsyncMock()
         svc.register_state_callback(callback)
 
-        task = await svc.create_task(title="t", metadata={"session_id": "s"})
+        task = await svc.create_task(
+            title="t",
+            metadata={"session_id": "s", "user_id": "u"},
+        )
 
         await svc.start_task(task.id)
 
@@ -520,7 +469,10 @@ class TestEmitStateChangeCallbacks:
         svc.register_state_callback(cb1)
         svc.register_state_callback(cb2)
 
-        task = await svc.create_task(title="t", metadata={"session_id": "s"})
+        task = await svc.create_task(
+            title="t",
+            metadata={"session_id": "s", "user_id": "u"},
+        )
         await svc.start_task(task.id)
 
         cb1.assert_called_once_with(task.id, "pending", "running")
@@ -535,7 +487,10 @@ class TestEmitStateChangeCallbacks:
         svc.register_state_callback(failing_cb)
         svc.register_state_callback(normal_cb)
 
-        task = await svc.create_task(title="t", metadata={"session_id": "s"})
+        task = await svc.create_task(
+            title="t",
+            metadata={"session_id": "s", "user_id": "u"},
+        )
 
         # 不应抛出异常
         await svc.start_task(task.id)
@@ -551,14 +506,17 @@ class TestEmitStateChangeCallbacks:
         svc.register_state_callback(callback)
         svc.unregister_state_callback(callback)
 
-        task = await svc.create_task(title="t", metadata={"session_id": "s"})
+        task = await svc.create_task(
+            title="t",
+            metadata={"session_id": "s", "user_id": "u"},
+        )
         await svc.start_task(task.id)
 
         callback.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════
-# 6. 回归验证：原有任务管理功能不受影响
+# 5. 回归验证：原有任务管理功能不受影响
 # ═══════════════════════════════════════════════════════════════
 
 class TestRegressionTaskManagement:
@@ -569,13 +527,10 @@ class TestRegressionTaskManagement:
         """完整任务生命周期：创建→启动→评估→完成，WS 推送不影响。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
             task = await svc.create_task(
                 title="全生命周期测试",
-                metadata={"session_id": "sess-001"},
+                metadata={"session_id": "sess-001", "user_id": "user-xyz"},
             )
 
             await svc.start_task(task.id)
@@ -592,13 +547,10 @@ class TestRegressionTaskManagement:
         """失败后重置流程正常。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
             task = await svc.create_task(
                 title="失败重置测试",
-                metadata={"session_id": "sess-001"},
+                metadata={"session_id": "sess-001", "user_id": "user-xyz"},
             )
 
             await svc.start_task(task.id)
@@ -613,13 +565,10 @@ class TestRegressionTaskManagement:
         """暂停/恢复流程正常。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
             task = await svc.create_task(
                 title="暂停恢复测试",
-                metadata={"session_id": "sess-001"},
+                metadata={"session_id": "sess-001", "user_id": "user-xyz"},
             )
 
             await svc.start_task(task.id)
@@ -636,16 +585,23 @@ class TestRegressionTaskManagement:
         """非法状态转换仍正确抛出异常。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
-            task = await svc.create_task(title="t", metadata={"session_id": "s"})
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
+            task = await svc.create_task(
+                title="t",
+                metadata={"session_id": "s", "user_id": "u"},
+            )
 
             # completed → running 是非法的（completed 只能 → pending）
             # 先把任务导航到 completed
             await svc.force_transition(task.id, TaskStatus.COMPLETED)
-            with pytest.raises(InvalidTransitionError):
+
+            # 注意：源码 _task_state.py 内部 `from src.tasks.state_machine import
+            # InvalidTransitionError`，与测试导入的 `tasks.state_machine` 是两个
+            # 不同的模块对象（src 同时作为根包与 sys.path 中的目录）。因此这里必须
+            # 捕获源码实际抛出的那个异常类，否则 isinstance 校验不通过。
+            from src.tasks.state_machine import InvalidTransitionError as _SrcErr
+
+            with pytest.raises(_SrcErr):
                 await svc.force_transition(task.id, TaskStatus.RUNNING)
 
     @pytest.mark.asyncio
@@ -653,12 +609,15 @@ class TestRegressionTaskManagement:
         """list_all 在有推送逻辑时仍正常返回任务列表。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
-            await svc.create_task(title="任务A", metadata={"session_id": "s1"})
-            await svc.create_task(title="任务B", metadata={"session_id": "s2"})
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
+            await svc.create_task(
+                title="任务A",
+                metadata={"session_id": "s1", "user_id": "u1"},
+            )
+            await svc.create_task(
+                title="任务B",
+                metadata={"session_id": "s2", "user_id": "u2"},
+            )
 
             all_tasks = await svc.list_all()
             assert len(all_tasks) >= 2
@@ -668,11 +627,11 @@ class TestRegressionTaskManagement:
         """删除任务正常工作。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
-            task = await svc.create_task(title="待删除", metadata={"session_id": "s"})
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
+            task = await svc.create_task(
+                title="待删除",
+                metadata={"session_id": "s", "user_id": "u"},
+            )
 
             result = await svc.delete_task(task.id)
             assert result is True
@@ -683,14 +642,11 @@ class TestRegressionTaskManagement:
         """force_transition 对所有合法转换路径都正常工作。"""
         svc = _make_service()
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()):
             for from_status, to_status in _ALL_TRANSITIONS:
                 task = await svc.create_task(
                     title=f"{from_status}->{to_status}",
-                    metadata={"session_id": "sess-loop"},
+                    metadata={"session_id": "sess-loop", "user_id": "user-loop"},
                 )
                 # 通过合法路径导航到 from_status
                 await _navigate_to_state(svc, task.id, from_status)
@@ -701,15 +657,15 @@ class TestRegressionTaskManagement:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 7. 端到端推送链路验证
+# 6. 端到端推送链路验证
 # ═══════════════════════════════════════════════════════════════
 
 class TestEndToEndPushChain:
-    """验证从高层方法到 MessageBus.emit 的完整调用链。"""
+    """验证从高层方法到 ws_interaction_notifier.send_to_user 的完整调用链。"""
 
     @pytest.mark.asyncio
-    async def test_start_task_to_message_bus_emit(self):
-        """start_task → _emit_state_change → _do_push_status_change_ws → bus.emit。
+    async def test_start_task_to_send_to_user(self):
+        """start_task → _emit_state_change → _push_status_change_ws → send_to_user。
 
         注意：_push_status_change_ws 使用 asyncio.create_task（fire-and-forget），
         需要 await asyncio.sleep(0) 让出事件循环控制权以等待异步任务执行。
@@ -717,59 +673,52 @@ class TestEndToEndPushChain:
         svc = _make_service()
         task = await svc.create_task(
             title="端到端测试",
-            metadata={"session_id": "sess-e2e"},
+            metadata={"session_id": "sess-e2e", "user_id": "user-e2e"},
         )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             await svc.start_task(task.id)
             # 让出事件循环，让 fire-and-forget 的 create_task 执行
             await asyncio.sleep(0)
 
-            # 验证 get_message_bus 被调用
-            mock_get_bus.assert_called_once()
-            # 验证 bus.emit 被调用
-            mock_bus.emit.assert_called_once()
+            mock_send.assert_awaited_once()
 
             # 验证消息内容
-            call_args = mock_bus.emit.call_args
-            message = call_args[0][1]
-            assert message["type"] == "task_status_changed"
-            assert message["data"]["task_id"] == task.id
-            assert message["data"]["status"] == "running"
-            assert message["data"]["previous_status"] == "pending"
+            user_id = mock_send.call_args.args[0]
+            event = mock_send.call_args.args[1]
+            assert user_id == "user-e2e"
+            assert event["type"] == "task_status_changed"
+            assert event["data"]["task_id"] == task.id
+            assert event["data"]["status"] == "running"
+            assert event["data"]["previous_status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_complete_task_e2e_message_payload(self):
-        """complete_task 端到端验证消息 payload 完整性。"""
+        """complete_task 端到端验证消息 payload 完整性（6 字段）。"""
         svc = _make_service()
         task = await svc.create_task(
             title="完整Payload测试",
-            metadata={"session_id": "sess-payload"},
+            metadata={"session_id": "sess-payload", "user_id": "user-payload"},
         )
 
-        with patch("api.websocket.message_bus.get_message_bus") as mock_get_bus:
-            mock_bus = AsyncMock()
-            mock_get_bus.return_value = mock_bus
-
+        with patch(_WS_SEND_PATCH, new=AsyncMock()) as mock_send:
             # start_task 也在 patch 内，避免 fire-and-forget 跨 patch 边界执行
             await svc.start_task(task.id)
             await asyncio.sleep(0)  # 消费 start_task 的 fire-and-forget
 
-            mock_bus.emit.reset_mock()  # 重置，只关注 complete_task 的推送
+            mock_send.reset_mock()  # 重置，只关注 complete_task 的推送
 
             await svc.complete_task(task.id)
             await asyncio.sleep(0)  # 让 fire-and-forget 执行
 
-            mock_bus.emit.assert_called_once()
-            message = mock_bus.emit.call_args[0][1]
-            data = message["data"]
+            mock_send.assert_awaited_once()
+            event = mock_send.call_args.args[1]
+            data = event["data"]
 
-            # 验证所有 5 个必填字段都存在且有效
+            # 验证所有 6 个字段都存在且有效
             assert data["task_id"] == task.id
             assert data["status"] == "completed"
             assert data["previous_status"] == "running"
             assert data["title"] == "完整Payload测试"
             assert data["updated_at"]  # 非空
+            assert data["thread_id"] == "sess-payload"

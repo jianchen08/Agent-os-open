@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     # 配置目录
     config_dir: str = Field(default="config", validation_alias="CONFIG_DIR")
 
+    # 注入 LLM 的当前时间所用时区（IANA 时区名，如 Asia/Shanghai、UTC、Asia/Tokyo）
+    # 传给 LLM 的时间会带上时区标注，格式如：2026-07-02 11:24:00 (UTC+8, Asia/Shanghai)
+    timezone: str = Field(
+        default="Asia/Shanghai", validation_alias="APP_TIMEZONE"
+    )
+
     # WebSocket 配置
     ws_heartbeat_interval: int = Field(
         default=30, validation_alias="WS_HEARTBEAT_INTERVAL"

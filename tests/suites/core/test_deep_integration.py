@@ -18,7 +18,6 @@ import pytest
 from evaluation.engine import EvaluationEngine
 from evaluation.executor import EvaluationExecutor
 from evaluation.types import (
-    EvaluationConfig,
     EvaluationResult,
     ExpectCondition,
     ExpectSpec,
@@ -34,15 +33,40 @@ from evaluation.types import (
 
 
 class TestEvaluateAgentIntegration:
-    """测试 Agent 型评估器的完整集成路径。"""
+    """测试 Agent 型评估器的集成路径。
+
+    变更说明（接口重构对齐）：
+    早期 EvaluationEngine 支持注入 ``pipeline_factory``，由测试用 mock 管道
+    驱动 _evaluate_agent。重构后 _evaluate_agent 改为经全局 service_provider /
+    engine_registry 注册真实评估子管道（CollectingSink + send_pipeline_message），
+    ``pipeline_factory`` 参数已移除，__init__ 不再接受该关键字。
+    因此本类不再用 mock 管道测完整链路，而是断言重构后的真实契约：
+    1. 评估引擎不接受 pipeline_factory；
+    2. agent_registry 缺失 / 找不到 evaluator_agent 时，_evaluate_agent 直接抛
+       RuntimeError 暴露配置问题（不再静默 fallback）。
+    """
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_evaluate_agent_full_chain_with_mock_pipeline(self, tmp_path):
-        """测试 evaluate() → _evaluate_metric() → _evaluate_agent() 完整链路。
+    def test_evaluate_agent_no_pipeline_factory_kwarg_anymore(self):
+        """验证 pipeline_factory 关键字已从 EvaluationEngine.__init__ 移除。
 
-        验证：当 mock pipeline 返回有效 eval_result JSON 时，
-        evaluate() 能正确生成 MetricResult。
+        变更原因：_evaluate_agent 重构为经全局注册表创建真实评估子管道，
+        不再接受外部 pipeline_factory 注入。此处断言新接口契约，
+        防止误用旧关键字。
+        """
+        loader = MagicMock()
+        with pytest.raises(TypeError, match="pipeline_factory"):
+            EvaluationEngine(loader=loader, pipeline_factory=MagicMock())
+
+    @pytest.mark.core
+    @pytest.mark.unit
+    async def test_evaluate_agent_missing_registry_raises_runtime_error(self):
+        """测试 agent_registry=None 时 _evaluate_agent 抛 RuntimeError。
+
+        变更原因：原 mock 管道版测试当 pipeline 输出无 JSON 时返回 fallback；
+        重构后无 agent_registry 即视为配置错误，_evaluate_agent 直接抛
+        RuntimeError（而非静默 fallback），暴露问题。这里断言新行为。
         """
         metric = MetricDefinition(
             id="semantic_check",
@@ -52,198 +76,19 @@ class TestEvaluateAgentIntegration:
         )
 
         loader = MagicMock()
-        loader.get.return_value = metric
-        loader.metrics = {"semantic_check": metric}
+        engine = EvaluationEngine(loader=loader, agent_registry=None)
 
-        from tests.suites.conftest import MockAgentRegistry, MockAgentConfig
-
-        agent_registry = MockAgentRegistry(configs=[
-            MockAgentConfig(
-                config_id="system_evaluator_agent",
-                name="evaluator_agent",
-            )
-        ])
-
-        eval_output = (
-            "## 评估完成\n\n"
-            "```json\n"
-            '{"evaluation_result": {"passed": true, "score": 92, "feedback": "报告包含核心概念"}}\n'
-            "```\n"
-        )
-        mock_engine = MagicMock()
-        mock_engine.run = AsyncMock(
-            return_value={
-                "raw_result": eval_output,
-                "final_output": eval_output,
-            },
-        )
-        pipeline_factory = MagicMock(return_value=mock_engine)
-
-        engine = EvaluationEngine(
-            loader=loader,
-            pipeline_factory=pipeline_factory,
-            agent_registry=agent_registry,
-        )
-
-        result = engine.evaluate(
-            task_id="test_task_001",
-            config=EvaluationConfig(
-                metric_ids=["semantic_check"],
-                input_params={"semantic_check": {"criteria": "报告包含 async/await 核心概念"}},
-            ),
-        )
-
-        assert isinstance(result, EvaluationResult)
-        assert len(result.results) == 1
-        mr = result.results[0]
-        assert mr.metric_id == "semantic_check"
-        assert mr.passed is True
-        assert mr.score == 92.0
+        with pytest.raises(RuntimeError, match="agent_registry"):
+            await engine._evaluate_agent(metric, {"criteria": "测试"})
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_evaluate_agent_pipeline_returns_no_eval_json(self):
-        """测试当 pipeline 返回不含 eval_result JSON 时的 fallback 行为。
+    async def test_evaluate_agent_not_found_in_registry_raises_runtime_error(self):
+        """测试 evaluator_agent 在 registry 中找不到时抛 RuntimeError。
 
-        验证：当 evaluator_agent 没有输出 evaluation_result JSON 时，
-        _evaluate_agent 应返回 passed=False, score=0.0 的 fallback 结果。
-        """
-        metric = MetricDefinition(
-            id="semantic_check",
-            name="语义评估",
-            metric_type=MetricType.AGENT,
-            evaluator_id="system_evaluator_agent",
-        )
-
-        from tests.suites.conftest import MockAgentRegistry, MockAgentConfig
-
-        agent_registry = MockAgentRegistry(configs=[
-            MockAgentConfig(config_id="system_evaluator_agent", name="evaluator_agent")
-        ])
-
-        no_json_output = "报告质量不错，包含了 async/await 和事件循环的概念。建议补充更多代码示例。"
-        mock_engine = MagicMock()
-        mock_engine.run = AsyncMock(
-            return_value={
-                "raw_result": no_json_output,
-                "final_output": no_json_output,
-            },
-        )
-        pipeline_factory = MagicMock(return_value=mock_engine)
-
-        loader = MagicMock()
-        engine = EvaluationEngine(
-            loader=loader,
-            pipeline_factory=pipeline_factory,
-            agent_registry=agent_registry,
-        )
-
-        result = engine._evaluate_agent(metric, {"criteria": "测试"})
-
-        assert result["passed"] is False
-        assert result["score"] == 0.0
-        assert "未能输出有效" in result["feedback"]
-
-    @pytest.mark.core
-    @pytest.mark.unit
-    def test_evaluate_agent_pipeline_exception_returns_fallback(self):
-        """测试当 pipeline 执行抛异常时的 fallback 行为。
-
-        验证：当 pipeline_factory 创建的 engine.run() 抛异常时，
-        _evaluate_agent 应捕获异常并返回 passed=False 的结果，而非向上抛出。
-        """
-        metric = MetricDefinition(
-            id="semantic_check",
-            name="语义评估",
-            metric_type=MetricType.AGENT,
-            evaluator_id="system_evaluator_agent",
-        )
-
-        from tests.suites.conftest import MockAgentRegistry, MockAgentConfig
-
-        agent_registry = MockAgentRegistry(configs=[
-            MockAgentConfig(config_id="system_evaluator_agent", name="evaluator_agent")
-        ])
-
-        mock_engine = MagicMock()
-        mock_engine.run = AsyncMock(side_effect=RuntimeError("LLM API 调用失败"))
-        pipeline_factory = MagicMock(return_value=mock_engine)
-
-        loader = MagicMock()
-        engine = EvaluationEngine(
-            loader=loader,
-            pipeline_factory=pipeline_factory,
-            agent_registry=agent_registry,
-        )
-
-        result = engine._evaluate_agent(metric, {"criteria": "测试"})
-
-        assert result["passed"] is False
-        assert result["score"] == 0.0
-        assert "评估管道执行异常" in result["feedback"]
-        assert "LLM API 调用失败" in result["feedback"]
-
-
-class TestEvaluateToolIntegration:
-    """测试 Tool 型评估器的集成路径。"""
-
-    @pytest.mark.core
-    @pytest.mark.unit
-    def test_evaluate_tool_no_registry_raises_runtime_error(self):
-        """测试 tool_registry=None 时 _evaluate_tool 应抛 RuntimeError。
-
-        验证：当 tool_registry 未注入时，不应 fallback 到 Mock，
-        而是直接抛出 RuntimeError 暴露问题。
-        """
-        metric = MetricDefinition(
-            id="bash_check",
-            name="命令检查",
-            metric_type=MetricType.TOOL,
-            evaluator_id="bash_execute",
-        )
-
-        loader = MagicMock()
-        engine = EvaluationEngine(loader=loader, tool_registry=None)
-
-        with pytest.raises(RuntimeError, match="Tool evaluation requires tool_registry"):
-            engine._evaluate_tool(metric, {"action": "execute", "command": "echo test"})
-
-    @pytest.mark.core
-    @pytest.mark.unit
-    def test_evaluate_tool_handler_not_found_raises_runtime_error(self):
-        """测试 tool 存在于 registry 但 handler 不存在时抛 RuntimeError。
-
-        验证：当 tool_registry 中找不到对应工具 handler 时，
-        应抛出 RuntimeError 而非静默 fallback。
-        """
-        metric = MetricDefinition(
-            id="bash_check",
-            name="命令检查",
-            metric_type=MetricType.TOOL,
-            evaluator_id="nonexistent_tool",
-        )
-
-        mock_registry = MagicMock()
-        mock_registry.get_handler.return_value = None
-
-        loader = MagicMock()
-        engine = EvaluationEngine(loader=loader, tool_registry=mock_registry)
-
-        with pytest.raises(RuntimeError, match="Tool 'nonexistent_tool' not found in registry"):
-            engine._evaluate_tool(metric, {"action": "execute"})
-
-
-class TestEvaluateMetricIntegration:
-    """测试 _evaluate_metric 的完整路径。"""
-
-    @pytest.mark.core
-    @pytest.mark.unit
-    def test_evaluate_metric_agent_type_exception_becomes_metric_result(self):
-        """测试 _evaluate_metric 中 Agent 评估异常被捕获为 MetricResult。
-
-        验证：当 _evaluate_agent 内部抛出未预期的异常时，
-        _evaluate_metric 应捕获异常并返回 passed=False 的 MetricResult，
-        而非让异常向上传播导致整个评估崩溃。
+        变更原因：原 mock 管道版测试当 pipeline 抛异常时返回 fallback；
+        重构后 evaluator_agent 未注册即视为配置错误，_evaluate_agent 直接抛
+        RuntimeError（而非捕获返回 fallback），暴露问题。这里断言新行为。
         """
         metric = MetricDefinition(
             id="semantic_check",
@@ -259,11 +104,101 @@ class TestEvaluateMetricIntegration:
         loader = MagicMock()
         engine = EvaluationEngine(
             loader=loader,
-            pipeline_factory=MagicMock(),
             agent_registry=empty_registry,
         )
 
-        result = engine._evaluate_metric(metric, {"criteria": "测试"})
+        with pytest.raises(RuntimeError, match="not found in registry"):
+            await engine._evaluate_agent(metric, {"criteria": "测试"})
+
+
+class TestEvaluateToolIntegration:
+    """测试 Tool 型评估器的集成路径。"""
+
+    @pytest.mark.core
+    @pytest.mark.unit
+    async def test_evaluate_tool_no_registry_falls_back_to_builtin(self):
+        """测试 tool_registry=None 时 _evaluate_tool 回退到内置工具发现。
+
+        变更原因：_evaluate_tool 重构后，当 tool_registry 未注入时不再抛
+        RuntimeError，而是经 DynamicToolLoader 自动发现 src/tools/builtin 下的
+        内置工具（evaluator_id 即工具 name）。此处用真实存在的 bash_execute
+        断言新行为：无 registry 也能解析到内置 BashTool 并成功执行。
+        （_evaluate_tool 为 async 方法，需 await。）
+        """
+        metric = MetricDefinition(
+            id="bash_check",
+            name="命令检查",
+            metric_type=MetricType.TOOL,
+            evaluator_id="bash_execute",
+        )
+
+        loader = MagicMock()
+        engine = EvaluationEngine(loader=loader, tool_registry=None)
+
+        result = await engine._evaluate_tool(
+            metric, {"action": "execute", "command": "echo test"},
+        )
+
+        # 内置 BashTool 执行成功，返回 success=True 的结果字典
+        assert result["success"] is True
+
+    @pytest.mark.core
+    @pytest.mark.unit
+    async def test_evaluate_tool_handler_not_found_raises_runtime_error(self):
+        """测试 tool 存在于 registry 但 handler 不存在时抛 RuntimeError。
+
+        验证：当 tool_registry 与内置工具发现都找不到对应 handler 时，
+        应抛出 RuntimeError 而非静默 fallback。
+        （_evaluate_tool 为 async 方法，需 await。）
+        """
+        metric = MetricDefinition(
+            id="bash_check",
+            name="命令检查",
+            metric_type=MetricType.TOOL,
+            evaluator_id="nonexistent_tool",
+        )
+
+        mock_registry = MagicMock()
+        mock_registry.get_handler.return_value = None
+
+        loader = MagicMock()
+        engine = EvaluationEngine(loader=loader, tool_registry=mock_registry)
+
+        with pytest.raises(RuntimeError, match="Tool 'nonexistent_tool' not found in registry"):
+            await engine._evaluate_tool(metric, {"action": "execute"})
+
+
+class TestEvaluateMetricIntegration:
+    """测试 _evaluate_metric 的完整路径。"""
+
+    @pytest.mark.core
+    @pytest.mark.unit
+    async def test_evaluate_metric_agent_type_exception_becomes_metric_result(self):
+        """测试 _evaluate_metric 中 Agent 评估异常被捕获为 MetricResult。
+
+        验证：当 _evaluate_agent 内部抛出未预期的异常（如 evaluator_agent 未
+        在 registry 注册）时，_evaluate_metric 应捕获异常并返回 passed=False
+        的 MetricResult，而非让异常向上传播导致整个评估崩溃。
+        （_evaluate_metric 为 async 方法，需 await。）
+        """
+        metric = MetricDefinition(
+            id="semantic_check",
+            name="语义评估",
+            metric_type=MetricType.AGENT,
+            evaluator_id="system_evaluator_agent",
+        )
+
+        from tests.suites.conftest import MockAgentRegistry
+
+        empty_registry = MockAgentRegistry(configs=[])
+
+        loader = MagicMock()
+        engine = EvaluationEngine(
+            loader=loader,
+            agent_registry=empty_registry,
+        )
+
+        result = await engine._evaluate_metric(metric, {"criteria": "测试"})
 
         assert isinstance(result, MetricResult)
         assert result.metric_id == "semantic_check"
@@ -272,12 +207,13 @@ class TestEvaluateMetricIntegration:
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_evaluate_metric_with_expect_conditions(self):
+    async def test_evaluate_metric_with_expect_conditions(self):
         """测试带 expect 条件的评估判定逻辑。
 
         验证：当 metric 定义了 expect.conditions 时，
         _evaluate_metric 会通过 ExpectEvaluator 进行条件判定，
         而非直接返回 passed=True。
+        （_evaluate_metric 为 async 方法，需 await。）
         """
         metric = MetricDefinition(
             id="bash_check",
@@ -306,7 +242,7 @@ class TestEvaluateMetricIntegration:
         loader = MagicMock()
         engine = EvaluationEngine(loader=loader, tool_registry=mock_registry)
 
-        result = engine._evaluate_metric(
+        result = await engine._evaluate_metric(
             metric,
             {"action": "execute", "command": "echo hello"},
         )
@@ -316,11 +252,12 @@ class TestEvaluateMetricIntegration:
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_evaluate_metric_expect_condition_fails(self):
+    async def test_evaluate_metric_expect_condition_fails(self):
         """测试 expect 条件不满足时评估结果为 failed。
 
         验证：当工具返回 exit_code=1 但期望 exit_code=0 时，
         ExpectEvaluator 应正确判定为 failed。
+        （_evaluate_metric 为 async 方法，需 await。）
         """
         metric = MetricDefinition(
             id="bash_check",
@@ -347,7 +284,7 @@ class TestEvaluateMetricIntegration:
         loader = MagicMock()
         engine = EvaluationEngine(loader=loader, tool_registry=mock_registry)
 
-        result = engine._evaluate_metric(
+        result = await engine._evaluate_metric(
             metric,
             {"action": "execute", "command": "false"},
         )
@@ -360,10 +297,11 @@ class TestExecutorIntegration:
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_executor_run_evaluation_with_real_engine(self):
+    async def test_executor_run_evaluation_with_real_engine(self):
         """测试 executor 使用真实 EvaluationEngine 执行评估。
 
         验证：EvaluationExecutor 能正确编排 loader → engine → mapper 的完整流程。
+        （run_evaluation 为 async 方法，需 await。）
         """
         metric = MetricDefinition(
             id="bash_check",
@@ -394,7 +332,7 @@ class TestExecutorIntegration:
             tool_registry=mock_registry,
         )
 
-        result = executor.run_evaluation(
+        result = await executor.run_evaluation(
             task_id="test_task_001",
             metric_ids=["bash_check"],
             input_params={"bash_check": {"action": "execute", "command": "echo test"}},
@@ -408,11 +346,13 @@ class TestExecutorIntegration:
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_executor_state_update_when_not_skipped(self):
+    async def test_executor_state_update_when_not_skipped(self):
         """测试 skip_state_update=False 时 executor 回写状态。
 
         验证：当 skip_state_update=False 且有 task_service 时，
         executor 应调用 task_service.complete_evaluation 回写结果。
+        （run_evaluation 为 async 方法，需 await。task_service.complete_evaluation
+        在源码中以 await 调用，故用 AsyncMock 模拟协程方法。）
         """
         metric = MetricDefinition(
             id="bash_check",
@@ -434,6 +374,7 @@ class TestExecutorIntegration:
         mock_registry.get_handler.return_value = lambda params: mock_result
 
         mock_task_service = MagicMock()
+        mock_task_service.complete_evaluation = AsyncMock()
 
         executor = EvaluationExecutor(
             task_service=mock_task_service,
@@ -441,7 +382,7 @@ class TestExecutorIntegration:
             tool_registry=mock_registry,
         )
 
-        result = executor.run_evaluation(
+        result = await executor.run_evaluation(
             task_id="test_task_001",
             metric_ids=["bash_check"],
             skip_state_update=False,
@@ -456,11 +397,12 @@ class TestExecutorIntegration:
 
     @pytest.mark.core
     @pytest.mark.unit
-    def test_executor_no_metrics_returns_empty_result(self):
+    async def test_executor_no_metrics_returns_empty_result(self):
         """测试当 loader 中无匹配指标时返回空结果。
 
         验证：当 metric_ids 中的 ID 在 loader 中不存在时，
         evaluate() 应返回 overall_passed=False 的空结果。
+        （run_evaluation 为 async 方法，需 await。）
         """
         mock_loader = MagicMock()
         mock_loader.get.return_value = None
@@ -471,7 +413,7 @@ class TestExecutorIntegration:
             loader=mock_loader,
         )
 
-        result = executor.run_evaluation(
+        result = await executor.run_evaluation(
             task_id="test_task_001",
             metric_ids=["nonexistent_metric"],
         )

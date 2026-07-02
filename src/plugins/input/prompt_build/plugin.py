@@ -27,9 +27,11 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
+from src.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +278,37 @@ class PromptBuildPlugin(IInputPlugin):
 
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _current_now(tz: Any) -> datetime:
+        """当前时间（目标时区）。独立为方法便于测试注入。"""
+        return datetime.now(tz)
+
+    def _now_in_configured_tz(self) -> tuple[datetime, str]:
+        """按 settings.timezone 返回 (当前时间, 时区标注后缀)。
+
+        返回的 datetime 已转换到目标时区；后缀形如 "(UTC+8, Asia/Shanghai)"。
+        时区名无效时降级到 UTC 并打 warning。
+
+        Returns:
+            (now, suffix)：now 为目标时区的 aware datetime；suffix 为时区标注字符串。
+        """
+        tz_name = get_settings().timezone
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            logger.warning(
+                "[%s] APP_TIMEZONE=%r 无效，时间注入回退到 UTC",
+                self.name, tz_name,
+            )
+            tz = UTC
+            tz_name = "UTC"
+        now = self._current_now(tz)
+        offset = now.strftime("%z")  # +0800 / -0530 / +0000
+        sign, hh, mm = offset[0], offset[1:3], offset[3:5]
+        # 整小时省略分钟，显示 UTC+8；半时区显示 UTC+5:30
+        offset_fmt = f"UTC{sign}{int(hh)}" + (f":{int(mm)}" if mm != "00" else "")
+        return now, f"({offset_fmt}, {tz_name})"
+
     async def _resolve_single_var_content(  # noqa: PLR0912,PLR0915
         self, ctx: PluginContext, var_def: dict, session_id: str, constraints: dict,
     ) -> str:
@@ -352,9 +385,9 @@ class PromptBuildPlugin(IInputPlugin):
                 content = await self._retrieve_by_tags(ctx, var_def)
 
         elif var_type == "timestamp":
-            now = datetime.now(UTC)
+            now, suffix = self._now_in_configured_tz()
             fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
-            content = now.strftime(fmt)
+            content = f"{now.strftime(fmt)} {suffix}"
 
         elif var_type == "session":
             content = session_id
@@ -966,7 +999,7 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             动态变量消息 dict，或 None（无动态变量时）
         """
-        now = datetime.now(UTC)
+        now, suffix = self._now_in_configured_tz()
         parts: list[str] = []
 
         dynamic_vars_def = ctx.state.get("context.dynamic_vars", [])
@@ -1002,7 +1035,7 @@ class PromptBuildPlugin(IInputPlugin):
 
                 if var_type == "timestamp":
                     fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
-                    parts.append(f"- {var_name}: {now.strftime(fmt)}")
+                    parts.append(f"- {var_name}: {now.strftime(fmt)} {suffix}")
                 elif var_type == "session":
                     parts.append(f"- {var_name}: {session_id}")
                 elif var_type == "agent":
@@ -1020,7 +1053,7 @@ class PromptBuildPlugin(IInputPlugin):
                         parts.append(f"- {var_name}: {content}")
         else:
             parts.append(f"- 日期: {now.strftime('%Y-%m-%d')}")
-            parts.append(f"- 时间: {now.strftime('%H:%M:%S')}")
+            parts.append(f"- 时间: {now.strftime('%H:%M:%S')} {suffix}")
 
             agent_name = ctx.state.get("context.agent_name", "")
             if agent_name:

@@ -226,7 +226,17 @@ class TemplateLoader:
         lines = text.split("\n")
         for line in lines:
             line = line.strip()  # noqa: PLW2901
-            if not line or line.startswith("|") or line.startswith(">"):
+            if not line or line.startswith(">"):
+                continue
+            # 跳过表格分隔行
+            if re.match(r"^\|[\s\-|]+\|$", line):
+                continue
+            # 表格行：取第一列作为场景名，第二列作为说明
+            if line.startswith("|"):
+                cells = [c.strip() for c in line.split("|")]
+                cells = [c for c in cells if c]
+                if len(cells) >= 2:
+                    scenarios.append(f"{cells[0]}：{cells[1]}")
                 continue
             match = re.match(r"[-*]\s+(.+)", line)
             if match:
@@ -371,7 +381,7 @@ class TemplateLoader:
             # 过滤空单元格
             cells = [c for c in cells if c]
             if len(cells) >= 3:
-                name = cells[0].strip()
+                name = cells[0].strip().strip("*").strip()
                 # 跳过表头
                 if name == "维度":
                     continue

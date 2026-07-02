@@ -270,9 +270,14 @@ async def spa_fallback(path: str):
     # 先尝试匹配实际的静态文件
     file_path = STATIC_DIR / path
     if file_path.is_file():
+        # index.html 必须 no-cache：它引用的 JS 文件名带 hash（内容变即重建），
+        # 但若浏览器缓存了旧 index.html，会一直加载旧 hash 的 JS，导致部署后
+        # 前端改动不生效（启发式缓存）。assets 里带 hash 的文件可长期缓存。
+        if file_path.name == "index.html":
+            return FileResponse(str(file_path), headers={"Cache-Control": "no-cache"})
         return FileResponse(str(file_path))
-    # 否则回退到 index.html（SPA 路由）
-    return FileResponse(str(INDEX_HTML))
+    # 否则回退到 index.html（SPA 路由），同样禁用缓存
+    return FileResponse(str(INDEX_HTML), headers={"Cache-Control": "no-cache"})
 
 
 # ---------------------------------------------------------------------------

@@ -77,11 +77,11 @@ Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itse
 
 ```bash
 # Clone the repository
-git clone https://github.com/lingxi-agentos/lingxi-agentos.git
+git clone https://github.com/AI-agent-system/Agent-os.git
 # Or Gitee mirror
-# git clone https://gitee.com/lingxi-agentos/lingxi-agentos.git
+# git clone https://gitee.com/agentos/agent-os.git
 
-cd lingxi-agentos
+cd Agent-os
 
 # Copy environment template
 cp .env.example .env
@@ -124,11 +124,10 @@ npm run dev
 | Document | Description |
 |----------|-------------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture details |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Version roadmap |
+| [ROADMAP.md](ROADMAP.md) | Version roadmap |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |
 | [CHANGELOG.md](CHANGELOG.md) | Changelog |
-| [gitee_sync_guide.md](gitee_sync_guide.md) | GitHub/Gitee dual-mirror sync guide |
 
 ---
 
@@ -136,10 +135,8 @@ npm run dev
 
 For better access from China, this project is also maintained on:
 
-- **GitHub** (Primary): `https://github.com/lingxi-agentos/lingxi-agentos`
-- **Gitee** (Mirror): `https://gitee.com/lingxi-agentos/lingxi-agentos`
-
-See [gitee_sync_guide.md](gitee_sync_guide.md) for sync instructions.
+- **GitHub** (Primary): `https://github.com/AI-agent-system/Agent-os`
+- **Gitee** (Mirror): `https://gitee.com/agentos/agent-os`
 
 ---
 

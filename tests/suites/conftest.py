@@ -104,6 +104,14 @@ def minimax_config():
 # ---------------------------------------------------------------------------
 
 
+class MockAgentConfig:
+    """测试用 Agent 配置 Mock，供 MockAgentRegistry 按 config_id 查找。"""
+
+    def __init__(self, config_id: str, name: str = "") -> None:
+        self.config_id = config_id
+        self.name = name
+
+
 class MockAgentRegistry:
     """测试用 Agent 注册表 Mock。
 

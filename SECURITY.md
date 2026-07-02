@@ -24,11 +24,11 @@
 ### 推荐渠道（按优先级）
 
 1. **GitHub Security Advisories**（推荐）
-   - 访问 https://github.com/lingxi-agentos/lingxi-agentos/security/advisories/new
+   - 访问 https://github.com/AI-agent-system/Agent-os/security/advisories/new
    - 填写漏洞详情（含复现步骤、影响范围、建议修复方案）
 
 2. **邮件**
-   - 发送至：`security@lingxi-agentos.com`（占位，请替换为实际邮箱）
+   - 发送至：`chenjian1306792950@foxmail.com`
    - 邮件主题前缀：`[Security]`
    - 邮件正文使用英文，便于国际安全研究者协作
 

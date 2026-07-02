@@ -121,10 +121,9 @@ defaults:
   stream_idle_timeout: 180
   compression: minimax-m3
   tiers:
-    large: minimax-m3
-    medium: minimax-m3
+    large: glm-5.2
+    medium: glm-5.2
     small: minimax-m3
-    # fallback_chain: {}  # 注释：tiers schema 要求值为 string，空 dict 会致加载失败
 providers:
   zhipu_coding:
     type: zai
@@ -135,11 +134,6 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
-    # - id: zhipu_coding_2       # 注释：ZHIPU_API_KEY_2 未配置，缺失致整个 llm.yaml 加载失败
-    #   api_key: ${ZHIPU_API_KEY_2}
-    #   max_concurrent: 6
-    #   rpm: 10
-    #   token_quota: 0
   zhipu:
     type: zai
     api_base: https://open.bigmodel.cn/api/paas/v4/
@@ -149,11 +143,6 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
-    # - id: zhipu_2              # 注释：ZHIPU_API_KEY_2 未配置
-    #   api_key: ${ZHIPU_API_KEY_2}
-    #   max_concurrent: 6
-    #   rpm: 10
-    #   token_quota: 0
   deepseek:
     type: deepseek
     api_base: https://api.deepseek.com/v1

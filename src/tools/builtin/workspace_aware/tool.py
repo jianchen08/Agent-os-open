@@ -89,6 +89,8 @@ class WorkspaceAwareMixin:
             self._workspace: Path = Path(inputs["workspace"])
         elif inputs.get("project_root"):
             self._workspace: Path = Path(inputs["project_root"])
+        elif getattr(self, "base_path", None):
+            self._workspace: Path = self.base_path
         else:
             self._workspace: Path = Path.cwd()
 

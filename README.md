@@ -78,11 +78,11 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/lingxi-agentos/lingxi-agentos.git
+git clone https://github.com/AI-agent-system/Agent-os.git
 # 或 Gitee 镜像
-# git clone https://gitee.com/lingxi-agentos/lingxi-agentos.git
+# git clone https://gitee.com/agentos/agent-os.git
 
-cd lingxi-agentos
+cd Agent-os
 
 # 复制环境变量模板
 cp .env.example .env
@@ -125,11 +125,10 @@ npm run dev
 | 文档 | 说明 |
 |------|------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | 版本路线图 |
+| [ROADMAP.md](ROADMAP.md) | 版本路线图 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
 | [CHANGELOG.md](CHANGELOG.md) | 变更日志 |
-| [gitee_sync_guide.md](gitee_sync_guide.md) | GitHub/Gitee 双开同步指南 |
 
 ---
 
@@ -137,10 +136,8 @@ npm run dev
 
 为方便国内用户访问，本项目同时在以下平台维护：
 
-- **GitHub**（主仓库）：`https://github.com/lingxi-agentos/lingxi-agentos`
-- **Gitee**（镜像）：`https://gitee.com/lingxi-agentos/lingxi-agentos`
-
-同步指南参见 [gitee_sync_guide.md](gitee_sync_guide.md)。
+- **GitHub**（主仓库）：`https://github.com/AI-agent-system/Agent-os`
+- **Gitee**（镜像）：`https://gitee.com/agentos/agent-os`
 
 ---
 

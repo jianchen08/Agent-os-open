@@ -139,7 +139,7 @@ docs(readme): update quick start for Docker
 ## 📁 项目结构
 
 ```
-lingxi-agentos/
+Agent-os/
 ├── src/                  # 后端源码
 │   ├── modules/         # 业务模块
 │   ├── shared/          # 共享代码
@@ -171,7 +171,7 @@ lingxi-agentos/
 - **GitHub Issues**：Bug 报告、功能请求
 - **GitHub Discussions**：技术讨论、问题求助
 - **Gitee Issues**：国内用户反馈通道
-- 邮件：`dev@lingxi-agentos.com`（占位）
+- 邮件：`chenjian1306792950@foxmail.com`
 
 ---
 

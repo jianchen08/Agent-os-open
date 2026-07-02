@@ -193,8 +193,6 @@ class WebSearchMCPServer {
               numResults: limit,
             });
 
-            // const searchTime = Date.now() - startTime; // Unused for now
-
             // Convert to summary format (no content extraction)
             const summaryResults = searchResponse.results.map(item => ({
               title: item.title,
@@ -291,7 +289,6 @@ class WebSearchMCPServer {
           const title = urlObj.hostname + urlObj.pathname;
 
           // Create content preview and word count
-          // const contentPreview = content.length > 200 ? content.substring(0, 200) + '...' : content; // Unused for now
           const wordCount = content.split(/\s+/).filter(word => word.length > 0).length;
 
           console.error(`[MCP] Single page content extraction completed, extracted ${content.length} characters`);

@@ -1,7 +1,7 @@
 # 灵汐 AgentOS 路线图
 
 > 本文档描述灵汐 AgentOS 的**未来演进方向**。路线图是规划性的，会根据社区反馈和优先级动态调整。
-> 想影响路线图？欢迎在 [Discussions](https://github.com/lingxi-agentos/lingxi-agentos/discussions) 发起讨论。
+> 想影响路线图？欢迎在 [Discussions](https://github.com/AI-agent-system/Agent-os/discussions) 发起讨论。
 
 ---
 
@@ -127,7 +127,7 @@
 - 🌍 **联邦学习** —— 多实例协同训练，提升模型能力而不共享原始数据
 - 🔮 **预测式主动 Agent** —— Agent 主动预测用户需求并提前准备
 
-欢迎在 [Discussions](https://github.com/lingxi-agentos/lingxi-agentos/discussions) 提交你的想法！
+欢迎在 [Discussions](https://github.com/AI-agent-system/Agent-os/discussions) 提交你的想法！
 
 ---
 
@@ -174,11 +174,11 @@
 
 ## 💬 参与方式
 
-- 🐛 [报告 Bug](https://github.com/lingxi-agentos/lingxi-agentos/issues/new?template=bug_report.md)
-- 💡 [功能请求](https://github.com/lingxi-agentos/lingxi-agentos/issues/new?template=feature_request.md)
-- 💬 [参与讨论](https://github.com/lingxi-agentos/lingxi-agentos/discussions)
-- 🪞 国内用户：[Gitee Issues](https://gitee.com/lingxi-agentos/lingxi-agentos/issues)
-- 📧 邮件：`dev@lingxi-agentos.com`（占位）
+- 🐛 [报告 Bug](https://github.com/AI-agent-system/Agent-os/issues/new?template=bug_report.md)
+- 💡 [功能请求](https://github.com/AI-agent-system/Agent-os/issues/new?template=feature_request.md)
+- 💬 [参与讨论](https://github.com/AI-agent-system/Agent-os/discussions)
+- 🪞 国内用户：[Gitee Issues](https://gitee.com/agentos/agent-os/issues)
+- 📧 邮件：`chenjian1306792950@foxmail.com`
 
 ---
 

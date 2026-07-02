@@ -68,7 +68,7 @@ pytest output here
 
 - [ ] README
 - [ ] docs/ARCHITECTURE.md
-- [ ] docs/ROADMAP.md
+- [ ] ROADMAP.md
 - [ ] CHANGELOG.md
 - [ ] 配置文件注释
 - [ ] 无需文档更新

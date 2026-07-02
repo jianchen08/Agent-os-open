@@ -353,7 +353,7 @@ src/channels/
 
 ## 进一步阅读
 
-- [ROADMAP.md](ROADMAP.md) —— 版本路线图与未来方向
+- [ROADMAP.md](../ROADMAP.md) —— 版本路线图与未来方向
 - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 贡献流程
 - [CHANGELOG.md](../CHANGELOG.md) —— 版本变更记录
 
