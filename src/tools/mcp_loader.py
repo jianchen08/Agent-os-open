@@ -415,17 +415,10 @@ class MCPToolLoader:
     async def _connect_server(self, config: MCPServerConfig) -> Any:
         """连接 MCP 服务器
 
-        BUG-FIX-fix_20260406_mcp_web_search
-        问题根因: uvicorn --reload 在 Windows 上使用 SelectorEventLoop（不支持子进程），
-                  asyncio.create_subprocess_exec 抛出 NotImplementedError
-        修复方案: 使用 subprocess.Popen 创建子进程 + asyncio.to_thread 包装 I/O
-        影响范围: 所有 MCP 服务器连接（web-search 等）
-
-        BUG-FIX-fix_20260408_mcp_stale_connection
-        问题根因: 缓存的 MCPClient 子进程可能已退出，但 _connections 缓存未清理，
-                  后续调用 call_tool 时写入 stdin 失败或 readline 超时（60秒）
-        修复方案: 返回缓存连接前检测子进程存活状态，已死则清理并重建连接
-        影响范围: 所有 MCP 服务器连接
+        用 subprocess.Popen 创建子进程并 asyncio.to_thread 包装 I/O（Windows 上
+        uvicorn --reload 的 SelectorEventLoop 不支持 asyncio.create_subprocess_exec）。
+        返回缓存连接前先检测子进程存活状态，已退出则清理缓存并重建连接，避免写入
+        已关闭的 stdin 或等待超时。
         """
         import logging  # noqa: PLC0415
         import sys  # noqa: PLC0415

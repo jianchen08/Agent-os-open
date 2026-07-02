@@ -687,18 +687,8 @@ class TriggerManager:
 
         send_pipeline_message 内部自动处理管道所有状态（运行中/挂起/已关闭）。
 
-
-
-        BUG-FIX-fix_20260525_trigger_check_loop_temp_event_loop:
-
-        问题根因: 之前 _check_loop 是 async task，由 trigger_setup 工具
-
-          在 asyncio.to_thread + asyncio.run() 创建的临时事件循环上启动。
-
-          工具返回后临时循环关闭，_check_loop 被取消，触发器永远不会触发。
-
-        修复方案: 改为 threading.Thread + time.sleep，完全独立于事件循环。
-
+        _check_loop 运行在独立 threading.Thread + time.sleep 上，完全独立于事件循环，
+        避免 trigger_setup 工具在临时事件循环上启动的 async task 随循环关闭而被取消。
         """
 
         logger.info("[TriggerManager] 后台检查循环已启动(线程)")

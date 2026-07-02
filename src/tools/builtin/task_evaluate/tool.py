@@ -1022,9 +1022,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         每次 task_evaluate 工具被调用时执行，用于实现全局调用次数上限。
         计数值存储在 task.metadata["eval_total_calls"] 中。
-
-        BUG-FIX-fix_20260513_eval_sequential_retry:
-        防止 Agent 无限循环调用评估工具，超过上限直接标记任务失败。
+        超过上限直接标记任务失败，防止 Agent 无限循环调用评估工具。
 
         Args:
             task: TaskModel 实例
@@ -1064,13 +1062,8 @@ class TaskEvaluateTool(BuiltinTool):
         对于 input_params 为空的指标，自动从任务描述中构建 criteria。
         对于工具型评估指标（如 file_check），自动注入 workspace 参数，
         确保评估工具在正确的工作目录下解析文件路径。
-
-        BUG-FIX-fix_20260419_eval_workspace:
-        问题根因: file_check 评估器调用 file_read 时未传递 workspace，
-                 导致 file_read 在项目根目录而非任务工作空间中查找文件，
-                 文件路径解析错误使评估永远失败。
-        修复方案: 从 task.metadata 解析 workspace 绝对路径，注入到工具型评估指标的参数中。
-        影响范围: 所有使用工具型评估指标（file_check 等）的任务评估
+        从 task.metadata 解析 workspace 绝对路径，注入到工具型评估指标的参数中，
+        使 file_read 等工具在任务工作空间而非项目根目录查找文件。
 
         Args:
             task: TaskModel 实例
@@ -1217,11 +1210,8 @@ class TaskEvaluateTool(BuiltinTool):
         """从 TaskService 推断当前活跃的 task_id。
 
         当 task_id 未通过注入获取时，尝试从 TaskService 中
-        查找当前处于 RUNNING 或 EVALUATING 状态的任务作为 fallback。
-
-        BUG-FIX-fix_20260418_task_inject: 扩展推断范围
-        问题根因: 原仅查 RUNNING 状态，任务可能已转为 EVALUATING
-        修复方案: 覆盖 RUNNING + EVALUATING 两种状态
+        查找当前处于 RUNNING 或 EVALUATING 状态的任务作为 fallback
+        （任务可能在评估期间从 RUNNING 转为 EVALUATING，需同时覆盖两种状态）。
 
         Args:
             task_service: TaskService 实例

@@ -86,12 +86,8 @@ class SchemaEvaluator:
     def _detect_format(self, path: str | None, data: Any) -> str:
         """根据文件扩展名或数据类型自动检测格式。
 
-        BUG-FIX-fix_20260607_format_valid_json_default:
-        问题根因: default_config 中 format 固定为 json，导致所有格式文件（YAML、Markdown等）
-                 都以 JSON 格式校验，非 JSON 文件必然失败。
-        修复方案: 新增 auto 格式类型，根据文件扩展名自动推断校验格式；
-                 有 path 时按扩展名映射，无 path 时按数据类型推断。
-        影响范围: 所有使用 format_valid 评估指标的任务评估
+        auto 格式类型按文件扩展名映射校验格式（有 path 时），
+        或按数据类型推断（无 path 时），避免所有文件都以 JSON 格式校验。
 
         Args:
             path: 文件路径（可能为 None）
