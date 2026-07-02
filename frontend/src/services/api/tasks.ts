@@ -243,8 +243,25 @@ export async function createRootTask(payload: {
   isolation_level?: string
   inherit?: Record<string, unknown>
   thread_id: string
+  parent_task_id?: string
 }): Promise<TaskInfo> {
   const response = await apiClient.post<TaskInfo>(API_ENDPOINTS.TASKS.CREATE_ROOT, payload)
+  return response.data
+}
+
+/**
+ * 列出会话的容器任务（供新建子任务选父容器）
+ *
+ * @param sessionId 会话 ID（=thread_id）
+ * @returns 容器任务列表（id + title）
+ */
+export async function getContainerTasks(
+  sessionId: string,
+): Promise<Array<{ id: string; title: string }>> {
+  const response = await apiClient.get<Array<{ id: string; title: string }>>(
+    API_ENDPOINTS.TASKS.CONTAINERS,
+    { params: { session_id: sessionId } },
+  )
   return response.data
 }
 

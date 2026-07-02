@@ -67,12 +67,27 @@ def client(mock_auth):
         yield c
 
 
+def _make_container_parent(task_id="c-parent-001", title="父容器"):
+    """构造一个容器父任务（task_scope=container），供子任务挂载测试。"""
+    from tasks.types import TaskModel, TaskStatus  # noqa: PLC0415
+
+    return TaskModel(
+        id=task_id,
+        title=title,
+        description="",
+        status=TaskStatus.RUNNING,
+        target_type=None,
+        metadata={"task_scope": "container"},
+    )
+
+
 @contextmanager
-def patched_downstream(task_model=None, active_pipeline_id="pipe-main-001", session_exists=True):
+def patched_downstream(task_model=None, active_pipeline_id="pipe-main-001", session_exists=True, parent_task=None):
     """统一 patch 下游依赖（task_service / 会话 / submit）。
 
     _submit_task_event 直接 patch 为 AsyncMock，断言其被调用（提交执行契约），
     不深入其内部 task_worker 解析——那是 _submit_task_event 自己的单元测试范围。
+    parent_task 非空时，task_service.get_task 返回该父任务（供子任务挂载测试）。
     返回 dict，含 task_service / task_model / submit_mock / session 句柄。
     """
     task_model = task_model or _make_task_model()
@@ -80,6 +95,8 @@ def patched_downstream(task_model=None, active_pipeline_id="pipe-main-001", sess
     task_service = MagicMock()
     task_service.create_task = AsyncMock(return_value=task_model)
     task_service.bind_pipeline_run = AsyncMock(return_value=None)
+    task_service.get_task = MagicMock(return_value=parent_task)
+    task_service.list_all = AsyncMock(return_value=[])
 
     submit_mock = AsyncMock(return_value=True)
 
@@ -239,3 +256,82 @@ class TestCreateRootTaskSessionPipe:
         assert resp.status_code == 201
         _kwargs = dep["task_service"].create_task.call_args.kwargs
         assert _kwargs["parent_pipeline_id"] is None
+
+
+# ============================================================
+# Test: 容器子任务（parent_task_id）
+# ============================================================
+
+
+class TestCreateChildTask:
+    """容器子任务：挂到容器父任务下，workspace 继承。"""
+
+    def test_child_task_attaches_to_container_parent(self, client):
+        """指定 parent_task_id（容器父任务）→ 挂为子任务，is_root=False。"""
+        parent = _make_container_parent()
+        with patched_downstream(parent_task=parent) as dep:
+            resp = client.post("/api/v1/tasks/root", json={
+                "title": "子任务",
+                "task_scope": "non_container",
+                "target_id": "agent-x",
+                "thread_id": "thread-1",
+                "parent_task_id": "c-parent-001",
+            })
+
+        assert resp.status_code == 201, resp.text
+        # create_task 收到 parent_task_id
+        _kwargs = dep["task_service"].create_task.call_args.kwargs
+        assert _kwargs["parent_task_id"] == "c-parent-001"
+        # 父任务被查询校验
+        dep["task_service"].get_task.assert_called_with("c-parent-001")
+        # 提交时 is_root=False（子任务共享父容器 ws）
+        dep["submit_mock"].assert_awaited_once()
+        assert dep["submit_mock"].call_args.kwargs["is_root"] is False
+
+    def test_child_rejects_non_container_parent(self, client):
+        """父任务不是 container → 拒绝。"""
+        # parent_task=None 时 get_task 返回 None（不存在）
+        with patched_downstream():
+            resp = client.post("/api/v1/tasks/root", json={
+                "title": "子任务",
+                "task_scope": "non_container",
+                "target_id": "agent-x",
+                "thread_id": "thread-1",
+                "parent_task_id": "ghost-parent",
+            })
+
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "PARENT_TASK_NOT_FOUND"
+
+
+# ============================================================
+# Test: 容器任务列表接口
+# ============================================================
+
+
+class TestListContainers:
+    """GET /api/v1/tasks/containers — 返回会话的容器任务。"""
+
+    def test_list_containers_filters_container_scope(self, client):
+        """只返回 task_scope=container 的任务。"""
+        from tasks.types import TaskModel, TaskStatus
+
+        # 混合：一个容器 + 一个非容器
+        container = TaskModel(id="c1", title="容器A", status=TaskStatus.RUNNING,
+                              metadata={"task_scope": "container"})
+        plain = TaskModel(id="t1", title="普通任务", status=TaskStatus.PENDING,
+                          metadata={"task_scope": "non_container"})
+
+        with patched_downstream() as dep:
+            dep["task_service"].list_all = AsyncMock(return_value=[container, plain])
+            resp = client.get("/api/v1/tasks/containers", params={"session_id": "thread-1"})
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["id"] == "c1"
+        assert items[0]["title"] == "容器A"
+        dep["task_service"].list_all.assert_awaited_once()
+        # list_all 收到 session_id
+        assert dep["task_service"].list_all.call_args.kwargs.get("session_id") == "thread-1"
+

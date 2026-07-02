@@ -630,6 +630,44 @@ async def create_root_task(
 
             )
 
+    # ── 父容器校验（挂子任务时）：父任务必须存在且为 container ──
+
+    parent_task_id = body.parent_task_id or None
+
+    is_child = False
+
+    if parent_task_id:
+
+        _parent = task_service.get_task(parent_task_id)
+
+        if _parent is None:
+
+            raise APIError(
+
+                status_code=400,
+
+                error_code="PARENT_TASK_NOT_FOUND",
+
+                message=f"父任务不存在: {parent_task_id}",
+
+            )
+
+        _parent_scope = (_parent.metadata or {}).get("task_scope", "non_container")
+
+        if _parent_scope != "container":
+
+            raise APIError(
+
+                status_code=400,
+
+                error_code="PARENT_NOT_CONTAINER",
+
+                message=f"父任务必须是容器（container）任务，当前 scope: {_parent_scope}",
+
+            )
+
+        is_child = True
+
     # ── 复用当前会话和主管道 ──
 
     thread_id = body.thread_id
@@ -685,6 +723,8 @@ async def create_root_task(
             title=body.title,
 
             description=body.description or "",
+
+            parent_task_id=parent_task_id,
 
             parent_pipeline_id=active_pipeline_id or None,
 
@@ -750,9 +790,58 @@ async def create_root_task(
 
     # ── 提交执行（container/non_container 都复用现有 _submit_task_event） ──
 
-    await _submit_task_event(task_id, task_service)
+    # 子任务（父是 container）is_root=False，task_executor 兜底走 _start_subtask 共享父容器 ws
+
+    await _submit_task_event(task_id, task_service, is_root=not is_child)
 
     return _task_to_response(task)
+
+
+
+
+@router.get(
+
+    "/containers",
+
+    summary="列出会话的容器任务（供新建子任务选父容器）",
+
+)
+
+async def list_container_tasks(
+
+    session_id: str = Query(..., description="会话 ID（=thread_id）"),
+
+    _user: dict = Depends(require_auth),
+
+) -> list[dict[str, Any]]:
+
+    """返回当前会话下所有 task_scope=container 的任务，供前端下拉选父容器。"""
+
+    task_service = _get_task_service()
+
+    if task_service is None:
+
+        return []
+
+    containers: list[dict[str, Any]] = []
+
+    try:
+
+        tasks = await task_service.list_all(limit=1000, session_id=session_id)
+
+        for tm in tasks:
+
+            _meta = tm.metadata or {}
+
+            if _meta.get("task_scope") == "container":
+
+                containers.append({"id": tm.id, "title": tm.title})
+
+    except Exception as exc:
+
+        logger.warning("[list_container_tasks] 加载失败 | session=%s | error=%s", session_id, exc)
+
+    return containers
 
 
 
@@ -1920,7 +2009,7 @@ async def cancel_task(
 
 
 
-async def _submit_task_event(task_id: str, task_service: Any) -> bool:
+async def _submit_task_event(task_id: str, task_service: Any, is_root: bool = True) -> bool:
 
     """通过 task_worker 直接提交任务事件。"""
 
@@ -1963,6 +2052,8 @@ async def _submit_task_event(task_id: str, task_service: Any) -> bool:
             "acceptance_criteria": metadata.get("acceptance_criteria", {}),
 
             "workspace": metadata.get("workspace", ""),
+
+            "is_root": is_root,
 
         })
 

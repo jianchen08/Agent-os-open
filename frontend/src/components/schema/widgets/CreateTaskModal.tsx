@@ -12,7 +12,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/ui/Modal'
 import { useAgentStore } from '@/stores/agentStore'
-import { createRootTask } from '@/services/api/tasks'
+import { createRootTask, getContainerTasks } from '@/services/api/tasks'
 
 interface CreateTaskModalProps {
   /** 是否打开 */
@@ -49,6 +49,8 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
     const [workspace, setWorkspace] = useState('')
     const [isolationLevel, setIsolationLevel] = useState('')
     const [isSubmitting, setIsSubmitting] = useState(false)
+    const [parentTaskId, setParentTaskId] = useState('')
+    const [containers, setContainers] = useState<Array<{ id: string; title: string }>>([])
 
     const agents = useAgentStore((state) => state.agents)
     const availableAgents = useMemo(
@@ -56,7 +58,10 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
       [agents],
     )
 
-    // 打开时重置字段
+    // 选了父容器 → 子任务必然 non_container，workspace 继承父容器（隐藏该字段）
+    const isChildTask = parentTaskId.trim().length > 0
+
+    // 打开时重置字段 + 拉取当前会话的容器任务（供选父容器）
     useEffect(() => {
       if (isOpen) {
         setTitle('')
@@ -65,28 +70,41 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
         setTargetId('')
         setWorkspace('')
         setIsolationLevel('')
+        setParentTaskId('')
+        if (sessionId) {
+          getContainerTasks(sessionId)
+            .then(setContainers)
+            .catch(() => setContainers([]))
+        }
       }
-    }, [isOpen])
+    }, [isOpen, sessionId])
 
-    // 非容器任务必须指定执行 agent
+    // 容器根任务无需 agent；非容器/子任务必须指定执行 agent
+    const needsAgent = isChildTask || taskScope === 'non_container'
     const canSubmit =
-      title.trim().length > 0 && (taskScope === 'container' || targetId.trim().length > 0)
+      title.trim().length > 0 && (!needsAgent || targetId.trim().length > 0)
 
     const handleSubmit = useCallback(async () => {
       if (!canSubmit || isSubmitting || !sessionId) return
       setIsSubmitting(true)
       try {
+        const effectiveScope = isChildTask ? 'non_container' : taskScope
         await createRootTask({
           title: title.trim(),
           description: description.trim(),
-          task_scope: taskScope,
-          target_id: taskScope === 'non_container' ? targetId.trim() : '',
+          task_scope: effectiveScope,
+          target_id: effectiveScope === 'non_container' ? targetId.trim() : '',
           workspace: workspace.trim(),
           isolation_level: isolationLevel,
           thread_id: sessionId,
+          parent_task_id: parentTaskId.trim() || undefined,
         })
         toast.success(
-          taskScope === 'container' ? '工作空间已创建' : '任务已创建并开始执行',
+          isChildTask
+            ? '子任务已创建，工作空间继承父容器'
+            : taskScope === 'container'
+              ? '工作空间已创建'
+              : '任务已创建并开始执行',
         )
         onCreated()
         onClose()
@@ -99,7 +117,8 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
       }
     }, [
       canSubmit, isSubmitting, sessionId,
-      title, description, taskScope, targetId, workspace, isolationLevel,
+      title, description, taskScope, targetId, workspace, isolationLevel, parentTaskId,
+      isChildTask,
       onCreated, onClose,
     ])
 
@@ -136,21 +155,43 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
             />
           </div>
 
-          {/* 任务类型 */}
+          {/* 父容器（可选）：选了则挂为该容器的子任务，workspace 自动继承 */}
+          {containers.length > 0 && (
+            <div>
+              <label className="text-foreground mb-1 block text-sm font-medium">
+                父容器（可选，选则挂为子任务）
+              </label>
+              <select
+                value={parentTaskId}
+                onChange={(e) => setParentTaskId(e.target.value)}
+                className={fieldClass}
+              >
+                <option value="">无（创建根任务）</option>
+                {containers.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* 任务类型（选了父容器则锁定为非容器子任务） */}
           <div>
             <label className="text-foreground mb-1 block text-sm font-medium">任务类型</label>
             <select
-              value={taskScope}
+              value={isChildTask ? 'non_container' : taskScope}
               onChange={(e) => setTaskScope(e.target.value as 'container' | 'non_container')}
               className={fieldClass}
+              disabled={isChildTask}
             >
               <option value="non_container">非容器（直接执行）</option>
               <option value="container">容器（工作空间集合）</option>
             </select>
           </div>
 
-          {/* 执行 Agent（仅非容器） */}
-          {taskScope === 'non_container' && (
+          {/* 执行 Agent（非容器：根任务非容器 或 子任务） */}
+          {(isChildTask || taskScope === 'non_container') && (
             <div>
               <label className="text-foreground mb-1 block text-sm font-medium">执行 Agent</label>
               <select
@@ -168,19 +209,23 @@ export const CreateTaskModal = memo<CreateTaskModalProps>(
             </div>
           )}
 
-          {/* 工作空间（可选） */}
-          <div>
-            <label className="text-foreground mb-1 block text-sm font-medium">
-              工作空间（可选）
-            </label>
-            <input
-              type="text"
-              value={workspace}
-              onChange={(e) => setWorkspace(e.target.value)}
-              className={fieldClass}
-              placeholder="留空使用默认工作空间..."
-            />
-          </div>
+          {/* 工作空间（子任务继承父容器，不显示） */}
+          {isChildTask ? (
+            <p className="text-muted-foreground text-xs">工作空间将自动继承所选父容器</p>
+          ) : (
+            <div>
+              <label className="text-foreground mb-1 block text-sm font-medium">
+                工作空间（可选）
+              </label>
+              <input
+                type="text"
+                value={workspace}
+                onChange={(e) => setWorkspace(e.target.value)}
+                className={fieldClass}
+                placeholder="留空使用默认工作空间..."
+              />
+            </div>
+          )}
 
           {/* 隔离模式 */}
           <div>

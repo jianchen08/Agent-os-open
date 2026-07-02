@@ -195,6 +195,7 @@ class TaskRootCreate(BaseModel):
     isolation_level: str = ""           # plain/worktree/shared
     inherit: dict[str, Any] | None = None
     thread_id: str                      # 复用当前会话 → 取主管道 + 作 session_id
+    parent_task_id: str | None = None   # 父容器任务 ID；有值则挂为子任务，workspace 继承父容器
 
 
 class TaskUpdate(BaseModel):

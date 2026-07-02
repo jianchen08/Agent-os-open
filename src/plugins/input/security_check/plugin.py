@@ -173,9 +173,9 @@ class SecurityCheckPlugin(IInputPlugin):
         隔离即放行，裸操作才审批：
         1. 基础安全检查（路径遍历 / 敏感系统目录黑名单）→ 任何模式都必须执行，
            这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
-        2. 已隔离（docker 容器，或 ws_meta.mode 为 worktree/project_root/branch）
-           → 基础检查通过后一路绿灯（操作的是独立副本，不污染原项目）
-        3. 裸操作（host/shared/plain，无隔离副本）按工具是否危险决定：
+        2. 已 docker 隔离（所有工具 provider 均为 docker）
+           → 基础检查通过后一路绿灯
+        3. 非 docker 隔离按工具是否危险决定：
            - 非危险工具 → 放行
            - 危险工具（command_in_container 或声明了 dangerous_operations）：
              参数命中白名单（action=allow）→ 放行（allow 优先于其它规则）
@@ -234,14 +234,13 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第二道：按模式分流 ──
 
-        # 已隔离即放行：docker 容器或 ws_meta.mode 为隔离副本（worktree/project_root/branch）
-        # 直接读任务的隔离真相，不靠 provider==docker 反推——worktree 等隔离模式下
-        # 文件工具 provider 仍是 host，但它们操作的已是独立 git 副本，无需审批。
-        if self._is_isolated(ctx, execution_contexts):
-            logger.info("[%s] 已隔离（容器/worktree），基础检查通过，放行", self.name)
-            return {"security.decision": {"allowed": True, "reason": "isolated workspace, base checks passed"}}
+        # 已 docker 隔离即放行：isolation_level 只决定是否用 docker 隔离，
+        # 工作空间副本（worktree/shared 等）不参与隔离审批判定。
+        if self._is_isolated(execution_contexts):
+            logger.info("[%s] 已 docker 隔离，基础检查通过，放行", self.name)
+            return {"security.decision": {"allowed": True, "reason": "isolated by docker, base checks passed"}}
 
-        # 裸操作（host/shared/plain）：逐个检查工具调用的参数
+        # 非 docker 隔离：逐个检查工具调用的参数
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
@@ -860,93 +859,21 @@ class SecurityCheckPlugin(IInputPlugin):
         dangerous_ops = self._get_dangerous_operations(ctx, tool_name)
         return bool(dangerous_ops)
 
-    # worktree/project_root/branch 都是独立 git 副本，操作不污染原项目。
-    # shared(host 直接操作项目目录)/plain(空目录) 是裸操作，必须审批。
-    _ISOLATED_WS_MODES: frozenset[str] = frozenset({"worktree", "project_root", "branch"})
+    def _is_isolated(self, execution_contexts: list[dict[str, Any]]) -> bool:
+        """判断当前任务是否在 docker 隔离环境中执行。
 
-    def _is_isolated(self, ctx: PluginContext, execution_contexts: list[dict[str, Any]]) -> bool:
-        """判断当前任务是否在隔离环境中执行。
-
-        隔离真相有三个来源（满足任一即隔离）：
-        1. docker 容器：所有工具 execution_contexts 的 provider 均为 docker
-        2. 工作空间隔离副本：task.metadata.ws_meta.mode ∈ {worktree, project_root, branch}
-        3. 隔离继承：子任务共享父任务的隔离副本目录，其 ws_meta 携带
-           inherited_isolated 标记（由 workspace_lifecycle._start_subtask 写入）。
-           子任务 mode 保持 shared 以免触发独立 merge/cleanup，但其操作同样落在
-           隔离副本内，应与父任务同等放行。
-
-        不靠 provider==docker 单一反推——worktree 等模式下文件工具 provider 仍是 host，
-        但它们操作的是独立 git 副本，应与 docker 同等放行。
+        isolation_level 只决定是否用 docker 隔离，工作空间副本（worktree/shared 等）
+        不参与隔离审批判定。
 
         Args:
-            ctx: 插件执行上下文
             execution_contexts: isolation_guard 写入的工具执行上下文列表
 
         Returns:
-            True=已隔离（放行），False=裸操作（危险工具需审批）
+            True=已 docker 隔离（放行），False=非 docker（危险工具需审批）
         """
-        # 来源 1：docker 容器（保留原判定）
-        if execution_contexts and all(
+        return bool(execution_contexts) and all(
             c.get("provider") == "docker" for c in execution_contexts
-        ):
-            return True
-
-        # 来源 2/3：工作空间隔离真相（直接读任务 ws_meta）
-        ws_meta = self._get_ws_meta(ctx)
-        # 来源 3：子任务继承了父任务的隔离副本
-        if ws_meta and ws_meta.get("inherited_isolated"):
-            return True
-        # 来源 2：本任务自身即为隔离副本
-        ws_mode = (ws_meta or {}).get("mode", "")
-        return ws_mode in self._ISOLATED_WS_MODES
-
-    def _get_ws_meta(self, ctx: PluginContext) -> dict[str, Any] | None:
-        """读取当前任务的完整 ws_meta 字典。
-
-        通过 task_id → task_service → task.metadata.ws_meta 取值，
-        与 isolation_guard._get_task_metadata 同一模式。取不到时返回 None，
-        调用方按未隔离（需审批）处理。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            ws_meta 字典（含 mode / inherited_isolated 等），不可用时为 None
-        """
-        task_id = ctx.state.get(StateKeys.TASK_ID, "")
-        if not task_id:
-            return None
-
-        try:
-            task_service = ctx.get_service("task_service")
-        except KeyError:
-            return None
-
-        try:
-            task = task_service.get_task(task_id)
-        except Exception as e:
-            logger.debug(
-                "[%s] 读取 task ws_meta 失败 | task_id=%s | error=%s",
-                self.name, task_id, e,
-            )
-            return None
-
-        if task and task.metadata:
-            ws_meta = task.metadata.get("ws_meta")
-            if isinstance(ws_meta, dict):
-                return ws_meta
-        return None
-
-    def _get_ws_mode(self, ctx: PluginContext) -> str:
-        """从当前任务的 ws_meta.mode 读取工作空间隔离模式（_get_ws_meta 的薄封装）。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            ws_meta.mode 值（如 worktree/project_root/shared/plain），不可用时为空串
-        """
-        return (self._get_ws_meta(ctx) or {}).get("mode", "") or ""
+        )
 
     @staticmethod
     def _get_dangerous_operations(
