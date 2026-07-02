@@ -506,6 +506,7 @@ function HomePage(): ReactNode {
       </div>
 
       <SessionEditModal
+        mode="edit"
         isOpen={!!editingSessionId}
         session={editingSession}
         onClose={handleCloseEditModal}

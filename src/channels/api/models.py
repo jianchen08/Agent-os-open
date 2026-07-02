@@ -180,6 +180,23 @@ class TaskCreate(BaseModel):
     input_data: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaskRootCreate(BaseModel):
+    """手动创建根任务请求模型。
+
+    用户以 L1 身份手动发起一项工作（等价于 L1 主 agent 调 task_submit 提根任务），
+    为 L2+ 子 agent 提供合法的任务上下文。acceptance_criteria 默认空，继承规则
+    与 task_submit 一致。
+    """
+    title: str
+    description: str = ""
+    task_scope: str = "non_container"   # "container" | "non_container"
+    target_id: str = ""                 # 非容器必填（执行 agent）；容器为空
+    workspace: str = ""
+    isolation_level: str = ""           # plain/worktree/shared
+    inherit: dict[str, Any] | None = None
+    thread_id: str                      # 复用当前会话 → 取主管道 + 作 session_id
+
+
 class TaskUpdate(BaseModel):
     """更新任务请求模型。"""
     title: str | None = None

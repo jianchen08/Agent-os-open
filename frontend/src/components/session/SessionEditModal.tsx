@@ -60,15 +60,6 @@ export const SessionEditModal = memo<SessionEditModalProps>(
         if (mode === 'edit' && session) {
           setTitle(session.title || '')
           setSelectedAgentId(session.agentId || defaultAgentId)
-          // [诊断临时日志] 定位"打开编辑框永远显示灵汐"的根因
-          const optionValues = availableAgents.map((a) => a.configId || a.id)
-          console.log('[诊断 SessionEditModal] 打开编辑框', {
-            sessionAgentId: session.agentId,
-            defaultAgentId,
-            agentsCount: availableAgents.length,
-            optionValues,
-            能否匹配: session.agentId ? optionValues.includes(session.agentId) : 'agentId为空→走default',
-          })
         } else {
           setTitle('新会话')
           setSelectedAgentId(defaultAgentId)
@@ -122,8 +113,6 @@ export const SessionEditModal = memo<SessionEditModalProps>(
                   </option>
                 ))}
               </select>
-              {/* [诊断临时] 捕获渲染时 select 的匹配状态 */}
-              <input type="hidden" data-diag-selected={selectedAgentId} data-diag-options={availableAgents.map((a) => a.configId || a.id).join(',')} />
             </div>
           </div>
 

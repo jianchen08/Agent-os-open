@@ -7,6 +7,11 @@
 
 根因：原实现推送的是 _collect_token_usage 的累计 total_tokens（跨轮相加），
 多轮时越加越大；且不带 pipeline_id，前端无法分桶 → 进度条恒为 0。
+
+二次根因（运行时确诊）：原代码用 state.get("thread_id") 做发送守卫，
+但 thread_id 不是 state 标准字段（恒为空），导致 if thread_id 直接跳过发送。
+真实会话标识是 session_id；TargetedSink 可按 pipeline_id 从 registry 自解析，
+不需要 thread_id 守卫。本测试覆盖 session_id 和无 session_id 两种路径。
 """
 
 import asyncio
@@ -39,23 +44,12 @@ def _make_ctx(state: dict[str, Any]) -> PluginContext:
     return PluginContext(state=state, config={})
 
 
-def _patch_notifier_and_sink(events_out: list[dict[str, Any]]):
-    """patch ws_interaction_notifier + create_targeted_sink，把推送的事件记入 events_out。
-
-    create_targeted_sink 返回一个 send_event 是 AsyncMock 的假 sink。
-    """
-    fake_sink = _FakeSink(events_out)
-    return (
-        patch("channels.websocket.ws_handler.ws_interaction_notifier", object()),
-        patch("pipeline.stream_bridge.create_targeted_sink", return_value=fake_sink),
-    )
-
-
 class _FakeSink:
-    """假 sink：记录所有 send_event 收到的事件。"""
+    """假 sink：记录所有 send_event 收到的事件 + sink 构造参数。"""
 
-    def __init__(self, events: list[dict[str, Any]]) -> None:
+    def __init__(self, events: list[dict[str, Any]], calls: list[tuple]) -> None:
         self._events = events
+        self._calls = calls
         self.send_event = AsyncMock(side_effect=self._record)
 
     async def _record(self, event: dict[str, Any]) -> bool:
@@ -63,12 +57,27 @@ class _FakeSink:
         return True
 
 
-def test_cost_update_carries_single_round_tokens_and_pipeline_id():
-    """llm_call 轮：cost_update 必须含 pipeline_id + 单轮 total/input/output tokens。"""
-    plugin = TrackPlugin()
+def _patch_notifier_and_sink(events_out: list[dict[str, Any]], calls_out: list[tuple]):
+    """patch ws_interaction_notifier + create_targeted_sink。
+
+    create_targeted_sink 返回假 sink，并把构造参数记入 calls_out，
+    便于断言传入的 session_id / pipeline_id。
+    """
+    def _factory(notifier, thread_id="", pipeline_id="", user_id=""):
+        calls_out.append((thread_id, pipeline_id))
+        return _FakeSink(events_out, calls_out)
+
+    return (
+        patch("channels.websocket.ws_handler.ws_interaction_notifier", object()),
+        patch("pipeline.stream_bridge.create_targeted_sink", side_effect=_factory),
+    )
+
+
+# 真实 state 标准字段是 session_id，不是 thread_id
+def _base_state(**overrides: Any) -> dict[str, Any]:
     state = {
         "core_type": "llm_call",
-        "thread_id": "thread_001",
+        "session_id": "session_001",
         "pipeline_id": PIPELINE_ID,
         "llm_usage": {
             "input_tokens": 1200,
@@ -77,10 +86,18 @@ def test_cost_update_carries_single_round_tokens_and_pipeline_id():
             "cached_tokens": 0,
         },
     }
-    ctx = _make_ctx(state)
-    events: list[dict[str, Any]] = []
+    state.update(overrides)
+    return state
 
-    notifier_patch, sink_patch = _patch_notifier_and_sink(events)
+
+def test_cost_update_carries_single_round_tokens_and_pipeline_id():
+    """llm_call 轮：cost_update 必须含 pipeline_id + 单轮 total/input/output tokens。"""
+    plugin = TrackPlugin()
+    ctx = _make_ctx(_base_state())
+    events: list[dict[str, Any]] = []
+    calls: list[tuple] = []
+
+    notifier_patch, sink_patch = _patch_notifier_and_sink(events, calls)
     with notifier_patch, sink_patch:
         _run(plugin._try_notify_cost_update(ctx))
 
@@ -93,19 +110,31 @@ def test_cost_update_carries_single_round_tokens_and_pipeline_id():
     assert data["output_tokens"] == 300
 
 
+def test_cost_update_passes_session_id_to_sink():
+    """会话标识 session_id 必须传给 create_targeted_sink 的 thread_id 参数。"""
+    plugin = TrackPlugin()
+    ctx = _make_ctx(_base_state(session_id="sess_xyz"))
+    events: list[dict[str, Any]] = []
+    calls: list[tuple] = []
+
+    notifier_patch, sink_patch = _patch_notifier_and_sink(events, calls)
+    with notifier_patch, sink_patch:
+        _run(plugin._try_notify_cost_update(ctx))
+
+    assert len(calls) == 1
+    thread_id_arg, pipeline_id_arg = calls[0]
+    assert thread_id_arg == "sess_xyz", "应把 session_id 作为会话标识传入 sink"
+    assert pipeline_id_arg == PIPELINE_ID
+
+
 def test_cost_update_skipped_on_tool_execute_round():
     """tool_execute 轮不推送 cost_update（llm_usage 是上一轮残留，避免错误覆盖）。"""
     plugin = TrackPlugin()
-    state = {
-        "core_type": "tool_execute",
-        "thread_id": "thread_001",
-        "pipeline_id": PIPELINE_ID,
-        "llm_usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
-    }
-    ctx = _make_ctx(state)
+    ctx = _make_ctx(_base_state(core_type="tool_execute"))
     events: list[dict[str, Any]] = []
+    calls: list[tuple] = []
 
-    notifier_patch, sink_patch = _patch_notifier_and_sink(events)
+    notifier_patch, sink_patch = _patch_notifier_and_sink(events, calls)
     with notifier_patch, sink_patch:
         _run(plugin._try_notify_cost_update(ctx))
 
@@ -120,27 +149,17 @@ def test_cost_update_not_accumulated_across_rounds():
     """
     plugin = TrackPlugin()
 
-    # 第一轮
-    state_r1 = {
-        "core_type": "llm_call",
-        "thread_id": "thread_001",
-        "pipeline_id": PIPELINE_ID,
-        "llm_usage": {"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200},
-    }
+    state_r1 = _base_state(llm_usage={"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200})
     events_r1: list[dict[str, Any]] = []
-    n1, s1 = _patch_notifier_and_sink(events_r1)
+    calls_r1: list[tuple] = []
+    n1, s1 = _patch_notifier_and_sink(events_r1, calls_r1)
     with n1, s1:
         _run(plugin._try_notify_cost_update(_make_ctx(state_r1)))
 
-    # 第二轮（llm_usage 更新为新的单轮值，不是叠加）
-    state_r2 = {
-        "core_type": "llm_call",
-        "thread_id": "thread_001",
-        "pipeline_id": PIPELINE_ID,
-        "llm_usage": {"input_tokens": 1800, "output_tokens": 100, "total_tokens": 1900},
-    }
+    state_r2 = _base_state(llm_usage={"input_tokens": 1800, "output_tokens": 100, "total_tokens": 1900})
     events_r2: list[dict[str, Any]] = []
-    n2, s2 = _patch_notifier_and_sink(events_r2)
+    calls_r2: list[tuple] = []
+    n2, s2 = _patch_notifier_and_sink(events_r2, calls_r2)
     with n2, s2:
         _run(plugin._try_notify_cost_update(_make_ctx(state_r2)))
 

@@ -321,8 +321,6 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     try {
       const updatedSession = await updateSessionAgentApi(sessionId, agentId)
-      // [诊断临时日志] 确认 PATCH 返回的 agentId 是否为新值
-      console.log('[诊断 updateSessionAgent] 入参 agentId=%s, API返回 agentId=%s', agentId, updatedSession.agentId)
 
       useSessionStore.setState((state) => ({
         sessions: state.sessions.map((session) =>
@@ -337,10 +335,6 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         isLoading: false,
         error: null,
       }))
-
-      // [诊断临时日志] 确认 sessionStore 更新后的实际值
-      const afterSession = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
-      console.log('[诊断 updateSessionAgent] sessionStore更新后 agentId=%s, sessions总数=%d', afterSession?.agentId, useSessionStore.getState().sessions.length)
 
       // 同步刷新当前活跃会话主 Tab 的 agentId，使编辑保存后主 Tab 按钮立即
       // 显示新绑定的 Agent 名称（渲染层 ChatContainer 按 agentId 实时解析名称）。

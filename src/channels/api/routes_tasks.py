@@ -25,6 +25,7 @@ from channels.api.models import (
     TaskEvaluateResponse,
     TaskListResponse,
     TaskResponse,
+    TaskRootCreate,
     TaskSubmitResponse,
     TaskUpdate,
 )
@@ -536,6 +537,222 @@ async def create_task(
 
     return _task_to_response(task)
 
+
+
+
+@router.post(
+
+    "/root",
+
+    response_model=TaskResponse,
+
+    status_code=201,
+
+    summary="手动创建根任务",
+
+)
+
+async def create_root_task(
+
+    body: TaskRootCreate,
+
+    _user: dict = Depends(require_auth),
+
+) -> TaskResponse:
+
+    """用户手动创建根任务。
+
+    等价于 L1 主 agent 调 task_submit 提交根任务，为 L2+ 子 agent 提供合法的
+    任务上下文（根任务 ID 注入管道 state 后，L2 调 task_submit 即可正确挂子任务）。
+    container / non_container 都走现有下游逻辑，容器是工作空间集合（编排语义），
+    非容器由 target agent 直接执行。L2 拦截规则、层级配置、注入链均不变。
+    """
+
+    task_service = _get_task_service()
+
+    if task_service is None:
+
+        raise APIError(
+
+            status_code=503,
+
+            error_code="API_TIME_2005",
+
+            message="TaskService 不可用，无法创建任务",
+
+        )
+
+    # ── 校验 ──
+
+    if body.task_scope not in ("container", "non_container"):
+
+        raise APIError(
+
+            status_code=400,
+
+            error_code="INVALID_TASK_SCOPE",
+
+            message=f"task_scope 必须为 container 或 non_container，收到: {body.task_scope}",
+
+        )
+
+    # 非容器必须有执行 agent；容器是工作空间集合，无执行 target
+
+    if body.task_scope != "container" and not body.target_id:
+
+        raise APIError(
+
+            status_code=400,
+
+            error_code="MISSING_TARGET_AGENT",
+
+            message="非容器根任务必须指定执行 Agent（target_id），容器任务除外",
+
+        )
+
+    # workspace 路径安全校验（复用 task_submit 同款）
+
+    if body.workspace:
+
+        from tools.builtin.task_submit.tool import _validate_workspace_path  # noqa: PLC0415
+
+        ws_error = _validate_workspace_path(body.workspace)
+
+        if ws_error:
+
+            raise APIError(
+
+                status_code=400,
+
+                error_code="UNSAFE_WORKSPACE",
+
+                message=ws_error,
+
+            )
+
+    # ── 复用当前会话和主管道 ──
+
+    thread_id = body.thread_id
+
+    active_pipeline_id = ""
+
+    try:
+
+        _session = store.get_session(thread_id)
+
+        if _session:
+
+            active_pipeline_id = _session.active_pipeline_id or ""
+
+    except Exception as exc:
+
+        logger.warning("[create_root_task] 获取会话主管道失败 | thread=%s | error=%s", thread_id, exc)
+
+    # ── 构造 metadata（字段集对齐 task_submit._build_metadata） ──
+
+    metadata: dict[str, Any] = {
+
+        "task_scope": body.task_scope,
+
+        "target_id": body.target_id,
+
+        "session_id": thread_id,
+
+        "submitted_by_level": 1,          # 用户层 = L1
+
+        "acceptance_criteria": {},        # 默认空，_build_full_task_input 会自动跳过评估段
+
+        "workspace": body.workspace,
+
+        "isolation_level": body.isolation_level,
+
+        "user_id": _user["sub"],
+
+        "inherit": body.inherit or {},
+
+        "source": "user_manual",          # 审计标记：区分用户直接发起
+
+    }
+
+    # ── 创建任务 ──
+
+    from tasks.types import TaskModel, TaskPriority  # noqa: F401,PLC0415
+
+    try:
+
+        task_model = await task_service.create_task(
+
+            title=body.title,
+
+            description=body.description or "",
+
+            parent_pipeline_id=active_pipeline_id or None,
+
+            target_type="agent" if body.task_scope != "container" else None,
+
+            priority=TaskPriority.NORMAL,
+
+            metadata=metadata,
+
+        )
+
+    except Exception as exc:
+
+        logger.error("[create_root_task] 任务创建失败 | error=%s", exc)
+
+        raise APIError(
+
+            status_code=500,
+
+            error_code="TASK_CREATE_FAILED",
+
+            message=f"根任务创建失败: {exc}",
+
+        ) from exc
+
+    task_id = task_model.id
+
+    task = _task_model_to_dict(task_model)
+
+    logger.info(
+
+        "[create_root_task] 用户 %s 手动创建根任务 | task_id=%s | scope=%s | thread=%s",
+
+        _user.get("username"), task_id, body.task_scope, thread_id,
+
+    )
+
+    # ── 容器任务：绑定主管道（子任务完成时通知父管道），其余走下游现有流程 ──
+
+    if body.task_scope == "container" and active_pipeline_id:
+
+        try:
+
+            await task_service.bind_pipeline_run(task_id, active_pipeline_id)
+
+            logger.info(
+
+                "[create_root_task] 容器任务已绑定主管道 | task_id=%s | pipeline_id=%s",
+
+                task_id, active_pipeline_id,
+
+            )
+
+        except Exception as exc:
+
+            logger.warning(
+
+                "[create_root_task] 容器任务绑定管道失败 | task_id=%s | error=%s",
+
+                task_id, exc,
+
+            )
+
+    # ── 提交执行（container/non_container 都复用现有 _submit_task_event） ──
+
+    await _submit_task_event(task_id, task_service)
+
+    return _task_to_response(task)
 
 
 
