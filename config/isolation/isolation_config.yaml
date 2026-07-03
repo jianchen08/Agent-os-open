@@ -104,6 +104,10 @@ providers:
   cua:
     enabled: true
     # 镜像配置（使用 AgentOS 自定义镜像，预装工具链）
+    # 注意：agentos:latest 是运行时镜像。agent 在 host 模式下可通过
+    # `docker commit cua-<workspace最后一段> agentos:latest` 覆盖此 tag 沉淀依赖，
+    # 但覆盖后旧 latest 变为悬挂镜像会被启动时清理（docker image prune），不可回滚。
+    # 如需版本管理/可回滚，改用带时间戳 tag（如 agentos:commit-20260703）并切换此 image 配置。
     image: "agentos:latest"
     # 资源限制（优化后）
     limits:

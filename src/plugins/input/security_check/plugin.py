@@ -240,10 +240,22 @@ class SecurityCheckPlugin(IInputPlugin):
             logger.info("[%s] 已 docker 隔离，基础检查通过，放行", self.name)
             return {"security.decision": {"allowed": True, "reason": "isolated by docker, base checks passed"}}
 
-        # 非 docker 隔离：逐个检查工具调用的参数
+        # 混合批次（部分工具 docker、部分 host）时按工具自己的 provider 判定：
+        # file_read 等工具天然走 host（不进容器），不应拖累走 docker 的危险工具。
+        tool_provider = {
+            c.get("tool_name"): c.get("provider")
+            for c in execution_contexts
+            if isinstance(c, dict)
+        }
+
+        # 逐个检查工具调用的参数
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
+
+            # 该工具自己走 docker 隔离 → 放行（即使批次里有 host 工具）
+            if tool_provider.get(tool_name) == "docker":
+                continue
 
             # 判定是否危险工具：
             # - policy.execution == command_in_container（bash 等命令执行类）
