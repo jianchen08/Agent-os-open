@@ -245,24 +245,16 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第二道：按模式分流 ──
 
-        # 已 docker 隔离即放行：isolation_level 只决定是否用 docker 隔离，
-        # 工作空间副本（worktree/shared 等）不参与隔离审批判定。
+        # 隔离任务即放行：isolation_level 是隔离唯一真相源，隔离任务（isolated/None/空）
+        # 的所有工具一律放行，不弹审批——无论工具走 docker 还是 host。
         if self._is_isolated(execution_contexts):
-            logger.info("[%s] 已 docker 隔离，基础检查通过，放行", self.name)
-            return {"security.decision": {"allowed": True, "reason": "isolated by docker, base checks passed"}}
+            logger.info("[%s] 隔离任务，基础检查通过，放行", self.name)
+            return {"security.decision": {"allowed": True, "reason": "isolated task, base checks passed"}}
 
-        # 混合批次（部分工具 docker、部分 host）时按工具自己的 provider 判定：
-        # file_read 等工具天然走 host（不进容器），不应拖累走 docker 的危险工具。
-        tool_provider = {c.get("tool_name"): c.get("provider") for c in execution_contexts if isinstance(c, dict)}
-
-        # 逐个检查工具调用的参数
+        # 非隔离任务：逐个检查工具调用的参数
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
-
-            # 该工具自己走 docker 隔离 → 放行（即使批次里有 host 工具）
-            if tool_provider.get(tool_name) == "docker":
-                continue
 
             # 判定是否危险工具：
             # - policy.execution == command_in_container（bash 等命令执行类）
@@ -920,18 +912,19 @@ class SecurityCheckPlugin(IInputPlugin):
         return bool(dangerous_ops)
 
     def _is_isolated(self, execution_contexts: list[dict[str, Any]]) -> bool:
-        """判断当前任务是否在 docker 隔离环境中执行。
+        """判断当前任务是否为隔离模式。
 
-        isolation_level 只决定是否用 docker 隔离，工作空间副本（worktree/shared 等）
-        不参与隔离审批判定。
+        isolation_level 是隔离的唯一真相源：隔离任务（isolated/None/空）的所有
+        工具一律放行，不弹审批——无论工具自身走 docker 还是 host（如 delete_file）。
+        task_isolated 由 isolation_guard 按任务 isolation_level 归一化后注入每个 context。
 
         Args:
             execution_contexts: isolation_guard 写入的工具执行上下文列表
 
         Returns:
-            True=已 docker 隔离（放行），False=非 docker（危险工具需审批）
+            True=隔离任务（放行），False=非隔离任务（危险工具需审批）
         """
-        return bool(execution_contexts) and all(c.get("provider") == "docker" for c in execution_contexts)
+        return bool(execution_contexts) and all(c.get("task_isolated") for c in execution_contexts)
 
     @staticmethod
     def _get_dangerous_operations(ctx: PluginContext, tool_name: str) -> list[str]:

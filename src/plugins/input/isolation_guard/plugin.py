@@ -171,6 +171,13 @@ class IsolationGuard(IInputPlugin):
             context = self._decide_isolation(tool_name, ctx, tool_args=tc_args)
             execution_contexts.append(context)
 
+        # 给每个 context 注入任务级隔离标志：isolation_level 是隔离的唯一真相源，
+        # 隔离任务（isolated/None/空）的所有工具一律放行，不弹审批。
+        task_metadata = self._get_task_metadata(ctx)
+        task_isolated = (task_metadata.get("isolation_level") or "isolated") == "isolated"
+        for context in execution_contexts:
+            context["task_isolated"] = task_isolated
+
         state_updates: dict[str, Any] = {
             "execution_contexts": execution_contexts,
         }
