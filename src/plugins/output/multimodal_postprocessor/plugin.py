@@ -16,7 +16,7 @@ from pipeline.types import ErrorPolicy, StateKeys
 
 # 图片URL正则：匹配 http(s)://...jpg/png/gif/webp/svg
 _IMAGE_URL_PATTERN = re.compile(
-    r'(https?://\S+\.(?:jpg|jpeg|png|gif|webp|svg)(?:\?\S*)?)',
+    r"(https?://\S+\.(?:jpg|jpeg|png|gif|webp|svg)(?:\?\S*)?)",
     re.IGNORECASE,
 )
 
@@ -85,9 +85,11 @@ class MultimodalPostprocessor(IOutputPlugin):
         if not multimodal_urls:
             return OutputResult()
 
-        return OutputResult(state_updates={
-            "multimodal_output_urls": multimodal_urls,
-        })
+        return OutputResult(
+            state_updates={
+                "multimodal_output_urls": multimodal_urls,
+            }
+        )
 
     def _extract_urls(self, text: str) -> list[str]:
         """从文本中提取图片URL。

@@ -64,14 +64,10 @@ class ToolPermissionManager:
         if template_name in self.permission_templates:
             if user_id not in self.user_permissions:
                 self.user_permissions[user_id] = set()
-            self.user_permissions[user_id].update(
-                self.permission_templates[template_name]
-            )
+            self.user_permissions[user_id].update(self.permission_templates[template_name])
             self._log_permission_change("apply_template", user_id, template_name)
 
-    def check_permission(
-        self, user_id: str, tool_name: str, user_roles: list[str] = None
-    ) -> bool:
+    def check_permission(self, user_id: str, tool_name: str, user_roles: list[str] = None) -> bool:
         """检查用户是否有权限使用工具"""
         if user_roles is None:
             user_roles = []
@@ -102,9 +98,7 @@ class ToolPermissionManager:
         """获取角色权限"""
         return self.role_permissions.get(role, set()).copy()
 
-    def get_effective_permissions(
-        self, user_id: str, user_roles: list[str] = None
-    ) -> set[str]:
+    def get_effective_permissions(self, user_id: str, user_roles: list[str] = None) -> set[str]:
         """获取用户有效权限（包括角色继承）"""
         if user_roles is None:
             user_roles = []

@@ -261,23 +261,17 @@ class PlaywrightTestTool(BuiltinTool):
 
         page = session.page
         if page is None:
-            raise ValueError(
-                f"会话 {session_id} 的页面对象为 None，浏览器可能未正确启动。"
-                f"请重新创建会话。"
-            )
+            raise ValueError(f"会话 {session_id} 的页面对象为 None，浏览器可能未正确启动。请重新创建会话。")
 
         try:
             if page.is_closed():
-                raise ValueError(
-                    f"会话 {session_id} 的页面已关闭，请重新创建会话。"
-                )
+                raise ValueError(f"会话 {session_id} 的页面已关闭，请重新创建会话。")
         except Exception as e:
             # page.is_closed() 本身可能因 CDP 连接断开而失败
             if isinstance(e, ValueError):
                 raise
             raise ValueError(  # noqa: B904
-                f"会话 {session_id} 的页面连接已断开（CDP 错误），"
-                f"请重新创建会话。原始错误: {e}"
+                f"会话 {session_id} 的页面连接已断开（CDP 错误），请重新创建会话。原始错误: {e}"
             )
 
         return session, page
@@ -337,18 +331,20 @@ class PlaywrightTestTool(BuiltinTool):
             if restored_state:
                 message += f"，已自动恢复状态: {restored_state}"
 
-            return create_success_result(data={
-                "session_id": session_id,
-                "browser_type": browser,
-                "headless": headless,
-                "viewport": {
-                    "width": viewport_width,
-                    "height": viewport_height,
-                },
-                "auto_persist": auto_persist,
-                "restored_state": restored_state,
-                "message": message,
-            })
+            return create_success_result(
+                data={
+                    "session_id": session_id,
+                    "browser_type": browser,
+                    "headless": headless,
+                    "viewport": {
+                        "width": viewport_width,
+                        "height": viewport_height,
+                    },
+                    "auto_persist": auto_persist,
+                    "restored_state": restored_state,
+                    "message": message,
+                }
+            )
         except Exception as e:
             logger.error(f"浏览器启动失败: {e}")
             return create_failure_result(f"浏览器启动失败: {str(e)}")
@@ -380,14 +376,16 @@ class PlaywrightTestTool(BuiltinTool):
             title = await page.title()
             current_url = page.url
 
-            return create_success_result(data={
-                "session_id": session_id,
-                "title": title,
-                "url": current_url,
-                "status": response.status if response else None,
-                "load_state": wait_until,
-                "message": "页面导航成功",
-            })
+            return create_success_result(
+                data={
+                    "session_id": session_id,
+                    "title": title,
+                    "url": current_url,
+                    "status": response.status if response else None,
+                    "load_state": wait_until,
+                    "message": "页面导航成功",
+                }
+            )
         except ValueError:
             raise  # 让上层的 except 接管 ValueError
         except Exception as e:
@@ -501,10 +499,7 @@ class PlaywrightTestTool(BuiltinTool):
 
             # 过滤消息
             if filter_type != "all":
-                console_messages = [
-                    msg for msg in console_messages
-                    if msg.get("type") == filter_type
-                ]
+                console_messages = [msg for msg in console_messages if msg.get("type") == filter_type]
 
             # 断言检查
             assertion_results = {
@@ -537,21 +532,21 @@ class PlaywrightTestTool(BuiltinTool):
                 for keyword, found in present_found.items():
                     if not found:
                         assertion_results["passed"] = False
-                        assertion_results["errors"].append(
-                            f"断言失败: 缺少必需消息关键词: {keyword}"
-                        )
+                        assertion_results["errors"].append(f"断言失败: 缺少必需消息关键词: {keyword}")
 
             # 清空 console（如果需要）
             if clear:
                 session.console_messages = []
 
-            return create_success_result(data={
-                "session_id": session_id,
-                "console_messages": console_messages,
-                "assertion_results": assertion_results,
-                "filter_type": filter_type,
-                "total_messages": len(console_messages),
-            })
+            return create_success_result(
+                data={
+                    "session_id": session_id,
+                    "console_messages": console_messages,
+                    "assertion_results": assertion_results,
+                    "filter_type": filter_type,
+                    "total_messages": len(console_messages),
+                }
+            )
         except ValueError:
             raise
         except Exception as e:
@@ -608,10 +603,12 @@ class PlaywrightTestTool(BuiltinTool):
                 mime = result.get("mime_type", "image/png")
                 mm_content: list[dict[str, Any]] | None = None
                 if b64:
-                    mm_content = [{
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{b64}"},
-                    }]
+                    mm_content = [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        }
+                    ]
 
                 metadata: dict[str, Any] = {}
                 if mm_content:
@@ -647,11 +644,13 @@ class PlaywrightTestTool(BuiltinTool):
             result = await BrowserManager.save_session_state(session_id, state_path)
 
             if result.get("success"):
-                return create_success_result(data={
-                    "session_id": session_id,
-                    "state_path": state_path,
-                    "message": "浏览器状态保存成功",
-                })
+                return create_success_result(
+                    data={
+                        "session_id": session_id,
+                        "state_path": state_path,
+                        "message": "浏览器状态保存成功",
+                    }
+                )
             return create_failure_result(result.get("error", "保存浏览器状态失败"))
         except Exception as e:
             logger.error(f"保存浏览器状态失败: {e}")
@@ -679,12 +678,14 @@ class PlaywrightTestTool(BuiltinTool):
             # 存储会话
             self._sessions[session_id] = session_info
 
-            return create_success_result(data={
-                "session_id": session_id,
-                "browser_type": browser,
-                "state_path": state_path,
-                "message": "浏览器状态恢复成功",
-            })
+            return create_success_result(
+                data={
+                    "session_id": session_id,
+                    "browser_type": browser,
+                    "state_path": state_path,
+                    "message": "浏览器状态恢复成功",
+                }
+            )
         except Exception as e:
             logger.error(f"恢复浏览器状态失败: {e}")
             return create_failure_result(f"恢复浏览器状态失败: {str(e)}")
@@ -718,13 +719,15 @@ class PlaywrightTestTool(BuiltinTool):
             else:
                 result_value = str(js_result)
 
-            return create_success_result(data={
-                "session_id": session_id,
-                "expression": value,
-                "result": result_value,
-                "result_type": result_type,
-                "message": "JS 表达式执行成功",
-            })
+            return create_success_result(
+                data={
+                    "session_id": session_id,
+                    "expression": value,
+                    "result": result_value,
+                    "result_type": result_type,
+                    "message": "JS 表达式执行成功",
+                }
+            )
 
         except ValueError:
             raise

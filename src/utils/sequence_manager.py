@@ -65,9 +65,7 @@ class SequenceManager:
                             user_key = f"user-{session.user_id}"
                             if user_key not in user_session_sequences:
                                 user_session_sequences[user_key] = 0
-                            user_session_sequences[user_key] = max(
-                                user_session_sequences[user_key], sequences[0]
-                            )
+                            user_session_sequences[user_key] = max(user_session_sequences[user_key], sequences[0])
                     except Exception as e:
                         # 解析失败时跳过（可能是旧格式的 UUID）
                         logger.debug(f"解析会话ID失败 | id={session.id} | error={e}")
@@ -92,9 +90,7 @@ class SequenceManager:
                         if depth == 0:
                             if session_id not in session_sequences:
                                 session_sequences[session_id] = 0
-                            session_sequences[session_id] = max(
-                                session_sequences[session_id], seq
-                            )
+                            session_sequences[session_id] = max(session_sequences[session_id], seq)
 
                         # 如果有父记录ID，也记录父子关系序列号
                         parent_id = record.parent_record_id
@@ -117,9 +113,7 @@ class SequenceManager:
                             user_key = f"user-{record.session_id}"
                             if user_key not in user_sequences:
                                 user_sequences[user_key] = 0
-                            user_sequences[user_key] = max(
-                                user_sequences[user_key], sequences[0]
-                            )
+                            user_sequences[user_key] = max(user_sequences[user_key], sequences[0])
                     except Exception as e:
                         # 解析失败时跳过
                         logger.debug(f"解析嵌套ID失败 | id={record.id} | error={e}")
@@ -134,15 +128,11 @@ class SequenceManager:
                             if len(sequences) > 0:
                                 root_max_sequence = max(root_max_sequence, sequences[0])
                         except Exception as e:
-                            logger.debug(
-                                f"解析顶层记录ID失败 | id={record.id} | error={e}"
-                            )
+                            logger.debug(f"解析顶层记录ID失败 | id={record.id} | error={e}")
 
                 if root_max_sequence > 0:
                     self._sequences["__root__"] = root_max_sequence
-                    logger.info(
-                        f"[SequenceManager] 恢复 __root__ 序列号 | sequence={root_max_sequence}"
-                    )
+                    logger.info(f"[SequenceManager] 恢复 __root__ 序列号 | sequence={root_max_sequence}")
 
                 # 合并所有序列号（注意：user_session_sequences 优先级更高，因为它是从 Session 表直接恢复的）
                 self._sequences.update(session_sequences)
@@ -186,10 +176,7 @@ class SequenceManager:
             self._sequences[key] += 1
             sequence = self._sequences[key]
 
-            logger.debug(
-                f"[SequenceManager] 生成序列号 | "
-                f"parent_id={parent_id} | sequence={sequence}"
-            )
+            logger.debug(f"[SequenceManager] 生成序列号 | parent_id={parent_id} | sequence={sequence}")
 
             return sequence
 

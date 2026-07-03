@@ -7,6 +7,7 @@
 - FormatManager：格式管理器
 - get_format_manager()：获取全局单例
 """
+
 from __future__ import annotations
 
 import json
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 class ToolFormat(Enum):
     """工具输出格式枚举。"""
+
     JSON = "json"
     YAML = "yaml"
     XML = "xml"
@@ -71,9 +73,7 @@ class FormatManager:
         if target == ToolFormat.YAML:
             filtered = [t for t in json_tools if t.get("function", {}).get("name") in names] if names else json_tools
 
-            return yaml.dump(
-                {"tools": filtered}, default_flow_style=False, allow_unicode=True
-            )
+            return yaml.dump({"tools": filtered}, default_flow_style=False, allow_unicode=True)
 
         if target == ToolFormat.XML:
             root = ET.Element("tools")

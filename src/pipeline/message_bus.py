@@ -1,4 +1,5 @@
 """管道消息总线 — 统一消息注入入口。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class InjectResult:
     """消息注入结果。"""
+
     success: bool
     method: str = ""
     pipeline_id: str = ""
@@ -32,6 +34,7 @@ class InjectResult:
 def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     """查找目标管道引擎实例。返回 (engine, state) 元组。"""
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return None, ""
@@ -50,6 +53,7 @@ async def _auto_complete_interaction(pipeline_id: str) -> None:
     """自动完成管道的 pending conversation 模式交互请求。"""
     try:
         from human_interaction import get_human_interaction_service  # noqa: PLC0415
+
         service = get_human_interaction_service()
         if service is None:
             return
@@ -110,6 +114,7 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
     if thread_id and pipeline_id:
         try:
             from pipeline.registry import get_engine_registry as _reg_get  # noqa: PLC0415
+
             _reg_entry = _reg_get().get(pipeline_id)
             if _reg_entry and not _reg_entry.thread_id:
                 _reg_entry.thread_id = thread_id
@@ -118,9 +123,17 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
 
     if engine is not None:
         return await _inject_to_engine(
-            pipeline_id, engine, state, content, metadata,
-            request.agent_config, request.workspace, request.task_id,
-            request.conversation_history, request.output_sink, thread_id,
+            pipeline_id,
+            engine,
+            state,
+            content,
+            metadata,
+            request.agent_config,
+            request.workspace,
+            request.task_id,
+            request.conversation_history,
+            request.output_sink,
+            thread_id,
             client_message_id=client_message_id,
             attachments=attachments,
         )
@@ -143,10 +156,13 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
 async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> InjectResult:
     """I6：投递控制信号到引擎（不进 inject 队列，不删 entry）。"""
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return InjectResult(
-            success=False, error="管道未注册，无法投递信号", method="rejected",
+            success=False,
+            error="管道未注册，无法投递信号",
+            method="rejected",
             pipeline_id=pipeline_id,
         )
     engine = entry.engine
@@ -155,18 +171,17 @@ async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> Inj
     # cancel 到底走了 None/done/取消哪条）。在这里提前打印，复现时能直接定位
     # "信号投递了但没停"到底卡在哪一环。
     _et = entry.engine_task
-    _et_state = (
-        "None" if _et is None
-        else ("done" if _et.done() else "active")
-    )
+    _et_state = "None" if _et is None else ("done" if _et.done() else "active")
     logger.info(
         "[MessageBus] 停止信号投递诊断: pipeline=%s signal_type=%s "
         "engine.is_running=%s engine.is_idle=%s engine_task=%s "
         "engine_id=%d",
-        pipeline_id[:12], (msg.metadata or {}).get("signal_type", "?"),
+        pipeline_id[:12],
+        (msg.metadata or {}).get("signal_type", "?"),
         getattr(engine, "is_running", "?"),
         getattr(engine, "is_idle", "?"),
-        _et_state, id(engine),
+        _et_state,
+        id(engine),
     )
     # 引擎暴露 deliver_signal 才支持信号机制；否则降级为日志
     if hasattr(engine, "deliver_signal"):
@@ -177,7 +192,8 @@ async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> Inj
             return InjectResult(success=False, error=str(exc), method="failed", pipeline_id=pipeline_id)
         logger.info(
             "[MessageBus] 信号已投递: pipeline=%s signal_type=%s",
-            pipeline_id[:12], (msg.metadata or {}).get("signal_type", "?"),
+            pipeline_id[:12],
+            (msg.metadata or {}).get("signal_type", "?"),
         )
         return InjectResult(success=True, method="signal", pipeline_id=pipeline_id)
     logger.debug("[MessageBus] 引擎不支持信号投递（无 deliver_signal）: pipeline=%s", pipeline_id[:12])
@@ -185,25 +201,38 @@ async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> Inj
 
 
 async def _inject_to_engine(
-    pipeline_id: str, engine: Any, state: str, message: str,
-    metadata: dict | None, agent_config: AgentConfig | None, workspace: str,
-    task_id: str, conversation_history: list[dict] | None,
-    output_sink: IOutputSink | None, thread_id: str,
+    pipeline_id: str,
+    engine: Any,
+    state: str,
+    message: str,
+    metadata: dict | None,
+    agent_config: AgentConfig | None,
+    workspace: str,
+    task_id: str,
+    conversation_history: list[dict] | None,
+    output_sink: IOutputSink | None,
+    thread_id: str,
     client_message_id: str = "",
     attachments: list[dict[str, Any]] | None = None,
 ) -> InjectResult:
     """向已存在的引擎注入消息。"""
     from pipeline.drain_manager import create_sink  # noqa: PLC0415
-    try:
 
+    try:
         msg_source = (metadata or {}).get("source", "user")
-        logger.info("[MessageBus] 消息注入: pipeline=%s state=%s source=%s msg=%.60s",
-                     pipeline_id[:12], state, msg_source, message or "(empty)")
+        logger.info(
+            "[MessageBus] 消息注入: pipeline=%s state=%s source=%s msg=%.60s",
+            pipeline_id[:12],
+            state,
+            msg_source,
+            message or "(empty)",
+        )
 
         # 非 user 消息：通过 bridge 推送 system_notification（和 AI stream 走同一通道，保证时序）。
         # emit_notification 是 async，在 inject_message 之前调度，保证 notification 在 stream chunk 之前。
         if msg_source != "user":
             from pipeline.registry import get_engine_registry as _reg_for_push  # noqa: PLC0415
+
             _notif_bridge = _reg_for_push().get_bridge(pipeline_id)
             if _notif_bridge is not None:
                 try:
@@ -215,34 +244,44 @@ async def _inject_to_engine(
                 _push_sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
                 if _push_sink is not None:
                     try:
-                        await _push_sink.send_event({
-                            "type": "system_notification",
-                            "data": {
-                                "pipeline_id": pipeline_id,
-                                "content": message,
-                                "source": msg_source,
-                                "level": "info",
-                                "notificationType": f"{msg_source}_notification",
-                            },
-                        })
+                        await _push_sink.send_event(
+                            {
+                                "type": "system_notification",
+                                "data": {
+                                    "pipeline_id": pipeline_id,
+                                    "content": message,
+                                    "source": msg_source,
+                                    "level": "info",
+                                    "notificationType": f"{msg_source}_notification",
+                                },
+                            }
+                        )
                     except Exception as exc:
                         logger.warning("[MessageBus] sink 推送通知失败: %s", exc)
 
         if state == "idle":
             return await _start_idle_engine(
-                pipeline_id, engine, message, agent_config=agent_config,
-                workspace=workspace, task_id=task_id,
+                pipeline_id,
+                engine,
+                message,
+                agent_config=agent_config,
+                workspace=workspace,
+                task_id=task_id,
                 conversation_history=conversation_history,
-                output_sink=output_sink, thread_id=thread_id,
+                output_sink=output_sink,
+                thread_id=thread_id,
                 client_message_id=client_message_id,
                 attachments=attachments,
             )
 
         engine.inject_message(message, source=msg_source, client_message_id=client_message_id)
-        logger.info("[MessageBus] 已注入引擎: pipeline=%s source=%s method=%s queue=%d",
-                     pipeline_id[:12], msg_source,
-                     "wake" if state == "suspended" else "notification",
-                     engine.inject_queue_size)
+        logger.info(
+            "[MessageBus] 已注入引擎: pipeline=%s source=%s method=%s queue=%d",
+            pipeline_id[:12],
+            msg_source,
+            "wake" if state == "suspended" else "notification",
+            engine.inject_queue_size,
+        )
         method = "wake" if state == "suspended" else "notification"
 
         if state == "running" and msg_source == "user":
@@ -256,15 +295,22 @@ async def _inject_to_engine(
 
 
 async def _start_idle_engine(
-    pipeline_id: str, engine: Any, message: str, *,
-    agent_config: AgentConfig | None = None, workspace: str = "", task_id: str = "",
+    pipeline_id: str,
+    engine: Any,
+    message: str,
+    *,
+    agent_config: AgentConfig | None = None,
+    workspace: str = "",
+    task_id: str = "",
     conversation_history: list[dict] | None = None,
-    output_sink: IOutputSink | None = None, thread_id: str = "",
+    output_sink: IOutputSink | None = None,
+    thread_id: str = "",
     client_message_id: str = "",
     attachments: list[dict[str, Any]] | None = None,
 ) -> InjectResult:
     """启动 idle 状态的引擎。"""
     from pipeline.drain_manager import create_sink  # noqa: PLC0415
+
     _sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
     if _sink is None:
         return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
@@ -276,6 +322,7 @@ async def _start_idle_engine(
     if _resolved_agent is None:
         from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
         from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
         _entry = get_engine_registry().get(pipeline_id)
         _agent_id = _entry.tags.get("agent_id") if _entry else None
         if _agent_id:
@@ -287,6 +334,7 @@ async def _start_idle_engine(
         # 诊断：输出每一步状态，定位注册失败点
         from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
         from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
         _diag_entry = get_engine_registry().get(pipeline_id)
         _diag_tags = _diag_entry.tags if _diag_entry else "NO_ENTRY"
         _diag_reg = get_global_agent_registry_sync()
@@ -294,17 +342,22 @@ async def _start_idle_engine(
         logger.error(
             "[MessageBus] idle agent 解析失败诊断: pipeline=%s thread=%s "
             "engine.agent_config=%s entry_exists=%s tags=%s agent_registry_count=%d",
-            pipeline_id[:12], thread_id[:12] if thread_id else "?",
+            pipeline_id[:12],
+            thread_id[:12] if thread_id else "?",
             engine.agent_config is not None,
-            _diag_entry is not None, _diag_tags, _diag_reg_count,
+            _diag_entry is not None,
+            _diag_tags,
+            _diag_reg_count,
         )
         return InjectResult(
             success=False,
             error="idle 引擎重启失败：创建者未注册 agent_id 到注册表 tags",
-            method="failed", pipeline_id=pipeline_id,
+            method="failed",
+            pipeline_id=pipeline_id,
         )
 
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
     _registry = get_engine_registry()
 
     _tags_entry = _registry.get(pipeline_id)
@@ -320,21 +373,29 @@ async def _start_idle_engine(
 
     # Phase 1 改造：仅创建/复用 bridge，engine 主动 emit 事件，不再启动 drain_loop。
     bridge = _registry.ensure_bridge(
-        pipeline_id, _sink, engine=engine,
+        pipeline_id,
+        _sink,
+        engine=engine,
     )
     # Phase 1: on_chunk 由引擎的流式输出口 StreamingOutput（engine._streaming）处理，
     # 不再从 bridge 读取。详见 pipeline/engine_streaming.py。
     # engine 在主循环运行，不再创建独立线程。
-    engine_future = asyncio.ensure_future(engine.run(
-        user_input=message, agent_config=_resolved_agent,
-        conversation_history=conversation_history or [],
-        task_id=task_id, workspace=workspace, project_root="",
-        streaming=True, on_chunk=None,
-        client_message_id=client_message_id,
-        attachments=attachments,
-        user_id=_ctx_user_id,
-        session_id=_ctx_session_id,
-    ))
+    engine_future = asyncio.ensure_future(
+        engine.run(
+            user_input=message,
+            agent_config=_resolved_agent,
+            conversation_history=conversation_history or [],
+            task_id=task_id,
+            workspace=workspace,
+            project_root="",
+            streaming=True,
+            on_chunk=None,
+            client_message_id=client_message_id,
+            attachments=attachments,
+            user_id=_ctx_user_id,
+            session_id=_ctx_session_id,
+        )
+    )
     _idle_entry = _registry.get(pipeline_id)
     if _idle_entry:
         _idle_entry.engine_task = engine_future
@@ -362,6 +423,7 @@ from pipeline.drain_manager import (  # noqa: E402, F401
 # 兼容别名已删除：_try_revive_pipeline / _revive_pipeline_message 不再存在，
 # 旧测试 patch 此名称将失败（这些测试随 revive 路径一并清理）。
 
+
 async def emit(
     message: PipelineMessage,
     **kwargs: Any,
@@ -373,6 +435,7 @@ async def emit(
 async def stop(pipeline_id: str) -> InjectResult:
     """唯一停止入口（I1 原子级联）。"""
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return InjectResult(success=False, error="管道未注册", method="rejected", pipeline_id=pipeline_id)

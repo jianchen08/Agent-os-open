@@ -115,7 +115,9 @@ class GitHelpers:
             如果不是 git 仓库返回失败结果，否则返回 None
         """
         return_code, _, _ = await self.run_git(
-            "rev-parse", "--git-dir", cwd=self.base_path,
+            "rev-parse",
+            "--git-dir",
+            cwd=self.base_path,
         )
         if return_code != 0:
             return create_failure_result(
@@ -143,7 +145,8 @@ class GitHelpers:
         git_dir = workspace / ".git"
         if not git_dir.exists():
             return_code, stdout, stderr = await self.run_git(
-                "init", cwd=workspace,
+                "init",
+                cwd=workspace,
             )
             if return_code != 0:
                 return create_failure_result(
@@ -154,7 +157,9 @@ class GitHelpers:
         return None
 
     async def git_status(
-        self, inputs: dict[str, Any], workspace: Path,
+        self,
+        inputs: dict[str, Any],
+        workspace: Path,
     ) -> ToolResult:
         """git_status 操作：查看 workspace 的 git 状态
 
@@ -173,7 +178,9 @@ class GitHelpers:
                 )
 
             return_code, stdout, stderr = await self.run_git(
-                "status", "--porcelain", cwd=workspace,
+                "status",
+                "--porcelain",
+                cwd=workspace,
             )
             if return_code != 0:
                 return create_failure_result(
@@ -220,7 +227,9 @@ class GitHelpers:
             )
 
     async def git_commit(
-        self, inputs: dict[str, Any], workspace: Path,
+        self,
+        inputs: dict[str, Any],
+        workspace: Path,
     ) -> ToolResult:
         """git_commit 操作：暂存并提交 workspace 中的变更
 
@@ -242,17 +251,23 @@ class GitHelpers:
 
             # 配置 git 用户信息
             await self.run_git(
-                "config", "user.email", "resource-merge@agent.local",
+                "config",
+                "user.email",
+                "resource-merge@agent.local",
                 cwd=workspace,
             )
             await self.run_git(
-                "config", "user.name", "Agent Resource Merge",
+                "config",
+                "user.name",
+                "Agent Resource Merge",
                 cwd=workspace,
             )
 
             # 暂存所有变更
             return_code, _, stderr = await self.run_git(
-                "add", "-A", cwd=workspace,
+                "add",
+                "-A",
+                cwd=workspace,
             )
             if return_code != 0:
                 return create_failure_result(
@@ -262,7 +277,9 @@ class GitHelpers:
 
             # 检查是否有变更需要提交
             return_code, status_output, _ = await self.run_git(
-                "status", "--porcelain", cwd=workspace,
+                "status",
+                "--porcelain",
+                cwd=workspace,
             )
             if not status_output.strip():
                 return create_success_result(
@@ -275,7 +292,10 @@ class GitHelpers:
 
             # 提交变更
             return_code, _, stderr = await self.run_git(
-                "commit", "-m", message, cwd=workspace,
+                "commit",
+                "-m",
+                message,
+                cwd=workspace,
             )
             if return_code != 0:
                 return create_failure_result(
@@ -285,7 +305,9 @@ class GitHelpers:
 
             # 获取 commit hash
             return_code, commit_hash, _ = await self.run_git(
-                "rev-parse", "HEAD", cwd=workspace,
+                "rev-parse",
+                "HEAD",
+                cwd=workspace,
             )
 
             return create_success_result(
@@ -304,7 +326,9 @@ class GitHelpers:
             )
 
     async def git_diff(
-        self, inputs: dict[str, Any], workspace: Path,
+        self,
+        inputs: dict[str, Any],
+        workspace: Path,
     ) -> ToolResult:
         """git_diff 操作：查看 workspace 中的变更
 
@@ -324,12 +348,16 @@ class GitHelpers:
 
             # 查看暂存区和工作区的变更
             return_code, stdout, stderr = await self.run_git(
-                "diff", "HEAD", cwd=workspace,
+                "diff",
+                "HEAD",
+                cwd=workspace,
             )
             if return_code != 0:
                 # 可能是没有历史 commit，尝试查看暂存区变更
                 return_code, stdout, stderr = await self.run_git(
-                    "diff", "--cached", cwd=workspace,
+                    "diff",
+                    "--cached",
+                    cwd=workspace,
                 )
                 if return_code != 0:
                     return create_failure_result(
@@ -352,7 +380,9 @@ class GitHelpers:
             )
 
     async def git_log(
-        self, inputs: dict[str, Any], workspace: Path,
+        self,
+        inputs: dict[str, Any],
+        workspace: Path,
     ) -> ToolResult:
         """git_log 操作：查看 workspace 的提交历史
 
@@ -372,7 +402,9 @@ class GitHelpers:
 
             # 获取提交历史（最多 20 条）
             return_code, stdout, stderr = await self.run_git(
-                "log", "--oneline", "--max-count=20",
+                "log",
+                "--oneline",
+                "--max-count=20",
                 "--format=%H|%s|%ai",
                 cwd=workspace,
             )
@@ -390,11 +422,13 @@ class GitHelpers:
                         continue
                     parts = line.split("|", 2)
                     if len(parts) == 3:
-                        commits.append({
-                            "hash": parts[0],
-                            "message": parts[1],
-                            "time": parts[2],
-                        })
+                        commits.append(
+                            {
+                                "hash": parts[0],
+                                "message": parts[1],
+                                "time": parts[2],
+                            }
+                        )
 
             return create_success_result(
                 data={
@@ -412,7 +446,9 @@ class GitHelpers:
             )
 
     async def git_merge_abort(
-        self, inputs: dict[str, Any], workspace: Path,
+        self,
+        inputs: dict[str, Any],
+        workspace: Path,
     ) -> ToolResult:
         """中止当前正在进行的 git merge 操作
 
@@ -434,7 +470,9 @@ class GitHelpers:
 
             # 检查是否正在合并中
             return_code, stdout, _ = await self.run_git(
-                "rev-parse", "--verify", "MERGE_HEAD",
+                "rev-parse",
+                "--verify",
+                "MERGE_HEAD",
                 cwd=self.base_path,
             )
             if return_code != 0:
@@ -448,7 +486,9 @@ class GitHelpers:
 
             # 执行 merge --abort
             return_code, _, stderr = await self.run_git(
-                "merge", "--abort", cwd=self.base_path,
+                "merge",
+                "--abort",
+                cwd=self.base_path,
             )
             if return_code != 0:
                 return create_failure_result(

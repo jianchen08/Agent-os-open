@@ -63,10 +63,7 @@ def list_memories(
     )
     total = len(store.memories)
     if memory_type:
-        total = sum(
-            1 for m in store.memories.values()
-            if m["memory_type"] == memory_type
-        )
+        total = sum(1 for m in store.memories.values() if m["memory_type"] == memory_type)
 
     items = [_memory_to_response(m) for m in memories]
     return MemoryListResponse(items=items, total=total)
@@ -122,7 +119,12 @@ def list_episodes(
     memories = store.list_memories(memory_type="episode", limit=page_size, offset=offset)
     total = sum(1 for m in store.memories.values() if m["memory_type"] == "episode")
     items = [
-        {"id": m["id"], "intent_text": m.get("content", ""), "tags": m.get("tags", []), "created_at": m.get("created_at", "")}
+        {
+            "id": m["id"],
+            "intent_text": m.get("content", ""),
+            "tags": m.get("tags", []),
+            "created_at": m.get("created_at", ""),
+        }
         for m in memories
     ]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
@@ -140,7 +142,12 @@ def get_episode(
     memory = store.get_memory(episode_id)
     if memory is None:
         raise APIError(status_code=404, error_code="MEM_NOTF_5001", message="未找到相关记忆")
-    return {"id": memory["id"], "intent_text": memory.get("content", ""), "tags": memory.get("tags", []), "created_at": memory.get("created_at", "")}
+    return {
+        "id": memory["id"],
+        "intent_text": memory.get("content", ""),
+        "tags": memory.get("tags", []),
+        "created_at": memory.get("created_at", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +166,13 @@ def list_semantic(
     memories = store.list_memories(memory_type="semantic", limit=100)
     total = sum(1 for m in store.memories.values() if m["memory_type"] == "semantic")
     items = [
-        {"id": m["id"], "content": m.get("content", ""), "source_type": "memory_store", "extra_data": {}, "created_at": m.get("created_at", "")}
+        {
+            "id": m["id"],
+            "content": m.get("content", ""),
+            "source_type": "memory_store",
+            "extra_data": {},
+            "created_at": m.get("created_at", ""),
+        }
         for m in memories
     ]
     return {"items": items, "total": total}
@@ -191,7 +204,12 @@ def get_memory_stats(
     """获取记忆统计信息。"""
     episode_count = sum(1 for m in store.memories.values() if m["memory_type"] == "episode")
     semantic_count = sum(1 for m in store.memories.values() if m["memory_type"] == "semantic")
-    return {"episode_count": episode_count, "knowledge_count": semantic_count, "total_count": len(store.memories), "last_updated": ""}
+    return {
+        "episode_count": episode_count,
+        "knowledge_count": semantic_count,
+        "total_count": len(store.memories),
+        "last_updated": "",
+    }
 
 
 # ---------------------------------------------------------------------------

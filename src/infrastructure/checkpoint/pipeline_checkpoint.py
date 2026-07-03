@@ -15,25 +15,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DYNAMIC_STATE_KEYS: frozenset[str] = frozenset({
-    "iteration",
-    "ended",
-    "user_input",
-    "messages",
-    "pipeline_id",
-    "core_type",
-    "conversation_mode",
-    "conversation_round",
-    # FIND-3 fix: 保存原始 Agent 标识，恢复时按 ID 查找对应 Agent，
-    # 避免非灵汐 Agent 的检查点恢复后以灵汐身份运行。
-    "agent_config_id",
-    # 错误重试计数：suspend/resume 周期必须保留，否则 transient_max_retries
-    # 安全阀在恢复后归零，上游持续 timeout 时管道无限重试无法 failed。
-    "retry.count",
-    "retry.transient_count",
-    "error_check.last_error_type",
-    "error_check.consecutive_same_type",
-})
+_DYNAMIC_STATE_KEYS: frozenset[str] = frozenset(
+    {
+        "iteration",
+        "ended",
+        "user_input",
+        "messages",
+        "pipeline_id",
+        "core_type",
+        "conversation_mode",
+        "conversation_round",
+        # FIND-3 fix: 保存原始 Agent 标识，恢复时按 ID 查找对应 Agent，
+        # 避免非灵汐 Agent 的检查点恢复后以灵汐身份运行。
+        "agent_config_id",
+        # 错误重试计数：suspend/resume 周期必须保留，否则 transient_max_retries
+        # 安全阀在恢复后归零，上游持续 timeout 时管道无限重试无法 failed。
+        "retry.count",
+        "retry.transient_count",
+        "error_check.last_error_type",
+        "error_check.consecutive_same_type",
+    }
+)
 
 
 class PipelineCheckpointManager:
@@ -83,10 +85,7 @@ class PipelineCheckpointManager:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         checkpoint_id = f"{pipeline_id}_{timestamp}"
 
-        dynamic_state = {
-            k: v for k, v in state.items()
-            if k in _DYNAMIC_STATE_KEYS
-        }
+        dynamic_state = {k: v for k, v in state.items() if k in _DYNAMIC_STATE_KEYS}
         serialized_state = self._serialize_state(dynamic_state)
 
         metadata: dict[str, Any] = {
@@ -112,7 +111,9 @@ class PipelineCheckpointManager:
 
         logger.debug(
             "Checkpoint saved: checkpoint_id=%s, phase=%s, iteration=%d, keys=%s",
-            checkpoint_id, phase, metadata["iteration"],
+            checkpoint_id,
+            phase,
+            metadata["iteration"],
             list(serialized_state.keys()),
         )
         return checkpoint_id
@@ -261,7 +262,8 @@ class PipelineCheckpointManager:
             已删除的检查点数量
         """
         all_checkpoints = await self.list_checkpoints(
-            pipeline_id=pipeline_id, limit=1000,
+            pipeline_id=pipeline_id,
+            limit=1000,
         )
 
         if len(all_checkpoints) <= keep_count:
@@ -277,7 +279,9 @@ class PipelineCheckpointManager:
 
         logger.info(
             "Cleaned up %d old checkpoints for pipeline %s (kept %d)",
-            deleted_count, pipeline_id, keep_count,
+            deleted_count,
+            pipeline_id,
+            keep_count,
         )
         return deleted_count
 

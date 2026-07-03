@@ -153,7 +153,10 @@ class DuplicateCheckPlugin(IOutputPlugin):
         return updates
 
     def _handle_duplicate_tool_calls(
-        self, ctx: PluginContext, updates: dict[str, Any], count: int,
+        self,
+        ctx: PluginContext,
+        updates: dict[str, Any],
+        count: int,
     ) -> dict[str, Any]:
         """处理工具调用重复，三级渐进策略。
 
@@ -174,10 +177,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
 
         # 第二级：重复达到阈值 → 拦截 + 路由回 LLM
         if count >= self._max_duplicate_calls:
-            warning = (
-                f"检测到重复工具调用{tool_desc}，已跳过执行。"
-                f"请不要再次使用相同的工具和参数，请尝试其他方法。"
-            )
+            warning = f"检测到重复工具调用{tool_desc}，已跳过执行。请不要再次使用相同的工具和参数，请尝试其他方法。"
             stripped = self._strip_trailing_tool_call_assistant(ctx)
             self._inject_warning(ctx, warning)
             updates[StateKeys.RAW_TOOL_CALLS] = []
@@ -185,7 +185,11 @@ class DuplicateCheckPlugin(IOutputPlugin):
             updates["router.duplicate_intercepts"] = intercepts + 1
             logger.info(
                 "[%s] Duplicate tool calls intercepted | count=%d intercepts=%d tool=%s stripped_assistants=%d",
-                self.name, count, intercepts + 1, tool_desc, stripped,
+                self.name,
+                count,
+                intercepts + 1,
+                tool_desc,
+                stripped,
             )
             updates["__route_signal__"] = RouteSignal(
                 route_type="next_llm",
@@ -198,12 +202,17 @@ class DuplicateCheckPlugin(IOutputPlugin):
         self._inject_hint(ctx, hint)
         logger.info(
             "[%s] Duplicate tool call soft hint | count=%d tool=%s",
-            self.name, count, tool_desc,
+            self.name,
+            count,
+            tool_desc,
         )
         return updates
 
     def _handle_repetitive_output(
-        self, ctx: PluginContext, updates: dict[str, Any], count: int,
+        self,
+        ctx: PluginContext,
+        updates: dict[str, Any],
+        count: int,
     ) -> dict[str, Any]:
         """处理输出内容重复，三级渐进策略。
 
@@ -230,7 +239,9 @@ class DuplicateCheckPlugin(IOutputPlugin):
             updates["router.duplicate_intercepts"] = intercepts + 1
             logger.info(
                 "[%s] Repetitive output intercepted | count=%d intercepts=%d",
-                self.name, count, intercepts + 1,
+                self.name,
+                count,
+                intercepts + 1,
             )
             updates["__route_signal__"] = RouteSignal(
                 route_type="next_llm",
@@ -243,12 +254,17 @@ class DuplicateCheckPlugin(IOutputPlugin):
         self._inject_hint(ctx, hint)
         logger.info(
             "[%s] Repetitive output soft hint | count=%d",
-            self.name, count,
+            self.name,
+            count,
         )
         return updates
 
     def _terminate_pipeline(
-        self, ctx: PluginContext, updates: dict[str, Any], desc: str, intercepts: int,
+        self,
+        ctx: PluginContext,
+        updates: dict[str, Any],
+        desc: str,
+        intercepts: int,
     ) -> dict[str, Any]:
         """终止管道，主 agent 注入用户通知，子 agent 直接终止。
 
@@ -270,12 +286,16 @@ class DuplicateCheckPlugin(IOutputPlugin):
             ctx.state["messages"] = messages
             logger.warning(
                 "[%s] Pipeline terminating (main agent) | intercepts=%d desc=%s",
-                self.name, intercepts, desc,
+                self.name,
+                intercepts,
+                desc,
             )
         else:
             logger.warning(
                 "[%s] Pipeline terminating (sub agent) | intercepts=%d desc=%s",
-                self.name, intercepts, desc,
+                self.name,
+                intercepts,
+                desc,
             )
 
         updates["__route_signal__"] = RouteSignal(
@@ -356,10 +376,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         stripped = 0
         while messages:
             last = messages[-1]
-            if (
-                last.get("role") == "assistant"
-                and last.get("tool_calls")
-            ):
+            if last.get("role") == "assistant" and last.get("tool_calls"):
                 messages.pop()
                 stripped += 1
                 continue
@@ -406,16 +423,13 @@ class DuplicateCheckPlugin(IOutputPlugin):
             # 合并进末尾消息 content，保持 assistant(tool_calls)→tool 序列完整
             merged = dict(last)
             original = merged.get("content") or ""
-            merged["content"] = (
-                f"{original}\n\n{content}" if original else content
-            )
+            merged["content"] = f"{original}\n\n{content}" if original else content
             messages[-1] = merged
         else:
             # 末尾为 user（或其它无配对约束的角色）→ 追加 user
             messages.append({"role": "user", "content": content})
 
         ctx.state["messages"] = messages
-
 
     def _check_duplicate_calls(self, ctx: PluginContext) -> dict[str, Any]:
         """检查工具调用重复。
@@ -457,7 +471,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
             duplicate_count += 1
             logger.debug(
                 "[%s] Duplicate tool call detected | count=%d",
-                self.name, duplicate_count,
+                self.name,
+                duplicate_count,
             )
         else:
             duplicate_count = 0  # 不同则重置
@@ -495,7 +510,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
             repetitive_count += 1
             logger.debug(
                 "[%s] Repetitive output detected | count=%d",
-                self.name, repetitive_count,
+                self.name,
+                repetitive_count,
             )
         else:
             # 相似度检查（简单字符级对比）
@@ -504,7 +520,9 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 repetitive_count += 1
                 logger.debug(
                     "[%s] Similar output detected | similarity>%.2f | count=%d",
-                    self.name, self._similarity_threshold, repetitive_count,
+                    self.name,
+                    self._similarity_threshold,
+                    repetitive_count,
                 )
             else:
                 repetitive_count = 0  # 不同则重置

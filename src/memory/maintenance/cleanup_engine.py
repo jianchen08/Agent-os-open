@@ -111,7 +111,10 @@ class CleanupEngine:
                     if age_days > self._config.cleanup_min_age_days:
                         should_delete_l0 = True
                         should_delete_l1 = True  # 很老了，L0/L1 一起删
-                    elif age_days > self._config.cleanup_early_age_days and capacity_pressure > self._config.cleanup_capacity_threshold:
+                    elif (
+                        age_days > self._config.cleanup_early_age_days
+                        and capacity_pressure > self._config.cleanup_capacity_threshold
+                    ):
                         should_delete_l0 = True
                         # 容量紧张但不算很老，只删 L0
 
@@ -124,7 +127,8 @@ class CleanupEngine:
 
                 if should_delete_l0:
                     delete_result = await self._delete_pipeline_data(
-                        summary.run_id, delete_l1=should_delete_l1,
+                        summary.run_id,
+                        delete_l1=should_delete_l1,
                     )
                     result["l0_deleted"] += delete_result.get("l0_deleted", 0)
                     result["l1_deleted"] += delete_result.get("l1_deleted", 0)
@@ -134,7 +138,8 @@ class CleanupEngine:
             except Exception as e:
                 logger.warning(
                     "[Maintenance] 清理管道失败 | pipeline=%s | error=%s",
-                    summary.run_id[:12], e,
+                    summary.run_id[:12],
+                    e,
                 )
                 result["errors"].append(f"pipeline_{summary.run_id[:12]}: {e}")
 
@@ -151,8 +156,10 @@ class CleanupEngine:
 
         logger.info(
             "[Maintenance] 清理完成 | L0=%d | L1=%d | episodes=%d | pressure=%.2f",
-            result["l0_deleted"], result["l1_deleted"],
-            result["episodes_deleted"], capacity_pressure,
+            result["l0_deleted"],
+            result["l1_deleted"],
+            result["episodes_deleted"],
+            capacity_pressure,
         )
         return result
 
@@ -171,9 +178,7 @@ class CleanupEngine:
         try:
             data_dir = self._storage._data_dir
             if data_dir and data_dir.exists():
-                total_size = sum(
-                    f.stat().st_size for f in data_dir.rglob("*.yaml")
-                )
+                total_size = sum(f.stat().st_size for f in data_dir.rglob("*.yaml"))
                 # 假设 1GB 为容量上限
                 max_bytes = 1024 * 1024 * 1024
                 return min(1.0, total_size / max_bytes)
@@ -276,7 +281,8 @@ class CleanupEngine:
             except Exception as e:
                 logger.warning(
                     "[Maintenance] 删除 L1 块失败 | pipeline=%s | error=%s",
-                    pipeline_id[:12], e,
+                    pipeline_id[:12],
+                    e,
                 )
 
         # 第三步：处理 Episode（如果有 memory_service）
@@ -287,7 +293,9 @@ class CleanupEngine:
                     # 简单处理：删除与该管道关联的 Episode
                     if hasattr(episode_service, "_storage") and episode_service._storage:
                         episodes = await episode_service._storage.find_by_user(
-                            "__all__", limit=1000000, offset=0,
+                            "__all__",
+                            limit=1000000,
+                            offset=0,
                         )
                         for ep in episodes:
                             if getattr(ep, "session_id", "") == pipeline_id:
@@ -295,7 +303,8 @@ class CleanupEngine:
                                 result["episodes_deleted"] += 1
                     elif hasattr(episode_service, "_in_memory"):
                         to_delete = [
-                            eid for eid, ep in episode_service._in_memory.items()
+                            eid
+                            for eid, ep in episode_service._in_memory.items()
                             if getattr(ep, "session_id", "") == pipeline_id
                         ]
                         for eid in to_delete:
@@ -303,13 +312,16 @@ class CleanupEngine:
                             result["episodes_deleted"] += 1
             except Exception as e:
                 logger.debug(
-                    "[Maintenance] Episode 清理失败（非致命）: %s", e,
+                    "[Maintenance] Episode 清理失败（非致命）: %s",
+                    e,
                 )
 
         logger.debug(
             "[Maintenance] 删除管道数据 | pipeline=%s | L0=%d | L1=%d | episodes=%d",
             pipeline_id[:12],
-            result["l0_deleted"], result["l1_deleted"], result["episodes_deleted"],
+            result["l0_deleted"],
+            result["l1_deleted"],
+            result["episodes_deleted"],
         )
         return result
 
@@ -369,7 +381,9 @@ class CleanupEngine:
         try:
             if episode_service._storage:
                 all_episodes = await episode_service._storage.find_by_user(
-                    "__all__", limit=1000000, offset=0,
+                    "__all__",
+                    limit=1000000,
+                    offset=0,
                 )
             else:
                 all_episodes = list(episode_service._in_memory.values())
@@ -391,7 +405,8 @@ class CleanupEngine:
                 except Exception as e:
                     logger.warning(
                         "[Maintenance] 重建情景索引失败 | id=%s | error=%s",
-                        ep.id, e,
+                        ep.id,
+                        e,
                     )
         except Exception as e:
             result["errors"].append(f"episodes: {e}")
@@ -401,7 +416,8 @@ class CleanupEngine:
         try:
             if knowledge_service._storage:
                 all_knowledge = await knowledge_service._storage.find_by_user(
-                    "__all__", limit=1000000,
+                    "__all__",
+                    limit=1000000,
                 )
             else:
                 all_knowledge = list(knowledge_service._in_memory.values())
@@ -423,7 +439,8 @@ class CleanupEngine:
                 except Exception as e:
                     logger.warning(
                         "[Maintenance] 重建语义索引失败 | id=%s | error=%s",
-                        kn.id, e,
+                        kn.id,
+                        e,
                     )
         except Exception as e:
             result["errors"].append(f"knowledge: {e}")

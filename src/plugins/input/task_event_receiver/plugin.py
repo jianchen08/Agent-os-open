@@ -75,14 +75,10 @@ class TaskEventReceiverPlugin(IInputPlugin):
             if pid:
                 parent_hint = f" [容器 {pid}]"
             if event["type"] == "task_completed":
-                event_messages.append(
-                    f"[系统通知] 任务 '{event['title']}' 已完成{parent_hint}"
-                )
+                event_messages.append(f"[系统通知] 任务 '{event['title']}' 已完成{parent_hint}")
             elif event["type"] == "task_failed":
                 error = event.get("error", "未知错误")
-                event_messages.append(
-                    f"[系统通知] 任务 '{event['title']}' 失败: {error}{parent_hint}"
-                )
+                event_messages.append(f"[系统通知] 任务 '{event['title']}' 失败: {error}{parent_hint}")
 
         # 注入到 user_input
         state_updates: dict[str, Any] = {}

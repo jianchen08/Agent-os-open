@@ -31,9 +31,7 @@ class EventBus:
     """
 
     def __init__(self) -> None:
-        self._subscribers: dict[str, list[Callable[..., Coroutine[Any, Any, None]]]] = (
-            defaultdict(list)
-        )
+        self._subscribers: dict[str, list[Callable[..., Coroutine[Any, Any, None]]]] = defaultdict(list)
 
     async def emit(self, event_type: str, data: dict[str, Any]) -> None:
         """发射事件，通知所有订阅者。
@@ -49,22 +47,16 @@ class EventBus:
             logger.debug("No subscribers for event: %s", event_type)
             return
 
-        logger.debug(
-            "Emitting event %s to %d subscribers", event_type, len(callbacks)
-        )
+        logger.debug("Emitting event %s to %d subscribers", event_type, len(callbacks))
         for callback in callbacks:
             try:
                 result = callback(data)
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as exc:
-                logger.error(
-                    "Event callback error for %s: %s", event_type, exc, exc_info=True
-                )
+                logger.error("Event callback error for %s: %s", event_type, exc, exc_info=True)
 
-    def subscribe(
-        self, event_type: str, callback: Callable[..., Coroutine[Any, Any, None]]
-    ) -> None:
+    def subscribe(self, event_type: str, callback: Callable[..., Coroutine[Any, Any, None]]) -> None:
         """订阅事件。
 
         Args:
@@ -74,9 +66,7 @@ class EventBus:
         self._subscribers[event_type].append(callback)
         logger.debug("Subscribed to %s: %s", event_type, callback.__name__)
 
-    def unsubscribe(
-        self, event_type: str, callback: Callable[..., Coroutine[Any, Any, None]]
-    ) -> None:
+    def unsubscribe(self, event_type: str, callback: Callable[..., Coroutine[Any, Any, None]]) -> None:
         """取消订阅。
 
         Args:
@@ -84,9 +74,7 @@ class EventBus:
             callback: 要移除的回调函数
         """
         if event_type in self._subscribers:
-            self._subscribers[event_type] = [
-                cb for cb in self._subscribers[event_type] if cb is not callback
-            ]
+            self._subscribers[event_type] = [cb for cb in self._subscribers[event_type] if cb is not callback]
             logger.debug("Unsubscribed from %s: %s", event_type, callback.__name__)
 
     def has_subscribers(self, event_type: str) -> bool:

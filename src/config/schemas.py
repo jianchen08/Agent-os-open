@@ -84,13 +84,9 @@ class RateLimitConfig(BaseModel):
 class CORSConfig(BaseModel):
     """CORS 配置"""
 
-    allowed_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000"]
-    )
+    allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
     allow_credentials: bool = True
-    allowed_methods: list[str] = Field(
-        default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    )
+    allowed_methods: list[str] = Field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS"])
     allowed_headers: list[str] = Field(default_factory=lambda: ["*"])
 
 

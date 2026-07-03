@@ -84,7 +84,8 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         if not pipeline_run_id:
             logger.debug(
-                "[%s] 无 pipeline_run_id，跳过经验沉淀", self.name,
+                "[%s] 无 pipeline_run_id，跳过经验沉淀",
+                self.name,
             )
             return OutputResult()
 
@@ -93,7 +94,8 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
             chunk_service = ctx.get_service("chunk_service")
         except KeyError:
             logger.debug(
-                "[%s] chunk_service 不可用，跳过经验沉淀", self.name,
+                "[%s] chunk_service 不可用，跳过经验沉淀",
+                self.name,
             )
             return OutputResult()
 
@@ -101,7 +103,8 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
             knowledge_service = ctx.get_service("knowledge_service")
         except KeyError:
             logger.debug(
-                "[%s] knowledge_service 不可用，跳过经验沉淀", self.name,
+                "[%s] knowledge_service 不可用，跳过经验沉淀",
+                self.name,
             )
             return OutputResult()
 
@@ -111,14 +114,17 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
         except Exception as e:
             logger.warning(
                 "[%s] 获取压缩块失败 | pipeline_run_id=%s | error=%s",
-                self.name, pipeline_run_id, e,
+                self.name,
+                pipeline_run_id,
+                e,
             )
             return OutputResult()
 
         if not chunks:
             logger.debug(
                 "[%s] 无压缩块可沉淀 | pipeline_run_id=%s",
-                self.name, pipeline_run_id,
+                self.name,
+                pipeline_run_id,
             )
             return OutputResult()
 
@@ -155,14 +161,19 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
                 errors.append(str(e))
                 logger.warning(
                     "[%s] 知识存储失败 | chunk_id=%s | error=%s",
-                    self.name, chunk.id, e,
+                    self.name,
+                    chunk.id,
+                    e,
                 )
 
         # 6. 更新 state
         if knowledge_ids:
             logger.info(
                 "[%s] 经验沉淀成功 | pipeline_run_id=%s | chunks=%d | knowledge_ids=%s",
-                self.name, pipeline_run_id, len(chunks), knowledge_ids,
+                self.name,
+                pipeline_run_id,
+                len(chunks),
+                knowledge_ids,
             )
             return OutputResult(
                 state_updates={
@@ -173,7 +184,10 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
             )
         logger.debug(
             "[%s] 经验沉淀失败 | pipeline_run_id=%s | chunks=%d | errors=%d",
-            self.name, pipeline_run_id, len(chunks), len(errors),
+            self.name,
+            pipeline_run_id,
+            len(chunks),
+            len(errors),
         )
         return OutputResult(
             state_updates={

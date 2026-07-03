@@ -48,30 +48,26 @@ class TaskIdleTimerMixin:
         task_service = self._task_service
         if not task_service:
             logger.warning(
-                "TaskWorker: [IDLE-TIMEOUT] 无 task_service，无法处理: "
-                "task_id=%s", task_id,
+                "TaskWorker: [IDLE-TIMEOUT] 无 task_service，无法处理: task_id=%s",
+                task_id,
             )
             return
 
         task = task_service.get_task(task_id)
         if task is None:
             logger.debug(
-                "TaskWorker: [IDLE-TIMEOUT] 任务不存在，取消计时器: "
-                "task_id=%s", task_id,
+                "TaskWorker: [IDLE-TIMEOUT] 任务不存在，取消计时器: task_id=%s",
+                task_id,
             )
             self._cancel_idle_timer_async(task_id)
             return
 
-        status_str = (
-            task.status
-            if isinstance(task.status, str)
-            else task.status.value
-        )
+        status_str = task.status if isinstance(task.status, str) else task.status.value
         if status_str != "running":
             logger.info(
-                "TaskWorker: [IDLE-TIMEOUT] 任务已非 running 状态，"
-                "跳过 idle 判定: task_id=%s status=%s",
-                task_id, status_str,
+                "TaskWorker: [IDLE-TIMEOUT] 任务已非 running 状态，跳过 idle 判定: task_id=%s status=%s",
+                task_id,
+                status_str,
             )
             ctx = self._contexts.get(task_id)
             if ctx:
@@ -86,26 +82,22 @@ class TaskIdleTimerMixin:
             # 真正 idle：bg_task done + 引擎已停止 + 无活跃子任务
             # is_actually_idle 内部已记录判定路径
             try:
-                threshold = (
-                    getattr(timer_manager, "idle_threshold", "?")
-                    if timer_manager else "?"
-                )
+                threshold = getattr(timer_manager, "idle_threshold", "?") if timer_manager else "?"
                 _reason = self._build_idle_fail_reason(
-                    task_id, task_service, threshold,
+                    task_id,
+                    task_service,
+                    threshold,
                 )
                 loop = asyncio.get_running_loop()
-                _fail_task = loop.create_task(
-                    task_service.fail_task(task_id, _reason)
-                )
+                _fail_task = loop.create_task(task_service.fail_task(task_id, _reason))
                 # fail_task 是 fire-and-forget 协程，内部若抛异常（如
                 # _emit_state_change / _notify_suspended_pipelines 失败）
                 # 默认进黑洞无人知晓，导致父任务死等。挂回调把异常打出来。
-                _fail_task.add_done_callback(
-                    lambda fut, tid=task_id: self._log_fail_task_exception(fut, tid)
-                )
+                _fail_task.add_done_callback(lambda fut, tid=task_id: self._log_fail_task_exception(fut, tid))
                 logger.warning(
-                    "TaskWorker: [IDLE-TIMEOUT] 确认真正 idle，标记 failed: "
-                    "task_id=%s threshold=%ss", task_id, threshold,
+                    "TaskWorker: [IDLE-TIMEOUT] 确认真正 idle，标记 failed: task_id=%s threshold=%ss",
+                    task_id,
+                    threshold,
                 )
                 ctx = self._contexts.get(task_id)
                 if ctx:
@@ -113,29 +105,31 @@ class TaskIdleTimerMixin:
                     ctx.cleanup(timer_manager)
             except Exception as e:
                 logger.error(
-                    "TaskWorker: [IDLE-TIMEOUT] fail 处理失败: "
-                    "task_id=%s error=%s", task_id, e,
+                    "TaskWorker: [IDLE-TIMEOUT] fail 处理失败: task_id=%s error=%s",
+                    task_id,
+                    e,
                 )
             return
 
         # 非真正 idle：引擎仍在运行或有活跃子任务 → 重建计时器继续监控
         # is_actually_idle 内部已记录具体哪个检查通过了
         logger.info(
-            "TaskWorker: [IDLE-TIMEOUT] 非真正 idle，重建计时器继续监控: "
-            "task_id=%s", task_id,
+            "TaskWorker: [IDLE-TIMEOUT] 非真正 idle，重建计时器继续监控: task_id=%s",
+            task_id,
         )
         if timer_manager:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(
                     self._recreate_idle_timer_async(
-                        task_id, timer_manager,
+                        task_id,
+                        timer_manager,
                     ),
                 )
             except RuntimeError:
                 logger.warning(
-                    "TaskWorker: [IDLE-TIMEOUT] 无事件循环，"
-                    "无法重建计时器: task_id=%s", task_id,
+                    "TaskWorker: [IDLE-TIMEOUT] 无事件循环，无法重建计时器: task_id=%s",
+                    task_id,
                 )
 
     def _build_idle_fail_reason(
@@ -168,6 +162,7 @@ class TaskIdleTimerMixin:
         # 引擎 last_state：raw_error / stop_reason / ended / iteration
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entries = get_engine_registry().find_by_tag("task_id", task_id)
             engine = next(
                 (getattr(e, "engine", None) for e in entries if e),
@@ -190,8 +185,9 @@ class TaskIdleTimerMixin:
                     hints.append("ended=False(引擎未正常收尾)")
         except Exception as exc:
             logger.debug(
-                "TaskWorker: [IDLE-CTX] 收集引擎 last_state 失败: "
-                "task_id=%s error=%s", task_id, exc,
+                "TaskWorker: [IDLE-CTX] 收集引擎 last_state 失败: task_id=%s error=%s",
+                task_id,
+                exc,
             )
 
         # task.error：上一轮可能已写入失败原因
@@ -203,8 +199,9 @@ class TaskIdleTimerMixin:
                     hints.append(f"任务error={err[:300]}")
         except Exception as exc:
             logger.debug(
-                "TaskWorker: [IDLE-CTX] 读取 task.error 失败: "
-                "task_id=%s error=%s", task_id, exc,
+                "TaskWorker: [IDLE-CTX] 读取 task.error 失败: task_id=%s error=%s",
+                task_id,
+                exc,
             )
 
         if hints:
@@ -233,9 +230,10 @@ class TaskIdleTimerMixin:
         exc = task_future.exception()
         if exc is not None:
             logger.error(
-                "TaskWorker: [IDLE-TIMEOUT] fail_task 协程内部异常，"
-                "子任务失败可能未通知到父任务: task_id=%s error=%s",
-                task_id, exc, exc_info=exc,
+                "TaskWorker: [IDLE-TIMEOUT] fail_task 协程内部异常，子任务失败可能未通知到父任务: task_id=%s error=%s",
+                task_id,
+                exc,
+                exc_info=exc,
             )
         else:
             logger.info(
@@ -262,12 +260,13 @@ class TaskIdleTimerMixin:
         """
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             registry = get_engine_registry()
             entries = registry.find_by_tag("task_id", task_id)
             if not entries:
                 logger.debug(
-                    "TaskWorker: [IDLE-CHECK] EngineRegistry 中无匹配引擎: "
-                    "task_id=%s", task_id,
+                    "TaskWorker: [IDLE-CHECK] EngineRegistry 中无匹配引擎: task_id=%s",
+                    task_id,
                 )
                 return False
             for entry in entries:
@@ -283,9 +282,8 @@ class TaskIdleTimerMixin:
                     try:
                         last_state = getattr(entry.engine, "last_state", None) or {}
                         from pipeline.types import StateKeys  # noqa: PLC0415
-                        exec_status = last_state.get(
-                            StateKeys.EXECUTION_STATUS, ""
-                        )
+
+                        exec_status = last_state.get(StateKeys.EXECUTION_STATUS, "")
                         if exec_status == "waiting_recovery":
                             logger.warning(
                                 "TaskWorker: [IDLE-CHECK] 引擎处于 "
@@ -303,9 +301,9 @@ class TaskIdleTimerMixin:
                         future_done = entry.engine_task.done()
                         if not future_done:
                             logger.info(
-                                "TaskWorker: [IDLE-CHECK] 引擎 Future 仍在执行，"
-                                "判定为非 idle: task_id=%s pipeline=%s",
-                                task_id, getattr(entry.engine, 'pipeline_id', '?')[:12],
+                                "TaskWorker: [IDLE-CHECK] 引擎 Future 仍在执行，判定为非 idle: task_id=%s pipeline=%s",
+                                task_id,
+                                getattr(entry.engine, "pipeline_id", "?")[:12],
                             )
                             return True
                     except Exception:
@@ -317,20 +315,23 @@ class TaskIdleTimerMixin:
                             logger.info(
                                 "TaskWorker: [IDLE-CHECK] engine.is_running=True，"
                                 "判定为非 idle: task_id=%s pipeline=%s",
-                                task_id, entry.engine.pipeline_id[:12],
+                                task_id,
+                                entry.engine.pipeline_id[:12],
                             )
                             return True
                     except Exception:
                         pass
             # 有 entry 但引擎不在运行状态
             logger.debug(
-                "TaskWorker: [IDLE-CHECK] 引擎已停止（Future done + is_running=False）: "
-                "task_id=%s entries=%d", task_id, len(entries),
+                "TaskWorker: [IDLE-CHECK] 引擎已停止（Future done + is_running=False）: task_id=%s entries=%d",
+                task_id,
+                len(entries),
             )
         except Exception as exc:
             logger.warning(
-                "TaskWorker: [IDLE-CHECK] EngineRegistry 查询异常: "
-                "task_id=%s error=%s", task_id, exc,
+                "TaskWorker: [IDLE-CHECK] EngineRegistry 查询异常: task_id=%s error=%s",
+                task_id,
+                exc,
             )
         return False
 
@@ -355,8 +356,8 @@ class TaskIdleTimerMixin:
         ctx = self._contexts.get(task_id)
         if ctx is not None and ctx.bg_task is not None and not ctx.bg_task.done():
             logger.debug(
-                "TaskWorker: [IDLE-CHECK] bg_task 仍在执行，判定为非 idle: "
-                "task_id=%s", task_id,
+                "TaskWorker: [IDLE-CHECK] bg_task 仍在执行，判定为非 idle: task_id=%s",
+                task_id,
             )
             return False
         if self._engine_is_running(task_id):
@@ -364,18 +365,20 @@ class TaskIdleTimerMixin:
             return False
         if self._has_active_children(task_id):
             logger.info(
-                "TaskWorker: [IDLE-CHECK] 存在活跃子任务，判定为非 idle: "
-                "task_id=%s", task_id,
+                "TaskWorker: [IDLE-CHECK] 存在活跃子任务，判定为非 idle: task_id=%s",
+                task_id,
             )
             return False
         logger.warning(
-            "TaskWorker: [IDLE-CHECK] 判定为真正 idle（bg_task done + "
-            "引擎已停止 + 无活跃子任务）: task_id=%s", task_id,
+            "TaskWorker: [IDLE-CHECK] 判定为真正 idle（bg_task done + 引擎已停止 + 无活跃子任务）: task_id=%s",
+            task_id,
         )
         return True
 
     async def _arm_idle_timer(
-        self, task_id: str, timer_manager: Any,
+        self,
+        task_id: str,
+        timer_manager: Any,
     ) -> None:
         """统一为任务装备 idle 计时器（取消旧 + 创建新）。
 
@@ -419,7 +422,9 @@ class TaskIdleTimerMixin:
             pass
 
     async def _do_cancel_timer(
-        self, task_id: str, timer_manager: Any,
+        self,
+        task_id: str,
+        timer_manager: Any,
     ) -> None:
         """实际执行计时器取消。
 
@@ -430,14 +435,16 @@ class TaskIdleTimerMixin:
         try:
             await timer_manager.cancel_timer(task_id)
             logger.debug(
-                "TaskWorker: 残留 idle 计时器已取消: "
-                "task_id=%s", task_id,
+                "TaskWorker: 残留 idle 计时器已取消: task_id=%s",
+                task_id,
             )
         except Exception:
             pass
 
     async def _recreate_idle_timer_async(
-        self, task_id: str, timer_manager: Any,
+        self,
+        task_id: str,
+        timer_manager: Any,
     ) -> None:
         """idle 超时非真正 idle 时异步重建计时器。
 
@@ -453,16 +460,12 @@ class TaskIdleTimerMixin:
             if self._task_service:
                 task = self._task_service.get_task(task_id)
                 if task is not None:
-                    status = (
-                        task.status
-                        if isinstance(task.status, str)
-                        else task.status.value
-                    )
+                    status = task.status if isinstance(task.status, str) else task.status.value
                     if status != "running":
                         logger.info(
-                            "TaskWorker: [IDLE-RECREATE] 跳过计时器重建，"
-                            "任务已非 running: task_id=%s status=%s",
-                            task_id, status,
+                            "TaskWorker: [IDLE-RECREATE] 跳过计时器重建，任务已非 running: task_id=%s status=%s",
+                            task_id,
+                            status,
                         )
                         ctx = self._contexts.get(task_id)
                         if ctx:
@@ -471,15 +474,15 @@ class TaskIdleTimerMixin:
                         return
             await self._arm_idle_timer(task_id, timer_manager)
             logger.info(
-                "TaskWorker: [IDLE-RECREATE] 计时器已重建（引擎仍在运行/有活跃子任务）: "
-                "task_id=%s threshold=%ss",
-                task_id, getattr(timer_manager, 'idle_threshold', '?'),
+                "TaskWorker: [IDLE-RECREATE] 计时器已重建（引擎仍在运行/有活跃子任务）: task_id=%s threshold=%ss",
+                task_id,
+                getattr(timer_manager, "idle_threshold", "?"),
             )
         except Exception as e:
             logger.warning(
-                "TaskWorker: [IDLE-RECREATE] 计时器重建失败: "
-                "task_id=%s error=%s",
-                task_id, e,
+                "TaskWorker: [IDLE-RECREATE] 计时器重建失败: task_id=%s error=%s",
+                task_id,
+                e,
             )
 
     def _has_active_children(self, task_id: str) -> bool:
@@ -501,25 +504,23 @@ class TaskIdleTimerMixin:
             subtasks = task_service.list_subtasks(task_id)
         except Exception as exc:
             logger.debug(
-                "TaskWorker: [IDLE-CHECK] 查询子任务失败: "
-                "task_id=%s error=%s", task_id, exc,
+                "TaskWorker: [IDLE-CHECK] 查询子任务失败: task_id=%s error=%s",
+                task_id,
+                exc,
             )
             return False
 
         active_statuses = {"pending", "running", "evaluating", "scheduled"}
         active_children: list[str] = []
         for st in subtasks:
-            status = (
-                st.status.value
-                if hasattr(st.status, "value")
-                else str(st.status)
-            )
+            status = st.status.value if hasattr(st.status, "value") else str(st.status)
             if status in active_statuses:
                 active_children.append(f"{st.id}({status})")
         if active_children:
             logger.info(
                 "TaskWorker: [IDLE-CHECK] 活跃子任务: task_id=%s children=%s",
-                task_id, active_children,
+                task_id,
+                active_children,
             )
             return True
         return False
@@ -551,12 +552,13 @@ class TaskIdleTimerMixin:
         try:
             await self._arm_idle_timer(task_id, timer_manager)
             logger.debug(
-                "TaskWorker: [IDLE-RESET] 计时器已重置（新轮迭代开始）: "
-                "task_id=%s threshold=%ss",
-                task_id, getattr(timer_manager, 'idle_threshold', '?'),
+                "TaskWorker: [IDLE-RESET] 计时器已重置（新轮迭代开始）: task_id=%s threshold=%ss",
+                task_id,
+                getattr(timer_manager, "idle_threshold", "?"),
             )
         except Exception as e:
             logger.warning(
-                "TaskWorker: [IDLE-RESET] 计时器重置失败（非致命）: "
-                "task_id=%s error=%s", task_id, e,
+                "TaskWorker: [IDLE-RESET] 计时器重置失败（非致命）: task_id=%s error=%s",
+                task_id,
+                e,
             )

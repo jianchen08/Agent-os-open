@@ -40,10 +40,8 @@ class ScreenshotManager:
             if output_path is None:
                 import tempfile  # noqa: PLC0415
                 import uuid  # noqa: PLC0415
-                output_path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"playwright_screenshot_{uuid.uuid4().hex[:8]}.png"
-                )
+
+                output_path = os.path.join(tempfile.gettempdir(), f"playwright_screenshot_{uuid.uuid4().hex[:8]}.png")
 
             # 确保目录存在
             os.makedirs(os.path.dirname(output_path), exist_ok=True)  # noqa: PTH103,PTH120
@@ -94,10 +92,8 @@ class ScreenshotManager:
             if output_path is None:
                 import tempfile  # noqa: PLC0415
                 import uuid  # noqa: PLC0415
-                output_path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"playwright_element_{uuid.uuid4().hex[:8]}.png"
-                )
+
+                output_path = os.path.join(tempfile.gettempdir(), f"playwright_element_{uuid.uuid4().hex[:8]}.png")
 
             # 确保目录存在
             os.makedirs(os.path.dirname(output_path), exist_ok=True)  # noqa: PTH103,PTH120

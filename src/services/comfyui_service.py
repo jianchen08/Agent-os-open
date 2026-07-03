@@ -364,14 +364,10 @@ class ComfyUIService:
                 )
 
         except asyncio.CancelledError:
-            self._history.update(
-                record_id, status=GenerationStatus.FAILED, error="任务已取消"
-            )
+            self._history.update(record_id, status=GenerationStatus.FAILED, error="任务已取消")
         except Exception as e:
             logger.error("监控生成任务异常: record_id=%s, error=%s", record_id, e)
-            self._history.update(
-                record_id, status=GenerationStatus.FAILED, error=str(e)
-            )
+            self._history.update(record_id, status=GenerationStatus.FAILED, error=str(e))
         finally:
             self._running_tasks.pop(record_id, None)
             self._task_progress.pop(record_id, None)
@@ -398,9 +394,7 @@ class ComfyUIService:
             "steps": params.get("steps", 20),
             "cfg_scale": params.get("cfg_scale", 7.0),
             "seed": params.get("seed", -1),
-            "checkpoint": params.get(
-                "checkpoint", "v1-5-pruned-emaonly.safetensors"
-            ),
+            "checkpoint": params.get("checkpoint", "v1-5-pruned-emaonly.safetensors"),
         }
 
         result = template_str

@@ -60,10 +60,7 @@ class EvaluationResultStorage:
             metric = await self.metric_loader.get_metric_by_name(result.metric_name)
 
             if metric:
-                logger.info(
-                    f"评估结果记录: {result.metric_name} "
-                    f"(passed={result.passed}, score={result.score})"
-                )
+                logger.info(f"评估结果记录: {result.metric_name} (passed={result.passed}, score={result.score})")
                 return metric.get("id", "")
             logger.warning(f"评估指标不存在: {result.metric_name}")
             return ""

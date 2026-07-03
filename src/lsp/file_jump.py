@@ -72,9 +72,7 @@ class FileJumpProtocol:
 
         # 根据 IDE 类型跳转
         try:
-            return await FileJumpProtocol._jump_by_ide_type(
-                ide_info.type, file_path, position
-            )
+            return await FileJumpProtocol._jump_by_ide_type(ide_info.type, file_path, position)
         except Exception as e:
             logger.error(f"跳转失败: {e}")
             return False

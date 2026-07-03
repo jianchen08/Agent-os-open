@@ -89,7 +89,10 @@ class ToolProgressReporter(IOutputPlugin):
             for p in progress_list:
                 logger.info(
                     "[%s] Tool progress | name=%s | status=%s | summary=%.80s",
-                    self.name, p["tool_name"], p["status"], p["result_summary"],
+                    self.name,
+                    p["tool_name"],
+                    p["status"],
+                    p["result_summary"],
                 )
 
         return OutputResult(state_updates={"tool_progress": progress_list})
@@ -127,23 +130,27 @@ class ToolProgressReporter(IOutputPlugin):
                 result = tool_results[i]
                 if isinstance(result, dict) and "error" in result:
                     status = "failed"
-                    result_summary = str(result["error"])[:self._summary_max_length]
+                    result_summary = str(result["error"])[: self._summary_max_length]
                 elif result is not None:
                     status = "success"
-                    result_summary = str(result)[:self._summary_max_length]
+                    result_summary = str(result)[: self._summary_max_length]
                 else:
                     status = "pending"
 
-            progress_list.append({
-                "tool_name": tool_name,
-                "status": status,
-                "result_summary": result_summary,
-            })
+            progress_list.append(
+                {
+                    "tool_name": tool_name,
+                    "status": status,
+                    "result_summary": result_summary,
+                }
+            )
 
         return progress_list
 
     def _publish_progress(
-        self, ctx: PluginContext, progress_list: list[dict[str, Any]],
+        self,
+        ctx: PluginContext,
+        progress_list: list[dict[str, Any]],
     ) -> None:
         """通过 event_bus 发布进度事件。
 
@@ -157,11 +164,14 @@ class ToolProgressReporter(IOutputPlugin):
         try:
             event_bus = ctx.get_service("event_bus")
             if hasattr(event_bus, "emit"):
-                event_bus.emit("tool_progress", {
-                    "progress": progress_list,
-                    "session_id": ctx.state.get(StateKeys.SESSION_ID, ""),
-                    "task_id": ctx.state.get(StateKeys.TASK_ID, ""),
-                })
+                event_bus.emit(
+                    "tool_progress",
+                    {
+                        "progress": progress_list,
+                        "session_id": ctx.state.get(StateKeys.SESSION_ID, ""),
+                        "task_id": ctx.state.get(StateKeys.TASK_ID, ""),
+                    },
+                )
         except KeyError:
             logger.debug(
                 "[%s] event_bus service not available, skipping event publish",

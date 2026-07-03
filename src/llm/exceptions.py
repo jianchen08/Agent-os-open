@@ -24,6 +24,5 @@ class KeyPoolExhaustedError(LLMResourceError):
         self.timeout = timeout
         self.unavailable = unavailable
         super().__init__(
-            f"KeyPool '{pool_id}' 所有 key 不可用，等待 {timeout:.0f}s 后超时；"
-            f"不可用 key 诊断: {unavailable}"
+            f"KeyPool '{pool_id}' 所有 key 不可用，等待 {timeout:.0f}s 后超时；不可用 key 诊断: {unavailable}"
         )

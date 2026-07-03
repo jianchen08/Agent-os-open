@@ -50,9 +50,7 @@ def _build_inputs(mode, inherit_from: str = "src-task-001") -> dict:
         "target_type": "agent",
         "target_id": "general_agent",
         "task_scope": "non_container",
-        "acceptance_criteria": {
-            "file_check": {"input_params": {"path": "src/foo.py"}}
-        },
+        "acceptance_criteria": {"file_check": {"input_params": {"path": "src/foo.py"}}},
         "parent_agent_level": 1,
         "inherit": {
             "from": inherit_from,
@@ -82,31 +80,33 @@ def _patch_infrastructure():
     mock_service_provider.get_or_create.return_value = mock_task_service
 
     patches = [
+        patch.object(TaskSubmitTool, "_get_task_service", return_value=mock_task_service),
         patch.object(
-            TaskSubmitTool, "_get_task_service", return_value=mock_task_service
-        ),
-        patch.object(
-            TaskSubmitTool, "_validate_target_agent",
+            TaskSubmitTool,
+            "_validate_target_agent",
             return_value=(True, "", ""),
         ),
         patch.object(
-            TaskSubmitTool, "_auto_fill_criteria", return_value=None,
+            TaskSubmitTool,
+            "_auto_fill_criteria",
+            return_value=None,
         ),
         patch.object(
-            TaskSubmitTool, "_check_dependencies_exist", return_value=[],
+            TaskSubmitTool,
+            "_check_dependencies_exist",
+            return_value=[],
         ),
         patch(
             "infrastructure.service_provider.get_service_provider",
             return_value=mock_service_provider,
         ),
         # 屏蔽 ws 广播副作用
-        patch.dict(sys.modules, {
-            "ws_handler": MagicMock(
-                ws_interaction_notifier=MagicMock(
-                    send_to_user=MagicMock()
-                )
-            ),
-        }),
+        patch.dict(
+            sys.modules,
+            {
+                "ws_handler": MagicMock(ws_interaction_notifier=MagicMock(send_to_user=MagicMock())),
+            },
+        ),
     ]
     return patches, mock_task_service
 
@@ -124,19 +124,12 @@ def test_inherit_mode_schema_supports_string_and_array():
     mode_schema = inherit_schema["properties"]["mode"]
 
     # 必须是 oneOf 形式
-    assert "oneOf" in mode_schema, (
-        "inherit.mode 缺少 oneOf 定义，"
-        f"实际 schema={mode_schema}"
-    )
+    assert "oneOf" in mode_schema, f"inherit.mode 缺少 oneOf 定义，实际 schema={mode_schema}"
 
     one_of = mode_schema["oneOf"]
     type_kinds = [opt.get("type") for opt in one_of]
-    assert "string" in type_kinds, (
-        f"inherit.mode 缺少 string 分支，实际={type_kinds}"
-    )
-    assert "array" in type_kinds, (
-        f"inherit.mode 缺少 array 分支，实际={type_kinds}"
-    )
+    assert "string" in type_kinds, f"inherit.mode 缺少 string 分支，实际={type_kinds}"
+    assert "array" in type_kinds, f"inherit.mode 缺少 array 分支，实际={type_kinds}"
 
     # string 分支应允许 pipe/workspace
     string_opt = next(opt for opt in one_of if opt.get("type") == "string")
@@ -176,12 +169,8 @@ def test_inherit_mode_string_pipe_backward_compatible():
     inputs = _build_inputs(mode="pipe")
     error_code = _run_execute_capture_error_code(inputs)
 
-    assert error_code != "INVALID_INHERIT_MODE", (
-        f"mode='pipe' 字符串应被识别为合法，但收到错误码={error_code}"
-    )
-    assert error_code != "INVALID_INHERIT_PARAMS", (
-        f"mode='pipe' 字符串应被识别为合法，但收到错误码={error_code}"
-    )
+    assert error_code != "INVALID_INHERIT_MODE", f"mode='pipe' 字符串应被识别为合法，但收到错误码={error_code}"
+    assert error_code != "INVALID_INHERIT_PARAMS", f"mode='pipe' 字符串应被识别为合法，但收到错误码={error_code}"
 
 
 def test_inherit_mode_string_workspace_backward_compatible():
@@ -189,9 +178,7 @@ def test_inherit_mode_string_workspace_backward_compatible():
     inputs = _build_inputs(mode="workspace")
     error_code = _run_execute_capture_error_code(inputs)
 
-    assert error_code != "INVALID_INHERIT_MODE", (
-        f"mode='workspace' 字符串应被识别为合法，但收到错误码={error_code}"
-    )
+    assert error_code != "INVALID_INHERIT_MODE", f"mode='workspace' 字符串应被识别为合法，但收到错误码={error_code}"
     assert error_code != "INVALID_INHERIT_PARAMS"
 
 
@@ -218,9 +205,7 @@ def test_inherit_mode_list_single_pipe():
     inputs = _build_inputs(mode=["pipe"])
     error_code = _run_execute_capture_error_code(inputs)
 
-    assert error_code != "INVALID_INHERIT_MODE", (
-        f"mode=['pipe'] 应被识别为合法，但收到错误码={error_code}"
-    )
+    assert error_code != "INVALID_INHERIT_MODE", f"mode=['pipe'] 应被识别为合法，但收到错误码={error_code}"
     assert error_code != "INVALID_INHERIT_PARAMS"
 
 
@@ -229,9 +214,7 @@ def test_inherit_mode_list_single_workspace():
     inputs = _build_inputs(mode=["workspace"])
     error_code = _run_execute_capture_error_code(inputs)
 
-    assert error_code != "INVALID_INHERIT_MODE", (
-        f"mode=['workspace'] 应被识别为合法，但收到错误_code={error_code}"
-    )
+    assert error_code != "INVALID_INHERIT_MODE", f"mode=['workspace'] 应被识别为合法，但收到错误_code={error_code}"
     assert error_code != "INVALID_INHERIT_PARAMS"
 
 
@@ -240,9 +223,7 @@ def test_inherit_mode_invalid_string_returns_error():
     inputs = _build_inputs(mode="invalid")
     error_code = _run_execute_capture_error_code(inputs)
 
-    assert error_code == "INVALID_INHERIT_MODE", (
-        f"mode='invalid' 应返回 INVALID_INHERIT_MODE 错误，实际={error_code}"
-    )
+    assert error_code == "INVALID_INHERIT_MODE", f"mode='invalid' 应返回 INVALID_INHERIT_MODE 错误，实际={error_code}"
 
 
 def test_inherit_mode_list_with_invalid_value_returns_error():
@@ -250,9 +231,7 @@ def test_inherit_mode_list_with_invalid_value_returns_error():
     inputs = _build_inputs(mode=["invalid"])
     error_code = _run_execute_capture_error_code(inputs)
 
-    assert error_code == "INVALID_INHERIT_MODE", (
-        f"mode=['invalid'] 应返回 INVALID_INHERIT_MODE 错误，实际={error_code}"
-    )
+    assert error_code == "INVALID_INHERIT_MODE", f"mode=['invalid'] 应返回 INVALID_INHERIT_MODE 错误，实际={error_code}"
 
 
 def test_inherit_mode_list_with_mixed_valid_and_invalid_returns_error():
@@ -261,8 +240,7 @@ def test_inherit_mode_list_with_mixed_valid_and_invalid_returns_error():
     error_code = _run_execute_capture_error_code(inputs)
 
     assert error_code == "INVALID_INHERIT_MODE", (
-        f"mode=['pipe', 'invalid'] 应返回 INVALID_INHERIT_MODE 错误，"
-        f"实际={error_code}"
+        f"mode=['pipe', 'invalid'] 应返回 INVALID_INHERIT_MODE 错误，实际={error_code}"
     )
 
 
@@ -286,8 +264,7 @@ def test_build_metadata_handles_list_mode_for_pipe():
 
     # 验证 pipe 标记被设置（即使 mode 是列表也应正确识别）
     assert metadata.get("inherit_pipe_from") == "src-task-001", (
-        f"mode 为列表时 inherit_pipe_from 应被设置，"
-        f"实际 metadata={metadata}"
+        f"mode 为列表时 inherit_pipe_from 应被设置，实际 metadata={metadata}"
     )
 
 
@@ -301,8 +278,7 @@ def test_build_metadata_handles_string_mode_for_pipe():
     metadata = tool._build_metadata(inputs, goal, criteria)
 
     assert metadata.get("inherit_pipe_from") == "src-task-001", (
-        f"mode='pipe' 字符串时 inherit_pipe_from 应被设置，"
-        f"实际 metadata={metadata}"
+        f"mode='pipe' 字符串时 inherit_pipe_from 应被设置，实际 metadata={metadata}"
     )
 
 
@@ -317,8 +293,7 @@ def test_build_metadata_no_pipe_mark_for_workspace_only_list():
 
     # workspace-only 模式不应触发 pipe 标记
     assert "inherit_pipe_from" not in metadata, (
-        f"mode=['workspace'] 不应设置 inherit_pipe_from，"
-        f"实际 metadata={metadata}"
+        f"mode=['workspace'] 不应设置 inherit_pipe_from，实际 metadata={metadata}"
     )
 
 
@@ -334,9 +309,7 @@ def test_normalize_description_list_to_string():
     """
     result = _normalize_description(["在当前执行环境", ""])
     assert isinstance(result, str)
-    assert result == "在当前执行环境\n", (
-        f"list 应按换行连接，实际={result!r}"
-    )
+    assert result == "在当前执行环境\n", f"list 应按换行连接，实际={result!r}"
 
 
 def test_normalize_description_string_passthrough():

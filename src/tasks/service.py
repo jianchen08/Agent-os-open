@@ -64,6 +64,7 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         """通知所有注册的回调函数任务状态已变更，并通过 WebSocket 推送事件。"""
         # 绑定日志上下文，使后续日志自动携带 task_id
         from src.core.logging import LogContext  # noqa: PLC0415
+
         LogContext.bind(task_id=task_id)
 
         for cb in self._state_callbacks:
@@ -120,17 +121,20 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
                 )
                 return
 
-            await ws_interaction_notifier.send_to_user(_user_id, {
-                "type": "task_status_changed",
-                "data": {
-                    "task_id": task_id,
-                    "status": new_status,
-                    "previous_status": old_status,
-                    "title": task.title or "",
-                    "updated_at": task.updated_at or "",
-                    "thread_id": thread_id,
+            await ws_interaction_notifier.send_to_user(
+                _user_id,
+                {
+                    "type": "task_status_changed",
+                    "data": {
+                        "task_id": task_id,
+                        "status": new_status,
+                        "previous_status": old_status,
+                        "title": task.title or "",
+                        "updated_at": task.updated_at or "",
+                        "thread_id": thread_id,
+                    },
                 },
-            })
+            )
         except Exception as exc:
             logger.debug(
                 "[TaskService] task_status_changed 推送失败（非致命）task_id=%s: %s",

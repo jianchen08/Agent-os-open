@@ -81,7 +81,9 @@ class ArtifactService:
 
         logger.info(
             "[ArtifactService] 创建制品 | id=%s | task_id=%s | type=%s",
-            artifact.id, task_id, artifact_type.value,
+            artifact.id,
+            task_id,
+            artifact_type.value,
         )
         return artifact
 
@@ -143,7 +145,9 @@ class ArtifactService:
 
         logger.info(
             "[ArtifactService] 更新制品 | new_id=%s | old_id=%s | version=%d",
-            new_artifact.id, artifact_id, new_artifact.version,
+            new_artifact.id,
+            artifact_id,
+            new_artifact.version,
         )
         return new_artifact
 
@@ -215,12 +219,14 @@ class ArtifactService:
         from_content = version_map.get(from_version, {}).get("content", "")
         to_content = version_map.get(to_version, {}).get("content", "")
 
-        diff_lines = list(difflib.unified_diff(
-            from_content.splitlines(keepends=True),
-            to_content.splitlines(keepends=True),
-            fromfile=f"v{from_version}",
-            tofile=f"v{to_version}",
-        ))
+        diff_lines = list(
+            difflib.unified_diff(
+                from_content.splitlines(keepends=True),
+                to_content.splitlines(keepends=True),
+                fromfile=f"v{from_version}",
+                tofile=f"v{to_version}",
+            )
+        )
 
         return {
             "diff": "".join(diff_lines),

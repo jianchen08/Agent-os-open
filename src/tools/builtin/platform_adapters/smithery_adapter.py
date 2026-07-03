@@ -67,16 +67,20 @@ class SmitheryAdapter(PlatformAdapter):
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
+                ) as resp,
+            ):
                 if resp.status != 200:
                     logger.warning(
                         "[smithery] 搜索请求失败: status=%d url=%s",
-                        resp.status, resp.url,
+                        resp.status,
+                        resp.url,
                     )
                     return []
 
@@ -105,7 +109,8 @@ class SmitheryAdapter(PlatformAdapter):
 
         logger.info(
             "[smithery] 搜索完成: query=%s 返回 %d 条结果",
-            query, len(results),
+            query,
+            len(results),
         )
         return results
 
@@ -142,12 +147,7 @@ class SmitheryAdapter(PlatformAdapter):
         Returns:
             标准化资源字典，解析失败返回 None
         """
-        name = (
-            server.get("qualifiedName")
-            or server.get("displayName")
-            or server.get("name")
-            or server.get("id", "")
-        )
+        name = server.get("qualifiedName") or server.get("displayName") or server.get("name") or server.get("id", "")
         if not name:
             return None
 

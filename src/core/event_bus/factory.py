@@ -109,6 +109,7 @@ def get_event_bus(
                 )
                 # 尝试连接
                 import asyncio  # noqa: PLC0415
+
                 try:
                     asyncio.get_running_loop()
                     # 如果能获取到运行中的循环，尝试连接
@@ -120,9 +121,7 @@ def get_event_bus(
                     _event_bus_instance = InMemoryEventBus(**kwargs)
                     logger.warning("[EventBus] 无事件循环，使用内存事件总线")
             except Exception as e:
-                logger.warning(
-                    f"[EventBus] Redis 连接失败，降级到内存事件总线 | error={str(e)}"
-                )
+                logger.warning(f"[EventBus] Redis 连接失败，降级到内存事件总线 | error={str(e)}")
                 _event_bus_instance = InMemoryEventBus(**kwargs)
         else:
             _event_bus_instance = create_event_bus(

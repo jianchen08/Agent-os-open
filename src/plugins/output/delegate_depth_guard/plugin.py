@@ -110,14 +110,19 @@ class DelegateDepthGuardPlugin(IOutputPlugin):
             state_updates[self._depth_key] = new_depth
             logger.debug(
                 "[%s] Delegate depth incremented: %d → %d (max=%d)",
-                self.name, current_depth, new_depth, max_depth,
+                self.name,
+                current_depth,
+                new_depth,
+                max_depth,
             )
 
             # 检查是否超限
             if new_depth > max_depth:
                 logger.warning(
                     "[%s] Delegate depth exceeded! depth=%d, max=%d. Blocking delegation.",
-                    self.name, new_depth, max_depth,
+                    self.name,
+                    new_depth,
+                    max_depth,
                 )
                 state_updates["delegation.depth_blocked"] = {
                     "depth": new_depth,

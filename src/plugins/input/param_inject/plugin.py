@@ -83,10 +83,11 @@ class ParamInjectPlugin(IInputPlugin):
                 except (json.JSONDecodeError, TypeError):
                     tool_name = injected_tc.get("name", "?")
                     logger.warning(
-                        "[%s] 工具 %s 的 arguments JSON 解析失败（疑似输出被 "
-                        "max_tokens 截断），长度=%d，前200字符: %s",
-                        self.name, tool_name,
-                        len(raw_args), raw_args[:200],
+                        "[%s] 工具 %s 的 arguments JSON 解析失败（疑似输出被 max_tokens 截断），长度=%d，前200字符: %s",
+                        self.name,
+                        tool_name,
+                        len(raw_args),
+                        raw_args[:200],
                     )
                     # 截断修复：用 repair_json_string 尽量保住完整字段（含半截 content），
                     # 避免直接 raw_args={} 把半截内容全部丢失，导致下游验证器/tool_core
@@ -94,6 +95,7 @@ class ParamInjectPlugin(IInputPlugin):
                     from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
                         repair_json_string,
                     )
+
                     repaired = repair_json_string(raw_args)
                     if repaired is not None:
                         try:
@@ -105,7 +107,8 @@ class ParamInjectPlugin(IInputPlugin):
                         injected_tc["_args_truncated"] = True
                         logger.info(
                             "[%s] 工具 %s 截断修复成功，已保住可用字段 %s",
-                            self.name, tool_name,
+                            self.name,
+                            tool_name,
                             list(raw_args.keys()) if isinstance(raw_args, dict) else [],
                         )
                     else:
@@ -143,8 +146,7 @@ class ParamInjectPlugin(IInputPlugin):
                     _tool_name = injected_tc.get("name", "?")
                     if _tool_name in ("task_submit", "task_evaluate", "task_manage"):
                         logger.warning(
-                            "[param_inject] task_id 注入失败 | tool=%s | "
-                            "state[TASK_ID]=%r | pipeline_id=%s",
+                            "[param_inject] task_id 注入失败 | tool=%s | state[TASK_ID]=%r | pipeline_id=%s",
                             _tool_name,
                             ctx.state.get(StateKeys.TASK_ID),
                             ctx.state.get(StateKeys.PIPELINE_ID, "")[:12],
@@ -171,10 +173,7 @@ class ParamInjectPlugin(IInputPlugin):
             # 注入 parent_agent_level：从 state 中获取当前 Agent 层级
             # 供 task_submit / task_manage 等工具判断权限和设置子任务层级
             if "parent_agent_level" not in args:
-                raw_level = (
-                    ctx.state.get(StateKeys.AGENT_LEVEL)
-                    or ctx.state.get("context.agent_level", "")
-                )
+                raw_level = ctx.state.get(StateKeys.AGENT_LEVEL) or ctx.state.get("context.agent_level", "")
                 if raw_level:
                     level_str = str(raw_level).upper().lstrip("L")
                     with contextlib.suppress(ValueError, TypeError):
@@ -211,7 +210,8 @@ class ParamInjectPlugin(IInputPlugin):
 
         logger.debug(
             "[%s] Parameters injected | count=%d",
-            self.name, len(injected_calls),
+            self.name,
+            len(injected_calls),
         )
 
         return updates

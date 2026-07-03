@@ -100,9 +100,9 @@ class ConversationModeDetector(IOutputPlugin):
 
         if raw_tool_calls:
             logger.info(
-                "[%s][iter=%d] AI produced tool calls during conversation, "
-                "clearing conversation_mode",
-                self.name, iteration,
+                "[%s][iter=%d] AI produced tool calls during conversation, clearing conversation_mode",
+                self.name,
+                iteration,
             )
             return OutputResult(
                 state_updates={
@@ -114,7 +114,9 @@ class ConversationModeDetector(IOutputPlugin):
         round_num = state.get(StateKeys.CONVERSATION_ROUND, 0) + 1
         logger.info(
             "[%s][iter=%d] Conversation round %d, suspending pipeline (wait)",
-            self.name, iteration, round_num,
+            self.name,
+            iteration,
+            round_num,
         )
         return OutputResult(
             state_updates={StateKeys.CONVERSATION_ROUND: round_num},
@@ -147,7 +149,9 @@ class ConversationModeDetector(IOutputPlugin):
         return False
 
     def _detect_conversation_activation(
-        self, state: dict, iteration: int,
+        self,
+        state: dict,
+        iteration: int,
     ) -> OutputResult:
         """检测 tool_results 中是否包含对话模式激活信号。
 
@@ -177,9 +181,9 @@ class ConversationModeDetector(IOutputPlugin):
 
             if self._extract_conversation_flag(data):
                 logger.info(
-                    "[%s][iter=%d] Detected conversation_mode=True in tool_results, "
-                    "activating conversation mode",
-                    self.name, iteration,
+                    "[%s][iter=%d] Detected conversation_mode=True in tool_results, activating conversation mode",
+                    self.name,
+                    iteration,
                 )
                 return OutputResult(
                     state_updates={

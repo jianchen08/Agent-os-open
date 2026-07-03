@@ -236,8 +236,10 @@ class ResourceMergeTool(BuiltinTool):
                 )
 
             return_code, stdout, stderr = await self._git_helpers.run_git(
-                "worktree", "add",
-                "-b", branch_name,
+                "worktree",
+                "add",
+                "-b",
+                branch_name,
                 str(workspace),
                 "HEAD",
                 cwd=self.base_path,
@@ -250,7 +252,9 @@ class ResourceMergeTool(BuiltinTool):
                 )
 
             return_code, commit_hash, _ = await self._git_helpers.run_git(
-                "rev-parse", "HEAD", cwd=workspace,
+                "rev-parse",
+                "HEAD",
+                cwd=workspace,
             )
 
             return create_success_result(
@@ -328,12 +332,18 @@ class ResourceMergeTool(BuiltinTool):
                 else:
                     if base_commit:
                         return_code, diff_output, _ = await self._git_helpers.run_git(
-                            "diff", "--name-status", base_commit, "HEAD",
+                            "diff",
+                            "--name-status",
+                            base_commit,
+                            "HEAD",
                             cwd=workspace,
                         )
                     else:
                         return_code, diff_output, _ = await self._git_helpers.run_git(
-                            "diff", "--name-status", "HEAD", cwd=workspace,
+                            "diff",
+                            "--name-status",
+                            "HEAD",
+                            cwd=workspace,
                         )
 
                     if return_code == 0 and diff_output:
@@ -374,7 +384,9 @@ class ResourceMergeTool(BuiltinTool):
             logger.info(
                 "ResourceMerge merge: mode=%s, workspace=%s, target=%s, merged=%d files",
                 "worktree" if is_worktree else "direct",
-                workspace, target_dir, len(merged_files),
+                workspace,
+                target_dir,
+                len(merged_files),
             )
 
             return create_success_result(
@@ -430,17 +442,23 @@ class ResourceMergeTool(BuiltinTool):
 
             # 配置 workspace 的 git 用户信息
             await self._git_helpers.run_git(
-                "config", "user.email", "resource-merge@agent.local",
+                "config",
+                "user.email",
+                "resource-merge@agent.local",
                 cwd=workspace,
             )
             await self._git_helpers.run_git(
-                "config", "user.name", "Agent Resource Merge",
+                "config",
+                "user.name",
+                "Agent Resource Merge",
                 cwd=workspace,
             )
 
             # 在 workspace 中暂存所有变更
             return_code, _, stderr = await self._git_helpers.run_git(
-                "add", "-A", cwd=workspace,
+                "add",
+                "-A",
+                cwd=workspace,
             )
             if return_code != 0:
                 return create_failure_result(
@@ -450,13 +468,18 @@ class ResourceMergeTool(BuiltinTool):
 
             # 检查是否有变更需要提交
             return_code, status_output, _ = await self._git_helpers.run_git(
-                "status", "--porcelain", cwd=workspace,
+                "status",
+                "--porcelain",
+                cwd=workspace,
             )
             if status_output.strip():
                 # 有变更，执行 commit
                 commit_msg = f"auto: merge from {branch_name}"
                 return_code, _, stderr = await self._git_helpers.run_git(
-                    "commit", "-m", commit_msg, cwd=workspace,
+                    "commit",
+                    "-m",
+                    commit_msg,
+                    cwd=workspace,
                 )
                 if return_code != 0:
                     return create_failure_result(
@@ -466,11 +489,15 @@ class ResourceMergeTool(BuiltinTool):
 
             # 配置主仓库的 git 用户信息
             await self._git_helpers.run_git(
-                "config", "user.email", "resource-merge@agent.local",
+                "config",
+                "user.email",
+                "resource-merge@agent.local",
                 cwd=self.base_path,
             )
             await self._git_helpers.run_git(
-                "config", "user.name", "Agent Resource Merge",
+                "config",
+                "user.name",
+                "Agent Resource Merge",
                 cwd=self.base_path,
             )
 
@@ -480,17 +507,21 @@ class ResourceMergeTool(BuiltinTool):
                 merge_args.append("--no-ff")
 
             return_code, stdout, stderr = await self._git_helpers.run_git(
-                *merge_args, cwd=self.base_path,
+                *merge_args,
+                cwd=self.base_path,
             )
 
             if return_code == 0:
                 # 合并成功，获取 merge commit hash
                 _, commit_hash, _ = await self._git_helpers.run_git(
-                    "rev-parse", "HEAD", cwd=self.base_path,
+                    "rev-parse",
+                    "HEAD",
+                    cwd=self.base_path,
                 )
                 logger.info(
                     "[resource_merge] git merge 成功: branch=%s, commit=%s",
-                    branch_name, commit_hash.strip(),
+                    branch_name,
+                    commit_hash.strip(),
                 )
                 return create_success_result(
                     data={
@@ -506,14 +537,15 @@ class ResourceMergeTool(BuiltinTool):
 
             # 合并失败，检查是否存在冲突
             return_code_diff, diff_output, _ = await self._git_helpers.run_git(
-                "diff", "--name-only", "--diff-filter=U", cwd=self.base_path,
+                "diff",
+                "--name-only",
+                "--diff-filter=U",
+                cwd=self.base_path,
             )
 
             conflict_files: list[str] = []
             if return_code_diff == 0 and diff_output.strip():
-                conflict_files = [
-                    line.strip() for line in diff_output.splitlines() if line.strip()
-                ]
+                conflict_files = [line.strip() for line in diff_output.splitlines() if line.strip()]
 
             # 执行 git merge --abort 撤销合并
             await self._git_helpers.run_git("merge", "--abort", cwd=self.base_path)
@@ -521,7 +553,8 @@ class ResourceMergeTool(BuiltinTool):
             if conflict_files:
                 logger.warning(
                     "[resource_merge] git merge 冲突: branch=%s, conflicts=%s",
-                    branch_name, conflict_files,
+                    branch_name,
+                    conflict_files,
                 )
                 return create_failure_result(
                     error=f"合并冲突，已自动中止。冲突文件: {', '.join(conflict_files)}",
@@ -539,7 +572,8 @@ class ResourceMergeTool(BuiltinTool):
             # 其他类型的合并失败
             logger.error(
                 "[resource_merge] git merge 失败: branch=%s, stderr=%s",
-                branch_name, stderr,
+                branch_name,
+                stderr,
             )
             return create_failure_result(
                 error=f"git merge 失败: {stderr}",
@@ -585,9 +619,7 @@ class ResourceMergeTool(BuiltinTool):
             pass
         return result
 
-    async def _rollback(
-        self, inputs: dict[str, Any], workspace: Path
-    ) -> ToolResult:
+    async def _rollback(self, inputs: dict[str, Any], workspace: Path) -> ToolResult:
         """rollback 操作：在 worktree 中恢复到分支初始状态
 
         通过 git checkout -- . 恢复所有文件到 HEAD 状态。
@@ -607,7 +639,10 @@ class ResourceMergeTool(BuiltinTool):
                 )
 
             return_code, _, stderr = await self._git_helpers.run_git(
-                "checkout", "--", ".", cwd=workspace,
+                "checkout",
+                "--",
+                ".",
+                cwd=workspace,
             )
 
             if return_code != 0:
@@ -617,7 +652,9 @@ class ResourceMergeTool(BuiltinTool):
                 )
 
             return_code, _, stderr = await self._git_helpers.run_git(
-                "clean", "-fd", cwd=workspace,
+                "clean",
+                "-fd",
+                cwd=workspace,
             )
 
             return create_success_result(
@@ -634,9 +671,7 @@ class ResourceMergeTool(BuiltinTool):
                 error_code="ROLLBACK_FAILED",
             )
 
-    async def _cleanup(
-        self, inputs: dict[str, Any], workspace: Path
-    ) -> ToolResult:
+    async def _cleanup(self, inputs: dict[str, Any], workspace: Path) -> ToolResult:
         """cleanup 操作：移除 worktree 并删除分支"""
 
         def _remove_readonly_func(func, path, _):
@@ -649,26 +684,27 @@ class ResourceMergeTool(BuiltinTool):
 
             if is_worktree:
                 return_code, _, stderr = await self._git_helpers.run_git(
-                    "worktree", "remove", str(workspace), "--force",
+                    "worktree",
+                    "remove",
+                    str(workspace),
+                    "--force",
                     cwd=self.base_path,
                 )
                 if return_code != 0:
-                    logger.warning(
-                        "[resource_merge] worktree remove 失败: %s, 尝试手动删除", stderr
-                    )
+                    logger.warning("[resource_merge] worktree remove 失败: %s, 尝试手动删除", stderr)
                     try:
                         shutil.rmtree(str(workspace), onexc=_remove_readonly_func)
                     except Exception as e:
                         logger.warning("[resource_merge] 手动删除 workspace 失败: %s", e)
 
                 return_code, _, stderr = await self._git_helpers.run_git(
-                    "branch", "-D", branch_name,
+                    "branch",
+                    "-D",
+                    branch_name,
                     cwd=self.base_path,
                 )
                 if return_code != 0:
-                    logger.warning(
-                        "[resource_merge] branch delete 失败: %s", stderr
-                    )
+                    logger.warning("[resource_merge] branch delete 失败: %s", stderr)
             elif workspace.exists():
                 git_dir = workspace / ".git"
                 if git_dir.exists():

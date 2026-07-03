@@ -36,9 +36,7 @@ class IInteractionNotifier(ABC):
         ...
 
     @abstractmethod
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
         """通知请求已取消。"""
         ...
 
@@ -110,44 +108,33 @@ class CLIInteractionNotifier(IInteractionNotifier):
             msg_data = request.get("message_data", {})
 
         mode = msg_data.get("interaction_mode", "choice")
-        request_id = (
-            getattr(request, "id", None)
-            or (
-                request.get("id", "")
-                if isinstance(request, dict)
-                else ""
-            )
-        )
+        request_id = getattr(request, "id", None) or (request.get("id", "") if isinstance(request, dict) else "")
 
-        await self._pending_queue.put({
-            "request_id": str(request_id),
-            "message_data": msg_data,
-        })
+        await self._pending_queue.put(
+            {
+                "request_id": str(request_id),
+                "message_data": msg_data,
+            }
+        )
         self._request_event.set()
 
         logger.info(
-            "[CLINotifier] 交互请求已入队 | request_id=%s"
-            " | mode=%s",
-            request_id, mode,
+            "[CLINotifier] 交互请求已入队 | request_id=%s | mode=%s",
+            request_id,
+            mode,
         )
 
         return True
 
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
         """打印取消通知。"""
         reason_text = f" (原因: {reason})" if reason else ""
-        self._console.print(
-            f"[yellow]交互请求已取消: {request_id[:12]}...{reason_text}[/yellow]"
-        )
+        self._console.print(f"[yellow]交互请求已取消: {request_id[:12]}...{reason_text}[/yellow]")
         return True
 
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
         """打印超时通知。"""
-        self._console.print(
-            f"[red]交互请求已超时: {request_id[:12]}...[/red]"
-        )
+        self._console.print(f"[red]交互请求已超时: {request_id[:12]}...[/red]")
         return True
 
     async def notify_timeout_reminder(
@@ -163,8 +150,7 @@ class CLIInteractionNotifier(IInteractionNotifier):
     ) -> bool:
         """打印超时提醒。"""
         self._console.print(
-            f"[yellow]超时提醒: 还剩 {remaining_seconds} 秒"
-            f" (请求: {title or request_id[:12]})[/yellow]"
+            f"[yellow]超时提醒: 还剩 {remaining_seconds} 秒 (请求: {title or request_id[:12]})[/yellow]"
         )
         return True
 
@@ -295,18 +281,9 @@ async def run_sub_conversation(  # noqa: PLR0915
     mode = msg_data.get("interaction_mode", "choice")
     options = msg_data.get("options") or []
 
-    console.print(
-        "\n[bold magenta]───────────────────────────────"
-        "─────────────────────────[/bold magenta]"
-    )
-    console.print(
-        f"[bold magenta]  {agent_name} 请求交互"
-        f"（输入 /back 返回主对话）[/bold magenta]"
-    )
-    console.print(
-        "[bold magenta]───────────────────────────────"
-        "─────────────────────────[/bold magenta]"
-    )
+    console.print("\n[bold magenta]────────────────────────────────────────────────────────[/bold magenta]")
+    console.print(f"[bold magenta]  {agent_name} 请求交互（输入 /back 返回主对话）[/bold magenta]")
+    console.print("[bold magenta]────────────────────────────────────────────────────────[/bold magenta]")
 
     _show_request_panel(console, title, agent_name, mode, msg_data)
 
@@ -322,9 +299,7 @@ async def run_sub_conversation(  # noqa: PLR0915
         console.print(prompt, end="")
         reader = input_adapter._get_stdin_reader()
         loop = asyncio.get_running_loop()
-        line = await loop.run_in_executor(
-            None, reader.read_line_blocking
-        )
+        line = await loop.run_in_executor(None, reader.read_line_blocking)
         if line is None:
             raise EOFError
         return line
@@ -332,51 +307,25 @@ async def run_sub_conversation(  # noqa: PLR0915
     try:
         while True:
             if mode == "choice" and options:
-                console.print(
-                    "[dim]请输入选项编号或选项 ID "
-                    "(输入 /back 返回主对话):[/dim]"
-                )
+                console.print("[dim]请输入选项编号或选项 ID (输入 /back 返回主对话):[/dim]")
             elif mode == "conversation":
-                console.print(
-                    "[dim]请输入回复内容 "
-                    "(输入 /back 返回主对话):[/dim]"
-                )
+                console.print("[dim]请输入回复内容 (输入 /back 返回主对话):[/dim]")
 
-            user_input = await _read_input(
-                f"\n{input_adapter._prompt_str}"
-            )
+            user_input = await _read_input(f"\n{input_adapter._prompt_str}")
 
-            if user_input.strip().lower() in (
-                "/back", "/done", "/返回"
-            ):
+            if user_input.strip().lower() in ("/back", "/done", "/返回"):
                 # 清空剩余待处理请求，防止主循环立即重入子对话
                 while notifier.get_next_pending() is not None:
                     pass
-                console.print(
-                    "[bold magenta]──────────────────────"
-                    "────────────────────────────[/bold"
-                    " magenta]"
-                )
-                console.print(
-                    "[bold magenta]  返回主 Agent 对话"
-                    "[/bold magenta]"
-                )
-                console.print(
-                    "[bold magenta]──────────────────────"
-                    "────────────────────────────[/bold"
-                    " magenta]\n"
-                )
+                console.print("[bold magenta]──────────────────────────────────────────────────[/bold magenta]")
+                console.print("[bold magenta]  返回主 Agent 对话[/bold magenta]")
+                console.print("[bold magenta]──────────────────────────────────────────────────[/bold magenta]\n")
                 break
 
             if not user_input.strip():
                 if mode == "choice" and options:
-                    opt_ids = ", ".join(
-                        o.get("id", "") for o in options
-                    )
-                    console.print(
-                        "[yellow]请输入选项编号 (如 1) 或选项 ID "
-                        f"(可选: {opt_ids})[/yellow]"
-                    )
+                    opt_ids = ", ".join(o.get("id", "") for o in options)
+                    console.print(f"[yellow]请输入选项编号 (如 1) 或选项 ID (可选: {opt_ids})[/yellow]")
                 continue
 
             await _submit_user_response(
@@ -390,23 +339,13 @@ async def run_sub_conversation(  # noqa: PLR0915
             # 提交后短暂等待，检查队列是否有后续请求
             await asyncio.sleep(0.5)
             next_pending = await _get_valid_pending(
-                notifier, interaction_service,
+                notifier,
+                interaction_service,
             )
             if next_pending is None:
-                console.print(
-                    "[bold magenta]──────────────────────"
-                    "────────────────────────────[/bold"
-                    " magenta]"
-                )
-                console.print(
-                    "[bold magenta]  返回主 Agent 对话"
-                    "[/bold magenta]"
-                )
-                console.print(
-                    "[bold magenta]──────────────────────"
-                    "────────────────────────────[/bold"
-                    " magenta]\n"
-                )
+                console.print("[bold magenta]──────────────────────────────────────────────────[/bold magenta]")
+                console.print("[bold magenta]  返回主 Agent 对话[/bold magenta]")
+                console.print("[bold magenta]──────────────────────────────────────────────────[/bold magenta]\n")
                 break
 
             pending = next_pending
@@ -417,15 +356,10 @@ async def run_sub_conversation(  # noqa: PLR0915
             options = msg_data.get("options") or []
 
             console.print("")
-            _show_request_panel(
-                console, title, agent_name, mode, msg_data
-            )
+            _show_request_panel(console, title, agent_name, mode, msg_data)
 
     except (EOFError, asyncio.CancelledError):
-        console.print(
-            "\n[dim yellow]stdin 已关闭，退出子对话"
-            "[/dim yellow]"
-        )
+        console.print("\n[dim yellow]stdin 已关闭，退出子对话[/dim yellow]")
 
     finally:
         input_adapter._prompt_str = original_prompt
@@ -474,7 +408,8 @@ async def _submit_user_response(
     except Exception as exc:
         logger.warning(
             "[CLINotifier] 提交响应失败 | request_id=%s | error=%s",
-            request_id, exc,
+            request_id,
+            exc,
         )
 
 
@@ -532,8 +467,7 @@ async def _get_valid_pending(
                 if record and record.get("status") == "pending":
                     return pending
                 logger.debug(
-                    "[CLINotifier] 跳过已失效请求 | "
-                    "request_id=%s | status=%s",
+                    "[CLINotifier] 跳过已失效请求 | request_id=%s | status=%s",
                     request_id,
                     record.get("status", "?") if record else "gone",
                 )

@@ -92,16 +92,12 @@ class ConnectorRegistry:
         Returns:
             最优先的活跃连接器，无活跃连接器时返回 None
         """
-        connected = [
-            conn for conn in self._connectors.values() if conn.is_connected
-        ]
+        connected = [conn for conn in self._connectors.values() if conn.is_connected]
         if not connected:
             return None
 
         # 按优先级降序排序，同优先级按类型名字母序
-        connected.sort(
-            key=lambda c: (-c.get_info().priority, c.connector_type)
-        )
+        connected.sort(key=lambda c: (-c.get_info().priority, c.connector_type))
         return connected[0]
 
     def list_connectors(self) -> list[ConnectorInfo]:
@@ -136,9 +132,7 @@ class ConnectorRegistry:
         if not candidates:
             return None
 
-        candidates.sort(
-            key=lambda c: (-c.get_info().priority, c.connector_type)
-        )
+        candidates.sort(key=lambda c: (-c.get_info().priority, c.connector_type))
         return candidates[0]
 
     def has(self, connector_type: str) -> bool:

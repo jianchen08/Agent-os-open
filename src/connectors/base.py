@@ -124,13 +124,18 @@ class BaseConnector(ABC):
                 await self.disconnect()
                 await self.connect()
                 self._logger.info(
-                    "重连成功 (尝试 %d/%d)", attempt, max_retries,
+                    "重连成功 (尝试 %d/%d)",
+                    attempt,
+                    max_retries,
                 )
                 return
             except Exception as e:
                 last_error = e
                 self._logger.warning(
-                    "重连失败 (尝试 %d/%d): %s", attempt, max_retries, e,
+                    "重连失败 (尝试 %d/%d): %s",
+                    attempt,
+                    max_retries,
+                    e,
                 )
                 if attempt < max_retries:
                     delay = base_delay * (2 ** (attempt - 1))

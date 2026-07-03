@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # 平台适配器抽象基类
 # ---------------------------------------------------------------------------
 
+
 class PlatformAdapter(ABC):
     """外部平台适配器抽象基类，具体平台（如 MCP Hub）需继承此类并实现 search 方法。"""
 
@@ -49,6 +50,7 @@ class PlatformAdapter(ABC):
 # LLM 调用协议（与 llm.adapter.LLMAdapter 兼容）
 # ---------------------------------------------------------------------------
 
+
 @runtime_checkable
 class LLMCaller(Protocol):
     """LLM 调用协议，仅需 completion 方法"""
@@ -65,6 +67,7 @@ class LLMCaller(Protocol):
 # ---------------------------------------------------------------------------
 # 外部资源搜索主类
 # ---------------------------------------------------------------------------
+
 
 class ExternalResourceSearch:
     """
@@ -179,14 +182,10 @@ class ExternalResourceSearch:
             if success:
                 entry["success_count"] = entry.get("success_count", 0) + 1
                 old_score = entry.get("trust_score", 0.5)
-                entry["trust_score"] = min(
-                    self.TRUST_MAX, old_score + self.TRUST_DELTA
-                )
+                entry["trust_score"] = min(self.TRUST_MAX, old_score + self.TRUST_DELTA)
             else:
                 old_score = entry.get("trust_score", 0.5)
-                entry["trust_score"] = max(
-                    self.TRUST_MIN, old_score - self.TRUST_DELTA * 2
-                )
+                entry["trust_score"] = max(self.TRUST_MIN, old_score - self.TRUST_DELTA * 2)
 
             entry["last_used"] = datetime.now().isoformat()
 
@@ -194,7 +193,9 @@ class ExternalResourceSearch:
 
         logger.info(
             "[external_search] 使用反馈: name=%s success=%s trust_score=%.2f",
-            name, success, entry.get("trust_score", 0.5),
+            name,
+            success,
+            entry.get("trust_score", 0.5),
         )
 
     def get_cached_resource(self, name: str) -> dict[str, Any] | None:
@@ -308,16 +309,18 @@ class ExternalResourceSearch:
                 if query_lower not in name.lower() and query_lower not in entry.get("description", "").lower():
                     continue
 
-                results.append({
-                    "name": name,
-                    "description": entry.get("description", ""),
-                    "schema": entry.get("schema", {}),
-                    "source": entry.get("source_platform", "cache"),
-                    "trust_score": entry.get("trust_score", 0.5),
-                    "review_status": entry.get("review_status", "unreviewed"),
-                    "usage_count": entry.get("usage_count", 0),
-                    "from_cache": True,
-                })
+                results.append(
+                    {
+                        "name": name,
+                        "description": entry.get("description", ""),
+                        "schema": entry.get("schema", {}),
+                        "source": entry.get("source_platform", "cache"),
+                        "trust_score": entry.get("trust_score", 0.5),
+                        "review_status": entry.get("review_status", "unreviewed"),
+                        "usage_count": entry.get("usage_count", 0),
+                        "from_cache": True,
+                    }
+                )
 
         # 按 trust_score 降序排列
         results.sort(key=lambda x: x["trust_score"], reverse=True)
@@ -353,13 +356,12 @@ class ExternalResourceSearch:
             except Exception as e:
                 logger.warning(
                     "[external_search] 平台 %s 搜索失败: %s",
-                    platform.__class__.__name__, e,
+                    platform.__class__.__name__,
+                    e,
                 )
                 return []
 
-        platform_results = await asyncio.gather(
-            *[_search_one(p) for p in self._platforms]
-        )
+        platform_results = await asyncio.gather(*[_search_one(p) for p in self._platforms])
 
         all_results: list[dict[str, Any]] = []
         for items in platform_results:
@@ -384,20 +386,23 @@ class ExternalResourceSearch:
                 }
 
                 # 写入缓存
-                await self._update_cache_entry(name, {
-                    "name": name,
-                    "description": result["description"],
-                    "schema": result["schema"],
-                    "source_platform": result["source"],
-                    "resource_type": resource_type,
-                    "trust_score": result["trust_score"],
-                    "review_status": result["review_status"],
-                    "risk_level": result.get("risk_level", "unknown"),
-                    "needs_deep_review": result.get("needs_deep_review", False),
-                    "usage_count": 0,
-                    "success_count": 0,
-                    "first_seen": datetime.now().isoformat(),
-                })
+                await self._update_cache_entry(
+                    name,
+                    {
+                        "name": name,
+                        "description": result["description"],
+                        "schema": result["schema"],
+                        "source_platform": result["source"],
+                        "resource_type": resource_type,
+                        "trust_score": result["trust_score"],
+                        "review_status": result["review_status"],
+                        "risk_level": result.get("risk_level", "unknown"),
+                        "needs_deep_review": result.get("needs_deep_review", False),
+                        "usage_count": 0,
+                        "success_count": 0,
+                        "first_seen": datetime.now().isoformat(),
+                    },
+                )
 
                 all_results.append(result)
 
@@ -469,7 +474,8 @@ class ExternalResourceSearch:
         except Exception as e:
             logger.warning(
                 "[external_search] LLM 审查失败，降级为未审查: name=%s error=%s",
-                resource.get("name", ""), e,
+                resource.get("name", ""),
+                e,
             )
             return {"status": "unreviewed", "risk_level": "unknown", "needs_deep_review": True}
 

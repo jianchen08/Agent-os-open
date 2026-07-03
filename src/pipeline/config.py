@@ -48,9 +48,11 @@ def _resolve_env_vars_in_value(
         替换后的值。
     """
     if isinstance(value, str):
+
         def _replace(match: re.Match[str]) -> str:
             var_name = match.group(1)
             return os.environ.get(var_name, "")
+
         result = _ENV_VAR_PATTERN.sub(_replace, value)
         # 若替换后为空且整个字符串就是一个占位符，尝试回退到模型配置
         if not result and _ENV_VAR_PATTERN.fullmatch(value) and model_loader is not None:
@@ -185,26 +187,30 @@ def load_pipeline_config(
     # 构建输入路由表
     input_entries: list[InputRouteEntry] = []
     for entry_data in raw.get("input_routes", []):
-        input_entries.append(InputRouteEntry(
-            name=entry_data["name"],
-            condition=entry_data.get("condition", ""),
-            target=entry_data.get("target", "core"),
-            plugins=entry_data.get("plugins", []),
-            priority=entry_data.get("priority", 0),
-        ))
+        input_entries.append(
+            InputRouteEntry(
+                name=entry_data["name"],
+                condition=entry_data.get("condition", ""),
+                target=entry_data.get("target", "core"),
+                plugins=entry_data.get("plugins", []),
+                priority=entry_data.get("priority", 0),
+            )
+        )
     input_route_table = InputRouteTable(input_entries)
 
     # 构建输出路由表
     output_entries: list[OutputRouteEntry] = []
     for entry_data in raw.get("output_routes", []):
-        output_entries.append(OutputRouteEntry(
-            name=entry_data.get("name", ""),
-            route_type=entry_data.get("route_type", ""),
-            condition=entry_data.get("condition", ""),
-            priority=entry_data.get("priority", 0),
-            target_core=entry_data.get("target_core"),
-            plugins=entry_data.get("plugins", []),
-        ))
+        output_entries.append(
+            OutputRouteEntry(
+                name=entry_data.get("name", ""),
+                route_type=entry_data.get("route_type", ""),
+                condition=entry_data.get("condition", ""),
+                priority=entry_data.get("priority", 0),
+                target_core=entry_data.get("target_core"),
+                plugins=entry_data.get("plugins", []),
+            )
+        )
     output_route_table = OutputRouteTable(output_entries)
 
     return PipelineConfig(
@@ -234,9 +240,7 @@ def _import_class(dotted_path: str) -> type:
     try:
         module_path, class_name = dotted_path.rsplit(".", 1)
         if not any(module_path.startswith(prefix) for prefix in _ALLOWED_PREFIXES):
-            raise ImportError(
-                f"Security: module '{module_path}' is not in allowed prefixes"
-            )
+            raise ImportError(f"Security: module '{module_path}' is not in allowed prefixes")
         module = importlib.import_module(module_path)
         cls = getattr(module, class_name)
         if not isinstance(cls, type):
@@ -276,11 +280,7 @@ def _discover_plugin_class(name: str) -> type | None:
             if attr_name.startswith("_"):
                 continue
             attr = getattr(module, attr_name)
-            if (
-                isinstance(attr, type)
-                and issubclass(attr, base_cls)
-                and attr is not base_cls
-            ):
+            if isinstance(attr, type) and issubclass(attr, base_cls) and attr is not base_cls:
                 found.append(attr)
 
         if len(found) == 1:
@@ -288,7 +288,8 @@ def _discover_plugin_class(name: str) -> type | None:
         if len(found) > 1:
             logger.warning(
                 "Module '%s' contains %d plugin classes, skipping auto-discovery",
-                module_name, len(found),
+                module_name,
+                len(found),
             )
 
     return None
@@ -320,9 +321,7 @@ def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
 
     plugin_cls = _discover_plugin_class(plugin_name)
     if plugin_cls is None:
-        raise ImportError(
-            f"Plugin '{plugin_name}' not found in plugins.input or plugins.output"
-        )
+        raise ImportError(f"Plugin '{plugin_name}' not found in plugins.input or plugins.output")
     return plugin_cls
 
 
@@ -381,10 +380,7 @@ def build_plugin_registry(  # noqa: PLR0912,PLR0915
         try:
             plugin_cls = _resolve_plugin_class(plugin_conf)
             if plugin_cls is None:
-                raise ImportError(
-                    f"Plugin '{plugin_id}' could not be resolved: "
-                    "config must specify 'class' or 'name'"
-                )
+                raise ImportError(f"Plugin '{plugin_id}' could not be resolved: config must specify 'class' or 'name'")
             plugin_instance: IPlugin = plugin_cls(config=plugin_config)
             registry.register(plugin_instance)
             plugin_cls.register_types(type_slot)
@@ -413,14 +409,13 @@ def build_plugin_registry(  # noqa: PLR0912,PLR0915
                     plugin_config = merged_config
                     logger.info(
                         "[build_plugin_registry] 使用模型: %s (context_window=%s)",
-                        configured_model, llm_conf.get("context_window"),
+                        configured_model,
+                        llm_conf.get("context_window"),
                     )
             else:
                 default_model_conf = model_loader.get_default_model("chat")
                 if default_model_conf:
-                    llm_conf = model_loader.get_llm_core_config(
-                        default_model_conf.get("_id", "") or "minimax-m2.7"
-                    )
+                    llm_conf = model_loader.get_llm_core_config(default_model_conf.get("_id", "") or "minimax-m2.7")
                     if llm_conf:
                         merged_config = dict(plugin_config)
                         merged_config.update(llm_conf)
@@ -432,8 +427,7 @@ def build_plugin_registry(  # noqa: PLR0912,PLR0915
                         )
                 else:
                     logger.warning(
-                        "[build_plugin_registry] llm.yaml defaults.chat 未配置，"
-                        "使用 core_plugins 中的原有配置"
+                        "[build_plugin_registry] llm.yaml defaults.chat 未配置，使用 core_plugins 中的原有配置"
                     )
 
             if core_type == "llm_call" and not plugin_config.get("context_window"):
@@ -450,6 +444,7 @@ def build_plugin_registry(  # noqa: PLR0912,PLR0915
             # llm_call: 优先使用 KeyPoolAdapter（按 key 粒度并发控制）
             if core_type == "llm_call" and model_loader is not None:
                 from llm.router_factory import get_or_create_adapter  # noqa: PLC0415
+
                 _adapter = get_or_create_adapter(model_loader)
                 core_instance: ICorePlugin = plugin_cls(config=plugin_config, adapter=_adapter)
             elif core_type == "llm_call" and router is not None:
@@ -460,9 +455,7 @@ def build_plugin_registry(  # noqa: PLR0912,PLR0915
             plugin_cls.register_types(type_slot)
             logger.info("Core plugin loaded: %s (core_type=%s)", class_path, core_type)
         except Exception as exc:
-            raise ImportError(
-                f"Core plugin '{core_type}' (class={class_path}) failed to load: {exc}"
-            ) from exc
+            raise ImportError(f"Core plugin '{core_type}' (class={class_path}) failed to load: {exc}") from exc
 
     # 将共享的 type_slot 附加到 registry，供下游使用
     registry.plugin_types = type_slot  # type: ignore[attr-defined]

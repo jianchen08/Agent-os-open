@@ -41,15 +41,15 @@ class StateUpdateTool(BuiltinTool):
             "不适用场景：仅需在节点内部使用临时变量时、需要更新数据库记录时（使用持久化工具）。"
             "注意事项：更新的变量会被添加到shared_variables中；支持increment(增量)和append(追加)操作；"
             "context参数用于获取当前状态值。"
-            "示例：{\"updates\": {\"retry_count\": {\"operation\": \"increment\", \"value\": 1}}} 表示将retry_count增加1",
+            '示例：{"updates": {"retry_count": {"operation": "increment", "value": 1}}} 表示将retry_count增加1',
             input_schema={
                 "type": "object",
                 "properties": {
                     "updates": {
                         "type": "object",
                         "description": "要更新的状态变量键值对。支持两种格式："
-                        "1. 直接赋值：{\"key\": value}；"
-                        "2. 操作模式：{\"key\": {\"operation\": \"increment\"/\"append\", \"value\": n}}。"
+                        '1. 直接赋值：{"key": value}；'
+                        '2. 操作模式：{"key": {"operation": "increment"/"append", "value": n}}。'
                         "increment操作用于数值累加，append操作用于列表追加",
                         "additionalProperties": True,
                     }

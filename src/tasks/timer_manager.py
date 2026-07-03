@@ -96,9 +96,7 @@ class TimerState:
             "task_id": self.task_id,
             "root_task_id": self.root_task_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "last_activity": (
-                self.last_activity.isoformat() if self.last_activity else None
-            ),
+            "last_activity": (self.last_activity.isoformat() if self.last_activity else None),
             "timeout_at": self.timeout_at.isoformat() if self.timeout_at else None,
             "timeout_duration": self.timeout_duration,
             "status": self.status.value,
@@ -193,6 +191,7 @@ class TimerManager:
         """
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             config = get_config_center().get("system/long_term_task.yaml")
             if config and isinstance(config, dict):
                 self._config = self._merge_config(self.DEFAULT_CONFIG, config)
@@ -205,9 +204,7 @@ class TimerManager:
             logger.warning("加载配置文件失败，使用默认配置: %s", e)
             self._config = self.DEFAULT_CONFIG.copy()
 
-    def _merge_config(
-        self, default: dict[str, Any], override: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _merge_config(self, default: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         """递归合并配置。
 
         Args:
@@ -220,11 +217,7 @@ class TimerManager:
         result = default.copy()
 
         for key, value in override.items():
-            if (
-                key in result
-                and isinstance(result[key], dict)
-                and isinstance(value, dict)
-            ):
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                 result[key] = self._merge_config(result[key], value)
             else:
                 result[key] = value
@@ -346,9 +339,7 @@ class TimerManager:
             callback=callback,
         )
 
-        timer.handle = asyncio.get_event_loop().call_later(
-            timeout, self._on_timeout, task_id
-        )
+        timer.handle = asyncio.get_event_loop().call_later(timeout, self._on_timeout, task_id)
 
         self._timers[task_id] = timer
         logger.debug("创建计时器: task_id=%s, timeout=%ss", task_id, timeout)
@@ -393,9 +384,7 @@ class TimerManager:
             callback=old_timer.callback,
         )
 
-        new_timer.handle = asyncio.get_event_loop().call_later(
-            timeout, self._on_timeout, task_id
-        )
+        new_timer.handle = asyncio.get_event_loop().call_later(timeout, self._on_timeout, task_id)
 
         self._timers[task_id] = new_timer
         logger.debug("重置计时器: task_id=%s, timeout=%ss", task_id, timeout)
@@ -533,7 +522,8 @@ class TimerManager:
                         restored_count += 1
                         logger.info(
                             "恢复计时器成功: task_id=%s, remaining=%.1fs",
-                            task.id, remaining,
+                            task.id,
+                            remaining,
                         )
                     except Exception as e:
                         logger.error("恢复计时器失败: task_id=%s, error=%s", task.id, e)
@@ -541,7 +531,8 @@ class TimerManager:
                     expired_count += 1
                     logger.warning(
                         "任务已超时，立即触发回调: task_id=%s, elapsed=%.1fs",
-                        task.id, elapsed,
+                        task.id,
+                        elapsed,
                     )
                     if callback:
                         try:
@@ -551,7 +542,8 @@ class TimerManager:
 
             logger.info(
                 "计时器恢复完成: restored=%d, expired=%d",
-                restored_count, expired_count,
+                restored_count,
+                expired_count,
             )
 
         except Exception as e:
@@ -559,9 +551,7 @@ class TimerManager:
 
         return restored_count
 
-    async def _async_callback(
-        self, callback: Callable[[str], None], task_id: str
-    ) -> None:
+    async def _async_callback(self, callback: Callable[[str], None], task_id: str) -> None:
         """异步执行回调函数。
 
         Args:
@@ -578,11 +568,7 @@ class TimerManager:
 
     async def cleanup_expired_timers(self) -> int:
         """清理已过期或已取消的计时器"""
-        to_remove = [
-            task_id
-            for task_id, timer in self._timers.items()
-            if timer.is_expired() or timer.is_cancelled()
-        ]
+        to_remove = [task_id for task_id, timer in self._timers.items() if timer.is_expired() or timer.is_cancelled()]
 
         for task_id in to_remove:
             del self._timers[task_id]

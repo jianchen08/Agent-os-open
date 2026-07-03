@@ -77,7 +77,8 @@ class ExternalToolRegistry:
 
         self._logger.info(
             "外部工具已注册 | name=%s | capabilities=%d",
-            name, len(adapter.get_capabilities()),
+            name,
+            len(adapter.get_capabilities()),
         )
         return name
 
@@ -95,9 +96,7 @@ class ExternalToolRegistry:
         self._connections.pop(name, None)
 
         # 清理工具映射
-        keys_to_remove = [
-            k for k, v in self._tool_map.items() if v == name
-        ]
+        keys_to_remove = [k for k, v in self._tool_map.items() if v == name]
         for key in keys_to_remove:
             del self._tool_map[key]
 
@@ -205,10 +204,7 @@ class ExternalToolRegistry:
         tools = self.list_external_tools()
 
         if capability:
-            tools = [
-                t for t in tools
-                if any(c.name == capability for c in t.capabilities)
-            ]
+            tools = [t for t in tools if any(c.name == capability for c in t.capabilities)]
 
         return tools
 
@@ -246,7 +242,8 @@ class ExternalToolRegistry:
                 except Exception as e:
                     self._logger.error(
                         "内部工具注册失败 | name=%s | error=%s",
-                        tool.name, e,
+                        tool.name,
+                        e,
                     )
 
         return registered

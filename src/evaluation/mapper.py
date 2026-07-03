@@ -128,7 +128,7 @@ class ResultMapper:
         metrics: list[MetricDefinition] = []
 
         for i, dim in enumerate(dimensions):
-            metric_id = f"{template_id}_dim_{i+1}"
+            metric_id = f"{template_id}_dim_{i + 1}"
 
             # 构建期望条件：检查输出中是否包含 check_content 关键内容
             # 使用 agent 类型评估（让 LLM 判断是否满足维度要求）
@@ -163,7 +163,9 @@ class ResultMapper:
 
         logger.debug(
             "Template dimensions mapped: template_id=%s, %d dimensions → %d metrics",
-            template_id, len(dimensions), len(metrics),
+            template_id,
+            len(dimensions),
+            len(metrics),
         )
 
         return metrics

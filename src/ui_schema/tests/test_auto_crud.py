@@ -634,9 +634,7 @@ class TestValidationHelpers:
         """枚举值校验。"""
         from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
-        error = _validate_field_value(
-            "type", "invalid", {"type": "enum", "values": ["a", "b"]}
-        )
+        error = _validate_field_value("type", "invalid", {"type": "enum", "values": ["a", "b"]})
         assert error is not None
         assert "不在允许范围" in error
 
@@ -644,9 +642,7 @@ class TestValidationHelpers:
         """数值范围校验。"""
         from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
-        error = _validate_field_value(
-            "qty", -1, {"type": "integer", "min": 0}
-        )
+        error = _validate_field_value("qty", -1, {"type": "integer", "min": 0})
         assert error is not None
         assert "小于最小值" in error
 
@@ -654,9 +650,7 @@ class TestValidationHelpers:
         """合法值应通过校验。"""
         from ui_schema.auto_crud import _validate_field_value  # noqa: PLC0415
 
-        error = _validate_field_value(
-            "name", "hello", {"type": "string", "required": True}
-        )
+        error = _validate_field_value("name", "hello", {"type": "string", "required": True})
         assert error is None
 
 
@@ -676,21 +670,23 @@ class TestSchemaParserDataDecls:
             tmp_dir = Path(tmp)
             filepath = tmp_dir / "mod.yaml"
             filepath.write_text(
-                yaml.dump({
-                    "config_id": "data_mod",
-                    "ui": {
-                        "identity": {"id": "data_mod", "name": "Data Mod"},
-                    },
-                    "data": {
-                        "items": {
-                            "fields": {
-                                "id": {"type": "uuid", "primary": True, "auto": True},
-                                "name": {"type": "string", "required": True},
-                            },
-                            "access": "crud",
+                yaml.dump(
+                    {
+                        "config_id": "data_mod",
+                        "ui": {
+                            "identity": {"id": "data_mod", "name": "Data Mod"},
                         },
-                    },
-                }),
+                        "data": {
+                            "items": {
+                                "fields": {
+                                    "id": {"type": "uuid", "primary": True, "auto": True},
+                                    "name": {"type": "string", "required": True},
+                                },
+                                "access": "crud",
+                            },
+                        },
+                    }
+                ),
                 encoding="utf-8",
             )
             parser = SchemaParser()
@@ -709,18 +705,20 @@ class TestSchemaParserDataDecls:
             tmp_dir = Path(tmp)
             filepath = tmp_dir / "data_only.yaml"
             filepath.write_text(
-                yaml.dump({
-                    "config_id": "data_only_mod",
-                    "data": {
-                        "settings": {
-                            "fields": {
-                                "key": {"type": "string", "primary": True},
-                                "value": {"type": "string"},
+                yaml.dump(
+                    {
+                        "config_id": "data_only_mod",
+                        "data": {
+                            "settings": {
+                                "fields": {
+                                    "key": {"type": "string", "primary": True},
+                                    "value": {"type": "string"},
+                                },
+                                "access": "read-only",
                             },
-                            "access": "read-only",
                         },
-                    },
-                }),
+                    }
+                ),
                 encoding="utf-8",
             )
             parser = SchemaParser()
@@ -739,20 +737,22 @@ class TestSchemaParserDataDecls:
             for i in range(2):
                 filepath = tmp_dir / f"mod{i}.yaml"
                 filepath.write_text(
-                    yaml.dump({
-                        "config_id": f"mod{i}",
-                        "ui": {
-                            "identity": {"id": f"mod{i}", "name": f"Mod{i}"},
-                        },
-                        "data": {
-                            f"coll{i}": {
-                                "fields": {
-                                    "id": {"type": "uuid", "primary": True},
-                                },
-                                "access": "crud",
+                    yaml.dump(
+                        {
+                            "config_id": f"mod{i}",
+                            "ui": {
+                                "identity": {"id": f"mod{i}", "name": f"Mod{i}"},
                             },
-                        },
-                    }),
+                            "data": {
+                                f"coll{i}": {
+                                    "fields": {
+                                        "id": {"type": "uuid", "primary": True},
+                                    },
+                                    "access": "crud",
+                                },
+                            },
+                        }
+                    ),
                     encoding="utf-8",
                 )
             parser = SchemaParser()

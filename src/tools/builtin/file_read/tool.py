@@ -125,18 +125,15 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "起始行号（从1开始），仅读取指定行范围。"
-                        "不指定则从第1行开始。",
+                        "description": "起始行号（从1开始），仅读取指定行范围。不指定则从第1行开始。",
                     },
                     "end_line": {
                         "type": "integer",
-                        "description": "结束行号（从1开始，包含该行），仅读取指定行范围。"
-                        "不指定则到文件末尾。",
+                        "description": "结束行号（从1开始，包含该行），仅读取指定行范围。不指定则到文件末尾。",
                     },
                     "tail": {
                         "type": "integer",
-                        "description": "仅读取文件最后 N 行（仅文本文件有效）。"
-                        "不指定则返回完整内容。",
+                        "description": "仅读取文件最后 N 行（仅文本文件有效）。不指定则返回完整内容。",
                     },
                 },
                 "required": [],
@@ -177,12 +174,14 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 "tail": tail,
             }
             result = await self._read_file(file_inputs)
-            results.append({
-                "path": path_str,
-                "success": result.success,
-                "data": result.output if result.success else None,
-                "error": result.error if not result.success else None,
-            })
+            results.append(
+                {
+                    "path": path_str,
+                    "success": result.success,
+                    "data": result.output if result.success else None,
+                    "error": result.error if not result.success else None,
+                }
+            )
 
         # 汇总结果
         success_count = sum(1 for r in results if r["success"])
@@ -252,16 +251,12 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
             # 行范围模式：只读取指定行范围
             if start_line is not None or end_line is not None:
-                return await self._read_line_range(
-                    path, display_path, start_line, end_line
-                )
+                return await self._read_line_range(path, display_path, start_line, end_line)
 
             # 全量读取
             content = await asyncio.to_thread(self._read_text_safe, path)
             file_size = path.stat().st_size
-            lines = content.count("\n") + (
-                1 if content and not content.endswith("\n") else 0
-            )
+            lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
 
             fields = inputs.get("fields")
             if fields:
@@ -283,9 +278,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="READ_FAILED",
             )
 
-    async def _read_tail(
-        self, path: Path, display_path: str, tail: int
-    ) -> ToolResult:
+    async def _read_tail(self, path: Path, display_path: str, tail: int) -> ToolResult:
         """高效读取文件末尾N行，使用 deque 避免全量加载到内存。
 
         Args:
@@ -442,9 +435,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
         return None
 
-    def _extract_fields(
-        self, content: str, path: Path, fields: list[str]
-    ) -> ToolResult:
+    def _extract_fields(self, content: str, path: Path, fields: list[str]) -> ToolResult:
         suffix = path.suffix.lower()
         data: dict[str, Any] = {}
 
@@ -455,8 +446,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 data = json.loads(content)
             else:
                 return create_failure_result(
-                    error=f"fields 参数仅支持 YAML/JSON 文件，"
-                    f"当前文件类型: {suffix}",
+                    error=f"fields 参数仅支持 YAML/JSON 文件，当前文件类型: {suffix}",
                     error_code="FIELDS_NOT_SUPPORTED",
                 )
         except (yaml.YAMLError, json.JSONDecodeError) as e:
@@ -506,7 +496,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             - ("filter", list_key, filter_key, filter_val) 表示列表筛选
         """
         # 匹配两种模式：key{filter} 或 纯 key
-        pattern = r'([^.{}]+)\{([^}=]+)=([^}]+)\}|([^.{}]+)'
+        pattern = r"([^.{}]+)\{([^}=]+)=([^}]+)\}|([^.{}]+)"
         segments: list[tuple] = []
         for match in re.finditer(pattern, field):
             if match.group(1):
@@ -618,9 +608,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 return None
         return current
 
-    def _set_nested_field(
-        self, data: dict[str, Any], field: str, value: Any
-    ) -> None:
+    def _set_nested_field(self, data: dict[str, Any], field: str, value: Any) -> None:
         """将值设置到结果字典中，使用原始字段路径作为键。
 
         直接用原始 field 字符串作为扁平键存储，避免列表筛选路径无法还原为嵌套结构的问题。

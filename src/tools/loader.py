@@ -109,9 +109,7 @@ class DynamicToolLoader:
             self._discover_tools_in_module(module_path)
 
         self._discovered = True
-        logger.info(
-            f"[动态加载] 工具发现完成 | " f"发现 {len(self._tool_modules)} 个工具"
-        )
+        logger.info(f"[动态加载] 工具发现完成 | 发现 {len(self._tool_modules)} 个工具")
 
     def _discover_tools_in_module(self, module_path: str) -> None:
         """在指定模块中发现工具类"""
@@ -168,23 +166,17 @@ class DynamicToolLoader:
                     self._tool_modules[tool_name] = module_path
                     self._tool_classes[tool_name] = (module_path, attr_name)
 
-                    logger.debug(
-                        f"[动态加载] 发现工具 | "
-                        f"name={tool_name} | class={attr_name} | module={module_path}"
-                    )
+                    logger.debug(f"[动态加载] 发现工具 | name={tool_name} | class={attr_name} | module={module_path}")
 
                 except Exception as e:
                     logger.warning(
-                        f"[动态加载] 获取工具定义失败 | "
-                        f"class={attr_name} | module={module_path} | error={e}"
+                        f"[动态加载] 获取工具定义失败 | class={attr_name} | module={module_path} | error={e}"
                     )
 
         except ImportError as e:
             logger.debug(f"[动态加载] 导入模块失败 | module={module_path} | error={e}")
         except Exception as e:
-            logger.warning(
-                f"[动态加载] 发现工具失败 | module={module_path} | error={e}"
-            )
+            logger.warning(f"[动态加载] 发现工具失败 | module={module_path} | error={e}")
 
     def is_core_tool(self, tool_name: str) -> bool:
         """检查是否是核心系统工具"""
@@ -244,10 +236,7 @@ class DynamicToolLoader:
                 if "missing" in str(e) and "required positional argument" in str(e):
                     # 工具需要依赖注入，记录警告但继续尝试加载
                     # 运行时依赖在执行时通过其他方式注入（如通过 session factory）
-                    logger.warning(
-                        f"[动态加载] 工具需要依赖注入，将延迟实例化 | "
-                        f"tool_name={tool_name} | hint={e}"
-                    )
+                    logger.warning(f"[动态加载] 工具需要依赖注入，将延迟实例化 | tool_name={tool_name} | hint={e}")
                     tool_definition = tool_class.get_tool_definition()
                     tool_instance = None
                 else:
@@ -266,18 +255,12 @@ class DynamicToolLoader:
                 # 工具需要依赖注入，注册定义但不注册 handler
                 # 通过工具名直接注册
                 registered_name = self._registry.register(tool_definition)
-                logger.info(
-                    f"[动态加载] 工具定义已注册（无handler），执行时需要注入依赖 | "
-                    f"tool_name={tool_name}"
-                )
+                logger.info(f"[动态加载] 工具定义已注册（无handler），执行时需要注入依赖 | tool_name={tool_name}")
 
             # 标记已加载
             self._loaded.add(tool_name)
 
-            logger.debug(
-                f"[动态加载] 工具加载成功 | "
-                f"tool_name={tool_name} | registered_name={registered_name}"
-            )
+            logger.debug(f"[动态加载] 工具加载成功 | tool_name={tool_name} | registered_name={registered_name}")
 
             return registered_name
 
@@ -325,7 +308,6 @@ class DynamicToolLoader:
                 except ToolNotFoundError:
                     logger.warning(f"[动态加载] 无法加载工具 | tool_name={tool_name}")
 
-
     def load_tool_sync(self, tool_name: str) -> str:  # noqa: PLR0912
         """同步动态加载工具（从 load_tool 提取的纯同步路径）"""
         if not self._discovered:
@@ -355,10 +337,7 @@ class DynamicToolLoader:
                 tool_instance = tool_class()
             except TypeError as e:
                 if "missing" in str(e) and "required positional argument" in str(e):
-                    logger.warning(
-                        f"[动态加载-同步] 工具需要依赖注入，将延迟实例化 | "
-                        f"tool_name={tool_name} | hint={e}"
-                    )
+                    logger.warning(f"[动态加载-同步] 工具需要依赖注入，将延迟实例化 | tool_name={tool_name} | hint={e}")
                     tool_definition = tool_class.get_tool_definition()
                     tool_instance = None
                 else:
@@ -373,17 +352,11 @@ class DynamicToolLoader:
                 )
             else:
                 registered_name = self._registry.register(tool_definition)
-                logger.info(
-                    f"[动态加载-同步] 工具定义已注册（无handler），执行时需要注入依赖 | "
-                    f"tool_name={tool_name}"
-                )
+                logger.info(f"[动态加载-同步] 工具定义已注册（无handler），执行时需要注入依赖 | tool_name={tool_name}")
 
             self._loaded.add(tool_name)
 
-            logger.debug(
-                f"[动态加载-同步] 工具加载成功 | "
-                f"tool_name={tool_name} | registered_name={registered_name}"
-            )
+            logger.debug(f"[动态加载-同步] 工具加载成功 | tool_name={tool_name} | registered_name={registered_name}")
 
             return registered_name
 

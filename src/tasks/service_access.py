@@ -6,6 +6,7 @@
 公共接口：
 - get_task_service() -> Any: 获取全局 TaskService 实例
 """
+
 from __future__ import annotations
 
 import logging

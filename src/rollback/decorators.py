@@ -76,9 +76,7 @@ def reversible_operation(
                         before_state=before_state,
                         after_state=after_state,
                         reversible=True,
-                        reverse_action={
-                            "handler": reverse_handler or f"{tool_name}_reverser"
-                        },
+                        reverse_action={"handler": reverse_handler or f"{tool_name}_reverser"},
                     )
                 except Exception as e:
                     logger.warning(f"记录操作日志失败: {e}")
@@ -90,9 +88,7 @@ def reversible_operation(
     return decorator
 
 
-async def _capture_state(
-    operation_type: OperationType, target: str
-) -> dict[str, Any] | None:
+async def _capture_state(operation_type: OperationType, target: str) -> dict[str, Any] | None:
     """
     捕获操作前/后状态
 
@@ -209,9 +205,7 @@ class OperationRecorder:
             reverse_action=reverse_action,
         )
 
-    async def create_checkpoint(
-        self, name: str | None = None, description: str | None = None
-    ) -> str:
+    async def create_checkpoint(self, name: str | None = None, description: str | None = None) -> str:
         """
         创建检查点
 

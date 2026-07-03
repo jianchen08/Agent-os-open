@@ -30,9 +30,7 @@ class SessionModel:
         metadata: 扩展元数据
     """
 
-    session_id: str = field(
-        default_factory=lambda: uuid.uuid4().hex[:12]
-    )
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     channel_type: str = "cli"
     channel_ref: str = ""
     pipeline_ids: list[str] = field(default_factory=list)

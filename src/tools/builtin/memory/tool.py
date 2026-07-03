@@ -79,6 +79,7 @@ class MemoryTool(BuiltinTool):
 
         # 降级：创建空壳 MemoryService（无存储，仅内存字典）
         from memory.service import MemoryService  # noqa: PLC0415
+
         self._memory_service = MemoryService()
         logger.warning("[MemoryTool] memory_service 未注入，使用内存降级模式（重启数据丢失）")
         return self._memory_service
@@ -391,7 +392,8 @@ class MemoryTool(BuiltinTool):
             knowledge_id = await ms.store_knowledge(knowledge)
             logger.info(
                 "[MemoryTool] import_text 降级存储成功 | name=%s | knowledge_id=%s",
-                name, knowledge_id,
+                name,
+                knowledge_id,
             )
             return create_success_result(
                 {
@@ -436,6 +438,7 @@ class MemoryTool(BuiltinTool):
 
         # 降级：读取文件内容后用 MemoryService 存储
         import os as _os  # noqa: PLC0415
+
         if not _os.path.exists(file_path):  # noqa: PTH110
             return create_failure_result(f"文件不存在: {file_path}")
         try:
@@ -459,7 +462,8 @@ class MemoryTool(BuiltinTool):
             knowledge_id = await ms.store_knowledge(knowledge)
             logger.info(
                 "[MemoryTool] import_file 降级存储成功 | file=%s | knowledge_id=%s",
-                file_path, knowledge_id,
+                file_path,
+                knowledge_id,
             )
             return create_success_result(
                 {
@@ -501,9 +505,7 @@ class MemoryTool(BuiltinTool):
                 return create_failure_result(f"更新失败: {str(e)}")
 
         # 降级：从 file_path 提取 knowledge_id，删除旧知识 + 存储新知识
-        knowledge_id_raw = (
-            file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
-        )
+        knowledge_id_raw = file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
         if not new_content:
             return create_failure_result("更新知识需要提供 content 参数")
 
@@ -521,7 +523,8 @@ class MemoryTool(BuiltinTool):
             knowledge_id = await ms.store_knowledge(knowledge)
             logger.info(
                 "[MemoryTool] update 降级成功 | old_id=%s | new_knowledge_id=%s",
-                knowledge_id_raw, knowledge_id,
+                knowledge_id_raw,
+                knowledge_id,
             )
             return create_success_result(
                 {
@@ -554,15 +557,14 @@ class MemoryTool(BuiltinTool):
 
         # 降级：从 file_path 提取 knowledge_id，调用 MemoryService
         # file_path 格式可能是 "memory://<id>" 或直接就是 knowledge_id
-        knowledge_id = (
-            file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
-        )
+        knowledge_id = file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
         try:
             ms = self._get_memory_service(inputs)
             success = await ms.delete_knowledge(knowledge_id, self.SYSTEM_USER_ID)
             logger.info(
                 "[MemoryTool] delete 降级成功 | knowledge_id=%s | deleted=%s",
-                knowledge_id, success,
+                knowledge_id,
+                success,
             )
             return create_success_result({"success": success})
         except Exception as e:

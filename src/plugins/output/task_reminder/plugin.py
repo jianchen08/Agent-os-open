@@ -45,7 +45,8 @@ class TaskReminder(IOutputPlugin):
         if core_type != "llm_call":
             logger.debug(
                 "TaskReminder[iter=%s]: skip, core_type=%s (need llm_call)",
-                iteration, core_type,
+                iteration,
+                core_type,
             )
             return OutputResult()
 
@@ -64,7 +65,8 @@ class TaskReminder(IOutputPlugin):
         if agent_level == "L1":
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: skip, L1 调度层不触发 reminder",
-                iteration, task_id,
+                iteration,
+                task_id,
             )
             return OutputResult()
 
@@ -72,6 +74,7 @@ class TaskReminder(IOutputPlugin):
         if not task_service:
             try:
                 from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
                 task_service = get_service_provider().get("task_service")
             except Exception:
                 pass
@@ -84,7 +87,8 @@ class TaskReminder(IOutputPlugin):
                     else:
                         logger.info(
                             "TaskReminder[iter=%s][task=%s]: task not found, sending end signal",
-                            iteration, task_id,
+                            iteration,
+                            task_id,
                         )
                         return OutputResult(
                             route_signal=RouteSignal(
@@ -101,7 +105,8 @@ class TaskReminder(IOutputPlugin):
         if await self._has_active_children(task_id, ctx):
             logger.info(
                 "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
-                iteration, task_id,
+                iteration,
+                task_id,
             )
             return OutputResult()
 
@@ -126,17 +131,18 @@ class TaskReminder(IOutputPlugin):
                         f"【评估强制提醒 #{reminder_count + 1}】"
                         "你已经收集了足够的证据。"
                         "请立即停止调用工具，直接输出评估结论 JSON：\n"
-                        '```json\n'
+                        "```json\n"
                         '{"evaluation_result": {"passed": true/false, '
                         '"score": 0-100, "feedback": "评估说明..."}}\n'
-                        '```'
+                        "```"
                     )
                     messages = list(state.get("messages", []))
                     messages.append({"role": "system", "content": reminder_message})
                     logger.info(
-                        "TaskReminder[iter=%s][task=%s]: eval force reminder "
-                        "after %d no-text iters, reminder #%d",
-                        iteration, task_id, tool_only_count,
+                        "TaskReminder[iter=%s][task=%s]: eval force reminder after %d no-text iters, reminder #%d",
+                        iteration,
+                        task_id,
+                        tool_only_count,
                         reminder_count + 1,
                     )
                     return OutputResult(
@@ -153,23 +159,30 @@ class TaskReminder(IOutputPlugin):
                     )
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: eval no-text count=%d",
-                iteration, task_id, tool_only_count,
+                iteration,
+                task_id,
+                tool_only_count,
             )
-            return OutputResult(state_updates={
-                "eval_tool_only_count": tool_only_count,
-            })
+            return OutputResult(
+                state_updates={
+                    "eval_tool_only_count": tool_only_count,
+                }
+            )
 
         if has_tool_calls:
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: skip, has tool calls (len=%d)",
-                iteration, task_id, len(raw_tool_calls),
+                iteration,
+                task_id,
+                len(raw_tool_calls),
             )
             return OutputResult()
 
         if not has_text:
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: skip, raw_result is empty",
-                iteration, task_id,
+                iteration,
+                task_id,
             )
             return OutputResult()
 
@@ -179,9 +192,9 @@ class TaskReminder(IOutputPlugin):
             detected = self._detect_evaluation_result_json(raw_text)
             if detected is not None:
                 logger.info(
-                    "TaskReminder[iter=%s][task=%s]: evaluation_result JSON "
-                    "detected, sending end signal",
-                    iteration, task_id,
+                    "TaskReminder[iter=%s][task=%s]: evaluation_result JSON detected, sending end signal",
+                    iteration,
+                    task_id,
                 )
                 return OutputResult(
                     state_updates={"evaluation.detected_result": detected},
@@ -194,14 +207,16 @@ class TaskReminder(IOutputPlugin):
         if state.get("task_evaluation_completed"):
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: skip, task already evaluated and passed",
-                iteration, task_id,
+                iteration,
+                task_id,
             )
             return OutputResult()
 
         if state.get("conversation_mode"):
             logger.info(
                 "TaskReminder[iter=%s][task=%s]: skip, conversation mode active",
-                iteration, task_id,
+                iteration,
+                task_id,
             )
             return OutputResult()
 
@@ -212,7 +227,10 @@ class TaskReminder(IOutputPlugin):
             logger.warning(
                 "TaskReminder[iter=%s][task=%s]: max_reminders reached "
                 "(%d >= %d), sending end signal to prevent infinite loop",
-                iteration, task_id, reminder_count, self._max_reminders,
+                iteration,
+                task_id,
+                reminder_count,
+                self._max_reminders,
             )
             return OutputResult(
                 route_signal=RouteSignal(
@@ -227,9 +245,11 @@ class TaskReminder(IOutputPlugin):
         messages.append({"role": "system", "content": reminder_message})
 
         logger.info(
-            "TaskReminder[iter=%s][task=%s]: injecting reminder #%d/%d, "
-            "triggering next_llm",
-            iteration, task_id, reminder_count + 1, self._max_reminders,
+            "TaskReminder[iter=%s][task=%s]: injecting reminder #%d/%d, triggering next_llm",
+            iteration,
+            task_id,
+            reminder_count + 1,
+            self._max_reminders,
         )
 
         return OutputResult(
@@ -252,14 +272,14 @@ class TaskReminder(IOutputPlugin):
         brace_depth = 0
         start = -1
         for i, ch in enumerate(text):
-            if ch == '{':
+            if ch == "{":
                 if brace_depth == 0:
                     start = i
                 brace_depth += 1
-            elif ch == '}':
+            elif ch == "}":
                 brace_depth -= 1
                 if brace_depth == 0 and start >= 0:
-                    candidates.append(text[start:i + 1])
+                    candidates.append(text[start : i + 1])
                     start = -1
 
         for candidate in reversed(candidates):
@@ -287,7 +307,9 @@ class TaskReminder(IOutputPlugin):
         return None
 
     async def _has_active_children(
-        self, task_id: str, ctx: PluginContext,
+        self,
+        task_id: str,
+        ctx: PluginContext,
     ) -> bool:
         """检查当前任务是否有活跃的子任务。"""
         try:
@@ -295,6 +317,7 @@ class TaskReminder(IOutputPlugin):
         except KeyError:
             try:
                 from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
                 provider = get_service_provider()
                 task_service = provider.get("task_service")
             except Exception:
@@ -337,7 +360,10 @@ class TaskReminder(IOutputPlugin):
         return self._build_executor_reminder(state, task_id, count)
 
     def _build_executor_reminder(
-        self, state: dict[str, Any], task_id: str, count: int,
+        self,
+        state: dict[str, Any],
+        task_id: str,
+        count: int,
     ) -> str:
         """构建执行者提醒内容。"""
         parts = [f"【系统提醒 #{count + 1}】请检查任务验收标准是否已满足："]
@@ -353,8 +379,7 @@ class TaskReminder(IOutputPlugin):
                     parts.append(f"  {i}. {ac}")
 
         parts.append(
-            f'- 如果已完成所有验收标准：调用 task_evaluate(action="auto_complete", '
-            f'task_id="{task_id}") 提交评估',
+            f'- 如果已完成所有验收标准：调用 task_evaluate(action="auto_complete", task_id="{task_id}") 提交评估',
         )
         parts.append("- 如果尚未完成：继续执行任务，完成后再提交评估")
 
@@ -379,7 +404,10 @@ class TaskReminder(IOutputPlugin):
             self._evaluation_mode = task_reminder_config["evaluation_mode"]
 
     def _build_evaluator_reminder(
-        self, state: dict[str, Any], task_id: str, count: int,
+        self,
+        state: dict[str, Any],
+        task_id: str,
+        count: int,
     ) -> str:
         """构建评估者提醒内容。"""
         parts = [f"【评估提醒 #{count + 1}】请输出评估结论（JSON格式）："]

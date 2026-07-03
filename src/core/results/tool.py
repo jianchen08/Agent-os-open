@@ -37,10 +37,7 @@ class ToolExecutionResult(ExecutionResult[Any]):
     tool_id: str | None = Field(default=None, description="工具 ID")
 
     # 输入参数
-    input_params: dict[str, Any] = Field(
-        default_factory=dict,
-        description="输入参数"
-    )
+    input_params: dict[str, Any] = Field(default_factory=dict, description="输入参数")
 
     def to_dict(self, slim: bool = False) -> dict[str, Any]:
         """转换为字典

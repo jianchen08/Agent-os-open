@@ -102,12 +102,14 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
                 "force": force,
             }
             result = await self._delete_single(file_inputs)
-            results.append({
-                "path": path_str,
-                "success": result.success,
-                "data": result.output if result.success else None,
-                "error": result.error if not result.success else None,
-            })
+            results.append(
+                {
+                    "path": path_str,
+                    "success": result.success,
+                    "data": result.output if result.success else None,
+                    "error": result.error if not result.success else None,
+                }
+            )
 
         success_count = sum(1 for r in results if r["success"])
         failed_count = len(results) - success_count

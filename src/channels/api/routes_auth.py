@@ -48,9 +48,7 @@ def login(request: LoginRequest) -> TokenResponse:
     user = store.get_user_by_username(request.username)
     # 使用 bcrypt 验证密码，禁止明文比对
     stored_password = user.get("password", "") if user else ""
-    if not user or not stored_password or not verify_password(
-        request.password, stored_password
-    ):
+    if not user or not stored_password or not verify_password(request.password, stored_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",

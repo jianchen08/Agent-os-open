@@ -187,9 +187,7 @@ class SchemaEvaluator:
                     }
                 )
 
-            return create_success_result(
-                data={"passed": True, "score": 100, "feedback": "JSON 格式有效"}
-            )
+            return create_success_result(data={"passed": True, "score": 100, "feedback": "JSON 格式有效"})
         except json.JSONDecodeError as e:
             return create_success_result(
                 data={
@@ -208,9 +206,7 @@ class SchemaEvaluator:
             else:
                 yaml.safe_dump(data)
 
-            return create_success_result(
-                data={"passed": True, "score": 100, "feedback": "YAML 格式有效"}
-            )
+            return create_success_result(data={"passed": True, "score": 100, "feedback": "YAML 格式有效"})
         except yaml.YAMLError as e:
             return create_success_result(
                 data={
@@ -234,15 +230,11 @@ class SchemaEvaluator:
                 try:
                     data = yaml.safe_load(data)
                 except yaml.YAMLError:
-                    return create_success_result(
-                        data={"passed": False, "score": 0, "feedback": "数据格式无效"}
-                    )
+                    return create_success_result(data={"passed": False, "score": 0, "feedback": "数据格式无效"})
 
         try:
             jsonschema.validate(instance=data, schema=schema)
-            return create_success_result(
-                data={"passed": True, "score": 100, "feedback": "数据符合 Schema"}
-            )
+            return create_success_result(data={"passed": True, "score": 100, "feedback": "数据符合 Schema"})
         except jsonschema.ValidationError as e:
             return create_success_result(
                 data={
@@ -257,9 +249,7 @@ class SchemaEvaluator:
                 }
             )
 
-    async def _validate_regex(
-        self, data: str, patterns: list[str], pattern_mode: str
-    ) -> ToolResult:
+    async def _validate_regex(self, data: str, patterns: list[str], pattern_mode: str) -> ToolResult:
         """使用正则表达式验证文本"""
         if not patterns:
             return create_success_result(

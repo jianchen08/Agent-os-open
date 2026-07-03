@@ -78,7 +78,8 @@ class MemoryService:
         """确保至少有 keyword 检索器可用。"""
         if "keyword" not in self._retrievers:
             self._retrievers["keyword"] = _InMemoryKeywordRetriever(
-                self._episode_service, self._knowledge_service,
+                self._episode_service,
+                self._knowledge_service,
             )
 
     # 情景记忆操作 - 委托给 EpisodeService
@@ -88,11 +89,7 @@ class MemoryService:
         entry_id = await self._episode_service.store_episode(episode)
 
         # 同步写向量索引
-        if (
-            self._vector_retriever
-            and episode.intent_vector
-            and hasattr(self._vector_retriever, "save_index")
-        ):
+        if self._vector_retriever and episode.intent_vector and hasattr(self._vector_retriever, "save_index"):
             try:
                 await self._vector_retriever.save_index(
                     entry_id=entry_id,
@@ -129,7 +126,8 @@ class MemoryService:
     async def get_episode(self, episode_id: str, user_id: str) -> dict[str, Any] | None:
         """获取情景记忆。"""
         return await self._episode_service.get_episode(
-            episode_id=episode_id, user_id=user_id,
+            episode_id=episode_id,
+            user_id=user_id,
         )
 
     async def list_episodes(
@@ -140,19 +138,23 @@ class MemoryService:
     ) -> dict[str, Any]:
         """获取情景记忆列表。"""
         return await self._episode_service.list_episodes(
-            user_id=user_id, page=page, page_size=page_size,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
         )
 
     async def consolidate_episode(self, episode_id: str, summary: str) -> bool:
         """整理情景记忆。"""
         return await self._episode_service.consolidate_episode(
-            episode_id=episode_id, summary=summary,
+            episode_id=episode_id,
+            summary=summary,
         )
 
     async def delete_episode(self, episode_id: str, user_id: str) -> bool:
         """删除情景记忆。"""
         success = await self._episode_service.delete_episode(
-            episode_id=episode_id, user_id=user_id,
+            episode_id=episode_id,
+            user_id=user_id,
         )
 
         # 同步删向量索引
@@ -174,11 +176,7 @@ class MemoryService:
         entry_id = await self._knowledge_service.store_knowledge(knowledge)
 
         # 同步写向量索引
-        if (
-            self._vector_retriever
-            and knowledge.embedding
-            and hasattr(self._vector_retriever, "save_index")
-        ):
+        if self._vector_retriever and knowledge.embedding and hasattr(self._vector_retriever, "save_index"):
             try:
                 await self._vector_retriever.save_index(
                     entry_id=entry_id,
@@ -200,8 +198,10 @@ class MemoryService:
     ) -> dict[str, Any]:
         """创建知识。"""
         return await self._knowledge_service.create_knowledge(
-            user_id=user_id, content=content,
-            source_type=source_type, extra_data=extra_data,
+            user_id=user_id,
+            content=content,
+            source_type=source_type,
+            extra_data=extra_data,
         )
 
     async def list_semantic_memory(self, user_id: str) -> dict[str, Any]:
@@ -211,7 +211,8 @@ class MemoryService:
     async def delete_knowledge(self, knowledge_id: str, user_id: str) -> bool:
         """删除知识。"""
         success = await self._knowledge_service.delete_knowledge(
-            knowledge_id=knowledge_id, user_id=user_id,
+            knowledge_id=knowledge_id,
+            user_id=user_id,
         )
 
         # 同步删向量索引
@@ -249,7 +250,11 @@ class MemoryService:
         if inject_type_enum == InjectType.SUMMARY:
             return await self._retrieve_summary(user_id, filter, query, top_k)
         return await self._retrieve_by_method(
-            user_id, filter, retrieval_method_enum, query, top_k,
+            user_id,
+            filter,
+            retrieval_method_enum,
+            query,
+            top_k,
         )
 
     async def _retrieve_full(
@@ -303,7 +308,11 @@ class MemoryService:
         """摘要注入 - 使用默认检索方法检索后生成摘要。"""
         default_method = RetrievalMethod(self._default_method)
         results = await self._retrieve_by_method(
-            user_id, filter, default_method, query, top_k,
+            user_id,
+            filter,
+            default_method,
+            query,
+            top_k,
         )
 
         # 摘要生成需要 embedding_service，当前 MVP 直接返回检索结果
@@ -330,7 +339,11 @@ class MemoryService:
         # 混合检索模式
         if self._hybrid_enabled and method_name == "vector":
             results = await self._hybrid_retrieve(
-                user_id, filter, query, top_k, memory_type,
+                user_id,
+                filter,
+                query,
+                top_k,
+                memory_type,
             )
             if results:
                 return results
@@ -350,9 +363,7 @@ class MemoryService:
                     return []
             else:
                 available = list(self._retrievers.keys())
-                raise ValueError(
-                    f"检索器 '{method_name}' 未注册。可用检索器: {available}"
-                )
+                raise ValueError(f"检索器 '{method_name}' 未注册。可用检索器: {available}")
 
         results = await retriever.retrieve(
             query=query,
@@ -526,7 +537,8 @@ class MemoryService:
         try:
             if self._knowledge_service._storage:
                 all_knowledge = await self._knowledge_service._storage.find_by_user(
-                    "__all__", limit=1000000,
+                    "__all__",
+                    limit=1000000,
                 )
                 knowledge_count = len(all_knowledge)
             else:
@@ -558,21 +570,13 @@ class MemoryService:
         # 3. 存储后端状态
         storage_status: dict[str, str] = {}
         storage_status["episode_storage"] = (
-            type(self._episode_service._storage).__name__
-            if self._episode_service._storage
-            else "in_memory"
+            type(self._episode_service._storage).__name__ if self._episode_service._storage else "in_memory"
         )
         storage_status["semantic_storage"] = (
-            type(self._knowledge_service._storage).__name__
-            if self._knowledge_service._storage
-            else "in_memory"
+            type(self._knowledge_service._storage).__name__ if self._knowledge_service._storage else "in_memory"
         )
         storage_status["vector_search"] = "enabled" if self._vector_search_enabled else "disabled"
-        storage_status["vector_retriever"] = (
-            type(self._vector_retriever).__name__
-            if self._vector_retriever
-            else "none"
-        )
+        storage_status["vector_retriever"] = type(self._vector_retriever).__name__ if self._vector_retriever else "none"
 
         # 检查存储连接
         storage_healthy = True
@@ -587,9 +591,8 @@ class MemoryService:
 
         # 5. 检索统计
         stats = self._retrieval_stats.copy()
-        stats["hit_rate"] = (
-            (stats["vector_hits"] + stats["keyword_hits"] + stats["fallback_hits"])
-            / max(stats["total_requests"], 1)
+        stats["hit_rate"] = (stats["vector_hits"] + stats["keyword_hits"] + stats["fallback_hits"]) / max(
+            stats["total_requests"], 1
         )
 
         # 组装报告
@@ -629,9 +632,7 @@ class MemoryService:
         """获取检索统计信息。"""
         stats = self._retrieval_stats.copy()
         total = max(stats["total_requests"], 1)
-        stats["hit_rate"] = (
-            (stats["vector_hits"] + stats["keyword_hits"] + stats["fallback_hits"]) / total
-        )
+        stats["hit_rate"] = (stats["vector_hits"] + stats["keyword_hits"] + stats["fallback_hits"]) / total
         stats["vector_hit_rate"] = stats["vector_hits"] / total
         stats["keyword_hit_rate"] = stats["keyword_hits"] / total
         stats["fallback_rate"] = stats["fallback_hits"] / total
@@ -741,18 +742,21 @@ class _InMemoryKeywordRetriever(IRetriever):
         results: list[SearchResult] = []
         try:
             episode_list = await self._episode_service.list_episodes(
-                user_id=user_id or "__all__", page_size=1000,
+                user_id=user_id or "__all__",
+                page_size=1000,
             )
             for item in episode_list.get("items", []):
                 content = (item.get("execution_summary") or item.get("intent_text", "")).lower()
                 if query_lower in content:
-                    results.append(SearchResult(
-                        id=item.get("id", ""),
-                        content=item.get("execution_summary") or item.get("intent_text", ""),
-                        score=1.0,
-                        memory_type="episode",
-                        metadata=item,
-                    ))
+                    results.append(
+                        SearchResult(
+                            id=item.get("id", ""),
+                            content=item.get("execution_summary") or item.get("intent_text", ""),
+                            score=1.0,
+                            memory_type="episode",
+                            metadata=item,
+                        )
+                    )
         except Exception as e:
             logger.warning("[KeywordRetriever] 搜索情景记忆失败: %s", e)
         return results[:top_k]
@@ -766,9 +770,14 @@ class _InMemoryKeywordRetriever(IRetriever):
         """在知识库中搜索关键词。"""
         results: list[SearchResult] = []
         try:
-            knowledge_list = await self._knowledge_service._storage.find_by_user(
-                user_id or "__all__", limit=1000,
-            ) if self._knowledge_service._storage else []
+            knowledge_list = (
+                await self._knowledge_service._storage.find_by_user(
+                    user_id or "__all__",
+                    limit=1000,
+                )
+                if self._knowledge_service._storage
+                else []
+            )
 
             for item in knowledge_list:
                 content = ""
@@ -778,13 +787,15 @@ class _InMemoryKeywordRetriever(IRetriever):
                     content = item.get("content", "")
                 if query_lower in content.lower():
                     k_id = item.id if hasattr(item, "id") else item.get("id", "")
-                    results.append(SearchResult(
-                        id=k_id,
-                        content=content,
-                        score=1.0,
-                        memory_type="semantic",
-                        metadata=item if isinstance(item, dict) else {},
-                    ))
+                    results.append(
+                        SearchResult(
+                            id=k_id,
+                            content=content,
+                            score=1.0,
+                            memory_type="semantic",
+                            metadata=item if isinstance(item, dict) else {},
+                        )
+                    )
         except Exception as e:
             logger.warning("[KeywordRetriever] 搜索知识库失败: %s", e)
         return results[:top_k]

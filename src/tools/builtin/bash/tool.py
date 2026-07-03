@@ -48,26 +48,26 @@ class SecurityChecker:
 
     # 危险命令正则模式（防止命令注入绕过）
     DANGEROUS_PATTERNS: ClassVar[list[str]] = [
-        r"\brm\s+-rf\b",           # rm -rf（词边界匹配）
-        r"\brm\s+-rf\s+/",         # rm -rf /（明确删除根目录）
-        r"\|\s*bash\b",            # 管道到 bash
-        r"\|\s*sh\b",              # 管道到 sh
-        r"\|\s*zsh\b",             # 管道到 zsh
-        r"\|\s*fish\b",            # 管道到 fish
-        r";\s*rm\b",               # 分号连接 rm
-        r";\s*del\b",              # 分号连接 del
-        r";\s*format\b",           # 分号连接 format
-        r"\bmkfs\b",               # 格式化命令
-        r"\bdd\s+if=",             # dd 写入
-        r">\s*/dev/sd[a-z]",       # 写入磁盘设备
+        r"\brm\s+-rf\b",  # rm -rf（词边界匹配）
+        r"\brm\s+-rf\s+/",  # rm -rf /（明确删除根目录）
+        r"\|\s*bash\b",  # 管道到 bash
+        r"\|\s*sh\b",  # 管道到 sh
+        r"\|\s*zsh\b",  # 管道到 zsh
+        r"\|\s*fish\b",  # 管道到 fish
+        r";\s*rm\b",  # 分号连接 rm
+        r";\s*del\b",  # 分号连接 del
+        r";\s*format\b",  # 分号连接 format
+        r"\bmkfs\b",  # 格式化命令
+        r"\bdd\s+if=",  # dd 写入
+        r">\s*/dev/sd[a-z]",  # 写入磁盘设备
         r":\(\)\s*\{\s*:\|:&\s*\};:",  # Fork bomb
-        r"\bdel\s+/f\s+/s\s+/q\b", # Windows 强制删除
-        r"\brmdir\s+/s\s+/q\b",    # Windows 强制删除目录
-        r"\bformat\s+[a-z]:",      # Windows 格式化
-        r"\bshutdown\b",           # 关机
-        r"\breboot\b",             # 重启
-        r"\bpoweroff\b",           # 关机
-        r"\bhalt\b",               # 停机
+        r"\bdel\s+/f\s+/s\s+/q\b",  # Windows 强制删除
+        r"\brmdir\s+/s\s+/q\b",  # Windows 强制删除目录
+        r"\bformat\s+[a-z]:",  # Windows 格式化
+        r"\bshutdown\b",  # 关机
+        r"\breboot\b",  # 重启
+        r"\bpoweroff\b",  # 关机
+        r"\bhalt\b",  # 停机
     ]
 
     # 需要额外确认的命令（保持简单字符串匹配即可）
@@ -83,8 +83,8 @@ class SecurityChecker:
         "copy ",
         ">",
         ">>",
-        "$(",      # 命令替换（脚本常用，不应阻断）
-        "`",       # 反引号命令替换
+        "$(",  # 命令替换（脚本常用，不应阻断）
+        "`",  # 反引号命令替换
     ]
 
     def __init__(self, allowed_commands: list[str] | None = None):
@@ -105,9 +105,7 @@ class SecurityChecker:
         cmd_stripped = command.strip()
 
         # 检查危险命令（使用正则表达式）
-        for pattern, compiled in zip(
-            self.DANGEROUS_PATTERNS, self._compiled_dangerous, strict=True
-        ):
+        for pattern, compiled in zip(self.DANGEROUS_PATTERNS, self._compiled_dangerous, strict=True):
             if compiled.search(cmd_stripped):
                 return False, False, f"命令包含危险操作: {pattern}"
 
@@ -460,7 +458,11 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
                 if exit_code != 0:
-                    error_msg = output[-500:] if output and len(output) > 500 else (output or f"命令执行失败，退出码: {exit_code}")
+                    error_msg = (
+                        output[-500:]
+                        if output and len(output) > 500
+                        else (output or f"命令执行失败，退出码: {exit_code}")
+                    )
                     return create_failure_result(
                         error=error_msg,
                         error_code="COMMAND_FAILED",

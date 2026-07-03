@@ -72,9 +72,7 @@ class MetricLoader:
             FileNotFoundError: 指标目录不存在
         """
         if not self._metrics_dir.exists():
-            raise FileNotFoundError(
-                f"Metrics directory not found: {self._metrics_dir}"
-            )
+            raise FileNotFoundError(f"Metrics directory not found: {self._metrics_dir}")
 
         yaml_files = sorted(self._metrics_dir.glob("*.yaml"))
         if not yaml_files:

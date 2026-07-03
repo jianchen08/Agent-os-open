@@ -97,9 +97,7 @@ class ToolSyncService:
         """
         from src.tools.builtin import get_all_builtin_tools  # noqa: PLC0415
 
-        result = SyncResult(
-            added=[], updated=[], deprecated=[], unchanged=[], errors=[]
-        )
+        result = SyncResult(added=[], updated=[], deprecated=[], unchanged=[], errors=[])
 
         # 获取所有内置工具定义
         code_tools: dict[str, Tool] = {}
@@ -112,9 +110,7 @@ class ToolSyncService:
             return result
 
         # 获取数据库中所有内置工具（source_type 为 code 或 builtin）
-        stmt = select(ToolLibrary).where(
-            ToolLibrary.source_type.in_(["code", "builtin"])
-        )
+        stmt = select(ToolLibrary).where(ToolLibrary.source_type.in_(["code", "builtin"]))
         db_result = await self._session.execute(stmt)
         db_tools = {t.name: t for t in db_result.scalars().all()}
 
@@ -207,9 +203,7 @@ class ToolSyncService:
         Returns:
             工具定义，不存在返回 None
         """
-        stmt = select(ToolLibrary).where(
-            ToolLibrary.name == name, ToolLibrary.status == "active"
-        )
+        stmt = select(ToolLibrary).where(ToolLibrary.name == name, ToolLibrary.status == "active")
         result = await self._session.execute(stmt)
         db_tool = result.scalar_one_or_none()
 
@@ -218,9 +212,7 @@ class ToolSyncService:
 
         return self._db_model_to_tool(db_tool)
 
-    async def load_all_tools_from_db(
-        self, source_type: str | None = None, status: str = "active"
-    ) -> list[Tool]:
+    async def load_all_tools_from_db(self, source_type: str | None = None, status: str = "active") -> list[Tool]:
         """
         从数据库加载所有工具定义
 
@@ -241,9 +233,7 @@ class ToolSyncService:
 
         return [self._db_model_to_tool(t) for t in db_tools]
 
-    async def get_tool_names_from_db(
-        self, source_type: str | None = None, status: str = "active"
-    ) -> set[str]:
+    async def get_tool_names_from_db(self, source_type: str | None = None, status: str = "active") -> set[str]:
         """
         获取数据库中的工具名称列表（轻量查询）
 
@@ -312,9 +302,7 @@ class ToolSyncService:
             requires_approval=tool.requires_approval,
         )
 
-    async def _update_db_tool(
-        self, db_tool: ToolLibrary, tool: Tool, checksum: str
-    ) -> None:
+    async def _update_db_tool(self, db_tool: ToolLibrary, tool: Tool, checksum: str) -> None:
         """
         更新数据库中的工具记录
 
@@ -326,9 +314,7 @@ class ToolSyncService:
         db_tool.description = tool.description
         db_tool.when_to_use = tool.when_to_use or None
         db_tool.when_not_to_use = tool.when_not_to_use or None
-        db_tool.examples = (
-            [e.model_dump() for e in tool.examples] if tool.examples else None
-        )
+        db_tool.examples = [e.model_dump() for e in tool.examples] if tool.examples else None
         db_tool.caveats = tool.caveats or None
         db_tool.input_schema = tool.input_schema
         db_tool.output_schema = tool.output_schema

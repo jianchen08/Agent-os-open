@@ -317,7 +317,10 @@ class ConfigCenter:
                 raise ValueError(f"YAML 内容必须是字典类型: {abs_path}")
         except yaml.YAMLError as e:
             return self._handle_load_failure(
-                str(abs_path), event_type, config_type, f"YAML 解析失败: {e}",
+                str(abs_path),
+                event_type,
+                config_type,
+                f"YAML 解析失败: {e}",
             )
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -344,13 +347,15 @@ class ConfigCenter:
         self._notify_watchers(event_type, str(abs_path), context)
 
         # 审计日志
-        self._write_audit(AuditEntry(
-            file_path=path_str,
-            event_type=event_type,
-            config_type=config_type,
-            success=True,
-            content_hash=content_hash,
-        ))
+        self._write_audit(
+            AuditEntry(
+                file_path=path_str,
+                event_type=event_type,
+                config_type=config_type,
+                success=True,
+                content_hash=content_hash,
+            )
+        )
 
         logger.info("配置重载成功: type=%s path=%s", config_type, abs_path)
         return {"success": True, "error": None, "rolled_back": False, "config_type": config_type}
@@ -420,10 +425,7 @@ class ConfigCenter:
             try:
                 from watchfiles import awatch  # noqa: PLC0415
             except ImportError:
-                logger.warning(
-                    "watchfiles 未安装，回退到 watchdog 模式。"
-                    "建议安装: pip install watchfiles"
-                )
+                logger.warning("watchfiles 未安装，回退到 watchdog 模式。建议安装: pip install watchfiles")
                 self._running = False
                 return
 
@@ -536,7 +538,9 @@ class ConfigCenter:
 
             # 处理变更（在线程池中执行以避免阻塞事件循环）
             await asyncio.to_thread(
-                self._handle_file_change, event_type, path_str,
+                self._handle_file_change,
+                event_type,
+                path_str,
             )
 
     def _handle_file_change(self, event_type: str, path_str: str) -> None:
@@ -556,12 +560,14 @@ class ConfigCenter:
 
             context = {"config_type": config_type}
             self._notify_watchers(event_type, path_str, context)
-            self._write_audit(AuditEntry(
-                file_path=path_str,
-                event_type=event_type,
-                config_type=config_type,
-                success=True,
-            ))
+            self._write_audit(
+                AuditEntry(
+                    file_path=path_str,
+                    event_type=event_type,
+                    config_type=config_type,
+                    success=True,
+                )
+            )
             return
 
         # 读取并计算哈希
@@ -575,7 +581,9 @@ class ConfigCenter:
             data = yaml.safe_load(content)
             if not isinstance(data, dict):
                 self._handle_load_failure(
-                    path_str, event_type, config_type,
+                    path_str,
+                    event_type,
+                    config_type,
                     f"YAML 内容不是字典类型: {path_str}",
                 )
                 return
@@ -599,13 +607,15 @@ class ConfigCenter:
         self._notify_watchers(event_type, path_str, context)
 
         # 审计日志
-        self._write_audit(AuditEntry(
-            file_path=path_str,
-            event_type=event_type,
-            config_type=config_type,
-            success=True,
-            content_hash=new_hash,
-        ))
+        self._write_audit(
+            AuditEntry(
+                file_path=path_str,
+                event_type=event_type,
+                config_type=config_type,
+                success=True,
+                content_hash=new_hash,
+            )
+        )
 
         logger.info("配置自动重载: type=%s event=%s path=%s", config_type, event_type, path_str)
 
@@ -636,22 +646,28 @@ class ConfigCenter:
             # 回滚：旧缓存保留不变
             rolled_back = True
             logger.warning(
-                "配置加载失败，保留旧配置 | path=%s | error=%s", path_str, error,
+                "配置加载失败，保留旧配置 | path=%s | error=%s",
+                path_str,
+                error,
             )
         else:
             # 无旧配置可回滚
             logger.error(
-                "配置加载失败（无旧配置可回滚）| path=%s | error=%s", path_str, error,
+                "配置加载失败（无旧配置可回滚）| path=%s | error=%s",
+                path_str,
+                error,
             )
 
-        self._write_audit(AuditEntry(
-            file_path=path_str,
-            event_type=event_type,
-            config_type=config_type,
-            success=False,
-            rolled_back=rolled_back,
-            error=error,
-        ))
+        self._write_audit(
+            AuditEntry(
+                file_path=path_str,
+                event_type=event_type,
+                config_type=config_type,
+                success=False,
+                rolled_back=rolled_back,
+                error=error,
+            )
+        )
 
         return {
             "success": False,
@@ -684,7 +700,9 @@ class ConfigCenter:
                 callback(event_type, file_path, context)
             except Exception:
                 logger.exception(
-                    "配置变更回调执行失败 | event=%s | path=%s", event_type, file_path,
+                    "配置变更回调执行失败 | event=%s | path=%s",
+                    event_type,
+                    file_path,
                 )
 
     def _write_audit(self, entry: AuditEntry) -> None:

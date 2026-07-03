@@ -141,10 +141,10 @@ class _ConsoleFormatter(logging.Formatter):
 
     # ANSI 颜色码
     _COLORS: dict[int, str] = {
-        logging.DEBUG: "\033[36m",     # 青色
-        logging.INFO: "\033[32m",      # 绿色
-        logging.WARNING: "\033[33m",   # 黄色
-        logging.ERROR: "\033[31m",     # 红色
+        logging.DEBUG: "\033[36m",  # 青色
+        logging.INFO: "\033[32m",  # 绿色
+        logging.WARNING: "\033[33m",  # 黄色
+        logging.ERROR: "\033[31m",  # 红色
         logging.CRITICAL: "\033[35m",  # 紫色
     }
     _RESET = "\033[0m"
@@ -163,10 +163,7 @@ class _ConsoleFormatter(logging.Formatter):
         timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         trace = getattr(record, "trace_id", "")
         trace_part = f" [{trace[:8]}]" if trace else ""
-        msg = (
-            f"{timestamp} {color}{record.levelname:8s}{self._RESET} "
-            f"{record.name}: {record.getMessage()}{trace_part}"
-        )
+        msg = f"{timestamp} {color}{record.levelname:8s}{self._RESET} {record.name}: {record.getMessage()}{trace_part}"
         if record.exc_info and record.exc_info[1] is not None:
             msg += "\n" + self.formatException(record.exc_info)
         return msg

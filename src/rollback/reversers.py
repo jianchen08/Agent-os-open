@@ -126,9 +126,7 @@ class FileReverser(BaseReverser):
             "details": {"action": "delete", "path": target},
         }
 
-    async def _reverse_update(
-        self, target: str, before_state: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _reverse_update(self, target: str, before_state: dict[str, Any]) -> dict[str, Any]:
         """逆操作：恢复文件原内容"""
         path = Path(target)
         content = before_state.get("content")
@@ -152,9 +150,7 @@ class FileReverser(BaseReverser):
             "details": {"action": "restore", "path": target},
         }
 
-    async def _reverse_delete(
-        self, target: str, before_state: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _reverse_delete(self, target: str, before_state: dict[str, Any]) -> dict[str, Any]:
         """逆操作：恢复删除的文件"""
         path = Path(target)
         content = before_state.get("content")
@@ -252,14 +248,10 @@ class GitReverser(BaseReverser):
 
         if commit_hash:
             # 回退到指定 commit
-            returncode, stdout, stderr = await self._run_git_command(
-                "reset", "--soft", commit_hash
-            )
+            returncode, stdout, stderr = await self._run_git_command("reset", "--soft", commit_hash)
         else:
             # 回退最近一次 commit
-            returncode, stdout, stderr = await self._run_git_command(
-                "reset", "--soft", "HEAD~1"
-            )
+            returncode, stdout, stderr = await self._run_git_command("reset", "--soft", "HEAD~1")
 
         if returncode != 0:
             return {
@@ -286,9 +278,7 @@ class GitReverser(BaseReverser):
             }
 
         # 删除分支
-        returncode, stdout, stderr = await self._run_git_command(
-            "branch", "-D", branch_name
-        )
+        returncode, stdout, stderr = await self._run_git_command("branch", "-D", branch_name)
 
         if returncode != 0:
             return {
@@ -308,9 +298,7 @@ class GitReverser(BaseReverser):
         stash_index = before_state.get("stash_index", 0)
 
         # 应用 stash
-        returncode, stdout, stderr = await self._run_git_command(
-            "stash", "pop", f"stash@{{{stash_index}}}"
-        )
+        returncode, stdout, stderr = await self._run_git_command("stash", "pop", f"stash@{{{stash_index}}}")
 
         if returncode != 0:
             return {
@@ -362,9 +350,7 @@ class APIReverser(BaseReverser):
             "details": {},
         }
 
-    async def _execute_http_reverse(
-        self, reverse_action: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _execute_http_reverse(self, reverse_action: dict[str, Any]) -> dict[str, Any]:
         """执行 HTTP 逆操作"""
         import aiohttp  # noqa: PLC0415
 
@@ -381,9 +367,10 @@ class APIReverser(BaseReverser):
             }
 
         try:
-            async with aiohttp.ClientSession() as session, session.request(
-                method, url, headers=headers, json=body
-            ) as response:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.request(method, url, headers=headers, json=body) as response,
+            ):
                 if response.status < 400:
                     return {
                         "success": True,

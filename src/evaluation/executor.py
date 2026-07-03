@@ -133,7 +133,9 @@ class EvaluationExecutor:
                     ],
                 }
                 await self._task_service.complete_evaluation(
-                    task_id, overall_passed, result=eval_data,
+                    task_id,
+                    overall_passed,
+                    result=eval_data,
                 )
                 logger.info(
                     "Task %s evaluation completed: %s",
@@ -141,9 +143,7 @@ class EvaluationExecutor:
                     "passed" if overall_passed else "failed",
                 )
             except Exception as e:
-                logger.error(
-                    "Failed to update task %s status: %s", task_id, e
-                )
+                logger.error("Failed to update task %s status: %s", task_id, e)
                 result.summary += f" [状态回写失败: {e}]"
 
         # 构建摘要

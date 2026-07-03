@@ -15,6 +15,7 @@ WebSocket。本 sink 实现该契约：
 - 评估侧不持有 engine 引用、不调 engine.run；只 register + send + await sink。
 - 本 sink 是 IOutputSink 的一个消费者实现，不依赖任何 pipeline 私有成员。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -86,7 +87,9 @@ class CollectingSink:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[CollectingSink] 事件处理异常 pipeline=%s type=%s err=%s",
-                self._pipeline_id[:12], event_type, exc,
+                self._pipeline_id[:12],
+                event_type,
+                exc,
             )
             return False
         return True

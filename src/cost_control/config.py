@@ -15,15 +15,9 @@ from src.core.constants import CostControl
 class AlertThresholds(BaseModel):
     """告警阈值配置"""
 
-    warning_threshold: float = Field(
-        default=CostControl.WARNING_THRESHOLD, description="警告阈值"
-    )
-    critical_threshold: float = Field(
-        default=CostControl.CRITICAL_THRESHOLD, description="严重阈值"
-    )
-    exhausted_threshold: float = Field(
-        default=CostControl.EXHAUSTED_THRESHOLD, description="耗尽阈值"
-    )
+    warning_threshold: float = Field(default=CostControl.WARNING_THRESHOLD, description="警告阈值")
+    critical_threshold: float = Field(default=CostControl.CRITICAL_THRESHOLD, description="严重阈值")
+    exhausted_threshold: float = Field(default=CostControl.EXHAUSTED_THRESHOLD, description="耗尽阈值")
 
 
 class ProtectionConfig(BaseModel):
@@ -37,16 +31,10 @@ class ProtectionConfig(BaseModel):
 class GlobalBudget(BaseModel):
     """全局预算配置"""
 
-    daily_token_limit: int = Field(
-        default=CostControl.DAILY_TOKEN_LIMIT, description="每日 Token 限制"
-    )
-    monthly_token_limit: int = Field(
-        default=CostControl.MONTHLY_TOKEN_LIMIT, description="每月 Token 限制"
-    )
+    daily_token_limit: int = Field(default=CostControl.DAILY_TOKEN_LIMIT, description="每日 Token 限制")
+    monthly_token_limit: int = Field(default=CostControl.MONTHLY_TOKEN_LIMIT, description="每月 Token 限制")
     per_task_token_limit: int = Field(default=50000, description="单任务 Token 限制")
-    per_session_token_limit: int = Field(
-        default=100000, description="单会话 Token 限制"
-    )
+    per_session_token_limit: int = Field(default=100000, description="单会话 Token 限制")
 
 
 class CostRates(BaseModel):
@@ -111,6 +99,7 @@ def load_cost_control_config(config_path: str | None = None) -> CostControlConfi
 
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+
         rel = config_path.replace("config/", "", 1) if config_path.startswith("config/") else config_path
         data = get_config_center().get(rel) or {}
     except Exception:

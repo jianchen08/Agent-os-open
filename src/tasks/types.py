@@ -107,7 +107,9 @@ class TaskModel:
 
     # ── 层级关系（任务管理） ──
     parent_task_id: str | None = None
-    parent_pipeline_id: str | None = field(default=None, metadata={"description": "创建该任务的父管道 ID，用于子任务完成时直接通知父管道"})
+    parent_pipeline_id: str | None = field(
+        default=None, metadata={"description": "创建该任务的父管道 ID，用于子任务完成时直接通知父管道"}
+    )
     dependencies: list[str] | None = None
 
     # ── 执行者（身份 vs 实例） ──

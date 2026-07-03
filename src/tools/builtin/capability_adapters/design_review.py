@@ -331,12 +331,14 @@ class DesignReviewTool(CapabilityAdapterBase):
             if not stripped:
                 continue
             if "StaticText" in stripped and len(stripped) < 3:
-                issues.append({
-                    "type": "dom_structure",
-                    "severity": "low",
-                    "selector": "text-node",
-                    "description": "Very short text node detected in accessibility tree",
-                })
+                issues.append(
+                    {
+                        "type": "dom_structure",
+                        "severity": "low",
+                        "selector": "text-node",
+                        "description": "Very short text node detected in accessibility tree",
+                    }
+                )
         return issues[:20]
 
     def _parse_console_issues(self, console_data: Any) -> list[dict[str, Any]]:
@@ -356,24 +358,28 @@ class DesignReviewTool(CapabilityAdapterBase):
                 msg_type = entry.get("type", "")
                 text = entry.get("text", "")
                 if msg_type in ("error", "warning") and text:
-                    issues.append({
-                        "type": "interaction",
-                        "severity": "high" if msg_type == "error" else "medium",
-                        "selector": "console",
-                        "description": f"Console {msg_type}: {text[:200]}",
-                    })
+                    issues.append(
+                        {
+                            "type": "interaction",
+                            "severity": "high" if msg_type == "error" else "medium",
+                            "selector": "console",
+                            "description": f"Console {msg_type}: {text[:200]}",
+                        }
+                    )
         elif isinstance(console_data, dict):
             for entry in console_data.get("messages", []):
                 if isinstance(entry, dict):
                     msg_type = entry.get("type", "")
                     text = entry.get("text", "")
                     if msg_type in ("error", "warning") and text:
-                        issues.append({
-                            "type": "interaction",
-                            "severity": "high" if msg_type == "error" else "medium",
-                            "selector": "console",
-                            "description": f"Console {msg_type}: {text[:200]}",
-                        })
+                        issues.append(
+                            {
+                                "type": "interaction",
+                                "severity": "high" if msg_type == "error" else "medium",
+                                "selector": "console",
+                                "description": f"Console {msg_type}: {text[:200]}",
+                            }
+                        )
         return issues
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
@@ -385,9 +391,7 @@ class DesignReviewTool(CapabilityAdapterBase):
                 error_code="EMPTY_INPUT",
             )
 
-        check_types = inputs.get(
-            "check_types", ["layout", "color", "accessibility", "interaction"]
-        )
+        check_types = inputs.get("check_types", ["layout", "color", "accessibility", "interaction"])
         include_screenshot = inputs.get("include_screenshot", False)
 
         backends = self._get_backends()
@@ -401,18 +405,10 @@ class DesignReviewTool(CapabilityAdapterBase):
                 continue
             attempted = True
             try:
-                steps = self._build_steps(
-                    backend, url, check_types, include_screenshot
-                )
-                raw_results = await self._call_backend_multi_step(
-                    backend, steps
-                )
-                parsed_results = [
-                    self._extract_mcp_content(r) for r in raw_results
-                ]
-                return self._transform_results(
-                    parsed_results, backend.name, check_types
-                )
+                steps = self._build_steps(backend, url, check_types, include_screenshot)
+                raw_results = await self._call_backend_multi_step(backend, steps)
+                parsed_results = [self._extract_mcp_content(r) for r in raw_results]
+                return self._transform_results(parsed_results, backend.name, check_types)
             except Exception as e:
                 logger.warning(
                     "[DesignReview] 后端 '%s' 失败: %s",
@@ -444,12 +440,14 @@ class DesignReviewTool(CapabilityAdapterBase):
 
         for idx, result in enumerate(parsed_results):
             if isinstance(result, dict) and result.get("error"):
-                all_issues.append({
-                    "type": "system",
-                    "severity": "high",
-                    "selector": "mcp",
-                    "description": f"MCP step {idx} returned error: {result.get('message', '')[:200]}",
-                })
+                all_issues.append(
+                    {
+                        "type": "system",
+                        "severity": "high",
+                        "selector": "mcp",
+                        "description": f"MCP step {idx} returned error: {result.get('message', '')[:200]}",
+                    }
+                )
                 continue
 
             if idx == 1:
@@ -487,7 +485,9 @@ class DesignReviewTool(CapabilityAdapterBase):
                 by_type[typ] = by_type.get(typ, 0) + 1
 
         total = len(all_issues)
-        score = max(0, 100 - by_severity.get("high", 0) * 10 - by_severity.get("medium", 0) * 3 - by_severity.get("low", 0))
+        score = max(
+            0, 100 - by_severity.get("high", 0) * 10 - by_severity.get("medium", 0) * 3 - by_severity.get("low", 0)
+        )
 
         summary = (
             f"发现 {total} 个问题: "

@@ -7,6 +7,7 @@ Phase 1 改造：删除 _accumulated_content / _collected_parts / _thinking_cont
 bridge 不再独立累加内容，state.raw_result 是唯一数据源。
 _handle_chunk 只负责"格式化 + 推送"，数据持久化由 state → TrackPlugin 负责。
 """
+
 from __future__ import annotations
 
 import logging
@@ -37,9 +38,14 @@ class BridgeEventsMixin:
         """如果 thinking 处于活跃状态，发送 thinking_end 事件关闭。"""
         if self._thinking_active:
             self._thinking_active = False
-            await self._send_event(self._make_event("thinking_end", {
-                "duration_ms": duration_ms,
-            }))
+            await self._send_event(
+                self._make_event(
+                    "thinking_end",
+                    {
+                        "duration_ms": duration_ms,
+                    },
+                )
+            )
             # 思考块结束：重置块追踪，使后续（正文或新思考）开新 sequence 块。
             self._reset_current_block()
 
@@ -59,23 +65,38 @@ class BridgeEventsMixin:
             # 推送 stream_chunk（不累加，完整内容由 emit_finish 从 state 推送）
             # sequence 按 part 块分配：同一段正文的连续 chunk 共享一个 sequence，
             # 避免长输出把计数器推高导致与后续/其它 part 的 sequence 交错（见 _seq_for_block）。
-            await self._send_event(self._make_event("stream_chunk", {
-                "content": content,
-                "sequence": self._seq_for_block("text"),
-            }))
+            await self._send_event(
+                self._make_event(
+                    "stream_chunk",
+                    {
+                        "content": content,
+                        "sequence": self._seq_for_block("text"),
+                    },
+                )
+            )
 
         elif chunk_type == "thinking" and content:
             # 同一段思考的连续 chunk 共享一个 sequence（块级）。
             if not self._thinking_active:
                 self._thinking_active = True
-                await self._send_event(self._make_event("thinking_start", {
-                    "sequence": self._seq_for_block("thinking"),
-                }))
-            await self._send_event(self._make_event("thinking_chunk", {
-                "content": content,
-                "sequence": self._current_block_seq,
-                "step_type": chunk.get("step_type", ""),
-            }))
+                await self._send_event(
+                    self._make_event(
+                        "thinking_start",
+                        {
+                            "sequence": self._seq_for_block("thinking"),
+                        },
+                    )
+                )
+            await self._send_event(
+                self._make_event(
+                    "thinking_chunk",
+                    {
+                        "content": content,
+                        "sequence": self._current_block_seq,
+                        "step_type": chunk.get("step_type", ""),
+                    },
+                )
+            )
 
         elif chunk_type == "thinking_end":
             await self._close_thinking_if_active(chunk.get("duration_ms"))
@@ -85,7 +106,7 @@ class BridgeEventsMixin:
             if _tool_calls:
                 await self._close_thinking_if_active(None)
                 for _tc in _tool_calls:
-                    _tc_id = getattr(_tc, 'id', None)
+                    _tc_id = getattr(_tc, "id", None)
                     if _tc_id:
                         self._llm_seen_call_ids.add(_tc_id)
 
@@ -96,7 +117,9 @@ class BridgeEventsMixin:
             if _call_id in self._sent_tool_starts:
                 logger.debug(
                     "tool_start skipped (dedup): tool=%s call_id=%s pipeline=%s",
-                    _tool_name, _call_id, self.pipeline_id[:12],
+                    _tool_name,
+                    _call_id,
+                    self.pipeline_id[:12],
                 )
                 return
             self._sent_tool_starts.add(_call_id)
@@ -104,41 +127,64 @@ class BridgeEventsMixin:
             self._reset_current_block()
             logger.debug(
                 "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
-                _tool_name, _call_id, _seq, self.pipeline_id[:12],
+                _tool_name,
+                _call_id,
+                _seq,
+                self.pipeline_id[:12],
             )
-            await self._send_event(self._make_event("tool_start", {
-                "tool_name": _tool_name,
-                "args": chunk.get("args"),
-                "call_id": chunk.get("call_id"),
-                "sequence": _seq,
-            }))
+            await self._send_event(
+                self._make_event(
+                    "tool_start",
+                    {
+                        "tool_name": _tool_name,
+                        "args": chunk.get("args"),
+                        "call_id": chunk.get("call_id"),
+                        "sequence": _seq,
+                    },
+                )
+            )
 
         elif chunk_type == "tool_result":
             await self._handle_tool_result(chunk)
 
         elif chunk_type == "tool_multimedia_result":
-            await self._send_event(self._make_event("tool_multimedia_result", {
-                "count": chunk.get("count", 0),
-                "multimedia": chunk.get("multimedia", []),
-                "sequence": self._next_part_seq(),
-            }))
+            await self._send_event(
+                self._make_event(
+                    "tool_multimedia_result",
+                    {
+                        "count": chunk.get("count", 0),
+                        "multimedia": chunk.get("multimedia", []),
+                        "sequence": self._next_part_seq(),
+                    },
+                )
+            )
             self._reset_current_block()
 
         elif chunk_type == "iteration":
             await self._close_thinking_if_active(None)
-            await self._send_event(self._make_event("iteration", {
-                "iteration": chunk.get("iteration", 0),
-                "max_iterations": chunk.get("max_iterations", 0),
-            }))
+            await self._send_event(
+                self._make_event(
+                    "iteration",
+                    {
+                        "iteration": chunk.get("iteration", 0),
+                        "max_iterations": chunk.get("max_iterations", 0),
+                    },
+                )
+            )
 
         elif chunk_type == "notification":
-            await self._send_event(self._make_event("system_notification", {
-                "content": chunk.get("content", ""),
-                "level": chunk.get("level", "info"),
-                "notificationType": chunk.get("notificationType", ""),
-                "notification_id": chunk.get("notification_id", ""),
-                "sequence": chunk.get("sequence", 0),
-            }))
+            await self._send_event(
+                self._make_event(
+                    "system_notification",
+                    {
+                        "content": chunk.get("content", ""),
+                        "level": chunk.get("level", "info"),
+                        "notificationType": chunk.get("notificationType", ""),
+                        "notification_id": chunk.get("notification_id", ""),
+                        "sequence": chunk.get("sequence", 0),
+                    },
+                )
+            )
             self._reset_current_block()
 
     async def _handle_tool_result(self, chunk: dict) -> None:
@@ -147,20 +193,31 @@ class BridgeEventsMixin:
         if _result_call_id not in self._sent_tool_starts and _result_call_id not in self._llm_seen_call_ids:
             logger.info(
                 "FIXUP: tool_result without tool_start: tool=%s pipeline=%s",
-                chunk.get('tool_name'), self.pipeline_id[:12],
+                chunk.get("tool_name"),
+                self.pipeline_id[:12],
             )
             self._sent_tool_starts.add(_result_call_id)
-            await self._send_event(self._make_event("tool_start", {
-                "tool_name": chunk.get("tool_name", "unknown"),
-                "args": None,
-                "call_id": chunk.get("call_id"),
-                "sequence": self._next_part_seq(),
-            }))
+            await self._send_event(
+                self._make_event(
+                    "tool_start",
+                    {
+                        "tool_name": chunk.get("tool_name", "unknown"),
+                        "args": None,
+                        "call_id": chunk.get("call_id"),
+                        "sequence": self._next_part_seq(),
+                    },
+                )
+            )
             self._reset_current_block()
-        await self._send_event(self._make_event("tool_result", {
-            "tool_name": chunk.get("tool_name", "unknown"),
-            "success": chunk.get("success", True),
-            "result": chunk.get("result"),
-            "duration_ms": chunk.get("duration_ms"),
-            "call_id": chunk.get("call_id"),
-        }))
+        await self._send_event(
+            self._make_event(
+                "tool_result",
+                {
+                    "tool_name": chunk.get("tool_name", "unknown"),
+                    "success": chunk.get("success", True),
+                    "result": chunk.get("result"),
+                    "duration_ms": chunk.get("duration_ms"),
+                    "call_id": chunk.get("call_id"),
+                },
+            )
+        )

@@ -71,9 +71,7 @@ class PluginRegistry:
         """按核心类型获取核心插件实例。"""
         return self._core_plugins.get(core_type)
 
-    def get_output_plugins(
-        self, core_type: str | None = None
-    ) -> list[IOutputPlugin]:
+    def get_output_plugins(self, core_type: str | None = None) -> list[IOutputPlugin]:
         """获取所有输出插件列表（带缓存）。"""
         if self._output_plugins_cache is not None:
             return self._output_plugins_cache
@@ -105,9 +103,7 @@ class PluginRegistry:
                         if hasattr(plugin, attr):
                             setattr(new_instance, attr, getattr(plugin, attr))
                 except Exception:
-                    logger.debug(
-                        "PluginRegistry.fork: 无法重建插件 %s, 复用原实例", name
-                    )
+                    logger.debug("PluginRegistry.fork: 无法重建插件 %s, 复用原实例", name)
             new_registry._plugins[name] = new_instance
 
         for core_name, plugin_name in core_name_to_plugin_name.items():

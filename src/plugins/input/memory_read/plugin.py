@@ -118,7 +118,9 @@ class MemoryReadPlugin(IInputPlugin):
 
             logger.debug(
                 "[%s] 记忆检索完成 | query_len=%d | results=%d",
-                self.name, len(query), len(results),
+                self.name,
+                len(query),
+                len(results),
             )
 
             return PluginResult(state_updates={"memory.retrieved": context_data})

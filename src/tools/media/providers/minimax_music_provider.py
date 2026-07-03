@@ -166,24 +166,23 @@ class MiniMaxMusicProvider(MediaProvider):
             "Content-Type": "application/json",
         }
 
-        async with aiohttp.ClientSession() as session, session.post(
-            url,
-            json=payload,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp,
+        ):
             if resp.status != 200:
                 error_text = await resp.text()
-                raise RuntimeError(
-                    f"MiniMax 音乐生成任务提交失败 (status={resp.status}): {error_text}"
-                )
+                raise RuntimeError(f"MiniMax 音乐生成任务提交失败 (status={resp.status}): {error_text}")
             result = await resp.json()
 
         base_resp = result.get("base_resp", {})
         if base_resp.get("status_code", 0) != 0:
-            raise RuntimeError(
-                f"MiniMax 音乐生成业务错误: {base_resp.get('status_msg', 'unknown')}"
-            )
+            raise RuntimeError(f"MiniMax 音乐生成业务错误: {base_resp.get('status_msg', 'unknown')}")
 
         task_id = result.get("task_id")
         if not task_id:
@@ -217,9 +216,7 @@ class MiniMaxMusicProvider(MediaProvider):
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        raise RuntimeError(
-                            f"查询音乐生成任务失败 (status={resp.status}): {error_text}"
-                        )
+                        raise RuntimeError(f"查询音乐生成任务失败 (status={resp.status}): {error_text}")
                     result = await resp.json()
 
                 status = result.get("status", "processing")
@@ -230,20 +227,18 @@ class MiniMaxMusicProvider(MediaProvider):
                     return audio_url
 
                 if status == "failed":
-                    raise RuntimeError(
-                        f"音乐生成任务失败: {result.get('base_resp', {}).get('status_msg', 'unknown')}"
-                    )
+                    raise RuntimeError(f"音乐生成任务失败: {result.get('base_resp', {}).get('status_msg', 'unknown')}")
 
                 logger.debug(
                     "[MiniMax Music] 任务 %s 状态: %s，等待 %ds",
-                    task_id, status, self._poll_interval,
+                    task_id,
+                    status,
+                    self._poll_interval,
                 )
                 await asyncio.sleep(self._poll_interval)
                 elapsed += self._poll_interval
 
-        raise RuntimeError(
-            f"音乐生成任务超时 (task_id={task_id}, timeout={self._timeout}s)"
-        )
+        raise RuntimeError(f"音乐生成任务超时 (task_id={task_id}, timeout={self._timeout}s)")
 
     async def _download_audio(self, audio_url: str) -> Path:
         """从 URL 下载音频文件。
@@ -257,10 +252,13 @@ class MiniMaxMusicProvider(MediaProvider):
         Raises:
             RuntimeError: 下载失败
         """
-        async with aiohttp.ClientSession() as session, session.get(
-            audio_url,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
+                audio_url,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp,
+        ):
             if resp.status != 200:
                 raise RuntimeError(f"下载音乐文件失败 (status={resp.status})")
             content = await resp.read()

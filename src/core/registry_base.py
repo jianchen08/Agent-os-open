@@ -241,9 +241,7 @@ class SimpleRegistry(BaseRegistry[K, V]):
 
     def _create_key(self, value: V) -> K:
         """简单注册表需要显式提供键"""
-        raise NotImplementedError(
-            "SimpleRegistry 需要显式提供键，使用 register(value, key='xxx')"
-        )
+        raise NotImplementedError("SimpleRegistry 需要显式提供键，使用 register(value, key='xxx')")
 
 
 # =============================================================================

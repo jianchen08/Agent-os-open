@@ -243,7 +243,10 @@ async def save_file_content(
 
     MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
     if len(content.encode("utf-8")) > MAX_SIZE:
-        return {"success": False, "message": f"内容过大（{len(content.encode('utf-8'))} 字节），超过 {MAX_SIZE // (1024*1024)}MB 限制"}
+        return {
+            "success": False,
+            "message": f"内容过大（{len(content.encode('utf-8'))} 字节），超过 {MAX_SIZE // (1024 * 1024)}MB 限制",
+        }
 
     if not full_path.parent.exists():
         return {"success": False, "message": f"目标目录不存在: {full_path.parent}"}
@@ -360,6 +363,7 @@ async def delete_entry(  # noqa: PLR0911
     try:
         if full_path.is_dir():
             import shutil  # noqa: PLC0415
+
             shutil.rmtree(full_path)
         else:
             full_path.unlink()
@@ -494,6 +498,7 @@ async def move_entry(  # noqa: PLR0911
 
     try:
         import shutil  # noqa: PLC0415
+
         shutil.move(str(full_source), str(dest_full_path))
         return {
             "success": True,

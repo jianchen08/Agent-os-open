@@ -88,6 +88,7 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
 
     try:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         task_service = provider.get_or_create(
             "task_service",
@@ -206,7 +207,9 @@ class TaskEvaluateTool(BuiltinTool):
 
         logger.warning(
             "[TRACE-EVAL] execute() ENTRY | action=%s | task_id=%s | input_keys=%s",
-            action, task_id, list(inputs.keys()),
+            action,
+            task_id,
+            list(inputs.keys()),
         )
 
         task_service = self._get_task_service()
@@ -234,22 +237,19 @@ class TaskEvaluateTool(BuiltinTool):
 
         task = task_service.get_task(task_id)
         if task is None:
-            return create_failure_result(
-                error="任务不存在", error_code="TASK_NOT_FOUND"
-            )
+            return create_failure_result(error="任务不存在", error_code="TASK_NOT_FOUND")
 
         max_eval_calls = _DEFAULT_MAX_EVAL_CALLS
         if task.metadata and isinstance(task.metadata, dict):
-            max_eval_calls = task.metadata.get(
-                "max_eval_calls", _DEFAULT_MAX_EVAL_CALLS
-            )
+            max_eval_calls = task.metadata.get("max_eval_calls", _DEFAULT_MAX_EVAL_CALLS)
         eval_total_calls = self._increment_eval_call_count(task)
 
         if eval_total_calls > max_eval_calls:
             logger.warning(
-                "[TaskEvaluate] 全局评估调用次数超限 | task_id=%s | "
-                "calls=%d | max=%d | 直接标记失败",
-                task_id, eval_total_calls, max_eval_calls,
+                "[TaskEvaluate] 全局评估调用次数超限 | task_id=%s | calls=%d | max=%d | 直接标记失败",
+                task_id,
+                eval_total_calls,
+                max_eval_calls,
             )
             await self._save_task(task_service, task)
             return create_failure_result(
@@ -265,9 +265,7 @@ class TaskEvaluateTool(BuiltinTool):
             return await self._evaluate_single(inputs, task_service, task)
         if action == "auto_complete":
             return await self._auto_complete(inputs, task_service, task)
-        return create_failure_result(
-            error=f"不支持的操作: {action}", error_code="INVALID_ACTION"
-        )
+        return create_failure_result(error=f"不支持的操作: {action}", error_code="INVALID_ACTION")
 
     async def _evaluate_single(  # noqa: PLR0911
         self,
@@ -290,11 +288,11 @@ class TaskEvaluateTool(BuiltinTool):
         task_id = task.id
 
         logger.warning(
-            "[TRACE-EVAL] _evaluate_single ENTRY | task=%s | metric_id=%s | "
-            "metric_ids=%s | task_metadata_keys=%s",
-            task_id, metric_id,
+            "[TRACE-EVAL] _evaluate_single ENTRY | task=%s | metric_id=%s | metric_ids=%s | task_metadata_keys=%s",
+            task_id,
+            metric_id,
             self._get_metric_ids(task),
-            list(task.metadata.keys()) if hasattr(task, 'metadata') and task.metadata else "N/A",
+            list(task.metadata.keys()) if hasattr(task, "metadata") and task.metadata else "N/A",
         )
 
         if not metric_id:
@@ -306,9 +304,9 @@ class TaskEvaluateTool(BuiltinTool):
         metric_ids = self._get_metric_ids(task)
         if len(metric_ids) == 1:
             logger.info(
-                "[TaskEvaluate] 单指标任务自动转为完全评估 | "
-                "task_id=%s | metric_count=%d",
-                task_id, len(metric_ids),
+                "[TaskEvaluate] 单指标任务自动转为完全评估 | task_id=%s | metric_count=%d",
+                task_id,
+                len(metric_ids),
             )
             return await self._auto_complete(inputs, task_service, task)
 
@@ -316,6 +314,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         try:
             import asyncio  # noqa: PLC0415
+
             asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
@@ -337,7 +336,9 @@ class TaskEvaluateTool(BuiltinTool):
         except litellm.RateLimitError as exc:
             logger.warning(
                 "[TaskEvaluate] 评估期间 API 限速 | task_id=%s | metric_id=%s: %s",
-                task_id, metric_id, exc,
+                task_id,
+                metric_id,
+                exc,
             )
             return create_failure_result(
                 error=f"评估期间 API 限速: {exc}",
@@ -346,7 +347,9 @@ class TaskEvaluateTool(BuiltinTool):
         except asyncio.TimeoutError:
             logger.warning(
                 "[TaskEvaluate] 单指标评估超时 | task_id=%s | metric_id=%s | timeout=%ss",
-                task_id, metric_id, timeout,
+                task_id,
+                metric_id,
+                timeout,
             )
             return create_failure_result(
                 error=f"评估超时（{timeout}s）: 指标 {metric_id} 执行时间过长",
@@ -354,9 +357,7 @@ class TaskEvaluateTool(BuiltinTool):
             )
         except Exception as e:
             logger.exception("[TaskEvaluate] 单指标评估失败: %s", e)
-            return create_failure_result(
-                error=f"评估失败: {e}", error_code="EVAL_FAILED"
-            )
+            return create_failure_result(error=f"评估失败: {e}", error_code="EVAL_FAILED")
 
         # 注册评估子管道 + 追加历史记录
         self._register_eval_pipelines(task_service, task, result)
@@ -397,9 +398,7 @@ class TaskEvaluateTool(BuiltinTool):
                 "action": "evaluate_single",
                 "result": "partial_pass",
                 "message": (
-                    f"指标 {metric_id} 已通过。"
-                    f"进度：{evaluated}/{len(metric_ids)}，"
-                    f"剩余：{', '.join(remaining)}"
+                    f"指标 {metric_id} 已通过。进度：{evaluated}/{len(metric_ids)}，剩余：{', '.join(remaining)}"
                 ),
             },
         )
@@ -413,48 +412,57 @@ class TaskEvaluateTool(BuiltinTool):
         """自动完成评估（评估任务提交时声明的所有指标）。"""
         logger.warning(
             "[TRACE-EVAL] _auto_complete ENTRY | task=%s | metric_ids=%s",
-            task.id, self._get_metric_ids(task),
+            task.id,
+            self._get_metric_ids(task),
         )
         metric_ids = self._get_metric_ids(task)
         input_params = self._get_input_params(task)
 
         if not metric_ids:
             logger.warning(
-                "[TaskEvaluate] 任务 %s 未声明任何评估指标，跳过评估 | "
-                "直接标记完成",
+                "[TaskEvaluate] 任务 %s 未声明任何评估指标，跳过评估 | 直接标记完成",
                 task.id,
             )
             return await self._complete_task(
-                task_service, task,
-                type("EvalResult", (), {
-                    "task_id": task.id,
-                    "overall_passed": True,
-                    "summary": "未声明评估指标，自动通过",
-                    "results": [],
-                })(),
+                task_service,
+                task,
+                type(
+                    "EvalResult",
+                    (),
+                    {
+                        "task_id": task.id,
+                        "overall_passed": True,
+                        "summary": "未声明评估指标，自动通过",
+                        "results": [],
+                    },
+                )(),
             )
 
         # 跳过已通过的指标，只评估未通过的
         already_passed, remaining_ids = self._get_eval_progress(
-            task, metric_ids,
+            task,
+            metric_ids,
         )
         if not remaining_ids:
             logger.info(
-                "[TaskEvaluate] 所有指标已通过，直接完成任务 | "
-                "task_id=%s | passed=%d/%d",
-                task.id, already_passed, len(metric_ids),
+                "[TaskEvaluate] 所有指标已通过，直接完成任务 | task_id=%s | passed=%d/%d",
+                task.id,
+                already_passed,
+                len(metric_ids),
             )
             return await self._complete_task(
-                task_service, task,
-                type("EvalResult", (), {
-                    "task_id": task.id,
-                    "overall_passed": True,
-                    "summary": (
-                        f"所有 {len(metric_ids)} 个指标均已通过"
-                        f"（来自历史评估记录）"
-                    ),
-                    "results": [],
-                })(),
+                task_service,
+                task,
+                type(
+                    "EvalResult",
+                    (),
+                    {
+                        "task_id": task.id,
+                        "overall_passed": True,
+                        "summary": (f"所有 {len(metric_ids)} 个指标均已通过（来自历史评估记录）"),
+                        "results": [],
+                    },
+                )(),
             )
 
         summary_from_input = inputs.get("summary", "")
@@ -464,13 +472,16 @@ class TaskEvaluateTool(BuiltinTool):
                     p["summary"] = summary_from_input
 
         logger.info(
-            "[TaskEvaluate] 自动评估 | task_id=%s | total=%d | "
-            "already_passed=%d | to_eval=%s",
-            task.id, len(metric_ids), already_passed, remaining_ids,
+            "[TaskEvaluate] 自动评估 | task_id=%s | total=%d | already_passed=%d | to_eval=%s",
+            task.id,
+            len(metric_ids),
+            already_passed,
+            remaining_ids,
         )
 
         try:
             import asyncio  # noqa: PLC0415
+
             asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
@@ -486,9 +497,10 @@ class TaskEvaluateTool(BuiltinTool):
             return await self._handle_evaluation_result(inputs, task_service, task, result)
         except asyncio.TimeoutError:
             logger.warning(
-                "[TaskEvaluate] 自动评估超时 | task_id=%s | "
-                "metrics=%s | timeout=%ss",
-                task.id, remaining_ids, timeout,
+                "[TaskEvaluate] 自动评估超时 | task_id=%s | metrics=%s | timeout=%ss",
+                task.id,
+                remaining_ids,
+                timeout,
             )
             return create_failure_result(
                 error=f"评估超时（{timeout}s）: 指标 {metric_ids} 执行时间过长",
@@ -496,9 +508,7 @@ class TaskEvaluateTool(BuiltinTool):
             )
         except Exception as e:
             logger.exception("[TaskEvaluate] 自动完成评估失败: %s", e)
-            return create_failure_result(
-                error=f"评估失败: {e}", error_code="EVAL_FAILED"
-            )
+            return create_failure_result(error=f"评估失败: {e}", error_code="EVAL_FAILED")
 
     async def _handle_evaluation_result(  # noqa: PLR0912,PLR0915
         self,
@@ -535,7 +545,12 @@ class TaskEvaluateTool(BuiltinTool):
         has_failure = False
         exhausted = False
 
-        _UNRECOVERABLE_PATTERNS = ("command not found", "no such file or directory", "module not found", "is not recognized")  # noqa: N806
+        _UNRECOVERABLE_PATTERNS = (  # noqa: N806
+            "command not found",
+            "no such file or directory",
+            "module not found",
+            "is not recognized",
+        )
 
         for r in eval_result.results:
             mid = r.metric_id
@@ -543,10 +558,7 @@ class TaskEvaluateTool(BuiltinTool):
                 has_failure = True
                 output_str = str(r.evaluator_output or "").lower()
                 message_str = (r.message or "").lower()
-                is_unrecoverable = any(
-                    p in output_str or p in message_str
-                    for p in _UNRECOVERABLE_PATTERNS
-                )
+                is_unrecoverable = any(p in output_str or p in message_str for p in _UNRECOVERABLE_PATTERNS)
                 if is_unrecoverable:
                     retry_counts[mid] = max_retries
                     exhausted = True
@@ -560,9 +572,9 @@ class TaskEvaluateTool(BuiltinTool):
                 prev_count = retry_counts.get(mid, 0)
                 if prev_count > 0:
                     logger.info(
-                        "[TaskEvaluate] 指标 %s 通过，重置连续失败计数 "
-                        "%d → 0 (渐进重试)",
-                        mid, prev_count,
+                        "[TaskEvaluate] 指标 %s 通过，重置连续失败计数 %d → 0 (渐进重试)",
+                        mid,
+                        prev_count,
                     )
                 retry_counts[mid] = 0
 
@@ -591,7 +603,9 @@ class TaskEvaluateTool(BuiltinTool):
             return await self._fail_task(task_service, task, eval_result, max_retries)
         min_remaining = max_retries - min(retry_counts.values())
         eval_total = task.metadata.get("eval_total_calls", 0) if task.metadata else 0
-        max_eval_calls = task.metadata.get("max_eval_calls", _DEFAULT_MAX_EVAL_CALLS) if task.metadata else _DEFAULT_MAX_EVAL_CALLS
+        max_eval_calls = (
+            task.metadata.get("max_eval_calls", _DEFAULT_MAX_EVAL_CALLS) if task.metadata else _DEFAULT_MAX_EVAL_CALLS
+        )
         overall_remaining = max_eval_calls - eval_total
         failed_details = []
         for r in eval_result.results:
@@ -615,9 +629,7 @@ class TaskEvaluateTool(BuiltinTool):
             },
         )
 
-    async def _complete_task(
-        self, task_service: Any, task: Any, eval_result: Any
-    ) -> ToolExecutionResult:
+    async def _complete_task(self, task_service: Any, task: Any, eval_result: Any) -> ToolExecutionResult:
         """评估通过，完成任务。
 
         合并前置策略：对于 worktree 模式的任务，在标记 completed 之前先执行合并，
@@ -638,7 +650,8 @@ class TaskEvaluateTool(BuiltinTool):
             logger.info("[TaskEvaluate] 任务 %s 已完成，跳过状态回写", task.id)
         elif task.status == TaskStatus.FAILED:
             logger.warning(
-                "[TaskEvaluate] 任务 %s 已失败但评估通过，尝试恢复为完成", task.id,
+                "[TaskEvaluate] 任务 %s 已失败但评估通过，尝试恢复为完成",
+                task.id,
             )
             try:
                 eval_data = self._build_result_data(eval_result)
@@ -649,19 +662,16 @@ class TaskEvaluateTool(BuiltinTool):
             merge_error = self._try_merge_before_complete(task)
             if merge_error:
                 logger.error(
-                    "[TaskEvaluate] worktree 合并失败，任务标记为 failed: "
-                    "task_id=%s, error=%s",
-                    task.id, merge_error,
+                    "[TaskEvaluate] worktree 合并失败，任务标记为 failed: task_id=%s, error=%s",
+                    task.id,
+                    merge_error,
                 )
                 try:
                     eval_data = self._build_result_data(eval_result)
                     eval_data["overall_passed"] = False
                     eval_data["merge_failure"] = merge_error
-                    eval_data["summary"] = (
-                        f"评估指标已通过，但 worktree 合并失败: {merge_error}"
-                    )
-                    await task_service.complete_evaluation(
-                        task.id, passed=False, result=eval_data)
+                    eval_data["summary"] = f"评估指标已通过，但 worktree 合并失败: {merge_error}"
+                    await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
                 except Exception as e:
                     logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
                 return create_failure_result(
@@ -701,11 +711,12 @@ class TaskEvaluateTool(BuiltinTool):
         （register_services 注册的是字典里每个独立 key）。
         """
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         lifecycle = get_service_provider().get("workspace_lifecycle_manager")
         if lifecycle is None:
             logger.warning(
-                "[TaskEvaluate] workspace_lifecycle_manager 未注册到 ServiceProvider，"
-                "跳过合并门控 | task_id=%s", task.id,
+                "[TaskEvaluate] workspace_lifecycle_manager 未注册到 ServiceProvider，跳过合并门控 | task_id=%s",
+                task.id,
             )
             return None
         return lifecycle.merge_worktree_before_complete(task.id)
@@ -743,17 +754,14 @@ class TaskEvaluateTool(BuiltinTool):
                 metadata={"eval_data": str(self._build_result_data(eval_result))[:200]},
             )
 
-        failed_metrics = [
-            r.metric_id for r in eval_result.results if not r.passed
-        ]
+        failed_metrics = [r.metric_id for r in eval_result.results if not r.passed]
         return create_success_result(
             data=self._build_result_data(eval_result),
             metadata={
                 "action": "auto_complete",
                 "result": "failed",
                 "message": (
-                    f"评估未通过且重试次数耗尽({max_retries}次)，"
-                    f"任务失败。未通过指标：{', '.join(failed_metrics)}"
+                    f"评估未通过且重试次数耗尽({max_retries}次)，任务失败。未通过指标：{', '.join(failed_metrics)}"
                 ),
             },
         )
@@ -772,7 +780,9 @@ class TaskEvaluateTool(BuiltinTool):
 
     @staticmethod
     def _register_eval_pipelines(
-        task_service: Any, task: Any, eval_result: Any,
+        task_service: Any,
+        task: Any,
+        eval_result: Any,
     ) -> None:
         """将 Agent 型评估产生的子管道注册到根任务子目录。
 
@@ -784,18 +794,16 @@ class TaskEvaluateTool(BuiltinTool):
             root_id = task_service.get_root_task_id(task.id)
             if not root_id:
                 logger.debug(
-                    "[TaskEvaluate] 无 root_id，跳过评估管道注册 | "
-                    "task=%s", task.id,
+                    "[TaskEvaluate] 无 root_id，跳过评估管道注册 | task=%s",
+                    task.id,
                 )
                 return
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
-                logger.warning(
-                    "[TaskEvaluate] execution_record_storage 不可用，"
-                    "跳过评估管道注册"
-                )
+                logger.warning("[TaskEvaluate] execution_record_storage 不可用，跳过评估管道注册")
                 return
             registered = 0
             skipped = 0
@@ -808,14 +816,17 @@ class TaskEvaluateTool(BuiltinTool):
                     skipped += 1
             if registered or skipped:
                 logger.info(
-                    "[TaskEvaluate] 评估管道注册 | task=%s | root=%s | "
-                    "registered=%d | skipped=%d",
-                    task.id, root_id, registered, skipped,
+                    "[TaskEvaluate] 评估管道注册 | task=%s | root=%s | registered=%d | skipped=%d",
+                    task.id,
+                    root_id,
+                    registered,
+                    skipped,
                 )
         except Exception as exc:
             logger.warning(
                 "[TaskEvaluate] 注册评估管道分组失败 | task=%s | error=%s",
-                task.id, exc,
+                task.id,
+                exc,
             )
 
     @staticmethod
@@ -854,12 +865,14 @@ class TaskEvaluateTool(BuiltinTool):
         history = task.metadata.get("evaluation_history", [])
         if not isinstance(history, list):
             history = []
-        history.append({
-            "timestamp": datetime.now().isoformat(),
-            "passed": eval_result.overall_passed,
-            "summary": getattr(eval_result, "summary", ""),
-            "metrics": metrics,
-        })
+        history.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "passed": eval_result.overall_passed,
+                "summary": getattr(eval_result, "summary", ""),
+                "metrics": metrics,
+            }
+        )
         task.metadata["evaluation_history"] = history
 
     def _get_task_service(self) -> Any:
@@ -871,6 +884,7 @@ class TaskEvaluateTool(BuiltinTool):
             TaskService 实例，获取失败返回 None
         """
         from tasks.service_access import get_task_service  # noqa: PLC0415
+
         return get_task_service()
 
     def _create_executor(self, task_service: Any) -> Any:
@@ -897,6 +911,7 @@ class TaskEvaluateTool(BuiltinTool):
             main_loop = asyncio.get_running_loop()
             if main_loop is not None:
                 import threading  # noqa: F401,PLC0415
+
                 main_thread_loop = getattr(asyncio, "_main_loop_ref", None)
                 if main_thread_loop is None:
                     with contextlib.suppress(RuntimeError):
@@ -921,6 +936,7 @@ class TaskEvaluateTool(BuiltinTool):
         通过 ServiceProvider 统一获取。
         """
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         return provider.get("agent_registry")
 
@@ -931,12 +947,14 @@ class TaskEvaluateTool(BuiltinTool):
         通过 ServiceProvider 统一获取，保留从全局注册表模块获取的兜底逻辑。
         """
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         registry = provider.get("tool_registry")
         if registry is not None:
             return registry
         try:
             from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+
             return get_global_tool_registry_sync()
         except Exception:
             return None
@@ -973,7 +991,8 @@ class TaskEvaluateTool(BuiltinTool):
 
     @staticmethod
     def _get_eval_progress(
-        task: Any, metric_ids: list[str],
+        task: Any,
+        metric_ids: list[str],
     ) -> tuple[int, list[str]]:
         """获取评估进度：已通过数量和剩余未通过的指标 ID。
 
@@ -1083,10 +1102,7 @@ class TaskEvaluateTool(BuiltinTool):
                             params[metric_id] = config["input_params"]
                         else:
                             # LLM may put params at top level; filter known non-param keys
-                            params[metric_id] = {
-                                k: v for k, v in config.items()
-                                if k not in _non_param_keys
-                            }
+                            params[metric_id] = {k: v for k, v in config.items() if k not in _non_param_keys}
 
         task_desc = ""
         if hasattr(task, "description") and task.description:
@@ -1140,6 +1156,7 @@ class TaskEvaluateTool(BuiltinTool):
         if not workspace_abs:
             return None
         from pathlib import Path  # noqa: PLC0415
+
         tools_dir = Path(workspace_abs) / "src" / "tools" / "builtin"
         if not tools_dir.exists():
             return None
@@ -1165,10 +1182,12 @@ class TaskEvaluateTool(BuiltinTool):
         metrics = []
         for r in result.results:
             if r.passed:
-                metrics.append({
-                    "metric_id": r.metric_id,
-                    "passed": True,
-                })
+                metrics.append(
+                    {
+                        "metric_id": r.metric_id,
+                        "passed": True,
+                    }
+                )
             else:
                 m: dict[str, Any] = {
                     "metric_id": r.metric_id,
@@ -1226,18 +1245,18 @@ class TaskEvaluateTool(BuiltinTool):
                     if len(tasks) > 1:
                         logger.warning(
                             "[TaskEvaluate] 有 %d 个 %s 任务，使用最新的",
-                            len(tasks), status.value,
+                            len(tasks),
+                            status.value,
                         )
                     latest = max(
                         tasks,
-                        key=lambda t: t.created_at
-                        if hasattr(t, "created_at")
-                        else "",
+                        key=lambda t: t.created_at if hasattr(t, "created_at") else "",
                     )
                     tid = latest.id if hasattr(latest, "id") else latest.get("id")
                     logger.info(
                         "[TaskEvaluate] 推断 task_id=%s (从 %s 任务列表)",
-                        tid, status.value,
+                        tid,
+                        status.value,
                     )
                     return tid
         except Exception as exc:

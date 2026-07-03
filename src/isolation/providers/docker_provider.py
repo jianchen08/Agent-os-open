@@ -46,6 +46,7 @@ class DockerProvider(IsolationProvider):
         # 打爆 daemon（尤其 WSL2 后端，daemon GIL/锁耗尽会假死冻死整个事件循环）。
         # 默认 4，可经 config.max_docker_concurrency 覆盖。
         import asyncio  # noqa: PLC0415
+
         self._max_docker_concurrency = int(self._config.get("max_docker_concurrency", 4))
         self._docker_sem = asyncio.Semaphore(self._max_docker_concurrency)
         # WSL docker 模式缓存：DOCKER_HOST 指向 WSL2/TCP 时为 True（需 Windows→WSL 路径转换）
@@ -54,14 +55,13 @@ class DockerProvider(IsolationProvider):
     def _is_wsl_docker(self) -> bool:
         """判断 docker daemon 是否在 WSL2 Linux 里（非 Docker Desktop）。"""
         import os  # noqa: PLC0415
+
         if self._wsl_docker_cache is not None:
             return self._wsl_docker_cache
         docker_host = os.environ.get("DOCKER_HOST", "")
         # 指向 tcp:// 或 unix:// = 远程/WSL daemon；npipe/空 = Docker Desktop
         self._wsl_docker_cache = bool(docker_host) and (
-            docker_host.startswith("tcp://")
-            or docker_host.startswith("unix://")
-            or docker_host.startswith("ssh://")
+            docker_host.startswith("tcp://") or docker_host.startswith("unix://") or docker_host.startswith("ssh://")
         )
         return self._wsl_docker_cache
 
@@ -73,7 +73,8 @@ class DockerProvider(IsolationProvider):
             return workspace
         # Windows 路径 → WSL 路径: D:\myproject\xxx -> /mnt/d/myproject/xxx
         import re  # noqa: PLC0415
-        m = re.match(r'^([A-Za-z]):[\\/](.*)$', workspace.replace('\\', '/'))
+
+        m = re.match(r"^([A-Za-z]):[\\/](.*)$", workspace.replace("\\", "/"))
         if not m:
             return workspace  # 非标准 Windows 路径，原样返回
         drive = m.group(1).lower()
@@ -92,6 +93,7 @@ class DockerProvider(IsolationProvider):
         try:
             # 用同步 subprocess 替代 asyncio subprocess（Windows 兼容性）
             import subprocess as _sp  # noqa: PLC0415
+
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
                 None,
@@ -167,9 +169,12 @@ class DockerProvider(IsolationProvider):
                     context.task_id,
                 )
                 return self._make_error_environment(
-                    context, now, "工作空间为空，无法挂载到容器",
+                    context,
+                    now,
+                    "工作空间为空，无法挂载到容器",
                 )
             from pathlib import Path  # noqa: PLC0415
+
             # 路径校验：
             # - Docker Desktop(daemon 在 Windows): 校验原 Windows 路径
             # - WSL docker(daemon 在 Linux): Agent 在 Windows,无法用 Path() 校验
@@ -180,10 +185,13 @@ class DockerProvider(IsolationProvider):
                 if check_path and not Path(check_path).exists():
                     logger.error(
                         "[DockerProvider] 拒绝创建容器：工作空间路径不存在 | task=%s | path=%s",
-                        context.task_id, check_path,
+                        context.task_id,
+                        check_path,
                     )
                     return self._make_error_environment(
-                        context, now, f"工作空间路径不存在: {check_path}",
+                        context,
+                        now,
+                        f"工作空间路径不存在: {check_path}",
                     )
 
         # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）
@@ -222,30 +230,29 @@ class DockerProvider(IsolationProvider):
         self._environments[env_id] = env
         logger.info(
             "[DockerProvider] 容器已创建 | id=%s | name=%s",
-            container_id[:12], container_name,
+            container_id[:12],
+            container_name,
         )
         return env
 
     async def _create_one(self, run_args: list[str]) -> tuple[str, str]:
         """执行 docker create。"""
-        rc, stdout, stderr = await self._run_cmd(
-            ["docker", "create", *run_args], timeout=30
-        )
+        rc, stdout, stderr = await self._run_cmd(["docker", "create", *run_args], timeout=30)
         if rc != 0:
             return "", stderr.decode("utf-8", errors="replace")
         return stdout.decode("utf-8", errors="replace").strip(), ""
 
     async def _start_one(self, container_id: str) -> tuple[bool, str]:
         """执行 docker start。"""
-        rc, _, stderr = await self._run_cmd(
-            ["docker", "start", container_id], timeout=15
-        )
+        rc, _, stderr = await self._run_cmd(["docker", "start", container_id], timeout=15)
         if rc == 0:
             return True, ""
         return False, stderr.decode("utf-8", errors="replace")
 
     async def _create_and_start(
-        self, name: str, run_args: list[str],
+        self,
+        name: str,
+        run_args: list[str],
     ) -> tuple[str, str]:
         """创建并启动容器；start 失败时删除卡死容器并重建重试一次。"""
         container_id, err = await self._create_one(run_args)
@@ -259,7 +266,9 @@ class DockerProvider(IsolationProvider):
         # start 失败：删除卡死容器（释放脏挂载路径）后重建重试一次
         logger.warning(
             "[DockerProvider] 容器启动失败，删除后重建重试 | name=%s | id=%s | error=%s",
-            name, container_id[:12], start_err,
+            name,
+            container_id[:12],
+            start_err,
         )
         await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
 
@@ -274,7 +283,8 @@ class DockerProvider(IsolationProvider):
         await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
         logger.error(
             "[DockerProvider] 容器启动重试仍失败 | name=%s | error=%s",
-            name, start_err or err,
+            name,
+            start_err or err,
         )
         return "", start_err or err
 
@@ -289,38 +299,47 @@ class DockerProvider(IsolationProvider):
             try:
                 await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
                 logger.info(
-                    "[DockerProvider] 容器已销毁 | id=%s", container_id[:12],
+                    "[DockerProvider] 容器已销毁 | id=%s",
+                    container_id[:12],
                 )
             except Exception as e:
                 logger.warning(
                     "[DockerProvider] 销毁容器失败 | id=%s | error=%s",
-                    container_id[:12], e,
+                    container_id[:12],
+                    e,
                 )
 
         self._environments.pop(env_id, None)
 
     async def execute_in_environment(
-        self, env_id: str, operation: dict[str, Any],
+        self,
+        env_id: str,
+        operation: dict[str, Any],
     ) -> ExecutionResult:
         """在 Docker 容器中执行操作。"""
         env = self._environments.get(env_id)
         if not env:
             return ExecutionResult(
-                success=False, output=None, error=f"环境不存在: {env_id}",
+                success=False,
+                output=None,
+                error=f"环境不存在: {env_id}",
             )
 
         # 创建失败的环境（如工作空间未挂载校验未过）直接返回其错误，
         # 不再尝试执行——否则会以模糊的“容器ID不存在”掩盖真实原因。
         if env.status == EnvironmentStatus.ERROR.value:
             return ExecutionResult(
-                success=False, output=None,
+                success=False,
+                output=None,
                 error=env.provider_info.get("error", "容器环境处于错误状态"),
             )
 
         container_id = env.provider_info.get("container_id")
         if not container_id:
             return ExecutionResult(
-                success=False, output=None, error="容器ID不存在",
+                success=False,
+                output=None,
+                error="容器ID不存在",
             )
 
         op_type = operation.get("type")
@@ -330,7 +349,9 @@ class DockerProvider(IsolationProvider):
         if op_type == "file_operation":
             return await self._file_op_in_container(container_id, operation)
         return ExecutionResult(
-            success=False, output=None, error=f"不支持的操作类型: {op_type}",
+            success=False,
+            output=None,
+            error=f"不支持的操作类型: {op_type}",
         )
 
     async def get_environment_status(self, env_id: str) -> EnvironmentStatus:
@@ -362,30 +383,39 @@ class DockerProvider(IsolationProvider):
             return EnvironmentStatus.ERROR
 
     def _build_run_args(
-        self, container_name: str, context: IsolationContext,
+        self,
+        container_name: str,
+        context: IsolationContext,
     ) -> list[str]:
         """构建 docker create 命令参数（含 IMAGE 与 COMMAND）。"""
         args = [
-            "--name", container_name,
+            "--name",
+            container_name,
             # --init: 使用 tini 作为 PID 1，回收 docker exec 产生的僵尸进程，
             # 避免僵尸累积逼近 --pids-limit 导致容器被杀
             "--init",
             # 资源约束：单容器配额 = (宿主机一半) / max_environments，
             # 由 hardware_profile 动态计算，满载时所有容器总和 = 宿主机一半。
-            "--cpus", self._cpu_limit,
-            "--memory", self._memory_limit,
+            "--cpus",
+            self._cpu_limit,
+            "--memory",
+            self._memory_limit,
             # swap = memory，禁止容器通过 swap 超额使用内存
-            "--memory-swap", self._memory_swap,
+            "--memory-swap",
+            self._memory_swap,
             # 进程数上限，防 fork 炸弹吃光系统进程表
-            "--pids-limit", str(self._pids_limit),
-            "--network", self._network_mode,
+            "--pids-limit",
+            str(self._pids_limit),
+            "--network",
+            self._network_mode,
         ]
         # 发布端口(system-issue #3 escape hatch)：把容器端口映射到宿主。
         # 见 __init__ 中 self._publish_ports 的说明。
         for port_spec in self._publish_ports:
             args.extend(["-p", str(port_spec)])
         args += [
-            "-i", "-t",
+            "-i",
+            "-t",
         ]
 
         # 挂载工作目录（WSL docker 时用转换后的 /mnt/x 路径）
@@ -408,9 +438,7 @@ class DockerProvider(IsolationProvider):
         import subprocess as _sp  # noqa: PLC0415
 
         try:
-            rc, _, _ = await self._run_cmd(
-                ["docker", "image", "inspect", self._image], timeout=5
-            )
+            rc, _, _ = await self._run_cmd(["docker", "image", "inspect", self._image], timeout=5)
             if rc == 0:
                 return
 
@@ -423,14 +451,17 @@ class DockerProvider(IsolationProvider):
                 None,
                 lambda: _sp.run(  # noqa: PLW1510
                     ["docker", "image", "prune", "-f"],
-                    capture_output=True, timeout=30,
+                    capture_output=True,
+                    timeout=30,
                 ),
             )
         except Exception as e:
             logger.warning("[DockerProvider] 镜像检查/拉取失败 | error=%s", e)
 
     async def _exec_in_container(
-        self, container_id: str, operation: dict[str, Any],
+        self,
+        container_id: str,
+        operation: dict[str, Any],
     ) -> ExecutionResult:
         """在容器中执行命令。"""
         command = operation.get("command", "")
@@ -442,10 +473,14 @@ class DockerProvider(IsolationProvider):
 
         try:
             exec_args = [
-                "docker", "exec",
-                "-w", working_dir,
+                "docker",
+                "exec",
+                "-w",
+                working_dir,
                 container_id,
-                "sh", "-c", command,
+                "sh",
+                "-c",
+                command,
             ]
 
             rc, stdout, stderr = await self._run_cmd(exec_args, timeout=timeout)
@@ -468,17 +503,21 @@ class DockerProvider(IsolationProvider):
 
         except TimeoutError:
             return ExecutionResult(
-                success=False, output=None,
+                success=False,
+                output=None,
                 error=f"命令执行超时（{timeout}秒）",
             )
         except Exception as e:
             return ExecutionResult(
-                success=False, output=None,
+                success=False,
+                output=None,
                 error=f"执行命令失败: {e}",
             )
 
     async def _file_op_in_container(
-        self, container_id: str, operation: dict[str, Any],
+        self,
+        container_id: str,
+        operation: dict[str, Any],
     ) -> ExecutionResult:
         """在容器中执行文件操作。"""
         op = operation.get("operation")
@@ -503,41 +542,47 @@ class DockerProvider(IsolationProvider):
                 return ExecutionResult(success=True, output={"exists": exists})
 
             return ExecutionResult(
-                success=False, output=None,
+                success=False,
+                output=None,
                 error=f"不支持的文件操作: {op}",
             )
 
         except Exception as e:
             return ExecutionResult(
-                success=False, output=None,
+                success=False,
+                output=None,
                 error=f"文件操作失败: {e}",
             )
 
     async def _read_container_file(
-        self, container_id: str, path: str,
+        self,
+        container_id: str,
+        path: str,
     ) -> str:
         """从容器中读取文件内容。"""
-        _, stdout, _ = await self._run_cmd(
-            ["docker", "exec", container_id, "cat", path], timeout=10
-        )
+        _, stdout, _ = await self._run_cmd(["docker", "exec", container_id, "cat", path], timeout=10)
         return stdout.decode("utf-8", errors="replace")
 
     async def _write_container_file(
-        self, container_id: str, path: str, content: str,
+        self,
+        container_id: str,
+        path: str,
+        content: str,
     ) -> None:
         """向容器中写入文件。"""
         # 确保目录存在
         dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
-        await self._run_cmd(
-            ["docker", "exec", container_id, "mkdir", "-p", dir_path], timeout=10
-        )
+        await self._run_cmd(["docker", "exec", container_id, "mkdir", "-p", dir_path], timeout=10)
 
         # 写入文件
         encoded = json.dumps(content)
         await self._run_cmd(
             [
-                "docker", "exec", container_id,
-                "python3", "-c",
+                "docker",
+                "exec",
+                container_id,
+                "python3",
+                "-c",
                 f"import json; open('{path}','w').write(json.loads({encoded}))",
             ],
             timeout=10,

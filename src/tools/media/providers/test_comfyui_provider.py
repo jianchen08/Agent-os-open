@@ -134,20 +134,15 @@ class TestGeneratePromptMode:
         provider = provider_with_temp_dir
 
         # Mock ComfyUI API 的完整流程
-        with patch.object(provider, "_submit_workflow") as mock_submit, \
-             patch.object(provider, "_poll_result") as mock_poll, \
-             patch.object(provider, "_download_image") as mock_download:
-
+        with (
+            patch.object(provider, "_submit_workflow") as mock_submit,
+            patch.object(provider, "_poll_result") as mock_poll,
+            patch.object(provider, "_download_image") as mock_download,
+        ):
             mock_submit.return_value = "test-prompt-id"
             mock_poll.return_value = {
                 "status": "success",
-                "outputs": {
-                    "9": {
-                        "images": [
-                            {"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"}
-                        ]
-                    }
-                },
+                "outputs": {"9": {"images": [{"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"}]}},
             }
             # 模拟下载图片：创建一个假的 PNG 文件
             fake_png = temp_output_dir / "ComfyUI_00001_.png"
@@ -170,20 +165,15 @@ class TestGeneratePromptMode:
         """generate 应将参数正确传递到工作流模板。"""
         provider = provider_with_temp_dir
 
-        with patch.object(provider, "_submit_workflow") as mock_submit, \
-             patch.object(provider, "_poll_result") as mock_poll, \
-             patch.object(provider, "_download_image") as mock_download:
-
+        with (
+            patch.object(provider, "_submit_workflow") as mock_submit,
+            patch.object(provider, "_poll_result") as mock_poll,
+            patch.object(provider, "_download_image") as mock_download,
+        ):
             mock_submit.return_value = "test-prompt-id"
             mock_poll.return_value = {
                 "status": "success",
-                "outputs": {
-                    "9": {
-                        "images": [
-                            {"filename": "test.png", "subfolder": "", "type": "output"}
-                        ]
-                    }
-                },
+                "outputs": {"9": {"images": [{"filename": "test.png", "subfolder": "", "type": "output"}]}},
             }
             fake_png = temp_output_dir / "test.png"
             fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -218,20 +208,15 @@ class TestGeneratePromptMode:
         """返回的 MediaResult metadata 应包含 prompt、size、seed 等信息。"""
         provider = provider_with_temp_dir
 
-        with patch.object(provider, "_submit_workflow") as mock_submit, \
-             patch.object(provider, "_poll_result") as mock_poll, \
-             patch.object(provider, "_download_image") as mock_download:
-
+        with (
+            patch.object(provider, "_submit_workflow") as mock_submit,
+            patch.object(provider, "_poll_result") as mock_poll,
+            patch.object(provider, "_download_image") as mock_download,
+        ):
             mock_submit.return_value = "test-id"
             mock_poll.return_value = {
                 "status": "success",
-                "outputs": {
-                    "9": {
-                        "images": [
-                            {"filename": "test.png", "subfolder": "", "type": "output"}
-                        ]
-                    }
-                },
+                "outputs": {"9": {"images": [{"filename": "test.png", "subfolder": "", "type": "output"}]}},
             }
             fake_png = temp_output_dir / "test.png"
             fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -265,20 +250,15 @@ class TestGenerateWorkflowMode:
         """使用 workflow_template 参数时应加载对应模板。"""
         provider = provider_with_temp_dir
 
-        with patch.object(provider, "_submit_workflow") as mock_submit, \
-             patch.object(provider, "_poll_result") as mock_poll, \
-             patch.object(provider, "_download_image") as mock_download:
-
+        with (
+            patch.object(provider, "_submit_workflow") as mock_submit,
+            patch.object(provider, "_poll_result") as mock_poll,
+            patch.object(provider, "_download_image") as mock_download,
+        ):
             mock_submit.return_value = "test-id"
             mock_poll.return_value = {
                 "status": "success",
-                "outputs": {
-                    "9": {
-                        "images": [
-                            {"filename": "test.png", "subfolder": "", "type": "output"}
-                        ]
-                    }
-                },
+                "outputs": {"9": {"images": [{"filename": "test.png", "subfolder": "", "type": "output"}]}},
             }
             fake_png = temp_output_dir / "test.png"
             fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -301,9 +281,10 @@ class TestGenerateErrors:
         """轮询超时应抛出异常。"""
         provider = provider_with_temp_dir
 
-        with patch.object(provider, "_submit_workflow") as mock_submit, \
-             patch.object(provider, "_poll_result") as mock_poll:
-
+        with (
+            patch.object(provider, "_submit_workflow") as mock_submit,
+            patch.object(provider, "_poll_result") as mock_poll,
+        ):
             mock_submit.return_value = "test-id"
             mock_poll.side_effect = TimeoutError("ComfyUI generation timed out after 120 seconds")
 
@@ -339,9 +320,16 @@ class TestWorkflowTemplateLoading:
     def test_replace_template_placeholders(self, provider: ComfyUIProvider) -> None:
         """模板占位符应被正确替换。"""
         template_str = '{"seed": {{seed}}, "prompt": "{{prompt}}"}'
-        params = {"seed": 42, "prompt": "a cat", "width": 512, "height": 512,
-                  "steps": 20, "cfg_scale": 7.0, "negative_prompt": "",
-                  "checkpoint": "model.safetensors"}
+        params = {
+            "seed": 42,
+            "prompt": "a cat",
+            "width": 512,
+            "height": 512,
+            "steps": 20,
+            "cfg_scale": 7.0,
+            "negative_prompt": "",
+            "checkpoint": "model.safetensors",
+        }
 
         result = provider._render_template(template_str, params)
         parsed = json.loads(result)
@@ -379,8 +367,12 @@ class TestGetToolDefinition:
         properties = tool_def.input_schema["properties"]
 
         optional_params = [
-            "negative_prompt", "width", "height",
-            "style", "seed", "workflow_template",
+            "negative_prompt",
+            "width",
+            "height",
+            "style",
+            "seed",
+            "workflow_template",
         ]
         for param in optional_params:
             assert param in properties, f"缺少可选参数: {param}"

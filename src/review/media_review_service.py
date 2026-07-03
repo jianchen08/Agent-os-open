@@ -96,13 +96,9 @@ class MediaReviewService:
         cfg = config or self._default_config
 
         if media_type == "image":
-            return await asyncio.to_thread(
-                ImageReviewer.review, file_path, cfg
-            )
+            return await asyncio.to_thread(ImageReviewer.review, file_path, cfg)
         if media_type == "video":
-            return await asyncio.to_thread(
-                VideoReviewer.review, file_path, cfg
-            )
+            return await asyncio.to_thread(VideoReviewer.review, file_path, cfg)
 
         raise ValueError(f"不支持的媒体类型: {media_type}，仅支持 'image' 和 'video'")
 
@@ -133,18 +129,22 @@ class MediaReviewService:
             try:
                 artifact_data = await storage.load(artifact_id)
                 if artifact_data is None:
-                    results.append({
-                        "artifact_id": artifact_id,
-                        "error": f"制品不存在: {artifact_id}",
-                    })
+                    results.append(
+                        {
+                            "artifact_id": artifact_id,
+                            "error": f"制品不存在: {artifact_id}",
+                        }
+                    )
                     continue
 
                 file_path = artifact_data.get("file_path")
                 if not file_path:
-                    results.append({
-                        "artifact_id": artifact_id,
-                        "error": f"制品缺少 file_path: {artifact_id}",
-                    })
+                    results.append(
+                        {
+                            "artifact_id": artifact_id,
+                            "error": f"制品缺少 file_path: {artifact_id}",
+                        }
+                    )
                     continue
 
                 # 确定 media_type：优先使用显式指定，否则推断
@@ -153,36 +153,44 @@ class MediaReviewService:
                     try:
                         media_type = _infer_media_type(file_path)
                     except ValueError:
-                        results.append({
-                            "artifact_id": artifact_id,
-                            "error": f"无法推断媒体类型: {file_path}",
-                        })
+                        results.append(
+                            {
+                                "artifact_id": artifact_id,
+                                "error": f"无法推断媒体类型: {file_path}",
+                            }
+                        )
                         continue
 
                 review_result = await self.review_media(file_path, media_type)
 
-                results.append({
-                    "artifact_id": artifact_id,
-                    "media_type": media_type,
-                    "file_path": file_path,
-                    **review_result.to_dict(),
-                })
+                results.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "media_type": media_type,
+                        "file_path": file_path,
+                        **review_result.to_dict(),
+                    }
+                )
 
             except FileNotFoundError as exc:
-                results.append({
-                    "artifact_id": artifact_id,
-                    "error": f"文件不存在: {exc}",
-                })
+                results.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "error": f"文件不存在: {exc}",
+                    }
+                )
             except Exception as exc:
                 logger.error(
                     "[MediaReviewService] 制品审阅失败 | artifact_id=%s | error=%s",
                     artifact_id,
                     exc,
                 )
-                results.append({
-                    "artifact_id": artifact_id,
-                    "error": str(exc),
-                })
+                results.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "error": str(exc),
+                    }
+                )
 
         return results
 
@@ -260,9 +268,7 @@ class MediaReviewService:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _get_image_metadata(
-        file_path: str, base: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _get_image_metadata(file_path: str, base: dict[str, Any]) -> dict[str, Any]:
         """提取图片元数据并合并到 base 字典。
 
         Args:
@@ -288,6 +294,7 @@ class MediaReviewService:
                 if raw_exif:
                     for tag_id, value in raw_exif.items():
                         from PIL.ExifTags import Base as ExifBase  # noqa: PLC0415
+
                         tag_name = ExifBase(tag_id).name
                         if isinstance(value, bytes):
                             continue
@@ -295,13 +302,15 @@ class MediaReviewService:
             except Exception:
                 pass
 
-            base.update({
-                "format": fmt,
-                "width": width,
-                "height": height,
-                "aspect_ratio": aspect_ratio,
-                "exif": exif,
-            })
+            base.update(
+                {
+                    "format": fmt,
+                    "width": width,
+                    "height": height,
+                    "aspect_ratio": aspect_ratio,
+                    "exif": exif,
+                }
+            )
         except Exception as exc:
             logger.warning(
                 "[MediaReviewService] 图片元数据提取失败 | path=%s | error=%s",
@@ -313,9 +322,7 @@ class MediaReviewService:
         return base
 
     @staticmethod
-    def _get_video_metadata(
-        file_path: str, base: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _get_video_metadata(file_path: str, base: dict[str, Any]) -> dict[str, Any]:
         """提取视频元数据并合并到 base 字典。
 
         Args:
@@ -331,12 +338,14 @@ class MediaReviewService:
             base["error"] = "无法解析视频文件"
             return base
 
-        base.update({
-            "format": metadata.get("format", ""),
-            "duration_seconds": metadata.get("duration_seconds", 0.0),
-            "width": metadata.get("width", 0),
-            "height": metadata.get("height", 0),
-            "fps": metadata.get("fps", 0.0),
-            "codec": metadata.get("codec", ""),
-        })
+        base.update(
+            {
+                "format": metadata.get("format", ""),
+                "duration_seconds": metadata.get("duration_seconds", 0.0),
+                "width": metadata.get("width", 0),
+                "height": metadata.get("height", 0),
+                "fps": metadata.get("fps", 0.0),
+                "codec": metadata.get("codec", ""),
+            }
+        )
         return base

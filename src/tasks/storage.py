@@ -110,7 +110,8 @@ class TaskStorage:
             if current_parent in visited:
                 logger.warning(
                     "检测到 parent_task_id 循环: %s, 截断使用 %s",
-                    visited, current_parent,
+                    visited,
+                    current_parent,
                 )
                 break
             visited.add(current_parent)
@@ -221,9 +222,9 @@ class TaskStorage:
         # 否则 API 层 TaskResponse.description（pydantic 强制 str）校验失败。
         raw_desc = data.get("description", "")
         if not isinstance(raw_desc, str):
-            data["description"] = "\n".join(
-                str(item) for item in raw_desc
-            ) if isinstance(raw_desc, (list, tuple)) else str(raw_desc)
+            data["description"] = (
+                "\n".join(str(item) for item in raw_desc) if isinstance(raw_desc, (list, tuple)) else str(raw_desc)
+            )
 
         if isinstance(data.get("status"), str):
             data["status"] = TaskStatus(data["status"])

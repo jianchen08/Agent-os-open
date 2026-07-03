@@ -1,4 +1,4 @@
-﻿"""
+"""
 工具模块接口定义
 
 暴露接口：
@@ -296,9 +296,7 @@ class IToolRegistry(ABC):
         """设置同步服务"""
 
     @abstractmethod
-    def configure_unload_policy(
-        self, max_tools: int = 100, unload_threshold: int = 20
-    ) -> None:
+    def configure_unload_policy(self, max_tools: int = 100, unload_threshold: int = 20) -> None:
         """配置工具卸载策略"""
 
     @abstractmethod

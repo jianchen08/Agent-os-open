@@ -24,15 +24,14 @@ class ToolCacheConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="是否启用缓存")
     default_ttl: int = Field(default=300, description="默认 TTL（秒）")
-    tools: dict[str, dict[str, Any]] = Field(
-        default_factory=dict, description="按工具配置"
-    )
+    tools: dict[str, dict[str, Any]] = Field(default_factory=dict, description="按工具配置")
 
     @classmethod
     def load_from_file(cls, path: str = "config/builtin_tools_config.yaml"):
         """从配置文件加载（通过 ConfigCenter 统一缓存）"""
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             rel = path.replace("config/", "", 1) if path.startswith("config/") else path
             data = get_config_center().get(rel) or {}
         except Exception:
@@ -99,8 +98,12 @@ class ToolCache:
         """规范化输入参数，移除无关字段，提高缓存命中率。"""
         normalized: dict[str, Any] = {}
         skip_keys = {
-            "timestamp", "request_id", "session_id",
-            "user_id", "tool_call_id", "execution_id",
+            "timestamp",
+            "request_id",
+            "session_id",
+            "user_id",
+            "tool_call_id",
+            "execution_id",
         }
         for key, value in inputs.items():
             if key in skip_keys:
@@ -134,9 +137,7 @@ class ToolCache:
 
         return not _contains_sensitive_info(inputs)
 
-    async def get_cached_result(
-        self, tool_name: str, inputs: dict[str, Any]
-    ) -> ToolExecutionResult | None:
+    async def get_cached_result(self, tool_name: str, inputs: dict[str, Any]) -> ToolExecutionResult | None:
         """获取缓存的结果。"""
         if not self._cache_config.is_cacheable(tool_name):
             return None

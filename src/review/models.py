@@ -283,11 +283,7 @@ class MediaReviewConfig:
     image_max_width: int = 7680
     image_min_height: int = 1
     image_max_height: int = 4320
-    allowed_image_formats: list[str] = field(
-        default_factory=lambda: list(_DEFAULT_IMAGE_FORMATS)
-    )
+    allowed_image_formats: list[str] = field(default_factory=lambda: list(_DEFAULT_IMAGE_FORMATS))
     video_min_duration: float = 0.0
     video_max_duration: float = 3600.0
-    allowed_video_formats: list[str] = field(
-        default_factory=lambda: list(_DEFAULT_VIDEO_FORMATS)
-    )
+    allowed_video_formats: list[str] = field(default_factory=lambda: list(_DEFAULT_VIDEO_FORMATS))

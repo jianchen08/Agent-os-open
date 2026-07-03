@@ -132,9 +132,9 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
         # 追加面向 LLM 的提示无意义。直接清除，由 error_check 路由决策接管。
         if error_type != "bad_request":
             logger.warning(
-                "LLM error recovery: %s detected, "
-                "skipping hint (LLM cannot fix this) | error=%s",
-                error_type, error_msg[:200],
+                "LLM error recovery: %s detected, skipping hint (LLM cannot fix this) | error=%s",
+                error_type,
+                error_msg[:200],
             )
             return OutputResult(state_updates={"llm_error_info": None})
 
@@ -145,8 +145,7 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
         # 也修不了，喂进去只会污染对话历史。不喂，清除错误信息由 error_check 接管。
         if not _is_bad_request_fixable(error_msg):
             logger.info(
-                "LLM error recovery: bad_request 非可修复类型，跳过提示"
-                "（不喂 LLM） | error=%s",
+                "LLM error recovery: bad_request 非可修复类型，跳过提示（不喂 LLM） | error=%s",
                 error_msg[:200],
             )
             return OutputResult(state_updates={"llm_error_info": None})
@@ -160,62 +159,54 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
         # - 不能在 assistant(tool_calls) 和 tool 之间插入 user 消息
         # 因此根据最后一条消息的角色决定如何追加错误提示
         if not messages:
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"[系统错误] 上一次 LLM 调用失败：{error_msg[:300]}\n"
-                    f"建议：{hint}"
-                ),
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (f"[系统错误] 上一次 LLM 调用失败：{error_msg[:300]}\n建议：{hint}"),
+                }
+            )
         elif messages[-1].get("role") == "tool":
             # 合并到 tool 消息，保持 assistant(tool_calls) → tool* 序列完整
             last_msg = dict(messages[-1])
             original = last_msg.get("content", "")
-            last_msg["content"] = (
-                f"{original}\n\n"
-                f"[系统提示] 上一次 LLM 调用失败：{error_msg[:300]}\n"
-                f"建议：{hint}"
-            )
+            last_msg["content"] = f"{original}\n\n[系统提示] 上一次 LLM 调用失败：{error_msg[:300]}\n建议：{hint}"
             messages[-1] = last_msg
-        elif (
-            messages[-1].get("role") == "assistant"
-            and messages[-1].get("tool_calls")
-        ):
+        elif messages[-1].get("role") == "assistant" and messages[-1].get("tool_calls"):
             # assistant 带 tool_calls 但还没收到 tool 结果
             # 不能插入 user 消息，合并到 assistant 消息的 content 中
             last_msg = dict(messages[-1])
             original = last_msg.get("content") or ""
             last_msg["content"] = (
-                f"{original}\n\n"
-                f"[系统提示] 上一次 LLM 调用失败：{error_msg[:300]}\n"
-                f"建议：{hint}"
+                f"{original}\n\n[系统提示] 上一次 LLM 调用失败：{error_msg[:300]}\n建议：{hint}"
                 if original
-                else (
-                    f"[系统提示] 上一次 LLM 调用失败：{error_msg[:300]}\n"
-                    f"建议：{hint}"
-                )
+                else (f"[系统提示] 上一次 LLM 调用失败：{error_msg[:300]}\n建议：{hint}")
             )
             messages[-1] = last_msg
         else:
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
-                    f"错误信息：{error_msg[:500]}\n\n"
-                    f"建议：{hint}"
-                ),
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
+                        f"错误信息：{error_msg[:500]}\n\n"
+                        f"建议：{hint}"
+                    ),
+                }
+            )
 
         logger.info(
             "LLM error recovery: appended hint for error_type=%s | error=%s",
-            error_type, error_msg[:200],
+            error_type,
+            error_msg[:200],
         )
 
         # 清除错误信息，避免重复处理
-        return OutputResult(state_updates={
-            "messages": messages,
-            "llm_error_info": None,
-        })
+        return OutputResult(
+            state_updates={
+                "messages": messages,
+                "llm_error_info": None,
+            }
+        )
 
     @staticmethod
     def _build_llm_error_hint(error_msg: str) -> str:  # noqa: PLR0911
@@ -230,10 +221,7 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
         error_lower = error_msg.lower()
         # MiniMax (2013) tool id not found — 消息序列被破坏，不是参数问题
         if "tool id" in error_lower and "not found" in error_lower:
-            return (
-                "API 报告工具调用序列异常。"
-                "请重新发起工具调用，不要继续之前的调用链。"
-            )
+            return "API 报告工具调用序列异常。请重新发起工具调用，不要继续之前的调用链。"
         if "invalid function arguments" in error_lower or "invalid params" in error_lower:
             return (
                 "你上一次的工具调用参数 JSON 格式无效，可能是因为参数内容过长被截断。"
@@ -244,29 +232,16 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
             )
         if "timeout" in error_lower or "timed out" in error_lower:
             # 区分 stream chunk 超时（服务端无响应）和总调用超时（输出过长）
-            is_stream_chunk_timeout = (
-                "no data for" in error_lower
-                or "stream chunk timeout" in error_lower
-            )
+            is_stream_chunk_timeout = "no data for" in error_lower or "stream chunk timeout" in error_lower
             if is_stream_chunk_timeout:
                 return (
                     "API 服务端长时间未返回数据（连接超时）。"
                     "这通常是服务端或网络临时问题，请直接重试当前操作。"
                     "如果持续失败，请稍等片刻后再试。"
                 )
-            return (
-                "上一次 LLM 调用超时。请尝试简化你的请求或缩短输出内容。"
-            )
+            return "上一次 LLM 调用超时。请尝试简化你的请求或缩短输出内容。"
         if "rate limit" in error_lower or "429" in error_lower:
-            return (
-                "API 调用频率超限，请稍后重试。你可以先输出一段文本回复，下一轮再尝试工具调用。"
-            )
+            return "API 调用频率超限，请稍后重试。你可以先输出一段文本回复，下一轮再尝试工具调用。"
         if "context_length" in error_lower or "token limit" in error_lower or "max_tokens" in error_lower:
-            return (
-                "对话上下文过长，已超出模型限制。请尝试完成当前任务并调用 task_evaluate 结束，"
-                "或者精简后续操作步骤。"
-            )
-        return (
-            "请检查你的操作是否正确，调整后重试。"
-            "如果多次失败，请尝试换一种方式完成任务。"
-        )
+            return "对话上下文过长，已超出模型限制。请尝试完成当前任务并调用 task_evaluate 结束，或者精简后续操作步骤。"
+        return "请检查你的操作是否正确，调整后重试。如果多次失败，请尝试换一种方式完成任务。"

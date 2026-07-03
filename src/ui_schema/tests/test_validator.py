@@ -331,8 +331,7 @@ class TestValidateAll:
     def test_validate_all_all_valid(self) -> None:
         """所有 Schema 有效时结果应为空字典。"""
         schemas = [
-            _make_schema(identity=ModuleIdentity(id=f"mod{i}", name=f"Mod{i}", version="1.0.0"))
-            for i in range(3)
+            _make_schema(identity=ModuleIdentity(id=f"mod{i}", name=f"Mod{i}", version="1.0.0")) for i in range(3)
         ]
         validator = SchemaValidator()
         results = validator.validate_all(schemas)
@@ -363,5 +362,3 @@ class TestValidatorComprehensive:
         validator = SchemaValidator()
         errors = validator.validate(schema)
         assert len(errors) >= 3  # 至少: id 空、name 空、api 格式、widget 白名单
-
-

@@ -30,18 +30,14 @@ from tools.types import (
 _DIFF_CONTENT_MAX = 100_000
 
 
-def _diff_extras(
-    old_content: str | None, new_content: str, *, include_content: bool = True
-) -> dict[str, Any]:
+def _diff_extras(old_content: str | None, new_content: str, *, include_content: bool = True) -> dict[str, Any]:
     """计算 old→new 的增删行数，并在体积允许时附带原文供前端渲染 diff。
 
     - old_content 为 None 表示无法获取旧内容（如 append 优化路径），按纯新增处理。
     - include_content=False 时只返回增删行数（不带 old/new 正文）。
     """
     old = old_content or ""
-    matcher = difflib.SequenceMatcher(
-        None, old.splitlines(), new_content.splitlines(), autojunk=False
-    )
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new_content.splitlines(), autojunk=False)
     added = removed = 0
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag in ("delete", "replace"):
@@ -80,8 +76,8 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
     # ------------------------------------------------------------------
 
     # 空字节及控制字符（除常见空白符外）
-    _NULL_BYTE_RE = re.compile(r'[\x00]')
-    _CONTROL_CHAR_RE = re.compile(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]')
+    _NULL_BYTE_RE = re.compile(r"[\x00]")
+    _CONTROL_CHAR_RE = re.compile(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
     @classmethod
     def _validate_path_security(cls, path_str: str) -> tuple[bool, str]:
@@ -103,7 +99,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         #    先统一为 / 再匹配，避免大小写/斜杠差异绕过
         normalized = path_str.replace("\\", "/")
         # 匹配 ../ 或开头 ./.. 或 /..  或 ..\（已在上方统一为 /）
-        if re.search(r'(?:^|/)\.\.(?:/|$)', normalized):
+        if re.search(r"(?:^|/)\.\.(?:/|$)", normalized):
             return False, "路径包含穿越序列(../)，已拦截"
 
         return True, ""
@@ -136,9 +132,18 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
         # 检查是否指向常见敏感目录
         sensitive_prefixes = [
-            "/etc/", "/usr/", "/bin/", "/sbin/", "/var/",
-            "/boot/", "/dev/", "/proc/", "/sys/", "/root/",
-            "C:/Windows/", "C:/Program Files/",
+            "/etc/",
+            "/usr/",
+            "/bin/",
+            "/sbin/",
+            "/var/",
+            "/boot/",
+            "/dev/",
+            "/proc/",
+            "/sys/",
+            "/root/",
+            "C:/Windows/",
+            "C:/Program Files/",
         ]
         for prefix in sensitive_prefixes:
             if normalized.lower().startswith(prefix.lower()):
@@ -400,11 +405,11 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                         )
 
                     # 替换行范围
-                    new_lines = lines[:start_idx] + content.splitlines() + lines[end_idx + 1:]
+                    new_lines = lines[:start_idx] + content.splitlines() + lines[end_idx + 1 :]
                     lines_affected = end_idx - start_idx + 1
                 else:
                     # 只指定了起始行：替换单行
-                    new_lines = lines[:start_idx] + content.splitlines() + lines[start_idx + 1:]
+                    new_lines = lines[:start_idx] + content.splitlines() + lines[start_idx + 1 :]
                     lines_affected = 1
 
                 # 创建备份
@@ -693,7 +698,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
             # 删除指定行范围
-            new_lines = lines[:start_idx] + lines[end_idx + 1:]
+            new_lines = lines[:start_idx] + lines[end_idx + 1 :]
             lines_affected = end_idx - start_idx + 1
 
             # 创建备份

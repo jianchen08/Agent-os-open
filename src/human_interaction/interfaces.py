@@ -21,9 +21,7 @@ class IInteractionNotifier(ABC):
         ...
 
     @abstractmethod
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
         """通知请求已取消"""
         ...
 

@@ -119,7 +119,9 @@ class InjectedParamValidator(IInputPlugin):
                 "[%s] 工具 '%s' 的 injected_params 包含 '%s'，"
                 "但无已知注入来源且不在 input_schema.properties 中。"
                 "运行时该参数可能永远为空。",
-                self.name, tool_name, param_name,
+                self.name,
+                tool_name,
+                param_name,
             )
 
     def _get_injected_params(self, tool_def: Any) -> list[str]:

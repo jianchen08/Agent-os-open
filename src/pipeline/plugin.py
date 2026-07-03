@@ -138,6 +138,7 @@ class PluginContext:
     def __post_init__(self) -> None:
         if self.plugin_types is None:
             from pipeline.plugin_types import PluginTypeSlot  # noqa: PLC0415
+
             self.plugin_types = PluginTypeSlot()
 
     def get_service(self, name: str) -> Any:

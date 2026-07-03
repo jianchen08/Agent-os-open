@@ -223,8 +223,14 @@ class TestChatInteractionConfig:
         from ui_schema.types import ChatInteractionConfig  # noqa: PLC0415
 
         for itype in (
-            "form", "chart", "gallery", "table",
-            "progress", "code_block", "status_card", "decision",
+            "form",
+            "chart",
+            "gallery",
+            "table",
+            "progress",
+            "code_block",
+            "status_card",
+            "decision",
         ):
             config = ChatInteractionConfig(type=itype)
             assert config.type == itype

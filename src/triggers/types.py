@@ -114,7 +114,7 @@ def parse_duration(duration_str: str) -> float:
         match = pattern.search(remaining)
         if match:
             total_seconds += int(match.group(1)) * multiplier
-            remaining = remaining[:match.start()] + remaining[match.end():]
+            remaining = remaining[: match.start()] + remaining[match.end() :]
 
     remaining = remaining.strip().strip(", ")
     if remaining:

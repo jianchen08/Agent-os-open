@@ -111,7 +111,9 @@ class TagCooccurrenceMatrix:
         self._tag_freq[tag_id] = frequency
 
     def get_related_tags(
-        self, tag_id: int, exclude_ids: list[int] | None = None,
+        self,
+        tag_id: int,
+        exclude_ids: list[int] | None = None,
     ) -> list[tuple[int, int]]:
         """获取与指定 Tag 相关的 Tag 列表。
 
@@ -126,11 +128,7 @@ class TagCooccurrenceMatrix:
             return []
 
         exclude_set = set(exclude_ids or [])
-        related = [
-            (tid, weight)
-            for tid, weight in self._matrix[tag_id].items()
-            if tid not in exclude_set
-        ]
+        related = [(tid, weight) for tid, weight in self._matrix[tag_id].items() if tid not in exclude_set]
         return sorted(related, key=lambda x: x[1], reverse=True)
 
     def get_tag_frequency(self, tag_id: int) -> int:
@@ -223,13 +221,16 @@ class TagNetworkRetriever:
 
             logger.info(
                 "[TagNetworkRetriever] PG 初始化完成 | tags=%d | cooccurrences=%d",
-                len(tags), len(cooccurrences) if cooccurrences else 0,
+                len(tags),
+                len(cooccurrences) if cooccurrences else 0,
             )
         except Exception as e:
             logger.warning("[TagNetworkRetriever] PG 初始化失败: %s", e)
 
     async def apply_tag_boost(
-        self, query_vector: list[float], tag_boost: float = 0.3,
+        self,
+        query_vector: list[float],
+        tag_boost: float = 0.3,
     ) -> TagBoostResult:
         """应用 Tag 增强。
 
@@ -272,19 +273,18 @@ class TagNetworkRetriever:
         expanded_tags = self._expand_tags(lens_results, exclude_ids=original_tag_ids)
 
         if not expanded_tags:
-            expanded_tags = [
-                (tid, score, self._cooccurrence.get_tag_frequency(tid))
-                for tid, score in lens_results
-            ]
+            expanded_tags = [(tid, score, self._cooccurrence.get_tag_frequency(tid)) for tid, score in lens_results]
 
         # ========== 阶段 3: 聚焦投影 ==========
         fused_vector, spike_info = self._fuse_vectors(
-            query_vector, expanded_tags, tag_boost, dynamic_alpha, dynamic_beta,
+            query_vector,
+            expanded_tags,
+            tag_boost,
+            dynamic_alpha,
+            dynamic_beta,
         )
 
-        matched_tag_names = [
-            self._tag_names.get(tid, f"tag_{tid}") for tid, _, _ in expanded_tags
-        ]
+        matched_tag_names = [self._tag_names.get(tid, f"tag_{tid}") for tid, _, _ in expanded_tags]
 
         return TagBoostResult(
             vector=fused_vector,
@@ -295,7 +295,9 @@ class TagNetworkRetriever:
         )
 
     def _search_similar_tags(
-        self, query_vector: list[float], k: int = 10,
+        self,
+        query_vector: list[float],
+        k: int = 10,
     ) -> list[tuple[int, float]]:
         """搜索与查询向量最相似的 Tag。
 
@@ -327,7 +329,9 @@ class TagNetworkRetriever:
         return similarities[:k]
 
     def _expand_tags(
-        self, lens_results: list[tuple[int, float]], exclude_ids: list[int],
+        self,
+        lens_results: list[tuple[int, float]],
+        exclude_ids: list[int],
     ) -> list[tuple[int, float, int]]:
         """毛刺拓展：从共现矩阵查找关联 Tag。
 
@@ -342,19 +346,15 @@ class TagNetworkRetriever:
 
         for tag_id, tag_score in lens_results:
             related = self._cooccurrence.get_related_tags(
-                tag_id, exclude_ids=exclude_ids,
+                tag_id,
+                exclude_ids=exclude_ids,
             )
             for related_id, weight in related:
                 co_tags[related_id] += weight * tag_score
 
-        sorted_tags = sorted(co_tags.items(), key=lambda x: x[1], reverse=True)[
-            : self._config.spike_max_expand
-        ]
+        sorted_tags = sorted(co_tags.items(), key=lambda x: x[1], reverse=True)[: self._config.spike_max_expand]
 
-        return [
-            (tid, weight, self._cooccurrence.get_tag_frequency(tid))
-            for tid, weight in sorted_tags
-        ]
+        return [(tid, weight, self._cooccurrence.get_tag_frequency(tid)) for tid, weight in sorted_tags]
 
     def _fuse_vectors(
         self,
@@ -433,10 +433,7 @@ class TagNetworkRetriever:
         Returns:
             增强指数
         """
-        alpha = (
-            self._config.alpha_min
-            + (self._config.alpha_max - self._config.alpha_min) * avg_score
-        )
+        alpha = self._config.alpha_min + (self._config.alpha_max - self._config.alpha_min) * avg_score
         return min(self._config.alpha_max, max(self._config.alpha_min, alpha))
 
     def _compute_dynamic_beta(self, avg_score: float) -> float:

@@ -61,9 +61,7 @@ class TemplateRegistry:
         """
         return self._templates.get(template_id)
 
-    def find_by_type(
-        self, template_type: TemplateType
-    ) -> list[TemplateSpec]:
+    def find_by_type(self, template_type: TemplateType) -> list[TemplateSpec]:
         """按类型筛选模板。
 
         Args:
@@ -72,11 +70,7 @@ class TemplateRegistry:
         Returns:
             匹配的模板列表。
         """
-        return [
-            t
-            for t in self._templates.values()
-            if t.template_type == template_type
-        ]
+        return [t for t in self._templates.values() if t.template_type == template_type]
 
     def find_by_tag(self, tag: str) -> list[TemplateSpec]:
         """按标签筛选模板。

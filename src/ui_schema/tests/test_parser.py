@@ -33,29 +33,33 @@ class TestSchemaParserLoadDirectory:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "test_module.yaml", {
-                "config_id": "test_module",
-                "name": "测试模块",
-                "ui": {
-                    "identity": {
-                        "id": "test_module",
-                        "name": "测试模块",
-                        "version": "1.0.0",
-                        "category": "builtin",
-                    },
-                    "actions": [
-                        {"id": "run", "name": "运行", "type": "command"},
-                    ],
-                    "rendering": {
-                        "chat": [],
-                        "spaces": [],
-                    },
-                    "clients": {
-                        "required_spaces": ["chat"],
-                        "required_widgets": [],
+            self._write_yaml(
+                tmp_dir,
+                "test_module.yaml",
+                {
+                    "config_id": "test_module",
+                    "name": "测试模块",
+                    "ui": {
+                        "identity": {
+                            "id": "test_module",
+                            "name": "测试模块",
+                            "version": "1.0.0",
+                            "category": "builtin",
+                        },
+                        "actions": [
+                            {"id": "run", "name": "运行", "type": "command"},
+                        ],
+                        "rendering": {
+                            "chat": [],
+                            "spaces": [],
+                        },
+                        "clients": {
+                            "required_spaces": ["chat"],
+                            "required_widgets": [],
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schemas = parser.load_directory(tmp_dir)
             assert len(schemas) == 1
@@ -68,10 +72,14 @@ class TestSchemaParserLoadDirectory:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "no_ui.yaml", {
-                "config_id": "no_ui",
-                "name": "无 UI 模块",
-            })
+            self._write_yaml(
+                tmp_dir,
+                "no_ui.yaml",
+                {
+                    "config_id": "no_ui",
+                    "name": "无 UI 模块",
+                },
+            )
             parser = SchemaParser()
             schemas = parser.load_directory(tmp_dir)
             assert len(schemas) == 0
@@ -83,15 +91,19 @@ class TestSchemaParserLoadDirectory:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             for i in range(3):
-                self._write_yaml(tmp_dir, f"mod{i}.yaml", {
-                    "ui": {
-                        "identity": {
-                            "id": f"mod{i}",
-                            "name": f"模块{i}",
-                            "version": "1.0.0",
+                self._write_yaml(
+                    tmp_dir,
+                    f"mod{i}.yaml",
+                    {
+                        "ui": {
+                            "identity": {
+                                "id": f"mod{i}",
+                                "name": f"模块{i}",
+                                "version": "1.0.0",
+                            },
                         },
                     },
-                })
+                )
             parser = SchemaParser()
             schemas = parser.load_directory(tmp_dir)
             assert len(schemas) == 3
@@ -132,18 +144,22 @@ class TestSchemaParserLoadFile:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            filepath = self._write_yaml(tmp_dir, "single.yaml", {
-                "config_id": "single",
-                "name": "单文件",
-                "ui": {
-                    "identity": {
-                        "id": "single",
-                        "name": "单文件",
-                        "version": "1.0.0",
-                        "category": "extension",
+            filepath = self._write_yaml(
+                tmp_dir,
+                "single.yaml",
+                {
+                    "config_id": "single",
+                    "name": "单文件",
+                    "ui": {
+                        "identity": {
+                            "id": "single",
+                            "name": "单文件",
+                            "version": "1.0.0",
+                            "category": "extension",
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(filepath)
             assert schema is not None
@@ -163,10 +179,14 @@ class TestSchemaParserLoadFile:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            filepath = self._write_yaml(tmp_dir, "no_ui.yaml", {
-                "config_id": "no_ui",
-                "name": "No UI",
-            })
+            filepath = self._write_yaml(
+                tmp_dir,
+                "no_ui.yaml",
+                {
+                    "config_id": "no_ui",
+                    "name": "No UI",
+                },
+            )
             parser = SchemaParser()
             result = parser.load_file(filepath)
             assert result is None
@@ -213,20 +233,24 @@ class TestSchemaParserNestedStructure:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "nested-identity",
-                        "name": "嵌套测试",
-                        "version": "2.0.0",
-                        "category": "extension",
-                        "description": "测试描述",
-                        "icon": "🧪",
-                        "author": "tester",
-                        "tags": ["test", "nested"],
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "nested-identity",
+                            "name": "嵌套测试",
+                            "version": "2.0.0",
+                            "category": "extension",
+                            "description": "测试描述",
+                            "icon": "🧪",
+                            "author": "tester",
+                            "tags": ["test", "nested"],
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "mod.yaml")
             assert schema is not None
@@ -241,33 +265,37 @@ class TestSchemaParserNestedStructure:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "action-test",
-                        "name": "Action Test",
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "action-test",
+                            "name": "Action Test",
+                        },
+                        "actions": [
+                            {
+                                "id": "create_item",
+                                "name": "创建项目",
+                                "type": "command",
+                                "label": "创建",
+                                "api": "/api/v1/modules/action-test/items",
+                                "requiresConfirmation": False,
+                                "isDangerous": False,
+                            },
+                            {
+                                "id": "delete_item",
+                                "name": "删除项目",
+                                "type": "command",
+                                "api": "/api/v1/modules/action-test/items",
+                                "requiresConfirmation": True,
+                                "isDangerous": True,
+                            },
+                        ],
                     },
-                    "actions": [
-                        {
-                            "id": "create_item",
-                            "name": "创建项目",
-                            "type": "command",
-                            "label": "创建",
-                            "api": "/api/v1/modules/action-test/items",
-                            "requiresConfirmation": False,
-                            "isDangerous": False,
-                        },
-                        {
-                            "id": "delete_item",
-                            "name": "删除项目",
-                            "type": "command",
-                            "api": "/api/v1/modules/action-test/items",
-                            "requiresConfirmation": True,
-                            "isDangerous": True,
-                        },
-                    ],
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "mod.yaml")
             assert schema is not None
@@ -284,44 +312,48 @@ class TestSchemaParserNestedStructure:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "render-test",
-                        "name": "Render Test",
-                    },
-                    "rendering": {
-                        "chat": [
-                            {"type": "form", "dataSource": "module://items/create"},
-                            {"type": "chart", "refreshInterval": 30000},
-                        ],
-                        "spaces": [
-                            {
-                                "space": "workspace",
-                                "widget": "split",
-                                "props": {"direction": "horizontal"},
-                                "layout": {"width": "100%", "height": "100%"},
-                            },
-                            {
-                                "space": "floating",
-                                "widget": "status_card",
-                                "layout": {"width": 300, "height": 200, "position": "bottom-right"},
-                                "autoOpen": {"event": "on_task_start", "delay": 500},
-                            },
-                        ],
-                        "dock": {
-                            "icon": "🧪",
-                            "label": "测试",
-                            "indicator": "dot",
-                            "indicatorColor": "#52c41a",
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "render-test",
+                            "name": "Render Test",
                         },
-                        "fullscreen": {
-                            "triggerEvent": "on_full_edit",
-                            "autoEnter": False,
+                        "rendering": {
+                            "chat": [
+                                {"type": "form", "dataSource": "module://items/create"},
+                                {"type": "chart", "refreshInterval": 30000},
+                            ],
+                            "spaces": [
+                                {
+                                    "space": "workspace",
+                                    "widget": "split",
+                                    "props": {"direction": "horizontal"},
+                                    "layout": {"width": "100%", "height": "100%"},
+                                },
+                                {
+                                    "space": "floating",
+                                    "widget": "status_card",
+                                    "layout": {"width": 300, "height": 200, "position": "bottom-right"},
+                                    "autoOpen": {"event": "on_task_start", "delay": 500},
+                                },
+                            ],
+                            "dock": {
+                                "icon": "🧪",
+                                "label": "测试",
+                                "indicator": "dot",
+                                "indicatorColor": "#52c41a",
+                            },
+                            "fullscreen": {
+                                "triggerEvent": "on_full_edit",
+                                "autoEnter": False,
+                            },
                         },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "mod.yaml")
             assert schema is not None
@@ -349,20 +381,24 @@ class TestSchemaParserNestedStructure:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "client-test",
-                        "name": "Client Test",
-                    },
-                    "clients": {
-                        "required_spaces": ["chat", "workspace"],
-                        "required_widgets": ["form", "table"],
-                        "minClientVersion": "1.0.0",
-                        "fallback": {"widget": "status_card", "space": "chat"},
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "client-test",
+                            "name": "Client Test",
+                        },
+                        "clients": {
+                            "required_spaces": ["chat", "workspace"],
+                            "required_widgets": ["form", "table"],
+                            "minClientVersion": "1.0.0",
+                            "fallback": {"widget": "status_card", "space": "chat"},
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "mod.yaml")
             assert schema is not None
@@ -388,16 +424,20 @@ class TestSchemaParserDefaultValues:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "minimal.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "minimal",
-                        "name": "最小化",
-                        "version": "0.1.0",
-                        "category": "custom",
+            self._write_yaml(
+                tmp_dir,
+                "minimal.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "minimal",
+                            "name": "最小化",
+                            "version": "0.1.0",
+                            "category": "custom",
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schemas = parser.load_directory(tmp_dir)
             assert len(schemas) == 1
@@ -411,11 +451,15 @@ class TestSchemaParserDefaultValues:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {"id": "no-render", "name": "No Render"},
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {"id": "no-render", "name": "No Render"},
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "mod.yaml")
             assert schema is not None
@@ -430,11 +474,15 @@ class TestSchemaParserDefaultValues:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {"id": "no-clients", "name": "No Clients"},
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {"id": "no-clients", "name": "No Clients"},
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "mod.yaml")
             assert schema is not None
@@ -447,11 +495,15 @@ class TestSchemaParserDefaultValues:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "bad.yaml", {
-                "ui": {
-                    "identity": {"name": "No ID"},
+            self._write_yaml(
+                tmp_dir,
+                "bad.yaml",
+                {
+                    "ui": {
+                        "identity": {"name": "No ID"},
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "bad.yaml")
             assert schema is None
@@ -462,11 +514,15 @@ class TestSchemaParserDefaultValues:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "bad.yaml", {
-                "ui": {
-                    "identity": {"id": "no-name"},
+            self._write_yaml(
+                tmp_dir,
+                "bad.yaml",
+                {
+                    "ui": {
+                        "identity": {"id": "no-name"},
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "bad.yaml")
             assert schema is None
@@ -477,11 +533,15 @@ class TestSchemaParserDefaultValues:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "noid.yaml", {
-                "ui": {
-                    "actions": [],
+            self._write_yaml(
+                tmp_dir,
+                "noid.yaml",
+                {
+                    "ui": {
+                        "actions": [],
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             schema = parser.load_file(tmp_dir / "noid.yaml")
             assert schema is None
@@ -502,11 +562,15 @@ class TestSchemaParserCache:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "mod.yaml", {
-                "ui": {
-                    "identity": {"id": "cached-mod", "name": "Cached"},
+            self._write_yaml(
+                tmp_dir,
+                "mod.yaml",
+                {
+                    "ui": {
+                        "identity": {"id": "cached-mod", "name": "Cached"},
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             parser.load_directory(tmp_dir)
             cached = parser.get_schema("cached-mod")
@@ -527,11 +591,15 @@ class TestSchemaParserCache:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             for i in range(3):
-                self._write_yaml(tmp_dir, f"mod{i}.yaml", {
-                    "ui": {
-                        "identity": {"id": f"list-mod{i}", "name": f"Mod{i}"},
+                self._write_yaml(
+                    tmp_dir,
+                    f"mod{i}.yaml",
+                    {
+                        "ui": {
+                            "identity": {"id": f"list-mod{i}", "name": f"Mod{i}"},
+                        },
                     },
-                })
+                )
             parser = SchemaParser()
             parser.load_directory(tmp_dir)
             all_schemas = parser.list_schemas()
@@ -553,36 +621,44 @@ class TestSchemaParserHotReload:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "hot.yaml", {
-                "config_id": "hot",
-                "name": "热重载",
-                "ui": {
-                    "identity": {
-                        "id": "hot",
-                        "name": "热重载",
-                        "version": "1.0.0",
-                        "category": "builtin",
+            self._write_yaml(
+                tmp_dir,
+                "hot.yaml",
+                {
+                    "config_id": "hot",
+                    "name": "热重载",
+                    "ui": {
+                        "identity": {
+                            "id": "hot",
+                            "name": "热重载",
+                            "version": "1.0.0",
+                            "category": "builtin",
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             schemas = parser.load_directory(tmp_dir)
             assert len(schemas) == 1
 
             # 修改文件（确保 mtime 变化）
             time.sleep(0.1)
-            self._write_yaml(tmp_dir, "hot.yaml", {
-                "config_id": "hot",
-                "name": "热重载更新",
-                "ui": {
-                    "identity": {
-                        "id": "hot",
-                        "name": "热重载更新",
-                        "version": "2.0.0",
-                        "category": "builtin",
+            self._write_yaml(
+                tmp_dir,
+                "hot.yaml",
+                {
+                    "config_id": "hot",
+                    "name": "热重载更新",
+                    "ui": {
+                        "identity": {
+                            "id": "hot",
+                            "name": "热重载更新",
+                            "version": "2.0.0",
+                            "category": "builtin",
+                        },
                     },
                 },
-            })
+            )
 
             # 检测变更
             changed = parser.detect_changes(tmp_dir)
@@ -594,11 +670,15 @@ class TestSchemaParserHotReload:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "stable.yaml", {
-                "ui": {
-                    "identity": {"id": "stable", "name": "Stable"},
+            self._write_yaml(
+                tmp_dir,
+                "stable.yaml",
+                {
+                    "ui": {
+                        "identity": {"id": "stable", "name": "Stable"},
+                    },
                 },
-            })
+            )
             parser = SchemaParser()
             parser.load_directory(tmp_dir)
 
@@ -612,29 +692,37 @@ class TestSchemaParserHotReload:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            self._write_yaml(tmp_dir, "update.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "update-mod",
-                        "name": "旧名称",
-                        "version": "1.0.0",
+            self._write_yaml(
+                tmp_dir,
+                "update.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "update-mod",
+                            "name": "旧名称",
+                            "version": "1.0.0",
+                        },
                     },
                 },
-            })
+            )
             parser = SchemaParser()
             parser.load_directory(tmp_dir)
             assert parser.get_schema("update-mod").identity.name == "旧名称"
 
             # 修改并重新加载
             time.sleep(0.1)
-            self._write_yaml(tmp_dir, "update.yaml", {
-                "ui": {
-                    "identity": {
-                        "id": "update-mod",
-                        "name": "新名称",
-                        "version": "2.0.0",
+            self._write_yaml(
+                tmp_dir,
+                "update.yaml",
+                {
+                    "ui": {
+                        "identity": {
+                            "id": "update-mod",
+                            "name": "新名称",
+                            "version": "2.0.0",
+                        },
                     },
                 },
-            })
+            )
             parser.load_directory(tmp_dir)
             assert parser.get_schema("update-mod").identity.name == "新名称"

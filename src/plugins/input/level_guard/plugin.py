@@ -34,11 +34,13 @@ logger = logging.getLogger(__name__)
 # 只有这类工具受 tool_ids 硬限制——不在 Agent 授权集合内就拦截。
 # task_manage / task_submit / task_evaluate 内部还会按 parent_agent_level
 # 做二次校验，本插件负责第一道 tool_ids 过滤。
-TASK_CONTROL_TOOLS: frozenset[str] = frozenset({
-    "task_submit",
-    "task_manage",
-    "task_evaluate",
-})
+TASK_CONTROL_TOOLS: frozenset[str] = frozenset(
+    {
+        "task_submit",
+        "task_manage",
+        "task_evaluate",
+    }
+)
 
 
 class LevelGuardPlugin(IInputPlugin):
@@ -123,10 +125,7 @@ class LevelGuardPlugin(IInputPlugin):
         # 只检查任务类工具的授权。其它工具软放行——
         # 可见性由 tool_schema 控制（LLM 看不到未授权工具），
         # 职责由 yaml 提示词约束，无需本插件硬拦。
-        task_tool_calls = [
-            tc for tc in tool_calls
-            if tc.get("name", "") in TASK_CONTROL_TOOLS
-        ]
+        task_tool_calls = [tc for tc in tool_calls if tc.get("name", "") in TASK_CONTROL_TOOLS]
         if not task_tool_calls:
             return {
                 "security.level_decision": {
@@ -156,13 +155,12 @@ class LevelGuardPlugin(IInputPlugin):
                 blocked_tools.append(tool_name)
 
         if blocked_tools:
-            reason = (
-                f"Agent level {agent_level} not allowed to call task tools: "
-                f"{', '.join(blocked_tools)}"
-            )
+            reason = f"Agent level {agent_level} not allowed to call task tools: {', '.join(blocked_tools)}"
             logger.warning(
                 "[%s] Blocked by level guard | level=%s | tools=%s",
-                self.name, agent_level, blocked_tools,
+                self.name,
+                agent_level,
+                blocked_tools,
             )
             decision = {
                 "allowed": False,
@@ -172,4 +170,6 @@ class LevelGuardPlugin(IInputPlugin):
             }
             return {"security.level_decision": decision}
 
-        return {"security.level_decision": {"allowed": True, "reason": "task-control tools within tool_ids authorization"}}
+        return {
+            "security.level_decision": {"allowed": True, "reason": "task-control tools within tool_ids authorization"}
+        }

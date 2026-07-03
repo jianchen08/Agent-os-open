@@ -48,16 +48,32 @@ class ErrorCheckPlugin(IOutputPlugin):
 
     # 工具缺失错误关键词
     _TOOL_MISSING_KEYWORDS = [
-        "tool", "not found", "not registered", "not available",
-        "unknown function", "no such tool", "doesn't exist",
-        "工具", "未找到", "未注册", "不存在",
+        "tool",
+        "not found",
+        "not registered",
+        "not available",
+        "unknown function",
+        "no such tool",
+        "doesn't exist",
+        "工具",
+        "未找到",
+        "未注册",
+        "不存在",
     ]
 
     # 知识不足指示关键词（出现在 LLM 回复中）
     _KNOWLEDGE_INSUFFICIENT_KEYWORDS = [
-        "i don't know", "i cannot", "i'm unable", "i am unable",
-        "no information", "not enough information", "insufficient data",
-        "我不知道", "无法回答", "没有足够", "信息不足",
+        "i don't know",
+        "i cannot",
+        "i'm unable",
+        "i am unable",
+        "no information",
+        "not enough information",
+        "insufficient data",
+        "我不知道",
+        "无法回答",
+        "没有足够",
+        "信息不足",
     ]
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -85,7 +101,8 @@ class ErrorCheckPlugin(IOutputPlugin):
         self._check_format = self._config.get("check_format_error", True)
         self._check_tool_missing = self._config.get("check_tool_missing", True)
         self._check_knowledge_insufficient = self._config.get(
-            "check_knowledge_insufficient", True,
+            "check_knowledge_insufficient",
+            True,
         )
         self._check_strategy_error = self._config.get("check_strategy_error", True)
 
@@ -253,9 +270,10 @@ class ErrorCheckPlugin(IOutputPlugin):
             # 临时错误重试到上限：直接 failed，由 task 失败链通知父任务。
             # 不再 route=wait 挂起等"恢复"——wait 没有主动唤醒源会死挂。
             logger.warning(
-                "[error_check] 临时错误重试上限耗尽，置为 failed "
-                "(category=%s transient=%d/%d): %s",
-                category, transient_count, self._transient_max_retries,
+                "[error_check] 临时错误重试上限耗尽，置为 failed (category=%s transient=%d/%d): %s",
+                category,
+                transient_count,
+                self._transient_max_retries,
                 error_str[:150],
             )
             return {
@@ -284,12 +302,7 @@ class ErrorCheckPlugin(IOutputPlugin):
                 "error_check.consecutive_same_type": consecutive,
                 "__route_signal__": RouteSignal(
                     route_type="next_llm",
-                    reason=(
-                        f"Retryable {category} "
-                        f"(attempt {retry_count + 1}/"
-                        f"{self._max_retries}): "
-                        f"{error_str[:100]}"
-                    ),
+                    reason=(f"Retryable {category} (attempt {retry_count + 1}/{self._max_retries}): {error_str[:100]}"),
                 ),
             }
 
@@ -301,11 +314,7 @@ class ErrorCheckPlugin(IOutputPlugin):
             "error_check.consecutive_same_type": consecutive,
             "__route_signal__": RouteSignal(
                 route_type="end",
-                reason=(
-                    f"Non-retryable {category} or "
-                    f"max retries reached: "
-                    f"{error_str[:100]}"
-                ),
+                reason=(f"Non-retryable {category} or max retries reached: {error_str[:100]}"),
             ),
         }
 
@@ -337,7 +346,10 @@ class ErrorCheckPlugin(IOutputPlugin):
             if isinstance(error, BaseException):
                 info = classify_error(error)
                 return info.kind.value in (
-                    "service_down", "rate_limit", "network", "server_error",
+                    "service_down",
+                    "rate_limit",
+                    "network",
+                    "server_error",
                 )
 
             # state["RAW_ERROR"] 存的是字符串。错误消息常以异常类型名开头
@@ -411,11 +423,7 @@ class ErrorCheckPlugin(IOutputPlugin):
                 "error_check.consecutive_same_type": consecutive,
                 "__route_signal__": RouteSignal(
                     route_type="next_llm",
-                    reason=(
-                        f"Empty response, retry "
-                        f"{retry_count + 1}/"
-                        f"{self._max_retries}"
-                    ),
+                    reason=(f"Empty response, retry {retry_count + 1}/{self._max_retries}"),
                 ),
             }
         return {
@@ -457,11 +465,7 @@ class ErrorCheckPlugin(IOutputPlugin):
                 "error_check.consecutive_same_type": consecutive,
                 "__route_signal__": RouteSignal(
                     route_type="next_llm",
-                    reason=(
-                        f"Format error, retry "
-                        f"{retry_count + 1}/"
-                        f"{self._max_retries}"
-                    ),
+                    reason=(f"Format error, retry {retry_count + 1}/{self._max_retries}"),
                 ),
             }
         return {
@@ -489,7 +493,9 @@ class ErrorCheckPlugin(IOutputPlugin):
         return bool(isinstance(result, str) and result.strip().lower() in self._EMPTY_RESPONSE_INDICATORS)
 
     def _track_consecutive_error(
-        self, ctx: PluginContext, category: str,
+        self,
+        ctx: PluginContext,
+        category: str,
     ) -> int:
         """追踪连续相同类型的错误次数。
 
@@ -505,10 +511,12 @@ class ErrorCheckPlugin(IOutputPlugin):
             更新后的连续相同类型错误次数
         """
         last_type = ctx.state.get(
-            "error_check.last_error_type", "",
+            "error_check.last_error_type",
+            "",
         )
         consecutive = ctx.state.get(
-            "error_check.consecutive_same_type", 0,
+            "error_check.consecutive_same_type",
+            0,
         )
         if category == last_type:
             consecutive += 1
@@ -630,7 +638,8 @@ class ErrorCheckPlugin(IOutputPlugin):
             return True
         # 连续相同类型错误检测
         consecutive_same = ctx.state.get(
-            "error_check.consecutive_same_type", 0,
+            "error_check.consecutive_same_type",
+            0,
         )
         return consecutive_same >= 3
 
@@ -653,10 +662,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         consecutive = self._track_consecutive_error(ctx, category)
         analysis = {
             "retryable": False,
-            "reason": (
-                "Knowledge insufficient: no memory "
-                "or knowledge context available"
-            ),
+            "reason": ("Knowledge insufficient: no memory or knowledge context available"),
             "category": category,
             "retry_count": retry_count,
         }
@@ -687,10 +693,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         consecutive = self._track_consecutive_error(ctx, category)
         analysis = {
             "retryable": False,
-            "reason": (
-                "Strategy error: repeated failures "
-                "suggest approach needs change"
-            ),
+            "reason": ("Strategy error: repeated failures suggest approach needs change"),
             "category": category,
             "retry_count": retry_count,
         }
@@ -702,9 +705,6 @@ class ErrorCheckPlugin(IOutputPlugin):
             "error_check.consecutive_same_type": consecutive,
             "__route_signal__": RouteSignal(
                 route_type="end",
-                reason=(
-                    "Strategy error: approach needs "
-                    "change, not retry"
-                ),
+                reason=("Strategy error: approach needs change, not retry"),
             ),
         }

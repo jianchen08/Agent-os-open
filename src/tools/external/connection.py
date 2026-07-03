@@ -69,7 +69,9 @@ class ExternalToolConnection(IExternalToolConnection):
         if old_state != new_state:
             self._logger.info(
                 "状态变更 | tool=%s | %s → %s",
-                self._config.name, old_state.value, new_state.value,
+                self._config.name,
+                old_state.value,
+                new_state.value,
             )
 
     async def connect(self) -> None:
@@ -166,7 +168,8 @@ class ExternalToolConnection(IExternalToolConnection):
         except Exception as e:
             self._logger.warning(
                 "健康检查失败 | tool=%s | error=%s",
-                self._config.name, e,
+                self._config.name,
+                e,
             )
             return False
 
@@ -358,7 +361,8 @@ class ExternalToolConnection(IExternalToolConnection):
         except Exception as e:
             self._logger.error(
                 "心跳循环异常 | tool=%s | error=%s",
-                self._config.name, e,
+                self._config.name,
+                e,
             )
 
     async def _reconnect(self) -> None:
@@ -382,26 +386,30 @@ class ExternalToolConnection(IExternalToolConnection):
                 self._set_state(ExternalToolState.CONNECTED)
                 self._logger.info(
                     "重连成功 | tool=%s | attempt=%d",
-                    self._config.name, attempt + 1,
+                    self._config.name,
+                    attempt + 1,
                 )
                 return
 
             except Exception as e:
                 self._logger.warning(
                     "重连失败 | tool=%s | attempt=%d/%d | error=%s",
-                    self._config.name, attempt + 1,
-                    policy.max_retries, e,
+                    self._config.name,
+                    attempt + 1,
+                    policy.max_retries,
+                    e,
                 )
 
                 delay = min(
-                    policy.base_delay * (policy.exponential_base ** attempt),
+                    policy.base_delay * (policy.exponential_base**attempt),
                     policy.max_delay,
                 )
                 await asyncio.sleep(delay)
 
         self._set_state(ExternalToolState.ERROR)
         self._logger.error(
-            "重连全部失败 | tool=%s", self._config.name,
+            "重连全部失败 | tool=%s",
+            self._config.name,
         )
 
     # ---- 辅助方法 ----

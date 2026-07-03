@@ -110,7 +110,12 @@ class ChunkService:
             except Exception as e:
                 logger.warning("[ChunkService] 关联 Tag 失败 | id=%s | error=%s", chunk_data.id, e)
 
-        logger.info("[ChunkService] 保存压缩块 | id=%s | layer=%s | tokens=%d", chunk_data.id, chunk_data.layer, chunk_data.token_count)
+        logger.info(
+            "[ChunkService] 保存压缩块 | id=%s | layer=%s | tokens=%d",
+            chunk_data.id,
+            chunk_data.layer,
+            chunk_data.token_count,
+        )
         return chunk_data.id
 
     async def load(self, chunk_id: str) -> ChunkData | None:
@@ -170,10 +175,7 @@ class ChunkService:
         Returns:
             压缩块列表（按创建时间升序）
         """
-        results = [
-            chunk for chunk in self._cache.values()
-            if chunk.pipeline_run_id == pipeline_run_id
-        ]
+        results = [chunk for chunk in self._cache.values() if chunk.pipeline_run_id == pipeline_run_id]
         if not results:
             results = self._lazy_load_pipeline(pipeline_run_id)
         if layer:
@@ -209,7 +211,8 @@ class ChunkService:
         if loaded:
             logger.info(
                 "[ChunkService] 懒加载 | pipeline=%s | loaded=%d",
-                pipeline_run_id, len(loaded),
+                pipeline_run_id,
+                len(loaded),
             )
         return loaded
 
@@ -225,16 +228,14 @@ class ChunkService:
         Returns:
             移除的块数量
         """
-        to_remove = [
-            cid for cid, chunk in self._cache.items()
-            if chunk.pipeline_run_id == pipeline_run_id
-        ]
+        to_remove = [cid for cid, chunk in self._cache.items() if chunk.pipeline_run_id == pipeline_run_id]
         for cid in to_remove:
             del self._cache[cid]
         if to_remove:
             logger.info(
                 "[ChunkService] 已释放管道缓存 | pipeline=%s | count=%d",
-                pipeline_run_id, len(to_remove),
+                pipeline_run_id,
+                len(to_remove),
             )
         return len(to_remove)
 
@@ -248,10 +249,7 @@ class ChunkService:
         Returns:
             压缩块列表
         """
-        results = [
-            chunk for chunk in self._cache.values()
-            if chunk.user_id == user_id
-        ]
+        results = [chunk for chunk in self._cache.values() if chunk.user_id == user_id]
         results.sort(key=lambda x: x.created_at, reverse=True)
         return results[:limit]
 

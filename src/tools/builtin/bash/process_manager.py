@@ -49,10 +49,10 @@ class ProcessManager:
         #      （双条件避免误杀 build：build 飙高后会回落，不满足"持续增长"）
         #   2. 孤儿进程：running 状态超过 ORPHAN_TIMEOUT 秒无任何外部访问
         #      （合法长期进程只要 Agent 周期性 continue/input/read_log 就不会被判孤儿）
-        self._watchdog_interval: float = 10.0       # 采样间隔（秒）
-        self._handle_threshold: int = 100000         # 句柄绝对阈值
-        self._handle_grow_rounds: int = 3            # 连续增长采样次数
-        self._orphan_timeout: float = 1800.0         # 孤儿判定：30 分钟无访问
+        self._watchdog_interval: float = 10.0  # 采样间隔（秒）
+        self._handle_threshold: int = 100000  # 句柄绝对阈值
+        self._handle_grow_rounds: int = 3  # 连续增长采样次数
+        self._orphan_timeout: float = 1800.0  # 孤儿判定：30 分钟无访问
         self._watchdog_task: asyncio.Task | None = None
 
     def _generate_log_filename(self, command: str) -> str:
@@ -83,7 +83,7 @@ class ProcessManager:
                 f"# PID: {pid}",
                 f"# Started: {datetime.now(UTC).isoformat()}",
                 f"# Platform: {platform.system()}",
-                f"# {'='*50}",
+                f"# {'=' * 50}",
                 "",
             ]
             with open(log_file, "w", encoding="utf-8") as f:
@@ -168,7 +168,11 @@ class ProcessManager:
             if "LANG" not in merged_env:
                 merged_env["LANG"] = "en_US.UTF-8"
             process = await asyncio.create_subprocess_exec(
-                "wsl", "-e", "bash", "-c", command,
+                "wsl",
+                "-e",
+                "bash",
+                "-c",
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
@@ -180,7 +184,9 @@ class ProcessManager:
             if "LANG" not in merged_env:
                 merged_env["LANG"] = "en_US.UTF-8"
             process = await asyncio.create_subprocess_exec(
-                "bash", "-c", command,
+                "bash",
+                "-c",
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
@@ -228,14 +234,13 @@ class ProcessManager:
         self._ensure_watchdog()
 
         # 添加任务完成回调以清理引用
-        output_task.add_done_callback(
-            lambda t, p=pid: self._on_output_task_done(p, t)
-        )
+        output_task.add_done_callback(lambda t, p=pid: self._on_output_task_done(p, t))
 
         return pid, log_file
 
     async def _read_output(self, pid: int, process: asyncio.subprocess.Process, log_file: Path):
         """异步读取进程输出"""
+
         async def read_stream(stream, prefix: str = ""):
             """读取流并写入日志，使用自适应编码解码。"""
             while True:
@@ -423,8 +428,7 @@ class ProcessManager:
     def cleanup_finished(self):
         """清理已完成的进程记录"""
         finished_pids = [
-            pid for pid, info in self.active_processes.items()
-            if info.status in ("completed", "error", "terminated")
+            pid for pid, info in self.active_processes.items() if info.status in ("completed", "error", "terminated")
         ]
 
         if finished_pids:
@@ -479,10 +483,7 @@ class ProcessManager:
         """单次巡检：扫描所有 running 进程，判定失控并处理。"""
         now = time.time()
         # 快照当前 running 进程（迭代中 terminate 会修改字典）
-        running = [
-            (pid, info) for pid, info in list(self.active_processes.items())
-            if info.status == "running"
-        ]
+        running = [(pid, info) for pid, info in list(self.active_processes.items()) if info.status == "running"]
         if not running:
             return
 
@@ -496,9 +497,11 @@ class ProcessManager:
             idle_secs = now - info.last_access_time
             if idle_secs >= self._orphan_timeout:
                 logger.error(
-                    "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | "
-                    "无访问 %.0fs（阈值 %.0fs）| 句柄历史=%s",
-                    pid, info.command, idle_secs, self._orphan_timeout,
+                    "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | 无访问 %.0fs（阈值 %.0fs）| 句柄历史=%s",
+                    pid,
+                    info.command,
+                    idle_secs,
+                    self._orphan_timeout,
                     info.handle_samples[-3:],
                 )
                 await self._watchdog_kill(pid, info, "orphan")
@@ -515,9 +518,11 @@ class ProcessManager:
 
                 if self._is_resource_out_of_control(info.handle_samples):
                     logger.error(
-                        "[Watchdog] 资源失控进程终止 | pid=%s cmd=%.60s | "
-                        "句柄=%d（阈值 %d）| 采样历史=%s",
-                        pid, info.command, handles, self._handle_threshold,
+                        "[Watchdog] 资源失控进程终止 | pid=%s cmd=%.60s | 句柄=%d（阈值 %d）| 采样历史=%s",
+                        pid,
+                        info.command,
+                        handles,
+                        self._handle_threshold,
                         info.handle_samples,
                     )
                     await self._watchdog_kill(pid, info, "resource")
@@ -527,6 +532,7 @@ class ProcessManager:
         """采样进程句柄数。失败返回 None（不作为失控判据）。"""
         try:
             import psutil  # noqa: PLC0415
+
             p = psutil.Process(pid)
             # num_handles 是 Windows 专属；其他平台用 num_fds 兜底
             if hasattr(p, "num_handles"):
@@ -548,7 +554,7 @@ class ProcessManager:
         rounds = self._handle_grow_rounds
         if len(samples) < rounds + 1:
             return False  # 采样不足，不判定
-        recent = samples[-(rounds + 1):]
+        recent = samples[-(rounds + 1) :]
         if recent[-1] < self._handle_threshold:
             return False  # 没超阈值
         # 连续 rounds 次都在增长
@@ -584,6 +590,7 @@ class ProcessManager:
         try:
             if platform.system() == "Windows":
                 import _winapi  # noqa: PLC0415
+
                 # SYNCHRONIZE 用于 WaitForSingleObject，QUERY_LIMITED_INFORMATION 获取退出码
                 ACCESS = _winapi.SYNCHRONIZE | 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION  # noqa: N806
                 handle = _winapi.OpenProcess(ACCESS, False, pid)
@@ -612,11 +619,11 @@ class ProcessManager:
             stdin = process.stdin
             if stdin is None:
                 return None
-            transport = getattr(stdin, '_transport', None)
+            transport = getattr(stdin, "_transport", None)
             if transport is None:
                 return None
-            sock = getattr(transport, '_sock', None)
-            if sock is None or not hasattr(sock, 'fileno'):
+            sock = getattr(transport, "_sock", None)
+            if sock is None or not hasattr(sock, "fileno"):
                 return None
             return sock.fileno()
         except Exception:
@@ -632,6 +639,7 @@ class ProcessManager:
         try:
             if platform.system() == "Windows":
                 import _winapi  # noqa: PLC0415
+
                 _winapi.WriteFile(fd, data)
             else:
                 os.write(fd, data)
@@ -649,15 +657,17 @@ class ProcessManager:
     # ── WSL 直连支持 ──────────────────────────────────────────────
 
     # WSL 命令匹配模式（wsl 或 wsl.exe 开头）
-    _WSL_COMMAND_RE: ClassVar[re.Pattern[str]] = re.compile(
-        r'^\s*wsl(?:\.exe)?(?:\s+|$)', re.IGNORECASE
-    )
+    _WSL_COMMAND_RE: ClassVar[re.Pattern[str]] = re.compile(r"^\s*wsl(?:\.exe)?(?:\s+|$)", re.IGNORECASE)
 
     # WSL 自身标志（接受一个值参数，如 -d Ubuntu-20.04）
-    _WSL_FLAGS_WITH_VALUE: ClassVar[frozenset[str]] = frozenset({
-        '-d', '--distribution',
-        '-u', '--user',
-    })
+    _WSL_FLAGS_WITH_VALUE: ClassVar[frozenset[str]] = frozenset(
+        {
+            "-d",
+            "--distribution",
+            "-u",
+            "--user",
+        }
+    )
 
     # ── Windows 路径转 WSL 路径支持 ───────────────────────────────
 
@@ -669,18 +679,18 @@ class ProcessManager:
     # 带引号的 Windows 路径：引号内允许空格、括号等，只以对应引号终止。
     _WIN_QUOTED_PATH_RE: ClassVar[re.Pattern[str]] = re.compile(
         r'(?P<quote>[\'"])'
-        r'(?P<path>'
+        r"(?P<path>"
         r'(?:\\\\\?\\)?[a-zA-Z]:[/\\][^\'"]*?'
         r'|\\\\wsl(?:\.localhost|\$)\\[^\'"]*?'
-        r')'
-        r'(?P=quote)'
+        r")"
+        r"(?P=quote)"
     )
     _WIN_UNQUOTED_PATH_RE: ClassVar[re.Pattern[str]] = re.compile(
-        r'(?P<path>'
-        r'\\\\\?\\[a-zA-Z]:[/\\]' + _WIN_UNQUOTED_PATH_CHARS + r'*'
-        r'|\\\\wsl(?:\.localhost|\$)\\[^\\]+\\' + _WIN_UNQUOTED_PATH_CHARS + r'*'
-        r'|[a-zA-Z]:[/\\]' + _WIN_UNQUOTED_PATH_CHARS + r'*'
-        r')'
+        r"(?P<path>"
+        r"\\\\\?\\[a-zA-Z]:[/\\]" + _WIN_UNQUOTED_PATH_CHARS + r"*"
+        r"|\\\\wsl(?:\.localhost|\$)\\[^\\]+\\" + _WIN_UNQUOTED_PATH_CHARS + r"*"
+        r"|[a-zA-Z]:[/\\]" + _WIN_UNQUOTED_PATH_CHARS + r"*"
+        r")"
     )
 
     @classmethod
@@ -716,7 +726,7 @@ class ProcessManager:
                 if cmd_start < len(tokens):
                     wsl_opts.append(tokens[cmd_start])
                     cmd_start += 1
-            elif t.startswith('-') and t not in ('-c', '-e', '--exec'):
+            elif t.startswith("-") and t not in ("-c", "-e", "--exec"):
                 # 其他 WSL 标志，不包括 -c/-e（属于后续命令）
                 wsl_opts.append(t)
                 cmd_start += 1
@@ -736,13 +746,13 @@ class ProcessManager:
         """将 token 列表拼接为 bash -c 的命令字符串。"""
         parts: list[str] = []
         for t in tokens:
-            if any(c in t for c in (' ', '\t', '\n')):
+            if any(c in t for c in (" ", "\t", "\n")):
                 # 含空格 → 需要引号保护
                 parts.append(shlex.quote(t))
             else:
                 # 不含空格 → 保持原样，保留 $VAR、|、; 等 shell 元字符
                 parts.append(t)
-        return ' '.join(parts)
+        return " ".join(parts)
 
     async def _start_wsl_process(
         self,
@@ -806,7 +816,7 @@ class ProcessManager:
             return path
 
         # 盘符路径：D:\path 或 D:/path
-        match = re.match(r'^([a-zA-Z]):[/\\](.*)$', path)
+        match = re.match(r"^([a-zA-Z]):[/\\](.*)$", path)
         if match:
             drive = match.group(1).lower()
             rest = match.group(2).replace("\\", "/").rstrip("/")

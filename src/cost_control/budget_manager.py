@@ -113,12 +113,8 @@ class BudgetManager:
         self._usage_records: list[UsageRecord] = []
 
         # 时间跟踪
-        self._day_start = datetime.now().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        self._month_start = datetime.now().replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
-        )
+        self._day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        self._month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
         # 告警状态（防止重复告警）
         self._last_alerts: dict[str, BudgetAlertLevel] = {}
@@ -157,9 +153,7 @@ class BudgetManager:
             if global_daily_after > self.config.global_budget.daily_token_limit:
                 raise QuotaExhaustedException(
                     message=f"全局每日配额已耗尽，当前: {self._global_daily_usage}, 限制: {self.config.global_budget.daily_token_limit}",
-                    usage_percent=self._global_daily_usage
-                    / self.config.global_budget.daily_token_limit
-                    * 100,
+                    usage_percent=self._global_daily_usage / self.config.global_budget.daily_token_limit * 100,
                     quota_type="daily",
                 )
 
@@ -168,9 +162,7 @@ class BudgetManager:
             if global_monthly_after > self.config.global_budget.monthly_token_limit:
                 raise QuotaExhaustedException(
                     message=f"全局每月配额已耗尽，当前: {self._global_monthly_usage}, 限制: {self.config.global_budget.monthly_token_limit}",
-                    usage_percent=self._global_monthly_usage
-                    / self.config.global_budget.monthly_token_limit
-                    * 100,
+                    usage_percent=self._global_monthly_usage / self.config.global_budget.monthly_token_limit * 100,
                     quota_type="monthly",
                 )
 
@@ -235,9 +227,7 @@ class BudgetManager:
             # 更新用户使用量
             if user_id:
                 self._daily_usage[user_id] = self._daily_usage.get(user_id, 0) + tokens
-                self._monthly_usage[user_id] = (
-                    self._monthly_usage.get(user_id, 0) + tokens
-                )
+                self._monthly_usage[user_id] = self._monthly_usage.get(user_id, 0) + tokens
 
             # 更新任务使用量
             if task_id:
@@ -245,9 +235,7 @@ class BudgetManager:
 
             # 更新会话使用量
             if session_id:
-                self._session_usage[session_id] = (
-                    self._session_usage.get(session_id, 0) + tokens
-                )
+                self._session_usage[session_id] = self._session_usage.get(session_id, 0) + tokens
 
             # 记录使用
             record = UsageRecord(
@@ -275,21 +263,15 @@ class BudgetManager:
 
         # 跨月重置
         if now.month != self._month_start.month or now.year != self._month_start.year:
-            self._month_start = now.replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0
-            )
+            self._month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             self._global_monthly_usage = 0
             self._monthly_usage.clear()
 
     async def _check_alerts(self) -> BudgetAlert | None:
         """检查是否触发告警"""
         # 计算使用率
-        daily_percent = (
-            self._global_daily_usage / self.config.global_budget.daily_token_limit
-        )
-        monthly_percent = (
-            self._global_monthly_usage / self.config.global_budget.monthly_token_limit
-        )
+        daily_percent = self._global_daily_usage / self.config.global_budget.daily_token_limit
+        monthly_percent = self._global_monthly_usage / self.config.global_budget.monthly_token_limit
         usage_percent = max(daily_percent, monthly_percent)
 
         # 确定告警级别
@@ -340,9 +322,7 @@ class BudgetManager:
 
         return alert if alert_level != BudgetAlertLevel.INFO else None
 
-    def _build_alert_message(
-        self, level: BudgetAlertLevel, usage_percent: float
-    ) -> str:
+    def _build_alert_message(self, level: BudgetAlertLevel, usage_percent: float) -> str:
         """构建告警消息"""
         if level == BudgetAlertLevel.EXHAUSTED:
             return (
@@ -429,23 +409,18 @@ class BudgetManager:
                 "monthly_tokens": self._global_monthly_usage,
                 "daily_limit": self.config.global_budget.daily_token_limit,
                 "monthly_limit": self.config.global_budget.monthly_token_limit,
-                "daily_usage_percent": self._global_daily_usage
-                / self.config.global_budget.daily_token_limit
-                * 100,
+                "daily_usage_percent": self._global_daily_usage / self.config.global_budget.daily_token_limit * 100,
                 "monthly_usage_percent": self._global_monthly_usage
                 / self.config.global_budget.monthly_token_limit
                 * 100,
                 "estimated_daily_cost": (self._global_daily_usage / 1000) * cost_rate,
-                "estimated_monthly_cost": (self._global_monthly_usage / 1000)
-                * cost_rate,
+                "estimated_monthly_cost": (self._global_monthly_usage / 1000) * cost_rate,
             },
             "tasks": {
                 task_id: {
                     "tokens": tokens,
                     "limit": self.config.global_budget.per_task_token_limit,
-                    "usage_percent": tokens
-                    / self.config.global_budget.per_task_token_limit
-                    * 100,
+                    "usage_percent": tokens / self.config.global_budget.per_task_token_limit * 100,
                 }
                 for task_id, tokens in self._task_usage.items()
             },
@@ -453,9 +428,7 @@ class BudgetManager:
                 session_id: {
                     "tokens": tokens,
                     "limit": self.config.global_budget.per_session_token_limit,
-                    "usage_percent": tokens
-                    / self.config.global_budget.per_session_token_limit
-                    * 100,
+                    "usage_percent": tokens / self.config.global_budget.per_session_token_limit * 100,
                 }
                 for session_id, tokens in self._session_usage.items()
             },

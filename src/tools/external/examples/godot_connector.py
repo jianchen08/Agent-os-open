@@ -194,9 +194,7 @@ class GodotConnector(ExternalToolAdapter):
         if operation == "open_scene":
             scene_path = validated.get("scene_path", "")
             if scene_path and not scene_path.endswith((".tscn", ".scn")):
-                raise ValueError(
-                    f"场景文件格式无效: {scene_path}，期望 .tscn 或 .scn"
-                )
+                raise ValueError(f"场景文件格式无效: {scene_path}，期望 .tscn 或 .scn")
 
         # 验证资源操作参数
         if operation == "manage_resource":
@@ -243,6 +241,8 @@ class GodotConnector(ExternalToolAdapter):
 
         except Exception as e:
             self._logger.error(
-                "Godot 操作失败 | op=%s | error=%s", operation, e,
+                "Godot 操作失败 | op=%s | error=%s",
+                operation,
+                e,
             )
             return {"success": False, "error": str(e), "operation": operation}

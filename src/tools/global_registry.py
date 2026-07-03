@@ -1,4 +1,4 @@
-﻿"""
+"""
 全局工具注册表
 
 暴露接口：
@@ -49,9 +49,7 @@ async def get_global_tool_registry(
         async with _registry_lock:
             # 双重检查锁定
             if _global_tool_registry is None or force_reload:
-                logger.info(
-                    "[GlobalRegistry] 初始化全局工具注册表（只注册核心工具）..."
-                )
+                logger.info("[GlobalRegistry] 初始化全局工具注册表（只注册核心工具）...")
 
                 from tools.builtin import register_core_tools  # noqa: PLC0415
                 from tools.loader import init_dynamic_tool_loader  # noqa: PLC0415
@@ -71,8 +69,7 @@ async def get_global_tool_registry(
                 _initialized = True
 
                 logger.info(
-                    "[GlobalRegistry] 全局工具注册表初始化完成 | "
-                    "核心工具数=%d | 其他工具将按需动态加载",
+                    "[GlobalRegistry] 全局工具注册表初始化完成 | 核心工具数=%d | 其他工具将按需动态加载",
                     len(registered_tools),
                 )
 
@@ -129,19 +126,14 @@ def _sync_initialize_builtin_tools(registry: ToolRegistry) -> None:
                 )
                 core_tools.append(name)
 
-        logger.info(
-            f"成功加载 {len(core_tools)} 个核心系统工具: {core_tools}"
-        )
+        logger.info(f"成功加载 {len(core_tools)} 个核心系统工具: {core_tools}")
 
     except Exception as e:
         logger.warning(f"核心工具加载失败: {e}", exc_info=True)
 
     # 记录最终状态
     total_tools = registry.count()
-    logger.info(
-        f"ToolRegistry 初始化完成，{total_tools} 个核心工具可用 "
-        f"(其他工具将按需加载)"
-    )
+    logger.info(f"ToolRegistry 初始化完成，{total_tools} 个核心工具可用 (其他工具将按需加载)")
 
 
 async def initialize_tools_async(
@@ -175,9 +167,7 @@ async def initialize_tools_async(
         # 2.1 自动扫描 mcp-servers/*/mcp.json
         mcp_servers_dir = Path("mcp-servers")
         if mcp_servers_dir.exists():
-            mcp_tools = await loader.load_from_directory(
-                mcp_servers_dir, include_disabled=False
-            )
+            mcp_tools = await loader.load_from_directory(mcp_servers_dir, include_disabled=False)
             for tool in mcp_tools:
                 try:
                     registry.register(tool, overwrite=False)
@@ -189,9 +179,7 @@ async def initialize_tools_async(
         for config_path in [Path("config/mcp.json"), Path(".mcp.json")]:
             if config_path.exists():
                 try:
-                    mcp_tools = await loader.load_from_config(
-                        config_path, include_disabled=False
-                    )
+                    mcp_tools = await loader.load_from_config(config_path, include_disabled=False)
                     for tool in mcp_tools:
                         try:
                             registry.register(tool, overwrite=False)

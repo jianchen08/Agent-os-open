@@ -48,8 +48,7 @@ class IDEOpenFileTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="ide_open_file",
-            description="在 IDE 中打开指定文件，并可选跳转到特定位置。"
-            "无连接器时降级为读取文件内容。",
+            description="在 IDE 中打开指定文件，并可选跳转到特定位置。无连接器时降级为读取文件内容。",
             when_to_use=["需要在 IDE 中打开文件进行编辑", "需要跳转到文件特定行"],
             when_not_to_use=["仅需读取文件内容（使用 file_read）"],
             input_schema={

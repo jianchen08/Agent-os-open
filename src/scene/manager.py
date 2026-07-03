@@ -184,9 +184,7 @@ class SceneManager:
         """
         return self._persistence.get_scene(scene_id)
 
-    def update_scene(
-        self, scene_id: str, request: SceneUpdateRequest
-    ) -> Scene | None:
+    def update_scene(self, scene_id: str, request: SceneUpdateRequest) -> Scene | None:
         """更新场景。
 
         Args:

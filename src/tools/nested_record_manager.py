@@ -39,21 +39,19 @@ class NestedRecordManager:
 
                 db_session = await get_async_session()
                 return await self._create_nested_record_in_session(
-                        db_session,
-                        parent_record_id,
-                        session_id,
-                        tool_name,
-                        tool_args,
-                        tool_call_id,
-                    )
+                    db_session,
+                    parent_record_id,
+                    session_id,
+                    tool_name,
+                    tool_args,
+                    tool_call_id,
+                )
             return await self._create_nested_record_in_session(
                 db, parent_record_id, session_id, tool_name, tool_args, tool_call_id
             )
 
         except Exception as e:
-            logger.warning(
-                f"[ToolExecutor] 创建嵌套执行记录失败 | tool_name={tool_name} | error={e}"
-            )
+            logger.warning(f"[ToolExecutor] 创建嵌套执行记录失败 | tool_name={tool_name} | error={e}")
             return None
 
     async def _create_nested_record_in_session(
@@ -72,9 +70,7 @@ class NestedRecordManager:
 
         repo = ExecutionRecordRepository(db)
 
-        parent_record = await db.execute(
-            select(ExecutionRecord).where(ExecutionRecord.id == parent_record_id)
-        )
+        parent_record = await db.execute(select(ExecutionRecord).where(ExecutionRecord.id == parent_record_id))
         parent = parent_record.scalar_one_or_none()
 
         actual_session_id = session_id
@@ -127,18 +123,12 @@ class NestedRecordManager:
                 from infrastructure.db import get_async_session  # noqa: PLC0415
 
                 db_session = await get_async_session()
-                await self._update_nested_record_in_session(
-                        db_session, record_id, success, output, error, duration_ms
-                    )
+                await self._update_nested_record_in_session(db_session, record_id, success, output, error, duration_ms)
             else:
-                await self._update_nested_record_in_session(
-                    db, record_id, success, output, error, duration_ms
-                )
+                await self._update_nested_record_in_session(db, record_id, success, output, error, duration_ms)
 
         except Exception as e:
-            logger.warning(
-                f"[ToolExecutor] 更新嵌套执行记录失败 | record_id={record_id} | error={e}"
-            )
+            logger.warning(f"[ToolExecutor] 更新嵌套执行记录失败 | record_id={record_id} | error={e}")
 
     async def _update_nested_record_in_session(
         self,
@@ -154,9 +144,7 @@ class NestedRecordManager:
         from sqlalchemy import select  # noqa: PLC0415
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
-        result = await db.execute(
-            select(ExecutionRecord).where(ExecutionRecord.id == record_id)
-        )
+        result = await db.execute(select(ExecutionRecord).where(ExecutionRecord.id == record_id))
         record = result.scalar_one_or_none()
 
         if not record:
@@ -181,6 +169,5 @@ class NestedRecordManager:
             await db.commit()
 
         logger.info(
-            f"[ToolExecutor] 更新嵌套执行记录 | "
-            f"record_id={record_id} | success={success} | duration_ms={duration_ms}"
+            f"[ToolExecutor] 更新嵌套执行记录 | record_id={record_id} | success={success} | duration_ms={duration_ms}"
         )

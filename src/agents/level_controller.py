@@ -116,6 +116,7 @@ class LevelController:
         """
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             config = get_config_center().get("tool_permissions.yaml") or {}
             if not config:
                 self.logger.info("工具权限配置文件不存在，使用默认配置")
@@ -230,9 +231,7 @@ class LevelController:
         except ValueError:
             return None
 
-    def calculate_current_depth(
-        self, parent_task_id: str | None, task_depth_map: dict[str, int]
-    ) -> int:
+    def calculate_current_depth(self, parent_task_id: str | None, task_depth_map: dict[str, int]) -> int:
         """
         计算当前任务深度
 
@@ -320,9 +319,7 @@ class LevelController:
             return ValidationResult(
                 passed=False,
                 error_code=ValidationError.INVALID_TARGET_LEVEL,
-                error_message=(
-                    f"L{from_level} 不能提交任务给 L{to_level}，允许: {allowed}"
-                ),
+                error_message=(f"L{from_level} 不能提交任务给 L{to_level}，允许: {allowed}"),
             )
 
         return ValidationResult(passed=True)

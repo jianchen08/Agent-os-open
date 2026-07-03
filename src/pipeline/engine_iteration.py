@@ -110,7 +110,8 @@ async def _dispatch_input_target(
     target, matched_entry = engine.input_route_table.resolve_target(state)
     logger.debug(
         "Input route resolved target: %s (entry=%s)",
-        target, matched_entry.name if matched_entry else "none",
+        target,
+        matched_entry.name if matched_entry else "none",
     )
 
     if target == "end":
@@ -166,9 +167,7 @@ def consume_pending_notifications(
         state["user_input"] = f"{_combined}\n\n{_existing_input}"
     else:
         state["user_input"] = _combined
-    state.setdefault("messages", []).append(
-        {"role": "user", "content": _combined}
-    )
+    state.setdefault("messages", []).append({"role": "user", "content": _combined})
     state[StateKeys.CORE_TYPE] = "llm_call"
     state.pop("raw_result", None)
     state.pop("error_analysis", None)
@@ -181,7 +180,8 @@ def consume_pending_notifications(
 
     logger.info(
         "[Engine] 消费 %d 条待处理通知，注入 state 继续循环 (prepend=%s)",
-        len(_filtered), prepend,
+        len(_filtered),
+        prepend,
     )
     return True
 
@@ -263,14 +263,19 @@ async def _execute_core_and_route(
 
     if not route_signals:
         _no_route_action = await handle_no_route_signals(
-            engine, state, core_type, iteration,
+            engine,
+            state,
+            core_type,
+            iteration,
         )
         return IterationAction.BREAK if _no_route_action == "end" else IterationAction.CONTINUE
 
     resolved = engine.output_route_table.arbitrate(route_signals, state)
     logger.debug(
         "Route arbitrated: type=%s, target=%s, reason=%s",
-        resolved.route_type, resolved.target, resolved.reason,
+        resolved.route_type,
+        resolved.target,
+        resolved.reason,
     )
     should_break = await apply_route(engine, resolved, state)
     return IterationAction.BREAK if should_break else IterationAction.CONTINUE

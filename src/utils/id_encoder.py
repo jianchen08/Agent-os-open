@@ -142,9 +142,7 @@ def generate_task_id(
     return f"{parent_task_id}-{encoded_index}"
 
 
-def generate_nested_id(
-    parent_id: str | None = None, sequence: int = 0, prefix: str = "exec"
-) -> str:
+def generate_nested_id(parent_id: str | None = None, sequence: int = 0, prefix: str = "exec") -> str:
     """生成嵌套ID
 
     用于ExecutionRecord和Task的ID生成，支持嵌套层级。

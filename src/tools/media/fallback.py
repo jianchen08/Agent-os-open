@@ -47,9 +47,7 @@ class ProviderChain:
             providers: Provider 列表（会按 priority 排序）
             strategy: Fallback 策略
         """
-        self._providers = sorted(
-            providers, key=lambda p: p.config.priority
-        )
+        self._providers = sorted(providers, key=lambda p: p.config.priority)
         self._strategy = strategy
 
     @property
@@ -134,9 +132,7 @@ class ProviderChain:
                 )
                 errors.append(f"{provider.provider_name}: {e}")
 
-        raise RuntimeError(
-            f"所有 Provider 均失败: {'; '.join(errors)}"
-        )
+        raise RuntimeError(f"所有 Provider 均失败: {'; '.join(errors)}")
 
     async def execute_generate(self, prompt: str, **kwargs: Any) -> MediaResult:
         """按 Fallback 策略执行 generate。
@@ -197,6 +193,4 @@ class ProviderChain:
                 )
                 errors.append(f"{provider.provider_name}: {e}")
 
-        raise RuntimeError(
-            f"所有 Provider 均失败: {'; '.join(errors)}"
-        )
+        raise RuntimeError(f"所有 Provider 均失败: {'; '.join(errors)}")

@@ -122,11 +122,7 @@ class EvaluationEngine:
         config = config or EvaluationConfig()
 
         if config.metric_ids:
-            metrics_to_run = [
-                self._loader.get(mid)
-                for mid in config.metric_ids
-                if self._loader.get(mid) is not None
-            ]
+            metrics_to_run = [self._loader.get(mid) for mid in config.metric_ids if self._loader.get(mid) is not None]
         else:
             metrics_to_run = list(self._loader.metrics.values())
 
@@ -166,14 +162,13 @@ class EvaluationEngine:
                 summary="无可评估指标",
             )
 
-        metrics_to_run = sorted(
-            metrics_to_run, key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
-        )
+        metrics_to_run = sorted(metrics_to_run, key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99))
 
         type_order = [m.metric_type.value for m in metrics_to_run]
         logger.info(
             "Evaluation order for task %s: %s (sorted by type priority)",
-            task_id, type_order,
+            task_id,
+            type_order,
         )
 
         results: list[MetricResult] = []
@@ -291,15 +286,14 @@ class EvaluationEngine:
                     (
                         {_resolve_template(k, context): _resolve_template(v, context) for k, v in item.items()}
                         if isinstance(item, dict)
-                        else _resolve_template(item, context) if isinstance(item, str) else item
+                        else _resolve_template(item, context)
+                        if isinstance(item, str)
+                        else item
                     )
                     for item in value
                 ]
             elif isinstance(value, dict):
-                resolved[key] = {
-                    _resolve_template(k, context): _resolve_template(v, context)
-                    for k, v in value.items()
-                }
+                resolved[key] = {_resolve_template(k, context): _resolve_template(v, context) for k, v in value.items()}
             else:
                 resolved[key] = value
         return resolved
@@ -343,7 +337,9 @@ class EvaluationEngine:
 
             # 调用评估器获取输出
             output = await evaluator(
-                metric_def, merged_params, task_id,
+                metric_def,
+                merged_params,
+                task_id,
             )
 
             # 使用期望评估器判定
@@ -354,9 +350,10 @@ class EvaluationEngine:
             )
 
             logger.info(
-                "Expect evaluation: %s -> passed=%s, score=%s, "
-                "message=%s",
-                metric_def.id, result.passed, result.score,
+                "Expect evaluation: %s -> passed=%s, score=%s, message=%s",
+                metric_def.id,
+                result.passed,
+                result.score,
                 result.message[:100] if result.message else "",
             )
             if not result.passed and result.details:
@@ -364,7 +361,8 @@ class EvaluationEngine:
                 if failed:
                     logger.info(
                         "Failed conditions for %s: %s",
-                        metric_def.id, failed,
+                        metric_def.id,
+                        failed,
                     )
 
             # 尝试提取 score（agent/human 类型可能返回 score）
@@ -390,9 +388,7 @@ class EvaluationEngine:
             return result
 
         except Exception as e:
-            logger.error(
-                "Evaluation failed for metric %s: %s", metric_def.id, e
-            )
+            logger.error("Evaluation failed for metric %s: %s", metric_def.id, e)
             return MetricResult(
                 metric_id=metric_def.id,
                 passed=False,
@@ -403,7 +399,8 @@ class EvaluationEngine:
 
     @staticmethod
     def _pre_register_eval_pipeline(
-        pipeline_id: str, task_id: str,
+        pipeline_id: str,
+        task_id: str,
     ) -> None:
         """在评估子管道运行前立即注册到根任务子目录。
 
@@ -415,11 +412,13 @@ class EvaluationEngine:
             return
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
                 return
             from tasks.service import TaskService  # noqa: PLC0415
+
             ts = provider.get_or_create(
                 "task_service",
                 TaskService,
@@ -431,11 +430,13 @@ class EvaluationEngine:
                 exec_storage.register_pipeline(pipeline_id, root_id)
                 logger.debug(
                     "Eval pipeline pre-registered: %s -> root=%s",
-                    pipeline_id, root_id,
+                    pipeline_id,
+                    root_id,
                 )
         except Exception as exc:
             logger.debug(
-                "Eval pipeline pre-registration skipped (non-critical): %s", exc,
+                "Eval pipeline pre-registration skipped (non-critical): %s",
+                exc,
             )
 
     # ── 默认评估器实现（Mock） ────────────────────────────
@@ -460,7 +461,8 @@ class EvaluationEngine:
         evaluator_id = metric_def.evaluator_id
         logger.info(
             "Tool evaluation: %s (evaluator_id=%s)",
-            metric_def.id, evaluator_id,
+            metric_def.id,
+            evaluator_id,
         )
 
         handler = None
@@ -477,7 +479,7 @@ class EvaluationEngine:
                 if evaluator_id == "human_interaction":
                     params["pipeline_id"] = f"__eval__{task_id or 'unknown'}"
 
-                _is_human_interaction = (evaluator_id == "human_interaction")
+                _is_human_interaction = evaluator_id == "human_interaction"
                 try:
                     _running_loop = asyncio.get_running_loop()
                 except RuntimeError:
@@ -485,8 +487,12 @@ class EvaluationEngine:
 
                 logger.info(
                     "[EvalEngine] _evaluate_tool | metric=%s | evaluator=%s | pipeline_id=%s | params_keys=%s | running_loop=%s | main_loop=%s",
-                    metric_def.id, evaluator_id, params.get("pipeline_id"), list(params.keys()),
-                    id(_running_loop) if _running_loop else None, id(self._main_loop) if self._main_loop else None,
+                    metric_def.id,
+                    evaluator_id,
+                    params.get("pipeline_id"),
+                    list(params.keys()),
+                    id(_running_loop) if _running_loop else None,
+                    id(self._main_loop) if self._main_loop else None,
                 )
 
                 _needs_main_loop = (
@@ -500,7 +506,8 @@ class EvaluationEngine:
                 if _needs_main_loop:
                     logger.info(
                         "[EvalEngine] human_interaction 跨事件循环检测 | running=%s | main=%s | 使用 run_coroutine_threadsafe",
-                        id(_running_loop), id(self._main_loop),
+                        id(_running_loop),
+                        id(self._main_loop),
                     )
                     coro = handler(params)
                     future = asyncio.run_coroutine_threadsafe(coro, self._main_loop)
@@ -521,32 +528,30 @@ class EvaluationEngine:
                     status = result_dict.get("status", "completed")
                     result_dict["success"] = status == "completed"
 
-                actual_status = result_dict.get("data", result_dict).get(
-                    "status", result_dict.get("status")
-                )
+                actual_status = result_dict.get("data", result_dict).get("status", result_dict.get("status"))
                 actual_exit = result_dict.get("data", result_dict).get("exit_code")
                 logger.info(
-                    "Tool evaluation completed: %s -> success=%s, "
-                    "cmd_status=%s, exit_code=%s",
-                    metric_def.id, result_dict.get("success"),
-                    actual_status, actual_exit,
+                    "Tool evaluation completed: %s -> success=%s, cmd_status=%s, exit_code=%s",
+                    metric_def.id,
+                    result_dict.get("success"),
+                    actual_status,
+                    actual_exit,
                 )
                 return result_dict
 
             except Exception as e:
                 logger.error(
                     "Tool execution failed for %s (evaluator_id=%s): %s",
-                    metric_def.id, evaluator_id, e,
+                    metric_def.id,
+                    evaluator_id,
+                    e,
                 )
                 return {
                     "success": False,
                     "error": str(e),
                 }
 
-        raise RuntimeError(
-            f"Tool '{evaluator_id}' not found in registry. "
-            f"Metric: {metric_def.id}"
-        )
+        raise RuntimeError(f"Tool '{evaluator_id}' not found in registry. Metric: {metric_def.id}")
 
     @staticmethod
     def _get_builtin_evaluator_handler(evaluator_id: str) -> Any | None:
@@ -567,7 +572,6 @@ class EvaluationEngine:
         if handler is not None:
             return handler
         return _EvaluatorComponentResolver.resolve(evaluator_id)
-
 
     async def _evaluate_agent(
         self,
@@ -615,7 +619,8 @@ class EvaluationEngine:
 
         logger.info(
             "Agent evaluation: %s (evaluator_id=%s) — launching sub-pipeline",
-            metric_def.id, evaluator_id,
+            metric_def.id,
+            evaluator_id,
         )
 
         eval_prompt = self._build_agent_eval_prompt(metric_def, params)
@@ -672,30 +677,28 @@ class EvaluationEngine:
                 metadata={"source": MessageSource.SYSTEM.value},
             )
             inject_result = await send_pipeline_message(
-                msg, agent_config=agent_config, output_sink=_sink,
+                msg,
+                agent_config=agent_config,
+                output_sink=_sink,
                 workspace=workspace,
                 task_id=f"__eval__{metric_def.id}",
             )
             if not inject_result.success:
-                raise RuntimeError(
-                    f"评估消息注入失败: {inject_result.error or inject_result.method}"
-                )
+                raise RuntimeError(f"评估消息注入失败: {inject_result.error or inject_result.method}")
 
             # 阻塞等待 evaluator_agent 流式结束。evaluator_agent.timeout_seconds
             # （evaluator YAML，由 stop_check 插件执行）是真实超时安全阀；
             # 此处取一个略大于它的上限作为 await 兜底，防止 stop_check 失效时
             # 评估挂死整个 evaluate() 调用。
-            _await_timeout = (
-                float(getattr(agent_config, "timeout_seconds", 0) or 0)
-                + 60
-            ) or None
+            _await_timeout = (float(getattr(agent_config, "timeout_seconds", 0) or 0) + 60) or None
             output_text, sink_error = await _sink.result(timeout=_await_timeout)
 
             logger.info(
-                "Agent evaluation raw output: metric=%s, pipeline=%s, "
-                "output_text len=%d first200=%s",
-                metric_def.id, pipeline_id,
-                len(output_text or ""), (output_text or "")[:200],
+                "Agent evaluation raw output: metric=%s, pipeline=%s, output_text len=%d first200=%s",
+                metric_def.id,
+                pipeline_id,
+                len(output_text or ""),
+                (output_text or "")[:200],
             )
 
             if sink_error:
@@ -733,26 +736,21 @@ class EvaluationEngine:
                 return {
                     "passed": False,
                     "score": 0.0,
-                    "feedback": (
-                        f"evaluator_agent 经 {max_reminders}"
-                        " 次提醒后仍未输出有效评估结论"
-                    ),
+                    "feedback": (f"evaluator_agent 经 {max_reminders} 次提醒后仍未输出有效评估结论"),
                     "pipeline_run_id": pipeline_id,
                 }
             return {
                 "passed": False,
                 "score": 0.0,
-                "feedback": (
-                    "evaluator_agent 未能输出有效的"
-                    " evaluation_result JSON"
-                ),
+                "feedback": ("evaluator_agent 未能输出有效的 evaluation_result JSON"),
                 "pipeline_run_id": pipeline_id,
             }
 
         except Exception as e:
             logger.error(
                 "Agent evaluation pipeline failed for %s: %s",
-                metric_def.id, e,
+                metric_def.id,
+                e,
             )
             return {
                 "passed": False,
@@ -764,11 +762,13 @@ class EvaluationEngine:
             # 一次性评估：无论成功失败都终结管道（cancel engine_task + 停 bridge
             # + engine.cleanup + unregister），避免 entry 在 registry 堆积。
             from pipeline.message_bus import stop as _stop_pipeline  # noqa: PLC0415
+
             try:
                 await _stop_pipeline(pipeline_id)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
-                    "Eval pipeline stop failed (non-critical): %s", exc,
+                    "Eval pipeline stop failed (non-critical): %s",
+                    exc,
                 )
 
     @staticmethod
@@ -780,6 +780,7 @@ class EvaluationEngine:
         """
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(pipeline_id)
             if entry is None or entry.engine is None:
                 return {}
@@ -812,7 +813,7 @@ class EvaluationEngine:
             blocks = []
             i = 0
             while i < len(s):
-                if s[i] == '{':
+                if s[i] == "{":
                     depth = 0
                     start = i
                     in_string = False
@@ -821,26 +822,26 @@ class EvaluationEngine:
                         ch = s[i]
                         if escape_next:
                             escape_next = False
-                        elif ch == '\\' and in_string:
+                        elif ch == "\\" and in_string:
                             escape_next = True
                         elif ch == '"' and not escape_next:
                             in_string = not in_string
                         elif not in_string:
-                            if ch == '{':
+                            if ch == "{":
                                 depth += 1
-                            elif ch == '}':
+                            elif ch == "}":
                                 depth -= 1
                                 if depth == 0:
-                                    blocks.append(s[start:i + 1])
+                                    blocks.append(s[start : i + 1])
                                     break
                         i += 1
                 i += 1
             return blocks
 
-        code_block_pattern = re.compile(r'```(?:json)?\s*\n?(.*?)\n?\s*```', re.DOTALL)
+        code_block_pattern = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
         for match in code_block_pattern.finditer(text):
             candidate = match.group(1).strip()
-            if candidate.startswith('{'):
+            if candidate.startswith("{"):
                 try:
                     parsed = json.loads(candidate)
                     result = EvaluationEngine._extract_eval_from_parsed(parsed)
@@ -937,7 +938,7 @@ class EvaluationEngine:
         parts.append("")
         parts.append(
             "请根据以上信息进行评估验证，并在完成后输出评估结论 JSON：\n"
-            '```json\n'
+            "```json\n"
             '{"evaluation_result": {\n'
             '  "passed": true/false,\n'
             '  "score": 0-100,\n'
@@ -945,8 +946,8 @@ class EvaluationEngine:
             '  "issues": ["文件:行号 — 具体问题描述", ...],\n'
             '  "suggestions": ["具体修复建议", ...],\n'
             '  "report_path": "评估报告文件的相对路径"\n'
-            '}}\n'
-            '```\n'
+            "}}\n"
+            "```\n"
             "\n要求：\n"
             "- issues: 逐条列出每个不通过项，包含文件路径和行号\n"
             "- suggestions: 针对每个 issue 给出可操作的修复建议\n"
@@ -1038,6 +1039,7 @@ def _resolve_eval_project_root(
     workspace = params.get("workspace")
     if workspace:
         from pathlib import Path  # noqa: PLC0415
+
         p = Path(workspace)
         if p.is_absolute() and p.exists():
             return str(p)
@@ -1050,6 +1052,7 @@ def _resolve_eval_project_root(
 
     try:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         ts = provider.get_or_create(
             "task_service",
@@ -1062,6 +1065,7 @@ def _resolve_eval_project_root(
             ws = task.metadata.get("workspace")
             if ws:
                 from pathlib import Path  # noqa: PLC0415
+
                 abs_ws = Path.cwd() / ws
                 if abs_ws.exists():
                     return str(abs_ws)
@@ -1117,13 +1121,13 @@ class _DynamicToolResolver:
 
             sig = inspect.signature(tool_cls.__init__)
             required_params = [
-                p for p in sig.parameters.values()
-                if p.name != "self" and p.default is inspect.Parameter.empty
+                p for p in sig.parameters.values() if p.name != "self" and p.default is inspect.Parameter.empty
             ]
             if required_params:
                 logger.debug(
                     "Evaluator '%s' requires injection params %s, skipped",
-                    evaluator_id, [p.name for p in required_params],
+                    evaluator_id,
+                    [p.name for p in required_params],
                 )
                 return None
 
@@ -1131,7 +1135,9 @@ class _DynamicToolResolver:
             return inst.execute
         except Exception as e:
             logger.debug(
-                "DynamicToolResolver failed for '%s': %s", evaluator_id, e,
+                "DynamicToolResolver failed for '%s': %s",
+                evaluator_id,
+                e,
             )
             return None
 
@@ -1163,9 +1169,7 @@ class _EvaluatorComponentResolver:
         try:
             import importlib  # noqa: PLC0415
 
-            class_name = "".join(
-                word.capitalize() for word in evaluator_id.split("_")
-            )
+            class_name = "".join(word.capitalize() for word in evaluator_id.split("_"))
 
             for pkg in cls._EVALUATOR_DIRS:
                 module_path = f"{pkg}.{evaluator_id}"
@@ -1187,6 +1191,7 @@ class _EvaluatorComponentResolver:
         except Exception as e:
             logger.debug(
                 "EvaluatorComponentResolver failed for '%s': %s",
-                evaluator_id, e,
+                evaluator_id,
+                e,
             )
         return None

@@ -125,24 +125,17 @@ class ToolUsageTracker:
         return {
             "total_calls": total_calls,
             "total_success": total_success,
-            "overall_success_rate": (
-                total_success / total_calls if total_calls > 0 else 0
-            ),
+            "overall_success_rate": (total_success / total_calls if total_calls > 0 else 0),
             "average_duration": total_duration / total_calls if total_calls > 0 else 0,
             "total_tools": len(self.stats),
             "active_users": len(self.user_stats),
             "top_tools": [stat.tool_name for stat in self.get_top_tools(5)],
             "slowest_tools": [
-                stat.tool_name
-                for stat in sorted(
-                    self.stats.values(), key=lambda x: x.avg_duration, reverse=True
-                )[:5]
+                stat.tool_name for stat in sorted(self.stats.values(), key=lambda x: x.avg_duration, reverse=True)[:5]
             ],
         }
 
-    def _update_user_stats(
-        self, user_id: str, tool_name: str, success: bool, duration: float
-    ):
+    def _update_user_stats(self, user_id: str, tool_name: str, success: bool, duration: float):
         """更新用户统计"""
         if user_id not in self.user_stats:
             self.user_stats[user_id] = {}

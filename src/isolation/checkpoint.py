@@ -97,10 +97,7 @@ class CheckpointManager:
 
         # 如果工作目录不存在，返回空检查点
         if not workspace_path.exists():
-            logger.warning(
-                f"[CheckpointManager] 工作目录不存在，跳过备份 | "
-                f"workspace={workspace}"
-            )
+            logger.warning(f"[CheckpointManager] 工作目录不存在，跳过备份 | workspace={workspace}")
             self._save_manifest(checkpoint_path, checkpoint)
             return checkpoint
 
@@ -148,16 +145,11 @@ class CheckpointManager:
                         backup_path=str(backup_file.relative_to(checkpoint_path)),
                         checksum=checksum,
                         size=original_file.stat().st_size,
-                        modified_at=datetime.fromtimestamp(
-                            original_file.stat().st_mtime, UTC
-                        ).isoformat(),
+                        modified_at=datetime.fromtimestamp(original_file.stat().st_mtime, UTC).isoformat(),
                     )
                 )
             except Exception as e:
-                logger.error(
-                    f"[CheckpointManager] 备份文件失败 | "
-                    f"file={file_rel_path} | error={e}"
-                )
+                logger.error(f"[CheckpointManager] 备份文件失败 | file={file_rel_path} | error={e}")
 
         # 保存清单
         self._save_manifest(checkpoint_path, checkpoint)
@@ -175,9 +167,7 @@ class CheckpointManager:
         manifest_path = checkpoint_path / "manifest.json"
 
         if not manifest_path.exists():
-            logger.warning(
-                f"[CheckpointManager] 检查点不存在 | task_id={task_id}"
-            )
+            logger.warning(f"[CheckpointManager] 检查点不存在 | task_id={task_id}")
             return False
 
         # 加载检查点
@@ -195,18 +185,14 @@ class CheckpointManager:
                     shutil.copy2(backup_file, original_file)
                     restored_count += 1
                 except Exception as e:
-                    logger.error(
-                        f"[CheckpointManager] 恢复文件失败 | "
-                        f"file={file_record.original_path} | error={e}"
-                    )
+                    logger.error(f"[CheckpointManager] 恢复文件失败 | file={file_record.original_path} | error={e}")
 
         # 更新状态
         checkpoint.status = "restored"
         self._save_manifest(checkpoint_path, checkpoint)
 
         logger.info(
-            f"[CheckpointManager] 检查点已恢复 | "
-            f"task_id={task_id} | restored={restored_count}/{len(checkpoint.files)}"
+            f"[CheckpointManager] 检查点已恢复 | task_id={task_id} | restored={restored_count}/{len(checkpoint.files)}"
         )
 
         return True
@@ -216,22 +202,15 @@ class CheckpointManager:
         checkpoint_path = self.checkpoint_dir / task_id
 
         if not checkpoint_path.exists():
-            logger.warning(
-                f"[CheckpointManager] 检查点不存在，无需清理 | task_id={task_id}"
-            )
+            logger.warning(f"[CheckpointManager] 检查点不存在，无需清理 | task_id={task_id}")
             return True
 
         try:
             shutil.rmtree(checkpoint_path)
-            logger.info(
-                f"[CheckpointManager] 检查点已清理 | task_id={task_id}"
-            )
+            logger.info(f"[CheckpointManager] 检查点已清理 | task_id={task_id}")
             return True
         except Exception as e:
-            logger.error(
-                f"[CheckpointManager] 清理检查点失败 | "
-                f"task_id={task_id} | error={e}"
-            )
+            logger.error(f"[CheckpointManager] 清理检查点失败 | task_id={task_id} | error={e}")
             return False
 
     def get_checkpoint(self, task_id: str) -> Checkpoint | None:

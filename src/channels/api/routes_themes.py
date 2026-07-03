@@ -56,9 +56,7 @@ def _extract_meta(theme_path: Path) -> ThemeManifestItem | None:
         清单元数据；JSON 无效或缺少必填字段时返回 None。
     """
     try:
-        data: dict[str, Any] = json.loads(
-            theme_path.read_text(encoding="utf-8")
-        )
+        data: dict[str, Any] = json.loads(theme_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("[routes_themes] 跳过无效主题文件 %s: %s", theme_path.name, exc)
         return None

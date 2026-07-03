@@ -60,9 +60,7 @@ def is_sensitive_path(path: str) -> tuple[bool, str]:
 
     sp_lower = resolved.replace("\\", "/").lower()
 
-    sensitive_dirs = (
-        SENSITIVE_DIRS_WINDOWS if os.name == "nt" else SENSITIVE_DIRS_LINUX
-    )
+    sensitive_dirs = SENSITIVE_DIRS_WINDOWS if os.name == "nt" else SENSITIVE_DIRS_LINUX
 
     for forbidden in sensitive_dirs:
         if sp_lower == forbidden or sp_lower.startswith(forbidden + "/"):

@@ -197,6 +197,7 @@ class Application:
             _ctx_window = _llm_conf.get("context_window", 128000)
 
             from config.defaults import COMPRESS_TRIGGER_RATIO  # noqa: PLC0415
+
             context_service = MemoryContextService(
                 config={
                     "context_window": _ctx_window,
@@ -263,6 +264,7 @@ class Application:
             _review_ctx_window = 128000  # 兜底默认
             try:
                 from config.models import get_model_config_loader as _get_loader  # noqa: PLC0415
+
                 _loader = _get_loader()
                 _tiers = _loader._load_llm_data().get("defaults", {}).get("tiers", {})
                 _review_model_alias = _tiers.get("small", "")  # review_agent.yaml: model_tier=small
@@ -312,9 +314,7 @@ class Application:
             _maintenance_service = MemoryMaintenanceService(
                 storage=services.get("execution_record_storage"),
                 chunk_db=services.get("chunk_service"),
-                knowledge_service=getattr(
-                    memory_service, "_knowledge_service", None
-                ) if memory_service else None,
+                knowledge_service=getattr(memory_service, "_knowledge_service", None) if memory_service else None,
                 config=_maintenance_config,
                 memory_service=memory_service,
                 task_lookup=_task_lookup,
@@ -355,9 +355,7 @@ class Application:
                 _manager = get_isolation_manager_sync()
                 _manager.set_task_repository(task_service._storage)
             except Exception as _exc:
-                logger.warning(
-                    "注入 task_repository 到 IsolationManager 失败: %s", _exc
-                )
+                logger.warning("注入 task_repository 到 IsolationManager 失败: %s", _exc)
         except Exception as exc:
             logger.warning("创建 task_service 服务失败: %s", exc, exc_info=True)
 
@@ -414,6 +412,7 @@ class Application:
         # 解耦 infrastructure 对 channels 的逆向依赖。
         try:
             from channels.api.memory_store import store as _api_store  # noqa: PLC0415
+
             services["api_store"] = _api_store
             logger.debug("服务已: api_store")
         except Exception as exc:
@@ -483,9 +482,17 @@ class Application:
                 return "错误：未提供计算表达式"
             try:
                 allowed_names = {
-                    "abs": abs, "round": round, "min": min, "max": max,
-                    "pow": pow, "sum": sum, "pi": _math.pi, "e": _math.e,
-                    "sqrt": _math.sqrt, "ceil": _math.ceil, "floor": _math.floor,
+                    "abs": abs,
+                    "round": round,
+                    "min": min,
+                    "max": max,
+                    "pow": pow,
+                    "sum": sum,
+                    "pi": _math.pi,
+                    "e": _math.e,
+                    "sqrt": _math.sqrt,
+                    "ceil": _math.ceil,
+                    "floor": _math.floor,
                 }
                 result = eval(expression, {"__builtins__": {}}, allowed_names)
                 return str(result)
@@ -546,9 +553,7 @@ class Application:
                 class_name = provider_conf.get("class", "")
                 module_path = _PROVIDER_CLASS_MAP.get(class_name)
                 if not module_path:
-                    logger.warning(
-                        "[MediaRegistry] 未知 Provider 类: %s，跳过", class_name
-                    )
+                    logger.warning("[MediaRegistry] 未知 Provider 类: %s，跳过", class_name)
                     continue
 
                 try:
@@ -562,7 +567,8 @@ class Application:
 
                     if not raw_config.get("api_key"):
                         raw_config["api_key"] = Application._resolve_api_key(
-                            class_name, raw_config,
+                            class_name,
+                            raw_config,
                         )
 
                     provider_config = MediaProviderConfig(
@@ -750,6 +756,7 @@ class Application:
             logger.warning("services 中缺少 task_service，尝试懒创建")
             try:
                 from tasks.service import TaskService  # noqa: PLC0415
+
                 task_service = TaskService(event_bus=event_bus)
                 svc["task_service"] = task_service
                 logger.debug("task_service 懒创建成功")
@@ -817,6 +824,7 @@ class Application:
             return {}
         try:
             import yaml  # noqa: PLC0415
+
             data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             return data.get("maintenance", {}) if isinstance(data, dict) else {}
         except Exception as exc:

@@ -58,22 +58,28 @@ class TaskPostPipelineMixin:
         if task is None:
             return
 
-        status_str = (
-            task.status if isinstance(task.status, str) else task.status.value
-        )
+        status_str = task.status if isinstance(task.status, str) else task.status.value
         if status_str != "running":
             return
 
         task_result = getattr(task, "result", None)
         if task_result:
             await self._transition_to_evaluating(
-                task_id, task_service, lifecycle, workspace, ws_meta,
-                ctx, timer_manager,
+                task_id,
+                task_service,
+                lifecycle,
+                workspace,
+                ws_meta,
+                ctx,
+                timer_manager,
             )
         else:
             await self._fail_after_pipeline_exit(
-                task_id, task_service, pipeline_state,
-                ctx, timer_manager,
+                task_id,
+                task_service,
+                pipeline_state,
+                ctx,
+                timer_manager,
             )
 
     async def _transition_to_evaluating(
@@ -92,8 +98,7 @@ class TaskPostPipelineMixin:
         （复用系统重启恢复的逻辑），确保任务不会卡在 evaluating 状态。
         """
         logger.info(
-            "TaskWorker: task %s still RUNNING after pipeline exit, "
-            "has result output -> moving to evaluating",
+            "TaskWorker: task %s still RUNNING after pipeline exit, has result output -> moving to evaluating",
             task_id,
         )
         if lifecycle:
@@ -102,21 +107,24 @@ class TaskPostPipelineMixin:
             except Exception as e:
                 logger.warning(
                     "TaskWorker: lifecycle on_before_evaluate failed: task_id=%s, error=%s",
-                    task_id, e,
+                    task_id,
+                    e,
                 )
         try:
             await task_service.move_to_evaluating(task_id)
         except Exception as e:
             logger.warning(
                 "TaskWorker: move_to_evaluating failed for %s: %s, falling back to fail",
-                task_id, e,
+                task_id,
+                e,
             )
             try:
                 await task_service.fail_task(task_id, f"管道退出后状态转移失败: {e}")
             except Exception as fail_exc:
                 logger.error(
                     "TaskWorker: fallback fail_task also failed for %s: %s",
-                    task_id, fail_exc,
+                    task_id,
+                    fail_exc,
                 )
             ctx.set_terminal()
             ctx.cleanup(timer_manager)
@@ -131,11 +139,13 @@ class TaskPostPipelineMixin:
             except Exception as rerun_exc:
                 logger.error(
                     "TaskWorker: _rerun_evaluation failed for %s: %s",
-                    task_id, rerun_exc,
+                    task_id,
+                    rerun_exc,
                 )
                 with contextlib.suppress(Exception):
                     await task_service.fail_task(
-                        task_id, f"管道退出后评估执行失败: {rerun_exc}",
+                        task_id,
+                        f"管道退出后评估执行失败: {rerun_exc}",
                     )
 
     async def _fail_after_pipeline_exit(
@@ -166,10 +176,13 @@ class TaskPostPipelineMixin:
             "TaskWorker: _fail_after_pipeline_exit 诊断 | task=%s pipeline=%s "
             "state_empty=%s state_not_ended=%s iteration=%s/%s ended=%s "
             "raw_error=%s stop_reason=%s",
-            task_id, pipeline_id[:12] if isinstance(pipeline_id, str) else pipeline_id,
+            task_id,
+            pipeline_id[:12] if isinstance(pipeline_id, str) else pipeline_id,
             not pipeline_state,
             isinstance(ended, bool) and not ended,
-            iteration_count, max_iter, ended,
+            iteration_count,
+            max_iter,
+            ended,
             raw_error or "(none)",
             stop_reason or "(none)",
         )
@@ -177,6 +190,7 @@ class TaskPostPipelineMixin:
         # 统计 LLM 错误类型分布（从 pipeline state 的单一数据源取）
         # 供 task metadata、watchdog、通知器等任意消费方使用
         from collections import Counter  # noqa: PLC0415
+
         error_history = pipeline_state.get("llm_error_history", []) if pipeline_state else []
         error_kinds: dict[str, int] = {}
         if error_history:
@@ -184,15 +198,9 @@ class TaskPostPipelineMixin:
 
         # 根据实际原因构建精确的错误信息
         parts: list[str] = []
-        hit_max_iter = (
-            isinstance(iteration_count, int)
-            and isinstance(max_iter, int)
-            and iteration_count >= max_iter
-        )
+        hit_max_iter = isinstance(iteration_count, int) and isinstance(max_iter, int) and iteration_count >= max_iter
         state_is_empty = not pipeline_state
-        state_not_ended = (
-            isinstance(ended, bool) and not ended
-        )
+        state_not_ended = isinstance(ended, bool) and not ended
 
         if raw_error:
             # 管道内有明确错误（LLM 调用失败、工具异常等）→ 直接透传
@@ -206,9 +214,7 @@ class TaskPostPipelineMixin:
             parts.append(stop_reason)
         elif hit_max_iter:
             # 确实是迭代耗尽
-            parts.append(
-                f"管道迭代耗尽({iteration_count}/{max_iter})"
-            )
+            parts.append(f"管道迭代耗尽({iteration_count}/{max_iter})")
         elif state_is_empty or state_not_ended:
             # pipeline_state 为空（进程被杀/重启导致 asyncio task 未完成）
             # 或 ended=False（管道循环被外部中断，如 CancelledError 后进程退出）
@@ -220,10 +226,7 @@ class TaskPostPipelineMixin:
             )
         else:
             # 其他未知原因
-            parts.append(
-                f"管道异常结束(iterations="
-                f"{iteration_count}/{max_iter})"
-            )
+            parts.append(f"管道异常结束(iterations={iteration_count}/{max_iter})")
 
         if error_analysis:
             parts.append(f"错误分析: {error_analysis}")
@@ -233,11 +236,7 @@ class TaskPostPipelineMixin:
         if task_complete is False:
             parts.append("Agent 标记任务未完成")
 
-        error_msg = (
-            "，".join(parts)
-            if parts
-            else "管道异常退出，Agent 未完成评估"
-        )
+        error_msg = "，".join(parts) if parts else "管道异常退出，Agent 未完成评估"
 
         logger.warning(
             "TaskWorker: task %s still RUNNING "
@@ -245,20 +244,24 @@ class TaskPostPipelineMixin:
             "iterations=%s/%s, ended=%s, "
             "raw_error=%s, "
             "has_result=False → %s",
-            task_id, iteration_count,
-            max_iter, ended,
+            task_id,
+            iteration_count,
+            max_iter,
+            ended,
             raw_error or "(none)",
             error_msg,
         )
 
         if task_service:
             await task_service.fail_task(
-                task_id, error_msg,
+                task_id,
+                error_msg,
                 extra_meta={"error_kinds": error_kinds} if error_kinds else None,
             )
             logger.info(
                 "TaskWorker: task %s marked failed after pipeline exit: %s",
-                task_id, error_msg,
+                task_id,
+                error_msg,
             )
         ctx.set_terminal()
         ctx.cleanup(timer_manager)
@@ -287,11 +290,7 @@ class TaskPostPipelineMixin:
         stop_reason = pipeline_state.get("router.stop_reason", "")
 
         parts: list[str] = []
-        hit_max_iter = (
-            isinstance(iteration_count, int)
-            and isinstance(max_iter, int)
-            and iteration_count >= max_iter
-        )
+        hit_max_iter = isinstance(iteration_count, int) and isinstance(max_iter, int) and iteration_count >= max_iter
 
         if raw_error:
             parts.append(f"管道异常退出: {raw_error}")
@@ -303,17 +302,11 @@ class TaskPostPipelineMixin:
         elif hit_max_iter:
             parts.append(f"管道迭代耗尽({iteration_count}/{max_iter})")
         else:
-            parts.append(
-                f"管道异常结束(iterations={iteration_count}/{max_iter})"
-            )
+            parts.append(f"管道异常结束(iterations={iteration_count}/{max_iter})")
 
         if error_analysis:
             parts.append(f"错误分析: {error_analysis}")
         if task_complete is False:
             parts.append("Agent 标记任务未完成")
 
-        return (
-            "，".join(parts)
-            if parts
-            else "管道异常退出，Agent 未完成评估"
-        )
+        return "，".join(parts) if parts else "管道异常退出，Agent 未完成评估"

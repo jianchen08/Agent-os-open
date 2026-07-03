@@ -108,13 +108,15 @@ class ToolCache(IInputPlugin):
                     cached_results.append(result)
                     logger.debug(
                         "[%s] Cache hit | key=%s",
-                        self.name, cache_key[:12],
+                        self.name,
+                        cache_key[:12],
                     )
                     continue
                 del self._cache[cache_key]
                 logger.debug(
                     "[%s] Cache expired | key=%s",
-                    self.name, cache_key[:12],
+                    self.name,
+                    cache_key[:12],
                 )
 
             return PluginResult()
@@ -170,16 +172,15 @@ class ToolCache(IInputPlugin):
         如果清理后仍超过 max_size，按 LRU 策略移除最久未访问的条目。
         """
         now = time.time()
-        expired_keys = [
-            k for k, (_, exp, _) in self._cache.items() if now >= exp
-        ]
+        expired_keys = [k for k, (_, exp, _) in self._cache.items() if now >= exp]
         for k in expired_keys:
             del self._cache[k]
 
         if len(self._cache) > self._max_size:
             # LRU: 按 last_access_time 排序，移除最久未访问的条目
             sorted_items = sorted(
-                self._cache.items(), key=lambda item: item[1][2],
+                self._cache.items(),
+                key=lambda item: item[1][2],
             )
             to_remove = len(self._cache) - self._max_size
             for k, _ in sorted_items[:to_remove]:

@@ -47,7 +47,4 @@ class ProviderAdapter:
         Returns:
             适配后的消息列表（新列表，原数据不变）
         """
-        return [
-            {k: v for k, v in m.items() if k != "reasoning_content"}
-            for m in messages
-        ]
+        return [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]

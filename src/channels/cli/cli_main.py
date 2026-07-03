@@ -46,13 +46,15 @@ if _sys.platform == "win32":
     # 启用 Windows CMD 的 ANSI escape code 支持
     try:
         import ctypes
+
         _kernel32 = ctypes.windll.kernel32
         for _handle_id in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
             _handle = _kernel32.GetStdHandle(_handle_id)
             _mode = ctypes.c_ulong()
             if _kernel32.GetConsoleMode(_handle, ctypes.byref(_mode)):
                 _kernel32.SetConsoleMode(
-                    _handle, _mode.value | 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                    _handle,
+                    _mode.value | 0x0004,  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
                 )
     except Exception:
         pass
@@ -114,13 +116,26 @@ def setup_logging(
 
     if not debug:
         _SUPPRESSED_NS = (  # noqa: N806
-            "pipeline.", "httpcore", "httpx", "LiteLLM", "openai",
-            "isolation.", "infrastructure.",
-            "tools.", "plugins.", "llm.",
-            "src.tools.", "src.plugins.", "src.llm.",
-            "evaluation", "tasks", "memory",
-            "human_interaction", "channels.cli.",
-            "__main__", "asyncio",
+            "pipeline.",
+            "httpcore",
+            "httpx",
+            "LiteLLM",
+            "openai",
+            "isolation.",
+            "infrastructure.",
+            "tools.",
+            "plugins.",
+            "llm.",
+            "src.tools.",
+            "src.plugins.",
+            "src.llm.",
+            "evaluation",
+            "tasks",
+            "memory",
+            "human_interaction",
+            "channels.cli.",
+            "__main__",
+            "asyncio",
         )
 
         def _console_filter(record: logging.LogRecord) -> bool:
@@ -234,17 +249,12 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         config_path = Path(config_path)
         if not config_path.exists():
             # 回退到 src/ 下的 config/pipelines/
-            project_root = (
-                Path(__file__).resolve().parent.parent.parent
-                / "config" / "pipelines" / "default.yaml"
-            )
+            project_root = Path(__file__).resolve().parent.parent.parent / "config" / "pipelines" / "default.yaml"
             if project_root.exists():
                 config_path = project_root
             else:
                 logger.error("Pipeline config not found at %s", config_path)
-                raise FileNotFoundError(
-                    f"Pipeline config not found: {config_path}"
-                )
+                raise FileNotFoundError(f"Pipeline config not found: {config_path}")
 
         logger.info("Loading pipeline config from: %s", config_path)
 
@@ -253,9 +263,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
 
         # 加载管道配置
         try:
-            pipeline_config = load_pipeline_config(
-                config_path, model_loader=model_loader
-            )
+            pipeline_config = load_pipeline_config(config_path, model_loader=model_loader)
         except (FileNotFoundError, ValueError) as exc:
             logger.error("Failed to load pipeline config: %s", exc)
             raise
@@ -263,7 +271,9 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         # 构建插件注册表（通过 model_loader 自动创建共享 Router）
         _t0 = _time.monotonic()
         self._plugin_registry = build_plugin_registry(
-            pipeline_config, model_loader=model_loader, router=None,
+            pipeline_config,
+            model_loader=model_loader,
+            router=None,
         )
         logger.info(
             "[STARTUP] build_plugin_registry: %.2fs",
@@ -272,6 +282,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
 
         # 获取共享 Router
         from llm.router_factory import get_or_create_router  # noqa: PLC0415
+
         router = get_or_create_router(model_loader)
 
         # 使用配置中的路由表
@@ -280,6 +291,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
 
         # 加载 Agent 配置（使用全局单例 registry，热重载统一生效）
         from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+
         agent_registry = get_global_agent_registry_sync()
 
         # 创建共享服务 → 注入 PipelineEngine
@@ -322,9 +334,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         # 初始化任务执行器
         self._init_task_worker(config_path)
 
-        logger.info(
-            "Real pipeline setup complete: name=%s", pipeline_config.name
-        )
+        logger.info("Real pipeline setup complete: name=%s", pipeline_config.name)
 
     def _register_tools_to_core(self) -> None:
         """注册核心工具到 ToolCore 并注入隔离执行器。"""
@@ -336,10 +346,9 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         if tool_registry is not None:
             try:
                 from tools.builtin import register_core_tools  # noqa: PLC0415
+
                 registered = register_core_tools(tool_registry, session=None)
-                logger.info(
-                    "ToolCore registered %d core tools", len(registered)
-                )
+                logger.info("ToolCore registered %d core tools", len(registered))
             except Exception as exc:
                 logger.warning("register_core_tools failed: %s", exc)
             tool_core.register_tools_from_registry(tool_registry)
@@ -415,14 +424,17 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             from tasks.service import TaskService  # noqa: PLC0415
+
             _provider = get_service_provider()
             task_service = self._services.get("task_service") or _provider.get_or_create(
-                "task_service", lambda: TaskService(event_bus=_provider.get("event_bus")),
+                "task_service",
+                lambda: TaskService(event_bus=_provider.get("event_bus")),
             )
 
             import yaml as _yaml  # noqa: PLC0415
 
             from infrastructure.task_worker import TaskWorker  # noqa: PLC0415
+
             _tw_config: dict[str, Any] = {}
             try:
                 with open(config_path, encoding="utf-8") as _f:
@@ -457,9 +469,8 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             # 注册 pipeline_factory 到 ServiceProvider
             try:
                 from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-                get_service_provider().register(
-                    "pipeline_factory", _eval_pipeline_factory
-                )
+
+                get_service_provider().register("pipeline_factory", _eval_pipeline_factory)
             except Exception:
                 pass
         except Exception as exc:
@@ -502,20 +513,14 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             from channels.cli.cli_interaction import CLIInteractionNotifier  # noqa: PLC0415
             from human_interaction import get_human_interaction_service  # noqa: PLC0415
 
-            cli_notifier = CLIInteractionNotifier(
-                console=self._output_adapter.console
-            )
+            cli_notifier = CLIInteractionNotifier(console=self._output_adapter.console)
             human_svc = get_human_interaction_service()
             human_svc.set_notifier(cli_notifier)
             services["cli_notifier"] = cli_notifier
             services["human_interaction_service"] = human_svc
-            logger.info(
-                "Service created: CLIInteractionNotifier -> HumanInteractionService"
-            )
+            logger.info("Service created: CLIInteractionNotifier -> HumanInteractionService")
         except Exception as exc:
-            logger.warning(
-                "Failed to create CLIInteractionNotifier: %s", exc
-            )
+            logger.warning("Failed to create CLIInteractionNotifier: %s", exc)
 
         return services
 
@@ -534,26 +539,26 @@ def main() -> None:
     - ``--no-streaming``: 禁用流式输出
     - ``--mode MODE``: 交互模式 (normal/auto/plan)
     """
-    parser = argparse.ArgumentParser(
-        description="Agent OS CLI — Claude Code 风格插件化管道交互式命令行"
-    )
+    parser = argparse.ArgumentParser(description="Agent OS CLI — Claude Code 风格插件化管道交互式命令行")
+    parser.add_argument("--config", type=str, default=None, help="管道配置 YAML 路径")
+    parser.add_argument("--debug", action="store_true", help="启用调试日志")
     parser.add_argument(
-        "--config", type=str, default=None, help="管道配置 YAML 路径"
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="启用调试日志"
-    )
-    parser.add_argument(
-        "--no-streaming", action="store_true",
+        "--no-streaming",
+        action="store_true",
         help="禁用流式输出（默认启用）",
     )
     parser.add_argument(
-        "--mode", type=str, default="normal",
+        "--mode",
+        type=str,
+        default="normal",
         choices=["normal", "auto", "plan"],
         help="交互模式 (normal/auto/plan)",
     )
     parser.add_argument(
-        "--message", "-m", type=str, default=None,
+        "--message",
+        "-m",
+        type=str,
+        default=None,
         help="直接发送消息（非交互模式）",
     )
     args = parser.parse_args()
@@ -573,6 +578,7 @@ def main() -> None:
     finally:
         try:
             from llm.adapter import cleanup_litellm_resources_sync  # noqa: PLC0415
+
             cleanup_litellm_resources_sync()
         except Exception:
             pass

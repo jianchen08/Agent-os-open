@@ -34,9 +34,7 @@ class ConditionTrigger(BaseTrigger):
         super().__init__(config)
 
         if config.trigger_type != TriggerType.CONDITION:
-            raise ValueError(
-                f"触发器类型必须是 CONDITION，实际是 {config.trigger_type}"
-            )
+            raise ValueError(f"触发器类型必须是 CONDITION，实际是 {config.trigger_type}")
 
         if not config.condition:
             raise ValueError("条件触发器必须包含 condition 配置")
@@ -61,9 +59,7 @@ class ConditionTrigger(BaseTrigger):
         """
         if not self.enabled:
             logger.debug(f"条件触发器 {self.name} 已禁用，跳过执行")
-            return ExecutionResult(
-                success=False, message="触发器已禁用", data={"trigger_id": self.id}
-            )
+            return ExecutionResult(success=False, message="触发器已禁用", data={"trigger_id": self.id})
 
         # 检查是否需要监听此事件类型
         event_type_value = event.event_type.value
@@ -96,9 +92,7 @@ class ConditionTrigger(BaseTrigger):
                 },
             )
 
-        logger.info(
-            f"条件触发器 {self.name} 被触发: {event.event_type.value}, 条件: {self.expression}"
-        )
+        logger.info(f"条件触发器 {self.name} 被触发: {event.event_type.value}, 条件: {self.expression}")
 
         # 执行配置的动作
         context = {
@@ -141,9 +135,7 @@ class ConditionTrigger(BaseTrigger):
             return bool(result)
 
         except InvalidExpression as e:
-            logger.error(
-                f"条件表达式求值失败（无效表达式）: {e}, 表达式: {self.expression}"
-            )
+            logger.error(f"条件表达式求值失败（无效表达式）: {e}, 表达式: {self.expression}")
             return False
         except Exception as e:
             logger.error(f"条件表达式求值失败: {e}, 表达式: {self.expression}")

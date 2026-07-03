@@ -178,24 +178,23 @@ class MiniMaxImageProvider(MediaProvider):
             "Content-Type": "application/json",
         }
 
-        async with aiohttp.ClientSession() as session, session.post(
-            self._api_url,
-            json=payload,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                self._api_url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp,
+        ):
             if resp.status != 200:
                 error_text = await resp.text()
-                raise RuntimeError(
-                    f"MiniMax API 调用失败 (status={resp.status}): {error_text}"
-                )
+                raise RuntimeError(f"MiniMax API 调用失败 (status={resp.status}): {error_text}")
             result = await resp.json()
 
         base_resp = result.get("base_resp", {})
         if base_resp.get("status_code", 0) != 0:
-            raise RuntimeError(
-                f"MiniMax API 业务错误: {base_resp.get('status_msg', 'unknown')}"
-            )
+            raise RuntimeError(f"MiniMax API 业务错误: {base_resp.get('status_msg', 'unknown')}")
 
         return result
 
@@ -216,10 +215,13 @@ class MiniMaxImageProvider(MediaProvider):
         image_urls = response_data.get("data", {}).get("image_urls", [])
         if image_urls:
             url = image_urls[0]
-            async with aiohttp.ClientSession() as session, session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp,
+            ):
                 if resp.status != 200:
                     raise RuntimeError(f"下载图片失败 (status={resp.status})")
                 content = await resp.read()

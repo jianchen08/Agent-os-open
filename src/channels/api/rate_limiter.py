@@ -102,9 +102,7 @@ class TieredRateLimiter:
         else:
             self.policies = dict(policies)
             # 确保 DEFAULT 策略始终存在
-            self.policies.setdefault(
-                RateLimitCategory.DEFAULT, DEFAULT_POLICIES[RateLimitCategory.DEFAULT]
-            )
+            self.policies.setdefault(RateLimitCategory.DEFAULT, DEFAULT_POLICIES[RateLimitCategory.DEFAULT])
         self._hits: dict[tuple[str, RateLimitCategory], list[float]] = {}
 
     def is_allowed(self, key: str, category: RateLimitCategory) -> bool:

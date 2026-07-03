@@ -102,42 +102,14 @@ class ModelCapability(BaseModel):
     supports_audio: bool = Field(default=False, description="是否支持音频")
     supports_video: bool = Field(default=False, description="是否支持视频")
     supports_document: bool = Field(default=False, description="是否支持文档")
-    supported_image_types: list[str] = Field(
-        default_factory=list,
-        description="支持的图片MIME类型"
-    )
-    supported_audio_types: list[str] = Field(
-        default_factory=list,
-        description="支持的音频MIME类型"
-    )
-    supported_video_types: list[str] = Field(
-        default_factory=list,
-        description="支持的视频MIME类型"
-    )
-    supported_document_types: list[str] = Field(
-        default_factory=list,
-        description="支持的文档MIME类型"
-    )
-    max_image_size: int = Field(
-        default=20 * 1024 * 1024,
-        ge=0,
-        description="最大图片大小（字节）"
-    )
-    max_audio_size: int = Field(
-        default=25 * 1024 * 1024,
-        ge=0,
-        description="最大音频大小（字节）"
-    )
-    max_video_size: int = Field(
-        default=100 * 1024 * 1024,
-        ge=0,
-        description="最大视频大小（字节）"
-    )
-    max_document_size: int = Field(
-        default=10 * 1024 * 1024,
-        ge=0,
-        description="最大文档大小（字节）"
-    )
+    supported_image_types: list[str] = Field(default_factory=list, description="支持的图片MIME类型")
+    supported_audio_types: list[str] = Field(default_factory=list, description="支持的音频MIME类型")
+    supported_video_types: list[str] = Field(default_factory=list, description="支持的视频MIME类型")
+    supported_document_types: list[str] = Field(default_factory=list, description="支持的文档MIME类型")
+    max_image_size: int = Field(default=20 * 1024 * 1024, ge=0, description="最大图片大小（字节）")
+    max_audio_size: int = Field(default=25 * 1024 * 1024, ge=0, description="最大音频大小（字节）")
+    max_video_size: int = Field(default=100 * 1024 * 1024, ge=0, description="最大视频大小（字节）")
+    max_document_size: int = Field(default=10 * 1024 * 1024, ge=0, description="最大文档大小（字节）")
 
 
 class MultimodalContent(BaseModel):

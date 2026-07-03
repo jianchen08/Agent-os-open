@@ -36,13 +36,15 @@ class DegradationManager:
     """
 
     # 支持降级处理的操作类型集合
-    DEGRADABLE_ACTIONS: frozenset[str] = frozenset({
-        "open_file",
-        "get_selection",
-        "show_diff",
-        "insert_content",
-        "jump_to",
-    })
+    DEGRADABLE_ACTIONS: frozenset[str] = frozenset(
+        {
+            "open_file",
+            "get_selection",
+            "show_diff",
+            "insert_content",
+            "jump_to",
+        }
+    )
 
     def __init__(self) -> None:
         """初始化降级管理器。"""
@@ -59,9 +61,7 @@ class DegradationManager:
         """
         return action_type in self.DEGRADABLE_ACTIONS
 
-    def execute_with_fallback(
-        self, action_type: str, params: dict[str, Any]
-    ) -> ActionResult:
+    def execute_with_fallback(self, action_type: str, params: dict[str, Any]) -> ActionResult:
         """带降级的执行操作。
 
         根据操作类型选择合适的降级方案执行。
@@ -89,9 +89,7 @@ class DegradationManager:
                 error=f"降级执行失败: {str(e)}",
             )
 
-    def _get_fallback_handler(
-        self, action_type: str
-    ) -> Any:
+    def _get_fallback_handler(self, action_type: str) -> Any:
         """获取降级处理函数。
 
         Args:

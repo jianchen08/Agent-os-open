@@ -39,9 +39,7 @@ class ActionExecutor:
         self._custom_handlers = {}
         self._retry_queue = []
 
-    async def execute(
-        self, action_config: ActionConfig, context: dict[str, Any]
-    ) -> ExecutionResult:
+    async def execute(self, action_config: ActionConfig, context: dict[str, Any]) -> ExecutionResult:
         handler = self._action_handlers.get(action_config.type)
 
         if not handler:
@@ -55,13 +53,9 @@ class ActionExecutor:
             return await handler(action_config.config, context)
         except Exception as e:
             logger.error(f"执行动作失败: {e}", exc_info=True)
-            return ExecutionResult(
-                success=False, message=f"动作执行失败: {str(e)}", error=str(e)
-            )
+            return ExecutionResult(success=False, message=f"动作执行失败: {str(e)}", error=str(e))
 
-    async def _execute_notification(
-        self, config: dict[str, Any], context: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_notification(self, config: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
         channel = config.get("channel", "websocket")
         template_str = config.get("template", "")
         priority = config.get("priority", "normal")
@@ -77,13 +71,9 @@ class ActionExecutor:
 
         try:
             if channel == "websocket":
-                await self._send_websocket_notification(
-                    user_id, title, message, priority
-                )
+                await self._send_websocket_notification(user_id, title, message, priority)
             elif channel == "database":
-                await self._send_database_notification(
-                    user_id, title, message, priority
-                )
+                await self._send_database_notification(user_id, title, message, priority)
             elif channel == "webhook":
                 await self._send_webhook_notification(config, title, message, priority)
             else:
@@ -110,13 +100,9 @@ class ActionExecutor:
 
         except Exception as e:
             logger.error(f"发送通知失败: {e}")
-            return ExecutionResult(
-                success=False, message=f"发送通知失败: {str(e)}", error=str(e)
-            )
+            return ExecutionResult(success=False, message=f"发送通知失败: {str(e)}", error=str(e))
 
-    async def _send_websocket_notification(
-        self, user_id: str, title: str, message: str, priority: str
-    ):
+    async def _send_websocket_notification(self, user_id: str, title: str, message: str, priority: str):
         try:
             container = get_global_container()
 
@@ -129,24 +115,16 @@ class ActionExecutor:
                     priority=priority,
                     timestamp=datetime.utcnow(),
                 )
-                logger.info(
-                    f"WebSocket通知已发送: 用户={user_id}, 标题={title}, 优先级={priority}"
-                )
+                logger.info(f"WebSocket通知已发送: 用户={user_id}, 标题={title}, 优先级={priority}")
             else:
                 logger.warning("WebSocket事件服务未注册，使用日志记录")
-                logger.info(
-                    f"WebSocket通知: 用户={user_id}, 标题={title}, 优先级={priority}"
-                )
+                logger.info(f"WebSocket通知: 用户={user_id}, 标题={title}, 优先级={priority}")
 
         except Exception as e:
             logger.error(f"发送WebSocket通知失败: {e}")
-            logger.info(
-                f"WebSocket通知(降级): 用户={user_id}, 标题={title}, 优先级={priority}"
-            )
+            logger.info(f"WebSocket通知(降级): 用户={user_id}, 标题={title}, 优先级={priority}")
 
-    async def _send_database_notification(
-        self, user_id: str, title: str, message: str, priority: str
-    ):
+    async def _send_database_notification(self, user_id: str, title: str, message: str, priority: str):
         try:
             from src.api.services.notification_service import NotificationService  # noqa: PLC0415
 
@@ -167,9 +145,7 @@ class ActionExecutor:
             logger.error(f"创建数据库通知失败: {e}")
             raise
 
-    async def _send_webhook_notification(
-        self, config: dict[str, Any], title: str, message: str, priority: str
-    ):
+    async def _send_webhook_notification(self, config: dict[str, Any], title: str, message: str, priority: str):
         webhook_url = config.get("webhook_url")
         if not webhook_url:
             raise ValueError("Webhook通知需要提供webhook_url")
@@ -190,9 +166,7 @@ class ActionExecutor:
             logger.error(f"发送Webhook通知失败: {e}")
             raise
 
-    async def _execute_api_call(
-        self, config: dict[str, Any], context: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_api_call(self, config: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
         endpoint = config.get("endpoint", "")
         method = config.get("method", "GET").upper()
         headers = config.get("headers", {})
@@ -238,9 +212,7 @@ class ActionExecutor:
                         "status_code": response.status_code,
                         "response": (
                             response.json()
-                            if response.headers.get("content-type", "").startswith(
-                                "application/json"
-                            )
+                            if response.headers.get("content-type", "").startswith("application/json")
                             else response.text
                         ),
                     },
@@ -248,13 +220,9 @@ class ActionExecutor:
 
         except httpx.HTTPError as e:
             logger.error(f"API 调用失败: {e}")
-            return ExecutionResult(
-                success=False, message=f"API 调用失败: {str(e)}", error=str(e)
-            )
+            return ExecutionResult(success=False, message=f"API 调用失败: {str(e)}", error=str(e))
 
-    async def _execute_task_retry(
-        self, config: dict[str, Any], context: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_task_retry(self, config: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
         task_id = context.get("task_id")
         max_retries = config.get("max_retries", 3)
         delay_seconds = config.get("delay_seconds", 60)
@@ -277,7 +245,7 @@ class ActionExecutor:
                 error="Max retries exceeded",
             )
 
-        actual_delay = delay_seconds * 2 ** current_retries if exponential_backoff else delay_seconds
+        actual_delay = delay_seconds * 2**current_retries if exponential_backoff else delay_seconds
 
         retry_info = {
             "task_id": task_id,
@@ -289,9 +257,7 @@ class ActionExecutor:
 
         self._retry_queue.append(retry_info)
 
-        logger.info(
-            f"任务重试已安排: {task_id}, 重试次数: {current_retries + 1}/{max_retries}, 延迟: {actual_delay}s"
-        )
+        logger.info(f"任务重试已安排: {task_id}, 重试次数: {current_retries + 1}/{max_retries}, 延迟: {actual_delay}s")
 
         return ExecutionResult(
             success=True,
@@ -305,9 +271,7 @@ class ActionExecutor:
             },
         )
 
-    async def _execute_task_complete(
-        self, config: dict[str, Any], context: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_task_complete(self, config: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
         task_id = config.get("task_id") or context.get("task_id")
         status = config.get("status", "completed")
         result = config.get("result", {})
@@ -324,9 +288,7 @@ class ActionExecutor:
 
             if container.has("task_manager"):
                 task_manager = container.get("task_manager")
-                update_result = await task_manager.update_task_status(
-                    task_id=task_id, status=status, result=result
-                )
+                update_result = await task_manager.update_task_status(task_id=task_id, status=status, result=result)
 
                 if update_result.get("success", False):
                     logger.info(f"任务完成: {task_id}, 状态: {status}")
@@ -351,13 +313,9 @@ class ActionExecutor:
 
         except Exception as e:
             logger.error(f"执行任务完成动作失败: {e}")
-            return ExecutionResult(
-                success=False, message=f"执行任务完成动作失败: {str(e)}", error=str(e)
-            )
+            return ExecutionResult(success=False, message=f"执行任务完成动作失败: {str(e)}", error=str(e))
 
-    async def _execute_custom(
-        self, config: dict[str, Any], context: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_custom(self, config: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
         handler_name = config.get("handler", "")
         params = config.get("params", {})
 
@@ -449,13 +407,9 @@ class ActionExecutor:
             )
 
             if retry_result.get("success", False):
-                logger.info(
-                    f"任务重试成功: {retry_info['task_id']}, 重试次数: {retry_info['retry_count']}"
-                )
+                logger.info(f"任务重试成功: {retry_info['task_id']}, 重试次数: {retry_info['retry_count']}")
             else:
-                logger.error(
-                    f"任务重试失败: {retry_info['task_id']}, 错误: {retry_result.get('error', '未知错误')}"
-                )
+                logger.error(f"任务重试失败: {retry_info['task_id']}, 错误: {retry_result.get('error', '未知错误')}")
 
         except Exception as e:
             logger.error(f"任务重试异常: {retry_info['task_id']}, 错误: {e}")
@@ -463,9 +417,7 @@ class ActionExecutor:
     def get_retry_queue_status(self) -> dict[str, Any]:
         current_time = datetime.utcnow().timestamp()
         pending_count = len(self._retry_queue)
-        ready_count = sum(
-            1 for retry in self._retry_queue if retry["scheduled_time"] <= current_time
-        )
+        ready_count = sum(1 for retry in self._retry_queue if retry["scheduled_time"] <= current_time)
 
         return {
             "total_pending": pending_count,

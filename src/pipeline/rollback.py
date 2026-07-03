@@ -230,7 +230,9 @@ class RollbackManager:
                     exc,
                 )
                 rolled_back = await self._rollback_config(
-                    config_id, previous_data, new_version.version_id,
+                    config_id,
+                    previous_data,
+                    new_version.version_id,
                 )
                 return RollbackResult(
                     success=False,
@@ -258,7 +260,9 @@ class RollbackManager:
                     config_id,
                 )
                 rolled_back = await self._rollback_config(
-                    config_id, previous_data, new_version.version_id,
+                    config_id,
+                    previous_data,
+                    new_version.version_id,
                 )
                 return RollbackResult(
                     success=False,

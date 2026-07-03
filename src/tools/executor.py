@@ -72,9 +72,7 @@ class ExecutionContext(BaseModel):
     task_id: str = Field(default="", description="任务 ID")
     user_id: str | None = Field(None, description="用户 ID")
     agent_level: int = Field(default=3, description="Agent 层级（1=L1, 2=L2, 3=L3）")
-    db_session: Any | None = Field(
-        None, description="数据库会话（用于需要数据库的工具）"
-    )
+    db_session: Any | None = Field(None, description="数据库会话（用于需要数据库的工具）")
     metadata: dict[str, Any] = Field(default_factory=dict, description="元数据")
 
 
@@ -200,8 +198,7 @@ class ToolExecutor(IToolExecutor):
         # 如果是评估上下文，必须提供 evaluation_record_id
         if is_evaluation_context and not evaluation_record_id:
             raise ValueError(
-                f"评估上下文中必须提供 evaluation_record_id | "
-                f"tool_name={tool_name} | session_id={context.session_id}"
+                f"评估上下文中必须提供 evaluation_record_id | tool_name={tool_name} | session_id={context.session_id}"
             )
 
         # 创建嵌套的评估器执行记录
@@ -230,10 +227,7 @@ class ToolExecutor(IToolExecutor):
             f"inputs={json.dumps(inputs, ensure_ascii=False, default=str)[:500]}"
         )
         logger.debug(
-            f"[ToolExecutor] 执行配置 | "
-            f"timeout={timeout} | "
-            f"use_runnable={use_runnable} | "
-            f"use_cache={use_cache}"
+            f"[ToolExecutor] 执行配置 | timeout={timeout} | use_runnable={use_runnable} | use_cache={use_cache}"
         )
 
         # 获取工具定义（支持动态加载）
@@ -246,25 +240,17 @@ class ToolExecutor(IToolExecutor):
             loader = get_dynamic_tool_loader()
             if loader is not None:
                 try:
-                    logger.info(
-                        f"[ToolExecutor] 工具未注册，尝试动态加载 | tool_name={tool_name}"
-                    )
+                    logger.info(f"[ToolExecutor] 工具未注册，尝试动态加载 | tool_name={tool_name}")
                     await loader.load_tool(tool_name)
                     # 重新获取工具
                     tool = self._registry.get(tool_name)
                 except Exception as e:
-                    logger.warning(
-                        f"[ToolExecutor] 动态加载失败 | tool_name={tool_name} | error={e}"
-                    )
+                    logger.warning(f"[ToolExecutor] 动态加载失败 | tool_name={tool_name} | error={e}")
 
         if tool is None:
             raise ToolNotFoundError(tool_name)
 
-        logger.debug(
-            f"[ToolExecutor] 工具定义 | "
-            f"name={tool.name} | "
-            f"category={tool.category}"
-        )
+        logger.debug(f"[ToolExecutor] 工具定义 | name={tool.name} | category={tool.category}")
 
         # 工具层级权限检查由 level_guard 插件统一处理（基于 tool_ids SSOT），
         # executor 不再重复校验
@@ -279,9 +265,7 @@ class ToolExecutor(IToolExecutor):
         if should_cache:
             cached_result = await self._tool_cache.get_cached_result(tool_name, inputs)
             if cached_result is not None:
-                logger.info(
-                    f"[ToolExecutor] 缓存命中 | tool_name={tool_name} | tool_call_id={tool_call_id}"
-                )
+                logger.info(f"[ToolExecutor] 缓存命中 | tool_name={tool_name} | tool_call_id={tool_call_id}")
                 # 添加缓存标记（在 metadata 和 data 中都标记）
                 if cached_result.metadata is None:
                     cached_result.metadata = {}
@@ -290,9 +274,7 @@ class ToolExecutor(IToolExecutor):
 
                 # 在 data 中添加明显的缓存提示
                 if isinstance(cached_result.output, dict):
-                    cached_result.output["_cache_info"] = (
-                        "⚠️ 此结果来自缓存，操作已在之前执行过，无需重复操作"
-                    )
+                    cached_result.output["_cache_info"] = "⚠️ 此结果来自缓存，操作已在之前执行过，无需重复操作"
                 elif isinstance(cached_result.output, str):
                     cached_result.output = f"⚠️ [缓存结果] {cached_result.output}\n\n注意：此结果来自缓存，操作已在之前执行过，无需重复操作。"
 
@@ -308,21 +290,15 @@ class ToolExecutor(IToolExecutor):
                         logger.warning(f"记录缓存命中指标失败: {e}")
 
                 return cached_result
-            logger.debug(
-                f"[ToolExecutor] 缓存未命中 | tool_name={tool_name} | tool_call_id={tool_call_id}"
-            )
+            logger.debug(f"[ToolExecutor] 缓存未命中 | tool_name={tool_name} | tool_call_id={tool_call_id}")
         else:
-            logger.debug(
-                f"[ToolExecutor] 缓存已禁用 | tool_name={tool_name} | tool_call_id={tool_call_id}"
-            )
+            logger.debug(f"[ToolExecutor] 缓存已禁用 | tool_name={tool_name} | tool_call_id={tool_call_id}")
 
         # 发送开始进度
         await self._notify_progress(tool_call_id, 0.0, f"开始执行工具 {tool_name}")
 
         # 决定执行模式
-        should_use_runnable = (
-            use_runnable if use_runnable is not None else self._use_runnable_first
-        )
+        should_use_runnable = use_runnable if use_runnable is not None else self._use_runnable_first
         logger.debug(
             f"[ToolExecutor] 执行模式选择 | "
             f"tool_name={tool_name} | "
@@ -334,19 +310,11 @@ class ToolExecutor(IToolExecutor):
             if should_use_runnable:
                 runnable = self._registry.get_runnable(tool_name)
                 if runnable is not None:
-                    logger.info(
-                        f"[ToolExecutor] 使用 Runnable 模式 | tool_name={tool_name}"
-                    )
-                    await self._notify_progress(
-                        tool_call_id, 10.0, "使用 Runnable 模式执行"
-                    )
-                    result = await self._execute_runnable(
-                        runnable, inputs, timeout, tool_call_id
-                    )
+                    logger.info(f"[ToolExecutor] 使用 Runnable 模式 | tool_name={tool_name}")
+                    await self._notify_progress(tool_call_id, 10.0, "使用 Runnable 模式执行")
+                    result = await self._execute_runnable(runnable, inputs, timeout, tool_call_id)
                     await self._notify_progress(tool_call_id, 100.0, "执行完成")
-                    result = self._finalize_result(
-                        result, start_time, tool_name, cache_hit=False, tool=tool
-                    )
+                    result = self._finalize_result(result, start_time, tool_name, cache_hit=False, tool=tool)
 
                     # 更新嵌套执行记录
                     if nested_record_id:
@@ -355,11 +323,7 @@ class ToolExecutor(IToolExecutor):
                             success=result.success,
                             output=result.output,
                             error=result.error,
-                            duration_ms=(
-                                result.metadata.get("duration_ms")
-                                if result.metadata
-                                else None
-                            ),
+                            duration_ms=(result.metadata.get("duration_ms") if result.metadata else None),
                         )
 
                     logger.info(
@@ -379,19 +343,13 @@ class ToolExecutor(IToolExecutor):
             handler = self._handlers.get(tool_name)
             if handler is None:
                 logger.error(f"[ToolExecutor] 未找到处理函数 | tool_name={tool_name}")
-                raise ToolExecutionError(
-                    tool_name, f"未找到工具 '{tool_name}' 的处理函数或 Runnable"
-                )
+                raise ToolExecutionError(tool_name, f"未找到工具 '{tool_name}' 的处理函数或 Runnable")
 
             logger.info(f"[ToolExecutor] 使用 Handler 模式 | tool_name={tool_name}")
             await self._notify_progress(tool_call_id, 10.0, "使用 Handler 模式执行")
-            result = await self._execute_handler(
-                handler, tool_name, inputs, timeout, tool_call_id
-            )
+            result = await self._execute_handler(handler, tool_name, inputs, timeout, tool_call_id)
             await self._notify_progress(tool_call_id, 100.0, "执行完成")
-            result = self._finalize_result(
-                result, start_time, tool_name, cache_hit=False, tool=tool
-            )
+            result = self._finalize_result(result, start_time, tool_name, cache_hit=False, tool=tool)
 
             # 更新嵌套执行记录
             if nested_record_id:
@@ -400,9 +358,7 @@ class ToolExecutor(IToolExecutor):
                     success=result.success,
                     output=result.output,
                     error=result.error,
-                    duration_ms=(
-                        result.metadata.get("duration_ms") if result.metadata else None
-                    ),
+                    duration_ms=(result.metadata.get("duration_ms") if result.metadata else None),
                 )
 
             logger.info(
@@ -462,19 +418,13 @@ class ToolExecutor(IToolExecutor):
     ) -> ToolExecutionResult:
         """使用 Runnable 执行"""
         runnable_start = time.time()
-        logger.debug(
-            f"[ToolExecutor._execute_runnable] 开始 | "
-            f"tool_call_id={tool_call_id} | "
-            f"timeout={timeout}"
-        )
+        logger.debug(f"[ToolExecutor._execute_runnable] 开始 | tool_call_id={tool_call_id} | timeout={timeout}")
 
         try:
             await self._notify_progress(tool_call_id, 30.0, "准备执行 Runnable")
 
             if timeout:
-                logger.debug(
-                    f"[ToolExecutor._execute_runnable] 带超时执行 | timeout={timeout}"
-                )
+                logger.debug(f"[ToolExecutor._execute_runnable] 带超时执行 | timeout={timeout}")
                 await self._notify_progress(tool_call_id, 50.0, "执行中...")
                 raw_result = await asyncio.wait_for(
                     runnable.ainvoke(inputs),
@@ -485,31 +435,24 @@ class ToolExecutor(IToolExecutor):
                 raw_result = await runnable.ainvoke(inputs)
 
             runnable_duration_ms = int((time.time() - runnable_start) * 1000)
-            logger.debug(
-                f"[ToolExecutor._execute_runnable] Runnable.ainvoke 完成 | "
-                f"duration_ms={runnable_duration_ms}"
-            )
+            logger.debug(f"[ToolExecutor._execute_runnable] Runnable.ainvoke 完成 | duration_ms={runnable_duration_ms}")
 
             await self._notify_progress(tool_call_id, 90.0, "处理执行结果")
 
             # 将原始结果包装为 ToolExecutionResult
             if isinstance(raw_result, ToolExecutionResult):
                 logger.debug(
-                    f"[ToolExecutor._execute_runnable] 返回 ToolExecutionResult | "
-                    f"success={raw_result.success}"
+                    f"[ToolExecutor._execute_runnable] 返回 ToolExecutionResult | success={raw_result.success}"
                 )
                 return raw_result
             logger.debug(
-                f"[ToolExecutor._execute_runnable] 包装为 ToolExecutionResult | "
-                f"result_type={type(raw_result).__name__}"
+                f"[ToolExecutor._execute_runnable] 包装为 ToolExecutionResult | result_type={type(raw_result).__name__}"
             )
             return create_success_result(data=raw_result)
 
         except TimeoutError:
             logger.warning(
-                f"[ToolExecutor._execute_runnable] 执行超时 | "
-                f"tool_call_id={tool_call_id} | "
-                f"timeout={timeout}"
+                f"[ToolExecutor._execute_runnable] 执行超时 | tool_call_id={tool_call_id} | timeout={timeout}"
             )
             return create_failure_result(
                 error=f"执行超时（{timeout}秒）",
@@ -517,9 +460,7 @@ class ToolExecutor(IToolExecutor):
             )
         except Exception as e:
             logger.error(
-                f"[ToolExecutor._execute_runnable] 执行异常 | "
-                f"tool_call_id={tool_call_id} | "
-                f"error={str(e)}",
+                f"[ToolExecutor._execute_runnable] 执行异常 | tool_call_id={tool_call_id} | error={str(e)}",
                 exc_info=True,
             )
             return create_failure_result(
@@ -548,9 +489,7 @@ class ToolExecutor(IToolExecutor):
             await self._notify_progress(tool_call_id, 30.0, "准备执行 Handler")
 
             if timeout:
-                logger.debug(
-                    f"[ToolExecutor._execute_handler] 带超时执行 | timeout={timeout}"
-                )
+                logger.debug(f"[ToolExecutor._execute_handler] 带超时执行 | timeout={timeout}")
                 await self._notify_progress(tool_call_id, 50.0, "执行中...")
                 result = await asyncio.wait_for(
                     handler(inputs),
@@ -570,17 +509,11 @@ class ToolExecutor(IToolExecutor):
             await self._notify_progress(tool_call_id, 90.0, "处理执行结果")
             return result
         except TimeoutError:
-            logger.warning(
-                f"[ToolExecutor._execute_handler] 执行超时 | "
-                f"tool_name={tool_name} | "
-                f"timeout={timeout}"
-            )
+            logger.warning(f"[ToolExecutor._execute_handler] 执行超时 | tool_name={tool_name} | timeout={timeout}")
             raise ToolExecutionError(tool_name, f"执行超时（{timeout}秒）") from None
         except Exception as e:
             logger.error(
-                f"[ToolExecutor._execute_handler] 执行异常 | "
-                f"tool_name={tool_name} | "
-                f"error={str(e)}",
+                f"[ToolExecutor._execute_handler] 执行异常 | tool_name={tool_name} | error={str(e)}",
                 exc_info=True,
             )
             raise ToolExecutionError(tool_name, str(e), cause=e) from e
@@ -609,12 +542,10 @@ class ToolExecutor(IToolExecutor):
         if tool and tool.output_schema and result.success:
             try:
                 import jsonschema as _js  # noqa: PLC0415
+
                 _js.validate(instance=result.output, schema=tool.output_schema)
             except Exception as schema_err:
-                logger.warning(
-                    f"[ToolExecutor] 输出不符合 output_schema | "
-                    f"tool_name={tool_name} | error={schema_err}"
-                )
+                logger.warning(f"[ToolExecutor] 输出不符合 output_schema | tool_name={tool_name} | error={schema_err}")
                 result = ToolExecutionResult.create_failed(
                     error=f"工具输出不符合预期结构: {schema_err}",
                     error_code="OUTPUT_SCHEMA_MISMATCH",
@@ -649,16 +580,13 @@ class ToolExecutor(IToolExecutor):
             截断后的输出
         """
         if isinstance(output, str) and len(output) > self.MAX_TOOL_OUTPUT_LENGTH:
-            truncated = output[:self.MAX_TOOL_OUTPUT_LENGTH]
+            truncated = output[: self.MAX_TOOL_OUTPUT_LENGTH]
             total_len = len(output)
             logger.warning(
                 f"[ToolExecutor] 工具输出已截断 | "
                 f"original_length={total_len} | max_length={self.MAX_TOOL_OUTPUT_LENGTH}"
             )
-            return truncated + (
-                f"\n\n[输出已截断，共 {total_len} 字符，"
-                f"仅显示前 {self.MAX_TOOL_OUTPUT_LENGTH} 字符]"
-            )
+            return truncated + (f"\n\n[输出已截断，共 {total_len} 字符，仅显示前 {self.MAX_TOOL_OUTPUT_LENGTH} 字符]")
         return output
 
     async def batch_execute(

@@ -85,9 +85,7 @@ class ResultPropagator:
             callback: 回调函数
             enabled: 是否启用
         """
-        self._callbacks.append(
-            ResultPropagationCallback(name=name, callback=callback, enabled=enabled)
-        )
+        self._callbacks.append(ResultPropagationCallback(name=name, callback=callback, enabled=enabled))
         logger.info(f"已注册评估结果回调: {name}")
 
     def unregister_callback(self, name: str) -> bool:
@@ -229,9 +227,7 @@ class ResultPropagator:
                 propagate_to_callbacks=propagate_to_callbacks,
                 propagate_to_storage=propagate_to_storage,
             )
-            propagation_summary["callback_results"].extend(
-                result_summary["callback_results"]
-            )
+            propagation_summary["callback_results"].extend(result_summary["callback_results"])
 
         return propagation_summary
 

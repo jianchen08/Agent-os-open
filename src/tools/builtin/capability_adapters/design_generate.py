@@ -112,13 +112,9 @@ class DesignGenerateTool(CapabilityAdapterBase):
 
             mcp_tool_name = backend.tool_mapping.get("generate", "generate")
             try:
-                raw_result = await self._call_backend(
-                    backend, mcp_tool_name, mcp_args
-                )
+                raw_result = await self._call_backend(backend, mcp_tool_name, mcp_args)
                 parsed = self._extract_mcp_content(raw_result)
-                return self._transform_result(
-                    parsed, backend.name, output_format
-                )
+                return self._transform_result(parsed, backend.name, output_format)
             except Exception as e:
                 logger.warning(
                     "[DesignGenerate] 后端 '%s' 失败: %s",

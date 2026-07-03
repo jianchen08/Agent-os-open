@@ -124,9 +124,7 @@ class DiskFileStorage(IFileStorage):
         if base_dir is None:
             import os  # noqa: PLC0415
 
-            base_dir = os.environ.get(
-                "MULTIMODAL_STORAGE_DIR", "./data/multimodal"
-            )
+            base_dir = os.environ.get("MULTIMODAL_STORAGE_DIR", "./data/multimodal")
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
 

@@ -12,6 +12,7 @@ Phase 1 改造：删除 drain_loop 独立协程，engine 直接调 emit_* 推送
 
 本文件保持所有公共 API 的导入路径不变，确保外部模块无需修改。
 """
+
 from __future__ import annotations
 
 from pipeline.bridge_core import BridgeCore

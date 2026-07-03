@@ -198,9 +198,7 @@ class IDEDetector:
         # VSCode: 检查 "vscode", "visual studio code", 或 "code.exe"
         if "vscode" in name_lower or "visual studio code" in name_lower or name_lower in {"code.exe", "code"}:
             return IDEType.VSCODE
-        if (
-            "idea" in name_lower or "pycharm" in name_lower or "jetbrains" in name_lower
-        ):
+        if "idea" in name_lower or "pycharm" in name_lower or "jetbrains" in name_lower:
             return IDEType.JETBRAINS
         if "nvim" in name_lower or "neovim" in name_lower:
             return IDEType.NVIM

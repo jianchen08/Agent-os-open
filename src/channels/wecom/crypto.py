@@ -135,8 +135,7 @@ class WecomCrypto:
         # 验证 corp_id
         if received_corp_id.decode("utf-8") != self._corp_id:
             raise ValueError(
-                f"CorpID mismatch: expected={self._corp_id}, "
-                f"got={received_corp_id.decode('utf-8', errors='replace')}"
+                f"CorpID mismatch: expected={self._corp_id}, got={received_corp_id.decode('utf-8', errors='replace')}"
             )
 
         return msg.decode("utf-8")

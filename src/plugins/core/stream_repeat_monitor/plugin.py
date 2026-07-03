@@ -71,26 +71,19 @@ class StreamRepetitionMonitor:
         self._buf += content
         self._chars_since_check += len(content)
 
-        if (
-            self._chars_since_check >= self._interval
-            and len(self._buf) >= self._window * 2
-        ):
-            recent = self._buf[-self._window:]
-            prev = self._buf[-self._window * 2:-self._window]
+        if self._chars_since_check >= self._interval and len(self._buf) >= self._window * 2:
+            recent = self._buf[-self._window :]
+            prev = self._buf[-self._window * 2 : -self._window]
 
             if len(recent) > 20 and len(prev) > 20:
-                sim = SequenceMatcher(
-                    None, recent, prev
-                ).ratio()
+                sim = SequenceMatcher(None, recent, prev).ratio()
                 if sim > self._similarity:
                     self._repeat_count += 1
                     if self._repeat_count >= self._trigger:
                         logger.warning(
-                            "[StreamRepetitionMonitor] "
-                            "检测到流式重复 "
-                            "(sim=%.2f, count=%d), "
-                            "发送 stop 信号",
-                            sim, self._repeat_count,
+                            "[StreamRepetitionMonitor] 检测到流式重复 (sim=%.2f, count=%d), 发送 stop 信号",
+                            sim,
+                            self._repeat_count,
                         )
                         return "stop"
                 else:
@@ -98,6 +91,6 @@ class StreamRepetitionMonitor:
 
             self._chars_since_check = 0
             if len(self._buf) > self._window * 5:
-                self._buf = self._buf[-self._window * 2:]
+                self._buf = self._buf[-self._window * 2 :]
 
         return None

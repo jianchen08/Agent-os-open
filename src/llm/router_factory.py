@@ -23,8 +23,12 @@ _LLM_DIRECT_HOSTS = (
 
 # 进程内代理环境变量名（httpx / aiohttp / requests 三家都读这些）。
 _PROXY_ENV_VARS = (
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
 )
 
 
@@ -48,9 +52,10 @@ def disable_llm_proxy() -> None:
         os.environ["no_proxy"] = merged
 
     logger.info(
-        "[Router] LLM 出口已强制直连 (proxy env cleared, aiohttp_trust_env=False, "
-        "NO_PROXY=%s)", os.environ.get("NO_PROXY"),
+        "[Router] LLM 出口已强制直连 (proxy env cleared, aiohttp_trust_env=False, NO_PROXY=%s)",
+        os.environ.get("NO_PROXY"),
     )
+
 
 # 模块级单例缓存
 _router_instance: litellm.Router | None = None
@@ -118,28 +123,33 @@ def _parse_provider_keys(
             for i, key_conf in enumerate(keys_conf):
                 if not isinstance(key_conf, dict):
                     continue
-                slots.append(KeySlot(
-                    key_id=key_conf.get("id", f"{provider_name}_{i}"),
-                    api_key=key_conf.get("api_key", ""),
-                    api_base=key_conf.get("api_base", "") or api_base,
-                    max_concurrent=key_conf.get("max_concurrent", 2),
-                    rpm_limit=key_conf.get("rpm", 0),
-                    token_quota=key_conf.get("token_quota", 0),
-                ))
+                slots.append(
+                    KeySlot(
+                        key_id=key_conf.get("id", f"{provider_name}_{i}"),
+                        api_key=key_conf.get("api_key", ""),
+                        api_base=key_conf.get("api_base", "") or api_base,
+                        max_concurrent=key_conf.get("max_concurrent", 2),
+                        rpm_limit=key_conf.get("rpm", 0),
+                        token_quota=key_conf.get("token_quota", 0),
+                    )
+                )
         else:
             api_key = provider_conf.get("api_key", "")
             if api_key:
-                slots.append(KeySlot(
-                    key_id=f"{provider_name}_default",
-                    api_key=api_key,
-                    api_base=api_base,
-                ))
+                slots.append(
+                    KeySlot(
+                        key_id=f"{provider_name}_default",
+                        api_key=api_key,
+                        api_base=api_base,
+                    )
+                )
 
         if slots:
             result[provider_name] = slots
             logger.info(
                 "[Router] provider %s: %d key(s)",
-                provider_name, len(slots),
+                provider_name,
+                len(slots),
             )
 
     return result
@@ -179,13 +189,17 @@ def build_model_list(
                 if not lp["api_base"]:
                     del lp["api_base"]
 
-                model_list.append({
-                    "model_name": model_id,
-                    "litellm_params": lp,
-                })
+                model_list.append(
+                    {
+                        "model_name": model_id,
+                        "litellm_params": lp,
+                    }
+                )
                 logger.info(
                     "[Router] deployment: %s → %s (key=%s)",
-                    model_id, litellm_model, slot.key_id,
+                    model_id,
+                    litellm_model,
+                    slot.key_id,
                 )
         else:
             # 单 key：直接用模型级或 provider 级的凭证
@@ -197,13 +211,16 @@ def build_model_list(
             elif slots and slots[0].api_base:
                 lp["api_base"] = slots[0].api_base
 
-            model_list.append({
-                "model_name": model_id,
-                "litellm_params": lp,
-            })
+            model_list.append(
+                {
+                    "model_name": model_id,
+                    "litellm_params": lp,
+                }
+            )
             logger.info(
                 "[Router] deployment: %s → %s",
-                model_id, litellm_model,
+                model_id,
+                litellm_model,
             )
 
     return model_list
@@ -252,7 +269,8 @@ def build_router(model_loader: Any) -> litellm.Router:
             _provider_type_map[provider_name] = provider_conf["type"]
             logger.info(
                 "[Router] provider %s → litellm prefix: %s",
-                provider_name, provider_conf["type"],
+                provider_name,
+                provider_conf["type"],
             )
 
     provider_keys = _parse_provider_keys(llm_data)
@@ -290,7 +308,8 @@ def build_router(model_loader: Any) -> litellm.Router:
 
     logger.info(
         "[Router] 创建完成: %d deployments, fallbacks=%d",
-        len(model_list), len(fallbacks),
+        len(model_list),
+        len(fallbacks),
     )
     return router
 
@@ -327,7 +346,8 @@ def build_adapter(model_loader: Any) -> Any:
 
     logger.info(
         "[Router] KeyPoolAdapter: default_max_concurrent=%d, key_pools=%s",
-        default_max_concurrent, list(_key_pools.keys()),
+        default_max_concurrent,
+        list(_key_pools.keys()),
     )
     return adapter
 

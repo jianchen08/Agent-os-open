@@ -14,19 +14,23 @@ from pydantic import BaseModel, ConfigDict, Field
 # 请求/响应模型
 # ============================================================
 
+
 class RefreshRequest(BaseModel):
     """刷新令牌请求模型。"""
+
     refresh_token: str
 
 
 class LoginRequest(BaseModel):
     """登录请求模型。"""
+
     username: str
     password: str
 
 
 class RegisterRequest(BaseModel):
     """注册请求模型。"""
+
     username: str
     password: str
     email: str | None = None
@@ -34,6 +38,7 @@ class RegisterRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     """Token 响应模型。"""
+
     access_token: str
     refresh_token: str
     expires_in: int = Field(description="access token 有效期（秒）")
@@ -42,6 +47,7 @@ class TokenResponse(BaseModel):
 
 class UserResponse(BaseModel):
     """用户信息响应模型。"""
+
     id: str
     username: str
     email: str | None = None
@@ -50,6 +56,7 @@ class UserResponse(BaseModel):
 
 class ThreadCreate(BaseModel):
     """创建线程请求模型。"""
+
     title: str | None = None
     agent_id: str | None = None
     intent: str | None = None
@@ -58,6 +65,7 @@ class ThreadCreate(BaseModel):
 
 class ThreadUpdate(BaseModel):
     """更新线程请求模型。"""
+
     title: str | None = None
     agent_id: str | None = None
     intent: str | None = None
@@ -66,6 +74,7 @@ class ThreadUpdate(BaseModel):
 
 class ThreadResponse(BaseModel):
     """线程响应模型，字段名与前端 mapThreadToSession 对齐。"""
+
     thread_id: str
     title: str | None = None
     intent: str | None = None
@@ -102,6 +111,7 @@ class ToolCallItem(BaseModel):
     消除历史契约混乱：后端构造子项曾用 snake_case（call_id/tool_name/tool_args），
     前端被迫用 ``tc.callId || tc.call_id`` hack 兼容。统一为 camelCase 单一命名。
     """
+
     model_config = ConfigDict(populate_by_name=True)
 
     callId: str = ""  # noqa: N815
@@ -116,6 +126,7 @@ class ToolCallItem(BaseModel):
 
 class MessageResponse(BaseModel):
     """消息响应模型，字段名与前端 mapBackendMessageToMessage 对齐。"""
+
     id: str
     thread_id: str
     role: str
@@ -140,8 +151,10 @@ class MessageResponse(BaseModel):
 # Agent 相关模型
 # ============================================================
 
+
 class AgentResponse(BaseModel):
     """Agent 配置响应模型。"""
+
     config_id: str
     name: str
     display_name: str = ""
@@ -161,6 +174,7 @@ class AgentResponse(BaseModel):
 
 class AgentListResponse(BaseModel):
     """Agent 列表响应模型。"""
+
     items: list[AgentResponse]
     total: int
 
@@ -169,8 +183,10 @@ class AgentListResponse(BaseModel):
 # Task 相关模型
 # ============================================================
 
+
 class TaskCreate(BaseModel):
     """创建任务请求模型。"""
+
     title: str
     description: str | None = None
     agent_id: str | None = None
@@ -186,19 +202,21 @@ class TaskRootCreate(BaseModel):
     为 L2+ 子 agent 提供合法的任务上下文。acceptance_criteria 默认空，继承规则
     与 task_submit 一致。
     """
+
     title: str
     description: str = ""
-    task_scope: str = "non_container"   # "container" | "non_container"
-    target_id: str = ""                 # 非容器必填（执行 agent）；容器为空
+    task_scope: str = "non_container"  # "container" | "non_container"
+    target_id: str = ""  # 非容器必填（执行 agent）；容器为空
     workspace: str = ""
-    isolation_level: str = ""           # plain/worktree/shared
+    isolation_level: str = ""  # plain/worktree/shared
     inherit: dict[str, Any] | None = None
-    thread_id: str                      # 复用当前会话 → 取主管道 + 作 session_id
-    parent_task_id: str | None = None   # 父容器任务 ID；有值则挂为子任务，workspace 继承父容器
+    thread_id: str  # 复用当前会话 → 取主管道 + 作 session_id
+    parent_task_id: str | None = None  # 父容器任务 ID；有值则挂为子任务，workspace 继承父容器
 
 
 class TaskUpdate(BaseModel):
     """更新任务请求模型。"""
+
     title: str | None = None
     description: str | None = None
     status: str | None = None
@@ -246,12 +264,14 @@ class TaskResponse(BaseModel):
 
 class TaskListResponse(BaseModel):
     """任务列表响应模型。"""
+
     items: list[TaskResponse]
     total: int
 
 
 class TaskSubmitResponse(BaseModel):
     """任务提交响应模型。"""
+
     task_id: str
     status: str
     message: str
@@ -259,12 +279,14 @@ class TaskSubmitResponse(BaseModel):
 
 class TaskEvaluateRequest(BaseModel):
     """任务评估请求模型。"""
+
     metric_ids: list[str] = Field(default_factory=list)
     input_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class TaskEvaluateResponse(BaseModel):
     """任务评估响应模型。"""
+
     task_id: str
     overall_passed: bool
     summary: str
@@ -275,8 +297,10 @@ class TaskEvaluateResponse(BaseModel):
 # Tool 相关模型
 # ============================================================
 
+
 class ToolResponse(BaseModel):
     """工具响应模型，包含工具的完整信息供前端展示。"""
+
     name: str
     description: str = ""
     category: str = ""
@@ -296,6 +320,7 @@ class ToolResponse(BaseModel):
 
 class ToolListResponse(BaseModel):
     """工具列表响应模型。"""
+
     items: list[ToolResponse]
     total: int
 
@@ -304,8 +329,10 @@ class ToolListResponse(BaseModel):
 # Memory 相关模型
 # ============================================================
 
+
 class MemorySearchRequest(BaseModel):
     """记忆搜索请求模型。"""
+
     query: str
     memory_type: str | None = None
     top_k: int = 5
@@ -314,6 +341,7 @@ class MemorySearchRequest(BaseModel):
 
 class MemoryResponse(BaseModel):
     """记忆条目响应模型。"""
+
     id: str
     content: str = ""
     memory_type: str = ""
@@ -324,6 +352,7 @@ class MemoryResponse(BaseModel):
 
 class MemoryListResponse(BaseModel):
     """记忆列表响应模型。"""
+
     items: list[MemoryResponse]
     total: int
 
@@ -332,8 +361,10 @@ class MemoryListResponse(BaseModel):
 # Evaluation 相关模型
 # ============================================================
 
+
 class MetricResponse(BaseModel):
     """评估指标响应模型。"""
+
     id: str
     name: str = ""
     description: str = ""
@@ -348,6 +379,7 @@ class MetricResponse(BaseModel):
 
 class MetricDetailResponse(MetricResponse):
     """评估指标详情响应模型。"""
+
     default_config: dict[str, Any] = Field(default_factory=dict)
     input_schema: dict[str, Any] = Field(default_factory=dict)
     includes: list[str] = Field(default_factory=list)
@@ -356,6 +388,7 @@ class MetricDetailResponse(MetricResponse):
 
 class MetricListResponse(BaseModel):
     """评估指标列表响应模型。"""
+
     items: list[MetricResponse]
     total: int
 
@@ -364,19 +397,23 @@ class MetricListResponse(BaseModel):
 # 通用分页和列表模型
 # ============================================================
 
+
 class PaginatedQuery(BaseModel):
     """分页查询参数。"""
+
     limit: int = Field(default=20, ge=1, le=100, description="每页数量")
     offset: int = Field(default=0, ge=0, description="偏移量")
 
 
 class ErrorResponse(BaseModel):
     """标准错误响应模型。"""
+
     error: dict[str, Any] = Field(description="错误详情")
 
 
 class HealthResponse(BaseModel):
     """健康检查响应模型。"""
+
     status: str = "ok"
     version: str = "1.0.0"
     uptime_seconds: float = 0.0

@@ -227,11 +227,11 @@ class LogCompressor:
             标准化后的错误信息
         """
         # 去除常见的时间戳格式
-        normalized = re.sub(r'\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}', '', error)
+        normalized = re.sub(r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}", "", error)
         # 去除行号
-        normalized = re.sub(r':\d+', ':*', normalized)
+        normalized = re.sub(r":\d+", ":*", normalized)
         # 去除多余的空格
-        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        normalized = re.sub(r"\s+", " ", normalized).strip()
 
         return normalized
 
@@ -271,7 +271,7 @@ class LogCompressor:
             recent_lines = lines
         else:
             # 日志行数超过阈值，只取最近 max_lines 行进行分析
-            recent_lines = lines[-self.max_lines:] if total_lines > self.max_lines else lines
+            recent_lines = lines[-self.max_lines :] if total_lines > self.max_lines else lines
 
         # 检测类型
         output_type = self.detect_output_type(command, recent_lines)
@@ -318,7 +318,7 @@ class LogCompressor:
             error_list = self.compress_errors(recent_lines, dedup=config.dedup_errors)
             if error_list:
                 summary_lines.append("错误列表:")
-                for error in error_list[:config.recent_lines]:
+                for error in error_list[: config.recent_lines]:
                     summary_lines.append(f"  - {error}")
 
         # 最新消息

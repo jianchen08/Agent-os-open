@@ -56,9 +56,7 @@ class TimeTrigger(BaseTrigger):
         """
         if not self.enabled:
             logger.debug(f"时间触发器 {self.name} 已禁用，跳过执行")
-            return ExecutionResult(
-                success=False, message="触发器已禁用", data={"trigger_id": self.id}
-            )
+            return ExecutionResult(success=False, message="触发器已禁用", data={"trigger_id": self.id})
 
         logger.info(f"时间触发器 {self.name} 被触发，执行动作...")
 
@@ -133,9 +131,7 @@ class TimeTrigger(BaseTrigger):
         if all([weeks == 0, days == 0, hours == 0, minutes == 0, seconds == 0]):
             raise ValueError("间隔触发器必须至少指定一个时间单位")
 
-        return APSchedulerIntervalTrigger(
-            weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds
-        )
+        return APSchedulerIntervalTrigger(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
 
     def _get_date_trigger(self) -> APSchedulerDateTrigger:
         """
@@ -185,9 +181,7 @@ class TimeTrigger(BaseTrigger):
     def __repr__(self) -> str:
         schedule_info = f"{self.schedule_type}"
         if self.schedule_type == "cron":
-            schedule_info = (
-                f"cron({self.schedule_config.get('expression', '* * * * *')})"
-            )
+            schedule_info = f"cron({self.schedule_config.get('expression', '* * * * *')})"
         elif self.schedule_type == "interval":
             schedule_info = f"interval({self.schedule_config})"
         elif self.schedule_type == "date":

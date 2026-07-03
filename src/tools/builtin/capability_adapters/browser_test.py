@@ -132,18 +132,10 @@ class BrowserTestTool(CapabilityAdapterBase):
                 continue
             attempted = True
             try:
-                steps = self._build_steps(
-                    backend, url_or_html, actions, verify
-                )
-                raw_results = await self._call_backend_multi_step(
-                    backend, steps
-                )
-                parsed_results = [
-                    self._extract_mcp_content(r) for r in raw_results
-                ]
-                return self._transform_results(
-                    parsed_results, backend.name, verify
-                )
+                steps = self._build_steps(backend, url_or_html, actions, verify)
+                raw_results = await self._call_backend_multi_step(backend, steps)
+                parsed_results = [self._extract_mcp_content(r) for r in raw_results]
+                return self._transform_results(parsed_results, backend.name, verify)
             except Exception as e:
                 logger.warning(
                     "[BrowserTest] 后端 '%s' 失败: %s",
@@ -222,9 +214,7 @@ class BrowserTestTool(CapabilityAdapterBase):
             if result.get("type") == "console_log" or "logs" in result or "console" in result:
                 console_logs = result.get("logs") or result.get("console", [])
             if result.get("type") == "performance" or "metrics" in result or "performance" in result:
-                performance = result.get("metrics") or result.get(
-                    "performance", {}
-                )
+                performance = result.get("metrics") or result.get("performance", {})
 
         actions_count = max(0, len(parsed_results) - 1 - len(verify))
 

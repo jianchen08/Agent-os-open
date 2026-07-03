@@ -96,6 +96,7 @@ def _background_inject():
     for attempt in range(30):
         try:
             from human_interaction import get_human_interaction_service  # noqa: PLC0415
+
             svc = get_human_interaction_service()
             if svc is not None:
                 notifier = AutoConfirmNotifier(confirm_delay=1.5)
@@ -106,7 +107,8 @@ def _background_inject():
         except Exception as exc:
             logger.debug(
                 "[AutoConfirm] 后台注入尝试 %d 失败: %s",
-                attempt + 1, exc,
+                attempt + 1,
+                exc,
             )
         time.sleep(0.5)
 
@@ -126,6 +128,7 @@ def main():
     inject_thread.start()
 
     from channels.cli.cli_main import CLIApplication, setup_logging  # noqa: PLC0415
+
     setup_logging(debug=args.debug)
 
     app = CLIApplication(streaming=not args.no_streaming)
@@ -145,6 +148,7 @@ def main():
     finally:
         try:
             from llm.adapter import cleanup_litellm_resources_sync  # noqa: PLC0415
+
             cleanup_litellm_resources_sync()
         except Exception as exc:
             logger.debug("cleanup_litellm_resources_sync 失败: %s", exc)

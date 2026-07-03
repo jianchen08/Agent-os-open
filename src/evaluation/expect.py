@@ -69,14 +69,13 @@ class ExpectEvaluator:
                 passed = self._check_condition(actual, cond)
                 condition_results.append(passed)
                 if not passed:
-                    failed_conditions.append(
-                        f"{cond.field} {cond.operator} "
-                        f"{cond.value!r} (actual: {actual!r})"
-                    )
+                    failed_conditions.append(f"{cond.field} {cond.operator} {cond.value!r} (actual: {actual!r})")
             except Exception as e:
                 logger.warning(
                     "Condition check failed for %s.%s: %s",
-                    metric_id, cond.field, e,
+                    metric_id,
+                    cond.field,
+                    e,
                 )
                 condition_results.append(False)
                 failed_conditions.append(f"{cond.field}: {e}")

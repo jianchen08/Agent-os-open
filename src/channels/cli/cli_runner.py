@@ -104,9 +104,7 @@ class CLIRunnerMixin:
                             try:
                                 import json as _json  # noqa: PLC0415
 
-                                args = (
-                                    _json.loads(args_str) if args_str else {}
-                                )
+                                args = _json.loads(args_str) if args_str else {}
                             except Exception:
                                 args = {}
                             self._output_adapter.show_tool_call(name, args)
@@ -114,9 +112,7 @@ class CLIRunnerMixin:
 
             if chunk_type == "tool_start":
                 tool_name = chunk.get("tool_name", "unknown")
-                console.print(
-                    f"  [dim yellow]>> 执行 {tool_name}...[/dim yellow]"
-                )
+                console.print(f"  [dim yellow]>> 执行 {tool_name}...[/dim yellow]")
                 return
 
             if chunk_type == "tool_result":
@@ -181,17 +177,11 @@ class CLIRunnerMixin:
                     if isinstance(tc, dict):
                         func = tc.get("function", {})
                         name = func.get("name", tc.get("name", "unknown"))
-                        args_str = func.get(
-                            "arguments", tc.get("args", "")
-                        )
+                        args_str = func.get("arguments", tc.get("args", ""))
                         try:
                             import json  # noqa: PLC0415
 
-                            args = (
-                                json.loads(args_str)
-                                if isinstance(args_str, str)
-                                else args_str
-                            )
+                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
                         except (json.JSONDecodeError, TypeError):
                             args = {}
                         self._output_adapter.show_tool_call(name, args)
@@ -235,41 +225,24 @@ class CLIRunnerMixin:
             submitted_task_id = final_state.get("submitted_task_id")
             if submitted_task_id:
                 task_service = self._services.get("task_service")
-                if (
-                    task_service
-                    and hasattr(task_service, "bind_pipeline_run")
-                ):
+                if task_service and hasattr(task_service, "bind_pipeline_run"):
                     try:
-                        await task_service.bind_pipeline_run(
-                            submitted_task_id, pipeline_run_id
-                        )
+                        await task_service.bind_pipeline_run(submitted_task_id, pipeline_run_id)
                         logger.info(
                             "Bound task %s to pipeline_run %s",
                             submitted_task_id,
                             pipeline_run_id,
                         )
-                        exec_storage = self._services.get(
-                            "execution_record_storage"
-                        )
+                        exec_storage = self._services.get("execution_record_storage")
                         if exec_storage:
-                            root_id = task_service.get_root_task_id(
-                                submitted_task_id
-                            )
+                            root_id = task_service.get_root_task_id(submitted_task_id)
                             if root_id:
-                                exec_storage.register_pipeline(
-                                    pipeline_run_id, root_id
-                                )
+                                exec_storage.register_pipeline(pipeline_run_id, root_id)
                     except Exception as exc:
-                        logger.warning(
-                            "Failed to bind pipeline_run_id: %s", exc
-                        )
-            logger.info(
-                "Pipeline run completed: pipeline_id=%s", pipeline_run_id
-            )
+                        logger.warning("Failed to bind pipeline_run_id: %s", exc)
+            logger.info("Pipeline run completed: pipeline_id=%s", pipeline_run_id)
 
-        await self._output_adapter.send(
-            final_state, streamed=self._streaming
-        )
+        await self._output_adapter.send(final_state, streamed=self._streaming)
 
         # 显示管道产生的工具调用信息
         self._display_tool_calls_from_state(final_state)
@@ -285,13 +258,9 @@ class CLIRunnerMixin:
             user_input = initial_state.get("user_input", "")
             raw_result = final_state.get("raw_result", "")
             if user_input:
-                conversation_history.append(
-                    {"role": "user", "content": user_input}
-                )
+                conversation_history.append({"role": "user", "content": user_input})
             if raw_result:
-                conversation_history.append(
-                    {"role": "assistant", "content": raw_result}
-                )
+                conversation_history.append({"role": "assistant", "content": raw_result})
 
         # 更新状态栏
         ctx_pct = self._estimate_context_pct(conversation_history)
@@ -352,8 +321,7 @@ class CLIRunnerMixin:
                 return {"should_stop": True}, False
             except Exception as _recv_exc:
                 logger.warning(
-                    "[_wait_for_next_event] receive error "
-                    "(no cli_notifier): %s",
+                    "[_wait_for_next_event] receive error (no cli_notifier): %s",
                     _recv_exc,
                     exc_info=True,
                 )
@@ -399,9 +367,7 @@ class CLIRunnerMixin:
             self._suppress_streaming = False
             # 回放缓冲的管道输出
             if self._streaming_buffer:
-                safe = sanitize_for_terminal(
-                    "".join(self._streaming_buffer)
-                )
+                safe = sanitize_for_terminal("".join(self._streaming_buffer))
                 console.print(safe, end="", highlight=False)
                 self._last_was_text = True
                 self._streaming_buffer.clear()
@@ -440,10 +406,7 @@ class CLIRunnerMixin:
             interaction_task = asyncio.create_task(_poll_interaction())
             tasks[interaction_task] = "interaction"
 
-        if (
-            self._pipeline_task is not None
-            and not self._pipeline_task.done()
-        ):
+        if self._pipeline_task is not None and not self._pipeline_task.done():
             tasks[self._pipeline_task] = "pipeline"
 
         done, pending = await asyncio.wait(
@@ -471,17 +434,14 @@ class CLIRunnerMixin:
                 try:
                     result = t.result()
                     logger.info(
-                        "[_wait_for_next_event] input result: "
-                        "stop=%s empty=%s interrupted=%s",
+                        "[_wait_for_next_event] input result: stop=%s empty=%s interrupted=%s",
                         result.get("should_stop"),
                         result.get("_is_empty"),
                         result.get("_interrupted"),
                     )
                     return result, False
                 except (EOFError, KeyboardInterrupt):
-                    logger.warning(
-                        "[_wait_for_next_event] input EOFError"
-                    )
+                    logger.warning("[_wait_for_next_event] input EOFError")
                     return {"should_stop": True}, False
                 except Exception as _input_exc:
                     # 输入适配器异常不应导致 CLI 退出。
@@ -512,9 +472,7 @@ class CLIRunnerMixin:
 
                 self._suppress_streaming = True
                 try:
-                    human_svc = self._services.get(
-                        "human_interaction_service"
-                    )
+                    human_svc = self._services.get("human_interaction_service")
                     from channels.cli.cli_interaction import (  # noqa: PLC0415
                         run_sub_conversation,
                     )
@@ -528,20 +486,15 @@ class CLIRunnerMixin:
                     )
                 except Exception as _sub_conv_exc:
                     logger.warning(
-                        "[_wait_for_next_event] run_sub_conversation "
-                        "error: %s",
+                        "[_wait_for_next_event] run_sub_conversation error: %s",
                         _sub_conv_exc,
                         exc_info=True,
                     )
                 finally:
                     self._suppress_streaming = False
                     if self._streaming_buffer:
-                        safe = sanitize_for_terminal(
-                            "".join(self._streaming_buffer)
-                        )
-                        console.print(
-                            safe, end="", highlight=False
-                        )
+                        safe = sanitize_for_terminal("".join(self._streaming_buffer))
+                        console.print(safe, end="", highlight=False)
                         self._last_was_text = True
                         self._streaming_buffer.clear()
                 self._input_adapter.drain_stdin()
@@ -554,9 +507,7 @@ class CLIRunnerMixin:
     # 斜杠命令处理
     # ------------------------------------------------------------------
 
-    async def _handle_slash_command(
-        self, state: dict[str, Any]
-    ) -> Any | None:
+    async def _handle_slash_command(self, state: dict[str, Any]) -> Any | None:
         """处理斜杠命令。
 
         Args:
@@ -604,14 +555,8 @@ class CLIRunnerMixin:
                 self._output_adapter.update_status_bar(mode=new_mode)
                 # 更新输入提示符
                 mode_label = new_mode.upper()
-                agent_name = (
-                    self._agent_config.display_name
-                    if self._agent_config
-                    else "Agent OS"
-                )
-                self._input_adapter._prompt_str = (
-                    f"[{mode_label}] {agent_name} > "
-                )
+                agent_name = self._agent_config.display_name if self._agent_config else "Agent OS"
+                self._input_adapter._prompt_str = f"[{mode_label}] {agent_name} > "
 
         # 思考过程显示切换
         if "show_thinking" in updates:
@@ -655,18 +600,10 @@ class CLIRunnerMixin:
         try:
             from tasks.types import TaskStatus  # noqa: PLC0415
 
-            stats["running"] = len(
-                task_service.list_by_status(TaskStatus.RUNNING)
-            )
-            stats["pending"] = len(
-                task_service.list_by_status(TaskStatus.PENDING)
-            )
-            stats["completed"] = len(
-                task_service.list_by_status(TaskStatus.COMPLETED)
-            )
-            stats["failed"] = len(
-                task_service.list_by_status(TaskStatus.FAILED)
-            )
+            stats["running"] = len(task_service.list_by_status(TaskStatus.RUNNING))
+            stats["pending"] = len(task_service.list_by_status(TaskStatus.PENDING))
+            stats["completed"] = len(task_service.list_by_status(TaskStatus.COMPLETED))
+            stats["failed"] = len(task_service.list_by_status(TaskStatus.FAILED))
         except Exception as exc:
             logger.debug("Failed to collect task stats: %s", exc)
         return stats
@@ -683,10 +620,7 @@ class CLIRunnerMixin:
         if not history:
             return 0.0
 
-        char_count = sum(
-            len(m.get("content", "")) if isinstance(m, dict) else len(str(m))
-            for m in history
-        )
+        char_count = sum(len(m.get("content", "")) if isinstance(m, dict) else len(str(m)) for m in history)
         estimated_tokens = char_count // 3
         max_context = 128000
         return min(100.0, estimated_tokens / max_context * 100)

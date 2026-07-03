@@ -324,7 +324,9 @@ class AutoCRUDGenerator:
         if access not in valid_access:
             logger.warning(
                 "未知的 access 模式 '%s'，回退为 crud: module=%s, collection=%s",
-                access, module_id, collection,
+                access,
+                module_id,
+                collection,
             )
             access = "crud"
 
@@ -347,35 +349,55 @@ class AutoCRUDGenerator:
         # read_only / read_write / read_create / crud 均允许读
         if access in ("read_only", "read_write", "read_create", "crud"):
             self._register_list_route(
-                router, module_id, collection, fields,
-                filters, sort_fields, pagination_enabled, primary_key,
+                router,
+                module_id,
+                collection,
+                fields,
+                filters,
+                sort_fields,
+                pagination_enabled,
+                primary_key,
             )
 
         # ---- 注册 GET（单条）路由 ----
         if access in ("read_only", "read_write", "read_create", "crud"):
             self._register_get_route(
-                router, module_id, collection, primary_key,
+                router,
+                module_id,
+                collection,
+                primary_key,
             )
 
         # ---- 注册 POST（创建）路由 ----
         # read_create / crud / write_only 均允许创建
         if access in ("read_create", "crud", "write_only"):
             self._register_create_route(
-                router, module_id, collection, fields, primary_key,
+                router,
+                module_id,
+                collection,
+                fields,
+                primary_key,
             )
 
         # ---- 注册 PUT（更新）路由 ----
         # read_write / crud 均允许更新
         if access in ("read_write", "crud"):
             self._register_update_route(
-                router, module_id, collection, fields, primary_key,
+                router,
+                module_id,
+                collection,
+                fields,
+                primary_key,
             )
 
         # ---- 注册 DELETE（删除）路由 ----
         # 仅 crud 允许删除
         if access == "crud":
             self._register_delete_route(
-                router, module_id, collection, primary_key,
+                router,
+                module_id,
+                collection,
+                primary_key,
             )
 
         self._routers[(module_id, collection)] = router
@@ -469,10 +491,7 @@ class AutoCRUDGenerator:
             for filter_field in _filters:
                 if filter_field in query_params:
                     filter_value = query_params[filter_field]
-                    result = [
-                        r for r in result
-                        if str(r.get(filter_field, "")) == filter_value
-                    ]
+                    result = [r for r in result if str(r.get(filter_field, "")) == filter_value]
 
             total = len(result)
 

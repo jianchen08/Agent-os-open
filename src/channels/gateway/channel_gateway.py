@@ -105,9 +105,7 @@ class ChannelGateway:
             ValueError: 重复注册同一通道类型
         """
         if channel_type in self._adapters:
-            raise ValueError(
-                f"Channel type '{channel_type}' already registered"
-            )
+            raise ValueError(f"Channel type '{channel_type}' already registered")
         self._adapters[channel_type] = adapter
         logger.info("Adapter registered: %s", channel_type)
 
@@ -118,9 +116,7 @@ class ChannelGateway:
                 await adapter.start()
                 logger.info("Adapter started: %s", channel_type)
             except Exception as exc:
-                logger.error(
-                    "Failed to start adapter %s: %s", channel_type, exc
-                )
+                logger.error("Failed to start adapter %s: %s", channel_type, exc)
 
     async def stop(self) -> None:
         """停止所有适配器。"""
@@ -129,9 +125,7 @@ class ChannelGateway:
                 await adapter.stop()
                 logger.info("Adapter stopped: %s", channel_type)
             except Exception as exc:
-                logger.error(
-                    "Failed to stop adapter %s: %s", channel_type, exc
-                )
+                logger.error("Failed to stop adapter %s: %s", channel_type, exc)
 
     async def handle_message(
         self,
@@ -158,9 +152,7 @@ class ChannelGateway:
             )
 
             # 3. 更新活跃通道
-            self._session_bridge.switch_channel(
-                unified.unified_user_id, channel_type
-            )
+            self._session_bridge.switch_channel(unified.unified_user_id, channel_type)
 
             # 4. 构建管道初始 state
             initial_state = create_initial_state(
@@ -187,14 +179,10 @@ class ChannelGateway:
             if self.on_pipeline_request:
                 await self.on_pipeline_request(initial_state)
             else:
-                logger.warning(
-                    "No pipeline request handler set, message dropped"
-                )
+                logger.warning("No pipeline request handler set, message dropped")
 
         except ValueError as exc:
-            logger.error(
-                "Failed to handle message from %s: %s", channel_type, exc
-            )
+            logger.error("Failed to handle message from %s: %s", channel_type, exc)
         except Exception as exc:
             logger.error(
                 "Unexpected error handling message from %s: %s",
@@ -221,9 +209,7 @@ class ChannelGateway:
 
         try:
             # 反标准化
-            channel_payload = self._normalizer.denormalize(
-                response.channel_type, response
-            )
+            channel_payload = self._normalizer.denormalize(response.channel_type, response)
 
             # 通过适配器的 output_adapter 发送
             output_adapter = adapter.output_adapter

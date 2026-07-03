@@ -195,9 +195,7 @@ class RBACManager:
         """
         if not self.has_resource_permission(role, resource, permission):
             role = self._normalize_role(role)
-            raise PermissionDeniedError(
-                f"角色 '{role}' 没有资源 '{resource}' 的 '{permission.value}' 权限"
-            )
+            raise PermissionDeniedError(f"角色 '{role}' 没有资源 '{resource}' 的 '{permission.value}' 权限")
 
     def has_resource_action_permission(
         self,

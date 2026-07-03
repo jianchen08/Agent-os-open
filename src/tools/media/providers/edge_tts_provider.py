@@ -80,9 +80,7 @@ class EdgeTTSProvider(MediaProvider):
             ValueError: text 参数为空。
         """
         if edge_tts is None:
-            raise RuntimeError(
-                "edge-tts 库未安装，请执行 `pip install edge-tts` 后重试"
-            )
+            raise RuntimeError("edge-tts 库未安装，请执行 `pip install edge-tts` 后重试")
 
         if not text or not text.strip():
             raise ValueError("text 参数不能为空")

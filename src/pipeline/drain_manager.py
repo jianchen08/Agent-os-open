@@ -1,4 +1,5 @@
 """Drain 生命周期管理（Phase 1 管道重构后已精简）。"""
+
 from __future__ import annotations
 
 import logging
@@ -8,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 # Sink 创建
+
 
 def create_sink(pipeline_id: str, thread_id: str = "") -> Any | None:
     """从 registry 获取 thread_id 创建 TargetedSink。"""
@@ -25,6 +27,7 @@ def create_sink(pipeline_id: str, thread_id: str = "") -> Any | None:
         # 优先使用传入的 thread_id，仅当为空时从 registry 兜底
         if not thread_id:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             registry = get_engine_registry()
             entry = registry.get(pipeline_id)
             thread_id = entry.thread_id if entry else ""
@@ -39,7 +42,8 @@ def create_sink(pipeline_id: str, thread_id: str = "") -> Any | None:
     except Exception as _cs_err:
         logger.warning(
             "[DrainMgr] create_sink FAILED: pipeline=%s error=%s",
-            pipeline_id[:12], _cs_err,
+            pipeline_id[:12],
+            _cs_err,
         )
         return None
 
@@ -48,6 +52,7 @@ def create_sink(pipeline_id: str, thread_id: str = "") -> Any | None:
 # engine 现在主动调用 bridge.emit_* 推送事件，不再需要独立 drain 协程消费
 # bridge 队列。以下函数保留签名仅为兼容现有导入链（message_bus、
 # pipeline_reviver、task_executor 等），调用时不再产生任何副作用。
+
 
 def start_bg_drain(
     pipeline_id: str,

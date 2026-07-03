@@ -132,7 +132,10 @@ class ContextBuildPlugin(IInputPlugin):
 
         logger.debug(
             "[%s] Context built | agent=%s | level=%s | iteration=%d",
-            self.name, self._agent_name, self._agent_level, iteration,
+            self.name,
+            self._agent_name,
+            self._agent_level,
+            iteration,
         )
 
         return updates

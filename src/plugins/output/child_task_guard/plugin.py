@@ -70,8 +70,7 @@ class ChildTaskGuard(IOutputPlugin):
 
         if state.get("task_evaluation_completed"):
             logger.debug(
-                "ChildTaskGuard[iter=%s]: task evaluation passed, "
-                "emitting end signal to terminate pipeline",
+                "ChildTaskGuard[iter=%s]: task evaluation passed, emitting end signal to terminate pipeline",
                 iteration,
             )
             return OutputResult(
@@ -90,7 +89,9 @@ class ChildTaskGuard(IOutputPlugin):
         if not has_active:
             logger.debug(
                 "ChildTaskGuard[iter=%s][pipeline=%s]: no active children (%s)",
-                iteration, pipeline_id[:8] if pipeline_id else "none", core_type,
+                iteration,
+                pipeline_id[:8] if pipeline_id else "none",
+                core_type,
             )
             return OutputResult()
 
@@ -98,7 +99,9 @@ class ChildTaskGuard(IOutputPlugin):
             logger.debug(
                 "ChildTaskGuard[iter=%s][pipeline=%s]: active children found but "
                 "core_type=%s, deferring suspension to next LLM call",
-                iteration, pipeline_id[:8] if pipeline_id else "none", core_type,
+                iteration,
+                pipeline_id[:8] if pipeline_id else "none",
+                core_type,
             )
             return OutputResult()
 
@@ -106,14 +109,17 @@ class ChildTaskGuard(IOutputPlugin):
             logger.debug(
                 "ChildTaskGuard[iter=%s][pipeline=%s]: active children found but "
                 "LLM has pending tool calls, continuing",
-                iteration, pipeline_id[:8] if pipeline_id else "none",
+                iteration,
+                pipeline_id[:8] if pipeline_id else "none",
             )
             return OutputResult()
 
         logger.debug(
             "ChildTaskGuard[iter=%s][pipeline=%s]: ACTIVE children found (%s), "
             "suspending pipeline (wait signal), child_ids=%s",
-            iteration, pipeline_id[:8] if pipeline_id else "none", core_type,
+            iteration,
+            pipeline_id[:8] if pipeline_id else "none",
+            core_type,
             active_ids,
         )
         return OutputResult(
@@ -126,7 +132,10 @@ class ChildTaskGuard(IOutputPlugin):
         )
 
     def _get_active_children(
-        self, pipeline_id: str, task_id: str | None, ctx: PluginContext,
+        self,
+        pipeline_id: str,
+        task_id: str | None,
+        ctx: PluginContext,
     ) -> tuple[bool, list[str]]:
         """通过 parent_pipeline_id 或 parent_task_id 检查是否有活跃子任务。
 
@@ -147,6 +156,7 @@ class ChildTaskGuard(IOutputPlugin):
         if pipeline_id:
             try:
                 from tasks.types import TaskStatus as TS  # noqa: N817,PLC0415
+
                 for status_val in (TS.RUNNING, TS.PENDING, TS.EVALUATING):
                     for t in task_service.list_by_status(status_val):
                         if getattr(t, "parent_pipeline_id", None) == pipeline_id:
@@ -185,4 +195,5 @@ class ChildTaskGuard(IOutputPlugin):
             pass
 
         from tasks.service_access import get_task_service  # noqa: PLC0415
+
         return get_task_service()

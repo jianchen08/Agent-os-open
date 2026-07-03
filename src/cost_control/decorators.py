@@ -61,14 +61,10 @@ def budget_check(
             tokens_estimate = estimated_tokens
             if tokens_estimate is None:
                 # 尝试从 messages 参数计算
-                messages = kwargs.get("messages") or (
-                    args[1] if len(args) > 1 else None
-                )
+                messages = kwargs.get("messages") or (args[1] if len(args) > 1 else None)
                 if messages:
                     if model is None:
-                        raise ValueError(
-                            "计算 Token 需要模型参数，请设置 model_param 或确保方法有 model_name 属性"
-                        )
+                        raise ValueError("计算 Token 需要模型参数，请设置 model_param 或确保方法有 model_name 属性")
                     tokens_estimate = token_counter.count_messages(messages, model)
                 else:
                     tokens_estimate = 1000  # 默认预估

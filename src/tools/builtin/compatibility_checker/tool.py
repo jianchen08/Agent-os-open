@@ -91,35 +91,25 @@ class CompatibilityCheckerTool(BuiltinTool):
                 results["checks"]["config"] = config_result
                 if not config_result["compatible"]:
                     results["compatible"] = False
-                results["breaking_changes"].extend(
-                    config_result.get("breaking_changes", [])
-                )
+                results["breaking_changes"].extend(config_result.get("breaking_changes", []))
                 results["warnings"].extend(config_result.get("warnings", []))
 
             # 接口兼容性检查
             if "all" in check_types or "interface" in check_types:
-                interface_result = self._check_interface_compatibility(
-                    original, modified
-                )
+                interface_result = self._check_interface_compatibility(original, modified)
                 results["checks"]["interface"] = interface_result
                 if not interface_result["compatible"]:
                     results["compatible"] = False
-                results["breaking_changes"].extend(
-                    interface_result.get("breaking_changes", [])
-                )
+                results["breaking_changes"].extend(interface_result.get("breaking_changes", []))
                 results["warnings"].extend(interface_result.get("warnings", []))
 
             # 依赖兼容性检查
             if "all" in check_types or "dependency" in check_types:
-                dep_result = self._check_dependency_compatibility(
-                    original, modified, dependencies
-                )
+                dep_result = self._check_dependency_compatibility(original, modified, dependencies)
                 results["checks"]["dependency"] = dep_result
                 if not dep_result["compatible"]:
                     results["compatible"] = False
-                results["breaking_changes"].extend(
-                    dep_result.get("breaking_changes", [])
-                )
+                results["breaking_changes"].extend(dep_result.get("breaking_changes", []))
                 results["warnings"].extend(dep_result.get("warnings", []))
 
             # 判断是否需要迁移

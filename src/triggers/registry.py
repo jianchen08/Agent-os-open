@@ -52,9 +52,7 @@ class TriggerRegistry:
             logger.warning(f"触发器配置目录不存在: {self._config_dir}")
             return
 
-        config_files = list(self._config_dir.glob("*.yaml")) + list(
-            self._config_dir.glob("*.yml")
-        )
+        config_files = list(self._config_dir.glob("*.yaml")) + list(self._config_dir.glob("*.yml"))
 
         if not config_files:
             logger.warning(f"配置目录中没有找到 YAML 文件: {self._config_dir}")
@@ -127,14 +125,10 @@ class TriggerRegistry:
                 try:
                     run_date = datetime.fromisoformat(run_date_str)
                     if run_date < datetime.utcnow():
-                        logger.warning(
-                            f"时间触发器 {trigger.id} 已过期 ({run_date_str})，自动禁用"
-                        )
+                        logger.warning(f"时间触发器 {trigger.id} 已过期 ({run_date_str})，自动禁用")
                         trigger.enabled = False
                 except ValueError:
-                    logger.error(
-                        f"时间触发器 {trigger.id} 时间格式无效: {run_date_str}"
-                    )
+                    logger.error(f"时间触发器 {trigger.id} 时间格式无效: {run_date_str}")
 
         # 注册到事件总线（如果是事件触发器）
         from src.core.event_bus.types import EventFilter, EventType  # noqa: PLC0415
@@ -143,8 +137,7 @@ class TriggerRegistry:
         if isinstance(trigger, (EventTrigger, ConditionTrigger)):
             if trigger.trigger_type == TriggerType.EVENT:
                 sub_id = self._event_bus.subscribe(
-                    trigger.execute,
-                    filter=EventFilter(event_types=[EventType(trigger.event_type)])
+                    trigger.execute, filter=EventFilter(event_types=[EventType(trigger.event_type)])
                 )
                 self._subscription_ids[trigger.id].append(sub_id)
                 logger.info(f"订阅事件: {trigger.event_type} -> {trigger.name}")
@@ -155,10 +148,7 @@ class TriggerRegistry:
                         et = EventType(event_type)
                     except ValueError:
                         et = EventType.CUSTOM
-                    sub_id = self._event_bus.subscribe(
-                        trigger.execute,
-                        filter=EventFilter(event_types=[et])
-                    )
+                    sub_id = self._event_bus.subscribe(trigger.execute, filter=EventFilter(event_types=[et]))
                     self._subscription_ids[trigger.id].append(sub_id)
                 logger.info(f"订阅事件: {trigger.watch_event_types} -> {trigger.name}")
 

@@ -32,6 +32,7 @@ _DEBUG_LOG_FILE = "debug_event_delivery.log"
 def _debug_log(msg: str) -> None:
     """写入调试日志到专用文件，避免被控制台输出截断。"""
     import datetime  # noqa: PLC0415
+
     try:
         with open(_DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {msg}\n")
@@ -105,7 +106,9 @@ class InMemoryEventBus(EventBusBase):
         Returns:
             事件 ID
         """
-        _debug_log(f"publish | event_type={event.event_type.value} | priority={event.priority.value} | HIGH_threshold={EventPriority.HIGH.value}")
+        _debug_log(
+            f"publish | event_type={event.event_type.value} | priority={event.priority.value} | HIGH_threshold={EventPriority.HIGH.value}"
+        )
         if event.priority.value >= EventPriority.HIGH.value:
             _debug_log("publish -> _publish_direct (HIGH priority)")
             return await self._publish_direct(event)
@@ -129,18 +132,13 @@ class InMemoryEventBus(EventBusBase):
 
         try:
             self._message_counter += 1
-            message_id = (
-                f"{int(event.timestamp.timestamp() * 1000)}-{self._message_counter}"
-            )
+            message_id = f"{int(event.timestamp.timestamp() * 1000)}-{self._message_counter}"
 
             self._history.append(event)
 
             await self._notify_subscribers(event)
 
-            logger.debug(
-                f"事件已发布 | type={event.event_type.value} "
-                f"| session={event.session_id} | id={message_id}"
-            )
+            logger.debug(f"事件已发布 | type={event.event_type.value} | session={event.session_id} | id={message_id}")
 
             success = True
             return message_id
@@ -182,9 +180,7 @@ class InMemoryEventBus(EventBusBase):
         """
         if self._batch_timer is None or self._batch_timer.cancelled():
             loop = asyncio.get_event_loop()
-            self._batch_timer = loop.call_later(
-                0.1, lambda: asyncio.create_task(self._process_batch())
-            )
+            self._batch_timer = loop.call_later(0.1, lambda: asyncio.create_task(self._process_batch()))
 
     async def _process_batch(self) -> None:
         """
@@ -224,9 +220,7 @@ class InMemoryEventBus(EventBusBase):
                 event_success = event in batch[:success_count]
                 self._record_publish_metrics(start_time, event_success)
 
-            logger.debug(
-                f"批量处理完成 | 事件数量: {len(batch)} | 成功: {success_count}"
-            )
+            logger.debug(f"批量处理完成 | 事件数量: {len(batch)} | 成功: {success_count}")
         except Exception as e:
             logger.error(f"处理批处理队列失败: {e}")
             # 记录失败指标
@@ -240,16 +234,22 @@ class InMemoryEventBus(EventBusBase):
         Args:
             event: 执行事件
         """
-        _debug_log(f"_notify_subscribers | event_type={event.event_type.value} | subs={len(self._subscriptions)} | event_id={event.event_id}")
+        _debug_log(
+            f"_notify_subscribers | event_type={event.event_type.value} | subs={len(self._subscriptions)} | event_id={event.event_id}"
+        )
         matched_count = 0
         total_count = len(self._subscriptions)
         for sub_id, subscription in self._subscriptions.items():
             if subscription.filter and not subscription.filter.matches(event):
-                _debug_log(f"  SKIP sub={sub_id} | filter_types={[t.value for t in (subscription.filter.event_types or [])]} | event_type={event.event_type.value}")
+                _debug_log(
+                    f"  SKIP sub={sub_id} | filter_types={[t.value for t in (subscription.filter.event_types or [])]} | event_type={event.event_type.value}"
+                )
                 continue
 
             matched_count += 1
-            handler_name = getattr(subscription.handler, "__qualname__", None) or getattr(subscription.handler, "__name__", str(subscription.handler))
+            handler_name = getattr(subscription.handler, "__qualname__", None) or getattr(
+                subscription.handler, "__name__", str(subscription.handler)
+            )
             _debug_log(f"  MATCH sub={sub_id} | handler={handler_name} | event_type={event.event_type.value}")
             try:
                 asyncio.create_task(self._safe_call(subscription.handler, event))
@@ -401,7 +401,10 @@ class InMemoryEventBus(EventBusBase):
                     if et.value in (normalized, event_type):
                         return True
             if subscription.filter.custom_event_types:  # noqa: SIM102
-                if event_type in subscription.filter.custom_event_types or normalized in subscription.filter.custom_event_types:
+                if (
+                    event_type in subscription.filter.custom_event_types
+                    or normalized in subscription.filter.custom_event_types
+                ):
                     return True
         return False
 
@@ -423,6 +426,8 @@ class InMemoryEventBus(EventBusBase):
                     for sub in self._subscriptions.values()
                     if sub.filter and sub.filter.event_types
                 }
-            ) if self._subscriptions else [],
+            )
+            if self._subscriptions
+            else [],
             "history_size": len(self._history),
         }

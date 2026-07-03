@@ -3,6 +3,7 @@
 封装单个任务从提交到终态的完整生命周期状态，
 提供统一的清理和回滚接口，替代 TaskWorker 中 9 个散列字典的隐式耦合。
 """
+
 from __future__ import annotations
 
 import asyncio

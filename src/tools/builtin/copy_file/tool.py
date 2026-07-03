@@ -106,13 +106,15 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
                 "overwrite": overwrite,
             }
             result = await self._copy_single(file_inputs)
-            results.append({
-                "source": source_str,
-                "destination": dest_str,
-                "success": result.success,
-                "data": result.output if result.success else None,
-                "error": result.error if not result.success else None,
-            })
+            results.append(
+                {
+                    "source": source_str,
+                    "destination": dest_str,
+                    "success": result.success,
+                    "data": result.output if result.success else None,
+                    "error": result.error if not result.success else None,
+                }
+            )
 
         success_count = sum(1 for r in results if r["success"])
         failed_count = len(results) - success_count
@@ -215,6 +217,7 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
                 raise FileExistsError(f"目标目录已存在: {dest}")
             # 覆盖模式下，先删除目标目录
             import shutil as sh  # noqa: PLC0415
+
             sh.rmtree(dest)
 
         # 复制目录

@@ -130,9 +130,7 @@ class MemoryStore:
         if not os.path.exists(path):  # noqa: PTH110
             persist_dir = os.path.dirname(path)  # noqa: PTH120
             if os.path.exists(persist_dir) and os.listdir(persist_dir):  # noqa: PTH110,PTH208
-                _log.warning(
-                    "store.json 不存在但 persist_dir 非空，可能数据丢失: %s",
-                    persist_dir)
+                _log.warning("store.json 不存在但 persist_dir 非空，可能数据丢失: %s", persist_dir)
                 self._load_failed = True
             return
         try:
@@ -178,6 +176,7 @@ class MemoryStore:
                     backup_path = path + ".bak"
                     try:
                         import shutil  # noqa: PLC0415
+
                         shutil.copy2(path, backup_path)
                     except Exception:
                         _log.warning("备份 store.json 失败，继续写入")
@@ -243,7 +242,10 @@ class MemoryStore:
         return None
 
     def create_user(
-        self, username: str, password: str, email: str | None = None,
+        self,
+        username: str,
+        password: str,
+        email: str | None = None,
     ) -> dict[str, Any]:
         """创建新用户并存入内存。
 
@@ -317,8 +319,11 @@ class MemoryStore:
         return thread
 
     def update_thread(
-        self, thread_id: str, title: str | None = None,
-        agent_id: str | None = None, metadata: dict[str, Any] | None = None,
+        self,
+        thread_id: str,
+        title: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """更新线程属性。"""
         thread = self.threads.get(thread_id)
@@ -341,11 +346,7 @@ class MemoryStore:
         使用 _user_thread_index 索引加速查找，避免遍历全量 threads 字典。
         """
         thread_ids = self._user_thread_index.get(user_id, [])
-        return [
-            {**self.threads[tid]}
-            for tid in thread_ids
-            if tid in self.threads
-        ]
+        return [{**self.threads[tid]} for tid in thread_ids if tid in self.threads]
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None:
         """获取指定线程详情。"""
@@ -505,10 +506,13 @@ class MemoryStore:
         items = list(self.memories.values())
         if memory_type:
             items = [m for m in items if m["memory_type"] == memory_type]
-        return items[offset:offset + limit]
+        return items[offset : offset + limit]
 
     def search_memories(
-        self, query: str, top_k: int = 5, method: str = "keyword",
+        self,
+        query: str,
+        top_k: int = 5,
+        method: str = "keyword",
     ) -> list[dict[str, Any]]:
         """搜索记忆条目（简易关键词匹配）。"""
         query_lower = query.lower()

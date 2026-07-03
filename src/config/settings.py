@@ -30,28 +30,18 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=20, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=30, validation_alias="DB_MAX_OVERFLOW")
     db_pool_timeout: int = Field(default=60, validation_alias="DB_POOL_TIMEOUT")
-    db_pool_recycle: int = Field(
-        default=3600, validation_alias="DB_POOL_RECYCLE"
-    )
+    db_pool_recycle: int = Field(default=3600, validation_alias="DB_POOL_RECYCLE")
 
     # Redis 配置
-    redis_url: str = Field(
-        default="redis://localhost:6379/0", validation_alias="REDIS_URL"
-    )
+    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     redis_db: int = Field(default=0, validation_alias="REDIS_DB")
     redis_pool_size: int = Field(default=10, validation_alias="REDIS_POOL_SIZE")
-    redis_decode_responses: bool = Field(
-        default=True, validation_alias="REDIS_DECODE_RESPONSES"
-    )
+    redis_decode_responses: bool = Field(default=True, validation_alias="REDIS_DECODE_RESPONSES")
 
     # API 密钥
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
-    anthropic_api_key: str | None = Field(
-        default=None, validation_alias="ANTHROPIC_API_KEY"
-    )
-    zhipu_api_key: str | None = Field(
-        default=None, validation_alias="APP_ZHIPU_API_KEY"
-    )
+    anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    zhipu_api_key: str | None = Field(default=None, validation_alias="APP_ZHIPU_API_KEY")
 
     # 日志配置
     log_level: str = Field(default="INFO", validation_alias="APP_LOG_LEVEL")
@@ -67,17 +57,11 @@ class Settings(BaseSettings):
     )
     jwt_algorithm: str = Field(default="HS256", validation_alias="APP_JWT_ALGORITHM")
     jwt_expire_minutes: int = Field(default=30, validation_alias="JWT_EXPIRE_MINUTES")
-    access_token_expire_minutes: int = Field(
-        default=30, validation_alias="APP_ACCESS_TOKEN_EXPIRE_MINUTES"
-    )
-    refresh_token_expire_days: int = Field(
-        default=7, validation_alias="APP_REFRESH_TOKEN_EXPIRE_DAYS"
-    )
+    access_token_expire_minutes: int = Field(default=30, validation_alias="APP_ACCESS_TOKEN_EXPIRE_MINUTES")
+    refresh_token_expire_days: int = Field(default=7, validation_alias="APP_REFRESH_TOKEN_EXPIRE_DAYS")
 
     # 文件上传配置
-    max_file_size: int = Field(
-        default=10 * 1024 * 1024, validation_alias="MAX_FILE_SIZE"
-    )  # 10MB
+    max_file_size: int = Field(default=10 * 1024 * 1024, validation_alias="MAX_FILE_SIZE")  # 10MB
     upload_dir: str = Field(default="uploads", validation_alias="UPLOAD_DIR")
 
     # 配置目录
@@ -85,20 +69,14 @@ class Settings(BaseSettings):
 
     # 注入 LLM 的当前时间所用时区（IANA 时区名，如 Asia/Shanghai、UTC、Asia/Tokyo）
     # 传给 LLM 的时间会带上时区标注，格式如：2026-07-02 11:24:00 (UTC+8, Asia/Shanghai)
-    timezone: str = Field(
-        default="Asia/Shanghai", validation_alias="APP_TIMEZONE"
-    )
+    timezone: str = Field(default="Asia/Shanghai", validation_alias="APP_TIMEZONE")
 
     # WebSocket 配置
-    ws_heartbeat_interval: int = Field(
-        default=30, validation_alias="WS_HEARTBEAT_INTERVAL"
-    )
+    ws_heartbeat_interval: int = Field(default=30, validation_alias="WS_HEARTBEAT_INTERVAL")
     ws_max_connections: int = Field(default=1000, validation_alias="WS_MAX_CONNECTIONS")
 
     # 任务配置
-    max_concurrent_tasks: int = Field(
-        default=10, validation_alias="MAX_CONCURRENT_TASKS"
-    )
+    max_concurrent_tasks: int = Field(default=10, validation_alias="MAX_CONCURRENT_TASKS")
     task_timeout: int = Field(default=300, validation_alias="TASK_TIMEOUT")  # 5分钟
     ac_max_retries: int = Field(default=5, validation_alias="AC_MAX_RETRIES")  # AC 最大重试次数
     task_max_retries: int = Field(default=6, validation_alias="TASK_MAX_RETRIES")  # 任务最大重试次数
@@ -125,9 +103,7 @@ class Settings(BaseSettings):
     )  # LLM API 每分钟最大请求数（已弃用）
 
     # 各提供商的并发配置
-    llm_zhipu_max_concurrent: int = Field(
-        default=2, validation_alias="LLM_ZHIPU_MAX_CONCURRENT"
-    )  # 智谱 AI 最大并发数
+    llm_zhipu_max_concurrent: int = Field(default=2, validation_alias="LLM_ZHIPU_MAX_CONCURRENT")  # 智谱 AI 最大并发数
     llm_openai_max_concurrent: int = Field(
         default=10, validation_alias="LLM_OPENAI_MAX_CONCURRENT"
     )  # OpenAI 最大并发数
@@ -139,23 +115,13 @@ class Settings(BaseSettings):
     )  # 默认最大并发数（未配置的提供商使用）
 
     # 性能优化配置
-    enable_query_cache: bool = Field(
-        default=True, validation_alias="ENABLE_QUERY_CACHE"
-    )
-    query_cache_ttl: int = Field(
-        default=300, validation_alias="QUERY_CACHE_TTL"
-    )  # 查询缓存5分钟
-    enable_redis_cache: bool = Field(
-        default=True, validation_alias="ENABLE_REDIS_CACHE"
-    )
+    enable_query_cache: bool = Field(default=True, validation_alias="ENABLE_QUERY_CACHE")
+    query_cache_ttl: int = Field(default=300, validation_alias="QUERY_CACHE_TTL")  # 查询缓存5分钟
+    enable_redis_cache: bool = Field(default=True, validation_alias="ENABLE_REDIS_CACHE")
 
     # API性能配置
-    api_response_cache_ttl: int = Field(
-        default=60, validation_alias="API_RESPONSE_CACHE_TTL"
-    )  # API响应缓存1分钟
-    enable_compression: bool = Field(
-        default=True, validation_alias="ENABLE_COMPRESSION"
-    )  # 启用响应压缩
+    api_response_cache_ttl: int = Field(default=60, validation_alias="API_RESPONSE_CACHE_TTL")  # API响应缓存1分钟
+    enable_compression: bool = Field(default=True, validation_alias="ENABLE_COMPRESSION")  # 启用响应压缩
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -55,11 +55,29 @@ class StructuredFormatter(logging.Formatter):
     def _extract_extras(record: logging.LogRecord) -> str:
         """提取用户自定义的 extra 字段，拼接为 key=value 字符串。"""
         standard = {
-            "name", "msg", "args", "created", "relativeCreated", "exc_info",
-            "exc_text", "stack_info", "lineno", "funcName", "pathname",
-            "filename", "module", "thread", "threadName", "process",
-            "processName", "levelno", "levelname", "message", "msecs",
-            "context", "taskName",
+            "name",
+            "msg",
+            "args",
+            "created",
+            "relativeCreated",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "pathname",
+            "filename",
+            "module",
+            "thread",
+            "threadName",
+            "process",
+            "processName",
+            "levelno",
+            "levelname",
+            "message",
+            "msecs",
+            "context",
+            "taskName",
         }
         extras: list[str] = []
         for key, val in record.__dict__.items():
@@ -148,8 +166,13 @@ def _json_safe(value: Any) -> Any:
 def _standard_record_keys() -> set[str]:
     """返回 logging.LogRecord 的标准属性名集合（模块级缓存，仅初始化一次）。"""
     record = logging.LogRecord(
-        name="", level=0, pathname="", lineno=0,
-        msg="", args=None, exc_info=None,
+        name="",
+        level=0,
+        pathname="",
+        lineno=0,
+        msg="",
+        args=None,
+        exc_info=None,
     )
     return set(record.__dict__.keys()) | {"message", "asctime", "context", "taskName"}
 

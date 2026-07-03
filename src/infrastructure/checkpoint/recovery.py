@@ -78,8 +78,7 @@ class PipelineRecovery:
         full_state = {**base_state, **saved_state}
 
         logger.info(
-            "Pipeline state recovered: pipeline_id=%s, checkpoint_id=%s, "
-            "phase=%s, iteration=%d, merged_keys=%s",
+            "Pipeline state recovered: pipeline_id=%s, checkpoint_id=%s, phase=%s, iteration=%d, merged_keys=%s",
             pipeline_id,
             metadata.get("checkpoint_id"),
             metadata.get("phase"),
@@ -150,7 +149,8 @@ class PipelineRecovery:
         }
 
     def _load_agent_base_state(
-        self, agent_config_id: str | None = None,
+        self,
+        agent_config_id: str | None = None,
     ) -> dict[str, Any]:
         """从 Agent 配置文件加载静态基础状态。
 
@@ -212,8 +212,7 @@ class PipelineRecovery:
 
         if phase == "suspended":
             return (
-                f"管道在第 {iteration} 轮迭代时被挂起（suspended）。"
-                "建议使用 recover_and_resume 从挂起点恢复继续执行。"
+                f"管道在第 {iteration} 轮迭代时被挂起（suspended）。建议使用 recover_and_resume 从挂起点恢复继续执行。"
             )
         if phase == "auto":
             return (
@@ -221,16 +220,7 @@ class PipelineRecovery:
                 "可以使用 recover 恢复状态，或 recover_and_resume 恢复并继续。"
             )
         if phase.startswith("pre_"):
-            return (
-                f"管道在 {phase} 阶段（第 {iteration} 轮）保存了检查点。"
-                "建议从该阶段入口处重新执行。"
-            )
+            return f"管道在 {phase} 阶段（第 {iteration} 轮）保存了检查点。建议从该阶段入口处重新执行。"
         if phase.startswith("post_"):
-            return (
-                f"管道在 {phase} 阶段（第 {iteration} 轮）保存了检查点。"
-                "建议从下一阶段入口处恢复执行。"
-            )
-        return (
-            f"管道在第 {iteration} 轮迭代时保存了检查点（phase={phase}）。"
-            "可以使用 recover 恢复状态后手动处理。"
-        )
+            return f"管道在 {phase} 阶段（第 {iteration} 轮）保存了检查点。建议从下一阶段入口处恢复执行。"
+        return f"管道在第 {iteration} 轮迭代时保存了检查点（phase={phase}）。可以使用 recover 恢复状态后手动处理。"

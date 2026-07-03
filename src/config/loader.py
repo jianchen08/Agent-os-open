@@ -256,9 +256,7 @@ class ConfigLoader:
 
         return loaded
 
-    async def load_tools(
-        self, session: Any = None, tools_dir: str = "src/tools/builtin"
-    ) -> list[str]:
+    async def load_tools(self, session: Any = None, tools_dir: str = "src/tools/builtin") -> list[str]:
         """
         加载工具到数据库
 
@@ -319,9 +317,7 @@ class ConfigLoader:
 
         return loaded
 
-    def _extract_tool_info(
-        self, source_code: str, filename: str
-    ) -> dict[str, Any] | None:
+    def _extract_tool_info(self, source_code: str, filename: str) -> dict[str, Any] | None:
         """
         从源代码提取工具信息
 
@@ -360,9 +356,7 @@ class ConfigLoader:
 
                         # 工具名称：优先使用装饰器参数，否则使用函数名
                         tool_name = decorator_args.get("name", node.name)
-                        description = decorator_args.get(
-                            "description", docstring.split("\n")[0] if docstring else ""
-                        )
+                        description = decorator_args.get("description", docstring.split("\n")[0] if docstring else "")
 
                         # 构建参数 schema
                         schema = self._build_tool_schema(node, docstring)
@@ -454,6 +448,7 @@ class ConfigLoader:
     def _create_agent_model(self, config: dict[str, Any]) -> AgentConfigModel:  # noqa: F821
         """从配置创建 AgentConfigModel"""
         from src.db.models.agent import AgentConfig as AgentConfigModel  # noqa: PLC0415
+
         return AgentConfigModel(
             config_id=config["config_id"],
             name=config.get("name", config["config_id"]),
@@ -480,7 +475,9 @@ class ConfigLoader:
         )
 
     def _update_agent_model(  # noqa: PLR0912
-        self, agent: AgentConfigModel, config: dict[str, Any]  # noqa: F821
+        self,
+        agent: AgentConfigModel,  # noqa: F821
+        config: dict[str, Any],
     ) -> None:
         """更新 AgentConfigModel"""
         if "name" in config:
@@ -525,9 +522,7 @@ class ConfigLoader:
             agent.agent_metadata = config["metadata"]
 
 
-async def load_config_to_db(
-    session: Any = None, config_dir: str = "config"
-) -> dict[str, list[str]]:
+async def load_config_to_db(session: Any = None, config_dir: str = "config") -> dict[str, list[str]]:
     """
     便捷函数：加载配置到数据库
 

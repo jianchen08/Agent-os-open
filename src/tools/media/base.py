@@ -43,12 +43,8 @@ class MediaResult(BaseModel):
 
     file_path: Path = Field(..., description="生成文件的路径")
     media_type: MediaType = Field(..., description="媒体类型")
-    duration_seconds: float | None = Field(
-        default=None, description="音视频时长（秒）"
-    )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict, description="扩展元数据"
-    )
+    duration_seconds: float | None = Field(default=None, description="音视频时长（秒）")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="扩展元数据")
     provider_name: str = Field(..., description="产生此结果的 Provider 名称")
     error: str | None = Field(default=None, description="错误信息")
 
@@ -66,9 +62,7 @@ class MediaProviderConfig(BaseModel):
     class_name: str = Field(..., description="Provider 实现类名")
     enabled: bool = Field(default=True, description="是否启用")
     priority: int = Field(default=99, description="优先级，数值越小越优先")
-    config: dict[str, Any] = Field(
-        default_factory=dict, description="Provider 特有的配置参数"
-    )
+    config: dict[str, Any] = Field(default_factory=dict, description="Provider 特有的配置参数")
 
 
 class MediaProvider(ABC):
@@ -140,9 +134,7 @@ class MediaProvider(ABC):
         Raises:
             NotImplementedError: 此 Provider 不支持 synthesize 操作
         """
-        raise NotImplementedError(
-            f"Provider '{self.provider_name}' 不支持 synthesize 操作"
-        )
+        raise NotImplementedError(f"Provider '{self.provider_name}' 不支持 synthesize 操作")
 
     async def generate(self, prompt: str, **kwargs: Any) -> MediaResult:
         """生成媒体内容（用于图像/视频/音乐）。
@@ -157,14 +149,8 @@ class MediaProvider(ABC):
         Raises:
             NotImplementedError: 此 Provider 不支持 generate 操作
         """
-        raise NotImplementedError(
-            f"Provider '{self.provider_name}' 不支持 generate 操作"
-        )
+        raise NotImplementedError(f"Provider '{self.provider_name}' 不支持 generate 操作")
 
     def __repr__(self) -> str:
         """返回 Provider 的字符串表示。"""
-        return (
-            f"{self.__class__.__name__}("
-            f"name={self.provider_name!r}, "
-            f"type={self.media_type.value!r})"
-        )
+        return f"{self.__class__.__name__}(name={self.provider_name!r}, type={self.media_type.value!r})"

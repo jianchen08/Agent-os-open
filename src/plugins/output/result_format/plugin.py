@@ -45,9 +45,9 @@ class ResultFormatPlugin(IOutputPlugin):
     error_policy = ErrorPolicy.SKIP
 
     # 工具输出截断配置：基于 context_window 动态计算
-    TOOL_OUTPUT_RATIO = 0.05          # 单个工具输出占上下文窗口的最大比例
-    TOOL_OUTPUT_MIN_TOKENS = 2000     # 最小保留 token 数
-    CHARS_PER_TOKEN = 2               # token 估算：1 token ≈ 2 字符
+    TOOL_OUTPUT_RATIO = 0.05  # 单个工具输出占上下文窗口的最大比例
+    TOOL_OUTPUT_MIN_TOKENS = 2000  # 最小保留 token 数
+    CHARS_PER_TOKEN = 2  # token 估算：1 token ≈ 2 字符
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化结果格式化插件。
@@ -60,12 +60,8 @@ class ResultFormatPlugin(IOutputPlugin):
         """
         self._config = config or {}
         self._max_length = self._config.get("max_result_length", 2000)
-        self._include_tool_name = self._config.get(
-            "include_tool_name", True
-        )
-        self._truncate_msg = self._config.get(
-            "truncate_message", "...[truncated]"
-        )
+        self._include_tool_name = self._config.get("include_tool_name", True)
+        self._truncate_msg = self._config.get("truncate_message", "...[truncated]")
         fmt_str = self._config.get("result_format", "yaml")
         try:
             self._result_format = ToolFormat(fmt_str.lower())
@@ -165,11 +161,13 @@ class ResultFormatPlugin(IOutputPlugin):
             else:
                 content = self._format_error(tool_name, error)
 
-            formatted.append({
-                "role": "tool",
-                "name": tool_name,
-                "content": content,
-            })
+            formatted.append(
+                {
+                    "role": "tool",
+                    "name": tool_name,
+                    "content": content,
+                }
+            )
 
         # 对 messages 中 role="tool" 的消息内容进行截断
         self._truncate_tool_messages(ctx)
@@ -188,8 +186,7 @@ class ResultFormatPlugin(IOutputPlugin):
         context_window = ctx.state.get("context_window")
         if not context_window:
             logger.warning(
-                "[%s] context_window 未设置，工具输出截断不可用。"
-                "请检查 LLMCore 配置是否包含 context_window。",
+                "[%s] context_window 未设置，工具输出截断不可用。请检查 LLMCore 配置是否包含 context_window。",
                 self.name,
             )
             return
@@ -214,7 +211,9 @@ class ResultFormatPlugin(IOutputPlugin):
         if truncated_count:
             logger.debug(
                 "[%s] 截断了 %d 条 tool 消息（阈值 %d 字符）",
-                self.name, truncated_count, max_output_chars,
+                self.name,
+                truncated_count,
+                max_output_chars,
             )
 
     def _format_success(self, tool_name: str, result: Any) -> str:
@@ -222,14 +221,10 @@ class ResultFormatPlugin(IOutputPlugin):
         if isinstance(result, str):
             result_str = result
         else:
-            result_str = self._format_manager.serialize(
-                result, fmt=self._result_format
-            )
+            result_str = self._format_manager.serialize(result, fmt=self._result_format)
 
         if len(result_str) > self._max_length:
-            result_str = (
-                result_str[:self._max_length] + self._truncate_msg
-            )
+            result_str = result_str[: self._max_length] + self._truncate_msg
 
         if self._include_tool_name:
             return f"[{tool_name}] {result_str}"

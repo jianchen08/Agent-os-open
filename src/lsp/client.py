@@ -55,8 +55,7 @@ class LSPClient:
             # 检查服务器是否已安装
             if not self.is_server_installed(self.server_info.command):
                 logger.error(
-                    f"LSP 服务器未安装: {self.server_info.name} "
-                    f"(命令 '{self.server_info.command}' 不在 PATH 中)"
+                    f"LSP 服务器未安装: {self.server_info.name} (命令 '{self.server_info.command}' 不在 PATH 中)"
                 )
                 return False
 
@@ -296,9 +295,7 @@ class LSPClient:
 
         # 序列化请求
         request_str = json.dumps(request.dict(), ensure_ascii=False)
-        message = (
-            f"Content-Length: {len(request_str.encode('utf-8'))}\r\n\r\n{request_str}"
-        )
+        message = f"Content-Length: {len(request_str.encode('utf-8'))}\r\n\r\n{request_str}"
 
         # 发送请求
         self.process.stdin.write(message.encode("utf-8"))

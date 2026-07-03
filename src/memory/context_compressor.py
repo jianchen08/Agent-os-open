@@ -71,11 +71,14 @@ class CompressionConfig:
         """
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
             budgets = yaml_data.get("budgets", {})
             return cls(
                 context_window=context_window,
-                compress_trigger_ratio=yaml_data.get("compress_trigger_ratio", 0.55),  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
+                compress_trigger_ratio=yaml_data.get(
+                    "compress_trigger_ratio", 0.55
+                ),  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
                 l1_ratio=budgets.get("l1", 0.08),
                 l2_ratio=budgets.get("l2", 0.03),
                 recent_ratio=budgets.get("recent", 0.10),
@@ -285,7 +288,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
     def __init__(
         self,
         llm_call_fn: Callable[[str], Awaitable[str]] | None = None,
-         config: CompressionConfig | None = None,
+        config: CompressionConfig | None = None,
     ) -> None:
         """初始化上下文压缩器。
 
@@ -326,8 +329,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             RuntimeError: LLM 调用过程异常时
         """
         if not messages:
-            return {"l1": "", "l2": "", "keywords": [],
-                    "state_snapshot": {}, "memory_items": {}}
+            return {"l1": "", "l2": "", "keywords": [], "state_snapshot": {}, "memory_items": {}}
 
         messages_text = self._format_messages(messages)
 
@@ -349,12 +351,14 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
                 return None
 
             import json  # noqa: PLC0415
+
             try:
                 parsed = json.loads(raw_json)
             except json.JSONDecodeError as je:
                 logger.warning(
                     "[ContextCompressor] JSON 解析失败: %s | raw_json 前 200 字符: %s",
-                    je, raw_json[:200],
+                    je,
+                    raw_json[:200],
                 )
                 return None
 
@@ -365,10 +369,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             l2_str = json.dumps(l2_data, ensure_ascii=False, indent=2) if l2_data else ""
 
             raw_keywords = parsed.get("keywords", [])
-            keywords = [
-                kw.strip() for kw in raw_keywords
-                if isinstance(kw, str) and kw.strip()
-            ][:10]
+            keywords = [kw.strip() for kw in raw_keywords if isinstance(kw, str) and kw.strip()][:10]
 
             state_snapshot_data = parsed.get("state_snapshot", {})
             memory_items_data = parsed.get("memory_items", {})
@@ -381,9 +382,13 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             logger.info(
                 "[ContextCompressor] 一次性压缩完成 | L1≈%d字符 L2≈%d字符 "
                 "keywords=%d state_snapshot=%d字段 memory_items=%d",
-                len(l1_str), len(l2_str), len(keywords),
+                len(l1_str),
+                len(l2_str),
+                len(keywords),
                 sum(1 for v in state_snapshot_data.values() if v) if isinstance(state_snapshot_data, dict) else 0,
-                sum(1 for v in memory_items_data.values() if v and v != "null") if isinstance(memory_items_data, dict) else 0,
+                sum(1 for v in memory_items_data.values() if v and v != "null")
+                if isinstance(memory_items_data, dict)
+                else 0,
             )
 
             return {
@@ -397,7 +402,6 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         except Exception as e:
             logger.error("[ContextCompressor] 一次性压缩失败 | error=%s", e)
             raise RuntimeError(f"压缩失败: {e}") from e
-
 
     def _truncate_to_budget(self, text: str, max_tokens: int) -> str:
         """截断文本到预算内，保持 JSON 结构完整。
@@ -426,7 +430,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 
         # 是 JSON：找一个安全的截断点（最后一个完整 key-value 后的逗号）
         # 注意 last_comma 是在 truncated 里找的索引，必须用它切 truncated
-        last_comma = truncated.rfind(',\n')
+        last_comma = truncated.rfind(",\n")
         if last_comma > 0:  # noqa: SIM108
             safe = truncated[:last_comma] + "\n}"
         else:
@@ -462,12 +466,12 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             return text
 
         # 尝试从 markdown 代码块中提取
-        json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+        json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if json_match:
             json_str = json_match.group(1).strip()
         else:
             # 尝试直接匹配 { ... }
-            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
             json_str = json_match.group(0) if json_match else text
 
         try:

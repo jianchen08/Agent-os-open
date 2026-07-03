@@ -110,9 +110,7 @@ class ToolAutoLoader:
             from db.models import ToolLibrary  # noqa: PLC0415
             from sqlalchemy import select  # noqa: PLC0415
 
-            result = await self._db_session.execute(
-                select(ToolLibrary).where(ToolLibrary.name == tool_name)
-            )
+            result = await self._db_session.execute(select(ToolLibrary).where(ToolLibrary.name == tool_name))
             db_tool = result.scalar_one_or_none()
 
             if not db_tool:
@@ -234,7 +232,8 @@ class ToolAutoLoader:
                     is_new = not self._registry.has(tool_name)
 
                     self._registry.register_with_handler(
-                        tool=tool_def, handler=tool_instance.execute,
+                        tool=tool_def,
+                        handler=tool_instance.execute,
                     )
 
                     # 首次加载时标记为动态工具
@@ -242,7 +241,7 @@ class ToolAutoLoader:
                         self._registry.mark_dynamic(tool_name)
 
                     # 注册 Schema 丰富器（如果工具实例支持）
-                    if hasattr(tool_instance, 'get_schema_enricher'):
+                    if hasattr(tool_instance, "get_schema_enricher"):
                         enricher = tool_instance.get_schema_enricher()
                         if enricher:
                             self._registry.register_schema_enricher(tool_def.name, enricher)
@@ -276,7 +275,8 @@ class ToolAutoLoader:
                     is_new = not self._registry.has(tool_name)
 
                     self._registry.register_with_handler(
-                        tool=tool_def, handler=tool_instance.execute,
+                        tool=tool_def,
+                        handler=tool_instance.execute,
                     )
 
                     # 首次加载时标记为动态工具
@@ -284,7 +284,7 @@ class ToolAutoLoader:
                         self._registry.mark_dynamic(tool_name)
 
                     # 注册 Schema 丰富器（如果工具实例支持）
-                    if hasattr(tool_instance, 'get_schema_enricher'):
+                    if hasattr(tool_instance, "get_schema_enricher"):
                         enricher = tool_instance.get_schema_enricher()
                         if enricher:
                             self._registry.register_schema_enricher(tool_def.name, enricher)
@@ -350,11 +350,7 @@ class ToolAutoLoader:
                 attr = getattr(module, attr_name)
 
                 # 检查是否是工具类
-                if (
-                    isinstance(attr, type)
-                    and hasattr(attr, "get_tool_definition")
-                    and hasattr(attr, "execute")
-                ):
+                if isinstance(attr, type) and hasattr(attr, "get_tool_definition") and hasattr(attr, "execute"):
                     try:
                         # 尝试实例化
                         instance = attr()

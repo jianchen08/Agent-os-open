@@ -23,8 +23,17 @@ class InputHandler:
 
     # 敏感关键词（输入会被隐藏）
     SENSITIVE_KEYWORDS: ClassVar[list[str]] = [
-        "password", "passwd", "pwd", "secret", "token", "key",
-        "api_key", "apikey", "credential", "auth", "private",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "key",
+        "api_key",
+        "apikey",
+        "credential",
+        "auth",
+        "private",
     ]
 
     # 禁止的输入字符

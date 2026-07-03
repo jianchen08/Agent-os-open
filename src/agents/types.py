@@ -109,9 +109,7 @@ class RuleReinforcement:
     include_hard_constraints: bool = True
     include_soft_constraints: bool = False
     include_system_prompt_rules: bool = True
-    extraction_markers: list[str] = field(
-        default_factory=lambda: ["【重要】", "【必须】", "必须"]
-    )
+    extraction_markers: list[str] = field(default_factory=lambda: ["【重要】", "【必须】", "必须"])
     custom_rules: list[str] = field(default_factory=list)
     template: str = ""
     max_rules: int = 10
@@ -295,20 +293,24 @@ class AgentConfig:
                 for item in self.static_vars.items
             ]
             if self.config_id:
-                sv_items.append({
+                sv_items.append(
+                    {
+                        "name": "agent_self_memory",
+                        "tags": [self.config_id],
+                        "inject_type": "retrieval",
+                        "top_k": 5,
+                    }
+                )
+            state["context.static_vars"] = sv_items
+        elif self.config_id:
+            state["context.static_vars"] = [
+                {
                     "name": "agent_self_memory",
                     "tags": [self.config_id],
                     "inject_type": "retrieval",
                     "top_k": 5,
-                })
-            state["context.static_vars"] = sv_items
-        elif self.config_id:
-            state["context.static_vars"] = [{
-                "name": "agent_self_memory",
-                "tags": [self.config_id],
-                "inject_type": "retrieval",
-                "top_k": 5,
-            }]
+                }
+            ]
 
         if self.dynamic_vars.enabled and self.dynamic_vars.items:
             state["context.dynamic_vars"] = [

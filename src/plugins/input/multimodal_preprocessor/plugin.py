@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 
 # 图片URL正则：匹配 http(s)://...jpg/png/gif/webp/svg
 _IMAGE_URL_PATTERN = re.compile(
-    r'(https?://\S+\.(?:jpg|jpeg|png|gif|webp|svg)(?:\?\S*)?)',
+    r"(https?://\S+\.(?:jpg|jpeg|png|gif|webp|svg)(?:\?\S*)?)",
     re.IGNORECASE,
 )
 
 # 本地文件路径正则：匹配以图片/PDF扩展名结尾的路径
 _LOCAL_FILE_PATTERN = re.compile(
-    r'((?:[A-Za-z]:)?[/\\][\S]+\.(?:jpg|jpeg|png|gif|webp|svg|pdf))',
+    r"((?:[A-Za-z]:)?[/\\][\S]+\.(?:jpg|jpeg|png|gif|webp|svg|pdf))",
     re.IGNORECASE,
 )
 
@@ -110,10 +110,12 @@ class MultimodalPreprocessor(IInputPlugin):
         if not all_blocks:
             return PluginResult()
 
-        return PluginResult(state_updates={
-            "multimodal_content": all_blocks,
-            "has_multimodal": True,
-        })
+        return PluginResult(
+            state_updates={
+                "multimodal_content": all_blocks,
+                "has_multimodal": True,
+            }
+        )
 
     async def _process_attachments(self, attachments: list[dict]) -> list[dict]:
         """处理 state 中的附件列表。
@@ -150,10 +152,12 @@ class MultimodalPreprocessor(IInputPlugin):
                 else:
                     image_url = url
 
-                content_blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                })
+                content_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    }
+                )
                 continue
 
             # 处理音频类型：不支持音频的模型，经 ASR 转写为文字
@@ -271,9 +275,7 @@ class MultimodalPreprocessor(IInputPlugin):
                 with open(full_path, "rb") as f:
                     return f.read().decode("utf-8", errors="replace")
             except OSError as exc:
-                logger.error(
-                    "[MultimodalPreprocessor] 读取文本附件失败: %s, %s", full_path, exc
-                )
+                logger.error("[MultimodalPreprocessor] 读取文本附件失败: %s, %s", full_path, exc)
                 return ""
 
         # 二进制文档（pdf/docx/xlsx/pptx 等）：经 markitdown 转 Markdown
@@ -337,17 +339,13 @@ class MultimodalPreprocessor(IInputPlugin):
                 convert_binary_to_markdown,
             )
         except ImportError:
-            logger.warning(
-                "[MultimodalPreprocessor] binary_converter 不可用，跳过文档附件提取"
-            )
+            logger.warning("[MultimodalPreprocessor] binary_converter 不可用，跳过文档附件提取")
             return ""
 
         try:
             result = convert_binary_to_markdown(Path(full_path))
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "[MultimodalPreprocessor] 文档转换异常: %s, %s", full_path, exc
-            )
+            logger.error("[MultimodalPreprocessor] 文档转换异常: %s, %s", full_path, exc)
             return ""
 
         if not result.success:
@@ -415,10 +413,12 @@ class MultimodalPreprocessor(IInputPlugin):
             url = match.group(1)
             start, end = match.span(1)
             matched_spans.append((start, end))
-            content_blocks.append({
-                "type": "image_url",
-                "image_url": {"url": url},
-            })
+            content_blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }
+            )
 
         # 检测本地文件路径
         for match in _LOCAL_FILE_PATTERN.finditer(text):
@@ -467,9 +467,7 @@ class MultimodalPreprocessor(IInputPlugin):
 
         return {"type": "image_url", "image_url": {"url": file_path}}
 
-    def _extract_remaining_text(
-        self, text: str, spans: list[tuple[int, int]]
-    ) -> str:
+    def _extract_remaining_text(self, text: str, spans: list[tuple[int, int]]) -> str:
         """从原始文本中移除已匹配的多模态片段，返回剩余纯文本。
 
         Args:

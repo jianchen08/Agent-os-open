@@ -181,28 +181,24 @@ class LLMCore(ICorePlugin):
                 "[%s] context_window 未配置！上下文守卫将无法工作。"
                 " 请在模型配置（llm.yaml）或 core_plugins 中设置 context_window。"
                 " model=%s, provider=%s",
-                self.name, self._model, self._provider,
+                self.name,
+                self._model,
+                self._provider,
             )
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
-        self._call_timeout: float = float(
-            self._config.get("call_timeout", 300)
-        )
+        self._call_timeout: float = float(self._config.get("call_timeout", 300))
         # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 120s）。
         # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
         # 用 120s 而非 60s：yichengc/glm-5.2 等上游偶发慢节点下 60s 误判率高
         # （曾观测连续 14 次请求中 6 次首字节 60s 超时被判为失败，但节点实际未宕机）。
         # 120s 给上游建连+负载均衡+冷启动留足余地，仍能在死连接时及时止损。
-        self._first_token_timeout: float = float(
-            self._config.get("first_token_timeout", 120)
-        )
+        self._first_token_timeout: float = float(self._config.get("first_token_timeout", 120))
         # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（默认 600s）。
         # 与 call_timeout 分离：call_timeout 用于非流式整体超时，此处用于流式
         # inter-chunk 静默（每个 chunk 到达即重置，活跃推理不误触发）。
-        self._stream_idle_timeout: float = float(
-            self._config.get("stream_idle_timeout", 600)
-        )
+        self._stream_idle_timeout: float = float(self._config.get("stream_idle_timeout", 600))
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
             self.max_retries = self._config["max_retries"]
@@ -218,7 +214,7 @@ class LLMCore(ICorePlugin):
         # 构建适配器
         if adapter is not None:
             self._adapter = adapter
-            self._use_router = hasattr(adapter, '_router')
+            self._use_router = hasattr(adapter, "_router")
         else:
             self._adapter = LiteLLMAdapter()
             self._use_router = False
@@ -260,12 +256,11 @@ class LLMCore(ICorePlugin):
 
         try:
             from llm.key_pool import set_agent_priority  # noqa: PLC0415
+
             agent_level = ctx.state.get("agent_level", "L3")
             set_agent_priority(agent_level)
 
-            response: LLMResponse = await self._call_llm(
-                messages, ctx, stream=streaming, on_chunk=on_chunk
-            )
+            response: LLMResponse = await self._call_llm(messages, ctx, stream=streaming, on_chunk=on_chunk)
 
             result_text = response.text
             tool_calls = response.tool_calls
@@ -278,19 +273,18 @@ class LLMCore(ICorePlugin):
             # 流式重复检测：模型在流式输出中陷入重复循环
             if response.stream_repetition:
                 logger.warning(
-                    "[%s] 流式输出重复检测触发，"
-                    "丢弃重复内容并添加提醒",
+                    "[%s] 流式输出重复检测触发，丢弃重复内容并添加提醒",
                     self.name,
                 )
                 history = list(ctx.state.get("messages", []))
-                history.append({
-                    "role": "system",
-                    "content": (
-                        "[StreamRepetitionGuard] "
-                        "检测到流式输出中出现重复内容，"
-                        "已截断。请重新组织输出，避免重复。"
-                    ),
-                })
+                history.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "[StreamRepetitionGuard] 检测到流式输出中出现重复内容，已截断。请重新组织输出，避免重复。"
+                        ),
+                    }
+                )
                 return {
                     StateKeys.RAW_RESULT: None,
                     StateKeys.RAW_ERROR: None,
@@ -306,19 +300,22 @@ class LLMCore(ICorePlugin):
                 retry_count = ctx.state.get("thinking_retry_count", 0) + 1
                 max_retries = 3
                 logger.warning(
-                    "[%s] 思考内容过长已截断，丢弃本次输出，"
-                    "retry=%d/%d",
-                    self.name, retry_count, max_retries,
+                    "[%s] 思考内容过长已截断，丢弃本次输出，retry=%d/%d",
+                    self.name,
+                    retry_count,
+                    max_retries,
                 )
                 history = list(ctx.state.get("messages", []))
-                history.append({
-                    "role": "system",
-                    "content": (
-                        "[ThinkingTruncationGuard] "
-                        "上一轮思考内容过长已截断，本次输出已丢弃。"
-                        "请直接给出结论或工具调用，不要冗长思考。"
-                    ),
-                })
+                history.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "[ThinkingTruncationGuard] "
+                            "上一轮思考内容过长已截断，本次输出已丢弃。"
+                            "请直接给出结论或工具调用，不要冗长思考。"
+                        ),
+                    }
+                )
                 return {
                     StateKeys.RAW_RESULT: None,
                     StateKeys.RAW_ERROR: None,
@@ -342,13 +339,15 @@ class LLMCore(ICorePlugin):
 
             logger.info(
                 "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d)",
-                self.name, streaming, bool(thinking_text),
-                (result_text or "")[:200], len(tool_calls or []),
+                self.name,
+                streaming,
+                bool(thinking_text),
+                (result_text or "")[:200],
+                len(tool_calls or []),
             )
             # 完整响应记录到管道日志（DEBUG 级别）
             logger.debug(
-                "[%s] LLM full response: text=%d chars, "
-                "thinking=%d chars, usage=%s",
+                "[%s] LLM full response: text=%d chars, thinking=%d chars, usage=%s",
                 self.name,
                 len(result_text or ""),
                 len(thinking_text or ""),
@@ -358,7 +357,8 @@ class LLMCore(ICorePlugin):
                 for tc in tool_calls:
                     logger.debug(
                         "[%s] tool_call: %s(%s)",
-                        self.name, tc.get("name", "?"),
+                        self.name,
+                        tc.get("name", "?"),
                         str(tc.get("args", tc.get("arguments", "")))[:200],
                     )
                     # 诊断：arguments repr，定位转义层级（adapter 返回时是否已双重转义）
@@ -366,7 +366,8 @@ class LLMCore(ICorePlugin):
                     if isinstance(_tc_args_raw, str) and len(_tc_args_raw) > 100:
                         logger.debug(
                             "[%s] tool_call arguments repr前80: %s",
-                            self.name, repr(_tc_args_raw[:80]),
+                            self.name,
+                            repr(_tc_args_raw[:80]),
                         )
 
             # LLMCore 生产的 assistant 回复，由 LLMCore 负责 append 到 messages
@@ -388,7 +389,9 @@ class LLMCore(ICorePlugin):
                         if raw_id:
                             logger.info(
                                 "[%s] LLM 返回非标准 tool_call_id，已修正: %s → %s",
-                                self.name, raw_id, std_id,
+                                self.name,
+                                raw_id,
+                                std_id,
                             )
 
                 # 将解析后的 id 回写到 raw_tool_calls，供后续 tool_core 使用
@@ -426,9 +429,10 @@ class LLMCore(ICorePlugin):
             _pipeline_id = ctx.state.get("pipeline_id", "?")
             _iteration = ctx.state.get("iteration", -1)
             logger.debug(
-                "[%s] pipeline=%s iter=%d LLM returned: "
-                "text=%d chars, tool_calls=%d, thinking=%d chars",
-                self.name, _pipeline_id, _iteration,
+                "[%s] pipeline=%s iter=%d LLM returned: text=%d chars, tool_calls=%d, thinking=%d chars",
+                self.name,
+                _pipeline_id,
+                _iteration,
                 len(result_text) if result_text else 0,
                 len(tool_calls) if tool_calls else 0,
                 len(thinking_text) if thinking_text else 0,
@@ -450,7 +454,9 @@ class LLMCore(ICorePlugin):
         except Exception as exc:
             logger.error(
                 "[%s] LLM call failed: %s — %s",
-                self.name, type(exc).__name__, exc,
+                self.name,
+                type(exc).__name__,
+                exc,
             )
             # 工具调用错误后重置消息配对缓存，确保下次全量扫描
             exc_msg = str(exc)
@@ -458,14 +464,18 @@ class LLMCore(ICorePlugin):
                 from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
                     reset_pairing_cache,
                 )
+
                 # 精确重置当前管道的缓存（pipeline_id 维度隔离后必须带 ID）
                 _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
                 reset_pairing_cache(
-                    self._provider, self.name, pipeline_id=_pipeline_id,
+                    self._provider,
+                    self.name,
+                    pipeline_id=_pipeline_id,
                 )
                 logger.info(
                     "[%s] 检测到 tool_call 相关错误，已重置配对缓存 (pipeline=%s)",
-                    self.name, _pipeline_id or "?",
+                    self.name,
+                    _pipeline_id or "?",
                 )
             raise
 
@@ -514,9 +524,7 @@ class LLMCore(ICorePlugin):
                     existing_content = messages[i].get("content", "")
                     if isinstance(existing_content, str):
                         # 转换为 content blocks 数组
-                        messages[i]["content"] = [
-                            {"type": "text", "text": existing_content}
-                        ] + multimodal_content
+                        messages[i]["content"] = [{"type": "text", "text": existing_content}] + multimodal_content
                     elif isinstance(existing_content, list):
                         # 已经是 content blocks，直接追加
                         messages[i]["content"].extend(multimodal_content)
@@ -535,11 +543,13 @@ class LLMCore(ICorePlugin):
             else:
                 content = str(dynamic_vars_msg)
             if content:
-                messages.append({
-                    "role": "system",
-                    "name": "dynamic_context",
-                    "content": content,
-                })
+                messages.append(
+                    {
+                        "role": "system",
+                        "name": "dynamic_context",
+                        "content": content,
+                    }
+                )
 
         return messages
 
@@ -573,11 +583,13 @@ class LLMCore(ICorePlugin):
         if cleaned_history_len <= 0 or raw_history_len <= 0:
             return
 
-        cleaned_history = cleaned_messages[prefix_len:prefix_len + cleaned_history_len]
+        cleaned_history = cleaned_messages[prefix_len : prefix_len + cleaned_history_len]
         state["messages"] = list(cleaned_history)
         logger.info(
             "[%s] normalize 清理写回 state: history %d → %d 条（移除孤儿/未配对消息）",
-            self.name, raw_history_len, cleaned_history_len,
+            self.name,
+            raw_history_len,
+            cleaned_history_len,
         )
 
     def _get_model_string(self) -> str:
@@ -595,6 +607,7 @@ class LLMCore(ICorePlugin):
         provider_prefix = ""
         try:
             from llm.router_factory import get_litellm_prefix  # noqa: PLC0415
+
             provider_prefix = get_litellm_prefix(self._provider)
         except Exception:  # noqa: BLE001
             provider_prefix = ""
@@ -651,9 +664,9 @@ class LLMCore(ICorePlugin):
             for _i, _m in enumerate(normalized_messages):
                 if _i > 0 and _m.get("role") == "system":
                     logger.warning(
-                        "[%s] MiniMax 主动修复: 非首位 system→user "
-                        "idx=%d, content=%s",
-                        self.name, _i,
+                        "[%s] MiniMax 主动修复: 非首位 system→user idx=%d, content=%s",
+                        self.name,
+                        _i,
                         str(_m.get("content", ""))[:200],
                     )
                     _m["role"] = "user"
@@ -662,12 +675,14 @@ class LLMCore(ICorePlugin):
             if fix_count:
                 logger.warning(
                     "[%s] MiniMax 主动修复了 %d 条遗漏的 system 消息",
-                    self.name, fix_count,
+                    self.name,
+                    fix_count,
                 )
 
         logger.info(
             "[%s] Sending %d messages to LLM",
-            self.name, len(normalized_messages),
+            self.name,
+            len(normalized_messages),
         )
 
         for idx, msg in enumerate(normalized_messages):
@@ -680,18 +695,18 @@ class LLMCore(ICorePlugin):
                 prefix += f" name={name}"
             if tc_list:
                 try:
-                    tc_str = json.dumps(
-                        tc_list, ensure_ascii=False, default=str
-                    )
+                    tc_str = json.dumps(tc_list, ensure_ascii=False, default=str)
                 except (TypeError, ValueError):
                     tc_str = str(tc_list)
                 logger.info(
-                    "%s tool_calls=%s", prefix,
+                    "%s tool_calls=%s",
+                    prefix,
                     tc_str if tc_list else "[]",
                 )
             else:
                 logger.info(
-                    "%s content=%s", prefix,
+                    "%s content=%s",
+                    prefix,
                     str(content) or "",
                 )
 
@@ -721,24 +736,33 @@ class LLMCore(ICorePlugin):
 
         tool_schemas = ctx.state.get("tool_schemas", [])
         if tool_schemas:
-            logger.info("[%s] tool_schemas count=%d | %s",
-                        self.name, len(tool_schemas),
-                        ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas))
+            logger.info(
+                "[%s] tool_schemas count=%d | %s",
+                self.name,
+                len(tool_schemas),
+                ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas),
+            )
 
         # 调用前记录模型/API 信息
         model_str = self._model
         api_base = kwargs.get("api_base") or self._api_base or "default"
         logger.info(
             "[%s] Calling LLM: model=%s, provider=%s, api_base=%s, streaming=%s",
-            self.name, model_str, self._provider, api_base, stream,
+            self.name,
+            model_str,
+            self._provider,
+            api_base,
+            stream,
         )
         # TEMP-DEBUG tool_stream 透传诊断：真实运行时 kwargs 里到底有没有
         _dp_keys = sorted(self._default_params.keys())
         logger.info(
-            "[TEMP-DEBUG][%s] default_params keys=%s extra_body=%s "
-            "kwargs.extra_body=%s kwargs.tool_stream=%s",
-            self.name, _dp_keys, self._default_params.get("extra_body"),
-            kwargs.get("extra_body"), kwargs.get("tool_stream"),
+            "[TEMP-DEBUG][%s] default_params keys=%s extra_body=%s kwargs.extra_body=%s kwargs.tool_stream=%s",
+            self.name,
+            _dp_keys,
+            self._default_params.get("extra_body"),
+            kwargs.get("extra_body"),
+            kwargs.get("tool_stream"),
         )
 
         try:

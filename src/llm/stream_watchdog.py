@@ -118,9 +118,7 @@ class StreamHardTimeout:
                 self._on_fire()
         aclose = getattr(self._stream, "aclose", None)
         if aclose is None:
-            logger.warning(
-                "[StreamHardTimeout] stream 无 aclose 方法，无法强制关闭"
-            )
+            logger.warning("[StreamHardTimeout] stream 无 aclose 方法，无法强制关闭")
             return
         try:
             # 回桥主 loop 执行 async aclose；不阻塞等待结果（loop 可能已冻，

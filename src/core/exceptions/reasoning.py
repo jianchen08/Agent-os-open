@@ -35,12 +35,14 @@ class ReasoningRequiredError(ToolException):
         self.reasoning_prompt = reasoning_prompt
         self.retry_count = retry_count
         error_details = details or {}
-        error_details.update({
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "reasoning_prompt": reasoning_prompt,
-            "retry_count": retry_count,
-        })
+        error_details.update(
+            {
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "reasoning_prompt": reasoning_prompt,
+                "retry_count": retry_count,
+            }
+        )
         super().__init__(
             f"工具 {tool_name} 需要推理（重试次数: {retry_count}）",
             code="REASONING_REQUIRED",

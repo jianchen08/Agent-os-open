@@ -21,9 +21,7 @@ from isolation.types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_POLICY_PATH = (
-    Path(__file__).parent.parent.parent / "config" / "isolation" / "isolation_policy.yaml"
-)
+DEFAULT_POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "isolation" / "isolation_policy.yaml"
 
 
 @dataclass
@@ -67,9 +65,10 @@ class IsolationPolicyLoader:
         path = self._config_path
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             rel = str(path).replace("\\", "/")
             if "config/" in rel:
-                rel = rel[rel.index("config/") + len("config/"):]
+                rel = rel[rel.index("config/") + len("config/") :]
             self._config = get_config_center().get(rel) or {}
         except Exception:
             logger.warning(f"隔离策略配置加载失败: {path}，使用默认策略（容器隔离）")
@@ -79,28 +78,25 @@ class IsolationPolicyLoader:
             return
 
         self._default = self._parse_policy(self._config.get("default", {}))
-        self._tools = {
-            k: self._parse_policy(v) for k, v in self._config.get("tools", {}).items()
-        }
-        self._categories = {
-            k: self._parse_policy(v) for k, v in self._config.get("categories", {}).items()
-        }
-        logger.info(
-            f"隔离策略加载完成: {len(self._tools)} 个工具策略, "
-            f"{len(self._categories)} 个分类策略"
-        )
+        self._tools = {k: self._parse_policy(v) for k, v in self._config.get("tools", {}).items()}
+        self._categories = {k: self._parse_policy(v) for k, v in self._config.get("categories", {}).items()}
+        logger.info(f"隔离策略加载完成: {len(self._tools)} 个工具策略, {len(self._categories)} 个分类策略")
 
     def _register_watcher(self) -> None:
         """注册 config_center watcher，配置变更时自动 reload。"""
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             get_config_center().watch("isolation/", self._on_config_changed)
             logger.debug("[IsolationPolicyLoader] 已注册 config_center watcher")
         except Exception as e:
             logger.warning(f"[IsolationPolicyLoader] 注册 watcher 失败: {e}")
 
     def _on_config_changed(
-        self, event_type: str, file_path: str, context: dict | None = None,
+        self,
+        event_type: str,
+        file_path: str,
+        context: dict | None = None,
     ) -> None:
         """config_center 回调：检测到 isolation_policy.yaml 变更时自动 reload。
 
@@ -112,7 +108,8 @@ class IsolationPolicyLoader:
         if "isolation_policy" in file_path:
             logger.info(
                 "[IsolationPolicyLoader] 检测到策略配置变更(%s)，自动 reload: %s",
-                event_type, file_path,
+                event_type,
+                file_path,
             )
             self._load_config()
 

@@ -33,9 +33,7 @@ class IsolationProvider(ABC):
         """检查提供者是否可用"""
 
     @abstractmethod
-    async def create_environment(
-        self, context: IsolationContext
-    ) -> IsolationEnvironment:
+    async def create_environment(self, context: IsolationContext) -> IsolationEnvironment:
         """创建隔离环境"""
 
     @abstractmethod
@@ -43,9 +41,7 @@ class IsolationProvider(ABC):
         """销毁隔离环境"""
 
     @abstractmethod
-    async def execute_in_environment(
-        self, env_id: str, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:
         """在隔离环境中执行操作"""
 
     @abstractmethod

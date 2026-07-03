@@ -51,7 +51,7 @@ def _fix_records_empty_flow(text: str) -> str:
     追加 "- record_id: ..."，两者混合产生无效 YAML。将 "records: []" 替换为
     "records:" 即可恢复正确格式。
     """
-    return re.sub(r'^records:\s*\[\]\s*$', 'records:', text, flags=re.MULTILINE)
+    return re.sub(r"^records:\s*\[\]\s*$", "records:", text, flags=re.MULTILINE)
 
 
 @dataclass
@@ -133,8 +133,8 @@ class PipelineRunSummary:
     final_output: str = ""
     error: str | None = None
 
-    review_status: str = "pending"       # "pending" 或 "reviewed"
-    reviewed_at: str | None = None       # 复盘完成时间
+    review_status: str = "pending"  # "pending" 或 "reviewed"
+    reviewed_at: str | None = None  # 复盘完成时间
 
     created_at: str = ""
 
@@ -291,7 +291,7 @@ class ExecutionRecordStorage:
 
         text = file_path.read_text(encoding="utf-8")
         # 使用正则匹配文件顶层的 "records:" 行，排除 record 内容中的嵌套匹配
-        _records_marker = re.search(r'^records:', text, re.MULTILINE)
+        _records_marker = re.search(r"^records:", text, re.MULTILINE)
         if _records_marker is None:
             logger.warning("YAML 文件格式异常，无法定位 records 段: %s", file_path.name)
             return
@@ -300,9 +300,7 @@ class ExecutionRecordStorage:
         new_text = new_summary_text + "\n" + text[marker_idx:]
         file_path.write_text(new_text, encoding="utf-8")
 
-    def _detect_active_part(
-        self, pipeline_run_id: str, part_files: list[Path]
-    ) -> None:
+    def _detect_active_part(self, pipeline_run_id: str, part_files: list[Path]) -> None:
         """从文件列表推断活跃分片编号。"""
         last = part_files[-1]
         name = last.name
@@ -347,7 +345,8 @@ class ExecutionRecordStorage:
             self._data_dir.mkdir(parents=True, exist_ok=True)
             tmp = self._totals_file.with_suffix(".json.tmp")
             tmp.write_text(
-                json.dumps(self._totals_cache, ensure_ascii=False), encoding="utf-8",
+                json.dumps(self._totals_cache, ensure_ascii=False),
+                encoding="utf-8",
             )
             tmp.replace(self._totals_file)
         except Exception:
@@ -446,15 +445,11 @@ class ExecutionRecordStorage:
         except Exception:
             logger.warning("管道文件损坏，跳过 summary 加载: %s", yaml_file.name)
 
-    def _get_pipeline_file(
-        self, pipeline_run_id: str, part: int | None = None
-    ) -> Path | None:
+    def _get_pipeline_file(self, pipeline_run_id: str, part: int | None = None) -> Path | None:
         if not self._data_dir:
             return None
         root_id = self._pipeline_root_map.get(pipeline_run_id)
-        base_dir = (
-            self._data_dir / root_id if root_id else self._data_dir
-        )
+        base_dir = self._data_dir / root_id if root_id else self._data_dir
         if part is None:
             part = self._active_part.get(pipeline_run_id, 1)
         if part <= 1:
@@ -466,15 +461,11 @@ class ExecutionRecordStorage:
         if not self._data_dir:
             return []
         root_id = self._pipeline_root_map.get(pipeline_run_id)
-        base_dir = (
-            self._data_dir / root_id if root_id else self._data_dir
-        )
+        base_dir = self._data_dir / root_id if root_id else self._data_dir
         if not base_dir.exists():
             return []
         files = [base_dir / f"{pipeline_run_id}.yaml"]
-        files.extend(
-            sorted(base_dir.glob(f"{pipeline_run_id}_*.yaml"))
-        )
+        files.extend(sorted(base_dir.glob(f"{pipeline_run_id}_*.yaml")))
         return [f for f in files if f.exists()]
 
     @staticmethod
@@ -505,8 +496,10 @@ class ExecutionRecordStorage:
                 result[k] = ExecutionRecordStorage._sanitize_dict(v)
             elif isinstance(v, list):
                 result[k] = [
-                    ExecutionRecordStorage._sanitize_dict(i) if isinstance(i, dict)
-                    else str(i) if not isinstance(i, (str, int, float, bool, type(None)))
+                    ExecutionRecordStorage._sanitize_dict(i)
+                    if isinstance(i, dict)
+                    else str(i)
+                    if not isinstance(i, (str, int, float, bool, type(None)))
                     else i
                     for i in v
                 ]
@@ -540,8 +533,9 @@ class ExecutionRecordStorage:
             self._loaded_pipelines.add(record.pipeline_run_id)
             self._append_record_to_file(record)
         self._all_summaries_loaded = False
-        logger.debug("保存执行记录: %s (pipeline=%s, iteration=%d)",
-                      record.record_id, record.pipeline_run_id, record.iteration)
+        logger.debug(
+            "保存执行记录: %s (pipeline=%s, iteration=%d)", record.record_id, record.pipeline_run_id, record.iteration
+        )
         return record.record_id
 
     def get(self, record_id: str) -> ExecutionRecordData | None:
@@ -552,21 +546,15 @@ class ExecutionRecordStorage:
                 return r
         return None
 
-    def list_by_session(
-        self, session_id: str, limit: int = 50
-    ) -> list[ExecutionRecordData]:
+    def list_by_session(self, session_id: str, limit: int = 50) -> list[ExecutionRecordData]:
         self._ensure_loaded(session_id)
-        records = [
-            r for r in self._records.values() if r.pipeline_run_id == session_id
-        ]
+        records = [r for r in self._records.values() if r.pipeline_run_id == session_id]
         records.sort(key=lambda r: r.iteration)
         return records[:limit]
 
     def count_by_session(self, session_id: str) -> int:
         self._ensure_loaded(session_id)
-        return sum(
-            1 for r in self._records.values() if r.pipeline_run_id == session_id
-        )
+        return sum(1 for r in self._records.values() if r.pipeline_run_id == session_id)
 
     def delete_by_session(self, session_id: str) -> int:
         # 懒加载：先从磁盘读入该 pipeline 的全部记录，否则服务重启后（或会话
@@ -574,10 +562,7 @@ class ExecutionRecordStorage:
         # `if to_delete` 会失败，导致磁盘 YAML/子目录/_pipeline_root_map 残留。
         # 与 list_by_session/count_by_session 等所有兄弟访问器保持一致。
         self._ensure_loaded(session_id)
-        to_delete = [
-            rid for rid, r in self._records.items()
-            if r.pipeline_run_id == session_id
-        ]
+        to_delete = [rid for rid, r in self._records.items() if r.pipeline_run_id == session_id]
         for rid in to_delete:
             del self._records[rid]
         if session_id in self._summaries:
@@ -638,14 +623,10 @@ class ExecutionRecordStorage:
             是否存在比 limit 更多的更早记录。
         """
         if limit is None:
-            return self._list_by_pipeline_full(
-                pipeline_run_id, before_sequence, after_sequence
-            )
+            return self._list_by_pipeline_full(pipeline_run_id, before_sequence, after_sequence)
 
         if before_sequence is not None:
-            return self._list_by_pipeline_full(
-                pipeline_run_id, before_sequence, after_sequence, limit=limit
-            )
+            return self._list_by_pipeline_full(pipeline_run_id, before_sequence, after_sequence, limit=limit)
 
         records, has_more = self.read_records_from_tail(
             pipeline_run_id,
@@ -660,9 +641,7 @@ class ExecutionRecordStorage:
             "[list_by_pipeline] 尾部读取无结果，fallback 全量加载: %s",
             pipeline_run_id,
         )
-        return self._list_by_pipeline_full(
-            pipeline_run_id, before_sequence, after_sequence, limit=limit
-        )
+        return self._list_by_pipeline_full(pipeline_run_id, before_sequence, after_sequence, limit=limit)
 
     def _list_by_pipeline_full(
         self,
@@ -729,9 +708,7 @@ class ExecutionRecordStorage:
         """
         src_files = self._get_part_files(source_pipeline_id)
         if not src_files:
-            raise ValueError(
-                f"源管道 {source_pipeline_id} 无执行记录，无法克隆"
-            )
+            raise ValueError(f"源管道 {source_pipeline_id} 无执行记录，无法克隆")
 
         # 先读取并替换所有源文件内容（register_pipeline 前读，避免其迁移副作用干扰）
         replaced_items: list[tuple[str, str, int]] = []  # (dst_filename, serialized_yaml, part_num)
@@ -750,7 +727,10 @@ class ExecutionRecordStorage:
             first_pid = records[0].get("pipeline_run_id", "(空)") if records else "(空)"
             logger.info(
                 "克隆源文件 | src_file=%s | src_pid=%s | 首条记录pid=%s | 记录数=%d",
-                src_f, source_pipeline_id, first_pid, len(records),
+                src_f,
+                source_pipeline_id,
+                first_pid,
+                len(records),
             )
 
             # 逐条替换：pipeline_run_id / container_task_id 改为目标值，
@@ -801,14 +781,10 @@ class ExecutionRecordStorage:
                 try:
                     data = yaml.safe_load(replaced)
                 except yaml.YAMLError as e:
-                    raise ValueError(
-                        f"克隆管道记录失败：目标文件 {dst_name} YAML 解析错误 - {e}"
-                    ) from e
+                    raise ValueError(f"克隆管道记录失败：目标文件 {dst_name} YAML 解析错误 - {e}") from e
                 records = data.get("records") if isinstance(data, dict) else None
                 if not records:
-                    raise ValueError(
-                        f"克隆管道记录失败：目标文件 {dst_name} 的 records 为空或格式异常"
-                    )
+                    raise ValueError(f"克隆管道记录失败：目标文件 {dst_name} 的 records 为空或格式异常")
                 for i, rec in enumerate(records):
                     rec_pid = rec.get("pipeline_run_id")
                     rec_ctid = rec.get("container_task_id")
@@ -835,7 +811,9 @@ class ExecutionRecordStorage:
 
         logger.info(
             "克隆管道记录完成 | src=%s dst=%s records=%d",
-            source_pipeline_id[:12], target_pipeline_id[:12], total,
+            source_pipeline_id[:12],
+            target_pipeline_id[:12],
+            total,
         )
         return total
 
@@ -865,7 +843,8 @@ class ExecutionRecordStorage:
         self._records_in_active_file.pop(target_pipeline_id, None)
         logger.warning(
             "克隆管道记录已回滚 | dst=%s | 删除文件=%d",
-            target_pipeline_id[:12], len(written_files),
+            target_pipeline_id[:12],
+            len(written_files),
         )
 
     def reconstruct_messages(
@@ -887,15 +866,14 @@ class ExecutionRecordStorage:
             消息字典列表（按时间顺序，旧的在前）
         """
         if token_fn is None:
+
             def _default_token_fn(text: str) -> int:
                 return max(1, len(text) // 2) if text else 0
+
             token_fn = _default_token_fn
 
         # 内存回退：无 data_dir 时直接从缓存读取
-        all_records = [
-            r for r in self._records.values()
-            if r.pipeline_run_id == pipeline_run_id
-        ]
+        all_records = [r for r in self._records.values() if r.pipeline_run_id == pipeline_run_id]
         all_records.sort(key=lambda r: (r.sequence, r.created_at or ""))
 
         if not all_records:
@@ -938,9 +916,7 @@ class ExecutionRecordStorage:
             if record.type == "ai" and record.tool_calls_json:
                 rec_tokens += token_fn(record.tool_calls_json)
 
-            tool_tokens = sum(
-                token_fn(r.content or "") for r in pending_tools
-            )
+            tool_tokens = sum(token_fn(r.content or "") for r in pending_tools)
             total_tokens = rec_tokens + tool_tokens
 
             if budget is not None and used_tokens + total_tokens > budget:
@@ -968,11 +944,7 @@ class ExecutionRecordStorage:
             records_list = data.get("records", [])
             if not records_list or not isinstance(records_list, list):
                 return []
-            return [
-                self._dict_to_record(d)
-                for d in records_list
-                if isinstance(d, dict)
-            ]
+            return [self._dict_to_record(d) for d in records_list if isinstance(d, dict)]
         except Exception as exc:
             logger.warning("分片文件损坏，跳过加载: %s - %s", file_path.name, exc)
             return []
@@ -1123,6 +1095,7 @@ class ExecutionRecordStorage:
                 # 解析 blocks 中所有 sequence，看是否有大于 after_sequence 的。
                 # blocks 是 YAML 文本块，这里用轻量正则提取 sequence 字段。
                 import re as _re  # noqa: PLC0415
+
                 block_text = "\n".join(blocks)
                 seqs = [int(m) for m in _re.findall(r"sequence:\s*(\d+)", block_text)]
                 part_has_new = any(s > after_sequence for s in seqs)
@@ -1154,20 +1127,14 @@ class ExecutionRecordStorage:
         try:
             data = yaml.safe_load(yaml_text)
         except Exception as exc:
-            logger.warning(
-                "反向读取 YAML 解析失败: %s - %s", pipeline_run_id, exc
-            )
+            logger.warning("反向读取 YAML 解析失败: %s - %s", pipeline_run_id, exc)
             return [], False
 
         raw_records = data.get("records") if isinstance(data, dict) else []
         if not isinstance(raw_records, list) or not raw_records:
             return [], False
 
-        records = [
-            self._dict_to_record(rd)
-            for rd in raw_records
-            if isinstance(rd, dict)
-        ]
+        records = [self._dict_to_record(rd) for rd in raw_records if isinstance(rd, dict)]
         records.sort(key=lambda r: (r.sequence, r.created_at or ""))
 
         # 断线补漏：只过滤，不截断
@@ -1220,12 +1187,15 @@ class ExecutionRecordStorage:
         # 增量更新全局 token 用量缓存：新管道加入、已有管道覆盖最新值
         self._totals_cache[summary.run_id] = dict(summary.total_tokens)
         self._persist_totals_cache()
-        logger.debug("保存管道摘要: %s (iterations=%d, status=%s)",
-                      summary.run_id, summary.total_iterations, summary.status)
+        logger.debug(
+            "保存管道摘要: %s (iterations=%d, status=%s)", summary.run_id, summary.total_iterations, summary.status
+        )
         return summary.run_id
 
     def register_pipeline(
-        self, pipeline_run_id: str, root_task_id: str,
+        self,
+        pipeline_run_id: str,
+        root_task_id: str,
     ) -> None:
         old_root = self._pipeline_root_map.get(pipeline_run_id)
         if old_root == root_task_id:
@@ -1304,9 +1274,7 @@ class ExecutionRecordStorage:
             self._all_summaries_loaded = True
         return list(self._summaries.values())
 
-    def list_summaries(
-        self, limit: int = 50
-    ) -> list[PipelineRunSummary]:
+    def list_summaries(self, limit: int = 50) -> list[PipelineRunSummary]:
         # summaries 需要全量扫描，触发一次性加载
         if self._data_dir and not self._loaded_pipelines:
             self._load_all()

@@ -69,7 +69,10 @@ class MemoryContextService:
             config.get("context_window", 128000) if config else 128000,
         )
         self._compressor = compressor or ContextCompressor(config=compression_config)
-        self._config = config or {"context_window": 128000, "compress_trigger_ratio": 0.55}  # 0.55 见 config.defaults.COMPRESS_TRIGGER_RATIO
+        self._config = config or {
+            "context_window": 128000,
+            "compress_trigger_ratio": 0.55,
+        }  # 0.55 见 config.defaults.COMPRESS_TRIGGER_RATIO
         self._llm_call_fn: LLMCallFn | None = llm_call_fn
 
         # 内存存储：{session_id: {"L0": [messages], "L1": str, "L2": str}}
@@ -91,8 +94,7 @@ class MemoryContextService:
         self._validate_config()
 
         logger.debug(
-            "[MemoryContextService] 初始化完成 | "
-            "context_window=%s",
+            "[MemoryContextService] 初始化完成 | context_window=%s",
             self._config.get("context_window"),
         )
 
@@ -119,11 +121,19 @@ class MemoryContextService:
         self._compressor.set_llm_call_fn(llm_call_fn)
         logger.debug("[MemoryContextService] LLM 调用函数已注入")
 
-    def setup(self, *, chunk_service=None, memory_service=None,
-              llm_core=None, pipeline_id="", session_id="",
-              context_window=0, user_id="",
-              compression_model_id=None,
-              model_name="") -> None:
+    def setup(
+        self,
+        *,
+        chunk_service=None,
+        memory_service=None,
+        llm_core=None,
+        pipeline_id="",
+        session_id="",
+        context_window=0,
+        user_id="",
+        compression_model_id=None,
+        model_name="",
+    ) -> None:
         """注入外部依赖，供 context_window_guard 调用。"""
         if chunk_service is not None:
             self._chunk_service = chunk_service
@@ -179,14 +189,19 @@ class MemoryContextService:
         """
         try:
             return await self._compress_messages_impl(
-                messages, context_window, trigger_ratio,
-                state_snapshot, recent_process_blocks,
-                save_chunk_fn, compression_window,
+                messages,
+                context_window,
+                trigger_ratio,
+                state_snapshot,
+                recent_process_blocks,
+                save_chunk_fn,
+                compression_window,
             )
         except Exception as exc:
             logger.error(
                 "[MemoryContextService] compress_messages 顶层异常: %s",
-                exc, exc_info=True,
+                exc,
+                exc_info=True,
             )
             return None
 
@@ -209,8 +224,11 @@ class MemoryContextService:
             state_snapshot = bg["state_snapshot"]
             if not recent_process_blocks:
                 recent_process_blocks = bg["process_blocks"]
-            logger.info("[MemoryContextService] 背景加载完成: snapshot=%d, blocks=%d",
-                        len(state_snapshot), len(recent_process_blocks))
+            logger.info(
+                "[MemoryContextService] 背景加载完成: snapshot=%d, blocks=%d",
+                len(state_snapshot),
+                len(recent_process_blocks),
+            )
 
         if not self._llm_call_fn:
             logger.info("[MemoryContextService] 构建 LLM 调用函数...")
@@ -235,12 +253,14 @@ class MemoryContextService:
             "msg_count=%d, context_window=%d, compression_window=%s, "
             "trigger_ratio=%.2f, llm_fn=%s, chunk_service=%s, "
             "state_snapshot_len=%d, process_blocks_len=%d",
-            len(messages), context_window,
+            len(messages),
+            context_window,
             compression_window or context_window,
             trigger_ratio,
             "有" if self._llm_call_fn else "无",
             "有" if self._chunk_service else "无",
-            len(state_snapshot), len(recent_process_blocks),
+            len(state_snapshot),
+            len(recent_process_blocks),
         )
 
         if not self._llm_call_fn:
@@ -258,8 +278,11 @@ class MemoryContextService:
 
         for round_idx in range(self._MAX_COMPRESS_ROUNDS):
             compressed = await self._do_compress_round(
-                current_messages, context_window, budgets,
-                state_snapshot, recent_process_blocks,
+                current_messages,
+                context_window,
+                budgets,
+                state_snapshot,
+                recent_process_blocks,
                 compression_window=comp_window,
             )
             if compressed is None:
@@ -268,8 +291,11 @@ class MemoryContextService:
             total_tokens = sum(self._estimate_msg_tokens(m) for m in compressed)
             logger.info(
                 "[MemoryContextService] 第 %d 轮压缩: %d -> %d 条, %d tokens (触发线 %d)",
-                round_idx + 1, len(current_messages), len(compressed),
-                total_tokens, trigger_tokens,
+                round_idx + 1,
+                len(current_messages),
+                len(compressed),
+                total_tokens,
+                trigger_tokens,
             )
 
             if total_tokens < trigger_tokens:
@@ -320,8 +346,12 @@ class MemoryContextService:
             "[MemoryContextService] _do_compress_round: "
             "total=%d, pure_system=%d, old_blocks=%d, other=%d, "
             "recent_budget=%d, context_window=%d, compression_window=%s",
-            len(messages), len(pure_system_msgs), len(old_blocks), len(other_msgs),
-            budgets.get("recent", 0), context_window,
+            len(messages),
+            len(pure_system_msgs),
+            len(old_blocks),
+            len(other_msgs),
+            budgets.get("recent", 0),
+            context_window,
             compression_window or context_window,
         )
 
@@ -336,13 +366,18 @@ class MemoryContextService:
             logger.warning(
                 "[MemoryContextService] split_idx=%d, 所有消息都在 recent 预算内: "
                 "total_estimated=%d tokens, recent_budget=%d, context_window=%d, msg_count=%d",
-                split_idx, total_est, recent_budget, context_window, len(other_msgs),
+                split_idx,
+                total_est,
+                recent_budget,
+                context_window,
+                len(other_msgs),
             )
             return None
 
         # 保证工具调用配对完整
         old_msgs, recent_msgs = self._split_preserving_tool_pairs(
-            other_msgs, split_idx,
+            other_msgs,
+            split_idx,
         )
 
         if not old_msgs:
@@ -350,9 +385,11 @@ class MemoryContextService:
 
         recent_tokens = sum(self._estimate_msg_tokens(m) for m in recent_msgs)
         logger.info(
-            "[MemoryContextService] 预算切分: recent=%d条/%dtokens (预算%d), "
-            "old=%d条, existing_blocks=%d",
-            len(recent_msgs), recent_tokens, recent_budget, len(old_msgs),
+            "[MemoryContextService] 预算切分: recent=%d条/%dtokens (预算%d), old=%d条, existing_blocks=%d",
+            len(recent_msgs),
+            recent_tokens,
+            recent_budget,
+            len(old_msgs),
             len(old_blocks) // 2,
         )
 
@@ -375,15 +412,22 @@ class MemoryContextService:
 
             logger.info(
                 "[MemoryContextService] 分批压缩 %d/%d: %d 条消息",
-                batch_idx + 1, num_batches, len(batch),
+                batch_idx + 1,
+                num_batches,
+                len(batch),
             )
 
             comp_result = await self._build_compression_content(
-                batch, context_window, budgets, state_snapshot, recent_process_blocks,
+                batch,
+                context_window,
+                budgets,
+                state_snapshot,
+                recent_process_blocks,
             )
             if not comp_result:
                 logger.warning(
-                    "[MemoryContextService] 第 %d 批压缩失败", batch_idx + 1,
+                    "[MemoryContextService] 第 %d 批压缩失败",
+                    batch_idx + 1,
                 )
                 continue
 
@@ -411,18 +455,21 @@ class MemoryContextService:
         if self._chunk_service and self._pipeline_id:
             try:
                 snapshots = await self._chunk_service.find_by_pipeline(
-                    self._pipeline_id, "STATE_SNAPSHOT",
+                    self._pipeline_id,
+                    "STATE_SNAPSHOT",
                 )
                 if snapshots:
                     state_snapshot = snapshots[0].content or ""
             except Exception as e:
                 logger.warning(
-                    "[MemoryContextService] 加载 state_snapshot 失败: %s", e,
+                    "[MemoryContextService] 加载 state_snapshot 失败: %s",
+                    e,
                 )
 
             try:
                 chunks = await self._chunk_service.find_by_pipeline(
-                    self._pipeline_id, "L1",
+                    self._pipeline_id,
+                    "L1",
                 )
                 if chunks:
                     sorted_chunks = sorted(chunks, key=lambda c: c.sequence_start)
@@ -436,12 +483,12 @@ class MemoryContextService:
                             sorted_chunks[-1],
                         ]
                     process_blocks = "\n\n---\n\n".join(
-                        f"[{chunk.sequence_start}-{chunk.sequence_end}] {chunk.content}"
-                        for chunk in samples
+                        f"[{chunk.sequence_start}-{chunk.sequence_end}] {chunk.content}" for chunk in samples
                     )
             except Exception as e:
                 logger.warning(
-                    "[MemoryContextService] 加载 L1 过程块失败: %s", e,
+                    "[MemoryContextService] 加载 L1 过程块失败: %s",
+                    e,
                 )
 
         return {"state_snapshot": state_snapshot, "process_blocks": process_blocks}
@@ -451,7 +498,9 @@ class MemoryContextService:
     # ------------------------------------------------------------------
 
     async def _save_compression_result(  # noqa: PLR0912,PLR0915
-        self, old_msgs: list[dict[str, Any]], comp_result: dict[str, Any],
+        self,
+        old_msgs: list[dict[str, Any]],
+        comp_result: dict[str, Any],
     ) -> None:
         """保存压缩块到 ChunkService + 覆盖状态快照 + 写入长期记忆。"""
         if not self._chunk_service or not self._pipeline_id:
@@ -468,7 +517,8 @@ class MemoryContextService:
         context_window = self._config.get("context_window", 0)
 
         sequences = [
-            m["_record_sequence"] for m in old_msgs
+            m["_record_sequence"]
+            for m in old_msgs
             if "_record_sequence" in m and isinstance(m["_record_sequence"], int)
         ]
         if sequences:
@@ -479,7 +529,8 @@ class MemoryContextService:
             sequence_start = 1
             try:
                 existing_l1 = await self._chunk_service.find_by_pipeline(
-                    self._pipeline_id, "L1",
+                    self._pipeline_id,
+                    "L1",
                 )
                 if existing_l1:
                     max_end = max(c.sequence_end for c in existing_l1 if c.sequence_end)
@@ -524,7 +575,8 @@ class MemoryContextService:
         if state_snapshot:
             try:
                 old_snapshots = await self._chunk_service.find_by_pipeline(
-                    self._pipeline_id, "STATE_SNAPSHOT",
+                    self._pipeline_id,
+                    "STATE_SNAPSHOT",
                 )
                 for old in old_snapshots:
                     await self._chunk_service.delete(old.id)
@@ -532,6 +584,7 @@ class MemoryContextService:
                 pass
 
             import json  # noqa: PLC0415
+
             ss_content = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
             snapshot_chunk = ChunkData(
                 pipeline_run_id=self._pipeline_id,
@@ -567,15 +620,18 @@ class MemoryContextService:
                         extracted += 1
                 if extracted:
                     logger.info(
-                        "[MemoryContextService] 长期记忆提取: %d 条", extracted,
+                        "[MemoryContextService] 长期记忆提取: %d 条",
+                        extracted,
                     )
             except Exception as exc:
                 logger.warning("[MemoryContextService] 长期记忆写入失败: %s", exc)
 
         logger.info(
-            "[MemoryContextService] 压缩块已保存: L1_id=%s (%d字符), "
-            "L2≈%d字符, keywords=%d, state_snapshot=%s",
-            l1_id, len(l1_content), len(l2_content), len(keywords),
+            "[MemoryContextService] 压缩块已保存: L1_id=%s (%d字符), L2≈%d字符, keywords=%d, state_snapshot=%s",
+            l1_id,
+            len(l1_content),
+            len(l2_content),
+            len(keywords),
             "有" if state_snapshot else "无",
         )
 
@@ -605,6 +661,7 @@ class MemoryContextService:
                     provider = model_conf.get("provider", "")
                     bare_name = model_conf.get("model_name", model_id)
                     from llm.router_factory import _get_litellm_model_string  # noqa: PLC0415
+
                     litellm_model = _get_litellm_model_string(provider, bare_name)
 
                     async def _call_via_shared_adapter(prompt: str) -> str:
@@ -617,7 +674,8 @@ class MemoryContextService:
 
                     logger.info(
                         "[MemoryContextService] 压缩使用共享Adapter: model=%s (provider=%s)",
-                        model_id, provider,
+                        model_id,
+                        provider,
                     )
                     return _call_via_shared_adapter
         except Exception as exc:
@@ -625,7 +683,7 @@ class MemoryContextService:
 
         # 回退：llm_core 的 adapter
         if self._llm_core and hasattr(self._llm_core, "_adapter") and hasattr(self._llm_core, "_model"):
-            _use_router = hasattr(self._llm_core._adapter, '_router')
+            _use_router = hasattr(self._llm_core._adapter, "_router")
             _model_str = self._llm_core._model if _use_router else self._llm_core._get_model_string()
 
             async def _call_via_core(prompt: str) -> str:
@@ -641,6 +699,7 @@ class MemoryContextService:
                         kwargs["api_key"] = self._llm_core._api_key
                 response = await self._llm_core._adapter.completion(**kwargs)
                 return response.text or ""
+
             return _call_via_core
 
         return None
@@ -655,6 +714,7 @@ class MemoryContextService:
             return None
         try:
             from config.models import get_model_config_loader  # noqa: PLC0415
+
             loader = get_model_config_loader()
             conf = loader.get_llm_core_config(self._compression_model_id)
             if conf and conf.get("context_window"):
@@ -678,7 +738,8 @@ class MemoryContextService:
 
         try:
             chunks = await self._chunk_service.find_by_pipeline(
-                self._pipeline_id, "L1",
+                self._pipeline_id,
+                "L1",
             )
         except Exception:
             return None
@@ -693,7 +754,8 @@ class MemoryContextService:
             return None
 
         cleaned = [
-            m for m in messages
+            m
+            for m in messages
             if not (
                 m.get("role") == "system"
                 and (
@@ -708,7 +770,9 @@ class MemoryContextService:
 
         logger.info(
             "[MemoryContextService] context_window 变更: %d → %d, 清理 %d 条旧压缩摘要",
-            chunk_window, context_window, len(messages) - len(cleaned),
+            chunk_window,
+            context_window,
+            len(messages) - len(cleaned),
         )
         return cleaned
 
@@ -759,13 +823,13 @@ class MemoryContextService:
             return None
 
         logger.info(
-            "[MemoryContextService] 压缩完成: L1≈%d字符 L2≈%d字符 "
-            "keywords=%d state_snapshot=%d字段",
-            len(l1), len(l2), len(kw),
+            "[MemoryContextService] 压缩完成: L1≈%d字符 L2≈%d字符 keywords=%d state_snapshot=%d字段",
+            len(l1),
+            len(l2),
+            len(kw),
             sum(1 for v in ss.values() if v) if isinstance(ss, dict) else 0,
         )
-        return {"l1": l1, "l2": l2, "keywords": kw,
-                "state_snapshot": ss, "memory_items": mi}
+        return {"l1": l1, "l2": l2, "keywords": kw, "state_snapshot": ss, "memory_items": mi}
 
     # ------------------------------------------------------------------
     # 预算切分辅助

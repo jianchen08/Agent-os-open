@@ -61,7 +61,7 @@ class ScientificCalculatorTool(BuiltinTool):
         # 幂和根
         "pow": math.pow,
         "sqrt": math.sqrt,
-        "cbrt": lambda x: math.copysign(abs(x) ** (1/3), x),
+        "cbrt": lambda x: math.copysign(abs(x) ** (1 / 3), x),
         # 其他数学函数
         "abs": abs,
         "ceil": math.ceil,
@@ -107,9 +107,7 @@ class ScientificCalculatorTool(BuiltinTool):
                         "log, ln, log10, log2, pow, sqrt, cbrt, abs, ceil, floor, "
                         "round, factorial, gcd, exp, degrees, radians",
                     },
-                    "value": {
-                        "description": "运算值（单参数函数使用）。数值类型。"
-                    },
+                    "value": {"description": "运算值（单参数函数使用）。数值类型。"},
                     "values": {
                         "type": "array",
                         "description": "运算值数组（双参数函数如pow、log使用）。格式：[底数, 指数]或[数值, 底数]",
@@ -129,12 +127,7 @@ class ScientificCalculatorTool(BuiltinTool):
             tags=["calculator", "math", "science", "analysis"],
         )
 
-    def _evaluate_single_operation(
-        self,
-        func: str,
-        value: int | float,
-        values: list = None
-    ) -> int | float:
+    def _evaluate_single_operation(self, func: str, value: int | float, values: list = None) -> int | float:
         """求值单个数学函数"""
         # 处理常量
         if func.lower() in self.CONSTANTS:

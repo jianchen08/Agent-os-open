@@ -170,7 +170,10 @@ class GenericCreativeConnector(BaseConnector, ConfigSubscriberMixin):
             return ActionResult(success=resp.status == 200, data=data)
 
     def _on_config_changed(
-        self, event_type: str, file_path: str, context: dict[str, Any],
+        self,
+        event_type: str,
+        file_path: str,
+        context: dict[str, Any],
     ) -> None:
         """配置变更回调：记录日志。
 
@@ -181,5 +184,7 @@ class GenericCreativeConnector(BaseConnector, ConfigSubscriberMixin):
         """
         self._logger.info(
             "%s 配置变更: event=%s, path=%s",
-            self._name, event_type, file_path,
+            self._name,
+            event_type,
+            file_path,
         )

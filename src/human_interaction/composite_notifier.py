@@ -22,16 +22,10 @@ class CompositeNotifier(IInteractionNotifier):
     async def notify_request(self, request: Any) -> bool:
         return await self._delegate("notify_request", request)
 
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
-        return await self._delegate(
-            "notify_cancel", request_id, reason, thread_id
-        )
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
+        return await self._delegate("notify_cancel", request_id, reason, thread_id)
 
-    async def notify_timeout(
-        self, request_id: str, thread_id: str = ""
-    ) -> bool:
+    async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
         return await self._delegate("notify_timeout", request_id, thread_id)
 
     async def notify_timeout_reminder(

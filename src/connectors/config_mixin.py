@@ -82,9 +82,9 @@ class ConfigSubscriberMixin:
         self._config_callback = _create_callback(self)
         config_center.watch(path_prefix, self._config_callback)
 
-        adapter_name = getattr(self, "connector_type", None) or getattr(
-            self, "channel_type", None
-        ) or self.__class__.__name__
+        adapter_name = (
+            getattr(self, "connector_type", None) or getattr(self, "channel_type", None) or self.__class__.__name__
+        )
         logger.info(
             "配置订阅已注册: %s -> prefix=%s",
             adapter_name,
@@ -95,17 +95,14 @@ class ConfigSubscriberMixin:
         """取消 ConfigCenter 配置订阅。"""
         self._ensure_config_state()
 
-        if (
-            self._config_center is not None
-            and self._config_callback is not None
-        ):
+        if self._config_center is not None and self._config_callback is not None:
             self._config_center.unwatch(
                 self._config_path_prefix,
                 self._config_callback,
             )
-            adapter_name = getattr(self, "connector_type", None) or getattr(
-                self, "channel_type", None
-            ) or self.__class__.__name__
+            adapter_name = (
+                getattr(self, "connector_type", None) or getattr(self, "channel_type", None) or self.__class__.__name__
+            )
             logger.info(
                 "配置订阅已取消: %s -> prefix=%s",
                 adapter_name,
@@ -132,9 +129,9 @@ class ConfigSubscriberMixin:
             file_path: 变更的文件绝对路径
             context: 变更上下文，包含 config_type 等元信息
         """
-        adapter_name = getattr(self, "connector_type", None) or getattr(
-            self, "channel_type", None
-        ) or self.__class__.__name__
+        adapter_name = (
+            getattr(self, "connector_type", None) or getattr(self, "channel_type", None) or self.__class__.__name__
+        )
         logger.info(
             "配置变更通知: %s, event=%s, path=%s",
             adapter_name,

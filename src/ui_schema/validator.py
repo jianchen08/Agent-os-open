@@ -70,9 +70,7 @@ VALID_WIDGET_TYPES: set[str] = {
 }
 
 # API 端点正则：以 /api/ 开头，路径段由小写字母/数字/下划线/连字符组成
-_API_ENDPOINT_PATTERN = re.compile(
-    r"^/api(/[a-z0-9_-]+)+$"
-)
+_API_ENDPOINT_PATTERN = re.compile(r"^/api(/[a-z0-9_-]+)+$")
 
 
 class SchemaValidator:
@@ -109,9 +107,7 @@ class SchemaValidator:
 
         return errors
 
-    def validate_all(
-        self, schemas: list[ModuleUISchema]
-    ) -> dict[str, list[str]]:
+    def validate_all(self, schemas: list[ModuleUISchema]) -> dict[str, list[str]]:
         """批量验证多个 Schema。
 
         Args:
@@ -127,9 +123,7 @@ class SchemaValidator:
                 results[schema.identity.id] = errors
         return results
 
-    def _validate_identity(
-        self, schema: ModuleUISchema, errors: list[str]
-    ) -> None:
+    def _validate_identity(self, schema: ModuleUISchema, errors: list[str]) -> None:
         """验证 identity 部分。
 
         Args:
@@ -146,14 +140,9 @@ class SchemaValidator:
 
         # id 格式：只允许小写字母、数字、下划线、连字符
         if identity.id and not re.match(r"^[a-z0-9_-]+$", identity.id):
-            errors.append(
-                f"identity.id 格式不合法: '{identity.id}'，"
-                "仅允许小写字母、数字、下划线、连字符"
-            )
+            errors.append(f"identity.id 格式不合法: '{identity.id}'，仅允许小写字母、数字、下划线、连字符")
 
-    def _validate_actions(
-        self, schema: ModuleUISchema, errors: list[str]
-    ) -> None:
+    def _validate_actions(self, schema: ModuleUISchema, errors: list[str]) -> None:
         """验证 actions 部分的 API 端点格式。
 
         Args:
@@ -163,14 +152,11 @@ class SchemaValidator:
         for action in schema.actions:
             if action.api is not None and not _API_ENDPOINT_PATTERN.match(action.api):
                 errors.append(
-                    f"action '{action.id}' 的 API 端点格式不合法: "
-                    f"'{action.api}'，应以 /api/ 开头且路径段合法"
+                    f"action '{action.id}' 的 API 端点格式不合法: '{action.api}'，应以 /api/ 开头且路径段合法"
                 )
             self._validate_action_id(action, errors)
 
-    def _validate_action_id(
-        self, action: ModuleAction, errors: list[str]
-    ) -> None:
+    def _validate_action_id(self, action: ModuleAction, errors: list[str]) -> None:
         """验证 action ID 格式。
 
         Args:
@@ -180,9 +166,7 @@ class SchemaValidator:
         if not action.id or not action.id.strip():
             errors.append("action.id 不能为空")
 
-    def _validate_rendering(
-        self, schema: ModuleUISchema, errors: list[str]
-    ) -> None:
+    def _validate_rendering(self, schema: ModuleUISchema, errors: list[str]) -> None:
         """验证 rendering 部分的 widget 类型。
 
         Args:
@@ -193,6 +177,5 @@ class SchemaValidator:
             widget = space_config.widget
             if widget and widget not in VALID_WIDGET_TYPES:
                 errors.append(
-                    f"rendering.spaces 中 widget '{widget}' 不在白名单内，"
-                    f"合法值: {sorted(VALID_WIDGET_TYPES)[:10]}..."
+                    f"rendering.spaces 中 widget '{widget}' 不在白名单内，合法值: {sorted(VALID_WIDGET_TYPES)[:10]}..."
                 )

@@ -43,9 +43,7 @@ class MediaProviderRegistry:
         """
         name = provider.provider_name
         if name in self._providers:
-            logger.debug(
-                "[MediaRegistry] Provider '%s' 已存在，将被覆盖", name
-            )
+            logger.debug("[MediaRegistry] Provider '%s' 已存在，将被覆盖", name)
         self._providers[name] = provider
         logger.debug(
             "[MediaRegistry] 已注册 Provider '%s' (type=%s)",
@@ -61,9 +59,7 @@ class MediaProviderRegistry:
         """
         if provider_name in self._providers:
             del self._providers[provider_name]
-            logger.debug(
-                "[MediaRegistry] 已注销 Provider '%s'", provider_name
-            )
+            logger.debug("[MediaRegistry] 已注销 Provider '%s'", provider_name)
 
     def get(self, provider_name: str) -> MediaProvider | None:
         """获取已注册的 Provider（大小写不敏感）。
@@ -111,11 +107,7 @@ class MediaProviderRegistry:
         Returns:
             匹配的 Provider 列表（按 priority 排序）
         """
-        providers = [
-            p
-            for p in self._providers.values()
-            if p.media_type == media_type
-        ]
+        providers = [p for p in self._providers.values() if p.media_type == media_type]
         return sorted(providers, key=lambda p: p.config.priority)
 
     def get_chain_for_type(
@@ -152,9 +144,7 @@ class MediaProviderRegistry:
             yaml.YAMLError: YAML 解析错误
         """
         if not config_path.exists():
-            raise FileNotFoundError(
-                f"媒体配置文件不存在: {config_path}"
-            )
+            raise FileNotFoundError(f"媒体配置文件不存在: {config_path}")
 
         with open(config_path, encoding="utf-8") as f:
             raw_config = yaml.safe_load(f)
@@ -187,14 +177,10 @@ class MediaProviderRegistry:
             }
 
         self._configs = parsed
-        logger.info(
-            "[MediaRegistry] 已加载配置，共 %d 种媒体类型", len(parsed)
-        )
+        logger.info("[MediaRegistry] 已加载配置，共 %d 种媒体类型", len(parsed))
         return parsed
 
-    def get_config(
-        self, media_type_key: str
-    ) -> dict[str, Any] | None:
+    def get_config(self, media_type_key: str) -> dict[str, Any] | None:
         """获取指定媒体类型的配置。
 
         Args:

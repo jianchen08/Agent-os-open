@@ -242,7 +242,7 @@ class _SimpleHistogram:
         with self._lock:
             for key, data in sorted(self._data.items()):
                 label_str = self._format_labels(key)
-                base = f',{label_str}' if label_str else ''
+                base = f",{label_str}" if label_str else ""
                 for bucket_key, count in data["buckets"].items():
                     le_val = bucket_key.split("=")[1]
                     lines.append(f'{label_prefix}_bucket{{le="{le_val}"{base}}} {count}')

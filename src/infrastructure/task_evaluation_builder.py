@@ -25,7 +25,8 @@ class TaskEvaluationBuilderMixin:
     """
 
     def _build_evaluation_criteria_prompt(  # noqa: PLR0912
-        self, acceptance_criteria: dict[str, Any],
+        self,
+        acceptance_criteria: dict[str, Any],
     ) -> str:
         """根据验收标准中的指标 ID 加载完整指标定义，生成可读的评估说明文本。
 
@@ -94,7 +95,9 @@ class TaskEvaluationBuilderMixin:
         return f"\n\n{header}\n\n" + "\n\n".join(parts)
 
     def _normalize_acceptance_criteria_paths(
-        self, criteria: dict | list, workspace: str,
+        self,
+        criteria: dict | list,
+        workspace: str,
     ) -> dict | list:
         """递归规范化验收标准中的路径，转为相对于 workspace 的相对路径。
 
@@ -112,11 +115,12 @@ class TaskEvaluationBuilderMixin:
         """
         workspace_normalized = workspace.replace("\\", "/").rstrip("/")
         from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+
         _ws_root_name = Path(get_workspace_config_root()).name + "/"
 
         def _to_relative(value_normalized: str) -> str:
             if value_normalized.startswith(workspace_normalized + "/"):
-                return value_normalized[len(workspace_normalized) + 1:]
+                return value_normalized[len(workspace_normalized) + 1 :]
             if value_normalized == workspace_normalized:
                 return "."
             if value_normalized.startswith(_ws_root_name) or (
@@ -208,7 +212,8 @@ class TaskEvaluationBuilderMixin:
         # goal_context 信息不再注入到任务输入中，减少冗余输出
         if acceptance_criteria:
             acceptance_criteria = self._normalize_acceptance_criteria_paths(
-                acceptance_criteria, workspace,
+                acceptance_criteria,
+                workspace,
             )
             eval_prompt = self._build_evaluation_criteria_prompt(acceptance_criteria)
             if eval_prompt:
@@ -219,7 +224,7 @@ class TaskEvaluationBuilderMixin:
             full_input += (
                 "\n\n路径使用规则（重要）："
                 "\n- 所有文件操作使用相对路径即可，系统会自动拼接到工作目录"
-                "\n- 示例：file_write(path=\"docs/report.md\")"
+                '\n- 示例：file_write(path="docs/report.md")'
             )
 
         # 注入场景化工作空间提示

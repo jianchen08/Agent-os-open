@@ -61,17 +61,18 @@ def _substitute_env_vars(value: Any) -> Any:
     _load_dotenv_once()
 
     if isinstance(value, str):
+
         def _replace(match: re.Match[str]) -> str:
             var_name = match.group(1)
             env_value = os.environ.get(var_name)
             if env_value is None:
                 logger.warning(
-                    "环境变量 %s 未设置，对应配置项将为空。"
-                    "请在 .env 文件或系统环境变量中设置该值。",
+                    "环境变量 %s 未设置，对应配置项将为空。请在 .env 文件或系统环境变量中设置该值。",
                     var_name,
                 )
                 return ""
             return env_value
+
         return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _substitute_env_vars(v) for k, v in value.items()}
@@ -119,7 +120,8 @@ class ModelConfigLoader:
 
     @staticmethod
     def _case_insensitive_lookup(
-        mapping: dict[str, Any], key: str,
+        mapping: dict[str, Any],
+        key: str,
     ) -> dict[str, Any] | None:
         """在字典中执行大小写不敏感的键查找。"""
         if key in mapping:
@@ -215,13 +217,9 @@ class ModelConfigLoader:
         defaults = self._load_llm_data().get("defaults", {})
         call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
         # 首 token 超时：流式首 chunk 不来时强制超时的秒数（优先模型配置，回退 defaults）
-        first_token_timeout = model_conf.get(
-            "first_token_timeout", defaults.get("first_token_timeout", 60)
-        )
+        first_token_timeout = model_conf.get("first_token_timeout", defaults.get("first_token_timeout", 60))
         # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（优先模型配置，回退 defaults）
-        stream_idle_timeout = model_conf.get(
-            "stream_idle_timeout", defaults.get("stream_idle_timeout", 600)
-        )
+        stream_idle_timeout = model_conf.get("stream_idle_timeout", defaults.get("stream_idle_timeout", 600))
 
         return {
             "model_id": model_id,
@@ -274,15 +272,18 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
 
     # 2. 清除 LLMConfigManager 单例（延迟导入避免循环依赖）
     from config.llm_config import reset_llm_config
+
     reset_llm_config()
 
     # 3. 清除 Router 和 Adapter 单例（延迟导入）
     from llm.router_factory import reset_router
+
     reset_router()
 
     # 4. 清除 tier 缓存，使配置变更实时生效
     try:
         import pipeline.plugin_resolver as pr_mod
+
         pr_mod._tier_cache.clear()
     except Exception:
         pass

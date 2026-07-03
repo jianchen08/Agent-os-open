@@ -195,17 +195,18 @@ class WebSearchMCPTool(BuiltinTool):
             await loader.disconnect_all()
 
     async def _do_search(  # noqa: PLR0911,PLR0912
-        self, loader: MCPToolLoader, server_config: MCPServerConfig,
-        query: str, max_results: int, search_mode: str,
+        self,
+        loader: MCPToolLoader,
+        server_config: MCPServerConfig,
+        query: str,
+        max_results: int,
+        search_mode: str,
     ) -> ToolResult:
         """执行搜索，mcp-webgate 失败时自动降级到 bing-search"""
         import json  # noqa: F401,PLC0415
         import traceback  # noqa: F401,PLC0415
 
-        is_webgate = (
-            "mcp_webgate" in str(server_config.args)
-            or "mcp-webgate" in str(server_config.command)
-        )
+        is_webgate = "mcp_webgate" in str(server_config.args) or "mcp-webgate" in str(server_config.command)
         original_backend = "mcp-webgate" if is_webgate else "bing-search"
 
         try:
@@ -222,13 +223,17 @@ class WebSearchMCPTool(BuiltinTool):
                 if search_mode == "content_only":
                     return create_failure_result(
                         error="content_only 需要 mcp-webgate 后端（pip install mcp-webgate + Docker SearXNG）",
-                        error_code="UNSUPPORTED_MODE")
+                        error_code="UNSUPPORTED_MODE",
+                    )
                 tool_name = "web_search"
                 mcp_args = {"query": query, "max_results": max_results}
 
             result = await loader.call_tool(
-                server_config, tool_name, mcp_args,
-                timeout=60.0, overall_timeout=self.config.mcp_overall_timeout,
+                server_config,
+                tool_name,
+                mcp_args,
+                timeout=60.0,
+                overall_timeout=self.config.mcp_overall_timeout,
             )
             parsed = self._extract_mcp_content(result)
 
@@ -236,9 +241,7 @@ class WebSearchMCPTool(BuiltinTool):
                 search_results = self._parse_webgate_minimal(parsed, query, search_mode)
                 # 后端不可用检测：fetched=0 且 failed=0 → SearXNG 没响应
                 stats = search_results.get("stats", {})
-                if (search_results.get("total", 0) == 0
-                        and stats.get("fetched", 0) == 0
-                        and stats.get("failed", 0) == 0):
+                if search_results.get("total", 0) == 0 and stats.get("fetched", 0) == 0 and stats.get("failed", 0) == 0:
                     logger.warning("mcp-webgate 后端无响应（fetched=0 failed=0），降级到 bing-search")
                     return await self._fallback_bing_search(loader, query, max_results, search_mode)
             elif isinstance(parsed, dict):
@@ -268,7 +271,11 @@ class WebSearchMCPTool(BuiltinTool):
             return create_failure_result(error=f"搜索失败: {e}", error_code="SEARCH_FAILED")
 
     async def _fallback_bing_search(
-        self, loader: MCPToolLoader, query: str, max_results: int, search_mode: str,
+        self,
+        loader: MCPToolLoader,
+        query: str,
+        max_results: int,
+        search_mode: str,
     ) -> ToolResult:
         """降级到 bing-search（纯 Python，零依赖）"""
         # 向上搜索项目根，找到 mcp-servers/bing-search/server.py
@@ -276,14 +283,14 @@ class WebSearchMCPTool(BuiltinTool):
         if server_py is None:
             return create_failure_result(error="[fallback] bing-search server.py 未找到", error_code="FALLBACK_MISSING")
 
-        fallback_cfg = MCPServerConfig(
-            name="bing-fallback", command=sys.executable, args=[server_py]
-        )
+        fallback_cfg = MCPServerConfig(name="bing-fallback", command=sys.executable, args=[server_py])
         try:
             result = await loader.call_tool(
-                fallback_cfg, "web_search",
+                fallback_cfg,
+                "web_search",
                 {"query": query, "max_results": max_results},
-                timeout=30.0, overall_timeout=45.0,
+                timeout=30.0,
+                overall_timeout=45.0,
             )
             parsed = self._extract_mcp_content(result)
             if isinstance(parsed, dict):
@@ -321,22 +328,26 @@ class WebSearchMCPTool(BuiltinTool):
         # sources（已抓取+清洗的页面）
         for i, src in enumerate(result.get("sources", []) or []):
             content = src.get("content", "")
-            results.append({
-                "title": src.get("title", ""),
-                "url": src.get("url", ""),
-                "snippet": src.get("snippet", content[:200] if content else ""),
-                "content": content if not src.get("truncated") else content + "...",
-                "index": i,
-            })
+            results.append(
+                {
+                    "title": src.get("title", ""),
+                    "url": src.get("url", ""),
+                    "snippet": src.get("snippet", content[:200] if content else ""),
+                    "content": content if not src.get("truncated") else content + "...",
+                    "index": i,
+                }
+            )
         # snippet_pool（未抓取的补充摘要）
         offset = len(results)
         for i, snip in enumerate(result.get("snippet_pool", []) or []):
-            results.append({
-                "title": snip.get("title", ""),
-                "url": snip.get("url", ""),
-                "snippet": snip.get("snippet", ""),
-                "index": offset + i,
-            })
+            results.append(
+                {
+                    "title": snip.get("title", ""),
+                    "url": snip.get("url", ""),
+                    "snippet": snip.get("snippet", ""),
+                    "index": offset + i,
+                }
+            )
         return {
             "query": result.get("queries", query) if isinstance(result.get("queries"), str) else query,
             "results": results,

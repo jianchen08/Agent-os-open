@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+
 class PipelineContext:
     """管道引擎上下文（启动期共享配置容器）。
 
@@ -124,6 +125,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
         logger.info("加载管道配置: %s", config_path)
 
         from application import Application  # noqa: PLC0415
+
         model_loader = ModelConfigLoader()
 
         # 加载管道配置
@@ -134,6 +136,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
 
         # 加载 Agent 配置
         from agents.registry import AgentRegistry  # noqa: PLC0415
+
         agent_registry = AgentRegistry()
         agent_config_dir = _PROJECT_ROOT / "config" / "agents"
         if agent_config_dir.exists():
@@ -150,6 +153,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
             if tool_registry is not None:
                 try:
                     from tools.builtin import register_core_tools  # noqa: PLC0415
+
                     registered = register_core_tools(tool_registry, session=None)
                     logger.info("ToolCore 注册了 %d 个核心工具", len(registered))
                 except Exception as exc:
@@ -179,6 +183,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
         # 注册路由表和插件注册表到 ServiceProvider，供 MessageBus 重建管道使用
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             _sp = get_service_provider()
             _sp.register("input_route_table", pipeline_config.input_route_table)
             _sp.register("output_route_table", pipeline_config.output_route_table)
@@ -195,7 +200,8 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
                 globals()["_task_worker"] = _task_worker
                 # create_pipeline_factory 内部已注册到 ServiceProvider，无需 sys 全局变量
                 _app.create_pipeline_factory(
-                    pipeline_config, plugin_registry,
+                    pipeline_config,
+                    plugin_registry,
                 )
                 logger.info("TaskWorker 初始化完成（将在首次请求时启动）")
             else:
@@ -206,6 +212,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
         # 注册 WebSocket 交互通知器到 HumanInteractionService
         try:
             from human_interaction import get_human_interaction_service  # noqa: PLC0415
+
             # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌面通知（含提示音）
             try:  # noqa: SIM105
                 import human_interaction.desktop_notifier  # noqa: F401,PLC0415
@@ -246,6 +253,7 @@ def _get_call_timeout() -> int:
         return _cached_call_timeout
     try:
         from config.models import ModelConfigLoader  # noqa: PLC0415
+
         loader = ModelConfigLoader()
         defaults = loader._load_llm_data().get("defaults", {})
         _cached_call_timeout = int(defaults.get("call_timeout", 120))
@@ -271,6 +279,7 @@ def _register_pipeline_thread(pipeline_id: str, engine: Any, thread_id: str) -> 
     否则，新建注册条目。
     """
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
     _registry = get_engine_registry()
     _entry = _registry.get(pipeline_id)
     if _entry:
@@ -292,18 +301,17 @@ def _sync_conversation_history(
     assistant 消息。
     """
     if messages:
-        filtered = [
-            msg for msg in messages
-            if isinstance(msg, dict) and msg.get("role") in _VALID_ROLES
-        ]
+        filtered = [msg for msg in messages if isinstance(msg, dict) and msg.get("role") in _VALID_ROLES]
         conversation_history.clear()
         conversation_history.extend(filtered)
     elif fallback_content:
-        conversation_history.append({
-            "role": "assistant",
-            "content": fallback_content,
-            "id": fallback_id,
-        })
+        conversation_history.append(
+            {
+                "role": "assistant",
+                "content": fallback_content,
+                "id": fallback_id,
+            }
+        )
 
 
 async def _cancel_engine_task(engine_task: asyncio.Task) -> None:
@@ -340,8 +348,8 @@ async def _create_engine_tracker(engine: Any) -> asyncio.Task:
     async def _poll():
         await asyncio.sleep(0.5)
         while True:
-            is_running = getattr(engine, 'is_running', False)
-            is_suspended = getattr(engine, 'is_suspended', False)
+            is_running = getattr(engine, "is_running", False)
+            is_suspended = getattr(engine, "is_suspended", False)
             if not is_running and not is_suspended:
                 break
             await asyncio.sleep(0.3)
@@ -365,8 +373,8 @@ async def handle_stream_request(ctx: StreamContext) -> None:
 
     logger.warning(
         "[handle_stream] 无可用路径: engine=%s bridge=%s user_content=%s pipeline_ctx=%s",
-        ctx.engine is not None, ctx.bridge is not None,
-        bool(ctx.user_content), ctx.pipeline_ctx is not None,
+        ctx.engine is not None,
+        ctx.bridge is not None,
+        bool(ctx.user_content),
+        ctx.pipeline_ctx is not None,
     )
-
-

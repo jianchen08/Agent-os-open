@@ -100,9 +100,7 @@ class MultiLevelCache:
         Returns:
             是否成功
         """
-        l1_ttl = (
-            ttl if isinstance(ttl, int) else (int(ttl.total_seconds()) if ttl else None)
-        )
+        l1_ttl = ttl if isinstance(ttl, int) else (int(ttl.total_seconds()) if ttl else None)
         self.l1_cache.set(key, value, l1_ttl)
         return True
 

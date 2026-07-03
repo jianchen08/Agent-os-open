@@ -106,11 +106,7 @@ class TriggerStateManager:
         states = list(self._trigger_states.values())
 
         if state_filter:
-            filter_value = (
-                state_filter.value
-                if isinstance(state_filter, LifecycleStatus)
-                else state_filter
-            )
+            filter_value = state_filter.value if isinstance(state_filter, LifecycleStatus) else state_filter
             states = [s for s in states if s.get("state") == filter_value]
 
         states.sort(key=lambda x: x.get("updated_at", datetime.min), reverse=True)
@@ -155,9 +151,7 @@ class TriggerStateManager:
             },
         )
 
-        logger.info(
-            f"触发器执行已记录: {trigger_id}, 成功: {success}, 耗时: {execution_time:.2f}s"
-        )
+        logger.info(f"触发器执行已记录: {trigger_id}, 成功: {success}, 耗时: {execution_time:.2f}s")
 
     async def get_execution_statistics(
         self, trigger_id: str | None = None, time_range: int | None = None
@@ -183,24 +177,14 @@ class TriggerStateManager:
                 "execution_count": state.get("execution_count", 0),
                 "last_execution": state.get("last_execution"),
                 "last_error": state.get("last_error"),
-                "last_execution_time": state.get("metadata", {}).get(
-                    "last_execution_time"
-                ),
+                "last_execution_time": state.get("metadata", {}).get("last_execution_time"),
             }
         all_states = list(self._trigger_states.values())
 
         total_triggers = len(all_states)
-        active_triggers = sum(
-            1 for s in all_states if s.get("state") == LifecycleStatus.ACTIVE.value
-        )
-        error_triggers = sum(
-            1 for s in all_states if s.get("state") == LifecycleStatus.ERROR.value
-        )
-        inactive_triggers = sum(
-            1
-            for s in all_states
-            if s.get("state") == LifecycleStatus.INACTIVE.value
-        )
+        active_triggers = sum(1 for s in all_states if s.get("state") == LifecycleStatus.ACTIVE.value)
+        error_triggers = sum(1 for s in all_states if s.get("state") == LifecycleStatus.ERROR.value)
+        inactive_triggers = sum(1 for s in all_states if s.get("state") == LifecycleStatus.INACTIVE.value)
 
         total_executions = sum(s.get("execution_count", 0) for s in all_states)
 
@@ -209,9 +193,7 @@ class TriggerStateManager:
             for s in all_states
             if s.get("metadata", {}).get("last_execution_time")
         ]
-        avg_execution_time = (
-            sum(execution_times) / len(execution_times) if execution_times else 0
-        )
+        avg_execution_time = sum(execution_times) / len(execution_times) if execution_times else 0
 
         return {
             "total_triggers": total_triggers,
@@ -270,9 +252,7 @@ class TriggerStateManager:
         Args:
             trigger_id: 触发器ID
         """
-        await self.update_trigger_state(
-            trigger_id=trigger_id, state=LifecycleStatus.ACTIVE
-        )
+        await self.update_trigger_state(trigger_id=trigger_id, state=LifecycleStatus.ACTIVE)
         logger.info(f"触发器已启用: {trigger_id}")
 
     async def disable_trigger(self, trigger_id: str):
@@ -282,9 +262,7 @@ class TriggerStateManager:
         Args:
             trigger_id: 触发器ID
         """
-        await self.update_trigger_state(
-            trigger_id=trigger_id, state=LifecycleStatus.DISABLED
-        )
+        await self.update_trigger_state(trigger_id=trigger_id, state=LifecycleStatus.DISABLED)
         logger.info(f"触发器已禁用: {trigger_id}")
 
     def get_memory_usage(self) -> dict[str, Any]:
@@ -300,10 +278,7 @@ class TriggerStateManager:
         memory_size = sys.getsizeof(self._trigger_states)
 
         if total_states > 0:
-            avg_state_size = (
-                sum(sys.getsizeof(state) for state in self._trigger_states.values())
-                / total_states
-            )
+            avg_state_size = sum(sys.getsizeof(state) for state in self._trigger_states.values()) / total_states
         else:
             avg_state_size = 0
 

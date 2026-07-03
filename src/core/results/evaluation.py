@@ -45,12 +45,12 @@ class EvaluationStatus(str, Enum):
         ERROR: 错误
     """
 
-    PENDING = "pending"        # 待评估
+    PENDING = "pending"  # 待评估
     EVALUATING = "evaluating"  # 评估中
-    PASSED = "passed"          # 已通过
-    FAILED = "failed"          # 未通过
-    TIMEOUT = "timeout"        # 超时
-    ERROR = "error"            # 错误
+    PASSED = "passed"  # 已通过
+    FAILED = "failed"  # 未通过
+    TIMEOUT = "timeout"  # 超时
+    ERROR = "error"  # 错误
 
 
 class EvaluationExecutionResult(ExecutionResult[Any]):
@@ -85,10 +85,7 @@ class EvaluationExecutionResult(ExecutionResult[Any]):
     """
 
     # 评估状态（覆盖基类）
-    status: EvaluationStatus = Field(
-        default=EvaluationStatus.PENDING,
-        description="评估状态"
-    )
+    status: EvaluationStatus = Field(default=EvaluationStatus.PENDING, description="评估状态")
 
     # 指标标识
     metric_id: str = Field(..., description="指标 ID")
@@ -96,19 +93,11 @@ class EvaluationExecutionResult(ExecutionResult[Any]):
 
     # 评估结果
     passed: bool = Field(default=False, description="是否通过")
-    score: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=100.0,
-        description="评分 (0-100)"
-    )
+    score: float = Field(default=0.0, ge=0.0, le=100.0, description="评分 (0-100)")
     weight: float = Field(default=1.0, ge=0.0, description="权重")
 
     # 红线指标
-    is_red_line: bool = Field(
-        default=False,
-        description="是否为红线指标（必须通过）"
-    )
+    is_red_line: bool = Field(default=False, description="是否为红线指标（必须通过）")
 
     # 证据和建议
     evidence: list[str] = Field(default_factory=list, description="证据列表")
@@ -196,8 +185,10 @@ class EvaluationExecutionResult(ExecutionResult[Any]):
         # 解析状态
         status_str = data.get("status", "")
         try:
-            status = EvaluationStatus(status_str) if status_str else (
-                EvaluationStatus.PASSED if data.get("passed") else EvaluationStatus.FAILED
+            status = (
+                EvaluationStatus(status_str)
+                if status_str
+                else (EvaluationStatus.PASSED if data.get("passed") else EvaluationStatus.FAILED)
             )
         except ValueError:
             status = EvaluationStatus.PASSED if data.get("passed") else EvaluationStatus.FAILED

@@ -85,7 +85,8 @@ class ExternalToolLifecycle:
         self._adapter_factory[tool_type] = adapter_cls
         self._logger.info(
             "适配器类型已注册 | type=%s | class=%s",
-            tool_type, adapter_cls.__name__,
+            tool_type,
+            adapter_cls.__name__,
         )
 
     async def start(self) -> None:
@@ -111,7 +112,8 @@ class ExternalToolLifecycle:
                 except Exception as e:
                     self._logger.error(
                         "工具启动失败 | name=%s | error=%s",
-                        name, e,
+                        name,
+                        e,
                     )
 
             # 3. 启动监控
@@ -146,7 +148,8 @@ class ExternalToolLifecycle:
                     except Exception as e:
                         self._logger.error(
                             "断开连接失败 | name=%s | error=%s",
-                            info.name, e,
+                            info.name,
+                            e,
                         )
 
             # 3. 清理所有沙箱
@@ -180,12 +183,14 @@ class ExternalToolLifecycle:
             return True
         except Exception as e:
             self._logger.error(
-                "工具启动失败 | name=%s | error=%s", tool_name, e,
+                "工具启动失败 | name=%s | error=%s",
+                tool_name,
+                e,
             )
             return False
 
     async def stop_tool(self, tool_name: str) -> bool:
-        """ 停止单个外部工具。
+        """停止单个外部工具。
 
         Args:
             tool_name: 工具名称
@@ -199,7 +204,9 @@ class ExternalToolLifecycle:
                 await connection.disconnect()
             except Exception as e:
                 self._logger.error(
-                    "停止工具失败 | name=%s | error=%s", tool_name, e,
+                    "停止工具失败 | name=%s | error=%s",
+                    tool_name,
+                    e,
                 )
                 return False
 
@@ -236,7 +243,8 @@ class ExternalToolLifecycle:
         if adapter_cls is None:
             self._logger.warning(
                 "未注册适配器类型 | type=%s | tool=%s，跳过",
-                tool_type, name,
+                tool_type,
+                name,
             )
             return
 
@@ -253,11 +261,14 @@ class ExternalToolLifecycle:
             await connection.connect()
             self._logger.info(
                 "工具已启动 | name=%s | state=%s",
-                name, connection.get_state().value,
+                name,
+                connection.get_state().value,
             )
         except Exception as e:
             self._logger.error(
-                "工具连接失败 | name=%s | error=%s", name, e,
+                "工具连接失败 | name=%s | error=%s",
+                name,
+                e,
             )
             # 注册失败不阻塞其他工具
 
@@ -269,13 +280,12 @@ class ExternalToolLifecycle:
 
                 # 批量健康检查
                 health = await self._registry.health_check_all()
-                unhealthy = [
-                    name for name, ok in health.items() if not ok
-                ]
+                unhealthy = [name for name, ok in health.items() if not ok]
 
                 if unhealthy:
                     self._logger.warning(
-                        "以下外部工具不健康: %s", unhealthy,
+                        "以下外部工具不健康: %s",
+                        unhealthy,
                     )
 
         except asyncio.CancelledError:

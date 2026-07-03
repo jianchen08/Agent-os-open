@@ -49,8 +49,7 @@ class IDEGetSelectionTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="ide_get_selection",
-            description="获取当前 IDE 中的上下文信息，包括活动文件、选中文本和光标位置。"
-            "无连接器时返回提示信息。",
+            description="获取当前 IDE 中的上下文信息，包括活动文件、选中文本和光标位置。无连接器时返回提示信息。",
             when_to_use=["需要获取用户当前在 IDE 中的上下文"],
             when_not_to_use=["已经知道文件路径和内容"],
             input_schema={

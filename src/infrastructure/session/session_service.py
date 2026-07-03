@@ -70,7 +70,8 @@ class SessionService:
             self._persist_session_state(session)
             logger.info(
                 "Session restored: id=%s, active_pipeline=%s",
-                session.session_id, session.active_pipeline_id,
+                session.session_id,
+                session.active_pipeline_id,
             )
             return session
         return self.create(channel_type=channel_type, channel_ref=channel_ref)

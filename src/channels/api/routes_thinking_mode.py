@@ -51,16 +51,18 @@ def list_models() -> list[dict[str, Any]]:
     for mid, mconf in models.items():
         if not mconf.get("reasoning_model"):
             continue
-        result.append({
-            "model_name": mid,
-            "display_name": mconf.get("display_name", mid),
-            "thinking_type": "parameter_switch",
-            "base_model": mid,
-            "thinking_model": mid,
-            "is_same_model": True,
-            "supports_reasoning_effort": True,
-            "description": f"{mconf.get('display_name', mid)} 支持思考模式",
-        })
+        result.append(
+            {
+                "model_name": mid,
+                "display_name": mconf.get("display_name", mid),
+                "thinking_type": "parameter_switch",
+                "base_model": mid,
+                "thinking_model": mid,
+                "is_same_model": True,
+                "supports_reasoning_effort": True,
+                "description": f"{mconf.get('display_name', mid)} 支持思考模式",
+            }
+        )
     return result
 
 
@@ -95,8 +97,7 @@ def get_model_info(model_name: str) -> dict[str, Any]:
         "thinking_model": model_name,
         "is_same_model": True,
         "switch_description": (
-            f"启用 {model.get('display_name', model_name)} 的深度思考模式"
-            if is_reasoning else "该模型不支持思考模式"
+            f"启用 {model.get('display_name', model_name)} 的深度思考模式" if is_reasoning else "该模型不支持思考模式"
         ),
         "thinking_params": thinking_params,
         "normal_params": default_params,
@@ -168,15 +169,17 @@ def recommendations(body: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if not mconf.get("reasoning_model"):
             continue
         is_default = mid == default_chat
-        result.append({
-            "model_name": mid,
-            "display_name": mconf.get("display_name", mid),
-            "thinking_type": "parameter_switch",
-            "suitability_score": 0.95 if is_default else 0.7,
-            "optimal_params": {**mconf.get("default_params", {}), "reasoning_effort": 99},
-            "best_for": ["复杂推理", "代码分析", "问题解决"],
-            "tips": ["适合需要深度思考的任务"],
-            "cost_estimate": f"约 {mconf.get('default_params', {}).get('max_tokens', 4096)} tokens/次",
-        })
+        result.append(
+            {
+                "model_name": mid,
+                "display_name": mconf.get("display_name", mid),
+                "thinking_type": "parameter_switch",
+                "suitability_score": 0.95 if is_default else 0.7,
+                "optimal_params": {**mconf.get("default_params", {}), "reasoning_effort": 99},
+                "best_for": ["复杂推理", "代码分析", "问题解决"],
+                "tips": ["适合需要深度思考的任务"],
+                "cost_estimate": f"约 {mconf.get('default_params', {}).get('max_tokens', 4096)} tokens/次",
+            }
+        )
 
     return sorted(result, key=lambda x: x["suitability_score"], reverse=True)

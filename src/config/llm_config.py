@@ -326,9 +326,7 @@ class LLMConfigManager:
         if key == "models":
             return {alias: model.__dict__ for alias, model in self._models.items()}
         if key == "providers":
-            return {
-                name: provider.__dict__ for name, provider in self._providers.items()
-            }
+            return {name: provider.__dict__ for name, provider in self._providers.items()}
         if key == "embeddings":
             return {name: emb.__dict__ for name, emb in self._embeddings.items()}
         if key == "defaults":

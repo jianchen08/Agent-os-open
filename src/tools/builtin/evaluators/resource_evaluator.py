@@ -265,11 +265,7 @@ class ResourceEvaluator:
 
         fb = self._gen_feedback(results, rtype, all_pass)
 
-        sugg = [
-            f"修复 {r['criterion_id']}: {r['description']}"
-            for r in results
-            if not r["passed"]
-        ]
+        sugg = [f"修复 {r['criterion_id']}: {r['description']}" for r in results if not r["passed"]]
 
         if all_pass:
             verdict = "pass"

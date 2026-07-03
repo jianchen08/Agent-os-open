@@ -24,8 +24,7 @@ try:
     from sqlalchemy.ext.asyncio import AsyncSession
 except ImportError as exc:
     raise ImportError(
-        "PgVectorRetriever 需要 sqlalchemy 和 psycopg2。"
-        "请安装: pip install sqlalchemy psycopg2-binary"
+        "PgVectorRetriever 需要 sqlalchemy 和 psycopg2。请安装: pip install sqlalchemy psycopg2-binary"
     ) from exc
 
 logger = logging.getLogger(__name__)
@@ -71,23 +70,28 @@ class PgVectorRetriever(IRetriever):
         - tag_cooccurrences: Tag 共现关系
         """
         async with self._session.begin():
-            await self._session.execute(text("""
+            await self._session.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS episodes_memory (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(64) NOT NULL,
                     intent_vector VECTOR(1536)
                 )
-            """))
+            """)
+            )
 
-            await self._session.execute(text("""
+            await self._session.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS semantic_memory (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(64) NOT NULL,
                     embedding VECTOR(1536)
                 )
-            """))
+            """)
+            )
 
-            await self._session.execute(text("""
+            await self._session.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS memory_chunks (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(64),
@@ -95,25 +99,30 @@ class PgVectorRetriever(IRetriever):
                     layer VARCHAR(10),
                     embedding VECTOR(1536)
                 )
-            """))
+            """)
+            )
 
-            await self._session.execute(text("""
+            await self._session.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS tags (
                     id SERIAL PRIMARY KEY,
                     name VARCHAR(255) UNIQUE,
                     vector VECTOR(1536),
                     frequency INTEGER DEFAULT 0
                 )
-            """))
+            """)
+            )
 
-            await self._session.execute(text("""
+            await self._session.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS tag_cooccurrences (
                     tag1_id INTEGER REFERENCES tags(id),
                     tag2_id INTEGER REFERENCES tags(id),
                     cooccurrence_count INTEGER DEFAULT 1,
                     PRIMARY KEY (tag1_id, tag2_id)
                 )
-            """))
+            """)
+            )
 
         logger.info("[PgVectorRetriever] 向量索引表已创建")
 
@@ -148,11 +157,14 @@ class PgVectorRetriever(IRetriever):
                 "ON CONFLICT (id) DO UPDATE SET embedding = :embedding, user_id = :user_id"
             )
 
-        await self._session.execute(query, {
-            "id": entry_id,
-            "user_id": user_id,
-            "embedding": str(embedding),
-        })
+        await self._session.execute(
+            query,
+            {
+                "id": entry_id,
+                "user_id": user_id,
+                "embedding": str(embedding),
+            },
+        )
         await self._session.flush()
         return entry_id
 
@@ -267,13 +279,15 @@ class PgVectorRetriever(IRetriever):
                     content = getattr(entry, "content", "")
                     metadata = getattr(entry, "extra_data", None)
 
-                results.append(SearchResult(
-                    id=entry_id,
-                    content=content or "",
-                    score=score_map.get(entry_id, 0.0),
-                    memory_type=MemoryType.EPISODE if memory_type == "episode" else MemoryType.SEMANTIC,
-                    metadata=metadata,
-                ))
+                results.append(
+                    SearchResult(
+                        id=entry_id,
+                        content=content or "",
+                        score=score_map.get(entry_id, 0.0),
+                        memory_type=MemoryType.EPISODE if memory_type == "episode" else MemoryType.SEMANTIC,
+                        metadata=metadata,
+                    )
+                )
             except Exception as e:
                 logger.warning("[PgVectorRetriever] 读取全文失败 | id=%s | error=%s", entry_id, e)
 
@@ -310,13 +324,16 @@ class PgVectorRetriever(IRetriever):
             "embedding = :embedding, user_id = :user_id, "
             "session_id = :session_id, layer = :layer"
         )
-        await self._session.execute(query, {
-            "id": chunk_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "layer": layer,
-            "embedding": str(embedding),
-        })
+        await self._session.execute(
+            query,
+            {
+                "id": chunk_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "layer": layer,
+                "embedding": str(embedding),
+            },
+        )
         await self._session.flush()
         return chunk_id
 
@@ -389,13 +406,15 @@ class PgVectorRetriever(IRetriever):
 
         results: list[SearchResult] = []
         for row in rows:
-            results.append(SearchResult(
-                id=str(row.id),
-                content="",
-                score=float(row.score),
-                memory_type=MemoryType.SEMANTIC,
-                metadata={"source": "chunk"},
-            ))
+            results.append(
+                SearchResult(
+                    id=str(row.id),
+                    content="",
+                    score=float(row.score),
+                    memory_type=MemoryType.SEMANTIC,
+                    metadata={"source": "chunk"},
+                )
+            )
 
         return results
 
@@ -426,11 +445,14 @@ class PgVectorRetriever(IRetriever):
             "vector = :vector, frequency = :frequency "
             "RETURNING id"
         )
-        result = await self._session.execute(query, {
-            "name": name,
-            "vector": str(vector) if vector else None,
-            "frequency": frequency,
-        })
+        result = await self._session.execute(
+            query,
+            {
+                "name": name,
+                "vector": str(vector) if vector else None,
+                "frequency": frequency,
+            },
+        )
         row = result.fetchone()
         await self._session.flush()
         return int(row.id) if row else 0
@@ -471,19 +493,19 @@ class PgVectorRetriever(IRetriever):
             "LIMIT :top_k"
         )
         try:
-            result = await self._session.execute(sql, {
-                "embedding": str(query_vector),
-                "top_k": top_k,
-            })
+            result = await self._session.execute(
+                sql,
+                {
+                    "embedding": str(query_vector),
+                    "top_k": top_k,
+                },
+            )
             rows = result.fetchall()
         except Exception as e:
             logger.warning("[PgVectorRetriever] Tag 向量检索失败: %s", e)
             return []
 
-        return [
-            {"id": int(row.id), "name": str(row.name), "score": float(row.score)}
-            for row in rows
-        ]
+        return [{"id": int(row.id), "name": str(row.name), "score": float(row.score)} for row in rows]
 
     async def update_cooccurrence(self, tag1_id: int, tag2_id: int) -> None:
         """更新 Tag 共现关系（UPSERT）。
@@ -498,10 +520,13 @@ class PgVectorRetriever(IRetriever):
             "ON CONFLICT (tag1_id, tag2_id) DO UPDATE SET "
             "cooccurrence_count = tag_cooccurrences.cooccurrence_count + 1"
         )
-        await self._session.execute(query, {
-            "tag1_id": tag1_id,
-            "tag2_id": tag2_id,
-        })
+        await self._session.execute(
+            query,
+            {
+                "tag1_id": tag1_id,
+                "tag2_id": tag2_id,
+            },
+        )
         await self._session.flush()
 
     async def load_all_tags(self) -> list[dict[str, Any]]:
@@ -544,9 +569,7 @@ class PgVectorRetriever(IRetriever):
         Returns:
             共现关系列表 [(tag1_id, tag2_id, count), ...]
         """
-        sql = text(
-            "SELECT tag1_id, tag2_id, cooccurrence_count FROM tag_cooccurrences"
-        )
+        sql = text("SELECT tag1_id, tag2_id, cooccurrence_count FROM tag_cooccurrences")
         try:
             result = await self._session.execute(sql)
             rows = result.fetchall()

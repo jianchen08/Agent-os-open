@@ -48,9 +48,7 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 # 否则热重载校验会误拒 orchestrator/atomic 等编排/原子 Agent 配置。
 # 注意：_resolve_agent_type 对未知值降级为 SPECIALIZED（宽容运行），
 # 但 schema 校验应拒绝未知值（严格校验），故合法集合=映射键本身。
-VALID_AGENT_TYPE_KEYS: frozenset[str] = frozenset(
-    {"main", "orchestrator", "specialized", "atomic", "system"}
-)
+VALID_AGENT_TYPE_KEYS: frozenset[str] = frozenset({"main", "orchestrator", "specialized", "atomic", "system"})
 
 
 def _substitute_env_vars(value: Any) -> Any:
@@ -66,8 +64,10 @@ def _substitute_env_vars(value: Any) -> Any:
         替换后的值，类型与输入一致。
     """
     if isinstance(value, str):
+
         def _replace(match: re.Match[str]) -> str:
             return os.environ.get(match.group(1), "")
+
         return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _substitute_env_vars(v) for k, v in value.items()}
@@ -132,10 +132,7 @@ class AgentConfigLoader:
         """
         if data is None:
             return ContextConfig()
-        items = [
-            AgentConfigLoader._parse_context_var_item(item)
-            for item in (data.get("items") or [])
-        ]
+        items = [AgentConfigLoader._parse_context_var_item(item) for item in (data.get("items") or [])]
         return ContextConfig(enabled=data.get("enabled", True), items=items)
 
     @staticmethod
@@ -174,9 +171,7 @@ class AgentConfigLoader:
             include_hard_constraints=data.get("include_hard_constraints", True),
             include_soft_constraints=data.get("include_soft_constraints", False),
             include_system_prompt_rules=data.get("include_system_prompt_rules", True),
-            extraction_markers=data.get(
-                "extraction_markers", ["【重要】", "【必须】", "必须"]
-            ),
+            extraction_markers=data.get("extraction_markers", ["【重要】", "【必须】", "必须"]),
             custom_rules=data.get("custom_rules", []),
             template=data.get("template", ""),
             max_rules=data.get("max_rules", 10),
@@ -326,14 +321,10 @@ class AgentConfigLoader:
         static_vars = cls._parse_context_config(data.get("static_vars"))
         dynamic_vars = cls._parse_context_config(data.get("dynamic_vars"))
         knowledge = cls._parse_knowledge_config(data.get("knowledge"))
-        rule_reinforcement = cls._parse_rule_reinforcement(
-            data.get("rule_reinforcement")
-        )
+        rule_reinforcement = cls._parse_rule_reinforcement(data.get("rule_reinforcement"))
         plugins = cls._parse_plugins_config(data.get("plugins"))
         deliverables = [cls._parse_deliverable(d) for d in data.get("deliverables", [])]
-        recommended_metrics = [
-            cls._parse_metric_ref(m) for m in data.get("recommended_metrics", [])
-        ]
+        recommended_metrics = [cls._parse_metric_ref(m) for m in data.get("recommended_metrics", [])]
 
         return AgentConfig(
             config_id=data.get("config_id", ""),
@@ -370,9 +361,7 @@ class AgentConfigLoader:
         )
 
     @classmethod
-    def load_from_directory(
-        cls, dir_path: str | Path, *, strict: bool = True
-    ) -> list[AgentConfig]:
+    def load_from_directory(cls, dir_path: str | Path, *, strict: bool = True) -> list[AgentConfig]:
         """从目录递归加载所有 YAML Agent 配置。
 
         单个文件的失败默认不中断整体加载（字段缺失等校验错误会被跳过）。
@@ -405,9 +394,7 @@ class AgentConfigLoader:
             try:
                 config = cls.load_from_yaml(yaml_file)
                 configs.append(config)
-                logger.debug(
-                    "已加载 Agent 配置: %s (from %s)", config.config_id, yaml_file
-                )
+                logger.debug("已加载 Agent 配置: %s (from %s)", config.config_id, yaml_file)
             except ValueError as e:
                 # strict=True：YAML 语法错误（load_from_yaml 已包装为 ValueError，
                 # 通过 __cause__ 链识别）需上抛，保留 fail-fast 契约。
@@ -432,9 +419,7 @@ class AgentConfigLoader:
         return await asyncio.to_thread(cls.load_from_yaml, path)
 
     @classmethod
-    async def load_from_directory_async(
-        cls, dir_path: str | Path, *, strict: bool = True
-    ) -> list[AgentConfig]:
+    async def load_from_directory_async(cls, dir_path: str | Path, *, strict: bool = True) -> list[AgentConfig]:
         """异步版本的 load_from_directory，将同步 I/O 卸载到线程池。
 
         Args:
@@ -444,6 +429,4 @@ class AgentConfigLoader:
         Returns:
             AgentConfig 列表。
         """
-        return await asyncio.to_thread(
-            cls.load_from_directory, dir_path, strict=strict
-        )
+        return await asyncio.to_thread(cls.load_from_directory, dir_path, strict=strict)

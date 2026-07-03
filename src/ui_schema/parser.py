@@ -205,13 +205,9 @@ class SchemaParser:
             self._file_mtimes[key] = file_path.stat().st_mtime
 
         content_str = str(raw.get("ui", ""))
-        self._file_hashes[key] = hashlib.md5(
-            content_str.encode(), usedforsecurity=False
-        ).hexdigest()
+        self._file_hashes[key] = hashlib.md5(content_str.encode(), usedforsecurity=False).hexdigest()
 
-    def _check_file_change(
-        self, file_path: Path, changed: dict[str, str]
-    ) -> None:
+    def _check_file_change(self, file_path: Path, changed: dict[str, str]) -> None:
         """检查单个文件是否有变更。
 
         Args:
@@ -244,9 +240,7 @@ class SchemaParser:
             return
 
         ui_str = str(raw.get("ui", ""))
-        current_hash = hashlib.md5(
-            ui_str.encode(), usedforsecurity=False
-        ).hexdigest()
+        current_hash = hashlib.md5(ui_str.encode(), usedforsecurity=False).hexdigest()
         old_hash = self._file_hashes.get(key, "")
 
         if current_hash != old_hash:
@@ -254,15 +248,11 @@ class SchemaParser:
             ui_data = raw.get("ui", {})
             if isinstance(ui_data, dict):
                 identity = ui_data.get("identity", {})
-                module_id = (
-                    identity.get("id", "") if isinstance(identity, dict) else ""
-                )
+                module_id = identity.get("id", "") if isinstance(identity, dict) else ""
                 if module_id:
                     changed[module_id] = "changed"
 
-    def _parse_ui_section(
-        self, ui_data: dict[str, Any], file_path: Path
-    ) -> ModuleUISchema | None:
+    def _parse_ui_section(self, ui_data: dict[str, Any], file_path: Path) -> ModuleUISchema | None:
         """解析 YAML 中的 ui 部分。
 
         自动填充默认值，处理 YAML 友好的字段命名。
@@ -295,9 +285,7 @@ class SchemaParser:
             logger.warning("UI Schema 解析失败: %s | %s", file_path, exc)
             return None
 
-    def _parse_identity(
-        self, data: dict[str, Any]
-    ) -> ModuleIdentity | None:
+    def _parse_identity(self, data: dict[str, Any]) -> ModuleIdentity | None:
         """解析 identity 部分。
 
         Args:
@@ -390,9 +378,7 @@ class SchemaParser:
         except Exception:
             return ClientCapabilities()
 
-    def _extract_and_cache_data(
-        self, raw: dict[str, Any], data_section: dict[str, Any]
-    ) -> None:
+    def _extract_and_cache_data(self, raw: dict[str, Any], data_section: dict[str, Any]) -> None:
         """从 YAML 原始数据中提取 data 段并缓存。
 
         优先使用 ui.identity.id 作为模块 ID，其次使用顶层 config_id。

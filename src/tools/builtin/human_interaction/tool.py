@@ -143,16 +143,12 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         """执行人类交互工具"""
         self._init_workspace(inputs)
 
-
-
         mode = inputs.get("mode")
 
         pipeline_id = self.pipeline_id or inputs.get("pipeline_id")
 
         if not pipeline_id:
-            return create_failure_result(
-                error="缺少必要的上下文信息（pipeline_id）"
-            )
+            return create_failure_result(error="缺少必要的上下文信息（pipeline_id）")
 
         service = get_human_interaction_service()
 
@@ -199,7 +195,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 error=(
                     f"file_paths 参数类型错误：期望字符串列表（list[str]），"
                     f"实际收到 {type(file_paths).__name__}。"
-                    "请将 file_paths 改为字符串数组格式，例如：[\"src/main.py\", \"docs/plan.md\"]"
+                    '请将 file_paths 改为字符串数组格式，例如：["src/main.py", "docs/plan.md"]'
                 ),
                 error_code="INVALID_FILE_PATHS",
             )
@@ -224,14 +220,13 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             ok, err = self.check_path_allowed(str(real_path), "read", agent_level)
             if not ok:
                 errors.append(
-                    f"路径 \"{path_str}\" 超出允许范围（{err}）。"
-                    "请确认路径是否正确，或改用工作空间内的相对路径"
+                    f'路径 "{path_str}" 超出允许范围（{err}）。请确认路径是否正确，或改用工作空间内的相对路径'
                 )
                 continue
 
             if not real_path.exists():
                 errors.append(
-                    f"路径 \"{path_str}\" 对应的文件不存在。"
+                    f'路径 "{path_str}" 对应的文件不存在。'
                     "请先用文件列表工具确认文件是否真实存在、路径拼写是否正确，"
                     "如果文件尚未创建，请先创建文件再发起交互"
                 )
@@ -239,7 +234,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
             if not real_path.is_file():
                 errors.append(
-                    f"路径 \"{path_str}\" 是一个目录而非文件，"
+                    f'路径 "{path_str}" 是一个目录而非文件，'
                     "file_paths 只能指定文件，不能指定目录。"
                     "请改为指定目录下的具体文件路径"
                 )
@@ -248,7 +243,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             file_size = real_path.stat().st_size
             if file_size > MAX_FILE_SIZE_BYTES:
                 errors.append(
-                    f"文件 \"{path_str}\" 大小为 {format_size(file_size)}，"
+                    f'文件 "{path_str}" 大小为 {format_size(file_size)}，'
                     f"超过单文件上限 {format_size(MAX_FILE_SIZE_BYTES)}，无法在交互面板中展示。"
                     "请改用 file_read 工具分段读取文件内容，或在描述中说明文件过大需用户自行查看"
                 )
@@ -331,12 +326,14 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             )
 
             response = await service.wait_for_choice(
-                request_id, timeout=timeout_seconds,
+                request_id,
+                timeout=timeout_seconds,
             )
 
             logger.info(
                 "[HumanInteractionTool] wait_for_choice() 返回 | request_id=%s | response=%s",
-                request_id, {k: v for k, v in response.items() if k != "answers"},
+                request_id,
+                {k: v for k, v in response.items() if k != "answers"},
             )
 
             selected_id = response.get("selected_option")
@@ -357,14 +354,16 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 result["feedback"] = response["feedback"]
             logger.info(
                 "[HumanInteractionTool] 选择模式完成 | request_id=%s | selected=%s | status=%s",
-                request_id, result.get("selected_option"), result.get("status"),
+                request_id,
+                result.get("selected_option"),
+                result.get("status"),
             )
             return create_success_result(data=result)
 
         except InteractionTimeoutError as e:
             logger.warning(
-                "[HumanInteractionTool] 交互超时 | "
-                "request_id=%s", e.request_id,
+                "[HumanInteractionTool] 交互超时 | request_id=%s",
+                e.request_id,
             )
             return create_failure_result(
                 error=(
@@ -377,21 +376,18 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         except InteractionCancelledError as e:
             logger.info(
-                "[HumanInteractionTool] 交互取消 | "
-                "request_id=%s", e.request_id,
+                "[HumanInteractionTool] 交互取消 | request_id=%s",
+                e.request_id,
             )
             return create_failure_result(
-                error=(
-                    f"人类交互已取消: {e.reason or '用户取消'}。"
-                    "你可以根据当前任务上下文决定下一步操作。"
-                ),
+                error=(f"人类交互已取消: {e.reason or '用户取消'}。你可以根据当前任务上下文决定下一步操作。"),
                 error_code="INTERACTION_CANCELLED",
             )
 
         except InteractionDeniedError as e:
             logger.info(
-                "[HumanInteractionTool] 交互拒绝 | "
-                "request_id=%s", e.request_id,
+                "[HumanInteractionTool] 交互拒绝 | request_id=%s",
+                e.request_id,
             )
             return create_success_result(
                 data={
@@ -403,27 +399,25 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         except CancelledError:
             logger.info(
-                "[HumanInteractionTool] 管道被取消 | "
-                "request_id=%s",
+                "[HumanInteractionTool] 管道被取消 | request_id=%s",
                 request_id,
             )
             if request_id:
                 with contextlib.suppress(Exception):
                     await service.cancel_request(
-                        request_id, reason="pipeline_cancelled",
+                        request_id,
+                        reason="pipeline_cancelled",
                     )
             raise
 
         except Exception as e:
             logger.error(
-                "[HumanInteractionTool] 选择模式执行失败 | "
-                "error=%s", e, exc_info=True,
+                "[HumanInteractionTool] 选择模式执行失败 | error=%s",
+                e,
+                exc_info=True,
             )
             return create_failure_result(
-                error=(
-                    f"人类交互执行失败: {str(e)}。"
-                    "你可以根据当前任务上下文决定下一步操作。"
-                ),
+                error=(f"人类交互执行失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。"),
                 error_code="INTERACTION_FAILED",
             )
 
@@ -470,7 +464,8 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             )
 
             response = await service.wait_for_choice(
-                request_id, timeout=timeout_seconds,
+                request_id,
+                timeout=timeout_seconds,
             )
 
             resp_type = response.get("response_type", "")
@@ -482,7 +477,8 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                     "conversation_mode": True,
                     "selected_option": None,
                     "message": (
-                        feedback or "用户已进入对话标签页。"
+                        feedback
+                        or "用户已进入对话标签页。"
                         "【重要指令】你不得再输出任何文字，不得再调用任何工具（尤其是 human_interaction）。"
                         "管道已自动挂起，等待用户在对话标签页中发起新消息后才会唤醒你。"
                         "你现在什么都不需要做。"
@@ -500,35 +496,30 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         except InteractionTimeoutError as e:
             logger.warning(
-                "[HumanInteractionTool] 对话超时 | "
-                "request_id=%s", e.request_id,
+                "[HumanInteractionTool] 对话超时 | request_id=%s",
+                e.request_id,
             )
             return create_failure_result(
                 error=(
-                    f"对话超时（等待了{e.timeout}秒），"
-                    "用户未在规定时间内响应。"
-                    "你可以根据当前任务上下文决定下一步操作。"
+                    f"对话超时（等待了{e.timeout}秒），用户未在规定时间内响应。你可以根据当前任务上下文决定下一步操作。"
                 ),
                 error_code="INTERACTION_TIMEOUT",
             )
 
         except InteractionCancelledError as e:
             logger.info(
-                "[HumanInteractionTool] 对话取消 | "
-                "request_id=%s", e.request_id,
+                "[HumanInteractionTool] 对话取消 | request_id=%s",
+                e.request_id,
             )
             return create_failure_result(
-                error=(
-                    f"对话已取消: {e.reason or '用户取消'}。"
-                    "你可以根据当前任务上下文决定下一步操作。"
-                ),
+                error=(f"对话已取消: {e.reason or '用户取消'}。你可以根据当前任务上下文决定下一步操作。"),
                 error_code="INTERACTION_CANCELLED",
             )
 
         except InteractionDeniedError as e:
             logger.info(
-                "[HumanInteractionTool] 对话拒绝 | "
-                "request_id=%s", e.request_id,
+                "[HumanInteractionTool] 对话拒绝 | request_id=%s",
+                e.request_id,
             )
             return create_success_result(
                 data={
@@ -541,30 +532,27 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         except CancelledError:
             logger.info(
-                "[HumanInteractionTool] 管道被取消 | "
-                "request_id=%s",
+                "[HumanInteractionTool] 管道被取消 | request_id=%s",
                 request_id,
             )
             if request_id:
                 with contextlib.suppress(Exception):
                     await service.cancel_request(
-                        request_id, reason="pipeline_cancelled",
+                        request_id,
+                        reason="pipeline_cancelled",
                     )
             raise
 
         except Exception as e:
             logger.error(
-                "[HumanInteractionTool] 对话模式执行失败 | "
-                "error=%s", e, exc_info=True,
+                "[HumanInteractionTool] 对话模式执行失败 | error=%s",
+                e,
+                exc_info=True,
             )
             return create_failure_result(
-                error=(
-                    f"人类交互执行失败: {str(e)}。"
-                    "你可以根据当前任务上下文决定下一步操作。"
-                ),
+                error=(f"人类交互执行失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。"),
                 error_code="INTERACTION_FAILED",
             )
-
 
     async def _execute_notification_mode(
         self,
@@ -610,17 +598,14 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         except Exception as e:
             logger.error(
-                "[HumanInteractionTool] 通知模式执行失败 | "
-                "error=%s", e, exc_info=True,
+                "[HumanInteractionTool] 通知模式执行失败 | error=%s",
+                e,
+                exc_info=True,
             )
             return create_failure_result(
-                error=(
-                    f"通知发送失败: {str(e)}。"
-                    "你可以根据当前任务上下文决定下一步操作。"
-                ),
+                error=(f"通知发送失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。"),
                 error_code="INTERACTION_FAILED",
             )
-
 
 
 def create_human_interaction_tool(

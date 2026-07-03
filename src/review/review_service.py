@@ -101,7 +101,9 @@ class ReviewService:
 
         logger.info(
             "[ReviewService] 创建审批 | id=%s | task_id=%s | title=%s",
-            review.id, task_id, title,
+            review.id,
+            task_id,
+            title,
         )
         return review
 
@@ -150,7 +152,8 @@ class ReviewService:
         if review.status not in (ReviewStatus.PENDING, ReviewStatus.IN_REVIEW):
             logger.warning(
                 "[ReviewService] 审批状态不允许反馈 | id=%s | status=%s",
-                review_id, review.status.value,
+                review_id,
+                review.status.value,
             )
             return None
 
@@ -166,6 +169,7 @@ class ReviewService:
 
         # 更新审批状态
         from datetime import UTC, datetime  # noqa: PLC0415
+
         now = datetime.now(UTC).isoformat()
 
         if response_type == "approved":
@@ -190,7 +194,8 @@ class ReviewService:
 
         logger.info(
             "[ReviewService] 提交反馈 | review_id=%s | type=%s",
-            review_id, response_type,
+            review_id,
+            response_type,
         )
         return feedback
 
@@ -205,6 +210,7 @@ class ReviewService:
             return False
 
         from datetime import UTC, datetime  # noqa: PLC0415
+
         review.status = ReviewStatus.IN_REVIEW
         review.reviewed_at = datetime.now(UTC).isoformat()
         review.updated_at = datetime.now(UTC).isoformat()
@@ -226,6 +232,7 @@ class ReviewService:
             return False
 
         from datetime import UTC, datetime  # noqa: PLC0415
+
         review.status = ReviewStatus.CANCELLED
         review.updated_at = datetime.now(UTC).isoformat()
         review.completed_at = datetime.now(UTC).isoformat()
@@ -318,6 +325,7 @@ class ReviewService:
         review = self._reviews.get(review_id)
         if review:
             from datetime import UTC, datetime  # noqa: PLC0415
+
             review.status = ReviewStatus.TIMEOUT
             review.updated_at = datetime.now(UTC).isoformat()
             review.completed_at = datetime.now(UTC).isoformat()

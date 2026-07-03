@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # 硬件检测
 # ---------------------------------------------------------------------------
 
+
 def _read_cgroup_memory_limit_gb() -> float | None:
     """读取 cgroup v1/v2 的内存限制（容器内更准确）。
 
@@ -196,8 +197,8 @@ def detect_hardware() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 # 分级阈值（GB）
-LOW_MEM_THRESHOLD = 12.0   # < 12GB 视为低配
-MID_MEM_THRESHOLD = 24.0   # 12-24GB 视为中配，>24GB 视为高配
+LOW_MEM_THRESHOLD = 12.0  # < 12GB 视为低配
+MID_MEM_THRESHOLD = 24.0  # 12-24GB 视为中配，>24GB 视为高配
 
 # 三档配置（纯数据，便于测试和调整）
 _PROFILES = {
@@ -205,8 +206,8 @@ _PROFILES = {
         "max_environments": 3,
         "container_memory": "256m",
         "container_cpus": "0.25",
-        "memory_swap": "256m",   # = memory，禁止 swap 放大
-        "pids_limit": 64,        # 更严格的进程数限制
+        "memory_swap": "256m",  # = memory，禁止 swap 放大
+        "pids_limit": 64,  # 更严格的进程数限制
         "max_concurrent_tasks": 3,
     },
     "mid": {  # 中配机（如 16GB 主流笔记本）
@@ -254,13 +255,9 @@ def _apply_env_overrides(profile: dict[str, Any]) -> dict[str, Any]:
         if env_val is not None:
             try:
                 result[key] = cast(env_val)
-                logger.info(
-                    f"[hardware_profile] 环境变量覆盖: {key}={result[key]} (来自 {env_name})"
-                )
+                logger.info(f"[hardware_profile] 环境变量覆盖: {key}={result[key]} (来自 {env_name})")
             except (ValueError, TypeError):
-                logger.warning(
-                    f"[hardware_profile] 环境变量 {env_name}={env_val} 无法转为 {cast.__name__}，忽略"
-                )
+                logger.warning(f"[hardware_profile] 环境变量 {env_name}={env_val} 无法转为 {cast.__name__}，忽略")
     return result
 
 
@@ -301,9 +298,7 @@ def compute_resource_profile(hardware: dict[str, Any] | None = None) -> dict[str
     reserved_cpu = {"low": 1, "mid": 2, "high": 4}[tier]
     cpu_based_concurrency = max(1, cpu - reserved_cpu)
     profile["max_environments"] = min(profile["max_environments"], cpu_based_concurrency)
-    profile["max_concurrent_tasks"] = min(
-        profile["max_concurrent_tasks"], cpu_based_concurrency
-    )
+    profile["max_concurrent_tasks"] = min(profile["max_concurrent_tasks"], cpu_based_concurrency)
 
     # 总量约束：所有容器资源总和不超过宿主机的一半。
     # 单容器配额 = (宿主机一半) / max_environments，满载时总和恰好 = 一半。
@@ -335,6 +330,7 @@ def compute_resource_profile(hardware: dict[str, Any] | None = None) -> dict[str
 # ---------------------------------------------------------------------------
 # 便捷入口
 # ---------------------------------------------------------------------------
+
 
 def get_resource_profile() -> dict[str, Any]:
     """便捷入口：检测硬件 + 计算配额，一步到位。

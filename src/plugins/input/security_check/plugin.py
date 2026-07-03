@@ -87,9 +87,18 @@ class SecurityCheckPlugin(IInputPlugin):
         self._enabled = self._config.get("enabled", True)
         self._workspace = self._config.get("workspace", "")
         self._max_path_depth = self._config.get("max_path_depth", 10)
-        self._path_params = self._config.get("path_params", [
-            "path", "file_path", "directory", "dest", "target", "output_path", "working_dir",
-        ])
+        self._path_params = self._config.get(
+            "path_params",
+            [
+                "path",
+                "file_path",
+                "directory",
+                "dest",
+                "target",
+                "output_path",
+                "working_dir",
+            ],
+        )
         self._allowed_base_paths = self._config.get("allowed_base_paths", ["skills"])
 
         # 本管道内已记忆"通过"的命令指纹集合。
@@ -128,6 +137,7 @@ class SecurityCheckPlugin(IInputPlugin):
         rel = rules_path.replace("config/", "", 1) if rules_path.startswith("config/") else rules_path
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             data = get_config_center().get(rel)
             if data and "rules" in data:
                 return data["rules"]
@@ -219,7 +229,9 @@ class SecurityCheckPlugin(IInputPlugin):
             if traversal_reason:
                 logger.warning(
                     "[%s] Blocked path traversal | tool=%s | reason=%s",
-                    self.name, tool_name, traversal_reason,
+                    self.name,
+                    tool_name,
+                    traversal_reason,
                 )
                 return self._soft_block(ctx, tool_name, f"路径遍历攻击被拦截: {traversal_reason}")
 
@@ -228,7 +240,9 @@ class SecurityCheckPlugin(IInputPlugin):
             if sensitive_reason:
                 logger.warning(
                     "[%s] Blocked sensitive system path | tool=%s | reason=%s",
-                    self.name, tool_name, sensitive_reason,
+                    self.name,
+                    tool_name,
+                    sensitive_reason,
                 )
                 return self._soft_block(ctx, tool_name, f"敏感系统目录被拦截: {sensitive_reason}")
 
@@ -242,11 +256,7 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # 混合批次（部分工具 docker、部分 host）时按工具自己的 provider 判定：
         # file_read 等工具天然走 host（不进容器），不应拖累走 docker 的危险工具。
-        tool_provider = {
-            c.get("tool_name"): c.get("provider")
-            for c in execution_contexts
-            if isinstance(c, dict)
-        }
+        tool_provider = {c.get("tool_name"): c.get("provider") for c in execution_contexts if isinstance(c, dict)}
 
         # 逐个检查工具调用的参数
         for tc in tool_calls:
@@ -271,7 +281,9 @@ class SecurityCheckPlugin(IInputPlugin):
             if action == "allow":
                 logger.info(
                     "[%s] 危险工具参数命中白名单，放行 | tool=%s | rule=%s",
-                    self.name, tool_name, rule_name,
+                    self.name,
+                    tool_name,
+                    rule_name,
                 )
                 continue
 
@@ -280,7 +292,8 @@ class SecurityCheckPlugin(IInputPlugin):
             if signature and signature in self._approved_signatures:
                 logger.info(
                     "[%s] 危险工具命中本管道已记忆指纹，放行 | tool=%s",
-                    self.name, tool_name,
+                    self.name,
+                    tool_name,
                 )
                 continue
 
@@ -288,10 +301,15 @@ class SecurityCheckPlugin(IInputPlugin):
             reason = "参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
             logger.warning(
                 "[%s] 危险工具参数未命中白名单，弹审批 | tool=%s | rule=%s",
-                self.name, tool_name, rule_name or "none",
+                self.name,
+                tool_name,
+                rule_name or "none",
             )
             return await self._await_approval(
-                ctx, tool_name, reason, signature=signature,
+                ctx,
+                tool_name,
+                reason,
+                signature=signature,
             )
 
         return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
@@ -332,6 +350,7 @@ class SecurityCheckPlugin(IInputPlugin):
             interaction_svc = ctx.get_service("human_interaction_service")
         except KeyError:
             from human_interaction import get_human_interaction_service  # noqa: PLC0415
+
             interaction_svc = get_human_interaction_service()
 
         # 提取工具调用的具体参数，显示给用户审批
@@ -364,7 +383,10 @@ class SecurityCheckPlugin(IInputPlugin):
 
             logger.info(
                 "[%s] Approval request created | request_id=%s | tool=%s | rule=%s",
-                self.name, request_id, tool_name, rule_name,
+                self.name,
+                request_id,
+                tool_name,
+                rule_name,
             )
 
             result = await interaction_svc.wait_for_choice(request_id)
@@ -382,12 +404,18 @@ class SecurityCheckPlugin(IInputPlugin):
                     self._approved_signatures.add(signature)
                     logger.info(
                         "[%s] Approval granted (remember signature) | request_id=%s | tool=%s | sig=%s",
-                        self.name, request_id, tool_name, signature,
+                        self.name,
+                        request_id,
+                        tool_name,
+                        signature,
                     )
                 else:
                     logger.info(
                         "[%s] Approval granted (once) | request_id=%s | tool=%s | option=%s",
-                        self.name, request_id, tool_name, selected_option,
+                        self.name,
+                        request_id,
+                        tool_name,
+                        selected_option,
                     )
                 return {
                     "security.decision": {
@@ -399,7 +427,11 @@ class SecurityCheckPlugin(IInputPlugin):
 
             logger.warning(
                 "[%s] Approval denied | request_id=%s | tool=%s | response=%s | option=%s",
-                self.name, request_id, tool_name, response_type, selected_option,
+                self.name,
+                request_id,
+                tool_name,
+                response_type,
+                selected_option,
             )
             # 审批拒绝属于软拦截——用户主观选择拒绝，不应结束管道，
             # 而是把拒绝结果作为 tool_result 返回给 LLM，让 LLM 决定下一步。
@@ -408,28 +440,39 @@ class SecurityCheckPlugin(IInputPlugin):
         except InteractionDeniedError as e:
             logger.warning(
                 "[%s] Approval denied (exception) | request_id=%s | tool=%s | reason=%s",
-                self.name, request_id, tool_name, e.reason,
+                self.name,
+                request_id,
+                tool_name,
+                e.reason,
             )
             return self._soft_block(ctx, tool_name, f"用户拒绝执行: {e.reason or rule_name}")
 
         except InteractionTimeoutError:
             logger.warning(
                 "[%s] Approval timed out | request_id=%s | tool=%s",
-                self.name, request_id, tool_name,
+                self.name,
+                request_id,
+                tool_name,
             )
             return self._soft_block(ctx, tool_name, f"审批超时未响应: {rule_name}")
 
         except InteractionCancelledError as e:
             logger.warning(
                 "[%s] Approval cancelled | request_id=%s | tool=%s | reason=%s",
-                self.name, request_id, tool_name, e.reason,
+                self.name,
+                request_id,
+                tool_name,
+                e.reason,
             )
             return self._soft_block(ctx, tool_name, f"审批被取消: {e.reason or rule_name}")
 
         except Exception as e:
             logger.error(
                 "[%s] Approval error | request_id=%s | tool=%s | error=%s",
-                self.name, request_id, tool_name, e,
+                self.name,
+                request_id,
+                tool_name,
+                e,
             )
             return self._soft_block(ctx, tool_name, f"审批服务异常: {e}")
 
@@ -483,7 +526,10 @@ class SecurityCheckPlugin(IInputPlugin):
         return f"{tool_name}:{digest}"
 
     def _soft_block(
-        self, ctx: PluginContext, tool_name: str, reason: str,
+        self,
+        ctx: PluginContext,
+        tool_name: str,
+        reason: str,
     ) -> dict[str, Any]:
         """软拦截：把拒绝原因作为 tool_result 返回给 LLM，不结束管道。
 
@@ -517,22 +563,23 @@ class SecurityCheckPlugin(IInputPlugin):
         for tc in tool_calls:
             tc_name = tc.get("name", "")
             tc_call_id = tc.get("id")
-            block_reason = (
-                f"[审批拒绝] {reason}" if tc_name == tool_name
-                else f"[关联拒绝] {reason}"
+            block_reason = f"[审批拒绝] {reason}" if tc_name == tool_name else f"[关联拒绝] {reason}"
+            rejected_results.append(
+                {
+                    "tool_name": tc_name,
+                    "success": False,
+                    "error": block_reason,
+                    "call_id": tc_call_id,
+                }
             )
-            rejected_results.append({
-                "tool_name": tc_name,
-                "success": False,
-                "error": block_reason,
-                "call_id": tc_call_id,
-            })
             if tc_call_id:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_call_id,
-                    "content": f"Error: {block_reason}",
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_call_id,
+                        "content": f"Error: {block_reason}",
+                    }
+                )
 
         # 连续拒绝计数：同一工具签名被反复拦截时累加，换请求即重置。
         signature = self._make_signature(tool_name, self._first_args(tool_calls, tool_name))
@@ -557,7 +604,9 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
                 logger.warning(
                     "[%s] %s | sig=%s",
-                    self.name, fatal_reason, signature,
+                    self.name,
+                    fatal_reason,
+                    signature,
                 )
                 updates[StateKeys.RAW_RESULT] = fatal_reason
                 updates[StateKeys.RAW_ERROR] = fatal_reason
@@ -567,13 +616,15 @@ class SecurityCheckPlugin(IInputPlugin):
 
         logger.info(
             "[%s] Soft-block: 拒绝转为 tool_result 反馈给 LLM | tool=%s",
-            self.name, tool_name,
+            self.name,
+            tool_name,
         )
         return updates
 
     @staticmethod
     def _first_args(
-        tool_calls: list[dict[str, Any]], tool_name: str,
+        tool_calls: list[dict[str, Any]],
+        tool_name: str,
     ) -> dict[str, Any]:
         """取出触发拒绝的工具调用参数，用于计算连续拒绝指纹。
 
@@ -612,6 +663,7 @@ class SecurityCheckPlugin(IInputPlugin):
             # args 可能是 JSON 字符串
             if isinstance(args, str):
                 import json  # noqa: PLC0415
+
                 try:
                     args = json.loads(args)
                 except (json.JSONDecodeError, TypeError):
@@ -721,7 +773,9 @@ class SecurityCheckPlugin(IInputPlugin):
                         except re.error:
                             logger.warning(
                                 "[%s] Invalid regex in rule '%s': %s",
-                                self.name, rule.get("name", "?"), pat_value,
+                                self.name,
+                                rule.get("name", "?"),
+                                pat_value,
                             )
 
                     if matched:
@@ -883,14 +937,10 @@ class SecurityCheckPlugin(IInputPlugin):
         Returns:
             True=已 docker 隔离（放行），False=非 docker（危险工具需审批）
         """
-        return bool(execution_contexts) and all(
-            c.get("provider") == "docker" for c in execution_contexts
-        )
+        return bool(execution_contexts) and all(c.get("provider") == "docker" for c in execution_contexts)
 
     @staticmethod
-    def _get_dangerous_operations(
-        ctx: PluginContext, tool_name: str
-    ) -> list[str]:
+    def _get_dangerous_operations(ctx: PluginContext, tool_name: str) -> list[str]:
         """从 tool_registry 获取工具声明的 dangerous_operations。
 
         优先用 engine 注入的 tool_registry 服务，取不到时回退全局单例。
@@ -910,6 +960,7 @@ class SecurityCheckPlugin(IInputPlugin):
         if registry is None:
             try:
                 from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+
                 registry = get_global_tool_registry_sync()
             except Exception:
                 return []
@@ -923,4 +974,3 @@ class SecurityCheckPlugin(IInputPlugin):
             return []
 
         return getattr(tool_def, "dangerous_operations", None) or []
-

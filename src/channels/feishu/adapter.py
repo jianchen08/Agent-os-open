@@ -138,9 +138,7 @@ class FeishuOutputAdapter(IOutputAdapter):
         # 处理错误
         error = state.get(StateKeys.RAW_ERROR)
         if error:
-            await self._stream_client.send_message(
-                user_id, f"❌ 错误: {error}"
-            )
+            await self._stream_client.send_message(user_id, f"❌ 错误: {error}")
             return
 
         # 发送正常结果
@@ -163,9 +161,7 @@ class FeishuOutputAdapter(IOutputAdapter):
         # 如果标记了 flush 或 stream end，发送累积内容
         if chunk.get("flush", False) or chunk.get("type") == "end":  # noqa: SIM102
             if self._channel_user_id and self._accumulated_text:
-                await self._stream_client.send_message(
-                    self._channel_user_id, self._accumulated_text
-                )
+                await self._stream_client.send_message(self._channel_user_id, self._accumulated_text)
                 self._accumulated_text = ""
 
 

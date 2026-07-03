@@ -27,6 +27,7 @@ router = APIRouter(
 # 请求 / 响应模型
 # ============================================================
 
+
 class ExternalChatRequest(BaseModel):
     """外部聊天请求模型。"""
 
@@ -45,6 +46,7 @@ class ExternalChatResponse(BaseModel):
 # 依赖获取
 # ============================================================
 
+
 def _get_agent_registry() -> Any:
     """从 ServiceProvider 获取全局 AgentRegistry 实例。"""
     from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
@@ -55,6 +57,7 @@ def _get_agent_registry() -> Any:
 # ============================================================
 # 端点
 # ============================================================
+
 
 @router.post(
     "/chat",

@@ -80,9 +80,7 @@ class TestWecomCrypto:
 
     def test_verify_signature_invalid(self) -> None:
         """无效签名验证失败。"""
-        assert self.crypto.verify_signature(
-            "1234567890", "nonce", "encrypt", "wrong_signature"
-        ) is False
+        assert self.crypto.verify_signature("1234567890", "nonce", "encrypt", "wrong_signature") is False
 
     def test_encrypt_and_decrypt_roundtrip(self) -> None:
         """加密-解密往返测试。"""
@@ -273,11 +271,13 @@ class TestWeComStreamClient:
         client = WeComStreamClient(corp_id=CORP_ID, agent_id=AGENT_ID, secret=SECRET)
 
         mock_response = AsyncMock()
-        mock_response.json = AsyncMock(return_value={
-            "access_token": "new_token",
-            "expires_in": 7200,
-            "errcode": 0,
-        })
+        mock_response.json = AsyncMock(
+            return_value={
+                "access_token": "new_token",
+                "expires_in": 7200,
+                "errcode": 0,
+            }
+        )
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=False)
 
@@ -387,9 +387,7 @@ class TestWeComOutputAdapter:
         state = {"_channel_user_id": "user1", "raw_error": "Something went wrong"}
         await adapter.send(state)
 
-        mock_client.send_message.assert_awaited_once_with(
-            "user1", "❌ 错误: Something went wrong"
-        )
+        mock_client.send_message.assert_awaited_once_with("user1", "❌ 错误: Something went wrong")
 
     @pytest.mark.asyncio
     async def test_send_no_user_id(self) -> None:
@@ -495,12 +493,8 @@ class TestWeComAdapter:
         signature = root.find("MsgSignature").text
 
         # 模拟 stream_client.trigger_on_message
-        with patch.object(
-            adapter.stream_client, "trigger_on_message", new_callable=AsyncMock
-        ) as mock_trigger:
-            result = await adapter.handle_callback(
-                timestamp, nonce, signature, encrypted_xml
-            )
+        with patch.object(adapter.stream_client, "trigger_on_message", new_callable=AsyncMock) as mock_trigger:
+            result = await adapter.handle_callback(timestamp, nonce, signature, encrypted_xml)
             assert "Hello" in result
             mock_trigger.assert_awaited_once()
 
@@ -545,9 +539,7 @@ class TestWeComAdapter:
         raw_str = "".join(parts)
         signature = hashlib.sha1(raw_str.encode("utf-8")).hexdigest()
 
-        result = await adapter.handle_verify_url(
-            timestamp, nonce, signature, encrypted_echo
-        )
+        result = await adapter.handle_verify_url(timestamp, nonce, signature, encrypted_echo)
         assert result == echo_str
 
 

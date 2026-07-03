@@ -39,13 +39,14 @@ class MaintenanceConfig:
         cleanup_capacity_threshold: 容量使用率超过此值时提前清理
         cleanup_early_age_days: 容量紧张时，多少天以上的已复盘数据可清理
     """
+
     enabled: bool = False
     # 复盘配置（B 路径只保留预算相关项，不再有定时触发）
     skeleton_budget_percent: int = 15
     records_per_skeleton_token: int = 15
     review_batch_limit: int = 10  # 单批复盘管道数上限，与 token 预算取 min
     # 清理配置
-    cleanup_check_interval: int = 86400     # 1 天
+    cleanup_check_interval: int = 86400  # 1 天
     cleanup_min_age_days: int = 30
     cleanup_capacity_threshold: float = 0.8
     cleanup_early_age_days: int = 7
@@ -170,6 +171,7 @@ class MemoryMaintenanceService:
         """
         if self._review_engine is None:
             from .review_engine import ReviewEngine  # noqa: PLC0415
+
             self._review_engine = ReviewEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
@@ -186,6 +188,7 @@ class MemoryMaintenanceService:
         """
         if self._cleanup_engine is None:
             from .cleanup_engine import CleanupEngine  # noqa: PLC0415
+
             self._cleanup_engine = CleanupEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
@@ -215,10 +218,7 @@ class MemoryMaintenanceService:
             from triggers import TriggerConfig, TriggerManager  # noqa: PLC0415
             from triggers.types import TriggerType  # noqa: PLC0415
         except ImportError:
-            logger.warning(
-                "[Maintenance] TriggerManager 不可用，"
-                "无法注册自动维护触发器"
-            )
+            logger.warning("[Maintenance] TriggerManager 不可用，无法注册自动维护触发器")
             return []
 
         trigger_manager: TriggerManager = _get_trigger_manager_safe()
@@ -229,15 +229,17 @@ class MemoryMaintenanceService:
 
         # 注册清理巡检触发器（按配置间隔）
         trigger_id = "memory_maintenance_check"
-        trigger_manager.register(TriggerConfig(
-            trigger_id=trigger_id,
-            name="记忆维护巡检（清理）",
-            trigger_type=TriggerType.INTERVAL,
-            interval_seconds=self._config.cleanup_check_interval,
-            action="memory_maintenance.run_cleanup",
-            max_fires=0,
-            metadata={"maintenance_type": "cleanup"},
-        ))
+        trigger_manager.register(
+            TriggerConfig(
+                trigger_id=trigger_id,
+                name="记忆维护巡检（清理）",
+                trigger_type=TriggerType.INTERVAL,
+                interval_seconds=self._config.cleanup_check_interval,
+                action="memory_maintenance.run_cleanup",
+                max_fires=0,
+                metadata={"maintenance_type": "cleanup"},
+            )
+        )
         registered.append(trigger_id)
 
         logger.info(
@@ -309,7 +311,8 @@ class MemoryMaintenanceService:
     # ============================================
 
     async def trigger_llm_review(
-        self, parent_pipeline_id: str,
+        self,
+        parent_pipeline_id: str,
     ) -> dict[str, Any]:
         """启动 LLM 复盘管道并返回。不阻塞调用方，复盘在后台运行。
 
@@ -353,6 +356,7 @@ class MemoryMaintenanceService:
         """检查给定 pipeline 是否已是复盘链路上的管道（source=tool_review）。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(pipeline_id)
             tags = getattr(entry, "tags", {}) or {} if entry else {}
             return tags.get("source") == "tool_review"
@@ -380,21 +384,24 @@ class MemoryMaintenanceService:
             all_targets = self._collect_review_targets(parent_pipeline_id)
             logger.info(
                 "[Maintenance] 收集待复盘目标 parent=%s targets=%d",
-                parent_pipeline_id[:12], len(all_targets),
+                parent_pipeline_id[:12],
+                len(all_targets),
             )
 
             # 2. 按预算切成多个复盘批次（最多 review_batch_limit 批）
             batches = self._split_targets_into_batches(all_targets)
             if not batches:
                 await self._notify_parent(
-                    parent_pipeline_id, "failed",
+                    parent_pipeline_id,
+                    "failed",
                     "无 pending 管道可复盘。",
                 )
                 return
 
             logger.info(
                 "[Maintenance] 切成 %d 个复盘批次（review_batch_limit=%d），共 %d 个目标",
-                len(batches), self._config.review_batch_limit,
+                len(batches),
+                self._config.review_batch_limit,
                 sum(len(b) for b in batches),
             )
 
@@ -407,7 +414,8 @@ class MemoryMaintenanceService:
                     # 该批启动失败：跳过，不中断后续批次
                     logger.warning(
                         "[Maintenance] 第 %d/%d 批复盘管道启动失败，跳过",
-                        idx, len(batches),
+                        idx,
+                        len(batches),
                     )
                     continue
 
@@ -424,7 +432,8 @@ class MemoryMaintenanceService:
             # 4. 通知父管道：本次复盘管道数 + 目标数 + 剩余 pending
             remaining = self._count_remaining_pending()
             await self._notify_parent(
-                parent_pipeline_id, "completed",
+                parent_pipeline_id,
+                "completed",
                 f"复盘完成：本次启动 {len(batches)} 个复盘管道，产出 {produced_reports} 份报告，"
                 f"复盘 {total_reviewed} 个目标。还剩 {remaining} 个 pending 待复盘。",
             )
@@ -432,7 +441,8 @@ class MemoryMaintenanceService:
         except Exception as exc:
             logger.error("[Maintenance] 复盘执行失败: %s", exc, exc_info=True)
             await self._notify_parent(
-                parent_pipeline_id, "failed",
+                parent_pipeline_id,
+                "failed",
                 f"复盘执行失败: {exc}",
             )
         finally:
@@ -483,17 +493,20 @@ class MemoryMaintenanceService:
                         pass
                 targets.append(item)
             # 两级分组：先 agent_id 聚集，再 status（failed 先），再 records 多优先
-            targets.sort(key=lambda t: (
-                t.get("agent_id") or "",
-                0 if t.get("status") == "failed" else 1,
-                -(t.get("total_records", 0)),
-            ))
+            targets.sort(
+                key=lambda t: (
+                    t.get("agent_id") or "",
+                    0 if t.get("status") == "failed" else 1,
+                    -(t.get("total_records", 0)),
+                )
+            )
         except Exception as exc:
             logger.warning("[Maintenance] 收集待复盘管道失败: %s", exc)
         return targets
 
     def _select_targets_by_budget(
-        self, targets: list[dict[str, Any]],
+        self,
+        targets: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """按骨架预算从前往后选目标，装满一个复盘管道的容量即停。
 
@@ -510,9 +523,7 @@ class MemoryMaintenanceService:
         Returns:
             一个复盘管道预算内可塞的目标子集
         """
-        budget_tokens = (
-            self._review_context_window * self._config.skeleton_budget_percent // 100
-        )
+        budget_tokens = self._review_context_window * self._config.skeleton_budget_percent // 100
         cost_per_token = self._config.records_per_skeleton_token
         selected: list[dict[str, Any]] = []
         used = 0
@@ -525,7 +536,8 @@ class MemoryMaintenanceService:
         return selected
 
     def _split_targets_into_batches(
-        self, targets: list[dict[str, Any]],
+        self,
+        targets: list[dict[str, Any]],
     ) -> list[list[dict[str, Any]]]:
         """把已排序的全部目标按预算切成多个批次，每批 = 一个复盘管道的容量。
 
@@ -557,7 +569,10 @@ class MemoryMaintenanceService:
         return batches
 
     async def _mark_targets_reviewed(
-        self, targets: list[dict[str, Any]], *, failed: bool = False,
+        self,
+        targets: list[dict[str, Any]],
+        *,
+        failed: bool = False,
     ) -> None:
         """把本次复盘覆盖的 pending 管道标记为已复盘。
 
@@ -575,7 +590,8 @@ class MemoryMaintenanceService:
             except Exception as exc:
                 logger.warning(
                     "[Maintenance] 标记管道已复盘失败 | run_id=%s | err=%s",
-                    run_id[:12], exc,
+                    run_id[:12],
+                    exc,
                 )
         # 更新统计
         self._stats["last_review_at"] = datetime.now(UTC).isoformat()
@@ -600,6 +616,7 @@ class MemoryMaintenanceService:
             return origin
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(parent_pipeline_id)
             tags = getattr(entry, "tags", {}) or {} if entry else {}
             origin["trigger_agent"] = tags.get("agent_id", "") or ""
@@ -609,7 +626,8 @@ class MemoryMaintenanceService:
         return origin
 
     async def _try_launch_review_agent(
-        self, targets: list[dict[str, Any]],
+        self,
+        targets: list[dict[str, Any]],
     ) -> tuple[str, bool]:
         """注册 review_agent 管道并注入消息，启动 LLM 复盘。
 
@@ -628,11 +646,13 @@ class MemoryMaintenanceService:
             # 前置校验：review_agent 配置必须存在，否则 tags.agent_id 反查会失败
             from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
             from tools.tool_context import MessageType, PipelineMessage, emit, get_engine_registry  # noqa: PLC0415
+
             if get_global_agent_registry_sync().get(self.REVIEW_AGENT_ID) is None:
                 logger.warning("[Maintenance] review_agent 配置不存在")
                 return "", False
 
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             registry = get_engine_registry()
             provider = get_service_provider()
 
@@ -663,10 +683,10 @@ class MemoryMaintenanceService:
             # 构造消息内容
             if targets:
                 targets_str = "\n".join(
-                    f"- pipeline_run_id={t['run_id']} (status={t.get('status','?')}, "
-                    f"records={t.get('total_records','?')}, iters={t.get('total_iterations','?')}, "
-                    f"agent={t.get('agent_id','?')}, task={t.get('task_title','?')}"
-                    + (f", error={t.get('error','')[:60]}" if t.get('error') else "")
+                    f"- pipeline_run_id={t['run_id']} (status={t.get('status', '?')}, "
+                    f"records={t.get('total_records', '?')}, iters={t.get('total_iterations', '?')}, "
+                    f"agent={t.get('agent_id', '?')}, task={t.get('task_title', '?')}"
+                    + (f", error={t.get('error', '')[:60]}" if t.get("error") else "")
                     + ")"
                     for t in targets
                 )
@@ -719,6 +739,7 @@ class MemoryMaintenanceService:
 
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             registry = get_engine_registry()
             entry = registry.get(child_pid)
             if entry is None:
@@ -768,10 +789,7 @@ class MemoryMaintenanceService:
             if self._knowledge_service is not None:
                 await self._knowledge_service.create_knowledge(
                     user_id="system",
-                    content=(
-                        f"## 复盘报告（pipeline={child_pipeline_id}）\n\n"
-                        f"{report_text[:5000]}"
-                    ),
+                    content=(f"## 复盘报告（pipeline={child_pipeline_id}）\n\n{report_text[:5000]}"),
                     source_type="review_experience",
                     extra_data={"pipeline_run_id": child_pipeline_id},
                 )
@@ -805,7 +823,10 @@ class MemoryMaintenanceService:
         self._stats["total_experiences_saved"] += 1
 
     async def _notify_parent(
-        self, parent_pid: str, status: str, summary: str,
+        self,
+        parent_pid: str,
+        status: str,
+        summary: str,
     ) -> None:
         """复盘完成后，向父管道回写完成通知。"""
         if not parent_pid:
@@ -816,6 +837,7 @@ class MemoryMaintenanceService:
                 MessageType,
                 PipelineMessage,
             )
+
             msg = PipelineMessage(
                 type=MessageType.CHAT,
                 content=f"[复盘完成] {summary}",
@@ -825,7 +847,8 @@ class MemoryMaintenanceService:
             await send_pipeline_message(msg)
             logger.info(
                 "[Maintenance] 已通知父管道复盘结果: parent=%s status=%s",
-                parent_pid[:12], status,
+                parent_pid[:12],
+                status,
             )
         except Exception as exc:
             logger.warning("[Maintenance] 通知父管道失败: %s", exc)
@@ -851,6 +874,7 @@ def _get_trigger_manager_safe() -> Any:
     """
     try:
         from triggers import get_trigger_manager  # noqa: PLC0415
+
         return get_trigger_manager()
     except ImportError:
         return None

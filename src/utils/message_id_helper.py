@@ -61,17 +61,15 @@ async def generate_execution_record_id(
     """
     if parent_record_id:
         result = await db.execute(
-            select(
-                func.max(ExecutionRecord.message_data["order"]["sequence"].as_integer())
-            ).where(ExecutionRecord.parent_record_id == parent_record_id)
+            select(func.max(ExecutionRecord.message_data["order"]["sequence"].as_integer())).where(
+                ExecutionRecord.parent_record_id == parent_record_id
+            )
         )
         base_id = parent_record_id
         context = f"parent_record_id={parent_record_id}"
     else:
         result = await db.execute(
-            select(
-                func.max(ExecutionRecord.message_data["order"]["sequence"].as_integer())
-            ).where(
+            select(func.max(ExecutionRecord.message_data["order"]["sequence"].as_integer())).where(
                 ExecutionRecord.session_id == session_id,
                 ExecutionRecord.parent_record_id.is_(None),
             )
@@ -87,9 +85,7 @@ async def generate_execution_record_id(
         formatted_seq = encode_base36(new_seq, 5)
         message_id = f"{base_id}-{formatted_seq}"
 
-        existing = await db.execute(
-            select(ExecutionRecord.id).where(ExecutionRecord.id == message_id)
-        )
+        existing = await db.execute(select(ExecutionRecord.id).where(ExecutionRecord.id == message_id))
         if existing.scalar_one_or_none():
             logger.warning(
                 f"[generate_execution_record_id] ID 已存在，重试 | "
@@ -151,9 +147,7 @@ async def generate_task_id(
     from src.db.models import Task  # noqa: PLC0415
 
     if parent_task_id:
-        result = await db.execute(
-            select(func.max(Task.id)).where(Task.parent_task_id == parent_task_id)
-        )
+        result = await db.execute(select(func.max(Task.id)).where(Task.parent_task_id == parent_task_id))
         max_id = result.scalar()
         base_id = parent_task_id
     else:
@@ -177,6 +171,4 @@ async def generate_task_id(
             return task_id
         new_seq += 1
 
-    raise IDGenerationError(
-        f"无法生成唯一任务ID（已尝试 {max_attempts} 次）| base_id={base_id}"
-    )
+    raise IDGenerationError(f"无法生成唯一任务ID（已尝试 {max_attempts} 次）| base_id={base_id}")

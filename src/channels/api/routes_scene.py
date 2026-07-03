@@ -74,11 +74,7 @@ def create_scene(
             description=request.description,
             template_id=request.template_id,
             layout=request.layout,
-            widgets=(
-                [w.model_dump(mode="json") for w in request.widgets]
-                if request.widgets
-                else None
-            ),
+            widgets=([w.model_dump(mode="json") for w in request.widgets] if request.widgets else None),
         )
     except ValueError as exc:
         raise APIError(

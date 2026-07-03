@@ -43,8 +43,10 @@ _CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
 # Pydantic Schema 模型（S-2: 替代裸 dict[str, Any] 请求体，限制可写入字段）
 # ---------------------------------------------------------------------------
 
+
 class LlmDefaultsUpdateRequest(BaseModel):
     """LLM 默认模型配置更新请求。"""
+
     chat: str | None = None
     embedding: str | None = None
     tiers: dict[str, Any] | None = None
@@ -52,16 +54,19 @@ class LlmDefaultsUpdateRequest(BaseModel):
 
 class ModelAddRequest(BaseModel):
     """添加模型请求，key 为模型 ID，value 为模型配置。"""
+
     models: dict[str, dict[str, Any]] = Field(description="模型 ID → 配置")
 
 
 class ModelConfigUpdateRequest(BaseModel):
     """单模型配置更新请求，允许任意字段（透传合并到现有配置）。"""
+
     config: dict[str, Any] = Field(description="模型配置字段")
 
 
 class ProviderConfigUpdateRequest(BaseModel):
     """提供商配置更新请求，允许任意字段（透传合并到现有配置）。"""
+
     config: dict[str, Any] = Field(description="提供商配置字段")
 
 
@@ -71,12 +76,14 @@ class ProviderCreateRequest(BaseModel):
     若 config 中包含 ``api_key``，将自动写入 .env 文件，
     llm.yaml 中对应 key 改为 ``${PROVIDER_ID_UPPER}_API_KEY`` 引用格式。
     """
+
     provider_id: str = Field(description="提供商唯一标识（如 deepseek）")
     config: dict[str, Any] = Field(description="提供商完整配置")
 
 
 class ContextWindowUpdateRequest(BaseModel):
     """上下文窗口配置更新请求，仅允许白名单字段。"""
+
     max_context_length: int | None = None
     compress_trigger_ratio: float | None = None
     budgets: dict[str, Any] | None = None
@@ -90,12 +97,14 @@ class ContextWindowUpdateRequest(BaseModel):
 
 class GenericConfigUpdateRequest(BaseModel):
     """通用配置更新请求，data 为完整配置内容（白名单校验路径）。"""
+
     data: dict[str, Any] = Field(description="配置文件完整内容")
 
 
 # ---------------------------------------------------------------------------
 # YAML 读写工具
 # ---------------------------------------------------------------------------
+
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -125,6 +134,7 @@ def _mask_key(key: str) -> str:
 # ---------------------------------------------------------------------------
 # .env 文件读写工具
 # ---------------------------------------------------------------------------
+
 
 def _read_env_file(path: Path) -> dict[str, str]:
     """读取 .env 文件，返回 key=value 字典（跳过注释和空行）。
@@ -185,6 +195,7 @@ def _update_env_var(path: Path, var_name: str, var_value: str) -> None:
 # ---------------------------------------------------------------------------
 # LLM 配置
 # ---------------------------------------------------------------------------
+
 
 @router.get("/llm", summary="获取完整 LLM 配置")
 def get_llm_config() -> dict[str, Any]:
@@ -441,8 +452,14 @@ def update_context_window_config(body: ContextWindowUpdateRequest) -> dict[str, 
     """合并前端提交的字段到现有配置，支持 budgets/compression 等嵌套对象。"""
     data = _read_yaml(_CONTEXT_WINDOW_YAML)
     _EDITABLE_KEYS = {  # noqa: N806
-        "max_context_length", "compress_trigger_ratio", "budgets", "compression", "layer_order",
-        "include_tools_description_in_prompt", "static_vars", "dynamic_vars",
+        "max_context_length",
+        "compress_trigger_ratio",
+        "budgets",
+        "compression",
+        "layer_order",
+        "include_tools_description_in_prompt",
+        "static_vars",
+        "dynamic_vars",
         "custom_layers",
     }
     body_data = body.model_dump(exclude_none=True)
@@ -464,6 +481,7 @@ def reset_context_window_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # API 配置（运行时状态）
 # ---------------------------------------------------------------------------
+
 
 @router.get("/api", summary="获取 API 配置")
 def get_api_config() -> dict[str, Any]:
@@ -495,6 +513,7 @@ def save_api_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 并发配置
 # ---------------------------------------------------------------------------
+
 
 @router.get("/concurrency", summary="获取并发配置")
 def get_concurrency_config() -> dict[str, Any]:
@@ -621,15 +640,17 @@ def save_generic_config(config_path: str, body: GenericConfigUpdateRequest) -> d
     # 触发 config_center reload，使 watcher 生效（热更新）
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+
         rel = str(file_path).replace("\\", "/")
         if "config/" in rel:
-            rel = rel[rel.index("config/") + len("config/"):]
+            rel = rel[rel.index("config/") + len("config/") :]
         get_config_center().reload(rel)
         logger.info("通用配置已更新并触发 reload: %s", config_path)
     except Exception as e:
         logger.warning("通用配置 reload 失败: %s | error=%s", config_path, e)
 
     return body.data
+
 
 # ---------------------------------------------------------------------------
 # 手动热重载端点

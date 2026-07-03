@@ -77,9 +77,7 @@ class E2BProvider(IsolationProvider):
         except Exception as e:
             return False, f"沙箱不可用: {str(e)}"
 
-    async def create_environment(
-        self, context: IsolationContext
-    ) -> IsolationEnvironment:
+    async def create_environment(self, context: IsolationContext) -> IsolationEnvironment:
         """创建沙箱环境
 
         Args:
@@ -149,9 +147,7 @@ class E2BProvider(IsolationProvider):
         except Exception as e:
             logger.error(f"销毁环境失败: {e}", exc_info=True)
 
-    async def execute_in_environment(
-        self, env_id: str, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:
         """在沙箱中执行操作
 
         Args:
@@ -190,9 +186,7 @@ class E2BProvider(IsolationProvider):
                 error=f"执行失败: {str(e)}",
             )
 
-    async def _execute_python_code(
-        self, env: IsolationEnvironment, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_python_code(self, env: IsolationEnvironment, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Python 代码
 
         Args:
@@ -274,9 +268,7 @@ class E2BProvider(IsolationProvider):
                 error=f"执行代码失败: {str(e)}",
             )
 
-    async def _execute_command(
-        self, env: IsolationEnvironment, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_command(self, env: IsolationEnvironment, operation: dict[str, Any]) -> ExecutionResult:
         """执行命令
 
         Args:

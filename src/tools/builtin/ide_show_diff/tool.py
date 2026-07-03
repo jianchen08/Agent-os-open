@@ -48,8 +48,7 @@ class IDEShowDiffTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="ide_show_diff",
-            description="在 IDE 中显示文件差异对比视图。"
-            "无连接器时降级为生成 unified diff 文本输出。",
+            description="在 IDE 中显示文件差异对比视图。无连接器时降级为生成 unified diff 文本输出。",
             when_to_use=["需要向用户展示文件修改前后的差异"],
             when_not_to_use=["仅需比较两个文件内容（使用 bash_execute 的 diff 命令）"],
             input_schema={

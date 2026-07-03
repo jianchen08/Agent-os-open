@@ -127,7 +127,7 @@ class KnowledgeInjectPlugin(IInputPlugin):
         parts: list[str] = []
         total_tokens = 0
 
-        for i, item in enumerate(items[:self._top_k], 1):
+        for i, item in enumerate(items[: self._top_k], 1):
             content = item.get("content", "")
             estimated_tokens = len(content) // 2
             if total_tokens + estimated_tokens > self._max_tokens:
@@ -149,7 +149,7 @@ class KnowledgeInjectPlugin(IInputPlugin):
         parts: list[str] = []
         total_tokens = 0
 
-        for i, item in enumerate(items[:self._top_k], 1):
+        for i, item in enumerate(items[: self._top_k], 1):
             content = item.get("content", "")
             summary = content[:200] + "..." if len(content) > 200 else content
             estimated_tokens = len(summary) // 2
@@ -179,7 +179,9 @@ class KnowledgeInjectPlugin(IInputPlugin):
         return f"知识库中找到 {count} 条相关内容：\n" + "\n".join(topics)
 
     def _filter_by_relevance(
-        self, items: list[dict[str, Any]], query: str,
+        self,
+        items: list[dict[str, Any]],
+        query: str,
     ) -> list[dict[str, Any]]:
         """按 query 关键词对知识条目做基础相关性排序和筛选。
 
@@ -196,7 +198,7 @@ class KnowledgeInjectPlugin(IInputPlugin):
         # 简单分词：按空白字符拆分，过滤短词
         query_words = {w.lower() for w in query.split() if len(w) > 1}
         if not query_words:
-            return items[:self._top_k]
+            return items[: self._top_k]
 
         scored: list[tuple[int, int, dict[str, Any]]] = []
         for idx, item in enumerate(items):
@@ -212,4 +214,4 @@ class KnowledgeInjectPlugin(IInputPlugin):
         filtered = [item for hit, _, item in scored if hit > 0]
 
         # 若全部零命中，回退到原始列表（保证有内容可用）
-        return filtered[:self._top_k] if filtered else items[:self._top_k]
+        return filtered[: self._top_k] if filtered else items[: self._top_k]

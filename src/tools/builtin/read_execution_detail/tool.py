@@ -32,8 +32,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="read_execution_detail",
-            description="查看管道执行的详细记录（渐进式披露）。"
-            "先看骨架了解全局，再看L1了解语义，最后看L0了解细节。",
+            description="查看管道执行的详细记录（渐进式披露）。先看骨架了解全局，再看L1了解语义，最后看L0了解细节。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -52,17 +51,12 @@ class ReadExecutionDetailTool(BuiltinTool):
                     },
                     "iteration": {
                         "type": "integer",
-                        "description": (
-                            "目标轮次。skeleton不指定则返回完整骨架。L1/L0必填。"
-                        ),
+                        "description": ("目标轮次。skeleton不指定则返回完整骨架。L1/L0必填。"),
                     },
                     "fields": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": (
-                            "L0层专用：thinking, content, tool_calls, tool_input, "
-                            "error, all。默认all。"
-                        ),
+                        "description": ("L0层专用：thinking, content, tool_calls, tool_input, error, all。默认all。"),
                     },
                 },
                 "required": ["pipeline_run_id", "level"],
@@ -187,9 +181,7 @@ class ReadExecutionDetailTool(BuiltinTool):
 
         # 获取该 iteration 的所有记录，用于构建上下文摘要
         all_records = storage.list_by_pipeline(pipeline_run_id)[0]
-        target_records = [
-            r for r in all_records if r.iteration == iteration
-        ]
+        target_records = [r for r in all_records if r.iteration == iteration]
 
         if not target_records:
             return create_failure_result(
@@ -245,19 +237,23 @@ class ReadExecutionDetailTool(BuiltinTool):
 
         # 错误摘要
         for r in error_records:
-            summary_sections["errors"].append({
-                "type": r.type,
-                "name": r.name,
-                "error": r.error[:200] if r.error else "",
-            })
+            summary_sections["errors"].append(
+                {
+                    "type": r.type,
+                    "name": r.name,
+                    "error": r.error[:200] if r.error else "",
+                }
+            )
 
         # 关键决策（从 thinking_content 中提取）
         for r in ai_records:
             if r.thinking_content:
-                summary_sections["key_decisions"].append({
-                    "iteration": r.iteration,
-                    "thinking_preview": r.thinking_content[:300],
-                })
+                summary_sections["key_decisions"].append(
+                    {
+                        "iteration": r.iteration,
+                        "thinking_preview": r.thinking_content[:300],
+                    }
+                )
 
         return create_success_result(
             data={
@@ -265,8 +261,7 @@ class ReadExecutionDetailTool(BuiltinTool):
                 "level": "L1",
                 "iteration": iteration,
                 "record_count": len(target_records),
-                "note": "当前为模拟 L1 摘要（基于 L0 记录生成），"
-                        "接入 ChunkDB 后将返回真实 L1 压缩块。",
+                "note": "当前为模拟 L1 摘要（基于 L0 记录生成），接入 ChunkDB 后将返回真实 L1 压缩块。",
                 "summary": summary_sections,
             },
             metadata={"action": "L1"},
@@ -292,9 +287,7 @@ class ReadExecutionDetailTool(BuiltinTool):
             fields = ["all"]
 
         all_records = storage.list_by_pipeline(pipeline_run_id)[0]
-        target_records = [
-            r for r in all_records if r.iteration == iteration
-        ]
+        target_records = [r for r in all_records if r.iteration == iteration]
 
         if not target_records:
             return create_failure_result(
@@ -319,9 +312,7 @@ class ReadExecutionDetailTool(BuiltinTool):
             metadata={"action": "L0"},
         )
 
-    def _filter_record_fields(
-        self, record: Any, fields: list[str]
-    ) -> dict[str, Any]:
+    def _filter_record_fields(self, record: Any, fields: list[str]) -> dict[str, Any]:
         """按 fields 列表过滤单条记录的字段。"""
         # 基础信息始终包含
         result: dict[str, Any] = {
@@ -335,9 +326,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         if "all" in fields:
             # 返回全部字段
             result["role"] = record.role
-            result["content"] = self._truncate_text(
-                record.content, _CONTENT_MAX_LEN
-            )
+            result["content"] = self._truncate_text(record.content, _CONTENT_MAX_LEN)
             result["thinking_content"] = record.thinking_content
             result["tool_calls"] = self._parse_tool_calls(record.tool_calls_json)
             result["tool_input"] = record.tool_input
@@ -350,9 +339,7 @@ class ReadExecutionDetailTool(BuiltinTool):
             result["thinking_content"] = record.thinking_content
 
         if "content" in fields and record.content:
-            result["content"] = self._truncate_text(
-                record.content, _CONTENT_MAX_LEN
-            )
+            result["content"] = self._truncate_text(record.content, _CONTENT_MAX_LEN)
 
         if "tool_calls" in fields and record.tool_calls_json:
             result["tool_calls"] = self._parse_tool_calls(record.tool_calls_json)

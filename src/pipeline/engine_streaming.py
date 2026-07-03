@@ -15,6 +15,7 @@
   drain(挂起前排空)、save/restore/set 上下文、shutdown(收尾取消协程)。
 - 不持有：引擎的 state 机、生命周期、stop 信号判定（后者通过 stop_check 回调注入）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -147,9 +148,9 @@ class StreamingOutput:
         # 协作式停止：每个 chunk 检查 stop_generation 信号（只读不删，由插件消费）。
         if self._stop_check():
             logger.info(
-                "[Streaming] on_chunk 检测到 stop_generation 信号，协作式中断流式"
-                ": pipeline=%s chunk_type=%s",
-                self._pipeline_id[:12], chunk.get("type", "?"),
+                "[Streaming] on_chunk 检测到 stop_generation 信号，协作式中断流式: pipeline=%s chunk_type=%s",
+                self._pipeline_id[:12],
+                chunk.get("type", "?"),
             )
             raise asyncio.CancelledError("stop_generation signal")
 
@@ -169,7 +170,8 @@ class StreamingOutput:
         except Exception as exc:
             logger.debug(
                 "[Streaming] on_chunk 入队失败: %s pipeline=%s",
-                exc, self._pipeline_id[:12],
+                exc,
+                self._pipeline_id[:12],
             )
 
     # ------------------------------------------------------------------
@@ -198,7 +200,8 @@ class StreamingOutput:
             except Exception as exc:
                 logger.warning(
                     "[Streaming] chunk_consumer emit_chunk 失败（非致命）: %s pipeline=%s",
-                    exc, self._pipeline_id[:12],
+                    exc,
+                    self._pipeline_id[:12],
                 )
 
     # ------------------------------------------------------------------
@@ -224,7 +227,8 @@ class StreamingOutput:
                 if remaining:
                     logger.warning(
                         "[Streaming] chunk queue drain 超时，仍有 %d 个 chunk 未消费: pipeline=%s",
-                        remaining, self._pipeline_id[:12],
+                        remaining,
+                        self._pipeline_id[:12],
                     )
                 return
             await asyncio.sleep(0.005)
@@ -253,7 +257,7 @@ class StreamingOutput:
             while True:
                 await asyncio.sleep(self._KEEPALIVE_INTERVAL)
                 # 流式未开始或已结束：不发保活包（emit_finish/emit_suspend 已置 False）
-                if not getattr(bridge, '_stream_started', False):
+                if not getattr(bridge, "_stream_started", False):
                     continue
                 _idle = _time.monotonic() - self._last_chunk_monotonic
                 # chunk 密集（最近收过）：抑制保活包
@@ -261,14 +265,20 @@ class StreamingOutput:
                     continue
                 # 静默超阈值：推保活包。失败隔离，不阻断循环。
                 try:
-                    await bridge.send_event(bridge._make_event("stream_keepalive", {
-                        "idle_seconds": round(_idle, 1),
-                        "pipeline_id": self._pipeline_id,
-                    }))
+                    await bridge.send_event(
+                        bridge._make_event(
+                            "stream_keepalive",
+                            {
+                                "idle_seconds": round(_idle, 1),
+                                "pipeline_id": self._pipeline_id,
+                            },
+                        )
+                    )
                 except Exception:
                     logger.debug(
                         "[Streaming] keepalive 推送失败（非致命）: pipeline=%s",
-                        self._pipeline_id[:12], exc_info=True,
+                        self._pipeline_id[:12],
+                        exc_info=True,
                     )
         except asyncio.CancelledError:
             pass

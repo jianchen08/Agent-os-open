@@ -131,19 +131,28 @@ class CostControlPlugin(IInputPlugin):
         if exceeded:
             logger.warning(
                 "[%s] Token budget exceeded! used=%d, budget=%d (%.1f%%)",
-                self.name, total_tokens, budget, usage_percent * 100,
+                self.name,
+                total_tokens,
+                budget,
+                usage_percent * 100,
             )
             updates[StateKeys.SHOULD_STOP] = True
             updates["cost_control.stop_reason"] = f"Token budget exceeded: {total_tokens}/{budget}"
         elif usage_percent >= self._critical_threshold:
             logger.warning(
                 "[%s] Token usage critical: %d/%d (%.1f%%)",
-                self.name, total_tokens, budget, usage_percent * 100,
+                self.name,
+                total_tokens,
+                budget,
+                usage_percent * 100,
             )
         elif usage_percent >= self._warning_threshold:
             logger.info(
                 "[%s] Token usage warning: %d/%d (%.1f%%)",
-                self.name, total_tokens, budget, usage_percent * 100,
+                self.name,
+                total_tokens,
+                budget,
+                usage_percent * 100,
             )
 
         return updates

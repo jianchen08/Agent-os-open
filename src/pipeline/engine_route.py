@@ -102,14 +102,12 @@ async def apply_route(  # noqa: PLR0911
             # 检查是否有新通知注入（如 task_event_receiver 的完成通知）
             # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
             from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
+
             if consume_pending_notifications(engine, state):
                 return False
 
             # 无新输入，降级为 wait（挂起等用户反馈）
-            logger.info(
-                "Route next_llm + text-only output (no new input): "
-                "downgrading to wait, suspending pipeline"
-            )
+            logger.info("Route next_llm + text-only output (no new input): downgrading to wait, suspending pipeline")
             restored = await engine.suspend_and_wait(state)
             if restored:
                 state[StateKeys.CORE_TYPE] = "llm_call"
@@ -130,6 +128,7 @@ async def apply_route(  # noqa: PLR0911
     if route_type == "end":
         # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
         from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
+
         if consume_pending_notifications(engine, state):
             logger.info("[Engine] route=end 但有待处理通知，取消结束: %s", route.reason)
             return False

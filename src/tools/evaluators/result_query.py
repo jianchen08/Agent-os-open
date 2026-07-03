@@ -143,9 +143,9 @@ class EvaluationResultQuery:
             # 简单的名称匹配
             keyword_lower = keyword.lower()
             matched = [
-                m for m in all_metrics
-                if keyword_lower in m.get("name", "").lower()
-                or keyword_lower in m.get("description", "").lower()
+                m
+                for m in all_metrics
+                if keyword_lower in m.get("name", "").lower() or keyword_lower in m.get("description", "").lower()
             ]
 
             return [

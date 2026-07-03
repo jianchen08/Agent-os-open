@@ -33,8 +33,9 @@ class DeepSeekAdapter(ProviderAdapter):
         **kwargs: object,
     ) -> list[dict[str, Any]]:
         retention = kwargs.get("reasoning_retention", {})
-        interval = retention.get("sample_interval", _DEFAULT_INTERVAL) \
-            if isinstance(retention, dict) else _DEFAULT_INTERVAL
+        interval = (
+            retention.get("sample_interval", _DEFAULT_INTERVAL) if isinstance(retention, dict) else _DEFAULT_INTERVAL
+        )
         return _apply_sampling(messages, interval)
 
 

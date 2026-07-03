@@ -109,9 +109,7 @@ class AuthService:
         attempts = [t for t in attempts if now - t < window]
         self._login_attempts[username] = attempts
         if len(attempts) >= self.LOGIN_RATE_LIMIT:
-            raise RateLimitExceededError(
-                f"用户 '{username}' 登录尝试超过限制（{self.LOGIN_RATE_LIMIT}次/{window}秒）"
-            )
+            raise RateLimitExceededError(f"用户 '{username}' 登录尝试超过限制（{self.LOGIN_RATE_LIMIT}次/{window}秒）")
 
     def _record_login_attempt(self, username: str) -> None:
         """记录一次登录尝试。"""

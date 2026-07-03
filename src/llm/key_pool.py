@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # Agent 层级优先级
 
 _current_agent_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "agent_priority", default=99,
+    "agent_priority",
+    default=99,
 )
 
 _LEVEL_PRIORITY_MAP: dict[str, int] = {
@@ -74,12 +75,13 @@ class PrioritySemaphore:
         self._waiters.sort(key=lambda x: x[0])
 
         # 诊断日志：排队等待时打印优先级和等待队列状态
-        queue_desc = ",".join(
-            f"({p},{_priority_label(p)})" for p, _ in self._waiters
-        )
+        queue_desc = ",".join(f"({p},{_priority_label(p)})" for p, _ in self._waiters)
         logger.info(
             "[PrioritySemaphore] 排队等待 | level=%s priority=%d | waiters=%d | queue=[%s]",
-            _priority_label(priority), priority, len(self._waiters), queue_desc,
+            _priority_label(priority),
+            priority,
+            len(self._waiters),
+            queue_desc,
         )
 
         try:
@@ -112,7 +114,9 @@ class PrioritySemaphore:
                 fut.set_result(None)
                 logger.info(
                     "[PrioritySemaphore] 唤醒等待者 | level=%s priority=%d | remaining_waiters=%d",
-                    _priority_label(w_priority), w_priority, len(self._waiters),
+                    _priority_label(w_priority),
+                    w_priority,
+                    len(self._waiters),
                 )
                 return
             # 死 future（被 cancel 的 waiter）：直接丢弃，继续找下一个活的
@@ -141,7 +145,9 @@ class PrioritySemaphore:
         self._value = min(self._value, self._capacity)
         logger.info(
             "[PrioritySemaphore] 缩容 → capacity=%d (value=%d, waiters=%d)",
-            self._capacity, self._value, len(self._waiters),
+            self._capacity,
+            self._value,
+            len(self._waiters),
         )
         return self._capacity
 
@@ -155,7 +161,9 @@ class PrioritySemaphore:
             self._value += 1
         logger.info(
             "[PrioritySemaphore] 扩容 → capacity=%d (value=%d, waiters=%d)",
-            self._capacity, self._value, len(self._waiters),
+            self._capacity,
+            self._value,
+            len(self._waiters),
         )
         return self._capacity
 
@@ -222,11 +230,7 @@ class KeySlot:
     @property
     def is_exhausted(self) -> bool:
         """key 是否完全不可用（冷却中 or RPM 满 or 配额耗尽）。"""
-        return (
-            self.is_cooling
-            or self.rpm_remaining <= 0
-            or self.token_remaining <= 0
-        )
+        return self.is_cooling or self.rpm_remaining <= 0 or self.token_remaining <= 0
 
     def score(self) -> float:
         """选 key 时的评分，越高越优先选。"""
@@ -274,17 +278,21 @@ class KeySlot:
             self._reduce_rpm()
             logger.info(
                 "[KeySlot] %s RATE_LIMIT 冷却 %.1fs + rpm 降级 → %d",
-                self.key_id, cool, self._effective_rpm(),
+                self.key_id,
+                cool,
+                self._effective_rpm(),
             )
         elif kind == ErrorKind.QUOTA_EXHAUSTED:
             self._cooling_until = _time.monotonic() + 3600.0
             logger.warning(
-                "[KeySlot] %s QUOTA_EXHAUSTED 冷却 3600s", self.key_id,
+                "[KeySlot] %s QUOTA_EXHAUSTED 冷却 3600s",
+                self.key_id,
             )
         elif kind == ErrorKind.AUTH_FAILED:
             self._cooling_until = _time.monotonic() + 300.0
             logger.warning(
-                "[KeySlot] %s AUTH_FAILED 冷却 300s", self.key_id,
+                "[KeySlot] %s AUTH_FAILED 冷却 300s",
+                self.key_id,
             )
         elif kind == ErrorKind.SERVICE_DOWN:
             self._consecutive_down += 1
@@ -299,19 +307,23 @@ class KeySlot:
                 self._cooling_until = _time.monotonic() + cool
                 logger.info(
                     "[KeySlot] %s SERVICE_DOWN 连续 %d 次，冷却 %.0fs",
-                    self.key_id, n, cool,
+                    self.key_id,
+                    n,
+                    cool,
                 )
             # 累计 3 次确认非偶发，并发降级
             if n >= 3:
                 self._reduce_concurrency()
                 logger.warning(
                     "[KeySlot] %s SERVICE_DOWN 连续 %d 次，并发降级",
-                    self.key_id, n,
+                    self.key_id,
+                    n,
                 )
             else:
                 logger.info(
                     "[KeySlot] %s SERVICE_DOWN 第 %d 次（adapter 退避重试）",
-                    self.key_id, n,
+                    self.key_id,
+                    n,
                 )
         elif kind == ErrorKind.SERVER_ERROR:
             self._cooling_until = _time.monotonic() + 5.0
@@ -324,7 +336,9 @@ class KeySlot:
         new_cap = sem.shrink()
         logger.info(
             "[KeySlot] %s 并发降级 → %d (原 %d)",
-            self.key_id, new_cap, self.max_concurrent,
+            self.key_id,
+            new_cap,
+            self.max_concurrent,
         )
 
     def _reduce_rpm(self) -> None:
@@ -358,15 +372,15 @@ class KeySlot:
         if sem.capacity < self.max_concurrent:
             new_cap = sem.grow()
             logger.info(
-                "[KeySlot] %s 并发回升 → %d", self.key_id, new_cap,
+                "[KeySlot] %s 并发回升 → %d",
+                self.key_id,
+                new_cap,
             )
 
     def _evict_old(self, now: float) -> None:
         """清除 60 秒前的请求时间戳。"""
         cutoff = now - 60.0
-        self._request_timestamps = [
-            t for t in self._request_timestamps if t > cutoff
-        ]
+        self._request_timestamps = [t for t in self._request_timestamps if t > cutoff]
 
     async def acquire(self) -> None:
         """获取并发许可。"""
@@ -407,7 +421,8 @@ class KeyPool:
         unavailable = self.get_unavailable_slots()
         logger.warning(
             "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted): %s",
-            self.pool_id, unavailable,
+            self.pool_id,
+            unavailable,
         )
         return None
 
@@ -433,7 +448,9 @@ class KeyPool:
                 unavailable = self.get_unavailable_slots()
                 logger.error(
                     "[KeyPool] %s 所有 key 不可用，等待 %.0fs 超时；诊断: %s",
-                    self.pool_id, timeout, unavailable,
+                    self.pool_id,
+                    timeout,
+                    unavailable,
                 )
                 raise KeyPoolExhaustedError(self.pool_id, timeout, unavailable)
             # 所有 key 都满了，等最短冷却时间
@@ -443,7 +460,8 @@ class KeyPool:
                 wait = max(0.1, earliest - _time.monotonic())
                 logger.debug(
                     "[KeyPool] %s 所有 key 忙，等待 %.1fs",
-                    self.pool_id, wait,
+                    self.pool_id,
+                    wait,
                 )
                 await asyncio.sleep(wait)
             else:
@@ -453,8 +471,7 @@ class KeyPool:
     def get_unavailable_slots(self) -> list[str]:
         """返回当前不可用 key 的诊断信息（脱敏 key 前缀）。"""
         return [
-            f"{s.api_key[:8]}...(cooling={s.is_cooling}, "
-            f"rpm_left={s.rpm_remaining}, token_left={s.token_remaining})"
+            f"{s.api_key[:8]}...(cooling={s.is_cooling}, rpm_left={s.rpm_remaining}, token_left={s.token_remaining})"
             for s in self._slots
         ]
 

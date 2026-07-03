@@ -74,9 +74,7 @@ class Diagnostic(BaseModel):
     """诊断信息"""
 
     range: Range = Field(..., description="诊断范围")
-    severity: int = Field(
-        ..., description="严重程度：1=Error, 2=Warning, 3=Info, 4=Hint"
-    )
+    severity: int = Field(..., description="严重程度：1=Error, 2=Warning, 3=Info, 4=Hint")
     code: str | None = Field(None, description="诊断代码")
     source: str | None = Field(None, description="诊断源（如 'python'）")
     message: str = Field(..., description="诊断消息")

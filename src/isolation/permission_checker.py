@@ -99,9 +99,7 @@ class PermissionChecker:
         if write_perm.scope == PermissionScope.PROJECT:
             # 允许写入整个项目
             if write_perm.require_confirmation:
-                logger.info(
-                    f"[PermissionChecker] 写入操作需要用户确认 | path={path}"
-                )
+                logger.info(f"[PermissionChecker] 写入操作需要用户确认 | path={path}")
             return True, ""
 
         if write_perm.scope == PermissionScope.WORKSPACE:
@@ -116,22 +114,13 @@ class PermissionChecker:
             is_inside = self._is_path_inside(normalized_path, workspace_path)
 
             if not is_inside and not write_perm.allow_outside:
-                error_msg = (
-                    f"权限拒绝：无法在工作目录 '{workspace}' 之外执行写入操作。"
-                    f"当前路径: '{path}'"
-                )
-                logger.warning(
-                    f"[PermissionChecker] 写入权限检查失败 | "
-                    f"path={path} | workspace={workspace}"
-                )
+                error_msg = f"权限拒绝：无法在工作目录 '{workspace}' 之外执行写入操作。当前路径: '{path}'"
+                logger.warning(f"[PermissionChecker] 写入权限检查失败 | path={path} | workspace={workspace}")
                 return False, error_msg
 
             # 4. 检查是否需要检查点
             if write_perm.require_checkpoint:
-                logger.info(
-                    f"[PermissionChecker] 写入操作需要创建检查点 | "
-                    f"path={path} | workspace={workspace}"
-                )
+                logger.info(f"[PermissionChecker] 写入操作需要创建检查点 | path={path} | workspace={workspace}")
 
             # 5. 检查允许的操作类型
             if write_perm.allowed_operations and operation not in write_perm.allowed_operations:
@@ -242,9 +231,7 @@ def check_write_permission(
 
         policy_obj = WorkspacePermissionPolicy(
             name=policy.get("name", "custom"),
-            policy_type=PermissionPolicyType(
-                policy.get("policy_type", "default")
-            ),
+            policy_type=PermissionPolicyType(policy.get("policy_type", "default")),
             read=ReadPermission(
                 scope=PermissionScope(read_config.get("scope", "project")),
                 allow_all=read_config.get("allow_all", True),

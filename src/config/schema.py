@@ -166,15 +166,11 @@ class ConfigSchemaValidator:
         if "agent_type" in data:
             agent_type = data["agent_type"]
             if isinstance(agent_type, str) and agent_type not in _VALID_AGENT_TYPES:
-                errors.append(
-                    f"agent_type 值 {agent_type!r} 不合法，应为 {sorted(_VALID_AGENT_TYPES)}"
-                )
+                errors.append(f"agent_type 值 {agent_type!r} 不合法，应为 {sorted(_VALID_AGENT_TYPES)}")
 
         return errors
 
-    def validate_yaml_file(
-        self, path: str | Path, config_type: str = "auto"
-    ) -> list[str]:
+    def validate_yaml_file(self, path: str | Path, config_type: str = "auto") -> list[str]:
         """校验单个 YAML 配置文件。
 
         先检查 YAML 语法正确性，再根据配置类型进行字段校验。
@@ -222,9 +218,7 @@ class ConfigSchemaValidator:
 
         return errors
 
-    def validate_directory(
-        self, dir_path: str | Path, config_type: str = "auto"
-    ) -> dict[str, list[str]]:
+    def validate_directory(self, dir_path: str | Path, config_type: str = "auto") -> dict[str, list[str]]:
         """批量校验目录下的所有 YAML 配置文件。
 
         Args:

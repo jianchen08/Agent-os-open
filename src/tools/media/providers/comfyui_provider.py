@@ -69,12 +69,8 @@ class ComfyUIProvider(MediaProvider):
         cfg = config.config
         self._api_url: str = cfg.get("api_url", DEFAULT_API_URL)
         self._output_dir: Path = Path(cfg.get("output_dir", "./output/images"))
-        self._workflow_dir: Path | None = (
-            Path(cfg["workflow_dir"]) if "workflow_dir" in cfg else None
-        )
-        self._default_checkpoint: str = cfg.get(
-            "default_checkpoint", DEFAULT_CHECKPOINT
-        )
+        self._workflow_dir: Path | None = Path(cfg["workflow_dir"]) if "workflow_dir" in cfg else None
+        self._default_checkpoint: str = cfg.get("default_checkpoint", DEFAULT_CHECKPOINT)
 
     @property
     def api_url(self) -> str:
@@ -90,10 +86,13 @@ class ComfyUIProvider(MediaProvider):
             True 表示 API 可连接，False 表示不可连接
         """
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                f"{self._api_url}/system_stats",
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    f"{self._api_url}/system_stats",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp,
+            ):
                 return resp.status == 200
         except Exception:
             logger.debug("[ComfyUI] API 连接失败: %s", self._api_url)
@@ -197,9 +196,7 @@ class ComfyUIProvider(MediaProvider):
             "checkpoint": self._default_checkpoint,
         }
 
-    def _load_and_render_template(
-        self, template_name: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _load_and_render_template(self, template_name: str, params: dict[str, Any]) -> dict[str, Any]:
         """加载并渲染工作流模板。
 
         Args:
@@ -244,9 +241,7 @@ class ComfyUIProvider(MediaProvider):
                 logger.debug("[ComfyUI] 加载模板: %s", template_path)
                 return content
 
-        raise FileNotFoundError(
-            f"工作流模板不存在: {template_name}（搜索路径: {search_paths}）"
-        )
+        raise FileNotFoundError(f"工作流模板不存在: {template_name}（搜索路径: {search_paths}）")
 
     def _render_template(self, template_str: str, params: dict[str, Any]) -> str:
         """渲染模板，替换占位符。
@@ -286,16 +281,17 @@ class ComfyUIProvider(MediaProvider):
             RuntimeError: 提交失败
         """
         payload = {"prompt": workflow}
-        async with aiohttp.ClientSession() as session, session.post(
-            f"{self._api_url}/prompt",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                f"{self._api_url}/prompt",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp,
+        ):
             if resp.status != 200:
                 error_text = await resp.text()
-                raise RuntimeError(
-                    f"ComfyUI 提交工作流失败 (status={resp.status}): {error_text}"
-                )
+                raise RuntimeError(f"ComfyUI 提交工作流失败 (status={resp.status}): {error_text}")
             result = await resp.json()
             prompt_id: str = result.get("prompt_id", "")
             if not prompt_id:
@@ -322,13 +318,9 @@ class ComfyUIProvider(MediaProvider):
             while True:
                 elapsed = time.time() - start_time
                 if elapsed > POLL_TIMEOUT:
-                    raise TimeoutError(
-                        f"ComfyUI generation timed out after {POLL_TIMEOUT} seconds"
-                    )
+                    raise TimeoutError(f"ComfyUI generation timed out after {POLL_TIMEOUT} seconds")
 
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         history: dict[str, Any] = await resp.json()
                         # 检查是否有该 prompt_id 的记录
@@ -337,21 +329,15 @@ class ComfyUIProvider(MediaProvider):
                         if prompt_history:
                             # 检查是否完成
                             status = prompt_history.get("status", {})
-                            if status.get("completed", False) or status.get(
-                                "status_str", ""
-                            ) in ("success", "error"):
+                            if status.get("completed", False) or status.get("status_str", "") in ("success", "error"):
                                 if status.get("status_str") == "error":
                                     error_msg = status.get("messages", "Unknown error")
-                                    raise RuntimeError(
-                                        f"ComfyUI 工作流执行失败: {error_msg}"
-                                    )
+                                    raise RuntimeError(f"ComfyUI 工作流执行失败: {error_msg}")
                                 return prompt_history
 
                 await asyncio.sleep(POLL_INTERVAL)
 
-    def _extract_output_images(
-        self, history: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _extract_output_images(self, history: dict[str, Any]) -> list[dict[str, Any]]:
         """从工作流历史中提取输出图片信息。
 
         Args:
@@ -393,15 +379,16 @@ class ComfyUIProvider(MediaProvider):
         if subfolder:
             params["subfolder"] = subfolder
 
-        async with aiohttp.ClientSession() as session, session.get(
-            f"{self._api_url}/view",
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
+                f"{self._api_url}/view",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp,
+        ):
             if resp.status != 200:
-                raise RuntimeError(
-                    f"下载图片失败 (status={resp.status}): {filename}"
-                )
+                raise RuntimeError(f"下载图片失败 (status={resp.status}): {filename}")
             content = await resp.read()
 
         # 保存到本地

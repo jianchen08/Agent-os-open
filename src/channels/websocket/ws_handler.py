@@ -87,9 +87,7 @@ class WebSocketInteractionNotifier:
             "type": "interaction_request",
             "data": {
                 "request_id": request_id,
-                "interaction_mode": msg_data.get(
-                    "interaction_mode", "choice"
-                ),
+                "interaction_mode": msg_data.get("interaction_mode", "choice"),
                 "title": msg_data.get("title", ""),
                 "description": msg_data.get("description", ""),
                 "options": msg_data.get("options"),
@@ -126,20 +124,20 @@ class WebSocketInteractionNotifier:
 
         if sent:
             logger.info(
-                "[WSNotifier] 交互请求已发送 | request_id=%s user=%s", request_id,
+                "[WSNotifier] 交互请求已发送 | request_id=%s user=%s",
+                request_id,
                 (target_uid or "broadcast")[:12],
             )
         else:
             logger.info(
                 "[WSNotifier] 无前端连接，将在 %.0fs 后自动确认 | request_id=%s",
-                self._auto_confirm_delay, request_id,
+                self._auto_confirm_delay,
+                request_id,
             )
 
         # 启动自动确认回退任务：如果前端未响应，自动批准
         if self._service:
-            task = asyncio.create_task(
-                self._auto_confirm_fallback(request_id, msg_data)
-            )
+            task = asyncio.create_task(self._auto_confirm_fallback(request_id, msg_data))
             self._fallback_tasks.add(task)
             self._fallback_request_map[request_id] = task
             task.add_done_callback(
@@ -169,6 +167,7 @@ class WebSocketInteractionNotifier:
             # 补充: 从 registry 恢复 _thread_user_map 里没有的活跃 pipeline
             try:
                 from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
                 _reg = get_engine_registry()
                 for _pid, _entry in list(_reg.all_entries().items()):
                     if _entry.thread_id and _entry.thread_id not in resumed_tids:
@@ -198,7 +197,8 @@ class WebSocketInteractionNotifier:
         if main_loop is not None and not main_loop.is_closed():
             with contextlib.suppress(Exception):
                 asyncio.run_coroutine_threadsafe(
-                    websocket.close(code=code, reason=reason), main_loop,
+                    websocket.close(code=code, reason=reason),
+                    main_loop,
                 )
             return
 
@@ -215,6 +215,7 @@ class WebSocketInteractionNotifier:
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
             from pipeline.stream_bridge import TargetedSink, create_targeted_sink  # noqa: F401,PLC0415
+
             registry = get_engine_registry()
         except Exception:
             return
@@ -222,16 +223,16 @@ class WebSocketInteractionNotifier:
         # 遍历所有注册表条目，查找与该 thread_id 关联的活跃 pipeline。
         # 匹配来源：entry.thread_id 优先，为空时用 tags["session_id"] 兜底
         for pipeline_id, entry in list(registry._engines.items()):
-            _matched_tid = entry.thread_id if entry.thread_id else (
-                (entry.tags or {}).get("session_id", "") if entry.tags else ""
+            _matched_tid = (
+                entry.thread_id if entry.thread_id else ((entry.tags or {}).get("session_id", "") if entry.tags else "")
             )
             if _matched_tid != thread_id:
                 continue
             if entry.engine is None:
                 continue
             # 检查引擎是否仍在运行或挂起中
-            _engine_running = getattr(entry.engine, 'is_running', False)
-            _engine_suspended = getattr(entry.engine, 'is_suspended', False)
+            _engine_running = getattr(entry.engine, "is_running", False)
+            _engine_suspended = getattr(entry.engine, "is_suspended", False)
             if not _engine_running and not _engine_suspended:
                 continue
 
@@ -244,14 +245,17 @@ class WebSocketInteractionNotifier:
                     entry.thread_id = thread_id
                 _sink_user_id = (entry.tags or {}).get("user_id", "")
                 _new_sink = create_targeted_sink(
-                    self, thread_id, pipeline_id=pipeline_id, user_id=_sink_user_id,
+                    self,
+                    thread_id,
+                    pipeline_id=pipeline_id,
+                    user_id=_sink_user_id,
                 )
                 if _new_sink is not None:
                     entry.bridge.output_sink = _new_sink
                     logger.info(
-                        "[WS-Reconnect] 已恢复 pipeline 输出: pipeline=%s thread=%s "
-                        "(重建 sink)",
-                        pipeline_id[:12], thread_id[:12],
+                        "[WS-Reconnect] 已恢复 pipeline 输出: pipeline=%s thread=%s (重建 sink)",
+                        pipeline_id[:12],
+                        thread_id[:12],
                     )
                 # Phase 1: drain_loop 已删除，engine 主动 emit 推送。
                 # sink 已替换，无需重启 drain。
@@ -286,9 +290,7 @@ class WebSocketInteractionNotifier:
         """获取指定用户的全局 WebSocket 连接。"""
         return self._global_connections.get(user_id)
 
-    async def _auto_confirm_fallback(
-        self, request_id: str, msg_data: dict
-    ) -> None:
+    async def _auto_confirm_fallback(self, request_id: str, msg_data: dict) -> None:
         """延迟后检查请求是否仍待处理，若是则自动确认。"""
         await asyncio.sleep(self._auto_confirm_delay)
         if not self._service:
@@ -317,7 +319,8 @@ class WebSocketInteractionNotifier:
         if task and not task.done():
             task.cancel()
             logger.debug(
-                "[WSNotifier] 已取消自动确认回退 | request_id=%s", request_id,
+                "[WSNotifier] 已取消自动确认回退 | request_id=%s",
+                request_id,
             )
 
     async def send_to_thread(self, thread_id: str, event_data: dict) -> bool:
@@ -358,37 +361,40 @@ class WebSocketInteractionNotifier:
         )
         return False
 
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
         """通知前端交互请求已取消。"""
-        return await self.send_to_thread(thread_id, {
-            "type": "interaction_cancelled",
-            "data": {"request_id": request_id, "reason": reason},
-        })
+        return await self.send_to_thread(
+            thread_id,
+            {
+                "type": "interaction_cancelled",
+                "data": {"request_id": request_id, "reason": reason},
+            },
+        )
 
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
         """通知前端交互请求已超时。"""
-        return await self.send_to_thread(thread_id, {
-            "type": "interaction_timeout",
-            "data": {"request_id": request_id},
-        })
-
-    async def notify_timeout_reminder(
-        self, request_id, remaining_seconds, thread_id="", **kw
-    ) -> bool:
-        """通知前端交互请求即将超时。"""
-        return await self.send_to_thread(thread_id, {
-            "type": "interaction_timeout_reminder",
-            "data": {
-                "request_id": request_id,
-                "remaining_seconds": remaining_seconds,
+        return await self.send_to_thread(
+            thread_id,
+            {
+                "type": "interaction_timeout",
+                "data": {"request_id": request_id},
             },
-        })
+        )
 
-    async def notify_conversation_start(
-        self, thread_id, tab_id, title, **kw
-    ) -> bool:
+    async def notify_timeout_reminder(self, request_id, remaining_seconds, thread_id="", **kw) -> bool:
+        """通知前端交互请求即将超时。"""
+        return await self.send_to_thread(
+            thread_id,
+            {
+                "type": "interaction_timeout_reminder",
+                "data": {
+                    "request_id": request_id,
+                    "remaining_seconds": remaining_seconds,
+                },
+            },
+        )
+
+    async def notify_conversation_start(self, thread_id, tab_id, title, **kw) -> bool:
         return True
 
 

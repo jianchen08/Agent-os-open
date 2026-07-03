@@ -272,19 +272,13 @@ class SearchResultProcessor:
             }
 
             query_params = parse_qs(parsed.query)
-            filtered_params = {
-                k: v
-                for k, v in query_params.items()
-                if k.lower() not in tracking_params
-            }
+            filtered_params = {k: v for k, v in query_params.items() if k.lower() not in tracking_params}
 
             # 重建 URL
             normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".lower().rstrip("/")
 
             if filtered_params:
-                param_str = "&".join(
-                    f"{k}={v[0]}" for k, v in sorted(filtered_params.items())
-                )
+                param_str = "&".join(f"{k}={v[0]}" for k, v in sorted(filtered_params.items()))
                 normalized += f"?{param_str}"
 
             return normalized
@@ -330,15 +324,11 @@ class SearchResultProcessor:
         title_sim = SequenceMatcher(None, a.title.lower(), b.title.lower()).ratio()
 
         # 摘要相似度（权重 0.6）
-        snippet_sim = SequenceMatcher(
-            None, a.snippet.lower(), b.snippet.lower()
-        ).ratio()
+        snippet_sim = SequenceMatcher(None, a.snippet.lower(), b.snippet.lower()).ratio()
 
         return title_sim * 0.4 + snippet_sim * 0.6
 
-    def _rank_results(
-        self, results: list[SearchResult], query: str
-    ) -> list[SearchResult]:
+    def _rank_results(self, results: list[SearchResult], query: str) -> list[SearchResult]:
         """
         对结果进行排序
 
@@ -352,8 +342,7 @@ class SearchResultProcessor:
             quality_score = self._calculate_quality(result)
 
             result.score = (
-                relevance_score * self.config.query_relevance_weight
-                + quality_score * self.config.quality_weight
+                relevance_score * self.config.query_relevance_weight + quality_score * self.config.quality_weight
             )
 
         # 按分数降序排序
@@ -386,12 +375,8 @@ class SearchResultProcessor:
         title_words = set(title_lower.split())
         snippet_words = set(snippet_lower.split())
 
-        title_match = (
-            len(query_words & title_words) / len(query_words) if query_words else 0
-        )
-        snippet_match = (
-            len(query_words & snippet_words) / len(query_words) if query_words else 0
-        )
+        title_match = len(query_words & title_words) / len(query_words) if query_words else 0
+        snippet_match = len(query_words & snippet_words) / len(query_words) if query_words else 0
 
         score += title_match * 0.25
         score += snippet_match * 0.15
@@ -538,9 +523,7 @@ class SearchResultFilter:
         self._filters.append(filter_func)
         return self
 
-    def add_length_filter(
-        self, min_length: int = 20, max_length: int = 1000
-    ) -> "SearchResultFilter":
+    def add_length_filter(self, min_length: int = 20, max_length: int = 1000) -> "SearchResultFilter":
         """添加长度过滤"""
 
         def filter_func(result: dict[str, Any]) -> bool:
@@ -550,9 +533,7 @@ class SearchResultFilter:
         self._filters.append(filter_func)
         return self
 
-    def add_custom_filter(
-        self, filter_func: Callable[[dict[str, Any]], bool]
-    ) -> "SearchResultFilter":
+    def add_custom_filter(self, filter_func: Callable[[dict[str, Any]], bool]) -> "SearchResultFilter":
         """添加自定义过滤器"""
         self._filters.append(filter_func)
         return self

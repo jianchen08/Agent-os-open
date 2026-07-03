@@ -258,10 +258,12 @@ async def get_media_metadata(
             media_type = file_info.get("media_type", "")
 
         if not file_path or not os.path.isfile(file_path):  # noqa: PTH113
-            metadata_list.append({
-                "file_path": file_path,
-                "error": "文件不存在或路径无效",
-            })
+            metadata_list.append(
+                {
+                    "file_path": file_path,
+                    "error": "文件不存在或路径无效",
+                }
+            )
             continue
 
         try:
@@ -272,10 +274,12 @@ async def get_media_metadata(
             meta = media_svc.get_media_metadata(file_path, media_type)
             metadata_list.append(meta)
         except (ValueError, FileNotFoundError) as exc:
-            metadata_list.append({
-                "file_path": file_path,
-                "error": str(exc),
-            })
+            metadata_list.append(
+                {
+                    "file_path": file_path,
+                    "error": str(exc),
+                }
+            )
 
     return {
         "review_id": review_id,
@@ -340,10 +344,12 @@ async def add_attachments(
 
                 media_type = _infer_media_type(file_path)
             except ValueError:
-                added.append({
-                    "file_path": file_path,
-                    "error": "无法推断媒体类型",
-                })
+                added.append(
+                    {
+                        "file_path": file_path,
+                        "error": "无法推断媒体类型",
+                    }
+                )
                 continue
 
         entry = {"path": file_path, "media_type": media_type}
@@ -365,10 +371,12 @@ async def add_attachments(
                 review_result_dict = {"error": str(exc)}
                 review_results[file_path] = review_result_dict
 
-        added.append({
-            **entry,
-            "review_result": review_result_dict,
-        })
+        added.append(
+            {
+                **entry,
+                "review_result": review_result_dict,
+            }
+        )
 
     # 更新审批的 metadata
     review.metadata["media_files"] = media_files

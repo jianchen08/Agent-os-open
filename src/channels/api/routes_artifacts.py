@@ -141,7 +141,10 @@ async def upload_file(
 
     logger.info(
         "[upload] 文件上传成功 | file_id=%s filename=%s media_type=%s size=%d",
-        file_id, file.filename, media_type, len(content),
+        file_id,
+        file.filename,
+        media_type,
+        len(content),
     )
 
     return {

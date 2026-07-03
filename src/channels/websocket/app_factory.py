@@ -19,6 +19,7 @@ from typing import Any
 # 必须在所有其他导入之前完成，确保后续模块能正确读取环境变量
 try:
     from dotenv import load_dotenv
+
     _env_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")  # noqa: PTH120
     if os.path.exists(_env_path):  # noqa: PTH110
         load_dotenv(_env_path, override=False)
@@ -60,6 +61,7 @@ def _get_call_timeout() -> float:
     """获取管道调用超时时间（秒）。"""
     try:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         _sp = get_service_provider()
         _timeout = _sp.get("call_timeout") if _sp else None
         if _timeout:
@@ -86,7 +88,8 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         global _task_worker_started  # noqa: PLW0603
         logger.info(
             "[Lifespan] 应用启动开始 | pid=%d | loop_id=%s",
-            os.getpid(), id(asyncio.get_running_loop()),
+            os.getpid(),
+            id(asyncio.get_running_loop()),
         )
         if not _task_worker_started:
             tw = getattr(stream_handler, "_task_worker", None)
@@ -105,6 +108,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         # 会话系统启动恢复：从 api_store 注册所有会话管道（含 agent_id）
         try:
             from channels.api.routes_threads import restore_session_pipelines  # noqa: PLC0415
+
             _session_count = restore_session_pipelines()
             if _session_count:
                 logger.info("[Lifespan] 会话管道恢复: 已注册 %d 个主管道", _session_count)
@@ -115,6 +119,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
 
         try:
             from triggers.manager import get_trigger_manager  # noqa: PLC0415
+
             main_loop = asyncio.get_running_loop()
             get_trigger_manager().set_main_loop(main_loop)
             asyncio._main_loop_ref = main_loop
@@ -126,6 +131,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         _config_center_started = False
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             center = get_config_center()
             # create_task 调度 start()，但非阻塞——需等待 start() 内部
             # _running 置位完成，否则下游 PluginHotReloader 检测 is_running
@@ -137,9 +143,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
             if _config_center_started:
                 logger.info("[Lifespan] ConfigCenter 文件监听已启动")
             else:
-                logger.warning(
-                    "[Lifespan] ConfigCenter 启动超时或失败（热重载将不可用）"
-                )
+                logger.warning("[Lifespan] ConfigCenter 启动超时或失败（热重载将不可用）")
         except Exception as exc:
             logger.warning("[Lifespan] ConfigCenter 启动失败（热重载将不可用）: %s", exc, exc_info=True)
 
@@ -175,13 +179,15 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
             # 停止 ConfigCenter 文件监听
             try:
                 from config.config_center import get_config_center  # noqa: PLC0415
+
                 get_config_center().stop()
                 logger.info("[Lifespan] ConfigCenter 已停止")
             except Exception:
                 pass
             logger.info(
                 "[Lifespan] 应用关闭 | pid=%d | loop_id=%s",
-                os.getpid(), id(asyncio.get_running_loop()),
+                os.getpid(),
+                id(asyncio.get_running_loop()),
             )
 
     app = create_app(lifespan=_combined_lifespan)
@@ -224,11 +230,15 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         ws_interaction_notifier.register_global(user_id, websocket)
 
         try:
-            await websocket.send_text(json.dumps({
-                "type": "connection_confirmation",
-                "data": {"status": "connected", "mode": "global", "user_id": user_id},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }))
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "connection_confirmation",
+                        "data": {"status": "connected", "mode": "global", "user_id": user_id},
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
         except WebSocketDisconnect:
             logger.info("[GlobalWS] 客户端在握手确认前已断开: user=%s", user_id[:12])
             ws_interaction_notifier.unregister_global(user_id, websocket)
@@ -236,7 +246,8 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
         except Exception as exc:
             logger.error(
                 "[GlobalWS] 发送 connection_confirmation 失败: user=%s err=%s",
-                user_id[:12], exc,
+                user_id[:12],
+                exc,
             )
             ws_interaction_notifier.unregister_global(user_id, websocket)
             return
@@ -252,21 +263,34 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                 msg_type = msg_data.get("type", "")
                 # heartbeat 高频轮询，不记日志
                 if msg_type != "heartbeat":
-                    logger.info("[GlobalWS] 收到消息: type=%s thread_id=%s user=%s", msg_type, msg_data.get("thread_id", "")[:12], user_id[:12])
+                    logger.info(
+                        "[GlobalWS] 收到消息: type=%s thread_id=%s user=%s",
+                        msg_type,
+                        msg_data.get("thread_id", "")[:12],
+                        user_id[:12],
+                    )
 
                 if msg_type == "heartbeat":
-                    await websocket.send_text(json.dumps({
-                        "type": "heartbeat_ack",
-                        "data": {"server_time": datetime.now(timezone.utc).isoformat()},
-                    }))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "heartbeat_ack",
+                                "data": {"server_time": datetime.now(timezone.utc).isoformat()},
+                            }
+                        )
+                    )
                     continue
 
                 thread_id = msg_data.get("thread_id", "")
                 if not thread_id:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "data": {"message": f"消息缺少 thread_id: type={msg_type}"},
-                    }))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "data": {"message": f"消息缺少 thread_id: type={msg_type}"},
+                            }
+                        )
+                    )
                     continue
 
                 # 绑定链路追踪上下文，使后续日志可关联到当前会话
@@ -312,7 +336,8 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     if not _target_pid:
                         logger.error(
                             "user_input 缺少 pipeline_id，拒绝路由: thread_id=%s content=%.30s",
-                            thread_id, _pipeline_msg.content[:30],
+                            thread_id,
+                            _pipeline_msg.content[:30],
                         )
                         continue
 
@@ -321,13 +346,20 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     # - 主管道：会话映射 thread["agent_id"]（注册时写入 tags，重建时从会话读）
                     # - 子任务管道：任务数据 task.metadata["target_id"]
                     # 引擎 idle 重启用引擎自带 _agent_config；revive 从持久化数据重建。
-                    _sink = create_targeted_sink(
-                        ws_interaction_notifier, thread_id, user_id=user_id,
-                    ) if _pipeline_ctx and _pipeline_ctx.available else None
+                    _sink = (
+                        create_targeted_sink(
+                            ws_interaction_notifier,
+                            thread_id,
+                            user_id=user_id,
+                        )
+                        if _pipeline_ctx and _pipeline_ctx.available
+                        else None
+                    )
 
                     _history = conversation_histories.get(thread_id, [])
 
                     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
                     _registry = get_engine_registry()
 
                     if _target_pid and thread_id:
@@ -366,10 +398,19 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     if _result.success:
                         continue
 
-                    await websocket.send_text(json.dumps({
-                        "type": "stream_error",
-                        "data": {"message_id": _msg_id, "error": _result.error or "管道不可用", "pipeline_id": _target_pid},
-                    }, ensure_ascii=False))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "stream_error",
+                                "data": {
+                                    "message_id": _msg_id,
+                                    "error": _result.error or "管道不可用",
+                                    "pipeline_id": _target_pid,
+                                },
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
                     continue
                 if msg_type == "interaction_response":
                     try:
@@ -381,24 +422,29 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     request_id = resp_data.get("request_id", "")
                     logger.info(
                         "[GlobalWS] 收到 interaction_response | request_id=%s | data_keys=%s",
-                        request_id, list(resp_data.keys()) if isinstance(resp_data, dict) else "non-dict",
+                        request_id,
+                        list(resp_data.keys()) if isinstance(resp_data, dict) else "non-dict",
                     )
                     if request_id:
                         try:
                             from human_interaction import get_human_interaction_service  # noqa: PLC0415
+
                             human_svc = get_human_interaction_service()
                             if human_svc:
                                 respond_result = await human_svc.respond(request_id, resp_data)
                                 logger.info(
                                     "[GlobalWS] human_svc.respond 返回 | request_id=%s | result=%s",
-                                    request_id, respond_result,
+                                    request_id,
+                                    respond_result,
                                 )
                                 request_record = await human_svc.get_request(request_id)
                                 if request_record:
                                     pipeline_id = request_record.get("session_id", "")
                                     logger.info(
                                         "[GlobalWS] 交互请求记录 | request_id=%s | session_id=%s | status=%s",
-                                        request_id, pipeline_id, request_record.get("status"),
+                                        request_id,
+                                        pipeline_id,
+                                        request_record.get("status"),
                                     )
                                     # human_interaction 工具为阻塞执行：工具内部 wait_for_choice()
                                     # 由 respond() → submit_response() → _set_event_threadsafe() 直接唤醒，
@@ -411,7 +457,8 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                                         logger.info(
                                             "[GlobalWS] 评估交互响应已处理（纯Event，无管道唤醒） | "
                                             "request_id=%s | session_id=%s",
-                                            request_id, pipeline_id,
+                                            request_id,
+                                            pipeline_id,
                                         )
                                 else:
                                     logger.warning(
@@ -471,20 +518,33 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                                             _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
                                             if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
                                                 try:
-                                                    await _task_svc.fail_task(_active_tid, reason=f"用户取消: {_stop_msg.metadata.get('reason', 'stop_generation')}")
+                                                    await _task_svc.fail_task(
+                                                        _active_tid,
+                                                        reason=f"用户取消: {_stop_msg.metadata.get('reason', 'stop_generation')}",
+                                                    )
                                                 except Exception as _ft_err:
-                                                    logger.warning("[GlobalWS] fail_task 失败(仍将继续取消): task=%s, err=%s", _active_tid[:12], _ft_err)
+                                                    logger.warning(
+                                                        "[GlobalWS] fail_task 失败(仍将继续取消): task=%s, err=%s",
+                                                        _active_tid[:12],
+                                                        _ft_err,
+                                                    )
                                                 tw.cancel_pipeline(_active_tid)
-                                                logger.info("[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12])
+                                                logger.info(
+                                                    "[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12]
+                                                )
                                     except Exception:
                                         pass
                     except Exception as _tw_err:
                         logger.warning("[GlobalWS] 取消 TaskWorker 任务时出错: %s", _tw_err)
 
-                    await websocket.send_text(json.dumps({
-                        "type": "state_change",
-                        "data": {"status": "stopped", "thread_id": thread_id},
-                    }))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "state_change",
+                                "data": {"status": "stopped", "thread_id": thread_id},
+                            }
+                        )
+                    )
 
         except WebSocketDisconnect:
             logger.info("[GlobalWS] 用户断开连接: user=%s", user_id[:12])
@@ -492,10 +552,7 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
             logger.error("[GlobalWS] 消息循环异常: user=%s err=%s", user_id[:12], exc)
         finally:
             # 在清理前先反查该 user 名下的 thread（供 conversation_histories 清理）
-            removed_tids = [
-                tid for tid, uid in ws_interaction_notifier._thread_user_map.items()
-                if uid == user_id
-            ]
+            removed_tids = [tid for tid, uid in ws_interaction_notifier._thread_user_map.items() if uid == user_id]
             ws_interaction_notifier.unregister_global(user_id, websocket)
             ws_interaction_notifier.unregister_all_for_ws(websocket)
             for tid in removed_tids:
@@ -536,7 +593,9 @@ def main() -> None:
 
     if actual_port != preferred_port:
         logger.warning(
-            "端口 %d 已被占用，自动切换到 %d", preferred_port, actual_port,
+            "端口 %d 已被占用，自动切换到 %d",
+            preferred_port,
+            actual_port,
         )
 
     logger.info("正在启动 Agent OS 服务器...")

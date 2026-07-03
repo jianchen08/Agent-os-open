@@ -147,13 +147,12 @@ class EpisodeService:
         """
         if self._storage:
             all_episodes = await self._storage.find_by_user(
-                user_id, limit=page_size * page + page_size, offset=0,
+                user_id,
+                limit=page_size * page + page_size,
+                offset=0,
             )
         else:
-            all_episodes = [
-                ep for ep in self._in_memory.values()
-                if ep.user_id == user_id
-            ]
+            all_episodes = [ep for ep in self._in_memory.values() if ep.user_id == user_id]
             all_episodes.sort(key=lambda x: x.created_at, reverse=True)
 
         total = len(all_episodes)

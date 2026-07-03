@@ -31,10 +31,7 @@ try:
     _SQLALCHEMY_AVAILABLE = True
 except ImportError:
     _SQLALCHEMY_AVAILABLE = False
-    logger.warning(
-        "SQLAlchemy 不可用，PostgreSQL 功能已禁用。"
-        "安装方法: pip install sqlalchemy psycopg2-binary"
-    )
+    logger.warning("SQLAlchemy 不可用，PostgreSQL 功能已禁用。安装方法: pip install sqlalchemy psycopg2-binary")
 
 
 def _get_database_url() -> str | None:
@@ -112,7 +109,9 @@ async def get_async_session() -> Any | None:
 
     try:
         async_session_factory = sessionmaker(
-            engine, class_=AsyncSession, expire_on_commit=False,
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
         session = async_session_factory()
         return session
@@ -139,7 +138,8 @@ async def init_db() -> bool:
 
         async with engine.begin() as conn:
             # 创建情景记忆表
-            await conn.execute(text("""
+            await conn.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS episodes_memory (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(64) NOT NULL,
@@ -153,10 +153,12 @@ async def init_db() -> bool:
                     tags JSONB DEFAULT '[]',
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
-            """))
+            """)
+            )
 
             # 创建语义记忆表
-            await conn.execute(text("""
+            await conn.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS semantic_memory (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(64) NOT NULL,
@@ -167,7 +169,8 @@ async def init_db() -> bool:
                     memory_metadata JSONB DEFAULT '{}',
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
-            """))
+            """)
+            )
 
         logger.info("PostgreSQL 数据库表初始化完成")
         return True

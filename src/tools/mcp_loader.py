@@ -221,9 +221,7 @@ class MCPToolLoader:
 
         return all_tools
 
-    def _resolve_args_paths(
-        self, config: MCPServerConfig, base_dir: Path
-    ) -> MCPServerConfig:
+    def _resolve_args_paths(self, config: MCPServerConfig, base_dir: Path) -> MCPServerConfig:
         """
         将配置中相对路径的 args 转换为相对于 base_dir 的绝对路径
 
@@ -232,10 +230,7 @@ class MCPToolLoader:
         resolved_args = []
         for arg in config.args:
             arg_path = Path(arg)
-            if (
-                arg_path.suffix in (".js", ".ts", ".py", ".mjs")
-                and not arg_path.is_absolute()
-            ):
+            if arg_path.suffix in (".js", ".ts", ".py", ".mjs") and not arg_path.is_absolute():
                 absolute_path = (base_dir / config.name / arg).resolve()
                 if absolute_path.exists():
                     resolved_args.append(str(absolute_path))
@@ -320,43 +315,28 @@ class MCPToolLoader:
 
         # 文件操作
         file_keywords = ["file", "read", "write", "edit", "create", "delete", "save"]
-        if any(
-            keyword in name_lower or keyword in desc_lower for keyword in file_keywords
-        ):
+        if any(keyword in name_lower or keyword in desc_lower for keyword in file_keywords):
             return "file"
 
         # 搜索
-        if any(
-            keyword in name_lower or keyword in desc_lower
-            for keyword in ["search", "find", "lookup", "query"]
-        ):
+        if any(keyword in name_lower or keyword in desc_lower for keyword in ["search", "find", "lookup", "query"]):
             return "search"
 
         # Web 操作
-        if any(
-            keyword in name_lower or keyword in desc_lower
-            for keyword in ["web", "http", "url", "fetch", "browse"]
-        ):
+        if any(keyword in name_lower or keyword in desc_lower for keyword in ["web", "http", "url", "fetch", "browse"]):
             return "web"
 
         # 记忆
-        if any(
-            keyword in name_lower or keyword in desc_lower
-            for keyword in ["memory", "remember", "recall", "store"]
-        ):
+        if any(keyword in name_lower or keyword in desc_lower for keyword in ["memory", "remember", "recall", "store"]):
             return "memory"
 
         # 任务
-        if any(
-            keyword in name_lower or keyword in desc_lower
-            for keyword in ["task", "execute", "run", "complete"]
-        ):
+        if any(keyword in name_lower or keyword in desc_lower for keyword in ["task", "execute", "run", "complete"]):
             return "task"
 
         # 分析
         if any(
-            keyword in name_lower or keyword in desc_lower
-            for keyword in ["analyze", "evaluate", "assess", "check"]
+            keyword in name_lower or keyword in desc_lower for keyword in ["analyze", "evaluate", "assess", "check"]
         ):
             return "analysis"
 
@@ -381,7 +361,7 @@ class MCPToolLoader:
                     for line in process.stderr:
                         if not line:
                             break
-                        text = line.decode('utf-8', errors='replace').strip()
+                        text = line.decode("utf-8", errors="replace").strip()
                         if text:
                             logger.debug("[MCP:%s stderr] %s", server_name, text)  # noqa: F821
                 except Exception:
@@ -400,7 +380,7 @@ class MCPToolLoader:
                         line = await process.stderr.readline()
                         if not line:
                             break
-                        text = line.decode('utf-8', errors='replace').strip()
+                        text = line.decode("utf-8", errors="replace").strip()
                         if text:
                             logger.debug("[MCP:%s stderr] %s", server_name, text)  # noqa: F821
                 except Exception:
@@ -429,9 +409,7 @@ class MCPToolLoader:
             cached_client = self._connections[config.name]
             if cached_client.is_alive():
                 return cached_client
-            logger.warning(
-                "MCP 子进程已退出，清理并重连 | server=%s", config.name
-            )
+            logger.warning("MCP 子进程已退出，清理并重连 | server=%s", config.name)
             with contextlib.suppress(Exception):
                 await cached_client.close()
             del self._connections[config.name]
@@ -504,9 +482,7 @@ class MCPToolLoader:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2)
                 else:
-                    logger.error(
-                        "连接 MCP 服务器最终失败 %s: %s", config.name, e
-                    )
+                    logger.error("连接 MCP 服务器最终失败 %s: %s", config.name, e)
                     raise MCPConnectionError(
                         message=f"连接 MCP 服务器 '{config.name}' 失败（重试 {max_retries} 次后）",
                         details={"server": config.name, "error": str(e)},
@@ -516,10 +492,7 @@ class MCPToolLoader:
 
     def get_server_status(self) -> dict[str, str]:
         """获取所有服务器状态"""
-        return {
-            name: "connected" if client else "disconnected"
-            for name, client in self._connections.items()
-        }
+        return {name: "connected" if client else "disconnected" for name, client in self._connections.items()}
 
     async def call_tool(
         self,
@@ -570,9 +543,7 @@ class MCPToolLoader:
 
         if overall_timeout is not None:
             try:
-                return await asyncio.wait_for(
-                    _call_with_retry(), timeout=overall_timeout
-                )
+                return await asyncio.wait_for(_call_with_retry(), timeout=overall_timeout)
             except asyncio.TimeoutError:
                 raise MCPConnectionError(  # noqa: B904
                     message=(
@@ -600,4 +571,3 @@ class MCPToolLoader:
         server_names = list(self._connections.keys())
         for name in server_names:
             await self.disconnect_server(name)
-

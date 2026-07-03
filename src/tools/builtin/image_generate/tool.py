@@ -51,10 +51,7 @@ def _enrich_image_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     enriched.input_schema.setdefault("properties", {})
     enriched.input_schema["properties"]["provider"] = {
         "type": "string",
-        "description": (
-            f"指定使用的图像生成服务。"
-            f"当前可用: {', '.join(provider_names)}。不填则自动选择。"
-        ),
+        "description": (f"指定使用的图像生成服务。当前可用: {', '.join(provider_names)}。不填则自动选择。"),
         "enum": provider_names + ["auto"],
     }
 
@@ -204,8 +201,13 @@ class ImageGenerateTool(BuiltinTool):
             return None
 
         ext = os.path.splitext(file_path)[1].lower()  # noqa: PTH122
-        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                     ".webp": "image/webp", ".gif": "image/gif"}
+        mime_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }
         mime_type = mime_map.get(ext, "image/png")
 
         return [{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_data}"}}]
@@ -223,8 +225,7 @@ class ImageGenerateTool(BuiltinTool):
             registry = provider.get("media_provider_registry")
             if registry is None:
                 logger.warning(
-                    "[ImageGenerate] ServiceProvider 中未找到 media_provider_registry，"
-                    "可用服务: %s",
+                    "[ImageGenerate] ServiceProvider 中未找到 media_provider_registry，可用服务: %s",
                     list(provider._services.keys()),
                 )
             return registry

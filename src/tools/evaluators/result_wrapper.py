@@ -116,14 +116,10 @@ class EvaluationSummary(BaseModel):
     red_line_failed: bool = Field(default=False, description="红线指标是否失败")
 
     # 详细信息
-    results: list[EvaluationExecutionResult] = Field(
-        default_factory=list, description="详细结果列表"
-    )
+    results: list[EvaluationExecutionResult] = Field(default_factory=list, description="详细结果列表")
 
     # 时间
-    evaluated_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC), description="评估时间"
-    )
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="评估时间")
 
     def add_result(self, result: EvaluationExecutionResult) -> None:
         """添加评估结果"""

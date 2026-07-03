@@ -272,11 +272,13 @@ class BrowserManager:
             console_messages: list[dict[str, Any]] = []
 
             def console_handler(msg: Any) -> None:
-                console_messages.append({
-                    "type": msg.type,
-                    "text": msg.text,
-                    "location": msg.location,
-                })
+                console_messages.append(
+                    {
+                        "type": msg.type,
+                        "text": msg.text,
+                        "location": msg.location,
+                    }
+                )
 
             page.on("console", console_handler)
 
@@ -529,7 +531,7 @@ class BrowserManager:
             state_files.sort(key=os.path.getmtime, reverse=True)
 
             # 删除超出数量的旧文件
-            for old_file in state_files[cls.MAX_STATE_FILES:]:
+            for old_file in state_files[cls.MAX_STATE_FILES :]:
                 try:
                     os.remove(old_file)  # noqa: PTH107
                     logger.info(f"清理旧状态文件: {old_file}")

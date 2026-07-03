@@ -149,9 +149,7 @@ class SlashCommandRegistry:
         handler = self._handlers.get(resolved)
 
         if handler is None:
-            self._console.print(
-                f"[yellow]未知命令: /{cmd_name}[/yellow]  输入 [bold]/help[/bold] 查看可用命令"
-            )
+            self._console.print(f"[yellow]未知命令: /{cmd_name}[/yellow]  输入 [bold]/help[/bold] 查看可用命令")
             return CommandResult()
 
         try:
@@ -217,9 +215,7 @@ class SlashCommandRegistry:
             table.add_row(f"/{name}", alias_str, desc)
 
         self._console.print(table)
-        self._console.print(
-            "\n[dim]快捷语法: @path=文件引用  !cmd=执行命令  #text=追加记忆[/dim]"
-        )
+        self._console.print("\n[dim]快捷语法: @path=文件引用  !cmd=执行命令  #text=追加记忆[/dim]")
         return CommandResult()
 
     async def _cmd_compact(self, args: str, ctx: dict[str, Any]) -> CommandResult:
@@ -314,8 +310,7 @@ class SlashCommandRegistry:
         # 估算上下文大小
         msg_count = len(conversation_history)
         char_count = sum(
-            len(m.get("content", "")) if isinstance(m, dict) else len(str(m))
-            for m in conversation_history
+            len(m.get("content", "")) if isinstance(m, dict) else len(str(m)) for m in conversation_history
         )
 
         # 粗略估算 token 数（中文约 1.5 字/token，英文约 4 字符/token）
@@ -330,9 +325,7 @@ class SlashCommandRegistry:
 
         color = "green" if usage_pct < 50 else ("yellow" if usage_pct < 80 else "red")
 
-        self._console.print(
-            f"[cyan]上下文占用:[/cyan] [{color}]{bar}[/{color}] {usage_pct:.1f}%"
-        )
+        self._console.print(f"[cyan]上下文占用:[/cyan] [{color}]{bar}[/{color}] {usage_pct:.1f}%")
         self._console.print(
             f"  消息数: {msg_count}  |  字符数: {char_count:,}  |  "
             f"估算 Token: {estimated_tokens:,}  |  窗口: {max_context:,}"
@@ -505,15 +498,17 @@ class SlashCommandRegistry:
                 tool_count = len(tool_registry.list_tools())
 
         # 输出
-        self._console.print(Panel(
-            f"[bold]Agent:[/bold] {agent_name} (Level: {agent_level})\n"
-            f"[bold]模式:[/bold] {mode}  |  [bold]轮次:[/bold] {turn_count}  |  "
-            f"[bold]历史消息:[/bold] {len(conversation_history)}\n"
-            f"[bold]工具数:[/bold] {tool_count}\n"
-            "\n[bold]服务状态:[/bold]",
-            title="系统状态",
-            border_style="cyan",
-        ))
+        self._console.print(
+            Panel(
+                f"[bold]Agent:[/bold] {agent_name} (Level: {agent_level})\n"
+                f"[bold]模式:[/bold] {mode}  |  [bold]轮次:[/bold] {turn_count}  |  "
+                f"[bold]历史消息:[/bold] {len(conversation_history)}\n"
+                f"[bold]工具数:[/bold] {tool_count}\n"
+                "\n[bold]服务状态:[/bold]",
+                title="系统状态",
+                border_style="cyan",
+            )
+        )
 
         for svc_name, svc_stat in svc_status:
             self._console.print(f"  {svc_stat} {svc_name}")
@@ -547,8 +542,7 @@ class SlashCommandRegistry:
         }
 
         self._console.print(
-            f"[green][OK] 模式已切换: {current_mode} -> {new_mode}[/green]  "
-            f"[dim]({mode_desc[new_mode]})[/dim]"
+            f"[green][OK] 模式已切换: {current_mode} -> {new_mode}[/green]  [dim]({mode_desc[new_mode]})[/dim]"
         )
         return CommandResult(state_updates={"interaction_mode": new_mode})
 
@@ -623,7 +617,9 @@ class SlashCommandRegistry:
                     if 1 <= idx <= len(checkpoints):
                         selected = checkpoints[idx - 1]
                         return await self._do_restore(
-                            pipeline_recovery, str(selected.get("pipeline_id", "")), ctx,
+                            pipeline_recovery,
+                            str(selected.get("pipeline_id", "")),
+                            ctx,
                         )
                     self._console.print(f"[red]无效索引: {idx}，范围 1-{len(checkpoints)}[/red]")
                     return CommandResult()
@@ -632,9 +628,7 @@ class SlashCommandRegistry:
                     return await self._do_restore(pipeline_recovery, args.strip(), ctx)
 
             # 无参数时提示用法
-            self._console.print(
-                "\n[dim]用法: /restore <序号>  或  /restore <pipeline_id>[/dim]"
-            )
+            self._console.print("\n[dim]用法: /restore <序号>  或  /restore <pipeline_id>[/dim]")
 
         except Exception as exc:
             self._console.print(f"[red]获取检查点列表失败: {exc}[/red]")
@@ -667,16 +661,18 @@ class SlashCommandRegistry:
             checkpoint_meta = info.get("checkpoint", {})
             suggestion = info.get("recovery_suggestion", "")
 
-            self._console.print(Panel(
-                f"[bold]管道:[/bold] {pipeline_id}\n"
-                f"[bold]检查点:[/bold] {checkpoint_meta.get('checkpoint_id', '?')}\n"
-                f"[bold]阶段:[/bold] {checkpoint_meta.get('phase', '?')}\n"
-                f"[bold]轮次:[/bold] {checkpoint_meta.get('iteration', 0)}\n"
-                f"[bold]时间:[/bold] {checkpoint_meta.get('timestamp', '?')}\n"
-                f"\n[dim]建议: {suggestion}[/dim]",
-                title="恢复信息",
-                border_style="cyan",
-            ))
+            self._console.print(
+                Panel(
+                    f"[bold]管道:[/bold] {pipeline_id}\n"
+                    f"[bold]检查点:[/bold] {checkpoint_meta.get('checkpoint_id', '?')}\n"
+                    f"[bold]阶段:[/bold] {checkpoint_meta.get('phase', '?')}\n"
+                    f"[bold]轮次:[/bold] {checkpoint_meta.get('iteration', 0)}\n"
+                    f"[bold]时间:[/bold] {checkpoint_meta.get('timestamp', '?')}\n"
+                    f"\n[dim]建议: {suggestion}[/dim]",
+                    title="恢复信息",
+                    border_style="cyan",
+                )
+            )
 
             # 恢复状态
             state = await pipeline_recovery.recover(pipeline_id)
@@ -684,9 +680,7 @@ class SlashCommandRegistry:
                 self._console.print("[red]恢复失败：无法加载检查点状态[/red]")
                 return CommandResult()
 
-            self._console.print(
-                f"[green][OK] 管道状态已恢复 | state_keys={list(state.keys())[:5]}...[/green]"
-            )
+            self._console.print(f"[green][OK] 管道状态已恢复 | state_keys={list(state.keys())[:5]}...[/green]")
             return CommandResult(state_updates={"restored_state": state})
 
         except Exception as exc:

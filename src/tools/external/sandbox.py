@@ -55,7 +55,9 @@ class ExternalToolSandbox(IExternalToolSandbox):
         try:
             # 尝试使用 isolation 模块创建环境
             sandbox_env = await self._create_isolation_environment(
-                sandbox_id, tool_name, limits,
+                sandbox_id,
+                tool_name,
+                limits,
             )
 
             self._sandboxes[sandbox_id] = {
@@ -67,7 +69,10 @@ class ExternalToolSandbox(IExternalToolSandbox):
 
             self._logger.info(
                 "沙箱已创建 | sandbox_id=%s | tool=%s | cpu=%.1f | mem=%dMB",
-                sandbox_id, tool_name, limits.cpu_limit, limits.memory_limit_mb,
+                sandbox_id,
+                tool_name,
+                limits.cpu_limit,
+                limits.memory_limit_mb,
             )
             return sandbox_id
 
@@ -136,7 +141,8 @@ class ExternalToolSandbox(IExternalToolSandbox):
         sandbox = self._sandboxes.pop(sandbox_id, None)
         if sandbox is None:
             self._logger.warning(
-                "沙箱不存在 | sandbox_id=%s", sandbox_id,
+                "沙箱不存在 | sandbox_id=%s",
+                sandbox_id,
             )
             return
 
@@ -147,12 +153,14 @@ class ExternalToolSandbox(IExternalToolSandbox):
                 await self._destroy_isolation_environment(env)
 
             self._logger.info(
-                "沙箱已销毁 | sandbox_id=%s", sandbox_id,
+                "沙箱已销毁 | sandbox_id=%s",
+                sandbox_id,
             )
         except Exception as e:
             self._logger.error(
                 "沙箱清理失败 | sandbox_id=%s | error=%s",
-                sandbox_id, e,
+                sandbox_id,
+                e,
             )
 
     def get_sandbox_status(self, sandbox_id: str) -> str | None:

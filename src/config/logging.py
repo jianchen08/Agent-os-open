@@ -55,9 +55,7 @@ class ColoredFormatter(logging.Formatter):
     def format(self, record):
         # 添加颜色
         if record.levelname in self.COLORS:
-            record.levelname = (
-                f"{self.COLORS[record.levelname]}{record.levelname}{self.RESET}"
-            )
+            record.levelname = f"{self.COLORS[record.levelname]}{record.levelname}{self.RESET}"
         return super().format(record)
 
 
@@ -114,7 +112,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                     os.rename(self.baseFilename, dfn)  # noqa: PTH104
                 except (OSError, PermissionError):
                     # 文件被占用，清空当前文件继续写入
-                    with open(self.baseFilename, 'w', encoding=self.encoding):
+                    with open(self.baseFilename, "w", encoding=self.encoding):
                         pass
         except Exception:
             pass
@@ -159,7 +157,6 @@ def setup_logging(console_level: str = None):
     _logging_configured = True
 
     return logging.getLogger(__name__)
-
 
 
 # 创建默认logger（延迟导入时才初始化）

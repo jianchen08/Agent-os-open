@@ -1,4 +1,5 @@
 """管道引擎的日志基础设施（per-pipeline 文件日志）。"""
+
 from __future__ import annotations
 
 import contextlib
@@ -15,13 +16,22 @@ logger = logging.getLogger(__name__)
 # 需要挂 per-pipeline FileHandler 的日志器清单（引擎核心 + 插件 + 工具 + LLM 等）。
 # 放模块级常量，与引擎类解耦。
 _PIPELINE_LOGGERS: tuple[str, ...] = (
-    "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
-    "pipeline.route", "pipeline.config", "pipeline.registry",
+    "pipeline.engine",
+    "pipeline.chain",
+    "pipeline.event_bus",
+    "pipeline.route",
+    "pipeline.config",
+    "pipeline.registry",
     "pipeline.stream_bridge",
-    "plugins.core", "plugins.input", "plugins.output",
-    "infrastructure.task_worker", "tasks",
-    "tools.builtin", "evaluation",
-    "llm.adapter", "llm.adapter._stream",
+    "plugins.core",
+    "plugins.input",
+    "plugins.output",
+    "infrastructure.task_worker",
+    "tasks",
+    "tools.builtin",
+    "evaluation",
+    "llm.adapter",
+    "llm.adapter._stream",
     "triggers.manager",
     "pipeline.message_bus",
     "src.core.event_bus",
@@ -115,19 +125,25 @@ class PipelineLogger:
             # 1. 主日志（DEBUG~INFO，排除 WARNING+，避免与 error 重复）
             main_handler = _create_log_handler(
                 str(pipeline_dir / f"pipeline_{pipeline_run_id}.log"),
-                log_mode, logging.DEBUG, log_fmt,
+                log_mode,
+                logging.DEBUG,
+                log_fmt,
                 [pipeline_filter, lambda r: r.levelno < logging.WARNING],
             )
             # 2. 错误/警告日志（WARNING+，独立文件夹）
             error_handler = _create_log_handler(
                 str(error_dir / f"pipeline_{pipeline_run_id}.log"),
-                log_mode, logging.WARNING, log_fmt,
+                log_mode,
+                logging.WARNING,
+                log_fmt,
                 [pipeline_filter],
             )
             # 3. 任务执行日志（独立文件夹）
             task_handler = _create_log_handler(
                 str(task_dir / f"pipeline_{pipeline_run_id}.log"),
-                log_mode, logging.DEBUG, log_fmt,
+                log_mode,
+                logging.DEBUG,
+                log_fmt,
                 [_TaskLogFilter(pipeline_run_id)],
             )
 

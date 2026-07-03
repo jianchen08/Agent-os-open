@@ -19,6 +19,7 @@ def _load_isolation_config() -> dict:
     """通过 ConfigCenter 读取 isolation 配置（统一缓存）。"""
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+
         return get_config_center().get("isolation/isolation_config.yaml") or {}
     except Exception as e:
         logger.warning(f"读取 isolation 配置失败 | error={e}")
@@ -43,8 +44,7 @@ def get_isolation_level() -> str:
     return "isolated"
 
 
-def resolve_container_workspace_path(workspace: str | None, task_id: str,
-                                     isolation_mode: str | None = None) -> str:
+def resolve_container_workspace_path(workspace: str | None, task_id: str, isolation_mode: str | None = None) -> str:
     """纯路径计算：返回容器任务应使用的工作空间路径。
 
     规则：
@@ -110,8 +110,7 @@ def resolve_workspace(  # noqa: PLR0911
             return task_workspace
         if task_workspace.startswith(f"{root}/") or task_workspace == root:
             logger.debug(
-                f"[resolve_workspace] task_workspace 已包含 root 前缀，直接返回 | "
-                f"task_workspace={task_workspace}"
+                f"[resolve_workspace] task_workspace 已包含 root 前缀，直接返回 | task_workspace={task_workspace}"
             )
             return task_workspace
         return f"{root}/{task_workspace}"
@@ -126,8 +125,7 @@ def resolve_workspace(  # noqa: PLR0911
     if task_workspace:
         if _is_absolute_path(task_workspace):
             logger.debug(
-                f"[resolve_workspace] 子任务 task_workspace 是绝对路径，直接返回 | "
-                f"task_workspace={task_workspace}"
+                f"[resolve_workspace] 子任务 task_workspace 是绝对路径，直接返回 | task_workspace={task_workspace}"
             )
             return task_workspace
         if task_workspace.startswith(f"{parent_resolved_workspace}/") or task_workspace == parent_resolved_workspace:
@@ -171,9 +169,7 @@ async def resolve_workspace_chain(
 
     task = await session.get(Task, task_id)
     if not task:
-        logger.warning(
-            f"[resolve_workspace_chain] 任务不存在，使用基础解析 | task_id={task_id}"
-        )
+        logger.warning(f"[resolve_workspace_chain] 任务不存在，使用基础解析 | task_id={task_id}")
         return resolve_workspace(task_id, task_workspace)
 
     if not task.parent_task_id:
@@ -186,7 +182,8 @@ async def resolve_workspace_chain(
         nesting_mode=nesting_mode,
     )
     return resolve_workspace(
-        task_id, task_workspace,
+        task_id,
+        task_workspace,
         parent_resolved_workspace=parent_workspace,
         nesting_mode=nesting_mode,
     )

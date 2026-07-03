@@ -233,9 +233,7 @@ class PermissionException(DomainException):
         error_details = details.copy() if details else {}
         if required_permission:
             error_details["required_permission"] = required_permission
-        super().__init__(
-            message, code=code or "PERMISSION_DENIED", details=error_details
-        )
+        super().__init__(message, code=code or "PERMISSION_DENIED", details=error_details)
         self.required_permission = required_permission
 
 
@@ -268,9 +266,7 @@ class BusinessRuleException(DomainException):
         error_details = details.copy() if details else {}
         if rule:
             error_details["rule"] = rule
-        super().__init__(
-            message, code=code or "BUSINESS_RULE_VIOLATION", details=error_details
-        )
+        super().__init__(message, code=code or "BUSINESS_RULE_VIOLATION", details=error_details)
         self.rule = rule
 
 
@@ -326,9 +322,7 @@ class DatabaseException(SystemException):
         error_details = details.copy() if details else {}
         if operation:
             error_details["operation"] = operation
-        super().__init__(
-            message, code=code or "DB_ERROR", details=error_details, cause=cause
-        )
+        super().__init__(message, code=code or "DB_ERROR", details=error_details, cause=cause)
         self.operation = operation
 
 
@@ -364,9 +358,7 @@ class CacheException(SystemException):
         error_details = details.copy() if details else {}
         if operation:
             error_details["operation"] = operation
-        super().__init__(
-            message, code=code or "CACHE_ERROR", details=error_details, cause=cause
-        )
+        super().__init__(message, code=code or "CACHE_ERROR", details=error_details, cause=cause)
         self.operation = operation
 
 

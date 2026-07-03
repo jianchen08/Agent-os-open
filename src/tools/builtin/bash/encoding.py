@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 
 # Windows 下 CMD 常见代码页
 _WIN_CMD_ENCODINGS: tuple[str, ...] = (
-    "cp936",   # 简体中文 GBK
-    "cp950",   # 繁体中文 Big5
-    "cp932",   # 日文 Shift-JIS
-    "cp949",   # 韩文
+    "cp936",  # 简体中文 GBK
+    "cp950",  # 繁体中文 Big5
+    "cp932",  # 日文 Shift-JIS
+    "cp949",  # 韩文
     "cp1252",  # 西欧
 )
 
@@ -125,12 +125,13 @@ class EncodingHandler:
         try:
             result = data.decode("utf-8", errors="surrogateescape")
             # 检查 surrogate 字符比例：如果 < 15%，说明大部分是有效 UTF-8
-            surrogate_count = sum(1 for c in result if '\ud800' <= c <= '\udfff')
+            surrogate_count = sum(1 for c in result if "\ud800" <= c <= "\udfff")
             if surrogate_count == 0 or surrogate_count < max(len(result) * 0.15, 3):
                 if surrogate_count > 0:
                     logger.debug(
                         "UTF-8 surrogateescape used: %d surrogates in %d chars",
-                        surrogate_count, len(result),
+                        surrogate_count,
+                        len(result),
                     )
                 return result
         except UnicodeDecodeError:
@@ -156,7 +157,8 @@ class EncodingHandler:
 
         # 最后兜底：UTF-8 + replace
         logger.debug(
-            "Falling back to UTF-8+replace for %d bytes", len(data),
+            "Falling back to UTF-8+replace for %d bytes",
+            len(data),
         )
         return data.decode("utf-8", errors="replace")
 

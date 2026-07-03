@@ -74,7 +74,8 @@ class ContextBuilder:
                 if full_path.stat().st_size > self._MAX_CONTEXT_FILE_SIZE:
                     logger.warning(
                         "上下文文件过大，跳过: %s (%d bytes)",
-                        full_path, full_path.stat().st_size,
+                        full_path,
+                        full_path.stat().st_size,
                     )
                     return ""
                 return full_path.read_text(encoding="utf-8")
@@ -127,7 +128,8 @@ class ContextBuilder:
                 if entry.stat().st_size > self._MAX_CONTEXT_FILE_SIZE:
                     logger.warning(
                         "上下文文件过大，跳过: %s (%d bytes)",
-                        entry, entry.stat().st_size,
+                        entry,
+                        entry.stat().st_size,
                     )
                     continue
                 content = entry.read_text(encoding="utf-8")
@@ -214,9 +216,7 @@ class ContextBuilder:
 
         return result
 
-    def _build_context(
-        self, config: ContextConfig, config_obj: AgentConfig
-    ) -> dict[str, Any]:
+    def _build_context(self, config: ContextConfig, config_obj: AgentConfig) -> dict[str, Any]:
         """从 ContextConfig 构建上下文字典。
 
         Args:
@@ -234,9 +234,7 @@ class ContextBuilder:
             item_value = self._build_item_value(item)
             # 对于 rules 类型，补充约束内容
             if item.type == "rules":
-                rules_content = "\n".join(
-                    config_obj.hard_constraints + config_obj.soft_constraints
-                )
+                rules_content = "\n".join(config_obj.hard_constraints + config_obj.soft_constraints)
                 item_value["content"] = rules_content
             items.append(item_value)
 
@@ -286,13 +284,9 @@ class ContextBuilder:
         """异步版本的文件内容读取。"""
         return await asyncio.to_thread(self._resolve_path_content, file_path)
 
-    async def _resolve_folder_content_async(
-        self, folder_path: str, extensions: list[str] | None = None
-    ) -> str:
+    async def _resolve_folder_content_async(self, folder_path: str, extensions: list[str] | None = None) -> str:
         """异步版本的文件夹内容读取。"""
-        return await asyncio.to_thread(
-            self._resolve_folder_content, folder_path, extensions
-        )
+        return await asyncio.to_thread(self._resolve_folder_content, folder_path, extensions)
 
     async def build_static_context_async(self, config: AgentConfig) -> dict[str, Any]:
         """异步构建静态上下文，文件读取卸载到线程池。"""

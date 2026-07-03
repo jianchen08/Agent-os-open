@@ -183,9 +183,7 @@ class ExternalToolAdapter(IExternalToolAdapter):
         # 2. 获取操作超时
         capability = self.get_capability(operation)
         timeout = (
-            capability.timeout_override
-            if capability and capability.timeout_override
-            else self._config.execute_timeout
+            capability.timeout_override if capability and capability.timeout_override else self._config.execute_timeout
         )
 
         # 3. 带重试执行
@@ -209,24 +207,33 @@ class ExternalToolAdapter(IExternalToolAdapter):
                 )
                 self._logger.warning(
                     "操作超时 | tool=%s | op=%s | attempt=%d/%d | timeout=%ss",
-                    self.name, operation, attempt + 1,
-                    retry_policy.max_retries + 1, timeout,
+                    self.name,
+                    operation,
+                    attempt + 1,
+                    retry_policy.max_retries + 1,
+                    timeout,
                 )
 
             except ConnectionError as e:
                 last_error = e
                 self._logger.warning(
                     "连接错误 | tool=%s | op=%s | attempt=%d/%d | error=%s",
-                    self.name, operation, attempt + 1,
-                    retry_policy.max_retries + 1, e,
+                    self.name,
+                    operation,
+                    attempt + 1,
+                    retry_policy.max_retries + 1,
+                    e,
                 )
 
             except ExecutionError as e:
                 last_error = e
                 self._logger.warning(
                     "执行错误 | tool=%s | op=%s | attempt=%d/%d | error=%s",
-                    self.name, operation, attempt + 1,
-                    retry_policy.max_retries + 1, e,
+                    self.name,
+                    operation,
+                    attempt + 1,
+                    retry_policy.max_retries + 1,
+                    e,
                 )
 
             except Exception as e:
@@ -238,7 +245,10 @@ class ExternalToolAdapter(IExternalToolAdapter):
                 )
                 self._logger.error(
                     "未预期错误 | tool=%s | op=%s | error=%s",
-                    self.name, operation, e, exc_info=True,
+                    self.name,
+                    operation,
+                    e,
+                    exc_info=True,
                 )
 
             # 重试前等待（指数退避）
@@ -246,7 +256,9 @@ class ExternalToolAdapter(IExternalToolAdapter):
                 delay = self._calculate_delay(retry_policy, attempt)
                 self._logger.debug(
                     "等待重试 | tool=%s | op=%s | delay=%.2fs",
-                    self.name, operation, delay,
+                    self.name,
+                    operation,
+                    delay,
                 )
                 await asyncio.sleep(delay)
 
@@ -290,7 +302,9 @@ class ExternalToolAdapter(IExternalToolAdapter):
         """
         self._logger.error(
             "操作失败 | tool=%s | op=%s | error=%s",
-            self.name, operation, error,
+            self.name,
+            operation,
+            error,
         )
         return {
             "success": False,
@@ -314,7 +328,8 @@ class ExternalToolAdapter(IExternalToolAdapter):
             tool = Tool(
                 name=f"{self._config.name}__{cap.name}",
                 description=cap.description or f"{self._config.display_name} - {cap.name}",
-                input_schema=cap.input_schema or {
+                input_schema=cap.input_schema
+                or {
                     "type": "object",
                     "properties": {},
                 },
@@ -344,7 +359,7 @@ class ExternalToolAdapter(IExternalToolAdapter):
             延迟秒数
         """
         delay = min(
-            policy.base_delay * (policy.exponential_base ** attempt),
+            policy.base_delay * (policy.exponential_base**attempt),
             policy.max_delay,
         )
         if policy.jitter:

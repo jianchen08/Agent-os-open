@@ -48,6 +48,7 @@ def _sync_diag_handlers() -> None:
             _diag_logger.addHandler(h)
             _diag_logger.setLevel(logging.DEBUG)
 
+
 _THINK_PATTERN = re.compile(
     r"<think[^>]*>(.*?)</think[^>]*>",
     re.DOTALL,
@@ -114,6 +115,7 @@ def _move_to_extra_body(kwargs: dict[str, Any], keys: tuple[str, ...]) -> None:
 # 数据类型
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LLMResponse:
     """统一 LLM 响应结构。
@@ -144,6 +146,7 @@ class LLMResponse:
 # ---------------------------------------------------------------------------
 # 抽象接口
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class LLMAdapter(Protocol):
@@ -194,6 +197,7 @@ class LLMAdapter(Protocol):
 # 基类 — 共享响应解析逻辑
 # ---------------------------------------------------------------------------
 
+
 class _BaseLiteLLMAdapter:
     """共享的 LLM 响应解析逻辑。
 
@@ -207,7 +211,8 @@ class _BaseLiteLLMAdapter:
 
     @staticmethod
     def _ensure_minimax_role_safety(
-        model: str, messages: list[dict[str, Any]],
+        model: str,
+        messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """防御性兜底：确保 minimax 模型不会收到非首位 system 消息。
 
@@ -242,7 +247,8 @@ class _BaseLiteLLMAdapter:
                 msg.pop("name", None)
                 logger.warning(
                     "[adapter] Minimax 兜底: 非首位 system→user idx=%d content=%s",
-                    i, str(msg.get("content", ""))[:100],
+                    i,
+                    str(msg.get("content", ""))[:100],
                 )
         return messages
 
@@ -263,6 +269,7 @@ class _BaseLiteLLMAdapter:
         # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
         # 透传 **kwargs（即 default_params），adapter 按需读取自身配置
         from llm.provider_adapters import get_provider_adapter  # noqa: PLC0415
+
         adapter = get_provider_adapter(model)
         messages = adapter.adapt_messages_before_send(messages, **kwargs)
 
@@ -279,12 +286,8 @@ class _BaseLiteLLMAdapter:
             _move_to_extra_body(kwargs, ("reasoning_effort", "thinking"))
 
         if stream:
-            return await self._call_streaming(
-                model, messages, tools=tools, on_chunk=on_chunk, **kwargs
-            )
-        return await self._call_non_streaming(
-            model, messages, tools=tools, **kwargs
-        )
+            return await self._call_streaming(model, messages, tools=tools, on_chunk=on_chunk, **kwargs)
+        return await self._call_non_streaming(model, messages, tools=tools, **kwargs)
 
     async def health_check(self, model: str) -> bool:
         """检查模型是否可用。"""
@@ -298,7 +301,10 @@ class _BaseLiteLLMAdapter:
         except Exception as exc:
             logger.warning(
                 "[%s] health_check 失败 model=%s: %s — %s",
-                type(self).__name__, model, type(exc).__name__, exc,
+                type(self).__name__,
+                model,
+                type(exc).__name__,
+                exc,
             )
             return False
 
@@ -346,7 +352,8 @@ class _BaseLiteLLMAdapter:
                 result_text = thinking_text
                 logger.info(
                     "[%s] 使用 reasoning_content 作为 result_text (len=%d)",
-                    type(self).__name__, len(result_text),
+                    type(self).__name__,
+                    len(result_text),
                 )
 
         # 兜底：当 reasoning_content 为空时，手动从 content 中提取 <think/> 标签
@@ -358,7 +365,8 @@ class _BaseLiteLLMAdapter:
                 logger.info(
                     "[%s] 从 <think/> 标签提取 thinking (thinking=%d, content=%d)",
                     type(self).__name__,
-                    len(thinking_text), len(result_text or ""),
+                    len(thinking_text),
+                    len(result_text or ""),
                 )
 
         # 解析 usage 信息
@@ -460,9 +468,7 @@ class _BaseLiteLLMAdapter:
 
         first_chunk: Any = None
         try:
-            response, first_chunk = await asyncio.wait_for(
-                _open_and_first_chunk(), timeout=first_chunk_timeout
-            )
+            response, first_chunk = await asyncio.wait_for(_open_and_first_chunk(), timeout=first_chunk_timeout)
         except StopAsyncIteration:
             # 空流：服务端建连成功、HTTP 200，但流体一打开即 EOF（零 chunk）。
             # 这不是"模型正常返回空内容"，而是首 token 永远不会到来——
@@ -473,29 +479,24 @@ class _BaseLiteLLMAdapter:
             # 直至 total_timeout 兜底——根因即此空流被当成空成功吞掉。
             # resp 已在 _open_and_first_chunk 内部 aclose，此处无需再关。
             logger.warning(
-                "[%s] STREAM EMPTY: 首字节即空流 (建连成功但零 chunk)"
-                " model=%s，按首 token 失败处理",
-                type(self).__name__, model,
+                "[%s] STREAM EMPTY: 首字节即空流 (建连成功但零 chunk) model=%s，按首 token 失败处理",
+                type(self).__name__,
+                model,
             )
             raise litellm.Timeout(  # noqa: B904
-                message=(
-                    "Stream first chunk empty: server returned 200"
-                    " but zero chunks (premature EOF)"
-                ),
+                message=("Stream first chunk empty: server returned 200 but zero chunks (premature EOF)"),
                 model=model,
                 llm_provider="zai",
             )
         except asyncio.TimeoutError:
             logger.error(
-                "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs)"
-                " 含建连阶段 model=%s",
-                type(self).__name__, first_chunk_timeout, model,
+                "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs) 含建连阶段 model=%s",
+                type(self).__name__,
+                first_chunk_timeout,
+                model,
             )
             raise litellm.Timeout(  # noqa: B904
-                message=(
-                    "Stream first chunk timeout (incl. connect):"
-                    f" no response for {first_chunk_timeout:.0f}s"
-                ),
+                message=(f"Stream first chunk timeout (incl. connect): no response for {first_chunk_timeout:.0f}s"),
                 model=model,
                 llm_provider="zai",
             )
@@ -522,9 +523,7 @@ class _BaseLiteLLMAdapter:
 
         stream_repetition = False
         thinking_truncated = False
-        _max_thinking_chars = int(
-            kwargs.pop("max_thinking_chars", 180000)
-        )
+        _max_thinking_chars = int(kwargs.pop("max_thinking_chars", 180000))
         # 接收端点诊断：统计 tool_calls 字段从 API 到达次数，定位丢失环节
         _recv_seq = 0
         _recv_tc_count = 0
@@ -554,7 +553,8 @@ class _BaseLiteLLMAdapter:
                     if _diag_logger.handlers:
                         _delta = getattr(
                             getattr(chunk, "choices", [None])[0],
-                            "delta", None,
+                            "delta",
+                            None,
                         )
                         _tc = getattr(_delta, "tool_calls", None)
                         _usage = getattr(chunk, "usage", None)
@@ -562,9 +562,7 @@ class _BaseLiteLLMAdapter:
                             _rc = getattr(_delta, "reasoning_content", None)
                             _ct = getattr(_delta, "content", None)
                             _diag_logger.debug(
-                                "[%s] chunk #%d:"
-                                " content=%s reasoning=%s"
-                                " tc=%s usage=%s",
+                                "[%s] chunk #%d: content=%s reasoning=%s tc=%s usage=%s",
                                 type(self).__name__,
                                 _chunk_idx,
                                 repr((_ct or "")[:40]),
@@ -576,15 +574,9 @@ class _BaseLiteLLMAdapter:
                 if hasattr(chunk, "usage") and chunk.usage:
                     _prompt_details = getattr(chunk.usage, "prompt_tokens_details", None)
                     stream_usage = {
-                        "prompt_tokens": getattr(
-                            chunk.usage, "prompt_tokens", 0
-                        ) or 0,
-                        "completion_tokens": getattr(
-                            chunk.usage, "completion_tokens", 0
-                        ) or 0,
-                        "total_tokens": getattr(
-                            chunk.usage, "total_tokens", 0
-                        ) or 0,
+                        "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
                         "cached_tokens": getattr(_prompt_details, "cached_tokens", 0) or 0,
                     }
 
@@ -599,23 +591,16 @@ class _BaseLiteLLMAdapter:
                     thinking_parts.append(reasoning)
                     _stream_logger.debug(
                         "[STREAM][THINKING] #%d +%d chars",
-                        len(thinking_parts), len(reasoning),
+                        len(thinking_parts),
+                        len(reasoning),
                     )
                     if on_chunk:
-                        on_chunk(
-                            {"type": "thinking", "content": reasoning}
-                        )
+                        on_chunk({"type": "thinking", "content": reasoning})
                     # 思考内容过长 → 截断
-                    thinking_len = sum(
-                        len(p) for p in thinking_parts
-                    )
-                    if (
-                        _max_thinking_chars > 0
-                        and thinking_len > _max_thinking_chars
-                    ):
+                    thinking_len = sum(len(p) for p in thinking_parts)
+                    if _max_thinking_chars > 0 and thinking_len > _max_thinking_chars:
                         logger.warning(
-                            "[%s] 思考内容过长"
-                            "(%d>%d chars)，截断",
+                            "[%s] 思考内容过长(%d>%d chars)，截断",
                             type(self).__name__,
                             thinking_len,
                             _max_thinking_chars,
@@ -638,7 +623,7 @@ class _BaseLiteLLMAdapter:
                                     on_chunk({"type": "thinking", "content": _think_part})
                             _after_close = content[close_idx:]
                             _gt = _after_close.find(">")
-                            _rest = _after_close[_gt + 1:] if _gt >= 0 else ""
+                            _rest = _after_close[_gt + 1 :] if _gt >= 0 else ""
                             _in_think_tag = False
                             if _rest.strip():
                                 result_parts.append(_rest)
@@ -651,7 +636,8 @@ class _BaseLiteLLMAdapter:
                             thinking_parts.append(content)
                             _stream_logger.debug(
                                 "[STREAM][THINKING] #%d +%d chars",
-                                len(thinking_parts), len(content),
+                                len(thinking_parts),
+                                len(content),
                             )
                             if on_chunk:
                                 on_chunk({"type": "thinking", "content": content})
@@ -660,7 +646,8 @@ class _BaseLiteLLMAdapter:
                                 logger.warning(
                                     "[%s] 思考内容过长 (%d>%d chars)，截断",
                                     type(self).__name__,
-                                    thinking_len, _max_thinking_chars,
+                                    thinking_len,
+                                    _max_thinking_chars,
                                 )
                                 thinking_truncated = True
                                 return True
@@ -674,7 +661,7 @@ class _BaseLiteLLMAdapter:
                                 on_chunk({"type": "text", "content": _before})
                         _after_open = content[_open_idx:]
                         _gt = _after_open.find(">")
-                        _inner = _after_open[_gt + 1:] if _gt >= 0 else ""
+                        _inner = _after_open[_gt + 1 :] if _gt >= 0 else ""
                         _in_think_tag = True
                         if "</think" in _inner:
                             _ci = _inner.index("</think")
@@ -685,7 +672,7 @@ class _BaseLiteLLMAdapter:
                                     on_chunk({"type": "thinking", "content": _tp})
                             _ac = _inner[_ci:]
                             _g2 = _ac.find(">")
-                            _rs = _ac[_g2 + 1:] if _g2 >= 0 else ""
+                            _rs = _ac[_g2 + 1 :] if _g2 >= 0 else ""
                             _in_think_tag = False
                             if _rs.strip():
                                 result_parts.append(_rs)
@@ -698,7 +685,8 @@ class _BaseLiteLLMAdapter:
                             thinking_parts.append(_inner)
                             _stream_logger.debug(
                                 "[STREAM][THINKING] #%d +%d chars",
-                                len(thinking_parts), len(_inner),
+                                len(thinking_parts),
+                                len(_inner),
                             )
                             if on_chunk:
                                 on_chunk({"type": "thinking", "content": _inner})
@@ -708,13 +696,12 @@ class _BaseLiteLLMAdapter:
                         result_parts.append(content)
                         _stream_logger.debug(
                             "[STREAM][TEXT] #%d +%d chars: %s",
-                            len(result_parts), len(content),
+                            len(result_parts),
+                            len(content),
                             repr(content[:80]),
                         )
                         if on_chunk:
-                            signal = on_chunk(
-                                {"type": "text", "content": content}
-                            )
+                            signal = on_chunk({"type": "text", "content": content})
                             if signal == "stop":
                                 stream_repetition = True
                                 logger.warning(
@@ -729,38 +716,29 @@ class _BaseLiteLLMAdapter:
                     if on_chunk and thinking_parts:
                         on_chunk({"type": "thinking_end", "content": ""})
                     for tc in delta.tool_calls:
-                        idx = (
-                            tc.index if hasattr(tc, "index") else 0
-                        )
+                        idx = tc.index if hasattr(tc, "index") else 0
                         if idx not in tool_calls_map:
                             tool_calls_map[idx] = {
-                                "id": (
-                                    getattr(tc, "id", None)
-                                    or f"tc_{idx}_{id(tool_calls_map)}"
-                                ),
+                                "id": (getattr(tc, "id", None) or f"tc_{idx}_{id(tool_calls_map)}"),
                                 "name": "",
                                 "arguments": "",
                             }
                             _stream_logger.debug(
                                 "[STREAM][TOOL_CALL] #%d new: id=%s",
-                                idx, tool_calls_map[idx]["id"],
+                                idx,
+                                tool_calls_map[idx]["id"],
                             )
                         if tc.function:
                             if tc.function.name:
-                                tool_calls_map[idx]["name"] += (
-                                    tc.function.name
-                                )
+                                tool_calls_map[idx]["name"] += tc.function.name
                                 _stream_logger.debug(
                                     "[STREAM][TOOL_CALL] #%d name=%s",
-                                    idx, tool_calls_map[idx]["name"],
+                                    idx,
+                                    tool_calls_map[idx]["name"],
                                 )
                             if tc.function.arguments:
-                                tool_calls_map[idx]["arguments"] += (
-                                    tc.function.arguments
-                                )
-                                _arg_len = len(
-                                    tool_calls_map[idx]["arguments"]
-                                )
+                                tool_calls_map[idx]["arguments"] += tc.function.arguments
+                                _arg_len = len(tool_calls_map[idx]["arguments"])
                                 _stream_logger.debug(
                                     "[STREAM][TOOL_CALL] #%d args +%d → %d chars: %s",
                                     idx,
@@ -770,10 +748,12 @@ class _BaseLiteLLMAdapter:
                                 )
 
                     if on_chunk:
-                        on_chunk({
-                            "type": "tool_call",
-                            "tool_calls": delta.tool_calls,
-                        })
+                        on_chunk(
+                            {
+                                "type": "tool_call",
+                                "tool_calls": delta.tool_calls,
+                            }
+                        )
                 return False
 
             # 处理首个 chunk
@@ -785,7 +765,8 @@ class _BaseLiteLLMAdapter:
             # 沿用 process_manager._watchdog_loop 的 create_task + CancelledError 退出范式。
             _heartbeat_task = asyncio.create_task(
                 self._stream_heartbeat(
-                    model, inter_chunk_timeout,
+                    model,
+                    inter_chunk_timeout,
                     lambda: (_time.monotonic() - _last_chunk_monotonic),
                     lambda: _chunks_received,
                     _completion_stream,
@@ -795,7 +776,9 @@ class _BaseLiteLLMAdapter:
             # event loop，一旦底层 socket 阻塞冻住事件循环，全部失效（僵死管道零
             # HEARTBEAT 即铁证）。硬超时到点强制 aclose，loop 冻住也能打破死锁。
             _hard_timeout = StreamHardTimeout(
-                response, asyncio.get_running_loop(), inter_chunk_timeout,
+                response,
+                asyncio.get_running_loop(),
+                inter_chunk_timeout,
             )
             _hard_timeout.arm()
             # 接收端点诊断（首个 chunk）
@@ -816,14 +799,17 @@ class _BaseLiteLLMAdapter:
                             _tc_summary0.append(f"{_tc_name0}(args={len(_tc_args0)}c)")
                         _stream_logger.debug(
                             "[STREAM][RECV] #%d tool_calls 到达(首chunk, %d个): %s",
-                            _recv_seq, len(_tc0),
+                            _recv_seq,
+                            len(_tc0),
                             ", ".join(_tc_summary0),
                         )
                     if _fr0:
                         _finish_reason = _fr0
                         _stream_logger.debug(
                             "[STREAM][RECV] #%d finish=%s (首chunk, 累计tc=%d)",
-                            _recv_seq, _fr0, _recv_tc_count,
+                            _recv_seq,
+                            _fr0,
+                            _recv_tc_count,
                         )
             except Exception:
                 pass
@@ -842,18 +828,18 @@ class _BaseLiteLLMAdapter:
             # 满 timeout，说明连接已挂，应中断。
             while True:
                 try:
-                    chunk = await asyncio.wait_for(
-                        aiter.__anext__(), timeout=inter_chunk_timeout
-                    )
+                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=inter_chunk_timeout)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
                     _idle = _time.monotonic() - _last_chunk_monotonic
                     logger.warning(
-                        "[%s] STREAM TIMEOUT: inter-chunk 静默超时 (%.0fs)"
-                        " 距上个 chunk #%d 已静默 %.0fs model=%s",
-                        type(self).__name__, inter_chunk_timeout,
-                        _chunks_received, _idle, model,
+                        "[%s] STREAM TIMEOUT: inter-chunk 静默超时 (%.0fs) 距上个 chunk #%d 已静默 %.0fs model=%s",
+                        type(self).__name__,
+                        inter_chunk_timeout,
+                        _chunks_received,
+                        _idle,
+                        model,
                     )
                     raise litellm.Timeout(  # noqa: B904
                         message=(
@@ -887,13 +873,16 @@ class _BaseLiteLLMAdapter:
                                 _tc_summary.append(f"{_tc_name}(args={len(_tc_args)}c)")
                             _stream_logger.debug(
                                 "[STREAM][RECV] #%d tool_calls 到达(%d个): %s",
-                                _recv_seq, len(_tc),
+                                _recv_seq,
+                                len(_tc),
                                 ", ".join(_tc_summary),
                             )
                             _finish_reason = _fr
                             _stream_logger.debug(
                                 "[STREAM][RECV] #%d finish=%s (累计tc=%d)",
-                                _recv_seq, _fr, _recv_tc_count,
+                                _recv_seq,
+                                _fr,
+                                _recv_tc_count,
                             )
                 except Exception:
                     pass
@@ -923,15 +912,20 @@ class _BaseLiteLLMAdapter:
             "chunks=%d tool_calls=%d "
             "tokens=%d elapsed=%.2fs speed=%.1f tok/s",
             _finish_reason,
-            len(result_text or ""), len(thinking_text or ""),
+            len(result_text or ""),
+            len(thinking_text or ""),
             len(result_parts) + len(thinking_parts),
             len(tool_calls),
-            _comp_tokens, _stream_elapsed, _speed,
+            _comp_tokens,
+            _stream_elapsed,
+            _speed,
         )
         # 接收端点汇总：API 端实际送达的 tool_calls chunk 数 vs 最终解析数
         _stream_logger.debug(
             "[STREAM][STATS] recv_chunks=%d recv_tc=%d parsed_tc=%d",
-            _recv_seq, _recv_tc_count, len(tool_calls),
+            _recv_seq,
+            _recv_tc_count,
+            len(tool_calls),
         )
 
         return LLMResponse(
@@ -979,15 +973,15 @@ class _BaseLiteLLMAdapter:
                 await asyncio.sleep(30.0)
                 idle = idle_getter()
                 received = chunks_getter()
-                closed = (
-                    getattr(completion_stream, "is_closed", None)
-                    if completion_stream is not None else None
-                )
+                closed = getattr(completion_stream, "is_closed", None) if completion_stream is not None else None
                 _stream_logger.log(
                     logging.WARNING if idle >= half else logging.DEBUG,
-                    "[STREAM][HEARTBEAT] idle=%.0fs since chunk #%d total=%d "
-                    "stream_closed=%s model=%s",
-                    idle, received, received, closed, model,
+                    "[STREAM][HEARTBEAT] idle=%.0fs since chunk #%d total=%d stream_closed=%s model=%s",
+                    idle,
+                    received,
+                    received,
+                    closed,
+                    model,
                 )
         except asyncio.CancelledError:
             pass
@@ -999,16 +993,16 @@ class _BaseLiteLLMAdapter:
 
         parsed: list[dict[str, Any]] = []
         for tc in raw_tool_calls:
-            parsed.append({
-                "id": getattr(tc, "id", None) or f"call_{len(parsed)}",
-                "name": tc.function.name,
-                "arguments": tc.function.arguments,
-            })
+            parsed.append(
+                {
+                    "id": getattr(tc, "id", None) or f"call_{len(parsed)}",
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+            )
         return parsed
 
-    def _normalize_tool_calls(
-        self, tool_calls_map: dict[int, dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _normalize_tool_calls(self, tool_calls_map: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
         """将流式收集的 tool_calls 映射归一化。"""
         if not tool_calls_map:
             return []
@@ -1016,17 +1010,20 @@ class _BaseLiteLLMAdapter:
         result: list[dict[str, Any]] = []
         for idx in sorted(tool_calls_map.keys()):
             tc = tool_calls_map[idx]
-            result.append({
-                "id": tc.get("id") or f"call_{idx}",
-                "name": tc["name"],
-                "arguments": tc["arguments"],
-            })
+            result.append(
+                {
+                    "id": tc.get("id") or f"call_{idx}",
+                    "name": tc["name"],
+                    "arguments": tc["arguments"],
+                }
+            )
         return result
 
 
 # ---------------------------------------------------------------------------
 # LiteLLM 适配器 — 直接调用 litellm.acompletion()
 # ---------------------------------------------------------------------------
+
 
 class LiteLLMAdapter(_BaseLiteLLMAdapter):
     """基于 litellm.acompletion() 的 LLM 调用适配器。
@@ -1043,6 +1040,7 @@ class LiteLLMAdapter(_BaseLiteLLMAdapter):
 # ---------------------------------------------------------------------------
 # KeyPool 适配器 — 基于 KeyPool 的多 key 聚合 + RPM 限流
 # ---------------------------------------------------------------------------
+
 
 class KeyPoolAdapter(_BaseLiteLLMAdapter):
     """基于 KeyPool 的 LLM 调用适配器。
@@ -1117,7 +1115,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                 slot: KeySlot = await pool.acquire_slot()
                 logger.info(
                     "[KeyPoolAdapter] provider=%s 选用 key=%s (api_key=%s...) attempt=%d/%d",
-                    provider_name, slot.key_id, slot.api_key[:6], attempt + 1, max_retries,
+                    provider_name,
+                    slot.key_id,
+                    slot.api_key[:6],
+                    attempt + 1,
+                    max_retries,
                 )
                 # 信号量释放时机区分流式/非流式两条路径：
                 # 流式路径下 _direct_call_with_slot 返回的是惰性 stream wrapper
@@ -1136,9 +1138,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     if slot.api_base:
                         key_kwargs.setdefault("api_base", slot.api_base)
 
-                    result = await self._direct_call_with_slot(
-                        slot=slot, **key_kwargs
-                    )
+                    result = await self._direct_call_with_slot(slot=slot, **key_kwargs)
 
                     slot.on_success()
                     # 流式返回值是 async iterator（CustomStreamWrapper），其流式
@@ -1158,7 +1158,8 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     if info.kind == ErrorKind.BAD_REQUEST:
                         logger.warning(
                             "[KeyPoolAdapter] BAD_REQUEST 不可恢复 → key=%s: %s",
-                            slot.key_id, str(exc)[:200],
+                            slot.key_id,
+                            str(exc)[:200],
                         )
                         raise
 
@@ -1167,11 +1168,13 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     # release + 下一轮 acquire_slot 中，select() 会暂时绕开这个
                     # key（单 key 场景则等到冷却到期再重试），避免无限选回坏 key。
                     if info.kind == ErrorKind.SERVICE_DOWN:
-                        backoff = min(2.0 * (2 ** slot._consecutive_down), 16.0)
+                        backoff = min(2.0 * (2**slot._consecutive_down), 16.0)
                         logger.warning(
-                            "[KeyPoolAdapter] SERVICE_DOWN → key=%s 退避 %.1fs 重试"
-                            " (attempt %d/%d): %s",
-                            slot.key_id, backoff, attempt + 1, max_retries,
+                            "[KeyPoolAdapter] SERVICE_DOWN → key=%s 退避 %.1fs 重试 (attempt %d/%d): %s",
+                            slot.key_id,
+                            backoff,
+                            attempt + 1,
+                            max_retries,
                             str(exc)[:150],
                         )
                         slot.handle_error(info)
@@ -1182,7 +1185,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                         slot.handle_error(info)
                         logger.info(
                             "[KeyPoolAdapter] %s → key=%s 处理 (attempt %d/%d)",
-                            info.kind.value, slot.key_id, attempt + 1, max_retries,
+                            info.kind.value,
+                            slot.key_id,
+                            attempt + 1,
+                            max_retries,
                         )
                         last_exc = exc
                 finally:
@@ -1195,11 +1201,12 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             # 转成业务可读的 RateLimitError，保留原始异常链（backend_rules §3.1）。
             logger.error(
                 "[KeyPoolAdapter] key 池耗尽 provider=%s model=%s: %s",
-                provider_name, model_str, exc,
+                provider_name,
+                model_str,
+                exc,
             )
             last_exc = litellm.RateLimitError(
-                message=f"所有 API key 不可用且等待超时（{exc.timeout:.0f}s）；"
-                        f"不可用 key 诊断: {exc.unavailable}",
+                message=f"所有 API key 不可用且等待超时（{exc.timeout:.0f}s）；不可用 key 诊断: {exc.unavailable}",
                 model=model_str,
                 llm_provider=provider_name or "unknown",
             )
@@ -1209,9 +1216,9 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         # 走 router.acompletion() 利用 llm.yaml 的 fallback_chain 配置
         # 切换到备用模型（如 deepseek-v4-pro → minimax-m3）
         logger.warning(
-            "[KeyPoolAdapter] 所有 key 均失败 provider=%s model=%s，"
-            "尝试 Router fallback...",
-            provider_name, model_str,
+            "[KeyPoolAdapter] 所有 key 均失败 provider=%s model=%s，尝试 Router fallback...",
+            provider_name,
+            model_str,
         )
         try:
             return await self._route_call(**kwargs)
@@ -1261,9 +1268,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
 
         stream.aclose = _aclose_with_release  # type: ignore[method-assign]
 
-    async def _direct_call_with_slot(
-        self, slot: Any, **kwargs: Any
-    ) -> Any:
+    async def _direct_call_with_slot(self, slot: Any, **kwargs: Any) -> Any:
         """用指定 slot 的 key 直接调用 litellm.acompletion。
 
         不经过 Router，直接构建 litellm 参数，确保使用 slot 的 key。
@@ -1304,9 +1309,13 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         logger.warning(
             "[TEMP-DEBUG][KeyPoolAdapter] 发请求前 model=%s api_base=%s "
             "stream=%s extra_body=%s tool_stream=%s drop_params=%s tools=%d",
-            _ik.get("model"), _ik.get("api_base"), _ik.get("stream"),
-            _ik.get("extra_body"), _ik.get("tool_stream"),
-            _ik.get("drop_params"), len(_ik.get("tools") or []),
+            _ik.get("model"),
+            _ik.get("api_base"),
+            _ik.get("stream"),
+            _ik.get("extra_body"),
+            _ik.get("tool_stream"),
+            _ik.get("drop_params"),
+            len(_ik.get("tools") or []),
         )
 
         return await litellm.acompletion(**input_kwargs)

@@ -31,6 +31,7 @@ def _get_agent_registry() -> Any:
     """
     try:
         from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+
         return get_global_agent_registry_sync()
     except Exception as exc:
         logger.warning("Agent 注册表初始化失败: %s", exc)
@@ -53,6 +54,7 @@ def _resolve_agent_model(cfg: Any) -> str:
     if getattr(cfg, "model_tier", ""):
         try:
             from pipeline.plugin_resolver import resolve_tier  # noqa: PLC0415
+
             model_id = resolve_tier(cfg.model_tier, {})
         except Exception as exc:
             logger.warning("解析 model_tier=%r 失败: %s", cfg.model_tier, exc)
@@ -68,16 +70,10 @@ def _config_to_response(cfg: Any) -> AgentResponse:
         name=cfg.name,
         display_name=cfg.display_name,
         description=cfg.description,
-        agent_type=cfg.agent_type.value
-        if hasattr(cfg.agent_type, "value")
-        else str(cfg.agent_type),
+        agent_type=cfg.agent_type.value if hasattr(cfg.agent_type, "value") else str(cfg.agent_type),
         category=cfg.category,
-        level=cfg.level.value
-        if hasattr(cfg.level, "value")
-        else str(cfg.level),
-        system_prompt=cfg.system_prompt[:200] + "..."
-        if len(cfg.system_prompt) > 200
-        else cfg.system_prompt,
+        level=cfg.level.value if hasattr(cfg.level, "value") else str(cfg.level),
+        system_prompt=cfg.system_prompt[:200] + "..." if len(cfg.system_prompt) > 200 else cfg.system_prompt,
         tool_ids=cfg.tool_ids,
         tags=cfg.tags,
         is_active=cfg.is_active,
@@ -119,6 +115,7 @@ def list_agents(
         configs = [c for c in configs if c.category == category]
     if level:
         from agents.types import AgentLevel  # noqa: PLC0415
+
         try:
             level_enum = AgentLevel(level)
             configs = [c for c in configs if c.level == level_enum]
@@ -128,7 +125,7 @@ def list_agents(
         configs = [c for c in configs if tag in c.tags]
 
     total = len(configs)
-    items = [_config_to_response(c) for c in configs[offset:offset + limit]]
+    items = [_config_to_response(c) for c in configs[offset : offset + limit]]
 
     return AgentListResponse(items=items, total=total)
 
@@ -202,7 +199,14 @@ def get_default_agent(
     """获取默认 Agent 配置。"""
     registry = _get_agent_registry()
     if registry is None:
-        return {"config_id": "default", "name": "default", "display_name": "默认Agent", "description": "默认Agent配置", "agent_type": "general", "is_active": True}
+        return {
+            "config_id": "default",
+            "name": "default",
+            "display_name": "默认Agent",
+            "description": "默认Agent配置",
+            "agent_type": "general",
+            "is_active": True,
+        }
     return {"config_id": "default", "name": "default", "display_name": "默认Agent"}
 
 

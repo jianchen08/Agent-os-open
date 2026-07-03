@@ -50,11 +50,7 @@ def build_plugin_list(
     plugins_config = agent_config.plugins
 
     if hasattr(plugins_config, "disabled") and plugins_config.disabled:
-        result = [
-            p
-            for p in result
-            if not matches_disabled(p.name, plugins_config.disabled)
-        ]
+        result = [p for p in result if not matches_disabled(p.name, plugins_config.disabled)]
 
     if hasattr(plugins_config, "enabled") and plugins_config.enabled:
         for name, config in plugins_config.enabled.items():
@@ -99,11 +95,7 @@ def _ensure_context_build_level(
     if not cb or not hasattr(cb, "_config"):
         return
 
-    level_value = (
-        agent_config.level.value
-        if hasattr(agent_config.level, "value")
-        else str(agent_config.level)
-    )
+    level_value = agent_config.level.value if hasattr(agent_config.level, "value") else str(agent_config.level)
 
     current_level = cb._config.get("agent_level", "L1")
 
@@ -116,7 +108,8 @@ def _ensure_context_build_level(
         plugin_registry._plugins["context_build"] = new_cb
         logger.debug(
             "Auto-inject agent_level=%s into context_build (was %s)",
-            level_value, current_level,
+            level_value,
+            current_level,
         )
     except Exception:
         logger.debug("Failed to auto-inject agent_level into context_build")
@@ -158,9 +151,7 @@ def apply_agent_plugin_configs(
             new_plugin = type(existing)(config=merged_config)
             plugin_registry._plugins[name] = new_plugin
             # 同步 core_plugins 映射
-            for core_key, pname in list(
-                plugin_registry._core_plugins.items()
-            ):
+            for core_key, pname in list(plugin_registry._core_plugins.items()):
                 if pname == name:
                     plugin_registry._core_plugins[core_key] = name
             logger.debug(
@@ -205,6 +196,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
         _ml._llm_data = None
     try:
         from config.models import get_model_config_loader  # noqa: PLC0415
+
         _global_loader = get_model_config_loader()
         _global_loader._llm_data = None
     except Exception:
@@ -234,6 +226,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
         if _resolved_loader is None:
             try:
                 from config.models import get_model_config_loader  # noqa: PLC0415
+
                 _resolved_loader = get_model_config_loader()
             except Exception:
                 _resolved_loader = None
@@ -270,9 +263,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
 
             model_loader = get_model_config_loader()
         except Exception:
-            logger.warning(
-                "[apply_agent_model_override] ModelConfigLoader 不可用，跳过模型覆盖"
-            )
+            logger.warning("[apply_agent_model_override] ModelConfigLoader 不可用，跳过模型覆盖")
             return
 
     llm_conf = model_loader.get_llm_core_config(model_id)

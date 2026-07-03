@@ -9,6 +9,7 @@ TaskWorker 只负责启动子管道，子管道中的 Agent 通过 task_evaluate
 - Worker 是管道执行的中间层，CLI → Worker → Engine
 - TaskWorker 是后台任务处理器，CLI → Engine（直接），TaskWorker（后台）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -50,6 +51,7 @@ def _reconstruct_tool_calls(messages: list[dict[str, Any]]) -> None:
         messages: 恢复的对话历史消息列表（原地修改）
     """
     import logging as _logging  # noqa: PLC0415
+
     _log = _logging.getLogger(__name__)
 
     i = 0
@@ -94,20 +96,23 @@ def _reconstruct_tool_calls(messages: list[dict[str, Any]]) -> None:
                 except (TypeError, ValueError):
                     fn_args = str(raw_args)
 
-            reconstructed.append({
-                "id": tc_id,
-                "type": "function",
-                "function": {
-                    "name": fn_name,
-                    "arguments": fn_args,
-                },
-            })
+            reconstructed.append(
+                {
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "arguments": fn_args,
+                    },
+                }
+            )
 
         if reconstructed:
             msg["tool_calls"] = reconstructed
             _log.debug(
                 "Reconstructed tool_calls for assistant msg[%d]: %d calls",
-                i, len(reconstructed),
+                i,
+                len(reconstructed),
             )
 
         i = j
@@ -177,6 +182,7 @@ class TaskWorker(
         # 通过 ServiceProvider 注册全局引用，供 task_manage cancel 调用
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             get_service_provider().register("task_worker", self)
         except Exception:
             logger.warning("TaskWorker: ServiceProvider 注册失败，不阻塞启动", exc_info=True)
@@ -208,6 +214,7 @@ class TaskWorker(
             resource_merge = ResourceMergeTool(base_path=project_root)
 
             from config.config_center import get_config_center  # noqa: PLC0415
+
             iso_config: dict[str, Any] = get_config_center().get("isolation/isolation_config.yaml") or {}
 
             ws_meta_store: dict[str, Any] = {}
@@ -224,6 +231,7 @@ class TaskWorker(
             # 通过 provider.get("workspace_lifecycle_manager") 获取同一实例。
             try:
                 from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
                 get_service_provider().register("workspace_lifecycle_manager", lifecycle)
             except Exception:
                 logger.warning(
@@ -236,8 +244,8 @@ class TaskWorker(
             )
         except Exception as exc:
             logger.warning(
-                "TaskWorker: WorkspaceLifecycleManager init failed, "
-                "lifecycle hooks will be skipped: %s", exc,
+                "TaskWorker: WorkspaceLifecycleManager init failed, lifecycle hooks will be skipped: %s",
+                exc,
             )
 
     async def stop(self) -> None:
@@ -272,6 +280,7 @@ class TaskWorker(
         if self._task_service:
             try:
                 from tasks.types import TaskStatus  # noqa: PLC0415
+
                 remaining_ids = list(self._contexts.keys())
                 for tid in remaining_ids:
                     try:

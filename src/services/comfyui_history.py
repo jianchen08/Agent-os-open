@@ -129,11 +129,7 @@ class GenerationHistory:
         """将历史记录持久化到 JSON 文件。"""
         try:
             self._file_path.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                "records": {
-                    rid: record.to_dict() for rid, record in self._records.items()
-                }
-            }
+            data = {"records": {rid: record.to_dict() for rid, record in self._records.items()}}
             tmp_path = self._file_path.with_suffix(".tmp")
             tmp_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),

@@ -142,7 +142,5 @@ class ScenePersistence:
         Args:
             scenes: 场景列表
         """
-        raw: dict[str, Any] = {
-            "scenes": {s.id: s.model_dump(mode="json") for s in scenes}
-        }
+        raw: dict[str, Any] = {"scenes": {s.id: s.model_dump(mode="json") for s in scenes}}
         self._write_all_raw(raw)

@@ -67,46 +67,22 @@ class ExecutionResult(BaseModel, Generic[T]):
     )
 
     # === 核心状态 ===
-    status: ExecutionStatus = Field(
-        default=ExecutionStatus.PENDING,
-        description="执行状态"
-    )
+    status: ExecutionStatus = Field(default=ExecutionStatus.PENDING, description="执行状态")
 
     # === 输出数据 ===
-    output: T | None = Field(
-        default=None,
-        description="输出数据"
-    )
+    output: T | None = Field(default=None, description="输出数据")
 
     # === 错误信息 ===
-    error: str | None = Field(
-        default=None,
-        description="错误信息"
-    )
-    error_code: str | None = Field(
-        default=None,
-        description="错误代码"
-    )
+    error: str | None = Field(default=None, description="错误信息")
+    error_code: str | None = Field(default=None, description="错误代码")
 
     # === 时间追踪 ===
-    started_at: datetime | None = Field(
-        default=None,
-        description="开始时间"
-    )
-    completed_at: datetime | None = Field(
-        default=None,
-        description="完成时间"
-    )
-    duration_ms: int | None = Field(
-        default=None,
-        description="执行时长（毫秒）"
-    )
+    started_at: datetime | None = Field(default=None, description="开始时间")
+    completed_at: datetime | None = Field(default=None, description="完成时间")
+    duration_ms: int | None = Field(default=None, description="执行时长（毫秒）")
 
     # === 元数据 ===
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="扩展元数据"
-    )
+    metadata: dict[str, Any] = Field(default_factory=dict, description="扩展元数据")
 
     # === 便捷属性 ===
 
@@ -139,37 +115,19 @@ class ExecutionResult(BaseModel, Generic[T]):
     @classmethod
     def create_running(cls, **kwargs: Any) -> "ExecutionResult[T]":
         """创建运行中状态的结果"""
-        return cls(
-            status=ExecutionStatus.RUNNING,
-            started_at=datetime.now(UTC),
-            **kwargs
-        )
+        return cls(status=ExecutionStatus.RUNNING, started_at=datetime.now(UTC), **kwargs)
 
     @classmethod
     def create_completed(cls, output: T, **kwargs: Any) -> "ExecutionResult[T]":
         """创建成功完成的结果"""
         now = datetime.now(UTC)
-        return cls(
-            status=ExecutionStatus.COMPLETED,
-            output=output,
-            completed_at=now,
-            **kwargs
-        )
+        return cls(status=ExecutionStatus.COMPLETED, output=output, completed_at=now, **kwargs)
 
     @classmethod
-    def create_failed(
-        cls,
-        error: str,
-        error_code: str | None = None,
-        **kwargs: Any
-    ) -> "ExecutionResult[T]":
+    def create_failed(cls, error: str, error_code: str | None = None, **kwargs: Any) -> "ExecutionResult[T]":
         """创建失败结果"""
         return cls(
-            status=ExecutionStatus.FAILED,
-            error=error,
-            error_code=error_code,
-            completed_at=datetime.now(UTC),
-            **kwargs
+            status=ExecutionStatus.FAILED, error=error, error_code=error_code, completed_at=datetime.now(UTC), **kwargs
         )
 
     # === 序列化方法 ===
@@ -201,18 +159,12 @@ class ExecutionResult(BaseModel, Generic[T]):
                     # 整段回灌进上下文。此处只保留 added/removed 等统计量给 LLM。
                     # diff_omitted 同样无意义，一并剔除。
                     if isinstance(serialized, dict):
-                        serialized = {
-                            k: v for k, v in serialized.items()
-                            if k not in _SLIM_OUTPUT_EXCLUDE
-                        }
+                        serialized = {k: v for k, v in serialized.items() if k not in _SLIM_OUTPUT_EXCLUDE}
                     result["output"] = serialized
                 if self.metadata:
                     # slim 模式排除大体积字段，避免 base64 污染 LLM 文本上下文
                     _slim_exclude = {"action", "multimodal_content"}
-                    non_excluded = {
-                        k: v for k, v in self.metadata.items()
-                        if k not in _slim_exclude
-                    }
+                    non_excluded = {k: v for k, v in self.metadata.items() if k not in _slim_exclude}
                     if non_excluded:
                         result["metadata"] = non_excluded
             return result

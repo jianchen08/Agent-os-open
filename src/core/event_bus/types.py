@@ -99,17 +99,13 @@ class EventPriority(int, Enum):
 class ExecutionEvent(BaseModel):
     """执行事件数据模型"""
 
-    event_id: str = Field(
-        default_factory=lambda: uuid.uuid4().hex[:12], description="事件唯一 ID"
-    )
+    event_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12], description="事件唯一 ID")
     event_type: EventType = Field(..., description="事件类型")
     session_id: str = Field(..., description="会话/执行 ID")
     data: dict[str, Any] = Field(default_factory=dict, description="事件数据")
     timestamp: datetime = Field(default_factory=datetime.now, description="事件时间戳")
     metadata: dict[str, Any] = Field(default_factory=dict, description="元数据")
-    priority: EventPriority = Field(
-        default=EventPriority.NORMAL, description="事件优先级"
-    )
+    priority: EventPriority = Field(default=EventPriority.NORMAL, description="事件优先级")
     source: str | None = Field(None, description="事件来源（进程/实例标识）")
 
     def to_dict(self) -> dict[str, Any]:
@@ -188,8 +184,7 @@ class EventFilter:
         """检查事件是否匹配过滤器"""
         if self.event_types and event.event_type not in self.event_types:
             _logger.debug(
-                "[EventFilter] 匹配失败 | reason=event_types "
-                "| event_type=%s | required=%s",
+                "[EventFilter] 匹配失败 | reason=event_types | event_type=%s | required=%s",
                 event.event_type.value,
                 [et.value for et in self.event_types],
             )
@@ -198,41 +193,40 @@ class EventFilter:
         if self.custom_event_types:
             if event.event_type != EventType.CUSTOM:
                 _logger.debug(
-                    "[EventFilter] 匹配失败 | reason=not_custom "
-                    "| event_type=%s",
+                    "[EventFilter] 匹配失败 | reason=not_custom | event_type=%s",
                     event.event_type.value,
                 )
                 return False
             custom_type = event.data.get("custom_event_type", "")
             if custom_type not in self.custom_event_types:
                 _logger.debug(
-                    "[EventFilter] 匹配失败 | reason=custom_type_mismatch "
-                    "| custom_type=%s | required=%s",
-                    custom_type, self.custom_event_types,
+                    "[EventFilter] 匹配失败 | reason=custom_type_mismatch | custom_type=%s | required=%s",
+                    custom_type,
+                    self.custom_event_types,
                 )
                 return False
 
         if self.session_ids and event.session_id not in self.session_ids:
             _logger.debug(
-                "[EventFilter] 匹配失败 | reason=session_id "
-                "| session_id=%s | required=%s",
-                event.session_id, self.session_ids,
+                "[EventFilter] 匹配失败 | reason=session_id | session_id=%s | required=%s",
+                event.session_id,
+                self.session_ids,
             )
             return False
 
         if self.min_priority and event.priority.value < self.min_priority.value:
             _logger.debug(
-                "[EventFilter] 匹配失败 | reason=priority "
-                "| event_priority=%s | min_priority=%s",
-                event.priority.value, self.min_priority.value,
+                "[EventFilter] 匹配失败 | reason=priority | event_priority=%s | min_priority=%s",
+                event.priority.value,
+                self.min_priority.value,
             )
             return False
 
         if self.sources and event.source not in self.sources:
             _logger.debug(
-                "[EventFilter] 匹配失败 | reason=source "
-                "| source=%s | required=%s",
-                event.source, self.sources,
+                "[EventFilter] 匹配失败 | reason=source | source=%s | required=%s",
+                event.source,
+                self.sources,
             )
             return False
 

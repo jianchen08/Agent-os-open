@@ -51,6 +51,7 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
                    timestamps: {createdAt, updatedAt}}}
     """
     from datetime import datetime, timezone  # noqa: PLC0415
+
     now = datetime.now(timezone.utc).isoformat()
     return {
         "project": {
@@ -98,6 +99,7 @@ async def get_task_tree(  # noqa: PLR0912,PLR0915
         related_pipeline_ids: set[str] = set()
         try:
             from channels.api.routes_threads import store as api_store  # noqa: PLC0415
+
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
@@ -231,7 +233,9 @@ def _task_to_tree_item(task: Any, session_id: str | None = None) -> dict[str, An
     _ws_meta = _metadata.get("ws_meta", {}) or {}
 
     _agent_level = getattr(task, "agent_level", None)
-    _agent_level_str = _agent_level.value if _agent_level and hasattr(_agent_level, "value") else str(_agent_level or "")
+    _agent_level_str = (
+        _agent_level.value if _agent_level and hasattr(_agent_level, "value") else str(_agent_level or "")
+    )
 
     return {
         "id": task.id,
@@ -349,12 +353,16 @@ async def create_user(
 
 
 @users_router.api_route("/{user_id}/role", methods=["PUT", "PATCH"], summary="更新用户角色")
-async def update_user_role(user_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def update_user_role(
+    user_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     return {"id": user_id, "role": "user"}
 
 
 @users_router.api_route("/{user_id}/active", methods=["PUT", "PATCH"], summary="更新用户激活状态")
-async def update_user_active(user_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def update_user_active(
+    user_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     return {"id": user_id, "is_active": True}
 
 
@@ -369,7 +377,9 @@ async def get_user_settings(_user: dict = Depends(require_auth)) -> dict[str, An
 
 
 @users_router.put("/settings", summary="更新用户设置")
-async def update_user_settings(body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def update_user_settings(
+    body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     return {"settings": {}, "message": "设置已更新"}
 
 
@@ -414,8 +424,10 @@ def _get_token_usage() -> dict[str, Any]:
     Returns:
         包含 total_tokens, prompt_tokens, completion_tokens, request_count 的字典
     """
+
     def _strategy_execution_record_storage() -> dict[str, Any] | None:
         from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
+
         storage = get_execution_record_storage()
         if storage is None:
             return None
@@ -443,6 +455,7 @@ def _get_token_usage() -> dict[str, Any]:
 
     def _strategy_usage_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         monitor = provider.get("usage_monitor")
         if monitor is None:
@@ -460,6 +473,7 @@ def _get_token_usage() -> dict[str, Any]:
 
     def _strategy_perf_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
         if perf_monitor is None:
@@ -524,13 +538,16 @@ def _get_system_metrics() -> dict[str, Any]:
     2. psutil 直接采集
     3. 零值兜底
     """
+
     def _strategy_perf_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
         if perf_monitor is None or not hasattr(perf_monitor, "get_system_metrics"):
             return None
         import asyncio  # noqa: PLC0415
+
         loop = asyncio.get_event_loop()
         if loop.is_running():
             # 不能在运行中的事件循环里 await，用 psutil 直接采集
@@ -615,13 +632,18 @@ def _get_task_statistics() -> dict[str, Any]:
     2. 零值兜底
     """
     _default = {
-        "total": 0, "succeeded": 0, "failed": 0,
-        "running": 0, "pending": 0,
-        "avg_duration": 0, "success_rate": 0,
+        "total": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "running": 0,
+        "pending": 0,
+        "avg_duration": 0,
+        "success_rate": 0,
     }
 
     def _strategy_task_service() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         provider = get_service_provider()
         task_service = provider.get("task_service")
         if task_service is None or not hasattr(task_service, "get_all_tasks"):
@@ -767,7 +789,8 @@ async def get_monitoring_tasks(
                 tasks.append(_taskmodel_to_monitoring_dict(tm))
         except Exception as exc:
             logger.warning(
-                "monitoring/tasks: 从 TaskStorage 加载任务失败: %s", exc,
+                "monitoring/tasks: 从 TaskStorage 加载任务失败: %s",
+                exc,
             )
 
     # ── 转换为前端 TaskInfo 格式并筛选 ──
@@ -863,7 +886,9 @@ async def create_trigger(body: dict[str, Any] | None = None, _user: dict = Depen
 
 
 @triggers_router.put("/{trigger_id}", summary="更新触发器")
-async def update_trigger(trigger_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def update_trigger(
+    trigger_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     return {"id": trigger_id, "message": "触发器已更新"}
 
 
@@ -992,7 +1017,9 @@ async def mark_viewed(
 # ---------------------------------------------------------------------------
 # Agent Calls 路由 - /api/v1/agent-calls
 # ---------------------------------------------------------------------------
-agent_calls_router = APIRouter(prefix="/api/v1/agent-calls", tags=["Agent调用记录"], dependencies=[Depends(require_auth)])
+agent_calls_router = APIRouter(
+    prefix="/api/v1/agent-calls", tags=["Agent调用记录"], dependencies=[Depends(require_auth)]
+)
 
 
 @agent_calls_router.get("", summary="获取调用记录列表")
@@ -1294,14 +1321,18 @@ async def get_session_total_token_usage(session_id: str, _user: dict = Depends(r
 
 
 @sessions_router.get("/{session_id}/context-token-usage", summary="获取上下文Token用量")
-async def get_session_context_token_usage(session_id: str, parent_execution_record_id: str | None = Query(default=None), _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def get_session_context_token_usage(
+    session_id: str, parent_execution_record_id: str | None = Query(default=None), _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     return {"current_context_tokens": 0, "is_estimated": True, "model": "default"}
 
 
 # ---------------------------------------------------------------------------
 # Knowledge Base 路由 - /api/v1/knowledge-base
 # ---------------------------------------------------------------------------
-knowledge_base_router = APIRouter(prefix="/api/v1/knowledge-base", tags=["知识库"], dependencies=[Depends(require_auth)])
+knowledge_base_router = APIRouter(
+    prefix="/api/v1/knowledge-base", tags=["知识库"], dependencies=[Depends(require_auth)]
+)
 
 
 @knowledge_base_router.get("", summary="获取知识库列表")
@@ -1479,7 +1510,9 @@ async def get_trends(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Evaluation Metrics 别名路由 - /api/v1/evaluation-metrics
 # ---------------------------------------------------------------------------
-eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=["评估指标别名"], dependencies=[Depends(require_auth)])
+eval_metrics_alias_router = APIRouter(
+    prefix="/api/v1/evaluation-metrics", tags=["评估指标别名"], dependencies=[Depends(require_auth)]
+)
 
 
 @eval_metrics_alias_router.get("", summary="获取评估指标列表（别名）")
@@ -1493,18 +1526,16 @@ async def list_eval_metrics_alias(
 ) -> dict[str, Any]:
     try:
         from channels.api.routes_evaluation import _get_metric_loader, _metric_to_response  # noqa: PLC0415
+
         loader = _get_metric_loader()
         if loader is None:
             return {"metrics": [], "total": 0}
         metrics = list(loader.metrics.values())
         if metric_type:
             metrics = [
-                m for m in metrics
-                if (
-                    m.metric_type.value
-                    if hasattr(m.metric_type, "value")
-                    else str(m.metric_type)
-                ) == metric_type
+                m
+                for m in metrics
+                if (m.metric_type.value if hasattr(m.metric_type, "value") else str(m.metric_type)) == metric_type
             ]
         if tag:
             metrics = [m for m in metrics if tag in m.tags]
@@ -1523,6 +1554,7 @@ async def list_eval_metrics_alias(
 async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     try:
         from channels.api.routes_evaluation import _get_metric_loader, _metric_to_detail  # noqa: PLC0415
+
         loader = _get_metric_loader()
         if loader is None:
             raise APIError(status_code=404, error_code="API_NOTF_2004", message="评估指标加载器未初始化")  # noqa: F821
@@ -1621,7 +1653,15 @@ async def get_model_file_capabilities(
 
 @files_router.post("/upload", summary="上传文件")
 async def upload_file(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"file_id": "stub", "filename": "", "mime_type": "", "size": 0, "file_type": "document", "base64_data": "", "uploaded_at": ""}
+    return {
+        "file_id": "stub",
+        "filename": "",
+        "mime_type": "",
+        "size": 0,
+        "file_type": "document",
+        "base64_data": "",
+        "uploaded_at": "",
+    }
 
 
 @files_router.get("/supported-types", summary="获取支持的文件类型")
@@ -1731,7 +1771,8 @@ async def get_task_ac(task_id: str, _user: dict = Depends(require_auth)) -> dict
 
 @task_phase_router.post("/{task_id}/ac/{ac_id}/evaluate", summary="评估单个验收标准")
 async def evaluate_ac(
-    task_id: str, ac_id: str,
+    task_id: str,
+    ac_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """评估单个验收标准。
@@ -1761,7 +1802,8 @@ async def evaluate_all_ac(task_id: str, _user: dict = Depends(require_auth)) -> 
 
 @task_phase_router.get("/{task_id}/ac/{ac_id}/result", summary="获取验收标准评估结果")
 async def get_ac_result(
-    task_id: str, ac_id: str,
+    task_id: str,
+    ac_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """获取验收标准的评估结果。

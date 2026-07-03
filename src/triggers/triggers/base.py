@@ -59,9 +59,7 @@ class BaseTrigger(ABC):
             ExecutionResult: 执行结果
         """
 
-    async def execute_actions(
-        self, context: dict[str, Any] | None = None
-    ) -> ExecutionResult:
+    async def execute_actions(self, context: dict[str, Any] | None = None) -> ExecutionResult:
         """
         执行所有配置的动作
 
@@ -73,9 +71,7 @@ class BaseTrigger(ABC):
         """
         if not self.config.actions:
             logger.warning(f"触发器 {self.name} 没有配置动作")
-            return ExecutionResult(
-                success=True, message="没有配置动作", data={"trigger_id": self.id}
-            )
+            return ExecutionResult(success=True, message="没有配置动作", data={"trigger_id": self.id})
 
         results = []
         errors = []
@@ -85,9 +81,7 @@ class BaseTrigger(ABC):
 
         for action_config in sorted_actions:
             try:
-                result = await self.action_executor.execute(
-                    action_config, context or {}
-                )
+                result = await self.action_executor.execute(action_config, context or {})
                 results.append(result)
 
                 if not result.success:
@@ -105,11 +99,7 @@ class BaseTrigger(ABC):
         success = len(errors) == 0
         self.last_result = ExecutionResult(
             success=success,
-            message=(
-                f"执行 {len(results)} 个动作, {len(errors)} 个失败"
-                if errors
-                else "所有动作执行成功"
-            ),
+            message=(f"执行 {len(results)} 个动作, {len(errors)} 个失败" if errors else "所有动作执行成功"),
             data={
                 "trigger_id": self.id,
                 "action_results": [r.to_dict() for r in results],
@@ -152,9 +142,7 @@ class BaseTrigger(ABC):
             "trigger_type": self.trigger_type.value,
             "enabled": self.enabled,
             "execution_count": self.execution_count,
-            "last_execution": (
-                self.last_execution.isoformat() if self.last_execution else None
-            ),
+            "last_execution": (self.last_execution.isoformat() if self.last_execution else None),
             "last_result": self.last_result.to_dict() if self.last_result else None,
             "config": self.config.to_dict(),
         }

@@ -51,7 +51,8 @@ def get_global_agent_registry_sync() -> AgentRegistry:
                 )
             except Exception as exc:
                 logger.warning(
-                    "[GlobalAgentRegistry] 同步加载失败: %s", exc,
+                    "[GlobalAgentRegistry] 同步加载失败: %s",
+                    exc,
                 )
     return _global_agent_registry
 
@@ -76,9 +77,7 @@ async def get_global_agent_registry(
         async with _registry_lock:
             # 双重检查锁定
             if _global_agent_registry is None or force_reload:
-                logger.info(
-                    "[GlobalAgentRegistry] 初始化全局 Agent 注册表..."
-                )
+                logger.info("[GlobalAgentRegistry] 初始化全局 Agent 注册表...")
                 _global_agent_registry = AgentRegistry()
 
                 if _DEFAULT_CONFIG_DIR.exists():
@@ -92,7 +91,8 @@ async def get_global_agent_registry(
                         )
                     except Exception as exc:
                         logger.warning(
-                            "[GlobalAgentRegistry] 加载失败: %s", exc,
+                            "[GlobalAgentRegistry] 加载失败: %s",
+                            exc,
                         )
 
                 _initialized = True

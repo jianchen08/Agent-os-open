@@ -98,9 +98,7 @@ class PluginChain:
 
         return results
 
-    async def _execute_plugin(
-        self, plugin: IPlugin, ctx: PluginContext
-    ) -> PluginResult:
+    async def _execute_plugin(self, plugin: IPlugin, ctx: PluginContext) -> PluginResult:
         """执行单个插件，内建错误策略处理。
 
         - ABORT: 记录错误，返回 skip_remaining=True

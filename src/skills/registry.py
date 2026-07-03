@@ -12,6 +12,7 @@
 - 渐进式披露：先扫 frontmatter 索引，按需读全文
 - 失败兜底：扫描失败不影响整体，错误记录日志
 """
+
 from __future__ import annotations
 
 import logging
@@ -172,7 +173,9 @@ class SkillRegistry:
                         self._name_index[skill.skill_name.lower()] = skill
                     except Exception as exc:
                         logger.warning(
-                            "[SkillRegistry] 解析 Skill 失败: %s | %s", entry, exc,
+                            "[SkillRegistry] 解析 Skill 失败: %s | %s",
+                            entry,
+                            exc,
                         )
         except Exception as exc:
             logger.warning("[SkillRegistry] 扫描目录失败: %s | %s", root, exc)
@@ -261,8 +264,7 @@ class SkillRegistry:
                 if query_lower and query_lower != skill.skill_name.lower():
                     continue
             elif query_lower and (
-                query_lower not in skill.skill_name.lower()
-                and query_lower not in skill.description.lower()
+                query_lower not in skill.skill_name.lower() and query_lower not in skill.description.lower()
             ):
                 continue
 
@@ -302,7 +304,9 @@ class SkillRegistry:
                 workspace_path.mkdir(parents=True, exist_ok=True)
             except Exception as exc:
                 logger.error(
-                    "[SkillRegistry] 无法创建工作空间: %s | %s", workspace, exc,
+                    "[SkillRegistry] 无法创建工作空间: %s | %s",
+                    workspace,
+                    exc,
                 )
                 return []
 
@@ -330,7 +334,9 @@ class SkillRegistry:
                 target.symlink_to(source, target_is_directory=True)
                 mounted.append(skill.skill_name)
                 logger.info(
-                    "[SkillRegistry] Skill 软链已建立: %s → %s", target, source,
+                    "[SkillRegistry] Skill 软链已建立: %s → %s",
+                    target,
+                    source,
                 )
             except OSError as symlink_err:
                 # Windows 非管理员权限下符号链接可能失败 → 降级为复制

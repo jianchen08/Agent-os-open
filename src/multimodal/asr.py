@@ -149,7 +149,9 @@ def load_asr_config(config_path: Path | None = None) -> ASRConfig:
     )
     logger.info(
         "[ASR] 配置已加载: provider=%s, model=%s, enabled=%s",
-        default_provider or "(fallback)", config.model, config.enabled,
+        default_provider or "(fallback)",
+        config.model,
+        config.enabled,
     )
     return config
 
@@ -216,7 +218,10 @@ class ASRService:
 
         logger.info(
             "[ASR] 提交转写: size=%d bytes, mime=%s, model=%s, lang=%s",
-            len(audio_bytes), mime_type, self._config.model, lang,
+            len(audio_bytes),
+            mime_type,
+            self._config.model,
+            lang,
         )
 
         form = aiohttp.FormData()
@@ -227,17 +232,18 @@ class ASRService:
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
 
         try:
-            async with aiohttp.ClientSession() as session, session.post(
-                url,
-                data=form,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=self._config.timeout),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    url,
+                    data=form,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=self._config.timeout),
+                ) as resp,
+            ):
                 if resp.status != 200:
                     error_text = await resp.text()
-                    raise RuntimeError(
-                        f"ASR API 调用失败 (status={resp.status}): {error_text}"
-                    )
+                    raise RuntimeError(f"ASR API 调用失败 (status={resp.status}): {error_text}")
                 result = await resp.json()
         except aiohttp.ClientError as exc:
             raise RuntimeError(f"ASR 网络请求失败: {exc}") from exc

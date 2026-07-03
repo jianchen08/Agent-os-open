@@ -40,9 +40,7 @@ _TOKEN_PATTERNS = [
     ("SKIP", r"\s+"),
 ]
 
-_TOKEN_RE = re.compile(
-    "|".join(f"(?P<{name}>{pattern})" for name, pattern in _TOKEN_PATTERNS)
-)
+_TOKEN_RE = re.compile("|".join(f"(?P<{name}>{pattern})" for name, pattern in _TOKEN_PATTERNS))
 
 
 def _tokenize(expr: str) -> list[tuple[str, str]]:

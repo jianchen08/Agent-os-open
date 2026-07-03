@@ -98,9 +98,7 @@ def verify_token(token: str, token_type: str = "access") -> dict[str, Any] | Non
         # 先用 TokenManager 验证（含撤销检查），再 decode 获取完整 payload
         manager.verify_token(token, token_type=token_type)
         # 验证通过后，decode 获取完整 payload（含 username 等自定义字段）
-        payload = _jwt.decode(
-            token, manager.secret_key, algorithms=[manager.algorithm]
-        )
+        payload = _jwt.decode(token, manager.secret_key, algorithms=[manager.algorithm])
         return payload
     except Exception as exc:
         logger.warning("Token 验证失败: %s", exc)

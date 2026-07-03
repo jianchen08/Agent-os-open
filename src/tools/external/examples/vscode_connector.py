@@ -248,7 +248,9 @@ class VSCodeConnector(ExternalToolAdapter):
 
         except Exception as e:
             self._logger.error(
-                "VSCode 操作失败 | op=%s | error=%s", operation, e,
+                "VSCode 操作失败 | op=%s | error=%s",
+                operation,
+                e,
             )
             return {"success": False, "error": str(e), "operation": operation}
 

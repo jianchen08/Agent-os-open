@@ -23,10 +23,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 # 没有 Provider 时的友好提示
-_NO_PROVIDER_MESSAGE = (
-    "音乐生成功能暂未配置 Provider，"
-    "请配置 Suno 等 Provider 后使用"
-)
+_NO_PROVIDER_MESSAGE = "音乐生成功能暂未配置 Provider，请配置 Suno 等 Provider 后使用"
 
 
 def _enrich_music_schema(tool: Tool, services: dict[str, Any]) -> Tool:
@@ -50,10 +47,7 @@ def _enrich_music_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     enriched.input_schema.setdefault("properties", {})
     enriched.input_schema["properties"]["provider"] = {
         "type": "string",
-        "description": (
-            f"指定使用的音乐生成服务。"
-            f"当前可用: {', '.join(provider_names)}。不填则自动选择。"
-        ),
+        "description": (f"指定使用的音乐生成服务。当前可用: {', '.join(provider_names)}。不填则自动选择。"),
         "enum": provider_names + ["auto"],
     }
 
@@ -92,8 +86,7 @@ class MusicGenerateTool(BuiltinTool):
         return Tool(
             name="music_generate",
             description=(
-                "音乐生成工具。根据文本描述生成音乐内容，"
-                "当前为基线版本，支持通过 Suno 等 Provider 执行生成。"
+                "音乐生成工具。根据文本描述生成音乐内容，当前为基线版本，支持通过 Suno 等 Provider 执行生成。"
             ),
             when_to_use=[
                 "需要根据文本描述生成音乐片段",
@@ -150,9 +143,7 @@ class MusicGenerateTool(BuiltinTool):
         """获取音乐生成工具的 Schema 丰富器。"""
         return _enrich_music_schema
 
-    async def execute(
-        self, inputs: dict[str, Any]
-    ) -> Any:
+    async def execute(self, inputs: dict[str, Any]) -> Any:
         """执行音乐生成。
 
         尝试通过 MediaProviderRegistry 获取 MUSIC ProviderChain 并调用。

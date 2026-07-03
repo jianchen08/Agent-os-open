@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # ─── 常量 ───────────────────────────────────────────────
 DEFAULT_MAX_SIZE = 1 * 1024 * 1024 * 1024  # 1 GB
-DEFAULT_SEGMENT_SIZE = 4 * 1024 * 1024     # 4 MB per segment
+DEFAULT_SEGMENT_SIZE = 4 * 1024 * 1024  # 4 MB per segment
 DEFAULT_MAX_CONNECTIONS = 8
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_TIMEOUT = 300
@@ -69,7 +69,7 @@ def _sanitize_filename(name: str) -> str:
     """清洗文件名：去除路径分隔符，防止路径穿越"""
     name = os.path.basename(name)  # noqa: PTH119
     # 仅保留安全字符
-    name = re.sub(r'[^\w\s\.\-\u4e00-\u9fff]', '_', name)
+    name = re.sub(r"[^\w\s\.\-\u4e00-\u9fff]", "_", name)
     # 去除前后空白和点
     name = name.strip(". \t\n\r")
     if not name:
@@ -117,14 +117,13 @@ def _validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[boo
         return False, "URL 缺少主机名"
 
     # 3. 域名白名单（可选）
-    if allow_domains and hostname not in allow_domains and not any(
-        hostname.endswith(f".{d}") for d in allow_domains
-    ):
+    if allow_domains and hostname not in allow_domains and not any(hostname.endswith(f".{d}") for d in allow_domains):
         return False, f"域名 {hostname} 不在白名单中"
 
     # 4. SSRF 防护：DNS 解析后检查是否为内网 IP
     try:
         import socket  # noqa: PLC0415
+
         resolved_ips = socket.getaddrinfo(hostname, None)
         for entry in resolved_ips:
             ip_str = entry[4][0]
@@ -303,9 +302,7 @@ class DownloadTool(BuiltinTool):
             if expected_hash and result.get("path"):
                 actual_hash = await self._sha256_file(result["path"])
                 if actual_hash != expected_hash.lower():
-                    return create_failure_result(
-                        f"哈希校验失败: 期望 {expected_hash}, 实际 {actual_hash}"
-                    )
+                    return create_failure_result(f"哈希校验失败: 期望 {expected_hash}, 实际 {actual_hash}")
 
             # ── 构建返回结果 ──
             file_size = result.get("size", 0)
@@ -366,16 +363,13 @@ class DownloadTool(BuiltinTool):
             client_kwargs["proxy"] = proxy
 
         async with httpx.AsyncClient(**client_kwargs) as client:
-
             # ── Step 1: HEAD 探测 ──
             content_length = 0
             accept_ranges = False
             etag = ""
             head_headers = httpx.Headers()
             try:
-                head_resp = await self._retry_request(
-                    client.head, url, max_retries=min(max_retries, 2)
-                )
+                head_resp = await self._retry_request(client.head, url, max_retries=min(max_retries, 2))
                 content_length = int(head_resp.headers.get("content-length", 0))
                 accept_ranges = head_resp.headers.get("accept-ranges", "").lower() == "bytes"
                 etag = head_resp.headers.get("etag", "")
@@ -385,10 +379,7 @@ class DownloadTool(BuiltinTool):
 
             # 确定文件名（无论 HEAD 是否成功都需要）
             if not filename:
-                filename = (
-                    _extract_filename_from_headers(head_headers)
-                    or _extract_filename_from_url(url)
-                )
+                filename = _extract_filename_from_headers(head_headers) or _extract_filename_from_url(url)
             filename = _sanitize_filename(filename)
 
             final_path = save_dir / filename
@@ -408,10 +399,7 @@ class DownloadTool(BuiltinTool):
 
             # ── 文件大小校验 ──
             if max_size > 0 and content_length > 0 and content_length > max_size:
-                raise ValueError(
-                    f"文件大小 {content_length} 字节超过上限 {max_size} 字节"
-                    f"({_format_size(max_size)})"
-                )
+                raise ValueError(f"文件大小 {content_length} 字节超过上限 {max_size} 字节({_format_size(max_size)})")
 
             # ── Step 2: 检查断点续传状态 ──
             resumed = False
@@ -535,10 +523,7 @@ class DownloadTool(BuiltinTool):
                         actual_size = part_file.stat().st_size
                         expected_size = end - start + 1
                         if actual_size != expected_size:
-                            raise OSError(
-                                f"分片 {seg_idx} 大小不匹配: "
-                                f"期望 {expected_size}, 实际 {actual_size}"
-                            )
+                            raise OSError(f"分片 {seg_idx} 大小不匹配: 期望 {expected_size}, 实际 {actual_size}")
 
                         completed_segments.add(seg_idx)
                         _save_state(completed_segments)
@@ -547,10 +532,8 @@ class DownloadTool(BuiltinTool):
 
                     except Exception as e:
                         if attempt < max_retries:
-                            wait = min(2 ** attempt, 30)  # 指数退避，最多 30 秒
-                            logger.warning(
-                                f"分片 {seg_idx} 第 {attempt} 次重试: {e}，等待 {wait}s"
-                            )
+                            wait = min(2**attempt, 30)  # 指数退避，最多 30 秒
+                            logger.warning(f"分片 {seg_idx} 第 {attempt} 次重试: {e}，等待 {wait}s")
                             await asyncio.sleep(wait)
                         else:
                             raise RuntimeError(  # noqa: B904
@@ -628,9 +611,7 @@ class DownloadTool(BuiltinTool):
 
                         # 流式大小校验
                         if max_size > 0 and total_downloaded > max_size:
-                            raise ValueError(
-                                f"下载已超过大小上限 {max_size} 字节"
-                            )
+                            raise ValueError(f"下载已超过大小上限 {max_size} 字节")
 
                         f.write(chunk)
 
@@ -649,7 +630,7 @@ class DownloadTool(BuiltinTool):
 
             except Exception as e:
                 if attempt < max_retries:
-                    wait = min(2 ** attempt, 30)
+                    wait = min(2**attempt, 30)
                     logger.warning(f"第 {attempt} 次重试: {e}，等待 {wait}s")
                     await asyncio.sleep(wait)
                 else:
@@ -660,9 +641,7 @@ class DownloadTool(BuiltinTool):
     # 工具方法
     # ────────────────────────────────────────────────────────
 
-    async def _retry_request(
-        self, method, url: str, max_retries: int = 3, **kwargs
-    ) -> httpx.Response:
+    async def _retry_request(self, method, url: str, max_retries: int = 3, **kwargs) -> httpx.Response:
         """带指数退避的重试请求"""
         last_error = None
         for attempt in range(1, max_retries + 1):
@@ -673,7 +652,7 @@ class DownloadTool(BuiltinTool):
             except Exception as e:
                 last_error = e
                 if attempt < max_retries:
-                    wait = min(2 ** attempt, 30)
+                    wait = min(2**attempt, 30)
                     logger.debug(f"请求重试 {attempt}/{max_retries}: {e}，等待 {wait}s")
                     await asyncio.sleep(wait)
         raise RuntimeError(f"请求失败（已重试 {max_retries} 次）: {last_error}")

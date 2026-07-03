@@ -34,7 +34,10 @@ class ExternalToolException(DomainException):
         if tool_name:
             error_details["tool_name"] = tool_name
         super().__init__(
-            message=message, code=code or self.DEFAULT_CODE, details=error_details, cause=cause,
+            message=message,
+            code=code or self.DEFAULT_CODE,
+            details=error_details,
+            cause=cause,
         )
         self.tool_name = tool_name
 

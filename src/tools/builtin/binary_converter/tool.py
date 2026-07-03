@@ -18,35 +18,94 @@ from tools.types import (
 )
 
 # 文档类扩展名 — markitdown 可转换
-DOCUMENT_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".doc",
-    ".xlsx", ".xls", ".csv",
-    ".pptx", ".ppt",
-})
+DOCUMENT_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".xlsx",
+        ".xls",
+        ".csv",
+        ".pptx",
+        ".ppt",
+    }
+)
 
 # 图片类扩展名 — markitdown 可转换（含 OCR/描述）
-IMAGE_EXTENSIONS = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
-    ".tiff", ".tif", ".svg",
-})
+IMAGE_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".webp",
+        ".tiff",
+        ".tif",
+        ".svg",
+    }
+)
 
 # 拒绝的扩展名 — 音视频/压缩包/可执行文件
-REJECTED_EXTENSIONS = frozenset({
-    # 音视频
-    ".mp3", ".mp4", ".wav", ".avi", ".mkv", ".mov",
-    ".flv", ".wmv", ".webm", ".m4a", ".aac", ".ogg", ".flac",
-    # 压缩包
-    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".iso",
-    # 可执行文件
-    ".exe", ".dll", ".so", ".dylib", ".o", ".obj", ".a", ".lib",
-    # 数据/编译产物
-    ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
-    ".pyc", ".pyd", ".pyo", ".class", ".jar", ".war",
-    # 字体
-    ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    # 其他二进制
-    ".node", ".wasm",
-})
+REJECTED_EXTENSIONS = frozenset(
+    {
+        # 音视频
+        ".mp3",
+        ".mp4",
+        ".wav",
+        ".avi",
+        ".mkv",
+        ".mov",
+        ".flv",
+        ".wmv",
+        ".webm",
+        ".m4a",
+        ".aac",
+        ".ogg",
+        ".flac",
+        # 压缩包
+        ".zip",
+        ".rar",
+        ".7z",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".zst",
+        ".cab",
+        ".iso",
+        # 可执行文件
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".obj",
+        ".a",
+        ".lib",
+        # 数据/编译产物
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
+        ".pyc",
+        ".pyd",
+        ".pyo",
+        ".class",
+        ".jar",
+        ".war",
+        # 字体
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        # 其他二进制
+        ".node",
+        ".wasm",
+    }
+)
 
 MAX_BINARY_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -95,8 +154,7 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:  # noqa: PLR0911
     category = get_file_category(path)
     if category not in ("document", "image"):
         return create_failure_result(
-            error=f"不支持转换此类型文件: {path.name}。"
-            f"支持：PDF、DOCX、XLSX、PPTX、PNG、JPG 等图片。",
+            error=f"不支持转换此类型文件: {path.name}。支持：PDF、DOCX、XLSX、PPTX、PNG、JPG 等图片。",
             error_code="BINARY_FILE_NOT_SUPPORTED",
         )
 
@@ -112,8 +170,7 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:  # noqa: PLR0911
         from markitdown import MarkItDown  # noqa: PLC0415
     except ImportError:
         return create_failure_result(
-            error=f"无法转换文件 {path.name}：需要安装 markitdown 库。\n"
-            f"安装命令：pip install markitdown",
+            error=f"无法转换文件 {path.name}：需要安装 markitdown 库。\n安装命令：pip install markitdown",
             error_code="MARKITDOWN_NOT_INSTALLED",
         )
 

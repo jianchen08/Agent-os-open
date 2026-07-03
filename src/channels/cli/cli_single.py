@@ -70,8 +70,7 @@ class CLISingleMixin:
                         running_tasks = [
                             (tid, t)
                             for tid, t in all_tasks.items()
-                            if hasattr(t, "status")
-                            and t.status.value in ("running", "pending")
+                            if hasattr(t, "status") and t.status.value in ("running", "pending")
                         ]
                         if running_tasks:
                             running_tasks.sort(
@@ -82,37 +81,22 @@ class CLISingleMixin:
                 except Exception:
                     pass
 
-            console.print(
-                f"\n[dim]L1 done: {elapsed_l1:.1f}s, "
-                f"{iters} iterations, pipeline={pipeline_id}[/dim]"
-            )
+            console.print(f"\n[dim]L1 done: {elapsed_l1:.1f}s, {iters} iterations, pipeline={pipeline_id}[/dim]")
             if task_ids:
-                console.print(
-                    f"[dim]Tasks submitted: {task_ids}, "
-                    f"waiting for completion...[/dim]\n"
-                )
+                console.print(f"[dim]Tasks submitted: {task_ids}, waiting for completion...[/dim]\n")
 
-                final_statuses = await self._wait_for_tasks_completion(
-                    ts, task_ids
-                )
+                final_statuses = await self._wait_for_tasks_completion(ts, task_ids)
 
                 if final_statuses and self._engine:
-                    await self._report_task_results(
-                        ts, task_ids, final_statuses, console
-                    )
+                    await self._report_task_results(ts, task_ids, final_statuses, console)
 
                 elapsed_total = _time.time() - t0
                 for tid in task_ids:
                     status = final_statuses.get(tid, "timeout")
-                    console.print(
-                        f"\n[bold]Task {tid}: {status}[/bold]"
-                    )
+                    console.print(f"\n[bold]Task {tid}: {status}[/bold]")
                 console.print(f"[dim]Total: {elapsed_total:.1f}s[/dim]")
             else:
-                console.print(
-                    f"\n[dim]No task submitted. "
-                    f"Response: {str(raw)[:300]}[/dim]"
-                )
+                console.print(f"\n[dim]No task submitted. Response: {str(raw)[:300]}[/dim]")
 
         finally:
             # 确保 TaskWorker 和 LiteLLM 资源始终被清理
@@ -154,16 +138,8 @@ class CLISingleMixin:
                     for tid in task_ids:
                         task = ts.get_task(tid)
                         if task:
-                            status = (
-                                task.status
-                                if hasattr(task, "status")
-                                else task.get("status", "?")
-                            )
-                            status_val = (
-                                status.value
-                                if hasattr(status, "value")
-                                else str(status)
-                            )
+                            status = task.status if hasattr(task, "status") else task.get("status", "?")
+                            status_val = status.value if hasattr(status, "value") else str(status)
                             if status_val in (
                                 "completed",
                                 "failed",
@@ -197,12 +173,8 @@ class CLISingleMixin:
             summary_lines = []
             for tid, st in final_statuses.items():
                 task_obj = ts.get_task(tid) if ts else None
-                title = (
-                    getattr(task_obj, "title", tid) if task_obj else tid
-                )
-                summary_lines.append(
-                    f"- 任务 [{title}](id={tid}): {st}"
-                )
+                title = getattr(task_obj, "title", tid) if task_obj else tid
+                summary_lines.append(f"- 任务 [{title}](id={tid}): {st}")
             summary_text = "\n".join(summary_lines)
             followup = (
                 f"[系统通知] 以下子任务已到达终态，"
@@ -219,8 +191,6 @@ class CLISingleMixin:
             )
             followup_raw = followup_result.get("raw_result", "")
             if followup_raw:
-                console.print(
-                    f"\n[bold green]Agent:[/bold green] {followup_raw}"
-                )
+                console.print(f"\n[bold green]Agent:[/bold green] {followup_raw}")
         except Exception as exc:
             logger.warning("run_single followup failed: %s", exc)

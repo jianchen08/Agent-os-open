@@ -21,11 +21,21 @@ logger = logging.getLogger(__name__)
 # ── 安全常量 ──────────────────────────────────────────────────
 
 # 跳过的目录（性能 + 安全）
-_SKIP_DIRS: frozenset[str] = frozenset({
-    ".git", "node_modules", "__pycache__", ".venv", "venv",
-    ".tox", "dist", "build", ".mypy_cache", ".pytest_cache",
-    ".workbuddy",
-})
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        "dist",
+        "build",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".workbuddy",
+    }
+)
 
 # 默认最大递归深度
 _DEFAULT_MAX_DEPTH: int = 20
@@ -175,9 +185,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             error_code="INVALID_SEARCH_TYPE",
         )
 
-    def _validate_search_path(
-        self, search_path_str: str, fallback_boundary: Path | None = None
-    ) -> ToolResult | None:
+    def _validate_search_path(self, search_path_str: str, fallback_boundary: Path | None = None) -> ToolResult | None:
         """校验搜索路径安全性。
 
         返回 None 表示通过；返回 ToolResult 表示校验失败。

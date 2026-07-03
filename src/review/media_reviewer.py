@@ -149,9 +149,7 @@ class ImageReviewer:
 
         allowed = [f.upper() for f in config.allowed_image_formats]
         if fmt.upper() not in allowed:
-            errors.append(
-                f"不支持的图片格式: {fmt}，允许的格式: {', '.join(allowed)}"
-            )
+            errors.append(f"不支持的图片格式: {fmt}，允许的格式: {', '.join(allowed)}")
         return errors
 
     @staticmethod
@@ -174,21 +172,13 @@ class ImageReviewer:
         warnings: list[str] = []
 
         if width < config.image_min_width:
-            errors.append(
-                f"图片宽度 {width}px 小于最小限制 {config.image_min_width}px"
-            )
+            errors.append(f"图片宽度 {width}px 小于最小限制 {config.image_min_width}px")
         if width > config.image_max_width:
-            errors.append(
-                f"图片宽度 {width}px 超过最大限制 {config.image_max_width}px"
-            )
+            errors.append(f"图片宽度 {width}px 超过最大限制 {config.image_max_width}px")
         if height < config.image_min_height:
-            errors.append(
-                f"图片高度 {height}px 小于最小限制 {config.image_min_height}px"
-            )
+            errors.append(f"图片高度 {height}px 小于最小限制 {config.image_min_height}px")
         if height > config.image_max_height:
-            errors.append(
-                f"图片高度 {height}px 超过最大限制 {config.image_max_height}px"
-            )
+            errors.append(f"图片高度 {height}px 超过最大限制 {config.image_max_height}px")
 
         return errors, warnings
 
@@ -239,6 +229,7 @@ class ImageReviewer:
                     if isinstance(value, tuple):
                         try:
                             from fractions import Fraction  # noqa: PLC0415
+
                             value = float(Fraction(value[0], value[1]))
                         except (ZeroDivisionError, TypeError, IndexError):
                             value = str(value)
@@ -311,9 +302,7 @@ class VideoReviewer:
         errors.extend(format_errors)
 
         # ---- 时长检查 ----
-        duration_errors, duration_warnings = VideoReviewer._check_duration(
-            duration, cfg
-        )
+        duration_errors, duration_warnings = VideoReviewer._check_duration(duration, cfg)
         errors.extend(duration_errors)
         warnings.extend(duration_warnings)
 
@@ -452,9 +441,7 @@ class VideoReviewer:
 
         allowed = [f.upper() for f in config.allowed_video_formats]
         if fmt.upper() not in allowed:
-            errors.append(
-                f"不支持的视频格式: {fmt}，允许的格式: {', '.join(allowed)}"
-            )
+            errors.append(f"不支持的视频格式: {fmt}，允许的格式: {', '.join(allowed)}")
         return errors
 
     @staticmethod
@@ -475,13 +462,9 @@ class VideoReviewer:
         warnings: list[str] = []
 
         if duration < config.video_min_duration:
-            errors.append(
-                f"视频时长 {duration:.2f}s 小于最短限制 {config.video_min_duration}s"
-            )
+            errors.append(f"视频时长 {duration:.2f}s 小于最短限制 {config.video_min_duration}s")
         if duration > config.video_max_duration:
-            errors.append(
-                f"视频时长 {duration:.2f}s 超过最长限制 {config.video_max_duration}s"
-            )
+            errors.append(f"视频时长 {duration:.2f}s 超过最长限制 {config.video_max_duration}s")
 
         return errors, warnings
 
@@ -502,9 +485,7 @@ class VideoReviewer:
         try:
             container = av.open(file_path)
         except Exception as exc:
-            logger.warning(
-                "[VideoReviewer] 无法打开视频 | path=%s | error=%s", file_path, exc
-            )
+            logger.warning("[VideoReviewer] 无法打开视频 | path=%s | error=%s", file_path, exc)
             return None
 
         try:
@@ -549,8 +530,6 @@ class VideoReviewer:
             }
 
         except Exception as exc:
-            logger.warning(
-                "[VideoReviewer] 元数据提取异常 | path=%s | error=%s", file_path, exc
-            )
+            logger.warning("[VideoReviewer] 元数据提取异常 | path=%s | error=%s", file_path, exc)
             container.close()
             return None

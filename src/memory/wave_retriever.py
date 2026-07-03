@@ -30,43 +30,184 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # 中文停用词（高频虚词）
-_CN_STOP_WORDS: frozenset[str] = frozenset({
-    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
-    "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
-    "你", "会", "着", "没有", "看", "好", "自己", "这",
-})
+_CN_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "的",
+        "了",
+        "在",
+        "是",
+        "我",
+        "有",
+        "和",
+        "就",
+        "不",
+        "人",
+        "都",
+        "一",
+        "一个",
+        "上",
+        "也",
+        "很",
+        "到",
+        "说",
+        "要",
+        "去",
+        "你",
+        "会",
+        "着",
+        "没有",
+        "看",
+        "好",
+        "自己",
+        "这",
+    }
+)
 
 # 中文动词后缀
 _CN_VERB_SUFFIXES: tuple[str, ...] = (
-    "处理", "分析", "执行", "优化", "管理", "查询", "检索",
-    "搜索", "创建", "删除", "更新", "部署", "运行", "设计",
-    "开发", "实现", "构建", "测试", "调试", "配置", "安装",
-    "编程", "详解", "实践",
+    "处理",
+    "分析",
+    "执行",
+    "优化",
+    "管理",
+    "查询",
+    "检索",
+    "搜索",
+    "创建",
+    "删除",
+    "更新",
+    "部署",
+    "运行",
+    "设计",
+    "开发",
+    "实现",
+    "构建",
+    "测试",
+    "调试",
+    "配置",
+    "安装",
+    "编程",
+    "详解",
+    "实践",
 )
 
 # 英文停用词
-_EN_STOP_WORDS: frozenset[str] = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been",
-    "being", "have", "has", "had", "do", "does", "did", "will",
-    "would", "shall", "should", "may", "might", "must", "can",
-    "could", "of", "in", "to", "for", "with", "on", "at", "by",
-    "from", "as", "into", "through", "during", "before", "after",
-    "and", "but", "or", "nor", "not", "so", "yet", "both",
-    "either", "neither", "each", "every", "all", "any", "few",
-    "more", "most", "other", "some", "such", "no", "only", "own",
-    "same", "than", "too", "very", "just", "because", "if",
-    "it", "its", "this", "that", "these", "those",
-})
+_EN_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
+        "can",
+        "could",
+        "of",
+        "in",
+        "to",
+        "for",
+        "with",
+        "on",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "not",
+        "so",
+        "yet",
+        "both",
+        "either",
+        "neither",
+        "each",
+        "every",
+        "all",
+        "any",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "only",
+        "own",
+        "same",
+        "than",
+        "too",
+        "very",
+        "just",
+        "because",
+        "if",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+    }
+)
 
 # 英文动词列表（常见行为动词）
-_EN_VERBS: frozenset[str] = frozenset({
-    "process", "analyze", "execute", "optimize", "manage",
-    "query", "retrieve", "search", "create", "delete",
-    "update", "deploy", "run", "design", "develop",
-    "implement", "build", "test", "debug", "configure",
-    "install", "handle", "compute", "generate", "transform",
-    "extract", "merge", "split", "validate", "parse",
-})
+_EN_VERBS: frozenset[str] = frozenset(
+    {
+        "process",
+        "analyze",
+        "execute",
+        "optimize",
+        "manage",
+        "query",
+        "retrieve",
+        "search",
+        "create",
+        "delete",
+        "update",
+        "deploy",
+        "run",
+        "design",
+        "develop",
+        "implement",
+        "build",
+        "test",
+        "debug",
+        "configure",
+        "install",
+        "handle",
+        "compute",
+        "generate",
+        "transform",
+        "extract",
+        "merge",
+        "split",
+        "validate",
+        "parse",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +465,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
 
         logger.debug(
             "[WaveRetriever] 检索完成 | query='%s' | results=%d",
-            query[:30], len(merged),
+            query[:30],
+            len(merged),
         )
         return merged
 
@@ -389,11 +531,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
 
             # 单字名词（2 字以上片段中的每个非停用词单字）
             for char in segment:
-                if (
-                    len(char) == 1
-                    and char not in _CN_STOP_WORDS
-                    and char not in seen_entity
-                ):
+                if len(char) == 1 and char not in _CN_STOP_WORDS and char not in seen_entity:
                     seen_entity.add(char)
                     result["entity"].append(char)
 
@@ -426,7 +564,9 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
         return result
 
     def _epa_score(
-        self, query: str, candidates: list[dict[str, Any]],
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
     ) -> list[SearchResult]:
         """基于 EPA 维度匹配进行打分。
 
@@ -452,11 +592,13 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
                 overlap = query_terms & content_terms
                 if overlap:
                     score = len(overlap) / max(len(query_terms), 1)
-                    results.append(SearchResult(
-                        id=item["id"],
-                        content=item.get("content", ""),
-                        score=min(score, 1.0),
-                    ))
+                    results.append(
+                        SearchResult(
+                            id=item["id"],
+                            content=item.get("content", ""),
+                            score=min(score, 1.0),
+                        )
+                    )
                 continue
 
             item_terms: set[str] = set()
@@ -469,11 +611,13 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
             overlap = query_terms & item_terms
             if overlap:
                 score = len(overlap) / max(len(query_terms), 1)
-                results.append(SearchResult(
-                    id=item["id"],
-                    content=item.get("content", ""),
-                    score=min(score, 1.0),
-                ))
+                results.append(
+                    SearchResult(
+                        id=item["id"],
+                        content=item.get("content", ""),
+                        score=min(score, 1.0),
+                    )
+                )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results
@@ -483,7 +627,9 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # ======================================================================
 
     def _residual_pyramid(
-        self, query: str, candidates: list[dict[str, Any]],
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
     ) -> list[SearchResult]:
         """残差金字塔：多层次递进检索。
 
@@ -547,11 +693,13 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
         for item in candidates:
             item_id = item.get("id", "")
             if item_id in scored:
-                results.append(SearchResult(
-                    id=item_id,
-                    content=item.get("content", ""),
-                    score=scored[item_id],
-                ))
+                results.append(
+                    SearchResult(
+                        id=item_id,
+                        content=item.get("content", ""),
+                        score=scored[item_id],
+                    )
+                )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results
@@ -584,9 +732,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
             return []
 
         # 构建索引
-        item_map: dict[str, dict[str, Any]] = {
-            item["id"]: item for item in all_items if "id" in item
-        }
+        item_map: dict[str, dict[str, Any]] = {item["id"]: item for item in all_items if "id" in item}
 
         # 初始分数
         scores: dict[str, float] = {r.id: r.score for r in initial_results}
@@ -632,7 +778,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
                 for neighbor_id in neighbors:
                     if neighbor_id in visited:
                         continue
-                    hop_score = parent_score * (decay ** hop)
+                    hop_score = parent_score * (decay**hop)
                     if neighbor_id not in scores or hop_score > scores.get(neighbor_id, 0.0):
                         scores[neighbor_id] = hop_score
                     next_frontier.add(neighbor_id)
@@ -653,7 +799,9 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # ======================================================================
 
     def _shotgun_retrieve(
-        self, query: str, all_items: list[dict[str, Any]],
+        self,
+        query: str,
+        all_items: list[dict[str, Any]],
     ) -> list[SearchResult]:
         """霰弹枪检索：同时从多个角度发射查询并合并结果。
 
@@ -692,7 +840,9 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
         return self._merge_results(result_groups)
 
     def _keyword_match(
-        self, query: str, candidates: list[dict[str, Any]],
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
     ) -> list[SearchResult]:
         """基于关键词的快速匹配。
 
@@ -718,11 +868,13 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
 
             if overlap:
                 score = len(overlap) / max(len(query_keywords), 1)
-                results.append(SearchResult(
-                    id=item["id"],
-                    content=content,
-                    score=min(score, 1.0),
-                ))
+                results.append(
+                    SearchResult(
+                        id=item["id"],
+                        content=content,
+                        score=min(score, 1.0),
+                    )
+                )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results
@@ -757,7 +909,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # ======================================================================
 
     def _merge_results(
-        self, result_groups: list[list[SearchResult]],
+        self,
+        result_groups: list[list[SearchResult]],
     ) -> list[SearchResult]:
         """合并多路检索结果，按 ID 去重，保留最高分，按得分降序排列。
 
@@ -782,7 +935,8 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
 
     @staticmethod
     def _scale_scores(
-        results: list[SearchResult], factor: float,
+        results: list[SearchResult],
+        factor: float,
     ) -> list[SearchResult]:
         """按权重因子缩放搜索结果的分数。
 
@@ -810,7 +964,9 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # ======================================================================
 
     def _cosine_similarity(
-        self, vec_a: list[float], vec_b: list[float],
+        self,
+        vec_a: list[float],
+        vec_b: list[float],
     ) -> float:
         """计算两个向量的余弦相似度。
 
@@ -886,10 +1042,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
             for key, value in filters.items():
                 if value is None:
                     continue
-                result = [
-                    it for it in result
-                    if it.get(key) == value or it.get(key) is None
-                ]
+                result = [it for it in result if it.get(key) == value or it.get(key) is None]
 
         return result
 

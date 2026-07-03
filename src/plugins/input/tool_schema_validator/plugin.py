@@ -116,10 +116,7 @@ class ToolSchemaValidator(IInputPlugin):
                 for tool in registry.list_all():
                     defs[tool.name] = {"input_schema": tool.input_schema}
             except Exception:  # noqa: BLE001
-                logger.debug(
-                    "[tool_schema_validator] registry.list_all() 失败，"
-                    "回退到 state[_tool_definitions]"
-                )
+                logger.debug("[tool_schema_validator] registry.list_all() 失败，回退到 state[_tool_definitions]")
                 defs = {}
 
         if not defs:
@@ -163,9 +160,7 @@ class ToolSchemaValidator(IInputPlugin):
             tc_call_id = tc.get("id", "")
             # 本调用是否被截断：结构性标记（param_inject 修复时打，可靠）
             # 或本轮 finish_reason=length（依赖代理返回，辅助）。任一命中即判截断。
-            tc_truncated = bool(
-                tc.get("_args_truncated", False) or output_truncated
-            )
+            tc_truncated = bool(tc.get("_args_truncated", False) or output_truncated)
 
             # ── 阶段 0: arguments JSON 截断检测 ──
             # LLM 生成 tool_call 时可能截断 arguments JSON 字符串，
@@ -177,21 +172,27 @@ class ToolSchemaValidator(IInputPlugin):
                 # 将截断诊断作为 tool result 消息注入对话历史，
                 # 模拟工具已执行并返回截断错误，LLM 可据此重试
                 messages = list(ctx.state.get("messages", []))
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_call_id,
-                    "content": json.dumps({
-                        "success": False,
-                        "error": truncation_result["error"],
-                        "error_code": "ARGS_TRUNCATED",
-                        "lost_keys": truncation_result["lost_keys"],
-                    }, ensure_ascii=False),
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_call_id,
+                        "content": json.dumps(
+                            {
+                                "success": False,
+                                "error": truncation_result["error"],
+                                "error_code": "ARGS_TRUNCATED",
+                                "lost_keys": truncation_result["lost_keys"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
                 state_updates["messages"] = messages
                 logger.warning(
-                    "[%s] 截断 tool_call %s 已注入诊断结果，"
-                    "丢失字段: %s",
-                    self.name, tool_name, truncation_result["lost_keys"],
+                    "[%s] 截断 tool_call %s 已注入诊断结果，丢失字段: %s",
+                    self.name,
+                    tool_name,
+                    truncation_result["lost_keys"],
                 )
                 # 不加入 validated_calls → tool_core 不会重复执行此调用
                 continue
@@ -199,21 +200,23 @@ class ToolSchemaValidator(IInputPlugin):
             tool_def = tool_definitions.get(tool_name)
             if tool_def is None:
                 if self._strict:
-                    schema_errors.append({
-                        "tool": tool_name,
-                        "error": f"Tool definition not found: {tool_name}",
-                    })
+                    schema_errors.append(
+                        {
+                            "tool": tool_name,
+                            "error": f"Tool definition not found: {tool_name}",
+                        }
+                    )
                     logger.warning(
                         "[%s] Unknown tool in strict mode | tool=%s",
-                        self.name, tool_name,
+                        self.name,
+                        tool_name,
                     )
                 else:
                     validated_calls.append(tc)
                 continue
 
             input_schema = (
-                tool_def.get("input_schema") if isinstance(tool_def, dict)
-                else getattr(tool_def, "input_schema", None)
+                tool_def.get("input_schema") if isinstance(tool_def, dict) else getattr(tool_def, "input_schema", None)
             )
             if input_schema is None:
                 validated_calls.append(tc)
@@ -226,13 +229,17 @@ class ToolSchemaValidator(IInputPlugin):
                 fixed_args, fix_messages = self._auto_fix_args(args, input_schema)
 
                 if fix_messages:
-                    all_fix_messages.append({
-                        "tool": tool_name,
-                        "fixes": fix_messages,
-                    })
+                    all_fix_messages.append(
+                        {
+                            "tool": tool_name,
+                            "fixes": fix_messages,
+                        }
+                    )
                     logger.info(
                         "[%s] Auto-fixed args | tool=%s | fixes=%s",
-                        self.name, tool_name, fix_messages,
+                        self.name,
+                        tool_name,
+                        fix_messages,
                     )
 
                 # 修复后再次验证
@@ -242,16 +249,14 @@ class ToolSchemaValidator(IInputPlugin):
                     # 拦截该调用并注入 role=tool 诊断消息——保持 assistant(tool_calls)
                     # →tool 消息序列完整，同时把缺失明细反馈给 LLM。
                     # 截断场景额外提示「文件太大请分块」，让模型改用 append 续写。
-                    schema_errors.append({
-                        "tool": tool_name,
-                        "errors": re_errors,
-                        "attempted_fixes": fix_messages,
-                    })
-                    missing = [
-                        e.split(":", 1)[1].strip()
-                        for e in re_errors
-                        if e.startswith("Missing required field:")
-                    ]
+                    schema_errors.append(
+                        {
+                            "tool": tool_name,
+                            "errors": re_errors,
+                            "attempted_fixes": fix_messages,
+                        }
+                    )
+                    missing = [e.split(":", 1)[1].strip() for e in re_errors if e.startswith("Missing required field:")]
                     truncated_hint = ""
                     if tc_truncated and missing:
                         truncated_hint = (
@@ -260,26 +265,34 @@ class ToolSchemaValidator(IInputPlugin):
                             "如 file_write 先写入前半部分，再用 action=append 续写后续内容。"
                         )
                     messages = list(ctx.state.get("messages", []))
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_call_id,
-                        "content": json.dumps({
-                            "success": False,
-                            "error": (
-                                f"工具 {tool_name} 参数校验失败："
-                                + "; ".join(re_errors)
-                                + "。请补齐/修正对应参数后重新调用。"
-                                + truncated_hint
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_call_id,
+                            "content": json.dumps(
+                                {
+                                    "success": False,
+                                    "error": (
+                                        f"工具 {tool_name} 参数校验失败："
+                                        + "; ".join(re_errors)
+                                        + "。请补齐/修正对应参数后重新调用。"
+                                        + truncated_hint
+                                    ),
+                                    "error_code": "SCHEMA_VALIDATION_FAILED",
+                                    "validation_errors": re_errors,
+                                    "output_truncated": tc_truncated,
+                                },
+                                ensure_ascii=False,
                             ),
-                            "error_code": "SCHEMA_VALIDATION_FAILED",
-                            "validation_errors": re_errors,
-                            "output_truncated": tc_truncated,
-                        }, ensure_ascii=False),
-                    })
+                        }
+                    )
                     state_updates["messages"] = messages
                     logger.warning(
                         "[%s] Schema validation failed, blocked call | tool=%s | errors=%s | truncated=%s",
-                        self.name, tool_name, re_errors, tc_truncated,
+                        self.name,
+                        tool_name,
+                        re_errors,
+                        tc_truncated,
                     )
                     continue
                 # 修复成功，用修复后的参数替换原始参数
@@ -301,7 +314,9 @@ class ToolSchemaValidator(IInputPlugin):
         return PluginResult(state_updates=state_updates)
 
     def _auto_fix_args(
-        self, args: dict[str, Any], schema: dict[str, Any],
+        self,
+        args: dict[str, Any],
+        schema: dict[str, Any],
     ) -> tuple[dict[str, Any], list[str]]:
         """尝试自动修复参数类型不匹配。
 
@@ -335,9 +350,7 @@ class ToolSchemaValidator(IInputPlugin):
             new_value = self._try_convert(value, expected_type)
             if new_value is not value:
                 fixed_args[field_name] = new_value
-                fix_messages.append(
-                    f"{field_name}: {type(value).__name__}→{expected_type}"
-                )
+                fix_messages.append(f"{field_name}: {type(value).__name__}→{expected_type}")
 
         return fixed_args, fix_messages
 
@@ -387,13 +400,17 @@ class ToolSchemaValidator(IInputPlugin):
         except Exception:
             logger.debug(
                 "[%s] Type conversion failed | value=%r | target=%s",
-                self.name, value, target_type,
+                self.name,
+                value,
+                target_type,
             )
 
         return value
 
     def _check_args_truncation(  # noqa: PLR0911
-        self, args: Any, tool_name: str,
+        self,
+        args: Any,
+        tool_name: str,
     ) -> dict[str, Any] | None:
         """检测 arguments JSON 是否被截断。
 
@@ -428,6 +445,7 @@ class ToolSchemaValidator(IInputPlugin):
         from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
             repair_json_string,
         )
+
         repaired = repair_json_string(args)
         if repaired is None:
             # 完全无法修复 → 不是截断场景，交给 tool_core 处理
@@ -450,10 +468,12 @@ class ToolSchemaValidator(IInputPlugin):
             return None
 
         logger.warning(
-            "[%s] 工具 %s 的 arguments JSON 被截断修复，"
-            "丢失字段: %s，原始长度=%d，修复后长度=%d",
-            self.name, tool_name, lost_keys,
-            len(args), len(repaired),
+            "[%s] 工具 %s 的 arguments JSON 被截断修复，丢失字段: %s，原始长度=%d，修复后长度=%d",
+            self.name,
+            tool_name,
+            lost_keys,
+            len(args),
+            len(repaired),
         )
 
         return {
@@ -474,7 +494,9 @@ class ToolSchemaValidator(IInputPlugin):
         }
 
     def _validate_args(
-        self, args: dict[str, Any], schema: dict[str, Any],
+        self,
+        args: dict[str, Any],
+        schema: dict[str, Any],
     ) -> list[str]:
         """根据 input_schema 验证参数。
 
@@ -502,10 +524,7 @@ class ToolSchemaValidator(IInputPlugin):
             field_schema = properties[field_name]
             expected_type = field_schema.get("type")
             if expected_type and not self._check_type(value, expected_type):
-                errors.append(
-                    f"Type mismatch for '{field_name}': "
-                    f"expected {expected_type}, got {type(value).__name__}"
-                )
+                errors.append(f"Type mismatch for '{field_name}': expected {expected_type}, got {type(value).__name__}")
 
         return errors
 

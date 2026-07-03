@@ -27,6 +27,7 @@ def _get_metric_loader() -> Any:
     """惰性获取或创建 MetricLoader 实例。"""
     try:
         from evaluation.loader import MetricLoader  # noqa: PLC0415
+
         loader = MetricLoader()
         if not loader.metrics:
             loader.load_all()
@@ -42,9 +43,7 @@ def _metric_to_response(m: Any) -> MetricResponse:
         id=m.id,
         name=m.name,
         description=m.description,
-        metric_type=m.metric_type.value
-        if hasattr(m.metric_type, "value")
-        else str(m.metric_type),
+        metric_type=m.metric_type.value if hasattr(m.metric_type, "value") else str(m.metric_type),
         evaluator_id=m.evaluator_id,
         is_red_line=m.is_red_line,
         default_weight=m.default_weight,
@@ -60,9 +59,7 @@ def _metric_to_detail(m: Any) -> MetricDetailResponse:
         id=m.id,
         name=m.name,
         description=m.description,
-        metric_type=m.metric_type.value
-        if hasattr(m.metric_type, "value")
-        else str(m.metric_type),
+        metric_type=m.metric_type.value if hasattr(m.metric_type, "value") else str(m.metric_type),
         evaluator_id=m.evaluator_id,
         is_red_line=m.is_red_line,
         default_weight=m.default_weight,
@@ -83,11 +80,13 @@ def _metric_to_detail(m: Any) -> MetricDetailResponse:
 )
 def list_metrics(
     metric_type: str | None = Query(
-        default=None, description="按类型筛选 (tool/agent/human)",
+        default=None,
+        description="按类型筛选 (tool/agent/human)",
     ),
     tag: str | None = Query(default=None, description="按标签筛选"),
     is_red_line: bool | None = Query(
-        default=None, description="是否红线指标",
+        default=None,
+        description="是否红线指标",
     ),
     limit: int = Query(default=50, ge=1, le=200, description="每页数量"),
     offset: int = Query(default=0, ge=0, description="偏移量"),
@@ -110,12 +109,9 @@ def list_metrics(
     # 筛选
     if metric_type:
         metrics = [
-            m for m in metrics
-            if (
-                m.metric_type.value
-                if hasattr(m.metric_type, "value")
-                else str(m.metric_type)
-            ) == metric_type
+            m
+            for m in metrics
+            if (m.metric_type.value if hasattr(m.metric_type, "value") else str(m.metric_type)) == metric_type
         ]
     if tag:
         metrics = [m for m in metrics if tag in m.tags]

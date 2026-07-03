@@ -56,8 +56,7 @@ class LSPTools:
             server_name = server_config.name if server_config else language
             hint = gateway.get_install_hint(language)
             return create_failure_result(
-                f"LSP 服务器未启动: {language} 语言的服务器 ({server_name}) 不可用。\n"
-                f"安装提示: {hint}",
+                f"LSP 服务器未启动: {language} 语言的服务器 ({server_name}) 不可用。\n安装提示: {hint}",
                 error_code="LSP_SERVER_NOT_AVAILABLE",
             )
         return None
@@ -124,9 +123,7 @@ class LSPTools:
         character = inputs.get("character", 0)
 
         if not file_path:
-            return create_failure_result(
-                "缺少 file_path 参数", error_code="MISSING_FILE_PATH"
-            )
+            return create_failure_result("缺少 file_path 参数", error_code="MISSING_FILE_PATH")
 
         validated_path, error = self._validate_file_path(file_path)
         if error:
@@ -170,24 +167,16 @@ class LSPTools:
 
         except ImportError:
             logger.error("lsp_definition 执行失败: LSP 模块未安装")
-            return create_failure_result(
-                "LSP 模块未安装", error_code="LSP_NOT_INSTALLED"
-            )
+            return create_failure_result("LSP 模块未安装", error_code="LSP_NOT_INSTALLED")
         except ConnectionError as e:
             logger.error(f"lsp_definition 执行失败: LSP 服务器连接错误 - {str(e)}")
-            return create_failure_result(
-                f"LSP 服务器连接错误: {str(e)}", error_code="LSP_CONNECTION_ERROR"
-            )
+            return create_failure_result(f"LSP 服务器连接错误: {str(e)}", error_code="LSP_CONNECTION_ERROR")
         except (ValueError, TypeError) as e:
             logger.error(f"lsp_definition 执行失败: 参数错误 - {str(e)}")
-            return create_failure_result(
-                f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT"
-            )
+            return create_failure_result(f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT")
         except Exception as e:
             logger.exception("lsp_definition 执行失败")
-            return create_failure_result(
-                f"执行失败: {str(e)}", error_code="EXECUTION_FAILED"
-            )
+            return create_failure_result(f"执行失败: {str(e)}", error_code="EXECUTION_FAILED")
 
     @staticmethod
     def _lsp_references_tool() -> Tool:
@@ -230,9 +219,7 @@ class LSPTools:
         character = inputs.get("character", 0)
 
         if not file_path:
-            return create_failure_result(
-                "缺少 file_path 参数", error_code="MISSING_FILE_PATH"
-            )
+            return create_failure_result("缺少 file_path 参数", error_code="MISSING_FILE_PATH")
 
         validated_path, error = self._validate_file_path(file_path)
         if error:
@@ -269,24 +256,16 @@ class LSPTools:
 
         except ImportError:
             logger.error("lsp_references 执行失败: LSP 模块未安装")
-            return create_failure_result(
-                "LSP 模块未安装", error_code="LSP_NOT_INSTALLED"
-            )
+            return create_failure_result("LSP 模块未安装", error_code="LSP_NOT_INSTALLED")
         except ConnectionError as e:
             logger.error(f"lsp_references 执行失败: LSP 服务器连接错误 - {str(e)}")
-            return create_failure_result(
-                f"LSP 服务器连接错误: {str(e)}", error_code="LSP_CONNECTION_ERROR"
-            )
+            return create_failure_result(f"LSP 服务器连接错误: {str(e)}", error_code="LSP_CONNECTION_ERROR")
         except (ValueError, TypeError) as e:
             logger.error(f"lsp_references 执行失败: 参数错误 - {str(e)}")
-            return create_failure_result(
-                f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT"
-            )
+            return create_failure_result(f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT")
         except Exception as e:
             logger.exception("lsp_references 执行失败")
-            return create_failure_result(
-                f"执行失败: {str(e)}", error_code="EXECUTION_FAILED"
-            )
+            return create_failure_result(f"执行失败: {str(e)}", error_code="EXECUTION_FAILED")
 
     @staticmethod
     def _lsp_diagnostics_tool() -> Tool:
@@ -319,9 +298,7 @@ class LSPTools:
         file_path = inputs.get("file_path")
 
         if not file_path:
-            return create_failure_result(
-                "缺少 file_path 参数", error_code="MISSING_FILE_PATH"
-            )
+            return create_failure_result("缺少 file_path 参数", error_code="MISSING_FILE_PATH")
 
         validated_path, error = self._validate_file_path(file_path)
         if error:
@@ -358,24 +335,16 @@ class LSPTools:
 
         except ImportError:
             logger.error("lsp_diagnostics 执行失败: LSP 模块未安装")
-            return create_failure_result(
-                "LSP 模块未安装", error_code="LSP_NOT_INSTALLED"
-            )
+            return create_failure_result("LSP 模块未安装", error_code="LSP_NOT_INSTALLED")
         except ConnectionError as e:
             logger.error(f"lsp_diagnostics 执行失败: LSP 服务器连接错误 - {str(e)}")
-            return create_failure_result(
-                f"LSP 服务器连接错误: {str(e)}", error_code="LSP_CONNECTION_ERROR"
-            )
+            return create_failure_result(f"LSP 服务器连接错误: {str(e)}", error_code="LSP_CONNECTION_ERROR")
         except (ValueError, TypeError) as e:
             logger.error(f"lsp_diagnostics 执行失败: 参数错误 - {str(e)}")
-            return create_failure_result(
-                f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT"
-            )
+            return create_failure_result(f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT")
         except Exception as e:
             logger.exception("lsp_diagnostics 执行失败")
-            return create_failure_result(
-                f"执行失败: {str(e)}", error_code="EXECUTION_FAILED"
-            )
+            return create_failure_result(f"执行失败: {str(e)}", error_code="EXECUTION_FAILED")
 
     @staticmethod
     def _file_jump_tool() -> Tool:
@@ -418,9 +387,7 @@ class LSPTools:
         character = inputs.get("character")
 
         if not file_path:
-            return create_failure_result(
-                "缺少 file_path 参数", error_code="MISSING_FILE_PATH"
-            )
+            return create_failure_result("缺少 file_path 参数", error_code="MISSING_FILE_PATH")
 
         validated_path, error = self._validate_file_path(file_path)
         if error:
@@ -449,21 +416,13 @@ class LSPTools:
 
         except ImportError:
             logger.error("file_jump 执行失败: LSP 模块未安装")
-            return create_failure_result(
-                "LSP 模块未安装", error_code="LSP_NOT_INSTALLED"
-            )
+            return create_failure_result("LSP 模块未安装", error_code="LSP_NOT_INSTALLED")
         except FileNotFoundError:
             logger.error(f"file_jump 执行失败: 文件不存在 - {validated_path}")
-            return create_failure_result(
-                f"文件不存在: {validated_path}", error_code="FILE_NOT_FOUND"
-            )
+            return create_failure_result(f"文件不存在: {validated_path}", error_code="FILE_NOT_FOUND")
         except (ValueError, TypeError) as e:
             logger.error(f"file_jump 执行失败: 参数错误 - {str(e)}")
-            return create_failure_result(
-                f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT"
-            )
+            return create_failure_result(f"参数错误: {str(e)}", error_code="INVALID_ARGUMENT")
         except Exception as e:
             logger.exception("file_jump 执行失败")
-            return create_failure_result(
-                f"执行失败: {str(e)}", error_code="EXECUTION_FAILED"
-            )
+            return create_failure_result(f"执行失败: {str(e)}", error_code="EXECUTION_FAILED")

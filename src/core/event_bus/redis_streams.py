@@ -118,9 +118,7 @@ class RedisStreamsEventBus(EventBusBase):
         """获取会话专属流名称"""
         return f"{self.stream_prefix}:session:{session_id}"
 
-    async def _send_to_dead_letter_queue(
-        self, event: ExecutionEvent, error: str
-    ) -> None:
+    async def _send_to_dead_letter_queue(self, event: ExecutionEvent, error: str) -> None:
         """
         将失败的事件发送到死信队列
 
@@ -157,9 +155,7 @@ class RedisStreamsEventBus(EventBusBase):
                 socket_connect_timeout=5,
                 socket_timeout=5,
             )
-            logger.info(
-                f"Redis Streams 事件总线已连接: {self.redis_url} (连接池大小: {self.max_connections})"
-            )
+            logger.info(f"Redis Streams 事件总线已连接: {self.redis_url} (连接池大小: {self.max_connections})")
 
         # 确保默认消费者组存在
         await self._ensure_consumer_group(self.main_stream, self.default_group)
@@ -324,9 +320,7 @@ class RedisStreamsEventBus(EventBusBase):
                     await asyncio.sleep(backoff)
 
         # 所有重试都失败，仍然触发本地订阅者（确保进程内事件传递）
-        logger.warning(
-            f"[EventBus] Redis 发布失败，触发本地订阅者 | event_type={event.event_type.value}"
-        )
+        logger.warning(f"[EventBus] Redis 发布失败，触发本地订阅者 | event_type={event.event_type.value}")
         await self._notify_local_subscribers(event)
 
         # 记录到死信队列（可选）
@@ -383,9 +377,7 @@ class RedisStreamsEventBus(EventBusBase):
         """
         if self._batch_timer is None or self._batch_timer.cancelled():
             loop = asyncio.get_event_loop()
-            self._batch_timer = loop.call_later(
-                0.1, lambda: asyncio.create_task(self._process_batch())
-            )
+            self._batch_timer = loop.call_later(0.1, lambda: asyncio.create_task(self._process_batch()))
 
     async def _process_batch(self) -> None:  # noqa: PLR0912
         """
@@ -460,9 +452,7 @@ class RedisStreamsEventBus(EventBusBase):
                 event_success = event in batch[:success_count]
                 self._record_publish_metrics(start_time, event_success)
 
-            logger.debug(
-                f"批量发布完成 | 事件数量: {len(batch)} | 成功: {success_count}"
-            )
+            logger.debug(f"批量发布完成 | 事件数量: {len(batch)} | 成功: {success_count}")
 
         except Exception as e:
             logger.error(f"批处理发布失败: {e}")
@@ -486,9 +476,7 @@ class RedisStreamsEventBus(EventBusBase):
 
             # 异步调用处理器
             try:
-                asyncio.create_task(
-                    self._safe_call_handler(subscription.handler, event)
-                )
+                asyncio.create_task(self._safe_call_handler(subscription.handler, event))
             except Exception as e:
                 logger.error(f"创建事件处理任务失败: {e}")
 
@@ -847,9 +835,7 @@ class RedisStreamsEventBus(EventBusBase):
 
         try:
             # 读取死信队列消息
-            messages = await redis.xrange(
-                self.dead_letter_stream, "-", "+", count=limit
-            )
+            messages = await redis.xrange(self.dead_letter_stream, "-", "+", count=limit)
 
             events = []
             for message_id, data in messages:
@@ -884,9 +870,7 @@ class RedisStreamsEventBus(EventBusBase):
 
             # 重新发布事件
             await self.publish(event)
-            logger.info(
-                f"已重试死信队列事件: {event_id} | type={event.event_type.value}"
-            )
+            logger.info(f"已重试死信队列事件: {event_id} | type={event.event_type.value}")
             return True
 
         except Exception as e:

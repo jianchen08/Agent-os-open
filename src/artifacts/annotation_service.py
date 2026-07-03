@@ -80,7 +80,9 @@ class AnnotationService:
 
         logger.info(
             "[AnnotationService] 创建批注 | id=%s | artifact_id=%s | type=%s",
-            annotation.id, artifact_id, target_type.value,
+            annotation.id,
+            artifact_id,
+            target_type.value,
         )
         return annotation
 
@@ -156,6 +158,7 @@ class AnnotationService:
 
         annotation.status = AnnotationStatus.RESOLVED
         from datetime import UTC, datetime  # noqa: PLC0415
+
         annotation.resolved_at = datetime.now(UTC).isoformat()
 
         logger.info("[AnnotationService] 标记批注已解决 | id=%s", annotation_id)

@@ -188,7 +188,7 @@ class HotSwapManager:
                 # 旧插件不存在（原始是新增），移除当前插件
                 if current is not None:
                     self._registry._plugins.pop(snapshot.plugin_name, None)
-                    if hasattr(self._registry, '_core_plugins'):
+                    if hasattr(self._registry, "_core_plugins"):
                         self._registry._core_plugins.pop(snapshot.plugin_name, None)
                 logger.info(
                     "Rollback succeeded: removed '%s' (was new, swap_id=%s)",
@@ -234,9 +234,7 @@ class HotSwapManager:
             if old_interfaces != new_interfaces:
                 old_names = [i.__name__ for i in old_interfaces]
                 new_names = [i.__name__ for i in new_interfaces]
-                warnings.append(
-                    f"插件接口类型不同: 旧={old_names}, 新={new_names}"
-                )
+                warnings.append(f"插件接口类型不同: 旧={old_names}, 新={new_names}")
 
         return warnings
 
@@ -259,9 +257,11 @@ class HotSwapManager:
 
             # 对于 Input/Output 插件，尝试一次空 execute
             from pipeline.plugin import ICorePlugin  # noqa: PLC0415
+
             if not isinstance(plugin, ICorePlugin):
                 # 构造一个最小化的 PluginContext 用于检查
                 from pipeline.plugin import PluginContext  # noqa: PLC0415
+
                 mock_ctx = PluginContext(state={}, _services={})
                 await plugin.execute(mock_ctx)
 

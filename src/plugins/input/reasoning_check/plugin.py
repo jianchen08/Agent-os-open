@@ -223,7 +223,9 @@ class ReasoningCheckPlugin(IInputPlugin):
             重复步数
         """
         # 按句号/换行分割
-        sentences = [s.strip() for s in text.replace("。", ".\n").replace("\n", ".\n").split(".") if len(s.strip()) > 20]
+        sentences = [
+            s.strip() for s in text.replace("。", ".\n").replace("\n", ".\n").split(".") if len(s.strip()) > 20
+        ]
         if len(sentences) < 2:
             return 0
 

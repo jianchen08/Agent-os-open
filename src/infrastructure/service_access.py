@@ -6,6 +6,7 @@
 公共接口：
 - get_execution_record_storage() -> Any: 获取全局 ExecutionRecordStorage 实例
 """
+
 from __future__ import annotations
 
 import logging

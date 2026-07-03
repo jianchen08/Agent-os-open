@@ -33,11 +33,7 @@ class MultimodalAdapter(ABC):
     """
 
     @abstractmethod
-    def convert(
-        self,
-        content: str,
-        attachments: list[AttachmentInfo]
-    ) -> list[dict]:
+    def convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]:
         """转换为模型特定格式"""
         pass
 
@@ -66,11 +62,7 @@ class OpenAIVisionAdapter(MultimodalAdapter):
         - gpt-4-turbo
     """
 
-    def convert(
-        self,
-        content: str,
-        attachments: list[AttachmentInfo]
-    ) -> list[dict]:
+    def convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]:
         """转换为OpenAI Vision格式"""
         messages: list[dict] = [{"type": "text", "text": content}]
 
@@ -80,16 +72,10 @@ class OpenAIVisionAdapter(MultimodalAdapter):
                 # 优先使用base64数据
                 if attachment.base64_data:
                     image_url = f"data:{attachment.mime_type};base64,{attachment.base64_data}"
-                    messages.append({
-                        "type": "image_url",
-                        "image_url": {"url": image_url}
-                    })
+                    messages.append({"type": "image_url", "image_url": {"url": image_url}})
                 # 如果有URL，直接使用
                 elif attachment.url:
-                    messages.append({
-                        "type": "image_url",
-                        "image_url": {"url": attachment.url}
-                    })
+                    messages.append({"type": "image_url", "image_url": {"url": attachment.url}})
 
         return messages
 
@@ -100,12 +86,7 @@ class OpenAIVisionAdapter(MultimodalAdapter):
             supports_image=True,
             supports_audio=True,
             supports_video=False,
-            supported_image_types=[
-                "image/jpeg",
-                "image/png",
-                "image/gif",
-                "image/webp"
-            ],
+            supported_image_types=["image/jpeg", "image/png", "image/gif", "image/webp"],
             max_image_size=20 * 1024 * 1024,  # 20MB
             max_audio_size=25 * 1024 * 1024,  # 25MB
         )
@@ -131,11 +112,7 @@ class ClaudeVisionAdapter(MultimodalAdapter):
         - claude-3-7-sonnet
     """
 
-    def convert(
-        self,
-        content: str,
-        attachments: list[AttachmentInfo]
-    ) -> list[dict]:
+    def convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]:
         """转换为Claude Vision格式"""
         messages: list[dict] = [{"type": "text", "text": content}]
 
@@ -144,14 +121,16 @@ class ClaudeVisionAdapter(MultimodalAdapter):
             if attachment.media_type == MediaType.IMAGE:  # noqa: SIM102
                 # 使用base64数据
                 if attachment.base64_data:
-                    messages.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": attachment.mime_type,
-                            "data": attachment.base64_data
+                    messages.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": attachment.mime_type,
+                                "data": attachment.base64_data,
+                            },
                         }
-                    })
+                    )
 
         return messages
 
@@ -162,12 +141,7 @@ class ClaudeVisionAdapter(MultimodalAdapter):
             supports_image=True,
             supports_audio=False,
             supports_video=False,
-            supported_image_types=[
-                "image/jpeg",
-                "image/png",
-                "image/gif",
-                "image/webp"
-            ],
+            supported_image_types=["image/jpeg", "image/png", "image/gif", "image/webp"],
             max_image_size=20 * 1024 * 1024,  # 20MB
         )
 
@@ -184,11 +158,7 @@ class DefaultAdapter(MultimodalAdapter):
         - 未知模型的降级处理
     """
 
-    def convert(
-        self,
-        content: str,
-        attachments: list[AttachmentInfo]
-    ) -> list[dict]:
+    def convert(self, content: str, attachments: list[AttachmentInfo]) -> list[dict]:
         """转换为纯文本格式"""
         return [{"type": "text", "text": content}]
 

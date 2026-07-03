@@ -89,12 +89,8 @@ class SceneState(BaseModel):
         default_factory=lambda: {"x": 0, "y": 0},
         description="滚动位置",
     )
-    widget_states: dict[str, Any] = Field(
-        default_factory=dict, description="各组件状态"
-    )
-    custom_data: dict[str, Any] = Field(
-        default_factory=dict, description="自定义状态数据"
-    )
+    widget_states: dict[str, Any] = Field(default_factory=dict, description="各组件状态")
+    custom_data: dict[str, Any] = Field(default_factory=dict, description="自定义状态数据")
 
 
 class Scene(BaseModel):
@@ -119,20 +115,12 @@ class Scene(BaseModel):
     name: str = Field(..., description="场景名称")
     description: str = Field(default="", description="场景描述")
     template_id: str | None = Field(default=None, description="模板ID")
-    layout: SceneLayoutConfig = Field(
-        default_factory=SceneLayoutConfig, description="布局配置"
-    )
-    widgets: list[SceneWidgetConfig] = Field(
-        default_factory=list, description="组件列表"
-    )
+    layout: SceneLayoutConfig = Field(default_factory=SceneLayoutConfig, description="布局配置")
+    widgets: list[SceneWidgetConfig] = Field(default_factory=list, description="组件列表")
     state: SceneState = Field(default_factory=SceneState, description="场景状态")
     is_active: bool = Field(default=False, description="是否活跃")
-    created_at: str = Field(
-        default_factory=lambda: datetime.now().isoformat(), description="创建时间"
-    )
-    updated_at: str = Field(
-        default_factory=lambda: datetime.now().isoformat(), description="更新时间"
-    )
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="创建时间")
+    updated_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="更新时间")
 
 
 class SceneTemplate(BaseModel):
@@ -154,12 +142,8 @@ class SceneTemplate(BaseModel):
     name: str = Field(..., description="模板名称")
     description: str = Field(default="", description="模板描述")
     icon: str = Field(default="📋", description="模板图标")
-    layout: SceneLayoutConfig = Field(
-        default_factory=SceneLayoutConfig, description="布局配置"
-    )
-    widgets: list[SceneWidgetConfig] = Field(
-        default_factory=list, description="组件列表"
-    )
+    layout: SceneLayoutConfig = Field(default_factory=SceneLayoutConfig, description="布局配置")
+    widgets: list[SceneWidgetConfig] = Field(default_factory=list, description="组件列表")
     category: str = Field(default="general", description="模板分类")
 
 
@@ -178,9 +162,7 @@ class SceneCreateRequest(BaseModel):
     description: str = Field(default="", max_length=500, description="场景描述")
     template_id: str | None = Field(default=None, description="模板ID")
     layout: SceneLayoutConfig | None = Field(default=None, description="布局配置")
-    widgets: list[SceneWidgetConfig] | None = Field(
-        default=None, description="组件列表"
-    )
+    widgets: list[SceneWidgetConfig] | None = Field(default=None, description="组件列表")
 
 
 class SceneUpdateRequest(BaseModel):

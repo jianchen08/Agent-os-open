@@ -24,14 +24,14 @@ class ErrorKind(Enum):
     分类依据是「该如何处理」，而不是「原始异常类型」。
     """
 
-    RATE_LIMIT = "rate_limit"          # 限流（429，含 group limit / upstream rate）
+    RATE_LIMIT = "rate_limit"  # 限流（429，含 group limit / upstream rate）
     QUOTA_EXHAUSTED = "quota_exhausted"  # 配额耗尽（余额不足、月度上限）
-    AUTH_FAILED = "auth_failed"        # 认证失败（401）
-    SERVICE_DOWN = "service_down"      # 服务不可用（503，上游临时挂，值得重试）
-    SERVER_ERROR = "server_error"      # 服务器内部错误（500）
-    NETWORK = "network"                # 网络错误（超时、连接失败）
-    BAD_REQUEST = "bad_request"        # 请求参数错误（400，不可重试）
-    UNKNOWN = "unknown"                # 未分类
+    AUTH_FAILED = "auth_failed"  # 认证失败（401）
+    SERVICE_DOWN = "service_down"  # 服务不可用（503，上游临时挂，值得重试）
+    SERVER_ERROR = "server_error"  # 服务器内部错误（500）
+    NETWORK = "network"  # 网络错误（超时、连接失败）
+    BAD_REQUEST = "bad_request"  # 请求参数错误（400，不可重试）
+    UNKNOWN = "unknown"  # 未分类
 
 
 @dataclass(frozen=True)
@@ -55,16 +55,31 @@ class ErrorInfo:
 # 收紧：不收录 "limit" 这种宽泛词（group requests-per-minute limit 也含 limit，
 # 但那是 RPM 限流不是配额）。只收明确表示"耗尽/上限/余额"的词。
 _QUOTA_KEYWORDS = (
-    "insufficient", "balance", "quota",
-    "额度", "上限", "用完", "余额", "不足",
-    "使用上限", "每周", "每月", "monthly", "weekly",
-    "exhausted", "depleted",
+    "insufficient",
+    "balance",
+    "quota",
+    "额度",
+    "上限",
+    "用完",
+    "余额",
+    "不足",
+    "使用上限",
+    "每周",
+    "每月",
+    "monthly",
+    "weekly",
+    "exhausted",
+    "depleted",
 )
 
 # 限流类错误消息的关键词（区分于配额）
 _RATE_LIMIT_KEYWORDS = (
-    "rate limit", "rate_limit", "requests-per-minute",
-    "too many requests", "请求过快", "频率",
+    "rate limit",
+    "rate_limit",
+    "requests-per-minute",
+    "too many requests",
+    "请求过快",
+    "频率",
 )
 
 
@@ -184,9 +199,7 @@ def classify_error(exc: BaseException) -> ErrorInfo:
     # 判定是否配额耗尽：优先用 response body 精确判定，其次嗅探 message。
     # 这样能兼容各种 provider（智谱/DeepSeek/中转站）的不同错误格式，
     # 而不用为每个 provider 单独写规则。
-    is_quota = _is_quota_from_body(exc) or any(
-        kw.lower() in msg for kw in _QUOTA_KEYWORDS
-    )
+    is_quota = _is_quota_from_body(exc) or any(kw.lower() in msg for kw in _QUOTA_KEYWORDS)
 
     # 1. 按异常类型名直接映射（litellm/openai 标准类型）
     if "AuthenticationError" in type_name:
@@ -242,7 +255,13 @@ def classify_error(exc: BaseException) -> ErrorInfo:
     if any(kw in msg for kw in _RATE_LIMIT_KEYWORDS):
         return ErrorInfo(ErrorKind.RATE_LIMIT, retry_after, exc)
 
-    if "service temporarily unavailable" in msg or "503" in msg or "502" in msg or "bad gateway" in msg or "badgateway" in msg:
+    if (
+        "service temporarily unavailable" in msg
+        or "503" in msg
+        or "502" in msg
+        or "bad gateway" in msg
+        or "badgateway" in msg
+    ):
         return ErrorInfo(ErrorKind.SERVICE_DOWN, retry_after, exc)
 
     if "timeout" in msg or "timed out" in msg:

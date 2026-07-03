@@ -194,9 +194,7 @@ class EventBusBase(abc.ABC):
             清空的事件数量
         """
 
-    async def _send_to_dead_letter_queue(
-        self, event: ExecutionEvent, error: str
-    ) -> None:
+    async def _send_to_dead_letter_queue(self, event: ExecutionEvent, error: str) -> None:
         """
         将失败的事件发送到死信队列
 
@@ -217,14 +215,12 @@ class EventBusBase(abc.ABC):
         """
         # 计算平均延迟
         avg_publish_latency = (
-            sum(self._metrics["publish_latency"])
-            / len(self._metrics["publish_latency"])
+            sum(self._metrics["publish_latency"]) / len(self._metrics["publish_latency"])
             if self._metrics["publish_latency"]
             else 0
         )
         avg_subscribe_latency = (
-            sum(self._metrics["subscribe_latency"])
-            / len(self._metrics["subscribe_latency"])
+            sum(self._metrics["subscribe_latency"]) / len(self._metrics["subscribe_latency"])
             if self._metrics["subscribe_latency"]
             else 0
         )
@@ -238,9 +234,7 @@ class EventBusBase(abc.ABC):
             "avg_subscribe_latency_ms": avg_subscribe_latency,
             "dead_letter_count": self._metrics["dead_letter_count"],
             "retry_count": self._metrics["retry_count"],
-            "uptime_seconds": int(time.time() - self._start_time)
-            if self._start_time
-            else 0,
+            "uptime_seconds": int(time.time() - self._start_time) if self._start_time else 0,
             "connected": self._connected,
         }
 
@@ -269,9 +263,7 @@ class EventBusBase(abc.ABC):
         """
         return {
             "status": "healthy" if self._connected else "unhealthy",
-            "uptime_seconds": int(time.time() - self._start_time)
-            if self._start_time
-            else 0,
+            "uptime_seconds": int(time.time() - self._start_time) if self._start_time else 0,
             "metrics": self.get_metrics(),
         }
 
@@ -308,9 +300,7 @@ class EventBusBase(abc.ABC):
         self._metrics["subscribe_latency"].append(latency)
         if len(self._metrics["subscribe_latency"]) > 1000:
             # 只保留最近的 1000 个数据点
-            self._metrics["subscribe_latency"] = self._metrics["subscribe_latency"][
-                -1000:
-            ]
+            self._metrics["subscribe_latency"] = self._metrics["subscribe_latency"][-1000:]
 
         if success:
             self._metrics["subscribed_events"] += 1
@@ -568,9 +558,11 @@ class EventBusBase(abc.ABC):
 
         data_summary = str(data)[:200] if data else ""
         logger.info(
-            "[EventBus] emit | raw_type=%s | resolved_enum=%s "
-            "| session_id=%s | data_summary=%s",
-            event_type, event_enum.value, session_id, data_summary,
+            "[EventBus] emit | raw_type=%s | resolved_enum=%s | session_id=%s | data_summary=%s",
+            event_type,
+            event_enum.value,
+            session_id,
+            data_summary,
         )
 
         _normalized_type = event_type.replace(".", "_")

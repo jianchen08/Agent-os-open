@@ -39,9 +39,7 @@ class _StdinLineReader:
         self._queue: queue.Queue[Any] = queue.Queue()
         self._eof = False
         self._interrupt_event = threading.Event()
-        self._thread = threading.Thread(
-            target=self._read_loop, daemon=True
-        )
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._started = False
         self._was_interrupted = False
 
@@ -240,9 +238,11 @@ class CLIInputAdapter(IInputAdapter):
             }
         except Exception as _read_exc:
             import logging as _logging  # noqa: PLC0415
+
             _logging.getLogger(__name__).warning(
                 "[InputAdapter] receive() unexpected error: %s",
-                _read_exc, exc_info=True,
+                _read_exc,
+                exc_info=True,
             )
             return {
                 "user_input": "",
@@ -289,6 +289,7 @@ class CLIInputAdapter(IInputAdapter):
 
         # 普通输入 -- 解析行内快捷语法
         from channels.cli.cli_commands import parse_inline_shortcuts  # noqa: PLC0415
+
         processed_text, inline_extras = parse_inline_shortcuts(stripped)
 
         state: dict[str, Any] = {
@@ -380,9 +381,7 @@ class CLIInputAdapter(IInputAdapter):
 
         if extra > 0:
             self._paste_line_count = extra
-            logger.info(
-                "粘贴检测: 合并 %d 行额外输入", extra
-            )
+            logger.info("粘贴检测: 合并 %d 行额外输入", extra)
 
     def is_slash_command(self, state: dict[str, Any]) -> bool:
         """判断 state 是否来自斜杠命令输入。

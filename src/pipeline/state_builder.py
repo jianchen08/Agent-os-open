@@ -47,7 +47,9 @@ def build_initial_state(
         管道初始状态字典
     """
     resolved_history = resolve_conversation_history(
-        conversation_history, pipeline_id, services,
+        conversation_history,
+        pipeline_id,
+        services,
     )
 
     state: dict[str, Any] = {

@@ -67,9 +67,7 @@ class SessionBridge:
         """
         if unified_user_id in self._user_sessions:
             session_id = self._user_sessions[unified_user_id]
-            logger.debug(
-                "Session found for user %s: %s", unified_user_id, session_id
-            )
+            logger.debug("Session found for user %s: %s", unified_user_id, session_id)
             return session_id
 
         # 创建新会话
@@ -108,9 +106,7 @@ class SessionBridge:
             new_channel_type: 新的活跃通道类型
         """
         if unified_user_id not in self._user_sessions:
-            logger.warning(
-                "Cannot switch channel for unknown user: %s", unified_user_id
-            )
+            logger.warning("Cannot switch channel for unknown user: %s", unified_user_id)
             return
 
         old_channel = self._active_channels.get(unified_user_id, "")
@@ -157,8 +153,6 @@ class SessionBridge:
             data = json.loads(state_file.read_text(encoding="utf-8"))
             self._user_sessions = data.get("user_sessions", {})
             self._active_channels = data.get("active_channels", {})
-            logger.info(
-                "Session bridge restored: %d users", len(self._user_sessions)
-            )
+            logger.info("Session bridge restored: %d users", len(self._user_sessions))
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Failed to load session bridge state: %s", exc)

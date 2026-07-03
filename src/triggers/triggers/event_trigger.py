@@ -58,9 +58,7 @@ class EventTrigger(BaseTrigger):
         """
         if not self.enabled:
             logger.debug(f"事件触发器 {self.name} 已禁用，跳过执行")
-            return ExecutionResult(
-                success=False, message="触发器已禁用", data={"trigger_id": self.id}
-            )
+            return ExecutionResult(success=False, message="触发器已禁用", data={"trigger_id": self.id})
 
         # 检查事件类型是否匹配
         if event.event_type.value != self.event_type:
@@ -115,9 +113,7 @@ class EventTrigger(BaseTrigger):
             return bool(result)
 
         except InvalidExpression as e:
-            logger.error(
-                f"过滤条件求值失败（无效表达式）: {e}, 表达式: {self.filter_expression}"
-            )
+            logger.error(f"过滤条件求值失败（无效表达式）: {e}, 表达式: {self.filter_expression}")
             # 出错时默认不通过，避免误触发
             return False
         except Exception as e:
@@ -138,7 +134,5 @@ class EventTrigger(BaseTrigger):
         return self.event_type == event_type
 
     def __repr__(self) -> str:
-        filter_str = (
-            f" filter={self.filter_expression}" if self.filter_expression else ""
-        )
+        filter_str = f" filter={self.filter_expression}" if self.filter_expression else ""
         return f"<EventTrigger id={self.id} name={self.name} event={self.event_type}{filter_str}>"

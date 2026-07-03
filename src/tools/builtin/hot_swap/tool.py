@@ -175,7 +175,9 @@ def _action_swap_plugin(params: dict[str, Any]) -> dict[str, Any]:
 
         logger.info(
             "[hot_swap] 插件替换: name=%s, success=%s, swap_id=%s",
-            plugin_name, result.success, result.swap_id,
+            plugin_name,
+            result.success,
+            result.swap_id,
         )
 
         return {
@@ -231,7 +233,8 @@ def _action_rollback_plugin(params: dict[str, Any]) -> dict[str, Any]:
 
         logger.info(
             "[hot_swap] 插件回滚: swap_id=%s, success=%s",
-            swap_id, rolled_back,
+            swap_id,
+            rolled_back,
         )
 
         return {
@@ -281,15 +284,17 @@ def _action_save_config_version(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-
         manager = _get_rollback_manager()
         version = manager.save_version(
-            config_id, config_data, description=description,
+            config_id,
+            config_data,
+            description=description,
         )
 
         logger.info(
             "[hot_swap] 配置版本保存: config_id=%s, version_id=%s",
-            config_id, version.version_id,
+            config_id,
+            version.version_id,
         )
 
         return {
@@ -328,26 +333,20 @@ def _action_rollback_config(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-
         manager = _get_rollback_manager()
         loop = _get_or_create_event_loop()
-        success = loop.run_until_complete(
-            manager.rollback_to_version(version_id)
-        )
+        success = loop.run_until_complete(manager.rollback_to_version(version_id))
 
         logger.info(
             "[hot_swap] 配置回滚: version_id=%s, success=%s",
-            version_id, success,
+            version_id,
+            success,
         )
 
         return {
             "success": success,
             "version_id": version_id,
-            "message": (
-                f"配置已回滚到版本 {version_id}"
-                if success
-                else f"配置回滚失败，版本 {version_id} 不存在"
-            ),
+            "message": (f"配置已回滚到版本 {version_id}" if success else f"配置回滚失败，版本 {version_id} 不存在"),
         }
 
     except Exception as exc:
@@ -378,7 +377,6 @@ def _action_list_versions(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-
         manager = _get_rollback_manager()
         versions = manager.list_versions(config_id)
 

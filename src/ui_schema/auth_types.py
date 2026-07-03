@@ -2,6 +2,7 @@
 
 将业务异常从 channels 模块解耦，避免 channels <-> ui_schema 的循环导入。
 """
+
 from __future__ import annotations
 
 from typing import Any

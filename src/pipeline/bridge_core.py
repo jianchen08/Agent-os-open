@@ -11,6 +11,7 @@ state.raw_result 是唯一数据源，推送和持久化都从这里取。
 - emit_error(exc): 发 stream_error
 - emit_notification(content): 直接推送系统通知（替代 enqueue_notification）
 """
+
 from __future__ import annotations
 
 import logging
@@ -56,9 +57,11 @@ class BridgeCore:
 
         # 绑定日志上下文，使后续日志自动携带 pipeline_id / task_id
         from src.core.logging import LogContext  # noqa: PLC0415
+
         _ctx: dict[str, str] = {"pipeline_id": pipeline_id}
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             self._entry = get_engine_registry().get(pipeline_id)
             if self._entry and hasattr(self._entry, "tags"):
                 self._container_task_id = self._entry.tags.get("task_id", "")
@@ -70,7 +73,8 @@ class BridgeCore:
         except Exception:
             logger.debug(
                 "BridgeCore: 获取 PipelineEntry 失败 pipeline=%s",
-                pipeline_id[:12], exc_info=True,
+                pipeline_id[:12],
+                exc_info=True,
             )
 
         # 绑定日志上下文（contextvars，async 安全）
@@ -97,10 +101,11 @@ class BridgeCore:
 
     def _get_next_sequence(self) -> int:
         """从 PipelineEntry 共享计数器获取下一个 sequence。"""
-        if getattr(self, '_entry', None) is not None:
+        if getattr(self, "_entry", None) is not None:
             return self._entry.next_sequence()
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(self.pipeline_id)
             if entry is not None:
                 self._entry = entry
@@ -108,7 +113,8 @@ class BridgeCore:
         except Exception:
             logger.debug(
                 "BridgeCore: 获取 sequence 失败 pipeline=%s",
-                self.pipeline_id[:12], exc_info=True,
+                self.pipeline_id[:12],
+                exc_info=True,
             )
         return 0
 
@@ -178,14 +184,16 @@ class BridgeCore:
                 logger.warning(
                     "[Bridge] 推送返回 False: type=%s sink=%s pipeline=%s",
                     event.get("type", "unknown"),
-                    getattr(self.output_sink, 'sink_id', '?'),
+                    getattr(self.output_sink, "sink_id", "?"),
                     self.pipeline_id[:12],
                 )
             return success
         except Exception as e:
             logger.warning(
                 "[Bridge] 推送异常: type=%s error=%s pipeline=%s",
-                event.get("type", "unknown"), e, self.pipeline_id[:12],
+                event.get("type", "unknown"),
+                e,
+                self.pipeline_id[:12],
             )
             return False
 
@@ -236,19 +244,26 @@ class BridgeCore:
             self._start_new_turn(state)
         logger.info(
             "[Bridge] emit_start: msg=%s pipeline=%s sink=%s",
-            self.message_id[:12], self.pipeline_id[:12],
-            getattr(self.output_sink, 'sink_id', '?'),
+            self.message_id[:12],
+            self.pipeline_id[:12],
+            getattr(self.output_sink, "sink_id", "?"),
         )
         try:
-            await self._send_event(self._make_event("stream_start", {
-                "message_id": self.message_id,
-                "pipeline_id": self.pipeline_id,
-                "_threadId": getattr(self.output_sink, '_thread_id', None),
-            }))
+            await self._send_event(
+                self._make_event(
+                    "stream_start",
+                    {
+                        "message_id": self.message_id,
+                        "pipeline_id": self.pipeline_id,
+                        "_threadId": getattr(self.output_sink, "_thread_id", None),
+                    },
+                )
+            )
         except Exception as e:
             logger.warning(
                 "[Bridge] emit_start 推送失败: msg=%s error=%s",
-                self.message_id[:12], e,
+                self.message_id[:12],
+                e,
             )
 
     async def emit_chunk(self, chunk: dict) -> None:
@@ -262,9 +277,10 @@ class BridgeCore:
         if not self._stream_started:
             chunk_type = chunk.get("type", "?") if isinstance(chunk, dict) else "?"
             logger.warning(
-                "[Bridge] chunk 丢弃：_stream_started=False（emit_start 未调用或已结束），"
-                "type=%s msg=%s pipeline=%s",
-                chunk_type, self.message_id[:12], self.pipeline_id[:12],
+                "[Bridge] chunk 丢弃：_stream_started=False（emit_start 未调用或已结束），type=%s msg=%s pipeline=%s",
+                chunk_type,
+                self.message_id[:12],
+                self.pipeline_id[:12],
             )
             return
         try:
@@ -273,7 +289,9 @@ class BridgeCore:
             chunk_type = chunk.get("type", "?") if isinstance(chunk, dict) else "?"
             logger.warning(
                 "[Bridge] emit_chunk 失败: type=%s error=%s pipeline=%s",
-                chunk_type, e, self.pipeline_id[:12],
+                chunk_type,
+                e,
+                self.pipeline_id[:12],
             )
 
     async def emit_finish(self, state: dict[str, Any]) -> None:
@@ -287,43 +305,55 @@ class BridgeCore:
         await self._close_thinking_if_active(None)
         full_content = state.get("raw_result") or ""
         parts = self._build_parts_from_state(state)
-        elapsed_ms = int(
-            (time.monotonic() - self._emit_start_time) * 1000
-        ) if self._emit_start_time else 0
+        elapsed_ms = int((time.monotonic() - self._emit_start_time) * 1000) if self._emit_start_time else 0
         logger.info(
             "[Bridge] emit_finish: msg=%s pipeline=%s content_len=%d parts=%d elapsed_ms=%d",
-            self.message_id[:12], self.pipeline_id[:12],
-            len(full_content), len(parts), elapsed_ms,
+            self.message_id[:12],
+            self.pipeline_id[:12],
+            len(full_content),
+            len(parts),
+            elapsed_ms,
         )
         try:
             final_seq = self._get_next_sequence()
             # 发 new_message（完整助手消息，供前端直接渲染）
             # 空内容 + 空 parts 时跳过 new_message，避免空气泡（只发 stream_end）
             if full_content or parts:
-                await self._send_event(self._make_event("new_message", {
-                    "id": self.message_id,
-                    "role": "assistant",
-                    "content": full_content,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "sequence": final_seq,
-                    "parts": parts,
-                }))
+                await self._send_event(
+                    self._make_event(
+                        "new_message",
+                        {
+                            "id": self.message_id,
+                            "role": "assistant",
+                            "content": full_content,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "sequence": final_seq,
+                            "parts": parts,
+                        },
+                    )
+                )
             else:
                 logger.info(
                     "[Bridge] emit_finish: 内容为空，跳过 new_message 只发 stream_end: msg=%s",
                     self.message_id[:12],
                 )
             # 发 stream_end（标记流式完成）
-            await self._send_event(self._make_event("stream_end", {
-                "full_content": full_content,
-                "parts": parts,
-                "message_persisted": True,
-                "final_sequence": final_seq,
-            }))
+            await self._send_event(
+                self._make_event(
+                    "stream_end",
+                    {
+                        "full_content": full_content,
+                        "parts": parts,
+                        "message_persisted": True,
+                        "final_sequence": final_seq,
+                    },
+                )
+            )
         except Exception as e:
             logger.warning(
                 "[Bridge] emit_finish 推送失败: msg=%s error=%s",
-                self.message_id[:12], e,
+                self.message_id[:12],
+                e,
             )
         finally:
             self._stream_started = False
@@ -337,36 +367,53 @@ class BridgeCore:
         await self._close_thinking_if_active(None)
         logger.debug(
             "[Bridge] emit_suspend: msg=%s pipeline=%s",
-            self.message_id[:12], self.pipeline_id[:12],
+            self.message_id[:12],
+            self.pipeline_id[:12],
         )
         full_content = state.get("raw_result") or ""
         parts = self._build_parts_from_state(state)
         try:
-            await self._send_event(self._make_event("state_change", {
-                "status": "suspended",
-                "pipeline_id": self.pipeline_id,
-                "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
-            }))
+            await self._send_event(
+                self._make_event(
+                    "state_change",
+                    {
+                        "status": "suspended",
+                        "pipeline_id": self.pipeline_id,
+                        "thread_id": getattr(self.output_sink, "_thread_id", "") or "",
+                    },
+                )
+            )
             final_seq = self._get_next_sequence()
             if full_content or parts:
-                await self._send_event(self._make_event("new_message", {
-                    "id": self.message_id,
-                    "role": "assistant",
-                    "content": full_content,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "sequence": final_seq,
-                    "parts": parts,
-                }))
-            await self._send_event(self._make_event("stream_end", {
-                "full_content": full_content,
-                "parts": parts,
-                "message_persisted": True,
-                "final_sequence": final_seq,
-            }))
+                await self._send_event(
+                    self._make_event(
+                        "new_message",
+                        {
+                            "id": self.message_id,
+                            "role": "assistant",
+                            "content": full_content,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "sequence": final_seq,
+                            "parts": parts,
+                        },
+                    )
+                )
+            await self._send_event(
+                self._make_event(
+                    "stream_end",
+                    {
+                        "full_content": full_content,
+                        "parts": parts,
+                        "message_persisted": True,
+                        "final_sequence": final_seq,
+                    },
+                )
+            )
         except Exception as e:
             logger.warning(
                 "[Bridge] emit_suspend 推送失败: msg=%s error=%s",
-                self.message_id[:12], e,
+                self.message_id[:12],
+                e,
             )
         finally:
             self._stream_started = False
@@ -381,18 +428,26 @@ class BridgeCore:
         error_msg = str(exc)
         logger.error(
             "[Bridge] emit_error: msg=%s pipeline=%s error_type=%s error=%s",
-            self.message_id[:12], self.pipeline_id[:12],
-            type(exc).__name__, error_msg[:200],
+            self.message_id[:12],
+            self.pipeline_id[:12],
+            type(exc).__name__,
+            error_msg[:200],
         )
         try:
-            await self._send_event(self._make_event("stream_error", {
-                "error": f"管道执行失败: {error_msg}",
-                "message_persisted": False,
-            }))
+            await self._send_event(
+                self._make_event(
+                    "stream_error",
+                    {
+                        "error": f"管道执行失败: {error_msg}",
+                        "message_persisted": False,
+                    },
+                )
+            )
         except Exception as e:
             logger.warning(
                 "[Bridge] emit_error 推送失败: msg=%s error=%s",
-                self.message_id[:12], e,
+                self.message_id[:12],
+                e,
             )
         finally:
             self._stream_started = False
@@ -419,20 +474,29 @@ class BridgeCore:
         seq = self._get_next_sequence()
         logger.info(
             "[Bridge] emit_notification: seq=%d source=%s pipeline=%s content=%.50s",
-            seq, source, self.pipeline_id[:12], content[:50],
+            seq,
+            source,
+            self.pipeline_id[:12],
+            content[:50],
         )
         try:
-            await self._send_event(self._make_event("system_notification", {
-                "content": content.strip(),
-                "source": source,
-                "level": level,
-                "notificationType": f"{source}_notification",
-                "notification_id": f"sys_{self.pipeline_id[:8]}_{seq}",
-                "sequence": seq,
-            }))
+            await self._send_event(
+                self._make_event(
+                    "system_notification",
+                    {
+                        "content": content.strip(),
+                        "source": source,
+                        "level": level,
+                        "notificationType": f"{source}_notification",
+                        "notification_id": f"sys_{self.pipeline_id[:8]}_{seq}",
+                        "sequence": seq,
+                    },
+                )
+            )
         except Exception as e:
             logger.warning(
-                "[Bridge] emit_notification 推送失败: error=%s", e,
+                "[Bridge] emit_notification 推送失败: error=%s",
+                e,
             )
         return seq
 
@@ -451,10 +515,14 @@ class BridgeCore:
         parts: list[dict] = []
         thinking = state.get("raw_thinking")
         if thinking:
-            parts.append({
-                "type": "thinking", "content": thinking,
-                "state": "done", "sequence": self._next_part_seq(),
-            })
+            parts.append(
+                {
+                    "type": "thinking",
+                    "content": thinking,
+                    "state": "done",
+                    "sequence": self._next_part_seq(),
+                }
+            )
         tool_calls = state.get("raw_tool_calls") or []
         tool_results = state.get("tool_results") or []
         for tc in tool_calls:
@@ -472,19 +540,27 @@ class BridgeCore:
                     result = tr.get("data") or tr.get("result")
                     success = tr.get("success", True)
                     break
-            parts.append({
-                "type": "tool_call", "callId": call_id, "name": name,
-                "args": args,
-                "state": "done" if success else "error",
-                "result": result,
-                "sequence": self._next_part_seq(),
-            })
+            parts.append(
+                {
+                    "type": "tool_call",
+                    "callId": call_id,
+                    "name": name,
+                    "args": args,
+                    "state": "done" if success else "error",
+                    "result": result,
+                    "sequence": self._next_part_seq(),
+                }
+            )
         raw_result = state.get("raw_result")
         if raw_result:
-            parts.append({
-                "type": "text", "content": raw_result,
-                "state": "done", "sequence": self._next_part_seq(),
-            })
+            parts.append(
+                {
+                    "type": "text",
+                    "content": raw_result,
+                    "state": "done",
+                    "sequence": self._next_part_seq(),
+                }
+            )
         return parts
 
     # ------------------------------------------------------------------

@@ -221,6 +221,7 @@ class StatusBarRenderer:
         # 构建带右对齐的完整行
         try:
             from shutil import get_terminal_size  # noqa: PLC0415
+
             term_width = get_terminal_size().columns
             if term_width < 40:
                 term_width = 80
@@ -290,6 +291,7 @@ class CLIOutputAdapter(IOutputAdapter):
         else:
             try:
                 from shutil import get_terminal_size  # noqa: PLC0415
+
                 detected_width = get_terminal_size().columns
                 width = detected_width if detected_width >= 40 else 80
             except Exception:
@@ -335,19 +337,19 @@ class CLIOutputAdapter(IOutputAdapter):
         """
         # 错误输出
         if error := state.get("error"):
-            self._console.print(Panel(
-                str(error),
-                title="[bold red]错误[/bold red]",
-                border_style="red",
-                expand=False,
-            ))
+            self._console.print(
+                Panel(
+                    str(error),
+                    title="[bold red]错误[/bold red]",
+                    border_style="red",
+                    expand=False,
+                )
+            )
             return
 
         # 停止信号
         if state.get("should_stop"):
-            self._console.print(
-                Text("[系统] 会话结束", style="bold blue")
-            )
+            self._console.print(Text("[系统] 会话结束", style="bold blue"))
             return
 
         # 正常结果输出：流式模式下不重复打印
@@ -499,15 +501,17 @@ class CLIOutputAdapter(IOutputAdapter):
             agent_name: Agent 显示名称
             mode: 交互模式
         """
-        self._console.print(Panel(
-            f"[bold cyan]{agent_name}[/bold cyan] CLI 已启动\n\n"
-            f"[dim]输入消息开始对话，输入 [bold]/help[/bold] 查看命令[/dim]\n"
-            f"[dim]模式: [bold]{mode.upper()}[/bold]  |  "
-            f"快捷: @file  !cmd  #memo[/dim]",
-            title="> Agent OS",
-            border_style="cyan",
-            expand=False,
-        ))
+        self._console.print(
+            Panel(
+                f"[bold cyan]{agent_name}[/bold cyan] CLI 已启动\n\n"
+                f"[dim]输入消息开始对话，输入 [bold]/help[/bold] 查看命令[/dim]\n"
+                f"[dim]模式: [bold]{mode.upper()}[/bold]  |  "
+                f"快捷: @file  !cmd  #memo[/dim]",
+                title="> Agent OS",
+                border_style="cyan",
+                expand=False,
+            )
+        )
 
     def show_processing(self, message: str = "思考中") -> Status:
         """创建处理中状态指示器。

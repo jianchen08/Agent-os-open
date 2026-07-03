@@ -83,6 +83,7 @@ def _is_mock(obj: Any) -> bool:
     """
     try:
         from unittest.mock import MagicMock, Mock  # noqa: PLC0415
+
         return isinstance(obj, (Mock, MagicMock))
     except ImportError:
         return False
@@ -181,10 +182,7 @@ class KnowledgeService:
         if self._storage:
             memories = await _find_knowledge_by_user(self._storage, user_id)
         else:
-            memories = [
-                kn for kn in self._in_memory.values()
-                if kn.user_id == user_id
-            ]
+            memories = [kn for kn in self._in_memory.values() if kn.user_id == user_id]
             memories.sort(key=lambda x: x.created_at, reverse=True)
 
         items = [kn.to_dict() for kn in memories]
@@ -232,9 +230,7 @@ class KnowledgeService:
             memories = await _find_knowledge_by_user(self._storage, user_id)
             return len(memories)
 
-        return sum(
-            1 for kn in self._in_memory.values() if kn.user_id == user_id
-        )
+        return sum(1 for kn in self._in_memory.values() if kn.user_id == user_id)
 
     # ============================================
     # 相关性搜索
@@ -288,13 +284,15 @@ class KnowledgeService:
             combined_score = kw_score * keyword_weight + sem_score * semantic_weight
 
             if combined_score > 0:
-                results.append(SearchResult(
-                    id=kn.id,
-                    content=kn.content,
-                    score=combined_score,
-                    memory_type=MemoryType.SEMANTIC,
-                    metadata=kn.extra_data,
-                ))
+                results.append(
+                    SearchResult(
+                        id=kn.id,
+                        content=kn.content,
+                        score=combined_score,
+                        memory_type=MemoryType.SEMANTIC,
+                        metadata=kn.extra_data,
+                    )
+                )
 
         # 按得分降序排序
         results.sort(key=lambda r: r.score, reverse=True)
@@ -302,13 +300,15 @@ class KnowledgeService:
         # 如果没有得分大于 0 的结果，返回 top_k 条原始结果（保证有内容可用）
         if not results:
             for kn in items[:top_k]:
-                results.append(SearchResult(
-                    id=kn.id,
-                    content=kn.content,
-                    score=0.0,
-                    memory_type=MemoryType.SEMANTIC,
-                    metadata=kn.extra_data,
-                ))
+                results.append(
+                    SearchResult(
+                        id=kn.id,
+                        content=kn.content,
+                        score=0.0,
+                        memory_type=MemoryType.SEMANTIC,
+                        metadata=kn.extra_data,
+                    )
+                )
 
         return results[:top_k]
 
@@ -324,10 +324,7 @@ class KnowledgeService:
         if self._storage:
             return await _find_knowledge_by_user(self._storage, user_id, limit=100000)
 
-        memories = [
-            kn for kn in self._in_memory.values()
-            if kn.user_id == user_id
-        ]
+        memories = [kn for kn in self._in_memory.values() if kn.user_id == user_id]
         memories.sort(key=lambda x: x.created_at, reverse=True)
         return memories
 
@@ -358,9 +355,7 @@ class KnowledgeService:
 
         for i, kn in enumerate(items):
             content = kn.content.lower()
-            tags = " ".join(
-                kn.extra_data.get("tags", []) if kn.extra_data else []
-            ).lower()
+            tags = " ".join(kn.extra_data.get("tags", []) if kn.extra_data else []).lower()
             combined = f"{content} {tags}"
 
             hit_count = sum(1 for w in query_words if w in combined)
@@ -415,7 +410,8 @@ class KnowledgeService:
             except Exception as e:
                 logger.warning(
                     "[KnowledgeService] 计算相似度失败 | id=%s | error=%s",
-                    kn.id, e,
+                    kn.id,
+                    e,
                 )
 
         return scores

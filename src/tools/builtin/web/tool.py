@@ -90,6 +90,7 @@ class WebTool(BuiltinTool):
     def from_config(cls, config_path: str | None = None) -> "WebTool":
         """从配置文件创建 WebTool 实例（通过 ConfigCenter 统一缓存）"""
         from config.config_center import get_config_center  # noqa: PLC0415
+
         rel = (config_path or cls.DEFAULT_CONFIG_PATH).replace("config/", "", 1)
         try:
             config = get_config_center().get(rel) or {}
@@ -105,10 +106,7 @@ class WebTool(BuiltinTool):
                 default_headers=config.get("default_headers"),
             )
 
-            logger.info(
-                f"[WebTool] 从配置文件加载成功 | "
-                f"blocked_domains={len(instance.blocked_domains)}"
-            )
+            logger.info(f"[WebTool] 从配置文件加载成功 | blocked_domains={len(instance.blocked_domains)}")
             return instance
 
         except Exception as e:
@@ -232,8 +230,7 @@ class WebTool(BuiltinTool):
             # 检查允许列表（支持子域名匹配）
             if self.allowed_domains is not None:
                 is_allowed = any(
-                    domain == allowed or domain.endswith("." + allowed)
-                    for allowed in self.allowed_domains
+                    domain == allowed or domain.endswith("." + allowed) for allowed in self.allowed_domains
                 )
                 if not is_allowed:
                     return False, f"域名不在允许列表中: {domain}"
@@ -299,6 +296,7 @@ class WebTool(BuiltinTool):
                     if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
                         try:
                             import trafilatura  # noqa: PLC0415
+
                             extracted = trafilatura.extract(
                                 text,
                                 include_tables=True,
@@ -387,6 +385,7 @@ class WebTool(BuiltinTool):
                     if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
                         try:
                             import trafilatura  # noqa: PLC0415
+
                             extracted = trafilatura.extract(
                                 text,
                                 include_tables=True,

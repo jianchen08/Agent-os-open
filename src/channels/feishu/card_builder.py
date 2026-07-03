@@ -66,13 +66,15 @@ class CardBuilder:
         Returns:
             self，支持链式调用
         """
-        self._elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": content,
-            },
-        })
+        self._elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": content,
+                },
+            }
+        )
         return self
 
     def add_action(self, actions: list[dict[str, Any]]) -> CardBuilder:
@@ -84,10 +86,12 @@ class CardBuilder:
         Returns:
             self，支持链式调用
         """
-        self._elements.append({
-            "tag": "action",
-            "actions": actions,
-        })
+        self._elements.append(
+            {
+                "tag": "action",
+                "actions": actions,
+            }
+        )
         return self
 
     def add_hr(self) -> CardBuilder:
@@ -108,15 +112,17 @@ class CardBuilder:
         Returns:
             self，支持链式调用
         """
-        self._elements.append({
-            "tag": "note",
-            "elements": [
-                {
-                    "tag": "plain_text",
-                    "content": content,
-                }
-            ],
-        })
+        self._elements.append(
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": content,
+                    }
+                ],
+            }
+        )
         return self
 
     def build(self) -> dict[str, Any]:
@@ -143,12 +149,7 @@ class CardBuilder:
         Returns:
             飞书卡片 JSON 字典
         """
-        return (
-            CardBuilder()
-            .add_header(title)
-            .add_markdown(content)
-            .build()
-        )
+        return CardBuilder().add_header(title).add_markdown(content).build()
 
     @staticmethod
     def build_action_card(
@@ -175,10 +176,4 @@ class CardBuilder:
             }
             for btn in buttons
         ]
-        return (
-            CardBuilder()
-            .add_header(title)
-            .add_markdown(content)
-            .add_action(actions)
-            .build()
-        )
+        return CardBuilder().add_header(title).add_markdown(content).add_action(actions).build()

@@ -29,6 +29,7 @@ from .tool import DownloadTool, _is_private_ip, _sanitize_filename, _validate_ur
 
 # ─── 本地 HTTP 测试服务器 ────────────────────────────
 
+
 class _SilentHandler(SimpleHTTPRequestHandler):
     """静默 HTTP 处理器（不打印日志）"""
 
@@ -100,6 +101,7 @@ def tool():
 
 # ─── 辅助函数 ──────────────────────────────────────
 
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -117,19 +119,22 @@ def _sha256_file(path: Path) -> str:
 
 # ─── 1. 小文件下载 + 完整性校验 ───────────────────────
 
+
 @pytest.mark.asyncio
 async def test_download_small_file_with_hash(tool, download_dir, test_server):
     """下载小文件 (1KB) 并用 SHA256 校验完整性"""
     url = f"{test_server['base_url']}/small.bin"
     expected_hash = test_server["small_sha256"]
 
-    result = await tool.execute({
-        "url": url,
-        "save_path": download_dir,
-        "timeout": 30,
-        "expected_hash": expected_hash,
-        "skip_ssrf_check": True,
-    })
+    result = await tool.execute(
+        {
+            "url": url,
+            "save_path": download_dir,
+            "timeout": 30,
+            "expected_hash": expected_hash,
+            "skip_ssrf_check": True,
+        }
+    )
 
     print(f"\n[小文件下载] 结果: success={result.success}")
 
@@ -156,6 +161,7 @@ async def test_download_small_file_with_hash(tool, download_dir, test_server):
 
 # ─── 2. 中等文件分段下载 ─────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_download_medium_file_segmented(tool, download_dir, test_server):
     """下载中等文件 (5MB)，验证分段下载和分片合并正确"""
@@ -163,14 +169,16 @@ async def test_download_medium_file_segmented(tool, download_dir, test_server):
     expected_hash = test_server["medium_sha256"]
     expected_size = len(test_server["medium_data"])
 
-    result = await tool.execute({
-        "url": url,
-        "save_path": download_dir,
-        "filename": "medium_test.bin",
-        "max_connections": 4,
-        "timeout": 60,
-        "skip_ssrf_check": True,
-    })
+    result = await tool.execute(
+        {
+            "url": url,
+            "save_path": download_dir,
+            "filename": "medium_test.bin",
+            "max_connections": 4,
+            "timeout": 60,
+            "skip_ssrf_check": True,
+        }
+    )
 
     print(f"\n[中等文件分段下载] 结果: success={result.success}")
 
@@ -195,7 +203,7 @@ async def test_download_medium_file_segmented(tool, download_dir, test_server):
     assert len(state_files) == 0, f"存在残留状态: {state_files}"
 
     print(f"  文件: {file_path.name}")
-    print(f"  大小: {data['size']} 字节 ({data['size']/1024/1024:.1f} MB)")
+    print(f"  大小: {data['size']} 字节 ({data['size'] / 1024 / 1024:.1f} MB)")
     print(f"  分段数: {meta.get('segments')}")
     print(f"  耗时: {data['duration']}s")
     print(f"  速度: {data['avg_speed']}")
@@ -203,6 +211,7 @@ async def test_download_medium_file_segmented(tool, download_dir, test_server):
 
 
 # ─── 3. 断点续传测试 ────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_resume_download(tool, download_dir, test_server):
@@ -245,14 +254,16 @@ async def test_resume_download(tool, download_dir, test_server):
     print(f"\n[断点续传] 已模拟部分下载: 分片 0/{num_segments} 完成")
 
     # Step 3: 重新下载，应从断点续传
-    result = await tool.execute({
-        "url": url,
-        "save_path": download_dir,
-        "filename": filename,
-        "max_connections": 4,
-        "timeout": 60,
-        "skip_ssrf_check": True,
-    })
+    result = await tool.execute(
+        {
+            "url": url,
+            "save_path": download_dir,
+            "filename": filename,
+            "max_connections": 4,
+            "timeout": 60,
+            "skip_ssrf_check": True,
+        }
+    )
 
     print(f"[断点续传] 结果: success={result.success}")
 
@@ -273,15 +284,18 @@ async def test_resume_download(tool, download_dir, test_server):
 
 # ─── 4. 超时处理测试 ────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_timeout_handling(tool, download_dir):
     """测试超时场景处理（使用不可达地址）"""
-    result = await tool.execute({
-        "url": "https://10.255.255.1/file.txt",  # 不可达 IP，必定超时
-        "save_path": download_dir,
-        "timeout": 2,
-        "max_retries": 1,
-    })
+    result = await tool.execute(
+        {
+            "url": "https://10.255.255.1/file.txt",  # 不可达 IP，必定超时
+            "save_path": download_dir,
+            "timeout": 2,
+            "max_retries": 1,
+        }
+    )
 
     print(f"\n[超时处理] 结果: success={result.success}, error={result.error}")
 
@@ -294,12 +308,14 @@ async def test_timeout_handling(tool, download_dir):
 @pytest.mark.asyncio
 async def test_invalid_url(tool, download_dir):
     """测试无效 URL 处理"""
-    result = await tool.execute({
-        "url": "https://this-domain-does-not-exist-abcxyz.com/file.txt",
-        "save_path": download_dir,
-        "timeout": 10,
-        "max_retries": 1,
-    })
+    result = await tool.execute(
+        {
+            "url": "https://this-domain-does-not-exist-abcxyz.com/file.txt",
+            "save_path": download_dir,
+            "timeout": 10,
+            "max_retries": 1,
+        }
+    )
 
     print(f"\n[无效URL] 结果: success={result.success}")
 
@@ -320,6 +336,7 @@ async def test_missing_params(tool, download_dir):
 
 
 # ─── 5. 安全校验测试 ────────────────────────────────
+
 
 def test_sanitize_filename():
     """测试文件名清洗（防路径穿越）"""
@@ -371,18 +388,19 @@ async def test_file_size_limit(tool, download_dir, test_server):
     """测试文件大小上限"""
     url = f"{test_server['base_url']}/small.bin"
 
-    result = await tool.execute({
-        "url": url,
-        "save_path": download_dir,
-        "max_size": 1,  # 1 字节上限
-        "skip_ssrf_check": True,
-    })
+    result = await tool.execute(
+        {
+            "url": url,
+            "save_path": download_dir,
+            "max_size": 1,  # 1 字节上限
+            "skip_ssrf_check": True,
+        }
+    )
 
     print(f"\n[大小限制] 结果: success={result.success}, error={result.error}")
 
     assert result.success is False, "超出大小限制应返回失败"
-    assert "大小" in result.error or "上限" in result.error, \
-        f"错误信息应包含大小限制描述，实际: {result.error}"
+    assert "大小" in result.error or "上限" in result.error, f"错误信息应包含大小限制描述，实际: {result.error}"
 
 
 @pytest.mark.asyncio
@@ -390,12 +408,14 @@ async def test_specified_filename(tool, download_dir, test_server):
     """测试指定文件名"""
     url = f"{test_server['base_url']}/small.bin"
 
-    result = await tool.execute({
-        "url": url,
-        "save_path": download_dir,
-        "filename": "custom_name.bin",
-        "timeout": 30,
-    })
+    result = await tool.execute(
+        {
+            "url": url,
+            "save_path": download_dir,
+            "filename": "custom_name.bin",
+            "timeout": 30,
+        }
+    )
 
     assert result.success
     assert Path(result.output["path"]).name == "custom_name.bin"
@@ -404,28 +424,34 @@ async def test_specified_filename(tool, download_dir, test_server):
 @pytest.mark.asyncio
 async def test_ssrf_protection(tool, download_dir):
     """测试 SSRF 防护（拒绝内网地址）"""
-    result = await tool.execute({
-        "url": "http://127.0.0.1:6800/secret",
-        "save_path": download_dir,
-    })
+    result = await tool.execute(
+        {
+            "url": "http://127.0.0.1:6800/secret",
+            "save_path": download_dir,
+        }
+    )
 
     assert result.success is False
-    assert "内网" in result.error or "SSRF" in result.error or "loopback" in result.error.lower(), \
+    assert "内网" in result.error or "SSRF" in result.error or "loopback" in result.error.lower(), (
         f"应拦截内网请求，实际: {result.error}"
+    )
 
 
 # ─── 6. 外部网络真实下载测试（可选）───────────────────
+
 
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="需要外部网络，手动运行: pytest -m network")
 async def test_download_external_small_file(tool, download_dir):
     """从 GitHub 下载小文件（外部网络测试）"""
-    result = await tool.execute({
-        "url": "https://raw.githubusercontent.com/python/cpython/main/README.rst",
-        "save_path": download_dir,
-        "timeout": 60,
-        "max_retries": 3,
-    })
+    result = await tool.execute(
+        {
+            "url": "https://raw.githubusercontent.com/python/cpython/main/README.rst",
+            "save_path": download_dir,
+            "timeout": 60,
+            "max_retries": 3,
+        }
+    )
 
     print(f"\n[外部小文件下载] 结果: {result}")
 

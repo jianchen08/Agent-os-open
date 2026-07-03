@@ -82,9 +82,7 @@ class MCPClient:
 
         return ToolsResponse(response)
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any], timeout: float = 120.0
-    ) -> Any:
+    async def call_tool(self, name: str, arguments: dict[str, Any], timeout: float = 120.0) -> Any:
         """调用工具
 
         使用 asyncio.wait_for 对整个调用过程进行超时保护，
@@ -114,9 +112,7 @@ class MCPClient:
             ) from None
 
         try:
-            response = await asyncio.wait_for(
-                self._read_response(timeout=timeout), timeout=timeout
-            )
+            response = await asyncio.wait_for(self._read_response(timeout=timeout), timeout=timeout)
         except TimeoutError:
             raise MCPConnectionError(
                 message=f"MCP 服务器 '{self.name}' 工具调用响应超时（{timeout}秒），工具: {name}",
@@ -211,20 +207,14 @@ class MCPClient:
             # 双字节汉字首字节（如 0xCA continuation byte）会让默认 UTF-8 解码抛
             # UnicodeDecodeError，使整个工具调用失败。errors='replace' 保证协议帧可解析，
             # 最坏情况下个别字节被替换为 □ 而非整次调用崩溃。
-            line_str = (
-                line.decode("utf-8", errors="replace").strip()
-                if isinstance(line, bytes)
-                else line.strip()
-            )
+            line_str = line.decode("utf-8", errors="replace").strip() if isinstance(line, bytes) else line.strip()
             if not line_str:
                 continue
 
             try:
                 return json.loads(line_str)
             except json.JSONDecodeError:
-                logging.getLogger(__name__).debug(
-                    f"[MCP] 跳过非 JSON 行: {line_str[:100]}"
-                )
+                logging.getLogger(__name__).debug(f"[MCP] 跳过非 JSON 行: {line_str[:100]}")
                 continue
 
         raise MCPConnectionError(

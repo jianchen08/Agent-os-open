@@ -48,12 +48,12 @@ class ModelCapabilityRegistry:
         "anthropic": ClaudeVisionAdapter,
         "anthropic_reasoning": ClaudeVisionAdapter,
         "google": OpenAIVisionAdapter,  # Gemini 使用类似 OpenAI 的格式
-        "zhipu": OpenAIVisionAdapter,   # 智谱使用类似 OpenAI 的格式
+        "zhipu": OpenAIVisionAdapter,  # 智谱使用类似 OpenAI 的格式
         "zhipu_coding": OpenAIVisionAdapter,  # GLM-5 系列支持图片
         "minimax": OpenAIVisionAdapter,  # MiniMax-M3 支持图片和视频
         "deepseek": DefaultAdapter,
         "deepseek_reasoning": DefaultAdapter,
-        "ollama": OpenAIVisionAdapter,   # Ollama 使用类似 OpenAI 的格式
+        "ollama": OpenAIVisionAdapter,  # Ollama 使用类似 OpenAI 的格式
     }
 
     @classmethod
@@ -113,8 +113,4 @@ class ModelCapabilityRegistry:
     def is_multimodal_supported(cls, model_name: str) -> bool:
         """检查模型是否支持多模态"""
         capability = cls.get_capability(model_name)
-        return (
-            capability.supports_image
-            or capability.supports_audio
-            or capability.supports_video
-        )
+        return capability.supports_image or capability.supports_audio or capability.supports_video

@@ -158,7 +158,10 @@ class ToolCallGuard(IInputPlugin):
         return prompt
 
     def _add_tool_results(
-        self, ctx: PluginContext, tool_calls: list[dict], prompt: str,
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict],
+        prompt: str,
     ) -> list:
         """把重复提示作为 tool_result 注入消息列表。
 
@@ -179,10 +182,12 @@ class ToolCallGuard(IInputPlugin):
         for tc in tool_calls:
             tool_name = tc.get("name", "unknown")
             call_id = tc.get("id", "")
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": tool_name,
-                "content": f"[ToolCallGuard] {prompt}",
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": tool_name,
+                    "content": f"[ToolCallGuard] {prompt}",
+                }
+            )
         return messages

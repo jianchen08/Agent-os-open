@@ -67,7 +67,8 @@ class ExternalToolConfigManager:
         # 2. 加载各工具配置
         if not self._config_dir.exists():
             self._logger.warning(
-                "配置目录不存在 | dir=%s", self._config_dir,
+                "配置目录不存在 | dir=%s",
+                self._config_dir,
             )
             return self._configs
 
@@ -81,12 +82,14 @@ class ExternalToolConfigManager:
                     self._configs[config.name] = config
                     self._logger.info(
                         "配置已加载 | tool=%s | file=%s",
-                        config.name, yaml_file.name,
+                        config.name,
+                        yaml_file.name,
                     )
             except Exception as e:
                 self._logger.error(
                     "配置加载失败 | file=%s | error=%s",
-                    yaml_file.name, e,
+                    yaml_file.name,
+                    e,
                 )
 
         return self._configs

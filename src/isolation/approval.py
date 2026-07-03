@@ -99,9 +99,7 @@ class ApprovalContext:
         """转换为字典"""
         return {
             "tool_name": self.tool_name,
-            "tool_definition": (
-                self.tool_definition.name if self.tool_definition else None
-            ),
+            "tool_definition": (self.tool_definition.name if self.tool_definition else None),
             "inputs": self.inputs,
             "isolation_level": self.isolation_level.value,
             "policy_approval": self.policy.approval if self.policy else None,
@@ -292,10 +290,7 @@ class ApprovalDecisionEngine:
                 risk_factors=["POLICY_APPROVAL"],
                 details={"policy_approval": True},
             )
-            logger.info(
-                f"[ApprovalDecisionEngine] 策略要求审批 | "
-                f"tool={context.tool_name}"
-            )
+            logger.info(f"[ApprovalDecisionEngine] 策略要求审批 | tool={context.tool_name}")
             return decision
 
         # ── 第 2 层：HOST 模式工具级分类 ──
@@ -315,10 +310,7 @@ class ApprovalDecisionEngine:
                     risk_factors=["HOST_MODE", "HOST_DIRECT_TOOL"],
                     details={"execution": "host_direct"},
                 )
-                logger.debug(
-                    f"[ApprovalDecisionEngine] HOST 内部工具免审批 | "
-                    f"tool={context.tool_name}"
-                )
+                logger.debug(f"[ApprovalDecisionEngine] HOST 内部工具免审批 | tool={context.tool_name}")
                 return decision
 
             # execution == "command_in_container"：命令执行类降级到 HOST，必须审批
@@ -332,9 +324,7 @@ class ApprovalDecisionEngine:
             if has_dangerous_op:
                 risk_factors = ["HOST_MODE", "DANGEROUS_OPERATION"]
                 risk_score = min(0.9 + 0.1, 1.0)
-                reason = (
-                    f"HOST 模式命令执行工具检测到危险操作: {has_dangerous_op}"
-                )
+                reason = f"HOST 模式命令执行工具检测到危险操作: {has_dangerous_op}"
             else:
                 risk_factors = ["HOST_MODE", "COMMAND_EXECUTION"]
                 risk_score = 0.9
@@ -352,8 +342,7 @@ class ApprovalDecisionEngine:
                 },
             )
             logger.info(
-                f"[ApprovalDecisionEngine] HOST 命令执行工具需要审批 | "
-                f"tool={context.tool_name}, op={has_dangerous_op}"
+                f"[ApprovalDecisionEngine] HOST 命令执行工具需要审批 | tool={context.tool_name}, op={has_dangerous_op}"
             )
             return decision
 

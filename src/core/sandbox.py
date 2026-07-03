@@ -146,10 +146,7 @@ class CodeValidator:
                         issues.append(f"禁止导入模块: {alias.name}")
 
             elif isinstance(node, ast.ImportFrom):
-                if (
-                    node.module
-                    and node.module.split(".")[0] in self.config.blocked_modules
-                ):
+                if node.module and node.module.split(".")[0] in self.config.blocked_modules:
                     issues.append(f"禁止导入模块: {node.module}")
 
             # 检查危险函数调用
@@ -233,9 +230,7 @@ class CodeSandbox:
         try:
             # 使用 asyncio 超时
             await asyncio.wait_for(
-                self._run_code(
-                    code, exec_globals, exec_locals, stdout_capture, stderr_capture
-                ),
+                self._run_code(code, exec_globals, exec_locals, stdout_capture, stderr_capture),
                 timeout=self._config.timeout_seconds,
             )
 
@@ -300,11 +295,7 @@ class CodeSandbox:
                 exec(code, exec_globals, exec_globals)
                 # 将结果复制到 exec_locals
                 exec_locals.update(
-                    {
-                        k: v
-                        for k, v in exec_globals.items()
-                        if not k.startswith("__") and k not in ("__builtins__",)
-                    }
+                    {k: v for k, v in exec_globals.items() if not k.startswith("__") and k not in ("__builtins__",)}
                 )
 
         loop = asyncio.get_event_loop()

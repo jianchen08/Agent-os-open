@@ -73,16 +73,20 @@ class LangChainHubAdapter(PlatformAdapter):
             headers["x-api-key"] = self._api_key
 
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
+                ) as resp,
+            ):
                 if resp.status != 200:
                     logger.warning(
                         "[langchain_hub] 搜索请求失败: status=%d url=%s",
-                        resp.status, resp.url,
+                        resp.status,
+                        resp.url,
                     )
                     return []
 
@@ -112,7 +116,9 @@ class LangChainHubAdapter(PlatformAdapter):
 
         logger.info(
             "[langchain_hub] 搜索完成: query=%s repo_type=%s 返回 %d 条结果",
-            query, repo_type, len(results),
+            query,
+            repo_type,
+            len(results),
         )
         return results
 

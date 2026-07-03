@@ -24,9 +24,7 @@ ToolHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
     """工具注册表"""
 
-    def __init__(
-        self, sync_service: Optional["ToolSyncService"] = None, lazy_load: bool = True
-    ) -> None:
+    def __init__(self, sync_service: Optional["ToolSyncService"] = None, lazy_load: bool = True) -> None:
         """初始化注册表"""
         # 初始化基类
         SimpleRegistry.__init__(self)
@@ -57,9 +55,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         """设置同步服务（支持延迟注入）"""
         self._sync_service = sync_service
 
-    def configure_unload_policy(
-        self, max_tools: int = 100, unload_threshold: int = 20
-    ) -> None:
+    def configure_unload_policy(self, max_tools: int = 100, unload_threshold: int = 20) -> None:
         """配置工具卸载策略"""
         self._max_tools = max_tools
         self._unload_threshold = unload_threshold
@@ -81,13 +77,12 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         """从 contextvar 获取当前 pipeline_id（隔离动态工具状态用）。"""
         try:
             from pipeline.engine_state import _current_pipeline_id  # noqa: PLC0415
+
             return _current_pipeline_id.get() or ""
         except Exception:
             return ""
 
-    def register_schema_enricher(
-        self, tool_name: str, enricher: Callable[[Any, dict[str, Any]], Any]
-    ) -> None:
+    def register_schema_enricher(self, tool_name: str, enricher: Callable[[Any, dict[str, Any]], Any]) -> None:
         """注册工具 Schema 动态丰富器。"""
         self._schema_enrichers[tool_name] = enricher
 
@@ -230,7 +225,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
             all_tools = get_all_builtin_tools()
 
             for tool_item in all_tools:
-                if hasattr(tool_item, 'get_tool_definition'):
+                if hasattr(tool_item, "get_tool_definition"):
                     tool_def = tool_item.get_tool_definition()
                     if tool_def.name == name:
                         registered_name = self.register_with_handler(
@@ -238,7 +233,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                             handler=tool_item.execute,
                         )
                         # 注册 Schema 丰富器（如果有）
-                        if hasattr(tool_item, 'get_schema_enricher'):
+                        if hasattr(tool_item, "get_schema_enricher"):
                             enricher = tool_item.get_schema_enricher()
                             if enricher:
                                 self.register_schema_enricher(tool_def.name, enricher)
@@ -247,6 +242,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                 elif isinstance(tool_item, Tool):
                     if tool_item.name == name:
                         from tools.builtin.lsp_tools import LSPTools  # noqa: PLC0415
+
                         lsp_instance = LSPTools()
                         handler_map = {
                             "lsp_definition": lsp_instance._lsp_definition,
@@ -299,15 +295,10 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
             core_tools = set()
 
         # 找出可以卸载的工具（非核心工具）
-        unloadable_tools = [
-            name for name in self._items if name not in core_tools
-        ]
+        unloadable_tools = [name for name in self._items if name not in core_tools]
 
         if not unloadable_tools:
-            logger.warning(
-                "[工具卸载] 所有工具都是核心工具，无法卸载 | "
-                f"工具数量={len(self._items)}"
-            )
+            logger.warning(f"[工具卸载] 所有工具都是核心工具，无法卸载 | 工具数量={len(self._items)}")
             return
 
         # 按最后使用时间排序（最久未使用的排在前面）
@@ -323,15 +314,11 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                 self.unregister(tool_name)
                 unloaded.append(tool_name)
             except Exception as e:
-                logger.warning(
-                    f"[工具卸载] 卸载工具失败 | tool={tool_name} | error={e}"
-                )
+                logger.warning(f"[工具卸载] 卸载工具失败 | tool={tool_name} | error={e}")
 
         if unloaded:
             logger.info(
-                f"[工具卸载] 已卸载 {len(unloaded)} 个工具 | "
-                f"当前工具数={len(self._items)} | "
-                f"卸载的工具={unloaded}"
+                f"[工具卸载] 已卸载 {len(unloaded)} 个工具 | 当前工具数={len(self._items)} | 卸载的工具={unloaded}"
             )
 
     def get_usage_stats(self) -> dict[str, dict[str, Any]]:
@@ -406,10 +393,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         results = []
 
         for tool in self._items.values():
-            if (
-                query_lower in tool.name.lower()
-                or query_lower in tool.description.lower()
-            ):
+            if query_lower in tool.name.lower() or query_lower in tool.description.lower():
                 results.append(tool)
 
         return results
@@ -436,9 +420,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
             }
             tools_desc.append(tool_simple)
 
-        return yaml.dump(
-            {"tools": tools_desc}, default_flow_style=False, allow_unicode=True
-        )
+        return yaml.dump({"tools": tools_desc}, default_flow_style=False, allow_unicode=True)
 
     def get_tools_for_llm_format(
         self, format_type: str | None = None, names: list[str] | None = None

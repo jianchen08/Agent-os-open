@@ -1,4 +1,4 @@
-﻿"""
+"""
 触发器设置工具
 
 通过 TriggerManager 注册触发器，支持延迟、定时、周期、事件和条件五种触发类型。
@@ -108,10 +108,7 @@ class TriggerSetupTool(BuiltinTool):
                         "type": "string",
                         "enum": ["setup", "cancel", "update"],
                         "description": (
-                            "操作类型: "
-                            "setup=设置触发器(默认), "
-                            "cancel=取消指定触发器, "
-                            "update=更新已有触发器的次数或时长"
+                            "操作类型: setup=设置触发器(默认), cancel=取消指定触发器, update=更新已有触发器的次数或时长"
                         ),
                     },
                     "trigger_id": {
@@ -157,9 +154,7 @@ class TriggerSetupTool(BuiltinTool):
                     "max_time": {
                         "type": "string",
                         "description": (
-                            "最长运行时间（到达后触发器自动停止），"
-                            "支持格式: '30m', '2h', '3d', '1h30m'。"
-                            "不填表示无限"
+                            "最长运行时间（到达后触发器自动停止），支持格式: '30m', '2h', '3d', '1h30m'。不填表示无限"
                         ),
                     },
                     "event_type": {
@@ -241,7 +236,8 @@ class TriggerSetupTool(BuiltinTool):
             execution_id = f"exec_{uuid.uuid4().hex[:12]}"
 
         active_count = sum(
-            1 for t in self._manager._triggers.values()
+            1
+            for t in self._manager._triggers.values()
             if t.pipeline_id == pipeline_id and t.status.value in ("active", "pending")
         )
         if active_count >= self.MAX_TRIGGERS_PER_SESSION:
@@ -252,25 +248,15 @@ class TriggerSetupTool(BuiltinTool):
 
         try:
             if trigger_type == "delay":
-                return await self._setup_delay_trigger(
-                    inputs, execution_id, pipeline_id, message
-                )
+                return await self._setup_delay_trigger(inputs, execution_id, pipeline_id, message)
             if trigger_type == "schedule":
-                return await self._setup_schedule_trigger(
-                    inputs, execution_id, pipeline_id, message
-                )
+                return await self._setup_schedule_trigger(inputs, execution_id, pipeline_id, message)
             if trigger_type == "interval":
-                return await self._setup_interval_trigger(
-                    inputs, execution_id, pipeline_id, message
-                )
+                return await self._setup_interval_trigger(inputs, execution_id, pipeline_id, message)
             if trigger_type == "event":
-                return await self._setup_event_trigger(
-                    inputs, execution_id, pipeline_id, message
-                )
+                return await self._setup_event_trigger(inputs, execution_id, pipeline_id, message)
             if trigger_type == "condition":
-                return await self._setup_condition_trigger(
-                    inputs, execution_id, pipeline_id, message
-                )
+                return await self._setup_condition_trigger(inputs, execution_id, pipeline_id, message)
             return create_failure_result(
                 error=f"不支持的触发类型: {trigger_type}",
                 error_code="INVALID_TRIGGER_TYPE",
@@ -394,11 +380,7 @@ class TriggerSetupTool(BuiltinTool):
                 error_code="TRIGGER_CANCEL_FAILED",
             )
 
-        logger.info(
-            f"[TriggerSetupTool] 触发器已取消 | "
-            f"trigger_id={trigger_id} | "
-            f"pipeline_id={pipeline_id}"
-        )
+        logger.info(f"[TriggerSetupTool] 触发器已取消 | trigger_id={trigger_id} | pipeline_id={pipeline_id}")
 
         return create_success_result(
             data={

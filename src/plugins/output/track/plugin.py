@@ -55,6 +55,7 @@ class TrackPlugin(IOutputPlugin):
         """获取当前消息的 sequence 值（只读，用于 summary 统计）。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(pipeline_run_id)
             if entry is not None:
                 return entry.msg_sequence
@@ -66,6 +67,7 @@ class TrackPlugin(IOutputPlugin):
         """获取下一条记录的 sequence。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             registry = get_engine_registry()
             entry = registry.get(pipeline_run_id)
             if entry is not None:
@@ -74,20 +76,22 @@ class TrackPlugin(IOutputPlugin):
                 self._local_sequences[pipeline_run_id] = seq
                 logger.debug(
                     "TrackPlugin._next_sequence: pipeline=%s entry_found=True seq=%d",
-                    pipeline_run_id[:12], seq,
+                    pipeline_run_id[:12],
+                    seq,
                 )
                 return seq
             logger.warning(
                 "TrackPlugin._next_sequence: pipeline=%s entry_found=False total_engines=%d "
                 "ids=%s — using local fallback",
                 pipeline_run_id[:12],
-                len(registry._engines) if hasattr(registry, '_engines') else -1,
-                [pid[:12] for pid in (list(registry._engines.keys())[:5] if hasattr(registry, '_engines') else [])],
+                len(registry._engines) if hasattr(registry, "_engines") else -1,
+                [pid[:12] for pid in (list(registry._engines.keys())[:5] if hasattr(registry, "_engines") else [])],
             )
         except Exception as exc:
             logger.warning(
                 "TrackPlugin._next_sequence: pipeline=%s exception=%s — using local fallback",
-                pipeline_run_id[:12], exc,
+                pipeline_run_id[:12],
+                exc,
             )
         # fallback: 使用本地计数器，确保即使 registry 不可用也能递增
         current = self._local_sequences.get(pipeline_run_id, 0)
@@ -96,11 +100,14 @@ class TrackPlugin(IOutputPlugin):
         return current
 
     def _resolve_ai_record_id(
-        self, pipeline_run_id: str, preset_record_id: str,
+        self,
+        pipeline_run_id: str,
+        preset_record_id: str,
     ) -> str:
         """解析 AI 记录的 record_id，保证与前端 stream_start 下发的 message_id 一致。"""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(pipeline_run_id)
             if entry is not None and entry.bridge is not None:
                 bridge_id = getattr(entry.bridge, "message_id", "") or ""
@@ -109,7 +116,8 @@ class TrackPlugin(IOutputPlugin):
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "TrackPlugin._resolve_ai_record_id: bridge 不可用 pipeline=%s err=%s — 使用 preset fallback",
-                pipeline_run_id[:12], exc,
+                pipeline_run_id[:12],
+                exc,
             )
         # bridge 不可用 → 用调用方传入的 preset（state.preset_ai_record_id）兜底
         return preset_record_id
@@ -172,24 +180,30 @@ class TrackPlugin(IOutputPlugin):
             return
         try:
             from channels.websocket.ws_handler import ws_interaction_notifier as _notifier  # noqa: PLC0415
+
             if _notifier:
                 _llm_usage = ctx.state.get("llm_usage") or {}
                 _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
                 _session_id = ctx.state.get(StateKeys.SESSION_ID, "")
                 from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
+
                 _sink = create_targeted_sink(
-                    _notifier, _session_id, pipeline_id=_pipeline_id,
+                    _notifier,
+                    _session_id,
+                    pipeline_id=_pipeline_id,
                 )
                 if _sink:
-                    await _sink.send_event({
-                        "type": "cost_update",
-                        "data": {
-                            "pipeline_id": _pipeline_id,
-                            "total_tokens": _llm_usage.get("total_tokens", 0),
-                            "input_tokens": _llm_usage.get("input_tokens", 0),
-                            "output_tokens": _llm_usage.get("output_tokens", 0),
-                        },
-                    })
+                    await _sink.send_event(
+                        {
+                            "type": "cost_update",
+                            "data": {
+                                "pipeline_id": _pipeline_id,
+                                "total_tokens": _llm_usage.get("total_tokens", 0),
+                                "input_tokens": _llm_usage.get("input_tokens", 0),
+                                "output_tokens": _llm_usage.get("output_tokens", 0),
+                            },
+                        }
+                    )
         except Exception:
             logger.debug("cost_update 推送失败", exc_info=True)
 
@@ -259,12 +273,14 @@ class TrackPlugin(IOutputPlugin):
                     self._local_sequences[pipeline_run_id] = max_seq
                 try:
                     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
                     entry = get_engine_registry().get(pipeline_run_id)
                     if entry is not None:
                         entry.init_sequence(max_seq)
                         logger.debug(
                             "TrackPlugin: resumed shared sequence to %d for pipeline %s",
-                            max_seq, pipeline_run_id,
+                            max_seq,
+                            pipeline_run_id,
                         )
                 except Exception:
                     pass
@@ -303,9 +319,7 @@ class TrackPlugin(IOutputPlugin):
                 except Exception:
                     logger.exception("用户消息记录持久化失败")
             elif self._last_saved_user_input:
-                new_content = self._extract_injected_content(
-                    user_input, self._last_saved_user_input
-                )
+                new_content = self._extract_injected_content(user_input, self._last_saved_user_input)
                 if new_content:
                     self._last_saved_user_input = user_input
                     # type=system：这是 engine.inject_message 注入的子任务完成/
@@ -326,7 +340,8 @@ class TrackPlugin(IOutputPlugin):
                         storage.save(notification_record)
                         logger.debug(
                             "Injected content saved at iteration %d (%d chars)",
-                            iteration, len(new_content),
+                            iteration,
+                            len(new_content),
                         )
                     except Exception:
                         logger.exception("注入内容记录持久化失败")
@@ -375,6 +390,7 @@ class TrackPlugin(IOutputPlugin):
                 ctx.state["track.last_ai_sequence"] = ai_record.sequence
                 try:
                     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
                     _entry = get_engine_registry().get(pipeline_run_id)
                     if _entry and _entry.bridge:
                         _entry.bridge._last_ai_sequence = ai_record.sequence
@@ -386,10 +402,7 @@ class TrackPlugin(IOutputPlugin):
         # -- 2. 工具执行记录（Tool Core 后写入，此时工具已执行完毕） --
         if core_type == "tool_execute":
             tool_results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
-            raw_tool_calls = (
-                ctx.state.get("_executed_tool_calls")
-                or ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
-            )
+            raw_tool_calls = ctx.state.get("_executed_tool_calls") or ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
             if tool_results and isinstance(tool_results, list):
                 for idx, tr in enumerate(tool_results):
                     if not isinstance(tr, dict):
@@ -410,10 +423,7 @@ class TrackPlugin(IOutputPlugin):
                         if isinstance(raw_call, dict):
                             raw_args = raw_call.get("args", {})
                             if isinstance(raw_args, dict):
-                                filtered_args = {
-                                    k: v for k, v in raw_args.items()
-                                    if not k.startswith("_")
-                                }
+                                filtered_args = {k: v for k, v in raw_args.items() if not k.startswith("_")}
                             else:
                                 filtered_args = raw_args
                             tool_input = {
@@ -481,8 +491,13 @@ class TrackPlugin(IOutputPlugin):
             logger.warning(
                 "[%s] 缓存命中异常: 总未命中=%d, 末轮input=%d, 偏差=%d (%.1f%% > 5%%阈值), "
                 "总input=%d, 总cached=%d, 命中率=%.1f%%",
-                pipeline_id, total_uncached, last_input, gap, ratio * 100,
-                total_input, total_cached,
+                pipeline_id,
+                total_uncached,
+                last_input,
+                gap,
+                ratio * 100,
+                total_input,
+                total_cached,
                 total_cached / total_input * 100 if total_input else 0,
             )
 
@@ -506,10 +521,7 @@ class TrackPlugin(IOutputPlugin):
         self._check_cache_anomaly(llm_usage, pipeline_run_id)
 
         # 从管道 state 中读取 thread_id 写入 summary
-        thread_id = (
-            ctx.state.get("thread_id", "")
-            or ctx.state.get("session_id", "")
-        )
+        thread_id = ctx.state.get("thread_id", "") or ctx.state.get("session_id", "")
 
         summary = PipelineRunSummary(
             run_id=pipeline_run_id,

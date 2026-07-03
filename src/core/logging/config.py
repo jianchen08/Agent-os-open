@@ -40,8 +40,12 @@ class LoggingConfig:
     file_backup_count: int = 5
     third_party_level: int = WARNING
     context_fields: tuple[str, ...] = (
-        "trace_id", "request_id", "task_id",
-        "session_id", "pipeline_id", "thread_id",
+        "trace_id",
+        "request_id",
+        "task_id",
+        "session_id",
+        "pipeline_id",
+        "thread_id",
         "agent_name",
     )
 
@@ -67,9 +71,7 @@ class LoggingConfig:
             file_path=os.getenv("LOG_FILE", cls.file_path),
             file_max_bytes=int(os.getenv("LOG_FILE_MAX_BYTES", str(cls.file_max_bytes))),
             file_backup_count=int(os.getenv("LOG_FILE_BACKUPS", str(cls.file_backup_count))),
-            third_party_level=_LEVEL_MAP.get(
-                os.getenv("LOG_THIRD_PARTY_LEVEL", "WARNING").upper(), WARNING
-            ),
+            third_party_level=_LEVEL_MAP.get(os.getenv("LOG_THIRD_PARTY_LEVEL", "WARNING").upper(), WARNING),
         )
 
     @classmethod
@@ -80,9 +82,7 @@ class LoggingConfig:
         if "level" in filtered and isinstance(filtered["level"], str):
             filtered["level"] = _LEVEL_MAP.get(filtered["level"].upper(), INFO)
         if "third_party_level" in filtered and isinstance(filtered["third_party_level"], str):
-            filtered["third_party_level"] = _LEVEL_MAP.get(
-                filtered["third_party_level"].upper(), WARNING
-            )
+            filtered["third_party_level"] = _LEVEL_MAP.get(filtered["third_party_level"].upper(), WARNING)
         return cls(**filtered)
 
 

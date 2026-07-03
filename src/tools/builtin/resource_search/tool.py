@@ -100,7 +100,7 @@ class ResourceSearchTool:
                         "type": "string",
                         "enum": ["simple", "detailed"],
                         "default": "simple",
-                        "description": "simple=列出匹配资源；detailed=按精确名称加载资源（tool类型会动态注入到当前会话，支持逗号分隔批量，如 query=\"file_read,bash_execute\"）",
+                        "description": 'simple=列出匹配资源；detailed=按精确名称加载资源（tool类型会动态注入到当前会话，支持逗号分隔批量，如 query="file_read,bash_execute"）',
                     },
                     "filters": {
                         "type": "object",
@@ -209,12 +209,18 @@ class ResourceSearchTool:
                     detail = agent_details[i] if i < len(agent_details) else {}
                     metrics = detail.get("recommended_metrics", [])
                     if metrics:
+
                         def _metric_str(m):
-                            mid = getattr(m, "metric_id", None) or (m.get("metric_id", "") if isinstance(m, dict) else "")
-                            params = getattr(m, "default_params", None) or (m.get("default_params", {}) if isinstance(m, dict) else {})
+                            mid = getattr(m, "metric_id", None) or (
+                                m.get("metric_id", "") if isinstance(m, dict) else ""
+                            )
+                            params = getattr(m, "default_params", None) or (
+                                m.get("default_params", {}) if isinstance(m, dict) else {}
+                            )
                             if isinstance(params, dict) and params:
                                 return f"{mid}({', '.join(f'{k}={v}' for k, v in params.items())})"
                             return str(mid)
+
                         metrics_str = "; ".join(_metric_str(m) for m in metrics)
                         row.append(f"推荐评估: {metrics_str}")
                         if len(results["agent_h"]) == 3:
@@ -226,30 +232,19 @@ class ResourceSearchTool:
             tool_names, tool_descriptions, tool_schemas = await self._search_tools(
                 query, category, level, limit, detailed, exact
             )
-            logger.debug(
-                f"[resource_search] _search_tools 返回：tool_names={tool_names}, detailed={detailed}"
-            )
+            logger.debug(f"[resource_search] _search_tools 返回：tool_names={tool_names}, detailed={detailed}")
             if tool_names:
                 # detailed 模式：触发动态工具加载和注入，返回简化消息
                 if detailed and tool_names:
                     logger.debug(f"[resource_search] 准备注入动态工具：{tool_names}")
-                    await self._inject_dynamic_tools(
-                        tool_names, session_id, parent_record_id
-                    )
+                    await self._inject_dynamic_tools(tool_names, session_id, parent_record_id)
                     results["tool_h"] = ["tool_name", "tool_description"]
-                    results["tool_d"] = [
-                        [tool_names[i], tool_descriptions[i]]
-                        for i in range(len(tool_names))
-                    ]
+                    results["tool_d"] = [[tool_names[i], tool_descriptions[i]] for i in range(len(tool_names))]
                     results["tool_c"] = len(tool_names)
                     if len(tool_names) == 1:
-                        results["message"] = (
-                            f"工具 '{tool_names[0]}' 已找到并加载，现在可以直接调用该工具"
-                        )
+                        results["message"] = f"工具 '{tool_names[0]}' 已找到并加载，现在可以直接调用该工具"
                     else:
-                        results["message"] = (
-                            f"工具 {tool_names} 已找到并加载，现在可以直接调用这些工具"
-                        )
+                        results["message"] = f"工具 {tool_names} 已找到并加载，现在可以直接调用这些工具"
                 else:
                     # simple 模式：返回 schema（如果有）
                     if tool_schemas and any(tool_schemas):
@@ -259,20 +254,20 @@ class ResourceSearchTool:
                             "tool_schema",
                         ]
                         results["tool_d"] = [
-                            [tool_names[i], tool_descriptions[i], str(tool_schemas[i])]
-                            for i in range(len(tool_names))
+                            [tool_names[i], tool_descriptions[i], str(tool_schemas[i])] for i in range(len(tool_names))
                         ]
                     else:
                         results["tool_h"] = ["tool_name", "tool_description"]
-                        results["tool_d"] = [
-                            [tool_names[i], tool_descriptions[i]]
-                            for i in range(len(tool_names))
-                        ]
+                        results["tool_d"] = [[tool_names[i], tool_descriptions[i]] for i in range(len(tool_names))]
                     results["tool_c"] = len(tool_names)
 
         if resource_type in ["skill", "all"]:
             skill_names, skill_descriptions, skill_details = await self._search_skills(
-                query, language, limit, detailed, exact,
+                query,
+                language,
+                limit,
+                detailed,
+                exact,
             )
             if skill_names:
                 if detailed and skill_details and any(skill_details):
@@ -291,10 +286,7 @@ class ResourceSearchTool:
                     ]
                 else:
                     results["skill_h"] = ["skill_name", "skill_description"]
-                    results["skill_d"] = [
-                        [skill_names[i], skill_descriptions[i]]
-                        for i in range(len(skill_names))
-                    ]
+                    results["skill_d"] = [[skill_names[i], skill_descriptions[i]] for i in range(len(skill_names))]
                 results["skill_c"] = len(skill_names)
 
         return create_success_result(
@@ -367,11 +359,7 @@ class ResourceSearchTool:
                     continue
 
                 # 过滤语言（仅 Skill 中的脚本）
-                if (
-                    language
-                    and res_type == "skill"
-                    and metadata.get("language") != language
-                ):
+                if language and res_type == "skill" and metadata.get("language") != language:
                     continue
 
                 # 精确匹配过滤
@@ -449,9 +437,7 @@ class ResourceSearchTool:
             return output
 
         except Exception as e:
-            logger.warning(
-                f"[resource_search] 向量检索失败，回退到遍历模式: {e}", exc_info=True
-            )
+            logger.warning(f"[resource_search] 向量检索失败，回退到遍历模式: {e}", exc_info=True)
             return {}
 
     @staticmethod
@@ -571,12 +557,8 @@ class ResourceSearchTool:
                 if detailed:
                     details_list.append(
                         {
-                            "deliverables": getattr(agent_config, "deliverables", None)
-                            or [],
-                            "recommended_metrics": getattr(
-                                agent_config, "recommended_metrics", None
-                            )
-                            or [],
+                            "deliverables": getattr(agent_config, "deliverables", None) or [],
+                            "recommended_metrics": getattr(agent_config, "recommended_metrics", None) or [],
                         }
                     )
                 else:
@@ -612,9 +594,7 @@ class ResourceSearchTool:
                 if len(names) >= limit:
                     break
                 query_lower = query_part.lower()
-                found = self._match_tool_single(
-                    tool_registry, query_lower, category, level, exact=True
-                )
+                found = self._match_tool_single(tool_registry, query_lower, category, level, exact=True)
                 if found and found.name not in names:
                     names.append(found.name)
                     descriptions.append(found.description)
@@ -629,9 +609,7 @@ class ResourceSearchTool:
             if not names:
                 for query_part in query_parts:
                     query_lower = query_part.lower()
-                    result = self._search_tools_from_dynamic_loader(
-                        query_lower, 1, exact=True
-                    )
+                    result = self._search_tools_from_dynamic_loader(query_lower, 1, exact=True)
                     if result[0]:
                         names.extend(result[0])
                         descriptions.extend(result[1])
@@ -639,9 +617,7 @@ class ResourceSearchTool:
 
             # 兜底：从外部平台搜索（detailed 模式）
             if not names and query:
-                ext_names, ext_descs, ext_schemas = await self._search_external(
-                    query, "tool", limit
-                )
+                ext_names, ext_descs, ext_schemas = await self._search_external(query, "tool", limit)
                 if ext_names:
                     names = ext_names
                     descriptions = ext_descs
@@ -683,21 +659,15 @@ class ResourceSearchTool:
 
         # 兜底：从 builtin_tools_config.yaml 搜索（覆盖未加载到内存的内置工具）
         if not names:
-            names, descriptions, schemas_list = self._search_tools_from_yaml(
-                query_lower, category, level, limit, exact
-            )
+            names, descriptions, schemas_list = self._search_tools_from_yaml(query_lower, category, level, limit, exact)
 
         # 兜底：从 DynamicToolLoader 已发现的工具中搜索（覆盖已扫描但未注册的工具）
         if not names:
-            names, descriptions, schemas_list = self._search_tools_from_dynamic_loader(
-                query_lower, limit, exact
-            )
+            names, descriptions, schemas_list = self._search_tools_from_dynamic_loader(query_lower, limit, exact)
 
         # 兜底：从外部平台搜索（仅在内部搜索结果不足时触发）
         if not names and query:
-            ext_names, ext_descs, ext_schemas = await self._search_external(
-                query, "tool", limit
-            )
+            ext_names, ext_descs, ext_schemas = await self._search_external(query, "tool", limit)
             if ext_names:
                 names = ext_names
                 descriptions = ext_descs
@@ -799,9 +769,7 @@ class ResourceSearchTool:
                             break
 
             if names:
-                logger.info(
-                    f"[resource_search] 从数据库搜索到 {len(names)} 个工具（内存注册表为空）"
-                )
+                logger.info(f"[resource_search] 从数据库搜索到 {len(names)} 个工具（内存注册表为空）")
 
             return names, descriptions, schemas_list
 
@@ -837,9 +805,7 @@ class ResourceSearchTool:
 
             for tool_name in discovered:
                 if not query_lower:
-                    desc = self._get_tool_description_from_code(
-                        tool_name, discovered[tool_name]
-                    )
+                    desc = self._get_tool_description_from_code(tool_name, discovered[tool_name])
                     names.append(tool_name)
                     descriptions.append(desc)
                     schemas_list.append({})
@@ -849,17 +815,13 @@ class ResourceSearchTool:
 
                 if exact:
                     if query_lower == tool_name.lower():
-                        desc = self._get_tool_description_from_code(
-                            tool_name, discovered[tool_name]
-                        )
+                        desc = self._get_tool_description_from_code(tool_name, discovered[tool_name])
                         names.append(tool_name)
                         descriptions.append(desc)
                         schemas_list.append({})
                         break
                 elif query_lower in tool_name.lower():
-                    desc = self._get_tool_description_from_code(
-                        tool_name, discovered[tool_name]
-                    )
+                    desc = self._get_tool_description_from_code(tool_name, discovered[tool_name])
                     names.append(tool_name)
                     descriptions.append(desc)
                     schemas_list.append({})
@@ -867,9 +829,7 @@ class ResourceSearchTool:
                         break
 
             if names:
-                logger.info(
-                    f"[resource_search] 从 DynamicToolLoader 搜索到 {len(names)} 个工具"
-                )
+                logger.info(f"[resource_search] 从 DynamicToolLoader 搜索到 {len(names)} 个工具")
 
             return names, descriptions, schemas_list
 
@@ -921,6 +881,7 @@ class ResourceSearchTool:
             import yaml  # noqa: F401,PLC0415
 
             from config.config_center import get_config_center  # noqa: PLC0415
+
             config = get_config_center().get("tools/builtin_tools_config.yaml")
             if not config:
                 return [], [], []
@@ -954,9 +915,7 @@ class ResourceSearchTool:
                         break
 
             if names:
-                logger.info(
-                    f"[resource_search] 从 YAML 配置搜索到 {len(names)} 个工具"
-                )
+                logger.info(f"[resource_search] 从 YAML 配置搜索到 {len(names)} 个工具")
 
             return names, descriptions, schemas_list
 
@@ -1031,6 +990,7 @@ class ResourceSearchTool:
         if self.skill_registry is None:
             try:
                 from skills.registry import get_global_skill_registry  # noqa: PLC0415
+
                 self.skill_registry = get_global_skill_registry()
             except Exception as exc:
                 logger.debug("[resource_search] SkillRegistry 加载失败: %s", exc)
@@ -1054,6 +1014,7 @@ class ResourceSearchTool:
             import yaml  # noqa: F401,PLC0415
 
             from config.config_center import get_config_center  # noqa: PLC0415
+
             config = get_config_center().get("tools/search/resource_search.yaml")
             if not config:
                 return None
@@ -1113,15 +1074,13 @@ class ResourceSearchTool:
             if adapter_cls is None:
                 logger.warning(
                     "[resource_search] 未知的平台适配器: %s，可用列表: %s",
-                    name, list(adapter_map.keys()),
+                    name,
+                    list(adapter_map.keys()),
                 )
                 continue
 
             # 提取适配器特定参数（排除 name 和 enabled）
-            kwargs = {
-                k: v for k, v in plat_conf.items()
-                if k not in ("name", "enabled") and v
-            }
+            kwargs = {k: v for k, v in plat_conf.items() if k not in ("name", "enabled") and v}
             try:
                 adapter = adapter_cls(**kwargs)
                 adapters.append(adapter)
@@ -1129,7 +1088,8 @@ class ResourceSearchTool:
             except Exception as e:
                 logger.warning(
                     "[resource_search] 平台适配器 %s 实例化失败: %s",
-                    name, e,
+                    name,
+                    e,
                 )
 
         return adapters
@@ -1167,17 +1127,20 @@ class ResourceSearchTool:
             for item in results:
                 names.append(item.get("name", ""))
                 descriptions.append(item.get("description", ""))
-                schemas_list.append({
-                    "external_schema": item.get("schema", {}),
-                    "source": item.get("source", ""),
-                    "trust_score": item.get("trust_score", 0.5),
-                    "review_status": item.get("review_status", "unreviewed"),
-                    "from_cache": item.get("from_cache", False),
-                })
+                schemas_list.append(
+                    {
+                        "external_schema": item.get("schema", {}),
+                        "source": item.get("source", ""),
+                        "trust_score": item.get("trust_score", 0.5),
+                        "review_status": item.get("review_status", "unreviewed"),
+                        "from_cache": item.get("from_cache", False),
+                    }
+                )
 
             logger.info(
                 "[resource_search] 外部搜索返回 %d 个 %s 资源",
-                len(names), resource_type,
+                len(names),
+                resource_type,
             )
             return names, descriptions, schemas_list
 
@@ -1276,9 +1239,7 @@ class ResourceSearchTool:
             session_id: 会话 ID（保留参数，暂未使用）
             parent_record_id: 父记录 ID（保留参数，暂未使用）
         """
-        logger.info(
-            "[resource_search] 开始注入动态工具: tool_names=%s", tool_names
-        )
+        logger.info("[resource_search] 开始注入动态工具: tool_names=%s", tool_names)
 
         from tools.auto_loader import get_tool_auto_loader  # noqa: PLC0415
 
@@ -1308,12 +1269,14 @@ class ResourceSearchTool:
                     tool_registry.mark_dynamic(tool_name)
                     logger.info(
                         "[resource_search] 已标记动态工具: %s (dynamic_tools=%s)",
-                        tool_name, tool_registry.get_dynamic_tool_names(),
+                        tool_name,
+                        tool_registry.get_dynamic_tool_names(),
                     )
 
                 logger.info("[resource_search] 动态工具加载成功: %s", tool_name)
             except Exception as e:
                 logger.error(
                     "[resource_search] 动态工具加载失败: %s, 错误: %s",
-                    tool_name, e,
+                    tool_name,
+                    e,
                 )

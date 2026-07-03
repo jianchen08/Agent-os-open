@@ -37,9 +37,7 @@ class SchemaValidator:
     """Agent 配置 Schema 验证器，基于简化 JSON Schema 进行校验。"""
 
     @staticmethod
-    def _validate_schema(
-        schema: dict[str, Any], data: dict[str, Any], prefix: str = ""
-    ) -> list[str]:
+    def _validate_schema(schema: dict[str, Any], data: dict[str, Any], prefix: str = "") -> list[str]:
         """根据 Schema 验证数据。
 
         支持的检查：
@@ -80,10 +78,7 @@ class SchemaValidator:
             if prop_type and prop_type in _TYPE_MAP:
                 expected_type = _TYPE_MAP[prop_type]
                 if not isinstance(value, expected_type):
-                    errors.append(
-                        f"{field_path}: 类型错误，期望 {prop_type}，"
-                        f"实际 {type(value).__name__}"
-                    )
+                    errors.append(f"{field_path}: 类型错误，期望 {prop_type}，实际 {type(value).__name__}")
 
             # 枚举值检查
             enum_values = prop_schema.get("enum")
@@ -92,9 +87,7 @@ class SchemaValidator:
 
             # 嵌套 object 递归检查
             if prop_type == "object" and isinstance(value, dict):
-                nested_errors = SchemaValidator._validate_schema(
-                    prop_schema, value, prefix=f"{field_path}."
-                )
+                nested_errors = SchemaValidator._validate_schema(prop_schema, value, prefix=f"{field_path}.")
                 errors.extend(nested_errors)
 
         return errors

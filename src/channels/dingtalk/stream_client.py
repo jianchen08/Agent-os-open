@@ -266,6 +266,7 @@ class DingTalkStreamClient:
             hashlib.sha256,
         ).digest()
         import base64  # noqa: PLC0415
+
         return base64.b64encode(hmac_code).decode("utf-8")
 
     async def _receive_loop(self) -> None:

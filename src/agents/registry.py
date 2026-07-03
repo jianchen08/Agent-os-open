@@ -114,7 +114,8 @@ class AgentRegistry:
         if yaml_path is None:
             logger.debug(
                 "懒加载未找到 Agent 配置: config_id=%s (搜索目录: %s)",
-                config_id, self._config_dir,
+                config_id,
+                self._config_dir,
             )
             return None
 
@@ -123,7 +124,9 @@ class AgentRegistry:
             self.register(config)
             self._scanned_files.add(str(yaml_path))
             logger.info(
-                "懒加载 Agent 配置成功: %s (from %s)", config.config_id, yaml_path,
+                "懒加载 Agent 配置成功: %s (from %s)",
+                config.config_id,
+                yaml_path,
             )
             return config
         except (ValueError, Exception) as e:
@@ -166,7 +169,8 @@ class AgentRegistry:
             if scanned_count >= self._MAX_SCAN_FILES:
                 logger.warning(
                     "已达到最大扫描文件数限制 (%d)，停止扫描: config_id=%s",
-                    self._MAX_SCAN_FILES, config_id,
+                    self._MAX_SCAN_FILES,
+                    config_id,
                 )
                 break
             p_str = str(p)
@@ -281,7 +285,8 @@ class AgentRegistry:
 
         logger.info(
             "AgentRegistry: 从 %s 加载了 %d 个配置 (支持后续懒加载)",
-            dir_path, len(configs),
+            dir_path,
+            len(configs),
         )
         return len(configs)
 
@@ -331,7 +336,10 @@ class AgentRegistry:
             # 加载失败通常是文件缺失或 YAML 解析错误，记录完整堆栈供排查。
             logger.warning(
                 "热更新 Agent 配置失败: %s (from %s): %s",
-                config_id, yaml_path, e, exc_info=True,
+                config_id,
+                yaml_path,
+                e,
+                exc_info=True,
             )
             return None
 

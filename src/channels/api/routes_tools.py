@@ -140,6 +140,7 @@ def list_tools(
     elif category:
         try:
             from tools.types import ToolCategory  # noqa: PLC0415
+
             cat_enum = ToolCategory(category)
             tools = registry.list_by_category(cat_enum)
         except (ValueError, AttributeError):
@@ -147,6 +148,7 @@ def list_tools(
     elif source:
         try:
             from tools.types import ToolSource  # noqa: PLC0415
+
             src_enum = ToolSource(source)
             tools = registry.list_by_source(src_enum)
         except (ValueError, AttributeError):

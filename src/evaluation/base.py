@@ -179,11 +179,7 @@ class EvaluationContext:
             评估上下文对象
         """
         timestamp_str = data.get("timestamp", "")
-        timestamp = (
-            datetime.fromisoformat(timestamp_str)
-            if timestamp_str
-            else datetime.now(UTC)
-        )
+        timestamp = datetime.fromisoformat(timestamp_str) if timestamp_str else datetime.now(UTC)
 
         return cls(
             task_id=data.get("task_id", ""),

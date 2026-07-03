@@ -106,9 +106,7 @@ def register_resource_func(params: dict[str, Any]) -> dict[str, Any]:
     return dispatcher(resource_id, config, overwrite)
 
 
-def _register_agent(
-    resource_id: str, config: dict[str, Any], overwrite: bool
-) -> dict[str, Any]:
+def _register_agent(resource_id: str, config: dict[str, Any], overwrite: bool) -> dict[str, Any]:
     """注册 Agent 配置到 AgentRegistry。
 
     Args:
@@ -126,6 +124,7 @@ def _register_agent(
         registry = _get_service("agent_registry")
         if registry is None:
             from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+
             registry = get_global_agent_registry_sync()
 
         # 检查是否已存在
@@ -180,9 +179,7 @@ def _register_agent(
         }
 
 
-def _register_tool(
-    resource_id: str, config: dict[str, Any], overwrite: bool
-) -> dict[str, Any]:
+def _register_tool(resource_id: str, config: dict[str, Any], overwrite: bool) -> dict[str, Any]:
     """注册工具到 ToolRegistry。
 
     工具注册需要提供 func_module 和 func_name，或者直接提供 func 引用。
@@ -265,9 +262,7 @@ def _register_tool(
         }
 
 
-def _register_template(
-    resource_id: str, config: dict[str, Any], overwrite: bool
-) -> dict[str, Any]:
+def _register_template(resource_id: str, config: dict[str, Any], overwrite: bool) -> dict[str, Any]:
     """注册模板到 TemplateRegistry。
 
     Args:
@@ -329,9 +324,7 @@ def _register_template(
         }
 
 
-def _register_pipeline_config(
-    resource_id: str, config: dict[str, Any], overwrite: bool
-) -> dict[str, Any]:
+def _register_pipeline_config(resource_id: str, config: dict[str, Any], overwrite: bool) -> dict[str, Any]:
     """注册管道配置到 PipelineConfigStore。
 
     Args:
@@ -386,9 +379,7 @@ def _register_pipeline_config(
         }
 
 
-def _build_template_spec(
-    resource_id: str, config: dict[str, Any]
-) -> TemplateSpec:  # noqa: F821
+def _build_template_spec(resource_id: str, config: dict[str, Any]) -> TemplateSpec:  # noqa: F821
     """从配置数据构建 TemplateSpec。
 
     当 raw_content 不可用或解析失败时使用。
@@ -419,11 +410,7 @@ def _build_template_spec(
         )
 
     template_type_str = config.get("template_type", "B")
-    template_type = (
-        TemplateType.DELIVERABLE
-        if template_type_str == "B"
-        else TemplateType.CONSUMABLE
-    )
+    template_type = TemplateType.DELIVERABLE if template_type_str == "B" else TemplateType.CONSUMABLE
 
     return TemplateSpec(
         template_id=resource_id,

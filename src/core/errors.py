@@ -37,6 +37,7 @@ class ErrorSeverity(str, Enum):
     WARNING = "warning"
     ERROR = "error"
 
+
 # ============================================================================
 # 错误码规范
 # ============================================================================
@@ -120,7 +121,6 @@ class ErrorCode(str, Enum):
     LLM_CONN_9001 = "LLM_CONN_9001"  # 连接失败
     LLM_EXEC_9002 = "LLM_EXEC_9002"  # 调用失败
     LLM_TIME_9003 = "LLM_TIME_9003"  # 调用超时
-
 
 
 # ============================================================================
@@ -362,9 +362,7 @@ class StandardError(BaseModel):
     message: str = Field(..., description="用户友好的错误消息")
     category: str = Field(..., description="错误类别")
     severity: str = Field(..., description="严重程度: info|warning|error")
-    timestamp: datetime = Field(
-        default_factory=datetime.now, description="错误发生时间"
-    )
+    timestamp: datetime = Field(default_factory=datetime.now, description="错误发生时间")
     trace_id: str = Field(..., description="链路追踪 ID")
     path: str | None = Field(None, description="请求路径")
     details: dict[str, Any] | None = Field(None, description="详细信息(开发环境)")

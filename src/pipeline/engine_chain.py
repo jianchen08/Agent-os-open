@@ -96,12 +96,19 @@ async def execute_core_plugin(
             break  # success, exit retry loop
         except Exception as exc:
             _handle_core_error(
-                engine, state, core_type, exc,
-                core_error_policy, core_attempts, max_core_retries,
-                core_retry_delay, core_plugin,
+                engine,
+                state,
+                core_type,
+                exc,
+                core_error_policy,
+                core_attempts,
+                max_core_retries,
+                core_retry_delay,
+                core_plugin,
             )
             if _is_retryable(core_error_policy, core_attempts, max_core_retries, exc):
                 import random as _rand  # noqa: PLC0415
+
                 exc_lower = str(exc).lower()
                 is_overload = "overloaded" in exc_lower or "529" in exc_lower
                 if is_overload:
@@ -110,8 +117,12 @@ async def execute_core_plugin(
                     delay = core_retry_delay * (2 ** (core_attempts - 1)) * (0.5 + _rand.random() * 0.5)
                 logger.warning(
                     "[%s] Core retry %d/%d (delay=%.1fs%s): %s",
-                    core_type, core_attempts, max_core_retries, delay,
-                    " [OVERLOAD]" if is_overload else "", exc,
+                    core_type,
+                    core_attempts,
+                    max_core_retries,
+                    delay,
+                    " [OVERLOAD]" if is_overload else "",
+                    exc,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -127,6 +138,7 @@ def _is_retryable(
 ) -> bool:
     """判断核心插件错误是否可重试。"""
     from pipeline.types import ErrorPolicy as _EP  # noqa: N814,PLC0415
+
     return error_policy == _EP.RETRY and attempts < max_retries + 1
 
 
@@ -151,6 +163,7 @@ def _handle_core_error(
     # transient = 临时性错误（限流/服务不可用/网络），不应计入连续错误强制结束
     # fixable = LLM 可自行修复的错误（参数错误），也不计入
     from llm.error_classifier import classify_error  # noqa: PLC0415
+
     _info = classify_error(exc)
     _transient_kinds = ("rate_limit", "service_down", "network", "server_error")
     is_transient = _info.kind.value in _transient_kinds
@@ -169,7 +182,10 @@ def _handle_core_error(
     else:
         logger.info(
             "[%s] error not counting as consecutive (transient=%s, fixable=%s): %s",
-            core_type, is_transient, is_fixable, exc,
+            core_type,
+            is_transient,
+            is_fixable,
+            exc,
         )
 
     # 构建 llm_error_info（仅 llm_call 类型）
@@ -178,7 +194,9 @@ def _handle_core_error(
 
 
 def _build_llm_error_info(
-    state: dict[str, Any], exc: Exception, core_type: str,
+    state: dict[str, Any],
+    exc: Exception,
+    core_type: str,
 ) -> None:
     """构建 llm_error_info 字典并存入 state，并追加到错误历史。
 
@@ -218,13 +236,16 @@ def _build_llm_error_info(
 
     # 追加到错误历史（单一数据源，任意消费方可读）
     from datetime import datetime  # noqa: PLC0415
+
     history = state.setdefault(StateKeys.LLM_ERROR_HISTORY, [])
-    history.append({
-        "iteration": state.get(StateKeys.ITERATION, 0),
-        "kind": error_type,
-        "msg": error_msg[:200],
-        "ts": datetime.now().isoformat(),
-    })
+    history.append(
+        {
+            "iteration": state.get(StateKeys.ITERATION, 0),
+            "kind": error_type,
+            "msg": error_msg[:200],
+            "ts": datetime.now().isoformat(),
+        }
+    )
 
 
 async def execute_output_chain(
@@ -269,12 +290,12 @@ async def execute_output_chain(
         if result.route_signal is not None:
             route_signals.append(result.route_signal)
 
-    signal_summary = ", ".join(
-        f"{s.route_type}({s.reason[:60]})" for s in route_signals
-    ) if route_signals else "none"
+    signal_summary = ", ".join(f"{s.route_type}({s.reason[:60]})" for s in route_signals) if route_signals else "none"
     logger.debug(
         "Output chain: %d plugins, %d signals [%s], ended=%s",
-        len(output_results), len(route_signals), signal_summary,
+        len(output_results),
+        len(route_signals),
+        signal_summary,
         state.get(StateKeys.ENDED, False),
     )
     return route_signals
@@ -311,30 +332,27 @@ async def handle_no_route_signals(
     _has_active_triggers = _check_active_triggers(state, engine.pipeline_id)
     if _has_active_triggers:
         logger.info(
-            "[Engine] 管道即将结束但存在活跃触发器，"
-            "挂起等待触发器唤醒 (iter=%d)", iteration,
+            "[Engine] 管道即将结束但存在活跃触发器，挂起等待触发器唤醒 (iter=%d)",
+            iteration,
         )
         state[StateKeys.CORE_TYPE] = "llm_call"
         state["user_input"] = ""
 
-
     else:
         logger.info(
-            "No route signals after LLM response (iter=%d), "
-            "suspending pipeline to wait for next message.",
+            "No route signals after LLM response (iter=%d), suspending pipeline to wait for next message.",
             iteration,
         )
         state["user_input"] = ""
 
     if state["user_input"]:
-        state.setdefault("messages", []).append(
-            {"role": "user", "content": state["user_input"]}
-        )
+        state.setdefault("messages", []).append({"role": "user", "content": state["user_input"]})
 
     resumed = await engine.suspend_and_wait(state)
     if not resumed:
         logger.info(
-            "[Engine] suspend_and_wait 返回 False，管道结束 (iter=%d)", iteration,
+            "[Engine] suspend_and_wait 返回 False，管道结束 (iter=%d)",
+            iteration,
         )
         state[StateKeys.ENDED] = True
         return "end"
@@ -345,12 +363,10 @@ def _check_active_triggers(state: dict[str, Any], engine_pipeline_id: str) -> bo
     """检查是否有活跃的触发器绑定到当前管道。"""
     try:
         from triggers.manager import get_trigger_manager  # noqa: PLC0415
+
         _tm = get_trigger_manager()
         _pipeline_id = state.get(StateKeys.PIPELINE_ID, engine_pipeline_id)
-        return any(
-            t.pipeline_id == _pipeline_id and t.status.value == "active"
-            for t in _tm._triggers.values()
-        )
+        return any(t.pipeline_id == _pipeline_id and t.status.value == "active" for t in _tm._triggers.values())
     except Exception:
         return False
 

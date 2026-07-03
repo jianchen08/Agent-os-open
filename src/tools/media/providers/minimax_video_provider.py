@@ -174,24 +174,23 @@ class MiniMaxVideoProvider(MediaProvider):
             "Content-Type": "application/json",
         }
 
-        async with aiohttp.ClientSession() as session, session.post(
-            url,
-            json=payload,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp,
+        ):
             if resp.status != 200:
                 error_text = await resp.text()
-                raise RuntimeError(
-                    f"MiniMax 视频生成任务提交失败 (status={resp.status}): {error_text}"
-                )
+                raise RuntimeError(f"MiniMax 视频生成任务提交失败 (status={resp.status}): {error_text}")
             result = await resp.json()
 
         base_resp = result.get("base_resp", {})
         if base_resp.get("status_code", 0) != 0:
-            raise RuntimeError(
-                f"MiniMax 视频生成业务错误: {base_resp.get('status_msg', 'unknown')}"
-            )
+            raise RuntimeError(f"MiniMax 视频生成业务错误: {base_resp.get('status_msg', 'unknown')}")
 
         task_id = result.get("task_id")
         if not task_id:
@@ -225,9 +224,7 @@ class MiniMaxVideoProvider(MediaProvider):
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        raise RuntimeError(
-                            f"查询视频生成任务失败 (status={resp.status}): {error_text}"
-                        )
+                        raise RuntimeError(f"查询视频生成任务失败 (status={resp.status}): {error_text}")
                     result = await resp.json()
 
                 status = result.get("status", "processing")
@@ -238,20 +235,18 @@ class MiniMaxVideoProvider(MediaProvider):
                     return file_id
 
                 if status == "failed":
-                    raise RuntimeError(
-                        f"视频生成任务失败: {result.get('base_resp', {}).get('status_msg', 'unknown')}"
-                    )
+                    raise RuntimeError(f"视频生成任务失败: {result.get('base_resp', {}).get('status_msg', 'unknown')}")
 
                 logger.debug(
                     "[MiniMax Video] 任务 %s 状态: %s，等待 %ds",
-                    task_id, status, self._poll_interval,
+                    task_id,
+                    status,
+                    self._poll_interval,
                 )
                 await asyncio.sleep(self._poll_interval)
                 elapsed += self._poll_interval
 
-        raise RuntimeError(
-            f"视频生成任务超时 (task_id={task_id}, timeout={self._timeout}s)"
-        )
+        raise RuntimeError(f"视频生成任务超时 (task_id={task_id}, timeout={self._timeout}s)")
 
     async def _download_video(self, file_id: str) -> Path:
         """通过 file_id 下载视频文件。
@@ -268,17 +263,18 @@ class MiniMaxVideoProvider(MediaProvider):
         url = f"{self._api_base}/files/retrieve"
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
-        async with aiohttp.ClientSession() as session, session.get(
-            url,
-            params={"file_id": file_id, "purpose": "video_generation"},
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=300),
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
+                url,
+                params={"file_id": file_id, "purpose": "video_generation"},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp,
+        ):
             if resp.status != 200:
                 error_text = await resp.text()
-                raise RuntimeError(
-                    f"下载视频文件失败 (status={resp.status}): {error_text}"
-                )
+                raise RuntimeError(f"下载视频文件失败 (status={resp.status}): {error_text}")
             content = await resp.read()
 
         filename = f"minimax_video_{uuid.uuid4().hex[:8]}.mp4"

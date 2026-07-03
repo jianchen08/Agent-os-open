@@ -225,9 +225,7 @@ class ComfyUIConnector(BaseConnector):
             return
 
         self._ws_session = aiohttp.ClientSession()
-        self._ws_listener_task = asyncio.create_task(
-            self._ws_listen_loop(), name="comfyui-ws-listener"
-        )
+        self._ws_listener_task = asyncio.create_task(self._ws_listen_loop(), name="comfyui-ws-listener")
         self._logger.info("WebSocket 监听已启动: %s", self.ws_url)
 
     async def stop_ws_listener(self) -> None:
@@ -387,10 +385,7 @@ class ComfyUIConnector(BaseConnector):
                     filename = img.get("filename", "")
                     subfolder = img.get("subfolder", "")
                     img_type = img.get("type", "output")
-                    images.append(
-                        f"{self._endpoint}/view?"
-                        f"filename={filename}&subfolder={subfolder}&type={img_type}"
-                    )
+                    images.append(f"{self._endpoint}/view?filename={filename}&subfolder={subfolder}&type={img_type}")
 
             return ActionResult(
                 success=True,

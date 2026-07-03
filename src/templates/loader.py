@@ -148,48 +148,34 @@ class TemplateLoader:
             spec.name = title_match.group(1).strip()
 
         # 【模板是什么】
-        desc_match = re.search(
-            r"【模板是什么】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL
-        )
+        desc_match = re.search(r"【模板是什么】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL)
         if desc_match:
             spec.description = desc_match.group(1).strip()
 
         # 【模板的作用】
-        purpose_match = re.search(
-            r"【模板的作用】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL
-        )
+        purpose_match = re.search(r"【模板的作用】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL)
         if purpose_match:
             purpose_text = purpose_match.group(1).strip()
             spec.purpose = self._parse_numbered_list(purpose_text)
 
         # 【如何使用本模板】
-        usage_match = re.search(
-            r"【如何使用本模板】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL
-        )
+        usage_match = re.search(r"【如何使用本模板】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL)
         if usage_match:
             usage_text = usage_match.group(1).strip()
             spec.usage = self._parse_numbered_list(usage_text)
 
         # 【适用场景】
-        scenarios_match = re.search(
-            r"【适用场景】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL
-        )
+        scenarios_match = re.search(r"【适用场景】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL)
         if scenarios_match:
             scenarios_text = scenarios_match.group(1).strip()
             spec.scenarios = self._parse_scenarios(scenarios_text)
 
         # 【与其他模板的关系】
-        relation_match = re.search(
-            r"【与其他模板的关系】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL
-        )
+        relation_match = re.search(r"【与其他模板的关系】\s*\n(.*?)(?=【|$)", comment_text, re.DOTALL)
         if relation_match:
             relation_text = relation_match.group(1).strip()
-            spec.upstream_templates = self._parse_template_refs(
-                relation_text, "上游"
-            )
-            spec.downstream_templates = self._parse_template_refs(
-                relation_text, "下游"
-            )
+            spec.upstream_templates = self._parse_template_refs(relation_text, "上游")
+            spec.downstream_templates = self._parse_template_refs(relation_text, "下游")
 
     def _parse_numbered_list(self, text: str) -> list[str]:
         """解析编号列表（``1. xxx — 说明`` 格式）。
@@ -243,9 +229,7 @@ class TemplateLoader:
                 scenarios.append(match.group(1).strip())
         return scenarios
 
-    def _parse_template_refs(
-        self, text: str, direction: str
-    ) -> list[str]:
+    def _parse_template_refs(self, text: str, direction: str) -> list[str]:
         """解析上下游模板引用。
 
         Args:
@@ -312,9 +296,7 @@ class TemplateLoader:
             if match:
                 # 保存前一个章节
                 if current_section is not None:
-                    current_section.content_template = "\n".join(
-                        content_lines
-                    ).strip()
+                    current_section.content_template = "\n".join(content_lines).strip()
                     sections.append(current_section)
 
                 title = match.group(1).strip()
@@ -343,9 +325,7 @@ class TemplateLoader:
 
         return sections
 
-    def _parse_evaluation(
-        self, content: str
-    ) -> list[EvaluationDimension]:
+    def _parse_evaluation(self, content: str) -> list[EvaluationDimension]:
         """解析评估维度。
 
         从评估指南注释块中提取检查维度表格。
@@ -359,9 +339,7 @@ class TemplateLoader:
         dimensions: list[EvaluationDimension] = []
 
         # 查找评估指南部分
-        eval_match = re.search(
-            r"评估指南.*?检查维度.*?\|(.*?)-->", content, re.DOTALL
-        )
+        eval_match = re.search(r"评估指南.*?检查维度.*?\|(.*?)-->", content, re.DOTALL)
         if not eval_match:
             return dimensions
 

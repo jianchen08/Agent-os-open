@@ -151,7 +151,9 @@ class PluginConfigWatchHandler(FileSystemEventHandler):
             self._callback(event_type, file_path)
         except Exception:
             logger.exception(
-                "Watch callback error | event=%s | path=%s", event_type, file_path,
+                "Watch callback error | event=%s | path=%s",
+                event_type,
+                file_path,
             )
 
     def on_modified(self, event: FileSystemEvent) -> None:
@@ -300,6 +302,7 @@ class PluginHotReloader:
         # 优先：订阅 ConfigCenter（生产环境主路径）
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             center = get_config_center()
             if center.is_running:
                 self.integrate_with_config_center(center)
@@ -444,6 +447,7 @@ class PluginHotReloader:
         # Lazily create a single-thread executor on first use
         if self._reload_executor is None:
             from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
             self._reload_executor = ThreadPoolExecutor(max_workers=1)
 
         self._reload_executor.submit(self._do_reload_safe, event_type, file_path)
@@ -455,12 +459,15 @@ class PluginHotReloader:
             if not result.success:
                 logger.warning(
                     "Hot-reload failed | event=%s | path=%s | error=%s",
-                    event_type, file_path, result.error,
+                    event_type,
+                    file_path,
+                    result.error,
                 )
         except Exception:
             logger.exception(
                 "Unexpected error in hot-reload | event=%s | path=%s",
-                event_type, file_path,
+                event_type,
+                file_path,
             )
 
     def _do_reload(self, event_type: str, file_path: str) -> ReloadEvent:  # noqa: PLR0911
@@ -479,7 +486,9 @@ class PluginHotReloader:
         config_type = self._determine_config_type(file_path)
         logger.info(
             "Config change detected | event=%s | type=%s | path=%s",
-            event_type, config_type, file_path,
+            event_type,
+            config_type,
+            file_path,
         )
 
         # Handle deletion
@@ -490,8 +499,11 @@ class PluginHotReloader:
         path = Path(file_path)
         if not path.exists():
             return self._make_event(
-                file_path, config_type, event_type,
-                success=False, error="File does not exist",
+                file_path,
+                config_type,
+                event_type,
+                success=False,
+                error="File does not exist",
             )
 
         try:
@@ -499,12 +511,17 @@ class PluginHotReloader:
                 data = yaml.safe_load(f)
         except yaml.YAMLError as exc:
             return self._handle_parse_error(
-                file_path, config_type, event_type, f"YAML parse error: {exc}",
+                file_path,
+                config_type,
+                event_type,
+                f"YAML parse error: {exc}",
             )
 
         if not isinstance(data, dict):
             return self._handle_parse_error(
-                file_path, config_type, event_type,
+                file_path,
+                config_type,
+                event_type,
                 f"Expected dict, got {type(data).__name__}",
             )
 
@@ -512,22 +529,30 @@ class PluginHotReloader:
         config_id = data.get("config_id", data.get("name", ""))
         if config_id in self._disabled_plugins:
             return self._make_event(
-                file_path, config_type, event_type,
-                success=True, error="disabled",
+                file_path,
+                config_type,
+                event_type,
+                success=True,
+                error="disabled",
             )
 
         # Validate
         errors = self._validate_config(data, config_type, file_path)
         if errors:
             return self._handle_validation_error(
-                file_path, config_type, event_type, errors,
+                file_path,
+                config_type,
+                event_type,
+                errors,
             )
 
         # Apply reload
         return self._apply_reload(file_path, config_type, event_type, data)
 
     def _handle_deleted(
-        self, file_path: str, config_type: str,
+        self,
+        file_path: str,
+        config_type: str,
     ) -> ReloadEvent:
         """Unregister a plugin whose config file was deleted.
 
@@ -544,7 +569,10 @@ class PluginHotReloader:
         if record is None:
             # Unknown file, nothing to do
             return self._make_event(
-                file_path, config_type, "deleted", success=True,
+                file_path,
+                config_type,
+                "deleted",
+                success=True,
             )
 
         # Attempt to unregister from the appropriate registry
@@ -553,7 +581,8 @@ class PluginHotReloader:
         except Exception as exc:
             logger.error(
                 "Failed to unregister deleted plugin | path=%s | error=%s",
-                file_path, exc,
+                file_path,
+                exc,
             )
 
         with self._records_lock:
@@ -566,14 +595,20 @@ class PluginHotReloader:
             )
 
         event = self._make_event(
-            file_path, config_type, "deleted", success=True,
+            file_path,
+            config_type,
+            "deleted",
+            success=True,
         )
         self._emit_event("plugin_unloaded", {"file_path": file_path, "config_type": config_type})
         return event
 
     def _handle_parse_error(
-        self, file_path: str, config_type: str,
-        event_type: str, error: str,
+        self,
+        file_path: str,
+        config_type: str,
+        event_type: str,
+        error: str,
     ) -> ReloadEvent:
         """Handle a YAML parse error -- keep old version if possible."""
         with self._records_lock:
@@ -583,12 +618,17 @@ class PluginHotReloader:
             # Keep old version (implicit rollback)
             logger.warning(
                 "Keeping previous version after parse error | path=%s | error=%s",
-                file_path, error,
+                file_path,
+                error,
             )
             record.last_error = error
             event = self._make_event(
-                file_path, config_type, event_type,
-                success=False, error=error, rolled_back=True,
+                file_path,
+                config_type,
+                event_type,
+                success=False,
+                error=error,
+                rolled_back=True,
             )
         else:
             with self._records_lock:
@@ -599,8 +639,11 @@ class PluginHotReloader:
                     last_error=error,
                 )
             event = self._make_event(
-                file_path, config_type, event_type,
-                success=False, error=error,
+                file_path,
+                config_type,
+                event_type,
+                success=False,
+                error=error,
             )
 
         self._emit_event(
@@ -610,8 +653,11 @@ class PluginHotReloader:
         return event
 
     def _handle_validation_error(
-        self, file_path: str, config_type: str,
-        event_type: str, errors: list[str],
+        self,
+        file_path: str,
+        config_type: str,
+        event_type: str,
+        errors: list[str],
     ) -> ReloadEvent:
         """Handle validation errors -- keep old version if possible."""
         error_msg = "; ".join(errors)
@@ -623,12 +669,17 @@ class PluginHotReloader:
             # Keep old version (implicit rollback)
             logger.warning(
                 "Keeping previous version after validation error | path=%s | errors=%s",
-                file_path, error_msg,
+                file_path,
+                error_msg,
             )
             record.last_error = error_msg
             event = self._make_event(
-                file_path, config_type, event_type,
-                success=False, error=error_msg, rolled_back=True,
+                file_path,
+                config_type,
+                event_type,
+                success=False,
+                error=error_msg,
+                rolled_back=True,
             )
         else:
             with self._records_lock:
@@ -639,8 +690,11 @@ class PluginHotReloader:
                     last_error=error_msg,
                 )
             event = self._make_event(
-                file_path, config_type, event_type,
-                success=False, error=error_msg,
+                file_path,
+                config_type,
+                event_type,
+                success=False,
+                error=error_msg,
             )
 
         self._emit_event(
@@ -650,8 +704,11 @@ class PluginHotReloader:
         return event
 
     def _apply_reload(
-        self, file_path: str, config_type: str,
-        event_type: str, data: dict[str, Any],
+        self,
+        file_path: str,
+        config_type: str,
+        event_type: str,
+        data: dict[str, Any],
     ) -> ReloadEvent:
         """Apply the reload: unregister old, register new.
 
@@ -697,7 +754,10 @@ class PluginHotReloader:
                 self._records[file_path] = new_record
 
             event = self._make_event(
-                file_path, config_type, event_type, success=True,
+                file_path,
+                config_type,
+                event_type,
+                success=True,
             )
             self._emit_event(
                 "plugin_reloaded",
@@ -710,7 +770,9 @@ class PluginHotReloader:
             )
             logger.info(
                 "Hot-reload succeeded | type=%s | id=%s | path=%s",
-                config_type, config_id, file_path,
+                config_type,
+                config_id,
+                file_path,
             )
             return event
 
@@ -718,7 +780,9 @@ class PluginHotReloader:
             # Rollback: restore old record
             logger.error(
                 "Hot-reload failed, rolling back | type=%s | path=%s | error=%s",
-                config_type, file_path, exc,
+                config_type,
+                file_path,
+                exc,
             )
 
             # Try to restore old data
@@ -744,8 +808,12 @@ class PluginHotReloader:
                 )
 
             event = self._make_event(
-                file_path, config_type, event_type,
-                success=False, error=str(exc), rolled_back=rolled_back,
+                file_path,
+                config_type,
+                event_type,
+                success=False,
+                error=str(exc),
+                rolled_back=rolled_back,
             )
             self._emit_event(
                 "reload_failed",
@@ -799,6 +867,7 @@ class PluginHotReloader:
 
         elif config_type == "model":
             from config.models import invalidate_all_llm_caches  # noqa: PLC0415
+
             invalidate_all_llm_caches()
             logger.info("Model config hot-reloaded: %s", file_path)
 
@@ -822,13 +891,17 @@ class PluginHotReloader:
 
         elif record.config_type == "model":
             from config.models import invalidate_all_llm_caches  # noqa: PLC0415
+
             invalidate_all_llm_caches()
             logger.info("Model config cache invalidated on delete: %s", record.config_path)
 
     # -- Validation --------------------------------------------------------
 
     def _validate_config(
-        self, data: dict[str, Any], config_type: str, file_path: str,
+        self,
+        data: dict[str, Any],
+        config_type: str,
+        file_path: str,
     ) -> list[str]:
         """Validate config data against the schema.
 

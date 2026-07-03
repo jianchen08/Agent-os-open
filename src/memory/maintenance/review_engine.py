@@ -12,6 +12,7 @@ B 路径（trigger_llm_review）。本引擎只保留复盘系统对存储层的
     _extract_experiences/_generate_lesson/_categorize_error/run_batch_review 等）。
   现在复盘唯一真相源是 B 路径。
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,6 +31,7 @@ __all__ = [
 
 class ReviewStatus(str, Enum):
     """复盘状态枚举（仅用于存储层 review_status 字段值对齐）。"""
+
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
@@ -39,6 +41,7 @@ class ReviewStatus(str, Enum):
 @dataclass
 class PipelineRunSummary:
     """管道运行摘要。"""
+
     run_id: str
     total_records: int = 0
     total_iterations: int = 0
@@ -103,10 +106,7 @@ class ReviewEngine:
         if self._storage is None:
             return []
         summaries = self._storage.list_all_summaries()
-        return [
-            s for s in summaries
-            if s.status in self._TERMINAL_STATUSES and s.review_status == "pending"
-        ]
+        return [s for s in summaries if s.status in self._TERMINAL_STATUSES and s.review_status == "pending"]
 
     def get_summary(self, run_id: str) -> PipelineRunSummary | None:
         """获取单个管道的复盘摘要。

@@ -53,12 +53,20 @@ class SensitiveChecker(IOutputPlugin):
     ]
 
     _SENSITIVE_KEY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-        ("Password Field", re.compile(
-            r"(password|passwd|pwd|secret)", re.IGNORECASE,
-        )),
-        ("API Key Field", re.compile(
-            r"(api_key|apikey|api-key)", re.IGNORECASE,
-        )),
+        (
+            "Password Field",
+            re.compile(
+                r"(password|passwd|pwd|secret)",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "API Key Field",
+            re.compile(
+                r"(api_key|apikey|api-key)",
+                re.IGNORECASE,
+            ),
+        ),
     ]
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -172,7 +180,8 @@ class SensitiveChecker(IOutputPlugin):
             if pattern.search(result):
                 logger.debug(
                     "[%s] Detected %s pattern, masking",
-                    self.name, label,
+                    self.name,
+                    label,
                 )
                 result = pattern.sub(self._mask, result)
 
@@ -184,10 +193,12 @@ class SensitiveChecker(IOutputPlugin):
             if value_pattern.search(result):
                 logger.debug(
                     "[%s] Detected %s, masking value",
-                    self.name, label,
+                    self.name,
+                    label,
                 )
                 result = value_pattern.sub(
-                    rf"\1\2{self._mask}\4", result,
+                    rf"\1\2{self._mask}\4",
+                    result,
                 )
 
         return result

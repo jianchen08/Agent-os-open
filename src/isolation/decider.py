@@ -69,10 +69,7 @@ class IsolationDecider:
 
         # 隔离级别不可用即报错，不降级（降级会导致跨容器/工作区污染）
         if not available_providers.get(policy.isolation, False):
-            raise IsolationError(
-                f"工具 {tool_name} 的隔离级别 {policy.isolation.value} 不可用，"
-                f"且不支持降级"
-            )
+            raise IsolationError(f"工具 {tool_name} 的隔离级别 {policy.isolation.value} 不可用，且不支持降级")
 
         return policy
 
@@ -96,4 +93,5 @@ class IsolationDecider:
 
 class IsolationError(Exception):
     """隔离策略错误"""
+
     pass

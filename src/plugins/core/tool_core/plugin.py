@@ -18,6 +18,7 @@ from tools.registry import ToolRegistry
 
 # asyncio 工具执行器 — 修复 _cancel_all_tasks 级联取消
 
+
 def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
     """在线程中运行异步工具函数，使用独立事件循环。"""
     loop = asyncio.new_event_loop()
@@ -89,7 +90,8 @@ class ToolCore(ICorePlugin):
                 self._tools[tool_def.name] = handler
                 logger.debug(
                     "[%s] Tool imported from registry: %s",
-                    self.name, tool_def.name,
+                    self.name,
+                    tool_def.name,
                 )
 
     def _get_schema_timeout_default(self, tool_name: str) -> float | None:
@@ -149,7 +151,9 @@ class ToolCore(ICorePlugin):
         return str(result)
 
     def _check_tool_blocked(
-        self, tool_name: str, state: dict[str, Any],
+        self,
+        tool_name: str,
+        state: dict[str, Any],
     ) -> dict[str, Any] | None:
         """统一工具拦截检查：被策略拦截的工具返回失败结果，否则返回 None。"""
         # level_guard 越权拦截
@@ -217,7 +221,9 @@ class ToolCore(ICorePlugin):
                 logger.warning(
                     "[tool_core] bash_execute workspace 在运行中丢失，已从任务数据恢复 | "
                     "task=%s | pipeline_id=%s | ws=%s",
-                    task_id, state.get("pipeline_id", "?"), workspace,
+                    task_id,
+                    state.get("pipeline_id", "?"),
+                    workspace,
                 )
 
         if not workspace:
@@ -234,7 +240,9 @@ class ToolCore(ICorePlugin):
                 task_id,
                 bool(state.get("task_id")),
                 state.get("pipeline_id", "?"),
-                list((state.get("ws_meta") or {}).keys()) if isinstance(state.get("ws_meta"), dict) else state.get("ws_meta"),
+                list((state.get("ws_meta") or {}).keys())
+                if isinstance(state.get("ws_meta"), dict)
+                else state.get("ws_meta"),
                 bool(state.get("session_id")),
                 _bash_ctx.get("provider") if _bash_ctx else "no_ctx",
                 sorted(k for k in state if not k.startswith("_"))[:15],
@@ -296,9 +304,11 @@ class ToolCore(ICorePlugin):
         """执行单个工具调用。"""
         _wrapped_chunk = on_chunk
         if on_chunk and call_id:
+
             def _wrap(chunk: dict[str, Any]) -> Any:
                 chunk.setdefault("call_id", call_id)
                 return on_chunk(chunk)
+
             _wrapped_chunk = _wrap
 
         if _wrapped_chunk:
@@ -311,7 +321,9 @@ class ToolCore(ICorePlugin):
                     tool_args[param_key] = services[service_key]
                     logger.debug(
                         "[%s] Injected service '%s' to tool '%s'",
-                        self.name, service_key, tool_name,
+                        self.name,
+                        service_key,
+                        tool_name,
                     )
 
         func = self._get_tool(tool_name)
@@ -327,29 +339,34 @@ class ToolCore(ICorePlugin):
                 "duration_ms": 0,
             }
             if _wrapped_chunk:
-                _wrapped_chunk({
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "result": f"Tool '{tool_name}' not found",
-                    "success": False,
-                    "duration_ms": 0,
-                })
+                _wrapped_chunk(
+                    {
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": f"Tool '{tool_name}' not found",
+                        "success": False,
+                        "duration_ms": 0,
+                    }
+                )
             return result
 
         start = time.monotonic()
 
         try:
             handler_for_check = self._tool_registry.get_handler(tool_name) if self._tool_registry else None
-            tool_self = handler_for_check.__self__ if handler_for_check and hasattr(handler_for_check, '__self__') else None
-            _is_main_loop = (
-                tool_name in ("human_interaction", "bash_execute")
-                or (tool_self is not None and getattr(tool_self, 'run_on_main_loop', False))
+            tool_self = (
+                handler_for_check.__self__ if handler_for_check and hasattr(handler_for_check, "__self__") else None
+            )
+            _is_main_loop = tool_name in ("human_interaction", "bash_execute") or (
+                tool_self is not None and getattr(tool_self, "run_on_main_loop", False)
             )
 
             if inspect.iscoroutinefunction(func) and not _is_main_loop:
                 raw_result = await asyncio.wait_for(
                     asyncio.to_thread(
-                        _asyncio_tool_runner, func, tool_args,
+                        _asyncio_tool_runner,
+                        func,
+                        tool_args,
                     ),
                     timeout=timeout,
                 )
@@ -367,7 +384,9 @@ class ToolCore(ICorePlugin):
             _result_preview = str(normalized)[:200] if normalized else ""
             logger.info(
                 "[%s] Tool executed: %s (%.1fms) → %s",
-                self.name, tool_name, duration_ms,
+                self.name,
+                tool_name,
+                duration_ms,
                 _result_preview,
             )
             result = {
@@ -385,46 +404,52 @@ class ToolCore(ICorePlugin):
                 # data（回 LLM 上下文的那份，见下方 result["data"]）保持 slim，避免写入
                 # 原文整段回灌进模型上下文。
                 display_data = self._normalize_tool_result(raw_result, slim=False)
-                _wrapped_chunk({
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "result": display_result,
-                    # 结构化完整数据（含 diff 的 added/removed/old_content/new_content），
-                    # 流式 result 为截断字符串仅供预览；result_data 供前端工具卡片渲染。
-                    "result_data": display_data,
-                    "success": True,
-                    "duration_ms": round(duration_ms, 1),
-                })
+                _wrapped_chunk(
+                    {
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": display_result,
+                        # 结构化完整数据（含 diff 的 added/removed/old_content/new_content），
+                        # 流式 result 为截断字符串仅供预览；result_data 供前端工具卡片渲染。
+                        "result_data": display_data,
+                        "success": True,
+                        "duration_ms": round(duration_ms, 1),
+                    }
+                )
             return result
         except asyncio.CancelledError:
             duration_ms = (time.monotonic() - start) * 1000
             logger.info(
                 "[%s] Tool cancelled: %s (%.1fms)",
-                self.name, tool_name, duration_ms,
+                self.name,
+                tool_name,
+                duration_ms,
             )
             result = {
                 "tool_name": tool_name,
                 "success": False,
-                "error": (
-                    f"Tool '{tool_name}' cancelled "
-                    "(pipeline stopped)"
-                ),
+                "error": (f"Tool '{tool_name}' cancelled (pipeline stopped)"),
                 "duration_ms": round(duration_ms, 1),
             }
             if _wrapped_chunk:
-                _wrapped_chunk({
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "result": "cancelled",
-                    "success": False,
-                    "duration_ms": round(duration_ms, 1),
-                })
+                _wrapped_chunk(
+                    {
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": "cancelled",
+                        "success": False,
+                        "duration_ms": round(duration_ms, 1),
+                    }
+                )
             raise
         except asyncio.TimeoutError:
             duration_ms = (time.monotonic() - start) * 1000
             logger.warning(
                 "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
-                self.name, tool_name, duration_ms, timeout,
+                self.name,
+                tool_name,
+                duration_ms,
+                timeout,
             )
             if tool_name == "human_interaction":
                 error_msg = (
@@ -434,9 +459,7 @@ class ToolCore(ICorePlugin):
                     "应根据当前任务上下文决定下一步操作。"
                 )
             else:
-                error_msg = (
-                    f"Tool '{tool_name}' timed out after {timeout}s"
-                )
+                error_msg = f"Tool '{tool_name}' timed out after {timeout}s"
             result = {
                 "tool_name": tool_name,
                 "success": False,
@@ -444,19 +467,24 @@ class ToolCore(ICorePlugin):
                 "duration_ms": round(duration_ms, 1),
             }
             if _wrapped_chunk:
-                _wrapped_chunk({
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "result": error_msg,
-                    "success": False,
-                    "duration_ms": round(duration_ms, 1),
-                })
+                _wrapped_chunk(
+                    {
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": error_msg,
+                        "success": False,
+                        "duration_ms": round(duration_ms, 1),
+                    }
+                )
             return result
         except Exception as exc:
             duration_ms = (time.monotonic() - start) * 1000
             logger.error(
                 "[%s] Tool error: %s (%.1fms) — %s",
-                self.name, tool_name, duration_ms, exc,
+                self.name,
+                tool_name,
+                duration_ms,
+                exc,
             )
             error_msg = str(exc)
             result = {
@@ -466,13 +494,15 @@ class ToolCore(ICorePlugin):
                 "duration_ms": round(duration_ms, 1),
             }
             if _wrapped_chunk:
-                _wrapped_chunk({
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "result": error_msg,
-                    "success": False,
-                    "duration_ms": round(duration_ms, 1),
-                })
+                _wrapped_chunk(
+                    {
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": error_msg,
+                        "success": False,
+                        "duration_ms": round(duration_ms, 1),
+                    }
+                )
             return result
 
     async def _try_auto_load_tool(self, tool_name: str) -> Callable[..., Any] | None:
@@ -532,12 +562,15 @@ class ToolCore(ICorePlugin):
                 except (json.JSONDecodeError, TypeError):
                     # 尝试容错修复 JSON（MiniMax 等模型返回格式不稳定）
                     from plugins.core.llm_core import _repair_json_string  # noqa: PLC0415
+
                     repaired = _repair_json_string(tool_args)
                     if repaired is not None:
                         logger.info(
                             "[%s] 工具 %s 的 arguments JSON 修复成功: %s -> %s",
-                            self.name, tool_name,
-                            tool_args[:200], repaired[:200],
+                            self.name,
+                            tool_name,
+                            tool_args[:200],
+                            repaired[:200],
                         )
                         try:
                             tool_args = json.loads(repaired)
@@ -548,9 +581,11 @@ class ToolCore(ICorePlugin):
 
                     if args_parse_failed:
                         logger.warning(
-                            "[%s] 工具 %s 的 arguments JSON 解析失败（可能过长被截断），"
-                            "长度=%d，前200字符: %s",
-                            self.name, tool_name, len(tool_args), tool_args[:200],
+                            "[%s] 工具 %s 的 arguments JSON 解析失败（可能过长被截断），长度=%d，前200字符: %s",
+                            self.name,
+                            tool_name,
+                            len(tool_args),
+                            tool_args[:200],
                         )
                         result = {
                             "tool_name": tool_name,
@@ -590,20 +625,24 @@ class ToolCore(ICorePlugin):
             _blocked_result = self._check_tool_blocked(tool_name, ctx.state)
             if _blocked_result is not None:
                 if on_chunk:
-                    on_chunk({
-                        "type": "tool_start",
-                        "tool_name": tool_name,
-                        "args": tool_args,
-                        "call_id": tc_call_id,
-                    })
-                    on_chunk({
-                        "type": "tool_result",
-                        "tool_name": tool_name,
-                        "result": _blocked_result.get("error", ""),
-                        "success": False,
-                        "duration_ms": 0,
-                        "call_id": tc_call_id,
-                    })
+                    on_chunk(
+                        {
+                            "type": "tool_start",
+                            "tool_name": tool_name,
+                            "args": tool_args,
+                            "call_id": tc_call_id,
+                        }
+                    )
+                    on_chunk(
+                        {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "result": _blocked_result.get("error", ""),
+                            "success": False,
+                            "duration_ms": 0,
+                            "call_id": tc_call_id,
+                        }
+                    )
                 results.append(_blocked_result)
                 last_result_text = f"Error: {_blocked_result['error']}"
                 continue
@@ -613,9 +652,7 @@ class ToolCore(ICorePlugin):
             execution_contexts = ctx.state.get("execution_contexts", [])
             ctx_entry = next((c for c in execution_contexts if c.get("tool_name") == tool_name), None)
             use_docker = (
-                ctx_entry is not None
-                and ctx_entry.get("provider") == "docker"
-                and not ctx_entry.get("blocked", False)
+                ctx_entry is not None and ctx_entry.get("provider") == "docker" and not ctx_entry.get("blocked", False)
             )
 
             logger.debug("[tool_core] tool=%s use_docker=%s", tool_name, use_docker)
@@ -629,18 +666,22 @@ class ToolCore(ICorePlugin):
                 )
                 if on_chunk:
                     display_data = result.get("data", result.get("error", ""))
-                    on_chunk({
-                        "type": "tool_result",
-                        "tool_name": tool_name,
-                        "result": str(display_data)[:200] if display_data else "",
-                        "result_data": display_data,
-                        "success": result.get("success", True),
-                        "duration_ms": result.get("duration_ms", 0),
-                        "call_id": tc_call_id,
-                    })
+                    on_chunk(
+                        {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "result": str(display_data)[:200] if display_data else "",
+                            "result_data": display_data,
+                            "success": result.get("success", True),
+                            "duration_ms": result.get("duration_ms", 0),
+                            "call_id": tc_call_id,
+                        }
+                    )
             else:
                 result = await self._execute_single_tool(
-                    tool_name, tool_args, timeout,
+                    tool_name,
+                    tool_args,
+                    timeout,
                     services=ctx._services,
                     on_chunk=on_chunk,
                     call_id=tc_call_id,
@@ -660,10 +701,7 @@ class ToolCore(ICorePlugin):
         # 更新 messages：追加工具结果消息，供下一轮 LLMCore 读取
         current_messages: list[dict[str, Any]] = list(ctx.state.get("messages", []))
         # 如果 messages 中已有 assistant 的 tool_calls 消息，只需追加 tool 结果
-        has_tool_call_msg = any(
-            m.get("role") == "assistant" and m.get("tool_calls")
-            for m in current_messages
-        )
+        has_tool_call_msg = any(m.get("role") == "assistant" and m.get("tool_calls") for m in current_messages)
         # 如果没有 assistant tool_calls 消息，先构建 assistant tool_calls 消息
         # 预先解析 tool_call_id 列表，确保 assistant 消息和 tool 结果使用一致的 id
         tc_ids: list[str] = []
@@ -714,8 +752,7 @@ class ToolCore(ICorePlugin):
                     if isinstance(result_data, dict):
                         written_lines = result_data.get("lines")
                     note = (
-                        f"⚠️ 本次输出因达到 max_tokens 被截断，结果可能基于不完整参数。"
-                        f" 已写入 {written_lines} 行。"
+                        f"⚠️ 本次输出因达到 max_tokens 被截断，结果可能基于不完整参数。 已写入 {written_lines} 行。"
                         if written_lines is not None
                         else "⚠️ 本次输出因达到 max_tokens 被截断，结果可能基于不完整参数。"
                     )
@@ -739,11 +776,13 @@ class ToolCore(ICorePlugin):
             if not isinstance(_data, dict):
                 continue
             if _data.get("base64_data") and _data.get("mime_type"):
-                pending_images.append({
-                    "base64": _data["base64_data"],
-                    "mime_type": _data["mime_type"],
-                    "path": _data.get("path", ""),
-                })
+                pending_images.append(
+                    {
+                        "base64": _data["base64_data"],
+                        "mime_type": _data["mime_type"],
+                        "path": _data.get("path", ""),
+                    }
+                )
             for _img in _data.get("images", []):
                 if isinstance(_img, dict) and _img.get("base64"):
                     pending_images.append(_img)
@@ -763,84 +802,80 @@ class ToolCore(ICorePlugin):
                     _url = (_block.get("image_url") or {}).get("url", "")
                     if _url.startswith("data:") and ";base64," in _url:
                         _mime_part, _b64_part = _url[5:].split(";base64,", 1)
-                        pending_images.append({
-                            "base64": _b64_part,
-                            "mime_type": _mime_part,
-                            "path": "",
-                        })
+                        pending_images.append(
+                            {
+                                "base64": _b64_part,
+                                "mime_type": _mime_part,
+                                "path": "",
+                            }
+                        )
 
         # MM-4b: 工具产生多模态结果时推送 tool_multimedia_result WS 事件
         if pending_images and on_chunk:
-            on_chunk({
-                "type": "tool_multimedia_result",
-                "count": len(pending_images),
-                "multimedia": [
-                    {
-                        "mime_type": _img.get("mime_type", "image/png"),
-                        "path": _img.get("path", ""),
-                    }
-                    for _img in pending_images
-                ],
-            })
+            on_chunk(
+                {
+                    "type": "tool_multimedia_result",
+                    "count": len(pending_images),
+                    "multimedia": [
+                        {
+                            "mime_type": _img.get("mime_type", "image/png"),
+                            "path": _img.get("path", ""),
+                        }
+                        for _img in pending_images
+                    ],
+                }
+            )
 
         if pending_images:
             from multimodal.capabilities import ModelCapabilityRegistry  # noqa: PLC0415
+
             _model_name = ctx.state.get("llm_model", "")
-            _supports_vision = ModelCapabilityRegistry.is_multimodal_supported(
-                _model_name
-            )
+            _supports_vision = ModelCapabilityRegistry.is_multimodal_supported(_model_name)
 
             if _supports_vision:
                 # 路径 A：模型支持视觉 → 注入多模态 user 消息
                 _content_blocks: list[dict] = [
                     {
                         "type": "text",
-                        "text": (
-                            f"[工具截图] 共 {len(pending_images)} 张图片，"
-                            "请分析截图内容："
-                        ),
+                        "text": (f"[工具截图] 共 {len(pending_images)} 张图片，请分析截图内容："),
                     }
                 ]
                 for _img in pending_images:
-                    _data_url = (
-                        f"data:{_img['mime_type']};base64,"
-                        f"{_img['base64']}"
+                    _data_url = f"data:{_img['mime_type']};base64,{_img['base64']}"
+                    _content_blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _data_url},
+                        }
                     )
-                    _content_blocks.append({
-                        "type": "image_url",
-                        "image_url": {"url": _data_url},
-                    })
-                current_messages.append({
-                    "role": "user",
-                    "name": "tool_images",
-                    "content": _content_blocks,
-                })
+                current_messages.append(
+                    {
+                        "role": "user",
+                        "name": "tool_images",
+                        "content": _content_blocks,
+                    }
+                )
             else:
                 # 路径 B：模型不支持视觉 → 提示 agent 调 MCP 分析
-                _paths = [
-                    _i.get("path", "")
-                    for _i in pending_images
-                    if _i.get("path")
-                ]
+                _paths = [_i.get("path", "") for _i in pending_images if _i.get("path")]
                 _paths_str = ", ".join(_paths) if _paths else "见工具返回"
-                current_messages.append({
-                    "role": "user",
-                    "name": "tool_images",
-                    "content": (
-                        f"[工具截图] 已保存 {len(pending_images)} 张截图"
-                        f"（{_paths_str}）。当前模型不支持图片分析，"
-                        "请使用 mcp__4_5v_mcp__analyze_image 工具分析"
-                        "截图内容，获取文本描述后继续验证。"
-                    ),
-                })
+                current_messages.append(
+                    {
+                        "role": "user",
+                        "name": "tool_images",
+                        "content": (
+                            f"[工具截图] 已保存 {len(pending_images)} 张截图"
+                            f"（{_paths_str}）。当前模型不支持图片分析，"
+                            "请使用 mcp__4_5v_mcp__analyze_image 工具分析"
+                            "截图内容，获取文本描述后继续验证。"
+                        ),
+                    }
+                )
 
         all_failed = results and all(not r.get("success") for r in results)
         raw_error = None
         if all_failed:
-            error_summary = "; ".join(
-                f"{r.get('tool_name', 'unknown')}: {r.get('error', 'unknown')}"
-                for r in results
-            )
+            error_summary = "; ".join(f"{r.get('tool_name', 'unknown')}: {r.get('error', 'unknown')}" for r in results)
             raw_error = f"所有工具执行失败: {error_summary}"
 
         has_task_failed = False
@@ -869,9 +904,7 @@ class ToolCore(ICorePlugin):
                 if tid and tid not in submitted_task_ids:
                     submitted_task_ids.append(tid)
             tool_name = r.get("tool_name", "")
-            if tool_name == "task_evaluate" \
-                    and isinstance(meta, dict) \
-                    and meta.get("result") == "completed":
+            if tool_name == "task_evaluate" and isinstance(meta, dict) and meta.get("result") == "completed":
                 evaluation_completed = True
             if tool_name == "human_interaction":
                 conv_flag = tool_data.get("conversation_mode")

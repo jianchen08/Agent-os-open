@@ -1,4 +1,5 @@
 """输出目标抽象层。"""
+
 from __future__ import annotations
 
 import logging
@@ -10,8 +11,10 @@ logger = logging.getLogger(__name__)
 
 # 管道消息来源枚举
 
+
 class EnvelopeSource(StrEnum):
     """管道消息来源标识。"""
+
     LLM = "llm"
     USER = "user"
     SYSTEM = "system"
@@ -20,6 +23,7 @@ class EnvelopeSource(StrEnum):
 
 
 # IOutputSink 协议与实现
+
 
 @runtime_checkable
 class IOutputSink(Protocol):
@@ -76,6 +80,7 @@ class TargetedSink:
             return ""
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(self._pipeline_id)
             if entry and entry.thread_id:
                 # 缓存到 self 以便后续 send 复用，sink_id 日志也随之更新
@@ -84,7 +89,8 @@ class TargetedSink:
         except Exception:
             logger.debug(
                 "TargetedSink._resolve_thread_id: registry 查找失败 pipeline=%s",
-                self._pipeline_id[:12], exc_info=True,
+                self._pipeline_id[:12],
+                exc_info=True,
             )
         return ""
 
@@ -106,6 +112,7 @@ class TargetedSink:
         if self._pipeline_id:
             try:
                 from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
                 entry = get_engine_registry().get(self._pipeline_id)
                 if entry:
                     _uid = (entry.tags or {}).get("user_id", "")
@@ -115,18 +122,15 @@ class TargetedSink:
             except Exception:
                 logger.debug(
                     "TargetedSink._resolve_user_id: registry 查找失败 pipeline=%s",
-                    self._pipeline_id[:12], exc_info=True,
+                    self._pipeline_id[:12],
+                    exc_info=True,
                 )
         return ""
 
     def _record_failure(self, event: dict, *, exc_info: bool = False) -> None:
         """记录一次推送失败，连续超过阈值时升级为 ERROR 日志。"""
         self._consecutive_failures += 1
-        level = (
-            logging.ERROR
-            if self._consecutive_failures >= self._FAILURE_THRESHOLD
-            else logging.WARNING
-        )
+        level = logging.ERROR if self._consecutive_failures >= self._FAILURE_THRESHOLD else logging.WARNING
         logger.log(
             level,
             "sink 连续推送失败 %d 次 thread_id=%s type=%s",
@@ -166,6 +170,7 @@ class TargetedSink:
 
 # MultiChannelSink — 多通道输出分发
 
+
 def create_targeted_sink(
     notifier: Any,
     thread_id: str = "",
@@ -181,6 +186,7 @@ def create_targeted_sink(
     if (not thread_id or not user_id) and pipeline_id:
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entry = get_engine_registry().get(pipeline_id)
             if entry:
                 if not thread_id:
@@ -190,7 +196,8 @@ def create_targeted_sink(
         except Exception:
             logger.debug(
                 "create_targeted_sink: registry 查找失败 pipeline=%s",
-                pipeline_id[:12], exc_info=True,
+                pipeline_id[:12],
+                exc_info=True,
             )
 
     if not thread_id:
@@ -234,7 +241,8 @@ class MultiChannelSink:
                 # M2-fix: 不再静默吞掉通道错误，记录 warning
                 logger.warning(
                     "MultiChannelSink: 通道 %s 发送异常 event_type=%s",
-                    name, event.get("type", "?"),
+                    name,
+                    event.get("type", "?"),
                     exc_info=True,
                 )
         return any_success

@@ -157,6 +157,7 @@ class HealthChecker:
         env_count = 0
         try:
             from isolation.manager import _global_manager  # noqa: PLC0415
+
             if _global_manager is not None:
                 stats = _global_manager.get_stats()
                 env_count = stats.get("total_environments", 0)

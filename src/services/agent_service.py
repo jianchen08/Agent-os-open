@@ -20,6 +20,7 @@ from src.db.models import AgentConfig
 def _get_default_chat_model() -> str:
     """获取默认对话模型别名（从 llm.yaml 读取）。"""
     from src.config.llm_config import get_llm_config  # noqa: PLC0415
+
     return get_llm_config().get_default_alias("chat")
 
 
@@ -347,9 +348,7 @@ class AgentService:
                     "agent_id": str(agent.id),
                     "agent_name": agent.name,
                     "status": status_str,
-                    "last_active": agent.created_at.isoformat()
-                    if agent.created_at
-                    else None,
+                    "last_active": agent.created_at.isoformat() if agent.created_at else None,
                     "error": error,
                 }
             )
@@ -372,9 +371,7 @@ class AgentService:
             "checked_at": datetime.now().isoformat(),
         }
 
-    async def get_default_agent(
-        self, user_default_agent_id: str | None = None
-    ) -> dict[str, Any]:
+    async def get_default_agent(self, user_default_agent_id: str | None = None) -> dict[str, Any]:
         """
         获取默认 Agent
 
@@ -392,9 +389,7 @@ class AgentService:
             try:
                 agent_uuid = UUID(user_default_agent_id)
                 result = await self.session.execute(
-                    select(AgentConfig).where(
-                        AgentConfig.id == agent_uuid, AgentConfig.is_active
-                    )
+                    select(AgentConfig).where(AgentConfig.id == agent_uuid, AgentConfig.is_active)
                 )
                 agent = result.scalar_one_or_none()
                 if agent:
@@ -404,9 +399,7 @@ class AgentService:
 
         # 返回系统默认 Agent（优先查找 config_id="lingxi" 的主 Agent）
         result = await self.session.execute(
-            select(AgentConfig).where(
-                AgentConfig.config_id == "lingxi", AgentConfig.is_active
-            )
+            select(AgentConfig).where(AgentConfig.config_id == "lingxi", AgentConfig.is_active)
         )
         agent = result.scalar_one_or_none()
 
@@ -422,9 +415,7 @@ class AgentService:
         # 如果还没有，查找任意活跃的 Agent
         if not agent:
             result = await self.session.execute(
-                select(AgentConfig)
-                .where(AgentConfig.is_active)
-                .order_by(AgentConfig.created_at.desc())
+                select(AgentConfig).where(AgentConfig.is_active).order_by(AgentConfig.created_at.desc())
             )
             agent = result.scalar_one_or_none()
 

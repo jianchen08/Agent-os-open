@@ -6,6 +6,7 @@ bridge.emit_start/chunk/finish/suspend/error 推送事件。
 本文件仅保留 send_frontend_event 模块级统一出口函数，
 供外部模块（如 task_notifier、triggers）通过 pipeline_id 查找 bridge 推送事件。
 """
+
 from __future__ import annotations
 
 import logging
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 模块级统一出口函数
 # ---------------------------------------------------------------------------
+
 
 async def send_frontend_event(
     pipeline_id: str,
@@ -34,6 +36,7 @@ async def send_frontend_event(
         return False
 
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
     registry = get_engine_registry()
 
     bridge = registry.get_bridge(pipeline_id)
@@ -49,7 +52,8 @@ async def send_frontend_event(
     except Exception as _import_err:
         logger.debug(
             "send_frontend_event: ws_interaction_notifier 不可用 pipeline=%s err=%s",
-            pipeline_id[:12], _import_err,
+            pipeline_id[:12],
+            _import_err,
         )
         _notifier = None
 
@@ -57,6 +61,7 @@ async def send_frontend_event(
         return False
 
     from pipeline.sink import create_targeted_sink  # noqa: PLC0415
+
     sink = create_targeted_sink(_notifier, entry.thread_id)
     if sink is None:
         return False

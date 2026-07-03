@@ -105,15 +105,9 @@ class ModuleAction(BaseModel):
     name: str
     type: ActionType = "command"
     description: str | None = Field(default=None, alias="description")
-    input_schema: dict[str, Any] | None = Field(
-        default=None, alias="inputSchema"
-    )
-    output_schema: dict[str, Any] | None = Field(
-        default=None, alias="outputSchema"
-    )
-    requires_confirmation: bool = Field(
-        default=False, alias="requiresConfirmation"
-    )
+    input_schema: dict[str, Any] | None = Field(default=None, alias="inputSchema")
+    output_schema: dict[str, Any] | None = Field(default=None, alias="outputSchema")
+    requires_confirmation: bool = Field(default=False, alias="requiresConfirmation")
     is_dangerous: bool = Field(default=False, alias="isDangerous")
     api: str | None = None
     params: list[str] | None = None
@@ -137,9 +131,7 @@ class ChatInteractionConfig(BaseModel):
     type: ChatInteractionType
     props: dict[str, Any] | None = None
     data_source: str | None = Field(default=None, alias="dataSource")
-    refresh_interval: int | None = Field(
-        default=None, alias="refreshInterval"
-    )
+    refresh_interval: int | None = Field(default=None, alias="refreshInterval")
 
     model_config = {"populate_by_name": True}
 
@@ -278,15 +270,9 @@ class ClientCapabilities(BaseModel):
         fallback: 降级方案。
     """
 
-    required_spaces: list[RenderingSpaceType] = Field(
-        default_factory=list, alias="requiredSpaces"
-    )
-    required_widgets: list[str] = Field(
-        default_factory=list, alias="requiredWidgets"
-    )
-    min_client_version: str | None = Field(
-        default=None, alias="minClientVersion"
-    )
+    required_spaces: list[RenderingSpaceType] = Field(default_factory=list, alias="requiredSpaces")
+    required_widgets: list[str] = Field(default_factory=list, alias="requiredWidgets")
+    min_client_version: str | None = Field(default=None, alias="minClientVersion")
     fallback: dict[str, Any] | None = None
 
     model_config = {"populate_by_name": True}
@@ -308,6 +294,4 @@ class ModuleUISchema(BaseModel):
     identity: ModuleIdentity
     actions: list[ModuleAction] = Field(default_factory=list)
     rendering: ModuleRendering = Field(default_factory=ModuleRendering)
-    clients: ClientCapabilities = Field(
-        default_factory=ClientCapabilities
-    )
+    clients: ClientCapabilities = Field(default_factory=ClientCapabilities)

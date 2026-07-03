@@ -107,7 +107,8 @@ class HumanInteractionService(IHumanInteractionService):
         if event is None:
             logger.warning(
                 "[HumanInteraction] Event NOT found | request_id=%s | pending_keys=%s",
-                request_id, list(self._pending_events.keys())[:5],
+                request_id,
+                list(self._pending_events.keys())[:5],
             )
             return
 
@@ -116,20 +117,20 @@ class HumanInteractionService(IHumanInteractionService):
         with contextlib.suppress(RuntimeError):
             current_loop = asyncio.get_running_loop()
 
-        if (
-            target_loop is not None
-            and target_loop.is_running()
-            and current_loop is not target_loop
-        ):
+        if target_loop is not None and target_loop.is_running() and current_loop is not target_loop:
             logger.info(
                 "[HumanInteraction] Event.set() via call_soon_threadsafe | request_id=%s | target_loop=%s | current_loop=%s",
-                request_id, id(target_loop), id(current_loop) if current_loop else None,
+                request_id,
+                id(target_loop),
+                id(current_loop) if current_loop else None,
             )
             target_loop.call_soon_threadsafe(event.set)
         else:
             logger.info(
                 "[HumanInteraction] Event.set() direct | request_id=%s | target_loop=%s | current_loop=%s",
-                request_id, id(target_loop) if target_loop else None, id(current_loop) if current_loop else None,
+                request_id,
+                id(target_loop) if target_loop else None,
+                id(current_loop) if current_loop else None,
             )
             event.set()
 
@@ -170,7 +171,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         logger.info(
             "[HumanInteraction] 发送通知 | request_id=%s | title=%s",
-            request_id, title,
+            request_id,
+            title,
         )
         return request_id
 
@@ -228,7 +230,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         logger.info(
             "[HumanInteraction] 创建选择请求 | request_id=%s | title=%s",
-            request_id, title,
+            request_id,
+            title,
         )
         return request_id
 
@@ -286,7 +289,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         logger.info(
             "[HumanInteraction] 创建对话请求 | request_id=%s | thread_id=%s",
-            request_id, thread_id,
+            request_id,
+            thread_id,
         )
         return request_id
 
@@ -337,7 +341,11 @@ class HumanInteractionService(IHumanInteractionService):
         try:
             logger.info(
                 "[HumanInteraction] wait_for_choice() 开始等待 | request_id=%s | timeout=%s | loop_id=%s | event_id=%s | event_is_set=%s",
-                request_id, timeout, current_loop_id, id(event), event.is_set(),
+                request_id,
+                timeout,
+                current_loop_id,
+                id(event),
+                event.is_set(),
             )
             await asyncio.wait_for(event.wait(), timeout=timeout)
             logger.info(
@@ -388,7 +396,9 @@ class HumanInteractionService(IHumanInteractionService):
 
         logger.info(
             "[HumanInteraction] respond() | request_id=%s | type=%s | option=%s",
-            request_id, response_type, selected_option,
+            request_id,
+            response_type,
+            selected_option,
         )
 
         result = await self.submit_response(
@@ -401,7 +411,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         logger.info(
             "[HumanInteraction] respond() result=%s | request_id=%s",
-            result, request_id,
+            result,
+            request_id,
         )
         return result
 
@@ -417,13 +428,18 @@ class HumanInteractionService(IHumanInteractionService):
         """提交响应。"""
         request_record = self._requests.get(request_id)
         if not request_record:
-            logger.warning("[HumanInteraction] 请求不存在 | request_id=%s | 已知 requests=%s", request_id, list(self._requests.keys())[-5:])
+            logger.warning(
+                "[HumanInteraction] 请求不存在 | request_id=%s | 已知 requests=%s",
+                request_id,
+                list(self._requests.keys())[-5:],
+            )
             return False
 
         if request_record.get("status") != InteractionStatus.PENDING.value:
             logger.warning(
                 "[HumanInteraction] 请求状态不允许响应 | request_id=%s | status=%s",
-                request_id, request_record.get("status"),
+                request_id,
+                request_record.get("status"),
             )
             return False
 
@@ -455,13 +471,15 @@ class HumanInteractionService(IHumanInteractionService):
             if event_exists:
                 logger.info(
                     "[HumanInteraction] submit_response() 准备唤醒 | request_id=%s | event_exists=%s",
-                    request_id, event_exists,
+                    request_id,
+                    event_exists,
                 )
                 self._set_event_threadsafe(request_id)
             else:
                 logger.warning(
                     "[HumanInteraction] Event NOT found | request_id=%s | pending_keys=%s",
-                    request_id, list(self._pending_events.keys())[:5],
+                    request_id,
+                    list(self._pending_events.keys())[:5],
                 )
             if request_id in self._timeout_tasks:
                 self._timeout_tasks[request_id].cancel()
@@ -477,7 +495,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         logger.info(
             "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s",
-            request_id, response_type,
+            request_id,
+            response_type,
         )
         return True
 
@@ -507,7 +526,11 @@ class HumanInteractionService(IHumanInteractionService):
             return False
 
         status = record.get("status")
-        if status in (InteractionStatus.COMPLETED.value, InteractionStatus.TIMEOUT.value, InteractionStatus.CANCELLED.value):
+        if status in (
+            InteractionStatus.COMPLETED.value,
+            InteractionStatus.TIMEOUT.value,
+            InteractionStatus.CANCELLED.value,
+        ):
             return False
 
         record["status"] = InteractionStatus.CANCELLED.value
@@ -522,13 +545,15 @@ class HumanInteractionService(IHumanInteractionService):
         if self._notifier:
             msg_data = record.get("message_data") or {}
             await self._notifier.notify_cancel(
-                request_id, reason,
+                request_id,
+                reason,
                 thread_id=msg_data.get("thread_id", ""),
             )
 
         logger.info(
             "[HumanInteraction] 请求已取消 | request_id=%s | reason=%s",
-            request_id, reason,
+            request_id,
+            reason,
         )
         return True
 
@@ -565,14 +590,15 @@ class HumanInteractionService(IHumanInteractionService):
                 )
                 completed += 1
                 logger.info(
-                    "[HumanInteraction] 自动完成 conversation 请求 | "
-                    "request_id=%s | pipeline_id=%s",
-                    request_id, pipeline_id,
+                    "[HumanInteraction] 自动完成 conversation 请求 | request_id=%s | pipeline_id=%s",
+                    request_id,
+                    pipeline_id,
                 )
             except Exception as exc:
                 logger.warning(
                     "[HumanInteraction] 自动完成失败 | request_id=%s | error=%s",
-                    request_id, exc,
+                    request_id,
+                    exc,
                 )
         return completed
 
@@ -601,7 +627,8 @@ class HumanInteractionService(IHumanInteractionService):
                 cancelled += 1
                 logger.info(
                     "[HumanInteraction] 取消 pending 请求（新消息到达）| request_id=%s | thread_id=%s",
-                    request_id, thread_id,
+                    request_id,
+                    thread_id,
                 )
             except Exception:
                 pass
@@ -698,7 +725,9 @@ class HumanInteractionService(IHumanInteractionService):
                     if self._notifier:
                         msg_data = record.get("message_data") or {}
                         await self._notifier.notify_timeout_reminder(
-                            request_id, self._remind_before_seconds, thread_id,
+                            request_id,
+                            self._remind_before_seconds,
+                            thread_id,
                             title=msg_data.get("title", ""),
                             mode=msg_data.get("interaction_mode", "choice"),
                             options=msg_data.get("options"),

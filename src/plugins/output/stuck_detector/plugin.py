@@ -84,7 +84,7 @@ class StuckDetector(IOutputPlugin):
         # 维护滑动窗口
         self._history.append(snapshot)
         if len(self._history) > self._window_size:
-            self._history = self._history[-self._window_size:]
+            self._history = self._history[-self._window_size :]
 
         # 检查工具调用重复
         tool_reason = self._check_tool_repeat(self._history)
@@ -99,17 +99,22 @@ class StuckDetector(IOutputPlugin):
             combined_reason = "; ".join(reasons)
             logger.warning(
                 "[%s] Stuck detected | reason=%s",
-                self.name, combined_reason,
+                self.name,
+                combined_reason,
             )
-            return OutputResult(state_updates={
-                "stuck_detected": True,
-                "stuck_reason": combined_reason,
-            })
+            return OutputResult(
+                state_updates={
+                    "stuck_detected": True,
+                    "stuck_reason": combined_reason,
+                }
+            )
 
-        return OutputResult(state_updates={
-            "stuck_detected": False,
-            "stuck_reason": "",
-        })
+        return OutputResult(
+            state_updates={
+                "stuck_detected": False,
+                "stuck_reason": "",
+            }
+        )
 
     def _check_tool_repeat(self, history: list[dict[str, Any]]) -> str:
         """检查工具调用重复。
@@ -127,7 +132,7 @@ class StuckDetector(IOutputPlugin):
             return ""
 
         # 取最近 repeat_threshold 轮的工具调用签名
-        recent = history[-self._repeat_threshold:]
+        recent = history[-self._repeat_threshold :]
         signatures = [h.get("tool_signature") for h in recent]
 
         # 所有签名必须相同且非空
@@ -136,10 +141,7 @@ class StuckDetector(IOutputPlugin):
             return ""
 
         if all(sig == first_sig for sig in signatures):
-            return (
-                f"Tool call repeated {self._repeat_threshold} times: "
-                f"{first_sig[:100]}"
-            )
+            return f"Tool call repeated {self._repeat_threshold} times: {first_sig[:100]}"
 
         return ""
 
@@ -158,7 +160,7 @@ class StuckDetector(IOutputPlugin):
         if len(history) < self._repeat_threshold:
             return ""
 
-        recent = history[-self._repeat_threshold:]
+        recent = history[-self._repeat_threshold :]
         outputs = [h.get("result_text", "") for h in recent]
 
         first_output = outputs[0]
@@ -167,19 +169,11 @@ class StuckDetector(IOutputPlugin):
 
         # 检查完全相同
         if all(out == first_output for out in outputs):
-            return (
-                f"Output repeated {self._repeat_threshold} times identically"
-            )
+            return f"Output repeated {self._repeat_threshold} times identically"
 
         # 检查高度相似
-        if all(
-            self._compute_similarity(out, first_output) >= self._similarity_threshold
-            for out in outputs[1:]
-        ):
-            return (
-                f"Output repeated {self._repeat_threshold} times "
-                f"(similarity >= {self._similarity_threshold})"
-            )
+        if all(self._compute_similarity(out, first_output) >= self._similarity_threshold for out in outputs[1:]):
+            return f"Output repeated {self._repeat_threshold} times (similarity >= {self._similarity_threshold})"
 
         return ""
 

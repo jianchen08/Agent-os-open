@@ -30,6 +30,7 @@ class WorkspaceAwareMixin:
         """获取缓存的 PermissionPolicyManager 单例（从配置文件加载策略）。"""
         if cls._policy_manager is None:
             from isolation.permission_policy import PermissionPolicyManager  # noqa: PLC0415
+
             cls._policy_manager = PermissionPolicyManager()
         return cls._policy_manager
 
@@ -64,15 +65,20 @@ class WorkspaceAwareMixin:
         policy = policy_manager.get_policy(policy_name)
 
         from isolation.permission_checker import PermissionChecker  # noqa: PLC0415
+
         checker = PermissionChecker(str(project_root))
 
         if operation == "write":
             ok, err = checker.check_write_permission(
-                path, str(workspace), policy,
+                path,
+                str(workspace),
+                policy,
             )
         else:
             ok, err = checker.check_read_permission(
-                path, str(workspace), policy,
+                path,
+                str(workspace),
+                policy,
             )
         return ok, err
 
@@ -110,9 +116,7 @@ class WorkspaceAwareMixin:
         # Windows: 转换 Git Bash 风格绝对路径 (/d/path → D:\path)
         if platform.system() == "Windows":
             normalized = path_str.replace("\\", "/")
-            drive_match = re.match(
-                r'^/([a-zA-Z])/(.+)', normalized
-            )
+            drive_match = re.match(r"^/([a-zA-Z])/(.+)", normalized)
             if drive_match:
                 drive = drive_match.group(1).upper()
                 rest = drive_match.group(2)
@@ -129,7 +133,7 @@ class WorkspaceAwareMixin:
         if normalized_path == normalized_ws:
             return self._workspace.resolve()
         if normalized_path.startswith(normalized_ws + "/"):
-            relative_part = normalized_path[len(normalized_ws) + 1:]
+            relative_part = normalized_path[len(normalized_ws) + 1 :]
             return (self._workspace / relative_part).resolve()
 
         # 尾部组件前缀匹配，逐级缩短 workspace 后缀进行比对
@@ -141,7 +145,7 @@ class WorkspaceAwareMixin:
             if normalized_path == suffix:
                 return self._workspace.resolve()
             if normalized_path.startswith(suffix + "/"):
-                relative_part = normalized_path[len(suffix) + 1:]
+                relative_part = normalized_path[len(suffix) + 1 :]
                 return (self._workspace / relative_part).resolve()
 
         return (self._workspace / path).resolve()

@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 # 上下文变量：当前正在执行的 pipeline_id
 # ---------------------------------------------------------------------------
 _current_pipeline_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "_current_pipeline_id", default=None,
+    "_current_pipeline_id",
+    default=None,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,9 @@ def register_suspended_engine(pipeline_id: str, engine: PipelineEngine) -> None:
     _GLOBAL_SUSPENDED_ENGINES[pipeline_id] = engine
     logger.info(
         "[Engine] 全局注册挂起引擎: pipeline=%s, engine_pid=%s, total=%d",
-        pipeline_id, id(engine), len(_GLOBAL_SUSPENDED_ENGINES),
+        pipeline_id,
+        id(engine),
+        len(_GLOBAL_SUSPENDED_ENGINES),
     )
 
 
@@ -58,9 +61,11 @@ def get_global_suspended_engine(pipeline_id: str) -> PipelineEngine | None:  # t
 # ---------------------------------------------------------------------------
 _SAFE_JSON_TYPES = (str, int, float, bool, type(None))
 
-_SKIP_COPY_KEYS = frozenset({
-    "on_chunk",
-})
+_SKIP_COPY_KEYS = frozenset(
+    {
+        "on_chunk",
+    }
+)
 
 _MAX_MANUAL_COPY_DEPTH = 20
 

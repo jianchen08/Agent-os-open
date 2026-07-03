@@ -28,11 +28,13 @@ router = APIRouter(
 
 class ConnectRequest(BaseModel):
     """连接 ComfyUI 请求。"""
+
     endpoint: str = Field(..., description="ComfyUI 服务地址")
 
 
 class GenerateRequest(BaseModel):
     """图像生成请求。"""
+
     prompt: str = Field(..., description="正向提示词")
     negative_prompt: str = Field(default="", description="负面提示词")
     template: str = Field(default="default_txt2img", description="工作流模板名称")
@@ -46,6 +48,7 @@ class GenerateRequest(BaseModel):
 
 class SaveWorkflowRequest(BaseModel):
     """保存工作流模板请求。"""
+
     name: str = Field(..., min_length=1, max_length=100, description="模板名称")
     workflow: dict[str, Any] = Field(..., description="工作流定义")
 
@@ -221,9 +224,7 @@ async def comfyui_ws(websocket: WebSocket) -> None:
     def on_progress(msg_type: str, data: dict[str, Any]) -> None:
         try:
             loop = asyncio.get_event_loop()
-            loop.create_task(websocket.send_text(
-                json.dumps({"type": msg_type, "data": data}, ensure_ascii=False)
-            ))
+            loop.create_task(websocket.send_text(json.dumps({"type": msg_type, "data": data}, ensure_ascii=False)))
         except Exception:
             pass
 

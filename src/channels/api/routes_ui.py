@@ -88,9 +88,7 @@ def _schema_to_dict(schema: ModuleUISchema) -> dict[str, Any]:
     return result
 
 
-def _filter_by_client_type(
-    schemas: list[ModuleUISchema], client_type: str | None
-) -> list[ModuleUISchema]:
+def _filter_by_client_type(schemas: list[ModuleUISchema], client_type: str | None) -> list[ModuleUISchema]:
     """按客户端类型过滤 Schema。
 
     根据客户端类型过滤掉不兼容的渲染空间和组件。
@@ -120,9 +118,7 @@ def _filter_by_client_type(
     result: list[ModuleUISchema] = []
     for schema in schemas:
         # 过滤渲染空间：只保留客户端支持的空间
-        filtered_spaces = [
-            s for s in schema.rendering.spaces if s.space in supported
-        ]
+        filtered_spaces = [s for s in schema.rendering.spaces if s.space in supported]
 
         # 如果模块要求的空间客户端不支持，则跳过该模块
         required_spaces = set(schema.clients.required_spaces)
@@ -258,6 +254,7 @@ def get_module_data_router() -> APIRouter:
             包含 children（树形结构）、items（扁平列表）、total 的字典
         """
         from channels.api.routes_missing import get_task_tree  # noqa: PLC0415
+
         return await get_task_tree(session_id=session_id, _user=_user)
 
     return _module_data_router

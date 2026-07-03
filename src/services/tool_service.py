@@ -193,9 +193,7 @@ class ToolService:
             logger.error(f"注销工具失败 {tool_name}: {e}")
             return False
 
-    async def get_tool_suggestions(
-        self, context: str, user_id: str = None
-    ) -> list[Tool]:
+    async def get_tool_suggestions(self, context: str, user_id: str = None) -> list[Tool]:
         """获取工具建议"""
         try:
             suggestions = []
@@ -206,9 +204,7 @@ class ToolService:
                     continue
 
                 # 检查权限
-                if user_id and not self.permission_manager.check_permission(
-                    user_id, tool.name
-                ):
+                if user_id and not self.permission_manager.check_permission(user_id, tool.name):
                     continue
 
                 # 简单的关键词匹配
@@ -223,9 +219,7 @@ class ToolService:
             # 按使用频率排序
             tool_stats = self.usage_tracker.get_stats()
             suggestions.sort(
-                key=lambda t: tool_stats.get(
-                    t.name, ToolUsageStats(t.name)
-                ).total_calls,
+                key=lambda t: tool_stats.get(t.name, ToolUsageStats(t.name)).total_calls,
                 reverse=True,
             )
 
@@ -235,9 +229,7 @@ class ToolService:
             logger.error(f"获取工具建议失败: {e}")
             return []
 
-    def get_available_tools(
-        self, user_id: str = None, user_roles: list[str] = None
-    ) -> list[Tool]:
+    def get_available_tools(self, user_id: str = None, user_roles: list[str] = None) -> list[Tool]:
         """获取可用工具列表"""
         available_tools = []
 
@@ -246,9 +238,7 @@ class ToolService:
                 continue
 
             # 检查权限
-            if user_id and not self.permission_manager.check_permission(
-                user_id, tool.name, user_roles
-            ):
+            if user_id and not self.permission_manager.check_permission(user_id, tool.name, user_roles):
                 continue
 
             available_tools.append(tool)
@@ -277,9 +267,7 @@ class ToolService:
         return {
             "tool": tool.model_dump(),
             "stats": asdict(stats) if stats else None,
-            "permissions": list(
-                self.permission_manager.tool_permissions.get(tool_name, set())
-            ),
+            "permissions": list(self.permission_manager.tool_permissions.get(tool_name, set())),
         }
 
     async def set_tool_enabled(self, tool_name: str, enabled: bool) -> bool:
@@ -290,9 +278,7 @@ class ToolService:
         self.tools[tool_name].enabled = enabled
 
         # 发送事件
-        await self.event_bus.emit(
-            "tool_status_changed", {"tool_name": tool_name, "enabled": enabled}
-        )
+        await self.event_bus.emit("tool_status_changed", {"tool_name": tool_name, "enabled": enabled})
 
         return True
 
@@ -346,9 +332,7 @@ class ToolService:
                         registry = get_global_tool_registry_sync()
 
                     registry_tools = registry.list_all()
-                    logger.info(
-                        f"[list_tools] Loaded {len(registry_tools)} tools from registry"
-                    )
+                    logger.info(f"[list_tools] Loaded {len(registry_tools)} tools from registry")
 
                     # 将注册表工具转换为内部 Tool 格式
                     for tool_def in registry_tools:
@@ -360,9 +344,7 @@ class ToolService:
                                 source=tool_def.source,
                                 category=tool_def.category,
                                 permissions=[],
-                                parameters=tool_def.input_schema.get("properties", {})
-                                if tool_def.input_schema
-                                else {},
+                                parameters=tool_def.input_schema.get("properties", {}) if tool_def.input_schema else {},
                                 enabled=True,
                                 version="1.0.0",
                                 author="system",
@@ -479,11 +461,7 @@ class ToolService:
             logger.info(f"[get_tool] Found tool in registry: {tool_def.name}")
 
             # 直接从 tool_def 构建响应
-            input_schema = (
-                tool_def.input_schema
-                if tool_def.input_schema
-                else {"type": "object", "properties": {}}
-            )
+            input_schema = tool_def.input_schema if tool_def.input_schema else {"type": "object", "properties": {}}
             return {
                 "name": tool_def.name,
                 "description": tool_def.description,
@@ -492,9 +470,7 @@ class ToolService:
                 "status": "active",
                 "input_schema": input_schema,
                 "output_schema": None,
-                "requires_approval": tool_def.requires_approval
-                if hasattr(tool_def, "requires_approval")
-                else False,
+                "requires_approval": tool_def.requires_approval if hasattr(tool_def, "requires_approval") else False,
                 "parameters": input_schema.get("properties", {}),
                 "created_at": None,
                 "version": "1.0.0",
@@ -608,6 +584,7 @@ class ToolService:
                 tool.description = description
             if category is not None:
                 from src.tools.types import ToolCategory  # noqa: PLC0415
+
                 tool.category = ToolCategory(category)
             if parameters is not None:
                 tool.parameters = parameters

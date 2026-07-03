@@ -38,14 +38,8 @@ class AgentExecutionResult(ExecutionResult[str]):
 
     # Agent 特有字段
     iterations: int = Field(default=0, ge=0, description="迭代次数")
-    tool_calls: list[ToolCallRecord] = Field(
-        default_factory=list,
-        description="工具调用记录"
-    )
-    reasoning: str | None = Field(
-        default=None,
-        description="推理过程（思考模式）"
-    )
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list, description="工具调用记录")
+    reasoning: str | None = Field(default=None, description="推理过程（思考模式）")
 
     # Agent 标识
     agent_id: str | None = Field(default=None, description="Agent ID")

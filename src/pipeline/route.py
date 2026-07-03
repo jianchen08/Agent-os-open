@@ -106,9 +106,7 @@ class InputRouteTable:
         Returns:
             去重保序的插件名称列表
         """
-        matched_entries = [
-            e for e in self.entries if _eval_condition(e.condition, state)
-        ]
+        matched_entries = [e for e in self.entries if _eval_condition(e.condition, state)]
 
         if not matched_entries:
             return []
@@ -195,9 +193,7 @@ class OutputRouteTable:
     """
 
     def __init__(self, entries: list[OutputRouteEntry] | None = None) -> None:
-        self.entries: list[OutputRouteEntry] = sorted(
-            entries or [], key=lambda e: e.priority
-        )
+        self.entries: list[OutputRouteEntry] = sorted(entries or [], key=lambda e: e.priority)
 
     def resolve_plugins(self, state: dict[str, Any]) -> list[str]:
         """根据 state 解析需要执行的 output 插件列表。
@@ -214,9 +210,7 @@ class OutputRouteTable:
         Returns:
             去重保序的插件名称列表；无匹配或无 plugins 声明时返回空列表
         """
-        matched_entries = [
-            e for e in self.entries if _eval_condition(e.condition, state)
-        ]
+        matched_entries = [e for e in self.entries if _eval_condition(e.condition, state)]
 
         if not matched_entries:
             return []
@@ -266,9 +260,7 @@ class OutputRouteTable:
         if "end" in signal_types:
             for entry in self.entries:
                 if entry.route_type == "end" and _eval_condition(entry.condition, state):
-                    matched_signal = next(
-                        s for s in signals if s.route_type == "end"
-                    )
+                    matched_signal = next(s for s in signals if s.route_type == "end")
                     return RouteSignal(
                         route_type="end",
                         target=entry.target_core,
@@ -278,9 +270,7 @@ class OutputRouteTable:
 
         for entry in self.entries:
             if entry.route_type in signal_types and _eval_condition(entry.condition, state):
-                matched_signal = next(
-                    s for s in signals if s.route_type == entry.route_type
-                )
+                matched_signal = next(s for s in signals if s.route_type == entry.route_type)
                 result = RouteSignal(
                     route_type=entry.route_type,
                     target=entry.target_core,

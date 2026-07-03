@@ -48,10 +48,7 @@ def _enrich_tts_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     enriched.input_schema.setdefault("properties", {})
     enriched.input_schema["properties"]["provider"] = {
         "type": "string",
-        "description": (
-            f"指定使用的 TTS 服务。"
-            f"当前可用: {', '.join(provider_names)}。不填则自动选择。"
-        ),
+        "description": (f"指定使用的 TTS 服务。当前可用: {', '.join(provider_names)}。不填则自动选择。"),
         "enum": provider_names + ["auto"],
     }
 

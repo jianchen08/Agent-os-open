@@ -73,7 +73,8 @@ class EventCallbackPlugin(IOutputPlugin):
             event_bus = ctx.get_service("event_bus")
             if event_bus is not None:
                 logger.debug(
-                    "EventCallback: event_bus available for %s", routed_to,
+                    "EventCallback: event_bus available for %s",
+                    routed_to,
                 )
         except KeyError:
             logger.debug("EventCallback: no event_bus service, using state-only mode")
@@ -82,7 +83,9 @@ class EventCallbackPlugin(IOutputPlugin):
             "EventCallback: suspending pipeline, waiting for %s",
             routed_to,
         )
-        return OutputResult(state_updates={
-            StateKeys.ENDED: True,
-            StateKeys.WAIT_FOR: routed_to,
-        })
+        return OutputResult(
+            state_updates={
+                StateKeys.ENDED: True,
+                StateKeys.WAIT_FOR: routed_to,
+            }
+        )

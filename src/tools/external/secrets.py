@@ -119,7 +119,8 @@ class ExternalToolSecretManager(ISecretManager):
             encrypted = self._encrypt(value)
             self._store[key] = (encrypted, metadata or {})
             self._logger.info(
-                "密钥已存储 | key=%s", self._mask_key(key),
+                "密钥已存储 | key=%s",
+                self._mask_key(key),
             )
         except Exception as e:
             raise SecretError(

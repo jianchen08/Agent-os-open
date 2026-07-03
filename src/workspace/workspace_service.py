@@ -57,7 +57,8 @@ class WorkspaceService:
         self._workspaces[container_task_id] = workspace
         logger.info(
             "[WorkspaceService] 创建工作空间 | id=%s | container_task_id=%s",
-            workspace.id, container_task_id,
+            workspace.id,
+            container_task_id,
         )
         return workspace
 
@@ -76,6 +77,7 @@ class WorkspaceService:
 
         # 延迟导入避免循环依赖
         from artifacts.artifact_service import get_artifact_service  # noqa: PLC0415
+
         artifact_service = get_artifact_service()
 
         items: list[dict[str, Any]] = []
@@ -107,6 +109,7 @@ class WorkspaceService:
         if ws:
             ws.file_tree = tree
             from datetime import UTC, datetime  # noqa: PLC0415
+
             ws.updated_at = datetime.now(UTC).isoformat()
 
         return {"tree": [n.to_dict() for n in tree]}
@@ -115,6 +118,7 @@ class WorkspaceService:
         """解析任务到容器任务。"""
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
             task_service = provider.get_or_create(
                 "task_service",
@@ -153,6 +157,7 @@ class WorkspaceService:
         """获取容器任务下所有子任务 ID。"""
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
             task_service = provider.get_or_create(
                 "task_service",
@@ -177,11 +182,32 @@ class WorkspaceService:
         except Exception:
             return set()
 
-    _WINDOWS_RESERVED_NAMES = frozenset({
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    })
+    _WINDOWS_RESERVED_NAMES = frozenset(
+        {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "COM2",
+            "COM3",
+            "COM4",
+            "COM5",
+            "COM6",
+            "COM7",
+            "COM8",
+            "COM9",
+            "LPT1",
+            "LPT2",
+            "LPT3",
+            "LPT4",
+            "LPT5",
+            "LPT6",
+            "LPT7",
+            "LPT8",
+            "LPT9",
+        }
+    )
 
     def _scan_directory(
         self,
@@ -219,20 +245,22 @@ class WorkspaceService:
                 continue
 
             if os.path.isdir(full_path):  # noqa: PTH112
-                children = self._scan_directory(
-                    full_path, base_path, max_depth, current_depth + 1
+                children = self._scan_directory(full_path, base_path, max_depth, current_depth + 1)
+                nodes.append(
+                    FileTreeNode(
+                        name=entry,
+                        type="directory",
+                        path=rel_path,
+                        children=children,
+                    )
                 )
-                nodes.append(FileTreeNode(
-                    name=entry,
-                    type="directory",
-                    path=rel_path,
-                    children=children,
-                ))
             else:
-                nodes.append(FileTreeNode(
-                    name=entry,
-                    type="file",
-                    path=rel_path,
-                ))
+                nodes.append(
+                    FileTreeNode(
+                        name=entry,
+                        type="file",
+                        path=rel_path,
+                    )
+                )
 
         return nodes

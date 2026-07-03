@@ -192,18 +192,12 @@ class PermissionPolicyManager:
     def _load_default_policies(self) -> None:
         """加载默认策略"""
         for policy_name, policy_config in self.DEFAULT_POLICIES.items():
-            policy = self._create_policy_from_config(
-                policy_name, policy_config, PermissionPolicyType(policy_name)
-            )
+            policy = self._create_policy_from_config(policy_name, policy_config, PermissionPolicyType(policy_name))
             self._policies[policy_name] = policy
 
-        logger.info(
-            f"[PermissionPolicyManager] 默认策略已加载 | count={len(self._policies)}"
-        )
+        logger.info(f"[PermissionPolicyManager] 默认策略已加载 | count={len(self._policies)}")
 
-    def _load_custom_policies(
-        self, custom_policies: dict[str, dict[str, Any]]
-    ) -> None:
+    def _load_custom_policies(self, custom_policies: dict[str, dict[str, Any]]) -> None:
         """加载自定义策略"""
         for policy_name, policy_config in custom_policies.items():
             # 确定策略类型
@@ -213,15 +207,10 @@ class PermissionPolicyManager:
             except ValueError:
                 policy_type = PermissionPolicyType.DEFAULT
 
-            policy = self._create_policy_from_config(
-                policy_name, policy_config, policy_type
-            )
+            policy = self._create_policy_from_config(policy_name, policy_config, policy_type)
             self._policies[policy_name] = policy
 
-        logger.info(
-            f"[PermissionPolicyManager] 自定义策略已加载 | "
-            f"count={len(custom_policies)}"
-        )
+        logger.info(f"[PermissionPolicyManager] 自定义策略已加载 | count={len(custom_policies)}")
 
     def _load_from_config_file(self) -> None:
         """从 isolation_config.yaml 的 permission_policies 段加载策略。
@@ -232,13 +221,11 @@ class PermissionPolicyManager:
         """
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+
             config = get_config_center().get("isolation/isolation_config.yaml") or {}
             policies_section = config.get("permission_policies", {})
             if not policies_section:
-                logger.debug(
-                    "[PermissionPolicyManager] 配置文件中未找到 permission_policies，"
-                    "使用代码默认值"
-                )
+                logger.debug("[PermissionPolicyManager] 配置文件中未找到 permission_policies，使用代码默认值")
                 return
 
             loaded = 0
@@ -254,21 +241,15 @@ class PermissionPolicyManager:
                 self._policies[name] = self._create_policy_from_config(
                     name,
                     policy_config,
-                    PermissionPolicyType(
-                        policy_config.get("policy_type", "default")
-                    ),
+                    PermissionPolicyType(policy_config.get("policy_type", "default")),
                 )
                 loaded += 1
 
             logger.info(
-                "[PermissionPolicyManager] 从配置文件加载策略完成 | "
-                f"loaded={loaded} | total={len(self._policies)}"
+                f"[PermissionPolicyManager] 从配置文件加载策略完成 | loaded={loaded} | total={len(self._policies)}"
             )
         except Exception as e:
-            logger.warning(
-                "[PermissionPolicyManager] 配置文件加载失败，使用代码默认策略 | "
-                f"error={e}"
-            )
+            logger.warning(f"[PermissionPolicyManager] 配置文件加载失败，使用代码默认策略 | error={e}")
 
     def _create_policy_from_config(
         self,
@@ -307,19 +288,14 @@ class PermissionPolicyManager:
             description=config.get("description", ""),
         )
 
-    def get_policy(
-        self, policy_type: PermissionPolicyType | str
-    ) -> WorkspacePermissionPolicy:
+    def get_policy(self, policy_type: PermissionPolicyType | str) -> WorkspacePermissionPolicy:
         """获取指定类型的权限策略"""
         # 支持字符串或枚举
         policy_name = policy_type.value if isinstance(policy_type, PermissionPolicyType) else policy_type
 
         policy = self._policies.get(policy_name)
         if not policy:
-            logger.warning(
-                f"[PermissionPolicyManager] 策略不存在，返回默认策略 | "
-                f"requested={policy_name}"
-            )
+            logger.warning(f"[PermissionPolicyManager] 策略不存在，返回默认策略 | requested={policy_name}")
             return self.get_default_policy()
 
         return policy

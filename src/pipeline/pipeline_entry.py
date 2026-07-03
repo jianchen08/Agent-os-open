@@ -4,6 +4,7 @@
 替代原先分散在 ServiceProvider 字符串 key、_GLOBAL_SUSPENDED_ENGINES、
 _pipeline_thread_map 中的多套映射。
 """
+
 from __future__ import annotations
 
 import logging
@@ -104,7 +105,8 @@ MAX_TAGS_PER_PIPELINE = 8
 
 
 def _build_engine_from_tags(
-    tags: dict[str, str], provider: Any | None,
+    tags: dict[str, str],
+    provider: Any | None,
 ) -> Any | None:
     """从 tags + provider 构造一个新的 PipelineEngine 对象（I3 lazy 重建）。
 
@@ -121,6 +123,7 @@ def _build_engine_from_tags(
     if provider is None:
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
         except Exception:
             return None
@@ -136,6 +139,7 @@ def _build_engine_from_tags(
         return None
 
     from pipeline.engine import PipelineEngine  # noqa: PLC0415
+
     checkpoint_mgr = services.get("checkpoint_manager") if services else None
     engine = PipelineEngine(
         input_route_table=input_route_table,

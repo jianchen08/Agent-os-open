@@ -51,18 +51,22 @@ class TaskRecoveryMixin:
             task_scope = task.metadata.get("task_scope", "non_container")
             if task_scope == "container":
                 logger.debug(
-                    "TaskWorker: 跳过容器任务恢复: task_id=%s", task.id,
+                    "TaskWorker: 跳过容器任务恢复: task_id=%s",
+                    task.id,
                 )
                 continue
             try:
                 await self._task_service.pause_task(task.id, paused_by="system")
                 suspended_count += 1
                 logger.info(
-                    "TaskWorker: 恢复 running → suspended: task_id=%s", task.id,
+                    "TaskWorker: 恢复 running → suspended: task_id=%s",
+                    task.id,
                 )
             except Exception as e:
                 logger.warning(
-                    "TaskWorker: 恢复 running 任务失败: task_id=%s, error=%s", task.id, e,
+                    "TaskWorker: 恢复 running 任务失败: task_id=%s, error=%s",
+                    task.id,
+                    e,
                 )
 
         # ── 2. pending 任务 → suspended（不再自动提交执行） ──
@@ -75,11 +79,14 @@ class TaskRecoveryMixin:
                 await self._task_service.pause_task(task.id, paused_by="system")
                 suspended_count += 1
                 logger.info(
-                    "TaskWorker: 恢复 pending → suspended: task_id=%s", task.id,
+                    "TaskWorker: 恢复 pending → suspended: task_id=%s",
+                    task.id,
                 )
             except Exception as e:
                 logger.warning(
-                    "TaskWorker: 恢复 pending 任务失败: task_id=%s, error=%s", task.id, e,
+                    "TaskWorker: 恢复 pending 任务失败: task_id=%s, error=%s",
+                    task.id,
+                    e,
                 )
 
         # ── 3. 已是 stopped 的任务保持原样 ──
@@ -89,7 +96,8 @@ class TaskRecoveryMixin:
             paused_by = (task.metadata or {}).get("paused_by", "unknown")
             logger.info(
                 "TaskWorker: 保持暂停任务: task_id=%s paused_by=%s",
-                task.id, paused_by,
+                task.id,
+                paused_by,
             )
             suspended_count += 1
 
@@ -120,15 +128,19 @@ class TaskRecoveryMixin:
             return
 
         logger.info(
-            "TaskWorker: 发现 %d 个 evaluating 任务，"
-            "准备重新激活评估管道",
+            "TaskWorker: 发现 %d 个 evaluating 任务，准备重新激活评估管道",
             len(evaluating_tasks),
         )
 
         for task in evaluating_tasks:
-            task_scope = task.metadata.get(
-                "task_scope", "non_container",
-            ) if task.metadata else "non_container"
+            task_scope = (
+                task.metadata.get(
+                    "task_scope",
+                    "non_container",
+                )
+                if task.metadata
+                else "non_container"
+            )
             if task_scope == "container":
                 logger.debug(
                     "TaskWorker: 跳过容器任务评估恢复: task_id=%s",
@@ -140,19 +152,19 @@ class TaskRecoveryMixin:
                 await self._rerun_evaluation(task)
             except Exception as e:
                 logger.error(
-                    "TaskWorker: 恢复 evaluating 任务失败: "
-                    "task_id=%s, error=%s",
-                    task.id, e,
+                    "TaskWorker: 恢复 evaluating 任务失败: task_id=%s, error=%s",
+                    task.id,
+                    e,
                 )
                 try:
                     await self._task_service.fail_task(
-                        task.id, f"评估恢复失败: {e}",
+                        task.id,
+                        f"评估恢复失败: {e}",
                     )
                 except Exception:
                     logger.warning("TaskWorker: fail_task 也失败: task_id=%s", task.id, exc_info=True)
 
-    async def _complete_with_merge(self, task_id: str, passed: bool,
-                                    result: dict | None = None) -> None:
+    async def _complete_with_merge(self, task_id: str, passed: bool, result: dict | None = None) -> None:
         """评估通过后统一完成入口：worktree 模式先合并再 complete_evaluation。
 
         评估通过后统一调用 lifecycle.merge_worktree_before_complete，合并失败则标记
@@ -167,15 +179,18 @@ class TaskRecoveryMixin:
             merge_error = self._try_merge_worktree(task_id)
             if merge_error:
                 logger.error(
-                    "TaskWorker: 恢复路径 worktree 合并失败，任务标记 failed: "
-                    "task_id=%s, error=%s", task_id, merge_error,
+                    "TaskWorker: 恢复路径 worktree 合并失败，任务标记 failed: task_id=%s, error=%s",
+                    task_id,
+                    merge_error,
                 )
                 result = dict(result) if result else {}
                 result["overall_passed"] = False
                 result["merge_failure"] = merge_error
                 result["summary"] = f"评估指标已通过，但 worktree 合并失败: {merge_error}"
                 await self._task_service.complete_evaluation(
-                    task_id, passed=False, result=result,
+                    task_id,
+                    passed=False,
+                    result=result,
                 )
                 return
         await self._task_service.complete_evaluation(task_id, passed=passed, result=result)
@@ -183,6 +198,7 @@ class TaskRecoveryMixin:
     def _try_merge_worktree(self, task_id: str) -> str | None:
         """获取 lifecycle 并执行合并门控，lifecycle 不可用时返回 None。"""
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
         lifecycle = get_service_provider().get("workspace_lifecycle_manager")
         if lifecycle is None:
             logger.warning(
@@ -207,7 +223,8 @@ class TaskRecoveryMixin:
 
         # 1. 提取评估指标 ID
         metric_ids: list[str] = metadata.get(
-            "evaluation_metric_ids", [],
+            "evaluation_metric_ids",
+            [],
         )
         if not metric_ids:
             ac = metadata.get("acceptance_criteria", {})
@@ -220,7 +237,8 @@ class TaskRecoveryMixin:
                 task_id,
             )
             await self._complete_with_merge(
-                task_id, passed=True,
+                task_id,
+                passed=True,
                 result={"overall_passed": True, "summary": "无评估指标，自动通过"},
             )
             return
@@ -244,7 +262,8 @@ class TaskRecoveryMixin:
                 task_id,
             )
             await self._complete_with_merge(
-                task_id, passed=True,
+                task_id,
+                passed=True,
                 result={"overall_passed": True, "summary": "所有指标已通过（历史记录）"},
             )
             return
@@ -268,9 +287,10 @@ class TaskRecoveryMixin:
         # 5. 运行评估
         timeout = float(metadata.get("eval_timeout", 600))
         logger.info(
-            "TaskWorker: 重新激活评估管道: task_id=%s, "
-            "remaining=%s, timeout=%ss",
-            task_id, remaining, timeout,
+            "TaskWorker: 重新激活评估管道: task_id=%s, remaining=%s, timeout=%ss",
+            task_id,
+            remaining,
+            timeout,
         )
 
         _idle_timer_cancelled = False
@@ -302,7 +322,8 @@ class TaskRecoveryMixin:
                 task_id,
             )
             await self._complete_with_merge(
-                task_id, passed=True,
+                task_id,
+                passed=True,
                 result={
                     "overall_passed": True,
                     "summary": result.summary,
@@ -319,16 +340,16 @@ class TaskRecoveryMixin:
                 },
             )
         else:
-            failed_metrics = [
-                r.metric_id for r in result.results if not r.passed
-            ]
+            failed_metrics = [r.metric_id for r in result.results if not r.passed]
             logger.warning(
-                "TaskWorker: 评估恢复完成（未通过）: task_id=%s, "
-                "failed=%s",
-                task_id, failed_metrics,
+                "TaskWorker: 评估恢复完成（未通过）: task_id=%s, failed=%s",
+                task_id,
+                failed_metrics,
             )
             await self._task_service.complete_evaluation(
-                task_id, passed=False, result={
+                task_id,
+                passed=False,
+                result={
                     "overall_passed": False,
                     "summary": result.summary,
                     "recovered": True,
@@ -346,7 +367,9 @@ class TaskRecoveryMixin:
             )
 
     def _build_recovery_input_params(  # noqa: PLR0912
-        self, task: Any, metric_ids: list[str],
+        self,
+        task: Any,
+        metric_ids: list[str],
     ) -> dict[str, dict[str, Any]]:
         """为评估恢复构建 input_params。
 
@@ -359,17 +382,16 @@ class TaskRecoveryMixin:
         ac = metadata.get("acceptance_criteria", {})
         if isinstance(ac, dict):
             _non_param_keys = {
-                "expected_output", "pass_threshold", "description",
+                "expected_output",
+                "pass_threshold",
+                "description",
             }
             for metric_id, config in ac.items():
                 if isinstance(config, dict) and metric_id in metric_ids:
                     if "input_params" in config:
                         params[metric_id] = config["input_params"]
                     else:
-                        params[metric_id] = {
-                            k: v for k, v in config.items()
-                            if k not in _non_param_keys
-                        }
+                        params[metric_id] = {k: v for k, v in config.items() if k not in _non_param_keys}
 
         # 解析 workspace
         workspace_abs: str | None = None

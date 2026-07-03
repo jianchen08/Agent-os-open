@@ -150,9 +150,7 @@ class YamlValidateTool(BuiltinTool):
             }
         )
 
-    def _validate_ui_scene(
-        self, data: dict, errors: list[str], warnings: list[str]
-    ) -> None:
+    def _validate_ui_scene(self, data: dict, errors: list[str], warnings: list[str]) -> None:
         """验证 UI 场景配置"""
         required = ["scene_id", "display_name"]
         for field in required:
@@ -173,9 +171,7 @@ class YamlValidateTool(BuiltinTool):
                     elif "action_type" not in action:
                         errors.append(f"quick_actions[{i}] 缺少 action_type 字段")
 
-    def _validate_agent(
-        self, data: dict, errors: list[str], warnings: list[str]
-    ) -> None:
+    def _validate_agent(self, data: dict, errors: list[str], warnings: list[str]) -> None:
         """验证 Agent 配置"""
         required = ["name"]
         for field in required:
@@ -186,9 +182,7 @@ class YamlValidateTool(BuiltinTool):
         if "tools" in data and not isinstance(data["tools"], list):
             errors.append("tools 必须是数组")
 
-    def _validate_workflow(
-        self, data: dict, errors: list[str], warnings: list[str]
-    ) -> None:
+    def _validate_workflow(self, data: dict, errors: list[str], warnings: list[str]) -> None:
         """验证工作流配置"""
         required = ["name"]
         for field in required:

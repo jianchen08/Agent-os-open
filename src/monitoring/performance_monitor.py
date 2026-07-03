@@ -236,7 +236,9 @@ class PerformanceMonitor:
 
         return ToolMetrics(
             execution_count=total_executions,
-            average_execution_time=self._tool_stats["total_execution_time"] / total_executions if total_executions > 0 else 0,
+            average_execution_time=self._tool_stats["total_execution_time"] / total_executions
+            if total_executions > 0
+            else 0,
             cache_hit_rate=self._tool_stats["cache_hits"] / total_cache if total_cache > 0 else 0,
             error_count=self._tool_stats["error_count"],
         )
@@ -258,15 +260,11 @@ class PerformanceMonitor:
             self._metrics_history[metric_type] = []
 
         # 记录指标
-        self._metrics_history[metric_type].append(
-            {"timestamp": time.time(), "metrics": metrics.model_dump()}
-        )
+        self._metrics_history[metric_type].append({"timestamp": time.time(), "metrics": metrics.model_dump()})
 
         # 限制历史记录长度
         if len(self._metrics_history[metric_type]) > self._max_history_size:
-            self._metrics_history[metric_type] = self._metrics_history[metric_type][
-                -self._max_history_size :
-            ]
+            self._metrics_history[metric_type] = self._metrics_history[metric_type][-self._max_history_size :]
 
     async def detect_bottlenecks(self):
         """检测性能瓶颈"""
@@ -286,7 +284,9 @@ class PerformanceMonitor:
 
         # 数据库瓶颈检测
         if db_metrics.active_connections > db_metrics.connection_pool_size * 0.8:
-            await self._trigger_alert("medium", f"数据库连接池使用率过高: {db_metrics.active_connections}/{db_metrics.connection_pool_size}")
+            await self._trigger_alert(
+                "medium", f"数据库连接池使用率过高: {db_metrics.active_connections}/{db_metrics.connection_pool_size}"
+            )
         if db_metrics.query_execution_time > 1.0:
             await self._trigger_alert("medium", f"数据库查询执行时间过长: {db_metrics.query_execution_time}秒")
 
@@ -357,9 +357,7 @@ class PerformanceMonitor:
         if self._llm_stats["active_requests"] > 0:
             self._llm_stats["active_requests"] -= 1
 
-    def record_tool_execution(
-        self, execution_time: float, cache_hit: bool = False, error: bool = False
-    ):
+    def record_tool_execution(self, execution_time: float, cache_hit: bool = False, error: bool = False):
         """记录工具执行"""
         self._tool_stats["execution_count"] += 1
         self._tool_stats["total_execution_time"] += execution_time
@@ -370,9 +368,7 @@ class PerformanceMonitor:
         if error:
             self._tool_stats["error_count"] += 1
 
-    def update_task_status(
-        self, pending: int, running: int, completed: int, task_time: float = 0
-    ):
+    def update_task_status(self, pending: int, running: int, completed: int, task_time: float = 0):
         """更新任务状态"""
         self._task_stats["pending_tasks"] = pending
         self._task_stats["running_tasks"] = running
@@ -380,9 +376,7 @@ class PerformanceMonitor:
         if task_time > 0:
             self._task_stats["total_task_time"] += task_time
 
-    def get_metrics_history(
-        self, metric_type: str, limit: int = 100
-    ) -> list[dict[str, Any]]:
+    def get_metrics_history(self, metric_type: str, limit: int = 100) -> list[dict[str, Any]]:
         """获取指标历史"""
         if metric_type not in self._metrics_history:
             return []
@@ -401,6 +395,7 @@ class PerformanceMonitor:
     def get_current_stats(self) -> dict[str, Any]:
         """获取当前统计信息（同步版本）"""
         import asyncio  # noqa: PLC0415
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():

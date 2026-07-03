@@ -104,6 +104,8 @@ def parse_frontend_message(raw_data: dict[str, Any]) -> PipelineMessage:
         pipeline_id=pipeline_id,
         thread_id=thread_id,
         client_message_id=client_message_id,
-        metadata=dict(data) if message_type in (MessageType.INTERACTION_RESPONSE, MessageType.CONTROL) else (data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}),
+        metadata=dict(data)
+        if message_type in (MessageType.INTERACTION_RESPONSE, MessageType.CONTROL)
+        else (data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}),
         attachments=data.get("attachments", []) if isinstance(data.get("attachments"), list) else [],
     )

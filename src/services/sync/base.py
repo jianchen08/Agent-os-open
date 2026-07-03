@@ -229,9 +229,7 @@ class YamlConfigSyncService(ABC):
 
         # 查询数据库
         entity_id_column = getattr(entity_class, entity_id_field)
-        result = await session.execute(
-            select(entity_class).where(entity_id_column == config_id)
-        )
+        result = await session.execute(select(entity_class).where(entity_id_column == config_id))
         entity = result.scalar_one_or_none()
 
         # 检查是否需要更新

@@ -101,17 +101,13 @@ class VSCodeConnector(BaseConnector, ConfigSubscriberMixin):
                 available = self._channel.is_available()
                 if available:
                     self._set_state(ConnectorState.CONNECTED)
-                    self._logger.info(
-                        f"VSCode 连接成功 ({self._host}:{self._port})"
-                    )
+                    self._logger.info(f"VSCode 连接成功 ({self._host}:{self._port})")
                     return
                 msg = f"VSCode 扩展不可用 (尝试 {attempt}/{MAX_RETRIES})"
                 raise ConnectionError(msg)
             except Exception as e:
                 last_error = e
-                self._logger.warning(
-                    f"VSCode 连接失败 (尝试 {attempt}/{MAX_RETRIES}): {e}"
-                )
+                self._logger.warning(f"VSCode 连接失败 (尝试 {attempt}/{MAX_RETRIES}): {e}")
                 if attempt < MAX_RETRIES:
                     delay = BASE_RETRY_DELAY * (2 ** (attempt - 1))
                     self._logger.info(f"等待 {delay:.1f} 秒后重试...")
@@ -223,7 +219,10 @@ class VSCodeConnector(BaseConnector, ConfigSubscriberMixin):
         )
 
     def _on_config_changed(
-        self, event_type: str, file_path: str, context: dict[str, Any],
+        self,
+        event_type: str,
+        file_path: str,
+        context: dict[str, Any],
     ) -> None:
         """配置变更回调：记录日志。
 
@@ -233,5 +232,7 @@ class VSCodeConnector(BaseConnector, ConfigSubscriberMixin):
             context: 变更上下文
         """
         self._logger.info(
-            "VSCode 配置变更: event=%s, path=%s", event_type, file_path,
+            "VSCode 配置变更: event=%s, path=%s",
+            event_type,
+            file_path,
         )

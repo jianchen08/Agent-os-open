@@ -86,11 +86,7 @@ class OperationLog:
             sequence=data.get("sequence", 0),
             status=OperationStatus(data.get("status", "executed")),
             error_message=data.get("error_message"),
-            created_at=(
-                datetime.fromisoformat(data["created_at"])
-                if "created_at" in data
-                else datetime.now()
-            ),
+            created_at=(datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now()),
         )
 
 
@@ -125,11 +121,7 @@ class Checkpoint:
             name=data.get("name"),
             description=data.get("description"),
             metadata=data.get("metadata", {}),
-            created_at=(
-                datetime.fromisoformat(data["created_at"])
-                if "created_at" in data
-                else datetime.now()
-            ),
+            created_at=(datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now()),
         )
 
 

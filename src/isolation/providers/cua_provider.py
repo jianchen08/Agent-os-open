@@ -80,9 +80,7 @@ class CuaProvider(IsolationProvider):
                 return False, "Docker 响应超时。请检查 Docker 服务状态"
             return False, f"Docker 不可用: {error_msg}"
 
-    async def create_environment(
-        self, context: IsolationContext
-    ) -> IsolationEnvironment:
+    async def create_environment(self, context: IsolationContext) -> IsolationEnvironment:
         """创建 Docker 容器环境
 
         Args:
@@ -175,9 +173,7 @@ class CuaProvider(IsolationProvider):
         except Exception as e:
             logger.error(f"销毁环境失败: {e}", exc_info=True)
 
-    async def execute_in_environment(
-        self, env_id: str, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:
         """在容器中执行操作
 
         Args:
@@ -219,9 +215,7 @@ class CuaProvider(IsolationProvider):
                 error=f"执行失败: {str(e)}",
             )
 
-    async def _execute_command(
-        self, container, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_command(self, container, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Shell 命令
 
         Args:
@@ -275,9 +269,7 @@ class CuaProvider(IsolationProvider):
                 error=f"执行命令失败: {str(e)}",
             )
 
-    async def _execute_python_code(
-        self, container, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_python_code(self, container, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Python 代码
 
         Args:
@@ -299,13 +291,9 @@ class CuaProvider(IsolationProvider):
         # 使用 -c 参数执行代码
         command = f'python -c "{code.replace(chr(34), chr(39))}"'
 
-        return await self._execute_command(
-            container, {"type": "command", "command": command}
-        )
+        return await self._execute_command(container, {"type": "command", "command": command})
 
-    async def _execute_file_op(
-        self, container, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def _execute_file_op(self, container, operation: dict[str, Any]) -> ExecutionResult:
         """执行文件操作
 
         Args:
@@ -378,9 +366,7 @@ class CuaProvider(IsolationProvider):
                     "dead": EnvironmentStatus.ERROR.value,
                 }
 
-                return EnvironmentStatus(
-                    status_map.get(container_status, EnvironmentStatus.READY.value)
-                )
+                return EnvironmentStatus(status_map.get(container_status, EnvironmentStatus.READY.value))
 
         except Exception:
             pass

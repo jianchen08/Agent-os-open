@@ -78,20 +78,25 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         if not self._config.enabled or not self._config.notify_request:
             return False
         title = _extract_title(request)
-        body = _build_request_body(
-            _extract_mode(request), _extract_description(request)
-        )
+        body = _build_request_body(_extract_mode(request), _extract_description(request))
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
             asyncio.ensure_future(play_alert_sound())
         return await send_notification(
-            title=title, message=body,
-            sound=self._config.sound, app_name=self._config.app_name,
+            title=title,
+            message=body,
+            sound=self._config.sound,
+            app_name=self._config.app_name,
         )
 
     async def notify_timeout_reminder(
-        self, request_id: str, remaining_seconds: int, thread_id: str = "",
-        *, title: str = "", mode: str = "",
+        self,
+        request_id: str,
+        remaining_seconds: int,
+        thread_id: str = "",
+        *,
+        title: str = "",
+        mode: str = "",
         options: list[dict] | None = None,
         questions: list[str] | None = None,
     ) -> bool:
@@ -106,12 +111,11 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         return await send_notification(
             title="超时提醒",
             message=f"「{display_title}」将在 {time_str} 后超时",
-            sound=self._config.sound, app_name=self._config.app_name,
+            sound=self._config.sound,
+            app_name=self._config.app_name,
         )
 
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
         if not self._config.enabled or not self._config.notify_cancel:
             return False
         body = f"请求 {request_id[:8]} 已取消"
@@ -121,8 +125,10 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         if self._config.sound:
             asyncio.ensure_future(play_alert_sound())
         return await send_notification(
-            title="请求已取消", message=body,
-            sound=self._config.sound, app_name=self._config.app_name,
+            title="请求已取消",
+            message=body,
+            sound=self._config.sound,
+            app_name=self._config.app_name,
         )
 
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
@@ -132,26 +138,34 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         if self._config.sound:
             asyncio.ensure_future(play_alert_sound())
         return await send_notification(
-            title="请求已超时", message=f"请求 {request_id[:8]} 已超时",
-            sound=self._config.sound, app_name=self._config.app_name,
+            title="请求已超时",
+            message=f"请求 {request_id[:8]} 已超时",
+            sound=self._config.sound,
+            app_name=self._config.app_name,
         )
 
     async def notify_conversation_start(
-        self, thread_id: str, tab_id: str, title: str,
-        request_id: str = "", initial_message: str | None = None,
+        self,
+        thread_id: str,
+        tab_id: str,
+        title: str,
+        request_id: str = "",
+        initial_message: str | None = None,
         suggestions: list[str] | None = None,
     ) -> bool:
         if not self._config.enabled or not self._config.notify_conversation_start:
             return False
         body = title
         if initial_message:
-            body += f"：{initial_message[:self._config.max_message_length]}"
+            body += f"：{initial_message[: self._config.max_message_length]}"
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
             asyncio.ensure_future(play_alert_sound())
         return await send_notification(
-            title="对话已开启", message=body,
-            sound=self._config.sound, app_name=self._config.app_name,
+            title="对话已开启",
+            message=body,
+            sound=self._config.sound,
+            app_name=self._config.app_name,
         )
 
 
@@ -189,14 +203,12 @@ def install_hook() -> None:
                 return
 
             # 解包已有 CompositeNotifier，防止嵌套包装
-            existing_notifiers = getattr(notifier, '_notifiers', [notifier])
+            existing_notifiers = getattr(notifier, "_notifiers", [notifier])
             non_desktop = [n for n in existing_notifiers if not isinstance(n, DesktopInteractionNotifier)]
             desktop = DesktopInteractionNotifier(config)
             composite = CompositeNotifier(*non_desktop, desktop)
             _original_set_notifier(self, composite)
-            logger.info(
-                "Desktop notification hook installed (signal → OS notifier)"
-            )
+            logger.info("Desktop notification hook installed (signal → OS notifier)")
 
         HumanInteractionService.set_notifier = _patched_set_notifier  # type: ignore[assignment]
         _hooked = True
@@ -217,21 +229,13 @@ install_hook()
 
 def _extract_title(request: Any) -> str:
     if isinstance(request, dict):
-        return (
-            request.get("message_data", {}).get("title")
-            or request.get("title")
-            or "人机交互请求"
-        )
+        return request.get("message_data", {}).get("title") or request.get("title") or "人机交互请求"
     return getattr(request, "title", None) or "人机交互请求"
 
 
 def _extract_description(request: Any) -> str:
     if isinstance(request, dict):
-        return (
-            request.get("message_data", {}).get("description")
-            or request.get("description")
-            or ""
-        )
+        return request.get("message_data", {}).get("description") or request.get("description") or ""
     return getattr(request, "description", "")
 
 

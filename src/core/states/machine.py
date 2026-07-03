@@ -106,8 +106,7 @@ class StateMachine(Generic[T]):
         if not self.can_transition(from_state, to_state):
             valid = self.get_valid_transitions(from_state)
             raise ValueError(
-                f"非法状态转换: {from_state.value} -> {to_state.value}。"
-                f"当前状态可转换为: {[s.value for s in valid]}"
+                f"非法状态转换: {from_state.value} -> {to_state.value}。当前状态可转换为: {[s.value for s in valid]}"
             )
 
         # 创建状态变更事件

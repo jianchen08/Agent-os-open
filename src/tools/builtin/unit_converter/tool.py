@@ -4,29 +4,30 @@
 支持长度、重量、温度等常见单位的相互转换
 """
 
+
 class UnitConverter:
     """单位换算器类"""
 
     # 长度单位转换（以米为基准）
     LENGTH_TO_METER = {
-        'm': 1.0,           # 米
-        'km': 1000.0,       # 千米
-        'cm': 0.01,         # 厘米
-        'mm': 0.001,        # 毫米
-        'mi': 1609.344,     # 英里
-        'yd': 0.9144,       # 码
-        'ft': 0.3048,       # 英尺
-        'in': 0.0254,       # 英寸
+        "m": 1.0,  # 米
+        "km": 1000.0,  # 千米
+        "cm": 0.01,  # 厘米
+        "mm": 0.001,  # 毫米
+        "mi": 1609.344,  # 英里
+        "yd": 0.9144,  # 码
+        "ft": 0.3048,  # 英尺
+        "in": 0.0254,  # 英寸
     }
 
     # 重量单位转换（以千克为基准）
     WEIGHT_TO_KG = {
-        'kg': 1.0,          # 千克
-        'g': 0.001,         # 克
-        'mg': 0.000001,     # 毫克
-        'lb': 0.453592,     # 磅
-        'oz': 0.0283495,    # 盎司
-        't': 1000.0,        # 吨
+        "kg": 1.0,  # 千克
+        "g": 0.001,  # 克
+        "mg": 0.000001,  # 毫克
+        "lb": 0.453592,  # 磅
+        "oz": 0.0283495,  # 盎司
+        "t": 1000.0,  # 吨
     }
 
     @staticmethod
@@ -66,32 +67,32 @@ class UnitConverter:
         to_unit = to_unit.upper()
 
         # 先转换为摄氏度
-        if from_unit == 'C':
+        if from_unit == "C":
             celsius = value
-        elif from_unit == 'F':
+        elif from_unit == "F":
             celsius = (value - 32) * 5 / 9
-        elif from_unit == 'K':
+        elif from_unit == "K":
             celsius = value - 273.15
         else:
             raise ValueError(f"不支持的温度单位: {from_unit}")
 
         # 从摄氏度转换到目标单位
-        if to_unit == 'C':
+        if to_unit == "C":
             return celsius
-        if to_unit == 'F':
+        if to_unit == "F":
             return celsius * 9 / 5 + 32
-        if to_unit == 'K':
+        if to_unit == "K":
             return celsius + 273.15
         raise ValueError(f"不支持的温度单位: {to_unit}")
 
     @classmethod
-    def convert(cls, value: float, from_unit: str, to_unit: str, category: str = 'length') -> float:
+    def convert(cls, value: float, from_unit: str, to_unit: str, category: str = "length") -> float:
         """通用转换接口"""
-        if category == 'length':
+        if category == "length":
             return cls.convert_length(value, from_unit, to_unit)
-        if category == 'weight':
+        if category == "weight":
             return cls.convert_weight(value, from_unit, to_unit)
-        if category == 'temperature':
+        if category == "temperature":
             return cls.convert_temperature(value, from_unit, to_unit)
         raise ValueError(f"不支持的类别: {category}")
 
@@ -111,19 +112,19 @@ def main():
     converter = UnitConverter()
 
     # 长度转换示例
-    result = converter.convert_length(100, 'm', 'km')
+    result = converter.convert_length(100, "m", "km")
     print(f"  100米 = {result}千米")
 
     # 重量转换示例
-    result = converter.convert_weight(1, 'kg', 'lb')
+    result = converter.convert_weight(1, "kg", "lb")
     print(f"  1千克 = {result:.4f}磅")
 
     # 温度转换示例
-    result = converter.convert_temperature(100, 'C', 'F')
+    result = converter.convert_temperature(100, "C", "F")
     print(f"  100摄氏度 = {result}华氏度")
 
     print("\n" + "=" * 50)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

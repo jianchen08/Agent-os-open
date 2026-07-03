@@ -108,7 +108,9 @@ class ToolSchemaPlugin(IInputPlugin):
         dynamic_names = tool_registry.get_dynamic_tool_names()
         logger.debug(
             "[%s] registry_id=%s dynamic_names=%s",
-            self.name, id(tool_registry), dynamic_names,
+            self.name,
+            id(tool_registry),
+            dynamic_names,
         )
         if dynamic_names:
             active_tool_ids = list(set(active_tool_ids) | dynamic_names)
@@ -118,6 +120,7 @@ class ToolSchemaPlugin(IInputPlugin):
         if active_tool_ids:
             try:
                 from tools.loader import get_dynamic_tool_loader  # noqa: PLC0415
+
                 dyn_loader = get_dynamic_tool_loader()
                 if dyn_loader is not None:
                     dyn_loader.ensure_loaded_sync(active_tool_ids)
@@ -151,7 +154,9 @@ class ToolSchemaPlugin(IInputPlugin):
                 except Exception as exc:
                     logger.debug(
                         "[%s] Schema enrichment failed for %s: %s",
-                        self.name, tool.name, exc,
+                        self.name,
+                        tool.name,
+                        exc,
                     )
                     llm_format = tool.to_llm_format(agent_level=agent_level)
             else:
@@ -169,7 +174,9 @@ class ToolSchemaPlugin(IInputPlugin):
 
         logger.debug(
             "[%s] Tool schemas injected | count=%d | desc=%s",
-            self.name, len(schemas), self._include_desc,
+            self.name,
+            len(schemas),
+            self._include_desc,
         )
 
         return result
@@ -200,10 +207,7 @@ class ToolSchemaPlugin(IInputPlugin):
         """
         from pipeline.types import StateKeys  # noqa: PLC0415
 
-        raw_level = (
-            ctx.state.get(StateKeys.AGENT_LEVEL)
-            or ctx.state.get("context.agent_level", "")
-        )
+        raw_level = ctx.state.get(StateKeys.AGENT_LEVEL) or ctx.state.get("context.agent_level", "")
         if raw_level:
             level_str = str(raw_level).upper().lstrip("L")
             try:

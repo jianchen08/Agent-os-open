@@ -110,8 +110,7 @@ def resolve_view_mode(
 
     # 4. 默认降级
     logger.debug(
-        "[ViewRouter] 无法确定视图模式，使用默认 text_diff | "
-        "explicit=%s types=%s first=%s",
+        "[ViewRouter] 无法确定视图模式，使用默认 text_diff | explicit=%s types=%s first=%s",
         explicit_mode,
         artifact_types,
         first_artifact_type,
@@ -138,12 +137,14 @@ def get_artifact_view_hints(
         - supports_timeline: 是否支持时间轴
     """
     view_mode = _ARTIFACT_TYPE_TO_VIEW_MODE.get(
-        artifact_type, _DEFAULT_VIEW_MODE,
+        artifact_type,
+        _DEFAULT_VIEW_MODE,
     )
 
     hints: dict[str, Any] = {
         "view_mode": view_mode.value,
-        "supports_annotations": view_mode in (
+        "supports_annotations": view_mode
+        in (
             ViewMode.IMAGE_ANNOTATION,
             ViewMode.MEDIA_TIMELINE,
         ),

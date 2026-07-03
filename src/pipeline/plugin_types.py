@@ -61,9 +61,7 @@ class PluginTypeSlot:
         if namespace not in self._enums:
             self._enums[namespace] = {}
         if name in self._enums[namespace]:
-            raise ValueError(
-                f"Enum '{namespace}.{name}' already registered"
-            )
+            raise ValueError(f"Enum '{namespace}.{name}' already registered")
         self._enums[namespace][name] = list(values)
 
     def register_constant(self, namespace: str, key: str, value: Any) -> None:
@@ -80,9 +78,7 @@ class PluginTypeSlot:
         if namespace not in self._constants:
             self._constants[namespace] = {}
         if key in self._constants[namespace]:
-            raise ValueError(
-                f"Constant '{namespace}.{key}' already registered"
-            )
+            raise ValueError(f"Constant '{namespace}.{key}' already registered")
         self._constants[namespace][key] = value
 
     def register_state_key(self, namespace: str, key: str, default: Any = None) -> None:
@@ -101,9 +97,7 @@ class PluginTypeSlot:
         if namespace not in self._state_keys:
             self._state_keys[namespace] = {}
         if key in self._state_keys[namespace]:
-            raise ValueError(
-                f"State key '{namespace}.{key}' already registered"
-            )
+            raise ValueError(f"State key '{namespace}.{key}' already registered")
         self._state_keys[namespace][key] = default
 
     def register_handler(self, namespace: str, name: str, handler: Callable[..., Any]) -> None:
@@ -120,9 +114,7 @@ class PluginTypeSlot:
         if namespace not in self._handlers:
             self._handlers[namespace] = {}
         if name in self._handlers[namespace]:
-            raise ValueError(
-                f"Handler '{namespace}.{name}' already registered"
-            )
+            raise ValueError(f"Handler '{namespace}.{name}' already registered")
         self._handlers[namespace][name] = handler
 
     # ── 读取 API ──────────────────────────────────────────
@@ -235,8 +227,5 @@ class PluginTypeSlot:
             "constants": dict(self._constants.get(namespace, {})),
             "enums": dict(self._enums.get(namespace, {})),
             "state_keys": dict(self._state_keys.get(namespace, {}).items()),
-            "handlers": {
-                k: repr(v)
-                for k, v in self._handlers.get(namespace, {}).items()
-            },
+            "handlers": {k: repr(v) for k, v in self._handlers.get(namespace, {}).items()},
         }

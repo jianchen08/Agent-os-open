@@ -55,9 +55,7 @@ class HostProvider(IsolationProvider):
         """
         return True, None
 
-    async def create_environment(
-        self, context: IsolationContext
-    ) -> IsolationEnvironment:
+    async def create_environment(self, context: IsolationContext) -> IsolationEnvironment:
         """创建虚拟环境"""
         now = datetime.now(UTC)
 
@@ -94,16 +92,11 @@ class HostProvider(IsolationProvider):
             return
 
         if not success:
-            logger.warning(
-                f"[HostProvider] host 任务失败，工作区回滚由 git 层处理 | "
-                f"task_id={env.context.task_id}"
-            )
+            logger.warning(f"[HostProvider] host 任务失败，工作区回滚由 git 层处理 | task_id={env.context.task_id}")
 
         self._environments.pop(env_id, None)
 
-    async def execute_in_environment(
-        self, env_id: str, operation: dict[str, Any]
-    ) -> ExecutionResult:
+    async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:
         """在宿主机上执行操作"""
         # 获取环境上下文
         env = self._environments.get(env_id)
@@ -157,9 +150,7 @@ class HostProvider(IsolationProvider):
 
             try:
                 # 等待完成，带超时
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=timeout
-                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
 
                 # 解码输出
                 stdout_text = stdout.decode("utf-8", errors="replace")
@@ -309,9 +300,7 @@ class HostProvider(IsolationProvider):
             return EnvironmentStatus.STOPPED
         return EnvironmentStatus(env.status)
 
-    def _check_workspace_permission(
-        self, path: str, workspace: str
-    ) -> tuple[bool, str | None]:
+    def _check_workspace_permission(self, path: str, workspace: str) -> tuple[bool, str | None]:
         """检查路径是否在 workspace 范围内"""
         try:
             # 标准化路径
@@ -327,13 +316,9 @@ class HostProvider(IsolationProvider):
 
             # 不在 workspace 内
             error_msg = (
-                f"权限拒绝：路径 '{path}' 不在工作目录 '{workspace}' 内。"
-                f"HOST 模式只能操作指定工作目录下的文件。"
+                f"权限拒绝：路径 '{path}' 不在工作目录 '{workspace}' 内。HOST 模式只能操作指定工作目录下的文件。"
             )
-            logger.warning(
-                f"[HostProvider] 权限检查失败 | "
-                f"path={path} | workspace={workspace}"
-            )
+            logger.warning(f"[HostProvider] 权限检查失败 | path={path} | workspace={workspace}")
             return False, error_msg
 
         except Exception as e:

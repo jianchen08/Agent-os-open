@@ -22,15 +22,17 @@ from pydantic import BaseModel
 
 class BashAction(str, Enum):
     """Bash 工具操作类型"""
-    EXECUTE = "execute"      # 执行新命令
-    CONTINUE = "continue"    # 继续运行中的命令
+
+    EXECUTE = "execute"  # 执行新命令
+    CONTINUE = "continue"  # 继续运行中的命令
     TERMINATE = "terminate"  # 终止运行中的命令
-    INPUT = "input"          # 向运行中的进程发送输入
-    READ_LOG = "read_log"    # 读取命令日志
+    INPUT = "input"  # 向运行中的进程发送输入
+    READ_LOG = "read_log"  # 读取命令日志
 
 
 class OutputType(str, Enum):
     """输出类型检测"""
+
     NPM_INSTALL = "npm_install"
     PIP_INSTALL = "pip_install"
     DOCKER_BUILD = "docker_build"
@@ -54,14 +56,15 @@ class LogCompressorConfig(BaseModel):
     """
 
     compress_threshold: int = 1000  # 压缩阈值（行数）
-    recent_lines: int = 10           # 最近行数
-    show_errors: bool = True          # 是否显示错误列表
-    dedup_errors: bool = True        # 是否合并重复错误
+    recent_lines: int = 10  # 最近行数
+    show_errors: bool = True  # 是否显示错误列表
+    dedup_errors: bool = True  # 是否合并重复错误
 
 
 @dataclass
 class OutputSummary:
     """输出摘要"""
+
     lines: list[str] = field(default_factory=list)
     output_type: OutputType = OutputType.GENERAL
     total_lines: int = 0
@@ -74,6 +77,7 @@ class OutputSummary:
 @dataclass
 class ProcessInfo:
     """进程信息"""
+
     pid: int
     command: str
     start_time: float

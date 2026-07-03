@@ -113,11 +113,15 @@ class StopCheckPlugin(IOutputPlugin):
         elapsed = time.monotonic() - self._start_time
         raw_tc_count = len(ctx.state.get(StateKeys.RAW_TOOL_CALLS, []))
         logger.debug(
-            "[%s] pipeline=%s iter=%d max_iter=%d elapsed=%.1f/%d "
-            "raw_tool_calls=%d start_time=%.2f",
-            self.name, pipeline_id, iteration,
-            self._max_iterations, elapsed, self._max_duration,
-            raw_tc_count, self._start_time,
+            "[%s] pipeline=%s iter=%d max_iter=%d elapsed=%.1f/%d raw_tool_calls=%d start_time=%.2f",
+            self.name,
+            pipeline_id,
+            iteration,
+            self._max_iterations,
+            elapsed,
+            self._max_duration,
+            raw_tc_count,
+            self._start_time,
         )
 
         # 1. 用户请求停止
@@ -126,7 +130,8 @@ class StopCheckPlugin(IOutputPlugin):
             return {
                 "router.stop_reason": "user_requested",
                 "__route_signal__": RouteSignal(
-                    route_type="end", reason="User requested stop",
+                    route_type="end",
+                    reason="User requested stop",
                 ),
             }
 
@@ -134,7 +139,9 @@ class StopCheckPlugin(IOutputPlugin):
         if self._max_iterations != -1 and iteration > self._max_iterations:
             logger.warning(
                 "[%s] Max iterations reached: %d > %d",
-                self.name, iteration, self._max_iterations,
+                self.name,
+                iteration,
+                self._max_iterations,
             )
             return {
                 "router.stop_reason": "max_iterations",
@@ -148,7 +155,9 @@ class StopCheckPlugin(IOutputPlugin):
         if self._max_duration != -1 and elapsed > self._max_duration:
             logger.warning(
                 "[%s] Execution timeout: %.1f > %d seconds",
-                self.name, elapsed, self._max_duration,
+                self.name,
+                elapsed,
+                self._max_duration,
             )
             return {
                 "router.stop_reason": "timeout",
@@ -210,7 +219,9 @@ class StopCheckPlugin(IOutputPlugin):
             if result in ("completed", "failed"):
                 message = metadata.get("message", f"task_evaluate: {result}")
                 logger.info(
-                    "[%s] task_evaluate result: %s", self.name, result,
+                    "[%s] task_evaluate result: %s",
+                    self.name,
+                    result,
                 )
                 return {
                     "router.stop_reason": f"task_evaluate_{result}",
@@ -287,15 +298,18 @@ class StopCheckPlugin(IOutputPlugin):
 
             if status in self._TERMINAL_STATUSES:
                 logger.info(
-                    "[%s] Task actual status is terminal: %s "
-                    "(task=%s, detected via task_service query, iter=%d)",
-                    self.name, status, task_id, iteration,
+                    "[%s] Task actual status is terminal: %s (task=%s, detected via task_service query, iter=%d)",
+                    self.name,
+                    status,
+                    task_id,
+                    iteration,
                 )
                 return status
         except Exception as exc:
             logger.debug(
                 "[%s] Failed to query task actual status: %s",
-                self.name, exc,
+                self.name,
+                exc,
             )
 
         return ""
@@ -324,4 +338,3 @@ class StopCheckPlugin(IOutputPlugin):
         if pipeline_id and pipeline_id != getattr(self, "_last_pipeline_id", None):
             self._start_time = time.monotonic()
             self._last_pipeline_id = pipeline_id
-

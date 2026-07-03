@@ -67,7 +67,9 @@ async def transcribe_audio(
     mime_type = file.content_type or "audio/webm"
     logger.info(
         "[ASR Route] 收到转写请求: filename=%s, mime=%s, size=%d",
-        file.filename, mime_type, len(audio_bytes),
+        file.filename,
+        mime_type,
+        len(audio_bytes),
     )
 
     try:

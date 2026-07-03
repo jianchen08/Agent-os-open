@@ -199,10 +199,7 @@ class RollbackManager:
                 self._operations[task_id] = []
             self._operations[task_id].append(operation)
 
-        logger.debug(
-            f"记录操作: {operation.id} (任务: {task_id}, "
-            f"工具: {tool_name}, 类型: {operation_type.value})"
-        )
+        logger.debug(f"记录操作: {operation.id} (任务: {task_id}, 工具: {tool_name}, 类型: {operation_type.value})")
         return operation.id
 
     async def get_operation(self, operation_id: str) -> OperationLog | None:
@@ -250,9 +247,7 @@ class RollbackManager:
         if checkpoint_id:
             checkpoint = await self.get_checkpoint(checkpoint_id)
             if checkpoint:
-                operations = [
-                    op for op in operations if op.created_at >= checkpoint.created_at
-                ]
+                operations = [op for op in operations if op.created_at >= checkpoint.created_at]
 
         # 筛选状态
         if status:
@@ -283,9 +278,7 @@ class RollbackManager:
         result = RollbackResult()
 
         # 获取需要回滚的操作
-        operations = await self._get_operations_to_rollback(
-            task_id, to_checkpoint, steps
-        )
+        operations = await self._get_operations_to_rollback(task_id, to_checkpoint, steps)
 
         if not operations:
             result.warnings.append("没有需要回滚的操作")
@@ -319,8 +312,7 @@ class RollbackManager:
         result.success = result.failed_count == 0
 
         logger.info(
-            f"回滚完成: 成功 {result.rolled_back_count}, "
-            f"跳过 {result.skipped_count}, 失败 {result.failed_count}"
+            f"回滚完成: 成功 {result.rolled_back_count}, 跳过 {result.skipped_count}, 失败 {result.failed_count}"
         )
 
         return result
@@ -333,26 +325,20 @@ class RollbackManager:
     ) -> list[OperationLog]:
         """获取需要回滚的操作列表"""
         # 获取所有已执行的操作
-        operations = await self.list_operations(
-            task_id, status=OperationStatus.EXECUTED
-        )
+        operations = await self.list_operations(task_id, status=OperationStatus.EXECUTED)
 
         if to_checkpoint:
             # 回滚到检查点
             checkpoint = await self.get_checkpoint(to_checkpoint)
             if checkpoint:
-                operations = [
-                    op for op in operations if op.created_at > checkpoint.created_at
-                ]
+                operations = [op for op in operations if op.created_at > checkpoint.created_at]
         elif steps:
             # 回滚最近 N 步
             operations = operations[-steps:]
 
         return operations
 
-    async def _rollback_single_operation(
-        self, operation: OperationLog
-    ) -> dict[str, Any]:
+    async def _rollback_single_operation(self, operation: OperationLog) -> dict[str, Any]:
         """回滚单个操作"""
         # 检查是否可逆
         if not operation.reversible:
@@ -378,9 +364,7 @@ class RollbackManager:
             result = await reverser.reverse(operation)
 
             if result["success"]:
-                await self._update_operation_status(
-                    operation.id, OperationStatus.ROLLED_BACK
-                )
+                await self._update_operation_status(operation.id, OperationStatus.ROLLED_BACK)
 
             return result
 
@@ -391,9 +375,7 @@ class RollbackManager:
                 "message": f"逆操作执行异常: {str(e)}",
             }
 
-    async def _update_operation_status(
-        self, operation_id: str, status: OperationStatus
-    ) -> None:
+    async def _update_operation_status(self, operation_id: str, status: OperationStatus) -> None:
         """更新操作状态"""
         if self.session:
             await self._update_operation_status_in_db(operation_id, status)
@@ -432,9 +414,7 @@ class RollbackManager:
         """从数据库加载检查点"""
         from src.db.models import RollbackCheckpoint  # noqa: PLC0415
 
-        result = await self.session.execute(
-            select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id)
-        )
+        result = await self.session.execute(select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id))
         db_checkpoint = result.scalar_one_or_none()
 
         if db_checkpoint:
@@ -475,9 +455,7 @@ class RollbackManager:
         """从数据库删除检查点"""
         from src.db.models import RollbackCheckpoint  # noqa: PLC0415
 
-        result = await self.session.execute(
-            select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id)
-        )
+        result = await self.session.execute(select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id))
         db_checkpoint = result.scalar_one_or_none()
 
         if db_checkpoint:
@@ -513,9 +491,7 @@ class RollbackManager:
         """从数据库加载操作日志"""
         from src.db.models import RollbackOperationLog  # noqa: PLC0415
 
-        result = await self.session.execute(
-            select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id)
-        )
+        result = await self.session.execute(select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id))
         db_op = result.scalar_one_or_none()
 
         if db_op:
@@ -548,17 +524,13 @@ class RollbackManager:
         """从数据库列出操作日志"""
         from src.db.models import RollbackOperationLog  # noqa: PLC0415
 
-        query = select(RollbackOperationLog).where(
-            RollbackOperationLog.task_id == task_id
-        )
+        query = select(RollbackOperationLog).where(RollbackOperationLog.task_id == task_id)
 
         if checkpoint_id:
             # 获取检查点时间
             checkpoint = await self.get_checkpoint(checkpoint_id)
             if checkpoint:
-                query = query.where(
-                    RollbackOperationLog.created_at >= checkpoint.created_at
-                )
+                query = query.where(RollbackOperationLog.created_at >= checkpoint.created_at)
 
         if status:
             query = query.where(RollbackOperationLog.status == status.value)
@@ -590,15 +562,11 @@ class RollbackManager:
             for op in db_operations
         ]
 
-    async def _update_operation_status_in_db(
-        self, operation_id: str, status: OperationStatus
-    ) -> None:
+    async def _update_operation_status_in_db(self, operation_id: str, status: OperationStatus) -> None:
         """更新数据库中的操作状态"""
         from src.db.models import RollbackOperationLog  # noqa: PLC0415
 
-        result = await self.session.execute(
-            select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id)
-        )
+        result = await self.session.execute(select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id))
         db_op = result.scalar_one_or_none()
 
         if db_op:

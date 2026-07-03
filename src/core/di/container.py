@@ -191,9 +191,7 @@ class Container:
         Returns:
             容器实例
         """
-        return self.register(
-            service_name, service_type, ServiceLifetime.SINGLETON, factory
-        )
+        return self.register(service_name, service_type, ServiceLifetime.SINGLETON, factory)
 
     def register_transient(
         self,
@@ -212,9 +210,7 @@ class Container:
         Returns:
             容器实例
         """
-        return self.register(
-            service_name, service_type, ServiceLifetime.TRANSIENT, factory
-        )
+        return self.register(service_name, service_type, ServiceLifetime.TRANSIENT, factory)
 
     def register_scoped(
         self,
@@ -233,9 +229,7 @@ class Container:
         Returns:
             容器实例
         """
-        return self.register(
-            service_name, service_type, ServiceLifetime.SCOPED, factory
-        )
+        return self.register(service_name, service_type, ServiceLifetime.SCOPED, factory)
 
     def get(self, service_name: str) -> Any:
         """
@@ -296,9 +290,7 @@ class Container:
     def _get_scoped(self, service_name: str, descriptor: ServiceDescriptor) -> Any:
         """获取作用域实例"""
         if self._current_scope is None:
-            raise ServiceValidationError(
-                "Cannot resolve scoped service outside of a scope"
-            )
+            raise ServiceValidationError("Cannot resolve scoped service outside of a scope")
 
         scope_cache = self._scopes.get(self._current_scope, {})
 
@@ -377,11 +369,7 @@ class Container:
 
         # 解析构造参数
         sig = inspect.signature(constructor)
-        params = [
-            p
-            for p in sig.parameters.values()
-            if p.name != "self" and p.kind != inspect.Parameter.VAR_KEYWORD
-        ]
+        params = [p for p in sig.parameters.values() if p.name != "self" and p.kind != inspect.Parameter.VAR_KEYWORD]
 
         kwargs = {}
         for param in params:
@@ -395,9 +383,7 @@ class Container:
                 kwargs[param.name] = dependency
             elif param.default == inspect.Parameter.empty:
                 # 必需参数但无法解析
-                logger.warning(
-                    f"Cannot resolve dependency {param.name} for {service_type.__name__}"
-                )
+                logger.warning(f"Cannot resolve dependency {param.name} for {service_type.__name__}")
 
         return service_type(**kwargs)
 
@@ -413,9 +399,7 @@ class Container:
         """
         # 查找匹配的服务
         for name, descriptor in self._services.items():
-            if descriptor.service_type == service_type or issubclass(
-                descriptor.service_type, service_type
-            ):
+            if descriptor.service_type == service_type or issubclass(descriptor.service_type, service_type):
                 return self.get(name)
 
         return None
@@ -519,9 +503,7 @@ class Container:
                 hook = self._init_hooks[service_name]
                 if inspect.iscoroutinefunction(hook):
                     # 异步钩子需要特殊处理
-                    logger.warning(
-                        f"Init hook for {service_name} is async but called synchronously"
-                    )
+                    logger.warning(f"Init hook for {service_name} is async but called synchronously")
                 else:
                     hook(instance)
             except Exception as e:
@@ -563,6 +545,4 @@ class Container:
         Returns:
             服务名称到类型名称的映射
         """
-        return {
-            name: desc.service_type.__name__ for name, desc in self._services.items()
-        }
+        return {name: desc.service_type.__name__ for name, desc in self._services.items()}

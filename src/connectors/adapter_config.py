@@ -69,9 +69,10 @@ def load_adapter_configs(
 
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+
         rel = str(path).replace("\\", "/")
         if "config/" in rel:
-            rel = rel[rel.index("config/") + len("config/"):]
+            rel = rel[rel.index("config/") + len("config/") :]
         data = get_config_center().get(rel) or {}
     except Exception as exc:
         logger.error("[AdapterConfig] 配置加载失败: %s", exc)

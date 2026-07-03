@@ -131,10 +131,7 @@ class WeComStreamClient:
         await self._ensure_token()
 
         body = self._build_send_body(user_id, content, msg_type)
-        url = (
-            f"{self._base_url}/cgi-bin/message/send"
-            f"?access_token={self._access_token}"
-        )
+        url = f"{self._base_url}/cgi-bin/message/send?access_token={self._access_token}"
         headers = {"Content-Type": "application/json"}
 
         if self._session is None:
@@ -198,10 +195,7 @@ class WeComStreamClient:
         if self._session is None:
             raise RuntimeError("Session not initialized")
 
-        url = (
-            f"{self._base_url}/cgi-bin/gettoken"
-            f"?corpid={self._corp_id}&corpsecret={self._secret}"
-        )
+        url = f"{self._base_url}/cgi-bin/gettoken?corpid={self._corp_id}&corpsecret={self._secret}"
 
         async with self._session.get(url) as resp:
             result = await resp.json()
@@ -212,9 +206,7 @@ class WeComStreamClient:
                     errcode,
                     result.get("errmsg", ""),
                 )
-                raise RuntimeError(
-                    f"WeCom get token failed: {result.get('errmsg', 'unknown')}"
-                )
+                raise RuntimeError(f"WeCom get token failed: {result.get('errmsg', 'unknown')}")
 
             self._access_token = result.get("access_token", "")
             expire = result.get("expires_in", 7200)

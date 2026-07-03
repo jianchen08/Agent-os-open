@@ -207,9 +207,7 @@ class WeComAdapter(BaseComboAdapter):
         encrypt_content = _extract_encrypt(body)
 
         # 验证签名
-        if not self.crypto.verify_signature(
-            timestamp, nonce, encrypt_content, msg_signature
-        ):
+        if not self.crypto.verify_signature(timestamp, nonce, encrypt_content, msg_signature):
             logger.warning("WeCom callback signature verification failed")
             return ""
 
@@ -248,9 +246,7 @@ class WeComAdapter(BaseComboAdapter):
         Returns:
             解密后的明文 echostr
         """
-        if not self.crypto.verify_signature(
-            timestamp, nonce, echostr, msg_signature
-        ):
+        if not self.crypto.verify_signature(timestamp, nonce, echostr, msg_signature):
             logger.warning("WeCom verify URL signature failed")
             return ""
 

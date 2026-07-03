@@ -109,7 +109,11 @@ class OutputRepetitionGuard(IOutputPlugin):
         repeat_count = ctx.state.get("output.repeat_count", 0)
 
         is_repeat = False
-        if current_hash == last_hash or last_text and self._compute_similarity(current_text, last_text) > self._similarity_threshold:
+        if (
+            current_hash == last_hash
+            or last_text
+            and self._compute_similarity(current_text, last_text) > self._similarity_threshold
+        ):
             is_repeat = True
 
         if is_repeat:
@@ -212,8 +216,10 @@ class OutputRepetitionGuard(IOutputPlugin):
             添加了系统提示后的消息列表。
         """
         messages = list(ctx.state.get("messages", []))
-        messages.append({
-            "role": "system",
-            "content": f"[OutputRepetitionGuard] {prompt}",
-        })
+        messages.append(
+            {
+                "role": "system",
+                "content": f"[OutputRepetitionGuard] {prompt}",
+            }
+        )
         return messages

@@ -69,6 +69,7 @@ class TriggerReviewTool(BuiltinTool):
         """
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
             maintenance_service = provider.get("maintenance_service")
             if maintenance_service is None:

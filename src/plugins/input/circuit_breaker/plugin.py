@@ -137,7 +137,9 @@ class CircuitBreaker(IInputPlugin):
             self._transition_to_open()
             logger.warning(
                 "[%s] 熔断触发 | failures=%d | threshold=%d",
-                self.name, consecutive_failures, self._failure_threshold,
+                self.name,
+                consecutive_failures,
+                self._failure_threshold,
             )
             return PluginResult(
                 state_updates={"circuit_open": True, "circuit_state": self.OPEN},
@@ -165,7 +167,9 @@ class CircuitBreaker(IInputPlugin):
             self._transition_to_half_open()
             logger.info(
                 "[%s] 进入半开状态 | elapsed=%.1fs | timeout=%ds",
-                self.name, elapsed, self._recovery_timeout,
+                self.name,
+                elapsed,
+                self._recovery_timeout,
             )
             return PluginResult(
                 state_updates={"circuit_open": False, "circuit_state": self.HALF_OPEN},
@@ -194,7 +198,9 @@ class CircuitBreaker(IInputPlugin):
             self._transition_to_open()
             logger.warning(
                 "[%s] 半开探测超限，重新熔断 | calls=%d | max=%d",
-                self.name, self._half_open_calls, self._half_open_max_calls,
+                self.name,
+                self._half_open_calls,
+                self._half_open_max_calls,
             )
             return PluginResult(
                 state_updates={"circuit_open": True, "circuit_state": self.OPEN},

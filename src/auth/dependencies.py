@@ -52,18 +52,14 @@ def init_auth_dependencies(
 def get_token_manager() -> TokenManager:
     """获取 Token 管理器"""
     if _token_manager is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="认证服务未初始化"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="认证服务未初始化")
     return _token_manager
 
 
 def get_rbac_manager() -> RBACManager:
     """获取 RBAC 管理器"""
     if _rbac_manager is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="权限服务未初始化"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="权限服务未初始化")
     return _rbac_manager
 
 
@@ -92,9 +88,7 @@ async def get_token_payload(
         )
 
     try:
-        payload = token_manager.verify_token(
-            credentials.credentials, token_type="access"
-        )
+        payload = token_manager.verify_token(credentials.credentials, token_type="access")
         return payload
     except TokenExpiredError:
         raise HTTPException(  # noqa: B904
@@ -132,9 +126,7 @@ async def get_current_user(
         HTTPException: 用户不存在
     """
     if _user_repository is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="用户服务未初始化"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="用户服务未初始化")
 
     user_id = UUID(payload.sub)
     user = await _user_repository.get_by_id(user_id)
@@ -165,9 +157,7 @@ async def get_current_active_user(
         HTTPException: 用户已禁用
     """
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="用户已被禁用"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户已被禁用")
     return user
 
 

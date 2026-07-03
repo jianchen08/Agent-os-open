@@ -90,9 +90,7 @@ class TokenCounter:
             # 如果编码失败，使用快速估算
             return self.estimate_tokens(text)
 
-    def count_messages(
-        self, messages: list[dict[str, Any]], model: str = "gpt-4"
-    ) -> int:
+    def count_messages(self, messages: list[dict[str, Any]], model: str = "gpt-4") -> int:
         """
         计算消息列表的总 Token 数量
 
@@ -111,9 +109,7 @@ class TokenCounter:
                 break
 
         if encoding_name is None:
-            raise ValueError(
-                f"不支持的模型名称: {model}，支持的模型前缀: {list(self.MODEL_ENCODINGS.keys())}"
-            )
+            raise ValueError(f"不支持的模型名称: {model}，支持的模型前缀: {list(self.MODEL_ENCODINGS.keys())}")
 
         try:
             encoding = tiktoken.get_encoding(encoding_name)

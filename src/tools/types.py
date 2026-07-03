@@ -162,19 +162,13 @@ class Tool(BaseModel):
     description: str = Field(..., description="工具功能描述（简短）")
 
     # 使用边界说明（新增，合并到 LLM description）
-    when_to_use: list[str] = Field(
-        default_factory=list, description="适用场景列表，说明什么情况下应该使用此工具"
-    )
+    when_to_use: list[str] = Field(default_factory=list, description="适用场景列表，说明什么情况下应该使用此工具")
     when_not_to_use: list[str] = Field(
         default_factory=list,
         description="不适用场景列表，说明什么情况下不应该使用此工具",
     )
-    examples: list[ToolExample] = Field(
-        default_factory=list, description="使用示例列表"
-    )
-    caveats: list[str] = Field(
-        default_factory=list, description="注意事项列表，使用时需要注意的问题"
-    )
+    examples: list[ToolExample] = Field(default_factory=list, description="使用示例列表")
+    caveats: list[str] = Field(default_factory=list, description="注意事项列表，使用时需要注意的问题")
 
     # Schema 定义
     input_schema: dict[str, Any] = Field(..., description="输入参数 JSON Schema")
@@ -183,7 +177,7 @@ class Tool(BaseModel):
     # 注入参数声明（运行时注入，不传给 LLM）
     injected_params: list[str] = Field(
         default_factory=list,
-        description="注入参数列表：这些参数由系统在运行时注入，不暴露给 LLM 决策。如 session_id, user_id, tool_record_id"
+        description="注入参数列表：这些参数由系统在运行时注入，不暴露给 LLM 决策。如 session_id, user_id, tool_record_id",
     )
 
     # 参数层级限制：声明哪些参数/枚举值只在特定 Agent 层级可见
@@ -219,9 +213,7 @@ class Tool(BaseModel):
 
     # 状态与权限
     status: ToolStatus = Field(ToolStatus.ACTIVE, description="工具状态")
-    dangerous_operations: list[str] = Field(
-        default_factory=list, description="危险操作列表，由安全插件统一决策审批"
-    )
+    dangerous_operations: list[str] = Field(default_factory=list, description="危险操作列表，由安全插件统一决策审批")
 
     # 数据库同步字段
     db_id: str | None = Field(None, description="数据库记录 ID")
@@ -315,9 +307,7 @@ class Tool(BaseModel):
                     del schema["properties"][param]
 
         if "required" in schema and isinstance(schema["required"], list):
-            schema["required"] = [
-                r for r in schema["required"] if r not in self.injected_params
-            ]
+            schema["required"] = [r for r in schema["required"] if r not in self.injected_params]
             if not schema["required"]:
                 del schema["required"]
 
@@ -352,15 +342,14 @@ class Tool(BaseModel):
             del properties[param_name]
             logger.debug(
                 "[ToolSchema] hidden param '%s' from L%d (max_visible=%d)",
-                param_name, agent_level,
+                param_name,
+                agent_level,
                 self.param_level_restrictions[param_name]["max_visible_level"],
             )
 
         # 从 required 中移除已隐藏的参数
         if "required" in schema and isinstance(schema["required"], list):
-            schema["required"] = [
-                r for r in schema["required"] if r not in set(to_remove)
-            ]
+            schema["required"] = [r for r in schema["required"] if r not in set(to_remove)]
             if not schema["required"]:
                 del schema["required"]
 

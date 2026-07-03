@@ -92,6 +92,7 @@ class IsolationGuard(IInputPlugin):
         """
         import shutil  # noqa: PLC0415
         import subprocess  # noqa: PLC0415
+
         if not shutil.which("docker"):
             return False
         try:
@@ -141,7 +142,8 @@ class IsolationGuard(IInputPlugin):
                 self._docker_checked_at = now
                 if self._docker_available:
                     logger.info(
-                        "[%s] Docker 可用性复检通过，解除 host 降级", self.name,
+                        "[%s] Docker 可用性复检通过，解除 host 降级",
+                        self.name,
                     )
 
         state = ctx.state
@@ -161,6 +163,7 @@ class IsolationGuard(IInputPlugin):
             tc_args = tc.get("args", tc.get("arguments", {}))
             if isinstance(tc_args, str):
                 import json  # noqa: PLC0415
+
                 try:
                     tc_args = json.loads(tc_args)
                 except (json.JSONDecodeError, TypeError):
@@ -227,17 +230,21 @@ class IsolationGuard(IInputPlugin):
             # 一律拒绝（不降级）。force_host 仅对本身就走 host 的工具有效。
             if policy_isolation == IsolationLevel.CONTAINER:
                 logger.warning(
-                    "[IsolationGuard] force_host 被拒绝: "
-                    "工具 %s 要求容器隔离，不降级到 host | tool=%s",
-                    tool_name, tool_name,
+                    "[IsolationGuard] force_host 被拒绝: 工具 %s 要求容器隔离，不降级到 host | tool=%s",
+                    tool_name,
+                    tool_name,
                 )
                 return self._build_context(
-                    tool_name, "denied", "force_host_denied_by_policy",
+                    tool_name,
+                    "denied",
+                    "force_host_denied_by_policy",
                     workspace=metadata_workspace,
                     blocked=True,
                 )
             return self._build_context(
-                tool_name, "host", "force_host",
+                tool_name,
+                "host",
+                "force_host",
                 workspace=metadata_workspace,
             )
 
@@ -253,12 +260,13 @@ class IsolationGuard(IInputPlugin):
             and self._has_host_path(tool_args)
         ):
             logger.info(
-                "[IsolationGuard] 命令含宿主路径，路由到 host 执行（等待审批） | "
-                "tool=%s | reason=host_path_detected",
+                "[IsolationGuard] 命令含宿主路径，路由到 host 执行（等待审批） | tool=%s | reason=host_path_detected",
                 tool_name,
             )
             return self._build_context(
-                tool_name, "host", "host_path_detected",
+                tool_name,
+                "host",
+                "host_path_detected",
                 workspace=metadata_workspace,
             )
 
@@ -272,7 +280,9 @@ class IsolationGuard(IInputPlugin):
             if metadata_isolation == "isolated":
                 if self._docker_available:
                     return self._build_context(
-                        tool_name, "docker", "task_metadata",
+                        tool_name,
+                        "docker",
+                        "task_metadata",
                         workspace=metadata_workspace,
                     )
                 # Docker 不可用：要求容器即拒绝，不降级到 host
@@ -281,20 +291,26 @@ class IsolationGuard(IInputPlugin):
                     tool_name,
                 )
                 return self._build_context(
-                    tool_name, "denied", "docker_unavailable_container_required",
+                    tool_name,
+                    "denied",
+                    "docker_unavailable_container_required",
                     workspace=metadata_workspace,
                     blocked=True,
                 )
             # metadata 强制 host → 降级
             return self._build_context(
-                tool_name, "host", "task_metadata_downgrade",
+                tool_name,
+                "host",
+                "task_metadata_downgrade",
                 workspace=metadata_workspace,
             )
 
         # ── 工具级 policy 决策（metadata 不适用或 policy 为 host）──
         if policy_isolation == IsolationLevel.CONTAINER and self._docker_available:
             return self._build_context(
-                tool_name, "docker", "policy",
+                tool_name,
+                "docker",
+                "policy",
                 workspace=metadata_workspace,
             )
 
@@ -305,13 +321,17 @@ class IsolationGuard(IInputPlugin):
                 tool_name,
             )
             return self._build_context(
-                tool_name, "denied", "docker_unavailable_container_required",
+                tool_name,
+                "denied",
+                "docker_unavailable_container_required",
                 workspace=metadata_workspace,
                 blocked=True,
             )
 
         return self._build_context(
-            tool_name, "host", "policy",
+            tool_name,
+            "host",
+            "policy",
             workspace=metadata_workspace,
         )
 
@@ -337,7 +357,10 @@ class IsolationGuard(IInputPlugin):
             self._force_host = config["force_host"]
 
     def _build_context(
-        self, tool_name: str, provider: str, reason: str,
+        self,
+        tool_name: str,
+        provider: str,
+        reason: str,
         workspace: str | None = None,
         blocked: bool = False,
     ) -> dict[str, Any]:
@@ -390,7 +413,8 @@ class IsolationGuard(IInputPlugin):
         except Exception as e:
             logger.debug(
                 "[IsolationGuard] 读取 task metadata 失败 | task_id=%s | error=%s",
-                task_id, e,
+                task_id,
+                e,
             )
         return {}
 

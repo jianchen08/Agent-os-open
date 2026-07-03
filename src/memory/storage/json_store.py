@@ -72,7 +72,8 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
             self._knowledge_ids.add(f.stem)
         logger.info(
             "[JsonMemoryStore] 索引扫描完成 | episodes=%d | knowledge=%d",
-            len(self._episode_ids), len(self._knowledge_ids),
+            len(self._episode_ids),
+            len(self._knowledge_ids),
         )
 
     def _is_episode_id(self, entry_id: str) -> bool:
@@ -276,7 +277,9 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         raise ValueError(f"不支持的类型: {type(entry)}")
 
     async def load(
-        self, entry_id: str, memory_type: str = "episode",
+        self,
+        entry_id: str,
+        memory_type: str = "episode",
     ) -> Episode | Knowledge | None:
         """按需从磁盘加载记忆条目。
 
@@ -358,16 +361,19 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
                 if tags_filter and not any(t in ep.tags for t in tags_filter):
                     continue
                 score = self._compute_keyword_score(
-                    query_lower, [ep.intent_text, ep.execution_summary or ""] + ep.tags,
+                    query_lower,
+                    [ep.intent_text, ep.execution_summary or ""] + ep.tags,
                 )
                 if score > 0:
-                    results.append(SearchResult(
-                        id=ep.id,
-                        content=ep.execution_summary or ep.intent_text,
-                        score=score,
-                        memory_type=MemoryType.EPISODE,
-                        metadata={"tags": ep.tags},
-                    ))
+                    results.append(
+                        SearchResult(
+                            id=ep.id,
+                            content=ep.execution_summary or ep.intent_text,
+                            score=score,
+                            memory_type=MemoryType.EPISODE,
+                            metadata={"tags": ep.tags},
+                        )
+                    )
 
         if memory_type in ("all", "semantic"):
             for kn in self._iter_all_knowledge():
@@ -378,16 +384,19 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
                     if not any(t in kn_tags for t in tags_filter):
                         continue
                 score = self._compute_keyword_score(
-                    query_lower, [kn.content],
+                    query_lower,
+                    [kn.content],
                 )
                 if score > 0:
-                    results.append(SearchResult(
-                        id=kn.id,
-                        content=kn.content,
-                        score=score,
-                        memory_type=MemoryType.SEMANTIC,
-                        metadata=kn.extra_data,
-                    ))
+                    results.append(
+                        SearchResult(
+                            id=kn.id,
+                            content=kn.content,
+                            score=score,
+                            memory_type=MemoryType.SEMANTIC,
+                            metadata=kn.extra_data,
+                        )
+                    )
 
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:limit]
@@ -430,7 +439,6 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
             limit=top_k,
             filters=merged_filters,
         )
-
 
     @staticmethod
     def _compute_keyword_score(query: str, texts: list[str]) -> float:
@@ -496,12 +504,9 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         Returns:
             情景记忆列表
         """
-        episodes = [
-            ep for ep in self._iter_all_episodes()
-            if ep.user_id == user_id
-        ]
+        episodes = [ep for ep in self._iter_all_episodes() if ep.user_id == user_id]
         episodes.sort(key=lambda x: x.created_at, reverse=True)
-        return episodes[offset:offset + limit]
+        return episodes[offset : offset + limit]
 
     # ============================================
     # IEpisodeStorage 专用方法
@@ -588,7 +593,9 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         return self._read_knowledge_from_disk(knowledge_id)
 
     async def find_knowledge_by_user(
-        self, user_id: str, limit: int = 20,
+        self,
+        user_id: str,
+        limit: int = 20,
     ) -> list[Knowledge]:
         """按用户查找知识（按需遍历磁盘文件）。
 
@@ -599,15 +606,14 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetrieve
         Returns:
             知识列表
         """
-        knowledge = [
-            kn for kn in self._iter_all_knowledge()
-            if kn.user_id == user_id
-        ]
+        knowledge = [kn for kn in self._iter_all_knowledge() if kn.user_id == user_id]
         knowledge.sort(key=lambda x: x.created_at, reverse=True)
         return knowledge[:limit]
 
     async def update_embedding(
-        self, knowledge_id: str, embedding: list[float],
+        self,
+        knowledge_id: str,
+        embedding: list[float],
     ) -> bool:
         """更新知识的向量嵌入（读取→修改→写回）。
 

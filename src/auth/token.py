@@ -80,6 +80,7 @@ class TokenManager:
         url = redis_url
         if url is None:
             import os  # noqa: PLC0415
+
             url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
         try:
@@ -98,8 +99,7 @@ class TokenManager:
             self._redis = None
             self._redis_available = False
             logger.warning(
-                "TokenManager: Redis 不可用 (%s)，撤销存储降级到内存。"
-                "多实例部署时 token 撤销无法跨进程生效。",
+                "TokenManager: Redis 不可用 (%s)，撤销存储降级到内存。多实例部署时 token 撤销无法跨进程生效。",
                 exc,
             )
 
@@ -137,6 +137,7 @@ class TokenManager:
 
         # 绑定日志上下文，使后续认证日志自动携带 request_id
         from src.core.logging import LogContext  # noqa: PLC0415
+
         LogContext.bind(request_id=user_id)
 
         return self._create_token(
@@ -324,9 +325,7 @@ class TokenManager:
                 )
                 return
             except Exception as exc:
-                logger.warning(
-                    "TokenManager: Redis 写入失败，降级到内存: %s", exc
-                )
+                logger.warning("TokenManager: Redis 写入失败，降级到内存: %s", exc)
 
         self._revoked_tokens.add(token)
 
@@ -348,9 +347,7 @@ class TokenManager:
                 )
                 return
             except Exception as exc:
-                logger.warning(
-                    "TokenManager: Redis 写入失败，降级到内存: %s", exc
-                )
+                logger.warning("TokenManager: Redis 写入失败，降级到内存: %s", exc)
 
         self._revoked_users[user_id] = now
 

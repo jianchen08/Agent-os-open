@@ -170,7 +170,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         return tokens
 
     async def _estimate_effective_tokens(
-        self, messages: list[dict[str, Any]], ctx: PluginContext,
+        self,
+        messages: list[dict[str, Any]],
+        ctx: PluginContext,
     ) -> int:
         """估算有效上下文大小。
 
@@ -189,7 +191,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
             if prev_input > 0:
                 logger.debug(
                     "[%s] 估算: llm_usage 为空，从 track 回退: prev_input=%d",
-                    self.name, prev_input,
+                    self.name,
+                    prev_input,
                 )
 
         # 策略 1：prev_input + delta
@@ -202,7 +205,11 @@ class ContextWindowGuardPlugin(IInputPlugin):
             if current_non_sys <= tracked:
                 logger.debug(
                     "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
-                    self.name, prev_input, prev_input, tracked, current_non_sys,
+                    self.name,
+                    prev_input,
+                    prev_input,
+                    tracked,
+                    current_non_sys,
                 )
                 return prev_input
 
@@ -213,7 +220,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
             effective = prev_input + delta_tokens
             logger.debug(
                 "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d, delta_count=%d)",
-                self.name, effective, prev_input, delta_tokens, tracked, current_non_sys, len(delta_msgs),
+                self.name,
+                effective,
+                prev_input,
+                delta_tokens,
+                tracked,
+                current_non_sys,
+                len(delta_msgs),
             )
             return effective
 
@@ -222,7 +235,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if assembled >= 0:
             logger.debug(
                 "[%s] 估算(压缩块拼接): %d tokens, msg_count=%d",
-                self.name, assembled, len(messages),
+                self.name,
+                assembled,
+                len(messages),
             )
             return assembled
 
@@ -230,12 +245,16 @@ class ContextWindowGuardPlugin(IInputPlugin):
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
         logger.debug(
             "[%s] 估算(全量字符): %d tokens, msg_count=%d",
-            self.name, estimated, len(messages),
+            self.name,
+            estimated,
+            len(messages),
         )
         return estimated
 
     async def _estimate_assembled_tokens(
-        self, ctx: PluginContext, messages: list[dict[str, Any]],
+        self,
+        ctx: PluginContext,
+        messages: list[dict[str, Any]],
     ) -> int:
         """用已有的压缩块 + recent 消息估算实际发送给 LLM 的 token 数。
 
@@ -275,10 +294,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             pass
 
         # system 消息 + recent 消息（非压缩块的）
-        system_tokens = sum(
-            self._estimate_msg_tokens(m) for m in messages
-            if m.get("role") == "system"
-        )
+        system_tokens = sum(self._estimate_msg_tokens(m) for m in messages if m.get("role") == "system")
 
         # recent 消息：从最大 L1 块的 sequence_end 之后开始
         max_end = max((c.sequence_end for c in l1_chunks if c.sequence_end), default=0)
@@ -293,7 +309,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
         total = l1_tokens + snapshot_tokens + system_tokens + recent_tokens
         logger.debug(
             "[%s] 压缩块拼接估算: l1=%d (blocks=%d), snapshot=%d, system=%d, recent=%d (after=%d), total=%d",
-            self.name, l1_tokens, len(l1_chunks), snapshot_tokens, system_tokens, recent_tokens, max_end, total,
+            self.name,
+            l1_tokens,
+            len(l1_chunks),
+            snapshot_tokens,
+            system_tokens,
+            recent_tokens,
+            max_end,
+            total,
         )
         return total
 
@@ -348,10 +371,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
         estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
         trigger_tokens = int(context_window * self._trigger_ratio)
         logger.debug(
-            "[%s] 阈值检查: estimated=%d, trigger=%d, context_window=%d, "
-            "ratio=%.2f, msg_count=%d, service=%s",
-            self.name, estimated_tokens, trigger_tokens, context_window,
-            self._trigger_ratio, len(messages), type(service).__name__,
+            "[%s] 阈值检查: estimated=%d, trigger=%d, context_window=%d, ratio=%.2f, msg_count=%d, service=%s",
+            self.name,
+            estimated_tokens,
+            trigger_tokens,
+            context_window,
+            self._trigger_ratio,
+            len(messages),
+            type(service).__name__,
         )
         if estimated_tokens < trigger_tokens:
             # 不需要压缩，但可能需要裁剪被已有压缩块覆盖的旧消息
@@ -360,11 +387,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
             trimmed_messages = messages
             if len(messages) > self._tracked_msg_count + 50:
                 trimmed_messages = await self._trim_covered_messages(
-                    ctx, messages,
+                    ctx,
+                    messages,
                 )
-            current_non_sys = sum(
-                1 for m in trimmed_messages if m.get("role") != "system"
-            )
+            current_non_sys = sum(1 for m in trimmed_messages if m.get("role") != "system")
             self._tracked_msg_count = current_non_sys
             updates = {"_tracked_msg_count": current_non_sys}
             if trimmed_messages is not messages:
@@ -376,18 +402,24 @@ class ContextWindowGuardPlugin(IInputPlugin):
         logger.info(
             "[%s] 上下文接近窗口限制: estimated_tokens=%d, trigger_tokens=%d, "
             "context_window=%d, trigger_ratio=%.2f, msg_count=%d",
-            self.name, estimated_tokens, trigger_tokens,
-            context_window, self._trigger_ratio, len(messages),
+            self.name,
+            estimated_tokens,
+            trigger_tokens,
+            context_window,
+            self._trigger_ratio,
+            len(messages),
         )
 
         # 前端压缩进度通知
         _on_chunk = ctx.state.get("on_chunk")
         if _on_chunk:
             with contextlib.suppress(Exception):
-                _on_chunk({
-                    "type": "compression_start",
-                    "pipeline_id": ctx.state.get("pipeline_id", ""),
-                })
+                _on_chunk(
+                    {
+                        "type": "compression_start",
+                        "pipeline_id": ctx.state.get("pipeline_id", ""),
+                    }
+                )
 
         # 调用压缩
         logger.info("[%s] 开始调用 compress_messages ...", self.name)
@@ -400,7 +432,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         except Exception as exc:
             logger.error(
                 "[%s] compress_messages 异常: %s | service=%s",
-                self.name, exc, type(service).__name__,
+                self.name,
+                exc,
+                type(service).__name__,
                 exc_info=True,
             )
             # 压缩异常 → 终止管线
@@ -413,7 +447,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if compressed and len(compressed) < len(messages):
             logger.info(
                 "[%s] 压缩完成: %d -> %d 条消息",
-                self.name, len(messages), len(compressed),
+                self.name,
+                len(messages),
+                len(compressed),
             )
             # 压缩只搬运消息不格式化，会原样保留历史段里的 raw 格式 tool_calls
             # （缺 type / 扁平结构，来自执行记录/state 恢复的脏数据）。
@@ -422,21 +458,22 @@ class ContextWindowGuardPlugin(IInputPlugin):
             # normalizer 的 _normalize_tool_calls_in_messages 是纯函数全量修复，
             # 同时同步配对的 tool result，不破坏配对。
             self._standardize_tool_calls(compressed)
-            post_compress_count = sum(
-                1 for m in compressed if m.get("role") != "system"
-            )
+            post_compress_count = sum(1 for m in compressed if m.get("role") != "system")
             self._tracked_msg_count = post_compress_count
             ctx.state["_tracked_msg_count"] = post_compress_count
-            return PluginResult(state_updates={
-                "messages": compressed,
-                "_tracked_msg_count": post_compress_count,
-            })
+            return PluginResult(
+                state_updates={
+                    "messages": compressed,
+                    "_tracked_msg_count": post_compress_count,
+                }
+            )
 
         # 压缩返回 None（失败）或未减少消息数 → 终止管线
         logger.error(
-            "[%s] 上下文压缩失败: estimated=%d 超过 trigger=%d 但压缩未能减少消息"
-            " (compressed=%s, original=%d)",
-            self.name, estimated_tokens, trigger_tokens,
+            "[%s] 上下文压缩失败: estimated=%d 超过 trigger=%d 但压缩未能减少消息 (compressed=%s, original=%d)",
+            self.name,
+            estimated_tokens,
+            trigger_tokens,
             f"{len(compressed)}条" if compressed else "None",
             len(messages),
         )
@@ -461,15 +498,19 @@ class ContextWindowGuardPlugin(IInputPlugin):
             from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
                 standardize_tool_calls_in_messages,
             )
+
             standardize_tool_calls_in_messages(messages)
         except Exception as exc:
             logger.warning(
                 "[%s] tool_calls 标准化失败（不阻塞写回）: %s",
-                self.name, exc,
+                self.name,
+                exc,
             )
 
     async def _trim_covered_messages(  # noqa: PLR0911
-        self, ctx: PluginContext, messages: list[dict[str, Any]],
+        self,
+        ctx: PluginContext,
+        messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """裁剪被已有压缩块覆盖的旧消息（重启场景）。
 
@@ -530,15 +571,16 @@ class ContextWindowGuardPlugin(IInputPlugin):
             # recent_part 是倒序的，需要再反转
             # 但 system 消息也混在里面了，需要重新分离
             trimmed_sys = [m for m in messages if m.get("role") == "system"]
-            trimmed_recent = list(reversed(
-                [m for m in recent_part if m.get("role") != "system"]
-            ))
+            trimmed_recent = list(reversed([m for m in recent_part if m.get("role") != "system"]))
             trimmed = trimmed_sys + trimmed_recent
 
         if len(trimmed) < len(messages):
             logger.info(
                 "[%s] 裁剪被压缩块覆盖的旧消息: %d -> %d (max_end=%d)",
-                self.name, len(messages), len(trimmed), max_end,
+                self.name,
+                len(messages),
+                len(trimmed),
+                max_end,
             )
             return trimmed
 
@@ -557,7 +599,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
         try:
             context_window = ctx.state.get("context_window", 128000)
             return MemoryContextService(
-                config={"context_window": context_window, "compress_trigger_ratio": 0.55},  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
+                config={
+                    "context_window": context_window,
+                    "compress_trigger_ratio": 0.55,
+                },  # 见 config.defaults.COMPRESS_TRIGGER_RATIO
             )
         except Exception:
             return None

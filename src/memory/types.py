@@ -325,8 +325,7 @@ class Context:
 
         if self.tool_descriptions:
             tools_text = "\n".join(
-                f"- {t.get('name', 'unknown')}: {t.get('description', '')}"
-                for t in self.tool_descriptions
+                f"- {t.get('name', 'unknown')}: {t.get('description', '')}" for t in self.tool_descriptions
             )
             parts.append(f"## 可用工具\n\n{tools_text}")
 

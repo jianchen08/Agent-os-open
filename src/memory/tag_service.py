@@ -95,7 +95,9 @@ class TagService:
             if self._vector_retriever and hasattr(self._vector_retriever, "save_tag"):
                 try:
                     tag.id = await self._vector_retriever.save_tag(
-                        name=name, vector=tag.vector or [], frequency=tag.frequency,
+                        name=name,
+                        vector=tag.vector or [],
+                        frequency=tag.frequency,
                     )
                 except Exception as e:
                     logger.warning("[TagService] 更新 Tag PG 失败 | name=%s | error=%s", name, e)
@@ -116,7 +118,9 @@ class TagService:
         if self._vector_retriever and hasattr(self._vector_retriever, "save_tag"):
             try:
                 tag_id = await self._vector_retriever.save_tag(
-                    name=name, vector=vector, frequency=1,
+                    name=name,
+                    vector=vector,
+                    frequency=1,
                 )
             except Exception as e:
                 logger.warning("[TagService] 写入 Tag PG 失败 | name=%s | error=%s", name, e)
@@ -174,7 +178,9 @@ class TagService:
                 except Exception as e:
                     logger.warning(
                         "[TagService] 更新共现关系失败 | tag1=%d | tag2=%d | error=%s",
-                        tag_ids[i], tag_ids[j], e,
+                        tag_ids[i],
+                        tag_ids[j],
+                        e,
                     )
 
     async def get_tag(self, name: str) -> TagInfo | None:

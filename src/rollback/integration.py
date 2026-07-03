@@ -64,10 +64,7 @@ class TaskRollbackIntegration:
         self._session_checkpoints[session_id].append(checkpoint_id)
         self._message_checkpoints[message_id] = checkpoint_id
 
-        logger.info(
-            f"创建消息检查点 | session={session_id}, "
-            f"message={message_id}, checkpoint={checkpoint_id}"
-        )
+        logger.info(f"创建消息检查点 | session={session_id}, message={message_id}, checkpoint={checkpoint_id}")
 
         return checkpoint_id
 
@@ -111,8 +108,7 @@ class TaskRollbackIntegration:
             return None
 
         logger.info(
-            f"开始回滚 Regenerate | session={session_id}, "
-            f"message={original_message_id}, checkpoint={checkpoint_id}"
+            f"开始回滚 Regenerate | session={session_id}, message={original_message_id}, checkpoint={checkpoint_id}"
         )
 
         # 回滚到检查点
