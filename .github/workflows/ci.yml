@@ -165,18 +165,18 @@ jobs:
           # 跳过的红测从 .github/known-skipped-tests.txt 动态读取（基线锁机制）：
           # 该文件只能删不能加，防止红测静默扩散。修复红测后从该文件移除即可恢复门禁。
           SKIP_FILE=".github/known-skipped-tests.txt"
-          DESELECT_ARGS=""
+          DESELECT_ARGS=()
           if [ -f "$SKIP_FILE" ]; then
             while IFS= read -r line; do
               # 跳过空行和注释
               case "$line" in
                 ""|\#*) continue ;;
               esac
-              DESELECT_ARGS="$DESELECT_ARGS --deselect \"$line\""
+              DESELECT_ARGS+=(--deselect "$line")
             done < "$SKIP_FILE"
-            echo "跳过 $(grep -cv '^[[:space:]]*\(#\|$\)' "$SKIP_FILE") 个已知红测（见 $SKIP_FILE）"
+            echo "跳过 ${#DESELECT_ARGS[@]} 个已知红测（见 $SKIP_FILE）"
           fi
-          eval python -m pytest \
+          python -m pytest \
             tests/unit \
             tests/test_utils \
             tests/core \
@@ -191,7 +191,7 @@ jobs:
             --tb=long \
             --no-header \
             -q \
-            $DESELECT_ARGS \
+            "${DESELECT_ARGS[@]}" \
             2>&1
           # 本次新增的附件注入测试：tests/suites/plugins 目录存在既有红测
           # （test_plugin_fixes/test_session_pipeline_downgrade），暂不整目录纳入，
