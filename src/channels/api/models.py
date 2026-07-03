@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
 
 # ============================================================
 # 请求/响应模型

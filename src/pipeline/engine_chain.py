@@ -146,8 +146,6 @@ def _handle_core_error(
     state[StateKeys.RAW_ERROR] = str(exc)
     state[StateKeys.RAW_RESULT] = None
 
-    error_msg_lower = str(exc).lower()
-
     # 判断是否为可恢复错误（不计入连续错误）
     # 基于 error_classifier 的 ErrorKind 派生，替代旧的字符串嗅探：
     # transient = 临时性错误（限流/服务不可用/网络），不应计入连续错误强制结束

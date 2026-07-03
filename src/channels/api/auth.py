@@ -7,19 +7,18 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
 
+from src.auth.token import TokenManager
+from src.config.settings import get_settings
+
 logger = logging.getLogger(__name__)
 
 # 密钥配置 — DEBT: 统一使用 Settings.jwt_secret_key。ceiling: channels/api/auth.py 仍保留独立常量。
 # upgrade: 全部路由认证迁移到 TokenManager 后删除此模块。
-from src.auth.token import TokenManager
-from src.config.settings import get_settings
-
 ALGORITHM = "HS256"
 SECRET_KEY = get_settings().jwt_secret_key
 

@@ -9,7 +9,6 @@ import contextvars
 import logging
 import time as _time
 import uuid as _uuid
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pipeline.engine_chain import (  # noqa: F401

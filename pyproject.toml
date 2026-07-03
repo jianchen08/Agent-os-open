@@ -130,15 +130,38 @@ select = [
     "PL",   # pylint
 ]
 # 忽略部分严格规则（避免一次性报大量错误）
+# 重构类规则（PLR0911/0912/0915）标注为技术债，见 ROADMAP，后续单独治理
 ignore = [
     "E501",   # 行长度由 line-length 控制
     "B008",   # 函数调用作为默认参数（FastAPI Depends 等）
     "PLR0913", # 参数过多
     "PLR2004", # magic value
+    "PLR0911", # return 语句过多（需拆函数，技术债）
+    "PLR0912", # 分支过多（需拆函数，技术债）
+    "PLR0915", # 语句过多（需拆函数，技术债）
+    "PLC0415", # 函数内 import（项目用于延迟加载/避免循环依赖）
+    "PLW0603", # global 语句（单例模式合理使用）
+    "SIM102",  # 嵌套 if 合并（可读性争议，保留显式结构）
+    "SIM103",  # 返回条件简化（可读性争议）
+    "SIM105",  # try-except-pass→contextlib.suppress（语义等价，保留显式 try）
+    "SIM108",  # if-else→三元（可读性争议，保留显式分支）
     "ARG001", # 未使用的方法参数（接口需要）
     "ARG002", # 同上
-    "PTH118", # os.path 已被项目大量使用
+    "PTH100", # os.path→pathlib（项目大量使用 os.path 风格，整族统一）
+    "PTH103", # 同上
+    "PTH107", # 同上
+    "PTH108", # 同上
+    "PTH109", # 同上
+    "PTH110", # 同上
+    "PTH112", # 同上
+    "PTH113", # 同上
+    "PTH115", # 同上
+    "PTH116", # 同上
+    "PTH118", # 同上
+    "PTH119", # 同上
+    "PTH120", # 同上
     "PTH123", # 同上
+    "PTH204", # 同上
     "ERA001", # 注释代码（可能是有意为之）
     "RET504", # 过多 return
     "N818",   # 异常类名不以 Error 结尾
@@ -151,6 +174,9 @@ unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
 "__init__.py" = ["F401", "F403"]  # __init__.py 允许未使用 import
 "tests/**" = ["B011", "PT009", "PT027"]  # 测试文件允许 assert
 "src/channels/cli/**" = ["T201"]  # CLI 允许 print
+# isolation/manager.py 的函数内 docker 延迟导入（已标 noqa: PLC0415），
+# 其 import 排序对延迟加载场景意义有限，避免与延迟加载意图冲突
+"src/isolation/manager.py" = ["I001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

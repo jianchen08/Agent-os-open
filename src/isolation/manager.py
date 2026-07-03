@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path, PurePath  # noqa: F401
@@ -727,10 +728,8 @@ class IsolationManager:
                         f"[IsolationManager] 恢复容器失败，将重建: "
                         f"{container_name}, 错误: {e}"
                     )
-                    try:
+                    with contextlib.suppress(DockerException):
                         container.remove(force=True)
-                    except DockerException:
-                        pass
                     return None
 
             workspace_path = None

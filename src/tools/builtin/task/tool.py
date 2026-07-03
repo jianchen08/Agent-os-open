@@ -1928,7 +1928,7 @@ class TaskTool(BuiltinTool):
 
         # 仅 completed 时清理子任务 worktree，其它状态纯改
 
-        if target_status == TaskStatus.COMPLETED.value or target_status == TaskStatus.COMPLETED:
+        if target_status in {TaskStatus.COMPLETED.value, TaskStatus.COMPLETED}:
 
             subtasks = service.list_subtasks(task_id)
 

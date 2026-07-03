@@ -11,7 +11,6 @@ import socket
 import sys  # noqa: F401
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 # PYTHONPATH 已在 Dockerfile/环境变量中设置为 /app/src，无需 sys.path.insert
