@@ -480,7 +480,7 @@ class _GitOpsMixin:
                 import stat  # noqa: PLC0415
                 os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
                 func(path)
-            shutil.rmtree(str(ws_dir), onexc=_remove_readonly)
+            shutil.rmtree(str(ws_dir), onerror=_remove_readonly)
         self._run_git("branch", "-D", branch, cwd=repo_path)
 
         rc, _, stderr = self._run_git(

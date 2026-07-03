@@ -693,7 +693,7 @@ class ResourceMergeTool(BuiltinTool):
                 if return_code != 0:
                     logger.warning("[resource_merge] worktree remove 失败: %s, 尝试手动删除", stderr)
                     try:
-                        shutil.rmtree(str(workspace), onexc=_remove_readonly_func)
+                        shutil.rmtree(str(workspace), onerror=_remove_readonly_func)
                     except Exception as e:
                         logger.warning("[resource_merge] 手动删除 workspace 失败: %s", e)
 
@@ -708,7 +708,7 @@ class ResourceMergeTool(BuiltinTool):
             elif workspace.exists():
                 git_dir = workspace / ".git"
                 if git_dir.exists():
-                    shutil.rmtree(str(git_dir), onexc=_remove_readonly_func)
+                    shutil.rmtree(str(git_dir), onerror=_remove_readonly_func)
 
             return create_success_result(
                 data={
