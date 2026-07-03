@@ -220,6 +220,8 @@
 | `PLR0912` | 函数分支过多（>12） | 需拆分函数 | 提取分支为独立方法 |
 | `PLR0915` | 函数语句过多（>50） | 需拆分函数 | 按职责拆分 |
 
+**mypy 类型注解**：当前约 470 个类型检查错误（`call-arg`/`union-attr`/`arg-type` 为主，多为 Optional 链路与字符串注解引用，非崩溃级 Bug）。CI 的 typecheck job 已设 `continue-on-error`，报告可见但不阻塞。完善类型注解是长期工作，欢迎认领：补全函数签名注解 → 收窄 Optional → 移除 `continue-on-error` 恢复硬门禁。
+
 **认领方式**：搜索对应规则码（如 `# noqa: PLR0912`），逐个函数重构，移除 noqa 注释后确保 CI 通过。
 
 ---

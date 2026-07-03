@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "灵汐 AgentOS - 高度可配置化、自进化的 AI Agent 平台",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AI-agent-system/Agent-os.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "electron": "electron .",
