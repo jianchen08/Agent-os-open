@@ -387,20 +387,8 @@ function mergeApiWithExisting(
 
   // 本地独有的消息（API 没有的）保留策略：
   // 1. 正在 streaming 的占位消息 — 必须保留（等 stream_end/new_message 收尾）
-  // 2. 刚发送的乐观 user 消息（30s 窗口内，带 clientMessageId） — 保留，
-  // 因为后端可能尚未持久化，API 尚未返回。
-  // 3. 其余本地消息（completed 历史、persist 残留的脏数据） — 丢弃，
-  // 以 API 权威数据为准。
-  // // 非 streaming 的本地消息 API 未匹配上则丢弃（return false），
-  // 防止 localStorage 残留的旧消息每次刷新被恢复保留导致重复渲染。
-  // （WS 重连 / Tab 切换 / 会话切换）→ 后端尚未持久化 user 消息 →
-  // API 返回数据不含该消息 → 乐观消息被丢弃 → 用户消息消失，
-  // 表现为"发送的消息不显示，刷新后才出现"。
-  // persist 残留的旧消息不满足时间条件（timestamp 远超 30s），仍被丢弃，
-  // 不重新引入重复渲染。
-  // 此时若 initFromAPI 并发触发且后端尚未持久化该 AI 消息，API 不含它 → 走
-  // return false 被丢弃 → 最新几条 AI 回复消失，刷新后才出现（与 user 消息同症状）。
-  // 后续 initFromAPI 通过 role::seq 指纹去重用 API 权威版本替换，不引入重复。
+  // 2. 刚发送的乐观 user 消息（30s 窗口内，带 clientMessageId） — 保留（后端可能尚未持久化）
+  // 3. 其余本地消息 — 丢弃，以 API 权威数据为准。
   const localOnly = existing.filter((m) => {
     if (apiIds.has(m.id)) return false
     if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
@@ -432,8 +420,6 @@ function mergeApiWithExisting(
     ? sorted.filter((m) => !localOnlyFingerprints.has(makeMessageFingerprint(m)))
     : sorted
 
-  // 排到所有 API 返回的新消息之后，导致页面刷新后消息顺序错乱、与后端数据不一致。
-  // mergePreservingStreaming/filterBlankMessages 不改变顺序，最终渲染顺序正确。
   // 注意：mergeSorted 要求两个输入各自升序，localOnly 来自 existing（可能无序，
   // 如 persist 恢复或并发写入），需先排序。
   const sortedLocalOnly = [...localOnly].sort(compareMessages)
@@ -750,7 +736,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       const existingIds = new Set(existing.map((m) => m.message_id || m.id))
       const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
       let merged = mergeSorted(newMsgs, existing)
-      // 无法跨边界合并，导致同一个 AI 回复被拆成多个气泡（"多重渲染"）。
+      // 跨边界合并保留 streaming 流式片段。
       merged = mergePreservingStreaming(merged)
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       merged = filterBlankMessages(merged)
@@ -1164,13 +1150,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
-      // 恢复的消息中所有 status='streaming' 的占位符强制标记为 completed。
-      // streamingState 已重置为空——这条占位符成了 orphan streaming。
-      // initFromAPI 时它走 isStreamingMessage() return true 被保留，与 API 返回的
-      // completed 权威消息并存 → AI 气泡重复渲染（user 消息已修复但 AI 仍重复）。
-      // state='streaming'/'calling' 的 part 改为 'done'。这样 orphan 占位符要么被
-      // initFromAPI 用 id/clientMessageId 匹配上（API 已有真实版本），
-      // 要么走 return false 丢弃，不再保留为孤儿。
+      // 恢复时把所有 streaming 占位符强制标记为 completed，避免 orphan 占位符与 API 权威消息并存。
       const cleanedMessages: Record<string, Message[]> = {}
       if (p.messagesByPipeline) {
         for (const [pid, msgs] of Object.entries(p.messagesByPipeline)) {

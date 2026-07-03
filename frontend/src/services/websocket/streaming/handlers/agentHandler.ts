@@ -19,15 +19,12 @@ export function handleSubAgentCreated(eventData: any) {
   )
   if (!taskId || !pipelineId) return
 
-  // 而 navigateToPipeline 使用 sub-${pipelineId} 生成 tabId，每个管道唯一，
-  // 两处不一致导致映射错乱。
+  // tabId 用 sub-${pipelineId} 生成，与 navigateToPipeline 保持一致。
   const tabId = `sub-${pipelineId}`
   const pStore = pipelineStore.getState()
   const agentTabStore = useAgentTabStore.getState()
 
-  // 导致 pipelineSessionMap 映射错乱，点击标签跳转到对方任务的会话。
-  // 仅注册 pipelineTabMap 映射，让紧随其后的 stream_start 用
-  // threadId（后端 WS 事件自带的会话 ID）正确注册 pipelineMeta。
+  // 仅注册 pipelineTabMap 映射，pipelineMeta 由紧随其后的 stream_start 用 threadId 注册。
   const parentPipelineId = data.parentPipelineId
   let sessionId = ''
 
@@ -58,10 +55,9 @@ export function handleSubAgentCreated(eventData: any) {
     }
   }
 
-  // 导致 findPipelineLocation 三级查找都失败，用户点击子管道时报错"找不到管道归属"。
+  // 优先级3: parentPipelineId 存在但前两级都没命中，用 activeSessionId 作 fallback。
   if (!sessionId && parentPipelineId) {
-    // 优先级3: parentPipelineId 存在但 pipelineSessionMap 和 session.pipelineIds 都没找到，
-    // 使用 activeSessionId 作为 fallback（子管道通常属于当前活跃会话）
+    // 子管道通常属于当前活跃会话。
     sessionId = useSessionStore.getState().activeSessionId || ''
     if (sessionId) {
       _debugLogger.info(
@@ -84,8 +80,6 @@ export function handleSubAgentCreated(eventData: any) {
     return
   }
 
-  // pipelineMeta.sessionId 发现为 null，跨会话保护失效，activePipelineId
-  // 被改成别的会话的管道，导致标签页跳转混乱。
   if (!pStore.pipelines[pipelineId]) {
     pStore.registerPipeline({
       pipelineId,

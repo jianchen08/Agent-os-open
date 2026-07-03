@@ -76,14 +76,8 @@ export function LlmSettingsPage() {
   const [newProviderApiBase, setNewProviderApiBase] = useState('')
   const [newProviderApiKey, setNewProviderApiKey] = useState('')
 
-  // 加载配置
-  // NOTE: apiClient uses baseURL='http://localhost:8988' (absolute URL) which bypasses the
-  // Vite dev server proxy (configured at vite.config.ts to proxy /api -> localhost:8988).
-  // In dev this works because CORS is typically permissive on localhost, but in production
-  // the API and frontend must be served from the same origin, or CORS headers must be set.
-  // If you see "无法连接服务器" errors in the browser, check the browser console for
-  // CORS errors (e.g. "blocked by CORS policy") and verify the backend sets proper
-  // Access-Control-Allow-Origin headers.
+  // 加载配置。
+  // apiClient 用绝对 baseURL 绕过 Vite 代理；生产环境前后端须同源或后端配置 CORS 头。
   const loadConfig = useCallback(() => {
     let cancelled = false
     setIsLoading(true)

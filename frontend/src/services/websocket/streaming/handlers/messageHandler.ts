@@ -34,10 +34,7 @@ export function handleNewMessage(eventData: any) {
   // 消息不存在 → 忽略（占位消息由 stream_start 创建，不应到达此处）
   if (!existingMsg) return
 
-  // 后端发送了完整 parts[] → 合并而非覆盖
-  // 增量构建的前几轮 thinking/text/tool 内容全部丢失，用户只看到最后一轮的 AI 回复。
-  // // 上一版用「parts 数组长度」判断，长度不可靠，会覆盖本地完整流式累积。改为本地优先。
-  // 详见 mergeStreamingParts。
+  // 后端发送完整 parts[] 时合并而非覆盖，本地有实质内容就优先保留（详见 mergeStreamingParts）。
   if (serverParts && Array.isArray(serverParts)) {
     const localParts = existingMsg.parts || []
     const { parts: finalParts, content } = mergeStreamingParts(

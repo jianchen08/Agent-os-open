@@ -164,10 +164,7 @@ export function handleStreamEnd(eventData: any) {
 
   if (pipelineId) {
     terminatePipeline(pipelineId, threadId)
-    // （如 trigger_review / 分派子任务）场景下，子管道的 stream_end 携带子管道 pipelineId，
-    // 而 activePipelineId 是用户正在查看的主管道。这段逻辑会错误地把主管道的占位消息
-    // 标记为 completed（内容仍为空）并清空 streamingState，导致主管道后续的 stream_chunk
-    // /stream_end 无法再更新该占位消息，用户看到空白气泡，刷新后从 API 重新拉取才显示。
+    // 子管道 stream_end 携带的 threadId 与 pipelineId 不同时，单独终止该 threadId 的流。
     if (threadId && threadId !== pipelineId) {
       pipelineStore.getState().stopStreaming(threadId)
     }
@@ -190,9 +187,7 @@ export function handleStreamEnd(eventData: any) {
           } as any)
         }
 
-        // 后端发送了完整 parts[] → 合并而非覆盖
-        // 会用末轮残缺内容覆盖本地完整的多轮流式累积。改为「本地有实质内容就优先
-        // 保留本地」，serverParts 仅作兜底。详见 mergeStreamingParts。
+        // 合并而非覆盖：本地有实质内容就优先保留本地，serverParts 仅作兜底（详见 mergeStreamingParts）。
         const serverParts = eventData?.data?.parts
         const localParts = msg.parts || []
         if (serverParts && Array.isArray(serverParts) && serverParts.length > 0) {
@@ -217,7 +212,7 @@ export function handleStreamEnd(eventData: any) {
               } as any)
             }
           } else {
-            // 占位消息永远卡在 status='streaming'，用户看到空气泡（bug 2 前端侧）。
+            // 空内容兜底：补一条 warning 并收尾，避免占位消息卡在 streaming。
             pipelineStore.getState().appendPart(pipelineId, messageId, {
               type: 'system',
               content: 'AI 回复内容为空，请重试',

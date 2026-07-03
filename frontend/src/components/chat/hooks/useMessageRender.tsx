@@ -179,10 +179,7 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
   const fragments: RenderFragment[] = []
   const parts = message.parts!
 
-  // part 渲染顺序 = 数组顺序（= 追加顺序 = 接收顺序）。
-  // 不再按 sequence 排序：流式新建的 part 无 sequence，历史消息 part 已在 API 映射时
-  // 用 seq++ 保证数组有序。之前的 sort 会把 fallback 大数（Date.now()）的 part 永久
-  // 推到末尾，导致工具卡片常驻气泡底部、文本渲染在它上方。
+  // part 渲染顺序 = 数组顺序（历史消息 part 已在 API 映射时用 seq++ 保证有序）。
   const toolCallCount = parts.filter((p) => p.type === 'tool_call').length
   let toolCallIndex = 0
 
@@ -245,8 +242,7 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
           currentStep: part.currentStep,
           containerTaskId: part.containerTaskId,
         }
-        // 构建 ActivityData 并应用工具卡片注册表增强
-        // 导致后端 _resolve_workspace_path 解析到错误容器 → 文件不存在。
+        // 构建 ActivityData 并应用工具卡片注册表增强。
         const activity = enhanceActivityWithToolConfig(
           buildActivityFromToolPart(part, toolCall, i),
           toolCall,

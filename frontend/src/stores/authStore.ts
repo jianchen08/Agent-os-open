@@ -346,9 +346,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
               // 刷新成功，获取用户信息
               await get().fetchCurrentUser()
-              // isAuthenticated 是否为 true 才调用 initializeGrowthLoop()，
-              // 导致 access_token 过期（走此分支）刷新成功后工作区标签
-              // 不重建，持续显示"工作区为空 — 模块激活后自动出现"。
+              // 刷新成功后标记已认证，触发 initializeGrowthLoop() 重建工作区标签。
               set({ isAuthenticated: true, isInitializing: false })
               return
             } catch (refreshError) {

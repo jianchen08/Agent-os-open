@@ -287,7 +287,6 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     if (fetchData) {
       try {
-        // 会导致 fetchMessages 用错误的 pipelineId 加载消息。
         const pipelineId = session?.pipelineIds?.[0]
         if (!pipelineId) {
           console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session?.pipelineIds)

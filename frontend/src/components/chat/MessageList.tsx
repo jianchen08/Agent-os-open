@@ -201,16 +201,8 @@ export const MessageList = ({
       return
     }
 
-    // 无缓存钉底：首次定位到底部
-    // useLayoutEffect 阶段同步钉底 + RAF 钉底双管齐下，避免仅靠 RAF 时浏览器先 paint
-    // 一帧（scrollTop 停在 persist 恢复的"之前位置"，用户看到中间态）再跳底。
-    // Edge（含部分配置/扩展的环境）即使 scrollRestoration=manual，仍会在刷新瞬间
-    // 把 scrollTop 停在旧位置，且 useLayoutEffect 的同步钉底被 Edge 的渲染时序推迟，
-    // 导致用户看到"先停旧位置再跳底"。Chrome 不复现（时序不同）。
-    // 兜底: 首次定位后启动 1.2s 的轮询钉底（每 50ms 一次），覆盖所有浏览器
-    // 渲染时序差异 + persist 异步 hydrate + markdown/代码块异步渲染导致的高度变化。
-    // 用户在此窗口内 wheel/touch 上滑会置 userScrolled，pinToBottom 内部据此跳过，
-    // 不会"抢"用户的滚动。
+    // 无缓存钉底：首次定位到底部。同步钉底 + RAF 钉底双管齐下避免中间态，
+    // 并启动 1.2s 轮询钉底覆盖各浏览器渲染时序差异与异步高度变化（用户上滑会置 userScrolled 跳过，不抢滚动）。
     const el = scrollRef.current
     if (!el) return
     pinToBottom()

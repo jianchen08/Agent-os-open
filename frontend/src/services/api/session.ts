@@ -8,7 +8,6 @@ import type { Message, MessageToolCall, Session } from '@/types/models'
 import type { MessagePart } from '@/types/messageParts'
 import { checkIsSystemMessage } from '@/utils/messageType'
 import type { RetryOptions } from '@/utils/retry'
-// 注意：GetMessagesResponse已被BackendMessagesListResponse替代，用于直接映射后端响应
 
 /** 后端线程列表响应类型 */
 interface ThreadListResponse {
@@ -142,8 +141,7 @@ function mapBackendMessageToMessage(
     }))
   }
 
-  // 从 metadata 中恢复思考内容
-  // 但没有被转换为 message.thinking 字段，导致思考内容不显示
+  // 从 metadata 中恢复思考内容。
   let thinking: Message['thinking'] = undefined
   const metadata = backendMessage.metadata
   if (metadata) {

@@ -328,8 +328,7 @@ export function FiveSpaceLayout({
 
       // 文件审批标签渲染
       if (tab.moduleId === '__file_review__') {
-        // // 历史遗留分支：交互附带文件不再创建 __file_review__ 类型 Tab，
-        // 现在统一走 __file_editor__。此处只做兼容旧持久化数据，显示提示让用户关闭。
+        // 兼容旧持久化数据：__file_review__ Tab 已统一为 __file_editor__，此处提示用户关闭。
         return (
           <div className="flex h-full flex-col items-center justify-center p-4">
             <div className="text-muted-foreground text-sm">此审阅 Tab 已过期，请关闭</div>

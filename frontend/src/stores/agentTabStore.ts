@@ -686,7 +686,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       const path = ['主Agent', agentName]
       const existingTab = state.tabs.find((t) => t.id === tabId)
 
-      // 导致 Tab 指向旧管道，switchToTab 激活错误的管道。
       if (existingTab) {
         const oldPipelineId = existingTab.pipelineRunId
         const updatedTab: AgentTab = {
