@@ -1,13 +1,20 @@
 # channels 模块文档
 
+> 数据准确性说明：本文档基于 `src/channels/` 实际代码核对。
+
 ## 需求
 
 提供管道与外部系统之间的输入/输出适配层，将外部请求转换为管道 state，将管道结果转换为外部响应格式。
 
-支持三种通道：
-1. **CLI 通道**：交互式命令行界面（M1 交付）
-2. **API 通道**：RESTful HTTP API（M9 WebSocket 交付后扩展）
-3. **WebSocket 通道**：实时双向通信（M9 交付）
+支持以下通道（所有 IM 通道共用 `gateway/` 网关层）：
+
+1. **CLI 通道**（`cli/`）：交互式命令行界面
+2. **HTTP API 通道**（`api/`）：RESTful HTTP API（FastAPI）
+3. **WebSocket 通道**（`websocket/`）：实时双向通信（Web UI 后端）
+4. **网关层**（`gateway/`）：钉钉 / 飞书 / QQ / 企微 共用的鉴权、消息标准化、会话路由
+5. **IM 适配器**：`dingtalk/`（钉钉）/ `feishu/`（飞书）/ `qq/`（QQ）/ `wecom/`（企微）
+
+> 新增一个 IM 平台，只需在 `src/channels/<platform>/` 下加一个 `adapter.py`（实现 `BaseComboAdapter`），业务逻辑零改动。
 
 ## 逻辑
 
@@ -17,89 +24,92 @@
 外部系统 → IInputAdapter.receive() → initial_state → PipelineEngine.run() → final_state → IOutputAdapter.send()
 ```
 
-- `IInputAdapter`：接收外部请求，返回初始 state 字典
-- `IOutputAdapter`：输出管道结果，支持一次性输出（`send`）和流式输出（`send_stream`）
-
-### CLI 通道
-
-CLI 通道提供交互式命令行界面，支持：
-- 多轮对话（用户输入 → 管道执行 → 输出 → 等待下次输入）
-- 命令模式（斜杠命令）
-- 流式输出（rich Console 彩色实时显示）
-- 自动确认模式（auto_confirm_runner）
-
-### API 通道
-
-RESTful HTTP API 通道，支持：
-- 线程管理（创建/查询/列表）
-- 认证鉴权（JWT Token）
-- 异步执行与结果轮询
-
-### WebSocket 通道
-
-实时双向通信通道，支持：
-- 流式消息推送（LLM 输出实时传输）
-- 管道状态事件通知
-- 多会话并发管理
-
-## 结构
-
-### 通道层文件
-
-| 文件 | 核心符号 | 说明 |
-|------|---------|------|
-| `__init__.py` | — | 模块入口 |
+- `IInputAdapter`（`input_adapter.py`）：接收外部请求，返回初始 state 字典
+- `IOutputAdapter`（`output_adapter.py`）：输出管道结果，支持一次性输出（`send`）和流式输出（`send_stream`）
+- `BaseComboAdapter`（`base_combo_adapter.py`）：输入/输出合一的组合适配器基类，IM 通道多基于它实现
 
 ### CLI 通道（`cli/`）
 
+交互式命令行界面，支持多轮对话、斜杠命令、rich Console 流式输出、自动确认模式。
+
 | 文件 | 核心符号 | 说明 |
 |------|---------|------|
-| `cli/__init__.py` | — | CLI 子模块入口 |
-| `cli/cli_main.py` | `CLIApplication`, `main` | CLI 入口（应用初始化 + 主循环） |
-| `cli/cli_interaction.py` | — | CLI 交互逻辑（输入处理/输出格式化） |
+| `cli/cli_main.py` | `CLIApplication`, `main` | CLI 入口（应用初始化 + 主循环），对应 `pyproject.toml` 的 `agent-os` 命令 |
+| `cli/cli_interaction.py` | — | CLI 交互逻辑（输入处理 / 输出格式化） |
 | `cli/cli_commands.py` | — | CLI 命令处理（斜杠命令） |
 | `cli/input_adapter.py` | `CLIInputAdapter` | CLI 输入适配器（stdin 读取） |
 | `cli/output_adapter.py` | `CLIOutputAdapter` | CLI 输出适配器（rich Console 输出） |
 
-### API 通道（`api/`）
+### HTTP API 通道（`api/`）
+
+RESTful HTTP API 通道（FastAPI），含 21 个 `routes_*.py` 路由模块、JWT 认证、限流。
 
 | 文件 | 核心符号 | 说明 |
 |------|---------|------|
-| `api/__init__.py` | — | API 子模块入口 |
-| `api/app.py` | `app` | FastAPI 应用实例 |
+| `api/app.py` | `create_app`, `app` | FastAPI 应用实例与工厂 |
 | `api/auth.py` | — | 认证中间件 |
+| `api/deps.py` | — | FastAPI 依赖注入 |
 | `api/models.py` | — | API 数据模型 |
-| `api/routes_auth.py` | — | 认证路由 |
-| `api/routes_threads.py` | — | 线程管理路由 |
+| `api/rate_limiter.py` | — | 限流器 |
+| `api/routes_*.py` | — | 21 个路由模块（agents / artifacts / auth / tasks / themes / threads / tools / workspaces ...） |
 
 ### WebSocket 通道（`websocket/`）
 
+实时双向通信通道（Web UI 后端），负责流式消息推送、管道状态事件、多会话并发。
+
 | 文件 | 核心符号 | 说明 |
 |------|---------|------|
-| `websocket/__init__.py` | — | WebSocket 子模块入口 |
-| `websocket/adapter.py` | — | WebSocket 适配器 |
-| `websocket/protocol.py` | — | 通信协议定义 |
-| `websocket/server.py` | — | WebSocket 服务器 |
-| `websocket/session_manager.py` | `SessionManager` | 会话管理器 |
+| `websocket/app_factory.py` | `create_app` 等 | **后端主入口**（`python -m channels.websocket.app_factory`），FastAPI + WebSocket 应用工厂 |
+| `websocket/ws_handler.py` | — | WebSocket 连接与消息处理 |
+| `websocket/stream_handler.py` | — | 流式响应处理 |
+| `websocket/static_files.py` | — | 静态文件挂载 |
+
+> 注意：早期文档提到的 `websocket/server.py` / `websocket/protocol.py` / `websocket/session_manager.py` 已不存在，实际文件见上表。
+
+### 网关层（`gateway/`）
+
+钉钉 / 飞书 / QQ / 企微 共用的网关层（鉴权、消息标准化、会话路由）。
+
+| 文件 | 核心符号 | 说明 |
+|------|---------|------|
+| `gateway/channel_gateway.py` | `ChannelGateway` | 网关核心（协议解析 / 鉴权 / 限流 / 路由） |
+| `gateway/message_normalizer.py` | — | 消息格式标准化 |
+| `gateway/session_bridge.py` | — | 会话桥接 |
+| `gateway/unified_types.py` | — | 统一消息类型定义 |
+
+### IM 适配器
+
+各 IM 平台适配器（均含 `adapter.py`，基于 `BaseComboAdapter`）：
+
+| 目录 | 平台 | 关键文件 |
+|------|------|----------|
+| `dingtalk/` | 钉钉 | `adapter.py` / `stream_client.py` |
+| `feishu/` | 飞书 | `adapter.py` / `card_builder.py` / `stream_client.py` |
+| `qq/` | QQ（OneBot） | `adapter.py` / `onebot_client.py` / `helpers.py` |
+| `wecom/` | 企微 | `adapter.py` / `crypto.py`（加解密）/ `stream_client.py` |
 
 ### 类继承关系
 
 ```
-IInputAdapter (ABC)
-├── CLIInputAdapter
+IInputAdapter (ABC)              # input_adapter.py
+└── CLIInputAdapter              # cli/input_adapter.py
 
-IOutputAdapter (ABC)
-├── CLIOutputAdapter
+IOutputAdapter (ABC)             # output_adapter.py
+└── CLIOutputAdapter             # cli/output_adapter.py
+
+BaseComboAdapter                 # base_combo_adapter.py（输入/输出合一，IM 通道基类）
+├── DingTalkAdapter              # dingtalk/adapter.py
+├── FeishuAdapter                # feishu/adapter.py
+├── QQAdapter                    # qq/adapter.py
+└── WeComAdapter                 # wecom/adapter.py
 ```
 
 ### 运行方式
 
 ```bash
-# CLI 通道
-$env:PYTHONPATH="src"
-python -m channels.cli.cli_main
+# Web UI / WebSocket 后端（主入口，docker-compose 也指向它）
+PYTHONPATH=src python -m channels.websocket.app_factory
 
-# API 通道（FastAPI）
-$env:PYTHONPATH="src"
-python -m channels.api.app
+# CLI 通道
+PYTHONPATH=src python -m channels.cli.cli_main
 ```

@@ -20,14 +20,14 @@
 
 ### 核心创新
 
-- 🔧 **高度可配置化** —— Agent 不是写死的代码，而是 YAML 数据 + 加载器。改一个提示词不用重启服务（`hot_swap` 支持热替换）
+- 🔧 **高度可配置化** —— Agent 不是写死的代码，而是 YAML 数据 + 加载器。改一个提示词不用重启服务（`hot_swap` 支持「快照-替换-健康检查-失败回滚」的热替换）
 - 🔄 **自进化闭环** —— 从需求澄清 → 任务派发 → 执行验证 → 评估反馈，每个环节都形成闭环，系统越用越聪明
-- 🔌 **插件化管道架构** —— 6 种路由信号 + 暂停/恢复机制 + 跨管道路由，把每一步决策都变成可观测的状态
-- 🧠 **多层记忆系统** —— 情景记忆（EPISODE）+ 语义记忆（SEMANTIC），三种检索方式 × 三种注入方式灵活组合
+- 🔌 **插件化管道架构** —— 6 种路由信号（`next_llm` / `next_tool` / `end` / `wait` / `delegate` / `decision`）+ 暂停/恢复机制 + 跨管道路由，把每一步决策都变成可观测的状态；插件级错误另设 `ABORT` / `SKIP` / `RETRY` / `FALLBACK` 四种策略框架（当前默认统一 `RETRY`，可按工具维度扩展）
+- 🧠 **多层记忆系统** —— 情景记忆（EPISODE）+ 语义记忆（SEMANTIC），三种注入方式（FULL / RETRIEVAL / SUMMARY）× 三种检索方式（VECTOR / KEYWORD / TAGWAVE，默认启用前两者，TAGWAVE 波浪检索器可注入扩展）灵活组合
 - 🛠️ **40+ 内置工具** —— 文件、Shell、代码搜索、浏览器、网络、记忆、媒体生成、IDE 集成（实际 41 个 tool.py 实现）
 - 🌐 **多通道接入** —— Web、CLI、钉钉、飞书、QQ、企微、HTTP API 共享同一套内核
 - 📐 **MCP 协议兼容** —— 完整支持 Model Context Protocol，可接入任何 MCP 服务
-- 🔁 **复盘系统** —— 情景记忆积累到阈值或到达间隔时自动触发，由 `review_agent` 调用 LLM 深度复盘管道（失败时降级到 `ReviewEngine`），产出可复用经验并清理过期记忆（实现于 `src/memory/maintenance/{review_engine,service,cleanup_engine}.py` + `src/tools/builtin/trigger_review/` + `config/agents/system/review_agent.yaml`）
+- 🔁 **复盘系统** —— 由 `trigger_review` 工具按需触发 `review_agent`，对已结束管道做 LLM 深度复盘，产出经验报告驱动 Agent 配置/插件/工具的迭代（早期定时触发与模板化提取的 A 路径已在演进中移除，统一收敛为 B 路径）；配套按年龄/容量/复盘状态决策的记忆清理机制（实现于 `src/memory/maintenance/{review_engine,service,cleanup_engine}.py` + `src/tools/builtin/trigger_review/` + `config/agents/system/review_agent.yaml`）
 
 ### 技术栈
 
@@ -49,7 +49,7 @@
 几乎所有行为都可以通过 YAML / 配置文件定制，不需要改代码。Agent 身份、提示词、工具集、模型选择、硬约束/软约束、输入输出 Schema 全部可配置。
 
 ### 2. 工具的精细化工程设计
-所有工具遵循统一接口契约（`name` / `when_to_use` / `when_not_to_use` / `input_schema` / `examples` / `caveats`），支持 ABORT / SKIP / FALLBACK / RETRY 四种错误策略。**当前实现 41 个内置工具**（含 MCP 外部工具接入）。
+所有工具遵循统一接口契约（`name` / `when_to_use` / `when_not_to_use` / `input_schema` / `examples` / `caveats`），预留了 `ABORT` / `SKIP` / `RETRY` / `FALLBACK` 四种错误策略框架（当前 ToolCore 默认 `RETRY`，可按工具维度扩展）。**当前实现 41 个内置工具**（含 MCP 外部工具接入）。
 
 ### 3. 智能会话——不只聊天，更是"会思考的对话"
 
@@ -58,7 +58,7 @@
 > **规划中（0.2.0+）**：投票面板、媒体时间线、思考模式开关等交互增强功能尚未在当前版本实现，详见 [ROADMAP.md](ROADMAP.md)。
 
 ### 4. 前端亮点——好看、好用、好定制
-7 套预设主题（含深空指挥台、深色、浅色、海洋微风等）、全量配置可视化、YAML 字段自动映射表单控件。
+8 套主题（5 套编译期预设：深色 / 浅色 / 深空指挥台 / 海洋微风 / 高对比度；3 套动态主题：林间薄雾 / 薰衣草田 / 日落晚霞）、全量配置可视化、YAML 字段自动映射表单控件。
 
 ### 5. 容器任务——复杂长期项目的引擎
 对于"开发一个 App""写一部网络小说""做一个游戏"这类多阶段、有交付物的大任务，容器任务提供完整的方案规划→阶段执行→人类审查→完成验收闭环。
@@ -194,11 +194,11 @@ npm run dev
 
 ---
 
-## 📊 项目状态（基于实际代码，2026-06-23）
+## 📊 项目状态（基于实际代码，2026-07-03）
 
-- **Python 代码**：约 17.5 万行（含 `src/` 和 `tests/`）
-- **前端代码**：约 9.2 万行（`frontend/src/`）
+- **Python 代码**：约 30.8 万行（`src/` ~16.6 万 + `tests/` ~14.2 万）
+- **前端代码**：约 9.6 万行（`frontend/src/`）
 - **内置工具**：41 个（`src/tools/builtin/` 下含 `tool.py` 实现）
 - **真实通道**：6 个（CLI / 钉钉 / 飞书 / QQ / 企微 / WebSocket）
-- **模块数**：33 个（`src/` 下子目录）
-- **测试文件**：335 个（`tests/` 下）
+- **模块数**：35 个（`src/` 下子目录）
+- **测试文件**：376 个（`tests/` 下 `test_*.py`）

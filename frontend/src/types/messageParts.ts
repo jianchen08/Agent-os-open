@@ -3,7 +3,7 @@
  *
  * 设计原则：
  * - 每个 Part 有独立的 state 字段（streaming/done），前端精确控制渲染
- * - Part 按 sequence 排序，支持 text/thinking/tool_call 交错显示
+ * - Part 按数组顺序渲染（= 追加顺序 = 接收顺序），sequence 仅用于历史消息指纹去重
  * - 流式增量通过 appendToPart 追加，不需要 reconcile
  */
 
@@ -21,7 +21,8 @@ export interface TextPart {
   type: 'text'
   content: string
   state: PartState
-  sequence: number
+  /** 仅历史消息（API 映射）使用；流式新建的 part 不赋值，渲染按数组顺序 */
+  sequence?: number
 }
 
 /** 思考过程 Part */
@@ -29,7 +30,8 @@ export interface ThinkingPart {
   type: 'thinking'
   content: string
   state: PartState
-  sequence: number
+  /** 仅历史消息（API 映射）使用；流式新建的 part 不赋值，渲染按数组顺序 */
+  sequence?: number
   durationMs?: number
   steps?: import('./models').ThinkingStep[]
 }
@@ -47,7 +49,8 @@ export interface ToolCallPart {
   resultData?: unknown
   error?: string
   durationMs?: number
-  sequence: number
+  /** 仅历史消息（API 映射）使用；流式新建的 part 不赋值，渲染按数组顺序 */
+  sequence?: number
   progress?: number
   /** 当前执行步骤描述 */
   currentStep?: string
@@ -61,7 +64,8 @@ export interface SystemPart {
   content: string
   level: SystemLevel
   notificationType: string
-  sequence: number
+  /** 仅历史消息（API 映射）使用；流式新建的 part 不赋值，渲染按数组顺序 */
+  sequence?: number
 }
 
 /** 统一 Part 联合类型 */

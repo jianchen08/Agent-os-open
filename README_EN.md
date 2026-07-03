@@ -51,10 +51,12 @@ Almost every behavior can be customized via YAML/config files without changing c
 All tools follow a unified interface contract (`name` / `when_to_use` / `when_not_to_use` / `input_schema` / `examples` / `caveats`), supporting ABORT / SKIP / FALLBACK / RETRY error strategies. **Currently 41 built-in tools** (including MCP external tool integration).
 
 ### 3. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
-Streaming response + real-time thinking display + proactive clarification + approval interaction + Schema forms + voting panels + media timelines + thinking mode toggle.
+Streaming response + real-time thinking display + proactive clarification + approval interaction + Schema forms.
+
+> **Planned (0.2.0+)**: Voting panels, media timelines, thinking-mode toggle and other interaction enhancements are not yet implemented in this version. See [ROADMAP.md](ROADMAP.md).
 
 ### 4. Frontend Excellence — Beautiful, Usable, Customizable
-7 preset themes (Deep Space Command Center, Dark, Light, Ocean Breeze, etc.), full configuration visualization, YAML-to-form auto-mapping.
+8 themes (5 built-in presets: Dark / Light / Deep Space Command Center / Ocean Breeze / High Contrast; plus 3 dynamic themes: Forest Mist / Lavender Field / Sunset Glow, discovered via a stateless backend manifest at `frontend/public/themes/*.json`), full configuration visualization, YAML-to-form auto-mapping.
 
 ### 5. Container Tasks — Engine for Complex Long-term Projects
 For multi-stage tasks with deliverables ("develop an App", "write a novel", "make a game"), container tasks provide a complete solution planning → phase execution → human review → final acceptance loop.

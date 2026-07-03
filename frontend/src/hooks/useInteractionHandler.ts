@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { API_ENDPOINTS } from '@/constants/api'
 import { ROUTES } from '@/constants/routes'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
@@ -19,6 +20,22 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 
 /** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
 let _isSubscribed = false
+
+/**
+ * 把后端 `/interaction/pending` 返回的 record（嵌套结构）适配为 `parseInteractionEvent` 期望的扁平结构。
+ *
+ * record 形如 `{ id, session_id, message_data: { request_id?, interaction_mode, ... } }`，
+ * 而 WS payload 与 parseInteractionEvent 期望的是扁平 `{ request_id, interaction_mode, session_id, ... }`。
+ * 这里把 message_data 拍平、用顶层 id 兜底 request_id，使恢复路径能复用同一套解析逻辑。
+ */
+function normalizeRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const messageData = (record.message_data as Record<string, unknown>) || {}
+  return {
+    ...messageData,
+    request_id: messageData.request_id || (record.id as string) || '',
+    session_id: (record.session_id as string) || '',
+  }
+}
 
 /** 从 WebSocket interaction_request 事件数据解析为 PendingInteraction 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容 */
 async function parseInteractionEvent(
@@ -144,16 +161,18 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
     const requestToNotificationMap = new Map<string, string>()
 
-    const handleInteractionRequest = async (data: Record<string, unknown>) => {
-      const parsed = await parseInteractionEvent(data)
-      if (!parsed) {
-        console.warn('[InteractionHandler] parseInteractionEvent returned null')
-        return
-      }
+    /**
+     * 把已解析的交互写入对应 store（去重 + mode 分流）。
+     * WS 实时推送与刷新恢复共用此入口，避免两套写入逻辑产生行为分叉。
+     * 返回 true 表示这是一条新交互（之前不存在）。
+     */
+    const ingestParsedInteraction = (
+      parsed: Omit<PendingInteraction, 'status'>,
+    ): boolean => {
       const existing = useInteractionStore.getState().pendingInteractions.find(
         (i) => i.requestId === parsed.requestId,
       )
-      if (existing) return
+      if (existing) return false
 
       // choice/conversation 模式在通知中心产生冗余通知。
       // - choice/conversation 模式：只写入 interactionStore（交互卡片已在聊天区域展示）
@@ -171,6 +190,18 @@ export function useInteractionHandler(sessionId: string | undefined) {
         // choice/conversation 模式：只写入交互 Store，由 GlobalInteractionOverlay 全局展示
         addInteraction(parsed)
       }
+      return true
+    }
+
+    const handleInteractionRequest = async (data: Record<string, unknown>) => {
+      const parsed = await parseInteractionEvent(data)
+      if (!parsed) {
+        console.warn('[InteractionHandler] parseInteractionEvent returned null')
+        return
+      }
+
+      const isNew = ingestParsedInteraction(parsed)
+      if (!isNew) return
 
       // 避免重复通知。
       playNotificationSound().catch(() => {
@@ -258,6 +289,34 @@ export function useInteractionHandler(sessionId: string | undefined) {
       }
     }
 
+    /** 1 秒防抖时间戳，避免重连风暴下重复拉取 pending 列表。 */
+    let lastRestoreAt = 0
+
+    /**
+     * 从后端 `/interaction/pending` 拉取仍待处理的交互请求并恢复到 store。
+     * 覆盖「页面刷新 / WS 重连」后交互卡片丢失的场景：WS 推送是 fire-and-forget，
+     * 不重推历史请求，故由本函数在初始化与重连时主动拉取重建。
+     * 复用 ingestParsedInteraction 完成去重与 mode 分流，addInteraction 自身也会去重。
+     */
+    const restorePendingInteractions = async () => {
+      const now = Date.now()
+      if (now - lastRestoreAt < 1000) return
+      lastRestoreAt = now
+
+      try {
+        const resp = await apiClient.get(API_ENDPOINTS.INTERACTION.PENDING)
+        const items = (resp.data?.items as Record<string, unknown>[]) || []
+        for (const record of items) {
+          const normalized = normalizeRecord(record)
+          const parsed = await parseInteractionEvent(normalized)
+          if (!parsed) continue
+          ingestParsedInteraction(parsed)
+        }
+      } catch (err) {
+        console.warn('[InteractionHandler] 恢复待处理交互失败:', err)
+      }
+    }
+
     globalWS.subscribe('_status', handleWsStatusChange as any)
 
     globalWS.subscribe(
@@ -272,12 +331,18 @@ export function useInteractionHandler(sessionId: string | undefined) {
       'interaction_timeout',
       handleInteractionTimeout as any,
     )
+    // WS 重连后恢复 pending 交互（断线期间可能错过推送，或刷新后内存已清空）
+    globalWS.subscribe('reconnected', restorePendingInteractions)
+
+    // 挂载即拉取一次：覆盖纯刷新、WS 尚未触发 reconnected 的窗口
+    restorePendingInteractions()
 
     return () => {
       globalWS.unsubscribe('_status', handleWsStatusChange as any)
       globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest as any)
       globalWS.unsubscribe('interaction_cancelled', handleInteractionCancelled as any)
       globalWS.unsubscribe('interaction_timeout', handleInteractionTimeout as any)
+      globalWS.unsubscribe('reconnected', restorePendingInteractions)
       _isSubscribed = false
     }
   }, [addInteraction, dismissInteraction])
@@ -316,7 +381,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
   )
 
   const navigateToTab = useCallback(
-    async (requestId: string, threadId: string, title?: string, agentLevelStr?: string, interactionSessionId?: string) => {
+    async (requestId: string, pipelineId: string, title?: string, agentLevelStr?: string, interactionSessionId?: string) => {
       const currentSid = useSessionStore.getState().activeSessionId
       if (!currentSid) {
         console.error('[useInteractionHandler.navigateToTab] 无活跃会话，无法处理交互跳转', requestId)
@@ -330,8 +395,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
       markEntered(requestId)
 
-      if (!threadId) {
-        console.error('[useInteractionHandler.navigateToTab] 交互请求缺少 threadId，无法跳转', requestId)
+      if (!pipelineId) {
+        console.error('[useInteractionHandler.navigateToTab] 交互请求缺少 pipelineId，无法跳转', requestId)
         return
       }
 
@@ -355,7 +420,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
       }
 
       // 使用全局管道导航服务跳转（自动处理跨会话查找和标签创建）
-      await navigateToPipeline(threadId, {
+      await navigateToPipeline(pipelineId, {
         agentName: title || '对话',
         agentLevel,
       })

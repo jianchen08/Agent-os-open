@@ -99,17 +99,15 @@ export function FiveSpaceLayout({
   const closeWorkspaceTab = useLayoutModeStore((s) => s.closeWorkspaceTab)
   const exitFullscreen = useLayoutModeStore((s) => s.exitFullscreen)
 
-  /** 工作区刷新 key，用于驱动 FileTreeWidget 等组件重新加载 */
+  /** 工作区刷新 key，用于驱动 FileTreeWidget 等组件重新加载。
+   * 直接作为 renderTabContent 的依赖传入任务树：任务状态事件 bump workspaceDataVersion
+   * → 此处重算新字符串 → renderTabContent 闭包捕获新值 → 任务树收到新 refreshKey 重取。
+   * CodeEditor 不受影响：WorkspacePanel 用 key=tab.id（稳定），CodeEditor props 不变，
+   * React 复用同一实例，内部 state 保留，不会因 callback identity 变化而 remount。 */
   const workspaceRefreshKey = useMemo(
     () => `${connectionStatus?.lastConnectedAt ?? ''}-v${workspaceDataVersion}`,
     [connectionStatus?.lastConnectedAt, workspaceDataVersion],
   )
-
-  /** 使用 ref 保持最新的 workspaceRefreshKey，避免 renderTabContent 依赖变化导致 CodeEditor 重新挂载 */
-  const workspaceRefreshKeyRef = useRef(workspaceRefreshKey)
-  useEffect(() => {
-    workspaceRefreshKeyRef.current = workspaceRefreshKey
-  }, [workspaceRefreshKey])
 
   /** 文件编辑器自动刷新逻辑 每 3 秒轮询检查已打开的文件编辑器 Tab 对应的文件是否被外部修改， */
   useEffect(() => {
@@ -355,7 +353,7 @@ export function FiveSpaceLayout({
                     {...(spaceConfig.props as Record<string, unknown> ?? {})}
                     dataSource={spaceConfig.dataSource as string}
                     sessionId={activeSessionId}
-                    refreshKey={workspaceRefreshKeyRef.current}
+                    refreshKey={workspaceRefreshKey}
                     onNodeClick={(node: any) => handleTaskNodeClick(node)}
                   />
                 </div>
@@ -438,7 +436,7 @@ export function FiveSpaceLayout({
                 <WidgetComponent
                   dataSource={tab.dataSource}
                   sessionId={activeSessionId}
-                  refreshKey={workspaceRefreshKeyRef.current}
+                  refreshKey={workspaceRefreshKey}
                   showStatus={false}
                   showProgress={false}
                   showSearch={true}
@@ -459,7 +457,7 @@ export function FiveSpaceLayout({
         </div>
       )
     },
-    [activeSessionId, handleTaskNodeClick],
+    [activeSessionId, handleTaskNodeClick, workspaceRefreshKey],
   )
 
   // Render floating window content (placeholder)

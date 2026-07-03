@@ -4,7 +4,7 @@
 
 > **数据准确性说明**（2026-06-23）：本架构文档基于实际代码核对
 > - Python 版本：3.10+（`pyproject.toml` `requires-python = ">=3.10"`）
-> - FastAPI / Redis：在 25+ 文件中实际 import，但 `pyproject.toml` 仅声明 9 个核心依赖（属依赖管理漏洞，详见 README）
+> - FastAPI / Redis：在 25+ 文件中实际 import，均已声明于 `pyproject.toml` 的 24 个核心运行时依赖中
 > - React 版本：19.2（`frontend/package.json` `"react": "^19.2.0"`）
 > - 工具数量：41 个 tool.py 实现（实际），下文用"40+ 内置工具"表述
 > - 通道数量：6 个真实通道（CLI / 钉钉 / 飞书 / QQ / 企微 / WebSocket），HTTP API 走 `src/channels/api/` 作为 REST 端点
@@ -245,9 +245,10 @@ class Tool(Protocol):
 
 ```
 src/channels/
-├── web/          # Web UI（React + WebSocket）
+├── websocket/    # WebSocket 后端（Web UI 后端，主入口 app_factory.py）
 ├── cli/          # CLI
-├── http/         # HTTP API
+├── api/          # HTTP API（FastAPI，21 个 routes_*.py）
+├── gateway/      # 网关层（鉴权 / 消息标准化 / 会话路由，IM 通道共用）
 ├── dingtalk/     # 钉钉
 ├── feishu/       # 飞书
 ├── wecom/        # 企微
@@ -317,11 +318,11 @@ src/channels/
 | 新增 Agent | 写 YAML | `config/agents/*.yaml` |
 | 新增内置工具 | 实现 Tool 协议 + 注册 | `src/tools/builtin/` |
 | 新增 MCP 服务 | 启动 MCP Server + 配置 | `mcp-servers/` |
-| 新增 IM 通道 | 实现 ChannelAdapter | `src/channels/<platform>/` |
-| 新增前端主题 | 写 TS 主题对象 | `frontend/src/themes/` |
+| 新增 IM 通道 | 继承 `BaseComboAdapter` 实现 `adapter.py` | `src/channels/<platform>/` |
+| 新增前端主题 | 写 TS 主题对象（预设）或 JSON（动态） | `frontend/src/config/themes/presets/` 或 `frontend/public/themes/` |
 | 新增 Schema 表单 | 写 JSON Schema | 任何 `ui_schema` 字段 |
-| 新增触发器类型 | 实现 TriggerHandler | `src/triggers/` |
-| 自定义路由信号 | 扩展 RoutingSignal 枚举 | `src/pipeline/signals.py` |
+| 新增触发器类型 | 继承 `src/triggers/triggers/base.py` 基类 | `src/triggers/triggers/` |
+| 自定义路由信号 | 扩展 `engine_route.py` 的路由分支 | `src/pipeline/engine_route.py` |
 
 ---
 
@@ -347,7 +348,7 @@ src/channels/
 ### 4. 找"变化方向"——什么会变，什么不会变？
 > 把"会变的"封装在内部，"不变的"暴露为接口。
 
-**例**：LLM Provider 实现会变（新增厂商、切换 API），但"调用 LLM 返回文本"这个动作不变。所以 Provider 实现藏在 `llm_providers/` 内部，外部只看到 `llm.complete(messages)`。
+**例**：LLM Provider 实现会变（新增厂商、切换 API），但"调用 LLM 返回文本"这个动作不变。所以 Provider 实现藏在 `src/llm/`（及 `provider_adapters/`）内部，外部只看到 `llm.complete(messages)`。
 
 ---
 

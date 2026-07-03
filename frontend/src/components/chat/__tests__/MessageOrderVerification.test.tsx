@@ -253,16 +253,13 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 3.5 tool_call sequence fallback 回归（修复：常驻底部的工具卡片）
-  //    根因：toolHandler 曾用 Date.now() 作为 tool_call part 的 sequence fallback，
-  //    Date.now() 是天文数字，渲染层按 part.sequence 升序排序时把 tool_call 永久推到
-  //    末尾，导致后续流式文本渲染在工具卡片上方（工具卡片常驻气泡底部）。
-  //    修复后 fallback 用 allocatePartSequence（part 级 max+1），tool_call 排在创建时刻
-  //    的内容之后。本测试直接在渲染层验证排序语义。
+  // 3.5 part 渲染顺序 = 数组顺序（与 sequence 数值无关）
+  //    简化重构：渲染层不再按 sequence 排序，直接按 parts 数组顺序遍历。
+  //    流式新建的 part 不赋 sequence；历史消息 part 在 API 映射时按顺序编号。
+  //    这样彻底消除「fallback 大数把 part 永久推到末尾」的工具卡片常驻底部 bug。
   // -----------------------------------------------------------------------
-  describe('tool_call sequence fallback 回归', () => {
-    it('tool_call 后续追加的 text 不应排到 tool_call 之前（渲染层按 sequence 升序）', () => {
-      // 模拟修复后状态：text(1) → tool_call(2, max+1) → text(3, max+1)
+  describe('part 渲染顺序 = 数组顺序', () => {
+    it('parts 按 sequence 升序排列时，渲染顺序与数组顺序一致', () => {
       const message = createMessage({
         parts: [
           textPart('调用前', 1),
@@ -273,28 +270,39 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
       const { result } = renderHook(() => useMessageRender({ message }))
 
-      const types = extractFragmentTypes(result.current.fragments)
-      // 工具卡片排在它之后的文本之前，不被推到末尾
-      expect(types).toEqual(['text', 'tool_call', 'text'])
+      expect(extractFragmentTypes(result.current.fragments)).toEqual(['text', 'tool_call', 'text'])
     })
 
-    it('若 tool_call sequence 被错误地设为天文数字（旧 Date.now() 行为），渲染时会被推到末尾——这是要规避的反例', () => {
-      // 反例：模拟旧 bug —— tool_call 用 Date.now() 量级的大数 sequence
-      const hugeSeq = Date.now()
+    it('sequence 数值乱序时，渲染仍按数组顺序（sequence 不影响渲染）', () => {
+      // 工具卡片的 sequence 故意是天文数字（模拟旧的 Date.now() fallback 残留），
+      // 后续文本 sequence 是小数。重构后渲染按数组顺序，工具卡片不再被推到末尾。
       const message = createMessage({
         parts: [
           textPart('调用前', 1),
-          toolCallPart('tc-1', 'read_file', 'done', hugeSeq),
+          toolCallPart('tc-1', 'read_file', 'done', 9999999999999),
           textPart('调用后', 2),
         ],
       })
 
       const { result } = renderHook(() => useMessageRender({ message }))
 
-      const types = extractFragmentTypes(result.current.fragments)
-      // 此场景下工具卡片被错误地推到末尾（正是旧 bug 的表现），
-      // 用以说明"fallback 必须用 max+1 而非 Date.now()"。
-      expect(types).toEqual(['text', 'text', 'tool_call'])
+      expect(extractFragmentTypes(result.current.fragments)).toEqual(['text', 'tool_call', 'text'])
+    })
+
+    it('流式新建的 part 无 sequence 字段时，渲染按数组顺序（即接收顺序）', () => {
+      // 模拟流式真实数据：part 上根本没有 sequence 字段
+      const message = createMessage({
+        parts: [
+          { type: 'thinking', content: '思考中', state: 'done' } as MessagePart,
+          { type: 'text', content: '调用前', state: 'done' } as MessagePart,
+          { type: 'tool_call', callId: 'tc-1', name: 'read_file', args: {}, state: 'done' } as MessagePart,
+          { type: 'text', content: '调用后', state: 'streaming' } as MessagePart,
+        ],
+      })
+
+      const { result } = renderHook(() => useMessageRender({ message }))
+
+      expect(extractFragmentTypes(result.current.fragments)).toEqual(['thinking', 'text', 'tool_call', 'text'])
     })
   })
 

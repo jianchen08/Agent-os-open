@@ -74,17 +74,6 @@ export function allocateNextSequence(pipelineId: string, backendSequence?: numbe
   return localMax + 1
 }
 
-/** 分配 Part 级 sequence 的 fallback 值（后端事件未携带 sequence 时）。 渲染层 buildFragmentsFromParts 按 part.sequence 数值升序渲染。若 fallback 用 */
-export function allocatePartSequence(pipelineId: string, messageId: string): number {
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
-  const parts = msg?.parts || []
-  const maxSeq = parts.reduce(
-    (max: number, p: any) => Math.max(max, typeof p.sequence === 'number' ? p.sequence : 0), 0,
-  )
-  return maxSeq + 1
-}
-
 /** 确保流式占位符消息存在 合并 startStreaming + setStreamingForTab + addMessage 三步操作， */
 export function ensureStreamingPlaceholder(
   pipelineId: string,

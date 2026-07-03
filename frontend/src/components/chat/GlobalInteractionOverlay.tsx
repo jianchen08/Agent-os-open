@@ -89,7 +89,7 @@ export function GlobalInteractionOverlay() {
       try {
         await navigateToTab(
           currentInteraction.requestId,
-          currentInteraction.threadId,
+          currentInteraction.pipelineId || currentInteraction.threadId,
           currentInteraction.title,
           (currentInteraction as any).agentLevel,
           currentInteraction.sessionId,

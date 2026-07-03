@@ -9,7 +9,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { allocatePartSequence, ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
+import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -20,7 +20,6 @@ const _chunkBuffer = new Map<string, {
   chunks: string[]
   pipelineId: string
   messageId: string
-  firstSequence?: number
 }>()
 let _flushRafId: number | null = null
 
@@ -42,9 +41,7 @@ function _flushChunks(): void {
         type: 'text',
         content: '',
         state: 'streaming',
-        // sequence fallback: 缺失时用 part 级 max+1，避免 Date.now() 大数
-        // 把文本推到思考 part 之后（详见 allocatePartSequence）。
-        sequence: entry.firstSequence ?? allocatePartSequence(entry.pipelineId, entry.messageId),
+        // part 渲染按数组顺序（= 追加顺序 = 接收顺序），不分配 sequence。
       })
       partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
     }
@@ -142,13 +139,12 @@ export function handleStreamChunk(eventData: any) {
   }
 
   // 缓冲 chunk，由 RAF 统一刷写到 store（合并同帧多个 chunk 为单次更新）
-  const sequence = eventData.sequence ?? eventData.data?.sequence
   const bufferKey = `${pipelineId}::${messageId}`
   const existing = _chunkBuffer.get(bufferKey)
   if (existing) {
     existing.chunks.push(content)
   } else {
-    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId, firstSequence: sequence })
+    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId })
   }
   _scheduleFlush()
 }
@@ -226,7 +222,6 @@ export function handleStreamEnd(eventData: any) {
               type: 'system',
               content: 'AI 回复内容为空，请重试',
               level: 'warning',
-              sequence: Date.now(),
             })
             pipelineStore.getState().updateMessage(pipelineId, messageId, {
               status: 'completed',

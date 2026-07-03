@@ -15,7 +15,7 @@
 
 **发布日期**：2026-06-22
 **代码状态**：基于实际代码核对（pyproject.toml、package.json、src/ 目录）
-**项目规模**：~175K Python LOC / ~92K 前端 LOC / 41 内置工具 / 6 真实通道 / 335 测试文件
+**项目规模**：Python ~308K LOC（src ~166K + tests ~142K）/ 前端 ~96K LOC / 41 内置工具 / 6 真实通道 / 376 测试文件
 
 ### ✨ 新增功能
 
@@ -46,7 +46,7 @@
 #### 多通道接入
 - **Web UI** —— React 19 + @lobehub/ui
 - **CLI** —— 命令行交互入口
-- **HTTP API** —— RESTful 接口（19 个路由模块）
+- **HTTP API** —— RESTful 接口（21 个 `routes_*.py` 路由模块，位于 `src/channels/api/`）
 - **IM 适配器框架** —— 钉钉、飞书、QQ、企微共用网关层
 
 #### 容器任务系统
@@ -56,10 +56,10 @@
 - **触发器系统** —— Cron 定时 / 事件触发 / 间隔轮询
 
 #### 前端亮点
-- **7 套预设主题** —— 深色、浅色、现代深色/浅色、深空指挥台、海洋微风、高对比度
+- **8 套主题** —— 5 套编译期预设（深色 / 浅色 / 深空指挥台 / 海洋微风 / 高对比度）+ 3 套动态主题（林间薄雾 / 薰衣草田 / 日落晚霞，由后端无状态清单 `frontend/public/themes/*.json` 发现）
 - **全量配置可视化** —— 后端 YAML 字段自动映射表单
 - **实时消息系统** —— WebSocket 流式响应 + 思考态展示
-- **结构化交互** —— 审批弹窗 / Schema 表单 / 投票面板 / 媒体时间线
+- **结构化交互** —— 审批弹窗 / Schema 表单（投票面板 / 媒体时间线 / 思考模式开关属 0.2.0+ 规划，尚未实现）
 
 #### MCP 协议
 - **完整 MCP 兼容** —— 支持 Model Context Protocol 标准
@@ -67,13 +67,13 @@
 - **多 MCP 服务并行接入**
 
 #### 部署
-- **Docker Compose 一键启动** —— Redis + 后端 + 前端 + Nginx
+- **Docker Compose 一键启动** —— 前端（静态托管）+ Redis；后端 FastAPI 运行在宿主机（`python -m channels.websocket.app_factory`）
 - **多环境配置** —— dev / staging / prod 通过 `.env` 切换
 - **健康检查** —— `/health` 端点
 
 ### 🛠️ 技术栈
 
-- **后端**：Python 3.10（`pyproject.toml` `requires-python = ">=3.10"`）/ FastAPI 0.110+（代码实际使用，pyproject.toml 暂未声明）/ Redis 5+（代码实际使用，pyproject.toml 暂未声明）/ Pydantic v2
+- **后端**：Python 3.10（`pyproject.toml` `requires-python = ">=3.10"`）/ FastAPI 0.110+（已声明于 `pyproject.toml`）/ Redis 5+（已声明于 `pyproject.toml`）/ Pydantic v2
 - **前端**：React 19.2（`frontend/package.json` `"react": "^19.2.0"`）/ TypeScript 5.9 / Vite 8 / @lobehub/ui / Tailwind CSS 4
 - **AI 接入**：OpenAI / Anthropic / DeepSeek V4（实际配置）/ 智谱 GLM（实际配置）/ Ollama
 - **协议**：MCP（Model Context Protocol）
@@ -89,7 +89,7 @@
 
 ### ⚠️ 已知限制
 
-- **依赖管理漏洞**：`pyproject.toml` 仅声明 9 个核心依赖，FastAPI 和 Redis 在 25+ 文件中实际 `import` 但未声明。安装时需手动 `pip install fastapi>=0.110 redis>=5.0`（Docker 镜像不受影响）
+- **依赖已收敛**：`pyproject.toml` 已声明全部 24 个核心运行时依赖（含 fastapi、redis、PyJWT、bcrypt、cryptography、httpx、sqlalchemy 等），`requirements.txt` 镜像同步。`pip install -e .` 或 `pip install -r requirements.txt` 即可直接运行，无需手动补装。（早期版本的「FastAPI/Redis 未声明」问题已修复）
 - **自进化闭环步骤 ⑥ 半自动**：复盘产出经验后，"自动修改配置/新增插件"步骤目前依赖人工触发 `hot_swap`，未形成完全自动闭环
 - 单实例部署（Redis 作为共享状态层，水平扩展需额外配置）
 - 暂未提供官方 Helm Chart（计划在 0.3.0 加入）

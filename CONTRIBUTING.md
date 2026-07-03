@@ -36,9 +36,8 @@
 
 1. **Fork 仓库** 并克隆到本地
 2. 创建特性分支：`git checkout -b feature/your-feature-name`
-3. 安装开发依赖：`pip install -e ".[dev]"`
-4. 补充未声明的运行时依赖：`pip install fastapi>=0.110 redis>=5.0`（pyproject.toml 暂未声明）
-5. 阅读 [开发规范](#开发规范) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+3. 安装开发依赖：`pip install -e ".[dev]"`（运行时依赖已在 `pyproject.toml` 中全部声明，无需手动补装 FastAPI/Redis）
+4. 阅读 [开发规范](#开发规范) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ### 编码流程
 
