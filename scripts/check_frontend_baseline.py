@@ -31,9 +31,12 @@ def count_vitest_failures() -> int:
         shell=True,
     )
     output = result.stdout + result.stderr
-    # 匹配 "Tests  109 failed | 737 passed (846)"
-    m = re.search(r"(\d+)\s+failed", output)
-    return int(m.group(1)) if m else 0
+    # 去除 ANSI 颜色码
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    # 精确匹配总结行 "Tests  109 failed | 737 passed (846)"
+    # 注意区分 "Test Files  N failed" 和 "Tests  N failed"，取后者
+    matches = re.findall(r"Tests\s+(\d+)\s+failed", output)
+    return int(matches[-1]) if matches else 0
 
 
 def count_eslint_errors() -> int:
