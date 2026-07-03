@@ -51,4 +51,5 @@ tests/suites/core/test_l0_reconstruct_e2e.py::TestFileSplitting::test_over_1000_
 tests/connectors/test_integration.py::TestConnectorHealthReconnectIntegration::test_health_check_with_persistent_failure
 tests/connectors/test_strategy_health_config.py::TestHealthCheck::test_health_check_reconnect_failure
 tests/connectors/test_vscode_connector.py::TestConnect::test_connect_failure_sets_error_state
+tests/tools/builtin/bash/test_integration.py::TestShellVariableExpansion::test_multiline_script
 
