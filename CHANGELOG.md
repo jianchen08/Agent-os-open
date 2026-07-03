@@ -15,7 +15,7 @@
 
 **发布日期**：2026-06-22
 **代码状态**：基于实际代码核对（pyproject.toml、package.json、src/ 目录）
-**项目规模**：Python ~308K LOC（src ~166K + tests ~142K）/ 前端 ~96K LOC / 41 内置工具 / 6 真实通道 / 376 测试文件
+**项目规模**：Python ~304K LOC（src ~162K + tests ~142K）/ 前端 ~95K LOC / 41 内置工具 / 6 真实通道 / 415 测试文件
 
 ### ✨ 新增功能
 
