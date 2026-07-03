@@ -320,14 +320,6 @@ function mergePreservingStreaming(messages: Message[]): Message[] {
     }
   }
   flush()
-  // 【诊断】注入分割 bug 定位：输出 mergePreservingStreaming 的输入与输出
-  // 复现注入场景后查看控制台，确认 system 是否被识别为边界
-  console.warn(
-    '[MERGE-DIAG] preserveStreaming in->out:',
-    messages.map((m) => m.role).join(','),
-    '=>',
-    result.map((m) => m.role).join(','),
-  )
   return result
 }
 

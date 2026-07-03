@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os as _os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -42,14 +43,25 @@ class RateLimitPolicy:
 #   WRITE  适中   — 写操作消耗资源较多（120 次/分钟）
 #   READ   最宽松 — 读操作可高并发（300 次/分钟）
 #   DEFAULT 兜底  — 未分类请求（200 次/分钟）
+#
+# 环境变量覆盖：测试/CI 环境可通过 RATE_LIMIT_AUTH_MAX 等环境变量放宽限流，
+# 避免 E2E 测试并发登录触发 429。生产环境不设这些变量，保持默认严格策略。
+
+
+def _policy_with_env_override(category: str, default_max: int, window: int = 60) -> RateLimitPolicy:
+    """支持环境变量覆盖限流阈值（RATE_LIMIT_<CATEGORY>_MAX）。"""
+    env_key = f"RATE_LIMIT_{category}_MAX"
+    max_requests = int(_os.environ.get(env_key, default_max))
+    return RateLimitPolicy(max_requests=max_requests, window_seconds=window)
+
 
 DEFAULT_POLICIES: dict[RateLimitCategory, RateLimitPolicy] = {
-    RateLimitCategory.AUTH: RateLimitPolicy(max_requests=10, window_seconds=60),
-    RateLimitCategory.UPLOAD: RateLimitPolicy(max_requests=20, window_seconds=60),
-    RateLimitCategory.DELETE: RateLimitPolicy(max_requests=30, window_seconds=60),
-    RateLimitCategory.WRITE: RateLimitPolicy(max_requests=120, window_seconds=60),
-    RateLimitCategory.READ: RateLimitPolicy(max_requests=300, window_seconds=60),
-    RateLimitCategory.DEFAULT: RateLimitPolicy(max_requests=200, window_seconds=60),
+    RateLimitCategory.AUTH: _policy_with_env_override("AUTH", 10),
+    RateLimitCategory.UPLOAD: _policy_with_env_override("UPLOAD", 20),
+    RateLimitCategory.DELETE: _policy_with_env_override("DELETE", 30),
+    RateLimitCategory.WRITE: _policy_with_env_override("WRITE", 120),
+    RateLimitCategory.READ: _policy_with_env_override("READ", 300),
+    RateLimitCategory.DEFAULT: _policy_with_env_override("DEFAULT", 200),
 }
 
 
