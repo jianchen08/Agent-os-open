@@ -362,17 +362,8 @@ class TrackPlugin(IOutputPlugin):
             # 见 _resolve_ai_record_id 的 说明（修复多轮/resume 场景 id 断裂导致的重复渲染）。
             preset_record_id = ctx.state.get("preset_ai_record_id") or ""
             ai_record_id = self._resolve_ai_record_id(pipeline_run_id, preset_record_id)
-            # （已修订）
-            #   一个 run() 包含多轮 LLM 迭代（while 循环），bridge.message_id 在整个
-            #   run 期间不变（一个气泡），但每轮迭代都会落盘一条 ai 记录。原方案给
-            #   iteration>1 的记录追加 #iteration 后缀以避免 storage._records dict 互相
-            #   覆盖。但这破坏了 id 契约——record_id 与前端 stream_start 下发的裸
-            #   message_id 不一致，导致前端 initFromAPI 精确 id 对账失败，乐观占位符
-            #   （虚高 sequence）无法被 API 权威消息替换而残留，表现为「流式气泡下
-            #   多出一个固定气泡 / 旧消息卡在列表底部」。
-            # 修订方案: record_id 始终保持裸 message_id（与前端 id 契约一致）；
-            #   同 record_id 多轮记录的覆盖问题改由 ExecutionRecordStorage 的组合 key
-            #   （record_id::sequence）解决，不再在此处加后缀。
+            # record_id 始终用裸 message_id（与前端 id 契约一致）；
+            # 同 record_id 多轮记录的覆盖由 ExecutionRecordStorage 组合 key（record_id::sequence）解决。
             ai_record = ExecutionRecordData(
                 record_id=ai_record_id,
                 pipeline_run_id=pipeline_run_id,

@@ -762,8 +762,7 @@ class TaskSubmitTool(BuiltinTool):
                     )
                 from pathlib import Path  # noqa: PLC0415
 
-                # 同容器才能 inherit：源任务的工作空间必须属于当前容器，
-                # 否则跨容器继承会导致产出落到错误的容器、合并串台（bdcd592d 根因）。
+                # 同容器才能 inherit，避免产出落到错误容器。
                 _source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
                 _current_container = Path(__file__).resolve().parents[4]
                 if _source_root:
@@ -786,10 +785,8 @@ class TaskSubmitTool(BuiltinTool):
                             "使用空工作空间开始。"
                         ),
                     )
-                # worktree 模式：目录在但 .git 没了 → 源 worktree 已被清理，
-                # 产物文件还在裸目录里但 git 身份（branch）已失效，继续 inherit
-                # 会在后续合并时找不到 branch 而失败（bdcd592d 串台事故根因）。
-                # 报错说明现状，让 agent 自行决定是否去该目录捞取已有产物。
+                # worktree 模式下源 .git 失效则不继承（后续合并找不到 branch），
+                # 报错让 agent 自行决定是否捞取已有产物。
                 if old_ws_meta.get("mode") == "worktree":
                     if not (Path(old_ws_path) / ".git").exists():
                         return create_failure_result(

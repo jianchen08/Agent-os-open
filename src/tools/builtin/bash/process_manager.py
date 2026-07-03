@@ -446,11 +446,7 @@ class ProcessManager:
             info.last_access_time = time.time()
 
     # ── 看门狗：监控失控进程 ──────────────────────────────────────
-    # 解决问题：bash_execute 超时后返回 running 状态但不杀进程（设计意图，
-    # 为了让 Agent 用 continue 续接长期任务）。但当 Agent 抛弃进程（拿到结果
-    # 转去干别的）或 Agent 协程自身卡死时，进程成了孤儿无限运行，可能耗尽
-    # 系统资源（如 find / 爆 900 万句柄拖垮 WSL/Docker）。
-    # 看门狗后台周期采样所有 running 进程，满足任一条件直接杀（不通知 Agent）：
+    # 周期采样所有 running 进程，满足任一条件直接杀（不通知 Agent）：
     #   1. 资源失控：句柄 > 阈值 且 连续 N 次采样都在增长
     #   2. 孤儿进程：running 超 30 分钟无任何外部访问
 

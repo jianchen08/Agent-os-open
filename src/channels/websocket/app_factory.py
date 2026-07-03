@@ -446,13 +446,8 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                                         pipeline_id,
                                         request_record.get("status"),
                                     )
-                                    # human_interaction 工具为阻塞执行：工具内部 wait_for_choice()
-                                    # 由 respond() → submit_response() → _set_event_threadsafe() 直接唤醒，
-                                    # 工具返回后引擎自然进入下一轮，无需此处额外 wake()。
-                                    # conversation 模式下，工具返回 conversation_mode=True 后引擎才挂起，
-                                    # 此时应等待用户在对话标签页发新消息（经 send_pipeline_message 注入）唤醒。
-                                    # 旧逻辑在此处用"进入标签页"的 approved 响应直接 wake()，会提前唤醒且不
-                                    # 携带用户消息，既触发一次空转 LLM 调用，又导致用户随后发送的消息无法注入。
+                                    # human_interaction 为阻塞执行，工具返回后引擎自然进入下一轮，无需此处 wake()。
+                                    # conversation 模式下引擎挂起，等待用户在对话标签页发新消息唤醒。
                                     if pipeline_id and pipeline_id.startswith("__eval__"):
                                         logger.info(
                                             "[GlobalWS] 评估交互响应已处理（纯Event，无管道唤醒） | "

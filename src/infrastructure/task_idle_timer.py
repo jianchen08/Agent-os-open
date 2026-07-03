@@ -270,14 +270,7 @@ class TaskIdleTimerMixin:
                 )
                 return False
             for entry in entries:
-                # 兜底：识别 waiting_recovery 死挂状态。引擎进入
-                # EXECUTION_STATUS=waiting_recovery 后会在 wake_event.wait 永久挂起
-                # （无主动唤醒源），但 is_running 仍为 True、engine_task 也未 done。
-                # 仅凭 is_running/engine_task 一律判"在跑"会让 idle_timer 永远不 fail，
-                # pipeline 死挂数小时。现在 error_check 已不再产 waiting_recovery（10 次
-                # 后直接 failed），此处仅保留兜底：若仍有遗留代码路径走出 wait 信号并把
-                # EXECUTION_STATUS 写为 waiting_recovery，idle_timer 会
-                # 在 idle_threshold 周期内识别并 fail，避免再次死挂。
+                # 兜底：识别 waiting_recovery 死挂状态（is_running 仍 True 但实际永久挂起）并 fail。
                 if entry.engine is not None:
                     try:
                         last_state = getattr(entry.engine, "last_state", None) or {}

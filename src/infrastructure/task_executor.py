@@ -25,9 +25,6 @@ from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F
 logger = logging.getLogger(__name__)
 
 
-# _run_engine_isolated 已删除：engine.run() 作为 asyncio.Task 在主事件循环中运行
-
-
 class TaskExecutorMixin:
     """后台任务执行混入类。"""
 

@@ -262,9 +262,6 @@ def _get_call_timeout() -> int:
     return _cached_call_timeout
 
 
-# _route_to_sub_pipeline 已移除，子管道路由统一使用 pipeline.message_bus.send_pipeline_message
-
-
 # ---------------------------------------------------------------------------
 # 流式响应共享辅助函数
 # ---------------------------------------------------------------------------

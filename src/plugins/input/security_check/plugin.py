@@ -170,10 +170,7 @@ class SecurityCheckPlugin(IInputPlugin):
             包含安全决策状态更新的插件执行结果。
             如果检查不通过，会设置 security.decision 为 blocked。
         """
-        # 每轮工具调用独立检查：state 跨轮复用，security.decision 一旦写入会永久驻留，
-        # 若在此处按"已有决策就跳过"短路，会导致第一轮审批通过后后续所有工具调用
-        # （含路径遍历、敏感目录等硬底线）全部被跳过，安全闸门失效。
-        # 历史上此处曾有一段基于 state 缓存的幂等检查，已删除。
+        # 每轮工具调用独立检查，不可短路（否则审批通过后硬底线被跳过，安全闸门失效）。
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
@@ -361,10 +358,7 @@ class SecurityCheckPlugin(IInputPlugin):
         # request_id 预初始化：create_choice_request 抛异常时尚未赋值，
         # 但 except 链日志需引用它，占位为 "-" 表示请求未创建成功。
         request_id = "-"
-        # try 覆盖整个审批交互（创建请求 + 等待响应）：
-        # 创建请求阶段（create_choice_request）抛异常（如服务不可用）同样要软拦截，
-        # 而非上抛导致 PluginChain ABORT 结束管道。历史上 try 仅包裹 wait_for_choice，
-        # 导致"服务不可用"时异常逃逸。
+        # try 覆盖创建请求+等待响应，避免服务异常上抛中断管道。
         try:
             request_id = await interaction_svc.create_choice_request(
                 session_id=session_id,

@@ -754,16 +754,6 @@ class LLMCore(ICorePlugin):
             api_base,
             stream,
         )
-        # TEMP-DEBUG tool_stream 透传诊断：真实运行时 kwargs 里到底有没有
-        _dp_keys = sorted(self._default_params.keys())
-        logger.info(
-            "[TEMP-DEBUG][%s] default_params keys=%s extra_body=%s kwargs.extra_body=%s kwargs.tool_stream=%s",
-            self.name,
-            _dp_keys,
-            self._default_params.get("extra_body"),
-            kwargs.get("extra_body"),
-            kwargs.get("tool_stream"),
-        )
 
         try:
             return await self._adapter.completion(

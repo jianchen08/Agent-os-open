@@ -237,9 +237,7 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
                 llm_call._model = llm_conf.get("model_name", llm_call._model)
                 llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
                 llm_call._context_window = llm_conf.get("context_window")
-                # 同步 default_params：直连模式分支(line 289)会更新，Router 分支历史遗漏，
-                # 导致 tool_stream 等 extra_body 透传参数（配置在 llm.yaml 各模型 default_params）
-                # 在 Router 模式切换模型后永远用 default.yaml 硬编码的那份，配置不生效。
+                # 同步 default_params（与直连模式分支保持一致）。
                 _new_params = llm_conf.get("default_params")
                 if _new_params:
                     llm_call._default_params = _new_params

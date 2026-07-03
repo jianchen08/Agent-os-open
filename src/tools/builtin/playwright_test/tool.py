@@ -34,12 +34,8 @@ class PlaywrightTestTool(BuiltinTool):
     支持 Chromium/Firefox/WebKit 三种浏览器引擎。
     """
 
-    # Playwright async 对象（browser/context/page）与创建它们的事件循环强绑定。
-    # 若默认走 to_thread 独立事件循环：browser_launch 在临时 loop A 内创建的 page，
-    # 其 CDP transport 绑定到 loop A；该调用结束后 loop A 即 close。
-    # 后续 navigate 进入另一个临时 loop B，对 page 调 goto 时底层 connection 已失效
-    # （指向 None），抛 'NoneType' object has no attribute 'send'，三引擎皆然。
-    # 必须固定在主管道事件循环执行，保证对象生命周期跨多次调用一致。
+    # Playwright async 对象与创建它的事件循环强绑定，必须固定在主管道 loop 执行，
+    # 否则跨调用对象生命周期不一致（CDP transport 失效）。
     run_on_main_loop: ClassVar[bool] = True
 
     # 类级别会话存储

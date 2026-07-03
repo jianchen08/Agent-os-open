@@ -534,9 +534,7 @@ class MemoryStore:
         del self.memories[mem_id]
         return True
 
-    # revoke_refresh_token / is_token_revoked 已移除：
-    # token 撤销统一走 TokenManager（Redis），见 P2.2。
-    # routes_auth.py 现直接调 _get_token_manager().revoke_token / _is_token_revoked。
+    # token 撤销统一走 TokenManager（Redis）。
 
 
 # 模块级单例

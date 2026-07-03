@@ -436,10 +436,7 @@ def _get_token_usage() -> dict[str, Any]:
         total = tokens.get("total_tokens", 0)
         if total == 0 and not tokens:
             return None
-        # request_count = 各管道迭代次数之和。管道每轮迭代对应一次 LLM 调用
-        # （engine 在迭代循环开头递增 StateKeys.ITERATION），所以迭代总数即
-        # 真实 LLM 请求数。老实现误用 len(summaries)（管道运行数）当请求数，
-        # 导致监控页把"202 次管道运行"显示成"202 次请求"，严重虚低。
+        # request_count = 各管道迭代次数之和（每轮迭代对应一次 LLM 调用）。
         summaries = storage.list_all_summaries()
         request_count = 0
         for summary in summaries:
@@ -1039,10 +1036,7 @@ async def get_agent_call(execution_id: str, _user: dict = Depends(require_auth))
 
 # ---------------------------------------------------------------------------
 # Execution Records 路由 - /api/v1/execution
-#
 # 数据来源：ExecutionRecordStorage（按 pipeline_run_id 分组的 YAML 持久化）。
-# 前端调试中心「执行记录」/「调试会话」两个页面通过本组端点读取数据。
-# 存储按 pipeline_run_id 分组，前端语义里的"会话"即对应一个 pipeline run。
 # ---------------------------------------------------------------------------
 execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"], dependencies=[Depends(require_auth)])
 

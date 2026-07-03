@@ -31,8 +31,6 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# cleanup_litellm_resources/logging 已删除（engine.run() 在主事件循环中运行，循环不关闭）
-
 _diag_logger = logging.getLogger(__name__ + "._diag")
 _diag_logger.propagate = False
 _stream_logger = logging.getLogger(__name__ + "._stream")
@@ -276,12 +274,8 @@ class _BaseLiteLLMAdapter:
         # 弹出 adapter 专属参数（不发给 litellm / API）
         kwargs.pop("reasoning_retention", None)
 
-        # 自定义 OpenAI 兼容端点（openai/ 前缀，如 apigo 中转）：
-        # litellm 的 openai provider 不认 reasoning_effort/thinking 等 deepseek
-        # 专有参数（会抛 UnsupportedParamsError 或被 drop_params 丢弃）。但中转
-        # 端上游本身能接受它们（实测 apigo 返回 200），所以挪进 extra_body
-        # 透传——OpenAI SDK 原生通道，litellm 会原样塞进请求 body。
-        # 原生支持的 provider（deepseek/、minimax/ 等）不进这里，参数照常直传。
+        # openai/ 前缀的中转端点：litellm openai provider 不认 reasoning_effort
+        # 等专有参数，故挪进 extra_body 透传（上游本身能接受）。
         if model.lower().startswith("openai/"):
             _move_to_extra_body(kwargs, ("reasoning_effort", "thinking"))
 
@@ -419,22 +413,8 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
-        # 在发请求前设置 timeout，让 litellm → httpx.Timeout(read=N) 在 socket 层
-        # 强制超时；放在 _do_completion 之后设置对已发出的请求无效，会导致首 chunk
-        # 不来时 asyncio.wait_for 的 cancel 传不到 httpx C 层 socket recv()。
-        # litellm 的 timeout 是核心参数（router_factory.py 已用 float 传过），
-        # drop_params=True 不会丢弃它。
-        #
-        # 注意 timeout 必须用大值，不能用 first_chunk_timeout（默认 60s）：
-        # httpx 的 read timeout 作用于流式连接的【每一次】 socket 读取，不只是首 chunk。
-        # 若设成 60s，LLM 流式输出中途两次 chunk 间隔 > 60s（长文档生成、思考停顿、
-        # 网络抖动）时 httpx 会把连接掐断，adapter 的 inter_chunk_timeout（300s）根本
-        # 等不到。
-        #
-        # 流式 read timeout：设一个很大的值，避免 reasoning 组装 tool_call 时
-        # 的数分钟静默期被 socket read timeout 误杀。glm-5.2 的 tool_call 整块
-        # 输出，thinking 结束到 tool_call 到达之间有正常静默期。
-        # zai provider 只接受 float，用大数近似"不超时"。
+        # timeout 必须设大值：httpx 的 read timeout 作用于流式连接的每一次 socket
+        # 读取，不能用 first_chunk_timeout，否则长 reasoning 间隙会被掐断。
         call_kwargs["timeout"] = 3600.0
 
         # 首字节超时统一覆盖"建连→等响应头→首字节"全过程：把 first_chunk_timeout 的
@@ -470,13 +450,7 @@ class _BaseLiteLLMAdapter:
         try:
             response, first_chunk = await asyncio.wait_for(_open_and_first_chunk(), timeout=first_chunk_timeout)
         except StopAsyncIteration:
-            # 空流：服务端建连成功、HTTP 200，但流体一打开即 EOF（零 chunk）。
-            # 这不是"模型正常返回空内容"，而是首 token 永远不会到来——
-            # 与"等满 first_chunk_timeout 仍无首 token"是同一语义（首字节失败），
-            # 故纳入首 token 检测，复用 first chunk 超时的恢复链路。
-            # 日志证据（f56f6211bdc5 iter=7）：Calling@10:01:09 选用 key 后
-            # adapter 层 17s 零 [STREAM] 事件，raw_result=None 空转，msg 冻结，
-            # 直至 total_timeout 兜底——根因即此空流被当成空成功吞掉。
+            # 空流：建连成功但首字节即 EOF（零 chunk），按首 token 失败处理。
             # resp 已在 _open_and_first_chunk 内部 aclose，此处无需再关。
             logger.warning(
                 "[%s] STREAM EMPTY: 首字节即空流 (建连成功但零 chunk) model=%s，按首 token 失败处理",
@@ -814,18 +788,8 @@ class _BaseLiteLLMAdapter:
             except Exception:
                 pass
 
-            # 后续 chunk：用 asyncio.wait_for 包裹 __anext__()，连续 inter_chunk_timeout
-            # 秒收不到任何 chunk 即抛 litellm.Timeout 中断死等。
-            #
-            # 关键设计：wait_for 是【逐次】超时——每个 chunk 到达就重新计时。活跃推理
-            # 的 reasoning/text chunk 间隔远小于 timeout（实测 <1s），故永不误触发；只有
-            # 真正静默（上游连接挂起/服务端冻结，连心跳都不发的死连接）才会累计满 timeout。
-            # 用 per-iteration 重置（而非固定 60s per-read）避免误杀正常的多分钟 reasoning
-            # 间隙，活跃流不受影响。
-            #
-            # 注意：glm-5.2 的 tool_call 虽是紧跟 reasoning 的整块输出（实测间隙≈0），
-            # 但仍依赖 reasoning 阶段持续吐 chunk 维持计时器存活；若 reasoning 也静默
-            # 满 timeout，说明连接已挂，应中断。
+            # 后续 chunk：逐次 wait_for 超时，每个 chunk 到达即重置计时器。
+            # 活跃推理 chunk 间隔远小于 timeout 故不误触发；仅真正静默（死连接）累计满 timeout。
             while True:
                 try:
                     chunk = await asyncio.wait_for(aiter.__anext__(), timeout=inter_chunk_timeout)
@@ -1121,15 +1085,8 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     attempt + 1,
                     max_retries,
                 )
-                # 信号量释放时机区分流式/非流式两条路径：
-                # 流式路径下 _direct_call_with_slot 返回的是惰性 stream wrapper
-                # （litellm CustomStreamWrapper），真正的流式传输（建连→首字节→逐
-                # chunk 读取）发生在调用方 _call_streaming 消费该对象期间，而非
-                # _do_completion 返回之前。因此流式返回时把 release 推迟到 stream.aclose
-                # （由 _call_streaming 的 finally 在流消费完毕后调用），否则在 stream
-                # wrapper 返回时立即释放会让 max_concurrent 形同虚设——只计量了"拿到
-                # stream 对象"的毫秒级瞬间，未覆盖秒~分钟级的流式传输。
-                # 非流式返回的是已完成的 ModelResponse，保持原有 finally 立即 release。
+                # 信号量释放：流式路径的真正传输在调用方消费 stream wrapper 期间，
+                # 故 release 推迟到 stream.aclose；非流式 finally 立即 release。
                 # 用 _defer_release 标志区分两条路径。
                 _defer_release = False
                 try:
@@ -1303,19 +1260,5 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
 
         # 禁用 litellm 内部重试：由 KeyPoolAdapter 自己用不同 key 重试
         input_kwargs["num_retries"] = 0
-
-        # TEMP-DEBUG tool_stream 透传诊断：真实 KeyPool 路径发请求前的最终 kwargs
-        _ik = input_kwargs
-        logger.warning(
-            "[TEMP-DEBUG][KeyPoolAdapter] 发请求前 model=%s api_base=%s "
-            "stream=%s extra_body=%s tool_stream=%s drop_params=%s tools=%d",
-            _ik.get("model"),
-            _ik.get("api_base"),
-            _ik.get("stream"),
-            _ik.get("extra_body"),
-            _ik.get("tool_stream"),
-            _ik.get("drop_params"),
-            len(_ik.get("tools") or []),
-        )
 
         return await litellm.acompletion(**input_kwargs)

@@ -257,8 +257,6 @@ class WebSocketInteractionNotifier:
                         pipeline_id[:12],
                         thread_id[:12],
                     )
-                # Phase 1: drain_loop 已删除，engine 主动 emit 推送。
-                # sink 已替换，无需重启 drain。
 
     def unregister_global(self, user_id: str, websocket: WebSocket = None) -> None:
         """注销全局连接。只有当传入的 websocket 是当前注册的连接时才删除，防止新连接被旧连接的 finally 块误删。"""

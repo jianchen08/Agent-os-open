@@ -166,23 +166,6 @@ async def _deliver_control_signal(pipeline_id: str, msg: PipelineMessage) -> Inj
             pipeline_id=pipeline_id,
         )
     engine = entry.engine
-    # 诊断：投递停止信号前打印 engine_task 归属与引擎运行状态。
-    # 这一步以前是诊断盲区（_interrupt_engine_task 三分支全是 debug 级，INFO 日志看不到
-    # cancel 到底走了 None/done/取消哪条）。在这里提前打印，复现时能直接定位
-    # "信号投递了但没停"到底卡在哪一环。
-    _et = entry.engine_task
-    _et_state = "None" if _et is None else ("done" if _et.done() else "active")
-    logger.info(
-        "[MessageBus] 停止信号投递诊断: pipeline=%s signal_type=%s "
-        "engine.is_running=%s engine.is_idle=%s engine_task=%s "
-        "engine_id=%d",
-        pipeline_id[:12],
-        (msg.metadata or {}).get("signal_type", "?"),
-        getattr(engine, "is_running", "?"),
-        getattr(engine, "is_idle", "?"),
-        _et_state,
-        id(engine),
-    )
     # 引擎暴露 deliver_signal 才支持信号机制；否则降级为日志
     if hasattr(engine, "deliver_signal"):
         try:
@@ -403,8 +386,6 @@ async def _start_idle_engine(
     return InjectResult(success=True, method="start", pipeline_id=pipeline_id, bridge=bridge)
 
 
-# _run_engine_in_thread 已删除，engine.run() 直接由 asyncio.ensure_future 调用。
-
 # _revive_pipeline_message 已删除：send 遇到未注册管道直接拒绝（I4），
 # 不再走自动 revive。引擎重建是持有者的责任（register）。
 
@@ -418,10 +399,7 @@ from pipeline.drain_manager import (  # noqa: E402, F401
 
 # restore_pipelines_on_startup re-export 已删除：启动恢复由各持有者负责
 # （会话模块 restore_session_pipelines 注册主管道；TaskWorker._recover_running_tasks
-#  将 running/pending 任务标记 suspended）。路由模块不越权恢复。
-
-# 兼容别名已删除：_try_revive_pipeline / _revive_pipeline_message 不再存在，
-# 旧测试 patch 此名称将失败（这些测试随 revive 路径一并清理）。
+# 将 running/pending 任务标记 suspended）。路由模块不越权恢复。
 
 
 async def emit(

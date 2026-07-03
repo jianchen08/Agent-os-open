@@ -684,12 +684,7 @@ class PipelineEngine:
             if _cl_entry:
                 _cl_entry.engine_task = None
 
-            # I3：引擎正常结束不再 unregister 自身。entry 保留，下次 send 走 idle 重启。
-            # 原逻辑"正常结束就 unregister"会导致：子任务管道跑完一轮后引擎消失，
-            # 但 task 仍 running，用户在任务标签页续发消息时报"未注册"。
-            # 引擎生命由注册表/持有者管理（stop 显式移除），引擎自身不主动注销。
-            # Cancel 时同样保留（原逻辑），现统一为都保留。
-            # 引擎实际资源释放由 message_bus.stop / entry.ensure_engine 负责。
+            # 引擎生命由注册表/持有者管理：正常结束保留 entry（下次 send 走 idle 重启），不主动注销。
 
             # 释放 chunk_service 内存缓存
 
@@ -1007,12 +1002,7 @@ class PipelineEngine:
             return
         signal_type = signal_tags.get("signal_type", "")
 
-        # stop_generation 必须无条件立即中断 engine_task，不能以 last_state 为门控。
-        # _last_state 仅在 _run_loop 的 finally（run 结束时）写入，引擎运行中——尤其
-        # 首次 run——其值为 None。原先 `if state is None: return` 会让运行中投递的停止
-        # 信号永远到不了 _interrupt_engine_task，engine_task 不被 cancel，LLM 调用跑到
-        # 自然结束才"停止"。是否真有 await 在进行，由 _interrupt_engine_task 内部按
-        # engine_task 存活与否判定（None/已 done 即 no-op），不依赖 last_state。
+        # stop_generation 无条件中断 engine_task（不依赖 last_state，是否真有 await 由 _interrupt_engine_task 内部判定）。
         if signal_type == "stop_generation":
             self._interrupt_engine_task()
 

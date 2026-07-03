@@ -89,10 +89,7 @@ def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # 尝试 5: 截断修复 — 状态机闭合，尽量保留完整字段（含半截字符串值）
-    # 旧方案用 count("{") 粗暴补括号、再用 rfind(",") 砍掉最后一个字段，
-    # 会把「字符串内部截断」（如 content 值没收尾引号）误判并砍掉完整字段。
-    # 新方案先闭合未结束的字符串再补括号，仅在尾部确为不完整字段时才回退边界。
+    # 尝试 5: 截断修复 — 状态机闭合，保留完整字段（含半截字符串值）。
     repaired = _repair_truncation(s)
     if repaired is not None:
         return repaired

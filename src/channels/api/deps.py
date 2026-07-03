@@ -133,10 +133,7 @@ def validate_pagination(limit: int, offset: int, max_limit: int = 100) -> None:
         )
 
 
-# 限流中间件
-# 注意：RateLimiter 为旧版全局限流器，已被 channels/api/rate_limiter.py
-# 中的 TieredRateLimiter（差异化限流）替代。rate_limiter 实例保留
-# 仅为向后兼容，新代码请使用 tiered_rate_limiter。
+# 限流中间件：旧版全局限流器，新代码请用 TieredRateLimiter。
 
 
 class RateLimiter:

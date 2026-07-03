@@ -750,9 +750,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         user_id = ctx.state.get("user_id", "")
 
-        # 检索调用是 prompt_build 卡死的头号嫌疑点：此处 await 若永不返回，
-        # 整个 prompt_build 协程永久挂起、零日志（与历史多次卡死现象一致）。
-        # 加 BEGIN/END 边界日志，下次卡死时可精确定位是否卡在 retrieve。
+        # retrieve 边界日志（定位 prompt_build 卡点）。
         from datetime import datetime as _rt  # noqa: PLC0415
 
         _rt_s = _rt.now()
