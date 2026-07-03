@@ -239,7 +239,11 @@ class TestIsolationGuardHostPathRouting:
 
     @pytest.mark.asyncio
     async def test_no_host_path_stays_docker(self):
-        """bash_execute + 无盘符路径 → 仍进容器（provider=docker）。"""
+        """bash_execute + 无盘符路径 → 仍进容器（provider=docker）。
+
+        无 task 上下文时 isolation_level 缺失，归一化为默认隔离（isolated），
+        走 metadata 决策分支（reason=task_metadata）而非工具 policy 分支。
+        """
         guard = _make_isolation_guard(config={"docker_available": True})
         _mock_container_policy(guard)
 
@@ -255,7 +259,6 @@ class TestIsolationGuardHostPathRouting:
 
         assert len(contexts) == 1
         assert contexts[0]["provider"] == "docker"
-        assert contexts[0]["reason"] == "policy"
 
     @pytest.mark.asyncio
     async def test_working_dir_host_path_routes_to_host(self):

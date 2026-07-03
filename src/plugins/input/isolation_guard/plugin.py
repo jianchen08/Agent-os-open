@@ -213,7 +213,9 @@ class IsolationGuard(IInputPlugin):
             执行上下文字典，包含 provider、level、tool_name、workspace 等信息
         """
         task_metadata = self._get_task_metadata(ctx)
-        metadata_isolation = task_metadata.get("isolation_level")
+        # isolation_level 是隔离的唯一真相源：None/空 = 默认隔离（isolated），
+        # 只有显式 non_isolated 才表示非隔离。归一化后下游决策统一。
+        metadata_isolation = task_metadata.get("isolation_level") or "isolated"
         metadata_workspace = task_metadata.get("workspace")
 
         # 先解析工具级 policy，作为决策基础
@@ -239,11 +241,33 @@ class IsolationGuard(IInputPlugin):
                 workspace=metadata_workspace,
             )
 
+        # ── 宿主路径前置检测（所有 docker 决策之前）──
+        # 命令/工作目录含 Windows 盘符路径时，容器内只有挂载的 /workspace，
+        # 宿主路径必然不存在（返回 "No such file or directory"）。无论
+        # isolation_level 是什么，含宿主路径的 bash_execute 都路由到 host 执行，
+        # 由 security_check 的 host_path_access 规则触发用户审批。
+        if (
+            policy_isolation == IsolationLevel.CONTAINER
+            and tool_name == "bash_execute"
+            and tool_args
+            and self._has_host_path(tool_args)
+        ):
+            logger.info(
+                "[IsolationGuard] 命令含宿主路径，路由到 host 执行（等待审批） | "
+                "tool=%s | reason=host_path_detected",
+                tool_name,
+            )
+            return self._build_context(
+                tool_name, "host", "host_path_detected",
+                workspace=metadata_workspace,
+            )
+
         # ── metadata 覆盖：只允许降级，不允许提升 ──
         # policy 是 non_isolated 的工具（如 file_write/task_submit），即使 metadata
         # 要求 isolated 也不路由到 docker（容器内没有工具代码，会报
         # "[isolated] tool=xxx not supported in container"）。
-        if metadata_isolation and policy_isolation == IsolationLevel.CONTAINER:
+        # metadata_isolation 已归一化：None/空 = "isolated"（默认隔离）。
+        if policy_isolation == IsolationLevel.CONTAINER:
             # policy 允许容器的工具（如 bash_execute），metadata 可控制实际级别
             if metadata_isolation == "isolated":
                 if self._docker_available:
@@ -269,20 +293,6 @@ class IsolationGuard(IInputPlugin):
 
         # ── 工具级 policy 决策（metadata 不适用或 policy 为 host）──
         if policy_isolation == IsolationLevel.CONTAINER and self._docker_available:
-            # 宿主路径检测：命令/工作目录含 Windows 盘符路径时，
-            # 容器内必然找不到该路径（容器只有挂载的 /workspace），
-            # 会返回 "No such file or directory"。改为路由到 host 执行，
-            # 由 security_check 的 host_path_access 规则触发用户审批。
-            if tool_name == "bash_execute" and tool_args and self._has_host_path(tool_args):
-                logger.info(
-                    "[IsolationGuard] 命令含宿主路径，路由到 host 执行（等待审批） | "
-                    "tool=%s | reason=host_path_detected",
-                    tool_name,
-                )
-                return self._build_context(
-                    tool_name, "host", "host_path_detected",
-                    workspace=metadata_workspace,
-                )
             return self._build_context(
                 tool_name, "docker", "policy",
                 workspace=metadata_workspace,

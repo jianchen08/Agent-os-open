@@ -387,7 +387,7 @@ def create_thread(
 
     # 这是创建者的职责——谁创建谁注册。引擎层只管转发，不在此解析 agent。
 
-    _register_session_pipeline(pipeline_id, thread["id"], _effective_agent_id)
+    _register_session_pipeline(pipeline_id, thread["id"], _effective_agent_id, user_id=_user["sub"])
 
 
     thread["pipeline_ids"] = list(session.pipeline_ids)
@@ -1299,23 +1299,29 @@ def update_thread_agent(
     return _build_thread_response(updated_thread)
 
 
-def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) -> None:
+def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str, user_id: str = "") -> None:
 
-    """创建者（会话系统）注册管道到引擎注册表，tags 含 agent_id。"""
+    """创建者（会话系统）注册管道到引擎注册表，tags 含 agent_id 和 user_id。
+
+    user_id 写入 tags 后，会随 message_bus → engine state → param_inject 一路下传，
+
+    最终落入 task_submit 写入的任务 metadata，使任务状态变更事件能按用户定向推送。"""
 
     import logging  # noqa: PLC0415
 
     _logger = logging.getLogger(__name__)
 
-    # agent_id 为空时从 api_store 读，仍为空则报错（数据错误）
+    # agent_id / user_id 为空时从 api_store 补全（与 agent_id 对称，避免历史调用方漏传）
 
-    if not agent_id:
+    if not agent_id or not user_id:
 
         try:
 
-            _t = store.get_thread(thread_id)
+            _t = store.get_thread(thread_id) or {}
 
-            agent_id = _t.get("agent_id") if _t else ""
+            agent_id = agent_id or _t.get("agent_id") or ""
+
+            user_id = user_id or _t.get("user_id") or ""
 
         except Exception:
 
@@ -1372,6 +1378,8 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) 
             "session_id": thread_id,
 
             "agent_id": agent_id,
+
+            "user_id": user_id,
 
         }
 
@@ -1446,7 +1454,7 @@ def restore_session_pipelines() -> int:
 
                 continue
 
-            _register_session_pipeline(_pid, tid, _agent_id)
+            _register_session_pipeline(_pid, tid, _agent_id, user_id=thread.get("user_id") or "")
 
             _count += 1
 

@@ -56,6 +56,64 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
     _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
 
 
+def _get_valid_metric_ids() -> set[str] | None:
+    """获取所有合法的评估指标 ID 集合。
+
+    通过 MetricLoader 从 config/evaluation_metrics/ 加载。
+    用于在提交期校验 LLM 传入的 acceptance_criteria key 是否为真实存在的指标 ID，
+    避免「把 pass_threshold 等 value 子字段误填为指标 ID」导致评估期反复
+    METRIC_NOT_FOUND。
+
+    Returns:
+        合法指标 ID 集合；加载失败时返回 None，表示跳过校验（fail-open，
+        不阻断正常提交）。
+    """
+    try:
+        from evaluation.loader import MetricLoader  # noqa: PLC0415
+        loader = MetricLoader()
+        if not loader.metrics:
+            loader.load_all()
+        return set(loader.metrics.keys())
+    except Exception as exc:
+        logger.warning(
+            "[TaskSubmit] 评估指标加载失败，跳过 metric_id 校验: %s", exc,
+        )
+        return None
+
+
+def _validate_metric_ids(
+    acceptance_criteria: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """校验 acceptance_criteria 的 key 是否为合法指标 ID。
+
+    - 合法 key 保留；
+    - 非法 key 剔除，记入返回的 invalid_ids 列表，由调用方决定如何处理
+      （全部无效则拒绝提交，部分无效则降级保留有效项）；
+    - 无法获取合法集合（_get_valid_metric_ids 返回 None）时原样返回，
+      不剔除任何 key（fail-open）。
+
+    Args:
+        acceptance_criteria: 待校验的验收标准字典
+
+    Returns:
+        (过滤后的 criteria, 被剔除的无效 key 列表)
+    """
+    valid_ids = _get_valid_metric_ids()
+    if valid_ids is None:
+        return acceptance_criteria, []
+    if not acceptance_criteria:
+        return acceptance_criteria, []
+
+    filtered: dict[str, Any] = {}
+    invalid: list[str] = []
+    for key, value in acceptance_criteria.items():
+        if key in valid_ids:
+            filtered[key] = value
+        else:
+            invalid.append(key)
+    return filtered, invalid
+
+
 def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
     """验证目标空间路径的安全性。"""
     if not workspace:
@@ -503,6 +561,39 @@ class TaskSubmitTool(BuiltinTool):
                             discarded, target_id,
                         )
                     acceptance_criteria = auto_criteria
+
+        # ── 评估指标 ID 合法性校验 ──
+        # 防止 LLM 把 pass_threshold / $text 等 value 子字段误填为 acceptance_criteria
+        # 的 key（即 metric_id），导致评估期 METRIC_NOT_FOUND 反复重试直至失败。
+        # 全部无效 → 拒绝提交并引导 LLM 使用正确指标 ID；
+        # 部分无效 → 剔除无效项后继续（降级，不阻断）。
+        original_keys = list(acceptance_criteria.keys())
+        if original_keys:
+            acceptance_criteria, invalid_ids = _validate_metric_ids(acceptance_criteria)
+            if invalid_ids and not acceptance_criteria:
+                valid_ids = _get_valid_metric_ids() or set()
+                valid_list = ", ".join(sorted(valid_ids)) if valid_ids else "(指标加载失败)"
+                logger.warning(
+                    "[TaskSubmit] acceptance_criteria 全部 key 无效，拒绝提交 | "
+                    "invalid=%s | valid=%s",
+                    invalid_ids, sorted(valid_ids),
+                )
+                return create_failure_result(
+                    error=(
+                        f"acceptance_criteria 的 key（评估指标 ID）全部无效: "
+                        f"{invalid_ids}。这些 key 必须是真实存在的评估指标 ID，"
+                        f"不能是 pass_threshold / expected_output 等 value 子字段。"
+                        f"当前合法指标 ID: {valid_list}。"
+                        "请改用合法指标 ID 重新提交，或留空让系统自动补全。"
+                    ),
+                    error_code="INVALID_METRIC_ID",
+                )
+            if invalid_ids:
+                logger.warning(
+                    "[TaskSubmit] 剔除 acceptance_criteria 中的无效 metric_id | "
+                    "invalid=%s | kept=%s",
+                    invalid_ids, list(acceptance_criteria.keys()),
+                )
 
         # ── L2/L3 层级校验：禁止显式指定 parent_task_id ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is not None:
