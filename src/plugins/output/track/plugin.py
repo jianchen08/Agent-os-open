@@ -286,7 +286,7 @@ class TrackPlugin(IOutputPlugin):
                         attachments_json = json.dumps(attachments, ensure_ascii=False)
                     except (TypeError, ValueError):
                         logger.warning("附件序列化失败", exc_info=True)
-                
+
                 user_record = ExecutionRecordData(
                     pipeline_run_id=pipeline_run_id,
                     type="user",

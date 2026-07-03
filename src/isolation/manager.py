@@ -202,7 +202,6 @@ class IsolationManager:
         用项目根的持久化标记文件记录上次清理时间，跨进程重启有效，
         避免每次启动管理器就触发一次全局 prune。
         """
-        from pathlib import Path  # noqa: PLC0415
         import time  # noqa: PLC0415
 
         mark = Path(self._PRUNE_MARK_FILE)

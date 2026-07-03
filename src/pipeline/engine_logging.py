@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pipeline.engine_state import _PipelineLogFilter, _current_pipeline_id
+from pipeline.engine_state import _current_pipeline_id, _PipelineLogFilter
 
 logger = logging.getLogger(__name__)
 

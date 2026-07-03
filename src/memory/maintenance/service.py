@@ -625,10 +625,9 @@ class MemoryMaintenanceService:
             (子 pipeline_id, 是否成功启动)
         """
         try:
-            from tools.tool_context import MessageType, PipelineMessage, emit, get_engine_registry  # noqa: PLC0415
-
             # 前置校验：review_agent 配置必须存在，否则 tags.agent_id 反查会失败
             from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+            from tools.tool_context import MessageType, PipelineMessage, emit, get_engine_registry  # noqa: PLC0415
             if get_global_agent_registry_sync().get(self.REVIEW_AGENT_ID) is None:
                 logger.warning("[Maintenance] review_agent 配置不存在")
                 return "", False
@@ -687,8 +686,8 @@ class MemoryMaintenanceService:
                 )
             else:
                 content = (
-                    f"[工具触发复盘] 当前无 pending 的执行记录可供复盘。"
-                    f"请用 read_execution_detail 查看最近的管道执行记录并产出分析报告。"
+                    "[工具触发复盘] 当前无 pending 的执行记录可供复盘。"
+                    "请用 read_execution_detail 查看最近的管道执行记录并产出分析报告。"
                 )
 
             msg = PipelineMessage(
@@ -814,7 +813,8 @@ class MemoryMaintenanceService:
         try:
             from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
             from pipeline.message_types import (  # noqa: PLC0415
-                MessageType, PipelineMessage,
+                MessageType,
+                PipelineMessage,
             )
             msg = PipelineMessage(
                 type=MessageType.CHAT,

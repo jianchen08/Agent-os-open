@@ -8,11 +8,11 @@ from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 
 from channels.api.auth import (
+    _get_token_manager,
     create_access_token,
     create_refresh_token,
     get_current_user,
     verify_token,
-    _get_token_manager,
 )
 from channels.api.deps import _extract_token
 from channels.api.memory_store import store

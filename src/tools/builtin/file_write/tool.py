@@ -26,7 +26,6 @@ from tools.types import (
     create_success_result,
 )
 
-
 # 工具卡片 diff 展示的内容体积上限（字节）；超过则只返回增删行数，省略正文
 _DIFF_CONTENT_MAX = 100_000
 

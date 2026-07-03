@@ -282,11 +282,10 @@ class ToolSchemaValidator(IInputPlugin):
                         self.name, tool_name, re_errors, tc_truncated,
                     )
                     continue
-                else:
-                    # 修复成功，用修复后的参数替换原始参数
-                    fixed_tc = dict(tc)
-                    fixed_tc["args"] = fixed_args
-                    validated_calls.append(fixed_tc)
+                # 修复成功，用修复后的参数替换原始参数
+                fixed_tc = dict(tc)
+                fixed_tc["args"] = fixed_args
+                validated_calls.append(fixed_tc)
             else:
                 validated_calls.append(tc)
 

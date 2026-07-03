@@ -215,7 +215,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             )
 
         errors: list[str] = []
-        agent_level = inputs.get("parent_agent_level", None)
+        agent_level = inputs.get("parent_agent_level")
         for path_str in file_paths:
             path = self.resolve_path(path_str)
             real_path = path.resolve()

@@ -97,9 +97,9 @@ async def external_chat(
     # 2. 持有者注册管道（API 入口是这次执行的持有者），再 run_once 执行拿结果。
     # 外部全程不持有 engine 引用：register 写 entry，run_once 内部经 entry 访问。
     from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-    from pipeline.registry import get_engine_registry  # noqa: PLC0415
     from pipeline.message_bus import run_once  # noqa: PLC0415
     from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
     provider = get_service_provider()
     entry = get_engine_registry().register_pipeline(

@@ -197,11 +197,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     from channels.api.routes_memory import router as memory_router  # noqa: PLC0415
     from channels.api.routes_plugins import router as plugins_router  # noqa: PLC0415
     from channels.api.routes_tasks import router as tasks_router  # noqa: PLC0415
+    from channels.api.routes_themes import router as themes_router  # noqa: PLC0415
     from channels.api.routes_thinking_mode import (  # noqa: PLC0415
         router as thinking_mode_router,
     )
     from channels.api.routes_threads import router as threads_router  # noqa: PLC0415
-    from channels.api.routes_themes import router as themes_router  # noqa: PLC0415
     from channels.api.routes_tools import router as tools_router  # noqa: PLC0415
     from channels.api.routes_ui import router as ui_router  # noqa: PLC0415
 

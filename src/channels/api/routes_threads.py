@@ -63,10 +63,10 @@ import contextlib  # noqa: E402
 from channels.api.memory_store import _parse_iso_time, store  # noqa: E402
 from channels.api.models import (  # noqa: E402
     MessageResponse,
-    ToolCallItem,
     ThreadCreate,
     ThreadResponse,
     ThreadUpdate,
+    ToolCallItem,
 )
 from infrastructure.execution_record_storage import ExecutionRecordStorage  # noqa: E402
 from infrastructure.service_provider import get_service_provider  # noqa: E402
