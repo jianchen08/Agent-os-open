@@ -127,6 +127,17 @@ export function ensureStreamingPlaceholder(
   // 否则后端 seq（小数字）会小于已分配的 user 消息 seq → assistant 排到 user 之前。
   const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
 
+  // 【诊断】确认新 AI 占位创建时，前一条消息的 role（判断是否该新建独立气泡）
+  const after = store.getMessages(pipelineId)
+  const prevMsg = after[after.length - 1]
+  console.warn(
+    '[PLACEHOLDER-DIAG] 新AI占位创建: msgId=%s prevRole=%s prevStatus=%s pipelineMsgCount=%d',
+    messageId.slice(0, 12),
+    prevMsg ? prevMsg.role : '(无)',
+    prevMsg ? prevMsg.status : '?',
+    after.length,
+  )
+
   store.addMessage(pipelineId, {
     id: messageId,
     sessionId: threadId || '',

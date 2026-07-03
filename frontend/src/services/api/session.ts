@@ -256,6 +256,12 @@ function dedupePartSequences(partsByMessage: any[][]): any[] {
 /** 合并连续的 assistant 消息 + 吸收夹在中间的 tool 消息（仅用于历史 API 加载） 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData， */
 export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
+  // 【诊断】注入分割 bug 定位：输出合并函数实际收到的输入（role+content 摘要）
+  // 复现注入场景后查看控制台，确认 system 注入消息是否在两条 AI 之间、是否被错误合并
+  console.warn(
+    '[MERGE-DIAG] input:',
+    messages.map((m) => `${m.role}:${(m.content || '').slice(0, 12)}|${m.sequence ?? '?'}`),
+  )
   // 第一遍：将夹在 assistant 之间的 tool 消息的结果注入 tool_call part
   const absorbed: Message[] = []
   let i = 0
@@ -322,6 +328,11 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
       parts: mergedParts.length > 0 ? mergedParts : undefined,
     } as Message)
   }
+  // 【诊断】输出合并结果，对比 input 看 system 是否被保留为边界
+  console.warn(
+    '[MERGE-DIAG] output:',
+    result.map((m) => `${m.role}:${(m.content || '').slice(0, 12)}|${m.sequence ?? '?'}`),
+  )
   return result
 }
 
@@ -437,6 +448,12 @@ export async function getMessages(
     const rawMessages = response.data.messages || []
     const mapped = rawMessages.map((msg: BackendMessageResponse) =>
       mapBackendMessageToMessage(msg, sessionId),
+    )
+    // 【诊断】注入分割 bug：打印后端原始返回（role + seq + content 摘要）
+    // 复现注入场景后查看控制台 [RAW-DIAG]，确认后端返回的顺序与 role
+    console.warn(
+      '[RAW-DIAG] 后端原始消息:',
+      rawMessages.map((m: any) => `${m.role}|seq=${m.sequence ?? '?'}|${(m.content || '').slice(0, 15)}`),
     )
     const merged = mergeConsecutiveAssistantMessages(mapped)
     return {

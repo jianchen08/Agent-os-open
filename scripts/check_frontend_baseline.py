@@ -107,8 +107,8 @@ def main() -> int:
             parts.append(f"vitest {base_v}→{cur_v}")
         if cur_e < base_e:
             parts.append(f"eslint {base_e}→{cur_e}")
-        print(f"\n✅ 失败数减少了（{', '.join(parts)}），自动更新基线")
-        write_baseline(cur_v, cur_e)
+        print(f"\n✅ 失败数减少了（{', '.join(parts)}）")
+        print("（基线不自动更新：本地与 CI 环境可能存在差异，请在 CI 验证后手动更新 .github/frontend-baseline.txt）")
         return 0
 
     print(f"\n✅ 与基线持平，无新增失败")

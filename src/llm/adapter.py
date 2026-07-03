@@ -741,7 +741,7 @@ class _BaseLiteLLMAdapter:
                 self._stream_heartbeat(
                     model,
                     inter_chunk_timeout,
-                    lambda: (_time.monotonic() - _last_chunk_monotonic),
+                    lambda: _time.monotonic() - _last_chunk_monotonic,
                     lambda: _chunks_received,
                     _completion_stream,
                 )

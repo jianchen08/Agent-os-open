@@ -57,8 +57,8 @@ def main() -> int:
         return 1
 
     if current < baseline:
-        print(f"\n✅ mypy 错误数减少了 {baseline - current} 个，自动更新基线 {baseline} → {current}")
-        write_baseline(current)
+        print(f"\n✅ mypy 错误数减少了 {baseline - current} 个（{baseline} → {current}）")
+        print("（基线不自动更新：本地与 CI 环境可能存在差异，请在 CI 验证后手动更新 .github/mypy-baseline.txt）")
         return 0
 
     print(f"\n✅ mypy 错误数与基线持平（{current}），无新增类型错误")
