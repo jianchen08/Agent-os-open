@@ -90,7 +90,7 @@ describe('CompositionEngine.resolve - 单体模式', () => {
     const result = engine.resolve(node)
     expect(result.component).toBeDefined()
     // component 可能是 null（降级也没找到）
-    expect(result.component?.component).toBeUndefined()
+    expect(result.component?.component).toBeNull()
   })
 
   it('空节点应返回 mode=single', () => {

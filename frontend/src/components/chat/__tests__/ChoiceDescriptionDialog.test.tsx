@@ -29,6 +29,7 @@ vi.mock('lucide-react', () => {
     'Clock',
     'AlertTriangle',
     'Send',
+    'X',
   ]
   const m: Record<string, any> = {}
   for (const name of icons) {
