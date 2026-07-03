@@ -428,7 +428,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Type Check (tsc --noEmit)
         working-directory: frontend
@@ -468,7 +468,7 @@ jobs:
 
       - name: Install Frontend Dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Build Frontend
         working-directory: frontend
@@ -587,7 +587,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Frontend Baseline Check (vitest + eslint)
         run: |
