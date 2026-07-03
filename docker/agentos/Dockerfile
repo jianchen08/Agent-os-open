@@ -109,6 +109,18 @@ RUN if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; f
         || python -m playwright install chromium \
         || echo "[warn] playwright chromium 下载失败，镜像仍可用但容器内 e2e 不可用")
 
+# 安装 Playwright headless shell(system-issue #3 续)
+# playwright 1.49+ 默认 headless 模式用 chrome-headless-shell 而非完整 chrome，
+# `install chromium` 虽含 shell 但下载中途失败会被上面的 `|| echo` 吞掉，导致
+# 镜像里只有完整 chrome、缺 shell——默认 e2e 代码（launch() 不传参）会报
+# "Executable doesn't exist at chromium_headless_shell-..."。
+# 这里独立装一次 shell，确保即使完整 chrome 那层失败也能补齐 shell；
+# --only-shell 避免重复下载完整 chrome。
+RUN if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
+    && (python -m playwright install --only-shell chromium \
+        || python -m playwright install --only-shell chromium \
+        || echo "[warn] playwright chromium-headless-shell 下载失败，默认 headless e2e 将不可用")
+
 # 设置工作目录
 WORKDIR /workspace
 
