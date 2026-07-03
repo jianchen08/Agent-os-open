@@ -112,6 +112,9 @@ export function AppHeader({
           </nav>
           <div className="relative ml-2">
             <ThemeButton onClick={() => onShowThemePanel(true)} />
+            {/* 主题面板：挂在 relative 锚点内，桌面端才能用 right-0/top-full 对齐到按钮下方。
+                移动端为 fixed 底部抽屉，挂载位置不影响其定位。 */}
+            <ThemePanel isOpen={showThemePanel} onClose={() => onShowThemePanel(false)} />
           </div>
         </div>
       </div>
@@ -182,9 +185,6 @@ export function AppHeader({
           </DropdownMenu>
         </div>
       </div>
-
-      {/* 主题面板 - 移动端 fixed overlay / 桌面端 absolute dropdown */}
-      <ThemePanel isOpen={showThemePanel} onClose={() => onShowThemePanel(false)} />
     </header>
   )
 }
