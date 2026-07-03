@@ -415,8 +415,7 @@ class _MergeOpsMixin:
         if not unstaged_lines:
             return
 
-        # 安全契约：此处只告警不修改工作区。曾用 `git checkout -- .` 静默丢弃，
-        # 导致用户改动丢失。
+        # 安全契约：此处只告警不修改工作区，避免丢失用户未提交的改动。
         logger.warning(
             "[WorkspaceLifecycle] 合并后检测到 %d 个 unstaged 变更，已保留未丢弃（避免数据丢失）: "
             "project_root=%s, 文件=%s",

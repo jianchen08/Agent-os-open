@@ -865,7 +865,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         })
 
         const rawMessages: Message[] = apiResult.messages || []
-        // 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端不再额外过滤 parentId
+        // 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端无需按 parentId 过滤。
         const mainMessages = rawMessages
 
         if (options?.after_sequence !== undefined) {

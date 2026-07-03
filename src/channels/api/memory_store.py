@@ -70,7 +70,7 @@ class MemoryStore:
         self.users: dict[str, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
-        # refresh_tokens 已移除：token 撤销统一走 TokenManager（Redis），见 P2.2。
+        # token 撤销统一走 TokenManager（Redis）。
         self.sessions: dict[str, SessionModel] = {}
         # 用户线程索引：user_id -> thread_id 列表，加速 get_user_threads 查询
         self._user_thread_index: dict[str, list[str]] = {}

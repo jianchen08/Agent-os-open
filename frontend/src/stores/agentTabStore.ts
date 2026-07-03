@@ -66,7 +66,7 @@ function cleanupExpiredSessionData(currentSessionId: string): void {
     localStorage.removeItem(key)
   }
 
-  // 清理旧版消息缓存残留（已迁 IndexedDB，此 key 不再使用）
+  // 清理旧版消息缓存残留（消息存储已迁至 IndexedDB）。
   try {
     if (localStorage.getItem(LEGACY_PIPELINE_MESSAGES_KEY) !== null) {
       localStorage.removeItem(LEGACY_PIPELINE_MESSAGES_KEY)

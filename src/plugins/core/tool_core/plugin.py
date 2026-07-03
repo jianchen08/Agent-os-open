@@ -16,7 +16,7 @@ from pipeline.types import ErrorPolicy, StateKeys
 from tools.format_manager import get_format_manager
 from tools.registry import ToolRegistry
 
-# asyncio 工具执行器 — 修复 _cancel_all_tasks 级联取消
+# asyncio 工具执行器：在线程中独立事件循环运行异步工具。
 
 
 def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
