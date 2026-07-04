@@ -90,6 +90,7 @@ export function ensureStreamingPlaceholder(
       msg.role === 'assistant'
       && msg.status === 'streaming'
       && msg.id !== messageId
+      && !msg.id.startsWith('placeholder_')
     ) {
       // 这些残留消息被标记 completed 后会与新的流式消息合并，造成渲染混乱。
       // - 所有 tool_call 已解析 + 有内容 → 标记 completed 保留

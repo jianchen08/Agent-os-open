@@ -123,7 +123,7 @@ defaults:
   tiers:
     large: glm-5.2
     medium: glm-5.2
-    small: minimax-m3
+    small: glm-5.2
 providers:
   zhipu_coding:
     type: zai

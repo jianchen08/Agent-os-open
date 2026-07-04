@@ -35,43 +35,12 @@ def _make_engine(services: dict | None = None) -> PipelineEngine:
 
 
 class TestInjectAndWakeSuspended:
-    """挂起态: _suspended_state 存在时的注入行为。"""
+    """挂起态: _suspended_state 存在时的注入行为。
 
-    @pytest.mark.asyncio
-    async def test_message_injected_into_suspended_state(self):
-        """挂起态下消息应注入到 _suspended_state.user_input 和 messages。
-
-        新架构注入逻辑封装在 _inject_notifications_to_suspended_state
-        （inject_message 仅入 _inject_queue，唤醒时再调本方法注入）。
-        """
-        engine = _make_engine()
-        engine._suspended_state = {
-            "user_input": "原始输入",
-            "messages": [],
-        }
-
-        engine._inject_notifications_to_suspended_state([("子任务已完成", "user")])
-
-        assert "子任务已完成" in engine._suspended_state["user_input"]
-        assert "原始输入" in engine._suspended_state["user_input"]
-        assert any(
-            m["content"] == "子任务已完成"
-            for m in engine._suspended_state["messages"]
-        )
-
-    @pytest.mark.asyncio
-    async def test_message_prepended_to_existing_user_input(self):
-        """注入的消息应前置到已有 user_input 前面。"""
-        engine = _make_engine()
-        engine._suspended_state = {
-            "user_input": "原始",
-            "messages": [],
-        }
-
-        engine._inject_notifications_to_suspended_state([("新消息", "user")])
-
-        ui = engine._suspended_state["user_input"]
-        assert ui.index("新消息") < ui.index("原始")
+    新架构下挂起期间的消息不再注入 _suspended_state，而是留在 _inject_queue
+    由 consume_pending_notifications 统一处理。这里只验证 inject_message
+    的入队与唤醒行为。
+    """
 
     @pytest.mark.asyncio
     async def test_wake_event_set_when_not_none(self):
@@ -185,32 +154,6 @@ class TestInjectAndWakeEdgeCases:
 
         engine.inject_message("测试")
 
-    @pytest.mark.asyncio
-    async def test_suspended_state_empty_messages_list(self):
-        """_suspended_state.messages 为空列表时正常注入。
-
-        system 通知只写 messages（不写 user_input），验证分流语义。
-        """
-        engine = _make_engine()
-        engine._suspended_state = {"user_input": "", "messages": []}
-
-        engine._inject_notifications_to_suspended_state([("第一条", "system")])
-
-        assert len(engine._suspended_state["messages"]) == 1
-        # system 通知不写 user_input
-        assert engine._suspended_state["user_input"] == ""
-
-    @pytest.mark.asyncio
-    async def test_suspended_state_no_messages_key(self):
-        """_suspended_state 没有 messages 键时自动创建。"""
-        engine = _make_engine()
-        engine._suspended_state = {"user_input": ""}
-
-        engine._inject_notifications_to_suspended_state([("消息", "user")])
-
-        assert "messages" in engine._suspended_state
-        assert len(engine._suspended_state["messages"]) == 1
-
 
 # ═══════════════════════════════════════════════════════════
 # 2. inject_message 与 _suspend_and_wait 集成
@@ -222,7 +165,12 @@ class TestInjectAndWakeWithSuspend:
 
     @pytest.mark.asyncio
     async def test_inject_wakes_suspended_engine(self):
-        """挂起中的引擎被 inject_message 唤醒后应恢复执行。"""
+        """挂起中的引擎被 inject_message 唤醒后应恢复执行。
+
+        新架构：消息留在 _inject_queue（不 drain 到 suspended_state），
+        由后续主循环 consume_pending_notifications 统一处理。
+        _suspend_and_wait 只负责「等待唤醒 + 判 resume」，唤醒后队列非空。
+        """
         services: dict = {"__test__": True}
         engine = _make_engine(services)
         pipeline_id = "test-wake-001"
@@ -239,9 +187,12 @@ class TestInjectAndWakeWithSuspend:
             engine.inject_message("子任务完成了！")
 
         asyncio.create_task(delayed_wake())
-        await engine._suspend_and_wait(state)
+        resumed = await engine._suspend_and_wait(state)
 
-        assert "子任务完成了！" in state.get("user_input", "")
+        assert resumed is True
+        # 消息留在队列，等 consume 处理（不进 user_input）
+        assert engine.inject_queue_size == 1
+        assert engine._inject_queue[0][0] == "子任务完成了！"
 
     @pytest.mark.skip(
         reason="挂起：arbitrate 返回 None + text-only 输出触发降级路径，且断言用"

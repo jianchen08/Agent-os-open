@@ -813,92 +813,76 @@ class PipelineEngine:
 
         self._running = False
 
-        pending_notifications = self.drain_inject_queue()
+        # 挂起/运行统一消息处理：消息一律留在 _inject_queue，不在此 drain。
+        # 唤醒后由主循环 run_iteration → consume_pending_notifications 统一消费
+        # （注入 state + 推送 system 通知），挂起与运行路径无差别。
+        # 这里只负责「等待唤醒」与「判定要不要 resume」。
 
-        if pending_notifications:
-            self._inject_notifications_to_suspended_state(pending_notifications)
+        logger.debug(
+            "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
+            pipeline_id,
+            self._watching_task_ids,
+        )
 
-            logger.debug(
-                "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: pipeline=%s",
-                len(pending_notifications),
-                pipeline_id,
-            )
+        # watching_tasks 语义切分：避免 50 轮 × 600s ≈ 8.3h 的静默死挂。
+        # - 空：无子任务可等，1 轮 600s 无注入即 return False（管道结束 → fail）
+        # - 非空：6 轮（约 60min）周期 _check_children_terminal，覆盖正常等子任务终态
+        max_wait_rounds = 6 if self._watching_task_ids else 1
 
-        else:
-            logger.debug(
-                "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
-                pipeline_id,
-                self._watching_task_ids,
-            )
+        self._engine_loop = asyncio.get_running_loop()
 
-            # watching_tasks 语义切分：避免 50 轮 × 600s ≈ 8.3h 的静默死挂。
-            # - 空：无子任务可等，1 轮 600s 无注入即 return False（管道结束 → fail）
-            # - 非空：6 轮（约 60min）周期 _check_children_terminal，覆盖正常等子任务终态
-            max_wait_rounds = 6 if self._watching_task_ids else 1
+        if self._wake_event is None:
+            self._wake_event = asyncio.Event()
 
-            self._engine_loop = asyncio.get_running_loop()
+        _wake_reason = ""
 
-            if self._wake_event is None:
-                self._wake_event = asyncio.Event()
+        for wait_round in range(max_wait_rounds):
+            _registry = get_engine_registry()
 
-            for wait_round in range(max_wait_rounds):
-                _registry = get_engine_registry()
+            _entry = _registry.get(pipeline_id)
 
-                _entry = _registry.get(pipeline_id)
-
-                if _entry is not None:
-                    _entry.engine = self
-
-                else:
-                    _registry.register(pipeline_id, self)
-
-                try:
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=600)
-
-                    break
-
-                except asyncio.TimeoutError:
-                    # 超时边界检查：Event 可能在 timeout 和异常处理之间被 set
-
-                    if self._wake_event.is_set():
-                        break
-
-                    pending_notifications = self.drain_inject_queue()
-
-                    if pending_notifications:
-                        self._inject_notifications_to_suspended_state(pending_notifications)
-
-                        logger.debug(
-                            "[Engine] 管道超时后发现 %d 条通知，唤醒: pipeline=%s",
-                            len(pending_notifications),
-                            pipeline_id,
-                        )
-
-                        break
-
-                    if self._check_children_terminal(state):
-                        logger.debug(
-                            "[Engine] 管道超时后发现子任务已终态，唤醒: pipeline=%s",
-                            pipeline_id,
-                        )
-
-                        break
-
-                    logger.debug(
-                        "[Engine] 管道等待超时(600s)无新通知，重新挂起 (round=%d/%d): pipeline=%s",
-                        wait_round + 1,
-                        max_wait_rounds,
-                        pipeline_id,
-                    )
-
-                    self._wake_event.clear()
+            if _entry is not None:
+                _entry.engine = self
 
             else:
-                logger.warning(
-                    "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
+                _registry.register(pipeline_id, self)
+
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=600)
+                # 正常唤醒 = wake_event 被 set = inject_message 入队后唤醒
+                _wake_reason = "injected"
+                break
+
+            except asyncio.TimeoutError:
+                # 超时边界检查：Event 可能在 timeout 和异常处理之间被 set
+                if self._wake_event.is_set():
+                    _wake_reason = "injected"
+                    break
+
+                if self._check_children_terminal(state):
+                    logger.debug(
+                        "[Engine] 管道超时后发现子任务已终态，唤醒: pipeline=%s",
+                        pipeline_id,
+                    )
+                    _wake_reason = "children_terminal"
+                    break
+
+                logger.debug(
+                    "[Engine] 管道等待超时(600s)无新通知，重新挂起 (round=%d/%d): pipeline=%s",
+                    wait_round + 1,
                     max_wait_rounds,
                     pipeline_id,
                 )
+
+                self._wake_event.clear()
+
+        else:
+            logger.warning(
+                "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
+                max_wait_rounds,
+                pipeline_id,
+            )
+            _wake_reason = "forced"
 
         self._wake_event = None
 
@@ -908,42 +892,26 @@ class PipelineEngine:
 
         self._running = True
 
-        # 唤醒后先把 _inject_queue 里的消息写入 _suspended_state，
+        # 判定要不要 resume（消息留队列，不 drain）：
+        # - 队列有消息（inject_message 入队）→ resume
+        # - 子任务终态（children_terminal）→ resume（子任务终态本身是有意义的事件，
+        #   即使通知还没到队列，也该醒来看 LLM 怎么决策）
+        # - 其余（裸 wake()、跑满轮数 forced 但无消息）→ 丢弃，没有新内容喂 LLM
+        # 队列里的消息由 consume_pending_notifications 统一处理，这里只读大小。
+        _has_message = self.inject_queue_size > 0
+        if not _has_message and _wake_reason != "children_terminal":
+            logger.debug(
+                "[Engine] 管道唤醒但无新内容（%s），丢弃唤醒: pipeline=%s",
+                _wake_reason or "bare_wake",
+                pipeline_id,
+            )
+            self._suspended_state = None
+            return False
 
-        # 这样下面的 _pending_input 判断才能正确检测到新内容。
-
-        # inject_message 统一写队列 → 此处 drain 到 suspended_state →
-
-        # 之后 _run_loop 的 drain_inject_queue 再 drain 一次（已空，无害）。
-
-        _queued = self.drain_inject_queue()
-
-        if _queued and self._suspended_state is not None:
-            self._inject_notifications_to_suspended_state(_queued)
-
+        # 恢复流式上下文（on_chunk/streaming）。挂起期间不再往 _suspended_state
+        # 注入消息，所以 user_input/messages 不需要从快照合并 —— 消息在队列里，
+        # 由 consume 处理。
         if self._suspended_state is not None:
-            _pending_input = self._suspended_state.get("user_input", "").strip()
-
-            if not _pending_input:
-                logger.debug(
-                    "[Engine] 管道唤醒但 suspended_state 无新内容，丢弃唤醒: pipeline=%s",
-                    pipeline_id,
-                )
-
-                self._suspended_state = None
-
-                return False
-
-            state["user_input"] = self._suspended_state.get(
-                "user_input",
-                state.get("user_input", ""),
-            )
-
-            state["messages"] = self._suspended_state.get(
-                "messages",
-                state.get("messages", []),
-            )
-
             for _key in ("on_chunk", "streaming"):
                 if _key in self._suspended_state:
                     state[_key] = self._suspended_state[_key]
@@ -955,13 +923,8 @@ class PipelineEngine:
             logger.debug("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
 
             # Phase 1: resume 后重新 emit_start
-
             # emit_suspend 已发 stream_end 关闭上一轮（_stream_started=False），
-
             # resume 进入新 iteration 会有新的 LLM 输出，需要新的 stream_start。
-
-            # emit_start 内部会调 _start_new_turn 生成新 message_id（新 turn = 新消息）。
-
             if self._streaming.bridge is not None:
                 try:
                     await self._streaming.emit_start(state)
@@ -1085,28 +1048,6 @@ class PipelineEngine:
     def agent_config(self) -> Any:
         """当前绑定的 Agent 配置（只读公共接口）。"""
         return self._agent_config
-
-    def _inject_notifications_to_suspended_state(self, notifications: list[tuple[str, str]]) -> None:
-        """将注入队列里的 (message, source) 注入到挂起状态中。
-
-        与 consume_pending_notifications 同源语义：
-        - source=user：写 user_input + messages（track 据此落 type=user）
-        - source!=user：只写 messages（喂 LLM，不写 user_input 避免 track 落 system）
-        系统通知的前端推送不在此时发生 —— 推送统一在 consume_pending_notifications
-        （suspended_state 恢复后下一轮迭代会经 consume 走到推送点）。
-        """
-        if self._suspended_state is None:
-            return
-
-        for _msg, _source in notifications:
-            if not _msg or not _msg.strip():
-                continue
-            self._suspended_state.setdefault("messages", []).append(
-                {"role": "user", "content": _msg}
-            )
-            if _source == "user":
-                _orig = self._suspended_state.get("user_input", "")
-                self._suspended_state["user_input"] = f"{_msg}\n\n{_orig}".strip()
 
     def _check_children_terminal(self, state: dict[str, Any]) -> bool:
         """检查 submitted_task_ids 中的子任务是否全部已到达终态。"""

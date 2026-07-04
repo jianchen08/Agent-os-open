@@ -62,6 +62,12 @@ _*.sh
 .tmp_*
 debug-*.md
 debug-*.log
+# 一次性调试探针脚本/探针配置/探针输出,不入库
+frontend/scripts/debug_*.mjs
+frontend/scripts/probe_*.mjs
+frontend/scripts/analyze_trace.py
+frontend/vite.probe.config.ts
+frontend/probe-out/
 
 # ─── 运行时 dump / 工具抓取产物 ───
 docker_watchdog_dumps/

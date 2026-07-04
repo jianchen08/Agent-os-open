@@ -91,11 +91,15 @@ class TestSuspendSemanticsSplit:
 
     @pytest.mark.asyncio
     async def test_children_terminal_breaks_loop(self):
-        """非空 watching_tasks 但 _check_children_terminal=True → 立即唤醒。"""
+        """非空 watching_tasks 但 _check_children_terminal=True → 立即唤醒。
+
+        新架构：子任务终态触发的唤醒（退出原因 children_terminal）直接 resume，
+        不依赖 user_input 非空（system 通知也能唤醒）。
+        """
         engine = _build_engine()
         engine._suspended_state = {
             StateKeys.PIPELINE_ID: "pipe-term",
-            "user_input": "from child",  # 有 user_input 才会 resume 成功
+            "user_input": "",  # 无 user_input，靠 children_terminal 唤醒
         }
         state = {
             StateKeys.PIPELINE_ID: "pipe-term",

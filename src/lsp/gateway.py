@@ -103,13 +103,22 @@ class LSPGateway:
         # 专用常驻事件循环（run_forever），承载所有 loop-bound 资源。
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
-        # 绑定在专用循环上的锁；通过 _run_in_loop 调度使用。
-        self._lock: asyncio.Lock = self._loop.run_until_complete(self._create_lock())
+        # 绑定在专用循环上的锁；延迟到首次在专用循环内使用时创建
+        # （见 _ensure_lock）。__init__ 不能用 run_until_complete 创建 lock：
+        # get_lsp_gateway 是 async 函数，调用时已有 loop 运行，
+        # Python 3.12 的 run_until_complete 会因 _check_running 检测到当前
+        # 线程运行的 loop 而抛 "Cannot run the event loop while another loop is running"。
+        self._lock: asyncio.Lock | None = None
 
-    @staticmethod
-    async def _create_lock() -> asyncio.Lock:
-        """在（专用）事件循环内创建 asyncio.Lock。"""
-        return asyncio.Lock()
+    async def _ensure_lock(self) -> asyncio.Lock:
+        """在专用循环内惰性创建并绑定锁。
+
+        asyncio.Lock 构造时延迟绑定到首个使用它的运行循环；本方法总在专用
+        循环内（经 _run_in_loop 调度）执行，从而把 lock 正确绑定到专用循环。
+        """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def start(self) -> None:
         """在 daemon 线程里启动专用事件循环（幂等）。"""
@@ -143,7 +152,7 @@ class LSPGateway:
 
     async def _shutdown_locked(self):
         """在专用循环内加锁停止所有客户端。"""
-        async with self._lock:
+        async with await self._ensure_lock():
             for client in self.clients.values():
                 try:
                     await client.stop()
@@ -163,7 +172,7 @@ class LSPGateway:
             return None
 
         # 带锁启动
-        async with self._lock:
+        async with await self._ensure_lock():
             # double-check
             if language in self.clients and self.clients[language].initialized:
                 return self.clients[language]

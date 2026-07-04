@@ -17,7 +17,7 @@ import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
-import { allocateNextSequence } from './services/websocket/streaming/handlers/utils'
+import { allocateNextSequence, ensureStreamingPlaceholder } from './services/websocket/streaming/handlers/utils'
 import { useAgentStore } from './stores/agentStore'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
@@ -422,8 +422,21 @@ function HomePage(): ReactNode {
             })),
           },
         )
+
+        // 消息已成功推送到后端（管道已接收），立即创建"思考中"占位气泡。
+        // 使用临时 placeholder_ 前缀 ID，后续 stream_start 事件到达时，
+        // utils.ensureStreamingPlaceholder 会通过 updateMessage(prevMsg.id, { id: realMessageId })
+        // 将此占位气泡的 ID 改写为后端真实 messageId（utils.ts L131-140 合并分支）。
+        // 发送失败时（catch 分支）不创建占位气泡——后端管道未接收到消息。
+        const placeholderMsgId = `placeholder_${generateUUID()}`
+        ensureStreamingPlaceholder(
+          targetPipelineId,
+          placeholderMsgId,
+          sid,
+        )
       } catch {
         // WebSocket 发送失败时消息已添加到本地状态，重连后会自动重试
+        // 发送失败不创建占位气泡（后端管道未接收到消息）
       }
     },
     [],

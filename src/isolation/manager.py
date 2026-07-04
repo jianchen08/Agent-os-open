@@ -175,6 +175,9 @@ class IsolationManager:
         self._reuse_map: dict[str, str] = {}
         # workspace 标识 → env_id，同 workspace 复用同一容器
         self._workspace_env_map: dict[str, str] = {}
+        # workspace 标识 → 专属锁，串行化同一 workspace 的「查找→创建→写缓存」，
+        # 防止并发任务重复创建同名容器（docker create 报 Conflict）。
+        self._ws_locks: dict[str, asyncio.Lock] = {}
         self._running = False
 
     async def start(self):
@@ -520,112 +523,113 @@ class IsolationManager:
 
         logger.debug(f"[IsolationManager] 任务 {task_id} 的 workspace={workspace}，容器名称: {container_name}")
 
-        # 2. 检查是否已有该 workspace 的容器（优先复用）
-        if ws_key in self._workspace_env_map:
-            env_id = self._workspace_env_map[ws_key]
-            existing = self._environments.get(env_id)
-            if existing and existing.status == EnvironmentStatus.READY.value:
-                existing.last_used_at = datetime.now(UTC).isoformat()
-                logger.debug(f"[IsolationManager] 复用 workspace 容器: {container_name} (env_id={env_id})")
-                return existing
+        async with self._get_ws_lock(ws_key):
+            # 2. 检查是否已有该 workspace 的容器（优先复用）
+            if ws_key in self._workspace_env_map:
+                env_id = self._workspace_env_map[ws_key]
+                existing = self._environments.get(env_id)
+                if existing and existing.status == EnvironmentStatus.READY.value:
+                    existing.last_used_at = datetime.now(UTC).isoformat()
+                    logger.debug(f"[IsolationManager] 复用 workspace 容器: {container_name} (env_id={env_id})")
+                    return existing
 
-        # 3. 尝试从 Docker 查找已有容器
-        existing_env = await self._find_existing_container(container_name)
-        if existing_env:
-            self._environments[existing_env.env_id] = existing_env
-            self._workspace_env_map[ws_key] = existing_env.env_id
-            # 同步注册到 provider，确保 execute_in_environment 能在 provider 侧命中。
-            # _find_existing_container 绕过 provider 直接构造了 env，
-            # 若不注册则 provider._environments 中无此记录。
-            provider = self._providers.get(existing_env.level)
-            if provider is not None:
-                provider._environments[existing_env.env_id] = existing_env
-            logger.debug(f"[IsolationManager] 恢复已有容器: {container_name}")
-            return existing_env
+            # 3. 尝试从 Docker 查找已有容器
+            existing_env = await self._find_existing_container(container_name)
+            if existing_env:
+                self._environments[existing_env.env_id] = existing_env
+                self._workspace_env_map[ws_key] = existing_env.env_id
+                # 同步注册到 provider，确保 execute_in_environment 能在 provider 侧命中。
+                # _find_existing_container 绕过 provider 直接构造了 env，
+                # 若不注册则 provider._environments 中无此记录。
+                provider = self._providers.get(existing_env.level)
+                if provider is not None:
+                    provider._environments[existing_env.env_id] = existing_env
+                logger.debug(f"[IsolationManager] 恢复已有容器: {container_name}")
+                return existing_env
 
-        # 4. 检查是否可以复用父级环境
-        if parent_env_id:
-            existing = self._environments.get(parent_env_id)
-            if existing and existing.status == EnvironmentStatus.READY.value:
-                existing.last_used_at = datetime.now(UTC).isoformat()
-                logger.debug(f"复用父级环境: {parent_env_id}")
-                return existing
+            # 4. 检查是否可以复用父级环境
+            if parent_env_id:
+                existing = self._environments.get(parent_env_id)
+                if existing and existing.status == EnvironmentStatus.READY.value:
+                    existing.last_used_at = datetime.now(UTC).isoformat()
+                    logger.debug(f"复用父级环境: {parent_env_id}")
+                    return existing
 
-        # 5. 决策隔离级别
-        available = await self._check_providers_availability()
-        if isolation_level:
-            level = isolation_level
-            requires_approval = level == IsolationLevel.HOST
-            logger.debug(f"使用指定的隔离级别: {level.value} (requires_approval={requires_approval})")
-        else:
-            # 使用决策器根据工具名决策隔离策略
-            # 注意：decider 需要的是 tool_name（如 bash_execute）而非 task_type（atomic），
-            # 否则 policy 匹配不到工具级规则会落到 default=host。
-            tool_category = operation_type.value if operation_type else None
-            policy = await self._decider.decide(
-                tool_name=tool_name or task_type.value,
-                tool_category=tool_category,
-                available_providers=available,
-            )
-            level = policy.isolation
-            requires_approval = policy.approval
-            logger.debug(
-                f"为任务 {task_id} 选择隔离级别: {level.value} (requires_approval={requires_approval})"
-                f"(tool_name={tool_name}, task_type={task_type.value}, operation_type={operation_type.value if operation_type else None})"
-            )
-
-        # 6. 创建新环境
-        provider = self._providers.get(level)
-        if not provider:
-            raise RuntimeError(f"找不到 {level.value} 对应的提供者")
-
-        # 资源保护：容器隔离时检查环境数量上限（防止低配机被压垮）
-        # 自适应 profile 决定上限，超限时拒绝新建，保护系统稳定性
-        if level == IsolationLevel.CONTAINER:
-            max_env = self._resource_profile.get("max_environments", 8)
-            # 统计活跃的容器环境（READY/BUSY/CREATING），排除已停止和出错的
-            inactive_statuses = {EnvironmentStatus.STOPPED.value, EnvironmentStatus.ERROR.value}
-            current_count = sum(
-                1
-                for env in self._environments.values()
-                if env.level == IsolationLevel.CONTAINER and env.status not in inactive_statuses
-            )
-            if current_count >= max_env:
-                logger.error(
-                    f"[IsolationManager] 隔离环境数量已达上限 {current_count}/{max_env} "
-                    f"(tier={self._resource_profile.get('tier', '?')}), "
-                    f"拒绝为 workspace {ws_key} 创建新环境。"
-                    f"可通过环境变量 AO_MAX_ENVIRONMENTS 调整上限。"
+            # 5. 决策隔离级别
+            available = await self._check_providers_availability()
+            if isolation_level:
+                level = isolation_level
+                requires_approval = level == IsolationLevel.HOST
+                logger.debug(f"使用指定的隔离级别: {level.value} (requires_approval={requires_approval})")
+            else:
+                # 使用决策器根据工具名决策隔离策略
+                # 注意：decider 需要的是 tool_name（如 bash_execute）而非 task_type（atomic），
+                # 否则 policy 匹配不到工具级规则会落到 default=host。
+                tool_category = operation_type.value if operation_type else None
+                policy = await self._decider.decide(
+                    tool_name=tool_name or task_type.value,
+                    tool_category=tool_category,
+                    available_providers=available,
                 )
-                raise RuntimeError(
-                    f"隔离环境数量已达上限 ({current_count}/{max_env})，"
-                    f"无法为任务创建新环境。请等待现有任务完成，"
-                    f"或通过环境变量 AO_MAX_ENVIRONMENTS 调整上限。"
+                level = policy.isolation
+                requires_approval = policy.approval
+                logger.debug(
+                    f"为任务 {task_id} 选择隔离级别: {level.value} (requires_approval={requires_approval})"
+                    f"(tool_name={tool_name}, task_type={task_type.value}, operation_type={operation_type.value if operation_type else None})"
                 )
 
-        context = IsolationContext(
-            task_id=task_id,
-            task_type=task_type,
-            operation_type=operation_type,
-            parent_env_id=parent_env_id,
-            workspace=workspace,
-            parent_workspace=parent_workspace,
-            is_root_task=True,
-            isolation_level=level,
-            requires_approval=requires_approval,
-            metadata=metadata or {},
-        )
+            # 6. 创建新环境
+            provider = self._providers.get(level)
+            if not provider:
+                raise RuntimeError(f"找不到 {level.value} 对应的提供者")
 
-        if level == IsolationLevel.CONTAINER:
-            env = await provider.create_environment(context, container_name=container_name)
-        else:
-            env = await provider.create_environment(context)
+            # 资源保护：容器隔离时检查环境数量上限（防止低配机被压垮）
+            # 自适应 profile 决定上限，超限时拒绝新建，保护系统稳定性
+            if level == IsolationLevel.CONTAINER:
+                max_env = self._resource_profile.get("max_environments", 8)
+                # 统计活跃的容器环境（READY/BUSY/CREATING），排除已停止和出错的
+                inactive_statuses = {EnvironmentStatus.STOPPED.value, EnvironmentStatus.ERROR.value}
+                current_count = sum(
+                    1
+                    for env in self._environments.values()
+                    if env.level == IsolationLevel.CONTAINER and env.status not in inactive_statuses
+                )
+                if current_count >= max_env:
+                    logger.error(
+                        f"[IsolationManager] 隔离环境数量已达上限 {current_count}/{max_env} "
+                        f"(tier={self._resource_profile.get('tier', '?')}), "
+                        f"拒绝为 workspace {ws_key} 创建新环境。"
+                        f"可通过环境变量 AO_MAX_ENVIRONMENTS 调整上限。"
+                    )
+                    raise RuntimeError(
+                        f"隔离环境数量已达上限 ({current_count}/{max_env})，"
+                        f"无法为任务创建新环境。请等待现有任务完成，"
+                        f"或通过环境变量 AO_MAX_ENVIRONMENTS 调整上限。"
+                    )
 
-        self._environments[env.env_id] = env
-        self._workspace_env_map[ws_key] = env.env_id
+            context = IsolationContext(
+                task_id=task_id,
+                task_type=task_type,
+                operation_type=operation_type,
+                parent_env_id=parent_env_id,
+                workspace=workspace,
+                parent_workspace=parent_workspace,
+                is_root_task=True,
+                isolation_level=level,
+                requires_approval=requires_approval,
+                metadata=metadata or {},
+            )
 
-        logger.debug(f"创建新隔离环境: {env.env_id} (level={level.value}, container_name={container_name})")
-        return env
+            if level == IsolationLevel.CONTAINER:
+                env = await provider.create_environment(context, container_name=container_name)
+            else:
+                env = await provider.create_environment(context)
+
+            self._environments[env.env_id] = env
+            self._workspace_env_map[ws_key] = env.env_id
+
+            logger.debug(f"创建新隔离环境: {env.env_id} (level={level.value}, container_name={container_name})")
+            return env
 
     def set_task_repository(self, repo: Any) -> None:
         """注入任务仓储，启用按 workspace 销毁容器。
@@ -638,6 +642,15 @@ class IsolationManager:
         """
         self._task_repository = repo
         logger.debug("[IsolationManager] task_repository 已注入，按 workspace 管理容器")
+
+    def _get_ws_lock(self, ws_key: str) -> asyncio.Lock:
+        """获取 workspace 专属锁（同 ws_key 恒返回同一把锁）。
+
+        用于串行化同一 workspace 的 get_or_create_environment，防止并发任务
+        同时通过「容器不存在」检查后重复 docker create 同名容器（Conflict）。
+        不同 ws_key 互不阻塞。
+        """
+        return self._ws_locks.setdefault(ws_key, asyncio.Lock())
 
     @staticmethod
     def _workspace_to_container_name(workspace: str | None, task_id: str) -> str:

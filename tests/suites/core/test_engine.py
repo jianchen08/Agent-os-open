@@ -506,21 +506,21 @@ class TestSuspendAndWaitPendingNotifications:
         }
 
         # 挂起后异步注入通知：inject_message 入 _inject_queue 并 set wake_event，
-        # _suspend_and_wait 唤醒后 drain_inject_queue 消费并注入 suspended_state。
+        # _suspend_and_wait 唤醒后消息留在队列，由主循环 consume_pending_notifications
+        # 统一处理（注入 state + 推送）。
         async def _inject_after_suspend():
             await asyncio.sleep(0.05)
             engine.inject_message("[系统通知] 子任务 'A' failed")
             engine.inject_message("[系统通知] 子任务 'B' completed")
 
         asyncio.create_task(_inject_after_suspend())
-        await engine._suspend_and_wait(state)
+        resumed = await engine._suspend_and_wait(state)
 
-        # inject_queue 应被 drain 清空
-        assert engine._inject_queue == []
-        injected = state.get("user_input", "")
-        assert "子任务 'A'" in injected
-        assert "子任务 'B'" in injected
-        assert "原始输入" in injected
+        # 新架构：消息留在队列等 consume 处理，_suspend_and_wait 不消费队列
+        assert resumed is True
+        assert len(engine._inject_queue) == 2
+        assert "子任务 'A'" in engine._inject_queue[0][0]
+        assert "子任务 'B'" in engine._inject_queue[1][0]
 
     @pytest.mark.asyncio
     async def test_no_pending_notifications_normal_suspend(self):

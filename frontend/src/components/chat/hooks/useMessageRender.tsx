@@ -175,8 +175,8 @@ function makeStablePartKey(part: MessagePart, index: number): string {
   }
 }
 
-function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragment[] {
-  const fragments: RenderFragment[] = []
+export function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragment[] {
+  let fragments: RenderFragment[] = []
   const parts = message.parts!
 
   // part 渲染顺序 = 数组顺序（历史消息 part 已在 API 映射时用 seq++ 保证有序）。
@@ -275,6 +275,20 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
         }
         break
       }
+    }
+  }
+
+  // 确保 thinking 片段始终在非 thinking 片段之前（先思考，再正文）。
+  // 流式事件竞态可能导致 text part 先于 thinking part 进入数组，
+  // 此处统一修正渲染顺序，保持各自组内相对顺序不变。
+  const thinkingFrags = fragments.filter((f) => f.type === 'thinking')
+  const otherFrags = fragments.filter((f) => f.type !== 'thinking')
+  if (thinkingFrags.length > 0 && otherFrags.length > 0) {
+    const firstThinkingIdx = fragments.findIndex((f) => f.type === 'thinking')
+    const firstNonThinkingIdx = fragments.findIndex((f) => f.type !== 'thinking')
+    // 仅在 thinking 确实排在 other 之后时才重排，避免无谓数组重建
+    if (firstThinkingIdx > firstNonThinkingIdx) {
+      fragments = [...thinkingFrags, ...otherFrags]
     }
   }
 

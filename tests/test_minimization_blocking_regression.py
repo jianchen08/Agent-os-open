@@ -58,7 +58,8 @@ class TestPipelineEngineRegression:
         engine._pipeline_id = "test-pipeline-001"
         engine._suspended_state = None
         engine._wake_event = None
-        engine._pending_notifications: list[str] = []
+        engine._inject_queue: list[tuple[str, str]] = []
+        engine._engine_loop = None
         engine._watching_task_ids: list[str] = []
         engine._checkpoint_manager = None
         engine.max_iterations = 100
@@ -79,15 +80,18 @@ class TestPipelineEngineRegression:
         assert engine.is_suspended is False
 
     def test_inject_message_suspended_state(self) -> None:
-        """挂起状态下 inject_message 应注入到 _suspended_state。"""
+        """挂起状态下 inject_message 入队并唤醒（不直接写 _suspended_state）。
+
+        新架构：消息统一入 _inject_queue，由 consume_pending_notifications 处理。
+        """
         engine = self._make_engine()
         engine._suspended_state = {"user_input": "", "messages": []}
         engine._wake_event = asyncio.Event()
 
         engine.inject_message("子任务完成通知")
 
-        assert "子任务完成通知" in engine._suspended_state["user_input"]
-        assert engine._suspended_state["messages"][-1]["content"] == "子任务完成通知"
+        # 消息入队（不写 suspended_state），wake_event 被 set
+        assert engine._inject_queue == [("子任务完成通知", "user")]
         assert engine._wake_event.is_set()
 
     def test_inject_message_running_state_queues(self) -> None:
@@ -127,17 +131,6 @@ class TestPipelineEngineRegression:
         engine = self._make_engine()
         engine._wake_event = None
         engine.wake()  # 不应抛异常
-
-    def test_inject_notifications_to_suspended_state(self) -> None:
-        """_inject_notifications_to_suspended_state 应正确拼接多条通知。"""
-        engine = self._make_engine()
-        engine._suspended_state = {"user_input": "原始输入", "messages": []}
-
-        engine._inject_notifications_to_suspended_state(["通知A", "通知B"])
-
-        assert "通知A" in engine._suspended_state["user_input"]
-        assert "通知B" in engine._suspended_state["user_input"]
-        assert len(engine._suspended_state["messages"]) == 2
 
 
 # ===========================================================================
