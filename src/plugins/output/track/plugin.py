@@ -322,29 +322,29 @@ class TrackPlugin(IOutputPlugin):
                 new_content = self._extract_injected_content(user_input, self._last_saved_user_input)
                 if new_content:
                     self._last_saved_user_input = user_input
-                    # type=system：这是 engine.inject_message 注入的子任务完成/
-                    # 触发器等系统通知（_extract_injected_content 抽取的增量段），
-                    # 不是用户原始输入。落盘如实记 role=system/type=system，渲染路径
-                    # 按此显示系统气泡；喂给 LLM 时由 record_role_for_llm 降级为 user
-                    # （多数模型不接受多轮穿插 system）。
-                    notification_record = ExecutionRecordData(
+                    # 此时 user_input 的变化只能来自 source=user 的注入消息
+                    # （系统通知 source!=user 已不写 user_input，由
+                    # consume_pending_notifications 直接推送 + 只进 messages 喂 LLM）。
+                    # 因此增量段是用户中途注入的输入，落盘记 type=user。
+                    injected_user_record = ExecutionRecordData(
                         pipeline_run_id=pipeline_run_id,
-                        type="system",
+                        type="user",
                         sequence=self._next_sequence(pipeline_run_id),
                         iteration=iteration,
-                        role="system",
+                        role="user",
                         content=new_content,
                         container_task_id=container_task_id or None,
+                        client_message_id=ctx.state.get("client_message_id") or None,
                     )
                     try:
-                        storage.save(notification_record)
+                        storage.save(injected_user_record)
                         logger.debug(
-                            "Injected content saved at iteration %d (%d chars)",
+                            "Injected user content saved at iteration %d (%d chars)",
                             iteration,
                             len(new_content),
                         )
                     except Exception:
-                        logger.exception("注入内容记录持久化失败")
+                        logger.exception("注入用户消息记录持久化失败")
 
         # -- 1. AI 回复记录（LLM Core 后写入） --
         raw_result = ctx.state.get(StateKeys.RAW_RESULT)

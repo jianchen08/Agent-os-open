@@ -50,7 +50,7 @@ class TestInjectAndWakeSuspended:
             "messages": [],
         }
 
-        engine._inject_notifications_to_suspended_state(["子任务已完成"])
+        engine._inject_notifications_to_suspended_state([("子任务已完成", "user")])
 
         assert "子任务已完成" in engine._suspended_state["user_input"]
         assert "原始输入" in engine._suspended_state["user_input"]
@@ -68,7 +68,7 @@ class TestInjectAndWakeSuspended:
             "messages": [],
         }
 
-        engine._inject_notifications_to_suspended_state(["新消息"])
+        engine._inject_notifications_to_suspended_state([("新消息", "user")])
 
         ui = engine._suspended_state["user_input"]
         assert ui.index("新消息") < ui.index("原始")
@@ -94,8 +94,8 @@ class TestInjectAndWakeSuspended:
 
         engine.inject_message("测试消息")
 
-        # 新架构：消息入 _inject_queue（drain_inject_queue 消费）
-        assert engine._inject_queue == ["测试消息"]
+        # 新架构：消息以 (message, source) 入 _inject_queue（drain_inject_queue 消费）
+        assert engine._inject_queue == [("测试消息", "user")]
 
 
 class TestInjectAndWakeRunning:
@@ -111,7 +111,7 @@ class TestInjectAndWakeRunning:
         engine.inject_message("子任务通知")
 
         assert len(engine._inject_queue) == 1
-        assert engine._inject_queue[0] == "子任务通知"
+        assert engine._inject_queue[0] == ("子任务通知", "user")
 
     @pytest.mark.asyncio
     async def test_multiple_messages_queue_up(self):
@@ -187,13 +187,18 @@ class TestInjectAndWakeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_suspended_state_empty_messages_list(self):
-        """_suspended_state.messages 为空列表时正常注入。"""
+        """_suspended_state.messages 为空列表时正常注入。
+
+        system 通知只写 messages（不写 user_input），验证分流语义。
+        """
         engine = _make_engine()
         engine._suspended_state = {"user_input": "", "messages": []}
 
-        engine._inject_notifications_to_suspended_state(["第一条"])
+        engine._inject_notifications_to_suspended_state([("第一条", "system")])
 
         assert len(engine._suspended_state["messages"]) == 1
+        # system 通知不写 user_input
+        assert engine._suspended_state["user_input"] == ""
 
     @pytest.mark.asyncio
     async def test_suspended_state_no_messages_key(self):
@@ -201,7 +206,7 @@ class TestInjectAndWakeEdgeCases:
         engine = _make_engine()
         engine._suspended_state = {"user_input": ""}
 
-        engine._inject_notifications_to_suspended_state(["消息"])
+        engine._inject_notifications_to_suspended_state([("消息", "user")])
 
         assert "messages" in engine._suspended_state
         assert len(engine._suspended_state["messages"]) == 1

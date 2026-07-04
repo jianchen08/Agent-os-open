@@ -103,7 +103,7 @@ async def apply_route(  # noqa: PLR0911
             # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
             from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
 
-            if consume_pending_notifications(engine, state):
+            if await consume_pending_notifications(engine, state):
                 return False
 
             # 无新输入，降级为 wait（挂起等用户反馈）
@@ -129,7 +129,7 @@ async def apply_route(  # noqa: PLR0911
         # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
         from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
 
-        if consume_pending_notifications(engine, state):
+        if await consume_pending_notifications(engine, state):
             logger.info("[Engine] route=end 但有待处理通知，取消结束: %s", route.reason)
             return False
         state[StateKeys.ENDED] = True

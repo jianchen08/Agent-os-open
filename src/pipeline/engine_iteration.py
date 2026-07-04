@@ -44,6 +44,20 @@ class IterationAction(Enum):
     BREAK = "break"
 
 
+def _get_bridge_for_pipeline(pipeline_id: str) -> Any | None:
+    """通过公开注册表 API 获取管道的 bridge（供通知推送用）。
+
+    consume_pending_notifications 不直接访问 engine 私有成员，
+    统一走 registry.get_bridge 公开接口。
+    """
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
+    try:
+        return get_engine_registry().get_bridge(pipeline_id)
+    except Exception:
+        return None
+
+
 async def run_iteration(
     engine: PipelineEngine,
     state: dict[str, Any],
@@ -68,7 +82,7 @@ async def run_iteration(
     """
 
     # 1. 消费待处理通知（tool_execute 时由统一函数内部跳过；前置追加到现有 user_input）
-    consume_pending_notifications(engine, state, prepend=True)
+    await consume_pending_notifications(engine, state, prepend=True)
 
     # 2. 解析插件列表 + 执行 Input 链
     plugin_names = engine.input_route_table.resolve_plugins(state)
@@ -115,7 +129,7 @@ async def _dispatch_input_target(
     )
 
     if target == "end":
-        return _handle_target_end(engine, state, matched_entry)
+        return await _handle_target_end(engine, state, matched_entry)
 
     if target == "wait":
         return await _handle_target_wait(engine, state)
@@ -123,22 +137,29 @@ async def _dispatch_input_target(
     return IterationAction.CONTINUE
 
 
-def consume_pending_notifications(
+async def consume_pending_notifications(
     engine: PipelineEngine,
     state: dict[str, Any],
     *,
     prepend: bool = False,
 ) -> bool:
-    """统一的待处理通知注入入口（state 注入的唯一函数）。
+    """统一的待处理通知注入入口（state 注入 + 前端推送的唯一函数）。
 
-    将 drain_inject_queue 取出的消息过滤空白后注入 state：
-    - user_input: prepend=True 时前置追加到现有 user_input，否则覆盖
-    - messages:   追加 {role: user} 记录
-    - core_type:  强制 llm_call；tool_execute 时跳过整个注入
-                  （避免在 assistant(tool_calls) 与 tool(result) 之间插入 user 消息，
-                   破坏配对会触发 Minimax API 2013 错误）
-    - raw_result/error_analysis: pop 掉，避免旧结果污染本轮
-    - client_message_id: 同步前端乐观消息 ID 到 state（供 track 插件持久化）
+    将 drain_inject_queue 取出的 (message, source) 过滤空白后注入 state，
+    按 source 分流：
+
+    - source=user（用户注入）：写 user_input + messages。
+      track 插件据此落 type="user" 记录（历史接口正确返回用户气泡）。
+    - source!=user（系统通知，如子任务完成）：只写 messages（喂 LLM），
+      不写 user_input（track 不落 type=system 记录，避免历史接口二次渲染）；
+      并在此推送 system_notification —— 这是系统通知的【唯一推送点】。
+
+    core_type 强制 llm_call；tool_execute 时跳过整个注入
+    （避免在 assistant(tool_calls) 与 tool(result) 之间插入 user 消息，
+     破坏配对会触发 Minimax API 2013 错误）。
+
+    推送时序：消息出队列、进入下一轮迭代的边界点推送，与 LLM 流式输出
+    共用 bridge 通道。除此之外不应存在其它 system 通知推送出口。
 
     Args:
         engine: PipelineEngine 实例
@@ -153,21 +174,50 @@ def consume_pending_notifications(
     if state.get(StateKeys.CORE_TYPE) == "tool_execute":
         return False
 
-    _notifs = engine.drain_inject_queue()
-    if not _notifs:
+    _queued = engine.drain_inject_queue()
+    if not _queued:
         return False
 
-    _filtered = [n for n in _notifs if n and n.strip()]
-    if not _filtered:
+    # 按 source 分流：user 注入 vs 系统通知
+    _user_msgs: list[str] = []
+    _system_notifs: list[tuple[str, str]] = []
+    for _msg, _source in _queued:
+        if not _msg or not _msg.strip():
+            continue
+        if _source == "user":
+            _user_msgs.append(_msg)
+        else:
+            _system_notifs.append((_msg, _source))
+
+    if not _user_msgs and not _system_notifs:
         return False
 
-    _combined = "\n\n".join(_filtered)
-    _existing_input = state.get("user_input", "")
-    if prepend and _existing_input:
-        state["user_input"] = f"{_combined}\n\n{_existing_input}"
-    else:
-        state["user_input"] = _combined
-    state.setdefault("messages", []).append({"role": "user", "content": _combined})
+    # ── user 注入：写 user_input + messages ──
+    if _user_msgs:
+        _combined_user = "\n\n".join(_user_msgs)
+        _existing_input = state.get("user_input", "")
+        if prepend and _existing_input:
+            state["user_input"] = f"{_combined_user}\n\n{_existing_input}"
+        else:
+            state["user_input"] = _combined_user
+        state.setdefault("messages", []).append({"role": "user", "content": _combined_user})
+
+    # ── 系统通知：只写 messages（喂 LLM），不写 user_input（track 不落 type=system） ──
+    if _system_notifs:
+        _combined_sys = "\n\n".join(_m for _m, _ in _system_notifs)
+        state.setdefault("messages", []).append({"role": "user", "content": _combined_sys})
+
+        # ★ 唯一推送点：消息出队列进下一轮时推送 ★
+        # 系统通知的前端气泡只此一处产生，不再有 message_bus 注入入口的推送、
+        # 也不进 user_input 让 track 落库二次渲染。
+        _bridge = _get_bridge_for_pipeline(engine.pipeline_id)
+        if _bridge is not None:
+            for _content, _source in _system_notifs:
+                try:
+                    await _bridge.emit_notification(_content, source=_source, level="info")
+                except Exception as exc:
+                    logger.warning("[Engine] 通知推送失败: %s", exc)
+
     state[StateKeys.CORE_TYPE] = "llm_call"
     state.pop("raw_result", None)
     state.pop("error_analysis", None)
@@ -179,14 +229,15 @@ def consume_pending_notifications(
         engine._pending_client_message_id = ""
 
     logger.info(
-        "[Engine] 消费 %d 条待处理通知，注入 state 继续循环 (prepend=%s)",
-        len(_filtered),
+        "[Engine] 消费通知：user=%d system=%d，注入 state 继续循环 (prepend=%s)",
+        len(_user_msgs),
+        len(_system_notifs),
         prepend,
     )
     return True
 
 
-def _handle_target_end(
+async def _handle_target_end(
     engine: PipelineEngine,
     state: dict[str, Any],
     matched_entry: Any,
@@ -200,7 +251,7 @@ def _handle_target_end(
     不生成内容（不写 RAW_RESULT）、不内联注入消息——通知注入统一走
     consume_pending_notifications。
     """
-    if consume_pending_notifications(engine, state):
+    if await consume_pending_notifications(engine, state):
         return IterationAction.CONTINUE
 
     state[StateKeys.ENDED] = True

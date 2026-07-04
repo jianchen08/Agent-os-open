@@ -149,42 +149,54 @@ class TestConsumePendingNotifications:
         from pipeline.engine_iteration import consume_pending_notifications
         assert callable(consume_pending_notifications)
 
-    def test_no_notifications_returns_false(self):
+    @pytest.mark.asyncio
+    async def test_no_notifications_returns_false(self):
         """无待处理通知 → 返回 False，不改 state。"""
         from pipeline.engine_iteration import consume_pending_notifications
         engine = MagicMock()
         engine.drain_inject_queue.return_value = []
+        engine.pipeline_id = "p1"
         state = {"messages": []}
 
-        result = consume_pending_notifications(engine, state)
+        result = await consume_pending_notifications(engine, state)
 
         assert result is False
         assert state["messages"] == [], "无通知时不应改 messages"
 
-    def test_empty_notifications_returns_false(self):
+    @pytest.mark.asyncio
+    async def test_empty_notifications_returns_false(self):
         """通知全是空白 → 返回 False。"""
         from pipeline.engine_iteration import consume_pending_notifications
         engine = MagicMock()
-        engine.drain_inject_queue.return_value = ["", "  ", ""]
+        engine.drain_inject_queue.return_value = [("", "user"), ("  ", "system")]
+        engine.pipeline_id = "p1"
         state = {"messages": []}
 
-        result = consume_pending_notifications(engine, state)
+        result = await consume_pending_notifications(engine, state)
         assert result is False
 
-    def test_real_notifications_injected(self):
-        """有实质通知 → 注入 messages/user_input，返回 True。"""
+    @pytest.mark.asyncio
+    async def test_real_notifications_injected(self):
+        """有实质通知 → 注入 messages/user_input，返回 True。
+
+        user 注入写 user_input + messages；system 通知只写 messages。
+        """
         from pipeline.engine_iteration import consume_pending_notifications
         engine = MagicMock()
-        engine.drain_inject_queue.return_value = ["任务完成", "子任务更新"]
+        engine.drain_inject_queue.return_value = [
+            ("任务完成", "user"),
+            ("子任务更新", "user"),
+        ]
+        engine.pipeline_id = "p1"
         state = {"messages": []}
 
-        result = consume_pending_notifications(engine, state)
+        result = await consume_pending_notifications(engine, state)
 
         assert result is True
-        assert len(state["messages"]) == 1, "通知应合并为一条 user 消息"
+        assert len(state["messages"]) == 1, "user 通知应合并为一条 user 消息"
         assert "任务完成" in state["messages"][0]["content"]
         assert "子任务更新" in state["messages"][0]["content"]
-        assert state["user_input"]  # user_input 应被设置
+        assert state["user_input"]  # user source 写 user_input
         from pipeline.types import StateKeys
         assert state[StateKeys.CORE_TYPE] == "llm_call"
 

@@ -121,9 +121,11 @@ class PipelineEngine:
 
         self._preserved_msg_sequence: int = 0
 
-        # 统一注入队列，所有 external 通知通过 inject_message 写入
+        # 统一注入队列，所有 external 通知通过 inject_message 写入。
+        # 元素为 (message, source) —— source 必须随消息入队，
+        # 供 consume_pending_notifications 区分 user 注入与 system 通知。
 
-        self._inject_queue: list[str] = []
+        self._inject_queue: list[tuple[str, str]] = []
 
         # 前端乐观消息 ID，供 track 插件持久化时写入 user_record
 
@@ -973,8 +975,8 @@ class PipelineEngine:
 
         return False
 
-    def drain_inject_queue(self) -> list[str]:
-        """从 _inject_queue 取出所有待处理消息并清空。"""
+    def drain_inject_queue(self) -> list[tuple[str, str]]:
+        """从 _inject_queue 取出所有 (message, source) 并清空。"""
 
         if not self._inject_queue:
             return []
@@ -1084,19 +1086,27 @@ class PipelineEngine:
         """当前绑定的 Agent 配置（只读公共接口）。"""
         return self._agent_config
 
-    def _inject_notifications_to_suspended_state(self, notifications: list[str]) -> None:
-        """将通知消息注入到挂起状态中（兼容旧接口）。"""
+    def _inject_notifications_to_suspended_state(self, notifications: list[tuple[str, str]]) -> None:
+        """将注入队列里的 (message, source) 注入到挂起状态中。
 
-        for notif in notifications:
-            if not notif or not notif.strip():
+        与 consume_pending_notifications 同源语义：
+        - source=user：写 user_input + messages（track 据此落 type=user）
+        - source!=user：只写 messages（喂 LLM，不写 user_input 避免 track 落 system）
+        系统通知的前端推送不在此时发生 —— 推送统一在 consume_pending_notifications
+        （suspended_state 恢复后下一轮迭代会经 consume 走到推送点）。
+        """
+        if self._suspended_state is None:
+            return
+
+        for _msg, _source in notifications:
+            if not _msg or not _msg.strip():
                 continue
-
-            if self._suspended_state is not None:
-                orig = self._suspended_state.get("user_input", "")
-
-                self._suspended_state["user_input"] = f"{notif}\n\n{orig}".strip()
-
-                self._suspended_state.setdefault("messages", []).append({"role": "user", "content": notif})
+            self._suspended_state.setdefault("messages", []).append(
+                {"role": "user", "content": _msg}
+            )
+            if _source == "user":
+                _orig = self._suspended_state.get("user_input", "")
+                self._suspended_state["user_input"] = f"{_msg}\n\n{_orig}".strip()
 
     def _check_children_terminal(self, state: dict[str, Any]) -> bool:
         """检查 submitted_task_ids 中的子任务是否全部已到达终态。"""
@@ -1223,7 +1233,7 @@ class PipelineEngine:
         if not message or not message.strip():
             return
 
-        self._inject_queue.append(message)
+        self._inject_queue.append((message, source))
 
         if client_message_id:
             self._pending_client_message_id = client_message_id

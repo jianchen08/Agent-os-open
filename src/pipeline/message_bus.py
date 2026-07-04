@@ -211,36 +211,9 @@ async def _inject_to_engine(
             message or "(empty)",
         )
 
-        # 非 user 消息：通过 bridge 推送 system_notification（和 AI stream 走同一通道，保证时序）。
-        # emit_notification 是 async，在 inject_message 之前调度，保证 notification 在 stream chunk 之前。
-        if msg_source != "user":
-            from pipeline.registry import get_engine_registry as _reg_for_push  # noqa: PLC0415
-
-            _notif_bridge = _reg_for_push().get_bridge(pipeline_id)
-            if _notif_bridge is not None:
-                try:
-                    await _notif_bridge.emit_notification(message, source=msg_source, level="info")
-                except Exception as exc:
-                    logger.warning("[MessageBus] bridge 通知推送失败: %s", exc)
-            else:
-                # bridge 不存在（idle/首次）→ sink 直推
-                _push_sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
-                if _push_sink is not None:
-                    try:
-                        await _push_sink.send_event(
-                            {
-                                "type": "system_notification",
-                                "data": {
-                                    "pipeline_id": pipeline_id,
-                                    "content": message,
-                                    "source": msg_source,
-                                    "level": "info",
-                                    "notificationType": f"{msg_source}_notification",
-                                },
-                            }
-                        )
-                    except Exception as exc:
-                        logger.warning("[MessageBus] sink 推送通知失败: %s", exc)
+        # 非 user 消息（系统通知）的前端推送统一由 consume_pending_notifications
+        # 在「消息出队列进下一轮迭代」时推送 —— 那是唯一的 system 通知推送点。
+        # 此处（注入入口）不再推送，避免「注入入口推一次 + 历史接口再渲染一次」的重复。
 
         if state == "idle":
             return await _start_idle_engine(

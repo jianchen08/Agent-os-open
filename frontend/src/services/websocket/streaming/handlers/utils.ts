@@ -123,8 +123,23 @@ export function ensureStreamingPlaceholder(
     }
   }
 
-  // // assistant 占位消息也要走本地 sequence 计数器（Math.max(后端 seq, 本地 max+1)），
-  // 否则后端 seq（小数字）会小于已分配的 user 消息 seq → assistant 排到 user 之前。
+  // 新 AI 消息来了，看前一条是什么：
+  // - 前一条是 user/system（或没有前一条）→ 新建独立气泡
+  // - 前一条是 assistant → 合并到前一条（不新建气泡，新内容追加进去）
+  const after = store.getMessages(pipelineId)
+  const prevMsg = after[after.length - 1]
+  if (prevMsg && prevMsg.role === 'assistant') {
+    // 合并到前一条 AI：把它的 id 更新为本轮的新 messageId，
+    // 这样后续 stream_chunk / tool_start 按新 messageId 操作时落到同一条消息。
+    // 同时重新置为 streaming，继续接收新内容。
+    store.updateMessage(pipelineId, prevMsg.id, {
+      id: messageId,
+      status: 'streaming',
+    } as any)
+    return
+  }
+
+  // 前一条是 user/system 或没有前一条 → 新建独立气泡
   const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
 
   store.addMessage(pipelineId, {

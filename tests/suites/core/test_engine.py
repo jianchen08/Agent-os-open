@@ -682,14 +682,14 @@ class TestEnginePublicInterface:
         engine = _build_engine()
         engine.inject_message("test message", source="system")
         assert len(engine._inject_queue) == 1
-        assert engine._inject_queue[0] == "test message"
+        assert engine._inject_queue[0] == ("test message", "system")
 
     def test_consume_pending_notifications(self):
         """drain_inject_queue 原子消费并清空通知队列。"""
         engine = _build_engine()
-        engine._inject_queue = ["msg1", "msg2", "msg3"]
+        engine._inject_queue = [("msg1", "user"), ("msg2", "system"), ("msg3", "user")]
         result = engine.drain_inject_queue()
-        assert result == ["msg1", "msg2", "msg3"]
+        assert result == [("msg1", "user"), ("msg2", "system"), ("msg3", "user")]
         assert engine._inject_queue == []
 
     def test_consume_pending_notifications_empty(self):

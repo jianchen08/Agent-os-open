@@ -326,7 +326,7 @@ async def handle_no_route_signals(
     # 不再内联重复 drain/过滤/拼接逻辑。
     from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
 
-    if consume_pending_notifications(engine, state):
+    if await consume_pending_notifications(engine, state):
         return "continue"
 
     _has_active_triggers = _check_active_triggers(state, engine.pipeline_id)
