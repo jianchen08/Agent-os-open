@@ -201,7 +201,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         tracked = max(self._tracked_msg_count, ctx.state.get("_tracked_msg_count", 0))
         current_non_sys = sum(1 for m in messages if m.get("role") != "system")
         restart_signature = tracked == 0 and current_non_sys > 50
-        logger.info(  # 临时诊断：定位重启后估算走哪条策略
+        logger.debug(
             "[%s] 估算分叉: prev_input=%d, tracked=%d, current_non_sys=%d, "
             "restart_signature=%s, msg_total=%d",
             self.name, prev_input, tracked, current_non_sys,
@@ -238,7 +238,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # 策略 2：压缩块拼接估算
         assembled = await self._estimate_assembled_tokens(ctx, messages)
-        logger.info(  # 临时诊断：策略2的返回值
+        logger.debug(
             "[%s] 估算(策略2/压缩块拼接): assembled=%d, msg_count=%d",
             self.name, assembled, len(messages),
         )
@@ -247,7 +247,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # 策略 3：全量字符估算（最后手段）
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
-        logger.warning(  # 临时诊断：落到策略3说明前两个都失败了
+        logger.warning(  # 落到策略3说明前两个都失败了，值得告警
             "[%s] 估算(策略3/全量字符 兜底): estimated=%d, msg_count=%d, "
             "prev_input=%d, tracked=%d",
             self.name,
@@ -380,20 +380,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 仅在重启特征（消息数远超上次追踪值）下裁剪，正常迭代不裁。
         trimmed = False
         if len(messages) > self._tracked_msg_count + 50:
-            before = len(messages)
             new_messages = await self._trim_covered_messages(ctx, messages)
             trimmed = new_messages is not messages
             if trimmed:
                 messages = new_messages
-            logger.info(  # 临时诊断：裁剪是否触发
-                "[%s] 裁剪检查: before=%d, after=%d, trimmed=%s, tracked=%d",
-                self.name, before, len(messages), trimmed, self._tracked_msg_count,
-            )
-        else:
-            logger.info(  # 临时诊断：未触发裁剪的原因
-                "[%s] 裁剪未触发: msg_count=%d <= tracked+50=%d",
-                self.name, len(messages), self._tracked_msg_count + 50,
-            )
 
         # 阈值检查
         estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
