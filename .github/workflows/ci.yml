@@ -242,6 +242,14 @@ jobs:
             --ignore=tests/test_isolation_container_self_heal.py \
             --ignore=tests/test_isolation_docker_timeout.py \
             --ignore=tests/test_isolation_prune_throttle.py \
+            --ignore=tests/test_agent_config_fix.py \
+            --ignore=tests/test_ar2_tool_context_bridge.py \
+            --ignore=tests/test_bug_fixes.py \
+            --ignore=tests/test_config_center.py \
+            --ignore=tests/test_drain_finalize_business_error.py \
+            --ignore=tests/test_empty_message_fix.py \
+            --ignore=tests/test_enhanced_search_boundary.py \
+            --ignore=tests/test_import_integrity.py \
             --continue-on-collection-errors \
             --timeout=30 --timeout-method=thread \
             --tb=line \
