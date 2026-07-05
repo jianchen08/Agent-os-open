@@ -485,14 +485,6 @@ class HumanInteractionService(IHumanInteractionService):
                 self._timeout_tasks[request_id].cancel()
                 del self._timeout_tasks[request_id]
 
-        if self._notifier and hasattr(self._notifier, "cancel_fallback"):
-            try:
-                result = self._notifier.cancel_fallback(request_id)
-                if hasattr(result, "__await__"):
-                    await result
-            except Exception:
-                pass
-
         logger.info(
             "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s",
             request_id,

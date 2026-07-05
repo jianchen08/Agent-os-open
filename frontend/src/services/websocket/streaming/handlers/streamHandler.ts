@@ -174,6 +174,7 @@ export function handleStreamEnd(eventData: any) {
       const msg = msgs.find((m: any) => m.id === messageId)
 
       if (msg) {
+        // msg 存在：合并后端权威 parts/sequence，收尾占位。
         // 同步后端权威 sequence（final_sequence）
         // stream_start 不携带 sequence，占位消息的 sequence 是前端自算的 localMax+1，
         // 与后端真实序号不一致。stream_end 携带 final_sequence，必须在此同步到占位消息，
@@ -230,6 +231,14 @@ export function handleStreamEnd(eventData: any) {
             })
           }
         }
+      } else {
+        // stream_end 找不到本地消息：说明 stream_start/chunk 在断线期间丢失，本地无对应占位。
+        // 后端已完成并持久化，由重连/重进入时的统一重新加载（useRealtimeEvents 的 initFromAPI
+        // 对账）拉取权威内容。此处不主动发请求（handler 是纯事件处理，不触发 HTTP）。
+        _debugLogger.warn(
+          '[STREAM_END] 本地无对应消息（断线期间 stream_start 丢失），将由重新加载对账: pipeline=%s msgId=%s',
+          pipelineId?.slice(0, 12), messageId?.slice(0, 12),
+        )
       }
     }
 

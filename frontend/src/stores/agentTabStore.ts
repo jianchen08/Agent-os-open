@@ -279,7 +279,12 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       usePipelineMessageStore.getState().activatePipeline(activeTab.pipelineRunId)
     }
 
-    // 子 Tab 异步加载消息
+    // 子 Tab 懒加载：进会话时只注册 pipeline 元数据（无网络请求），
+    // 不再 forEach 全量加载所有历史子 Tab 的消息。
+    // 历史子 Tab 的消息在用户真正切换到该 Tab 时由 switchToTab/setActiveTab
+    // 触发 loadTabMessages 加载（IndexedDB 有缓存时秒开，无缓存才发请求）。
+    // 这样把进会话的并发消息请求从 N（历史累积的子 Tab 数）降到最多 1，
+    // 避免会话切换瞬间打爆后端（曾出现 14 个子 Tab 并发 fetch 全部超时雪崩）。
     const pipelineStore = usePipelineMessageStore.getState()
     tabs.forEach((tab) => {
       if (tab.agentLevel !== 1 && tab.pipelineRunId) {
@@ -295,9 +300,13 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
             unreadCount: 0,
           })
         }
-        get().loadTabMessages(tab.id)
       }
     })
+
+    // 仅当前活跃的子 Tab 触发消息加载（主管道由 sessionListStore.setActiveSession 负责加载）
+    if (activeTab && activeTab.agentLevel !== 1 && activeTab.pipelineRunId) {
+      get().loadTabMessages(activeTab.id)
+    }
   },
 
   /** 保存当前标签状态到 localStorage（仅标签 + pipeline 映射）。 消息由 pipelineMessageStore 独立 persist，不在此缓存。 */

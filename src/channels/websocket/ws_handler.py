@@ -32,11 +32,8 @@ _SEND_TIMEOUT_SECONDS = _resolve_send_timeout()
 class WebSocketInteractionNotifier:
     """通过 WebSocket 将人类交互请求转发到前端。"""
 
-    def __init__(self, auto_confirm_delay: float = 600.0) -> None:
-        self._auto_confirm_delay = auto_confirm_delay
+    def __init__(self) -> None:
         self._service = None
-        self._fallback_tasks: set[asyncio.Task] = set()
-        self._fallback_request_map: dict[str, asyncio.Task] = {}
         # 单连接真相之源：user_id → WebSocket（每用户一条，新连接踢旧连接）。
         self._global_connections: dict[str, WebSocket] = {}
         # 流式路径兜底映射：thread_id → user_id。
@@ -129,21 +126,15 @@ class WebSocketInteractionNotifier:
                 (target_uid or "broadcast")[:12],
             )
         else:
-            logger.info(
-                "[WSNotifier] 无前端连接，将在 %.0fs 后自动确认 | request_id=%s",
-                self._auto_confirm_delay,
+            # 推送失败（无连接/路由解析失败）：不自动确认，等待用户响应或工具自身超时。
+            # 工具默认 timeout_seconds=86400（1天），超时后抛 InteractionTimeoutError 终止等待。
+            logger.warning(
+                "[WSNotifier] 交互请求未送达前端（无连接/路由失败），"
+                "等待用户响应或工具超时 | request_id=%s target_uid=%s thread_id=%s",
                 request_id,
+                (target_uid or "empty")[:12],
+                thread_id[:12],
             )
-
-        # 启动自动确认回退任务：如果前端未响应，自动批准
-        if self._service:
-            task = asyncio.create_task(self._auto_confirm_fallback(request_id, msg_data))
-            self._fallback_tasks.add(task)
-            self._fallback_request_map[request_id] = task
-            task.add_done_callback(
-                lambda t, _rid=request_id: self._fallback_request_map.pop(_rid, None)  # noqa: ARG005
-            )
-            task.add_done_callback(self._fallback_tasks.discard)
 
         return sent
 
@@ -287,39 +278,6 @@ class WebSocketInteractionNotifier:
     def get_global_websocket(self, user_id: str) -> WebSocket | None:
         """获取指定用户的全局 WebSocket 连接。"""
         return self._global_connections.get(user_id)
-
-    async def _auto_confirm_fallback(self, request_id: str, msg_data: dict) -> None:
-        """延迟后检查请求是否仍待处理，若是则自动确认。"""
-        await asyncio.sleep(self._auto_confirm_delay)
-        if not self._service:
-            return
-        try:
-            record = await self._service.get_request(request_id)
-            if record and record.get("status") == "pending":
-                logger.info(
-                    "[WSNotifier] 前端未响应，自动确认 | request_id=%s",
-                    request_id,
-                )
-                options = msg_data.get("options", [])
-                first_option_id = options[0]["id"] if options else "approve"
-                await self._service.submit_response(
-                    request_id=request_id,
-                    response_type="approved",
-                    selected_option=first_option_id,
-                    feedback="自动确认（前端未响应）",
-                )
-        except Exception as exc:
-            logger.debug("[WSNotifier] 自动确认回退失败: %s", exc)
-
-    def cancel_fallback(self, request_id: str) -> None:
-        """取消指定请求的自动确认回退任务。"""
-        task = self._fallback_request_map.pop(request_id, None)
-        if task and not task.done():
-            task.cancel()
-            logger.debug(
-                "[WSNotifier] 已取消自动确认回退 | request_id=%s",
-                request_id,
-            )
 
     async def send_to_thread(self, thread_id: str, event_data: dict) -> bool:
         """向指定 thread_id 关联用户的 WebSocket 连接发送事件。

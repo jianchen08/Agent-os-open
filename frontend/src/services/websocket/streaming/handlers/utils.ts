@@ -126,10 +126,12 @@ export function ensureStreamingPlaceholder(
 
   // 新 AI 消息来了，看前一条是什么：
   // - 前一条是 user/system（或没有前一条）→ 新建独立气泡
-  // - 前一条是 assistant → 合并到前一条（不新建气泡，新内容追加进去）
+  // - 前一条是 assistant 且仍处于 streaming → 合并到前一条（不新建气泡，新内容追加进去）
+  // 前一条 assistant 已 completed 时 id 冻结，绝不改写：否则会污染已完成消息的权威 id，
+  // 导致后续 chunk 按 hex id 查找命中错误消息（断线重连场景的空气泡根因）。
   const after = store.getMessages(pipelineId)
   const prevMsg = after[after.length - 1]
-  if (prevMsg && prevMsg.role === 'assistant') {
+  if (prevMsg && prevMsg.role === 'assistant' && prevMsg.status === 'streaming') {
     // 合并到前一条 AI：把它的 id 更新为本轮的新 messageId，
     // 这样后续 stream_chunk / tool_start 按新 messageId 操作时落到同一条消息。
     // 同时重新置为 streaming，继续接收新内容。

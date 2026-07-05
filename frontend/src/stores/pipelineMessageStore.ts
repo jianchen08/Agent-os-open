@@ -883,9 +883,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         if (status === 404) {
           logger.debug('[pipelineMessageStore.fetchMessages] 管道消息暂不可用 (404): pipelineId=%s', pipelineId)
         } else {
+          // 提取可读错误标识，避免 AxiosError 对象被 %s 序列化成 [object Object]。
+          // 优先级：HTTP 状态码 > axios error code（ECONNABORTED/ERR_NETWORK 等）> message
+          const errInfo = status || err?.code || err?.message || String(err)
           logger.warn(
             '[pipelineMessageStore.fetchMessages] 加载失败（已重试）: pipelineId=%s err=%s',
-            pipelineId, err,
+            pipelineId, errInfo,
           )
         }
         // 重新抛出，让上层调用方（loadPipelineMessages）能感知失败并决定通知策略。
@@ -1155,19 +1158,30 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       if (p.messagesByPipeline) {
         for (const [pid, msgs] of Object.entries(p.messagesByPipeline)) {
           if (!msgs) continue
-          cleanedMessages[pid] = msgs.map((m) => {
-            if (m.status === 'streaming') {
-              const cleanedParts = (m.parts || []).map((part) => {
-                const state = (part as { state?: string }).state
-                if (state === 'streaming' || state === 'calling') {
-                  return { ...part, state: 'done' } as MessagePart
-                }
-                return part
-              })
-              return { ...m, status: 'completed' as const, parts: cleanedParts }
-            }
-            return m
-          })
+          cleanedMessages[pid] = msgs
+            .filter((m) => {
+              // 丢弃空的乐观占位（断线期间未收到任何内容）：刷新后后端权威内容由
+              // initFromAPI 对账拉取，本地空占位只会变空气泡。保留有内容的占位。
+              if (m.status === 'streaming' && m.id.startsWith?.('placeholder_')) {
+                const hasContent = (m.content || '').length > 0
+                  || (m.parts || []).some((part) => part.type !== 'system')
+                return hasContent
+              }
+              return true
+            })
+            .map((m) => {
+              if (m.status === 'streaming') {
+                const cleanedParts = (m.parts || []).map((part) => {
+                  const state = (part as { state?: string }).state
+                  if (state === 'streaming' || state === 'calling') {
+                    return { ...part, state: 'done' } as MessagePart
+                  }
+                  return part
+                })
+                return { ...m, status: 'completed' as const, parts: cleanedParts }
+              }
+              return m
+            })
         }
       }
       return {

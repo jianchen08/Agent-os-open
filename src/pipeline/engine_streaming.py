@@ -259,6 +259,16 @@ class StreamingOutput:
                 # 流式未开始或已结束：不发保活包（emit_finish/emit_suspend 已置 False）
                 if not getattr(bridge, "_stream_started", False):
                     continue
+                # sink 熔断（用户长期离线，连续推送失败达阈值）：停止 keepalive，避免
+                # 向已下线用户无限重试燃烧 CPU。下一个 turn 的 start() 会重建 keepalive
+                # task（见 start() 的 done() 检查），重连后 sink 计数归零，自然恢复。
+                if getattr(bridge.output_sink, "is_dead", False):
+                    logger.info(
+                        "[Streaming] sink 已熔断，停止 keepalive: pipeline=%s thread_id=%s",
+                        self._pipeline_id[:12],
+                        (getattr(bridge.output_sink, "_thread_id", "") or "(empty)")[:12],
+                    )
+                    break
                 _idle = _time.monotonic() - self._last_chunk_monotonic
                 # chunk 密集（最近收过）：抑制保活包
                 if _idle < self._KEEPALIVE_IDLE_THRESHOLD:

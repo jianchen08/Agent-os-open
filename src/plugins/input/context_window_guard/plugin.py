@@ -195,13 +195,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
                     prev_input,
                 )
 
-        # 策略 1：prev_input + delta
-        if prev_input > 0:
-            # 以实例变量为主（跨同一插件实例的多次调用），
-            # ctx.state 为辅（重启/state 恢复场景，取更大值）
-            tracked = max(self._tracked_msg_count, ctx.state.get("_tracked_msg_count", 0))
-            current_non_sys = sum(1 for m in messages if m.get("role") != "system")
-
+        # 策略 1：prev_input + delta（仅同进程连续迭代有效）
+        # 重启后 tracked 归零、messages 从存储全量恢复，prev_input（上一进程某轮
+        # 的值）与当前 messages 不匹配，增量假设会双重计算 → 跳过让策略 2 接管
+        tracked = max(self._tracked_msg_count, ctx.state.get("_tracked_msg_count", 0))
+        current_non_sys = sum(1 for m in messages if m.get("role") != "system")
+        if prev_input > 0 and not (tracked == 0 and current_non_sys > 50):
             if current_non_sys <= tracked:
                 logger.debug(
                     "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
@@ -367,6 +366,17 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if cleaned is not None:
             messages = cleaned
 
+        # 重启场景裁剪：从存储全量恢复后，已被压缩块覆盖的旧消息需先剔除。
+        # 必须在阈值估算之前做——否则策略 1/3 会把覆盖区的消息全算进去导致
+        # 误触发压缩，且压缩分支拿到的 messages 还包含已被压缩过的旧消息。
+        # 仅在重启特征（消息数远超上次追踪值）下裁剪，正常迭代不裁。
+        trimmed = False
+        if len(messages) > self._tracked_msg_count + 50:
+            new_messages = await self._trim_covered_messages(ctx, messages)
+            trimmed = new_messages is not messages
+            if trimmed:
+                messages = new_messages
+
         # 阈值检查
         estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
         trigger_tokens = int(context_window * self._trigger_ratio)
@@ -381,21 +391,11 @@ class ContextWindowGuardPlugin(IInputPlugin):
             type(service).__name__,
         )
         if estimated_tokens < trigger_tokens:
-            # 不需要压缩，但可能需要裁剪被已有压缩块覆盖的旧消息
-            # 仅在重启加载场景（消息数远超上次追踪值）时裁剪，
-            # 正常迭代中新增的消息不应被裁剪
-            trimmed_messages = messages
-            if len(messages) > self._tracked_msg_count + 50:
-                trimmed_messages = await self._trim_covered_messages(
-                    ctx,
-                    messages,
-                )
-            current_non_sys = sum(1 for m in trimmed_messages if m.get("role") != "system")
+            # 不压缩，仅更新追踪计数；messages 已在上方裁剪过
+            current_non_sys = sum(1 for m in messages if m.get("role") != "system")
             self._tracked_msg_count = current_non_sys
-            updates = {"_tracked_msg_count": current_non_sys}
-            if trimmed_messages is not messages:
-                updates["messages"] = trimmed_messages
-            elif cleaned is not None:
+            updates: dict[str, Any] = {"_tracked_msg_count": current_non_sys}
+            if trimmed or cleaned is not None:
                 updates["messages"] = messages
             return PluginResult(state_updates=updates)
 

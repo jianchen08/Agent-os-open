@@ -637,11 +637,21 @@ class ExecutionRecordStorage:
         if records:
             return records, has_more
 
-        logger.debug(
-            "[list_by_pipeline] 尾部读取无结果，fallback 全量加载: %s",
-            pipeline_run_id,
+        # 尾部读取无结果。区分两种情况：
+        # - 内存模式（无 data_dir）：数据只在 _records 字典，尾部读天然读不到，
+        #   必须走全量加载（内存扫描，无磁盘 IO，不慢）。
+        # - 磁盘模式（有 data_dir）：尾部读读不到说明数据问题/分片损坏。
+        #   不静默 fallback 到全量加载——_list_by_pipeline_full 会全量读所有分片
+        #   （c7dc5433b2d7 共 5 分片 7.4MB，单次 10-40s），多 pipeline 并发即雪崩。
+        #   返回空 + WARNING 暴露问题，而非被慢全量加载掩盖拖垮系统。
+        if not self._data_dir:
+            return self._list_by_pipeline_full(pipeline_run_id, before_sequence, after_sequence, limit=limit)
+
+        logger.warning(
+            "[list_by_pipeline] 尾部读取无结果，返回空（不 fallback 全量加载）: pipeline=%s",
+            pipeline_run_id[:12],
         )
-        return self._list_by_pipeline_full(pipeline_run_id, before_sequence, after_sequence, limit=limit)
+        return [], False
 
     def _list_by_pipeline_full(
         self,

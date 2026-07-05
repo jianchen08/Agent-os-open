@@ -8,15 +8,15 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 import httpx
 import asyncio
 import websockets
 
 app = FastAPI()
 
-# 静态文件目录
-STATIC_DIR = Path("/app/dist")
+# 静态文件目录（容器内默认 /app/dist；支持环境变量覆盖便于本地/测试）
+STATIC_DIR = Path(os.environ.get("FRONTEND_DIST_DIR", "/app/dist"))
 INDEX_HTML = STATIC_DIR / "index.html"
 
 # 后端服务地址
@@ -26,47 +26,70 @@ BACKEND_WS_URL = os.environ.get("BACKEND_WS_URL", "ws://agent:8000")
 # HTTP 客户端
 client = httpx.AsyncClient(timeout=300.0)
 
-# 代理后端时的连接重试次数（吸收后端启动竞态：前端启动后到后端 uvicorn
-# listen 之间的窗口期，连不上应短暂重试而非直接 500）。
-# 总尝试次数 = PROXY_CONNECT_RETRIES + 1，指数退避。
-PROXY_CONNECT_RETRIES = int(os.environ.get("PROXY_CONNECT_RETRIES", "3"))
-PROXY_CONNECT_BACKOFF = float(os.environ.get("PROXY_CONNECT_BACKOFF", "0.5"))
+# 后端启动竞态吸收：前端容器启动时后端 uvicorn 可能还没 listen，此时第一个
+# 请求会 ConnectError。_stream_proxy 在 except 里返回 502，前端重试即可恢复，
+# 不再做启动期重试（旧 _request_with_connect_retry 已随全量读取写法一起移除）。
 
 
-async def _request_with_connect_retry(
-    method: str,
-    url: str,
-    *,
-    content: bytes | None = None,
-    headers: dict | None = None,
-    params: dict | None = None,
-    follow_redirects: bool = False,
-) -> httpx.Response:
-    """对后端 HTTP 请求做启动期连接重试。
+# ---------------------------------------------------------------------------
+# 流式反向代理（业界标准写法）
+# ---------------------------------------------------------------------------
+# 旧的写法用 Response(content=resp.content)，会在事件循环主线程一次性把整个
+# 后端响应体同步读进内存，触发大块堆分配（brk）。长时间运行后 Python 堆碎片化，
+# 单次 brk 在内核里退化到秒级，阻塞主线程（asyncio 协作式调度，不让出即停转），
+# 导致 /health、静态文件、所有请求排队 → 前端容器卡死。
+#
+# 正确做法：stream=True 让 httpx 不预读响应体；StreamingResponse + aiter_bytes
+# 分块转发（默认 64KB/块），主线程每次只处理一个小 chunk，永不持有完整响应体，
+# 不触发大 brk。同时用 background_tasks 确保 resp 在流结束后关闭，避免连接泄漏。
+# httpx 的流式响应必须显式 close，见 https://www.python-httpx.org/async/#streaming-responses
+_HOP_BY_HOP_HEADERS = frozenset(("content-encoding", "transfer-encoding", "content-length", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"))
 
-    仅重试 httpx.ConnectError / httpx.ConnectTimeout（后端端口未就绪），
-    一旦连接建立（拿到任何响应或非连接类错误）立即返回，不重试业务错误。
+
+async def _stream_proxy(request: Request, url: str, *, follow_redirects: bool = False):
+    """流式转发请求到后端，主线程永不持有完整响应体。
+
+    用 client.send(request, stream=True) 拿到流式响应（不预读响应体），
+    StreamingResponse 边 aiter_bytes 边转发。主线程每次只持有一个 chunk，
+    不触发大块堆分配（brk）。流结束/中断时 finally 关闭 resp 防连接泄漏。
+
+    Args:
+        request: 入站请求（取 method/body/headers/query）
+        url: 后端完整 URL
+        follow_redirects: 是否跟随重定向（媒体/上传需要）
+
+    Returns:
+        StreamingResponse，分块转发后端响应体。
     """
-    last_exc: Exception | None = None
-    for attempt in range(PROXY_CONNECT_RETRIES + 1):
+    body = await request.body()
+    headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+
+    # 构造 httpx.Request，用 client.send(stream=True) 拿流式响应（不预读响应体）
+    upstream_req = client.build_request(
+        request.method,
+        url,
+        content=body or None,
+        headers=headers,
+        params=dict(request.query_params),
+    )
+    # stream=True：httpx 不预读响应体，aiter_bytes 时才按需读取
+    resp = await client.send(upstream_req, stream=True, follow_redirects=follow_redirects)
+
+    # 过滤 hop-by-hop headers（代理不能透传这些）
+    resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS}
+
+    async def _iter_bytes():
         try:
-            return await client.request(
-                method=method,
-                url=url,
-                content=content,
-                headers=headers or {},
-                params=params,
-                follow_redirects=follow_redirects,
-            )
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            last_exc = exc
-            if attempt >= PROXY_CONNECT_RETRIES:
-                break
-            await asyncio.sleep(PROXY_CONNECT_BACKOFF * (2 ** attempt))
-    # 重试用尽，抛出最后的连接异常
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("_request_with_connect_retry: 重试用尽但未捕获异常")
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+
+    return StreamingResponse(
+        _iter_bytes(),
+        status_code=resp.status_code,
+        headers=resp_headers,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -100,39 +123,12 @@ async def inject_html():
 # ---------------------------------------------------------------------------
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_api(request: Request, path: str):
-    """将 /api/* 请求代理到后端"""
+    """将 /api/* 请求流式代理到后端（主线程不做大块内存分配）。"""
     url = f"{BACKEND_URL}/api/{path}"
-    body = await request.body()
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
-
-    resp: httpx.Response | None = None
     try:
-        resp = await _request_with_connect_retry(
-            method=request.method,
-            url=url,
-            content=body,
-            headers=headers,
-            params=dict(request.query_params),
-        )
-
-        # 过滤 hop-by-hop headers
-        resp_headers = {}
-        for k, v in resp.headers.items():
-            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-                resp_headers[k] = v
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=resp_headers,
-        )
+        return await _stream_proxy(request, url)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
-    finally:
-        if resp is not None:
-            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -197,32 +193,12 @@ async def proxy_websocket(websocket: WebSocket, path: str):
 # ---------------------------------------------------------------------------
 @app.api_route("/media/{path:path}", methods=["GET"])
 async def proxy_media(request: Request, path: str):
-    """将 /media/* 请求代理到后端"""
+    """将 /media/* 请求流式代理到后端。"""
     url = f"{BACKEND_URL}/media/{path}"
-
-    resp: httpx.Response | None = None
     try:
-        resp = await _request_with_connect_retry(
-            method="GET",
-            url=url,
-            follow_redirects=True,
-        )
-
-        resp_headers = {}
-        for k, v in resp.headers.items():
-            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-                resp_headers[k] = v
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=resp_headers,
-        )
+        return await _stream_proxy(request, url, follow_redirects=True)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
-    finally:
-        if resp is not None:
-            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -230,32 +206,12 @@ async def proxy_media(request: Request, path: str):
 # ---------------------------------------------------------------------------
 @app.api_route("/uploads/{path:path}", methods=["GET"])
 async def proxy_uploads(request: Request, path: str):
-    """将 /uploads/* 请求代理到后端（用户上传的图片/文件）"""
+    """将 /uploads/* 请求流式代理到后端（用户上传的图片/文件）。"""
     url = f"{BACKEND_URL}/uploads/{path}"
-
-    resp: httpx.Response | None = None
     try:
-        resp = await _request_with_connect_retry(
-            method="GET",
-            url=url,
-            follow_redirects=True,
-        )
-
-        resp_headers = {}
-        for k, v in resp.headers.items():
-            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-                resp_headers[k] = v
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=resp_headers,
-        )
+        return await _stream_proxy(request, url, follow_redirects=True)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
-    finally:
-        if resp is not None:
-            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------

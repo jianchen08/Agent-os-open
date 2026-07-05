@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from pipeline.plugin import PluginContext
@@ -79,7 +80,8 @@ class TestEndToEndRecordIdContract:
     storage 中所有 ai 记录的 record_id 都等于裸 message_id，无 #iteration 后缀。
     """
 
-    def test_multi_iteration_ai_records_keep_bare_record_id(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_multi_iteration_ai_records_keep_bare_record_id(self, tmp_path):
         from infrastructure.execution_record_storage import (
             ExecutionRecordData,
             ExecutionRecordStorage,
@@ -121,7 +123,7 @@ class TestEndToEndRecordIdContract:
                     config={},
                     _services={"execution_record_storage": storage},
                 )
-                plugin._try_persist_record(ctx, elapsed=0.1)
+                await plugin._try_persist_record(ctx, elapsed=0.1)
 
         # 取出所有 ai 记录
         records, _ = storage.list_by_pipeline(pipeline_run_id, limit=None)

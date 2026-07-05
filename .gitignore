@@ -66,6 +66,7 @@ debug-*.log
 frontend/scripts/debug_*.mjs
 frontend/scripts/probe_*.mjs
 frontend/scripts/analyze_trace.py
+frontend/scripts/analyze_trace2.py
 frontend/vite.probe.config.ts
 frontend/probe-out/
 

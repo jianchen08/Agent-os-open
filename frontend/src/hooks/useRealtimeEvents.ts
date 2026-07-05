@@ -1,6 +1,7 @@
 /** useRealtimeEvents Hook 订阅实时 WebSocket 事件并路由到 layout mode store 进行展示。 */
 
 import { useEffect } from 'react'
+import { useAuthStore } from '@/stores/authStore'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { handleSchemaUpdate } from '@/services/modules'
@@ -33,38 +34,38 @@ export function useRealtimeEvents(): void {
       }
       lastFetchTimeRef.current = now
 
-      const { activeSessionId } = useSessionStore.getState()
-      // 双游标补漏：WS 重连后，对所有有 bottomCursor 的管道走 after_sequence 增量补漏，
-      // 只拉断线期间缺失的新消息，天然不重复。延后一帧执行（外层 requestAnimationFrame），
-      // 确保 lifecycleHandlers 的 handleReconnected 先清理完残留 streaming 占位。
-      const store = usePipelineMessageStore.getState()
-      const pipelinesToBackfill: string[] = []
-      for (const [pid, cursor] of Object.entries(store.bottomCursorsByPipeline)) {
-        if (cursor > 0) pipelinesToBackfill.push(pid)
-      }
-      // 统一加载入口：WS 重连必须无条件补漏（skipStreamingCheck=true，刷新后 isStreaming=false），
-      // 强制 mode='backfill' 走 after_sequence 增量。失败时通知用户。
-      for (const pid of pipelinesToBackfill) {
-        usePipelineMessageStore
-          .getState()
-          .loadPipelineMessages(pid, {
-            threadId: activeSessionId || '',
-            mode: 'backfill',
-            skipStreamingCheck: true,
-          })
-          .then((result) => {
-            if (!result.ok) {
-              useNotificationStore.getState().addNotification({
-                title: '消息同步失败',
-                message: 'WebSocket 重连后消息同步失败，请手动刷新页面',
-                priority: 'high',
-                category: 'error',
-                isBlocking: false,
-                autoDismissMs: 8000,
-              })
-            }
-          })
-      }
+      const { activeSessionId, sessions } = useSessionStore.getState()
+      if (!activeSessionId) return
+      // 只补当前会话的【主管道】，不对 session.pipelineIds 全部扇出（曾导致 4+ 并发请求
+      // × 后端全量加载 40s = 性能雪崩）。子管道的消息在用户切到对应 tab 时按需加载。
+      const session = sessions.find((s) => s.id === activeSessionId)
+      const mainPipelineId = session?.pipelineIds?.[0]
+      if (!mainPipelineId) return
+
+      // 走 backfill（增量补漏，走后端尾部读优化）而非 init（全量加载）。
+      // init 触发 initFromAPI → 后端 _list_by_pipeline_full 全量读大 YAML（4.3MB+，
+      // 单请求 10-40s），多个 pipeline 并发即雪崩。backfill 走 read_records_from_tail
+      // 尾部窗口读，秒级返回。流式占位的 id 对账问题由 ensureStreamingPlaceholder 的
+      // 状态守护（改动 A）保证安全，无需靠 init 全量覆盖。
+      usePipelineMessageStore
+        .getState()
+        .loadPipelineMessages(mainPipelineId, {
+          threadId: activeSessionId,
+          mode: 'backfill',
+          skipStreamingCheck: true,
+        })
+        .then((result) => {
+          if (!result.ok) {
+            useNotificationStore.getState().addNotification({
+              title: '消息同步失败',
+              message: 'WebSocket 重连后消息同步失败，请手动刷新页面',
+              priority: 'high',
+              category: 'error',
+              isBlocking: false,
+              autoDismissMs: 8000,
+            })
+          }
+        })
 
       // 直到后端推送 SCHEMA_UPDATED 事件或重新登录才恢复。
       import('@/services/modules/ModuleManager')
@@ -309,9 +310,34 @@ export function useRealtimeEvents(): void {
     }
     globalWS.subscribe(WS_SERVER_EVENTS.SCHEMA_UPDATED, handleSchemaUpdatedEvent as any)
 
+    // visibility 回前台主动重连：浏览器后台时节流 setInterval 心跳 + uvicorn ws_ping_timeout
+    // 会掐断连接，但 onclose 可能在标签页冻结期间被延迟。回前台时主动检测：连接已断则重连，
+    // 重连成功后 onopen 自动发 reconnected → 上方 handleWsReconnect 自动追新（fan-out 复用）。
+    // 连接仍活着则不动（说明 WS 一直收消息，状态本就最新）。
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return
+      if (globalWS.status === 'connected') return
+      const { checkTokenExpiration, refreshToken, token } = useAuthStore.getState()
+      // token 过期：先刷新再连。必须用 .then()（成功才连），绝不能用 .finally()——
+      // refresh 失败时若仍用旧过期 token 硬连，会触发 4001 → 重连链 → 可能误登出。
+      // refresh 失败时不 connect，让 GlobalWebSocket 既有重连机制自行处理（它有
+      // isAuthFailureFromError 判断，瞬时故障不登出）。
+      if (checkTokenExpiration()) {
+        refreshToken()
+          .then(() => globalWS.connect(useAuthStore.getState().token || ''))
+          .catch(() => {
+            // refresh 失败：不主动连，不登出，交给 GlobalWebSocket 既有重连兜底
+          })
+      } else {
+        globalWS.connect(token || '')
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
     return () => {
       // WebSocket lifecycle
       globalWS.unsubscribe('reconnected', handleWsReconnect)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
 
       // Execution events
       globalWS.unsubscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)

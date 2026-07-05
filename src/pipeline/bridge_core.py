@@ -177,7 +177,16 @@ class BridgeCore:
         }
 
     async def _send_event_internal(self, event: dict) -> bool:
-        """内部事件发送实现（失败隔离：只 log warning，不抛异常）。"""
+        """内部事件发送实现（失败隔离：只 log warning，不抛异常）。
+
+        sink 熔断（连续推送失败达阈值，用户长期离线）：跳过推送，直接返回 False。
+        否则用户离线时后端会向死 sink 无限重试（thinking_chunk 等真实事件，非仅
+        keepalive），每秒刷 3 条 ERROR/WARNING 日志，拖垮后端 IO/CPU。sink 只在用户
+        重连时由 _resume_pipeline_for_thread 重建（计数归零），期间丢弃事件是安全的——
+        已完成的内容由 TrackPlugin 持久化，用户回来走 HTTP messages API 对账恢复。
+        """
+        if getattr(self.output_sink, "is_dead", False):
+            return False
         try:
             success = await self.output_sink.send_event(event)
             if not success:

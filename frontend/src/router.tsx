@@ -404,40 +404,29 @@ function HomePage(): ReactNode {
         useInteractionStore.getState().markResponded(enteredInteraction.requestId)
       }
 
-      try {
-        await globalWS.sendUserInput(
-          sid,
-          params.content,
-          {
-            enableThinking: params.enableThinking,
-            pipelineId: targetPipelineId,
-            clientMessageId: userMessage.id,
-            attachments: params.attachments?.map((att) => ({
-              file_id: att.id,
-              filename: att.name,
-              mime_type: att.type,
-              media_type: att.type?.startsWith('image/') ? 'image' : att.type?.startsWith('audio/') ? 'audio' : att.type?.startsWith('video/') ? 'video' : 'document',
-              size: att.size || 0,
-              url: att.url,
-            })),
-          },
-        )
+      // 发送前立即创建"思考中"占位气泡，让用户点发送的瞬间就看到反馈，
+      // 而不是等到 stream_start（后端管道已接收并开始流式）才出现气泡。
+      // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，否则入队待重连），
+      // 因此占位气泡放在 send 之前同步创建即可，不存在"发送失败需回滚占位气泡"的情况。
+      // 使用临时 placeholder_ 前缀 ID，后续 stream_start 事件到达时，
+      // utils.ensureStreamingPlaceholder 会通过 updateMessage(prevMsg.id, { id: realMessageId })
+      // 将此占位气泡的 ID 改写为后端真实 messageId（utils.ts 合并分支）。
+      const placeholderMsgId = `placeholder_${generateUUID()}`
+      ensureStreamingPlaceholder(targetPipelineId, placeholderMsgId, sid)
 
-        // 消息已成功推送到后端（管道已接收），立即创建"思考中"占位气泡。
-        // 使用临时 placeholder_ 前缀 ID，后续 stream_start 事件到达时，
-        // utils.ensureStreamingPlaceholder 会通过 updateMessage(prevMsg.id, { id: realMessageId })
-        // 将此占位气泡的 ID 改写为后端真实 messageId（utils.ts L131-140 合并分支）。
-        // 发送失败时（catch 分支）不创建占位气泡——后端管道未接收到消息。
-        const placeholderMsgId = `placeholder_${generateUUID()}`
-        ensureStreamingPlaceholder(
-          targetPipelineId,
-          placeholderMsgId,
-          sid,
-        )
-      } catch {
-        // WebSocket 发送失败时消息已添加到本地状态，重连后会自动重试
-        // 发送失败不创建占位气泡（后端管道未接收到消息）
-      }
+      globalWS.sendUserInput(sid, params.content, {
+        enableThinking: params.enableThinking,
+        pipelineId: targetPipelineId,
+        clientMessageId: userMessage.id,
+        attachments: params.attachments?.map((att) => ({
+          file_id: att.id,
+          filename: att.name,
+          mime_type: att.type,
+          media_type: att.type?.startsWith('image/') ? 'image' : att.type?.startsWith('audio/') ? 'audio' : att.type?.startsWith('video/') ? 'video' : 'document',
+          size: att.size || 0,
+          url: att.url,
+        })),
+      })
     },
     [],
   )

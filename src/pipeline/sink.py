@@ -128,17 +128,36 @@ class TargetedSink:
         return ""
 
     def _record_failure(self, event: dict, *, exc_info: bool = False) -> None:
-        """记录一次推送失败，连续超过阈值时升级为 ERROR 日志。"""
+        """记录一次推送失败。
+
+        降频策略（避免日志风暴：曾见连续失败 3994 次，每秒 3 条日志拖垮 IO）：
+        - 第 1 次：打 WARNING 详情（含 type），标记问题出现。
+        - 达阈值（第 5 次）：打 ERROR，升级可见性。
+        - 之后：每 100 次才打一条摘要"已连续失败 N 次"，不每条都打。
+        is_dead 后 bridge 层已熔断不再调用 send_event，此处不会持续触发。
+        """
         self._consecutive_failures += 1
-        level = logging.ERROR if self._consecutive_failures >= self._FAILURE_THRESHOLD else logging.WARNING
-        logger.log(
-            level,
-            "sink 连续推送失败 %d 次 thread_id=%s type=%s",
-            self._consecutive_failures,
-            (self._thread_id or "(empty)")[:12],
-            event.get("type", "?"),
-            exc_info=exc_info,
-        )
+        n = self._consecutive_failures
+        # 仅在关键节点打日志：首次、达阈值、之后每 100 次摘要
+        if n == 1:
+            logger.warning(
+                "sink 推送失败（首次） thread_id=%s type=%s",
+                (self._thread_id or "(empty)")[:12],
+                event.get("type", "?"),
+                exc_info=exc_info,
+            )
+        elif n == self._FAILURE_THRESHOLD:
+            logger.error(
+                "sink 连续推送失败达阈值 %d 次，即将熔断 thread_id=%s",
+                n,
+                (self._thread_id or "(empty)")[:12],
+            )
+        elif n % 100 == 0:
+            logger.error(
+                "sink 持续失败（摘要）已连续 %d 次 thread_id=%s",
+                n,
+                (self._thread_id or "(empty)")[:12],
+            )
 
     def _record_success(self) -> None:
         """记录一次推送成功，若此前有失败则记录恢复并重置计数。"""

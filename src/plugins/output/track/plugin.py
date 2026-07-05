@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -158,11 +159,14 @@ class TrackPlugin(IOutputPlugin):
             updates["track.execution_stats"] = stats
 
         # 3. 逐动作执行记录持久化
-        self._try_persist_record(ctx, elapsed)
+        # storage 落盘是同步阻塞 IO（yaml.safe_dump + 文件追加），
+        # 在事件循环里裸调用会冻结所有协程（含 messages 接口）。
+        # 改用 to_thread 卸载到线程池，避免长 LLM 调用期间阻塞 API。
+        await self._try_persist_record(ctx, elapsed)
 
         # 4. 管道结束时保存运行摘要
         if ctx.state.get(StateKeys.ENDED, False):
-            self.save_pipeline_summary(ctx, elapsed)
+            await self.save_pipeline_summary(ctx, elapsed)
 
         return updates
 
@@ -240,7 +244,7 @@ class TrackPlugin(IOutputPlugin):
             "last_cached_tokens": current_usage.get("cached_tokens", 0),
         }
 
-    def _try_persist_record(self, ctx: PluginContext, elapsed: float) -> None:  # noqa: PLR0912,PLR0915
+    async def _try_persist_record(self, ctx: PluginContext, elapsed: float) -> None:  # noqa: PLR0912,PLR0915
         """将逐动作执行记录持久化到存储后端。"""
         try:
             storage = ctx.get_service("execution_record_storage")
@@ -264,7 +268,7 @@ class TrackPlugin(IOutputPlugin):
         # CLI 重启后续接已有记录的 sequence，同时更新本地计数器
         if pipeline_run_id not in self._initialized_pipeline_ids:
             self._initialized_pipeline_ids.add(pipeline_run_id)
-            existing = storage.list_by_pipeline(pipeline_run_id)[0]
+            existing = (await asyncio.to_thread(storage.list_by_pipeline, pipeline_run_id))[0]
 
             if existing:
                 max_seq = max(r.sequence for r in existing)
@@ -315,7 +319,7 @@ class TrackPlugin(IOutputPlugin):
                     attachments_json=attachments_json,
                 )
                 try:
-                    storage.save(user_record)
+                    await asyncio.to_thread(storage.save, user_record)
                 except Exception:
                     logger.exception("用户消息记录持久化失败")
             elif self._last_saved_user_input:
@@ -337,7 +341,7 @@ class TrackPlugin(IOutputPlugin):
                         client_message_id=ctx.state.get("client_message_id") or None,
                     )
                     try:
-                        storage.save(injected_user_record)
+                        await asyncio.to_thread(storage.save, injected_user_record)
                         logger.debug(
                             "Injected user content saved at iteration %d (%d chars)",
                             iteration,
@@ -377,7 +381,7 @@ class TrackPlugin(IOutputPlugin):
                 container_task_id=container_task_id or None,
             )
             try:
-                storage.save(ai_record)
+                await asyncio.to_thread(storage.save, ai_record)
                 ctx.state["track.last_ai_sequence"] = ai_record.sequence
                 try:
                     from pipeline.registry import get_engine_registry  # noqa: PLC0415
@@ -442,7 +446,7 @@ class TrackPlugin(IOutputPlugin):
                         container_task_id=container_task_id or None,
                     )
                     try:
-                        storage.save(tool_record)
+                        await asyncio.to_thread(storage.save, tool_record)
                     except Exception:
                         logger.exception("工具执行记录持久化失败")
 
@@ -492,7 +496,7 @@ class TrackPlugin(IOutputPlugin):
                 total_cached / total_input * 100 if total_input else 0,
             )
 
-    def save_pipeline_summary(self, ctx: PluginContext, elapsed_total: float) -> None:
+    async def save_pipeline_summary(self, ctx: PluginContext, elapsed_total: float) -> None:
         """保存管道运行摘要。"""
         try:
             storage = ctx.get_service("execution_record_storage")
@@ -532,7 +536,7 @@ class TrackPlugin(IOutputPlugin):
         )
 
         try:
-            storage.save_summary(summary)
+            await asyncio.to_thread(storage.save_summary, summary)
             _total_recs = self._get_current_sequence(pipeline_run_id)
             logger.info("PipelineRunSummary saved: %s (%d records)", pipeline_run_id, _total_recs)
         except Exception:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -49,7 +50,13 @@ from pipeline.stream_bridge import TargetedSink, create_targeted_sink  # noqa: F
 # 配置日志 — 接入统一日志系统（支持结构化输出 + JSON 格式 + 链路追踪）
 from src.core.logging import LogContext, LoggingConfig, setup_logging as _setup_unified_logging
 
-_setup_unified_logging(LoggingConfig.from_env(), reset=True)
+# web 模式强制同时输出到文件：[WSNotifier]/[GlobalWS] 等交互推送链路日志需可事后审计，
+# 仅输出到控制台时（LoggingConfig 默认 output=console），进程关闭后无从查证。
+# CLI 不受影响（cli_main.py 有独立的 setup_logging）。
+_web_log_config = dataclasses.replace(
+    LoggingConfig.from_env(), output="both", file_path="logs/agent_os.log"
+)
+_setup_unified_logging(_web_log_config, reset=True)
 
 logger = logging.getLogger(__name__)
 
@@ -210,20 +217,31 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
     @app.websocket("/ws/chat")
     async def websocket_chat_global(websocket: WebSocket) -> None:  # noqa: PLR0912,PLR0915
         """全局单连接 WebSocket 端点（v3 协议）。"""
+
+        async def _safe_reject_ws(code: int, reason: str) -> None:
+            """拒绝连接：accept + close。吞 websockets 15.x close 的库内部异常。
+
+            websockets>=13 移除了 transfer_data_task，starlette 的 close 路径在
+            uvicorn websockets_impl 中会 await self.transfer_data_task 触发
+            AttributeError（库 bug，非业务异常），导致 ASGI 崩溃。这里兜底。
+            """
+            await websocket.accept()
+            try:
+                await websocket.close(code=code, reason=reason)
+            except Exception:
+                logger.debug("[GlobalWS] 拒绝连接 close 异常（已忽略）: code=%s", code, exc_info=True)
+
         token = websocket.query_params.get("token", "")
         if not token:
-            await websocket.accept()
-            await websocket.close(code=4001, reason="全局连接需要 token 认证")
+            await _safe_reject_ws(4001, "全局连接需要 token 认证")
             return
         payload = verify_token(token)
         if payload is None:
-            await websocket.accept()
-            await websocket.close(code=4001, reason="Token 无效或已过期")
+            await _safe_reject_ws(4001, "Token 无效或已过期")
             return
         user_id = payload.get("sub", "")
         if not user_id:
-            await websocket.accept()
-            await websocket.close(code=4001, reason="Token 中缺少用户标识")
+            await _safe_reject_ws(4001, "Token 中缺少用户标识")
             return
 
         await websocket.accept()
@@ -562,12 +580,46 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
 # 入口
 
 
+def _resolve_bind_host(host: str) -> str:
+    """规范化绑定地址，并就「localhost 慢」陷阱给出诊断提示。
+
+    背景：Windows/部分系统下 ``localhost`` 同时解析到 IPv6(::1) 与 IPv4(127.0.0.1)，
+    若服务端只监听 IPv4(0.0.0.0)，客户端优先连 ::1 会等待超时(~2s)再回退 IPv4，
+    表现为每个请求无故慢 2 秒。此处不强改用户配置，仅在检测到风险时打 WARN，
+    指引用户用 127.0.0.1（客户端，推荐）解决。
+
+    注意：BACKEND_HOST=:: 在 Linux 上可达成 IPv4+IPv6 双栈，但实测在 Windows 上
+    asyncio/uvicorn 的 :: 监听只接受原生 IPv6 连接，127.0.0.1(IPv4) 反而被拒。
+    故 Windows 下首选「客户端用 127.0.0.1 + 服务端 0.0.0.0」而非服务端 :: 。
+    """
+    if host in ("0.0.0.0", "") and sys.platform == "win32":
+        logger.warning(
+            "[bind] host=%r 仅监听 IPv4。Windows 下客户端若用 localhost 访问，"
+            "会因 ::1(IPv6) 优先且无监听而每个请求超时约 2s 再回退 IPv4。"
+            "推荐解决：前端/客户端改用 127.0.0.1（见 frontend/.env）。",
+            host or "0.0.0.0",
+        )
+    return host or "0.0.0.0"
+
+
 def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
-    """从 start_port 开始查找可用端口。"""
+    """从 start_port 开始查找可用端口。
+
+    根据 host 选择匹配的 socket family 探测：IPv6 地址(如 ``::``)用 AF_INET6，
+    其余用 AF_INET，避免与实际监听 family 不一致导致探测失真。
+    """
+    is_v6 = ":" in host and not host.startswith("0.")
+    family = socket.AF_INET6 if is_v6 else socket.AF_INET
     for port in range(start_port, start_port + 100):
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((host, port))
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                # IPv6 socket 默认可能 V6ONLY，关掉以匹配 dualstack 监听语义
+                if is_v6:
+                    try:
+                        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                    except (OSError, AttributeError):
+                        pass
+                s.bind((host, port, 0, 0) if is_v6 else (host, port))
                 return port
         except OSError:
             logger.debug("端口 %d 已被占用，尝试下一个", port)
@@ -579,12 +631,20 @@ def main() -> None:
     """主函数，启动 uvicorn 服务器。"""
     parser = argparse.ArgumentParser(description="Agent OS 服务器")
     parser.add_argument("--port", type=int, default=None, help="后端服务端口")
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="后端绑定地址（默认 0.0.0.0 仅 IPv4；设 :: 在 Linux 可双栈，但 Windows 仅 IPv6 会拒 IPv4，故 Windows 推荐客户端用 127.0.0.1）",
+    )
     args = parser.parse_args()
 
     default_port = 8988
     preferred_port = args.port or int(os.environ.get("BACKEND_PORT", default_port))
 
-    actual_port = find_available_port(preferred_port)
+    # 绑定地址优先级：命令行 --host > 环境变量 BACKEND_HOST > 默认 0.0.0.0
+    bind_host = _resolve_bind_host(args.host or os.environ.get("BACKEND_HOST", "0.0.0.0"))
+
+    actual_port = find_available_port(preferred_port, bind_host)
 
     if actual_port != preferred_port:
         logger.warning(
@@ -594,16 +654,17 @@ def main() -> None:
         )
 
     logger.info("正在启动 Agent OS 服务器...")
-    logger.info("API 地址: http://localhost:%d", actual_port)
-    logger.info("API 文档: http://localhost:%d/docs", actual_port)
-    logger.info("健康检查: http://localhost:%d/health", actual_port)
+    logger.info("绑定地址: %s:%d", bind_host, actual_port)
+    logger.info("API 地址: http://127.0.0.1:%d", actual_port)
+    logger.info("API 文档: http://127.0.0.1:%d/docs", actual_port)
+    logger.info("健康检查: http://127.0.0.1:%d/health", actual_port)
 
     os.environ["BACKEND_PORT"] = str(actual_port)
 
     app = create_combined_app()
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host=bind_host,
         port=actual_port,
         log_level="info",
         timeout_keep_alive=120,

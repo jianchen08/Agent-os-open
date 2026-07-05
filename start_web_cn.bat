@@ -5,21 +5,51 @@ title Agent OS
 
 cd /d "%~dp0"
 
+echo ========================================
+echo   Agent OS 启动
+echo ========================================
+echo 项目目录: %cd%
+echo.
+
+REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
+if not defined SHUTDOWN_RETRY set "SHUTDOWN_RETRY=0"
+
+REM NOTE: we do NOT unconditionally `wsl --shutdown` at startup.
+REM That would kill a running dockerd + containers and break a healthy WSL session.
+REM Instead: probe first; only on deadlock does :auto_shutdown do the reset.
+REM Idle-timeout suspension is prevented via .wslconfig vmIdleTimeout=-1.
+
+:wsl_alive_entry
+echo [INFO] 正在探测 WSL 是否响应...
+
+REM Windows-side liveness probe with a hard timeout (see wsl_alive_probe.ps1).
+REM rc=124 -> WSL hung -> auto wsl --shutdown retry; rc=0 -> alive, proceed;
+REM other -> WSL/Ubuntu unavailable -> fall back to Docker Desktop mode.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul
+set "WSL_ALIVE_RC=!errorlevel!"
+REM Use goto-based branching, NOT if (...) blocks: cmd's parenthesised blocks break
+REM on special chars (here the literal "(rc=" in an echo would corrupt block parsing
+REM with "was unexpected at this time"). Same idiom as the rest of this script.
+if "!WSL_ALIVE_RC!"=="124" goto :probe_deadlocked
+if not "!WSL_ALIVE_RC!"=="0" goto :probe_other_error
+goto :probe_ok
+
+:probe_deadlocked
+set "REASON=WSL 探测超时（内核可能死锁）"
+goto :auto_shutdown
+
+:probe_other_error
+echo [INFO] WSL 不可用 rc=!WSL_ALIVE_RC!，回退到 Docker Desktop 模式
+goto :no_wsl_docker
+
+:probe_ok
+echo [OK] WSL 响应正常
+
 REM Portable: derive WSL path from script's own location (no hardcoded project path).
 REM Note: %cd% uses backslashes; wsl/shell would eat them, so convert to slashes first.
 set "WIN_DIR=%cd%"
 set "WIN_DIR=%WIN_DIR:\=/%"
 for /f "delims=" %%i in ('wsl -d Ubuntu -u root -- bash -c "timeout 15 wslpath -u \"%WIN_DIR%\"" 2^>nul') do set "WSL_DIR=%%i"
-
-REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
-if not defined SHUTDOWN_RETRY set "SHUTDOWN_RETRY=0"
-
-echo ========================================
-echo   Agent OS 启动
-echo ========================================
-echo.
-echo 项目目录: %cd%
-echo.
 
 REM ===========================================================================
 REM WSL native docker mode (replaces Docker Desktop)
@@ -111,11 +141,13 @@ if !SHUTDOWN_RETRY! gtr 3 (
     exit /b 7
 )
 echo [WARN] !REASON!，自动 wsl --shutdown 后重试 ^(第 !SHUTDOWN_RETRY!/3 次^)...
-wsl --shutdown
+REM wsl --shutdown itself may hang under kernel deadlock; wrap in timeout (wsl_shutdown.ps1).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Timeout 15 >nul 2>&1
 echo [INFO] 等待 WSL 内核完全退出 ^(~10s^)...
-timeout /t 10 /nobreak >nul
-echo [INFO] 重新初始化 WSL 环境...
-goto :wsl_setup
+REM ping-based delay avoids timeout.exe (unreliable under non-interactive shells).
+ping -n 11 127.0.0.1 >nul
+echo [INFO] 重新探测 WSL 是否响应...
+goto :wsl_alive_entry
 
 :containers_ok
 echo [OK] Containers started
@@ -365,8 +397,8 @@ echo.
 echo ========================================
 echo   启动完成
 echo ========================================
-echo   后端: http://localhost:8988
-echo   前端: http://localhost:5289
+echo   后端: http://127.0.0.1:8988
+echo   前端: http://127.0.0.1:5289
 echo   停止: 关闭 Agent 窗口 + docker compose down
 echo ========================================
 pause

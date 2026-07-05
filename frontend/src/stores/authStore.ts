@@ -57,6 +57,58 @@ interface AuthState {
 /** 令牌刷新互斥锁（in-flight Promise） */
 let refreshInFlight: Promise<void> | null = null
 
+/** 主动刷新定时器（过期前续期，避免 WS 因 token 过期断连） */
+let tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 提前刷新的最大余量（毫秒），避免 TTL 很大时刷新过于提前 */
+const TOKEN_REFRESH_MAX_LEAD_MS = 5 * 60 * 1000
+
+/**
+ * 安排下一次主动刷新：在过期前 min(剩余寿命 / 2, 5分钟) 时刷新。
+ * 每次 login/register/refresh 成功后调用，setTimeout 单次 + 成功后重新调度，
+ * 精确跟随实际 expires_in（每次刷新后 TTL 会变）。失败按 refreshToken 错误处理。
+ *
+ * 暂停：该定时器疑似导致"十几分钟后被登出"。后端用 refresh token 轮换
+ * （每次 refresh 撤销旧 refresh_token），定时器在 ~12.5min 触发的 refresh 可能
+ * 与其它路径竞争，用了已撤销的 token → 401 → 登出。先停用定位，确认后再设计
+ * 安全的续期方案。access token 30min 内不会过期，停用期间不影响正常使用。
+ */
+function scheduleTokenRefresh(): void {
+  // 暂停主动刷新：见上方函数注释。保留实现便于后续修复后恢复。
+  return
+  if (tokenRefreshTimer) {
+    clearTimeout(tokenRefreshTimer)
+    tokenRefreshTimer = null
+  }
+  const storedExpiry = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
+  if (!storedExpiry) return
+  const expiryTime = parseInt(storedExpiry, 10)
+  if (isNaN(expiryTime)) return
+  const remainingMs = expiryTime - Date.now()
+  if (remainingMs <= 0) return // 已过期，由反应式路径处理
+  // 提前量：剩余寿命的一半，但不超过 5 分钟。TTL<10min 时取一半避免短 TTL 测试环境刷太频。
+  const delay = Math.max(1000, Math.min(remainingMs / 2, TOKEN_REFRESH_MAX_LEAD_MS))
+  tokenRefreshTimer = setTimeout(() => {
+    useAuthStore
+      .getState()
+      .refreshToken()
+      .then(() => scheduleTokenRefresh()) // 刷新成功（新的 expires_in）后重新调度
+      .catch(() => {
+        // 刷新失败：由 refreshToken 错误处理决策，清 timer 不再主动续期。
+        // 反应式路径（401/WS 4001）仍可兜底恢复。
+        tokenRefreshTimer = null
+      })
+  }, delay)
+}
+
+/** 清除主动刷新定时器（登出时调用） */
+function clearTokenRefreshTimer(): void {
+  if (tokenRefreshTimer) {
+    clearTimeout(tokenRefreshTimer)
+    tokenRefreshTimer = null
+  }
+}
+
 /** 将后端用户信息响应映射为前端User模型 */
 function mapUserInfoToUser(userInfo: UserInfoResponse): User {
   return {
@@ -127,6 +179,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         })
       }
 
+      // 安排主动刷新：token 过期前续期，避免 WS 因 token 过期反复断连
+      scheduleTokenRefresh()
+
  // 登录成功后 await restartGrowthLoop 确保模块就绪
       try {
         const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
@@ -196,6 +251,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ user: basicUser })
       }
 
+      // 安排主动刷新：token 过期前续期，避免 WS 因 token 过期反复断连
+      scheduleTokenRefresh()
+
  // 注册成功后 await restartGrowthLoop 确保模块就绪
       try {
         const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
@@ -213,6 +271,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   /** 登出 调用后端 POST /api/v1/auth/logout 端点并清除本地令牌。 */
   logout: async () => {
  // 登出时 await destroyGrowthLoop 确保完全清理
+    // 清除主动刷新定时器
+    clearTokenRefreshTimer()
     try {
       const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
       destroyGrowthLoop()
@@ -289,6 +349,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           token: response.access_token,
           refreshTokenValue: response.refresh_token || currentRefreshToken,
         })
+
+        // 刷新成功后重新调度主动刷新（新的 expires_in）
+        scheduleTokenRefresh()
       } catch (error: unknown) {
         // refreshToken 失败时只抛错不主动 logout，由调用方按错误类型决策。
         if (isAuthFailureFromError(error)) {
@@ -348,6 +411,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               await get().fetchCurrentUser()
               // 刷新成功后标记已认证，触发 initializeGrowthLoop() 重建工作区标签。
               set({ isAuthenticated: true, isInitializing: false })
+              // scheduleTokenRefresh 已在 refreshToken 成功时调度，无需重复
               return
             } catch (refreshError) {
               // 等用户下次操作或网络恢复后再尝试。
@@ -389,6 +453,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           isAuthenticated: true,
           isInitializing: false,
         })
+
+        // 恢复后安排主动刷新（页面刷新恢复的 token 同样需要续期）
+        scheduleTokenRefresh()
 
         // 异步获取最新用户信息
         get()

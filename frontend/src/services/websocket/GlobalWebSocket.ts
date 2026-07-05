@@ -21,8 +21,12 @@ const RECONNECT_BASE_DELAY = 4_000
 const RECONNECT_MAX_DELAY = 60_000
 const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
-// 超时设 45s，大于 INTERVAL 给 ack 留容错，仍能在真实连接死亡时及时重连。
-const HEARTBEAT_TIMEOUT = 45_000
+// 超时设 90s 并要求连续 2 次未收到 ack 才判定连接死亡：
+// 局域网/非本机访问（如跨设备 ip=192.168.x.x）或后端繁忙时，单次 ack 延迟常见，
+// 零容错（45s 一次超时就断）会导致 WS 每 30-45s 反复断连，流式 chunk 大量丢失。
+// 连续 2 次超时（≈90s）仍能及时检测真死连接。
+const HEARTBEAT_TIMEOUT = 90_000
+const HEARTBEAT_MAX_MISS = 2
 const CONNECTION_TIMEOUT = 15_000
 
 /** 发送缓冲区阈值：超过此值延迟发送（1MB） */
@@ -38,6 +42,7 @@ class GlobalWebSocketService {
   private _reconnectAttempts: number = 0
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+  private _heartbeatMissCount: number = 0
   private _disposed: boolean = false
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
@@ -140,7 +145,6 @@ class GlobalWebSocketService {
         clearTimeout(this._connectionTimeoutTimer)
         this._connectionTimeoutTimer = null
       }
-      const wasConnected = this._status === 'connected'
       this._status = 'disconnected'
       this._stopHeartbeat()
       this._emit('_status', { status: 'disconnected', code: event.code, reason: event.reason })
@@ -153,12 +157,13 @@ class GlobalWebSocketService {
 
       if (!this._disposed) {
         // 后端 token 无效/过期时以 code=4001 关闭连接，前端需先刷新 token 再重连。
-        // 某些代理/网关会吞掉 close code 返回 1006，故 1006 + 从未连过 + token 已过期 三者同时成立也视为认证拒绝。
+        // 任何掉线（含 1006、心跳超时 2002、4001）都先检查 token 是否已过期：
+        // 已建立连接掉了（wasConnected=true）也可能是 token 过期后才掉，旧逻辑的
+        // !wasConnected 门控会让此类掉线用过期 token 硬连 → 4001 → 崩溃。checkTokenExpiration
+        // 只在真过期时返回 true，未过期时不触发刷新，安全。
         let authRejected = event.code === 4001
-        if (!authRejected && event.code === 1006 && !wasConnected) {
-          // 仅当本地判定 token 已过期时才怀疑认证拒绝
-          const { checkTokenExpiration } = useAuthStore.getState()
-          authRejected = checkTokenExpiration()
+        if (!authRejected) {
+          authRejected = useAuthStore.getState().checkTokenExpiration()
         }
         this._scheduleReconnect(authRejected)
       }
@@ -312,19 +317,33 @@ class GlobalWebSocketService {
 
   private _startHeartbeat(): void {
     this._stopHeartbeat()
+    this._heartbeatMissCount = 0
     this._heartbeatTimer = setInterval(() => {
       if (this._status === 'connected') {
         this._send({ type: 'heartbeat', timestamp: Date.now() })
         this._clearHeartbeatTimeout()
         this._heartbeatTimeoutTimer = setTimeout(() => {
-          _wsLogger.warn('[GlobalWS] 心跳超时，连接可能已断开，主动关闭重连')
-          if (this.ws) {
-            // // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
-            // 4001 已被后端用于「token 无效/过期」的认证拒绝（见 app_factory.py:244/248），
-            // onclose 据此触发 token 刷新路径。若心跳超时也用 4001，会被误判为认证拒绝，
-            // 在无 refresh token 的环境（测试/未登录）反复抛错。心跳超时属于网络层故障，
-            // 应走普通重连（直接用当前 token 重连），不触发刷新。
-            this.ws.close(2002, '心跳超时')
+          // 连续失败容错：单次 ack 超时不立即断连，累计达到 HEARTBEAT_MAX_MISS 才判定死亡。
+          // 避免局域网抖动/后端繁忙时的误断（曾导致每 30-45s 反复断连、流式 chunk 丢失）。
+          this._heartbeatMissCount += 1
+          if (this._heartbeatMissCount >= HEARTBEAT_MAX_MISS) {
+            _wsLogger.warn(
+              '[GlobalWS] 心跳连续 %d 次未收到 ack，判定连接死亡，主动关闭重连',
+              this._heartbeatMissCount,
+            )
+            if (this.ws) {
+              // // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
+              // 4001 已被后端用于「token 无效/过期」的认证拒绝（见 app_factory.py:244/248），
+              // onclose 据此触发 token 刷新路径。若心跳超时也用 4001，会被误判为认证拒绝，
+              // 在无 refresh token 的环境（测试/未登录）反复抛错。心跳超时属于网络层故障，
+              // 应走普通重连（直接用当前 token 重连），不触发刷新。
+              this.ws.close(2002, '心跳超时')
+            }
+          } else {
+            _wsLogger.warn(
+              '[GlobalWS] 心跳 ack 超时（第 %d/%d 次），暂不断连等待下次心跳',
+              this._heartbeatMissCount, HEARTBEAT_MAX_MISS,
+            )
           }
         }, HEARTBEAT_TIMEOUT)
       }
@@ -333,6 +352,7 @@ class GlobalWebSocketService {
 
   private _handleHeartbeatAck(): void {
     this._clearHeartbeatTimeout()
+    this._heartbeatMissCount = 0
   }
 
   private _clearHeartbeatTimeout(): void {

@@ -202,6 +202,19 @@ jobs:
             --no-header \
             -q \
             2>&1
+          # 上下文压缩链路测试：tests/suites/memory 目录存在大量既有红测
+          # （test_context_compressor/test_memory_service 等，与压缩修复无关），
+          # 暂不整目录纳入，仅精确纳入压缩链路相关的稳定测试作为门禁。
+          # - test_restart_recompression_guard：重启后不应重复压缩已有压缩块覆盖的旧消息
+          # - test_e2e_compression / test_compress_standardize_toolcalls：压缩端到端链路
+          python -m pytest \
+            tests/suites/memory/test_restart_recompression_guard.py \
+            tests/suites/memory/test_e2e_compression.py \
+            tests/suites/memory/test_compress_standardize_toolcalls.py \
+            --tb=long \
+            --no-header \
+            -q \
+            2>&1
 
       - name: Generate Test Report
         if: always()

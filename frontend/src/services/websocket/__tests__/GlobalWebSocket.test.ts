@@ -464,13 +464,10 @@ describe('GlobalWebSocketService', () => {
       })
       expect(heartbeatSent).toBe(true)
 
-      // 注意：由于 HEARTBEAT_INTERVAL === HEARTBEAT_TIMEOUT === 30s，
-      // interval 回调内 _clearHeartbeatTimeout() 总是在 setInterval 触发时先执行，
-      // 清除上一轮的 timeout，导致 timeout 永远不会被触发（两者同时到期时 interval 优先）。
-      // 因此此处直接模拟心跳超时导致的 ws.close(2002) 行为，
-      // 验证 onclose 对心跳超时关闭的处理是否正确。
-      // 心跳超时使用 code=2002（TIMEOUT），与认证拒绝 code=4001 区分（见
-      // ）：心跳超时走普通重连，不触发 token 刷新。
+      // 注意：HEARTBEAT_TIMEOUT(90s) > HEARTBEAT_INTERVAL(30s)，且需连续 2 次超时才断。
+      // 单次超时只会累加 _heartbeatMissCount 并打 warn，不会 close。
+      // 因此此处直接模拟连接因心跳超时被关闭（ws.close 2002）的行为，
+      // 验证 onclose 对心跳超时关闭的处理是否正确（走普通重连，不触发 token 刷新）。
       ws.close(2002, '心跳超时')
 
       // ws.close(4001) → onclose → _scheduleReconnect → status = 'reconnecting'
@@ -483,11 +480,10 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
-    it('心跳超时应给 ack 留容错：30~45s 内收到 ack 不应断连', async () => {
+    it('心跳超时应给 ack 留容错：单次超时不断连，收到 ack 恢复', async () => {
       // LLM 流式期间后端事件循环负载高，heartbeat_ack 响应极易突破 30s。
-      // 修复: TIMEOUT 提到 45s，明确大于 INTERVAL，给 ack 留容错。
-      // 回归契约: 在 30s（INTERVAL）之后、45s（TIMEOUT）之前收到 heartbeat_ack，
-      // 连接必须仍然存活（ws.close 未因超时被调用）。
+      // 修复: TIMEOUT=90s 且需连续 2 次未收到 ack 才断（HEARTBEAT_MAX_MISS=2）。
+      // 回归契约: 单次超时（missCount=1）不触发 close；收到 ack 后 missCount 清零。
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')

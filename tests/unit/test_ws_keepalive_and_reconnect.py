@@ -30,6 +30,7 @@ class TestStreamKeepalive:
         streaming = StreamingOutput("p_keepalive_1", stop_check=lambda: False)
         bridge = MagicMock()
         bridge._stream_started = True
+        bridge.output_sink.is_dead = False  # sink 未熔断，keepalive 正常发送
         bridge._make_event = lambda et, data: {"type": et, "data": data}
         sent: list[dict] = []
 
@@ -63,6 +64,7 @@ class TestStreamKeepalive:
         streaming = StreamingOutput("p_keepalive_2", stop_check=lambda: False)
         bridge = MagicMock()
         bridge._stream_started = True
+        bridge.output_sink.is_dead = False  # sink 未熔断
         bridge._make_event = lambda et, data: {"type": et, "data": data}
         sent: list[dict] = []
 
@@ -115,6 +117,43 @@ class TestStreamKeepalive:
             await task
 
         assert sent == [], "bridge._stream_started=False 时不应发保活包"
+
+    @pytest.mark.asyncio
+    async def test_stops_when_sink_dead(self) -> None:
+        """sink 熔断（is_dead=True，用户长期离线）时停止 keepalive，不发保活包。
+
+        回归红线：验证死 sink 的 keepalive 循环真正退出（task done），
+        而非被吞掉失败继续无限重试。fix: engine_streaming._stream_keepalive_loop
+        在 is_dead 时 break，避免向已下线用户燃烧 CPU（日志曾见 4511 次失败）。
+        """
+        from pipeline.engine_streaming import StreamingOutput
+
+        streaming = StreamingOutput("p_keepalive_dead", stop_check=lambda: False)
+        bridge = MagicMock()
+        bridge._stream_started = True
+        bridge.output_sink.is_dead = True  # sink 已熔断
+        bridge.output_sink._thread_id = "tid_dead"
+        bridge._make_event = lambda et, data: {"type": et, "data": data}
+        sent: list[dict] = []
+
+        async def _send(ev):
+            sent.append(ev)
+            return True
+
+        bridge.send_event = _send
+        streaming._bridge = bridge
+        streaming._KEEPALIVE_IDLE_THRESHOLD = 0.0
+        streaming._KEEPALIVE_INTERVAL = 0.01
+        streaming._last_chunk_monotonic = time.monotonic() - 100
+
+        task = asyncio.create_task(streaming._stream_keepalive_loop())
+        # 给循环足够时间：若未 break，会发多个 keepalive；若 break 则 task 早结束
+        await asyncio.sleep(0.1)
+        # 回归核心：task 已因 break 正常结束（done），不是被外部 cancel
+        assert task.done(), "死 sink 时 keepalive 应主动 break 退出"
+        assert not task.cancelled(), "应是主动 break 而非 cancelled"
+        keepalives = [e for e in sent if e["type"] == "stream_keepalive"]
+        assert keepalives == [], "sink 熔断后不应发保活包"
 
     @pytest.mark.asyncio
     async def test_on_chunk_cooperative_stop_via_callback(self) -> None:

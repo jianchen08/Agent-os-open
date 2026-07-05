@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -749,7 +750,7 @@ def _try_recover_pipeline_ids(  # noqa: PLR0912
     "/{thread_id}/messages",
     summary="获取消息列表（支持倒序分页）",
 )
-def list_messages(
+async def list_messages(
     thread_id: str,
     pipeline_run_id: str | None = Query(default=None, description="按管道运行 ID 过滤消息"),
     limit: int = Query(default=20, ge=1, le=100, description="每页数量"),
@@ -757,7 +758,11 @@ def list_messages(
     after_sequence: int | None = Query(default=None, description="加载此 sequence 之后的消息（断线补漏）"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    """获取指定线程的消息列表，支持倒序分页。"""
+    """获取指定线程的消息列表，支持倒序分页。
+
+    async + to_thread：list_by_pipeline 是同步文件 IO（大管道全量读 5+ 分片需 10-40s），
+    若用同步 def 路由会占满 FastAPI threadpool 并饿死其他协程（含 WS 推送）。
+    """
 
     from channels.api.models import MessageListResponse  # noqa: PLC0415
 
@@ -788,7 +793,8 @@ def list_messages(
 
     if exec_storage and target_pid:
         try:
-            records, has_more = exec_storage.list_by_pipeline(
+            records, has_more = await asyncio.to_thread(
+                exec_storage.list_by_pipeline,
                 target_pid,
                 limit=limit,
                 before_sequence=before_sequence,
