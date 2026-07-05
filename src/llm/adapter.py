@@ -749,6 +749,9 @@ class _BaseLiteLLMAdapter:
             # 独立线程硬超时兜底：上述 asyncio 心跳/inter_chunk wait_for 共享同一
             # event loop，一旦底层 socket 阻塞冻住事件循环，全部失效（僵死管道零
             # HEARTBEAT 即铁证）。硬超时到点强制 aclose，loop 冻住也能打破死锁。
+            # 语义为"chunk 间隔超时"：每收到一个 chunk 调 reset() 重新计时，
+            # 避免误杀总时长长但 chunk 间隔始终健康的流（issue: 长流式响应总时长
+            # 超过 inter_chunk_timeout 时被误关）。
             _hard_timeout = StreamHardTimeout(
                 response,
                 asyncio.get_running_loop(),
@@ -816,6 +819,9 @@ class _BaseLiteLLMAdapter:
                     )
                 _last_chunk_monotonic = _time.monotonic()
                 _chunks_received += 1
+                # chunk 健康到达：重置硬超时倒计时（chunk 间隔语义，避免误杀长流）
+                if _hard_timeout is not None:
+                    _hard_timeout.reset()
                 if await _process_chunk(chunk):
                     break
                 # ── 接收端点诊断：每个 chunk 检查 delta.tool_calls 是否到达 ──

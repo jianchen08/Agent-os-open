@@ -270,4 +270,344 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     // API 返回顺序被打乱，冷启动应按 sequence 升序排好（localOnly 为空，纯走 dedupedSorted）
     expect(ids()).toEqual(['user-1', 'ai-1', 'user-3', 'ai-2'])
   })
+
+  // ── fix_20260705_notification_after_reply ──────────────────────────────
+  // 复现「系统通知跑到 AI 回复后面」的精确场景。
+  //
+  // 后端时序（bridge_core.py / engine_iteration.py 验证）：
+  //   consume_pending_notifications 在 LLM 调用前调 emit_notification：
+  //     1) emit_notification 推送 system_notification(seq=11, 后端权威)
+  //     2) AI 流式输出 stream_start/end(seq=12, 同一计数器递增)
+  // 后端 sequence 来自 _entry.next_sequence() 共享计数器，通知 seq=11 < AI seq=12，
+  // 逻辑上通知必须在 AI 回复之前。
+  //
+  // 但前端 allocateNextSequence 对 system_notification 走 Math.max(backendSeq, localMax+1)，
+  // 若通知事件 dispatch 时 localMax 已被流式推高，通知 sequence 被抬到 localMax+1，
+  // initFromAPI 重排时被 mergeSorted 排到 AI 之后 → UI 显示「通知在查看结果后面」。
+  //
+  // B2 改动（addMessage 不推 bottomCursor）已防止游标污染，但排序仍依赖 sequence。
+  // 本测试驱动「让带后端权威 sequence 的系统通知正确归位」的方案落地。
+  it('场景7: 系统通知(后端权威 seq=11) 应排在 AI 回复(seq=12) 之前，刷新后不丢失', () => {
+    const AI_MSG = 'msg_ai_after_notif'
+
+    // 冷启动已有历史：user-1(seq=1) ai-1(seq=2)，localMax=2，bottomCursor=2（权威）
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
+    ])
+
+    // 后端时序：consume_pending_notifications 先推送系统通知（seq=11, 权威）
+    handleSystemNotification(notificationEvent('[系统通知] 子任务已完成', {
+      sequence: 11, // 后端 emit_notification 下发的权威 sequence
+    }))
+
+    // 紧接着 AI 流式回复（seq=12, 权威）
+    handlers.handleStreamStart(evt('stream_start', {
+      message_id: AI_MSG,
+      _threadId: THREAD_ID,
+      sequence: 12, // stream_start 也可携带 sequence（stream_end 的 final_sequence 会在结束时同步）
+    }))
+    // 流式期间补一条文字内容并结束，让占位落定为 completed assistant
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_MSG, content: '查报告' }))
+    flush()
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI_MSG,
+      _threadId: THREAD_ID,
+      final_sequence: 12,
+      data: { parts: [{ type: 'text', content: '查报告', sequence: 0 }], full_content: '查报告' },
+    }))
+
+    // 流式期间渲染顺序 = 到达顺序：通知先到，AI 后到 → 通知在 AI 前
+    const duringIds = ids()
+    const sysId = duringIds.find((id) => id.startsWith('sys_'))
+    expect(sysId, '系统通知应已创建').toBeDefined()
+    const sysIdx = duringIds.indexOf(sysId!)
+    const aiIdx = duringIds.indexOf(AI_MSG)
+    expect(aiIdx, 'AI 回复应已落定').toBeGreaterThan(-1)
+    // ★ 第一断言：流式期间通知应在 AI 前面（到达顺序）
+    expect(sysIdx, '流式期间：通知(先到) 应排在 AI(后到) 之前').toBeLessThan(aiIdx)
+
+    // 切 Tab 触发 initFromAPI：后端历史 API 只返回落库的 user-1/ai-1 + AI 回复(seq=12)
+    // 系统通知未落库 → localOnly 保留；其 sequence 必须保持后端权威值 11（不被抬升）
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
+      makeMsg(AI_MSG, { role: 'assistant', content: '查报告', sequence: 12, status: 'completed' }),
+    ])
+
+    // ★ 第二断言（核心）：刷新后通知(seq=11) 必须仍在 AI(seq=12) 之前
+    //    修复前：通知 sequence 被前端抬到 localMax+1=13，重排后跑到 AI(12) 后面 → bug
+    //    修复后：通知 sequence 保持后端权威值 11，mergeSorted 按 sequence 归并 → 正确在前
+    const finalIds = ids()
+    const finalSysIdx = finalIds.indexOf(sysId!)
+    const finalAiIdx = finalIds.indexOf(AI_MSG)
+    expect(finalSysIdx, '刷新后通知应保留').toBeGreaterThan(-1)
+    expect(finalAiIdx, '刷新后 AI 应保留').toBeGreaterThan(-1)
+    expect(finalSysIdx, '刷新后：通知(seq=11) 必须排在 AI(seq=12) 之前').toBeLessThan(finalAiIdx)
+  })
+
+  // ── fix_20260705_notification_after_reply ──────────────────────────────
+  // 复现「系统通知跑到 AI 回复后面」的根因场景：allocateNextSequence 抬升。
+  //
+  // 后端时序（同一 sequence 计数器递增）：
+  //   子任务完成 → consume_pending_notifications 推送 system_notification(seq=11)
+  //   但 WS 事件到达前端时，AI 的工具调用流式（tool_start/tool_result 等）
+  //   可能已先把本地 localMax 推到更高（如 seq=15、16、17...）。
+  //   此时通知事件才被 dispatch，allocateNextSequence(pipeline, 11) 走
+  //   Math.max(11, localMax+1=18) = 18 → 通知 sequence 被抬到 18。
+  //   initFromAPI 重排时，mergeSorted 把通知(seq=18) 排到 AI 主回复(seq=12) 之后。
+  //
+  // 本场景直接用 addMessage 模拟"流式工具调用已把 localMax 推高"的状态，
+  // 再让系统通知"延迟到达"，精确复现 allocateNextSequence 抬升。
+  it('场景8: 通知事件延迟到达 + localMax 已被推高时，通知 sequence 不应被抬升到 AI 之后', () => {
+    const AI_MAIN = 'msg_ai_main_reply'
+
+    // 冷启动历史：user-1(seq=1) ai-1(seq=2)
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
+    ])
+
+    // AI 主回复流式落定（seq=12，后端权威）
+    handlers.handleStreamStart(evt('stream_start', { message_id: AI_MAIN, _threadId: THREAD_ID, sequence: 12 }))
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_MAIN, content: '先看报告' }))
+    flush()
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI_MAIN,
+      _threadId: THREAD_ID,
+      final_sequence: 12,
+      data: { parts: [{ type: 'text', content: '先看报告', sequence: 0 }], full_content: '先看报告' },
+    }))
+
+    // ★ 关键：模拟"通知事件延迟到达"——后端实际在 AI 主回复之前就推送了
+    // （consume_pending_notifications 在 LLM 调用前 emit_notification），
+    // 但 WS 分发 / handler 执行时序使它晚于 AI 主回复被处理。
+    // 此时 localMax 已是 12（AI 主回复），allocateNextSequence(pipeline, 11)
+    // 走 Math.max(11, 13) = 13 → 通知 sequence 被抬到 13，大于 AI 的 12。
+    handleSystemNotification(notificationEvent('[系统通知] 子任务已完成', {
+      sequence: 11, // 后端权威值，逻辑上早于 AI 主回复(12)
+    }))
+
+    const sysId = ids().find((id) => id.startsWith('sys_'))
+    expect(sysId, '系统通知应已创建').toBeDefined()
+
+    // 切 Tab 触发 initFromAPI：API 返回落库的 user-1/ai-1 + AI 主回复(seq=12)
+    // 系统通知 localOnly 保留
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
+      makeMsg(AI_MAIN, { role: 'assistant', content: '先看报告', sequence: 12, status: 'completed' }),
+    ])
+
+    // ★ 核心断言：通知(seq=11, 后端权威) 必须排在 AI 主回复(seq=12) 之前
+    //   修复前：allocateNextSequence 抬升通知 seq 到 13 → mergeSorted 排到 AI(12) 之后 → bug
+    //   修复后：通知 seq 保持后端权威值 11 → 正确排在 AI 之前
+    const finalIds = ids()
+    const finalSysIdx = finalIds.indexOf(sysId!)
+    const finalAiIdx = finalIds.indexOf(AI_MAIN)
+    expect(finalSysIdx, '刷新后通知应保留').toBeGreaterThan(-1)
+    expect(finalAiIdx, '刷新后 AI 应保留').toBeGreaterThan(-1)
+    expect(
+      finalSysIdx,
+      `刷新后：通知(后端 seq=11) 必须排在 AI(seq=12) 之前。实际顺序: ${JSON.stringify(finalIds)}`,
+    ).toBeLessThan(finalAiIdx)
+  })
+
+  // ── fix_20260705_notification_stuck_at_bottom ──────────────────────────
+  // 复现「通知固定在最下面、被排到上一轮 AI 之后」的边界情况。
+  //
+  // 用户洞察：上一轮 AI_A 还在 streaming 时，系统通知 N 推送进来；
+  // AI_A 的 stream_end 到达；然后 AI_B 的 stream_start 到达。
+  // 期望顺序：[..., AI_A, N, AI_B]（N 夹在两轮 AI 之间）
+  // 实际可能：N 被排到 AI_B 之后，或 AI_B 合并进 AI_A 把 N 挤后。
+  it('场景9: 上一轮 AI 还在 streaming 时通知到达，通知应夹在两轮 AI 之间', () => {
+    const AI_A = 'msg_ai_a_round1'
+    const AI_B = 'msg_ai_b_round2'
+
+    // 冷启动历史
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+    ])
+
+    // AI_A 流式开始（还在 streaming，未结束）
+    handlers.handleStreamStart(evt('stream_start', { message_id: AI_A, _threadId: THREAD_ID, sequence: 10 }))
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_A, content: 'AI_A 内容' }))
+    flush()
+    // ★ 注意：AI_A 还在 streaming，没有发 stream_end
+
+    // ★ 此时系统通知推送进来（AI_A 仍在 streaming）
+    handleSystemNotification(notificationEvent('[系统通知] 子任务已完成', {
+      sequence: 11,
+    }))
+    const sysId = ids().find((id) => id.startsWith('sys_'))
+    expect(sysId, '通知应已创建').toBeDefined()
+
+    // AI_A 流式结束
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI_A,
+      _threadId: THREAD_ID,
+      final_sequence: 10,
+      data: { parts: [{ type: 'text', content: 'AI_A 内容', sequence: 0 }], full_content: 'AI_A 内容' },
+    }))
+
+    // AI_B 新一轮流式开始
+    handlers.handleStreamStart(evt('stream_start', { message_id: AI_B, _threadId: THREAD_ID, sequence: 12 }))
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_B, content: 'AI_B 内容' }))
+    flush()
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI_B,
+      _threadId: THREAD_ID,
+      final_sequence: 12,
+      data: { parts: [{ type: 'text', content: 'AI_B 内容', sequence: 0 }], full_content: 'AI_B 内容' },
+    }))
+
+    const finalIds = ids()
+    // ★ 期望：N 夹在 AI_A 和 AI_B 之间
+    const aIdx = finalIds.indexOf(AI_A)
+    const nIdx = finalIds.indexOf(sysId!)
+    const bIdx = finalIds.indexOf(AI_B)
+    expect(aIdx, 'AI_A 应存在').toBeGreaterThan(-1)
+    expect(nIdx, '通知应存在').toBeGreaterThan(-1)
+    expect(bIdx, 'AI_B 应存在').toBeGreaterThan(-1)
+    expect(
+      nIdx,
+      `通知应夹在 AI_A 和 AI_B 之间。实际顺序: ${JSON.stringify(finalIds)}`,
+    ).toBeGreaterThan(aIdx)
+    expect(
+      nIdx,
+      `通知应在 AI_B 之前（夹在中间）。实际顺序: ${JSON.stringify(finalIds)}`,
+    ).toBeLessThan(bIdx)
+  })
+
+  // ── fix_20260705_notification_pushed_after_despite_arriving_first ──────
+  // 用户精确描述的现场：通知【先到】，AI 消息【后到】，但最终 UI 显示通知在 AI 之后。
+  // 怀疑点：ensureStreamingPlaceholder 的合并分支把后到的 AI 内容合并到了通知之前的
+  // 旧 streaming AI 消息里，导致通知被"挤"到末尾。
+  //
+  // 时序：
+  //   1. AI_old 还在 streaming（stream_end 未到）
+  //   2. 通知 N 推送（先到）→ push 末尾 [AI_old, N]
+  //   3. AI_new stream_start 到达（后到）→ ensureStreamingPlaceholder
+  //      prevMsg = after[last] = N (system) → 不满足合并 → 应新建
+  //   4. 期望 [AI_old, N, AI_new]，N 在中间
+  it('场景10: 通知先到 + AI 后到时，通知不应被后到的 AI 挤到末尾', () => {
+    const AI_OLD = 'msg_ai_old_streaming'
+    const AI_NEW = 'msg_ai_new_after_notif'
+
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+    ])
+
+    // 1. AI_old 流式开始（未结束）
+    handlers.handleStreamStart(evt('stream_start', { message_id: AI_OLD, _threadId: THREAD_ID, sequence: 10 }))
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_OLD, content: 'AI_old 部分内容' }))
+    flush()
+
+    // 2. ★ 通知先到（AI_old 仍在 streaming）
+    handleSystemNotification(notificationEvent('[系统通知] 子任务完成', { sequence: 11 }))
+    const sysId = ids().find((id) => id.startsWith('sys_'))!
+    expect(sysId, '通知应已创建').toBeDefined()
+
+    // 此时数组应为 [user-1, AI_old(streaming), sysId]
+    const midIds = ids()
+    expect(midIds).toEqual(['user-1', AI_OLD, sysId])
+
+    // 3. ★ AI_new 的 stream_start 后到
+    handlers.handleStreamStart(evt('stream_start', { message_id: AI_NEW, _threadId: THREAD_ID, sequence: 12 }))
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_NEW, content: 'AI_new 内容' }))
+    flush()
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI_NEW,
+      _threadId: THREAD_ID,
+      final_sequence: 12,
+      data: { parts: [{ type: 'text', content: 'AI_new 内容', sequence: 0 }], full_content: 'AI_new 内容' },
+    }))
+    // AI_old 也结束
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI_OLD,
+      _threadId: THREAD_ID,
+      final_sequence: 10,
+      data: { parts: [{ type: 'text', content: 'AI_old 部分内容', sequence: 0 }], full_content: 'AI_old 部分内容' },
+    }))
+
+    // 4. ★ 期望：通知夹在 AI_old 和 AI_new 之间，不被 AI_new 挤到末尾
+    const finalIds = ids()
+    const oldIdx = finalIds.indexOf(AI_OLD)
+    const nIdx = finalIds.indexOf(sysId)
+    const newIdx = finalIds.indexOf(AI_NEW)
+    expect(
+      [oldIdx, nIdx, newIdx],
+      `通知应夹在 AI_old 和 AI_new 之间。实际顺序: ${JSON.stringify(finalIds)}`,
+    ).toEqual([oldIdx, nIdx, newIdx].sort((a, b) => a - b))  // 升序 = old < n < new
+    expect(nIdx).toBeGreaterThan(oldIdx)
+    expect(nIdx).toBeLessThan(newIdx)
+  })
+
+  // ── fix_20260705_notification_stuck_at_bottom_real_storage ─────────────
+  // 基于真实存储数据复现：system 通知不落库（track 不写 record），sequence 在存储里
+  // 是"缺失"的（如 seq 64→69 缺 67/68，那是两条 system 通知）。
+  // 前端流式期间 push 顺序到达 system（seq=67/68），它们排在 ai(seq=66) 之后、ai(seq=69) 之前，
+  // 这是对的。但切 Tab/重连触发 initFromAPI 时：
+  //   - API 返回的 records 不含 system（缺 67/68）
+  //   - system 走 localOnly 保留，sequence 是后端权威的 67/68
+  //   - mergeSorted 应按 sequence 归并，把 system(67/68) 插到 ai(66) 和 ai(69) 之间
+  // 如果 system 被排到末尾，说明归并失败（sequence 抬升 或 localOnly 末尾拼接逻辑覆盖了归并）。
+  it('场景11: 真实存储 — system(seq=67/68 缺失) 应在 initFromAPI 后正确归并到 ai(66) 和 ai(69) 之间', () => {
+    // 流式期间已经按到达顺序收到：ai(66) → system(67) → system(68) → ai(69)
+    // 模拟流式阶段
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问', sequence: 60 }),
+      makeMsg('ai-64', { role: 'assistant', content: '触发器第1次', sequence: 64, status: 'completed' }),
+      makeMsg('tool-65', { role: 'tool', content: 'task_submit', sequence: 65 }),
+      makeMsg('ai-66', { role: 'assistant', content: '任务已派发', sequence: 66, status: 'completed' }),
+    ])
+    // 流式期间收到 system 通知（seq 67/68，后端权威）
+    handleSystemNotification(notificationEvent('[系统通知] 子任务1完成', { sequence: 67 }))
+    handleSystemNotification(notificationEvent('[系统通知] 子任务2完成', { sequence: 68 }))
+    // 然后 ai(69) 流式到达
+    const AI69 = 'msg_ai_69'
+    handlers.handleStreamStart(evt('stream_start', { message_id: AI69, _threadId: THREAD_ID, sequence: 69 }))
+    handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI69, content: '任务完成啦' }))
+    flush()
+    handlers.handleStreamEnd(evt('stream_end', {
+      message_id: AI69,
+      _threadId: THREAD_ID,
+      final_sequence: 69,
+      data: { parts: [{ type: 'text', content: '任务完成啦', sequence: 0 }], full_content: '任务完成啦' },
+    }))
+
+    // 流式期间顺序（到达顺序）：[..., ai-66, sys-67, sys-68, ai-69]
+    const beforeRefresh = ids()
+    const sys67 = beforeRefresh.find((id) => id.startsWith('sys_') && id.includes('_'))!
+    const sysIds = beforeRefresh.filter((id) => id.startsWith('sys_'))
+    expect(sysIds.length, '应有 2 条 system 通知').toBe(2)
+
+    // ★ 切 Tab 触发 initFromAPI：API 返回的 records 不含 system（缺 67/68）
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问', sequence: 60 }),
+      makeMsg('ai-64', { role: 'assistant', content: '触发器第1次', sequence: 64, status: 'completed' }),
+      makeMsg('tool-65', { role: 'tool', content: 'task_submit', sequence: 65 }),
+      makeMsg('ai-66', { role: 'assistant', content: '任务已派发', sequence: 66, status: 'completed' }),
+      makeMsg(AI69, { role: 'assistant', content: '任务完成啦', sequence: 69, status: 'completed' }),
+    ])
+
+    // ★ 核心断言：刷新后 system(67/68) 必须归并到 ai(66) 和 ai(69) 之间，不是末尾
+    const finalIds = ids()
+    const ai66Idx = finalIds.indexOf('ai-66')
+    const ai69Idx = finalIds.indexOf(AI69)
+    const sysIdxes = finalIds
+      .map((id, i) => id.startsWith('sys_') ? i : -1)
+      .filter((i) => i >= 0)
+
+    expect(ai66Idx, 'ai-66 应存在').toBeGreaterThan(-1)
+    expect(ai69Idx, 'ai-69 应存在').toBeGreaterThan(-1)
+    expect(sysIdxes.length, 'system 通知应保留').toBe(2)
+    for (const idx of sysIdxes) {
+      expect(
+        idx,
+        `system(seq=67/68) 必须在 ai(66) 和 ai(69) 之间，不能在末尾。实际: ${JSON.stringify(finalIds)}`,
+      ).toBeGreaterThan(ai66Idx)
+      expect(idx).toBeLessThan(ai69Idx)
+    }
+  })
 })

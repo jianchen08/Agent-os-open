@@ -84,6 +84,19 @@ async def run_iteration(
     # 1. 消费待处理通知（tool_execute 时由统一函数内部跳过；前置追加到现有 user_input）
     await consume_pending_notifications(engine, state, prepend=True)
 
+    # 1.5 流式续接：若上一轮 apply_route 的 next_llm 分支已 emit_finish 关流（注入分割），
+    # 本轮 LLM 输出前 emit_start 开新流。
+    # 只在 llm_call 轮且流未开时触发：
+    # - 工具结果触发（tool_execute→llm_call）：流还开着（工具链共用一个流），不触发（续流）
+    # - 注入触发（apply_route emit_finish 后）：流关了，触发 emit_start 开新流
+    if state.get(StateKeys.CORE_TYPE, "llm_call") == "llm_call":
+        _bridge_for_start = _get_bridge_for_pipeline(engine.pipeline_id)
+        if _bridge_for_start is not None and not getattr(_bridge_for_start, "_stream_started", False):
+            try:
+                await _bridge_for_start.emit_start(state)
+            except Exception as exc:
+                logger.warning("[Engine] emit_start 续接失败（非致命）: %s", exc)
+
     # 2. 解析插件列表 + 执行 Input 链
     plugin_names = engine.input_route_table.resolve_plugins(state)
     logger.debug("Input route resolved plugins: %s", plugin_names)

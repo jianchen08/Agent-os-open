@@ -308,9 +308,20 @@ class BridgeCore:
 
         state.raw_result 是唯一数据源，推送和持久化都从这里取。
 
+        幂等保护：若流已关闭（_stream_started=False），说明本轮已在路由阶段
+        emit_finish 收尾过（如 apply_route 的 next_llm text-only 路径），engine.run()
+        结束时的 emit_finish 跳过，避免重复发 new_message + stream_end。
+
         Args:
             state: 管道状态字典
         """
+        if not self._stream_started:
+            logger.debug(
+                "[Bridge] emit_finish 跳过（流已关闭，避免重复）: msg=%s pipeline=%s",
+                self.message_id[:12],
+                self.pipeline_id[:12],
+            )
+            return
         await self._close_thinking_if_active(None)
         full_content = state.get("raw_result") or ""
         parts = self._build_parts_from_state(state)

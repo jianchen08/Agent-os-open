@@ -922,15 +922,11 @@ class PipelineEngine:
 
             logger.debug("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
 
-            # Phase 1: resume 后重新 emit_start
-            # emit_suspend 已发 stream_end 关闭上一轮（_stream_started=False），
-            # resume 进入新 iteration 会有新的 LLM 输出，需要新的 stream_start。
-            if self._streaming.bridge is not None:
-                try:
-                    await self._streaming.emit_start(state)
-
-                except Exception as _emit_exc:
-                    logger.warning("[Engine] resume emit_start 失败（非致命）: %s", _emit_exc)
+            # resume 后不在此 emit_start —— 让 run_iteration 的 1.5 续接来负责。
+            # 原因：此处的 emit_start 在 consume 之前，导致 system 通知排在 AI 流之后。
+            # 改为 consume（run_iteration ①）→ emit_start（run_iteration 1.5），
+            # 通知排在 emit_start 之前 = 通知排在新 AI 气泡之前。
+            # emit_suspend 已发 stream_end（_stream_started=False），续接会检测到并 emit_start。
 
             return True
 

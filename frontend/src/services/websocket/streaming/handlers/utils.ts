@@ -62,15 +62,15 @@ export function stopPipelineStreaming(pipelineId: string, threadId?: string): vo
   }
 }
 
-/** 分配下一个 sequence 值。 - 后端消息：直接使用后端 sequence，但不小于本地已有最大值（防止后端计数器未续接） */
+/** 分配下一个 sequence 值。 - 后端消息：直接使用后端 sequence（后端 emit_notification / new_message / stream_end 都从 _entry.next_sequence() 共享计数器取值，是权威值，与流式输出共序，保证相对顺序正确）。 - 本地乐观消息（无 backendSequence，如 stream_start 占位、用户刚发的消息）：用 localMax+1 占位，待后端权威值到达后由 initFromAPI 对账纠正。 不再用 Math.max(backendSeq, localMax+1) 抬升后端权威值——那会让延迟到达的系统通知（后端 seq 早于本地 localMax）被错误排到后续 AI 回复之后。 */
 export function allocateNextSequence(pipelineId: string, backendSequence?: number): number {
+  if (backendSequence != null && backendSequence > 0) {
+    return backendSequence
+  }
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
   const localMax = existingMsgs.reduce(
     (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
   )
-  if (backendSequence != null && backendSequence > 0) {
-    return Math.max(backendSequence, localMax + 1)
-  }
   return localMax + 1
 }
 
@@ -131,6 +131,16 @@ export function ensureStreamingPlaceholder(
   // 导致后续 chunk 按 hex id 查找命中错误消息（断线重连场景的空气泡根因）。
   const after = store.getMessages(pipelineId)
   const prevMsg = after[after.length - 1]
+  // ★ 诊断：stream_start 到达时的 store 状态
+  loggers.websocket.info(
+    '[STREAM-ARRIVE] total=%d prev=[%s/%s/%s] newMsg=%s willMerge=%s',
+    after.length,
+    prevMsg?.role ?? 'null',
+    prevMsg?.status ?? 'null',
+    (prevMsg?.id ?? '').slice(0, 10),
+    messageId.slice(0, 10),
+    prevMsg?.role === 'assistant' && prevMsg?.status === 'streaming',
+  )
   if (prevMsg && prevMsg.role === 'assistant' && prevMsg.status === 'streaming') {
     // 合并到前一条 AI：把它的 id 更新为本轮的新 messageId，
     // 这样后续 stream_chunk / tool_start 按新 messageId 操作时落到同一条消息。

@@ -8,14 +8,21 @@ LLM 流式调用的 ``aiter.__anext__()`` 在上游半死连接（TCP 建连成�
 ``TimerManager.call_later``）共享同一个 loop，loop 一冻全部失效——这是历史上
 多次"管道僵死一整晚"的根因。
 
-``StreamHardTimeout`` 用 ``threading.Thread`` 独立倒计时，到点若无 ``disarm``
-取消，就用 ``asyncio.run_coroutine_threadsafe`` 在主 loop 执行
-``stream.aclose()`` 强制断流。它是 loop 冻住也能生效的最后一道兜底。
+    ``StreamHardTimeout`` 用 ``threading.Thread`` 独立倒计时，到点若无 ``disarm``
+    取消，就用 ``asyncio.run_coroutine_threadsafe`` 在主 loop 执行
+    ``stream.aclose()`` 强制断流。它是 loop 冻住也能生效的最后一道兜底。
+
+    语义为"chunk 间隔超时"：adapter 每收到一个 chunk 调 ``reset()`` 重新计时。
+    若仅总时长超过 timeout 但 chunk 持续健康到达（间隔小于 timeout），不触发；
+    只有点正静默满 timeout（死连接）才 fire。这与消费侧 ``wait_for`` 的 per-chunk
+    超时语义对齐，watchdog 是 loop 冻住、``wait_for`` 失效时的兜底。
 
 设计要点
 --------
-- 用 ``threading.Event.wait(timeout)`` 做倒计时：可被 ``disarm`` 的 ``set()``
-  提前唤醒，不浪费线程时间。
+- ``reset()`` 仅原子改写 ``_deadline``（GIL 保证可见），不触碰 Event；线程 wait
+  按 ``_deadline - now`` 计算剩余时间。彻底避免 ``clear/set`` 交错竞态（早期版本
+  的 Event-clear 方案存在 reset 信号被吞、超时分支无视 reset 直接 fire 的缺陷）。
+- ``disarm`` 用 ``stop_event.set()`` 唤醒线程退出；与 reset 路径完全隔离，互不干扰。
 - ``aclose`` 经 ``run_coroutine_threadsafe`` 回主 loop 执行（async 函数不能
   在线程里直接 await）。主 loop 若已冻死，这个 future 也排不进去——但此时
   底层 socket 的阻塞源自 loop 线程被占住，强制关连接是 OS 级操作，能打破
@@ -33,6 +40,7 @@ import asyncio
 import contextlib
 import logging
 import threading
+import time as _time
 from collections.abc import Callable
 from typing import Any
 
@@ -63,16 +71,19 @@ class StreamHardTimeout:
         self._loop = loop
         self._timeout = timeout
         self._on_fire = on_fire
-        # 用 Event 做倒计时门闩：disarm 时 set() 提前唤醒，避免空等。
+        # stop_event 仅 disarm 用：set() 唤醒线程退出。reset 不触碰它，避免竞态。
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
         self._fired = False
+        # 截止时刻（monotonic）：reset 原子改写，线程据此计算剩余时间。
+        self._deadline: float = 0.0
 
     def arm(self) -> None:
         """启动硬超时倒计时（幂等：重复 arm 不创建多个线程）。"""
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event = threading.Event()
+        self._deadline = _time.monotonic() + self._timeout
         self._thread = threading.Thread(
             target=self._countdown,
             name="llm-stream-hard-timeout",
@@ -85,18 +96,39 @@ class StreamHardTimeout:
         if self._stop_event is not None:
             self._stop_event.set()
 
+    def reset(self) -> None:
+        """重新计时（每收到一个 chunk 调用一次）。
+
+        仅原子改写 _deadline，不触碰 stop_event——避免与 disarm 路径竞争，
+        也避免 Event clear/set 交错丢信号。使 watchdog 退化为"chunk 间隔超时"
+        而非"总时长超时"，避免误杀长但健康的流（issue: 流式响应总时长
+        超过 inter_chunk_timeout 但 chunk 间隔始终健康时误触发 aclose）。
+
+        线程当前正 wait(旧 remaining)：deadline 推迟后 wait 仍按旧值返回，
+        循环顶部会基于新 deadline 重新计算 remaining 并决定续等或 fire，
+        因此 reset 最多在"一帧 wait"内生效，无需显式唤醒。
+        """
+        if self._stop_event is None:
+            return
+        self._deadline = _time.monotonic() + self._timeout
+
     def _countdown(self) -> None:
-        """独立线程入口：等 timeout 或被 disarm 唤醒。
+        """独立线程入口：等 deadline 到或被 disarm 唤醒。
 
         线程函数，所有异常吞掉——watchdog 永不传播错误到主流程。
         """
         try:
             assert self._stop_event is not None  # noqa: S101
-            # wait 返回 True 表示被 disarm(set)，False 表示超时到期
-            timed_out = not self._stop_event.wait(timeout=self._timeout)
-            if not timed_out:
-                return
-            self._fire()
+            while True:
+                remaining = self._deadline - _time.monotonic()
+                if remaining <= 0:
+                    self._fire()
+                    return
+                # disarm 用 set() 唤醒；timeout 内未被 disarm 则继续循环重新核算
+                # remaining（reset 会推迟 _deadline，从而续等）。
+                signaled = self._stop_event.wait(timeout=remaining)
+                if signaled:
+                    return
         except Exception:  # noqa: BLE001
             logger.warning(
                 "[StreamHardTimeout] 倒计时线程异常（已吞，不影响主流程）",

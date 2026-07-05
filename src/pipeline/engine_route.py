@@ -21,6 +21,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_bridge_for_pipeline(pipeline_id: str):
+    """通过公开注册表 API 获取管道的 bridge（与 engine_iteration 同实现）。"""
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
+    try:
+        return get_engine_registry().get_bridge(pipeline_id)
+    except Exception:
+        return None
+
+
 def resolve_output_plugins(
     engine: PipelineEngine,
     state: dict[str, object],
@@ -87,6 +97,29 @@ async def apply_route(  # noqa: PLR0911
     route_type = route.route_type
 
     if route_type == "next_llm":
+        # ★ 路由决定调 LLM。在这里（调 LLM 之前）检查注入，按用户消息路径分割流。
+        # 位置在 next_tool 之后（工具配对已完整路由），不会打断 tool_call 配对。
+        #
+        # 有注入 = 新回合（user/system 消息到来）：
+        #   emit_finish（结束上一轮 AI 流，落库为独立气泡）
+        #   → consume（注入消息 + 推 system 通知 WS）
+        #   → return False 继续循环，下一轮调 LLM 时是新一轮（engine.py run() 开头 emit_start）
+        # 无注入 = 续流（工具结果触发或正常继续），不动流。
+        if engine.inject_queue_size > 0:
+            from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
+
+            _bridge = _get_bridge_for_pipeline(engine.pipeline_id)
+            if _bridge is not None and getattr(_bridge, "_stream_started", False):
+                try:
+                    await _bridge.emit_finish(state)
+                    logger.info("[Engine] next_llm 注入分割：emit_finish 关闭上一轮 AI 流")
+                except Exception as exc:
+                    logger.warning("[Engine] next_llm emit_finish 失败（非致命）: %s", exc)
+
+            if await consume_pending_notifications(engine, state):
+                logger.info("[Engine] next_llm 注入分割：consume 了消息，继续循环开新回合")
+                return False
+
         # 检测 AI 纯文本输出 + 无新用户输入的组合，自动降级为 wait
         _raw_result = state.get("raw_result", "")
         _has_tool_calls = bool(state.get(StateKeys.RAW_TOOL_CALLS, []))
@@ -99,13 +132,7 @@ async def apply_route(  # noqa: PLR0911
 
         if _is_text_only and not _has_new_input:
             # AI 只输出了文本，没有调用任何工具。
-            # 检查是否有新通知注入（如 task_event_receiver 的完成通知）
-            # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
-            from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
-
-            if await consume_pending_notifications(engine, state):
-                return False
-
+            # 注入已在上面处理完（队列空），无注入则降级 wait 挂起。
             # 无新输入，降级为 wait（挂起等用户反馈）
             logger.info("Route next_llm + text-only output (no new input): downgrading to wait, suspending pipeline")
             restored = await engine.suspend_and_wait(state)

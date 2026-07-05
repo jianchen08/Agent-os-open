@@ -114,6 +114,18 @@ export function handleSystemNotification(eventData: any): void {
     pipelineId.slice(0, 12), content.slice(0, 40),
   )
 
+  // ★ 诊断：notification 到达时的 store 状态（INFO 级别确保可见）
+  const _diagBefore = pipelineStore.getMessages(pipelineId)
+  const _diagLast = _diagBefore[_diagBefore.length - 1]
+  loggers.websocket.info(
+    '[NOTIF-ARRIVE] total=%d last=[%s/%s/%s] seq=%s',
+    _diagBefore.length,
+    _diagLast?.role ?? 'null',
+    _diagLast?.status ?? 'null',
+    (_diagLast?.id ?? '').slice(0, 10),
+    data?.sequence ?? 'none',
+  )
+
   pipelineStore.addMessage(pipelineId, {
     id: `sys_${generateUUID()}`,
     role: 'system',

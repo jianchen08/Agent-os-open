@@ -138,3 +138,54 @@ class TestStreamHardTimeoutRobustness:
         wd.arm()
         wd.arm()  # 幂等，不应启动第二个线程
         wd.disarm()
+
+
+class TestStreamHardTimeoutReset:
+    """reset() 让 watchdog 成为 chunk 间隔超时，避免误杀长流。"""
+
+    @pytest.mark.asyncio
+    async def test_reset_before_timeout_does_not_fire(self) -> None:
+        """每小于 timeout 间隔 reset 一次，即使总时长远超 timeout 也不触发。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        fired = threading.Event()
+        # timeout=0.3s，但每 0.1s reset 一次（模拟 chunk 持续健康到达）
+        wd = StreamHardTimeout(stream, loop, timeout=0.3, on_fire=fired.set)
+        wd.arm()
+        # 持续 reset，总时长 1.0s 远超 timeout 0.3s
+        for _ in range(10):
+            await asyncio.sleep(0.1)
+            wd.reset()
+        wd.disarm()
+        # 再等一会儿确认确实没触发
+        await asyncio.sleep(0.5)
+        assert not fired.is_set(), "持续 reset 时 watchdog 仍误触发了 aclose"
+        stream.aclose.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reset_then_idle_past_timeout_fires(self) -> None:
+        """reset 后若真的静默满 timeout，仍应触发（chunk 间隔超时语义成立）。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        fired = threading.Event()
+        wd = StreamHardTimeout(stream, loop, timeout=0.2, on_fire=fired.set)
+        wd.arm()
+        # reset 一次模拟一个 chunk，然后停止 reset 模拟死连接
+        await asyncio.sleep(0.05)
+        wd.reset()
+        await asyncio.sleep(0.05)
+        wd.reset()
+        # 之后不再 reset，静默满 timeout 应触发
+        assert fired.wait(timeout=2.0), "reset 后真正静默满 timeout 未触发"
+        await asyncio.sleep(0.1)
+        stream.aclose.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reset_is_safe_before_arm(self) -> None:
+        """arm 之前调 reset 不抛错（防御性）。"""
+        stream = _make_fake_stream()
+        loop = asyncio.get_running_loop()
+        wd = StreamHardTimeout(stream, loop, timeout=1.0)
+        wd.reset()  # 未 arm，不应抛异常
+        wd.arm()
+        wd.disarm()

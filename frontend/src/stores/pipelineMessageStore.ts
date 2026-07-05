@@ -522,15 +522,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         }
       }
 
-      // 同步更新 bottomCursor
-      const newBottomCursors = { ...state.bottomCursorsByPipeline }
-      const newSeq = message.sequence
-      if (newSeq != null) {
-        const currentBottom = newBottomCursors[pipelineId] ?? 0
-        if (newSeq > currentBottom) {
-          newBottomCursors[pipelineId] = newSeq
-        }
-      }
+      // bottomCursor 只由 API 权威路径（initFromAPI / appendMessages / prependMessages）维护。
+      // addMessage 是乐观/流式/通知消息的入口（router 乐观 user、ensureStreamingPlaceholder
+      // 流式占位、handleSystemNotification 系统通知），其 sequence 来自本地分配
+      // （allocateNextSequence 可能用 Math.max(localMax+1) 抬升），并非后端权威值。
+      // 若让它推进 bottomCursor，会污染双游标：
+      //   - 系统通知 sequence 被抬到 localMax+1，initFromAPI 重排时被 mergeSorted 排到末尾，
+      //     导致「通知跑到 AI 回复后面」（排序错乱）。
+      //   - 流式占位的临时 sequence 进入游标，下次 after_sequence=bottomCursor 补漏会跳过
+      //     真正未加载的权威消息。
+      // 流式期间 bottomCursor 保持不动，等流式结束 → 切 Tab/重连触发 appendMessages 时
+      // 由 calculateBottomCursor 写入权威值。
 
       return {
         messagesByPipeline: {
@@ -539,7 +541,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           [pipelineId]: capMessagesForMemory(updatedMessages),
         },
         pipelines: newPipelines,
-        bottomCursorsByPipeline: newBottomCursors,
       }
     })
   },
