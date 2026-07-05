@@ -449,10 +449,10 @@ jobs:
     name: Frontend E2E (Playwright)
     runs-on: ubuntu-latest
     needs: [lint]
-    # Playwright E2E 需要真实后端+前端+Chromium 三层环境，CI runner 上可能不稳定。
-    # 每次都跑，但有 timeout-minutes: 10 + continue-on-error 防止卡死阻塞 CI。
+    # Playwright E2E 需要真实后端+前端+Chromium 三层环境，118+ 测试约需 10-12 分钟。
+    # 每次都跑，timeout 20 分钟兜底，continue-on-error 防偶发不稳定阻塞 CI。
     continue-on-error: true
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
