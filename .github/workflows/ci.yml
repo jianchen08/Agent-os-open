@@ -215,6 +215,40 @@ jobs:
             --no-header \
             -q \
             2>&1
+          # 散落在 tests/ 根目录的单元/功能测试（约 127 个文件，2900+ 测试）。
+          # 之前完全游离于 CI 之外，现纳入门禁。排除：
+          # - 3 个 collection error（导入已删除模块）
+          # - integration/e2e（需真实环境/长耗时）
+          # - media/ASR/ComfyUI/PGVector（需外部服务）
+          # - docker 相关（需 Docker daemon）
+          # 每测试 30 秒超时，防止挂起阻塞 CI。
+          pip install pytest-timeout -q
+          python -m pytest tests/test_*.py tests/test_external_tools/ tests/integration/ \
+            --ignore=tests/test_cross_domain_discovery.py \
+            --ignore=tests/test_directory_generator.py \
+            --ignore=tests/test_memory_metrics.py \
+            --ignore=tests/test_integration.py \
+            --ignore=tests/test_pipeline_integration.py \
+            --ignore=tests/test_external_project_e2e.py \
+            --ignore=tests/test_new_project_e2e.py \
+            --ignore=tests/test_rag_integration.py \
+            --ignore=tests/test_external_chat.py \
+            --ignore=tests/test_asr_service.py \
+            --ignore=tests/test_comfyui.py \
+            --ignore=tests/test_media_provider.py \
+            --ignore=tests/test_media_review.py \
+            --ignore=tests/test_media_review_service.py \
+            --ignore=tests/test_pgvector_store.py \
+            --ignore=tests/test_isolation_container_self_heal.py \
+            --ignore=tests/test_isolation_docker_timeout.py \
+            --ignore=tests/test_isolation_prune_throttle.py \
+            --continue-on-collection-errors \
+            --timeout=30 --timeout-method=thread \
+            --tb=line \
+            --no-header \
+            -q \
+            "${DESELECT_ARGS[@]}" \
+            2>&1
 
       - name: Generate Test Report
         if: always()
