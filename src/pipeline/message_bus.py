@@ -199,8 +199,6 @@ async def _inject_to_engine(
     attachments: list[dict[str, Any]] | None = None,
 ) -> InjectResult:
     """向已存在的引擎注入消息。"""
-    from pipeline.drain_manager import create_sink  # noqa: PLC0415
-
     try:
         msg_source = (metadata or {}).get("source", "user")
         logger.info(
