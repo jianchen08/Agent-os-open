@@ -251,6 +251,28 @@ jobs:
             -q \
             "${DESELECT_ARGS[@]}" \
             2>&1 || echo "⚠️ 第4批次有失败（pre-existing），见上方报告"
+          # 第 5 批次：tests/suites/ 下未纳入的功能套件测试（约 1000 测试）。
+          # 排除 e2e（需真实 WebSocket）、llm（需真实 API key）。
+          # 这批测试历史游离，部分有 pre-existing 失败，用 || true 容错。
+          python -m pytest \
+            tests/suites/agent \
+            tests/suites/cli \
+            tests/suites/m6_plugins \
+            tests/suites/pipeline \
+            tests/suites/stage \
+            tests/suites/task \
+            tests/suites/tools \
+            tests/suites/websocket \
+            tests/suites/test_plugin_type_slot.py \
+            tests/suites/memory/ \
+            tests/suites/plugins/ \
+            --continue-on-collection-errors \
+            --timeout=30 --timeout-method=thread \
+            --tb=line \
+            --no-header \
+            -q \
+            "${DESELECT_ARGS[@]}" \
+            2>&1 || echo "⚠️ 第5批次有失败（pre-existing），见上方报告"
 
       - name: Generate Test Report
         if: always()
