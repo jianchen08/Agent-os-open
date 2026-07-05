@@ -202,10 +202,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
         current_non_sys = sum(1 for m in messages if m.get("role") != "system")
         restart_signature = tracked == 0 and current_non_sys > 50
         logger.debug(
-            "[%s] 估算分叉: prev_input=%d, tracked=%d, current_non_sys=%d, "
-            "restart_signature=%s, msg_total=%d",
-            self.name, prev_input, tracked, current_non_sys,
-            restart_signature, len(messages),
+            "[%s] 估算分叉: prev_input=%d, tracked=%d, current_non_sys=%d, restart_signature=%s, msg_total=%d",
+            self.name,
+            prev_input,
+            tracked,
+            current_non_sys,
+            restart_signature,
+            len(messages),
         )
         if prev_input > 0 and not restart_signature:
             if current_non_sys <= tracked:
@@ -240,7 +243,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         assembled = await self._estimate_assembled_tokens(ctx, messages)
         logger.debug(
             "[%s] 估算(策略2/压缩块拼接): assembled=%d, msg_count=%d",
-            self.name, assembled, len(messages),
+            self.name,
+            assembled,
+            len(messages),
         )
         if assembled >= 0:
             return assembled
@@ -248,8 +253,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 策略 3：全量字符估算（最后手段）
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
         logger.warning(  # 落到策略3说明前两个都失败了，值得告警
-            "[%s] 估算(策略3/全量字符 兜底): estimated=%d, msg_count=%d, "
-            "prev_input=%d, tracked=%d",
+            "[%s] 估算(策略3/全量字符 兜底): estimated=%d, msg_count=%d, prev_input=%d, tracked=%d",
             self.name,
             estimated,
             len(messages),

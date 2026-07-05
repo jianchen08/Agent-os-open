@@ -53,9 +53,7 @@ from src.core.logging import LogContext, LoggingConfig, setup_logging as _setup_
 # web 模式强制同时输出到文件：[WSNotifier]/[GlobalWS] 等交互推送链路日志需可事后审计，
 # 仅输出到控制台时（LoggingConfig 默认 output=console），进程关闭后无从查证。
 # CLI 不受影响（cli_main.py 有独立的 setup_logging）。
-_web_log_config = dataclasses.replace(
-    LoggingConfig.from_env(), output="both", file_path="logs/agent_os.log"
-)
+_web_log_config = dataclasses.replace(LoggingConfig.from_env(), output="both", file_path="logs/agent_os.log")
 _setup_unified_logging(_web_log_config, reset=True)
 
 logger = logging.getLogger(__name__)
