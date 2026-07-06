@@ -45,6 +45,9 @@ agent-os = "channels.cli.cli_main:main"
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
 ]
 document = [
     "markitdown[docx,xlsx]>=0.1.0",
@@ -67,6 +70,10 @@ python_functions = ["test_*"]
 asyncio_mode = "auto"
 log_cli = false
 log_cli_level = "WARNING"
+# --strict-markers：未在下方注册的 marker 直接报错，防止动态未登记的标记再出现。
+# 不在此处设全局 -m 排除：各 CI job 已按需调度外部依赖测试
+#（llm-e2e 用 -m requires_api，e2e 靠 RUN_LLM_E2E 门控），全局排除会改变现有语义。
+addopts = ["--strict-markers"]
 markers = [
     "unit: 单元测试",
     "integration: 集成测试",
@@ -76,6 +83,18 @@ markers = [
     "requires_redis: 需要 Redis 的测试",
     "requires_db: 需要数据库的测试",
     "offline: 可离线运行的测试",
+    # ── 时序/稳定性门禁（§9.4/§6.4）──
+    "timing: 关键时序不变量（事件顺序/间隔/超时边界），独立 stage 阻塞门禁",
+    "soak: 长时间渗漏与稳定性回归（资源回收/RSS斜率/任务累积）",
+    # ── tests/suites/__init__.py 动态注册的标记（此处静态登记以配合 --strict-markers）──
+    "core: 核心单元测试",
+    "m6: M6插件测试",
+    "stage: Stage闭环测试",
+    "cli: CLI测试",
+    "memory: 内存经验测试",
+    "task: Task E2E测试",
+    "agent: Agent测试",
+    "llm: LLM相关测试",
 ]
 filterwarnings = [
     "ignore::sqlalchemy.exc.SADeprecationWarning",

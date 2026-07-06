@@ -108,14 +108,9 @@ async def apply_route(  # noqa: PLR0911
         if engine.inject_queue_size > 0:
             from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
 
-            _bridge = _get_bridge_for_pipeline(engine.pipeline_id)
-            if _bridge is not None and getattr(_bridge, "_stream_started", False):
-                try:
-                    await _bridge.emit_finish(state)
-                    logger.info("[Engine] next_llm 注入分割：emit_finish 关闭上一轮 AI 流")
-                except Exception as exc:
-                    logger.warning("[Engine] next_llm emit_finish 失败（非致命）: %s", exc)
-
+            # 路由已决定 next_llm，先把 core_type 设成 llm_call，否则 consume 看到
+            # tool_execute 会跳过。emit_finish 分割已在 consume 内部统一处理。
+            state[StateKeys.CORE_TYPE] = "llm_call"
             if await consume_pending_notifications(engine, state):
                 logger.info("[Engine] next_llm 注入分割：consume 了消息，继续循环开新回合")
                 return False

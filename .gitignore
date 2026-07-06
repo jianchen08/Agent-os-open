@@ -118,3 +118,6 @@ packages/wheels/*
 !packages/wheels/.gitkeep
 packages/npm-tarballs/*
 !packages/npm-tarballs/.gitkeep
+
+# ─── 崩溃转储（不入库）───
+*.stackdump

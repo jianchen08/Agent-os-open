@@ -307,13 +307,16 @@ def build_scenarios() -> list[Scenario]:
         ),
         Scenario(
             name="empty_stream",
-            desc="空流：建连成功但立刻 StopAsyncIteration（不该崩、不该等满 timeout）",
+            desc="空流：建连成功但立刻 StopAsyncIteration，adapter 按首 token 失败抛 Timeout",
             script=[],
             first_chunk_timeout=2.0,
             inter_chunk_timeout=2.0,
+            # adapter.py:453-464 明确设计：空流（首字节即 EOF）按首 token 失败处理，
+            # 抛 litellm.Timeout。原 expect_exception=None 是错误期望，与 adapter 契约相悖。
+            expect_exception=litellm.Timeout,
             expect_min_elapsed=0.0,
-            expect_max_elapsed=0.5,
-            expect_aclose=False,  # 空流路径 response 未绑定，不会调 aclose
+            expect_max_elapsed=0.5,  # 空流立即抛，不等满 timeout
+            expect_aclose=False,
         ),
     ]
 

@@ -16,6 +16,9 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+pytestmark = pytest.mark.timing
+# §9.4: 时序不变量门禁 — 此文件的测试断言可观察行为（事件顺序/间隔/超时边界/资源回收），
+# 不含实现细节断言（mock.call_count/私有方法），破坏不变量的改动在 CI 阶段即被拦截。
 
 from llm.stream_watchdog import StreamHardTimeout
 

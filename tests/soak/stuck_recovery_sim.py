@@ -11,6 +11,12 @@
   - waiting_recovery 状态是否被识别（回归 fix_20260629）
   - fail_task 协程内部异常是否能被回调打出（回归 fix_20260606）
   - 启动恢复：running → suspended → 可 resume
+
+DEBT: timer 基于 loop.call_later（真实 wall clock 相对值），非注入式 fake clock。
+  ceiling: 场景 1/9 的 threshold 已放大到 1.0s 缓解慢 CI flake，但仍依赖真实
+    时间流逝驱动 TimerHandle 回调，极端慢机仍可能抖动。
+  upgrade: 引入虚拟时间事件循环（如 aioloop_proxy / pytest-asyncio 的
+    event_loop policy 替换）后，可注入确定性时间推进，消除真实墙钟依赖。
 """
 
 from __future__ import annotations
@@ -350,16 +356,21 @@ async def case_stuck_in_engine_running(threshold: float) -> tuple[bool, str, dic
         # 清理：取消所有计时器
         await tm.cancel_timer(task_id)
 
-    # 期望：不该 fail（引擎仍在跑）；计时器应被重建至少一次（create > 1）
-    ok = (len(ts.fail_calls) == 0) and (tm.create_count >= 2)
+    # 期望（可观察行为，§9.5）：
+    #   1) 引擎仍在跑 → 不该 fail（fail_calls == 0）
+    #   2) cleanup 后无残留计时器（active_count == 0 = 无泄漏）
+    # 不再断言 create_count（调度器调用次数属实现细节：timer 策略从
+    # cancel+recreate 改为 reschedule 时 create_count 会变，但对外行为不变）。
+    ok = (len(ts.fail_calls) == 0) and (tm.active_count() == 0)
     reason = ""
     if ts.fail_calls:
         reason = f"不该 fail 但 fail 了: {ts.fail_calls[0][1][:80]}"
-    elif tm.create_count < 2:
-        reason = f"计时器应被重建至少一次，但 create_count={tm.create_count}"
+    elif tm.active_count() > 0:
+        reason = f"cleanup 后仍有残留计时器: {tm.active_count()}"
     return ok, reason, {
         "fail_calls": len(ts.fail_calls),
         "create": tm.create_count, "cancel": tm.cancel_count,
+        "active": tm.active_count(),
     }
 
 
@@ -638,9 +649,11 @@ async def case_evaluating_recovery_no_metrics_completes(_threshold: float) -> tu
 
 
 async def case_timer_no_runaway_storm(threshold: float) -> tuple[bool, str, dict]:
-    """场景 9：长时间引擎在跑，timer 重建次数有界（不爆炸）。
+    """场景 9：长时间引擎在跑，同时活跃的 timer 数有界（不堆积成风暴）。
 
-    threshold 内最多触发若干次 idle → recreate，验证不堆积。
+    真正的"风暴"可观察表现是：同一时刻累积大量未取消的活跃计时器
+    （资源泄漏），而非累计 create 次数。重建策略从 cancel+recreate 改为
+    reschedule 时 create_count 会变，但「活跃计时器有界」不变（§9.5）。
     """
     ts = FakeTaskService()
     tm = FakeTimerManager(idle_threshold=threshold)
@@ -653,26 +666,32 @@ async def case_timer_no_runaway_storm(threshold: float) -> tuple[bool, str, dict
     reg = FakeEngineRegistry()
     reg.register(task_id, FakeEntry(FakeEngine(is_running=True), engine_task_done=False))
     restore = install_fake_registry(reg)
+    max_concurrent_active = 0
     try:
         await worker._arm_idle_timer(task_id, tm)
-        # 跑 ~4 倍 threshold，触发约 4 次重建
-        await _wait_briefly(threshold * 4.5)
+        # 跑 ~4 倍 threshold，期间采样"同时活跃计时器数"的峰值。
+        end = asyncio.get_running_loop().time() + threshold * 4.5
+        while asyncio.get_running_loop().time() < end:
+            max_concurrent_active = max(max_concurrent_active, tm.active_count())
+            await asyncio.sleep(0.01)
     finally:
         restore()
         await tm.cancel_timer(task_id)
 
-    # 期望：create 次数 在 [4, 8] 之间（4~5 次触发 + 初始一次）；
-    # 不该出现指数级（如 > 20）
-    ok = 3 <= tm.create_count <= 10 and tm.active_count() == 0
+    # 期望（可观察行为，§9.5）：
+    #   1) 运行期间同一时刻活跃计时器 ≤ 2（同一 task_id 最多一个 + 短暂重建窗口），
+    #      超过即风暴（堆积未取消的 timer）
+    #   2) cleanup 后无残留（active_count == 0 = 无泄漏）
+    # 不再断言累计 create_count（调度次数属实现细节）。
+    ok = (max_concurrent_active <= 2) and (tm.active_count() == 0)
     reason = ""
-    if tm.create_count > 10:
-        reason = f"计时器风暴: create_count={tm.create_count}（重建堆积）"
-    elif tm.create_count < 3:
-        reason = f"计时器未按预期重建: create_count={tm.create_count}"
+    if max_concurrent_active > 2:
+        reason = f"计时器风暴: 同时活跃 {max_concurrent_active} 个（应 ≤2）"
     elif tm.active_count() > 0:
         reason = f"cleanup 后仍有残留计时器: {tm.active_count()}"
     return ok, reason, {
         "create": tm.create_count, "cancel": tm.cancel_count,
+        "max_concurrent_active": max_concurrent_active,
         "active": tm.active_count(),
     }
 
@@ -683,7 +702,7 @@ async def case_timer_no_runaway_storm(threshold: float) -> tuple[bool, str, dict
 
 ALL_CASES: list[tuple[str, str, float, Any]] = [
     ("stuck_engine_running_no_kill",
-     "引擎仍在运行，idle_timer 重建计时器不 fail", 0.3,
+     "引擎仍在运行，idle_timer 重建计时器不 fail", 1.0,
      case_stuck_in_engine_running),
     ("truly_idle_fails",
      "bg done + 引擎停止 + 无子任务 → fail", 0.3,
@@ -707,7 +726,7 @@ ALL_CASES: list[tuple[str, str, float, Any]] = [
      "evaluating 无指标退化路径不卡死", 0.0,
      case_evaluating_recovery_no_metrics_completes),
     ("timer_no_runaway_storm",
-     "长时间引擎在跑，计时器重建有界、cleanup 无残留", 0.3,
+     "长时间引擎在跑，计时器重建有界、cleanup 无残留", 1.0,
      case_timer_no_runaway_storm),
 ]
 

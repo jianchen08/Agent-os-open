@@ -51,7 +51,10 @@ jobs:
           cache: pip
 
       - name: Install Ruff
-        run: pip install "ruff==0.15.20"
+        # 精确锁 ruff 版本以稳定 lint 门禁；-e ".[dev]" 补齐其余 dev 依赖。
+        run: |
+          pip install "ruff==0.15.20"
+          pip install -e ".[dev]"
 
       - name: Ruff Lint
         run: |
@@ -120,7 +123,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install "mypy==2.1.0"
-          pip install -e ".[dev]" || pip install pyyaml rich aiohttp pydantic
+          pip install -e ".[dev]"
 
       - name: mypy Baseline Check
         run: |
@@ -143,9 +146,8 @@ jobs:
           cache: pip
 
       - name: Install Dependencies
-        run: |
-          pip install -e ".[dev]" || pip install pytest pytest-asyncio
-          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema
+        # -e ".[dev]" 已含 pytest/pytest-asyncio 及全部主依赖，无需手拼列表兜底。
+        run: pip install -e ".[dev]"
 
       - name: Create Reports Directory
         run: mkdir -p reports
@@ -221,58 +223,18 @@ jobs:
           # - integration/e2e（需真实环境/长耗时）
           # - media/ASR/ComfyUI/PGVector（需外部服务）
           # - docker 相关（需 Docker daemon）
-          # 每测试 30 秒超时，防止挂起阻塞 CI。
-          pip install pytest-timeout -q
-          # 第 4 批次：散落测试。这些测试历史游离于 CI，部分有 pre-existing 失败
-          # （配置/接口漂移），用 || true 让失败不阻塞 CI 门禁，但报告仍可见。
-          # 后续逐个修复后，这些测试会自然转绿。
-          python -m pytest tests/test_*.py tests/test_external_tools/ tests/integration/ \
-            --ignore=tests/test_cross_domain_discovery.py \
-            --ignore=tests/test_directory_generator.py \
-            --ignore=tests/test_memory_metrics.py \
-            --ignore=tests/test_integration.py \
-            --ignore=tests/test_pipeline_integration.py \
-            --ignore=tests/test_external_project_e2e.py \
-            --ignore=tests/test_new_project_e2e.py \
-            --ignore=tests/test_rag_integration.py \
-            --ignore=tests/test_external_chat.py \
-            --ignore=tests/test_asr_service.py \
-            --ignore=tests/test_media_provider.py \
-            --ignore=tests/test_media_review.py \
-            --ignore=tests/test_media_review_service.py \
-            --ignore=tests/test_pgvector_store.py \
-            --ignore=tests/test_isolation_container_self_heal.py \
-            --ignore=tests/test_isolation_docker_timeout.py \
-            --ignore=tests/test_isolation_prune_throttle.py \
-            --continue-on-collection-errors \
-            --timeout=30 --timeout-method=thread \
-            --tb=line \
-            --no-header \
-            -q \
-            "${DESELECT_ARGS[@]}" \
-            2>&1 || echo "⚠️ 第4批次有失败（pre-existing），见上方报告"
+          # 每测试 30 秒超时，防止挂起阻塞 CI（pytest-timeout 已在 [dev] 依赖）。
+          # 第 4 批次：散落测试（tests/test_*.py + integration + test_external_tools）。
+          # 历史游离于 CI，部分有 pre-existing 失败（配置/接口漂移，多为
+          # pytest-timeout 的 --timeout=30 打断的单测）。原先用 `|| true` 容错——
+          # 完全不约束失败数增长。现改为基线锁：
+          # 失败数 > .github/test-batch-baseline.txt 的基线 → CI 红（拦截增长）；
+          # 失败数 ≤ 基线 → CI 绿（允许 pre-existing 持平，鼓励逐步修复后收紧）。
+          # 基线初值基于真实 CI 数据（见 baseline 文件头），含 +1 余量防 Timeout 抖动。
+          python scripts/check_test_batch_baseline.py --batch 4
           # 第 5 批次：tests/suites/ 下未纳入的功能套件测试（约 1000 测试）。
-          # 排除 e2e（需真实 WebSocket）、llm（需真实 API key）。
-          # 这批测试历史游离，部分有 pre-existing 失败，用 || true 容错。
-          python -m pytest \
-            tests/suites/agent \
-            tests/suites/cli \
-            tests/suites/m6_plugins \
-            tests/suites/pipeline \
-            tests/suites/stage \
-            tests/suites/task \
-            tests/suites/tools \
-            tests/suites/websocket \
-            tests/suites/test_plugin_type_slot.py \
-            tests/suites/memory/ \
-            tests/suites/plugins/ \
-            --continue-on-collection-errors \
-            --timeout=30 --timeout-method=thread \
-            --tb=line \
-            --no-header \
-            -q \
-            "${DESELECT_ARGS[@]}" \
-            2>&1 || echo "⚠️ 第5批次有失败（pre-existing），见上方报告"
+          # 排除 e2e（需真实 WebSocket）、llm（需真实 API key）。同样走基线锁。
+          python scripts/check_test_batch_baseline.py --batch 5
 
       - name: Generate Test Report
         if: always()
@@ -289,6 +251,43 @@ jobs:
             reports/test_report.json
             reports/test_report.html
           retention-days: 14
+
+  # ── 阶段 3a: 时序不变量门禁（timing，§9.4）──────────────────
+  # 独立 stage 专门跑 @pytest.mark.timing 用例：断言关键时序不变量
+  # （事件顺序/间隔/超时边界/资源回收），破坏不变量的改动在 CI 阶段即拦截。
+  # 与 test job 隔离运行，避免真实延迟影响主测试套件稳定性。
+  # §9.4 铁律：不带 continue-on-error，不带 || true，失败即拦截合并。
+  timing:
+    name: Timing Invariants
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run Timing Invariant Tests
+        env:
+          PYTHONPATH: src
+        run: |
+          echo "━━━ Timing Invariant Tests (§9.4 门禁) ━━━"
+          python -m pytest -m timing \
+            tests/pipeline \
+            tests/unit \
+            tests/soak \
+            --tb=long \
+            --no-header \
+            -q \
+            --timeout=120 --timeout-method=thread \
+            2>&1
 
   # ── 阶段 3b: E2E 测试（WS 真实链路）─────────────────────────
   # 单独 job：需要 TestClient 启动完整 app（含 WS），较慢且重，与纯单测分离。
@@ -310,9 +309,8 @@ jobs:
           cache: pip
 
       - name: Install Dependencies
-        run: |
-          pip install -e ".[dev]" || pip install pytest pytest-asyncio httpx
-          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema uvicorn fastapi
+        # -e ".[dev]" 已含全部主依赖（httpx/uvicorn/fastapi 均在 [project] dependencies）。
+        run: pip install -e ".[dev]"
 
       - name: Run E2E Tests (WS real link)
         env:
@@ -353,9 +351,8 @@ jobs:
           cache: pip
 
       - name: Install Dependencies
-        run: |
-          pip install -e ".[dev]" || pip install pytest pytest-asyncio httpx
-          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema uvicorn fastapi
+        # -e ".[dev]" 已含全部主依赖（httpx/uvicorn/fastapi 均在 [project] dependencies）。
+        run: pip install -e ".[dev]"
 
       - name: Run Review B-Path Full E2E
         env:
@@ -400,9 +397,8 @@ jobs:
           cache: pip
 
       - name: Install Dependencies
-        run: |
-          pip install -e ".[dev]" || pip install pytest pytest-asyncio
-          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema psutil
+        # -e ".[dev]" 已含 pytest/pytest-asyncio、psutil（在 [project] dependencies）及全部 dev 工具。
+        run: pip install -e ".[dev]"
 
       - name: Timeout Decision Sim (single-shot correctness)
         env:
@@ -459,9 +455,8 @@ jobs:
           cache: pip
 
       - name: Install Dependencies
-        run: |
-          pip install -e ".[dev]" || pip install pytest pytest-asyncio
-          pip install pyyaml rich aiohttp watchdog litellm pydantic jsonschema psutil
+        # -e ".[dev]" 已含 pytest/pytest-asyncio、psutil（在 [project] dependencies）及全部 dev 工具。
+        run: pip install -e ".[dev]"
 
       - name: Soak Run (nightly profile, 2000 iters)
         env:
@@ -508,6 +503,11 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
+      - name: Unit Tests (vitest)
+        working-directory: frontend
+        run: npm run test
+        continue-on-error: false
+
       - name: Production Build
         working-directory: frontend
         run: npm run build
@@ -542,7 +542,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install Backend Dependencies
-        run: pip install -e ".[dev]" || pip install -r requirements.txt
+        run: pip install -e ".[dev]"
 
       - name: Install Frontend Dependencies
         working-directory: frontend
@@ -682,7 +682,7 @@ jobs:
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, test, e2e, soak-smoke, soak-nightly, llm-e2e, frontend-build, frontend-e2e, frontend-test]
+    needs: [lint, typecheck, test, timing, e2e, soak-smoke, soak-nightly, llm-e2e, frontend-build, frontend-e2e, frontend-test]
     if: always()
     steps:
       - name: Download All Artifacts
@@ -697,6 +697,7 @@ jobs:
           echo "Lint:         ${{ needs.lint.result }}"
           echo "Type Check:   ${{ needs.typecheck.result }}"
           echo "Tests:        ${{ needs.test.result }}"
+          echo "Timing:       ${{ needs.timing.result }}"
           echo "E2E Tests:    ${{ needs.e2e.result }}"
           echo "Soak (smoke): ${{ needs.soak-smoke.result }}"
           echo "Soak (nightly): ${{ needs.soak-nightly.result }}"

@@ -81,7 +81,10 @@ async def run_iteration(
         IterationAction.CONTINUE 继续循环；IterationAction.BREAK 中断循环。
     """
 
-    # 1. 消费待处理通知（tool_execute 时由统一函数内部跳过；前置追加到现有 user_input）
+    # 1. 消费待处理通知。每轮迭代开头检查队列，队列有什么就消费什么（按时序）。
+    # tool_execute 轮 consume 内部跳过（保护 tool_call 配对）。
+    # consume 内部统一做 emit_finish 流式分割（推送通知前关当前流），保证通知排在
+    # 旧 AI 气泡之后、新 AI 气泡之前。
     await consume_pending_notifications(engine, state, prepend=True)
 
     # 1.5 流式续接：若上一轮 apply_route 的 next_llm 分支已 emit_finish 关流（注入分割），
@@ -156,7 +159,26 @@ async def consume_pending_notifications(
     *,
     prepend: bool = False,
 ) -> bool:
-    """统一的待处理通知注入入口（state 注入 + 前端推送的唯一函数）。
+    """统一的待处理通知注入入口（state 注入 + 前端推送 + 流式分割的唯一函数）。
+
+    将 drain_inject_queue 取出的 (message, source) 过滤空白后注入 state，
+    按 source 分流：
+
+    - source=user（用户注入）：写 user_input + messages。
+      track 插件据此落 type="user" 记录（历史接口正确返回用户气泡）。
+    - source!=user（系统通知，如子任务完成）：只写 messages（喂 LLM），
+      不写 user_input（track 不落 type=system 记录，避免历史接口二次渲染）；
+      并在此推送 system_notification —— 这是系统通知的【唯一推送点】。
+
+    ★ 流式分割（fix_20260705_notification_after_reply）：
+    推送 system 通知前，如果当前 AI 流还开着（_stream_started=True），先 emit_finish
+    关闭它（落库为独立气泡）。这样通知排在旧 AI 气泡和新 AI 气泡之间。
+    下一轮 run_iteration 1.5 会 emit_start 开新流。
+
+    所有 consume 调用点（apply_route next_llm、_handle_target_end、handle_no_route_signals）
+    都走这个统一函数，注入分割逻辑只此一处实现，不会遗漏。
+
+    core_type 强制 llm_call（在调用方设置）；tool_execute 时由调用方跳过（不调本函数）。
 
     将 drain_inject_queue 取出的 (message, source) 过滤空白后注入 state，
     按 source 分流：
@@ -225,6 +247,18 @@ async def consume_pending_notifications(
         # 也不进 user_input 让 track 落库二次渲染。
         _bridge = _get_bridge_for_pipeline(engine.pipeline_id)
         if _bridge is not None:
+            # ★ 流式分割：推送 system 通知前，如果当前 AI 流还开着，先 emit_finish 关闭它。
+            # 这样通知排在旧 AI 气泡之后、新 AI 气泡之前（下一轮 run_iteration 1.5 emit_start 开新流）。
+            # emit_finish 有幂等保护（_stream_started=False 时跳过）。
+            # 这是统一的分割点 —— 所有 consume 调用点（apply_route、_handle_target_end、
+            # handle_no_route_signals）都自动获得分割能力，不会遗漏。
+            if getattr(_bridge, "_stream_started", False):
+                try:
+                    await _bridge.emit_finish(state)
+                    logger.info("[Engine] consume 流式分割：emit_finish 关闭当前 AI 流（推送通知前）")
+                except Exception as exc:
+                    logger.warning("[Engine] consume 流式分割 emit_finish 失败（非致命）: %s", exc)
+
             for _content, _source in _system_notifs:
                 try:
                     await _bridge.emit_notification(_content, source=_source, level="info")

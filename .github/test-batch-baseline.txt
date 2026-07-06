@@ -1,0 +1,19 @@
+# 散落测试批次失败数基线（只许减不许增，见 scripts/check_test_batch_baseline.py）
+#
+# 对应 ci.yml test job 第 4/5 批次（原 `|| true` 容错替换为基线锁）：
+#   - batch4: tests/test_*.py + tests/test_external_tools/ + tests/integration/
+#   - batch5: tests/suites/{agent,cli,m6_plugins,pipeline,stage,task,tools,websocket} + memory/plugins
+#
+# ⚠️ 严格规则：只能【减】不能【增】。
+#   - 减（鼓励）：修复了 pre-existing 失败后，运行
+#     `python scripts/check_test_batch_baseline.py --batch N --init` 重写更低的值，
+#     或手动把数值改小，收紧门禁。
+#   - 增（禁止）：新失败不允许调大基线逃避，必须修复。
+#
+# 数据来源：GitHub Actions 运行 28743859702（Python 3.11/ubuntu，最近一次 push 成功 CI）。
+#   真实失败数：batch4=2、batch5=2（均为 pytest-timeout 的 --timeout=30 打断的单测，
+#   pytest summary 行未输出，由 scripts/check_test_batch_baseline.py 的 progress+
+#   Timeout 回退计数得出）。基线值取 真实值+1 余量，防 CI 慢机波动导致 Timeout 数
+#   抖动误红（基线锁只许减，后续修复或稳定后逐步收紧）。
+batch4_failures=3
+batch5_failures=3
