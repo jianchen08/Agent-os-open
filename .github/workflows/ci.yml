@@ -503,10 +503,11 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
-      - name: Unit Tests (vitest)
-        working-directory: frontend
-        run: npm run test
-        continue-on-error: false
+      # vitest 单测不在此 job 跑：前端有 109 个 pre-existing 失败，由
+      # frontend-test (baseline locked) job 用基线锁统一管理（只许减不许增）。
+      # 此 job 曾用 continue-on-error: false 跑 npm run test，导致 109 个
+      # pre-existing 失败随机让本 job 红（前几次靠 vitest 退出码差异侥幸绿）。
+      # 本 job 聚焦"构建不能破坏"的底线：typecheck + production build。
 
       - name: Production Build
         working-directory: frontend

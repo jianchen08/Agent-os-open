@@ -9,6 +9,7 @@
 用法（CI 或本地）:
     python scripts/check_frontend_baseline.py
 """
+
 from __future__ import annotations
 
 import re
@@ -22,13 +23,18 @@ BASELINE_FILE = ROOT / ".github" / "frontend-baseline.txt"
 
 
 def count_vitest_failures() -> int:
-    """运行 vitest 并解析失败测试数。"""
+    """运行 vitest 并解析失败测试数。
+
+    vitest 非零退出是正常的（有失败用例时退出码=1）。只有当连总结行都
+    解析不到时才视为异常（vitest 未正常启动/崩溃），此时打印原始输出
+    并抛错，而非静默返回 0（旧逻辑的 0 会让基线锁误判为"全部通过"）。
+    """
     result = subprocess.run(
         ["npx", "vitest", "run"],
         capture_output=True,
         text=True,
         cwd=FRONTEND,
-        shell=True,
+        check=False,
     )
     output = result.stdout + result.stderr
     # 去除 ANSI 颜色码
@@ -36,7 +42,13 @@ def count_vitest_failures() -> int:
     # 精确匹配总结行 "Tests  109 failed | 737 passed (846)"
     # 注意区分 "Test Files  N failed" 和 "Tests  N failed"，取后者
     matches = re.findall(r"Tests\s+(\d+)\s+failed", output)
-    return int(matches[-1]) if matches else 0
+    if matches:
+        return int(matches[-1])
+    # 解析不到总结行：vitest 未正常启动。打印原始输出辅助排查，报错而非返回 0。
+    print(f"⚠️ vitest 输出未匹配到 'Tests N failed' 总结行（returncode={result.returncode}）")
+    print("原始输出尾部：")
+    print(output[-1500:] if output.strip() else "(空输出)")
+    raise RuntimeError("vitest 未输出总结行，无法解析失败数（检查 vitest 是否正常启动）")
 
 
 def count_eslint_errors() -> int:
@@ -46,12 +58,19 @@ def count_eslint_errors() -> int:
         capture_output=True,
         text=True,
         cwd=FRONTEND,
-        shell=True,
+        check=False,
     )
     output = result.stdout + result.stderr
     # 匹配 "✖ 853 problems (33 errors, 820 warnings)"
     m = re.search(r"\((\d+)\s+errors?,", output)
-    return int(m.group(1)) if m else 0
+    if m:
+        return int(m.group(1))
+    # eslint 退出码 0（无 error）时无 "(N errors)" 段，返回 0 正确。
+    # 非零退出又解析不到时打印输出辅助排查。
+    if result.returncode != 0 and "problems" in output:
+        print("⚠️ eslint 非零退出但未匹配 errors 数，原始输出尾部：")
+        print(output[-1000:])
+    return 0
 
 
 def read_baseline() -> tuple[int, int]:
@@ -84,7 +103,7 @@ def main() -> int:
     print("运行 ESLint...")
     cur_e = count_eslint_errors()
 
-    print(f"\n         基线    当前")
+    print("\n         基线    当前")
     print(f"vitest:  {base_v:<6}  {cur_v}")
     print(f"eslint:  {base_e:<6}  {cur_e}")
 
@@ -111,7 +130,7 @@ def main() -> int:
         print("（基线不自动更新：本地与 CI 环境可能存在差异，请在 CI 验证后手动更新 .github/frontend-baseline.txt）")
         return 0
 
-    print(f"\n✅ 与基线持平，无新增失败")
+    print("\n✅ 与基线持平，无新增失败")
     return 0
 
 
