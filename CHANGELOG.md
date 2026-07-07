@@ -34,14 +34,14 @@
 #### 记忆系统
 - **情景记忆（EPISODE）** —— 自动记录每轮对话
 - **语义记忆（SEMANTIC）** —— 用户偏好、项目决策持久化
-- **三种检索方式** —— VECTOR（向量）/ KEYWORD（关键词）/ TAGWAVE（标签浪潮）
-- **三种注入方式** —— FULL（全量）/ RETRIEVAL（按需）/ SUMMARY（摘要）
+- **基础检索 / 注入能力** —— 当前版本提供按需检索与按需注入；更丰富的多种检索方式 × 多种注入方式组合 **计划在下个版本正式上线**，详见 [ROADMAP.md](ROADMAP.md)
 
 #### 复盘系统
-- **6 层级架构** —— Agent 配置 / 工具入口 / 复盘引擎 / 服务编排 / 清理引擎 / 设计文档
-- **双触发机制** —— 阈值触发（500 条记录）/ 间隔触发（7 天）/ 手动触发（agent 或用户）
+- **触发机制** —— 阈值触发（500 条记录）/ 间隔触发（7 天）/ 手动触发（agent 或用户）
 - **双路径降级** —— LLM 深度复盘管道优先，失败时降级到 ReviewEngine
-- **实施位置** —— `src/memory/maintenance/{review_engine,service,cleanup_engine}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml` + `docs/design/复盘系统设计.md`
+- **实施位置** —— `src/memory/maintenance/{review_engine,service}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml` + `docs/design/复盘系统设计.md`
+
+> 注：本版本复盘系统聚焦"触发 + 复盘 + 沉淀"，记忆侧的容量治理归入记忆系统演进（见 [ROADMAP.md](ROADMAP.md)），不在复盘模块中描述。
 
 #### 多通道接入
 - **Web UI** —— React 19 + @lobehub/ui
@@ -59,7 +59,7 @@
 - **8 套主题** —— 5 套编译期预设（深色 / 浅色 / 深空指挥台 / 海洋微风 / 高对比度）+ 3 套动态主题（林间薄雾 / 薰衣草田 / 日落晚霞，由后端无状态清单 `frontend/public/themes/*.json` 发现）
 - **全量配置可视化** —— 后端 YAML 字段自动映射表单
 - **实时消息系统** —— WebSocket 流式响应 + 思考态展示
-- **结构化交互** —— 审批弹窗 / Schema 表单（投票面板 / 媒体时间线 / 思考模式开关属 0.2.0+ 规划，尚未实现）
+- **结构化交互** —— 审批弹窗（投票面板 / 媒体时间线 / 思考模式开关属 0.2.0+ 规划，尚未实现）
 
 #### MCP 协议
 - **完整 MCP 兼容** —— 支持 Model Context Protocol 标准

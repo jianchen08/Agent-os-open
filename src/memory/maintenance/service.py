@@ -408,6 +408,7 @@ class MemoryMaintenanceService:
             # 3. 逐批串行起复盘管道
             total_reviewed = 0
             produced_reports = 0
+            report_paths: list[str] = []
             for idx, batch in enumerate(batches, start=1):
                 child_pipeline_id, launched = await self._try_launch_review_agent(batch)
                 if not launched:
@@ -421,21 +422,39 @@ class MemoryMaintenanceService:
 
                 report_text = await self._await_child_report(child_pipeline_id)
                 if report_text:
-                    await self._persist_review_result(child_pipeline_id, report_text)
+                    written_path = await self._persist_review_result(child_pipeline_id, report_text)
                     await self._mark_targets_reviewed(batch)
                     total_reviewed += len(batch)
                     produced_reports += 1
+                    if written_path:
+                        report_paths.append(written_path)
                 else:
                     # 有执行但未产出报告：标记为 failed
                     await self._mark_targets_reviewed(batch, failed=True)
 
-            # 4. 通知父管道：本次复盘管道数 + 目标数 + 剩余 pending
+            # 4. 通知父管道：本次复盘管道数 + 目标数 + 剩余 pending + 产出报告文件名
             remaining = self._count_remaining_pending()
+            summary = (
+                f"复盘完成：本次启动 {len(batches)} 个复盘管道，产出 {produced_reports} 份报告，"
+                f"复盘 {total_reviewed} 个目标。还剩 {remaining} 个 pending 待复盘。"
+            )
+            if report_paths:
+                # 列出报告文件名（相对路径更易读），让用户知道去读哪个文件
+                try:
+                    import os as _os  # noqa: PLC0415
+
+                    cwd = _os.getcwd()
+                    rel_paths = [
+                        _os.path.relpath(p, cwd) if _os.path.isabs(p) else p
+                        for p in report_paths
+                    ]
+                except Exception:
+                    rel_paths = report_paths
+                summary += "\n\n详细报告：\n" + "\n".join(f"- {p}" for p in rel_paths)
             await self._notify_parent(
                 parent_pipeline_id,
                 "completed",
-                f"复盘完成：本次启动 {len(batches)} 个复盘管道，产出 {produced_reports} 份报告，"
-                f"复盘 {total_reviewed} 个目标。还剩 {remaining} 个 pending 待复盘。",
+                summary,
             )
 
         except Exception as exc:
@@ -625,6 +644,58 @@ class MemoryMaintenanceService:
             pass
         return origin
 
+    def _collect_agent_constraints(self, agent_ids: list[str]) -> str:
+        """收集被复盘 agent 的硬约束 + 软约束，拼成一段供 review_agent 对照检查。
+
+        用于「指令遵循」维度判断：review_agent 需知道被复盘 agent 的体系约束，
+        才能判断其执行是否违反硬约束。agent_id 为空或配置缺失时跳过，不阻断复盘。
+
+        Args:
+            agent_ids: 待复盘管道涉及的 agent_id 列表（可能含重复和空值）
+
+        Returns:
+            拼好的约束块文本；无任何可用约束时返回空字符串（消息里会留空行，无害）
+        """
+        # 去重 + 去空，保持稳定顺序
+        seen: set[str] = set()
+        unique_ids = [aid for aid in agent_ids if aid and aid not in seen and not seen.add(aid)]
+        if not unique_ids:
+            return ""
+
+        try:
+            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+
+            registry = get_global_agent_registry_sync()
+        except Exception as exc:
+            logger.warning("[Maintenance] 获取 agent 注册表失败，跳过约束收集: %s", exc)
+            return ""
+
+        blocks: list[str] = []
+        for agent_id in unique_ids:
+            try:
+                cfg = registry.get(agent_id)
+            except Exception:
+                cfg = None
+            if cfg is None:
+                continue
+            hard = getattr(cfg, "hard_constraints", []) or []
+            soft = getattr(cfg, "soft_constraints", []) or []
+            if not hard and not soft:
+                continue
+            lines = [f"【{agent_id} 的体系约束】"]
+            if hard:
+                lines.append(f"硬约束（违反即问题）：")
+                lines.extend(f"- {c}" for c in hard)
+            if soft:
+                lines.append(f"软约束：")
+                lines.extend(f"- {c}" for c in soft)
+            blocks.append("\n".join(lines))
+
+        if not blocks:
+            return ""
+
+        return "被复盘 Agent 的体系约束（对照检查「指令遵循」维度用）：\n\n" + "\n\n".join(blocks)
+
     async def _try_launch_review_agent(
         self,
         targets: list[dict[str, Any]],
@@ -690,15 +761,26 @@ class MemoryMaintenanceService:
                     + ")"
                     for t in targets
                 )
+
+                # 收集被复盘 agent 的体系约束（硬约束 + 软约束），供 review_agent
+                # 对照检查「指令遵循」维度。拿不到配置的 agent 跳过，不阻断复盘。
+                constraints_block = self._collect_agent_constraints(
+                    [t.get("agent_id", "") for t in targets]
+                )
+
                 content = (
                     f"[工具触发复盘] 请分析以下管道的执行记录，产出经验和改进建议。\n\n"
                     f"待复盘管道列表（先按 agent 分组、再按 status 分组，共 {len(targets)} 个）：\n{targets_str}\n\n"
+                    f"{constraints_block}\n\n"
                     f"分析要求：\n"
                     f"1. 先用 read_execution_detail(level=skeleton, pipeline_run_id=...) 逐个查看骨架；\n"
                     f"2. 【必须】分析每个管道时，先看用户最初下达的指令（type=user 的记录）"
                     f"和后续的人类交互/反馈——脱离用户意图的根因分析没有意义；\n"
                     f"3. 对失败/异常的 iteration 做 5 Whys 根因分析（找根因不找症状）；\n"
-                    f"4. 【必须】每个管道各产出一份独立的复盘报告，不要合并。"
+                    f"4. 【必须】按体系约束逐项检查 4 个执行过程质量维度（wrong_tool/over_call/"
+                    f"under_call/instruction_compliance），对照上方附带的「被复盘 Agent 的体系约束」"
+                    f"判断是否违反硬约束；\n"
+                    f"5. 【必须】每个管道各产出一份独立的复盘报告，不要合并。"
                     f"多管道时用 JSON 数组包裹 N 份报告："
                     f"[\n  {{...管道A的 pipeline_run_id/summary/experiences/improvements...}},\n"
                     f"  {{...管道B的...}}\n]\n"
@@ -779,10 +861,15 @@ class MemoryMaintenanceService:
         except Exception:
             return ""
 
-    async def _persist_review_result(self, child_pipeline_id: str, report_text: str) -> None:
-        """将复盘报告持久化到 KnowledgeService + Markdown 文件。"""
+    async def _persist_review_result(self, child_pipeline_id: str, report_text: str) -> str | None:
+        """将复盘报告持久化到 KnowledgeService + Markdown 文件。
+
+        Returns:
+            写入的 Markdown 报告文件绝对路径；report_text 为空或文件写入失败时返回 None。
+            调用方（_run_llm_review_task）据此收集文件名列进通知。
+        """
         if not report_text:
-            return
+            return None
 
         # 1. 写入 KnowledgeService
         try:
@@ -800,6 +887,7 @@ class MemoryMaintenanceService:
             logger.warning("[Maintenance] 写入 KnowledgeService 失败: %s", exc)
 
         # 2. 写 review_report_{id}.md 文件
+        written_path: str | None = None
         try:
             import os as _os  # noqa: PLC0415
             from datetime import datetime as _dt  # noqa: PLC0415
@@ -816,11 +904,14 @@ class MemoryMaintenanceService:
                     f"---\n\n{report_text}\n"
                 )
             logger.info("[Maintenance] review_report.md 已写入: %s", _path)
+            written_path = _path
         except Exception as exc:
             logger.warning("[Maintenance] 写报告文件失败: %s", exc)
 
         # 3. 更新经验统计
         self._stats["total_experiences_saved"] += 1
+
+        return written_path
 
     async def _notify_parent(
         self,

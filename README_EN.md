@@ -21,10 +21,10 @@
 
 ### Core Innovations
 
-- 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Change a prompt without restarting (hot_swap supported)
+- 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns (e.g. placing time-of-day rules at stable positions to preserve prompt-cache hits) and reorders injected fragments by usage frequency to improve cache-hit rate. Change a prompt without restarting (`hot_swap` supports snapshot → replace → health-check → rollback-on-failure).
 - 🔄 **Self-Evolving Closed Loop** — From requirement clarification → task dispatch → execution validation → evaluation feedback, every step forms a closed loop
 - 🔌 **Plugin-based Pipeline Architecture** — 6 routing signals + pause/resume + cross-pipeline routing
-- 🧠 **Multi-layer Memory** — Episodic (EPISODE) + Semantic (SEMANTIC), with 3 retrieval methods × 3 injection methods
+- 🧠 **Multi-layer Memory** — Episodic (EPISODE) + Semantic (SEMANTIC), retrieved on demand and injected as needed. The richer set of multiple injection methods and multiple retrieval methods is **scheduled to ship in the next release** — see [ROADMAP.md](ROADMAP.md).
 - 🛠️ **40+ Built-in Tools** — Files, Shell, code search, browser, network, memory, media generation, IDE integration (41 actual tool.py implementations)
 - 🌐 **Multi-channel Access** — Web, CLI, DingTalk, Feishu, QQ, WeCom, HTTP API share the same kernel
 - 📐 **MCP Compatible** — Full support for Model Context Protocol
@@ -52,7 +52,7 @@ Almost every behavior can be customized via YAML/config files without changing c
 All tools follow a unified interface contract (`name` / `when_to_use` / `when_not_to_use` / `input_schema` / `examples` / `caveats`), supporting ABORT / SKIP / FALLBACK / RETRY error strategies. **Currently 41 built-in tools** (including MCP external tool integration).
 
 ### 3. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
-Streaming response + real-time thinking display + proactive clarification + approval interaction + Schema forms.
+Streaming response + real-time thinking display + proactive clarification + approval interaction.
 
 > **Planned (0.2.0+)**: Voting panels, media timelines, thinking-mode toggle and other interaction enhancements are not yet implemented in this version. See [ROADMAP.md](ROADMAP.md).
 
@@ -64,6 +64,9 @@ For multi-stage tasks with deliverables ("develop an App", "write a novel", "mak
 
 ### 6. Trigger System — Unattended Operation
 Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itself.
+
+### 7. Workspace Isolation & Worktree Mechanism
+Each task runs in its own **isolated workspace** (folder-level isolation by default; Docker isolation for higher-risk execution paths), and multi-task scenarios use the **worktree** mechanism to fork off a dedicated worktree directory per task. This guarantees that concurrent tasks do not collide on the filesystem and that any side-effect can be reviewed or rolled back at the worktree boundary.
 
 ---
 
@@ -131,7 +134,7 @@ For developers who skip the scripts and need fine-grained control.
 pip install -e .              # via pyproject.toml (recommended)
 pip install -r requirements.txt  # via requirements.txt
 
-# 2. Start Redis (via Docker, port aligned with .env)
+# 2. Start Redis (Docker, port aligned with .env)
 docker run -d --name agent-os-redis -p 6480:6379 \
     redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
 
@@ -139,22 +142,22 @@ docker run -d --name agent-os-redis -p 6480:6379 \
 PYTHONPATH=src python -m channels.websocket.app_factory
 # Backend runs at http://localhost:8988
 
-# 4. Start frontend (another terminal)
+# 4. Start frontend (separate terminal)
 cd frontend
 npm install
 npm run dev
 # Frontend dev server runs at http://localhost:5188
 ```
 
-> **About CLI mode**: `python run.py demo` (echo) or `python run.py real` (real LLM) starts a command-line interaction, not a web service.
+> **About CLI mode**: `python run.py demo` (echo) or `python run.py real` (real LLM) starts a CLI session — it does NOT start the web services.
 
 ---
 
-## 📖 Documentation
+## 📖 Documentation Navigation
 
 | Document | Description |
 |----------|-------------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture details |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture deep-dive |
 | [ROADMAP.md](ROADMAP.md) | Version roadmap |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |
@@ -162,42 +165,31 @@ npm run dev
 
 ---
 
-## 🌍 Mirrors
+## 🌍 Mirror Repositories
 
-For better access from China, this project is also maintained on:
+For users in mainland China, this project is also mirrored at:
 
-- **GitHub** (Primary): `https://github.com/AI-agent-system/Agent-os`
-- **Gitee** (Mirror): `https://gitee.com/agentos/agent-os`
+- **GitHub** (primary): `https://github.com/AI-agent-system/Agent-os`
+- **Gitee** (mirror): `https://gitee.com/agentos/agent-os`
 
 ---
 
 ## 🤝 Contributing
 
-All forms of contribution are welcome — submitting Issues, PRs, improving docs, sharing use cases. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions of any form are welcome — Issues, PRs, docs, use-case sharing. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 ## 📄 License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+This project is licensed under [Apache License 2.0](LICENSE).
 
 ---
 
-## 🌟 Star History
+## ✨ Star History
 
-If this project helps you, please star it ⭐️ to support us!
-
----
-
-> **Lingxi, named after "spirit energy flowing like tides"** — We hope AI Agents can possess self-regulating, self-evolving vitality like tides.
+If this project helps you, please star ⭐️ to support us!
 
 ---
 
-## 📊 Project Status (Based on Actual Code, 2026-06-23)
-
-- **Python code**: ~175K LOC (including `src/` and `tests/`)
-- **Frontend code**: ~92K LOC (`frontend/src/`)
-- **Built-in tools**: 41 (with `tool.py` in `src/tools/builtin/`)
-- **Real channels**: 6 (CLI / DingTalk / Feishu / QQ / WeCom / WebSocket)
-- **Modules**: 33 (subdirectories under `src/`)
-- **Test files**: 335 (under `tests/`)
+> **"Lingxi" (灵汐) — from "spiritual energy like tides, endlessly renewed"** — We hope AI Agents can self-regulate and self-evolve like tides.
