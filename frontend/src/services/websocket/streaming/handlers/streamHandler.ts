@@ -13,17 +13,24 @@ import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStr
 
 const _debugLogger = loggers.websocket
 
-// ── RAF 批处理：合并同一帧内的多个 stream_chunk 为单次 store 更新 ──
+// ── RAF 批处理：合并同一帧内的多个 chunk 为单次 store 更新 ──
+// stream_chunk（正文）和 thinking_chunk（思考）共用同一套缓冲 + RAF，
+// 避免每个 chunk 同步触发 store 更新 → React 重渲染阻塞主线程。
+// 思考 chunk 若同步写入，每个都阻塞一帧，导致思考"匀速逐字慢"且正文
+// chunk 积压在 buffer 中等主线程空闲才一次性 flush（"一股脑全渲染"）。
 
-/** 每个 (pipelineId, messageId) 对应的待刷写 chunk 缓冲 */
+type ChunkPartType = 'text' | 'thinking'
+
+/** 每个 (pipelineId, messageId, partType) 对应的待刷写 chunk 缓冲 */
 const _chunkBuffer = new Map<string, {
   chunks: string[]
   pipelineId: string
   messageId: string
+  partType: ChunkPartType
 }>()
 let _flushRafId: number | null = null
 
-/** 将缓冲区的 chunk 合并后一次性写入 store。 通过 parts[] 路径写入：找到 streaming 状态的 text part 并追加内容。 */
+/** 将缓冲区的 chunk 合并后一次性写入 store。 按 partType 路由到 text/thinking part。 */
 function _flushChunks(): void {
   _flushRafId = null
   if (_chunkBuffer.size === 0) return
@@ -35,18 +42,35 @@ function _flushChunks(): void {
     const combinedContent = entry.chunks.join('')
     if (!combinedContent) continue
 
-    let partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
-    if (partIndex < 0) {
-      pipelineStore.getState().appendPart(entry.pipelineId, entry.messageId, {
-        type: 'text',
-        content: '',
-        state: 'streaming',
-        // part 渲染按数组顺序（= 追加顺序 = 接收顺序），不分配 sequence。
-      })
-      partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
-    }
-    if (partIndex >= 0) {
-      pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
+    if (entry.partType === 'thinking') {
+      // thinking part 用 findLastPartIndex 精确路由（与 thinkingHandler 一致）
+      let partIndex = pipelineStore.getState().findLastPartIndex(entry.pipelineId, entry.messageId, 'thinking')
+      if (partIndex < 0) {
+        pipelineStore.getState().appendPart(entry.pipelineId, entry.messageId, {
+          type: 'thinking',
+          content: '',
+          state: 'streaming',
+        })
+        partIndex = pipelineStore.getState().findLastPartIndex(entry.pipelineId, entry.messageId, 'thinking')
+      }
+      if (partIndex >= 0) {
+        pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
+      }
+    } else {
+      // text part 用 findStreamingPartIndex（仅匹配 text，避免误入 thinking part）
+      let partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
+      if (partIndex < 0) {
+        pipelineStore.getState().appendPart(entry.pipelineId, entry.messageId, {
+          type: 'text',
+          content: '',
+          state: 'streaming',
+          // part 渲染按数组顺序（= 追加顺序 = 接收顺序），不分配 sequence。
+        })
+        partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
+      }
+      if (partIndex >= 0) {
+        pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
+      }
     }
   }
 }
@@ -58,7 +82,19 @@ function _scheduleFlush(): void {
   }
 }
 
-/** 立即刷写缓冲区。 streamEnd / streamError 必须在 reconcile 之前调用此方法， */
+/** 缓冲一个 chunk，等待 RAF 批量刷写。 stream_chunk 和 thinking_chunk 共用。 */
+export function bufferChunk(pipelineId: string, messageId: string, content: string, partType: ChunkPartType): void {
+  const bufferKey = `${pipelineId}::${messageId}::${partType}`
+  const existing = _chunkBuffer.get(bufferKey)
+  if (existing) {
+    existing.chunks.push(content)
+  } else {
+    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId, partType })
+  }
+  _scheduleFlush()
+}
+
+/** 立即刷写缓冲区。 streamEnd / streamError / thinkingEnd 必须在 reconcile 之前调用此方法， */
 export function flushStreamChunkBuffer(): void {
   if (_flushRafId !== null) {
     cancelAnimationFrame(_flushRafId)
@@ -139,14 +175,7 @@ export function handleStreamChunk(eventData: any) {
   }
 
   // 缓冲 chunk，由 RAF 统一刷写到 store（合并同帧多个 chunk 为单次更新）
-  const bufferKey = `${pipelineId}::${messageId}`
-  const existing = _chunkBuffer.get(bufferKey)
-  if (existing) {
-    existing.chunks.push(content)
-  } else {
-    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId })
-  }
-  _scheduleFlush()
+  bufferChunk(pipelineId, messageId, content, 'text')
 }
 
 /** 处理流式结束事件 */

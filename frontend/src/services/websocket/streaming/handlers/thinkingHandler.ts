@@ -4,6 +4,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
+import { bufferChunk, flushStreamChunkBuffer } from './streamHandler'
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
 
 const _debugLogger = loggers.websocket
@@ -107,22 +108,10 @@ export function handleThinkingChunk(eventData: any) {
     ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
   }
 
-  // 通过 parts[] 统一方法向最后一个 thinking part 追加内容
-  const partIndex = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
-  if (partIndex >= 0) {
-    pipelineStore.getState().appendToPart(pipelineId, messageId, partIndex, chunk)
-  } else {
-    // thinking part 不存在（start 事件丢失），自动创建再追加
-    _debugLogger.warn(
-      `[THINKING_CHUNK] thinking part not found, auto-creating: pipeline=%s msgId=%s`,
-      pipelineId?.slice(0, 12), messageId?.slice(0, 12),
-    )
-    pipelineStore.getState().appendPart(pipelineId, messageId, {
-      type: 'thinking',
-      content: chunk,
-      state: 'streaming',
-    })
-  }
+  // 缓冲 chunk，由 RAF 统一刷写（与 stream_chunk 共用批处理机制）。
+  // 思考 chunk 若同步写入，每个都触发一次 store 更新 → React 重渲染阻塞主线程，
+  // 导致思考"匀速逐字慢"且正文 chunk 积压等主线程空闲才一次性 flush。
+  bufferChunk(pipelineId, messageId, chunk, 'thinking')
 }
 
 /** 处理思考结束事件：将最后一个 thinking part 状态置为 done */
@@ -134,6 +123,9 @@ export function handleThinkingEnd(eventData: any) {
 
   // 收到 end，清除 thinking 超时
   clearThinkingTimeout(messageId)
+
+  // 先 flush 缓冲区中残留的 thinking chunk，再标记 done，避免末尾内容丢失
+  flushStreamChunkBuffer()
 
   // 通过 parts[] 统一方法将 thinking part 状态置为 done
   const partIndex = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')

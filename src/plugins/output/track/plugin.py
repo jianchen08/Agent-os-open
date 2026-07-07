@@ -293,6 +293,9 @@ class TrackPlugin(IOutputPlugin):
         if ctx.state.get(StateKeys.ENDED, False):
             return
 
+        # 本轮注入的 source 标记（consume 写入，区分 user vs system，供 track 区分 type）
+        _inject_sources: list[str] = ctx.state.pop("_last_inject_sources", [])
+
         # -- 0. 用户消息记录 --
         user_input = ctx.state.get("user_input", "")
         if user_input and user_input != self._last_saved_user_input:
@@ -326,29 +329,29 @@ class TrackPlugin(IOutputPlugin):
                 new_content = self._extract_injected_content(user_input, self._last_saved_user_input)
                 if new_content:
                     self._last_saved_user_input = user_input
-                    # 此时 user_input 的变化只能来自 source=user 的注入消息
-                    # （系统通知 source!=user 已不写 user_input，由
-                    # consume_pending_notifications 直接推送 + 只进 messages 喂 LLM）。
-                    # 因此增量段是用户中途注入的输入，落盘记 type=user。
-                    injected_user_record = ExecutionRecordData(
+                    # 增量段可能是 user 注入或 system 通知（consume 统一写 user_input）。
+                    # 通过 _inject_sources 区分 type：含非 user source 的标 system，否则 user。
+                    _has_system = any(s != "user" for s in _inject_sources)
+                    _record_type = "system" if _has_system else "user"
+                    _record_role = "system" if _has_system else "user"
+                    injected_record = ExecutionRecordData(
                         pipeline_run_id=pipeline_run_id,
-                        type="user",
+                        type=_record_type,
                         sequence=self._next_sequence(pipeline_run_id),
                         iteration=iteration,
-                        role="user",
+                        role=_record_role,
                         content=new_content,
                         container_task_id=container_task_id or None,
                         client_message_id=ctx.state.get("client_message_id") or None,
                     )
                     try:
-                        await asyncio.to_thread(storage.save, injected_user_record)
+                        await asyncio.to_thread(storage.save, injected_record)
                         logger.debug(
-                            "Injected user content saved at iteration %d (%d chars)",
-                            iteration,
-                            len(new_content),
+                            "Injected content saved at iteration %d type=%s (%d chars)",
+                            iteration, _record_type, len(new_content),
                         )
                     except Exception:
-                        logger.exception("注入用户消息记录持久化失败")
+                        logger.exception("注入消息记录持久化失败")
 
         # -- 1. AI 回复记录（LLM Core 后写入） --
         raw_result = ctx.state.get(StateKeys.RAW_RESULT)

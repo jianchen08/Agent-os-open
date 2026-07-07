@@ -242,6 +242,19 @@ async def consume_pending_notifications(
         _combined_sys = "\n\n".join(_m for _m, _ in _system_notifs)
         state.setdefault("messages", []).append({"role": "user", "content": _combined_sys})
 
+        # ★ system 通知走 state 通道持久化（与其他类型统一）：
+        # consume 把通知内容 + source 写入 state，track 在 output 链统一落库。
+        # 不用临时字段（如 _pending_system_notifs），而是复用 user_input 的增量检测机制：
+        # system 通知也写 user_input（prepend），track 的 _extract_injected_content 会提取增量。
+        # 落库时 track 通过 source 标记区分 type=system vs type=user。
+        if prepend:
+            _existing = state.get("user_input", "")
+            state["user_input"] = f"{_combined_sys}\n\n{_existing}" if _existing else _combined_sys
+        else:
+            state["user_input"] = _combined_sys
+        # 标记本轮 user_input 增量里含 system 通知（供 track 区分 type）
+        state["_last_inject_sources"] = [s for _, s in _system_notifs]
+
         # ★ 唯一推送点：消息出队列进下一轮时推送 ★
         # 系统通知的前端气泡只此一处产生，不再有 message_bus 注入入口的推送、
         # 也不进 user_input 让 track 落库二次渲染。

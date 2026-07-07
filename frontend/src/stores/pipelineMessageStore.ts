@@ -368,6 +368,23 @@ function makeMessageFingerprint(m: Message): string {
   return m.role + '::' + m.timestamp + '::' + contentPrefix
 }
 
+/**
+ * 判断本地消息是否被 API 权威消息覆盖（即二者是同一条逻辑消息）。
+ *
+ * 去重规则唯一真相源，全量对账（initFromAPI）与增量补漏（append/prepend）共用：
+ * - id 相同 → 同一条（后端 record_id == WS message_id，正常路径）
+ * - clientMessageId 相同 → 同一条（user 乐观版 id=前端 UUID，API 版 id=后端
+ *   record_id，id 不同但后端从乐观消息回传了相同 clientMessageId）
+ *
+ * 命中时本地版让位 API 版（丢弃本地、保留 API），保证全量与增量两条路径的
+ * 渲染终态一致 —— 切会话回来（增量）与刷新（全量）不会产生不同的消息列表。
+ */
+function isCoveredByApi(m: Message, apiIds: Set<string>, apiByClientId: Map<string, Message>): boolean {
+  if (apiIds.has(m.id)) return true
+  if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return true
+  return false
+}
+
 /** 合并 API 权威消息与本地已有消息 策略： */
 function mergeApiWithExisting(
   sorted: Message[],
@@ -390,8 +407,7 @@ function mergeApiWithExisting(
   // 2. 刚发送的乐观 user 消息（30s 窗口内，带 clientMessageId） — 保留（后端可能尚未持久化）
   // 3. 其余本地消息 — 丢弃，以 API 权威数据为准。
   const localOnly = existing.filter((m) => {
-    if (apiIds.has(m.id)) return false
-    if (m.clientMessageId && apiByClientId.has(m.clientMessageId)) return false
+    if (isCoveredByApi(m, apiIds, apiByClientId)) return false
     // 系统通知是 AI 消息之间的结构分隔符，必须保留：
     // 后端 system_notification 是瞬态事件，通常不在消息历史 API 中返回，
     // 若丢弃则刷新/切 Tab 后它消失，前后的 AI 气泡失去边界被合并成一条。
@@ -424,6 +440,34 @@ function mergeApiWithExisting(
   // 如 persist 恢复或并发写入），需先排序。
   const sortedLocalOnly = [...localOnly].sort(compareMessages)
   return { finalMessages: mergeSorted(dedupedSorted, sortedLocalOnly), preservedCount: localOnly.length }
+}
+
+/**
+ * 增量补漏（append/prepend）合并：API 仅返回新增消息（after_sequence 增量或
+ * before_sequence 翻页），本地已有历史必须全部保留 —— 与 initFromAPI 的全量对账
+ * 不同（全量会丢弃 API 没返回的旧消息，增量必须保留 ≤ bottomCursor 的历史）。
+ *
+ * 去重规则与全量路径共用 isCoveredByApi：本地消息若被 API 覆盖（同 id 或同
+ * clientMessageId），让位 API 版，保证增量与全量渲染终态一致。user 乐观版
+ * （id=前端 UUID）与 API 版（id=后端 record_id）同 clientMessageId 时不会并存。
+ *
+ * 仅做合并 + 去重，后处理（流式合并 / 空气泡过滤 / 内存封顶）由调用方按需追加。
+ */
+function mergeIncrementalApiWithLocal(apiSorted: Message[], existing: Message[]): Message[] {
+  if (apiSorted.length === 0) return existing
+  if (existing.length === 0) return apiSorted
+
+  const apiIds = new Set(apiSorted.map((m) => m.id))
+  const apiByClientId = new Map<string, Message>()
+  for (const m of apiSorted) {
+    if (m.clientMessageId) apiByClientId.set(m.clientMessageId, m)
+  }
+
+  // 本地消息：被 API 覆盖 → 让位 API 版（丢弃本地乐观版）；其余全部保留（增量语义）。
+  const keptLocal = existing.filter((m) => !isCoveredByApi(m, apiIds, apiByClientId))
+
+  // mergeSorted 要求两边各自升序；keptLocal 来自 existing（可能无序），先排序。
+  return mergeSorted([...keptLocal].sort(compareMessages), apiSorted)
 }
 
 /** 计算 bottom 游标（只增不减，防止流式消息 sequence 临时值导致回退） 取 max(API 返回的最大 seq, 现有 bottomCursor)，只增不减。 */
@@ -734,20 +778,19 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       }
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      const existingIds = new Set(existing.map((m) => m.message_id || m.id))
-      const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
-      let merged = mergeSorted(newMsgs, existing)
+      // 含 clientMessageId 对账（与 appendMessages 共用 mergeIncrementalApiWithLocal）。
+      const merged = mergeIncrementalApiWithLocal(sorted, existing)
       // 跨边界合并保留 streaming 流式片段。
-      merged = mergePreservingStreaming(merged)
+      let finalMerged = mergePreservingStreaming(merged)
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
-      merged = filterBlankMessages(merged)
+      finalMerged = filterBlankMessages(finalMerged)
       // 内存封顶：翻页累计超量时丢弃最老消息，防止撑爆内存（OOM）
-      merged = capMessagesForMemory(merged)
-      const topCursor = merged[0]?.sequence ?? 0
+      finalMerged = capMessagesForMemory(finalMerged)
+      const topCursor = finalMerged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
-          [pipelineId]: merged,
+          [pipelineId]: finalMerged,
         },
         topCursorsByPipeline: {
           ...state.topCursorsByPipeline,
@@ -772,15 +815,16 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       if (messages.length === 0) return state
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      const existingIds = new Set(existing.map((m) => m.message_id || m.id))
-      const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
-      const merged = mergeSorted(existing, newMsgs)
-      const bottomCursor = merged.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
+      // 含 clientMessageId 对账：user 乐观版（UUID id）与 API 版（record_id）
+      // 同 clientMessageId 时丢弃本地乐观版，避免切会话回来两条 user 并存。
+      const merged = mergeIncrementalApiWithLocal(sorted, existing)
+      // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
+      const finalMerged = capMessagesForMemory(merged)
+      const bottomCursor = finalMerged.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
-          // 内存封顶：超量时丢弃最老消息，防止撑爆内存（OOM）
-          [pipelineId]: capMessagesForMemory(merged),
+          [pipelineId]: finalMerged,
         },
         bottomCursorsByPipeline: {
           ...state.bottomCursorsByPipeline,
@@ -1092,7 +1136,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return -1
   },
 
-  /** 获取指定消息中 state='streaming' 的最后一个 Part 的 index */
+  /** 获取指定消息中 state='streaming' 的最后一个 text Part 的 index */
   findStreamingPartIndex: (pipelineId: string, messageId: string) => {
     const state = get()
     const pipelineMessages = state.messagesByPipeline[pipelineId]
@@ -1101,7 +1145,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     if (!msg || !msg.parts) return -1
     for (let i = msg.parts.length - 1; i >= 0; i--) {
       const p = msg.parts[i]
-      if ((p.type === 'text' || p.type === 'thinking') && p.state === 'streaming') return i
+      // 仅匹配 text part：正文 stream_chunk 只应追加到 text part。
+      // 若匹配 thinking part，后端 </think> 关闭时先发正文 chunk（thinking_end
+      // 在下一次 delta 才发）会导致正文被吞进 thinking part，正文不显示或
+      // 等 thinking_end 后才一次性渲染。thinking 的流式追加由 thinkingHandler
+      // 用 findLastPartIndex(type='thinking') 精确路由，不走本方法。
+      if (p.type === 'text' && p.state === 'streaming') return i
     }
     return -1
   },
