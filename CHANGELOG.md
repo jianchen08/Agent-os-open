@@ -90,7 +90,6 @@
 ### ⚠️ 已知限制
 
 - **依赖已收敛**：`pyproject.toml` 已声明全部 24 个核心运行时依赖（含 fastapi、redis、PyJWT、bcrypt、cryptography、httpx、sqlalchemy 等），`requirements.txt` 镜像同步。`pip install -e .` 或 `pip install -r requirements.txt` 即可直接运行，无需手动补装。（早期版本的「FastAPI/Redis 未声明」问题已修复）
-- **自进化闭环步骤 ⑥ 半自动**：复盘产出经验后，"自动修改配置/新增插件"步骤目前依赖人工触发 `hot_swap`，未形成完全自动闭环
 - 单实例部署（Redis 作为共享状态层，水平扩展需额外配置）
 - 暂未提供官方 Helm Chart（计划在 0.3.0 加入）
 - 部分 IM 适配器（飞书、企微）需要用户自行申请应用凭证

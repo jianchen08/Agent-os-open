@@ -23,7 +23,7 @@
 
 - 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns (e.g. placing time-of-day rules at stable positions to preserve prompt-cache hits) and reorders injected fragments by usage frequency to improve cache-hit rate. Change a prompt without restarting (`hot_swap` supports snapshot → replace → health-check → rollback-on-failure).
 - 🔄 **Self-Evolving Closed Loop** — From requirement clarification → task dispatch → execution validation → evaluation feedback, every step forms a closed loop
-- 🔌 **Plugin-based Pipeline Architecture** — 6 routing signals + pause/resume + cross-pipeline routing
+- 🔌 **Plugin-based Pipeline Architecture** — 6 routing signals (`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`) + pause/resume + cross-pipeline routing
 - 🧠 **Multi-layer Memory** — Episodic (EPISODE) + Semantic (SEMANTIC), retrieved on demand and injected as needed. The richer set of multiple injection methods and multiple retrieval methods is **scheduled to ship in the next release** — see [ROADMAP.md](ROADMAP.md).
 - 🛠️ **40+ Built-in Tools** — Files, Shell, code search, browser, network, memory, media generation, IDE integration (41 actual tool.py implementations)
 - 🌐 **Multi-channel Access** — Web, CLI, DingTalk, Feishu, QQ, WeCom, HTTP API share the same kernel
