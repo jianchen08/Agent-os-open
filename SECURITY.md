@@ -97,7 +97,7 @@
    - 启用 Dependabot 自动升级 PR
 
 5. **代码执行隔离**
-   - 容器任务默认在 Docker 隔离环境执行（`isolation/docker/`）
+   - 容器任务默认在 Docker 隔离环境执行（`src/isolation/providers/docker_provider.py`）
    - 不要禁用 `isolation_policy.yaml` 中的安全规则
 
 ---

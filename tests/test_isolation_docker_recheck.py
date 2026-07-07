@@ -27,10 +27,15 @@ from plugins.input.isolation_guard.plugin import IsolationGuard
 
 
 def _make_ctx(tool="bash_execute"):
-    """创建 tool_execute 类型的 PluginContext。"""
+    """创建 tool_execute 类型的 PluginContext。
+
+    默认标 L2（子任务）：本文件用例测的是"docker 可用进容器 / 不可用 blocked"
+    这类子任务场景；主 agent（L1）的 bash_execute 一律走 host，不会进容器。
+    """
     return PluginContext(
         state={
             StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.AGENT_LEVEL: "L2",
             StateKeys.RAW_TOOL_CALLS: [{"name": tool, "args": {}}],
         },
         config={},

@@ -108,7 +108,7 @@ docs(readme): update quick start for Docker
 ### 代码风格
 
 - **Python**：遵循 PEP 8，使用 `ruff` 强制格式化（项目 `pyproject.toml` 已配置 ruff + mypy）
-  - Python 版本：3.10+（`requires-python = ">=3.10"`）
+  - Python 版本：3.11+（`requires-python = ">=3.11"`）
 - **TypeScript**：遵循项目 ESLint + Prettier 配置
   - React 版本：19.2+（`frontend/package.json`）
 - **命名**：
@@ -140,16 +140,25 @@ docs(readme): update quick start for Docker
 ```
 Agent-os/
 ├── src/                  # 后端源码
-│   ├── modules/         # 业务模块
-│   ├── shared/          # 共享代码
-│   ├── infrastructure/  # 基础设施
-│   └── config/          # 配置
-├── frontend/            # 前端源码
-├── config/              # 配置文件
-│   └── agents/         # Agent YAML 定义
-├── tests/              # 测试
-├── docs/               # 文档
-└── .github/            # Issue / PR 模板
+│   ├── pipeline/        # 管道引擎（路由信号、插件链、热替换）
+│   ├── agents/          # Agent 系统（注册表、YAML 加载、协作）
+│   ├── tools/           # 工具系统（内置工具、MCP 适配、注册表）
+│   ├── memory/          # 记忆系统（EPISODE/SEMANTIC、检索注入、复盘维护）
+│   ├── channels/        # 通道层（WebSocket/CLI/API/钉钉/飞书/企微/QQ + 网关）
+│   ├── skills/          # Skill 注册与发现
+│   ├── isolation/       # 工作区隔离（Docker/Host Provider、worktree）
+│   ├── triggers/        # 触发器系统（Cron/事件/间隔）
+│   ├── evaluation/      # 强制评估系统
+│   ├── plugins/         # 管道插件实现（input/output/core）
+│   ├── connectors/      # 外部工具连接器（VSCode/游戏引擎/ComfyUI）
+│   ├── infrastructure/  # 基础设施（任务执行、通知、恢复）
+│   └── ...              # auth / monitoring / llm / ui_schema 等
+├── skills/              # 可复用技能包（Skill 根目录）
+├── frontend/            # 前端源码（React 19 + Vite）
+├── config/              # 配置文件（agents/tools/pipelines/triggers/...）
+├── tests/               # 测试
+├── docs/                # 文档
+└── .github/             # Issue / PR 模板
 ```
 
 ---
@@ -176,7 +185,7 @@ Agent-os/
 
 ## 🙏 致谢
 
-每一位贡献者都会被记录在 `CONTRIBUTORS.md` 中。你的名字将永远留在项目的历史里。
+每一位贡献者都会被记录在 [AUTHORS.md](AUTHORS.md) 中。你的名字将永远留在项目的历史里。
 
 ---
 

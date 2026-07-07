@@ -278,19 +278,10 @@ export function buildFragmentsFromParts(message: Message, taskId?: string): Rend
     }
   }
 
-  // 确保 thinking 片段始终在非 thinking 片段之前（先思考，再正文）。
-  // 流式事件竞态可能导致 text part 先于 thinking part 进入数组，
-  // 此处统一修正渲染顺序，保持各自组内相对顺序不变。
-  const thinkingFrags = fragments.filter((f) => f.type === 'thinking')
-  const otherFrags = fragments.filter((f) => f.type !== 'thinking')
-  if (thinkingFrags.length > 0 && otherFrags.length > 0) {
-    const firstThinkingIdx = fragments.findIndex((f) => f.type === 'thinking')
-    const firstNonThinkingIdx = fragments.findIndex((f) => f.type !== 'thinking')
-    // 仅在 thinking 确实排在 other 之后时才重排，避免无谓数组重建
-    if (firstThinkingIdx > firstNonThinkingIdx) {
-      fragments = [...thinkingFrags, ...otherFrags]
-    }
-  }
+  // fragments 严格按 parts 数组顺序渲染（= 接收顺序 = 最终态顺序）。
+  // 不再做"thinking 整体前置"重排：多轮 LLM 调用的思考应与各自正文交错呈现
+  // （思考1→正文1→思考2→正文2），而非把所有思考堆在一起。
+  // 后端正常时序已保证单轮内 thinking 在 text 之前。
 
   // 标记最后一个 text fragment 的 isLast
   const lastTextIdx = fragments.reduce(

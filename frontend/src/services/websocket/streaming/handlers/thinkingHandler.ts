@@ -41,13 +41,18 @@ export function handleThinkingStart(eventData: any) {
     ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
   }
 
-  // 若已存在 streaming 状态的 thinking part，直接跳过
+  // 若上一轮 thinking part 仍处于 streaming（thinking_end 丢失/乱序场景），
+  // 先兜底把它置为 done，再开新一轮的 thinking part。
+  // 这样每次 thinking_start 都对应一个独立卡片，与最终态（每轮 LLM 各一个 part）一致，
+  // 避免把两轮思考合并进同一个 part。
   const partIndex = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
   if (partIndex >= 0) {
     const msgs = pipelineStore.getState().getMessages(pipelineId)
     const msg = msgs.find((m: any) => m.id === messageId)
     const existing = (msg?.parts?.[partIndex] as any)
-    if (existing?.state === 'streaming') return
+    if (existing?.state === 'streaming') {
+      pipelineStore.getState().updatePart(pipelineId, messageId, partIndex, { state: 'done' })
+    }
   }
 
   // 清除旧的 thinking 超时（如有），启动新的

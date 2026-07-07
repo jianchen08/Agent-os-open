@@ -64,12 +64,17 @@ class TestContainerUnavailableBlocked:
 
     @pytest.mark.asyncio
     async def test_container_unavailable_sets_blocked_context(self):
-        """容器隔离 + Docker 不可用 → 返回 blocked=True 的上下文。"""
+        """容器隔离 + Docker 不可用 → 返回 blocked=True 的上下文。
+
+        注：主 agent（L1）的 bash_execute 一律走 host，不会进容器。
+        此用例显式标 L2，验证子任务场景下 docker 不可用的拒绝行为。
+        """
         plugin = self._make_plugin(config={"docker_available": False})
         self._mock_container_policy(plugin)
 
         ctx = _make_ctx({
             StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.AGENT_LEVEL: "L2",
             StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {}}],
         })
 
@@ -84,12 +89,17 @@ class TestContainerUnavailableBlocked:
 
     @pytest.mark.asyncio
     async def test_container_unavailable_sets_isolation_blocked(self):
-        """容器隔离 + Docker 不可用 → 设置 isolation.blocked = True。"""
+        """容器隔离 + Docker 不可用 → 设置 isolation.blocked = True。
+
+        注：主 agent（L1）的 bash_execute 一律走 host，不会进容器。
+        此用例显式标 L2，验证子任务场景下 docker 不可用的拒绝行为。
+        """
         plugin = self._make_plugin(config={"docker_available": False})
         self._mock_container_policy(plugin)
 
         ctx = _make_ctx({
             StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.AGENT_LEVEL: "L2",
             StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {}}],
         })
 
@@ -101,7 +111,11 @@ class TestContainerUnavailableBlocked:
 
     @pytest.mark.asyncio
     async def test_docker_available_no_block(self):
-        """Docker 可用时容器隔离工具正常路由到 docker。"""
+        """Docker 可用时容器隔离工具正常路由到 docker。
+
+        注：主 agent（L1）的 bash_execute 一律走 host，不会进容器。
+        此用例显式标 L2，验证子任务场景下 docker 可用时的容器路由。
+        """
         from isolation.types import IsolationLevel
 
         plugin = self._make_plugin(config={"docker_available": True})
@@ -112,6 +126,7 @@ class TestContainerUnavailableBlocked:
 
         ctx = _make_ctx({
             StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.AGENT_LEVEL: "L2",
             StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {}}],
         })
 
@@ -329,7 +344,11 @@ class TestIsolationGuardSecurityCheckIntegration:
 
     @pytest.mark.asyncio
     async def test_isolation_guard_blocked_skips_security_check(self):
-        """IsolationGuard 已阻止时设置 isolation.blocked=True。"""
+        """IsolationGuard 已阻止时设置 isolation.blocked=True。
+
+        注：主 agent（L1）的 bash_execute 一律走 host，不会进容器。
+        此用例显式标 L2，验证子任务场景下 docker 不可用的拒绝行为。
+        """
         from isolation.types import IsolationLevel
 
         guard = self._make_isolation_guard(config={"docker_available": False})
@@ -340,6 +359,7 @@ class TestIsolationGuardSecurityCheckIntegration:
 
         ctx = _make_ctx({
             StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.AGENT_LEVEL: "L2",
             StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {}}],
         })
 

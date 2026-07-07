@@ -35,9 +35,18 @@ def _load(module_name, rel_path):
 
 
 def _make_ctx(state=None, services=None):
-    """创建 Mock PluginContext。"""
+    """创建 Mock PluginContext。
+
+    默认标 L2（子任务）：本文件测的是"含宿主路径 → host + host_path_detected
+    reason"和"无盘符 → docker"这类子任务场景；主 agent（L1）的 bash_execute
+    一律走 host（reason=l1_main_agent_host），会盖掉 host_path_detected，
+    故必须用 L2 才能测到 host_path 分支本身。
+    """
+    _state = {"agent_level": "L2"}
+    if state:
+        _state.update(state)
     return PluginContext(
-        state=state or {},
+        state=_state,
         config={},
         _services=services or {},
     )

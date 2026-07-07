@@ -644,17 +644,23 @@ class MemoryMaintenanceService:
             pass
         return origin
 
-    def _collect_agent_constraints(self, agent_ids: list[str]) -> str:
-        """收集被复盘 agent 的硬约束 + 软约束，拼成一段供 review_agent 对照检查。
+    async def _collect_agent_constraints(self, agent_ids: list[str]) -> str:
+        """收集被复盘 agent 的完整体系提示词（解析后）+ 硬/软约束，供 review_agent 对照检查。
 
-        用于「指令遵循」维度判断：review_agent 需知道被复盘 agent 的体系约束，
-        才能判断其执行是否违反硬约束。agent_id 为空或配置缺失时跳过，不阻断复盘。
+        复盘「指令遵循」维度需要知道被复盘 agent 的完整指令体系，才能判断其执行是否
+        偏离/违反。仅看硬/软约束不够——system_prompt 主体（角色定义、流程、方法论）
+        同样是指令的一部分。因此本方法解析每个 agent 的完整 system_prompt：
+        - 用 PromptBuildPlugin._resolve_placeholders 替换 {{path:...}}/{{rules}} 等占位符
+        - 再附上硬约束/软约束（rules 类型的占位符虽会替换，但显式列出更便于对照）
+
+        解析失败（缺插件/文件读错）时降级为仅列硬/软约束原文，不阻断复盘。
+        agent_id 为空或配置缺失时跳过该 agent。
 
         Args:
             agent_ids: 待复盘管道涉及的 agent_id 列表（可能含重复和空值）
 
         Returns:
-            拼好的约束块文本；无任何可用约束时返回空字符串（消息里会留空行，无害）
+            拼好的体系提示词块文本；无任何可用内容时返回空字符串（消息里会留空行，无害）
         """
         # 去重 + 去空，保持稳定顺序
         seen: set[str] = set()
@@ -667,8 +673,12 @@ class MemoryMaintenanceService:
 
             registry = get_global_agent_registry_sync()
         except Exception as exc:
-            logger.warning("[Maintenance] 获取 agent 注册表失败，跳过约束收集: %s", exc)
+            logger.warning("[Maintenance] 获取 agent 注册表失败，跳过体系提示词收集: %s", exc)
             return ""
+
+        import os as _os  # noqa: PLC0415
+
+        project_root = _os.getcwd()
 
         blocks: list[str] = []
         for agent_id in unique_ids:
@@ -678,23 +688,92 @@ class MemoryMaintenanceService:
                 cfg = None
             if cfg is None:
                 continue
+
             hard = getattr(cfg, "hard_constraints", []) or []
             soft = getattr(cfg, "soft_constraints", []) or []
-            if not hard and not soft:
+            raw_prompt = getattr(cfg, "system_prompt", "") or ""
+
+            # 解析 system_prompt 占位符（{{path:...}}/{{rules}} 等）
+            resolved_prompt = ""
+            if raw_prompt:
+                resolved_prompt = await self._resolve_prompt_placeholders(
+                    raw_prompt, project_root, hard, soft,
+                )
+
+            if not resolved_prompt and not hard and not soft:
                 continue
-            lines = [f"【{agent_id} 的体系约束】"]
+
+            lines = [f"【{agent_id} 的完整体系提示词（解析后）】"]
+            if resolved_prompt:
+                lines.append(resolved_prompt)
             if hard:
-                lines.append(f"硬约束（违反即问题）：")
+                lines.append("\n硬约束（违反即问题）：")
                 lines.extend(f"- {c}" for c in hard)
             if soft:
-                lines.append(f"软约束：")
+                lines.append("\n软约束：")
                 lines.extend(f"- {c}" for c in soft)
             blocks.append("\n".join(lines))
 
         if not blocks:
             return ""
 
-        return "被复盘 Agent 的体系约束（对照检查「指令遵循」维度用）：\n\n" + "\n\n".join(blocks)
+        return (
+            "被复盘 Agent 的完整体系提示词（对照检查「指令遵循」维度用，"
+            "判断 agent 执行是否违反其自身指令体系）：\n\n" + "\n\n".join(blocks)
+        )
+
+    async def _resolve_prompt_placeholders(
+        self,
+        raw_prompt: str,
+        project_root: str,
+        hard: list[str],
+        soft: list[str],
+    ) -> str:
+        """复用 PromptBuildPlugin 的占位符替换逻辑，解析 agent system_prompt。
+
+        构造最小可用的 PluginContext（仅提供 project_root + constraints），
+        让 PromptBuildPlugin._resolve_placeholders 能跑通 {{path:...}}/{{rules}}
+        等占位符替换，得到解析后的完整 prompt。retrieval/tags 类占位符因缺
+        memory_service 会静默跳过（返回空），不影响主体解析。
+
+        任何异常都降级返回原文（带未解析占位符），不阻断复盘。
+
+        Args:
+            raw_prompt: 带占位符的原始 system_prompt
+            project_root: 项目根路径，用于解析 {{path:...}} 相对路径
+            hard: 硬约束列表（填入 {{rules}} 占位符的 [必须] 部分）
+            soft: 软约束列表（填入 {{rules}} 占位符的 [建议] 部分）
+
+        Returns:
+            解析后的 prompt 文本；解析失败返回原文
+        """
+        if "{{" not in raw_prompt:
+            return raw_prompt
+
+        try:
+            from unittest.mock import MagicMock  # noqa: PLC0415
+
+            from plugins.input.prompt_build.plugin import PromptBuildPlugin  # noqa: PLC0415
+
+            ctx = MagicMock()
+            ctx.state = {
+                "project_root": project_root,
+                "context.session_id": "review-prompt-resolve",
+                "constraints": {"hard": hard, "soft": soft},
+                "workspace": "",
+            }
+            ctx._services = {"project_root": project_root}
+            # retrieval/tags 类占位符会尝试 get_service，缺服务时让其抛 KeyError 跳过
+            ctx.get_service = MagicMock(side_effect=KeyError("no service in review context"))
+
+            plugin = PromptBuildPlugin()
+            return await plugin._resolve_placeholders(ctx, raw_prompt)
+        except Exception as exc:
+            logger.warning(
+                "[Maintenance] 解析 agent system_prompt 占位符失败，降级用原文: %s",
+                exc,
+            )
+            return raw_prompt
 
     async def _try_launch_review_agent(
         self,
@@ -762,9 +841,9 @@ class MemoryMaintenanceService:
                     for t in targets
                 )
 
-                # 收集被复盘 agent 的体系约束（硬约束 + 软约束），供 review_agent
+                # 收集被复盘 agent 的完整体系提示词（解析后）+ 硬/软约束，供 review_agent
                 # 对照检查「指令遵循」维度。拿不到配置的 agent 跳过，不阻断复盘。
-                constraints_block = self._collect_agent_constraints(
+                constraints_block = await self._collect_agent_constraints(
                     [t.get("agent_id", "") for t in targets]
                 )
 

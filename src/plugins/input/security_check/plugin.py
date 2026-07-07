@@ -48,6 +48,23 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
 #   host_direct          → 内部 API 工具，免审批
 _policy_loader = IsolationPolicyLoader()
 
+# 审批选项单一事实源：发起处（create_choice_request）与消费处（wait_for_choice 返回值
+# 解析）共用这一份常量，消除两处硬编码漂移。
+#
+# 消费侧约定：前端优先提交选项 label（见 InteractionPanel.tsx 的
+# respondChoice：optionLabel || optionId），因此 wait_for_choice 返回的
+# selected_option 通常是 label。消费处先按 label 反查出稳定 id 再做分支判断，
+# label 文案随意调整都不影响指纹记忆等内部逻辑。auto_confirm_runner 等不经
+# 前端的路径仍提交 id，反查时回退按 id 直接匹配兜底。
+_APPROVAL_OPTIONS: list[dict[str, str]] = [
+    {"id": "approved_once", "label": "仅本次执行"},
+    {"id": "approved_remember", "label": "本管道内同命令免批"},
+    {"id": "denied", "label": "拒绝执行"},
+]
+# label → id 反查表（消费处用）。
+_APPROVAL_LABEL_TO_ID = {opt["label"]: opt["id"] for opt in _APPROVAL_OPTIONS}
+_APPROVAL_ID_TO_LABEL = {opt["id"]: opt["label"] for opt in _APPROVAL_OPTIONS}
+
 
 class SecurityCheckPlugin(IInputPlugin):
     """安全检查 Input 插件。
@@ -97,6 +114,14 @@ class SecurityCheckPlugin(IInputPlugin):
                 "target",
                 "output_path",
                 "working_dir",
+            ],
+        )
+        # 命令参数名列表：基础检查里用于 CMD 风格 nul 重定向检测
+        self._command_params = self._config.get(
+            "command_params",
+            [
+                "command",
+                "cmd",
             ],
         )
         self._allowed_base_paths = self._config.get("allowed_base_paths", ["skills"])
@@ -213,7 +238,7 @@ class SecurityCheckPlugin(IInputPlugin):
         # 判断执行模式
         execution_contexts = ctx.state.get("execution_contexts", [])
 
-        # ── 第一道：基础安全检查（路径遍历 + 敏感系统目录黑名单）──
+        # ── 第一道：基础安全检查（路径遍历 + 敏感系统目录黑名单 + nul 重定向）──
         # 任何模式都必须执行，这是防注入、防触碰 OS 核心目录的底线。
         # host 模式不再做工作目录越界检查（不管路径）。
         # 违规时软拦截——反馈给 LLM 让它改正，不杀引擎。
@@ -242,6 +267,21 @@ class SecurityCheckPlugin(IInputPlugin):
                     sensitive_reason,
                 )
                 return self._soft_block(ctx, tool_name, f"敏感系统目录被拦截: {sensitive_reason}")
+
+            # 3. CMD 风格 nul 重定向检测（Git Bash/Linux 下会创建名为 nul 的垃圾文件）
+            nul_reason = self._check_nul_redirect(args)
+            if nul_reason:
+                logger.warning(
+                    "[%s] Blocked CMD-style nul redirect | tool=%s | reason=%s",
+                    self.name,
+                    tool_name,
+                    nul_reason,
+                )
+                return self._soft_block(
+                    ctx,
+                    tool_name,
+                    f"CMD 风格重定向被拦截: {nul_reason}（Git Bash 下请用 2>/dev/null）",
+                )
 
         # ── 第二道：按模式分流 ──
 
@@ -358,11 +398,7 @@ class SecurityCheckPlugin(IInputPlugin):
                 tab_id="",
                 title=f"安全审批: {tool_name}",
                 description=args_preview,
-                options=[
-                    {"id": "approved_once", "label": "仅本次执行"},
-                    {"id": "approved_remember", "label": "本管道内同命令免批"},
-                    {"id": "denied", "label": "拒绝执行"},
-                ],
+                options=list(_APPROVAL_OPTIONS),
                 priority=Priority.HIGH,
                 user_id=ctx.state.get("user_id"),
             )
@@ -381,12 +417,21 @@ class SecurityCheckPlugin(IInputPlugin):
             # 用户的具体选择在 selected_option 字段中。
             # DENIED 和 CANCELLED 已由 wait_for_choice 抛异常处理，
             # 到这里 response_type 通常是 "answered"，需检查 selected_option。
-            selected_option = result.get("selected_option", "")
+            #
+            # selected_option 可能是 label（前端优先传 label）也可能是 id
+            # （auto_confirm_runner 等不经前端的路径传 id）。这里归一到稳定 id
+            # 再做分支判断——文案怎么改都不影响指纹记忆逻辑。
+            raw_selected = result.get("selected_option", "")
+            # 归一到稳定 id：前端传 label（走 _LABEL_TO_ID），不经前端的路径传 id
+            # （raw_selected 本身就是 id，直接用）。两者都查不到则保守视为拒绝。
+            resolved_id = _APPROVAL_LABEL_TO_ID.get(raw_selected) or (
+                raw_selected if raw_selected in _APPROVAL_ID_TO_LABEL else ""
+            )
 
-            if selected_option in ("approved_once", "approved_remember"):
+            if resolved_id in ("approved_once", "approved_remember"):
                 # "同命令免批"：记忆精确指纹，本管道内同工具+同命令后续免审批。
                 # 仅当指纹可计算时才记忆；无指纹（如无法归一化的参数）退化为"仅本次"。
-                if selected_option == "approved_remember" and signature:
+                if resolved_id == "approved_remember" and signature:
                     self._approved_signatures.add(signature)
                     logger.info(
                         "[%s] Approval granted (remember signature) | request_id=%s | tool=%s | sig=%s",
@@ -401,7 +446,7 @@ class SecurityCheckPlugin(IInputPlugin):
                         self.name,
                         request_id,
                         tool_name,
-                        selected_option,
+                        resolved_id,
                     )
                 return {
                     "security.decision": {
@@ -412,12 +457,13 @@ class SecurityCheckPlugin(IInputPlugin):
                 }
 
             logger.warning(
-                "[%s] Approval denied | request_id=%s | tool=%s | response=%s | option=%s",
+                "[%s] Approval denied | request_id=%s | tool=%s | response=%s | raw=%s | resolved=%s",
                 self.name,
                 request_id,
                 tool_name,
                 response_type,
-                selected_option,
+                raw_selected,
+                resolved_id,
             )
             # 审批拒绝属于软拦截——用户主观选择拒绝，不应结束管道，
             # 而是把拒绝结果作为 tool_result 返回给 LLM，让 LLM 决定下一步。
@@ -881,6 +927,42 @@ class SecurityCheckPlugin(IInputPlugin):
                 hit, matched = is_sensitive_path(value)
                 if hit:
                     return f"Path hits sensitive system dir: {value} (matched: {matched})"
+        return ""
+
+    def _check_nul_redirect(self, args: dict[str, Any]) -> str:
+        """检查命令参数是否含 CMD 风格 nul 重定向（内置安全机制）。
+
+        Windows CMD 的 ``>nul`` / ``2>nul`` 把输出丢弃到 NUL 设备，语法合法；
+        但同样的字符串在 Git Bash / Linux bash 下不识别 NUL 设备，反而会
+        创建一个名为 ``nul`` 的真实文件（垃圾文件）。本检查拦截此类命令，
+        命中后走软拦截反馈给 LLM，提示改用 ``2>/dev/null``。
+
+        匹配范围限定在 command/cmd 参数（命令字符串），不影响路径参数。
+        正则 ``(?:2\\s*)?>+\\s*&?\\s*nul(?!\\w)`` 覆盖 ``>nul`` / ``2>nul`` /
+        ``>>nul`` / ``2>>nul`` / ``>&nul`` 等变体，大小写不敏感；负向断言
+        ``(?!\\w)`` 排除 ``null`` / ``nullable`` 等合法标识符，也确保
+        ``>/dev/null`` 不被误命中（``dev/null`` 里 nul 前无重定向符 ``>``）。
+
+        Args:
+            args: 工具参数
+
+        Returns:
+            拦截原因字符串，空字符串表示通过
+        """
+        for key in self._command_params:
+            if key not in args:
+                continue
+            value = args[key]
+            if not isinstance(value, str):
+                continue
+            # (?:2\s*)?  可选的 fd 前缀 2
+            # \s*>+      一个或多个 >（覆盖 >>）
+            # \s*&?\s*   可选的 &（覆盖 >&nul 这种合并写法）
+            # nul        目标 nul
+            # (?!\w)     后面不能跟单词字符（排除 null/nullable/nuls 等合法标识符）
+            m = re.search(r"(?:2\s*)?>+\s*&?\s*nul(?!\w)", value, re.IGNORECASE)
+            if m:
+                return f"CMD-style nul redirect detected: {m.group(0)!r} in command"
         return ""
 
     def _is_dangerous_tool(self, ctx: PluginContext, tool_name: str) -> bool:

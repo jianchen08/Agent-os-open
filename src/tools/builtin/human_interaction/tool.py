@@ -336,18 +336,17 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                 {k: v for k, v in response.items() if k != "answers"},
             )
 
-            selected_id = response.get("selected_option")
+            # selected_option 由前端提交，前端优先传选项 label（见
+            # InteractionPanel.tsx 的 respondChoice：optionLabel || optionId），
+            # 因此这里直接透传为"用户所选文本"，所见即所得——LLM 无需再做
+            # id→label 的二次翻译。这里不再做 id 反查。
+            selected_option = response.get("selected_option")
             result: dict[str, Any] = {
                 "status": "completed",
                 "response_type": response.get("response_type"),
             }
-            if selected_id:
-                result["selected_option"] = selected_id
-                if isinstance(options, list):
-                    for opt in options:
-                        if isinstance(opt, dict) and opt.get("id") == selected_id:
-                            result["selected_option_label"] = opt.get("label", selected_id)
-                            break
+            if selected_option:
+                result["selected_option"] = selected_option
             if response.get("answers"):
                 result["answers"] = response["answers"]
             if response.get("feedback"):
@@ -392,7 +391,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             return create_success_result(
                 data={
                     "status": "denied",
-                    "selected_option": "reject",
+                    "selected_option": "用户拒绝",
                     "reason": e.reason or "用户拒绝",
                 }
             )
@@ -524,7 +523,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             return create_success_result(
                 data={
                     "status": "denied",
-                    "selected_option": "reject",
+                    "selected_option": "用户拒绝",
                     "conversation_mode": True,
                     "reason": e.reason or "用户拒绝",
                 }

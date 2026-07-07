@@ -22,8 +22,25 @@ export function mergeStreamingParts(
         (p.type === 'system' && p.content),
     )
 
-  // 本地有完整流式内容 → 优先保留本地 parts，避免被末轮残缺 serverParts 覆盖
-  const parts = hasLocalContent ? localParts! : serverParts && serverParts.length > 0 ? serverParts : []
+  // 本地有完整流式内容 → 优先保留本地 parts，避免被末轮残缺 serverParts 覆盖。
+  // 同时收敛残留 state='streaming' 的 text/thinking part 为 'done'：stream_end 已标志
+  // 流终止，残留的 streaming 状态通常来自 thinking_end 丢失/乱序，不收尾会让卡片图标
+  // 一直转圈（参见 streamTimingRepro 场景3）。仅在实际存在残留时才新建数组，保持引用稳定。
+  let parts: any[]
+  if (hasLocalContent) {
+    const needsFinalize = localParts!.some(
+      (p) => (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming',
+    )
+    parts = needsFinalize
+      ? localParts!.map((p) =>
+          (p.type === 'text' || p.type === 'thinking') && p.state === 'streaming'
+            ? { ...p, state: 'done' as const }
+            : p,
+        )
+      : localParts!
+  } else {
+    parts = serverParts && serverParts.length > 0 ? serverParts : []
+  }
 
   // content 校准：server 的 full_content 更长时采用（本地逐 chunk 拼接可能不完整）
   const currentContent = localContent || ''

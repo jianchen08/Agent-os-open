@@ -88,11 +88,6 @@ def _patch_infrastructure():
         ),
         patch.object(
             TaskSubmitTool,
-            "_auto_fill_criteria",
-            return_value=None,
-        ),
-        patch.object(
-            TaskSubmitTool,
             "_check_dependencies_exist",
             return_value=[],
         ),

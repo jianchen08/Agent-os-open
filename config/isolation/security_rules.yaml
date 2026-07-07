@@ -92,6 +92,10 @@ rules:
         value: "LD_PRELOAD"
       - type: keyword
         value: "no-preserve-root"
+      # CMD 风格 nul 重定向（Git Bash/Linux 下会创建名为 nul 的垃圾文件）
+      # 基础检查层已对所有模式软拦截；此处为非隔离模式规则层第二道记录
+      - type: keyword
+        value: ">nul"
       - type: regex
         value: "\\brm\\s+(-\\w*r\\w*f\\w*|-\\w*f\\w*r\\w*)"
       - type: regex

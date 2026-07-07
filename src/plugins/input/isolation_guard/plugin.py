@@ -255,6 +255,24 @@ class IsolationGuard(IInputPlugin):
                 workspace=metadata_workspace,
             )
 
+        # ── L1 主 agent 前置路由（force_host 之后，所有 docker 决策之前）──
+        # 任务级 isolation_level（默认 isolated）是给子任务的：子任务有独立
+        # 工作空间，可挂载进容器。L1 主 agent 没有任务工作空间（它直接在
+        # project_root 操作），强制进容器会因无 workspace 被拒（tool_core 报
+        # "工作空间未解析"）。L1 主 agent 的 bash_execute 一律路由到 host，
+        # 由 security_check 按 root_task 策略触发审批（require_confirmation）。
+        if tool_name == "bash_execute" and self._is_main_agent(ctx.state):
+            logger.info(
+                "[IsolationGuard] L1 主 agent bash_execute 路由到 host（无任务工作空间，由 security_check 审批） | tool=%s",
+                tool_name,
+            )
+            return self._build_context(
+                tool_name,
+                "host",
+                "l1_main_agent_host",
+                workspace=metadata_workspace,
+            )
+
         # ── 宿主路径前置检测（所有 docker 决策之前）──
         # 命令/工作目录含 Windows 盘符路径时，容器内只有挂载的 /workspace，
         # 宿主路径必然不存在（返回 "No such file or directory"）。无论
@@ -424,6 +442,27 @@ class IsolationGuard(IInputPlugin):
                 e,
             )
         return {}
+
+    @staticmethod
+    def _is_main_agent(state: dict[str, Any]) -> bool:
+        """判断当前调用方是否为 L1 主 agent。
+
+        层级语义与 permission_policy.get_policy_name_for_agent_level 对齐：
+        level <= 1（含 None/缺省/解析失败）即主 agent。主 agent 没有任务
+        工作空间，bash_execute 不应进容器。
+
+        Args:
+            state: 插件上下文 state，读取 agent_level 字段。
+
+        Returns:
+            True 表示当前调用方是主 agent（L1 或未标层级）。
+        """
+        raw_level = state.get(StateKeys.AGENT_LEVEL) or state.get("context.agent_level")
+        try:
+            level = int(str(raw_level).upper().lstrip("L")) if raw_level else 1
+        except (ValueError, TypeError):
+            level = 1
+        return level <= 1
 
     # 匹配 Windows 盘符绝对路径，如 D:/、D:\、C:\Users
     # 正则：盘符前须是行首/空白/引号/等号（排除 URL 中的 p:/、t:/ 片段），

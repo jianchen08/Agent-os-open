@@ -20,8 +20,8 @@
 ### ✨ 新增功能
 
 #### 核心架构
-- **插件化管道引擎** —— 基于 6 种路由信号（`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`）的统一执行框架
-- **多层 Agent 协作** —— L1 主管 + L2 编排（方案规划 / 编程编排）+ L3 执行（写代码 / 调研 / 调试）
+- **插件化管道引擎** —— 基于 4 种路由信号（`next_llm` / `next_tool` / `end` / `wait`）的统一执行框架
+- **多层 Agent 协作** —— 主管 + 编排（方案规划 / 编程编排）+ 执行（写代码 / 调研 / 调试）
 - **配置驱动的 Agent 加载** —— Agent 完全由 YAML 描述，支持 `hot_swap` 热替换
 - **跨管道路由** —— `PipelineRegistry` 支持父子管道间精确消息回传
 
@@ -32,8 +32,8 @@
 - **动态 Schema 增强** —— `image_generate` 等工具运行时注入可用 Provider 列表
 
 #### 记忆系统
-- **情景记忆（EPISODE）** —— 自动记录每轮对话
-- **语义记忆（SEMANTIC）** —— 用户偏好、项目决策持久化
+- **情景记忆（EPISODE）** —— 对话压缩后的记忆，保留要点而非逐轮原文
+- **语义记忆（SEMANTIC）** —— 沉淀用户偏好 / 项目决策 / 外部知识库导入
 - **基础检索 / 注入能力** —— 当前版本提供按需检索与按需注入；更丰富的多种检索方式 × 多种注入方式组合 **计划在下个版本正式上线**，详见 [ROADMAP.md](ROADMAP.md)
 
 #### 复盘系统
@@ -42,6 +42,15 @@
 - **实施位置** —— `src/memory/maintenance/{review_engine,service}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml` + `docs/design/复盘系统设计.md`
 
 > 注：本版本复盘系统聚焦"触发 + 复盘 + 沉淀"，记忆侧的容量治理归入记忆系统演进（见 [ROADMAP.md](ROADMAP.md)），不在复盘模块中描述。
+
+#### 质量保障与执行隔离
+- **审批交互闭环** —— choice / conversation 双模式 + 管道暂停/恢复 + 反馈注入 + 任务打回重做；diff 渲染组件与版本对比 API 已具备
+- **强制评估系统** —— 任务提交时须同时提交评估指标（AC），管道退出后强制门控转入评估、按指标审查；全过才完成，失败重试耗尽则失败
+- **工作区隔离** —— 文件夹隔离 + Docker 容器隔离（`src/isolation/providers/docker_provider.py`）+ git worktree 多任务分叉
+- **Skill 能力集成** —— 可加载可复用的技能包，扫描 `skills/` 目录发现，按需注入 Agent
+
+#### 触发器系统
+- **Cron 定时触发** / **事件触发** / **间隔触发** —— 无人值守运行，`TriggerRegistry` 自动订阅 EventBus
 
 #### 多通道接入
 - **Web UI** —— React 19 + @lobehub/ui

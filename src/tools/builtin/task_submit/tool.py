@@ -232,14 +232,30 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "acceptance_criteria": {
                         "type": "object",
-                        "description": "验收标准字典（可选）。key 为评估指标 ID，value 为配置对象。",
+                        "description": (
+                            "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。"
+                            "评估指标 ID 必须从下列内置指标中选取，按验证强度递增："
+                            "\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）"
+                            "\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）"
+                            "\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）"
+                            "\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）"
+                            "\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，"
+                            "不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。"
+                            "指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。"
+                        ),
                         "additionalProperties": {
                             "type": "object",
                             "description": "评估指标配置对象",
                             "properties": {
                                 "input_params": {
                                     "type": "object",
-                                    "description": '传递给评估工具的参数。例如 file_check 需要 {"path": "src/main.py"}',
+                                    "description": (
+                                        "传递给评估工具的参数。不同指标所需参数不同："
+                                        "file_check 需要 {\"path\": \"src/main.py\"}；"
+                                        "bash_check 需要 {\"command\": \"pytest tests/\"}；"
+                                        "semantic_check 需要 {\"criteria\": \"评估要求描述\"}；"
+                                        "human_review 需要 {\"title\": \"审核标题\", \"mode\": \"choice\"}。"
+                                    ),
                                 },
                                 "expected_output": {
                                     "type": "object",
@@ -523,34 +539,21 @@ class TaskSubmitTool(BuiltinTool):
 
         if not isinstance(acceptance_criteria, dict):
             logger.warning(
-                "[TaskSubmit] acceptance_criteria 类型异常: %s，重置为空 dict 以触发自动补全",
+                "[TaskSubmit] acceptance_criteria 类型异常: %s，重置为空 dict",
                 type(acceptance_criteria).__name__,
             )
             acceptance_criteria = {}
 
-        if target_type == "agent" and target_id:
-            auto_criteria = self._auto_fill_criteria(
-                target_id,
-                context=inputs,
+        # ── 验收标准铁律：不 fallback、不默认、不覆盖，只认大模型输入 ──
+        # 评估指标完全由大模型在 acceptance_criteria 中显式指定，
+        # 禁止用 agent 配置的 recommended_metrics 自动补全或覆盖，
+        # 禁止任何形式的兜底默认值。模型不传 → 无验收标准（不强行补）。
+        # recommended_metrics 仅作文档参考，不参与提交期逻辑。
+        if acceptance_criteria:
+            logger.info(
+                "[TaskSubmit] 采用大模型显式传入的验收标准 | metrics=%s",
+                list(acceptance_criteria.keys()),
             )
-            if auto_criteria:
-                if not acceptance_criteria:
-                    acceptance_criteria = auto_criteria
-                    logger.info(
-                        "[TaskSubmit] 自动补全验收标准 | target_id=%s | metrics=%s",
-                        target_id,
-                        list(auto_criteria.keys()),
-                    )
-                else:
-                    # recommended_metrics 存在时，以配置为准，忽略 LLM 传入的额外指标
-                    discarded = [k for k in acceptance_criteria if k not in auto_criteria]
-                    if discarded:
-                        logger.info(
-                            "[TaskSubmit] 丢弃 LLM 传入的非推荐指标: %s (以 %s recommended_metrics 为准)",
-                            discarded,
-                            target_id,
-                        )
-                    acceptance_criteria = auto_criteria
 
         # ── 评估指标 ID 合法性校验 ──
         # 防止 LLM 把 pass_threshold / $text 等 value 子字段误填为 acceptance_criteria
@@ -574,7 +577,7 @@ class TaskSubmitTool(BuiltinTool):
                         f"{invalid_ids}。这些 key 必须是真实存在的评估指标 ID，"
                         f"不能是 pass_threshold / expected_output 等 value 子字段。"
                         f"当前合法指标 ID: {valid_list}。"
-                        "请改用合法指标 ID 重新提交，或留空让系统自动补全。"
+                        "请改用合法指标 ID 重新提交（系统不会自动补全或覆盖你传入的指标）。"
                     ),
                     error_code="INVALID_METRIC_ID",
                 )
@@ -1642,113 +1645,3 @@ class TaskSubmitTool(BuiltinTool):
         agent_level = level_map.get(agent_level_str, 0)
         is_active = config.get("is_active", True)
         return (True, agent_level_str, agent_level, is_active)
-
-    def _auto_fill_criteria(  # noqa: PLR0912,PLR0915
-        self,
-        target_id: str,
-        context: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """从 agent 配置的 recommended_metrics 自动构建验收标准。"""
-        from pathlib import Path  # noqa: PLC0415
-
-        import yaml  # noqa: PLC0415
-
-        _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
-        config_dir = _project_root / "config" / "agents"
-
-        if not config_dir.exists():
-            logger.warning(
-                "[TaskSubmit] agent 配置目录不存在: %s",
-                config_dir,
-            )
-            return {}
-
-        yaml_path = None
-        for p in config_dir.rglob(f"{target_id}.yaml"):
-            yaml_path = p
-            break
-
-        if not yaml_path or not yaml_path.exists():
-            for p in config_dir.rglob("*.yaml"):
-                try:
-                    with open(p, encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
-                    if data.get("config_id", "") == target_id:
-                        yaml_path = p
-                        break
-                except Exception:
-                    continue
-
-        if not yaml_path or not yaml_path.exists():
-            logger.debug(
-                "[TaskSubmit] 未找到 agent 配置: %s (搜索目录: %s)",
-                target_id,
-                config_dir,
-            )
-            return {}
-
-        try:
-            with open(yaml_path, encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
-            recommended = config.get("recommended_metrics", [])
-            if not recommended:
-                return {}
-
-            # Build template variables from context
-            tmpl_vars: dict[str, str] = {}
-            if context:
-                for key in ("tool_id", "task_id"):
-                    val = context.get(key)
-                    if val:
-                        tmpl_vars[key] = str(val)
-                # Also check nested goal/inputs
-                goal = context.get("goal") or {}
-                if isinstance(goal, dict):
-                    for key in ("tool_id", "title"):
-                        val = goal.get(key)
-                        if val:
-                            tmpl_vars.setdefault(key, str(val))
-                    # Extract agent_id from goal.context (set by L2 agents)
-                    goal_ctx = goal.get("context")
-                    if isinstance(goal_ctx, dict):
-                        for key in ("agent_id", "agent_name", "output_dir"):
-                            val = goal_ctx.get(key)
-                            if val:
-                                tmpl_vars.setdefault(key, str(val))
-
-            criteria = {}
-            for metric in recommended:
-                metric_id = metric.get("metric_id")
-                if not metric_id:
-                    continue
-                default_params = metric.get("default_params", {})
-                # 如果参数值包含未解析的 {{...}} 模板变量，跳过整个指标。
-                # 模板变量应在提交时被替换为具体值，不应存储模板字符串。
-                has_unresolved = any(isinstance(v, str) and "{{" in v and "}}" in v for v in default_params.values())
-                if has_unresolved:
-                    logger.info(
-                        "[TaskSubmit] 跳过指标 %s: 包含未解析的模板变量 (params=%s)",
-                        metric_id,
-                        default_params,
-                    )
-                    continue
-                # 用已知变量替换单花括号模板变量 {var}
-                if tmpl_vars:
-                    replaced = {}
-                    for k, v in default_params.items():
-                        if isinstance(v, str):
-                            for var_name, var_val in tmpl_vars.items():
-                                v = v.replace("{" + var_name + "}", var_val)  # noqa: PLW2901
-                        replaced[k] = v
-                    default_params = replaced
-                criteria[metric_id] = {"input_params": default_params}
-            logger.info(
-                "[TaskSubmit] 从 %s 加载了 %d 个推荐指标 (vars=%s)",
-                yaml_path.name,
-                len(criteria),
-                list(tmpl_vars.keys()),
-            )
-            return criteria
-        except Exception as e:
-            logger.debug("[TaskSubmit] 自动补全验收标准失败: %s", e)
-            return {}

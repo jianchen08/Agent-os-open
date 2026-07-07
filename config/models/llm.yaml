@@ -121,7 +121,7 @@ defaults:
   stream_idle_timeout: 180
   compression: minimax-m3
   tiers:
-    large: minimax-m3
+    large: glm-5.2
     medium: minimax-m3
     small: minimax-m3
 providers:

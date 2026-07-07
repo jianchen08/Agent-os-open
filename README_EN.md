@@ -21,19 +21,16 @@
 
 ### Core Innovations
 
-- 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns (e.g. placing time-of-day rules at stable positions to preserve prompt-cache hits) and reorders injected fragments by usage frequency to improve cache-hit rate. Change a prompt without restarting (`hot_swap` supports snapshot → replace → health-check → rollback-on-failure).
-- 🔄 **Self-Evolving Closed Loop** — From requirement clarification → task dispatch → execution validation → evaluation feedback, every step forms a closed loop
-- 🔌 **Plugin-based Pipeline Architecture** — 6 routing signals (`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`) + pause/resume + cross-pipeline routing
-- 🧠 **Multi-layer Memory** — Episodic (EPISODE) + Semantic (SEMANTIC), retrieved on demand and injected as needed. The richer set of multiple injection methods and multiple retrieval methods is **scheduled to ship in the next release** — see [ROADMAP.md](ROADMAP.md).
-- 🛠️ **40+ Built-in Tools** — Files, Shell, code search, browser, network, memory, media generation, IDE integration (41 actual tool.py implementations)
-- 🌐 **Multi-channel Access** — Web, CLI, DingTalk, Feishu, QQ, WeCom, HTTP API share the same kernel
-- 📐 **MCP Compatible** — Full support for Model Context Protocol
+- 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns: volatile content (timestamps, session rules) is injected as a separate trailing message so the leading system prompt stays byte-stable and preserves prompt-cache hits. Injected fragments can be arranged by usage frequency at config time to maximize cache-hit rate. Change a prompt without restarting (`hot_swap` supports hot replacement, with rollback on failure).
+- 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review of finished pipelines, sedimenting experience reports into the knowledge base) → modify, enhance and refactor the system, forming a closed loop that gets smarter with use. A companion memory cleanup mechanism decides retention along three dimensions (review-status × age × capacity), ensuring reviews are sedimented before raw memories are reclaimed.
+- 🔌 **Plugin-based Pipeline Architecture** — 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) + pause/resume + every decision observable as state; plugin-level errors via `ABORT` / `SKIP` / `RETRY` / `FALLBACK` strategies (currently default `RETRY`, extensible per tool)
+- 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release — see [ROADMAP.md](ROADMAP.md).
 
 ### Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.10 / FastAPI 0.110+ / aiohttp / Redis / Pydantic / LiteLLM |
+| Backend | Python 3.11 / FastAPI 0.110+ / aiohttp / Redis / Pydantic / LiteLLM |
 | Frontend | React 19 / TypeScript / Vite / Zustand / Antd / @lobehub/ui / Tailwind CSS |
 | AI | OpenAI / Anthropic / DeepSeek / GLM / Ollama / multi-model routing |
 | Protocol | MCP (Model Context Protocol) |
@@ -66,7 +63,25 @@ For multi-stage tasks with deliverables ("develop an App", "write a novel", "mak
 Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itself.
 
 ### 7. Workspace Isolation & Worktree Mechanism
-Each task runs in its own **isolated workspace** (folder-level isolation by default; Docker isolation for higher-risk execution paths), and multi-task scenarios use the **worktree** mechanism to fork off a dedicated worktree directory per task. This guarantees that concurrent tasks do not collide on the filesystem and that any side-effect can be reviewed or rolled back at the worktree boundary.
+Each task runs in its own **isolated workspace**: folder-level isolation by default, with Docker container isolation for higher-risk execution paths. In multi-task scenarios the **git worktree** mechanism forks a dedicated working directory per task, so concurrent tasks never collide on the filesystem and any side-effect can be reviewed or rolled back at the worktree boundary.
+
+### 8. Approval Closed Loop — Quality Gate for Human-AI Collaboration
+Human approval (choice / conversation dual modes) + pipeline pause/resume + feedback injection + task rework, forming a "generate → approve → feedback → iterate" loop. Text approval is live; diff rendering components and version-comparison APIs are already in place (see [ROADMAP.md](ROADMAP.md)).
+
+### 9. Mandatory Evaluation System — Hard Constraint on Task Quality
+Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
+
+### 10. 40+ Built-in Tools — Out-of-the-box Toolbox
+Files, Shell, code search, browser, network, memory, media generation, IDE integration (41 actual tool.py implementations), including MCP external tool integration.
+
+### 11. Multi-channel Access — One Kernel, Everywhere Reachable
+Web, CLI, DingTalk, Feishu, QQ, WeCom, HTTP API share the same kernel; full MCP protocol support to integrate any MCP service.
+
+### 12. Skill Integration — Extend Domain Capabilities on Demand
+Loadable, reusable skill packages that can be injected into Agents on demand to gain new domain capabilities (document processing, PDF generation, etc.) without writing code.
+
+### 13. Hot Swap — Evolve Without Downtime
+`hot_swap` (snapshot → replace → health-check → rollback-on-failure) supports runtime hot replacement of plugins/Agents, while `hot_reload` watches config files and auto-reloads on change — debug and iterate without restarting the service.
 
 ---
 
@@ -74,7 +89,7 @@ Each task runs in its own **isolated workspace** (folder-level isolation by defa
 
 ### Prerequisites
 
-- Python 3.10+ (launch scripts auto-detect 3.11/3.12/3.13)
+- Python 3.11+ (launch scripts auto-detect 3.11/3.12/3.13)
 - Node.js 18+ (for frontend build, Vite required)
 - Docker (frontend container + Redis container; backend runs on the host)
 

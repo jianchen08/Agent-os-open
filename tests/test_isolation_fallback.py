@@ -103,8 +103,16 @@ def _make_guard(docker_available=False, force_host=False):
 
 
 def _make_ctx(state=None):
-    """创建最小 PluginContext。"""
-    return PluginContext(state=state or {}, _services={})
+    """创建最小 PluginContext。
+
+    默认标 L2（子任务）：metadata/policy 路径的用例测的是"docker 可用进容器 /
+    不可用 blocked"这类子任务场景；主 agent（L1）的 bash_execute 一律走 host。
+    force_host 用例不受影响——force_host 判断在 L1 路由之前，无论层级都先 blocked。
+    """
+    _state = {"agent_level": "L2"}
+    if state:
+        _state.update(state)
+    return PluginContext(state=_state, _services={})
 
 
 class TestGuardForceHostBlocked:

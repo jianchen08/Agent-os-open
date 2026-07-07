@@ -3,7 +3,7 @@
 > 本文档面向**希望深入了解灵汐内部机制、进行二次开发或参与核心贡献**的开发者。
 
 > **数据准确性说明**（2026-06-23）：本架构文档基于实际代码核对
-> - Python 版本：3.10+（`pyproject.toml` `requires-python = ">=3.10"`）
+> - Python 版本：3.11+（`pyproject.toml` `requires-python = ">=3.11"`）
 > - FastAPI / Redis：在 25+ 文件中实际 import，均已声明于 `pyproject.toml` 的 24 个核心运行时依赖中
 > - React 版本：19.2（`frontend/package.json` `"react": "^19.2.0"`）
 > - 工具数量：41 个 tool.py 实现（实际），下文用"40+ 内置工具"表述
@@ -23,6 +23,12 @@
   - [配置系统](#配置系统)
   - [通道层（Channels）](#通道层channels)
   - [容器任务系统](#容器任务系统)
+  - [隔离与工作区（Isolation & Workspace）](#隔离与工作区isolation--workspace)
+  - [复盘与记忆维护（Review & Memory Maintenance）](#复盘与记忆维护review--memory-maintenance)
+  - [触发器系统（Triggers）](#触发器系统triggers)
+  - [审批交互闭环（Approval Loop）](#审批交互闭环approval-loop)
+  - [强制评估系统（Mandatory Evaluation）](#强制评估系统mandatory-evaluation)
+  - [Skill 能力集成](#skill-能力集成)
 - [数据流示例](#数据流示例)
 - [扩展点](#扩展点)
 - [架构设计四问](#架构设计四问)
@@ -67,8 +73,8 @@
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                   │
 │                              ▼                                   │
-│                  6 种路由信号仲裁                                  │
-│           (next_llm / next_tool / end / delegate / wait / ...)   │
+│                  4 种路由信号仲裁                                  │
+│           (next_llm / next_tool / end / wait / ...)              │
 └────────┬──────────────┬──────────────┬──────────────┬───────────┘
          │              │              │              │
          ▼              ▼              ▼              ▼
@@ -103,16 +109,14 @@
 - **输入路由表**（可叠加）：根据上下文决定执行哪些 Input 插件
 - **输出路由表**（互斥优先级）：仲裁 Output 插件产生的路由信号
 
-#### 6 种路由信号
+#### 4 种路由信号
 
 | 信号 | 含义 | 典型场景 |
 |------|------|----------|
 | `next_llm` | 下一轮调用 LLM | 工具调用完成后 |
 | `next_tool` | 执行工具 | LLM 决定调用工具 |
 | `end` | 结束管道 | LLM 完成回复 |
-| `delegate` | 委托子任务 | 派发到子 Agent / 子管道 |
 | `wait` | 挂起等待 | 等用户审批 / 外部事件 |
-| `decision` | 决策分支 | 多方案路由选择 |
 
 #### 暂停/恢复机制
 
@@ -133,7 +137,6 @@
 ```yaml
 id: code_writer_agent
 name: 代码编写专家
-level: L3  # L1 / L2 / L3
 type: executor  # supervisor / orchestrator / executor
 
 system_prompt: "{{path:prompts/code_writer.md}}"  # 引用外部文件
@@ -166,9 +169,9 @@ output_schema:  # JSON Schema
 
 #### 多层 Agent 协作
 
-- **L1 主管**（灵汐）：面向用户的统一入口，负责任务分类与初步规划
-- **L2 编排**（方案规划 / 编程编排）：复杂任务的多步骤编排、依赖管理、审查节点
-- **L3 执行**（写代码 / 调研 / 调试 / 验证）：具体的执行单元
+- **主管**（灵汐）：面向用户的统一入口，负责任务分类与初步规划
+- **编排**（方案规划 / 编程编排）：复杂任务的多步骤编排、依赖管理、审查节点
+- **执行**（写代码 / 调研 / 调试 / 验证）：具体的执行单元
 
 #### 智能切换主 Agent
 
@@ -219,18 +222,20 @@ class Tool(Protocol):
 
 #### 两种记忆类型
 
-- **情景记忆（EPISODE）**：自动记录每轮对话，会话切换不丢失
-- **语义记忆（SEMANTIC）**：把"用户的偏好、项目的关键决策"沉淀到知识库，下次开新会话也能调用
+- **情景记忆（EPISODE）**：对话压缩后的记忆，保留对话要点而非逐轮原文，会话切换不丢失
+- **语义记忆（SEMANTIC）**：沉淀用户偏好、项目关键决策、外部知识库导入等，下次开新会话也能调用
 
-#### 3 × 3 灵活组合
+#### 检索 × 注入（设计能力与上线状态）
 
-**三种检索方式** × **三种注入方式**：
+设计上支持**三种检索方式** × **三种注入方式**的灵活组合，当前上线状态如下（✅ 已上线 / 🚧 规划中，后续版本发布）：
 
-| 注入\检索 | VECTOR | KEYWORD | TAGWAVE |
+| 注入\检索 | VECTOR（向量语义） | KEYWORD（关键词） | TAGWAVE（标签联想） |
 |-----------|--------|---------|---------|
-| FULL | 全量语义相似 | 全量关键词匹配 | 全量标签联想 |
-| RETRIEVAL | 按需语义检索 | 按需关键词检索 | 按需标签检索 |
-| SUMMARY | 摘要语义检索 | 摘要关键词检索 | 摘要标签检索 |
+| FULL（全量注入） | 🚧 | ✅ 全量关键词匹配 | ✅ 全量标签联想 |
+| RETRIEVAL（按需检索） | 🚧 | 🚧 | 🚧 |
+| SUMMARY（摘要注入） | 🚧 | 🚧 | 🚧 |
+
+> **当前实现**：关键词检索、标签检索 + 全量注入。向量语义检索、按需/摘要注入尚未上线。
 
 ### 配置系统
 
@@ -271,6 +276,72 @@ src/channels/
   → 关闭容器
 ```
 
+### 隔离与工作区（Isolation & Workspace）
+
+容器任务的每一步都运行在**隔离环境**中，由 `src/isolation/` 提供统一抽象：
+
+- **隔离级别**：`IsolationLevel`（CONTAINER / HOST）。`IsolationDecider` 按工具维度决策，**默认 CONTAINER**；当配置要求的级别在当前环境不可用时**拒绝降级**（抛 `IsolationError`），避免跨容器污染。
+- **Provider**：`DockerProvider`（真实 Docker CLI 集成，`docker create` 带 `--init`/`--cpus`/`--memory`/`--pids-limit`/网络/端口/-v 挂载，按任务复用容器、任务结束销毁）与 `HostProvider`（宿主直接执行，需显式配置 + 人工批准）。
+- **工作区生命周期**：`WorkspaceLifecycleManager` 为每个任务准备独立工作目录，支持 `worktree` / `shared` / `plain` / `project_root` / `container` 等模式。
+
+**Git Worktree 分叉**：多任务场景下，每个任务在 `task/{task_id}` 分支上分叉出独立 worktree（`_worktree_add_with_repair` 含 prune-and-retry），大仓走 sparse-checkout；worktree 创建前对项目根做 auto-save 提交以避免带入脏改动；任务完成前 `merge_worktree_before_complete` 合并回主工作区，清理时移除 worktree 与分支。并发任务因此互不抢占文件系统，副作用可在 worktree 边界审查与回滚。
+
+### 复盘与记忆维护（Review & Memory Maintenance）
+
+系统内置「**复盘 → 沉淀 → 回收**」闭环，位于 `src/memory/maintenance/`：
+
+- **触发**：`trigger_review` 工具（`src/tools/builtin/trigger_review/tool.py`）解析父 `pipeline_id` 后调用 `MemoryMaintenanceService.trigger_llm_review()`；另有 REST 入口 `POST /api/v1/maintenance/review`。带自环保护（复盘管道内不再触发）与单运行守卫。
+- **执行**：服务收集所有 `review_status=pending` 的已结束管道，按 Agent/状态分组，按 token 预算（模型上下文窗口 × `skeleton_budget_percent`，默认 15%，上限 `review_batch_limit`=10）分批，每批注册并启动子 `review_agent` 管道，注入目标清单 + 被复盘 Agent 的硬/软约束。
+- **产出**：拉取报告（轮询上限 ~600s）→ 持久化到 KnowledgeService **并**写入 `docs/working/review_report_{id}.md` → 标记管道已复盘 → 回调通知父管道。
+- **记忆清理**：周期性触发器 `memory_maintenance_check`（间隔 `cleanup_check_interval`，默认 86400s）驱动 `CleanupEngine.cleanup_by_age_and_capacity()`，按**复盘状态 × 年龄 × 容量**三维矩阵决策：
+
+  | 复盘状态 | 年龄 | 容量 | 动作 |
+  |---------|------|------|------|
+  | 已复盘 | > 30 天（`cleanup_min_age_days`） | — | 删除 L0 + L1 |
+  | 已复盘 | > 7 天（`cleanup_early_age_days`） | > 80%（`cleanup_capacity_threshold`） | 仅删除 L0 |
+  | 未复盘 | > 30 天 | — | 直接删除 L0 + L1 |
+  | 其他 | — | — | 保留 |
+
+  清理按体积分层（先 L0 大 YAML，条件性 L1 压缩块，再关联 Episode；**Knowledge 永不删除**），删除后重建向量索引。容量压力按数据目录 YAML 总大小 / 1 GB 上限估算。
+
+### 触发器系统（Triggers）
+
+让灵汐无人值守自动运行。位于 `src/triggers/`：
+
+- **触发器类型**：Cron 定时触发、事件触发（订阅 EventBus）、间隔触发
+- **注册与调度**：`TriggerRegistry` 从 `config/triggers/` 加载，`TriggerManager` 经 ServiceProvider 拿到管道引擎执行
+- **自动订阅**：触发器启动时自动订阅事件总线，事件命中即派发任务到管道
+
+### 审批交互闭环（Approval Loop）
+
+人机协同的质量闸，构成"生成→审批→反馈→迭代"闭环：
+
+- **双审批模式**：`choice`（预设选项快速决策）/ `conversation`（多轮自由讨论），均支持自由文本输入
+- **管道暂停/恢复**：`wait` 路由信号挂起管道并保存 state 快照，外部事件 `wake()` 恢复
+- **反馈注入**：审批结果（通过/驳回/批注）注入管道 state，驱动 AI 返工
+- **任务打回重做**：任务状态机支持打回，重新进入执行
+- **版本对比**：`ReviewDiff` 组件（LCS 算法 side-by-side/unified）+ 后端 `get_version_diff` API + `annotation_service` 批注 CRUD 已具备
+
+> 文本审批闭环已上线。审批请求携带制品（artifacts）的协议增强与工作区自动联动待补全（详见 [ROADMAP.md](../../ROADMAP.md)）。
+
+### 强制评估系统（Mandatory Evaluation）
+
+任务质量的硬约束，确保质量不被跳过。位于 `src/evaluation/` + `src/infrastructure/task_post_pipeline.py`：
+
+- **提交即带指标**：`task_submit` 提交任务时须同时提交评估指标（acceptance criteria），校验指标 ID 合法性；支持从 Agent 的 `recommended_metrics` 自动补全
+- **强制门控**：管道退出后若任务仍 RUNNING 且有产出，`task_post_pipeline.py` 强制 `move_to_evaluating` 并重跑评估——即使 Agent 不主动调 `task_evaluate` 也会被强制审查
+- **按指标审查**：`EvaluationEngine` 分发 tool / agent / human 三类评估（`evaluator_agent` 执行单指标评估）；指标定义在 `config/evaluation_metrics/`（file_check / bash_check / human_review / semantic_check）
+- **结果约束**：指标全过 → COMPLETED；失败未耗尽 → 反馈重试；失败耗尽 → FAILED
+- **容器级验证**：`container_verification_agent` 做端到端验证-修复闭环（最多 3 轮）
+
+### Skill 能力集成
+
+可加载、可复用的技能（skill）包，按需注入 Agent 扩展领域能力。位于 `src/skills/`：
+
+- **发现**：`SkillRegistry` 扫描 `skills/` 根目录（`DEFAULT_SKILL_ROOTS`）发现技能
+- **按需注入**：技能可在 Agent 配置中声明引用，运行时注入对应能力
+- **领域扩展**：无需改代码即可获得新领域能力（如文档处理 docx、PDF 生成 pdf 等）
+
 ---
 
 ## 数据流示例
@@ -287,11 +358,11 @@ src/channels/
    └─ 路由到目标会话
 
 3. 管道引擎
-   ├─ 加载对话历史（情景记忆 EPISODE 注入）
-   ├─ 注入动态变量（当前时间戳、项目路径、用户偏好）
-   ├─ Input 插件链
-   │   ├─ 上下文窗口裁剪
-   │   └─ 语义记忆检索（RETRIEVAL 模式）
+   ├─ 加载对话历史（情景记忆 EPISODE）
+   └─ Input 插件链
+       ├─ 动态变量注入（当前时间戳、项目路径、用户偏好）
+       ├─ 提示词构建
+       └─ 语义记忆检索（关键词/标签检索）
    └─ LLM 调用（流式）
        ├─ 推理：决定调用 enhanced_search + file_read
        └─ Output 插件：路由信号 = next_tool
@@ -321,7 +392,9 @@ src/channels/
 | 新增 IM 通道 | 继承 `BaseComboAdapter` 实现 `adapter.py` | `src/channels/<platform>/` |
 | 新增前端主题 | 写 TS 主题对象（预设）或 JSON（动态） | `frontend/src/config/themes/presets/` 或 `frontend/public/themes/` |
 | 新增 Schema 表单 | 写 JSON Schema | 任何 `ui_schema` 字段 |
+| 新增 Skill | 写技能包（含 SKILL.md + 实现）放到 skill 根目录 | `skills/` |
 | 新增触发器类型 | 继承 `src/triggers/triggers/base.py` 基类 | `src/triggers/triggers/` |
+| 新增审批视图 | 注册 review Widget + ui_schema 路由 | `frontend/src/components/review/`、`config/ui/modules/` |
 | 自定义路由信号 | 扩展 `engine_route.py` 的路由分支 | `src/pipeline/engine_route.py` |
 
 ---

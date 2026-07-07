@@ -70,7 +70,7 @@ Agent -> request_interaction() -> 自动审批判断 -> WebSocket 推送 -> 用�
 |---|---|---|
 | request_id | str | 请求 ID |
 | response_type | ResponseType | 响应类型 |
-| selected_option_id | str | 选择的选项 |
+| selected_option | str | 用户选择的选项文本（label），所见即所得 |
 | modified_data | dict | 修改后的数据 |
 | reason | str | 原因 |
 

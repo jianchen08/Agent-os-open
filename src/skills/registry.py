@@ -30,11 +30,9 @@ logger = logging.getLogger(__name__)
 # 项目根目录：src/skills/ → src/ → project_root/
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Skill 默认扫描根目录（优先级从高到低）
+# Skill 默认扫描根目录
 DEFAULT_SKILL_ROOTS: list[Path] = [
     _PROJECT_ROOT / "skills",
-    _PROJECT_ROOT / ".trae" / "skills",
-    _PROJECT_ROOT / ".agents" / "skills",
 ]
 
 # 脚本后缀到语言映射

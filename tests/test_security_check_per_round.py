@@ -251,3 +251,94 @@ class TestSignatureMemory:
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "空白归一化后应视为同命令，免审批"
         assert r2.state_updates.get("security.decision", {}).get("allowed") is True
+
+
+# ═══════════════════════════════════════════════════════════════
+# 契约 3：label 反查 —— 前端提交 label 文本时分支判断仍正确
+#
+# 阶段 2 改动：消费处把 selected_option（可能是 label 也可能是 id）
+# 归一到 stable id 再做分支。前端实际优先传 label，此契约保障该路径。
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestLabelBasedSelection:
+    """前端提交选项 label 文本（非 id）时，审批分支判断仍正确。
+
+    前端 InteractionPanel.respondChoice 优先传 optionLabel，故 wait_for_choice
+    返回的 selected_option 通常是 label。插件需先按 label 反查 id 再判分支。
+    """
+
+    @pytest.mark.asyncio
+    async def test_label_remember_triggers_signature_memory(self, monkeypatch):
+        """提交 label '本管道内同命令免批' → 等价 approved_remember → 记忆指纹。"""
+        from plugins.input.security_check.plugin import SecurityCheckPlugin
+
+        svc, create = _approval_svc(
+            [{"selected_option": "本管道内同命令免批"}]
+        )
+        import human_interaction
+        monkeypatch.setattr(
+            human_interaction, "get_human_interaction_service", lambda: svc,
+        )
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+
+        ctx1 = _ctx_for("bash_execute", "curl http://api.example")
+        await plugin.execute(ctx1)
+        assert create.calls == 1
+        assert plugin._approved_signatures, "label 路径下 approved_remember 应记忆指纹"
+
+        # 同命令再次调用 → 免审批（指纹已记）
+        ctx2 = _ctx_for("bash_execute", "curl http://api.example")
+        r2 = await plugin.execute(ctx2)
+        assert create.calls == 1, "label 路径记忆后，同命令应免审批"
+        assert r2.state_updates.get("security.decision", {}).get("allowed") is True
+
+    @pytest.mark.asyncio
+    async def test_label_once_does_not_remember(self, monkeypatch):
+        """提交 label '仅本次执行' → 等价 approved_once → 不记忆指纹。"""
+        from plugins.input.security_check.plugin import SecurityCheckPlugin
+
+        svc, create = _approval_svc(
+            [{"selected_option": "仅本次执行"}, {"selected_option": "仅本次执行"}]
+        )
+        import human_interaction
+        monkeypatch.setattr(
+            human_interaction, "get_human_interaction_service", lambda: svc,
+        )
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+
+        ctx1 = _ctx_for("bash_execute", "curl http://api.example")
+        await plugin.execute(ctx1)
+        assert create.calls == 1
+        assert not plugin._approved_signatures, "label 路径下 approved_once 不应记忆"
+
+        # 同命令再次调用 → 仍要审批
+        ctx2 = _ctx_for("bash_execute", "curl http://api.example")
+        await plugin.execute(ctx2)
+        assert create.calls == 2, "label 路径 approved_once 未记忆，同命令仍应审批"
+
+    @pytest.mark.asyncio
+    async def test_label_denied_soft_blocks(self, monkeypatch):
+        """提交 label '拒绝执行' → 等价 denied → 软拦截，不放行。"""
+        from plugins.input.security_check.plugin import SecurityCheckPlugin
+
+        svc, _create = _approval_svc([{"selected_option": "拒绝执行"}])
+        import human_interaction
+        monkeypatch.setattr(
+            human_interaction, "get_human_interaction_service", lambda: svc,
+        )
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+
+        ctx = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        r = await plugin.execute(ctx)
+        decision = r.state_updates.get("security.decision", {})
+        # _soft_block 返回 allowed=True（软拦截：拒绝结果反馈给 LLM，
+        # 不结束管道），靠 reason 标记区分是否被拒。
+        assert "soft_block" in decision.get("reason", ""), (
+            "label 路径 denied 应走 soft_block，reason 须带 soft_block 标记"
+        )
+        assert "用户拒绝" in decision.get("reason", ""), "reason 应体现用户拒绝"
+        assert not plugin._approved_signatures, "denied 绝不记忆指纹"
