@@ -661,7 +661,11 @@ class MemoryMaintenanceService:
         """
         # 去重 + 去空，保持稳定顺序
         seen: set[str] = set()
-        unique_ids = [aid for aid in agent_ids if aid and aid not in seen and not seen.add(aid)]
+        unique_ids: list[str] = []
+        for aid in agent_ids:
+            if aid and aid not in seen:
+                seen.add(aid)
+                unique_ids.append(aid)
         if not unique_ids:
             return ""
 

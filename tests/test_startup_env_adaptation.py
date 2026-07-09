@@ -5,21 +5,23 @@
   审查发现启动脚本/配置存在设备/环境耦合，会导致换机器/换目录/换 OS 时失效：
     1. docker-compose.yml / start_web_cn.bat / wsl_ensure_containers.sh 三处
        硬编码容器名后缀 -22404（来自目录名前 5 位 hex），换部署目录即三处不一致
-    2. wsl_ensure_containers.sh 裸跑默认路径写死 /mnt/d/myproject/container_224042d3b925
-    3. .env（含真实凭据）需确保被 .gitignore 忽略
+    2. docker-compose.yml 的 name 字段 + 显式 container_name 把 compose project
+       锁死成固定字面量，导致 compose "看不见"既有容器，下次 up 重建→端口冲突
+    3. wsl_ensure_containers.sh 裸跑默认路径写死 /mnt/d/myproject/container_224042d3b925
 
-修复策略：
-  - 容器名/网络/卷去掉 -22404 后缀，改由 COMPOSE_PROJECT_NAME 参数化（默认 agentos）
+修复策略（回归 compose 标准命名）：
+  - 移除 docker-compose.yml 的 name 字段和显式 container_name，让 compose 用标准
+    {project}-{service} 命名；project 默认取自目录名，不同目录天然隔离
+  - 脚本（bat / wsl_ensure_containers.sh）改用 `docker compose ps -q <service>`
+    动态获取容器，不依赖固定容器名（update_frontend.ps1 已验证的范式）
   - wsl 脚本裸跑时用 wslpath 动态推导项目目录
-  - 确保 .gitignore 持续忽略 .env
 
 验证范围：
   1. 三脚本均不含 22404 字面量（硬编码后缀已清除）
-  2. 三脚本容器名引用一致（无后缀统一命名）
-  3. docker-compose.yml 顶部有 name 字段并引用 COMPOSE_PROJECT_NAME（多实例可参数化）
-  4. compose 容器名/网络/卷声明一致
-  5. wsl 脚本用 wslpath 动态推导项目目录（不写死挂载路径）
-  6. .gitignore 持续忽略 .env（防凭据入库回归）
+  2. compose 不设 name/container_name（让 project 跟随目录）
+  3. 脚本用 docker compose ps -q 动态获取容器（不写死容器名）
+  4. wsl 脚本用 wslpath 动态推导项目目录（不写死挂载路径）
+  5. .gitignore 持续忽略 .env（防凭据入库回归）
 """
 from pathlib import Path
 
@@ -60,14 +62,47 @@ class TestNoHardcodedDirSuffix:
 
 
 # ---------------------------------------------------------------------------
-# 2. 容器名引用跨脚本一致（无后缀统一命名）
+# 2. compose 回归标准命名（project 跟随目录）
 # ---------------------------------------------------------------------------
-class TestContainerNameConsistency:
-    """验证 redis/frontend 容器名在 compose 与探测脚本间一致。"""
+class TestComposeStandardNaming:
+    """验证 docker-compose.yml 让 compose 用标准 {project}-{service} 命名。
+
+    不设 name 字段和 container_name，project name 默认取自所在目录名，
+    这样既有容器能被 compose 识别，不同目录的实例天然隔离。
+    """
 
     @pytest.fixture
-    def compose(self):
+    def content(self):
         return _read_file("docker-compose.yml")
+
+    def test_no_explicit_name_field(self, content):
+        """不应有顶层 name 字段（否则 project name 被锁死成字面量）"""
+        # 逐行检查，避免误命中注释里的 "name:" 或 service 内字段
+        for line in content.splitlines():
+            stripped = line.lstrip()
+            # 顶层 name: 字段（无缩进），非注释
+            if stripped.startswith("name:") and not line.startswith(" "):
+                pytest.fail(f"docker-compose.yml 含顶层 name 字段，会锁死 project name: {line}")
+
+    def test_no_container_name(self, content):
+        """不应有显式 container_name（否则多实例容器名冲突）"""
+        assert "container_name:" not in content, (
+            "docker-compose.yml 含 container_name，会锁死容器名导致多实例冲突"
+        )
+
+    def test_network_and_volume_unsuffixed(self, content):
+        """网络名 agent-net、卷名 redis-data 无目录哈希后缀"""
+        assert "agent-net" in content
+        assert "redis-data" in content
+        assert "agent-net-22404" not in content
+        assert "redis-data-22404" not in content
+
+
+# ---------------------------------------------------------------------------
+# 3. 脚本动态获取容器（不写死容器名）
+# ---------------------------------------------------------------------------
+class TestDynamicContainerLookup:
+    """验证 bat / wsl 脚本用 docker compose ps -q 动态获取容器，不依赖固定名。"""
 
     @pytest.fixture
     def bat(self):
@@ -77,55 +112,35 @@ class TestContainerNameConsistency:
     def wsl_sh(self):
         return _read_file("wsl_ensure_containers.sh")
 
-    def test_compose_redis_container_name(self, compose):
-        """compose 中 redis 容器名为 agent-os-redis（无后缀）"""
-        assert "container_name: agent-os-redis\n" in compose
-
-    def test_compose_frontend_container_name(self, compose):
-        """compose 中 frontend 容器名为 agent-os-frontend（无后缀）"""
-        assert "container_name: agent-os-frontend\n" in compose
-
-    def test_bat_references_unsuffixed_names(self, bat):
-        """bat 探测/启动用无后缀容器名，与 compose 一致"""
-        assert "agent-os-redis" in bat
-        assert "agent-os-frontend" in bat
-
-    def test_wsl_references_unsuffixed_names(self, wsl_sh):
-        """wsl 脚本状态轮询用无后缀容器名，与 compose 一致"""
-        assert "agent-os-redis" in wsl_sh
-        assert "agent-os-frontend" in wsl_sh
-
-
-# ---------------------------------------------------------------------------
-# 3. compose project name 参数化（多实例隔离）
-# ---------------------------------------------------------------------------
-class TestComposeProjectName:
-    """验证 docker-compose.yml 通过 COMPOSE_PROJECT_NAME 支持多实例隔离。"""
-
-    @pytest.fixture
-    def content(self):
-        return _read_file("docker-compose.yml")
-
-    def test_has_name_field(self, content):
-        """compose 顶部应有 name 字段（显式声明 project name）"""
-        assert "name:" in content, "docker-compose.yml 缺少 name 字段"
-
-    def test_name_uses_env_with_default(self, content):
-        """name 字段应引用 COMPOSE_PROJECT_NAME 环境变量并带默认值"""
-        assert "COMPOSE_PROJECT_NAME" in content, (
-            "name 字段未引用 COMPOSE_PROJECT_NAME，无法多实例隔离"
-        )
-        # 形如 name: ${COMPOSE_PROJECT_NAME:-agentos}
-        assert "${COMPOSE_PROJECT_NAME:-" in content, (
-            "name 字段缺少默认值兜底（:- 语法），单实例无法开箱即用"
+    def test_bat_uses_compose_ps(self, bat):
+        """bat 用 docker compose ps -q <service> 获取容器 ID"""
+        assert "docker compose ps -q" in bat, (
+            "bat 应使用 docker compose ps -q 动态获取容器，而非写死容器名"
         )
 
-    def test_network_and_volume_unsuffixed(self, content):
-        """网络名 agent-net、卷名 redis-data 无目录哈希后缀"""
-        assert "agent-net" in content
-        assert "redis-data" in content
-        assert "agent-net-22404" not in content
-        assert "redis-data-22404" not in content
+    def test_bat_no_hardcoded_container_start(self, bat):
+        """bat 不应写死 docker start agent-os-frontend/redis 容器名"""
+        assert "docker start agent-os-frontend" not in bat, (
+            "bat 仍写死 docker start agent-os-frontend，换目录会失配"
+        )
+        assert "docker start agent-os-redis" not in bat, (
+            "bat 仍写死 docker start agent-os-redis，换目录会失配"
+        )
+
+    def test_wsl_uses_compose_ps(self, wsl_sh):
+        """wsl 脚本用 docker compose ps -q <service> 获取容器 ID"""
+        assert "docker compose ps -q" in wsl_sh, (
+            "wsl 脚本应使用 docker compose ps -q 动态获取容器，而非写死容器名"
+        )
+
+    def test_wsl_no_hardcoded_name_filter(self, wsl_sh):
+        """wsl 脚本不应写死 --filter name=agent-os-* 容器名"""
+        assert "name=agent-os-frontend" not in wsl_sh, (
+            "wsl 脚本仍写死 name=agent-os-frontend 过滤，换目录会失配"
+        )
+        assert "name=agent-os-redis" not in wsl_sh, (
+            "wsl 脚本仍写死 name=agent-os-redis 过滤，换目录会失配"
+        )
 
 
 # ---------------------------------------------------------------------------

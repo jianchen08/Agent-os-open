@@ -275,17 +275,22 @@ echo [OK] Docker 就绪
 
 echo [INFO] 启动 Docker 服务...
 
-docker ps -a --format "{{.Names}}" | findstr "agent-os-redis" >nul 2>&1
-if not errorlevel 1 (
-    echo [OK] 复用已有容器 agent-os-redis
-    docker start agent-os-redis >nul 2>&1
+REM 容器名跟随 compose project（目录名），用 `docker compose ps -q <service>`
+REM 动态获取容器 ID，不依赖固定容器名（避免换目录后失配）。
+REM 范式与 update_frontend.ps1 一致。
+set "REDIS_CID="
+for /f "delims=" %%i in ('docker compose ps -q redis 2^>nul') do set "REDIS_CID=%%i"
+if defined REDIS_CID (
+    echo [OK] 复用已有 redis 容器 !REDIS_CID!
+    docker start !REDIS_CID! >nul 2>&1
 ) else (
     docker compose up -d --no-recreate redis
 )
-docker ps -a --format "{{.Names}}" | findstr "agent-os-frontend" >nul 2>&1
-if not errorlevel 1 (
-    echo [OK] 复用已有容器 agent-os-frontend
-    docker start agent-os-frontend >nul 2>&1
+set "FRONT_CID="
+for /f "delims=" %%i in ('docker compose ps -q frontend 2^>nul') do set "FRONT_CID=%%i"
+if defined FRONT_CID (
+    echo [OK] 复用已有 frontend 容器 !FRONT_CID!
+    docker start !FRONT_CID! >nul 2>&1
 ) else (
     docker compose up -d --no-recreate frontend
 )

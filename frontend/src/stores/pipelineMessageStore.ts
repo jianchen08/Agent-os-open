@@ -725,7 +725,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      let { finalMessages, preservedCount } = mergeApiWithExisting(sorted, existing)
+      const mergeResult = mergeApiWithExisting(sorted, existing)
+      let { finalMessages } = mergeResult
+      const { preservedCount } = mergeResult
 
       // // 合并 API 数据与本地流式消息后，边界处可能有连续 assistant 消息需要合并
       // // 流式消息（status='streaming' 或 parts 含 streaming part）不参与合并，

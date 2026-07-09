@@ -116,17 +116,24 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 # 真正等待容器进入 running，而非盲目 sleep 后报 OK
+# 容器名跟随 compose project（目录名），用 `docker compose ps` 按服务名查询，
+# 不依赖固定容器名前缀（update_frontend.ps1 已采用同一范式）。
 echo "[INFO] 等待容器进入 running ..."
 ok=0
 for i in $(seq 1 15); do
-    redis_up="$(timeout 8 docker ps --filter name=agent-os-redis --filter status=running --format '{{.Names}}' 2>/dev/null)"
-    front_up="$(timeout 8 docker ps --filter name=agent-os-frontend --filter status=running --format '{{.Names}}' 2>/dev/null)"
-    if [ -n "$redis_up" ] && [ -n "$front_up" ]; then ok=1; break; fi
+    redis_up="$(timeout 8 docker compose ps -q redis 2>/dev/null)"
+    front_up="$(timeout 8 docker compose ps -q frontend 2>/dev/null)"
+    # 有容器 ID 还需确认处于 running（compose ps -q 含已停止的）
+    if [ -n "$redis_up" ] && [ -n "$front_up" ]; then
+        redis_state="$(timeout 8 docker inspect -f '{{.State.Running}}' "$redis_up" 2>/dev/null)"
+        front_state="$(timeout 8 docker inspect -f '{{.State.Running}}' "$front_up" 2>/dev/null)"
+        if [ "$redis_state" = "true" ] && [ "$front_state" = "true" ]; then ok=1; break; fi
+    fi
     sleep 2
 done
 
 echo "--- 实际运行状态 ---"
-timeout 8 docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | grep 'agent-os-' || true
+timeout 8 docker compose ps --format '{{.Service}}\t{{.Name}}\t{{.Status}}' 2>/dev/null || true
 if [ "$ok" -ne 1 ]; then
     echo "[WARN] 部分容器未进入 running（可能仍在构建或已失败），详见上方输出"
     exit 1
