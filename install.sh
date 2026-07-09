@@ -230,7 +230,7 @@ health_check() {
         [[ $i -eq 30 ]] && warn "前端服务未在 30 秒内就绪,请检查 agentos.log"
     done
 
-    if docker ps --format '{{.Names}}' | grep -q agent-os-redis; then
+    if docker compose ps -q redis >/dev/null 2>&1; then
         ok "Redis 服务就绪"
     else
         warn "Redis 容器未运行"

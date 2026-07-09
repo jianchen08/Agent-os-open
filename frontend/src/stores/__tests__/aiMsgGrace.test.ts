@@ -118,7 +118,7 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(aiMsgs[0].content).toBe('AI reply via WS')
   })
 
-  it('场景4: streaming 中的 AI 消息始终保留（不受宽限期影响）', () => {
+  it('场景4: streaming 中的 AI 消息也被 initFromAPI 丢弃（靠 WS backfill 恢复）', () => {
     const store = usePipelineMessageStore.getState()
 
     const streamingMsg = makeMsg('streaming-4', 2, {
@@ -133,9 +133,11 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
       makeMsg('api-user-4', 1, { role: 'user', content: 'hi' }),
     ])
 
+    // 新语义：initFromAPI 完全丢弃本地（含 streaming），只保留 API 权威数据。
+    // 正在输出的内容不靠刷新兜底，而是由 WS 重连的 backfill（appendMessages）
+    // + 续流补回，避免刷新瞬间用陈旧本地缓存与后端权威数据并存造成重复渲染。
     const streaming = store.getMessages(PIPELINE_ID).find((m) => m.id === 'streaming-4')
-    expect(streaming).toBeDefined()
-    expect(streaming?.status).toBe('streaming')
+    expect(streaming).toBeUndefined()
   })
 
   it('场景5: 无 _lastUpdated 的 assistant 消息不享受宽限期（直接丢弃）', () => {
@@ -156,7 +158,7 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
     expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'no-lu-5')).toBeUndefined()
   })
 
-  it('场景6: 修复未破坏既有 user 消息宽限期行为', () => {
+  it('场景6: 新语义下 user 乐观消息也被 initFromAPI 丢弃（API 不含即不保留）', () => {
     const store = usePipelineMessageStore.getState()
 
     const optimisticUser = makeMsg('client-uuid-6', 1, {
@@ -172,9 +174,11 @@ describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
       makeMsg('api-ai-6', 2, { role: 'assistant', content: 'reply' }),
     ])
 
+    // 新语义：initFromAPI 不再保留任何 localOnly（含 user 乐观宽限期）。
+    // API 未返回该 user 消息（后端尚未持久化）时，刷新后该消息被丢弃；
+    // 后端持久化后，下一次 API 调用会带它回来。
     const userMsg = store.getMessages(PIPELINE_ID).find((m) => m.role === 'user')
-    expect(userMsg).toBeDefined()
-    expect(userMsg?.content).toBe('hello')
+    expect(userMsg).toBeUndefined()
   })
 
   // ★ 回归保护：ensureStreamingPlaceholder 合并覆盖 id 后，

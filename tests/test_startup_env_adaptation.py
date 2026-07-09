@@ -170,6 +170,35 @@ class TestWslProjectDirDynamic:
 
 
 # ---------------------------------------------------------------------------
+# 4.5 安装脚本不写死项目路径 / 容器名前缀
+# ---------------------------------------------------------------------------
+class TestInstallScriptsPortability:
+    """验证安装脚本可跨设备移植，不写死项目绝对路径或旧容器名前缀。"""
+
+    def test_install_wsl_docker_no_hardcoded_path(self):
+        """install_wsl_docker.sh 不应写死 /mnt/d/myproject/container_... 路径"""
+        content = _read_file("install_wsl_docker.sh")
+        assert "/mnt/d/myproject/container_" not in content, (
+            "install_wsl_docker.sh 仍写死项目挂载路径，换部署目录挂载测试必失败"
+        )
+        # 挂载测试应改为动态推导脚本所在目录
+        assert "dirname" in content or "pwd" in content, (
+            "install_wsl_docker.sh 挂载测试应动态推导项目路径（dirname/pwd）"
+        )
+
+    def test_install_sh_uses_compose_for_redis_check(self):
+        """install.sh 健康检查应用 docker compose ps 查 service，而非旧容器名前缀"""
+        content = _read_file("install.sh")
+        # 旧写法 grep agent-os-redis 与 compose 标准命名（{project}-redis）不匹配
+        assert "grep -q agent-os-redis" not in content, (
+            "install.sh 仍用 grep agent-os-redis 检查容器，与 compose 标准命名不匹配"
+        )
+        assert "docker compose ps -q redis" in content, (
+            "install.sh 应改用 docker compose ps -q redis 检查 service"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 5. .gitignore 持续忽略 .env（防凭据入库回归）
 # ---------------------------------------------------------------------------
 class TestEnvIgnored:

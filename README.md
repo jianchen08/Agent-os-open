@@ -184,7 +184,11 @@ npm run dev
 # 前端开发服务器运行在 http://localhost:5188
 ```
 
-> **关于 CLI 模式**：`python run.py demo`（echo 回显）或 `python run.py real`（真实 LLM）启动的是命令行交互，不启动 Web 服务。
+> **关于 CLI 模式**：除 Web 模式外，还支持命令行交互（不启动 Web 服务）：
+> - `python run.py demo`（echo 回显）/ `python run.py real`（真实 LLM）—— 基于 `run.py` 的快捷入口
+> - `cli_cn.bat`（Windows）—— 清 `__pycache__` 后启动完整 CLI（`channels.cli.cli_main`），支持 `--mode {normal,auto,plan}`、`--message` 等参数
+> - `PYTHONPATH=src python -m channels.cli.cli_main`（跨平台）或安装后用注册命令 `agent-os`
+
 
 ---
 

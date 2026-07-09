@@ -72,11 +72,14 @@ type PreviewType = 'image' | 'pdf' | 'code' | 'binary'
  * SyntaxHighlighter 行级样式
  *
  * 修复 react-syntax-highlighter@16 在同时开启 showLineNumbers + wrapLongLines 时的
- * 缩进/空白塌陷问题：每行容器会被加上 `display: flex`，导致行内前导空格（缩进）
- * 被当成普通空白折叠，yaml 等缩进敏感语言就会"挤成一块一块的"。
- * 这里通过 lineProps 给每个行 span 强制 pre-wrap，保留缩进与换行。
+ * "竖排/每行只剩几个字"问题：库会在每行 span 上强制注入 `display: flex`（见其
+ * highlight.js 的 `wrapLongLines & showLineNumbers` 分支），flex 容器打破 inline 文本
+ * 流并折叠前导空格（缩进），导致 yaml 等缩进敏感语言被挤压成竖条、无法阅读。
+ * 这里用 `display: block` 覆盖库注入的 `display: flex`（库内部
+ * `_objectSpread({display:'flex'}, lineProps.style)`，后展开的同名属性胜），
+ * `whiteSpace: pre-wrap` 保留缩进与长行换行。
  */
-const HIGHLIGHTER_LINE_PROPS = { style: { whiteSpace: 'pre-wrap' } } as const
+const HIGHLIGHTER_LINE_PROPS = { style: { whiteSpace: 'pre-wrap', display: 'block' } } as const
 
 /** 文件预览组件属性 */
 export interface FilePreviewProps {

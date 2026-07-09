@@ -725,14 +725,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      const mergeResult = mergeApiWithExisting(sorted, existing)
-      let { finalMessages } = mergeResult
-      const { preservedCount } = mergeResult
-
-      // // 合并 API 数据与本地流式消息后，边界处可能有连续 assistant 消息需要合并
-      // // 流式消息（status='streaming' 或 parts 含 streaming part）不参与合并，
-      // 它们作为分隔符打断连续 assistant 组，避免 part 被重编或丢弃。
-      finalMessages = mergePreservingStreaming(finalMessages)
+      // ★ 刷新语义：完全丢弃本地消息，只用 API 权威数据。
+      // 不保留任何 localOnly（不合并、不宽限、不 streaming 保护）——
+      // 刷新后所有内容都从后端持久化拿，本地流式缓存一律丢弃。
+      // 后端正在输出时，WS 重连的 backfill 增量补漏 + 续流会补回新内容。
+      let finalMessages = sorted
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       finalMessages = filterBlankMessages(finalMessages)
       // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
@@ -741,8 +738,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
       const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
 
-      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d preserved=%d',
-        pipelineId?.slice(0, 12), finalMessages.length, preservedCount)
+      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d (全量替换，不保留本地)',
+        pipelineId?.slice(0, 12), finalMessages.length)
 
       return {
         messagesByPipeline: {

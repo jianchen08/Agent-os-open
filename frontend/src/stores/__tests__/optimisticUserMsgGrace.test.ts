@@ -46,7 +46,7 @@ describe('乐观 user 消息宽限期', () => {
     })
   })
 
-  it('场景1: 刚发送的乐观 user 消息，API 未返回时不被丢弃', () => {
+  it('场景1: 刚发送的乐观 user 消息，API 未返回时被丢弃（刷新全量替换语义）', () => {
     const store = usePipelineMessageStore.getState()
 
     // 用户发送乐观消息（带 clientMessageId，timestamp 为当前时间）
@@ -55,21 +55,21 @@ describe('乐观 user 消息宽限期', () => {
       content: 'hello world',
       status: 'completed',
       clientMessageId: 'client-uuid-1',
-      timestamp: new Date().toISOString(), // 当前时间，在宽限期内
+      timestamp: new Date().toISOString(),
     })
     store.addMessage(PIPELINE_ID, optimisticMsg)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // initFromAPI 被触发（如 WS 重连），后端尚未持久化 user 消息，API 只返回旧历史
+    // initFromAPI（刷新）：完全丢弃本地，只用 API 权威数据
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-old-1', 1, { role: 'assistant', content: 'old reply' }),
     ])
 
-    // 乐观消息应仍然存在（未被丢弃）
+    // 新语义：刷新后本地乐观消息被丢弃，只有 API 数据。后端持久化后下次刷新会返回。
     const msgs = store.getMessages(PIPELINE_ID)
-    const userMsg = msgs.find((m) => m.role === 'user')
-    expect(userMsg).toBeDefined()
-    expect(userMsg?.content).toBe('hello world')
+    expect(msgs.find((m) => m.role === 'user')).toBeUndefined()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].id).toBe('api-old-1')
   })
 
   it('场景2: 乐观 user 消息在宽限期外的 persist 残留被丢弃', () => {
@@ -149,7 +149,7 @@ describe('乐观 user 消息宽限期', () => {
     expect(msgs.find((m) => m.id === 'no-client-4')).toBeUndefined()
   })
 
-  it('场景5: streaming 占位消息仍然始终保留', () => {
+  it('场景5: streaming 占位消息在刷新时被丢弃（WS backfill 恢复）', () => {
     const store = usePipelineMessageStore.getState()
 
     // 创建 streaming 占位消息
@@ -161,14 +161,15 @@ describe('乐观 user 消息宽限期', () => {
     store.startStreaming(PIPELINE_ID, 'stream-5')
     store.addMessage(PIPELINE_ID, streamingMsg)
 
-    // initFromAPI 不含 streaming 消息（后端尚未持久化）
+    // initFromAPI（刷新）：完全丢弃本地，只用 API 权威数据
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-5', 1, { role: 'user', content: 'hi' }),
     ])
 
-    // streaming 占位消息应保留
+    // 新语义：streaming 占位消息被丢弃，恢复靠 WS 重连 backfill + 续流
     const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs.find((m) => m.id === 'stream-5')).toBeDefined()
-    expect(msgs.find((m) => m.id === 'stream-5')?.status).toBe('streaming')
+    expect(msgs.find((m) => m.id === 'stream-5')).toBeUndefined()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].id).toBe('api-user-5')
   })
 })

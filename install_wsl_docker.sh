@@ -124,10 +124,11 @@ else
     warn "TCP 2375 未监听(Windows 可能连不上)"
 fi
 
-info "挂载 /mnt/d 测试(关键:验证能访问 Windows 项目):"
-PROJ="/mnt/d/myproject/container_224042d3b925"
+info "挂载测试(关键:验证能访问 Windows 项目):"
+# 用脚本自身所在目录动态推导项目路径（本脚本位于项目根），不写死挂载点。
+PROJ="$(cd "$(dirname "$0")" && pwd)"
 if docker run --rm -v "${PROJ}:/workspace" alpine sh -c "test -f /workspace/install_wsl_docker.sh && echo MOUNT_OK" 2>/dev/null | grep -q MOUNT_OK; then
-    ok "挂载 /mnt/d 成功，容器能访问 Windows 项目"
+    ok "挂载成功，容器能访问 Windows 项目"
 else
     warn "挂载测试未通过(项目路径可能不同，不影响 docker 本身)"
 fi

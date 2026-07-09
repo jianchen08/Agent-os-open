@@ -1,16 +1,18 @@
 /**
  * 系统通知 + 注入消息 + 刷新复杂场景的消息顺序测试。
  *
- * 验证 fix_20260627_message_order_jump_top：
- * 流式期间触发 initFromAPI（WS 重连补漏 / 切 Tab / 会话切换）时，
- * localOnly（流式占位 / optimistic grace）必须保持到达顺序追加到 API 权威消息末尾，
- * 不能按 sequence 归并——否则 sequence 不可靠的占位/grace 消息会错位插入，
- * 表现为「偶尔下一条输出跑到消息最上面」。
+ * 【initFromAPI 新语义】initFromAPI 现为全量替换：完全丢弃本地所有消息，仅使用传入的 API 数据。
+ * 不再 merge、不再保护 localOnly（不保护 streaming、不保护 grace、不保留 system 通知、不保留 optimistic user）。
+ * 刷新 = 从后端持久化全量重载。后端正在输出时，WS 重连的 backfill 增量补漏 + 续流会补回新内容。
+ *
+ * 因此本文件分两类断言：
+ * 1. 流式期间（未触发 initFromAPI）的到达顺序断言 —— 仍然有效：渲染顺序 = store 数组顺序 = 到达顺序。
+ * 2. 触发 initFromAPI 之后的断言 —— 必须 assert「store 恰好等于 API 返回数据，无任何 localOnly 残留」。
  *
  * 设计原则（与 multiturnOrderE2E 对齐）：
  * - 用真实 pipelineMessageStore + 真实 handlers（不 mock store）
- * - API 权威消息 sequence 可靠（≥1 单调），localOnly sequence 不可靠（前端自算 localMax+1）
- * - 渲染顺序 = store 数组顺序 = 到达顺序（API 已排序在前，localOnly 按到达序在后）
+ * - 流式期间：渲染顺序 = 到达顺序（system 通知按到达序夹在 AI 气泡之间）
+ * - initFromAPI 后：store 仅含 API 权威消息，本地流式/占位/system/optimistic 一律丢弃
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Message } from '@/types/models'
@@ -138,7 +140,7 @@ beforeEach(async () => {
 })
 
 describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
-  it('场景1: 流式占位 localMax+1 与 API 权威 sequence 错位时，刷新后占位仍在末尾', () => {
+  it('场景1: 流式占位在 initFromAPI 后被丢弃，store 恰好等于 API 数据', () => {
     const MSG = 'msg_streaming_a000000'
 
     // 历史消息（API 风格）：user1(seq=1) → ai1(seq=2)
@@ -146,25 +148,26 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2, parts: [{ type: 'text', content: '答1', sequence: 1 } as any] }),
     ])
-    // 当前 store: [user-1, ai-1]，localMax(seq) = 2
+    // 当前 store: [user-1, ai-1]
 
-    // 流式开始：stream_start 不带 sequence → 占位 sequence 走 localMax+1 = 3
+    // 流式开始：stream_start 不带 sequence → 占位进入本地态
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG, _threadId: THREAD_ID }))
-    // 占位还在 streaming，此时刷新（initFromAPI）
+    expect(ids()).toContain(MSG) // 流式期间占位存在
+
+    // 此时刷新（initFromAPI，全量替换语义）
     // 后端真实时序：ai1 之后注入了一条「上级」user 消息（seq=3），流式占位后端还没落库
-    // → API 返回 user-injected(seq=3)，占位 sequence(3) 与它撞了，但占位不在 API 列表里
+    // → API 返回 user-injected(seq=3)，占位不在 API 列表里
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2, parts: [{ type: 'text', content: '答1', sequence: 1 } as any] }),
       makeMsg('user-injected', { role: 'user', content: '[上级]继续', sequence: 3 }),
     ])
 
-    // 期望：API 三条按 sequence 排序在前，流式占位保持到达顺序在末尾
-    // 而不是把占位(sequence=3) 按 sequence 归并插到 user-injected(seq=3) 旁边/前面
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-injected', MSG])
+    // 新语义：API 三条按 sequence 排序，占位被丢弃（不在 API 列表里）
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-injected'])
   })
 
-  it('场景2: 系统通知 + 流式占位 + 切 Tab 刷新，占位保持到达顺序在末尾', () => {
+  it('场景2: 系统通知 + 流式占位 + 切 Tab 刷新，刷新后仅剩 API 数据（system + 占位都丢弃）', () => {
     const MSG = 'msg_streaming_b000000'
 
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -180,26 +183,26 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     const beforeIds = ids()
     expect(beforeIds[0]).toBe('user-1')
     expect(beforeIds[1]).toBe(MSG)
-    expect(systemIds(), '应有一条 system 通知').toHaveLength(1)
+    expect(systemIds(), '流式期间应有一条 system 通知').toHaveLength(1)
     const sysId = systemIds()[0]
     expect(beforeIds[beforeIds.length - 1]).toBe(sysId)
 
-    // 切 Tab 触发 initFromAPI：API 只返回 user-1
-    // 系统通知是 AI 消息之间的结构分隔符，必须保留：即使后端不在历史 API 中返回，
-    // 刷新/切 Tab 后 system 仍留在列表里，作为前后 AI 气泡的边界，避免被错误合并。
-    // 流式占位（assistant streaming）与 system 一起进 localOnly，保持到达顺序追加到 API 末尾。
+    // 切 Tab 触发 initFromAPI（全量替换语义）：API 只返回 user-1
+    // 新语义：system 通知 / 流式占位都不在 API 列表里 → 全部丢弃，store 恰好等于 API。
+    // 后端正在输出时，WS 重连的 backfill 补漏 + 续流会补回 system 通知与流式内容。
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
     ])
 
-    // 期望：API user-1 在前，localOnly（占位 + system）按到达顺序在末尾
-    expect(ids()).toEqual(['user-1', MSG, sysId])
+    // 期望：store 仅含 API 返回的 user-1，占位与 system 通知都被丢弃
+    expect(ids()).toEqual(['user-1'])
+    expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
   })
 
-  it('场景3: 上级注入 user 消息占 sequence + 流式占位，刷新后不互相覆盖、顺序正确', () => {
+  it('场景3: 上级注入 user 消息占 sequence + 流式占位，刷新后仅 API 数据保留', () => {
     const MSG = 'msg_streaming_c000000'
 
-    // store 已有 user-1(seq=1) ai-1(seq=2)，localMax=2
+    // store 已有 user-1(seq=1) ai-1(seq=2)
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
@@ -211,6 +214,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     }))
     // 流式占位（前端 sequence=localMax+1=4）
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG, _threadId: THREAD_ID }))
+    expect(ids()).toContain(MSG) // 流式期间占位存在
 
     // 后端真实时序：后端把 user-2 落库 seq=3，但中间插入了上级 user-injected(后端 seq=4)，
     // 流式占位后端 seq=5 尚未落库 → API 返回到 seq=4
@@ -221,12 +225,11 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg('user-injected', { role: 'user', content: '[上级]补充', sequence: 4 }),
     ])
 
-    // 期望：API 四条按 sequence 排序，流式占位(前端 seq=4) 保持到达顺序在末尾
-    // 不被按 sequence(4) 归并到 user-injected(seq=4) 旁边
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', 'user-injected', MSG])
+    // 新语义：API 四条按 sequence 排序，流式占位被丢弃（不在 API 列表里）
+    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', 'user-injected'])
   })
 
-  it('场景4: optimistic grace user 消息 + 流式，刷新后 grace 消息保持到达顺序', () => {
+  it('场景4: optimistic grace user 消息 + 流式，刷新后 grace 消息与占位都被丢弃', () => {
     const MSG = 'msg_streaming_d000000'
 
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
@@ -240,15 +243,18 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     }))
     // 流式占位
     handlers.handleStreamStart(evt('stream_start', { message_id: MSG, _threadId: THREAD_ID }))
+    expect(ids()).toContain('user-2')
+    expect(ids()).toContain(MSG)
 
-    // 刷新：后端尚未持久化 user-2 和占位 → API 只返回到 ai-1
+    // 刷新（全量替换语义）：后端尚未持久化 user-2 和占位 → API 只返回到 ai-1
+    // 新语义：grace user 与流式占位都不在 API 列表里 → 全部丢弃
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
     ])
 
-    // localOnly = [user-2(grace), MSG(streaming)]，保持到达顺序追加到 API 之后
-    expect(ids()).toEqual(['user-1', 'ai-1', 'user-2', MSG])
+    // store 恰好等于 API：user-1 + ai-1，grace 与占位都消失
+    expect(ids()).toEqual(['user-1', 'ai-1'])
   })
 
   it('场景5: 回归 — persist 残留的 completed 旧消息不复活 refresh_order 旧 bug', () => {
@@ -283,26 +289,13 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(ids()).toEqual(['user-1', 'ai-1', 'user-3', 'ai-2'])
   })
 
-  // ── fix_20260705_notification_after_reply ──────────────────────────────
-  // 复现「系统通知跑到 AI 回复后面」的精确场景。
-  //
-  // 后端时序（bridge_core.py / engine_iteration.py 验证）：
-  //   consume_pending_notifications 在 LLM 调用前调 emit_notification：
-  //     1) emit_notification 推送 system_notification(seq=11, 后端权威)
-  //     2) AI 流式输出 stream_start/end(seq=12, 同一计数器递增)
-  // 后端 sequence 来自 _entry.next_sequence() 共享计数器，通知 seq=11 < AI seq=12，
-  // 逻辑上通知必须在 AI 回复之前。
-  //
-  // 但前端 allocateNextSequence 对 system_notification 走 Math.max(backendSeq, localMax+1)，
-  // 若通知事件 dispatch 时 localMax 已被流式推高，通知 sequence 被抬到 localMax+1，
-  // initFromAPI 重排时被 mergeSorted 排到 AI 之后 → UI 显示「通知在查看结果后面」。
-  //
-  // B2 改动（addMessage 不推 bottomCursor）已防止游标污染，但排序仍依赖 sequence。
-  // 本测试驱动「让带后端权威 sequence 的系统通知正确归位」的方案落地。
-  it('场景7: 系统通知(后端权威 seq=11) 应排在 AI 回复(seq=12) 之前，刷新后不丢失', () => {
+  // ── fix_20260705_notification_after_reply（initFromAPI 全量替换语义下重写）──
+  // 流式期间通知按到达顺序排在 AI 之前，这部分断言不变（rendering = arrival order）。
+  // 但刷新（initFromAPI）后，由于 system 通知不在 API 返回列表里，新语义会将其丢弃。
+  it('场景7: 系统通知流式期间排在 AI 之前；刷新后 system 通知被丢弃（API 未返回）', () => {
     const AI_MSG = 'msg_ai_after_notif'
 
-    // 冷启动已有历史：user-1(seq=1) ai-1(seq=2)，localMax=2，bottomCursor=2（权威）
+    // 冷启动已有历史：user-1(seq=1) ai-1(seq=2)
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
@@ -317,7 +310,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     handlers.handleStreamStart(evt('stream_start', {
       message_id: AI_MSG,
       _threadId: THREAD_ID,
-      sequence: 12, // stream_start 也可携带 sequence（stream_end 的 final_sequence 会在结束时同步）
+      sequence: 12,
     }))
     // 流式期间补一条文字内容并结束，让占位落定为 completed assistant
     handlers.handleStreamChunk(evt('stream_chunk', { message_id: AI_MSG, content: '查报告' }))
@@ -331,47 +324,31 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 流式期间渲染顺序 = 到达顺序：通知先到，AI 后到 → 通知在 AI 前
     const duringIds = ids()
-    expect(systemIds(), '系统通知应已创建').toHaveLength(1)
+    expect(systemIds(), '流式期间系统通知应已创建').toHaveLength(1)
     const sysId = systemIds()[0]
     const sysIdx = duringIds.indexOf(sysId)
     const aiIdx = duringIds.indexOf(AI_MSG)
     expect(aiIdx, 'AI 回复应已落定').toBeGreaterThan(-1)
-    // ★ 第一断言：流式期间通知应在 AI 前面（到达顺序）
+    // ★ 流式期间断言：通知（先到）应在 AI（后到）之前
     expect(sysIdx, '流式期间：通知(先到) 应排在 AI(后到) 之前').toBeLessThan(aiIdx)
 
-    // 切 Tab 触发 initFromAPI：后端历史 API 只返回落库的 user-1/ai-1 + AI 回复(seq=12)
-    // 系统通知未落库 → localOnly 保留；其 sequence 必须保持后端权威值 11（不被抬升）
+    // 切 Tab 触发 initFromAPI（全量替换语义）：API 只返回落库的 user-1/ai-1 + AI 回复(seq=12)
+    // 系统通知未落库 → 新语义下被丢弃，store 恰好等于 API 数据
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
       makeMsg(AI_MSG, { role: 'assistant', content: '查报告', sequence: 12, status: 'completed' }),
     ])
 
-    // ★ 第二断言（核心）：刷新后通知(seq=11) 必须仍在 AI(seq=12) 之前
-    //    修复前：通知 sequence 被前端抬到 localMax+1=13，重排后跑到 AI(12) 后面 → bug
-    //    修复后：通知 sequence 保持后端权威值 11，mergeSorted 按 sequence 归并 → 正确在前
-    const finalIds = ids()
-    const finalSysIdx = finalIds.indexOf(sysId!)
-    const finalAiIdx = finalIds.indexOf(AI_MSG)
-    expect(finalSysIdx, '刷新后通知应保留').toBeGreaterThan(-1)
-    expect(finalAiIdx, '刷新后 AI 应保留').toBeGreaterThan(-1)
-    expect(finalSysIdx, '刷新后：通知(seq=11) 必须排在 AI(seq=12) 之前').toBeLessThan(finalAiIdx)
+    // ★ 刷新后断言：system 通知被丢弃（API 未返回），store 仅含 API 三条
+    expect(ids()).toEqual(['user-1', 'ai-1', AI_MSG])
+    expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
   })
 
-  // ── fix_20260705_notification_after_reply ──────────────────────────────
-  // 复现「系统通知跑到 AI 回复后面」的根因场景：allocateNextSequence 抬升。
-  //
-  // 后端时序（同一 sequence 计数器递增）：
-  //   子任务完成 → consume_pending_notifications 推送 system_notification(seq=11)
-  //   但 WS 事件到达前端时，AI 的工具调用流式（tool_start/tool_result 等）
-  //   可能已先把本地 localMax 推到更高（如 seq=15、16、17...）。
-  //   此时通知事件才被 dispatch，allocateNextSequence(pipeline, 11) 走
-  //   Math.max(11, localMax+1=18) = 18 → 通知 sequence 被抬到 18。
-  //   initFromAPI 重排时，mergeSorted 把通知(seq=18) 排到 AI 主回复(seq=12) 之后。
-  //
-  // 本场景直接用 addMessage 模拟"流式工具调用已把 localMax 推高"的状态，
-  // 再让系统通知"延迟到达"，精确复现 allocateNextSequence 抬升。
-  it('场景8: 通知事件延迟到达 + localMax 已被推高时，通知 sequence 不应被抬升到 AI 之后', () => {
+  // ── fix_20260705_notification_after_reply（initFromAPI 全量替换语义下重写）──
+  // 通知延迟到达 + localMax 被推高：旧断言依赖 initFromAPI 后 system 仍保留并按 seq 归并。
+  // 新语义下 initFromAPI 全量替换，system 通知不在 API 列表 → 被丢弃。
+  it('场景8: 通知延迟到达 + localMax 被推高；刷新后 system 通知被丢弃（API 未返回）', () => {
     const AI_MAIN = 'msg_ai_main_reply'
 
     // 冷启动历史：user-1(seq=1) ai-1(seq=2)
@@ -391,38 +368,24 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       data: { parts: [{ type: 'text', content: '先看报告', sequence: 0 }], full_content: '先看报告' },
     }))
 
-    // ★ 关键：模拟"通知事件延迟到达"——后端实际在 AI 主回复之前就推送了
-    // （consume_pending_notifications 在 LLM 调用前 emit_notification），
-    // 但 WS 分发 / handler 执行时序使它晚于 AI 主回复被处理。
-    // 此时 localMax 已是 12（AI 主回复），allocateNextSequence(pipeline, 11)
-    // 走 Math.max(11, 13) = 13 → 通知 sequence 被抬到 13，大于 AI 的 12。
+    // 模拟"通知事件延迟到达"——后端实际在 AI 主回复之前推送（seq=11, 后端权威）
     handleSystemNotification(notificationEvent('[系统通知] 子任务已完成', {
-      sequence: 11, // 后端权威值，逻辑上早于 AI 主回复(12)
+      sequence: 11,
     }))
 
-    expect(systemIds(), '系统通知应已创建').toHaveLength(1)
-    const sysId = systemIds()[0]
+    expect(systemIds(), '流式期间系统通知应已创建').toHaveLength(1)
 
-    // 切 Tab 触发 initFromAPI：API 返回落库的 user-1/ai-1 + AI 主回复(seq=12)
-    // 系统通知 localOnly 保留
+    // 切 Tab 触发 initFromAPI（全量替换语义）：API 返回落库的 user-1/ai-1 + AI 主回复(seq=12)
+    // 系统通知 localOnly 不在 API 列表 → 新语义下被丢弃
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
       makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
       makeMsg(AI_MAIN, { role: 'assistant', content: '先看报告', sequence: 12, status: 'completed' }),
     ])
 
-    // ★ 核心断言：通知(seq=11, 后端权威) 必须排在 AI 主回复(seq=12) 之前
-    //   修复前：allocateNextSequence 抬升通知 seq 到 13 → mergeSorted 排到 AI(12) 之后 → bug
-    //   修复后：通知 seq 保持后端权威值 11 → 正确排在 AI 之前
-    const finalIds = ids()
-    const finalSysIdx = finalIds.indexOf(sysId!)
-    const finalAiIdx = finalIds.indexOf(AI_MAIN)
-    expect(finalSysIdx, '刷新后通知应保留').toBeGreaterThan(-1)
-    expect(finalAiIdx, '刷新后 AI 应保留').toBeGreaterThan(-1)
-    expect(
-      finalSysIdx,
-      `刷新后：通知(后端 seq=11) 必须排在 AI(seq=12) 之前。实际顺序: ${JSON.stringify(finalIds)}`,
-    ).toBeLessThan(finalAiIdx)
+    // ★ 刷新后断言：store 恰好等于 API 三条，system 通知被丢弃
+    expect(ids()).toEqual(['user-1', 'ai-1', AI_MAIN])
+    expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
   })
 
   // ── fix_20260705_notification_stuck_at_bottom ──────────────────────────
@@ -555,18 +518,11 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(nIdx).toBeLessThan(newIdx)
   })
 
-  // ── fix_20260705_notification_stuck_at_bottom_real_storage ─────────────
-  // 基于真实存储数据复现：system 通知不落库（track 不写 record），sequence 在存储里
-  // 是"缺失"的（如 seq 64→69 缺 67/68，那是两条 system 通知）。
-  // 前端流式期间 push 顺序到达 system（seq=67/68），它们排在 ai(seq=66) 之后、ai(seq=69) 之前，
-  // 这是对的。但切 Tab/重连触发 initFromAPI 时：
-  //   - API 返回的 records 不含 system（缺 67/68）
-  //   - system 走 localOnly 保留，sequence 是后端权威的 67/68
-  //   - mergeSorted 应按 sequence 归并，把 system(67/68) 插到 ai(66) 和 ai(69) 之间
-  // 如果 system 被排到末尾，说明归并失败（sequence 抬升 或 localOnly 末尾拼接逻辑覆盖了归并）。
-  it('场景11: 真实存储 — system(seq=67/68 缺失) 应在 initFromAPI 后正确归并到 ai(66) 和 ai(69) 之间', () => {
+  // ── fix_20260705_notification_stuck_at_bottom_real_storage（initFromAPI 全量替换语义下重写）──
+  // 流式期间 system(seq=67/68) 按到达顺序夹在 ai(66) 与 ai(69) 之间，该断言不变。
+  // 但刷新（initFromAPI）后 API 不返回 system → 新语义丢弃 system，store 恰好等于 API。
+  it('场景11: 真实存储 — 流式期间 system(67/68) 夹在 ai(66)/ai(69) 之间；刷新后 system 被丢弃', () => {
     // 流式期间已经按到达顺序收到：ai(66) → system(67) → system(68) → ai(69)
-    // 模拟流式阶段
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问', sequence: 60 }),
       makeMsg('ai-64', { role: 'assistant', content: '触发器第1次', sequence: 64, status: 'completed' }),
@@ -589,11 +545,20 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     }))
 
     // 流式期间顺序（到达顺序）：[..., ai-66, sys-67, sys-68, ai-69]
-    const beforeRefresh = ids()
     const sysIds = systemIds()
-    expect(sysIds.length, '应有 2 条 system 通知').toBe(2)
+    expect(sysIds.length, '流式期间应有 2 条 system 通知').toBe(2)
+    const beforeRefresh = ids()
+    const ai66Idx = beforeRefresh.indexOf('ai-66')
+    const ai69Idx = beforeRefresh.indexOf(AI69)
+    expect(ai66Idx, 'ai-66 应存在').toBeGreaterThan(-1)
+    expect(ai69Idx, 'ai-69 应存在').toBeGreaterThan(-1)
+    for (const id of sysIds) {
+      const idx = beforeRefresh.indexOf(id)
+      expect(idx, '流式期间 system 应夹在 ai(66) 和 ai(69) 之间').toBeGreaterThan(ai66Idx)
+      expect(idx).toBeLessThan(ai69Idx)
+    }
 
-    // ★ 切 Tab 触发 initFromAPI：API 返回的 records 不含 system（缺 67/68）
+    // ★ 切 Tab 触发 initFromAPI（全量替换语义）：API 返回的 records 不含 system（缺 67/68）
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问', sequence: 60 }),
       makeMsg('ai-64', { role: 'assistant', content: '触发器第1次', sequence: 64, status: 'completed' }),
@@ -602,34 +567,18 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       makeMsg(AI69, { role: 'assistant', content: '任务完成啦', sequence: 69, status: 'completed' }),
     ])
 
-    // ★ 核心断言：刷新后 system(67/68) 必须归并到 ai(66) 和 ai(69) 之间，不是末尾
-    const finalIds = ids()
-    const finalSysIds = systemIds()
-    const ai66Idx = finalIds.indexOf('ai-66')
-    const ai69Idx = finalIds.indexOf(AI69)
-    const sysIdxes = finalSysIds.map((id) => finalIds.indexOf(id))
-
-    expect(ai66Idx, 'ai-66 应存在').toBeGreaterThan(-1)
-    expect(ai69Idx, 'ai-69 应存在').toBeGreaterThan(-1)
-    expect(sysIdxes.length, 'system 通知应保留').toBe(2)
-    for (const idx of sysIdxes) {
-      expect(
-        idx,
-        `system(seq=67/68) 必须在 ai(66) 和 ai(69) 之间，不能在末尾。实际: ${JSON.stringify(finalIds)}`,
-      ).toBeGreaterThan(ai66Idx)
-      expect(idx).toBeLessThan(ai69Idx)
-    }
+    // ★ 核心断言（新语义）：刷新后 system 通知全部丢弃，store 恰好等于 API 返回的 5 条
+    expect(systemIds(), '刷新后 system 通知应被丢弃（API 未返回）').toHaveLength(0)
+    expect(ids()).toEqual(['user-1', 'ai-64', 'tool-65', 'ai-66', AI69])
   })
 
-  // ── fix_20260708_system_notification_duplicate_on_refresh ──────────────
-  // 复现「触发器通知刷新后渲染两次」。根因：流式 system 气泡 id 与后端落库
-  // record_id 不一致（前端曾用 sys_<uuid>，后端 record_id 随机生成），刷新后
-  // isCoveredByApi 按 id 去重失败 → 流式气泡 + API 记录并存 = 两条。
+  // ── fix_20260708_system_notification_duplicate_on_refresh（initFromAPI 全量替换语义）──
+  // 旧 bug：流式 system 气泡 id 与后端落库 record_id 不一致，刷新后流式气泡 + API 记录并存 = 两条。
+  // 修复后事件 payload 与 track 落库共用后端生成的 record_id。
   //
-  // 修复：后端 emit_notification 生成 record_id（唯一 id 来源），事件 payload 与
-  // track 落库共用它；前端用 record_id 作消息 id。刷新后 API 返回同 record_id 的
-  // system 记录 → isCoveredByApi 按 id 命中 → 本地流式气泡让位 API 版 → 只剩一条。
-  it('场景12: 流式 system(后端 record_id) + 刷新返回同 record_id 的 system 记录 → 只剩一条', () => {
+  // 新语义下，无论 id 是否一致，initFromAPI 都会全量替换：本地流式气泡丢弃，只剩 API 版本。
+  // 此场景验证刷新后 system 恰好只剩 API 那一条（同 record_id），user-1 也不重复。
+  it('场景12: 流式 system + 刷新返回同 record_id 的 system 记录 → 只剩 API 版（不重复）', () => {
     // 冷启动历史
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
       makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
@@ -655,7 +604,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       }),
     ])
 
-    // ★ 核心断言：刷新后 system 消息只剩 1 条（流式气泡被 API 同 id 版本覆盖，不并存）
+    // ★ 核心断言：刷新后 system 消息只剩 1 条（initFromAPI 全量替换：本地流式气泡丢弃，只剩 API 版）
     expect(systemIds(), '刷新后 system 不应重复').toHaveLength(1)
     expect(systemIds()[0]).toBe(notifRecordId)
     const finalIds = ids()

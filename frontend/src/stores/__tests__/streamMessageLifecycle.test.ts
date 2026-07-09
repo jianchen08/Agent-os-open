@@ -90,7 +90,7 @@ describe('stream 消息生命周期', () => {
   })
 
   describe('场景2: initFromAPI 在 stream_start 之后执行', () => {
-    it('initFromAPI 不应删除 streaming 状态的消息', () => {
+    it('initFromAPI 完全丢弃本地消息，只用 API 权威数据（不保留 streaming）', () => {
       const store = usePipelineMessageStore.getState()
 
       // 1. 先加载历史消息
@@ -117,17 +117,12 @@ describe('stream 消息生命周期', () => {
       ]
       store.initFromAPI(PIPELINE_ID, apiMsgs)
 
-      // 5. 验证 streaming 消息仍然存在
+      // 5. 新语义：刷新 = 全量替换，本地 streaming 消息被丢弃，仅保留 API 权威数据。
+      //    流式恢复由 WS 重连 backfill 处理，不再依赖本地保留。
       const msgsAfterInit = store.getMessages(PIPELINE_ID)
       const streamingMsg = msgsAfterInit.find((m) => m.id === MESSAGE_ID)
-      expect(streamingMsg).toBeDefined()
-      expect(streamingMsg!.status).toBe('streaming')
-
-      // 6. stream_end 应该能找到消息
-      store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
-      const afterEnd = store.getMessages(PIPELINE_ID).find((m) => m.id === MESSAGE_ID)
-      expect(afterEnd).toBeDefined()
-      expect(afterEnd!.status).toBe('completed')
+      expect(streamingMsg).toBeUndefined()
+      expect(msgsAfterInit).toHaveLength(2)
     })
   })
 
@@ -183,7 +178,7 @@ describe('stream 消息生命周期', () => {
   })
 
   describe('场景5: fetchMessages (initFromAPI) 覆盖场景', () => {
-    it('initFromAPI 用 API 数据覆盖后，WS 新消息 ID 在 API 中不存在', () => {
+    it('initFromAPI 完全丢弃本地消息，WS 新消息（含 streaming）不再保留', () => {
       const store = usePipelineMessageStore.getState()
 
       // 1. 加载历史（使用固定 sequence 模拟真实 API 数据）
@@ -220,19 +215,17 @@ describe('stream 消息生命周期', () => {
       ])
 
       const msgs = store.getMessages(PIPELINE_ID)
+
+      // 5. 新语义：刷新 = 全量替换，本地 streaming 消息被丢弃，仅保留 API 权威数据。
       const streamingMsg = msgs.find((m) => m.id === MESSAGE_ID)
-
-      expect(streamingMsg).toBeDefined()
-      expect(streamingMsg!.status).toBe('streaming')
-
-      // 5. stream_end 应能找到
-      store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
-      const final = store.getMessages(PIPELINE_ID).find((m) => m.id === MESSAGE_ID)
-      expect(final).toBeDefined()
-      expect(final!.status).toBe('completed')
+      expect(streamingMsg).toBeUndefined()
+      // 本地乐观 user-1（sequence=2）虽与 API 同 id，但全量替换后只看 API，
+      // API 恰好含同 id 的 user-1，故最终列表 = API 两条。
+      expect(msgs).toHaveLength(2)
+      expect(msgs.map((m) => m.id).sort()).toEqual(['old-1', 'user-1'])
     })
 
-    it('initFromAPI 在非 streaming 消息上的指纹去重', () => {
+    it('initFromAPI 完全丢弃本地系统通知，仅保留 API 权威数据', () => {
       const store = usePipelineMessageStore.getState()
 
       // WS 先收到一条 completed 的消息（通过 handlePipelineReceived 或 handleSystemNotification）
@@ -247,9 +240,13 @@ describe('stream 消息生命周期', () => {
         makeMsg('api-msg-1', { content: 'hello', status: 'completed' }),
       ])
 
-      // WS 的 system 消息应该被保留（指纹不匹配）
+      // 新语义：刷新 = 全量替换，本地 system 消息被丢弃（不再保留为结构边界）。
+      // 后端持久化的内容由 API 决定，瞬态系统通知刷新后即消失。
       const msgs = store.getMessages(PIPELINE_ID)
-      expect(msgs.length).toBeGreaterThanOrEqual(1)
+      const systemMsg = msgs.find((m) => m.id === 'ws-msg-1')
+      expect(systemMsg).toBeUndefined()
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('api-msg-1')
     })
   })
 

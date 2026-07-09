@@ -54,7 +54,7 @@ describe('initFromAPI 吃掉 streaming 消息', () => {
     })
   })
 
-  it('场景A: initFromAPI 在 streaming 消息之后调用，streaming 消息必须保留', () => {
+  it('场景A: initFromAPI 在 streaming 消息之后调用，本地 streaming 消息被丢弃（刷新=全量重载）', () => {
     const store = usePipelineMessageStore.getState()
 
     // 初始加载
@@ -80,16 +80,17 @@ describe('initFromAPI 吃掉 streaming 消息', () => {
     ])
 
     const afterInit = store.getMessages(PIPELINE_ID)
-    const streamingMsg = afterInit.find(m => m.id === MESSAGE_ID)
-    expect(streamingMsg).toBeDefined()
-    expect(streamingMsg!.status).toBe('streaming')
+    // 新语义：initFromAPI 完全丢弃本地消息（含 streaming 占位符），只用 API 权威数据
+    expect(afterInit.find(m => m.id === MESSAGE_ID)).toBeUndefined()
+    expect(afterInit).toHaveLength(2)
+    expect(afterInit.map(m => m.id)).toEqual(['user-1', 'user-2'])
 
-    // stream_end 能找到
+    // 被丢弃的 streaming 占位符不会被 updateMessage 重新创建
     store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
-    expect(store.getMessages(PIPELINE_ID).find(m => m.id === MESSAGE_ID)?.status).toBe('completed')
+    expect(store.getMessages(PIPELINE_ID).find(m => m.id === MESSAGE_ID)).toBeUndefined()
   })
 
-  it('场景B: initFromAPI 在 streaming 消息之后调用，API 返回了不同 sequence 的消息', () => {
+  it('场景B: initFromAPI 在 streaming 消息之后调用，本地 streaming 占位符被丢弃，仅保留 API 返回的消息', () => {
     const store = usePipelineMessageStore.getState()
 
     // 初始加载
@@ -109,20 +110,21 @@ describe('initFromAPI 吃掉 streaming 消息', () => {
 
     const msgs = store.getMessages(PIPELINE_ID)
 
-    // 关键检查：streaming 消息（WS 创建的 MESSAGE_ID）是否还在
-    const wsMsg = msgs.find(m => m.id === MESSAGE_ID)
+    // 新语义：本地 streaming 占位符（MESSAGE_ID）被丢弃，只剩 API 权威数据
+    expect(msgs.find(m => m.id === MESSAGE_ID)).toBeUndefined()
     const apiMsg = msgs.find(m => m.id === 'api-msg-same-seq')
+    expect(apiMsg).toBeDefined()
+    expect(apiMsg!.content).toBe('full response from api')
+    expect(msgs).toHaveLength(2)
 
-    console.log('msgs after initFromAPI:', msgs.map(m => ({ id: m.id, seq: m.sequence, status: m.status })))
-
-    // 至少有一个 sequence=2 的 assistant 消息存在
+    // sequence=2 的 assistant 消息只有 API 那一条（不再保留 WS 占位符）
     const seq2Msgs = msgs.filter(m => m.sequence === 2 && m.role === 'assistant')
-    expect(seq2Msgs.length).toBeGreaterThanOrEqual(1)
+    expect(seq2Msgs.length).toBe(1)
+    expect(seq2Msgs[0].id).toBe('api-msg-same-seq')
 
-    // stream_end 用 MESSAGE_ID 能 updateMessage 吗？
+    // 被丢弃的 streaming 占位符不会被 updateMessage 重新创建
     store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
-    const afterUpdate = store.getMessages(PIPELINE_ID).find(m => m.id === MESSAGE_ID)
-    expect(afterUpdate).toBeDefined()
+    expect(store.getMessages(PIPELINE_ID).find(m => m.id === MESSAGE_ID)).toBeUndefined()
   })
 
   it('场景C: 乐观 user 消息通过 clientMessageId 对账去重', () => {
