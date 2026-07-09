@@ -5,7 +5,15 @@
 # 构建上下文说明：
 #   - frontend: context 为仓库根目录（.），以便 Dockerfile 读取 packages/ 离线包
 #   - redis: 直接使用 Docker Hub 镜像；首次拉取由 start_web.bat 带镜像前缀回退
+#
+# 容器命名说明：
+#   compose project name 取自 COMPOSE_PROJECT_NAME 环境变量，默认 agentos。
+#   容器名/网络名/卷名不再写死目录哈希后缀；多实例部署时设置不同的
+#   COMPOSE_PROJECT_NAME（如 export COMPOSE_PROJECT_NAME=agentos2）即可隔离。
 # =============================================================================
+
+# project name 可被环境变量覆盖；默认 agentos 保证单实例开箱即用。
+name: ${COMPOSE_PROJECT_NAME:-agentos}
 
 services:
   # ---------------------------------------------------------------------------
@@ -18,21 +26,26 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     image: agent-os-frontend:latest
-    container_name: agent-os-frontend-22404
+    container_name: agent-os-frontend
     # on-failure + 上层 deploy 限制：崩溃不再无限重启拉起，
     # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
     restart: on-failure
     ports:
       - "5289:5188"
     environment:
-      # Agent 跑在宿主机，前端通过 host.docker.internal 连接
-      - BACKEND_URL=http://host.docker.internal:8988
-      - BACKEND_WS_URL=ws://host.docker.internal:8988
+      # Agent 跑在宿主机，前端需连到宿主的 8988。
+      # - Docker Desktop 模式：host.docker.internal 由 Desktop 自动注入，指向 Windows 宿主。
+      # - WSL 原生 docker 模式：host.docker.internal 不被注入（→ 容器解析失败 → 502），
+      #   且后端在 Windows（WSL 的上一层宿主），host-gateway 也只指向 WSL 自身。
+      #   故由 wsl_ensure_containers.sh 导出 BACKEND_HOST_IP=WSL默认网关(=Windows宿主)，
+      #   未设置时回退 host.docker.internal（兼容 Desktop 模式与直接 docker compose up）。
+      - BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:8988
+      - BACKEND_WS_URL=ws://${BACKEND_HOST_IP:-host.docker.internal}:8988
     depends_on:
       redis:
         condition: service_healthy
     networks:
-      - agent-net-22404
+      - agent-net
     deploy:
       restart_policy:
         condition: on-failure
@@ -51,7 +64,7 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: agent-os-redis-22404
+    container_name: agent-os-redis
     # on-failure：与 frontend 一致，崩溃不无限重启，避免反复触发 WSL2 容器停止路径的内核卡死。
     restart: on-failure
     ports:
@@ -63,9 +76,9 @@ services:
       --appendonly no
       --save ""
     volumes:
-      - redis-data-22404:/data
+      - redis-data:/data
     networks:
-      - agent-net-22404
+      - agent-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -74,8 +87,8 @@ services:
       retries: 3
 
 volumes:
-  redis-data-22404:
+  redis-data:
 
 networks:
-  agent-net-22404:
+  agent-net:
     driver: bridge

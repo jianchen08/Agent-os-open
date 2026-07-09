@@ -2,4 +2,4 @@
 
 from .tool import MusicGenerateTool
 
-__all__ = ['MusicGenerateTool']
+__all__ = ["MusicGenerateTool"]

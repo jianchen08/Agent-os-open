@@ -220,16 +220,20 @@ class TestEmitFlow:
         assert len(sink.events) == 0
 
     def test_emit_notification(self, sink):
-        """emit_notification 推送 system_notification。"""
+        """emit_notification 推送 system_notification，返回 record_id（唯一 id 来源）。"""
         b = PipelineStreamBridge("p7", sink)
-        seq = _run(b.emit_notification("任务完成"))
-        assert seq >= 0
-        assert sink.events[0]["data"]["content"] == "任务完成"
+        record_id = _run(b.emit_notification("任务完成"))
+        # 返回 hex12 record_id（与 AI message_id 同格式，非 int seq）
+        assert isinstance(record_id, str) and len(record_id) == 12
+        data = sink.events[0]["data"]
+        assert data["content"] == "任务完成"
+        # record_id 必须出现在 payload（前端据此设消息 id，与 track 落库对齐）
+        assert data["record_id"] == record_id
 
-    def test_emit_notification_empty_returns_minus_one(self, sink):
-        """空通知返回 -1。"""
+    def test_emit_notification_empty_returns_empty(self, sink):
+        """空通知返回空串（拒绝推送）。"""
         b = PipelineStreamBridge("p8", sink)
-        assert _run(b.emit_notification("  ")) == -1
+        assert _run(b.emit_notification("  ")) == ""
 
 
 # ============================================================

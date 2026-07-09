@@ -10,6 +10,7 @@ files/capabilities。
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -20,6 +21,9 @@ from human_interaction import get_human_interaction_service
 from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
+
+# 模块加载时间（近似应用启动时间，用于计算运行时长）
+_module_start_time: float = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -599,8 +603,6 @@ def _format_system_metrics(
     disk_free: int = 0,
 ) -> dict[str, Any]:
     """格式化系统指标为统一响应结构。"""
-    import time  # noqa: PLC0415
-
     return {
         "cpu_usage": round(cpu, 2),
         "memory": {
@@ -616,7 +618,7 @@ def _format_system_metrics(
             "free": disk_free,
             "usage_percent": round(disk_percent, 2),
         },
-        "uptime": int(time.time()),
+        "uptime": int(time.time() - _module_start_time),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 

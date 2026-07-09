@@ -255,7 +255,7 @@ export async function addModel(
   return requestWithRetry(async () => {
     const response = await apiClient.post<Record<string, ModelConfig>>(
       API_ENDPOINTS.CONFIG.LLM_MODELS,
-      { [modelId]: config },
+      { models: { [modelId]: config } },
     )
     return response.data
   }, options)
@@ -269,7 +269,7 @@ export async function updateModel(
   return requestWithRetry(async () => {
     const response = await apiClient.put<Record<string, ModelConfig>>(
       `${API_ENDPOINTS.CONFIG.LLM_MODELS}/${modelId}`,
-      config,
+      { config },
     )
     return response.data
   }, options)

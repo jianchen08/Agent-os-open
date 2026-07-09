@@ -21,6 +21,7 @@ class _TaskCleanupMixin:
     def _get_execution_record_storage(self):
         """获取全局 ExecutionRecordStorage 实例。委托到公共接口。"""
         from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
+
         return get_execution_record_storage()
 
     def _cancel_pipeline(self, task_id: str) -> None:
@@ -38,7 +39,8 @@ class _TaskCleanupMixin:
         except Exception as e:
             logger.warning(
                 "[TaskService] 任务 %s 管道取消失败 (non-fatal): %s",
-                task_id, e,
+                task_id,
+                e,
             )
 
     def _cancel_pipeline_recursive(self, task_id: str) -> None:
@@ -92,6 +94,7 @@ class _TaskCleanupMixin:
         lifecycle_cleaned = False
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             provider = get_service_provider()
             lifecycle = provider.get("workspace_lifecycle_manager")
             if lifecycle:
@@ -120,7 +123,8 @@ class _TaskCleanupMixin:
                 if not ws_path_resolved.is_relative_to(ws_root_resolved):
                     logger.warning(
                         "[TaskService] 拒绝删除工作空间（不在配置根目录下）: %s (root=%s)",
-                        ws_path_resolved, ws_root_resolved,
+                        ws_path_resolved,
+                        ws_root_resolved,
                     )
                     cleanup_results["errors"].append(
                         f"安全拦截：路径 {ws_path_resolved} 不在工作空间根目录 {ws_root_resolved} 下，已跳过删除"
@@ -162,7 +166,7 @@ class _TaskCleanupMixin:
         try:
             git_file_content = (workspace_path / ".git").read_text(encoding="utf-8").strip()
             if git_file_content.startswith("gitdir: "):
-                worktree_gitdir = Path(git_file_content[len("gitdir: "):])
+                worktree_gitdir = Path(git_file_content[len("gitdir: ") :])
                 main_repo = worktree_gitdir.parent.parent.parent
             else:
                 main_repo = workspace_path.parent
@@ -201,7 +205,8 @@ class _TaskCleanupMixin:
                 if branch_del.returncode == 0:
                     logger.info(
                         "[TaskService] 已删除 worktree 关联分支: %s (源: %s)",
-                        branch_to_delete, workspace_path,
+                        branch_to_delete,
+                        workspace_path,
                     )
                 else:
                     cleanup_results["errors"].append(
@@ -209,15 +214,15 @@ class _TaskCleanupMixin:
                     )
                     logger.warning(
                         "[TaskService] 删除分支失败: %s, stderr: %s",
-                        branch_to_delete, branch_del.stderr,
+                        branch_to_delete,
+                        branch_del.stderr,
                     )
         except subprocess.CalledProcessError as e:
-            cleanup_results["errors"].append(
-                f"git worktree remove 失败: {e.stderr.strip() if e.stderr else str(e)}"
-            )
+            cleanup_results["errors"].append(f"git worktree remove 失败: {e.stderr.strip() if e.stderr else str(e)}")
             logger.warning(
                 "[TaskService] git worktree remove 失败: %s, stderr: %s",
-                workspace_path, e.stderr,
+                workspace_path,
+                e.stderr,
             )
         except Exception as e:
             cleanup_results["errors"].append(f"清理 worktree 失败: {str(e)}")
@@ -262,7 +267,8 @@ class _TaskCleanupMixin:
 
         logger.info(
             "[TaskService] 开始清理容器 %s 的子任务 worktree，共 %d 个子任务",
-            container_task.id, len(subtasks),
+            container_task.id,
+            len(subtasks),
         )
 
         for subtask in subtasks:
@@ -270,7 +276,8 @@ class _TaskCleanupMixin:
 
             if not workspace:
                 logger.debug(
-                    "[TaskService] 子任务 %s 无 workspace_path，跳过", subtask.id,
+                    "[TaskService] 子任务 %s 无 workspace_path，跳过",
+                    subtask.id,
                 )
                 result["skipped_count"] += 1
                 continue
@@ -283,7 +290,8 @@ class _TaskCleanupMixin:
             if container_ws_resolved and sub_ws_resolved == container_ws_resolved:
                 logger.info(
                     "[TaskService] 子任务 %s 的 workspace 与容器相同 (%s)，跳过",
-                    subtask.id, workspace,
+                    subtask.id,
+                    workspace,
                 )
                 result["skipped_count"] += 1
                 continue
@@ -298,24 +306,25 @@ class _TaskCleanupMixin:
                     if lifecycle:
                         lifecycle.restore_ws_meta(subtask.id)
                         lc_result = lifecycle.cleanup_workspace(subtask.id)
-                        if lc_result and (
-                            lc_result.get("worktree_removed") or lc_result.get("dir_removed")
-                        ):
+                        if lc_result and (lc_result.get("worktree_removed") or lc_result.get("dir_removed")):
                             lifecycle_cleaned = True
                             result["cleaned_count"] += 1
                             logger.info(
                                 "[TaskService] 已通过 lifecycle 清理子任务 %s 的 worktree: %s",
-                                subtask.id, workspace,
+                                subtask.id,
+                                workspace,
                             )
                 except Exception as e:
                     logger.debug(
                         "[TaskService] lifecycle 清理子任务 %s 不可用: %s",
-                        subtask.id, e,
+                        subtask.id,
+                        e,
                     )
 
                 if not lifecycle_cleaned:
                     cleanup_result = await self._cleanup_task_resources(
-                        task_id=subtask.id, workspace=workspace,
+                        task_id=subtask.id,
+                        workspace=workspace,
                     )
                     if cleanup_result.get("workspace_cleaned"):
                         result["cleaned_count"] += 1
@@ -323,9 +332,7 @@ class _TaskCleanupMixin:
                         errors = cleanup_result.get("errors", [])
                         if errors:
                             result["error_count"] += 1
-                            result["errors"].extend(
-                                [f"子任务 {subtask.id}: {e}" for e in errors]
-                            )
+                            result["errors"].extend([f"子任务 {subtask.id}: {e}" for e in errors])
                         else:
                             result["skipped_count"] += 1
 
@@ -334,15 +341,18 @@ class _TaskCleanupMixin:
                 result["errors"].append(f"子任务 {subtask.id}: {str(e)}")
                 logger.warning(
                     "[TaskService] 清理子任务 %s 的 worktree 失败: %s, 错误: %s",
-                    subtask.id, workspace, e,
+                    subtask.id,
+                    workspace,
+                    e,
                 )
 
         logger.info(
-            "[TaskService] 容器 %s 子任务 worktree 清理完成: "
-            "总计=%d, 已清理=%d, 跳过=%d, 失败=%d",
+            "[TaskService] 容器 %s 子任务 worktree 清理完成: 总计=%d, 已清理=%d, 跳过=%d, 失败=%d",
             container_task.id,
-            result["total_subtasks"], result["cleaned_count"],
-            result["skipped_count"], result["error_count"],
+            result["total_subtasks"],
+            result["cleaned_count"],
+            result["skipped_count"],
+            result["error_count"],
         )
 
         return result
@@ -382,14 +392,16 @@ class _TaskCleanupMixin:
             if deleted > 0:
                 logger.info(
                     "[TaskService] 已清理管道执行文件: %s (%d 条记录)",
-                    pipeline_run_id, deleted,
+                    pipeline_run_id,
+                    deleted,
                 )
                 return True
             return False
         except Exception as e:
             logger.warning(
                 "[TaskService] 清理管道执行文件失败 (non-fatal): %s, 错误: %s",
-                pipeline_run_id, e,
+                pipeline_run_id,
+                e,
             )
             return False
 
@@ -424,7 +436,8 @@ class _TaskCleanupMixin:
 
         logger.info(
             "[TaskService] 开始级联清理任务 %s 的 %d 个后代子任务",
-            task_id, len(descendant_ids),
+            task_id,
+            len(descendant_ids),
         )
 
         container_ws_resolved = ""
@@ -440,10 +453,7 @@ class _TaskCleanupMixin:
                 continue
 
             # 1. 清理管道执行文件
-            if (
-                descendant_task.pipeline_run_id
-                and self._cleanup_pipeline_file(descendant_task.pipeline_run_id)
-            ):
+            if descendant_task.pipeline_run_id and self._cleanup_pipeline_file(descendant_task.pipeline_run_id):
                 stats["pipeline_files_cleaned"] += 1
 
             # 2. 清理工作空间
@@ -463,39 +473,37 @@ class _TaskCleanupMixin:
                     else:
                         try:
                             cleanup_result = await self._cleanup_task_resources(
-                                task_id=descendant_id, workspace=workspace,
+                                task_id=descendant_id,
+                                workspace=workspace,
                             )
                             if cleanup_result.get("workspace_cleaned"):
                                 stats["workspaces_cleaned"] += 1
                         except Exception as e:
-                            stats["errors"].append(
-                                f"子任务 {descendant_id} 工作空间清理失败: {str(e)}"
-                            )
+                            stats["errors"].append(f"子任务 {descendant_id} 工作空间清理失败: {str(e)}")
 
             # 3. 删除存储记录
             try:
                 await self.hard_delete(descendant_id)
                 stats["subtasks_deleted"] += 1
             except Exception as e:
-                stats["errors"].append(
-                    f"子任务 {descendant_id} 记录删除失败: {str(e)}"
-                )
+                stats["errors"].append(f"子任务 {descendant_id} 记录删除失败: {str(e)}")
                 logger.warning(
                     "[TaskService] 删除子任务记录失败 (non-fatal): %s, 错误: %s",
-                    descendant_id, e,
+                    descendant_id,
+                    e,
                 )
 
         logger.info(
             "[TaskService] 级联清理完成: 子任务删除=%d, 管道文件清理=%d, 工作空间清理=%d, 错误=%d",
-            stats["subtasks_deleted"], stats["pipeline_files_cleaned"],
-            stats["workspaces_cleaned"], len(stats["errors"]),
+            stats["subtasks_deleted"],
+            stats["pipeline_files_cleaned"],
+            stats["workspaces_cleaned"],
+            len(stats["errors"]),
         )
 
         return stats
 
-    async def soft_delete_container(
-        self, task_id: str, reason: str = "用户请求删除"
-    ) -> dict[str, Any]:
+    async def soft_delete_container(self, task_id: str, reason: str = "用户请求删除") -> dict[str, Any]:
         """软删除容器任务（标记取消 + 级联清理子任务）。
 
         Args:
@@ -526,7 +534,9 @@ class _TaskCleanupMixin:
 
         container_workspace = (task.metadata or {}).get("workspace", "")
         cascade_stats = await self._cascade_cleanup_subtasks(
-            task_id, skip_workspace=False, container_workspace=container_workspace,
+            task_id,
+            skip_workspace=False,
+            container_workspace=container_workspace,
         )
 
         result: dict[str, Any] = {
@@ -579,7 +589,9 @@ class _TaskCleanupMixin:
         subtasks = self.list_subtasks(task_id)
         if subtasks:
             cascade_stats = await self._cascade_cleanup_subtasks(
-                task_id, skip_workspace=skip_workspace, container_workspace="",
+                task_id,
+                skip_workspace=skip_workspace,
+                container_workspace="",
             )
 
         pipeline_cleaned = False
@@ -589,7 +601,8 @@ class _TaskCleanupMixin:
         if not skip_workspace:
             workspace = task.metadata.get("workspace")
             cleanup_results = await self._cleanup_task_resources(
-                task_id=task_id, workspace=workspace,
+                task_id=task_id,
+                workspace=workspace,
             )
         else:
             cleanup_results = {"skipped": "容器子任务不清理工作空间"}
@@ -599,6 +612,7 @@ class _TaskCleanupMixin:
         # WebSocket 通知（按 user_id 精确路由，与 task_service 一致）
         try:
             from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
             _provider = get_service_provider()
             _ws_notifier = _provider.get("ws_interaction_notifier")
             if _ws_notifier:
@@ -611,7 +625,8 @@ class _TaskCleanupMixin:
                     await _ws_notifier.send_to_user(_user_id, _ws_payload)
                     logger.debug(
                         "[TaskService] task_deleted 已通过 send_to_user 发送 | task_id=%s user=%s",
-                        task_id, _user_id[:12],
+                        task_id,
+                        _user_id[:12],
                     )
                 else:
                     logger.debug(

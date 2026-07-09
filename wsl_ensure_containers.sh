@@ -9,8 +9,14 @@
 set -uo pipefail
 
 # 项目目录由 start_web_cn.bat 通过 $1 传入（wslpath 转换后的路径）。
-# 未传参时回退到默认值，保证直接运行脚本也能工作。
-PROJECT_DIR="${1:-/mnt/d/myproject/container_224042d3b925}"
+# 未传参时用 wslpath 从当前 Windows 工作目录动态推导，保证直接运行脚本也能工作
+# 且不依赖写死的挂载路径；wslpath 不可用时回退到脚本所在目录。
+if [ -z "${1:-}" ]; then
+    _guessed="$(wslpath "$(pwd)" 2>/dev/null || true)"
+    PROJECT_DIR="${_guessed:-$(cd "$(dirname "$0")" && pwd)}"
+else
+    PROJECT_DIR="$1"
+fi
 cd "$PROJECT_DIR" 2>/dev/null || { echo "[ERROR] 项目目录不存在: $PROJECT_DIR"; exit 1; }
 
 # 防御：compose 前先确认 daemon 的 unix socket 真正可响应
@@ -67,6 +73,19 @@ if [ "$stuck" -ne 0 ]; then
 fi
 
 echo "[INFO] docker compose up -d"
+
+# WSL 原生 docker 模式下，host.docker.internal 不被注入（非 Docker Desktop）。
+# 获取 WSL 默认网关（= Windows 宿主地址），传给 docker-compose 的 BACKEND_HOST_IP，
+# 使 frontend 容器能正确连接 Windows 宿主上的后端（8988）。
+# Docker Desktop 模式不会执行此脚本，compose 自动回退 host.docker.internal。
+if [ -z "${BACKEND_HOST_IP:-}" ]; then
+    BACKEND_HOST_IP="$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')"
+fi
+if [ -n "$BACKEND_HOST_IP" ]; then
+    echo "[INFO] BACKEND_HOST_IP=${BACKEND_HOST_IP}"
+    export BACKEND_HOST_IP
+fi
+
 out="$(timeout 120 docker compose up -d 2>&1)"
 rc=$?
 echo "$out" | tail -8
@@ -100,8 +119,8 @@ fi
 echo "[INFO] 等待容器进入 running ..."
 ok=0
 for i in $(seq 1 15); do
-    redis_up="$(timeout 8 docker ps --filter name=agent-os-redis-22404 --filter status=running --format '{{.Names}}' 2>/dev/null)"
-    front_up="$(timeout 8 docker ps --filter name=agent-os-frontend-22404 --filter status=running --format '{{.Names}}' 2>/dev/null)"
+    redis_up="$(timeout 8 docker ps --filter name=agent-os-redis --filter status=running --format '{{.Names}}' 2>/dev/null)"
+    front_up="$(timeout 8 docker ps --filter name=agent-os-frontend --filter status=running --format '{{.Names}}' 2>/dev/null)"
     if [ -n "$redis_up" ] && [ -n "$front_up" ]; then ok=1; break; fi
     sleep 2
 done

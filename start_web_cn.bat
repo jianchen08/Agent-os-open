@@ -275,17 +275,17 @@ echo [OK] Docker 就绪
 
 echo [INFO] 启动 Docker 服务...
 
-docker ps -a --format "{{.Names}}" | findstr "agent-os-redis-22404" >nul 2>&1
+docker ps -a --format "{{.Names}}" | findstr "agent-os-redis" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 复用已有容器 agent-os-redis-22404
-    docker start agent-os-redis-22404 >nul 2>&1
+    echo [OK] 复用已有容器 agent-os-redis
+    docker start agent-os-redis >nul 2>&1
 ) else (
     docker compose up -d --no-recreate redis
 )
-docker ps -a --format "{{.Names}}" | findstr "agent-os-frontend-22404" >nul 2>&1
+docker ps -a --format "{{.Names}}" | findstr "agent-os-frontend" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 复用已有容器 agent-os-frontend-22404
-    docker start agent-os-frontend-22404 >nul 2>&1
+    echo [OK] 复用已有容器 agent-os-frontend
+    docker start agent-os-frontend >nul 2>&1
 ) else (
     docker compose up -d --no-recreate frontend
 )

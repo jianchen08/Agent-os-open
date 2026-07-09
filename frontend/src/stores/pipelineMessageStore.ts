@@ -35,13 +35,16 @@ export const _PERSIST_LIMITS = {
 /** 乐观消息的"宽限期" */
 const OPTIMISTIC_MSG_GRACE_MS = 30_000
 
-/** 判断本地独有消息（API 未返回的）是否落在「刚生成、后端可能尚未持久化」的宽限期内。 */
+/** 判断本地独有消息（API 未返回的）是否落在「刚生成、后端可能尚未持久化」的宽限期内。
+ *
+ *  仅 user 乐观消息走宽限期（带 clientMessageId，后端回传同一 ID 后可对账）。
+ *  assistant 消息不走宽限期：initFromAPI 是全量权威对账，应信任 API；
+ *  正在 streaming 的 assistant 已由 isStreamingMessage 保护，无需时间窗口兜底。
+ *  （去掉宽限期可防止 ensureStreamingPlaceholder 合并覆盖 id 后，本地气泡
+ *   id ≠ API record_id 导致的刷新后 AI 回复重复渲染。） */
 function isWithinOptimisticGrace(m: Message): boolean {
   if (m.role === 'user' && m.clientMessageId) {
     return Date.now() - new Date(m.timestamp).getTime() < OPTIMISTIC_MSG_GRACE_MS
-  }
-  if (m.role === 'assistant' && typeof m._lastUpdated === 'number') {
-    return Date.now() - m._lastUpdated < OPTIMISTIC_MSG_GRACE_MS
   }
   return false
 }
@@ -970,31 +973,31 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     const state = get()
     const existingCount = (state.messagesByPipeline[pipelineId] || []).length
 
-    // 流式保护：流式输出中且已有实质消息时跳过，避免 API 覆盖流式状态。
-    // WS 重连场景传 skipStreamingCheck=true 无条件补漏（刷新后 isStreaming=false）。
+    // 流式保护：流式输出中且已有实质消息时跳过所有 API 调用。
+    // 切换会话：显示当前流式进度，不覆盖。
+    // WS 重连场景传 skipStreamingCheck=true 强制加载。
     if (!skipStreamingCheck && state.isStreaming(pipelineId) && existingCount > 1) {
       return { ok: true }
     }
 
-    // 模式决策（统一权威定义 isInitialized）：
-    // - mode='auto'：未初始化 或 本次会话尚未与后端对账 → 全量冷启动；否则增量补漏
-    // - mode='init'：强制全量
-    // - mode='backfill'：强制增量补漏
-    // 对账（reconcile）标记是 runtime 值，rehydrate 后重置为空。因此应用重启后即使
-    // isInitialized=true（持久化的 bottomCursor 已恢复），首次 auto 也会走全量 initFromAPI，
-    // 用 role::seq 指纹去重修正流式断线造成的已加载区间内空洞。
-    const isInit = mode === 'init'
-      || (mode === 'auto' && (!state.isInitialized(pipelineId) || !state.reconciledByPipeline[pipelineId]))
+    // 模式决策：
+    // - mode='init'：页面刷新 / 显式强制 → 全量 initFromAPI，丢弃本地，以 API 权威重建
+    // - mode='auto'：切换会话 → 该管道尚未对账（刷新后首次进入 / 无缓存）：全量对账一次；
+    //   已对账：不做任何 API 调用，直接用缓存
+    // - mode='backfill'：WS 重连补漏 → 增量追加
+    const reconciled = state.reconciledByPipeline[pipelineId] ?? false
+    const isInit = mode === 'init' || (mode === 'auto' && !reconciled)
+    const needBackfill = mode === 'backfill'
 
     try {
       if (isInit) {
         await state.fetchMessages(pipelineId, { threadId })
-        // 全量对账成功后标记，后续 auto 切会话/切 Tab 走高效增量补漏。
         set((s) => ({ reconciledByPipeline: { ...s.reconciledByPipeline, [pipelineId]: true } }))
-      } else {
+      } else if (needBackfill) {
         const bottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
         await state.fetchMessages(pipelineId, { threadId, after_sequence: bottomCursor })
       }
+      // mode='auto' 且已对账 或 缓存为空 → 不做 API 调用，直接用缓存
       return { ok: true }
     } catch (error) {
       return { ok: false, error }
@@ -1203,7 +1206,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
-      // 恢复时把所有 streaming 占位符强制标记为 completed，避免 orphan 占位符与 API 权威消息并存。
+      // 近期 streaming 消息宽限期（5 分钟）：
+      // 刷新时后端可能还在输出 → 保留 streaming 状态，让 initFromAPI 的
+      // isStreamingMessage 保护它不被丢弃；WS 重连后续流。
+      // 超过宽限期的 orphan streaming 才标记 completed 兜底。
+      const STREAMING_GRACE_MS = 5 * 60 * 1000
+      const now = Date.now()
       const cleanedMessages: Record<string, Message[]> = {}
       if (p.messagesByPipeline) {
         for (const [pid, msgs] of Object.entries(p.messagesByPipeline)) {
@@ -1221,6 +1229,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
             })
             .map((m) => {
               if (m.status === 'streaming') {
+                // 近期 streaming → 保留原样（后端可能还在输出，WS 重连会续流）
+                if (typeof m._lastUpdated === 'number' && (now - m._lastUpdated) < STREAMING_GRACE_MS) {
+                  return m
+                }
+                // 过期 orphan streaming → 标记 completed 兜底
                 const cleanedParts = (m.parts || []).map((part) => {
                   const state = (part as { state?: string }).state
                   if (state === 'streaming' || state === 'calling') {

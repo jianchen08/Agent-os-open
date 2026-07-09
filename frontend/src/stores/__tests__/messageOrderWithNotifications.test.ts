@@ -77,14 +77,18 @@ function evt(type: string, data: Record<string, any>): any {
   return { type, sequence: data.sequence ?? 0, data: { pipeline_id: PIPELINE_ID, ...data } }
 }
 
-/** 构造一个 system_notification 事件（resolvePipelineId 取 data.pipeline_id） */
+/** 构造一个 system_notification 事件（resolvePipelineId 取 data.pipeline_id）。
+ * 模拟后端 emit_notification：生成 record_id（hex12，唯一 id 来源），
+ * 前端用它作消息 id，与 track 落库 record_id 一致。 */
 function notificationEvent(content: string, overrides: Record<string, any> = {}): any {
+  const recordId = Math.random().toString(16).slice(2, 14).padEnd(12, '0')
   return {
     data: {
       pipeline_id: PIPELINE_ID,
       content,
       level: 'info',
       notification_id: `sys_${Math.random().toString(36).slice(2, 10)}`,
+      record_id: recordId,
       ...overrides,
     },
   }
@@ -98,6 +102,13 @@ function flush(): void {
 /** 读取 store 中消息的 id 序列 */
 function ids(): string[] {
   return pipelineStore.getState().getMessages(PIPELINE_ID).map((m) => m.id)
+}
+
+/** 读取 store 中所有 system 消息的 id 序列（system 消息 id 现为后端 record_id，无固定前缀） */
+function systemIds(): string[] {
+  return pipelineStore.getState().getMessages(PIPELINE_ID)
+    .filter((m) => m.role === 'system')
+    .map((m) => m.id)
 }
 
 beforeEach(async () => {
@@ -169,8 +180,9 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     const beforeIds = ids()
     expect(beforeIds[0]).toBe('user-1')
     expect(beforeIds[1]).toBe(MSG)
-    expect(beforeIds[beforeIds.length - 1]).toMatch(/^sys_/)
-    const sysId = beforeIds[beforeIds.length - 1] as string
+    expect(systemIds(), '应有一条 system 通知').toHaveLength(1)
+    const sysId = systemIds()[0]
+    expect(beforeIds[beforeIds.length - 1]).toBe(sysId)
 
     // 切 Tab 触发 initFromAPI：API 只返回 user-1
     // 系统通知是 AI 消息之间的结构分隔符，必须保留：即使后端不在历史 API 中返回，
@@ -319,9 +331,9 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 流式期间渲染顺序 = 到达顺序：通知先到，AI 后到 → 通知在 AI 前
     const duringIds = ids()
-    const sysId = duringIds.find((id) => id.startsWith('sys_'))
-    expect(sysId, '系统通知应已创建').toBeDefined()
-    const sysIdx = duringIds.indexOf(sysId!)
+    expect(systemIds(), '系统通知应已创建').toHaveLength(1)
+    const sysId = systemIds()[0]
+    const sysIdx = duringIds.indexOf(sysId)
     const aiIdx = duringIds.indexOf(AI_MSG)
     expect(aiIdx, 'AI 回复应已落定').toBeGreaterThan(-1)
     // ★ 第一断言：流式期间通知应在 AI 前面（到达顺序）
@@ -388,8 +400,8 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       sequence: 11, // 后端权威值，逻辑上早于 AI 主回复(12)
     }))
 
-    const sysId = ids().find((id) => id.startsWith('sys_'))
-    expect(sysId, '系统通知应已创建').toBeDefined()
+    expect(systemIds(), '系统通知应已创建').toHaveLength(1)
+    const sysId = systemIds()[0]
 
     // 切 Tab 触发 initFromAPI：API 返回落库的 user-1/ai-1 + AI 主回复(seq=12)
     // 系统通知 localOnly 保留
@@ -439,8 +451,8 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     handleSystemNotification(notificationEvent('[系统通知] 子任务已完成', {
       sequence: 11,
     }))
-    const sysId = ids().find((id) => id.startsWith('sys_'))
-    expect(sysId, '通知应已创建').toBeDefined()
+    expect(systemIds(), '通知应已创建').toHaveLength(1)
+    const sysId = systemIds()[0]
 
     // AI_A 流式结束
     handlers.handleStreamEnd(evt('stream_end', {
@@ -505,8 +517,8 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 2. ★ 通知先到（AI_old 仍在 streaming）
     handleSystemNotification(notificationEvent('[系统通知] 子任务完成', { sequence: 11 }))
-    const sysId = ids().find((id) => id.startsWith('sys_'))!
-    expect(sysId, '通知应已创建').toBeDefined()
+    expect(systemIds(), '通知应已创建').toHaveLength(1)
+    const sysId = systemIds()[0]
 
     // 此时数组应为 [user-1, AI_old(streaming), sysId]
     const midIds = ids()
@@ -578,8 +590,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // 流式期间顺序（到达顺序）：[..., ai-66, sys-67, sys-68, ai-69]
     const beforeRefresh = ids()
-    const sys67 = beforeRefresh.find((id) => id.startsWith('sys_') && id.includes('_'))!
-    const sysIds = beforeRefresh.filter((id) => id.startsWith('sys_'))
+    const sysIds = systemIds()
     expect(sysIds.length, '应有 2 条 system 通知').toBe(2)
 
     // ★ 切 Tab 触发 initFromAPI：API 返回的 records 不含 system（缺 67/68）
@@ -593,11 +604,10 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
 
     // ★ 核心断言：刷新后 system(67/68) 必须归并到 ai(66) 和 ai(69) 之间，不是末尾
     const finalIds = ids()
+    const finalSysIds = systemIds()
     const ai66Idx = finalIds.indexOf('ai-66')
     const ai69Idx = finalIds.indexOf(AI69)
-    const sysIdxes = finalIds
-      .map((id, i) => id.startsWith('sys_') ? i : -1)
-      .filter((i) => i >= 0)
+    const sysIdxes = finalSysIds.map((id) => finalIds.indexOf(id))
 
     expect(ai66Idx, 'ai-66 应存在').toBeGreaterThan(-1)
     expect(ai69Idx, 'ai-69 应存在').toBeGreaterThan(-1)
@@ -609,5 +619,67 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
       ).toBeGreaterThan(ai66Idx)
       expect(idx).toBeLessThan(ai69Idx)
     }
+  })
+
+  // ── fix_20260708_system_notification_duplicate_on_refresh ──────────────
+  // 复现「触发器通知刷新后渲染两次」。根因：流式 system 气泡 id 与后端落库
+  // record_id 不一致（前端曾用 sys_<uuid>，后端 record_id 随机生成），刷新后
+  // isCoveredByApi 按 id 去重失败 → 流式气泡 + API 记录并存 = 两条。
+  //
+  // 修复：后端 emit_notification 生成 record_id（唯一 id 来源），事件 payload 与
+  // track 落库共用它；前端用 record_id 作消息 id。刷新后 API 返回同 record_id 的
+  // system 记录 → isCoveredByApi 按 id 命中 → 本地流式气泡让位 API 版 → 只剩一条。
+  it('场景12: 流式 system(后端 record_id) + 刷新返回同 record_id 的 system 记录 → 只剩一条', () => {
+    // 冷启动历史
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+    ])
+
+    // 触发器通知到达：事件带 record_id（后端 emit_notification 生成）
+    const notifEvt = notificationEvent('[触发器通知] 延迟测试已触发', { sequence: 18 })
+    const notifRecordId = notifEvt.data.record_id
+    handleSystemNotification(notifEvt)
+
+    // 流式期间：1 条 system 气泡，id == 后端 record_id
+    expect(systemIds(), '流式期间应 1 条 system').toHaveLength(1)
+    expect(systemIds()[0]).toBe(notifRecordId)
+
+    // 刷新：后端已落库 system 记录，API 返回它（id = 同一个 record_id, seq=18）
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+      makeMsg(notifRecordId, {
+        role: 'system',
+        content: '[触发器通知] 延迟测试已触发',
+        sequence: 18,
+        status: 'completed',
+      }),
+    ])
+
+    // ★ 核心断言：刷新后 system 消息只剩 1 条（流式气泡被 API 同 id 版本覆盖，不并存）
+    expect(systemIds(), '刷新后 system 不应重复').toHaveLength(1)
+    expect(systemIds()[0]).toBe(notifRecordId)
+    const finalIds = ids()
+    const userCount = finalIds.filter((id) => id === 'user-1').length
+    expect(userCount, 'user-1 也不应重复').toBe(1)
+  })
+
+  // ── record_id 缺失直接拒绝（暴露后端 bug，不做兜底）─────────────────────
+  it('场景13: 事件缺 record_id → 拒绝创建气泡（强制后端 emit_notification 生成 id）', () => {
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
+      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+    ])
+
+    // 故意构造不带 record_id 的事件（模拟后端 bug）
+    handleSystemNotification({
+      data: {
+        pipeline_id: PIPELINE_ID,
+        content: '残缺事件',
+        notification_id: 'sys_xxx_1',
+        // 不带 record_id
+      },
+    })
+
+    // 应被拒绝，不创建任何 system 气泡
+    expect(systemIds(), '缺 record_id 的事件不应创建气泡').toHaveLength(0)
   })
 })

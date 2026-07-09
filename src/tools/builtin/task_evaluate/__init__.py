@@ -2,4 +2,4 @@
 
 from .tool import TaskEvaluateTool, _simple_evaluate, task_evaluate_func
 
-__all__ = ['TaskEvaluateTool', '_simple_evaluate', 'task_evaluate_func']
+__all__ = ["TaskEvaluateTool", "_simple_evaluate", "task_evaluate_func"]

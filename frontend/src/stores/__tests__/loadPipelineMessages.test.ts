@@ -96,35 +96,27 @@ describe('loadPipelineMessages 统一加载入口', () => {
     expect(mockGet).toHaveBeenCalledTimes(1)
   })
 
-  it("mode='auto' 已初始化 → after_sequence 增量补漏", async () => {
+  it("mode='auto' 已对账 → 不做任何 API 调用，直接用缓存", async () => {
     const store = usePipelineMessageStore.getState()
     store.registerPipeline({
       pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
       agentName: '', status: 'running', parentId: null, unreadCount: 0,
     })
-    // 先全量 init 建立本地状态 + bottomCursor=2，并标记已对账（模拟运行中状态）
+    // 先全量 init 建立本地状态 + bottomCursor=2，并标记已对账
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('u1', 1, { role: 'user', content: 'q' }),
       makeMsg('a1', 2, { content: 'a' }),
     ])
     usePipelineMessageStore.setState({ reconciledByPipeline: { [PIPELINE_ID]: true } })
     expect(store.getBottomCursor(PIPELINE_ID)).toBe(2)
-
-    // 补漏：API 返回 seq>2 的新消息
-    setApiRecords([
-      { id: 'u2', sequence: 3, role: 'user', content: 'q2', timestamp: '2026-01-01T00:00:02Z' },
-      { id: 'a2', sequence: 4, role: 'assistant', content: 'a2', timestamp: '2026-01-01T00:00:03Z' },
-    ])
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
 
     const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
 
     expect(result.ok).toBe(true)
-    expect(store.getMessages(PIPELINE_ID)).toHaveLength(4)
-    expect(store.getBottomCursor(PIPELINE_ID)).toBe(4)
-    // 确认传了 after_sequence=2（增量而非全量）
-    expect(mockGet).toHaveBeenCalledTimes(1)
-    const callArg = mockGet.mock.calls[0][1]
-    expect(callArg.params.after_sequence).toBe(2)
+    // 已对账：不发起任何 API 请求，消息数不变
+    expect(mockGet).not.toHaveBeenCalled()
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
   })
 
   it('流式输出中（count>1）且未 skipStreamingCheck → 跳过加载', async () => {
@@ -269,13 +261,13 @@ describe('loadPipelineMessages 统一加载入口', () => {
     expect(firstCallArg.params.after_sequence).toBeUndefined()
     expect(store.getBottomCursor(PIPELINE_ID)).toBe(2)
 
-    // 第二次 auto：已对账 → 增量补漏
-    setApiRecords([
-      { id: 'a2', sequence: 3, role: 'assistant', content: 'a2', timestamp: '2026-01-01T00:00:02Z' },
-    ])
+    // 第二次 auto：已对账 → 不做任何 API 调用，直接用缓存
+    // （不设 setApiRecords，验证 mockGet 不再被调用）
     await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
-    const secondCallArg = mockGet.mock.calls[1][1]
-    expect(secondCallArg.params.after_sequence).toBe(2)
+    // mockGet 只被调用一次（第一次全量对账），第二次不做请求
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    // 消息数不变
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
   })
 
   it('流式断线空洞：rehydrate 后全量对账修正已加载区间内的缺失消息（核心回归）', async () => {

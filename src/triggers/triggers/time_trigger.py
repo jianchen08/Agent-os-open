@@ -149,6 +149,11 @@ class TimeTrigger(BaseTrigger):
         try:
             run_date = datetime.fromisoformat(run_date_str)
 
+            # naive datetime（用户未带时区）按 UTC 解释，避免与下方 aware 的
+            # datetime.now(timezone.utc) 比较时抛 TypeError（aware vs naive 非法比较）。
+            if run_date.tzinfo is None:
+                run_date = run_date.replace(tzinfo=timezone.utc)
+
             # 检查时间是否已过期
             now = datetime.now(timezone.utc)
             if run_date < now:

@@ -2,4 +2,4 @@
 
 from .tool import CompatibilityCheckerTool
 
-__all__ = ['CompatibilityCheckerTool']
+__all__ = ["CompatibilityCheckerTool"]

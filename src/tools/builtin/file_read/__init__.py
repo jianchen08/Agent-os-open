@@ -2,4 +2,4 @@
 
 from .tool import MAX_FILE_SIZE, FileReadTool
 
-__all__ = ['FileReadTool', 'MAX_FILE_SIZE']
+__all__ = ["FileReadTool", "MAX_FILE_SIZE"]

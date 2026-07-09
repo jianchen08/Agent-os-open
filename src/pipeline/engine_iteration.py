@@ -166,9 +166,14 @@ async def consume_pending_notifications(
 
     - source=user（用户注入）：写 user_input + messages。
       track 插件据此落 type="user" 记录（历史接口正确返回用户气泡）。
-    - source!=user（系统通知，如子任务完成）：只写 messages（喂 LLM），
-      不写 user_input（track 不落 type=system 记录，避免历史接口二次渲染）；
-      并在此推送 system_notification —— 这是系统通知的【唯一推送点】。
+    - source!=user（系统通知，如触发器/子任务完成）：写 user_input + messages
+      并标 _last_inject_sources，track 据此落 type="system" 记录（历史接口返回
+      system 气泡）；同时在此推送 system_notification —— 这是系统通知的【唯一推送点】。
+
+    ★ id 契约（与 AI 消息对称，避免刷新后 system 气泡重复渲染）：
+    emit_notification 生成 record_id（唯一 id 来源），逐条事件 payload 带上它，
+    并把本轮 record_id 写入 state["_pending_system_record_id"]。track 落 system
+    记录时复用它作 record_id，保证：事件 record_id == 落库 record_id == 前端消息 id。
 
     ★ 流式分割（fix_20260705_notification_after_reply）：
     推送 system 通知前，如果当前 AI 流还开着（_stream_started=True），先 emit_finish
@@ -179,19 +184,6 @@ async def consume_pending_notifications(
     都走这个统一函数，注入分割逻辑只此一处实现，不会遗漏。
 
     core_type 强制 llm_call（在调用方设置）；tool_execute 时由调用方跳过（不调本函数）。
-
-    将 drain_inject_queue 取出的 (message, source) 过滤空白后注入 state，
-    按 source 分流：
-
-    - source=user（用户注入）：写 user_input + messages。
-      track 插件据此落 type="user" 记录（历史接口正确返回用户气泡）。
-    - source!=user（系统通知，如子任务完成）：只写 messages（喂 LLM），
-      不写 user_input（track 不落 type=system 记录，避免历史接口二次渲染）；
-      并在此推送 system_notification —— 这是系统通知的【唯一推送点】。
-
-    core_type 强制 llm_call；tool_execute 时跳过整个注入
-    （避免在 assistant(tool_calls) 与 tool(result) 之间插入 user 消息，
-     破坏配对会触发 Minimax API 2013 错误）。
 
     推送时序：消息出队列、进入下一轮迭代的边界点推送，与 LLM 流式输出
     共用 bridge 通道。除此之外不应存在其它 system 通知推送出口。
@@ -274,9 +266,16 @@ async def consume_pending_notifications(
 
             for _content, _source in _system_notifs:
                 try:
-                    await _bridge.emit_notification(_content, source=_source, level="info")
+                    _notif_rid = await _bridge.emit_notification(_content, source=_source, level="info")
                 except Exception as exc:
                     logger.warning("[Engine] 通知推送失败: %s", exc)
+                    _notif_rid = ""
+                # 记录本轮 system 通知的 record_id（emit_notification 是唯一 id 来源），
+                # 供 track 插件落库时复用 —— 保证事件 record_id == 落库 record_id。
+                # 多条 system 通知在 track 里合并落一条记录（_combined_sys），故取最后一个
+                # record_id 覆盖，使合并记录与至少一条事件气泡 id 对齐。
+                if _notif_rid:
+                    state["_pending_system_record_id"] = _notif_rid
 
     state[StateKeys.CORE_TYPE] = "llm_call"
     state.pop("raw_result", None)

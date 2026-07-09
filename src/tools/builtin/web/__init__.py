@@ -2,4 +2,4 @@
 
 from .tool import WebTool
 
-__all__ = ['WebTool']
+__all__ = ["WebTool"]

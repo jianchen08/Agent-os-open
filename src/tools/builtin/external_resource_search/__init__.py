@@ -2,4 +2,4 @@
 
 from .tool import ExternalResourceSearch, LLMCaller, PlatformAdapter
 
-__all__ = ['PlatformAdapter', 'LLMCaller', 'ExternalResourceSearch']
+__all__ = ["PlatformAdapter", "LLMCaller", "ExternalResourceSearch"]

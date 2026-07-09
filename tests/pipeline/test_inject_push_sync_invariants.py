@@ -66,9 +66,12 @@ class _EventRecordingBridge:
         self._stream_started = False
         self._record("emit_suspend")
 
-    async def emit_notification(self, content: str, *, source: str = "system", level: str = "info") -> int:
+    async def emit_notification(self, content: str, *, source: str = "system", level: str = "info") -> str:
         self._record("emit_notification", content)
-        return 1
+        # 返回 record_id（hex12），与真实 emit_notification 契约一致；
+        # consume 会把它写入 state["_pending_system_record_id"] 供 track 复用
+        import uuid
+        return uuid.uuid4().hex[:12]
 
     @property
     def actions(self) -> list[str]:
@@ -168,6 +171,24 @@ class TestInjectPushSyncInvariants:
             assert any(
                 "任务A完成" in str(m.get("content", "")) for m in last_llm_messages
             ), f"LLM 调用时 messages 必须包含推送的通知。LLM messages: {last_llm_messages}"
+
+    async def test_system_notification_record_id_written_to_state(self, setup):
+        """★ id 契约：consume 推送 system 通知后，emit_notification 返回的 record_id
+        必须写入 state["_pending_system_record_id"]，供 track 落库时复用。
+
+        这是「system 通知不重复渲染」的根因修复：emit_notification 是唯一 id 来源，
+        track 落库的 record_id 与前端气泡 id 都引用它，刷新后按 id 自然去重。
+        """
+        bridge, engine, state = setup
+        engine.inject("[触发器通知] 延迟测试已触发", "trigger")
+
+        _run(consume_pending_notifications(engine, state, prepend=True))
+
+        # consume 必须把 record_id 写入 state（track 据此设落库 record_id）
+        record_id = state.get("_pending_system_record_id", "")
+        assert isinstance(record_id, str) and len(record_id) == 12, (
+            f"_pending_system_record_id 应为 hex12（emit_notification 返回值），实际: {record_id!r}"
+        )
 
     async def test_notification_not_pushed_without_llm_seeing(self, setup):
         """★ 不变量2：LLM 没看到的通知，不能被推送（反过来也要成立）。

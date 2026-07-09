@@ -2,4 +2,4 @@
 
 from .tool import DeleteFileTool
 
-__all__ = ['DeleteFileTool']
+__all__ = ["DeleteFileTool"]

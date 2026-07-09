@@ -27,14 +27,14 @@ models:
     model_name: embedding-3
     display_name: Embedding-3
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
-    context_window: 128000
+    context_window: 1000000
     dimension: 2048
   embedding-2:
     provider: zhipu_coding
     model_name: embedding-2
     display_name: Embedding-2
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
-    context_window: 128000
+    context_window: 1000000
     dimension: 1024
   deepseek-v4-flash:
     provider: deepseek
@@ -42,7 +42,7 @@ models:
     display_name: DeepSeek V4 Flash
     api_base: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
-    context_window: 128000
+    context_window: 1000000
     reasoning_model: true
     default_params:
       temperature: 0.7
@@ -58,7 +58,7 @@ models:
     display_name: DeepSeek V4 Pro
     api_base: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
-    context_window: 128000
+    context_window: 1000000
     reasoning_model: true
     default_params:
       temperature: 0.7
@@ -121,7 +121,7 @@ defaults:
   stream_idle_timeout: 180
   compression: minimax-m3
   tiers:
-    large: glm-5.2
+    large: minimax-m3
     medium: minimax-m3
     small: minimax-m3
 providers:

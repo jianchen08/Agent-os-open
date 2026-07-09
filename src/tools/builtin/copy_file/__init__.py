@@ -2,4 +2,4 @@
 
 from .tool import CopyFileTool
 
-__all__ = ['CopyFileTool']
+__all__ = ["CopyFileTool"]

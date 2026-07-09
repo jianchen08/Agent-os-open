@@ -12,10 +12,12 @@ inject_message 接口唤醒挂起的管道，注入预设消息。
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core.results import ToolExecutionResult
+from src.config.settings import get_settings
 from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
@@ -505,15 +507,28 @@ class TriggerSetupTool(BuiltinTool):
                 error_code="INVALID_SCHEDULE_TIME",
             )
 
-        now = datetime.utcnow()
-        if schedule_time < now:
+        # 时区解释：naive（用户未带时区）视为 APP_TIMEZONE 本地时间，
+        # aware（用户带了 +08:00 / Z）直接采用。最终统一归一到 aware UTC 存入 scheduled_at。
+        # 否则 manager._normalize_datetime 会把 naive 当作 UTC，导致本地时间被误解、触发延迟一个时区偏移。
+        if schedule_time.tzinfo is None:
+            tz_name = get_settings().timezone
+            try:
+                local_tz: tzinfo = ZoneInfo(tz_name)
+            except Exception:
+                logger.warning("[TriggerSetupTool] APP_TIMEZONE=%r 无效，naive 时间回退到 UTC 解释", tz_name)
+                local_tz = UTC
+            schedule_time = schedule_time.replace(tzinfo=local_tz)
+        schedule_time_utc = schedule_time.astimezone(UTC)
+
+        now = datetime.now(UTC)
+        if schedule_time_utc < now:
             return create_failure_result(
                 error="定时触发时间不能早于当前时间",
                 error_code="SCHEDULE_TIME_IN_PAST",
             )
 
         max_schedule_time = now + timedelta(hours=self.MAX_SCHEDULE_HOURS)
-        if schedule_time > max_schedule_time:
+        if schedule_time_utc > max_schedule_time:
             return create_failure_result(
                 error=f"定时触发时间超过最大限制 ({self.MAX_SCHEDULE_HOURS} 小时 = 7天)",
                 error_code="SCHEDULE_TIME_EXCEEDS_LIMIT",
@@ -525,7 +540,7 @@ class TriggerSetupTool(BuiltinTool):
             trigger_id=trigger_id,
             name=inputs.get("name", f"定时触发器-{schedule_time_str}"),
             trigger_type=TriggerType.SCHEDULED,
-            scheduled_at=schedule_time,
+            scheduled_at=schedule_time_utc,
             max_fires=1,
             message=message,
             pipeline_id=pipeline_id or "",
@@ -541,7 +556,7 @@ class TriggerSetupTool(BuiltinTool):
             f"[TriggerSetupTool] 定时触发器已设置 | "
             f"trigger_id={trigger_id} | "
             f"pipeline_id={pipeline_id} | "
-            f"schedule_time={schedule_time_str}"
+            f"schedule_time={schedule_time_str} (UTC={schedule_time_utc.isoformat()})"
         )
 
         return create_success_result(

@@ -2,4 +2,4 @@
 
 from .tool import TriggerSetupTool
 
-__all__ = ['TriggerSetupTool']
+__all__ = ["TriggerSetupTool"]

@@ -348,7 +348,9 @@ class TrackPlugin(IOutputPlugin):
                         await asyncio.to_thread(storage.save, injected_record)
                         logger.debug(
                             "Injected content saved at iteration %d type=%s (%d chars)",
-                            iteration, _record_type, len(new_content),
+                            iteration,
+                            _record_type,
+                            len(new_content),
                         )
                     except Exception:
                         logger.exception("注入消息记录持久化失败")

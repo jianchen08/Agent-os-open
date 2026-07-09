@@ -2,4 +2,4 @@
 
 from .tool import ResourceSearchTool
 
-__all__ = ['ResourceSearchTool']
+__all__ = ["ResourceSearchTool"]

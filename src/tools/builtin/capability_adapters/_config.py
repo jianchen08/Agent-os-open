@@ -23,7 +23,9 @@ _DEFAULT_CONFIG_PATH = _CONFIG_DIR / "capability_adapters.yaml"
 _ENV_PATTERN = re.compile(r"\$\{(\w+)\}")
 
 _empty_cache_sentinel = object()
-_parse_cache: dict[str, list["BackendConfig"]] | object = _empty_cache_sentinel  # "配置不存在"时缓存空字典避免反复读文件
+_parse_cache: dict[str, list["BackendConfig"]] | object = (
+    _empty_cache_sentinel  # "配置不存在"时缓存空字典避免反复读文件
+)
 
 
 @dataclass
@@ -44,9 +46,7 @@ def _interpolate_env(value: str) -> str:
     return _ENV_PATTERN.sub(lambda m: os.environ.get(m.group(1), ""), value)
 
 
-def _parse_server_config(
-    name: str, raw: dict[str, Any]
-) -> MCPServerConfig:
+def _parse_server_config(name: str, raw: dict[str, Any]) -> MCPServerConfig:
     """从 YAML 字典解析 MCPServerConfig"""
     env = raw.get("env", {})
     interpolated_env = {k: _interpolate_env(str(v)) for k, v in env.items()}
@@ -66,7 +66,7 @@ def _parse_yaml(path: Path) -> dict[str, list[BackendConfig]]:
 
     rel = str(path).replace("\\", "/")
     if "config/" in rel:
-        rel = rel[rel.index("config/") + len("config/"):]
+        rel = rel[rel.index("config/") + len("config/") :]
     data = get_config_center().get(rel) or {}
 
     adapters_raw = data.get("adapters", {})
@@ -113,9 +113,7 @@ class CapabilityAdapterConfig:
     """
 
     @classmethod
-    def load(
-        cls, config_path: str | Path | None = None
-    ) -> dict[str, list[BackendConfig]]:
+    def load(cls, config_path: str | Path | None = None) -> dict[str, list[BackendConfig]]:
         """加载配置（每次读取文件，支持热更新）"""
         global _parse_cache  # noqa: PLW0603
 
@@ -124,9 +122,7 @@ class CapabilityAdapterConfig:
         if not path.exists():
             if _parse_cache is not _empty_cache_sentinel and _parse_cache == {}:
                 return {}
-            logger.warning(
-                "[CapabilityAdapter] 配置文件不存在: %s", path
-            )
+            logger.warning("[CapabilityAdapter] 配置文件不存在: %s", path)
             _parse_cache = {}
             return {}
 

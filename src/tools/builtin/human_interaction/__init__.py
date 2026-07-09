@@ -2,4 +2,4 @@
 
 from .tool import HumanInteractionTool
 
-__all__ = ['HumanInteractionTool']
+__all__ = ["HumanInteractionTool"]

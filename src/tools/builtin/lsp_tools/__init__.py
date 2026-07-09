@@ -2,4 +2,4 @@
 
 from .tool import LSPTools
 
-__all__ = ['LSPTools']
+__all__ = ["LSPTools"]

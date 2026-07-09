@@ -1219,10 +1219,14 @@ class TestFileWriteToolAppend:
 
 
 class TestFileWriteToolInvalidAction:
-    """FileWriteTool 无效操作测试"""
+    """FileWriteTool action 校验测试。
+
+    区分两种错误：缺失 action → MISSING_ACTION（明确告知必填 + 合法值）；
+    非法 action → INVALID_ACTION（告知传入值 + 合法枚举）。
+    """
 
     async def test_invalid_action_returns_error(self, tmp_path):
-        """测试无效的 action 返回 INVALID_ACTION 错误"""
+        """非法 action 值返回 INVALID_ACTION，错误信息含合法枚举。"""
         tool = FileWriteTool(base_path=str(tmp_path))
         result = await tool.execute({
             "action": "invalid",
@@ -1231,16 +1235,30 @@ class TestFileWriteToolInvalidAction:
 
         assert result.success is False
         assert result.error_code == "INVALID_ACTION"
+        assert "invalid" in result.error
+        assert "write" in result.error
 
-    async def test_missing_action_returns_error(self, tmp_path):
-        """测试缺少 action 参数时返回 INVALID_ACTION 错误"""
+    async def test_missing_action_returns_missing_action_error(self, tmp_path):
+        """缺失 action 参数返回 MISSING_ACTION（非含糊的 INVALID_ACTION）。"""
         tool = FileWriteTool(base_path=str(tmp_path))
         result = await tool.execute({
             "path": str(tmp_path / "test.txt"),
         })
 
         assert result.success is False
-        assert result.error_code == "INVALID_ACTION"
+        assert result.error_code == "MISSING_ACTION"
+        assert "action" in result.error
+
+    async def test_none_action_returns_missing_action_error(self, tmp_path):
+        """action 显式为 None 同样返回 MISSING_ACTION。"""
+        tool = FileWriteTool(base_path=str(tmp_path))
+        result = await tool.execute({
+            "action": None,
+            "path": str(tmp_path / "test.txt"),
+        })
+
+        assert result.success is False
+        assert result.error_code == "MISSING_ACTION"
 
 
 class TestFileWriteToolWorkspace:

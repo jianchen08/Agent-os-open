@@ -2,4 +2,4 @@
 
 from .tool import TaskTool
 
-__all__ = ['TaskTool']
+__all__ = ["TaskTool"]

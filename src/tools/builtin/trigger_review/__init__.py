@@ -2,4 +2,4 @@
 
 from .tool import TriggerReviewTool
 
-__all__ = ['TriggerReviewTool']
+__all__ = ["TriggerReviewTool"]

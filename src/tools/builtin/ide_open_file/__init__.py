@@ -2,4 +2,4 @@
 
 from .tool import IDEOpenFileTool
 
-__all__ = ['IDEOpenFileTool']
+__all__ = ["IDEOpenFileTool"]

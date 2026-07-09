@@ -1,4 +1,4 @@
-/** AI 消息宽限期保留测试 */
+/** AI 消息刷新对账测试（assistant 不走乐观宽限期） */
 import { describe, it, expect, beforeEach } from 'vitest'
 import { usePipelineMessageStore } from '../pipelineMessageStore'
 import type { Message } from '@/types/models'
@@ -24,7 +24,7 @@ function makeMsg(
   } as Message
 }
 
-describe('AI 消息宽限期', () => {
+describe('AI 消息刷新对账（initFromAPI 全量权威）', () => {
   beforeEach(() => {
     const store = usePipelineMessageStore.getState()
     usePipelineMessageStore.setState({
@@ -45,62 +45,54 @@ describe('AI 消息宽限期', () => {
     })
   })
 
-  it('场景1: 刚 finalize 的 AI 消息，API 未返回时不被丢弃', () => {
+  it('场景1: 已完成的 AI 消息，API 未返回时信任 API 丢弃（全量对账权威）', () => {
     const store = usePipelineMessageStore.getState()
 
-    // AI 回复刚 stream_end 完成：status='completed'，_lastUpdated 为当前时间
-    // （finalizeMessage 会写入 _lastUpdated: Date.now()，这里模拟该状态）
+    // 已完成 AI 消息：非 streaming，API 不含它 → initFromAPI 全量对账应丢弃
     const freshAiMsg = makeMsg('ai-uuid-1', 2, {
       role: 'assistant',
       content: 'hello, this is the AI reply',
       status: 'completed',
-      _lastUpdated: Date.now(), // 刚 finalize，在宽限期内
+      _lastUpdated: Date.now(),
       timestamp: new Date().toISOString(),
     })
     store.addMessage(PIPELINE_ID, freshAiMsg)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // initFromAPI 被并发触发（WS 重连/Tab 切换），后端尚未持久化该 AI 消息，
-    // API 只返回 user 消息
+    // initFromAPI 不含该消息（后端尚未持久化）
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-1', 1, { role: 'user', content: 'question' }),
     ])
 
-    // 刚完成的 AI 消息应仍然存在（未被丢弃）
+    // assistant 不走乐观宽限期：全量对账信任 API 权威，本地消息被丢弃。
+    // 后端持久化后，下一次增量 API 调用（append/prepend）会拉回该消息。
     const msgs = store.getMessages(PIPELINE_ID)
-    const aiMsg = msgs.find((m) => m.id === 'ai-uuid-1')
-    expect(aiMsg).toBeDefined()
-    expect(aiMsg?.content).toBe('hello, this is the AI reply')
+    expect(msgs.find((m) => m.id === 'ai-uuid-1')).toBeUndefined()
   })
 
-  it('场景2: AI 消息在宽限期外的 persist 残留被丢弃', () => {
+  it('场景2: AI 消息在宽限期外的 persist 残留被丢弃（不变）', () => {
     const store = usePipelineMessageStore.getState()
 
-    // persist 残留的旧 AI 消息（_lastUpdated 为 2 分钟前，远超 30s 宽限期）
     const staleAiMsg = makeMsg('stale-ai-2', 2, {
       role: 'assistant',
       content: 'stale AI reply',
       status: 'completed',
-      _lastUpdated: Date.now() - 120_000, // 2 分钟前
+      _lastUpdated: Date.now() - 120_000,
       timestamp: new Date(Date.now() - 120_000).toISOString(),
     })
     store.addMessage(PIPELINE_ID, staleAiMsg)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // initFromAPI 返回新数据，不含此旧消息
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-2', 1, { role: 'user', content: 'new question' }),
     ])
 
-    // 旧 AI 消息应被丢弃（不在宽限期内）
-    const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs.find((m) => m.id === 'stale-ai-2')).toBeUndefined()
+    expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'stale-ai-2')).toBeUndefined()
   })
 
   it('场景3: AI 消息被后端持久化后通过 role::seq 指纹去重（不重复渲染）', () => {
     const store = usePipelineMessageStore.getState()
 
-    // AI 消息刚 finalize（本地 WS UUID）
     const localAiMsg = makeMsg('ws-uuid-3', 5, {
       role: 'assistant',
       content: 'AI reply via WS',
@@ -109,16 +101,16 @@ describe('AI 消息宽限期', () => {
     })
     store.addMessage(PIPELINE_ID, localAiMsg)
 
-    // 后端持久化后，API 返回该消息（不同 id=API hex，相同 sequence=5）
+    // API 返回同 seq 的记录 → 指纹匹配，去重
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-3', 4, { role: 'user', content: 'q' }),
       makeMsg('api-hex-3', 5, {
         role: 'assistant',
-        content: 'AI reply via WS', // 同 sequence 同 role，指纹相同
+        content: 'AI reply via WS',
       }),
     ])
 
-    // 应只有 1 条 sequence=5 的 assistant 消息（去重后不并存，避免气泡重复渲染）
+    // 只剩 1 条 sequence=5 的 assistant（API 权威版覆盖本地版）
     const aiMsgs = store
       .getMessages(PIPELINE_ID)
       .filter((m) => m.role === 'assistant' && m.sequence === 5)
@@ -129,7 +121,6 @@ describe('AI 消息宽限期', () => {
   it('场景4: streaming 中的 AI 消息始终保留（不受宽限期影响）', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 正在流式的 AI 占位消息
     const streamingMsg = makeMsg('streaming-4', 2, {
       role: 'assistant',
       content: '',
@@ -138,12 +129,10 @@ describe('AI 消息宽限期', () => {
     store.startStreaming(PIPELINE_ID, 'streaming-4')
     store.addMessage(PIPELINE_ID, streamingMsg)
 
-    // initFromAPI 不含该消息（后端尚未持久化）
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-4', 1, { role: 'user', content: 'hi' }),
     ])
 
-    // streaming 占位消息应保留
     const streaming = store.getMessages(PIPELINE_ID).find((m) => m.id === 'streaming-4')
     expect(streaming).toBeDefined()
     expect(streaming?.status).toBe('streaming')
@@ -152,9 +141,6 @@ describe('AI 消息宽限期', () => {
   it('场景5: 无 _lastUpdated 的 assistant 消息不享受宽限期（直接丢弃）', () => {
     const store = usePipelineMessageStore.getState()
 
-    // addMessage 直接创建的 assistant 消息不会写 _lastUpdated。
-    // 此类消息若无后续 finalize/updateMessage，说明不是刚完成的流式回复，
-    // 不应享受乐观窗口（避免误保留脏数据）。
     const noLastUpdated = makeMsg('no-lu-5', 3, {
       role: 'assistant',
       content: 'assistant msg without _lastUpdated',
@@ -163,20 +149,16 @@ describe('AI 消息宽限期', () => {
     delete (noLastUpdated as Partial<Message>)._lastUpdated
     store.addMessage(PIPELINE_ID, noLastUpdated)
 
-    // initFromAPI 未返回该消息
     store.initFromAPI(PIPELINE_ID, [
       makeMsg('api-user-5', 1, { role: 'user', content: 'q' }),
     ])
 
-    // 无 _lastUpdated 的 assistant 消息应被丢弃（无判据，不享受宽限期）
-    const msgs = store.getMessages(PIPELINE_ID)
-    expect(msgs.find((m) => m.id === 'no-lu-5')).toBeUndefined()
+    expect(store.getMessages(PIPELINE_ID).find((m) => m.id === 'no-lu-5')).toBeUndefined()
   })
 
   it('场景6: 修复未破坏既有 user 消息宽限期行为', () => {
     const store = usePipelineMessageStore.getState()
 
-    // 乐观 user 消息（带 clientMessageId）
     const optimisticUser = makeMsg('client-uuid-6', 1, {
       role: 'user',
       content: 'hello',
@@ -190,9 +172,40 @@ describe('AI 消息宽限期', () => {
       makeMsg('api-ai-6', 2, { role: 'assistant', content: 'reply' }),
     ])
 
-    // user 消息仍应保留（回归保护）
     const userMsg = store.getMessages(PIPELINE_ID).find((m) => m.role === 'user')
     expect(userMsg).toBeDefined()
     expect(userMsg?.content).toBe('hello')
+  })
+
+  // ★ 回归保护：ensureStreamingPlaceholder 合并覆盖 id 后，
+  // 本地气泡 id ≠ API record_id → 不应通过宽限期保留，防止 AI 回复重复渲染。
+  it('场景7: 本地 assistant id 与 API record_id 不同时，不走宽限期保留，只留 API 版', () => {
+    const store = usePipelineMessageStore.getState()
+
+    // 模拟 ensureStreamingPlaceholder 合并：本地气泡 id 是合并后的 id（hex_222...），
+    // 但 API record_id 是第一次 emit_start 的 id（hex_111...）
+    const mergedLocalMsg = makeMsg('hex_222222222222', 2, {
+      role: 'assistant',
+      content: '合并后的 AI 回复',
+      status: 'completed',
+      _lastUpdated: Date.now(),
+    })
+    store.addMessage(PIPELINE_ID, mergedLocalMsg)
+
+    // API 返回同 content 但不同 id 的记录（第一次 emit_start 的 record_id）
+    store.initFromAPI(PIPELINE_ID, [
+      makeMsg('api-user-7', 1, { role: 'user', content: '问' }),
+      makeMsg('hex_111111111111', 3, {
+        role: 'assistant',
+        content: '合并后的 AI 回复',
+        status: 'completed',
+      }),
+    ])
+
+    // ★ 核心断言：assistant 不走宽限期 → 本地 id 不同的消息被丢弃，
+    // 只剩 API 版 1 条，不重复渲染
+    const aiMsgs = store.getMessages(PIPELINE_ID).filter((m) => m.role === 'assistant')
+    expect(aiMsgs).toHaveLength(1)
+    expect(aiMsgs[0].id).toBe('hex_111111111111')
   })
 })

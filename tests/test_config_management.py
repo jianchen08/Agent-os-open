@@ -489,3 +489,262 @@ class TestGenericWhitelist:
         get_resp = config_client.get("/api/v1/config/generic/test/roundtrip")
         assert get_resp.status_code == 200
         assert get_resp.json() == payload, "GET 回读内容与 PUT 不一致"
+
+
+# ===================================================================
+# 5. Model CRUD（含 422 schema 契约回归）
+# ===================================================================
+
+
+class TestModelCRUD:
+    """Model 增删改查完整流程测试。
+
+    覆盖 POST /llm/models、PUT /llm/models/{id}、DELETE /llm/models/{id}，
+    含前后端 payload schema 契约回归（422 防漂移）。
+    """
+
+    def test_add_model_success(self, config_client: TestClient) -> None:
+        """POST /llm/models 用正确 payload {models: {id: conf}} 添加成功。"""
+        resp = config_client.post(
+            "/api/v1/config/llm/models",
+            json={
+                "models": {
+                    "new-model": {
+                        "provider": "test-provider",
+                        "model_name": "new-model",
+                        "display_name": "New Model",
+                    }
+                }
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "new-model" in data["models"]
+        assert data["models"]["new-model"]["display_name"] == "New Model"
+        # 原有模型不应被覆盖
+        assert "test-model" in data["models"]
+
+    def test_add_model_wrong_payload_returns_422(
+        self, config_client: TestClient,
+    ) -> None:
+        """POST /llm/models 用旧 payload {id: conf}（缺少 models 包裹）必须 422。
+
+        回归测试：前端曾直接把 model_id 作为顶层 key 发送，后端 ModelAddRequest
+        要求顶层 models 字段，导致 422。此测试锁定前后端 schema 契约，防止回退。
+        """
+        resp = config_client.post(
+            "/api/v1/config/llm/models",
+            json={"wrong-model": {"provider": "p", "model_name": "m"}},
+        )
+        assert resp.status_code == 422
+        # Pydantic 错误详情应指明 models 字段缺失
+        detail = resp.json().get("detail", [])
+        assert any(
+            "models" in str(err.get("loc", [])) and err.get("type") == "missing"
+            for err in detail
+        ), f"422 详情应指向 models 字段缺失，实际: {detail}"
+
+    def test_add_model_empty_dict_returns_200_noop(
+        self, config_client: TestClient,
+    ) -> None:
+        """POST /llm/models 空 models 字典 → 200，无副作用。"""
+        resp = config_client.post(
+            "/api/v1/config/llm/models",
+            json={"models": {}},
+        )
+        assert resp.status_code == 200
+        # 不应新增模型
+        assert "test-model" in resp.json()["models"]
+
+    def test_update_model_success(self, config_client: TestClient) -> None:
+        """PUT /llm/models/{id} 用正确 payload {config: {...}} 更新成功。"""
+        resp = config_client.put(
+            "/api/v1/config/llm/models/test-model",
+            json={"config": {"display_name": "Updated Name", "context_window": 8192}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"]["test-model"]["display_name"] == "Updated Name"
+        assert data["models"]["test-model"]["context_window"] == 8192
+        # 原有字段应保留（部分更新，非整体替换）
+        assert data["models"]["test-model"]["provider"] == "test-provider"
+
+    def test_update_model_wrong_payload_returns_422(
+        self, config_client: TestClient,
+    ) -> None:
+        """PUT /llm/models/{id} 用旧 payload（直接传 config 对象，缺少 config 包裹）必须 422。
+
+        回归测试：前端曾直接传 config 对象而非 {config: {...}}，后端
+        ModelConfigUpdateRequest 要求顶层 config 字段。锁定前后端 schema 契约。
+        """
+        resp = config_client.put(
+            "/api/v1/config/llm/models/test-model",
+            json={"display_name": "Should Fail"},
+        )
+        assert resp.status_code == 422
+        detail = resp.json().get("detail", [])
+        assert any(
+            "config" in str(err.get("loc", [])) and err.get("type") == "missing"
+            for err in detail
+        ), f"422 详情应指向 config 字段缺失，实际: {detail}"
+
+    def test_update_model_not_found_returns_404(
+        self, config_client: TestClient,
+    ) -> None:
+        """PUT 不存在的 model_id 必须返回 404，不能隐式创建。"""
+        resp = config_client.put(
+            "/api/v1/config/llm/models/nonexistent-model",
+            json={"config": {"display_name": "Ghost"}},
+        )
+        assert resp.status_code == 404
+        assert "不存在" in resp.json().get("detail", "")
+
+    def test_delete_model_success(self, config_client: TestClient) -> None:
+        """DELETE /llm/models/{id} 删除已存在模型成功。"""
+        resp = config_client.delete("/api/v1/config/llm/models/test-model")
+        assert resp.status_code == 200
+        assert "test-model" not in resp.json()["models"]
+
+    def test_delete_model_not_found_returns_404(
+        self, config_client: TestClient,
+    ) -> None:
+        """DELETE 不存在的 model_id 应返回 404。"""
+        resp = config_client.delete(
+            "/api/v1/config/llm/models/nonexistent-model",
+        )
+        assert resp.status_code == 404
+
+    def test_model_crud_roundtrip(self, config_client: TestClient) -> None:
+        """Model 完整生命周期：添加 → 更新 → 删除。"""
+        # 1. 添加
+        add_resp = config_client.post(
+            "/api/v1/config/llm/models",
+            json={
+                "models": {
+                    "lifecycle-model": {
+                        "provider": "test-provider",
+                        "model_name": "lifecycle",
+                        "display_name": "Lifecycle",
+                    }
+                }
+            },
+        )
+        assert add_resp.status_code == 200
+        assert "lifecycle-model" in add_resp.json()["models"]
+
+        # 2. 更新
+        upd_resp = config_client.put(
+            "/api/v1/config/llm/models/lifecycle-model",
+            json={"config": {"display_name": "Lifecycle Updated"}},
+        )
+        assert upd_resp.status_code == 200
+        assert (
+            upd_resp.json()["models"]["lifecycle-model"]["display_name"]
+            == "Lifecycle Updated"
+        )
+
+        # 3. 删除
+        del_resp = config_client.delete(
+            "/api/v1/config/llm/models/lifecycle-model",
+        )
+        assert del_resp.status_code == 200
+        assert "lifecycle-model" not in del_resp.json()["models"]
+
+
+# ===================================================================
+# 6. 配置修改端点统一 schema 契约（CI/CD 门禁）
+# ===================================================================
+
+
+class TestConfigSchemaContract:
+    """所有配置修改端点的 payload schema 契约回归测试。
+
+    统一门禁：每个需 body 的 POST/PUT 配置端点，发送错误 payload 结构
+    （模拟前后端 schema 漂移）必须返回 422，而非静默成功或 500。
+
+    新增配置修改端点时，在此参数化追加一行即可套用同一 CI 门禁。
+    """
+
+    @pytest.mark.parametrize(
+        ("method", "path", "wrong_payload", "expected_field"),
+        [
+            # Model 端点 — 缺少 models/config 包裹
+            (
+                "POST",
+                "/api/v1/config/llm/models",
+                {"bare-id": {"provider": "p"}},
+                "models",
+            ),
+            (
+                "PUT",
+                "/api/v1/config/llm/models/test-model",
+                {"provider": "p", "model_name": "m"},
+                "config",
+            ),
+            # Provider 端点 — 缺少 config 包裹 / provider_id
+            (
+                "POST",
+                "/api/v1/config/llm/providers",
+                {"type": "openai", "api_base": "x"},
+                "provider_id",
+            ),
+            (
+                "PUT",
+                "/api/v1/config/llm/providers/test-provider",
+                {"api_base": "x"},
+                "config",
+            ),
+            # 通用配置端点 — 缺少 data 包裹
+            (
+                "PUT",
+                "/api/v1/config/api",
+                {"endpoint": {"base_url": "x"}},
+                "data",
+            ),
+            (
+                "PUT",
+                "/api/v1/config/concurrency",
+                {"task": {"max_concurrent_tasks": 3}},
+                "data",
+            ),
+            (
+                "PUT",
+                "/api/v1/config/cost-control",
+                {"enabled": True},
+                "data",
+            ),
+        ],
+        ids=[
+            "post-llm-models-missing-models",
+            "put-llm-models-missing-config",
+            "post-llm-providers-missing-provider_id",
+            "put-llm-providers-missing-config",
+            "put-api-missing-data",
+            "put-concurrency-missing-data",
+            "put-cost-control-missing-data",
+        ],
+    )
+    def test_wrong_payload_returns_422(
+        self,
+        config_client: TestClient,
+        method: str,
+        path: str,
+        wrong_payload: dict[str, Any],
+        expected_field: str,
+    ) -> None:
+        """错误 payload 结构必须返回 422，锁定前后端 schema 契约。"""
+        if method == "POST":
+            resp = config_client.post(path, json=wrong_payload)
+        else:
+            resp = config_client.put(path, json=wrong_payload)
+        assert resp.status_code == 422, (
+            f"{method} {path} 错误 payload 应返回 422，"
+            f"实际 {resp.status_code}: {resp.text[:200]}"
+        )
+        detail = resp.json().get("detail", [])
+        assert any(
+            expected_field in str(err.get("loc", []))
+            for err in detail
+        ), (
+            f"422 详情应指向字段 '{expected_field}'，实际: {detail}"
+        )

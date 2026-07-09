@@ -90,8 +90,7 @@ class CapabilityAdapterBase(BuiltinTool):
         backends = self._get_backends()
         if not backends:
             raise RuntimeError(
-                f"适配器 '{self._adapter_name}' 无可用后端。"
-                f"请检查 config/tools/capability_adapters.yaml"
+                f"适配器 '{self._adapter_name}' 无可用后端。请检查 config/tools/capability_adapters.yaml"
             )
 
         last_error: Exception | None = None
@@ -99,9 +98,7 @@ class CapabilityAdapterBase(BuiltinTool):
             if not backend.available:
                 continue
             try:
-                result = await self._call_backend(
-                    backend, mcp_tool_name, arguments
-                )
+                result = await self._call_backend(backend, mcp_tool_name, arguments)
                 return result, backend
             except Exception as e:
                 logger.warning(
@@ -112,9 +109,7 @@ class CapabilityAdapterBase(BuiltinTool):
                 )
                 last_error = e
 
-        raise RuntimeError(
-            f"适配器 '{self._adapter_name}' 所有后端均失败: {last_error}"
-        )
+        raise RuntimeError(f"适配器 '{self._adapter_name}' 所有后端均失败: {last_error}")
 
     @staticmethod
     def _extract_mcp_content(result: Any) -> Any:
@@ -151,8 +146,7 @@ class CapabilityAdapterBase(BuiltinTool):
         """返回"无可用后端"的标准错误。"""
         return create_failure_result(
             error=(
-                f"适配器 '{self._adapter_name}' 无可用后端。"
-                f"请在 config/tools/capability_adapters.yaml 中配置后端。"
+                f"适配器 '{self._adapter_name}' 无可用后端。请在 config/tools/capability_adapters.yaml 中配置后端。"
             ),
             error_code="NO_BACKEND_CONFIGURED",
         )

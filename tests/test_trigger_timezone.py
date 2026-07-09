@@ -404,3 +404,127 @@ class TestTimezoneBugConclusion:
 
         # aware vs aware 比较正常
         assert isinstance(run_date < now, bool), "两个 aware datetime 比较应正常"
+
+
+# ===========================================================================
+# 5. trigger_setup 工具：naive 本地时间解释（回归测试）
+# ===========================================================================
+#
+# 故障复现：用户传 schedule_time="2026-07-08T12:07:00"（naive，无时区）。
+# 旧 _setup_schedule_trigger 把 naive 当字面值，manager._normalize_datetime 又把它当作 UTC，
+# 导致北京 12:07 被理解成 UTC 12:07（即北京 20:07），晚 8 小时触发甚至永不触发。
+# 修复后：naive 时间按 APP_TIMEZONE 解释为本地时间，转成 aware UTC 存入 scheduled_at。
+
+
+class TestTriggerSetupScheduleLocalTime:
+    """验证 TriggerSetupTool 把 naive 本地时间按 APP_TIMEZONE 解释为 aware UTC。"""
+
+    @pytest.mark.asyncio
+    async def test_naive_local_time_interpreted_as_app_timezone(self):
+        """naive 时间字符串应按 APP_TIMEZONE 解释，存为 aware UTC。
+
+        用户传北京「2天后 12:07:00」（无时区），
+        应被解释为 Asia/Shanghai 本地时间，转成 UTC「2天后 04:07:00」。
+        """
+        from src.tools.builtin.trigger_setup.tool import TriggerSetupTool
+
+        local_tz = datetime.timezone(datetime.timedelta(hours=8))
+        # 2 天后的本地 12:07:00，必在 7 天上限内且在未来
+        target_local = (
+            datetime.datetime.now(local_tz) + datetime.timedelta(days=2)
+        ).replace(hour=12, minute=7, second=0, microsecond=0)
+        schedule_time_str = target_local.strftime("%Y-%m-%dT%H:%M:%S")
+
+        with patch("src.config.settings.get_settings") as mock_settings:
+            mock_settings.return_value.timezone = "Asia/Shanghai"
+
+            tool = TriggerSetupTool()
+            result = await tool.execute({
+                "trigger_type": "schedule",
+                "message": "定时测试",
+                "schedule_time": schedule_time_str,
+                "pipeline_id": "pipe_test_001",
+                "execution_id": "exec_test_001",
+            })
+
+        assert result.success is True, f"设置应成功: {getattr(result, 'error', '')}"
+        trigger_id = result.output["trigger_id"]
+
+        trigger = tool._manager.get(trigger_id)
+        assert trigger is not None
+        assert trigger.trigger_type.value == "scheduled"
+
+        # 核心：scheduled_at 必须是 aware，且 UTC 化后等于本地时间 -8h
+        scheduled = trigger.scheduled_at
+        assert scheduled.tzinfo is not None, "scheduled_at 必须是 aware datetime"
+        expected_utc = target_local.astimezone(datetime.timezone.utc)
+        assert scheduled == expected_utc, f"本地{target_local} 应解释为 UTC{expected_utc}，实际 {scheduled}"
+
+        tool._manager.unregister(trigger_id)
+
+    @pytest.mark.asyncio
+    async def test_aware_offset_time_preserved(self):
+        """带时区偏移的时间字符串应保留其语义，转成 aware UTC。"""
+        from src.tools.builtin.trigger_setup.tool import TriggerSetupTool
+
+        local_tz = datetime.timezone(datetime.timedelta(hours=8))
+        target_local = (
+            datetime.datetime.now(local_tz) + datetime.timedelta(days=2)
+        ).replace(hour=12, minute=7, second=0, microsecond=0)
+        # 明确带 +08:00 的时间字符串
+        schedule_time_str = target_local.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+        with patch("src.config.settings.get_settings") as mock_settings:
+            mock_settings.return_value.timezone = "Asia/Shanghai"
+
+            tool = TriggerSetupTool()
+            result = await tool.execute({
+                "trigger_type": "schedule",
+                "message": "定时测试",
+                "schedule_time": schedule_time_str,
+                "pipeline_id": "pipe_test_002",
+                "execution_id": "exec_test_002",
+            })
+
+        assert result.success is True
+        trigger = tool._manager.get(result.output["trigger_id"])
+        expected_utc = target_local.astimezone(datetime.timezone.utc)
+        assert trigger.scheduled_at == expected_utc
+        tool._manager.unregister(trigger.trigger_id)
+
+    @pytest.mark.asyncio
+    async def test_naive_local_time_not_treated_as_utc(self):
+        """回归：naive 本地时间不能被当作 UTC（旧 bug 的核心症状）。
+
+        旧代码：naive 12:07 被当 UTC 12:07 → 比 now(UTC)~07:xx 大 → 通过校验但永不触发。
+        新代码：naive 12:07 被当本地 → UTC 04:07。
+        用一个「字面值在 now(UTC) 之前、但本地解释后在 now(UTC) 之后」的时间，
+        验证不会被误判为过去时间（旧 bug 会误判）。
+        """
+        from src.tools.builtin.trigger_setup.tool import TriggerSetupTool
+
+        # now_utc ≈ 07:5x（北京 15:5x）。取本地 13:00（UTC 05:00）：
+        # - 旧代码（当 UTC）：13:00 > 07:5x → 视为未来，通过校验 ❌ 但实际永不触发
+        # - 新代码（当本地）：UTC 05:00 < 07:5x → 应判为过去时间，返回 SCHEDULE_TIME_IN_PAST ✅
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        local_tz = datetime.timezone(datetime.timedelta(hours=8))
+        # 本地 13:00 = UTC 05:00，在 now_utc(~07:5x) 之前
+        naive_local_past = (now_utc.astimezone(local_tz).replace(hour=13, minute=0, second=0, microsecond=0))
+        schedule_time_str = naive_local_past.strftime("%Y-%m-%dT%H:%M:%S")
+
+        with patch("src.config.settings.get_settings") as mock_settings:
+            mock_settings.return_value.timezone = "Asia/Shanghai"
+
+            tool = TriggerSetupTool()
+            result = await tool.execute({
+                "trigger_type": "schedule",
+                "message": "定时测试",
+                "schedule_time": schedule_time_str,
+                "pipeline_id": "pipe_test_004",
+                "execution_id": "exec_test_004",
+            })
+
+        # 新代码应识别为过去时间
+        assert result.success is False, "本地 13:00(=UTC05:00) 早于 now 应被判为过去时间"
+        assert result.error_code == "SCHEDULE_TIME_IN_PAST"
+

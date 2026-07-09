@@ -2,4 +2,4 @@
 
 from .tool import MoveFileTool
 
-__all__ = ['MoveFileTool']
+__all__ = ["MoveFileTool"]

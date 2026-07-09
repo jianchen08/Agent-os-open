@@ -2,4 +2,4 @@
 
 from .tool import MemoryTool
 
-__all__ = ['MemoryTool']
+__all__ = ["MemoryTool"]

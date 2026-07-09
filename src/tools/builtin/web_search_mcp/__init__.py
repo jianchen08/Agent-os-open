@@ -2,4 +2,4 @@
 
 from .tool import WebSearchMCPConfig, WebSearchMCPTool
 
-__all__ = ['WebSearchMCPConfig', 'WebSearchMCPTool']
+__all__ = ["WebSearchMCPConfig", "WebSearchMCPTool"]

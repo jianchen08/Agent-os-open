@@ -2,4 +2,4 @@
 
 from .tool import EnhancedSearchTool
 
-__all__ = ['EnhancedSearchTool']
+__all__ = ["EnhancedSearchTool"]

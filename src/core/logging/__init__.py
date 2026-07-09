@@ -140,4 +140,12 @@ def _quiet_third_party(level: int) -> None:
         logging.getLogger(name).setLevel(level)
 
 
-__all__ = ["setup_logging", "get_logger", "LoggingConfig", "LogContext", "ContextFilter", "JsonFormatter", "StructuredFormatter"]
+__all__ = [
+    "setup_logging",
+    "get_logger",
+    "LoggingConfig",
+    "LogContext",
+    "ContextFilter",
+    "JsonFormatter",
+    "StructuredFormatter",
+]

@@ -1,25 +1,31 @@
-"""测试 task_submit 评估指标自动注入修复。
+"""测试 task_submit 对 acceptance_criteria 的类型校验。
 
-BUG-FIX-fix_20260420_eval_inject: 验证 acceptance_criteria 的类型规范化、
-_auto_fill_criteria 的项目根目录定位、_build_metadata 的防御性存储。
+背景：历史上 acceptance_criteria 非 dict（如 list/字符串）时会被静默重置为空 dict
+并继续提交，导致「LLM 填了验收标准」伪装成「没填」，task_evaluate 又对空 AC
+「自动通过」，制造虚假合格信号。
+
+修复后铁律：空（不传）→ 合法，无 AC 自动通过；传了 → 必须是 dict（key=指标ID，
+value=配置对象），传 list/字符串等错误类型一律拒绝提交（INVALID_ACCEPTANCE_CRITERIA），
+让 LLM 拿到明确反馈去修正。
 
 覆盖场景:
-1. acceptance_criteria 为非 dict 类型（字符串/列表）时自动重置并补全
-2. acceptance_criteria 为空 dict 时自动从 agent 配置补全
-3. _auto_fill_criteria 能正确从项目根目录定位 agent 配置
-4. _build_metadata 对非 dict 类型不会静默丢失
+1. 非 dict 类型（字符串/列表/数字）→ 拒绝提交，返回 INVALID_ACCEPTANCE_CRITERIA
+2. 空 acceptance_criteria（不传或空 dict）→ 正常提交，无 AC
+3. 合法 dict → 正常提交，AC 存入 metadata
+4. _build_metadata 收到非 dict 时断言报错（第二道防线，不应被静默吞掉）
 """
+from __future__ import annotations
+
 import os
 import sys
+
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 os.environ["PYTHONPATH"] = "src"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
-
-from tools.builtin.task_submit import TaskSubmitTool
+from tools.builtin.task_submit import TaskSubmitTool  # noqa: E402
 
 
 @pytest.fixture
@@ -28,38 +34,145 @@ def tool():
     return TaskSubmitTool()
 
 
-class TestAutoFillCriteria:
-    """测试 _auto_fill_criteria 方法。"""
+@pytest.fixture
+def mock_services(tool, monkeypatch):
+    """为走到 create_task 的成功路径 mock 必要的 service。
 
-    def test_finds_planning_agent_config(self, tool):
-        """能从项目根目录定位 planning_agent 配置并提取推荐指标。"""
-        result = tool._auto_fill_criteria("planning_agent")
-        assert isinstance(result, dict)
-        assert "file_check" in result
-        assert "format_valid" in result
-        assert result["file_check"]["input_params"]["action"] == "read"
-        assert result["format_valid"]["input_params"]["type"] == "markdown"
+    task_submit.execute 成功路径会：await create_task → get_service_provider().get("task_worker")
+    → task_worker.submit_task。把这些外部依赖一并 mock 掉，使测试聚焦于
+    acceptance_criteria 校验而非完整提交链路。monkeypatch 自动清理 patch。
+    """
+    mock_task_service = MagicMock()
+    # create_task / hard_delete 是 async（代码用 await 调用），必须用 AsyncMock
+    mock_task_service.create_task = AsyncMock(
+        return_value=MagicMock(id="test_001", title="test", status=MagicMock(value="pending"))
+    )
+    mock_task_service.hard_delete = AsyncMock()
+    mock_task_service.get_task.return_value = None  # 无父任务
 
-    def test_returns_empty_for_unknown_agent(self, tool):
-        """不存在的 agent_id 返回空 dict。"""
-        result = tool._auto_fill_criteria("nonexistent_agent_xyz")
-        assert result == {}
+    mock_event_bus = MagicMock()
+    mock_event_bus.has_subscribers = MagicMock(return_value=True)
+    mock_event_bus.emit = AsyncMock()
 
-    def test_uses_project_root_not_cwd(self, tool):
-        """验证使用 __file__ 路径而非 Path.cwd() 定位配置。"""
-        config_dir = Path(__file__).resolve().parent.parent.parent.parent / "config" / "agents"
-        assert config_dir.exists(), f"配置目录应存在: {config_dir}"
+    mock_task_worker = MagicMock()
+    mock_task_worker.submit_task = MagicMock(return_value=True)
 
-        planning_yaml = list(config_dir.rglob("planning_agent.yaml"))
-        assert len(planning_yaml) > 0, "应找到 planning_agent.yaml"
+    tool._get_task_service = MagicMock(return_value=mock_task_service)
+    tool._get_event_bus = MagicMock(return_value=mock_event_bus)
+    monkeypatch.setattr(
+        "infrastructure.service_provider.get_service_provider",
+        lambda: MagicMock(get=lambda _: mock_task_worker),
+    )
+
+    return mock_task_service
 
 
-class TestBuildMetadata:
-    """测试 _build_metadata 方法的防御性类型检查。"""
+class TestAcceptanceCriteriaTypeGuard:
+    """execute() 入口对 acceptance_criteria 类型的硬校验。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.task
+    async def test_list_criteria_rejected(self, tool):
+        """acceptance_criteria 为 list → 拒绝提交，不静默重置为空。"""
+        inputs = {
+            "goal": {"title": "test task", "description": "test"},
+            "target_type": "agent",
+            "target_id": "general_agent",
+            "acceptance_criteria": ["file_check", "bash_check"],
+            "task_scope": "non_container",
+            "parent_agent_level": 1,
+        }
+
+        result = await tool.execute(inputs)
+
+        assert result.success is False
+        assert result.error_code == "INVALID_ACCEPTANCE_CRITERIA"
+
+    @pytest.mark.asyncio
+    @pytest.mark.task
+    async def test_string_criteria_rejected(self, tool):
+        """acceptance_criteria 为字符串 → 拒绝提交。"""
+        inputs = {
+            "goal": {"title": "test task", "description": "test"},
+            "target_type": "agent",
+            "target_id": "general_agent",
+            "acceptance_criteria": "file_check",
+            "task_scope": "non_container",
+            "parent_agent_level": 1,
+        }
+
+        result = await tool.execute(inputs)
+
+        assert result.success is False
+        assert result.error_code == "INVALID_ACCEPTANCE_CRITERIA"
+
+    @pytest.mark.asyncio
+    @pytest.mark.task
+    async def test_none_criteria_allowed(self, tool, mock_services):
+        """不传 acceptance_criteria（None）→ 合法，正常提交，无 AC。"""
+        inputs = {
+            "goal": {"title": "test task", "description": "test"},
+            "target_type": "agent",
+            "target_id": "general_agent",
+            "task_scope": "non_container",
+            "parent_agent_level": 1,
+        }
+
+        result = await tool.execute(inputs)
+
+        assert result.success is True
+        metadata = mock_services.create_task.call_args[1]["metadata"]
+        assert "acceptance_criteria" not in metadata
+        assert "evaluation_metric_ids" not in metadata
+
+    @pytest.mark.asyncio
+    @pytest.mark.task
+    async def test_empty_dict_criteria_allowed(self, tool, mock_services):
+        """acceptance_criteria 为空 dict → 合法，正常提交，无 AC。"""
+        inputs = {
+            "goal": {"title": "test task", "description": "test"},
+            "target_type": "agent",
+            "target_id": "general_agent",
+            "acceptance_criteria": {},
+            "task_scope": "non_container",
+            "parent_agent_level": 1,
+        }
+
+        result = await tool.execute(inputs)
+
+        assert result.success is True
+        metadata = mock_services.create_task.call_args[1]["metadata"]
+        assert "acceptance_criteria" not in metadata
+        assert "evaluation_metric_ids" not in metadata
+
+    @pytest.mark.asyncio
+    @pytest.mark.task
+    async def test_valid_dict_criteria_stored(self, tool, mock_services):
+        """合法 dict acceptance_criteria → 正常提交，AC 存入 metadata。"""
+        criteria = {"file_check": {"input_params": {"path": "src/main.py"}}}
+        inputs = {
+            "goal": {"title": "test task", "description": "test"},
+            "target_type": "agent",
+            "target_id": "general_agent",
+            "acceptance_criteria": criteria,
+            "task_scope": "non_container",
+            "parent_agent_level": 1,
+        }
+
+        result = await tool.execute(inputs)
+
+        assert result.success is True
+        metadata = mock_services.create_task.call_args[1]["metadata"]
+        assert metadata["acceptance_criteria"] == criteria
+        assert metadata["evaluation_metric_ids"] == ["file_check"]
+
+
+class TestBuildMetadataDefensiveAssert:
+    """_build_metadata 第二道防线：非 dict 断言报错，不静默吞掉。"""
 
     def test_stores_dict_criteria(self, tool):
         """正常的 dict 类型 acceptance_criteria 能正确存储。"""
-        inputs = {"metadata": {}, "workspace": "", "task_scope": "short_term", "target_id": "test"}
+        inputs = {"metadata": {}, "workspace": "", "task_scope": "non_container", "target_id": "test"}
         goal = {"title": "test", "context": {}}
         criteria = {"file_check": {"input_params": {"path": "test.md"}}}
 
@@ -67,125 +180,27 @@ class TestBuildMetadata:
         assert metadata["acceptance_criteria"] == criteria
         assert metadata["evaluation_metric_ids"] == ["file_check"]
 
-    def test_warns_on_non_dict_criteria(self, tool):
-        """非 dict 类型的 acceptance_criteria 不静默丢失，记录 warning 日志。"""
-        inputs = {"metadata": {}, "workspace": "", "task_scope": "short_term", "target_id": "test"}
-        goal = {"title": "test", "context": {}}
-
-        with patch("tools.builtin.task_submit.logger") as mock_logger:
-            metadata = tool._build_metadata(inputs, goal, "invalid_string")
-
-        mock_logger.warning.assert_called()
-        assert "acceptance_criteria" not in metadata
-        assert "evaluation_metric_ids" not in metadata
-
     def test_empty_criteria_not_stored(self, tool):
         """空 acceptance_criteria 不会存入 metadata。"""
-        inputs = {"metadata": {}, "workspace": "", "task_scope": "short_term", "target_id": "test"}
+        inputs = {"metadata": {}, "workspace": "", "task_scope": "non_container", "target_id": "test"}
         goal = {"title": "test", "context": {}}
 
         metadata = tool._build_metadata(inputs, goal, {})
         assert "acceptance_criteria" not in metadata
         assert "evaluation_metric_ids" not in metadata
 
+    def test_non_dict_criteria_raises_assertion(self, tool):
+        """非 dict 的 acceptance_criteria 触发断言报错（execute 入口已拦截，此处不应到达）。"""
+        inputs = {"metadata": {}, "workspace": "", "task_scope": "non_container", "target_id": "test"}
+        goal = {"title": "test", "context": {}}
 
-class TestCriteriaNormalization:
-    """测试 execute() 中 acceptance_criteria 类型规范化。"""
+        with pytest.raises(AssertionError):
+            tool._build_metadata(inputs, goal, ["file_check"])
 
-    @pytest.mark.asyncio
-    async def test_string_criteria_resets_and_auto_fills(self, tool):
-        """acceptance_criteria 为字符串时重置为空并触发自动补全。"""
-        mock_task_service = MagicMock()
-        mock_task_service.create_task.return_value = MagicMock(
-            id="test_001", title="test", status=MagicMock(value="pending")
-        )
-        mock_event_bus = MagicMock()
-        mock_event_bus.has_subscribers = MagicMock(return_value=True)
-        mock_event_bus.emit = AsyncMock()
+    def test_non_dict_string_criteria_raises_assertion(self, tool):
+        """字符串类型的 acceptance_criteria 触发断言报错。"""
+        inputs = {"metadata": {}, "workspace": "", "task_scope": "non_container", "target_id": "test"}
+        goal = {"title": "test", "context": {}}
 
-        tool._get_task_service = MagicMock(return_value=mock_task_service)
-        tool._get_event_bus = MagicMock(return_value=mock_event_bus)
-
-        inputs = {
-            "goal": {"title": "test task", "description": "test"},
-            "target_type": "agent",
-            "target_id": "planning_agent",
-            "acceptance_criteria": "this_is_a_string_not_dict",
-            "task_scope": "short_term",
-            "parent_agent_level": 1,
-        }
-
-        result = await tool.execute(inputs)
-
-        assert result.success is True
-        call_args = mock_task_service.create_task.call_args
-        metadata = call_args[1]["metadata"]
-
-        assert "acceptance_criteria" in metadata
-        assert "evaluation_metric_ids" in metadata
-        assert len(metadata["evaluation_metric_ids"]) > 0
-
-    @pytest.mark.asyncio
-    async def test_empty_criteria_auto_fills_from_agent_config(self, tool):
-        """空 acceptance_criteria 时自动从 agent 配置补全。"""
-        mock_task_service = MagicMock()
-        mock_task_service.create_task.return_value = MagicMock(
-            id="test_002", title="test", status=MagicMock(value="pending")
-        )
-        mock_event_bus = MagicMock()
-        mock_event_bus.has_subscribers = MagicMock(return_value=True)
-        mock_event_bus.emit = AsyncMock()
-
-        tool._get_task_service = MagicMock(return_value=mock_task_service)
-        tool._get_event_bus = MagicMock(return_value=mock_event_bus)
-
-        inputs = {
-            "goal": {"title": "test task", "description": "test"},
-            "target_type": "agent",
-            "target_id": "planning_agent",
-            "task_scope": "short_term",
-            "parent_agent_level": 1,
-        }
-
-        result = await tool.execute(inputs)
-
-        assert result.success is True
-        call_args = mock_task_service.create_task.call_args
-        metadata = call_args[1]["metadata"]
-
-        assert "file_check" in metadata.get("acceptance_criteria", {})
-        assert "format_valid" in metadata.get("acceptance_criteria", {})
-        assert "file_check" in metadata.get("evaluation_metric_ids", [])
-        assert "format_valid" in metadata.get("evaluation_metric_ids", [])
-
-    @pytest.mark.asyncio
-    async def test_list_criteria_resets_and_auto_fills(self, tool):
-        """acceptance_criteria 为列表时重置为空并触发自动补全。"""
-        mock_task_service = MagicMock()
-        mock_task_service.create_task.return_value = MagicMock(
-            id="test_003", title="test", status=MagicMock(value="pending")
-        )
-        mock_event_bus = MagicMock()
-        mock_event_bus.has_subscribers = MagicMock(return_value=True)
-        mock_event_bus.emit = AsyncMock()
-
-        tool._get_task_service = MagicMock(return_value=mock_task_service)
-        tool._get_event_bus = MagicMock(return_value=mock_event_bus)
-
-        inputs = {
-            "goal": {"title": "test task", "description": "test"},
-            "target_type": "agent",
-            "target_id": "planning_agent",
-            "acceptance_criteria": ["file_check", "format_valid"],
-            "task_scope": "short_term",
-            "parent_agent_level": 1,
-        }
-
-        result = await tool.execute(inputs)
-
-        assert result.success is True
-        call_args = mock_task_service.create_task.call_args
-        metadata = call_args[1]["metadata"]
-
-        assert isinstance(metadata.get("acceptance_criteria"), dict)
-        assert len(metadata["evaluation_metric_ids"]) > 0
+        with pytest.raises(AssertionError):
+            tool._build_metadata(inputs, goal, "invalid_string")

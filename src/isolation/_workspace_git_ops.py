@@ -20,11 +20,33 @@ logger = logging.getLogger(__name__)
 # 排除的目录（不参与场景检测、复制和大小计算）
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data"})
 _SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
-_WIN_RESERVED_NAMES = frozenset({
-    "nul", "NUL", "CON", "PRN", "AUX",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-})
+_WIN_RESERVED_NAMES = frozenset(
+    {
+        "nul",
+        "NUL",
+        "CON",
+        "PRN",
+        "AUX",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
 _SPARSE_THRESHOLD_BYTES = 50 * 1024 * 1024  # sparse checkout 大小阈值（50MB）
 _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
 _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
@@ -33,13 +55,14 @@ _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作
 def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 15) -> str:
     """生成安全的 worktree 目录名，项目名截断到 name_limit 字符避免 Windows 路径超限。"""
     import re  # noqa: PLC0415
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', project_name)
+
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", project_name)
     safe = safe.replace(" ", "_")
-    safe = re.sub(r'_+', '_', safe).strip('._')
+    safe = re.sub(r"_+", "_", safe).strip("._")
     if not safe:
         safe = "ws"
     if len(safe) > name_limit:
-        safe = safe[:name_limit].rstrip('._')
+        safe = safe[:name_limit].rstrip("._")
     return f"{safe}__wt_{task_id[:8]}"
 
 
@@ -49,6 +72,7 @@ def _force_rmtree(path: str) -> None:
     Windows 上 git objects 文件为只读属性，shutil.rmtree 默认无法删除。
     通过 onerror 回调去除只读属性后重试。
     """
+
     def _on_error(func, filepath, exc_info):
         if os.name == "nt":
             os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101
@@ -77,7 +101,7 @@ class _GitOpsMixin:
     - self._resource_merge: Any
     """
 
-    _WIN_ABS_PATH = __import__("re").compile(r'^[a-zA-Z]:[/\\]')
+    _WIN_ABS_PATH = __import__("re").compile(r"^[a-zA-Z]:[/\\]")
 
     def _get_workspace_root(self) -> Path:
         """从配置中读取工作空间基目录，解析为绝对路径。
@@ -87,6 +111,7 @@ class _GitOpsMixin:
         例如配置 root: "D:/myproject" 则返回 Path("D:/myproject")。
         """
         from isolation.workspace import _DEFAULT_WORKSPACE_ROOT  # noqa: PLC0415
+
         raw = self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
         if self._WIN_ABS_PATH.match(raw):
             return Path(raw)
@@ -99,7 +124,9 @@ class _GitOpsMixin:
         """执行 git 命令（同步，使用 subprocess）"""
         cmd = ["git"] + list(args)
         try:
-            r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)  # noqa: PLW1510
+            r = subprocess.run(
+                cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+            )  # noqa: PLW1510
             if r.returncode != 0:
                 err_parts = []
                 if r.stderr.strip():
@@ -170,14 +197,15 @@ class _GitOpsMixin:
         Returns:
             True if on expected branch, False otherwise.
         """
-        rc, current, _ = self._run_git(
-            "rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
+        rc, current, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
         if rc == 0 and current.strip() == expected:
             return True
         logger.warning(
-            "[WorkspaceLifecycle] EXPECT %s but on %s — "
-            "不允许 checkout 切换分支: cwd=%s",
-            expected, current.strip() if rc == 0 else "(unknown)", cwd)
+            "[WorkspaceLifecycle] EXPECT %s but on %s — 不允许 checkout 切换分支: cwd=%s",
+            expected,
+            current.strip() if rc == 0 else "(unknown)",
+            cwd,
+        )
         return False
 
     def _record_main_branch(self):
@@ -197,7 +225,9 @@ class _GitOpsMixin:
                 else:
                     logger.warning(
                         "[WorkspaceLifecycle] 当前分支 '%s' 不是主分支(main/master)，"
-                        "worktree 将基于此分支创建。建议在主分支上启动任务。", branch)
+                        "worktree 将基于此分支创建。建议在主分支上启动任务。",
+                        branch,
+                    )
         except Exception:
             logger.warning("[WorkspaceLifecycle] _record_main_branch 失败", exc_info=True)
 
@@ -218,7 +248,9 @@ class _GitOpsMixin:
             logger.warning(
                 "[WorkspaceLifecycle] BRANCH GUARD: 项目根目录分支已变更! "
                 "expected=%s, actual=%s — 跳过操作避免写入错误分支",
-                self._main_branch, current.strip() if rc == 0 else "(unknown)")
+                self._main_branch,
+                current.strip() if rc == 0 else "(unknown)",
+            )
             return False
         except Exception:
             logger.warning("[WorkspaceLifecycle] _guard_root_branch 检查异常，默认放行", exc_info=True)
@@ -250,7 +282,9 @@ class _GitOpsMixin:
         if needs_init:
             rc, _, stderr = self._run_git("init", "--initial-branch=main", cwd=cwd)
             if rc != 0:
-                logger.warning("[WorkspaceLifecycle] git init --initial-branch=main failed: %s, retry without flag", stderr)
+                logger.warning(
+                    "[WorkspaceLifecycle] git init --initial-branch=main failed: %s, retry without flag", stderr
+                )
                 rc, _, stderr = self._run_git("init", cwd=cwd)
                 if rc != 0:
                     logger.warning("[WorkspaceLifecycle] git init failed: %s", stderr)
@@ -261,14 +295,12 @@ class _GitOpsMixin:
 
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
-            logger.warning(
-                "[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s",
-                gitignore)
+            logger.warning("[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s", gitignore)
             with contextlib.suppress(OSError):
                 gitignore.write_text(
-                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\n"
-                    "node_modules/\n.env\n*.log\n*.bak\n",
-                    encoding="utf-8")
+                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\nnode_modules/\n.env\n*.log\n*.bak\n",
+                    encoding="utf-8",
+                )
 
         self._remove_index_lock(cwd)
 
@@ -277,14 +309,15 @@ class _GitOpsMixin:
             if "index.lock" in (stderr or "") and self._remove_index_lock(cwd):
                 rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
             if rc != 0:
-                logger.warning(
-                    "[WorkspaceLifecycle] git add -A failed (非致命，继续提交): %s", stderr)
+                logger.warning("[WorkspaceLifecycle] git add -A failed (非致命，继续提交): %s", stderr)
 
         rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
         if rc != 0:
             if "index.lock" in (stderr or ""):  # noqa: SIM102
                 if self._remove_index_lock(cwd):
-                    rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
+                    rc, out, stderr = self._run_git(
+                        "commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT
+                    )
             if rc != 0:
                 logger.warning("[WorkspaceLifecycle] git commit failed after retry: %s | stdout: %s", stderr, out)
                 return False
@@ -306,14 +339,12 @@ class _GitOpsMixin:
 
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
-            logger.warning(
-                "[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s",
-                gitignore)
+            logger.warning("[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s", gitignore)
             with contextlib.suppress(OSError):
                 gitignore.write_text(
-                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\n"
-                    "node_modules/\n.env\n*.log\n*.bak\n",
-                    encoding="utf-8")
+                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\nnode_modules/\n.env\n*.log\n*.bak\n",
+                    encoding="utf-8",
+                )
 
         rc, _, _ = self._run_git("add", "-A", cwd=cwd)
         if rc != 0:
@@ -349,13 +380,16 @@ class _GitOpsMixin:
             raise RuntimeError(
                 f"auto-save 失败：工作区仍存在未提交的已跟踪变更，"
                 f"为避免数据丢失中止 worktree 创建。task_id={task_id}, "
-                f"path={cwd}, 文件={dirty[:10]}")
+                f"path={cwd}, 文件={dirty[:10]}"
+            )
         if rc != 0:
             # 校验命令本身失败不应阻塞任务启动（避免 git 偶发故障放大成任务失败），
             # 但必须留下告警便于排查。
             logger.warning(
-                "[WorkspaceLifecycle] auto-save 后状态校验命令失败，无法确认工作区干净（放行）: "
-                "task_id=%s, path=%s", task_id, cwd)
+                "[WorkspaceLifecycle] auto-save 后状态校验命令失败，无法确认工作区干净（放行）: task_id=%s, path=%s",
+                task_id,
+                cwd,
+            )
 
     def _git_add_tracked_and_commit(self, cwd: Path, message: str) -> str | None:
         """只提交已跟踪文件的修改，不添加未跟踪文件。返回 commit hash 或 None。"""
@@ -456,39 +490,43 @@ class _GitOpsMixin:
         return total
 
     def _worktree_add_with_repair(
-        self, repo_path: Path, branch: str, ws_dir: Path, task_id: str,
+        self,
+        repo_path: Path,
+        branch: str,
+        ws_dir: Path,
+        task_id: str,
     ) -> None:
         """创建 worktree，失败时自动 prune 并重试一次。
 
         常见失败原因：之前 worktree 清理不彻底，.git/worktrees 下残留引用，
         导致 git 认为路径状态不一致。prune 可清除这些失效引用。
         """
-        rc, _, stderr = self._run_git(
-            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
+        rc, _, stderr = self._run_git("worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
         if rc == 0:
             self._link_worktree_dependencies(ws_dir, repo_path)
             return
 
         logger.warning(
-            "[WorkspaceLifecycle] worktree add 失败，尝试 prune 修复: "
-            "task_id=%s, path=%s, error=%s",
-            task_id, repo_path, stderr,
+            "[WorkspaceLifecycle] worktree add 失败，尝试 prune 修复: task_id=%s, path=%s, error=%s",
+            task_id,
+            repo_path,
+            stderr,
         )
         self._run_git("worktree", "prune", cwd=repo_path)
         if ws_dir.exists():
+
             def _remove_readonly(func, path, exc_info):
                 import stat  # noqa: PLC0415
+
                 os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
                 func(path)
+
             shutil.rmtree(str(ws_dir), onerror=_remove_readonly)
         self._run_git("branch", "-D", branch, cwd=repo_path)
 
-        rc, _, stderr = self._run_git(
-            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
+        rc, _, stderr = self._run_git("worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
         if rc != 0:
-            raise RuntimeError(
-                f"git worktree add 失败（prune 后重试仍失败）: "
-                f"task_id={task_id}, error={stderr}")
+            raise RuntimeError(f"git worktree add 失败（prune 后重试仍失败）: task_id={task_id}, error={stderr}")
         self._link_worktree_dependencies(ws_dir, repo_path)
 
     def _link_worktree_dependencies(self, ws_dir: Path, project_root: Path) -> None:
@@ -501,8 +539,7 @@ class _GitOpsMixin:
         - 文件：Linux symlink / Windows mklink（无 /J）
         - 含父目录的路径（如 frontend/node_modules）→ 自动创建父目录
         """
-        link_patterns = self._config.get("workspace", {}).get(
-            "worktree_link_patterns", [])
+        link_patterns = self._config.get("workspace", {}).get("worktree_link_patterns", [])
         if not link_patterns:
             return
 
@@ -516,22 +553,19 @@ class _GitOpsMixin:
                 if src.is_dir():
                     if os.name == "nt":
                         subprocess.run(  # noqa: PLW1510
-                            ["cmd", "/c", "mklink", "/J", str(dst), str(src)],
-                            capture_output=True, timeout=10)
+                            ["cmd", "/c", "mklink", "/J", str(dst), str(src)], capture_output=True, timeout=10
+                        )
                     else:
                         dst.symlink_to(src)
                 elif os.name == "nt":
                     subprocess.run(  # noqa: PLW1510
-                        ["cmd", "/c", "mklink", str(dst), str(src)],
-                        capture_output=True, timeout=10)
+                        ["cmd", "/c", "mklink", str(dst), str(src)], capture_output=True, timeout=10
+                    )
                 else:
                     dst.symlink_to(src)
-                logger.info(
-                    "[WorkspaceLifecycle] 符号链接已创建: %s -> %s", dst, src)
+                logger.info("[WorkspaceLifecycle] 符号链接已创建: %s -> %s", dst, src)
             except Exception as e:
-                logger.warning(
-                    "[WorkspaceLifecycle] 创建符号链接失败: %s -> %s, error=%s",
-                    src, dst, e)
+                logger.warning("[WorkspaceLifecycle] 创建符号链接失败: %s -> %s, error=%s", src, dst, e)
 
     def _setup_sparse_worktree(self, ws_dir: Path, project_root: Path, branch: str):
         """为大项目设置 sparse-checkout worktree，排除目录通过符号链接关联（Windows 用 junction point 降级）
@@ -542,8 +576,7 @@ class _GitOpsMixin:
         """
         self._run_git("worktree", "add", "--no-checkout", "-b", branch, str(ws_dir), cwd=project_root)
         self._run_git("sparse-checkout", "init", "--cone", cwd=ws_dir)
-        whitelist = self._config.get("workspace", {}).get(
-            "worktree_include_patterns", ["src", "config"])
+        whitelist = self._config.get("workspace", {}).get("worktree_include_patterns", ["src", "config"])
         mandatory = [".gitignore", ".gitattributes", ".gitmodules"]
         for m in mandatory:
             if m not in whitelist:

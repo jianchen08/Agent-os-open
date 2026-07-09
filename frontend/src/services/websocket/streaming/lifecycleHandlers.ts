@@ -3,7 +3,6 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
-import { generateUUID } from '@/utils/uuid'
 
 import { allocateNextSequence, terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
@@ -74,7 +73,7 @@ export function handleReconnected(): void {
   }
 }
 
-/** 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知） 系统消息气泡的唯一创建入口。后端通过 send_frontend_event 发送 */
+/** 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知） 系统消息气泡的唯一创建入口。后端 emit_notification 生成 record_id（唯一 id 来源），事件 payload 带上它；前端用它作消息 id，与后端落库的 record_id 一致，刷新后按 id 自然去重（与 AI 消息同款 id 契约）。 */
 export function handleSystemNotification(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
   const data = eventData?.data || eventData
@@ -82,32 +81,28 @@ export function handleSystemNotification(eventData: any): void {
   const level = data?.level || 'info'
   const notificationType = data?.notificationType || ''
   const notificationId = data?.notification_id || ''
+  // record_id 是后端 emit_notification 生成的【唯一 id 来源】，事件必须携带。
+  // 缺失说明后端未正确生成 id —— 直接报错，不做兜底（兜底会掩盖后端 bug，
+  // 且无法与 track 落库的 record_id 对齐，导致刷新后重复渲染）。
+  const recordId = data?.record_id
+  if (!recordId) {
+    loggers.websocket.error(
+      '[系统通知] record_id 缺失，拒绝创建气泡（后端 emit_notification 必须生成 record_id）: pipeline=%s content=%.40s',
+      pipelineId?.slice(0, 12), content.slice(0, 40),
+    )
+    return
+  }
 
   if (!pipelineId || !content) return
 
   const pipelineStore = usePipelineMessageStore.getState()
 
   const existingMsgs = pipelineStore.getMessages(pipelineId)
-  // notification_id 为空时走内容精确去重，避免空字符串匹配所有通知
-  if (notificationId) {
-    const alreadyExists = existingMsgs.some((m: any) => {
-      if (m.role !== 'system') return false
-      const metaId = (m as any).metadata?.notification_id || ''
-      return metaId === notificationId
-    })
-    if (alreadyExists) return
-  } else {
-    // notification_id 缺失时，用 content 精确匹配去重
-    const alreadyExists = existingMsgs.some((m: any) => {
-      if (m.role !== 'system') return false
-      return m.content === content
-    })
-    if (alreadyExists) {
-      // -M03: WS handler 层 console 残留
-      loggers.websocket.warn('[系统通知] notification_id 缺失，使用内容去重: %.40s', content.slice(0, 40))
-      return
-    }
-  }
+  // 内存级去重：同一 record_id 的 system 事件只创建一次（防重复投递）。
+  // record_id 即消息 id，与后端落库 record_id 一致，刷新时由 initFromAPI 的
+  // id 对账（isCoveredByApi）处理流式气泡 vs API 记录的去重。
+  const alreadyExists = existingMsgs.some((m: any) => m.id === recordId)
+  if (alreadyExists) return
 
   loggers.websocket.debug(
     '[MSG-LIFE] 系统通知创建: pipeline=%s content=%.40s',
@@ -127,7 +122,9 @@ export function handleSystemNotification(eventData: any): void {
   )
 
   pipelineStore.addMessage(pipelineId, {
-    id: `sys_${generateUUID()}`,
+    // id 用后端 record_id（== track 落库 record_id），刷新后 API 返回同 id，
+    // isCoveredByApi 按 id 去重，不再产生「流式气泡 + API 记录」两条。
+    id: recordId,
     role: 'system',
     content,
     timestamp: new Date().toISOString(),
@@ -148,7 +145,7 @@ export function handleSystemNotification(eventData: any): void {
       sender_type: 'system',
       notification_level: level,
       notification_type: notificationType,
-      notification_id: notificationId,  // Stage1: 保存notification_id用于去重
+      notification_id: notificationId,
     },
   } as any)
 }

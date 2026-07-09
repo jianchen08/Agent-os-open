@@ -2,4 +2,4 @@
 
 from .tool import TtsGenerateTool, create_tts_generate_tool
 
-__all__ = ['TtsGenerateTool', 'create_tts_generate_tool']
+__all__ = ["TtsGenerateTool", "create_tts_generate_tool"]

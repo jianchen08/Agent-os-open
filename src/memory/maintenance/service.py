@@ -441,13 +441,10 @@ class MemoryMaintenanceService:
             if report_paths:
                 # 列出报告文件名（相对路径更易读），让用户知道去读哪个文件
                 try:
-                    import os as _os  # noqa: PLC0415
+                    from pathlib import Path  # noqa: PLC0415
 
-                    cwd = _os.getcwd()
-                    rel_paths = [
-                        _os.path.relpath(p, cwd) if _os.path.isabs(p) else p
-                        for p in report_paths
-                    ]
+                    cwd = Path.cwd()
+                    rel_paths = [str(Path(p).relative_to(cwd)) if Path(p).is_absolute() else p for p in report_paths]
                 except Exception:
                     rel_paths = report_paths
                 summary += "\n\n详细报告：\n" + "\n".join(f"- {p}" for p in rel_paths)
@@ -697,7 +694,10 @@ class MemoryMaintenanceService:
             resolved_prompt = ""
             if raw_prompt:
                 resolved_prompt = await self._resolve_prompt_placeholders(
-                    raw_prompt, project_root, hard, soft,
+                    raw_prompt,
+                    project_root,
+                    hard,
+                    soft,
                 )
 
             if not resolved_prompt and not hard and not soft:
@@ -843,9 +843,7 @@ class MemoryMaintenanceService:
 
                 # 收集被复盘 agent 的完整体系提示词（解析后）+ 硬/软约束，供 review_agent
                 # 对照检查「指令遵循」维度。拿不到配置的 agent 跳过，不阻断复盘。
-                constraints_block = await self._collect_agent_constraints(
-                    [t.get("agent_id", "") for t in targets]
-                )
+                constraints_block = await self._collect_agent_constraints([t.get("agent_id", "") for t in targets])
 
                 content = (
                     f"[工具触发复盘] 请分析以下管道的执行记录，产出经验和改进建议。\n\n"

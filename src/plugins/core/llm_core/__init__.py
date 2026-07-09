@@ -2,4 +2,4 @@
 
 from .plugin import LLMCore
 
-__all__ = ['LLMCore']
+__all__ = ["LLMCore"]

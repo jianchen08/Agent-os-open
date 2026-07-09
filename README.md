@@ -137,8 +137,28 @@ chmod +x install.sh
 ```
 
 启动后：
-- Web UI：http://localhost:5188
+- Web UI：http://localhost:5289
 - 后端 API：http://localhost:8988
+
+### 跨设备 / 多实例配置说明
+
+默认配置开箱即用，以下情况需要按需调整：
+
+**工作空间根目录**：任务的工作文件默认存放在 `config/isolation/isolation_config.yaml` 中 `workspace.root` 指定的目录下。如果你的项目不在该路径，或希望放到其他盘符/分区，编辑该文件把 `root` 改为你的实际路径（支持绝对路径，如 Linux 的 `/tmp/ai_workspaces` 或 Windows 的 `D:/workspaces`）。注意：容器隔离模式下 `root` 必须是绝对路径，相对路径会导致 Docker bind mount 失败。
+
+**多实例隔离**：在同一台机器上运行多个独立实例时，为避免容器名冲突，在启动前设置不同的 `COMPOSE_PROJECT_NAME` 环境变量：
+
+```bash
+# Linux / macOS / WSL
+export COMPOSE_PROJECT_NAME=agentos2
+./start_web.sh
+
+# Windows (cmd)
+set COMPOSE_PROJECT_NAME=agentos2
+start_web_cn.bat
+```
+
+这会让前端/Redis 容器、网络、卷名都带上独立前缀，互不干扰。
 
 ### 方式三：手动开发模式
 

@@ -2,4 +2,4 @@
 
 from .plugin import _KNOWN_INJECT_SOURCES, InjectedParamValidator
 
-__all__ = ['InjectedParamValidator', '_KNOWN_INJECT_SOURCES']
+__all__ = ["InjectedParamValidator", "_KNOWN_INJECT_SOURCES"]

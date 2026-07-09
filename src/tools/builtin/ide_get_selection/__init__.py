@@ -2,4 +2,4 @@
 
 from .tool import IDEGetSelectionTool
 
-__all__ = ['IDEGetSelectionTool']
+__all__ = ["IDEGetSelectionTool"]

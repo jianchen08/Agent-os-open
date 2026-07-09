@@ -64,7 +64,7 @@ def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    candidate = s[first_brace:i + 1]
+                    candidate = s[first_brace : i + 1]
                     try:
                         json.loads(candidate)
                         return candidate
@@ -239,14 +239,16 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  
                 if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
                     normalized.append(tc)
                     continue
-                normalized.append({
-                    "id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
-                    "type": "function",
-                    "function": {
-                        "name": tc.get("name", ""),
-                        "arguments": tc.get("args", tc.get("arguments", "{}")),
-                    },
-                })
+                normalized.append(
+                    {
+                        "id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": tc.get("args", tc.get("arguments", "{}")),
+                        },
+                    }
+                )
             msg["tool_calls"] = normalized
             raw_tcs = normalized
 
@@ -260,7 +262,9 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  
                 tc["id"] = new_id
                 id_remap[old_id] = new_id
                 logger.info(
-                    "tool_call_id 格式修正: %s → %s", old_id, new_id,
+                    "tool_call_id 格式修正: %s → %s",
+                    old_id,
+                    new_id,
                 )
 
     # 同步修正 tool 消息中对应的 tool_call_id，保持 assistant↔tool 配对一致
@@ -310,9 +314,12 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
 
     if scan_start > 0:
         logger.debug(
-            "[%s] %s tool_call pairing: incremental scan "
-            "safety_start=%d, scan_start=%d, total=%d",
-            name, provider, safety_start, scan_start, msg_count,
+            "[%s] %s tool_call pairing: incremental scan safety_start=%d, scan_start=%d, total=%d",
+            name,
+            provider,
+            safety_start,
+            scan_start,
+            msg_count,
         )
 
     # ── Phase A: 移除孤立的 tool result ──
@@ -322,16 +329,8 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     for msg in messages[safety_start:scan_start]:
         if msg.get("role") == "assistant":
             if msg.get("tool_calls"):
-                expecting_tool_ids = {
-                    tc.get("id")
-                    for tc in msg["tool_calls"]
-                    if tc.get("id")
-                }
-                expecting_tool_ids_ordered = [
-                    tc.get("id")
-                    for tc in msg["tool_calls"]
-                    if tc.get("id")
-                ]
+                expecting_tool_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
+                expecting_tool_ids_ordered = [tc.get("id") for tc in msg["tool_calls"] if tc.get("id")]
             else:
                 expecting_tool_ids = set()
                 expecting_tool_ids_ordered = []
@@ -358,16 +357,8 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     for msg in messages[scan_start:]:
         if msg.get("role") == "assistant":
             if msg.get("tool_calls"):
-                expecting_tool_ids = {
-                    tc.get("id")
-                    for tc in msg["tool_calls"]
-                    if tc.get("id")
-                }
-                expecting_tool_ids_ordered = [
-                    tc.get("id")
-                    for tc in msg["tool_calls"]
-                    if tc.get("id")
-                ]
+                expecting_tool_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
+                expecting_tool_ids_ordered = [tc.get("id") for tc in msg["tool_calls"] if tc.get("id")]
             else:
                 expecting_tool_ids = set()
                 expecting_tool_ids_ordered = []
@@ -385,9 +376,11 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
                     expecting_tool_ids.discard(matched_id)
                     positional_match_count += 1
                     logger.info(
-                        "[%s] %s tool_call pairing: positional match "
-                        "tool_call_id %s → %s",
-                        name, provider, tc_id, matched_id,
+                        "[%s] %s tool_call pairing: positional match tool_call_id %s → %s",
+                        name,
+                        provider,
+                        tc_id,
+                        matched_id,
                     )
                     patched_msg = dict(msg)
                     patched_msg["tool_call_id"] = matched_id
@@ -395,16 +388,20 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
                 else:
                     dropped_count += 1
                     logger.warning(
-                        "[%s] %s tool_call pairing: dropping tool result "
-                        "with unexpected tool_call_id=%s (expected %s)",
-                        name, provider, tc_id, expecting_tool_ids,
+                        "[%s] %s tool_call pairing: dropping tool result with unexpected tool_call_id=%s (expected %s)",
+                        name,
+                        provider,
+                        tc_id,
+                        expecting_tool_ids,
                     )
             else:
                 dropped_count += 1
                 logger.warning(
                     "[%s] %s tool_call pairing: dropping orphaned tool "
                     "result (tool_call_id=%s, no preceding assistant)",
-                    name, provider, msg.get("tool_call_id", "?"),
+                    name,
+                    provider,
+                    msg.get("tool_call_id", "?"),
                 )
         else:
             expecting_tool_ids = set()
@@ -413,12 +410,16 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     if dropped_count:
         logger.warning(
             "[%s] %s tool_call pairing: dropped %d invalid tool results",
-            name, provider, dropped_count,
+            name,
+            provider,
+            dropped_count,
         )
     if positional_match_count:
         logger.info(
             "[%s] %s tool_call pairing: positionally matched %d",
-            name, provider, positional_match_count,
+            name,
+            provider,
+            positional_match_count,
         )
 
     # ── Phase B: 清理不完整的 assistant(tool_calls) 消息 ──
@@ -432,11 +433,7 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     while i < len(validated):
         msg = validated[i]
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            required_ids = {
-                tc.get("id")
-                for tc in msg["tool_calls"]
-                if tc.get("id")
-            }
+            required_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
             j = i + 1
             while j < len(validated) and validated[j].get("role") == "tool":
                 tc_id = validated[j].get("tool_call_id")
@@ -446,9 +443,10 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
                 # 有不完整的 tool_call → 删除整条 assistant 消息及已匹配的 tool 结果
                 removed_count += 1
                 logger.warning(
-                    "[%s] %s tool_call pairing: removing incomplete assistant message "
-                    "(missing tool results: %s)",
-                    name, provider, required_ids,
+                    "[%s] %s tool_call pairing: removing incomplete assistant message (missing tool results: %s)",
+                    name,
+                    provider,
+                    required_ids,
                 )
                 i = j  # 跳过后续已匹配的 tool 结果
             else:
@@ -465,7 +463,9 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
         logger.warning(
             "[%s] %s tool_call pairing: removed %d incomplete assistant messages "
             "(tool execution was interrupted, no result available)",
-            name, provider, removed_count,
+            name,
+            provider,
+            removed_count,
         )
 
     # 更新缓存：记录本次验证完成时的消息数量
@@ -518,7 +518,10 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     # 消息历史在压缩/截断/执行记录恢复等场景下可能产生不配对消息，
     # 不同模型对此的容忍度不同，统一修复避免换模型时踩坑。
     messages = _validate_tool_call_pairing(
-        messages, provider, name, pipeline_id=pipeline_id,
+        messages,
+        provider,
+        name,
+        pipeline_id=pipeline_id,
     )
 
     if provider != "minimax":
@@ -566,7 +569,10 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
                     if args_val != "":
                         logger.warning(
                             "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments 类型异常 (%s)，重置为 {{}}",
-                            name, idx, fn.get("name", "?"), type(args_val).__name__,
+                            name,
+                            idx,
+                            fn.get("name", "?"),
+                            type(args_val).__name__,
                         )
                     fn["arguments"] = "{}"
                 else:
@@ -578,14 +584,20 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
                         if repaired is not None:
                             logger.info(
                                 "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments JSON 修复成功: %s -> %s",
-                                name, idx, fn.get("name", "?"),
-                                args_val[:200], repaired[:200],
+                                name,
+                                idx,
+                                fn.get("name", "?"),
+                                args_val[:200],
+                                repaired[:200],
                             )
                             fn["arguments"] = repaired
                         else:
                             logger.warning(
                                 "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments JSON 修复失败，重置为 {{}}: %s",
-                                name, idx, fn.get("name", "?"), args_val[:500],
+                                name,
+                                idx,
+                                fn.get("name", "?"),
+                                args_val[:500],
                             )
                             fn["arguments"] = "{}"
 
@@ -601,11 +613,7 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
 
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             # 收集此 assistant 期望的 tool_call_id 集合
-            expected_ids: set[str] = {
-                tc.get("id")
-                for tc in msg["tool_calls"]
-                if isinstance(tc, dict) and tc.get("id")
-            }
+            expected_ids: set[str] = {tc.get("id") for tc in msg["tool_calls"] if isinstance(tc, dict) and tc.get("id")}
             # 收集紧随其后且 tool_call_id 匹配的 tool 消息
             tool_group: list[dict[str, Any]] = []
             intruders: list[dict[str, Any]] = []
@@ -658,12 +666,14 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     if converted_count:
         logger.info(
             "[%s] MiniMax: 将 %d 条非首位 system 消息转换为 user",
-            name, converted_count,
+            name,
+            converted_count,
         )
     if relocated_count:
         logger.info(
             "[%s] MiniMax: 重定位 %d 条 assistant(tool_calls) 与 tool 之间的非法消息",
-            name, relocated_count,
+            name,
+            relocated_count,
         )
 
     # Phase 5: 终极安全网 — 确保所有非首位 system 消息都已转换
@@ -674,9 +684,9 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     for _i, _m in enumerate(result):
         if _i > 0 and _m.get("role") == "system":
             logger.warning(
-                "[%s] MiniMax Phase 5 安全网: 非首位 system→user "
-                "idx=%d, content=%s",
-                name, _i,
+                "[%s] MiniMax Phase 5 安全网: 非首位 system→user idx=%d, content=%s",
+                name,
+                _i,
                 str(_m.get("content", ""))[:200],
             )
             _m["role"] = "user"
@@ -685,7 +695,8 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     if final_fix_count:
         logger.warning(
             "[%s] MiniMax Phase 5 安全网修复了 %d 条遗漏的 system 消息",
-            name, final_fix_count,
+            name,
+            final_fix_count,
         )
 
     return result

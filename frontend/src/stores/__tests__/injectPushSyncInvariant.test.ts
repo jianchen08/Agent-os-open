@@ -81,14 +81,16 @@ function evt(type: string, data: Record<string, any>): any {
   return { type, sequence: data.sequence ?? 0, data: { pipeline_id: PIPELINE_ID, ...data } }
 }
 
-/** 构造一个 system_notification 事件 */
+/** 构造一个 system_notification 事件（模拟后端 emit_notification，带 record_id） */
 function notificationEvent(content: string, overrides: Record<string, any> = {}): any {
+  const recordId = Math.random().toString(16).slice(2, 14).padEnd(12, '0')
   return {
     data: {
       pipeline_id: PIPELINE_ID,
       content,
       level: 'info',
       notification_id: `sys_${Math.random().toString(36).slice(2, 10)}`,
+      record_id: recordId,
       ...overrides,
     },
   }
@@ -100,6 +102,13 @@ function flush(): void {
 
 function ids(): string[] {
   return pipelineStore.getState().getMessages(PIPELINE_ID).map((m) => m.id)
+}
+
+/** 所有 system 消息的 id（system 消息 id 现为后端 record_id，无固定前缀） */
+function systemIds(): string[] {
+  return pipelineStore.getState().getMessages(PIPELINE_ID)
+    .filter((m) => m.role === 'system')
+    .map((m) => m.id)
 }
 
 beforeEach(async () => {
@@ -164,10 +173,10 @@ describe('注入-推送同步不变量', () => {
 
     // ★ 断言：store 数组里 system 通知在 AI_new 之前
     const finalIds = ids()
-    const notifIdx = finalIds.findIndex((id) => id.startsWith('sys_'))
+    expect(systemIds(), '系统通知应存在').toHaveLength(1)
+    const notifIdx = finalIds.indexOf(systemIds()[0])
     const aiNewIdx = finalIds.indexOf(AI_NEW)
 
-    expect(notifIdx, '系统通知应存在').toBeGreaterThan(-1)
     expect(aiNewIdx, 'AI_new 应存在').toBeGreaterThan(-1)
     expect(notifIdx, '系统通知必须在 AI_new 之前').toBeLessThan(aiNewIdx)
   })
@@ -214,7 +223,7 @@ describe('注入-推送同步不变量', () => {
 
     // ★ 断言：通知和 AI 回复交替排列，不是所有通知堆最后
     const finalIds = ids()
-    const sysIds = finalIds.filter((id) => id.startsWith('sys_'))
+    const sysIds = systemIds()
     expect(sysIds.length, '应有3条系统通知').toBe(3)
 
     // 每条通知后面都应该跟着一条 AI 回复（交替）
@@ -240,7 +249,8 @@ describe('注入-推送同步不变量', () => {
 
     // 断言：这种情况下通知排在 AI 后面（验证测试能抓到顺序错误）
     const finalIds = ids()
-    const notifIdx = finalIds.findIndex((id) => id.startsWith('sys_'))
+    expect(systemIds(), '系统通知应存在').toHaveLength(1)
+    const notifIdx = finalIds.indexOf(systemIds()[0])
     const aiIdx = finalIds.indexOf(AI_NEW)
     // 错误顺序下，通知在 AI 后面
     expect(notifIdx, '错误顺序：通知在 AI 后面').toBeGreaterThan(aiIdx)
@@ -268,7 +278,8 @@ describe('注入-推送同步不变量', () => {
     // ★ 断言：AI_new 是独立气泡（没合并到 AI_old），通知夹在中间
     const finalIds = ids()
     const oldIdx = finalIds.indexOf(AI_OLD)
-    const notifIdx = finalIds.findIndex((id) => id.startsWith('sys_'))
+    expect(systemIds(), '系统通知应存在').toHaveLength(1)
+    const notifIdx = finalIds.indexOf(systemIds()[0])
     const newIdx = finalIds.indexOf(AI_NEW)
 
     expect(oldIdx).toBeGreaterThanOrEqual(0)

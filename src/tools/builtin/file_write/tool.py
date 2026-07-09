@@ -29,6 +29,9 @@ from tools.types import (
 # 工具卡片 diff 展示的内容体积上限（字节）；超过则只返回增删行数，省略正文
 _DIFF_CONTENT_MAX = 100_000
 
+# action 参数的合法取值集合（模块级常量，避免函数内大写变量触发 N806）
+_VALID_ACTIONS: tuple[str, ...] = ("write", "search_replace", "insert", "delete_lines", "append")
+
 
 def _diff_extras(old_content: str | None, new_content: str, *, include_content: bool = True) -> dict[str, Any]:
     """计算 old→new 的增删行数，并在体积允许时附带原文供前端渲染 diff。
@@ -254,6 +257,15 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
         action = inputs.get("action")
 
+        if action is None:
+            return create_failure_result(
+                error=(
+                    "缺少必填参数 action。可选值："
+                    "write(全量写入)、search_replace(搜索替换)、"
+                    "insert(插入)、delete_lines(删除行)、append(追加)。"
+                ),
+                error_code="MISSING_ACTION",
+            )
         if action == "write":
             return await self._write(inputs)
         if action == "search_replace":
@@ -265,7 +277,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         if action == "append":
             return await self._append(inputs)
         return create_failure_result(
-            error=f"不支持的操作: {action}",
+            error=(f"不支持的 action: {action!r}。合法值为：{', '.join(_VALID_ACTIONS)}。"),
             error_code="INVALID_ACTION",
         )
 

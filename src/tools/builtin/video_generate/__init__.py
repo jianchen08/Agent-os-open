@@ -2,4 +2,4 @@
 
 from .tool import VideoGenerateTool
 
-__all__ = ['VideoGenerateTool']
+__all__ = ["VideoGenerateTool"]

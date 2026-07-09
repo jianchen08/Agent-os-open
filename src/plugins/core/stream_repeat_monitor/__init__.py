@@ -2,4 +2,4 @@
 
 from .plugin import StreamRepetitionMonitor
 
-__all__ = ['StreamRepetitionMonitor']
+__all__ = ["StreamRepetitionMonitor"]

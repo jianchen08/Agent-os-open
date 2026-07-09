@@ -9,7 +9,7 @@ state.raw_result 是唯一数据源，推送和持久化都从这里取。
 - emit_finish(state): 从 state 取内容发 new_message + stream_end
 - emit_suspend(state): 发 state_change + stream_end
 - emit_error(exc): 发 stream_error
-- emit_notification(content): 直接推送系统通知（替代 enqueue_notification）
+- emit_notification(content): 推送系统通知，生成 record_id（唯一 id 来源）并返回
 """
 
 from __future__ import annotations
@@ -478,8 +478,18 @@ class BridgeCore:
         *,
         source: str = "system",
         level: str = "info",
-    ) -> int:
+    ) -> str:
         """直接推送系统通知（替代原 enqueue_notification，不再走队列）。
+
+        生成 record_id（hex12，与 emit_start 的 message_id 同格式）—— 这是 system
+        通知的【唯一 id 来源】。该 id 同时放入事件 payload（前端据此设消息 id）和
+        经调用方写入 state（track 插件据此设落库 record_id），保证：
+
+            事件 record_id == state record_id == 落库 record_id == 前端消息 id
+            == API 返回的 record_id（routes_threads 以 record_id 作消息 id）
+
+        全程一个值、一个来源，刷新后前端按 id 自然去重（与 AI 消息通过
+        preset_ai_record_id 建立 id 契约的机制完全对称）。
 
         Args:
             content: 通知内容
@@ -487,13 +497,15 @@ class BridgeCore:
             level: 通知级别
 
         Returns:
-            通知的 sequence 值，-1 表示内容为空
+            本条通知的 record_id（hex12）；空内容时返回空串
         """
         if not content or not content.strip():
-            return -1
+            return ""
+        record_id = uuid.uuid4().hex[:12]
         seq = self._get_next_sequence()
         logger.info(
-            "[Bridge] emit_notification: seq=%d source=%s pipeline=%s content=%.50s",
+            "[Bridge] emit_notification: record_id=%s seq=%d source=%s pipeline=%s content=%.50s",
+            record_id,
             seq,
             source,
             self.pipeline_id[:12],
@@ -509,6 +521,7 @@ class BridgeCore:
                         "level": level,
                         "notificationType": f"{source}_notification",
                         "notification_id": f"sys_{self.pipeline_id[:8]}_{seq}",
+                        "record_id": record_id,
                         "sequence": seq,
                     },
                 )
@@ -518,7 +531,7 @@ class BridgeCore:
                 "[Bridge] emit_notification 推送失败: error=%s",
                 e,
             )
-        return seq
+        return record_id
 
     # ------------------------------------------------------------------
     # parts 重建（从 state，单一数据源）

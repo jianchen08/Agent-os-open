@@ -2,4 +2,4 @@
 
 from .tool import ImageGenerateTool, create_image_generate_tool
 
-__all__ = ['ImageGenerateTool', 'create_image_generate_tool']
+__all__ = ["ImageGenerateTool", "create_image_generate_tool"]

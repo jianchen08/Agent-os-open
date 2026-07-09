@@ -2,4 +2,4 @@
 
 from .tool import TaskSubmitTool
 
-__all__ = ['TaskSubmitTool']
+__all__ = ["TaskSubmitTool"]

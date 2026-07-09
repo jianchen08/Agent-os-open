@@ -2,4 +2,4 @@
 
 from .plugin import ToolCore
 
-__all__ = ['ToolCore']
+__all__ = ["ToolCore"]

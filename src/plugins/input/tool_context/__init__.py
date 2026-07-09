@@ -2,4 +2,4 @@
 
 from .plugin import ToolContextPlugin
 
-__all__ = ['ToolContextPlugin']
+__all__ = ["ToolContextPlugin"]

@@ -2,4 +2,4 @@
 
 from .tool import WorkspaceAwareMixin
 
-__all__ = ['WorkspaceAwareMixin']
+__all__ = ["WorkspaceAwareMixin"]

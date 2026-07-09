@@ -55,9 +55,11 @@ def get_all_builtin_tools() -> list[Any]:
             cls = getattr(mod, class_name)
 
             import inspect  # noqa: PLC0415
+
             sig = inspect.signature(cls.__init__)
             required_params = [
-                p for p in sig.parameters.values()
+                p
+                for p in sig.parameters.values()
                 if p.name != "self"
                 and p.default is inspect.Parameter.empty
                 and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
@@ -77,6 +79,7 @@ def get_all_builtin_tools() -> list[Any]:
 
     try:
         from .lsp_tools.tool import LSPTools  # noqa: PLC0415
+
         tools.extend(LSPTools.get_tools())
     except Exception as e:
         _logger.debug(f"[内置工具] 跳过 LSPTools: {e}")
@@ -343,6 +346,7 @@ def register_core_tools(  # noqa: PLR0912,PLR0915
             tool_class = None
             try:
                 import importlib  # noqa: PLC0415
+
                 mod = importlib.import_module(module_path)
                 tool_class = getattr(mod, class_name)
             except ImportError as _import_err:
@@ -422,8 +426,6 @@ def register_core_tools(  # noqa: PLR0912,PLR0915
     if failed:
         logger.warning(f"共有 {len(failed)} 个核心工具注册失败")
 
-    logger.info(
-        f"[核心工具注册] 完成 | 成功: {len(names)} | 跳过: {len(skipped)} | 失败: {len(failed)}"
-    )
+    logger.info(f"[核心工具注册] 完成 | 成功: {len(names)} | 跳过: {len(skipped)} | 失败: {len(failed)}")
 
     return names

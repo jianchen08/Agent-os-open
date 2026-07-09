@@ -251,10 +251,10 @@ class TaskSubmitTool(BuiltinTool):
                                     "type": "object",
                                     "description": (
                                         "传递给评估工具的参数。不同指标所需参数不同："
-                                        "file_check 需要 {\"path\": \"src/main.py\"}；"
-                                        "bash_check 需要 {\"command\": \"pytest tests/\"}；"
-                                        "semantic_check 需要 {\"criteria\": \"评估要求描述\"}；"
-                                        "human_review 需要 {\"title\": \"审核标题\", \"mode\": \"choice\"}。"
+                                        'file_check 需要 {"path": "src/main.py"}；'
+                                        'bash_check 需要 {"command": "pytest tests/"}；'
+                                        'semantic_check 需要 {"criteria": "评估要求描述"}；'
+                                        'human_review 需要 {"title": "审核标题", "mode": "choice"}。'
                                     ),
                                 },
                                 "expected_output": {

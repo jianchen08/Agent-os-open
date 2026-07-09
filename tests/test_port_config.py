@@ -87,13 +87,14 @@ class TestDockerComposeBackendUrl:
 
     def test_backend_url_port(self, content):
         """BACKEND_URL 应使用端口 8988"""
-        assert "BACKEND_URL=http://host.docker.internal:8988" in content, (
+        # compose 中实际形式为 BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:8988
+        assert re.search(r"BACKEND_URL=http://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:8988", content), (
             "BACKEND_URL 应指向后端端口 8988"
         )
 
     def test_backend_ws_url_port(self, content):
         """BACKEND_WS_URL 应使用端口 8988"""
-        assert "BACKEND_WS_URL=ws://host.docker.internal:8988" in content, (
+        assert re.search(r"BACKEND_WS_URL=ws://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:8988", content), (
             "BACKEND_WS_URL 应指向后端端口 8988"
         )
 
@@ -120,13 +121,14 @@ class TestStartWebCnBat:
 
     def test_display_backend_url(self, content):
         """启动完成提示中的后端 URL 应使用端口 8988"""
-        assert "http://localhost:8988" in content, (
+        # 脚本实际用 127.0.0.1（避免 IPv6 慢回退），非 localhost
+        assert "http://127.0.0.1:8988" in content, (
             "启动脚本中后端 URL 应使用端口 8988"
         )
 
     def test_display_frontend_url(self, content):
         """启动完成提示中的前端 URL 应使用端口 5289"""
-        assert "http://localhost:5289" in content, (
+        assert "http://127.0.0.1:5289" in content, (
             "启动脚本中前端 URL 应使用端口 5289"
         )
 
@@ -187,6 +189,34 @@ class TestContainerInternalPorts:
 
 
 # ---------------------------------------------------------------------------
+# 5.5 frontend/.env.example — 前端环境变量端口
+# ---------------------------------------------------------------------------
+class TestFrontendEnvExample:
+    """验证 frontend/.env.example 中前端连接后端的端口正确"""
+
+    @pytest.fixture
+    def content(self):
+        return _read_file("frontend/.env.example")
+
+    def test_api_base_url_port(self, content):
+        """VITE_API_BASE_URL 应使用端口 8988"""
+        assert "VITE_API_BASE_URL=http://127.0.0.1:8988" in content, (
+            ".env.example 中 VITE_API_BASE_URL 应使用后端端口 8988"
+        )
+
+    def test_ws_base_url_port(self, content):
+        """VITE_WS_BASE_URL 应使用端口 8988"""
+        assert "VITE_WS_BASE_URL=ws://127.0.0.1:8988" in content, (
+            ".env.example 中 VITE_WS_BASE_URL 应使用后端端口 8988"
+        )
+
+    def test_no_old_backend_port(self, content):
+        """旧后端端口 8888 不应作为服务端口出现在 .env.example 中"""
+        # 用带上下文的精确匹配（:8888），避免裸 8888 子串误报
+        assert ":8888" not in content, ".env.example 中仍残留旧后端端口 8888"
+
+
+# ---------------------------------------------------------------------------
 # 6. 旧端口在关键配置文件中不再作为服务端口出现
 # ---------------------------------------------------------------------------
 class TestNoOldPortsInKeyConfigs:
@@ -210,6 +240,7 @@ class TestNoOldPortsInKeyConfigs:
     @pytest.mark.parametrize("rel_path", [
         "docker-compose.yml",
         "start_web_cn.bat",
+        "frontend/.env.example",
     ])
     def test_no_old_frontend_host_port(self, rel_path):
         """旧前端宿主机端口 5189 不应出现在关键配置中"""

@@ -2,4 +2,4 @@
 
 from .tool import YamlValidateTool
 
-__all__ = ['YamlValidateTool']
+__all__ = ["YamlValidateTool"]

@@ -106,7 +106,8 @@ class _TaskStateMixin:
             allowed = _TASK_TRANSITIONS.get(current, [])
             if target not in allowed:
                 raise InvalidTransitionError(
-                    current, target,
+                    current,
+                    target,
                     f"不允许从 ''{current}'' 转换到 ''{target}''，合法目标: {allowed}",
                 )
 
@@ -140,7 +141,8 @@ class _TaskStateMixin:
         allowed = {"running", "pending"}
         if current not in allowed:
             raise InvalidTransitionError(
-                current, "stopped",
+                current,
+                "stopped",
                 f"不允许从 ''{current}'' 停止任务",
             )
 
@@ -180,7 +182,8 @@ class _TaskStateMixin:
         current = safe_enum_value(task.status)
         if current != "stopped":
             raise InvalidTransitionError(
-                current, "running",
+                current,
+                "running",
                 f"只有 stopped 状态的任务可以恢复，当前: ''{current}''",
             )
 
@@ -200,18 +203,21 @@ class _TaskStateMixin:
         # 唤醒挂起的管道引擎
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             entries = get_engine_registry().find_by_tag("task_id", task_id)
             for entry in entries:
                 if entry.engine is not None and entry.engine.is_suspended:
                     entry.engine.wake()
                     logger.info(
                         "TaskService: 唤醒挂起引擎 task_id=%s pipeline=%s",
-                        task_id, entry.pipeline_id[:12],
+                        task_id,
+                        entry.pipeline_id[:12],
                     )
         except Exception as exc:
             logger.debug(
                 "TaskService: 唤醒引擎失败（非致命）task_id=%s: %s",
-                task_id, exc,
+                task_id,
+                exc,
             )
 
         return task
@@ -241,7 +247,8 @@ class _TaskStateMixin:
         old_status = safe_enum_value(task.status)
         if old_status not in ("pending", "running"):
             raise InvalidTransitionError(
-                old_status, "running",
+                old_status,
+                "running",
                 f"不允许从 '{old_status}' 启动任务",
             )
 
@@ -278,7 +285,8 @@ class _TaskStateMixin:
         old_status = safe_enum_value(task.status)
         if old_status not in ("running", "evaluating"):
             raise InvalidTransitionError(
-                old_status, "evaluating",
+                old_status,
+                "evaluating",
                 f"不允许从 ''{old_status}'' 转换到 evaluating",
             )
 
@@ -327,7 +335,9 @@ class _TaskStateMixin:
 
         logger.info(
             "TaskService: fail_task 状态已落盘 | task=%s old=%s reason=%s",
-            task_id, old_status, reason[:120] if reason else "",
+            task_id,
+            old_status,
+            reason[:120] if reason else "",
         )
 
         # 以下三步各自隔离：单步失败不阻断后续步，避免某步异常导致
@@ -337,9 +347,10 @@ class _TaskStateMixin:
             await self._emit_state_change(task_id, old_status, "failed")
         except Exception as exc:
             logger.error(
-                "TaskService: fail_task 状态变更通知失败（父任务可能收不到失败通知）| "
-                "task=%s error=%s",
-                task_id, exc, exc_info=exc,
+                "TaskService: fail_task 状态变更通知失败（父任务可能收不到失败通知）| task=%s error=%s",
+                task_id,
+                exc,
+                exc_info=exc,
             )
 
         # 2. 父任务失败时级联取消所有非终态的子任务
@@ -348,12 +359,15 @@ class _TaskStateMixin:
             if _cascade_count > 0:
                 logger.info(
                     "TaskService: fail_task cascade 完成 | parent=%s, cancelled_subtasks=%d",
-                    task_id, _cascade_count,
+                    task_id,
+                    _cascade_count,
                 )
         except Exception as exc:
             logger.error(
                 "TaskService: fail_task 级联取消子任务失败 | task=%s error=%s",
-                task_id, exc, exc_info=exc,
+                task_id,
+                exc,
+                exc_info=exc,
             )
 
         # 3. 任务失败后尝试销毁容器（仅当 workspace 无其他活跃任务时）
@@ -363,7 +377,9 @@ class _TaskStateMixin:
         except Exception as exc:
             logger.error(
                 "TaskService: fail_task 容器销毁检查失败 | task=%s error=%s",
-                task_id, exc, exc_info=exc,
+                task_id,
+                exc,
+                exc_info=exc,
             )
 
     async def cancel_task(self, task_id: str, reason: str = "") -> None:
@@ -498,12 +514,11 @@ class _TaskStateMixin:
         except Exception as e:
             logger.debug(
                 "TaskService: 终态销毁容器检查失败（非致命）| task=%s, error=%s",
-                task_id, e,
+                task_id,
+                e,
             )
 
-    async def complete_evaluation(
-        self, task_id: str, passed: bool, result: dict | None = None
-    ) -> None:
+    async def complete_evaluation(self, task_id: str, passed: bool, result: dict | None = None) -> None:
         """评估完成后更新任务状态。
 
         Args:
@@ -558,6 +573,7 @@ class _TaskStateMixin:
 
         try:
             from pipeline.registry import get_engine_registry  # noqa: PLC0415
+
             _reg = get_engine_registry()
             _entry = _reg.get(pipeline_run_id)
             if not _entry or not _entry.engine:
@@ -587,7 +603,9 @@ class _TaskStateMixin:
             pass
 
     async def recover_to_completed(
-        self, task_id: str, result: dict | None = None,
+        self,
+        task_id: str,
+        result: dict | None = None,
     ) -> None:
         """将已 failed 的任务恢复为 completed。
 

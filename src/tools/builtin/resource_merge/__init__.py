@@ -2,4 +2,4 @@
 
 from .tool import ResourceMergeTool
 
-__all__ = ['ResourceMergeTool']
+__all__ = ["ResourceMergeTool"]

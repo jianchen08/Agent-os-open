@@ -2,4 +2,4 @@
 
 from .tool import IDEShowDiffTool
 
-__all__ = ['IDEShowDiffTool']
+__all__ = ["IDEShowDiffTool"]

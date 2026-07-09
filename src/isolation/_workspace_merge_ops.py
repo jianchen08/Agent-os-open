@@ -1,4 +1,5 @@
 """工作空间合并操作 Mixin。"""
+
 from __future__ import annotations
 
 import logging
@@ -16,6 +17,7 @@ _SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
 
 def _force_rmtree(path: str) -> None:
     """强制删除目录树，兼容 Windows 下 .git 只读文件。"""
+
     def _on_error(func, filepath, exc_info):
         if os.name == "nt":
             os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101
@@ -51,9 +53,7 @@ class _MergeOpsMixin:
                 return {"success": True, "commit_hash": None, "has_changes": True}
             self._ensure_git_user(proj_path)
             msg_suffix = f" (task {task_id})" if task_id else ""
-            commit_hash = self._git_add_commit_if_dirty(
-                proj_path, f"checkpoint: before evaluate{msg_suffix}"
-            )
+            commit_hash = self._git_add_commit_if_dirty(proj_path, f"checkpoint: before evaluate{msg_suffix}")
             rc, status, _ = self._run_git("status", "--porcelain", cwd=proj_path)
             return {
                 "success": True,
@@ -63,8 +63,7 @@ class _MergeOpsMixin:
         self._ensure_git_user(ws_path)
         commit_hash = self._git_add_commit_if_dirty(ws_path, "checkpoint: before evaluate")
         rc, status, _ = self._run_git("status", "--porcelain", cwd=ws_path)
-        return {"success": True, "commit_hash": commit_hash,
-                "has_changes": bool(status and status.strip())}
+        return {"success": True, "commit_hash": commit_hash, "has_changes": bool(status and status.strip())}
 
     # ── 6. 评估通过 ──────────────────────────────────────────────
 
@@ -85,31 +84,43 @@ class _MergeOpsMixin:
                         logger.warning(
                             "[WorkspaceLifecycle] 合并失败 (attempt %d/%d)，跳过清理以保留文件: "
                             "task_id=%s, workspace=%s, error=%s",
-                            attempt, max_retries, task_id, workspace, result.get("error", "unknown"))
+                            attempt,
+                            max_retries,
+                            task_id,
+                            workspace,
+                            result.get("error", "unknown"),
+                        )
                         if attempt < max_retries:
                             continue
                         return result
-                    verified, verify_detail = self._verify_merge_result(
-                        workspace, project_root, ws_meta, result)
+                    verified, verify_detail = self._verify_merge_result(workspace, project_root, ws_meta, result)
                     if verified:
                         logger.debug(
                             "[WorkspaceLifecycle] 合并验证通过 (attempt %d): task_id=%s, method=%s",
-                            attempt, task_id, result.get("method"))
+                            attempt,
+                            task_id,
+                            result.get("method"),
+                        )
                         self._cleanup_worktree(
-                            workspace, ws_meta, tag_task_id=task_id,
-                            merge_method=result.get("method", ""))
+                            workspace, ws_meta, tag_task_id=task_id, merge_method=result.get("method", "")
+                        )
                         # P1: 合并成功后清理 project_root 中的 unstaged 残留
                         self._cleanup_unstaged_changes(project_root)
                         return result
                     logger.warning(
-                        "[WorkspaceLifecycle] 合并验证失败 (attempt %d/%d): "
-                        "task_id=%s, detail=%s",
-                        attempt, max_retries, task_id, verify_detail)
+                        "[WorkspaceLifecycle] 合并验证失败 (attempt %d/%d): task_id=%s, detail=%s",
+                        attempt,
+                        max_retries,
+                        task_id,
+                        verify_detail,
+                    )
                     if attempt < max_retries:
                         continue
                 logger.error(
-                    "[WorkspaceLifecycle] 合并重试耗尽，保留 worktree 不清理: "
-                    "task_id=%s, workspace=%s", task_id, workspace)
+                    "[WorkspaceLifecycle] 合并重试耗尽，保留 worktree 不清理: task_id=%s, workspace=%s",
+                    task_id,
+                    workspace,
+                )
                 result["verify_error"] = verify_detail
                 if "error" not in result:
                     result["error"] = f"合并验证失败(重试{max_retries}次): {verify_detail}"
@@ -130,8 +141,9 @@ class _MergeOpsMixin:
                 ws_meta = task.metadata.get("ws_meta")
         except Exception as exc:
             logger.warning(
-                "[WorkspaceLifecycle] merge_worktree_before_complete 读取 task 失败: "
-                "task_id=%s, error=%s", task_id, exc,
+                "[WorkspaceLifecycle] merge_worktree_before_complete 读取 task 失败: task_id=%s, error=%s",
+                task_id,
+                exc,
             )
         if not ws_meta or not isinstance(ws_meta, dict):
             # 兜底: 异步持久化延迟可能让 task.metadata 暂时缺失，从 store 恢复
@@ -157,8 +169,9 @@ class _MergeOpsMixin:
             conflict_files = result.get("conflict_files", [])
             if conflict_files:
                 logger.warning(
-                    "[WorkspaceLifecycle] worktree 合并完成但有冲突文件: "
-                    "task_id=%s, conflicts=%s", task_id, conflict_files,
+                    "[WorkspaceLifecycle] worktree 合并完成但有冲突文件: task_id=%s, conflicts=%s",
+                    task_id,
+                    conflict_files,
                 )
             return None
 
@@ -168,7 +181,11 @@ class _MergeOpsMixin:
         return ", ".join(error_parts)
 
     def _cleanup_worktree(
-        self, workspace: str, ws_meta: dict, *, tag_task_id: str = "",
+        self,
+        workspace: str,
+        ws_meta: dict,
+        *,
+        tag_task_id: str = "",
         merge_method: str = "",
     ):
         """清理 worktree：删 worktree → 条件打 tag → 删分支
@@ -185,12 +202,15 @@ class _MergeOpsMixin:
         if not project_root.exists():
             logger.warning(
                 "[WorkspaceLifecycle] project_root 无效或缺失: %r，尝试从 worktree 反查仓库根: %s",
-                str(project_root), workspace,
+                str(project_root),
+                workspace,
             )
             ws_path_probe = Path(workspace)
             if ws_path_probe.exists():
                 rc, out, err = self._run_git(
-                    "rev-parse", "--show-toplevel", cwd=str(ws_path_probe),
+                    "rev-parse",
+                    "--show-toplevel",
+                    cwd=str(ws_path_probe),
                 )
                 if rc == 0 and out.strip():
                     project_root = Path(out.strip())
@@ -198,12 +218,15 @@ class _MergeOpsMixin:
                 else:
                     logger.warning(
                         "[WorkspaceLifecycle] 反查仓库根失败(rc=%s): %s，放弃清理: %s",
-                        rc, err.strip(), workspace,
+                        rc,
+                        err.strip(),
+                        workspace,
                     )
                     return
             else:
                 logger.warning(
-                    "[WorkspaceLifecycle] worktree 目录不存在，跳过清理: %s", workspace,
+                    "[WorkspaceLifecycle] worktree 目录不存在，跳过清理: %s",
+                    workspace,
                 )
                 return
 
@@ -277,52 +300,45 @@ class _MergeOpsMixin:
         if not project_root:
             return {"success": False, "error": "缺少 project_root 信息"}
         if not branch:
-            return {"success": False,
-                    "error": "缺少 branch 信息，ws_meta 不完整"}
+            return {"success": False, "error": "缺少 branch 信息，ws_meta 不完整"}
         proj_path, ws_path = Path(project_root), Path(workspace)
         self._ensure_git_user(ws_path)
-        self._git_add_commit_if_dirty(
-            ws_path, "chore: auto commit before merge")
+        self._git_add_commit_if_dirty(ws_path, "chore: auto commit before merge")
         self._ensure_git_user(proj_path)
-        self._git_add_tracked_and_commit(
-            proj_path, "chore: auto-save before merge")
-        rc, current_branch, _ = self._run_git(
-            "rev-parse", "--abbrev-ref", "HEAD", cwd=proj_path)
+        self._git_add_tracked_and_commit(proj_path, "chore: auto-save before merge")
+        rc, current_branch, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=proj_path)
         if rc != 0 or not current_branch.strip():
-            return {"success": False,
-                    "error": f"无法获取当前分支: rc={rc}, "
-                             f"output={current_branch!r}"}
+            return {"success": False, "error": f"无法获取当前分支: rc={rc}, output={current_branch!r}"}
         # 校验待合并分支存在：worktree 模式下 branch 来自 ws_meta，
         # 子任务 inherit 父任务工作空间时可能复用已被清理的分支引用
         # （分支已删但元数据仍在），此时 git merge 会报模糊的
         # "not something we can merge"，提前校验给出明确根因。
-        rc_v, _, verify_err = self._run_git(
-            "rev-parse", "--verify", f"{branch}^{{commit}}", cwd=proj_path)
+        rc_v, _, verify_err = self._run_git("rev-parse", "--verify", f"{branch}^{{commit}}", cwd=proj_path)
         if rc_v != 0:
-            return {"success": False,
-                    "error": f"待合并分支不存在(branch={branch})，"
-                             f"可能继承自已清理的父任务 worktree: "
-                             f"{verify_err[:200] if verify_err else 'unknown'}"}
-        rc_pre, pre_merge_head, _ = self._run_git(
-            "rev-parse", "HEAD", cwd=proj_path)
-        rc, _, stderr = self._run_git(
-            "merge", branch, cwd=proj_path)
+            return {
+                "success": False,
+                "error": f"待合并分支不存在(branch={branch})，"
+                f"可能继承自已清理的父任务 worktree: "
+                f"{verify_err[:200] if verify_err else 'unknown'}",
+            }
+        rc_pre, pre_merge_head, _ = self._run_git("rev-parse", "HEAD", cwd=proj_path)
+        rc, _, stderr = self._run_git("merge", branch, cwd=proj_path)
         if rc == 0:
-            result = {"success": True, "action": "merged",
-                       "method": "git_merge"}
+            result = {"success": True, "action": "merged", "method": "git_merge"}
             if rc_pre == 0 and pre_merge_head.strip():
                 result["pre_merge_head"] = pre_merge_head.strip()
             return result
         self._run_git("merge", "--abort", cwd=proj_path)
-        return {"success": False,
-                "error": f"git merge 失败(branch={branch}): "
-                         f"{stderr[:300] if stderr else 'unknown'}"}
-
+        return {"success": False, "error": f"git merge 失败(branch={branch}): {stderr[:300] if stderr else 'unknown'}"}
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 
     def _verify_merge_result(  # noqa: PLR0912
-        self, workspace: str, project_root: str, ws_meta: dict, merge_result: dict,
+        self,
+        workspace: str,
+        project_root: str,
+        ws_meta: dict,
+        merge_result: dict,
     ) -> tuple[bool, str]:
         """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。"""
         branch = ws_meta.get("branch", "")
@@ -352,9 +368,15 @@ class _MergeOpsMixin:
             # 排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
             # 会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
             rc, diff_out, _ = self._run_git(
-                "-c", "core.quotepath=false",
-                "diff", "--name-only", "--diff-filter=AMRC",
-                branch + "~1", branch, cwd=proj_path)
+                "-c",
+                "core.quotepath=false",
+                "diff",
+                "--name-only",
+                "--diff-filter=AMRC",
+                branch + "~1",
+                branch,
+                cwd=proj_path,
+            )
             if rc == 0 and diff_out.strip():
                 branch_files = set(diff_out.strip().splitlines())
                 missing = []
@@ -392,11 +414,11 @@ class _MergeOpsMixin:
             logger.warning("[WorkspaceLifecycle] 验证合并状态失败: branch=%s", branch_name)
             return False
         if log_output.strip():
-            logger.warning("[WorkspaceLifecycle] 分支未完全合并: branch=%s, 未合并=%d",
-                           branch_name, len(log_output.splitlines()))
+            logger.warning(
+                "[WorkspaceLifecycle] 分支未完全合并: branch=%s, 未合并=%d", branch_name, len(log_output.splitlines())
+            )
             return False
         return True
-
 
     def _cleanup_unstaged_changes(self, project_root: str) -> None:
         """检测合并后 project_root 的 unstaged 变更，只记录警告，绝不自动丢弃。"""
@@ -408,10 +430,7 @@ class _MergeOpsMixin:
         if rc != 0 or not status.strip():
             return
 
-        unstaged_lines = [
-            line for line in status.splitlines()
-            if len(line) >= 2 and line[1] in ("M", "D")
-        ]
+        unstaged_lines = [line for line in status.splitlines() if len(line) >= 2 and line[1] in ("M", "D")]
         if not unstaged_lines:
             return
 
@@ -419,6 +438,7 @@ class _MergeOpsMixin:
         logger.warning(
             "[WorkspaceLifecycle] 合并后检测到 %d 个 unstaged 变更，已保留未丢弃（避免数据丢失）: "
             "project_root=%s, 文件=%s",
-            len(unstaged_lines), project_root,
+            len(unstaged_lines),
+            project_root,
             [line.strip() for line in unstaged_lines[:10]],
         )

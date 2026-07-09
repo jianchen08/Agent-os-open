@@ -73,12 +73,14 @@ class _TaskCrudMixin:
             task.updated_at = datetime.now().isoformat()
             self._storage.save(task)
             logger.info(
-                "[TaskService] 容器任务自动启动 | task_id=%s", task.id,
+                "[TaskService] 容器任务自动启动 | task_id=%s",
+                task.id,
             )
 
         logger.info(
             "[TaskService] 任务已创建 | task_id=%s | title=%s",
-            task.id, task.title,
+            task.id,
+            task.title,
         )
         return task
 
@@ -105,7 +107,8 @@ class _TaskCrudMixin:
         self._storage.save(task)
         logger.info(
             "[TaskService] 管道已绑定 | task_id=%s | pipeline_id=%s",
-            task_id, pipeline_id,
+            task_id,
+            pipeline_id,
         )
 
     def list_by_status(self, status: Any) -> list[Any]:
@@ -169,10 +172,7 @@ class _TaskCrudMixin:
         all_tasks = self.get_all_tasks()
 
         if session_id:
-            all_tasks = [
-                t for t in all_tasks
-                if t.metadata.get("session_id") == session_id
-            ]
+            all_tasks = [t for t in all_tasks if t.metadata.get("session_id") == session_id]
 
         all_tasks.sort(
             key=lambda t: t.created_at or "",
