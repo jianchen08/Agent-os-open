@@ -124,18 +124,20 @@ wsl -d Ubuntu -u root -- bash -c "cd '!WSL_SCRIPT_DIR!' && bash install_wsl_dock
 type "%WSL_OUT%"
 set "WSL_RC=!errorlevel!"
 
-REM exit 100 = systemd just enabled, need wsl --shutdown then rerun
-if "!WSL_RC!"=="100" (
+REM wsl.exe 传递 bash 退出码不可靠(尤其首次开 systemd 时),改用输出标记判断:
+REM NEED_WSL_RESTART = 刚开启 systemd,需 wsl --shutdown 后重跑(等同于 exit 100 的语义)
+findstr /c:"NEED_WSL_RESTART" "%WSL_OUT%" >nul 2>&1
+if not errorlevel 1 (
     echo.
-    echo [INFO] systemd enabled. Restarting WSL to apply...
+    echo [INFO] systemd 刚开启,重启 WSL 使其生效...
     wsl --shutdown
     timeout /t 5 /nobreak >nul
-    echo [INFO] Re-running install script...
+    echo [INFO] 重新运行安装脚本...
     del "%WSL_OUT%" >nul 2>&1
     goto run_wsl_install
 )
 
-REM WSL exit code 不可靠,用成功标记 WSL_DOCKER_READY 判定真成功;缺失即失败。
+REM 同理,用成功标记 WSL_DOCKER_READY 判定真成功;缺失即失败。
 findstr /c:"WSL_DOCKER_READY" "%WSL_OUT%" >nul 2>&1
 if errorlevel 1 goto :install_failed
 del "%WSL_OUT%" >nul 2>&1

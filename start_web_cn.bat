@@ -305,6 +305,10 @@ echo [OK] Docker 就绪
 
 echo [INFO] 启动 Docker 服务...
 
+REM 清理 dangling 镜像层(前端多次迭代重建会累积,不清理会占数 GB 磁盘)。
+REM 只清无标签的悬空层(dangling),不影响正在用的镜像和构建缓存(保留加速)。
+docker image prune -f >nul 2>&1
+
 REM 容器名跟随 compose project（目录名），用 `docker compose ps -q <service>`
 REM 动态获取容器 ID，不依赖固定容器名（避免换目录后失配）。
 REM 范式与 update_frontend.ps1 一致。
