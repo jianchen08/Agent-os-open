@@ -62,8 +62,28 @@ else
     DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
     install -m 0755 -d /etc/apt/keyrings
     if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
-        curl -fsSL "${DOCKER_REPO}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        # 下载 docker GPG key,带重试 + 多镜像源回退(国内网络偶发 DNS 不通)。
+        # 分开执行(先下临时文件再 gpg),避免 curl 失败时管道吞掉错误。
+        GPG_KEY=""
+        for attempt in 1 2 3; do
+            for mirror in "https://mirrors.aliyun.com" "https://mirrors.tuna.tsinghua.edu.cn" "https://download.docker.com"; do
+                info "下载 docker GPG key (尝试 $attempt, 源 ${mirror})..."
+                if curl -fsSL --connect-timeout 15 --max-time 30 "${mirror}/docker-ce/linux/ubuntu/gpg" -o /tmp/docker-gpg-key; then
+                    GPG_KEY=/tmp/docker-gpg-key
+                    break 2
+                fi
+                warn "下载失败(${mirror}),尝试下一个源..."
+            done
+            sleep 3
+        done
+        if [ -z "$GPG_KEY" ]; then
+            err "无法下载 docker GPG key(所有镜像源均失败)。请检查网络后重试。"
+            exit 1
+        fi
+        gpg --dearmor -o /etc/apt/keyrings/docker.gpg < "$GPG_KEY"
         chmod a+r /etc/apt/keyrings/docker.gpg
+        rm -f /tmp/docker-gpg-key
+        ok "docker GPG key 已配置"
     fi
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} $(lsb_release -cs) stable" \
         | tee /etc/apt/sources.list.d/docker.list > /dev/null
