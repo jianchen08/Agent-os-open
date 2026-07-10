@@ -410,17 +410,17 @@ echo [OK] Python: %PYEXE%
 if not exist ".py_deps_installed" (
     echo [INFO] Installing Python deps...
     set "DEPS_OK=0"
-    "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 2>nul
+    "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60
     if not errorlevel 1 (
         set "DEPS_OK=1"
     ) else (
         echo [WARN] Some packages failed, retry with --no-deps...
-        "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 --no-deps 2>nul
+        "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 --no-deps
         if not errorlevel 1 set "DEPS_OK=1"
     )
     if "!DEPS_OK!"=="0" (
         echo [WARN] requirements.txt failed, fallback: pip install -e .
-        "%PYEXE%" -m pip install -e . -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 30 1>nul 2>nul
+        "%PYEXE%" -m pip install -e . -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 30
         if not errorlevel 1 set "DEPS_OK=1"
     )
     if "!DEPS_OK!"=="1" (
