@@ -26,19 +26,13 @@ coverage/
 htmlcov/
 
 # ─── 本地工作区(过程文档/私密资料/草稿,不入库)───
-working/
+# 锚定到根目录,避免误伤 docs/working/ 等同名子目录
+/working/
 .project/
 .ai_workspaces/
 .claude/
 .workbuddy/
 .dbg/
-
-# ─── 内部敏感资料(绝对不能公开)───
-# 包含竞品分析、专利、个人简历等私人内容
-# 即使 docs/ 整体被忽略,这里再加一道显式兜底防误操作
-docs/working/private/
-docs/working/private/**
-/docs/working/private
 
 # ─── 测试 / 报告产物(可随时再生,不入库)───
 reports/
