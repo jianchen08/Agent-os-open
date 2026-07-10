@@ -1,6 +1,6 @@
-# Agent OS 运行时依赖（与 pyproject.toml [project] dependencies 保持一致）
-# 本文件供 start_web.sh / start_web_cn.bat / install.sh 等启动脚本使用。
-# 开发依赖见 pyproject.toml [project.optional-dependencies] 的 dev 分组。
+# Agent OS runtime dependencies (mirrors pyproject.toml [project] dependencies)
+# Used by start_web.sh / start_web_cn.bat / install.sh
+# Dev dependencies: see pyproject.toml [project.optional-dependencies] dev
 
 pyyaml>=6.0
 rich>=13.0
