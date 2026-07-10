@@ -115,6 +115,12 @@ if [ -n "$REAL_USER" ]; then
         info "用户 $REAL_USER 已在 docker 组"
     fi
 fi
+# Docker Desktop 残留会把 docker.service masked(屏蔽),导致 systemctl enable
+# 失败("Unit file ... is masked")。unmask 后才能正常启用。
+if systemctl is-enabled docker 2>/dev/null | grep -q masked; then
+    warn "docker.service 被 masked(通常是 Docker Desktop 残留),执行 unmask..."
+    systemctl unmask docker
+fi
 systemctl enable docker
 systemctl restart docker
 sleep 2
