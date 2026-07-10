@@ -11,10 +11,10 @@ if not defined REDIS_HOST_PORT set "REDIS_HOST_PORT=6480"
 if not defined BACKEND_PORT set "BACKEND_PORT=8988"
 
 echo ========================================
-echo   Agent OS 启动
+echo   Agent OS Starting
 echo ========================================
-echo 项目目录: %cd%
-echo 端口: 前端=!FRONTEND_HOST_PORT! 后端=!BACKEND_PORT! Redis=!REDIS_HOST_PORT!
+echo Project dir: %cd%
+echo Ports: frontend=!FRONTEND_HOST_PORT! backend=!BACKEND_PORT! Redis=!REDIS_HOST_PORT!
 echo.
 
 REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
@@ -26,7 +26,7 @@ REM Instead: probe first; only on deadlock does :auto_shutdown do the reset.
 REM Idle-timeout suspension is prevented via .wslconfig vmIdleTimeout=-1.
 
 :wsl_alive_entry
-echo [INFO] 正在探测 WSL 是否响应...
+echo [INFO] Probing WSL response...
 
 REM Windows-side liveness probe with a hard timeout (see wsl_alive_probe.ps1).
 REM rc=124 -> WSL hung -> auto wsl --shutdown retry; rc=0 -> alive, proceed;
@@ -42,17 +42,17 @@ if not "!WSL_ALIVE_RC!"=="0" goto :probe_other_error
 goto :probe_ok
 
 :probe_deadlocked
-set "REASON=WSL 探测超时（内核可能死锁）"
+set "REASON=WSL probe timeout (kernel deadlock?)"
 goto :auto_shutdown
 
 :probe_other_error
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
-echo [INFO] WSL 不可用 rc=!WSL_ALIVE_RC!，回退到 Docker Desktop 模式
+echo [INFO] WSL unavailable rc=!WSL_ALIVE_RC!, fallback to Docker Desktop mode
 goto :no_wsl_docker
 
 :probe_ok
-echo [OK] WSL 响应正常
+echo [OK] WSL responding OK
 
 REM Portable: derive WSL path from script's own location (no hardcoded project path).
 REM Note: %cd% uses backslashes; wsl/shell would eat them, so convert to slashes first.
@@ -83,7 +83,7 @@ if "!HEALTH_RC!"=="8" goto :wsl_polluted
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
 REM timeout force-kill returns 124, or other anomaly -> treat as pollution
-echo [WARN] health probe abnormal (rc=!HEALTH_RC!)，treat as kernel pollution
+echo [WARN] health probe abnormal (rc=!HEALTH_RC!), treat as kernel pollution
 goto :wsl_polluted
 
 :wsl_alive_ok
@@ -98,7 +98,7 @@ wsl -d Ubuntu -u root -- bash -c "timeout 150 %WSL_DIR%/wsl_start_daemon.sh"
 set "DAEMON_RC=!errorlevel!"
 if "!DAEMON_RC!"=="0" goto :daemon_ok
 if "!DAEMON_RC!"=="7" goto :wsl_polluted
-echo [ERROR] dockerd start failed (rc=!DAEMON_RC!)，详见上方输出
+echo [ERROR] dockerd start failed (rc=!DAEMON_RC!), see output above
 goto :wsl_polluted
 
 :daemon_ok
@@ -129,14 +129,12 @@ set "_PORTPROXY_BAT=%TEMP%\agent_portproxy.bat"
 powershell -NoProfile -Command "Start-Process cmd -Verb RunAs -Wait -ArgumentList '/c','%_PORTPROXY_BAT%'" 2>nul
 REM Verify portproxy was actually set (UAC may have been denied).
 netsh interface portproxy show v4tov4 2>nul | findstr "%FRONTEND_HOST_PORT%" >nul 2>&1
-if errorlevel 1 (
-    echo [WARN] Port forwarding NOT set (UAC may have been denied).
-    echo [WARN] Run this manually as admin:
-    echo        netsh interface portproxy add v4tov4 listenport=%FRONTEND_HOST_PORT% listenaddress=0.0.0.0 connectport=%FRONTEND_HOST_PORT% connectaddress=%WSL_IP%
-    echo        netsh interface portproxy add v4tov4 listenport=%REDIS_HOST_PORT% listenaddress=0.0.0.0 connectport=%REDIS_HOST_PORT% connectaddress=%WSL_IP%
-) else (
-    echo [OK] Port forwarding configured
-)
+if errorlevel 1 goto :portproxy_failed
+echo [OK] Port forwarding configured
+goto :portproxy_done
+:portproxy_failed
+echo [WARN] Port forwarding NOT set. Run as admin or set manually.
+:portproxy_done
 
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 REM    Outer timeout 240s backstop; script internals also wrap every docker call.
@@ -145,44 +143,44 @@ wsl -d Ubuntu -u root -- bash -c "export FRONTEND_HOST_PORT=%FRONTEND_HOST_PORT%
 set "CONTAINERS_RC=!errorlevel!"
 if "!CONTAINERS_RC!"=="0" goto :containers_ok
 if "!CONTAINERS_RC!"=="7" goto :cgroup_stuck
-echo [ERROR] 容器启动失败 (rc=!CONTAINERS_RC!)，详见上方输出
-echo [ERROR] 可尝试: wsl --shutdown 后重新运行本脚本
+echo [ERROR] container start failed (rc=!CONTAINERS_RC!), see output above
+echo [ERROR] try: wsl --shutdown then re-run this script
 pause
 exit /b 1
 
 :cgroup_stuck
-set "REASON=容器清理/启动受阻（cgroup 或 task 残留）"
+set "REASON=container cleanup/start blocked (cgroup/task residue)"
 goto :auto_shutdown
 
 :disk_lost
-echo [ERROR] Ubuntu 发行版的虚拟磁盘(ext4.vhdx)丢失或损坏,wsl --shutdown 无法修复。
-echo [ERROR] 错误信息:
+echo [ERROR] Ubuntu (ext4.vhdx),wsl --shutdown 
+echo [ERROR] :
 if exist "%TEMP%\wsl_alive_probe.err" type "%TEMP%\wsl_alive_probe.err"
-echo [ERROR] 解决:先运行 install_native_docker.bat,它会自动清理并重装 Ubuntu,
-echo [ERROR]       然后重新双击本脚本启动项目。
-echo [ERROR] 或手动: wsl --unregister Ubuntu 然后 wsl --install -d Ubuntu
+echo [ERROR] : install_native_docker.bat, Ubuntu,
+echo [ERROR]       
+echo [ERROR] : wsl --unregister Ubuntu  wsl --install -d Ubuntu
 pause
 exit /b 8
 
 :wsl_polluted
-set "REASON=WSL 内核被 D 状态死锁污染"
+set "REASON=WSL kernel polluted by D-state deadlock"
 
 :auto_shutdown
 set /a "SHUTDOWN_RETRY+=1"
 if !SHUTDOWN_RETRY! gtr 3 (
-    echo [ERROR] 已自动 wsl --shutdown 重试 !SHUTDOWN_RETRY! 次仍失败，放弃。
-    echo [ERROR] 原因: !REASON!
-    echo [ERROR] 请手动执行 wsl --shutdown，等待 10 秒后重新双击本脚本。
+    echo [ERROR] auto wsl --shutdown retried !SHUTDOWN_RETRY!  times still failed, giving up
+    echo [ERROR] reason: !REASON!
+    echo [ERROR] Run wsl --shutdown manually, wait 10s, re-run this script
     pause
     exit /b 7
 )
-echo [WARN] !REASON!，自动 wsl --shutdown 后重试 ^(第 !SHUTDOWN_RETRY!/3 次^)...
+echo [WARN] !REASON!, auto wsl --shutdown then retry ^( !SHUTDOWN_RETRY!/3 ^)...
 REM wsl --shutdown itself may hang under kernel deadlock; wrap in timeout (wsl_shutdown.ps1).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Timeout 15 >nul 2>&1
-echo [INFO] 等待 WSL 内核完全退出 ^(~10s^)...
+echo [INFO] Waiting for WSL kernel to exit ^(~10s^)...
 REM ping-based delay avoids timeout.exe (unreliable under non-interactive shells).
 ping -n 11 127.0.0.1 >nul
-echo [INFO] 重新探测 WSL 是否响应...
+echo [INFO] Re-probing WSL response...
 goto :wsl_alive_entry
 
 :containers_ok
@@ -197,7 +195,7 @@ where docker >nul 2>&1
 if not errorlevel 1 (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_frontend.ps1"
 ) else (
-    echo [INFO] Windows 侧无 docker CLI, 跳过前端热更新
+    echo [INFO] Windows  docker CLI, 
 )
 
 echo.
@@ -213,7 +211,7 @@ echo [INFO] No WSL docker found, falling back to Docker Desktop mode
 
 
 :: ===========================================================================
-echo [INFO] 清理上次残留进程...
+echo [INFO] Cleaning leftover processes...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_processes.ps1"
 echo.
 
@@ -226,8 +224,8 @@ echo.
 :: ===========================================================================
 where docker >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] 未找到 Docker，本项目需要 Docker 才能运行
-    echo [INFO] 下载: https://www.docker.com/products/docker-desktop/
+    echo [ERROR] Docker not found, this project requires Docker
+    echo [INFO] : https://www.docker.com/products/docker-desktop/
     pause
     exit /b 1
 )
@@ -246,11 +244,11 @@ if "!DAEMON_STATUS!"=="3" goto :daemon_hung
 if not defined DOCKER_WAIT_COUNT (
     if defined WSL_IP (
 
-        echo [INFO] 启动 WSL docker 服务...
+        echo [INFO] Starting WSL docker service...
         wsl -d Ubuntu -u root -- bash -c "systemctl start docker 2>/dev/null" >nul 2>&1
     ) else (
 
-        echo [INFO] 正在启动 Docker Desktop...
+        echo [INFO] Starting Docker Desktop...
         start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
     )
     set "DOCKER_WAIT_COUNT=0"
@@ -259,53 +257,53 @@ if not defined DOCKER_WAIT_COUNT (
 set /a "DOCKER_WAIT_COUNT+=1"
 
 if !DOCKER_WAIT_COUNT! gtr 4 goto :daemon_failed
-echo [INFO] 等待 Docker daemon 就绪... (!DOCKER_WAIT_COUNT!/4)
+echo [INFO] Waiting for Docker daemon... (!DOCKER_WAIT_COUNT!/4)
 timeout /t 10 /nobreak >nul
 goto :check_daemon
 
 
 :daemon_hung
-echo [WARN] docker daemon 90 秒内无响应（假死，非启动中）。
+echo [WARN] docker daemon 90 no response (hung, not starting)
 if defined DAEMON_RESTARTED (
-    echo [WARN] 自动重启已尝试过一次，daemon 仍然假死，放弃。
+    echo [WARN] auto-restart tried once, daemon still hung, giving up
     goto :daemon_failed
 )
 if defined WSL_IP (
 
-    echo [INFO] 重启 WSL docker 服务...
+    echo [INFO] Restarting WSL docker service...
     wsl -d Ubuntu -u root -- bash -c "systemctl restart docker 2>/dev/null" >nul 2>&1
     set "DAEMON_RESTARTED=1"
     timeout /t 5 /nobreak >nul
     goto :check_daemon
 )
-echo [INFO] 启动自动恢复（会弹确认框，因为会停掉运行中的容器）...
+echo [INFO] Starting auto-recovery (will prompt, stops running containers)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0restart_docker.ps1"
 set "RESTART_RC=!errorlevel!"
 if "!RESTART_RC!"=="0" (
-    echo [OK] Docker daemon 重启后已恢复。
+    echo [OK] Docker daemon restored after restart
     set "DAEMON_RESTARTED=1"
     goto :check_daemon
 )
 if "!RESTART_RC!"=="2" (
-    echo [INFO] 用户取消了重启，终止。
+    echo [INFO] user cancelled restart, abort
     goto :daemon_failed
 )
-echo [WARN] 自动重启未能恢复 daemon，终止。
+echo [WARN] auto-restart failed to restore daemon, abort
 goto :daemon_failed
 
 :daemon_failed
-echo [ERROR] Docker daemon 未就绪，无法启动项目。
-echo [ERROR] 请手动重启 Docker Desktop 后重新运行本脚本:
-echo [ERROR]   1. 右键托盘 Docker 图标 -^> Quit Docker Desktop
-echo [ERROR]   2. 等待托盘图标消失（约 10 秒）
-echo [ERROR]   3. 重新打开 Docker Desktop，等待图标变绿
-echo [ERROR] 若仍异常: wsl --shutdown 后重启 Docker Desktop
-echo [ERROR] 诊断日志: %%LOCALAPPDATA%%\Docker\log\host\com.docker.backend.exe.log
+echo [ERROR] Docker daemon not ready, cannot start project
+echo [ERROR]  Docker Desktop then re-run this script:
+echo [ERROR]   1.  Docker  -^> Quit Docker Desktop
+echo [ERROR]   2. ( 10 )
+echo [ERROR]   3.  Docker Desktop, 
+echo [ERROR] : wsl --shutdown  Docker Desktop
+echo [ERROR] : %%LOCALAPPDATA%%\Docker\log\host\com.docker.backend.exe.log
 pause
 exit /b 1
 
 :docker_ready
-echo [OK] Docker 就绪
+echo [OK] Docker ready
 
 :: ===========================================================================
 
@@ -314,14 +312,14 @@ echo [OK] Docker 就绪
 
 
 
-echo [INFO] 启动 Docker 服务...
+echo [INFO] Starting Docker service...
 
 docker image prune -f >nul 2>&1
 
 set "REDIS_CID="
 for /f "delims=" %%i in ('docker compose ps -q redis 2^>nul') do set "REDIS_CID=%%i"
 if defined REDIS_CID (
-    echo [OK] 复用已有 redis 容器 !REDIS_CID!
+    echo [OK] Reusing existing redis container !REDIS_CID!
     docker start !REDIS_CID! >nul 2>&1
 ) else (
     docker compose up -d --no-recreate redis
@@ -329,32 +327,32 @@ if defined REDIS_CID (
 set "FRONT_CID="
 for /f "delims=" %%i in ('docker compose ps -q frontend 2^>nul') do set "FRONT_CID=%%i"
 if defined FRONT_CID (
-    echo [OK] 复用已有 frontend 容器 !FRONT_CID!
+    echo [OK] Reusing existing frontend container !FRONT_CID!
     docker start !FRONT_CID! >nul 2>&1
 ) else (
     docker compose up -d --no-recreate frontend
 )
-echo [OK] Docker 服务已启动
+echo [OK] Docker service started
 
 
 docker image inspect agent-os-frontend:latest >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] 前端镜像不存在，需要首次构建（需要网络拉取基础镜像）
-    echo [INFO] 尝试构建...
+    echo [INFO] Frontend image not found, need first build
+    echo [INFO] Attempting build...
     set "COMPOSE_PROGRESS=plain"
     docker compose build frontend
     if errorlevel 1 (
-        echo [ERROR] 前端镜像构建失败。
-        echo [ERROR] 已尝试：本地离线包（packages/）→ 多镜像链（阿里云/清华/淘宝）→ 官方源
-        echo [ERROR] 排查建议:
-        echo [ERROR]   1. 预下载离线包到 packages/wheels 和 packages/npm-tarballs 后重新构建
-        echo [ERROR]   2. 配置 Docker daemon.json 的 registry-mirrors（国内镜像加速）
+        echo [ERROR] Frontend image build failed
+        echo [ERROR] : (packages/)-> (//)-> 
+        echo [ERROR] :
+        echo [ERROR]   1.  packages/wheels  packages/npm-tarballs 
+        echo [ERROR]   2.  Docker daemon.json  registry-mirrors(mirror)
         pause
         exit /b 1
     )
-    echo [OK] 前端镜像构建完成
+    echo [OK] Frontend image build complete
     docker compose up -d frontend
-    echo [INFO] 清理旧镜像...
+    echo [INFO] Cleaning old images...
     docker image prune -f 2>nul
     powershell -NoProfile -Command "Get-Date | Out-File -FilePath '.frontend_built_at' -Encoding ascii"
 ) else (
@@ -502,30 +500,30 @@ set "IMG=%~1"
 
 docker image inspect "%IMG%" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 本地已有镜像: %IMG%
+    echo [OK] Image exists locally: %IMG%
     exit /b 0
 )
 
-echo [INFO] 本地无 %IMG%，尝试拉取...
+echo [INFO] Not local %IMG%, trying pull...
 docker pull "%IMG%" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 拉取成功: %IMG%
+    echo [OK] pull success: %IMG%
     exit /b 0
 )
 
 
-echo [WARN] Docker Hub 拉取失败，尝试 daocloud 镜像...
+echo [WARN] Docker Hub pull failed,  daocloud ...
 docker pull "docker.m.daocloud.io/library/%IMG%" >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] 镜像 %IMG% 拉取失败（Docker Hub 与 daocloud 均不可用）
-    echo [WARN] 后续 compose/build 会再次尝试，若仍失败请配置 daemon.json registry-mirrors
+    echo [WARN]  %IMG% pull failed(Docker Hub  daocloud )
+    echo [WARN] compose/build will retry later, if still fails configure daemon.json registry-mirrors
     exit /b 0
 )
 
 docker tag "docker.m.daocloud.io/library/%IMG%" "%IMG%" >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] tag 重命名失败: docker.m.daocloud.io/library/%IMG% -^> %IMG%
+    echo [WARN] tag tag rename failed: docker.m.daocloud.io/library/%IMG% -^> %IMG%
     exit /b 0
 )
-echo [OK] 拉取成功（daocloud 回退）: %IMG%
+echo [OK] pull success(daocloud ): %IMG%
 exit /b 0
