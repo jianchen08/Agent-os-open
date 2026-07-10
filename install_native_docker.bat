@@ -119,31 +119,28 @@ if "!WSL_SCRIPT_DIR!"=="" (
 echo [INFO] Script dir in WSL: !WSL_SCRIPT_DIR!
 
 :run_wsl_install
-set "WSL_OUT=%TEMP%\install_wsl_docker.out"
-REM 实时输出到终端(apt 下载/安装过程可见),同时存文件供标记检测。
-REM cmd 无 tee,用 PowerShell tee 实现。之前用 > 重定向导致整个安装过程
-REM (数分钟)屏幕静止,用户以为卡死。
-REM 注意: $LASTEXITCODE 拿 wsl 的退出码(管道默认返回 tee 的退出码=0)。
-powershell -NoProfile -Command "$ErrorActionPreference='Continue'; wsl -d Ubuntu -u root -- bash -c 'cd \"!WSL_SCRIPT_DIR!\" && bash install_wsl_docker.sh' 2>&1 | Tee-Object -FilePath '%WSL_OUT%'; exit $LASTEXITCODE"
+REM Output goes directly to terminal (real-time, no tee/redirect = no buffering).
+REM Markers (NEED_WSL_RESTART / WSL_DOCKER_READY) are written to /tmp files
+REM inside WSL by install_wsl_docker.sh, read back here via wsl cat.
+wsl -d Ubuntu -u root -- bash -c "cd '!WSL_SCRIPT_DIR!' && bash install_wsl_docker.sh"
 set "WSL_RC=!errorlevel!"
 
-REM wsl.exe 传递 bash 退出码不可靠(尤其首次开 systemd 时),改用输出标记判断:
-REM NEED_WSL_RESTART = 刚开启 systemd,需 wsl --shutdown 后重跑(等同于 exit 100 的语义)
-findstr /c:"NEED_WSL_RESTART" "%WSL_OUT%" >nul 2>&1
+REM Check restart marker (written to file, not stdout, for reliability).
+wsl -d Ubuntu -u root -- test -f /tmp/wsl_docker_restart.marker 2>nul
 if not errorlevel 1 (
     echo.
-    echo [INFO] systemd 刚开启,重启 WSL 使其生效...
+    echo [INFO] systemd enabled. Restarting WSL to apply...
     wsl --shutdown
     timeout /t 5 /nobreak >nul
-    echo [INFO] 重新运行安装脚本...
-    del "%WSL_OUT%" >nul 2>&1
+    echo [INFO] Re-running install script...
+    wsl -d Ubuntu -u root -- rm -f /tmp/wsl_docker_restart.marker 2>nul
     goto run_wsl_install
 )
 
-REM 同理,用成功标记 WSL_DOCKER_READY 判定真成功;缺失即失败。
-findstr /c:"WSL_DOCKER_READY" "%WSL_OUT%" >nul 2>&1
+REM Check success marker.
+wsl -d Ubuntu -u root -- test -f /tmp/wsl_docker_ready.marker 2>nul
 if errorlevel 1 goto :install_failed
-del "%WSL_OUT%" >nul 2>&1
+wsl -d Ubuntu -u root -- rm -f /tmp/wsl_docker_ready.marker 2>nul
 goto :install_ok
 
 :install_failed

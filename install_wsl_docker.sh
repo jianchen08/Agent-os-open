@@ -55,6 +55,7 @@ else
 systemd=true
 EOF
     echo "NEED_WSL_RESTART"
+    echo "NEED_WSL_RESTART" > /tmp/wsl_docker_restart.marker
     exit 100  # 特殊码：需要外层 wsl --shutdown 后重跑
 fi
 
@@ -264,4 +265,5 @@ ok " WSL2 docker-ce 安装完成！"
 ok "=========================================="
 echo "WSL 侧就绪。Windows 侧设 DOCKER_HOST=tcp://localhost:2375 即可连接。"
 echo "WSL_DOCKER_READY"
+echo "WSL_DOCKER_READY" > /tmp/wsl_docker_ready.marker
 exit 0

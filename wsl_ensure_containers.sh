@@ -86,22 +86,42 @@ if [ -n "$BACKEND_HOST_IP" ]; then
     export BACKEND_HOST_IP
 fi
 
-# docker compose up 实时输出到终端(避免长时间无反馈被误认为卡死),
-# 同时存入临时文件供下方错误特征检测。首次部署需构建前端镜像,耗时较长,
-# 故超时放宽到 600s(镜像已在时几秒即完成)。
-# COMPOSE_PROGRESS=plain: 输出完整构建步骤(Step X/Y / ---> Using cache / 拉取层),
-# 而非压缩进度条(进度条在非交互管道里会被丢弃,用户看不到构建进度)。
+# 构建与启动分两步: build 耗时不可控(慢网络下拉基础镜像+npm/pip 可能 15 分钟+),
+# 放在超大超时(1800s)内; up 只启动已构建的镜像,几秒完成,短超时(120s)即可。
+# 分开后 build 慢不会导致 up 的 timeout 误判失败。
 export COMPOSE_PROGRESS=plain
 COMPOSE_OUT="${TMPDIR:-/tmp}/compose_up_$$.out"
-timeout 600 docker compose up -d 2>&1 | tee "$COMPOSE_OUT"
+
+# 先 build(首次构建前端镜像,慢网络下耗时很长,给 30 分钟)。
+echo "[INFO] docker compose build (首次构建前端镜像,可能需要数分钟)..."
+timeout 1800 docker compose build 2>&1 | tee "$COMPOSE_OUT"
+BUILD_RC=${PIPESTATUS[0]}
+if [ "$BUILD_RC" -ne 0 ] && [ "$BUILD_RC" -ne 124 ]; then
+    # build 失败(非超时):可能是 Dockerfile 错误或网络全不通。
+    out="$(cat "$COMPOSE_OUT" 2>/dev/null)"
+    if echo "$out" | grep -qiE 'cgroup is not empty|failed to create (task|shim)'; then
+        echo "[FATAL] Docker/containerd/runc 状态不一致。请 wsl --shutdown 后重试。"
+        exit 7
+    fi
+    echo "[ERROR] docker compose build 失败 (rc=$BUILD_RC)"
+    exit 1
+fi
+if [ "$BUILD_RC" -eq 124 ]; then
+    echo "[WARN] docker compose build 超时(>1800s)。网络太慢,请检查网络后重试。"
+    exit 7
+fi
+
+# build 成功后 up(启动已构建的镜像,应该很快)。
+echo "[INFO] docker compose up -d..."
+timeout 120 docker compose up -d 2>&1 | tee "$COMPOSE_OUT"
 rc=${PIPESTATUS[0]}
 out="$(cat "$COMPOSE_OUT" 2>/dev/null)"
 rm -f "$COMPOSE_OUT"
 
-# compose 超时（124）= 内核被 D 状态污染或构建耗时超限，需 wsl --shutdown / 重试
+# compose 超时（124）= 镜像已构建但 up 仍超时,疑似内核 D 状态污染。
 if [ "$rc" -eq 124 ]; then
-    echo "[WARN] docker compose 超时（>600s）。若首次构建前端镜像属正常耗时长；"
-    echo "[WARN] 若反复超时,疑似内核 D 状态污染,请在 Windows 执行 wsl --shutdown 后重试。"
+    echo "[WARN] docker compose up 超时(镜像已构建,up 仍慢=疑似内核 D 状态污染)"
+    echo "[WARN] 请在 Windows 执行 wsl --shutdown 后重试。"
     exit 7
 fi
 
