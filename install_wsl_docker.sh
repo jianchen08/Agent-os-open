@@ -23,6 +23,18 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}==== $* ====${NC}"; }
 
+# Ubuntu 的 command-not-find post-invoke 钩子(/usr/lib/cnf-update-db)调用 python3,
+# 若发行版 Python 环境损坏(No module named 'encodings')会崩溃,在 set -e 下导致
+# apt-get update 异常退出。该钩子只更新命令建议数据库,与 docker 安装无关,禁用它。
+if [ -f /etc/apt/apt.conf.d/50command-not-found ]; then
+    mv /etc/apt/apt.conf.d/50command-not-found /etc/apt/apt.conf.d/50command-not-found.bak 2>/dev/null || true
+fi
+info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
+ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+step()  { echo -e "\n${CYAN}==== $* ====${NC}"; }
+
 # ── 1. 开 systemd ──
 step "1/5 开启 systemd"
 if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
@@ -43,7 +55,9 @@ if command -v dockerd &>/dev/null; then
     ok "docker-ce 已安装: $(dockerd --version | awk '{print $3}')"
 else
     info "配置 apt 源(阿里云镜像)..."
-    apt-get update -y
+    # apt-get update 的 post-invoke 钩子可能因 Python 环境损坏而失败,
+    # 但这不影响包索引本身已更新。用 || warn 容忍,继续往下装。
+    apt-get update -y || warn "apt-get update 有警告(post-invoke 钩子失败属正常,继续)"
     apt-get install -y ca-certificates curl gnupg lsb-release
     DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
     install -m 0755 -d /etc/apt/keyrings
@@ -53,7 +67,7 @@ else
     fi
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} $(lsb_release -cs) stable" \
         | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    apt-get update -y
+    apt-get update -y || warn "apt-get update 有警告(post-invoke 钩子失败属正常,继续)"
     info "安装 docker-ce..."
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     ok "docker-ce 安装完成"
