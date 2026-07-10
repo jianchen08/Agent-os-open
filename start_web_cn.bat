@@ -410,20 +410,14 @@ echo [OK] Python: %PYEXE%
 if not exist ".py_deps_installed" (
     echo [INFO] 安装 Python 依赖...
     set "DEPS_OK=0"
-    REM pip 用国内镜像源加速(阿里云 -> 清华 -> 官方), 加超时避免网络不通时卡几分钟。
-    "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 30 1>nul 2>nul
+    REM pip 用国内镜像源(阿里云 -> 清华 -> 官方), 不吞 stdout 以便看到哪个包失败。
+    "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 2>nul
     if not errorlevel 1 (
         set "DEPS_OK=1"
     ) else (
-        echo [WARN] 阿里云源失败,尝试清华源...
-        "%PYEXE%" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/ --trusted-host pypi.tuna.tsinghua.edu.cn --timeout 30 1>nul 2>nul
-        if not errorlevel 1 (
-            set "DEPS_OK=1"
-        ) else (
-            echo [WARN] 清华源失败,尝试官方源...
-            "%PYEXE%" -m pip install -r requirements.txt --timeout 30 1>nul 2>nul
-            if not errorlevel 1 set "DEPS_OK=1"
-        )
+        echo [WARN] requirements.txt 有包失败(见上方),尝试单包安装跳过失败的...
+        "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 --no-deps 2>nul
+        if not errorlevel 1 set "DEPS_OK=1"
     )
     if "!DEPS_OK!"=="0" (
         echo [WARN] requirements.txt 不可用，回退: pip install -e .
