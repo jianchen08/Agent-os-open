@@ -68,8 +68,11 @@ else
     # 但这不影响包索引本身已更新。用 || warn 容忍,继续往下装。
     apt-get update -y || warn "apt-get update 有警告(post-invoke 钩子失败属正常,继续)"
     apt-get install -y ca-certificates curl gnupg lsb-release
-    DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
     install -m 0755 -d /etc/apt/keyrings
+    # docker apt 源的镜像,与 GPG key 用同一个成功源(避免 aliyun DNS 不通时
+    # GPG key 从清华下了,apt 源还写死 aliyun 导致包索引下载失败)。
+    DOCKER_MIRRORS="https://mirrors.aliyun.com https://mirrors.tuna.tsinghua.edu.cn https://download.docker.com"
+    DOCKER_REPO=""
     # 校验 GPG key 存在且非空(上次下载失败会留空/损坏文件,不能跳过重下)。
     NEED_KEY=1
     if [ -s /etc/apt/keyrings/docker.gpg ]; then
@@ -83,13 +86,14 @@ else
     fi
     if [ "$NEED_KEY" = "1" ]; then
         # 下载 docker GPG key,带重试 + 多镜像源回退(国内网络偶发 DNS 不通)。
-        # 分开执行(先下临时文件再 gpg),避免 curl 失败时管道吞掉错误。
+        # 记录成功的镜像源,后面 apt 源用同一个(保证 GPG key 和包索引同源)。
         GPG_KEY=""
         for attempt in 1 2 3; do
-            for mirror in "https://mirrors.aliyun.com" "https://mirrors.tuna.tsinghua.edu.cn" "https://download.docker.com"; do
+            for mirror in $DOCKER_MIRRORS; do
                 info "下载 docker GPG key (尝试 $attempt, 源 ${mirror})..."
                 if curl -fsSL --connect-timeout 15 --max-time 30 "${mirror}/docker-ce/linux/ubuntu/gpg" -o /tmp/docker-gpg-key; then
                     GPG_KEY=/tmp/docker-gpg-key
+                    DOCKER_REPO="${mirror}/docker-ce/linux/ubuntu"
                     break 2
                 fi
                 warn "下载失败(${mirror}),尝试下一个源..."
@@ -103,7 +107,21 @@ else
         gpg --dearmor -o /etc/apt/keyrings/docker.gpg < "$GPG_KEY"
         chmod a+r /etc/apt/keyrings/docker.gpg
         rm -f /tmp/docker-gpg-key
-        ok "docker GPG key 已配置"
+        ok "docker GPG key 已配置 (源: ${DOCKER_REPO})"
+    fi
+    # GPG key 已存在(NEED_KEY=0)时,DOCKER_REPO 还是空,需要探测可用的镜像源。
+    if [ -z "$DOCKER_REPO" ]; then
+        for mirror in $DOCKER_MIRRORS; do
+            if curl -fsSL --connect-timeout 10 --max-time 15 -o /dev/null "${mirror}/docker-ce/linux/ubuntu/dists/focal/Release" 2>/dev/null; then
+                DOCKER_REPO="${mirror}/docker-ce/linux/ubuntu"
+                break
+            fi
+        done
+        if [ -z "$DOCKER_REPO" ]; then
+            err "无法连接任何 docker 镜像源(aliyun/清华/官方均不通)。请检查网络后重试。"
+            exit 1
+        fi
+        ok "docker apt 源选用: ${DOCKER_REPO}"
     fi
     # 写 docker apt 源(先清旧的可能损坏的文件,避免 Malformed entry)。
     rm -f /etc/apt/sources.list.d/docker.list
