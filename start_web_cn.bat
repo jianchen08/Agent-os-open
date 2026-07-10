@@ -408,31 +408,30 @@ echo [OK] Python: %PYEXE%
 "%PYEXE%" --version 2>&1
 
 if not exist ".py_deps_installed" (
-    echo [INFO] 安装 Python 依赖...
+    echo [INFO] Installing Python deps...
     set "DEPS_OK=0"
-    REM pip 用国内镜像源(阿里云 -> 清华 -> 官方), 不吞 stdout 以便看到哪个包失败。
     "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 2>nul
     if not errorlevel 1 (
         set "DEPS_OK=1"
     ) else (
-        echo [WARN] requirements.txt 有包失败(见上方),尝试单包安装跳过失败的...
+        echo [WARN] Some packages failed, retry with --no-deps...
         "%PYEXE%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 60 --no-deps 2>nul
         if not errorlevel 1 set "DEPS_OK=1"
     )
     if "!DEPS_OK!"=="0" (
-        echo [WARN] requirements.txt 不可用，回退: pip install -e .
+        echo [WARN] requirements.txt failed, fallback: pip install -e .
         "%PYEXE%" -m pip install -e . -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --timeout 30 1>nul 2>nul
         if not errorlevel 1 set "DEPS_OK=1"
     )
     if "!DEPS_OK!"=="1" (
         echo. > ".py_deps_installed"
-        echo [OK] 依赖安装完成
+        echo [OK] Python deps installed
     ) else (
-        echo [ERROR] Python 依赖安装失败，后端可能无法启动
-        echo [INFO] 请手动执行: pip install -r requirements.txt
+        echo [ERROR] Python deps install failed, backend may not start
+        echo [INFO] Run manually: pip install -r requirements.txt
     )
 ) else (
-    echo [OK] Python 依赖已安装
+    echo [OK] Python deps already installed
 )
 
 :: ===========================================================================
