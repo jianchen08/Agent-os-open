@@ -6,11 +6,18 @@
 #   - frontend: context 为仓库根目录（.），以便 Dockerfile 读取 packages/ 离线包
 #   - redis: 直接使用 Docker Hub 镜像；首次拉取由 start_web.bat 带镜像前缀回退
 #
-# 容器命名说明：
+# 容器命名与端口说明：
 #   不设 name/container_name，让 compose 用标准 {project}-{service} 命名。
-#   project name 默认取自所在目录名（目录名规范化后作 project），
-#   因此不同目录的实例天然隔离，换部署目录不会丢失既有容器。
-#   多实例只需在不同目录各跑一份，或用 COMPOSE_PROJECT_NAME 环境变量显式指定。
+#   project name 默认取自所在目录名，因此不同目录的实例天然隔离
+#   （容器/网络/卷互不冲突）。
+#
+#   宿主端口用环境变量参数化（带默认值），单实例零配置开箱即用：
+#     FRONTEND_HOST_PORT  默认 5289（前端宿主映射）
+#     REDIS_HOST_PORT     默认 6480（Redis 宿主映射）
+#     BACKEND_PORT        默认 8988（后端进程；容器经 BACKEND_URL 反代连它）
+#   需同时运行多个实例（如对比测试两个版本）时，给第二实例设不同端口：
+#     set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989
+#
 #   脚本（start_web_cn.bat / wsl_ensure_containers.sh）用
 #   `docker compose ps -q <service>` 动态获取容器，不依赖固定名。
 # =============================================================================
@@ -30,7 +37,7 @@ services:
     # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
     restart: on-failure
     ports:
-      - "5289:5188"
+      - "${FRONTEND_HOST_PORT:-5289}:5188"
     environment:
       # Agent 跑在宿主机，前端需连到宿主的 8988。
       # - Docker Desktop 模式：host.docker.internal 由 Desktop 自动注入，指向 Windows 宿主。
@@ -38,8 +45,8 @@ services:
       #   且后端在 Windows（WSL 的上一层宿主），host-gateway 也只指向 WSL 自身。
       #   故由 wsl_ensure_containers.sh 导出 BACKEND_HOST_IP=WSL默认网关(=Windows宿主)，
       #   未设置时回退 host.docker.internal（兼容 Desktop 模式与直接 docker compose up）。
-      - BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:8988
-      - BACKEND_WS_URL=ws://${BACKEND_HOST_IP:-host.docker.internal}:8988
+      - BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
+      - BACKEND_WS_URL=ws://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
     depends_on:
       redis:
         condition: service_healthy
@@ -66,7 +73,7 @@ services:
     # on-failure：与 frontend 一致，崩溃不无限重启，避免反复触发 WSL2 容器停止路径的内核卡死。
     restart: on-failure
     ports:
-      - "6480:6379"
+      - "${REDIS_HOST_PORT:-6480}:6379"
     command: >
       redis-server
       --maxmemory 256mb

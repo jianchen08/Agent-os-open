@@ -13,6 +13,14 @@
 
 [English](./README_EN.md) | [中文](#)
 
+## 📑 目录
+
+- [项目简介](#-项目简介) · [核心亮点](#-核心亮点) · [项目规模](#-项目规模)
+- [快速开始](#-快速开始)（[Windows](#方式一windows-一键启动推荐) / [Linux·macOS](#方式二linux--macos-一键启动) / [手动开发](#方式三手动开发模式)）
+- [多实例配置](#跨设备--多实例配置说明)
+- [文档导航](#-文档导航) · [镜像仓库](#-镜像仓库)
+- [贡献](#-贡献) · [安全策略](#-安全策略) · [开源协议](#-开源协议)
+
 ---
 
 ## 🌊 项目简介
@@ -37,6 +45,14 @@
 | 部署 | Docker / Docker Compose |
 
 > **依赖说明**：`pyproject.toml` 声明 24 个核心运行时依赖（含 fastapi、redis、PyJWT、bcrypt、cryptography、httpx、sqlalchemy 等），并通过 `requirements.txt` 镜像供启动脚本使用。直接 `pip install -e .` 或 `pip install -r requirements.txt` 即可，无需手动补装。
+
+### 📊 项目规模
+
+- **Python 代码**：约 30.8 万行（`src/` ~16.6 万 + `tests/` ~14.2 万）
+- **前端代码**：约 9.6 万行（`frontend/src/`）
+- **内置工具**：41 个（`src/tools/builtin/` 下含 `tool.py` 实现）
+- **真实通道**：6 个（CLI / 钉钉 / 飞书 / QQ / 企微 / WebSocket）
+- **模块数**：35 个（`src/` 下子目录）
 
 ---
 
@@ -146,19 +162,21 @@ chmod +x install.sh
 
 **工作空间根目录**：任务的工作文件默认存放在 `config/isolation/isolation_config.yaml` 中 `workspace.root` 指定的目录下。如果你的项目不在该路径，或希望放到其他盘符/分区，编辑该文件把 `root` 改为你的实际路径（支持绝对路径，如 Linux 的 `/tmp/ai_workspaces` 或 Windows 的 `D:/workspaces`）。注意：容器隔离模式下 `root` 必须是绝对路径，相对路径会导致 Docker bind mount 失败。
 
-**多实例隔离**：在同一台机器上运行多个独立实例时，为避免容器名冲突，在启动前设置不同的 `COMPOSE_PROJECT_NAME` 环境变量：
+**多实例运行（同时跑两个版本做对比测试）**：compose project 会自动按**所在目录名**隔离（不同目录 = 不同的容器名/网络/卷，互不冲突），无需手动设置 `COMPOSE_PROJECT_NAME`。唯一会冲突的是**宿主端口**（前端 5289 / Redis 6480 / 后端 8988）。
 
-```bash
-# Linux / macOS / WSL
-export COMPOSE_PROJECT_NAME=agentos2
-./start_web.sh
+宿主端口已参数化（带默认值），单实例零配置。需要同时运行第二份实例时，给它设置不同的端口即可：
 
-# Windows (cmd)
-set COMPOSE_PROJECT_NAME=agentos2
+```bat
+:: 实例一（默认端口）：直接双击 start_web_cn.bat
+
+:: 实例二（不同端口）：在另一个目录的命令行里
+set FRONTEND_HOST_PORT=5290
+set REDIS_HOST_PORT=6481
+set BACKEND_PORT=8989
 start_web_cn.bat
 ```
 
-这会让前端/Redis 容器、网络、卷名都带上独立前缀，互不干扰。
+两个实例互不干扰：不同目录 → 不同 compose project（容器/网络/卷隔离）；不同端口 → 无冲突。启动提示会显示本实例实际使用的端口。停止时各自在对应目录执行 `docker compose down` 即可（按 project 隔离，不影响另一个）。
 
 ### 方式三：手动开发模式
 
@@ -196,11 +214,15 @@ npm run dev
 
 | 文档 | 说明 |
 |------|------|
+| [README_EN.md](README_EN.md) | English README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
 | [ROADMAP.md](ROADMAP.md) | 版本路线图 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 贡献者行为准则 |
 | [CHANGELOG.md](CHANGELOG.md) | 变更日志 |
+| [SECURITY.md](SECURITY.md) | 安全策略与漏洞上报 |
+| [AUTHORS.md](AUTHORS.md) | 贡献者名单 |
+| [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) | 第三方依赖许可证清单 |
 
 ---
 
@@ -215,7 +237,13 @@ npm run dev
 
 ## 🤝 贡献
 
-欢迎任何形式的贡献——提交 Issue、PR、完善文档、分享使用案例。详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎任何形式的贡献——提交 Issue、PR、完善文档、分享使用案例。详见 [CONTRIBUTING.md](CONTRIBUTING.md)，参与前请阅读[贡献者行为准则](CODE_OF_CONDUCT.md)。
+
+---
+
+## 🔒 安全策略
+
+发现安全漏洞请勿在公开 Issue 提交，按 [SECURITY.md](SECURITY.md) 的流程私下上报。
 
 ---
 
@@ -232,14 +260,4 @@ npm run dev
 ---
 
 > **灵汐，取自"灵气如潮汐般生生不息"** —— 我们希望 AI Agent 也能像潮汐一样，具备自我调节、自我进化的生命力。
-
----
-
-## 📊 项目状态（基于实际代码，2026-07-03）
-
-- **Python 代码**：约 30.8 万行（`src/` ~16.6 万 + `tests/` ~14.2 万）
-- **前端代码**：约 9.6 万行（`frontend/src/`）
-- **内置工具**：41 个（`src/tools/builtin/` 下含 `tool.py` 实现）
-- **真实通道**：6 个（CLI / 钉钉 / 飞书 / QQ / 企微 / WebSocket）
-- **模块数**：35 个（`src/` 下子目录）
 - **测试文件**：376 个（`tests/` 下 `test_*.py`）

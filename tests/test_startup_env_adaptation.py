@@ -8,20 +8,25 @@
     2. docker-compose.yml 的 name 字段 + 显式 container_name 把 compose project
        锁死成固定字面量，导致 compose "看不见"既有容器，下次 up 重建→端口冲突
     3. wsl_ensure_containers.sh 裸跑默认路径写死 /mnt/d/myproject/container_224042d3b925
+    4. 宿主端口（5289/6480/8988）写死，多个部署目录无法同时运行（对比测试两个版本）
 
-修复策略（回归 compose 标准命名）：
-  - 移除 docker-compose.yml 的 name 字段和显式 container_name，让 compose 用标准
-    {project}-{service} 命名；project 默认取自目录名，不同目录天然隔离
-  - 脚本（bat / wsl_ensure_containers.sh）改用 `docker compose ps -q <service>`
-    动态获取容器，不依赖固定容器名（update_frontend.ps1 已验证的范式）
+修复策略：
+  - 回归 compose 标准命名：移除 name/container_name，project 默认取自目录名，
+    不同目录的实例天然隔离（容器/网络/卷互不冲突）
+  - 脚本改用 `docker compose ps -q <service>` 动态获取容器，不依赖固定容器名
   - wsl 脚本裸跑时用 wslpath 动态推导项目目录
+  - 宿主端口参数化（${VAR:-default}）：单实例零配置；多实例设不同端口 env 即可共存
+    （如 set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989）
+  - 删除"自动删除 foreign 容器"的危险预检（多实例下会误杀另一个合法实例）
 
 验证范围：
   1. 三脚本均不含 22404 字面量（硬编码后缀已清除）
   2. compose 不设 name/container_name（让 project 跟随目录）
   3. 脚本用 docker compose ps -q 动态获取容器（不写死容器名）
-  4. wsl 脚本用 wslpath 动态推导项目目录（不写死挂载路径）
-  5. .gitignore 持续忽略 .env（防凭据入库回归）
+  4. 宿主端口已参数化（${VAR:-default}），bat 读取 env 带默认值
+  5. 脚本不含危险的 foreign 容器自动删除逻辑
+  6. wsl 脚本用 wslpath 动态推导项目目录（不写死挂载路径）
+  7. .gitignore 持续忽略 .env（防凭据入库回归）
 """
 from pathlib import Path
 
@@ -166,6 +171,71 @@ class TestWslProjectDirDynamic:
         """不应写死 container_224042d3b925 目录名"""
         assert "container_224042d3b925" not in content, (
             "wsl 脚本仍写死 container_224042d3b925 目录名，换目录即失效"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4.6 宿主端口参数化（支持多实例共存，不互相冲突）
+# ---------------------------------------------------------------------------
+class TestPortParameterization:
+    """验证宿主端口已参数化（${VAR:-default}），多实例设不同 env 即可隔离。
+
+    compose project 隔离已天然生效（不同目录 = 不同容器/网络/卷），
+    唯一冲突点是宿主端口。参数化后，第二实例设不同端口即可共存。
+    """
+
+    def test_compose_frontend_port_parameterized(self):
+        """docker-compose.yml 前端宿主端口应参数化"""
+        content = _read_file("docker-compose.yml")
+        assert "${FRONTEND_HOST_PORT:-5289}" in content, (
+            "前端宿主端口应参数化为 ${FRONTEND_HOST_PORT:-5289}"
+        )
+
+    def test_compose_redis_port_parameterized(self):
+        """docker-compose.yml Redis 宿主端口应参数化"""
+        content = _read_file("docker-compose.yml")
+        assert "${REDIS_HOST_PORT:-6480}" in content, (
+            "Redis 宿主端口应参数化为 ${REDIS_HOST_PORT:-6480}"
+        )
+
+    def test_compose_backend_port_parameterized(self):
+        """docker-compose.yml BACKEND_URL 端口应参数化"""
+        content = _read_file("docker-compose.yml")
+        assert "${BACKEND_PORT:-8988}" in content, (
+            "BACKEND_URL 端口应参数化为 ${BACKEND_PORT:-8988}"
+        )
+
+    def test_bat_reads_port_env_with_defaults(self):
+        """start_web_cn.bat 应读取 3 个端口 env 并带默认值"""
+        content = _read_file("start_web_cn.bat")
+        assert "if not defined FRONTEND_HOST_PORT set" in content, (
+            "bat 应读取 FRONTEND_HOST_PORT（带默认值）"
+        )
+        assert "if not defined REDIS_HOST_PORT set" in content, (
+            "bat 应读取 REDIS_HOST_PORT（带默认值）"
+        )
+        assert "if not defined BACKEND_PORT set" in content, (
+            "bat 应读取 BACKEND_PORT（带默认值）"
+        )
+
+    def test_bat_no_dangerous_foreign_container_removal(self):
+        """start_web_cn.bat 不应含'自动删除 foreign 容器'的危险预检（会误杀多实例）"""
+        content = _read_file("start_web_cn.bat")
+        assert "foreign container" not in content, (
+            "bat 仍含自动删除 foreign 容器的危险逻辑，会误杀另一个合法实例"
+        )
+        assert "预检端口冲突" not in content, (
+            "bat 仍含旧的端口冲突预检（已改为参数化隔离，不再需要）"
+        )
+
+    def test_wsl_no_dangerous_foreign_container_removal(self):
+        """wsl_ensure_containers.sh 不应含'自动删除 foreign 容器'的危险预检"""
+        content = _read_file("wsl_ensure_containers.sh")
+        assert "foreign" not in content, (
+            "wsl 脚本仍含自动删除 foreign 容器的危险逻辑"
+        )
+        assert "预检端口冲突" not in content, (
+            "wsl 脚本仍含旧的端口冲突预检（已改为参数化隔离）"
         )
 
 

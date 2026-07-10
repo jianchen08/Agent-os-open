@@ -13,6 +13,14 @@
 
 [中文](./README.md) | [English](#)
 
+## 📑 Table of Contents
+
+- [Overview](#-overview) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
+- [Quick Start](#-quick-start)（[Windows](#option-1-windows-one-click-recommended) / [Linux·macOS](#option-2-linux--macos-one-click) / [Manual](#option-3-manual-development)）
+- [Multi-Instance Config](#cross-device--multi-instance-configuration)
+- [Documentation](#-documentation-navigation) · [Mirrors](#-mirror-repositories)
+- [Contributing](#-contributing) · [Security](#-security-policy) · [License](#-license)
+
 ---
 
 ## 🌊 Overview
@@ -37,6 +45,14 @@
 | Deployment | Docker / Docker Compose |
 
 > **Dependencies**: `pyproject.toml` declares 24 core runtime dependencies (including fastapi, redis, PyJWT, bcrypt, cryptography, httpx, sqlalchemy, etc.), mirrored in `requirements.txt` for the launch scripts. Run `pip install -e .` or `pip install -r requirements.txt` directly — no manual supplement needed.
+
+### 📊 Project Scale
+
+- **Python code**: ~308K lines (`src/` ~166K + `tests/` ~142K)
+- **Frontend code**: ~96K lines (`frontend/src/`)
+- **Built-in tools**: 41 (`src/tools/builtin/` with `tool.py`)
+- **Live channels**: 6 (CLI / DingTalk / Feishu / QQ / WeCom / WebSocket)
+- **Modules**: 35 (subdirectories under `src/`)
 
 ---
 
@@ -137,8 +153,30 @@ chmod +x install.sh
 ```
 
 After startup:
-- Web UI: http://localhost:5188
+- Web UI: http://localhost:5289
 - Backend API: http://localhost:8988
+
+### Cross-device / Multi-Instance Configuration
+
+The defaults work out of the box. Adjust as needed for the cases below.
+
+**Workspace root**: task working files are stored under the path set by `workspace.root` in `config/isolation/isolation_config.yaml`. If your project lives elsewhere, or you prefer a different drive/partition, edit that file and set `root` to your actual path (absolute paths only, e.g. `/tmp/ai_workspaces` on Linux or `D:/workspaces` on Windows). In container isolation mode `root` **must** be absolute — a relative path breaks the Docker bind mount.
+
+**Multi-instance (running two versions side by side for comparison)**: the compose project is auto-isolated by **directory name** (different directories = different container/network/volume names, no conflict). You do **not** need to set `COMPOSE_PROJECT_NAME`. The only thing that clashes is the **host port** (frontend 5289 / Redis 6480 / backend 8988).
+
+Host ports are parameterized (with defaults), so a single instance needs zero config. To run a second instance, just give it different ports:
+
+```bat
+:: Instance 1 (default ports): double-click start_web_cn.bat
+
+:: Instance 2 (different ports), in the other directory's shell:
+set FRONTEND_HOST_PORT=5290
+set REDIS_HOST_PORT=6481
+set BACKEND_PORT=8989
+start_web_cn.bat
+```
+
+The two instances don't interfere: different directories → different compose projects (container/network/volume isolation); different ports → no conflict. The startup banner shows the actual ports in use. Stop each by running `docker compose down` in its own directory (project-scoped, won't affect the other).
 
 ### Option 3: Manual Development
 
@@ -164,7 +202,10 @@ npm run dev
 # Frontend dev server runs at http://localhost:5188
 ```
 
-> **About CLI mode**: `python run.py demo` (echo) or `python run.py real` (real LLM) starts a CLI session — it does NOT start the web services.
+> **About CLI mode**: besides Web mode, a command-line interactive session is available (no web services started):
+> - `python run.py demo` (echo) / `python run.py real` (real LLM) — quick entry via `run.py`
+> - `cli_cn.bat` (Windows) — clears `__pycache__` then launches the full CLI (`channels.cli.cli_main`), supports `--mode {normal,auto,plan}`, `--message`, etc.
+> - `PYTHONPATH=src python -m channels.cli.cli_main` (cross-platform), or the registered command `agent-os` after install
 
 ---
 
@@ -172,11 +213,15 @@ npm run dev
 
 | Document | Description |
 |----------|-------------|
+| [README.md](README.md) | Chinese README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture deep-dive |
 | [ROADMAP.md](ROADMAP.md) | Version roadmap |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |
 | [CHANGELOG.md](CHANGELOG.md) | Changelog |
+| [SECURITY.md](SECURITY.md) | Security policy & vulnerability reporting |
+| [AUTHORS.md](AUTHORS.md) | Contributors list |
+| [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) | Third-party dependency licenses |
 
 ---
 
@@ -191,7 +236,13 @@ For users in mainland China, this project is also mirrored at:
 
 ## 🤝 Contributing
 
-Contributions of any form are welcome — Issues, PRs, docs, use-case sharing. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions of any form are welcome — Issues, PRs, docs, use-case sharing. See [CONTRIBUTING.md](CONTRIBUTING.md); please read the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
+
+---
+
+## 🔒 Security Policy
+
+If you discover a security vulnerability, please do **not** open a public Issue. Report it privately following [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -201,7 +252,7 @@ This project is licensed under [Apache License 2.0](LICENSE).
 
 ---
 
-## ✨ Star History
+## 🌟 Star History
 
 If this project helps you, please star ⭐️ to support us!
 

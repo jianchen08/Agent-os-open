@@ -59,12 +59,16 @@ class TestDockerComposePortMapping:
         return _read_file("docker-compose.yml")
 
     def test_frontend_port_mapping(self, content):
-        """前端端口映射应为 5289:5188（宿主机:容器）"""
-        assert '"5289:5188"' in content, "前端端口映射应为 5289:5188"
+        """前端宿主端口应参数化，默认 5289，容器内 5188"""
+        assert "${FRONTEND_HOST_PORT:-5289}:5188" in content, (
+            "前端端口映射应为 ${FRONTEND_HOST_PORT:-5289}:5188（参数化+默认值）"
+        )
 
     def test_redis_port_mapping(self, content):
-        """Redis 端口映射应为 6480:6379（宿主机:容器）"""
-        assert '"6480:6379"' in content, "Redis 端口映射应为 6480:6379"
+        """Redis 宿主端口应参数化，默认 6480，容器内 6379"""
+        assert "${REDIS_HOST_PORT:-6480}:6379" in content, (
+            "Redis 端口映射应为 ${REDIS_HOST_PORT:-6480}:6379（参数化+默认值）"
+        )
 
     def test_no_old_frontend_host_port_in_mapping(self, content):
         """旧的前端宿主机端口 5189 不应出现在端口映射中"""
@@ -86,16 +90,16 @@ class TestDockerComposeBackendUrl:
         return _read_file("docker-compose.yml")
 
     def test_backend_url_port(self, content):
-        """BACKEND_URL 应使用端口 8988"""
-        # compose 中实际形式为 BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:8988
-        assert re.search(r"BACKEND_URL=http://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:8988", content), (
-            "BACKEND_URL 应指向后端端口 8988"
+        """BACKEND_URL 端口应参数化，默认 8988"""
+        # 形式：BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
+        assert re.search(r"BACKEND_URL=http://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:\$\{BACKEND_PORT:-8988\}", content), (
+            "BACKEND_URL 端口应参数化为 ${BACKEND_PORT:-8988}"
         )
 
     def test_backend_ws_url_port(self, content):
-        """BACKEND_WS_URL 应使用端口 8988"""
-        assert re.search(r"BACKEND_WS_URL=ws://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:8988", content), (
-            "BACKEND_WS_URL 应指向后端端口 8988"
+        """BACKEND_WS_URL 端口应参数化，默认 8988"""
+        assert re.search(r"BACKEND_WS_URL=ws://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:\$\{BACKEND_PORT:-8988\}", content), (
+            "BACKEND_WS_URL 端口应参数化为 ${BACKEND_PORT:-8988}"
         )
 
     def test_no_old_backend_port_in_urls(self, content):
@@ -113,23 +117,28 @@ class TestStartWebCnBat:
     def content(self):
         return _read_file("start_web_cn.bat")
 
-    def test_redis_url_port(self, content):
-        """REDIS_URL 应使用端口 6480"""
-        assert "REDIS_URL=redis://localhost:6480" in content, (
-            "REDIS_URL 应使用端口 6480"
+    def test_redis_url_uses_port_var(self, content):
+        """REDIS_URL 应使用 REDIS_HOST_PORT 变量（参数化）"""
+        assert "REDIS_URL=redis://localhost:%REDIS_HOST_PORT%/0" in content, (
+            "REDIS_URL 应使用 %REDIS_HOST_PORT% 变量"
         )
 
-    def test_display_backend_url(self, content):
-        """启动完成提示中的后端 URL 应使用端口 8988"""
-        # 脚本实际用 127.0.0.1（避免 IPv6 慢回退），非 localhost
-        assert "http://127.0.0.1:8988" in content, (
-            "启动脚本中后端 URL 应使用端口 8988"
+    def test_backend_port_var_exported(self, content):
+        """后端启动时应导出 BACKEND_PORT 变量"""
+        assert "set BACKEND_PORT=%BACKEND_PORT%" in content, (
+            "后端启动应 set BACKEND_PORT 变量传给 app_factory"
         )
 
-    def test_display_frontend_url(self, content):
-        """启动完成提示中的前端 URL 应使用端口 5289"""
-        assert "http://127.0.0.1:5289" in content, (
-            "启动脚本中前端 URL 应使用端口 5289"
+    def test_display_backend_url_uses_var(self, content):
+        """启动提示后端 URL 应用 BACKEND_PORT 变量"""
+        assert "http://127.0.0.1:%BACKEND_PORT%" in content, (
+            "启动提示后端 URL 应使用 %BACKEND_PORT% 变量"
+        )
+
+    def test_display_frontend_url_uses_var(self, content):
+        """启动提示前端 URL 应用 FRONTEND_HOST_PORT 变量"""
+        assert "http://127.0.0.1:%FRONTEND_HOST_PORT%" in content, (
+            "启动提示前端 URL 应使用 %FRONTEND_HOST_PORT% 变量"
         )
 
     def test_no_old_redis_port(self, content):
@@ -177,15 +186,15 @@ class TestContainerInternalPorts:
         return _read_file("docker-compose.yml")
 
     def test_frontend_container_port_unchanged(self, content):
-        """前端容器内部端口仍为 5188"""
-        # 端口映射中的容器端口
-        assert '"5289:5188"' in content, "前端端口映射中容器端口应为 5188"
+        """前端容器内部端口仍为 5188（参数化只改宿主端口，容器内不变）"""
+        # 映射形式 "${FRONTEND_HOST_PORT:-5289}:5188"，容器端口 5188 紧跟在 }: 后
+        assert "}:5188" in content, "前端容器内部端口应为 5188"
         # healthcheck 中的 localhost 端口（容器内部访问）
         assert "localhost:5188" in content, "healthcheck 中前端容器端口应为 5188"
 
     def test_redis_container_port_unchanged(self, content):
         """Redis 容器内部端口仍为 6379"""
-        assert '"6480:6379"' in content, "Redis 端口映射中容器端口应为 6379"
+        assert "}:6379" in content, "Redis 端口映射中容器端口应为 6379"
 
 
 # ---------------------------------------------------------------------------

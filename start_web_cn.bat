@@ -5,10 +5,17 @@ title Agent OS
 
 cd /d "%~dp0"
 
+REM 宿主端口参数化（带默认值）：单实例零配置；多实例（对比测试两个版本）设不同端口即可。
+REM   set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989
+if not defined FRONTEND_HOST_PORT set "FRONTEND_HOST_PORT=5289"
+if not defined REDIS_HOST_PORT set "REDIS_HOST_PORT=6480"
+if not defined BACKEND_PORT set "BACKEND_PORT=8988"
+
 echo ========================================
 echo   Agent OS 启动
 echo ========================================
 echo 项目目录: %cd%
+echo 端口: 前端=!FRONTEND_HOST_PORT! 后端=!BACKEND_PORT! Redis=!REDIS_HOST_PORT!
 echo.
 
 REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
@@ -109,13 +116,14 @@ echo [OK] WSL IP: %WSL_IP%
 REM 4. Setup netsh portproxy (Windows localhost -> WSL container ports)
 REM    reset first to avoid duplicate rules from repeated runs
 echo [INFO] Setting up port forwarding...
-powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy reset; netsh interface portproxy add v4tov4 listenport=5289 listenaddress=0.0.0.0 connectport=5289 connectaddress=%WSL_IP%; netsh interface portproxy add v4tov4 listenport=6480 listenaddress=0.0.0.0 connectport=6480 connectaddress=%WSL_IP%'" 2>nul
+powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy reset; netsh interface portproxy add v4tov4 listenport=%FRONTEND_HOST_PORT% listenaddress=0.0.0.0 connectport=%FRONTEND_HOST_PORT% connectaddress=%WSL_IP%; netsh interface portproxy add v4tov4 listenport=%REDIS_HOST_PORT% listenaddress=0.0.0.0 connectport=%REDIS_HOST_PORT% connectaddress=%WSL_IP%'" 2>nul
 echo [OK] Port forwarding configured
 
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 REM    Outer timeout 240s backstop; script internals also wrap every docker call.
 echo [INFO] Starting project containers...
-wsl -d Ubuntu -u root -- bash -c "timeout 240 %WSL_DIR%/wsl_ensure_containers.sh %WSL_DIR%"
+REM 把端口变量传进 WSL bash 会话（compose 读环境变量做端口插值）
+wsl -d Ubuntu -u root -- bash -c "export FRONTEND_HOST_PORT=%FRONTEND_HOST_PORT% REDIS_HOST_PORT=%REDIS_HOST_PORT% BACKEND_PORT=%BACKEND_PORT%; timeout 240 %WSL_DIR%/wsl_ensure_containers.sh %WSL_DIR%"
 set "CONTAINERS_RC=!errorlevel!"
 if "!CONTAINERS_RC!"=="0" goto :containers_ok
 if "!CONTAINERS_RC!"=="7" goto :cgroup_stuck
@@ -396,14 +404,14 @@ if not exist ".py_deps_installed" (
 
 :: ===========================================================================
 echo [INFO] 启动 Agent...
-start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6480/0&& "%PYEXE%" -m channels.websocket.app_factory"
+start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:%REDIS_HOST_PORT%/0&& set BACKEND_PORT=%BACKEND_PORT%&& "%PYEXE%" -m channels.websocket.app_factory"
 
 echo.
 echo ========================================
 echo   启动完成
 echo ========================================
-echo   后端: http://127.0.0.1:8988
-echo   前端: http://127.0.0.1:5289
+echo   后端: http://127.0.0.1:%BACKEND_PORT%
+echo   前端: http://127.0.0.1:%FRONTEND_HOST_PORT%
 echo   停止: 关闭 Agent 窗口 + docker compose down
 echo ========================================
 pause
