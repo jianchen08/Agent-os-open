@@ -4,7 +4,7 @@
 # WSL2 backend has known fragility: ext4.vhdx single-file lock, 9p file proxy
 # crashes. Pro/Enterprise can switch to Hyper-V backend to eliminate these.
 #
-# Duty (deploy-time prevention, orthogonal to runtime recovery restart_docker.ps1):
+# Duty (deploy-time prevention):
 #   1. Detect if Windows edition supports Hyper-V
 #   2. Pro/Enterprise -> enable Hyper-V + configure Docker Desktop to Hyper-V
 #   3. Home -> WSL2 only, warn about stability risk + give optimization tips

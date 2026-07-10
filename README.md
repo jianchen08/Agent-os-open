@@ -107,7 +107,7 @@ Web、CLI、钉钉、飞书、QQ、企微、HTTP API 共享同一套内核；完
 
 - Python 3.11+（启动脚本自动探测 3.11/3.12/3.13）
 - Node.js 18+（前端构建，Vite 要求）
-- Docker（前端容器 + Redis 容器；后端运行在宿主机）
+- Docker（WSL2 + docker-ce；前端容器 + Redis 容器，后端运行在宿主机）
 
 > **架构说明**：`docker compose` 只负责前端（静态托管）和 Redis 容器，**后端 FastAPI 进程运行在宿主机**（通过 `python -m channels.websocket.app_factory` 启动）。下方脚本会自动编排这三部分。
 
@@ -118,8 +118,9 @@ Web、CLI、钉钉、飞书、QQ、企微、HTTP API 共享同一套内核；完
 copy .env.example .env
 ::    编辑 .env，填入 LLM API Key（参考 config/models/llm.yaml）
 
-:: 2. 首次配置 Docker 环境（WSL2 + docker-ce，替代 Docker Desktop）
-::    若已装 Docker Desktop 可跳过，直接执行第 3 步
+:: 2. 首次配置 Docker 环境（WSL2 + docker-ce，不再支持 Docker Desktop）
+::    本部署使用 WSL2 + docker-ce，不再支持 Docker Desktop
+::    若尚未配置，请先运行下面的脚本；已配置可跳过直接执行第 3 步
 install_native_docker.bat
 
 :: 3. 启动项目（自动装依赖 + 启动后端/前端/Redis）
@@ -199,7 +200,7 @@ PYTHONPATH=src python -m channels.websocket.app_factory
 cd frontend
 npm install
 npm run dev
-# 前端开发服务器运行在 http://localhost:5188
+# 前端开发服务器运行在 http://localhost:5289
 ```
 
 > **关于 CLI 模式**：除 Web 模式外，还支持命令行交互（不启动 Web 服务）：

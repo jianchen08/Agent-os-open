@@ -107,7 +107,7 @@ Loadable, reusable skill packages that can be injected into Agents on demand to 
 
 - Python 3.11+ (launch scripts auto-detect 3.11/3.12/3.13)
 - Node.js 18+ (for frontend build, Vite required)
-- Docker (frontend container + Redis container; backend runs on the host)
+- Docker (WSL2 + docker-ce; frontend container + Redis container, backend runs on the host)
 
 > **Architecture note**: `docker compose` only manages the frontend (static hosting) and Redis containers. The **backend FastAPI process runs on the host** (started via `python -m channels.websocket.app_factory`). The scripts below orchestrate all three parts.
 
@@ -118,8 +118,9 @@ Loadable, reusable skill packages that can be injected into Agents on demand to 
 copy .env.example .env
 ::    Edit .env and fill in your LLM API keys (see config/models/llm.yaml)
 
-:: 2. Configure Docker environment first (WSL2 + docker-ce, replaces Docker Desktop)
-::    Skip if Docker Desktop is already installed — jump to step 3
+:: 2. Configure Docker environment first (WSL2 + docker-ce, Docker Desktop no longer supported)
+::    This deployment uses WSL2 + docker-ce only; Docker Desktop is not supported.
+::    Run the script below if not yet configured; skip to step 3 if already set up.
 install_native_docker.bat
 
 :: 3. Start the project (installs deps + launches backend/frontend/Redis)
@@ -199,7 +200,7 @@ PYTHONPATH=src python -m channels.websocket.app_factory
 cd frontend
 npm install
 npm run dev
-# Frontend dev server runs at http://localhost:5188
+# Frontend dev server runs at http://localhost:5289
 ```
 
 > **About CLI mode**: besides Web mode, a command-line interactive session is available (no web services started):

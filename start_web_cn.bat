@@ -30,7 +30,7 @@ echo [INFO] Probing WSL response...
 
 REM Windows-side liveness probe with a hard timeout (see wsl_alive_probe.ps1).
 REM rc=124 -> WSL hung -> auto wsl --shutdown retry; rc=0 -> alive, proceed;
-REM other -> WSL/Ubuntu unavailable -> fall back to Docker Desktop mode.
+REM other -> WSL/Ubuntu unavailable -> abort (Docker Desktop not supported).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul
 set "WSL_ALIVE_RC=!errorlevel!"
 REM Use goto-based branching, NOT if (...) blocks: cmd's parenthesised blocks break
@@ -48,8 +48,10 @@ goto :auto_shutdown
 :probe_other_error
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
-echo [INFO] WSL unavailable rc=!WSL_ALIVE_RC!, fallback to Docker Desktop mode
-goto :no_wsl_docker
+echo [ERROR] WSL unavailable rc=!WSL_ALIVE_RC!, cannot start without WSL2 + docker-ce
+echo [ERROR] Docker Desktop is no longer supported. Run install_native_docker.bat to set up WSL2 docker first.
+pause
+exit /b 1
 
 :probe_ok
 echo [OK] WSL responding OK
@@ -110,10 +112,7 @@ REM 3. Get WSL IP (NAT mode, may change on restart)
 set "WSL_IP="
 for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do set "WSL_IP=%%i"
 
-if not defined WSL_IP (
-    echo [ERROR] Cannot get WSL IP
-    goto :no_wsl_docker
-)
+if not defined WSL_IP goto :no_wsl_ip
 
 echo [OK] WSL IP: %WSL_IP%
 
@@ -186,7 +185,7 @@ goto :wsl_alive_entry
 :containers_ok
 echo [OK] Containers started
 
-REM Frontend code auto-update (same flow as Docker Desktop mode).
+REM Frontend code auto-update.
 REM Windows docker CLI reaches WSL daemon via DOCKER_HOST=tcp://<WSL_IP>:2375;
 REM WSL IP may change after wsl --shutdown, so bind to current %WSL_IP%.
 echo [INFO] Checking frontend updates...
@@ -199,168 +198,24 @@ if not errorlevel 1 (
 )
 
 echo.
-echo [INFO] Using WSL native docker (Docker Desktop not needed)
+echo [INFO] Using WSL native docker
 goto :start_python
 
+REM ===========================================================================
+REM WSL/docker abort exits (reached via goto; Docker Desktop no longer supported)
+REM ===========================================================================
 :no_wsl_docker
-echo [INFO] No WSL docker found, falling back to Docker Desktop mode
-
-:: ===========================================================================
-
-
-
-
-:: ===========================================================================
-echo [INFO] Cleaning leftover processes...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_processes.ps1"
-echo.
-
-:: ===========================================================================
-
-::
-
-
-
-:: ===========================================================================
-where docker >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Docker not found, this project requires Docker
-    echo [INFO] : https://www.docker.com/products/docker-desktop/
-    pause
-    exit /b 1
-)
-
-
-:check_daemon
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_docker.ps1" -Timeout 90 >nul 2>&1
-set "DAEMON_STATUS=!errorlevel!"
-if "!DAEMON_STATUS!"=="0" goto :docker_ready
-
-
-if "!DAEMON_STATUS!"=="3" goto :daemon_hung
-
-
-
-if not defined DOCKER_WAIT_COUNT (
-    if defined WSL_IP (
-
-        echo [INFO] Starting WSL docker service...
-        wsl -d Ubuntu -u root -- bash -c "systemctl start docker 2>/dev/null" >nul 2>&1
-    ) else (
-
-        echo [INFO] Starting Docker Desktop...
-        start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
-    )
-    set "DOCKER_WAIT_COUNT=0"
-)
-
-set /a "DOCKER_WAIT_COUNT+=1"
-
-if !DOCKER_WAIT_COUNT! gtr 4 goto :daemon_failed
-echo [INFO] Waiting for Docker daemon... (!DOCKER_WAIT_COUNT!/4)
-timeout /t 10 /nobreak >nul
-goto :check_daemon
-
-
-:daemon_hung
-echo [WARN] docker daemon 90 no response (hung, not starting)
-if defined DAEMON_RESTARTED (
-    echo [WARN] auto-restart tried once, daemon still hung, giving up
-    goto :daemon_failed
-)
-if defined WSL_IP (
-
-    echo [INFO] Restarting WSL docker service...
-    wsl -d Ubuntu -u root -- bash -c "systemctl restart docker 2>/dev/null" >nul 2>&1
-    set "DAEMON_RESTARTED=1"
-    timeout /t 5 /nobreak >nul
-    goto :check_daemon
-)
-echo [INFO] Starting auto-recovery (will prompt, stops running containers)...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0restart_docker.ps1"
-set "RESTART_RC=!errorlevel!"
-if "!RESTART_RC!"=="0" (
-    echo [OK] Docker daemon restored after restart
-    set "DAEMON_RESTARTED=1"
-    goto :check_daemon
-)
-if "!RESTART_RC!"=="2" (
-    echo [INFO] user cancelled restart, abort
-    goto :daemon_failed
-)
-echo [WARN] auto-restart failed to restore daemon, abort
-goto :daemon_failed
-
-:daemon_failed
-echo [ERROR] Docker daemon not ready, cannot start project
-echo [ERROR]  Docker Desktop then re-run this script:
-echo [ERROR]   1.  Docker  -^> Quit Docker Desktop
-echo [ERROR]   2. ( 10 )
-echo [ERROR]   3.  Docker Desktop, 
-echo [ERROR] : wsl --shutdown  Docker Desktop
-echo [ERROR] : %%LOCALAPPDATA%%\Docker\log\host\com.docker.backend.exe.log
+echo [ERROR] WSL reachable but docker not working
+echo [ERROR] Docker Desktop is no longer supported. Run install_native_docker.bat to set up WSL2 docker first.
 pause
 exit /b 1
 
-:docker_ready
-echo [OK] Docker ready
+:no_wsl_ip
+echo [ERROR] Cannot get WSL IP
+echo [ERROR] WSL2 networking not ready. Run install_native_docker.bat to reconfigure, then retry.
+pause
+exit /b 1
 
-:: ===========================================================================
-
-:: ===========================================================================
-
-
-
-
-echo [INFO] Starting Docker service...
-
-docker image prune -f >nul 2>&1
-
-set "REDIS_CID="
-for /f "delims=" %%i in ('docker compose ps -q redis 2^>nul') do set "REDIS_CID=%%i"
-if defined REDIS_CID (
-    echo [OK] Reusing existing redis container !REDIS_CID!
-    docker start !REDIS_CID! >nul 2>&1
-) else (
-    docker compose up -d --no-recreate redis
-)
-set "FRONT_CID="
-for /f "delims=" %%i in ('docker compose ps -q frontend 2^>nul') do set "FRONT_CID=%%i"
-if defined FRONT_CID (
-    echo [OK] Reusing existing frontend container !FRONT_CID!
-    docker start !FRONT_CID! >nul 2>&1
-) else (
-    docker compose up -d --no-recreate frontend
-)
-echo [OK] Docker service started
-
-
-docker image inspect agent-os-frontend:latest >nul 2>&1
-if errorlevel 1 (
-    echo [INFO] Frontend image not found, need first build
-    echo [INFO] Attempting build...
-    set "COMPOSE_PROGRESS=plain"
-    docker compose build frontend
-    if errorlevel 1 (
-        echo [ERROR] Frontend image build failed
-        echo [ERROR] : (packages/)-> (//)-> 
-        echo [ERROR] :
-        echo [ERROR]   1.  packages/wheels  packages/npm-tarballs 
-        echo [ERROR]   2.  Docker daemon.json  registry-mirrors(mirror)
-        pause
-        exit /b 1
-    )
-    echo [OK] Frontend image build complete
-    docker compose up -d frontend
-    echo [INFO] Cleaning old images...
-    docker image prune -f 2>nul
-    powershell -NoProfile -Command "Get-Date | Out-File -FilePath '.frontend_built_at' -Encoding ascii"
-) else (
-    echo [INFO] Checking frontend updates...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_frontend.ps1"
-)
-
-:: ===========================================================================
 :start_python
 
 :: ===========================================================================
