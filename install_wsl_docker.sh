@@ -23,31 +23,26 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}==== $* ====${NC}"; }
 
-# Ubuntu 的 command-not-find post-invoke 钩子(/usr/lib/cnf-update-db)调用 python3,
-# 若发行版 Python 环境损坏(No module named 'encodings')会崩溃,在 set -e 下导致
-# apt-get update 异常退出。该钩子只更新命令建议数据库,与 docker 安装无关,禁用它。
+# ── 0. 彻底清理上次失败/Docker Desktop 残留(核武器级) ──
+# 上次安装失败可能留下 malformed 的 apt 源、空的 GPG key、masked 的 service。
+# Docker Desktop 卸载后也可能残留 docker apt 源和 service 文件。
+# 这些残留会导致 apt-get update 报 Malformed entry 或 systemctl enable 失败。
+# 本脚本是幂等的,下面会重新生成正确配置,删除残留是安全的。
+info "清理 docker/apt 相关残留..."
+# 删除所有 docker 相关的 apt 源文件(无论是否损坏)
+rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker-ce.list 2>/dev/null || true
+# 删除旧的 docker GPG key(可能为空/损坏)
+rm -f /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker-ce.gpg 2>/dev/null || true
+# 删除 Docker Desktop 残留的 apt 源
+rm -f /etc/apt/sources.list.d/docker-desktop.list 2>/dev/null || true
+# unmask docker.service(Docker Desktop 残留会 mask 它)
+systemctl unmask docker.service 2>/dev/null || true
+systemctl unmask containerd.service 2>/dev/null || true
+# 禁用 command-not-found post-invoke 钩子(调 python3,环境损坏会崩溃中断 apt)
 if [ -f /etc/apt/apt.conf.d/50command-not-found ]; then
     mv /etc/apt/apt.conf.d/50command-not-found /etc/apt/apt.conf.d/50command-not-found.bak 2>/dev/null || true
 fi
-info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
-step()  { echo -e "\n${CYAN}==== $* ====${NC}"; }
-
-# 清理上次失败可能残留的损坏文件(空/坏的 docker.gpg 或 malformed docker.list)。
-# 这些残留会导致本次 apt-get update 报 Malformed entry,脚本无法继续。
-# 本脚本是幂等的,重新生成正确的文件,删除残留是安全的。
-if [ -f /etc/apt/sources.list.d/docker.list ]; then
-    if ! head -1 /etc/apt/sources.list.d/docker.list 2>/dev/null | grep -q '^deb '; then
-        warn "检测到残留的异常 docker.list,清理..."
-        rm -f /etc/apt/sources.list.d/docker.list
-    fi
-fi
-if [ -f /etc/apt/keyrings/docker.gpg ] && [ ! -s /etc/apt/keyrings/docker.gpg ]; then
-    warn "检测到空的 docker.gpg(上次下载失败残留),清理..."
-    rm -f /etc/apt/keyrings/docker.gpg
-fi
+ok "残留清理完成"
 
 # ── 1. 开 systemd ──
 step "1/5 开启 systemd"
