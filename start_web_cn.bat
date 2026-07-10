@@ -38,6 +38,8 @@ REM Use goto-based branching, NOT if (...) blocks: cmd's parenthesised blocks br
 REM on special chars (here the literal "(rc=" in an echo would corrupt block parsing
 REM with "was unexpected at this time"). Same idiom as the rest of this script.
 if "!WSL_ALIVE_RC!"=="124" goto :probe_deadlocked
+REM rc=2 = probe 检测到 stderr 含磁盘丢失特征(ext4.vhdx 丢失/损坏),直连终态提示。
+if "!WSL_ALIVE_RC!"=="2" goto :disk_lost
 if not "!WSL_ALIVE_RC!"=="0" goto :probe_other_error
 goto :probe_ok
 

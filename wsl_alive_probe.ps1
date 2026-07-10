@@ -7,7 +7,8 @@
 # We wrap wsl in Start-Process + WaitForExit so a hang is converted to a code.
 #
 # Exit codes:
-#   0   WSL responded (Ubuntu distro ran the echo)
+#   0   WSL responded (Ubuntu distro ran the echo), and stderr is clean
+#   2   Distro disk lost/corrupted (MountDisk/ERROR_FILE_NOT_FOUND in stderr) -> caller reinstalls
 #   124 WSL hung past the timeout (kernel deadlock) -> caller does wsl --shutdown retry
 #   other  WSL/Ubuntu unavailable (returns instantly) -> caller falls back to Docker Desktop
 #
@@ -32,5 +33,17 @@ $p = Start-Process -FilePath 'wsl.exe' `
 if (-not $p.WaitForExit($Timeout * 1000)) {
     try { $p.Kill() } catch {}
     exit 124
+}
+
+# wsl.exe may exit 0 even when the distro failed to boot (e.g. ext4.vhdx lost:
+# it prints "MountDisk/HCS/ERROR_FILE_NOT_FOUND" to stderr but still returns 0).
+# Trusting the exit code alone gives a false green. Inspect stderr on every exit.
+if (Test-Path $err) {
+    $errText = Get-Content $err -Raw -ErrorAction SilentlyContinue
+    if ($errText -and $errText -match 'MountDisk|ERROR_FILE_NOT_FOUND|0x80070002|Wsl_E MountDisk') {
+        # Distro disk lost/corrupted — cannot be fixed by wsl --shutdown.
+        # Exit 2 so the caller routes to reinstall instead of a retry loop.
+        exit 2
+    }
 }
 exit $p.ExitCode

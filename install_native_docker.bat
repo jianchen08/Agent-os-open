@@ -46,8 +46,10 @@ if exist "%BOOT_ERR%" del "%BOOT_ERR%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul 2>&1
 set "BOOT_RC=!errorlevel!"
 if "!BOOT_RC!"=="0" goto :ubuntu_boot_ok
+REM rc=2 = probe 检测到 stderr 含磁盘丢失特征(wsl.exe 自身却返回 0),直接自愈。
+if "!BOOT_RC!"=="2" goto :ubuntu_self_heal
 
-REM rc=0 之外:读 wsl 的 stderr,区分"磁盘丢失/损坏"与"临时死锁/超时"。
+REM rc=0/2 之外:读 wsl 的 stderr,区分"磁盘丢失/损坏"与"临时死锁/超时"。
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%BOOT_ERR%" >nul 2>&1
 if not errorlevel 1 goto :ubuntu_self_heal
 
@@ -59,6 +61,7 @@ if exist "%BOOT_ERR%" del "%BOOT_ERR%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul 2>&1
 set "BOOT_RC=!errorlevel!"
 if "!BOOT_RC!"=="0" goto :ubuntu_boot_ok
+if "!BOOT_RC!"=="2" goto :ubuntu_self_heal
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%BOOT_ERR%" >nul 2>&1
 if not errorlevel 1 goto :ubuntu_self_heal
 echo [ERROR] Ubuntu 启动失败 (rc=!BOOT_RC!) 且非磁盘丢失。错误输出:
