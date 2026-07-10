@@ -177,7 +177,6 @@ tool_ids:
 - enhanced_search
 - bash_execute
 - task_evaluate
-- resource_search
 - lsp_definition
 - lsp_references
 - lsp_diagnostics
