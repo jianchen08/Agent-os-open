@@ -400,9 +400,36 @@ if not defined PYEXE (
 )
 
 if not defined PYEXE (
-    echo [ERROR] 未找到 Python，请安装 Python 3.11+
+    echo [ERROR] Python not found. Install Python 3.11+
     pause
     exit /b 1
+)
+
+REM Python version check: project requires >=3.11. If older (e.g. 3.9),
+REM auto-install Python 3.12 via winget, then re-detect.
+"%PYEXE%" -c "import sys; exit(0 if sys.version_info >= (3,11) else 1)" 2>nul
+if errorlevel 1 (
+    echo [WARN] Python too old, need >=3.11. Auto-installing Python 3.12...
+    winget install Python.Python.3.12 --accept-source-agreements --accept-package-agreements --silent 2>nul
+    if errorlevel 1 (
+        echo [ERROR] winget install failed. Please manually install Python 3.12 from python.org
+        echo [ERROR] Make sure to check "Add Python to PATH" during install.
+        pause
+        exit /b 1
+    )
+    echo [OK] Python 3.12 installed. Re-detecting...
+    REM Refresh PATH (winget installs to Program Files, may not be in current PATH yet).
+    set "P312A=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    set "P312B=%ProgramFiles%\Python312\python.exe"
+    if exist "%P312A%" set "PYEXE=%P312A%"
+    if exist "%P312B%" set "PYEXE=%P312B%"
+    if not defined PYEXE for /f "delims=" %%p in ('where python3.12 2^>nul') do set "PYEXE=%%p"
+    if not defined PYEXE (
+        echo [ERROR] Python 3.12 installed but cannot find it. Reopen terminal and retry.
+        pause
+        exit /b 1
+    )
+    del ".py_deps_installed" 2>nul
 )
 echo [OK] Python: %PYEXE%
 "%PYEXE%" --version 2>&1
