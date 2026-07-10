@@ -465,16 +465,26 @@ if not exist ".py_deps_installed" (
 :: ===========================================================================
 
 :: ===========================================================================
-echo [INFO] 启动 Agent...
-start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:%REDIS_HOST_PORT%/0&& set BACKEND_PORT=%BACKEND_PORT%&& "%PYEXE%" -m channels.websocket.app_factory"
+echo [INFO] Starting Agent backend...
+REM Write a temp launcher to avoid quote-nesting hell in start cmd /c.
+REM PYEXE path may contain spaces (e.g. C:\Users\...\Python312\python.exe),
+REM embedding it in cmd /c "... && PYEXE ..." breaks quote matching.
+set "_LAUNCHER=%TEMP%\agent_os_backend.bat"
+> "%_LAUNCHER%" echo @echo off
+>> "%_LAUNCHER%" echo set PYTHONPATH=src
+>> "%_LAUNCHER%" echo set REDIS_URL=redis://localhost:%REDIS_HOST_PORT%/0
+>> "%_LAUNCHER%" echo set BACKEND_PORT=%BACKEND_PORT%
+>> "%_LAUNCHER%" echo cd /d "%cd%"
+>> "%_LAUNCHER%" echo "%PYEXE%" -m channels.websocket.app_factory
+start "Agent OS Backend" "%_LAUNCHER%"
 
 echo.
 echo ========================================
-echo   启动完成
+echo   Started
 echo ========================================
-echo   后端: http://127.0.0.1:%BACKEND_PORT%
-echo   前端: http://127.0.0.1:%FRONTEND_HOST_PORT%
-echo   停止: 关闭 Agent 窗口 + docker compose down
+echo   Backend: http://127.0.0.1:%BACKEND_PORT%
+echo   Frontend: http://127.0.0.1:%FRONTEND_HOST_PORT%
+echo   Stop: close Agent window + docker compose down
 echo ========================================
 pause
 exit /b 0
