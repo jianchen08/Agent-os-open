@@ -418,18 +418,19 @@ if errorlevel 1 (
         exit /b 1
     )
     echo [OK] Python 3.12 installed. Re-detecting...
-    REM Refresh PATH (winget installs to Program Files, may not be in current PATH yet).
-    set "P312A=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-    set "P312B=%ProgramFiles%\Python312\python.exe"
-    if exist "%P312A%" set "PYEXE=%P312A%"
-    if exist "%P312B%" set "PYEXE=%P312B%"
-    if not defined PYEXE for /f "delims=" %%p in ('where python3.12 2^>nul') do set "PYEXE=%%p"
-    if not defined PYEXE (
-        echo [ERROR] Python 3.12 installed but cannot find it. Reopen terminal and retry.
+    REM winget 装的 Python 在 if 块内路径变量不展开,用 py launcher 最可靠。
+    REM py -3.12 由 Python 安装器注册,精确定位 3.12 不受 PATH 干扰。
+    py -3.12 -c "import sys; print(sys.executable)" >nul 2>&1
+    if not errorlevel 1 (
+        for /f "delims=" %%p in ('py -3.12 -c "import sys; print(sys.executable)" 2^>nul') do set "PYEXE=%%p"
+        echo [OK] Using Python 3.12: !PYEXE!
+        del ".py_deps_installed" 2>nul
+    ) else (
+        echo [ERROR] Python 3.12 installed but py launcher cannot find it.
+        echo [ERROR] Reopen terminal and re-run this script.
         pause
         exit /b 1
     )
-    del ".py_deps_installed" 2>nul
 )
 echo [OK] Python: %PYEXE%
 "%PYEXE%" --version 2>&1
