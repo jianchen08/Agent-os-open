@@ -5,7 +5,6 @@ title Agent OS
 
 cd /d "%~dp0"
 
-REM 宿主端口参数化（带默认值）：单实例零配置；多实例（对比测试两个版本）设不同端口即可。
 REM   set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989
 if not defined FRONTEND_HOST_PORT set "FRONTEND_HOST_PORT=5289"
 if not defined REDIS_HOST_PORT set "REDIS_HOST_PORT=6480"
@@ -38,7 +37,6 @@ REM Use goto-based branching, NOT if (...) blocks: cmd's parenthesised blocks br
 REM on special chars (here the literal "(rc=" in an echo would corrupt block parsing
 REM with "was unexpected at this time"). Same idiom as the rest of this script.
 if "!WSL_ALIVE_RC!"=="124" goto :probe_deadlocked
-REM rc=2 = probe 检测到 stderr 含磁盘丢失特征(ext4.vhdx 丢失/损坏),直连终态提示。
 if "!WSL_ALIVE_RC!"=="2" goto :disk_lost
 if not "!WSL_ALIVE_RC!"=="0" goto :probe_other_error
 goto :probe_ok
@@ -48,8 +46,6 @@ set "REASON=WSL 探测超时（内核可能死锁）"
 goto :auto_shutdown
 
 :probe_other_error
-REM rc=0/124 之外:可能是磁盘丢失(MountDisk/ERROR_FILE_NOT_FOUND),也可能是临时不可用。
-REM 磁盘丢失无法用 wsl --shutdown 修复,直接给终态提示,避免误判/无效重试。
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
 echo [INFO] WSL 不可用 rc=!WSL_ALIVE_RC!，回退到 Docker Desktop 模式
@@ -84,8 +80,6 @@ wsl -d Ubuntu -u root -- bash -c "timeout 30 %WSL_DIR%/wsl_health_probe.sh %WSL_
 set "HEALTH_RC=!errorlevel!"
 if "!HEALTH_RC!"=="0" goto :wsl_alive_ok
 if "!HEALTH_RC!"=="8" goto :wsl_polluted
-REM rc=0/8 之外:先看 stderr 是否为磁盘丢失(MountDisk/ERROR_FILE_NOT_FOUND)。
-REM 磁盘丢失无法用 wsl --shutdown 修复,走终态提示,不进无效重试循环。
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
 REM timeout force-kill returns 124, or other anomaly -> treat as pollution
@@ -147,7 +141,6 @@ if errorlevel 1 (
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 REM    Outer timeout 240s backstop; script internals also wrap every docker call.
 echo [INFO] Starting project containers...
-REM 把端口变量传进 WSL bash 会话（compose 读环境变量做端口插值）
 wsl -d Ubuntu -u root -- bash -c "export FRONTEND_HOST_PORT=%FRONTEND_HOST_PORT% REDIS_HOST_PORT=%REDIS_HOST_PORT% BACKEND_PORT=%BACKEND_PORT%; timeout 240 %WSL_DIR%/wsl_ensure_containers.sh %WSL_DIR%"
 set "CONTAINERS_RC=!errorlevel!"
 if "!CONTAINERS_RC!"=="0" goto :containers_ok
@@ -162,8 +155,6 @@ set "REASON=容器清理/启动受阻（cgroup 或 task 残留）"
 goto :auto_shutdown
 
 :disk_lost
-REM Ubuntu 发行版的 ext4.vhdx 丢失或损坏。wsl --shutdown 无法让一个不存在的
-REM 文件重新出现,重试必然失败,因此不进 auto_shutdown 重试循环,直接终态提示。
 echo [ERROR] Ubuntu 发行版的虚拟磁盘(ext4.vhdx)丢失或损坏,wsl --shutdown 无法修复。
 echo [ERROR] 错误信息:
 if exist "%TEMP%\wsl_alive_probe.err" type "%TEMP%\wsl_alive_probe.err"
@@ -200,8 +191,6 @@ echo [OK] Containers started
 REM Frontend code auto-update (same flow as Docker Desktop mode).
 REM Windows docker CLI reaches WSL daemon via DOCKER_HOST=tcp://<WSL_IP>:2375;
 REM WSL IP may change after wsl --shutdown, so bind to current %WSL_IP%.
-REM WSL 原生 docker 模式下 Windows 侧可能没有 docker.exe(CLI 装在 WSL 里),
-REM 此时跳过前端热更新(镜像已构建,首次启动无需更新)。
 echo [INFO] Checking frontend updates...
 set "DOCKER_HOST=tcp://%WSL_IP%:2375"
 where docker >nul 2>&1
@@ -327,13 +316,8 @@ echo [OK] Docker 就绪
 
 echo [INFO] 启动 Docker 服务...
 
-REM 清理 dangling 镜像层(前端多次迭代重建会累积,不清理会占数 GB 磁盘)。
-REM 只清无标签的悬空层(dangling),不影响正在用的镜像和构建缓存(保留加速)。
 docker image prune -f >nul 2>&1
 
-REM 容器名跟随 compose project（目录名），用 `docker compose ps -q <service>`
-REM 动态获取容器 ID，不依赖固定容器名（避免换目录后失配）。
-REM 范式与 update_frontend.ps1 一致。
 set "REDIS_CID="
 for /f "delims=" %%i in ('docker compose ps -q redis 2^>nul') do set "REDIS_CID=%%i"
 if defined REDIS_CID (
@@ -433,8 +417,6 @@ if errorlevel 1 (
         exit /b 1
     )
     echo [OK] Python 3.12 installed. Re-detecting...
-    REM winget 装的 Python 在 if 块内路径变量不展开,用 py launcher 最可靠。
-    REM py -3.12 由 Python 安装器注册,精确定位 3.12 不受 PATH 干扰。
     py -3.12 -c "import sys; print(sys.executable)" >nul 2>&1
     if not errorlevel 1 (
         for /f "delims=" %%p in ('py -3.12 -c "import sys; print(sys.executable)" 2^>nul') do set "PYEXE=%%p"
