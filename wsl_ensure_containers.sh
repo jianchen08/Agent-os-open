@@ -89,6 +89,9 @@ fi
 # docker compose up 实时输出到终端(避免长时间无反馈被误认为卡死),
 # 同时存入临时文件供下方错误特征检测。首次部署需构建前端镜像,耗时较长,
 # 故超时放宽到 600s(镜像已在时几秒即完成)。
+# COMPOSE_PROGRESS=plain: 输出完整构建步骤(Step X/Y / ---> Using cache / 拉取层),
+# 而非压缩进度条(进度条在非交互管道里会被丢弃,用户看不到构建进度)。
+export COMPOSE_PROGRESS=plain
 COMPOSE_OUT="${TMPDIR:-/tmp}/compose_up_$$.out"
 timeout 600 docker compose up -d 2>&1 | tee "$COMPOSE_OUT"
 rc=${PIPESTATUS[0]}

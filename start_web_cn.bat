@@ -331,6 +331,7 @@ docker image inspect agent-os-frontend:latest >nul 2>&1
 if errorlevel 1 (
     echo [INFO] 前端镜像不存在，需要首次构建（需要网络拉取基础镜像）
     echo [INFO] 尝试构建...
+    set "COMPOSE_PROGRESS=plain"
     docker compose build frontend
     if errorlevel 1 (
         echo [ERROR] 前端镜像构建失败。
