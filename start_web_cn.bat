@@ -127,7 +127,16 @@ REM 4. Setup netsh portproxy (Windows localhost -> WSL container ports)
 REM    reset first to avoid duplicate rules from repeated runs
 echo [INFO] Setting up port forwarding...
 powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command','netsh interface portproxy reset; netsh interface portproxy add v4tov4 listenport=%FRONTEND_HOST_PORT% listenaddress=0.0.0.0 connectport=%FRONTEND_HOST_PORT% connectaddress=%WSL_IP%; netsh interface portproxy add v4tov4 listenport=%REDIS_HOST_PORT% listenaddress=0.0.0.0 connectport=%REDIS_HOST_PORT% connectaddress=%WSL_IP%'" 2>nul
-echo [OK] Port forwarding configured
+REM Verify portproxy was actually set (UAC may have been denied).
+netsh interface portproxy show v4tov4 2>nul | findstr "%FRONTEND_HOST_PORT%" >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] Port forwarding NOT set (UAC may have been denied).
+    echo [WARN] Run this manually as admin:
+    echo        netsh interface portproxy add v4tov4 listenport=%FRONTEND_HOST_PORT% listenaddress=0.0.0.0 connectport=%FRONTEND_HOST_PORT% connectaddress=%WSL_IP%
+    echo        netsh interface portproxy add v4tov4 listenport=%REDIS_HOST_PORT% listenaddress=0.0.0.0 connectport=%REDIS_HOST_PORT% connectaddress=%WSL_IP%
+) else (
+    echo [OK] Port forwarding configured
+)
 
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 REM    Outer timeout 240s backstop; script internals also wrap every docker call.
