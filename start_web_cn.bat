@@ -132,7 +132,7 @@ set "_PORTPROXY_BAT=%TEMP%\agent_portproxy.bat"
 >> "%_PORTPROXY_BAT%" echo netsh interface portproxy reset
 >> "%_PORTPROXY_BAT%" echo netsh interface portproxy add v4tov4 listenport=%FRONTEND_HOST_PORT% listenaddress=0.0.0.0 connectport=%FRONTEND_HOST_PORT% connectaddress=%WSL_IP%
 >> "%_PORTPROXY_BAT%" echo netsh interface portproxy add v4tov4 listenport=%REDIS_HOST_PORT% listenaddress=0.0.0.0 connectport=%REDIS_HOST_PORT% connectaddress=%WSL_IP%
-powershell -NoProfile -Command "Start-Process cmd -Verb RunAs -Wait -ArgumentList '/c','\"%_PORTPROXY_BAT%\"'" 2>nul
+powershell -NoProfile -Command "Start-Process cmd -Verb RunAs -Wait -ArgumentList '/c','%_PORTPROXY_BAT%'" 2>nul
 REM Verify portproxy was actually set (UAC may have been denied).
 netsh interface portproxy show v4tov4 2>nul | findstr "%FRONTEND_HOST_PORT%" >nul 2>&1
 if errorlevel 1 (
