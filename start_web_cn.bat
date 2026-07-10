@@ -189,10 +189,11 @@ REM WSL 原生 docker 模式下 Windows 侧可能没有 docker.exe(CLI 装在 WS
 REM 此时跳过前端热更新(镜像已构建,首次启动无需更新)。
 echo [INFO] 检查前端代码更新...
 set "DOCKER_HOST=tcp://%WSL_IP%:2375"
-where docker >nul 2>&1 && (
+where docker >nul 2>&1
+if not errorlevel 1 (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_frontend.ps1"
-) || (
-    echo [INFO] Windows 侧无 docker CLI(WSL 原生模式),跳过前端热更新。镜像已构建,首次启动无需更新。
+) else (
+    echo [INFO] Windows 侧无 docker CLI, 跳过前端热更新
 )
 
 echo.
