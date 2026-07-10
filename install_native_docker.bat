@@ -120,8 +120,11 @@ echo [INFO] Script dir in WSL: !WSL_SCRIPT_DIR!
 
 :run_wsl_install
 set "WSL_OUT=%TEMP%\install_wsl_docker.out"
-wsl -d Ubuntu -u root -- bash -c "cd '!WSL_SCRIPT_DIR!' && bash install_wsl_docker.sh" > "%WSL_OUT%" 2>&1
-type "%WSL_OUT%"
+REM 实时输出到终端(apt 下载/安装过程可见),同时存文件供标记检测。
+REM cmd 无 tee,用 PowerShell tee 实现。之前用 > 重定向导致整个安装过程
+REM (数分钟)屏幕静止,用户以为卡死。
+REM 注意: $LASTEXITCODE 拿 wsl 的退出码(管道默认返回 tee 的退出码=0)。
+powershell -NoProfile -Command "$ErrorActionPreference='Continue'; wsl -d Ubuntu -u root -- bash -c 'cd \"!WSL_SCRIPT_DIR!\" && bash install_wsl_docker.sh' 2>&1 | Tee-Object -FilePath '%WSL_OUT%'; exit $LASTEXITCODE"
 set "WSL_RC=!errorlevel!"
 
 REM wsl.exe 传递 bash 退出码不可靠(尤其首次开 systemd 时),改用输出标记判断:

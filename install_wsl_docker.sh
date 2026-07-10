@@ -58,6 +58,28 @@ EOF
     exit 100  # 特殊码：需要外层 wsl --shutdown 后重跑
 fi
 
+# ── 1.5 网络预检(WSL2 NAT 模式下 DNS 偶发不通,提前发现避免白跑 9 次 curl) ──
+info "检查 WSL 网络连通性..."
+NET_OK=0
+for host in "mirrors.aliyun.com" "mirrors.tuna.tsinghua.edu.cn" "download.docker.com"; do
+    if getent hosts "$host" >/dev/null 2>&1 || curl -fsSL --connect-timeout 5 --max-time 8 -o /dev/null "https://${host}" 2>/dev/null; then
+        ok "网络正常(可解析 ${host})"
+        NET_OK=1
+        break
+    fi
+done
+if [ "$NET_OK" = "0" ]; then
+    err "WSL 网络不通: 无法解析任何镜像源(aliyun/清华/docker 官方)。"
+    err "这通常是 WSL2 NAT 模式下的 DNS 问题,不是脚本 bug。"
+    err ""
+    err "解决方法(任选其一):"
+    err "  1. 在 Windows 执行 wsl --shutdown,等 10 秒后重跑本脚本"
+    err "  2. 检查 Windows 是否开了 VPN/代理(WSL2 NAT 模式不走 Windows 代理)"
+    err "  3. 手动设 WSL DNS: sudo bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
+    err "  4. 在 %USERPROFILE%\.wslconfig 加 [wsl2] networkingMode=mirrored"
+    exit 1
+fi
+
 # ── 2. 装 docker-ce ──
 step "2/5 安装 docker-ce"
 if command -v dockerd &>/dev/null; then
