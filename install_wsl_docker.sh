@@ -61,7 +61,18 @@ else
     apt-get install -y ca-certificates curl gnupg lsb-release
     DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
     install -m 0755 -d /etc/apt/keyrings
-    if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+    # 校验 GPG key 存在且非空(上次下载失败会留空/损坏文件,不能跳过重下)。
+    NEED_KEY=1
+    if [ -s /etc/apt/keyrings/docker.gpg ]; then
+        if gpg --quiet --show-keys /etc/apt/keyrings/docker.gpg >/dev/null 2>&1; then
+            NEED_KEY=0
+            ok "docker GPG key 已存在且有效"
+        else
+            warn "docker.gpg 存在但无效(上次下载可能失败),重新下载..."
+            rm -f /etc/apt/keyrings/docker.gpg
+        fi
+    fi
+    if [ "$NEED_KEY" = "1" ]; then
         # 下载 docker GPG key,带重试 + 多镜像源回退(国内网络偶发 DNS 不通)。
         # 分开执行(先下临时文件再 gpg),避免 curl 失败时管道吞掉错误。
         GPG_KEY=""
@@ -85,8 +96,16 @@ else
         rm -f /tmp/docker-gpg-key
         ok "docker GPG key 已配置"
     fi
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} $(lsb_release -cs) stable" \
-        | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    # 写 docker apt 源(先清旧的可能损坏的文件,避免 Malformed entry)。
+    rm -f /etc/apt/sources.list.d/docker.list
+    CODENAME="$(lsb_release -cs)"
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} ${CODENAME} stable" \
+        > /etc/apt/sources.list.d/docker.list
+    # 校验写出的文件格式正确(非空 + 含 deb 开头)。
+    if ! head -1 /etc/apt/sources.list.d/docker.list | grep -q '^deb '; then
+        err "docker.list 写入异常,内容: $(cat /etc/apt/sources.list.d/docker.list)"
+        exit 1
+    fi
     apt-get update -y || warn "apt-get update 有警告(post-invoke 钩子失败属正常,继续)"
     info "安装 docker-ce..."
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
