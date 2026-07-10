@@ -98,9 +98,26 @@ else
     fi
     # 写 docker apt 源(先清旧的可能损坏的文件,避免 Malformed entry)。
     rm -f /etc/apt/sources.list.d/docker.list
-    CODENAME="$(lsb_release -cs)"
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} ${CODENAME} stable" \
+    # codename 从 /etc/os-release 读(不依赖 lsb_release,后者可能刚装好路径未更新)。
+    CODENAME=""
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+    fi
+    # lsb_release 作为回退
+    if [ -z "$CODENAME" ] && command -v lsb_release >/dev/null 2>&1; then
+        CODENAME="$(lsb_release -cs 2>/dev/null)"
+    fi
+    if [ -z "$CODENAME" ]; then
+        err "无法确定 Ubuntu 代号(codename),/etc/os-release 和 lsb_release 均失败。"
+        err "请手动设置 /etc/apt/sources.list.d/docker.list"
+        exit 1
+    fi
+    ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+    echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO} ${CODENAME} stable" \
         > /etc/apt/sources.list.d/docker.list
+    ok "docker apt 源: ${CODENAME} (${ARCH})"
     # 校验写出的文件格式正确(非空 + 含 deb 开头)。
     if ! head -1 /etc/apt/sources.list.d/docker.list | grep -q '^deb '; then
         err "docker.list 写入异常,内容: $(cat /etc/apt/sources.list.d/docker.list)"
