@@ -11,6 +11,10 @@
 #   124 WSL hung past the timeout (kernel deadlock) -> caller does wsl --shutdown retry
 #   other  WSL/Ubuntu unavailable (returns instantly) -> caller falls back to Docker Desktop
 #
+# stderr is also written to %TEMP%\wsl_alive_probe.err so the caller can
+# distinguish a lost ext4.vhdx (MountDisk / ERROR_FILE_NOT_FOUND) from a
+# transient deadlock and route to "reinstall distro" instead of a shutdown loop.
+#
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File wsl_alive_probe.ps1 [-Timeout 20]
 param(
     [int]$Timeout = 20

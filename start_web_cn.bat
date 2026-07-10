@@ -46,6 +46,10 @@ set "REASON=WSL 探测超时（内核可能死锁）"
 goto :auto_shutdown
 
 :probe_other_error
+REM rc=0/124 之外:可能是磁盘丢失(MountDisk/ERROR_FILE_NOT_FOUND),也可能是临时不可用。
+REM 磁盘丢失无法用 wsl --shutdown 修复,直接给终态提示,避免误判/无效重试。
+findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
+if not errorlevel 1 goto :disk_lost
 echo [INFO] WSL 不可用 rc=!WSL_ALIVE_RC!，回退到 Docker Desktop 模式
 goto :no_wsl_docker
 
@@ -78,6 +82,10 @@ wsl -d Ubuntu -u root -- bash -c "timeout 30 %WSL_DIR%/wsl_health_probe.sh %WSL_
 set "HEALTH_RC=!errorlevel!"
 if "!HEALTH_RC!"=="0" goto :wsl_alive_ok
 if "!HEALTH_RC!"=="8" goto :wsl_polluted
+REM rc=0/8 之外:先看 stderr 是否为磁盘丢失(MountDisk/ERROR_FILE_NOT_FOUND)。
+REM 磁盘丢失无法用 wsl --shutdown 修复,走终态提示,不进无效重试循环。
+findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
+if not errorlevel 1 goto :disk_lost
 REM timeout force-kill returns 124, or other anomaly -> treat as pollution
 echo [WARN] health probe abnormal (rc=!HEALTH_RC!)，treat as kernel pollution
 goto :wsl_polluted
@@ -135,6 +143,18 @@ exit /b 1
 :cgroup_stuck
 set "REASON=容器清理/启动受阻（cgroup 或 task 残留）"
 goto :auto_shutdown
+
+:disk_lost
+REM Ubuntu 发行版的 ext4.vhdx 丢失或损坏。wsl --shutdown 无法让一个不存在的
+REM 文件重新出现,重试必然失败,因此不进 auto_shutdown 重试循环,直接终态提示。
+echo [ERROR] Ubuntu 发行版的虚拟磁盘(ext4.vhdx)丢失或损坏,wsl --shutdown 无法修复。
+echo [ERROR] 错误信息:
+if exist "%TEMP%\wsl_alive_probe.err" type "%TEMP%\wsl_alive_probe.err"
+echo [ERROR] 解决:先运行 install_native_docker.bat,它会自动清理并重装 Ubuntu,
+echo [ERROR]       然后重新双击本脚本启动项目。
+echo [ERROR] 或手动: wsl --unregister Ubuntu 然后 wsl --install -d Ubuntu
+pause
+exit /b 8
 
 :wsl_polluted
 set "REASON=WSL 内核被 D 状态死锁污染"

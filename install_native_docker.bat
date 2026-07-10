@@ -17,7 +17,7 @@ pause >nul
 
 echo.
 
-REM === 1. Ensure Ubuntu WSL exists ===
+REM === 1. Ensure Ubuntu WSL exists (and actually boots) ===
 echo [1/5] Check WSL2 Ubuntu...
 powershell -NoProfile -Command ^
   "$list = ((wsl -l -q) -join \"`n\") -replace [char]0, '';" ^
@@ -36,6 +36,69 @@ if errorlevel 1 (
 )
 echo [OK] Ubuntu installed
 
+REM 名字在列表里 != 发行版可用:注册表条目可能还在,但它指向的
+REM ext4.vhdx 文件可能已被删除/移动/损坏。此时 wsl --shutdown 无法修复
+REM (虚拟磁盘文件已丢失),必须 unregister + 重装。真实启动验证 + 自愈。
+:ubuntu_boot_probe
+echo [INFO] Verifying Ubuntu actually boots...
+set "BOOT_ERR=%TEMP%\wsl_alive_probe.err"
+if exist "%BOOT_ERR%" del "%BOOT_ERR%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul 2>&1
+set "BOOT_RC=!errorlevel!"
+if "!BOOT_RC!"=="0" goto :ubuntu_boot_ok
+
+REM rc=0 之外:读 wsl 的 stderr,区分"磁盘丢失/损坏"与"临时死锁/超时"。
+findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%BOOT_ERR%" >nul 2>&1
+if not errorlevel 1 goto :ubuntu_self_heal
+
+REM 非磁盘丢失(可能死锁超时 rc=124 或其它):shutdown 后重探一次。
+echo [WARN] Ubuntu boot abnormal (rc=!BOOT_RC!), retrying after wsl --shutdown...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Timeout 15 >nul 2>&1
+ping -n 9 127.0.0.1 >nul
+if exist "%BOOT_ERR%" del "%BOOT_ERR%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul 2>&1
+set "BOOT_RC=!errorlevel!"
+if "!BOOT_RC!"=="0" goto :ubuntu_boot_ok
+findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%BOOT_ERR%" >nul 2>&1
+if not errorlevel 1 goto :ubuntu_self_heal
+echo [ERROR] Ubuntu 启动失败 (rc=!BOOT_RC!) 且非磁盘丢失。错误输出:
+if exist "%BOOT_ERR%" type "%BOOT_ERR%"
+echo [ERROR] 请手动排查后重新运行本脚本。
+pause
+exit /b 1
+
+:ubuntu_self_heal
+echo [WARN] Ubuntu 发行版的虚拟磁盘(ext4.vhdx)丢失或损坏,数据无法保留。
+echo [INFO] 本脚本即环境重置,自动清理并重装发行版...
+echo [INFO] wsl --unregister Ubuntu
+wsl --unregister Ubuntu
+set "UNREG_RC=!errorlevel!"
+if not "!UNREG_RC!"=="0" (
+    echo [ERROR] wsl --unregister 失败 (rc=!UNREG_RC!)。请手动执行: wsl --unregister Ubuntu
+    pause
+    exit /b 1
+)
+echo [OK] 旧发行版已清理
+echo [INFO] wsl --install -d Ubuntu
+wsl --install -d Ubuntu
+if errorlevel 1 (
+    echo [ERROR] Ubuntu 重装失败。请手动执行: wsl --install -d Ubuntu
+    pause
+    exit /b 1
+)
+REM 新装发行版确认可引导:可引导则就地继续配置 docker,否则提示重启后重跑。
+if exist "%BOOT_ERR%" del "%BOOT_ERR%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 30 >nul 2>&1
+set "BOOT_RC=!errorlevel!"
+if "!BOOT_RC!"=="0" goto :ubuntu_boot_ok
+echo [WARN] Ubuntu 已重装,需重启 Windows 后 WSL 才能稳定运行。
+echo [INFO] 请重启电脑,然后重新双击本脚本完成 docker 配置。
+pause
+exit /b 3010
+
+:ubuntu_boot_ok
+echo [OK] Ubuntu 可正常启动
+
 REM === 2. Install docker-ce inside WSL (as root, no password) ===
 echo.
 echo [2/5] Install docker-ce inside WSL2 Ubuntu (root, no password)...
@@ -53,11 +116,11 @@ if "!WSL_SCRIPT_DIR!"=="" (
 echo [INFO] Script dir in WSL: !WSL_SCRIPT_DIR!
 
 :run_wsl_install
-wsl -d Ubuntu -u root -- bash -c "cd '!WSL_SCRIPT_DIR!' && bash install_wsl_docker.sh"
+set "WSL_OUT=%TEMP%\install_wsl_docker.out"
+wsl -d Ubuntu -u root -- bash -c "cd '!WSL_SCRIPT_DIR!' && bash install_wsl_docker.sh" > "%WSL_OUT%" 2>&1
+type "%WSL_OUT%"
 set "WSL_RC=!errorlevel!"
 
-REM WSL exit code is unreliable for completed scripts; check by content.
-REM Success marker: script prints "WSL_DOCKER_READY" (we capture via temp file).
 REM exit 100 = systemd just enabled, need wsl --shutdown then rerun
 if "!WSL_RC!"=="100" (
     echo.
@@ -65,8 +128,23 @@ if "!WSL_RC!"=="100" (
     wsl --shutdown
     timeout /t 5 /nobreak >nul
     echo [INFO] Re-running install script...
+    del "%WSL_OUT%" >nul 2>&1
     goto run_wsl_install
 )
+
+REM WSL exit code 不可靠,用成功标记 WSL_DOCKER_READY 判定真成功;缺失即失败。
+findstr /c:"WSL_DOCKER_READY" "%WSL_OUT%" >nul 2>&1
+if errorlevel 1 goto :install_failed
+del "%WSL_OUT%" >nul 2>&1
+goto :install_ok
+
+:install_failed
+echo [ERROR] docker-ce 安装失败 ^(rc=!WSL_RC!^),详见上方输出。
+echo [ERROR] 若反复失败,可手动进入 WSL 运行: bash install_wsl_docker.sh
+pause
+exit /b 1
+
+:install_ok
 
 REM === 3. Get WSL IP and set DOCKER_HOST (NAT mode, IP may change) ===
 echo.
