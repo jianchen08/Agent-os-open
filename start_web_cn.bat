@@ -187,7 +187,7 @@ REM Windows docker CLI reaches WSL daemon via DOCKER_HOST=tcp://<WSL_IP>:2375;
 REM WSL IP may change after wsl --shutdown, so bind to current %WSL_IP%.
 REM WSL 原生 docker 模式下 Windows 侧可能没有 docker.exe(CLI 装在 WSL 里),
 REM 此时跳过前端热更新(镜像已构建,首次启动无需更新)。
-echo [INFO] 检查前端代码更新...
+echo [INFO] Checking frontend updates...
 set "DOCKER_HOST=tcp://%WSL_IP%:2375"
 where docker >nul 2>&1
 if not errorlevel 1 (
@@ -197,7 +197,7 @@ if not errorlevel 1 (
 )
 
 echo.
-echo [INFO] Skipping Docker Desktop checks (using WSL native docker)
+echo [INFO] Using WSL native docker (Docker Desktop not needed)
 goto :start_python
 
 :no_wsl_docker
@@ -359,7 +359,7 @@ if errorlevel 1 (
     docker image prune -f 2>nul
     powershell -NoProfile -Command "Get-Date | Out-File -FilePath '.frontend_built_at' -Encoding ascii"
 ) else (
-    echo [INFO] 检查前端代码更新...
+    echo [INFO] Checking frontend updates...
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_frontend.ps1"
 )
 
