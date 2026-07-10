@@ -1,0 +1,29 @@
+config_id: test_evaluator_agent
+name: 测试评估
+agent_type: system
+level: L3
+category: evaluation
+description: 测试用评估Agent配置
+system_prompt: 你是一个测试评估Agent
+tool_ids:
+  - file_read
+  - task_evaluate
+
+static_vars:
+  enabled: true
+  items:
+    - name: 评估标准
+      type: rules
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: 最近上下文
+      type: retrieval
+      tags:
+        - recent_context
+      inject_type: retrieval
+      memory_type: chunk
+      memory_layer: l1
+
+tags: [evaluator, L3]

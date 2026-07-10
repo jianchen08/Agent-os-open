@@ -1,0 +1,117 @@
+# ============================================================
+# .gitignore — 灵汐 AgentOS
+# 防散落核心规则:
+#   - 根目录下划线开头的脚本(_*.py / _*.ps1 / _*.sh)一律不入库
+#   - working/ 与 .project/ 是本地工作区(过程文档/私密资料),不入库
+#   - 可再生产物(reports/dump/构建标记)不入库
+# ============================================================
+
+# ─── Python ───
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.tox/
+.py_deps_installed
+
+# ─── Node / 前端 ───
+node_modules/
+dist/
+dist-electron/
+build/
+coverage/
+.coverage
+htmlcov/
+
+# ─── 本地工作区(过程文档/私密资料/草稿,不入库)───
+# 锚定到根目录,避免误伤 docs/working/ 等同名子目录
+/working/
+.project/
+.ai_workspaces/
+.claude/
+.workbuddy/
+.dbg/
+
+# ─── 测试 / 报告产物(可随时再生,不入库)───
+reports/
+test-results/
+e2e_screenshots/
+verify_screenshots/
+frontend/test-results/
+*_debug.log
+_paste_debug.log
+*.ndjson
+*.json.gz
+*.heapsnapshot
+
+# ─── 调试 / 临时脚本(根目录下划线开头一律不入库)───
+# 防散落硬规则:任何 _*.py / _*.ps1 / _*.sh 都不会被提交,
+# 调试脚本请用下划线开头写在根目录,天然隔离不入库。
+_*.py
+_*.ps1
+_*.sh
+*.tmp
+.tmp_*
+debug-*.md
+debug-*.log
+# 一次性调试探针脚本/探针配置/探针输出,不入库
+frontend/scripts/debug_*.mjs
+frontend/scripts/probe_*.mjs
+frontend/scripts/analyze_trace.py
+frontend/scripts/analyze_trace2.py
+frontend/vite.probe.config.ts
+frontend/probe-out/
+
+# ─── 运行时 dump / 工具抓取产物 ───
+docker_watchdog_dumps/
+.playwright-cli/
+src/logs/
+# 根目录 logs/ 是运行时日志/截图/诊断产物，不入库
+/logs/
+
+# ─── 备份文件(含后缀变体 .bak_xxx)───
+*.bak
+*.bak_*
+
+# ─── 机密 ───
+.env
+*.log
+.ports
+
+# ─── 数据库 / 运行时数据 ───
+data/
+database.db
+*.db
+*.sqlite3
+
+# ─── 前端构建注入标记(本地构建生成,不入库)───
+.frontend_built_at
+.frontend_src_hash
+
+# ─── 本地临时工作目录 ───
+tmp*/
+/artifacts/
+/deliverables/
+/review/
+/findings/
+/e2e/
+/agent_os_hot_reload/
+/pytest-of-*/
+
+# ─── Windows shell 重定向产生的坏文件名 ───
+NUL
+nul
+nul)
+$null
+/frontend/$null
+
+# ─── 离线依赖包(二进制不入库,仅保留 .gitkeep 占位)───
+packages/wheels/*
+!packages/wheels/.gitkeep
+packages/npm-tarballs/*
+!packages/npm-tarballs/.gitkeep
+
+# ─── 崩溃转储（不入库）───
+*.stackdump

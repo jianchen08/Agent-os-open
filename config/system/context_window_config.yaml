@@ -1,0 +1,81 @@
+version: '2.0'
+compress_trigger_ratio: 0.56
+budgets:
+  system_prompt: 0.08
+  tools_description: 0
+  static_vars: 0.05
+  dynamic_variables: 0.05
+  l3: 0.03
+  l2: 0.08
+  l1: 0.15
+  recent: 0.25
+  retrieval: 0.08
+  response_reserve: 0.23
+include_tools_description_in_prompt: false
+templates:
+  system_prompt: '{content}'
+  tools_description: '## 可用工具
+
+    {tools}'
+  static_vars: '## 静态资源
+
+    {content}'
+  l3_memory: '## 历史关键词索引
+
+    {keywords}'
+  l2_memory: '## 历史摘要
+
+    {summaries}'
+  l1_memory: '## 详细历史
+
+    {details}'
+  recent_messages: '{messages}'
+  dynamic_vars: '## 动态上下文
+
+    {variables}'
+stability:
+  system_prompt: stable
+  tools_description: stable
+  static_vars: stable
+  l3_memory: semi_stable
+  l2_memory: semi_stable
+  l1_memory: semi_stable
+  recent_messages: dynamic
+  dynamic_vars: dynamic
+budget_mapping:
+  static_vars: static_vars
+  l3_memory: l3_memory
+  l2_memory: l2_memory
+  l1_memory: l1_memory
+  recent_messages: recent_messages
+  dynamic_vars: dynamic_vars
+layer_order:
+- system_prompt
+- tools_description
+- static_vars
+- l3
+- l2
+- l1
+- recent
+- dynamic_variables
+static_vars:
+  enabled: true
+  sources: []
+dynamic_vars:
+  enabled: true
+  vars:
+  - Date
+  - Time
+  - Knowledge
+  - Retrieval
+  - Rules
+  rules:
+    enabled: true
+    hard_constraints: []
+    max_rules: 10
+compression:
+  enabled: true
+  model: ''
+  layer_trigger_ratio: 0.8
+  max_turn_ratio: 0.5
+custom_layers: {}

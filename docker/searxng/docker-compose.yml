@@ -1,0 +1,29 @@
+# SearXNG 服务定义 —— 为 web_search (mcp-webgate) 提供搜索后端
+#
+# 启动: docker compose -f docker/searxng/docker-compose.yml up -d
+# 停止: docker compose -f docker/searxng/docker-compose.yml down
+#
+# 配置由 scripts/searxng_config.py 生成，挂载覆盖容器内默认配置。
+# 修改配置后: 重新运行脚本 + docker compose restart
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8080:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      # SearXNG 必须有非默认的 secret_key，否则 worker 拒绝启动。
+      # 容器 entrypoint 会用此值覆盖 settings.yml 里的 ultrasecretkey。
+      - SEARXNG_SECRET=webgate-searxng-secret-2026-fix
+      - UWSGI_WORKERS=2
+    volumes:
+      # 挂载自定义配置：开启 JSON 格式 + 启用 baidu/bing/sogou + 禁用被阻断引擎
+      # 注意：不加 :ro，SearXNG 启动脚本需要 chown 此文件
+      - ./settings.yml:/etc/searxng/settings.yml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

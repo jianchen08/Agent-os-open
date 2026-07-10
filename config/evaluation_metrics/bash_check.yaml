@@ -1,0 +1,119 @@
+# 自定义命令执行检查评估指标
+# 通用命令执行检查，通过 exit_code 判断结果
+# 适用于任何能通过 exit code 表达结果的确定性检查
+
+id: bash_check
+name: 命令检查
+description: 执行自定义命令，通过退出码判断是否通过
+
+# ===== 评估器配置 =====
+evaluator_id: bash_execute
+evaluator_type: tool
+
+default_config:
+  action: execute
+  use_isolation: true
+  timeout: 15
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+    - field: "output.status"
+      operator: "equals"
+      value: "completed"
+    - field: "output.exit_code"
+      operator: "equals"
+      value: 0
+  logic: "and"
+  pass_message: "命令执行成功"
+  fail_message: "命令执行失败"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: ["execute", "continue", "terminate", "input", "read_log"]
+      description: "操作类型"
+      default: "execute"
+    command:
+      type: string
+      description: "要执行的命令"
+    pid:
+      type: integer
+      description: "进程ID（continue/terminate/input/read_log 时使用）"
+    timeout:
+      type: integer
+      description: "超时时间（秒）"
+      default: 30
+    working_dir:
+      type: string
+      description: "工作目录"
+    input_text:
+      type: string
+      description: "发送到进程的输入"
+    force:
+      type: boolean
+      description: "是否强制终止"
+      default: false
+    use_isolation:
+      type: boolean
+      description: "是否使用隔离环境"
+      default: true
+  required: ["action"]
+
+# ===== 使用边界 =====
+when_to_use:
+  - 命令有明确的 exit code（0=成功，非0=失败）
+  - 命令执行时间短（秒级到分钟级）
+  - 无交互输入、无破坏性副作用
+  - 输出简短可读，无需复杂解析
+  - 构建检查（pip install -e . / npm run build）
+  - 安装检查（pip audit / npm audit）
+  - 覆盖率检查（pytest --cov=src --cov-fail-under=80）
+  - 端口/服务检查（curl http://localhost:8988/health）
+  - 数据库检查（数据库CLI命令）
+  - 环境版本检查（python --version）
+when_not_use:
+  - 启动长驻进程或服务（npm run dev / python server.py）
+  - 需要交互输入（mysql / python -i）
+  - 需要从输出中提取复杂结果
+  - 有破坏性操作（rm -rf / DROP TABLE）
+  - 需要复杂输出解析（应使用 format_valid 的正则匹配或 semantic_check）
+examples:
+  - params:
+      command: pip install -e .
+    description: "项目安装检查"
+  - params:
+      command: pytest --cov=src --cov-fail-under=80
+    description: "覆盖率检查"
+  - params:
+      command: pip audit
+    description: "安全审计"
+  - params:
+      command: curl -s http://localhost:8988/health
+    description: "服务健康检查"
+caveats:
+  - 命令由执行 Agent 在任务上下文中提供，评估阶段只负责执行和判断
+  - 只适合 exit code 能明确表达结果的命令
+  - 需要目标环境已安装对应工具
+
+# ===== 依赖关系 =====
+is_red_line: false
+default_weight: 1.0
+level: 2
+includes:
+  - file_check
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - bash
+  - command
+  - execute
+  - universal

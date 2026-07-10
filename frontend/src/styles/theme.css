@@ -1,0 +1,40 @@
+/**
+ * Deep Space Command 主题变量
+ *
+ * 设计理念：深空指挥台 - 沉浸式、专业级、低疲劳
+ */
+
+:root {
+  /* === 背景色系 === */
+  --bg-main: radial-gradient(circle at 50% 0%, #0f172a, #020617);
+  --bg-panel: rgba(15, 23, 42, 0.7);
+  --bg-elevated: rgba(30, 41, 59, 0.8);
+  --bg-input: rgba(15, 23, 42, 0.6);
+
+  /* === 状态强调色 === */
+  --accent-running: #00f0ff;      /* Cyan-400: 执行中、数据流、选中态 */
+  --accent-waiting: #f59e0b;      /* Amber-500: 等待输入、警示 */
+  --accent-success: #10b981;      /* Emerald-500: 完成、通过 */
+  --accent-error: #ef4444;        /* Red-500: 失败、阻断 */
+  --accent-pending: #94a3b8;      /* Slate-400: 等待中 */
+
+  /* === 文本色系 === */
+  /* 优化：提高对比度以符合WCAG AA标准 (4.5:1) */
+  --text-primary: #f8fafc;        /* Slate-50: 主要文本 - 对比度 16:1 */
+  --text-secondary: #cbd5e1;      /* Slate-300: 辅助信息 - 对比度 7.2:1 (原 #94a3b8 5.4:1) */
+  --text-muted: #94a3b8;          /* Slate-400: 次要信息 - 对比度 5.4:1 (原 #64748b 3.2:1) */
+  --text-disabled: #64748b;       /* Slate-500: 禁用文本 - 对比度 3.2:1 (原 #475569 2.1:1) */
+
+  /* === 边框色系 === */
+  /* 优化：增加透明度以提高可见度 */
+  --border-default: rgba(255, 255, 255, 0.12);  /* 从 0.08 增加 */
+  --border-hover: rgba(255, 255, 255, 0.20);    /* 从 0.15 增加 */
+  --border-active: rgba(0, 240, 255, 0.5);      /* 从 0.4 增加 */
+
+  /* === 阴影 === */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-glow-running: 0 0 15px rgba(0, 240, 255, 0.3);
+  --shadow-glow-waiting: 0 0 15px rgba(245, 158, 11, 0.3);
+}

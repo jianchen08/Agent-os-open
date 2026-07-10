@@ -1,0 +1,44 @@
+========================================
+  Agent OS 启动
+========================================
+项目目录: D:\myproject\container_224042d3b925
+
+[INFO] 正在探测 WSL 是否响应...
+[OK] WSL 响应正常
+[INFO] WSL docker mode detected
+[INFO] Checking WSL kernel health...
+[OK] WSL kernel healthy (persistent D-state: 0) (running, uptime=288s)
+[OK] dockerd 就绪
+[OK] WSL IP: 172.29.128.210
+[INFO] Setting up port forwarding...
+[OK] Port forwarding configured
+[INFO] Starting project containers...
+[INFO] 清理上轮任务容器（cua- 前缀，仅保留 frontend + redis）...
+[INFO] docker compose up -d
+ Container agent-os-frontend-22404 Running 
+ Container agent-os-redis-22404 Running 
+ Container agent-os-redis-22404 Waiting 
+ Container agent-os-redis-22404 Healthy 
+[INFO] 等待容器进入 running ...
+--- 实际运行状态 ---
+agent-os-frontend-22404	Up 3 minutes (healthy)
+agent-os-redis-22404	Up 3 minutes (healthy)
+[OK] redis + frontend 均已运行
+[OK] Containers started
+[INFO] 检查前端代码更新...
+[OK] Frontend code unchanged
+
+[INFO] Skipping Docker Desktop checks (using WSL native docker)
+[OK] Python: C:\Users\jc\AppData\Local\Programs\Python\Python312\python.exe
+Python 3.12.10
+[OK] Python 依赖已安装
+[INFO] 启动 Agent...
+
+========================================
+  启动完成
+========================================
+  后端: http://localhost:8988
+  前端: http://localhost:5289
+  停止: 关闭 Agent 窗口 + docker compose down
+========================================
+Press any key to continue . . . 

@@ -1,0 +1,137 @@
+# ============================================================
+# pre-commit 配置（REQ-13）
+# 集成 ruff（lint+format）+ mypy（类型检查）+ 基础文件检查
+# ============================================================
+#
+# 使用方式：
+#   1. 安装 pre-commit: pip install pre-commit
+#   2. 安装 git hooks: pre-commit install
+#   3. 手动运行: pre-commit run --all-files
+#
+# 说明：
+#   - 本配置文件是项目代码质量门禁的入口
+#   - 现有警告会被允许通过（按任务要求"工具本身不报错"）
+#   - 新代码应逐步满足所有规则
+
+# 最小 pre-commit 版本
+minimum_pre_commit_version: "3.5.0"
+
+# 默认所有文件都跑所有 hook
+default_install_hook_types: [pre-commit, commit-msg]
+
+# 失败时回滚到 clean 状态
+fail_fast: false
+
+# 跳过自动生成的/不需要检查的目录
+exclude: |
+  (?x)^(
+      .*\.min\.(js|css)|
+      .*\.bak|
+      frontend/.*|
+      electron/.*|
+      mcp-servers/.*|
+      node_modules/.*|
+      .*\.egg-info/.*|
+      docs/.*\.md
+  )$
+
+repos:
+  # ============================================================
+  # 1. 基础文件检查（pre-commit-hooks 内置）
+  # ============================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        name: 去除行尾空白
+        args: [--markdown-linebreak-ext=md]
+
+      - id: end-of-file-fixer
+        name: 确保文件以换行符结尾
+
+      - id: check-yaml
+        name: 验证 YAML 语法
+        args: [--allow-multiple-documents]
+        # 排除第三方 YAML
+        exclude: ^(\.gitlab-ci\.yml|docker/.*|node_modules/.*)
+
+      - id: check-toml
+        name: 验证 TOML 语法
+
+      - id: check-json
+        name: 验证 JSON 语法
+        exclude: ^(\.vscode/.*|node_modules/.*|package-lock\.json)
+
+      - id: check-merge-conflict
+        name: 检测未解决的合并冲突标记
+
+      - id: check-added-large-files
+        name: 防止提交大文件
+        args: [--maxkb=1024]
+
+      - id: check-case-conflict
+        name: 检测文件名大小写冲突
+
+      - id: mixed-line-ending
+        name: 强制 LF 换行符
+        args: [--fix=lf]
+
+      - id: detect-private-key
+        name: 防止意外提交私钥
+
+  # ============================================================
+  # 2. Ruff（lint + format）— Astral 官方
+  # ============================================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      # Lint 检查（先于 format）
+      - id: ruff
+        name: Ruff Lint
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+        # 排除不需要 lint 的目录
+        exclude: |
+          (?x)^(
+              frontend/.*|
+              electron/.*|
+              mcp-servers/.*|
+              node_modules/.*
+          )$
+
+      # Format 格式化（在 lint 之后）
+      - id: ruff-format
+        name: Ruff Format
+        types_or: [python, pyi]
+        exclude: |
+          (?x)^(
+              frontend/.*|
+              electron/.*|
+              mcp-servers/.*|
+              node_modules/.*
+          )$
+
+  # ============================================================
+  # 3. mypy（类型检查）
+  # ============================================================
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        name: mypy 类型检查
+        # 允许现有警告（不强制 0 错误），工具本身正常运行即可
+        args: [--config-file=pyproject.toml, --no-incremental]
+        files: \.py$
+        # 仅检查 src/ 下的 Python 文件
+        exclude: |
+          (?x)^(
+              tests/.*|
+              frontend/.*|
+              electron/.*|
+              mcp-servers/.*|
+              .*tests/.*|
+              .*test_.*\.py$
+          )$
+        additional_dependencies: []
+        # 单个文件失败不影响其他
+        require_serial: false

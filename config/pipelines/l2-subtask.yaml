@@ -1,0 +1,49 @@
+# L2 Subtask Agent Configuration
+# L2 子任务 Agent 配置 - 任务级 Agent
+
+inherit: default                       # 继承默认配置
+
+pipeline:
+  name: "l2_subtask_agent"
+
+  # Pre 插件扩展
+  pre:
+    # 子任务工具执行时使用容器隔离
+    tool_execute:
+      - plugin: isolation_guard
+        priority: 25
+        config:
+          docker_available: true    # 强制启用 Docker 隔离检测
+      - plugin: security_check
+        priority: 70
+        config:
+          default_isolation: container  # 子任务默认容器隔离
+          require_approval: true         # 子任务需要审批
+
+  # Post 插件扩展
+  post:
+    llm_call:
+      # 任务评估提醒（LLM 只输出文本时提醒提交评估）
+      - plugin: task_reminder
+        priority: 35
+        config:
+          max_reminders: 3              # 最大提醒次数
+          cooldown_seconds: 300         # 冷却期（秒）
+      # 子任务添加完成通知
+      - plugin: notify_completion
+        priority: 25
+
+  # Router 插件扩展
+  router:
+    # 子任务需要评估退出（关键）
+    - plugin: task_evaluation
+      priority: 40
+      config:
+        evaluation_model: "gpt-4o-mini"  # 评估使用的模型
+        evaluation_threshold: 0.8        # 评估阈值
+
+  # 子任务特定的迭代限制
+  config:
+    max_iterations: 50                  # 子任务最大迭代次数
+    timeout: 2400                       # 子任务超时时间（秒）
+    timeout_seconds: 2400               # 子任务超时时间（秒，兼容键名）

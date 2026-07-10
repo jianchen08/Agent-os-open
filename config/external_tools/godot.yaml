@@ -1,0 +1,43 @@
+# Godot 引擎插件连接配置
+name: godot
+display_name: Godot Engine
+description: Godot 引擎编辑器插件连接器，支持场景管理、脚本执行、资源管理等
+type: godot
+
+# 通信协议
+protocol: http
+endpoint: "http://localhost:9867"
+
+# 超时配置
+connect_timeout: 5.0
+read_timeout: 30.0
+execute_timeout: 60.0
+
+# 重试策略
+retry_policy:
+  max_retries: 2
+  base_delay: 2.0
+  max_delay: 20.0
+
+# 认证（可选）
+auth:
+  type: api_key
+  secret_key: godot_api_key
+
+# 连接池
+max_connections: 3
+
+# 沙箱（脚本执行需要）
+enable_sandbox: true
+sandbox_image: "godot-headless:4.2"
+
+# 支持的操作列表
+extra:
+  version: "1.0.0"
+  operations:
+    - list_scenes
+    - open_scene
+    - run_scene
+    - execute_script
+    - manage_resource
+    - get_project_info

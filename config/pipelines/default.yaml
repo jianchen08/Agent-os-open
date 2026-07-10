@@ -1,0 +1,237 @@
+# Default Pipeline Configuration
+# 默认管道配置 - 灵汐 Agent 基础配置
+#
+# 扁平格式，兼容 load_pipeline_config() 解析。
+# Agent 参数（system_prompt, tool_ids 等）由 CLIApplication 注入 state，
+# 插件运行时从 ctx.state / ctx.get_service() 自主读取。
+
+name: lingxi_agent
+
+task_worker:
+  pipeline_timeout: 7200
+  child_wait_timeout: 3600
+  terminal_wait_timeout: 3600
+
+input_routes:
+  # 工具级拦截（权限/隔离/安全）不再用 target=end 终结管道。
+  # 拦截决策由对应 input 插件写入 state，tool_core 在执行工具前统一检查，
+  # 被拦截的工具转为「失败结果」返回给 LLM，让 LLM 自行调整策略，
+  # 而不是把单次工具越权放大成整个任务管道失败。
+  #
+  # 历史问题：原本这里有三条 target=end 路由（security_blocked / level_blocked
+  # / isolation_blocked），把拦截原因写进 RAW_RESULT 并 ENDED=True，导致
+  # 「权限不足」变成最终输出、任务被错误终结、停止后重发消息 agent 身份丢失。
+
+  # 工具执行 → 安全检查后执行 core（tool_core 内部处理拦截转失败结果）
+  - name: tool_execute
+    condition: "core_type == 'tool_execute'"
+    target: core
+    plugins:
+      - tool_schema
+      - param_inject
+      - memory_read
+      - knowledge_inject
+      - prompt_build
+      - isolation_guard
+      - level_guard
+      - security_check
+    priority: 10
+
+  # LLM 调用 → 上下文守卫 + 直接执行 core
+  - name: llm_call
+    condition: "core_type == 'llm_call'"
+    target: core
+    plugins:
+      - multimodal_preprocessor
+      - context_window_guard
+      - tool_schema
+      - param_inject
+      - memory_read
+      - knowledge_inject
+      - prompt_build
+    priority: 20
+
+  # 任务暂停检测 → 挂起管道（优先级最高，先于其他路由）
+  - name: task_paused
+    condition: "pause_guard.checked.paused == True"
+    target: wait
+    plugins: []
+    priority: 3
+
+  # 默认路由
+  - name: default
+    condition: "True"
+    target: core
+    plugins:
+      - pause_guard
+      - tool_schema
+      - param_inject
+      - memory_read
+      - knowledge_inject
+      - prompt_build
+    priority: 30
+
+output_routes:
+  # 有工具调用时 → 切换到 tool_execute
+  - route_type: next_tool
+    condition: "raw_tool_calls != []"
+    priority: 1
+  # BUG-FIX-fix_20260421_wait_route: 之前缺少 wait 路由，child_task_guard 返回的 wait 信号
+  # 在路由仲裁中找不到匹配 → fallback 到 end → 管道直接结束 → TaskWorker 判定"迭代耗尽"。
+  # wait 信号用于管道挂起等待子任务完成，必须在 end 之前被匹配。
+  - route_type: wait
+    condition: "True"
+    priority: 10
+  # 提醒信号 → 继续下一轮 LLM 调用
+  - route_type: next_llm
+    condition: "True"
+    priority: 50
+  # 无匹配信号时 → 结束当前轮次（仅 fallback 使用）
+  - route_type: end
+    condition: "True"
+    priority: 99
+
+# 普通 Input/Output 插件 — 由 build_plugin_registry 统一实例化
+# Agent 可通过 plugins.disabled / plugins.enabled 覆盖
+plugins:
+  # ── Input 插件链（按 priority 排序）──
+  - name: multimodal_preprocessor
+    config:
+      priority: 35
+      max_file_size: 20971520  # 20MB
+  - name: context_window_guard
+    config:
+      enabled: true
+      # trigger_ratio 不在此配置，从 config/system/context_window_config.yaml 的
+      # compress_trigger_ratio 继承（三层覆盖：agent > pipeline > system > 默认）
+      compression_model: minimax-m3
+  - name: tool_schema
+    config:
+      enabled: true
+  # BUG-FIX-fix_20260421_param_inject: ParamInjectPlugin 之前未注册到 pipeline 配置中，
+  # 导致 task_id、session_id、workspace 等 injected_params 永远不会被注入到工具调用参数中。
+  # 子任务提交时 parent_task_id 为 null，任务树结构断裂。
+  - name: param_inject
+    config:
+      inject_session_id: true
+      inject_user_id: true
+      inject_timestamp: true
+  - name: memory_read
+    config:
+      retrieval: semantic
+      top_k: 5
+  - name: knowledge_inject
+    config:
+      mode: disabled
+  - name: prompt_build
+    config:
+      enabled: true
+      include_tools_description_in_prompt: false
+      include_static_vars: true
+      include_compressed_layers: true
+      # 语言配置：控制 LLM 的思考语言和回复语言
+      # 可选值: zh-CN, zh-TW, en, ja, ko, fr, de, es 等
+      language: "zh-CN"
+  # ── Output 插件链（按 priority 排序）──
+  # P0: 系统级检查（停止/错误/深度保护）
+  - name: stop_check
+    config:
+      enabled: true
+      max_duration_seconds: 7200
+  - name: error_check
+    config:
+      enabled: true
+  - name: llm_error_recovery
+    config:
+      enabled: true
+  - name: delegate_depth_guard
+    config:
+      enabled: true
+      max_depth: 3
+  # P1: 工具调用与重复检测
+  - name: conversation_mode
+    config:
+      enabled: true
+  - name: pending_tools
+    config:
+      enabled: true
+  - name: duplicate_check
+    config:
+      max_duplicate_calls: 10
+      max_repetitive_output: 8
+  - name: output_repetition_guard
+    config:
+      max_retries: 3
+      similarity_threshold: 0.85
+  - name: stuck_detector
+    config:
+      window_size: 5
+      similarity_threshold: 0.9
+      repeat_threshold: 3
+  # P2: 统计与安全
+  - name: track
+    config:
+      enabled: true
+      track_token_usage: true
+      track_execution_time: true
+  - name: sensitive_checker
+    config:
+      enabled: true
+  # P3: 结果处理
+  - name: result_format
+    config:
+      max_result_length: 2000
+      include_tool_name: true
+      result_format: "yaml"
+
+  # P4: 任务管理
+  - name: child_task_guard
+    config:
+      idle_remind_limit: 3
+  - name: task_reminder
+    config:
+      max_reminders: 3
+      cooldown_seconds: 300
+
+# 核心 LLM/工具执行插件
+core_plugins:
+  llm_call:
+    class: plugins.core.llm_core.LLMCore
+    config:
+      # 不指定 model_name，回退到 llm.yaml defaults.chat
+      default_params:
+        temperature: 0.7
+        max_tokens: 131072
+      # litellm 内置重试（处理瞬态错误 + 过载）
+      num_retries: 3
+      retry_delay: 15
+      # engine.py 层过载兜底（litellm 重试耗尽后触发）
+      overload_retry_delay: 45
+      max_retries: 1
+      # LLM 调用超时（秒）
+      llm_call_timeout: 300
+  tool_execute:
+    class: plugins.core.tool_core.ToolCore
+    config:
+      timeout: 300
+      result_format: "yaml"
+      level_timeouts:
+        "1": 3600
+        "2": 14400
+        "3": 5400
+      tool_timeouts:
+        # BUG-FIX-fix_20260605_human_interaction_timeout:
+        # 问题根因: 外层 asyncio.wait_for 超时(1800s)先于内部超时(默认86400s)触发，
+        #           导致工具被强制取消，LLM 只收到 "Tool timed out" 的通用错误，
+        #           无法得知"人类未交互"。
+        # 修复方案: 外层超时设为 86400s（与工具内部默认超时一致），
+        #           让内部超时机制（InteractionTimeoutError）优先控制，
+        #           返回明确的人类未交互信息。
+        human_interaction: 86400
+        task_evaluate: 1200
+        bash_execute: 300
+        enhanced_search: 600
+        resource_search: 600
+        resource_merge: 600
+        file_write: 300
+        file_read: 300

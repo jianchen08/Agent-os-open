@@ -1,0 +1,344 @@
+# -*- coding: utf-8 -*-
+# 内置工具配置
+# 此文件由 scripts/tools/collect_tool_info.py 自动生成
+# 请勿手动修改，运行脚本重新生成
+
+tool_cache:
+  enabled: true
+  default_ttl: 300
+  tools:
+    file_read:
+      enabled: false
+    file_write:
+      enabled: false
+    bash_execute:
+      enabled: false
+    enhanced_search:
+      enabled: true
+      ttl: 600
+    fetch:
+      enabled: true
+      ttl: 1800
+    web_search:
+      enabled: true
+      ttl: 600
+    evaluate:
+      enabled: true
+      ttl: 300
+    resource_search:
+      enabled: true
+      ttl: 300
+    yaml_validate:
+      enabled: false
+    schema_evaluator:
+      enabled: false
+    resource_evaluator:
+      enabled: false
+    compatibility_checker:
+      enabled: false
+    rollback_task:
+      enabled: false
+    resource_merge:
+      enabled: true
+      ttl: 300
+    state_update:
+      enabled: false
+      enabled: false
+    task_submit:
+      enabled: false
+    task_manage:
+      enabled: false
+    task_evaluate:
+      enabled: false
+    human_interaction:
+      enabled: true
+      ttl: 0
+tools:
+- name: file_read
+  description: 读取文件内容、列出目录结构。适用场景：需要读取文件内容、浏览目录结构。不适用场景：需要写入文件（使用 file_write）、执行代码（使用
+    bash_execute）、搜索文件内容（使用 enhanced_search）、搜索文件名（使用 enhanced_search 的 filename 模式）。注意：路径访问受
+    base_path 限制；大文件读取可能影响性能。fields 参数：读取 YAML/JSON 文件的特定字段，节省 token。例如：fields=['id',
+    'name'] 只返回这两个字段。
+  category: file
+  level: user
+  requires_approval: false
+  dangerous_operations:
+  - read:/etc/
+  - read:/sys/
+  - read:C:\Windows\
+  tags:
+  - file
+  - io
+  - read
+- name: file_write
+  description: 创建、写入、编辑文件内容。支持 write(全量写入/替换行)、search_replace(搜索替换)、insert(插入)、delete_lines(删除行)、append(追加)。适用场景：创建新文件、全量覆盖写入、修改特定行、搜索替换内容、插入内容、删除行、追加内容。不适用场景：仅读取文件（使用
+    file_read）、列出目录（使用 file_read）。注意：write 会覆盖已有内容；行号从 1 开始；默认创建 .bak 备份；操作具有原子性。
+  category: file
+  level: user
+  requires_approval: false
+  dangerous_operations:
+  - write:/etc/
+  - write:/sys/
+  - write:C:\Windows\
+  - 'delete_lines:'
+  tags:
+  - file
+  - edit
+  - write
+  - replace
+  - insert
+  - delete
+- name: bash_execute
+  description: 执行 Shell 命令，支持长时间运行进程（30秒超时+回调机制）、交互式输入（确认/密码）和隔离环境执行。适用场景：执行系统命令（ls/cat/grep/pip/npm等）、运行脚本、查看系统信息、安装依赖、编译构建项目。不适用场景：仅需读取文件（使用file_read）、仅需搜索文件（使用code_search）、危险操作（rm
+    -rf/format/dd等）、长期运行服务。注意事项：命令执行默认30秒超时，超时后触发回调机制；危险命令会被安全检查拦截；Windows和Linux/Mac命令语法可能不同；需要审批才能执行；长时间运行命令会保存日志到logs/bash/目录；敏感输入会被自动掩码处理。
+  category: system
+  level: user
+  requires_approval: true
+  dangerous_operations:
+  - rm -rf
+  - format
+  - del /q
+  - shutdown
+  - reboot
+  - mkfs
+  - dd if=
+  - '> /dev/sd'
+  - curl
+  - wget
+  tags:
+  - bash
+  - shell
+  - command
+  - dangerous
+  - interactive
+  - long-running
+- name: enhanced_search
+  description: 在文件中搜索文本、代码或文件名。支持内容搜索（集成ripgrep，性能提升10-100倍）和文件名搜索。适用于查找函数/类/变量定义、TODO注释、特定文件名等场景。默认不区分大小写，结果限制100条。文件名搜索不支持正则表达式。
+  category: search
+  level: user
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - search
+  - code
+  - ripgrep
+  - performance
+  - filename
+- name: fetch
+  description: Web 操作工具：执行 HTTP 请求和网页抓取。支持 GET/POST 请求和网页内容抓取。使用场景：调用外部 API；抓取网页内容；发送
+    HTTP 请求获取远程数据。限制：请求默认 30 秒超时；响应大小限制为 10MB；某些域名可能被安全策略阻止。
+  category: web
+  level: user
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - web
+  - http
+  - scrape
+- name: web_search
+  description: 搜索互联网信息，基于 mcp-webgate 实现。支持 SearXNG 多引擎聚合搜索，自动 BM25 重排序、HTML 去噪、URL 去重，返回高质量结果。提供三种搜索模式：完整搜索（搜索+抓取+清洗+排序）、摘要模式（仅搜索结果摘要）、内容提取（提取指定URL的页面内容）。
+  category: search
+  level: user
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - web
+  - search
+  - internet
+  - mcp
+- name: resource_search
+  description: 搜索系统内 Agent、工具、Skill 资源。空结果是正常的，不要重复搜索。simple=列出匹配资源；detailed=按精确名称加载资源（tool会动态注入，支持逗号分隔批量）。
+  category: search
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - search
+  - resource
+  - system
+- name: yaml_validate
+  description: 验证 YAML 配置文件的格式和内容。支持验证 YAML 语法、检查必需字段、以及针对 agent/workflow/ui_scene
+    类型的 Schema 验证。使用时提供 content 或 file_path 之一，可指定 schema_type 进行特定格式验证。
+  category: system
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - yaml
+  - validate
+  - config
+- name: schema_evaluator
+  description: Schema 评估器：验证 JSON/YAML 格式和 Schema
+  category: system
+  level: user
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - evaluator
+  - schema
+  - json
+  - yaml
+- name: resource_evaluator
+  description: 资源评估器
+  category: system
+  level: user
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - evaluator
+  - resource
+- name: compatibility_checker
+  description: 检查修改后的资源与系统的兼容性，识别配置变更是否会导致破坏性变更。支持配置兼容性、接口兼容性和依赖兼容性检查。适用于修改 Agent、工具或工作流配置后验证变更安全性。
+  category: system
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - compatibility
+  - check
+  - system
+- name: resource_merge
+  description: 基于 git 的资源合并与回滚工具。在 workspace 中通过 git 追踪文件变更，支持将修改后的资源合并到目标目录，以及回滚到之前的版本。适用场景：资源生成/修改时的
+    workspace 管理、文件变更追踪、合并到正式目录、版本回滚。不适用场景：仅读取文件（使用 file_read）、执行命令（使用 bash_execute）。注意事项：需要系统已安装
+    git；rollback 操作会将文件恢复到指定 commit 状态；cleanup 会删除 .git 目录且不可逆。
+  category: task
+  level: all
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - git
+  - merge
+  - rollback
+  - resource
+- name: state_update
+  description: '在工作流执行过程中更新共享状态变量。适用场景：更新重试计数器、在工作流节点间传递累计结果、更新工作流级状态变量。不适用场景：仅需在节点内部使用临时变量时、需要更新数据库记录时（使用持久化工具）。注意事项：更新的变量会被添加到shared_variables中；支持increment(增量)和append(追加)操作；context参数用于获取当前状态值。示例：{"updates":
+    {"retry_count": {"operation": "increment", "value": 1}}} 表示将retry_count增加1'
+  category: system
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - workflow
+  - state
+  - system
+  description: TODO 清单管理：write(创建清单，传入字符串列表)、read(读取清单)、update(更新状态)、clear(清空)。
+  category: task
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - todo
+  - checklist
+- name: task_submit
+  description: '任务提交工具。将任务提交给指定的 Agent 执行，或创建容器任务组织复杂工作。
+
+    task_scope 参数决定任务类型：
+    - non_container（默认）：实际执行的任务，必须指定 target_type 和 target_id
+    - container：容器任务，用于组织复杂长期任务的子任务链，不能指定 target_type 和 target_id
+
+    【核心功能】
+
+    - 将任务分配给合适的 Agent 执行（non_container）
+
+    - 创建容器任务组织复杂项目（container）
+
+    - 为任务配置验收标准，确保执行结果可验证
+
+    - 支持立即执行、排队等待、计划执行三种模式
+
+
+    【示例 - 普通任务】
+
+    {"target_type": "agent", "target_id": "general_agent", "goal": {"title": "实现用户登录"},
+    "acceptance_criteria": {"file_check": {"input_params": {"path": "src/auth/login.py"}}}}
+
+    【示例 - 容器任务】
+
+    {"task_scope": "container", "goal": {"title": "开发Roguelike游戏"}, "needs_preparation": true}'
+  category: task
+  level: l1_l2_only
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - task
+  - submit
+- name: task_manage
+  description: 任务管理工具：用于查询和控制任务状态。支持操作：get(查询详情)、list(列出列表)、update(更新状态)、status(状态概览)、pause(暂停)、resume(继续)、cancel(取消)、retry(重试)、delete(删除)。权限：L1可管理所属会话的所有任务，L2只能管理自己提交的子任务。
+  category: task
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - task
+  - management
+  - L1
+  - L2
+  - status
+  - control
+- name: task_evaluate
+  description: 任务评估工具：用于评估任务的评估指标是否满足。支持两种模式：evaluate_single(评估单个指标，增量模式，需提供metric_id)、auto_complete(自动评估所有指标，推荐)。完成任务执行后使用，验证是否满足验收标准。注意：任务未完成时先执行任务；无验收标准的任务无法评估；指标重试5次后任务会被标记为blocked。
+  category: task
+  level: system
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - task
+  - evaluate
+  - metric
+  - completion
+- name: human_interaction
+  description: 与用户交互工具。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页。
+  category: system
+  level: all
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - interaction
+  - human
+  - approval
+  - conversation
+permission_policies:
+  admin:
+    can_approve: true
+    auto_approve_tools:
+    - '*'
+  developer:
+    can_approve: false
+    auto_approve_tools:
+    - enhanced_search
+    - fetch
+    - web_search
+    - resource_search
+    - yaml_validate
+    - schema_evaluator
+    - resource_evaluator
+    - compatibility_checker
+    - resource_merge
+    - state_update
+    - task_submit
+    - task_manage
+    - task_evaluate
+    require_approval_tools:
+    - file_read
+    - file_write
+    - bash_execute
+  readonly:
+    can_approve: false
+    auto_approve_tools:
+    - enhanced_search
+    - fetch
+    - web_search
+    - resource_search
+    require_approval_tools:
+    - file_read
+    - file_write
+    - bash_execute
+    - yaml_validate
+    - schema_evaluator
+    - resource_evaluator
+    - compatibility_checker
+    - resource_merge
+    - state_update
+    - task_submit
+    - task_manage
+    - task_evaluate

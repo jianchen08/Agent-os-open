@@ -1,0 +1,84 @@
+# CODEOWNERS 文件
+# 文档：https://docs.github.com/zh/repositories/creating-and-managing-repositories/about-code-owners
+#
+# 规则：最后一条匹配规则生效，因此越具体的规则要写在下面
+# 语法：<pattern> <owner1> <owner2> ...
+#       <pattern> 留空表示回退到上层的 owner
+# 占位说明：以下使用 @AI-agent-system/core-team 作为示例 org/team，
+#          请在 GitHub 仓库创建后替换为实际的团队/用户名
+
+# ============================================================
+# 默认所有者（所有文件，除非下方更具体的规则覆盖）
+# ============================================================
+*                           @AI-agent-system/core-team
+
+# ============================================================
+# 核心架构（管道引擎 / Agent 系统 / 配置加载）
+# ============================================================
+/src/pipeline/              @AI-agent-system/core-team @AI-agent-system/architecture-team
+/src/agents/                @AI-agent-system/core-team @AI-agent-system/architecture-team
+/src/core/                  @AI-agent-system/core-team
+/src/config/                @AI-agent-system/core-team
+/config/                    @AI-agent-system/core-team
+
+# ============================================================
+# 安全与认证（高敏感区域）
+# ============================================================
+/src/auth/                  @AI-agent-system/core-team @AI-agent-system/security-team
+/src/isolation/             @AI-agent-system/core-team @AI-agent-system/security-team
+/.env.example               @AI-agent-system/core-team @AI-agent-system/security-team
+/SECURITY.md                @AI-agent-system/core-team @AI-agent-system/security-team
+/.github/workflows/         @AI-agent-system/core-team @AI-agent-system/security-team
+
+# ============================================================
+# LLM 适配与记忆系统
+# ============================================================
+/src/llm/                   @AI-agent-system/core-team @AI-agent-system/ai-team
+/src/memory/                @AI-agent-system/core-team @AI-agent-system/ai-team
+/config/models/             @AI-agent-system/core-team @AI-agent-system/ai-team
+
+# ============================================================
+# 工具系统
+# ============================================================
+/src/tools/                 @AI-agent-system/core-team @AI-agent-system/tools-team
+/src/plugins/               @AI-agent-system/core-team @AI-agent-system/tools-team
+
+# ============================================================
+# 通道层（IM 适配器）
+# ============================================================
+/src/channels/              @AI-agent-system/core-team @AI-agent-system/integrations-team
+
+# ============================================================
+# 前端代码
+# ============================================================
+/frontend/                  @AI-agent-system/core-team @AI-agent-system/frontend-team
+
+# ============================================================
+# 文档（开源相关的核心文件由 core-team 拥有）
+# ============================================================
+/README.md                  @AI-agent-system/core-team
+/README_EN.md               @AI-agent-system/core-team
+/CHANGELOG.md               @AI-agent-system/core-team
+/CONTRIBUTING.md            @AI-agent-system/core-team
+/CODE_OF_CONDUCT.md         @AI-agent-system/core-team
+/docs/                      @AI-agent-system/core-team @AI-agent-system/docs-team
+
+# ============================================================
+# CI / DevOps
+# ============================================================
+/.github/                   @AI-agent-system/core-team @AI-agent-system/devops-team
+/pyproject.toml             @AI-agent-system/core-team @AI-agent-system/devops-team
+/package.json               @AI-agent-system/core-team @AI-agent-system/devops-team
+/docker-compose.yml         @AI-agent-system/core-team @AI-agent-system/devops-team
+/Dockerfile                 @AI-agent-system/core-team @AI-agent-system/devops-team
+/.pre-commit-config.yaml    @AI-agent-system/core-team @AI-agent-system/devops-team
+
+# ============================================================
+# 测试
+# ============================================================
+/tests/                     @AI-agent-system/core-team
+
+# ============================================================
+# 回退规则（如果上面的 owner 都失效，使用这个兜底）
+# ============================================================
+# 注意：GitHub CODEOWNERS 必须有至少一个有效 owner，否则 PR 会被 block

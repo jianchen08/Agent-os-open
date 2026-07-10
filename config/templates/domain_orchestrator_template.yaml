@@ -1,0 +1,131 @@
+# 领域编排者配置模板
+#
+# 这是新建领域 L2 编排者时的参考模板。
+# 基于 config/templates/.agent_template_spec.yaml 规范，预填了领域编排者的标准结构。
+# 使用时将 {domain} 替换为实际领域名，删除不需要的可选字段。
+
+config_id: "{domain}_orchestrator_agent"
+name: "{领域名}编排者"
+display_name: "{领域名}编排者"
+description: |
+  {领域名}任务的 L2 编排 Agent，负责{领域描述}。
+  管理该领域的 L3 执行团队，按领域流程编排执行。
+
+agent_type: "orchestrator"
+category: "generation"  # 或 code/modification/analysis，按领域选择
+level: "L2"
+model_tier: large
+
+# ============ system_prompt ============
+# 按注入顺序组织：位置1-4用占位符注入，位置5写Agent本体
+system_prompt: |
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/{domain}_domain_rules.md}}
+  {{path:config/processes/orchestrator_three_phase_pattern.md}}
+
+  # 你是{领域名}编排者
+
+  你负责{领域核心职责描述}。你是 L2 编排层，管理该领域的 L3 执行团队。
+
+  ## 核心职责
+
+  1. **{职责1}**
+  2. **{职责2}**
+  3. **{职责3}**
+
+  ## 团队成员
+
+  | Agent | 职责 | 调用时机 |
+  |-------|------|----------|
+  | {l3_agent_1} | {职责} | {时机} |
+  | {l3_agent_2} | {职责} | {时机} |
+
+  ## 执行流程
+
+  ### 阶段零：意图结构化【自己执行】
+  {领域专属的阶段零流程}
+
+  ### 阶段一：分阶段执行【派发给L3】
+  {领域专属的执行流程}
+
+  ### 阶段二：交付审查【自己执行】
+  {领域专属的审查流程}
+
+# ============ 变量注入 ============
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "下级 Agent 映射"
+      type: "reference"
+      content: |
+        ## 下级 Agent 映射
+        **强制规则**：提交任务时 target_id 必须使用本表中的 Agent ID。
+        | Agent | 说明 | Goal 应包含 | 推荐指标 |
+        |-------|------|------------|----------|
+        | {l3_agent_1} | {职责} | {goal内容} | {指标} |
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+    - name: "决策检查点"
+      type: "reference"
+      content: |
+        每轮动作前按此顺序思考（不在正文中输出或复述该流程）：
+        1. 确认范围：我要做什么
+        2. 回顾流程：当前任务类型对应的执行步骤
+        3. 检查约束：需求第一优先，目标多大动作多大，多余的不做；动作是否触碰硬约束红线
+        4. 确认工具：将调用工具的参数和限制
+        严格遵循以上思考结果执行。
+
+# ============ 工具配置 ============
+tool_ids:
+  - task_submit
+  - task_manage
+  - task_evaluate
+  - file_read
+  - file_write
+  - list_directory
+  - human_interaction
+  - memory
+  # resource_search 仅在需要灵活搜索时保留
+
+# ============ 约束 ============
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "评估通过才能结束任务"
+  - "下级 Agent 映射表已列出所有团队成员，提交任务时直接用映射表中的 Agent ID，禁止用 resource_search 搜索 Agent"
+
+soft_constraints:
+  - "优先复用现有资源"
+
+# ============ 产出物 ============
+deliverables:
+  - name: "execution_report"
+    description: "{领域}执行报告"
+    output_path: "{{workspace}}/reports/{{task_id}}_report.md"
+    type: "markdown"
+    required: true
+
+# ============ 运行配置 ============
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 40
+max_reminders: 5
+timeout_seconds: 1800
+
+tags:
+  - "orchestrator"
+  - "L2"
+  - "{domain}"
+
+metadata:
+  author: "System"
+  created_at: "{date}"
+  capabilities:
+    - "task_orchestration"
+    - "domain_expertise"

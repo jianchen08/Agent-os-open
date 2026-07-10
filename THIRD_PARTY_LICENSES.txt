@@ -1,0 +1,33 @@
+# 第三方依赖许可证清单（后端 Python）
+
+> 本清单对应 `pyproject.toml` `[project] dependencies` 的 24 个直接依赖（版本号取自当前环境）。
+> 传递依赖的许可证请运行 `pip-licenses`（全量清单）查阅。
+> 每次 `pyproject.toml` 依赖变更或发版前应重新生成（生成方法见 `THIRD_PARTY_LICENSES.md`）。
+> 所有依赖均为宽松许可证（MIT / Apache-2.0 / BSD-3-Clause），与本项目 Apache-2.0 兼容。
+
+| Name              | Version | License                    |
+| ----------------- | ------- | -------------------------- |
+| aiohttp           | 3.13.5  | Apache-2.0 AND MIT         |
+| bcrypt            | 5.0.0   | Apache-2.0                 |
+| cryptography      | 46.0.3  | Apache-2.0 OR BSD-3-Clause |
+| fastapi           | 0.121.3 | MIT                        |
+| httpx             | 0.28.1  | BSD-3-Clause               |
+| Jinja2            | 3.1.6   | BSD-3-Clause               |
+| jsonschema        | 4.23.0  | MIT                        |
+| litellm           | 1.83.4  | MIT                        |
+| Pillow            | 12.2.0  | MIT                        |
+| psutil            | 7.2.0   | BSD-3-Clause               |
+| pydantic          | 2.12.5  | MIT                        |
+| pydantic-settings | 2.12.0  | MIT                        |
+| PyJWT             | 2.8.0   | MIT                        |
+| python-dotenv     | 1.0.1   | BSD-3-Clause               |
+| python-lsp-server | 1.14.0  | MIT                        |
+| python-multipart  | 0.0.21  | MIT                        |
+| PyYAML            | 6.0.3   | MIT                        |
+| redis             | 7.1.0   | MIT                        |
+| rich              | 13.9.4  | MIT                        |
+| simpleeval        | 1.0.3   | MIT                        |
+| SQLAlchemy        | 2.0.44  | MIT                        |
+| uvicorn           | 0.38.0  | BSD-3-Clause               |
+| watchdog          | 6.0.0   | Apache-2.0                 |
+| watchfiles        | 1.1.1   | MIT                        |

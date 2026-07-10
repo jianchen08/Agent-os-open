@@ -1,0 +1,28 @@
+# Agent OS 运行时依赖（与 pyproject.toml [project] dependencies 保持一致）
+# 本文件供 start_web.sh / start_web_cn.bat / install.sh 等启动脚本使用。
+# 开发依赖见 pyproject.toml [project.optional-dependencies] 的 dev 分组。
+
+pyyaml>=6.0
+rich>=13.0
+aiohttp>=3.9
+watchdog>=3.0
+litellm>=1.0
+pydantic>=2.0
+pydantic-settings>=2.0
+jsonschema>=4.0
+simpleeval>=1.0.5
+python-lsp-server>=1.14.0
+fastapi>=0.110
+python-multipart>=0.0.31
+uvicorn>=0.27
+redis>=5.0
+PyJWT>=2.13.0
+bcrypt>=4.0
+cryptography>=42.0
+psutil>=5.9
+watchfiles>=0.21
+httpx>=0.27
+sqlalchemy>=2.0
+python-dotenv>=1.2.2
+jinja2>=3.1
+Pillow>=10.0

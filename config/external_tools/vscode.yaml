@@ -1,0 +1,41 @@
+# VSCode 扩展连接配置
+name: vscode
+display_name: VSCode Extension
+description: VSCode 编辑器扩展连接器，支持文件操作、选区获取、差异显示等
+type: vscode
+
+# 通信协议
+protocol: websocket
+endpoint: "ws://localhost:9741/ws"
+
+# 超时配置
+connect_timeout: 5.0
+read_timeout: 15.0
+execute_timeout: 30.0
+
+# 重试策略
+retry_policy:
+  max_retries: 3
+  base_delay: 1.0
+  max_delay: 15.0
+
+# 认证（可选）
+auth:
+  type: none
+
+# 心跳
+heartbeat_interval: 15.0
+
+# 沙箱
+enable_sandbox: false
+
+# 支持的操作列表
+extra:
+  version: "1.0.0"
+  operations:
+    - open_file
+    - get_selection
+    - show_diff
+    - apply_edit
+    - get_diagnostics
+    - get_symbols

@@ -1,0 +1,20 @@
+{
+  "id": "forest-mist",
+  "name": "林间薄雾",
+  "basedOn": "dark",
+  "createdAt": "",
+  "updatedAt": "",
+  "customizations": {
+    "name": "林间薄雾",
+    "description": "基于深色主题的森林雾境变体，墨绿主调，宁静沉浸",
+    "colors": {
+      "primary": "#2dd4bf",
+      "secondary": "#14b8a6",
+      "accent": "#5eead4",
+      "status": {
+        "success": "#34d399",
+        "running": "#2dd4bf"
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+config_id: test_orchestrator_agent
+name: 测试编排
+agent_type: orchestrator
+level: L2
+category: task
+description: 测试用编排Agent配置
+system_prompt: 你是一个测试编排Agent
+tool_ids:
+  - task_submit
+
+static_vars:
+  enabled: true
+  items:
+    - name: 任务上下文
+      type: rules
+    - name: 执行报告模板
+      type: path
+      path: templates/execution_report_template.md
+
+dynamic_vars:
+  enabled: false
+  items: []
+
+input_schema:
+  type: object
+  properties:
+    phase:
+      type: string
+    task_description:
+      type: string
+  required:
+    - phase
+    - task_description
+
+output_schema:
+  type: object
+  properties:
+    result_summary:
+      type: string
+
+deliverables:
+  - name: trigger_config
+    type: json
+    required: true
+  - name: execution_log
+    type: markdown
+    required: false
+
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: read
+
+tags: [orchestrator, L2]

@@ -1,0 +1,11 @@
+endpoint:
+  base_url: http://localhost:8988
+  version: v1
+  timeout: 30
+rate_limit:
+  global_limit: 100/minute
+  auth: 5/minute
+  tasks: 20/minute
+  websocket: 50/minute
+cors_origins:
+- '*'

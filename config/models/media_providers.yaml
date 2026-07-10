@@ -1,0 +1,66 @@
+# 媒体 Provider 配置
+# YAML 驱动切换，修改配置行即可切换 Provider，不改代码
+
+media:
+  # === TTS（文本转语音） ===
+  tts:
+    default_provider: edge_tts
+    providers:
+      edge_tts:
+        class: EdgeTTSProvider
+        enabled: true
+        priority: 1
+        config:
+          voice: zh-CN-XiaoxiaoNeural
+          rate: "+0%"
+      minimax_tts:
+        class: MiniMaxTTSProvider
+        enabled: true
+        priority: 2
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "speech-02-turbo"
+
+  # === 图像生成 ===
+  image:
+    default_provider: minimax
+    providers:
+      minimax:
+        class: MiniMaxImageProvider
+        enabled: true
+        priority: 1
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "image-01"
+          prompt_optimizer: true
+      comfyui:
+        class: ComfyUIProvider
+        enabled: true
+        priority: 2
+        config:
+          api_url: "http://127.0.0.1:8188"
+          workflow: default
+
+  # === 视频生成 ===
+  video:
+    default_provider: minimax_video
+    providers:
+      minimax_video:
+        class: MiniMaxVideoProvider
+        enabled: true
+        priority: 1
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "MiniMax-Hailuo-2.3"
+
+  # === 音乐生成 ===
+  music:
+    default_provider: minimax_music
+    providers:
+      minimax_music:
+        class: MiniMaxMusicProvider
+        enabled: true
+        priority: 1
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "music-2.6"

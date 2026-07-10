@@ -1,0 +1,19 @@
+# .git-blame-ignore-revs
+# 让 git blame 跳过以下纯格式化/样式提交,使 blame 指向真正的逻辑变更。
+#
+# 使用方法:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# 或全局:
+#   git config --global blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub 网页端、JetBrains IDE 默认尊重此文件;
+# VS Code 需安装 GitLens 并启用 "Ignore Revisions" 选项。
+
+# style(format): ruff format 全仓库统一 (478 文件)
+a1cff51f671c7f192bb126196cb943005e66bc9f
+
+# style(lint): 清零剩余 lint,统一 ruff ignore 规则族
+ee2e5962b09331cedd7540b9dad44a5ba79f2116
+
+# style(lint): ruff --fix 自动修复 12 项 lint (F401/F541/F811/F841 + isort)
+18ed78238c6dab17f31197e1dd6f27e2d6280d74

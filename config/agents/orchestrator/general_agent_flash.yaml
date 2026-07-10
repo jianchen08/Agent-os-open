@@ -1,0 +1,188 @@
+config_id: general_agent_flash
+name: 通用任务编排者-Flash
+display_name: 通用任务编排者-Flash
+description: '通用任务编排Agent（DeepSeek Flash版），负责编排和执行各类通用任务。
+
+  对于复杂或需要专业化的任务，向下级 Agent 派发；对于简单直接的任务，可自行执行。
+
+  支持资源搜索、任务调度、结果整合和评估。
+
+  '
+agent_type: orchestrator
+category: task
+level: L2
+model_name: deepseek-v4-flash
+system_prompt: "{{path:config/rules/information_integrity_rules.md}}\n{{path:config/rules/document_context_rules.md}}\n\n# 你是通用任务编排者\n\n你负责编排和执行通用任务。对于复杂或需要专业化的任务，你向下级 Agent 派发；对于简单直接的任务，你可以自行执行。\n\n## 核心职责\n\n1. **任务理解**：分析任务描述，识别任务目标和验收标准(AC)\n2. **任务分配**：根据任务性质，将任务分配给合适的专业 Agent 执行\n3. **自主执行**：对于简单任务或无需专业 Agent 的任务，自行执行\n4. **结果评估**：使用 task_evaluate 工具评估任务完成情况\n\n## 执行步骤\n\n1. **需求分析**【自己执行】：分析任务描述，确定任务类型和复杂度\n2. **决策**【自己执行】：判断是自行执行还是派发给专业 Agent\n   - 简单/单步任务 → 【自己执行】\n   - 复杂/专业任务 → 【派发给对应专业Agent】\n3. **执行/派发**：按决策执行\n4. **结果整合**【自己执行】：收集并整合执行结果\n5. **评估**【自己执行】：调用 task_evaluate 评估\n\n## 单步操作\n\n- 使用 resource_search 搜索现有 Agent 和工具资源\n- 使用 file_read/file_write 操作文件\n- 使用 bash_execute 执行命令\n- 使用 web_search/fetch 搜索网络信息\n\n## 工作空间\n\n\n- 每个工具只需调用一次，不要重复调用相同的工具\n- 工具返回成功结果后，不要再次调用同一工具\n- 如果工具返回\"缓存结果\"，说明操作已在之前完成，直接进行下一步\n"
+static_vars:
+  enabled: true
+  items:
+  - '{{rules}}'
+  - name: 可扩展工具索引
+    type: reference
+    content: '## 可扩展工具索引
+
+      以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+
+      - lsp_definition: 跳转到代码定义
+
+      - lsp_references: 查找代码引用
+
+      - lsp_diagnostics: 获取代码诊断信息
+
+      - yaml_validate: 验证YAML配置文件
+
+      - schema_evaluator: 验证JSON/YAML格式或正则模式校验
+
+
+      如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，
+
+      工具将自动加载到当前会话，下一轮即可直接调用。
+
+      '
+dynamic_vars:
+  enabled: true
+  items:
+  - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '{{path:config/rules/execution_review_rules.md}}'
+  - '{{path:config/rules/dispatcher_rules_exec.md}}'
+tool_ids:
+- file_read
+- file_write
+- copy_file
+- move_file
+- delete_file
+- create_directory
+- list_directory
+- bash_execute
+- enhanced_search
+- resource_search
+- web_search
+- fetch
+- memory
+- task_submit
+- task_manage
+- task_evaluate
+- human_interaction
+- design_generate
+- playwright_test
+- design_review
+hard_constraints:
+- 遇到无法解决的问题必须报告
+- 必须先明确任务目标和验收标准再开始执行
+- 如果任务描述中包含验收标准（AC），每个 AC 必须在产出物中有对应实现或回答
+- 上下文继承约束（L1/L2通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间，这会导致上下文断裂
+soft_constraints:
+- 优先使用简单直接的方法
+- 执行前确认理解任务
+- 优先搜索现有资源再搜索网络
+rule_reinforcement:
+  enabled: true
+  include_hard_constraints: true
+  include_soft_constraints: false
+  include_system_prompt_rules: true
+  extraction_markers:
+  - 【重要】
+  - 【必须】
+  - 必须
+  custom_rules: []
+  template: '---
+
+    【执行前请再次确认以下规则】
+
+    {rules}
+
+    ---
+
+    '
+  max_rules: 10
+deliverables:
+- name: execution_report
+  description: 执行报告，包含任务概述、执行记录、产出物索引、修改记录、已知问题与建议
+  output_path: '{{workspace}}/reports/{{task_id}}_report.md'
+  type: markdown
+  template_source: knowledge
+  template_name: config/templates/execution_report_template.md
+  required: true
+recommended_metrics:
+- metric_id: file_check
+  default_params:
+    action: read
+    path: '{{workspace}}/reports/{{task_id}}_report.md'
+- metric_id: format_valid
+  default_params:
+    path: '{{workspace}}/reports/{{task_id}}_report.md'
+    type: markdown
+input_schema:
+  type: object
+  properties:
+    task:
+      type: object
+      description: 任务描述
+      properties:
+        description:
+          type: string
+        inputs:
+          type: object
+        expected_outputs:
+          type: array
+        constraints:
+          type: array
+    context:
+      type: object
+      description: 上下文信息
+  required:
+  - task
+output_schema:
+  type: object
+  properties:
+    execution_result:
+      type: object
+      description: 执行结果
+      properties:
+        status:
+          type: string
+          enum:
+          - success
+          - partial
+          - failed
+        task_description:
+          type: string
+        steps_executed:
+          type: array
+        outputs:
+          type: object
+        issues:
+          type: array
+        suggestions:
+          type: array
+  required:
+  - execution_result
+version: 1.0.0
+is_active: true
+status: active
+max_iterations: 250
+max_reminders: 5
+timeout_seconds: 2400
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+tags:
+- orchestrator
+- task
+- general
+- L2
+- deepseek-flash
+metadata:
+  author: System
+  created_at: '2026-05-30'
+  updated_at: '2026-05-30'
+  capabilities:
+  - task_orchestration
+  - resource_search
+  - general_execution
+  - file_operations
+  - data_processing
+  - information_gathering
