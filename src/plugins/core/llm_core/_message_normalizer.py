@@ -130,7 +130,7 @@ def _repair_truncation(s: str) -> str | None:
             stack.append("{")
         elif c == "[":
             stack.append("[")
-        elif c == "}" and stack and stack[-1] == "{":
+        elif c == "}" and stack and stack[-1] == "{":  # noqa: SIM114
             stack.pop()
         elif c == "]" and stack and stack[-1] == "[":
             stack.pop()
@@ -158,7 +158,7 @@ def _repair_truncation(s: str) -> str | None:
                 in_s = True
             elif ch in "{[":
                 st.append(ch)
-            elif ch == "}" and st and st[-1] == "{":
+            elif ch == "}" and st and st[-1] == "{":  # noqa: SIM114
                 st.pop()
             elif ch == "]" and st and st[-1] == "[":
                 st.pop()

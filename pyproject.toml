@@ -198,7 +198,19 @@ unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
 "src/isolation/manager.py" = ["I001"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+# src/ 下各顶层模块直接以模块名(如 llm/pipeline/plugins)导入，而非 from src.xxx。
+# 必须显式声明真实模块名，否则 ruff 无法稳定识别为 first-party，
+# 在 CI(ubuntu + pip install -e .)环境下会把内部模块误判为 third-party → I001 误报。
+# 同时保留 "src" 以兼容少量 from src.xxx 风格的导入。
+known-first-party = [
+    "src",
+    "agents", "artifacts", "auth", "bridge", "cache", "channels", "config",
+    "connectors", "core", "cost_control", "evaluation", "human_interaction",
+    "infrastructure", "isolation", "llm", "logs", "lsp", "memory", "monitoring",
+    "multimodal", "pipeline", "plugins", "review", "rollback", "scene",
+    "services", "skills", "tasks", "templates", "tools", "triggers", "ui_schema",
+    "utils", "websocket", "workspace",
+]
 combine-as-imports = true
 
 [tool.ruff.format]

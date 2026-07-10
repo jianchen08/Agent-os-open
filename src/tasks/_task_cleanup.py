@@ -178,6 +178,7 @@ class _TaskCleanupMixin:
                 cwd=str(workspace_path),
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if branch_probe.returncode == 0:
                 branch_to_delete = branch_probe.stdout.strip()
@@ -201,6 +202,7 @@ class _TaskCleanupMixin:
                     cwd=str(main_repo),
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 if branch_del.returncode == 0:
                     logger.info(
@@ -566,8 +568,6 @@ class _TaskCleanupMixin:
         Returns:
             操作结果字典
         """
-        import contextlib  # noqa: PLC0415
-
         task = self.get_task(task_id)
         if task is None:
             return {"error": f"任务不存在: {task_id}"}

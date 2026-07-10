@@ -3,13 +3,13 @@
 > **An Evolvable Agent Operating System** — A highly configurable, self-evolving AI Agent platform
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![CI](https://github.com/AI-agent-system/Agent-os/actions/workflows/ci.yml/badge.svg)](https://github.com/AI-agent-system/Agent-os/actions/workflows/ci.yml)
+[![CI](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml/badge.svg)](https://github.com/jianchen08/Agent-os-open/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
-[![Gitee Mirror](https://img.shields.io/badge/Gitee-Mirror-red.svg)](https://gitee.com/agentos/agent-os)
-[![GitHub Primary](https://img.shields.io/badge/GitHub-Primary-black.svg)](https://github.com/AI-agent-system/Agent-os)
+[![Gitee Mirror](https://img.shields.io/badge/Gitee-Mirror-red.svg)](https://gitee.com/jc27/Agent-os-open)
+[![GitHub Primary](https://img.shields.io/badge/GitHub-Primary-black.svg)](https://github.com/jianchen08/Agent-os-open)
 
 [中文](./README.md) | [English](#)
 
@@ -184,8 +184,8 @@ npm run dev
 
 For users in mainland China, this project is also mirrored at:
 
-- **GitHub** (primary): `https://github.com/AI-agent-system/Agent-os`
-- **Gitee** (mirror): `https://gitee.com/agentos/agent-os`
+- **GitHub** (primary): `https://github.com/jianchen08/Agent-os-open`
+- **Gitee** (mirror): `https://gitee.com/jc27/Agent-os-open`
 
 ---
 

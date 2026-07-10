@@ -125,8 +125,15 @@ class _GitOpsMixin:
         cmd = ["git"] + list(args)
         try:
             r = subprocess.run(
-                cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-            )  # noqa: PLW1510
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
             if r.returncode != 0:
                 err_parts = []
                 if r.stderr.strip():
