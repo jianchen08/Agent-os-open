@@ -86,13 +86,19 @@ if [ -n "$BACKEND_HOST_IP" ]; then
     export BACKEND_HOST_IP
 fi
 
-out="$(timeout 120 docker compose up -d 2>&1)"
-rc=$?
-echo "$out" | tail -8
+# docker compose up 实时输出到终端(避免长时间无反馈被误认为卡死),
+# 同时存入临时文件供下方错误特征检测。首次部署需构建前端镜像,耗时较长,
+# 故超时放宽到 600s(镜像已在时几秒即完成)。
+COMPOSE_OUT="${TMPDIR:-/tmp}/compose_up_$$.out"
+timeout 600 docker compose up -d 2>&1 | tee "$COMPOSE_OUT"
+rc=${PIPESTATUS[0]}
+out="$(cat "$COMPOSE_OUT" 2>/dev/null)"
+rm -f "$COMPOSE_OUT"
 
-# compose 超时（124）= 内核被 D 状态污染，daemon 不可响应，需 wsl --shutdown
+# compose 超时（124）= 内核被 D 状态污染或构建耗时超限，需 wsl --shutdown / 重试
 if [ "$rc" -eq 124 ]; then
-    echo "[WARN] docker compose 超时（疑似内核 D 状态污染）"
+    echo "[WARN] docker compose 超时（>600s）。若首次构建前端镜像属正常耗时长；"
+    echo "[WARN] 若反复超时,疑似内核 D 状态污染,请在 Windows 执行 wsl --shutdown 后重试。"
     exit 7
 fi
 
