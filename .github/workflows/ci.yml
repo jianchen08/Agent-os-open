@@ -513,17 +513,19 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-  # ── 阶段 3g: 前端端到端测试（Playwright，最高优先级）─────────
+  # ── 阶段 3g: 前端端到端测试（Playwright，夜间/手动）─────────
   # 完整服务编排：启后端(FastAPI 内存模式) + 前端(vite preview)，
   # 跑 frontend/e2e/ 下所有 spec（对应功能点的端到端验证）。
   # 功能测试优先于单测：e2e 能拦住单测 mock 漏掉的运行时回归。
+  # 仅手动(workflow_dispatch)/夜间(schedule)触发：Playwright 需要真实后端+
+  # 前端+Chromium 三层环境，190+ 测试约 15-17 分钟，且 CI 无头环境偶发 flaky
+  # （input[type=number] 填值、元素超时等时序敏感用例）。普通 push/PR 时跳过，
+  # 避免 failure check 污染 commit 徽章；夜间全量验证仍保留门禁价值。
   frontend-e2e:
     name: Frontend E2E (Playwright)
     runs-on: ubuntu-latest
     needs: [lint]
-    # Playwright E2E 需要真实后端+前端+Chromium 三层环境，118+ 测试约需 10-12 分钟。
-    # 每次都跑，timeout 20 分钟兜底，continue-on-error 防偶发不稳定阻塞 CI。
-    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -678,7 +680,7 @@ jobs:
           python scripts/check_frontend_baseline.py
 
   # ── 阶段 4: 汇总报告 ────────────────────────────────────────
-  # needs 里包含 soak-nightly/llm-e2e，但这俩在 PR 时被各自 if 跳过，
+  # needs 里包含 soak-nightly/llm-e2e/frontend-e2e，但这仨在 push/PR 时被各自 if 跳过，
   # summary 的 if: always() 不会因它们 skipped 而失败。
   summary:
     name: CI Summary
