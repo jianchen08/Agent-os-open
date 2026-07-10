@@ -35,6 +35,20 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}==== $* ====${NC}"; }
 
+# 清理上次失败可能残留的损坏文件(空/坏的 docker.gpg 或 malformed docker.list)。
+# 这些残留会导致本次 apt-get update 报 Malformed entry,脚本无法继续。
+# 本脚本是幂等的,重新生成正确的文件,删除残留是安全的。
+if [ -f /etc/apt/sources.list.d/docker.list ]; then
+    if ! head -1 /etc/apt/sources.list.d/docker.list 2>/dev/null | grep -q '^deb '; then
+        warn "检测到残留的异常 docker.list,清理..."
+        rm -f /etc/apt/sources.list.d/docker.list
+    fi
+fi
+if [ -f /etc/apt/keyrings/docker.gpg ] && [ ! -s /etc/apt/keyrings/docker.gpg ]; then
+    warn "检测到空的 docker.gpg(上次下载失败残留),清理..."
+    rm -f /etc/apt/keyrings/docker.gpg
+fi
+
 # ── 1. 开 systemd ──
 step "1/5 开启 systemd"
 if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
