@@ -118,42 +118,76 @@ if [ -n "$BACKEND_HOST_IP" ]; then
     export BACKEND_HOST_IP
 fi
 
-# 构建与启动分两步: build 耗时不可控(慢网络下拉基础镜像+npm/pip 可能 15 分钟+),
-# 放在超大超时(1800s)内; up 只启动已构建的镜像,几秒完成,短超时(120s)即可。
-# 分开后 build 慢不会导致 up 的 timeout 误判失败。
+# 构建与启动分两步: build 用"无输出超时"监控(只要持续有输出就不杀,
+# 连续 300s 无输出才判定卡死); up 启动已构建镜像,60s 无输出超时。
 export COMPOSE_PROGRESS=plain
 COMPOSE_OUT="${TMPDIR:-/tmp}/compose_up_$$.out"
 
-# 先 build(首次构建前端镜像,慢网络下耗时很长,给 30 分钟)。
-echo "[INFO] docker compose build (首次构建前端镜像,可能需要数分钟)..."
-timeout 1800 docker compose build 2>&1 | tee "$COMPOSE_OUT"
-BUILD_RC=${PIPESTATUS[0]}
+# run_with_idle_timeout: 后台运行命令,监控其 stdout 输出,
+# 连续 IDLE_TIMEOUT 秒无新输出(卡死)才杀掉;只要在持续下载/构建就不中断。
+# $1=idle_timeout_sec  $2..=command
+run_with_idle_timeout() {
+    local idle_timeout="$1"; shift
+    local out_file="${TMPDIR:-/tmp}/idle_monitor_$$.out"
+    local last_size=0
+    local stable_secs=0
+    local check_interval=15
+
+    "$@" > "$out_file" 2>&1 &
+    local cmd_pid=$!
+
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        sleep "$check_interval"
+        local cur_size
+        cur_size=$(wc -c < "$out_file" 2>/dev/null || echo 0)
+        if [ "$cur_size" -gt "$last_size" ]; then
+            # 有新输出,重置计时器,把增量打出来
+            tail -c +$((last_size + 1)) "$out_file" 2>/dev/null
+            last_size="$cur_size"
+            stable_secs=0
+        else
+            stable_secs=$((stable_secs + check_interval))
+            if [ "$stable_secs" -ge "$idle_timeout" ]; then
+                echo "[WARN] No output for ${idle_timeout}s, process likely hung. Killing..."
+                kill -TERM "$cmd_pid" 2>/dev/null
+                sleep 2
+                kill -KILL "$cmd_pid" 2>/dev/null
+                wait "$cmd_pid" 2>/dev/null
+                rm -f "$out_file"
+                return 124
+            fi
+        fi
+    done
+
+    # 进程已结束,输出剩余内容
+    tail -c +$((last_size + 1)) "$out_file" 2>/dev/null
+    wait "$cmd_pid" 2>/dev/null
+    local rc=$?
+    rm -f "$out_file"
+    return $rc
+}
+
+# build: 无输出超时 300s(5分钟没动静才杀,下载慢但持续有进度不会触发)
+echo "[INFO] docker compose build (idle timeout 300s = only kills if 5min no output)..."
+run_with_idle_timeout 300 docker compose build
+BUILD_RC=$?
 if [ "$BUILD_RC" -ne 0 ] && [ "$BUILD_RC" -ne 124 ]; then
-    # build 失败(非超时):可能是 Dockerfile 错误或网络全不通。
-    out="$(cat "$COMPOSE_OUT" 2>/dev/null)"
-    if echo "$out" | grep -qiE 'cgroup is not empty|failed to create (task|shim)'; then
-        echo "[FATAL] Docker/containerd/runc 状态不一致。请 wsl --shutdown 后重试。"
-        exit 7
-    fi
-    echo "[ERROR] docker compose build 失败 (rc=$BUILD_RC)"
+    echo "[ERROR] docker compose build failed (rc=$BUILD_RC)"
     exit 1
 fi
 if [ "$BUILD_RC" -eq 124 ]; then
-    echo "[WARN] docker compose build 超时(>1800s)。网络太慢,请检查网络后重试。"
+    echo "[WARN] build hung (no output for 300s). Check network or wsl --shutdown and retry."
     exit 7
 fi
 
-# build 成功后 up(启动已构建的镜像,应该很快)。
+# up: 启动已构建镜像,60s 无输出超时
 echo "[INFO] docker compose up -d..."
-timeout 120 docker compose up -d 2>&1 | tee "$COMPOSE_OUT"
-rc=${PIPESTATUS[0]}
-out="$(cat "$COMPOSE_OUT" 2>/dev/null)"
+run_with_idle_timeout 60 docker compose up -d
+rc=$?
 rm -f "$COMPOSE_OUT"
 
-# compose 超时（124）= 镜像已构建但 up 仍超时,疑似内核 D 状态污染。
 if [ "$rc" -eq 124 ]; then
-    echo "[WARN] docker compose up 超时(镜像已构建,up 仍慢=疑似内核 D 状态污染)"
-    echo "[WARN] 请在 Windows 执行 wsl --shutdown 后重试。"
+    echo "[WARN] compose up hung (no output for 60s). wsl --shutdown and retry."
     exit 7
 fi
 
