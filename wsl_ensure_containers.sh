@@ -72,6 +72,38 @@ if [ "$stuck" -ne 0 ]; then
     exit 7
 fi
 
+# 确保 daemon.json 配了国内镜像加速(慢网络下从 docker.io 拉镜像会超时)。
+# 如果 daemon.json 不存在或缺少 registry-mirrors,写入并重启 docker。
+DAEMON_JSON="/etc/docker/daemon.json"
+NEED_MIRROR_FIX=0
+if [ ! -f "$DAEMON_JSON" ]; then
+    NEED_MIRROR_FIX=1
+elif ! grep -q "registry-mirrors" "$DAEMON_JSON" 2>/dev/null; then
+    NEED_MIRROR_FIX=1
+fi
+if [ "$NEED_MIRROR_FIX" = "1" ]; then
+    echo "[INFO] Configuring Docker registry mirrors (daocloud + tencent)..."
+    mkdir -p /etc/docker
+    cat > "$DAEMON_JSON" << 'MIRROREOF'
+{
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io",
+    "https://mirror.ccs.tencentyun.com"
+  ],
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+MIRROREOF
+    # 重启 docker daemon 使镜像加速生效
+    if systemctl restart docker 2>/dev/null; then
+        echo "[OK] Docker daemon restarted with registry mirrors"
+        sleep 3
+    elif service docker restart 2>/dev/null; then
+        echo "[OK] Docker service restarted with registry mirrors"
+        sleep 3
+    fi
+fi
+
 echo "[INFO] docker compose up -d"
 
 # WSL 原生 docker 模式下，host.docker.internal 不被注入（非 Docker Desktop）。
