@@ -1,42 +1,12 @@
 # 插件开发完整指南
 
-<!--
-============================================================
-【模板是什么】
-Agent OS 管道插件的完整开发指南，从零开始手把手教你开发一个标准插件。
+Agent OS 管道插件的完整开发指南，从概念到实现，配合真实代码示例讲解。
 
-【模板的作用】
-1. 指导新开发者快速上手 — 从概念到实现的完整路径
-2. 提供端到端教程 — 包含真实可运行的示例
-3. 集成所有工具链 — 脚手架、验证器、测试的联合使用
-4. 建立最佳实践 — 通过示例传递正确的设计模式
-
-【如何使用本模板】
-1. 新手：按顺序从头到尾阅读并实践
-2. 有经验者：跳到相关章节查阅特定主题
-3. 作为参考文档：开发过程中随时查阅规范和模式
-
-【适用场景】
-- 新成员加入团队，需要学习插件开发
-- 开发新的管道插件
-- 理解 Agent OS 插件体系的设计哲学
-- 排查插件开发中的常见问题
-
-【与其他模板的关系】
-- 上游：docs/standards/plugin_development_standard.md（规范定义）
-- 上游：config/templates/plugin_test_template.md（测试模板）
-- 下游：tools/plugin_scaffold.py（脚手架生成器）
-- 下游：tools/plugin_validator.py（验证器）
--->
+> 配套规范见同目录 [插件开发标准规范](plugin_development_standard.md)，接口定义见 `src/pipeline/plugin.py`。
 
 ---
 
-## 第一章：理解插件体系 [必填]
-
-<!--
-> **章节说明**：介绍 Agent OS 的插件体系设计哲学和核心概念。
-> **填写时机**：首次阅读时。
--->
+## 第一章：理解插件体系
 
 ### 1.1 什么是管道插件
 
@@ -69,275 +39,252 @@ Input 插件 B → 读取 state["security.decision"] → 执行拦截
 
 ### 1.4 现有插件一览
 
-| 插件名 | 类型 | 优先级 | 职责 |
-|--------|------|--------|------|
-| message_inject | Input | 默认 | 注入用户消息 |
-| context_window_guard | Input | 默认 | 上下文窗口管理 |
-| param_inject | Input | 20 | 参数注入 |
-| memory_read | Input | 默认 | 记忆检索 |
-| knowledge_inject | Input | 默认 | 知识注入 |
-| prompt_build | Input | 50 | 提示词构建 |
-| security_check | Input | 70 | 安全检查 |
-| stop_check | Output | 默认 | 停止条件检查 |
-| error_check | Output | 默认 | 错误检测 |
-| task_reminder | Output | 默认 | 任务提醒 |
-| result_format | Output | 默认 | 结果格式化 |
-| track | Output | 默认 | 统计追踪 |
+项目 `src/plugins/` 下已有 47 个插件（input 22 / output 21 / core 4），均位于 `src/plugins/{type}/{name}/` 目录下。以下是常用插件及其职责，完整列表直接查看 `src/plugins/{input,output,core}/` 目录：
+
+**Input 插件（部分）：**
+
+| 插件名 | 职责 |
+|--------|------|
+| `context_window_guard` | 上下文窗口管理与压缩 |
+| `param_inject` | 参数注入（task_id / session_id / user_id / timestamp） |
+| `memory_read` | 记忆检索（语义） |
+| `knowledge_inject` | 知识注入 |
+| `prompt_build` | 提示词构建 |
+| `security_check` | 安全检查 |
+| `isolation_guard` | 隔离守卫（工具级拦截） |
+| `level_guard` | 层级守卫 |
+| `tool_schema` | 工具 Schema 注入 |
+| `pause_guard` | 任务暂停检测 |
+
+**Output 插件（部分）：**
+
+| 插件名 | 职责 |
+|--------|------|
+| `stop_check` | 停止条件检查 |
+| `error_check` | 错误检测 |
+| `duplicate_check` | 重复工具调用/输出检测（三级渐进策略） |
+| `task_reminder` | 任务提醒 |
+| `result_format` | 结果格式化 |
+| `track` | 统计追踪（token/耗时） |
+| `output_repetition_guard` | 输出重复守卫 |
+| `stuck_detector` | 卡死检测 |
+| `child_task_guard` | 子任务守卫 |
+| `llm_error_recovery` | LLM 错误恢复 |
+
+**Core 插件：**
+
+| 插件名 | 职责 |
+|--------|------|
+| `llm_core` | LLM 调用核心 |
+| `tool_core` | 工具执行核心 |
+| `stream_repeat_monitor` | 流式重复监控 |
 
 ---
 
-## 第二章：快速开始 — 5 分钟创建一个插件 [必填]
+## 第二章：快速开始 — 创建一个插件
 
-<!--
-> **章节说明**：使用脚手架工具快速创建插件骨架。
-> **填写时机**：开发新插件时。
--->
+### 2.1 创建目录结构
 
-### 2.1 使用脚手架生成器
+> **注意**：项目当前未提供脚手架生成器（`tools/plugin_scaffold.py`）和合规性验证器（`tools/plugin_validator.py`）。插件骨架需手动创建，标准结构如下。
 
-```bash
-# 进入项目根目录
-cd /path/to/agent-os
-
-# 生成 Input 插件骨架
-python tools/plugin_scaffold.py input my_feature --desc "我的新功能插件" --priority 55
-
-# 生成 Output 插件骨架
-python tools/plugin_scaffold.py output result_handler --desc "结果处理器"
-
-# 生成 Core 插件骨架
-python tools/plugin_scaffold.py core custom_core --desc "自定义核心插件"
-```
-
-生成后的目录结构：
+每个插件是一个独立目录，位于 `src/plugins/{input|output|core}/{plugin_name}/`：
 
 ```
-src/plugins/input/my_feature/
-├── __init__.py              # 模块入口
-├── my_feature.py            # 主插件逻辑
-└── tests/
-    ├── __init__.py
-    └── test_my_feature.py   # 测试文件
+src/plugins/output/my_feature/
+├── __init__.py          # 模块入口，导出插件类
+└── plugin.py            # 主插件逻辑（文件名固定为 plugin.py）
 ```
+
+`__init__.py` 使用相对导入导出插件类：
+
+```python
+"""my_feature 插件 — 一句话描述。"""
+
+from .plugin import MyFeaturePlugin
+
+__all__ = ["MyFeaturePlugin"]
+```
+
+> **命名约定**：主文件统一命名为 `plugin.py`（而非 `{plugin_name}.py`），这是项目现有 47 个插件的一致做法。`__init__.py` 通过 `from .plugin import XxxPlugin` 导出。
 
 ### 2.2 注册到管道配置
 
-编辑 `config/pipelines/default.yaml`：
+编辑 `config/pipelines/default.yaml`，在对应插件链（`plugins:` 列表）中添加：
 
 ```yaml
 plugins:
-  # 在适当位置添加（按优先级顺序）
+  # 按 priority 排序插入，参考已有插件的优先级分组
   - name: my_feature
     config:
       enabled: true
-      # 插件特有配置项
+      priority: 20            # 数值越小越先执行
+      # 插件特有配置项（带默认值，见第三章）
 ```
 
-### 2.3 运行验证
+Input 插件还需在对应 `input_routes[].plugins` 列表中按需引用，Output 插件则由 `output_routes` 的路由仲裁自动触发。
+
+### 2.3 运行测试
 
 ```bash
-# 验证插件合规性
-python tools/plugin_validator.py input my_feature
-
-# 运行测试
-PYTHONPATH=src pytest src/plugins/input/my_feature/tests/ -v
+# 项目无独立验证器，通过单元测试验证插件正确性
+PYTHONPATH=src pytest tests/ -k "my_feature" -v
 ```
 
 ---
 
-## 第三章：从零开发 — 完整教程 [必填]
+## 第三章：从零开发 — 完整教程
 
-<!--
-> **章节说明**：手把手开发一个完整的插件，涵盖从设计到测试的全流程。
-> **填写时机**：首次开发插件时，按步骤实践。
--->
+本章以一个 **Output 插件**为例，完整演示从设计到测试的全流程。
+
+> 项目里已有真实的复杂 Output 插件 `duplicate_check`（三级渐进重复检测策略），完整源码见 `src/plugins/output/duplicate_check/plugin.py`，可作为高级参考。本章为教学目的展示一个**精简但接口完全正确**的示例。
 
 ### 3.1 需求场景
 
-我们要开发一个 **`duplicate_check`** 插件（Output 类型），用于检测 LLM 是否产生重复的工具调用和重复输出。
+开发一个 **`result_length_guard`** 插件（Output 类型），在管道输出阶段检查 LLM 输出长度，超过阈值时写入警告标记。
 
 **功能需求**：
-1. 检测连续重复的工具调用（相同工具+相同参数）
-2. 检测重复的文本输出（高相似度）
-3. 超过阈值时设置 `skip_remaining=True` 阻止后续插件处理
+1. 读取 `raw_result`（由 `llm_core` 写入）
+2. 超过阈值时写入 `length_guard.warning` 状态
+3. 不阻断管道流程（错误策略 `SKIP`）
 
 ### 3.2 第一步：设计 State 交互
 
+State 是插件间通信的唯一通道，使用 `{namespace}.{key}` 命名空间格式：
+
 ```python
-# 读取的 state 键
-raw_tool_calls: list[dict]      # 由 LLM Core 写入
-raw_result: str                  # 由 LLM Core 写入
+# 读取的 state 键（由 Core 插件写入）
+raw_result: str | None      # StateKeys.RAW_RESULT，LLM 的原始输出
 
 # 写入的 state 键
-duplicate.is_duplicate: bool     # 是否检测到重复
-duplicate.tool_count: int        # 重复工具调用计数
-duplicate.output_count: int      # 重复输出计数
+length_guard.warning: str | None   # 超长警告，None 表示正常
 ```
+
+> **关键**：计数与跨轮状态应存入 `state`（由引擎在迭代间保持），而非插件实例属性。插件实例在管道内可能被复用，用实例属性做跨迭代计数会出错。真实 `duplicate_check` 的计数全部走 `router.duplicate_count` 等 state 键。
 
 ### 3.3 第二步：创建插件文件
 
-```bash
-python tools/plugin_scaffold.py output duplicate_check --desc "重复检测插件" --priority 30
+手动创建目录（项目未提供脚手架）：
+
+```
+src/plugins/output/result_length_guard/
+├── __init__.py      # 导出 ResultLengthGuardPlugin
+└── plugin.py        # 主逻辑
+```
+
+`__init__.py`：
+
+```python
+"""result_length_guard 插件 — 输出长度守卫。"""
+
+from .plugin import ResultLengthGuardPlugin
+
+__all__ = ["ResultLengthGuardPlugin"]
 ```
 
 ### 3.4 第三步：实现插件逻辑
 
-编辑 `src/plugins/output/duplicate_check/duplicate_check.py`：
+编辑 `src/plugins/output/result_length_guard/plugin.py`：
 
 ```python
-"""duplicate_check 插件 — 检测重复的工具调用和文本输出。
+"""result_length_guard 插件 — 检查 LLM 输出长度。
 
-在管道输出阶段检查 LLM 产生的工具调用和文本是否重复，
-防止陷入无限循环。
+在管道输出阶段读取 raw_result，超过阈值时写入警告状态。
+不阻断管道流程（错误策略 SKIP）。
 
 State 读写:
-    读取: raw_tool_calls, raw_result
-    写入: duplicate.is_duplicate, duplicate.tool_count, duplicate.output_count
+    读取: raw_result
+    写入: length_guard.warning
 
 配置项:
-    enabled (bool): 是否启用，默认 True
-    max_duplicate_calls (int): 最大允许重复工具调用次数，默认 10
-    max_repetitive_output (int): 最大允许重复输出次数，默认 8
+    max_length (int): 输出最大字符数，默认 2000
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from typing import Any
 
-from pipeline.plugin import IOutputPlugin, PluginContext, OutputResult
-from pipeline.types import ErrorPolicy
+from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
+from pipeline.types import ErrorPolicy, StateKeys
 
 logger = logging.getLogger(__name__)
 
 
-class DuplicateCheckPlugin(IOutputPlugin):
-    """检测重复的工具调用和文本输出。
-
-    通过比较连续轮次的工具调用参数和文本输出哈希，
-    检测 LLM 是否陷入重复循环。
+class ResultLengthGuardPlugin(IOutputPlugin):
+    """输出长度守卫插件。
 
     Attributes:
-        error_policy: 错误处理策略，此处使用 SKIP（重复检测失败不影响主流程）
+        error_policy: SKIP，本插件失败不影响主流程
     """
 
-    error_policy: ErrorPolicy = ErrorPolicy.SKIP
+    error_policy = ErrorPolicy.SKIP
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
-        """初始化重复检测插件。
+        """初始化长度守卫插件。
 
         Args:
             config: 插件配置字典
         """
         self._config = config or {}
-        self._enabled = self._config.get("enabled", True)
-        self._max_duplicate_calls = self._config.get("max_duplicate_calls", 10)
-        self._max_repetitive_output = self._config.get("max_repetitive_output", 8)
-        self._call_history: list[str] = []
-        self._output_history: list[str] = []
+        self._max_length = self._config.get("max_length", 2000)
 
     @property
     def name(self) -> str:
         """插件唯一标识名称。"""
-        return "duplicate_check"
+        return "result_length_guard"
 
     @property
     def priority(self) -> int:
-        """插件执行优先级。"""
-        return 30
+        """插件执行优先级（可被 config.priority 覆盖）。"""
+        return self._config.get("priority", 25)
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
-        """执行重复检测。
+        """执行长度检查。
 
         Args:
             ctx: 插件执行上下文
 
         Returns:
-            检测结果，包含重复状态信息
+            包含长度警告状态的输出结果
         """
-        if not self._enabled:
+        raw_result = ctx.state.get(StateKeys.RAW_RESULT)
+        if raw_result is None:
             return OutputResult()
 
-        try:
-            state_updates: dict[str, Any] = {}
-            is_duplicate = False
-
-            # 检测工具调用重复
-            tool_calls = ctx.state.get("raw_tool_calls", [])
-            if tool_calls:
-                call_hash = self._hash_tool_calls(tool_calls)
-                self._call_history.append(call_hash)
-                duplicate_count = self._count_recent_duplicates(self._call_history, call_hash)
-                state_updates["duplicate.tool_count"] = duplicate_count
-
-                if duplicate_count >= self._max_duplicate_calls:
-                    is_duplicate = True
-                    logger.warning(
-                        "Duplicate tool calls detected: %d consecutive calls",
-                        duplicate_count,
-                    )
-
-            # 检测文本输出重复
-            raw_result = ctx.state.get("raw_result", "")
-            if raw_result:
-                output_hash = self._hash_text(str(raw_result))
-                self._output_history.append(output_hash)
-                output_count = self._count_recent_duplicates(self._output_history, output_hash)
-                state_updates["duplicate.output_count"] = output_count
-
-                if output_count >= self._max_repetitive_output:
-                    is_duplicate = True
-                    logger.warning(
-                        "Repetitive output detected: %d consecutive outputs",
-                        output_count,
-                    )
-
-            state_updates["duplicate.is_duplicate"] = is_duplicate
-
+        text = str(raw_result)
+        if len(text) > self._max_length:
+            logger.warning(
+                "[%s] Output length %d exceeds max %d",
+                self.name,
+                len(text),
+                self._max_length,
+            )
             return OutputResult(
-                state_updates=state_updates,
-                skip_remaining=is_duplicate,
+                state_updates={
+                    "length_guard.warning": f"输出长度 {len(text)} 超过上限 {self._max_length}",
+                },
             )
 
-        except Exception as e:
-            logger.error("Plugin %s execution failed: %s", self.name, e)
-            return OutputResult(error=e)
-
-    @staticmethod
-    def _hash_tool_calls(tool_calls: list[dict]) -> str:
-        """计算工具调用的哈希值。"""
-        content = str(sorted(
-            (tc.get("function", {}).get("name", ""), tc.get("function", {}).get("arguments", ""))
-            for tc in tool_calls
-        ))
-        return hashlib.md5(content.encode()).hexdigest()
-
-    @staticmethod
-    def _hash_text(text: str) -> str:
-        """计算文本的哈希值。"""
-        normalized = text.strip().lower()
-        return hashlib.md5(normalized.encode()).hexdigest()
-
-    @staticmethod
-    def _count_recent_duplicates(history: list[str], current: str, window: int = 20) -> int:
-        """计算最近窗口内与当前值相同的次数。"""
-        recent = history[-window:]
-        return sum(1 for h in recent if h == current)
+        return OutputResult(state_updates={"length_guard.warning": None})
 ```
+
+**要点对照真实代码**：
+- 导入路径是 `pipeline.plugin`（`src/pipeline/plugin.py`）和 `pipeline.types`（`src/pipeline/types.py`）
+- `ErrorPolicy` 有四个成员：`ABORT` / `SKIP` / `RETRY` / `FALLBACK`
+- `StateKeys.RAW_RESULT` 等预定义键在 `pipeline.types` 中，避免硬编码字符串
+- `priority` 通常从 `config.get("priority", 默认值)` 读取，便于配置覆盖
+- 跨迭代状态写 state，不存实例属性
 
 ### 3.5 第四步：编写测试
 
-编辑 `src/plugins/output/duplicate_check/tests/test_duplicate_check.py`：
-
 ```python
-"""duplicate_check 插件单元测试。"""
+"""result_length_guard 插件单元测试。"""
 
 from __future__ import annotations
 
-import pytest
-
-from pipeline.plugin import PluginContext, OutputResult
+from pipeline.plugin import PluginContext
+from pipeline.types import StateKeys
+from plugins.output.result_length_guard.plugin import ResultLengthGuardPlugin
 
 
 def make_ctx(state: dict | None = None, config: dict | None = None) -> PluginContext:
@@ -345,126 +292,87 @@ def make_ctx(state: dict | None = None, config: dict | None = None) -> PluginCon
     return PluginContext(state=state or {}, config=config or {}, _services={})
 
 
-def make_plugin(config: dict | None = None):
+def make_plugin(config: dict | None = None) -> ResultLengthGuardPlugin:
     """创建插件实例。"""
-    from plugins.output.duplicate_check.duplicate_check import DuplicateCheckPlugin
-    return DuplicateCheckPlugin(config=config)
+    return ResultLengthGuardPlugin(config=config)
 
 
-class TestDuplicateCheckProperties:
+class TestResultLengthGuardProperties:
     """基础属性测试。"""
 
     def test_name(self) -> None:
-        assert make_plugin().name == "duplicate_check"
+        assert make_plugin().name == "result_length_guard"
 
-    def test_priority(self) -> None:
-        assert make_plugin().priority == 30
+    def test_priority_default(self) -> None:
+        assert make_plugin().priority == 25
+
+    def test_priority_config_override(self) -> None:
+        assert make_plugin(config={"priority": 99}).priority == 99
 
     def test_error_policy_is_skip(self) -> None:
         from pipeline.types import ErrorPolicy
         assert make_plugin().__class__.error_policy == ErrorPolicy.SKIP
 
 
-class TestDuplicateCheckInit:
+class TestResultLengthGuardInit:
     """初始化测试。"""
 
     def test_default_config(self) -> None:
         plugin = make_plugin(config=None)
-        assert plugin._enabled is True
-        assert plugin._max_duplicate_calls == 10
-        assert plugin._max_repetitive_output == 8
+        assert plugin._max_length == 2000
 
     def test_custom_config(self) -> None:
-        plugin = make_plugin(config={
-            "max_duplicate_calls": 5,
-            "max_repetitive_output": 3,
-        })
-        assert plugin._max_duplicate_calls == 5
-        assert plugin._max_repetitive_output == 3
-
-    def test_disabled(self) -> None:
-        plugin = make_plugin(config={"enabled": False})
-        assert plugin._enabled is False
+        plugin = make_plugin(config={"max_length": 500})
+        assert plugin._max_length == 500
 
 
-class TestDuplicateCheckExecute:
+class TestResultLengthGuardExecute:
     """核心执行测试。"""
 
-    @pytest.mark.asyncio
-    async def test_disabled_returns_empty(self) -> None:
-        plugin = make_plugin(config={"enabled": False})
+    async def test_no_result_returns_empty(self) -> None:
+        plugin = make_plugin()
         result = await plugin.execute(make_ctx())
         assert result.state_updates == {}
 
-    @pytest.mark.asyncio
-    async def test_no_duplicates(self) -> None:
+    async def test_normal_length(self) -> None:
         plugin = make_plugin()
-        ctx = make_ctx(state={"raw_tool_calls": [{"function": {"name": "test"}}]})
+        ctx = make_ctx(state={StateKeys.RAW_RESULT: "短文本"})
         result = await plugin.execute(ctx)
-        assert result.state_updates.get("duplicate.is_duplicate") is False
+        assert result.state_updates.get("length_guard.warning") is None
 
-    @pytest.mark.asyncio
-    async def test_detects_duplicate_tool_calls(self) -> None:
-        plugin = make_plugin(config={"max_duplicate_calls": 3})
-        calls = [{"function": {"name": "same_tool", "arguments": "{}"}}]
-
-        # 连续执行 3 次相同调用
-        for _ in range(3):
-            ctx = make_ctx(state={"raw_tool_calls": calls})
-            result = await plugin.execute(ctx)
-
-        assert result.state_updates.get("duplicate.is_duplicate") is True
-        assert result.skip_remaining is True
-
-    @pytest.mark.asyncio
-    async def test_detects_duplicate_output(self) -> None:
-        plugin = make_plugin(config={"max_repetitive_output": 2})
-
-        # 连续执行 2 次相同输出
-        for _ in range(2):
-            ctx = make_ctx(state={"raw_result": "Same output text"})
-            result = await plugin.execute(ctx)
-
-        assert result.state_updates.get("duplicate.is_duplicate") is True
-
-    @pytest.mark.asyncio
-    async def test_empty_state_no_error(self) -> None:
-        plugin = make_plugin()
-        ctx = make_ctx(state={})
+    async def test_exceeds_max_length(self) -> None:
+        plugin = make_plugin(config={"max_length": 5})
+        ctx = make_ctx(state={StateKeys.RAW_RESULT: "这是一段超过五个字符的文本"})
         result = await plugin.execute(ctx)
-        assert result is not None
-        assert result.state_updates.get("duplicate.is_duplicate") is False
+        assert result.state_updates["length_guard.warning"] is not None
+        assert "5" in result.state_updates["length_guard.warning"]
 ```
+
+> **异步测试说明**：项目 `pyproject.toml` 配置了 `asyncio_mode = "auto"`，`async def test_*()` 函数会被 pytest-asyncio 自动识别，**无需** `@pytest.mark.asyncio` 装饰器。
 
 ### 3.6 第五步：注册到管道配置
 
-编辑 `config/pipelines/default.yaml`，在 Output 插件区域添加：
+编辑 `config/pipelines/default.yaml`，在 `plugins:` 的 Output 区域添加：
 
 ```yaml
-  - name: duplicate_check
+  - name: result_length_guard
     config:
-      max_duplicate_calls: 10
-      max_repetitive_output: 8
+      max_length: 2000
+      priority: 25
 ```
 
-### 3.7 第六步：验证和测试
+> Output 插件由 `output_routes` 路由仲裁统一触发，无需像 Input 插件那样在 `input_routes[].plugins` 中显式引用。
+
+### 3.7 第六步：运行测试
 
 ```bash
-# 验证合规性
-python tools/plugin_validator.py output duplicate_check
-
-# 运行测试
-PYTHONPATH=src pytest src/plugins/output/duplicate_check/tests/ -v
+# 项目无独立验证器，通过单元测试验证插件正确性
+PYTHONPATH=src pytest tests/ -k "result_length_guard" -v
 ```
 
 ---
 
-## 第四章：高级主题 [按需]
-
-<!--
-> **章节说明**：涵盖插件开发中的高级主题。
-> **填写时机**：遇到特定场景时查阅。
--->
+## 第四章：高级主题
 
 ### 4.1 类型插槽使用
 
@@ -483,13 +391,13 @@ class MyPlugin(IOutputPlugin):
         slots.register_handler("my_plugin", "on_complete", my_handler_func)
 ```
 
-在其他插件中读取：
+在其他插件中读取（返回类型取决于插件类型，Input→`PluginResult`、Output→`OutputResult`、Core→`dict`）：
 
 ```python
-async def execute(self, ctx: PluginContext) -> PluginResult:
+async def execute(self, ctx: PluginContext) -> OutputResult:
     StatusEnum = ctx.plugin_types.get_enum_class("my_plugin", "status")
     max_items = ctx.plugin_types.get_constant("my_plugin", "max_items")
-    state_key = ctx.plugin_types.get_state_key("my_plugin", "item_count")
+    state_key = ctx.plugin_types.get_state_key("my_plugin", "item_count")  # 返回 "my_plugin.item_count"
     handler = ctx.plugin_types.get_handler("my_plugin", "on_complete")
 ```
 
@@ -554,7 +462,7 @@ class MyOutputPlugin(IOutputPlugin):
         )
 ```
 
-可用路由信号类型：
+可用路由信号类型（定义见 `src/pipeline/types.py` 的 `RouteSignal` 与 `output_routes` 路由表）：
 
 | route_type | 含义 | 效果 |
 |------------|------|------|
@@ -562,7 +470,10 @@ class MyOutputPlugin(IOutputPlugin):
 | `next_tool` | 下一轮执行工具 | `state["core_type"] = "tool_execute"` |
 | `end` | 管道结束 | `state["ended"] = True` |
 | `wait` | 管道挂起 | 保存 state，等待唤醒 |
-| `delegate` | 委派到子管道 | `pipeline_registry.route()` |
+
+> **`delegate` / `decision` 信号说明**：0.1 代码中 `RouteType` 枚举保留了 `delegate` 和 `decision`，但引擎实际不消费这两个信号——跨管道路由在 0.1 已通过 task 工具链实现。新插件开发**不应**使用这两个信号。0.2 已正式将其从路由信号中移除（收敛为 4 种），跨管道路由统一走工具触发专门服务，而非由引擎直接派生子管道。
+
+`RouteSignal` 的完整字段：`route_type`（必填）、`target`（路由目标，可为字符串或列表）、`reason`（原因描述）、`payload`（附加数据）。
 
 ### 4.4 配置覆盖（Agent 级别）
 
@@ -581,11 +492,7 @@ plugins:
 
 ---
 
-## 第五章：常见问题 [按需]
-
-<!--
-> **章节说明**：解答插件开发中的常见问题。
--->
+## 第五章：常见问题
 
 ### Q1：插件应该使用什么错误策略？
 
@@ -639,10 +546,9 @@ async def execute(self, ctx: PluginContext) -> PluginResult:
 
 ### Q5：插件测试如何处理异步？
 
-使用 `pytest-asyncio`：
+项目 `pyproject.toml` 配置了 `asyncio_mode = "auto"`，`async def test_*()` 函数会被 pytest-asyncio 自动识别，**无需** `@pytest.mark.asyncio` 装饰器：
 
 ```python
-@pytest.mark.asyncio
 async def test_my_plugin() -> None:
     plugin = MyPlugin()
     ctx = make_ctx()
@@ -656,19 +562,20 @@ async def test_my_plugin() -> None:
 
 开发完成后，逐项检查：
 
-- [ ] 使用脚手架生成标准目录结构
+- [ ] 目录结构符合标准（`{type}/{name}/` 下 `__init__.py` + `plugin.py`）
+- [ ] 主文件命名为 `plugin.py`，`__init__.py` 用 `from .plugin import XxxPlugin` 导出
 - [ ] 正确继承 `IInputPlugin` / `ICorePlugin` / `IOutputPlugin`
 - [ ] 实现 `name`、`priority`、`execute` 三个必需成员
-- [ ] 声明了正确的 `error_policy`
-- [ ] 构造函数接受 `config: dict | None = None`
-- [ ] State 键使用命名空间格式
-- [ ] 不直接修改 `ctx.state`
+- [ ] 声明了正确的 `error_policy`（`ABORT` / `SKIP` / `RETRY` / `FALLBACK`）
+- [ ] 构造函数接受 `config: dict[str, Any] | None = None`
+- [ ] State 键使用命名空间格式（`{namespace}.{key}`），跨迭代状态存 state 不存实例属性
+- [ ] 优先从 `config.get("priority", 默认值)` 读取优先级
+- [ ] 不直接修改 `ctx.state`，通过返回 `state_updates` 让引擎合并
 - [ ] 不使用 `eval()` / `exec()` 等不安全操作
-- [ ] 有单元测试覆盖核心路径
+- [ ] 有单元测试覆盖核心路径和错误路径
 - [ ] 模块和类有完整文档字符串
 - [ ] 在 `config/pipelines/default.yaml` 中注册
-- [ ] 通过 `plugin_validator` 验证
-- [ ] 所有测试通过
+- [ ] 所有测试通过（`PYTHONPATH=src pytest tests/ -k "<插件名>" -v`）
 
 ---
 
@@ -676,36 +583,10 @@ async def test_my_plugin() -> None:
 
 | 资源 | 路径 | 说明 |
 |------|------|------|
-| 插件开发标准规范 | `docs/standards/plugin_development_standard.md` | 完整规范文档 |
-| 插件测试流程模板 | `config/templates/plugin_test_template.md` | 测试编写指南 |
-| 脚手架生成器 | `tools/plugin_scaffold.py` | 一键生成插件骨架 |
-| 插件验证器 | `tools/plugin_validator.py` | 自动检查插件合规性 |
-| 管道配置 | `config/pipelines/default.yaml` | 默认管道配置 |
-| 插件接口定义 | `src/pipeline/plugin.py` | IPlugin 等基类定义 |
-| 类型插槽 | `src/pipeline/plugin_types.py` | 类型注册机制 |
-| 现有插件示例 | `src/plugins/` | 22+ 已有插件可参考 |
-
----
-
-<!--
-
-## 评估指南
-
-> **检查维度**：
->
-> | 维度 | 检查内容 | 必填 | 通过标准 |
-> |------|---------|------|---------|
-> | 完整性 | 覆盖从概念到实现的完整路径 | 是 | 5 章 + 2 附录 |
-> | 准确性 | 代码示例可直接运行 | 是 | 示例与现有代码一致 |
-> | 可操作性 | 按教程可实际开发出插件 | 是 | 包含完整的端到端示例 |
-> | 格式规范 | Markdown 格式正确 | 是 | 代码块有语言标注 |
->
-> **评估结论标准**：
->
-> | 结论 | 判定条件 | 后续动作 |
-> |------|---------|---------|
-> | 通过 | 所有必填维度通过 | 指南可用 |
-> | 有条件通过 | 必填维度通过，存在改进建议 | 标注改进项 |
-> | 不通过 | 存在必填维度未通过 | 退回修改 |
-
--->
+| 插件开发标准规范 | `docs/guides/plugin_development_standard.md` | 完整规范文档（同目录） |
+| 插件接口定义 | `src/pipeline/plugin.py` | `IPlugin`/`IInputPlugin`/`ICorePlugin`/`IOutputPlugin`/`PluginContext`/`PluginResult`/`OutputResult` |
+| 类型与枚举 | `src/pipeline/types.py` | `ErrorPolicy`/`RouteSignal`/`StateKeys` 定义 |
+| 类型插槽 | `src/pipeline/plugin_types.py` | `PluginTypeSlot` 类型注册机制 |
+| 管道配置 | `config/pipelines/default.yaml` | 默认管道配置（插件注册位置） |
+| 真实插件示例 | `src/plugins/output/duplicate_check/plugin.py` | 三级渐进策略的完整 Output 插件实现 |
+| 现有插件目录 | `src/plugins/{input,output,core}/` | 47 个已有插件可参考（input 22 / output 21 / core 4） |

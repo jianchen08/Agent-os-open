@@ -39,7 +39,7 @@
 #### 复盘系统
 - **触发机制** —— 阈值触发（500 条记录）/ 间隔触发（7 天）/ 手动触发（agent 或用户）
 - **双路径降级** —— LLM 深度复盘管道优先，失败时降级到 ReviewEngine
-- **实施位置** —— `src/memory/maintenance/{review_engine,service}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml` + `docs/design/复盘系统设计.md`
+- **实施位置** —— `src/memory/maintenance/{review_engine,service}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml`
 
 > 注：本版本复盘系统聚焦"触发 + 复盘 + 沉淀"，记忆侧的容量治理归入记忆系统演进（见 [ROADMAP.md](ROADMAP.md)），不在复盘模块中描述。
 
@@ -118,5 +118,5 @@
 - **次版本号**：向下兼容的功能新增
 - **修订号**：向下兼容的 Bug 修复
 
-[未发布]: https://github.com/AI-agent-system/Agent-os/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/AI-agent-system/Agent-os/releases/tag/v0.1.0
+[未发布]: https://github.com/jianchen08/Agent-os-open/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jianchen08/Agent-os-open/releases/tag/v0.1.0

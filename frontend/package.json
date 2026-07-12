@@ -6,7 +6,7 @@
   "description": "灵汐 AgentOS 前端 — 聊天界面与可视化配置",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AI-agent-system/Agent-os"
+    "url": "https://github.com/jianchen08/Agent-os-open"
   },
   "type": "module",
   "scripts": {

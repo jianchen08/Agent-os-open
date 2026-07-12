@@ -1,10 +1,12 @@
 """直接用 litellm 测试 normalize 后的消息序列"""
 import asyncio
+import os
+
 import litellm
 
 litellm.suppress_debug_info = True
 
-API_KEY = "[REDACTED]"
+API_KEY = os.environ.get("MINIMAX_API_KEY", "your-minimax-api-key")
 API_BASE = "https://api.minimaxi.com/v1"
 MODEL = "minimax/MiniMax-M2.7"
 

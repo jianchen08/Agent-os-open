@@ -91,10 +91,7 @@ def minimax_config():
         "provider": "minimax",
         "model_name": "MiniMax-M2.7",
         "api_base": "https://api.minimaxi.com/v1",
-        "api_key": os.environ.get(
-            "MINIMAX_API_KEY",
-            "[REDACTED]",
-        ),
+        "api_key": os.environ.get("MINIMAX_API_KEY", "your-minimax-api-key"),
         "default_params": {"temperature": 0.7, "max_tokens": 8192},
     }
 

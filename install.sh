@@ -259,7 +259,7 @@ main() {
     if [[ "$os_type" == "unknown" ]]; then
         err "不支持的操作系统: $(uname -s)"
         err "支持: Linux, macOS"
-        err "Windows 请使用 install_cn.bat"
+        err "Windows 请使用 install_native_docker.bat"
         exit 1
     fi
 

@@ -36,8 +36,7 @@ logger = logging.getLogger("CLI_TEST")
 
 def _set_env():
     """设置 API Key 环境变量。"""
-    os.environ.setdefault("MINIMAX_API_KEY",
-        "[REDACTED]")
+    os.environ.setdefault("MINIMAX_API_KEY", "your-minimax-api-key")
 
 
 def _create_engine_and_services():

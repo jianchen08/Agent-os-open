@@ -80,6 +80,22 @@ src/logs/
 *.log
 .ports
 
+# ─── 本地运行/调试产物(防 auto-save 提交混入,不入库)───
+# 启动脚本运行日志及其调试包装脚本
+_run_log.txt
+start_web_cn.log
+start_web_cn_log.bat
+# 一次性评估/语义检查报告(过程产物,见 docs/working/)
+eval_report_*.md
+# 崩溃转储(根目录已由 *.stackdump 覆盖,此处补 frontend/ 等子目录)
+*.stackdump
+# 纯数字误建文件(如 `python3.11` 命令重定向错误产生的 3.11)
+/3.11
+
+# ─── IDE / Agent 本地工作区(规划过程、会话产物,不入库)───
+# 整体忽略 .zcode/,防止未来新增子目录(如 cache/、tmp/)再次泄露
+.zcode/
+
 # ─── 数据库 / 运行时数据 ───
 data/
 database.db

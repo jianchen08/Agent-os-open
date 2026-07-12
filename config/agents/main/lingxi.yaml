@@ -94,7 +94,7 @@ system_prompt: |-
 
   #### 工作空间规则
 
-  - **资源管理任务**（提交给 resource_manager_agent）需要设置 `workspace="D:\myproject\container_08f57bc14532"`
+  - **资源管理任务**（提交给 resource_manager_agent）需要设置 `workspace="<项目根目录绝对路径>"`
   - workspace 参数含义、子任务继承、inherit_workspace_from 等通用规则参见 task_submit 工具描述
 
   ### 失败处理原则

@@ -2,7 +2,7 @@
 
 > 本文档面向**希望深入了解灵汐内部机制、进行二次开发或参与核心贡献**的开发者。
 
-> **数据准确性说明**（2026-06-23）：本架构文档基于实际代码核对
+> **数据准确性说明**：本架构文档基于实际代码核对
 > - Python 版本：3.11+（`pyproject.toml` `requires-python = ">=3.11"`）
 > - FastAPI / Redis：在 25+ 文件中实际 import，均已声明于 `pyproject.toml` 的 24 个核心运行时依赖中
 > - React 版本：19.2（`frontend/package.json` `"react": "^19.2.0"`）
@@ -292,7 +292,7 @@ src/channels/
 
 - **触发**：`trigger_review` 工具（`src/tools/builtin/trigger_review/tool.py`）解析父 `pipeline_id` 后调用 `MemoryMaintenanceService.trigger_llm_review()`；另有 REST 入口 `POST /api/v1/maintenance/review`。带自环保护（复盘管道内不再触发）与单运行守卫。
 - **执行**：服务收集所有 `review_status=pending` 的已结束管道，按 Agent/状态分组，按 token 预算（模型上下文窗口 × `skeleton_budget_percent`，默认 15%，上限 `review_batch_limit`=10）分批，每批注册并启动子 `review_agent` 管道，注入目标清单 + 被复盘 Agent 的硬/软约束。
-- **产出**：拉取报告（轮询上限 ~600s）→ 持久化到 KnowledgeService **并**写入 `docs/working/review_report_{id}.md` → 标记管道已复盘 → 回调通知父管道。
+- **产出**：拉取报告（轮询上限 ~600s）→ 持久化到 KnowledgeService **并**写入运行时工作区的复盘报告（`review_report_{id}.md`）→ 标记管道已复盘 → 回调通知父管道。
 - **记忆清理**：周期性触发器 `memory_maintenance_check`（间隔 `cleanup_check_interval`，默认 86400s）驱动 `CleanupEngine.cleanup_by_age_and_capacity()`，按**复盘状态 × 年龄 × 容量**三维矩阵决策：
 
   | 复盘状态 | 年龄 | 容量 | 动作 |
@@ -322,7 +322,7 @@ src/channels/
 - **任务打回重做**：任务状态机支持打回，重新进入执行
 - **版本对比**：`ReviewDiff` 组件（LCS 算法 side-by-side/unified）+ 后端 `get_version_diff` API + `annotation_service` 批注 CRUD 已具备
 
-> 文本审批闭环已上线。审批请求携带制品（artifacts）的协议增强与工作区自动联动待补全（详见 [ROADMAP.md](../../ROADMAP.md)）。
+> 文本审批闭环已上线。审批请求携带制品（artifacts）的协议增强与工作区自动联动待补全（详见 [ROADMAP.md](../ROADMAP.md)）。
 
 ### 强制评估系统（Mandatory Evaluation）
 

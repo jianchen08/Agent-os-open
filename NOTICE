@@ -18,7 +18,7 @@ Copyright 2026 Lingxi AgentOS Contributors
 - LiteLLM —— 统一 LLM 接口（MIT）
 - Pydantic —— 数据验证（MIT）
 - pyyaml —— YAML 解析（MIT）
-- Redis —— 内存数据库（BSD-3）
+- Redis —— 内存数据库（MIT）
 - rich —— 终端美化（MIT）
 - watchdog —— 文件系统监控（Apache 2.0）
 - python-lsp-server —— 语言服务协议（MIT）

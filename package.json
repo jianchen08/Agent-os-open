@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AI-agent-system/Agent-os.git"
+    "url": "https://github.com/jianchen08/Agent-os-open.git"
   },
   "main": "dist-electron/main.js",
   "scripts": {
