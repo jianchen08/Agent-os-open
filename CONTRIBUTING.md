@@ -146,7 +146,7 @@ Agent-os/
 │   ├── agents/          # Agent 系统（注册表、YAML 加载、协作）
 │   ├── tools/           # 工具系统（内置工具、MCP 适配、注册表）
 │   ├── memory/          # 记忆系统（EPISODE/SEMANTIC、检索注入、复盘维护）
-│   ├── channels/        # 通道层（WebSocket/CLI/API/钉钉/飞书/企微/QQ + 网关）
+│   ├── channels/        # 通道层（Web/CLI/API + 网关；含 IM 适配器实验代码）
 │   ├── skills/          # Skill 注册与发现
 │   ├── isolation/       # 工作区隔离（Docker/Host Provider、worktree）
 │   ├── triggers/        # 触发器系统（Cron/事件/间隔）

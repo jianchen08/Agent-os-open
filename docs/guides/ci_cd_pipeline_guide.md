@@ -63,6 +63,7 @@ pip install ruff mypy
 │                         触发条件                                        │
 │   push 到 main/develop 分支                                            │
 │   Pull Request 到 main/develop 分支                                    │
+│   workflow_dispatch（手动）/ schedule（定时跑全链路 LLM e2e）          │
 └─────────────────────────┬───────────────────────────────────────────────┘
                           │
                           ▼
@@ -91,7 +92,7 @@ pip install ruff mypy
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  阶段 3: Tests（test job，依赖 lint 通过）                             │
 │  ┌──────────────────────────────────────────────────────┐               │
-│  │ pytest tests/                                        │               │
+│  │ pytest <显式指定子目录，详见 3.3 节>                │               │
 │  │   ├── conftest.py 初始化统一日志系统                  │               │
 │  │   ├── 每个 test 自动收集结果到 ReportGenerator       │               │
 │  │   ├── 失败 test 触发 BugLocator 定位                 │               │
@@ -127,7 +128,7 @@ pip install ruff mypy
 
 | 变量 | CI 中的值 | 说明 |
 |------|----------|------|
-| `PYTHON_VERSION` | `3.10` | Python 版本 |
+| `PYTHON_VERSION` | `3.11` | Python 版本 |
 | `REPORT_DIR` | `reports` | 报告输出目录 |
 | `LOG_LEVEL` | `WARNING` | 测试期间日志级别 |
 | `LOG_OUTPUT` | `console` | 日志输出目标 |
@@ -157,14 +158,14 @@ tests/
 │   └── report_generator.py  # 结构化报告生成器
 ├── unit/                    # 单元测试（独立模块，无外部依赖）
 ├── integration/             # 集成测试（模块间交互）
-├── channels/                # 通道层测试（钉钉/飞书/QQ/企微等）
+├── channels/                # 通道层测试（Web/CLI/API 等）
 ├── connectors/              # 连接器测试
 ├── tools/                   # 工具测试
 ├── monitoring/              # 监控模块测试
 ├── electron/                # Electron 相关测试
 ├── suites/                  # 测试套件（按功能组织）
 ├── manual/                  # 手动测试脚本
-└── test_*.py                # 各功能模块测试文件（80+ 文件）
+└── test_*.py                # 各功能模块测试文件（120+ 文件）
 ```
 
 ### 3.2 pytest 常用命令
@@ -182,10 +183,10 @@ python -m pytest tests/ -q
 python -m pytest tests/test_task2_bugfixes.py tests/test_task_manage_refactor.py -v
 
 # 管道相关测试
-python -m pytest tests/test_pipeline_integration.py tests/test_direct_pipeline_routing.py -v
+python -m pytest tests/test_pipeline_integration.py tests/test_ws_routing_defect.py -v
 
 # WebSocket 相关测试
-python -m pytest tests/test_websocket_api_imports.py tests/test_websocket_sender_queue.py -v
+python -m pytest tests/test_websocket_api_imports.py tests/test_ws_and_api_alignment.py -v
 ```
 
 #### 按关键词筛选
@@ -201,12 +202,20 @@ python -m pytest tests/ -k "memory" -v
 #### 按标记筛选
 
 ```bash
-# pyproject.toml 中定义的标记
-# markers = ["integration: LLM integration tests (require --run-integration)"]
+# pyproject.toml 中注册了 18 个标记（unit/integration/e2e/slow/requires_api 等）
+# 用 -m 按标记筛选
 
-# 运行集成测试（需要显式 opt-in）
-python -m pytest tests/ --run-integration -v
+# 只运行单元测试
+python -m pytest tests/ -m "unit" -v
+
+# 只运行集成测试
+python -m pytest tests/ -m "integration" -v
+
+# 排除需要外部服务的测试
+python -m pytest tests/ -m "not requires_api and not requires_redis" -v
 ```
+
+> **注意**：项目启用了 `--strict-markers`，未在 `pyproject.toml` 注册的标记会直接报错。
 
 #### 详细输出模式
 
@@ -223,38 +232,87 @@ python -m pytest tests/ --tb=short --no-header -q
 
 ### 3.3 CI 中的测试运行方式
 
-CI 流水线中运行测试时排除了以下目录（这些目录的测试需要特殊环境或手动触发）：
+CI 的 `test` job **显式指定要运行的测试目录**（而非全量跑 `tests/` 再排除）。完整定义见 `.github/workflows/ci.yml` 的 `test` job，要点：
+
+**批次 1 — 核心单元/功能测试**（显式列目录）：
 
 ```bash
-python -m pytest tests/ \
-  --tb=long \
-  --no-header \
-  -q \
-  --ignore=tests/suites \
-  --ignore=tests/integration \
-  --ignore=tests/e2e \
-  --ignore=tests/manual \
-  --ignore=tests/electron \
-  --ignore=tests/monitoring \
-  --ignore=tests/tools \
-  --ignore=tests/unit \
-  --ignore=tests/channels \
-  --ignore=tests/connectors \
-  --ignore=tests/test_utils
+python -m pytest \
+  tests/unit \
+  tests/test_utils \
+  tests/core \
+  tests/tools \
+  tests/triggers \
+  tests/pipeline \
+  tests/multimodal \
+  tests/suites/core \
+  tests/channels \
+  tests/connectors \
+  tests/monitoring \
+  --tb=long --no-header -q \
+  "${DESELECT_ARGS[@]}"   # 从 .github/known-skipped-tests.txt 动态读取 --deselect
 ```
+
+- `.github/known-skipped-tests.txt` 是**基线锁**：该文件只能删不能加，防止红测静默扩散。修复红测后从该文件移除即可恢复门禁。
+
+**批次 2/3 — 精确纳入的稳定测试**（整目录存在既有红测时，仅纳入指定文件）：
+
+```bash
+python -m pytest tests/suites/plugins/test_multimodal_preprocessor_text.py ...
+python -m pytest tests/suites/memory/test_restart_recompression_guard.py tests/suites/memory/test_e2e_compression.py ...
+```
+
+**批次 4/5 — 散落测试与功能套件**（走基线锁脚本）：
+
+```bash
+python scripts/check_test_batch_baseline.py --batch 4   # tests/test_*.py + integration + test_external_tools
+python scripts/check_test_batch_baseline.py --batch 5   # tests/suites/ 下未纳入的套件
+```
+
+- 基线锁机制：失败数 > `.github/test-batch-baseline.txt` 的基线 → CI 红（拦截增长）；失败数 ≤ 基线 → CI 绿（允许 pre-existing 持平，鼓励逐步修复后收紧）。
+- 每测试 30 秒超时（pytest-timeout `--timeout=30`），防止挂起。
+
+**其他 CI job 覆盖的测试**（不在 test job 内）：
+
+| Job | 运行内容 | 触发条件 |
+|-----|---------|---------|
+| `e2e`（阶段 3b） | `tests/e2e`（真实 WebSocket 链路，排除 `test_auth`/`test_chat_flow`） | push/PR |
+| `llm-e2e`（阶段 3c） | `tests/e2e/test_review_b_path_llm_e2e.py`（真实 LLM 复盘） | 仅手动/定时 |
+| `timing`（阶段 3a） | `@pytest.mark.timing` 时序不变量用例 | push/PR |
+| `soak-smoke` / `soak-nightly` | `@pytest.mark.soak` 长时间渗漏稳定性 | push/PR / 定时 |
+
+> 完整 job 定义与触发条件以 `.github/workflows/ci.yml` 为准。
 
 ### 3.4 pytest 配置（pyproject.toml）
 
 ```toml
 [tool.pytest.ini_options]
 asyncio_mode = "auto"          # 自动识别 async 测试函数
-testpaths = ["src/tests"]      # 默认测试路径
+testpaths = ["tests"]          # 默认测试路径
+addopts = ["--strict-markers"] # 未注册的 marker 直接报错
 markers = [
-    "integration: LLM integration tests (require --run-integration)",
+    "unit: 单元测试",
+    "integration: 集成测试",
+    "e2e: 端到端测试",
+    "slow: 慢速测试",
+    "requires_api: 需要真实 API 的测试",
+    "requires_redis: 需要 Redis 的测试",
+    "requires_db: 需要数据库的测试",
+    "offline: 可离线运行的测试",
+    "timing: 关键时序不变量（事件顺序/间隔/超时边界），独立 stage 阻塞门禁",
+    "soak: 长时间渗漏与稳定性回归（资源回收/RSS斜率/任务累积）",
+    "core: 核心单元测试",
+    "m6: M6插件测试",
+    "stage: Stage闭环测试",
+    "cli: CLI测试",
+    "memory: 内存经验测试",
+    "task: Task E2E测试",
+    "agent: Agent测试",
+    "llm: LLM相关测试",
 ]
 ```
 
-> **注意**：`asyncio_mode = "auto"` 意味着所有 `async def test_*()` 函数自动被 pytest-asyncio 处理，无需 `@pytest.mark.asyncio` 装饰器。
+> **注意**：完整 markers 列表以 `pyproject.toml` 为准（共 18 个）。`asyncio_mode = "auto"` 意味着所有 `async def test_*()` 函数自动被 pytest-asyncio 处理，无需 `@pytest.mark.asyncio` 装饰器。`--strict-markers` 要求所有 `@pytest.mark.xxx` 必须在上方 markers 列表中注册，否则报错。
 
 ### 3.5 conftest.py 中的全局配置
 
@@ -268,16 +326,20 @@ markers = [
 
 #### 排除的测试文件
 
-`conftest.py` 中的 `collect_ignore` 列表会在默认 `pytest` 运行时排除：
+`conftest.py` 中的 `collect_ignore` 列表会在默认 `pytest` 运行时排除需要特殊外部服务（向量库/Redis/真实 LLM 等）的根级测试文件：
 
 ```python
 collect_ignore = [
-    "suites",
     "test_cross_domain_discovery.py",
     "test_directory_generator.py",
     "test_memory_metrics.py",
     "test_pgvector_store.py",
-    "test_state_evolution_levels.py",
+    "test_task_submit_event_chain.py",
+    "test_yaml_error_chain.py",
+]
+```
+
+> **注意**：`suites` 目录已从 `collect_ignore` 移除，`tests/suites/` 现可被正常收集为集成测试。
     "test_task_submit_event_chain.py",
     "test_yaml_error_chain.py",
 ]
@@ -1025,7 +1087,7 @@ pytest 执行
     }
   ],
   "environment": {
-    "python": "3.10.x",
+    "python": "3.11.x",
     "platform": "linux",
     "cwd": "/path/to/project",
     "user": "runner"
@@ -1062,8 +1124,6 @@ cat reports/ruff_results.json | jq '[.[] | .code] | group_by(.) | map({code: .[0
 ```python
 """新功能的测试。"""
 
-import pytest
-
 
 def test_basic_case():
     """测试基本场景。"""
@@ -1071,9 +1131,12 @@ def test_basic_case():
     assert result.status == "expected_status"
 
 
-@pytest.mark.asyncio
 async def test_async_case():
-    """测试异步场景（pytest-asyncio 自动处理，无需装饰器）。"""
+    """测试异步场景。
+
+    asyncio_mode = "auto"，async def test_*() 自动被 pytest-asyncio 识别，
+    无需 @pytest.mark.asyncio 装饰器。
+    """
     result = await some_async_function()
     assert result is not None
 ```
@@ -1191,9 +1254,9 @@ def test_with_context(log_context):
 
 ---
 
-## 附录 A：CI/CD 流水线配置完整参考
+## 附录 A：CI/CD 流水线主要 Job 概览
 
-> 来源：`.github/workflows/ci.yml`
+> 来源：`.github/workflows/ci.yml`。完整 job 定义以该文件为准（还包含 e2e、定时全链路 LLM 测试等 job，此处仅列主干）。
 
 | 阶段 | Job 名称 | 依赖 | 产出物 |
 |------|----------|------|--------|
@@ -1211,7 +1274,7 @@ def test_with_context(log_context):
 | ruff | `line-length` | 120 |
 | ruff | `target-version` | py310 |
 | ruff | `lint.select` | E, W, F, I, B, C4, UP, N, SIM, PT, RET, ARG, PTH, ERA, PL |
-| mypy | `python_version` | 3.10 |
+| mypy | `python_version` | 3.11 |
 | mypy | `ignore_missing_imports` | true |
 | mypy | `check_untyped_defs` | true |
 | pytest | `asyncio_mode` | auto |
@@ -1230,4 +1293,3 @@ def test_with_context(log_context):
 | `src/core/logging/config.py` | 日志配置 |
 | `src/core/logging/formatters.py` | 日志格式化器（JSON + 结构化文本） |
 | `src/core/logging/context.py` | 日志上下文追踪 |
-| `docs/feature_audit_report.md` | 功能审计报告 |

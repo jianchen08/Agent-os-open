@@ -51,7 +51,7 @@
 - **Python code**: ~308K lines (`src/` ~166K + `tests/` ~142K)
 - **Frontend code**: ~96K lines (`frontend/src/`)
 - **Built-in tools**: 41 (`src/tools/builtin/` with `tool.py`)
-- **Live channels**: 6 (CLI / DingTalk / Feishu / QQ / WeCom / WebSocket)
+- **Live channels**: 2 (Web / CLI)
 - **Modules**: 35 (subdirectories under `src/`)
 
 ---
@@ -100,8 +100,8 @@ Task submission must include acceptance criteria (evaluation metrics); after pip
 ### 10. 40+ Built-in Tools — Out-of-the-box Toolbox
 Files, Shell, code search, browser, network, memory, media generation, IDE integration (41 actual tool.py implementations), including MCP external tool integration.
 
-### 11. Multi-channel Access — One Kernel, Everywhere Reachable
-Web, CLI, DingTalk, Feishu, QQ, WeCom, HTTP API share the same kernel; full MCP protocol support to integrate any MCP service.
+### 11. Dual-channel Access — One Kernel, Everywhere Reachable
+Web and CLI share the same kernel; full MCP protocol support to integrate any MCP service.
 
 ### 12. Skill Integration — Extend Domain Capabilities on Demand
 Loadable, reusable skill packages that can be injected into Agents on demand to gain new domain capabilities (document processing, PDF generation, etc.) without writing code.

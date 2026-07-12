@@ -70,7 +70,7 @@
 - ✅ **Skill 能力集成** —— 可加载可复用的技能（skill）包，按需注入 Agent，扩展领域能力
 - ✅ 8 套前端主题（5 预设 + 3 动态）
 - ✅ MCP 协议基础支持
-- ✅ 多通道（CLI / Web / 钉钉 / 飞书 / 企微 / QQ）+ HTTP API
+- ✅ 多通道（Web / CLI）+ HTTP API
 - ✅ Docker Compose 一键部署
 
 > 0.1.0 是后续所有版本的依赖基线。

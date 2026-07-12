@@ -7,7 +7,7 @@
 > - FastAPI / Redis：在 25+ 文件中实际 import，均已声明于 `pyproject.toml` 的 24 个核心运行时依赖中
 > - React 版本：19.2（`frontend/package.json` `"react": "^19.2.0"`）
 > - 工具数量：41 个 tool.py 实现（实际），下文用"40+ 内置工具"表述
-> - 通道数量：6 个真实通道（CLI / 钉钉 / 飞书 / QQ / 企微 / WebSocket），HTTP API 走 `src/channels/api/` 作为 REST 端点
+> - 通道数量：2 个真实通道（Web / CLI），HTTP API 走 `src/channels/api/` 作为 REST 端点
 
 ---
 
@@ -55,7 +55,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                         Channels (多通道)                        │
-│   Web UI │ CLI │ HTTP API │ 钉钉 │ 飞书 │ 企微 │ QQ │ ...     │
+│            Web UI   │   CLI   │   HTTP API   │   ...            │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
                              ▼
@@ -253,11 +253,11 @@ src/channels/
 ├── websocket/    # WebSocket 后端（Web UI 后端，主入口 app_factory.py）
 ├── cli/          # CLI
 ├── api/          # HTTP API（FastAPI，21 个 routes_*.py）
-├── gateway/      # 网关层（鉴权 / 消息标准化 / 会话路由，IM 通道共用）
-├── dingtalk/     # 钉钉
-├── feishu/       # 飞书
-├── wecom/        # 企微
-└── qq/           # QQ
+├── gateway/      # 网关层（鉴权 / 消息标准化 / 会话路由）
+├── dingtalk/     # 钉钉适配器（实验性，未充分测试）
+├── feishu/       # 飞书适配器（实验性，未充分测试）
+├── wecom/        # 企微适配器（实验性，未充分测试）
+└── qq/           # QQ 适配器（实验性，未充分测试）
 ```
 
 ### 容器任务系统
