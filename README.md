@@ -15,7 +15,7 @@
 
 ## 📑 目录
 
-- [项目简介](#-项目简介) · [核心亮点](#-核心亮点) · [项目规模](#-项目规模)
+- [项目简介](#-项目简介) · [演示视频](#-演示视频) · [核心亮点](#-核心亮点) · [项目规模](#-项目规模)
 - [快速开始](#-快速开始)（[Windows](#方式一windows-一键启动推荐) / [Linux·macOS](#方式二linux--macos-一键启动) / [手动开发](#方式三手动开发模式)）
 - [多实例配置](#跨设备--多实例配置说明)
 - [文档导航](#-文档导航) · [镜像仓库](#-镜像仓库)
@@ -53,6 +53,16 @@
 - **内置工具**：41 个（`src/tools/builtin/` 下含 `tool.py` 实现）
 - **真实通道**：6 个（CLI / 钉钉 / 飞书 / QQ / 企微 / WebSocket）
 - **模块数**：35 个（`src/` 下子目录）
+
+---
+
+## 🎬 演示视频
+
+<a href="https://www.bilibili.com/video/BV1d1NV62Efh">
+  <img src="https://img.shields.io/badge/▶_观看演示视频-B站-FF69B4?style=for-the-badge&logo=bilibili&logoColor=white" alt="灵汐 AgentOS 演示视频" />
+</a>
+
+> 点击上方图片在 B站 观看简单演示视频。
 
 ---
 

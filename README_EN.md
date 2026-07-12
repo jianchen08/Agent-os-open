@@ -15,7 +15,7 @@
 
 ## 📑 Table of Contents
 
-- [Overview](#-overview) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
+- [Overview](#-overview) · [Demo Video](#-demo-video) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
 - [Quick Start](#-quick-start)（[Windows](#option-1-windows-one-click-recommended) / [Linux·macOS](#option-2-linux--macos-one-click) / [Manual](#option-3-manual-development)）
 - [Multi-Instance Config](#cross-device--multi-instance-configuration)
 - [Documentation](#-documentation-navigation) · [Mirrors](#-mirror-repositories)
@@ -53,6 +53,16 @@
 - **Built-in tools**: 41 (`src/tools/builtin/` with `tool.py`)
 - **Live channels**: 6 (CLI / DingTalk / Feishu / QQ / WeCom / WebSocket)
 - **Modules**: 35 (subdirectories under `src/`)
+
+---
+
+## 🎬 Demo Video
+
+<a href="https://www.bilibili.com/video/BV1d1NV62Efh">
+  <img src="https://img.shields.io/badge/▶_Watch_Demo-Bilibili-FF69B4?style=for-the-badge&logo=bilibili&logoColor=white" alt="Lingxi AgentOS Demo Video" />
+</a>
+
+> Click the image above to watch a quick demo on Bilibili.
 
 ---
 
