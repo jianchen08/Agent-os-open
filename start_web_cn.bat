@@ -179,6 +179,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Tim
 echo [INFO] Waiting for WSL kernel to exit ^(~10s^)...
 REM ping-based delay avoids timeout.exe (unreliable under non-interactive shells).
 ping -n 11 127.0.0.1 >nul
+REM Disable known D-state culprits (landscape-client etc) to prevent re-pollution on restart.
+echo [INFO] Disabling known D-state services (landscape-client etc)...
+wsl -d Ubuntu -u root -- bash -c "systemctl disable landscape-client landscape-client.service unattended-upgrades 2>/dev/null; systemctl mask landscape-client landscape-client.service 2>/dev/null; true" >nul 2>&1
 echo [INFO] Re-probing WSL response...
 goto :wsl_alive_entry
 

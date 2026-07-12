@@ -30,8 +30,10 @@ if [ -n "$uptime_int" ] && [ "$uptime_int" -lt 60 ] 2>/dev/null; then
     boot_phase=1
 fi
 
-# 已知的良性初始化进程，启动期可忽略其瞬时 D 状态
-ignore_names="systemd-sysctl|systemd-journal|multipathd|systemd-udevd"
+# 已知的良性初始化进程，启动期可忽略其瞬时 D 状态。
+# landscape-client(landscape-confi) 是 Ubuntu 系统信息采集服务,
+# 偶发 D 状态但不影响 docker/项目运行。
+ignore_names="systemd-sysctl|systemd-journal|multipathd|systemd-udevd|landscape-conf|landscape-clien|unattended-upgr|packagekitd|apt-daily|dpkg"
 
 # 第一遍：采集所有处于 D 状态的 PID + Name
 first_pass=""
