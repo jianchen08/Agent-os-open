@@ -559,8 +559,12 @@ export async function getGenericConfig(
 /**
  * 保存通用配置
  *
+ * 注意：后端 GenericConfigUpdateRequest 要求 PUT body 形如 {"data": {...}}，
+ * 而非裸配置对象（见 tests/e2e/test_config_rw.py::_put_config 的封装格式）。
+ * 缺失 `data` 包装会被 Pydantic 拒绝并返回 422。
+ *
  * @param configPath 配置路径
- * @param data 完整配置数据
+ * @param data 完整配置数据（裸 dict，本函数内部会包装）
  * @param options 重试选项
  */
 export async function saveGenericConfig(
@@ -571,7 +575,7 @@ export async function saveGenericConfig(
   return requestWithRetry(async () => {
     const response = await apiClient.put<Record<string, unknown>>(
       API_ENDPOINTS.CONFIG.GENERIC_UPDATE(configPath),
-      data,
+      { data },
     )
     return response.data
   }, options)
