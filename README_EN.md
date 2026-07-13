@@ -30,8 +30,8 @@
 ### Core Innovations
 
 - 🔧 **Highly Configurable** — Agents are YAML data + loaders, not hardcoded classes. Dynamic prompt loading supports cache-hit-friendly patterns: volatile content (timestamps, session rules) is injected as a separate trailing message so the leading system prompt stays byte-stable and preserves prompt-cache hits. Injected fragments can be arranged by usage frequency at config time to maximize cache-hit rate. Change a prompt without restarting (`hot_swap` supports hot replacement, with rollback on failure).
-- 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review of finished pipelines, sedimenting experience reports into the knowledge base) → modify, enhance and refactor the system, forming a closed loop that gets smarter with use. A companion memory cleanup mechanism decides retention along three dimensions (review-status × age × capacity), ensuring reviews are sedimented before raw memories are reclaimed.
-- 🔌 **Plugin-based Pipeline Architecture** — 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) + pause/resume + every decision observable as state; plugin-level errors via `ABORT` / `SKIP` / `RETRY` / `FALLBACK` strategies (currently default `RETRY`, extensible per tool)
+- 🔄 **Self-Evolving Closed Loop** — Task execution → review (deep LLM review of finished pipelines, sedimenting experience reports into the knowledge base) → modify/add configuration and add plugins to enhance the system, forming a closed loop that gets smarter with use. A companion memory cleanup mechanism decides retention along three dimensions (review-status × age × capacity), ensuring reviews are sedimented before raw memories are reclaimed.
+- 🔌 **Plugin-based Pipeline Architecture** — The engine just holds a shared `state` and runs a `while not ended` loop; **you can freely write or configure plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): a plugin can end the pipeline, suspend it, decide whether the next round calls the LLM or a tool, or read/write any state field — all without touching engine code. Combined with 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) and `ABORT` / `SKIP` / `RETRY` / `FALLBACK` error strategies, every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
 - 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release — see [ROADMAP.md](ROADMAP.md).
 
 ### Tech Stack
@@ -108,6 +108,39 @@ Loadable, reusable skill packages that can be injected into Agents on demand to 
 
 ### 13. Hot Swap — Evolve Without Downtime
 `hot_swap` (snapshot → replace → health-check → rollback-on-failure) supports runtime hot replacement of plugins/Agents, while `hot_reload` watches config files and auto-reloads on change — debug and iterate without restarting the service.
+
+### 14. Plugin-based Pipeline Architecture — Every State of Agent Execution Is Yours to Control
+
+The engine does only one thing: hold a shared `state` dict and run a `while not state["ended"]` loop. **"What each round does" is entirely up to plugins** — wherever you want to intervene in Agent execution, whatever you want to rewrite, skip, or terminate, you implement it as a plugin. No engine code changes needed.
+
+```
+User message → Channel layer → Pipeline engine ┌─ Input plugins (preprocess, security, context…)
+                                               ├─ Core plugin (LLM call / tool execution)
+                                               └─ Output plugins (result shaping, routing…)
+                                                   ↑ all plugins read/write the same shared state ↑
+```
+
+**Four ways a plugin controls state**:
+
+| Control | What the plugin does | Effect |
+|---------|----------------------|--------|
+| Read/write fields | Returns `state_updates`, merged into `state` on the fly | Downstream plugins, routing table, and Core all see it |
+| End / suspend | Sets `state["ended"]=True`, or a field that makes routing pick `wait` | Ends the pipeline now, or suspends until an external event (e.g. approval) then `wake()` resumes |
+| Routing table picks plugins by state | Input route table re-evaluates `condition` every round | Different rounds of the same pipeline run different plugin sets — no hardcoded branching |
+| Output signal picks next round | Output plugins emit a routing signal | Next round runs LLM, a tool, ends, or suspends |
+
+**The 4 routing signals** clearly define "what the next round does":
+
+| Signal | Meaning |
+|--------|---------|
+| `next_llm` | Next round calls the LLM |
+| `next_tool` | Execute a tool |
+| `end` | End the pipeline |
+| `wait` | Suspend, wait for external input/approval |
+
+**4 error strategies** let you declare what a plugin does on failure: `ABORT` (stop), `SKIP` (skip and continue), `RETRY` (retry), `FALLBACK` (use a fallback result) — security checks use `ABORT` (uncertain → must not continue), context building uses `FALLBACK` (degraded still works), stats plugins use `SKIP` (failure must not break the round).
+
+**Config-driven onboarding**: write a Python class implementing `IInputPlugin` / `ICorePlugin` / `IOutputPlugin`, declare it via `name:` or `class:` in YAML, and the engine auto-discovers and instantiates it at startup. Adding a plugin touches no engine code; existing plugins support hot swap and rollback.
 
 ---
 
