@@ -1,3 +1,6 @@
+# syntax=docker/dockerfile:1
+# BuildKit 前端：--mount=type=cache 需要此指令 + DOCKER_BUILDKIT=1 才生效。
+# 构建时务必带 DOCKER_BUILDKIT=1（install.sh 与 docker_provider._ensure_image 已带）。
 # =============================================================================
 # AgentOS Container Runtime Image
 # 用于隔离任务执行的自定义镜像，基于 python:3.11-slim 预装工具链
@@ -18,7 +21,13 @@ LABEL maintainer="Agent OS Team" \
 #   预装 nodejs+npm 让前端 e2e 可在容器内运行。
 # - chromium 系统依赖(system-issue #3): playwright install --with-deps 只装 python 侧，
 #   浏览器运行的 .so 依赖(libnss3/libatk/libgbm 等)在此一并装掉。
-RUN apt-get update \
+# apt 缓存挂载：复用宿主已下载的 .deb，二次构建跳过下载（需 BuildKit）。
+# 注意：不再 rm -rf /var/lib/apt/lists/*，否则会清空 cache 挂载反而失效；
+# 改用禁用 docker-clean 配置，让 apt 复用缓存的索引和包。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         curl \
@@ -46,8 +55,7 @@ RUN apt-get update \
         libpangocairo-1.0-0 \
         libpango-1.0-0 \
         libcairo2 \
-        fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
+        fonts-liberation
 
 # 创建 python -> python3 软链接（确保 python 命令可用）
 RUN ln -sf /usr/local/bin/python3 /usr/local/bin/python
@@ -66,9 +74,24 @@ RUN ln -sf /usr/local/bin/python3 /usr/local/bin/python
 # 4. 浏览器自动化(system-issue #3)：playwright。chromium 浏览器本体在下一层装。
 ARG PY_MIRROR="https://mirrors.aliyun.com/pypi/simple/"
 ARG PY_TRUSTED="mirrors.aliyun.com"
-RUN pip install --no-cache-dir \
+# 注意：pip 层故意不加 --mount=type=cache。实测 BuildKit 的 cache 挂载到
+# /root/.cache/pip 会导致 pip 26.x 在 python:3.11-slim 里 Segmentation fault
+# （解析依赖阶段崩溃，16s 即 exit 139）。去掉 cache mount 后正常构建成功。
+# 缓存增益主要来自 apt 层（体积大、下载慢），pip 层牺牲缓存换稳定性。
+#
+# 不把 "pip>=24.0" 放进 install 列表。pip 24.0 自带的 packaging 库有 bug
+# （_parse_letter_version 在解析某些版本号时变 None → TypeError: 'NoneType' object
+# is not callable），在解析"自身要不要升级"时直接崩溃，三个镜像源全失败。
+# 改为：先单独 python -m pip install --upgrade pip 升级到最新（修复 bug），
+# 再装其余依赖。
+RUN \
+    (python -m pip install --upgrade pip -i ${PY_MIRROR} --trusted-host ${PY_TRUSTED} \
+        || python -m pip install --upgrade pip \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple/ --trusted-host pypi.tuna.tsinghua.edu.cn \
+        || python -m pip install --upgrade pip) \
+    && pip install --no-cache-dir \
         -i ${PY_MIRROR} --trusted-host ${PY_TRUSTED} \
-        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" "pip>=24.0" \
+        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
         "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
@@ -77,14 +100,14 @@ RUN pip install --no-cache-dir \
     || pip install --no-cache-dir \
         -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
         --trusted-host pypi.tuna.tsinghua.edu.cn \
-        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" "pip>=24.0" \
+        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
         "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
         "playwright>=1.40" \
     || pip install --no-cache-dir \
-        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" "pip>=24.0" \
+        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
         "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
@@ -104,7 +127,10 @@ RUN pip install --no-cache-dir \
 # - 失败仅 warning，不阻断镜像构建（断网时仍能得到可用镜像，#1/#2 不受影响，
 #   容器内 e2e 暂不可用，可后续 docker exec 单独补装）。
 ARG PW_HOST=""
-RUN if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
+# playwright 缓存挂载：复用宿主已下载的浏览器 zip，二次构建跳过下载（需 BuildKit）。
+# 保持原有 || echo 容错：下载失败仅 warning，不阻断镜像构建。
+RUN --mount=type=cache,target=/root/.cache/ms-playwright \
+    if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
     && (python -m playwright install chromium \
         || python -m playwright install chromium \
         || echo "[warn] playwright chromium 下载失败，镜像仍可用但容器内 e2e 不可用")
@@ -116,7 +142,8 @@ RUN if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; f
 # "Executable doesn't exist at chromium_headless_shell-..."。
 # 这里独立装一次 shell，确保即使完整 chrome 那层失败也能补齐 shell；
 # --only-shell 避免重复下载完整 chrome。
-RUN if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
+RUN --mount=type=cache,target=/root/.cache/ms-playwright \
+    if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
     && (python -m playwright install --only-shell chromium \
         || python -m playwright install --only-shell chromium \
         || echo "[warn] playwright chromium-headless-shell 下载失败，默认 headless e2e 将不可用")

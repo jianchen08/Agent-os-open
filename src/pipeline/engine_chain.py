@@ -137,7 +137,13 @@ def _is_retryable(
     exc: Exception,
 ) -> bool:
     """判断核心插件错误是否可重试。"""
+    from isolation.decider import IsolationUnrecoverableError  # noqa: PLC0415
     from pipeline.types import ErrorPolicy as _EP  # noqa: N814,PLC0415
+
+    # 隔离环境不可恢复：永不重试（_handle_core_error 已 ENDED，这里兜底防
+    # 止 RETRY 策略在 break 前再 sleep 重试一次）。
+    if isinstance(exc, IsolationUnrecoverableError):
+        return False
 
     return error_policy == _EP.RETRY and attempts < max_retries + 1
 
@@ -154,6 +160,22 @@ def _handle_core_error(
     core_plugin: Any,
 ) -> None:
     """处理核心插件执行错误：记录日志、追踪连续错误、构建 llm_error_info。"""
+    # 隔离环境不可恢复（容器反复建不起来，自愈失败）：直接挂引擎。
+    # 这不是 LLM 能 fixable 的错误，继续 retry/next_llm 只会每轮空等 docker create
+    # 30s × 3 次。engine 收到熔断信号即 ENDED，任务失败上报上级。
+    from isolation.decider import IsolationUnrecoverableError  # noqa: PLC0415
+
+    if isinstance(exc, IsolationUnrecoverableError):
+        logger.error(
+            "[engine_chain] 隔离环境不可恢复，强制结束管道 | core_type=%s | %s",
+            core_type,
+            exc,
+        )
+        state[StateKeys.ENDED] = True
+        state[StateKeys.RAW_ERROR] = str(exc)
+        state[StateKeys.RAW_RESULT] = None
+        return
+
     logger.error("Core plugin error: %s", exc)
     state[StateKeys.RAW_ERROR] = str(exc)
     state[StateKeys.RAW_RESULT] = None

@@ -175,7 +175,8 @@ deploy_services() {
     # cua 容器镜像(隔离执行用)
     if [[ -f "docker/agentos/Dockerfile" ]]; then
         info "构建 agentos 镜像(隔离执行运行时)..."
-        docker build -t agentos:latest -f docker/agentos/Dockerfile . || {
+        # DOCKER_BUILDKIT=1 启用 Dockerfile 里的 --mount=type=cache，复用本机下载缓存。
+        DOCKER_BUILDKIT=1 docker build -t agentos:latest -f docker/agentos/Dockerfile . || {
             err "agentos 镜像构建失败"
             return 1
         }

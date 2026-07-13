@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePath  # noqa: F401
 from typing import Any
 
-from isolation.decider import IsolationDecider
+from isolation.decider import IsolationDecider, IsolationUnrecoverableError
 from isolation.providers.base import IsolationProvider
 from isolation.providers.docker_provider import DockerProvider
 from isolation.providers.host_provider import HostProvider
@@ -92,6 +92,14 @@ def _create_providers_from_config(
                 "network_mode": docker_config.get("network_mode", "bridge"),
                 # system-issue #3 escape hatch：容器端口映射到宿主，默认空。
                 "publish_ports": docker_config.get("publish_ports", []),
+                # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build
+                # （BuildKit 缓存复用本机已下载的包），无 Dockerfile 则回退 pull。
+                # 默认 dockerfile_path/build_context 相对仓库根；超时默认 600s
+                # （镜像含 apt+pip+playwright 下载，分钟级）。
+                "auto_build": docker_config.get("auto_build", True),
+                "dockerfile_path": docker_config.get("dockerfile_path", "docker/agentos/Dockerfile"),
+                "build_context": docker_config.get("build_context", "."),
+                "build_timeout": docker_config.get("build_timeout", 1800),
             },
         )
         logger.debug(
@@ -123,6 +131,13 @@ class IsolationManager:
     """
 
     CONTAINER_NAME_PREFIX = "cua-"
+
+    # 连续建环境失败达此阈值即熔断（跨 core-retry 累计，ws 维度计数）。
+    # docker create 自身已有「重建1次」+ engine core retry 3 次，这里的计数是
+    # 在更高一层的「每轮 tool_execute」维度累计：连续 N 轮都建不起来即判定
+    # 隔离环境不可恢复，抛 IsolationUnrecoverableError 让 engine_chain 挂引擎，
+    # 不再每轮空转 docker create 30s。
+    _MAX_ENV_FAILURES = 3
 
     def __init__(
         self,
@@ -178,6 +193,9 @@ class IsolationManager:
         # workspace 标识 → 专属锁，串行化同一 workspace 的「查找→创建→写缓存」，
         # 防止并发任务重复创建同名容器（docker create 报 Conflict）。
         self._ws_locks: dict[str, asyncio.Lock] = {}
+        # workspace 标识 → 连续建环境失败次数。成功建/复用即清零；
+        # 达 _MAX_ENV_FAILURES 抛 IsolationUnrecoverableError 熔断。
+        self._ws_env_fail_counts: dict[str, int] = {}
         self._running = False
 
     async def start(self):
@@ -531,6 +549,7 @@ class IsolationManager:
                 if existing and existing.status == EnvironmentStatus.READY.value:
                     existing.last_used_at = datetime.now(UTC).isoformat()
                     logger.debug(f"[IsolationManager] 复用 workspace 容器: {container_name} (env_id={env_id})")
+                    self._ws_env_fail_counts.pop(ws_key, None)
                     return existing
 
             # 3. 尝试从 Docker 查找已有容器
@@ -545,6 +564,7 @@ class IsolationManager:
                 if provider is not None:
                     provider._environments[existing_env.env_id] = existing_env
                 logger.debug(f"[IsolationManager] 恢复已有容器: {container_name}")
+                self._ws_env_fail_counts.pop(ws_key, None)
                 return existing_env
 
             # 4. 检查是否可以复用父级环境
@@ -553,6 +573,7 @@ class IsolationManager:
                 if existing and existing.status == EnvironmentStatus.READY.value:
                     existing.last_used_at = datetime.now(UTC).isoformat()
                     logger.debug(f"复用父级环境: {parent_env_id}")
+                    self._ws_env_fail_counts.pop(ws_key, None)
                     return existing
 
             # 5. 决策隔离级别
@@ -629,6 +650,7 @@ class IsolationManager:
             self._workspace_env_map[ws_key] = env.env_id
 
             logger.debug(f"创建新隔离环境: {env.env_id} (level={level.value}, container_name={container_name})")
+            self._ws_env_fail_counts.pop(ws_key, None)
             return env
 
     def set_task_repository(self, repo: Any) -> None:
@@ -935,15 +957,62 @@ class IsolationManager:
             "tool_name": tool_name,
         }
 
-        # 获取或创建环境
-        env = await self.get_or_create_environment(**rebuild_kwargs)
+        # 获取或创建环境。
+        # docker create/pull 超时（subprocess.TimeoutExpired）历史上在此冒泡成
+        # Core 异常 → engine_chain 当 transient 不熔断 → 无限 next_llm 空转（每轮
+        # 白等 docker create 30s × core retry 3 次 ≈ 4min）。这里把建环境整体 try：
+        # 未达阈值返回失败 result（走正常路径回 LLM，LLM 可自行调整）；
+        # 达阈值抛 IsolationUnrecoverableError 让 engine_chain 直接 ENDED 挂引擎。
+        try:
+            env = await self.get_or_create_environment(**rebuild_kwargs)
 
-        # 执行前健康检查：容器非就绪(created/exited/dead)时透明自愈重建一次，
-        # 避免 docker start 失败被吞后，用卡死的容器执行导致 "is not running"。
-        env = await self._ensure_env_healthy_or_rebuild(
-            env,
-            rebuild_kwargs=rebuild_kwargs,
-        )
+            # 执行前健康检查：容器非就绪(created/exited/dead)时透明自愈重建一次，
+            # 避免 docker start 失败被吞后，用卡死的容器执行导致 "is not running"。
+            env = await self._ensure_env_healthy_or_rebuild(
+                env,
+                rebuild_kwargs=rebuild_kwargs,
+            )
+        except IsolationUnrecoverableError:
+            raise  # 熔断信号原样上抛，engine_chain 收到后 ENDED
+        except Exception as build_exc:
+            ws_key = PurePath(workspace).name if workspace else (task_id or "unknown")
+            count = self._ws_env_fail_counts.get(ws_key, 0) + 1
+
+            if count >= self._MAX_ENV_FAILURES:
+                # 隔离环境连续多次建不起来：自愈已无意义（docker/WSL 长时间不可用），
+                # 继续重试/next_llm 只会空转烧钱。清零计数后抛熔断信号挂引擎。
+                self._ws_env_fail_counts.pop(ws_key, None)
+                logger.error(
+                    "[IsolationManager] 隔离环境连续 %d/%d 次不可用，触发熔断 | "
+                    "ws_key=%s task=%s | last_error=%s",
+                    count,
+                    self._MAX_ENV_FAILURES,
+                    ws_key,
+                    task_id,
+                    build_exc,
+                )
+                raise IsolationUnrecoverableError(
+                    f"隔离环境连续 {count} 次不可用，自愈失败，已熔断。"
+                    f"请检查 Docker/WSL 是否正常运行"
+                    f"（docker ps 是否秒回、agentos:latest 镜像是否存在）。"
+                    f"最近错误: {build_exc}"
+                ) from build_exc
+
+            self._ws_env_fail_counts[ws_key] = count
+            logger.warning(
+                "[IsolationManager] 建隔离环境失败 (%d/%d)，返回失败结果 | "
+                "ws_key=%s | error=%s",
+                count,
+                self._MAX_ENV_FAILURES,
+                ws_key,
+                build_exc,
+            )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=f"隔离环境暂不可用({count}/{self._MAX_ENV_FAILURES}): {build_exc}",
+                metadata={"isolation_unavailable": True, "fail_count": count},
+            )
 
         logger.debug(f"在环境 {env.env_id} 中执行操作: {operation.get('type', 'unknown')}")
 

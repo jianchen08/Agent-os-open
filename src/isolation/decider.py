@@ -95,3 +95,14 @@ class IsolationError(Exception):
     """隔离策略错误"""
 
     pass
+
+
+class IsolationUnrecoverableError(IsolationError):
+    """隔离环境不可恢复：自愈重建反复失败，继续 retry/next_llm 无意义。
+
+    manager.execute_in_isolation 在「同一 workspace 连续建环境失败达阈值」时抛出，
+    engine_chain 识别后直接 ENDED 挂掉引擎，不空转。
+    正常路径不应抛出，仅 docker/WSL 长时间不可用时触发。
+    """
+
+    pass

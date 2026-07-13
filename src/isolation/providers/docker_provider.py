@@ -51,6 +51,23 @@ class DockerProvider(IsolationProvider):
         self._docker_sem = asyncio.Semaphore(self._max_docker_concurrency)
         # WSL docker 模式缓存：DOCKER_HOST 指向 WSL2/TCP 时为 True（需 Windows→WSL 路径转换）
         self._wsl_docker_cache: bool | None = None
+        # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build（BuildKit 缓存复用本机
+        # 已下载的 apt/pip/playwright 包，二次构建秒级）；无 Dockerfile 则回退 docker pull。
+        # 仓库根：src/isolation/providers/ 上溯 3 级（与 stream_handler.py parents[3] 同手法）。
+        from pathlib import Path  # noqa: PLC0415
+
+        self._repo_root = Path(__file__).resolve().parents[3]
+        self._auto_build = bool(self._config.get("auto_build", True))
+        _df = self._config.get("dockerfile_path", "docker/agentos/Dockerfile")
+        _df_path = Path(_df)
+        self._dockerfile_path = _df_path if _df_path.is_absolute() else self._repo_root / _df
+        _ctx = self._config.get("build_context", ".")
+        _ctx_path = Path(_ctx)
+        self._build_context = _ctx_path if _ctx_path.is_absolute() else self._repo_root / _ctx
+        self._build_timeout = float(self._config.get("build_timeout", 1800))
+        # 构建锁：防多个协程并发触发 docker build（争抢同一 Dockerfile、浪费 CPU/磁盘）。
+        # 本包首个 asyncio.Lock，配合二次 inspect 实现双重检查。
+        self._build_lock = asyncio.Lock()
 
     def _is_wsl_docker(self) -> bool:
         """判断 docker daemon 是否在 WSL2 Linux 里（非 Docker Desktop）。"""
@@ -115,13 +132,72 @@ class DockerProvider(IsolationProvider):
         except Exception as e:
             return False, f"Docker 检查失败: {e}"
 
-    async def _run_cmd(self, args: list[str], timeout: float = 30) -> tuple[int, bytes, bytes]:
-        """统一执行命令（同步 subprocess + 线程池）。"""
+    async def _run_cmd(
+        self,
+        args: list[str],
+        timeout: float = 30,
+        env: dict[str, str] | None = None,
+        stream_log: bool = False,
+    ) -> tuple[int, bytes, bytes]:
+        """统一执行命令（同步 subprocess + 线程池）。
+
+        env：可选，非 None 时合并到当前 os.environ 上（如 {DOCKER_BUILDKIT: "1"}），
+        未提到的环境变量保持继承宿主，避免误清空 PATH 等关键变量。
+
+        stream_log：为 True 时改用 Popen 实时读取 stderr（BuildKit 进度走 stderr）
+        转成 INFO 日志，让 docker build 这种分钟级长任务的进度可见。
+        stdout 仍整体捕获返回；stderr 逐行打日志后也整体返回（供错误 tail）。
+        """
+        import os
         import subprocess as _sp  # noqa: PLC0415
 
-        def _run():
-            proc = _sp.run(args, capture_output=True, timeout=timeout)  # noqa: PLW1510
-            return proc.returncode, proc.stdout, proc.stderr
+        def _run() -> tuple[int, bytes, bytes]:
+            run_env = None
+            if env:
+                run_env = {**os.environ, **env}
+            if not stream_log:
+                proc = _sp.run(args, capture_output=True, timeout=timeout, env=run_env)  # noqa: PLW1510
+                return proc.returncode, proc.stdout, proc.stderr
+            # 流式模式：Popen + 逐行读 stderr(BuildKit 进度)实时打日志。
+            # stdout 整体捕获；stderr 一边打日志一边累积，供错误 tail。
+            proc = _sp.Popen(  # noqa: S603
+                args, stdout=_sp.PIPE, stderr=_sp.PIPE, env=run_env,
+                text=False, bufsize=1,
+            )
+            collected_err: list[bytes] = []
+            collected_out: list[bytes] = []
+            # stdout=PIPE/stderr=PIPE 保证两者非 None，mypy 需显式收窄。
+            stdout_pipe = proc.stdout
+            stderr_pipe = proc.stderr
+            if stdout_pipe is None or stderr_pipe is None:  # pragma: no cover
+                raise RuntimeError("Popen 未建立管道")
+            try:
+                # 先读 stdout 全量(stderr 同步读会阻塞,因为 BuildKit 进度全在 stderr)。
+                # 策略：循环轮询 stderr 逐行实时打日志，stdout 留到末尾 read。
+                # 但 stdout/stderr 若同时填满管道缓冲会死锁——为避免,用线程读 stdout。
+                import threading
+
+                def _drain_stdout() -> None:
+                    collected_out.append(stdout_pipe.read())
+
+                t = threading.Thread(target=_drain_stdout, daemon=True)
+                t.start()
+                for raw_line in stderr_pipe:
+                    collected_err.append(raw_line)
+                    line = raw_line.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        logger.info("[docker build] %s", line)
+                proc.wait(timeout=timeout)
+                t.join(timeout=5)
+            except _sp.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise
+            return (
+                proc.returncode if proc.returncode is not None else -1,
+                b"".join(collected_out),
+                b"".join(collected_err),
+            )
 
         loop = asyncio.get_event_loop()
         async with self._docker_sem:
@@ -434,29 +510,65 @@ class DockerProvider(IsolationProvider):
         return args
 
     async def _ensure_image(self) -> None:
-        """确保 Docker 镜像存在，不存在则拉取。"""
-        import subprocess as _sp  # noqa: PLC0415
+        """确保镜像存在：本地有就用，没有则自动构建（优先），再不行才 pull。
 
-        try:
+        与旧实现的关键差异：
+        1. 构建优先于拉取——agentos:latest 是本地构建镜像（不在 Docker Hub），
+           旧版 docker pull 是死代码；改用 docker build + BuildKit 缓存复用本机已下载的包。
+        2. 构建失败必须 raise，不再 except 吞掉——让 manager.py 的熔断器
+           （连续 _MAX_ENV_FAILURES 次抛 IsolationUnrecoverableError）接管，
+           避免无限 next_llm 空转（每轮白等 docker create 30s × core retry 3 次 ≈ 4min）。
+        3. 加锁 + 二次检查，防多协程并发触发构建。
+        """
+        # 快路径：镜像已存在，直接返回（无锁开销）。
+        rc, _, _ = await self._run_cmd(["docker", "image", "inspect", self._image], timeout=5)
+        if rc == 0:
+            return
+
+        # 镜像缺失：加锁后二次检查（双重检查），确保并发只构建一次。
+        async with self._build_lock:
             rc, _, _ = await self._run_cmd(["docker", "image", "inspect", self._image], timeout=5)
             if rc == 0:
                 return
 
-            logger.info("[DockerProvider] 拉取镜像 | image=%s", self._image)
-            await self._run_cmd(["docker", "pull", self._image], timeout=120)
+            # 优先自动构建：本地有 Dockerfile 则 docker build。
+            # DOCKER_BUILDKIT=1 是 Dockerfile 里 --mount=type=cache 生效的前提。
+            if self._auto_build and self._dockerfile_path.is_file():
+                logger.info(
+                    "[DockerProvider] 本地无镜像，首次自动构建"
+                    "（已启用 BuildKit 缓存，二次构建会复用本机已下载的包）"
+                    " | image=%s | dockerfile=%s",
+                    self._image,
+                    self._dockerfile_path,
+                )
+                rc, _, stderr = await self._run_cmd(
+                    ["docker", "build", "--progress=plain", "-t", self._image,
+                     "-f", str(self._dockerfile_path), str(self._build_context)],
+                    timeout=self._build_timeout,
+                    env={"DOCKER_BUILDKIT": "1"},
+                    stream_log=True,
+                )
+                if rc == 0:
+                    logger.info("[DockerProvider] 镜像构建成功 | image=%s", self._image)
+                    return
+                err_tail = stderr.decode("utf-8", errors="replace")[-500:]
+                # raise 而非吞：让 manager.py 熔断器接管，避免无限空转。
+                raise RuntimeError(
+                    f"镜像 {self._image} 自动构建失败（docker build 退出码非 0）。"
+                    f"请检查 docker build 输出。stderr tail={err_tail}"
+                )
 
-            # 镜像拉取后清理悬挂镜像（旧版被替换后的 <none>:<none>）
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: _sp.run(  # noqa: PLW1510
-                    ["docker", "image", "prune", "-f"],
-                    capture_output=True,
-                    timeout=30,
-                ),
+            # 回退：本地无 Dockerfile（如 pip 安装的包场景），尝试拉取。
+            logger.info(
+                "[DockerProvider] 本地无 Dockerfile，尝试拉取镜像 | image=%s", self._image
             )
-        except Exception as e:
-            logger.warning("[DockerProvider] 镜像检查/拉取失败 | error=%s", e)
+            rc, _, stderr = await self._run_cmd(["docker", "pull", self._image], timeout=120)
+            if rc == 0:
+                return
+            err_tail = stderr.decode("utf-8", errors="replace")[-500:]
+            raise RuntimeError(
+                f"镜像 {self._image} 拉取失败，且本地无 Dockerfile 可构建: {err_tail}"
+            )
 
     async def _exec_in_container(
         self,
