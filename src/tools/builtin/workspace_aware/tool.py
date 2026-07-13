@@ -105,6 +105,21 @@ class WorkspaceAwareMixin:
         else:
             self._project_root = self._infer_project_root(self._workspace)
 
+    def _init_agent_level(self, inputs: dict[str, Any]) -> None:
+        """从输入参数初始化 agent 层级，供路径权限校验决策使用。
+
+        读取 inputs["parent_agent_level"]（默认 1），解析为整数存到
+        self._agent_level；解析失败回退到 1（主 agent）。
+
+        Args:
+            inputs: 工具执行时接收的输入参数字典。
+        """
+        raw_level = inputs.get("parent_agent_level", 1)
+        try:
+            self._agent_level = int(str(raw_level).upper().lstrip("L"))
+        except (ValueError, TypeError):
+            self._agent_level = 1
+
     def resolve_path(self, path_str: str) -> Path:  # noqa: PLR0911
         """解析路径，处理绝对路径、相对路径及前缀去重。
 

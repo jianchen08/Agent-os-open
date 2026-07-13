@@ -201,3 +201,37 @@ class TestRegisterTotalTimeout:
         assert "t-fast" in called[0]
         assert "total_timeout" in called[0]
         ctx.set_terminal.assert_called_once()
+
+
+class TestCancelPipelineCancelsTotalTimeout:
+    """cancel_pipeline（pause/cancel 终态冻结引擎的统一路径）必须取消
+    total_timeout_handle。
+
+    BUG-FIX-fix_20260713_cancel_pipeline_leaks_total_timer:
+    pause/cancel 都走 cancel_pipeline 冻结引擎，但旧 cancel_pipeline 手动清理了
+    active/suspended_engine/idle_timer，唯独漏了 total_timeout_handle（它的取消
+    在 ctx.cleanup 里）。结果 pause 后引擎虽停，2400s 硬墙定时器仍倒计时，到点
+    照常 fail_task 把 STOPPED 改成 FAILED，触发通知唤醒父任务重试。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_pipeline_cancels_total_timeout_handle(self) -> None:
+        from infrastructure.task_executor import TaskExecutorMixin
+
+        class _Holder(TaskExecutorMixin):
+            pass
+
+        holder = _Holder()
+        holder._task_service = None  # 跳过 pipeline_id 解析与 message_bus.stop
+        holder._contexts = {}
+        holder._cancel_idle_timer_async = MagicMock()  # type: ignore[method-assign]
+
+        ctx = TaskExecutionContext("t-freeze")
+        handle = MagicMock()
+        ctx.total_timeout_handle = handle
+        holder._contexts["t-freeze"] = ctx
+
+        holder.cancel_pipeline("t-freeze")
+
+        handle.cancel.assert_called_once()
+        assert ctx.total_timeout_handle is None

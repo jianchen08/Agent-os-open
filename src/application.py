@@ -481,20 +481,24 @@ class Application:
             if not expression:
                 return "错误：未提供计算表达式"
             try:
-                allowed_names = {
+                # 使用 simpleeval（AST 白名单求值器）替代裸 eval，
+                # 从源头杜绝 __builtins__ 逃逸与 __class__ 链攻击。
+                # 常量进 names，可调用函数进 functions。
+                from simpleeval import simple_eval  # noqa: PLC0415
+
+                constants = {"pi": _math.pi, "e": _math.e}
+                functions = {
                     "abs": abs,
                     "round": round,
                     "min": min,
                     "max": max,
                     "pow": pow,
                     "sum": sum,
-                    "pi": _math.pi,
-                    "e": _math.e,
                     "sqrt": _math.sqrt,
                     "ceil": _math.ceil,
                     "floor": _math.floor,
                 }
-                result = eval(expression, {"__builtins__": {}}, allowed_names)
+                result = simple_eval(expression, names=constants, functions=functions)
                 return str(result)
             except Exception as exc:
                 return f"计算错误：{exc}"

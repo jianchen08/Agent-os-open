@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from channels.api.auth import verify_token
 from channels.api.deps import APIError, require_auth
 from services.comfyui_service import get_comfyui_service
 
@@ -217,7 +218,22 @@ async def cancel_task(record_id: str) -> dict[str, Any]:
 
 @router.websocket("/ws")
 async def comfyui_ws(websocket: WebSocket) -> None:
-    """WebSocket 端点，向客户端实时推送 ComfyUI 生成进度。"""
+    """WebSocket 端点，向客户端实时推送 ComfyUI 生成进度。
+
+    注意：FastAPI 的 HTTP dependencies（router 级 require_auth）不作用于
+    @router.websocket，必须在函数体内单独校验 token。
+    """
+    # 鉴权：token 从 query 参数取，accept 前校验
+    token = websocket.query_params.get("token", "")
+    if not token:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="连接需要 token 认证")
+        return
+    if verify_token(token) is None:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Token 无效或已过期")
+        return
+
     await websocket.accept()
     service = get_comfyui_service()
 

@@ -7,11 +7,25 @@
 - 智能日志压缩（3-5行摘要）
 - 自适应编码转换（Windows CMD GBK / Git Bash UTF-8 自动识别）
 
+⚠️ 安全威胁模型（H3）
+=================
+
+bash 工具的设计语义就是"执行用户命令"，**无法靠输入过滤根治**——
+shell 元字符（| $() `` ;）天然有效，黑名单不可穷举（python -c "import os;
+os.system('...')" 即绕过 SecurityChecker）。
+
+SecurityChecker 的正则黑名单只拦**不可逆灾难**（rm -rf /、mkfs、dd 等
+手滑即无法挽回的操作），**不是安全边界**。curl | sh 这类"危险但合法"的
+模式不在此层硬拦，而是降级为 warning + 管道层审批。真正的控制是**隔离**：
+
+- 可信/本地单用户场景：宿主机执行可接受（SecurityChecker 防误操作即可）。
+- 不可信/多租户场景：bash 调用必须经 IsolationCoordinator 路由到容器隔离
+  （降权 + 只读根 + 限制能力），宿主机路径对不可信输入 fail-closed。
+  容器模式下 SecurityChecker 被跳过是合理的（容器内黑名单无意义）。
+
 暴露接口：
-- check(self, command: str) -> tuple[bool, bool, str | None]：check功能
-- get_tool_definition() -> Tool：get_tool_definition功能
-- SecurityChecker：SecurityChecker类
-- BashTool：BashTool类
+- SecurityChecker：防误操作黑名单（非安全边界，见上文）
+- BashTool：工具主类，隔离决策由上层 IsolationCoordinator 统一处理
 """
 
 from __future__ import annotations
@@ -40,20 +54,29 @@ from .types import BashAction
 
 
 class SecurityChecker:
-    """
-    安全检查器
+    """命令防误操作检查器（**非安全边界**）。
 
-    检查命令的安全性，防止危险操作。
+    用正则黑名单匹配 rm -rf /、fork bomb 等**不可逆灾难**模式，防止手滑
+    造成无法挽回的破坏。这是"防误操作"层级，**不能抵御恶意构造的命令**
+    ——shell 元字符天然有效，黑名单不可穷举（见模块文档 H3 威胁模型）。
+    抵御恶意命令依靠容器隔离，不靠这里。
+
+    分层原则（按"可逆性"而非"看起来像不像黑客"）：
+    - DANGEROUS_PATTERNS：**不可逆灾难**硬拦——一旦执行无法挽回（rm -rf、
+      mkfs、dd、format、shutdown 等）。硬拦与审批层互不干涉，是最后兜底。
+    - CAUTION_PATTERNS：**危险但合法**降级——curl/wget/管道到 shell 等
+      是主流工具的官方用法，不应硬拦。命中只标 warning，是否放行交给管道
+      层 SecurityCheckPlugin 的审批决策（用户批准即可执行）。
+
+    与管道层的分工：管道层 SecurityCheckPlugin 基于危险工具声明 + 用户审批
+    做精细决策；本层只在工具内部兜底挡不可逆灾难，不重复审批层的语义。
     """
 
-    # 危险命令正则模式（防止命令注入绕过）
+    # 不可逆灾难命令：硬拦（一旦执行无法挽回）
+    # 注意：管道到 shell（| sh / | bash 等）不在此列——它们是合法常见模式，
+    # 由 CAUTION_PATTERNS 降级 + 管道层审批把关，避免"批了还过不去"。
     DANGEROUS_PATTERNS: ClassVar[list[str]] = [
-        r"\brm\s+-rf\b",  # rm -rf（词边界匹配）
-        r"\brm\s+-rf\s+/",  # rm -rf /（明确删除根目录）
-        r"\|\s*bash\b",  # 管道到 bash
-        r"\|\s*sh\b",  # 管道到 sh
-        r"\|\s*zsh\b",  # 管道到 zsh
-        r"\|\s*fish\b",  # 管道到 fish
+        r"\brm\s+-rf\b",  # rm -rf（词边界匹配，覆盖 rm -rf / 等所有变体）
         r";\s*rm\b",  # 分号连接 rm
         r";\s*del\b",  # 分号连接 del
         r";\s*format\b",  # 分号连接 format
@@ -70,7 +93,8 @@ class SecurityChecker:
         r"\bhalt\b",  # 停机
     ]
 
-    # 需要额外确认的命令（保持简单字符串匹配即可）
+    # 危险但合法的命令：降级标 warning（不阻断），由管道层审批把关
+    # 管道到 shell（rustup/homebrew/nvm 等官方安装方式）、curl/wget 等属此类。
     CAUTION_PATTERNS: ClassVar[list[str]] = [
         "curl",
         "wget",
@@ -85,6 +109,10 @@ class SecurityChecker:
         ">>",
         "$(",  # 命令替换（脚本常用，不应阻断）
         "`",  # 反引号命令替换
+        "| sh",  # 管道到 sh（合法常见模式，降级审批而非硬拦）
+        "| bash",  # 管道到 bash
+        "| zsh",  # 管道到 zsh
+        "| fish",  # 管道到 fish
     ]
 
     def __init__(self, allowed_commands: list[str] | None = None):

@@ -80,6 +80,7 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
     async def execute(self, inputs: dict[str, Any]):
         """执行文件删除操作"""
         self._init_workspace(inputs)
+        self._init_agent_level(inputs)
 
         # 优先使用 paths 批量参数
         paths = inputs.get("paths")
@@ -141,6 +142,15 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
 
             path = self.resolve_path(path_str)
             display_path = self._format_output_path(path, path_str)
+
+            # 路径越界校验：删除是破坏性写操作，必须落在 workspace 允许范围内
+            agent_level = getattr(self, "_agent_level", None)
+            ok, err = self.check_path_allowed(str(path), "write", agent_level)
+            if not ok:
+                return create_failure_result(
+                    error=f"路径越界拒绝: {err}",
+                    error_code="PATH_NOT_ALLOWED",
+                )
 
             # 检查路径是否存在
             if not path.exists():

@@ -1245,6 +1245,11 @@ class TaskExecutorMixin:
 
             ctx.set_terminal()
 
+            # 取消 total_timeout 硬墙定时器（pause/cancel 都走此路径冻结引擎，
+            # 若不取消，定时器到点仍会 fail_task 把 STOPPED 改成 FAILED）。
+            # ctx.cleanup 会统一取消 idle/total 定时器，这里复用它。
+            ctx.cleanup()
+
             bg_task = ctx.bg_task
 
         else:

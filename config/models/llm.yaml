@@ -114,7 +114,7 @@ models:
       - image/webp
       max_image_size: 20971520
 defaults:
-  chat: glm-5.2
+  chat: deepseek-v4-flash
   embedding: embedding-3
   call_timeout: 600
   first_token_timeout: 120

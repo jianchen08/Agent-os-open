@@ -9,7 +9,6 @@
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -22,6 +21,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from tools.builtin.base import BuiltinTool
+from tools.common.ssrf_guard import validate_url as _validate_url
 from tools.types import (
     Tool,
     ToolCategory,
@@ -43,26 +43,8 @@ DEFAULT_TIMEOUT = 300
 MAX_REDIRECTS = 5
 CHUNK_SIZE = 64 * 1024  # 64 KB read/write buffer
 
-# RFC 1918 / loopback / link-local 网段（SSRF 防护）
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
-
-
-def _is_private_ip(ip_str: str) -> bool:
-    """检查 IP 是否属于内网地址（SSRF 防护）"""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        return any(ip in net for net in _PRIVATE_NETWORKS)
-    except ValueError:
-        return True  # 无法解析的 IP 视为不安全
+# SSRF 防护（协议/域名白名单 + DNS 解析内网 IP 检查）抽到公共模块，
+# download / web 等工具共用，避免漏接。详见 tools.common.ssrf_guard。
 
 
 def _sanitize_filename(name: str) -> str:
@@ -101,38 +83,6 @@ def _extract_filename_from_headers(headers: httpx.Headers) -> str | None:
     if match:
         return _sanitize_filename(match.group(1))
     return None
-
-
-def _validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[bool, str]:
-    """URL 安全校验：协议白名单 + 域名白名单 + SSRF 防护"""
-    parsed = urlparse(url)
-
-    # 1. 协议白名单
-    if parsed.scheme not in ("http", "https"):
-        return False, f"不支持的协议: {parsed.scheme}，仅允许 http/https"
-
-    # 2. 域名检查
-    hostname = parsed.hostname
-    if not hostname:
-        return False, "URL 缺少主机名"
-
-    # 3. 域名白名单（可选）
-    if allow_domains and hostname not in allow_domains and not any(hostname.endswith(f".{d}") for d in allow_domains):
-        return False, f"域名 {hostname} 不在白名单中"
-
-    # 4. SSRF 防护：DNS 解析后检查是否为内网 IP
-    try:
-        import socket  # noqa: PLC0415
-
-        resolved_ips = socket.getaddrinfo(hostname, None)
-        for entry in resolved_ips:
-            ip_str = entry[4][0]
-            if _is_private_ip(ip_str):
-                return False, f"域名 {hostname} 解析到内网 IP {ip_str}，已拒绝（SSRF 防护）"
-    except socket.gaierror:
-        return False, f"无法解析域名: {hostname}"
-
-    return True, "OK"
 
 
 def _format_size(size_bytes: float) -> str:
@@ -264,12 +214,23 @@ class DownloadTool(BuiltinTool):
 
         # ── URL 安全校验 ──
         if skip_ssrf_check:
-            # 仅校验协议和基本格式
+            # skip_ssrf_check 仅用于测试本地开发服务器，绝不能旁路到内网。
+            # 即便 skip，也强制拦截"主机名本身是内网 IP 字面量"的情况
+            # （http://169.254.169.254、http://10.0.0.1 等直连），
+            # 避免攻击者用一个布尔位就关掉 SSRF 防护访问云 metadata。
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https"):
                 return create_failure_result(f"URL 安全校验失败: 不支持的协议: {parsed.scheme}")
-            if not parsed.hostname:
+            hostname = parsed.hostname
+            if not hostname:
                 return create_failure_result("URL 安全校验失败: URL 缺少主机名")
+            # 主机名是 IP 字面量且属于内网 → 拒绝（skip 也不能放行）
+            from tools.common.ssrf_guard import is_private_ip  # noqa: PLC0415
+
+            if is_private_ip(hostname):
+                return create_failure_result(
+                    f"URL 安全校验失败: skip_ssrf_check 也不能访问内网 IP {hostname}"
+                )
         else:
             valid, msg = _validate_url(url, allow_domains)
             if not valid:

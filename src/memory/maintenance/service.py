@@ -1,7 +1,6 @@
 """维护主服务 —— 调度、触发器、配置、入口。
 
-复盘执行统一收敛到 B 路径（trigger_llm_review → review_agent LLM 深度分析）。
-历史上存在的 A 路径（trigger_review_now 模板化经验提取 / 定时复盘触发器）已删除。
+复盘执行由 trigger_llm_review 编排（启动 review_agent 做 LLM 深度分析）。
 
 暴露接口：
 - MaintenanceConfig: 维护配置数据类
@@ -41,7 +40,7 @@ class MaintenanceConfig:
     """
 
     enabled: bool = False
-    # 复盘配置（B 路径只保留预算相关项，不再有定时触发）
+    # 复盘配置（按需触发，只保留预算相关项）
     skeleton_budget_percent: int = 15
     records_per_skeleton_token: int = 15
     review_batch_limit: int = 10  # 单批复盘管道数上限，与 token 预算取 min
@@ -84,7 +83,7 @@ class MemoryMaintenanceService:
     """复盘驱动的记忆维护服务。
 
     两个维护职责：
-    1. 复盘（B 路径）：trigger_review 工具触发 → 启动 review_agent 做 LLM 深度复盘
+    1. 复盘：trigger_review 工具触发 → 启动 review_agent 做 LLM 深度复盘
        → 产出报告 → 持久化 + 通知父管道
     2. 清理：定时巡检，按复盘状态/数据年龄/容量压力分层清理数据
 
@@ -204,8 +203,7 @@ class MemoryMaintenanceService:
     def register_triggers(self) -> list[str]:
         """向 TriggerManager 注册清理巡检触发器。
 
-        复盘不再走定时触发（A 路径已删除），统一由 trigger_review 工具按需触发。
-        这里只注册一个定时清理触发器。
+        复盘由 trigger_review 工具按需触发，这里只注册一个定时清理触发器。
 
         Returns:
             注册的触发器 ID 列表
@@ -257,7 +255,7 @@ class MemoryMaintenanceService:
     async def run_cleanup(self) -> dict[str, Any]:
         """执行清理巡检（供定时触发器调用）。
 
-        不再触发复盘（A 路径已删除）。仅按复盘状态/年龄/容量清理数据。
+        仅按复盘状态/年龄/容量清理数据，不触发复盘（复盘由 trigger_review 工具按需触发）。
 
         Returns:
             清理结果字典
@@ -307,7 +305,7 @@ class MemoryMaintenanceService:
         return False
 
     # ============================================
-    # LLM 复盘编排（B 路径，由 trigger_review 工具触发）
+    # LLM 复盘编排（由 trigger_review 工具触发）
     # ============================================
 
     async def trigger_llm_review(
@@ -319,8 +317,7 @@ class MemoryMaintenanceService:
         这是 trigger_review 工具的唯一调用入口。工具只负责获取服务并调用此方法，
         复盘的全生命周期（注册管道→注入消息→等待完成→持久化→通知）在此编排。
 
-        复盘是 B 路径唯一的真相源。若 review_agent 启动失败，直接判失败并通知，
-        不再降级到模板提取（A 路径已删除）。
+        若 review_agent 启动失败，直接判失败并通知。
 
         单批复盘多少个管道不由参数决定，而由 _collect_review_targets 内部按
         agent/status 分组 + 模型上下文预算反推（review_context_window ×
@@ -372,7 +369,7 @@ class MemoryMaintenanceService:
         串行而非并行的理由：max_concurrent_pipelines 全局限流，逐个起更稳妥，
         且 LLM 成本可控、不挤压正常任务管道。复盘是后台异步任务，不阻塞用户。
 
-        review_agent 启动失败直接判失败通知，不降级（A 路径已删除）。
+        review_agent 启动失败直接判失败通知。
         """
         try:
             # 0. 解析触发来源（父管道的 agent/会话），供复盘管道 tags 溯源

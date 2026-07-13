@@ -96,7 +96,7 @@ RUN \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
-        "playwright>=1.40" \
+        "playwright>=1.40" "pandas>=2.0" \
     || pip install --no-cache-dir \
         -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
         --trusted-host pypi.tuna.tsinghua.edu.cn \
@@ -105,14 +105,14 @@ RUN \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
-        "playwright>=1.40" \
+        "playwright>=1.40" "pandas>=2.0" \
     || pip install --no-cache-dir \
         "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
         "jsonschema>=4.0" "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
         "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
         "python-lsp-server>=1.14.0" \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
-        "playwright>=1.40"
+        "playwright>=1.40" "pandas>=2.0"
 
 # 安装 Playwright 浏览器(system-issue #3)
 # 让 agent 在容器内直接跑 e2e 测试（npx playwright / python -m pytest）。
@@ -147,6 +147,29 @@ RUN --mount=type=cache,target=/root/.cache/ms-playwright \
     && (python -m playwright install --only-shell chromium \
         || python -m playwright install --only-shell chromium \
         || echo "[warn] playwright chromium-headless-shell 下载失败，默认 headless e2e 将不可用")
+
+# Rust 工具链（≥1.85，jsonschema-rs MSRV 要求）
+# 0.2 内核用 Rust 编写，隔离子任务（cargo build/check/clippy/fmt）必须可用。
+# - 先补装 pkg-config（apt 层漏装，Rust 编译时链接系统库如 openssl 需要它）
+# - 用 rustup 官方脚本安装，RUST_VERSION 锁定 1.85.0
+# - --profile minimal 只装 rustc+cargo，再单独 add rustfmt+clippy
+# - RUSTUP_HOME / CARGO_HOME 放 /usr/local 下，对所有用户可见
+ARG RUST_VERSION=1.85.0
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:${PATH}
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        pkg-config \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+        --default-toolchain ${RUST_VERSION} \
+        --profile minimal \
+    && rustup component add rustfmt clippy \
+    && rustc --version \
+    && cargo --version
 
 # 设置工作目录
 WORKDIR /workspace

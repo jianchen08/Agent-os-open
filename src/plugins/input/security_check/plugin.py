@@ -139,8 +139,9 @@ class SecurityCheckPlugin(IInputPlugin):
         self._rejected_signatures: dict[str, int] = {}
         self._reject_threshold = self._config.get("reject_threshold", 3)
 
-        # 加载安全规则
+        # 加载安全规则，并启动期预编译校验所有正则（fail-fast，见 _validate_rules）
         self._rules = self._load_rules()
+        self._validate_rules(self._rules)
 
     def _load_rules(self) -> list[dict[str, Any]]:
         """从配置或 YAML 文件加载安全规则。
@@ -148,8 +149,19 @@ class SecurityCheckPlugin(IInputPlugin):
         优先使用 config 中直接提供的 rules 列表，
         否则从 rules_path 指定的 YAML 文件加载。
 
+        Fail-closed 语义（关键）：
+        - 本规则集是黑名单语义（mode: blacklist）——"没有规则"等于"全部放行"。
+          若配置加载失败却静默返回空列表，安全检查会退化为"全放行"，
+          属于危险态。因此加载失败时抛 ValueError，让管道启动期就暴露问题，
+          而不是带着空规则静默运行。
+        - 仅当配置明确返回"空规则集"（合法的、用户主动选择全放行）时才返回空列表。
+          YAML 文件缺失 / ConfigCenter 未初始化 / 数据无 rules 字段都视为加载失败。
+
         Returns:
             安全规则列表，每条规则包含 name、tools、params、action、patterns
+
+        Raises:
+            ValueError: 规则文件加载失败或数据无效时抛出（fail-closed）
         """
         # 优先使用 config 中直接传入的规则
         if "rules" in self._config and self._config["rules"]:
@@ -164,13 +176,49 @@ class SecurityCheckPlugin(IInputPlugin):
             from config.config_center import get_config_center  # noqa: PLC0415
 
             data = get_config_center().get(rel)
-            if data and "rules" in data:
-                return data["rules"]
-            logger.warning("[%s] No rules found in %s", self.name, rules_path)
-            return []
-        except Exception:
-            logger.warning("[%s] Rules file load failed: %s", self.name, rules_path)
-            return []
+        except Exception as e:
+            # 加载异常（ConfigCenter 未初始化 / IO 错误）→ fail-closed
+            msg = f"安全规则文件加载失败（{rules_path}）: {e}"
+            logger.error("[%s] %s", self.name, msg)
+            raise ValueError(msg) from e
+
+        if not data or "rules" not in data:
+            # 数据无效：视为加载失败而非"用户主动选择空规则"
+            msg = f"安全规则文件无有效 rules 字段（{rules_path}）"
+            logger.error("[%s] %s", self.name, msg)
+            raise ValueError(msg)
+
+        return data["rules"]
+
+    def _validate_rules(self, rules: list[dict[str, Any]]) -> None:
+        """启动期预编译校验所有 regex 规则，编译错立即暴露。
+
+        Fail-fast 语义：正则规则配错时，运行期 _match_rules 只会 warning 然后把
+        该 pattern 当作不匹配（fail-open）。对于安全规则，这会让"该拦截的没拦"
+        静默发生。本方法在构造时一次性编译所有 type=regex 的 pattern，编译失败
+        立即抛 ValueError，让配置错误在管道启动期就暴露，绝不带到运行期。
+
+        Args:
+            rules: 已加载的规则列表
+
+        Raises:
+            ValueError: 任何 regex pattern 编译失败时抛出，含规则名与错误 pattern
+        """
+        for rule in rules:
+            rule_name = rule.get("name", "?")
+            for pattern_def in rule.get("patterns", []):
+                if pattern_def.get("type", "keyword") != "regex":
+                    continue
+                pat_value = pattern_def.get("value", "")
+                try:
+                    re.compile(pat_value)
+                except re.error as e:
+                    msg = (
+                        f"安全规则 '{rule_name}' 含非法正则 {pat_value!r}: {e}。"
+                        f"该 pattern 在运行期会被静默跳过（fail-open），请在配置中修正。"
+                    )
+                    logger.error("[%s] %s", self.name, msg)
+                    raise ValueError(msg) from e
 
     @property
     def name(self) -> str:
@@ -511,13 +559,22 @@ class SecurityCheckPlugin(IInputPlugin):
     def _make_signature(self, tool_name: str, args: dict[str, Any]) -> str | None:
         """计算命令指纹，用于"本管道内同命令免批"记忆。
 
-        指纹 = 工具名 + 关键参数（命令/路径/内容/代码）的归一化字符串的 sha256 短摘要。
+        指纹 = 工具名 + 全部非空参数的归一化字符串的 sha256 短摘要。
 
         安全边界（关键）：
-        - 精确匹配，不做前缀/语义模糊。命令仅做空白归一化（统一连续空白为单空格、
-          去首尾），不替换路径、不截断、不解析重排。保证 "rm -rf /tmp/x" ≠ "rm -rf /"。
+        - 精确匹配，不做前缀/语义模糊。字符串参数仅做空白归一化（统一连续空白为
+          单空格、去首尾），不替换路径、不截断、不解析重排。保证 "rm -rf /tmp/x"
+          ≠ "rm -rf /"。
         - 命令前后差异（哪怕只多一个空格）也会产生不同指纹 → 用户重审，宁可多问。
-        - 无任何关键参数可归一化时返回 None，调用方退化为"仅本次"。
+        - 无任何可归一化参数时返回 None，调用方退化为"仅本次"。
+
+        全参数入哈希（非白名单参数键）：
+        - 早期实现只对 command/code/content 与写死的 7 个路径键做哈希，新增工具若
+          用别的键承载关键内容（如 url/src/dst/filename），指纹会漏掉这些参数 →
+          "仅 url 不同"的两个 download 调用算同一指纹 → 用户授权一次后不同目标全
+          部免批，方向上是"少问/漏放"，违反"宁可多问"。
+        - 现改为：对所有非空参数（string 归一化；非 string 走 repr 稳定表示）都
+          入哈希。list/dict 等结构类型用 repr() 参与签名，保证内容差异能区分。
 
         Args:
             tool_name: 工具名称
@@ -528,28 +585,39 @@ class SecurityCheckPlugin(IInputPlugin):
         """
         import hashlib  # noqa: PLC0415
 
-        # 提取关键参数：与 _format_args_for_approval 一致的参数集合
         parts: list[str] = [tool_name]
 
-        cmd = args.get("command") or args.get("cmd")
-        if isinstance(cmd, str) and cmd.strip():
-            # 仅空白归一化：连续空白→单空格，去首尾。不改命令语义。
-            parts.append("command=" + " ".join(cmd.split()))
+        # 全参数入哈希：按键名排序保证稳定性（dict 顺序不影响指纹），
+        # 字符串走空白归一化，其余类型用 repr() 稳定表示。
+        for key in sorted(args.keys()):
+            val = args[key]
+            if val is None:
+                continue
+            if isinstance(val, str):
+                if not val.strip():
+                    continue
+                parts.append(f"{key}=" + " ".join(val.split()))
+            elif isinstance(val, set):
+                # set 无序：先排序再 repr，保证元素顺序不影响指纹稳定性
+                if not val:
+                    continue
+                try:
+                    parts.append(f"{key}={sorted(val)!r}")
+                except TypeError:
+                    # 含不可排序元素（如 dict）时退化为 repr，接受可能的顺序敏感
+                    parts.append(f"{key}={val!r}")
+            elif isinstance(val, (list, dict, tuple)):
+                # list/tuple 有序、dict 保序：空集合跳过，否则直接 repr
+                if not val:
+                    continue
+                parts.append(f"{key}={val!r}")
+            else:
+                # 数值/布尔等标量：空字符串跳过，否则入哈希
+                if isinstance(val, str) and not val:  # pragma: no cover - 上面已处理 str
+                    continue
+                parts.append(f"{key}={val!r}")
 
-        code = args.get("code")
-        if isinstance(code, str) and code.strip():
-            parts.append("code=" + " ".join(code.split()))
-
-        content = args.get("content")
-        if isinstance(content, str) and content.strip():
-            parts.append("content=" + " ".join(content.split()))
-
-        for path_key in ("path", "file_path", "directory", "dest", "target", "output_path", "working_dir"):
-            val = args.get(path_key)
-            if isinstance(val, str) and val.strip():
-                parts.append(f"{path_key}={val.strip()}")
-
-        # 只有工具名、无任何关键参数 → 无法稳定记忆，返回 None
+        # 只有工具名、无任何可归一化参数 → 无法稳定记忆，返回 None
         if len(parts) == 1:
             return None
 

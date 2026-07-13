@@ -83,6 +83,7 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
     async def execute(self, inputs: dict[str, Any]):
         """执行文件移动操作"""
         self._init_workspace(inputs)
+        self._init_agent_level(inputs)
 
         # 优先使用 moves 批量参数
         moves = inputs.get("moves")
@@ -155,6 +156,21 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
 
             display_source = self._format_output_path(source, source_str)
             display_dest = self._format_output_path(dest, dest_str)
+
+            # 路径越界校验：移动会删除 source 并写 dest，两者都按 write 校验
+            agent_level = getattr(self, "_agent_level", None)
+            ok_src, err_src = self.check_path_allowed(str(source), "write", agent_level)
+            if not ok_src:
+                return create_failure_result(
+                    error=f"源路径越界拒绝: {err_src}",
+                    error_code="PATH_NOT_ALLOWED",
+                )
+            ok_dst, err_dst = self.check_path_allowed(str(dest), "write", agent_level)
+            if not ok_dst:
+                return create_failure_result(
+                    error=f"目标路径越界拒绝: {err_dst}",
+                    error_code="PATH_NOT_ALLOWED",
+                )
 
             # 检查源路径是否存在
             if not source.exists():

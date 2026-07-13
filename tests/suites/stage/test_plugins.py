@@ -744,15 +744,19 @@ class TestStopCheckPlugin:
         assert result.route_signal is None
         assert result.state_updates["router.stop_reason"] == ""
 
-    def test_task_canceled(self) -> None:
-        """边界 — 任务被取消产出 end 信号。"""
+    def test_task_stopped(self) -> None:
+        """边界 — 任务被暂停/取消（stopped）产出 end 信号。
+
+        TaskStatus 枚举仅有 stopped（合并旧 suspended/cancelled），
+        stop_check 必须把 stopped 判为终态，否则暂停后引擎仍空转。
+        """
         from plugins.output.stop_check import StopCheckPlugin
 
         plugin = StopCheckPlugin()
         ctx = make_ctx(state={
             StateKeys.SHOULD_STOP: False,
             StateKeys.ITERATION: 0,
-            "task_status": "canceled",
+            "task_status": "stopped",
         })
         result = run(plugin.execute(ctx))
 

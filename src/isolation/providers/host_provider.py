@@ -227,7 +227,10 @@ class HostProvider(IsolationProvider):
                 content = operation.get("content")
                 # 确保目录存在
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
+                # newline="\n"：强制 LF 行尾。Windows 文本模式默认 \n→\r\n，
+                # 写出的脚本喂给容器 /bin/sh 会报 "Illegal option -"。
+                # 见 tests/tools/builtin/file_write/test_line_endings.py。
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(content)
                 return ExecutionResult(success=True, output=None)
 

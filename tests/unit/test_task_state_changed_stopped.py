@@ -5,10 +5,12 @@ BUG-FIX-fix_20260702_engine_not_stopped_on_cancel:
 cancel_pipeline 触发条件判 ("cancelled","failed") 也不含 stopped →
 任务 stopped 后管道引擎继续空转（对上游反复 timeout 重试）。
 
-修复：
-1. _TERMINAL_STATES 加入 "stopped"
-2. cancel_pipeline 触发条件区分：cancel-stopped（无 paused_by）停引擎；
-   pause-stopped（有 paused_by）保留引擎待 resume_task 唤醒
+BUG-FIX-fix_20260713_pause_does_not_freeze_engine:
+pause_task 产生的 stopped（有 paused_by）旧逻辑保留引擎待 resume_task 唤醒，
+但 pause 不取消 total_timeout 硬墙定时器 → 到点照常 fail_task → 唤醒父管道 →
+父 LLM 决定重试子任务 → 新一轮超时 → 反复上报。修复：pause 与 cancel 统一
+冻结引擎（都调 cancel_pipeline 做完整清理，含取消超时定时器），靠 paused_by
+metadata 区分意图（pause 可 resume 重建，cancel 不可恢复）。
 """
 from __future__ import annotations
 
@@ -70,27 +72,29 @@ class TestStoppedTerminalRouting:
         worker.cancel_pipeline.assert_called_once_with("task-unknown")
 
     @pytest.mark.asyncio
-    async def test_pause_stopped_does_not_stop_engine(self) -> None:
-        """pause_task 产生的 stopped（有 paused_by）绝不能停引擎——
-        resume_task 需要保留的引擎来 wake。"""
+    async def test_pause_stopped_freezes_engine(self) -> None:
+        """pause_task 产生的 stopped（有 paused_by=user）必须冻结引擎——
+        调 cancel_pipeline 停止执行并取消 total_timeout 定时器。
+        resume 时由调用方 submit_task 重新拉起引擎。
+        不冻结会导致超时定时器继续倒计时，到点 fail 并反复唤醒父任务重试。"""
         worker = _make_worker(
             task_metadata={"paused_by": "user"},
         )
 
         await worker._on_task_state_changed("task-pause", "running", "stopped")
 
-        worker.cancel_pipeline.assert_not_called()
+        worker.cancel_pipeline.assert_called_once_with("task-pause")
 
     @pytest.mark.asyncio
-    async def test_pause_system_stopped_does_not_stop_engine(self) -> None:
-        """系统暂停（paused_by=system）同样保留引擎。"""
+    async def test_pause_system_stopped_freezes_engine(self) -> None:
+        """系统暂停（paused_by=system）同样冻结引擎。"""
         worker = _make_worker(
             task_metadata={"paused_by": "system"},
         )
 
         await worker._on_task_state_changed("task-syspause", "running", "stopped")
 
-        worker.cancel_pipeline.assert_not_called()
+        worker.cancel_pipeline.assert_called_once_with("task-syspause")
 
     @pytest.mark.asyncio
     async def test_failed_always_stops_engine(self) -> None:

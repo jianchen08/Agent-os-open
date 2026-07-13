@@ -1,6 +1,6 @@
 """维护管理 API 路由。
 
-提供手动触发复盘（B 路径）的接口。复盘由 trigger_llm_review 编排：
+提供手动触发复盘的接口。复盘由 trigger_llm_review 编排：
 启动 review_agent 管道做 LLM 深度分析 → 产出报告 → 持久化。
 
 该模块为独立模块，触发链路：
@@ -8,8 +8,6 @@
     -> MemoryMaintenanceService.trigger_llm_review(parent_pipeline_id="")
     -> review_agent 管道（LLM 深度复盘）
     -> 报告写入 KnowledgeService + docs/working/review_report_*.md
-
-注：A 路径（trigger_review_now 模板化经验提取）已删除，复盘统一走 B 路径。
 """
 
 from __future__ import annotations
@@ -51,7 +49,7 @@ def _get_maintenance_service() -> Any:
 
 @router.post("/review", summary="手动触发复盘")
 async def trigger_review() -> dict[str, Any]:
-    """手动触发复盘（B 路径：LLM 深度复盘）。
+    """手动触发复盘（LLM 深度复盘）。
 
     启动 review_agent 管道，对 status=已结束 且 review_status=pending 的管道
     做 LLM 深度复盘，产出结构化报告并写入 KnowledgeService + docs/working/。
@@ -66,7 +64,7 @@ async def trigger_review() -> dict[str, Any]:
     if maintenance_service is None:
         return {"status": "error", "message": "MaintenanceService 不可用"}
 
-    # B 路径内部已做 _review_running 互斥与防自循环检查，直接调用即可
+    # trigger_llm_review 内部已做 _review_running 互斥与防自循环检查，直接调用即可
     # 单批复盘多少个管道由 service 内部按 agent/status 分组 + 模型窗口预算反推决定
     result = await maintenance_service.trigger_llm_review(
         parent_pipeline_id="",

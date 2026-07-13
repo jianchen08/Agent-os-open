@@ -83,6 +83,7 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
     async def execute(self, inputs: dict[str, Any]):
         """执行文件复制操作"""
         self._init_workspace(inputs)
+        self._init_agent_level(inputs)
 
         # 优先使用 copies 批量参数
         copies = inputs.get("copies")
@@ -155,6 +156,21 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
 
             display_source = self._format_output_path(source, source_str)
             display_dest = self._format_output_path(dest, dest_str)
+
+            # 路径越界校验：source 读、dest 写，两者都必须落在 workspace 允许范围内
+            agent_level = getattr(self, "_agent_level", None)
+            ok_src, err_src = self.check_path_allowed(str(source), "read", agent_level)
+            if not ok_src:
+                return create_failure_result(
+                    error=f"源路径越界拒绝: {err_src}",
+                    error_code="PATH_NOT_ALLOWED",
+                )
+            ok_dst, err_dst = self.check_path_allowed(str(dest), "write", agent_level)
+            if not ok_dst:
+                return create_failure_result(
+                    error=f"目标路径越界拒绝: {err_dst}",
+                    error_code="PATH_NOT_ALLOWED",
+                )
 
             # 检查源路径是否存在
             if not source.exists():

@@ -59,7 +59,7 @@ class CleanupEngine:
         清理决策 = 复盘状态 x 年龄 x 容量压力：
         - 已复盘 + age > 30天 → 删除
         - 已复盘 + age > 7天 + 容量紧张 → 删除
-        - 未复盘 + age > 30天 → 直接删除（A 路径删除后不再"先复盘再清理"）
+        - 未复盘 + age > 30天 → 直接删除（清理不触发复盘，直接按年龄判断）
         - 其他 → 不动
 
         清理层级（优先删大的）：
@@ -69,8 +69,7 @@ class CleanupEngine:
         4. Knowledge 永不删除
 
         Args:
-            review_engine: 历史参数，保留签名兼容，当前不再使用
-                （清理不再触发复盘，A 路径已删除）。
+            review_engine: 未使用，保留签名兼容（清理不触发复盘，复盘由 trigger_review 工具按需触发）。
 
         Returns:
             清理结果字典
@@ -119,7 +118,7 @@ class CleanupEngine:
                         # 容量紧张但不算很老，只删 L0
 
                 elif review_status == "pending":  # noqa: SIM102
-                    # 未复盘：A 路径删除后不再"先复盘再清理"，直接按年龄判断。
+                    # 未复盘：清理不触发复盘，直接按年龄判断。
                     # 很老（>cleanup_min_age_days）还没复盘，视为无价值，直接删 L0+L1。
                     if age_days > self._config.cleanup_min_age_days:
                         should_delete_l0 = True

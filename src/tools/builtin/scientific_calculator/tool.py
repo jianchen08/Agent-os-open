@@ -160,52 +160,18 @@ class ScientificCalculatorTool(BuiltinTool):
         return op_func(value)
 
     def _safe_eval(self, expression: str) -> int | float:
-        """安全地计算数学表达式"""
-        # 替换常量
-        expr = expression.lower()
-        for name, val in self.CONSTANTS.items():
-            expr = expr.replace(name, str(val))
+        """安全地计算数学表达式。
 
-        # 安全替换数学函数（使用math模块）
-        safe_funcs = {
-            "sin": "math.sin(math.radians(%s))",
-            "cos": "math.cos(math.radians(%s))",
-            "tan": "math.tan(math.radians(%s))",
-            "asin": "math.degrees(math.asin(%s))",
-            "acos": "math.degrees(math.acos(%s))",
-            "atan": "math.degrees(math.atan(%s))",
-            "sinh": "math.sinh(%s)",
-            "cosh": "math.cosh(%s)",
-            "tanh": "math.tanh(%s)",
-            "log": "math.log(%s)",
-            "ln": "math.log(%s)",
-            "log10": "math.log10(%s)",
-            "log2": "math.log2(%s)",
-            "sqrt": "math.sqrt(%s)",
-            "cbrt": "math.copysign(abs(%s)**(1/3), %s)",
-            "abs": "abs(%s)",
-            "ceil": "math.ceil(%s)",
-            "floor": "math.floor(%s)",
-            "factorial": "math.factorial(int(%s))",
-            "exp": "math.exp(%s)",
-            "degrees": "math.degrees(%s)",
-            "radians": "math.radians(%s)",
-        }
+        使用 simpleeval（AST 白名单求值器）替代裸 eval，从源头杜绝
+        ``__builtins__`` 逃逸与 ``__class__`` 链攻击：simpleeval 只允许
+        数值运算符和显式声明的 names/functions，禁止 Attribute 访问、
+        任意 Call、import 等。
+        """
+        from simpleeval import simple_eval  # noqa: PLC0415
 
-        for name, pattern in safe_funcs.items():
-            expr = expr.replace(name + "(", pattern % "")
-            # 修正已替换的模式（末尾的 % "" 会留下多余括号）
-            expr = expr.replace("))", ")")
-
-        # 使用 eval 计算表达式（仅允许数学运算）
-        allowed_names = {
-            "math": math,
-            "abs": abs,
-            "round": round,
-        }
-
-        result = eval(expr, {"__builtins__": {}}, allowed_names)
-        return result
+        # CONSTANTS 作为常量名（pi/e/tau/inf），OPERATIONS 作为可调用函数名。
+        # simple_eval 内部用 AST 白名单解析，不会执行任意代码。
+        return simple_eval(expression, names=self.CONSTANTS, functions=self.OPERATIONS)
 
     async def execute(  # noqa: PLR0911,PLR0912
         self,

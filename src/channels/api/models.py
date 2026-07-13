@@ -51,6 +51,7 @@ class UserResponse(BaseModel):
     id: str
     username: str
     email: str | None = None
+    role: str = "user"
     created_at: str
 
 

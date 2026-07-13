@@ -97,33 +97,26 @@ class TestStopCheckPlugin:
         assert result.route_signal is None
 
     @pytest.mark.asyncio
-    async def test_task_canceled(self, ctx, base_state):
-        """测试任务被取消。"""
+    async def test_task_stopped(self, ctx, base_state):
+        """测试任务被暂停/取消（stopped）产出 end 信号。
+
+        TaskStatus 枚举仅有 stopped（合并旧 suspended/cancelled），
+        stop_check 必须把 stopped 判为终态，否则暂停后引擎仍空转。
+        """
         base_state[StateKeys.ITERATION] = 1
-        base_state["task_status"] = "canceled"
+        base_state["task_status"] = "stopped"
         plugin = StopCheckPlugin({"max_iterations": 20, "max_duration_seconds": 3600})
         result = await plugin.execute(ctx)
 
         assert result.route_signal is not None
         assert result.route_signal.route_type == "end"
-        assert "canceled" in result.state_updates["router.stop_reason"]
-
-    @pytest.mark.asyncio
-    async def test_task_deleted(self, ctx, base_state):
-        """测试任务被删除。"""
-        base_state[StateKeys.ITERATION] = 1
-        base_state["task_status"] = "deleted"
-        plugin = StopCheckPlugin({"max_iterations": 20, "max_duration_seconds": 3600})
-        result = await plugin.execute(ctx)
-
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert "stopped" in result.state_updates["router.stop_reason"]
 
     @pytest.mark.asyncio
     async def test_check_task_status_disabled(self, ctx, base_state):
         """测试禁用任务状态检查。"""
         base_state[StateKeys.ITERATION] = 1
-        base_state["task_status"] = "canceled"
+        base_state["task_status"] = "stopped"
         plugin = StopCheckPlugin({
             "max_iterations": 20,
             "max_duration_seconds": 3600,

@@ -10,8 +10,10 @@ rules:
         value: "rm -rf"
       - type: keyword
         value: "del /s"
-      - type: keyword
-        value: "format"
+      # format 命令：仅匹配磁盘格式化形态（format C: / format /fs:...），
+      # 不再用裸子串 "format"（会误伤 git log --format、str.format、含 format 的文本）。
+      - type: regex
+        value: "(^|\\s|;|\\|\\s*)format\\s+([A-Za-z]:|/)"
       - type: keyword
         value: "mkfs"
       - type: keyword
@@ -82,8 +84,10 @@ rules:
         value: "crontab"
       - type: keyword
         value: "schtasks"
-      - type: keyword
-        value: "at "
+      # at 命令（计划任务调度）：仅匹配命令形态，不再用裸子串 "at "
+      # （会误伤几乎所有含 "at " 的英文句子，如 "look at this"、"at 3pm"）。
+      - type: regex
+        value: "(^|;|\\|\\s*)at\\s+[0-9]"
       - type: keyword
         value: "export PATH"
       - type: keyword

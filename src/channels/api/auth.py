@@ -125,4 +125,4 @@ def get_current_user(token: str) -> dict[str, Any] | None:
     if user_id is None or username is None:
         return None
 
-    return {"sub": user_id, "username": username}
+    return {"sub": user_id, "username": username, "role": payload.get("role", "user")}

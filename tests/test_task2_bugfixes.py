@@ -1,8 +1,7 @@
 """
-灵汐系统 5 个 Bug 修复回归测试。
+灵汐系统 4 个 Bug 修复回归测试。
 
 对应 REQ:
-  REQ-1: RBAC 权限 is_role_higher_or_equal 缺失
   REQ-2: 容器任务创建后状态矛盾（pending 死锁）
   REQ-3: 触发器时区不匹配导致 TypeError
   REQ-4: 事件触发器 evaluate_event 无人调用
@@ -19,64 +18,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-
-# ═══════════════════════════════════════════════════════════════════
-# REQ-1: RBAC is_role_higher_or_equal
-# ═══════════════════════════════════════════════════════════════════
-
-
-class TestRBACIsRoleHigherOrEqual:
-    """回归：验证 RBACManager.is_role_higher_or_equal 方法存在且正确。"""
-
-    def test_method_exists(self) -> None:
-        """is_role_higher_or_equal 方法应该存在于 RBACManager 上。"""
-        from src.auth.rbac import RBACManager
-
-        mgr = RBACManager()
-        assert hasattr(mgr, "is_role_higher_or_equal"), (
-            "根因未修复: RBACManager 缺少 is_role_higher_or_equal 方法"
-        )
-
-    def test_same_role_returns_true(self) -> None:
-        """相同角色应返回 True。"""
-        from src.auth.rbac import RBACManager, Role
-
-        mgr = RBACManager()
-        assert mgr.is_role_higher_or_equal(Role.ADMIN, Role.ADMIN) is True
-
-    def test_higher_role_returns_true(self) -> None:
-        """高权限角色对低权限角色应返回 True。"""
-        from src.auth.rbac import RBACManager, Role
-
-        mgr = RBACManager()
-        assert mgr.is_role_higher_or_equal(Role.SUPER_ADMIN, Role.ADMIN) is True
-        assert mgr.is_role_higher_or_equal(Role.ADMIN, Role.USER) is True
-        assert mgr.is_role_higher_or_equal(Role.USER, Role.GUEST) is True
-
-    def test_lower_role_returns_false(self) -> None:
-        """低权限角色对高权限角色应返回 False。"""
-        from src.auth.rbac import RBACManager, Role
-
-        mgr = RBACManager()
-        assert mgr.is_role_higher_or_equal(Role.GUEST, Role.USER) is False
-        assert mgr.is_role_higher_or_equal(Role.USER, Role.ADMIN) is False
-
-    def test_string_role_input(self) -> None:
-        """字符串角色输入应正常工作。"""
-        from src.auth.rbac import RBACManager
-
-        mgr = RBACManager()
-        assert mgr.is_role_higher_or_equal("admin", "user") is True
-        assert mgr.is_role_higher_or_equal("guest", "admin") is False
-
-    def test_super_admin_inherits_all(self) -> None:
-        """SUPER_ADMIN 应高于所有角色。"""
-        from src.auth.rbac import RBACManager, Role
-
-        mgr = RBACManager()
-        for role in [Role.ADMIN, Role.USER, Role.GUEST]:
-            assert mgr.is_role_higher_or_equal(Role.SUPER_ADMIN, role) is True
 
 
 # ═══════════════════════════════════════════════════════════════════

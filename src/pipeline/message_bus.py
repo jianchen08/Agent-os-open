@@ -269,20 +269,22 @@ async def _start_idle_engine(
     if _sink is None:
         return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
 
-    # 引擎自带身份（上次 run() 绑定的）
-    _resolved_agent = engine.agent_config or agent_config
+    # 优先从 registry 解析：tags.agent_id 指向配置 ID（创建者注册时写入，整个 pipeline
+    # 生命周期稳定），重新查询总能拿到热重载后的最新配置，确保同会话内改 YAML 立即生效。
+    # 仅当 registry 查不到（如 tags 未写 agent_id 的历史创建路径）时，才回退到
+    # 引擎/调用方缓存的配置，保留兼容。
+    from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
-    # 注册表 tags.agent_id（创建者注册时写入）
+    _resolved_agent = None
+    _entry = get_engine_registry().get(pipeline_id)
+    _agent_id = _entry.tags.get("agent_id") if _entry else None
+    if _agent_id:
+        _registry = get_global_agent_registry_sync()
+        if _registry:
+            _resolved_agent = _registry.get(_agent_id)
     if _resolved_agent is None:
-        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
-        from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
-        _entry = get_engine_registry().get(pipeline_id)
-        _agent_id = _entry.tags.get("agent_id") if _entry else None
-        if _agent_id:
-            _registry = get_global_agent_registry_sync()
-            if _registry:
-                _resolved_agent = _registry.get(_agent_id)
+        _resolved_agent = engine.agent_config or agent_config
 
     if _resolved_agent is None:
         # 诊断：输出每一步状态，定位注册失败点

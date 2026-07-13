@@ -273,6 +273,7 @@ class MemoryStore:
             "username": username,
             "password": hash_password(password),
             "email": email,
+            "role": "user",
             "created_at": _now_iso(),
         }
         self.users[username] = user

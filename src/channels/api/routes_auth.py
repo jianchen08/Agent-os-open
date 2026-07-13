@@ -24,6 +24,7 @@ from channels.api.models import (
     UserResponse,
 )
 from src.auth.password import verify_password
+from src.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def login(request: LoginRequest) -> TokenResponse:
             detail="用户名或密码错误",
         )
 
-    token_data = {"sub": user["id"], "username": user["username"]}
+    token_data = {"sub": user["id"], "username": user["username"], "role": user.get("role", "user")}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
@@ -70,6 +71,12 @@ def login(request: LoginRequest) -> TokenResponse:
 @router.post("/register", response_model=TokenResponse, summary="用户注册")
 def register(request: RegisterRequest) -> TokenResponse:
     """创建新用户并返回 token。"""
+    if not get_settings().allow_public_register:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="未开启公开注册，请联系管理员创建账号",
+        )
+
     try:
         user = store.create_user(
             username=request.username,
@@ -82,7 +89,7 @@ def register(request: RegisterRequest) -> TokenResponse:
             detail=str(exc),
         ) from exc
 
-    token_data = {"sub": user["id"], "username": user["username"]}
+    token_data = {"sub": user["id"], "username": user["username"], "role": user.get("role", "user")}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
@@ -129,6 +136,7 @@ def get_me(
         id=user["id"],
         username=user["username"],
         email=user.get("email"),
+        role=user.get("role", "user"),
         created_at=user["created_at"],
     )
 
@@ -186,8 +194,8 @@ def refresh_token(
     # 撤销旧的 refresh token（统一走 TokenManager → Redis，P2.2）
     token_manager.revoke_token(actual_token)
 
-    # 生成新 token
-    token_data = {"sub": user_id, "username": username}
+    # 生成新 token（从当前用户记录补 role，避免刷新后掉权）
+    token_data = {"sub": user_id, "username": username, "role": user.get("role", "user")}
     new_access = create_access_token(token_data)
     new_refresh = create_refresh_token(token_data)
 

@@ -262,7 +262,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         console.error('注册后启动自生长闭环失败:', err)
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : '注册失败'
+      // 兼容 Error 实例与 ApiError 对象（{code,message,details}）：
+      // axios 拦截器 reject 的是 ApiError plain object，不是 Error 实例，
+      // 否则后端返回的 detail 文案（如"未开启公开注册"）会被吞成通用"注册失败"。
+      const errorMessage =
+        (error && typeof error === 'object' && 'message' in error
+          ? String((error as { message?: unknown }).message)
+          : error instanceof Error
+            ? error.message
+            : '') || '注册失败'
       set({ isLoading: false, error: errorMessage })
       throw new Error(errorMessage)
     }

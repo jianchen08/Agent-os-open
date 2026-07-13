@@ -2,6 +2,24 @@
 代码沙箱模块
 
 提供安全的代码执行环境。
+
+⚠️ 安全警告（H3/M5）
+=================
+
+本沙箱在**宿主进程内**用 ``exec`` 运行用户代码，AST 检查是**黑名单**性质，
+**不能作为不可信代码的安全边界**——它只能挡住公开的逃逸 payload，无法
+防御新型绕过。一旦绕过，攻击者即获得宿主进程的完整权限。
+
+威胁模型：
+- **可信/本地单用户场景**：本沙箱够用（防误操作 + 挡经典攻击）。
+- **不可信/多租户场景**：必须通过 IsolationCoordinator 把代码执行
+  移进容器隔离（降权 + 只读根 + 限制能力），**绝不**走本沙箱的宿主路径。
+
+配置项 ``SandboxConfig.require_isolation``（见下）用于让宿主执行路径
+在不可信场景 fail-closed。
+
+根治路径（未完成）：将 host_provider 的 code_execute 调用强制路由到
+容器 provider，本沙箱仅作为容器内的兜底（容器内即便逃逸也受限）。
 """
 
 import ast
@@ -23,6 +41,24 @@ class SandboxTimeoutError(SandboxError):
 
 class SandboxSecurityError(SandboxError):
     """沙箱安全错误"""
+
+
+# 已知的 dunder 属性逃逸跳板：通过这些属性可从任意对象爬到 object/os。
+# 黑名单只能挡公开 payload（根治需容器隔离，见模块文档）。
+_DUNDER_ESCAPE_ATTRS = frozenset({
+    "__class__",
+    "__bases__",
+    "__base__",
+    "__subclasses__",
+    "__mro__",
+    "__globals__",
+    "__builtins__",
+    "__import__",
+    "__loader__",
+    "__code__",
+    "__func__",
+    "__self__",
+})
 
 
 @dataclass
@@ -160,6 +196,12 @@ class CodeValidator:
                         module = node.func.value.id
                         if module in self.config.blocked_modules:
                             issues.append(f"禁止使用模块: {module}")
+
+            # 拦截 dunder 属性链逃逸（().__class__.__bases__[0].__subclasses__() 等）
+            # 这是经典逃逸手法，黑名单无法根治但能挡住所有公开 payload。
+            # 根治方案：不可信代码移进容器隔离（见模块文档警告）。
+            if isinstance(node, ast.Attribute) and node.attr in _DUNDER_ESCAPE_ATTRS:
+                issues.append(f"禁止访问 dunder 属性: {node.attr}（潜在逃逸）")
 
         return len(issues) == 0, issues
 

@@ -1,16 +1,11 @@
 """ReviewEngine - 复盘查询层。
 
-复盘的执行（LLM 深度分析、报告产出）已全部收敛到 MemoryMaintenanceService 的
-B 路径（trigger_llm_review）。本引擎只保留复盘系统对存储层的查询能力：
+复盘的执行（LLM 深度分析、报告产出）由 MemoryMaintenanceService.trigger_llm_review
+编排。本引擎只保留复盘系统对存储层的查询能力：
 
 - get_pending_pipelines(): 列出待复盘管道（status=已结束 且 review_status=pending）
 - get_summary(): 单个管道复盘摘要
-- mark_reviewed(): B 路径产出报告后，把管道标记为已复盘
-
-历史上曾存在两套复盘机制：
-  A 路径（模板化经验提取）——已删除（_run_review_simple/_run_review_full/
-    _extract_experiences/_generate_lesson/_categorize_error/run_batch_review 等）。
-  现在复盘唯一真相源是 B 路径。
+- mark_reviewed(): 复盘产出报告后，把管道标记为已复盘
 """
 
 from __future__ import annotations
@@ -54,8 +49,8 @@ class PipelineRunSummary:
 class ReviewEngine:
     """复盘查询层：列出待复盘管道、标记已复盘。
 
-    不再包含任何"经验提取"执行逻辑（A 路径已删除）。复盘执行统一由
-    MemoryMaintenanceService.trigger_llm_review（B 路径）编排。
+    复盘执行由 MemoryMaintenanceService.trigger_llm_review 编排，本类只负责
+    对存储层的查询与状态标记。
 
     Args:
         storage: 执行记录存储，提供 list_all_summaries/get_summary/update_summary
@@ -78,14 +73,12 @@ class ReviewEngine:
         Args:
             storage: 执行记录存储
             chunk_db: 数据块存储（标记复盘用）
-            knowledge_service: 保留参数以兼容旧构造调用，当前不再使用
-                （经验存储已移交 B 路径的 _persist_review_result）。
-            task_lookup: 保留参数以兼容旧构造调用，当前不再使用
-                （任务反查已移交 service._collect_review_targets）。
+            knowledge_service: 未使用，保留参数位以兼容构造签名。
+            task_lookup: 未使用，保留参数位以兼容构造签名。
         """
         self._storage = storage
         self._chunk_db = chunk_db
-        # knowledge_service / task_lookup 不再有执行逻辑，仅保留参数位避免破坏构造签名
+        # knowledge_service / task_lookup 仅保留参数位以兼容构造签名
         self._knowledge_service = knowledge_service
         self._task_lookup = task_lookup
 
@@ -100,8 +93,7 @@ class ReviewEngine:
         兼容 track 插件实际写入的 status 值（success/failed/completed）。
 
         Returns:
-            待复盘的管道摘要列表。storage 为 None 时返回空列表
-            （历史内存模式已随 A 路径删除，不再支持）。
+            待复盘的管道摘要列表。storage 为 None 时返回空列表。
         """
         if self._storage is None:
             return []
@@ -122,11 +114,11 @@ class ReviewEngine:
         return None
 
     # ============================================
-    # 标记：B 路径产出报告后调用
+    # 标记：复盘产出报告后调用
     # ============================================
 
     async def mark_reviewed(self, run_id: str, *, failed: bool = False) -> None:
-        """把管道标记为已复盘（B 路径产出报告后调用）。
+        """把管道标记为已复盘（复盘产出报告后调用）。
 
         Args:
             run_id: 管道运行 ID

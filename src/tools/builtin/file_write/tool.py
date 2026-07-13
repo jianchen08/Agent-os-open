@@ -299,7 +299,11 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=".tmp_")
         try:
             # 写入内容到临时文件
-            with open(fd, "w", encoding="utf-8") as f:
+            # newline="\n"：强制 LF 行尾。Windows 文本模式默认把 \n 翻译成 \r\n，
+            # 写出的 .sh 脚本带 CRLF，喂给容器 /bin/sh 会报
+            # "/bin/sh: set: Illegal option -"（\r 被当 option 名的一部分）。
+            # 见 tests/tools/builtin/file_write/test_line_endings.py。
+            with open(fd, "w", encoding="utf-8", newline="\n") as f:
                 f.write(content)
 
             # 重命名临时文件为目标文件（原子操作）
@@ -809,7 +813,8 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                         needs_newline = last_byte != b"\n"
                     f.seek(0, 2)  # 移到末尾
                 # 用文本模式追加写入
-                with open(path, "a", encoding="utf-8") as f:
+                # newline="\n"：强制 LF，与 _atomic_write 一致（见其注释）。
+                with open(path, "a", encoding="utf-8", newline="\n") as f:
                     if needs_newline:
                         f.write("\n")
                     f.write(content)

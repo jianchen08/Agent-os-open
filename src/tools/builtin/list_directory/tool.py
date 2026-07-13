@@ -70,6 +70,7 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
     async def execute(self, inputs: dict[str, Any]):
         """执行目录列表操作"""
         self._init_workspace(inputs)
+        self._init_agent_level(inputs)
 
         try:
             path_str = inputs.get("path")
@@ -84,6 +85,15 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
 
             path = self.resolve_path(path_str)
             display_path = self._format_output_path(path, path_str)
+
+            # 路径越界校验：列出目录是读操作，必须落在 workspace 允许范围内
+            agent_level = getattr(self, "_agent_level", None)
+            ok, err = self.check_path_allowed(str(path), "read", agent_level)
+            if not ok:
+                return create_failure_result(
+                    error=f"路径越界拒绝: {err}",
+                    error_code="PATH_NOT_ALLOWED",
+                )
 
             if not path.exists():
                 return create_failure_result(

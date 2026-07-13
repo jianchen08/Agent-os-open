@@ -669,7 +669,7 @@ class ProcessManager:
 
     # 匹配命令中的 Windows 风格绝对路径，用于在 WSL 执行前自动转换。
     # 支持：D:\path, D:/path, \\?\D:\path, \\wsl$\Distro\path, \\wsl.localhost\Distro\path
-    # 不匹配：相对路径、环境变量、网络共享 \\server\share、Unix 路径。
+    # 不匹配：相对路径、环境变量、网络共享 \\server\share、Unix 路径、URL。
     # 不带引号的 Windows 路径：遇到空格、引号、管道、重定向等 shell 元字符即终止。
     _WIN_UNQUOTED_PATH_CHARS: ClassVar[str] = r'[^\s"\'|&;<>$`]'
     # 带引号的 Windows 路径：引号内允许空格、括号等，只以对应引号终止。
@@ -685,7 +685,14 @@ class ProcessManager:
         r"(?P<path>"
         r"\\\\\?\\[a-zA-Z]:[/\\]" + _WIN_UNQUOTED_PATH_CHARS + r"*"
         r"|\\\\wsl(?:\.localhost|\$)\\[^\\]+\\" + _WIN_UNQUOTED_PATH_CHARS + r"*"
-        r"|[a-zA-Z]:[/\\]" + _WIN_UNQUOTED_PATH_CHARS + r"*"
+        # 第三分支：裸盘符 X:/ 或 X:\。
+        # (?<![a-zA-Z]) 负向回查：盘符字母前不能再有字母。
+        # 否则会把 URL 当盘符误伤 —— https://sh.rustup.rs 里紧跟 ':' 的 's'
+        # 会被当成盘符，整段 URL 被转成 /mnt/s//sh.rustup.rs 而破坏。
+        # URL scheme（http/https/ftp/git/ssh/file...）末字母前必有字母，
+        # 回查必失败；Windows 盘符前是空格/行首/引号/(/= 等，回查通过。
+        # 见 tests/tools/builtin/bash/test_path_conversion.py URL 分组。
+        r"|(?<![a-zA-Z])[a-zA-Z]:[/\\]" + _WIN_UNQUOTED_PATH_CHARS + r"*"
         r")"
     )
 

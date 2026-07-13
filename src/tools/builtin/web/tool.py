@@ -209,7 +209,12 @@ class WebTool(BuiltinTool):
         return hints.get(status_code, "")
 
     def _check_url_security(self, url: str) -> tuple[bool, str | None]:
-        """检查 URL 安全性"""
+        """检查 URL 安全性。
+
+        校验顺序：黑名单 → 公共 validate_url（协议 + 白名单 + DNS 内网 IP 检查）。
+        DNS 解析查内网 IP 是关键——仅做域名字符串匹配会被
+        http://169.254.169.254/ 云 metadata 或 DNS rebinding 到 127.0.0.1 绕过。
+        """
         try:
             parsed = urlparse(url)
             domain = parsed.netloc.lower()
@@ -218,22 +223,17 @@ class WebTool(BuiltinTool):
             if ":" in domain:
                 domain = domain.split(":")[0]
 
-            # 检查协议
-            if parsed.scheme not in ["http", "https"]:
-                return False, f"不支持的协议: {parsed.scheme}"
-
-            # 检查禁止域名（支持子域名匹配）
+            # 检查禁止域名（支持子域名匹配）—— web 工具特有的黑名单
             for blocked in self.blocked_domains:
                 if domain == blocked or domain.endswith("." + blocked):
                     return False, f"域名在禁止列表中: {domain}"
 
-            # 检查允许列表（支持子域名匹配）
-            if self.allowed_domains is not None:
-                is_allowed = any(
-                    domain == allowed or domain.endswith("." + allowed) for allowed in self.allowed_domains
-                )
-                if not is_allowed:
-                    return False, f"域名不在允许列表中: {domain}"
+            # 复用公共 SSRF 防护：协议白名单 + 域名白名单 + DNS 解析内网 IP 检查
+            from tools.common.ssrf_guard import validate_url  # noqa: PLC0415
+
+            ok, msg = validate_url(url, self.allowed_domains)
+            if not ok:
+                return False, msg
 
             return True, None
 

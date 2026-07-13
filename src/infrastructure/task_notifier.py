@@ -128,16 +128,18 @@ class TaskNotifierMixin:
                     new_status,
                 )
 
-            # 任务进入终态时，终止关联管道引擎。
-            # failed → 必停；stopped → 仅 cancel_task 产生的（无 paused_by）才停，
-            # pause_task 产生的（有 paused_by）保留引擎待 resume_task 唤醒。
-            # 历史根因：TaskStatus 无 cancelled，cancel_task emit "stopped"，
+            # 任务进入终态时，冻结关联管道引擎（停止执行 + 取消 total_timeout 定时器）。
+            # failed 和 stopped 都调 cancel_pipeline 做完整清理：
+            #   - cancel_pipeline 取消 bg_task、清 suspended_engine、取消 idle/total 定时器
+            #   - 不动 task.status（status 由 fail_task/pause_task/cancel_task 已设）
+            # pause vs cancel 的差异靠 metadata 区分（paused_by 可 resume 重建，
+            #   cancel_reason 不可恢复），不再用"是否停引擎"区分。
+            # 历史根因：旧逻辑让 pause（有 paused_by）保留引擎待 resume_task 唤醒，
+            # 但 pause 不取消 total_timeout 硬墙定时器 → 到点照常 fail_task →
+            # 唤醒父管道 → 父 LLM 重试子任务 → 反复超时上报。统一冻结即可根治。
+            # 历史根因2：TaskStatus 无 cancelled，cancel_task emit "stopped"，
             # 旧代码判 ("cancelled","failed") 永远不匹配 stopped → 引擎空转。
-            _should_stop_engine = new_status == "failed" or (
-                new_status == "stopped" and self._is_cancel_stopped(task_id)
-            )
-
-            if _should_stop_engine:
+            if new_status in ("failed", "stopped"):
                 try:
                     _cancelled = self.cancel_pipeline(task_id)
 
@@ -155,12 +157,6 @@ class TaskNotifierMixin:
                         new_status,
                         _cp_exc,
                     )
-
-            elif new_status == "stopped":
-                logger.info(
-                    "TaskWorker: 任务 stopped 但为 pause（保留引擎待 resume）| task=%s",
-                    task_id,
-                )
 
             try:
                 await self._check_stale_containers()

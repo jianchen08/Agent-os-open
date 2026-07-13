@@ -4,8 +4,16 @@
 提供项目的统一配置管理，支持环境变量覆盖
 """
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 已知不安全的 JWT secret 占位符（代码默认值 + 常见占位串）
+_INSECURE_JWT_SECRETS = frozenset({
+    "dev-insecure-key-do-not-use-in-production",
+    "development-secret-key-change-in-production",
+    "change-me",
+    "your-secret-key",
+})
 
 
 class Settings(BaseSettings):
@@ -59,6 +67,9 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = Field(default=30, validation_alias="JWT_EXPIRE_MINUTES")
     access_token_expire_minutes: int = Field(default=30, validation_alias="APP_ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(default=7, validation_alias="APP_REFRESH_TOKEN_EXPIRE_DAYS")
+
+    # 是否开放公开注册（默认关闭，需管理员预创建账号或显式开启）
+    allow_public_register: bool = Field(default=False, validation_alias="APP_ALLOW_PUBLIC_REGISTER")
 
     # 文件上传配置
     max_file_size: int = Field(default=10 * 1024 * 1024, validation_alias="MAX_FILE_SIZE")  # 10MB
@@ -129,6 +140,25 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",  # 忽略额外字段
     )
+
+    @model_validator(mode="after")
+    def _validate_jwt_secret_strength(self) -> "Settings":
+        """非 development 环境强制校验 JWT secret 强度（fail-closed）。
+
+        生产/预发环境若仍使用代码默认值或已知占位串或过短的 secret，
+        直接拒启动，防止攻击者伪造任意用户 token。
+        """
+        if self.environment == "development":
+            return self
+        secret = self.jwt_secret_key
+        if secret in _INSECURE_JWT_SECRETS or len(secret) < 32:
+            raise ValueError(
+                "JWT secret 不安全：非 development 环境（当前 "
+                f"{self.environment!r}）必须配置强随机 secret（>=32 字节、"
+                "非占位符）。请运行 `openssl rand -hex 32` 生成并写入"
+                " APP_JWT_SECRET_KEY 环境变量后重启。"
+            )
+        return self
 
     @property
     def api_base_url(self) -> str:

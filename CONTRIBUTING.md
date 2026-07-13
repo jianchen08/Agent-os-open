@@ -172,7 +172,7 @@ Agent-os/
 - 文档翻译：在 `docs/i18n/<lang>/` 下创建对应翻译
 - UI 翻译：在 `frontend/src/locales/<lang>/` 下提交 PR
 
-目前已支持：简体中文、英文。
+> **现状说明**：当前仓库以简体中文为主，文档另提供英文版（`README_EN.md`）；多语言目录 `docs/i18n/` 与 `frontend/src/locales/` 的结构**尚未建立**。欢迎首批贡献者协助搭建翻译框架——建议先在 Issue 中讨论目录结构与翻译规范，再提交 PR。
 
 ---
 

@@ -202,7 +202,19 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
 
     @app.websocket("/ws")
     async def websocket_root(websocket: WebSocket) -> None:
-        """处理根路径 WebSocket 连接。"""
+        """处理根路径 WebSocket 连接（需 token 认证）。"""
+        # 鉴权：与 /ws/chat 一致，token 从 query 参数取，accept 前校验
+        token = websocket.query_params.get("token", "")
+        if not token:
+            await websocket.accept()
+            await websocket.close(code=4001, reason="连接需要 token 认证")
+            return
+        payload = verify_token(token)
+        if payload is None:
+            await websocket.accept()
+            await websocket.close(code=4001, reason="Token 无效或已过期")
+            return
+
         await websocket.accept()
         logger.info("WebSocket 连接已建立（根路径）")
         try:

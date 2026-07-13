@@ -5,7 +5,7 @@ import json
 import logging
 import shutil
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from isolation.providers.base import IsolationProvider
 from isolation.types import (
@@ -513,6 +513,28 @@ class DockerProvider(IsolationProvider):
 
         return args
 
+    # BuildKit 缓存损坏的特征标记（小写匹配）。
+    # 命中任一即判定为缓存层损坏（非 Dockerfile 内容问题），可 prune 后重试自愈。
+    # 真实样本：unpigz: skipping: <stdin>: corrupted -- crc32 mismatch
+    _BUILDKIT_CORRUPTION_MARKERS: ClassVar[tuple[str, ...]] = (
+        "unpigz",
+        "corrupted",
+        "crc32 mismatch",
+        "checksum mismatch",
+    )
+
+    @classmethod
+    def _is_buildkit_cache_corruption(cls, err: str | bytes) -> bool:
+        """判断 build 失败 stderr 是否为 BuildKit 缓存损坏（可 prune 后重试自愈）。
+
+        与 Dockerfile 语法错、网络超时、磁盘满等"真失败"区分——后者重试无意义，
+        只会白等 build_timeout 秒并吃掉一次熔断计数。
+        """
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        low = err.lower()
+        return any(marker in low for marker in cls._BUILDKIT_CORRUPTION_MARKERS)
+
     async def _ensure_image(self) -> None:
         """确保镜像存在：本地有就用，没有则自动构建（优先），再不行才 pull。
 
@@ -523,6 +545,8 @@ class DockerProvider(IsolationProvider):
            （连续 _MAX_ENV_FAILURES 次抛 IsolationUnrecoverableError）接管，
            避免无限 next_llm 空转（每轮白等 docker create 30s × core retry 3 次 ≈ 4min）。
         3. 加锁 + 二次检查，防多协程并发触发构建。
+        4. BuildKit 缓存损坏（unpigz/crc32 mismatch）自动 prune + 重试一次：
+           这是瞬时故障，清掉损坏缓存后重试通常就成功，不该计入熔断计数。
         """
         # 快路径：镜像已存在，直接返回（无锁开销）。
         rc, _, _ = await self._run_cmd(["docker", "image", "inspect", self._image], timeout=5)
@@ -545,17 +569,18 @@ class DockerProvider(IsolationProvider):
                     self._image,
                     self._dockerfile_path,
                 )
+                build_args = [
+                    "docker",
+                    "build",
+                    "--progress=plain",
+                    "-t",
+                    self._image,
+                    "-f",
+                    str(self._dockerfile_path),
+                    str(self._build_context),
+                ]
                 rc, _, stderr = await self._run_cmd(
-                    [
-                        "docker",
-                        "build",
-                        "--progress=plain",
-                        "-t",
-                        self._image,
-                        "-f",
-                        str(self._dockerfile_path),
-                        str(self._build_context),
-                    ],
+                    build_args,
                     timeout=self._build_timeout,
                     env={"DOCKER_BUILDKIT": "1"},
                     stream_log=True,
@@ -564,6 +589,30 @@ class DockerProvider(IsolationProvider):
                     logger.info("[DockerProvider] 镜像构建成功 | image=%s", self._image)
                     return
                 err_tail = stderr.decode("utf-8", errors="replace")[-500:]
+
+                # BuildKit 缓存损坏：prune 清掉损坏缓存后重试一次。
+                # 这是瞬时故障（WSL2 异常关机/磁盘满/BuildKit 自身 bug），
+                # 非 Dockerfile 内容问题，重试通常即成功，不该白吃一次熔断计数。
+                if self._is_buildkit_cache_corruption(err_tail):
+                    logger.warning(
+                        "[DockerProvider] build 失败为 BuildKit 缓存损坏，清理缓存后重试一次 | markers_match=%s",
+                        err_tail[:200],
+                    )
+                    await self._run_cmd(
+                        ["docker", "builder", "prune", "-f"],
+                        timeout=120,
+                    )
+                    rc, _, stderr = await self._run_cmd(
+                        build_args,
+                        timeout=self._build_timeout,
+                        env={"DOCKER_BUILDKIT": "1"},
+                        stream_log=True,
+                    )
+                    if rc == 0:
+                        logger.info("[DockerProvider] 缓存清理后重试构建成功 | image=%s", self._image)
+                        return
+                    err_tail = stderr.decode("utf-8", errors="replace")[-500:]
+
                 # raise 而非吞：让 manager.py 熔断器接管，避免无限空转。
                 raise RuntimeError(
                     f"镜像 {self._image} 自动构建失败（docker build 退出码非 0）。"

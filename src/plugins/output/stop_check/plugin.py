@@ -232,18 +232,21 @@ class StopCheckPlugin(IOutputPlugin):
                 }
         return None
 
-    _TERMINAL_STATUSES = frozenset({"canceled", "deleted", "completed", "failed"})
+    # TaskStatus 枚举仅有 stopped/completed/failed（无 cancelled/canceled/deleted）。
+    # pause_task/cancel_task 都 emit "stopped"，必须纳入终态，否则暂停后引擎仍空转。
+    # 与 task_notifier._TERMINAL_STATES、engine._check_children_terminal 保持一致。
+    _TERMINAL_STATUSES = frozenset({"stopped", "completed", "failed"})
 
     def _check_task_terminal_status(self, ctx: PluginContext) -> str:
-        """检查任务是否已到达终态（取消/删除/完成/失败）。
+        """检查任务是否已到达终态（停止/完成/失败）。
 
         两个检测路径：
         1. 从 state["task_status"] 读取（由外部插件注入的缓存值）
         2. 从 TaskService 查询任务的实际状态（兜底，防止 state 未被更新）
 
-        终态检测范围包含 completed/failed（不止 canceled/deleted），并从 TaskService
+        终态检测范围包含 stopped/completed/failed，并从 TaskService
         查询任务实际状态兜底，确保无论 state 是否被更新都能检测到终态，避免管道在任务
-        完成后仍持续循环执行（state["task_status"] 可能从未被任何插件更新，
+        完成或暂停/取消后仍持续循环执行（state["task_status"] 可能从未被任何插件更新，
         task_event_receiver 只修改 user_input）。
 
         Args:
