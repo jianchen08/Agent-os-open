@@ -1,0 +1,322 @@
+/**
+ * 设计令牌 (Design Tokens)
+ *
+ * 定义全局设计变量,包括颜色、间距、字体等
+ * 优化版本：增强视觉层级、圆角、阴影
+ * 支持 light/dark 双主题模式
+ */
+
+:root {
+  color-scheme: dark light;
+
+  /* shadcn/ui 核心变量 - Light 模式默认值 */
+  --background: 0 0% 100%;
+  --foreground: 222.2 84% 4.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 84% 4.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 84% 4.9%;
+  --panel-solid: 0 0% 100%;
+  --primary: 222.2 47.4% 11.2%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 210 40% 96.1%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --accent: 210 40% 96.1%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214.3 31.8% 91.4%;
+  --input: 214.3 31.8% 91.4%;
+  --ring: 222.2 84% 4.9%;
+  --radius: 0.5rem;
+  --chart-1: 220 70% 50%;
+  --chart-2: 160 60% 45%;
+  --chart-3: 30 80% 55%;
+  --chart-4: 280 65% 60%;
+  --chart-5: 340 75% 55%;
+
+  /* 间距 */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+
+  /* 字体大小 */
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 1.875rem;
+
+  /* 字体族 */
+  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* 圆角 */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-full: 9999px;
+
+  /* 消息气泡圆角 */
+  --radius-bubble: 1rem;
+  --radius-bubble-sm: 0.5rem;
+
+  /* 过渡 */
+  --transition-fast: 150ms ease-in-out;
+  --transition-base: 200ms ease-in-out;
+  --transition-slow: 300ms ease-in-out;
+
+  /* === Light 模式默认值 === */
+
+  /* 阴影 - light模式柔和 */
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.03);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.08), 0 8px 10px -6px rgb(0 0 0 / 0.05);
+  --shadow-float: 0 8px 30px rgb(0 0 0 / 0.08);
+  --shadow-card: 0 2px 8px rgb(0 0 0 / 0.05);
+
+  /* 侧边栏 */
+  --sidebar-bg: #F7F7F8;
+
+  /* 品牌辅助色 */
+  --brand-accent: hsl(221.2 83.2% 53.3%);
+  --brand-accent-light: hsl(221.2 83.2% 93.3%);
+  --brand-success: hsl(142 76% 36%);
+  --brand-success-light: hsl(142 76% 90%);
+
+  /* 语义色 HSL 默认值（供 Tailwind 语义色和组件变量引用） */
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* 状态强调色（与 theme.css 保持一致，Light 模式默认值） */
+  --accent-running: #0ea5e9;
+  --accent-waiting: #f59e0b;
+  --accent-success: #10b981;
+  --accent-error: #ef4444;
+  --accent-pending: #94a3b8;
+
+  /* === 组件级样式变量 === */
+
+  /* 按钮 */
+  --btn-primary-bg: hsl(var(--primary));
+  --btn-primary-text: hsl(var(--primary-foreground));
+  --btn-primary-border: transparent;
+  --btn-primary-hover-bg: hsl(var(--primary) / 0.9);
+  --btn-primary-shadow: 0 2px 4px rgb(0 0 0 / 0.1);
+  --btn-primary-hover-shadow: 0 4px 8px rgb(0 0 0 / 0.15);
+
+  --btn-secondary-bg: hsl(var(--secondary));
+  --btn-secondary-text: hsl(var(--secondary-foreground));
+  --btn-secondary-border: transparent;
+  --btn-secondary-hover-bg: hsl(var(--secondary) / 0.9);
+  --btn-secondary-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+
+  --btn-ghost-bg: transparent;
+  --btn-ghost-text: hsl(var(--foreground));
+  --btn-ghost-border: transparent;
+  --btn-ghost-hover-bg: hsl(var(--accent) / 0.1);
+
+  --btn-destructive-bg: hsl(var(--destructive));
+  --btn-destructive-text: hsl(var(--destructive-foreground));
+  --btn-destructive-border: transparent;
+  --btn-destructive-hover-bg: hsl(var(--destructive) / 0.9);
+
+  /* 消息气泡 */
+  --bubble-user-bg: hsl(var(--primary));
+  --bubble-user-text: hsl(var(--primary-foreground));
+  --bubble-user-radius: 1rem;
+  --bubble-user-radius-tr: 0.25rem;
+  --bubble-user-shadow: 0 1px 3px rgb(0 0 0 / 0.1);
+
+  --bubble-ai-bg: hsl(var(--muted));
+  --bubble-ai-text: hsl(var(--muted-foreground));
+  --bubble-ai-radius: 1rem;
+  --bubble-ai-radius-tl: 0.25rem;
+  --bubble-ai-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+
+  /* 头像样式 */
+  --avatar-radius: 0.75rem;
+  --avatar-border: 1px solid hsl(var(--border) / 0.5);
+  --avatar-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+  --avatar-sm-size: 32px;
+  --avatar-md-size: 40px;
+  --avatar-lg-size: 48px;
+
+  /* 卡片样式 */
+  --card-bg: hsl(var(--card));
+  --card-border: 1px solid hsl(var(--border));
+  --card-radius: 0.75rem;
+  --card-shadow: 0 2px 8px rgb(0 0 0 / 0.06);
+  --card-hover-shadow: 0 4px 16px rgb(0 0 0 / 0.1);
+  --card-backdrop-blur: 8px;
+
+  /* 输入框样式 */
+  --input-bg: hsl(var(--input) / 0.5);
+  --input-border: 1px solid hsl(var(--border));
+  --input-radius: 0.5rem;
+  --input-focus-border: hsl(var(--primary));
+  --input-focus-ring: 0 0 0 3px hsl(var(--primary) / 0.15);
+  --input-focus-shadow: 0 0 8px hsl(var(--primary) / 0.15);
+
+  /* 状态指示器 */
+  --status-running-color: #0ea5e9;
+  --status-running-shadow: 0 0 10px rgba(14, 165, 233, 0.2);
+
+  --status-waiting-color: #f59e0b;
+  --status-waiting-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+
+  --status-success-color: #10b981;
+  --status-success-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+
+  --status-error-color: #ef4444;
+  --status-error-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
+
+  --status-pending-color: #94a3b8;
+  --status-pending-shadow: none;
+
+  /* 状态别名变量（不带 -color 后缀，供 Tailwind 引用） */
+  --status-running: var(--status-running-color);
+  --status-waiting: var(--status-waiting-color);
+  --status-warning: var(--status-waiting-color);
+  --status-success: var(--status-success-color);
+  --status-error: var(--status-error-color);
+  --status-info: #3b82f6;
+  --status-pending: var(--status-pending-color);
+
+  /* 思考过程样式 */
+  --thinking-text-color: rgba(100, 100, 115, 0.7);
+  --thinking-border-color: rgba(59, 130, 246, 0.3);
+  --thinking-bg: hsl(var(--muted) / 0.3);
+
+  /* 代码块样式 */
+  --code-bg: #1e1e1e;
+  --code-text: #d4d4d4;
+
+  /* 选中态 */
+  --selection-bg: rgba(59, 130, 246, 0.25);
+  --selection-text: inherit;
+
+  /* 卡片动画色 */
+  --card-breathe-color: var(--status-running-color);
+
+  /* 浮动引用按钮 */
+  --floating-quote-bg: hsl(var(--popover));
+  --floating-quote-text: hsl(var(--popover-foreground));
+  --floating-quote-border: hsl(var(--border));
+  --floating-quote-shadow: 0 4px 12px rgb(0 0 0 / 0.15);
+  --floating-quote-hover-bg: hsl(var(--accent));
+}
+
+/* === Dark 模式覆盖 === */
+.dark {
+  /* shadcn/ui 核心变量 - Dark 模式覆盖 */
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --card: 222.2 84% 4.9%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222.2 84% 4.9%;
+  --popover-foreground: 210 40% 98%;
+  --panel-solid: 222.2 84% 4.9%;
+  --primary: 217.2 91.2% 59.8%;
+  --primary-foreground: 222.2 47.4% 11.2%;
+  --secondary: 217.2 32.6% 17.5%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217.2 32.6% 17.5%;
+  --muted-foreground: 215 20.2% 65.1%;
+  --accent: 217.2 32.6% 17.5%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --input: 217.2 32.6% 17.5%;
+  --ring: 224.3 76.3% 48%;
+
+  /* 阴影 - dark模式更深 */
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.3);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.3);
+  --shadow-float: 0 8px 30px rgb(0 0 0 / 0.4);
+  --shadow-card: 0 2px 8px rgb(0 0 0 / 0.3);
+
+  /* 侧边栏 */
+  --sidebar-bg: rgba(15, 23, 42, 0.5);
+
+  /* 按钮阴影增强 */
+  --btn-primary-shadow: 0 4px 6px rgb(0 0 0 / 0.3);
+  --btn-primary-hover-shadow: 0 8px 12px rgb(0 0 0 / 0.4);
+  --btn-secondary-shadow: 0 2px 4px rgb(0 0 0 / 0.2);
+
+  /* 消息气泡阴影 */
+  --bubble-user-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+  --bubble-ai-shadow: 0 1px 4px rgb(0 0 0 / 0.2);
+
+  /* 头像 */
+  --avatar-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+
+  /* 卡片 */
+  --card-shadow: 0 4px 12px rgb(0 0 0 / 0.35);
+  --card-hover-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+  --card-backdrop-blur: 12px;
+
+  /* 输入框 */
+  --input-focus-shadow: 0 0 15px hsl(var(--primary) / 0.25);
+
+  /* 状态指示器 - dark模式用更亮的色 */
+  --status-running-color: #22d3ee;
+  --status-running-shadow: 0 0 15px rgba(34, 211, 238, 0.25);
+
+  --status-waiting-color: #fbbf24;
+  --status-waiting-shadow: 0 0 15px rgba(251, 191, 36, 0.25);
+
+  --status-success-color: #34d399;
+  --status-success-shadow: 0 0 15px rgba(52, 211, 153, 0.25);
+
+  --status-error-color: #f87171;
+  --status-error-shadow: 0 0 15px rgba(248, 113, 113, 0.25);
+
+  --status-pending-color: #94a3b8;
+  --status-pending-shadow: none;
+
+  /* 状态别名变量（不带 -color 后缀，供 Tailwind 引用） */
+  --status-running: var(--status-running-color);
+  --status-waiting: var(--status-waiting-color);
+  --status-warning: var(--status-waiting-color);
+  --status-success: var(--status-success-color);
+  --status-error: var(--status-error-color);
+  --status-info: #60a5fa;
+  --status-pending: var(--status-pending-color);
+
+  /* 思考过程样式 - dark */
+  --thinking-text-color: rgba(180, 180, 195, 0.6);
+  --thinking-border-color: rgba(59, 130, 246, 0.4);
+  --thinking-bg: rgba(0, 0, 0, 0.25);
+
+  /* 代码块样式 - dark */
+  --code-bg: #1e1e1e;
+  --code-text: #d4d4d4;
+
+  /* 选中态 */
+  --selection-bg: rgba(59, 130, 246, 0.35);
+  --selection-text: #ffffff;
+
+  /* 卡片动画色 */
+  --card-breathe-color: var(--status-running-color);
+
+  /* 浮动引用按钮 - dark */
+  --floating-quote-bg: hsl(var(--popover));
+  --floating-quote-text: hsl(var(--popover-foreground));
+  --floating-quote-border: hsl(var(--border));
+  --floating-quote-shadow: 0 4px 12px rgb(0 0 0 / 0.4);
+  --floating-quote-hover-bg: hsl(var(--accent));
+}

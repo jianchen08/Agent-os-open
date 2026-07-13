@@ -1,0 +1,27 @@
+# 嵌入模型（Embedding）Provider 配置
+# YAML 驱动切换，修改 default_provider 即可切换服务商，不改代码
+#
+# 说明（[来源: 参照 config/models/asr.yaml L1-25 结构推断]）：
+# - api_key 支持 ${ENV_VAR} 占位符，运行时从环境变量读取
+# - 嵌入模型用于语义检索、记忆系统向量检索、复盘经验相似度匹配
+# - 未配置 api_key（环境变量未设置）时，enabled 自动降为 False，
+#   语义检索会降级到关键词检索而非崩溃
+#
+# [未验证] 以下 providers 字段为最小可用占位模板，具体服务商标的待配置时确认
+
+embedding:
+  enabled: false  # 默认禁用，待配置 API Key 后改为 true
+  default_provider: openai
+  providers:
+    # OpenAI 兼容接口（默认，示例）
+    openai:
+      api_base: "https://api.openai.com/v1"
+      api_key: "${OPENAI_API_KEY}"
+      model: "text-embedding-3-small"
+      dimension: 1536
+    # 示例：将来切换到智谱 Embedding，取消注释并改 default_provider 为 zhipu
+    # zhipu:
+    #   api_base: "https://open.bigmodel.cn/api/paas/v4"
+    #   api_key: "${ZHIPU_API_KEY}"
+    #   model: "embedding-2"
+    #   dimension: 1024

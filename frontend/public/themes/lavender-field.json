@@ -1,0 +1,19 @@
+{
+  "id": "lavender-field",
+  "name": "薰衣草田",
+  "basedOn": "light",
+  "createdAt": "",
+  "updatedAt": "",
+  "customizations": {
+    "name": "薰衣草田",
+    "description": "基于浅色主题的紫色变体，薰衣草主调，清新雅致",
+    "colors": {
+      "primary": "#7c3aed",
+      "secondary": "#8b5cf6",
+      "accent": "#a78bfa",
+      "status": {
+        "info": "#7c3aed"
+      }
+    }
+  }
+}

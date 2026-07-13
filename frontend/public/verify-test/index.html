@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>SVG/Mermaid 渲染验证</title>
+<style>
+body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: auto; }
+.test-case { border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 8px; }
+.test-case h3 { margin-top: 0; }
+.pass { color: green; font-weight: bold; }
+.fail { color: red; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>SVG/Mermaid 渲染验证页面</h1>
+
+<div class="test-case" id="test1">
+<h3>场景1: SVG 代码块 Base64 图片渲染</h3>
+<img id="svg-img-1" alt="svg" src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTAiIGhlaWdodD0iNTAiPjxjaXJjbGUgY3g9IjI1IiBjeT0iMjUiIHI9IjIwIiBmaWxsPSJibHVlIi8+PC9zdmc+" />
+<p id="svg-img-1-status">检测中...</p>
+</div>
+
+<div class="test-case" id="test2">
+<h3>场景2: Mermaid 图表渲染</h3>
+<div id="mermaid-container">加载中...</div>
+<p id="mermaid-status">检测中...</p>
+</div>
+
+<div class="test-case" id="test3">
+<h3>场景3: XSS 过滤后 SVG 渲染</h3>
+<img id="svg-img-xss" alt="svg" src="data:image/svg+xml;base64,PHN2Zz48cmVjdCB3aWR0aD0iMTAiLz48L3N2Zz4=" />
+<p id="xss-status">检测中...</p>
+</div>
+
+<div class="test-case" id="test5">
+<h3>场景5: SVG 含括号 transform</h3>
+<img id="svg-img-transform" alt="svg" src="data:image/svg+xml;base64,PHN2Zz48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgxMCwyMCkiPnRleHQ8L2c+PC9zdmc+" />
+<p id="transform-status">检测中...</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+var img1 = document.getElementById('svg-img-1');
+img1.onload = function() {
+  document.getElementById('svg-img-1-status').innerHTML = '<span class="pass">PASS SVG naturalWidth=' + img1.naturalWidth + '</span>';
+};
+img1.onerror = function() {
+  document.getElementById('svg-img-1-status').innerHTML = '<span class="fail">FAIL SVG load error</span>';
+};
+
+try {
+  mermaid.initialize({ startOnLoad: true });
+  var mermaidDiv = document.createElement('div');
+  mermaidDiv.className = 'mermaid';
+  mermaidDiv.textContent = 'graph TD\nA-->B';
+  document.getElementById('mermaid-container').innerHTML = '';
+  document.getElementById('mermaid-container').appendChild(mermaidDiv);
+  mermaid.run().then(function() {
+    var svg = document.querySelector('#mermaid-container svg');
+    if (svg) {
+      document.getElementById('mermaid-status').innerHTML = '<span class="pass">PASS Mermaid rendered</span>';
+    } else {
+      document.getElementById('mermaid-status').innerHTML = '<span class="fail">FAIL no svg</span>';
+    }
+  }).catch(function(e) {
+    document.getElementById('mermaid-status').innerHTML = '<span class="fail">FAIL ' + e.message + '</span>';
+  });
+} catch(e) {
+  document.getElementById('mermaid-status').innerHTML = '<span class="fail">FAIL ' + e.message + '</span>';
+}
+
+var imgXss = document.getElementById('svg-img-xss');
+imgXss.onload = function() {
+  document.getElementById('xss-status').innerHTML = '<span class="pass">PASS XSS filtered SVG ok</span>';
+};
+
+var imgT = document.getElementById('svg-img-transform');
+imgT.onload = function() {
+  document.getElementById('transform-status').innerHTML = '<span class="pass">PASS transform SVG ok</span>';
+};
+</script>
+</body>
+</html>

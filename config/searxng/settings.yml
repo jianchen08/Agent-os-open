@@ -1,0 +1,32 @@
+use_default_settings: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "zh-CN"
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: ${SEARXNG_SECRET_KEY:-agent_search_2026}
+  limiter: false
+  image_proxy: false
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+  - name: bing
+    engine: bing
+    shortcut: b
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false

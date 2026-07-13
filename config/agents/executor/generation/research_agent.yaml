@@ -1,0 +1,196 @@
+config_id: research_agent
+name: 调研专家
+description: "通用调研Agent，负责各类调研任务：\n- 根据调研目标制定调研计划\n- 搜索网络、文档资料\n- 整理分析调研信息，自动标注信源等级\n- 输出结构化调研报告，结论-来源强制绑定\n  "
+model_name: minimax-m3
+model_tier: small
+agent_type: specialized
+category: analysis
+level: L3
+system_prompt: |-
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/research_domain_rules.md}}
+  {{path:.project/}}
+
+  # 你是调研专家
+
+  你是一个通用的**调研Agent**，负责按照调研报告模板结构执行调研任务，并将最终调研内容保存到验收标准中指定路径的 Markdown 文件。
+
+  调研工作流、信源评估体系、收集-写入循环、结论-来源绑定规则、报告章节结构均已在上方引入的 research_domain_rules.md 与 research_report_template.md 中定义，**严格遵照执行，不在本 prompt 重复**。
+
+  ## 输出路径规则
+
+  文件保存到 `docs/` 目录下。具体输出路径以任务验收标准（acceptance_criteria）中 file_check 的 path 为准。如果验收标准未指定路径，默认使用 `docs/working/{title}_research_report.md`（{title} 用上级 goal 任务名原文，不翻译、不缩写、不改写）。
+
+  ## 调研类型
+
+  根据调研目标自动识别调研类型：
+
+  | 类型 | 说明 | 输出重点 |
+  |------|------|----------|
+  | `technology` | 技术调研 | 实施方案对比、关键决策建议 |
+  | `resource` | 资源调研 | 现有资源清单、复用建议 |
+  | `market` | 市场调研 | 竞品分析、市场趋势 |
+  | `solution` | 方案调研 | 解决方案、最佳实践 |
+  | `general` | 通用调研 | 综合信息整理 |
+
+  ## 工作空间
+static_vars:
+  enabled: true
+  items:
+  - '{{rules}}'
+  - '{{path:config/templates/research_report_template.md}}'
+dynamic_vars:
+  enabled: true
+  items:
+  - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '{{path:config/rules/execution_review_rules.md}}'
+tool_ids:
+- web_search
+- fetch
+- memory
+- task_evaluate
+- file_read
+- file_write
+- list_directory
+- create_directory
+- copy_file
+- move_file
+- delete_file
+- enhanced_search
+hard_constraints:
+- 必须明确调研类型
+- 关键发现必须有信息来源，且每条结论必须按「结论」← 来源[等级] 格式绑定来源
+- 建议必须有理由支撑
+- 禁止连续 10 次迭代只调用信息获取工具而不 file_write，必须保持收集-写入循环
+- 每次 file_write 后必须自查 research_questions 覆盖情况，确保所有调研问题都已涉及
+- 调研报告完成前必须逐条检查 research_questions 中的每个问题是否已回答，未回答的必须补充调研或标注原因
+- 所有关键发现必须标注信源等级（🟢A/🔵B/🟡C/🟠D）和验证状态（✅/⚠️/❌）
+soft_constraints:
+- 提供多个可选方案
+- 标注信源等级（🟢A/🔵B/🟡C/🟠D），据此推导可信度
+- 考虑调研目标的实际约束
+- 上级 goal 要求多来源验证时，关键发现至少 2 个独立来源交叉验证
+input_schema:
+  type: object
+  properties:
+    research_goal:
+      type: string
+      description: 调研目标描述
+    research_type:
+      type: string
+      enum:
+      - technology
+      - resource
+      - market
+      - solution
+      - general
+      - auto
+      description: 调研类型，auto表示自动识别
+      default: auto
+    research_questions:
+      type: array
+      description: 调研问题列表（3-5个具体问题，由上层拆解后传递，required）
+      items:
+        type: object
+        properties:
+          question:
+            type: string
+            description: 具体调研问题
+          expected_answer_type:
+            type: string
+            enum:
+            - fact
+            - comparison
+            - solution
+            - data
+            - best_practice
+            description: 期望的答案类型
+          priority:
+            type: string
+            enum:
+            - must
+            - should
+            - nice_to_have
+            description: 优先级
+        required:
+        - question
+      minItems: 1
+    scope:
+      type: object
+      description: 调研范围约束
+      properties:
+        include_types:
+          type: array
+          description: 包含的资源类型
+          items:
+            type: string
+        exclude_types:
+          type: array
+          description: 排除的资源类型
+          items:
+            type: string
+        time_limit:
+          type: string
+          description: 时间限制（如：最近一年）
+    context:
+      type: object
+      description: 上下文信息（项目背景、约束条件等）
+    output_format:
+      type: string
+      enum:
+      - full
+      - summary
+      - actionable
+      description: 报告详细程度：完整报告/摘要/可操作建议
+      default: full
+  required:
+  - research_goal
+output_schema:
+  type: object
+  properties:
+    report_path:
+      type: string
+      description: '调研报告文件路径，格式: docs/working/{title}_research_report.md'
+deliverables:
+- name: research_report
+  description: 调研报告文件
+  template_source: knowledge
+  template_name: config/templates/research_report_template.md
+  output_path: '{{workspace}}/docs/working/{title}_research_report.md'
+  type: markdown
+  required: true
+recommended_metrics:
+- metric_id: file_check
+  default_params:
+    action: read
+    path: docs/working/{title}_research_report.md
+version: 3.0.0
+is_active: true
+status: active
+max_iterations: 500
+max_reminders: 5
+timeout_seconds: 2400
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+tags:
+- specialized
+- research
+- analysis
+- information
+- L3
+metadata:
+  author: System
+  created_at: '2026-01-11'
+  updated_at: '2026-05-21'
+  capabilities:
+  - requirement_analysis
+  - web_research
+  - information_synthesis
+  - recommendation_generation
+  - source_credibility_assessment
+  - cross_validation_support

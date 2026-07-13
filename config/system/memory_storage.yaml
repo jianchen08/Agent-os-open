@@ -1,0 +1,188 @@
+# -*- coding: utf-8 -*-
+# 记忆模块存储配置
+# 定义情景记忆和语义记忆的存储后端
+
+# 情景记忆存储后端
+episode_backend: file  # database | redis | file
+
+# 语义记忆存储后端
+semantic_backend: file  # database | redis | file
+
+# ========== 数据库配置 ==========
+database:
+  # 连接池大小
+  pool_size: 10
+
+  # 连接池最大溢出
+  max_overflow: 20
+
+  # 连接超时（秒）
+  pool_timeout: 30
+
+  # 连接回收时间（秒）
+  pool_recycle: 3600
+
+# ========== Redis 配置 ==========
+redis:
+  # Redis 主机地址
+  host: localhost
+
+  # Redis 端口
+  port: 6379
+
+  # 数据库索引（0-15）
+  db: 0
+
+  # 密码（可选）
+  password: null
+
+  # 连接池大小
+  pool_size: 10
+
+  # 数据过期时间（秒），默认 24 小时
+  ttl: 86400
+
+  # 连接超时（秒）
+  socket_timeout: 5
+
+  # SSL/TLS 配置
+  ssl: false
+
+# ========== 文件系统配置 ==========
+file:
+  # 基础存储路径（相对于项目根目录）
+  base_path: ./data/memory
+
+  # 是否启用压缩（gzip）
+  compression: true
+
+  # 压缩级别（1-9，越高压缩率越高但越慢）
+  compression_level: 6
+
+  # 是否启用索引（加速查询）
+  enable_index: true
+
+  # 索引文件路径
+  index_path: ./data/memory/index
+
+  # 文件权限（Unix）
+  file_mode: 0o644
+
+  # 目录权限（Unix）
+  dir_mode: 0o755
+
+# ========== 混合存储配置 ==========
+# 不同类型的数据使用不同的存储后端
+hybrid:
+  # 热数据（最近访问）使用 Redis
+  hot_data_backend: redis
+
+  # 冷数据使用数据库
+  cold_data_backend: database
+
+  # 归档数据使用文件系统
+  archive_backend: file
+
+  # 热数据阈值（访问次数或时间）
+  hot_threshold:
+    min_access_count: 5
+    max_age_hours: 24
+
+  # 冷数据阈值
+  cold_threshold:
+    max_age_hours: 720  # 30 天
+
+  # 归档阈值
+  archive_threshold:
+    max_age_hours: 8760  # 1 年
+
+# ========== 性能优化配置 ==========
+performance:
+  # 批量操作大小
+  batch_size: 100
+
+  # 并发操作数量
+  max_concurrent: 10
+
+  # 缓存大小（条目数）
+  cache_size: 1000
+
+  # 预加载配置
+  preload:
+    enabled: false
+    max_items: 100
+
+# ========== 向量检索配置 ==========
+vector_search:
+  # 是否启用向量检索（需要 pgvector 后端）
+  enabled: false
+
+  # 向量检索不可用时是否回退到关键词检索
+  fallback_to_keyword: true
+
+  # 默认检索方法：vector / keyword / tagwave
+  default_method: vector
+
+  # 混合检索配置（同时使用向量+关键词，按权重合并结果）
+  hybrid:
+    enabled: false
+    # 向量检索权重
+    vector_weight: 0.7
+    # 关键词检索权重
+    keyword_weight: 0.3
+
+  # 嵌入向量维度
+  embedding_dim: 1536
+
+# ========== 健康检查配置 ==========
+health_check:
+  # 是否启用健康检查
+  enabled: true
+
+  # 检查间隔（秒）
+  check_interval: 300
+
+# ========== 记忆维护配置 ==========
+maintenance:
+  # 是否启用自动维护
+  enabled: true
+
+  # 复盘配置
+  review:
+    # 复盘触发条件（满足任一即触发）
+    trigger:
+      min_records: 500            # 积累 500 条新执行记录后触发
+      max_interval: 604800        # 或最迟 7 天触发一次
+    # 骨架预算：占 review_agent 模型上下文窗口的百分比（10~20 区间）
+    # 窗口大小由装配时按 review_agent 的 model_tier 动态解析（见 application.py），
+    # 不写死——模型大自动多塞，模型小自动少塞。
+    skeleton_budget_percent: 15   # 15% 的模型上下文用于骨架
+    # 例：1M 窗口 -> 150,000 token -> ~10,000 条记录骨架；128K 窗口 -> 19,200 token -> ~1,280 条
+    records_per_skeleton_token: 15  # 每条执行记录在骨架中约占 15 token
+    # 单次复盘的管道数量上限（与骨架预算取更严的那个）。
+    # 受 review_agent 的 max_iterations/timeout 约束：10 管道 × ~5 轮迭代 ≈ 50 轮，
+    # 远低于 max_iterations=100，保证塞进去的都能真产出报告。配 5 就是 5，配 10 就是 10。
+    review_batch_limit: 10
+
+  # 清理配置
+  cleanup:
+    # 清理触发条件
+    check_interval: 86400        # 每天巡检一次
+    # 清理条件
+    min_age_days: 30             # 至少 30 天才考虑清理
+    capacity_pressure_threshold: 0.8  # 容量使用率 > 80% 时提前清理
+    early_cleanup_age_days: 7    # 容量紧张时，7 天以上的已复盘数据可清理
+
+# ========== 监控配置 ==========
+monitoring:
+  # 是否启用性能监控
+  enabled: true
+
+  # 慢查询阈值（毫秒）
+  slow_query_threshold: 1000
+
+  # 是否记录操作日志
+  log_operations: true
+
+  # 日志级别
+  log_level: INFO  # DEBUG | INFO | WARNING | ERROR

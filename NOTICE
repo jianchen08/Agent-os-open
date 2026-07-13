@@ -1,0 +1,55 @@
+灵汐 AgentOS
+Copyright 2026 Lingxi AgentOS Contributors
+
+本产品包含第三方软件组件，相关版权与许可证信息详见：
+- `THIRD_PARTY_LICENSES.txt`（自动生成的依赖清单）
+- `LICENSE`（Apache License 2.0 全文）
+
+================================================================================
+核心依赖致谢（不完整列表，完整列表见 THIRD_PARTY_LICENSES.txt）
+================================================================================
+
+本项目的核心理念是站在巨人肩上。以下是我们致谢的核心开源项目（按字母排序）：
+
+后端（Python）
+- aiohttp —— 异步 HTTP 客户端/服务端（Apache 2.0）
+- FastAPI —— 现代 Web 框架（MIT）
+- jsonschema —— JSON Schema 校验（MIT）
+- LiteLLM —— 统一 LLM 接口（MIT）
+- Pydantic —— 数据验证（MIT）
+- pyyaml —— YAML 解析（MIT）
+- Redis —— 内存数据库（MIT）
+- rich —— 终端美化（MIT）
+- watchdog —— 文件系统监控（Apache 2.0）
+- python-lsp-server —— 语言服务协议（MIT）
+- simpleeval —— 安全表达式求值（MIT）
+
+前端（TypeScript / React）
+- React 19 —— UI 框架（MIT）
+- TypeScript —— 类型化 JavaScript（Apache 2.0）
+- Vite —— 构建工具（MIT）
+- Zustand —— 状态管理（MIT）
+- Tailwind CSS —— 原子化 CSS（MIT）
+- @lobehub/ui —— UI 组件库（MIT）
+- Playwright —— 浏览器自动化（Apache 2.0）
+- Electron —— 桌面应用框架（MIT）
+
+AI 模型与协议
+- Model Context Protocol (MCP) —— Anthropic 提出的开放协议
+- OpenAI / Anthropic / DeepSeek / 智谱 GLM / Ollama —— 各大模型提供方
+
+================================================================================
+贡献者致谢
+================================================================================
+
+完整的贡献者名单请参阅 `AUTHORS.md`。
+
+每一行代码、每一份文档、每一次 Issue 反馈，都让这个项目变得更好。
+感谢所有为灵汐 AgentOS 付出时间和智慧的人。
+
+================================================================================
+商标声明
+================================================================================
+
+"灵汐"、"Lingxi"、"AgentOS" 是本项目的标识。
+本 NOTICE 中提及的其他产品名称可能是其各自所有者的商标。

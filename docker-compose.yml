@@ -1,0 +1,99 @@
+# =============================================================================
+# Agent OS — Docker Compose（Redis + Frontend）
+# Agent 在宿主机运行：python -m channels.websocket.app_factory
+#
+# 构建上下文说明：
+#   - frontend: context 为仓库根目录（.），以便 Dockerfile 读取 packages/ 离线包
+#   - redis: 直接使用 Docker Hub 镜像；首次拉取由 start_web.bat 带镜像前缀回退
+#
+# 容器命名与端口说明：
+#   不设 name/container_name，让 compose 用标准 {project}-{service} 命名。
+#   project name 默认取自所在目录名，因此不同目录的实例天然隔离
+#   （容器/网络/卷互不冲突）。
+#
+#   宿主端口用环境变量参数化（带默认值），单实例零配置开箱即用：
+#     FRONTEND_HOST_PORT  默认 5289（前端宿主映射）
+#     REDIS_HOST_PORT     默认 6480（Redis 宿主映射）
+#     BACKEND_PORT        默认 8988（后端进程；容器经 BACKEND_URL 反代连它）
+#   需同时运行多个实例（如对比测试两个版本）时，给第二实例设不同端口：
+#     set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989
+#
+#   脚本（start_web_cn.bat / wsl_ensure_containers.sh）用
+#   `docker compose ps -q <service>` 动态获取容器，不依赖固定名。
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # 前端 (Python 静态文件服务器)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      # 上下文设为仓库根目录，以便 COPY 根目录下的 packages/ 离线包
+      # Dockerfile 内的 COPY 路径已相应加上 frontend/ 前缀
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: agent-os-frontend:latest
+    # on-failure + 上层 deploy 限制：崩溃不再无限重启拉起，
+    # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
+    restart: on-failure
+    ports:
+      - "${FRONTEND_HOST_PORT:-5289}:5188"
+    environment:
+      # Agent 跑在宿主机，前端需连到宿主的 8988。
+      # - Docker Desktop 模式：host.docker.internal 由 Desktop 自动注入，指向 Windows 宿主。
+      # - WSL 原生 docker 模式：host.docker.internal 不被注入（→ 容器解析失败 → 502），
+      #   且后端在 Windows（WSL 的上一层宿主），host-gateway 也只指向 WSL 自身。
+      #   故由 wsl_ensure_containers.sh 导出 BACKEND_HOST_IP=WSL默认网关(=Windows宿主)，
+      #   未设置时回退 host.docker.internal（兼容 Desktop 模式与直接 docker compose up）。
+      - BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
+      - BACKEND_WS_URL=ws://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - agent-net
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+        delay: 10s
+        window: 60s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5188/health').read(); print('ok')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Redis
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    # on-failure：与 frontend 一致，崩溃不无限重启，避免反复触发 WSL2 容器停止路径的内核卡死。
+    restart: on-failure
+    ports:
+      - "${REDIS_HOST_PORT:-6480}:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly no
+      --save ""
+    volumes:
+      - redis-data:/data
+    networks:
+      - agent-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  redis-data:
+
+networks:
+  agent-net:
+    driver: bridge

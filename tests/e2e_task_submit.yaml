@@ -1,0 +1,255 @@
+# -*- coding: utf-8 -*-
+# E2E测试：验证任务提交功能
+# 测试覆盖：输入验证、提交成功反馈、错误处理等场景
+
+name: e2e_task_submit
+description: "端到端测试验证任务提交功能的完整性"
+category: e2e
+
+# 测试环境配置
+environment:
+  python_path: "src"
+  streaming: false
+  auto_approve: true
+
+# 测试用例
+test_cases:
+  # ============================================================
+  # 场景1: 正常任务提交
+  # ============================================================
+  - case_id: TC001_normal_submit
+    name: "正常任务提交"
+    description: "验证使用 task_submit 工具成功提交任务"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交一个测试任务：
+        - 目标类型: agent
+        - 目标ID: resource_manager_agent
+        - 任务标题: E2E测试任务-正常提交
+        - 任务描述: 用于验证任务提交功能的测试任务
+        - 优先级: 5
+        - 任务范围: short_term
+    
+    expected:
+      tool_called: task_submit
+      success: true
+      result_contains:
+        - "task_id"
+        - "success"
+    
+    validation:
+      - check: tool_results
+        operator: "contains_tool"
+        tool_name: task_submit
+        success: true
+      - check: task_persisted
+        data_file: "data/tasks.json"
+        min_count: 1
+
+  # ============================================================
+  # 场景2: 输入验证 - 缺少必填字段
+  # ============================================================
+  - case_id: TC002_missing_required
+    name: "输入验证-缺少必填字段"
+    description: "验证当缺少必填字段时系统正确报错"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交任务，只提供标题，不提供描述和目标信息。
+        只说：请提交一个任务，标题是"测试任务"
+    
+    expected:
+      error_handled: true
+      validation_message: true
+    
+    validation:
+      - check: error_handling
+        should_catch: true
+
+  # ============================================================
+  # 场景3: 输入验证 - 无效的目标类型
+  # ============================================================
+  - case_id: TC003_invalid_target_type
+    name: "输入验证-无效目标类型"
+    description: "验证当目标类型无效时系统正确报错"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交一个任务：
+        - 目标类型: invalid_type_xyz
+        - 目标ID: test_agent
+        - 任务标题: 测试任务
+        - 任务描述: 测试无效目标类型
+    
+    expected:
+      error_handled: true
+      validation_message: true
+    
+    validation:
+      - check: error_handling
+        should_catch: true
+
+  # ============================================================
+  # 场景4: 输入验证 - 无效优先级
+  # ============================================================
+  - case_id: TC004_invalid_priority
+    name: "输入验证-无效优先级"
+    description: "验证当优先级超出范围时系统正确报错"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交一个任务：
+        - 目标类型: agent
+        - 目标ID: test_agent
+        - 任务标题: 测试任务
+        - 任务描述: 测试任务
+        - 优先级: 999
+    
+    expected:
+      error_handled: true
+      validation_message: true
+    
+    validation:
+      - check: error_handling
+        should_catch: true
+
+  # ============================================================
+  # 场景5: 输入验证 - 无效任务范围
+  # ============================================================
+  - case_id: TC005_invalid_scope
+    name: "输入验证-无效任务范围"
+    description: "验证当任务范围无效时系统正确报错"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交一个任务：
+        - 目标类型: agent
+        - 目标ID: test_agent
+        - 任务标题: 测试任务
+        - 任务描述: 测试任务
+        - 优先级: 3
+        - 任务范围: invalid_scope
+    
+    expected:
+      error_handled: true
+      validation_message: true
+    
+    validation:
+      - check: error_handling
+        should_catch: true
+
+  # ============================================================
+  # 场景6: 提交成功反馈验证
+  # ============================================================
+  - case_id: TC006_success_feedback
+    name: "提交成功反馈"
+    description: "验证任务提交成功后返回正确的反馈信息"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交一个任务：
+        - 目标类型: agent
+        - 目标ID: resource_manager_agent
+        - 任务标题: E2E反馈测试
+        - 任务描述: 验证成功反馈信息
+        - 优先级: 4
+        - 任务范围: short_term
+    
+    expected:
+      tool_called: task_submit
+      success: true
+      result_contains:
+        - "task_id"
+        - "message"
+        - "success"
+    
+    validation:
+      - check: response_contains
+        fields:
+          - task_id
+          - success
+      - check: message_type
+        type: success
+
+  # ============================================================
+  # 场景7: 任务持久化验证
+  # ============================================================
+  - case_id: TC007_persistence
+    name: "任务持久化验证"
+    description: "验证提交的任务正确保存到持久化存储"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具提交一个任务：
+        - 目标类型: agent
+        - 目标ID: resource_manager_agent
+        - 任务标题: E2E持久化测试
+        - 任务描述: 验证任务数据持久化
+        - 优先级: 3
+        - 任务范围: short_term
+    
+    expected:
+      tool_called: task_submit
+      success: true
+    
+    validation:
+      - check: data_file
+        file: "data/tasks.json"
+        exists: true
+        min_tasks: 1
+      - check: task_structure
+        required_fields:
+          - task_id
+          - title
+          - status
+          - created_at
+
+  # ============================================================
+  # 场景8: 重复提交处理
+  # ============================================================
+  - case_id: TC008_duplicate_handling
+    name: "重复提交处理"
+    description: "验证短时间内重复提交任务的处理逻辑"
+    enabled: true
+    
+    input:
+      prompt: |
+        请使用 task_submit 工具连续提交两个相同内容的任务：
+        - 目标类型: agent
+        - 目标ID: resource_manager_agent
+        - 任务标题: E2E重复测试
+        - 任务描述: 测试重复提交
+        - 优先级: 1
+        - 任务范围: short_term
+    
+    expected:
+      tool_called: task_submit
+      calls_count: 2
+      success: true
+    
+    validation:
+      - check: tool_results
+        min_calls: 1
+
+# 测试执行配置
+execution:
+  timeout: 120
+  retry_count: 1
+  continue_on_error: false
+
+# 验收标准
+acceptance_criteria:
+  - "测试文件存在且格式正确"
+  - "测试覆盖正常提交流程"
+  - "测试覆盖输入验证场景"
+  - "测试覆盖错误处理场景"
+  - "测试验证任务持久化"
+  - "pytest 能够正常执行测试"

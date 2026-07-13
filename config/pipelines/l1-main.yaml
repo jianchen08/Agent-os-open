@@ -1,0 +1,29 @@
+# L1 Main Agent Configuration
+# L1 主 Agent 配置 - 项目级 Agent
+
+inherit: default                       # 继承默认配置
+
+pipeline:
+  name: "l1_main_agent"
+
+  # Post 插件扩展
+  post:
+    llm_call:
+      # 主 Agent 添加进度追踪
+      - plugin: track_progress
+        priority: 15
+
+  # Router 插件扩展
+  router:
+    # 主 Agent 需要项目级路由策略
+    - plugin: project_completion       # 项目完成检测
+      priority: 55
+    - plugin: project_pause            # 项目暂停检测
+      priority: 56
+    - plugin: project_resource         # 项目资源管理
+      priority: 57
+    - plugin: circuit_breaker          # 熔断器
+      priority: 58
+      config:
+        failure_threshold: 5           # 失败阈值
+        recovery_timeout: 60           # 恢复超时（秒）

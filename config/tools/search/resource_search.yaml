@@ -1,0 +1,40 @@
+# -*- coding: utf-8 -*-
+# 资源搜索工具
+
+name: resource_search
+display_name: "资源搜索"
+description: "资源搜索工具：搜索 Agent、工具、工作流、Skill 等资源"
+
+category: "search"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 300  # 5 分钟
+
+# 标签
+tags: ["resource", "search", "agent", "tool", "workflow", "skill"]
+
+# 外部资源搜索配置
+external_search:
+  enabled: true
+  cache_path: "data/external_tool_cache.json"  # 本地信任缓存文件路径
+  review_model: "fast"  # LLM 审查模型：fast = 轻量模型，thorough = 大模型
+  max_results: 5  # 每次搜索最大返回数量
+  platforms:
+    - name: mcp_registry
+      enabled: true
+      base_url: "https://registry.modelcontextprotocol.io"
+    - name: smithery
+      enabled: true
+      base_url: "https://api.smithery.ai"
+      api_key: ""  # 可选，填入 Smithery API Key（smithery.ai/account/api-keys）
+    - name: langchain_hub
+      enabled: true
+      base_url: "https://api.smith.langchain.com"
+      api_key: ""  # 可选，填入 LangSmith API Key

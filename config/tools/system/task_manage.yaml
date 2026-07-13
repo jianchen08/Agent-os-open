@@ -1,0 +1,32 @@
+# -*- coding: utf-8 -*-
+# 任务管理工具
+
+name: task_manage
+display_name: "任务管理"
+description: "任务管理工具：查询和控制任务状态。支持操作：get(查询详情)、list(列出列表)、update(更新状态)、status(状态概览)、pause(暂停)、resume(继续)、cancel(取消)、retry(重试)。权限：L1默认只看到自己提交的任务，传show_all=true可递归查看当前会话所有任务（含子任务的子任务）。L2只能管理自己提交的子任务。"
+
+category: "task"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 注入参数（由系统自动注入）
+injected_params:
+  - name: "parent_agent_level"
+    description: "调用者Agent层级"
+    required: true
+  - name: "session_id"
+    description: "当前会话ID（L1使用）"
+    required: false
+  - name: "parent_task_id"
+    description: "父任务ID（L2使用，系统注入）"
+    required: false
+
+# 缓存配置
+cache:
+  enabled: false  # 状态会变化，不缓存
+
+# 标签
+tags: ["task", "management", "L1", "L2", "status", "control"]

@@ -1,0 +1,151 @@
+config_id: general_agent
+name: 通用任务执行者
+display_name: 通用任务执行者
+description: '通用任务执行Agent（L3），负责执行各类通用任务。
+
+  包括文件操作、数据处理、信息收集、简单脚本编写等。
+
+  可被灵汐(L1)直接调用处理轻量任务，也可被各L2编排者按需调用。
+
+  '
+agent_type: specialized
+category: task
+level: L3
+model_tier: small
+system_prompt: '{{path:config/rules/information_integrity_rules.md}}
+
+  {{path:config/rules/document_context_rules.md}}
+
+  {{path:.project/}}
+
+
+  # 你是通用任务执行者
+
+
+  你是 L3 执行 Agent，负责执行各类通用任务。你接收上级 Agent（灵汐或各 L2 编排者）派发的任务，自主执行并产出结果。
+
+
+  ## 核心职责
+
+
+  1. **任务理解**：理解任务描述、目标和验收标准
+
+  2. **任务执行**：使用可用工具完成任务
+
+  3. **结果产出**：按任务要求产出文件或结果
+
+  4. **结果评估**：使用 task_evaluate 评估任务完成情况
+
+
+  ## 执行流程
+
+
+  1. **理解任务**【自己执行】：分析任务描述，明确目标和验收标准
+
+  2. **制定方案**【自己执行】：确定执行步骤和所需工具
+
+  3. **执行任务**【自己执行】：使用工具逐步执行
+
+  4. **验证产出**【自己执行】：检查产出物是否符合验收标准
+
+  5. **评估完成**【自己执行】：调用 task_evaluate 评估
+
+
+  ## 工作空间
+
+
+  
+  '
+static_vars:
+  enabled: true
+  items:
+  - '{{rules}}'
+  - name: 可扩展工具索引
+    type: reference
+    content: '## 可扩展工具索引
+
+      以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+
+      - yaml_validate: 验证YAML配置文件
+
+      - schema_evaluator: 验证JSON/YAML格式或正则模式校验
+
+
+      如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，
+
+      工具将自动加载到当前会话，下一轮即可直接调用。
+
+      '
+dynamic_vars:
+  enabled: true
+  items:
+  - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '{{path:config/rules/execution_review_rules.md}}'
+tool_ids:
+- file_read
+- file_write
+- copy_file
+- move_file
+- delete_file
+- create_directory
+- list_directory
+- bash_execute
+- enhanced_search
+- web_search
+- fetch
+- memory
+- task_evaluate
+- human_interaction
+- playwright_test
+hard_constraints:
+- 任务执行完成后必须调用 task_evaluate 工具进行评估
+- 必须输出规定的产出物
+- 评估通过才能结束任务
+- 遇到无法解决的问题必须报告上级
+soft_constraints:
+- 优先使用简单直接的方法
+- 执行前确认理解任务
+- 每个工具只需调用一次，不要重复调用相同的工具
+deliverables:
+- name: execution_report
+  description: 执行报告，包含任务概述、执行记录、产出物索引、修改记录、已知问题与建议
+  output_path: '{{workspace}}/reports/{{task_id}}_report.md'
+  type: markdown
+  template_source: knowledge
+  template_name: config/templates/execution_report_template.md
+  required: true
+recommended_metrics:
+- metric_id: file_check
+  default_params:
+    action: read
+    path: '{{workspace}}/reports/{{task_id}}_report.md'
+- metric_id: format_valid
+  default_params:
+    path: '{{workspace}}/reports/{{task_id}}_report.md'
+    type: markdown
+version: 2.0.0
+is_active: true
+status: active
+max_iterations: 500
+max_reminders: 3
+timeout_seconds: 1800
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 3
+      cooldown_seconds: 180
+tags:
+- specialized
+- task
+- general
+- L3
+metadata:
+  author: System
+  created_at: '2026-01-15'
+  updated_at: '2026-06-01'
+  capabilities:
+  - general_execution
+  - file_operations
+  - data_processing
+  - information_gathering

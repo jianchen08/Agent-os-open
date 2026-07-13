@@ -1,0 +1,592 @@
+# 方案与任务链模板 (YAML 结构化格式)
+#
+# 【v5.0 产出模型变更 — 本模板为 legacy 参考骨架】
+# 当前方案规划 Agent 的产出拆成三类，职责不重叠：
+#   ① .project/ 项目文档：稳定真相源（架构决策/API契约/领域模型），方案阶段定稿
+#   ② docs/{title}_solution.md：方案总纲，只讲 why（本模板的 solution 段仅对应此 why 层）
+#   ③ docs/tasks/：自包含任务文件，含执行方案与设计，拿到即可开工
+#
+# 各领域的产出形状（.project/ 该有哪些文件、任务文件结构）以对应 Skill 的
+# 「产出物拆分约定」为准（skills/skill-solution-*/SKILL.md）。
+#
+# 本模板顶层的 solution 段保留为「why 层总纲」的字段参考；
+# 其中 implementation_plan.detailed_design、task_chain 等装具体设计/步骤的字段，
+# 在新模型下应下沉到 .project/ 或任务文件，不再放在 solution.md。
+# 以下内容作为字段级参考保留，不再作为强制产出结构。
+#
+# 所有字段说明以 YAML 注释形式给出。
+# 标注 [必填] 的字段必须填写，[可选] 按需填写，[按需] 根据场景决定。
+#
+# 核心设计原则：
+#   1. 包是调度单元 — 任务链定义包，包给 L2 或直接给 L3
+#   2. 按内容边界打包，不按人工工序拆 — 每个包应该是自包含的业务目标
+#   3. 执行者灵活选择 — 需要编排用 L2，不需要编排直接用 L3
+#   4. 同类型包优先合并 — 多个同类型包可以塞给同一个 L2
+#   5. 缺失资源内嵌标注 — 直接写在对应任务里，不单独汇总
+#   6. L3 拆分指引仅对直通 L3 的包 — 给 L2 的包由 L2 自己决定内部拆法
+
+# ============================================================================
+# 第一段：solution — 方案内容（供人类确认）
+# ============================================================================
+
+solution:
+
+  # --------------------------------------------------------------------------
+  # 基本信息 [必填]
+  # 方案的元数据信息，用于唯一标识和追踪方案。
+  # --------------------------------------------------------------------------
+
+  basic_info:
+    name: "{方案名称}"               # [必填] string, 简洁明了的方案标题
+    id: "{S+序号}"                   # [必填] string, 唯一标识，格式 S+序号，如 S001
+    created_at: "{ISO日期}"          # [必填] string, ISO 日期格式，如 2026-03-15
+    author: "{创建者}"               # [必填] string, 方案创建人/Agent
+    source: "{需求来源}"             # [必填] string, 需求的提出方，如 "用户需求" / "PRD-001"
+    priority: "{高/中/低}"           # [必填] enum: 高(紧急重要)/中(正常)/低(可延后)
+    status: "{草稿/评审中/已确认/执行中/已完成}"  # [必填] enum, 方案状态流转
+    plan_status: "{草稿/已确认}"     # [必填] enum, 执行计划状态
+    document_version_type: "{初稿/正式稿}"  # [必填] enum, 初稿需提供A/B/C备选方案；正式稿锁定最终方案
+
+  # --------------------------------------------------------------------------
+  # 需求概述 [必填]
+  # 方案的背景、目标、具体需求清单以及范围约束。
+  # --------------------------------------------------------------------------
+
+  requirements:
+    background: |                    # [必填] string, 为什么要做这件事，当前痛点或机会
+      {requirement_background}
+
+    goals:                           # [必填] list[string], 期望达成的结果，用可度量的指标描述
+      - "{goal_1}"
+      - "{goal_2}"
+
+    user_value_goals:                # [必填] list[string], 方案对最终用户的核心价值
+      - "{user_value_goal_1}"
+      - "{user_value_goal_2}"
+
+    requirement_list:                # [必填] list[object], 具体需求清单
+      - id: "REQ-1"                  # string, 需求编号
+        description: "{需求描述}"     # string, 具体的需求描述
+        priority: "{高/中/低}"       # string, 需求优先级
+        type: "{功能/非功能}"         # string, 需求类型
+        source: "{来源}"             # string, 需求来源
+
+    scope:
+      in_scope:                      # [必填] list[string], 本次方案覆盖的内容
+        - "{范围内项_1}"
+      out_of_scope:                  # [必填] list[string], 本次方案不覆盖的内容
+        - "{范围外项_1}"
+      constraints:                   # [必填] list[string], 技术、时间、资源等方面的限制
+        - "{约束条件_1}"
+
+    user_journey:                    # [必填] 用户旅程与体验要求
+      mermaid: |                     # [必填] string, Mermaid 流程图代码，展示关键路径和分支
+        flowchart TD
+            S1([S-1: {用户步骤}]) --> S2([S-2: {用户步骤}])
+            S2 --> S3([S-3: {用户步骤}])
+      steps:                         # [必填] list[object], 用户旅程步骤明细
+        - step_id: "S-1"             # string, 步骤编号
+          action: "{用户操作}"        # string, 用户执行的操作
+          experience_metric: "{体验指标}"  # string, 具体可度量的体验指标
+          error_handling: "{异常处理}"     # string, 失败/异常时的处理方式
+
+  # --------------------------------------------------------------------------
+  # 调研摘要 [必填]
+  # 基于调研报告的要点总结，引用调研报告的结论。
+  # --------------------------------------------------------------------------
+
+  research_summary:
+    resource_assessment:             # [必填] list[object], 现有资源评估
+      - type: "{Agent/工具/模板/依赖库}"  # string, 资源分类
+        reusable: "{可复用资源}"      # string, 已有且可直接使用的资源
+        need_new: "{需新建资源}"      # string, 需要新创建的资源
+        notes: "{备注}"              # [可选] string, 补充说明
+
+    key_findings:                    # [必填] list[object], 关键调研发现
+      - id: "F-1"                    # string, 发现编号，格式 F-N
+        finding: "{发现内容}"         # string, 具体的调研发现
+        impact: "{影响说明}"          # string, 对方案的影响
+        source: "{信息出处}"          # string, 信息出处（报告编号/URL等）
+
+    conclusion: |                    # [必填] string, 调研核心结论，直接指导方案决策
+      {research_conclusion}
+
+  # --------------------------------------------------------------------------
+  # 实施方案 [必填]
+  # 方案的具体实施方法，是生成任务链的直接输入源。
+  # --------------------------------------------------------------------------
+
+  implementation_plan:
+    overview: |                      # [必填] string, 用2-5句话描述方案核心思路和关键决策
+      {solution_overview}
+
+    structure:                       # [必填] 结构划分
+      description: |                 # [必填] string, 方案由哪些部分组成，各部分关系
+        {structure_description}
+      mermaid: |                     # [必填] string, Mermaid图，展示模块/组件调用关系和数据流向
+        flowchart LR
+            A[模块A] --> B[模块B]
+      components:                    # [必填] list[object], 各模块/组件详情
+        - name: "{组件名称}"          # string, 模块/组件名称
+          responsibility: "{职责}"   # string, 该组件的核心职责
+          key_interface: "{关键接口}" # string, 主要对外接口
+          dependencies: []           # list[string], 依赖的其他组件
+
+    key_decisions:                   # [必填] list[object], 关键决策点
+      - id: "D-1"                    # string, 决策编号
+        topic: "{决策主题}"           # string, 决策点名称
+        options:                     # list[object], 备选方案（初稿至少3个）
+          - name: "{方案A名称}"
+            description: "{方案描述}"
+            pros: "{优势}"
+            cons: "{劣势}"
+            scenario: "{适用场景}"
+        selected: "{最终选择}"        # string, 选定的方案名称
+        reason: "{选择理由}"          # string, 为什么选择这个方案
+        decision_factors: "{决策因素}" # string, 影响决策的关键因素
+
+    detailed_design: |               # [按需] string, 方案复杂时填写实施细节
+      {detailed_design_content}
+
+  # --------------------------------------------------------------------------
+  # 验收标准 [必填]
+  # 方案完成的判定标准，每项必须可验证。
+  # --------------------------------------------------------------------------
+
+  acceptance_criteria:               # [必填] list[object]
+    - id: "AC-1"                     # string, 验收标准编号，格式 AC-N
+      item: "{验收项}"               # string, 具体的验收条件描述
+      metric_type: "{技术/用户体验}"  # string, 指标类型
+      verification_method: "{验证方式}" # string, 如何验证此项
+      priority: "{高/中/低}"         # string, 优先级
+      related_requirement: "REQ-1"   # string, 对应的需求编号
+
+  # --------------------------------------------------------------------------
+  # 风险评估 [可选]
+  # 识别方案及执行过程中可能面临的风险，制定应对策略。
+  # --------------------------------------------------------------------------
+
+  risk_assessment:                   # [可选] list[object]
+    - id: "R-1"                      # string, 风险编号，格式 R-N
+      description: "{风险描述}"       # string, 具体的风险描述
+      impact_level: "{高/中/低}"      # string, 若发生的影响级别
+      probability: "{高/中/低}"       # string, 发生的可能性
+      scope: "{影响范围}"             # string, 受影响的模块、任务或系统范围
+      mitigation: "{应对策略}"        # string, 预防或应对措施
+      owner: "{负责人}"              # string, 风险责任人
+      checkpoint: "{检查点}"          # string, 在哪个阶段/任务后检查
+
+  # --------------------------------------------------------------------------
+  # 里程碑 [可选]
+  # 关键里程碑节点，用于监控整体进度。任务数>5或执行周期>1天时建议填写。
+  # --------------------------------------------------------------------------
+
+  milestones:                        # [可选] list[object]
+    - name: "{里程碑名称}"
+      tasks: []                      # list[string], 包含的任务ID
+      expected_time: "{预期时间}"
+      deliverables: "{交付物}"
+
+  # --------------------------------------------------------------------------
+  # 变更记录 [必填]
+  # 记录文档的所有变更历史，确保可追溯。
+  # --------------------------------------------------------------------------
+
+  change_log:                        # [必填] list[object]
+    - version: "v1.0"                # string, 语义化版本号
+      date: "{变更日期}"              # string, ISO日期格式
+      change: "{变更内容}"            # string, 简要描述本次变更
+      author: "{变更人}"             # string, 变更执行人
+
+  # --------------------------------------------------------------------------
+  # 备注 [可选]
+  # --------------------------------------------------------------------------
+
+  notes: |                           # [可选] string, 补充说明、待讨论问题、参考链接等
+    {notes}
+
+# ============================================================================
+# 第二段：task_chain — 任务链（供 L1 派发用）
+# ============================================================================
+#
+# 任务链规则：
+#   - 包按内容边界划分，不按人工工序拆
+#   - 需要编排 → L2；不需要编排 → L3；不存在的标记"需新建"
+#   - 同类型包优先合并给同一个 L2
+#   - 所有标记"需新建"的资源创建操作必须提交给 resource_manager_agent
+#
+# 上下文环境拆分指引规则（仅适用于直通 L3 的包）：
+#   - 知识域：完成任务需要理解的知识范围（模块、概念、领域）
+#   - 操作域：任务操作的文件/资源范围（目录、文件、API）
+#   - 依赖域：对其他任务产出的依赖（前置产出、共享状态）
+#   - 包给已有 L2 或 L3 → 不填拆分指引
+# ============================================================================
+
+task_chain:
+
+  # --------------------------------------------------------------------------
+  # 执行评估 [必填]
+  # 在分解任务之前，先评估内容量和边界，决定如何打包和分配。
+  # --------------------------------------------------------------------------
+
+  content_estimation: |              # [必填] string, 识别自然单元，估算大小
+    {列出任务的自然单元及其预估大小}
+
+  packing_plan: |                    # [必填] string, 按上下文容量将单元分组
+    {按上下文容量将单元分组的方案}
+
+  judgment_basis: |                  # [必填] string, 一句话说明为什么这样打包
+    {判定依据}
+
+  # --------------------------------------------------------------------------
+  # 任务列表 [必填]
+  # 每个打包后的任务（包），包含描述、推荐执行者、依赖和验收标准。
+  # --------------------------------------------------------------------------
+
+  tasks:                             # [必填] list[object]
+    - id: "T1"                       # string, 任务编号
+      name: "{任务名称}"              # string, 任务的简短名称
+      description: "{任务描述}"       # string, 具体要做什么
+      recommended_executor: "{执行者ID}"  # string, L2/L3 的 Agent ID，不存在则标记"需新建"
+      executor_level: "{L2/L3}"      # string, 执行者层级
+      resource_status: "{已有/需新建}" # string, 资源状态；需新建时须说明为何现有资源无法复用
+      resource_description: |        # [按需] string, 仅当 resource_status 为"需新建"时填写
+        {新建资源的职责边界和适用场景}
+      dependencies: []               # list[string], 前置任务ID列表，无依赖为空
+      acceptance_criteria:           # list[string], 可验证的完成条件列表
+        - "AC-1: {验收条件}"
+      estimated_time: "{预估时间}"    # string, 如 "2h" / "30min" / "1d"
+      context_split_guide:           # [按需] 仅当执行者为 L3 直通时必填
+        knowledge_domain: "{知识域}"  # string, 需要理解的知识范围
+        operation_domain: "{操作域}"  # string, 操作的文件/资源范围
+        dependency_domain: "{依赖域}" # string, 对其他任务产出的依赖
+
+  # --------------------------------------------------------------------------
+  # 执行顺序 [必填]
+  # 按依赖关系排列任务的执行顺序，标注哪些任务可以并行执行。
+  # --------------------------------------------------------------------------
+
+  execution_order:                   # [必填] list[object]
+    - stage: 1                       # integer, 阶段编号
+      parallel: false                # boolean, 本阶段任务是否可并行执行
+      tasks: ["T1"]                  # list[string], 本阶段包含的任务ID
+      depends_on: []                 # list[string], 依赖的前置阶段编号，无依赖为空
+
+# ============================================================================
+# 填写示例（软件开发场景）
+# ============================================================================
+#
+# solution:
+#   basic_info:
+#     name: "用户登录功能方案"
+#     id: "S001"
+#     created_at: "2026-03-15"
+#     author: "backend-architect"
+#     source: "用户需求 #12"
+#     priority: "高"
+#     status: "草稿"
+#     plan_status: "草稿"
+#     document_version_type: "初稿"
+#   requirements:
+#     background: |
+#       当前系统用户登录仅支持账密方式，用户体验差且安全性不足。
+#     goals:
+#       - "支持 JWT Token 认证，登录响应时间 < 500ms"
+#       - "登录失败 5 次后锁定账号 30 分钟"
+#     user_value_goals:
+#       - "用户登录操作步骤从 3 步简化为 2 步，首次登录到使用核心功能不超过 30 秒"
+#       - "登录失败时有清晰的错误提示和引导，用户能自行解决问题"
+#     requirement_list:
+#       - id: "REQ-1"
+#         description: "支持 JWT Token 认证登录"
+#         priority: "高"
+#         type: "功能"
+#         source: "用户需求 #12"
+#     scope:
+#       in_scope:
+#         - "JWT Token 生成与验证"
+#         - "账密登录接口"
+#       out_of_scope:
+#         - "OAuth 2.0 第三方登录（下期迭代）"
+#       constraints:
+#         - "必须兼容现有用户表结构"
+#     user_journey:
+#       mermaid: |
+#         flowchart TD
+#             S1([S-1: 打开登录页面]) -->|加载完成| S2([S-2: 输入账号密码])
+#             S2 -->|点击登录| S3{S-3: 校验结果}
+#             S3 -->|成功| S4([S-4: 登录成功跳转])
+#             S3 -->|密码错误| E1[/提示剩余尝试次数/]
+#             E1 --> S2
+#       steps:
+#         - step_id: "S-1"
+#           action: "打开登录页面"
+#           experience_metric: "页面加载 < 1s，表单元素清晰可见"
+#           error_handling: "网络异常时显示重试提示"
+#         - step_id: "S-2"
+#           action: "输入账号密码并登录"
+#           experience_metric: "点击后 < 500ms 出现加载反馈，登录完成 < 2s"
+#           error_handling: "密码错误提示剩余尝试次数"
+#         - step_id: "S-3"
+#           action: "登录成功跳转"
+#           experience_metric: "跳转至目标页面 < 1s"
+#           error_handling: "Token 刷新失败时静默重试"
+#   research_summary:
+#     resource_assessment:
+#       - type: "Agent"
+#         reusable: "backend-architect"
+#         need_new: "auth-agent"
+#         notes: "认证专用 Agent 需新建"
+#     key_findings:
+#       - id: "F-1"
+#         finding: "现有用户表缺少 token_version 字段"
+#         impact: "需要数据库迁移"
+#         source: "调研报告 R-001"
+#       - id: "F-2"
+#         finding: "Redis 已部署但未用于 Token 管理"
+#         impact: "可直接复用 Redis"
+#         source: "基础设施调研"
+#     conclusion: |
+#       综合调研结果，认证方案采用 JWT + Refresh Token 双 Token 机制，
+#       使用 Redis 存储 Token 黑名单实现即时失效。
+#   implementation_plan:
+#     overview: |
+#       本方案采用 JWT + Refresh Token 双 Token 认证架构。
+#       用户登录成功后签发 access_token（有效期 2h）和 refresh_token（有效期 7d）。
+#       Token 黑名单存储在 Redis 中，支持即时失效和强制下线。
+#     structure:
+#       description: "系统分为三个模块：AuthService（认证核心）、TokenManager（Token管理）、UserRepo（用户数据访问）"
+#       mermaid: |
+#         flowchart LR
+#             Client([客户端]) -->|登录请求| AuthService[AuthService]
+#             AuthService -->|查询用户| UserRepo[(UserRepo)]
+#             AuthService -->|生成/验证 Token| TokenManager[TokenManager]
+#             TokenManager -->|读写黑名单| Redis[(Redis)]
+#             AuthService -->|返回 Token| Client
+#       components:
+#         - name: "AuthService"
+#           responsibility: "用户认证核心逻辑"
+#           key_interface: "login(), verify_token()"
+#           dependencies: ["UserRepo", "TokenManager"]
+#         - name: "TokenManager"
+#           responsibility: "Token 生成、验证、刷新"
+#           key_interface: "generate_tokens(), validate_token()"
+#           dependencies: ["Redis"]
+#         - name: "UserRepo"
+#           responsibility: "用户数据访问"
+#           key_interface: "get_user_by_name()"
+#           dependencies: []
+#     key_decisions:
+#       - id: "D-1"
+#         topic: "认证方式选型"
+#         options:
+#           - name: "方案A：JWT"
+#             description: "无状态 Token，客户端持有"
+#             pros: "无状态易扩展"
+#             cons: "无法主动失效"
+#             scenario: "微服务架构"
+#           - name: "方案B：Session"
+#             description: "服务端存储会话状态"
+#             pros: "安全可控、即时失效"
+#             cons: "有状态、需共享存储"
+#             scenario: "单体应用"
+#           - name: "方案C：混合"
+#             description: "Session + JWT 结合"
+#             pros: "兼顾安全和扩展性"
+#             cons: "架构复杂度高"
+#             scenario: "需即时失效的微服务"
+#         selected: "方案A：JWT"
+#         reason: "微服务架构，配合 Redis 黑名单解决主动失效"
+#         decision_factors: "系统架构为微服务、需要水平扩展"
+#   acceptance_criteria:
+#     - id: "AC-1"
+#       item: "登录接口返回有效 JWT Token"
+#       metric_type: "技术"
+#       verification_method: "自动化测试"
+#       priority: "高"
+#       related_requirement: "REQ-1"
+#     - id: "AC-2"
+#       item: "用户完成登录操作不超过 2 步"
+#       metric_type: "用户体验"
+#       verification_method: "手动测试"
+#       priority: "高"
+#       related_requirement: "S-1~S-3"
+#   risk_assessment:
+#     - id: "R-1"
+#       description: "JWT 密钥泄露导致 Token 伪造"
+#       impact_level: "高"
+#       probability: "低"
+#       scope: "全系统"
+#       mitigation: "使用非对称加密（RS256），私钥严格管控"
+#       owner: "backend-architect"
+#       checkpoint: "开发完成时"
+#   milestones:
+#     - name: "M1-认证核心就绪"
+#       tasks: ["T1"]
+#       expected_time: "第 1 天"
+#       deliverables: "登录接口可用"
+#   change_log:
+#     - version: "v1.0"
+#       date: "2026-03-15"
+#       change: "初始版本"
+#       author: "backend-architect"
+#   notes: |
+#     1. OAuth 2.0 第三方登录方案将在下期迭代中实现
+#     2. JWT 密钥管理方案参考：https://tools.ietf.org/html/rfc7519
+#
+# task_chain:
+#   content_estimation: |
+#     用户认证模块：约 8 个接口，预估中等（约 80K tokens）
+#   packing_plan: |
+#     包1 = [用户认证模块] → 单独成包，约 80K tokens，一个 L2 能承载
+#   judgment_basis: "认证模块为独立领域，L2 编排者含中间消耗可承载 400K~600K tokens"
+#   tasks:
+#     - id: "T1"
+#       name: "用户认证模块"
+#       description: "实现用户注册/登录/权限管理功能"
+#       recommended_executor: "programming_orchestrator_agent_v2"
+#       executor_level: "L2"
+#       resource_status: "已有"
+#       dependencies: []
+#       acceptance_criteria:
+#         - "AC-1: 用户注册/登录接口可用"
+#         - "AC-2: Token 生成和验证正常"
+#       estimated_time: "8h"
+#   execution_order:
+#     - stage: 1
+#       parallel: false
+#       tasks: ["T1"]
+#       depends_on: []
+#
+# ============================================================================
+# 填写示例（非代码场景 — 活动策划）
+# ============================================================================
+#
+# solution:
+#   basic_info:
+#     name: "年度技术大会策划方案"
+#     id: "S010"
+#     created_at: "2026-04-01"
+#     author: "event-planner"
+#     source: "市场部需求"
+#     priority: "高"
+#     status: "草稿"
+#     plan_status: "草稿"
+#     document_version_type: "初稿"
+#   requirements:
+#     background: |
+#       公司计划举办年度技术大会，展示技术实力，吸引行业关注。
+#     goals:
+#       - "参会人数达到 500 人以上"
+#       - "媒体曝光度提升 30%"
+#     user_value_goals:
+#       - "参会者能获取前沿技术洞察，建立行业人脉"
+#     requirement_list:
+#       - id: "REQ-1"
+#         description: "确定大会主题和议程"
+#         priority: "高"
+#         type: "功能"
+#         source: "市场部需求"
+#     scope:
+#       in_scope:
+#         - "大会主题策划"
+#         - "嘉宾邀请"
+#       out_of_scope:
+#         - "线下场地搭建（外包）"
+#       constraints:
+#         - "预算：50万以内"
+#     user_journey:
+#       mermaid: |
+#         flowchart TD
+#             S1([S-1: 看到大会宣传]) --> S2([S-2: 在线注册])
+#             S2 --> S3([S-3: 参会体验])
+#       steps:
+#         - step_id: "S-1"
+#           action: "看到大会宣传"
+#           experience_metric: "宣传页面加载 < 2s，核心信息一目了然"
+#           error_handling: "宣传链接失效时提供备选入口"
+#   research_summary:
+#     resource_assessment:
+#       - type: "模板"
+#         reusable: "活动策划模板 v2"
+#         need_new: "大会专属议程模板"
+#         notes: ""
+#     key_findings:
+#       - id: "F-1"
+#         finding: "去年同类大会线上直播观看人数达 2000+"
+#         impact: "应增加线上直播方案"
+#         source: "去年活动复盘报告"
+#     conclusion: |
+#       建议采用线上线下混合模式，以线下核心体验为主。
+#   implementation_plan:
+#     overview: |
+#       大会分为主题演讲、分论坛、展示区三个板块，为期一天。
+#     structure:
+#       description: "分为议程策划、嘉宾管理、宣传推广三大板块"
+#       mermaid: |
+#         flowchart LR
+#             A[议程策划] --> B[嘉宾确认]
+#             B --> C[宣传推广]
+#       components:
+#         - name: "议程策划"
+#           responsibility: "确定主题和流程"
+#           key_interface: "议程表"
+#           dependencies: []
+#     key_decisions:
+#       - id: "D-1"
+#         topic: "大会形式"
+#         options:
+#           - name: "纯线下"
+#             description: "全部线下举办"
+#             pros: "体验好"
+#             cons: "人数受限"
+#             scenario: "小型精品会"
+#           - name: "纯线上"
+#             description: "全部线上直播"
+#             pros: "覆盖广"
+#             cons: "互动差"
+#             scenario: "疫情时期"
+#           - name: "混合模式"
+#             description: "线下为主+线上直播"
+#             pros: "兼顾体验和覆盖"
+#             cons: "组织复杂"
+#             scenario: "大型技术大会"
+#         selected: "混合模式"
+#         reason: "兼顾线下体验和线上覆盖，最大化影响力"
+#         decision_factors: "预算充足，需要最大化曝光"
+#   acceptance_criteria:
+#     - id: "AC-1"
+#       item: "议程表完整，嘉宾全部确认"
+#       metric_type: "技术"
+#       verification_method: "人工审查"
+#       priority: "高"
+#       related_requirement: "REQ-1"
+#   change_log:
+#     - version: "v1.0"
+#       date: "2026-04-01"
+#       change: "初始版本"
+#       author: "event-planner"
+#
+# task_chain:
+#   content_estimation: |
+#     议程策划：约 3 个主题方向，预估较小（约 30K tokens）
+#     嘉宾邀请：约 10 位嘉宾，预估中等（约 60K tokens）
+#   packing_plan: |
+#     包1 = [议程策划 + 嘉宾邀请 + 宣传推广] → 合并，共约 120K tokens
+#   judgment_basis: "三个板块关联紧密，总量在上下文范围内"
+#   tasks:
+#     - id: "T1"
+#       name: "大会策划全流程"
+#       description: "完成议程策划、嘉宾邀请确认、宣传推广方案"
+#       recommended_executor: "general_agent"
+#       executor_level: "L2"
+#       resource_status: "已有"
+#       dependencies: []
+#       acceptance_criteria:
+#         - "AC-1: 议程表完整"
+#       estimated_time: "4h"
+#   execution_order:
+#     - stage: 1
+#       parallel: false
+#       tasks: ["T1"]
+#       depends_on: []

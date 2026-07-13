@@ -1,0 +1,21 @@
+# GitHub Issue 模板配置
+# 文档：https://docs.github.com/zh/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository
+
+blank_issues_enabled: false  # 禁用空白 Issue，强制使用模板
+
+contact_links:
+  - name: "💬 GitHub Discussions"
+    url: https://github.com/jianchen08/Agent-os-open/discussions
+    about: "技术讨论、问题求助、想法分享（推荐）"
+
+  - name: "🔒 安全漏洞报告"
+    url: https://github.com/jianchen08/Agent-os-open/security/advisories/new
+    about: "**请勿**通过公开 Issue 报告安全漏洞，使用 Security Advisories"
+
+  - name: "📚 项目文档"
+    url: https://github.com/jianchen08/Agent-os-open/tree/main/docs
+    about: "查看完整项目文档"
+
+  - name: "🇨🇳 Gitee 镜像"
+    url: https://gitee.com/jc27/Agent-os-open
+    about: "国内用户可通过 Gitee 反馈问题（同步可能有延迟）"

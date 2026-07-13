@@ -1,0 +1,48 @@
+# -*- coding: utf-8 -*-
+# 测试Agent
+
+config_id: test_agent_001
+name: 测试Agent
+display_name: 测试Agent
+description: |
+  这是一个自动创建的测试Agent
+
+agent_type: specialized
+category: test
+level: L3
+
+system_prompt: |
+  # 你是测试Agent
+
+  ## 核心职责
+  这是一个自动创建的测试Agent
+
+  ## 执行步骤
+  1. 接收任务
+  2. 执行任务
+  3. 返回结果
+
+tool_ids:
+- file_read
+- file_write
+
+hard_constraints:
+- 必须完成分配的任务
+- 必须返回结果
+
+soft_constraints:
+- 尽量高效完成
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 20
+timeout_seconds: 300
+
+tags:
+- test
+- auto_created
+
+metadata:
+  author: auto_test
+  created_at: '2026-04-14'

@@ -1,0 +1,61 @@
+# 中间件配置
+# 控制工具执行前的各种检查功能
+
+# 中间件功能开关
+enabled:
+  reasoning: false    # 推理检查（高风险工具执行前要求 AI 推理）
+  permission: true    # 权限检查（控制参数访问范围）
+
+# 推理检查配置
+reasoning:
+  high_risk_tools:
+    - execute_shell
+    - delete_file
+    - write_file
+  max_retries: 2
+  auto_pass_after_retries: true
+
+# 权限检查配置
+permission:
+  # 路径权限规则
+  # 所有文件操作工具在容器模式下限制在 workspace 内
+  path_rules:
+    file_write:
+      path:
+        condition: within_workspace_if_container
+        mode: write
+
+    file_read:
+      path:
+        condition: within_workspace_if_container
+        mode: read
+
+    enhanced_search:
+      path:
+        condition: within_workspace_if_container
+        mode: read
+
+    bash_execute:
+      working_dir:
+        condition: within_workspace
+        mode: execute
+
+    lsp_definition:
+      file_path:
+        condition: within_workspace_if_container
+        mode: read
+
+    lsp_references:
+      file_path:
+        condition: within_workspace_if_container
+        mode: read
+
+    lsp_diagnostics:
+      file_path:
+        condition: within_workspace_if_container
+        mode: read
+
+    file_jump:
+      file_path:
+        condition: within_workspace_if_container
+        mode: read

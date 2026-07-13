@@ -1,0 +1,420 @@
+/**
+ * Markdown 渲染样式
+ *
+ * 为 AI 消息中的 Markdown 内容提供样式支持
+ * 使用 CSS 变量适应浅色/深色主题
+ */
+
+/* ========================================
+ * Markdown 内容容器
+ * ======================================== */
+.markdown-content {
+  font-size: 0.9375rem;
+  line-height: 1.7;
+  /* 继承所在容器的文字色（气泡用 --bubble-*-text，页面用 --foreground）。
+     不要硬连 --foreground：否则在深色用户气泡里会用错文字色导致看不见。 */
+  color: inherit;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  /* 防止内容溢出 */
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* ========================================
+ * 标题样式
+ * ======================================== */
+.markdown-content .md-h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+  color: inherit;
+  border-bottom: 1px solid hsl(var(--border));
+  padding-bottom: 0.5rem;
+}
+
+.markdown-content .md-h1:first-child {
+  margin-top: 0;
+}
+
+.markdown-content .md-h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.75rem;
+  color: inherit;
+}
+
+.markdown-content .md-h2:first-child {
+  margin-top: 0;
+}
+
+.markdown-content .md-h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  color: inherit;
+}
+
+.markdown-content .md-h3:first-child {
+  margin-top: 0;
+}
+
+.markdown-content .md-h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.5rem;
+  color: inherit;
+}
+
+.markdown-content .md-h4:first-child {
+  margin-top: 0;
+}
+
+/* ========================================
+ * 段落和文本样式
+ * ======================================== */
+.markdown-content .md-p {
+  margin: 0.75rem 0;
+  line-height: 1.7;
+}
+
+.markdown-content .md-p:first-child {
+  margin-top: 0;
+}
+
+.markdown-content .md-p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content .md-strong {
+  font-weight: 600;
+  color: inherit;
+}
+
+.markdown-content .md-em {
+  font-style: italic;
+}
+
+.markdown-content .md-del {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+/* ========================================
+ * 链接样式
+ * ======================================== */
+.markdown-content .md-link {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: opacity 0.15s;
+  /* 长链接换行 */
+  word-break: break-all;
+}
+
+.markdown-content .md-link:hover {
+  opacity: 0.8;
+}
+
+/* ========================================
+ * 列表样式
+ * ======================================== */
+.markdown-content .md-ul {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+  list-style-type: disc;
+}
+
+.markdown-content .md-ol {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+  list-style-type: decimal;
+}
+
+.markdown-content .md-li {
+  margin: 0.375rem 0;
+  line-height: 1.6;
+}
+
+.markdown-content .md-li > .md-ul,
+.markdown-content .md-li > .md-ol {
+  margin: 0.25rem 0;
+}
+
+/* 任务列表 */
+.markdown-content ul.contains-task-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+.markdown-content li.task-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.markdown-content li.task-list-item input[type='checkbox'] {
+  margin-top: 0.35rem;
+  accent-color: hsl(var(--primary));
+}
+
+/* ========================================
+ * 引用块样式
+ * ======================================== */
+.markdown-content .md-blockquote {
+  border-left: 4px solid hsl(var(--primary));
+  background-color: hsl(var(--muted) / 0.5);
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+  border-radius: 0 0.375rem 0.375rem 0;
+}
+
+.markdown-content .md-blockquote .md-p {
+  margin: 0;
+}
+
+/* ========================================
+ * 行内代码样式
+ * ======================================== */
+.markdown-content .md-inline-code {
+  background-color: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.25rem;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.875em;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* ========================================
+ * 分隔线样式
+ * ======================================== */
+.markdown-content .md-hr {
+  border: none;
+  border-top: 1px solid hsl(var(--border));
+  margin: 1.5rem 0;
+}
+
+/* ========================================
+ * 表格样式
+ * ======================================== */
+.markdown-content .md-table-wrapper {
+  margin: 1rem 0;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--border));
+}
+
+.markdown-content .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.markdown-content .md-thead {
+  background-color: hsl(var(--muted));
+}
+
+.markdown-content .md-tbody {
+  background-color: hsl(var(--background));
+}
+
+.markdown-content .md-tr {
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.markdown-content .md-tr:last-child {
+  border-bottom: none;
+}
+
+.markdown-content .md-th {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  border-right: 1px solid hsl(var(--border));
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.markdown-content .md-th:last-child {
+  border-right: none;
+}
+
+.markdown-content .md-td {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  color: hsl(var(--foreground));
+  border-right: 1px solid hsl(var(--border));
+}
+
+.markdown-content .md-td:last-child {
+  border-right: none;
+}
+
+/* ========================================
+ * Streamdown 表格列分隔线
+ * Streamdown 默认只有行分隔线，补充列分隔线
+ * 使用 !important 确保 Tailwind v4 层叠顺序下生效
+ * ======================================== */
+.markdown-content [data-streamdown="table-header-cell"],
+.markdown-content [data-streamdown="table-cell"] {
+  border-right: 1px solid hsl(var(--border)) !important;
+}
+
+.markdown-content [data-streamdown="table-header-cell"]:last-child,
+.markdown-content [data-streamdown="table-cell"]:last-child {
+  border-right: none !important;
+}
+
+.markdown-content [data-streamdown="table-header-cell"] {
+  border-bottom: 1px solid hsl(var(--border)) !important;
+}
+
+/* ========================================
+ * 图片样式
+ * ======================================== */
+.markdown-content .md-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+  border: 1px solid hsl(var(--border));
+}
+
+/* ========================================
+ * KaTeX 数学公式样式
+ * ======================================== */
+.markdown-content .katex-display {
+  margin: 1rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0;
+}
+
+.markdown-content .katex {
+  font-size: 1.1em;
+  color: inherit;
+}
+
+/* KaTeX 公式渲染样式修正 */
+.markdown-content .katex {
+  line-height: 1.5;
+}
+
+.markdown-content .katex-display {
+  line-height: 1.2;
+}
+
+.markdown-content .katex-display > .katex {
+  display: inline-block;
+  vertical-align: baseline;
+}
+
+.markdown-content .katex-display > .katex > .katex-html {
+  display: inline-block;
+  vertical-align: baseline;
+}
+
+.markdown-content .katex-display > .katex > .katex-html > .base {
+  display: inline;
+  vertical-align: baseline;
+}
+
+/* 确保 .katex-mathml 不会撑开页面高度 */
+.markdown-content .katex-mathml {
+  position: absolute !important;
+  clip: rect(1px, 1px, 1px, 1px) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  /* 重置 bottom 属性，避免负值撑开页面 */
+  bottom: auto !important;
+  top: -9999px !important;
+  left: -9999px !important;
+}
+
+/* 确保 markdown-content 容器正确处理行内元素 */
+.markdown-content {
+  line-height: 1.5;
+}
+
+/* 确保 p 标签与 KaTeX 元素对齐 */
+.markdown-content .md-p {
+  line-height: 1.5;
+}
+
+/* ========================================
+ * 流式输出光标
+ * ======================================== */
+.markdown-content .md-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.2em;
+  background-color: hsl(var(--primary));
+  margin-left: 2px;
+  animation: cursor-blink 1s step-end infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes cursor-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ========================================
+ * Mermaid 图表样式
+ * ======================================== */
+.markdown-content [data-testid='mermaid-container'] {
+  background-color: hsl(var(--muted) / 0.3);
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin: 1rem 0;
+  overflow: hidden;
+  contain: layout style;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 0;
+}
+
+.markdown-content [data-testid='mermaid-container'] svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  vertical-align: bottom;
+  margin: 0;
+  padding: 0;
+  contain: layout style;
+  flex-shrink: 0;
+  max-height: 100%;
+}
+
+/* ========================================
+ * 响应式调整
+ * ======================================== */
+@media (max-width: 640px) {
+  .markdown-content {
+    font-size: 0.875rem;
+  }
+
+  .markdown-content .md-table-wrapper {
+    margin-left: -0.5rem;
+    margin-right: -0.5rem;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+}

@@ -1,0 +1,26 @@
+# -*- coding: utf-8 -*-
+# Web 获取工具配置
+
+name: fetch
+display_name: "Web 获取"
+description: "Web 获取工具：HTTP 请求、网页抓取等操作"
+
+category: "web"
+level: "user"
+
+# 禁止访问的域名（黑名单）
+blocked_domains: []
+
+# 允许访问的域名（白名单，为空表示不限制）
+allowed_domains: []
+
+# SSL 证书验证配置
+# 默认为 true（验证 SSL 证书），设为 false 可跳过 SSL 验证（用于测试环境或自签名证书）
+verify_ssl: true
+
+# 缓存配置
+cache:
+  enabled: false
+
+# 标签
+tags: ["web", "http", "fetch"]

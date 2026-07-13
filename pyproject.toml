@@ -1,0 +1,277 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-os"
+version = "0.1.0"
+description = "Agent OS 插件化管道架构"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Lingxi AgentOS Contributors"}
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "aiohttp>=3.9",
+    "watchdog>=3.0",
+    "litellm>=1.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "jsonschema>=4.0",
+    "simpleeval>=1.0.5",
+    "python-lsp-server>=1.14.0",
+    "fastapi>=0.110",
+    "python-multipart>=0.0.31",
+    "uvicorn>=0.27",
+    "redis>=5.0",
+    "PyJWT>=2.13.0",
+    "bcrypt>=4.0",
+    "cryptography>=42.0",
+    "psutil>=5.9",
+    "watchfiles>=0.21",
+    "httpx>=0.27",
+    "sqlalchemy>=2.0",
+    "python-dotenv>=1.2.2",
+    "jinja2>=3.1",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+agent-os = "channels.cli.cli_main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
+]
+document = [
+    "markitdown[docx,xlsx]>=0.1.0",
+]
+isolation = [
+    "docker>=7.0",
+]
+triggers = [
+    "apscheduler>=3.10",
+]
+
+[tool.pytest.ini_options]
+# 合并自原 pytest.ini（已删除），pyproject.toml 为唯一 pytest 配置来源。
+# CI 显式列出子目录跑纯单测；本地全量跑可用 `pytest tests/`。
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+log_cli = false
+log_cli_level = "WARNING"
+# --strict-markers：未在下方注册的 marker 直接报错，防止动态未登记的标记再出现。
+# 不在此处设全局 -m 排除：各 CI job 已按需调度外部依赖测试
+#（llm-e2e 用 -m requires_api，e2e 靠 RUN_LLM_E2E 门控），全局排除会改变现有语义。
+addopts = ["--strict-markers"]
+markers = [
+    "unit: 单元测试",
+    "integration: 集成测试",
+    "e2e: 端到端测试",
+    "slow: 慢速测试",
+    "requires_api: 需要真实 API 的测试",
+    "requires_redis: 需要 Redis 的测试",
+    "requires_db: 需要数据库的测试",
+    "offline: 可离线运行的测试",
+    # ── 时序/稳定性门禁（§9.4/§6.4）──
+    "timing: 关键时序不变量（事件顺序/间隔/超时边界），独立 stage 阻塞门禁",
+    "soak: 长时间渗漏与稳定性回归（资源回收/RSS斜率/任务累积）",
+    # ── tests/suites/__init__.py 动态注册的标记（此处静态登记以配合 --strict-markers）──
+    "core: 核心单元测试",
+    "m6: M6插件测试",
+    "stage: Stage闭环测试",
+    "cli: CLI测试",
+    "memory: 内存经验测试",
+    "task: Task E2E测试",
+    "agent: Agent测试",
+    "llm: LLM相关测试",
+]
+filterwarnings = [
+    "ignore::sqlalchemy.exc.SADeprecationWarning",
+    "ignore::sqlalchemy.exc.SAWarning",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ============================================================
+# 代码质量工具链配置（REQ-13）
+# ============================================================
+
+[tool.ruff]
+# 行长度配置
+line-length = 120
+# 目标 Python 版本
+target-version = "py310"
+# 排除的目录
+extend-exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    "frontend",
+    "electron",
+    "mcp-servers",
+    "node_modules",
+]
+
+[tool.ruff.lint]
+# 默认规则集 + 项目常用规则
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort（导入排序）
+    "B",    # flake8-bugbear（常见 bug）
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade（现代化语法）
+    "N",    # pep8-naming
+    "SIM",  # flake8-simplify
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+    "ERA",  # eradicate（注释代码）
+    "PL",   # pylint
+]
+# 忽略部分严格规则（避免一次性报大量错误）
+# 重构类规则（PLR0911/0912/0915）标注为技术债，见 ROADMAP，后续单独治理
+ignore = [
+    "E501",   # 行长度由 line-length 控制
+    "B008",   # 函数调用作为默认参数（FastAPI Depends 等）
+    "PLR0913", # 参数过多
+    "PLR2004", # magic value
+    "PLR0911", # return 语句过多（需拆函数，技术债）
+    "PLR0912", # 分支过多（需拆函数，技术债）
+    "PLR0915", # 语句过多（需拆函数，技术债）
+    "PLC0415", # 函数内 import（项目用于延迟加载/避免循环依赖）
+    "PLW0603", # global 语句（单例模式合理使用）
+    "SIM102",  # 嵌套 if 合并（可读性争议，保留显式结构）
+    "SIM103",  # 返回条件简化（可读性争议）
+    "SIM105",  # try-except-pass→contextlib.suppress（语义等价，保留显式 try）
+    "SIM108",  # if-else→三元（可读性争议，保留显式分支）
+    "ARG001", # 未使用的方法参数（接口需要）
+    "ARG002", # 同上
+    "PTH100", # os.path→pathlib（项目大量使用 os.path 风格，整族统一）
+    "PTH103", # 同上
+    "PTH107", # 同上
+    "PTH108", # 同上
+    "PTH109", # 同上
+    "PTH110", # 同上
+    "PTH112", # 同上
+    "PTH113", # 同上
+    "PTH115", # 同上
+    "PTH116", # 同上
+    "PTH118", # 同上
+    "PTH119", # 同上
+    "PTH120", # 同上
+    "PTH123", # 同上
+    "PTH204", # 同上
+    "ERA001", # 注释代码（可能是有意为之）
+    "RET504", # 过多 return
+    "N818",   # 异常类名不以 Error 结尾
+]
+# 允许自动修复
+fixable = ["ALL"]
+unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]  # __init__.py 允许未使用 import
+"tests/**" = ["B011", "PT009", "PT027"]  # 测试文件允许 assert
+"src/channels/cli/**" = ["T201"]  # CLI 允许 print
+# isolation/manager.py 的函数内 docker 延迟导入（已标 noqa: PLC0415），
+# 其 import 排序对延迟加载场景意义有限，避免与延迟加载意图冲突
+"src/isolation/manager.py" = ["I001"]
+
+[tool.ruff.lint.isort]
+# src/ 下各顶层模块直接以模块名(如 llm/pipeline/plugins)导入，而非 from src.xxx。
+# 必须显式声明真实模块名，否则 ruff 无法稳定识别为 first-party，
+# 在 CI(ubuntu + pip install -e .)环境下会把内部模块误判为 third-party → I001 误报。
+# 同时保留 "src" 以兼容少量 from src.xxx 风格的导入。
+known-first-party = [
+    "src",
+    "agents", "artifacts", "auth", "bridge", "cache", "channels", "config",
+    "connectors", "core", "cost_control", "evaluation", "human_interaction",
+    "infrastructure", "isolation", "llm", "logs", "lsp", "memory", "monitoring",
+    "multimodal", "pipeline", "plugins", "review", "rollback", "scene",
+    "services", "skills", "tasks", "templates", "tools", "triggers", "ui_schema",
+    "utils", "websocket", "workspace",
+]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+# ============================================================
+# mypy 类型检查配置
+# ============================================================
+
+[tool.mypy]
+python_version = "3.11"
+# 宽松模式：项目大量依赖无类型注解的第三方库（litellm/docker 等），
+# 关闭噪音类警告，只保留真正的类型错误检查。
+# 类型注解完善是长期技术债，见 ROADMAP。
+warn_return_any = false
+warn_unused_configs = true
+warn_redundant_casts = false
+warn_unused_ignores = false
+# 以下检查适度开启，不强制全量覆盖
+disallow_untyped_defs = false
+disallow_any_unimported = false
+no_implicit_optional = true
+check_untyped_defs = true
+# 忽略缺失导入（第三方库未提供类型注解）
+ignore_missing_imports = true
+# 宽松模式：允许现有警告（不强制 0 错误）
+ignore_errors = false
+# 禁用噪音类规则（项目大量使用动态属性/Pydantic model/Mixin 模式，
+# mypy 静态检测报大量 attr-defined 误报；import-untyped 是缺第三方 stubs 的环境问题）
+disable_error_code = ["attr-defined", "import-untyped"]
+# 显示错误上下文
+show_error_codes = true
+show_column_numbers = true
+# 增量检查：从缓存开始
+incremental = true
+cache_dir = ".mypy_cache"
+# 排除目录
+exclude = [
+    "frontend",
+    "electron",
+    "mcp-servers",
+    "node_modules",
+    "tests",
+    "build",
+    "dist",
+    "docs",
+]
+
+[[tool.mypy.overrides]]
+# 测试文件更宽松
+module = "tests.*"
+ignore_missing_imports = true
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# 第三方库跳过
+module = [
+    "litellm.*",
+    "watchdog.*",
+    "aiohttp.*",
+]
+ignore_missing_imports = true

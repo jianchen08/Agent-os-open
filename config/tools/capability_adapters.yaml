@@ -1,0 +1,122 @@
+# ================================================================
+# 能力适配器后端配置
+# ================================================================
+#
+# 快速启用步骤：
+#   1. 把目标后端的 available 改为 true
+#   2. 确认 server.command/args 指向正确的 MCP 服务
+#   3. 如需环境变量，在 server.env 中配置（支持 ${VAR} 插值）
+#   4. 无需重启，下次调用自动加载最新配置
+#
+# tool_mapping 说明：
+#   左侧是适配器的操作名（固定），右侧是 MCP Server 暴露的工具名。
+#   安装 MCP Server 后，可用 tools/list 查看实际工具名并更新映射。
+#
+# 回退机制：
+#   同一适配器下多个后端按 priority 排序，第一个 available=true 的后端优先。
+#   主后端调用失败时自动回退到下一个。
+#
+# Windows 注意：
+#   command 使用 npx.cmd 而非 npx（Python subprocess 兼容性）
+# ================================================================
+
+adapters:
+  # ============================================================
+  # UI 代码生成：从文字描述/截图 → 前端代码
+  # ============================================================
+  design_generate:
+    default_backend: magic
+    backends:
+      # --- 21st.dev Magic（已安装，组件生成）---
+      # 需要 API Key：https://21st.dev/magic 获取，设置环境变量 MAGIC_API_KEY
+      # 工具映射说明：
+      #   generate: 用 inspiration 搜索组件（纯API，无需浏览器）
+      #   build: 用 component_builder 创建组件（需打开浏览器）
+      #   refine: 用 component_refiner 改进组件（纯API）
+      - name: magic
+        priority: 1
+        server:
+          command: "npx.cmd"
+          args: ["-y", "@21st-dev/magic@latest"]
+          env:
+            API_KEY: "${MAGIC_API_KEY}"
+        tool_mapping:
+          generate: "21st_magic_component_inspiration"
+          build: "21st_magic_component_builder"
+          refine: "21st_magic_component_refiner"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: true
+
+      # --- screenshot-to-code（截图→代码，原项目无 MCP 包，待替代）---
+      - name: screenshot_to_code
+        priority: 2
+        server:
+          command: "npx.cmd"
+          args: ["-y", "screenshot-to-code@latest"]
+        tool_mapping:
+          generate: "generate_code"
+        timeout: 120.0
+        overall_timeout: 180.0
+        available: false
+
+      # --- Google Stitch（需 Google Cloud 认证）---
+      - name: stitch
+        priority: 3
+        server:
+          command: "npx.cmd"
+          args: ["-y", "stitch-mcp@latest"]
+          env:
+            GOOGLE_CLOUD_PROJECT: "${GOOGLE_CLOUD_PROJECT}"
+        tool_mapping:
+          generate: "stitch_generate"
+        timeout: 120.0
+        overall_timeout: 180.0
+        available: false
+
+  # ============================================================
+  # 浏览器测试：已迁移到 playwright_test 内置工具
+  # （原 browser_test MCP 适配器已废弃，保留配置仅供参考）
+  # ============================================================
+
+  # ============================================================
+  # 设计审查：对比设计参考 vs 实现，识别视觉问题
+  # ============================================================
+  design_review:
+    default_backend: playwright_screenshot
+    backends:
+      # --- Playwright（全维度审查：快照 + JS注入 + 控制台）---
+      # BUG-FIX-fix_20260516_browser_state_not_persist:
+      # 问题根因: 使用 --isolated 标志导致浏览器状态仅保存在内存，每次启动都是全新会话
+      # 修复方案: 移除 --isolated，使用默认的 Persistent 模式，状态保存在磁盘
+      # 影响范围: design_review 适配器的所有浏览器操作
+      # 修复日期: 2026-05-16
+      - name: playwright_screenshot
+        priority: 1
+        server:
+          command: "npx.cmd"
+          args: ["-y", "@playwright/mcp@latest", "--caps=vision"]
+        tool_mapping:
+          navigate: "browser_navigate"
+          snapshot: "browser_snapshot"
+          evaluate: "browser_evaluate"
+          console: "browser_console_messages"
+          screenshot: "browser_take_screenshot"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: true
+
+      # --- Figma MCP（需 Figma Access Token）---
+      - name: figma_compare
+        priority: 2
+        server:
+          command: "npx.cmd"
+          args: ["-y", "figma-developer-mcp@latest"]
+          env:
+            FIGMA_ACCESS_TOKEN: "${FIGMA_ACCESS_TOKEN}"
+        tool_mapping:
+          screenshot: "get_figma_data"
+          compare: "visual_compare"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: false

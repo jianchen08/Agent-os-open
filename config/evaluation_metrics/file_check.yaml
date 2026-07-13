@@ -1,0 +1,81 @@
+# 文件检查评估指标
+# 使用通用工具 file_read 检查文件存在性
+
+# BUG-FIX-fix_20260509_file_check:
+# 问题根因: default_config 包含 file_read 不支持的 action: read 参数，
+#           input_schema 与 file_read 工具实际 schema 不匹配（file_read 无 action 参数），
+#           且错误地声称支持目录检查（file_read 只能检查文件）。
+# 修复方案: 删除无效的 action 参数，对齐 input_schema 与 file_read 实际 schema，
+#           明确仅支持文件路径检查，不支持目录检查。
+# 影响范围: file_check 评估指标的配置
+
+id: file_check
+name: 文件检查
+description: 检查文件是否存在
+
+# ===== 评估器配置 =====
+evaluator_id: file_read
+evaluator_type: tool
+
+default_config: {}
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+  logic: "and"
+  pass_message: "文件存在"
+  fail_message: "文件不存在或无法访问"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: "文件路径（相对路径或绝对路径，不支持目录）"
+    fields:
+      type: array
+      items:
+        type: string
+      description: "要读取的字段列表（仅支持 YAML/JSON 文件）。不指定则返回完整内容。"
+    tail:
+      type: integer
+      description: "仅读取文件最后 N 行（仅文本文件有效）。不指定则返回完整内容。"
+  required: ["path"]
+
+# ===== 使用边界 =====
+when_to_use:
+  - 需要验证文件是否存在
+when_not_use:
+  - 需要验证目录是否存在（应使用 list_directory）
+  - 需要检查文件内容（应使用 semantic_check）
+  - 需要检查文件权限
+examples:
+  - params:
+      path: src/main.py
+    description: "检查文件是否存在"
+  - params:
+      path: config/settings.yaml
+      fields: ["id", "name"]
+    description: "检查 YAML 文件是否存在并读取特定字段"
+caveats:
+  - ⚠️ path 必须写具体的文件路径（如 tests/test_login.py）
+  - 如果文件路径在运行时才能确定，请使用 {{模板变量}}（如 {{test_file}}），系统会在未解析时自动跳过
+  - file_read 工具无需额外参数，只需传入 path 即可
+  - 不要传入 action 等非 file_read 支持的参数
+
+# ===== 依赖关系 =====
+is_red_line: false
+default_weight: 1.0
+level: 1
+includes: []
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - file
+  - existence

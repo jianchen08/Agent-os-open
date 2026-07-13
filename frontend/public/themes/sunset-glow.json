@@ -1,0 +1,20 @@
+{
+  "id": "sunset-glow",
+  "name": "日落晚霞",
+  "basedOn": "dark",
+  "createdAt": "",
+  "updatedAt": "",
+  "customizations": {
+    "name": "日落晚霞",
+    "description": "基于深色主题的暖色变体，琥珀与玫红，温暖柔和",
+    "colors": {
+      "primary": "#f59e0b",
+      "secondary": "#fb923c",
+      "accent": "#f472b6",
+      "status": {
+        "warning": "#fbbf24",
+        "error": "#fb7185"
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# 最小 Rust workspace — 用于 Docker 镜像构建验证
+# 后续 task_03 会创建完整的 0.2 kernel workspace
+[workspace]
+resolver = "2"
+members = ["kernel-api"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"

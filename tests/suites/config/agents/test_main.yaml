@@ -1,0 +1,39 @@
+config_id: test_main_agent
+name: 测试主控
+agent_type: main
+level: L1
+category: system
+description: 测试用主控Agent配置
+system_prompt: 你是一个测试主控Agent
+tool_ids:
+  - task_submit
+  - resource_search
+  - file_read
+
+static_vars:
+  enabled: true
+  items:
+    - name: 行为约束
+      type: rules
+      tags: []
+    - name: 可扩展工具索引
+      type: rules
+      content: |
+        - file_read: 读取文件
+        - bash: 执行命令
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: 当前时间
+      type: timestamp
+
+hard_constraints:
+  - 必须派发子任务
+  - 必须记录执行日志
+soft_constraints:
+  - 优先使用已有工具
+
+tags: [main, L1]
+metadata:
+  author: Test

@@ -1,0 +1,93 @@
+# 人工审核评估指标
+
+id: human_review
+name: 人工审核
+description: 人工审核（审批/复核）
+
+evaluator_id: human_interaction
+evaluator_type: human
+
+default_config:
+  mode: choice
+  timeout_seconds: 300
+
+# 默认选项：通过 / 不通过，判定条件匹配 options 中的 id
+input_mapping:
+  mode: "choice"
+  title: "{{ metric.name }}"
+  description: "{{ metric.description }}"
+  options:
+    - id: "approve"
+      label: "通过"
+    - id: "reject"
+      label: "不通过"
+  timeout_seconds: "{{ metric.default_config.timeout_seconds | default(300) }}"
+  priority: "high"
+
+# 判定：success=true 且 selected_option=approve → 通过，否则不通过
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+      logic: "and"
+      pass_message: "审核通过"
+      fail_message: "审核未通过"
+    - field: "output.selected_option"
+      operator: "equals"
+      value: "approve"
+      logic: "and"
+      pass_message: "用户选择通过"
+      fail_message: "用户选择不通过"
+
+input_schema:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: ["choice", "conversation"]
+      description: "交互模式"
+      default: "choice"
+    title:
+      type: string
+      description: "审核标题"
+    description:
+      type: string
+      description: "审核说明"
+    options:
+      type: array
+      items:
+        type: object
+        properties:
+          id: {"type": "string"}
+          label: {"type": "string"}
+      description: "选项列表"
+    timeout_seconds:
+      type: number
+      description: "超时时间（秒）"
+      default: 300
+    priority:
+      type: string
+      enum: ["low", "normal", "high", "critical"]
+      description: "优先级"
+      default: "normal"
+  required: ["mode", "title"]
+
+when_to_use:
+  - 需要人工审批
+  - 需要人工复核
+when_not_use:
+  - 可以自动验证
+  - 有明确的自动化检查标准
+
+is_red_line: false
+default_weight: 1.0
+level: 4
+includes: []
+requires: []
+
+source: builtin
+status: active
+tags:
+  - human
+  - approval
+  - review

@@ -1,0 +1,29 @@
+# 前端构建上下文忽略文件（构建上下文 = frontend/ 目录）
+# 这些目录会在 Docker 内重新生成，不能让宿主机的版本污染构建
+
+# node_modules：镜像内 npm ci 重新安装，宿主机的 node_modules 可能含 native binding（如 esbuild），
+# 跨平台带入会冲突；且体积巨大，拖慢构建上下文上传
+node_modules
+
+# dist：镜像内 vite build 重新生成，宿主机的 dist 可能是旧版本
+dist
+
+# 版本控制和 IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# 日志和临时文件
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 测试产物（不进运行时镜像）
+coverage
+.nyc_output
+test-results
+
+# 不需要进构建上下文的配置
+.gitkeep

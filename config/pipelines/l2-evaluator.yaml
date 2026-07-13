@@ -1,0 +1,35 @@
+# L2 Evaluator Agent Configuration
+# L2 评估者 Agent 配置 - 任务评估 Agent
+
+inherit: default                       # 继承默认配置
+
+pipeline:
+  name: "l2_evaluator_agent"
+
+  # Pre 插件扩展（评估者不需要额外的 Input 插件）
+
+  # Post 插件扩展
+  post:
+    llm_call:
+      # 评估者提醒（LLM 只输出文本时提醒输出评估结果）
+      - plugin: task_reminder
+        priority: 35
+        config:
+          max_reminders: 5              # 评估者允许更多提醒
+          cooldown_seconds: 60          # 评估者冷却期更短
+      # 评估完成通知
+      - plugin: notify_completion
+        priority: 25
+
+  # Router 插件扩展
+  router:
+    # 评估结果检测
+    - plugin: task_evaluation
+      priority: 40
+      config:
+        evaluation_threshold: 0.8
+
+  # 评估者特定的迭代限制
+  config:
+    max_iterations: 10                 # 评估不需要太多迭代
+    timeout: 1200                      # 评估超时时间（秒，最长 20 分钟）

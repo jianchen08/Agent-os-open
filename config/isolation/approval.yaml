@@ -1,0 +1,16 @@
+# 审批配置
+
+enabled: true
+
+policies:
+  # 高风险操作审批策略（由 security_check 插件统一判定）
+  # security_check 通过 security_rules.yaml 配置规则，
+  # 匹配到 needs_approval 动作时设置 approval_required=True，管道挂起等待人工审批
+  high_risk:
+    enabled: true
+    action: "NEEDS_APPROVAL"
+    description: "由 security_check 插件统一判定危险操作并触发审批流程"
+
+user_trust:
+  enabled: false
+  trusted_users: []

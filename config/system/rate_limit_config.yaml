@@ -1,0 +1,36 @@
+# 差异化限流策略配置
+#
+# 按 API 类别设置不同的限流参数。
+# 路径优先级：认证 > 上传 > HTTP方法分类
+#
+# 类别说明：
+#   auth   — 认证端点（登录/注册），最严格，防暴力破解
+#   upload — 文件上传/导入端点，较严格，防大流量滥用
+#   delete — DELETE 请求，较严格，不可逆操作需保护
+#   write  — POST/PUT/PATCH 请求，适中，写操作消耗资源较多
+#   read   — GET 请求，最宽松，读操作可高并发
+#   default — 兜底，未分类的请求
+
+auth:
+  max_requests: 10
+  window_seconds: 60
+
+upload:
+  max_requests: 20
+  window_seconds: 60
+
+delete:
+  max_requests: 30
+  window_seconds: 60
+
+write:
+  max_requests: 120
+  window_seconds: 60
+
+read:
+  max_requests: 300
+  window_seconds: 60
+
+default:
+  max_requests: 200
+  window_seconds: 60

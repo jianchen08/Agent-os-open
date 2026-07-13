@@ -1,0 +1,90 @@
+# 工具隔离策略配置
+# 优先级：tools（工具名精确匹配）> categories（分类匹配）> default
+#
+# 设计原则：
+# - 只有「命令执行类」工具需要强制容器隔离（因为它们执行任意命令）
+# - 其他工具的隔离级别由分类兜底策略决定
+# - 审批由 security_check 插件统一处理，不在策略中配置
+# - 隔离级别不可用即拒绝执行（返回 blocked），不降级到其它级别
+#
+# 隔离环境按根任务共享，不是每个工具调用创建新环境
+
+# ============================================
+# 默认策略（未匹配到的工具走宿主机执行）
+# 只有 bash_execute 需要/能在容器里执行（它是 shell 命令），
+# 其他工具是 Python 函数，容器里没有工具代码，必须走 non_isolated。
+# ============================================
+default:
+  isolation: non_isolated
+  execution: host_direct
+
+# ============================================
+# 工具级规则（优先级最高，精确匹配工具名）
+# ============================================
+tools:
+  # --- 命令执行类（强制容器隔离）---
+  # 这些工具在容器内执行任意命令，必须隔离；容器不可用即拒绝，不降级到 non_isolated
+  bash_execute:
+    isolation: isolated
+    execution: command_in_container
+    disk_quota: "100m"
+    network: restricted
+
+  # --- 内部 API / 数据服务类（宿主机执行，不走容器）---
+  # 这些是系统内部工具，直接操作内存/数据库/状态，不需要容器
+  task_submit:
+    isolation: non_isolated
+    execution: host_direct
+  task_manage:
+    isolation: non_isolated
+    execution: host_direct
+  task_evaluate:
+    isolation: non_isolated
+    execution: host_direct
+  memory:
+    isolation: non_isolated
+    execution: host_direct
+  state_update:
+    isolation: non_isolated
+    execution: host_direct
+  resource_merge:
+    isolation: non_isolated
+    execution: host_direct
+  trigger_setup:
+    isolation: non_isolated
+    execution: host_direct
+  human_interaction:
+    isolation: non_isolated
+    execution: host_direct
+
+# ============================================
+# 分类级规则（匹配不到具体工具名时，按分类兜底）
+# ============================================
+categories:
+  execution:
+    isolation: non_isolated
+    execution: host_direct
+  network:
+    isolation: non_isolated
+    execution: host_direct
+  file:
+    isolation: non_isolated
+    execution: host_direct
+  search:
+    isolation: non_isolated
+    execution: host_direct
+  analysis:
+    isolation: non_isolated
+    execution: host_direct
+  system:
+    isolation: non_isolated
+    execution: host_direct
+  evaluation:
+    isolation: non_isolated
+    execution: host_direct
+  task:
+    isolation: non_isolated
+    execution: host_direct
+  memory:
+    isolation: non_isolated
+    execution: host_direct

@@ -1,0 +1,75 @@
+# -*- coding: utf-8 -*-
+# 人类交互工具
+
+name: human_interaction
+display_name: "人类交互"
+description: "人类交互工具——只要是需要请求人类交互的场景，就必须使用此工具，禁止通过其他方式绕过人类交互。支持三种模式：选择模式（choice）——弹出选择框等待用户决定；对话模式（conversation）——跳转到对话标签页进行多轮对话；通知模式（notification）——非阻塞推送信息给用户。"
+
+category: "system"
+level: "all"
+
+input_schema:
+  type: "object"
+  properties:
+    mode:
+      type: "string"
+      enum: ["choice", "conversation", "notification"]
+      description: "交互模式：choice=选择模式（弹出选择框），conversation=对话模式（跳转标签页），notification=通知模式（非阻塞推送信息给用户）"
+    title:
+      type: "string"
+      description: "交互标题"
+    description:
+      type: "string"
+      description: "详细说明"
+    options:
+      type: "array"
+      items:
+        type: "object"
+        properties:
+          id: {"type": "string"}
+          label: {"type": "string"}
+      description: "选项列表（选择模式）"
+    questions:
+      type: "array"
+      items: {"type": "string"}
+      description: "问题列表（澄清场景）"
+    initial_message:
+      type: "string"
+      description: "开场消息（对话模式）/ 通知内容（通知模式）"
+    suggestions:
+      type: "array"
+      items: {"type": "string"}
+      description: "快捷回复建议（对话模式）"
+    file_paths:
+      type: "array"
+      items:
+        type: "string"
+      description: "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。支持相对路径和绝对路径。"
+    progress:
+      type: "number"
+      description: "进度百分比 0-100（通知模式）"
+    timeout_seconds:
+      type: "number"
+      default: 86400
+      description: "超时时间（秒）"
+    priority:
+      type: "string"
+      enum: ["low", "normal", "high", "critical"]
+      default: "normal"
+      description: "优先级"
+  required: ["mode", "title"]
+
+injected_params:
+  - name: "pipeline_id"
+    description: "管道ID"
+    required: true
+  - name: "workspace"
+    description: "工作空间路径"
+    required: false
+
+tags:
+  - "interaction"
+  - "human"
+  - "approval"
+  - "conversation"
+  - "system"

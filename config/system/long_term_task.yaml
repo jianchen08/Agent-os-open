@@ -1,0 +1,36 @@
+# 长期任务调度配置
+# 用于支持长期运行任务的计时器管理和超时控制
+
+# 任务超时配置
+timeout:
+  task_max_duration: 3600      # 单个任务最大执行时间（秒），1小时
+  idle_threshold: 300          # 无活动判定阈值（秒），5分钟
+  project_max_duration: 86400  # 总任务最大执行时间（秒），24小时
+  activity_threshold: 300      # 活动判定阈值（秒），5分钟
+
+# 重试配置
+retry:
+  max_retries: 3               # 最大重试次数
+  retry_interval: 60           # 重试间隔（秒）
+
+# 自动执行配置
+auto_execute:
+  enabled: true                # 是否启用自动执行
+  next_task_delay: 5           # 任务完成后触发下一个的延迟（秒）
+  fallback_check_interval: 300 # 兜底检查间隔（秒），5分钟
+
+# 心跳配置
+heartbeat:
+  interval: 60                 # 心跳上报间隔（秒）
+  grace_period: 120            # 宽限期（秒）
+
+# 通知配置
+notification:
+  notify_on_timeout: true      # 超时是否发送通知
+  notify_on_stuck: true        # 卡住是否发送通知
+  notify_on_max_retries: true  # 重试耗尽是否发送通知
+
+# 恢复配置
+recovery:
+  auto_restore: true           # 服务启动时是否自动恢复计时器
+  restore_lookback: 7200       # 恢复时检查的时间范围（秒），2小时
