@@ -379,7 +379,7 @@ class IsolationManager:
             loop = asyncio.get_event_loop()
 
             # 1. 清理悬挂镜像
-            rc, _, stderr = await loop.run_in_executor(
+            proc = await loop.run_in_executor(
                 None,
                 lambda: _sp.run(  # noqa: PLW1510
                     ["docker", "image", "prune", "-f"],
@@ -387,10 +387,10 @@ class IsolationManager:
                     timeout=60,
                 ),
             )
-            if rc == 0:
+            if proc.returncode == 0:
                 logger.debug("[IsolationManager] Docker 悬挂镜像已清理")
             else:
-                err = stderr.decode("utf-8", errors="replace") if stderr else ""
+                err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
                 logger.debug(
                     "[IsolationManager] image prune 跳过（Docker 不可用或无需清理）: %s",
                     err.strip()[:200],
