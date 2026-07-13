@@ -228,9 +228,7 @@ class DownloadTool(BuiltinTool):
             from tools.common.ssrf_guard import is_private_ip  # noqa: PLC0415
 
             if is_private_ip(hostname):
-                return create_failure_result(
-                    f"URL 安全校验失败: skip_ssrf_check 也不能访问内网 IP {hostname}"
-                )
+                return create_failure_result(f"URL 安全校验失败: skip_ssrf_check 也不能访问内网 IP {hostname}")
         else:
             valid, msg = _validate_url(url, allow_domains)
             if not valid:

@@ -45,20 +45,22 @@ class SandboxSecurityError(SandboxError):
 
 # 已知的 dunder 属性逃逸跳板：通过这些属性可从任意对象爬到 object/os。
 # 黑名单只能挡公开 payload（根治需容器隔离，见模块文档）。
-_DUNDER_ESCAPE_ATTRS = frozenset({
-    "__class__",
-    "__bases__",
-    "__base__",
-    "__subclasses__",
-    "__mro__",
-    "__globals__",
-    "__builtins__",
-    "__import__",
-    "__loader__",
-    "__code__",
-    "__func__",
-    "__self__",
-})
+_DUNDER_ESCAPE_ATTRS = frozenset(
+    {
+        "__class__",
+        "__bases__",
+        "__base__",
+        "__subclasses__",
+        "__mro__",
+        "__globals__",
+        "__builtins__",
+        "__import__",
+        "__loader__",
+        "__code__",
+        "__func__",
+        "__self__",
+    }
+)
 
 
 @dataclass

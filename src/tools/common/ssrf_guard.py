@@ -72,9 +72,7 @@ def validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[bool
         return False, "URL 缺少主机名"
 
     # 3. 域名白名单（可选；支持子域名后缀匹配）
-    if allow_domains and hostname not in allow_domains and not any(
-        hostname.endswith(f".{d}") for d in allow_domains
-    ):
+    if allow_domains and hostname not in allow_domains and not any(hostname.endswith(f".{d}") for d in allow_domains):
         return False, f"域名 {hostname} 不在白名单中"
 
     # 4. SSRF 防护：DNS 解析后检查是否命中内网 IP。

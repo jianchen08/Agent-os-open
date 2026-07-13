@@ -8,12 +8,14 @@ from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 已知不安全的 JWT secret 占位符（代码默认值 + 常见占位串）
-_INSECURE_JWT_SECRETS = frozenset({
-    "dev-insecure-key-do-not-use-in-production",
-    "development-secret-key-change-in-production",
-    "change-me",
-    "your-secret-key",
-})
+_INSECURE_JWT_SECRETS = frozenset(
+    {
+        "dev-insecure-key-do-not-use-in-production",
+        "development-secret-key-change-in-production",
+        "change-me",
+        "your-secret-key",
+    }
+)
 
 
 class Settings(BaseSettings):
