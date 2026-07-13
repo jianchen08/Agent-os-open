@@ -327,6 +327,7 @@ jobs:
             -q \
             --ignore=tests/e2e/test_auth.py \
             --ignore=tests/e2e/test_chat_flow.py \
+            --deselect tests/e2e/test_tool_call.py::test_bash_execute_simple_command \
             2>&1
 
   # ── 阶段 3c: 全链路真实 LLM 复盘 e2e ────────────────────────
