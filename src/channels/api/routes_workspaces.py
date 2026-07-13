@@ -328,6 +328,7 @@ async def create_entry(  # noqa: PLR0911
 @workspaces_router.delete("/{container_task_id}/entries", summary="删除文件或文件夹")
 async def delete_entry(  # noqa: PLR0911
     container_task_id: str,
+    path: str = Query("", description="要删除的文件或文件夹相对路径（query 参数，兼容旧调用）"),
     body: dict[str, Any] | None = None,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
@@ -335,14 +336,19 @@ async def delete_entry(  # noqa: PLR0911
 
     Args:
         container_task_id: 容器任务 ID
-        body: 请求体，含 {"path": "要删除的文件或文件夹相对路径"}
-            （与 create-entry/rename-entry/move-entry 一致用 body 传参）
+        path: query 参数，要删除的相对路径（兼容旧调用）
+        body: 请求体，含 {"path": "相对路径"}（与 create-entry/rename-entry/move-entry 一致）
         _user: 已认证用户信息
 
     Returns:
         包含 success、message 的操作结果字典
+
+    Note:
+        path 优先从 body 读取（与其它 entry 操作一致）；body 缺失时回退到 query 参数，
+        以保持对历史 query 调用方的向后兼容。
     """
-    path = (body or {}).get("path", "")
+    # 优先 body（与 create/rename/move 一致），fallback 到 query 参数
+    path = (body or {}).get("path", "") or path
     if not path:
         return {"success": False, "message": "path 参数不能为空"}
 
