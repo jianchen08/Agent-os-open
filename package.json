@@ -1,0 +1,64 @@
+{
+  "name": "agent-os",
+  "version": "0.1.0",
+  "description": "灵汐 AgentOS - 高度可配置化、自进化的 AI Agent 平台",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jianchen08/Agent-os-open.git"
+  },
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "electron": "electron .",
+    "electron:dev": "concurrently \"npm run dev --prefix frontend\" \"wait-on http://localhost:5188 && electron .\"",
+    "electron:build": "npm run build --prefix frontend && tsc -p electron/tsconfig.json && electron-builder",
+    "electron:compile": "tsc -p electron/tsconfig.json",
+    "electron:compile:watch": "tsc -p electron/tsconfig.json --watch",
+    "test": "jest --config jest.config.cjs",
+    "test:coverage": "jest --config jest.config.cjs --coverage"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.10.1",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.9",
+    "typescript": "~5.9.3",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.lingxi.assistant",
+    "productName": "灵汐助手",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "frontend/dist/**/*",
+      "frontend/public/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "frontend/dist",
+        "to": "frontend/dist"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "frontend/public/favicon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "frontend/public/icon.png"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "frontend/public/icon.png"
+    }
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

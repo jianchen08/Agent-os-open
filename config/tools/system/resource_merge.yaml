@@ -1,0 +1,19 @@
+# -*- coding: utf-8 -*-
+# 资源合并与回滚工具配置
+
+name: resource_merge
+description: |
+  基于 git 的资源合并与回滚工具。
+  在 workspace 中通过 git 追踪文件变更，支持将修改后的资源合并到目标目录，以及回滚到之前的版本。
+  适用场景：资源生成/修改时的 workspace 管理、文件变更追踪、合并到正式目录、版本回滚。
+  不适用场景：仅读取文件（使用 file_read）、执行命令（使用 bash_execute）。
+  注意事项：需要系统已安装 git；rollback 操作会将文件恢复到指定 commit 状态；cleanup 会删除 .git 目录且不可逆。
+category: task
+level: all
+requires_approval: false
+dangerous_operations: []
+tags:
+  - git
+  - merge
+  - rollback
+  - resource

@@ -1,0 +1,3 @@
+# 前端测试基线（只许减不许增，见 scripts/check_frontend_baseline.py）
+vitest_failures=109
+eslint_errors=33

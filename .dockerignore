@@ -1,0 +1,89 @@
+# =============================================================================
+# Docker 忽略文件
+# 排除不需要进入 Docker 镜像的文件和目录
+# =============================================================================
+
+# 版本控制
+.git
+.gitignore
+.gitattributes
+
+# Python 缓存和编译文件
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+*.egg-info
+*.egg
+/dist/
+/build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+.env
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 测试和覆盖率
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Docker 相关（避免递归）
+# 注意：docker-entrypoint.sh 不能排除！后端 Dockerfile 要 COPY 它进镜像，
+# 排除会导致本地 build 时 COPY 失败。
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# 文档和报告
+docs/
+*.md
+!README.md
+reports/
+
+# 前端构建产物
+# 注意：frontend/dist 不排除！当宿主机已 npm run build 产出 dist 时，
+# Dockerfile 直接 COPY 它，跳过容器内构建（容器内 node 在 WSL2 CPU 上有 V8 SIGILL）。
+frontend/node_modules/
+frontend/.nuxt/
+
+# 临时和日志文件
+logs/
+*.log
+tmp/
+temp/
+
+# pytest 临时目录（Windows 上路径含特殊字符，会破坏构建上下文上传）
+pytest-of-*/
+.pytest_cache/
+
+# 脚本和工具（非运行时需要）
+# 注意：用 /scripts/ 仅匹配根目录的 scripts/，避免误排除 frontend/scripts/
+# （frontend/scripts/patch-lobehub-ui.mjs 是前端构建 postinstall 钩子依赖）
+/scripts/
+verify_*.py
+start_web.bat
+start_web.sh
+stop_web.bat
+stop_web.sh
+cli.bat
+
+# 其他非运行时文件
+skills/
+mcp-servers/
+future/
+vscode_extension/
+.bash.exe.stackdump

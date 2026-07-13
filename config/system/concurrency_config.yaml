@@ -1,0 +1,15 @@
+task:
+  max_concurrent_tasks: 15
+  task_max_workers: 10
+  task_timeout: 600
+agent:
+  l1_max_concurrent: 3
+  l2_max_concurrent: 5
+  l3_max_concurrent: 10
+workflow:
+  max_concurrent: 6
+llm:
+  zhipu_max_concurrent: 4
+  openai_max_concurrent: 3
+  anthropic_max_concurrent: 2
+  default_max_concurrent: 2

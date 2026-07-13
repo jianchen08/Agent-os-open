@@ -1,0 +1,13 @@
+# 换行符规则（防止 git 在 Windows 上自动转 CRLF 破坏 Linux 脚本）
+# Linux 脚本：强制 LF
+*.sh         text eol=lf
+install.sh   text eol=lf
+install_wsl_docker.sh text eol=lf
+docker-entrypoint.sh  text eol=lf
+
+# Windows 脚本：强制 CRLF
+*.bat        text eol=crlf
+*.ps1        text eol=crlf
+
+# 默认：交给 git autocrlf 处理
+* text=auto

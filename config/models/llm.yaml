@@ -1,0 +1,176 @@
+models:
+  glm-5.2:
+    provider: zhipu_coding
+    model_name: glm-5.2
+    display_name: GLM-5.2
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      thinking:
+        type: enabled
+      reasoning_effort: max
+      extra_body:
+        tool_stream: true
+    multimodal:
+      supports_image: true
+      supported_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      max_image_size: 20971520
+  embedding-3:
+    provider: zhipu_coding
+    model_name: embedding-3
+    display_name: Embedding-3
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    context_window: 1000000
+    dimension: 2048
+  embedding-2:
+    provider: zhipu_coding
+    model_name: embedding-2
+    display_name: Embedding-2
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    context_window: 1000000
+    dimension: 1024
+  deepseek-v4-flash:
+    provider: deepseek
+    model_name: deepseek-v4-flash
+    display_name: DeepSeek V4 Flash
+    api_base: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      thinking:
+        type: enabled
+      reasoning_effort: max
+      reasoning_retention:
+        sample_interval: 3
+  deepseek-v4-pro:
+    provider: deepseek
+    model_name: deepseek-v4-pro
+    display_name: DeepSeek V4 Pro
+    api_base: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      thinking:
+        type: enabled
+      reasoning_effort: max
+      reasoning_retention:
+        sample_interval: 3
+  minimax-m3:
+    provider: minimax
+    model_name: MiniMax-M3
+    display_name: MiniMax-M3
+    api_base: https://api.minimaxi.com/v1
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      thinking:
+        type: adaptive
+    multimodal:
+      supports_image: true
+      supports_video: true
+      supported_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      max_image_size: 20971520
+      max_video_size: 104857600
+  glm-5.2-yi:
+    provider: yichengc
+    model_name: glm-5.2
+    display_name: GLM-5.2-YC
+    api_base: https://ai.1cc.ai/v1
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      thinking:
+        type: enabled
+      reasoning_effort: max
+      extra_body:
+        tool_stream: true
+    multimodal:
+      supports_image: true
+      supported_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      max_image_size: 20971520
+defaults:
+  chat: glm-5.2
+  embedding: embedding-3
+  call_timeout: 600
+  first_token_timeout: 120
+  stream_idle_timeout: 180
+  compression: minimax-m3
+  tiers:
+    large: glm-5.2
+    medium: glm-5.2
+    small: minimax-m3
+providers:
+  zhipu_coding:
+    type: zai
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    keys:
+    - id: zhipu_coding_main
+      api_key: ${ZHIPU_API_KEY}
+      max_concurrent: 6
+      rpm: 10
+      token_quota: 0
+  zhipu:
+    type: zai
+    api_base: https://open.bigmodel.cn/api/paas/v4/
+    keys:
+    - id: zhipu_main
+      api_key: ${ZHIPU_API_KEY}
+      max_concurrent: 6
+      rpm: 10
+      token_quota: 0
+  deepseek:
+    type: deepseek
+    api_base: https://api.deepseek.com/v1
+    keys:
+    - id: deepseek_main
+      api_key: ${DEEPSEEK_API_KEY}
+      max_concurrent: 6
+      rpm: 10
+      token_quota: 0
+  minimax:
+    type: minimax
+    api_base: https://api.minimaxi.com/v1
+    keys:
+    - id: minimax_main
+      api_key: ${MINIMAX_API_KEY}
+      max_concurrent: 6
+      rpm: 10
+      token_quota: 0
+  yichengc:
+    type: openai
+    api_base: https://ai.1cc.ai/v1
+    keys:
+    - id: yichengc_main
+      api_key: ${YICHENGC_API_KEY}
+      max_concurrent: 6
+      rpm: 12
+      token_quota: 0
+embeddings: {}
+concurrency:
+  max_concurrent_pipelines: 5
+  default_max_concurrent: 2

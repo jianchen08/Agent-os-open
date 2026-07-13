@@ -1,0 +1,22 @@
+timeout:
+  task_max_duration: 3600
+  idle_threshold: 300
+  project_max_duration: 86400
+  activity_threshold: 300
+retry:
+  max_retries: 4
+  retry_interval: 60
+auto_execute:
+  enabled: true
+  next_task_delay: 5
+  fallback_check_interval: 300
+heartbeat:
+  interval: 60
+  grace_period: 120
+notification:
+  notify_on_timeout: true
+  notify_on_stuck: true
+  notify_on_max_retries: true
+recovery:
+  auto_restore: true
+  restore_lookback: 7200

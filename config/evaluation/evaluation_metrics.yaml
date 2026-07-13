@@ -1,0 +1,134 @@
+# -*- coding: utf-8 -*-
+# 内置评估指标配置
+# 应用启动时自动同步到数据库
+
+metrics:
+  # ========== 文件检查 ==========
+  - name: file_check
+    description: 文件/目录检查（存在性、非空、内容匹配）
+    category: file
+    evaluator_type: tool
+    evaluator_id: file_evaluator
+    level: 1  # 基础层级
+    includes: []  # 独立指标，不包含其他
+    requires: []  # 无前置依赖
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 文件或目录路径
+        check:
+          type: string
+          enum: [exists, not_empty, contains, is_directory]
+          description: 检查类型
+          default: exists
+        pattern:
+          type: string
+          description: 内容匹配模式（check=contains 时使用）
+        min_size:
+          type: integer
+          description: 最小字节数（check=not_empty 时使用）
+          default: 1
+      required: [path]
+    tags: [file, existence, content]
+
+  # ========== 语义检查 ==========
+  - name: semantic_check
+    description: 语义检查（意图覆盖、匹配、幻觉）
+    category: semantic
+    evaluator_type: agent
+    evaluator_id: evaluator_agent
+    level: 3  # 语义层级
+    includes: []  # 独立指标（语义检查不依赖文件）
+    requires: []  # 无前置依赖
+    input_schema:
+      type: object
+      properties:
+        output:
+          type: string
+          description: 要检查的输出
+        check:
+          type: string
+          enum: [intent, match, hallucination]
+          description: 检查类型
+          default: match
+        intents:
+          type: array
+          items:
+            type: string
+          description: 用户意图列表（check=intent 时使用）
+        expected:
+          type: string
+          description: 期望的语义描述（check=match 时使用）
+        references:
+          type: array
+          items:
+            type: string
+          description: 参考资料（check=hallucination 时使用）
+      required: [output]
+    tags: [semantic, intent, match, hallucination]
+
+  # ========== 命令检查 ==========
+  - name: bash_check
+    description: 自定义命令执行检查（通过退出码判定结果）
+    category: command
+    evaluator_type: tool
+    evaluator_id: bash_execute
+    level: 2
+    includes: [file_check]
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        command:
+          type: string
+          description: 要执行的命令
+        timeout:
+          type: integer
+          description: 超时时间（秒）
+          default: 30
+        working_dir:
+          type: string
+          description: 工作目录
+        use_isolation:
+          type: boolean
+          description: 是否使用隔离环境
+          default: true
+      required: [command]
+    tags: [bash, command, execute, universal]
+
+  # ========== 人工审核 ==========
+  - name: human_review
+    description: 人工审核（审批/复核）
+    category: human
+    evaluator_type: human
+    evaluator_id: human_interaction
+    level: 4
+    includes: []
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [choice, conversation]
+          description: 交互模式
+          default: choice
+        title:
+          type: string
+          description: 审核标题
+        description:
+          type: string
+          description: 审核说明
+        options:
+          type: array
+          items:
+            type: object
+          description: 选项列表（mode=choice 时使用）
+        timeout_seconds:
+          type: number
+          description: 超时时间（秒）
+          default: 300
+      required: [mode, title]
+    tags: [human, approval, review]

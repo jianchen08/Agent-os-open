@@ -1,0 +1,159 @@
+workspace:
+  root: .ai_workspaces
+  nesting_mode: shared
+  sparse_threshold_mb: 500
+  worktree_include_patterns:
+  - src
+  - config
+  - tests
+  - frontend
+  - skills
+  - pyproject.toml
+  - package.json
+  - Cargo.toml
+  - go.mod
+  worktree_exclude_patterns:
+  - .venv
+  - node_modules
+  - build
+  - dist
+  - .gradle
+  - target
+  - .idea
+  - .vscode
+  - __pycache__
+  - .pytest_cache
+  - .mypy_cache
+  - .tox
+  - data
+  large_file_threshold_mb: 50
+  worktree_link_patterns:
+  - assets
+  - node_modules
+  - frontend/node_modules
+  - .env
+  - vendor
+  scenario_detection:
+    auto_detect: true
+  new_project:
+    auto_git_init: true
+  existing_project:
+    default_merge_strategy: git_merge
+    auto_cleanup: true
+    auto_rollback_on_failure: true
+    auto_commit_before_evaluate: true
+  max_eval_retries: 3
+coordinator:
+  enabled: true
+  enable_fallback: false
+  default_level: isolated
+  reuse_environment: true
+  resource_limits:
+    max_environments: 50
+    environment_ttl: 3600
+    default_timeout: 300
+providers:
+  host:
+    enabled: true
+  cua:
+    enabled: true
+    image: agentos:latest
+    limits:
+      memory: 512m
+      cpus: '0.5'
+    publish_ports: []
+    # 首次需要隔离环境时，若本地无镜像则自动 docker build（默认开）。
+    # BuildKit 缓存(--mount=type=cache)会复用本机已下载的 apt/pip/playwright 包，
+    # 二次构建秒级。关闭后只回退 docker pull（适用于镜像已推到 registry 的场景）。
+    auto_build: true
+    dockerfile_path: docker/agentos/Dockerfile   # 相对仓库根；绝对路径原样使用
+    build_context: .                              # 构建上下文，默认仓库根
+    build_timeout: 1800                           # 秒；首次冷构建 Playwright 慢，缓存命中后秒级
+policy:
+  enable_fallback: false
+  custom: {}
+permission_policies:
+  default_policy:
+    name: default
+    policy_type: default
+    description: 默认策略：读取整个项目，写入仅限工作目录
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: workspace
+      allow_outside: false
+  subtask_policy:
+    name: subtask
+    policy_type: subtask
+    description: 子任务策略：同默认策略
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: workspace
+      allow_outside: false
+  system_config_policy:
+    name: system_config
+    policy_type: system_config
+    description: 系统配置策略：修改前需要创建检查点
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: workspace
+      allow_outside: false
+      require_checkpoint: true
+      allowed_operations:
+      - create
+      - modify
+  readonly_policy:
+    name: readonly
+    policy_type: readonly
+    description: 只读策略：禁止所有写入操作
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: none
+      allow_outside: false
+  special_directories:
+    config/:
+      read:
+        scope: project
+        allow_all: true
+      write:
+        scope: workspace
+        allow_outside: false
+        require_checkpoint: true
+    shared/:
+      read:
+        scope: project
+        allow_all: true
+      write:
+        scope: none
+    templates/:
+      read:
+        scope: project
+        allow_all: true
+      write:
+        scope: none
+  root_task_policy:
+    name: root_task
+    policy_type: default
+    description: 根任务权限策略：可写入整个项目，需要用户确认
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: project
+      allow_outside: true
+      require_confirmation: true
+lifecycle:
+  project_ttl: 604800
+  module_ttl: 86400
+  atomic_ttl: 3600
+container_lifecycle:
+  on_shutdown: stop
+  resume_on_startup: true
+  name_prefix: cua-

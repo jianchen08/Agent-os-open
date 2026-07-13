@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# Web 操作工具
+
+name: web_operate
+display_name: "Web 操作"
+description: "Web 操作工具：HTTP 请求、网页抓取等操作"
+
+category: "web"
+level: "user"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: false
+
+# 标签
+tags: ["web", "http", "operate"]

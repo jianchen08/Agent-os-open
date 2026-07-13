@@ -1,0 +1,78 @@
+# -*- coding: utf-8 -*-
+# Bash 执行工具配置
+
+name: bash_execute
+display_name: "Bash 执行"
+description: "增强版 Bash 命令执行工具：支持长时间运行进程、交互式输入和智能日志压缩"
+
+category: "system"
+level: "user"
+
+# 权限配置
+requires_approval: true  # 默认需要审批
+dangerous_operations:
+  - "rm -rf"
+  - "format"
+  - "del /q"
+  - "shutdown"
+  - "reboot"
+  - "mkfs"
+  - "dd if="
+  - "> /dev/sd"
+  - "curl"
+  - "wget"
+
+# 超时配置
+timeout:
+  default: 30  # 默认超时时间（秒）
+  callback_threshold: 30  # 回调触发阈值（秒）
+  max: 3600  # 最大超时时间（秒）
+
+# 日志配置
+logging:
+  enabled: true
+  directory: "logs/bash"  # 日志保存目录
+  max_lines_in_summary: 200  # 摘要中分析的最大行数
+  max_summary_lines: 5  # 摘要返回的最大行数
+
+# 安全配置
+security:
+  check_dangerous_commands: true
+  check_sensitive_input: true
+  max_input_length: 4096  # 最大输入长度
+  
+  # 危险命令模式
+  dangerous_patterns:
+    - "rm -rf /"
+    - "format"
+    - "mkfs"
+    - "dd if="
+    - "> /dev/sd"
+    - ":(){ :|:& };:"  # Fork bomb
+  
+  # 敏感关键词（输入会被掩码）
+  sensitive_keywords:
+    - "password"
+    - "passwd"
+    - "secret"
+    - "token"
+    - "key"
+    - "api_key"
+    - "credential"
+
+# 隔离配置
+isolation:
+  enabled: true  # 默认启用隔离
+  default_level: "isolated"  # 默认隔离级别：non_isolated/isolated
+  
+  # 隔离级别映射
+  level_mapping:
+    non_isolated: "非隔离（直接执行）"
+    isolated: "隔离（容器/Docker）"
+
+# 缓存配置
+cache:
+  enabled: false  # 有副作用，不缓存
+
+# 标签
+tags: ["bash", "shell", "command", "dangerous", "interactive", "long-running"]

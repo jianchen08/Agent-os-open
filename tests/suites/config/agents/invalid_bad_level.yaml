@@ -1,0 +1,4 @@
+config_id: bad_level_agent
+name: 无效层级
+agent_type: main
+level: INVALID_LEVEL

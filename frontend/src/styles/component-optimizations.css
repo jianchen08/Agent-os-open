@@ -1,0 +1,145 @@
+/**
+ * 执行图节点优化样式
+ *
+ * 添加 Deep Space 主题的工具类
+ */
+
+/* ========================================
+ * 节点切角矩形样式
+ * ======================================== */
+.chamfered-node {
+  clip-path: polygon(
+    8px 0, 100% 0,
+    100% calc(100% - 8px),
+    calc(100% - 8px) 100%,
+    0 100%,
+    0 8px
+  );
+}
+
+/* ========================================
+ * 节点状态边框动画
+ * ======================================== */
+.node-status-running {
+  border: 1px solid var(--accent-running);
+  animation: border-flow 2s linear infinite;
+}
+
+.node-status-waiting {
+  border: 1px solid var(--accent-waiting);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.node-status-completed {
+  border: 1px solid var(--accent-success);
+}
+
+.node-status-failed {
+  border: 1px solid var(--accent-error);
+}
+
+/* ========================================
+ * 聊天气泡优化
+ * ======================================== */
+.message-bubble-agent {
+  background: var(--bg-panel);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-default);
+  border-left: 4px solid var(--accent-running);
+  border-radius: 1rem;
+  border-top-left-radius: 0.5rem;
+  padding: 1rem;
+  box-shadow: var(--shadow-md);
+}
+
+.message-bubble-user {
+  color: var(--text-primary);
+}
+
+.message-thinking-block {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: var(--thinking-bg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.875rem;
+  color: var(--thinking-text-color);
+  overflow-x: auto;
+  border: 1px solid var(--border-default);
+}
+
+/* ========================================
+ * 响应式优化
+ * ======================================== */
+@media (max-width: 767px) {
+  .split-pane-mobile {
+    flex-direction: column;
+  }
+
+  .execution-graph-mobile-hidden {
+    display: none;
+  }
+
+  .approval-hud-mobile {
+    max-width: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+  }
+}
+
+/* ========================================
+ * 思考内容样式（仅内容区域，标题栏保持不变）
+ * 使用主题变量控制颜色，适配 light/dark 模式
+ * ======================================== */
+.thinking-text-content {
+  color: var(--thinking-text-color) !important;
+  font-size: 0.8125rem !important;
+}
+
+.thinking-text-content .prose {
+  font-size: 0.8125rem !important;
+  color: inherit !important;
+}
+
+.thinking-text-content .prose p,
+.thinking-text-content .prose li,
+.thinking-text-content .prose span,
+.thinking-text-content .prose div,
+.thinking-text-content .prose strong,
+.thinking-text-content .prose em,
+.thinking-text-content .prose code,
+.thinking-text-content .prose pre,
+.thinking-text-content .prose h1,
+.thinking-text-content .prose h2,
+.thinking-text-content .prose h3 {
+  font-size: inherit !important;
+  color: inherit !important;
+}
+
+/* ========================================
+ * 无障碍优化
+ * ======================================== */
+*:focus-visible {
+  outline: 2px solid var(--accent-running);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* 跳过导航链接 */
+.skip-to-content {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  padding: 8px 16px;
+  z-index: 100;
+}
+
+.skip-to-content:focus {
+  top: 0;
+}

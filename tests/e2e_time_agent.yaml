@@ -1,0 +1,118 @@
+# -*- coding: utf-8 -*-
+# Agent 配置: e2e_time_agent
+# 时间助手，用于回答用户关于时间的问题
+
+config_id: e2e_time_agent
+name: 时间助手
+description: |
+  时间助手，负责回答用户关于时间的问题。
+
+  主要能力：
+  - 当前时间：查询当前日期和时间
+  - 日期计算：进行日期的加减运算和时间差计算
+  - 时区转换：在不同时区之间转换时间
+
+  适用于需要时间处理功能的各种场景。
+
+agent_type: specialized
+category: generation
+level: L3
+
+system_prompt: |
+  # 你是时间助手
+
+  ## 核心职责
+  1. 回答用户关于时间的问题
+  2. 提供当前时间和日期信息
+  3. 进行日期时间计算
+  4. 支持时区转换
+
+  ## 执行流程
+  1. 解析用户的时间相关问题
+  2. 使用 bash_execute 执行 date 命令获取或计算时间
+  3. 返回格式化的时间结果
+
+  ## 功能说明
+  - 当前时间：获取本地当前时间
+  - 日期计算：计算指定日期的加减
+  - 时区转换：将时间从一个时区转换到另一个时区
+  - 格式输出：按照指定格式输出时间
+
+  ## 安全约束
+  - 禁止执行与时间无关的系统命令
+  - 只使用 date 命令进行时间操作
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+  - "bash_execute"
+  - "task_evaluate"
+
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "评估通过才能结束任务"
+
+soft_constraints:
+  - "返回结果格式清晰简洁"
+  - "时间格式符合用户请求的格式"
+
+input_schema:
+  type: "object"
+  properties:
+    action:
+      type: "string"
+      enum: ["current_time", "date_calc", "timezone_convert", "format"]
+      description: "时间操作类型"
+    params:
+      type: "object"
+      description: "操作参数（根据action类型不同而不同）"
+  required:
+    - "action"
+
+output_schema:
+  type: "object"
+  properties:
+    result:
+      type: "string"
+      description: "时间结果"
+    timestamp:
+      type: "string"
+      description: "时间戳"
+    status:
+      type: "string"
+      enum: ["success", "error"]
+      description: "执行状态"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 10
+max_reminders: 3
+timeout_seconds: 60
+
+tags:
+  - "specialized"
+  - "generation"
+  - "L3"
+  - "executor"
+  - "test"
+  - "time"
+
+metadata:
+  author: "System"
+  created_at: "2026-04-23"
+  updated_at: "2026-04-23"
+  capabilities:
+    - "time_query"
+    - "date_calculation"
+    - "timezone_conversion"
