@@ -161,8 +161,12 @@ class DockerProvider(IsolationProvider):
             # 流式模式：Popen + 逐行读 stderr(BuildKit 进度)实时打日志。
             # stdout 整体捕获；stderr 一边打日志一边累积，供错误 tail。
             proc = _sp.Popen(  # noqa: S603
-                args, stdout=_sp.PIPE, stderr=_sp.PIPE, env=run_env,
-                text=False, bufsize=1,
+                args,
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                env=run_env,
+                text=False,
+                bufsize=1,
             )
             collected_err: list[bytes] = []
             collected_out: list[bytes] = []
@@ -542,8 +546,16 @@ class DockerProvider(IsolationProvider):
                     self._dockerfile_path,
                 )
                 rc, _, stderr = await self._run_cmd(
-                    ["docker", "build", "--progress=plain", "-t", self._image,
-                     "-f", str(self._dockerfile_path), str(self._build_context)],
+                    [
+                        "docker",
+                        "build",
+                        "--progress=plain",
+                        "-t",
+                        self._image,
+                        "-f",
+                        str(self._dockerfile_path),
+                        str(self._build_context),
+                    ],
                     timeout=self._build_timeout,
                     env={"DOCKER_BUILDKIT": "1"},
                     stream_log=True,
@@ -559,16 +571,12 @@ class DockerProvider(IsolationProvider):
                 )
 
             # 回退：本地无 Dockerfile（如 pip 安装的包场景），尝试拉取。
-            logger.info(
-                "[DockerProvider] 本地无 Dockerfile，尝试拉取镜像 | image=%s", self._image
-            )
+            logger.info("[DockerProvider] 本地无 Dockerfile，尝试拉取镜像 | image=%s", self._image)
             rc, _, stderr = await self._run_cmd(["docker", "pull", self._image], timeout=120)
             if rc == 0:
                 return
             err_tail = stderr.decode("utf-8", errors="replace")[-500:]
-            raise RuntimeError(
-                f"镜像 {self._image} 拉取失败，且本地无 Dockerfile 可构建: {err_tail}"
-            )
+            raise RuntimeError(f"镜像 {self._image} 拉取失败，且本地无 Dockerfile 可构建: {err_tail}")
 
     async def _exec_in_container(
         self,

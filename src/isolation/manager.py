@@ -983,8 +983,7 @@ class IsolationManager:
                 # 继续重试/next_llm 只会空转烧钱。清零计数后抛熔断信号挂引擎。
                 self._ws_env_fail_counts.pop(ws_key, None)
                 logger.error(
-                    "[IsolationManager] 隔离环境连续 %d/%d 次不可用，触发熔断 | "
-                    "ws_key=%s task=%s | last_error=%s",
+                    "[IsolationManager] 隔离环境连续 %d/%d 次不可用，触发熔断 | ws_key=%s task=%s | last_error=%s",
                     count,
                     self._MAX_ENV_FAILURES,
                     ws_key,
@@ -1000,8 +999,7 @@ class IsolationManager:
 
             self._ws_env_fail_counts[ws_key] = count
             logger.warning(
-                "[IsolationManager] 建隔离环境失败 (%d/%d)，返回失败结果 | "
-                "ws_key=%s | error=%s",
+                "[IsolationManager] 建隔离环境失败 (%d/%d)，返回失败结果 | ws_key=%s | error=%s",
                 count,
                 self._MAX_ENV_FAILURES,
                 ws_key,
