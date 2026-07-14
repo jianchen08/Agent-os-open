@@ -10,7 +10,13 @@ description = "Lingxi AgentOS 0.2 plugin loader — discovery, manifest validati
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 lingxi-core.workspace = true
+parking_lot = "0.12"
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

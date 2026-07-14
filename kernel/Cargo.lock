@@ -404,12 +404,17 @@ name = "lingxi-invoker"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "lingxi-core",
+ "lingxi-mcp",
+ "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -418,11 +423,14 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "lingxi-core",
+ "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -430,9 +438,13 @@ name = "lingxi-plugin-loader"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "lingxi-core",
+ "parking_lot",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -779,6 +791,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "task05-verify"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "lingxi-core",
+ "lingxi-invoker",
+ "lingxi-mcp",
+ "lingxi-plugin-loader",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

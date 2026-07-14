@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Lingxi AgentOS 0.2 MCP protocol client — rmcp wrapper"
+description = "Lingxi AgentOS 0.2 MCP protocol client — stdio + HTTP transport"
 
 [dependencies]
 tokio.workspace = true
@@ -14,3 +14,8 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 lingxi-core.workspace = true
+uuid.workspace = true
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

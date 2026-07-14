@@ -3,4 +3,19 @@
 //! 负责从文件系统发现插件、解析 manifest、验证 Schema、按需实例化。
 //! 遵循按需加载全局原则：首次调用时才启动进程，空闲超时自动卸载。
 //!
+//! ## 模块组织
+//!
+//! - `loader`: 插件加载器实现——双根扫描、manifest 解析校验、按需加载
+//! - `registry`: 能力注册表 + 依赖解析器
+//! - `error`: 错误类型
+//!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.7]
+//! [来源: docs/tasks/task_05_plugin_system.md]
+
+pub mod error;
+pub mod loader;
+pub mod registry;
+
+pub use error::LoaderError;
+pub use loader::PluginLoaderImpl;
+pub use registry::{CapabilityRegistryImpl, DependencyResolverImpl};
