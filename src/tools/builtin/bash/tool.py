@@ -115,11 +115,23 @@ class SecurityChecker:
         "| fish",  # 管道到 fish
     ]
 
+    # 手动后台化模式：降级标 warning（不阻断）。
+    # 本工具自带后台执行+轮询语义，手动 nohup/setsid/disown/行尾& 会让进程
+    # 脱离 ProcessManager 管理（continue/terminate 看不见），沦为孤儿。
+    # 用"命令位置"锚定（行首或 ;|& 之后的 token），避免误伤 grep nohup 这类参数。
+    BACKGROUND_PATTERNS: ClassVar[list[str]] = [
+        r"(?:^|[;|&]\s*)\s*nohup\b",  # nohup 作为命令 token
+        r"(?:^|[;|&]\s*)\s*setsid\b",  # setsid 作为命令 token
+        r"(?:^|[;|&]\s*)\s*disown\b",  # disown 作为命令 token
+        r"\s&\s*$",  # 行尾独立的 & 后台符（不误伤 a&b / 2>&1 中段 &）
+    ]
+
     def __init__(self, allowed_commands: list[str] | None = None):
         """初始化安全检查器"""
         self.allowed_commands = set(allowed_commands) if allowed_commands else None
         # 预编译正则表达式以提高性能
         self._compiled_dangerous = [re.compile(p, re.IGNORECASE) for p in self.DANGEROUS_PATTERNS]
+        self._compiled_background = [re.compile(p, re.IGNORECASE) for p in self.BACKGROUND_PATTERNS]
 
     def check(self, command: str) -> tuple[bool, bool, str | None]:
         """
@@ -148,6 +160,20 @@ class SecurityChecker:
         for pattern in self.CAUTION_PATTERNS:
             if pattern.lower() in cmd_lower:
                 return True, True, f"命令包含潜在风险操作: {pattern}"
+
+        # 检查手动后台化模式（nohup/setsid/disown/行尾&）→ warning，不阻断
+        # 提醒模型：本工具已自带后台执行，手动后台化会使进程脱离管理
+        for compiled in self._compiled_background:
+            if compiled.search(cmd_stripped):
+                return (
+                    True,
+                    True,
+                    (
+                        "命令包含手动后台化操作，本工具已自带后台执行+轮询，"
+                        "手动后台化会使进程脱离管理；直接 execute 启动，"
+                        "长任务返回 pid 后用 continue 轮询即可"
+                    ),
+                )
 
         return True, False, None
 
@@ -243,19 +269,22 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         """获取工具定义"""
         return Tool(
             name="bash_execute",
-            description="执行 Shell 命令，支持长时间运行进程（30秒超时+回调机制）、交互式输入（确认/密码）。"
-            "适用场景：执行系统命令（ls/cat/grep/pip/npm等）、运行脚本、查看系统信息、安装依赖、编译构建项目。"
-            "不适用场景：仅需读取文件（使用file_read）、仅需搜索文件（使用code_search）、危险操作（rm -rf/format/dd等）、长期运行服务。"
-            "注意事项：命令执行默认30秒超时，超时后触发回调机制；timeout参数最大值为290秒，不可超过此限制；"
-            "危险命令会被安全检查拦截；Windows和Linux/Mac命令语法可能不同；"
-            "需要审批才能执行；长时间运行命令会保存日志到logs/bash/目录；敏感输入会被自动掩码处理。",
+            description="执行 Shell 命令。本工具自带后台执行：execute 启动的命令在后台运行，"
+            "超时后进程不终止、返回 pid 供 continue 轮询(详见 action/timeout)。"
+            "直接用 execute 启动即可，不要手动 nohup/setsid/disown/行尾&(会使进程脱离管理、无法被 continue/terminate 操作)。"
+            "不适用：读文件用 file_read、搜索用 code_search、长期常驻服务（本工具面向有终点的任务）。"
+            "危险命令（rm -rf /、format、dd if=、mkfs 等）会被拦截；Windows 与 Linux/Mac 语法可能不同；可能需要审批。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["execute", "continue", "terminate", "input", "read_log"],
-                        "description": "操作类型：execute(执行新命令), continue(继续等待运行中的命令), terminate(终止命令), input(向进程发送输入), read_log(读取命令日志)",
+                        "description": "操作类型。典型流程：execute 启动命令 → 若返回 running 用 continue 轮询 → 完成或 terminate。"
+                        "execute=执行新命令；continue=带 pid 继续等待一个运行中的命令（每次等待不超过 timeout，"
+                        "耗时任务需多次 continue 直到结束）；terminate=带 pid 终止进程；"
+                        "input=带 pid 向等待输入的进程发送文本（如确认 yes/no、密码、菜单选项）；"
+                        "read_log=带 pid 读取完整日志。",
                         "default": "execute",
                     },
                     "command": {
@@ -268,7 +297,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "命令执行的超时时间（秒），默认30秒。最大值290秒，超过会被截断为290",
+                        "description": "本次操作的等待上限（秒），默认30，最大290。"
+                        "超时不会杀进程，只会返回 status=running + pid；对仍在跑的命令，按需继续用 continue 轮询。",
                         "default": 30,
                         "maximum": 290,
                     },
@@ -278,7 +308,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "input_text": {
                         "type": "string",
-                        "description": "要向运行中进程发送的输入文本（当action=input时必需）。例如：yes, 密码等",
+                        "description": "要向运行中进程发送的输入文本（当action=input时必需）。"
+                        "用于命令等待交互输入时：确认类回答（yes/no/y/n）、密码、交互式菜单的选项编号等。敏感内容自动掩码。",
                     },
                     "force": {
                         "type": "boolean",

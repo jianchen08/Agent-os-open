@@ -116,8 +116,14 @@ class WebSocketInteractionNotifier:
                 try:
                     await ws.send_text(json.dumps(payload_obj, ensure_ascii=False))
                     sent = True
-                except Exception:
-                    self._global_connections.pop(uid, None)
+                except Exception as exc:
+                    # 超时/异常：身份校验后决定是否清理（与 send_to_user 一致）。
+                    if isinstance(exc, asyncio.TimeoutError):
+                        logger.warning("[WSNotifier] 广播超时（保留连接）: user=%s", uid[:12])
+                    else:
+                        logger.error("[WSNotifier] 广播失败，注销连接: user=%s err=%s", uid[:12], exc)
+                        if self._global_connections.get(uid) is ws:
+                            self._global_connections.pop(uid, None)
 
         if sent:
             logger.info(
@@ -270,9 +276,16 @@ class WebSocketInteractionNotifier:
                 timeout=_SEND_TIMEOUT_SECONDS,
             )
             return True
-        except (asyncio.TimeoutError, Exception) as exc:
+        except asyncio.TimeoutError:
+            # 超时：连接可能仍存活（背压/调度抖动），只让 sink 失败计数累积，
+            # 不踢连接。权威清理由接收循环 WebSocketDisconnect → unregister_global。
+            logger.warning("[GlobalWS] 推送超时（保留连接）: user=%s", user_id[:12])
+            return False
+        except Exception as exc:
             logger.error("[GlobalWS] 推送失败，注销连接: user=%s err=%s", user_id[:12], exc)
-            self._global_connections.pop(user_id, None)
+            # 身份校验：只删仍是当前连接的那个，避免删掉重连后的新连接。
+            if self._global_connections.get(user_id) is ws:
+                self._global_connections.pop(user_id, None)
             return False
 
     def get_global_websocket(self, user_id: str) -> WebSocket | None:
@@ -304,8 +317,14 @@ class WebSocketInteractionNotifier:
                 try:
                     await asyncio.wait_for(ws.send_text(payload), timeout=_SEND_TIMEOUT_SECONDS)
                     sent_any = True
-                except (asyncio.TimeoutError, Exception):
-                    self._global_connections.pop(uid, None)
+                except asyncio.TimeoutError:
+                    # 超时保留连接（与 send_to_user 主路径语义一致）。
+                    logger.warning("[GlobalWS] 广播超时（保留连接）: user=%s", uid[:12])
+                except Exception as exc:
+                    logger.error("[GlobalWS] 广播失败，注销连接: user=%s err=%s", uid[:12], exc)
+                    # 身份校验：只删仍是当前 ws 的那个。
+                    if self._global_connections.get(uid) is ws:
+                        self._global_connections.pop(uid, None)
             if sent_any:
                 return True
 

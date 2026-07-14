@@ -332,8 +332,52 @@ class ProcessManager:
         except OSError:
             pass
 
+    @staticmethod
+    def _kill_process_tree(root_pid: int, force: bool) -> None:
+        """杀掉以 root_pid 为根的整棵进程树。
+
+        防止孙子进程变孤儿：bash 壳被杀后，它 fork 出的 cargo/rustc/cc 等
+        后代收不到信号会继续跑（Unix 下被 init 收养；Windows 下同理）。
+
+        用 psutil（项目硬依赖）递归枚举后代，叶子→根顺序逐个终止，
+        最后杀根。任一进程已死则跳过（NoSuchProcess）。
+        force=True 用 kill()（Unix SIGKILL / Windows TerminateProcess），
+        否则 terminate()（Unix SIGTERM，给清理机会）。
+        """
+        try:
+            import psutil  # noqa: PLC0415
+        except ImportError:
+            return  # psutil 不可用时，交给调用方回退单进程杀
+
+        try:
+            parent = psutil.Process(root_pid)
+        except psutil.NoSuchProcess:
+            return
+
+        # children(recursive=True) 已是叶子→...→根 的稳定顺序（psutil 保证）
+        try:
+            descendants = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            descendants = []
+
+        for proc in descendants:
+            try:
+                proc.kill() if force else proc.terminate()
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                continue
+
+        # 最后杀根进程
+        try:
+            parent.kill() if force else parent.terminate()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            pass
+
     async def terminate_process(self, pid: int, force: bool = False) -> tuple[bool, str | None]:
-        """终止进程。"""
+        """终止进程及其整棵进程树。"""
         if pid not in self.active_processes:
             return False, f"进程 {pid} 不存在"
 
@@ -343,10 +387,8 @@ class ProcessManager:
             return False, "进程未在运行"
 
         try:
-            if force:
-                proc_info.process.kill()
-            else:
-                proc_info.process.terminate()
+            # 先杀整棵进程树（孙子进程不再变孤儿），再由 asyncio reap 根进程
+            self._kill_process_tree(proc_info.process.pid, force=force)
 
             try:
                 await asyncio.wait_for(proc_info.process.wait(), timeout=5.0)

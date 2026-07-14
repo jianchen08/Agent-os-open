@@ -101,7 +101,7 @@ function validateSessionId(sessionId: string): void {
   }
 }
 
-function mapBackendMessageToMessage(
+export function mapBackendMessageToMessage(
   backendMessage: BackendMessageResponse,
   sessionId: string,
 ): Message {
@@ -198,9 +198,11 @@ function mapBackendMessageToMessage(
         result: tc.result,
         error: tc.error,
         sequence: seq++,
-        // // 从后端 API 恢复 containerTaskId，确保历史消息加载后
+        // 从后端 API 恢复 containerTaskId，确保历史消息加载后
         // 工具卡片的"打开文件"功能能正确解析工作空间路径。
-        containerTaskId: tc.container_task_id || undefined,
+        // tc 在上方由 camelCase 构建（line 140 containerTaskId），
+        // 此处必须读 camelCase，否则恒为 undefined 导致历史消息打开文件失败。
+        containerTaskId: tc.containerTaskId || undefined,
       })
     }
   }
