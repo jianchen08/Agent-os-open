@@ -9,6 +9,16 @@ description = "Lingxi AgentOS 0.2 config loader and YAML schema"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 thiserror.workspace = true
 tracing.workspace = true
 lingxi-core.workspace = true
+regex = "1"
+sha2 = "0.10"
+notify = "7"
+parking_lot = "0.12"
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
