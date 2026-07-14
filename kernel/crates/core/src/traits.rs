@@ -7,19 +7,29 @@
 //! - 路由信号精简为 4 种：[来源: docs/0.2_rust_plugin_solution.md §3.5]
 //! - 按需加载全局原则：[来源: docs/0.2_rust_plugin_solution.md §3.7]
 //! - 多租户上下文穿透：[来源: docs/0.2_rust_plugin_solution.md §3.4]
+//!
+//! ADR 修订（v2.0）：
+//! - HookContext 改为标签化动态上下文 HashMap（ADR ⑨）
+//! - PluginType 新增 Composite 组合插件类型（ADR ⑥）
+//! - 所有插件均支持 InProcess + Sidecar 双路径（ADR ⑧）
+//! - 新增 StorageBackend trait——SQLite 四表存储抽象（ADR ③④）
+//! - 新增 AdrEngine trait——极简调度器 + 状态账本（ADR ①）
 
 use std::any::Any;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::types::*;
+use crate::types::{
+    Branch, CompositeStep, EngineError, ErrorPolicy, Message, MessageRecord, PluginContext,
+    PluginError, PluginResult, RouteType, RunRecord, RunStatus, StepResult, StorageError,
+    SuspendHandle, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry, WakeEvent,
+};
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
 
-/// 插件元信息——所有插件（管道/工具/系统）共有的标识与描述。
+/// 插件元信息——所有插件（管道/工具/系统/组合）共有的标识与描述。
 ///
 /// 对应 Manifest V2.0 的核心字段，内核在加载时从 manifest 中提取。
 pub trait PluginMeta: Send + Sync {
@@ -47,6 +57,8 @@ pub trait PluginMeta: Send + Sync {
 }
 
 /// 插件类型枚举。
+///
+/// ADR ⑥ 新增 `Composite` 变体——组合插件由 YAML 配置编排步骤，引擎解释执行。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginType {
@@ -56,6 +68,8 @@ pub enum PluginType {
     Tool,
     /// 系统插件（记忆/审批/评估等内核级服务）
     System,
+    /// 组合插件（ADR ⑥：YAML 配置编排步骤，引擎解释执行）
+    Composite,
 }
 
 /// 管道插件角色（仅 type=Pipeline 时有效）。
@@ -72,11 +86,20 @@ pub enum PipelineRole {
 
 // ── 2. 管道插件 Trait ───────────────────────────────────────────
 
-/// 管道插件统一接口（Rust 原生，host_type = in_process）。
+/// 管道插件统一接口。
+///
+/// **ADR ⑧ 更新**：所有插件（含工具插件、系统插件）均支持 InProcess（Rust 原生）
+/// 和 Sidecar（MCP 边车）两种执行路径，由开发者根据性能需求自行选择，
+/// 不因插件类型限制可选路径。
 ///
 /// **混合方案**（[来源: docs/0.2_rust_plugin_solution.md §3.2]）：
 /// - 高频管道插件用 Rust 原生实现（热路径零 IPC 开销）
 /// - 低频管道插件可用 MCP 边车（通过 PluginInvoker 透明分发）
+/// - 两种路径对管道引擎透明——统一返回 `PluginResult`
+///
+/// **ADR ② 约束**：插件无状态不持久化——trait 签名是 `&self`（不可变引用），
+/// 插件不持有可变状态，不直接操作引擎存储。`PluginResult.state_updates` 是 Patch
+/// 而非直接写存储，引擎收到后决定是否应用。
 ///
 /// 对应 0.1 的 `pipeline/plugin.py IPlugin`。
 #[async_trait]
@@ -87,10 +110,10 @@ pub trait PipelinePlugin: PluginMeta + Any {
     /// 执行插件逻辑。
     ///
     /// # Arguments
-    /// * `ctx` - 插件执行上下文，包含管道状态、配置和租户信息
+    /// * `ctx` - 插件执行上下文，包含管道状态、配置、租户信息和内容懒加载句柄
     ///
     /// # Returns
-    /// 插件执行结果（状态更新 + 可能的路由信号）
+    /// 插件执行结果（状态更新 Patch + 可能的路由信号）
     async fn execute(&self, ctx: &PluginContext) -> Result<PluginResult, PluginError>;
 
     /// 本插件可能产出的路由信号类型列表（仅 Output 角色有效）。
@@ -165,13 +188,17 @@ pub trait OutputPipelinePlugin: PipelinePlugin {
 /// - `in_process`：直接调用 `dyn PipelinePlugin` 的 execute 方法（零 IPC 开销）
 /// - `sidecar`：通过 rmcp 客户端走 MCP 协议调用（进程隔离）
 /// - 两种路径对管道引擎透明——统一返回 `PluginResult`
+///
+/// **ADR ⑧ 更新**：所有插件（含工具插件、系统插件）均支持 InProcess 和 Sidecar
+/// 两种执行路径。原"工具/系统插件推荐用 Python 边车"的措辞已废除。
+/// 由开发者根据性能需求自行选择，不因插件类型限制可选路径。
 #[async_trait]
 pub trait PluginInvoker: Send + Sync {
     /// 调用管道插件执行。
     ///
     /// 内核根据插件的 `host_type` 字段选择调用路径：
     /// - InProcess: 直接 dyn PipelinePlugin::execute
-    /// - McpSidecar: rmcp tools/call("execute", {state, config})
+    /// - Sidecar: rmcp tools/call("execute", {state, config})
     async fn invoke_pipeline_plugin(
         &self,
         plugin_id: &str,
@@ -179,6 +206,8 @@ pub trait PluginInvoker: Send + Sync {
     ) -> Result<PluginResult, PluginError>;
 
     /// 调用工具插件执行。
+    ///
+    /// 工具插件同样支持 InProcess 和 Sidecar 两种路径（ADR ⑧）。
     async fn invoke_tool(
         &self,
         plugin_id: &str,
@@ -209,43 +238,67 @@ pub enum LifecycleHook {
     OnError,
 }
 
-/// 生命周期钩子上下文。
+/// 生命周期钩子上下文（ADR ⑨ 标签化动态上下文）。
+///
+/// **ADR ⑨ 改造**：从固定 6 字段结构体改为 `HashMap<String, serde_json::Value>`
+/// 标签化动态上下文。内核和插件可以自由写入任意标签，消费方按需读取。
+/// 新增上下文信息只需 `ctx.set("key", value)`，不需改 struct 定义。
+///
+/// 常用标签键（非强制，仅为约定）：
+/// - `session_id`: 会话 ID
+/// - `task_id`: 任务 ID
+/// - `tenant_id`: 租户 ID
+/// - `pipeline_id`: 管道 ID
+/// - `iteration`: 迭代轮次
+/// - `branch_id`: 分支 ID（ADR ⑤）
+/// - `seq_in_branch`: 分支内序列号（ADR ⑤）
+/// - `state_snapshot`: 状态快照（可选）
+///
+/// [来源: docs/working/adr_engine_design.md §7.3]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookContext {
-    pub session_id: String,
-    pub task_id: String,
-    pub tenant_id: String,
-    pub pipeline_id: Uuid,
-    pub iteration: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state_snapshot: Option<serde_json::Value>,
+    /// 标签集合：key → value
+    tags: HashMap<String, serde_json::Value>,
 }
 
 impl HookContext {
-    pub fn new(
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-        tenant_id: impl Into<String>,
-        pipeline_id: Uuid,
-    ) -> Self {
+    /// 创建空的标签化上下文。
+    pub fn new() -> Self {
         Self {
-            session_id: session_id.into(),
-            task_id: task_id.into(),
-            tenant_id: tenant_id.into(),
-            pipeline_id,
-            iteration: 0,
-            state_snapshot: None,
+            tags: HashMap::new(),
         }
     }
 
-    pub fn with_iteration(mut self, iteration: u32) -> Self {
-        self.iteration = iteration;
+    /// 写入标签（Builder 模式，支持链式调用）。
+    pub fn set(&mut self, key: impl Into<String>, value: serde_json::Value) -> &mut Self {
+        self.tags.insert(key.into(), value);
         self
     }
 
-    pub fn with_state_snapshot(mut self, snapshot: serde_json::Value) -> Self {
-        self.state_snapshot = Some(snapshot);
-        self
+    /// 读取标签（返回 serde_json::Value 引用）。
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.tags.get(key)
+    }
+
+    /// 读取标签并尝试转换为目标类型。
+    ///
+    /// 利用 serde 反序列化将 `serde_json::Value` 转换为指定类型。
+    /// 转换失败返回 None（静默降级，消费方按需处理）。
+    pub fn get_as<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.tags
+            .get(key)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// 获取所有标签的只读引用。
+    pub fn tags(&self) -> &HashMap<String, serde_json::Value> {
+        &self.tags
+    }
+}
+
+impl Default for HookContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -365,7 +418,9 @@ pub enum DependencyError {
     },
 
     /// 版本不兼容
-    #[error("dependency version mismatch: '{plugin_id}' requires >= {required}, but found {actual}")]
+    #[error(
+        "dependency version mismatch: '{plugin_id}' requires >= {required}, but found {actual}"
+    )]
     VersionMismatch {
         plugin_id: String,
         required: String,
@@ -589,6 +644,9 @@ pub trait PluginLoader: Send + Sync {
 }
 
 /// 已解析的插件 Manifest（运行时表示）。
+///
+/// **ADR ⑦ 新增**：`requires_content` 字段声明插件需要的最近消息条数，
+/// 引擎据此从 blobs 表按需加载消息内容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub id: String,
@@ -598,6 +656,7 @@ pub struct PluginManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_role: Option<PipelineRole>,
     pub language: String,
+    /// 宿主类型——所有插件均支持 InProcess 和 Sidecar（ADR ⑧）
     pub host_type: HostType,
     pub entry: String,
     pub capabilities: ManifestCapabilities,
@@ -611,6 +670,12 @@ pub struct PluginManifest {
     pub priority: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
+    /// 内容懒加载声明（ADR ⑦）。
+    ///
+    /// 声明插件需要多少条最近消息的完整内容。
+    /// 引擎据此从 blobs 表预加载，插件也可通过 ContentLoader 运行时按需加载。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_content: Option<u32>,
 }
 
 fn default_priority() -> u32 {
@@ -618,8 +683,13 @@ fn default_priority() -> u32 {
 }
 
 /// 宿主类型。
+///
+/// **ADR ⑧**：所有插件（含工具插件、系统插件）均支持以下两种执行路径，
+/// 由开发者根据性能需求自行选择，不因插件类型限制可选路径：
+/// - `InProcess`：Rust 原生进程内调用，零 IPC 开销，适合高频热路径
+/// - `Sidecar`：独立进程通过 MCP 协议通信，进程隔离，适合低频或第三方插件
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum HostType {
     /// Rust 原生进程内调用（零 IPC 开销）
     InProcess,
@@ -752,4 +822,137 @@ pub enum PluginStatus {
     Crashed,
     /// 加载失败
     Failed,
+}
+
+// ═════════════════════════════════════════════════════════════════
+// ADR ③④：StorageBackend trait——SQLite 四表存储抽象
+// ═════════════════════════════════════════════════════════════════
+
+/// 存储后端抽象（ADR ③④）。
+///
+/// SQLite 四表模型的 trait 抽象，供 ContentLoader 和 AdrEngine 使用。
+/// 具体实现为 SQLite，但 trait 层不绑定具体数据库——便于测试时 mock。
+///
+/// **四表模型**：
+/// - `runs`：运行实例元数据
+/// - `messages`：消息表（含分支标识）
+/// - `traces`：状态变更日志（Append-Only Patch）
+/// - `blobs`：不可变原始数据
+///
+/// [来源: docs/working/adr_engine_design.md §4.2]
+#[async_trait]
+pub trait StorageBackend: Send + Sync {
+    /// 获取运行实例记录。
+    async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError>;
+
+    /// 获取指定分支的所有消息记录。
+    async fn get_messages(
+        &self,
+        run_id: &str,
+        branch_id: &str,
+    ) -> Result<Vec<MessageRecord>, StorageError>;
+
+    /// 获取最近 N 条消息的完整内容（联查 messages + blobs 表）。
+    ///
+    /// 这是 ContentLoader 的底层调用——从 messages 表查询最近 N 条消息的
+    /// blob_id，再从 blobs 表加载完整内容，组装成 Message 返回。
+    async fn get_recent_messages(
+        &self,
+        run_id: &str,
+        branch_id: &str,
+        n: usize,
+    ) -> Result<Vec<Message>, StorageError>;
+
+    /// 获取指定 blob_id 的原始数据。
+    async fn get_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError>;
+
+    /// 追加一条状态变更日志到 traces 表（Append-Only，ADR ③）。
+    async fn append_trace(&self, entry: TraceEntry) -> Result<(), StorageError>;
+
+    /// 创建新分支（ADR ⑤：回滚 = 创建新分支 + 正向重放 Patch）。
+    async fn create_branch(&self, branch: Branch) -> Result<(), StorageError>;
+
+    /// 更新运行实例状态。
+    async fn update_run_status(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        current_branch: Option<&str>,
+        current_seq: Option<u32>,
+    ) -> Result<(), StorageError>;
+}
+
+// ═════════════════════════════════════════════════════════════════
+// ADR ①：AdrEngine trait——极简调度器 + 状态账本
+// ═════════════════════════════════════════════════════════════════
+
+/// ADR 引擎：调度器 + 状态账本（ADR ①）。
+///
+/// 设计原则（ADR ①）：
+/// - 引擎不含业务逻辑，只负责按配置顺序调用插件、维护状态一致性、记录变更日志
+/// - 状态以 SQLite 为正本（ADR ③④），所有变更以追加 Patch 记录（ADR ③）
+/// - 回滚通过创建新分支 + 正向重放 Patch（ADR ⑤）
+///
+/// 引擎核心循环：
+/// ```text
+/// 1. 从 config 加载步骤序列（YAML 定义）
+/// 2. for each step in steps:
+///    a. 构造 PluginContext（从 SQLite 读取当前状态 + 按需加载 BLOB 内容）
+///    b. 通过 PluginInvoker 调用插件 execute(ctx) -> PluginResult
+///    c. 将 PluginResult.state_updates 作为 Patch 追加到 traces 表
+///    d. 如果 PluginResult 有 route_signal：
+///       - NextLlm → 下一步调用 LLM 原子插件
+///       - NextTool → 下一步调用 Tool 原子插件
+///       - End → 结束循环
+///       - Wait → 挂起，保存分支状态
+///    e. 如果出错：按 ErrorPolicy 处理（Abort/Skip/Retry/Fallback）
+/// 3. 记录运行结束到 runs 表
+/// ```
+///
+/// [来源: docs/working/adr_engine_design.md §3.3]
+#[async_trait]
+pub trait AdrEngine: Send + Sync {
+    /// 启动一次运行实例。
+    ///
+    /// 在 runs 表创建记录，初始化主分支。
+    ///
+    /// # Returns
+    /// 运行实例 ID
+    async fn start_run(&self, config: &serde_json::Value) -> Result<String, EngineError>;
+
+    /// 执行一个步骤（原子插件或组合插件中的一个 step）。
+    ///
+    /// 1. 构造 PluginContext（从 SQLite 读取当前状态 + 按需加载 BLOB 内容）
+    /// 2. 通过 PluginInvoker 调用插件 execute(ctx) -> PluginResult
+    /// 3. 将 PluginResult.state_updates 作为 Patch 追加到 traces 表
+    async fn execute_step(
+        &self,
+        run_id: &str,
+        step: &CompositeStep,
+    ) -> Result<StepResult, EngineError>;
+
+    /// 挂起运行（ADR ⑤：保存分支状态，等待外部事件）。
+    ///
+    /// 将 runs 表状态更新为 Suspended，保存当前分支和序列号。
+    async fn suspend(&self, run_id: &str) -> Result<SuspendHandle, EngineError>;
+
+    /// 恢复运行（ADR ⑤：从分支状态恢复）。
+    ///
+    /// 将 runs 表状态更新为 Running，根据唤醒事件继续执行。
+    async fn resume(&self, handle: &SuspendHandle, event: WakeEvent) -> Result<(), EngineError>;
+
+    /// 回滚（ADR ⑤：创建新分支 + 正向重放 Patch 恢复状态）。
+    ///
+    /// 1. 创建新分支（branch_id = "{parent}.rollback.{n}"）
+    /// 2. 从 parent_branch 的 seq=0 到 target_seq 正向重放 Patch
+    /// 3. 恢复状态到 target_seq 的快照
+    ///
+    /// # Returns
+    /// 新分支 ID
+    async fn rollback(&self, run_id: &str, target_seq: u32) -> Result<String, EngineError>;
+
+    /// 结束运行。
+    ///
+    /// 将 runs 表状态更新为 Completed/Failed，记录结束时间。
+    async fn end_run(&self, run_id: &str) -> Result<(), EngineError>;
 }

@@ -7,9 +7,11 @@
 //!
 //! - [`traits`]: 插件抽象接口——PipelinePlugin（含 Input/Core/Output 子 trait）、
 //!   PluginInvoker（透明分发 in_process / sidecar）、CapabilityRegistry、
-//!   DependencyResolver、LlmProvider、PluginLoader
-//! - [`types`]: 共享数据结构——RouteSignal（4 种，移除了 Delegate/Fork/Decision）、
-//!   ErrorPolicy、PluginContext、PluginResult、PluginError、TenantContext 等
+//!   DependencyResolver、LlmProvider、PluginLoader、StorageBackend（ADR ③④）、
+//!   AdrEngine（ADR ①）
+//! - [`types`]: 共享数据结构——RouteSignal（4 种）、ErrorPolicy、PluginContext（含
+//!   ContentLoader ADR ⑦）、PluginResult、PluginError、TenantContext、
+//!   SQLite 四表模型（ADR ④）、多分支模型（ADR ⑤）、组合插件配置（ADR ⑥）
 //!
 //! ## 设计决策
 //!
@@ -17,6 +19,16 @@
 //! - 路由信号精简为 4 种：[方案总纲 §3.5]
 //! - 按需加载全局原则：[方案总纲 §3.7]
 //! - 多租户上下文穿透：[方案总纲 §3.4]
+//!
+//! ## ADR 修订（v2.0）
+//!
+//! - HookContext 改为标签化动态上下文 HashMap（ADR ⑨）
+//! - PluginType 新增 Composite 组合插件类型（ADR ⑥）
+//! - 所有插件均支持 InProcess + Sidecar 双路径（ADR ⑧）
+//! - 新增 StorageBackend trait——SQLite 四表存储抽象（ADR ③④）
+//! - 新增 AdrEngine trait——极简调度器 + 状态账本（ADR ①）
+//! - PluginContext 新增 ContentLoader 实现内容懒加载（ADR ⑦）
+//! - PluginManifest 新增 requires_content 字段（ADR ⑦）
 //!
 //! [方案总纲 §3.2]: docs/0.2_rust_plugin_solution.md
 //! [方案总纲 §3.5]: docs/0.2_rust_plugin_solution.md
