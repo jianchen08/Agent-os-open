@@ -180,7 +180,18 @@ try {
     }
     Write-Host "[OK] 容器内入口 JS 已更新: $containerHash"
 
+    # docker.exe 把诊断信息写到 stderr（即使成功时也写），在 ErrorActionPreference=Stop
+    # 下会触发 NativeCommandError terminating error 中断脚本。restart 仅用于让容器
+    # 重新加载新 dist（cp 已验证成功），失败不影响代码注入结果：用户下次启动时
+    # 容器自然加载新代码；若属 WSL 内核死锁，下次启动的 wsl_ensure_containers.sh
+    # 会自动识别 exit 7 并 wsl --shutdown 恢复。故这里容忍 stderr，失败仅 warn。
+    $ErrorActionPreference = 'Continue'
     & docker restart $containerName 2>&1 | Out-Null
+    $restartExit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($restartExit -ne 0) {
+        Write-Host "[WARN] docker restart 失败 (exit=$restartExit)，前端代码已注入但容器未重启。若 WSL 内核死锁，下次启动将自动 wsl --shutdown 恢复。"
+    }
     Get-Date | Out-File -FilePath $markFile -Encoding ascii
     if ($currentHash) {
         $currentHash | Out-File -FilePath $hashFile -Encoding ascii

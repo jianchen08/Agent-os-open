@@ -127,26 +127,45 @@ RUN \
 # - 失败仅 warning，不阻断镜像构建（断网时仍能得到可用镜像，#1/#2 不受影响，
 #   容器内 e2e 暂不可用，可后续 docker exec 单独补装）。
 ARG PW_HOST=""
-# playwright 缓存挂载：复用宿主已下载的浏览器 zip，二次构建跳过下载（需 BuildKit）。
+ARG PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+# 关键修正（历史 bug）：playwright install 默认把浏览器解压到
+# ~/.cache/ms-playwright。若该路径正好是 BuildKit cache mount 的 target，
+# 浏览器只存在于构建期 cache volume，【不会进入镜像层】——镜像里浏览器为空，
+# 容器跑 e2e 必报 "Executable doesn't exist"，之前的下载等于白做。
+#
+# 正确做法（BuildKit 「cache 下载 + 复制入层」模式）：
+# 1) PLAYWRIGHT_BROWSERS_PATH 指向镜像内固定路径 /opt/ms-playwright（非挂载点），
+#    解压产物天然进入镜像层。
+# 2) cache mount 只挂到 playwright 的 zip 下载缓存目录，二次构建跳过网络下载；
+#    最终二进制仍落在 /opt/ms-playwright 进镜像层。
+# 3) ENV 把 PLAYWRIGHT_BROWSERS_PATH 带进运行时，容器内 launch() 才能定位浏览器。
+ENV PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}
+
+# chromium 完整浏览器（默认 headful / 显式 channel 场景）。
 # 保持原有 || echo 容错：下载失败仅 warning，不阻断镜像构建。
-RUN --mount=type=cache,target=/root/.cache/ms-playwright \
-    if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
+# 末尾 ls 校验：哪怕 install 被 || echo 吞掉，也能在构建日志里看到
+# /opt/ms-playwright 实际落了什么，便于排查「装了但为空」。
+RUN --mount=type=cache,target=/root/.cache/ms-playwright-downloads,sharing=locked \
+    mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" \
+    && if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
     && (python -m playwright install chromium \
         || python -m playwright install chromium \
-        || echo "[warn] playwright chromium 下载失败，镜像仍可用但容器内 e2e 不可用")
+        || echo "[warn] playwright chromium 下载失败，镜像仍可用但容器内 e2e 不可用") \
+    && echo "[info] installed browsers:" && ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" 2>/dev/null
 
-# 安装 Playwright headless shell(system-issue #3 续)
+# chromium headless shell（system-issue #3 续）。
 # playwright 1.49+ 默认 headless 模式用 chrome-headless-shell 而非完整 chrome，
 # `install chromium` 虽含 shell 但下载中途失败会被上面的 `|| echo` 吞掉，导致
 # 镜像里只有完整 chrome、缺 shell——默认 e2e 代码（launch() 不传参）会报
 # "Executable doesn't exist at chromium_headless_shell-..."。
 # 这里独立装一次 shell，确保即使完整 chrome 那层失败也能补齐 shell；
 # --only-shell 避免重复下载完整 chrome。
-RUN --mount=type=cache,target=/root/.cache/ms-playwright \
+RUN --mount=type=cache,target=/root/.cache/ms-playwright-downloads,sharing=locked \
     if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
     && (python -m playwright install --only-shell chromium \
         || python -m playwright install --only-shell chromium \
-        || echo "[warn] playwright chromium-headless-shell 下载失败，默认 headless e2e 将不可用")
+        || echo "[warn] playwright chromium-headless-shell 下载失败，默认 headless e2e 将不可用") \
+    && echo "[info] installed browsers:" && ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" 2>/dev/null
 
 # Rust 工具链（≥1.85，jsonschema-rs MSRV 要求）
 # 0.2 内核用 Rust 编写，隔离子任务（cargo build/check/clippy/fmt）必须可用。

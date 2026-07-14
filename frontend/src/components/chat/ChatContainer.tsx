@@ -16,6 +16,7 @@ import { MessageList } from './MessageList'
 import { NotificationCenter } from './NotificationCenter'
 import { SubTabRouter } from './SubTabRouter'
 import { VotingPanel } from './VotingPanel'
+import { resolveMainTabName } from './tabNameResolver'
 import type { ChatContainerProps } from './types'
 import type { Agent, Message } from '@/types/models'
 
@@ -38,17 +39,6 @@ function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
       ))}
     </div>
   )
-}
-
-/** 主 Tab 的显示名称：用 agentId 从 agents 列表实时解析真实名称。
- *  主 Tab 的 agentName 在 agentTabStore 中被硬编码为 '主Agent'，且不随会话绑定
- *  的 Agent 变化而更新；这里改为渲染层派生，确保切换 Agent 后按钮显示正确名称，
- *  同时规避 fetchAgents 与 fetchSessions 并行加载导致的竞态（agents 后就绪时
- *  组件已响应式订阅会自动重渲染）。 */
-function resolveMainTabName(agentId: string | undefined, agents: Agent[]): string {
-  if (!agentId) return '主Agent'
-  const matched = agents.find((a) => a.id === agentId || a.configId === agentId)
-  return matched?.name || '主Agent'
 }
 
 /** 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式 */

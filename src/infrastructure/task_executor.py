@@ -49,6 +49,21 @@ class TaskExecutorMixin:
 
         return ""
 
+    def _resolve_parent_pipeline_id(
+        self, task_id: str, task_service: Any, task_data: dict[str, Any] | None = None,
+    ) -> str:
+        """解析子任务的父管道 ID。
+
+        权威来源是 task 对象的 parent_pipeline_id 属性（与 task_notifier.py:702 一致），
+        而非 task_data —— task_submit 构造的 task_data 字典不含 pipeline_id key。
+        """
+        if not task_service:
+            return ""
+        _task = task_service.get_task(task_id)
+        if _task is None:
+            return ""
+        return getattr(_task, "parent_pipeline_id", "") or ""
+
     async def _execute_background_task(self, task_data: dict[str, Any], ctx: TaskExecutionContext) -> None:  # noqa: PLR0911,PLR0912,PLR0915
         """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。"""
 
@@ -71,7 +86,12 @@ class TaskExecutorMixin:
 
         _ws_thread_id = ""
 
-        _parent_pipeline_id = task_data.get("pipeline_id", "")
+        task_service = self._task_service
+
+        # 父管道 ID 权威来源是 task 对象（与 task_notifier.py:702 一致），
+        # 而非 task_data —— task_submit 构造的 task_data 不含 pipeline_id key。
+
+        _parent_pipeline_id = self._resolve_parent_pipeline_id(task_id, task_service)
 
         # 尝试从注册表获取当前管道的 thread_id
 
@@ -84,8 +104,6 @@ class TaskExecutorMixin:
                 _ws_thread_id = _entry.thread_id or ""
 
         target_id = task_data.get("target_id", "")
-
-        task_service = self._task_service
 
         # 从 task.metadata 提取上下文身份（user_id / session_id），播种到管道 state 与
 

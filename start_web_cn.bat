@@ -73,6 +73,13 @@ if errorlevel 1 goto :no_wsl_docker
 echo [INFO] WSL docker mode detected
 
 :wsl_setup
+REM Pre-disable landscape-client BEFORE the health probe.
+REM landscape-client's landscape-sysinfo collector periodically enters D-state
+REM on WSL2 and pollutes the kernel. Pre-disable on every entry (incl. retries)
+REM prevents the deadlock at source. Idempotent: stop+disable+mask.
+echo [INFO] Pre-disabling landscape-client to avoid D-state deadlock...
+wsl -d Ubuntu -u root -- bash -c "timeout 25 systemctl stop landscape-client landscape-client.service unattended-upgrades 2>/dev/null; systemctl disable landscape-client landscape-client.service unattended-upgrades 2>/dev/null; systemctl mask landscape-client landscape-client.service 2>/dev/null; true" >nul 2>&1
+
 REM 0. WSL kernel health pre-warm: detect D-state deadlock pollution so that
 REM    later pgrep/docker probes are not infected and hang.
 REM    Outer timeout 30s backstop (probe normally <3s; if even reading /proc
@@ -179,9 +186,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Tim
 echo [INFO] Waiting for WSL kernel to exit ^(~10s^)...
 REM ping-based delay avoids timeout.exe (unreliable under non-interactive shells).
 ping -n 11 127.0.0.1 >nul
-REM Disable known D-state culprits (landscape-client etc) to prevent re-pollution on restart.
-echo [INFO] Disabling known D-state services (landscape-client etc)...
-wsl -d Ubuntu -u root -- bash -c "systemctl disable landscape-client landscape-client.service unattended-upgrades 2>/dev/null; systemctl mask landscape-client landscape-client.service 2>/dev/null; true" >nul 2>&1
 echo [INFO] Re-probing WSL response...
 goto :wsl_alive_entry
 

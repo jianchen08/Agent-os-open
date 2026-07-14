@@ -153,6 +153,8 @@ run_with_idle_timeout() {
                 sleep 2
                 kill -KILL "$cmd_pid" 2>/dev/null
                 wait "$cmd_pid" 2>/dev/null
+                # 持久化输出供调用方失败分支分析（如死锁特征 grep）
+                [ -n "${IDLE_LOG_FILE:-}" ] && cat "$out_file" >> "$IDLE_LOG_FILE" 2>/dev/null
                 rm -f "$out_file"
                 return 124
             fi
@@ -163,6 +165,8 @@ run_with_idle_timeout() {
     tail -c +$((last_size + 1)) "$out_file" 2>/dev/null
     wait "$cmd_pid" 2>/dev/null
     local rc=$?
+    # 持久化输出供调用方失败分支分析（如死锁特征 grep）
+    [ -n "${IDLE_LOG_FILE:-}" ] && cat "$out_file" >> "$IDLE_LOG_FILE" 2>/dev/null
     rm -f "$out_file"
     return $rc
 }
@@ -181,10 +185,13 @@ if [ "$BUILD_RC" -eq 124 ]; then
 fi
 
 # up: 启动已构建镜像,60s 无输出超时
+# 设 IDLE_LOG_FILE 让 run_with_idle_timeout 把完整输出持久化到 COMPOSE_OUT,
+# 供失败分支 grep 死锁特征（修复前输出仅打 stdout 无法被分析,退而引用未定义的 $out）。
 echo "[INFO] docker compose up -d..."
+export IDLE_LOG_FILE="$COMPOSE_OUT"
 run_with_idle_timeout 60 docker compose up -d
 rc=$?
-rm -f "$COMPOSE_OUT"
+unset IDLE_LOG_FILE
 
 if [ "$rc" -eq 124 ]; then
     echo "[WARN] compose up hung (no output for 60s). wsl --shutdown and retry."
@@ -196,19 +203,81 @@ if [ "$rc" -ne 0 ]; then
     # 命中以下任一特征，均说明 docker/containerd/runc 三方状态不一致，
     # 根源是上次容器停止时有线程以 D 状态卡在内核，旧 cgroup/task/state 永远清不掉。
     # 用户态无法自愈，必须 wsl --shutdown 重启内核。
-    if echo "$out" | grep -qiE 'cgroup is not empty|failed to create (task|shim task|shim)|container with given ID already exists|task .* already exists'; then
+    # 特征分两类：
+    #   - create task 失败（旧）：cgroup is not empty / failed to create shim ...
+    #   - stop/kill 失败（新）：tried to kill container, did not receive an exit event
+    #     （实测：docker compose up -d recreate 时无法 stop 旧容器即此特征）
+    if grep -qiE 'cgroup is not empty|failed to create (task|shim task|shim)|container with given ID already exists|task .* already exists|did not receive an exit event|cannot stop container|tried to kill container' "$COMPOSE_OUT" 2>/dev/null; then
         echo ""
-        echo "[FATAL] Docker/containerd/runc 状态不一致：无法为容器创建任务。"
+        echo "[FATAL] Docker/containerd/runc 状态不一致：无法 stop/create 容器任务。"
         echo "[FATAL] 通常是上次容器停止时，redis 等进程以 D 状态（不可中断磁盘睡眠）"
         echo "[FATAL] 卡在内核里，旧 cgroup/task/state 永远清不掉，脚本无法自愈。"
         echo "[FATAL] 请在 Windows 执行：  wsl --shutdown"
         echo "[FATAL] 等待约 10 秒后重新双击 start_web_cn.bat。"
         echo "[FATAL] （已关闭 redis AOF 持久化以降低复发概率）"
+        rm -f "$COMPOSE_OUT"
         exit 7
     fi
-    echo "[ERROR] docker compose 失败 (rc=$rc)"
-    exit "$rc"
+
+    # 容器名冲突（孤儿容器残留）：wsl --shutdown 重启内核后，旧容器进程死了，
+    # 但 docker 元数据库仍记录同名容器，compose up 重建时报 "already in use"。
+    # 这是用户态可自愈的（docker rm -f 孤儿即可），不应升级到 wsl --shutdown（exit 7）。
+    # 特征：already in use by container "<id>"
+    if grep -qiE 'already in use by container "[0-9a-f]+"' "$COMPOSE_OUT" 2>/dev/null; then
+        echo "[WARN] 检测到容器名冲突（孤儿容器残留），自动清理后重试..."
+        # 提取所有冲突容器 ID（可能多个服务同时冲突）并强制删除
+        orphan_ids="$(grep -oE 'already in use by container "[0-9a-f]+"' "$COMPOSE_OUT" \
+                     | grep -oE '"[0-9a-f]+"' | tr -d '"' | sort -u)"
+        removed=0
+        while IFS= read -r oid; do
+            [ -z "$oid" ] && continue
+            if timeout 20 docker rm -f "$oid" >/dev/null 2>&1; then
+                echo "  [OK] removed orphaned container $oid"
+                removed=$((removed + 1))
+            else
+                echo "  [WARN] 移除孤儿容器 $oid 失败/超时（可能已属死锁，转 exit 7）"
+            fi
+        done <<< "$orphan_ids"
+        if [ "$removed" -gt 0 ]; then
+            rm -f "$COMPOSE_OUT"
+            echo "[INFO] 孤儿容器已清理，重试 docker compose up -d..."
+            export IDLE_LOG_FILE="$COMPOSE_OUT"
+            run_with_idle_timeout 60 docker compose up -d
+            rc=$?
+            unset IDLE_LOG_FILE
+            if [ "$rc" -eq 0 ]; then
+                rm -f "$COMPOSE_OUT"
+                # 重试成功，跳过后续失败分支，进入 running 等待循环
+            elif [ "$rc" -ne 124 ]; then
+                # 重试仍失败，重新走失败分析（可能这次才是真死锁）
+                if grep -qiE 'cgroup is not empty|failed to create (task|shim task|shim)|container with given ID already exists|task .* already exists|did not receive an exit event|cannot stop container|tried to kill container' "$COMPOSE_OUT" 2>/dev/null; then
+                    echo "[FATAL] 清理孤儿容器后重试仍失败，确认为内核死锁。"
+                    echo "[FATAL] 请在 Windows 执行：  wsl --shutdown"
+                    rm -f "$COMPOSE_OUT"
+                    exit 7
+                fi
+                rm -f "$COMPOSE_OUT"
+                echo "[ERROR] 清理孤儿容器后 compose up 仍失败 (rc=$rc)"
+                exit "$rc"
+            else
+                rm -f "$COMPOSE_OUT"
+                echo "[WARN] 重试 compose up hung (60s 无输出)。wsl --shutdown and retry."
+                exit 7
+            fi
+        else
+            # 一个都没删掉 → 名字冲突但 rm 也失败，更像是死锁
+            rm -f "$COMPOSE_OUT"
+            echo "[FATAL] 容器名冲突但无法删除孤儿容器，确认为内核死锁。"
+            echo "[FATAL] 请在 Windows 执行：  wsl --shutdown"
+            exit 7
+        fi
+    else
+        rm -f "$COMPOSE_OUT"
+        echo "[ERROR] docker compose 失败 (rc=$rc)"
+        exit "$rc"
+    fi
 fi
+rm -f "$COMPOSE_OUT"
 
 # 真正等待容器进入 running，而非盲目 sleep 后报 OK
 # 容器名跟随 compose project（目录名），用 `docker compose ps` 按服务名查询，
