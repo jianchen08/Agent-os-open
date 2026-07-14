@@ -251,8 +251,8 @@ fn test_hook_context_full_journey() {
 
     // 步骤2: set(key, value) — 链式调用
     ctx.set("session_id", json!("sess_001"))
-       .set("iteration", json!(3))
-       .set("state_snapshot", json!({"step": 1}));
+        .set("iteration", json!(3))
+        .set("state_snapshot", json!({"step": 1}));
 
     // 步骤3: get(key) 返回 Value
     let val = ctx.get("session_id").unwrap();
@@ -271,7 +271,10 @@ fn test_hook_context_full_journey() {
     // 步骤6: 序列化往返一致
     let serialized = serde_json::to_string(&ctx).unwrap();
     let deserialized: HookContext = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(deserialized.get_as::<String>("session_id"), Some("sess_001".to_string()));
+    assert_eq!(
+        deserialized.get_as::<String>("session_id"),
+        Some("sess_001".to_string())
+    );
     assert_eq!(deserialized.get_as::<u32>("iteration"), Some(3));
     assert_eq!(deserialized.tags().len(), 3);
 }

@@ -1,6 +1,13 @@
 [workspace]
 members = [
     "crates/core",
+    "crates/config",
+    "crates/plugin-loader",
+    "crates/mcp",
+    "crates/invoker",
+    "crates/tenant",
+    "crates/api",
+    "crates/hooks",
 ]
 resolver = "2"
 
@@ -26,3 +33,5 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 # 时间
 chrono = { version = "0.4", features = ["serde"] }
+# 内核核心 trait（workspace 内部引用）
+lingxi-core = { path = "crates/core" }

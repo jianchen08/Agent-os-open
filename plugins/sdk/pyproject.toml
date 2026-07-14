@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lingxi-plugin-sdk"
+version = "0.2.0"
+description = "Lingxi AgentOS 0.2 Plugin SDK — Python plugin development toolkit"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Lingxi AgentOS Contributors"}
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    # MCP Python SDK（modelcontextprotocol/python-sdk），与 Rust 端 rmcp 同源不同实现
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "S", "C4"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

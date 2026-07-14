@@ -1,0 +1,17 @@
+[package]
+name = "lingxi-tenant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lingxi AgentOS 0.2 tenant context — task_local propagation and isolation"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+lingxi-core.workspace = true
