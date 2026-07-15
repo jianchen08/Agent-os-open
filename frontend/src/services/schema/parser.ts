@@ -15,6 +15,9 @@ export function parseSchema(schema: ModuleUISchema): ParsedSchema {
     actions: schema.actions,
     rendering: schema.rendering,
     clients: schema.clients,
+    // 0.2 新增字段透传
+    ui: schema.ui,
+    ui_contributions: schema.ui_contributions,
     parsedAt: Date.now(),
     versionHash: computeSchemaHash(schema),
   }

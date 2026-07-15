@@ -31,4 +31,7 @@ export type {
   WidgetEntry,
 } from './WidgetRegistry'
 
+// ===== Schema 路由表（0.2 新增）=====
+export { SchemaRouter, schemaRouter } from './SchemaRouter'
+
 

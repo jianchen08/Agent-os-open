@@ -14,6 +14,7 @@ import type {
   RenderingSpaceConfig,
   ClientCapabilities,
   ChatInteractionConfig,
+  UIContribution,
 } from '@/types/schema'
 
 /** 渲染指令 */
@@ -191,6 +192,22 @@ export class RenderingEngine {
       }
     }
 
+    // 1b. 处理 ui_contributions → 按贡献项声明的 renderSpace 路由到对应渲染空间
+    if (schema.ui_contributions) {
+      for (const contribution of schema.ui_contributions) {
+        if (!supportedSpaces.has(contribution.renderSpace)) continue
+
+        const instruction = this.createInstructionFromContribution(
+          contribution,
+          moduleId,
+          schema.versionHash,
+        )
+        if (instruction) {
+          result[contribution.renderSpace].push(instruction)
+        }
+      }
+    }
+
     // 2. 处理 rendering.chat → chat 空间
     if (supportedSpaces.has('chat')) {
       for (const chatConfig of schema.rendering.chat) {
@@ -269,6 +286,35 @@ export class RenderingEngine {
   }
 
   /**
+   * 从 UIContribution 创建渲染指令
+   */
+  private createInstructionFromContribution(
+    contribution: UIContribution,
+    moduleId: string,
+    versionHash: string,
+  ): RenderInstruction | null {
+    const component = this.config.enableDegradation
+      ? widgetRegistry.findFallback(contribution.widgetType)
+      : widgetRegistry.get(contribution.widgetType) ?? null
+
+    return {
+      id: `${moduleId}::${contribution.renderSpace}::${contribution.widgetType}::${versionHash}`,
+      space: contribution.renderSpace,
+      widgetType: contribution.widgetType,
+      component,
+      props: {
+        ...(contribution.schema ?? {}),
+        label: contribution.label,
+        icon: contribution.icon,
+        order: contribution.order,
+        defaultActive: contribution.defaultActive,
+      },
+      dataSource: contribution.datasourceUri,
+      moduleId,
+    }
+  }
+
+  /**
    * 为 Dock 空间创建渲染指令
    */
   private createInstructionForDock(
@@ -307,6 +353,7 @@ export class RenderingEngine {
       'floating',
       'dock',
       'fullscreen',
+      'scene',
     ]
 
     // 如果有降级 fallback 配置，优先使用 fallback 空间
@@ -326,6 +373,8 @@ export class RenderingEngine {
     const declaredSpaces = new Set<RenderingSpaceType>(['chat'])
     schema.rendering.spaces.forEach((s) => declaredSpaces.add(s.space))
     if (schema.rendering.dock) declaredSpaces.add('dock')
+    // 0.2 新增：ui_contributions 声明的 renderSpace 也加入支持集合
+    schema.ui_contributions?.forEach((c) => declaredSpaces.add(c.renderSpace))
 
     return declaredSpaces
   }
@@ -340,6 +389,7 @@ export class RenderingEngine {
       floating: [],
       dock: [],
       fullscreen: [],
+      scene: [],
     }
   }
 

@@ -12,6 +12,8 @@ import type {
   ParsedSchema,
   ClientCapabilities,
   RenderingSpaceType,
+  UIField,
+  UIContribution,
 } from '@/types/schema'
 
 /** Schema 解析错误 */
@@ -94,7 +96,7 @@ export class SchemaParser {
       return { parsed: cached, changed: false }
     }
 
-    // 4. 构建 ParsedSchema
+    // 4. 构建 ParsedSchema（含 0.2 扩展字段）
     const parsed: ParsedSchema = {
       raw: schema,
       identity: { ...schema.identity },
@@ -108,6 +110,11 @@ export class SchemaParser {
           : undefined,
       },
       clients: { ...schema.clients },
+      // 0.2 新增字段
+      ui: schema.ui ? { ...schema.ui } : undefined,
+      ui_contributions: schema.ui_contributions
+        ? schema.ui_contributions.map((c) => ({ ...c }))
+        : undefined,
       parsedAt: Date.now(),
       versionHash,
     }

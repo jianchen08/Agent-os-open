@@ -3,6 +3,12 @@
  *
  * 定义后端模块 UI Schema 的完整类型系统
  * Schema 分为四部分：identity、actions、rendering、clients
+ *
+ * 0.2 扩展：
+ * - ui 字段（input_form / result_widget）—— SchemaDriver 新解析能力
+ * - ui_contributions —— 插件贡献的 Widget/面板/快捷按钮
+ * - ui_schema（0.1 向后兼容字段）
+ * - scene 渲染空间（3D/Canvas/游戏场景预留）
  */
 
 /** 模块身份信息 */
@@ -68,8 +74,13 @@ export interface ChatInteractionConfig {
   refreshInterval?: number
 }
 
-/** 渲染空间类型 */
-export type RenderingSpaceType = 'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen'
+/**
+ * 渲染空间类型
+ *
+ * 0.2 新增 'scene'：场景化渲染（3D/Canvas/游戏场景，后续版本数字人/游戏接入）
+ * 'fullscreen' 保留向后兼容
+ */
+export type RenderingSpaceType = 'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen' | 'scene'
 
 /** 渲染空间配置 */
 export interface RenderingSpaceConfig {
@@ -140,7 +151,176 @@ export interface ClientCapabilities {
   }
 }
 
-/** 完整的模块 UI Schema */
+// ============================================================================
+// 0.2 新增：ui 字段类型（input_form / result_widget）
+// ============================================================================
+
+/**
+ * 输入表单字段定义
+ *
+ * 描述插件/工具的输入表单结构，SchemaDriver 解析后自动生成表单 UI。
+ */
+export interface UIInputFormField {
+  /** 字段名 */
+  name: string
+  /** 字段类型 */
+  type: 'string' | 'number' | 'boolean' | 'select' | 'multiselect' | 'textarea' | 'date' | 'file'
+  /** 标签文本 */
+  label: string
+  /** 描述/提示 */
+  description?: string
+  /** 默认值 */
+  default?: unknown
+  /** 是否必填 */
+  required?: boolean
+  /** 选择项（type 为 select/multiselect 时使用） */
+  options?: Array<{ label: string; value: string | number }>
+  /** 动态数据源 URI（调用内核代理端点获取选项列表） */
+  datasourceUri?: string
+  /** 占位符 */
+  placeholder?: string
+  /** 验证规则 */
+  validation?: {
+    min?: number
+    max?: number
+    pattern?: string
+    message?: string
+  }
+}
+
+/**
+ * 输入表单定义
+ *
+ * 0.2 新的 ui.input_form 字段，SchemaDriver 解析后自动生成表单 UI。
+ */
+export interface UIInputForm {
+  /** 表单字段列表 */
+  fields: UIInputFormField[]
+  /** 提交按钮文本 */
+  submitLabel?: string
+  /** 取消按钮文本 */
+  cancelLabel?: string
+  /** 表单布局：单列/双列 */
+  layout?: 'single' | 'double'
+}
+
+/**
+ * 结果展示 Widget 定义
+ *
+ * 0.2 新的 ui.result_widget 字段，描述工具/能力的输出渲染方式。
+ */
+export interface UIResultWidget {
+  /** Widget 类型标识 */
+  type: string
+  /** 目标渲染空间 */
+  renderSpace?: RenderingSpaceType
+  /** 组件属性模板 */
+  props?: Record<string, unknown>
+  /** 数据源引用 */
+  datasourceUri?: string
+  /** 自动刷新间隔（毫秒） */
+  refreshInterval?: number
+}
+
+/**
+ * 0.2 新的 ui 字段
+ *
+ * 包含 input_form 和 result_widget，是 0.2 SchemaDriver 的核心扩展点。
+ */
+export interface UIField {
+  /** 输入表单定义 */
+  inputForm?: UIInputForm
+  /** 结果展示 Widget 定义 */
+  resultWidget?: UIResultWidget
+}
+
+// ============================================================================
+// 0.2 新增：ui_contributions 类型（插件视觉扩展）
+// ============================================================================
+
+/**
+ * 插件 UI 贡献项类型
+ *
+ * 描述插件向前端贡献的 UI 元素类别：
+ * - widget: 自定义 Widget 组件
+ * - panel: Dock 面板
+ * - shortcut: 快捷按钮
+ * - context_menu: 右键菜单项
+ * - tab: 工作区标签页
+ */
+export type UIContributionType = 'widget' | 'panel' | 'shortcut' | 'context_menu' | 'tab'
+
+/**
+ * 插件 UI 贡献项定义
+ *
+ * 第三方插件通过 manifest 的 ui_contributions 声明自定义 Widget/Tab/面板，
+ * 前端 SchemaParser 解析 → RenderingEngine 按 widget_type 路由到对应渲染空间。
+ */
+export interface UIContribution {
+  /** 贡献项类型 */
+  type: UIContributionType
+  /** Widget 类型标识（唯一 key，用于路由到渲染空间） */
+  widgetType: string
+  /** 目标渲染空间 */
+  renderSpace: RenderingSpaceType
+  /** 显示名称 */
+  label?: string
+  /** 图标 */
+  icon?: string
+  /** 组件属性 Schema */
+  schema?: Record<string, unknown>
+  /** 动态数据源 URI */
+  datasourceUri?: string
+  /** 排序权重（越小越靠前） */
+  order?: number
+  /** 是否默认展开/激活 */
+  defaultActive?: boolean
+}
+
+// ============================================================================
+// 0.2 新增：动态数据源类型
+// ============================================================================
+
+/**
+ * 动态数据源定义
+ *
+ * 插件通过 manifest 声明数据源 URI，前端通过内核代理端点获取数据。
+ * 典型场景：select 组件的 options 列表从后端动态获取。
+ */
+export interface DynamicDataSource {
+  /** 数据源 URI（如 "datasource://tools/categories"） */
+  uri: string
+  /** 请求参数 */
+  params?: Record<string, unknown>
+  /** 缓存 TTL（秒） */
+  cacheTtl?: number
+}
+
+/**
+ * 动态数据源响应
+ */
+export interface DynamicDataSourceResponse {
+  /** 是否成功 */
+  success: boolean
+  /** 选项列表 */
+  options?: Array<{ label: string; value: string | number }>
+  /** 原始数据 */
+  data?: unknown
+}
+
+// ============================================================================
+// 完整的模块 UI Schema（0.2 扩展）
+// ============================================================================
+
+/**
+ * 完整的模块 UI Schema
+ *
+ * 0.1 字段：identity、actions、rendering、clients
+ * 0.2 新增字段（均可选，渐进增强）：
+ * - ui：input_form / result_widget
+ * - ui_contributions：插件视觉扩展
+ * - ui_schema：0.1 向后兼容字段（旧格式）
+ */
 export interface ModuleUISchema {
   /** 模块身份 */
   identity: ModuleIdentity
@@ -150,6 +330,12 @@ export interface ModuleUISchema {
   rendering: ModuleRendering
   /** 客户端能力要求 */
   clients: ClientCapabilities
+  /** 0.2 新增：UI 字段（input_form / result_widget） */
+  ui?: UIField
+  /** 0.2 新增：插件 UI 贡献项列表 */
+  ui_contributions?: UIContribution[]
+  /** 0.1 向后兼容：旧版 ui_schema 字段 */
+  ui_schema?: Record<string, unknown>
 }
 
 /** Schema 解析结果 */
@@ -164,6 +350,10 @@ export interface ParsedSchema {
   rendering: ModuleRendering
   /** 解析后的客户端要求 */
   clients: ClientCapabilities
+  /** 0.2 新增：解析后的 UI 字段 */
+  ui?: UIField
+  /** 0.2 新增：解析后的插件 UI 贡献项 */
+  ui_contributions?: UIContribution[]
   /** 解析时间戳 */
   parsedAt: number
   /** Schema 版本哈希 */
