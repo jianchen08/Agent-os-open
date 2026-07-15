@@ -1,0 +1,24 @@
+{
+    "id": "evaluation_service",
+    "name": "Evaluation Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "evaluation.run", "description": "Run evaluation metrics against targets"},
+            {"name": "evaluation.get_result", "description": "Get evaluation result by ID"}
+        ],
+        "resources": [
+            {"uri": "evaluation://metrics/registry", "name": "Metric Registry"}
+        ],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "abort",
+    "priority": 55
+}

@@ -1,0 +1,23 @@
+{
+    "id": "channel_websocket",
+    "name": "WebSocket Channel Adapter",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "channel.send_message", "description": "Send message to connected WebSocket clients"},
+            {"name": "channel.receive", "description": "Receive messages from WebSocket clients"},
+            {"name": "channel.broadcast", "description": "Broadcast message to all clients"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 70
+}
