@@ -4,12 +4,8 @@
 //!
 //! [来源: docs/tasks/task_07_llm_api.md AC-06-3/AC-06-5]
 
-use std::sync::Arc;
-
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
-
-use crate::error::ApiError;
 
 /// 健康检查响应。
 #[derive(Debug, Serialize)]
@@ -38,9 +34,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        Self {
-            config: json!({}),
-        }
+        Self { config: json!({}) }
     }
 
     pub fn with_config(config: serde_json::Value) -> Self {
@@ -86,11 +80,7 @@ pub async fn schema_handler(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let routes = state
-        .config
-        .get("routes")
-        .cloned()
-        .unwrap_or(json!({}));
+    let routes = state.config.get("routes").cloned().unwrap_or(json!({}));
 
     axum::Json(SchemaResponse {
         agents,

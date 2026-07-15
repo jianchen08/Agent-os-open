@@ -1,0 +1,33 @@
+[package]
+name = "lingxi-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lingxi AgentOS 0.2 cross-module integration tests"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+lingxi-core.workspace = true
+lingxi-config.workspace = true
+lingxi-plugin-loader.workspace = true
+lingxi-engine.workspace = true
+lingxi-invoker.workspace = true
+lingxi-mcp.workspace = true
+parking_lot = "0.12"
+uuid.workspace = true
+chrono.workspace = true
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_yaml = "0.9"
+tempfile = "3"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "pipeline_benchmark"
+harness = false

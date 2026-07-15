@@ -19,14 +19,15 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tracing::info;
 
 use crate::error::ApiError;
-use crate::routes::{agents_handler, health_handler, pipelines_handler, schema_handler, tools_handler, AppState};
+use crate::routes::{
+    agents_handler, health_handler, pipelines_handler, schema_handler, tools_handler, AppState,
+};
 
 /// WebSocket 消息请求体。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WsRequest {
     #[serde(default)]
     pub message: String,
@@ -61,15 +62,12 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// WebSocket 连接处理器（AC-06-4）。
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
 }
 
 /// 处理 WebSocket 连接——收发消息循环。
-async fn handle_ws_connection(socket: WebSocket, state: AppState) {
+async fn handle_ws_connection(socket: WebSocket, _state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
     // 发送欢迎消息
@@ -103,7 +101,11 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState) {
                 };
 
                 let response_json = serde_json::to_string(&response).unwrap_or_default();
-                if sender.send(Message::Text(response_json.into())).await.is_err() {
+                if sender
+                    .send(Message::Text(response_json.into()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -134,10 +136,7 @@ async fn chat_handler(
 }
 
 /// 启动 API 服务器。
-pub async fn start_server(
-    addr: SocketAddr,
-    state: AppState,
-) -> Result<(), ApiError> {
+pub async fn start_server(addr: SocketAddr, state: AppState) -> Result<(), ApiError> {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -153,21 +152,27 @@ pub async fn start_server(
     Ok(())
 }
 
-use uuid::Uuid;
 use futures_util::{SinkExt, StreamExt};
+use uuid::Uuid;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use serde_json::json;
     use tower::ServiceExt;
 
     #[tokio::test]
     async fn test_health_returns_200() {
         let app = build_router(AppState::new());
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -177,7 +182,12 @@ mod tests {
     async fn test_schema_returns_200() {
         let app = build_router(AppState::new());
         let response = app
-            .oneshot(Request::builder().uri("/api/v1/schema").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -187,7 +197,12 @@ mod tests {
     async fn test_agents_returns_200() {
         let app = build_router(AppState::new());
         let response = app
-            .oneshot(Request::builder().uri("/api/v1/agents").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -197,7 +212,12 @@ mod tests {
     async fn test_pipelines_returns_200() {
         let app = build_router(AppState::new());
         let response = app
-            .oneshot(Request::builder().uri("/api/v1/pipelines").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -207,7 +227,12 @@ mod tests {
     async fn test_tools_returns_200() {
         let app = build_router(AppState::new());
         let response = app
-            .oneshot(Request::builder().uri("/api/v1/tools").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tools")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -239,10 +264,17 @@ mod tests {
     async fn test_health_response_body() {
         let app = build_router(AppState::new());
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
         assert!(json["version"].is_string());
@@ -258,10 +290,17 @@ mod tests {
         });
         let app = build_router(AppState::with_config(config));
         let response = app
-            .oneshot(Request::builder().uri("/api/v1/schema").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["agents"].as_array().unwrap().len(), 1);
         assert_eq!(json["pipelines"].as_array().unwrap().len(), 1);
@@ -287,7 +326,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["type"], "message");
         assert!(json["content"].as_str().unwrap().contains("hello world"));

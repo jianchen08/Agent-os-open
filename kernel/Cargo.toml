@@ -9,6 +9,7 @@ members = [
     "crates/api",
     "crates/hooks",
     "crates/engine",
+    "crates/integration-tests",
 ]
 resolver = "2"
 
@@ -34,5 +35,13 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 # 时间
 chrono = { version = "0.4", features = ["serde"] }
-# 内核核心 trait（workspace 内部引用）
+# 内核 crate（workspace 内部引用）
 lingxi-core = { path = "crates/core" }
+lingxi-config = { path = "crates/config" }
+lingxi-plugin-loader = { path = "crates/plugin-loader" }
+lingxi-mcp = { path = "crates/mcp" }
+lingxi-invoker = { path = "crates/invoker" }
+lingxi-engine = { path = "crates/engine" }
+lingxi-tenant = { path = "crates/tenant" }
+lingxi-api = { path = "crates/api" }
+lingxi-hooks = { path = "crates/hooks" }
