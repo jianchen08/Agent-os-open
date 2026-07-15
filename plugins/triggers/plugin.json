@@ -1,0 +1,23 @@
+{
+    "id": "trigger_service",
+    "name": "Trigger Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "trigger.register", "description": "Register a new trigger"},
+            {"name": "trigger.cancel", "description": "Cancel a registered trigger"},
+            {"name": "trigger.list", "description": "List registered triggers"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 40
+}

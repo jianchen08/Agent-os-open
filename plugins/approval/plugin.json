@@ -1,0 +1,23 @@
+{
+    "id": "approval_service",
+    "name": "Approval Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "approval.create_choice", "description": "Create a choice approval request"},
+            {"name": "approval.create_conversation", "description": "Create a conversation approval request"},
+            {"name": "approval.submit", "description": "Submit approval result"}
+        ],
+        "resources": [],
+        "route_signals": ["wait"],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "abort",
+    "priority": 60
+}
