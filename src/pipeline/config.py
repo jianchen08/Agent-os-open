@@ -124,6 +124,7 @@ class PipelineConfig:
     output_route_table: OutputRouteTable
     plugins: list[dict[str, Any]] = field(default_factory=list)
     core_plugins: dict[str, Any] = field(default_factory=dict)
+    tenant_id: str | None = None
 
 
 def load_pipeline_config(
@@ -219,10 +220,16 @@ def load_pipeline_config(
         output_route_table=output_route_table,
         plugins=raw.get("plugins", []),
         core_plugins=raw.get("core_plugins", {}),
+        tenant_id=raw.get("tenant"),
     )
 
 
-_ALLOWED_PREFIXES = ("plugins.", "pipeline.", "agents.", "tools.")
+_ALLOWED_PREFIXES = (
+    "plugins.",
+    "pipeline.",
+    "agents.",
+    "tools.",
+)
 
 
 def _import_class(dotted_path: str) -> type:
@@ -250,80 +257,158 @@ def _import_class(dotted_path: str) -> type:
         raise ImportError(f"Failed to import class '{dotted_path}': {exc}") from exc
 
 
+# 共享搜索路径优先级：新路径（shared/）优先，旧路径回退
+# DEBT: 旧路径兼容 shim。ceiling: 所有 YAML 配置迁移到新路径后可删除旧路径。
+# upgrade: 当 config/pipelines/*.yaml 全部使用新路径且无代码引用旧路径时。
 _PLUGIN_SEARCH_PACKAGES = [
+    # 新路径优先（src/plugins/shared/ 目录）
+    ("plugins.shared.input", IInputPlugin),
+    ("plugins.shared.output", IOutputPlugin),
+    # 旧路径回退（src/plugins/ 下的兼容 shim 保证 import 可达）
     ("plugins.input", IInputPlugin),
     ("plugins.output", IOutputPlugin),
 ]
 
 
-def _discover_plugin_class(name: str) -> type | None:
+def _discover_plugin_class(name: str, tenant_id: str | None = None) -> type | None:
     """按插件名自动发现插件类。
 
-    在 plugins.input 和 plugins.output 包下查找同名模块，
-    导入后扫描其中唯一的 IPlugin 子类。
+    搜索顺序：
+    1. 若指定 tenant_id：先搜租户路径 plugins.tenants.{id}.{input|output}.{name}[.plugin]
+    2. 共享路径 plugins.shared.{input|output}.{name}[.plugin]
+    3. 旧路径回退 plugins.{input|output}.{name}[.plugin]
 
     Args:
-        name: 插件名称，对应模块文件名（如 "track" 对应 track.py）
+        name: 插件名称，对应模块文件名（如 "track" 对应 track/plugin.py）
+        tenant_id: 租户标识，指定后优先搜索租户目录
 
     Returns:
         找到的插件类，未找到返回 None
     """
-    for package_name, base_cls in _PLUGIN_SEARCH_PACKAGES:
-        module_name = f"{package_name}.{name}"
-        try:
-            module = importlib.import_module(module_name)
-        except (ImportError, ModuleNotFoundError):
-            continue
+    # 1. 租户插件优先（如果指定了 tenant_id）
+    if tenant_id:
+        tenant_packages = [
+            (f"plugins.tenants.{tenant_id}.input", IInputPlugin),
+            (f"plugins.tenants.{tenant_id}.output", IOutputPlugin),
+        ]
+        result = _scan_packages_for_plugin(name, tenant_packages)
+        if result is not None:
+            return result
 
-        found: list[type] = []
-        for attr_name in dir(module):
-            if attr_name.startswith("_"):
+    # 2. 共享 + 旧路径回退
+    return _scan_packages_for_plugin(name, _PLUGIN_SEARCH_PACKAGES)
+
+
+def _scan_packages_for_plugin(
+    name: str,
+    packages: list[tuple[str, type]],
+) -> type | None:
+    """在给定的搜索包列表中查找插件类。
+
+    Args:
+        name: 插件名称
+        packages: 搜索包列表，每项为 (包路径, 基类)
+
+    Returns:
+        找到的插件类，未找到返回 None
+    """
+    for package_name, base_cls in packages:
+        # 尝试两种模块路径：包本身（{name}）和 .plugin 子模块（{name}.plugin）
+        for module_suffix in ("", ".plugin"):
+            module_name = f"{package_name}.{name}{module_suffix}"
+            try:
+                module = importlib.import_module(module_name)
+            except (ImportError, ModuleNotFoundError):
                 continue
-            attr = getattr(module, attr_name)
-            if isinstance(attr, type) and issubclass(attr, base_cls) and attr is not base_cls:
-                found.append(attr)
 
-        if len(found) == 1:
-            return found[0]
-        if len(found) > 1:
-            logger.warning(
-                "Module '%s' contains %d plugin classes, skipping auto-discovery",
-                module_name,
-                len(found),
-            )
+            found: list[type] = []
+
+            for attr_name in dir(module):
+                if attr_name.startswith("_"):
+                    continue
+                attr = getattr(module, attr_name)
+                if isinstance(attr, type) and issubclass(attr, base_cls) and attr is not base_cls:
+                    found.append(attr)
+
+            if len(found) == 1:
+                return found[0]
+            if len(found) > 1:
+                logger.warning(
+                    "Module '%s' contains %d plugin classes, skipping auto-discovery",
+                    module_name,
+                    len(found),
+                )
 
     return None
 
 
-def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
+# DEBT: 旧路径迁移映射。ceiling: 所有 YAML 配置迁移到新路径后可删除。
+# upgrade: 当 config/pipelines/*.yaml 中无旧路径引用时。
+_MIGRATED_PATHS: dict[str, str] = {
+    "plugins.core.llm_core.LLMCore": "plugins.shared.core.llm_core.plugin.LLMCore",
+    "plugins.core.tool_core.ToolCore": "plugins.shared.core.tool_core.plugin.ToolCore",
+}
+
+_PREFIX_MIGRATIONS: dict[str, str] = {
+    "plugins.input.": "plugins.shared.input.",
+    "plugins.output.": "plugins.shared.output.",
+    "plugins.core.": "plugins.shared.core.",
+}
+
+
+def _migrate_class_path(class_path: str) -> str:
+    """将旧路径迁移为新路径，支持精确匹配和前缀匹配。
+
+    精确匹配优先（处理 plugins.core.llm_core.LLMCore 等不含 .plugin 的旧路径），
+    其次前缀匹配（处理 plugins.input.xxx.plugin.Yyy 等含 .plugin 的旧路径）。
+
+    Args:
+        class_path: YAML 配置中的 class 字段值
+
+    Returns:
+        迁移后的路径（如果已是新路径则原样返回）
+    """
+    # 精确匹配优先
+    if class_path in _MIGRATED_PATHS:
+        return _MIGRATED_PATHS[class_path]
+
+    # 前缀匹配
+    for old_prefix, new_prefix in _PREFIX_MIGRATIONS.items():
+        if class_path.startswith(old_prefix):
+            return new_prefix + class_path[len(old_prefix):]
+
+    # 已是新路径或未知路径，原样返回
+    return class_path
+
+
+def _resolve_plugin_class(plugin_conf: dict[str, Any], tenant_id: str | None = None) -> type | None:
     """从插件配置中解析插件类，支持 class: 和 name: 两种方式。
 
     优先使用 class: 方式（向后兼容），其次用 name: 方式自动发现。
+    当 tenant_id 非空时，name 方式优先搜索租户目录。
 
     Args:
         plugin_conf: 插件配置字典，包含 class 或 name 字段
+        tenant_id: 租户标识，用于租户级插件发现
 
     Returns:
         解析到的插件类，失败返回 None
     """
     class_path = plugin_conf.get("class", "")
     if class_path:
-        _migrated_paths = {
-            "plugins.core.llm_core.LLMCore": "plugins.core.llm_core.plugin.LLMCore",
-            "plugins.core.tool_core.ToolCore": "plugins.core.tool_core.plugin.ToolCore",
-        }
-        class_path = _migrated_paths.get(class_path, class_path)
+        class_path = _migrate_class_path(class_path)
         return _import_class(class_path)
 
     plugin_name = plugin_conf.get("name", "")
     if not plugin_name:
         return None
 
-    plugin_cls = _discover_plugin_class(plugin_name)
+    plugin_cls = _discover_plugin_class(plugin_name, tenant_id=tenant_id)
     if plugin_cls is None:
-        raise ImportError(f"Plugin '{plugin_name}' not found in plugins.input or plugins.output")
+        raise ImportError(
+            f"Plugin '{plugin_name}' not found in plugins.shared or plugins (legacy)"
+        )
     return plugin_cls
-
 
 def build_plugin_registry(  # noqa: PLR0912,PLR0915
     config: PipelineConfig,
@@ -378,7 +463,7 @@ def build_plugin_registry(  # noqa: PLR0912,PLR0915
             continue
 
         try:
-            plugin_cls = _resolve_plugin_class(plugin_conf)
+            plugin_cls = _resolve_plugin_class(plugin_conf, tenant_id=config.tenant_id)
             if plugin_cls is None:
                 raise ImportError(f"Plugin '{plugin_id}' could not be resolved: config must specify 'class' or 'name'")
             plugin_instance: IPlugin = plugin_cls(config=plugin_config)

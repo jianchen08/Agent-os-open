@@ -196,7 +196,7 @@ plugins:
 # 核心 LLM/工具执行插件
 core_plugins:
   llm_call:
-    class: plugins.core.llm_core.LLMCore
+    class: plugins.shared.core.llm_core.plugin.LLMCore
     config:
       # 不指定 model_name，回退到 llm.yaml defaults.chat
       default_params:
@@ -211,7 +211,7 @@ core_plugins:
       # LLM 调用超时（秒）
       llm_call_timeout: 300
   tool_execute:
-    class: plugins.core.tool_core.ToolCore
+    class: plugins.shared.core.tool_core.plugin.ToolCore
     config:
       timeout: 300
       result_format: "yaml"

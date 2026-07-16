@@ -26,17 +26,39 @@ if _SDK_SRC not in sys.path:
     sys.path.insert(0, _SDK_SRC)
 
 
+# 插件名 → 功能分类目录的映射（插件已按功能分类组织）
+_PLUGIN_CATEGORY_MAP: dict[str, str] = {
+    "memory": "shared/system",
+    "approval": "shared/system",
+    "evaluation": "shared/system",
+    "review": "shared/system",
+    "builtin_tools": "shared/tools",
+    "channel_ws": "shared/tools",
+    "triggers": "shared/tools",
+}
+
+
+def _get_plugin_dir(plugin_name: str) -> Path:
+    """根据插件名返回其所在的分类子目录路径。"""
+    category = _PLUGIN_CATEGORY_MAP.get(plugin_name, "")
+    if category:
+        return Path(_PLUGINS_DIR) / category / plugin_name
+    # 回退：直接在根目录查找（兼容未分类的插件）
+    return Path(_PLUGINS_DIR) / plugin_name
+
+
 def _load_plugin_module(plugin_name: str) -> Any:
     """动态加载插件模块并返回 module 对象。"""
     mod_name = f"{plugin_name}_server_test"
     if mod_name in sys.modules:
         return sys.modules[mod_name]
 
+    plugin_path = _get_plugin_dir(plugin_name) / "server.py"
     spec = importlib.util.spec_from_file_location(
         mod_name,
-        Path(_PLUGINS_DIR) / plugin_name / "server.py",
+        plugin_path,
     )
-    assert spec is not None and spec.loader is not None
+    assert spec is not None and spec.loader is not None, f"Cannot load plugin from {plugin_path}"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -366,7 +388,7 @@ class TestManifestValidation:
         "memory", "approval", "evaluation", "review", "triggers", "channel_ws",
     ])
     def test_manifest_exists_and_valid(self, plugin_dir: str) -> None:
-        manifest_path = Path(_PLUGINS_DIR) / plugin_dir / "plugin.json"
+        manifest_path = _get_plugin_dir(plugin_dir) / "plugin.json"
         assert manifest_path.exists(), f"plugin.json missing for {plugin_dir}"
 
         manifest = json.loads(manifest_path.read_text())
@@ -384,5 +406,5 @@ class TestManifestValidation:
         "memory", "approval", "evaluation", "review", "triggers", "channel_ws",
     ])
     def test_server_exists(self, plugin_dir: str) -> None:
-        server_path = Path(_PLUGINS_DIR) / plugin_dir / "server.py"
+        server_path = _get_plugin_dir(plugin_dir) / "server.py"
         assert server_path.exists(), f"server.py missing for {plugin_dir}"
