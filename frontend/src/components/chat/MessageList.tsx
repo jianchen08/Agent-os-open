@@ -1,36 +1,33 @@
 /**
- * 消息列表组件
+ * 消息列表组件（虚拟滚动版本）
  *
- * 显示消息列表，支持自动滚动、分页加载和加载状态。
+ * 用 react-virtuoso 实现聊天消息流的标准行为：
+ *   1. 打开就在底部（initialTopMostItemIndex + 数据到达后 scrollToIndex 兜底）
+ *   2. 向上滚动加载更早历史（startReached 回调，触顶时触发，防重复）
+ *   3. 加载历史后视口位置不变——靠 firstItemIndex 机制：prepend N 条时
+ *      store 递增 prependedCount，firstItemIndex 同步递减 N，virtuoso 自动
+ *      保持当前滚动位置（新内容出现在上方，用户可继续向上滚）。
  *
- * 滚动职责设计（最小职责原则）：
- *   1. MessageItem 已用 React.memo 包裹（见 MessageItem.tsx）：历史消息不随流式
- *      重渲染，避免算好的 scrollTop 被新渲染冲掉导致滚动条乱跳。
- *   2. 本组件只保留最小滚动职责：
- *      - 首次进入钉底、切 Tab 缓存/恢复 scrollTop
- *      - 用户发消息/流式期间跟随底部
- *      - 到顶触发加载更多
- *   3. 向上加载更多（prepend）的不跳由浏览器原生 CSS `overflow-anchor: auto`
- *      保证（微博/Twitter 同款机制，2019 年起全浏览器支持，Electron/Tauri 100% 兼容），
- *      无需手写任何锚点逻辑。
+ * 关键设计：firstItemIndex 由 store 权威维护（prependedCountByPipeline），
+ * 组件只读取，不在组件内对比前后帧猜测 prepend——后者不可靠（用户反馈
+ * 「有时能加载有时不能」的根因之一）。
+ *
+ * MessageItem 已用 React.memo 包裹，历史消息不随流式重渲染。
  */
 
 import { Loader2 } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
-import { logger as loggerService } from '@/utils/logger'
+import { ComponentProps, ComponentType, useCallback, useEffect, useMemo, useRef } from 'react'
+import { Virtuoso } from 'react-virtuoso'
+import type { VirtuosoHandle } from 'react-virtuoso'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
-
-const logger = loggerService.module('MessageList')
+import type { Message } from '@/types/models'
 
 /**
- * 每个 Tab 的滚动位置缓存
- *
- * 切换 Tab 时 MessageList 因 key 变化被销毁重建（见 ChatContainer 的
- * <MessageList key={activeTabId || sessionId}>），卸载前把 scrollTop 写入这里，
- * 重新挂载时读出恢复。内存级缓存，不跨页面刷新。
+ * firstItemIndex 的初始基准值。virtuoso 要求 firstItemIndex 为正数；
+ * prepend N 条则递减 N。基准值足够大以覆盖超长会话的累计 prepend 量。
  */
-const scrollTopCache = new Map<string, number>()
+const FIRST_ITEM_INDEX_BASE = 1_000_000
 
 /**
  * 消息列表组件属性扩展
@@ -48,10 +45,12 @@ export interface ExtendedMessageListProps extends MessageListProps {
   tabId?: string
   /** 当前 Tab 关联的任务 ID，用于工具卡片打开文件解析工作区 */
   taskId?: string
+  /** 累计向上翻页插入的条数（由 store 权威维护，驱动 firstItemIndex） */
+  prependedCount?: number
 }
 
 /**
- * 消息列表组件（原生滚动版本，无虚拟化）
+ * 消息列表组件（react-virtuoso 虚拟滚动版本）
  */
 export const MessageList = ({
   messages,
@@ -62,53 +61,123 @@ export const MessageList = ({
   isLoadingMore = false,
   onLoadMore,
   searchQuery,
-  tabId,
   taskId,
+  prependedCount = 0,
 }: ExtendedMessageListProps) => {
-  const scrollRef = useRef<HTMLDivElement>(null)
-  /** 是否在底部附近（距底部 150px 内） */
-  const isNearBottom = useRef(true)
-  /** 是否在顶部附近（触发加载更多） */
-  const isNearTop = useRef(false)
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+
   /**
    * 是否"跟随底部"——决定流式/新内容时是否把视图钉在底部。
    * 初始 true（看最新消息）；用户主动上滑 → false（停止跟随，翻历史）；
-   * 用户滚回底部附近 → true（恢复跟随）。
-   * 这是控制流式钉底的关键：用户上滑必须立即停止跟随，否则滚不动。
+   * 用户滚回底部附近 → true（恢复跟随）。通过驱动 followOutput 的返回值生效。
    */
   const isFollowingBottom = useRef(true)
-  /** 首次滚动是否完成 */
-  const initialScrollDone = useRef(false)
+
+  /** 首次数据到达后是否已执行过钉底（用于首次定位的兜底） */
+  const pinnedOnFirstData = useRef(false)
+  /** 上一帧渲染的消息总数，用于检测 initFromAPI 全量替换造成的内容高度突变 */
+  const prevRenderedCount = useRef(0)
+
   /**
-   * 用户是否通过真实手势（wheel/touch）滚动过。
-   * 用于区分"用户主动上滑"与"程序性滚动"（高度变化导致 scrollTop 变小）。
-   * onScroll 对两者都会触发，但只有真实手势才算用户意图上滑。
-   * 刷新恢复时 initFromAPI 重建导致高度突减，浏览器程序性滚动会触发 onScroll，
-   * 若仅凭 scrollTop 方向判断会把 isFollowingBottom 误置 false → 不钉底 → 停中间。
+   * followOutput 驱动函数：内容增长时是否自动钉到底部。
+   * 受 isFollowingBottom 控制——用户上滑翻历史时不抢回底部。
+   * 注意：followOutput 仅在 virtuoso 判定 data 变化时触发，对「同数量但内容高度变化」
+   * （如 markdown 异步渲染撑高、initFromAPI 全量替换后高度突变）不一定可靠，
+   * 故另有 itemsRendered + 内容高度变化的重钉兜底（见下方）。
    */
-  const userScrolled = useRef(false)
+  const followOutput: ComponentProps<typeof Virtuoso<Message>>['followOutput'] = useCallback(
+    () => (isFollowingBottom.current ? 'auto' : false),
+    [],
+  )
+
+  /**
+   * 把视图钉到底部（仅在跟随底部时）。封装 scrollToIndex，统一入口。
+   */
+  const pinToBottom = useCallback(() => {
+    virtuosoRef.current?.scrollToIndex({ index: 'LAST', behavior: 'auto' })
+  }, [])
+
+  /**
+   * 滚到顶部时触发加载更多。virtuoso 的 startReached 在视口触顶时触发，
+   * 配合 hasMore/isLoadingMore 防重复，每次只加载一页。
+   */
+  const startReached = useCallback(() => {
+    if (hasMore && !isLoadingMore && onLoadMore) {
+      onLoadMore()
+    }
+  }, [hasMore, isLoadingMore, onLoadMore])
+
+  /**
+   * 到达/离开底部状态变化：滚回底部附近时恢复跟随。
+   */
+  const atBottomStateChange = useCallback((atBottom: boolean) => {
+    if (atBottom) {
+      isFollowingBottom.current = true
+    }
+  }, [])
+
+  /**
+   * 真实手势监听：用户通过 wheel/touch 滚动时立即停止跟随底部。
+   * 用挂载标记防止 virtuoso 多次调用 scrollerRef 导致重复绑定监听器。
+   * 仅真实手势才算用户意图上滑，virtuoso 程序性滚动（followOutput 钉底）不触发。
+   */
+  const boundEl = useRef<HTMLElement | null>(null)
+  const scrollerRef = useCallback((element: HTMLElement | Window | null) => {
+    if (!element || !(element instanceof HTMLElement) || boundEl.current === element) return
+    const markUserScroll = () => {
+      isFollowingBottom.current = false
+    }
+    element.addEventListener('wheel', markUserScroll, { passive: true })
+    element.addEventListener('touchstart', markUserScroll, { passive: true })
+    boundEl.current = element
+  }, [])
+
+  /**
+   * 核心定位逻辑（补回 commit 28c670a0 的冷加载重钉防护）。
+   *
+   * 旧自研滚动版用 ResizeObserver 监听内容容器，内容高度变化且跟随底部时即钉底，
+   * 专门解决「persist 快照钉底后 initFromAPI 异步全量替换使内容高度突变，视图停在
+   * 快照高度的中间」。重写为 virtuoso 后该机制被删，导致刷新后停在中间。
+   *
+   * 现在用 messages 引用变化检测：快照→API 全量替换会产生新数组引用（store 的 set），
+   * 触发本 effect。只要仍在跟随底部，就重新钉底，覆盖流式增长 / initFromAPI 重建 /
+   * markdown 异步渲染撑高三种高度突变场景。用户主动上滑（isFollowingBottom=false）时
+   * 不抢回底部，尊重翻历史意图。
+   */
+  useEffect(() => {
+    if (messages.length === 0) return
+    if (!isFollowingBottom.current) return
+    // 首次数据用 RAF 等待 virtuoso 完成首次测量再钉，避免测量未完成时定位失准
+    if (!pinnedOnFirstData.current) {
+      pinnedOnFirstData.current = true
+      requestAnimationFrame(() => pinToBottom())
+      prevRenderedCount.current = messages.length
+      return
+    }
+    // 后续内容变化（含 initFromAPI 全量替换、流式追加）：跟随底部则重钉。
+    // 不限制 messages.length 变化方向——initFromAPI 替换可能使条数增/减，关键是
+    // 数组引用变了就说明内容已更新，跟随底部时必须重新对齐到底部最新消息。
+    pinToBottom()
+    prevRenderedCount.current = messages.length
+  }, [messages, pinToBottom])
+
+  /**
+   * 流式结束（isGenerating true→false）且仍在跟随时钉底一次，收尾。
+   */
   const prevGenerating = useRef(false)
-  /** 上一帧消息数量，用于判断是新消息追加还是 prepend 历史 */
-  const lastMessageCount = useRef(messages.length)
-  /**
-   * 内容容器 ref：包裹所有消息，尺寸随内容增高。
-   * ResizeObserver 监听它（而非滚动容器——滚动容器 flex-1 尺寸固定，监听不到
-   * 内容 scrollHeight 变化），在内容变化时重新钉底。详见 contentResize effect。
-   */
-  const contentRef = useRef<HTMLDivElement>(null)
-  /**
-   * 最近一次真实 scrollTop（onScroll 实时记录）。
-   * 切 Tab 卸载时 React 会先清空消息 DOM（scrollHeight/scrollTop 归 0），
-   * 此时读 DOM 拿到的是垃圾值 0；改读此 ref 拿到用户最后的真实位置。
-   */
-  const lastScrollTopRef = useRef(0)
+  useEffect(() => {
+    if (prevGenerating.current && !isGenerating && isFollowingBottom.current) {
+      pinToBottom()
+    }
+    prevGenerating.current = isGenerating
+  }, [isGenerating, pinToBottom])
 
   /** 渲染单个消息项 */
-  const renderItem = useCallback(
-    (message: any, index: number) => {
-      const isLast = index === messages.length - 1
+  const itemContent = useCallback(
+    (_index: number, message: Message) => {
+      const isLast = message.id === messages[messages.length - 1]?.id
       return (
-        <div className="group" key={`${message.id}-${message.sequence ?? index}`}>
+        <div className="group">
           <MessageItem
             message={message}
             isLast={isLast}
@@ -120,203 +189,48 @@ export const MessageList = ({
         </div>
       )
     },
-    [isGenerating, modelName, searchQuery, taskId],
+    [isGenerating, modelName, searchQuery, taskId, messages],
   )
 
-  /** 把滚动位置钉到最底部 */
-  const pinToBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (el) {
-      el.scrollTop = el.scrollHeight
-      // 程序设置 scrollTop 不触发 onScroll，手动同步缓存用 ref
-      lastScrollTopRef.current = el.scrollHeight
-    }
-  }, [])
-
-  /**
-   * 滚动事件处理
-   *
-   * 用 scrollTop 方向判断用户意图——只要用户往上滚（scrollTop 变小），
-   * 立即停止跟随（isFollowingBottom=false）并断开钉底 observer，把控制权完全交给用户。
-   * 不等"离开底部 150px"才停（流式期间若等过阈值才停，下一帧又会被钉底拉回，导致"滚不动"）。
-   * 滚回底部附近时恢复跟随。
-   */
-  const onScroll = useCallback(
-    (e: React.UIEvent<HTMLDivElement>) => {
-      const target = e.currentTarget
-      const { scrollTop, scrollHeight, clientHeight } = target
-      const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-      const prevScrollTop = lastScrollTopRef.current
-      isNearBottom.current = distanceFromBottom <= 150
-      isNearTop.current = scrollTop <= 150
-      // 实时记录：卸载时 DOM 内容已被 React 清空（scrollHeight=0），读 DOM 拿到的是 0
-      lastScrollTopRef.current = scrollTop
-
-      // 用户主动上滑（scrollTop 变小）→ 立即停止跟随。
-      // contentResize observer 内部判断 isFollowingBottom，停止跟随后不再钉底。
-      // 仅在用户通过真实手势（wheel/touch）滚动时才判定为"主动上滑"。
-      // 刷新恢复时 initFromAPI 重建导致高度突减，浏览器产生程序性滚动（无手势），
-      // 此时不应把 isFollowingBottom 置 false，否则后续 ResizeObserver 不钉底 → 停中间。
-      if (scrollTop < prevScrollTop - 1 && userScrolled.current) {
-        isFollowingBottom.current = false
-      }
-      // 用户滚回底部附近 → 恢复跟随
-      if (isNearBottom.current) {
-        isFollowingBottom.current = true
-      }
-
-      if (isNearTop.current && hasMore && !isLoadingMore && onLoadMore) {
-        onLoadMore()
-      }
-    },
-    [hasMore, isLoadingMore, onLoadMore],
+  /** Header/Footer 用 useMemo 稳定引用，避免每次渲染重建导致 virtuoso 重置内部状态 */
+  const headerComponent = useMemo<ComponentType | undefined>(
+    () =>
+      hasMore
+        ? () => (
+            <div className="flex items-center justify-center py-4">
+              {isLoadingMore ? (
+                <>
+                  <Loader2 className="text-muted-foreground h-4 w-4 animate-spin" />
+                  <span className="text-muted-foreground ml-2 text-sm">加载历史消息...</span>
+                </>
+              ) : (
+                <span className="text-muted-foreground text-sm">向上滚动加载更多</span>
+              )}
+            </div>
+          )
+        : undefined,
+    [hasMore, isLoadingMore],
   )
 
-  /**
-   * 首次加载：恢复缓存位置或钉到底部
-   *
-   * 有缓存（之前在此 Tab 翻过历史）→ 恢复并停止跟随；
-   * 无缓存 → 钉到底部（看最新消息）。
-   *
-   * 持续校正（initFromAPI 重建等内容高度变化时重新钉底）由下方 contentResize
-   * effect 负责，本 effect 只做一次性首次定位。
-   */
-  // 用 useLayoutEffect 而非 useEffect 做首次定位：useLayoutEffect 在 paint 前同步钉底，
-  // 从根本上消除"中间态"闪烁（useEffect 在 paint 后才跑，浏览器已先把 DOM 渲染在
-  // 维持上次相对位置的"中间"位置，用户会看到一帧中间态）。
-  useLayoutEffect(() => {
-    if (messages.length === 0 || initialScrollDone.current) return
-    initialScrollDone.current = true
-
-    const cached = tabId ? scrollTopCache.get(tabId) : undefined
-    // 缓存恢复：直接定位，不需要 observer 校正（停在用户离开的位置）
-    if (cached !== undefined) {
-      isNearBottom.current = false
-      requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = cached
-          lastScrollTopRef.current = cached
-        }
-      })
-      return
-    }
-
-    // 无缓存钉底：首次定位到底部。同步钉底 + RAF 钉底双管齐下避免中间态，
-    // 并启动 1.2s 轮询钉底覆盖各浏览器渲染时序差异与异步高度变化（用户上滑会置 userScrolled 跳过，不抢滚动）。
-    const el = scrollRef.current
-    if (!el) return
-    pinToBottom()
-    requestAnimationFrame(() => pinToBottom())
-    // 持续钉底兜底（覆盖 Edge 等浏览器的渲染时序差异）
-    // 用户在此窗口内 wheel/touch 上滑会置 userScrolled，此时停止强制钉底
-    let ticks = 0
-    const intervalId = window.setInterval(() => {
-      ticks++
-      if (userScrolled.current) {
-        window.clearInterval(intervalId)
-        return
-      }
-      pinToBottom()
-      if (ticks >= 24) window.clearInterval(intervalId)  // 1.2s 后停止
-    }, 50)
-  }, [messages.length, tabId, pinToBottom])
-
-  /**
-   * 注册真实手势监听（wheel/touch），区分用户主动滚动与程序性滚动。
-   * 只有真实手势触发时 userScrolled 才置位，onScroll 据此判断是否为用户意图上滑。
-   * 程序性滚动（高度变化导致）不置位。
-   */
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const markUserScroll = () => { userScrolled.current = true }
-    el.addEventListener('wheel', markUserScroll, { passive: true })
-    el.addEventListener('touchstart', markUserScroll, { passive: true })
-    return () => {
-      el.removeEventListener('wheel', markUserScroll)
-      el.removeEventListener('touchstart', markUserScroll)
-    }
-  }, [])
-
-  /**
-   * 持续跟随底部：内容高度变化时重新钉底。
-   *
-   * 用独立 effect 监听【内容容器】（随消息内容增高），只要仍在跟随底部
-   * （isFollowingBottom）内容一变就钉底。覆盖 initFromAPI 重建、流式增长、
-   * markdown/代码块异步渲染等所有内容高度变化场景——冷加载重建后内容高度变化
-   * （经 mergeConsecutiveAssistantMessages 合并、filterBlankMessages 删空白后常使
-   * 条数减少或不变），仅靠「消息条数增加才钉底」的逻辑无法触发，会导致视图停在
-   * 快照渲染高度的「中间」而非最新消息底部。用户上滑后 isFollowingBottom=false，
-   * observer 触发也不钉底，把控制权交给用户。
-   *
-   * 依赖含 messages.length：messages 从空→非空时 contentRef 才挂载，需要重跑本 effect
-   * 挂上 observer。之后 contentRef 持续存在，length 变化时 disconnect+observe 同一节点，
-   * 开销可忽略。
-   */
-  useEffect(() => {
-    const content = contentRef.current
-    if (!content) return
-    const ro = new ResizeObserver(() => {
-      if (isFollowingBottom.current) {
-        pinToBottom()
-      }
-    })
-    ro.observe(content)
-    return () => ro.disconnect()
-  }, [pinToBottom, messages.length])
-
-  /**
-   * 底部追加新消息 → 跟随底部
-   *
-   * 仅在已首次定位后、消息数量增加且仍在跟随底部时钉底。
-   * 用户上滑（isFollowingBottom=false）时不强行拉回。
-   */
-  useEffect(() => {
-    if (initialScrollDone.current && messages.length > lastMessageCount.current && isFollowingBottom.current) {
-      requestAnimationFrame(pinToBottom)
-    }
-    lastMessageCount.current = messages.length
-  }, [messages.length, pinToBottom])
-
-  /** 流式输出期间持续跟随底部（用户上滑后 isFollowingBottom=false，不再钉底） */
-  useEffect(() => {
-    if (isGenerating && isFollowingBottom.current) {
-      requestAnimationFrame(pinToBottom)
-    }
-  }, [isGenerating, messages, pinToBottom])
-
-  /** 流式结束后钉底一次（仅当仍在跟随底部时，否则用户在翻历史不打扰） */
-  useEffect(() => {
-    if (prevGenerating.current && !isGenerating && isFollowingBottom.current) {
-      const timer = setTimeout(pinToBottom, 300)
-      return () => clearTimeout(timer)
-    }
-    prevGenerating.current = isGenerating
-  }, [isGenerating, pinToBottom])
-
-  /**
-   * 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
-   *
-   * 读 onScroll 实时记录的 lastScrollTopRef（用户最后的真实滚动位置），而不读 DOM：
-   * 切 Tab 卸载时 React 先清空消息 DOM（scrollHeight/scrollTop 归 0），再跑 cleanup，
-   * 此时读 el.scrollTop 拿到的是垃圾值 0，存进缓存会导致切回时恢复到顶部。
-   * effect 运行时（commit 后）闭包捕获 DOM 引用；不在 cleanup 里直接读 ref，
-   * 因为卸载时 React 先 detach ref（置 null）再跑 passive effect cleanup。
-   */
-  useEffect(() => {
-    return () => {
-      if (tabId) {
-        scrollTopCache.set(tabId, lastScrollTopRef.current)
-      }
-    }
-  }, [tabId])
-
-  /** 切换会话时重置初始滚动标记 */
-  useEffect(() => {
-    if (messages.length === 0) {
-      initialScrollDone.current = false
-    }
-  }, [tabId])
+  const lastIsUser = messages[messages.length - 1]?.role === 'user'
+  const footerComponent = useMemo<ComponentType>(
+    () => () => (
+      <>
+        {isGenerating && lastIsUser && (
+          <div className="flex items-start gap-3 px-4 py-3">
+            <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
+              <Loader2 className="text-primary h-4 w-4 animate-spin" />
+            </div>
+            <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
+              <span className="text-muted-foreground text-sm">思考中...</span>
+            </div>
+          </div>
+        )}
+        <div className="h-4" />
+      </>
+    ),
+    [isGenerating, lastIsUser],
+  )
 
   /** 空状态渲染 */
   if (messages.length === 0) {
@@ -336,43 +250,37 @@ export const MessageList = ({
 
   return (
     <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      className={`min-h-0 flex-1 overflow-y-auto ${className}`}
-      style={{ overflowAnchor: 'auto' }}
+      className={`flex min-h-0 flex-1 flex-col ${className}`}
       data-testid="message-list"
     >
-      <div ref={contentRef}>
-        {/* 加载更多头部 */}
-        {hasMore && (
-          <div className="flex items-center justify-center py-4">
-            {isLoadingMore ? (
-              <div className="text-muted-foreground flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span className="text-sm">加载历史消息...</span>
-              </div>
-            ) : (
-              <div className="text-muted-foreground text-sm">向上滚动加载更多</div>
-            )}
-          </div>
-        )}
-
-        {/* 消息列表 */}
-        {messages.map((message, index) => renderItem(message, index))}
-
-        {/* 底部加载占位 */}
-        {isGenerating && messages[messages.length - 1]?.role === 'user' && (
-          <div className="flex items-start gap-3 px-4 py-3">
-            <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
-              <Loader2 className="text-primary h-4 w-4 animate-spin" />
-            </div>
-            <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
-              <span className="text-muted-foreground text-sm">思考中...</span>
-            </div>
-          </div>
-        )}
-        <div className="h-4" />
-      </div>
+      <Virtuoso<Message>
+        ref={virtuosoRef}
+        data={messages}
+        computeItemKey={(index) => {
+          const msg = messages[index]
+          return msg ? itemKey(msg) : index
+        }}
+        itemContent={itemContent}
+        firstItemIndex={FIRST_ITEM_INDEX_BASE - prependedCount}
+        initialTopMostItemIndex={Math.max(0, messages.length - 1)}
+        followOutput={followOutput}
+        startReached={startReached}
+        atBottomStateChange={atBottomStateChange}
+        scrollerRef={scrollerRef}
+        style={{ height: '100%' }}
+        components={{
+          Header: headerComponent,
+          Footer: footerComponent,
+        }}
+        increaseViewportBy={{ top: 600, bottom: 600 }}
+        atTopThreshold={200}
+        defaultItemHeight={120}
+      />
     </div>
   )
+}
+
+/** 消息项稳定 key：id + sequence，避免虚拟列表测量缓存因 key 漂移失效 */
+function itemKey(message: Message): string {
+  return `${message.id}-${message.sequence ?? 0}`
 }

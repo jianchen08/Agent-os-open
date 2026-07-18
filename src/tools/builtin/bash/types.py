@@ -6,12 +6,15 @@ Bash 工具类型定义
 - OutputType：OutputType类
 - OutputSummary：OutputSummary类
 - ProcessInfo：ProcessInfo类
+- ProcessBackend：进程执行/清理后端抽象（工具层）
+- WorkUnit：一次命令执行的可追踪、可杀句柄
 - LogCompressorConfig：LogCompressorConfig类
 """
 
 from __future__ import annotations
 
 import asyncio
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -87,10 +90,65 @@ class ProcessInfo:
     exit_code: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     output_task: asyncio.Task | None = None  # 输出读取任务引用，防止垃圾回收
-    stdin_fd: int | None = None  # stdin 管道的原始文件描述符，防御性后备写入
     # 最近一次被外部访问的时间（任何 get/send_input/terminate 调用都更新）。
-    # 看门狗据此判定进程是否已被 Agent 遗弃：running 状态长时间无访问 → 孤儿 → 杀。
-    # 合法长期进程（dev server / 下载）只要 Agent 周期性 continue 查看，就不会被判孤儿。
+    # 看门狗据此判定进程是否已被 Agent 遗弃：内存紧张时按 idle(=now-last_access)
+    # 排序，杀最久没访问的；idle>30min 无条件兜底杀。活跃进程(agent 一直访问)
+    # idle≈0，永不被杀。
     last_access_time: float = 0.0
-    # 句柄采样历史（看门狗判定资源失控用：超阈值 + 持续增长 → 杀）
-    handle_samples: list[int] = field(default_factory=list)
+    # 该工作单元所属的进程后端（看门狗杀进程时调 backend.kill）。
+    # 本地 bash 用 LocalProcessBackend，容器隔离用 ContainerProcessBackend。
+    backend: ProcessBackend | None = None
+
+
+@dataclass
+class WorkUnit:
+    """一次命令执行的可追踪、可杀句柄。
+
+    进程后端 launch 时返回。看门狗通过它定位并杀掉对应工作单元的整棵进程树。
+    - 本地后端：pid 是真实 OS pid，psutil 据此递归杀树。
+    - 容器后端：pgid 是容器内进程组号，docker exec kill -- -pgid 整组杀。
+    """
+
+    pid: int  # 主进程 pid（本地=OS pid；容器内可作标识）
+    command: str
+    pgid: int | None = None  # 进程组号（容器后端用，本地后端可不填）
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class ProcessBackend(ABC):
+    """进程执行/清理后端抽象（工具层）。
+
+    杀进程是工具的能力，隔离模式只是接入这个抽象的一种后端实现。
+    - LocalProcessBackend：本地宿主执行，psutil 递归杀进程树。
+    - ContainerProcessBackend：容器内 docker exec 执行，进程组整组杀。
+
+    看门狗（ProcessManager）的策略层只依赖此抽象，不关心进程跑在哪。
+    """
+
+    @abstractmethod
+    async def kill(self, unit: WorkUnit, force: bool = True) -> None:
+        """杀掉该工作单元的整棵进程树。
+
+        必须杀整树（含所有后代），否则孙子进程(cargo/rustc/cc)变孤儿继续跑，
+        是 setns 故障和 PID 耗尽的根因。
+        """
+
+    @abstractmethod
+    async def sample_memory(self) -> float | None:
+        """采样当前后端的内存使用率（0~1）。
+
+        返回 None 表示采样不可用（如容器 cgroup 读失败），看门狗据此降级
+        （退到 idle 兜底判据）。本地=宿主进程 RSS/total；容器=容器内存/limit。
+        """
+
+    async def sample_unit_memory(self, unit: WorkUnit) -> int | None:
+        """采样单个工作单元的内存占用（RSS 字节）。
+
+        默认实现返回 None（后端不支持单进程采样时降级）。看门狗据此判断
+        某个具体进程是否自己吃内存过多——比 sample_memory(系统整体水位)
+        对单进程失控更灵敏：31GB 宿主上单进程吃 2GB 只占 6% 触发不了
+        系统水位，但该进程自身 RSS 已远超其应有上限，应判为失控。
+        本地用 psutil 查单进程 RSS；容器读 /proc/<pid>/status 的 VmRSS。
+        返回 None 表示采样不可用。
+        """
+        return None

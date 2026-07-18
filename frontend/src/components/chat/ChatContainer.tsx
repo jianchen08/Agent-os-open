@@ -160,6 +160,10 @@ export const ChatContainer = ({
       return pid ? (s.streamingState[pid]?.isStreaming ?? false) : false
     }
   )
+  /** 累计向上翻页条数（驱动虚拟列表 firstItemIndex，prepend 时保持视口位置） */
+  const prependedCount = usePipelineMessageStore(
+    (s) => (currentTabPipelineId ? (s.prependedCountByPipeline[currentTabPipelineId] ?? 0) : 0),
+  )
 
 
   /** 根据当前模型名获取动态 context_window 模型无效时 contextWindow=0，使下游进度条（maxTokens>0 才渲染）不显示假数据。 */
@@ -269,6 +273,7 @@ export const ChatContainer = ({
         sessionId={sessionId}
         searchQuery={searchQuery}
         taskId={activeTab?.taskId}
+        prependedCount={prependedCount}
       />
 
       {/* 子Tab路由增强（无UI，逻辑层） */}

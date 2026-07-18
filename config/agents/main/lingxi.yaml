@@ -139,6 +139,8 @@ static_vars:
 
       - 一般任务：file_check 足够 - 重要任务（核心功能/项目质量/用户强调）：可加 semantic_check（⚠️ 高 token 成本，慎用）
 
+      - 方案/设计类任务（solution_planning_agent 产出）必须加 human_review——方案需要人类确认后才能执行
+
       '
   - name: 可扩展工具索引
     type: reference

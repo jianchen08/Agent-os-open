@@ -18,7 +18,14 @@ echo Ports: frontend=!FRONTEND_HOST_PORT! backend=!BACKEND_PORT! Redis=!REDIS_HO
 echo.
 
 REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
+REM 上限提到 5：冷启动期（刚 wsl --shutdown 重启后）文件系统/wslpath/wsl.exe
+REM 响应未就绪会被探针报成非 0 码，需更多重试机会让 WSL 暖好，避免误放弃。
 if not defined SHUTDOWN_RETRY set "SHUTDOWN_RETRY=0"
+REM POST_SHUTDOWN_GRACE=1 表示刚执行过 wsl --shutdown 重启，处于冷启动宽限窗口。
+REM 此窗口内探针的非 0 码（124/126/127 等瞬时故障）走原地重试而非直接判死锁。
+if not defined POST_SHUTDOWN_GRACE set "POST_SHUTDOWN_GRACE=0"
+REM health probe 原地重试计数（:probe_transient 内自增），与 SHUTDOWN_RETRY 分开计数
+if not defined PROBE_RETRY set "PROBE_RETRY=0"
 
 REM NOTE: we do NOT unconditionally `wsl --shutdown` at startup.
 REM That would kill a running dockerd + containers and break a healthy WSL session.
@@ -42,16 +49,35 @@ if not "!WSL_ALIVE_RC!"=="0" goto :probe_other_error
 goto :probe_ok
 
 :probe_deadlocked
+REM rc=124 = wsl.exe 超时。冷启动宽限窗口内（刚 shutdown 重启）这通常是
+REM WSL 还没暖好而非真死锁，走原地重试；否则才升级为 wsl --shutdown。
+if "!POST_SHUTDOWN_GRACE!"=="1" goto :alive_probe_transient
 set "REASON=WSL probe timeout (kernel deadlock?)"
 goto :auto_shutdown
 
 :probe_other_error
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
+REM 冷启动宽限窗口内，WSL 不可用多为瞬时（systemd 初始化未完成），原地重试
+if "!POST_SHUTDOWN_GRACE!"=="1" goto :alive_probe_transient
 echo [ERROR] WSL unavailable rc=!WSL_ALIVE_RC!, cannot start without WSL2 + docker-ce
 echo [ERROR] Docker Desktop is no longer supported. Run install_native_docker.bat to set up WSL2 docker first.
 pause
 exit /b 1
+
+:alive_probe_transient
+REM 冷启动宽限：wsl_alive_probe 非正常返回，原地重探而非直接 shutdown。
+REM 与 :probe_transient（health probe 重试）共用 PROBE_RETRY 计数。
+set /a "PROBE_RETRY+=1"
+if !PROBE_RETRY! gtr 6 (
+    echo [WARN] alive probe transient retry exhausted (!PROBE_RETRY! times), escalating to wsl --shutdown
+    set "POST_SHUTDOWN_GRACE=0"
+    set "REASON=alive probe stuck after grace retries"
+    goto :auto_shutdown
+)
+echo [INFO] WSL not ready yet (rc=!WSL_ALIVE_RC!), grace retry !PROBE_RETRY!/6...
+ping -n 4 127.0.0.1 >nul
+goto :wsl_alive_entry
 
 :probe_ok
 echo [OK] WSL responding OK
@@ -85,17 +111,55 @@ REM    later pgrep/docker probes are not infected and hang.
 REM    Outer timeout 30s backstop (probe normally <3s; if even reading /proc
 REM    hangs, the timeout will force-kill it).
 echo [INFO] Checking WSL kernel health...
-wsl -d Ubuntu -u root -- bash -c "timeout 30 %WSL_DIR%/wsl_health_probe.sh %WSL_DIR%" 2>&1
+REM 先校验脚本路径可达：冷启动期 wslpath 可能尚未就绪，导致 "No such file"。
+REM 路径不可达属瞬时故障，走 :probe_transient 原地重试，而非误判为死锁。
+wsl -d Ubuntu -u root -- bash -c "test -f '%WSL_DIR%/wsl_health_probe.sh'" 2>nul
+if errorlevel 1 goto :probe_transient
+REM 注意：wsl_health_probe.sh 不接受位置参数，旧代码误传 %WSL_DIR% 会被忽略，
+REM 但在 timeout 外壳 + 冷启动 wslpath 未稳时可能触发 "No such file"，故显式 bash 调用。
+wsl -d Ubuntu -u root -- bash -c "timeout 30 bash %WSL_DIR%/wsl_health_probe.sh" 2>&1
 set "HEALTH_RC=!errorlevel!"
 if "!HEALTH_RC!"=="0" goto :wsl_alive_ok
 if "!HEALTH_RC!"=="8" goto :wsl_polluted
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
-REM timeout force-kill returns 124, or other anomaly -> treat as pollution
-echo [WARN] health probe abnormal (rc=!HEALTH_RC!), treat as kernel pollution
-goto :wsl_polluted
+REM 三分法：只有脚本主动 exit 8（确证 D-state 死锁）才 shutdown；
+REM 其余非 0 码（124=timeout 外壳超时, 126=I/O error, 127=command not found 等）
+REM 是冷启动期瞬时故障，走 :probe_transient 原地重试，不再一律判死锁。
+echo [WARN] health probe abnormal (rc=!HEALTH_RC!), treating as transient (not deadlock)
+goto :probe_transient
+
+:probe_transient
+REM health probe 冷启动宽限：非 8 的非 0 码多为 WSL 刚重启后文件系统/IO 未就绪，
+REM 原地短重试让 WSL 暖好，不立即 wsl --shutdown（避免把刚启动好的内核又打回重启）。
+set /a "PROBE_RETRY+=1"
+if !PROBE_RETRY! gtr 6 (
+    echo [WARN] health probe transient retry exhausted (!PROBE_RETRY! times), escalating
+    set "PROBE_RETRY=0"
+    set "REASON=health probe stuck after grace retries"
+    goto :auto_shutdown
+)
+echo [INFO] WSL kernel probe not ready (rc=!HEALTH_RC!), grace retry !PROBE_RETRY!/6...
+ping -n 4 127.0.0.1 >nul
+REM 重试时重新校验路径 + 跑探针（不重置 POST_SHUTDOWN_GRACE）
+wsl -d Ubuntu -u root -- bash -c "test -f '%WSL_DIR%/wsl_health_probe.sh'" 2>nul
+if errorlevel 1 goto :probe_transient
+wsl -d Ubuntu -u root -- bash -c "timeout 30 bash %WSL_DIR%/wsl_health_probe.sh" 2>&1
+set "HEALTH_RC=!errorlevel!"
+if "!HEALTH_RC!"=="0" goto :probe_transient_ok
+if "!HEALTH_RC!"=="8" goto :wsl_polluted
+goto :probe_transient
+
+:probe_transient_ok
+echo [OK] WSL kernel healthy after grace retries
+set "PROBE_RETRY=0"
+goto :wsl_alive_ok
 
 :wsl_alive_ok
+REM WSL 已就绪：关闭冷启动宽限窗口。后续 daemon/containers 阶段的 rc=7（真死锁）
+REM 走正常 wsl --shutdown 路径，不再受 grace 宽限保护。
+set "POST_SHUTDOWN_GRACE=0"
+set "PROBE_RETRY=0"
 REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
 powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
 
@@ -173,20 +237,24 @@ set "REASON=WSL kernel polluted by D-state deadlock"
 
 :auto_shutdown
 set /a "SHUTDOWN_RETRY+=1"
-if !SHUTDOWN_RETRY! gtr 3 (
+if !SHUTDOWN_RETRY! gtr 5 (
     echo [ERROR] auto wsl --shutdown retried !SHUTDOWN_RETRY!  times still failed, giving up
     echo [ERROR] reason: !REASON!
     echo [ERROR] Run wsl --shutdown manually, wait 10s, re-run this script
     pause
     exit /b 7
 )
-echo [WARN] !REASON!, auto wsl --shutdown then retry ^( !SHUTDOWN_RETRY!/3 ^)...
+echo [WARN] !REASON!, auto wsl --shutdown then retry ^( !SHUTDOWN_RETRY!/5 ^)...
 REM wsl --shutdown itself may hang under kernel deadlock; wrap in timeout (wsl_shutdown.ps1).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Timeout 15 >nul 2>&1
 echo [INFO] Waiting for WSL kernel to exit ^(~10s^)...
 REM ping-based delay avoids timeout.exe (unreliable under non-interactive shells).
 ping -n 11 127.0.0.1 >nul
-echo [INFO] Re-probing WSL response...
+REM 标记进入冷启动宽限窗口：shutdown 重启后 WSL 需要时间暖好，
+REM 此窗口内探针的非 0 码走原地重试而非再次 shutdown（避免反复打回重启）。
+set "POST_SHUTDOWN_GRACE=1"
+set "PROBE_RETRY=0"
+echo [INFO] Re-probing WSL response...^(grace window on^)
 goto :wsl_alive_entry
 
 :containers_ok

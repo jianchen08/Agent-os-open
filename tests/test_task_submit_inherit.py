@@ -593,6 +593,72 @@ class TestInheritPipeConversationHistoryBug:
             f"实际为 {task_data.get('_inherit_pipe_pipeline_id')}"
         )
 
+    @pytest.mark.asyncio
+    async def test_retry_resets_eval_counters(self):
+        """retry 时应清空上一轮评估计数器，避免新轮评估立即命中上限。
+
+        回归：失败任务 continue 后，eval_total_calls / eval_retry_count
+        必须被重置，否则新一轮第一次提交评估即触发 EVAL_CALL_LIMIT_EXCEEDED。
+        """
+        from tools.builtin.task.tool import TaskTool
+        from tasks.types import TaskModel, TaskStatus
+        from tasks.service import TaskService as _TS
+
+        tool = TaskTool()
+
+        task = TaskModel(
+            id="task_retry_eval_001",
+            title="评估失败重试任务",
+            description="测试评估计数器重置",
+            agent_name="test_agent",
+            agent_level="L2",
+            status=TaskStatus.FAILED,
+            metadata={
+                "acceptance_criteria": {"file_check": {"input_params": {"path": "test.txt"}}},
+                "max_retries": 6,
+                "retry_count": 0,
+                "target_id": "test_agent",
+                "ws_meta": {"path": "/tmp/ws"},
+                "isolation_level": "non_isolated",
+                "workspace": "/tmp/ws",
+                # 上一轮评估残留的计数器（模拟已命中上限的状态）
+                "eval_total_calls": 15,
+                "eval_retry_count": {"file_check": 3},
+            },
+            pipeline_run_id="current_pipeline_id",
+            parent_pipeline_id="parent_pipeline_id",
+        )
+
+        mock_service = MagicMock(spec=_TS)
+        mock_service.get_task.return_value = task
+        mock_service.force_transition = AsyncMock()
+        mock_service.save_task = AsyncMock()
+
+        mock_task_worker = MagicMock()
+        mock_task_worker.submit_task.return_value = True
+
+        with (
+            patch("tools.builtin.task.tool.TaskTool._get_task_service", return_value=mock_service),
+            patch("infrastructure.service_provider.get_service_provider") as mock_sp,
+        ):
+            mock_sp_inst = MagicMock()
+            mock_sp_inst.get.side_effect = lambda key: (
+                mock_task_worker if key == "task_worker" else None
+            )
+            mock_sp.return_value = mock_sp_inst
+
+            result = await tool._retry_from_terminal(task, "", mock_service)
+
+        # 核心断言：评估计数器必须被清空
+        assert "eval_total_calls" not in task.metadata, (
+            "retry 后 eval_total_calls 必须被清空，否则新轮评估立即命中上限"
+        )
+        assert "eval_retry_count" not in task.metadata, (
+            "retry 后 eval_retry_count 必须被清空，否则新轮评估立即命中上限"
+        )
+        # retry_count 应正常递增（确认只清了 eval 计数器，未误伤其它字段）
+        assert task.metadata["retry_count"] == 1
+
     def test_build_metadata_stores_inherit_pipe_from(self):
         """_build_metadata 应持久化 inherit_pipe_from 供 retry 恢复使用。"""
         tool = TaskSubmitTool()

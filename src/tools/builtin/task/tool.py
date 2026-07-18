@@ -927,6 +927,11 @@ class TaskTool(BuiltinTool):
 
         task.metadata["retry_count"] = retry_count + 1
 
+        # 重置上一轮评估计数器，避免新轮评估立即命中上限而失败
+
+        task.metadata.pop("eval_total_calls", None)
+        task.metadata.pop("eval_retry_count", None)
+
         # 利用状态机从 failed/timeout → pending
 
         await service.force_transition(task.id, TaskStatus.PENDING)

@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 import { Splitter } from 'antd'
 import apiClient from '@/services/api/client'
 import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
+import type { LayoutConfig } from '@/types/layout'
 import { schemaRegistry } from '@/services/schema/registry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
@@ -74,6 +75,8 @@ export function FiveSpaceLayout({
   const workspaceCollapsed = useUIStore((s) => s.workspaceCollapsed)
   const toggleWorkspace = useUIStore((s) => s.toggleWorkspace)
   const setWorkspaceCollapsed = useUIStore((s) => s.setWorkspaceCollapsed)
+  const workspacePanelRatio = useUIStore((s) => s.workspacePanelRatio)
+  const setWorkspacePanelRatio = useUIStore((s) => s.setWorkspacePanelRatio)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false)
   /** 移动端工作区覆盖层是否打开 */
@@ -158,10 +161,21 @@ export function FiveSpaceLayout({
   }, [closeWorkspaceTab])
 
   // Layout resolution
-  const layoutConfig = useMemo(() => safeLoadLayout((themeConfig as any)?.layout), [themeConfig])
+  // themeConfig 异步解析（主题从 store/API 加载），刷新后会在首帧后才就位。
+  // 若 layoutConfig 直接依赖 themeConfig，则 resolved 会随 themeConfig 到达而重算，
+  // 导致已渲染的面板像素宽度被覆盖（Splitter.Panel 的 size 是受控的）→ 面板宽度跳动。
+  // 修复：首次解析出有效 layoutConfig 后冻结，之后 themeConfig 变化不再重算面板宽度。
+  // themeConfig 的布局字段基本是静态的（min/max/default 宽度），无需跟随重算；
+  // 面板宽度只在用户主动操作（拖拽改 ratio）或窗口 resize 时变。
+  const themeLayoutRaw = (themeConfig as any)?.layout
+  const frozenLayoutRef = useRef<LayoutConfig | null>(null)
+  if (!frozenLayoutRef.current) {
+    frozenLayoutRef.current = safeLoadLayout(themeLayoutRaw)
+  }
+  const layoutConfig = frozenLayoutRef.current
   const resolved = useMemo(
-    () => resolveLayout(layoutConfig, viewportWidth),
-    [layoutConfig, viewportWidth],
+    () => resolveLayout(layoutConfig, viewportWidth, workspacePanelRatio ?? undefined),
+    [layoutConfig, viewportWidth, workspacePanelRatio],
   )
   const breakpoint = useMemo(
     () => getBreakpoint(viewportWidth, layoutConfig.breakpoints),
@@ -590,10 +604,23 @@ export function FiveSpaceLayout({
                     toggleWorkspace()
                   }
                 }}
+                onResizeEnd={(sizes) => {
+                  // sizes 为像素数组 [chatPx, workspacePx]；换算成工作区比例并持久化
+                  const total = sizes[0] + sizes[1]
+                  if (!total || !Number.isFinite(total)) return
+                  let ratio = sizes[1] / total
+                  // 夹到合理区间，避免越界或低于最小宽度对应的极端比例
+                  const minChat = resolved.chatPanel.minWidth
+                  const minWorkspace = resolved.workspacePanel.minWidth
+                  const minRatio = minWorkspace / total
+                  const maxRatio = 1 - minChat / total
+                  ratio = Math.min(Math.max(ratio, minRatio), maxRatio)
+                  setWorkspacePanelRatio(ratio)
+                }}
               >
                 {/* Chat Panel */}
                 <Splitter.Panel
-                  defaultSize={resolved.chatPanel.width}
+                  size={resolved.chatPanel.width}
                   min={resolved.chatPanel.minWidth}
                 >
                   <div className="border-border h-full overflow-hidden border-r">
@@ -603,6 +630,7 @@ export function FiveSpaceLayout({
                 {/* Workspace Panel */}
                 <Splitter.Panel
                   collapsible
+                  size={resolved.workspacePanel.width}
                   min={resolved.workspacePanel.minWidth}
                 >
                   <section className="h-full min-w-0 overflow-hidden">

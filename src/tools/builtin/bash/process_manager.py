@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 from tools.builtin.bash.encoding import EncodingHandler
 from tools.builtin.bash.input_handler import InputHandler
 from tools.builtin.bash.log_compressor import LogCompressor
-from tools.builtin.bash.types import ProcessInfo
+from tools.builtin.bash.types import ProcessBackend, ProcessInfo, WorkUnit
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +43,31 @@ class ProcessManager:
         # 输入处理器
         self.input_handler = InputHandler()
 
-        # ── 看门狗配置（防止失控进程拖垮系统）──
-        # 触发条件（满足任一即杀，后台自动处理，不通知 Agent）：
-        #   1. 资源失控：句柄 > HANDLE_THRESHOLD 且连续 HANDLE_GROW_ROUNDS 次采样都在增长
-        #      （双条件避免误杀 build：build 飙高后会回落，不满足"持续增长"）
-        #   2. 孤儿进程：running 状态超过 ORPHAN_TIMEOUT 秒无任何外部访问
-        #      （合法长期进程只要 Agent 周期性 continue/input/read_log 就不会被判孤儿）
-        self._watchdog_interval: float = 10.0  # 采样间隔（秒）
-        self._handle_threshold: int = 100000  # 句柄绝对阈值
-        self._handle_grow_rounds: int = 3  # 连续增长采样次数
-        self._orphan_timeout: float = 1800.0  # 孤儿判定：30 分钟无访问
+        # ── 看门狗配置（内存水位驱动 + idle 排序杀）──
+        # 触发条件（后台自动处理，不通知 Agent）：
+        #   1. 内存高水位：采样内存使用率 ≥ high_watermark(85%) → 按 idle(最久没访问)
+        #      排序，从最闲的开始杀，每杀一个重采样，回落到 low_watermark(70%) 即停。
+        #      不一刀切，保 2-3G 容几个并发工作单元。
+        #   2. 孤儿兜底：running 状态超 30 分钟无任何外部访问 → 无条件杀
+        #      （内存没涨但进程确被遗忘的情况）。
+        # 判据看 idle(now - last_access_time) 不是 age(start_time)：
+        # 活跃 dev server 虽启动早但 agent 一直访问 → idle≈0 → 不杀；
+        # 跑飞的 cargo build 无人管 → idle 涨 → 内存紧张时优先杀。
+        self._watchdog_interval: float = 10.0  # 巡检间隔（秒）
+        self._cleanup_high_watermark: float = 0.85  # 内存高水位：触发清理
+        self._cleanup_low_watermark: float = 0.70  # 内存低水位：停止清理
+        self._orphan_timeout: float = 1800.0  # 孤儿兜底：30 分钟无访问无条件杀
+        # 单进程内存维度：某工作单元自身 RSS 超过此阈值即判为失控候选。
+        # 比系统水位更灵敏——31GB 宿主上单进程吃 2GB 只占 6% 触发不了系统水位，
+        # 但该进程自身已远超合理上限，应杀。默认 2GB(覆盖大部分 build 场景)。
+        # 可经环境变量 AO_UNIT_MEMORY_LIMIT_MB 覆盖。
+        self._unit_memory_limit: int = int(
+            os.environ.get("AO_UNIT_MEMORY_LIMIT_MB", "2048")
+        ) * 1024 * 1024
         self._watchdog_task: asyncio.Task | None = None
+        # 默认内存后端：本地宿主。容器隔离路径会注入 ContainerProcessBackend。
+        # 看门狗策略层只依赖 backend.sample_memory()，不关心进程跑在哪。
+        self._memory_backend: ProcessBackend | None = None
 
     def _generate_log_filename(self, command: str) -> str:
         """生成日志文件名"""
@@ -208,17 +222,14 @@ class ProcessManager:
 
         pid = process.pid
 
-        # 捕获 stdin 原始管道句柄，绕过 asyncio transport 层直写
-        # process.stdin._transport._sock 可能被 asyncio 置 None
-        stdin_fd = self._capture_stdin_fd(process)
-
         # 写入日志头部
         self._write_log_header(log_file, command, pid)
 
         # 启动日志读取任务并保存引用
         output_task = asyncio.create_task(self._read_output(pid, process, log_file))
 
-        # 保存进程信息
+        # 保存进程信息。注入本地后端，使看门狗的单进程内存维度判据生效
+        # （sample_unit_memory 用 psutil 查该进程及其后代 RSS，超阈值按 idle 杀）。
         self.active_processes[pid] = ProcessInfo(
             pid=pid,
             command=command,
@@ -227,7 +238,7 @@ class ProcessManager:
             process=process,
             status="running",
             output_task=output_task,
-            stdin_fd=stdin_fd,
+            backend=_get_local_backend(),
             last_access_time=time.time(),
         )
         # 确保看门狗在运行（首次启动进程时启动，幂等）
@@ -332,52 +343,12 @@ class ProcessManager:
         except OSError:
             pass
 
-    @staticmethod
-    def _kill_process_tree(root_pid: int, force: bool) -> None:
-        """杀掉以 root_pid 为根的整棵进程树。
-
-        防止孙子进程变孤儿：bash 壳被杀后，它 fork 出的 cargo/rustc/cc 等
-        后代收不到信号会继续跑（Unix 下被 init 收养；Windows 下同理）。
-
-        用 psutil（项目硬依赖）递归枚举后代，叶子→根顺序逐个终止，
-        最后杀根。任一进程已死则跳过（NoSuchProcess）。
-        force=True 用 kill()（Unix SIGKILL / Windows TerminateProcess），
-        否则 terminate()（Unix SIGTERM，给清理机会）。
-        """
-        try:
-            import psutil  # noqa: PLC0415
-        except ImportError:
-            return  # psutil 不可用时，交给调用方回退单进程杀
-
-        try:
-            parent = psutil.Process(root_pid)
-        except psutil.NoSuchProcess:
-            return
-
-        # children(recursive=True) 已是叶子→...→根 的稳定顺序（psutil 保证）
-        try:
-            descendants = parent.children(recursive=True)
-        except psutil.NoSuchProcess:
-            descendants = []
-
-        for proc in descendants:
-            try:
-                proc.kill() if force else proc.terminate()
-            except psutil.NoSuchProcess:
-                continue
-            except psutil.AccessDenied:
-                continue
-
-        # 最后杀根进程
-        try:
-            parent.kill() if force else parent.terminate()
-        except psutil.NoSuchProcess:
-            pass
-        except psutil.AccessDenied:
-            pass
-
     async def terminate_process(self, pid: int, force: bool = False) -> tuple[bool, str | None]:
-        """终止进程及其整棵进程树。"""
+        """终止进程及其整棵进程树。
+
+        优先用进程所属 backend 的 kill（整树杀）；本地无 backend 的旧进程
+        回退到 LocalProcessBackend 的 psutil 整树杀。
+        """
         if pid not in self.active_processes:
             return False, f"进程 {pid} 不存在"
 
@@ -387,8 +358,11 @@ class ProcessManager:
             return False, "进程未在运行"
 
         try:
-            # 先杀整棵进程树（孙子进程不再变孤儿），再由 asyncio reap 根进程
-            self._kill_process_tree(proc_info.process.pid, force=force)
+            # 整树杀：防止孙子进程(cargo/rustc/cc)变孤儿继续跑。
+            # 本地进程走 LocalProcessBackend(psutil 递归杀树)。
+            backend = proc_info.backend or _get_local_backend()
+            unit = WorkUnit(pid=proc_info.process.pid, command=proc_info.command)
+            await backend.kill(unit, force=force)
 
             try:
                 await asyncio.wait_for(proc_info.process.wait(), timeout=5.0)
@@ -487,10 +461,9 @@ class ProcessManager:
         if info is not None:
             info.last_access_time = time.time()
 
-    # ── 看门狗：监控失控进程 ──────────────────────────────────────
-    # 周期采样所有 running 进程，满足任一条件直接杀（不通知 Agent）：
-    #   1. 资源失控：句柄 > 阈值 且 连续 N 次采样都在增长
-    #   2. 孤儿进程：running 超 30 分钟无任何外部访问
+    # ── 看门狗：内存水位驱动 + idle 排序杀 ─────────────────────────
+    # 周期采样内存水位，达高水位按 idle(最久没访问)排序杀最闲的，回落即停。
+    # 兜底：idle 超 30 分钟无条件杀。判据看 idle 不看 age（活跃进程不杀）。
 
     def _ensure_watchdog(self) -> None:
         """确保看门狗后台任务在运行（幂等，重复调用安全）。"""
@@ -505,7 +478,7 @@ class ProcessManager:
             pass
 
     async def _watchdog_loop(self) -> None:
-        """看门狗主循环：周期采样 running 进程，发现失控即杀。"""
+        """看门狗主循环：周期巡检，内存高水位时杀最闲进程。"""
         while True:
             await asyncio.sleep(self._watchdog_interval)
             try:
@@ -518,94 +491,158 @@ class ProcessManager:
                 logger.error("[Watchdog] 看门狗巡检异常（非致命，继续）: %s", e, exc_info=True)
 
     async def _watchdog_check_once(self) -> None:
-        """单次巡检：扫描所有 running 进程，判定失控并处理。"""
+        """单次巡检：内存高水位时按 idle 排序杀最闲进程；idle 超时兜底杀。"""
         now = time.time()
-        # 快照当前 running 进程（迭代中 terminate 会修改字典）
+        # 快照当前 running 进程（迭代中 kill 会修改字典）
         running = [(pid, info) for pid, info in list(self.active_processes.items()) if info.status == "running"]
         if not running:
             return
 
+        # 先同步清理已退出的，避免对死进程做无谓采样/杀
         for pid, info in running:
-            # 先同步检测是否已退出（避免对已死进程做无谓采样）
             self._sync_poll_process(info)
-            if info.status != "running":
-                continue
 
-            # ── 判据1：孤儿进程（无访问超时）──
+        live = [(pid, info) for pid, info in running if info.status == "running"]
+        if not live:
+            return
+
+        # ── 判据0：单进程内存失控 → 某工作单元自身 RSS 超阈值即杀 ──
+        # 比系统水位更灵敏：31GB 宿主上单进程吃 2GB 只占 6%，触发不了系统水位，
+        # 但该进程自身已远超合理上限(_unit_memory_limit)。按 idle 排序，
+        # 只杀超阈值且最久没访问的（活跃的超内存进程先观察，优先杀被遗忘的）。
+        await self._cleanup_by_unit_memory(live, now)
+        # 杀完后重新快照
+        live = [
+            (pid, info)
+            for pid, info in list(self.active_processes.items())
+            if info.status == "running"
+        ]
+
+        # ── 判据1：内存高水位 → 按 idle 排序杀最闲的，回落即停 ──
+        if self._memory_backend is not None:
+            try:
+                mem_ratio = await self._memory_backend.sample_memory()
+            except Exception as e:
+                logger.warning("[Watchdog] 内存采样失败，跳过水位判据: %s", e)
+                mem_ratio = None
+
+            if mem_ratio is not None and mem_ratio >= self._cleanup_high_watermark:
+                await self._cleanup_by_idle(live, now)
+                # 杀完后重新快照（dict 可能已变），下面的孤儿兜底用新快照
+                live = [
+                    (pid, info)
+                    for pid, info in list(self.active_processes.items())
+                    if info.status == "running"
+                ]
+
+        # ── 判据2：孤儿兜底（idle 超 30 分钟无条件杀）──
+        for pid, info in live:
             idle_secs = now - info.last_access_time
             if idle_secs >= self._orphan_timeout:
                 logger.error(
-                    "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | 无访问 %.0fs（阈值 %.0fs）| 句柄历史=%s",
-                    pid,
-                    info.command,
-                    idle_secs,
-                    self._orphan_timeout,
-                    info.handle_samples[-3:],
+                    "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | 无访问 %.0fs（阈值 %.0fs）",
+                    pid, info.command, idle_secs, self._orphan_timeout,
                 )
                 await self._watchdog_kill(pid, info, "orphan")
+
+    async def _cleanup_by_unit_memory(self, live: list[tuple[int, ProcessInfo]], now: float) -> None:
+        """单进程内存失控清理:某工作单元自身 RSS 超阈值即判为失控候选。
+
+        比系统水位更灵敏——单进程吃 2GB 在大宿主上触发不了系统水位,但该进程
+        自身已超 _unit_memory_limit。按 idle 排序,优先杀超阈值且最久没访问的:
+        活跃的超内存进程(agent 在用的 dev server)先观察不杀,被遗忘的失控
+        build 才杀。best-effort,采样失败跳过该单元。
+        """
+        if self._unit_memory_limit <= 0:
+            return
+
+        # 收集超内存阈值的工作单元(idle 降序)
+        over_limit: list[tuple[int, ProcessInfo, int]] = []
+        for pid, info in live:
+            backend = info.backend
+            if backend is None:
                 continue
+            try:
+                unit = WorkUnit(pid=pid, command=info.command)
+                rss = await backend.sample_unit_memory(unit)
+            except Exception:
+                rss = None
+            if rss is not None and rss >= self._unit_memory_limit:
+                over_limit.append((pid, info, rss))
 
-            # ── 判据2：资源失控（句柄超阈值 + 持续增长）──
-            handles = self._sample_handles(pid)
-            if handles is not None:
-                info.handle_samples.append(handles)
-                # 只保留最近 N+1 次采样，防止无限增长
-                keep = self._handle_grow_rounds + 1
-                if len(info.handle_samples) > keep:
-                    info.handle_samples = info.handle_samples[-keep:]
+        if not over_limit:
+            return
 
-                if self._is_resource_out_of_control(info.handle_samples):
-                    logger.error(
-                        "[Watchdog] 资源失控进程终止 | pid=%s cmd=%.60s | 句柄=%d（阈值 %d）| 采样历史=%s",
-                        pid,
-                        info.command,
-                        handles,
-                        self._handle_threshold,
-                        info.handle_samples,
-                    )
-                    await self._watchdog_kill(pid, info, "resource")
-                    continue
+        # 按 idle 降序（最久没访问的超内存进程先杀）
+        over_limit.sort(key=lambda x: now - x[1].last_access_time, reverse=True)
+        for pid, info, rss in over_limit:
+            logger.warning(
+                "[Watchdog] 单进程内存失控清理 | pid=%s cmd=%.60s | RSS=%.0fMB（阈值 %.0fMB）| idle=%.0fs",
+                pid, info.command, rss / 1024 / 1024,
+                self._unit_memory_limit / 1024 / 1024,
+                now - info.last_access_time,
+            )
+            await self._watchdog_kill(pid, info, "unit_memory")
 
-    def _sample_handles(self, pid: int) -> int | None:
-        """采样进程句柄数。失败返回 None（不作为失控判据）。"""
-        try:
-            import psutil  # noqa: PLC0415
+    async def _cleanup_by_idle(self, live: list[tuple[int, ProcessInfo]], now: float) -> None:
+        """内存高水位时：按 idle(最久没访问)排序，从最闲开始杀，回落低水位即停。
 
-            p = psutil.Process(pid)
-            # num_handles 是 Windows 专属；其他平台用 num_fds 兜底
-            if hasattr(p, "num_handles"):
+        进入此方法时内存已确认 ≥ high_watermark（调用方已采样判断）。
+        第一次直接杀最闲的（已知高），杀完重采样，回落到 low_watermark 即停——
+        不一刀切清空，保 2-3G 容几个并发工作单元。
+        判据是 idle 不是 age：活跃进程 idle≈0 排最后。
+        """
+        if self._memory_backend is None:
+            return
+        # 按 idle 降序（最久没访问的排前）
+        by_idle = sorted(live, key=lambda kv: now - kv[1].last_access_time, reverse=True)
+
+        for idx, (pid, info) in enumerate(by_idle):
+            # 第一次不采样（调用方已确认高水位）；后续每杀一个重采样判断回落
+            if idx > 0:
                 try:
-                    return p.num_handles()
+                    mem_ratio = await self._memory_backend.sample_memory()
                 except Exception:
-                    pass
-            if hasattr(p, "num_fds"):
-                try:
-                    return p.num_fds()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return None
+                    break  # 采样失败，停止本轮清理（避免盲目杀）
+                if mem_ratio is None or mem_ratio < self._cleanup_low_watermark:
+                    break  # 已回落到低水位，停
 
-    def _is_resource_out_of_control(self, samples: list[int]) -> bool:
-        """判定资源是否失控：超阈值 且 连续 N 次都在增长。"""
-        rounds = self._handle_grow_rounds
-        if len(samples) < rounds + 1:
-            return False  # 采样不足，不判定
-        recent = samples[-(rounds + 1) :]
-        if recent[-1] < self._handle_threshold:
-            return False  # 没超阈值
-        # 连续 rounds 次都在增长
-        return all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
+            logger.warning(
+                "[Watchdog] 内存高水位清理 | 杀最闲进程 pid=%s cmd=%.60s | idle=%.0fs",
+                pid, info.command, now - info.last_access_time,
+            )
+            await self._watchdog_kill(pid, info, "memory_pressure")
 
     async def _watchdog_kill(self, pid: int, info: ProcessInfo, reason: str) -> None:
-        """看门狗强制终止进程（best-effort，失败仅记日志）。"""
+        """看门狗强制终止进程（best-effort，失败仅记日志）。
+
+        优先调进程所属 backend 的 kill（整树杀）；无 backend 则回退 terminate_process。
+        """
         try:
-            # 复用现有 terminate 逻辑（含 process.terminate/kill）
-            await self.terminate_process(pid, force=True)
+            if info.backend is not None:
+                unit = WorkUnit(pid=pid, command=info.command, pgid=info.metadata.get("pgid"))
+                await info.backend.kill(unit, force=True)
+                # 本地后端杀完后仍需 reap asyncio Process 并标记状态
+                await self._reap_after_kill(pid, info)
+            else:
+                await self.terminate_process(pid, force=True)
             logger.info("[Watchdog] 已终止 pid=%s reason=%s", pid, reason)
         except Exception as e:
             logger.error("[Watchdog] 终止 pid=%s 失败: %s", pid, e)
+
+    async def _reap_after_kill(self, pid: int, info: ProcessInfo) -> None:
+        """backend 整树杀后，reap 本地 asyncio Process 并更新状态。"""
+        if info.process is not None:
+            try:
+                await asyncio.wait_for(info.process.wait(), timeout=3.0)
+            except Exception:  # noqa: BLE001
+                try:
+                    info.process.kill()
+                    await info.process.wait()
+                except Exception:  # noqa: BLE001
+                    pass
+        info.status = "terminated"
+        self._append_to_log(info.log_file, "\n# Process terminated by watchdog\n")
 
     # ── 进程状态同步检测 ──────────────────────────────────────────
 
@@ -647,50 +684,6 @@ class ProcessManager:
                     proc_info.status = "completed" if proc_info.exit_code == 0 else "error"
         except Exception:
             pass
-
-    # ── stdin 直写支持 ────────────────────────────────────────────
-
-    @staticmethod
-    def _capture_stdin_fd(process: asyncio.subprocess.Process) -> int | None:
-        """从进程对象中捕获 stdin 管道的文件描述符。"""
-        try:
-            stdin = process.stdin
-            if stdin is None:
-                return None
-            transport = getattr(stdin, "_transport", None)
-            if transport is None:
-                return None
-            sock = getattr(transport, "_sock", None)
-            if sock is None or not hasattr(sock, "fileno"):
-                return None
-            return sock.fileno()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _raw_stdin_write(data: bytes, proc_info: ProcessInfo) -> bool:
-        """使用原始管道句柄直写 stdin，完全绕过 asyncio。"""
-        fd = proc_info.stdin_fd
-        if fd is None:
-            return False
-
-        try:
-            if platform.system() == "Windows":
-                import _winapi  # noqa: PLC0415
-
-                _winapi.WriteFile(fd, data)
-            else:
-                os.write(fd, data)
-            return True
-        except OSError:
-            # fd 可能已关闭，尝试从 process.stdin 写
-            try:
-                if proc_info.process and proc_info.process.stdin:
-                    proc_info.process.stdin.write(data)
-                    return True
-            except Exception:
-                pass
-        return False
 
     # ── WSL 直连支持 ──────────────────────────────────────────────
 
@@ -870,3 +863,98 @@ class ProcessManager:
             return f"/mnt/{drive}"
 
         return path
+
+
+class LocalProcessBackend(ProcessBackend):
+    """本地宿主进程后端：psutil 递归杀进程树 + 宿主内存采样。
+
+    杀进程树逻辑（原 ProcessManager._kill_process_tree）迁入此处：
+    用 psutil 枚举后代叶子→根逐个终止，防孙子进程变孤儿。
+    """
+
+    async def kill(self, unit: WorkUnit, force: bool = True) -> None:
+        """psutil 递归杀整棵进程树（叶子→根），防 cargo/rustc 后代变孤儿。"""
+        self._kill_tree_sync(unit.pid, force=force)
+
+    @staticmethod
+    def _kill_tree_sync(root_pid: int, force: bool) -> None:
+        """同步杀树（原 _kill_process_tree，迁自 ProcessManager）。"""
+        try:
+            import psutil  # noqa: PLC0415
+        except ImportError:
+            return  # psutil 不可用时，交给调用方回退单进程杀
+
+        try:
+            parent = psutil.Process(root_pid)
+        except psutil.NoSuchProcess:
+            return
+
+        # children(recursive=True) 已是叶子→...→根 的稳定顺序（psutil 保证）
+        try:
+            descendants = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            descendants = []
+
+        for proc in descendants:
+            try:
+                proc.kill() if force else proc.terminate()
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                continue
+
+        # 最后杀根进程
+        try:
+            parent.kill() if force else parent.terminate()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            pass
+
+    async def sample_memory(self) -> float | None:
+        """采样宿主内存使用率（系统级，0~1）。
+
+        用 psutil 的 virtual_memory。返回 None 表示采样不可用。
+        """
+        try:
+            import psutil  # noqa: PLC0415
+
+            mem = psutil.virtual_memory()
+            return mem.percent / 100.0
+        except Exception:
+            return None
+
+    async def sample_unit_memory(self, unit: WorkUnit) -> int | None:
+        """采样单个工作单元的内存占用(RSS 字节,含子进程)。
+
+        用 psutil 查该进程及其所有后代的 RSS 之和——单个失控进程(cargo build
+        fork 一堆 rustc 各吃内存)即使占系统比例低,自身 RSS 之和也会超阈值。
+        这比系统级 sample_memory 对单进程失控灵敏得多。
+        """
+        try:
+            import psutil  # noqa: PLC0415
+
+            root = psutil.Process(unit.pid)
+            total_rss = root.memory_info().rss
+            for child in root.children(recursive=True):
+                try:
+                    total_rss += child.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return total_rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+        except Exception:
+            return None
+
+
+# 本地后端单例（ProcessManager 默认后端，terminate_process 回退用它）
+_local_backend: LocalProcessBackend | None = None
+
+
+def _get_local_backend() -> LocalProcessBackend:
+    """获取本地进程后端单例。"""
+    global _local_backend  # noqa: PLW0603
+    if _local_backend is None:
+        _local_backend = LocalProcessBackend()
+    return _local_backend

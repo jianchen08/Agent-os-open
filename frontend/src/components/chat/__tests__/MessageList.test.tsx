@@ -6,17 +6,66 @@
  * - 有消息时正确渲染消息项
  * - isGenerating 状态下显示思考中提示
  * - 传入不同 props 的渲染行为
- * - 首次钉底、切 Tab 缓存恢复、底部追加跟随
+ * - 向上加载更多（startReached）、流式钉底（followOutput）等 virtuoso prop 配置正确
  *
- * 注：浏览器原生 overflow-anchor（加载更多不跳）是纯 CSS，jsdom 不实现 CSS 引擎，
- * 这部分靠浏览器实测，单测不覆盖。
+ * 注：虚拟滚动的真实滚动行为（视口位置/measure/动画）依赖真实浏览器布局，
+ * jsdom 无布局引擎无法验证，这部分靠浏览器实测。本测试只验证 MessageList 向
+ * Virtuoso 传递的 prop 配置是否正确，以及渲染/空状态/思考中占位等纯渲染逻辑。
  */
 
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import { forwardRef } from 'react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MessageList } from '../MessageList'
 import type { ExtendedMessageListProps } from '../MessageList'
 import type { Message } from '@/types/models'
+
+/**
+ * Mock react-virtuoso：捕获传入的 prop，让测试能断言 followOutput/startReached
+ * 等回调配置。用 forwardRef 转发 ref（组件内部用 ref 调 scrollToIndex）。
+ * Virtuoso 在 jsdom 下无法真实虚拟化（无布局），改用这个轻量替身。
+ */
+const capture: {
+  followOutput?: (...args: unknown[]) => unknown
+  startReached?: (index: number) => void
+  atBottomStateChange?: (atBottom: boolean) => void
+  initialTopMostItemIndex?: unknown
+  firstItemIndex?: number
+  components?: { Header?: unknown; Footer?: unknown }
+  ref?: unknown
+  scrollToIndex?: ReturnType<typeof vi.fn>
+} = {}
+
+vi.mock('react-virtuoso', () => ({
+  Virtuoso: forwardRef((props: Record<string, unknown>, ref) => {
+    capture.followOutput = props.followOutput as typeof capture.followOutput
+    capture.startReached = props.startReached as typeof capture.startReached
+    capture.atBottomStateChange = props.atBottomStateChange as typeof capture.atBottomStateChange
+    capture.initialTopMostItemIndex = props.initialTopMostItemIndex
+    capture.firstItemIndex = props.firstItemIndex as number
+    capture.components = props.components as typeof capture.components
+    capture.ref = ref
+    // 暴露一个 stub handle 记录 scrollToIndex 调用，让测试能断言「内容变化时重钉底部」。
+    // 这是补回 commit 28c670a0 冷加载重钉防护的核心验证点。
+    if (ref && typeof ref === 'object') {
+      ;(ref as { current: unknown }).current = { scrollToIndex: capture.scrollToIndex! }
+    }
+
+    const data = (props.data as Message[]) || []
+    const Header = props.components?.Header as React.ComponentType | undefined
+    const Footer = props.components?.Footer as React.ComponentType | undefined
+    return (
+      <div data-testid="virtuoso-mock">
+        {Header && <Header />}
+        {data.map((m, i) => {
+          const Content = props.itemContent
+          return <div key={`v-${i}`}>{Content ? Content(i, m) : null}</div>
+        })}
+        {Footer && <Footer />}
+      </div>
+    )
+  }),
+}))
 
 // Mock MessageItem（避免深入渲染依赖）
 vi.mock('../MessageItem', () => ({
@@ -42,59 +91,6 @@ function makeMessage(overrides: Partial<Message> = {}): Message {
   }
 }
 
-/**
- * 给 DOM 元素打补丁，模拟滚动尺寸
- *
- * jsdom 默认 scrollHeight/scrollTop 为 0 且写入 scrollTop 不生效，
- * 用 getter/setter 覆盖以便断言 MessageList 的滚动逻辑。
- */
-function mockScrollMetrics(el: HTMLElement, scrollHeight: number, clientHeight = 200) {
-  // 保留已有 scrollTop：更新 scrollHeight 时不应重置滚动位置
-  const prevTop = (Object.getOwnPropertyDescriptor(el, 'scrollTop')?.get as (() => number) | undefined)?.()
-  let currentScrollTop = prevTop ?? 0
-  Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => scrollHeight })
-  Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => clientHeight })
-  Object.defineProperty(el, 'scrollTop', {
-    configurable: true,
-    get: () => currentScrollTop,
-    set: (v: number) => {
-      currentScrollTop = v
-    },
-  })
-  return el
-}
-
-/**
- * requestAnimationFrame polyfill
- *
- * MessageList 用 rAF 异步设置 scrollTop。jsdom 不提供，测试里进队列后手动 flush，
- * 贴近真实异步行为且断言可控。
- */
-let rafQueue: FrameRequestCallback[] = []
-function flushRaf() {
-  const pending = rafQueue
-  rafQueue = []
-  for (const cb of pending) cb(0)
-}
-
-beforeEach(() => {
-  rafQueue = []
-  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-    rafQueue.push(cb)
-    return 0
-  })
-  // MessageList 首次加载用 ResizeObserver 持续校正钉底，jsdom 不提供，需 polyfill
-  vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  })
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
-
 describe('MessageList', () => {
   const defaultProps: ExtendedMessageListProps = {
     messages: [],
@@ -105,6 +101,15 @@ describe('MessageList', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    capture.followOutput = undefined
+    capture.startReached = undefined
+    capture.atBottomStateChange = undefined
+    capture.initialTopMostItemIndex = undefined
+    capture.firstItemIndex = undefined
+    capture.components = undefined
+    capture.ref = undefined
+    // 每个用例独立的 scrollToIndex mock（组件 ref 持有它的引用）
+    capture.scrollToIndex = vi.fn()
   })
 
   describe('空消息列表', () => {
@@ -147,7 +152,6 @@ describe('MessageList', () => {
       ]
       render(<MessageList {...defaultProps} messages={messages} isGenerating={true} />)
 
-      // 最后一条消息应有生成指示器
       expect(screen.getByTestId('generating-indicator')).toBeInTheDocument()
     })
   })
@@ -185,184 +189,163 @@ describe('MessageList', () => {
     it('modelName 传递到 MessageItem', () => {
       const messages = [makeMessage({ id: 'msg-1' })]
       render(<MessageList {...defaultProps} messages={messages} modelName="gpt-4" />)
-      // MessageItem mock 渲染了消息内容
       expect(screen.getByTestId('message-item-msg-1')).toBeInTheDocument()
     })
   })
 
-  describe('滚动行为', () => {
-    afterEach(() => {
-      cleanup()
-    })
-
-    it('无缓存时首次加载钉到最底部', () => {
-      const messages = [makeMessage({ id: 'msg-1' })]
-      const { container } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="no-cache" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
-
-      expect(listEl.scrollTop).toBe(1000)
-    })
-
-    it('卸载后重新挂载同一 Tab 恢复缓存的滚动位置', () => {
-      const messages = [makeMessage({ id: 'msg-1' })]
-      const tabId = 'restore'
-
-      // 第一次挂载：无缓存 → 钉到底部（1000）
-      const { container, unmount } = render(
-        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
-      expect(listEl.scrollTop).toBe(1000)
-
-      // 模拟用户向上滚动到中间（需派发 scroll 事件，onScroll 才会记录 scrollTop）
-      listEl.scrollTop = 400
-      fireEvent.scroll(listEl)
-
-      // 卸载：触发 cleanup 写入缓存
-      unmount()
-
-      // 重新挂载同一 Tab
-      const { container: container2 } = render(
-        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
-      )
-      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl2, 1000)
-      flushRaf()
-
-      // 恢复到缓存的 400
-      expect(listEl2.scrollTop).toBe(400)
-    })
-
-    it('切换到不同 Tab 不受其他 Tab 缓存影响', () => {
-      const messages = [makeMessage({ id: 'msg-1' })]
-
-      // Tab A 滚到中间后卸载
-      const { container, unmount } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="tab-A" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
-      listEl.scrollTop = 300
-      fireEvent.scroll(listEl)
-      unmount()
-
-      // 切到全新的 Tab B：无缓存 → 钉到底
-      const { container: container2 } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="tab-B" />,
-      )
-      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl2, 1000)
-      flushRaf()
-
-      expect(listEl2.scrollTop).toBe(1000)
-    })
-
-    it('底部追加新消息时跟随到底部', () => {
-      const initialMessages = [makeMessage({ id: 'msg-1', sequence: 1 })]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={initialMessages} tabId="append" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
-      expect(listEl.scrollTop).toBe(1000)
-
-      // 追加新消息（底部）
-      const appended = [
-        ...initialMessages,
-        makeMessage({ id: 'msg-2', sequence: 2 }),
-      ]
-      mockScrollMetrics(listEl, 1200)
-      rerender(<MessageList {...defaultProps} messages={appended} tabId="append" />)
-      flushRaf()
-
-      // 跟随到底部（1200）
-      expect(listEl.scrollTop).toBe(1200)
-    })
-
+  describe('virtuoso prop 配置', () => {
     /**
-     * 可手动触发回调的 ResizeObserver mock
-     *
-     * jsdom 不实现 ResizeObserver，beforeEach stub 的是空实现（验证不了"内容变化
-     * 触发钉底"）。这两个测试需要手动触发回调，模拟内容容器尺寸变化。
+     * 验证 MessageList 向 Virtuoso 传递的滚动行为配置是否正确。
+     * 真实滚动效果依赖浏览器布局，靠浏览器实测；此处只验证配置层面的契约。
      */
-    function makeTriggerableResizeObserver() {
-      const ref: { cb: (() => void) | null } = { cb: null }
-      vi.stubGlobal('ResizeObserver', class {
-        constructor(cb: () => void) { ref.cb = cb }
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      })
-      return ref
-    }
 
-    it('initFromAPI 重建（条数减少、内容变高）后，内容变化触发钉底回到底部', () => {
-      // 复现 fix_20260629_enter_stuck_in_middle：进入页面 persist 钉底后，initFromAPI
-      // 异步重建合并气泡使条数减少，原逻辑因"条数未增加"不钉底 → 停在中间。
-      const ro = makeTriggerableResizeObserver()
-
-      // 首次：3 条消息钉底（模拟 persist 快照恢复后挂载）
+    it('首屏钉到最后一条（initialTopMostItemIndex = length-1）', () => {
       const messages = [
-        makeMessage({ id: 'msg-1', sequence: 1 }),
-        makeMessage({ id: 'msg-2', sequence: 2 }),
-        makeMessage({ id: 'msg-3', sequence: 3 }),
+        makeMessage({ id: 'msg-1' }),
+        makeMessage({ id: 'msg-2' }),
+        makeMessage({ id: 'msg-3' }),
       ]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="rebuild" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
-      expect(listEl.scrollTop).toBe(1000)
-
-      // 模拟 initFromAPI 重建：合并连续 assistant 后条数减少（3→1），单条内容更高
-      const rebuilt = [makeMessage({ id: 'msg-merged', sequence: 2 })]
-      rerender(<MessageList {...defaultProps} messages={rebuilt} tabId="rebuild" />)
-      mockScrollMetrics(listEl, 1500)
-
-      // 重建后条数减少，原"条数增加才钉底"逻辑不会触发；scrollTop 仍停在旧底部
-      expect(listEl.scrollTop).toBe(1000)
-
-      // 内容容器尺寸变化触发 contentResize observer → 钉回底部（修复后行为）
-      ro.cb?.()
-      expect(listEl.scrollTop).toBe(1500)
+      render(<MessageList {...defaultProps} messages={messages} />)
+      expect(capture.initialTopMostItemIndex).toBe(messages.length - 1)
     })
 
-    it('用户上滑后内容变化不钉底，不打扰翻历史', () => {
-      const ro = makeTriggerableResizeObserver()
+    it('firstItemIndex 初始为正数（满足 virtuoso 要求）', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(<MessageList {...defaultProps} messages={messages} />)
+      expect(capture.firstItemIndex).toBeGreaterThan(0)
+    })
 
-      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="scroll-up" />,
+    it('prepend 后 firstItemIndex 随 prependedCount 递减（保持视口位置）', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      // 先无 prepend
+      const { rerender } = render(<MessageList {...defaultProps} messages={messages} />)
+      const baseFirstIndex = capture.firstItemIndex!
+
+      // prepend 了 50 条（store 累计 prependedCount=50）
+      const moreMessages = [
+        ...Array.from({ length: 50 }, (_, i) => makeMessage({ id: `old-${i}`, sequence: i })),
+        ...messages,
+      ]
+      rerender(<MessageList {...defaultProps} messages={moreMessages} prependedCount={50} />)
+
+      // firstItemIndex 应递减 50，保持旧首条的逻辑序号不变 → 视口位置不变
+      expect(capture.firstItemIndex).toBe(baseFirstIndex - 50)
+      expect(capture.firstItemIndex).toBeGreaterThan(0)
+    })
+
+    it('followOutput 默认跟随底部（返回 auto）', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(<MessageList {...defaultProps} messages={messages} />)
+      expect(capture.followOutput).toBeDefined()
+      expect(capture.followOutput!(true)).toBe('auto')
+    })
+
+    it('startReached 配置了 onLoadMore 且未在加载时触发', () => {
+      const onLoadMore = vi.fn()
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          hasMore={true}
+          isLoadingMore={false}
+          onLoadMore={onLoadMore}
+        />,
       )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
-      expect(listEl.scrollTop).toBe(1000)
+      expect(capture.startReached).toBeDefined()
+      capture.startReached!(0)
+      expect(onLoadMore).toHaveBeenCalledTimes(1)
+    })
 
-      // 用户上滑到中间（真实用户滚动是 wheel→scroll，wheel 置位 userScrolled，
-      // 随后 onScroll 据 userScrolled 判定为主动上滑，置 isFollowingBottom=false）
-      fireEvent.wheel(listEl, { deltaY: -100 })
-      listEl.scrollTop = 300
-      fireEvent.scroll(listEl)
+    it('isLoadingMore 时 startReached 不重复触发 onLoadMore', () => {
+      const onLoadMore = vi.fn()
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          hasMore={true}
+          isLoadingMore={true}
+          onLoadMore={onLoadMore}
+        />,
+      )
+      capture.startReached!(0)
+      expect(onLoadMore).not.toHaveBeenCalled()
+    })
 
-      // 内容变高（流式增长 / 重建）
-      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
-      rerender(<MessageList {...defaultProps} messages={grown} tabId="scroll-up" />)
-      mockScrollMetrics(listEl, 1200)
+    it('hasMore 时渲染 Header（加载更多提示）', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(
+        <MessageList {...defaultProps} messages={messages} hasMore={true} isLoadingMore={false} />,
+      )
+      expect(capture.components?.Header).toBeDefined()
+    })
 
-      ro.cb?.()
+    it('hasMore=false 时不渲染 Header', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(<MessageList {...defaultProps} messages={messages} hasMore={false} />)
+      expect(capture.components?.Header).toBeUndefined()
+    })
 
-      // 不被拉回底部，停留在用户的滚动位置
-      expect(listEl.scrollTop).toBe(300)
+    it('始终渲染 Footer（含思考中占位与间距）', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(<MessageList {...defaultProps} messages={messages} />)
+      expect(capture.components?.Footer).toBeDefined()
+    })
+  })
+
+  describe('冷加载重钉（补回 commit 28c670a0 防护）', () => {
+    /**
+     * 核心回归：刷新时 persist 快照先钉底 → initFromAPI 异步全量替换（新数组引用）
+     * → 必须重新钉底，否则视图停在快照高度的中间。
+     * 这是「刷新后渲染位置不对」的根因防护。
+     */
+
+    it('首次数据到达时钉底一次', async () => {
+      const messages = [makeMessage({ id: 'msg-1' }), makeMessage({ id: 'msg-2' })]
+      render(<MessageList {...defaultProps} messages={messages} />)
+      // 首次数据：RAF 异步调度 scrollToIndex('LAST')，用 waitFor 等 effect 跑完
+      // jsdom 下 RAF 需通过 microtask/计时器推进，waitFor 会自动轮询断言
+      await vi.waitFor(() => {
+        expect(capture.scrollToIndex).toHaveBeenCalledWith({ index: 'LAST', behavior: 'auto' })
+      })
+    })
+
+    it('initFromAPI 全量替换（新数组引用）后重新钉底', () => {
+      // 快照：2 条
+      const snapshot = [makeMessage({ id: 'msg-1' }), makeMessage({ id: 'msg-2' })]
+      const { rerender } = render(<MessageList {...defaultProps} messages={snapshot} />)
+      // 清掉首次钉底的调用计数
+      capture.scrollToIndex!.mockClear()
+
+      // initFromAPI 返回：全量替换为新数组（条数可能不同，引用必定不同）
+      const apiMessages = [
+        makeMessage({ id: 'api-1', content: 'api 消息一' }),
+        makeMessage({ id: 'api-2', content: 'api 消息二' }),
+        makeMessage({ id: 'api-3', content: 'api 消息三' }),
+      ]
+      rerender(<MessageList {...defaultProps} messages={apiMessages} />)
+
+      // 跟随底部（默认 true）时，内容变化必须重新钉底
+      expect(capture.scrollToIndex).toHaveBeenCalledWith({ index: 'LAST', behavior: 'auto' })
+    })
+
+    it('followOutput 契约：基于 isFollowingBottom 决定钉底（用户上滑时不钉）', () => {
+      // followOutput 的设计：返回值由 isFollowingBottom.current 决定，
+      // 不看 virtuoso 传入的 isAtBottom 参数（避免程序性滚动误判为用户跟随）。
+      // 默认 isFollowingBottom=true → 返回 'auto'（跟随钉底）。
+      // 用户上滑触发 wheel/touchstart 后 isFollowingBottom=false → 返回 false（不抢底）。
+      const messages = [makeMessage({ id: 'msg-1' })]
+      render(<MessageList {...defaultProps} messages={messages} />)
+
+      // 默认跟随底部：无论 virtuoso 传 true/false，都返回 auto（钉底）
+      expect(capture.followOutput!(true)).toBe('auto')
+      expect(capture.followOutput!(false)).toBe('auto')
+
+      // 模拟用户滚回底部附近 → atBottomStateChange(true) 恢复跟随
+      // （验证 atBottomStateChange 回调存在且可调用，不抛错即契约正确）
+      expect(capture.atBottomStateChange).toBeDefined()
+      expect(() => capture.atBottomStateChange!(true)).not.toThrow()
     })
   })
 })

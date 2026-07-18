@@ -139,6 +139,12 @@ class TaskNotifierMixin:
             # 唤醒父管道 → 父 LLM 重试子任务 → 反复超时上报。统一冻结即可根治。
             # 历史根因2：TaskStatus 无 cancelled，cancel_task emit "stopped"，
             # 旧代码判 ("cancelled","failed") 永远不匹配 stopped → 引擎空转。
+            #
+            # 边界澄清：本 cancel_pipeline 只对【真正终态】生效。用户"停止生成"
+            # (stop_generation) 现已不会 fail_task（见 engine.py 的 _user_stop_requested
+            # 安静退出分支 + app_factory.py stop_generation 不再级联 fail_task/cancel），
+            # 因此 stop_generation 不会经此回调二次毁管道。此处仍保留，是为了处理
+            # _stop_task 工具、超时硬墙、容器销毁等真正的 failed/stopped 终态。
             if new_status in ("failed", "stopped"):
                 try:
                     _cancelled = self.cancel_pipeline(task_id)
@@ -350,10 +356,16 @@ class TaskNotifierMixin:
             _cw = _cu.get("context_window", 0)
 
             if _pct > 0:
-                if _pct > 60:
+                if _pct > 50:
                     context_usage_text = (
                         f"\n📊 上下文使用率: {_pct}% ({_input:,}/{_cw:,} tokens)"
-                        f"\n⚠️ 建议优先创建新任务（上下文已超过60%，继续派发可能触发压缩或截断）"
+                        f"\n⚠️ 建议优先创建新任务（上下文已超过50%，继续派发可能触发压缩或截断）"
+                    )
+
+                elif _pct > 25:
+                    context_usage_text = (
+                        f"\n📊 上下文使用率: {_pct}% ({_input:,}/{_cw:,} tokens)"
+                        f"\n⚠️ 不建议继续向此 Agent 继承提交（上下文已超25%，建议新建任务以保留充足余量）"
                     )
 
                 else:

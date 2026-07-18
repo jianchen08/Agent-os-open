@@ -37,7 +37,7 @@
   >
   > In other words, the entire loop currently requires a human-in-the-loop: whether experience is reused is decided by configuration, and whether the system is changed is decided by you.
 - 🔌 **Plugin-based Pipeline Architecture** — The engine just holds a shared `state` and runs a `while not ended` loop; **you can freely write or configure plugins to control every state during Agent execution** (plugins are interceptors, `state` is the bus): a plugin can end the pipeline, suspend it, decide whether the next round calls the LLM or a tool, or read/write any state field — all without touching engine code. Combined with 4 routing signals (`next_llm` / `next_tool` / `end` / `wait`) and `ABORT` / `SKIP` / `RETRY` / `FALLBACK` error strategies, every decision is observable, intervenable, and rollback-able. See [Key Highlight 14](#14-plugin-based-pipeline-architecture-every-state-of-agent-execution-is-yours-to-control) below.
-- 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release — see [ROADMAP.md](ROADMAP.md).
+- 🧠 **Multi-layer Memory** — Episodic (EPISODE, compressed memory of conversations) + Semantic (SEMANTIC, sedimenting user preferences / project decisions / external knowledge base imports, etc.), retrieved on demand and injected as needed. Currently shipped: keyword retrieval, tag retrieval, and full injection. Richer retrieval modes (e.g. vector semantic retrieval) and injection modes (on-demand / summary injection) are planned for a later release.
 
 ### Tech Stack
 
@@ -82,7 +82,7 @@ All tools follow a unified interface contract (`name` / `when_to_use` / `when_no
 ### 3. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
 Streaming response + real-time thinking display + proactive clarification + approval interaction.
 
-> **Planned (0.2.0+)**: Voting panels, media timelines, thinking-mode toggle and other interaction enhancements are not yet implemented in this version. See [ROADMAP.md](ROADMAP.md).
+> **Planned (0.2.0+)**: Voting panels, media timelines, thinking-mode toggle and other interaction enhancements are not yet implemented in this version.
 
 ### 4. Frontend Excellence — Beautiful, Usable, Customizable
 8 themes (5 built-in presets: Dark / Light / Deep Space Command Center / Ocean Breeze / High Contrast; plus 3 dynamic themes: Forest Mist / Lavender Field / Sunset Glow, discovered via a stateless backend manifest at `frontend/public/themes/*.json`), full configuration visualization, YAML-to-form auto-mapping.
@@ -97,7 +97,7 @@ Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itse
 Each task runs in its own **isolated workspace**: folder-level isolation by default, with Docker container isolation for higher-risk execution paths. In multi-task scenarios the **git worktree** mechanism forks a dedicated working directory per task, so concurrent tasks never collide on the filesystem and any side-effect can be reviewed or rolled back at the worktree boundary.
 
 ### 8. Approval Closed Loop — Quality Gate for Human-AI Collaboration
-Human approval (choice / conversation dual modes) + pipeline pause/resume + feedback injection + task rework, forming a "generate → approve → feedback → iterate" loop. Text approval is live; diff rendering components and version-comparison APIs are already in place (see [ROADMAP.md](ROADMAP.md)).
+Human approval (choice / conversation dual modes) + pipeline pause/resume + feedback injection + task rework, forming a "generate → approve → feedback → iterate" loop. Text approval is live; diff rendering components and version-comparison APIs are already in place.
 
 ### 9. Mandatory Evaluation System — Hard Constraint on Task Quality
 Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
@@ -264,7 +264,6 @@ npm run dev
 |----------|-------------|
 | [README.md](README.md) | Chinese README |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture deep-dive |
-| [ROADMAP.md](ROADMAP.md) | Version roadmap |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |
 | [CHANGELOG.md](CHANGELOG.md) | Changelog |

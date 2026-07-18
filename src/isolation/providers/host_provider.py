@@ -82,19 +82,21 @@ class HostProvider(IsolationProvider):
         self._environments[env.env_id] = env
         return env
 
-    async def destroy_environment(self, env_id: str, success: bool = True) -> None:
+    async def destroy_environment(self, env_id: str, success: bool = True) -> bool:
         """销毁虚拟环境
 
         host 模式不维护文件检查点，无需清理/恢复；工作区回滚由 git 层负责。
+        host 无底层容器，销毁恒成功，返回 True。
         """
         env = self._environments.get(env_id)
         if not env:
-            return
+            return True
 
         if not success:
             logger.warning(f"[HostProvider] host 任务失败，工作区回滚由 git 层处理 | task_id={env.context.task_id}")
 
         self._environments.pop(env_id, None)
+        return True
 
     async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:
         """在宿主机上执行操作"""
@@ -172,9 +174,17 @@ class HostProvider(IsolationProvider):
                 )
 
             except TimeoutError:
-                # 超时，终止进程
+                # 超时，整树杀（防 cargo/rustc 后代变孤儿继续跑）。
+                # 旧实现 process.kill() 只杀单进程(cmd/c 壳)，孙子进程被 init
+                # 收养继续运行，是 host 路径进程泄漏的根因。改用 LocalProcessBackend
+                # 的 psutil 递归整树杀。
                 try:
-                    process.kill()
+                    from tools.builtin.bash.types import WorkUnit
+                    from tools.builtin.bash.process_manager import _get_local_backend
+
+                    await _get_local_backend().kill(
+                        WorkUnit(pid=process.pid, command=command), force=True
+                    )
                     await process.wait()
                 except Exception:
                     pass

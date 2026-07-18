@@ -524,41 +524,13 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
                     except Exception as _eng_err:
                         logger.warning("[GlobalWS] 投递停止信号出错: %s", _eng_err)
 
-                    # 3. 尝试取消 TaskWorker 中与该 thread_id 关联的后台任务
-                    try:
-                        tw = getattr(stream_handler, "_task_worker", None)
-                        if tw and hasattr(tw, "_task_id_to_bg_task") and hasattr(tw, "_task_service"):
-                            _task_svc = getattr(tw, "_task_service", None)
-                            if _task_svc:
-                                # 遍历活跃任务，查找与 thread_id 关联的 task
-                                for _active_tid in list(getattr(tw, "_active_tasks", set())):
-                                    try:
-                                        _t = _task_svc.get_task(_active_tid)
-                                        if _t:
-                                            # 通过 task 的 pipeline_run_id 或 parent_pipeline_id
-                                            # 关联到 thread_id 对应的管道
-                                            _t_pipeline = getattr(_t, "pipeline_run_id", "") or ""
-                                            _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
-                                            if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
-                                                try:
-                                                    await _task_svc.fail_task(
-                                                        _active_tid,
-                                                        reason=f"用户取消: {_stop_msg.metadata.get('reason', 'stop_generation')}",
-                                                    )
-                                                except Exception as _ft_err:
-                                                    logger.warning(
-                                                        "[GlobalWS] fail_task 失败(仍将继续取消): task=%s, err=%s",
-                                                        _active_tid[:12],
-                                                        _ft_err,
-                                                    )
-                                                tw.cancel_pipeline(_active_tid)
-                                                logger.info(
-                                                    "[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12]
-                                                )
-                                    except Exception:
-                                        pass
-                    except Exception as _tw_err:
-                        logger.warning("[GlobalWS] 取消 TaskWorker 任务时出错: %s", _tw_err)
+                    # 停止生成 = 纯输出打断语义：只投递控制信号（上面已做），不触碰
+                    # 任务状态机与引擎注册表。曾在此处 fail_task + cancel_pipeline，会把
+                    # "用户暂时不想看输出"误升级为"任务失败 + 管道销毁 + 触发重试"，且
+                    # engine_task.cancel() 会经 engine.py 的 CancelledError 分支再次 fail_task，
+                    # 二者叠加导致终态通知打到已 unregister 的 parent_pipeline 被硬拒。
+                    # 任务/管道的生命周期由显式停止工具(_stop_task)、超时硬墙、容器销毁
+                    # 等真正终态路径负责，与 stop_generation 无关。用户重发消息即继续。
 
                     await websocket.send_text(
                         json.dumps(

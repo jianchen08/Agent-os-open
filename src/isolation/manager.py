@@ -716,9 +716,15 @@ class IsolationManager:
     def _find_existing_container_sync(self, container_name: str) -> IsolationEnvironment | None:
         """查找已存在容器的同步实现（由 _run_docker_sync 在线程池执行）。
 
-        - running → 返回 READY 环境
+        - running → exec 探针验活性后返回 READY 环境（setns 脱节的坏容器探针会失败）
         - created/exited → 尝试 start；失败（如挂载脏路径）删容器返回 None
         - NotFound → None
+
+        第三层根因修复：setns 命名空间脱节时 docker inspect 仍报 running，
+        旧实现直接信任 status 复用坏容器 → 后续 exec 全部 setns 失败。
+        修复：running 容器加 exec_run(["true"]) 探针，runc 卡死的容器探针会抛
+        APIError（setns failure），此时删容器返回 None，让上层走 create_environment
+        真正新建。探针开销极小（true 是 no-op），且只在复用路径触发。
         """
         from docker.errors import DockerException, NotFound  # noqa: PLC0415
 
@@ -741,6 +747,30 @@ class IsolationManager:
                     with contextlib.suppress(DockerException):
                         container.remove(force=True)
                     return None
+
+            # 活性探针：running 容器也可能是 runc 命名空间脱节的"僵尸"
+            # （inspect 报 running 但 setns 已坏）。exec_run(["true"]) 正是
+            # 会触发 setns 的操作——坏容器探针抛 APIError，健康容器返回 (0, ...)。
+            # 用 no-op 命令把开销压到最小；探针失败则当坏容器处理：尝试删，
+            # 删不掉也无妨（docker rm -f 对卡死容器会失败），返回 None 让上层新建。
+            try:
+                exit_code, _ = container.exec_run(["true"])
+                if exit_code != 0:
+                    logger.warning(
+                        f"[IsolationManager] 容器活性探针失败（exec 非零），视为坏容器重建: "
+                        f"{container_name}, exit_code={exit_code}"
+                    )
+                    with contextlib.suppress(DockerException):
+                        container.remove(force=True)
+                    return None
+            except DockerException as e:
+                logger.warning(
+                    f"[IsolationManager] 容器活性探针异常（疑似 runc 命名空间脱节），视为坏容器重建: "
+                    f"{container_name}, 错误: {e}"
+                )
+                with contextlib.suppress(DockerException):
+                    container.remove(force=True)
+                return None
 
             workspace_path = None
             mounts = container.attrs.get("Mounts", [])
@@ -902,31 +932,43 @@ class IsolationManager:
         finally:
             client.close()
 
-    async def destroy_environment(self, env_id: str, success: bool = True) -> None:
-        """销毁隔离环境"""
+    async def destroy_environment(self, env_id: str, success: bool = True) -> bool:
+        """销毁隔离环境。
+
+        返回 provider 层是否真正删除成功（provider.destroy_environment 现返回 bool）。
+        provider 删除失败（如 runc 卡死删不掉）时返回 False 且不清理内存映射——
+        docker 里容器仍在，记录不能丢，供上层重建逻辑判断是否可重建。
+        """
         env = self._environments.get(env_id)
         if not env:
             logger.warning(f"尝试销毁不存在的环境: {env_id}")
-            return
+            return True  # 无可销毁记录，视为已成功（幂等）
 
         logger.debug(f"销毁隔离环境: {env_id}")
 
         provider = self._providers.get(env.level)
+        destroyed_ok = True
         if provider:
             try:
-                await provider.destroy_environment(env_id, success=success)
+                destroyed_ok = await provider.destroy_environment(env_id, success=success)
             except Exception as e:
                 logger.error(f"提供者销毁环境失败: {e}")
+                destroyed_ok = False
 
-        self._environments.pop(env_id, None)
+        # 只有 provider 真删成功，才清理内存映射；删失败时保留记录
+        # （docker 里容器仍在，内存记录不能脱节，否则上层误判）。
+        if destroyed_ok:
+            self._environments.pop(env_id, None)
 
-        keys_to_remove = [k for k, v in self._reuse_map.items() if v == env_id]
-        for key in keys_to_remove:
-            del self._reuse_map[key]
+            keys_to_remove = [k for k, v in self._reuse_map.items() if v == env_id]
+            for key in keys_to_remove:
+                del self._reuse_map[key]
 
-        ws_keys_to_remove = [k for k, v in self._workspace_env_map.items() if v == env_id]
-        for key in ws_keys_to_remove:
-            del self._workspace_env_map[key]
+            ws_keys_to_remove = [k for k, v in self._workspace_env_map.items() if v == env_id]
+            for key in ws_keys_to_remove:
+                del self._workspace_env_map[key]
+
+        return destroyed_ok
 
     async def execute_in_isolation(
         self,
@@ -1026,6 +1068,24 @@ class IsolationManager:
         try:
             result = await provider.execute_in_environment(env.env_id, operation)
 
+            # post-exec 自愈：runc 命名空间脱节（setns failure）。
+            # 这类故障下 docker inspect 仍报 running，pre-exec 健康检查（上面的
+            # _ensure_env_healthy_or_rebuild）无法发现，错误只在 exec 时以 runc
+            # 特征串冒泡。命中则 destroy + recreate + 单次重试——重建容器通常即恢复，
+            # 与 _create_and_start / _ensure_image 的「自愈重试一次」范式一致。
+            # 不计熔断：setns 是容器级瞬时故障，与 build 失败的熔断语义不同。
+            # 仅 command 操作纳入：file_operation 走不同 exec 组装路径，暂不覆盖。
+            # 标记识别（runc 特征串）与 provider 实例无关，直接用静态方法判定，
+            # 故不绑 isinstance——只对 CONTAINER 层（env.level）的 docker 容器路径有意义。
+            if (
+                not result.success
+                and operation.get("type") == "command"
+                and self._is_namespace_desync_result(result)
+            ):
+                result = await self._rebuild_and_retry_exec(
+                    env, rebuild_kwargs, operation, original_error=result.error
+                )
+
             # 更新最后使用时间
             env.last_used_at = datetime.now(UTC).isoformat()
 
@@ -1038,6 +1098,125 @@ class IsolationManager:
                 output=None,
                 error=f"执行操作失败: {str(e)}",
             )
+
+    @staticmethod
+    def _is_namespace_desync_result(result: ExecutionResult) -> bool:
+        """判断 exec 失败结果是否为 runc 命名空间脱节（同时看 error 与 output.stderr）。"""
+        if DockerProvider._is_namespace_desync_error(result.error):
+            return True
+        # output 可能是 dict（command exec 的标准结构）也可能为 None
+        if isinstance(result.output, dict):
+            return DockerProvider._is_namespace_desync_error(result.output.get("stderr"))
+        return False
+
+    async def _rebuild_and_retry_exec(
+        self,
+        env: IsolationEnvironment,
+        rebuild_kwargs: dict[str, Any],
+        operation: dict[str, Any],
+        *,
+        original_error: str | None,
+    ) -> ExecutionResult:
+        """命中 setns 命名空间脱节后：destroy + recreate + 单次重试。
+
+        重建/重试过程中的任何异常都只记 warning 并返回原失败 result——自愈逻辑
+        本身不应把引擎搞挂（重建失败说明 docker 长时间不可用，会由后续轮次的
+        建环境熔断器接管）。重试成功则在 metadata 标记 namespace_desync_recovered。
+
+        第三层根因闭环：runc 卡死的容器 docker rm -f 会失败（删不掉），且同名新
+        容器 create 必冲突（容器名唯一）。destroy 返回 False（没删干净）时绝不进
+        重建——否则重建要么被 _find_existing_container 捡回坏容器，要么 create
+        同名冲突，必然失败并空转。此时直接返回明确错误（坏容器删不掉，需重启
+        docker），让熔断器/LLM 知道该 workspace 已不可恢复，避免空转烧资源。
+        """
+        logger.warning(
+            "[IsolationManager] exec 命中 runc 命名空间脱节，触发自愈重建 | env=%s | err_tail=%s",
+            env.env_id,
+            (original_error or "")[:200],
+        )
+
+        # 1. 销毁脱节的旧容器。destroy 现在返回是否真从 docker 删除成功。
+        # rm -f 对 runc 卡死的容器会失败（could not kill ... no exit event），
+        # 此时 docker 里坏容器仍在，同名 create 必冲突——重建注定失败，
+        # 不空转，直接报错提示需重启 docker 清理。
+        try:
+            destroyed_ok = await self.destroy_environment(env.env_id, success=False)
+        except Exception as e:
+            logger.warning(
+                "[IsolationManager] setns 自愈：销毁旧环境异常 | env=%s | error=%s",
+                env.env_id, e,
+            )
+            destroyed_ok = False
+
+        if not destroyed_ok:
+            logger.error(
+                "[IsolationManager] setns 自愈：坏容器删不掉（runc 卡死），重建将同名冲突，"
+                "放弃重建避免空转 | env=%s | 提示：需重启 docker 清理僵尸容器",
+                env.env_id,
+            )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=(
+                    f"容器命名空间脱节且无法删除（runc 卡死），已无法自愈。"
+                    f"原错误: {original_error}。"
+                    f"请在宿主执行 systemctl restart docker（或 service docker restart）"
+                    f"清理僵尸容器后重试。"
+                ),
+                metadata={"namespace_desync_unremovable": True},
+            )
+
+        # 2. 重建（复用 get_or_create_environment，与 pre-exec 自愈同路径）
+        try:
+            new_env = await self.get_or_create_environment(**rebuild_kwargs)
+        except Exception as e:
+            logger.warning(
+                "[IsolationManager] setns 自愈：重建环境失败，返回原失败结果 | error=%s", e,
+            )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=original_error,
+                metadata={"namespace_desync_rebuild_failed": True},
+            )
+
+        # 3. 在新环境上单次重试
+        provider = self._providers.get(new_env.level)
+        if not provider:
+            logger.warning(
+                "[IsolationManager] setns 自愈：新环境无对应 provider | level=%s",
+                new_env.level,
+            )
+            return ExecutionResult(
+                success=False, output=None, error=original_error,
+            )
+
+        try:
+            retry_result = await provider.execute_in_environment(new_env.env_id, operation)
+        except Exception as e:
+            logger.warning(
+                "[IsolationManager] setns 自愈：重试执行抛异常，返回原失败结果 | error=%s", e,
+            )
+            return ExecutionResult(
+                success=False,
+                output=None,
+                error=original_error,
+                metadata={"namespace_desync_retry_failed": True},
+            )
+
+        if retry_result.success:
+            logger.info(
+                "[IsolationManager] setns 自愈重建成功 | old=%s | new=%s",
+                env.env_id, new_env.env_id,
+            )
+            retry_result.metadata["namespace_desync_recovered"] = True
+        else:
+            logger.warning(
+                "[IsolationManager] setns 自愈：重试仍失败 | new=%s | err_tail=%s",
+                new_env.env_id,
+                (retry_result.error or "")[:200],
+            )
+        return retry_result
 
     async def _ensure_env_healthy_or_rebuild(
         self,

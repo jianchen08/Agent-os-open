@@ -139,7 +139,7 @@ export function trimMessagesForPersistence(
 }
 
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
-const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 300
+const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
 
 /** 限制单管道内存消息数，防止无限增长导致浏览器 OOM。 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次 */
 function capMessagesForMemory(msgs: Message[]): Message[] {
@@ -198,6 +198,13 @@ interface PipelineMessageState {
   hasMoreOlderByPipeline: Record<string, boolean>
   /** 是否正在加载更早的消息 */
   isLoadingOlderByPipeline: Record<string, boolean>
+  /**
+   * 累计向上翻页插入的条数：pipelineId → number。
+   * 用于驱动虚拟列表的 firstItemIndex（prepend 时递减以保持视口位置）。
+   * initFromAPI 全量重建时重置为 0；prependMessages 成功插入 N 条时 +N。
+   * 由数据源（store）权威维护，组件只读取，避免在组件内对比前后帧猜测。
+   */
+  prependedCountByPipeline: Record<string, number>
   /** 运行时标记：本次会话已与后端全量对账过的 pipeline（不持久化，rehydrate 后重置）。
    *  防止流式断线残留的不可信 bottomCursor 导致刷新后只走增量补漏、已加载区间内空洞永远补不上。 */
   reconciledByPipeline: Record<string, boolean>
@@ -237,6 +244,8 @@ interface PipelineMessageState {
   isInitialized: (pipelineId: string) => boolean
   /** 判断指定管道是否还有更早的消息 */
   hasMoreOlder: (pipelineId: string) => boolean
+  /** 获取指定管道累计向上翻页插入的条数（驱动虚拟列表 firstItemIndex） */
+  getPrependedCount: (pipelineId: string) => number
 
   /** 直接从 API 加载指定管道的历史消息（底层，吞异常已修复，调用方应优先用 loadPipelineMessages） */
   fetchMessages: (
@@ -494,6 +503,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   bottomCursorsByPipeline: {},
   hasMoreOlderByPipeline: {},
   isLoadingOlderByPipeline: {},
+  prependedCountByPipeline: {},
   reconciledByPipeline: {},
 
   /** 注册管道，建立 pipelineId 与元数据的映射 */
@@ -759,6 +769,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           // 后端始终返回 has_more，前端直接使用
           [pipelineId]: hasMoreOlder ?? false,
         },
+        // 全量重建：prepended 计数归零（firstItemIndex 回到基准值）
+        prependedCountByPipeline: {
+          ...state.prependedCountByPipeline,
+          [pipelineId]: 0,
+        },
       }
     })
   },
@@ -782,13 +797,19 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       const existing = state.messagesByPipeline[pipelineId] || []
       // 含 clientMessageId 对账（与 appendMessages 共用 mergeIncrementalApiWithLocal）。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
-      // 跨边界合并保留 streaming 流式片段。
-      let finalMerged = mergePreservingStreaming(merged)
-      // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
-      finalMerged = filterBlankMessages(finalMerged)
-      // 内存封顶：翻页累计超量时丢弃最老消息，防止撑爆内存（OOM）
-      finalMerged = capMessagesForMemory(finalMerged)
+        // 跨边界合并保留 streaming 流式片段。
+        let finalMerged = mergePreservingStreaming(merged)
+        // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
+        finalMerged = filterBlankMessages(finalMerged)
+        // 注意：prepend 路径不调用 capMessagesForMemory。
+        // 用户主动向上翻页是为了「看历史」，裁剪最老消息会破坏视口并导致最新消息
+        // 因 sequence 重排而丢失。OOM 防护由虚拟列表（DOM 只渲染可见区）承担；
+        // 内存数组增长由 addMessage/init/append 路径的 cap 兜底（非用户主动意图）。
       const topCursor = finalMerged[0]?.sequence ?? 0
+      // 净增条数：驱动 firstItemIndex 递减，让虚拟列表 prepend 时保持视口位置。
+      // 用 finalMerged - existing 的差值，比 API 返回条数更准（考虑去重）。
+      const prependedDelta = Math.max(0, finalMerged.length - existing.length)
+      const prevPrepended = state.prependedCountByPipeline[pipelineId] ?? 0
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
@@ -806,6 +827,10 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         isLoadingOlderByPipeline: {
           ...state.isLoadingOlderByPipeline,
           [pipelineId]: false,
+        },
+        prependedCountByPipeline: {
+          ...state.prependedCountByPipeline,
+          [pipelineId]: prevPrepended + prependedDelta,
         },
       }
     })
@@ -859,6 +884,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return get().hasMoreOlderByPipeline[pipelineId] ?? false
   },
 
+  /** 获取指定管道累计向上翻页插入的条数（驱动虚拟列表 firstItemIndex） */
+  getPrependedCount: (pipelineId: string) => {
+    return get().prependedCountByPipeline[pipelineId] ?? 0
+  },
+
   /** 将旧管道中最近的用户消息迁移到新管道 */
   fetchMessages: async (
     pipelineId: string,
@@ -878,6 +908,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     const existingFetch = _fetchingPipelines.get(dedupeKey)
     if (existingFetch) {
       return existingFetch
+    }
+    // 防御：older 请求不得与 init 并发。init 是全量替换（initFromAPI），older 是增量
+    // prepend，二者去重 key 不同互不阻塞，若并发会导致 prepend 的历史被 init 全量覆盖
+    // 丢失或重复加载。merge 已在刷新时清空 hasMoreOlder 拦截大部分情况，这里再加一层：
+    // init 进行中时直接拒绝 older，等 init 返回重设 hasMoreOlder 后再放行。
+    if (options?.before_sequence !== undefined && _fetchingPipelines.has(`${pipelineId}::init`)) {
+      return
     }
 
     const fetchPromise = (async () => {
@@ -1256,6 +1293,16 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         // 重置对账标记：应用重启后持久化的 bottomCursor 不可信（可能来自流式断线时的乐观值），
         // 所有 pipeline 必须重新全量对账，避免已加载区间内的空洞无法通过增量补漏修复。
         reconciledByPipeline: {},
+        // 分页游标与 hasMore 同样重置：reconciledByPipeline 已清空，意味着每个 pipeline 都会走
+        // initFromAPI 全量对账。若保留快照里的 hasMoreOlder=true / 旧游标，刷新后 init 尚未返回时，
+        // MessageList 的 increaseViewportBy 会在初始渲染触发 startReached → onLoadMore 看到
+        // hasMoreOlder=true 放行（router.tsx）→ 用旧游标发 older 请求，与 init（去重 key 不同）并发，
+        // 导致 prepend 的历史被 initFromAPI 全量覆盖丢失或重复加载。统一「刷新=全量重新对账」，
+        // 快照仅用于 init 返回前的占位渲染，绝不参与分页决策。initFromAPI 返回后会用 API 的
+        // 真实 has_more + 游标重设这两个字段（见 initFromAPI）。
+        hasMoreOlderByPipeline: {},
+        topCursorsByPipeline: {},
+        bottomCursorsByPipeline: {},
       }
     },
     // 迁移配套：消息缓存已迁 IndexedDB，旧 localStorage['pipeline-messages'] 不再读取。

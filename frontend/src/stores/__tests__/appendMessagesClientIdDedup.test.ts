@@ -191,3 +191,80 @@ describe('appendMessages / prependMessages 的 clientMessageId 对账', () => {
     expect(msgs[1].role).toBe('assistant')
   })
 })
+
+/**
+ * prependedCountByPipeline 测试：驱动虚拟列表 firstItemIndex，保证 prepend 后视口位置不变。
+ * initFromAPI 全量重建时归零；prependMessages 净增 N 条时 +N。
+ */
+describe('prependedCountByPipeline（虚拟列表 firstItemIndex 驱动）', () => {
+  beforeEach(() => {
+    usePipelineMessageStore.setState({
+      messagesByPipeline: {},
+      pipelines: {},
+      pipelineSessionMap: {},
+      streamingState: {},
+      activePipelineId: null,
+      topCursorsByPipeline: {},
+      bottomCursorsByPipeline: {},
+      hasMoreOlderByPipeline: {},
+      isLoadingOlderByPipeline: {},
+      prependedCountByPipeline: {},
+      reconciledByPipeline: {},
+    })
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({
+      pipelineId: PIPELINE_ID,
+      sessionId: SESSION_ID,
+      level: 1,
+      tabId: null,
+      agentName: '',
+      status: 'idle',
+      parentId: null,
+      unreadCount: 0,
+    } as any)
+  })
+
+  it('initFromAPI 后 prependedCount 为 0', () => {
+    const store = usePipelineMessageStore.getState()
+    store.initFromAPI(PIPELINE_ID, [
+      makeMsg('a', 10, { role: 'user', content: 'a' }),
+      makeMsg('b', 20, { role: 'assistant', content: 'b' }),
+    ])
+    expect(store.getPrependedCount(PIPELINE_ID)).toBe(0)
+  })
+
+  it('prependMessages 后 prependedCount 累计净增条数', () => {
+    const store = usePipelineMessageStore.getState()
+    store.initFromAPI(PIPELINE_ID, [
+      makeMsg('a', 10, { role: 'user', content: 'a' }),
+      makeMsg('b', 20, { role: 'assistant', content: 'b' }),
+    ])
+    // 向上翻页：插入 2 条更早的历史（sequence 5、8）
+    store.prependMessages(PIPELINE_ID, [
+      makeMsg('old-1', 5, { role: 'user', content: 'old1' }),
+      makeMsg('old-2', 8, { role: 'assistant', content: 'old2' }),
+    ])
+    expect(store.getPrependedCount(PIPELINE_ID)).toBe(2)
+  })
+
+  it('多次 prepend 累加，不被覆盖', () => {
+    const store = usePipelineMessageStore.getState()
+    store.initFromAPI(PIPELINE_ID, [
+      makeMsg('a', 10, { role: 'user', content: 'a' }),
+    ])
+    store.prependMessages(PIPELINE_ID, [makeMsg('old-1', 5, { role: 'user' })])
+    store.prependMessages(PIPELINE_ID, [makeMsg('old-2', 3, { role: 'user' })])
+    expect(store.getPrependedCount(PIPELINE_ID)).toBe(2)
+  })
+
+  it('initFromAPI 重建后 prependedCount 归零', () => {
+    const store = usePipelineMessageStore.getState()
+    store.initFromAPI(PIPELINE_ID, [makeMsg('a', 10, { role: 'user', content: 'a' })])
+    store.prependMessages(PIPELINE_ID, [makeMsg('old-1', 5, { role: 'user' })])
+    expect(store.getPrependedCount(PIPELINE_ID)).toBe(1)
+
+    // 全量重建（刷新/切会话）
+    store.initFromAPI(PIPELINE_ID, [makeMsg('a', 10, { role: 'user', content: 'a' })])
+    expect(store.getPrependedCount(PIPELINE_ID)).toBe(0)
+  })
+})
