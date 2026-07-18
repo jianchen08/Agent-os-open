@@ -34,14 +34,14 @@
 #### 记忆系统
 - **情景记忆（EPISODE）** —— 对话压缩后的记忆，保留要点而非逐轮原文
 - **语义记忆（SEMANTIC）** —— 沉淀用户偏好 / 项目决策 / 外部知识库导入
-- **基础检索 / 注入能力** —— 当前版本提供按需检索与按需注入；更丰富的多种检索方式 × 多种注入方式组合 **计划在下个版本正式上线**，详见 [ROADMAP.md](ROADMAP.md)
+- **基础检索 / 注入能力** —— 当前版本提供按需检索与按需注入；更丰富的多种检索方式 × 多种注入方式组合 **计划在下个版本正式上线**
 
 #### 复盘系统
 - **触发机制** —— 阈值触发（500 条记录）/ 间隔触发（7 天）/ 手动触发（agent 或用户）
 - **双路径降级** —— LLM 深度复盘管道优先，失败时降级到 ReviewEngine
 - **实施位置** —— `src/memory/maintenance/{review_engine,service}.py` + `src/tools/builtin/trigger_review/tool.py` + `config/agents/system/review_agent.yaml`
 
-> 注：本版本复盘系统聚焦"触发 + 复盘 + 沉淀"，记忆侧的容量治理归入记忆系统演进（见 [ROADMAP.md](ROADMAP.md)），不在复盘模块中描述。
+> 注：本版本复盘系统聚焦"触发 + 复盘 + 沉淀"，记忆侧的容量治理归入记忆系统演进，不在复盘模块中描述。
 
 #### 质量保障与执行隔离
 - **审批交互闭环** —— choice / conversation 双模式 + 管道暂停/恢复 + 反馈注入 + 任务打回重做；diff 渲染组件与版本对比 API 已具备
@@ -92,7 +92,6 @@
 
 - 📖 [README.md](README.md) / [README_EN.md](README_EN.md)
 - 🏗️ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- 🗺️ [ROADMAP.md](ROADMAP.md)
 - 🤝 [CONTRIBUTING.md](CONTRIBUTING.md)
 - 📜 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
@@ -103,8 +102,6 @@
 - 暂未提供官方 Helm Chart（计划在 0.3.0 加入）
 - 部分 IM 适配器（飞书、企微）需要用户自行申请应用凭证
 - 文档的英文翻译覆盖率约 70%
-
-详见 [ROADMAP.md](ROADMAP.md)。
 
 ### 🙏 致谢
 

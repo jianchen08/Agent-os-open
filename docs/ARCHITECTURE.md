@@ -322,7 +322,7 @@ src/channels/
 - **任务打回重做**：任务状态机支持打回，重新进入执行
 - **版本对比**：`ReviewDiff` 组件（LCS 算法 side-by-side/unified）+ 后端 `get_version_diff` API + `annotation_service` 批注 CRUD 已具备
 
-> 文本审批闭环已上线。审批请求携带制品（artifacts）的协议增强与工作区自动联动待补全（详见 [ROADMAP.md](../ROADMAP.md)）。
+> 文本审批闭环已上线。审批请求携带制品（artifacts）的协议增强与工作区自动联动待补全。
 
 ### 强制评估系统（Mandatory Evaluation）
 
@@ -427,7 +427,6 @@ src/channels/
 
 ## 进一步阅读
 
-- [ROADMAP.md](../ROADMAP.md) —— 版本路线图与未来方向
 - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 贡献流程
 - [CHANGELOG.md](../CHANGELOG.md) —— 版本变更记录
 
