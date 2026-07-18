@@ -11,7 +11,7 @@
 #
 # 环境变量：
 #   LINGXI_KERNEL_PORT  内核端口（默认 9100）
-#   LINGXI_FRONTEND_PORT 前端端口（默认 5289）
+#   LINGXI_FRONTEND_PORT 前端端口（默认 5290）
 # ============================================================
 
 set -e
@@ -24,7 +24,7 @@ PORTS_FILE="$PROJECT_ROOT/.ports_02"
 
 # 端口配置
 KERNEL_PORT="${LINGXI_KERNEL_PORT:-9100}"
-FRONTEND_PORT="${LINGXI_FRONTEND_PORT:-5289}"
+FRONTEND_PORT="${LINGXI_FRONTEND_PORT:-5290}"
 
 # 颜色输出
 RED='\033[0;31m'
