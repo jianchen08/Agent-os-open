@@ -1,0 +1,23 @@
+{
+    "id": "channel_dingtalk",
+    "name": "DingTalk Channel",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "dingtalk.send_message", "description": "Send a text message to a DingTalk user via Stream API"},
+            {"name": "dingtalk.get_status", "description": "Get DingTalk channel adapter connection status"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": ["aiohttp"],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5
+}

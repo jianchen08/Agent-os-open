@@ -1,0 +1,24 @@
+{
+    "id": "channel_wecom",
+    "name": "WeCom Channel",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "wecom.send_message", "description": "Send a text message to a WeCom user via HTTP API"},
+            {"name": "wecom.handle_callback", "description": "Handle WeCom callback request (URL verification or message decryption)"},
+            {"name": "wecom.get_status", "description": "Get WeCom channel adapter connection status"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": ["aiohttp", "cryptography"],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5
+}

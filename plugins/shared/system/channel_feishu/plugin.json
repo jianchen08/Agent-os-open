@@ -1,0 +1,24 @@
+{
+    "id": "channel_feishu",
+    "name": "Feishu Channel",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "feishu.send_message", "description": "Send a text message to a Feishu user via API"},
+            {"name": "feishu.send_card", "description": "Send an interactive card message to a Feishu user"},
+            {"name": "feishu.get_status", "description": "Get Feishu channel adapter connection status"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": ["aiohttp"],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5
+}

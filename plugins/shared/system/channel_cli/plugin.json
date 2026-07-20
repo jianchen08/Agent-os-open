@@ -1,0 +1,23 @@
+{
+    "id": "channel_cli",
+    "name": "CLI Channel",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "cli.get_status", "description": "Get CLI channel adapter status"},
+            {"name": "cli.sanitize_text", "description": "Sanitize text for terminal output"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": ["rich"],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5
+}
