@@ -1,0 +1,23 @@
+{
+    "id": "channel_api",
+    "name": "HTTP API Channel",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "api.get_status", "description": "Get HTTP API channel server status"},
+            {"name": "api.list_routes", "description": "List available HTTP API routes"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": ["fastapi", "uvicorn"],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5
+}
