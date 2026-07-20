@@ -641,6 +641,16 @@ pub trait PluginLoader: Send + Sync {
 
     /// 查询插件当前加载状态。
     fn get_status(&self, plugin_id: &str) -> PluginStatus;
+
+    /// 加载配置文件，返回合并后的配置 JSON。
+    ///
+    /// 扫描配置目录下的所有 YAML 文件，解析并合并为一个 JSON 对象。
+    /// 文件名（不含扩展名）作为 key，文件内容解析后的 JSON 作为 value。
+    ///
+    /// 默认返回空 `{}`，由具体实现覆盖。
+    async fn load_config(&self) -> Result<serde_json::Value, PluginError> {
+        Ok(serde_json::json!({}))
+    }
 }
 
 /// 已解析的插件 Manifest（运行时表示）。

@@ -26,6 +26,8 @@ pub struct PluginLoaderImpl {
     builtin_root: PathBuf,
     /// 用户插件根目录（可写）
     user_root: Option<PathBuf>,
+    /// 配置文件根目录（如 `config/`）
+    config_root: Option<PathBuf>,
     /// 已发现的 manifest 缓存 {plugin_id: (manifest, source_path)}
     manifests: RwLock<HashMap<String, (PluginManifest, PathBuf)>>,
     /// 已加载的插件状态 {plugin_id: LoadedPlugin}
@@ -42,9 +44,37 @@ impl PluginLoaderImpl {
         Self {
             builtin_root: builtin_root.into(),
             user_root,
+            config_root: None,
             manifests: RwLock::new(HashMap::new()),
             loaded: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 设置配置文件根目录，返回 self 供链式调用。
+    ///
+    /// 设置后，`load_config()` 将扫描该目录下的 YAML 文件并解析为 JSON。
+    ///
+    /// # Security
+    ///
+    /// 此方法应由应用启动代码调用，传入可信的配置目录路径（如 `./config/`）。
+    /// 不应接受来自用户输入的路径，以防止路径遍历攻击。
+    pub fn with_config_root(mut self, config_root: impl Into<PathBuf>) -> Self {
+        let path = config_root.into();
+        // 尝试 canonicalize 以规范化路径（消除 ../、symlink 等）
+        // 如果路径尚不存在（如测试中的临时目录可能已清理），保留原始路径
+        match std::fs::canonicalize(&path) {
+            Ok(canonical) => {
+                self.config_root = Some(canonical);
+            }
+            Err(_) => {
+                warn!(
+                    "Config root canonicalize failed (path may not exist yet): {}",
+                    path.display()
+                );
+                self.config_root = Some(path);
+            }
+        }
+        self
     }
 
     /// 扫描单个根目录，发现所有 plugin.json/plugin.yaml manifest。
@@ -294,6 +324,53 @@ impl PluginLoader for PluginLoaderImpl {
             .map(|p| p.status.clone())
             .unwrap_or(PluginStatus::Discovered)
     }
+
+    /// 加载配置文件，返回合并后的配置 JSON。
+    ///
+    /// 扫描 `config_root` 目录下的所有 `.yaml` 文件（递归子目录），
+    /// 每个文件以文件名（不含扩展名）为 key，解析后的 JSON 为 value。
+    /// 多个文件合并为一个 flat JSON 对象。
+    ///
+    /// DEBT: 当前返回全量合并配置，所有插件共享同一份 config。ceiling: 所有插件
+    /// 收到全系统配置，存在跨插件信息泄漏风险。upgrade: 当插件数量超过 20 个或
+    /// 出现需要配置隔离的安全需求时，改为 load_config(manifest_id) 按插件过滤。
+    async fn load_config(&self) -> Result<serde_json::Value, lingxi_core::types::PluginError> {
+        let config_root = match &self.config_root {
+            Some(root) => root,
+            None => return Ok(serde_json::json!({})),
+        };
+
+        if !config_root.exists() {
+            warn!("Config root does not exist: {}", config_root.display());
+            return Ok(serde_json::json!({}));
+        }
+
+        let mut config_map = serde_json::Map::new();
+
+        self.collect_yaml_configs(config_root, &mut config_map)
+            .map_err(|e| {
+                let code = match &e {
+                    LoaderError::Io { .. } => "CONFIG_IO_ERROR",
+                    LoaderError::ManifestParse { .. } => "CONFIG_PARSE_ERROR",
+                    _ => "CONFIG_LOAD_FAILED",
+                };
+                lingxi_core::types::PluginError {
+                    message: format!("Failed to load config from {}: {}", config_root.display(), e),
+                    code: Some(code.to_string()),
+                    source: Some("plugin-loader".to_string()),
+                }
+            })?;
+
+        let config_keys: Vec<String> = config_map.keys().cloned().collect();
+        info!(
+            "Loaded {} config entries from {}: [{}]",
+            config_map.len(),
+            config_root.display(),
+            config_keys.join(", ")
+        );
+
+        Ok(serde_json::Value::Object(config_map))
+    }
 }
 
 impl PluginLoaderImpl {
@@ -307,6 +384,67 @@ impl PluginLoaderImpl {
     pub fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
         let manifests = self.manifests.read();
         manifests.get(plugin_id).map(|(m, _)| m.clone())
+    }
+
+    /// 递归扫描目录下的所有 YAML 文件，解析并合并到 config_map。
+    ///
+    /// 文件名（不含 `.yaml`/`.yml` 扩展名）作为 key，
+    /// 文件内容解析后的 JSON Value 作为 value。
+    /// 子目录名也会作为嵌套 key 被收录（子目录下的文件合并到该 key 对应的子对象中）。
+    #[allow(clippy::only_used_in_recursion)]
+    fn collect_yaml_configs(
+        &self,
+        dir: &Path,
+        config_map: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), LoaderError> {
+        let entries = std::fs::read_dir(dir).map_err(|e| LoaderError::Io {
+            message: format!("Failed to read config dir {}: {}", dir.display(), e),
+        })?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                // 递归处理子目录
+                let dir_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                let mut sub_map = serde_json::Map::new();
+                self.collect_yaml_configs(&path, &mut sub_map)?;
+
+                if !sub_map.is_empty() {
+                    config_map.insert(dir_name, serde_json::Value::Object(sub_map));
+                }
+            } else if path.is_file() {
+                // 只处理 .yaml 和 .yml 文件
+                let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+                if ext.as_deref() != Some("yaml") && ext.as_deref() != Some("yml") {
+                    continue;
+                }
+
+                let stem = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                let content = std::fs::read_to_string(&path).map_err(|e| LoaderError::Io {
+                    message: format!("Failed to read config file {}: {}", path.display(), e),
+                })?;
+
+                // YAML → JSON Value（serde_yaml 直接反序列化到 serde_json::Value）
+                let yaml_value: serde_json::Value =
+                    serde_yaml::from_str(&content).map_err(|e| LoaderError::ManifestParse {
+                        path: path.to_string_lossy().to_string(),
+                        message: e.to_string(),
+                    })?;
+
+                config_map.insert(stem, yaml_value);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -505,5 +643,287 @@ mod tests {
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));
+    }
+
+    // ── 配置加载测试 ──
+
+    #[tokio::test]
+    async fn test_load_config_no_config_root_returns_empty() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let config = loader.load_config().await.unwrap();
+        assert_eq!(config, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_load_config_nonexistent_dir_returns_empty() {
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root("/tmp/no_such_dir");
+        let config = loader.load_config().await.unwrap();
+        assert_eq!(config, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_load_config_reads_yaml_files() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        // 写入两个 YAML 配置文件
+        fs::write(
+            config_dir.path().join("memory_storage.yaml"),
+            "storage_backend: sqlite\ncache_size: 1000\n",
+        )
+        .unwrap();
+        fs::write(
+            config_dir.path().join("api_config.yaml"),
+            "timeout: 30\nhost: localhost\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        assert_eq!(obj.len(), 2);
+        assert!(obj.contains_key("memory_storage"));
+        assert!(obj.contains_key("api_config"));
+
+        // 验证 YAML 内容正确解析
+        let mem = obj.get("memory_storage").unwrap();
+        assert_eq!(mem["storage_backend"], "sqlite");
+        assert_eq!(mem["cache_size"], 1000);
+    }
+
+    #[tokio::test]
+    async fn test_load_config_handles_nested_dirs() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let sub_dir = config_dir.path().join("isolation");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        // 根目录 YAML
+        fs::write(
+            config_dir.path().join("memory_storage.yaml"),
+            "backend: sqlite\n",
+        )
+        .unwrap();
+        // 子目录 YAML
+        fs::write(
+            sub_dir.join("isolation_config.yaml"),
+            "level: strict\ncontainers: 5\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        assert_eq!(obj.len(), 2);
+        assert!(obj.contains_key("memory_storage"));
+        assert!(obj.contains_key("isolation"));
+
+        // 子目录合并为嵌套对象
+        let isolation = obj.get("isolation").unwrap().as_object().unwrap();
+        assert_eq!(isolation.len(), 1);
+        assert!(isolation.contains_key("isolation_config"));
+        assert_eq!(isolation["isolation_config"]["level"], "strict");
+    }
+
+    #[tokio::test]
+    async fn test_load_config_ignores_non_yaml_files() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        fs::write(
+            config_dir.path().join("config.yaml"),
+            "key: value\n",
+        )
+        .unwrap();
+        fs::write(
+            config_dir.path().join("readme.md"),
+            "# Not a config\n",
+        )
+        .unwrap();
+        fs::write(
+            config_dir.path().join("data.json"),
+            "{\"key\": \"value\"}\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        // 只有 YAML 文件被收录
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("config"));
+        assert!(!obj.contains_key("readme"));
+        assert!(!obj.contains_key("data"));
+    }
+
+    #[tokio::test]
+    async fn test_load_config_yml_extension() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        fs::write(
+            config_dir.path().join("short.yml"),
+            "name: test\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("short"));
+    }
+
+    #[tokio::test]
+    async fn test_load_config_empty_yaml_dir() {
+        let config_dir = tempfile::tempdir().unwrap();
+        // 空目录
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        assert_eq!(config, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_load_config_deep_nested_dirs() {
+        // 深层嵌套（≥ 2 层目录）
+        let config_dir = tempfile::tempdir().unwrap();
+        let deep_dir = config_dir
+            .path()
+            .join("system")
+            .join("subsystem");
+        fs::create_dir_all(&deep_dir).unwrap();
+
+        fs::write(
+            config_dir.path().join("root_config.yaml"),
+            "root_key: root_value\n",
+        )
+        .unwrap();
+        fs::write(
+            deep_dir.join("deep_config.yaml"),
+            "deep_key: deep_value\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        assert_eq!(obj.len(), 2);
+        assert!(obj.contains_key("root_config"));
+        assert!(obj.contains_key("system"));
+
+        // 第二层
+        let system = obj.get("system").unwrap().as_object().unwrap();
+        assert!(system.contains_key("subsystem"));
+
+        // 第三层
+        let subsystem = system.get("subsystem").unwrap().as_object().unwrap();
+        assert!(subsystem.contains_key("deep_config"));
+        assert_eq!(subsystem["deep_config"]["deep_key"], "deep_value");
+    }
+
+    #[tokio::test]
+    async fn test_load_config_same_stem_across_dirs() {
+        // 同名文件跨目录：根目录和子目录都有同名 yaml
+        let config_dir = tempfile::tempdir().unwrap();
+        let sub_dir = config_dir.path().join("sub");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        // 根目录有 config.yaml
+        fs::write(
+            config_dir.path().join("config.yaml"),
+            "from: root\n",
+        )
+        .unwrap();
+        // 子目录也有 config.yaml
+        fs::write(
+            sub_dir.join("config.yaml"),
+            "from: sub\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        // 根目录的 config.yaml 作为顶层 key
+        assert!(obj.contains_key("config"));
+        assert_eq!(obj["config"]["from"], "root");
+
+        // 子目录的 config.yaml 在 sub 子对象下（不会覆盖）
+        assert!(obj.contains_key("sub"));
+        let sub = obj.get("sub").unwrap().as_object().unwrap();
+        assert!(sub.contains_key("config"));
+        assert_eq!(sub["config"]["from"], "sub");
+    }
+
+    #[tokio::test]
+    async fn test_load_config_empty_subdir_not_collected() {
+        // 空子目录不应出现在结果中
+        let config_dir = tempfile::tempdir().unwrap();
+        let empty_sub = config_dir.path().join("empty_dir");
+        fs::create_dir_all(&empty_sub).unwrap();
+
+        fs::write(
+            config_dir.path().join("config.yaml"),
+            "key: value\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        // 空子目录不应出现
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("config"));
+        assert!(!obj.contains_key("empty_dir"));
+    }
+
+    #[tokio::test]
+    async fn test_load_config_mixed_yaml_and_yml() {
+        // 同一目录下同时有 .yaml 和 .yml 文件
+        let config_dir = tempfile::tempdir().unwrap();
+
+        fs::write(
+            config_dir.path().join("long.yaml"),
+            "type: yaml\n",
+        )
+        .unwrap();
+        fs::write(
+            config_dir.path().join("short.yml"),
+            "type: yml\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+
+        assert_eq!(obj.len(), 2);
+        assert!(obj.contains_key("long"));
+        assert!(obj.contains_key("short"));
+        assert_eq!(obj["long"]["type"], "yaml");
+        assert_eq!(obj["short"]["type"], "yml");
     }
 }
