@@ -1,0 +1,27 @@
+{
+    "id": "pipeline_level_guard",
+    "name": "Level Guard",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "level_guard.execute",
+                "description": "Level Guard pipeline plugin"
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50
+}

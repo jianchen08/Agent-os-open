@@ -1,0 +1,27 @@
+{
+    "id": "pipeline_stream_repeat_monitor",
+    "name": "Stream Repeat Monitor",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "stream_repeat_monitor.check",
+                "description": "Check content chunks for streaming repetition. Returns stop signal when similarity exceeds threshold for N consecutive sliding windows."
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50
+}

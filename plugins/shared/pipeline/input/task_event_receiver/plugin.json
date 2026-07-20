@@ -1,0 +1,27 @@
+{
+    "id": "pipeline_task_event_receiver",
+    "name": "Task Event Receiver",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "task_event_receiver.execute",
+                "description": "Task Event Receiver pipeline plugin"
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50
+}
