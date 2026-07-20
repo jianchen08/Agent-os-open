@@ -1,0 +1,23 @@
+{
+    "id": "llm_service",
+    "name": "LLM Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "llm.complete", "description": "Send a completion request to LLM with messages and optional tools"},
+            {"name": "llm.health_check", "description": "Check if a specific model is healthy and available"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30,
+    "requires_content": 3
+}

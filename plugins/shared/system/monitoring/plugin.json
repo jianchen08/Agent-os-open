@@ -1,0 +1,26 @@
+{
+    "id": "monitoring_service",
+    "name": "Monitoring Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "monitoring.get_metrics", "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)"},
+            {"name": "monitoring.get_health", "description": "Get system health status with bottleneck detection"},
+            {"name": "monitoring.record_llm_request", "description": "Record an LLM API call for usage tracking"},
+            {"name": "monitoring.record_tool_execution", "description": "Record a tool execution for performance tracking"},
+            {"name": "monitoring.update_task_status", "description": "Update task execution metrics (pending, running, completed counts)"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 40,
+    "requires_content": 3
+}
