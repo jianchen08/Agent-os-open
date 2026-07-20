@@ -1,0 +1,28 @@
+{
+    "id": "task_manage_tool",
+    "name": "Task Management Tool",
+    "description": "任务管理 MCP 工具，查询和控制任务生命周期",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "task_manage",
+                "description": "任务管理工具：查询和控制任务生命周期"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 10
+}

@@ -1,0 +1,40 @@
+{
+    "id": "media_tools",
+    "name": "Media Generation Tools",
+    "description": "媒体生成 MCP 工具集（图片/音乐/视频/TTS）",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "image_generate",
+                "description": "图片生成"
+            },
+            {
+                "name": "music_generate",
+                "description": "音乐生成"
+            },
+            {
+                "name": "video_generate",
+                "description": "视频生成"
+            },
+            {
+                "name": "tts_generate",
+                "description": "文本转语音"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

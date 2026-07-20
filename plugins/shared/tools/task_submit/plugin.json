@@ -1,0 +1,28 @@
+{
+    "id": "task_submit_tool",
+    "name": "Task Submit Tool",
+    "description": "任务提交 MCP 工具，将任务提交给指定 Agent 执行",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "task_submit",
+                "description": "任务提交工具，将任务提交给指定 Agent 执行"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 10
+}

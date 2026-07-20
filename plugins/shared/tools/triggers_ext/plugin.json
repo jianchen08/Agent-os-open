@@ -1,0 +1,28 @@
+{
+    "id": "trigger_setup_tool",
+    "name": "Trigger Setup Tool",
+    "description": "触发器配置 MCP 工具",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "trigger_setup",
+                "description": "触发器配置工具"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 40
+}

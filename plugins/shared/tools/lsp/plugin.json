@@ -1,0 +1,36 @@
+{
+    "id": "lsp_tool",
+    "name": "LSP Tools",
+    "description": "LSP 语言服务协议工具（定义跳转/引用查找/诊断）",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "lsp_definition",
+                "description": "跳转到符号定义位置"
+            },
+            {
+                "name": "lsp_references",
+                "description": "查找符号的所有引用位置"
+            },
+            {
+                "name": "lsp_diagnostics",
+                "description": "获取文件的诊断信息"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

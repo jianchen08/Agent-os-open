@@ -1,0 +1,33 @@
+{
+    "id": "smithery_search",
+    "name": "Smithery Search",
+    "description": "Smithery 搜索 MCP 工具",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "http",
+        "url": "https://smithery.ai/api",
+        "headers": {
+            "Accept": "application/json"
+        },
+        "auth": {
+            "type": "api_key",
+            "header_name": "Authorization",
+            "value": "${SMITHERY_API_KEY}"
+        }
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "smithery_search",
+                "description": "Search Smithery for MCP tools and servers"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

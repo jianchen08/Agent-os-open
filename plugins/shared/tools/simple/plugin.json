@@ -1,0 +1,70 @@
+{
+    "id": "simple_tools",
+    "name": "Simple Tools Plugin",
+    "description": "简单工具集 MCP 插件（11个纯函数工具：单位换算/计算器/YAML校验等）",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "unit_converter",
+                "description": "单位换算工具（长度/重量/温度）"
+            },
+            {
+                "name": "scientific_calculator",
+                "description": "科学计算器（三角函数/对数/幂运算等）"
+            },
+            {
+                "name": "yaml_validate",
+                "description": "YAML 配置文件格式校验"
+            },
+            {
+                "name": "binary_converter",
+                "description": "二进制文件转 Markdown（PDF/DOCX/图片等）"
+            },
+            {
+                "name": "ide_get_selection",
+                "description": "获取当前 IDE 中的上下文信息"
+            },
+            {
+                "name": "ide_open_file",
+                "description": "在 IDE 中打开指定文件"
+            },
+            {
+                "name": "ide_show_diff",
+                "description": "在 IDE 中显示文件差异"
+            },
+            {
+                "name": "state_update",
+                "description": "更新工作流共享状态变量"
+            },
+            {
+                "name": "compatibility_checker",
+                "description": "检查资源修改兼容性，识别破坏性变更"
+            },
+            {
+                "name": "read_execution_detail",
+                "description": "查看管道执行详细记录（渐进式披露）"
+            },
+            {
+                "name": "register_resource",
+                "description": "动态注册 Agent/工具/模板到系统"
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50
+}
