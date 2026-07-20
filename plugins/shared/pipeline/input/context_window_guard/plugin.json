@@ -1,0 +1,27 @@
+{
+    "id": "pipeline_context_window_guard",
+    "name": "Context Window Guard",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "context_window_guard.execute",
+                "description": "Context Window Guard pipeline plugin"
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50
+}
