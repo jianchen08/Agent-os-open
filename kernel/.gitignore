@@ -1,0 +1,5 @@
+# Rust target：仅保留 release 二进制
+target/**
+!target/release/
+target/release/**
+!target/release/lingxi-kernel
