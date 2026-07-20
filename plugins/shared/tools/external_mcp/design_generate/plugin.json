@@ -1,0 +1,30 @@
+{
+    "id": "design_generate_mcp",
+    "name": "Design Generate (MCP)",
+    "description": "设计生成 MCP 工具，基于 screenshot-to-code",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+            "-y",
+            "screenshot-to-code"
+        ],
+        "env": {}
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "design_generate",
+                "description": "Generate design from screenshot"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

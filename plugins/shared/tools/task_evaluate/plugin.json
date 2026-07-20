@@ -1,0 +1,28 @@
+{
+    "id": "task_evaluate_tool",
+    "name": "Task Evaluate Tool",
+    "description": "任务评估 MCP 工具，评估任务的验收指标是否满足",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "task_evaluate",
+                "description": "任务评估工具，评估任务的验收指标是否满足"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 10
+}

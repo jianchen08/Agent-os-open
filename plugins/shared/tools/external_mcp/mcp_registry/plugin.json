@@ -1,0 +1,33 @@
+{
+    "id": "mcp_registry_search",
+    "name": "MCP Registry Search",
+    "description": "MCP Registry 搜索 MCP 工具",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "http",
+        "url": "https://registry.modelcontextprotocol.io",
+        "headers": {
+            "Accept": "application/json"
+        },
+        "auth": {
+            "type": "api_key",
+            "header_name": "Authorization",
+            "value": "${MCP_REGISTRY_API_KEY}"
+        }
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "mcp_registry_search",
+                "description": "Search MCP Registry for registered servers"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

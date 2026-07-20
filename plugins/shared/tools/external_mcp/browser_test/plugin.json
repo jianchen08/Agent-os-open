@@ -1,0 +1,46 @@
+{
+    "id": "browser_test_mcp",
+    "name": "Browser Test (MCP)",
+    "description": "浏览器测试 MCP 工具，基于 Playwright",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+            "@anthropic-ai/mcp-playwright",
+            "--headless"
+        ],
+        "env": {}
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "browser_navigate",
+                "description": "Navigate to a URL"
+            },
+            {
+                "name": "browser_click",
+                "description": "Click an element"
+            },
+            {
+                "name": "browser_screenshot",
+                "description": "Take a screenshot"
+            },
+            {
+                "name": "browser_console",
+                "description": "Get console logs"
+            },
+            {
+                "name": "browser_performance",
+                "description": "Get performance metrics"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

@@ -1,0 +1,31 @@
+{
+    "id": "web_search_mcp",
+    "name": "Web Search (MCP)",
+    "description": "Web 搜索 MCP 工具，基于 Bing/SearXNG",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "stdio",
+        "command": "python3",
+        "args": [
+            "mcp-servers/bing-search/server.py"
+        ],
+        "env": {
+            "BING_API_KEY": "${BING_API_KEY}"
+        }
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "bing_search",
+                "description": "Search the web using Bing/SearXNG"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

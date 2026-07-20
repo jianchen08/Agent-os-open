@@ -1,0 +1,29 @@
+{
+    "id": "download_tool",
+    "name": "Download Tool",
+    "description": "通用文件下载 MCP 工具，支持多连接分段下载和断点续传",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "download",
+                "description": "通用文件下载工具，支持多连接分段下载、断点续传"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0",
+        "httpx>=0.27"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

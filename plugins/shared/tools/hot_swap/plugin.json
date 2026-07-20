@@ -1,0 +1,28 @@
+{
+    "id": "hot_swap_tool",
+    "name": "Hot Swap Tool",
+    "description": "热替换 MCP 工具，无需重启即可更新插件配置",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "hot_swap",
+                "description": "热替换工具，无需重启即可更新插件配置"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 20
+}

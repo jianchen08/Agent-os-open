@@ -1,0 +1,30 @@
+{
+    "id": "design_review_mcp",
+    "name": "Design Review (MCP)",
+    "description": "设计审查 MCP 工具，基于 Playwright",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+            "@anthropic-ai/mcp-playwright",
+            "--headless"
+        ],
+        "env": {}
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "design_review",
+                "description": "Review design using Playwright MCP"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

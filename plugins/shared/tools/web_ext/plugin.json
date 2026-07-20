@@ -1,0 +1,29 @@
+{
+    "id": "web_operate_tool",
+    "name": "Web Operate Tool",
+    "description": "Web 操作 MCP 工具（HTTP 请求和网页抓取）",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "web_operate",
+                "description": "Web 操作：HTTP 请求和网页抓取"
+            }
+        ],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0",
+        "aiohttp>=3.9"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}

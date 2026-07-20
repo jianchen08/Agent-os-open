@@ -1,0 +1,34 @@
+{
+    "id": "external_resource_search",
+    "name": "External Resource Search",
+    "description": "外部资源聚合搜索 MCP 工具（MCP Registry + Smithery）",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "mcp:external",
+    "mcp_endpoint": {
+        "transport": "http",
+        "url": "https://registry.modelcontextprotocol.io",
+        "headers": {
+            "X-Also-Search": "smithery.ai"
+        },
+        "auth": {
+            "type": "api_key",
+            "header_name": "Authorization",
+            "value": "${RESOURCE_SEARCH_API_KEY}"
+        }
+    },
+    "capabilities": {
+        "tools": [
+            {
+                "name": "resource_search",
+                "description": "Aggregate search across MCP Registry and Smithery platforms"
+            }
+        ]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 30
+}
