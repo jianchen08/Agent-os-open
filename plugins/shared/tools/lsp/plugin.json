@@ -1,7 +1,7 @@
 {
-    "id": "lsp_tool",
-    "name": "LSP Tools",
-    "description": "LSP 语言服务协议工具（定义跳转/引用查找/诊断）",
+    "id": "lsp_service",
+    "name": "LSP Service",
+    "description": "LSP 语言服务协议工具（定义跳转/引用查找/诊断/补全/文件跳转）",
     "version": "1.0.0",
     "plugin_type": "tool",
     "language": "python",
@@ -9,28 +9,22 @@
     "entry": "python3 server.py",
     "capabilities": {
         "tools": [
-            {
-                "name": "lsp_definition",
-                "description": "跳转到符号定义位置"
-            },
-            {
-                "name": "lsp_references",
-                "description": "查找符号的所有引用位置"
-            },
-            {
-                "name": "lsp_diagnostics",
-                "description": "获取文件的诊断信息"
-            }
+            {"name": "lsp.definition", "description": "跳转到符号定义位置"},
+            {"name": "lsp.references", "description": "查找符号的所有引用位置"},
+            {"name": "lsp.diagnostics", "description": "获取文件的诊断信息（错误和警告）"},
+            {"name": "lsp.completion", "description": "获取代码补全建议"},
+            {"name": "lsp.jump_to_file", "description": "在 IDE 中打开文件并跳转到指定位置"},
+            {"name": "lsp.supported_languages", "description": "获取支持的编程语言列表"}
         ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
+        "lifecycle_hooks": ["on_load", "on_unload"]
     },
     "dependencies": [
-        "lingxi-plugin-sdk>=0.2.0"
+        "lingxi-plugin-sdk>=0.2.0",
+        "pydantic>=2.0.0",
+        "psutil>=5.9.0"
     ],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 30
+    "priority": 30,
+    "requires_content": 3
 }
