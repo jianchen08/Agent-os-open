@@ -1,0 +1,29 @@
+{
+    "id": "human_interaction_service",
+    "name": "Human Interaction Service",
+    "description": "人机交互服务（选择模式/对话模式/通知模式）",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "interaction.send_notification", "description": "发送非阻塞通知"},
+            {"name": "interaction.create_choice", "description": "创建选择模式交互请求"},
+            {"name": "interaction.create_conversation", "description": "创建对话模式交互请求"},
+            {"name": "interaction.wait_for_choice", "description": "等待用户选择响应"},
+            {"name": "interaction.respond", "description": "提交交互响应"},
+            {"name": "interaction.cancel", "description": "取消交互请求"},
+            {"name": "interaction.get_pending", "description": "获取待处理请求列表"}
+        ],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [
+        "lingxi-plugin-sdk>=0.2.0"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 3
+}
