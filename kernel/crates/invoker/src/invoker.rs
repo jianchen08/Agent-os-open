@@ -91,8 +91,29 @@ impl PluginInvokerImpl {
             source: Some("plugin-invoker".to_string()),
         })?;
 
-        // initialize 握手
-        client.initialize().await.map_err(|e| PluginError {
+        // initialize 握手（携带插件配置）
+        // 配置加载失败时分级处理：IO 错误（目录不存在等）可降级为空配置；
+        // 解析错误（YAML 语法错误）应报错，让插件启动失败比悄悄降级更安全。
+        let config = match self.loader.load_config().await {
+            Ok(config) => config,
+            Err(e) => {
+                if e
+                    .code
+                    .as_deref()
+                    .map(|c| c.contains("PARSE"))
+                    .unwrap_or(false)
+                {
+                    return Err(PluginError {
+                        message: format!("Plugin config parse error: {}", e),
+                        code: Some("CONFIG_PARSE_ERROR".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    });
+                }
+                warn!("Failed to load plugin config, using empty: {}", e);
+                serde_json::json!({})
+            }
+        };
+        client.initialize(&config).await.map_err(|e| PluginError {
             message: format!("MCP initialize failed: {}", e),
             code: Some("MCP_INIT_FAILED".to_string()),
             source: Some("plugin-invoker".to_string()),
