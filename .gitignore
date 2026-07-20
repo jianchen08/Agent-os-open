@@ -130,3 +130,6 @@ packages/npm-tarballs/*
 
 # ─── 崩溃转储（不入库）───
 *.stackdump
+
+# ─── Rust 编译中间产物（仅保留 release 二进制）───
+
