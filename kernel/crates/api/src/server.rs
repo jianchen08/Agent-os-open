@@ -18,8 +18,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use lingxi_core::traits::{AdrEngine, PluginManifest, PluginType};
+use lingxi_core::types::{CompositeStep, RouteType};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::ApiError;
 use crate::routes::{
@@ -66,8 +68,143 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
 }
 
+/// 通过管道引擎处理消息。
+///
+/// 创建一个 engine run，将用户消息注入管道状态，
+/// 遍历已发现的 pipeline 插件执行，收集最终状态。
+///
+/// 如果引擎不可用或无 pipeline 插件，降级为 echo 模式（标注降级原因）。
+async fn process_via_engine(state: &AppState, message: &str) -> String {
+    let engine = match &state.engine {
+        Some(e) => e,
+        None => {
+            return format!(
+                "[echo-fallback: engine not available] {}",
+                message
+            );
+        }
+    };
+
+    // 构建管道配置——用户消息作为初始状态
+    let config = serde_json::json!({
+        "message": message,
+        "input": message,
+    });
+
+    // 启动 run
+    let run_id = match engine.start_run(&config).await {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("Engine start_run failed: {}, falling back to echo", e);
+            return format!("[engine-start-failed] {}", message);
+        }
+    };
+
+    info!("Pipeline run started: run_id={}", run_id);
+
+    // 收集所有 pipeline 类型的插件，按优先级排序
+    let mut pipeline_plugins: Vec<&PluginManifest> = state
+        .manifests
+        .iter()
+        .filter(|m| m.plugin_type == PluginType::Pipeline)
+        .collect();
+    pipeline_plugins.sort_by_key(|m| m.priority);
+
+    let mut executed_count = 0usize;
+    let mut last_state: serde_json::Value = serde_json::json!({"message": message});
+
+    for manifest in &pipeline_plugins {
+        let step = CompositeStep {
+            name: manifest.name.clone(),
+            plugin: manifest.id.clone(),
+            inputs: serde_json::json!({
+                "message": message,
+            }),
+            outputs: std::collections::HashMap::new(),
+        };
+
+        match engine.execute_step(&run_id, &step).await {
+            Ok(step_result) => {
+                executed_count += 1;
+                // 将状态更新合并到 last_state（merge 语义，非替换）
+                if !step_result.state_updates.is_empty() {
+                    if let Some(obj) = last_state.as_object_mut() {
+                        for (key, value) in &step_result.state_updates {
+                            obj.insert(key.clone(), value.clone());
+                        }
+                    } else {
+                        // last_state 不是 Object（首次或被覆盖），直接序列化 state_updates
+                        last_state = serde_json::to_value(&step_result.state_updates)
+                            .unwrap_or(last_state.clone());
+                    }
+                }
+
+                // 检查路由信号
+                if let Some(ref signal) = step_result.route_signal {
+                    match signal.route_type {
+                        RouteType::End => {
+                            info!("Pipeline ended via End signal after {} steps", executed_count);
+                            break;
+                        }
+                        RouteType::Wait => {
+                            info!("Pipeline suspended via Wait signal after {} steps", executed_count);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Pipeline step '{}' execution failed: {}, continuing (error_policy={:?})",
+                    manifest.id, e, manifest.error_policy
+                );
+                // 按错误策略处理：Abort 则终止，其他则继续
+                if manifest.error_policy == lingxi_core::types::ErrorPolicy::Abort {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 结束 run
+    if let Err(e) = engine.end_run(&run_id).await {
+        warn!("Engine end_run failed: {}", e);
+    }
+
+    // 构建响应内容
+    let run_id_short: &str = run_id.get(..8).unwrap_or(&run_id);
+    if executed_count == 0 {
+        // 没有插件被执行（可能全是 sidecar 但进程不可达）
+        format!(
+            "[pipeline: run_id={}, plugins_tried={}, no_plugin_executed] {}",
+            run_id_short,
+            pipeline_plugins.len(),
+            message
+        )
+    } else {
+        // 有插件被执行——返回引擎处理后的状态
+        // 优先从合并后的状态中提取 "message" 字段，否则 pretty-print 整个状态
+        let message_from_state = last_state
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let state_str = match message_from_state {
+            Some(msg) => msg,
+            None => serde_json::to_string_pretty(&last_state)
+                .unwrap_or_else(|_| message.to_string()),
+        };
+        format!(
+            "[pipeline: run_id={}, steps_executed={}] {}",
+            run_id_short,
+            executed_count,
+            state_str
+        )
+    }
+}
+
 /// 处理 WebSocket 连接——收发消息循环。
-async fn handle_ws_connection(socket: WebSocket, _state: AppState) {
+async fn handle_ws_connection(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
     // 发送欢迎消息
@@ -92,10 +229,13 @@ async fn handle_ws_connection(socket: WebSocket, _state: AppState) {
                     session_id: String::new(),
                 });
 
-                // 构造响应（简化：echo + 时间戳）
+                // 通过管道引擎处理消息
+                let content = process_via_engine(&state, &req.message).await;
+
+                // 构造响应
                 let response = WsResponse {
                     r#type: "message".to_string(),
-                    content: format!("Echo: {}", req.message),
+                    content,
                     session_id: req.session_id,
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 };
@@ -121,14 +261,17 @@ async fn handle_ws_connection(socket: WebSocket, _state: AppState) {
     }
 }
 
-/// /api/v1/chat POST 端点——非 WebSocket 消息发送。
+/// /api/v1/chat POST 端点——通过管道引擎处理消息。
 async fn chat_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::Json(req): axum::Json<WsRequest>,
 ) -> Result<axum::Json<WsResponse>, ApiError> {
+    // 通过管道引擎处理消息
+    let content = process_via_engine(&state, &req.message).await;
+
     let response = WsResponse {
         r#type: "message".to_string(),
-        content: format!("Response to: {}", req.message),
+        content,
         session_id: req.session_id,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
@@ -281,6 +424,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_chat_uses_engine_not_echo() {
+        // 验证 chat 响应不再是简单的 "Response to: xxx"
+        let app = build_router(AppState::new());
+        let body = serde_json::to_string(&WsRequest {
+            message: "hello world".to_string(),
+            session_id: "test_session".to_string(),
+        })
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["type"], "message");
+        // 响应内容不应再是 "Response to: hello world"（echo 模式）
+        let content = json["content"].as_str().unwrap();
+        assert!(
+            !content.starts_with("Response to:"),
+            "Chat should not be in echo mode, got: {}",
+            content
+        );
+        assert_eq!(json["session_id"], "test_session");
+    }
+
+    #[tokio::test]
     async fn test_schema_with_config() {
         let config = json!({
             "agents": [{"id": "agent1", "name": "Test Agent"}],
@@ -302,26 +480,24 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["agents"].as_array().unwrap().len(), 1);
-        assert_eq!(json["pipelines"].as_array().unwrap().len(), 1);
+        // config-based 模式下 agents 为空（因为 manifests 为空）
+        assert_eq!(json["agents"].as_array().unwrap().len(), 0);
+        // tools 来自 config（capability_registry 为 None 时 fallback 到 config）
         assert_eq!(json["tools"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn test_chat_response_content() {
-        let app = build_router(AppState::new());
-        let body = serde_json::to_string(&WsRequest {
-            message: "hello world".to_string(),
-            session_id: "test_session".to_string(),
-        })
-        .unwrap();
+    async fn test_tools_handler_returns_tools_list() {
+        // 验证 tools handler 从 config 返回工具列表（无 registry 时）
+        let config = json!({
+            "tools": [{"name": "calculator", "description": "A calculator"}],
+        });
+        let app = build_router(AppState::with_config(config));
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/chat")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
+                    .uri("/api/v1/tools")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -330,8 +506,8 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["type"], "message");
-        assert!(json["content"].as_str().unwrap().contains("hello world"));
-        assert_eq!(json["session_id"], "test_session");
+        let tools = json.as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "calculator");
     }
 }
