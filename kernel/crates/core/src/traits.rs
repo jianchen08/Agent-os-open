@@ -651,6 +651,16 @@ pub trait PluginLoader: Send + Sync {
     async fn load_config(&self) -> Result<serde_json::Value, PluginError> {
         Ok(serde_json::json!({}))
     }
+
+    /// 获取插件的目录路径（包含 plugin.json/server.py 的目录）。
+    ///
+    /// 用于 PluginInvokerImpl 设置 sidecar 进程的 working_dir，
+    /// 确保插件代码中的相对路径（如 `python3 server.py`）能正确解析。
+    ///
+    /// 默认返回 None，表示使用内核进程的 CWD。
+    fn get_plugin_dir(&self, _plugin_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// 已解析的插件 Manifest（运行时表示）。

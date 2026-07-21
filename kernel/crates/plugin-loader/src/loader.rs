@@ -371,6 +371,16 @@ impl PluginLoader for PluginLoaderImpl {
 
         Ok(serde_json::Value::Object(config_map))
     }
+
+    /// 获取插件的目录路径（包含 plugin.json/server.py 的目录）。
+    ///
+    /// 从已缓存的 manifest 发现路径中提取插件目录。
+    fn get_plugin_dir(&self, plugin_id: &str) -> Option<String> {
+        let manifests = self.manifests.read();
+        manifests
+            .get(plugin_id)
+            .and_then(|(_, path)| path.parent().map(|p| p.to_string_lossy().to_string()))
+    }
 }
 
 impl PluginLoaderImpl {
@@ -604,6 +614,48 @@ mod tests {
         // 卸载
         loader.unload("test_load").await.unwrap();
         assert_eq!(loader.get_status("test_load"), PluginStatus::Discovered);
+    }
+
+    #[tokio::test]
+    async fn test_get_plugin_dir_returns_correct_path() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "dir_test_plugin", "pipeline");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        loader.discover(&[]).await.unwrap();
+
+        let plugin_dir = loader.get_plugin_dir("dir_test_plugin");
+        assert!(plugin_dir.is_some(), "get_plugin_dir should return Some for discovered plugin");
+        let dir = plugin_dir.unwrap();
+        assert!(dir.ends_with("dir_test_plugin"), "plugin dir should end with plugin id, got: {}", dir);
+    }
+
+    #[tokio::test]
+    async fn test_get_plugin_dir_nonexistent_returns_none() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        // 未 discover 的插件应返回 None
+        assert!(loader.get_plugin_dir("nonexistent_plugin").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_plugin_dir_existing() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "dir_test", "pipeline");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        loader.discover(&[]).await.unwrap();
+
+        let plugin_dir = loader.get_plugin_dir("dir_test");
+        assert!(plugin_dir.is_some(), "get_plugin_dir should return Some for discovered plugin");
+        let dir = plugin_dir.unwrap();
+        assert!(dir.ends_with("dir_test"), "plugin dir should end with plugin id, got: {}", dir);
+    }
+
+    #[tokio::test]
+    async fn test_get_plugin_dir_nonexistent() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        // 未 discover 时返回 None
+        assert!(loader.get_plugin_dir("no_such_plugin").is_none());
     }
 
     #[tokio::test]

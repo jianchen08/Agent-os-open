@@ -18,6 +18,54 @@ use lingxi_mcp::{McpClient, McpError};
 use parking_lot::RwLock;
 use tracing::{error, info, warn};
 
+/// 从 MCP tools/call 响应中提取内部 JSON 值。
+///
+/// Python SDK 的 McpServer 返回格式为：
+/// ```json
+/// { "content": [{ "type": "text", "text": "<json_string>" }], "isError": false }
+/// ```
+/// 其中 `text` 字段是工具实际返回值的 JSON 字符串。
+/// 本函数提取 `content[0].text`，解析为 `serde_json::Value` 返回。
+///
+/// 如果 `isError` 为 true 或解析失败，返回包含错误信息的 JSON 对象。
+fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
+    // 检查 isError 标志
+    if mcp_result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let err_msg = mcp_result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("MCP tool returned isError=true");
+        return serde_json::json!({"error": err_msg});
+    }
+
+    // 提取 content[0].text 并解析为 JSON
+    let extracted = mcp_result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+        .and_then(|s| serde_json::from_str(s).ok());
+
+    match extracted {
+        Some(val) => val,
+        None => {
+            warn!(
+                "MCP response content extraction failed, returning raw result: {:?}",
+                mcp_result
+            );
+            mcp_result.clone()
+        }
+    }
+}
+
 /// PluginInvoker 实现。
 ///
 /// 管理插件实例和 MCP 客户端连接，按 host_type 透明分发调用。
@@ -85,6 +133,11 @@ impl PluginInvokerImpl {
         let (command, args) = self.parse_entry(&manifest.entry)?;
         let mut client = McpClient::new_stdio(command, args);
 
+        // 设置工作目录为插件目录（确保 server.py 等相对路径可解析）
+        if let Some(plugin_dir) = self.loader.get_plugin_dir(&manifest.id) {
+            client = client.with_working_dir(plugin_dir);
+        }
+
         client.connect().await.map_err(|e| PluginError {
             message: format!("MCP connect failed: {}", e),
             code: Some("MCP_CONNECT_FAILED".to_string()),
@@ -118,6 +171,16 @@ impl PluginInvokerImpl {
             code: Some("MCP_INIT_FAILED".to_string()),
             source: Some("plugin-invoker".to_string()),
         })?;
+
+        // 发送 on_load 通知——触发 Python 插件的 @plugin.on_load 回调，
+        // 初始化插件实例（如 _instance = MyPlugin(config)）。
+        // 不等待响应（fire-and-forget）；失败仅 warn 不阻断。
+        let _ = client
+            .send_notification("notifications/on_load", Some(config.clone()))
+            .await
+            .inspect_err(|e| {
+                warn!("on_load notification failed for {}: {}", manifest.id, e)
+            });
 
         info!(
             "MCP client connected and initialized: plugin={}",
@@ -233,13 +296,22 @@ impl PluginInvoker for PluginInvokerImpl {
                     });
                 }
 
+                // 从 manifest 获取工具名——插件注册的 tool name 是
+                // "<plugin_id>.execute" 格式（如 "context_build.execute"）
+                let tool_name = manifest
+                    .capabilities
+                    .tools
+                    .first()
+                    .map(|t| t.name.as_str())
+                    .unwrap_or("execute");
+
                 // 调用 tools/call
                 let tool_args = serde_json::json!({
                     "state": ctx.state,
                     "config": ctx.config,
                 });
 
-                let result = client.call_tool("execute", &tool_args).await.map_err(|e| {
+                let result = client.call_tool(tool_name, &tool_args).await.map_err(|e| {
                     let is_crash = matches!(e, McpError::Transport { .. });
                     if is_crash {
                         drop(client);
@@ -252,18 +324,17 @@ impl PluginInvoker for PluginInvokerImpl {
                     }
                 })?;
 
-                // 将 MCP 返回结果转为 PluginResult
-                let plugin_result: PluginResult =
-                    serde_json::from_value(result).unwrap_or(PluginResult {
-                        state_updates: HashMap::new(),
-                        route_signal: None,
-                        skip_remaining: false,
-                        error: Some(PluginError {
-                            message: "failed to parse MCP response as PluginResult".to_string(),
-                            code: Some("PARSE_ERROR".to_string()),
-                            source: None,
-                        }),
-                    });
+                // 解析 MCP 响应——Python SDK 返回格式为：
+                // { "content": [{ "type": "text", "text": "<json_string>" }], "isError": false }
+                // 提取 content[0].text 并反序列化为 PluginResult
+                let inner = extract_mcp_content(&result);
+                let plugin_result: PluginResult = serde_json::from_value(inner).map_err(|e| {
+                    PluginError {
+                        message: format!("failed to parse MCP response as PluginResult: {}", e),
+                        code: Some("PARSE_ERROR".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    }
+                })?;
 
                 Ok(plugin_result)
             }
@@ -317,16 +388,15 @@ impl PluginInvoker for PluginInvokerImpl {
                             source: Some("plugin-invoker".to_string()),
                         })?;
 
-                // 将 MCP 返回结果转为 ToolExecutionResult
-                let tool_result: ToolExecutionResult =
-                    serde_json::from_value(result).map_err(|e| PluginError {
-                        message: format!(
-                            "failed to parse MCP response as ToolExecutionResult: {}",
-                            e
-                        ),
+                // 解析 MCP 响应——与 pipeline 调用使用相同的解析逻辑
+                let inner = extract_mcp_content(&result);
+                let tool_result: ToolExecutionResult = serde_json::from_value(inner).map_err(|e| {
+                    PluginError {
+                        message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
                         code: Some("PARSE_ERROR".to_string()),
                         source: Some("plugin-invoker".to_string()),
-                    })?;
+                    }
+                })?;
 
                 Ok(tool_result)
             }
@@ -627,6 +697,59 @@ mod tests {
         // force_unload 对不存在的插件也应该返回 Ok
         let result = invoker.force_unload("nonexistent").await;
         assert!(result.is_ok());
+    }
+
+    // ── extract_mcp_content 辅助函数单元测试 ──
+
+    #[test]
+    fn test_extract_mcp_content_normal_response() {
+        let inner_json = r#"{"state_updates":{"key":"value"}}"#;
+        let mcp_result = json!({
+            "content": [{"type": "text", "text": inner_json}],
+            "isError": false
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        assert_eq!(extracted["state_updates"]["key"], "value");
+    }
+
+    #[test]
+    fn test_extract_mcp_content_is_error() {
+        let mcp_result = json!({
+            "content": [{"type": "text", "text": "something went wrong"}],
+            "isError": true
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        assert_eq!(extracted["error"], "something went wrong");
+    }
+
+    #[test]
+    fn test_extract_mcp_content_empty_content_array() {
+        let mcp_result = json!({
+            "content": [],
+            "isError": false
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        // 空数组 → and_then 链返回 None → fallback 到 clone 原对象
+        assert_eq!(extracted["content"], json!([]));
+    }
+
+    #[test]
+    fn test_extract_mcp_content_text_not_json() {
+        let mcp_result = json!({
+            "content": [{"type": "text", "text": "not_a_json_string"}],
+            "isError": false
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        // text 不是合法 JSON → from_str().ok() 返回 None → fallback 到 clone
+        assert_eq!(extracted["content"][0]["text"], "not_a_json_string");
+    }
+
+    #[test]
+    fn test_extract_mcp_content_missing_content_field() {
+        let mcp_result = json!({"isError": false});
+        let extracted = extract_mcp_content(&mcp_result);
+        // 无 content 字段 → fallback 到 clone 原对象
+        assert_eq!(extracted["isError"], false);
     }
 
     // Mock StorageBackend for test context

@@ -23,7 +23,9 @@ use lingxi_core::traits::{
 };
 use lingxi_core::types::{ToolCategory, ToolSource};
 use lingxi_engine::{AdrEngineImpl, SqliteStore};
+use lingxi_invoker::PluginInvokerImpl;
 use lingxi_plugin_loader::{CapabilityRegistryImpl, PluginLoaderImpl};
+use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
 #[tokio::main]
@@ -160,8 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // DEBT: 使用内存数据库，生产环境应使用持久化文件。ceiling: 进程重启丢失运行历史。
     // upgrade: 当需要跨重启会话持久化时，切换到 SqliteStore::open("lingxi.db")。
     let store = Arc::new(SqliteStore::open_memory()?);
-    let noop_invoker = Arc::new(NoopInvoker::new());
-    let engine = Arc::new(AdrEngineImpl::new(store, noop_invoker, "default"));
+
+    // 创建真实插件调用器——通过 MCP stdio fork Python sidecar 执行插件
+    let loader_arc = Arc::new(loader);
+    let invoker = Arc::new(PluginInvokerImpl::new(loader_arc.clone()));
+    let engine = Arc::new(AdrEngineImpl::new(store, invoker, "default"));
 
     info!(
         target: "lingxi-kernel",
@@ -174,8 +179,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-use tracing::{info, warn};
 
 /// 递归发现包含 plugin.json 的目录的父目录路径列表。
 ///
@@ -222,62 +225,3 @@ fn collect_plugin_dirs(dir: &std::path::Path, dirs: &mut Vec<String>) {
     }
 }
 
-/// 空操作调用器——占位实现，所有调用返回默认结果。
-///
-/// DEBT: 管道引擎的插件调用需要通过 MCP 客户端执行 sidecar 插件，
-/// 但当前阶段仅实现 manifest 注册和状态管理。
-/// ceiling: 当前无法实际执行 sidecar 插件逻辑。
-/// upgrade: 引入 PluginInvokerImpl 替换此占位实现。
-struct NoopInvoker {
-    _placeholder: (),
-}
-
-impl NoopInvoker {
-    fn new() -> Self {
-        Self { _placeholder: () }
-    }
-}
-
-#[async_trait::async_trait]
-impl lingxi_core::traits::PluginInvoker for NoopInvoker {
-    async fn invoke_pipeline_plugin(
-        &self,
-        plugin_id: &str,
-        _ctx: &lingxi_core::types::PluginContext,
-    ) -> Result<lingxi_core::types::PluginResult, lingxi_core::types::PluginError> {
-        warn!(
-            "NoopInvoker: pipeline plugin '{}' invoked but not implemented yet",
-            plugin_id
-        );
-        Err(lingxi_core::types::PluginError {
-            message: format!(
-                "NoopInvoker: plugin '{}' execution not implemented in this build",
-                plugin_id
-            ),
-            code: Some("NOOP_INVOKER".to_string()),
-            source: Some("lingxi-kernel".to_string()),
-        })
-    }
-
-    async fn invoke_tool(
-        &self,
-        _plugin_id: &str,
-        _tool_name: &str,
-        _inputs: &serde_json::Value,
-    ) -> Result<lingxi_core::types::ToolExecutionResult, lingxi_core::types::PluginError> {
-        Err(lingxi_core::types::PluginError {
-            message: "NoopInvoker: tool execution not implemented in this build".to_string(),
-            code: Some("NOOP_INVOKER".to_string()),
-            source: Some("lingxi-kernel".to_string()),
-        })
-    }
-
-    async fn send_lifecycle_hook(
-        &self,
-        _plugin_id: &str,
-        _hook: lingxi_core::traits::LifecycleHook,
-        _context: &lingxi_core::traits::HookContext,
-    ) -> Result<(), lingxi_core::types::PluginError> {
-        Ok(())
-    }
-}

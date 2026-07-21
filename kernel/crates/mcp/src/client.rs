@@ -64,6 +64,8 @@ pub enum McpTransport {
 pub struct McpClient {
     /// 传输方式
     transport: McpTransport,
+    /// 子进程工作目录（stdio 模式下设置，确保插件相对路径可解析）
+    working_dir: Option<std::path::PathBuf>,
     /// 子进程（stdio 模式）
     child: Option<Arc<Mutex<Child>>>,
     /// stdin 写入端
@@ -84,6 +86,7 @@ impl McpClient {
                 command: command.into(),
                 args,
             },
+            working_dir: None,
             child: None,
             stdin: None,
             stdout: None,
@@ -96,12 +99,22 @@ impl McpClient {
     pub fn new_http(url: impl Into<String>) -> Self {
         Self {
             transport: McpTransport::Http { url: url.into() },
+            working_dir: None,
             child: None,
             stdin: None,
             stdout: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// 设置子进程工作目录（stdio 模式下生效）。
+    ///
+    /// 插件 entry 如 `python3 server.py` 需要在插件目录下执行，
+    /// 否则 server.py 的相对路径无法解析。
+    pub fn with_working_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.working_dir = Some(dir.into());
+        self
     }
 
     /// 启动子进程并连接（stdio 模式）
@@ -114,6 +127,11 @@ impl McpClient {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
+
+                // 设置工作目录（插件目录），确保 server.py 等相对路径可解析
+                if let Some(ref dir) = self.working_dir {
+                    cmd.current_dir(dir);
+                }
 
                 let mut child = cmd.spawn().map_err(|e| McpError::SpawnFailed {
                     command: command.clone(),
