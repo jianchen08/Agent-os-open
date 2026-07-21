@@ -11,6 +11,9 @@ pub enum ApiError {
     #[error("bad request: {message}")]
     BadRequest { message: String },
 
+    #[error("unauthorized: {message}")]
+    Unauthorized { message: String },
+
     #[error("not found: {message}")]
     NotFound { message: String },
 
@@ -25,6 +28,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             ApiError::BadRequest { message } => (StatusCode::BAD_REQUEST, message.clone()),
+            ApiError::Unauthorized { message } => (StatusCode::UNAUTHORIZED, message.clone()),
             ApiError::NotFound { message } => (StatusCode::NOT_FOUND, message.clone()),
             ApiError::Internal { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
             ApiError::WebSocket { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),

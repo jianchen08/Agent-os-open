@@ -17,6 +17,7 @@ uuid.workspace = true
 lingxi-core.workspace = true
 parking_lot = "0.12"
 chrono.workspace = true
+base64 = "0.22"
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

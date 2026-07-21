@@ -11,10 +11,15 @@
 //! [来源: docs/0.2_rust_plugin_solution.md §2.2 Web 框架映射]
 //! [来源: docs/tasks/task_07_llm_api.md]
 
+pub mod auth;
 pub mod error;
 pub mod routes;
 pub mod server;
 
+pub use auth::{
+    login_handler, logout_handler, me_handler, refresh_handler, register_handler, RefreshResponse,
+    RegisterRequest,
+};
 pub use error::ApiError;
 pub use routes::{AppState, HealthResponse, SchemaResponse};
 pub use server::{build_router, start_server, WsRequest, WsResponse};

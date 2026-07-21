@@ -21,6 +21,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::auth::{login_handler, logout_handler, me_handler, refresh_handler, register_handler};
 use crate::error::ApiError;
 use crate::routes::{
     agents_handler, health_handler, pipelines_handler, schema_handler, tools_handler, AppState,
@@ -58,6 +59,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws", get(ws_handler))
         // 消息发送端点（REST fallback for WS）
         .route("/api/v1/chat", post(chat_handler))
+        // Auth 端点
+        .route("/api/v1/auth/login", post(login_handler))
+        .route("/api/v1/auth/me", get(me_handler))
+        .route("/api/v1/auth/refresh", post(refresh_handler))
+        .route("/api/v1/auth/logout", post(logout_handler))
+        .route("/api/v1/auth/register", post(register_handler))
         .with_state(state)
 }
 
