@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from tools.builtin.base import BuiltinTool
-from tools.builtin.workspace_aware import WorkspaceAwareMixin
+from plugins.shared.tools.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
     ToolCategory,

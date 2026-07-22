@@ -35,18 +35,52 @@ shift
 goto PARSE_ARGS
 :AFTER_ARGS
 
-REM ---------- 端口配置 ----------
-if not defined LINGXI_KERNEL_PORT   set "LINGXI_KERNEL_PORT=9100"
-if not defined LINGXI_FRONTEND_PORT set "LINGXI_FRONTEND_PORT=5290"
-set "KERNEL_PORT=%LINGXI_KERNEL_PORT%"
-set "FRONTEND_PORT=%LINGXI_FRONTEND_PORT%"
-
 REM ---------- 路径配置 ----------
 set "PROJECT_ROOT=%cd%"
 set "KERNEL_DIR=%PROJECT_ROOT%\kernel"
 set "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
 set "KERNEL_BIN=%KERNEL_DIR%\target\release\lingxi-kernel.exe"
 set "PORTS_FILE=%PROJECT_ROOT%\.ports_02"
+set "REDIS_CONTAINER=lingxi-redis-02"
+
+REM ---------- 动态端口查找 ----------
+REM 对标 start_web.sh 的 find_available_port: 从基准端口开始扫描可用端口
+set "KERNEL_PORT=%LINGXI_KERNEL_PORT%"
+set "FRONTEND_PORT=%LINGXI_FRONTEND_PORT%"
+
+REM Redis 端口也走动态查找（对标 start_web_02.sh）
+set "REDIS_HOST_PORT=6481"
+set /a "_redis_probe=6481"
+:find_redis_port
+netstat -ano 2>nul | findstr ":!_redis_probe! " >nul 2>&1
+if not errorlevel 1 (
+    set /a "_redis_probe+=1"
+    if !_redis_probe! leq 6581 goto :find_redis_port
+)
+set "REDIS_HOST_PORT=!_redis_probe!"
+
+REM 如果未通过环境变量显式指定端口，则动态查找
+if not defined LINGXI_KERNEL_PORT (
+    set /a "_probe_port=9100"
+    :find_kernel_port
+    netstat -ano 2>nul | findstr ":!_probe_port! " >nul 2>&1
+    if not errorlevel 1 (
+        set /a "_probe_port+=1"
+        if !_probe_port! leq 9200 goto :find_kernel_port
+    )
+    set "KERNEL_PORT=!_probe_port!"
+)
+
+if not defined LINGXI_FRONTEND_PORT (
+    set /a "_probe_port=5290"
+    :find_frontend_port
+    netstat -ano 2>nul | findstr ":!_probe_port! " >nul 2>&1
+    if not errorlevel 1 (
+        set /a "_probe_port+=1"
+        if !_probe_port! leq 5390 goto :find_frontend_port
+    )
+    set "FRONTEND_PORT=!_probe_port!"
+)
 
 echo ========================================
 echo   Lingxi AgentOS 0.2 new-arch launcher
@@ -94,6 +128,52 @@ if exist "%PORTS_FILE%" (
     )
     del /f /q "%PORTS_FILE%" >nul 2>&1
 )
+
+REM ============================================================
+REM  确保 Redis 就绪 (对标 start_web.sh 的 ensure_docker_and_redis)
+REM ============================================================
+echo [INFO] Checking Redis availability...
+where docker >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] Docker not found, skipping Redis orchestration.
+) else (
+    docker info >nul 2>&1
+    if errorlevel 1 (
+        echo [WARN] Docker daemon not running, skipping Redis orchestration.
+    ) else (
+        REM Check if Redis container already running
+        docker ps -q -f "name=%REDIS_CONTAINER%" 2>nul | findstr /R "[0-9]" >nul
+        if not errorlevel 1 (
+            echo [OK] Redis container (%REDIS_CONTAINER%) already running.
+        ) else (
+            REM Check if container exists but stopped
+            docker ps -a -q -f "name=%REDIS_CONTAINER%" 2>nul | findstr /R "[0-9]" >nul
+            if not errorlevel 1 (
+                echo [INFO] Starting existing Redis container...
+                docker start "%REDIS_CONTAINER%" >nul 2>&1
+            ) else (
+                echo [INFO] Creating Redis container (%REDIS_CONTAINER%, port !REDIS_HOST_PORT!)...
+                docker run -d --name "%REDIS_CONTAINER%" --restart unless-stopped -p "!REDIS_HOST_PORT!:6379" redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes >nul 2>&1
+            )
+            REM Wait for Redis to be ready
+            echo [INFO] Waiting for Redis...
+            set "REDIS_READY=0"
+            for /l %%i in (1,1,20) do (
+                if "!REDIS_READY!"=="0" (
+                    docker exec "%REDIS_CONTAINER%" redis-cli ping 2>nul | findstr "PONG" >nul
+                    if not errorlevel 1 (
+                        set "REDIS_READY=1"
+                        echo [OK] Redis ready.
+                    ) else (
+                        timeout /t 1 /nobreak >nul
+                    )
+                )
+            )
+            if "!REDIS_READY!"=="0" echo [WARN] Redis not ready within 20s, continuing anyway.
+        )
+    )
+)
+echo.
 
 set "KERNEL_PID="
 set "FRONTEND_PID="
@@ -176,6 +256,8 @@ REM 写端口/PID 文件, 供后续清理使用
 >  "%PORTS_FILE%" echo OLD_KERNEL_PID=%KERNEL_PID%
 >> "%PORTS_FILE%" echo OLD_KERNEL_PORT=%KERNEL_PORT%
 >> "%PORTS_FILE%" echo OLD_FRONTEND_PORT=%FRONTEND_PORT%
+>> "%PORTS_FILE%" echo REDIS_HOST_PORT=%REDIS_HOST_PORT%
+>> "%PORTS_FILE%" echo REDIS_CONTAINER=%REDIS_CONTAINER%
 
 REM ============================================================
 REM  步骤 3: 启动前端

@@ -21,10 +21,9 @@ KERNEL_DIR="$PROJECT_ROOT/kernel"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
 KERNEL_BIN="$KERNEL_DIR/target/release/lingxi-kernel"
 PORTS_FILE="$PROJECT_ROOT/.ports_02"
-
-# 端口配置
-KERNEL_PORT="${LINGXI_KERNEL_PORT:-9100}"
-FRONTEND_PORT="${LINGXI_FRONTEND_PORT:-5290}"
+PROJECT_ID=$(echo -n "$PROJECT_ROOT" | md5sum | cut -c1-8)
+REDIS_CONTAINER="lingxi-redis-02-$PROJECT_ID"
+COMPOSE_FILE="$PROJECT_ROOT/docker/0.2/docker-compose.yml"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -37,6 +36,8 @@ echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}  灵汐 AgentOS 0.2 新架构启动脚本${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
+echo "项目目录: $PROJECT_ROOT"
+echo "项目标识: $PROJECT_ID"
 
 # 解析参数
 NO_BUILD=false
@@ -47,6 +48,129 @@ for arg in "$@"; do
         --kernel-only) KERNEL_ONLY=true ;;
     esac
 done
+
+# ========== 查找可用端口 ==========
+find_available_port() {
+    local start_port=$1
+    local port=$start_port
+    local max_port=$((start_port + 100))
+    while [ $port -le $max_port ]; do
+        if ! lsof -ti:$port &>/dev/null 2>&1; then
+            echo $port
+            return 0
+        fi
+        port=$((port + 1))
+    done
+    return 1
+}
+
+# ========== 确保 Docker 和 Redis 就绪 ==========
+ensure_docker_and_redis() {
+    if ! command -v docker &>/dev/null; then
+        echo -e "${YELLOW}[WARN] 未找到 Docker，跳过 Redis 编排${NC}"
+        return 0
+    fi
+
+    if ! docker info &>/dev/null 2>&1; then
+        echo -e "${YELLOW}[INFO] Docker 未启动，正在尝试启动...${NC}"
+        if command -v systemctl &>/dev/null; then
+            sudo systemctl start docker 2>/dev/null || true
+        elif command -v service &>/dev/null; then
+            sudo service docker start 2>/dev/null || true
+        fi
+        echo -e "${YELLOW}[INFO] 正在等待 Docker 启动...${NC}"
+        DOCKER_READY=0
+        for i in $(seq 1 40); do
+            if docker info &>/dev/null 2>&1; then
+                DOCKER_READY=1
+                echo -e "${GREEN}[OK] Docker 已启动${NC}"
+                break
+            fi
+            sleep 3
+        done
+        if [ "$DOCKER_READY" -eq 0 ]; then
+            echo -e "${YELLOW}[WARN] Docker 未能在 2 分钟内启动，继续启动（部分功能可能不可用）${NC}"
+            return 0
+        fi
+    fi
+
+    # 使用 docker compose 管理 Redis（对标 docker/0.2/docker-compose.yml）
+    if [ -f "$COMPOSE_FILE" ]; then
+        echo -e "${YELLOW}[INFO] 使用 docker compose 启动 Redis（$COMPOSE_FILE）...${NC}"
+        REDIS_HOST_PORT=$(find_available_port 6481)
+        export REDIS_HOST_PORT
+        KERNEL_HOST_PORT=$(find_available_port 8090)
+        export KERNEL_HOST_PORT
+        docker compose -f "$COMPOSE_FILE" up -d redis 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "${YELLOW}[INFO] 等待 Redis 就绪...${NC}"
+            for i in $(seq 1 20); do
+                if docker exec "$(docker compose -f "$COMPOSE_FILE" ps -q redis 2>/dev/null)" redis-cli ping 2>/dev/null | grep -q PONG; then
+                    echo -e "${GREEN}[OK] Redis 已就绪${NC}"
+                    break
+                fi
+                sleep 1
+            done
+        else
+            echo -e "${YELLOW}[WARN] docker compose 启动 Redis 失败，尝试独立容器...${NC}"
+            _ensure_redis_container
+        fi
+    else
+        echo -e "${YELLOW}[INFO] 未找到 docker-compose.yml，使用独立容器启动 Redis...${NC}"
+        _ensure_redis_container
+    fi
+}
+
+_ensure_redis_container() {
+    if docker ps -q -f "name=$REDIS_CONTAINER" 2>/dev/null | grep -q .; then
+        echo -e "${GREEN}[OK] Redis 容器 ($REDIS_CONTAINER) 已运行${NC}"
+        return 0
+    fi
+
+    if docker ps -a -q -f "name=$REDIS_CONTAINER" 2>/dev/null | grep -q .; then
+        echo -e "${YELLOW}[INFO] Redis 容器 ($REDIS_CONTAINER) 已存在但未运行，正在启动...${NC}"
+        docker start "$REDIS_CONTAINER" &>/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}[OK] Redis 容器已启动${NC}"
+            return 0
+        fi
+    fi
+
+    REDIS_HOST_PORT=$(find_available_port 6481)
+    echo -e "${YELLOW}[INFO] 正在创建 Redis 容器 ($REDIS_CONTAINER, 端口 $REDIS_HOST_PORT)...${NC}"
+    docker run -d --name "$REDIS_CONTAINER" --restart unless-stopped \
+        -p "$REDIS_HOST_PORT:6379" \
+        redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes &>/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo -e "${YELLOW}[INFO] 等待 Redis 就绪...${NC}"
+        for i in $(seq 1 20); do
+            if docker exec "$REDIS_CONTAINER" redis-cli ping &>/dev/null 2>&1; then
+                echo -e "${GREEN}[OK] Redis 已就绪${NC}"
+                return 0
+            fi
+            sleep 1
+        done
+        echo -e "${YELLOW}[WARN] Redis 未能在 20 秒内就绪，继续启动${NC}"
+    else
+        echo -e "${YELLOW}[WARN] Redis 容器启动失败，继续启动（内核将使用内存模式）${NC}"
+    fi
+}
+
+# ========== 端口分配 ==========
+echo -e "${YELLOW}[INFO] 正在查找可用端口...${NC}"
+
+KERNEL_PORT=$(find_available_port "${LINGXI_KERNEL_PORT:-9100}") || {
+    echo -e "${RED}[ERROR] 无法找到可用的内核端口${NC}"
+    exit 1
+}
+FRONTEND_PORT=$(find_available_port "${LINGXI_FRONTEND_PORT:-5290}") || {
+    echo -e "${RED}[ERROR] 无法找到可用的前端端口${NC}"
+    exit 1
+}
+
+echo -e "${GREEN}[OK] 内核端口: $KERNEL_PORT${NC}"
+echo -e "${GREEN}[OK] 前端端口: $FRONTEND_PORT${NC}"
+echo ""
 
 # ========== 检查工具链 ==========
 echo -e "${YELLOW}[CHECK] 检查工具链...${NC}"
@@ -66,11 +190,15 @@ if [ "$KERNEL_ONLY" = false ]; then
 fi
 echo ""
 
+# ========== 确保 Docker/Redis 就绪 ==========
+ensure_docker_and_redis
+echo ""
+
 # ========== 步骤 1: 编译内核 ==========
 if [ "$NO_BUILD" = true ]; then
     echo -e "${YELLOW}[SKIP] 跳过内核编译（--no-build）${NC}"
 else
-    echo -e "${YELLOW}[1/3] 编译 Rust 内核 (cargo build --release)...${NC}"
+    echo -e "${YELLOW}[1/4] 编译 Rust 内核 (cargo build --release)...${NC}"
     echo -e "${YELLOW}       这可能需要几分钟（首次编译约 4-5 分钟，增量编译约 30 秒）${NC}"
     cd "$KERNEL_DIR"
     if cargo build --release --bin lingxi-kernel 2>&1; then
@@ -125,7 +253,7 @@ cleanup() {
 trap cleanup INT TERM
 
 # ========== 步骤 2: 启动内核 ==========
-echo -e "${YELLOW}[2/3] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
+echo -e "${YELLOW}[2/4] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
 export LINGXI_KERNEL_PORT=$KERNEL_PORT
 export LINGXI_KERNEL_HOST=0.0.0.0
 "$KERNEL_BIN" &
@@ -157,13 +285,15 @@ echo -e "${GREEN}       Health: $HEALTH_RESPONSE${NC}"
 echo "OLD_KERNEL_PID=$KERNEL_PID" > "$PORTS_FILE"
 echo "OLD_KERNEL_PORT=$KERNEL_PORT" >> "$PORTS_FILE"
 echo "OLD_FRONTEND_PORT=$FRONTEND_PORT" >> "$PORTS_FILE"
+echo "REDIS_HOST_PORT=${REDIS_HOST_PORT:-6481}" >> "$PORTS_FILE"
+echo "REDIS_CONTAINER=$REDIS_CONTAINER" >> "$PORTS_FILE"
 
 # ========== 步骤 3: 启动前端 ==========
 if [ "$KERNEL_ONLY" = true ]; then
     echo -e "${YELLOW}[SKIP] 仅内核模式（--kernel-only）${NC}"
 else
     echo ""
-    echo -e "${YELLOW}[3/3] 启动前端 (Vite :$FRONTEND_PORT, 连接内核 :$KERNEL_PORT)...${NC}"
+    echo -e "${YELLOW}[3/4] 启动前端 (Vite :$FRONTEND_PORT, 连接内核 :$KERNEL_PORT)...${NC}"
 
     # 安装前端依赖（如需要）
     if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
@@ -208,6 +338,7 @@ echo -e "${CYAN}  WebSocket:   ws://localhost:$KERNEL_PORT/ws${NC}"
 if [ "$KERNEL_ONLY" = false ]; then
     echo -e "${CYAN}  前端:        http://localhost:$FRONTEND_PORT${NC}"
 fi
+echo -e "${CYAN}  Redis:       localhost:${REDIS_HOST_PORT:-6481} (${REDIS_CONTAINER})${NC}"
 echo -e "${CYAN}${NC}"
 echo -e "${CYAN}  内核 PID:    $KERNEL_PID${NC}"
 [ -n "$FRONTEND_PID" ] && echo -e "${CYAN}  前端 PID:    $FRONTEND_PID${NC}"
