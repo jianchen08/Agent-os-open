@@ -111,7 +111,6 @@ class IDEShowDiffTool(BuiltinTool):
                         data={
                             "message": f"已在 IDE 中显示差异: {file_path}",
                             "file_path": file_path,
-                            "connector": connector.connector_type,
                         },
                     )
                 return create_failure_result(

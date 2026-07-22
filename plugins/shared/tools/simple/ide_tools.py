@@ -102,7 +102,6 @@ async def ide_open_file(file_path: str, line: int | None = None, column: int | N
                 return {
                     "message": f"已在 IDE 中打开文件: {file_path}",
                     "file_path": file_path,
-                    "connector": connector.connector_type,
                 }
         except Exception as e:
             logger.warning("连接器执行失败: %s", e)
@@ -144,7 +143,6 @@ async def ide_show_diff(
                 return {
                     "message": f"已在 IDE 中显示差异: {file_path}",
                     "file_path": file_path,
-                    "connector": connector.connector_type,
                 }
         except Exception as e:
             logger.warning("连接器执行失败: %s", e)

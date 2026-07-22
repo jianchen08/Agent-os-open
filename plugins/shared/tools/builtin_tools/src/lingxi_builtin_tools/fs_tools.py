@@ -300,7 +300,6 @@ CREATE_DIRECTORY_SCHEMA: dict[str, Any] = {
     "properties": {
         "path": {"type": "string", "description": "目录路径"},
         "parents": {"type": "boolean", "description": "是否创建父目录（默认 true）", "default": True},
-        "exist_ok": {"type": "boolean", "description": "目录已存在时是否不报错（默认 true）", "default": True},
     },
     "required": ["path"],
 }
@@ -309,15 +308,11 @@ CREATE_DIRECTORY_SCHEMA: dict[str, Any] = {
 async def create_directory(
     path: str,
     parents: bool = True,
-    exist_ok: bool = True,
 ) -> ToolResult:
-    """创建目录。"""
+    """创建目录（幂等：目录已存在直接返回成功）。"""
     dir_path = Path(path)
     try:
-        await asyncio.to_thread(dir_path.mkdir, parents=parents, exist_ok=exist_ok)
-    except FileExistsError:
-        if not exist_ok:
-            return ToolResult.failure_result(f"Directory already exists: {path}")
+        await asyncio.to_thread(dir_path.mkdir, parents=parents, exist_ok=True)
     except OSError as e:
         return ToolResult.failure_result(f"Create error: {e}")
 

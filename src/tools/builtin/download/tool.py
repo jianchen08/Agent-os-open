@@ -160,7 +160,7 @@ class DownloadTool(BuiltinTool):
         return Tool(
             name="download",
             description=(
-                "通用文件下载工具。支持多连接分段下载、断点续传、自动重试。"
+                "通用文件下载工具。"
                 "适用场景：从网络下载文件到本地。"
                 "不适用场景：已有本地文件操作（使用 file_read/file_write）。"
                 "安全限制：仅允许 http/https 协议，默认文件大小上限 1GB，内置 SSRF 防护。"

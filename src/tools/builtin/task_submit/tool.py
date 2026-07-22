@@ -1142,16 +1142,11 @@ class TaskSubmitTool(BuiltinTool):
             "[TaskSubmit] PERF | ws_broadcast=%.1fms | total=%.1fms", (_t_ws - _t_submit) * 1000, (_t_ws - _t0) * 1000
         )
 
-        result_data = {
+        result_data: dict[str, Any] = {
             "task_id": task.id,
             "title": task.title,
-            "description": description,
             "status": task.status.value,
-            "target_type": target_type,
             "target_id": target_id,
-            "submit_status": "submitted",
-            "workspace": workspace or "",
-            "resolved_workspace": (task.metadata or {}).get("ws_meta", {}).get("path", ""),
             "message": (
                 f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
                 "该任务需要一定时间完成。"
@@ -1159,6 +1154,11 @@ class TaskSubmitTool(BuiltinTool):
                 "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
             ),
         }
+
+        # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）
+        if parent_agent_level == 1:
+            result_data["workspace"] = workspace or ""
+            result_data["resolved_workspace"] = (task.metadata or {}).get("ws_meta", {}).get("path", "")
 
         return create_success_result(
             data=result_data,
@@ -1342,7 +1342,6 @@ class TaskSubmitTool(BuiltinTool):
             "title": task.title,
             "status": task.status.value,
             "task_scope": "container",
-            "submit_status": "submitted",
             "workspace": inputs.get("workspace") or "",
             "resolved_workspace": container_workspace_path,
         }

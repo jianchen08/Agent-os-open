@@ -251,7 +251,7 @@ class TestCreateDirectory:
     async def test_create_exist_ok(self, tmp_path: Path) -> None:
         d = tmp_path / "exists"
         d.mkdir()
-        result = await create_directory(str(d), exist_ok=True)
+        result = await create_directory(str(d))
         assert result.success
 
 

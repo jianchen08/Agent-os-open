@@ -39,9 +39,7 @@ class StateUpdateTool(BuiltinTool):
             description="在工作流执行过程中更新共享状态变量。"
             "适用场景：更新重试计数器、在工作流节点间传递累计结果、更新工作流级状态变量。"
             "不适用场景：仅需在节点内部使用临时变量时、需要更新数据库记录时（使用持久化工具）。"
-            "注意事项：更新的变量会被添加到shared_variables中；支持increment(增量)和append(追加)操作；"
-            "context参数用于获取当前状态值。"
-            '示例：{"updates": {"retry_count": {"operation": "increment", "value": 1}}} 表示将retry_count增加1',
+            "注意事项：支持increment(增量)和append(追加)操作；context参数用于获取当前状态值。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -108,15 +106,11 @@ class StateUpdateTool(BuiltinTool):
                     # 直接赋值
                     result_updates[key] = value
 
-            # 返回更新的键值对，这些将被合并到 shared_variables 中
+            # 返回更新结果：updates 是完整的键值对（含最终值）
             result_data = {
                 "success": True,
-                "updated": list(result_updates.keys()),
                 "updates": result_updates,
             }
-
-            # 将更新项直接添加到结果中
-            result_data.update(result_updates)
 
             logger.info("[工作流状态更新] 更新完成: %s", result_updates)
 

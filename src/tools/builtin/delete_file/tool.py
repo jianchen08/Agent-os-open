@@ -158,7 +158,6 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
             return create_success_result(
                 data={
                     "path": display_path,
-                    "deleted": True,
                     "type": "directory" if path.is_dir() else "file",
                 },
                 metadata={"action": "delete_file"},

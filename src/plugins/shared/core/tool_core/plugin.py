@@ -196,6 +196,59 @@ class ToolCore(ICorePlugin):
 
         return None
 
+    async def _resolve_container_id(
+        self,
+        state: dict[str, Any],
+        tool_name: str,
+    ) -> str | None:
+        """解析 use_docker 路径的 container_id（容器 env_id）。
+
+        通过 IsolationManager.get_or_create_environment 拿/建该 workspace 对应的容器，
+        返回其 env_id（=container_name）。workspace 缺失或建容器失败时返回 None，
+        调用方据此降级到老的同步容器执行路径（_execute_in_isolated_container）。
+
+        get_or_create_environment 本身是幂等的（同 workspace 复用同容器），所以这里
+        多调一次不会重建——它只是把"解析 env_id"这步从 execute_in_isolation 内部提上来，
+        让 BashTool 能拿到 container_id 走轮询流程。
+        """
+        from isolation.types import TaskType  # noqa: PLC0415
+
+        task_id = state.get("task_id", "unknown")
+        workspace = state.get("workspace")
+        if not workspace:
+            workspace = _recover_workspace_from_task(state, task_id)
+        if not workspace:
+            logger.warning(
+                "[tool_core] %s 容器路径 workspace 缺失，降级到同步容器执行 | task=%s",
+                tool_name, task_id,
+            )
+            return None
+
+        try:
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
+
+            manager = await get_isolation_manager()
+            env = await manager.get_or_create_environment(
+                task_id=task_id,
+                task_type=TaskType.ATOMIC,
+                operation_type=None,
+                workspace=workspace,
+                tool_name=tool_name,
+            )
+            if env and env.env_id:
+                return env.env_id
+            logger.warning(
+                "[tool_core] %s get_or_create_environment 返回空 env_id，降级 | task=%s",
+                tool_name, task_id,
+            )
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[tool_core] %s 解析 container_id 失败，降级到同步容器执行 | task=%s | err=%s",
+                tool_name, task_id, e,
+            )
+            return None
+
     async def _execute_in_isolated_container(
         self,
         state: dict[str, Any],
@@ -659,24 +712,41 @@ class ToolCore(ICorePlugin):
             if use_docker and tool_name == "bash_execute":
                 if on_chunk:
                     on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})
-                result = await self._execute_in_isolated_container(
-                    state=ctx.state,
-                    tool_args=tool_args,
-                    timeout=timeout,
-                )
-                if on_chunk:
-                    display_data = result.get("data", result.get("error", ""))
-                    on_chunk(
-                        {
-                            "type": "tool_result",
-                            "tool_name": tool_name,
-                            "result": str(display_data)[:200] if display_data else "",
-                            "result_data": display_data,
-                            "success": result.get("success", True),
-                            "duration_ms": result.get("duration_ms", 0),
-                            "call_id": tc_call_id,
-                        }
+
+                # 解析 container_id：通过 IsolationManager 拿/建该 workspace 的容器 env_id。
+                # 成功则注入 tool_args，让 BashTool 带容器 backend 走完整轮询流程
+                # （execute→running→continue→terminate）；失败则降级到老的同步容器执行路径。
+                container_id = await self._resolve_container_id(ctx.state, tool_name)
+                if container_id:
+                    tool_args = {**tool_args, "_container_id": container_id}
+                    result = await self._execute_single_tool(
+                        tool_name,
+                        tool_args,
+                        timeout,
+                        services=ctx._services,
+                        on_chunk=on_chunk,
+                        call_id=tc_call_id,
                     )
+                else:
+                    # 降级：workspace 缺失或拿不到 container_id 时走老路径（同步阻塞执行）
+                    result = await self._execute_in_isolated_container(
+                        state=ctx.state,
+                        tool_args=tool_args,
+                        timeout=timeout,
+                    )
+                    if on_chunk:
+                        display_data = result.get("data", result.get("error", ""))
+                        on_chunk(
+                            {
+                                "type": "tool_result",
+                                "tool_name": tool_name,
+                                "result": str(display_data)[:200] if display_data else "",
+                                "result_data": display_data,
+                                "success": result.get("success", True),
+                                "duration_ms": result.get("duration_ms", 0),
+                                "call_id": tc_call_id,
+                            }
+                        )
             else:
                 result = await self._execute_single_tool(
                     tool_name,

@@ -67,7 +67,6 @@ async def state_update(updates: dict[str, Any], **kwargs: Any) -> dict[str, Any]
 
         return {
             "success": True,
-            "updated": list(result_updates.keys()),
             "updates": result_updates,
         }
     except Exception as e:

@@ -474,31 +474,44 @@ class TrackPlugin(IOutputPlugin):
 
         return stripped_curr
 
-    def _check_cache_anomaly(self, llm_usage: dict[str, Any], pipeline_id: str) -> None:
-        """检测缓存命中异常并输出警告。"""
-        total_input = llm_usage.get("total_input_tokens", 0)
-        total_cached = llm_usage.get("total_cached_tokens", 0)
-        last_input = llm_usage.get("last_input_tokens", 0)
+    # 缓存异常阈值：本轮未命中 token 数超过此比例视为「缓存掉了」。
+    # 注意分母是本轮 input（单轮量纲），不是累计 input。
+    _CACHE_MISS_RATIO_THRESHOLD = 0.05
 
-        if total_input <= 0:
+    def _check_cache_anomaly(self, llm_usage: dict[str, Any], pipeline_id: str) -> None:
+        """检测缓存命中异常并输出警告。
+
+        语义：判断「本轮缓存有没有异常掉」，基于本轮单轮量：
+          本轮未命中 = last_input - last_cached
+          本轮命中率 = last_cached / last_input
+        当 last_input == 0（tool_execute 轮 / 无 LLM 调用）时无法判定，跳过。
+
+        历史 bug：原实现把累计未命中（total_input - total_cached）和末轮单轮
+        input 直接相减再除以累计总量——量纲错配，导致只要累计未命中占比 >5%
+        （哪怕累计命中率 94.9%），末轮 summary（last_input 常为 0）必报异常。
+        """
+        last_input = llm_usage.get("last_input_tokens", 0)
+        last_cached = llm_usage.get("last_cached_tokens", 0)
+
+        if last_input <= 0:
+            # 末轮无 input（非 llm_call 轮调 summary）：无法判定本轮命中率，跳过。
+            # 避免用累计量跨量纲误报。
             return
 
-        total_uncached = total_input - total_cached
-        gap = abs(total_uncached - last_input)
-        ratio = gap / total_input
+        last_uncached = last_input - last_cached
+        miss_ratio = last_uncached / last_input
 
-        if ratio > 0.05:
+        if miss_ratio > self._CACHE_MISS_RATIO_THRESHOLD:
+            hit_rate = last_cached / last_input * 100
             logger.warning(
-                "[%s] 缓存命中异常: 总未命中=%d, 末轮input=%d, 偏差=%d (%.1f%% > 5%%阈值), "
-                "总input=%d, 总cached=%d, 命中率=%.1f%%",
+                "[%s] 缓存命中异常: 本轮未命中=%d, 本轮input=%d, 本轮命中率=%.1f%% "
+                "(未命中占比 %.1f%% > %.0f%%阈值)",
                 pipeline_id,
-                total_uncached,
+                last_uncached,
                 last_input,
-                gap,
-                ratio * 100,
-                total_input,
-                total_cached,
-                total_cached / total_input * 100 if total_input else 0,
+                hit_rate,
+                miss_ratio * 100,
+                self._CACHE_MISS_RATIO_THRESHOLD * 100,
             )
 
     async def save_pipeline_summary(self, ctx: PluginContext, elapsed_total: float) -> None:

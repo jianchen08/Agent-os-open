@@ -1,7 +1,6 @@
 """增强搜索工具——代码/文件内容搜索。
 
 核心业务逻辑从 0.1 src/tools/builtin/enhanced_search/ 迁移。
-使用 ripgrep（如有）或 Python 实现。
 """
 
 from __future__ import annotations

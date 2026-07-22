@@ -103,7 +103,6 @@ class IDEOpenFileTool(BuiltinTool):
                             "file_path": file_path,
                             **({"line": line} if line is not None else {}),
                             **({"column": column} if column is not None else {}),
-                            "connector": connector.connector_type,
                         },
                     )
                 return create_failure_result(
