@@ -26,7 +26,7 @@ from human_interaction.service import (
 )
 from tools.builtin.base import BuiltinTool
 from tools.builtin.shared.formatters import format_size
-from tools.builtin.workspace_aware import WorkspaceAwareMixin
+from plugins.shared.tools.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
     ToolCategory,
