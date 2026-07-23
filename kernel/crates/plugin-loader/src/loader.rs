@@ -8,11 +8,51 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use lingxi_core::traits::{LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType};
+use agentos_core::traits::{LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::error::LoaderError;
+
+/// 插件准入白名单模式。
+///
+/// - `Permissive`（默认）：白名单为空或插件未列入时放行，开发友好；
+///   但若插件被列入白名单且配置了 `sha256`，仍会校验哈希。
+/// - `Strict`：未列入白名单的插件加载失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AllowlistMode {
+    /// 白名单为空或插件未列入时放行（默认）。
+    #[default]
+    Permissive,
+    /// 未列入白名单的插件加载失败。
+    Strict,
+}
+
+/// 白名单中的单个插件条目。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AllowlistEntry {
+    pub id: String,
+    /// 可选 SHA256（manifest 文件字节 || entry 文件字节 的哈希，小写 hex）。
+    /// 留空则只校验 id，不校验哈希。
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// 插件准入白名单配置。
+///
+/// 对应 `config/system/plugin_allowlist.yaml`。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AllowlistConfig {
+    /// 白名单模式（默认 permissive）。
+    #[serde(default)]
+    pub mode: AllowlistMode,
+    /// 白名单条目列表。
+    #[serde(default)]
+    pub plugins: Vec<AllowlistEntry>,
+}
 
 /// 插件加载器实现。
 ///
@@ -28,6 +68,8 @@ pub struct PluginLoaderImpl {
     user_root: Option<PathBuf>,
     /// 配置文件根目录（如 `config/`）
     config_root: Option<PathBuf>,
+    /// 插件准入白名单（P2-2）
+    allowlist: AllowlistConfig,
     /// 已发现的 manifest 缓存 {plugin_id: (manifest, source_path)}
     manifests: RwLock<HashMap<String, (PluginManifest, PathBuf)>>,
     /// 已加载的插件状态 {plugin_id: LoadedPlugin}
@@ -45,13 +87,13 @@ impl PluginLoaderImpl {
             builtin_root: builtin_root.into(),
             user_root,
             config_root: None,
+            allowlist: AllowlistConfig::default(),
             manifests: RwLock::new(HashMap::new()),
             loaded: RwLock::new(HashMap::new()),
         }
     }
 
-    /// 设置配置文件根目录，返回 self 供链式调用。
-    ///
+    /// 设置配置文件根目录，返回 self 供链式调用。    ///
     /// 设置后，`load_config()` 将扫描该目录下的 YAML 文件并解析为 JSON。
     ///
     /// # Security
@@ -74,6 +116,21 @@ impl PluginLoaderImpl {
                 self.config_root = Some(path);
             }
         }
+        self
+    }
+
+    /// 设置插件准入白名单，返回 self 供链式调用。
+    ///
+    /// 设置后，`validate_manifest_internal` 将按 `mode`（strict/permissive）
+    /// 校验插件 id 是否在白名单中，并对白名单条目声明了 `sha256` 的插件
+    /// 校验 `sha256(manifest_bytes || entry_file_bytes)` 是否匹配。
+    ///
+    /// # Security
+    ///
+    /// 白名单应由应用启动代码加载可信配置（如 `config/system/plugin_allowlist.yaml`）
+    /// 后传入，不应接受来自插件自身的输入。
+    pub fn with_allowlist(mut self, allowlist: AllowlistConfig) -> Self {
+        self.allowlist = allowlist;
         self
     }
 
@@ -173,6 +230,9 @@ impl PluginLoaderImpl {
         // host_type 校验（ADR ⑧: 所有插件支持双路径，但必须声明一个）
         // host_type 已是必填字段，serde 会校验
 
+        // ── P2-2 插件准入校验（白名单 + SHA256）──
+        self.validate_allowlist(manifest, source_path)?;
+
         info!(
             "Manifest validated: id={} type={:?} host={:?} path={}",
             manifest.id,
@@ -183,6 +243,135 @@ impl PluginLoaderImpl {
 
         Ok(())
     }
+
+    /// 插件准入校验：白名单 + SHA256 哈希。
+    ///
+    /// 规则：
+    /// - `Strict` 模式：`plugin.id` 不在白名单 → `Err`。
+    /// - `Permissive` 模式：跳过白名单门槛，所有插件放行；
+    ///   但若插件在白名单条目中且配置了 `sha256`，仍执行哈希校验。
+    /// - 哈希校验：当匹配的白名单条目 `sha256` 非空时，
+    ///   计算 `sha256(manifest_bytes || entry_file_bytes)`，不匹配 → `Err`。
+    ///   `entry_file_bytes` 为 entry 字段在插件目录中引用到的实际文件字节
+    ///   （找不到入口文件则按空字节处理，等价于只哈希 manifest）。
+    fn validate_allowlist(
+        &self,
+        manifest: &PluginManifest,
+        source_path: &Path,
+    ) -> Result<(), LoaderError> {
+        // 查找白名单条目
+        let entry = self
+            .allowlist
+            .plugins
+            .iter()
+            .find(|e| e.id == manifest.id);
+
+        // strict 模式门槛校验
+        if self.allowlist.mode == AllowlistMode::Strict && entry.is_none() {
+            return Err(LoaderError::ManifestValidation {
+                plugin_id: manifest.id.clone(),
+                reason: format!(
+                    "plugin '{}' is not in the allowlist (strict mode)",
+                    manifest.id
+                ),
+            });
+        }
+
+        // 哈希校验（仅当白名单条目声明了 sha256 时执行）
+        if let Some(entry) = entry {
+            if !entry.sha256.is_empty() {
+                let computed = self.compute_plugin_sha256(manifest, source_path)?;
+                if !secure_eq(&computed, &entry.sha256) {
+                    return Err(LoaderError::ManifestValidation {
+                        plugin_id: manifest.id.clone(),
+                        reason: format!(
+                            "SHA256 mismatch for plugin '{}': expected {}, computed {}",
+                            manifest.id, entry.sha256, computed
+                        ),
+                    });
+                }
+                info!(
+                    "Plugin SHA256 verified: id={} sha256={}",
+                    manifest.id, computed
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 计算 `sha256(manifest_bytes || entry_file_bytes)`，返回小写 hex。
+    ///
+    /// `manifest_bytes` = 读取 `source_path` 的原始字节。
+    /// `entry_file_bytes` = entry 字段在插件目录（`source_path.parent()`）
+    /// 中引用到的入口文件字节；找不到入口文件则按空字节处理
+    /// （如 `python3 -m my_plugin` 这类没有明确入口文件的情况）。
+    fn compute_plugin_sha256(
+        &self,
+        manifest: &PluginManifest,
+        source_path: &Path,
+    ) -> Result<String, LoaderError> {
+        let manifest_bytes = std::fs::read(source_path).map_err(|e| LoaderError::Io {
+            message: format!("Failed to read manifest {}: {}", source_path.display(), e),
+        })?;
+
+        let entry_bytes = self.read_entry_bytes(manifest, source_path)?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&manifest_bytes);
+        hasher.update(&entry_bytes);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    /// 读取 entry 字段引用的入口文件字节。
+    ///
+    /// 解析规则（保守）：
+    /// - 取 entry 字符串的最后一个 token 作为候选入口文件名
+    ///   （如 `python3 server.py` → `server.py`）。
+    /// - 仅当该 token 在插件目录（`source_path.parent()`）下作为文件存在时才读取；
+    ///   否则返回空字节（如 `python3 -m my_plugin` 或 entry 为空）。
+    fn read_entry_bytes(
+        &self,
+        manifest: &PluginManifest,
+        source_path: &Path,
+    ) -> Result<Vec<u8>, LoaderError> {
+        if manifest.entry.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 取最后一个 token
+        let candidate = manifest.entry.split_whitespace().last();
+        let Some(file_name) = candidate else {
+            return Ok(Vec::new());
+        };
+        // 排除明显是 flag（如 `-m`/`--port`）或命令本身的情况
+        if file_name.starts_with('-') {
+            return Ok(Vec::new());
+        }
+        let Some(dir) = source_path.parent() else {
+            return Ok(Vec::new());
+        };
+        let entry_path = dir.join(file_name);
+        match std::fs::read(&entry_path) {
+            Ok(bytes) => Ok(bytes),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+}
+
+/// 常数时间字符串比较，避免哈希比较的计时侧信道。
+///
+/// 先比较长度（长度不同必然不等），再逐字节 AND 累积差异。
+fn secure_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[async_trait]
@@ -193,7 +382,7 @@ impl PluginLoader for PluginLoaderImpl {
     async fn discover(
         &self,
         root_paths: &[&str],
-    ) -> Result<Vec<PluginManifest>, lingxi_core::types::PluginError> {
+    ) -> Result<Vec<PluginManifest>, agentos_core::types::PluginError> {
         let mut all_manifests = HashMap::new();
 
         // 扫描 root_paths（外部传入的路径）
@@ -244,9 +433,9 @@ impl PluginLoader for PluginLoaderImpl {
     fn validate_manifest(
         &self,
         manifest: &PluginManifest,
-    ) -> Result<(), lingxi_core::types::PluginError> {
+    ) -> Result<(), agentos_core::types::PluginError> {
         self.validate_manifest_internal(manifest, Path::new("(runtime)"))
-            .map_err(|e| lingxi_core::types::PluginError {
+            .map_err(|e| agentos_core::types::PluginError {
                 message: e.to_string(),
                 code: Some("MANIFEST_VALIDATION".to_string()),
                 source: Some("plugin-loader".to_string()),
@@ -257,7 +446,7 @@ impl PluginLoader for PluginLoaderImpl {
     ///
     /// 如果插件已加载则直接返回；如果未加载则首次实例化。
     /// 按需加载原则：首次被调用时才启动 MCP 边车进程（非预启动）。
-    async fn load(&self, plugin_id: &str) -> Result<LoadedPlugin, lingxi_core::types::PluginError> {
+    async fn load(&self, plugin_id: &str) -> Result<LoadedPlugin, agentos_core::types::PluginError> {
         // 检查是否已加载
         {
             let loaded = self.loaded.read();
@@ -272,7 +461,7 @@ impl PluginLoader for PluginLoaderImpl {
             manifests
                 .get(plugin_id)
                 .map(|(m, _)| m.clone())
-                .ok_or_else(|| lingxi_core::types::PluginError {
+                .ok_or_else(|| agentos_core::types::PluginError {
                     message: format!("plugin not found: {}", plugin_id),
                     code: Some("PLUGIN_NOT_FOUND".to_string()),
                     source: Some("plugin-loader".to_string()),
@@ -301,14 +490,14 @@ impl PluginLoader for PluginLoaderImpl {
     }
 
     /// 卸载插件（释放进程/资源）。
-    async fn unload(&self, plugin_id: &str) -> Result<(), lingxi_core::types::PluginError> {
+    async fn unload(&self, plugin_id: &str) -> Result<(), agentos_core::types::PluginError> {
         let mut loaded = self.loaded.write();
         if let Some(mut plugin) = loaded.remove(plugin_id) {
             plugin.status = PluginStatus::Unloaded;
             info!("Plugin unloaded: id={}", plugin_id);
             Ok(())
         } else {
-            Err(lingxi_core::types::PluginError {
+            Err(agentos_core::types::PluginError {
                 message: format!("plugin not loaded: {}", plugin_id),
                 code: Some("NOT_LOADED".to_string()),
                 source: Some("plugin-loader".to_string()),
@@ -334,7 +523,7 @@ impl PluginLoader for PluginLoaderImpl {
     /// DEBT: 当前返回全量合并配置，所有插件共享同一份 config。ceiling: 所有插件
     /// 收到全系统配置，存在跨插件信息泄漏风险。upgrade: 当插件数量超过 20 个或
     /// 出现需要配置隔离的安全需求时，改为 load_config(manifest_id) 按插件过滤。
-    async fn load_config(&self) -> Result<serde_json::Value, lingxi_core::types::PluginError> {
+    async fn load_config(&self) -> Result<serde_json::Value, agentos_core::types::PluginError> {
         let config_root = match &self.config_root {
             Some(root) => root,
             None => return Ok(serde_json::json!({})),
@@ -354,7 +543,7 @@ impl PluginLoader for PluginLoaderImpl {
                     LoaderError::ManifestParse { .. } => "CONFIG_PARSE_ERROR",
                     _ => "CONFIG_LOAD_FAILED",
                 };
-                lingxi_core::types::PluginError {
+                agentos_core::types::PluginError {
                     message: format!("Failed to load config from {}: {}", config_root.display(), e),
                     code: Some(code.to_string()),
                     source: Some("plugin-loader".to_string()),
@@ -401,6 +590,11 @@ impl PluginLoaderImpl {
     /// 文件名（不含 `.yaml`/`.yml` 扩展名）作为 key，
     /// 文件内容解析后的 JSON Value 作为 value。
     /// 子目录名也会作为嵌套 key 被收录（子目录下的文件合并到该 key 对应的子对象中）。
+    ///
+    /// **这是插件配置注入的唯一权威路径**（invoker → sidecar）。
+    /// 注意与 config crate 的 `ConfigLoader::load_all`（非递归、仅顶层、
+    /// 不在注入路径上）和 0.1 `src/config/loader.py::load_all`（同样非递归、
+    /// 服务于 0.1 自身）区分——后两者是镜像移植 / 旧路径，不要用于注入。
     #[allow(clippy::only_used_in_recursion)]
     fn collect_yaml_configs(
         &self,
@@ -461,7 +655,7 @@ impl PluginLoaderImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_core::traits::HostType;
+    use agentos_core::traits::HostType;
     use std::fs;
 
     fn create_test_plugin_dir(root: &Path, id: &str, plugin_type: &str) {
@@ -506,6 +700,8 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
+            config_refs: vec![],
+            ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -529,6 +725,8 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
+            config_refs: vec![],
+            ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_err());
     }
@@ -553,6 +751,8 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
+            config_refs: vec![],
+            ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -692,6 +892,8 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: Some(2),
+            config_refs: vec![],
+            ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));
@@ -977,5 +1179,122 @@ mod tests {
         assert!(obj.contains_key("short"));
         assert_eq!(obj["long"]["type"], "yaml");
         assert_eq!(obj["short"]["type"], "yml");
+    }
+
+    // ── P2-2 插件准入白名单 + SHA256 校验测试 ──
+
+    /// strict 模式下，非白名单插件应被拒绝。
+    #[tokio::test]
+    async fn test_allowlist_strict_rejects_unknown() {
+        let builtin = tempfile::tempdir().unwrap();
+        // 写一个插件，但它不在白名单里
+        create_test_plugin_dir(builtin.path(), "unknown_plugin", "pipeline");
+
+        // strict 模式 + 空白名单
+        let allowlist = AllowlistConfig {
+            mode: AllowlistMode::Strict,
+            plugins: vec![],
+        };
+        let loader =
+            PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist);
+
+        let manifests = loader.discover(&[]).await.unwrap();
+        // 非白名单插件被 validate_manifest_internal 拒绝 → 不进入结果
+        assert!(
+            manifests.is_empty(),
+            "strict mode should reject plugins not in allowlist"
+        );
+    }
+
+    /// permissive 模式下，所有插件应放行（含非白名单插件）。
+    #[tokio::test]
+    async fn test_allowlist_permissive_allows_all() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "any_plugin_a", "pipeline");
+        create_test_plugin_dir(builtin.path(), "any_plugin_b", "tool");
+
+        // permissive 模式 + 空白名单（默认）
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+
+        let manifests = loader.discover(&[]).await.unwrap();
+        assert_eq!(manifests.len(), 2, "permissive mode should allow all plugins");
+        let ids: Vec<_> = manifests.iter().map(|m| m.id.clone()).collect();
+        assert!(ids.contains(&"any_plugin_a".to_string()));
+        assert!(ids.contains(&"any_plugin_b".to_string()));
+    }
+
+    /// 白名单条目声明了 sha256，实际内容不匹配时应被拒绝。
+    #[tokio::test]
+    async fn test_sha256_mismatch_rejected() {
+        let builtin = tempfile::tempdir().unwrap();
+        let plugin_dir = builtin.path().join("hashed_plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+
+        // manifest 文件
+        let manifest_content = r#"{
+    "id": "hashed_plugin",
+    "name": "Hashed Plugin",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python3 server.py",
+    "capabilities": {},
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "abort",
+    "priority": 100
+}"#;
+        let manifest_path = plugin_dir.join("plugin.json");
+        fs::write(&manifest_path, manifest_content).unwrap();
+        // 入口文件
+        fs::write(plugin_dir.join("server.py"), "# entry file\n").unwrap();
+
+        // 算出正确的 sha256(manifest_bytes || entry_bytes)
+        let manifest_bytes = fs::read(&manifest_path).unwrap();
+        let entry_bytes = fs::read(plugin_dir.join("server.py")).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&manifest_bytes);
+        hasher.update(&entry_bytes);
+        let correct_hash = format!("{:x}", hasher.finalize());
+
+        // 1) 正确哈希 → 放行
+        let allowlist_ok = AllowlistConfig {
+            mode: AllowlistMode::Permissive,
+            plugins: vec![AllowlistEntry {
+                id: "hashed_plugin".to_string(),
+                sha256: correct_hash.clone(),
+            }],
+        };
+        let loader_ok =
+            PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_ok);
+        let manifests = loader_ok.discover(&[]).await.unwrap();
+        assert_eq!(
+            manifests.len(),
+            1,
+            "matching sha256 should allow the plugin"
+        );
+        assert_eq!(manifests[0].id, "hashed_plugin");
+
+        // 2) 故意改坏哈希 → 拒绝
+        // 翻转第一个 hex 字符以构造不匹配（保持合法 hex）
+        let mut chars = correct_hash.chars();
+        let first = chars.next().unwrap();
+        let flipped = if first == '0' { '1' } else { '0' };
+        let broken_hash = format!("{}{}", flipped, correct_hash[1..].to_string());
+        let allowlist_bad = AllowlistConfig {
+            mode: AllowlistMode::Permissive,
+            plugins: vec![AllowlistEntry {
+                id: "hashed_plugin".to_string(),
+                sha256: broken_hash,
+            }],
+        };
+        let loader_bad =
+            PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_bad);
+        let manifests_bad = loader_bad.discover(&[]).await.unwrap();
+        assert!(
+            manifests_bad.is_empty(),
+            "sha256 mismatch should reject the plugin"
+        );
     }
 }

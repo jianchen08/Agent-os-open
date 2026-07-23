@@ -161,6 +161,12 @@ class ConfigLoader:
         """
         加载配置目录下所有 YAML 文件
 
+        注意：此方法是 **非递归**（`glob("*.yaml")` 只扫顶层），且 **不在 0.2 内核的
+        插件配置注入路径上**。0.2 插件配置注入走的是内核 `plugin-loader` crate 的
+        `PluginLoaderImpl::load_config` → `collect_yaml_configs`（递归），经 invoker
+        按 `config_refs` 过滤后注入 sidecar。本方法仅服务于 0.1 自身的配置读取，
+        **不要** 误用于向 0.2 sidecar 注入配置。
+
         Returns:
             合并后的配置字典，键为文件名（不含扩展名）
         """

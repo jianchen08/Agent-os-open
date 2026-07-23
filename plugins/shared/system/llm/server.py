@@ -19,7 +19,8 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lingxi_plugin_sdk import AgentOSPlugin
+from _config_models import ModelConfigLoaderShim, set_config
+from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("llm_service")
@@ -48,8 +49,7 @@ async def _on_load(params: dict[str, Any]) -> None:
     config = plugin.get_config()
     logger.info("LLM service loaded, config keys: %s", list(config.keys()) if config else "(empty)")
 
-    # 注入配置到 _config_models shim（供 router_factory.build_adapter 使用）
-    from _config_models import set_config  # noqa: PLC0415
+    # 注入配置到 _config_models shim（供 router_factory/adapter 的懒加载路径复用）
     set_config(config)
 
     # 延迟构建 adapter：需要 model_loader（由配置注入）
@@ -80,22 +80,13 @@ def _ensure_adapter() -> Any:
     return _adapter
 
 
-class _ModelLoaderShim:
-    """模拟 0.1 ModelConfigLoader 接口，数据来自 plugin 配置。
+class _ModelLoaderShim(ModelConfigLoaderShim):
+    """server.py 侧的 model_loader 句柄（供 ``_ensure_adapter`` 构建时传参）。
 
-    router_factory.build_router / build_adapter 调用 model_loader._load_llm_data()
-    获取 llm.yaml 解析后的字典。
+    复用 ``_config_models.ModelConfigLoaderShim`` 的 ``_load_llm_data`` 实现，
+    确保三条取配置路径（本类 / ``router_factory`` / ``adapter._route_call``）
+    行为一致：统一从 ``config["models"]["llm"]`` 取值。
     """
-
-    def __init__(self, config: dict[str, Any]) -> None:
-        self._config = config
-
-    def _load_llm_data(self) -> dict[str, Any]:
-        """返回 llm 配置数据（等价于 0.1 中读取 llm.yaml 的结果）。"""
-        llm_config = self._config.get("llm", self._config)
-        if isinstance(llm_config, dict):
-            return llm_config
-        return {}
 
 
 @plugin.tool(
