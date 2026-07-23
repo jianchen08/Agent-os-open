@@ -1,13 +1,14 @@
 /**
  * Widget 注册模块
  *
- * 将所有 8 种基础 Widget 组件注册到全局 widgetRegistry。
+ * 将所有内置 Widget 组件（基础组件 + 场景化组件）注册到全局 widgetRegistry。
  * 导出 registerAllWidgets() 函数供应用启动时调用。
  *
  * @module widgets/register
  */
 
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { ArtifactPreviewWidget } from './ArtifactPreviewWidget'
 import { ChartWidget } from './ChartWidget'
 import { CodeBlockWidget } from './CodeBlockWidget'
 import { DecisionWidget } from './DecisionWidget'
@@ -15,8 +16,10 @@ import { FileTreeWidget } from './FileTreeWidget'
 import { FormWidget } from './FormWidget'
 import { GalleryWidget } from './GalleryWidget'
 import { ProgressWidget } from './ProgressWidget'
+import { ReviewDocumentWidget } from './ReviewDocumentWidget'
 import { StatusCardWidget } from './StatusCardWidget'
 import { TableWidget } from './TableWidget'
+import { TaskCardWidget } from './TaskCardWidget'
 import type { ComponentType } from 'react'
 
 /** Widget 注册条目定义 */
@@ -111,6 +114,30 @@ const WIDGET_REGISTRATIONS: WidgetRegistration[] = [
     description: '通用树形结构组件，支持递归嵌套、状态显示和进度追踪',
     supportedSpaces: ['chat', 'workspace'],
     fallbackWidget: 'table',
+  },
+  {
+    type: 'review_document',
+    component: ReviewDocumentWidget,
+    name: '文档审阅',
+    description: '审批文档审阅组件，展示制品标题、内容（支持 diff）和批注列表',
+    supportedSpaces: ['workspace', 'fullscreen'],
+    fallbackWidget: 'table',
+  },
+  {
+    type: 'task_card',
+    component: TaskCardWidget,
+    name: '任务卡片',
+    description: '任务卡片组件，展示任务标题、状态和进度',
+    supportedSpaces: ['chat', 'workspace', 'floating'],
+    fallbackWidget: 'status_card',
+  },
+  {
+    type: 'artifact_preview',
+    component: ArtifactPreviewWidget,
+    name: '制品预览',
+    description: '制品预览组件，按类型（文本/图片/代码/数据）展示制品内容',
+    supportedSpaces: ['chat', 'workspace', 'floating'],
+    fallbackWidget: 'code_block',
   },
 ]
 

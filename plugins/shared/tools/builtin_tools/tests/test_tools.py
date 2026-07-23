@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from lingxi_builtin_tools.bash_tool import bash_execute
-from lingxi_builtin_tools.fs_tools import (
+from agentos_builtin_tools.bash_tool import bash_execute
+from agentos_builtin_tools.fs_tools import (
     copy_file,
     create_directory,
     delete_file,
@@ -22,9 +22,9 @@ from lingxi_builtin_tools.fs_tools import (
     list_directory,
     move_file,
 )
-from lingxi_builtin_tools.search_tool import enhanced_search
-from lingxi_builtin_tools.web_tool import WEB_OPERATE_SCHEMA, web_operate
-from lingxi_builtin_tools.server import TOOL_REGISTRY
+from agentos_builtin_tools.search_tool import enhanced_search
+from agentos_builtin_tools.web_tool import WEB_OPERATE_SCHEMA, web_operate
+from agentos_builtin_tools.server import TOOL_REGISTRY
 
 
 # ═════════════════════════════════════════════════════════════
@@ -378,13 +378,13 @@ class TestWebOperate:
 
 class TestMcpServerWrapper:
     def test_create_plugin_has_all_tools(self) -> None:
-        from lingxi_builtin_tools.server import create_plugin
+        from agentos_builtin_tools.server import create_plugin
 
         plugin = create_plugin()
         assert len(plugin._tools) == 10
 
     def test_plugin_tool_names(self) -> None:
-        from lingxi_builtin_tools.server import create_plugin
+        from agentos_builtin_tools.server import create_plugin
 
         plugin = create_plugin()
         names = set(plugin._tools.keys())
@@ -398,8 +398,8 @@ class TestMcpServerWrapper:
     @pytest.mark.asyncio
     async def test_tool_call_via_server(self, tmp_path: Path) -> None:
         """模拟 MCP tools/call 流程：通过 server 的 McpServer handler 调用工具。"""
-        from lingxi_plugin_sdk import McpServer
-        from lingxi_builtin_tools.server import create_plugin
+        from agentos_plugin_sdk import McpServer
+        from agentos_builtin_tools.server import create_plugin
 
         plugin = create_plugin()
         server = McpServer(

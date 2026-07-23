@@ -5,6 +5,8 @@
 export { ApprovalRouter } from './ApprovalRouter'
 export type { ApprovalRouterProps, ViewMode } from './ApprovalRouter'
 
+export { ApprovalReviewOverlay } from './ApprovalReviewOverlay'
+
 export { TextDiffView } from './TextDiffView'
 export type { TextDiffViewProps } from './TextDiffView'
 

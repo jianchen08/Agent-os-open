@@ -255,9 +255,9 @@ def create_thread(
 ) -> ThreadResponse:
     """创建新线程。"""
 
-    # 前端默认创建会话是 lingxi（业务约定），未指定时用 lingxi
+    # 前端默认创建会话是 agentos（业务约定），未指定时用 agentos
 
-    _effective_agent_id = body.agent_id or "lingxi"
+    _effective_agent_id = body.agent_id or "agentos"
 
     # 自动标记为主管道会话（前端通过主界面创建的都是主管道）
 

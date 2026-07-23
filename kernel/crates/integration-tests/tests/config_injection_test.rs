@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use lingxi_core::traits::{PluginInvoker,
+use agentos_core::traits::{PluginInvoker,
     LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType,
 };
-use lingxi_mcp::McpClient;
+use agentos_mcp::McpClient;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 
@@ -69,7 +69,10 @@ for line in sys.stdin:
 
 const SHELL_WRAPPER_TEMPLATE: &str = r#"#!/bin/bash
 export VERIFY_RESULT_FILE="{result_file}"
-exec python3 -c '{script}'
+# 跨平台 python 探测：Windows 上 python3 可能是 Store stub（静默失败），
+# 优先 python3，不可用则回退 python。
+if python3 -c "pass" 2>/dev/null; then PY=python3; else PY=python; fi
+exec "$PY" -c '{script}'
 "#;
 
 fn create_mock_server_script(result_file: &str) -> tempfile::TempDir {
@@ -136,7 +139,7 @@ impl MockLoader {
     }
 }
 
-use lingxi_core::types::PluginError;
+use agentos_core::types::PluginError;
 
 #[async_trait]
 impl PluginLoader for MockLoader {
@@ -184,7 +187,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         plugin_type: PluginType::Tool,
         pipeline_role: None,
         language: "python".to_string(),
-        host_type: lingxi_core::traits::HostType::Sidecar,
+        host_type: agentos_core::traits::HostType::Sidecar,
         entry: entry.to_string(),
         capabilities: Default::default(),
         dependencies: vec![],
@@ -193,6 +196,9 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         priority: 100,
         mcp: None,
         requires_content: None,
+        config_refs: vec![],
+        config_files: vec![],
+        ui_schema: None,
     }
 }
 
@@ -210,7 +216,7 @@ async fn fp1_load_config_reads_yaml_files() {
         "timeout: 30\nhost: localhost\n",
     ).unwrap();
 
-    let loader = lingxi_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None)
+    let loader = agentos_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None)
         .with_config_root(config_dir.path());
 
     let config = loader.load_config().await.unwrap();
@@ -305,7 +311,7 @@ async fn fp3_invoker_loads_and_injects_config() {
     );
     loader.add_manifest(manifest);
 
-    let invoker = lingxi_invoker::PluginInvokerImpl::new(loader.clone());
+    let invoker = agentos_invoker::PluginInvokerImpl::new(loader.clone());
 
     let result = invoker
         .invoke_tool("test_plugin", "execute", &json!({"input": "test"}))
@@ -339,7 +345,7 @@ async fn fp3_config_change_triggers_reload() {
     );
     loader.add_manifest(manifest);
 
-    let invoker = lingxi_invoker::PluginInvokerImpl::new(loader.clone());
+    let invoker = agentos_invoker::PluginInvokerImpl::new(loader.clone());
 
     clear_result_file(result_file);
     let _ = invoker.invoke_tool("reload_plugin", "execute", &json!({})).await;
@@ -364,14 +370,14 @@ async fn fp3_config_change_triggers_reload() {
 
 #[tokio::test]
 async fn fp4_no_config_root_returns_empty() {
-    let loader = lingxi_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None);
+    let loader = agentos_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None);
     let config = loader.load_config().await.unwrap();
     assert_eq!(config, json!({}));
 }
 
 #[tokio::test]
 async fn fp4_nonexistent_dir_returns_empty() {
-    let loader = lingxi_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None)
+    let loader = agentos_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None)
         .with_config_root("/tmp/no_such_dir_99999");
     let config = loader.load_config().await.unwrap();
     assert_eq!(config, json!({}));
@@ -392,7 +398,7 @@ async fn fp4_invoker_works_with_empty_config() {
     );
     loader.add_manifest(manifest);
 
-    let invoker = lingxi_invoker::PluginInvokerImpl::new(loader);
+    let invoker = agentos_invoker::PluginInvokerImpl::new(loader);
 
     let result = invoker.invoke_tool("empty_config_plugin", "execute", &json!({})).await;
     assert!(result.is_ok(), "invoke_tool with empty config should succeed");
@@ -471,12 +477,12 @@ async fn e2e_full_config_injection_chain() {
     ).unwrap();
 
     let real_loader = Arc::new(
-        lingxi_plugin_loader::PluginLoaderImpl::new(plugin_dir.path(), None)
+        agentos_plugin_loader::PluginLoaderImpl::new(plugin_dir.path(), None)
             .with_config_root(config_dir.path()),
     );
     real_loader.discover(&[]).await.unwrap();
 
-    let real_invoker = lingxi_invoker::PluginInvokerImpl::new(real_loader);
+    let real_invoker = agentos_invoker::PluginInvokerImpl::new(real_loader);
 
     let result = real_invoker
         .invoke_tool("e2e_plugin", "execute", &json!({"input": "e2e_test"}))

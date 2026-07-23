@@ -13,7 +13,7 @@ _SRC_ROOT = os.path.join(_PROJECT_ROOT, 'src')
 if os.path.isdir(_SRC_ROOT):
     sys.path.insert(0, _SRC_ROOT)
 
-from lingxi_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 plugin = AgentOSPlugin("task_submit_tool")
 

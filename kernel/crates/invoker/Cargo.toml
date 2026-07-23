@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-invoker"
+name = "agentos-invoker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,8 +13,8 @@ serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-lingxi-core.workspace = true
-lingxi-mcp = { path = "../mcp" }
+agentos-core.workspace = true
+agentos-mcp = { path = "../mcp" }
 parking_lot = "0.12"
 
 [dev-dependencies]

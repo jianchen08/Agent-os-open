@@ -29,7 +29,7 @@
     "wait-on": "^8.0.3"
   },
   "build": {
-    "appId": "com.lingxi.assistant",
+    "appId": "com.agentos.assistant",
     "productName": "灵汐助手",
     "directories": {
       "output": "release"

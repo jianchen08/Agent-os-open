@@ -11,8 +11,10 @@
 //! [来源: docs/0.2_rust_plugin_solution.md §3.1.1]
 //! [来源: docs/tasks/task_05_plugin_system.md AC-04-4]
 
+pub mod capability;
 pub mod client;
 pub mod error;
 
+pub use capability::{parse_capability_method, CapabilityRouter, STANDARD_CAPABILITIES};
 pub use client::{McpClient, McpTransport};
 pub use error::McpError;

@@ -1,0 +1,54 @@
+{
+  "name": "agentos-vscode-host",
+  "displayName": "AgentOS Host",
+  "description": "灵汐 AgentOS 宿主接入扩展 - 在 VSCode 内启动 HTTP 服务，供灵汐连接器轮询获取上下文与下发操作。",
+  "version": "0.2.0",
+  "publisher": "agentos",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentosHost.start",
+        "title": "AgentOS Host: 启动服务"
+      },
+      {
+        "command": "agentosHost.stop",
+        "title": "AgentOS Host: 停止服务"
+      }
+    ],
+    "configuration": {
+      "title": "AgentOS Host",
+      "properties": {
+        "agentosHost.port": {
+          "type": "number",
+          "default": 9741,
+          "description": "HTTP 服务监听端口，需与灵汐 vscode 连接器一致（默认 9741）。"
+        },
+        "agentosHost.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "HTTP 服务监听地址。默认仅本机访问（127.0.0.1）。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p ./tsconfig.json",
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -p ./tsconfig.json --watch",
+    "typecheck": "tsc -p ./tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}

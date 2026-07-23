@@ -1,0 +1,20 @@
+# 公共 step 库示例：文档关键信息提取
+#
+# 可被任何管道的 step.steps 引用（命中规则②：公共 step 库）。
+# 格式同单个 step 定义。
+#
+# [来源: 配置驱动的管道引擎设计 — 公共 step 库]
+
+id: doc_extract
+steps:
+  - file_read
+  - llm_core
+context:
+  task: "提取文档关键信息"
+  temperature: 0.3
+routes:
+  - when: "extract_result == ''"
+    then:
+      next: end
+      set:
+        status: failed

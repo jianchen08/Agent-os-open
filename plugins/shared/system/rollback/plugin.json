@@ -5,7 +5,7 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {"name": "rollback.create_checkpoint", "description": "Create a rollback checkpoint for a task"},

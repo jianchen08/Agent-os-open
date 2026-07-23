@@ -24,7 +24,7 @@ def handle_request(request: dict) -> dict | None:
             "result": {
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
-                    "name": "lingxi-llm-sidecar",
+                    "name": "agentos-llm-sidecar",
                     "version": "1.0.0",
                 },
                 "capabilities": {

@@ -12,12 +12,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lingxi_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
-use lingxi_core::types::{
+use agentos_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
+use agentos_core::types::{
     CompositeStep, PatchType, PluginContext, PluginError, PluginResult, RouteSignal, RouteType,
     RunStatus, SuspendHandle, ToolExecutionResult, WakeEvent,
 };
-use lingxi_engine::{AdrEngineImpl, SqliteStore};
+use agentos_engine::{AdrEngineImpl, SqliteStore};
 use serde_json::json;
 
 /// 可捕获调用参数的 MockInvoker——验证 PluginContext 注入是否正确。
@@ -91,7 +91,7 @@ fn make_engine(
 ) -> (AdrEngineImpl, Arc<SqliteStore>, Arc<CapturingInvoker>) {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(CapturingInvoker::new(results));
-    let engine = AdrEngineImpl::new(store.clone(), invoker.clone(), "test_tenant_001");
+    let engine = AdrEngineImpl::new(store.clone(), invoker.clone(), "default");
     (engine, store, invoker)
 }
 
@@ -173,7 +173,7 @@ async fn verify_tenant_context_injection() {
 
     let ctx = invoker.get_last_context().expect("context should be captured");
     assert_eq!(
-        ctx.tenant.tenant_id, "test_tenant_001",
+        ctx.tenant.tenant_id, "default",
         "TenantContext.tenant_id should match engine default_tenant_id"
     );
     // session_id 应等于 run_id（引擎用 run_id 作为 session_id）
@@ -456,7 +456,7 @@ async fn verify_wal_mode_enabled() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_str().unwrap();
     let file_store = SqliteStore::open(path).unwrap();
-    file_store.create_run("wal_test", "hash", "tenant").unwrap();
+    file_store.create_run("wal_test", "hash", "default").unwrap();
 
     // 验证 store 可正常 CRUD（WAL 初始化成功且数据库可正常操作）
     let _run = file_store.get_run("wal_test").await.unwrap();

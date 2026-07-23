@@ -7,13 +7,18 @@
 //!
 //! - `store`: SQLite 四表存储实现——runs/messages/traces/blobs DDL + CRUD
 //! - `engine`: AdrEngine 实现——start_run/execute_step/suspend/resume/rollback/end_run
+//! - `template`: 配置模板插值器——解析 `{{state.xxx}}` / `{{path:xxx}}` 表达式
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.6]
 //! [来源: docs/working/adr_engine_design.md]
 //! [来源: docs/tasks/task_06_pipeline_engine.md]
 
+pub mod condition;
 pub mod engine;
+pub mod pipeline_loop;
 pub mod store;
+pub mod template;
 
 pub use engine::AdrEngineImpl;
+pub use pipeline_loop::PipelineExecutor;
 pub use store::SqliteStore;

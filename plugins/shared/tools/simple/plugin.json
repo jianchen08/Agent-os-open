@@ -6,7 +6,7 @@
     "plugin_type": "tool",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {
@@ -62,7 +62,7 @@
         ]
     },
     "dependencies": [
-        "lingxi-plugin-sdk>=0.2.0"
+        "agentos-plugin-sdk>=0.2.0"
     ],
     "permissions": {},
     "error_policy": "skip",

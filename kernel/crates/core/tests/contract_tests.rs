@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use uuid::Uuid;
 
-use lingxi_core::traits::*;
-use lingxi_core::types::*;
+use agentos_core::traits::*;
+use agentos_core::types::*;
 
 // ═══════════════════════════════════════════════════════════════════
 // ADR ⑨: HookContext 标签化动态上下文
@@ -128,6 +128,9 @@ fn make_test_manifest(
         priority: 100,
         mcp: None,
         requires_content,
+        config_refs: vec![],
+        config_files: vec![],
+        ui_schema: None,
     }
 }
 

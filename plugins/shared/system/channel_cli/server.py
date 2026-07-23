@@ -19,7 +19,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lingxi_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin
 
 from cli_output_adapter import sanitize_for_terminal
 

@@ -6,7 +6,7 @@
    4 个执行过程质量维度 + JSON schema 含 process_dimension 字段。
 
 2. 改动2（service.py 体系提示词注入）：真实装配 MemoryMaintenanceService，
-   对真实存在的 lingxi agent 调用 _collect_agent_constraints，验证返回内容含
+   对真实存在的 agentos agent 调用 _collect_agent_constraints，验证返回内容含
    解析后的完整 system_prompt（{{path:...}} 占位符已替换）+ 硬约束 + 软约束。
 
 3. 改动3（service.py 通知含报告文件名）：_persist_review_result 真实写文件到
@@ -121,41 +121,41 @@ class TestCollectAgentConstraintsInjectsFullPrompt:
     """验证 _collect_agent_constraints 注入被复盘 agent 的完整体系提示词。"""
 
     @pytest.mark.asyncio
-    async def test_lingxi_full_prompt_resolved(self, tmp_path):
-        """对真实 lingxi agent，system_prompt 占位符全部解析。"""
+    async def test_agentos_full_prompt_resolved(self, tmp_path):
+        """对真实 agentos agent，system_prompt 占位符全部解析。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi"])
+        block = await svc._collect_agent_constraints(["agentos"])
 
-        # lingxi 的 system_prompt 含 {{path:config/agents/main/persona/lingxi_persona.md}}
+        # agentos 的 system_prompt 含 {{path:config/agents/main/persona/agentos_persona.md}}
         # 等占位符，解析后不应再有 {{ 字样
-        assert block, "lingxi 应产出非空约束块"
+        assert block, "agentos 应产出非空约束块"
         assert "{{" not in block, "占位符应全部解析，不应残留 {{"
 
     @pytest.mark.asyncio
     async def test_block_contains_resolved_system_prompt_content(self, tmp_path):
-        """约束块含 lingxi system_prompt 解析后的真实内容（角色定义）。"""
+        """约束块含 agentos system_prompt 解析后的真实内容（角色定义）。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi"])
+        block = await svc._collect_agent_constraints(["agentos"])
 
-        # lingxi system_prompt 解析后含「智能助理」「派发」等角色定义关键词
+        # agentos system_prompt 解析后含「智能助理」「派发」等角色定义关键词
         assert "完整体系提示词" in block
-        assert "派发" in block or "调度" in block, "应含 lingxi 角色定义内容"
+        assert "派发" in block or "调度" in block, "应含 agentos 角色定义内容"
 
     @pytest.mark.asyncio
     async def test_block_contains_hard_constraints(self, tmp_path):
-        """约束块含 lingxi 的硬约束原文。"""
+        """约束块含 agentos 的硬约束原文。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi"])
+        block = await svc._collect_agent_constraints(["agentos"])
 
-        # lingxi 硬约束含「你是接单派单的角色」
+        # agentos 硬约束含「你是接单派单的角色」
         assert "硬约束" in block
-        assert "接单派单" in block, "应含 lingxi 硬约束原文"
+        assert "接单派单" in block, "应含 agentos 硬约束原文"
 
     @pytest.mark.asyncio
     async def test_block_contains_soft_constraints(self, tmp_path):
-        """约束块含 lingxi 的软约束。"""
+        """约束块含 agentos 的软约束。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi"])
+        block = await svc._collect_agent_constraints(["agentos"])
 
         assert "软约束" in block
 
@@ -177,17 +177,17 @@ class TestCollectAgentConstraintsInjectsFullPrompt:
     async def test_dedup_same_agent(self, tmp_path):
         """同一 agent 多次出现只产出一份约束块。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi", "lingxi", "lingxi"])
-        # 「【lingxi」标记应只出现 1 次
-        assert block.count("【lingxi") == 1, "同一 agent 应去重"
+        block = await svc._collect_agent_constraints(["agentos", "agentos", "agentos"])
+        # 「【agentos」标记应只出现 1 次
+        assert block.count("【agentos") == 1, "同一 agent 应去重"
 
     @pytest.mark.asyncio
     async def test_mixed_agents_each_get_block(self, tmp_path):
         """多个不同 agent 各自产出独立的约束块。"""
         svc = _make_service(tmp_path)
-        # lingxi 一定存在；code_reviewer_agent 也存在
-        block = await svc._collect_agent_constraints(["lingxi", "code_reviewer_agent"])
-        assert "【lingxi" in block
+        # agentos 一定存在；code_reviewer_agent 也存在
+        block = await svc._collect_agent_constraints(["agentos", "code_reviewer_agent"])
+        assert "【agentos" in block
         assert "【code_reviewer_agent" in block
 
     @pytest.mark.asyncio
@@ -196,8 +196,8 @@ class TestCollectAgentConstraintsInjectsFullPrompt:
         from agents.global_registry import get_global_agent_registry_sync
 
         svc = _make_service(tmp_path)
-        raw_prompt = get_global_agent_registry_sync().get("lingxi").system_prompt
-        block = await svc._collect_agent_constraints(["lingxi"])
+        raw_prompt = get_global_agent_registry_sync().get("agentos").system_prompt
+        block = await svc._collect_agent_constraints(["agentos"])
 
         # block 含解析后内容 + 约束，应显著长于裸 system_prompt 原文
         assert len(block) > len(raw_prompt), (
@@ -386,7 +386,7 @@ class TestConstraintsBlockUsableInTriggerMessage:
     async def test_block_is_plain_string(self, tmp_path):
         """产出是纯字符串，可直接 f-string 拼接（不会类型错误）。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi"])
+        block = await svc._collect_agent_constraints(["agentos"])
         assert isinstance(block, str)
 
         # 模拟 _try_launch_review_agent 里的拼接（验证不会因类型/格式崩）
@@ -397,11 +397,11 @@ class TestConstraintsBlockUsableInTriggerMessage:
     async def test_block_has_clear_delimiters(self, tmp_path):
         """产出块有清晰的标题分隔，review_agent 能识别边界。"""
         svc = _make_service(tmp_path)
-        block = await svc._collect_agent_constraints(["lingxi"])
+        block = await svc._collect_agent_constraints(["agentos"])
         # 开头应是说明性标题
         assert block.startswith("被复盘 Agent 的完整体系提示词")
         # 每个 agent 块用 【xxx】 标记
-        assert "【lingxi" in block
+        assert "【agentos" in block
 
 
 if __name__ == "__main__":

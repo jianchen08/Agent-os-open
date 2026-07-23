@@ -14,11 +14,11 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lingxi_config::ConfigLoader;
-use lingxi_core::traits::AdrEngine;
-use lingxi_core::types::CompositeStep;
-use lingxi_engine::{AdrEngineImpl, SqliteStore};
-use lingxi_integration_tests::NoopInvoker;
+use agentos_config::ConfigLoader;
+use agentos_core::traits::AdrEngine;
+use agentos_core::types::CompositeStep;
+use agentos_engine::{AdrEngineImpl, SqliteStore};
+use agentos_integration_tests::NoopInvoker;
 use serde_json::json;
 use tokio::runtime::Runtime;
 

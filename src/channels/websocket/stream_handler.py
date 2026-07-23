@@ -163,7 +163,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
 
         # 获取默认 Agent 配置（灵汐）
         agent_config = None
-        for candidate in ["default", "lingxi"]:
+        for candidate in ["default", "agentos"]:
             agent_config = agent_registry.get(candidate)
             if agent_config:
                 break

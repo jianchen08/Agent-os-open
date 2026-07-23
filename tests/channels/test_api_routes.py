@@ -217,7 +217,7 @@ class TestConfigToResponseModel:
         from channels.api.routes_agents import _config_to_response
 
         cfg = AgentConfig(
-            config_id="lingxi",
+            config_id="agentos",
             name="灵汐",
             display_name="灵汐",
             agent_type=AgentType.MAIN,

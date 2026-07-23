@@ -397,9 +397,9 @@ class AgentService:
             except ValueError:
                 pass  # 继续尝试其他方式
 
-        # 返回系统默认 Agent（优先查找 config_id="lingxi" 的主 Agent）
+        # 返回系统默认 Agent（优先查找 config_id="agentos" 的主 Agent）
         result = await self.session.execute(
-            select(AgentConfig).where(AgentConfig.config_id == "lingxi", AgentConfig.is_active)
+            select(AgentConfig).where(AgentConfig.config_id == "agentos", AgentConfig.is_active)
         )
         agent = result.scalar_one_or_none()
 

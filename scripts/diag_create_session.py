@@ -73,7 +73,7 @@ def login(base: str, user: str, pwd: str) -> str:
 
 def create_one(base: str, headers: dict, verbose: bool = False) -> dict:
     """创建一个会话，返回各段耗时（秒）。"""
-    payload = {"title": "diag-test", "agent_id": "lingxi"}
+    payload = {"title": "diag-test", "agent_id": "agentos"}
     t_start = time.perf_counter()
     r = requests.post(
         f"{base}/api/v1/threads",

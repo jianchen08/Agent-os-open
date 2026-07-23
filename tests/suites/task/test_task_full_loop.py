@@ -66,7 +66,7 @@ async def test_full_task_loop():
 
     submit_params = {
         "target_type": "agent",
-        "target_id": "lingxi",
+        "target_id": "agentos",
         "goal": {
             "title": "测试任务：说hello",
             "description": "请回复 hello world",

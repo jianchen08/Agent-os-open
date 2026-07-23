@@ -1,0 +1,62 @@
+# 通用自主循环管道配置
+#
+# 引擎作为配置解释执行器：读此配置，按 steps 执行，据 loop/routes 决定循环与分支。
+# 所有 Agent 共用此管道，差异由 Agent 配置（system_prompt/tool_ids/model_tier）体现。
+#
+# 一切皆 step：steps 字段引用的内容按三级命中规则解析：
+#   ① 当前管道 step id → 组合节点递归
+#   ② 公共 step 库 id（config/steps/）→ 组合节点递归
+#   ③ 插件名 → 原子插件 invoker 调用
+#
+# [来源: 配置驱动的管道引擎设计]
+
+name: autonomous
+
+loop:
+  enabled: true
+  max_iterations: -1          # -1=无限循环（由 Agent 配置的 max_iterations 覆盖）
+
+steps:
+  # ── 上下文准备（input 插件链）──
+  - id: prepare
+    steps:                    # 插件 id（manifest 里的 id，带 pipeline_ 前缀）
+      - pipeline_tool_schema
+      - pipeline_param_inject
+      - pipeline_memory_read
+      - pipeline_knowledge_inject
+      - pipeline_prompt_build
+    context:                  # 自由 key-value，merge 进 state 供插件读取
+      agent_id: "{{state.agent_id}}"
+      model_tier: "{{state.model_tier}}"
+
+  # ── LLM 或工具执行（由 core_type 决定）──
+  - id: core
+    steps:
+      - "{{state.core_plugin}}"   # 动态：pipeline_llm_core 或 pipeline_tool_core
+    context:
+      agent_id: "{{state.agent_id}}"
+      temperature: 0.7
+
+  # ── 输出处理 + 路由仲裁 ──
+  - id: post
+    steps:
+      - pipeline_stop_check
+      - pipeline_duplicate_check
+      - pipeline_stuck_detector
+      - pipeline_result_format
+    routes:                   # 配置驱动的路由分支
+      - when: "raw_tool_calls != []"
+        then:
+          next: loop
+          set:
+            core_type: tool_execute
+            core_plugin: pipeline_tool_core
+      - when: "text_only == True and no_new_input == True"
+        then:
+          next: end
+      - when: "True"
+        then:
+          next: loop
+          set:
+            core_type: llm_call
+            core_plugin: pipeline_llm_core

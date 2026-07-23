@@ -85,7 +85,7 @@ class _ModelLoaderShim(ModelConfigLoaderShim):
 
     复用 ``_config_models.ModelConfigLoaderShim`` 的 ``_load_llm_data`` 实现，
     确保三条取配置路径（本类 / ``router_factory`` / ``adapter._route_call``）
-    行为一致：统一从 ``config["models"]["llm"]`` 取值。
+    行为一致：P1 起统一从 ``config["llm"]`` 取值（config_files 命名空间）。
     """
 
 

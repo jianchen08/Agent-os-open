@@ -32,8 +32,8 @@ pub enum LoaderError {
     Io { message: String },
 }
 
-impl From<lingxi_core::types::PluginError> for LoaderError {
-    fn from(e: lingxi_core::types::PluginError) -> Self {
+impl From<agentos_core::types::PluginError> for LoaderError {
+    fn from(e: agentos_core::types::PluginError) -> Self {
         LoaderError::LoadFailed {
             plugin_id: String::new(),
             reason: e.message,

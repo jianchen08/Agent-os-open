@@ -17,6 +17,51 @@ import { BrowserWindow } from "electron";
 /** 轮询默认间隔（毫秒） */
 const DEFAULT_POLLING_INTERVAL_MS = 1000;
 
+/**
+ * 被识别为"宿主编辑器/引擎"的进程名关键字（大小写不敏感）。
+ * 前台窗口的 processName 命中其中任一关键字时，悬浮窗将跟随该宿主窗口定位。
+ */
+const HOST_PROCESS_KEYWORDS: readonly string[] = ["code", "godot"];
+
+/** 跟随宿主时悬浮窗相对宿主窗口右上角的水平/垂直留白（像素） */
+const FOLLOW_MARGIN_X = 16;
+const FOLLOW_MARGIN_Y = 16;
+
+/** 跟随时悬浮窗的最大宽度（避免遮挡整个宿主窗口） */
+const FOLLOW_MAX_WIDTH = 420;
+const FOLLOW_DEFAULT_HEIGHT = 560;
+
+/** 判断给定进程名是否为可跟随的宿主（VSCode / Godot）。大小写不敏感。 */
+export function isHostProcess(processName: string): boolean {
+  const lower = (processName || "").toLowerCase();
+  if (!lower) {
+    return false;
+  }
+  return HOST_PROCESS_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+/**
+ * 计算悬浮窗跟随宿主窗口时的目标几何位置（贴宿主右上角）。
+ *
+ * @param host - 宿主窗口信息
+ * @param overlayWidth - 悬浮窗期望宽度
+ * @param overlayHeight - 悬浮窗期望高度
+ * @returns 目标位置与尺寸（{ x, y, width, height }），单位像素
+ */
+export function computeFollowBounds(
+  host: WindowInfo,
+  overlayWidth: number = FOLLOW_MAX_WIDTH,
+  overlayHeight: number = FOLLOW_DEFAULT_HEIGHT
+): { x: number; y: number; width: number; height: number } {
+  // 钳制宽度，避免过宽遮挡宿主
+  const width = Math.min(overlayWidth, Math.max(200, host.width - FOLLOW_MARGIN_X * 2));
+  const height = overlayHeight;
+  // 贴宿主窗口右上角：右内缩 FOLLOW_MARGIN_X，顶内缩 FOLLOW_MARGIN_Y
+  const x = host.x + host.width - width - FOLLOW_MARGIN_X;
+  const y = host.y + FOLLOW_MARGIN_Y;
+  return { x, y, width, height };
+}
+
 /** 活跃窗口信息数据结构 */
 export interface WindowInfo {
   /** 窗口标题 */
@@ -317,17 +362,50 @@ export class WindowInfoPoller {
 /**
  * 启动窗口信息轮询的便捷函数。
  *
- * @param mainWindow - 要发送窗口信息的 BrowserWindow
+ * 每次轮询回调中：
+ * 1. 将窗口信息通过 IPC 推送给渲染进程（window-info 频道）；
+ * 2. 若前台窗口为宿主（VSCode / Godot），按 processName 过滤后计算悬浮窗位置
+ *    （贴宿主窗口右上角），并调用 mainWindow.setBounds() 让悬浮窗跟随宿主。
+ *
+ * @param mainWindow - 要发送窗口信息并跟随宿主的 BrowserWindow
  * @param intervalMs - 轮询间隔毫秒数
+ * @param followHost - 是否启用悬浮窗跟随宿主，默认 true
  * @returns WindowInfoPoller 实例，可用于停止轮询
  */
 export function startWindowInfoPolling(
   mainWindow: BrowserWindow,
-  intervalMs: number = DEFAULT_POLLING_INTERVAL_MS
+  intervalMs: number = DEFAULT_POLLING_INTERVAL_MS,
+  followHost: boolean = true
 ): WindowInfoPoller {
   const poller = new WindowInfoPoller((info) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("window-info", info);
+    if (mainWindow.isDestroyed()) {
+      return;
+    }
+
+    // 1. 推送窗口信息给渲染进程
+    mainWindow.webContents.send("window-info", info);
+
+    // 2. 悬浮窗跟随宿主窗口（VSCode / Godot）
+    if (!followHost) {
+      return;
+    }
+    // 只在宿主窗口有效几何信息且被识别为宿主进程时跟随
+    if (
+      info.width <= 0 ||
+      info.height <= 0 ||
+      !isHostProcess(info.processName)
+    ) {
+      return;
+    }
+    // 避免在窗口最小化 / 全屏时反复抢焦点移动
+    if (mainWindow.isMinimized() || mainWindow.isFullScreen()) {
+      return;
+    }
+    const bounds = computeFollowBounds(info);
+    try {
+      mainWindow.setBounds(bounds, false);
+    } catch (err) {
+      console.warn("悬浮窗跟随宿主失败:", err);
     }
   }, intervalMs);
   poller.start();

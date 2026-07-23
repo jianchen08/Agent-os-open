@@ -5,11 +5,11 @@
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
-use lingxi_core::traits::{
+use agentos_core::traits::{
     CapabilityRegistry, Dependency, DependencyError, DependencyResolver, ResourceDescriptor,
     ToolDescriptor,
 };
-use lingxi_core::types::{RouteType, ToolCategory};
+use agentos_core::types::{RouteType, ToolCategory};
 use parking_lot::RwLock;
 use tracing::info;
 
@@ -255,7 +255,7 @@ impl DependencyResolver for DependencyResolverImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_core::types::ToolSource;
+    use agentos_core::types::ToolSource;
     use serde_json::json;
 
     fn make_tool_descriptor(name: &str, plugin_id: &str, category: ToolCategory) -> ToolDescriptor {

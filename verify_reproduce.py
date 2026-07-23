@@ -209,11 +209,11 @@ def test_api() -> None:
     print("\n=== 场景7: API通道 ===")
     # SDK __init__.py 缺失，手动注册
     try:
-        from lingxi_plugin_sdk import AgentOSPlugin  # noqa: F401
+        from agentos_plugin_sdk import AgentOSPlugin  # noqa: F401
     except ImportError:
-        from lingxi_plugin_sdk.plugin import AgentOSPlugin
-        import lingxi_plugin_sdk
-        lingxi_plugin_sdk.AgentOSPlugin = AgentOSPlugin
+        from agentos_plugin_sdk.plugin import AgentOSPlugin
+        import agentos_plugin_sdk
+        agentos_plugin_sdk.AgentOSPlugin = AgentOSPlugin
 
     mod = import_from_channel("channel_api", "server")
     assert hasattr(mod, "plugin")

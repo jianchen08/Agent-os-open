@@ -16,11 +16,11 @@ function getMainPipelineId(sessionId: string): string | null {
   return mainPid ?? null
 }
 
-/** 获取主管道对应的主 Agent ID 后端创建会话时默认回填 agent_id="lingxi"（routes_threads.py）。 */
+/** 获取主管道对应的主 Agent ID 后端创建会话时默认回填 agent_id="agentos"（routes_threads.py）。 */
 function getMainAgentId(sessionId: string): string {
   const sessions = useSessionStore.getState().sessions
   const session = sessions.find((s) => s.id === sessionId)
-  return session?.agentId || 'lingxi'
+  return session?.agentId || 'agentos'
 }
 
 /** localStorage 存储键前缀 */

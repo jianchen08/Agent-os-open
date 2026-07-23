@@ -49,10 +49,10 @@ export const SessionEditModal = memo<SessionEditModalProps>(
     }, [agents])
 
     const defaultAgentId = useMemo(() => {
-      const lingxi = agents.find(
-        (a) => a.configId === 'lingxi' || a.name === '灵汐',
+      const agentos = agents.find(
+        (a) => a.configId === 'agentos' || a.name === '灵汐',
       )
-      return lingxi?.configId || lingxi?.id || null
+      return agentos?.configId || agentos?.id || null
     }, [agents])
 
     useEffect(() => {

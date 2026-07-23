@@ -5,8 +5,9 @@ description: Godot 引擎编辑器插件连接器，支持场景管理、脚本�
 type: godot
 
 # 通信协议
+# 端口 9600 与 plugins/shared/system/connectors/creative/game_engine.py:44 默认 endpoint 一致
 protocol: http
-endpoint: "http://localhost:9867"
+endpoint: "http://localhost:9600"
 
 # 超时配置
 connect_timeout: 5.0

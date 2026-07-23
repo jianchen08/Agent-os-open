@@ -12,7 +12,10 @@
 //! [来源: docs/tasks/task_07_llm_api.md]
 
 pub mod auth;
+pub mod capability_router;
+pub mod config_service;
 pub mod error;
+pub mod pipeline_loader;
 pub mod routes;
 pub mod server;
 
@@ -21,5 +24,9 @@ pub use auth::{
     RegisterRequest,
 };
 pub use error::ApiError;
+pub use pipeline_loader::{
+    load_pipeline_config, load_step_library, validate_no_name_conflicts, PipelineLoadError,
+};
 pub use routes::{AppState, HealthResponse, SchemaResponse};
 pub use server::{build_router, start_server, WsRequest, WsResponse};
+pub use capability_router::KernelCapabilityRouter;

@@ -14,7 +14,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lingxi_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 # --- 跨模块兼容层 ---
 # capabilities.py 的 get_capability() / get_adapter_for_model() 使用延迟导入

@@ -356,7 +356,7 @@ static_vars:
 
       │   │   ├── executor/          # 执行器 Agent
 
-      │   │   ├── main/              # 主 Agent（灵汐 lingxi）
+      │   │   ├── main/              # 主 Agent（灵汐 agentos）
 
       │   │   ├── orchestrator/      # 编排器 Agent
 

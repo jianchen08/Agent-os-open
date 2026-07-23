@@ -764,7 +764,7 @@ class TaskExecutorMixin:
 
         if not target_id:
             # 主管道任务无 target_id，回退默认 agent（与会话模块创建会话时一致）
-            target_id = "lingxi"
+            target_id = "agentos"
 
             logger.info("TaskWorker: task %s 无 target_id，回退默认 agent=%s", task_id, target_id)
 

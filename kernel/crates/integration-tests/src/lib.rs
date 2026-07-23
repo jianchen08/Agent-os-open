@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use lingxi_core::traits::{HookContext, LifecycleHook, PluginInvoker};
-use lingxi_core::types::{PluginContext, PluginError, PluginResult};
+use agentos_core::traits::{HookContext, LifecycleHook, PluginInvoker};
+use agentos_core::types::{PluginContext, PluginError, PluginResult};
 use serde_json::json;
 
 /// 空操作 Mock Invoker——基准测试和通用测试中不引入外部开销。
@@ -37,8 +37,8 @@ impl PluginInvoker for NoopInvoker {
         _: &str,
         _: &str,
         _: &serde_json::Value,
-    ) -> Result<lingxi_core::types::ToolExecutionResult, PluginError> {
-        Ok(lingxi_core::types::ToolExecutionResult::success(json!({})))
+    ) -> Result<agentos_core::types::ToolExecutionResult, PluginError> {
+        Ok(agentos_core::types::ToolExecutionResult::success(json!({})))
     }
 
     async fn send_lifecycle_hook(

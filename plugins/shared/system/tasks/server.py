@@ -15,7 +15,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lingxi_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from service import TaskService  # noqa: E402
 from task_types import TaskStatus  # noqa: E402
 
@@ -28,8 +28,10 @@ _service: TaskService | None = None
 class _ConfigCenterShim:
     """临时兼容层：模拟 0.1 ConfigCenter 接口，数据来自 plugin.get_config()。
 
-    DEBT: 配置注入链路未修复前使用此 shim。ceiling: plugin.get_config() 返回 {}。
-    upgrade: 内核 Rust 侧配置注入链路修复后删除此类，直接用 YAML 配置。
+    DEBT: 内核已实现按需注入（invoker.filter_config_by_refs 按 plugin.json
+    config_refs 过滤）。task_service 声明了 config_refs=["system"]，现在能收到
+    system 配置节（含 long_term_task 等）。本 shim 当前未被引用，待 task_service
+    实际消费 system 配置（如 long_term_task 超时）后删除，直接用 YAML 配置。
     """
 
     def __init__(self, config: dict) -> None:

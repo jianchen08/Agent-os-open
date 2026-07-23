@@ -87,7 +87,7 @@ export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProp
     const agent = agents.find((a) => a.id === agentId)
     if (!agent) return null
 
-    const isMainAgent = agent.configId === 'lingxi' || agent.type === 'system'
+    const isMainAgent = agent.configId === 'agentos' || agent.type === 'system'
 
     const baseTheme = getAgentTheme(isMainAgent)
 

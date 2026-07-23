@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-engine"
+name = "agentos-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,8 +13,9 @@ serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-lingxi-core.workspace = true
-lingxi-invoker = { path = "../invoker" }
+agentos-core.workspace = true
+agentos-tenant.workspace = true
+agentos-invoker = { path = "../invoker" }
 parking_lot = "0.12"
 chrono.workspace = true
 uuid.workspace = true

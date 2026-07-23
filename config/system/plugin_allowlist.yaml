@@ -1,0 +1,9 @@
+# 插件准入白名单
+# mode: permissive（默认，白名单为空时放行所有，开发友好）/ strict（非白名单插件加载失败）
+# plugins: 白名单条目，每项含 id 和可选 sha256（manifest+entry 文件的哈希）
+mode: permissive
+plugins: []
+# 示例（strict 模式）：
+# plugins:
+#   - id: "memory_service"
+#     sha256: ""  # 留空则只校验 id 不校验哈希

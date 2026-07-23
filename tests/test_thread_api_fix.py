@@ -39,8 +39,8 @@ class TestThreadCreateModel:
         """创建线程时绑定 Agent。"""
         from channels.api.models import ThreadCreate
 
-        tc = ThreadCreate(title="Agent 会话", agent_id="agent_lingxi")
-        assert tc.agent_id == "agent_lingxi"
+        tc = ThreadCreate(title="Agent 会话", agent_id="agent_agentos")
+        assert tc.agent_id == "agent_agentos"
 
     def test_with_metadata(self) -> None:
         """创建线程时带 metadata。"""
@@ -169,9 +169,9 @@ class TestMemoryStoreThread:
         thread = store.create_thread(
             user_id=user["id"],
             title="测试会话",
-            agent_id="agent_lingxi",
+            agent_id="agent_agentos",
         )
-        assert thread["agent_id"] == "agent_lingxi"
+        assert thread["agent_id"] == "agent_agentos"
 
     def test_create_thread_with_metadata(self) -> None:
         """创建线程时带 metadata。"""
@@ -353,12 +353,12 @@ class TestThreadRoutes:
         """POST /api/v1/threads 创建线程并绑定 Agent。"""
         response = self.client.post(
             "/api/v1/threads",
-            json={"title": "Agent 会话", "agent_id": "agent_lingxi"},
+            json={"title": "Agent 会话", "agent_id": "agent_agentos"},
             headers=self.headers,
         )
         assert response.status_code == 201
         data = response.json()
-        assert data["agent_id"] == "agent_lingxi"
+        assert data["agent_id"] == "agent_agentos"
 
     def test_create_thread_with_metadata(self) -> None:
         """POST /api/v1/threads 创建线程并带 metadata。"""
@@ -448,12 +448,12 @@ class TestThreadRoutes:
         # 更新 Agent
         response = self.client.patch(
             f"/api/v1/threads/{thread_id}/agent",
-            json={"agent_id": "agent_lingxi"},
+            json={"agent_id": "agent_agentos"},
             headers=self.headers,
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["agent_id"] == "agent_lingxi"
+        assert data["agent_id"] == "agent_agentos"
 
     def test_unbind_agent(self) -> None:
         """PATCH /api/v1/threads/{id}/agent 解绑 Agent（agent_id=null）。"""

@@ -5,7 +5,7 @@
 # Agent 参数（system_prompt, tool_ids 等）由 CLIApplication 注入 state，
 # 插件运行时从 ctx.state / ctx.get_service() 自主读取。
 
-name: lingxi_agent
+name: agentos_agent
 
 task_worker:
   pipeline_timeout: 7200

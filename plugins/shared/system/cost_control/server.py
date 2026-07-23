@@ -16,7 +16,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))  # 让同目录老代码的导入可用
 
-from lingxi_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin
 
 from budget_manager import (
     BudgetAlert,

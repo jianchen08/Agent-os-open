@@ -1,5 +1,6 @@
 /** 组件注册初始化 将所有已实现的组件注册到 widgetRegistry */
 
+import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPreviewWidget'
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
 import { DecisionWidget } from '@/components/schema/widgets/DecisionWidget'
@@ -8,8 +9,10 @@ import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { GalleryWidget } from '@/components/schema/widgets/GalleryWidget'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { ProgressWidget } from '@/components/schema/widgets/ProgressWidget'
+import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
+import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { widgetRegistry as composerRegistry } from './composer'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
@@ -71,6 +74,24 @@ export function initializeWidgets(): void {
       name: 'html_preview',
       component: HtmlPreviewWidget,
       spaces: ['workspace', 'floating', 'fullscreen'],
+      fallback: 'code_block',
+    },
+    {
+      name: 'review_document',
+      component: ReviewDocumentWidget,
+      spaces: ['workspace', 'fullscreen'],
+      fallback: 'table',
+    },
+    {
+      name: 'task_card',
+      component: TaskCardWidget,
+      spaces: ['chat', 'workspace', 'floating'],
+      fallback: 'status_card',
+    },
+    {
+      name: 'artifact_preview',
+      component: ArtifactPreviewWidget,
+      spaces: ['chat', 'workspace', 'floating'],
       fallback: 'code_block',
     },
   ]

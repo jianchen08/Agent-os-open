@@ -17,6 +17,10 @@ pub enum ApiError {
     #[error("not found: {message}")]
     NotFound { message: String },
 
+    /// 409 Conflict——配置写冲突（ETag/If-Match 不匹配，B4 乐观锁）。
+    #[error("conflict: {message}")]
+    Conflict { message: String },
+
     #[error("internal error: {message}")]
     Internal { message: String },
 
@@ -30,6 +34,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest { message } => (StatusCode::BAD_REQUEST, message.clone()),
             ApiError::Unauthorized { message } => (StatusCode::UNAUTHORIZED, message.clone()),
             ApiError::NotFound { message } => (StatusCode::NOT_FOUND, message.clone()),
+            ApiError::Conflict { message } => (StatusCode::CONFLICT, message.clone()),
             ApiError::Internal { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
             ApiError::WebSocket { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
         };

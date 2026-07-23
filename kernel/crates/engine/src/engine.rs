@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
-use lingxi_core::types::{
+use agentos_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
+use agentos_core::types::{
     CompositeStep, ContentLoader, EngineError, PatchType, PluginContext, PluginResult, RouteType,
     RunStatus, StepResult, SuspendHandle, TraceEntry, WakeEvent,
 };
@@ -99,10 +99,12 @@ impl AdrEngineImpl {
             branch_id.to_string(),
             0,
         );
+        let tenant_id =
+            agentos_tenant::current_or_default(&self.default_tenant_id).tenant_id;
         Ok(PluginContext::new(
             state_json,
             step.inputs.clone(),
-            lingxi_core::types::TenantContext::new(&self.default_tenant_id, run_id),
+            agentos_core::types::TenantContext::new(tenant_id, run_id),
             Uuid::new_v4(),
             content_loader,
         ))
@@ -110,12 +112,35 @@ impl AdrEngineImpl {
 
     /// 构造标签化 HookContext（ADR ⑨）。
     fn build_hook_context(&self, run_id: &str, branch_id: &str, seq: u32) -> HookContext {
+        let tenant_id =
+            agentos_tenant::current_or_default(&self.default_tenant_id).tenant_id;
         let mut ctx = HookContext::new();
         ctx.set("run_id", serde_json::json!(run_id));
         ctx.set("branch_id", serde_json::json!(branch_id));
         ctx.set("seq", serde_json::json!(seq));
-        ctx.set("tenant_id", serde_json::json!(&self.default_tenant_id));
+        ctx.set("tenant_id", serde_json::json!(tenant_id));
         ctx
+    }
+
+    /// 在租户上下文作用域内执行 future。
+    ///
+    /// 已存在 task_local（如 HTTP 入口注入）则原样执行，尊重外部租户；
+    /// 否则用 `self.default_tenant_id` 建立 scope，保证同一次 run 的写入/读取租户一致。
+    /// 这是 store 层隐式租户过滤与 per-engine 默认租户之间的桥梁。
+    async fn scoped<F, R>(&self, f: F) -> R
+    where
+        F: std::future::Future<Output = R>,
+    {
+        match agentos_tenant::current() {
+            Some(_) => f.await,
+            None => {
+                agentos_tenant::scope(
+                    agentos_core::types::TenantContext::new(&self.default_tenant_id, ""),
+                    f,
+                )
+                .await
+            }
+        }
     }
 
     /// 分发生命周期钩子事件（AC-05-8）。
@@ -235,20 +260,25 @@ impl AdrEngineImpl {
 #[async_trait]
 impl AdrEngine for AdrEngineImpl {
     async fn start_run(&self, config: &serde_json::Value) -> Result<String, EngineError> {
-        let run_id = Uuid::new_v4().to_string();
-        let config_hash = Self::config_hash(config)?;
-        self.store
-            .create_run(&run_id, &config_hash, &self.default_tenant_id)
-            .map_err(EngineError::Storage)?;
-        // 触发 OnPipelineStart 钩子（AC-05-8）
-        let hook_ctx = self.build_hook_context(&run_id, "main", 0);
-        self.dispatch_hook("__engine__", LifecycleHook::OnPipelineStart, &hook_ctx)
-            .await;
-        info!(
-            "Run started: id={} tenant={}",
-            run_id, self.default_tenant_id
-        );
-        Ok(run_id)
+        let config = config.clone();
+        self.scoped(async move {
+            let run_id = Uuid::new_v4().to_string();
+            let config_hash = Self::config_hash(&config)?;
+            let tenant_ctx = agentos_tenant::current_or_default(&self.default_tenant_id);
+            self.store
+                .create_run(&run_id, &config_hash, &tenant_ctx.tenant_id)
+                .map_err(EngineError::Storage)?;
+            // 触发 OnPipelineStart 钩子（AC-05-8）
+            let hook_ctx = self.build_hook_context(&run_id, "main", 0);
+            self.dispatch_hook("__engine__", LifecycleHook::OnPipelineStart, &hook_ctx)
+                .await;
+            info!(
+                "Run started: id={} tenant={}",
+                run_id, tenant_ctx.tenant_id
+            );
+            Ok(run_id)
+        })
+        .await
     }
 
     async fn execute_step(
@@ -256,210 +286,231 @@ impl AdrEngine for AdrEngineImpl {
         run_id: &str,
         step: &CompositeStep,
     ) -> Result<StepResult, EngineError> {
-        let run = self.store.get_run(run_id).await?;
-        if run.status != RunStatus::Running {
-            return Err(EngineError::InvalidState {
-                run_id: run_id.to_string(),
-                reason: format!("expected 'running', got '{:?}'", run.status),
-            });
-        }
+        let run_id = run_id.to_string();
+        let step = step.clone();
+        self.scoped(async move {
+            let run = self.store.get_run(&run_id).await?;
+            if run.status != RunStatus::Running {
+                return Err(EngineError::InvalidState {
+                    run_id: run_id.clone(),
+                    reason: format!("expected 'running', got '{:?}'", run.status),
+                });
+            }
 
-        let branch_id = run.current_branch.clone();
-        let state = self.replay_state(&branch_id, run.current_seq).await?;
-        let ctx = self.build_plugin_context(run_id, &branch_id, step, state)?;
+            let branch_id = run.current_branch.clone();
+            let state = self.replay_state(&branch_id, run.current_seq).await?;
+            let ctx = self.build_plugin_context(&run_id, &branch_id, &step, state)?;
 
-        info!(
-            "Executing step: run={} step={} plugin={}",
-            run_id, step.name, step.plugin
-        );
+            info!(
+                "Executing step: run={} step={} plugin={}",
+                run_id, step.name, step.plugin
+            );
 
-        let plugin_result = self
-            .invoker
-            .invoke_pipeline_plugin(&step.plugin, &ctx)
-            .await?;
+            let plugin_result = self
+                .invoker
+                .invoke_pipeline_plugin(&step.plugin, &ctx)
+                .await?;
 
-        let next_seq = run.current_seq + 1;
-        self.record_step_patches(run_id, &branch_id, next_seq, step, &plugin_result)
-            .await?;
+            let next_seq = run.current_seq + 1;
+            self.record_step_patches(&run_id, &branch_id, next_seq, &step, &plugin_result)
+                .await?;
 
-        let route_type = plugin_result.route_signal.as_ref().map(|s| &s.route_type);
-        self.apply_route_signal(run_id, &branch_id, next_seq, route_type)
-            .await?;
+            let route_type = plugin_result.route_signal.as_ref().map(|s| &s.route_type);
+            self.apply_route_signal(&run_id, &branch_id, next_seq, route_type)
+                .await?;
 
-        Ok(StepResult {
-            state_updates: plugin_result.state_updates,
-            route_signal: plugin_result.route_signal,
+            Ok(StepResult {
+                state_updates: plugin_result.state_updates,
+                route_signal: plugin_result.route_signal,
+            })
         })
+        .await
     }
 
     async fn suspend(&self, run_id: &str) -> Result<SuspendHandle, EngineError> {
-        let run = self.store.get_run(run_id).await?;
-        if run.status == RunStatus::Suspended {
-            return Err(EngineError::InvalidState {
-                run_id: run_id.to_string(),
-                reason: "already suspended".to_string(),
-            });
-        }
-        if run.status == RunStatus::Completed || run.status == RunStatus::Failed {
-            return Err(EngineError::InvalidState {
-                run_id: run_id.to_string(),
-                reason: format!("run is already {:?}", run.status),
-            });
-        }
-        let branch_id = run.current_branch.clone();
-        let seq = run.current_seq;
-        self.store
-            .update_run_status(run_id, RunStatus::Suspended, Some(&branch_id), Some(seq))
-            .await?;
-        info!(
-            "Run suspended: run={} branch={} seq={}",
-            run_id, branch_id, seq
-        );
-        Ok(SuspendHandle {
-            run_id: run_id.to_string(),
-            branch_id,
-            seq,
+        let run_id = run_id.to_string();
+        self.scoped(async move {
+            let run = self.store.get_run(&run_id).await?;
+            if run.status == RunStatus::Suspended {
+                return Err(EngineError::InvalidState {
+                    run_id: run_id.clone(),
+                    reason: "already suspended".to_string(),
+                });
+            }
+            if run.status == RunStatus::Completed || run.status == RunStatus::Failed {
+                return Err(EngineError::InvalidState {
+                    run_id: run_id.clone(),
+                    reason: format!("run is already {:?}", run.status),
+                });
+            }
+            let branch_id = run.current_branch.clone();
+            let seq = run.current_seq;
+            self.store
+                .update_run_status(&run_id, RunStatus::Suspended, Some(&branch_id), Some(seq))
+                .await?;
+            info!(
+                "Run suspended: run={} branch={} seq={}",
+                run_id, branch_id, seq
+            );
+            Ok(SuspendHandle {
+                run_id,
+                branch_id,
+                seq,
+            })
         })
+        .await
     }
 
     async fn resume(&self, handle: &SuspendHandle, event: WakeEvent) -> Result<(), EngineError> {
-        let run = self.store.get_run(&handle.run_id).await?;
-        if run.status != RunStatus::Suspended {
-            return Err(EngineError::InvalidState {
-                run_id: handle.run_id.clone(),
-                reason: format!("expected 'suspended', got '{:?}'", run.status),
-            });
-        }
+        let handle = handle.clone();
+        self.scoped(async move {
+            let run = self.store.get_run(&handle.run_id).await?;
+            if run.status != RunStatus::Suspended {
+                return Err(EngineError::InvalidState {
+                    run_id: handle.run_id.clone(),
+                    reason: format!("expected 'suspended', got '{:?}'", run.status),
+                });
+            }
 
-        // 将 WakeEvent 序列化为 Lifecycle patch 追加到 traces 表（AC-05-7）
-        let event_data = serde_json::to_value(&event).map_err(|e| EngineError::Other {
-            message: format!("WakeEvent serialization: {}", e),
-        })?;
-        self.append_trace(
-            &handle.run_id,
-            &handle.branch_id,
-            handle.seq + 1,
-            "__engine__",
-            PatchType::Lifecycle,
-            event_data,
-        )
-        .await?;
-
-        self.store
-            .update_run_status(
+            // 将 WakeEvent 序列化为 Lifecycle patch 追加到 traces 表（AC-05-7）
+            let event_data = serde_json::to_value(&event).map_err(|e| EngineError::Other {
+                message: format!("WakeEvent serialization: {}", e),
+            })?;
+            self.append_trace(
                 &handle.run_id,
-                RunStatus::Running,
-                Some(&handle.branch_id),
-                Some(handle.seq + 1),
+                &handle.branch_id,
+                handle.seq + 1,
+                "__engine__",
+                PatchType::Lifecycle,
+                event_data,
             )
             .await?;
 
-        info!(
-            "Run resumed: run={} branch={} seq={} event={:?}",
-            handle.run_id, handle.branch_id, handle.seq, event
-        );
-        Ok(())
+            self.store
+                .update_run_status(
+                    &handle.run_id,
+                    RunStatus::Running,
+                    Some(&handle.branch_id),
+                    Some(handle.seq + 1),
+                )
+                .await?;
+
+            info!(
+                "Run resumed: run={} branch={} seq={} event={:?}",
+                handle.run_id, handle.branch_id, handle.seq, event
+            );
+            Ok(())
+        })
+        .await
     }
 
     async fn rollback(&self, run_id: &str, target_seq: u32) -> Result<String, EngineError> {
-        let run = self.store.get_run(run_id).await?;
-        if run.status == RunStatus::Completed || run.status == RunStatus::Failed {
-            return Err(EngineError::InvalidState {
-                run_id: run_id.to_string(),
-                reason: format!("cannot rollback a {:?} run", run.status),
-            });
-        }
-
-        let parent_branch = run.current_branch.clone();
-        let uuid_short = &Uuid::new_v4().to_string()[..8];
-        let new_branch_id = format!("{}.rollback.{}", parent_branch, uuid_short);
-
-        let branch = lingxi_core::types::Branch {
-            branch_id: new_branch_id.clone(),
-            run_id: run_id.to_string(),
-            parent_branch: Some(parent_branch.clone()),
-            parent_seq: Some(target_seq),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        self.store.create_branch(branch).await?;
-
-        let traces = self
-            .store
-            .get_traces(&parent_branch, 0, target_seq)
-            .map_err(EngineError::Storage)?;
-        for trace in traces {
-            if trace.patch_type == PatchType::StateUpdate {
-                self.append_trace(
-                    run_id,
-                    &new_branch_id,
-                    trace.seq_in_branch,
-                    &trace.plugin_id,
-                    PatchType::StateUpdate,
-                    trace.patch_data.clone(),
-                )
-                .await?;
+        let run_id = run_id.to_string();
+        self.scoped(async move {
+            let run = self.store.get_run(&run_id).await?;
+            if run.status == RunStatus::Completed || run.status == RunStatus::Failed {
+                return Err(EngineError::InvalidState {
+                    run_id: run_id.clone(),
+                    reason: format!("cannot rollback a {:?} run", run.status),
+                });
             }
-        }
 
-        self.append_trace(
-            run_id,
-            &new_branch_id,
-            target_seq + 1,
-            "__engine__",
-            PatchType::Rollback,
-            serde_json::json!({"parent_branch": parent_branch, "target_seq": target_seq}),
-        )
-        .await?;
+            let parent_branch = run.current_branch.clone();
+            let uuid_short = &Uuid::new_v4().to_string()[..8];
+            let new_branch_id = format!("{}.rollback.{}", parent_branch, uuid_short);
 
-        self.store
-            .update_run_status(
-                run_id,
-                RunStatus::Running,
-                Some(&new_branch_id),
-                Some(target_seq + 1),
+            let branch = agentos_core::types::Branch {
+                branch_id: new_branch_id.clone(),
+                run_id: run_id.clone(),
+                parent_branch: Some(parent_branch.clone()),
+                parent_seq: Some(target_seq),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            self.store.create_branch(branch).await?;
+
+            let traces = self
+                .store
+                .get_traces(&parent_branch, 0, target_seq)
+                .map_err(EngineError::Storage)?;
+            for trace in traces {
+                if trace.patch_type == PatchType::StateUpdate {
+                    self.append_trace(
+                        &run_id,
+                        &new_branch_id,
+                        trace.seq_in_branch,
+                        &trace.plugin_id,
+                        PatchType::StateUpdate,
+                        trace.patch_data.clone(),
+                    )
+                    .await?;
+                }
+            }
+
+            self.append_trace(
+                &run_id,
+                &new_branch_id,
+                target_seq + 1,
+                "__engine__",
+                PatchType::Rollback,
+                serde_json::json!({"parent_branch": parent_branch, "target_seq": target_seq}),
             )
             .await?;
 
-        info!(
-            "Rollback completed: run={} new_branch={}",
-            run_id, new_branch_id
-        );
-        Ok(new_branch_id)
+            self.store
+                .update_run_status(
+                    &run_id,
+                    RunStatus::Running,
+                    Some(&new_branch_id),
+                    Some(target_seq + 1),
+                )
+                .await?;
+
+            info!(
+                "Rollback completed: run={} new_branch={}",
+                run_id, new_branch_id
+            );
+            Ok(new_branch_id)
+        })
+        .await
     }
 
     async fn end_run(&self, run_id: &str) -> Result<(), EngineError> {
-        let run = self.store.get_run(run_id).await?;
-        if run.status == RunStatus::Completed || run.status == RunStatus::Failed {
-            return Err(EngineError::InvalidState {
-                run_id: run_id.to_string(),
-                reason: format!("run is already {:?}", run.status),
-            });
-        }
+        let run_id = run_id.to_string();
+        self.scoped(async move {
+            let run = self.store.get_run(&run_id).await?;
+            if run.status == RunStatus::Completed || run.status == RunStatus::Failed {
+                return Err(EngineError::InvalidState {
+                    run_id: run_id.clone(),
+                    reason: format!("run is already {:?}", run.status),
+                });
+            }
 
-        // 触发 OnPipelineEnd 钩子（AC-05-8）
-        let hook_ctx = self.build_hook_context(run_id, &run.current_branch, run.current_seq);
-        self.dispatch_hook("__engine__", LifecycleHook::OnPipelineEnd, &hook_ctx)
-            .await;
+            // 触发 OnPipelineEnd 钩子（AC-05-8）
+            let hook_ctx = self.build_hook_context(&run_id, &run.current_branch, run.current_seq);
+            self.dispatch_hook("__engine__", LifecycleHook::OnPipelineEnd, &hook_ctx)
+                .await;
 
-        self.store
-            .update_run_status(
-                run_id,
-                RunStatus::Completed,
-                Some(&run.current_branch),
-                Some(run.current_seq),
-            )
-            .await?;
+            self.store
+                .update_run_status(
+                    &run_id,
+                    RunStatus::Completed,
+                    Some(&run.current_branch),
+                    Some(run.current_seq),
+                )
+                .await?;
 
-        info!("Run ended: run={}", run_id);
-        Ok(())
+            info!("Run ended: run={}", run_id);
+            Ok(())
+        })
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_core::traits::StorageBackend;
-    use lingxi_core::types::{PluginError, RouteSignal, ToolExecutionResult};
+    use agentos_core::traits::StorageBackend;
+    use agentos_core::types::{PluginError, RouteSignal, ToolExecutionResult};
     use serde_json::json;
 
     struct MockInvoker {
@@ -503,7 +554,7 @@ mod tests {
         for (id, result) in invoker_results {
             invoker.results.insert(id.to_string(), result);
         }
-        let engine = AdrEngineImpl::new(store.clone(), Arc::new(invoker), "test_tenant");
+        let engine = AdrEngineImpl::new(store.clone(), Arc::new(invoker), "default");
         (engine, store)
     }
 

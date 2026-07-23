@@ -13,13 +13,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_config::{CompositePluginYaml, ConfigLoader};
-use lingxi_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
-use lingxi_core::types::{
+use agentos_config::{CompositePluginYaml, ConfigLoader};
+use agentos_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
+use agentos_core::types::{
     CompositeStep, ContentLoader, PluginContext, PluginError, PluginResult, RouteSignal, RouteType,
     RunStatus, TenantContext, WakeEvent,
 };
-use lingxi_engine::{AdrEngineImpl, SqliteStore};
+use agentos_engine::{AdrEngineImpl, SqliteStore};
 use serde_json::json;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -71,8 +71,8 @@ impl PluginInvoker for MockInvoker {
         _plugin_id: &str,
         tool_name: &str,
         _inputs: &serde_json::Value,
-    ) -> Result<lingxi_core::types::ToolExecutionResult, PluginError> {
-        Ok(lingxi_core::types::ToolExecutionResult::success(
+    ) -> Result<agentos_core::types::ToolExecutionResult, PluginError> {
+        Ok(agentos_core::types::ToolExecutionResult::success(
             json!({ "tool": tool_name, "result": "ok" }),
         ))
     }
@@ -148,7 +148,7 @@ steps:
 async fn test_engine_store_patch_append() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(MockInvoker::new());
-    let engine = AdrEngineImpl::new(store.clone(), invoker, "test_tenant");
+    let engine = AdrEngineImpl::new(store.clone(), invoker, "default");
 
     // 启动运行
     let config = json!({
@@ -228,7 +228,7 @@ async fn test_store_content_loader_chain() {
     // 创建运行实例
     let run_id = "test_run_cl_001";
     let config_hash = "abc123";
-    store.create_run(run_id, config_hash, "tenant_1").unwrap();
+    store.create_run(run_id, config_hash, "default").unwrap();
 
     // 写入一条消息（消息内容存到 blobs 表）
     let content = "Hello, integration test!";
@@ -271,7 +271,7 @@ async fn test_store_content_loader_chain() {
 async fn test_engine_full_lifecycle() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(MockInvoker::new());
-    let engine = AdrEngineImpl::new(store.clone(), invoker, "lifecycle_tenant");
+    let engine = AdrEngineImpl::new(store.clone(), invoker, "default");
 
     // 1. 启动
     let config = json!({ "pipeline": "lifecycle_test" });
@@ -398,7 +398,10 @@ steps:
 // ═══════════════════════════════════════════════════════════════════
 
 /// 场景：两个不同租户的运行实例互不干扰。
-/// 验证 ADR 多租户上下文穿透。
+/// 验证 ADR 多租户上下文穿透（P0-4/P0-5：task_local 隔离）。
+///
+/// 隔离机制：每个引擎实例的 `default_tenant_id` 在其方法调用时建立 task_local scope。
+/// 直接 store 读取必须包裹在对应租户的 scope 内——跨租户读取应被拦截。
 #[tokio::test]
 async fn test_engine_multi_tenant_isolation() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
@@ -411,7 +414,7 @@ async fn test_engine_multi_tenant_isolation() {
     let invoker_b = Arc::new(MockInvoker::new());
     let engine_b = AdrEngineImpl::new(store.clone(), invoker_b, "tenant_B");
 
-    // 各自启动运行
+    // 各自启动运行（引擎方法内部按 default_tenant_id 建立 scope）
     let config_a = json!({ "pipeline": "pipeline_A" });
     let config_b = json!({ "pipeline": "pipeline_B" });
 
@@ -420,11 +423,30 @@ async fn test_engine_multi_tenant_isolation() {
 
     assert_ne!(run_a, run_b, "run IDs must differ");
 
-    // 验证 tenant_id 正确存储
-    let record_a = store.get_run(&run_a).await.unwrap();
-    let record_b = store.get_run(&run_b).await.unwrap();
+    // 在各自租户的 scope 内验证 tenant_id 正确存储
+    let record_a = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_A", "s"),
+        store.get_run(&run_a),
+    )
+    .await
+    .unwrap();
     assert_eq!(record_a.tenant_id, "tenant_A");
+
+    let record_b = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_B", "s"),
+        store.get_run(&run_b),
+    )
+    .await
+    .unwrap();
     assert_eq!(record_b.tenant_id, "tenant_B");
+
+    // 隔离验证：租户 B 的 scope 内读不到租户 A 的 run
+    let cross = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_B", "s"),
+        store.get_run(&run_a),
+    )
+    .await;
+    assert!(cross.is_err(), "tenant B must not see tenant A's run");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -456,8 +478,8 @@ impl PluginInvoker for RouteSignalInvoker {
         _plugin_id: &str,
         _tool_name: &str,
         _inputs: &serde_json::Value,
-    ) -> Result<lingxi_core::types::ToolExecutionResult, PluginError> {
-        Ok(lingxi_core::types::ToolExecutionResult::success(json!({})))
+    ) -> Result<agentos_core::types::ToolExecutionResult, PluginError> {
+        Ok(agentos_core::types::ToolExecutionResult::success(json!({})))
     }
 
     async fn send_lifecycle_hook(
@@ -526,8 +548,8 @@ async fn test_engine_tenant_context_injection() {
             _: &str,
             _: &str,
             _: &serde_json::Value,
-        ) -> Result<lingxi_core::types::ToolExecutionResult, PluginError> {
-            Ok(lingxi_core::types::ToolExecutionResult::success(json!({})))
+        ) -> Result<agentos_core::types::ToolExecutionResult, PluginError> {
+            Ok(agentos_core::types::ToolExecutionResult::success(json!({})))
         }
 
         async fn send_lifecycle_hook(

@@ -8,7 +8,7 @@
 export interface Agent {
   /** Agent 唯一标识 */
   id: string
-  /** Agent 配置 ID（用于查找特定 Agent，如 lingxi） */
+  /** Agent 配置 ID（用于查找特定 Agent，如 agentos） */
   configId?: string
   /** Agent 名称 */
   name: string

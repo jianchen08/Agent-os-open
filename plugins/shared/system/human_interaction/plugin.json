@@ -6,7 +6,7 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {"name": "interaction.send_notification", "description": "发送非阻塞通知"},
@@ -20,7 +20,7 @@
         "lifecycle_hooks": ["on_load", "on_unload"]
     },
     "dependencies": [
-        "lingxi-plugin-sdk>=0.2.0"
+        "agentos-plugin-sdk>=0.2.0"
     ],
     "permissions": {},
     "error_policy": "skip",

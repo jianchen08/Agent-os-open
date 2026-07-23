@@ -1,0 +1,31 @@
+{
+    "id": "agentos-builtin-tools",
+    "name": "Builtin Tools",
+    "description": "10 个高频内置工具（文件读写/shell/搜索/目录/Web 操作）MCP 封装",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [
+            {"name": "file_read", "description": "读取文件内容"},
+            {"name": "file_write", "description": "写入/编辑文件"},
+            {"name": "bash_execute", "description": "执行 Shell 命令"},
+            {"name": "enhanced_search", "description": "代码/文件搜索"},
+            {"name": "list_directory", "description": "目录列举"},
+            {"name": "create_directory", "description": "创建目录"},
+            {"name": "copy_file", "description": "复制文件"},
+            {"name": "move_file", "description": "移动文件"},
+            {"name": "delete_file", "description": "删除文件"},
+            {"name": "web_operate", "description": "Web 操作"}
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 40
+}

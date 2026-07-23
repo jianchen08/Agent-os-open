@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use lingxi_core::traits::*;
-use lingxi_core::types::*;
+use agentos_core::traits::*;
+use agentos_core::types::*;
 
 // ── 场景3补充：Composite × Sidecar 双路径组合 ──────────────────
 
@@ -61,6 +61,9 @@ fn make_test_manifest(
         priority: 100,
         mcp: None,
         requires_content,
+        config_refs: vec![],
+        config_files: vec![],
+        ui_schema: None,
     }
 }
 

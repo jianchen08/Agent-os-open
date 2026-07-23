@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-config"
+name = "agentos-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ serde_json.workspace = true
 serde_yaml = "0.9"
 thiserror.workspace = true
 tracing.workspace = true
-lingxi-core.workspace = true
+agentos-core.workspace = true
 regex = "1"
 sha2 = "0.10"
 notify = "7"

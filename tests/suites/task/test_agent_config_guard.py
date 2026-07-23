@@ -80,7 +80,7 @@ class TestValidateTargetAgent:
     def test_rejects_l1_agent_as_target(self, tool):
         """L1 Agent（灵汐）不能作为子任务执行者。"""
         ok, msg, code = tool._validate_target_agent(
-            "lingxi", parent_agent_level=1,
+            "agentos", parent_agent_level=1,
         )
         assert ok is False
         assert code == "TARGET_AGENT_IS_L1"
@@ -168,7 +168,7 @@ class TestTaskSubmitAgentValidation:
         result = await tool.execute({
             "goal": {"title": "测试任务"},
             "target_type": "agent",
-            "target_id": "lingxi",
+            "target_id": "agentos",
             "acceptance_criteria": {"file_check": {"input_params": {"path": "test.md"}}},
             "task_scope": "non_container",
             "parent_agent_level": 1,

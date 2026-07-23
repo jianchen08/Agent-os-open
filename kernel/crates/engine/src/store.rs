@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_core::traits::StorageBackend;
-use lingxi_core::types::{
+use agentos_core::traits::StorageBackend;
+use agentos_core::types::{
     BlobRecord, Branch, Message, MessageRecord, PatchType, RunRecord, RunStatus, StorageError,
     TraceEntry,
 };
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role            TEXT NOT NULL,
     blob_id         TEXT,
     content_preview TEXT,
+    tenant_id       TEXT NOT NULL DEFAULT 'default',
     created_at      TEXT NOT NULL,
     UNIQUE(branch_id, seq_in_branch)
 );
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS traces (
     plugin_id     TEXT NOT NULL,
     patch_type    TEXT NOT NULL,
     patch_data    TEXT NOT NULL,
+    tenant_id     TEXT NOT NULL DEFAULT 'default',
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_traces_branch_seq ON traces(branch_id, seq_in_branch);
@@ -65,10 +67,37 @@ CREATE TABLE IF NOT EXISTS branches (
     run_id        TEXT NOT NULL,
     parent_branch TEXT,
     parent_seq    INTEGER,
+    tenant_id     TEXT NOT NULL DEFAULT 'default',
     created_at    TEXT NOT NULL,
     PRIMARY KEY (branch_id, run_id)
 );
 ";
+
+/// 为旧库（建表时无 tenant_id 列）补加 tenant_id 列。
+///
+/// 仅在列缺失时执行 `ALTER TABLE ... ADD COLUMN`，幂等。blob 表不加（内容寻址，靠上游归属）。
+fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
+    for table in ["messages", "traces", "branches"] {
+        let has_col: bool = conn
+            .prepare(&format!("PRAGMA table_info({})", table))
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .any(|col| col == "tenant_id");
+        if !has_col {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE {} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+                    table
+                ),
+                [],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
 
 /// SQLite 四表存储实现。
 ///
@@ -103,6 +132,7 @@ impl SqliteStore {
             .map_err(|e| StorageError::Database(e.to_string()))?;
         conn.execute_batch(DDL)
             .map_err(|e| StorageError::Database(e.to_string()))?;
+        migrate_add_tenant_id(conn)?;
         info!("SQLite four-table store initialized");
         Ok(())
     }
@@ -130,16 +160,18 @@ impl SqliteStore {
             rusqlite::params![run_id, config_hash, tenant_id, now],
         )
         .map_err(|e| StorageError::Database(e.to_string()))?;
-        // 创建主分支
+        // 创建主分支（与 run 同租户）
         conn.execute(
-            "INSERT INTO branches (branch_id, run_id, created_at) VALUES ('main', ?1, ?2)",
-            rusqlite::params![run_id, now],
+            "INSERT INTO branches (branch_id, run_id, tenant_id, created_at) VALUES ('main', ?1, ?2, ?3)",
+            rusqlite::params![run_id, tenant_id, now],
         )
         .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
     }
 
     /// 追加消息到 messages 表。
+    ///
+    /// tenant_id 从 task_local [`agentos_tenant`] 取，无则回退 'default'。
     #[allow(clippy::too_many_arguments)]
     pub fn append_message(
         &self,
@@ -151,11 +183,12 @@ impl SqliteStore {
         blob_id: Option<&str>,
         content_preview: Option<&str>,
     ) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO messages (message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, now],
+            "INSERT INTO messages (message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, tenant_id, now],
         )
         .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
@@ -191,15 +224,16 @@ impl SqliteStore {
         from_seq: u32,
         to_seq: u32,
     ) -> Result<Vec<TraceEntry>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at FROM traces WHERE branch_id = ?1 AND seq_in_branch >= ?2 AND seq_in_branch <= ?3 ORDER BY seq_in_branch ASC",
+                "SELECT trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at FROM traces WHERE branch_id = ?1 AND seq_in_branch >= ?2 AND seq_in_branch <= ?3 AND tenant_id = ?4 ORDER BY seq_in_branch ASC",
             )
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
         let traces = stmt
-            .query_map(rusqlite::params![branch_id, from_seq, to_seq], |row| {
+            .query_map(rusqlite::params![branch_id, from_seq, to_seq, tenant_id], |row| {
                 let patch_type_str: String = row.get(5)?;
                 let patch_data_str: String = row.get(6)?;
                 Ok(TraceEntry {
@@ -297,10 +331,11 @@ impl SqliteStore {
 #[async_trait]
 impl StorageBackend for SqliteStore {
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let row = conn.query_row(
-            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE run_id = ?1",
-            rusqlite::params![run_id],
+            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE run_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![run_id, tenant_id],
             |row| {
                 let status_str: String = row.get(2)?;
                 let metadata_str: Option<String> = row.get(8)?;
@@ -338,15 +373,16 @@ impl StorageBackend for SqliteStore {
         _run_id: &str,
         branch_id: &str,
     ) -> Result<Vec<MessageRecord>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at FROM messages WHERE branch_id = ?1 ORDER BY seq_in_branch ASC",
+                "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at FROM messages WHERE branch_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
             )
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
         let msgs = stmt
-            .query_map(rusqlite::params![branch_id], |row| {
+            .query_map(rusqlite::params![branch_id, tenant_id], |row| {
                 Ok(MessageRecord {
                     message_id: row.get(0)?,
                     run_id: row.get(1)?,
@@ -371,6 +407,7 @@ impl StorageBackend for SqliteStore {
         branch_id: &str,
         n: usize,
     ) -> Result<Vec<Message>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
@@ -378,14 +415,14 @@ impl StorageBackend for SqliteStore {
                         b.data
                  FROM messages m
                  LEFT JOIN blobs b ON m.blob_id = b.blob_id
-                 WHERE m.run_id = ?1 AND m.branch_id = ?2
+                 WHERE m.run_id = ?1 AND m.branch_id = ?2 AND m.tenant_id = ?3
                  ORDER BY m.seq_in_branch DESC
-                 LIMIT ?3",
+                 LIMIT ?4",
             )
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
         let msgs = stmt
-            .query_map(rusqlite::params![run_id, branch_id, n as i64], |row| {
+            .query_map(rusqlite::params![run_id, branch_id, tenant_id, n as i64], |row| {
                 let blob_id: Option<String> = row.get(2)?;
                 let content_preview: Option<String> = row.get(3)?;
                 let blob_data: Option<Vec<u8>> = row.get(4)?;
@@ -439,6 +476,7 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn append_trace(&self, entry: TraceEntry) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let patch_type_str = match entry.patch_type {
             PatchType::StateUpdate => "state_update",
@@ -450,7 +488,7 @@ impl StorageBackend for SqliteStore {
         let patch_data_str =
             serde_json::to_string(&entry.patch_data).unwrap_or_else(|_| "{}".to_string());
         conn.execute(
-            "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 entry.trace_id,
                 entry.run_id,
@@ -459,6 +497,7 @@ impl StorageBackend for SqliteStore {
                 entry.plugin_id,
                 patch_type_str,
                 patch_data_str,
+                tenant_id,
                 entry.created_at,
             ],
         )
@@ -467,14 +506,16 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn create_branch(&self, branch: Branch) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO branches (branch_id, run_id, parent_branch, parent_seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO branches (branch_id, run_id, parent_branch, parent_seq, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 branch.branch_id,
                 branch.run_id,
                 branch.parent_branch,
                 branch.parent_seq.map(|s| s as i64),
+                tenant_id,
                 branch.created_at,
             ],
         )
@@ -489,6 +530,7 @@ impl StorageBackend for SqliteStore {
         current_branch: Option<&str>,
         current_seq: Option<u32>,
     ) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let status_str = match status {
             RunStatus::Running => "running",
@@ -506,8 +548,8 @@ impl StorageBackend for SqliteStore {
                     None
                 };
                 conn.execute(
-                    "UPDATE runs SET status = ?1, current_branch = ?2, current_seq = ?3, ended_at = COALESCE(?4, ended_at) WHERE run_id = ?5",
-                    rusqlite::params![status_str, branch, seq as i64, ended, run_id],
+                    "UPDATE runs SET status = ?1, current_branch = ?2, current_seq = ?3, ended_at = COALESCE(?4, ended_at) WHERE run_id = ?5 AND tenant_id = ?6",
+                    rusqlite::params![status_str, branch, seq as i64, ended, run_id, tenant_id],
                 )
                 .map_err(|e| StorageError::Database(e.to_string()))?;
             }
@@ -518,8 +560,8 @@ impl StorageBackend for SqliteStore {
                     None
                 };
                 conn.execute(
-                    "UPDATE runs SET status = ?1, ended_at = COALESCE(?2, ended_at) WHERE run_id = ?3",
-                    rusqlite::params![status_str, ended, run_id],
+                    "UPDATE runs SET status = ?1, ended_at = COALESCE(?2, ended_at) WHERE run_id = ?3 AND tenant_id = ?4",
+                    rusqlite::params![status_str, ended, run_id, tenant_id],
                 )
                 .map_err(|e| StorageError::Database(e.to_string()))?;
             }
@@ -536,6 +578,7 @@ impl StorageBackend for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_core::types::TenantContext;
     use serde_json::json;
 
     #[test]
@@ -543,7 +586,7 @@ mod tests {
         let store = SqliteStore::open_memory().unwrap();
         // 验证表存在——插入一条 run
         store
-            .create_run("test_run_1", "hash_abc", "tenant_1")
+            .create_run("test_run_1", "hash_abc", "default")
             .unwrap();
     }
 
@@ -551,13 +594,13 @@ mod tests {
     async fn test_create_and_get_run() {
         let store = SqliteStore::open_memory().unwrap();
         store
-            .create_run("run_1", "config_hash_1", "tenant_1")
+            .create_run("run_1", "config_hash_1", "default")
             .unwrap();
 
         let run = store.get_run("run_1").await.unwrap();
         assert_eq!(run.run_id, "run_1");
         assert_eq!(run.config_hash, "config_hash_1");
-        assert_eq!(run.tenant_id, "tenant_1");
+        assert_eq!(run.tenant_id, "default");
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.current_branch, "main");
         assert_eq!(run.current_seq, 0);
@@ -573,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_run_status() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_2", "hash", "tenant").unwrap();
+        store.create_run("run_2", "hash", "default").unwrap();
 
         store
             .update_run_status("run_2", RunStatus::Suspended, None, None)
@@ -594,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_run_status_with_branch() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_3", "hash", "tenant").unwrap();
+        store.create_run("run_3", "hash", "default").unwrap();
 
         store
             .update_run_status(
@@ -637,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn test_append_message() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_4", "hash", "tenant").unwrap();
+        store.create_run("run_4", "hash", "default").unwrap();
         store
             .append_message("msg_1", "run_4", "main", 0, "user", None, Some("Hello"))
             .unwrap();
@@ -651,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn test_append_trace_and_replay() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_5", "hash", "tenant").unwrap();
+        store.create_run("run_5", "hash", "default").unwrap();
 
         // 追加 3 条 trace
         for i in 0..3u32 {
@@ -679,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_branch() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_6", "hash", "tenant").unwrap();
+        store.create_run("run_6", "hash", "default").unwrap();
 
         let branch = Branch {
             branch_id: "main.rollback.001".to_string(),
@@ -694,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_current_seq_and_branch() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_7", "hash", "tenant").unwrap();
+        store.create_run("run_7", "hash", "default").unwrap();
 
         assert_eq!(store.get_current_seq("run_7").unwrap(), 0);
         assert_eq!(store.get_current_branch("run_7").unwrap(), "main");
@@ -709,7 +752,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_recent_messages_with_blob() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_8", "hash", "tenant").unwrap();
+        store.create_run("run_8", "hash", "default").unwrap();
 
         let blob_id = store.store_blob(b"full content", "text/plain").unwrap();
         store
@@ -738,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_recent_messages_missing_content_returns_error() {
         let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_9", "hash", "tenant").unwrap();
+        store.create_run("run_9", "hash", "default").unwrap();
         store
             .append_message("msg_2", "run_9", "main", 0, "assistant", None, None)
             .unwrap();
@@ -748,5 +791,56 @@ mod tests {
             result.is_err(),
             "expected error when blob_id and content_preview both missing"
         );
+    }
+
+    /// P0-5 关键验收：跨租户隔离。
+    ///
+    /// 租户 A 写入数据后，切换到租户 B 的 task_local 作用域：
+    /// - get_run / get_messages 必须读不到 A 的数据（隔离生效）
+    /// - 切回 A 作用域后仍可读到（数据未丢失）
+    ///
+    /// tenant_id 通过 task_local 隐式传递，StorageBackend trait 签名不变。
+    #[tokio::test]
+    async fn test_cross_tenant_isolation() {
+        let store = SqliteStore::open_memory().unwrap();
+
+        // 租户 A：创建 run + 追加消息
+        let ctx_a = TenantContext::new("tenant_a", "session_a");
+        agentos_tenant::scope(ctx_a, async {
+            store.create_run("run_a", "hash_a", "tenant_a").unwrap();
+            store
+                .append_message("msg_a", "run_a", "main", 0, "user", None, Some("hi-a"))
+                .unwrap();
+
+            // 自身作用域内可读到
+            let run = store.get_run("run_a").await.unwrap();
+            assert_eq!(run.tenant_id, "tenant_a");
+            let msgs = store.get_messages("run_a", "main").await.unwrap();
+            assert_eq!(msgs.len(), 1);
+        })
+        .await;
+
+        // 切换到租户 B 的作用域：必须读不到 A 的数据
+        let ctx_b = TenantContext::new("tenant_b", "session_b");
+        agentos_tenant::scope(ctx_b, async {
+            let run_result = store.get_run("run_a").await;
+            assert!(
+                run_result.is_err(),
+                "tenant B must not see tenant A's run (isolation)"
+            );
+            let msgs = store.get_messages("run_a", "main").await.unwrap();
+            assert!(
+                msgs.is_empty(),
+                "tenant B must not see tenant A's messages (isolation)"
+            );
+        })
+        .await;
+
+        // 切回 A：数据仍在（未丢失）
+        agentos_tenant::scope(TenantContext::new("tenant_a", "session_a"), async {
+            let run = store.get_run("run_a").await.unwrap();
+            assert_eq!(run.tenant_id, "tenant_a");
+        })
+        .await;
     }
 }

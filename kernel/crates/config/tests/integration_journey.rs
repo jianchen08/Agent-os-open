@@ -6,7 +6,7 @@
 //!
 //! 补充场景：错误输入(缺失环境变量/不存在路径/空steps) + 边界(防抖窗口/哈希去重)
 
-use lingxi_config::{CompositePluginYaml, ConfigCenter, ConfigError, ConfigLoader};
+use agentos_config::{CompositePluginYaml, ConfigCenter, ConfigError, ConfigLoader};
 use serde_json::Value;
 use std::fs;
 use std::time::Duration;

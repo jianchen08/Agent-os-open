@@ -14,19 +14,23 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::HeaderMap,
     response::IntoResponse,
     routing::{get, post},
     Router,
 };
-use lingxi_core::traits::{AdrEngine, PluginManifest, PluginType};
-use lingxi_core::types::{CompositeStep, RouteType};
+use agentos_core::types::TenantContext;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::auth::{login_handler, logout_handler, me_handler, refresh_handler, register_handler};
+use crate::auth::{
+    login_handler, logout_handler, me_handler, refresh_handler, register_handler,
+    resolve_request_tenant_id,
+};
 use crate::error::ApiError;
 use crate::routes::{
-    agents_handler, health_handler, pipelines_handler, schema_handler, tools_handler, AppState,
+    agents_handler, get_plugin_config_with_etag, health_handler, pipelines_handler,
+    put_plugin_config_handler, schema_handler, tools_handler, AppState,
 };
 
 /// WebSocket 消息请求体。
@@ -57,6 +61,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents", get(agents_handler))
         .route("/api/v1/pipelines", get(pipelines_handler))
         .route("/api/v1/tools", get(tools_handler))
+        // P1-4: 插件配置读写端点（manifest config_files 映射）
+        .route(
+            "/api/v1/plugins/{id}/config/{file_id}",
+            get(get_plugin_config_with_etag).put(put_plugin_config_handler),
+        )
         // AC-06-4: WebSocket 端点
         .route("/ws", get(ws_handler))
         // 消息发送端点（REST fallback for WS）
@@ -71,19 +80,39 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// WebSocket 连接处理器（AC-06-4）。
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
-/// 通过管道引擎处理消息。
+/// 根据请求头解析当前租户上下文。
 ///
-/// 创建一个 engine run，将用户消息注入管道状态，
-/// 遍历已发现的 pipeline 插件执行，收集最终状态。
+/// 多租户 P0-4：从 Authorization token 解析（或回退到默认租户），
+/// 注入到 [`agentos_tenant::scope`] 后，engine/store 通过 task_local 读取。
+fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> TenantContext {
+    TenantContext::new(resolve_request_tenant_id(headers), session_id)
+}
+
+/// 通过 0.2 配置驱动管道引擎处理消息。
 ///
-/// 如果引擎不可用或无 pipeline 插件，降级为 echo 模式（标注降级原因）。
-async fn process_via_engine(state: &AppState, message: &str) -> String {
-    let engine = match &state.engine {
-        Some(e) => e,
+/// 替代旧的"遍历全部 pipeline 插件"placeholder：改为构造
+/// [`agentos_engine::PipelineExecutor`]，读取 AppState 中的 `pipeline_config`
+/// + `step_library`，按 YAML 定义的 step 顺序执行（三级命中规则）。
+///
+/// 流程：
+/// 1. 构造初始 state（含 `message` / 默认 `agent_id` / `core_type` 等）
+/// 2. 加载 Agent 配置注入 state（system_prompt / tool_ids / model_tier / max_iterations）
+/// 3. 构造 PipelineExecutor 并执行 `run`
+/// 4. 从最终 state 提取响应（优先 `raw_result`，回退 `message`，再回退原消息）
+///
+/// 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
+/// 时走 echo-fallback，标注降级原因。
+async fn process_via_engine(state: &AppState, message: &str, agent_id: &str) -> String {
+    let invoker = match state.invoker.clone() {
+        Some(i) => i,
         None => {
             return format!(
                 "[echo-fallback: engine not available] {}",
@@ -91,127 +120,146 @@ async fn process_via_engine(state: &AppState, message: &str) -> String {
             );
         }
     };
-
-    // 构建管道配置——用户消息作为初始状态
-    let config = serde_json::json!({
-        "message": message,
-        "input": message,
-    });
-
-    // 启动 run
-    let run_id = match engine.start_run(&config).await {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("Engine start_run failed: {}, falling back to echo", e);
-            return format!("[engine-start-failed] {}", message);
+    let store = match state.store.clone() {
+        Some(s) => s,
+        None => {
+            return format!(
+                "[echo-fallback: store not available] {}",
+                message
+            );
+        }
+    };
+    let project_root = match state.project_root.clone() {
+        Some(p) => p,
+        None => {
+            return format!(
+                "[echo-fallback: project_root not configured] {}",
+                message
+            );
         }
     };
 
-    info!("Pipeline run started: run_id={}", run_id);
+    // 1. 构造初始 state
+    let mut initial_state = serde_json::json!({
+        "message": message,
+        "input": message,
+        "agent_id": agent_id,
+        "core_type": "llm_call",
+        "core_plugin": "pipeline_llm_core", // 初始调 LLM（插件 id 带 pipeline_ 前缀）
+        "ended": false,
+        "suspended": false,
+    });
 
-    // 收集所有 pipeline 类型的插件，按优先级排序
-    let mut pipeline_plugins: Vec<&PluginManifest> = state
-        .manifests
-        .iter()
-        .filter(|m| m.plugin_type == PluginType::Pipeline)
-        .collect();
-    pipeline_plugins.sort_by_key(|m| m.priority);
+    // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
+    load_agent_config_into_state(&mut initial_state, agent_id, &project_root);
 
-    let mut executed_count = 0usize;
-    let mut last_state: serde_json::Value = serde_json::json!({"message": message});
+    // 3. 构造 PipelineExecutor 并执行
+    //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
+    //    （多租户 P0-4：本函数已在 agentos_tenant::scope 内调用）。
+    let tenant =
+        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let branch_id = "main".to_string();
+    let executor = agentos_engine::PipelineExecutor::new(
+        invoker,
+        project_root,
+        tenant,
+        state.plugin_ids.iter().cloned(),
+        store,
+        run_id.clone(),
+        branch_id,
+    );
 
-    for manifest in &pipeline_plugins {
-        let step = CompositeStep {
-            name: manifest.name.clone(),
-            plugin: manifest.id.clone(),
-            inputs: serde_json::json!({
-                "message": message,
-            }),
-            outputs: std::collections::HashMap::new(),
-        };
+    info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
-        match engine.execute_step(&run_id, &step).await {
-            Ok(step_result) => {
-                executed_count += 1;
-                // 将状态更新合并到 last_state（merge 语义，非替换）
-                if !step_result.state_updates.is_empty() {
-                    if let Some(obj) = last_state.as_object_mut() {
-                        for (key, value) in &step_result.state_updates {
-                            obj.insert(key.clone(), value.clone());
-                        }
-                    } else {
-                        // last_state 不是 Object（首次或被覆盖），直接序列化 state_updates
-                        last_state = serde_json::to_value(&step_result.state_updates)
-                            .unwrap_or(last_state.clone());
-                    }
-                }
-
-                // 检查路由信号
-                if let Some(ref signal) = step_result.route_signal {
-                    match signal.route_type {
-                        RouteType::End => {
-                            info!("Pipeline ended via End signal after {} steps", executed_count);
-                            break;
-                        }
-                        RouteType::Wait => {
-                            info!("Pipeline suspended via Wait signal after {} steps", executed_count);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Pipeline step '{}' execution failed: {}, continuing (error_policy={:?})",
-                    manifest.id, e, manifest.error_policy
-                );
-                // 按错误策略处理：Abort 则终止，其他则继续
-                if manifest.error_policy == lingxi_core::types::ErrorPolicy::Abort {
-                    break;
-                }
-            }
+    let final_state = match executor
+        .run(&state.pipeline_config, &state.step_library, initial_state)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
+            return format!("[engine-run-failed] {}", message);
         }
-    }
+    };
 
-    // 结束 run
-    if let Err(e) = engine.end_run(&run_id).await {
-        warn!("Engine end_run failed: {}", e);
+    // 4. 提取响应：优先 raw_result，回退 state.message，再回退原消息
+    if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
+        return raw.to_string();
     }
+    if let Some(msg) = final_state.get("message").and_then(|v| v.as_str()) {
+        return msg.to_string();
+    }
+    // 没有 raw_result / message 字段：pretty-print 整个 state（便于调试）
+    serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
+}
 
-    // 构建响应内容
-    let run_id_short: &str = run_id.get(..8).unwrap_or(&run_id);
-    if executed_count == 0 {
-        // 没有插件被执行（可能全是 sidecar 但进程不可达）
-        format!(
-            "[pipeline: run_id={}, plugins_tried={}, no_plugin_executed] {}",
-            run_id_short,
-            pipeline_plugins.len(),
-            message
-        )
-    } else {
-        // 有插件被执行——返回引擎处理后的状态
-        // 优先从合并后的状态中提取 "message" 字段，否则 pretty-print 整个状态
-        let message_from_state = last_state
-            .get("message")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let state_str = match message_from_state {
-            Some(msg) => msg,
-            None => serde_json::to_string_pretty(&last_state)
-                .unwrap_or_else(|_| message.to_string()),
-        };
-        format!(
-            "[pipeline: run_id={}, steps_executed={}] {}",
-            run_id_short,
-            executed_count,
-            state_str
-        )
+/// 加载 Agent 配置注入到管道 state。
+///
+/// 简化语义（[来源: 任务 §load_agent_config_into_state]）：只读 `system_prompt`
+/// / `tool_ids` / `model_tier` / `max_iterations` 几个字段，不解析复杂结构。
+/// 文件不存在跳过（用 state 已有的默认值）。
+///
+/// 设计取舍：字段冲突时不覆盖 state 中已有的值（agent 调用方注入优先级高于配置默认），
+/// 仅在缺失时补。`max_iterations` 同时覆写 `pipeline_config.loop_config.max_iterations`
+/// 的运行期语义（由 PipelineExecutor 在每次 run 时读取 state，而非 config）。
+fn load_agent_config_into_state(
+    state: &mut serde_json::Value,
+    agent_id: &str,
+    config_root: &std::path::Path,
+) {
+    let path = config_root.join("agents").join(format!("{}.yaml", agent_id));
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => {
+            // 文件不存在 → 跳过（用默认 state）
+            tracing::debug!(
+                agent_id = %agent_id,
+                "Agent config not found at {}, using defaults",
+                path.display()
+            );
+            return;
+        }
+    };
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "Failed to parse agent config, using defaults"
+            );
+            return;
+        }
+    };
+
+    let obj = match state.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let entry = |key: &str| -> Option<serde_json::Value> {
+        parsed
+            .get(key)
+            .cloned()
+            .and_then(|v| serde_yaml::from_value(v).ok())
+    };
+
+    if let Some(v) = entry("system_prompt") {
+        obj.entry("system_prompt").or_insert(v);
+    }
+    if let Some(v) = entry("tool_ids") {
+        obj.entry("tool_ids").or_insert(v);
+    }
+    if let Some(v) = entry("model_tier") {
+        obj.entry("model_tier").or_insert(v);
+    }
+    if let Some(v) = entry("max_iterations") {
+        obj.entry("max_iterations").or_insert(v);
     }
 }
 
 /// 处理 WebSocket 连接——收发消息循环。
-async fn handle_ws_connection(socket: WebSocket, state: AppState) {
+async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: HeaderMap) {
     let (mut sender, mut receiver) = socket.split();
 
     // 发送欢迎消息
@@ -236,8 +284,12 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState) {
                     session_id: String::new(),
                 });
 
-                // 通过管道引擎处理消息
-                let content = process_via_engine(&state, &req.message).await;
+                // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
+                // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
+                let tenant_ctx = request_tenant_ctx(&headers, &req.session_id);
+                let content =
+                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, "agentos"))
+                        .await;
 
                 // 构造响应
                 let response = WsResponse {
@@ -271,10 +323,15 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState) {
 /// /api/v1/chat POST 端点——通过管道引擎处理消息。
 async fn chat_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::Json(req): axum::Json<WsRequest>,
 ) -> Result<axum::Json<WsResponse>, ApiError> {
-    // 通过管道引擎处理消息
-    let content = process_via_engine(&state, &req.message).await;
+    // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
+    // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
+    let tenant_ctx = request_tenant_ctx(&headers, &req.session_id);
+    let content =
+        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, "agentos"))
+            .await;
 
     let response = WsResponse {
         r#type: "message".to_string(),

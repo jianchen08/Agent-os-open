@@ -13,7 +13,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lingxi_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 from models import Priority  # noqa: E402
 from service import HumanInteractionService  # noqa: E402

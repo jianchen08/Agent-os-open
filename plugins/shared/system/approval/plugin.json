@@ -5,19 +5,35 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
+            {"name": "approval.create_review_request", "description": "Create a document review approval request that pauses the pipeline"},
             {"name": "approval.create_choice", "description": "Create a choice approval request"},
             {"name": "approval.create_conversation", "description": "Create a conversation approval request"},
-            {"name": "approval.submit", "description": "Submit approval result"}
+            {"name": "approval.submit", "description": "Submit approval result to resume the pipeline"}
         ],
         "resources": [],
         "route_signals": ["wait"],
         "lifecycle_hooks": ["on_load", "on_unload"]
     },
     "dependencies": [],
+    "capabilities_required": ["pipeline-executor", "event-bus", "logger"],
     "permissions": {},
     "error_policy": "abort",
-    "priority": 60
+    "priority": 60,
+    "ui_schema": {
+        "widgets": [
+            {
+                "id": "approval_panel",
+                "type": "review_document",
+                "space": "workspace",
+                "trigger": "on_route_signal:wait",
+                "props": {
+                    "diff_view": true,
+                    "annotation": true
+                }
+            }
+        ]
+    }
 }

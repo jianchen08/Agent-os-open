@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-hooks"
+name = "agentos-hooks"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,4 +13,4 @@ serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-lingxi-core.workspace = true
+agentos-core.workspace = true

@@ -18,7 +18,7 @@ def handle_initialize(params):
             "tools": {}
         },
         "serverInfo": {
-            "name": "lingxi-llm-sidecar",
+            "name": "agentos-llm-sidecar",
             "version": "0.2.0"
         }
     }

@@ -5,7 +5,7 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {"name": "memory.search", "description": "Search memories by query"},
@@ -23,5 +23,6 @@
     "permissions": {},
     "error_policy": "skip",
     "priority": 50,
-    "requires_content": 5
+    "requires_content": 5,
+    "config_refs": ["models", "system"]
 }

@@ -36,7 +36,7 @@ vi.mock('@/stores/pipelineMessageStore', () => ({
 vi.mock('@/stores/sessionStore', () => ({
   useSessionStore: {
     getState: () => ({
-      sessions: [{ id: 'sess-1', pipelineIds: ['pid-main'], agentId: 'lingxi' }],
+      sessions: [{ id: 'sess-1', pipelineIds: ['pid-main'], agentId: 'agentos' }],
     }),
   },
 }))

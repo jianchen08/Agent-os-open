@@ -334,6 +334,18 @@ pub struct TenantContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     pub session_id: String,
+    /// 用户角色（admin / member / ...）。None 表示未指定。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// 权限列表（如 ["pipeline:run", "tool:invoke"]）。
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    /// 该租户下启用的插件 ID 白名单；空表示无限制。
+    #[serde(default)]
+    pub enabled_plugins: Vec<String>,
+    /// 凭证句柄（指向密钥库中的条目），由 HTTP 入口注入，插件按需引用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_handle: Option<String>,
 }
 
 impl TenantContext {
@@ -342,7 +354,31 @@ impl TenantContext {
             tenant_id: tenant_id.into(),
             user_id: None,
             session_id: session_id.into(),
+            role: None,
+            permissions: Vec::new(),
+            enabled_plugins: Vec::new(),
+            credential_handle: None,
         }
+    }
+
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
+        self
+    }
+
+    pub fn with_permissions(mut self, permissions: Vec<String>) -> Self {
+        self.permissions = permissions;
+        self
+    }
+
+    pub fn with_enabled_plugins(mut self, enabled_plugins: Vec<String>) -> Self {
+        self.enabled_plugins = enabled_plugins;
+        self
+    }
+
+    pub fn with_credential_handle(mut self, handle: impl Into<String>) -> Self {
+        self.credential_handle = Some(handle.into());
+        self
     }
 }
 
@@ -751,4 +787,136 @@ pub enum StorageError {
     /// IO 错误
     #[error("io error: {0}")]
     Io(String),
+}
+
+// ── 配置驱动的管道配置类型（统一 step 模型）──────────────────
+
+/// 路由跳转目标。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteNext {
+    /// 继续循环（管道级 loop 的下一轮）
+    Loop,
+    /// 结束管道
+    End,
+    /// 挂起等待
+    Wait,
+    /// 跳转到指定 step id
+    Step(String),
+}
+
+/// 路由分支的 then 动作。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteAction {
+    /// 跳转目标
+    pub next: RouteNext,
+    /// 设置 state 字段（merge 进 state）
+    #[serde(default)]
+    pub set: HashMap<String, serde_json::Value>,
+}
+
+/// 路由分支：when 条件 → then 动作。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Route {
+    /// 条件表达式字符串（如 "raw_tool_calls != []"），空串或 "True" 视为始终匹配
+    pub when: String,
+    /// 匹配时执行的动作
+    pub then: RouteAction,
+}
+
+/// 循环配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopConfig {
+    /// 是否启用循环
+    #[serde(default)]
+    pub enabled: bool,
+    /// 最大迭代次数（-1=无限循环；>0=安全阀）
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: i32,
+}
+
+fn default_max_iterations() -> i32 {
+    -1
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_iterations: -1,
+        }
+    }
+}
+
+/// 管道步骤（统一 step 模型：原子插件和组合节点都是 step）。
+///
+/// `steps` 字段引用的内容按三级命中规则解析：
+/// ① 当前管道 step id → 组合节点递归
+/// ② 公共 step 库 id → 组合节点递归
+/// ③ 插件名 → 原子插件 invoker 调用
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineStep {
+    /// 步骤标识（可被其他 step 的 steps 引用）
+    pub id: String,
+    /// 要执行的内容（step id 或插件名，三级命中）
+    #[serde(default)]
+    pub steps: Vec<String>,
+    /// 上下文注入（自由 key-value，执行时 merge 进 state 供插件读取）
+    #[serde(default)]
+    pub context: HashMap<String, serde_json::Value>,
+    /// 该步骤的路由分支（无则顺序执行下一步）
+    #[serde(default)]
+    pub routes: Vec<Route>,
+    /// 该步骤的循环配置（组合节点可自带循环，如批量处理）
+    #[serde(default)]
+    pub loop_config: Option<LoopConfig>,
+}
+
+/// 管道配置（配置驱动的执行流程定义）。
+///
+/// 引擎作为配置解释执行器：读 PipelineConfig，按 steps 顺序执行，
+/// 据 loop/routes 决定循环与分支。一套引擎 + 不同 YAML = 不同行为。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// 管道名
+    pub name: String,
+    /// 管道级循环配置
+    ///
+    /// 兼容 YAML 中 `loop:` 简写（`config/pipelines/*.yaml` 约定），
+    /// 同时保留 `loop_config` 作为序列化字段名（JSON / Rust 直构造）。
+    #[serde(default, alias = "loop")]
+    pub loop_config: LoopConfig,
+    /// 有序步骤
+    pub steps: Vec<PipelineStep>,
+}
+
+impl PipelineConfig {
+    /// 按 id 查找步骤（命中规则①：当前管道 step id）。
+    pub fn find_step(&self, id: &str) -> Option<&PipelineStep> {
+        self.steps.iter().find(|s| s.id == id)
+    }
+
+    /// 收集所有 step id（用于重名检测）。
+    pub fn step_ids(&self) -> Vec<&str> {
+        self.steps.iter().map(|s| s.id.as_str()).collect()
+    }
+}
+
+/// 公共 step 库（config/steps/*.yaml 加载的可复用 step 定义）。
+#[derive(Debug, Clone, Default)]
+pub struct StepLibrary {
+    /// id → step 定义
+    pub steps: HashMap<String, PipelineStep>,
+}
+
+impl StepLibrary {
+    /// 按 id 查找公共 step（命中规则②）。
+    pub fn find(&self, id: &str) -> Option<&PipelineStep> {
+        self.steps.get(id)
+    }
+
+    /// 收集所有 id（用于重名检测）。
+    pub fn ids(&self) -> Vec<&str> {
+        self.steps.keys().map(|s| s.as_str()).collect()
+    }
 }

@@ -5,7 +5,7 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {"name": "connector.register", "description": "Register a connector instance"},
@@ -24,5 +24,9 @@
     "permissions": {},
     "error_policy": "skip",
     "priority": 50,
-    "requires_content": 5
+    "requires_content": 5,
+    "config_files": [
+        {"id": "godot", "path": "config/external_tools/godot.yaml", "label": "Godot 工具配置"},
+        {"id": "vscode", "path": "config/external_tools/vscode.yaml", "label": "VS Code 工具配置"}
+    ]
 }

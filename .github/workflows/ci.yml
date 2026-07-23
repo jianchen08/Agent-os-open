@@ -147,7 +147,7 @@ jobs:
         run: ruff check .
 
       - name: Mypy check
-        run: mypy src/lingxi_plugin_sdk
+        run: mypy src/agentos_plugin_sdk
 
   # ── Python Test ────────────────────────────────────────────
   python-test:

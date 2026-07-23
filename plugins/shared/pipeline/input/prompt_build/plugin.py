@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
-from src.config.settings import get_settings
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 

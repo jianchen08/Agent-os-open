@@ -10,8 +10,8 @@
 #   ./start_web_02.sh --kernel-only # 仅启动内核
 #
 # 环境变量：
-#   LINGXI_KERNEL_PORT  内核端口（默认 9100）
-#   LINGXI_FRONTEND_PORT 前端端口（默认 5290）
+#   AGENTOS_KERNEL_PORT  内核端口（默认 9100）
+#   AGENTOS_FRONTEND_PORT 前端端口（默认 5290）
 # ============================================================
 
 set -e
@@ -19,7 +19,7 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 KERNEL_DIR="$PROJECT_ROOT/kernel"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
-KERNEL_BIN="$KERNEL_DIR/target/release/lingxi-kernel"
+KERNEL_BIN="$KERNEL_DIR/target/release/agentos-kernel"
 PORTS_FILE="$PROJECT_ROOT/.ports_02"
 PROJECT_ID=$(echo -n "$PROJECT_ROOT" | md5sum | cut -c1-8)
 REDIS_CONTAINER="lingxi-redis-02-$PROJECT_ID"
@@ -159,11 +159,10 @@ _ensure_redis_container() {
 # ========== 端口分配 ==========
 echo -e "${YELLOW}[INFO] 正在查找可用端口...${NC}"
 
-KERNEL_PORT=$(find_available_port "${LINGXI_KERNEL_PORT:-9100}") || {
-    echo -e "${RED}[ERROR] 无法找到可用的内核端口${NC}"
+KERNEL_PORT=$(find_available_port "${AGENTOS_KERNEL_PORT:-9100}") || {    echo -e "${RED}[ERROR] 无法找到可用的内核端口${NC}"
     exit 1
 }
-FRONTEND_PORT=$(find_available_port "${LINGXI_FRONTEND_PORT:-5290}") || {
+FRONTEND_PORT=$(find_available_port "${AGENTOS_FRONTEND_PORT:-5290}") || {
     echo -e "${RED}[ERROR] 无法找到可用的前端端口${NC}"
     exit 1
 }
@@ -201,7 +200,7 @@ else
     echo -e "${YELLOW}[1/4] 编译 Rust 内核 (cargo build --release)...${NC}"
     echo -e "${YELLOW}       这可能需要几分钟（首次编译约 4-5 分钟，增量编译约 30 秒）${NC}"
     cd "$KERNEL_DIR"
-    if cargo build --release --bin lingxi-kernel 2>&1; then
+    if cargo build --release --bin agentos-kernel 2>&1; then
         echo -e "${GREEN}[OK] 内核编译成功${NC}"
     else
         echo -e "${RED}[ERROR] 内核编译失败${NC}"
@@ -254,8 +253,8 @@ trap cleanup INT TERM
 
 # ========== 步骤 2: 启动内核 ==========
 echo -e "${YELLOW}[2/4] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
-export LINGXI_KERNEL_PORT=$KERNEL_PORT
-export LINGXI_KERNEL_HOST=0.0.0.0
+export AGENTOS_KERNEL_PORT=$KERNEL_PORT
+export AGENTOS_KERNEL_HOST=0.0.0.0
 "$KERNEL_BIN" &
 KERNEL_PID=$!
 

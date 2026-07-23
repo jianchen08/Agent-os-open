@@ -138,14 +138,14 @@ class TestAuthLoginFullChain:
             f"is_active 期望 True，实际 {body.get('is_active')}"
 
     def test_me_with_token_returns_email(self):
-        """1.2d 用 Bearer token 访问 /auth/me 应返回 email='admin@lingxi.dev'。"""
+        """1.2d 用 Bearer token 访问 /auth/me 应返回 email='admin@agentos.dev'。"""
         login_payload = {"username": "admin", "password": "admin12345"}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         token = login_body["access_token"]
         status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/auth/me", token=token)
         assert status == 200
-        assert body.get("email") == "admin@lingxi.dev", \
-            f"email 期望 'admin@lingxi.dev'，实际 '{body.get('email')}'"
+        assert body.get("email") == "admin@agentos.dev", \
+            f"email 期望 'admin@agentos.dev'，实际 '{body.get('email')}'"
 
     def test_refresh_returns_new_access_token(self):
         """1.3 用 refresh_token 刷新应返回新的 access_token。"""

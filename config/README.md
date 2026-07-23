@@ -9,7 +9,7 @@ config/
 ├── README.md                    # 本文档
 ├── agents/                      # Agent 配置 (按层级分类)
 │   ├── main/                   # L1 主 Agent
-│   │   ├── lingxi.yaml         # 灵汐主Agent (已优化)
+│   │   ├── agentos.yaml         # 灵汐主Agent (已优化)
 │   │   └── main_agent.yaml     # 主控Agent
 │   ├── orchestrator/               # L2 编排 Agent
 │   │   ├── general_agent.yaml            # 通用任务编排
@@ -82,7 +82,7 @@ config/
 
 | 文件                                 | 说明          | 位置      |
 | ------------------------------------ | ------------- | --------- |
-| `agents/lingxi.yaml`                 | 主 Agent 配置 | ✅ 已优化 |
+| `agents/agentos.yaml`                 | 主 Agent 配置 | ✅ 已优化 |
 | `models/llm.yaml`                    | LLM 模型配置  | ✅ 已整理 |
 | `models/embedding.yaml`              | 嵌入模型配置  | ✅ 新建   |
 | `tools/builtin_tools_config.yaml`    | 内置工具配置  | ✅ 已移动 |
@@ -107,7 +107,7 @@ config/
 
 ### 已完成的整理
 
-- ✅ 优化 `lingxi.yaml` 提示词，添加简单任务直接处理逻辑
+- ✅ 优化 `agentos.yaml` 提示词，添加简单任务直接处理逻辑
 - ✅ 将 LLM 配置移至 `models/llm.yaml`
 - ✅ 创建独立的 `models/embedding.yaml` 嵌入模型配置
 - ✅ 将工具配置移至 `tools/` 目录
@@ -128,7 +128,7 @@ config/
 
 ### 主要改进
 
-1. **lingxi 提示词优化**:
+1. **agentos 提示词优化**:
 
    - 添加简单任务处理原则
    - 明确区分直接处理和创建任务的情况

@@ -5,7 +5,7 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {"name": "wecom.send_message", "description": "Send a text message to a WeCom user via HTTP API"},

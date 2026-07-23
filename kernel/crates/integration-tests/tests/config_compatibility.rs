@@ -11,7 +11,7 @@
 //!
 //! 对应 AC-11-3（traces_to: AC-4）
 
-use lingxi_config::ConfigLoader;
+use agentos_config::ConfigLoader;
 use serde_json::{json, Value};
 
 // ═══════════════════════════════════════════════════════════════════

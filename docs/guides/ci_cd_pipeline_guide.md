@@ -439,10 +439,10 @@ curl http://localhost:8988/api/v1/threads?page=1&page_size=20 \
 curl -X POST http://localhost:8988/api/v1/threads \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"title": "测试对话", "agent_id": "lingxi"}'
+  -d '{"title": "测试对话", "agent_id": "agentos"}'
 
 # 预期响应：
-# {"id": "thread_xxx", "title": "测试对话", "agent_id": "lingxi", "created_at": "..."}
+# {"id": "thread_xxx", "title": "测试对话", "agent_id": "agentos", "created_at": "..."}
 ```
 
 ### 4.3 任务 API
@@ -546,7 +546,7 @@ curl http://localhost:8988/api/v1/agents \
   -H "Authorization: Bearer <token>"
 
 # 预期响应：返回所有已注册的 Agent（L1/L2/L3 层级）
-# [{"config_id": "lingxi", "level": "L1", ...}, ...]
+# [{"config_id": "agentos", "level": "L1", ...}, ...]
 ```
 
 ### 4.6 工具 API

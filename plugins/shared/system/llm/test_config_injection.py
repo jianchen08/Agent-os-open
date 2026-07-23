@@ -29,10 +29,13 @@ if str(_PLUGIN_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────
 # 真实配置夹具：模拟内核注入给 llm 插件的配置形态。
 #
-# 链路：config/models/llm.yaml → plugin-loader collect_yaml_configs 递归扫描
-#   → {"models": {"llm": <llm.yaml 内容>, "embedding": <embedding.yaml 内容>}}
-#   → invoker filter_config_by_refs(config_refs=["models"])
-#   → 插件收到 {"models": {"llm": {...}, "embedding": {...}}}
+# P1 链路（config_files 映射，ADR §4.3 B3 命名空间）：
+#   config/models/llm.yaml → config_files[].id="llm" 映射
+#   config/models/embedding.yaml → config_files[].id="embedding" 映射
+#   → invoker build_injected_config 按 id 命名空间合并
+#   → 插件收到 {"llm": <llm.yaml 全文>, "embedding": <embedding.yaml 全文>}
+#
+# 旧 config_refs=["models"] 路径（{models:{llm,embedding}}）已废弃（llm 试点改用 config_files）。
 # ────────────────────────────────────────────────────────────
 
 _LLM_YAML_CONTENT = {
@@ -72,17 +75,15 @@ _EMBEDDING_YAML_CONTENT = {
     },
 }
 
-# 经 config_refs=["models"] 过滤后，插件实际收到的配置
+# 经 config_files 映射合并后，插件实际收到的配置（key = config_files[].id）
 _INJECTED_CONFIG: dict[str, Any] = {
-    "models": {
-        "llm": _LLM_YAML_CONTENT,
-        "embedding": _EMBEDDING_YAML_CONTENT,
-    },
+    "llm": _LLM_YAML_CONTENT,
+    "embedding": _EMBEDDING_YAML_CONTENT,
 }
 
 
 class TestModelLoaderShimConfigExtraction:
-    """P0-2：_ModelLoaderShim._load_llm_data 必须从 config["models"]["llm"] 取值。"""
+    """P1：_ModelLoaderShim._load_llm_data 必须从 config["llm"] 取值（config_files 命名空间）。"""
 
     def test_load_llm_data_returns_llm_yaml_content(self) -> None:
         """_load_llm_data 返回 llm.yaml 的完整内容（含 providers/models/defaults）。"""
@@ -132,18 +133,18 @@ class TestModelLoaderShimConfigExtraction:
         llm_data = shim._load_llm_data()
         assert llm_data == {}
 
-    def test_load_llm_data_missing_models_key_returns_empty(self) -> None:
-        """config 没有 models 键时返回空（不抛 KeyError）。"""
+    def test_load_llm_data_missing_llm_key_returns_empty(self) -> None:
+        """config 没有 llm 键时返回空（不抛 KeyError）。"""
         from server import _ModelLoaderShim  # noqa: PLC0415
 
         shim = _ModelLoaderShim({"system": {"foo": "bar"}})
         assert shim._load_llm_data() == {}
 
-    def test_load_llm_data_missing_llm_under_models_returns_empty(self) -> None:
-        """config["models"] 下没有 llm 子键时返回空。"""
+    def test_load_llm_data_llm_not_dict_returns_empty(self) -> None:
+        """config["llm"] 不是 dict 时返回空。"""
         from server import _ModelLoaderShim  # noqa: PLC0415
 
-        shim = _ModelLoaderShim({"models": {"embedding": _EMBEDDING_YAML_CONTENT}})
+        shim = _ModelLoaderShim({"llm": "not-a-dict"})
         assert shim._load_llm_data() == {}
 
 

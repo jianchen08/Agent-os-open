@@ -115,7 +115,7 @@ model_name: {model_name}
 # ===== L1 (main) Prompt 结构 =====
 #   L1 是主控 Agent，其 system_prompt 内容是固定的，不可修改。
 #   新建 L1 Agent 时：
-#   1. 复制现有 L1 Agent 配置文件（如 lingxi.yaml）作为基础
+#   1. 复制现有 L1 Agent 配置文件（如 agentos.yaml）作为基础
 #   2. 创建人设文件（config/agents/main/persona/{agent_id}_persona.md），写入人设内容
 #   3. 替换 system_prompt 中的人设占位符路径：{{path:config/agents/main/persona/{agent_id}_persona.md}}
 #   4. 仅修改 config_id、name、display_name、人设文件等可变字段，其余内容保持不变

@@ -17,7 +17,7 @@ sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
-from lingxi_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from plugin import StreamRepetitionMonitor  # noqa: E402
 
 logger = logging.getLogger(__name__)

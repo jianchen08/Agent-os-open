@@ -15,7 +15,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lingxi_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin
 
 # 直接导入同目录的老代码（文件就在旁边，不需要额外路径前缀）
 from manager import IsolationManager

@@ -360,7 +360,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         Args:
             agent_registry: Agent 注册表实例
         """
-        for candidate in ["default", "lingxi"]:
+        for candidate in ["default", "agentos"]:
             self._agent_config = agent_registry.get(candidate)
             if self._agent_config:
                 break

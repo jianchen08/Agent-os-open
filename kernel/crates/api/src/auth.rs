@@ -23,6 +23,9 @@ const ACCESS_TOKEN_TTL_SECS: u64 = 30 * 60; // 30 min
 /// 默认 refresh token 有效期（秒）。
 const REFRESH_TOKEN_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 
+/// 内置默认租户 ID——所有内置用户归属此租户。
+pub const DEFAULT_TENANT_ID: &str = "default";
+
 /// 内置默认用户（硬编码，无密码哈希开销，满足"简单内置用户"需求）。
 /// DEBT: 明文密码仅用于开发/演示。ceiling: 无多用户管理。
 /// upgrade: 接入正式用户系统时替换为数据库 + 哈希校验。
@@ -31,8 +34,9 @@ fn default_users() -> Vec<BuiltInUser> {
         id: "00000000-0000-0000-0000-000000000001".to_string(),
         username: "admin".to_string(),
         password: "admin12345".to_string(),
-        email: "admin@lingxi.dev".to_string(),
+        email: "admin@agentos.dev".to_string(),
         role: "admin".to_string(),
+        tenant_id: DEFAULT_TENANT_ID.to_string(),
         created_at: "2025-01-01T00:00:00Z".to_string(),
     }]
 }
@@ -45,6 +49,8 @@ struct BuiltInUser {
     password: String,
     email: String,
     role: String,
+    /// 用户归属的租户 ID（多租户隔离）。
+    tenant_id: String,
     created_at: String,
 }
 
@@ -162,6 +168,26 @@ fn decode_token(token: &str) -> Option<(String, String, u64)> {
 
 fn is_token_expired(exp: u64) -> bool {
     chrono::Utc::now().timestamp() as u64 >= exp
+}
+
+/// 解析请求归属的租户 ID。
+///
+/// 当前 token 载荷（`{type}:{user_id}:{username}:{exp}`）尚未包含 tenant 段，
+/// 因此本函数在 token 合法时回退到对应内置用户的 `tenant_id`，
+/// 否则回退到 [`DEFAULT_TENANT_ID`]。
+///
+/// TODO(多租户): token 格式扩展为携带 tenant 段后，改为优先从 token 解析。
+pub fn resolve_request_tenant_id(headers: &HeaderMap) -> String {
+    if let Some(token) = extract_bearer_token(headers) {
+        if let Some((user_id, _, exp)) = decode_token(&token) {
+            if !is_token_expired(exp) {
+                if let Some(user) = find_user_by_id(&user_id) {
+                    return user.tenant_id;
+                }
+            }
+        }
+    }
+    DEFAULT_TENANT_ID.to_string()
 }
 
 /// 从 Authorization 头提取 bearer token。
@@ -426,7 +452,7 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["username"], "admin");
-        assert_eq!(json["email"], "admin@lingxi.dev");
+        assert_eq!(json["email"], "admin@agentos.dev");
         assert_eq!(json["role"], "admin");
         assert_eq!(json["is_active"], true);
         assert!(json["id"].is_string());
@@ -596,6 +622,7 @@ mod tests {
             password: String::new(),
             email: String::new(),
             role: String::new(),
+            tenant_id: DEFAULT_TENANT_ID.to_string(),
             created_at: String::new(),
         };
         let token = encode_token(TokenType::Access, &user, 3600);

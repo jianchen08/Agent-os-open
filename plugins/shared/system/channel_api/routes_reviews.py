@@ -2,6 +2,11 @@
 
 提供审批请求的创建、状态查询、反馈提交等 REST API 端点。
 包含媒体审阅相关的文件上传、元数据查询和附件管理端点。
+
+TODO[P1-2]: 审批闭环 sidecar 化尚未完成。下方 ``from review.review_service`` 和
+``from review.media_review_service`` 仍依赖 src/review/（review_service 涉及状态机 +
+DB 交互，media_review_service 依赖 PIL/LLM，搬迁复杂度高），与本次 P1-3 批注/制品
+sidecar 化独立。待 P1-2 处理时一并搬迁至 plugins/shared/system/review/ sidecar 包。
 """
 
 from __future__ import annotations

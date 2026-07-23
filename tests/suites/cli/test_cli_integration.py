@@ -74,7 +74,7 @@ def _create_engine_and_services():
 
     agent_registry = AgentRegistry()
     agent_registry.load_directory(_PROJECT_ROOT / "config" / "agents")
-    agent_config = agent_registry.get("lingxi") or agent_registry.get("default")
+    agent_config = agent_registry.get("agentos") or agent_registry.get("default")
 
     tool_core = plugin_registry.get_core("tool_execute")
     if tool_core and "tool_registry" in services:

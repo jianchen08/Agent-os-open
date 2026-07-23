@@ -1,0 +1,9 @@
+# 本地构建配置
+#
+# 本机 Windows + rustc（1.85.0 / 1.92.0 stable）存在两类间歇性 ICE：
+#   1. 增量编译缓存损坏 → STATUS_ACCESS_ACCESS_VIOLATION（serde_json/itoa/aho-corasick link 阶段）
+#   2. 多线程编译竞态 → core_simd swizzle / proc_macro use-after-free（parking_lot_core/memchr build script）
+# 解决：关闭增量编译 + 单线程编译。CI 环境不受影响（CI 默认无增量缓存且通常单核）。
+[build]
+incremental = false
+jobs = 1

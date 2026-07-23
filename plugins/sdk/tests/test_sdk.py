@@ -16,14 +16,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from lingxi_plugin_sdk import (
+from agentos_plugin_sdk import (
     AgentOSPlugin,
     CapabilityHandle,
     McpServer,
     ToolDef,
     tool,
 )
-from lingxi_plugin_sdk.tool import collect_tools
+from agentos_plugin_sdk.tool import collect_tools
 
 # ═══════════════════════════════════════════════════════════
 # AC-07-1: pip install + AgentOSPlugin + @tool
@@ -34,7 +34,7 @@ class TestSdkImport:
     """验证 SDK 可导入且核心 API 存在。"""
 
     def test_import_version(self) -> None:
-        from lingxi_plugin_sdk import __version__
+        from agentos_plugin_sdk import __version__
 
         assert __version__ == "0.2.0"
 
@@ -129,7 +129,7 @@ class TestMcpServer:
         server, _, _ = self._make_server()
         result = server._handle_initialize({"capabilities": {}, "config": {}})
         assert result["protocolVersion"] == "2024-11-05"
-        assert result["serverInfo"]["name"] == "lingxi-plugin-sdk"
+        assert result["serverInfo"]["name"] == "agentos-plugin-sdk"
 
     def test_tools_list(self) -> None:
         server, _, _ = self._make_server()
@@ -175,7 +175,7 @@ class TestMcpServer:
 
     @pytest.mark.asyncio
     async def test_resources_read(self) -> None:
-        from lingxi_plugin_sdk.types import ResourceDef
+        from agentos_plugin_sdk.types import ResourceDef
 
         def read_config() -> dict:
             return {"setting": "value"}
@@ -338,7 +338,7 @@ class TestThirtyLinePlugin:
     def test_thirty_line_plugin(self) -> None:
         """30 行内封装工具为 MCP 服务的完整示例。"""
         plugin_code = '''
-from lingxi_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("calculator")
 

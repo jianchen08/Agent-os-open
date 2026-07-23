@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useState, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { ChatContainer } from './components/chat/ChatContainer'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
+import { ApprovalReviewOverlay } from './components/approval'
 import { AppHeader } from './components/layout/AppHeader'
 import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
 import { SessionEditModal } from './components/session/SessionEditModal'
@@ -182,6 +183,8 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
       {children}
       {/* 全局交互浮层：在所有受保护页面中显示待处理交互 */}
       <GlobalInteractionOverlay />
+      {/* 审批审阅浮层：监听 approval.created 事件，展示审阅界面（v0.2 P1-2） */}
+      <ApprovalReviewOverlay />
     </>
   )
 }

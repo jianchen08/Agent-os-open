@@ -1,6 +1,6 @@
 # 灵汐主Agent提示词 — 容器workspace决策规则补充
 
-> 本文件记录对灵汐主Agent（lingxi.yaml）提示词的workspace决策规则修改，防止容器任务误填workspace。
+> 本文件记录对灵汐主Agent（agentos.yaml）提示词的workspace决策规则修改，防止容器任务误填workspace。
 
 ## 容器任务 workspace 决策规则
 
@@ -18,5 +18,5 @@
 
 ## 修改文件
 
-- 实际修改文件：`config/agents/main/lingxi.yaml`（system_prompt 字段 + static_vars 工作空间机制）
+- 实际修改文件：`config/agents/main/agentos.yaml`（system_prompt 字段 + static_vars 工作空间机制）
 - YAML 格式验证通过（0 errors, 0 warnings）

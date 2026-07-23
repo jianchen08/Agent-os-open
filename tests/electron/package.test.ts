@@ -9,8 +9,8 @@ const pkg = require("../../package.json");
 
 describe("package.json Electron 配置", () => {
   describe("基本字段", () => {
-    it("name 应为 lingxi-electron", () => {
-      expect(pkg.name).toBe("lingxi-electron");
+    it("name 应为 agentos-electron", () => {
+      expect(pkg.name).toBe("agentos-electron");
     });
 
     it("main 应指向 dist-electron/main.js", () => {
@@ -91,7 +91,7 @@ describe("package.json Electron 配置", () => {
   describe("build 配置", () => {
     it("应设置 appId", () => {
       expect(pkg.build).toHaveProperty("appId");
-      expect(pkg.build.appId).toBe("com.lingxi.assistant");
+      expect(pkg.build.appId).toBe("com.agentos.assistant");
     });
 
     it("应设置 productName", () => {

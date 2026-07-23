@@ -17,5 +17,5 @@ pub mod loader;
 pub mod registry;
 
 pub use error::LoaderError;
-pub use loader::PluginLoaderImpl;
+pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
 pub use registry::{CapabilityRegistryImpl, DependencyResolverImpl};

@@ -5,7 +5,7 @@
     "plugin_type": "system",
     "language": "python",
     "host_type": "sidecar",
-    "entry": "python3 server.py",
+    "entry": "python server.py",
     "capabilities": {
         "tools": [
             {"name": "llm.complete", "description": "Send a completion request to LLM with messages and optional tools"},
@@ -19,5 +19,10 @@
     "permissions": {},
     "error_policy": "skip",
     "priority": 30,
-    "requires_content": 3
+    "requires_content": 3,
+    "config_refs": ["models"],
+    "config_files": [
+        {"id": "llm", "path": "config/models/llm.yaml", "label": "LLM 模型配置"},
+        {"id": "embedding", "path": "config/models/embedding.yaml", "label": "向量模型配置"}
+    ]
 }

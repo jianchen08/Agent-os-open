@@ -9,7 +9,7 @@ import { defineConfig, loadEnv } from 'vite'
  */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || ''
+  const apiTarget = process.env.VITE_PROXY_TARGET || env.VITE_PROXY_TARGET || process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || ''
 
   return {
     plugins: [react()],

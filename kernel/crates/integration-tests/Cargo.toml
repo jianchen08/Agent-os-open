@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-integration-tests"
+name = "agentos-integration-tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,12 +11,13 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
-lingxi-core.workspace = true
-lingxi-config.workspace = true
-lingxi-plugin-loader.workspace = true
-lingxi-engine.workspace = true
-lingxi-invoker.workspace = true
-lingxi-mcp.workspace = true
+agentos-core.workspace = true
+agentos-tenant.workspace = true
+agentos-config.workspace = true
+agentos-plugin-loader.workspace = true
+agentos-engine.workspace = true
+agentos-invoker.workspace = true
+agentos-mcp.workspace = true
 parking_lot = "0.12"
 uuid.workspace = true
 chrono.workspace = true

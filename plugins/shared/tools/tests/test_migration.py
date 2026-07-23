@@ -64,7 +64,7 @@ class TestSimpleServerImport:
 
     def test_create_plugin_returns_agentosplugin(self):
         from server import create_plugin
-        from lingxi_plugin_sdk import AgentOSPlugin
+        from agentos_plugin_sdk import AgentOSPlugin
 
         plugin = create_plugin()
         assert isinstance(plugin, AgentOSPlugin)

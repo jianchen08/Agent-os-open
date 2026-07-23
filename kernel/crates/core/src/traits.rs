@@ -696,6 +696,30 @@ pub struct PluginManifest {
     /// 引擎据此从 blobs 表预加载，插件也可通过 ContentLoader 运行时按需加载。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_content: Option<u32>,
+    /// 配置按需注入声明（ADR 配置统一）。
+    ///
+    /// 声明该插件需要读取哪些配置节（如 `["models", "memory_storage"]`）。
+    /// 内核 `load_config` 据此过滤，只投递声明的配置节（而非全量）。
+    /// 未声明时注入全量配置（向后兼容）。
+    ///
+    /// **迁移期保留（ADR §8.2 step1）**：P1~P5 期间与 `config_files` 并存，
+    /// loader 优先 `config_files`，无则回退 `config_refs`；P6 才删除。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_refs: Vec<String>,
+    /// 配置文件显式映射（ADR §4.2/§4.3 config_files）。
+    ///
+    /// 每项把一个配置文件（id/path/label）显式映射到现有 `config/` 子树下的文件。
+    /// P1 新增字段，与 `config_refs` 并存（迁移期 loader 优先 config_files）。
+    /// 未声明时为空 vec（向后兼容）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_files: Vec<ConfigFileMapping>,
+    /// 前端 UI Schema 声明（ADR 前端 schema 驱动）。
+    ///
+    /// 声明该插件要呈现的前端界面（用哪些 widget type、渲染空间、触发时机）。
+    /// 内核 schema 端点将 ui_schema 一并暴露给前端，前端据此自动渲染界面，
+    /// 新增插件无需手写前端代码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_schema: Option<serde_json::Value>,
 }
 
 fn default_priority() -> u32 {
@@ -729,6 +753,24 @@ pub struct ManifestCapabilities {
     pub route_signals: Vec<RouteType>,
     #[serde(default)]
     pub lifecycle_hooks: Vec<LifecycleHook>,
+}
+
+/// 配置文件映射项（ADR §4.2/§4.3 `config_files[]`）。
+///
+/// 把一个现有 `config/` 子树下的文件显式映射给插件。每项三要素：
+/// - `id`：该配置子项的标识（插件内唯一，作为注入命名空间 key 与 API file_id）；
+/// - `path`：相对 `config/` 根的路径（如 `config/models/llm.yaml`）；
+/// - `label`：前端展示用的名称。
+///
+/// path 安全校验见 loader 的 B1 实现（归一化 + 落 config/ 子树 + denylist）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigFileMapping {
+    /// 配置子项标识（插件内唯一）。
+    pub id: String,
+    /// 相对 config/ 根的文件路径（含 config/ 前缀或相对形式均可，loader 归一化）。
+    pub path: String,
+    /// 前端展示名称。
+    pub label: String,
 }
 
 /// 工具能力声明。

@@ -2,7 +2,7 @@
 
 
 def test_import_version():
-    """验证 lingxi_plugin_sdk 可导入且 __version__ 存在。"""
-    from lingxi_plugin_sdk import __version__
+    """验证 agentos_plugin_sdk 可导入且 __version__ 存在。"""
+    from agentos_plugin_sdk import __version__
 
     assert __version__ == "0.2.0"

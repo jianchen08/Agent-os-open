@@ -4,6 +4,8 @@ Agent OS 管道插件的开发标准规范，定义命名、目录结构、配�
 
 > 配套教程见同目录 [插件开发完整指南](plugin_development_guide.md)，接口定义见 `src/pipeline/plugin.py`。
 
+> ⚠️ **版本说明**：本文基于 **0.1 架构**（`src/plugins/` + `plugin.py`）。**0.2 架构**已统一为 `plugin.json` manifest 协议（命名、目录、能力声明等均有对应字段），开发新插件请以 [插件协议开发者文档](../plugin-protocol.md) 为准；本文保留作为 0.1 历史规范参考。
+
 ---
 
 ## 1. 命名规范

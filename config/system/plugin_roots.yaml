@@ -1,0 +1,6 @@
+# 插件根目录配置
+# builtin_root: 内置只读插件根（随发行包）
+# user_root: 用户可写插件根（第三方插件安装位置）
+# 环境变量 LINGXI_PLUGINS_DIR / LINGXI_USER_PLUGINS_DIR 优先于此配置
+builtin_root: "plugins/shared"
+user_root: ""  # 留空则用 OS 标准目录（%APPDATA%/agentos/plugins 等）

@@ -314,6 +314,11 @@ export const API_ENDPOINTS = {
     /** 重置预算 */
     BUDGET_RESET: '/api/v1/cost-control/budget/reset',
   },
+  /** Schema 聚合相关 - 对应后端 /api/v1/schema 端点（聚合 agents/pipelines/tools/ui_schema） */
+  SCHEMA: {
+    /** 获取聚合 Schema（含插件 ui_schema 声明） */
+    GET: '/api/v1/schema',
+  },
   /** 悬浮窗相关 - 对应后端 /api/v1/floating-chat/* */
   FLOATING_CHAT: {
     /** 获取悬浮窗状态 */

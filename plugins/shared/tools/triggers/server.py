@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any
 
-from lingxi_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("trigger_service")
 

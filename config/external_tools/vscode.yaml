@@ -5,8 +5,9 @@ description: VSCode 编辑器扩展连接器，支持文件操作、选区获取
 type: vscode
 
 # 通信协议
-protocol: websocket
-endpoint: "ws://localhost:9741/ws"
+# 协议与端口对齐 plugins/shared/system/connectors/vscode/channel.py 的 HTTP 实现（urllib，端口 9741）
+protocol: http
+endpoint: "http://localhost:9741"
 
 # 超时配置
 connect_timeout: 5.0
@@ -23,8 +24,7 @@ retry_policy:
 auth:
   type: none
 
-# 心跳
-heartbeat_interval: 15.0
+# HTTP 短轮询由连接器侧控制频率（channel.py），无需服务端心跳
 
 # 沙箱
 enable_sandbox: false

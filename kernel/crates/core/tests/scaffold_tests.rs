@@ -89,7 +89,7 @@ fn test_workspace_dependencies_present() {
     }
 }
 
-/// AC-02-1: 所有 crate 依赖 lingxi-core（除了 core 自身）
+/// AC-02-1: 所有 crate 依赖 agentos-core（除了 core 自身）
 #[test]
 fn test_crates_depend_on_core() {
     let dependent_crates = [
@@ -106,8 +106,8 @@ fn test_crates_depend_on_core() {
         let content = std::fs::read_to_string(&cargo_path)
             .unwrap_or_else(|_| panic!("缺少文件: {}", cargo_path));
         assert!(
-            content.contains("lingxi-core"),
-            "crate {} 应依赖 lingxi-core",
+            content.contains("agentos-core"),
+            "crate {} 应依赖 agentos-core",
             name
         );
     }
@@ -255,18 +255,18 @@ fn test_python_sdk_scaffold_exists() {
     assert!(pyproject.is_ok(), "plugins/sdk/pyproject.toml 应存在");
 }
 
-/// 验证所有 crate 的 crate name 命名规范（lingxi- 前缀）
+/// 验证所有 crate 的 crate name 命名规范（agentos- 前缀）
 #[test]
 fn test_crate_naming_convention() {
     let crate_dirs = [
-        ("core", "lingxi-core"),
-        ("config", "lingxi-config"),
-        ("plugin-loader", "lingxi-plugin-loader"),
-        ("mcp", "lingxi-mcp"),
-        ("invoker", "lingxi-invoker"),
-        ("tenant", "lingxi-tenant"),
-        ("api", "lingxi-api"),
-        ("hooks", "lingxi-hooks"),
+        ("core", "agentos-core"),
+        ("config", "agentos-config"),
+        ("plugin-loader", "agentos-plugin-loader"),
+        ("mcp", "agentos-mcp"),
+        ("invoker", "agentos-invoker"),
+        ("tenant", "agentos-tenant"),
+        ("api", "agentos-api"),
+        ("hooks", "agentos-hooks"),
     ];
     for (dir, expected_name) in &crate_dirs {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), dir);

@@ -17,7 +17,11 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
+use crate::capability::{parse_capability_method, CapabilityRouter};
 use crate::error::McpError;
+
+// tracing 的 warn 宏用于 reader_loop 的降级日志
+use tracing::warn;
 
 /// JSON-RPC 2.0 请求
 #[derive(Debug, Serialize)]
@@ -61,11 +65,17 @@ pub enum McpTransport {
 ///
 /// 管理 MCP 边车进程的生命周期和 JSON-RPC 通信。
 /// 支持 initialize 握手 → tools/list → tools/call 流程。
+///
+/// 双向通信：
+/// - 内核→sidecar：send_request / send_notification（已有）
+/// - sidecar→内核：reader loop 识别 incoming request，路由到 CapabilityRouter（新增）
 pub struct McpClient {
     /// 传输方式
     transport: McpTransport,
     /// 子进程工作目录（stdio 模式下设置，确保插件相对路径可解析）
     working_dir: Option<std::path::PathBuf>,
+    /// 额外环境变量（注入给 sidecar 子进程，如 PYTHONPATH 指向公共依赖）
+    extra_env: Vec<(String, String)>,
     /// 子进程（stdio 模式）
     child: Option<Arc<Mutex<Child>>>,
     /// stdin 写入端
@@ -76,6 +86,9 @@ pub struct McpClient {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     /// 是否已初始化
     initialized: Arc<Mutex<bool>>,
+    /// Capability 路由器——处理 sidecar 反向调用内核能力。
+    /// None 时 sidecar 反向调用将被拒绝（返回 method not found）。
+    router: Option<Arc<dyn CapabilityRouter>>,
 }
 
 impl McpClient {
@@ -87,11 +100,13 @@ impl McpClient {
                 args,
             },
             working_dir: None,
+            extra_env: Vec::new(),
             child: None,
             stdin: None,
             stdout: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
+            router: None,
         }
     }
 
@@ -100,11 +115,13 @@ impl McpClient {
         Self {
             transport: McpTransport::Http { url: url.into() },
             working_dir: None,
+            extra_env: Vec::new(),
             child: None,
             stdin: None,
             stdout: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
+            router: None,
         }
     }
 
@@ -114,6 +131,25 @@ impl McpClient {
     /// 否则 server.py 的相对路径无法解析。
     pub fn with_working_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.working_dir = Some(dir.into());
+        self
+    }
+
+    /// 设置 Capability 路由器（启用 sidecar→内核反向调用）。
+    ///
+    /// 设置后，reader loop 会识别 sidecar 主动发来的 JSON-RPC request，
+    /// 按 `<capability>.<method>` 路由到 router，并通过 stdin 回写 response。
+    ///
+    /// 未设置时，sidecar 反向调用将被拒绝（返回 method not found）。
+    pub fn with_router(mut self, router: Arc<dyn CapabilityRouter>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
+    /// 设置额外环境变量（注入给 sidecar 子进程）。
+    ///
+    /// 用于注入 PYTHONPATH 等公共依赖路径，让 sidecar 能 import 公共业务包。
+    pub fn with_extra_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.extra_env = env;
         self
     }
 
@@ -131,6 +167,11 @@ impl McpClient {
                 // 设置工作目录（插件目录），确保 server.py 等相对路径可解析
                 if let Some(ref dir) = self.working_dir {
                     cmd.current_dir(dir);
+                }
+
+                // 注入额外环境变量（如 PYTHONPATH 指向公共依赖 src/）
+                if !self.extra_env.is_empty() {
+                    cmd.envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
                 }
 
                 let mut child = cmd.spawn().map_err(|e| McpError::SpawnFailed {
@@ -168,10 +209,22 @@ impl McpClient {
     }
 
     /// 启动 stdout 读取循环
+    ///
+    /// 区分两类消息：
+    /// - response（对内核之前请求的响应）：有 id 且在 pending 表中 → resolve oneshot
+    /// - incoming request（sidecar 主动反向调用）：有 method 且不在 pending 表 → 路由到 router
+    /// - notification（sidecar 单向通知）：有 method 无 id → 当前忽略（无标准场景）
     async fn start_reader_loop(&self) {
         if let Some(stdout) = &self.stdout {
             let stdout = Arc::clone(stdout);
             let pending = Arc::clone(&self.pending);
+            let router = self.router.clone();
+            // stdin 在 stdio 模式下必然存在（与 stdout 同时建立）；
+            // reader loop 仅在 stdout 存在时启动，故 stdin 安全解包。
+            let Some(stdin) = self.stdin.clone() else {
+                warn!("reader_loop skipped: stdin is None in stdio mode");
+                return;
+            };
 
             tokio::spawn(async move {
                 let mut reader = stdout.lock().await;
@@ -182,14 +235,39 @@ impl McpClient {
                     match reader.read_line(&mut line).await {
                         Ok(0) => break, // EOF
                         Ok(_) => {
-                            if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
-                                if let Some(id) = &response.id {
-                                    let mut pending_map = pending.lock().await;
-                                    if let Some(sender) = pending_map.remove(id) {
+                            let line_str = line.trim().to_string();
+                            if line_str.is_empty() {
+                                continue;
+                            }
+                            // 先尝试解析为通用 JSON（同时覆盖 response 和 request）
+                            let msg: Value = match serde_json::from_str(&line_str) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+
+                            // 分支1：可能是对内核请求的响应（有 id，无 method）
+                            if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
+                                let mut pending_map = pending.lock().await;
+                                if let Some(sender) = pending_map.remove(id) {
+                                    // 匹配 pending → 这是 response
+                                    if let Ok(response) =
+                                        serde_json::from_str::<JsonRpcResponse>(&line_str)
+                                    {
                                         let _ = sender.send(response);
                                     }
+                                    continue;
                                 }
                             }
+
+                            // 分支2：sidecar 主动发起的 request（有 method + id）
+                            if let (Some(method), Some(id)) = (
+                                msg.get("method").and_then(|v| v.as_str()),
+                                msg.get("id").and_then(|v| v.as_str()).map(String::from),
+                            ) {
+                                handle_incoming_request(method, &msg, &id, &router, &stdin)
+                                    .await;
+                            }
+                            // 其余（notification 无 id 等）忽略
                         }
                         Err(_) => break,
                     }
@@ -279,11 +357,25 @@ impl McpClient {
     /// 发送 initialize 请求完成 MCP 协议握手。
     /// config 参数为插件配置 JSON，将包含在 initialize params 的 `config` 字段中。
     pub async fn initialize(&self, config: &Value) -> Result<Value, McpError> {
+        // 声明内核可被 sidecar 反向调用的 capability 名单。
+        // 仅在配置了 router 时声明全部能力；否则声明空（sidecar 反调会被拒）。
+        let capabilities: Value = if self.router.is_some() {
+            serde_json::json!({
+                "pipeline-executor": {},
+                "config-reader": {},
+                "tenant-context": {},
+                "event-bus": {},
+                "logger": {}
+            })
+        } else {
+            serde_json::json!({})
+        };
+
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": {},
+            "capabilities": capabilities,
             "clientInfo": {
-                "name": "lingxi-agentos",
+                "name": "agentos",
                 "version": "0.2.0"
             },
             "config": config
@@ -424,6 +516,79 @@ impl McpClient {
         *self.initialized.lock().await = false;
         Ok(())
     }
+}
+
+/// 向 stdin 写入一行原始 JSON（不加协议包装）。
+///
+/// 用于回写 sidecar 反向调用的 response——response 必须用与 request 相同的 id。
+async fn write_raw_line(
+    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
+    json_str: &str,
+) -> Result<(), McpError> {
+    let mut writer = stdin.lock().await;
+    writer
+        .write_all(json_str.as_bytes())
+        .await
+        .map_err(|e| McpError::Transport {
+            message: format!("write error: {}", e),
+        })?;
+    writer.write_all(b"\n").await.map_err(|e| McpError::Transport {
+        message: format!("write newline error: {}", e),
+    })?;
+    writer.flush().await.map_err(|e| McpError::Transport {
+        message: format!("flush error: {}", e),
+    })?;
+    Ok(())
+}
+
+/// 处理 sidecar 主动发起的 JSON-RPC request。
+///
+/// method 形如 `pipeline-executor.resume`，拆分后路由到 CapabilityRouter；
+/// 结果通过 stdin 回写为 JSON-RPC response（相同 id）。
+async fn handle_incoming_request(
+    method: &str,
+    msg: &Value,
+    id: &str,
+    router: &Option<Arc<dyn CapabilityRouter>>,
+    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
+) {
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+
+    // 非 capability method（如 MCP 标准方法）不处理
+    let Some((capability, cap_method)) = parse_capability_method(method) else {
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": format!("method not found: {method}")}
+        });
+        let _ = write_raw_line(stdin, &resp.to_string()).await;
+        return;
+    };
+
+    let Some(router) = router else {
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": "no capability router configured"}
+        });
+        let _ = write_raw_line(stdin, &resp.to_string()).await;
+        return;
+    };
+
+    let result = router.handle(capability, cap_method, params).await;
+    let resp = match result {
+        Ok(value) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": value
+        }),
+        Err(e) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32603, "message": e.to_string()}
+        }),
+    };
+    let _ = write_raw_line(stdin, &resp.to_string()).await;
 }
 
 impl Drop for McpClient {

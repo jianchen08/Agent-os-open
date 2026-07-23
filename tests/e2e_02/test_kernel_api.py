@@ -9,7 +9,7 @@
 
 [来源: kernel/crates/api/src/server.rs — 路由树定义]
 [来源: kernel/crates/api/src/routes.rs — 端点处理器]
-[来源: kernel/crates/api/src/bin/lingxi-kernel.rs — 内核入口]
+[来源: kernel/crates/api/src/bin/agentos-kernel.rs — 内核入口]
 """
 
 from __future__ import annotations
@@ -33,13 +33,13 @@ import pytest
 # 常量
 # ============================================================================
 
-KERNEL_PORT = int(os.environ.get("LINGXI_KERNEL_TEST_PORT", "9100"))
+KERNEL_PORT = int(os.environ.get("AGENTOS_KERNEL_TEST_PORT", "9100"))
 KERNEL_HOST = "127.0.0.1"
 BASE_URL = f"http://{KERNEL_HOST}:{KERNEL_PORT}"
 
 # 内核二进制路径（相对于项目根 /workspace）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-KERNEL_BIN = _PROJECT_ROOT / "kernel" / "target" / "release" / "lingxi-kernel"
+KERNEL_BIN = _PROJECT_ROOT / "kernel" / "target" / "release" / "agentos-kernel"
 
 # 等待内核就绪的超时（秒）
 STARTUP_TIMEOUT = 30
@@ -287,7 +287,7 @@ def _build_kernel_if_needed() -> Path:
 
     print(f"[setup] 内核二进制不存在，尝试编译: {KERNEL_BIN}")
     result = subprocess.run(
-        ["cargo", "build", "--release", "--bin", "lingxi-kernel"],
+        ["cargo", "build", "--release", "--bin", "agentos-kernel"],
         cwd=str(_PROJECT_ROOT / "kernel"),
         capture_output=True,
         text=True,
@@ -307,13 +307,13 @@ def _build_kernel_if_needed() -> Path:
 def _start_kernel() -> subprocess.Popen:
     """启动内核进程，返回 Popen 对象。
 
-    使用 LINGXI_KERNEL_PORT 环境变量指定端口。
+    使用 AGENTOS_KERNEL_PORT 环境变量指定端口。
     """
     binary = _build_kernel_if_needed()
 
     env = os.environ.copy()
-    env["LINGXI_KERNEL_PORT"] = str(KERNEL_PORT)
-    env["LINGXI_KERNEL_HOST"] = KERNEL_HOST
+    env["AGENTOS_KERNEL_PORT"] = str(KERNEL_PORT)
+    env["AGENTOS_KERNEL_HOST"] = KERNEL_HOST
 
     proc = subprocess.Popen(
         [str(binary)],

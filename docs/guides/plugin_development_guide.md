@@ -4,6 +4,8 @@ Agent OS 管道插件的完整开发指南，从概念到实现，配合真实�
 
 > 配套规范见同目录 [插件开发标准规范](plugin_development_standard.md)，接口定义见 `src/pipeline/plugin.py`。
 
+> ⚠️ **版本说明**：本文基于 **0.1 架构**（`src/plugins/` + `plugin.py`，Python 同进程插件）。**0.2 架构**已统一为 Rust 内核 + Python sidecar + `plugin.json` manifest 协议。开发新插件请以 [插件协议开发者文档](../plugin-protocol.md) 为准；本文保留作为 0.1 概念与管道模型的历史参考。
+
 ---
 
 ## 第一章：理解插件体系
