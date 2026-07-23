@@ -33,6 +33,7 @@ fn manifest_with_ui(
         requires_content: None,
         config_refs: vec![],
         config_files: vec![],
+        http_endpoints: vec![],
         ui_schema,
     }
 }

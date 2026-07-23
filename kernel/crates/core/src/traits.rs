@@ -342,6 +342,26 @@ pub trait CapabilityRegistry: Send + Sync {
     /// 检查某个路由信号是否被任何插件声明（路由表配置校验用）。
     fn has_route_signal(&self, signal: &RouteType) -> bool;
 
+    /// 注册插件贡献的 HTTP 端点（ADR §3.3）。
+    ///
+    /// 注册期执行路由治理（附录 E.1.3）：
+    /// - 命名空间校验：path 必须以 `/ext/{plugin_id}/**` 为前缀；
+    /// - denylist：path 不得含内核保留段（/ws、/api/v1/*、/health）；
+    /// - 冲突检测：同 path+method 冲突 fail-closed（返回错误，不静默覆盖）。
+    ///
+    /// 校验通过后写入 `http_routes` 维；失败返回聚合错误信息。
+    fn register_http_route(
+        &self,
+        plugin_id: &str,
+        endpoint: HttpEndpoint,
+    ) -> Result<HttpRouteDescriptor, String>;
+
+    /// 列出所有已注册 HTTP 路由（dispatcher 据此动态挂载）。
+    fn list_http_routes(&self) -> Vec<HttpRouteDescriptor>;
+
+    /// 按 path+method 查询单个路由（dispatcher 请求分发用）。
+    fn find_http_route(&self, path: &str, method: &str) -> Option<HttpRouteDescriptor>;
+
     /// 清除指定插件的所有注册项。
     fn clear_plugin(&self, plugin_id: &str);
 }
@@ -720,6 +740,154 @@ pub struct PluginManifest {
     /// 新增插件无需手写前端代码。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_schema: Option<serde_json::Value>,
+    /// HTTP 端点贡献声明（ADR §3.3）。
+    ///
+    /// 插件可向内核统一 HTTP server 贡献端点（如企微 webhook 回调）。
+    /// 每项声明一个 route（path/method/auth/handler_capability/timeout/concurrency），
+    /// dispatcher 据此动态挂载路由，经 capability RPC 调插件的 `http.handle`。
+    /// 路由治理见附录 E.1.3（强制 /ext/{plugin_id}/** 命名空间 + 内核 denylist）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_endpoints: Vec<HttpEndpoint>,
+}
+
+/// HTTP 端点声明项（ADR §3.3 / E.1.2）。
+///
+/// 一个插件端点 = 一个 (path, method) 路由。企微 webhook 双方法（GET 验证 +
+/// POST 回调）声明为两条同 path 不同 method 的记录（path+method 才算冲突）。
+///
+/// `auth` 字段经自定义反序列化校验：仅接受 `none` / `user` / `admin`
+/// （ADR §3.3 auth 枚举），非法值在反序列化期即被拒绝。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpEndpoint {
+    /// 路由标识（插件内唯一）。
+    pub route_id: String,
+    /// HTTP 方法（GET/POST/...）。
+    pub method: String,
+    /// 完整路径，必须落在 `/ext/{plugin_id}/**` 命名空间下（注册期校验）。
+    pub path: String,
+    /// 鉴权模式：`none`（webhook 验签自管）/ `user`（内核 JWT）/ `admin`。
+    #[serde(deserialize_with = "deserialize_http_auth")]
+    pub auth: String,
+    /// 处理该端点的 capability 名（统一 `http.handle`）。
+    pub handler_capability: String,
+    /// 单请求超时上限（毫秒），默认 30000（附录 E.1.3）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// 并发上限，超限返回 503，默认 16（附录 E.1.3）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<u32>,
+    /// 人类可读描述。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// 校验 HttpEndpoint.auth 仅接受 none/user/admin（ADR §3.3 auth 枚举）。
+fn deserialize_http_auth<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    match raw.as_str() {
+        "none" | "user" | "admin" => Ok(raw),
+        other => Err(serde::de::Error::custom(format!(
+            "invalid http_endpoint auth '{other}': must be one of none/user/admin"
+        ))),
+    }
+}
+
+/// HTTP 端点默认超时（毫秒），ADR 附录 E.1.3。
+pub const HTTP_ENDPOINT_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// HTTP 端点默认并发上限，ADR 附录 E.1.3。
+pub const HTTP_ENDPOINT_DEFAULT_MAX_CONCURRENCY: u32 = 16;
+
+/// 已注册的 HTTP 路由描述符（运行时表示）。
+///
+/// 由 [`CapabilityRegistry`] 在注册期校验命名空间/denylist/冲突后产出，
+/// dispatcher（ADR §3.3）据此动态挂载 axum 路由并查询路由归属。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpRouteDescriptor {
+    /// 所属插件 id（命名空间归属，dispatcher 据此路由到该插件的 http.handle）。
+    pub plugin_id: String,
+    /// 原始端点声明。
+    pub endpoint: HttpEndpoint,
+    /// 解析后的超时（声明值或默认 30000ms）。
+    timeout_ms: u64,
+    /// 解析后的并发上限（声明值或默认 16）。
+    max_concurrency: u32,
+}
+
+impl HttpRouteDescriptor {
+    /// 创建描述符，应用 timeout/concurrency 默认值。
+    pub fn new(plugin_id: String, endpoint: HttpEndpoint) -> Self {
+        let timeout_ms = endpoint
+            .timeout_ms
+            .unwrap_or(HTTP_ENDPOINT_DEFAULT_TIMEOUT_MS);
+        let max_concurrency = endpoint
+            .max_concurrency
+            .unwrap_or(HTTP_ENDPOINT_DEFAULT_MAX_CONCURRENCY);
+        Self {
+            plugin_id,
+            endpoint,
+            timeout_ms,
+            max_concurrency,
+        }
+    }
+
+    /// 解析后的单请求超时（毫秒）。
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    /// 解析后的并发上限。
+    pub fn max_concurrency(&self) -> u32 {
+        self.max_concurrency
+    }
+}
+
+/// HTTP 端点入站请求（HTTP → 插件，ADR 附录 E.1.2）。
+///
+/// **铁律**：`raw_body` 是原始字节的 base64 编码，内核绝不反序列化 body 再转发。
+/// headers/query 全量透传，插件据此做验签（如企微 SHA1）与解密。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpHandleRequest {
+    /// HTTP 方法。
+    pub method: String,
+    /// 完整路径。
+    pub path: String,
+    /// 目标插件 id（dispatcher 路由查找后填入，生产 multiplexer 据此调对应插件 http.handle）。
+    pub plugin_id: String,
+    /// 原始 body 字节的 base64 编码（不做反序列化）。
+    pub raw_body: String,
+    /// 全量原始 headers（key → value，多值用逗号拼接或取首个）。
+    pub headers: HashMap<String, String>,
+    /// 查询参数（key → value）。
+    pub query: HashMap<String, String>,
+}
+
+/// HTTP 端点出站响应（插件 → HTTP 响应，ADR 附录 E.1.2）。
+///
+/// **铁律**：插件完全控制 status/headers/body（不限 JSON）。dispatcher 只透传，
+/// 不做内容包装。企微回包经 `encrypt_response` 产出加密 XML，由插件作为 body 返回。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpHandleResponse {
+    /// HTTP 状态码（插件控制）。
+    pub status: u16,
+    /// 响应 headers（插件控制）。
+    pub headers: HashMap<String, String>,
+    /// 响应 body（base64 编码的字节）。
+    pub body: String,
+    /// body 编码（统一 `base64`）。
+    pub body_encoding: String,
+}
+
+/// 插件 HTTP 处理能力（capability RPC `http.handle` 的进程内抽象）。
+///
+/// dispatcher（ADR §3.3）经此 trait 把入站请求交给插件。生产实现走 sidecar
+/// MCP（`tools/call("http.handle", ...)`）；测试用进程内实现验证透传链路。
+#[async_trait]
+pub trait HttpHandleCapability: Send + Sync {
+    /// 处理一个 HTTP 请求，返回插件自定义响应；出错返回错误字符串（dispatcher 记 502）。
+    async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String>;
 }
 
 fn default_priority() -> u32 {

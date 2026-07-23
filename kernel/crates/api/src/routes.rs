@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentos_core::traits::{
-    CapabilityRegistry, ConfigFileMapping, PluginInvoker, PluginManifest, PluginType,
-    StorageBackend,
+    CapabilityRegistry, ConfigFileMapping, HttpHandleCapability, PluginInvoker, PluginManifest,
+    PluginType, StorageBackend,
 };
 use agentos_core::types::{PipelineConfig, StepLibrary};
 use agentos_engine::AdrEngineImpl;
@@ -77,6 +77,9 @@ pub struct AppState {
     pub session: Option<Arc<agentos_session::SessionCoordinator>>,
     /// P2：入站路由器（user_input/interaction/stop 分发）。
     pub inbound_router: Option<Arc<agentos_session::router::InboundRouter>>,
+    /// P3：HTTP 端点 dispatcher 的插件处理能力（http.handle）。
+    /// None = 不挂载插件 HTTP 端点（仅内核静态路由）。
+    pub http_handler: Option<Arc<dyn HttpHandleCapability>>,
 }
 
 impl AppState {
@@ -98,6 +101,7 @@ impl AppState {
             project_root: None,
             session: None,
             inbound_router: None,
+            http_handler: None,
         }
     }
 
@@ -119,6 +123,7 @@ impl AppState {
             project_root: None,
             session: None,
             inbound_router: None,
+            http_handler: None,
         }
     }
 
@@ -176,6 +181,7 @@ impl AppState {
             project_root: Some(project_root),
             session: None,
             inbound_router: None,
+            http_handler: None,
         }
     }
 
@@ -191,6 +197,17 @@ impl AppState {
         Self {
             session: Some(session),
             inbound_router: Some(inbound_router),
+            ..self
+        }
+    }
+
+    /// P3：注入 HTTP 端点 dispatcher 的插件处理能力（`http.handle`）。
+    ///
+    /// 生产用 [`crate::http_dispatcher::SidecarHttpHandler`]（经 invoker 调插件）。
+    /// 未注入时不挂载插件 HTTP 端点（`build_router` 仅保留内核静态路由）。
+    pub fn with_http_handler(self, handler: Arc<dyn HttpHandleCapability>) -> Self {
+        Self {
+            http_handler: Some(handler),
             ..self
         }
     }

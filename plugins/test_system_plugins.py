@@ -33,7 +33,6 @@ _PLUGIN_CATEGORY_MAP: dict[str, str] = {
     "evaluation": "shared/system",
     "review": "shared/system",
     "builtin_tools": "shared/tools",
-    "channel_ws": "shared/tools",
     "triggers": "shared/tools",
 }
 
@@ -342,50 +341,14 @@ class TestTriggerPlugin:
 
 
 # ═══════════════════════════════════════════════════════════
-# AC-09-6: WebSocket 通道适配器
-# ═══════════════════════════════════════════════════════════
-
-class TestChannelPlugin:
-    """验证 WebSocket 通道适配器。"""
-
-    def test_channel_tools_registered(self) -> None:
-        mod = _load_plugin_module("channel_ws")
-        assert "channel.send_message" in mod.plugin._tools
-        assert "channel.receive" in mod.plugin._tools
-        assert "channel.broadcast" in mod.plugin._tools
-
-    def test_send_to_disconnected_client(self) -> None:
-        mod = _load_plugin_module("channel_ws")
-        result = _call_tool(
-            mod, "channel.send_message",
-            client_id="unknown_client",
-            message={"text": "hello"},
-        )
-        assert "error" in result
-
-    def test_broadcast_no_clients(self) -> None:
-        mod = _load_plugin_module("channel_ws")
-        result = _call_tool(
-            mod, "channel.broadcast",
-            message={"event": "update"},
-        )
-        assert result["sent_count"] == 0
-
-    def test_receive_empty(self) -> None:
-        mod = _load_plugin_module("channel_ws")
-        result = _call_tool(mod, "channel.receive")
-        assert result["count"] == 0
-
-
-# ═══════════════════════════════════════════════════════════
 # AC-09-1~6: manifest 校验
 # ═══════════════════════════════════════════════════════════
 
 class TestManifestValidation:
-    """验证全部 6 个插件的 plugin.json manifest 格式。"""
+    """验证全部 5 个插件的 plugin.json manifest 格式。"""
 
     @pytest.mark.parametrize("plugin_dir", [
-        "memory", "approval", "evaluation", "review", "triggers", "channel_ws",
+        "memory", "approval", "evaluation", "review", "triggers",
     ])
     def test_manifest_exists_and_valid(self, plugin_dir: str) -> None:
         manifest_path = _get_plugin_dir(plugin_dir) / "plugin.json"
@@ -403,7 +366,7 @@ class TestManifestValidation:
         assert len(manifest["capabilities"]["tools"]) > 0
 
     @pytest.mark.parametrize("plugin_dir", [
-        "memory", "approval", "evaluation", "review", "triggers", "channel_ws",
+        "memory", "approval", "evaluation", "review", "triggers",
     ])
     def test_server_exists(self, plugin_dir: str) -> None:
         server_path = _get_plugin_dir(plugin_dir) / "server.py"

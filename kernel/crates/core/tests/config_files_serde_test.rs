@@ -101,6 +101,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         requires_content: None,
         config_refs: vec![],
         config_files: vec![],
+        http_endpoints: vec![],
         ui_schema: None,
     };
 

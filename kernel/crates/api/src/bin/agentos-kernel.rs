@@ -198,6 +198,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         manifests.len()
     );
 
+    // P3：注册插件 HTTP 端点（ADR §3.3）——聚合报错（fail-closed，不逐个 panic）。
+    // 冲突/越界的路由会被 register_http_route 拒绝并收集到 errors；启动期若有错误则 panic
+    // 退出（与命名陷阱治理 D.4 的"启动期聚合报错"一致）。
+    let http_errors =
+        agentos_api::http_dispatcher::register_manifest_http_routes(&registry, &manifests);
+    let http_route_count = registry.list_http_routes().len();
+    if !http_errors.is_empty() {
+        panic!(
+            "插件 HTTP 端点注册失败（路由治理 fail-closed），拒绝启动内核:\n{}",
+            http_errors.join("\n")
+        );
+    }
+    info!(
+        target: "agentos-kernel",
+        "Registered {} plugin HTTP endpoints",
+        http_route_count
+    );
+
     // 初始化管道引擎
     // DEBT: 使用内存数据库，生产环境应使用持久化文件。ceiling: 进程重启丢失运行历史。
     // upgrade: 当需要跨重启会话持久化时，切换到 SqliteStore::open("agentos.db")。
@@ -258,6 +276,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| PathBuf::from("."));
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
     let invoker_dyn: Arc<dyn agentos_core::traits::PluginInvoker> = invoker.clone();
+    // P3：HTTP 端点 dispatcher 的生产 handler（经 invoker 调插件 http.handle）
+    let http_handler: Arc<dyn agentos_core::traits::HttpHandleCapability> =
+        Arc::new(agentos_api::http_dispatcher::SidecarHttpHandler::new(
+            invoker_dyn.clone(),
+        ));
     let state = AppState::with_plugins(
         manifests.clone(),
         registry,
@@ -269,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugin_ids,
         project_root,
     )
+    .with_http_handler(http_handler)
     // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）
     .enable_session();
     start_server(addr, state).await?;

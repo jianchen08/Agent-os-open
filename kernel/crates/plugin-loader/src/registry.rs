@@ -6,19 +6,30 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use agentos_core::traits::{
-    CapabilityRegistry, Dependency, DependencyError, DependencyResolver, ResourceDescriptor,
-    ToolDescriptor,
+    CapabilityRegistry, Dependency, DependencyError, DependencyResolver, HttpEndpoint,
+    HttpRouteDescriptor, ResourceDescriptor, ToolDescriptor,
 };
 use agentos_core::types::{RouteType, ToolCategory};
 use parking_lot::RwLock;
 use tracing::info;
 
+/// 内核保留路径段 denylist（ADR 附录 E.1.3）：插件端点 path 任一段命中即拒。
+const KERNEL_RESERVED_PATH_SEGMENTS: &[&str] = &["ws", "health"];
+
+/// HTTP 路由 key：path + method 唯一标识一个端点（ADR §3.3：path+method 才算冲突）。
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RouteKey {
+    path: String,
+    method: String,
+}
+
 /// 能力注册表实现。
 ///
-/// 管理三类能力：
+/// 管理四类能力：
 /// 1. Tools: 工具插件/系统插件提供的工具
 /// 2. Resources: 插件暴露的数据源
 /// 3. RouteSignals: 管道插件声明的路由信号
+/// 4. HttpRoutes: 插件贡献的 HTTP 端点（ADR §3.3）
 pub struct CapabilityRegistryImpl {
     tools: RwLock<HashMap<String, ToolDescriptor>>,
     tools_by_plugin: RwLock<HashMap<String, Vec<String>>>,
@@ -26,6 +37,10 @@ pub struct CapabilityRegistryImpl {
     resources_by_plugin: RwLock<HashMap<String, Vec<String>>>,
     route_signals: RwLock<HashSet<RouteType>>,
     route_signals_by_plugin: RwLock<HashMap<String, Vec<RouteType>>>,
+    /// HTTP 端点维度（ADR §3.3）：RouteKey → 已注册描述符。
+    http_routes: RwLock<HashMap<RouteKey, HttpRouteDescriptor>>,
+    /// 插件 → 其注册的 RouteKey 列表（注销时清除用）。
+    http_routes_by_plugin: RwLock<HashMap<String, Vec<RouteKey>>>,
 }
 
 impl CapabilityRegistryImpl {
@@ -37,6 +52,8 @@ impl CapabilityRegistryImpl {
             resources_by_plugin: RwLock::new(HashMap::new()),
             route_signals: RwLock::new(HashSet::new()),
             route_signals_by_plugin: RwLock::new(HashMap::new()),
+            http_routes: RwLock::new(HashMap::new()),
+            http_routes_by_plugin: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -130,6 +147,61 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
         self.route_signals.read().contains(signal)
     }
 
+    fn register_http_route(
+        &self,
+        plugin_id: &str,
+        endpoint: HttpEndpoint,
+    ) -> Result<HttpRouteDescriptor, String> {
+        // 路由治理（ADR 附录 E.1.3）：注册期校验命名空间 + denylist。
+        if let Err(reason) = validate_http_route_path(plugin_id, &endpoint.path) {
+            info!(
+                "HTTP route rejected: plugin={} path={} reason={}",
+                plugin_id, endpoint.path, reason
+            );
+            return Err(reason);
+        }
+
+        let key = RouteKey {
+            path: endpoint.path.clone(),
+            method: endpoint.method.clone(),
+        };
+        let descriptor = HttpRouteDescriptor::new(plugin_id.to_string(), endpoint);
+
+        let mut routes = self.http_routes.write();
+        // 冲突检测：同 path+method fail-closed（不静默覆盖）。
+        if routes.contains_key(&key) {
+            let reason = format!(
+                "http route conflict: {} {} already registered (plugin={})",
+                key.method, key.path, plugin_id
+            );
+            info!("{}", reason);
+            return Err(reason);
+        }
+        routes.insert(key.clone(), descriptor.clone());
+        self.http_routes_by_plugin
+            .write()
+            .entry(plugin_id.to_string())
+            .or_default()
+            .push(key);
+        info!(
+            "HTTP route registered: plugin={} {} {}",
+            plugin_id, descriptor.endpoint.method, descriptor.endpoint.path
+        );
+        Ok(descriptor)
+    }
+
+    fn list_http_routes(&self) -> Vec<HttpRouteDescriptor> {
+        self.http_routes.read().values().cloned().collect()
+    }
+
+    fn find_http_route(&self, path: &str, method: &str) -> Option<HttpRouteDescriptor> {
+        let key = RouteKey {
+            path: path.to_string(),
+            method: method.to_string(),
+        };
+        self.http_routes.read().get(&key).cloned()
+    }
+
     fn clear_plugin(&self, plugin_id: &str) {
         self.unregister_tools(plugin_id);
         self.unregister_resources(plugin_id);
@@ -140,7 +212,52 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
                 sig_set.remove(sig);
             }
         }
+        // 清除 HTTP 路由
+        let mut http_by_plugin = self.http_routes_by_plugin.write();
+        if let Some(keys) = http_by_plugin.remove(plugin_id) {
+            let mut routes = self.http_routes.write();
+            for k in &keys {
+                routes.remove(k);
+            }
+        }
     }
+}
+
+/// 校验插件 HTTP 端点 path（ADR 附录 E.1.3 路由治理）。
+///
+/// 规则（注册期逐项校验，不符即拒绝）：
+/// 1. **强制命名空间**：path 必须以 `/ext/{plugin_id}/` 为前缀（或恰好 `/ext/{plugin_id}`）；
+/// 2. **denylist 段**：path 拆段后不得含内核保留段 `ws` / `health`；
+/// 3. **denylist 子路径**：path 不得包含 `api/v1`（防 `/ext/{pid}/api/v1/...` 越界）。
+fn validate_http_route_path(plugin_id: &str, path: &str) -> Result<(), String> {
+    // 规则 1：强制 /ext/{plugin_id}/** 命名空间。
+    let expected_ns = format!("/ext/{}/", plugin_id);
+    let exact_ns = format!("/ext/{}", plugin_id);
+    if path != exact_ns && !path.starts_with(&expected_ns) {
+        return Err(format!(
+            "http route path '{}' must be under namespace '/ext/{}/**'",
+            path, plugin_id
+        ));
+    }
+
+    // 规则 2：denylist 段（ws / health）。
+    for seg in path.split('/') {
+        if KERNEL_RESERVED_PATH_SEGMENTS.contains(&seg) {
+            return Err(format!(
+                "http route path '{}' contains kernel-reserved segment '{}'",
+                path, seg
+            ));
+        }
+    }
+
+    // 规则 3：denylist 子路径 api/v1（覆盖 /api/v1/* 与 /ext/{pid}/api/v1/*）。
+    if path.contains("api/v1") {
+        return Err(format!(
+            "http route path '{}' contains kernel-reserved subpath 'api/v1'",
+            path
+        ));
+    }
+    Ok(())
 }
 
 /// 依赖解析器实现。

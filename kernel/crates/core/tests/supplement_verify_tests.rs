@@ -63,6 +63,7 @@ fn make_test_manifest(
         requires_content,
         config_refs: vec![],
         config_files: vec![],
+        http_endpoints: vec![],
         ui_schema: None,
     }
 }

@@ -725,6 +725,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         }
     }
@@ -748,6 +749,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         }
     }
@@ -863,6 +865,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         };
         loader.add_manifest(manifest);
@@ -1022,6 +1025,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: files,
+            http_endpoints: vec![],
             ui_schema: None,
         }
     }

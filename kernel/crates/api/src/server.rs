@@ -53,8 +53,12 @@ pub struct WsResponse {
 }
 
 /// 构建 API 路由树。
+///
+/// P3（ADR §3.3）：内核静态路由 + 扫描 `http_routes` 动态挂载插件端点。
+/// 动态端点统一走 `dispatch_http`（raw body/headers 透传 + 插件自定义响应 +
+/// per-endpoint timeout/concurrency）。
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let static_router = Router::new()
         // AC-06-3: 健康检查
         .route("/health", get(health_handler))
         // AC-06-5: Schema 聚合端点
@@ -76,8 +80,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/refresh", post(refresh_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
-        .route("/api/v1/auth/register", post(register_handler))
-        .with_state(state)
+        .route("/api/v1/auth/register", post(register_handler));
+
+    // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
+    let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
+    router.with_state(state)
 }
 
 /// WebSocket 连接处理器（AC-06-4）。

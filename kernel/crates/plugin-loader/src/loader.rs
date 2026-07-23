@@ -702,6 +702,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
@@ -728,6 +729,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_err());
@@ -755,6 +757,7 @@ mod tests {
             requires_content: None,
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
@@ -897,6 +900,7 @@ mod tests {
             requires_content: Some(2),
             config_refs: vec![],
             config_files: vec![],
+            http_endpoints: vec![],
             ui_schema: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());

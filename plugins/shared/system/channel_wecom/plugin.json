@@ -20,5 +20,25 @@
     "permissions": {},
     "error_policy": "skip",
     "priority": 50,
-    "requires_content": 5
+    "requires_content": 5,
+    "http_endpoints": [
+        {
+            "route_id": "wecom_callback",
+            "method": "POST",
+            "path": "/ext/channel_wecom/callback",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 30000,
+            "max_concurrency": 16,
+            "description": "企微事件回调入口（加密 XML raw body，插件验签+解密+encrypt_response 回包）"
+        },
+        {
+            "route_id": "wecom_verify",
+            "method": "GET",
+            "path": "/ext/channel_wecom/callback",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "description": "企微 URL 验证（query 透传，插件解密 echostr 回明文）"
+        }
+    ]
 }

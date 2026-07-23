@@ -29,6 +29,7 @@ fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
         requires_content: None,
         config_refs: vec![],
         config_files: files,
+        http_endpoints: vec![],
         ui_schema: None,
     }
 }

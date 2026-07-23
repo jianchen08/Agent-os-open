@@ -35,6 +35,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         requires_content: None,
         config_refs: vec![],
         config_files: files,
+        http_endpoints: vec![],
         ui_schema: None,
     }
 }
