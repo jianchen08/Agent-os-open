@@ -139,7 +139,7 @@ export function trimMessagesForPersistence(
 }
 
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
-const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 300
+const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
 
 /** 限制单管道内存消息数，防止无限增长导致浏览器 OOM。 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次 */
 function capMessagesForMemory(msgs: Message[]): Message[] {
@@ -272,8 +272,12 @@ interface PipelineMessageState {
 }
 
 /**
- * 过滤完全空白的 assistant 消息（无 content、无 parts、非 streaming）。
+ * 过滤完全空白的 assistant 消息（无 content、无 parts、无 toolCalls、无 thinking、非 streaming）。
  * 这些消息来自后端记录但不包含可渲染内容，渲染为空气泡。
+ *
+ * 注意：assistant 可能 content 为空但有 toolCalls（发起工具调用）或 thinking
+ * （纯思考）。子任务管道大量存在这种消息，若只检查 content/parts 会误删，
+ * 导致消息丢失。必须检查 toolCalls 和 thinking。
  */
 function filterBlankMessages(messages: Message[]): Message[] {
   return messages.filter((m) => {
@@ -281,7 +285,9 @@ function filterBlankMessages(messages: Message[]): Message[] {
     if (m.status === 'streaming') return true
     const hasContent = m.content && m.content.trim()
     const hasParts = m.parts && m.parts.length > 0
-    return hasContent || hasParts
+    const hasToolCalls = m.toolCalls && m.toolCalls.length > 0
+    const hasThinking = m.thinking && (m.thinking.content || '').trim()
+    return hasContent || hasParts || hasToolCalls || hasThinking
   })
 }
 
@@ -780,14 +786,18 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       }
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      // 含 clientMessageId 对账（与 appendMessages 共用 mergeIncrementalApiWithLocal）。
+      // 合并新旧消息（保留已有 + 去重新增），不做 mergePreservingStreaming 二次合并——
+      // 它内部的 mergeConsecutiveAssistantMessages 会把跨页边界的连续 assistant
+      // 合并成一条，子管道（全是连续 tool 调用）50+50=100 条会被合并成 1-2 条，
+      // 导致向上加载后消息几乎全丢。连续 assistant 的气泡合并由渲染层负责，
+      // 数据层保持原始消息、sequence 连续。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
-      // 跨边界合并保留 streaming 流式片段。
-      let finalMerged = mergePreservingStreaming(merged)
-      // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
-      finalMerged = filterBlankMessages(finalMerged)
-      // 内存封顶：翻页累计超量时丢弃最老消息，防止撑爆内存（OOM）
-      finalMerged = capMessagesForMemory(finalMerged)
+      // 过滤空白 assistant 消息（无 content 无 parts 无 toolCalls），避免空气泡
+      let finalMerged = filterBlankMessages(merged)
+      console.log('[诊断-prepend]', pipelineId?.slice(0,12),
+        '新:', sorted.length, '已有:', existing.length,
+        'merge后:', merged.length, 'filter后:', finalMerged.length,
+        'seq:', finalMerged.length ? finalMerged[0].sequence+'~'+finalMerged[finalMerged.length-1].sequence : '空')
       const topCursor = finalMerged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {
@@ -973,8 +983,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     const existingCount = (state.messagesByPipeline[pipelineId] || []).length
 
     // 流式保护：流式输出中且已有实质消息时跳过所有 API 调用。
-    // 切换会话：显示当前流式进度，不覆盖。
-    // WS 重连场景传 skipStreamingCheck=true 强制加载。
     if (!skipStreamingCheck && state.isStreaming(pipelineId) && existingCount > 1) {
       return { ok: true }
     }

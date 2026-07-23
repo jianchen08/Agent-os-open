@@ -438,9 +438,12 @@ export async function getMessages(
     const mapped = rawMessages.map((msg: BackendMessageResponse) =>
       mapBackendMessageToMessage(msg, sessionId),
     )
-    const merged = mergeConsecutiveAssistantMessages(mapped)
+    // 数据层不合并：mergeConsecutiveAssistantMessages 会把子管道 50 条连续
+    // assistant+tool 合成 1-2 条，合并后只保留组内第一条的 sequence，中间
+    // sequence 丢失 → before_sequence 游标跳过中间消息 → 「加载到上面消息丢失」。
+    // 合并移到渲染层，数据层保持原始消息、sequence 连续。
     return {
-      messages: merged,
+      messages: mapped,
       total: response.data.total ?? rawMessages.length,
       has_more: response.data.has_more ?? false,
     }

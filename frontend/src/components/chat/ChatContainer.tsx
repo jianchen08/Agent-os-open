@@ -184,9 +184,15 @@ export const ChatContainer = ({
   const effectiveMaxTokens = modelContextWindow
   const effectiveTokenCount = effectiveTokenUsage
 
-  /** 统一消息源：只使用 pipelineMessageStore 所有消息（流式、API 加载、历史翻页）统一通过 pipelineMessageStore 管理， */
+  /**
+   * 统一消息源：保留所有消息（含 tool）。
+   * tool 消息不再在此过滤——渲染层（MessageList）的 mergeConsecutiveAssistantMessages
+   * 需要它们来把 tool 结果注入 assistant 的 tool_call part。旧架构在数据层
+   * （apiGetMessages）就合并删除了 tool，所以这里 filter 是兜底；现在数据层
+   * 不合并，filter 会把 tool 消息全删导致子管道消息大量丢失。
+   */
   const activeMessages = useMemo(() => {
-    return pipelineMessages.filter((m: any) => m.role !== 'tool')
+    return pipelineMessages
   }, [pipelineMessages])
 
   /** 将 store Tab 映射为 AgentTabBar 所需格式 */

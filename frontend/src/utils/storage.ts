@@ -294,6 +294,26 @@ export const uiStorage = {
   },
 
   /**
+   * 保存工作区面板宽度比例（传 undefined 会清除记录）
+   * @param ratio - 比例（0~1，相对 splitter 容器）
+   */
+  setWorkspacePanelRatio(ratio: number | undefined): void {
+    storage.setItem(STORAGE_KEYS.WORKSPACE_PANEL_RATIO, ratio)
+  },
+
+  /**
+   * 获取工作区面板宽度比例
+   * @returns 比例（0~1）或null（非法或未设置）
+   */
+  getWorkspacePanelRatio(): number | null {
+    const ratio = storage.getItem<number>(STORAGE_KEYS.WORKSPACE_PANEL_RATIO)
+    if (typeof ratio !== 'number' || !Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
+      return null
+    }
+    return ratio
+  },
+
+  /**
    * 保存思考模式启用状态
    * @param enabled - 是否启用
    */

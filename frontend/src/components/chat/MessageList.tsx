@@ -16,8 +16,9 @@
  */
 
 import { Loader2 } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { logger as loggerService } from '@/utils/logger'
+import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
 
@@ -65,6 +66,24 @@ export const MessageList = ({
   tabId,
   taskId,
 }: ExtendedMessageListProps) => {
+  /**
+   * 渲染用消息：合并连续 assistant 为一个气泡（工具调用链显示为一条消息）。
+   * 只影响渲染，不改 store 的原始数据——store 保持原始 sequence 保证
+   * before_sequence 翻页正常（数据层不合并，渲染层合并，彻底解耦）。
+   */
+  const displayMessages = useMemo(
+    () => mergeConsecutiveAssistantMessages(messages),
+    [messages],
+  )
+  // [诊断] 对比 store 原始条数 vs 合并后条数，定位丢失在哪层
+  useEffect(() => {
+    if (messages.length > 0) {
+      console.log('[诊断-渲染层]', 'store原始:', messages.length,
+        '合并后:', displayMessages.length,
+        'seq范围:', messages.length ? messages[0].sequence+'~'+messages[messages.length-1].sequence : '空')
+    }
+  }, [messages.length, displayMessages.length])
+
   const scrollRef = useRef<HTMLDivElement>(null)
   /** 是否在底部附近（距底部 150px 内） */
   const isNearBottom = useRef(true)
@@ -103,10 +122,10 @@ export const MessageList = ({
    */
   const lastScrollTopRef = useRef(0)
 
-  /** 渲染单个消息项 */
+  /** 渲染单个消息项（index 基于 displayMessages） */
   const renderItem = useCallback(
-    (message: any, index: number) => {
-      const isLast = index === messages.length - 1
+    (message: any, index: number, total: number) => {
+      const isLast = index === total - 1
       return (
         <div className="group" key={`${message.id}-${message.sequence ?? index}`}>
           <MessageItem
@@ -357,11 +376,13 @@ export const MessageList = ({
           </div>
         )}
 
-        {/* 消息列表 */}
-        {messages.map((message, index) => renderItem(message, index))}
+        {/* 消息列表（渲染合并后的气泡，连续 assistant 合为一条） */}
+        {displayMessages.map((message, index) =>
+          renderItem(message, index, displayMessages.length),
+        )}
 
         {/* 底部加载占位 */}
-        {isGenerating && messages[messages.length - 1]?.role === 'user' && (
+        {isGenerating && displayMessages[displayMessages.length - 1]?.role === 'user' && (
           <div className="flex items-start gap-3 px-4 py-3">
             <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
               <Loader2 className="text-primary h-4 w-4 animate-spin" />
