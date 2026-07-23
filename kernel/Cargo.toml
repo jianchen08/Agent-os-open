@@ -9,6 +9,7 @@ members = [
     "crates/api",
     "crates/hooks",
     "crates/engine",
+    "crates/session",
     "crates/integration-tests",
 ]
 resolver = "2"
@@ -46,4 +47,5 @@ agentos-invoker = { path = "crates/invoker" }
 agentos-engine = { path = "crates/engine" }
 agentos-tenant = { path = "crates/tenant" }
 agentos-api = { path = "crates/api" }
+agentos-session = { path = "crates/session" }
 agentos-hooks = { path = "crates/hooks" }

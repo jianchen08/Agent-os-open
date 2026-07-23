@@ -18,6 +18,7 @@ pub mod error;
 pub mod pipeline_loader;
 pub mod routes;
 pub mod server;
+pub mod ws_session;
 
 pub use auth::{
     login_handler, logout_handler, me_handler, refresh_handler, register_handler, RefreshResponse,

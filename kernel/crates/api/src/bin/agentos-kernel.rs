@@ -268,7 +268,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store_dyn,
         plugin_ids,
         project_root,
-    );
+    )
+    // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）
+    .enable_session();
     start_server(addr, state).await?;
 
     Ok(())

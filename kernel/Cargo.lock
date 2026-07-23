@@ -11,6 +11,7 @@ dependencies = [
  "agentos-invoker",
  "agentos-mcp",
  "agentos-plugin-loader",
+ "agentos-session",
  "agentos-tenant",
  "async-trait",
  "axum",
@@ -174,6 +175,21 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "agentos-session"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
