@@ -65,6 +65,8 @@ class IsolationPolicyLoader:
         path = self._config_path
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🔴 高危——工具/分类隔离策略直读，迁移前提同 manager #2。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #5，延后 P6。
 
             rel = str(path).replace("\\", "/")
             if "config/" in rel:
@@ -86,6 +88,9 @@ class IsolationPolicyLoader:
         """注册 config_center watcher，配置变更时自动 reload。"""
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🔴 高危——隔离策略热重载 watcher。注入模型(plugin.get_config)
+            # 无 watch 接口，P6 需改用 schema_updated WS 事件触发 reload。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #6，延后 P6。
 
             get_config_center().watch("isolation/", self._on_config_changed)
             logger.debug("[IsolationPolicyLoader] 已注册 config_center watcher")

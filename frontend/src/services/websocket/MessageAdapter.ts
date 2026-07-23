@@ -37,6 +37,18 @@ export interface AdaptedWSMessage {
   metadata?: Record<string, unknown>
 }
 
+/** widget_event 适配结果（P2 协议：插件向 UI 推送的 widget 交互事件） */
+export interface AdaptedWidgetEvent {
+  /** 触发事件的 widget 实例 id（插件内唯一） */
+  widget_id?: string
+  /** 事件名（如 doc_loaded / value_changed） */
+  event?: string
+  /** 事件载荷 */
+  data: Record<string, unknown>
+  /** 全局序号（P2 传输层顺序保证用，可选） */
+  sequence?: number
+}
+
 /**
  * 判断消息是否为 Rust 内核格式（含 data 包装层）
  *
@@ -115,5 +127,49 @@ export function adaptOutgoingMessage(msg: Record<string, unknown>): {
     type: type as string,
     data: rest,
     metadata: metadata as Record<string, unknown> | undefined,
+  }
+}
+
+// ── widget_event 族（P2 协议）──
+//
+// P2 后端将下发：{ type: "widget_event", data: { widget_id, event, data }, sequence }
+// data 包装层是 Rust 0.2 格式，但顶层 sequence 字段在通用 adaptIncomingMessage
+// 中会被丢弃（Rust 分支只保留 data/metadata），故提供专用 adaptWidgetEvent
+// 显式提取 widget_id / event / payload / sequence。
+
+/**
+ * 判断消息是否为 widget_event 族。
+ *
+ * @param msg - 原始消息
+ * @returns 是否为 widget_event
+ */
+export function isWidgetEvent(msg: Record<string, unknown>): boolean {
+  return msg?.type === 'widget_event'
+}
+
+/**
+ * 适配 widget_event 消息，提取 widget_id / event / payload / sequence。
+ *
+ * @param raw - 原始 WebSocket 消息
+ * @returns 适配后的 widget 事件，非 widget_event 或缺 data 包装时返回 null
+ */
+export function adaptWidgetEvent(raw: RawWSMessage): AdaptedWidgetEvent | null {
+  if (!raw || typeof raw !== 'object') return null
+  if (raw.type !== 'widget_event') return null
+
+  const data = raw.data
+  // widget_event 走 Rust 0.2 格式（必须有 data 包装层）；无 data 视为无效格式
+  if (!data || typeof data !== 'object') return null
+  const payload = data as Record<string, unknown>
+
+  const inner = payload.data
+  return {
+    widget_id: payload.widget_id as string | undefined,
+    event: payload.event as string | undefined,
+    data:
+      inner && typeof inner === 'object'
+        ? (inner as Record<string, unknown>)
+        : {},
+    sequence: typeof raw.sequence === 'number' ? (raw.sequence as number) : undefined,
   }
 }

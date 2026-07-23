@@ -34,4 +34,10 @@ export type {
 // ===== Schema 路由表（0.2 新增）=====
 export { SchemaRouter, schemaRouter } from './SchemaRouter'
 
-
+// ===== 插件能力聚合注册表（task_11 P1-6 新增，数据层非视觉）=====
+export { ContributionRegistry, contributionRegistry } from './ContributionRegistry'
+export type {
+  ContributionConfigFile,
+  ContributionPluginConfig,
+  ContributionWidget,
+} from './ContributionRegistry'

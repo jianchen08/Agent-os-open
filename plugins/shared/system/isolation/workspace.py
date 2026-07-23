@@ -19,6 +19,8 @@ def _load_isolation_config() -> dict:
     """通过 ConfigCenter 读取 isolation 配置（统一缓存）。"""
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+        # P1-7 DEBT(task_11): 🔴 高危——workspace 隔离配置直读，迁移前提同 manager #2。
+        # 见 docs/working/p1_7_config_center_migration_checklist.md #7，延后 P6。
 
         return get_config_center().get("isolation/isolation_config.yaml") or {}
     except Exception as e:

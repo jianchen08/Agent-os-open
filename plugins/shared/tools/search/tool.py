@@ -881,6 +881,9 @@ class ResourceSearchTool:
             import yaml  # noqa: F401,PLC0415
 
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🟢 低危——builtin_tools 配置直读（缺失走关键词检索兜底）。
+            # 迁移需 manifest 加 config_files + search server 加 _on_load 注入到工具实例。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #10，延后 P6。
 
             config = get_config_center().get("tools/builtin_tools_config.yaml")
             if not config:
@@ -1014,6 +1017,9 @@ class ResourceSearchTool:
             import yaml  # noqa: F401,PLC0415
 
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🟢 低危——外部检索配置直读（缺失返回 None，禁用外部检索）。
+            # 迁移前提同 #10。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #11，延后 P6。
 
             config = get_config_center().get("tools/search/resource_search.yaml")
             if not config:

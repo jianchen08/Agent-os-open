@@ -319,6 +319,11 @@ export const API_ENDPOINTS = {
     /** 获取聚合 Schema（含插件 ui_schema 声明） */
     GET: '/api/v1/schema',
   },
+  /** 插件配置相关 - 对应后端 /api/v1/plugins/{id}/config/{file_id} 端点（ADR §4.3） */
+  PLUGIN_CONFIG: {
+    /** 取/存某个插件的某个配置文件；需填充 pluginId 与 fileId */
+    FILE: (pluginId: string, fileId: string) => `/api/v1/plugins/${pluginId}/config/${fileId}`,
+  },
   /** 悬浮窗相关 - 对应后端 /api/v1/floating-chat/* */
   FLOATING_CHAT: {
     /** 获取悬浮窗状态 */

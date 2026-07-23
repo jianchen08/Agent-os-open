@@ -99,6 +99,9 @@ def load_cost_control_config(config_path: str | None = None) -> CostControlConfi
 
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+        # P1-7 DEBT(task_11): 🟢 低危——cost_control 配置直读（磁盘无此文件时走默认预算，
+        # 行为符合预期）。迁移需 manifest 加 config_files 映射 + load 改读注入。
+        # 见 docs/working/p1_7_config_center_migration_checklist.md #8，延后 P6。
 
         rel = config_path.replace("config/", "", 1) if config_path.startswith("config/") else config_path
         data = get_config_center().get(rel) or {}

@@ -90,6 +90,9 @@ class WebTool(BuiltinTool):
     def from_config(cls, config_path: str | None = None) -> "WebTool":
         """从配置文件创建 WebTool 实例（通过 ConfigCenter 统一缓存）"""
         from config.config_center import get_config_center  # noqa: PLC0415
+        # P1-7 DEBT(task_11): 🟢 低危——WebTool 配置直读（缺失走默认配置 cls()）。
+        # 迁移需 manifest 加 config_files + web_ext server 加 _on_load 注入。
+        # 见 docs/working/p1_7_config_center_migration_checklist.md #12，延后 P6。
 
         rel = (config_path or cls.DEFAULT_CONFIG_PATH).replace("config/", "", 1)
         try:

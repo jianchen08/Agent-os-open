@@ -191,6 +191,10 @@ class TimerManager:
         """
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🟢 低危——task_service 已声明 config_refs:["system"]，
+            # 内核会注入 system 节；但 TimerManager 是单例自加载，_on_load 没把注入配置
+            # 穿进来。迁移需 _on_load 把 config["system"]["long_term_task"] 穿给单例。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #9，延后 P6。
 
             config = get_config_center().get("system/long_term_task.yaml")
             if config and isinstance(config, dict):

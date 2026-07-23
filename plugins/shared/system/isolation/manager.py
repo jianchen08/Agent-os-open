@@ -35,6 +35,9 @@ def _load_provider_config() -> dict[str, Any]:
     """从配置文件加载提供者配置（通过 ConfigCenter 统一缓存）。"""
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+        # P1-7 DEBT(task_11): 🔴 高危——隔离提供者配置直读，迁移需 manifest 加 config_files
+        # + _on_load 把 plugin.get_config() 穿给 IsolationManager，否则容器隔离策略空。
+        # 见 docs/working/p1_7_config_center_migration_checklist.md #2，整体延后 P6。
 
         config = get_config_center().get("isolation/isolation_config.yaml") or {}
         providers_config = config.get("providers", {})
@@ -172,6 +175,8 @@ class IsolationManager:
             if config_path:
                 try:
                     from config.config_center import get_config_center  # noqa: PLC0415
+                    # P1-7 DEBT(task_11): 🔴 高危——隔离提供者配置直读（动态 path 分支），
+                    # 迁移前提同 #2。见 docs/working/p1_7_config_center_migration_checklist.md #3。
 
                     # config_path 可能是绝对路径或相对路径，ConfigCenter 统一解析
                     rel = str(config_path).replace("\\", "/")

@@ -221,6 +221,8 @@ class PermissionPolicyManager:
         """
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🔴 高危——权限策略直读，迁移前提同 #2。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #4，延后 P6。
 
             config = get_config_center().get("isolation/isolation_config.yaml") or {}
             policies_section = config.get("permission_policies", {})

@@ -69,6 +69,10 @@ def load_adapter_configs(
 
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
+        # P1-7 DEBT(task_11): 🟢 低危——适配器配置直读（缺失返回空适配器表）。
+        # 注：connectors manifest 已声明 config_files（godot/vscode），但本处读的是
+        # capability_adapters.yaml（另一个文件）。迁移需 manifest 追加该文件映射 + server 穿配置。
+        # 见 docs/working/p1_7_config_center_migration_checklist.md #13，延后 P6。
 
         rel = str(path).replace("\\", "/")
         if "config/" in rel:

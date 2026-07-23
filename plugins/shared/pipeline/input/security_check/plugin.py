@@ -162,6 +162,9 @@ class SecurityCheckPlugin(IInputPlugin):
         rel = rules_path.replace("config/", "", 1) if rules_path.startswith("config/") else rules_path
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
+            # P1-7 DEBT(task_11): 🔴 高危——安全规则直读，迁移需 manifest 加 config_files
+            # 映射 + _load_rules 改读注入的 plugin.get_config()，否则规则空=安全闸门失效。
+            # 见 docs/working/p1_7_config_center_migration_checklist.md #1，整体延后 P6。
 
             data = get_config_center().get(rel)
             if data and "rules" in data:

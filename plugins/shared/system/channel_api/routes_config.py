@@ -20,6 +20,9 @@ from deps import APIError, require_auth
 # 完整运行时由 PYTHONPATH 提供。Sidecar 模式下 server.py 不导入此模块。
 # ceiling: routes_config.py 无法在 sidecar 模式下直接 import。
 # upgrade: 当 config 迁移为独立插件后，通过 MCP 调用替换直接 import。
+# P1-7(task_11): 本模块的 get_config_center() 调用是**主进程 FastAPI 路由**（/api/v1/config）
+# 合法用法，不属 ADR §E.3 的"13 处 sidecar 绕过"——P6 迁移清单不收此处（见
+# docs/working/p1_7_config_center_migration_checklist.md "保留"小节）。
 try:
     from config.config_center import get_config_center
 except ImportError:
