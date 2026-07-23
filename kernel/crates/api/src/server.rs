@@ -8,6 +8,7 @@
 //! [来源: docs/tasks/task_07_llm_api.md]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::{
     extract::{
@@ -80,19 +81,53 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// WebSocket 连接处理器（AC-06-4）。
+///
+/// P2：若 AppState 启用了 session（`enable_session`），走内核化会话路径
+/// （握手鉴权 + 连接注册 + 入站路由）；否则降级为旧 echo/engine 路径（兼容）。
 async fn ws_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    // P2 内核化路径
+    if let (Some(session), Some(router)) = (state.session.clone(), state.inbound_router.clone()) {
+        let token = params.get("token").cloned();
+        return ws
+            .on_upgrade(move |socket| run_p2_ws_session(socket, session, router, token));
+    }
+    // 降级路径（旧 echo/engine，未启用 session 时）
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
+}
+
+/// P2 内核化 WS 会话包装：握手鉴权 + 会话运行 + 拒绝时 accept+close。
+async fn run_p2_ws_session(
+    socket: WebSocket,
+    session: Arc<agentos_session::SessionCoordinator>,
+    router: Arc<agentos_session::router::InboundRouter>,
+    token: Option<String>,
+) {
+    let mut user_id = None;
+    let (code, reason) = crate::ws_session::run_ws_session(
+        socket,
+        session,
+        router,
+        token.as_deref(),
+        &mut user_id,
+    )
+    .await;
+    if code != 1000 {
+        info!(code, reason = %reason, "WS 握手拒绝（P2 内核化路径）");
+    }
+    // 握手拒绝时 run_ws_session 已提前返回，socket 尚未 accept；
+    // axum WebSocketUpgrade 在 on_upgrade 回调里已 accept，拒绝码仅作日志。
 }
 
 /// 根据请求头解析当前租户上下文。
 ///
 /// 多租户 P0-4：从 Authorization token 解析（或回退到默认租户），
 /// 注入到 [`agentos_tenant::scope`] 后，engine/store 通过 task_local 读取。
-fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> TenantContext {
+pub(crate) fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> TenantContext {
     TenantContext::new(resolve_request_tenant_id(headers), session_id)
 }
 
@@ -110,7 +145,7 @@ fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> TenantContext {
 ///
 /// 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
 /// 时走 echo-fallback，标注降级原因。
-async fn process_via_engine(state: &AppState, message: &str, agent_id: &str) -> String {
+pub(crate) async fn process_via_engine(state: &AppState, message: &str, agent_id: &str) -> String {
     let invoker = match state.invoker.clone() {
         Some(i) => i,
         None => {

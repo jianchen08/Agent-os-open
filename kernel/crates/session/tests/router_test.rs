@@ -1,0 +1,163 @@
+//! 入站路由测试——user_input/interaction_response/stop_generation/heartbeat 分发（ADR §7.2）。
+
+use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};
+use async_trait::async_trait;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+/// 记录型 mock dispatcher，捕获每次调用。
+#[derive(Default)]
+struct MockDispatcher {
+    user_inputs: Arc<Mutex<Vec<(String, String, String)>>>, // (thread_id, user_id, content)
+    interactions: Arc<Mutex<Vec<(String, String)>>>,        // (thread_id, request_id)
+    stops: Arc<Mutex<Vec<String>>>,                          // thread_id
+}
+
+#[async_trait]
+impl PipelineDispatcher for MockDispatcher {
+    async fn dispatch_user_input(
+        &self,
+        thread_id: &str,
+        user_id: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.user_inputs
+            .lock()
+            .unwrap()
+            .push((thread_id.into(), user_id.into(), content.into()));
+        Ok(())
+    }
+    async fn dispatch_interaction_response(
+        &self,
+        thread_id: &str,
+        request_id: &str,
+    ) -> Result<(), String> {
+        self.interactions
+            .lock()
+            .unwrap()
+            .push((thread_id.into(), request_id.into()));
+        Ok(())
+    }
+    async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String> {
+        self.stops.lock().unwrap().push(thread_id.into());
+        Ok(())
+    }
+}
+
+fn router() -> (InboundRouter, Arc<MockDispatcher>) {
+    let dispatcher = Arc::new(MockDispatcher::default());
+    let r = InboundRouter::new(dispatcher.clone());
+    (r, dispatcher)
+}
+
+#[tokio::test]
+async fn user_input_routed_to_dispatcher() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "data": {"content": "hello"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].0, "thread-1");
+    assert_eq!(inputs[0].1, "user-A");
+    assert_eq!(inputs[0].2, "hello");
+}
+
+#[tokio::test]
+async fn interaction_response_routed_to_dispatcher() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "interaction_response",
+        "thread_id": "thread-1",
+        "data": {"request_id": "req-42"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inter = dispatcher.interactions.lock().unwrap();
+    assert_eq!(inter.len(), 1);
+    assert_eq!(inter[0].1, "req-42");
+}
+
+#[tokio::test]
+async fn stop_generation_routed_to_dispatcher() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "stop_generation",
+        "thread_id": "thread-1",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let stops = dispatcher.stops.lock().unwrap();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0], "thread-1");
+}
+
+#[tokio::test]
+async fn heartbeat_returns_heartbeat_ack_outcome() {
+    let (router, _dispatcher) = router();
+    let msg = serde_json::json!({"type": "heartbeat"});
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Heartbeat);
+}
+
+#[tokio::test]
+async fn unknown_type_returns_ignored() {
+    let (router, _dispatcher) = router();
+    let msg = serde_json::json!({"type": "mystery"});
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Ignored);
+}
+
+#[tokio::test]
+async fn user_input_missing_thread_id_returns_error() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "data": {"content": "hello"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert!(
+        matches!(outcome, RouteOutcome::Error(_)),
+        "缺 thread_id 应返回 Error"
+    );
+    assert!(
+        dispatcher.user_inputs.lock().unwrap().is_empty(),
+        "缺 thread_id 不应分发"
+    );
+}
+
+#[tokio::test]
+async fn invalid_json_returns_error() {
+    let (router, _dispatcher) = router();
+    let outcome = router.route_raw("not json", "user-A").await;
+    assert!(matches!(outcome, RouteOutcome::Error(_)));
+}
+
+#[tokio::test]
+async fn dispatcher_failure_returns_error() {
+    struct FailingDispatcher;
+    #[async_trait]
+    impl PipelineDispatcher for FailingDispatcher {
+        async fn dispatch_user_input(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Err("boom".into())
+        }
+        async fn dispatch_interaction_response(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let router = InboundRouter::new(Arc::new(FailingDispatcher));
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "data": {"content": "hi"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert!(matches!(outcome, RouteOutcome::Error(_)));
+}

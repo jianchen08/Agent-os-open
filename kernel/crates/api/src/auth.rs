@@ -342,6 +342,54 @@ pub async fn register_handler(
     }))
 }
 
+// ─── WS 握手鉴权（task_11 P2：session crate 复用） ────────────────
+
+/// 已校验的用户身份（WS 握手鉴权出口）。
+///
+/// 与 [`BuiltInUser`] 的区别：不含密码等敏感字段，仅供 session crate
+/// 注册连接 / 路由使用。token 格式见上方 [Token 编解码] 注释。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedUser {
+    pub user_id: String,
+    pub username: String,
+    pub tenant_id: String,
+}
+
+/// 校验 access token（供 WS 握手从 `?token=` 查询参数鉴权）。
+///
+/// 返回 `Some(VerifiedUser)` 当且仅当：token 能解码 + 类型为 access +
+/// 未过期 + user_id 命中内置用户。任一不满足返回 `None`（调用方按
+/// ADR §7.2 以 4001 拒绝握手）。
+pub fn verify_access_token(token: &str) -> Option<VerifiedUser> {
+    let (user_id, username, exp) = decode_token(token)?;
+    if is_token_expired(exp) {
+        return None;
+    }
+    // payload 必须是 access token（拒绝 refresh token 用于 WS 鉴权）
+    if !is_access_token(token) {
+        return None;
+    }
+    let user = find_user_by_id(&user_id)?;
+    Some(VerifiedUser {
+        user_id,
+        username,
+        tenant_id: user.tenant_id,
+    })
+}
+
+/// 判断 token 是否为 access 类型（payload 首段为 "access"）。
+fn is_access_token(token: &str) -> bool {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(token.trim())
+        .ok();
+    let payload = decoded.and_then(|b| String::from_utf8(b).ok());
+    match payload {
+        Some(s) => s.splitn(4, ':').next() == Some("access"),
+        None => false,
+    }
+}
+
 // ─── 单元测试 ────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -354,6 +402,72 @@ mod tests {
 
     fn app() -> axum::Router {
         crate::server::build_router(AppState::new())
+    }
+
+    // ── verify_access_token（WS 握手鉴权出口） ──
+
+    #[tokio::test]
+    async fn verify_access_token_accepts_valid_login_token() {
+        // 登录拿到真实 access token，再校验
+        let login_body = json!({"username": "admin", "password": "admin12345"}).to_string();
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(login_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = json["access_token"].as_str().unwrap();
+
+        let verified = verify_access_token(token).expect("有效 access token 应校验通过");
+        assert_eq!(verified.username, "admin");
+        assert!(!verified.user_id.is_empty());
+        assert_eq!(verified.tenant_id, DEFAULT_TENANT_ID);
+    }
+
+    #[test]
+    fn verify_access_token_rejects_garbage() {
+        assert!(verify_access_token("not-a-real-token").is_none());
+        assert!(verify_access_token("").is_none());
+    }
+
+    #[test]
+    fn verify_access_token_rejects_refresh_token() {
+        // 构造一个 refresh token（首段 "refresh"），即便未过期也应拒绝
+        use base64::Engine;
+        let exp = chrono::Utc::now().timestamp() as u64 + 3600;
+        let payload = format!("refresh:00000000-0000-0000-0000-000000000001:admin:{exp}");
+        let refresh = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload);
+        assert!(
+            verify_access_token(&refresh).is_none(),
+            "refresh token 不得用于 WS 鉴权"
+        );
+    }
+
+    #[test]
+    fn verify_access_token_rejects_expired() {
+        use base64::Engine;
+        let exp = chrono::Utc::now().timestamp() as u64 - 1; // 已过期
+        let payload = format!(
+            "access:00000000-0000-0000-0000-000000000001:admin:{exp}"
+        );
+        let expired = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload);
+        assert!(verify_access_token(&expired).is_none());
+    }
+
+    #[test]
+    fn verify_access_token_rejects_unknown_user() {
+        use base64::Engine;
+        let exp = chrono::Utc::now().timestamp() as u64 + 3600;
+        let payload = format!("access:no-such-user-id:ghost:{exp}");
+        let token = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload);
+        assert!(verify_access_token(&token).is_none());
     }
 
     // ── login ──

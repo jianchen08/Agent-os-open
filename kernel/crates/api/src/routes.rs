@@ -73,6 +73,10 @@ pub struct AppState {
     pub plugin_ids: Arc<std::collections::HashSet<String>>,
     /// 项目根目录（`{{path:...}}` 模板解析基准 + agent 配置加载基准）
     pub project_root: Option<PathBuf>,
+    /// P2：会话协调器（连接注册表 / 事件总线 / 重放缓冲）。None = 降级 echo。
+    pub session: Option<Arc<agentos_session::SessionCoordinator>>,
+    /// P2：入站路由器（user_input/interaction/stop 分发）。
+    pub inbound_router: Option<Arc<agentos_session::router::InboundRouter>>,
 }
 
 impl AppState {
@@ -92,6 +96,8 @@ impl AppState {
             store: None,
             plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
+            session: None,
+            inbound_router: None,
         }
     }
 
@@ -111,6 +117,8 @@ impl AppState {
             store: None,
             plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
+            session: None,
+            inbound_router: None,
         }
     }
 
@@ -166,6 +174,24 @@ impl AppState {
             store: Some(store),
             plugin_ids: Arc::new(plugin_ids),
             project_root: Some(project_root),
+            session: None,
+            inbound_router: None,
+        }
+    }
+
+    /// P2：启用会话内核（连接注册表 / 事件总线 / 重放缓冲 + 入站路由）。
+    ///
+    /// 在 `with_plugins` 后调用，注入 SessionCoordinator 与基于引擎的
+    /// 入站分发器。ws_handler 据此承载真实 WS 会话；未调用时 ws_handler
+    /// 降级为旧 echo/engine 路径（兼容）。
+    pub fn enable_session(self) -> Self {
+        let session = Arc::new(agentos_session::SessionCoordinator::new());
+        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(self.clone()));
+        let inbound_router = Arc::new(agentos_session::router::InboundRouter::new(dispatcher));
+        Self {
+            session: Some(session),
+            inbound_router: Some(inbound_router),
+            ..self
         }
     }
 }
