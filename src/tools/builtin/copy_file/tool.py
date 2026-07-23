@@ -180,7 +180,6 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
                 data={
                     "source": display_source,
                     "destination": display_dest,
-                    "copied": True,
                     "type": "directory" if source.is_dir() else "file",
                 },
                 metadata={"action": "copy_file"},
