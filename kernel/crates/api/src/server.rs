@@ -73,6 +73,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         // AC-06-4: WebSocket 端点
         .route("/ws", get(ws_handler))
+        // task_11 A2：前端写死连 /ws/chat（0.1 路径格式），加别名指向同一 handler，
+        // 保证 0.2 模式下前端直连内核可用；/ws 保留给新客户端。
+        .route("/ws/chat", get(ws_handler))
         // 消息发送端点（REST fallback for WS）
         .route("/api/v1/chat", post(chat_handler))
         // Auth 端点
