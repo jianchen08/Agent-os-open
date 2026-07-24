@@ -469,6 +469,18 @@ impl PluginInvoker for PluginInvokerImpl {
                     source: Some("plugin-invoker".to_string()),
                 })
             }
+            HostType::Wasm => {
+                // 临时占位：WasmRuntime 接入在 N7 实现。
+                // 此时 invoke_pipeline_plugin 对 Wasm 插件直接返回未实现错误。
+                Err(PluginError {
+                    message: format!(
+                        "Wasm pipeline plugin '{}' dispatch not yet wired (N7 pending)",
+                        plugin_id
+                    ),
+                    code: Some("WASM_NOT_WIRED".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })
+            }
             HostType::Sidecar => {
                 // ADR 附录 D③（P6 命名治理）：从 manifest.invoke_entry 取 MCP 入口名
                 // （如 "context_build.execute"）。不再回退 capabilities.tools 或字面量
@@ -558,6 +570,14 @@ impl PluginInvoker for PluginInvokerImpl {
                     tool_name
                 ),
                 code: Some("INPROCESS_DIRECT_CALL".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            }),
+            HostType::Wasm => Err(PluginError {
+                message: format!(
+                    "Wasm tool '{}' dispatch not yet wired (N7 pending)",
+                    tool_name
+                ),
+                code: Some("WASM_NOT_WIRED".to_string()),
                 source: Some("plugin-invoker".to_string()),
             }),
             HostType::Sidecar => {
@@ -735,6 +755,8 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            native: None,
+            wasm: None,
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -760,6 +782,8 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            native: None,
+            wasm: None,
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -877,6 +901,8 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            native: None,
+            wasm: None,
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -982,6 +1008,8 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            native: None,
+            wasm: None,
             requires_content: None,
             invoke_entry: None,
             config_files: files,
@@ -1090,6 +1118,8 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            native: None,
+            wasm: None,
             requires_content: None,
             config_files: vec![],
             http_endpoints: vec![],

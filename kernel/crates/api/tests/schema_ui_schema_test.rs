@@ -30,6 +30,8 @@ fn manifest_with_ui(
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        native: None,
+        wasm: None,
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],

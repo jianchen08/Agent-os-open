@@ -14,8 +14,10 @@
 
 pub mod error;
 pub mod loader;
+pub mod native_loader;
 pub mod registry;
 
 pub use error::LoaderError;
 pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
+pub use native_loader::NativePluginLoader;
 pub use registry::{CapabilityRegistryImpl, DependencyResolverImpl};

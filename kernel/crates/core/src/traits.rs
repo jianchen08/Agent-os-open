@@ -710,6 +710,18 @@ pub struct PluginManifest {
     pub priority: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
+    /// 原生插件产物（task_11：HostType::InProcess 必填）。
+    ///
+    /// 指向 cdylib 编译产物，loader 用 libloading 加载并取 `invoke_entry`
+    /// 指定的 C-ABI 符号（默认 `plugin_execute`）。仅 host_type==InProcess 时有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeArtifact>,
+    /// WASM 插件产物（task_11：HostType::Wasm 必填）。
+    ///
+    /// 指向 `.wasm` 文件 + host 能力白名单。loader 用 wasmtime 加载执行。
+    /// 仅 host_type==Wasm 时有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<WasmArtifact>,
     /// 内容懒加载声明（ADR ⑦）。
     ///
     /// 声明插件需要多少条最近消息的完整内容。
@@ -907,18 +919,54 @@ fn default_priority() -> u32 {
 
 /// 宿主类型。
 ///
-/// **ADR ⑧**：所有插件（含工具插件、系统插件）均支持以下两种执行路径，
+/// **ADR ⑧**：所有插件（含工具插件、系统插件）均支持多种执行路径，
 /// 由开发者根据性能需求自行选择，不因插件类型限制可选路径：
-/// - `InProcess`：Rust 原生进程内调用，零 IPC 开销，适合高频热路径
-/// - `Sidecar`：独立进程通过 MCP 协议通信，进程隔离，适合低频或第三方插件
+/// - `InProcess`：Rust 原生 cdylib 进程内调用（libloading + C-ABI），零 IPC 开销，适合高频热路径
+/// - `Sidecar`：独立进程通过 MCP 协议通信，进程隔离，适合低频或第三方（Python）插件
+/// - `Wasm`：WASM 插件经 wasmtime 沙箱执行，跨语言 + 热重载 + 沙箱隔离
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HostType {
-    /// Rust 原生进程内调用（零 IPC 开销）
+    /// Rust 原生 cdylib 进程内调用（libloading，零 IPC 开销）
     InProcess,
     /// 独立进程通过 MCP 协议通信
     #[default]
     Sidecar,
+    /// WASM 插件经 wasmtime 沙箱执行（task_11 新增）
+    Wasm,
+}
+
+/// 原生插件产物描述（task_11：HostType::InProcess 的 manifest 字段）。
+///
+/// `artifact` 指向编译产物（cdylib：`.dll`/`.so`/`.dylib`），
+/// loader 用 `libloading::Library::new` 加载并取 `invoke_entry` 符号。
+///
+/// 路径相对插件目录（与 manifest 同级目录）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeArtifact {
+    /// cdylib 文件名（相对插件目录），如 `my_plugin.dll` / `libmy_plugin.so`。
+    pub artifact: String,
+}
+
+/// WASM 插件产物描述（task_11：HostType::Wasm 的 manifest 字段）。
+///
+/// `artifact` 指向 `.wasm` 文件（wasm32-wasip2 或 core wasm），
+/// `granted_capabilities` 是插件被授予的 host 能力白名单（如 `["host.log"]`），
+/// 越权调用会被内核拒绝（N9）。
+///
+/// 完整 WIT 组件模型工具链（wit-bindgen）集成待 PoC（计划文档 §八 #1），
+/// 当前采用"JSON 经 WASM 线性内存传递"的简化契约，`wit_interface` 字段保留但可选。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WasmArtifact {
+    /// `.wasm` 文件名（相对插件目录）。
+    pub artifact: String,
+    /// WIT 接口文件名（可选，完整 WIT 待工具链 PoC）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wit_interface: Option<String>,
+    /// 授予插件的 host 能力白名单（如 `["host.log", "host.record_metric"]`）。
+    /// 越权调用被内核拒绝（N9）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_capabilities: Vec<String>,
 }
 
 /// Manifest 能力声明（运行时表示）。

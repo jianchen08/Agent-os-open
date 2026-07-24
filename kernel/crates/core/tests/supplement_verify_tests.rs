@@ -60,6 +60,8 @@ fn make_test_manifest(
         error_policy: ErrorPolicy::default(),
         priority: 100,
         mcp: None,
+        native: None,
+        wasm: None,
         requires_content,
         invoke_entry: None,
         config_files: vec![],

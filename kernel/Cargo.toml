@@ -3,6 +3,8 @@ members = [
     "crates/core",
     "crates/config",
     "crates/plugin-loader",
+    "crates/native-sdk",
+    "crates/native-sdk-test-plugin",
     "crates/mcp",
     "crates/invoker",
     "crates/tenant",
@@ -42,6 +44,8 @@ dirs = "5"
 agentos-core = { path = "crates/core" }
 agentos-config = { path = "crates/config" }
 agentos-plugin-loader = { path = "crates/plugin-loader" }
+# 原生插件 SDK（cdylib 插件作者依赖，task_11 N3）
+agentos-native-sdk = { path = "crates/native-sdk" }
 agentos-mcp = { path = "crates/mcp" }
 agentos-invoker = { path = "crates/invoker" }
 agentos-engine = { path = "crates/engine" }

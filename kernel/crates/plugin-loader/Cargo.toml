@@ -19,6 +19,9 @@ parking_lot = "0.12"
 chrono.workspace = true
 # 插件准入哈希校验（P2-2）
 sha2 = "0.10"
+# 原生插件 cdylib 动态加载（task_11 N2）；锁定 0.8 因 0.9 需 rustc1.88，环境为 1.85
+libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+agentos-native-sdk.workspace = true

@@ -72,6 +72,8 @@ fn test_none_invoke_entry_omitted_in_serialization() {
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        native: None,
+        wasm: None,
         requires_content: None,
         config_files: vec![],
         http_endpoints: vec![],
