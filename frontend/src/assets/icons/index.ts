@@ -1,207 +1,238 @@
-/**
- * Deep Space v2 图标系统入口
- *
- * 设计统一原则：
- * - 只使用设计导出的 SVG 组件
- * - 不回退到 lucide-react
- * - 如果前端需要某个图标但设计未导出，应补充到设计画布而不是在此处回退
- */
-
-// 设计导出的 50 个图标
-export { default as ActivityIcon } from './activity'
-export { default as AlertIcon } from './alert'
-export { default as ArrowRightIcon } from './arrow-right'
-export { default as AttachIcon } from './attach'
-export { default as BellIcon } from './bell'
-export { default as BoxIcon } from './box'
-export { default as BrainIcon } from './brain'
-export { default as ChartIcon } from './chart'
-export { default as ChatIcon } from './chat'
-export { default as ChatActiveIcon } from './chat-active'
-export { default as CheckIcon } from './check'
-export { default as ChevronDownIcon } from './chevron-down'
-export { default as ClockIcon } from './clock'
-export { default as CoinIcon } from './coin'
-export { default as CommandIcon } from './command'
-export { default as CpuIcon } from './cpu'
-export { default as DatabaseIcon } from './database'
-export { default as EditIcon } from './edit'
-export { default as EyeIcon } from './eye'
-export { default as FileIcon } from './file'
-export { default as FilterIcon } from './filter'
-export { default as FolderIcon } from './folder'
-export { default as GlobeIcon } from './globe'
-export { default as HelpIcon } from './help'
-export { default as HistoryIcon } from './history'
-export { default as KeyIcon } from './key'
-export { default as LayersIcon } from './layers'
-export { default as LayoutIcon } from './layout'
-export { default as LinkIcon } from './link'
-export { default as LockIcon } from './lock'
-export { default as LogoutIcon } from './logout'
-export { default as MicIcon } from './mic'
-export { default as MoonIcon } from './moon'
-export { default as MoreIcon } from './more'
-export { default as PersonIcon } from './person'
-export { default as PluginIcon } from './plugin'
-export { default as PlusIcon } from './plus'
-export { default as RefreshIcon } from './refresh'
-export { default as SearchIcon } from './search'
-export { default as SendIcon } from './send'
-export { default as SettingsIcon } from './settings'
-export { default as ShieldCheckIcon } from './shield-check'
-export { default as SlashIcon } from './slash'
-export { default as SplitIcon } from './split'
-export { default as SunIcon } from './sun'
-export { default as TasksIcon } from './tasks'
-export { default as TerminalIcon } from './terminal'
-export { default as ToolIcon } from './tool'
-export { default as XIcon } from './x'
-export { default as ZapIcon } from './zap'
-
-// Lucide 兼容别名（映射到设计图标）
-// 这些别名让现有代码无需重命名即可使用设计图标
-export { ActivityIcon as Activity } from './activity'
-export { AlertIcon as AlertCircle } from './alert'
-export { AlertIcon as AlertTriangle } from './alert'
-export { ArrowRightIcon as ArrowRight } from './arrow-right'
-export { AttachIcon as Paperclip } from './attach'
-export { BellIcon as Bell } from './bell'
-export { BoxIcon as Box } from './box'
-export { BrainIcon as Brain } from './brain'
-export { BrainIcon as Bot } from './brain'
-export { ChartIcon as BarChart3 } from './chart'
-export { ChatIcon as MessageSquare } from './chat'
-export { CheckIcon as Check } from './check'
-export { CheckIcon as CheckCircle } from './check'
-export { CheckIcon as CheckCircle2 } from './check'
-export { ChevronDownIcon as ChevronDown } from './chevron-down'
-export { ClockIcon as Clock } from './clock'
-export { CoinIcon as Coin } from './coin'
-export { CommandIcon as Command } from './command'
-export { CpuIcon as Cpu } from './cpu'
-export { DatabaseIcon as Database } from './database'
-export { EditIcon as Edit3 } from './edit'
-export { EditIcon as Pencil } from './edit'
-export { EditIcon as FileEdit } from './edit'
-export { EyeIcon as Eye } from './eye'
-export { FileIcon as File } from './file'
-export { FileIcon as FileText } from './file'
-export { FileIcon as FileCode } from './file'
-export { FilterIcon as Filter } from './filter'
-export { FolderIcon as Folder } from './folder'
-export { FolderIcon as FolderOpen } from './folder'
-export { GlobeIcon as Globe } from './globe'
-export { HelpIcon as HelpCircle } from './help'
-export { HistoryIcon as History } from './history'
-export { KeyIcon as Key } from './key'
-export { LayersIcon as Layers } from './layers'
-export { LayoutIcon as LayoutGrid } from './layout'
-export { LinkIcon as Link } from './link'
-export { LockIcon as Lock } from './lock'
-export { LogoutIcon as LogOut } from './logout'
-export { MicIcon as Mic } from './mic'
-export { MoonIcon as Moon } from './moon'
-export { MoreIcon as MoreHorizontal } from './more'
-export { PersonIcon as User } from './person'
-export { PersonIcon as Users } from './person'
-export { PluginIcon as Plug } from './plugin'
-export { PlusIcon as Plus } from './plus'
-export { RefreshIcon as RefreshCw } from './refresh'
-export { SearchIcon as Search } from './search'
-export { SendIcon as Send } from './send'
-export { SettingsIcon as Settings } from './settings'
-export { ShieldCheckIcon as ShieldCheck } from './shield-check'
-export { SlashIcon as Slash } from './slash'
-export { SplitIcon as Split } from './split'
-export { SunIcon as Sun } from './sun'
-export { TasksIcon as Target } from './tasks'
-export { TasksIcon as ClipboardList } from './tasks'
-export { TerminalIcon as Terminal } from './terminal'
-export { ToolIcon as Wrench } from './tool'
-export { XIcon as X } from './x'
-export { XIcon as XCircle } from './x'
-export { ZapIcon as Zap } from './zap'
-
-// 兼容现有调用点的统一设计别名：全部指向画布已导出的 SVG。
-export { ChevronDownIcon as ChevronLeft } from './chevron-down'
-export { ChevronDownIcon as ChevronRight } from './chevron-down'
-export { ChevronDownIcon as ChevronUp } from './chevron-down'
-export { AlertIcon as Ban } from './alert'
-export { BellIcon as BellOff } from './bell'
-export { FileIcon as BookOpen } from './file'
-export { BrainIcon as Bug } from './brain'
-export { BoxIcon as Camera } from './box'
-export { CoinIcon as Cloud } from './coin'
-export { FileIcon as Code } from './file'
-export { SplitIcon as Columns2 } from './split'
-export { FileIcon as Copy } from './file'
-export { FileIcon as Download } from './file'
-export { CommandIcon as DraftingCompass } from './command'
-export { LinkIcon as ExternalLink } from './link'
-export { FileIcon as FileArchive } from './file'
-export { FileIcon as FileQuestion } from './file'
-export { FileIcon as FileSpreadsheet } from './file'
-export { AlertIcon as FileWarning } from './alert'
-export { CommandIcon as FlaskConical } from './command'
-export { FolderIcon as FolderPlus } from './folder'
-export { FolderIcon as FolderTree } from './folder'
-export { SplitIcon as GitCompare } from './split'
-export { KeyIcon as Hash } from './key'
-export { MicIcon as Headphones } from './mic'
-export { FolderIcon as Home } from './folder'
-export { FileIcon as Image } from './file'
-export { FileIcon as Inbox } from './file'
-export { HelpIcon as Info } from './help'
-export { ClockIcon as Loader2 } from './clock'
-export { PersonIcon as MapPin } from './person'
-export { SplitIcon as Maximize } from './split'
-export { SplitIcon as Maximize2 } from './split'
-export { MoreIcon as Menu } from './more'
-export { MicIcon as MicOff } from './mic'
-export { SplitIcon as Minimize2 } from './split'
-export { PlusIcon as Minus } from './plus'
-export { LayoutIcon as Monitor } from './layout'
-export { SplitIcon as Move } from './split'
-export { CoinIcon as Music } from './coin'
-export { SettingsIcon as Palette } from './settings'
-export { SplitIcon as PanelLeftClose } from './split'
-export { SplitIcon as PanelLeftOpen } from './split'
-export { ClockIcon as Pause } from './clock'
-export { ClockIcon as PauseCircle } from './clock'
-export { KeyIcon as Pin } from './key'
-export { CheckIcon as Play } from './check'
-export { CheckIcon as PlayCircle } from './check'
-export { RefreshIcon as Quote } from './refresh'
-export { RefreshIcon as RotateCcw } from './refresh'
-export { RefreshIcon as RotateCw } from './refresh'
-export { SplitIcon as Rows3 } from './split'
-export { CheckIcon as Save } from './check'
-export { ArrowRightIcon as SkipBack } from './arrow-right'
-export { ArrowRightIcon as SkipForward } from './arrow-right'
-export { BrainIcon as Sparkles } from './brain'
-export { CheckIcon as Square } from './check'
-export { PersonIcon as Star } from './person'
-export { TasksIcon as Tag } from './tasks'
-export { CheckIcon as ThumbsUp } from './check'
-export { CheckIcon as ToggleLeft } from './check'
-export { CheckIcon as ToggleRight } from './check'
-export { XIcon as Trash2 } from './x'
-export { ChartIcon as TrendingDown } from './chart'
-export { ChartIcon as TrendingUp } from './chart'
-export { LinkIcon as Unplug } from './link'
-export { ArrowRightIcon as Upload } from './arrow-right'
-export { FileIcon as Video } from './file'
-export { CoinIcon as Volume2 } from './coin'
-export { CoinIcon as VolumeX } from './coin'
-export { XIcon as ZoomIn } from './x'
-export { XIcon as ZoomOut } from './x'
-export { BoxIcon as Aperture } from './box'
-export { AlertIcon as Circle } from './alert'
-export { AlertIcon as CircleDot } from './alert'
-export { ArrowRightIcon as ArrowUpDown } from './arrow-right'
-
-// 类型导出（用于类型标注）
-import type { FC, SVGProps } from 'react'
-export type IconProps = SVGProps<SVGSVGElement>
-export type LucideIcon = FC<IconProps>
+// Auto-generated icon exports (rolldown-compatible: default import + named export)
+import ActivityIcon from './activity'
+export { ActivityIcon }
+export { ActivityIcon as Activity }
+import AlertIcon from './alert'
+export { AlertIcon }
+export { AlertIcon as AlertCircle }
+export { AlertIcon as AlertTriangle }
+export { AlertIcon as Ban }
+export { AlertIcon as FileWarning }
+export { AlertIcon as Circle }
+export { AlertIcon as CircleDot }
+import ArrowRightIcon from './arrow-right'
+export { ArrowRightIcon }
+export { ArrowRightIcon as ArrowRight }
+export { ArrowRightIcon as SkipBack }
+export { ArrowRightIcon as SkipForward }
+export { ArrowRightIcon as Upload }
+export { ArrowRightIcon as ArrowUpDown }
+import AttachIcon from './attach'
+export { AttachIcon }
+export { AttachIcon as Paperclip }
+import BellIcon from './bell'
+export { BellIcon }
+export { BellIcon as Bell }
+export { BellIcon as BellOff }
+import BoxIcon from './box'
+export { BoxIcon }
+export { BoxIcon as Box }
+export { BoxIcon as Camera }
+export { BoxIcon as Aperture }
+import BrainIcon from './brain'
+export { BrainIcon }
+export { BrainIcon as Brain }
+export { BrainIcon as Bot }
+export { BrainIcon as Bug }
+export { BrainIcon as Sparkles }
+import ChartIcon from './chart'
+export { ChartIcon }
+export { ChartIcon as BarChart3 }
+export { ChartIcon as TrendingDown }
+export { ChartIcon as TrendingUp }
+import ChatIcon from './chat'
+export { ChatIcon }
+export { ChatIcon as MessageSquare }
+import ChatActiveIcon from './chat-active'
+export { ChatActiveIcon }
+import CheckIcon from './check'
+export { CheckIcon }
+export { CheckIcon as Check }
+export { CheckIcon as CheckCircle }
+export { CheckIcon as CheckCircle2 }
+export { CheckIcon as Play }
+export { CheckIcon as PlayCircle }
+export { CheckIcon as Save }
+export { CheckIcon as Square }
+export { CheckIcon as ThumbsUp }
+export { CheckIcon as ToggleLeft }
+export { CheckIcon as ToggleRight }
+import ChevronDownIcon from './chevron-down'
+export { ChevronDownIcon }
+export { ChevronDownIcon as ChevronDown }
+export { ChevronDownIcon as ChevronLeft }
+export { ChevronDownIcon as ChevronRight }
+export { ChevronDownIcon as ChevronUp }
+import ClockIcon from './clock'
+export { ClockIcon }
+export { ClockIcon as Clock }
+export { ClockIcon as Loader2 }
+export { ClockIcon as Pause }
+export { ClockIcon as PauseCircle }
+import CoinIcon from './coin'
+export { CoinIcon }
+export { CoinIcon as Coin }
+export { CoinIcon as Cloud }
+export { CoinIcon as Music }
+export { CoinIcon as Volume2 }
+export { CoinIcon as VolumeX }
+import CommandIcon from './command'
+export { CommandIcon }
+export { CommandIcon as Command }
+export { CommandIcon as DraftingCompass }
+export { CommandIcon as FlaskConical }
+import CpuIcon from './cpu'
+export { CpuIcon }
+export { CpuIcon as Cpu }
+import DatabaseIcon from './database'
+export { DatabaseIcon }
+export { DatabaseIcon as Database }
+import EditIcon from './edit'
+export { EditIcon }
+export { EditIcon as Edit3 }
+export { EditIcon as Pencil }
+export { EditIcon as FileEdit }
+import EyeIcon from './eye'
+export { EyeIcon }
+export { EyeIcon as Eye }
+import FileIcon from './file'
+export { FileIcon }
+export { FileIcon as File }
+export { FileIcon as FileText }
+export { FileIcon as FileCode }
+export { FileIcon as BookOpen }
+export { FileIcon as Code }
+export { FileIcon as Copy }
+export { FileIcon as Download }
+export { FileIcon as FileArchive }
+export { FileIcon as FileQuestion }
+export { FileIcon as FileSpreadsheet }
+export { FileIcon as Image }
+export { FileIcon as Inbox }
+export { FileIcon as Video }
+import FilterIcon from './filter'
+export { FilterIcon }
+export { FilterIcon as Filter }
+import FolderIcon from './folder'
+export { FolderIcon }
+export { FolderIcon as Folder }
+export { FolderIcon as FolderOpen }
+export { FolderIcon as FolderPlus }
+export { FolderIcon as FolderTree }
+export { FolderIcon as Home }
+import GlobeIcon from './globe'
+export { GlobeIcon }
+export { GlobeIcon as Globe }
+import HelpIcon from './help'
+export { HelpIcon }
+export { HelpIcon as HelpCircle }
+export { HelpIcon as Info }
+import HistoryIcon from './history'
+export { HistoryIcon }
+export { HistoryIcon as History }
+import KeyIcon from './key'
+export { KeyIcon }
+export { KeyIcon as Key }
+export { KeyIcon as Hash }
+export { KeyIcon as Pin }
+import LayersIcon from './layers'
+export { LayersIcon }
+export { LayersIcon as Layers }
+import LayoutIcon from './layout'
+export { LayoutIcon }
+export { LayoutIcon as LayoutGrid }
+export { LayoutIcon as Monitor }
+import LinkIcon from './link'
+export { LinkIcon }
+export { LinkIcon as Link }
+export { LinkIcon as ExternalLink }
+export { LinkIcon as Unplug }
+import LockIcon from './lock'
+export { LockIcon }
+export { LockIcon as Lock }
+import LogoutIcon from './logout'
+export { LogoutIcon }
+export { LogoutIcon as LogOut }
+import MicIcon from './mic'
+export { MicIcon }
+export { MicIcon as Mic }
+export { MicIcon as Headphones }
+export { MicIcon as MicOff }
+import MoonIcon from './moon'
+export { MoonIcon }
+export { MoonIcon as Moon }
+import MoreIcon from './more'
+export { MoreIcon }
+export { MoreIcon as MoreHorizontal }
+export { MoreIcon as Menu }
+import PersonIcon from './person'
+export { PersonIcon }
+export { PersonIcon as User }
+export { PersonIcon as Users }
+export { PersonIcon as MapPin }
+export { PersonIcon as Star }
+import PluginIcon from './plugin'
+export { PluginIcon }
+export { PluginIcon as Plug }
+import PlusIcon from './plus'
+export { PlusIcon }
+export { PlusIcon as Plus }
+export { PlusIcon as Minus }
+import RefreshIcon from './refresh'
+export { RefreshIcon }
+export { RefreshIcon as RefreshCw }
+export { RefreshIcon as Quote }
+export { RefreshIcon as RotateCcw }
+export { RefreshIcon as RotateCw }
+import SearchIcon from './search'
+export { SearchIcon }
+export { SearchIcon as Search }
+import SendIcon from './send'
+export { SendIcon }
+export { SendIcon as Send }
+import SettingsIcon from './settings'
+export { SettingsIcon }
+export { SettingsIcon as Settings }
+export { SettingsIcon as Palette }
+import ShieldCheckIcon from './shield-check'
+export { ShieldCheckIcon }
+export { ShieldCheckIcon as ShieldCheck }
+import SlashIcon from './slash'
+export { SlashIcon }
+export { SlashIcon as Slash }
+import SplitIcon from './split'
+export { SplitIcon }
+export { SplitIcon as Split }
+export { SplitIcon as Columns2 }
+export { SplitIcon as GitCompare }
+export { SplitIcon as Maximize }
+export { SplitIcon as Maximize2 }
+export { SplitIcon as Minimize2 }
+export { SplitIcon as Move }
+export { SplitIcon as PanelLeftClose }
+export { SplitIcon as PanelLeftOpen }
+export { SplitIcon as Rows3 }
+import SunIcon from './sun'
+export { SunIcon }
+export { SunIcon as Sun }
+import TasksIcon from './tasks'
+export { TasksIcon }
+export { TasksIcon as Target }
+export { TasksIcon as ClipboardList }
+export { TasksIcon as Tag }
+import TerminalIcon from './terminal'
+export { TerminalIcon }
+export { TerminalIcon as Terminal }
+import ToolIcon from './tool'
+export { ToolIcon }
+export { ToolIcon as Wrench }
+import XIcon from './x'
+export { XIcon }
+export { XIcon as X }
+export { XIcon as XCircle }
+export { XIcon as Trash2 }
+export { XIcon as ZoomIn }
+export { XIcon as ZoomOut }
+import ZapIcon from './zap'
+export { ZapIcon }
+export { ZapIcon as Zap }

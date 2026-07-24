@@ -168,7 +168,11 @@ function isMobileViewport(): boolean {
 function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
   const { isAuthenticated, isInitializing } = useAuthStore()
 
-  if (isInitializing) {
+  // 开发/本地模式：直接放行，不跳登录页（便于查看布局效果）
+  // 生产模式仍走正常鉴权。后续按 VS Code 方式改为侧边栏登录入口。
+  const devBypass = import.meta.env.DEV
+
+  if (!devBypass && isInitializing) {
     return (
       <div className="bg-background text-foreground flex min-h-screen items-center justify-center">
         <div className="space-y-2 text-center">
@@ -179,7 +183,7 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
     )
   }
 
-  if (!isAuthenticated) {
+  if (!devBypass && !isAuthenticated) {
     return <Navigate to={ROUTES.LOGIN} replace />
   }
 
