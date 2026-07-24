@@ -123,6 +123,11 @@ impl ConnectionRegistry {
         }
         delivered
     }
+
+    /// 当前活跃连接数（监控 M2：gauge，监控设计 §三 通道1）。
+    pub fn active_count(&self) -> usize {
+        self.connections.read().len()
+    }
 }
 
 impl Default for ConnectionRegistry {

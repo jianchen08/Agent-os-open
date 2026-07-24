@@ -365,7 +365,8 @@ impl McpClient {
                 "config-reader": {},
                 "tenant-context": {},
                 "event-bus": {},
-                "logger": {}
+                "logger": {},
+                "metrics": {}
             })
         } else {
             serde_json::json!({})

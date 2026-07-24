@@ -274,16 +274,12 @@ class TestDependencyInjection:
 
     def test_plugin_receives_capabilities(self) -> None:
         plugin = AgentOSPlugin("test")
+        # SDK 把 injected_caps[cap_name] 整体作为 context（_on_initialize 读
+        # injected_caps.get(cap_name, {})），故此处直接以 context 内容作为注入值。
         init_params = {
             "capabilities": {
-                "pipeline-executor": {
-                    "call_fn": AsyncMock(),
-                    "context": {"max_iterations": 10},
-                },
-                "config-reader": {
-                    "call_fn": AsyncMock(),
-                    "context": {"root": "/etc/agentos"},
-                },
+                "pipeline-executor": {"max_iterations": 10},
+                "config-reader": {"root": "/etc/agentos"},
             },
             "config": {"model": "gpt-4"},
         }
@@ -307,17 +303,20 @@ class TestDependencyInjection:
         with pytest.raises(KeyError, match="not injected"):
             plugin.get_capability("pipeline-executor")
 
-    def test_all_five_standard_capabilities(self) -> None:
-        """验证 5 个标准能力句柄均可被注入。"""
+    def test_all_six_standard_capabilities(self) -> None:
+        """验证 6 个标准能力句柄（含 metrics）均可被注入。"""
         plugin = AgentOSPlugin("test")
+        # SDK 把 injected_caps[cap_name] 整体作为 context；
+        # 故此处直接以 {"active": True} 作为每个 cap 的注入值。
         caps = {
-            name: {"call_fn": AsyncMock(), "context": {"active": True}}
+            name: {"active": True}
             for name in [
                 "pipeline-executor",
                 "config-reader",
                 "tenant-context",
                 "event-bus",
                 "logger",
+                "metrics",
             ]
         }
         plugin._on_initialize({"capabilities": caps, "config": {}})
@@ -325,6 +324,54 @@ class TestDependencyInjection:
         for name in caps:
             cap = plugin.get_capability(name)
             assert cap.get("active") is True
+
+    @pytest.mark.asyncio
+    async def test_record_metric_counter(self) -> None:
+        """record_metric 走 metrics.record 反向调用（监控设计 §三 通道2）。"""
+        plugin = AgentOSPlugin("llm_service")
+        call_fn = AsyncMock(return_value={"status": "recorded"})
+        plugin._on_initialize(
+            {"capabilities": {"metrics": {}}, "config": {}}
+        )
+        # 替换注入的 call_fn 为 mock（绕过真实 KernelChannel）
+        plugin._capabilities["metrics"]._call_fn = call_fn
+
+        result = await plugin.record_metric(
+            "tokens_used", 1280, "counter", {"model": "deepseek"}, unit="tokens"
+        )
+        assert result == {"status": "recorded"}
+        call_fn.assert_called_once()
+        args = call_fn.call_args.args
+        assert args[0] == "record"  # method
+        params = args[1]
+        assert params["name"] == "tokens_used"
+        assert params["value"] == 1280
+        assert params["metric_type"] == "counter"
+        assert params["labels"] == {"model": "deepseek"}
+        assert params["unit"] == "tokens"
+
+    @pytest.mark.asyncio
+    async def test_record_metric_defaults_to_counter(self) -> None:
+        """record_metric 默认 counter 类型。"""
+        plugin = AgentOSPlugin("p1")
+        call_fn = AsyncMock(return_value={"status": "recorded"})
+        plugin._on_initialize({"capabilities": {"metrics": {}}, "config": {}})
+        plugin._capabilities["metrics"]._call_fn = call_fn
+
+        await plugin.record_metric("calls", 1)
+        params = call_fn.call_args.args[1]
+        assert params["metric_type"] == "counter"
+        # 不传 labels/unit/help → 不出现在 params
+        assert "labels" not in params
+        assert "unit" not in params
+
+    @pytest.mark.asyncio
+    async def test_record_metric_without_metrics_capability_raises(self) -> None:
+        """未注入 metrics capability → record_metric 抛 KeyError。"""
+        plugin = AgentOSPlugin("p1")
+        plugin._on_initialize({"capabilities": {}, "config": {}})
+        with pytest.raises(KeyError, match="not injected"):
+            await plugin.record_metric("m", 1)
 
 
 # ═══════════════════════════════════════════════════════════

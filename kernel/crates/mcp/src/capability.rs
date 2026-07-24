@@ -13,8 +13,10 @@
 //! | pipeline-executor | start_run | 起一个新管道 |
 //! | event-bus | emit | 发事件/通知前端 |
 //! | config-reader | get | 读配置节 |
+//! | metrics | record | 插件上报指标（record_metric，监控设计 §三 通道2） |
 //!
 //! [来源: ROADMAP.md 审批闭环/复盘调管道/event-bus 三项业务的前置地基]
+//! [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -28,6 +30,7 @@ pub const STANDARD_CAPABILITIES: &[&str] = &[
     "tenant-context",
     "event-bus",
     "logger",
+    "metrics",
 ];
 
 /// Capability 路由器——处理 sidecar 反向调用内核能力。
@@ -122,11 +125,20 @@ mod tests {
 
     #[test]
     fn test_standard_capabilities_complete() {
-        // 确保 5 个标准能力都在清单里（与 SDK STANDARD_CAPABILITIES 对齐）
+        // 确保 6 个标准能力都在清单里（与 SDK STANDARD_CAPABILITIES 对齐）
         assert!(STANDARD_CAPABILITIES.contains(&"pipeline-executor"));
         assert!(STANDARD_CAPABILITIES.contains(&"config-reader"));
         assert!(STANDARD_CAPABILITIES.contains(&"tenant-context"));
         assert!(STANDARD_CAPABILITIES.contains(&"event-bus"));
         assert!(STANDARD_CAPABILITIES.contains(&"logger"));
+        assert!(STANDARD_CAPABILITIES.contains(&"metrics"));
+    }
+
+    #[test]
+    fn test_parse_metrics_method() {
+        // 监控设计 §三 通道2：metrics.record 反向调用
+        let (cap, method) = parse_capability_method("metrics.record").unwrap();
+        assert_eq!(cap, "metrics");
+        assert_eq!(method, "record");
     }
 }

@@ -20,6 +20,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "parking_lot",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

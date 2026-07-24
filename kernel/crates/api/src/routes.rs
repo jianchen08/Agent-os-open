@@ -24,6 +24,7 @@ use crate::config_service::{
     validate_config_path,
 };
 use crate::error::ApiError;
+use crate::metrics::{export_prometheus, Labels, MetricsAggregator};
 
 /// 健康检查响应。
 #[derive(Debug, Serialize)]
@@ -83,6 +84,8 @@ pub struct AppState {
     /// P3：HTTP 端点 dispatcher 的插件处理能力（http.handle）。
     /// None = 不挂载插件 HTTP 端点（仅内核静态路由）。
     pub http_handler: Option<Arc<dyn HttpHandleCapability>>,
+    /// 监控 M1：指标聚合器（监控设计 §四）。None = 不启用指标端点。
+    pub metrics: Option<MetricsAggregator>,
 }
 
 impl AppState {
@@ -105,6 +108,7 @@ impl AppState {
             session: None,
             inbound_router: None,
             http_handler: None,
+            metrics: None,
         }
     }
 
@@ -127,6 +131,7 @@ impl AppState {
             session: None,
             inbound_router: None,
             http_handler: None,
+            metrics: None,
         }
     }
 
@@ -185,6 +190,7 @@ impl AppState {
             session: None,
             inbound_router: None,
             http_handler: None,
+            metrics: None,
         }
     }
 
@@ -211,6 +217,14 @@ impl AppState {
     pub fn with_http_handler(self, handler: Arc<dyn HttpHandleCapability>) -> Self {
         Self {
             http_handler: Some(handler),
+            ..self
+        }
+    }
+
+    /// 监控 M1：注入指标聚合器（启用 `/api/v1/metrics` 与 `/metrics` 端点）。
+    pub fn with_metrics(self, metrics: MetricsAggregator) -> Self {
+        Self {
+            metrics: Some(metrics),
             ..self
         }
     }
@@ -575,6 +589,126 @@ pub async fn get_plugin_config_with_etag(
 // 触发 HeaderMap/IntoResponse 的使用（headers 参数预留用于鉴权扩展）。
 #[allow(dead_code)]
 fn _headers_used(_h: HeaderMap) {}
+
+// ── 监控 M5/M5b：指标查询与导出端点（监控设计 §五）──
+
+/// `/api/v1/metrics` 查询参数。
+#[derive(Debug, Default, Deserialize)]
+pub struct MetricsQueryParams {
+    /// 插件 id 过滤（缺省=all）。
+    pub plugin: Option<String>,
+    /// 指标名过滤（缺省=all）。
+    pub metric: Option<String>,
+    /// 时间窗（5m/1h/24h，缺省=1h）。
+    pub window: Option<String>,
+    /// labels 过滤，格式 key:value，多个用逗号。
+    pub labels: Option<String>,
+}
+
+/// 单条指标查询结果（监控设计 §五 响应）。
+#[derive(Debug, Serialize)]
+pub struct MetricSeriesResponse {
+    pub plugin_id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub metric_type: String,
+    pub labels: serde_json::Value,
+    pub samples: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest: Option<f64>,
+}
+
+/// `/api/v1/metrics` 响应。
+#[derive(Debug, Serialize)]
+pub struct MetricsResponse {
+    pub metrics: Vec<MetricSeriesResponse>,
+}
+
+/// 解析 window 字符串为 Duration。
+fn parse_window(s: &str) -> std::time::Duration {
+    match s.trim() {
+        "5m" => std::time::Duration::from_secs(5 * 60),
+        "1h" => std::time::Duration::from_secs(60 * 60),
+        "24h" => std::time::Duration::from_secs(24 * 60 * 60),
+        _ => std::time::Duration::from_secs(60 * 60), // 默认 1h
+    }
+}
+
+/// 解析 labels 查询串（"model:deepseek,region:us"）。
+fn parse_labels_query(s: &str) -> Labels {
+    let mut out = Labels::new();
+    for pair in s.split(',') {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once(':') {
+            let k = k.trim();
+            let v = v.trim();
+            if !k.is_empty() {
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// GET /api/v1/metrics（监控设计 §五）。
+///
+/// 支持 ?plugin=&metric=&window=5m/1h/24h&labels=key:value 过滤。
+pub async fn metrics_query_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<MetricsQueryParams>,
+) -> Result<axum::Json<MetricsResponse>, ApiError> {
+    let agg = state.metrics.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "metrics aggregator not enabled".to_string(),
+    })?;
+    let window = params
+        .window
+        .as_deref()
+        .map(parse_window)
+        .unwrap_or_else(|| std::time::Duration::from_secs(60 * 60));
+    let labels_filter = params
+        .labels
+        .as_deref()
+        .map(parse_labels_query)
+        .unwrap_or_default();
+    let views = agg.query(
+        params.plugin.as_deref(),
+        params.metric.as_deref(),
+        Some(window),
+        &labels_filter,
+    );
+    let metrics = views
+        .into_iter()
+        .map(|v| MetricSeriesResponse {
+            plugin_id: v.plugin_id,
+            name: v.name,
+            metric_type: v.metric_type.as_str().to_string(),
+            labels: serde_json::to_value(&v.labels).unwrap_or(serde_json::json!({})),
+            samples: v
+                .samples
+                .into_iter()
+                .map(|s| serde_json::json!({"ts": s.ts, "value": s.value}))
+                .collect(),
+            unit: v.unit,
+            latest: v.latest,
+        })
+        .collect();
+    Ok(axum::Json(MetricsResponse { metrics }))
+}
+
+/// GET /metrics（Prometheus exposition format，监控设计 §十一 决策3）。
+///
+/// 返回纯文本 Prometheus exposition 格式，供 Prometheus/Grafana 抓取。
+pub async fn metrics_prometheus_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<String, ApiError> {
+    let agg = state.metrics.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "metrics aggregator not enabled".to_string(),
+    })?;
+    let views = agg.snapshot();
+    Ok(export_prometheus(&views))
+}
 
 /// 从请求头提取 If-Match（备用：支持 header 形式而非 body）。
 #[allow(dead_code)]

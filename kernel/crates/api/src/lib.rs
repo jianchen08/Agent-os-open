@@ -16,6 +16,7 @@ pub mod capability_router;
 pub mod config_service;
 pub mod error;
 pub mod http_dispatcher;
+pub mod metrics;
 pub mod pipeline_loader;
 pub mod routes;
 pub mod server;

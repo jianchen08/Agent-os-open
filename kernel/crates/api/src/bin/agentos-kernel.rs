@@ -236,13 +236,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let invoker = Arc::new(PluginInvokerImpl::new(loader_arc.clone()));
     let engine = Arc::new(AdrEngineImpl::new(store.clone(), invoker.clone(), "default"));
 
-    // 启用 sidecar→内核反向 capability 通道（审批暂停/恢复、复盘调管道、event-bus 的地基）
-    let router = Arc::new(KernelCapabilityRouter::new(engine.clone()));
+    // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。
+    // M4：router 持聚合器，metrics.record 反向调用写入它。
+    let metrics_aggregator = agentos_api::metrics::MetricsAggregator::new();
+    // 监控 M2：内核自采 A 类指标计数器注册中心。
+    let kernel_counters = Arc::new(agentos_api::metrics::KernelCounters::new());
+
+    // 启用 sidecar→内核反向 capability 通道（审批暂停/恢复、复盘调管道、event-bus 的地基）。
+    // 监控 M4：router 持聚合器，metrics.record 分支写聚合器（第 6 个 capability）。
+    let router = Arc::new(KernelCapabilityRouter::with_metrics(
+        engine.clone(),
+        metrics_aggregator.clone(),
+    ));
     invoker.set_router(router);
+
+    // 监控 M3：注册崩溃回调——invoker 检测到插件崩溃时记时间戳到聚合器（last_crash_ts）。
+    // 进程态轮询（memory_rss/uptime/alive/pid）由独立后台任务周期采（见下方 spawn）。
+    {
+        let agg_for_crash = metrics_aggregator.clone();
+        invoker.on_crash(Arc::new(move |plugin_id: &str| {
+            let snap = agentos_api::metrics::ProcStateSnapshot {
+                plugin_id: plugin_id.to_string(),
+                alive: false,
+                pid: None,
+                memory_rss_bytes: None,
+                uptime_secs: None,
+                last_crash_ts: Some(agentos_api::metrics::now_secs()),
+            };
+            agentos_api::metrics::collect_proc_state(&agg_for_crash, &snap);
+            info!(target: "agentos-kernel", plugin = plugin_id, "Plugin crash recorded as process.last_crash_ts metric");
+        }));
+    }
 
     info!(
         target: "agentos-kernel",
-        "Pipeline engine initialized (in-memory SQLite, reverse capability channel enabled)"
+        "Pipeline engine initialized (in-memory SQLite, reverse capability channel + metrics aggregator enabled)"
     );
 
     // ── 0.2 引擎接线：加载管道配置 + 公共 step 库 + 重名检测 ──
@@ -303,8 +331,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         project_root,
     )
     .with_http_handler(http_handler)
+    // 监控 M1/M5/M5b：注入指标聚合器（启用 /api/v1/metrics + /metrics 端点）
+    .with_metrics(metrics_aggregator.clone())
     // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）
     .enable_session();
+
+    // 监控 M2/M6：后台任务——每秒把内核自采计数器 flush 到聚合器 + 滚动桶降采样。
+    // M6：每秒采样关键指标广播给订阅 statusBar 的连接（widget_event）。
+    if let Some(session) = state.session.clone() {
+        let agg_flush = metrics_aggregator.clone();
+        let kc_flush = kernel_counters.clone();
+        let agg_rollup = metrics_aggregator.clone();
+        // MetricBroadcaster::spawn 需要 Arc<MetricsAggregator>；MetricsAggregator 内部已
+        // 用 Arc<RwLock> 共享，这里再包一层 Arc 满足签名（spawn 内只读快照）。
+        let agg_bcast: Arc<agentos_api::metrics::MetricsAggregator> =
+            Arc::new(metrics_aggregator.clone());
+        let kc_bcast = kernel_counters.clone();
+        let session_bcast = session.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.tick().await; // 跳过首次立即触发
+            loop {
+                tick.tick().await;
+                // M2：内核自采计数器快照 → 聚合器
+                kc_flush.flush_to(&agg_flush);
+                // M1：滚动桶降采样（1s→10s 合并 + 超 2h 清理）
+                agg_rollup.rollup();
+            }
+        });
+        // M6：每秒采样关键指标广播（widget_event → 前端 statusBar）
+        let _bcast_handle = agentos_api::metrics::MetricBroadcaster::spawn(
+            agg_bcast,
+            Some(kc_bcast),
+            session_bcast,
+            std::time::Duration::from_secs(1),
+        );
+        info!(target: "agentos-kernel", "Metrics background tasks started (M2 flush + M1 rollup + M6 broadcast, 1s interval)");
+    }
+
     start_server(addr, state).await?;
 
     Ok(())

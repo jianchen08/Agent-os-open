@@ -16,7 +16,35 @@ use agentos_core::traits::{
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
 use agentos_mcp::{CapabilityRouter, McpClient, McpError};
 use parking_lot::RwLock;
+use serde_json::{json, Value};
 use tracing::{error, info, warn};
+
+/// 把共享内核路由器包成 per-plugin 路由器——在 params 里注入 `_plugin_id`，
+/// 供内核 metrics.record 等需要知道调用方插件的能力使用（监控设计 §三 通道2 + §十
+/// 安全：内核强制 plugin_id，插件无法伪报他人指标）。
+struct PluginScopedRouter {
+    plugin_id: String,
+    inner: Arc<dyn CapabilityRouter>,
+}
+
+#[async_trait]
+impl CapabilityRouter for PluginScopedRouter {
+    async fn handle(
+        &self,
+        capability: &str,
+        method: &str,
+        mut params: Value,
+    ) -> Result<Value, McpError> {
+        // 在 params 注入 _plugin_id（内核侧 metrics.record 读取它做命名空间）。
+        // 这是信任锚点：plugin_id 来自 invoker 的 manifest，不是 sidecar 上报。
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert("_plugin_id".to_string(), Value::String(self.plugin_id.clone()));
+        } else {
+            params = json!({ "_plugin_id": self.plugin_id, "value": params });
+        }
+        self.inner.handle(capability, method, params).await
+    }
+}
 
 /// 从 MCP tools/call 响应中提取内部 JSON 值。
 ///
@@ -200,11 +228,17 @@ impl PluginInvokerImpl {
         let (command, args) = self.parse_entry(&manifest.entry)?;
         let mut client = McpClient::new_stdio(command, args);
 
-        // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）
+        // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
+        // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
+        // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
         {
             let router_guard = self.router.read();
             if let Some(router) = router_guard.as_ref() {
-                client = client.with_router(Arc::clone(router));
+                let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
+                    plugin_id: manifest.id.clone(),
+                    inner: Arc::clone(router),
+                });
+                client = client.with_router(scoped);
             }
         }
 

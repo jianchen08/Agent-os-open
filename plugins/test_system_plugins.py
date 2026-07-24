@@ -371,3 +371,101 @@ class TestManifestValidation:
     def test_server_exists(self, plugin_dir: str) -> None:
         server_path = _get_plugin_dir(plugin_dir) / "server.py"
         assert server_path.exists(), f"server.py missing for {plugin_dir}"
+
+
+# ═══════════════════════════════════════════════════════════
+# 监控 M7：monitoring 插件改走 record_metric 上报 D 类系统资源
+# （监控设计 §三 D 类 + §十一 + 落地清单 M7）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestMonitoringRecordMetric:
+    """验证 monitoring 插件经 record_metric 上报 D 类系统资源（M7）。"""
+
+    def _load_monitoring(self) -> Any:
+        # monitoring 在 shared/system/monitoring/
+        plugin_path = Path(_PLUGINS_DIR) / "shared" / "system" / "monitoring" / "server.py"
+        spec = importlib.util.spec_from_file_location("monitoring_server_test", plugin_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["monitoring_server_test"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_monitoring_uses_record_metric(self) -> None:
+        """server.py 引用了 record_metric 上报路径（M7 改造标记）。"""
+        mod = self._load_monitoring()
+        # 验证后台上报函数存在
+        assert hasattr(mod, "_report_system_metrics_once")
+        assert hasattr(mod, "_report_metrics_loop")
+
+    @pytest.mark.asyncio
+    async def test_report_system_metrics_calls_record_metric(self) -> None:
+        """_report_system_metrics_once 在 metrics capability 注入时调 record_metric。
+
+        用 mock monitor + mock record_metric 验证：采到的系统指标经
+        record_metric 上报（counter/gauge 分流，这里都是 gauge）。
+        """
+        mod = self._load_monitoring()
+
+        # mock monitor.get_system_metrics 返回固定值
+        class _FakeSystem:
+            cpu_usage = 75.0
+            memory_usage = 60.0
+            disk_usage = 50.0
+            network_sent = 12.3
+            network_recv = 45.6
+
+        class _FakeMonitor:
+            async def get_system_metrics(self) -> Any:
+                return _FakeSystem()
+
+        # mock plugin.record_metric 记录调用
+        recorded: list[tuple] = []
+
+        async def _fake_record(name, value, metric_type="counter", labels=None, unit=None, help_text=None):
+            recorded.append((name, value, metric_type, labels, unit))
+            return {"status": "recorded"}
+
+        with patch.object(mod, "_monitor", _FakeMonitor()), \
+             patch.object(mod.plugin, "record_metric", _fake_record):
+            await mod._report_system_metrics_once()
+
+        # 应上报 5 个系统资源 gauge 指标
+        names = [r[0] for r in recorded]
+        assert "system.cpu_usage_ratio" in names
+        assert "system.memory_usage_ratio" in names
+        assert "system.disk_usage_ratio" in names
+        assert "system.network_sent_kbytes_per_sec" in names
+        assert "system.network_recv_kbytes_per_sec" in names
+        # 全部 gauge 类型（系统资源是当前值）
+        assert all(r[2] == "gauge" for r in recorded)
+        # cpu 75% → 0.75 ratio
+        cpu_rec = next(r for r in recorded if r[0] == "system.cpu_usage_ratio")
+        assert abs(cpu_rec[1] - 0.75) < 0.001
+        # labels 含 source=psutil
+        assert all(r[3] == {"source": "psutil"} for r in recorded)
+
+    @pytest.mark.asyncio
+    async def test_report_silently_skips_when_capability_not_injected(self) -> None:
+        """metrics capability 未注入（KeyError）→ 静默跳过，不阻断插件。"""
+        mod = self._load_monitoring()
+
+        class _FakeSystem:
+            cpu_usage = 75.0
+            memory_usage = 60.0
+            disk_usage = 50.0
+            network_sent = 0.0
+            network_recv = 0.0
+
+        class _FakeMonitor:
+            async def get_system_metrics(self) -> Any:
+                return _FakeSystem()
+
+        async def _raise_keyerror(*args, **kwargs):
+            raise KeyError("not injected")
+
+        with patch.object(mod, "_monitor", _FakeMonitor()), \
+             patch.object(mod.plugin, "record_metric", _raise_keyerror):
+            # 不应抛异常
+            await mod._report_system_metrics_once()

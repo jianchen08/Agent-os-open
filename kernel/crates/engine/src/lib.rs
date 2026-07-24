@@ -15,10 +15,12 @@
 
 pub mod condition;
 pub mod engine;
+pub mod metrics;
 pub mod pipeline_loop;
 pub mod store;
 pub mod template;
 
 pub use engine::AdrEngineImpl;
+pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 pub use pipeline_loop::PipelineExecutor;
 pub use store::SqliteStore;

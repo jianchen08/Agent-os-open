@@ -147,3 +147,60 @@ async fn reconnect_sends_connection_confirmation() {
         "重连后应发送 connection_confirmation"
     );
 }
+
+// ── 监控 M2：session crate 自采指标（监控设计 §三 通道1）──
+
+#[tokio::test]
+async fn metrics_emit_widget_increments_push_counter() {
+    let coord = SessionCoordinator::default();
+    let (sink, _recv) = MockSink::online();
+    coord.register("user-A", sink);
+    coord.register_thread("thread-1", "user-A");
+    coord
+        .emit_widget("thread-1", "cost", "tick", serde_json::json!({}), "p")
+        .await;
+    let snap = coord.metrics().snapshot();
+    assert_eq!(snap.event_bus_push_total, 1, "emit_widget 投递成功应 inc push");
+    assert_eq!(snap.event_bus_dropped_total, 0);
+}
+
+#[tokio::test]
+async fn metrics_reconnect_kick_increments_counters() {
+    let coord = SessionCoordinator::default();
+    let (sink1, _recv1) = MockSink::online();
+    coord.register("user-A", sink1);
+    // 重连踢旧 → kick_old + replay_hit（无溢出走回放路径）
+    let (sink2, _recv2) = MockSink::online();
+    coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
+    let snap = coord.metrics().snapshot();
+    assert!(snap.kick_old_total >= 1, "踢旧应 inc kick_old");
+    assert_eq!(snap.replay_hits_total, 1, "成功回放应 inc replay_hit");
+}
+
+#[tokio::test]
+async fn metrics_resync_increments_replay_miss() {
+    let coord = SessionCoordinator::with_replay_capacity(2);
+    let (sink1, _recv1) = MockSink::online();
+    coord.register("user-A", sink1);
+    coord.register_thread("thread-1", "user-A");
+    for i in 1..=5 {
+        coord.emit_stream("thread-1", &format!("c{i}")).await;
+    }
+    let (sink2, _recv2) = MockSink::online();
+    let outcome = coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
+    assert!(outcome.resync_required);
+    let snap = coord.metrics().snapshot();
+    assert_eq!(snap.replay_misses_total, 1, "resync 应 inc replay_miss");
+}
+
+#[tokio::test]
+async fn metrics_connections_gauge_tracks_registry_size() {
+    let coord = SessionCoordinator::default();
+    assert_eq!(coord.metrics().snapshot().connections, 0);
+    let (sink1, _r1) = MockSink::online();
+    coord.register("user-A", sink1);
+    assert_eq!(coord.metrics().snapshot().connections, 1);
+    let (sink2, _r2) = MockSink::online();
+    coord.register("user-B", sink2);
+    assert_eq!(coord.metrics().snapshot().connections, 2);
+}

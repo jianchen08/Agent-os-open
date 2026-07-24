@@ -1,13 +1,15 @@
 """依赖注入能力句柄。
 
-内核在 initialize 时注入 5 个能力句柄：
+内核在 initialize 时注入 6 个能力句柄：
 - pipeline-executor: 管道执行能力
 - config-reader: 配置读取能力
 - tenant-context: 租户上下文
 - event-bus: 事件总线
 - logger: 日志服务
+- metrics: 指标上报（record_metric，监控设计 §三 通道2）
 
 [来源: docs/tasks/task_08_python_sdk.md AC-07-3]
+[来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
 """
 
 from __future__ import annotations
@@ -78,11 +80,13 @@ class CapabilityHandle:
         return list(self._context.keys())
 
 
-# 5 个标准能力句柄名称
+# 6 个标准能力句柄名称（与内核 STANDARD_CAPABILITIES 对齐）
 STANDARD_CAPABILITIES = [
     "pipeline-executor",
     "config-reader",
     "tenant-context",
     "event-bus",
     "logger",
+    "metrics",
 ]
+

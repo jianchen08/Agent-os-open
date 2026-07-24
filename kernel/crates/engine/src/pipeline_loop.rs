@@ -52,6 +52,9 @@ pub struct PipelineExecutor {
     store: Arc<dyn StorageBackend>,
     run_id: String,
     branch_id: String,
+    /// 监控 M2：engine 自采计数器（监控设计 §三 通道1 + §补引擎调度层）。
+    /// 默认 new 一个；生产侧可用 with_metrics 注入共享实例。
+    metrics: Arc<crate::metrics::EngineMetrics>,
 }
 
 impl PipelineExecutor {
@@ -81,7 +84,19 @@ impl PipelineExecutor {
             store,
             run_id: run_id.into(),
             branch_id: branch_id.into(),
+            metrics: Arc::new(crate::metrics::EngineMetrics::new()),
         }
+    }
+
+    /// 监控 M2：注入共享 engine 计数器（生产侧用，聚合器周期性 snapshot）。
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::EngineMetrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// 监控 M2：暴露计数器句柄（聚合器周期性 snapshot）。
+    pub fn metrics(&self) -> &Arc<crate::metrics::EngineMetrics> {
+        &self.metrics
     }
 
     /// 执行管道。
@@ -100,6 +115,8 @@ impl PipelineExecutor {
         step_library: &StepLibrary,
         initial_state: serde_json::Value,
     ) -> Result<serde_json::Value, EngineError> {
+        // 监控 M2：pipeline 执行次数 + 耗时（监控设计 §三 通道1）
+        let run_start = std::time::Instant::now();
         let mut state = initial_state;
         ensure_object(&mut state);
         // 默认设 ended=false（如未设）
@@ -124,11 +141,16 @@ impl PipelineExecutor {
                     break;
                 }
             }
+            // 监控 M2：迭代轮数（仅 loop 模式计）
+            self.metrics.inc_iterations(iteration as u64);
         } else {
             self.execute_steps(&config.steps, &mut state, config, step_library)
                 .await;
         }
 
+        // 监控 M2：pipeline 执行累计耗时
+        let elapsed = run_start.elapsed().as_micros() as u64;
+        self.metrics.inc_pipeline_exec(elapsed);
         Ok(state)
     }
 
@@ -304,6 +326,8 @@ impl PipelineExecutor {
         plugin_id: &str,
         state: serde_json::Value,
     ) -> Result<PluginResult, PluginError> {
+        // 监控 M2：step 命中（每 invoke 一次 = 命中一个 step 的插件）
+        self.metrics.inc_step_hit();
         let content_loader = ContentLoader::new(
             Arc::clone(&self.store),
             self.run_id.clone(),
@@ -317,7 +341,22 @@ impl PipelineExecutor {
             uuid::Uuid::nil(),
             content_loader,
         );
-        self.invoker.invoke_pipeline_plugin(plugin_id, &ctx).await
+        // 监控 M2：LLM/工具调用次数 + 耗时（调度层视角 = invoke 前后差，
+        // 监控设计 §补引擎调度层）。按 plugin_id 启发式分类：
+        // - 含 "llm" → LLM 调用
+        // - 含 "tool" → 工具调用
+        // - 其他 → 不计 LLM/tool（如 context_build/condition 等编排插件）
+        let is_llm = plugin_id.to_lowercase().contains("llm");
+        let is_tool = plugin_id.to_lowercase().contains("tool");
+        let invoke_start = std::time::Instant::now();
+        let result = self.invoker.invoke_pipeline_plugin(plugin_id, &ctx).await;
+        let elapsed = invoke_start.elapsed().as_micros() as u64;
+        if is_llm {
+            self.metrics.inc_llm_call(elapsed);
+        } else if is_tool {
+            self.metrics.inc_tool_call(elapsed);
+        }
+        result
     }
 }
 

@@ -170,6 +170,51 @@ class AgentOSPlugin:
         """获取内核注入的插件配置。"""
         return self._injected_config
 
+    async def record_metric(
+        self,
+        name: str,
+        value: float,
+        metric_type: str = "counter",
+        labels: dict[str, str] | None = None,
+        unit: str | None = None,
+        help_text: str | None = None,
+    ) -> Any:
+        """上报一个业务指标到内核聚合器（监控设计 §三 通道2）。
+
+        内核自动把当前 plugin_id 作为指标的命名空间（series.plugin_id），
+        插件只需写短名（如 ``tokens_used``），不必加前缀。
+
+        Args:
+            name: 指标短名（如 "tokens_used"、"calls_total"）。
+            value: 指标值。
+            metric_type: "counter"（单调累加）/ "gauge"（覆盖）/ "histogram"（分布）。
+            labels: 维度标签（如 {"model": "deepseek"}）。值禁含换行/双引号。
+            unit: 单位（可选，如 "tokens"/"seconds"）。
+            help_text: HELP 文本（可选，Prometheus 导出用）。
+
+        Returns:
+            内核返回的确认（{"status": "recorded", ...}）。
+
+        Raises:
+            KeyError: metrics capability 未注入（内核未启用聚合器）。
+            RuntimeError: 调用失败。
+
+        [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
+        """
+        cap = self.get_capability("metrics")
+        params: dict[str, Any] = {
+            "name": name,
+            "value": value,
+            "metric_type": metric_type,
+        }
+        if labels is not None:
+            params["labels"] = {str(k): str(v) for k, v in labels.items()}
+        if unit is not None:
+            params["unit"] = unit
+        if help_text is not None:
+            params["help"] = help_text
+        return await cap.call("record", params)
+
     # ── MCP 服务端启动 ────────────────────────────────────
 
     def _on_initialize(self, params: dict[str, Any]) -> None:

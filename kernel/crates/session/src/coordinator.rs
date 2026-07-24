@@ -30,6 +30,8 @@ pub struct SessionCoordinator {
     registry: Arc<ConnectionRegistry>,
     bus: FrontendEventBus,
     replay: Arc<ReplayBuffer>,
+    /// 监控 M2：session crate 自采计数器（监控设计 §三 通道1）。
+    metrics: Arc<crate::metrics::SessionMetrics>,
 }
 
 impl SessionCoordinator {
@@ -38,10 +40,12 @@ impl SessionCoordinator {
         let registry = Arc::new(ConnectionRegistry::new());
         let bus = FrontendEventBus::new(registry.clone());
         let replay = Arc::new(ReplayBuffer::new(ReplayConfig::default()));
+        let metrics = Arc::new(crate::metrics::SessionMetrics::new());
         Self {
             registry,
             bus,
             replay,
+            metrics,
         }
     }
 
@@ -53,11 +57,18 @@ impl SessionCoordinator {
             capacity,
             ttl_secs: 300,
         }));
+        let metrics = Arc::new(crate::metrics::SessionMetrics::new());
         Self {
             registry,
             bus,
             replay,
+            metrics,
         }
+    }
+
+    /// 监控 M2：暴露 session 计数器句柄（聚合器周期性 snapshot）。
+    pub fn metrics(&self) -> &Arc<crate::metrics::SessionMetrics> {
+        &self.metrics
     }
 
     /// 暴露连接注册表（ws_handler 注册连接用）。
@@ -67,9 +78,13 @@ impl SessionCoordinator {
 
     /// 注册连接（单连接踢旧）。
     pub fn register(&self, user_id: &str, sink: Arc<dyn crate::EventSink>) -> Option<u64> {
-        self.registry
-            .register(user_id, sink)
-            .map(|kicked| kicked.id())
+        let kicked = self.registry.register(user_id, sink);
+        if kicked.is_some() {
+            self.metrics.inc_kick_old();
+        }
+        // 活跃连接数 = 注册表大小（gauge，每次 register 后同步真实值）
+        self.metrics.set_connections(self.registry.active_count() as u64);
+        kicked.map(|k| k.id())
     }
 
     /// 建立 thread→user 映射。
@@ -96,6 +111,12 @@ impl SessionCoordinator {
                 plugin_id,
             )
             .await;
+        // 监控 M2：记录 push / dropped（delivered=0 但 emit 已分配 seq → 被限流丢弃）
+        if delivered > 0 {
+            self.metrics.inc_event_bus_push(1);
+        } else {
+            self.metrics.inc_event_bus_dropped();
+        }
         // 记录到重放缓冲（widget 族）
         let payload = serde_json::to_string(&widget_envelope(widget_id, event, data, seq, plugin_id))
             .unwrap_or_default();
@@ -117,10 +138,45 @@ impl SessionCoordinator {
                 "stream",
             )
             .await;
+        if delivered > 0 {
+            self.metrics.inc_event_bus_push(1);
+        } else {
+            self.metrics.inc_event_bus_dropped();
+        }
         let payload = serde_json::to_string(&stream_envelope(chunk, seq)).unwrap_or_default();
         self.replay
             .record(thread_id, ReplayEvent::new(seq, payload))
             .await;
+        delivered
+    }
+
+    /// 广播一个 widget 事件到**全部活跃连接**（EmitScope::Broadcast，
+    /// 监控设计 §六 形态2 statusBar 实时数字）。
+    ///
+    /// 与 emit_widget（thread 单播）的区别：本方法广播给所有连接，
+    /// 且不进 thread 级重放缓冲（广播事件不重放）。用于状态栏类全局推送。
+    pub async fn broadcast_widget(
+        &self,
+        widget_id: &str,
+        event: &str,
+        data: Value,
+        plugin_id: &str,
+    ) -> usize {
+        let (delivered, _seq) = self
+            .bus
+            .emit_with_sequence(
+                widget_id,
+                event,
+                data,
+                EmitScope::Broadcast,
+                plugin_id,
+            )
+            .await;
+        // 监控 M2：broadcast 计数
+        self.metrics.inc_broadcast();
+        if delivered > 0 {
+            self.metrics.inc_event_bus_push(delivered as u64);
+        }
         delivered
     }
 
@@ -134,6 +190,9 @@ impl SessionCoordinator {
     ) -> ReconnectOutcome {
         // 1. 注册新连接（踢旧）
         let kicked_old_sink_id = self.register(user_id, sink.clone());
+        if kicked_old_sink_id.is_some() {
+            self.metrics.inc_kick_old();
+        }
 
         // 2. 发连接确认
         let confirmation = json!({
@@ -149,6 +208,7 @@ impl SessionCoordinator {
                 for ev in events {
                     let _ = sink.send_text(&ev.payload).await;
                 }
+                self.metrics.inc_replay_hit();
                 ReconnectOutcome {
                     replayed: true,
                     resync_required: false,
@@ -164,6 +224,7 @@ impl SessionCoordinator {
                 let _ = sink
                     .send_text(&serde_json::to_string(&resync).unwrap_or_default())
                     .await;
+                self.metrics.inc_replay_miss();
                 ReconnectOutcome {
                     replayed: false,
                     resync_required: true,

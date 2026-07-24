@@ -30,8 +30,9 @@ use crate::auth::{
 };
 use crate::error::ApiError;
 use crate::routes::{
-    agents_handler, get_plugin_config_with_etag, health_handler, pipelines_handler,
-    put_plugin_config_handler, schema_handler, tools_handler, AppState,
+    agents_handler, get_plugin_config_with_etag, health_handler, metrics_prometheus_handler,
+    metrics_query_handler, pipelines_handler, put_plugin_config_handler, schema_handler,
+    tools_handler, AppState,
 };
 
 /// WebSocket 消息请求体。
@@ -71,6 +72,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/plugins/{id}/config/{file_id}",
             get(get_plugin_config_with_etag).put(put_plugin_config_handler),
         )
+        // 监控 M5/M5b：指标查询 + Prometheus 导出（监控设计 §五/§十一）
+        .route("/api/v1/metrics", get(metrics_query_handler))
+        .route("/metrics", get(metrics_prometheus_handler))
         // AC-06-4: WebSocket 端点
         .route("/ws", get(ws_handler))
         // task_11 A2：前端写死连 /ws/chat（0.1 路径格式），加别名指向同一 handler，
@@ -618,5 +622,156 @@ mod tests {
         let tools = json.as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "calculator");
+    }
+
+    // ── 监控 M5/M5b：指标查询端点 + Prometheus 导出端点 ──
+
+    fn state_with_metrics() -> AppState {
+        use crate::metrics::{Labels, MetricType, MetricsAggregator};
+        let agg = MetricsAggregator::new();
+        let mut labels = Labels::new();
+        labels.insert("model".to_string(), "deepseek".to_string());
+        agg.record(
+            "llm_service",
+            "tokens_used",
+            MetricType::Counter,
+            12800.0,
+            &labels,
+            Some("tokens"),
+            Some("Total tokens used"),
+        );
+        agg.record(
+            "llm_service",
+            "latency",
+            MetricType::Histogram,
+            0.02,
+            &Labels::new(),
+            Some("seconds"),
+            Some("LLM latency"),
+        );
+        AppState::new().with_metrics(agg)
+    }
+
+    #[tokio::test]
+    async fn test_metrics_query_endpoint_returns_data() {
+        let app = build_router(state_with_metrics());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/metrics?plugin=llm_service")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let metrics = json["metrics"].as_array().unwrap();
+        assert!(!metrics.is_empty());
+        assert_eq!(metrics[0]["plugin_id"], "llm_service");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_query_filter_by_metric_name() {
+        let app = build_router(state_with_metrics());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/metrics?plugin=llm_service&metric=tokens_used")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let metrics = json["metrics"].as_array().unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0]["name"], "tokens_used");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_query_filter_by_labels() {
+        let app = build_router(state_with_metrics());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/metrics?labels=model:deepseek")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let metrics = json["metrics"].as_array().unwrap();
+        // 只有 tokens_used 带 model 标签
+        assert!(metrics.iter().all(|m| m["name"] == "tokens_used"));
+    }
+
+    #[tokio::test]
+    async fn test_metrics_query_no_aggregator_404() {
+        // 未注入 metrics → 404
+        let app = build_router(AppState::new());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_prometheus_endpoint() {
+        let app = build_router(state_with_metrics());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        // counter 导出
+        assert!(text.contains("# HELP llm_service_tokens_used Total tokens used"));
+        assert!(text.contains("# TYPE llm_service_tokens_used counter"));
+        assert!(text.contains("llm_service_tokens_used{model=\"deepseek\"}"));
+        // histogram 导出
+        assert!(text.contains("# TYPE llm_service_latency histogram"));
+        assert!(text.contains("llm_service_latency_bucket{le=\"0.025\"}"));
+        assert!(text.contains("llm_service_latency_bucket{le=\"+Inf\"}"));
+        assert!(text.contains("llm_service_latency_count"));
+    }
+
+    #[tokio::test]
+    async fn test_metrics_prometheus_no_aggregator_404() {
+        let app = build_router(AppState::new());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
