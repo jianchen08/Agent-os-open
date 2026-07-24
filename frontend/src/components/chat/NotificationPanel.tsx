@@ -9,7 +9,7 @@
  * 复用 NotificationItemComponent 渲染每条通知。
  */
 
-import { BellOff } from 'lucide-react'
+import { BellOff } from '@/assets/icons'
 import { useCallback } from 'react'
 import { cn } from '@/lib/utils'
 import { useNotificationStore } from '@/stores/notificationStore'

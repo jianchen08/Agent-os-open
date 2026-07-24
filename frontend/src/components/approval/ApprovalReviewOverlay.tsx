@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X, ChevronLeft, ChevronRight } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight } from '@/assets/icons'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { submitFeedback } from '@/services/api/reviews'
 import { ApprovalRouter } from './ApprovalRouter'

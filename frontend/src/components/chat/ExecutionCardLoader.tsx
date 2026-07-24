@@ -4,7 +4,7 @@
  * 根据执行记录 ID 查询数据并渲染活动卡片
  */
 
-import { AlertCircle } from 'lucide-react'
+import { AlertCircle } from '@/assets/icons'
 import { useExecutionRecord } from '@/hooks/useExecutionRecord'
 import { cn } from '@/lib/utils'
 import ActivityCard from './ActivityCard'

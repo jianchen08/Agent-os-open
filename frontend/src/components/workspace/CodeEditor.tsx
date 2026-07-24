@@ -1,6 +1,6 @@
 /** 代码编辑器组件 在工作区面板中提供带语法高亮的代码编辑功能。 */
 
-import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from 'lucide-react'
+import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from '@/assets/icons'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'

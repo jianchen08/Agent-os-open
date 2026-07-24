@@ -4,7 +4,7 @@
  * 紧凑的主题选择面板，使用网格布局显示所有主题
  */
 
-import { Check, Settings } from 'lucide-react'
+import { Check, Settings } from '@/assets/icons'
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'

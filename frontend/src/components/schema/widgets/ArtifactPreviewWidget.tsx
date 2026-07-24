@@ -8,7 +8,7 @@
  */
 
 import React from 'react'
-import { FileText, Image as ImageIcon, FileCode, File, Database } from 'lucide-react'
+import { FileText, Image as ImageIcon, FileCode, File, Database } from '@/assets/icons'
 
 /** 制品类型 */
 type ArtifactKind = 'text' | 'image' | 'code' | 'document' | 'data' | 'composite' | 'file'

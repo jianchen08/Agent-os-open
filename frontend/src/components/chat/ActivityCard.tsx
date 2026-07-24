@@ -16,7 +16,7 @@ import {
   Target,
   Wrench,
   XCircle,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { useState } from 'react'
 import { TextDiffView } from '@/components/approval'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'

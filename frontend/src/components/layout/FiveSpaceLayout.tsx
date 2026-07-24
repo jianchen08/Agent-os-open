@@ -1,6 +1,6 @@
 /** Five Space Layout Component Implements the five-rendering-space layout: */
 
-import { Minimize2, FolderOpen } from 'lucide-react'
+import { Minimize2, FolderOpen } from '@/assets/icons'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { getEditorForFile } from '@/config/fileEditors'
 import { cn } from '@/lib/utils'

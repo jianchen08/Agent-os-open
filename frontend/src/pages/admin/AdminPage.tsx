@@ -4,7 +4,7 @@
  * 用户管理，包含用户列表表格和用户统计
  */
 
-import { Users } from 'lucide-react'
+import { Users } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import * as usersApi from '@/services/api/users'
 import type { User } from '@/services/api/users'

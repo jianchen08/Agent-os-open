@@ -10,7 +10,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react'
-import { FileWarning } from 'lucide-react'
+import { FileWarning } from '@/assets/icons'
 
 /** HTML 预览组件属性 */
 export interface HtmlPreviewWidgetProps {

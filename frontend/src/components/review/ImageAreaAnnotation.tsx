@@ -5,7 +5,7 @@
  * 支持鼠标拖拽创建标注、已有标注显示为带编号矩形框。
  */
 
-import { X, Plus, Move } from 'lucide-react'
+import { X, Plus, Move } from '@/assets/icons'
 import React, { useState, useCallback, useRef } from 'react'
 import type { Annotation } from '@/types/review'
 

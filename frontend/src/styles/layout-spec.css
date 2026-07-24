@@ -1,0 +1,148 @@
+/**
+ * AgentOS 布局规范
+ *
+ * 来源：画布 C · 主界面 · 聊天核心 (node 49:162)
+ * 更新时间：2026-07-24
+ */
+
+/* === 布局尺寸规范 === */
+
+:root {
+  /* 顶层容器 */
+  --layout-titlebar-height: 32px;
+  --layout-statusbar-height: 22px;
+
+  /* ActivityBar */
+  --layout-activitybar-width: 56px;
+
+  /* SideBar */
+  --layout-sidebar-width: 288px;
+  --layout-sidebar-padding: 12px;
+  --layout-sidebar-search-height: 32px;
+  --layout-sidebar-item-height: 55px;
+  --layout-sidebar-group-gap: 59px; /* 分组标题到上一项的距离 */
+
+  /* ChatPanel */
+  --layout-chatpanel-width: 520px;
+  --layout-chatpanel-message-gap: 20px;
+  --layout-chatpanel-input-height: 111px;
+
+  /* WorkspacePanel */
+  --layout-workspacepanel-tab-height: 36px;
+  --layout-workspacepanel-content-gap: 20px;
+
+  /* 通用间距 */
+  --layout-gap-sm: 4px;
+  --layout-gap-md: 8px;
+  --layout-gap-lg: 12px;
+  --layout-gap-xl: 20px;
+
+  /* 圆角 */
+  --layout-radius-sm: 6px;
+  --layout-radius-md: 8px;
+  --layout-radius-lg: 10px;
+}
+
+/* === TitleBar === */
+/*
+高度: 32px
+背景: var(--ds-bg-panel)
+边框: 底部 1px var(--ds-border-subtle)
+
+布局:
+- 左侧: Logo (22x22, 渐变 #22D3EE → #A78BFA) + 应用名 "AgentOS" (13px SemiBold)
+- 中部: 会话标题 (12px Regular, var(--ds-text-muted))
+- 右侧: 图标组 (15x15, 间距 12px) - 搜索/通知/分屏/更多
+
+内边距: 左右 12px, 上下居中
+*/
+
+/* === ActivityBar === */
+/*
+宽度: 56px
+背景: var(--ds-bg-panel)
+边框: 右侧 1px var(--ds-border-subtle)
+
+布局:
+- 顶部槽位组: 图标 24x24, 间距 8px
+- 底部槽位组: 设置/主题/用户头像
+- 内边距: 顶部 12px, 底部 12px
+
+图标尺寸: 24x24 (Active 状态: 背景高亮, 青色边框)
+*/
+
+/* === SideBar === */
+/*
+宽度: 288px
+背景: var(--ds-bg-panel)
+边框: 右侧 1px var(--ds-border-subtle)
+
+结构:
+- 头部行: 36px 高, 包含标题 + 新建按钮
+- 搜索框: 32px 高, 圆角 8px
+- 分组标题: 11px Medium, var(--ds-text-muted)
+- 会话项: 55px 高, 圆角 8px
+  - 当前项: 背景 var(--ds-bg-elevated), 边框 var(--ds-border-active)
+
+内边距: 12px
+间距: 搜索框到分组 24px, 分组标题到会话项 12px
+*/
+
+/* === ChatPanel === */
+/*
+宽度: 520px (固定)
+背景: var(--ds-bg-canvas)
+边框: 左侧 1px var(--ds-border-subtle)
+
+结构:
+- 消息流: flex-grow, 间距 20px
+- 输入区: 111px 高, 上边框 1px var(--ds-border-subtle)
+
+消息气泡:
+- 用户: 右对齐, 背景 var(--ds-accent-primary)
+- AI: 左对齐, 背景 var(--ds-bg-elevated)
+- 圆角: 16px (气泡) / 4px (小气泡)
+*/
+
+/* === WorkspacePanel === */
+/*
+宽度: flex-grow (剩余空间)
+背景: var(--ds-bg-panel)
+无边框 (最右侧)
+
+结构:
+- 页签行: 36px 高, 底边框 1px var(--ds-border-subtle)
+  - 页签: 36px 高, 活动页签下划线 2px var(--ds-accent-primary)
+  - 页签间距: 20px
+- 内容区: flex-grow, 间距 20px
+*/
+
+/* === StatusBar === */
+/*
+高度: 22px
+背景: var(--ds-bg-panel)
+边框: 顶部 1px var(--ds-border-subtle)
+
+布局:
+- 左组: 系统状态项 (间距 16px)
+  - 连接状态: 圆点 + 文案
+  - 管道状态: 阶段/插件
+  - 审批状态
+- 右组: 会话指标 (间距 16px)
+  - 成本: JetBrains Mono 10px
+  - 模型: JetBrains Mono 10px
+  - 主题图标: 14x14
+  - 时间: JetBrains Mono 10px
+
+内边距: 左右 10px
+字体: 10px JetBrains Mono
+颜色: var(--ds-text-muted)
+*/
+
+/* === 响应式断点 === */
+/*
+- 1440px: 完整布局 (ActivityBar + SideBar + ChatPanel + WorkspacePanel)
+- 1200px: 隐藏 SideBar
+- 900px: 隐藏 WorkspacePanel, ChatPanel 展开到 640px
+- 600px: 只保留 ChatPanel
+*/

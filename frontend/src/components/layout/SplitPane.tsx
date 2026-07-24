@@ -3,7 +3,7 @@
  *
  * 支持拖拽调整宽度、折叠展开
  */
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight } from '@/assets/icons'
 import { useState, useRef, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 

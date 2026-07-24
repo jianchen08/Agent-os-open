@@ -25,7 +25,7 @@ import {
   ZoomIn,
   Info,
   Maximize2,
-} from 'lucide-react'
+} from '@/assets/icons'
 import React, { useState, useCallback, useMemo } from 'react'
 import type { Artifact, ArtifactType, MediaMetadata } from '@/types/review'
 

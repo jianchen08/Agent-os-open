@@ -5,7 +5,7 @@
  * 可选的重试按钮用于触发数据重新加载。
  */
 
-import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { AlertTriangle, RefreshCw } from '@/assets/icons'
 
 /** ErrorState 组件属性 */
 interface ErrorStateProps {

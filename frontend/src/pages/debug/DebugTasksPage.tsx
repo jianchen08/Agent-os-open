@@ -1,7 +1,7 @@
 /** 调试任务页面 展示任务列表，支持按状态过滤，支持暂停任务的恢复操作 */
 
 import { useState, useEffect, useCallback } from 'react'
-import { Play } from 'lucide-react'
+import { Play } from '@/assets/icons'
 import { getTaskList } from '@/services/api/monitoring'
 import { resumeTask } from '@/services/api/tasks'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'

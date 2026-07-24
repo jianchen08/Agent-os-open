@@ -9,7 +9,7 @@
  */
 
 import React, { useMemo, useState } from 'react'
-import { FileText, MessageSquare, GitCompare } from 'lucide-react'
+import { FileText, MessageSquare, GitCompare } from '@/assets/icons'
 import { ReviewDiff } from '@/components/review/ReviewDiff'
 
 /** 审阅制品项（与 ui_schema.props.artifacts 元素结构对齐） */

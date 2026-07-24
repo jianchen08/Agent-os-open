@@ -4,7 +4,7 @@
  * 展示所有插件状态，支持热重载单个/全部插件，查看重载历史
  */
 
-import { RefreshCw, Zap, AlertCircle, ChevronDown, ChevronRight, Plug } from 'lucide-react'
+import { RefreshCw, Zap, AlertCircle, ChevronDown, ChevronRight, Plug } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import apiClient from '@/services/api/client'
 

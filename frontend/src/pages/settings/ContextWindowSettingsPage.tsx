@@ -1,6 +1,6 @@
 /** 上下文窗口配置页面 管理上下文窗口大小、记忆层级配置、压缩设置、Token 预算分配 */
 
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'

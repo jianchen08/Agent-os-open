@@ -17,7 +17,7 @@ import {
   Info,
   Loader2,
   X,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { useCallback, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'

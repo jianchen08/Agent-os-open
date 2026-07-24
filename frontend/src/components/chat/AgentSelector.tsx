@@ -9,7 +9,7 @@
  * - AgentSelectorProps: 组件属性类型
  */
 
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown } from '@/assets/icons'
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useAgentStore } from '@/stores/agentStore'
 import { updateSessionAgent } from '@/services/api/session'

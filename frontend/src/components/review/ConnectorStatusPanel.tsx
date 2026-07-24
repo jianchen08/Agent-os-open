@@ -5,7 +5,7 @@
  * 支持连接/断开操作。
  */
 
-import { Plug, Unplug, RefreshCw, ExternalLink, Settings } from 'lucide-react'
+import { Plug, Unplug, RefreshCw, ExternalLink, Settings } from '@/assets/icons'
 import React, { useState, useCallback } from 'react'
 import type { ExternalConnector, ConnectorStatus } from '@/types/review'
 

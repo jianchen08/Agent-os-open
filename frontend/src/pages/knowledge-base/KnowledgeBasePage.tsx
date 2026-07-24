@@ -14,7 +14,7 @@ import {
   Folder,
   FileText,
   Cloud,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import apiClient from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'

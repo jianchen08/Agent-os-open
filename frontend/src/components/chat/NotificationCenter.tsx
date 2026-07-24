@@ -15,7 +15,7 @@
  * 原始 overflow 值。
  */
 
-import { Bell, BellOff, ChevronDown, ChevronRight, X } from 'lucide-react'
+import { Bell, BellOff, ChevronDown, ChevronRight, X } from '@/assets/icons'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'

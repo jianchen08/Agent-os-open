@@ -29,7 +29,7 @@ import {
   FileCode,
   FileSpreadsheet,
   FileArchive,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'

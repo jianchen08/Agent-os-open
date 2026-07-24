@@ -15,7 +15,7 @@
  *      无需手写任何锚点逻辑。
  */
 
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/assets/icons'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { logger as loggerService } from '@/utils/logger'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'

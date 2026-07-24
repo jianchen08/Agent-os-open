@@ -5,7 +5,7 @@
  * 支持三种显示模式：collapsed / summary / full
  */
 
-import { ChevronDown, ChevronRight, ExternalLink, MessageSquare } from 'lucide-react'
+import { ChevronDown, ChevronRight, ExternalLink, MessageSquare } from '@/assets/icons'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'

@@ -7,7 +7,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { Loader2, Plus } from 'lucide-react'
+import { Loader2, Plus } from '@/assets/icons'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/ui/Modal'

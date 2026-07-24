@@ -20,7 +20,7 @@ import {
   ExternalLink,
   ArrowUpDown,
   Plus,
-} from 'lucide-react'
+} from '@/assets/icons'
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask } from '@/services/api/tasks'

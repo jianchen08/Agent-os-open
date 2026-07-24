@@ -1,7 +1,10 @@
 /** 设置中心页面 展示卡片网格链接到各设置子页面，包括专用设置页和通用配置页。 */
 
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CONFIG_GROUPS } from '@/constants/genericConfigs'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { getSchema } from '@/services/api/schema'
+import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
 /** 设置项配置 */
 interface SettingCard {
@@ -11,8 +14,8 @@ interface SettingCard {
   icon: string
 }
 
-/** 基础设置页（有独立页面的配置） */
-const SETTINGS_CARDS: SettingCard[] = [
+/** 基础设置页（有独立页面的配置，内核独占） */
+const KERNEL_SETTINGS_CARDS: SettingCard[] = [
   {
     title: '模块设置',
     description: '管理已安装模块的配置',
@@ -39,10 +42,33 @@ const SETTINGS_CARDS: SettingCard[] = [
   },
 ]
 
-/** REQ-19 补充的配置页面已合并到 CONFIG_GROUPS 通用配置分组中。 原先此处有 EXTENDED_SETTINGS_CARDS 数组，使用 CategoryConfigPage 组件。 */
-
 /** 设置中心页面组件 */
 export function SettingsPage() {
+  const [settingsPanels, setSettingsPanels] = useState<SettingsPanelEntry[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+
+  // 加载 schema 并注册到 ContributionRegistry
+  useEffect(() => {
+    let cancelled = false
+    setIsLoading(true)
+
+    getSchema()
+      .then((schema) => {
+        if (!cancelled) {
+          contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
+          setSettingsPanels(contributionRegistry.getSettingsPanels())
+        }
+      })
+      .catch(() => {
+        // schema 加载失败时静默降级：只显示内核设置
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false)
+      })
+
+    return () => { cancelled = true }
+  }, [])
+
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
       <header className="flex h-12 shrink-0 items-center border-b px-4">
@@ -52,36 +78,60 @@ export function SettingsPage() {
         <h1 className="ml-4 text-base font-semibold">设置中心</h1>
       </header>
       <main className="flex-1 overflow-y-auto p-3 sm:p-6">
-        {/* 基础设置 */}
+        {/* 内核设置（内核独占，少数几项） */}
         <section className="mb-8">
-          <h2 className="text-foreground mb-4 text-sm font-semibold">基础设置</h2>
+          <h2 className="text-foreground mb-4 text-sm font-semibold">内核设置</h2>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {SETTINGS_CARDS.map((card) => (
+            {KERNEL_SETTINGS_CARDS.map((card) => (
               <SettingCardLink key={card.href} card={card} />
             ))}
           </div>
         </section>
 
-        {/* 通用配置分组 */}
-        {CONFIG_GROUPS.map((group) => (
-          <section key={group.name} className="mb-8">
-            <h2 className="text-foreground mb-4 text-sm font-semibold">{group.name}</h2>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {group.items.map((item) => (
-                <SettingCardLink
-                  key={item.configPath}
-                  card={{
-                    title: item.title,
-                    description: item.description,
-                    href: `/settings/generic/${item.configPath}`,
-                    icon: item.icon,
-                  }}
-                />
+        {/* 插件配置（按插件聚合，来自 ContributionRegistry） */}
+        {!isLoading && settingsPanels.length > 0 && (
+          <section className="mb-8">
+            <h2 className="text-foreground mb-4 text-sm font-semibold">插件配置</h2>
+            <div className="space-y-6">
+              {settingsPanels.map((panel) => (
+                <PluginConfigSection key={panel.pluginId} panel={panel} />
               ))}
             </div>
           </section>
-        ))}
+        )}
+
+        {/* 加载中提示 */}
+        {isLoading && (
+          <div className="text-muted-foreground flex items-center justify-center py-8">
+            <span className="text-sm">加载插件配置...</span>
+          </div>
+        )}
       </main>
+    </div>
+  )
+}
+
+/** 插件配置分区（按插件聚合展示） */
+function PluginConfigSection({ panel }: { panel: SettingsPanelEntry }) {
+  return (
+    <div>
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-lg">{panel.pluginIcon || '🔧'}</span>
+        <h3 className="text-sm font-medium">{panel.pluginName}</h3>
+      </div>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {panel.configFiles.map((file) => (
+          <SettingCardLink
+            key={file.id}
+            card={{
+              title: file.label,
+              description: file.path,
+              href: `/settings/plugin/${panel.pluginId}/${file.id}`,
+              icon: '⚙️',
+            }}
+          />
+        ))}
+      </div>
     </div>
   )
 }

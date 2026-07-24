@@ -4,7 +4,7 @@
  * 设置任务并发数、Agent 层级并发、LLM 并发、工作流并发、队列参数
  */
 
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

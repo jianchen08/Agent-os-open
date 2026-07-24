@@ -5,7 +5,7 @@
  * 当有搜索关键词时，显示匹配结果数量。
  */
 
-import { Search, X } from 'lucide-react'
+import { Search, X } from '@/assets/icons'
 import { memo, useCallback, useRef } from 'react'
 import { cn } from '@/lib/utils'
 

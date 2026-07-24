@@ -1,6 +1,8 @@
 @import './styles/responsive.css';
 @import './styles/design-tokens.css';
 @import './styles/theme.css';
+@import './styles/deep-space-v2.css';
+@import './styles/layout-spec.css';
 @import './styles/animations.css';
 @import './styles/enhancements.css';
 @import './styles/component-optimizations.css';

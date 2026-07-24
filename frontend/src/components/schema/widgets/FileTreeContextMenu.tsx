@@ -15,7 +15,7 @@ import {
   Move,
   Folder,
   X,
-} from 'lucide-react'
+} from '@/assets/icons'
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 

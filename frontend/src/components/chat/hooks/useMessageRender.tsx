@@ -1,6 +1,6 @@
 /** 消息渲染 Hook 统一处理消息的渲染上下文 */
 
-import { Copy } from 'lucide-react'
+import { Copy } from '@/assets/icons'
 import { useMemo } from 'react'
 import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'

@@ -1,6 +1,6 @@
 /** 费用控制配置页面 Token 用量限制和预算管理：预算限制、Token 用量追踪、费用告警、使用统计 */
 
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

@@ -7,7 +7,7 @@
  * @module components/workspace/FilePreview
  */
 
-import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from 'lucide-react'
+import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icons'
 import React, { useCallback, useMemo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'

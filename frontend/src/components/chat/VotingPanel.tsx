@@ -9,7 +9,7 @@
  * - 方案详情展开/折叠
  */
 
-import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp, X } from 'lucide-react'
+import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp, X } from '@/assets/icons'
 import { useCallback, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'

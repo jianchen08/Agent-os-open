@@ -8,7 +8,7 @@
  */
 
 import React from 'react'
-import { CheckCircle2, Clock, Loader2, AlertCircle, PauseCircle, XCircle } from 'lucide-react'
+import { CheckCircle2, Clock, Loader2, AlertCircle, PauseCircle, XCircle } from '@/assets/icons'
 
 /** 任务状态（与全局 TaskStatus 对齐的子集，宽松匹配） */
 type TaskCardStatus =

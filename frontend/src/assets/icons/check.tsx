@@ -1,0 +1,19 @@
+import React from "react";
+
+const CheckIcon: React.FC<React.SVGProps<SVGSVGElement>> = ({
+  className = "",
+  ...props
+}) => {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      className={`check-icon ${className}`}
+      fill="currentColor"
+      {...props}
+    >
+      <path fill="#34D399" transform="matrix(1 0 0 1 4 5.5)" d="M4.4207 8.1479L0.6364 4.3636Q0.3773 4.0891 0 4.1Q-0.3773 4.0891 -0.6364 4.3636Q-0.9109 4.6227 -0.9 5Q-0.9109 5.3773 -0.6364 5.6364L3.8636 10.1364Q4.1227 10.4109 4.5 10.4Q4.8773 10.4109 5.1364 10.1364Q5.155 10.1178 5.1725 10.0981Q5.1901 10.0784 5.2064 10.0577L12.7064 0.5577Q12.9487 0.2683 12.8938 -0.1052Q12.8605 -0.4811 12.5577 -0.7064Q12.2683 -0.9487 11.8948 -0.8938Q11.5189 -0.8605 11.2936 -0.5577L4.4207 8.1479Z" fill-rule="evenodd"/>
+    </svg>
+  );
+};
+
+export default CheckIcon;

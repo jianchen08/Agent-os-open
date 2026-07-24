@@ -4,7 +4,7 @@
  * 提供语音输入的交互界面，录音时呈现微信风呼吸脉冲圈动态效果。
  */
 
-import { Loader2, Mic, MicOff } from 'lucide-react'
+import { Loader2, Mic, MicOff } from '@/assets/icons'
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'

@@ -4,7 +4,7 @@
  * 只显示主 Agent（type 为 "main"）的选择器
  */
 
-import { Check, ChevronDown } from 'lucide-react'
+import { Check, ChevronDown } from '@/assets/icons'
 import { useMemo, useState } from 'react'
 import {
   DropdownMenu,

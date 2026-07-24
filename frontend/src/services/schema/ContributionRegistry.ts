@@ -1,128 +1,296 @@
 /**
- * ContributionRegistry —— 插件能力聚合数据层（非视觉）
+ * ContributionRegistry — 统一贡献注册中心
  *
- * 聚合 /api/v1/schema 返回的插件能力（config_files + ui_schema，以及后续 contributes），
- * 提供按插件/全局的查询接口。
+ * ADR §六：前端建立 ContributionRegistry 作为唯一真相源，
+ * 所有插件贡献（导航、布局、配置、UI 插槽）从这里派生。
  *
- * 边界（严格）：
- * - 只做"数据聚合 + 查询"，不做任何渲染、不引用 React 组件、不与 WidgetRegistry 耦合；
- * - WidgetRegistry（WidgetRegistry.ts）负责"组件类型 → React 组件"映射，本注册表只
- *   负责"插件声明了哪些 widget"，二者解耦。
+ * 四个投影：
+ * - NavigationProvider → 顶栏/侧栏导航项
+ * - LayoutProvider → 布局区的存在与拓扑
+ * - SettingsProvider → 设置菜单分组 + 配置页
+ * - WidgetProvider → 预置 Widget 注册
  *
- * @module schema/ContributionRegistry
+ * 数据源：/api/v1/schema 聚合的插件 manifest contributes.*
  */
 
-import type { SchemaResponse, PluginUiWidget } from '@/services/api/schema'
+import React from 'react'
 
-/** 单个配置文件映射项（manifest config_files 的前端镜像） */
-export interface ContributionConfigFile {
+/** 贡献点类型 */
+export type ContributionType =
+  | 'viewsContainers'   // ActivityBar 一级导航
+  | 'views'             // 侧边栏视图
+  | 'workspaceTabs'     // 工作区标签页
+  | 'dockItems'         // 底部 dock 栏
+  | 'floating'          // 浮窗
+  | 'modal'             // 模态对话框
+  | 'statusBarItems'    // 状态栏条目
+  | 'menus'             // 右键/顶栏菜单
+  | 'commands'          // 命令面板
+  | 'shortcuts'         // 快捷键
+  | 'chatMessages'      // 聊天消息卡片样式
+  | 'chatInteractions'  // 聊天交互模式
+  | 'chatActions'       // 聊天输入区动作
+  | 'settingsPanels'    // 插件配置面板
+  | 'widgets'           // 预置 widget 注册
+
+/** 单个贡献条目 */
+export interface ContributionEntry {
+  /** 贡献点类型 */
+  type: ContributionType
+  /** 唯一标识 */
   id: string
-  path: string
-  label: string
+  /** 显示名称 */
+  title?: string
+  /** 图标 */
+  icon?: string
+  /** 何时可见（条件表达式） */
+  when?: string
+  /** 何时激活（触发器） */
+  openOn?: string
+  /** 使用哪个预置 widget */
+  widget?: string
+  /** widget 配置/数据源 */
+  props?: Record<string, unknown>
+  /** 排序权重 */
+  order?: number
+  /** 所属插件 ID */
+  pluginId?: string
+  /** 配置文件路径（settingsPanels 用） */
+  configPath?: string
+  /** 配置标签（settingsPanels 用） */
+  configLabel?: string
+  /** 路由路径（viewsContainers 用） */
+  path?: string
+  /** 扩展字段 */
+  [key: string]: unknown
 }
 
-/** 插件配置条目（schema.plugin_configs 元素） */
-export interface ContributionPluginConfig {
-  plugin_id: string
-  plugin_name: string
-  config_files: ContributionConfigFile[]
-}
-
-/** 带 pluginId 来源标记的 widget 声明（供渲染层查到组件类型后定位来源插件） */
-export interface ContributionWidget extends PluginUiWidget {
-  /** 声明该 widget 的插件 id */
+/** 配置面板条目（settingsPanels 专用） */
+export interface SettingsPanelEntry {
   pluginId: string
+  pluginName: string
+  pluginIcon?: string
+  configFiles: Array<{
+    id: string
+    path: string
+    label: string
+  }>
 }
 
 /**
- * 插件能力聚合注册表。
+ * ContributionRegistry
  *
- * 一次 loadFromSchema 后即可按 pluginId / 全局查询 config_files 与 ui_schema widgets。
- * 再次调用 loadFromSchema 覆盖旧数据（幂等重载）。
+ * 全局单例，管理所有插件贡献。
+ * 数据源来自 /api/v1/schema 聚合。
  */
-export class ContributionRegistry {
-  /** pluginId → 配置条目 */
-  private readonly pluginConfigs: Map<string, ContributionPluginConfig> = new Map()
-  /** pluginId → widget 声明列表 */
-  private readonly pluginWidgets: Map<string, ContributionWidget[]> = new Map()
+class ContributionRegistry {
+  /** 所有贡献条目 */
+  private entries: Map<string, ContributionEntry[]> = new Map()
+  /** 配置面板条目 */
+  private settingsPanels: Map<string, SettingsPanelEntry> = new Map()
+  /** 是否已初始化 */
+  private initialized = false
 
   /**
-   * 从 schema 聚合响应载入插件能力（覆盖旧数据）。
+   * 从 /api/v1/schema 响应加载贡献（含 plugin_configs）
    *
-   * @param schema - /api/v1/schema 聚合响应
+   * @param schema - SchemaResponse 对象
    */
-  loadFromSchema(schema: SchemaResponse): void {
-    this.pluginConfigs.clear()
-    this.pluginWidgets.clear()
+  loadFromSchema(schema: Record<string, unknown>): void {
+    // 加载 plugin_configs（配置面板）
+    const pluginConfigs = (schema as Record<string, unknown>).plugin_configs as
+      | Array<{ plugin_id: string; plugin_name: string; config_files: Array<{ id: string; path: string; label: string }> }>
+      | undefined
 
-    // config_files 聚合
-    const entries = (schema as SchemaResponse & {
-      plugin_configs?: ContributionPluginConfig[]
-    }).plugin_configs
-    if (Array.isArray(entries)) {
-      for (const entry of entries) {
-        this.pluginConfigs.set(entry.plugin_id, entry)
+    if (Array.isArray(pluginConfigs)) {
+      for (const entry of pluginConfigs) {
+        this.settingsPanels.set(entry.plugin_id, {
+          pluginId: entry.plugin_id,
+          pluginName: entry.plugin_name,
+          configFiles: entry.config_files,
+        })
       }
     }
 
-    // ui_schema 聚合：agents + pipelines 都可能声明 ui_schema
-    for (const agent of schema.agents ?? []) {
-      this.collectWidgets(agent.id, agent.ui_schema)
+    // 加载 modules（contributes / ui_contributions）
+    this.registerFromSchema(schema as Parameters<typeof this.registerFromSchema>[0])
+  }
+
+  /**
+   * 获取指定插件的配置文件列表
+   */
+  getPluginConfigFiles(pluginId: string): Array<{ id: string; path: string; label: string }> {
+    return this.settingsPanels.get(pluginId)?.configFiles ?? []
+  }
+
+  /**
+   * 获取全部插件配置条目
+   */
+  getPluginConfigs(): SettingsPanelEntry[] {
+    return Array.from(this.settingsPanels.values())
+  }
+
+  /**
+   * 从 schema 数据注册贡献
+   *
+   * @param schemaData - /api/v1/schema 返回的聚合数据
+   */
+  registerFromSchema(schemaData: {
+    modules?: Array<{
+      module_id: string
+      name?: string
+      icon?: string
+      ui_contributions?: Array<Record<string, unknown>>
+      config_files?: Array<{ id: string; path: string; label: string }>
+      contributes?: Record<string, unknown[]>
+    }>
+  }): void {
+    if (!schemaData.modules) return
+
+    for (const module of schemaData.modules) {
+      const pluginId = module.module_id
+
+      // 注册 ui_contributions
+      if (module.ui_contributions) {
+        for (const contrib of module.ui_contributions) {
+          this.register({
+            ...contrib,
+            pluginId,
+          } as ContributionEntry)
+        }
+      }
+
+      // 注册 contributes（manifest 内联）
+      if (module.contributes) {
+        for (const [type, items] of Object.entries(module.contributes)) {
+          for (const item of items as Array<Record<string, unknown>>) {
+            this.register({
+              ...item,
+              type: type as ContributionType,
+              pluginId,
+            } as ContributionEntry)
+          }
+        }
+      }
+
+      // 注册配置面板（config_files → settingsPanels）
+      if (module.config_files && module.config_files.length > 0) {
+        this.settingsPanels.set(pluginId, {
+          pluginId,
+          pluginName: module.name || pluginId,
+          pluginIcon: module.icon,
+          configFiles: module.config_files,
+        })
+      }
     }
-    for (const pipeline of schema.pipelines ?? []) {
-      this.collectWidgets(pipeline.id, pipeline.ui_schema)
+
+    this.initialized = true
+  }
+
+  /**
+   * 注册单个贡献条目
+   */
+  register(entry: ContributionEntry): void {
+    const type = entry.type
+    if (!this.entries.has(type)) {
+      this.entries.set(type, [])
+    }
+    const list = this.entries.get(type)!
+    // 去重
+    if (!list.some((e) => e.id === entry.id)) {
+      list.push(entry)
+      // 按 order 排序
+      list.sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
     }
   }
 
   /**
-   * 把单个条目的 ui_schema widgets 收集进注册表。
+   * 注销贡献条目
    */
-  private collectWidgets(
-    pluginId: string,
-    uiSchema: { widgets?: PluginUiWidget[] } | null | undefined,
-  ): void {
-    if (!uiSchema || !Array.isArray(uiSchema.widgets) || uiSchema.widgets.length === 0) return
-    const stamped: ContributionWidget[] = uiSchema.widgets.map((w) => ({ ...w, pluginId }))
-    this.pluginWidgets.set(pluginId, stamped)
+  unregister(type: ContributionType, id: string): void {
+    const list = this.entries.get(type)
+    if (list) {
+      const idx = list.findIndex((e) => e.id === id)
+      if (idx >= 0) list.splice(idx, 1)
+    }
   }
 
   /**
-   * 返回全部插件配置条目。
+   * 获取某类型的所有贡献
    */
-  getPluginConfigs(): ContributionPluginConfig[] {
-    return Array.from(this.pluginConfigs.values())
+  getByType(type: ContributionType): ContributionEntry[] {
+    return this.entries.get(type) ?? []
   }
 
   /**
-   * 某插件是否声明了配置文件。
+   * 获取导航项（viewsContainers）
    */
-  hasPluginConfig(pluginId: string): boolean {
-    return this.pluginConfigs.has(pluginId)
+  getViewsContainers(): ContributionEntry[] {
+    return this.getByType('viewsContainers')
   }
 
   /**
-   * 按 pluginId 取配置文件列表（无声明返回空数组）。
+   * 获取侧边栏视图（views）
    */
-  getPluginConfigFiles(pluginId: string): ContributionConfigFile[] {
-    return this.pluginConfigs.get(pluginId)?.config_files ?? []
+  getViews(containerId?: string): ContributionEntry[] {
+    const views = this.getByType('views')
+    if (containerId) {
+      return views.filter((v) => v.containerId === containerId)
+    }
+    return views
   }
 
   /**
-   * 按 pluginId 取其声明的 widget 列表（无声明返回空数组）。
+   * 获取工作区标签页（workspaceTabs）
    */
-  getWidgetsForPlugin(pluginId: string): ContributionWidget[] {
-    return this.pluginWidgets.get(pluginId) ?? []
+  getWorkspaceTabs(): ContributionEntry[] {
+    return this.getByType('workspaceTabs')
   }
 
   /**
-   * 取所有插件声明的全部 widget（携带来源 pluginId）。
+   * 获取配置面板列表（settingsPanels）
    */
-  getAllWidgets(): ContributionWidget[] {
-    return Array.from(this.pluginWidgets.values()).flat()
+  getSettingsPanels(): SettingsPanelEntry[] {
+    return Array.from(this.settingsPanels.values())
+  }
+
+  /**
+   * 获取指定插件的配置面板
+   */
+  getSettingsPanel(pluginId: string): SettingsPanelEntry | undefined {
+    return this.settingsPanels.get(pluginId)
+  }
+
+  /**
+   * 获取状态栏条目
+   */
+  getStatusBarItems(): ContributionEntry[] {
+    return this.getByType('statusBarItems')
+  }
+
+  /**
+   * 获取 dock 栏条目
+   */
+  getDockItems(): ContributionEntry[] {
+    return this.getByType('dockItems')
+  }
+
+  /**
+   * 检查是否已初始化
+   */
+  isInitialized(): boolean {
+    return this.initialized
+  }
+
+  /**
+   * 清空所有注册
+   */
+  clear(): void {
+    this.entries.clear()
+    this.settingsPanels.clear()
+    this.initialized = false
   }
 }
 
-/** ContributionRegistry 全局单例 */
+/** 全局单例 */
 export const contributionRegistry = new ContributionRegistry()
-
-export default contributionRegistry

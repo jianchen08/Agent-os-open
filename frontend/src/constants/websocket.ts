@@ -68,12 +68,19 @@ export const WS_ACK_REQUIRED_EVENTS: ReadonlySet<string> = new Set([
  * 构建全局 WebSocket 连接 URL（不带 thread_id）
  *
  * 用于 GlobalWebSocketService 建立 /ws/chat 全局连接。
+ * 断线重连时传入 last_sequence 让后端重放断线期间的消息。
  *
  * @param token - JWT访问令牌
+ * @param lastSequence - 断线前已确认的最大消息序号（可选，用于断线补漏）
  * @returns 完整的 WebSocket URL
  */
-export const buildGlobalWebSocketUrl = (token: string): string =>
-  `${WS_BASE_URL}/ws/chat?token=${encodeURIComponent(token)}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
+export const buildGlobalWebSocketUrl = (token: string, lastSequence?: number): string => {
+  const base = `${WS_BASE_URL}/ws/chat?token=${encodeURIComponent(token)}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
+  if (lastSequence != null && lastSequence > 0) {
+    return `${base}&last_sequence=${lastSequence}`
+  }
+  return base
+}
 
 /**
  * WebSocket服务端事件类型
@@ -183,6 +190,8 @@ export const WS_SERVER_EVENTS = {
   PIPELINE_RECEIVED: 'pipeline_received',
   /** 迭代事件（管道引擎迭代开始/结束） */
   ITERATION: 'iteration',
+  /** 需要全量重新同步（断线重连后后端告知 last_sequence 过期） */
+  RESYNC_REQUIRED: 'resync_required',
 } as const
 
 /**

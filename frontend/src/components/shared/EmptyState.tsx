@@ -5,12 +5,12 @@
  * 参考现有 AgentsPage、AdminPage 的空状态实现，提取为统一组件。
  */
 
-import type { LucideIcon } from 'lucide-react'
+import type { LucideIcon } from '@/assets/icons'
 import type { ReactNode } from 'react'
 
 /** EmptyState 组件属性 */
 interface EmptyStateProps {
-  /** 图标组件，传入 lucide-react 图标 */
+  /** 图标组件，传入 Deep Space 设计图标 */
   icon: LucideIcon
   /** 标题文字 */
   title: string

@@ -5,7 +5,7 @@
  * 流式输出时不做语法高亮，避免性能抖动
  */
 
-import { Check, Copy, Loader2 } from 'lucide-react'
+import { Check, Copy, Loader2 } from '@/assets/icons'
 import { type FC, memo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'

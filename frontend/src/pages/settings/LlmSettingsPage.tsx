@@ -4,7 +4,7 @@
  * 配置大语言模型参数：默认模型选择、Temperature、Max Tokens、Fallback 模型、模型列表管理
  */
 
-import { Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Loader2, Plus, RefreshCw, Trash2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

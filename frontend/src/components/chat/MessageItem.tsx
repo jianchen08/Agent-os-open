@@ -1,6 +1,6 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
-import { Bell, Bot, Check, FileCode, FileText, FileIcon as FileGeneric, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
+import { Bell, Bot, Check, FileCode, FileText, FileIcon as FileGeneric, Loader2, MessageSquare, Sparkles, User } from '@/assets/icons'
 import { memo, useEffect, useRef, useState } from 'react'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'

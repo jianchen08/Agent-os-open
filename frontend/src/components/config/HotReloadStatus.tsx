@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { Loader2, CheckCircle2, RefreshCw } from 'lucide-react'
+import { Loader2, CheckCircle2, RefreshCw } from '@/assets/icons'
 import { useConfigHotReload } from '@/hooks/useConfigHotReload'
 
 /** HotReloadStatus 组件属性 */

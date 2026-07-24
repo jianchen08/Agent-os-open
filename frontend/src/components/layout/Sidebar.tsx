@@ -13,7 +13,7 @@
  * - 新增: 移动端响应式支持
  */
 
-import { ChevronLeft, ChevronRight, Loader2, MessageSquare, Plus, Search, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Loader2, MessageSquare, Plus, Search, X } from '@/assets/icons'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SessionEditModal } from '@/components/session/SessionEditModal'

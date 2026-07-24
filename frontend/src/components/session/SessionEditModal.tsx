@@ -7,7 +7,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { Loader2, Plus } from 'lucide-react'
+import { Loader2, Plus } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,

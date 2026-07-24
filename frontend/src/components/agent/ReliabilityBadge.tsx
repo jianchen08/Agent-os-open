@@ -4,7 +4,7 @@
  * 显示 Agent 的可靠性评分 (0-100)
  */
 
-import { Minus, Star, TrendingDown, TrendingUp } from 'lucide-react'
+import { Minus, Star, TrendingDown, TrendingUp } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 
 export interface ReliabilityBadgeProps {

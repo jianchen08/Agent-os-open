@@ -1,7 +1,7 @@
 /** 消息内容渲染器 统一的消息内容渲染入口，根据片段类型分发到对应的渲染器 */
 
 import { memo } from 'react'
-import { AlertCircle, AlertTriangle, Info } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Info } from '@/assets/icons'
 import ActivityCard from '@/components/chat/ActivityCard'
 import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'

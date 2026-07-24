@@ -26,7 +26,7 @@ import {
   Play,
   Volume2,
   VolumeX,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { memo, useCallback, useRef, useState } from 'react'
 
 /** AudioPlayer 组件属性 */

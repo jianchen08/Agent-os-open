@@ -5,7 +5,7 @@
  * 时间轴上显示标注标记点，支持在时间轴上点击添加标注。
  */
 
-import { Play, Pause, Plus, MessageSquare, SkipBack, SkipForward } from 'lucide-react'
+import { Play, Pause, Plus, MessageSquare, SkipBack, SkipForward } from '@/assets/icons'
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 import type { Annotation } from '@/types/review'
 

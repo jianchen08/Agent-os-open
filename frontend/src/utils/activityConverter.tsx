@@ -6,7 +6,7 @@
  * @module activityConverter
  */
 
-import { Copy, RefreshCw } from 'lucide-react'
+import { Copy, RefreshCw } from '@/assets/icons'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type {
   ActivityAction,

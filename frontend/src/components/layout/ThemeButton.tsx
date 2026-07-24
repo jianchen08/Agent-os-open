@@ -5,7 +5,7 @@
  * 长按或右键可打开完整主题面板
  */
 
-import { Moon, Sun, Palette } from 'lucide-react'
+import { Moon, Sun, Palette } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 

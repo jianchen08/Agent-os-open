@@ -5,7 +5,7 @@
  * 样式与项目现有按钮风格一致。
  */
 
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight } from '@/assets/icons'
 
 /** Pagination 组件属性 */
 interface PaginationProps {

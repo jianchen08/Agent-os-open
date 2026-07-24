@@ -37,7 +37,7 @@ import {
   Image as ImageIcon,
   Info,
   X,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 

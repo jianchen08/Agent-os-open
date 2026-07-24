@@ -4,7 +4,7 @@
  * 展示情景记忆、语义记忆和搜索功能，顶部显示统计卡片
  */
 
-import { Brain, Inbox, Search } from 'lucide-react'
+import { Brain, Inbox, Search } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { getEpisodes, searchMemory, getMemoryStats, getSemanticMemory } from '@/services/api/memory'
 import type { Episode, SemanticKnowledge, MemoryStats, MemoryItem } from '@/services/api/memory'

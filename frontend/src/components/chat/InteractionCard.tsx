@@ -11,7 +11,7 @@
  * - 用户必须输入内容后发送，不直接通过/驳回
  */
 
-import { ArrowRight, Check, Loader2, MessageSquare, X } from 'lucide-react'
+import { ArrowRight, Check, Loader2, MessageSquare, X } from '@/assets/icons'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {

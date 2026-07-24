@@ -1,0 +1,63 @@
+/**
+ * Deep Space v2 设计令牌
+ *
+ * 从 Ardot 画布变量集导出（精确值）
+ * 文件：AgentOS 插件能力统一模型 - UI 设计
+ * 来源：https://ardot.tencent.com/file/707091497079378
+ */
+
+:root {
+  /* === Colors 变量集 === */
+
+  /* 品牌色 */
+  --ds-accent-primary: #22D3EE;    /* 品牌青 - 选中态、链接、强调 */
+  --ds-accent-ai: #A78BFA;         /* AI 紫 - AI 相关元素 */
+  --ds-accent-blue: #3B82F6;       /* 辅助蓝 */
+  --ds-accent-glow: #00F0FF;       /* 辉光色 - 发光效果 */
+
+  /* 背景色 */
+  --ds-bg-canvas: #05050F;         /* 画布背景 */
+  --ds-bg-panel: #061126;          /* 面板背景 */
+  --ds-bg-elevated: #0B1C38;       /* 提升层背景 */
+  --ds-bg-hover: #1A2648;          /* 悬停背景 */
+
+  /* 文本色 */
+  --ds-text-primary: #F2F5FA;      /* 主要文本 */
+  --ds-text-secondary: #CCD3E0;    /* 次要文本 */
+  --ds-text-muted: #94A3B8;        /* 弱化文本 */
+  --ds-text-disabled: #63738C;     /* 禁用文本 */
+
+  /* 边框色 */
+  --ds-border-subtle: rgba(148, 163, 184, 0.12);  /* 微弱边框 */
+  --ds-border-strong: rgba(148, 163, 184, 0.22);   /* 强边框 */
+  --ds-border-active: rgba(34, 211, 238, 0.45);    /* 激活边框 */
+
+  /* 状态色 */
+  --ds-status-running: #22D3EE;    /* 运行中 */
+  --ds-status-waiting: #FABF14;    /* 等待 */
+  --ds-status-success: #35D499;    /* 成功 */
+  --ds-status-error: #F77070;      /* 错误 */
+  --ds-status-info: #61A5FA;       /* 信息 */
+  --ds-status-pending: #94A3B8;    /* 待定 */
+
+  /* === Space 变量集 === */
+  --ds-s-1: 4px;
+  --ds-s-2: 8px;
+  --ds-s-3: 12px;
+  --ds-s-4: 16px;
+  --ds-s-5: 20px;
+  --ds-s-6: 24px;
+  --ds-s-8: 32px;
+
+  /* === Radius 变量集 === */
+  --ds-r-sm: 6px;
+  --ds-r-md: 8px;
+  --ds-r-lg: 10px;
+  --ds-r-xl: 12px;
+  --ds-r-bubble: 16px;
+}
+
+/* Dark 模式继承（Deep Space 默认就是 dark） */
+.dark {
+  /* Deep Space v2 是深色主题，dark 模式下变量不变 */
+}

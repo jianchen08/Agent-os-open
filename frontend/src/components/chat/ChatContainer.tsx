@@ -1,6 +1,6 @@
 /** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/assets/icons'
 import { useCallback, useEffect, useMemo } from 'react'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { useAgentStore } from '@/stores/agentStore'

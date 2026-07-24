@@ -6,7 +6,7 @@ import { ChatContainer } from './components/chat/ChatContainer'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
 import { ApprovalReviewOverlay } from './components/approval'
 import { AppHeader } from './components/layout/AppHeader'
-import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
+import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { SessionEditModal } from './components/session/SessionEditModal'
 import { SessionList } from './components/session/SessionList'
 import { ROUTES } from './constants/routes'
@@ -146,6 +146,11 @@ const KnowledgeBasePage = lazy(() =>
 const GenericConfigRoute = lazy(() =>
   import('@/pages/settings/GenericConfigRoute').then((m) => ({
     default: m.GenericConfigRoute,
+  })),
+)
+const PluginConfigRoute = lazy(() =>
+  import('@/pages/settings/PluginConfigRoute').then((m) => ({
+    default: m.PluginConfigRoute,
   })),
 )
 
@@ -574,10 +579,10 @@ function HomePage(): ReactNode {
     </div>
   )
 
-  // Five-space layout mode
+  // Five-space layout mode → ChatPanelShell (ADR §五)
   if (layoutMode === 'five-space') {
     return (
-      <FiveSpaceLayout
+      <ChatPanelShell
         chatContent={chatContent}
         sidebarContent={sidebarContent}
         onToggleMode={toggleLayoutMode}
@@ -802,6 +807,16 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <GenericConfigRoute />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: '/settings/plugin/:pluginId/:fileId',
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <PluginConfigRoute />
           </Suspense>
         </ProtectedRoute>
       ),

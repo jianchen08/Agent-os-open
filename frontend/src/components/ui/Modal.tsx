@@ -4,7 +4,7 @@
  * 使用 Portal 渲染到 body，避免被父容器的 overflow 裁剪
  */
 
-import { X } from 'lucide-react'
+import { XIcon } from '@/assets/icons'
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
@@ -132,7 +132,7 @@ export function Modal({
                 className="text-muted-foreground hover:text-foreground transition-colors"
                 aria-label="关闭"
               >
-                <X className="h-5 w-5" />
+                <XIcon className="h-5 w-5" />
               </button>
             )}
           </div>
@@ -148,7 +148,7 @@ export function Modal({
             className="text-muted-foreground hover:text-foreground absolute top-4 right-4 transition-colors"
             aria-label="关闭"
           >
-            <X className="h-5 w-5" />
+            <XIcon className="h-5 w-5" />
           </button>
         )}
       </div>

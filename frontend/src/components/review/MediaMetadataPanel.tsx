@@ -18,7 +18,7 @@ import {
   Monitor,
   Aperture,
   Hash,
-} from 'lucide-react'
+} from '@/assets/icons'
 import React, { useState, useMemo } from 'react'
 import type { MediaMetadata, ImageReviewResult, VideoReviewResult } from '@/types/review'
 

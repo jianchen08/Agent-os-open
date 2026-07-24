@@ -7,7 +7,7 @@
  * @module toolCardRegistry
  */
 
-import { Copy, FileEdit, FileText, Globe, Target, Terminal } from 'lucide-react'
+import { Copy, FileEdit, FileText, Globe, Target, Terminal } from '@/assets/icons'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'

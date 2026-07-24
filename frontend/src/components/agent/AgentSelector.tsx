@@ -4,7 +4,7 @@
  * 用于选择当前会话使用的 Agent，支持完整模式和紧凑模式
  */
 
-import { Check, ChevronDown, Plus, Sparkles } from 'lucide-react'
+import { Check, ChevronDown, Plus, Sparkles } from '@/assets/icons'
 import { useState } from 'react'
 import {
   DropdownMenu,

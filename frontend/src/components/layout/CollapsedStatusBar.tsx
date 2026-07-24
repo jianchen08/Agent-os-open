@@ -3,7 +3,7 @@
  *
  * 在执行图折叠时显示，展示进度和 Agent 图标
  */
-import { ChevronLeft, Bot, DraftingCompass, Code, FlaskConical, CheckCircle } from 'lucide-react'
+import { ChevronLeft, Bot, DraftingCompass, Code, FlaskConical, CheckCircle } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import type { ReactNode } from 'react'
 

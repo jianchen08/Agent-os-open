@@ -4,7 +4,7 @@
  * 展示所有工具，支持搜索过滤、分页和展开详情
  */
 
-import { Wrench } from 'lucide-react'
+import { Wrench } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { getTools } from '@/services/api/tools'
 import type { ToolResponse, GetToolsParams } from '@/services/api/tools'

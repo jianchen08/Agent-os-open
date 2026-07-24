@@ -23,7 +23,7 @@ import {
   Settings,
   Wrench,
   X,
-} from 'lucide-react'
+} from '@/assets/icons'
 import React, { memo, useCallback, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'

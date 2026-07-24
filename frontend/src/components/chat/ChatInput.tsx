@@ -12,7 +12,7 @@ import {
   Send,
   Square,
   X,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'

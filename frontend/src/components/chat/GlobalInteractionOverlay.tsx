@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Minimize2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { X, Minimize2, ChevronLeft, ChevronRight } from '@/assets/icons'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'

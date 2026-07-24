@@ -1,7 +1,10 @@
 /** 自生长闭环集成 连接模块管理器、Schema 注册表、WebSocket 推送和组件注册 */
 
+import { syncNavItemsFromContributes } from '@/constants/navItems'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { schemaRegistry } from '@/services/schema/registry'
+import { getSchema } from '@/services/api/schema'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
 import { registerCapabilities } from './ClientCapabilities'
@@ -21,6 +24,16 @@ export async function initializeGrowthLoop(): Promise<void> {
   // Step 3: 拉取并注册模块（_syncToLayoutStore 已处理 workspace tab 和 dock 的同步）
   await moduleManager.initialize()
 
+  // Step 4: 加载 schema 到 ContributionRegistry 并同步导航
+  try {
+    const schema = await getSchema()
+    contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
+    syncNavItemsFromContributes()
+    loggers.websocket.info('ContributionRegistry 初始化完成')
+  } catch (error) {
+    loggers.websocket.warn('ContributionRegistry 初始化失败:', error)
+  }
+
   loggers.websocket.info('自生长闭环初始化完成')
 
   loggers.websocket.info(`当前已注册 ${schemaRegistry.getEnabled().length} 个模块`)
@@ -33,12 +46,15 @@ export function handleSchemaUpdate(event: {
   changes: string[]
 }): void {
   moduleManager.handleSchemaUpdate(event)
+  // Schema 更新后重新同步导航
+  syncNavItemsFromContributes()
 }
 
 /** 销毁自生长闭环（完全清理） 用于登出、认证过期等场景，需要彻底清除所有模块状态。 */
 export function destroyGrowthLoop(): void {
   moduleManager.destroy()
   schemaRegistry.clear()
+  contributionRegistry.clear()
   const store = useLayoutModeStore.getState()
   store.setDockItems([])
   useLayoutModeStore.setState({ workspaceTabs: [] })
@@ -48,12 +64,17 @@ export function destroyGrowthLoop(): void {
 export async function restartGrowthLoop(): Promise<void> {
   moduleManager.destroy()
   schemaRegistry.clear()
+  contributionRegistry.clear()
 
   initializeWidgets()
 
   try {
     await registerCapabilities()
     await moduleManager.fetchAndRebuild()
+    // 重新加载 schema 到 ContributionRegistry
+    const schema = await getSchema()
+    contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
+    syncNavItemsFromContributes()
     loggers.websocket.info('自生长闭环重启完成')
     loggers.websocket.info(`当前已注册 ${schemaRegistry.getEnabled().length} 个模块`)
   } catch (error) {

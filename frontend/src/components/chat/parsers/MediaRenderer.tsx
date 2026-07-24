@@ -3,7 +3,7 @@
  * 渲染音频和视频内容
  */
 
-import { AlertCircle, Download, Maximize, Pause, Play, Volume2, VolumeX } from 'lucide-react'
+import { AlertCircle, Download, Maximize, Pause, Play, Volume2, VolumeX } from '@/assets/icons'
 import { memo, useRef, useState } from 'react'
 
 interface AudioRendererProps {

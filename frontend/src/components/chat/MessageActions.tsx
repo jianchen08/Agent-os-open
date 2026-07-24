@@ -4,7 +4,7 @@
  * 提供消息的复制功能
  */
 
-import { Copy } from 'lucide-react'
+import { Copy } from '@/assets/icons'
 import { type FC } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'

@@ -13,7 +13,7 @@ import {
   ToggleRight,
   X,
   BarChart3,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import apiClient from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'

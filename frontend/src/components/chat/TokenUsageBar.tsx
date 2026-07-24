@@ -4,7 +4,7 @@
  * 显示当前 Token 使用情况，根据使用率自动显示不同颜色警告
  */
 
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle } from '@/assets/icons'
 
 export interface TokenUsageBarProps {
   /** 当前使用量 */

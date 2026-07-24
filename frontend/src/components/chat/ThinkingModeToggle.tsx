@@ -5,7 +5,7 @@
  * 支持两种思考模式类型：参数切换型和模型切换型
  */
 
-import { AlertCircle, Brain, Loader2 } from 'lucide-react'
+import { AlertCircle, Brain, Loader2 } from '@/assets/icons'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'

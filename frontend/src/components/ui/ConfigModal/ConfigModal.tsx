@@ -4,7 +4,7 @@
  * 统一的配置模态框组件，支持多种字段类型、验证和暂存功能
  */
 
-import { X, Save, RotateCcw, AlertCircle } from 'lucide-react'
+import { X, Save, RotateCcw, AlertCircle } from '@/assets/icons'
 import { useCallback, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'

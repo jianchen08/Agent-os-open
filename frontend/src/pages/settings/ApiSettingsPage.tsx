@@ -1,6 +1,6 @@
 /** API 配置页面 管理外部 API 密钥、端点、超时等配置 */
 
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

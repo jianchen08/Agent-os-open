@@ -12,14 +12,18 @@ import { ArtifactPreviewWidget } from './ArtifactPreviewWidget'
 import { ChartWidget } from './ChartWidget'
 import { CodeBlockWidget } from './CodeBlockWidget'
 import { DecisionWidget } from './DecisionWidget'
+import { EditorWidget } from './EditorWidget'
 import { FileTreeWidget } from './FileTreeWidget'
 import { FormWidget } from './FormWidget'
 import { GalleryWidget } from './GalleryWidget'
+import { HtmlPreviewWidget } from './HtmlPreviewWidget'
+import { KanbanWidget } from './KanbanWidget'
 import { ProgressWidget } from './ProgressWidget'
 import { ReviewDocumentWidget } from './ReviewDocumentWidget'
 import { StatusCardWidget } from './StatusCardWidget'
 import { TableWidget } from './TableWidget'
 import { TaskCardWidget } from './TaskCardWidget'
+import { TerminalWidget } from './TerminalWidget'
 import type { ComponentType } from 'react'
 
 /** Widget 注册条目定义 */
@@ -138,6 +142,22 @@ const WIDGET_REGISTRATIONS: WidgetRegistration[] = [
     description: '制品预览组件，按类型（文本/图片/代码/数据）展示制品内容',
     supportedSpaces: ['chat', 'workspace', 'floating'],
     fallbackWidget: 'code_block',
+  },
+  {
+    type: 'editor',
+    component: EditorWidget,
+    name: '代码编辑器',
+    description: '内嵌代码编辑器，支持语法高亮和实时交互',
+    supportedSpaces: ['chat', 'workspace', 'floating'],
+    fallbackWidget: 'code_block',
+  },
+  {
+    type: 'html_preview',
+    component: HtmlPreviewWidget,
+    name: 'HTML 预览',
+    description: 'HTML 内容渲染预览，支持 iframe 和 inline 两种模式',
+    supportedSpaces: ['chat', 'workspace', 'floating'],
+    fallbackWidget: 'artifact_preview',
   },
 ]
 

@@ -44,6 +44,8 @@ class GlobalWebSocketService {
   private _heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null
   private _heartbeatMissCount: number = 0
   private _disposed: boolean = false
+  /** 断线前已确认的最大消息序号（用于断线补漏 last_sequence） */
+  private _lastSequence: number = 0
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -73,8 +75,9 @@ class GlobalWebSocketService {
   private _doConnect(): void {
     if (this._disposed || this._status !== 'connecting') return
 
-    const url = buildGlobalWebSocketUrl(this._token)
-    _wsLogger.debug('[GlobalWS] connecting to %s', url.substring(0, 60))
+    // 断线重连时带上 last_sequence，让后端重放断线期间的消息
+    const url = buildGlobalWebSocketUrl(this._token, this._lastSequence > 0 ? this._lastSequence : undefined)
+    _wsLogger.debug('[GlobalWS] connecting to %s (last_sequence=%d)', url.substring(0, 60), this._lastSequence)
     this.ws = new WebSocket(url)
 
     this._connectionTimeoutTimer = setTimeout(() => {
@@ -123,6 +126,17 @@ class GlobalWebSocketService {
         const data = JSON.parse(event.data)
         if (data.type === 'heartbeat_ack') {
           this._handleHeartbeatAck()
+        }
+        // 追踪 last_sequence：从消息中提取 sequence 字段，更新最大已知序号
+        if (data.data?.sequence != null && typeof data.data.sequence === 'number') {
+          if (data.data.sequence > this._lastSequence) {
+            this._lastSequence = data.data.sequence
+          }
+        }
+        // 处理 resync_required 事件：后端告知需要全量重新同步
+        if (data.type === 'resync_required') {
+          _wsLogger.warn('[GlobalWS] 收到 resync_required，触发全量消息重同步')
+          this._emit('resync_required', data)
         }
         _wsLogger.debug(
           `[WS_RAW] type=${data.type} pipeline_id=${data.data?.pipeline_id?.slice(0, 12) || 'null'} message_id=${data.data?.message_id?.slice(0, 12) || 'null'}`,
@@ -248,6 +262,18 @@ class GlobalWebSocketService {
   /** 获取当前连接状态 */
   get status(): ConnectionStatus {
     return this._status
+  }
+
+  /** 获取断线前已确认的最大消息序号 */
+  get lastSequence(): number {
+    return this._lastSequence
+  }
+
+  /** 手动设置 last_sequence（例如从 pipelineMessageStore 恢复游标时） */
+  setLastSequence(seq: number): void {
+    if (seq > this._lastSequence) {
+      this._lastSequence = seq
+    }
   }
 
   // ── 内部方法 ──

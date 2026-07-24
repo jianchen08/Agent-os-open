@@ -10,7 +10,7 @@
  * - 布局切换按钮只显示图标
  */
 
-import { PanelLeftClose, PanelLeftOpen, LayoutGrid, Menu, LogOut } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen, LayoutGrid, Menu, LogOut } from '@/assets/icons'
 import React from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
@@ -20,22 +20,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { ROUTES } from '@/constants/routes'
+import { getVisibleNavItems } from '@/constants/navItems'
 import { useAuthStore } from '@/stores/authStore'
 import { useUIStore } from '@/stores/uiStore'
 import { ConnectionStatusIndicator } from './ConnectionStatusIndicator'
 import { ThemeButton } from './ThemeButton'
 import { ThemePanel } from './ThemePanel'
-
-/** 导航项定义 */
-const NAV_ITEMS = [
-  { path: ROUTES.TOOLS, label: '工具' },
-  { path: ROUTES.AGENTS, label: '智能体' },
-  { path: ROUTES.MONITORING, label: '监控' },
-  { path: ROUTES.MEMORY, label: '记忆' },
-  { path: ROUTES.SETTINGS, label: '设置' },
-  { path: ROUTES.DEBUG.ROOT, label: '调试' },
-] as const
 
 /** AppHeader 属性 */
 interface AppHeaderProps {
@@ -75,6 +65,7 @@ export function AppHeader({
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const user = useAuthStore((s) => s.user)
+  const navItems = getVisibleNavItems(user?.role === 'admin')
 
   return (
     <header className="border-border relative grid h-10 shrink-0 grid-cols-[auto_1fr_auto] items-center border-b px-2 md:px-3">
@@ -98,7 +89,7 @@ export function AppHeader({
       <div className="pointer-events-none hidden items-center justify-center md:flex">
         <div className="pointer-events-auto flex items-center gap-1">
           <nav className="flex min-w-0 items-center gap-1 overflow-x-auto">
-            {NAV_ITEMS.map((item) => (
+            {navItems.map((item) => (
               <Button
                 key={item.path}
                 onClick={() => navigate(item.path)}
@@ -172,7 +163,7 @@ export function AppHeader({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              {NAV_ITEMS.map((item) => (
+              {navItems.map((item) => (
                 <DropdownMenuItem
                   key={item.path}
                   onClick={() => navigate(item.path)}

@@ -19,7 +19,7 @@ import {
   Pin,
   Star,
   Trash2,
-} from 'lucide-react'
+} from '@/assets/icons'
 import { memo, useCallback, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
