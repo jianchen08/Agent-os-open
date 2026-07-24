@@ -173,43 +173,11 @@ class TrackPlugin(IOutputPlugin):
     async def _try_notify_cost_update(self, ctx: PluginContext) -> None:
         """推送本轮 LLM 调用的 token 用量（单轮值），供输入框进度条实时显示。
 
-        llm_usage 直接取自 state（llm_core 插件写入），是单轮 API 返回的用量，
-        天然对应当前 pipeline。pipeline_id 一并带出，供前端按 pipeline 分桶。
-        tool_execute 轮 llm_usage 为上一轮残留，跳过推送避免覆盖。
-
-        会话标识取 session_id（state 标准字段）；thread_id 未必存在时由
-        TargetedSink 按 pipeline_id 从 registry 自解析，不在此硬守卫。
+        0.2 推送改走 frontend.emit capability（ADR §3.5，插件 → 内核 → 前端唯一出口），
+        SDK 暂未实现该 capability；当前 cost_update 推送静默跳过，0.2 栈不再依赖
+        0.1 的 src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
+        待 SDK 实现 frontend.emit 后，在此用 ctx.frontend.emit(scope=...) 恢复推送。
         """
-        if ctx.state.get(StateKeys.CORE_TYPE) != "llm_call":
-            return
-        try:
-            from channels.websocket.ws_handler import ws_interaction_notifier as _notifier  # noqa: PLC0415
-
-            if _notifier:
-                _llm_usage = ctx.state.get("llm_usage") or {}
-                _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
-                _session_id = ctx.state.get(StateKeys.SESSION_ID, "")
-                from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
-
-                _sink = create_targeted_sink(
-                    _notifier,
-                    _session_id,
-                    pipeline_id=_pipeline_id,
-                )
-                if _sink:
-                    await _sink.send_event(
-                        {
-                            "type": "cost_update",
-                            "data": {
-                                "pipeline_id": _pipeline_id,
-                                "total_tokens": _llm_usage.get("total_tokens", 0),
-                                "input_tokens": _llm_usage.get("input_tokens", 0),
-                                "output_tokens": _llm_usage.get("output_tokens", 0),
-                            },
-                        }
-                    )
-        except Exception:
-            logger.debug("cost_update 推送失败", exc_info=True)
 
     def _collect_token_usage(self, ctx: PluginContext) -> dict[str, Any]:
         """收集 token 用量统计。"""

@@ -167,32 +167,14 @@ async def _push_upload_event(
     url: str,
     thread_id: str = "",
 ) -> None:
-    """推送 multimedia_uploaded WS 事件给用户。
+    """推送 multimedia_uploaded 事件给用户。
 
-    通过 ws_interaction_notifier 的 send_to_user 方法推送。
-    推送失败不影响上传结果，仅记录日志。
+    0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
+    当前推送静默跳过，0.2 栈不再依赖 0.1 的 src/channels/websocket/
+    ws_interaction_notifier（task_11 P2-7）。待 SDK 实现后在此用
+    ctx.frontend.emit(event="multimedia_uploaded", scope=...) 恢复。
     """
-    event = {
-        "type": "multimedia_uploaded",
-        "data": {
-            "file_id": file_id,
-            "filename": filename,
-            "mime_type": mime_type,
-            "media_type": media_type,
-            "size": size,
-            "url": url,
-            "thread_id": thread_id,
-        },
-    }
-    try:
-        try:
-            from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
-        except ImportError:
-            ws_interaction_notifier = None  # noqa: PLC0415
-
-        await ws_interaction_notifier.send_to_user(user_id, event)
-    except Exception:
-        logger.warning("[upload] WS 推送 multimedia_uploaded 失败 | file_id=%s", file_id)
+    return
 
 
 # ---------------------------------------------------------------------------

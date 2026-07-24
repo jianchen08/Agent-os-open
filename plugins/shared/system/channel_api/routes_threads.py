@@ -15,48 +15,14 @@ _recovered_user_ids: set[str] = set()
 
 
 def _notify_session_update(thread_id: str, action: str) -> None:
-    """通过 WebSocket 推送会话变更事件。"""
+    """推送会话变更事件。
 
-    try:
-        import asyncio  # noqa: PLC0415
-
-        try:
-            from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
-        except ImportError:
-            ws_interaction_notifier = None  # noqa: PLC0415
-        try:
-            from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
-        except ImportError:
-            create_targeted_sink = None  # noqa: PLC0415
-
-        if ws_interaction_notifier and thread_id:
-            _sink = create_targeted_sink(ws_interaction_notifier, thread_id)
-
-            if _sink:
-                loop = asyncio.get_event_loop()
-
-                if loop.is_running():
-                    asyncio.ensure_future(
-                        _sink.send_event(
-                            {
-                                "type": "session_update",
-                                "data": {"action": action, "thread_id": thread_id},
-                            }
-                        )
-                    )
-
-                else:
-                    loop.run_until_complete(
-                        _sink.send_event(
-                            {
-                                "type": "session_update",
-                                "data": {"action": action, "thread_id": thread_id},
-                            }
-                        )
-                    )
-
-    except Exception:
-        pass
+    0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
+    当前推送静默跳过，0.2 栈不再依赖 0.1 的 src/channels/websocket/
+    ws_interaction_notifier（task_11 P2-7）。待 SDK 实现后改用
+    ctx.frontend.emit(event="session_update", scope=...) 恢复。
+    """
+    return
 
 
 import contextlib  # noqa: E402

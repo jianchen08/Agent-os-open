@@ -1102,45 +1102,10 @@ class TaskSubmitTool(BuiltinTool):
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
-        try:
-            _user_id = inputs.get("user_id", "") or ""
-            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier  # noqa: PLC0415
-
-            if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
-                await _ws_notifier.send_to_user(
-                    _user_id,
-                    {
-                        "type": "task_status_update",
-                        "data": {
-                            "task_id": task.id,
-                            "old_status": "",
-                            "new_status": "pending",
-                            "current_phase": "prepare",
-                        },
-                    },
-                )
-                logger.info(
-                    "[TaskSubmit] task_status_update 已广播 | task_id=%s | user=%s | status=pending",
-                    task.id,
-                    _user_id[:12],
-                )
-            else:
-                logger.warning(
-                    "[TaskSubmit] 跳过广播 | notifier=%s user=%s",
-                    bool(_ws_notifier),
-                    _user_id[:12] if _user_id else "(empty)",
-                )
-        except Exception as _ws_exc:
-            logger.warning(
-                "[TaskSubmit] task_status_update 广播失败 | task_id=%s | error=%s",
-                task.id,
-                _ws_exc,
-            )
-
-        _t_ws = _time.monotonic()
-        logger.info(
-            "[TaskSubmit] PERF | ws_broadcast=%.1fms | total=%.1fms", (_t_ws - _t_submit) * 1000, (_t_ws - _t0) * 1000
-        )
+        # 0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
+        # 当前 task_status_update 广播静默跳过，0.2 栈不再依赖 0.1 的
+        # src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
+        # 待 SDK 实现后改用 ctx.frontend.emit(event="task_status_update", scope=...) 恢复。
 
         result_data: dict[str, Any] = {
             "task_id": task.id,
@@ -1257,40 +1222,10 @@ class TaskSubmitTool(BuiltinTool):
 
         logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
-        try:
-            _user_id = inputs.get("user_id", "") or ""
-            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier  # noqa: PLC0415
-
-            if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
-                await _ws_notifier.send_to_user(
-                    _user_id,
-                    {
-                        "type": "task_status_update",
-                        "data": {
-                            "task_id": task.id,
-                            "old_status": "",
-                            "new_status": "pending",
-                            "current_phase": "prepare",
-                        },
-                    },
-                )
-                logger.info(
-                    "[TaskSubmit] 容器 task_status_update 已广播 | task_id=%s | user=%s | status=pending",
-                    task.id,
-                    _user_id[:12],
-                )
-            else:
-                logger.warning(
-                    "[TaskSubmit] 容器跳过广播 | notifier=%s user=%s",
-                    bool(_ws_notifier),
-                    _user_id[:12] if _user_id else "(empty)",
-                )
-        except Exception as _ws_exc:
-            logger.warning(
-                "[TaskSubmit] 容器 task_status_update 广播失败 | task_id=%s | error=%s",
-                task.id,
-                _ws_exc,
-            )
+        # 0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
+        # 当前 task_status_update 广播静默跳过，0.2 栈不再依赖 0.1 的
+        # src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
+        # 待 SDK 实现后改用 ctx.frontend.emit(event="task_status_update", scope=...) 恢复。
 
         from isolation.workspace import resolve_container_workspace_path  # noqa: PLC0415
 

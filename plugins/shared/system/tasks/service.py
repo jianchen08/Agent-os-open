@@ -92,50 +92,11 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         old_status: str,
         new_status: str,
     ) -> None:
-        """实际执行 WebSocket 推送。"""
-        try:
-            if self._storage is None:
-                return
+        """实际执行任务状态变更推送。
 
-            task = self._storage.get(task_id)
-            if task is None:
-                return
-
-            thread_id = task.metadata.get("session_id") if task.metadata else None
-            if not thread_id:
-                logger.error(
-                    "[TaskService] task metadata 缺 session_id，task_status_changed 未推送 | task=%s",
-                    task_id[:12] if task_id else "",
-                )
-                return
-
-            from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
-
-            _user_id = (task.metadata.get("user_id") if task.metadata else "") or ""
-            if not _user_id:
-                logger.debug(
-                    "[TaskService] task metadata 缺 user_id，task_status_changed 未推送 | task=%s",
-                    task_id[:12] if task_id else "",
-                )
-                return
-
-            await ws_interaction_notifier.send_to_user(
-                _user_id,
-                {
-                    "type": "task_status_changed",
-                    "data": {
-                        "task_id": task_id,
-                        "status": new_status,
-                        "previous_status": old_status,
-                        "title": task.title or "",
-                        "updated_at": task.updated_at or "",
-                        "thread_id": thread_id,
-                    },
-                },
-            )
-        except Exception as exc:
-            logger.debug(
-                "[TaskService] task_status_changed 推送失败（非致命）task_id=%s: %s",
-                task_id[:12] if task_id else "",
-                exc,
-            )
+        0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
+        当前推送静默跳过，0.2 栈不再依赖 0.1 的 src/channels/websocket/
+        ws_interaction_notifier（task_11 P2-7）。待 SDK 实现后改用
+        ctx.frontend.emit(event="task_status_changed", scope=...) 恢复。
+        """
+        return
