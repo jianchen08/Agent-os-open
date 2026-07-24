@@ -27,10 +27,11 @@ fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: files,
         http_endpoints: vec![],
         ui_schema: None,
+        contributes: None,
     }
 }
 

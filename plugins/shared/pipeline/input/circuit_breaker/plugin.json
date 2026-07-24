@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "circuit_breaker.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "circuit_breaker.execute",
-                "description": "Circuit Breaker pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

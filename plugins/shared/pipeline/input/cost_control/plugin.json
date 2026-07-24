@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "cost_control.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "cost_control.execute",
-                "description": "Cost Control pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

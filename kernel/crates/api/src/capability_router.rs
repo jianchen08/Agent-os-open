@@ -121,7 +121,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // build_injected_config 在 spawn sidecar 时下发，插件经 plugin.get_config()
             // 直接拿到自己的命名空间配置，不再需要反向调用 config-reader.get。
             // 本 capability 名仍是 SDK 公共契约（STANDARD_CAPABILITIES），故保留 no-op
-            // 兜底（返回 null value），完整 capability 下线留 P6（config_refs 一并清理）。
+            // 兜底（返回 null value）。config_refs 已于 P6 删除，配置只走 config_files。
             ("config-reader", "get") => {
                 let key = params
                     .get("key")

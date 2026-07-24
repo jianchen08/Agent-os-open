@@ -66,48 +66,23 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// 按插件的 `config_refs` 声明过滤全量配置，只保留声明需要的顶层配置节。
-///
-/// 配置按需注入（ADR 配置统一）：每个插件通过 manifest 的 `config_refs`
-/// 声明它需要读取哪些配置节（对应配置文件/目录的顶层 key，如 `models`、`system`）。
-///
-/// - `refs` 为空 → 返回全量配置（向后兼容未声明 `config_refs` 的旧插件）。
-/// - `refs` 非空 → 仅保留 `full_config` 中 key 出现在 `refs` 里的顶层字段；
-///   `refs` 中声明但全量配置里不存在的 key 静默跳过（插件拿不到该节，消费方需自行降级）。
-///
-/// 这样避免把全系统配置（含其他插件的凭证/密钥）泄漏给每个 sidecar。
-fn filter_config_by_refs(full_config: &serde_json::Value, refs: &[String]) -> serde_json::Value {
-    if refs.is_empty() {
-        return full_config.clone();
-    }
-    let Some(obj) = full_config.as_object() else {
-        return full_config.clone();
-    };
-    let mut filtered = serde_json::Map::new();
-    for key in refs {
-        if let Some(val) = obj.get(key) {
-            filtered.insert(key.clone(), val.clone());
-        }
-    }
-    serde_json::Value::Object(filtered)
-}
-
-/// 构造注入给插件的配置（P1-2：config_files 优先，无则回退 config_refs）。
+/// 构造注入给插件的配置（ADR §4.3，P6：只走 config_files）。
 ///
 /// - manifest 声明了 `config_files`：按 `config_files[].id` 命名空间合并（B3），
 ///   每个 id 对应的值是 `config_files[].path` 在 `full_config` 递归扫描结果中的定位。
 ///   `full_config` 是 loader 对 `config/` 根的递归扫描：`config/models/llm.yaml`
 ///   → `full_config["models"]["llm"]`。路径解析见 [`resolve_config_path`]。
-/// - 未声明 `config_files`：回退到 [`filter_config_by_refs`]（迁移期 config_refs 旧路径，
-///   P6 才删除）。
+/// - 未声明 `config_files`：收空配置（空 Object）。P6 删除 config_refs 后不再回退全量；
+///   13 处 plugins 直读 config_center 有自己的兜底（P1-7 DEBT），收空不影响它们。
 ///
-/// 设计依据：ADR §4.3 B3（合并 dict 的命名空间）+ §8.2 step1（P1 只增不删）。
+/// 设计依据：ADR §4.3 B3 + §4.5（未声明 config_files 的插件收空配置）。
 fn build_injected_config(
     full_config: &serde_json::Value,
     manifest: &PluginManifest,
 ) -> serde_json::Value {
     if manifest.config_files.is_empty() {
-        return filter_config_by_refs(full_config, &manifest.config_refs);
+        // 未声明 config_files → 收空配置（不再回退全量，避免泄漏其他插件密钥）
+        return serde_json::Value::Object(serde_json::Map::new());
     }
     let mut merged = serde_json::Map::new();
     for mapping in &manifest.config_files {
@@ -298,7 +273,7 @@ impl PluginInvokerImpl {
                 serde_json::json!({})
             }
         };
-        // 按需注入（ADR 配置统一）：优先 config_files 映射（P1-2），无则回退 config_refs。
+        // 按需注入（ADR §4.3，P6）：只走 config_files 映射；未声明则收空配置。
         // 避免把全系统配置（含其他插件凭证）泄漏给每个 sidecar。
         let config = build_injected_config(&full_config, manifest);
         client.initialize(&config).await.map_err(|e| PluginError {
@@ -461,6 +436,19 @@ impl PluginInvoker for PluginInvokerImpl {
                 })
             }
             HostType::Sidecar => {
+                // ADR 附录 D③（P6 命名治理）：从 manifest.invoke_entry 取 MCP 入口名
+                // （如 "context_build.execute"）。不再回退 capabilities.tools 或字面量
+                // "execute"——缺 invoke_entry 是 manifest 错误，必须显式暴露。
+                // 启动期 discover 聚合校验是主门；此处为运行期防线（深度防御）。
+                let tool_name = manifest.invoke_entry.as_deref().ok_or_else(|| PluginError {
+                    message: format!(
+                        "pipeline plugin '{}' missing manifest.invoke_entry (ADR 附录 D②)",
+                        plugin_id
+                    ),
+                    code: Some("MISSING_INVOKE_ENTRY".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })?;
+
                 // Sidecar 模式：通过 MCP 客户端调用
                 let client_arc = self.get_or_create_mcp_client(manifest).await?;
                 let client = client_arc.lock().await;
@@ -475,15 +463,6 @@ impl PluginInvoker for PluginInvokerImpl {
                         source: Some("plugin-invoker".to_string()),
                     });
                 }
-
-                // 从 manifest 获取工具名——插件注册的 tool name 是
-                // "<plugin_id>.execute" 格式（如 "context_build.execute"）
-                let tool_name = manifest
-                    .capabilities
-                    .tools
-                    .first()
-                    .map(|t| t.name.as_str())
-                    .unwrap_or("execute");
 
                 // 调用 tools/call
                 let tool_args = serde_json::json!({
@@ -723,10 +702,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         }
     }
 
@@ -747,10 +727,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         }
     }
 
@@ -863,10 +844,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         };
         loader.add_manifest(manifest);
 
@@ -947,63 +929,7 @@ mod tests {
         assert_eq!(extracted["isError"], false);
     }
 
-    // ── filter_config_by_refs 按需注入过滤单元测试 ──
-
-    #[test]
-    fn test_filter_config_empty_refs_returns_full_config() {
-        // 空 refs → 返回全量配置（向后兼容未声明 config_refs 的旧插件）
-        let full = json!({
-            "models": {"llm": {"name": "glm"}},
-            "system": {"timeout": 30},
-            "secrets": {"api_key": "leak"}
-        });
-        let filtered = filter_config_by_refs(&full, &[]);
-        assert_eq!(filtered, full, "empty refs should return full config unchanged");
-    }
-
-    #[test]
-    fn test_filter_config_with_refs_keeps_only_declared_keys() {
-        // 声明 refs → 只保留声明 key，未声明的 key（如 secrets）被剔除
-        let full = json!({
-            "models": {"llm": {"name": "glm"}},
-            "system": {"timeout": 30},
-            "secrets": {"api_key": "leak"}
-        });
-        let refs = vec!["models".to_string(), "system".to_string()];
-        let filtered = filter_config_by_refs(&full, &refs);
-        let obj = filtered.as_object().unwrap();
-        assert_eq!(obj.len(), 2, "should keep only declared keys");
-        assert!(obj.contains_key("models"));
-        assert!(obj.contains_key("system"));
-        assert!(
-            !obj.contains_key("secrets"),
-            "undeclared keys must be filtered out"
-        );
-        // 保留的 key 内容应与原配置一致
-        assert_eq!(filtered["models"]["llm"]["name"], "glm");
-        assert_eq!(filtered["system"]["timeout"], 30);
-    }
-
-    #[test]
-    fn test_filter_config_skips_nonexistent_refs() {
-        // refs 中声明但全量配置不存在的 key 静默跳过
-        let full = json!({
-            "models": {"llm": {"name": "glm"}}
-        });
-        let refs = vec![
-            "models".to_string(),
-            "nonexistent".to_string(),
-            "memory_storage".to_string(),
-        ];
-        let filtered = filter_config_by_refs(&full, &refs);
-        let obj = filtered.as_object().unwrap();
-        assert_eq!(obj.len(), 1, "only existing declared keys are kept");
-        assert!(obj.contains_key("models"));
-        assert!(!obj.contains_key("nonexistent"));
-        assert!(!obj.contains_key("memory_storage"));
-    }
-
-    // ── P1-2 build_injected_config：config_files 优先 / config_refs 回退 ──
+    // ── P6 build_injected_config：只走 config_files（config_refs 已删除）──
 
     /// 辅助：构造一个带 config_files 的 manifest。
     fn make_manifest_with_config_files(id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
@@ -1023,10 +949,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: files,
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         }
     }
 
@@ -1068,25 +995,6 @@ mod tests {
         assert_eq!(injected["embedding"]["dim"], 1024);
     }
 
-    /// 无 config_files 时回退到 config_refs 旧路径（迁移期并存）。
-    #[test]
-    fn test_build_injected_config_falls_back_to_config_refs() {
-        let full = json!({
-            "models": {"llm": {"name": "glm"}},
-            "secrets": {"api_key": "leak"}
-        });
-        let mut manifest = make_manifest_with_config_files("memory", vec![]);
-        manifest.config_refs = vec!["models".to_string()];
-
-        let injected = build_injected_config(&full, &manifest);
-        // 回退到 filter_config_by_refs：只保留 models，剔除 secrets
-        assert_eq!(injected["models"]["llm"]["name"], "glm");
-        assert!(
-            injected.as_object().unwrap().get("secrets").is_none(),
-            "config_refs path must still filter"
-        );
-    }
-
     /// config_files 声明的文件在 full_config 不存在时，该 id 对应空 dict（不崩）。
     #[test]
     fn test_build_injected_config_missing_file_yields_empty_dict() {
@@ -1102,6 +1010,98 @@ mod tests {
 
         let injected = build_injected_config(&full, &manifest);
         assert_eq!(injected["nope"], json!({}), "missing file maps to empty dict");
+    }
+
+    // ── P6 命名治理（ADR 附录 D②/③）：build_injected_config 只走 config_files ──
+    // config_refs 已删除（P6-1），未声明 config_files 的插件收空配置（不再回退全量）。
+
+    /// P6：未声明 config_files 的插件收空配置（不再回退全量/不再有 config_refs）。
+    /// 13 处 plugins 直读 config_center 有自己的兜底（P1-7 DEBT），收空不影响它们。
+    #[test]
+    fn test_build_injected_config_no_config_files_yields_empty() {
+        let full = json!({
+            "models": {"llm": {"name": "glm"}},
+            "secrets": {"api_key": "leak"}
+        });
+        let manifest = make_manifest_with_config_files("no_config_plugin", vec![]);
+
+        let injected = build_injected_config(&full, &manifest);
+        assert!(
+            injected.as_object().map(|o| o.is_empty()).unwrap_or(true),
+            "no config_files declared → empty injected config, got: {injected}"
+        );
+        // 关键：全量配置里的 secrets 不再泄漏给未声明 config_files 的插件
+        assert!(
+            injected.get("secrets").is_none(),
+            "undeclared secrets must NOT leak to plugins without config_files"
+        );
+    }
+
+    // ── P6 命名治理（ADR 附录 D③）：invoke_pipeline_plugin 读 invoke_entry ──
+
+    /// 辅助：构造一个 sidecar pipeline manifest（用于 invoke_entry 缺失测试）。
+    fn make_pipeline_sidecar_manifest(id: &str, invoke_entry: Option<&str>) -> PluginManifest {
+        PluginManifest {
+            id: id.to_string(),
+            name: format!("Test {}", id),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Pipeline,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: HostType::Sidecar,
+            entry: "python server.py".to_string(),
+            capabilities: Default::default(),
+            dependencies: vec![],
+            permissions: Default::default(),
+            error_policy: Default::default(),
+            priority: 100,
+            mcp: None,
+            requires_content: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            invoke_entry: invoke_entry.map(str::to_string),
+        }
+    }
+
+    /// P6：sidecar pipeline 插件缺 invoke_entry 时，invoke_pipeline_plugin 返回
+    /// 明确的 MISSING_INVOKE_ENTRY 错误（不再静默回退字面量 "execute"）。
+    /// 此为运行期防线；启动期聚合校验（plugin-loader discover）是主门。
+    #[tokio::test]
+    async fn test_invoke_pipeline_plugin_missing_invoke_entry_returns_error() {
+        let loader = Arc::new(MockLoader::new());
+        // 缺 invoke_entry 的 sidecar pipeline 插件
+        loader.add_manifest(make_pipeline_sidecar_manifest("bad_pipeline", None));
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let ctx = PluginContext::new(
+            json!({}),
+            json!({}),
+            TenantContext::new("t1", "s1"),
+            Uuid::new_v4(),
+            agentos_core::types::ContentLoader::new(
+                std::sync::Arc::new(MockStorage),
+                "run1".to_string(),
+                "main".to_string(),
+                0,
+            ),
+        );
+
+        let result = invoker.invoke_pipeline_plugin("bad_pipeline", &ctx).await;
+        assert!(result.is_err(), "missing invoke_entry must error");
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.code.as_deref(),
+            Some("MISSING_INVOKE_ENTRY"),
+            "error code must be MISSING_INVOKE_ENTRY, got: {:?}",
+            err.code
+        );
+        assert!(
+            err.message.contains("bad_pipeline"),
+            "error message must name the offending plugin: {}",
+            err.message
+        );
     }
 
     // Mock StorageBackend for test context

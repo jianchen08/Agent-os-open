@@ -419,6 +419,29 @@ impl PluginLoader for PluginLoaderImpl {
             }
         }
 
+        // ADR 附录 D③/D.5（P6 命名治理）：启动期聚合校验 invoke_entry。
+        // pipeline 类型插件的 MCP 入口名必须显式声明（不再隐式回退 capabilities.tools）。
+        // 收集所有缺失项一次性报错——不逐个 panic，避免"修一个崩一个"的迁移体验。
+        // tool 类型用 capabilities.tools[]、system 类型暂保留 tools[]（D.6 双语义待评估），
+        // 都不要求 invoke_entry。
+        let mut missing_invoke_entry: Vec<String> = all_manifests
+            .values()
+            .map(|(m, _)| m)
+            .filter(|m| m.plugin_type == PluginType::Pipeline && m.invoke_entry.is_none())
+            .map(|m| m.id.clone())
+            .collect();
+        if !missing_invoke_entry.is_empty() {
+            missing_invoke_entry.sort();
+            return Err(agentos_core::types::PluginError {
+                message: format!(
+                    "pipeline plugins missing manifest.invoke_entry (ADR 附录 D②): [{}]",
+                    missing_invoke_entry.join(", ")
+                ),
+                code: Some("MISSING_INVOKE_ENTRY".to_string()),
+                source: Some("plugin-loader".to_string()),
+            });
+        }
+
         // 更新缓存
         let mut cache = self.manifests.write();
         cache.clear();
@@ -661,6 +684,12 @@ mod tests {
     fn create_test_plugin_dir(root: &Path, id: &str, plugin_type: &str) {
         let dir = root.join(id);
         fs::create_dir_all(&dir).unwrap();
+        // pipeline 类型插件需声明 invoke_entry（ADR 附录 D②，P6 discover 聚合校验）
+        let invoke_entry_field = if plugin_type == "pipeline" {
+            format!(",\n    \"invoke_entry\": \"{}.execute\"", id)
+        } else {
+            String::new()
+        };
         let manifest_json = format!(
             r#"{{
     "id": "{}",
@@ -674,9 +703,9 @@ mod tests {
     "dependencies": [],
     "permissions": {{}},
     "error_policy": "abort",
-    "priority": 100
+    "priority": 100{}
 }}"#,
-            id, id, plugin_type
+            id, id, plugin_type, invoke_entry_field
         );
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
     }
@@ -700,10 +729,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -727,10 +757,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         };
         assert!(loader.validate_manifest(&manifest).is_err());
     }
@@ -755,10 +786,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: None,
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -898,10 +930,11 @@ mod tests {
             priority: 100,
             mcp: None,
             requires_content: Some(2),
-            config_refs: vec![],
+            invoke_entry: None,
             config_files: vec![],
             http_endpoints: vec![],
             ui_schema: None,
+            contributes: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));
@@ -1238,7 +1271,7 @@ mod tests {
         let plugin_dir = builtin.path().join("hashed_plugin");
         fs::create_dir_all(&plugin_dir).unwrap();
 
-        // manifest 文件
+        // manifest 文件（pipeline 类型声明 invoke_entry，P6 discover 聚合校验）
         let manifest_content = r#"{
     "id": "hashed_plugin",
     "name": "Hashed Plugin",
@@ -1251,7 +1284,8 @@ mod tests {
     "dependencies": [],
     "permissions": {},
     "error_policy": "abort",
-    "priority": 100
+    "priority": 100,
+    "invoke_entry": "hashed_plugin.execute"
 }"#;
         let manifest_path = plugin_dir.join("plugin.json");
         fs::write(&manifest_path, manifest_content).unwrap();
@@ -1304,5 +1338,87 @@ mod tests {
             manifests_bad.is_empty(),
             "sha256 mismatch should reject the plugin"
         );
+    }
+
+    // ── P6 命名治理（ADR 附录 D③/D.5）：discover 启动期聚合校验 invoke_entry ──
+
+    /// 辅助：写一个 sidecar pipeline manifest（可指定 invoke_entry）。
+    fn write_pipeline_plugin(root: &Path, id: &str, invoke_entry: Option<&str>) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let entry_field = match invoke_entry {
+            Some(e) => format!(",\n    \"invoke_entry\": \"{}\"", e),
+            None => String::new(),
+        };
+        let manifest_json = format!(
+            r#"{{
+    "id": "{}",
+    "name": "Pipeline {}",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {{}}{}
+}}"#,
+            id, id, entry_field
+        );
+        fs::write(dir.join("plugin.json"), manifest_json).unwrap();
+    }
+
+    /// pipeline 插件声明了 invoke_entry → discover 成功，manifest 原样返回。
+    #[tokio::test]
+    async fn test_discover_pipeline_with_invoke_entry_succeeds() {
+        let builtin = tempfile::tempdir().unwrap();
+        write_pipeline_plugin(builtin.path(), "good_pipe", Some("good_pipe.execute"));
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let manifests = loader.discover(&[]).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(
+            manifests[0].invoke_entry.as_deref(),
+            Some("good_pipe.execute")
+        );
+    }
+
+    /// 缺 invoke_entry 的 pipeline 插件 → discover 启动期聚合报错（不逐个 panic）。
+    /// 错误消息必须列出所有缺失的插件 id（聚合，不是第一个就崩）。
+    #[tokio::test]
+    async fn test_discover_pipeline_missing_invoke_entry_aggregates_errors() {
+        let builtin = tempfile::tempdir().unwrap();
+        // 两个 pipeline 插件都缺 invoke_entry——聚合报错应一次列出两者
+        write_pipeline_plugin(builtin.path(), "bad_pipe_one", None);
+        write_pipeline_plugin(builtin.path(), "bad_pipe_two", None);
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let result = loader.discover(&[]).await;
+        assert!(result.is_err(), "missing invoke_entry must fail discover");
+        let err = result.unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MISSING_INVOKE_ENTRY"));
+        // 聚合：两个缺失插件都在错误消息里
+        assert!(
+            err.message.contains("bad_pipe_one"),
+            "error must aggregate all missing plugins, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("bad_pipe_two"),
+            "error must aggregate all missing plugins (not fail on first), got: {}",
+            err.message
+        );
+    }
+
+    /// tool 类型插件不需要 invoke_entry（它用 capabilities.tools[]）；
+    /// system 类型暂保留 tools[] 不强制 invoke_entry（D.6 双语义待评估）。
+    #[tokio::test]
+    async fn test_discover_tool_plugin_does_not_require_invoke_entry() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "a_tool", "tool");
+        create_test_plugin_dir(builtin.path(), "a_system", "system");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let manifests = loader.discover(&[]).await.unwrap();
+        // tool 和 system 都不要求 invoke_entry，discover 成功
+        assert_eq!(manifests.len(), 2);
     }
 }

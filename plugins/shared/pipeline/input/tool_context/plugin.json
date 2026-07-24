@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "tool_context.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "tool_context.execute",
-                "description": "Tool Context pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

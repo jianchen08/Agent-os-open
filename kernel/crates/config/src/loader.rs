@@ -271,7 +271,7 @@ impl ConfigLoader {
     /// `PluginLoaderImpl::load_config` → `collect_yaml_configs`（递归）。
     /// 本方法保留为 config crate 自治能力 / 镜像移植（与 0.1 `src/config/loader.py::load_all`
     /// 对齐），仅用于 config crate 单元测试与未来内核侧独立配置读取场景，
-    /// **不要** 用于向插件 sidecar 注入配置（那会绕过 config_refs 过滤，导致泄漏）。
+    /// **不要** 用于向插件 sidecar 注入配置（那会绕过 config_files 命名空间过滤，导致泄漏）。
     pub fn load_all(&self) -> Result<HashMap<String, Value>, ConfigError> {
         let mut result = HashMap::new();
 

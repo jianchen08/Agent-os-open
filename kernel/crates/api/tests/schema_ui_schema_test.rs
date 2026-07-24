@@ -31,10 +31,11 @@ fn manifest_with_ui(
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: vec![],
         http_endpoints: vec![],
         ui_schema,
+        contributes: None,
     }
 }
 

@@ -433,7 +433,7 @@ mod tests {
             .as_object()
             .expect("load_config 应返回对象，而非空 {{}}");
 
-        // P0-1 验收：非空 + 含 models 节（对应 config_refs=["models"] 的插件）
+        // P0-1 验收：非空 + 含 models 节（对应 config_files 映射 models 的插件）
         assert!(
             !obj.is_empty(),
             "config_root 接入后 load_config 不应返回空 {{}}（P0-1 bug 回归）"

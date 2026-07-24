@@ -1,7 +1,8 @@
-//! P1-1: PluginManifest.config_files 字段 serde 测试（TDD RED）。
+//! P1-1/P6: PluginManifest.config_files 字段 serde 测试。
 //!
-//! 验证 manifest 的 config_files 映射声明可正确序列化/反序列化。
 //! 设计依据：ADR §4.2 / §4.3（config_files: id/path/label 三要素）。
+//! P6 更新：config_refs 字段已删除（被 config_files 取代），invoke_entry 字段新增
+//! （ADR 附录 D②）。本文件验证 config_files 映射 + invoke_entry 并存的 serde 行为。
 
 use agentos_core::traits::{HostType, PluginManifest, PluginType};
 
@@ -34,7 +35,8 @@ fn test_manifest_deserializes_config_files() {
 }
 
 /// 未声明 config_files 的旧 manifest 应向后兼容（config_files 为空 vec）。
-/// 这保证 P1 只增不删——llm/memory/tasks 既有 config_refs 不受影响。
+/// P6：config_refs 字段已删除，但 manifest 残留的 config_refs 字段不破坏解析
+/// （serde 默认忽略未知字段）。
 #[test]
 fn test_manifest_without_config_files_defaults_empty() {
     let json = r#"{
@@ -52,23 +54,23 @@ fn test_manifest_without_config_files_defaults_empty() {
     let manifest: PluginManifest = serde_json::from_str(json).expect("manifest must parse");
 
     assert!(manifest.config_files.is_empty(), "missing config_files defaults to empty");
-    // config_refs 保留（P1 不删，留 P6）
-    assert_eq!(manifest.config_refs, vec!["memory_storage".to_string()]);
+    // P6: config_refs 字段已从结构体删除——编译期保证不再可访问。
+    // 残留的 config_refs JSON 字段被 serde 忽略（向后兼容旧 manifest 文件）。
 }
 
-/// config_files 与 config_refs 可并存（迁移期），二者独立解析。
+/// P6：config_files + invoke_entry 可并存（pipeline 插件既有配置映射又有 MCP 入口）。
 #[test]
-fn test_config_files_and_config_refs_coexist() {
+fn test_config_files_and_invoke_entry_coexist() {
     let json = r#"{
         "id": "dual",
         "name": "Dual",
         "version": "1.0.0",
-        "plugin_type": "system",
+        "plugin_type": "pipeline",
         "language": "python",
         "host_type": "sidecar",
         "entry": "python server.py",
         "capabilities": {},
-        "config_refs": ["models"],
+        "invoke_entry": "dual.execute",
         "config_files": [
             {"id": "llm", "path": "config/models/llm.yaml", "label": "LLM"}
         ]
@@ -76,7 +78,11 @@ fn test_config_files_and_config_refs_coexist() {
 
     let manifest: PluginManifest = serde_json::from_str(json).expect("manifest must parse");
 
-    assert_eq!(manifest.config_refs, vec!["models".to_string()]);
+    assert_eq!(
+        manifest.invoke_entry.as_deref(),
+        Some("dual.execute"),
+        "invoke_entry must parse alongside config_files"
+    );
     assert_eq!(manifest.config_files.len(), 1);
 }
 
@@ -99,15 +105,20 @@ fn test_empty_config_files_omitted_in_serialization() {
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: vec![],
         http_endpoints: vec![],
         ui_schema: None,
+        contributes: None,
     };
 
     let serialized = serde_json::to_string(&manifest).expect("serialize");
     assert!(
         !serialized.contains("config_files"),
         "empty config_files should be omitted, got: {serialized}"
+    );
+    assert!(
+        !serialized.contains("invoke_entry"),
+        "None invoke_entry should be omitted, got: {serialized}"
     );
 }

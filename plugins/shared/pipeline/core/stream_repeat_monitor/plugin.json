@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "stream_repeat_monitor.check",
     "capabilities": {
-        "tools": [
-            {
-                "name": "stream_repeat_monitor.check",
-                "description": "Check content chunks for streaming repetition. Returns stop signal when similarity exceeds threshold for N consecutive sliding windows."
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

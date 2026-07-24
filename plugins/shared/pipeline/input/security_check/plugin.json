@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "security_check.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "security_check.execute",
-                "description": "Security Check pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

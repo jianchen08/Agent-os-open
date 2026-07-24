@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "sensitive_checker.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "sensitive_checker.execute",
-                "description": "Sensitive Checker pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

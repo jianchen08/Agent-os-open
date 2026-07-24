@@ -33,10 +33,11 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: files,
         http_endpoints: vec![],
         ui_schema: None,
+        contributes: None,
     }
 }
 

@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "context_window_guard.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "context_window_guard.execute",
-                "description": "Context Window Guard pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "event_callback.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "event_callback.execute",
-                "description": "Event Callback pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

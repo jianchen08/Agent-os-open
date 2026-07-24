@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "result_format.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "result_format.execute",
-                "description": "Result Format pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

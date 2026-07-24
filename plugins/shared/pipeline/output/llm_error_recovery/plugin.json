@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "llm_error_recovery.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "llm_error_recovery.execute",
-                "description": "LLM Error Recovery pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

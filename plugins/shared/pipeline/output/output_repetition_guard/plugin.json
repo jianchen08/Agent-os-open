@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "output_repetition_guard.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "output_repetition_guard.execute",
-                "description": "Output Repetition Guard pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

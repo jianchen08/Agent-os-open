@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "multimodal_postprocessor.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "multimodal_postprocessor.execute",
-                "description": "Multimodal Postprocessor pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

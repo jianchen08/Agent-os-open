@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "memory_read.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "memory_read.execute",
-                "description": "Memory Read pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

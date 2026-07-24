@@ -716,21 +716,23 @@ pub struct PluginManifest {
     /// 引擎据此从 blobs 表预加载，插件也可通过 ContentLoader 运行时按需加载。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_content: Option<u32>,
-    /// 配置按需注入声明（ADR 配置统一）。
+    /// sidecar 的 MCP 入口方法名（ADR 附录 D②，P6 命名治理）。
     ///
-    /// 声明该插件需要读取哪些配置节（如 `["models", "memory_storage"]`）。
-    /// 内核 `load_config` 据此过滤，只投递声明的配置节（而非全量）。
-    /// 未声明时注入全量配置（向后兼容）。
+    /// 仅 pipeline/system 等**非 tool 插件**需要——这是管道引擎/内核 RPC
+    /// 调用 sidecar 的入口（如 `llm_core.execute`），与"给 LLM 的真工具"
+    /// （tool 类型插件的 `capabilities.tools[]`）分离。
+    /// tool 类型插件不用此字段。
     ///
-    /// **迁移期保留（ADR §8.2 step1）**：P1~P5 期间与 `config_files` 并存，
-    /// loader 优先 `config_files`，无则回退 `config_refs`；P6 才删除。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub config_refs: Vec<String>,
+    /// pipeline 类型插件必填：discover 启动期聚合校验，缺失则启动失败
+    /// （一次列出所有缺失项，不逐个 panic，见 ADR D.5/E.11）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoke_entry: Option<String>,
     /// 配置文件显式映射（ADR §4.2/§4.3 config_files）。
     ///
     /// 每项把一个配置文件（id/path/label）显式映射到现有 `config/` 子树下的文件。
-    /// P1 新增字段，与 `config_refs` 并存（迁移期 loader 优先 config_files）。
-    /// 未声明时为空 vec（向后兼容）。
+    /// 内核 loader 据此构造注入给插件的配置（按 id 命名空间合并，B3）。
+    /// 未声明 config_files 的插件收空配置（13 处 plugins 直读 config_center
+    /// 有自己的兜底，见 P1-7 DEBT）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_files: Vec<ConfigFileMapping>,
     /// 前端 UI Schema 声明（ADR 前端 schema 驱动）。

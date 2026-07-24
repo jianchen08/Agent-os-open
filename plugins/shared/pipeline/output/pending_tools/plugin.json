@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "pending_tools.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "pending_tools.execute",
-                "description": "Pending Tools pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "error_check.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "error_check.execute",
-                "description": "Error Check pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

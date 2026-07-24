@@ -61,10 +61,11 @@ fn make_test_manifest(
         priority: 100,
         mcp: None,
         requires_content,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: vec![],
         http_endpoints: vec![],
         ui_schema: None,
+        contributes: None,
     }
 }
 

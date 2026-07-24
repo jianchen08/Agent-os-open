@@ -6,13 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "invoke_entry": "param_inject.execute",
     "capabilities": {
-        "tools": [
-            {
-                "name": "param_inject.execute",
-                "description": "Param Inject pipeline plugin"
-            }
-        ],
+        "tools": [],
         "resources": [],
         "route_signals": [],
         "lifecycle_hooks": [

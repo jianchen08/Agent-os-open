@@ -362,10 +362,11 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: vec![],
         http_endpoints: vec![endpoint("r", "POST", "/ext/good/cb")],
         ui_schema: None,
+        contributes: None,
     };
     let bad = PluginManifest {
         id: "bad".to_string(),
@@ -383,11 +384,12 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: vec![],
         // 越界：不在 /ext/bad/ 命名空间
         http_endpoints: vec![endpoint("r", "POST", "/wecom/cb")],
         ui_schema: None,
+        contributes: None,
     };
 
     let errors = register_manifest_http_routes(&registry, &[good, bad]);

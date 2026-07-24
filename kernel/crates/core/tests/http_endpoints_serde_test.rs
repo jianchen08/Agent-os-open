@@ -101,10 +101,11 @@ fn test_empty_http_endpoints_omitted_in_serialization() {
         priority: 100,
         mcp: None,
         requires_content: None,
-        config_refs: vec![],
+        invoke_entry: None,
         config_files: vec![],
         http_endpoints: vec![],
         ui_schema: None,
+        contributes: None,
     };
 
     let serialized = serde_json::to_string(&manifest).expect("serialize");
