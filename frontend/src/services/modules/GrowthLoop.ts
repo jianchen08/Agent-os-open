@@ -4,6 +4,7 @@ import { syncNavItemsFromContributes } from '@/constants/navItems'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { schemaRegistry } from '@/services/schema/registry'
+import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { getSchema } from '@/services/api/schema'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
@@ -29,6 +30,7 @@ export async function initializeGrowthLoop(): Promise<void> {
     const schema = await getSchema()
     contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
     syncNavItemsFromContributes()
+    shortcutRegistry.refresh()
     loggers.websocket.info('ContributionRegistry 初始化完成')
   } catch (error) {
     loggers.websocket.warn('ContributionRegistry 初始化失败:', error)
@@ -46,8 +48,9 @@ export function handleSchemaUpdate(event: {
   changes: string[]
 }): void {
   moduleManager.handleSchemaUpdate(event)
-  // Schema 更新后重新同步导航
+  // Schema 更新后重新同步导航与快捷键
   syncNavItemsFromContributes()
+  shortcutRegistry.refresh()
 }
 
 /** 销毁自生长闭环（完全清理） 用于登出、认证过期等场景，需要彻底清除所有模块状态。 */
@@ -75,6 +78,7 @@ export async function restartGrowthLoop(): Promise<void> {
     const schema = await getSchema()
     contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
     syncNavItemsFromContributes()
+    shortcutRegistry.refresh()
     loggers.websocket.info('自生长闭环重启完成')
     loggers.websocket.info(`当前已注册 ${schemaRegistry.getEnabled().length} 个模块`)
   } catch (error) {

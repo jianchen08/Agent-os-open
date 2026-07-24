@@ -5,6 +5,7 @@ import { persist } from 'zustand/middleware'
 import { getMessages as apiGetMessages, mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { indexedDbStorage } from '@/utils/indexedDbStorage'
+import { useContextKeys } from '@/stores/contextKeysStore'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
@@ -679,6 +680,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         },
       },
     }))
+    // 同步 context key：有任意管道运行中 → pipeline.running=true（ADR §3.4）
+    useContextKeys.getState().setPipelineRunning(true)
   },
 
   /** 停止流式传输，同时将消息状态标记为 completed */
@@ -715,6 +718,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         streamingState: newStreamingState,
       }
     })
+    // 同步 context key：无管道运行中时回 idle（ADR §3.4）
+    const stillRunning = Object.keys(get().streamingState).length > 0
+    useContextKeys.getState().setPipelineRunning(stillRunning)
   },
 
   /** 查询指定管道是否正在流式传输 */

@@ -63,7 +63,7 @@ describe('ContributionRegistry — 插件配置聚合', () => {
     registry.loadFromSchema(schema)
 
     const entries = registry.getPluginConfigs()
-    expect(entries.map((e) => e.plugin_id)).toEqual(['a', 'b'])
+    expect(entries.map((e) => e.pluginId)).toEqual(['a', 'b'])
   })
 
   it('schema 无 plugin_configs 时所有查询返回空', () => {

@@ -77,26 +77,49 @@ export interface SettingsPanelEntry {
   }>
 }
 
+/** 插件 ui_schema 声明的单个 widget */
+export interface WidgetDeclaration {
+  /** widget 实例标识（插件内唯一） */
+  id: string
+  /** widget 类型，对应 WidgetRegistry 注册 key */
+  type: string
+  /** 目标渲染空间 */
+  space?: string
+  /** 触发时机 */
+  trigger?: string
+  /** widget props */
+  props?: Record<string, unknown>
+  /** 来源插件 ID */
+  pluginId?: string
+}
+
 /**
  * ContributionRegistry
  *
  * 全局单例，管理所有插件贡献。
  * 数据源来自 /api/v1/schema 聚合。
  */
-class ContributionRegistry {
+export class ContributionRegistry {
   /** 所有贡献条目 */
   private entries: Map<string, ContributionEntry[]> = new Map()
   /** 配置面板条目 */
   private settingsPanels: Map<string, SettingsPanelEntry> = new Map()
+  /** 插件 widget 声明（按 pluginId 索引，来自 ui_schema） */
+  private widgetsByPlugin: Map<string, WidgetDeclaration[]> = new Map()
   /** 是否已初始化 */
   private initialized = false
 
   /**
    * 从 /api/v1/schema 响应加载贡献（含 plugin_configs）
    *
+   * 重新加载会清空旧数据（幂等重载，避免幽灵菜单/widget）。
+   *
    * @param schema - SchemaResponse 对象
    */
   loadFromSchema(schema: Record<string, unknown>): void {
+    // 幂等重载：先清空旧状态
+    this.clear()
+
     // 加载 plugin_configs（配置面板）
     const pluginConfigs = (schema as Record<string, unknown>).plugin_configs as
       | Array<{ plugin_id: string; plugin_name: string; config_files: Array<{ id: string; path: string; label: string }> }>
@@ -114,6 +137,37 @@ class ContributionRegistry {
 
     // 加载 modules（contributes / ui_contributions）
     this.registerFromSchema(schema as Parameters<typeof this.registerFromSchema>[0])
+
+    // 提取 agents / pipelines 的 ui_schema.widgets
+    this.extractWidgets(schema)
+  }
+
+  /**
+   * 从 agents / pipelines 的 ui_schema 提取 widget 声明
+   */
+  private extractWidgets(schema: Record<string, unknown>): void {
+    const sources: Array<{ list?: Array<Record<string, unknown>> }> = [
+      { list: schema.agents as Array<Record<string, unknown>> | undefined },
+      { list: schema.pipelines as Array<Record<string, unknown>> | undefined },
+    ]
+    for (const { list } of sources) {
+      if (!Array.isArray(list)) continue
+      for (const entry of list) {
+        const pluginId = entry.id as string | undefined
+        if (!pluginId) continue
+        const uiSchema = entry.ui_schema as { widgets?: Array<Record<string, unknown>> } | null | undefined
+        if (!uiSchema || !Array.isArray(uiSchema.widgets)) continue
+        const widgets: WidgetDeclaration[] = uiSchema.widgets.map((w) => ({
+          id: w.id as string,
+          type: w.type as string,
+          space: w.space as string | undefined,
+          trigger: w.trigger as string | undefined,
+          props: w.props as Record<string, unknown> | undefined,
+          pluginId,
+        }))
+        this.widgetsByPlugin.set(pluginId, widgets)
+      }
+    }
   }
 
   /**
@@ -166,6 +220,7 @@ class ContributionRegistry {
           for (const item of items as Array<Record<string, unknown>>) {
             this.register({
               ...item,
+              id: (item.id as string | undefined) ?? synthesizeId(type, pluginId, item),
               type: type as ContributionType,
               pluginId,
             } as ContributionEntry)
@@ -275,6 +330,73 @@ class ContributionRegistry {
     return this.getByType('dockItems')
   }
 
+  // ── Widget 声明（来自 agents/pipelines 的 ui_schema）──
+
+  /**
+   * 获取指定插件的 widget 声明（来自 ui_schema.widgets）
+   */
+  getWidgetsForPlugin(pluginId: string): WidgetDeclaration[] {
+    return this.widgetsByPlugin.get(pluginId) ?? []
+  }
+
+  /**
+   * 聚合所有插件的 widget 声明
+   */
+  getAllWidgets(): WidgetDeclaration[] {
+    const all: WidgetDeclaration[] = []
+    for (const list of this.widgetsByPlugin.values()) {
+      all.push(...list)
+    }
+    return all
+  }
+
+  // ── contributes.menus（右键/上下文菜单，ADR §3.4 档位二）──
+
+  /**
+   * 获取菜单项（按 location 过滤）
+   *
+   * @param location - 菜单位置（如 'workspace/context'、'chat/context'）；省略返回全部
+   */
+  getMenus(location?: string): ContributionEntry[] {
+    const menus = this.getByType('menus')
+    if (location === undefined) return menus
+    return menus.filter((m) => m.location === location)
+  }
+
+  // ── contributes.commands（命令面板，ADR §3.4 档位二）──
+
+  /**
+   * 获取所有命令（命令面板聚合用）
+   */
+  getCommands(): ContributionEntry[] {
+    return this.getByType('commands')
+  }
+
+  // ── contributes.shortcuts（快捷键，ADR §3.4 档位二）──
+
+  /**
+   * 获取所有快捷键绑定
+   */
+  getShortcuts(): ContributionEntry[] {
+    return this.getByType('shortcuts')
+  }
+
+  // ── contributes.modal（模态弹窗，ADR §3.4 档位二）──
+
+  /**
+   * 获取所有模态弹窗声明
+   */
+  getModals(): ContributionEntry[] {
+    return this.getByType('modal')
+  }
+
+  /**
+   * 按 trigger 查找模态弹窗（如 'on_command:xxx'）
+   */
+  findModalByTrigger(trigger: string): ContributionEntry | undefined {
+    return this.getModals().find((m) => m.openOn === trigger || (m as { trigger?: string }).trigger === trigger)
+  }
+
   /**
    * 检查是否已初始化
    */
@@ -283,14 +405,44 @@ class ContributionRegistry {
   }
 
   /**
+   * 该插件是否声明了配置（config_files）
+   */
+  hasPluginConfig(pluginId: string): boolean {
+    return this.settingsPanels.has(pluginId)
+  }
+
+  /**
    * 清空所有注册
    */
   clear(): void {
     this.entries.clear()
     this.settingsPanels.clear()
+    this.widgetsByPlugin.clear()
     this.initialized = false
   }
 }
 
 /** 全局单例 */
 export const contributionRegistry = new ContributionRegistry()
+
+/**
+ * 为无显式 id 的贡献条目合成稳定 id
+ *
+ * shortcuts/menu 条目常无 id 字段，需从其标识字段合成以避免误去重：
+ * - shortcuts：command（每命令一个绑定）
+ * - menus：command + location（同命令在不同位置可各一）
+ * - 其他：pluginId + type + 序列
+ */
+function synthesizeId(type: string, pluginId: string, item: Record<string, unknown>): string {
+  if (type === 'shortcuts' && typeof item.command === 'string') {
+    return `${pluginId}:shortcut:${item.command}`
+  }
+  if (type === 'menus') {
+    const cmd = typeof item.command === 'string' ? item.command : ''
+    const loc = typeof item.location === 'string' ? item.location : ''
+    return `${pluginId}:menu:${cmd}:${loc}`
+  }
+  if (typeof item.command === 'string') return `${pluginId}:${type}:${item.command}`
+  if (typeof item.title === 'string') return `${pluginId}:${type}:${item.title}`
+  return `${pluginId}:${type}:${JSON.stringify(item).slice(0, 32)}`
+}

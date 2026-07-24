@@ -8,6 +8,7 @@ import { RouterProvider } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import { Toaster } from './components/ui/sonner'
 import { createRouter } from './router'
+import { ExtensionHost } from './components/extension/ExtensionHost'
 
 const router = createRouter()
 
@@ -18,6 +19,7 @@ export function App() {
   return (
     <ErrorBoundary>
       <RouterProvider router={router} />
+      <ExtensionHost />
       <Toaster />
     </ErrorBoundary>
   )
