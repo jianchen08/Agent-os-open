@@ -16,8 +16,13 @@ pub mod error;
 pub mod loader;
 pub mod native_loader;
 pub mod registry;
+pub mod wasm_loader;
 
 pub use error::LoaderError;
 pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
 pub use native_loader::NativePluginLoader;
 pub use registry::{CapabilityRegistryImpl, DependencyResolverImpl};
+pub use wasm_loader::{
+    HostCapability, WasmCapabilityChecker, WasmHostRegistry, WasmRuntime, WasmRuntimeConfig,
+    WASM_DEALLOC_FN, WASM_EXECUTE_FN, WASM_MEM_EXPORT,
+};

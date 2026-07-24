@@ -31,7 +31,7 @@ use agentos_core::types::{PluginError, PluginResult};
 use libloading::{Library, Symbol};
 use parking_lot::RwLock;
 use serde_json::Value;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// C-ABI 入口签名（与 SDK `plugin_execute` 对齐）。
 type ExecuteFn = unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32;
@@ -44,7 +44,8 @@ pub const DEFAULT_ENTRY_SYMBOL: &[u8] = b"plugin_execute";
 pub const DEFAULT_FREE_SYMBOL: &[u8] = b"plugin_free";
 
 /// 一个已加载的原生插件实例（Library + 函数指针）。
-struct NativePlugin {
+#[derive(Debug)]
+pub struct NativePlugin {
     /// Library 句柄——保活，函数指针指向其内代码。
     /// 永不单独释放（生产不做热卸载）。
     _lib: Library,

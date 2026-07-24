@@ -15,9 +15,11 @@ thiserror.workspace = true
 tracing.workspace = true
 agentos-core.workspace = true
 agentos-mcp = { path = "../mcp" }
+agentos-plugin-loader = { path = "../plugin-loader" }
 parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
 uuid.workspace = true
 chrono.workspace = true
+wat = "1"

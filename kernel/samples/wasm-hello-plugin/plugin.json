@@ -1,0 +1,18 @@
+{
+  "id": "wasm_hello",
+  "name": "WASM Hello World",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "pipeline_role": "processor",
+  "language": "rust",
+  "host_type": "wasm",
+  "entry": "wasm_hello.wasm",
+  "invoke_entry": "execute",
+  "wasm": {
+    "artifact": "wasm_hello.wasm",
+    "granted_capabilities": ["host.log"]
+  },
+  "capabilities": {},
+  "permissions": {},
+  "priority": 100
+}

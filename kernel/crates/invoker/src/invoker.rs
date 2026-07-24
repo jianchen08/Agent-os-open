@@ -15,6 +15,7 @@ use agentos_core::traits::{
 };
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
 use agentos_mcp::{CapabilityRouter, McpClient, McpError};
+use agentos_plugin_loader::WasmRuntime;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tracing::{error, info, warn};
@@ -164,6 +165,9 @@ pub struct PluginInvokerImpl {
     /// Capability 路由器——sidecar→内核反向调用通道。
     /// 设置后，新建的 MCP 客户端会带上路由器；已有客户端需重连才生效。
     router: RwLock<Option<Arc<dyn CapabilityRouter>>>,
+    /// WASM 插件运行时（task_11 N7）：host_type==Wasm 时用于加载/执行 .wasm。
+    /// None 时 WASM 插件调用返回 WASM_RUNTIME_NOT_CONFIGURED。
+    wasm_runtime: Option<Arc<WasmRuntime>>,
 }
 
 impl PluginInvokerImpl {
@@ -174,7 +178,63 @@ impl PluginInvokerImpl {
             mcp_clients: RwLock::new(HashMap::new()),
             crash_callbacks: RwLock::new(Vec::new()),
             router: RwLock::new(None),
+            wasm_runtime: None,
         }
+    }
+
+    /// 创建带 WASM 运行时的 PluginInvoker（task_11 N7）。
+    ///
+    /// `wasm_runtime` 由调用方（engine 启动期）构造并注入，便于共享 host 能力注册表
+    /// 与白名单校验器。None 等价于 [`Self::new`]。
+    pub fn with_wasm_runtime(loader: Arc<dyn PluginLoader>, wasm_runtime: Arc<WasmRuntime>) -> Self {
+        Self {
+            loader,
+            mcp_clients: RwLock::new(HashMap::new()),
+            crash_callbacks: RwLock::new(Vec::new()),
+            router: RwLock::new(None),
+            wasm_runtime: Some(wasm_runtime),
+        }
+    }
+
+    /// 构造注入给 WASM 插件的 PluginInput 等价 JSON（与原生/SDK 对齐）。
+    ///
+    /// 复用 sidecar 的 state/config 注入约定；tenant/session/task 来自 PluginContext。
+    fn build_wasm_input(ctx: &PluginContext) -> Value {
+        json!({
+            "state": ctx.state,
+            "config": ctx.config,
+            "tenant_id": ctx.tenant.tenant_id,
+            "session_id": ctx.tenant.session_id,
+        })
+    }
+
+    /// 解析 WASM 插件产物路径（manifest.wasm.artifact 相对插件目录）。
+    fn resolve_wasm_artifact(
+        &self,
+        plugin_id: &str,
+        manifest: &PluginManifest,
+    ) -> Result<std::path::PathBuf, PluginError> {
+        let artifact = manifest
+            .wasm
+            .as_ref()
+            .map(|w| w.artifact.as_str())
+            .ok_or_else(|| PluginError {
+                message: format!(
+                    "Wasm plugin '{}' missing manifest.wasm.artifact (ADR 附录 D②)",
+                    plugin_id
+                ),
+                code: Some("MISSING_WASM_ARTIFACT".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+        let dir = self.loader.get_plugin_dir(plugin_id).ok_or_else(|| PluginError {
+            message: format!(
+                "Wasm plugin '{}' directory not found (not discovered?)",
+                plugin_id
+            ),
+            code: Some("WASM_PLUGIN_DIR_NOT_FOUND".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        })?;
+        Ok(std::path::PathBuf::from(dir).join(artifact))
     }
 
     /// 设置 Capability 路由器（启用 sidecar→内核反向调用）。
@@ -470,16 +530,21 @@ impl PluginInvoker for PluginInvokerImpl {
                 })
             }
             HostType::Wasm => {
-                // 临时占位：WasmRuntime 接入在 N7 实现。
-                // 此时 invoke_pipeline_plugin 对 Wasm 插件直接返回未实现错误。
-                Err(PluginError {
+                // task_11 N7：经 WasmRuntime 加载/执行 .wasm。
+                // 复用 JSON 经线性内存契约（与原生插件 ABI 一致），host 能力白名单校验。
+                let runtime = self.wasm_runtime.as_ref().ok_or_else(|| PluginError {
                     message: format!(
-                        "Wasm pipeline plugin '{}' dispatch not yet wired (N7 pending)",
+                        "Wasm plugin '{}' invoked but no WasmRuntime configured",
                         plugin_id
                     ),
-                    code: Some("WASM_NOT_WIRED".to_string()),
+                    code: Some("WASM_RUNTIME_NOT_CONFIGURED".to_string()),
                     source: Some("plugin-invoker".to_string()),
-                })
+                })?;
+                let wasm_path = self.resolve_wasm_artifact(plugin_id, manifest)?;
+                // load 幂等（同 plugin_id 同路径复用缓存；不同路径触发热重载）
+                runtime.load(plugin_id, &wasm_path)?;
+                let input = Self::build_wasm_input(ctx);
+                runtime.invoke(plugin_id, &input)
             }
             HostType::Sidecar => {
                 // ADR 附录 D③（P6 命名治理）：从 manifest.invoke_entry 取 MCP 入口名
@@ -572,14 +637,23 @@ impl PluginInvoker for PluginInvokerImpl {
                 code: Some("INPROCESS_DIRECT_CALL".to_string()),
                 source: Some("plugin-invoker".to_string()),
             }),
-            HostType::Wasm => Err(PluginError {
-                message: format!(
-                    "Wasm tool '{}' dispatch not yet wired (N7 pending)",
-                    tool_name
-                ),
-                code: Some("WASM_NOT_WIRED".to_string()),
-                source: Some("plugin-invoker".to_string()),
-            }),
+            HostType::Wasm => {
+                // task_11 N7：WASM 工具插件——inputs 直接作为 PluginInput 的 state 传入。
+                let runtime = self.wasm_runtime.as_ref().ok_or_else(|| PluginError {
+                    message: format!(
+                        "Wasm tool plugin '{}' invoked but no WasmRuntime configured",
+                        plugin_id
+                    ),
+                    code: Some("WASM_RUNTIME_NOT_CONFIGURED".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })?;
+                let wasm_path = self.resolve_wasm_artifact(plugin_id, manifest)?;
+                runtime.load(plugin_id, &wasm_path)?;
+                let input = json!({ "state": inputs, "config": {} });
+                let plugin_result = runtime.invoke(plugin_id, &input)?;
+                // 工具调用期望 ToolExecutionResult——把 PluginResult 包装成 success。
+                Ok(ToolExecutionResult::success(serde_json::to_value(plugin_result).unwrap_or_default()))
+            }
             HostType::Sidecar => {
                 let client_arc = self.get_or_create_mcp_client(manifest).await?;
                 let client = client_arc.lock().await;
@@ -678,6 +752,8 @@ mod tests {
     struct MockLoader {
         manifests: RwLock<HashMap<String, PluginManifest>>,
         loaded: RwLock<HashMap<String, LoadedPlugin>>,
+        /// task_11 N7 测试用：plugin_id → 插件目录路径（get_plugin_dir 返回它）。
+        plugin_dirs: RwLock<HashMap<String, String>>,
     }
 
     impl MockLoader {
@@ -685,11 +761,17 @@ mod tests {
             Self {
                 manifests: RwLock::new(HashMap::new()),
                 loaded: RwLock::new(HashMap::new()),
+                plugin_dirs: RwLock::new(HashMap::new()),
             }
         }
 
         fn add_manifest(&self, manifest: PluginManifest) {
             self.manifests.write().insert(manifest.id.clone(), manifest);
+        }
+
+        /// 设置插件目录（N7 测试：让 invoker 能找到 .wasm 产物）。
+        fn set_plugin_dir(&self, plugin_id: &str, dir: impl Into<String>) {
+            self.plugin_dirs.write().insert(plugin_id.to_string(), dir.into());
         }
     }
 
@@ -727,6 +809,10 @@ mod tests {
         async fn unload(&self, plugin_id: &str) -> Result<(), PluginError> {
             self.loaded.write().remove(plugin_id);
             Ok(())
+        }
+
+        fn get_plugin_dir(&self, plugin_id: &str) -> Option<String> {
+            self.plugin_dirs.read().get(plugin_id).cloned()
         }
 
         fn get_status(&self, plugin_id: &str) -> PluginStatus {
@@ -934,6 +1020,168 @@ mod tests {
         // force_unload 对不存在的插件也应该返回 Ok
         let result = invoker.force_unload("nonexistent").await;
         assert!(result.is_ok());
+    }
+
+    // ── task_11 N7：invoker 分发 host_type==Wasm ──
+
+    /// 构造一个 Wasm pipeline manifest（host_type: wasm）。
+    fn make_wasm_manifest(id: &str, artifact: &str) -> PluginManifest {
+        PluginManifest {
+            id: id.to_string(),
+            name: format!("Wasm {}", id),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Pipeline,
+            pipeline_role: None,
+            language: "rust".to_string(),
+            host_type: HostType::Wasm,
+            entry: artifact.to_string(),
+            capabilities: Default::default(),
+            dependencies: vec![],
+            permissions: Default::default(),
+            error_policy: Default::default(),
+            priority: 100,
+            mcp: None,
+            native: None,
+            wasm: Some(agentos_core::traits::WasmArtifact {
+                artifact: artifact.to_string(),
+                wit_interface: None,
+                granted_capabilities: vec![],
+            }),
+            requires_content: None,
+            invoke_entry: Some("execute".to_string()),
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+        }
+    }
+
+    /// 一个 echo WAT（输入 JSON 原样回显为输出 JSON）。
+    /// 注意：输出必须是合法的 PluginResult JSON，否则反序列化失败。
+    /// 这里 execute 直接返回固定的成功 PluginResult JSON（不读输入），
+    /// 避免 WAT 里实现 JSON 解析的复杂度——仅验证 host→guest→host 链路通。
+    const ECHO_RESULT_WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (global $bump (mut i32) (i32.const 4))
+  (func $allocate (export "allocate") (param $len i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $bump))
+    (global.set $bump (i32.and
+      (i32.add (global.get $bump) (local.get $len))
+      (i32.const 0x7FFFFFFC)))
+    (local.set $ptr (i32.or (local.get $ptr) (i32.const 0)))
+    ;; 4 字节对齐
+    (global.set $bump (i32.and
+      (i32.add (global.get $bump) (i32.const 3))
+      (i32.const 0x7FFFFFFC)))
+    (local.get $ptr))
+  (func (export "deallocate") (param $p i32) (param $l i32))
+  ;; execute 返回固定的 PluginResult JSON：{"state_updates":{"echo":"ok"}} (31 字节)
+  ;; 把这串字节用 (data) 写进内存，execute 复制并返回 (ptr,len)。
+  (data (i32.const 1024) "{\"state_updates\":{\"echo\":\"ok\"}}")
+  (func (export "execute") (param $in_ptr i32) (param $in_len i32) (result i64)
+    (local $out_ptr i32)
+    ;; 输出长度 = 31（上面的 JSON 字节数）
+    (local.set $out_ptr (call $allocate (i32.const 31)))
+    ;; 复制 data 到 out
+    (memory.copy (local.get $out_ptr) (i32.const 1024) (i32.const 31))
+    (i64.or
+      (i64.extend_i32_u (local.get $out_ptr))
+      (i64.shl (i64.extend_i32_u (i32.const 31)) (i64.const 32))))
+)
+"#;
+
+    /// N7：invoker 经 WasmRuntime 加载并调用 WASM pipeline 插件，返回 PluginResult。
+    #[tokio::test]
+    async fn test_invoke_wasm_pipeline_plugin_dispatches_to_wasmruntime() {
+        // 1. 写 .wasm 文件到临时目录（用 wat 编译 WAT）
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_bytes = wat::parse_bytes(ECHO_RESULT_WAT.as_bytes()).unwrap();
+        let wasm_path = tmp.path().join("echo.wasm");
+        std::fs::write(&wasm_path, &wasm_bytes).unwrap();
+
+        // 2. 构造 loader + manifest，设置插件目录
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_wasm_manifest("wasm_echo", "echo.wasm"));
+        loader.set_plugin_dir("wasm_echo", tmp.path().to_string_lossy().to_string());
+
+        // 3. 构造带 WasmRuntime 的 invoker
+        let runtime = Arc::new(WasmRuntime::new().unwrap());
+        let invoker = PluginInvokerImpl::with_wasm_runtime(loader, runtime);
+
+        let ctx = PluginContext::new(
+            json!({}),
+            json!({}),
+            TenantContext::new("t1", "s1"),
+            Uuid::new_v4(),
+            agentos_core::types::ContentLoader::new(
+                Arc::new(MockStorage),
+                "run1".to_string(),
+                "main".to_string(),
+                0,
+            ),
+        );
+
+        let result = invoker.invoke_pipeline_plugin("wasm_echo", &ctx).await;
+        assert!(result.is_ok(), "WASM dispatch should succeed: {:?}", result);
+        let pr = result.unwrap();
+        // echo 模块返回 {"state_updates":{"echo":"ok"}}
+        assert_eq!(pr.state_updates.get("echo"), Some(&json!("ok")));
+    }
+
+    /// N7：未配置 WasmRuntime 时，WASM 插件调用返回 WASM_RUNTIME_NOT_CONFIGURED。
+    #[tokio::test]
+    async fn test_invoke_wasm_without_runtime_errors() {
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_wasm_manifest("wasm_no_rt", "x.wasm"));
+
+        // 用 new()——不注入 WasmRuntime
+        let invoker = PluginInvokerImpl::new(loader);
+        let ctx = PluginContext::new(
+            json!({}),
+            json!({}),
+            TenantContext::new("t1", "s1"),
+            Uuid::new_v4(),
+            agentos_core::types::ContentLoader::new(
+                Arc::new(MockStorage),
+                "run1".to_string(),
+                "main".to_string(),
+                0,
+            ),
+        );
+
+        let err = invoker.invoke_pipeline_plugin("wasm_no_rt", &ctx).await.unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("WASM_RUNTIME_NOT_CONFIGURED"));
+    }
+
+    /// N7：WASM 插件缺 manifest.wasm.artifact → MISSING_WASM_ARTIFACT。
+    #[tokio::test]
+    async fn test_invoke_wasm_missing_artifact_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loader = Arc::new(MockLoader::new());
+        let mut manifest = make_wasm_manifest("wasm_no_art", "echo.wasm");
+        manifest.wasm = None; // 故意去掉 wasm 字段
+        loader.add_manifest(manifest);
+        loader.set_plugin_dir("wasm_no_art", tmp.path().to_string_lossy().to_string());
+
+        let runtime = Arc::new(WasmRuntime::new().unwrap());
+        let invoker = PluginInvokerImpl::with_wasm_runtime(loader, runtime);
+        let ctx = PluginContext::new(
+            json!({}),
+            json!({}),
+            TenantContext::new("t1", "s1"),
+            Uuid::new_v4(),
+            agentos_core::types::ContentLoader::new(
+                Arc::new(MockStorage),
+                "run1".to_string(),
+                "main".to_string(),
+                0,
+            ),
+        );
+
+        let err = invoker.invoke_pipeline_plugin("wasm_no_art", &ctx).await.unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MISSING_WASM_ARTIFACT"));
     }
 
     // ── extract_mcp_content 辅助函数单元测试 ──
