@@ -23,7 +23,7 @@ use agentos_api::{
     validate_no_name_conflicts, KernelCapabilityRouter,
 };
 use agentos_core::traits::{
-    CapabilityRegistry, PluginLoader, ToolDescriptor,
+    CapabilityRegistry, PluginLoader, PluginType, ToolDescriptor,
 };
 use agentos_core::types::{ToolCategory, ToolSource};
 use agentos_engine::{AdrEngineImpl, SqliteStore};
@@ -151,35 +151,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 将 manifest 中声明的工具注册到 CapabilityRegistry
     let mut tool_count = 0usize;
+    let mut skipped_internal = 0usize;
     for manifest in &manifests {
-        for tool_cap in &manifest.capabilities.tools {
-            let category = tool_cap
-                .category
-                .clone()
-                .unwrap_or(ToolCategory::System);
-            let descriptor = ToolDescriptor {
-                name: tool_cap.name.clone(),
-                description: tool_cap
-                    .description
+        // ADR 附录D①（task_11）：只有 plugin_type == tool 的插件，其
+        // capabilities.tools 才是"给大模型调用的工具"，注册进 tools 维。
+        // pipeline 的 `*.execute` 是内部调用入口、system 的是服务能力，
+        // 不暴露给 LLM（/api/v1/tools）；P6 invoke_entry 治理后彻底分离。
+        if manifest.plugin_type == PluginType::Tool {
+            for tool_cap in &manifest.capabilities.tools {
+                let category = tool_cap
+                    .category
                     .clone()
-                    .unwrap_or_else(|| format!("Tool from {}", manifest.name)),
-                plugin_id: manifest.id.clone(),
-                input_schema: tool_cap
-                    .input_schema
-                    .clone()
-                    .unwrap_or(serde_json::json!({})),
-                output_schema: tool_cap.output_schema.clone(),
-                category,
-                source: if manifest.host_type
-                    == agentos_core::traits::HostType::Sidecar
-                {
-                    ToolSource::Mcp
-                } else {
-                    ToolSource::Builtin
-                },
-            };
-            registry.register_tool(&manifest.id, descriptor);
-            tool_count += 1;
+                    .unwrap_or(ToolCategory::System);
+                let descriptor = ToolDescriptor {
+                    name: tool_cap.name.clone(),
+                    description: tool_cap
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| format!("Tool from {}", manifest.name)),
+                    plugin_id: manifest.id.clone(),
+                    input_schema: tool_cap
+                        .input_schema
+                        .clone()
+                        .unwrap_or(serde_json::json!({})),
+                    output_schema: tool_cap.output_schema.clone(),
+                    category,
+                    source: if manifest.host_type
+                        == agentos_core::traits::HostType::Sidecar
+                    {
+                        ToolSource::Mcp
+                    } else {
+                        ToolSource::Builtin
+                    },
+                };
+                registry.register_tool(&manifest.id, descriptor);
+                tool_count += 1;
+            }
+        } else {
+            skipped_internal += manifest.capabilities.tools.len();
         }
 
         // 注册路由信号
@@ -193,9 +202,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(
         target: "agentos-kernel",
-        "Registered {} tools from {} plugins",
+        "Registered {} tools from {} plugins (filtered out {} internal/service entries from non-tool plugins, ADR 附录D①)",
         tool_count,
-        manifests.len()
+        manifests.len(),
+        skipped_internal
     );
 
     // P3：注册插件 HTTP 端点（ADR §3.3）——聚合报错（fail-closed，不逐个 panic）。
