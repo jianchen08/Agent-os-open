@@ -45,6 +45,9 @@ pub struct SchemaResponse {
     /// P1-4：各插件的 config_files 聚合（仅含声明 config_files 的插件）。
     /// 前端据此构建"插件 → 多配置子项"的配置树（ADR §4.6）。
     pub plugin_configs: Vec<serde_json::Value>,
+    /// P4/P5：各插件的 contributes 聚合（仅含声明 contributes 的插件）。
+    /// 前端 ContributionRegistry 作为唯一真相源消费（ADR §3.4/§六）。
+    pub plugin_contributes: Vec<serde_json::Value>,
 }
 
 /// 应用状态——通过 Axum State 共享。
@@ -295,12 +298,28 @@ pub async fn schema_handler(
         })
         .collect();
 
+    // P4/P5：聚合各插件的 contributes（仅含声明 contributes 的插件）。
+    // 内核不解释结构，透传给前端 ContributionRegistry（ADR §3.4/§六）。
+    let plugin_contributes: Vec<serde_json::Value> = state
+        .manifests
+        .iter()
+        .filter(|m| m.contributes.is_some())
+        .map(|m| {
+            json!({
+                "plugin_id": m.id,
+                "plugin_name": m.name,
+                "contributes": m.contributes,
+            })
+        })
+        .collect();
+
     axum::Json(SchemaResponse {
         agents,
         pipelines,
         tools,
         routes,
         plugin_configs,
+        plugin_contributes,
     })
 }
 

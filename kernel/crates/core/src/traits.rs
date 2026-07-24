@@ -740,6 +740,15 @@ pub struct PluginManifest {
     /// 新增插件无需手写前端代码。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_schema: Option<serde_json::Value>,
+    /// 前端贡献点声明（ADR §3.4/§六 contributes，task_11 P4/P5）。
+    ///
+    /// 声明该插件向前端贡献的 UI 插槽内容：viewsContainers/views/workspaceTabs/
+    /// dockItems/floating/modal/statusBarItems/menus/commands/shortcuts/
+    /// chatMessages/chatInteractions/chatActions/settingsPanels/widgets。
+    /// 内核不解释其结构，仅在 /api/v1/schema 透传聚合（`plugin_contributes`），
+    /// 由前端 ContributionRegistry 作为唯一真相源消费（与 ui_schema 透传同理）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contributes: Option<serde_json::Value>,
     /// HTTP 端点贡献声明（ADR §3.3）。
     ///
     /// 插件可向内核统一 HTTP server 贡献端点（如企微 webhook 回调）。
