@@ -32,11 +32,23 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use parking_lot::RwLock;
 use serde_json::Value;
+
+/// 全局单例：进程级唯一 PipelineStateRegistry。
+///
+/// 不放进 AppState 是为避免 AppState 体积膨胀触发主线程栈溢出
+///（Windows 主线程栈仅 1MB，AppState 含大量字段，再加一个 registry 字段
+/// 在 debug 构建下会突破栈极限）。改用全局单例，AppState 零体积增量。
+static GLOBAL_REGISTRY: OnceLock<PipelineStateRegistry> = OnceLock::new();
+
+/// 获取全局 PipelineStateRegistry 单例（首次调用时惰性初始化）。
+pub fn global_registry() -> &'static PipelineStateRegistry {
+    GLOBAL_REGISTRY.get_or_init(PipelineStateRegistry::new)
+}
 
 /// 按 `(tenant_id, pipeline_id)` 常驻的管道 state 注册表。
 #[derive(Clone)]

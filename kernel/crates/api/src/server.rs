@@ -253,62 +253,50 @@ pub(crate) async fn process_via_engine(
     //    - 热路径（命中）：复用上一轮 final_state，只覆盖本轮输入字段 + 追加新 user 消息。
     //    - 冷启动（未命中，进程重启/新会话首条）：从 DB 按 pipeline_id 重建历史（兜底）。
     use serde_json::json;
-    let mut initial_state = if let Some(reg) = state.pipeline_states.as_ref() {
-        if reg.contains(&tenant.tenant_id, pipeline_id) {
-            // ── 热路径：复用内存 state，只覆盖本轮变化的输入字段 ──
-            let entry = reg.get(&tenant.tenant_id, pipeline_id).unwrap();
-            let mut s = entry.read().state.clone();
-            // 先算去重判定（只读 s），避免与下方 as_object_mut 的可变借用冲突
-            let need_append = s.get("messages")
-                .and_then(|m| m.as_array())
-                .and_then(|arr| arr.last())
-                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                .map(|last| last != message)
-                .unwrap_or(true);
-            if let Some(obj) = s.as_object_mut() {
-                obj.insert("message".to_string(), json!(message));
-                obj.insert("input".to_string(), json!(message));
-                obj.insert("message_id".to_string(), json!(message_id));
-                obj.insert("ended".to_string(), json!(false));
-                obj.insert("suspended".to_string(), json!(false));
-                obj.insert("pipeline_id".to_string(), json!(pipeline_id));
-                obj.insert("session_id".to_string(), json!(thread_id));
-                // 追加本轮 user 消息（去重判定已在上方完成）
-                if need_append {
-                    if let Some(arr) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
-                        arr.push(json!({"role": "user", "content": message}));
-                    } else {
-                        obj.insert("messages".to_string(), json!([{"role":"user","content":message}]));
-                    }
+    // 全局 PipelineStateRegistry 单例（不放进 AppState，避免栈溢出，见模块说明）。
+    let reg = agentos_session::global_registry();
+    let mut initial_state = if reg.contains(&tenant.tenant_id, pipeline_id) {
+        // ── 热路径：复用上一轮 final_state，只覆盖本轮输入字段 + 追加新 user ──
+        let entry = reg.get(&tenant.tenant_id, pipeline_id).unwrap();
+        let mut s = entry.read().state.clone();
+        // 先算去重判定（只读 s），避免与下方 as_object_mut 的可变借用冲突
+        let need_append = s.get("messages")
+            .and_then(|m| m.as_array())
+            .and_then(|arr| arr.last())
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|last| last != message)
+            .unwrap_or(true);
+        if let Some(obj) = s.as_object_mut() {
+            obj.insert("message".to_string(), json!(message));
+            obj.insert("input".to_string(), json!(message));
+            obj.insert("message_id".to_string(), json!(message_id));
+            obj.insert("ended".to_string(), json!(false));
+            obj.insert("suspended".to_string(), json!(false));
+            obj.insert("pipeline_id".to_string(), json!(pipeline_id));
+            obj.insert("session_id".to_string(), json!(thread_id));
+            if need_append {
+                if let Some(arr) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                    arr.push(json!({"role": "user", "content": message}));
+                } else {
+                    obj.insert("messages".to_string(), json!([{"role":"user","content":message}]));
                 }
             }
-            s
-        } else {
-            // ── 冷启动：从 DB 重建历史（对齐 0.1 resolve_conversation_history 兜底）──
-            let mut msgs = if !history.is_empty() {
-                history.to_vec()
-            } else {
-                resolve_history_from_store(state, pipeline_id).await
-            };
-            let need_append = msgs.last()
-                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                .map(|last| last != message)
-                .unwrap_or(true);
-            if need_append {
-                msgs.push(json!({"role": "user", "content": message}));
-            }
-            json!({
-                "message": message, "input": message, "agent_id": agent_id,
-                "core_type": "llm_call", "core_plugin": DEFAULT_CORE_PLUGIN,
-                "ended": false, "suspended": false,
-                "pipeline_id": pipeline_id, "session_id": thread_id, "message_id": message_id,
-                "messages": msgs,
-            })
         }
+        s
     } else {
-        // 降级：无 registry（旧路径），每轮从零 + 前端 history（保持兼容）
-        let mut msgs = history.to_vec();
-        msgs.push(json!({"role": "user", "content": message}));
+        // ── 冷启动：从 DB 重建历史（对齐 0.1 resolve_conversation_history 兜底）──
+        let mut msgs = if !history.is_empty() {
+            history.to_vec()
+        } else {
+            resolve_history_from_store(state, pipeline_id).await
+        };
+        let need_append = msgs.last()
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|last| last != message)
+            .unwrap_or(true);
+        if need_append {
+            msgs.push(json!({"role": "user", "content": message}));
+        }
         json!({
             "message": message, "input": message, "agent_id": agent_id,
             "core_type": "llm_call", "core_plugin": DEFAULT_CORE_PLUGIN,
@@ -361,10 +349,10 @@ pub(crate) async fn process_via_engine(
         }
     };
 
-    // 3b. 回写 final_state 到 registry（热路径延续，对齐 0.1 _current_state 跨轮保留）。
-    //     下一轮 get_or_init 命中时即读到这份 state，messages 历史自然延续。
-    if let Some(reg) = state.pipeline_states.as_ref() {
-        // 冷启动时确保条目已注册（冷启动分支未注册，这里补注册）
+    // 3b. 回写 final_state 到全局 registry（热路径延续，对齐 0.1 _current_state 跨轮保留）。
+    //     下一轮命中时即读到这份 state，messages 历史自然延续。
+    {
+        let reg = agentos_session::global_registry();
         if !reg.contains(&tenant_id, pipeline_id) {
             reg.get_or_init(
                 &tenant_id, pipeline_id, thread_id, agent_id,

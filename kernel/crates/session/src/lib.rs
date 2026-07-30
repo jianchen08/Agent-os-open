@@ -22,7 +22,7 @@ pub mod router;
 pub use connection_registry::ConnectionRegistry;
 pub use coordinator::SessionCoordinator;
 pub use metrics::{SessionMetrics, SessionMetricsSnapshot};
-pub use pipeline_state_registry::PipelineStateRegistry;
+pub use pipeline_state_registry::{global_registry, PipelineStateRegistry};
 
 /// 出站消息投递抽象（ADR §7.2 唯一出口 push_to_* 的底层 sink）。
 ///
