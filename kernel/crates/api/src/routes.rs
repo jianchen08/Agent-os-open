@@ -80,6 +80,10 @@ pub struct AppState {
     pub project_root: Option<PathBuf>,
     /// P2：会话协调器（连接注册表 / 事件总线 / 重放缓冲）。None = 降级 echo。
     pub session: Option<Arc<agentos_session::SessionCoordinator>>,
+    /// 管道 state 内存常驻注册表（对齐 0.1 EngineRegistry）。
+    /// 按 (tenant_id, pipeline_id) 常驻 state，使多轮对话历史跨轮延续。
+    /// 热路径走内存复用；冷启动（重启/新会话）走 DB 重建。None = 每轮重建（降级）。
+    pub pipeline_states: Option<Arc<agentos_session::PipelineStateRegistry>>,
     /// P2：入站路由器（user_input/interaction/stop 分发）。
     pub inbound_router: Option<Arc<agentos_session::router::InboundRouter>>,
     /// P3：HTTP 端点 dispatcher 的插件处理能力（http.handle）。
@@ -111,6 +115,7 @@ impl AppState {
             project_root: None,
             enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             session: None,
+            pipeline_states: None,
             inbound_router: None,
             http_handler: None,
             metrics: None,
@@ -135,6 +140,7 @@ impl AppState {
             project_root: None,
             enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             session: None,
+            pipeline_states: None,
             inbound_router: None,
             http_handler: None,
             metrics: None,
@@ -196,6 +202,7 @@ impl AppState {
             project_root: Some(project_root),
             enabled_plugin_ids: Arc::new(RwLock::new(enabled_plugin_ids)),
             session: None,
+            pipeline_states: None,
             inbound_router: None,
             http_handler: None,
             metrics: None,
@@ -209,11 +216,14 @@ impl AppState {
     /// 降级为旧 echo/engine 路径（兼容）。
     pub fn enable_session(self) -> Self {
         let session = Arc::new(agentos_session::SessionCoordinator::new());
+        // 管道 state 常驻注册表（与 session 同生命期，一起启用）。
+        let pipeline_states = Arc::new(agentos_session::PipelineStateRegistry::new());
         // 关键：先把 session 注入 self，再 clone 给 dispatcher。
         // 否则 dispatcher 持有的 state.session 永远是 None（旧 bug：dispatcher
         // 用了设置 session 字段之前的 clone，导致引擎结果无法推回前端）。
         let self_with_session = Self {
             session: Some(session.clone()),
+            pipeline_states: Some(pipeline_states),
             inbound_router: None,
             ..self
         };
@@ -230,8 +240,11 @@ impl AppState {
     /// 用于需要提前创建 session（如注入 capability router 的流式推送）的场景，
     /// 避免重复创建。enable_session = 自建 session 的便捷封装。
     pub fn enable_session_with(self, session: Arc<agentos_session::SessionCoordinator>) -> Self {
+        // 管道 state 常驻注册表（与 session 同生命期，一起启用）。
+        let pipeline_states = Arc::new(agentos_session::PipelineStateRegistry::new());
         let self_with_session = Self {
             session: Some(session),
+            pipeline_states: Some(pipeline_states),
             inbound_router: None,
             ..self
         };

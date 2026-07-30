@@ -243,36 +243,80 @@ pub(crate) async fn process_via_engine(
         }
     };
 
-    // 1. 构造初始 state
-    //    core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
-    //    覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
-    let mut initial_state = serde_json::json!({
-        "message": message,
-        "input": message,
-        "agent_id": agent_id,
-        "core_type": "llm_call",
-        "core_plugin": DEFAULT_CORE_PLUGIN,
-        "ended": false,
-        "suspended": false,
-        // 流式推送路由键：
-        // - pipeline_id：前端消息路由键（前端 handleStreamStart 据此匹配占位气泡）
-        // - session_id：WS 连接路由键（内核 session.emit_stream 据此定位前端 WS 连接）
-        //   必须是真实 thread_id（WS 握手时注册的），否则 chunk 推不到前端。
-        "pipeline_id": pipeline_id,
-        "session_id": thread_id,
-        // assistant message_id：内核权威生成，sidecar 流式 chunk 携带它，
-        // 前端 handleStreamChunk 据此把 chunk 路由到 stream_start 建立的占位气泡。
-        "message_id": message_id,
-    });
-    // 多轮上下文：state.messages 是 LLMCore._build_messages 读取的对话历史。
-    // 有客户端传入的 history 则在其后追加当前 user 消息；无 history 则只放当前消息。
-    {
-        let mut msgs = history.to_vec();
-        msgs.push(serde_json::json!({"role": "user", "content": message}));
-        if let Some(obj) = initial_state.as_object_mut() {
-            obj.insert("messages".to_string(), serde_json::Value::Array(msgs));
+    // 租户上下文（state 构造与 registry 主键都需要，提前取）。
+    let tenant =
+        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
+
+    // 1. 构造本轮 state——热内存为主、冷 DB 为辅（对齐 0.1 EngineRegistry state 常驻）。
+    //    管道引擎是无状态一次性执行器，真正跨轮延续的是 state。PipelineStateRegistry
+    //    按 (tenant_id, pipeline_id) 常驻 state：
+    //    - 热路径（命中）：复用上一轮 final_state，只覆盖本轮输入字段 + 追加新 user 消息。
+    //    - 冷启动（未命中，进程重启/新会话首条）：从 DB 按 pipeline_id 重建历史（兜底）。
+    use serde_json::json;
+    let mut initial_state = if let Some(reg) = state.pipeline_states.as_ref() {
+        if reg.contains(&tenant.tenant_id, pipeline_id) {
+            // ── 热路径：复用内存 state，只覆盖本轮变化的输入字段 ──
+            let entry = reg.get(&tenant.tenant_id, pipeline_id).unwrap();
+            let mut s = entry.read().state.clone();
+            // 先算去重判定（只读 s），避免与下方 as_object_mut 的可变借用冲突
+            let need_append = s.get("messages")
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.last())
+                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                .map(|last| last != message)
+                .unwrap_or(true);
+            if let Some(obj) = s.as_object_mut() {
+                obj.insert("message".to_string(), json!(message));
+                obj.insert("input".to_string(), json!(message));
+                obj.insert("message_id".to_string(), json!(message_id));
+                obj.insert("ended".to_string(), json!(false));
+                obj.insert("suspended".to_string(), json!(false));
+                obj.insert("pipeline_id".to_string(), json!(pipeline_id));
+                obj.insert("session_id".to_string(), json!(thread_id));
+                // 追加本轮 user 消息（去重判定已在上方完成）
+                if need_append {
+                    if let Some(arr) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                        arr.push(json!({"role": "user", "content": message}));
+                    } else {
+                        obj.insert("messages".to_string(), json!([{"role":"user","content":message}]));
+                    }
+                }
+            }
+            s
+        } else {
+            // ── 冷启动：从 DB 重建历史（对齐 0.1 resolve_conversation_history 兜底）──
+            let mut msgs = if !history.is_empty() {
+                history.to_vec()
+            } else {
+                resolve_history_from_store(state, pipeline_id).await
+            };
+            let need_append = msgs.last()
+                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                .map(|last| last != message)
+                .unwrap_or(true);
+            if need_append {
+                msgs.push(json!({"role": "user", "content": message}));
+            }
+            json!({
+                "message": message, "input": message, "agent_id": agent_id,
+                "core_type": "llm_call", "core_plugin": DEFAULT_CORE_PLUGIN,
+                "ended": false, "suspended": false,
+                "pipeline_id": pipeline_id, "session_id": thread_id, "message_id": message_id,
+                "messages": msgs,
+            })
         }
-    }
+    } else {
+        // 降级：无 registry（旧路径），每轮从零 + 前端 history（保持兼容）
+        let mut msgs = history.to_vec();
+        msgs.push(json!({"role": "user", "content": message}));
+        json!({
+            "message": message, "input": message, "agent_id": agent_id,
+            "core_type": "llm_call", "core_plugin": DEFAULT_CORE_PLUGIN,
+            "ended": false, "suspended": false,
+            "pipeline_id": pipeline_id, "session_id": thread_id, "message_id": message_id,
+            "messages": msgs,
+        })
+    };
 
     // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
     load_agent_config_into_state(&mut initial_state, agent_id, &project_root);
@@ -288,8 +332,10 @@ pub(crate) async fn process_via_engine(
     // 3. 构造 PipelineExecutor 并执行
     //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
     //    （多租户 P0-4：本函数已在 agentos_tenant::scope 内调用）。
-    let tenant =
-        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
+    // 3. 构造 PipelineExecutor 并执行
+    //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文在上方已取。
+    //    tenant 会被 move 进 executor，先克隆 tenant_id 供下方 registry 回写用。
+    let tenant_id = tenant.tenant_id.clone();
     let run_id = uuid::Uuid::new_v4().to_string();
     let branch_id = "main".to_string();
     let executor = agentos_engine::PipelineExecutor::new(
@@ -315,6 +361,20 @@ pub(crate) async fn process_via_engine(
         }
     };
 
+    // 3b. 回写 final_state 到 registry（热路径延续，对齐 0.1 _current_state 跨轮保留）。
+    //     下一轮 get_or_init 命中时即读到这份 state，messages 历史自然延续。
+    if let Some(reg) = state.pipeline_states.as_ref() {
+        // 冷启动时确保条目已注册（冷启动分支未注册，这里补注册）
+        if !reg.contains(&tenant_id, pipeline_id) {
+            reg.get_or_init(
+                &tenant_id, pipeline_id, thread_id, agent_id,
+                final_state.clone(),
+            );
+        } else {
+            reg.update_state(&tenant_id, pipeline_id, final_state.clone());
+        }
+    }
+
     // 4. 提取响应：优先 raw_result，回退 state.message，再回退原消息
     if let Some(raw) = final_state.get("raw_result").and_then(|v| v.as_str()) {
         return raw.to_string();
@@ -324,6 +384,55 @@ pub(crate) async fn process_via_engine(
     }
     // 没有 raw_result / message 字段：pretty-print 整个 state（便于调试）
     serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
+}
+
+/// 从存储按 pipeline_id 加载历史对话，转 OpenAI {role, content} 格式。
+///
+/// 对齐 0.1 `resolve_conversation_history`（state_builder.py:102-145）的存储兜底分支：
+/// 调用方未传 history 时，自动 `list_by_pipeline(pipeline_id)` 恢复完整历史。
+/// 这是保证大模型看到多轮上下文的关键——0.2 的 WS/HTTP 入口均传空 history。
+///
+/// role 映射对齐 0.1 `record_role_for_llm`：system 降级为 user（多数模型拒绝多轮穿插
+/// system），其余 user/assistant/tool 原样。完整内容在 blobs 表，逐条联查取回。
+async fn resolve_history_from_store(
+    state: &AppState,
+    pipeline_id: &str,
+) -> Vec<serde_json::Value> {
+    let Some(store) = state.store.as_ref() else {
+        return Vec::new();
+    };
+    if pipeline_id.is_empty() {
+        return Vec::new();
+    }
+    let opts = agentos_core::traits::MessageQueryOpts::default();
+    let records = match store.get_messages_by_pipeline(pipeline_id, opts).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(pipeline_id = %pipeline_id, error = %e, "加载历史对话失败，state.messages 将只有当前一句");
+            return Vec::new();
+        }
+    };
+    let mut msgs = Vec::with_capacity(records.len());
+    for rec in records {
+        // 取完整内容：优先 blob，回退 content_preview
+        let content = if let Some(bid) = rec.blob_id.as_deref() {
+            match store.get_blob(bid).await {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(_) => rec.content_preview.clone().unwrap_or_default(),
+            }
+        } else {
+            rec.content_preview.clone().unwrap_or_default()
+        };
+        // role 映射：system 降级 user（对齐 record_role_for_llm）
+        let role = match rec.role.as_str() {
+            "assistant" => "assistant",
+            "tool" => "tool",
+            "system" => "user",
+            _ => "user",
+        };
+        msgs.push(serde_json::json!({"role": role, "content": content}));
+    }
+    msgs
 }
 
 /// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。

@@ -15,12 +15,14 @@ pub mod connection_registry;
 pub mod coordinator;
 pub mod event_bus;
 pub mod metrics;
+pub mod pipeline_state_registry;
 pub mod replay;
 pub mod router;
 
 pub use connection_registry::ConnectionRegistry;
 pub use coordinator::SessionCoordinator;
 pub use metrics::{SessionMetrics, SessionMetricsSnapshot};
+pub use pipeline_state_registry::PipelineStateRegistry;
 
 /// 出站消息投递抽象（ADR §7.2 唯一出口 push_to_* 的底层 sink）。
 ///
