@@ -215,6 +215,26 @@ pub(crate) async fn process_via_engine(
     thread_id: &str,
     message_id: &str,
 ) -> String {
+    // 整个函数体 Box::pin 到堆上：process_via_engine 是大 async 函数（多 await 点 +
+    // 大 state 构造），其 Future 状态机在 debug 构建下体积巨大，直接 await 会撑爆
+    // tokio worker 线程栈（默认 2MB）。Box::pin 让 Future 分配在堆上，规避 debug 栈溢出。
+    // release 下栈帧小不溢出，但 Box::pin 开销可忽略，统一使用保持一致。
+    Box::pin(process_via_engine_inner(
+        state, message, agent_id, history, pipeline_id, thread_id, message_id,
+    ))
+    .await
+}
+
+#[inline(never)]
+async fn process_via_engine_inner(
+    state: &AppState,
+    message: &str,
+    agent_id: &str,
+    history: &[serde_json::Value],
+    pipeline_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> String {
     let invoker = match state.invoker.clone() {
         Some(i) => i,
         None => {
