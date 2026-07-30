@@ -108,6 +108,8 @@ fn test_empty_http_endpoints_omitted_in_serialization() {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     };
 
     let serialized = serde_json::to_string(&manifest).expect("serialize");

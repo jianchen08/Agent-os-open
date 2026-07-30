@@ -40,7 +40,12 @@ if os.path.isdir(_SRC_ROOT) and _SRC_ROOT not in sys.path:
 
 
 def main() -> None:
-    """启动 channel_api HTTP server。"""
+    """启动 channel_api HTTP server。
+
+    优先使用 ``create_combined_app``（REST + ``/ws/chat`` + 管道引擎），
+    否则前端 WebSocket 会落到未注册路由 → Starlette 返回 403，对话无法完成。
+    若 combined 初始化失败，再降级为仅 REST 的 ``create_app``。
+    """
     parser = argparse.ArgumentParser(description="AgentOS channel_api HTTP server")
     parser.add_argument("--port", type=int, default=None, help="监听端口")
     parser.add_argument("--host", default=None, help="绑定地址")
@@ -52,15 +57,29 @@ def main() -> None:
     # 延迟 import（确保 sys.path 已设置）
     import uvicorn  # noqa: PLC0415
 
-    from app import create_app  # noqa: PLC0415
-
     print(f"channel_api HTTP server starting on {host}:{port}")
     print(f"  API: http://127.0.0.1:{port}")
     print(f"  Health: http://127.0.0.1:{port}/health")
-    print(f"  Docs: http://127.0.0.1:{port}/docs")
+    print(f"  Docs: http://127.0.0.1:{port}/api/docs")
+    print(f"  WS:   ws://127.0.0.1:{port}/ws/chat")
     print(f"  src: {_SRC_ROOT}")
 
-    app = create_app()
+    app = None
+    mode = "rest-only"
+    try:
+        # 0.1 完整入口：注册 /ws/chat、初始化管道、TaskWorker、会话恢复
+        from channels.websocket.app_factory import create_combined_app  # noqa: PLC0415
+
+        app = create_combined_app()
+        mode = "combined (REST + WebSocket + pipeline)"
+    except Exception as exc:  # noqa: BLE001 — 启动降级必须兜底
+        print(f"[WARN] create_combined_app failed: {exc!r}")
+        print("[WARN] falling back to REST-only create_app (chat WebSocket will 403)")
+        from app import create_app  # noqa: PLC0415
+
+        app = create_app()
+
+    print(f"  mode: {mode}")
     uvicorn.run(
         app,
         host=host,

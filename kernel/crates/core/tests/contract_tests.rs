@@ -135,6 +135,8 @@ fn make_test_manifest(
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     }
 }
 
@@ -183,6 +185,16 @@ impl StorageBackend for MockStorageBackend {
     ) -> Result<Vec<MessageRecord>, StorageError> {
         Ok(vec![])
     }
+    async fn get_messages_by_pipeline(
+        &self,
+        _pipeline_id: &str,
+        _opts: MessageQueryOpts,
+    ) -> Result<Vec<MessageRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn next_sequence(&self, _pipeline_id: &str) -> Result<u32, StorageError> {
+        Ok(1)
+    }
     async fn get_recent_messages(
         &self,
         _run_id: &str,
@@ -212,6 +224,46 @@ impl StorageBackend for MockStorageBackend {
         _branch: Option<&str>,
         _seq: Option<u32>,
     ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn create_run(
+        &self,
+        _run_id: &str,
+        _config_hash: &str,
+        _tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn append_message(
+        &self,
+        _message_id: &str,
+        _run_id: &str,
+        _branch_id: &str,
+        _seq_in_branch: u32,
+        _role: &str,
+        _blob_id: Option<&str>,
+        _content_preview: Option<&str>,
+        _pipeline_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
+        Ok("mock_blob".to_string())
+    }
+    async fn create_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn get_session(&self, _thread_id: &str) -> Result<Option<SessionRecord>, StorageError> {
+        Ok(None)
+    }
+    async fn list_sessions(
+        &self,
+        _filter: SessionListFilter,
+    ) -> Result<Vec<SessionRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
         Ok(())
     }
 }
@@ -315,6 +367,7 @@ fn test_message_record_serialization() {
         blob_id: Some("blob_001".to_string()),
         content_preview: Some("Hello".to_string()),
         created_at: "2026-07-14T00:00:00Z".to_string(),
+        pipeline_id: None,
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("msg_001"));

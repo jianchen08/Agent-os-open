@@ -4,6 +4,7 @@
     "description": "设计审查 MCP 工具，基于 Playwright",
     "version": "1.0.0",
     "plugin_type": "tool",
+    "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
     "mcp_endpoint": {

@@ -116,6 +116,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_root.display()
     );
 
+    // 加载项目根 .env 到进程环境（config_root 的父目录）。
+    // sidecar 子进程默认继承父进程环境变量（tokio Command 无 env_clear），
+    // 这样 sidecar 能解析配置里的 ${API_KEY} 等占位符（ADR §4.3 secrets）。
+    // 仅设置进程未已有的变量（系统环境变量优先于 .env）。
+    if let Some(project_root) = config_root.parent() {
+        let env_path = project_root.join(".env");
+        if env_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&env_path) {
+                let mut loaded = 0usize;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        let key = key.trim();
+                        // 仅当进程环境未已有该变量时设置（系统环境 > .env）
+                        if std::env::var(key).is_err() {
+                            let value = value.trim().trim_matches('"');
+                            std::env::set_var(key, value);
+                            loaded += 1;
+                        }
+                    }
+                }
+                info!(target: "agentos-kernel", "Loaded {} vars from {}", loaded, env_path.display());
+            }
+        }
+    }
+
     // 创建插件加载器——以 plugins/shared/ 为内置根，启用 user_root 覆盖语义，
     // 并接入 config_root（P0-1：否则 load_config() 恒返回空 {}，插件收不到配置）
     let loader = build_plugin_loader(&plugins_dir, user_plugins_dir, &config_root);
@@ -149,10 +178,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 创建能力注册表
     let registry = Arc::new(CapabilityRegistryImpl::new());
 
+    // 安装触发模型 L1：加载 default_profile.yaml 启用层。
+    // disabled 的插件不进注册表出口（tools/route_signals/http_routes 不暴露）。
+    // 优先级：manifest.enabled > profile.plugins[id] > defaults > enabled=true。
+    let enablement = agentos_plugin_loader::PluginEnablement::load(&config_root);
+
     // 将 manifest 中声明的工具注册到 CapabilityRegistry
     let mut tool_count = 0usize;
     let mut skipped_internal = 0usize;
+    let mut skipped_disabled = 0usize;
     for manifest in &manifests {
+        // L1 Enabled 过滤：disabled 插件不进出口（安装触发模型 §1.1）
+        if !enablement.is_enabled(&manifest.id, manifest.enabled) {
+            skipped_disabled += 1;
+            continue;
+        }
         // ADR 附录D①（task_11）：只有 plugin_type == tool 的插件，其
         // capabilities.tools 才是"给大模型调用的工具"，注册进 tools 维。
         // pipeline 的 `*.execute` 是内部调用入口、system 的是服务能力，
@@ -202,17 +242,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(
         target: "agentos-kernel",
-        "Registered {} tools from {} plugins (filtered out {} internal/service entries from non-tool plugins, ADR 附录D①)",
+        "Registered {} tools from {} plugins (filtered out {} internal/service entries, {} disabled by profile, ADR 附录D①)",
         tool_count,
         manifests.len(),
-        skipped_internal
+        skipped_internal,
+        skipped_disabled
     );
 
     // P3：注册插件 HTTP 端点（ADR §3.3）——聚合报错（fail-closed，不逐个 panic）。
-    // 冲突/越界的路由会被 register_http_route 拒绝并收集到 errors；启动期若有错误则 panic
-    // 退出（与命名陷阱治理 D.4 的"启动期聚合报错"一致）。
+    // 只注册 enabled 插件的 http_endpoints（安装触发模型 L1 过滤）。
+    let enabled_manifests: Vec<agentos_core::traits::PluginManifest> = manifests
+        .iter()
+        .filter(|m| enablement.is_enabled(&m.id, m.enabled))
+        .cloned()
+        .collect();
     let http_errors =
-        agentos_api::http_dispatcher::register_manifest_http_routes(&registry, &manifests);
+        agentos_api::http_dispatcher::register_manifest_http_routes(&registry, &enabled_manifests);
     let http_route_count = registry.list_http_routes().len();
     if !http_errors.is_empty() {
         panic!(
@@ -226,10 +271,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_route_count
     );
 
-    // 初始化管道引擎
-    // DEBT: 使用内存数据库，生产环境应使用持久化文件。ceiling: 进程重启丢失运行历史。
-    // upgrade: 当需要跨重启会话持久化时，切换到 SqliteStore::open("agentos.db")。
-    let store = Arc::new(SqliteStore::open_memory()?);
+    // 初始化管道引擎——SQLite 持久化文件（默认项目根 agentos.db，可用环境变量覆盖）。
+    // 进程重启后保留 runs/messages/traces/blobs 历史；多轮对话靠 messages 表按
+    // session_id 恢复上下文。开发/测试可用 AGENTOS_DB_PATH=:memory: 切回内存库。
+    //
+    // 0.2 用独立 db 文件（agentos_kernel.db），与 0.1 的 agentos.db 物理隔离：
+    // 0.2 是全新四表 schema（runs/messages/traces/blobs），不迁 0.1 数据，
+    // 隔离避免 0.1 老库同名表 schema 漂移的隐患（IF NOT EXISTS 不会改老表结构）。
+    let db_path = std::env::var("AGENTOS_DB_PATH").unwrap_or_else(|_| {
+        config_root
+            .parent()
+            .map(|root| root.join("agentos_kernel.db").to_string_lossy().to_string())
+            .unwrap_or_else(|| "agentos_kernel.db".to_string())
+    });
+    info!(target: "agentos-kernel", "SQLite store: {}", db_path);
+    let store = Arc::new(if db_path == ":memory:" {
+        SqliteStore::open_memory()?
+    } else {
+        SqliteStore::open(&db_path)?
+    });
 
     // 创建真实插件调用器——通过 MCP stdio fork Python sidecar 执行插件
     let loader_arc = Arc::new(loader);
@@ -244,10 +304,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 启用 sidecar→内核反向 capability 通道（审批暂停/恢复、复盘调管道、event-bus 的地基）。
     // 监控 M4：router 持聚合器，metrics.record 分支写聚合器（第 6 个 capability）。
-    let router = Arc::new(KernelCapabilityRouter::with_metrics(
-        engine.clone(),
-        metrics_aggregator.clone(),
-    ));
+    // tool-executor：tool_core sidecar 委托内核执行 tool 插件 sidecar（bash_execute 等）。
+    // event-bus.emit：流式 chunk 推前端——session 提前创建并注入 router + 后续 enable_session 复用。
+    let session_coord = Arc::new(agentos_session::SessionCoordinator::new());
+    let router = Arc::new(
+        KernelCapabilityRouter::with_metrics(
+            engine.clone(),
+            metrics_aggregator.clone(),
+        )
+        .with_invoker(invoker.clone())
+        .with_registry(registry.clone())
+        .with_session(session_coord.clone()),
+    );
     invoker.set_router(router);
 
     // 监控 M3：注册崩溃回调——invoker 检测到插件崩溃时记时间戳到聚合器（last_crash_ts）。
@@ -319,6 +387,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(agentos_api::http_dispatcher::SidecarHttpHandler::new(
             invoker_dyn.clone(),
         ));
+    // L1 启用集合（schema 据此过滤 contributes）
+    let enabled_plugin_ids: std::collections::HashSet<String> = manifests
+        .iter()
+        .filter(|m| enablement.is_enabled(&m.id, m.enabled))
+        .map(|m| m.id.clone())
+        .collect();
     let state = AppState::with_plugins(
         manifests.clone(),
         registry,
@@ -329,12 +403,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store_dyn,
         plugin_ids,
         project_root,
+        enabled_plugin_ids,
     )
     .with_http_handler(http_handler)
     // 监控 M1/M5/M5b：注入指标聚合器（启用 /api/v1/metrics + /metrics 端点）
     .with_metrics(metrics_aggregator.clone())
-    // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）
-    .enable_session();
+    // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）。
+    // 复用 router 已持有的 session_coord（流式 chunk 推送与 WS 出站共享同一 SessionCoordinator）。
+    .enable_session_with(session_coord);
 
     // 监控 M2/M6：后台任务——每秒把内核自采计数器 flush 到聚合器 + 滚动桶降采样。
     // M6：每秒采样关键指标广播给订阅 statusBar 的连接（widget_event）。
@@ -366,6 +442,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_bcast,
             std::time::Duration::from_secs(1),
         );
+        // ADR §3.5'：插件 widget 配置驱动推送——按 contributes.widgets[].metric_bindings
+        // 把插件已上报的指标定时推给前端。插件被动（照常 metrics.record），内核统一编排。
+        let widget_bindings = {
+            let entries: Vec<(&str, Option<&serde_json::Value>)> = manifests
+                .iter()
+                .map(|m| (m.id.as_str(), m.contributes.as_ref()))
+                .collect();
+            agentos_api::metrics::collect_all_bindings(entries)
+        };
+        if !widget_bindings.is_empty() {
+            let agg_widget: Arc<agentos_api::metrics::MetricsAggregator> =
+                Arc::new(metrics_aggregator.clone());
+            let session_widget: Arc<dyn agentos_api::metrics::WidgetEmitter> = session.clone();
+            let _widget_bcast_handle =
+                agentos_api::metrics::PluginWidgetBroadcaster::spawn(
+                    agg_widget,
+                    widget_bindings.clone(),
+                    session_widget,
+                );
+            info!(
+                target: "agentos-kernel",
+                count = widget_bindings.len(),
+                "PluginWidgetBroadcaster started ({} metric_bindings)",
+                widget_bindings.len()
+            );
+        }
         info!(target: "agentos-kernel", "Metrics background tasks started (M2 flush + M1 rollup + M6 broadcast, 1s interval)");
     }
 

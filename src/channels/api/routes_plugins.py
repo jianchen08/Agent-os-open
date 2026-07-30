@@ -82,6 +82,16 @@ def list_plugin_status() -> list[dict[str, Any]]:
     return _hot_reloader.get_plugin_status()
 
 
+@router.get(
+    "",
+    response_model=list[dict[str, Any]],
+    summary="List plugins (alias of /status)",
+)
+def list_plugins() -> list[dict[str, Any]]:
+    """Alias for ``/status`` so clients hitting ``GET /api/v1/plugins`` work."""
+    return list_plugin_status()
+
+
 @router.post(
     "/reload",
     response_model=dict[str, Any],

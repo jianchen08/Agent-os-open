@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     Branch, CompositeStep, EngineError, ErrorPolicy, Message, MessageRecord, PluginContext,
-    PluginError, PluginResult, RouteType, RunRecord, RunStatus, StepResult, StorageError,
-    SuspendHandle, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry, WakeEvent,
+    PluginError, PluginResult, RouteType, RunRecord, RunStatus, SessionRecord, StepResult,
+    StorageError, SuspendHandle, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry,
+    WakeEvent,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -771,6 +772,32 @@ pub struct PluginManifest {
     /// 路由治理见附录 E.1.3（强制 /ext/{plugin_id}/** 命名空间 + 内核 denylist）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_endpoints: Vec<HttpEndpoint>,
+    /// 启用开关（L1 Enabled，安装触发模型 §一）。
+    ///
+    /// `false` = 已安装但不启用：不进注册表出口（tools/http_routes/contributes 不暴露）。
+    /// 缺省时由 `config/plugins/default_profile.yaml` 决定（未列出走 defaults）。
+    /// 这是「运行时是否允许参与系统」的开关，与 PluginStatus（运行态）正交。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 激活策略（L2，安装触发模型 §5.2）。
+    ///
+    /// `eager` = 内核启动后即 load → Active；`lazy` = 首次 invoke 再 load（默认）；
+    /// `manual` = 仅用户显式启动。缺省时由 default_profile 决定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<ActivationPolicy>,
+}
+
+/// 插件激活策略（安装触发模型 §5.2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivationPolicy {
+    /// 内核启动后即 load → Active（Tier S 骨架、已启用的 webhook 通道）
+    Eager,
+    /// 首次 invoke / 首次命中路由再 load（默认，多数 tool/评估/监控）
+    #[default]
+    Lazy,
+    /// 仅用户点「启动」或 API 显式 load（重型/调试插件）
+    Manual,
 }
 
 /// HTTP 端点声明项（ADR §3.3 / E.1.2）。
@@ -1129,6 +1156,21 @@ pub enum PluginStatus {
 /// - `blobs`：不可变原始数据
 ///
 /// [来源: docs/working/adr_engine_design.md §4.2]
+
+/// 按 pipeline_id 查询消息的选项（游标分页）。
+///
+/// 对齐前端 getMessages 的查询参数（session.ts: before_sequence/after_sequence/limit）。
+/// sequence 按 pipeline_id 维度连续递增，故游标在管道内全局有效。
+#[derive(Debug, Clone, Default)]
+pub struct MessageQueryOpts {
+    /// 返回 seq_in_branch < before_sequence 的消息（向前翻页）
+    pub before_sequence: Option<u32>,
+    /// 返回 seq_in_branch > after_sequence 的消息（断线补漏）
+    pub after_sequence: Option<u32>,
+    /// 最多返回条数
+    pub limit: Option<usize>,
+}
+
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     /// 获取运行实例记录。
@@ -1140,6 +1182,24 @@ pub trait StorageBackend: Send + Sync {
         run_id: &str,
         branch_id: &str,
     ) -> Result<Vec<MessageRecord>, StorageError>;
+
+    /// 按 pipeline_id 查询历史消息（消息层自治查询主键）。
+    ///
+    /// 两域解耦：消息层只按 pipeline_id 查询，不关心会话（thread）归属。
+    /// 对齐 0.1 `ExecutionRecordStorage.list_by_pipeline(pipeline_run_id)`。
+    /// opts 支持游标分页（before_sequence/after_sequence）与 limit。
+    async fn get_messages_by_pipeline(
+        &self,
+        pipeline_id: &str,
+        opts: MessageQueryOpts,
+    ) -> Result<Vec<MessageRecord>, StorageError>;
+
+    /// 取管道内下一个 sequence（按 pipeline_id 维度连续递增）。
+    ///
+    /// sequence 按 pipeline_id 单调递增（跨多轮、跨 run_id），支撑前端
+    /// `before_sequence`/`after_sequence` 游标分页。替代旧的"每轮 run_id 重置 0/1"。
+    /// 对齐 0.1 ExecutionRecordData.sequence（管道内连续）。
+    async fn next_sequence(&self, pipeline_id: &str) -> Result<u32, StorageError>;
 
     /// 获取最近 N 条消息的完整内容（联查 messages + blobs 表）。
     ///
@@ -1169,6 +1229,66 @@ pub trait StorageBackend: Send + Sync {
         current_branch: Option<&str>,
         current_seq: Option<u32>,
     ) -> Result<(), StorageError>;
+
+    /// 创建运行实例（同时建主分支 main）。在管道执行开始时调用。
+    async fn create_run(
+        &self,
+        run_id: &str,
+        config_hash: &str,
+        tenant_id: &str,
+    ) -> Result<(), StorageError>;
+
+    /// 追加消息到 messages 表（ADR ③④）。
+    /// tenant_id 从 task_local agentos_tenant 取。完整内容存 blobs 表，
+    /// messages 表只存 content_preview 摘要 + blob_id 指针（ADR ⑦ 懒加载）。
+    /// pipeline_id：消息所属管道（消息层查询主键），从 state 读，可为 None 兼容旧调用。
+    #[allow(clippy::too_many_arguments)]
+    async fn append_message(
+        &self,
+        message_id: &str,
+        run_id: &str,
+        branch_id: &str,
+        seq_in_branch: u32,
+        role: &str,
+        blob_id: Option<&str>,
+        content_preview: Option<&str>,
+        pipeline_id: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    /// 存储不可变原始数据到 blobs 表（内容寻址去重，blob_id = SHA256）。
+    /// 返回 blob_id 供 messages 表引用。
+    async fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError>;
+
+    // ── 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────
+    // 解耦：session 只持 pipeline_ids 引用列表，不反向 join messages。
+
+    /// 创建会话（对齐 0.1 SessionModel + MemoryStore.set_session）。
+    async fn create_session(&self, session: &SessionRecord) -> Result<(), StorageError>;
+
+    /// 按 thread_id 取单个会话（含 pipeline_ids）。
+    async fn get_session(&self, thread_id: &str) -> Result<Option<SessionRecord>, StorageError>;
+
+    /// 列会话（按 filter 过滤，对齐 0.1 list_threads）。
+    async fn list_sessions(
+        &self,
+        filter: SessionListFilter,
+    ) -> Result<Vec<SessionRecord>, StorageError>;
+
+    /// 更新会话（upsert：存在则更新，不存在则插入）。
+    /// 用于 create_thread 后追加 pipeline_id、更新 title/agent 等。
+    async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError>;
+}
+
+/// `list_sessions` 的过滤条件。
+///
+/// tenant_id 走 task_local（与消息查询一致）。limit 控制返回条数。
+/// session_type 用于按 metadata.session_type 过滤（对齐 0.1 list_threads 的 query）。
+#[derive(Debug, Clone, Default)]
+pub struct SessionListFilter {
+    /// 按 metadata.session_type 过滤（如 "main_pipeline"）
+    pub session_type: Option<String>,
+    /// 最多返回条数
+    pub limit: Option<usize>,
 }
 
 // ═════════════════════════════════════════════════════════════════

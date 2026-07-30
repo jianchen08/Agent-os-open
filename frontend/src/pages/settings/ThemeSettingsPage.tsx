@@ -11,9 +11,61 @@ import type { ThemeInfo } from '@/types/theme'
 
 /**
  * 主题设置页面组件
+ *
+ * @param embedded 嵌入设置主页右侧面板时为 true（去掉独立全屏头）
  */
-export function ThemeSettingsPage() {
+export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const { currentThemeId, mode, setTheme, setMode, resolvedTheme } = useThemeStore()
+
+  const content = (
+    <>
+      <section className="mb-8">
+        <h2 className="mb-3 text-sm font-semibold">显示模式</h2>
+        <div className="flex gap-3">
+          {(['light', 'dark', 'system'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
+                mode === m
+                  ? 'bg-primary/10 text-primary border-primary/30'
+                  : 'hover:bg-accent/30 border-border'
+              }`}
+            >
+              {m === 'light' ? '浅色' : m === 'dark' ? '深色' : '跟随系统'}
+            </button>
+          ))}
+        </div>
+        <p className="text-muted-foreground mt-2 text-xs">
+          当前解析为：{resolvedTheme === 'dark' ? '深色' : '浅色'}模式
+        </p>
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-sm font-semibold">选择主题</h2>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {themeList.map((theme) => (
+            <ThemeCard
+              key={theme.id}
+              theme={theme}
+              isActive={currentThemeId === theme.id}
+              onSelect={() => setTheme(theme.id)}
+            />
+          ))}
+        </div>
+      </section>
+    </>
+  )
+
+  if (embedded) {
+    return (
+      <div className="h-full overflow-y-auto">
+        <h2 className="mb-4 text-base font-semibold">主题设置</h2>
+        {content}
+      </div>
+    )
+  }
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
@@ -23,46 +75,7 @@ export function ThemeSettingsPage() {
         </a>
         <h1 className="ml-4 text-base font-semibold">主题设置</h1>
       </header>
-
-      <main className="flex-1 overflow-y-auto p-6">
-        {/* 模式切换 */}
-        <section className="mb-8">
-          <h2 className="mb-3 text-sm font-semibold">显示模式</h2>
-          <div className="flex gap-3">
-            {(['light', 'dark', 'system'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
-                  mode === m
-                    ? 'bg-primary/10 text-primary border-primary/30'
-                    : 'hover:bg-accent/30 border-border'
-                }`}
-              >
-                {m === 'light' ? '浅色' : m === 'dark' ? '深色' : '跟随系统'}
-              </button>
-            ))}
-          </div>
-          <p className="text-muted-foreground mt-2 text-xs">
-            当前解析为：{resolvedTheme === 'dark' ? '深色' : '浅色'}模式
-          </p>
-        </section>
-
-        {/* 主题选择 */}
-        <section>
-          <h2 className="mb-3 text-sm font-semibold">选择主题</h2>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {themeList.map((theme) => (
-              <ThemeCard
-                key={theme.id}
-                theme={theme}
-                isActive={currentThemeId === theme.id}
-                onSelect={() => setTheme(theme.id)}
-              />
-            ))}
-          </div>
-        </section>
-      </main>
+      <main className="flex-1 overflow-y-auto p-6">{content}</main>
     </div>
   )
 }
@@ -81,6 +94,7 @@ function ThemeCard({
 
   return (
     <button
+      type="button"
       onClick={onSelect}
       className={`group rounded-lg border p-4 text-left transition-all ${
         isActive
@@ -88,7 +102,6 @@ function ThemeCard({
           : 'hover:border-primary/50 border-border'
       }`}
     >
-      {/* 色彩预览 */}
       {preview && (
         <div className="mb-3 flex gap-1.5">
           <div
@@ -114,18 +127,15 @@ function ThemeCard({
         </div>
       )}
 
-      {/* 主题信息 */}
       <h3 className="text-sm font-semibold">{theme.name}</h3>
       {theme.description && (
-        <p className="text-muted-foreground mt-1 text-xs line-clamp-2">{theme.description}</p>
+        <p className="text-muted-foreground mt-1 line-clamp-2 text-xs">{theme.description}</p>
       )}
 
-      {/* 激活标识 */}
       {isActive && (
         <span className="text-primary mt-2 inline-block text-xs font-medium">✓ 当前使用</span>
       )}
 
-      {/* 类别标签 */}
       <span
         className={`mt-2 inline-block rounded px-1.5 py-0.5 text-xs ${
           theme.category === 'light'

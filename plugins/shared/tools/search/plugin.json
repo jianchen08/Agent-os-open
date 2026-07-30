@@ -19,10 +19,20 @@
             "on_unload"
         ]
     },
-    "dependencies": [
-        "agentos-plugin-sdk>=0.2.0"
-    ],
+    "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 30
+    "priority": 30,
+    "config_files": [
+        {
+            "id": "builtin_tools_config",
+            "path": "config/tools/builtin_tools_config.yaml",
+            "label": "内置工具配置"
+        },
+        {
+            "id": "resource_search",
+            "path": "config/tools/search/resource_search.yaml",
+            "label": "资源搜索配置"
+        }
+    ]
 }

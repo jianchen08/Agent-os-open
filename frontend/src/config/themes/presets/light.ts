@@ -1,7 +1,11 @@
 /**
- * 浅色主题配置
+ * 浅色主题配置（默认亮色）
  *
- * 默认浅色主题，适合日间使用
+ * 由 Deep Space v2 暗色主题反转得到：
+ * - 保留品牌青 / AI 紫 / 辅助蓝（略加深以保证浅底对比度）
+ * - 背景：深空蓝阶 → 冷灰蓝浅阶
+ * - 文本：浅 slate → 深 slate
+ * - 状态色：略加深，满足浅底可读性
  */
 
 import type { ThemeConfig } from '@/types/theme'
@@ -9,108 +13,108 @@ import type { ThemeConfig } from '@/types/theme'
 export const lightTheme: ThemeConfig = {
   id: 'light',
   name: '浅色主题',
-  description: '默认浅色主题，适合日间使用',
+  description: 'Deep Space v2 反转亮色（默认浅色）',
   category: 'light',
 
   colors: {
-    // 基于 Radix slate 浅中性 + 同色系蓝：克制干净，层次由浅到深
-    primary: '#3e63dd',
-    secondary: '#5472e4',
-    accent: '#9eb1ff',
+    // 品牌色略加深，浅底上仍保持 Deep Space 识别度
+    primary: '#0891B2',
+    secondary: '#2563EB',
+    accent: '#7C3AED',
 
     background: {
-      main: '#fcfcfd',
-      card: '#ffffff',
-      sidebar: '#f9f9fb',
-      input: '#f0f0f3',
-      elevated: '#ffffff',
+      main: '#F4F7FB',
+      card: '#FFFFFF',
+      sidebar: '#EEF2F8',
+      input: '#E8EEF7',
+      elevated: '#FFFFFF',
     },
 
     text: {
-      primary: '#1c2024',
-      secondary: '#60646c',
-      muted: '#80838d',
-      disabled: '#8b8d98',
+      primary: '#0B1220',
+      secondary: '#334155',
+      muted: '#64748B',
+      disabled: '#94A3B8',
     },
 
     border: {
-      default: 'rgba(0, 0, 0, 0.08)',
-      hover: 'rgba(0, 0, 0, 0.14)',
-      active: 'rgba(62, 99, 221, 0.45)',
+      default: 'rgba(15, 23, 42, 0.10)',
+      hover: 'rgba(15, 23, 42, 0.18)',
+      active: 'rgba(8, 145, 178, 0.50)',
     },
 
     status: {
-      success: '#0d3d38',
-      warning: '#a8650b',
-      error: '#dc2626',
-      info: '#3e63dd',
-      running: '#00749e',
-      pending: '#80838d',
+      success: '#059669',
+      warning: '#D97706',
+      error: '#DC2626',
+      info: '#2563EB',
+      running: '#0891B2',
+      pending: '#64748B',
     },
 
     bubble: {
-      user_bg: '#3e63dd',
-      user_text: '#ffffff',
+      user_bg: '#0891B2',
+      user_text: '#F8FAFC',
       user_radius: '1rem 1rem 1rem 0.25rem',
-      user_shadow: '0 4px 12px rgba(62, 99, 221, 0.22)',
-      ai_bg: '#f0f0f3',
-      ai_text: '#1c2024',
-      ai_radius: '0.875rem 0.875rem 0.875rem 0.25rem',
-      ai_shadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
-      ai_border: '1px solid rgba(0, 0, 0, 0.06)',
+      user_shadow: '0 2px 8px rgba(8, 145, 178, 0.18)',
+      ai_bg: '#EEF2F8',
+      ai_text: '#0B1220',
+      ai_radius: '1rem 1rem 1rem 0.25rem',
+      ai_shadow: '0 1px 4px rgba(15, 23, 42, 0.06)',
+      ai_border: '1px solid rgba(15, 23, 42, 0.08)',
     },
   },
 
   components: {
     borderRadius: {
       none: '0',
-      sm: '0.25rem',
+      sm: '0.375rem',
       md: '0.5rem',
-      lg: '0.75rem',
-      xl: '1rem',
+      lg: '0.625rem',
+      xl: '0.75rem',
       full: '9999px',
       defaultRadius: 'md',
     },
 
     fonts: {
-      ui: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      ui: "'Noto Sans SC', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       code: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
     },
 
     fontSize: {
-      xs: '14px',
-      sm: '15px',
-      md: '16px',
-      lg: '17px',
-      xl: '18px',
+      xs: '11px',
+      sm: '12px',
+      md: '13px',
+      lg: '16px',
+      xl: '20px',
       defaultFontSize: 'md',
     },
 
     shadows: {
       none: { sm: 'none', md: 'none', lg: 'none' },
       light: {
-        sm: '0 1px 2px 0 rgb(0 0 0 / 0.03)',
-        md: '0 4px 6px -1px rgb(0 0 0 / 0.05)',
-        lg: '0 10px 15px -3px rgb(0 0 0 / 0.05)',
+        sm: '0 1px 2px 0 rgb(15 23 42 / 0.04)',
+        md: '0 4px 6px -1px rgb(15 23 42 / 0.06)',
+        lg: '0 10px 15px -3px rgb(15 23 42 / 0.08)',
       },
       normal: {
-        sm: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
-        md: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
-        lg: '0 10px 15px -3px rgb(0 0 0 / 0.1)',
+        sm: '0 1px 2px 0 rgb(15 23 42 / 0.06)',
+        md: '0 4px 6px -1px rgb(15 23 42 / 0.08)',
+        lg: '0 10px 15px -3px rgb(15 23 42 / 0.1)',
       },
       strong: {
-        sm: '0 1px 3px 0 rgb(0 0 0 / 0.1)',
-        md: '0 4px 8px -1px rgb(0 0 0 / 0.15)',
-        lg: '0 10px 20px -3px rgb(0 0 0 / 0.2)',
+        sm: '0 1px 3px 0 rgb(15 23 42 / 0.08)',
+        md: '0 4px 8px -1px rgb(15 23 42 / 0.12)',
+        lg: '0 10px 20px -3px rgb(15 23 42 / 0.14)',
       },
       defaultShadow: 'normal',
     },
 
     glow: {
-      running: '0 0 15px rgba(8, 145, 178, 0.2)',
-      waiting: '0 0 15px rgba(217, 119, 6, 0.2)',
-      success: '0 0 15px rgba(5, 150, 105, 0.2)',
-      error: '0 0 15px rgba(220, 38, 38, 0.2)',
+      running: '0 0 12px rgba(8, 145, 178, 0.2)',
+      waiting: '0 0 12px rgba(217, 119, 6, 0.18)',
+      success: '0 0 12px rgba(5, 150, 105, 0.18)',
+      error: '0 0 12px rgba(220, 38, 38, 0.18)',
       defaultGlowIntensity: 20,
     },
 
@@ -118,150 +122,150 @@ export const lightTheme: ThemeConfig = {
       style: 'rounded',
       shadow: true,
       borderWidth: '1px',
-      hoverEffect: 'darken',
+      hoverEffect: 'lift',
       texture: 'none',
       textureOpacity: 0,
       variants: {
         primary: {
-          bg: '#3e63dd',
-          text: '#ffffff',
+          bg: '#0891B2',
+          text: '#F8FAFC',
           border: 'transparent',
-          hoverBg: '#304384',
+          hoverBg: '#0E7490',
         },
         secondary: {
-          bg: '#f0f0f3',
-          text: '#1c2024',
-          border: '#e0e1e6',
-          hoverBg: '#e0e1e6',
+          bg: 'rgba(8, 145, 178, 0.10)',
+          text: '#0E7490',
+          border: 'rgba(8, 145, 178, 0.28)',
+          hoverBg: 'rgba(8, 145, 178, 0.16)',
         },
         ghost: {
           bg: 'transparent',
-          text: '#60646c',
+          text: '#334155',
           border: 'transparent',
-          hoverBg: 'rgba(0, 0, 0, 0.05)',
+          hoverBg: 'rgba(15, 23, 42, 0.05)',
         },
         destructive: {
-          bg: '#dc2626',
-          text: '#ffffff',
-          border: 'transparent',
-          hoverBg: '#b91c1c',
+          bg: 'rgba(220, 38, 38, 0.1)',
+          text: '#B91C1C',
+          border: 'rgba(220, 38, 38, 0.28)',
+          hoverBg: 'rgba(220, 38, 38, 0.16)',
         },
       },
     },
 
     input: {
-      style: 'outlined',
-      focusBorder: '#2563eb',
-      focusGlow: '0 0 0 3px rgba(37, 99, 235, 0.1)',
+      style: 'filled',
+      focusBorder: '#0891B2',
+      focusGlow: '0 0 0 3px rgba(8, 145, 178, 0.15)',
     },
 
     card: {
       style: 'elevated',
       blur: '0',
-      border: '1px solid rgba(0, 0, 0, 0.08)',
+      border: '1px solid rgba(15, 23, 42, 0.10)',
     },
 
     badge: {
       borderRadius: '9999px',
       variants: {
         default: {
-          bg: '#2563eb',
-          text: '#ffffff',
+          bg: '#0891B2',
+          text: '#F8FAFC',
           border: 'transparent',
         },
         secondary: {
-          bg: '#f1f5f9',
-          text: '#0f172a',
+          bg: 'rgba(15, 23, 42, 0.06)',
+          text: '#334155',
           border: 'transparent',
         },
         success: {
-          bg: '#dcfce7',
-          text: '#166534',
-          border: '#bbf7d0',
+          bg: 'rgba(5, 150, 105, 0.12)',
+          text: '#047857',
+          border: 'rgba(5, 150, 105, 0.28)',
         },
         warning: {
-          bg: '#fef3c7',
-          text: '#92400e',
-          border: '#fde68a',
+          bg: 'rgba(217, 119, 6, 0.12)',
+          text: '#B45309',
+          border: 'rgba(217, 119, 6, 0.28)',
         },
         error: {
-          bg: '#fee2e2',
-          text: '#991b1b',
-          border: '#fecaca',
+          bg: 'rgba(220, 38, 38, 0.12)',
+          text: '#B91C1C',
+          border: 'rgba(220, 38, 38, 0.28)',
         },
         info: {
-          bg: '#dbeafe',
-          text: '#1e40af',
-          border: '#bfdbfe',
+          bg: 'rgba(37, 99, 235, 0.12)',
+          text: '#1D4ED8',
+          border: 'rgba(37, 99, 235, 0.28)',
         },
       },
     },
 
     dialog: {
-      borderRadius: '1rem',
-      overlayBg: '#000000',
-      overlayOpacity: 0.5,
-      shadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
-      border: '1px solid rgba(0, 0, 0, 0.1)',
+      borderRadius: '0.75rem',
+      overlayBg: '#0B1220',
+      overlayOpacity: 0.45,
+      shadow: '0 25px 50px -12px rgba(15, 23, 42, 0.2)',
+      border: '1px solid rgba(15, 23, 42, 0.1)',
     },
 
     tabs: {
       borderRadius: '0.5rem',
-      listBg: '#f1f5f9',
-      activeBg: '#ffffff',
-      activeText: '#0f172a',
-      inactiveText: '#64748b',
+      listBg: 'rgba(15, 23, 42, 0.05)',
+      activeBg: '#FFFFFF',
+      activeText: '#0891B2',
+      inactiveText: '#64748B',
     },
 
     toast: {
-      borderRadius: '0.75rem',
-      shadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)',
+      borderRadius: '0.625rem',
+      shadow: '0 10px 15px -3px rgba(15, 23, 42, 0.1)',
       variants: {
         default: {
-          bg: '#ffffff',
-          text: '#0f172a',
-          border: 'rgba(0, 0, 0, 0.1)',
+          bg: '#FFFFFF',
+          text: '#0B1220',
+          border: 'rgba(15, 23, 42, 0.1)',
         },
         success: {
-          bg: '#dcfce7',
-          text: '#166534',
-          border: '#bbf7d0',
+          bg: 'rgba(5, 150, 105, 0.1)',
+          text: '#047857',
+          border: 'rgba(5, 150, 105, 0.28)',
         },
         error: {
-          bg: '#fee2e2',
-          text: '#991b1b',
-          border: '#fecaca',
+          bg: 'rgba(220, 38, 38, 0.1)',
+          text: '#B91C1C',
+          border: 'rgba(220, 38, 38, 0.28)',
         },
         warning: {
-          bg: '#fef3c7',
-          text: '#92400e',
-          border: '#fde68a',
+          bg: 'rgba(217, 119, 6, 0.1)',
+          text: '#B45309',
+          border: 'rgba(217, 119, 6, 0.28)',
         },
         info: {
-          bg: '#dbeafe',
-          text: '#1e40af',
-          border: '#bfdbfe',
+          bg: 'rgba(37, 99, 235, 0.1)',
+          text: '#1D4ED8',
+          border: 'rgba(37, 99, 235, 0.28)',
         },
       },
     },
 
     progress: {
-      borderRadius: '9999px',
-      trackBg: 'rgba(37, 99, 235, 0.2)',
+      borderRadius: '0.125rem',
+      trackBg: '#E2E8F0',
       variants: {
-        default: '#2563eb',
+        default: '#0891B2',
         success: '#059669',
-        warning: '#d97706',
-        error: '#dc2626',
+        warning: '#D97706',
+        error: '#DC2626',
       },
     },
 
     dropdownMenu: {
-      borderRadius: '0.75rem',
-      shadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)',
-      border: '1px solid rgba(0, 0, 0, 0.1)',
-      itemHoverBg: '#f1f5f9',
-      itemHoverText: '#0f172a',
+      borderRadius: '0.625rem',
+      shadow: '0 10px 15px -3px rgba(15, 23, 42, 0.1)',
+      border: '1px solid rgba(15, 23, 42, 0.1)',
+      itemHoverBg: 'rgba(15, 23, 42, 0.05)',
+      itemHoverText: '#0B1220',
     },
   },
 
@@ -273,23 +277,33 @@ export const lightTheme: ThemeConfig = {
   },
 
   backgrounds: {
-    main: { type: 'solid', value: '#f8fafc' },
+    main: {
+      type: 'solid',
+      value: '#F4F7FB',
+    },
     image: {
       enabled: false,
       url: '',
       position: 'center',
       size: 'cover',
       attachment: 'fixed',
-      overlay: 'rgba(255, 255, 255, 0.9)',
+      overlay: 'rgba(244, 247, 251, 0.9)',
       overlayOpacity: 0.9,
     },
     texture: {
       type: 'none',
-      color: 'rgba(0, 0, 0, 0.02)',
+      color: 'rgba(15, 23, 42, 0.03)',
       size: '24px',
       opacity: 0.05,
     },
-    sidebar: { type: 'solid', value: '#ffffff', texture: { type: 'none' } },
-    chat: { type: 'solid', value: '#f8fafc' },
+    sidebar: {
+      type: 'solid',
+      value: '#EEF2F8',
+      texture: { type: 'none' },
+    },
+    chat: {
+      type: 'solid',
+      value: '#F4F7FB',
+    },
   },
 }

@@ -64,8 +64,8 @@ export async function getTaskList(
       params,
     })
     return {
-      items: response.data.items,
-      total: response.data.total,
+      items: response.data.items ?? [],
+      total: response.data.total ?? 0,
     }
   }, options)
 }

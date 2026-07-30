@@ -20,6 +20,7 @@ impl PipelineDispatcher for MockDispatcher {
         thread_id: &str,
         user_id: &str,
         content: &str,
+        _pipeline_id: &str,
     ) -> Result<(), String> {
         self.user_inputs
             .lock()
@@ -142,7 +143,7 @@ async fn dispatcher_failure_returns_error() {
     struct FailingDispatcher;
     #[async_trait]
     impl PipelineDispatcher for FailingDispatcher {
-        async fn dispatch_user_input(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        async fn dispatch_user_input(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), String> {
             Err("boom".into())
         }
         async fn dispatch_interaction_response(&self, _: &str, _: &str) -> Result<(), String> {

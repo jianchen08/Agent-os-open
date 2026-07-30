@@ -8,17 +8,35 @@
     "entry": "python server.py",
     "capabilities": {
         "tools": [
-            {"name": "evaluation.run", "description": "Run evaluation metrics against targets"},
-            {"name": "evaluation.get_result", "description": "Get evaluation result by ID"}
+            {
+                "name": "evaluation.run",
+                "description": "Run evaluation metrics against targets"
+            },
+            {
+                "name": "evaluation.get_result",
+                "description": "Get evaluation result by ID"
+            }
         ],
         "resources": [
-            {"uri": "evaluation://metrics/registry", "name": "Metric Registry"}
+            {
+                "uri": "evaluation://metrics/registry",
+                "name": "Metric Registry"
+            }
         ],
         "route_signals": [],
-        "lifecycle_hooks": ["on_load"]
+        "lifecycle_hooks": [
+            "on_load"
+        ]
     },
     "dependencies": [],
     "permissions": {},
     "error_policy": "abort",
-    "priority": 55
+    "priority": 55,
+    "config_files": [
+        {
+            "id": "evaluation_metrics",
+            "path": "config/evaluation/evaluation_metrics.yaml",
+            "label": "评估指标定义"
+        }
+    ]
 }

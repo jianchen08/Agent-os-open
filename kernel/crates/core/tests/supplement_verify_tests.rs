@@ -68,6 +68,8 @@ fn make_test_manifest(
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     }
 }
 
@@ -84,6 +86,7 @@ fn test_message_record_roundtrip() {
         blob_id: Some("blob_001".to_string()),
         content_preview: Some("Hello".to_string()),
         created_at: "2026-07-14T00:00:00Z".to_string(),
+        pipeline_id: Some("pipe_001".to_string()),
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();
@@ -95,6 +98,7 @@ fn test_message_record_roundtrip() {
     assert_eq!(deserialized.blob_id, original.blob_id);
     assert_eq!(deserialized.content_preview, original.content_preview);
     assert_eq!(deserialized.created_at, original.created_at);
+    assert_eq!(deserialized.pipeline_id, original.pipeline_id);
 }
 
 #[test]
@@ -108,6 +112,7 @@ fn test_message_record_roundtrip_no_optional() {
         blob_id: None,
         content_preview: None,
         created_at: "2026-07-14T00:01:00Z".to_string(),
+        pipeline_id: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();

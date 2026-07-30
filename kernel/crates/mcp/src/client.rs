@@ -38,6 +38,7 @@ struct JsonRpcRequest {
 struct JsonRpcResponse {
     #[allow(dead_code)]
     jsonrpc: Option<String>,
+    #[allow(dead_code)]
     id: Option<String>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
@@ -266,8 +267,23 @@ impl McpClient {
                             ) {
                                 handle_incoming_request(method, &msg, &id, &router, &stdin)
                                     .await;
+                                continue;
                             }
-                            // 其余（notification 无 id 等）忽略
+                            // 分支3：sidecar 主动发起的 notification（有 method 无 id）
+                            // 用于流式 chunk 推送：fire-and-forget，内核不回 response。
+                            if let Some(method) = msg.get("method").and_then(|v| v.as_str()).map(String::from) {
+                                let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                                // 关键：notification 处理用 spawn 并发，不阻塞 reader loop！
+                                // handle_incoming_notification 内部会 await session.emit_event
+                                //（WS 发送），若串行 await 会让后续 notification 攒批排队
+                                // （sidecar 实时写了 45 个跨 11s，内核却攒批 2s 内才处理完）。
+                                // notification 是 fire-and-forget，无需等结果，spawn 后继续读下一行。
+                                let router_clone = router.clone();
+                                tokio::spawn(async move {
+                                    handle_incoming_notification(&method, params, &router_clone).await;
+                                });
+                            }
+                            // 其余忽略
                         }
                         Err(_) => break,
                     }
@@ -321,10 +337,10 @@ impl McpClient {
             });
         }
 
-        // 等待响应（超时 30 秒）
-        let response = tokio::time::timeout(Duration::from_secs(30), rx)
+        // 等待响应（超时 120 秒：LLM 调用尤其是 reasoning model 首次可能较慢）
+        let response = tokio::time::timeout(Duration::from_secs(120), rx)
             .await
-            .map_err(|_| McpError::Timeout { timeout_secs: 30 })?
+            .map_err(|_| McpError::Timeout { timeout_secs: 120 })?
             .map_err(|_| McpError::Protocol {
                 message: "response channel closed".to_string(),
             })?;
@@ -366,7 +382,8 @@ impl McpClient {
                 "tenant-context": {},
                 "event-bus": {},
                 "logger": {},
-                "metrics": {}
+                "metrics": {},
+                "tool-executor": {}
             })
         } else {
             serde_json::json!({})
@@ -590,6 +607,35 @@ async fn handle_incoming_request(
         }),
     };
     let _ = write_raw_line(stdin, &resp.to_string()).await;
+}
+
+/// 处理 sidecar 主动发起的 JSON-RPC notification（无 id，fire-and-forget）。
+///
+/// method 形如 `event-bus.emit`，拆分后路由到 CapabilityRouter。
+/// 与 handle_incoming_request 的区别：不回 response（notification 协议无响应）。
+/// 用于流式 chunk 高频推送（sidecar 边生成边推，内核推前端）。
+async fn handle_incoming_notification(
+    method: &str,
+    params: Value,
+    router: &Option<Arc<dyn CapabilityRouter>>,
+) {
+    tracing::debug!(target: "mcp:notification", method = %method, "收到 sidecar notification");
+    let Some((capability, cap_method)) = parse_capability_method(method) else {
+        tracing::debug!(target: "mcp:notification", method = %method, "notification 非 capability method，丢弃");
+        return;
+    };
+    let Some(router) = router else {
+        return;
+    };
+    // 调用 router.handle，忽略返回值（notification 不需要 response）。
+    // event-bus.emit handler 内部负责把 chunk 推到前端。
+    if let Err(e) = router.handle(capability, cap_method, params).await {
+        tracing::warn!(
+            target: "mcp:notification",
+            capability, method = cap_method, error = %e,
+            "capability notification 处理失败",
+        );
+    }
 }
 
 impl Drop for McpClient {

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use agentos_core::traits::AdrEngine;
+use agentos_core::traits::{AdrEngine, CapabilityRegistry};
 use agentos_mcp::{CapabilityRouter, McpError};
 use serde_json::{json, Value};
 use tracing::warn;
@@ -29,6 +29,14 @@ pub struct KernelCapabilityRouter {
     /// 指标聚合器（处理 metrics.record 调用，监控设计 §三 通道2）。
     /// None = 不接受插件指标上报（聚合器未启用）。
     metrics: Option<MetricsAggregator>,
+    /// 插件调用器（处理 tool-executor.invoke 调用——sidecar tool_core 反向请求
+    /// 内核执行 tool 插件 sidecar，如 bash_execute）。None = 不支持工具委托执行。
+    invoker: Option<Arc<dyn agentos_core::traits::PluginInvoker>>,
+    /// 能力注册表（tool_name → plugin_id 反查,服务于 tool-executor.invoke）。
+    registry: Option<Arc<dyn CapabilityRegistry>>,
+    /// 会话协调器（处理 event-bus.emit 的流式 chunk 推送）。
+    /// None = 不支持流式 chunk 推前端（session 未启用）。
+    session: Option<Arc<agentos_session::SessionCoordinator>>,
 }
 
 impl KernelCapabilityRouter {
@@ -37,6 +45,9 @@ impl KernelCapabilityRouter {
         Self {
             engine,
             metrics: None,
+            invoker: None,
+            registry: None,
+            session: None,
         }
     }
 
@@ -45,7 +56,28 @@ impl KernelCapabilityRouter {
         Self {
             engine,
             metrics: Some(metrics),
+            invoker: None,
+            registry: None,
+            session: None,
         }
+    }
+
+    /// 注入插件调用器（启用 tool-executor.invoke 反向调用）。
+    pub fn with_invoker(mut self, invoker: Arc<dyn agentos_core::traits::PluginInvoker>) -> Self {
+        self.invoker = Some(invoker);
+        self
+    }
+
+    /// 注入能力注册表（tool_name → plugin_id 反查）。
+    pub fn with_registry(mut self, registry: Arc<dyn CapabilityRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// 注入会话协调器（启用 event-bus.emit 流式 chunk 推前端）。
+    pub fn with_session(mut self, session: Arc<agentos_session::SessionCoordinator>) -> Self {
+        self.session = Some(session);
+        self
     }
 }
 
@@ -117,19 +149,63 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 Ok(json!({"status": "started", "run_id": run_id}))
             }
 
-            // ── event-bus：发事件/通知（当前记录日志，前端推送留 P1-2 审批接线）──
+            // ── event-bus：发事件/通知。流式 chunk 推送的核心出口 ──
+            // sidecar（如 llm_core）每生成一个 chunk 就 notify 一次 event-bus.emit，
+            // 内核收到后调 session.emit_stream 把 chunk 推到前端 WS。
             ("event-bus", "emit") => {
                 let event_name = params
                     .get("event")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                // DEBT: 前端 WS 推送在 P1-2 审批闭环接线时实现。ceiling: 当前仅日志。
-                // upgrade: 接入 AppState 的 WS 广播通道。
-                tracing::info!(
+                let payload = params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                tracing::debug!(target: "capability:event-bus", event = %event_name, "收到 event-bus.emit");
+
+                // 流式事件族：stream_chunk / thinking_start / thinking_chunk / thinking_end
+                // 对齐 0.1 协议（bridge_events._make_event）：信封必须含 pipeline_id +
+                // message_id，否则前端 resolvePipelineId/extractMessageId 失败丢弃。
+                // thinking 系列让前端渲染思考卡片（thinkingHandler.ts）。
+                let stream_events = ["stream_chunk", "thinking_start", "thinking_chunk", "thinking_end"];
+                if stream_events.contains(&event_name) {
+                    if let Some(session) = &self.session {
+                        let thread_id = payload
+                            .get("thread_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let content = payload
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| payload.get("chunk").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        let pipeline_id = payload
+                            .get("pipeline_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let message_id = payload
+                            .get("message_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        // thinking_start/thinking_end 无 content，跳过空 content 校验
+                        let needs_content = event_name == "stream_chunk" || event_name == "thinking_chunk";
+                        if !thread_id.is_empty() && (!needs_content || !content.is_empty()) {
+                            let mut data = serde_json::json!({
+                                "pipeline_id": pipeline_id,
+                                "message_id": message_id,
+                                "_threadId": thread_id,
+                            });
+                            if !content.is_empty() {
+                                data["content"] = serde_json::Value::String(content.to_string());
+                            }
+                            let _ = session.emit_event(thread_id, event_name, data).await;
+                        }
+                    }
+                    return Ok(json!({"status": "emitted", "event": event_name}));
+                }
+
+                // 其他 event 暂只记日志（审批/通知等留后续）
+                tracing::debug!(
                     target: "capability:event-bus",
                     "plugin event: {} payload={}",
-                    event_name,
-                    params.get("payload").unwrap_or(&serde_json::Value::Null)
+                    event_name, payload
                 );
                 Ok(json!({"status": "emitted", "event": event_name}))
             }
@@ -210,6 +286,37 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     help.as_deref(),
                 );
                 Ok(json!({"status": "recorded", "plugin_id": plugin_id, "name": name}))
+            }
+
+            // ── tool-executor：sidecar（如 tool_core）委托内核执行 tool 插件 sidecar ──
+            // 0.2 sidecar 架构：tool_core sidecar 进程内没有 ToolRegistry（那是 0.1 单进程
+            // 装配的），找不到 bash_execute 等工具。tool_core 通过此 capability 反向请求
+            // 内核，内核用 invoke_tool 调对应的 tool 插件 sidecar（MCP），结果返回给 tool_core。
+            ("tool-executor", "invoke") => {
+                let tool_name = params
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "tool-executor.invoke 缺少 tool_name 参数".to_string(),
+                    })?;
+                let tool_args = params.get("args").cloned().unwrap_or(json!({}));
+                // 从 CapabilityRegistry 反查 tool_name → plugin_id（tool 插件的 manifest id）
+                let plugin_id = self
+                    .registry
+                    .as_ref()
+                    .and_then(|r| r.get_tool(tool_name))
+                    .map(|td| td.plugin_id.clone())
+                    .unwrap_or_else(|| tool_name.to_string());
+                let invoker = self.invoker.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "tool-executor 未配置 invoker".to_string(),
+                })?;
+                match invoker.invoke_tool(&plugin_id, tool_name, &tool_args).await {
+                    Ok(result) => Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"success": false}))),
+                    Err(e) => Ok(json!({
+                        "success": false,
+                        "error": format!("tool execution failed: {}", e.message),
+                    })),
+                }
             }
 
             // tenant-context / logger 暂未实现具体 method（P0-4 多租户时补 tenant-context）

@@ -241,6 +241,7 @@ async fn test_store_content_loader_chain() {
             "user",
             Some(content),
             Some(content),
+            None,
         )
         .unwrap();
 

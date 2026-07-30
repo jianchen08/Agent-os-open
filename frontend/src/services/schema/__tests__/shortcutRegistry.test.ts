@@ -45,9 +45,9 @@ describe('ShortcutRegistry — 注册与匹配', () => {
 
   it('从 contributes.shortcuts 加载快捷键绑定', () => {
     ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'editor',
+          plugin_id: 'editor',
           contributes: {
             shortcuts: [
               { command: 'editor.save', key: 'Ctrl+S', when: 'workspace.focus' },
@@ -66,8 +66,8 @@ describe('ShortcutRegistry — 注册与匹配', () => {
 
   it('matchKey 按 KeyboardEvent 归一化后查找 command', () => {
     ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
       ],
     })
     registry.refresh()
@@ -82,8 +82,8 @@ describe('ShortcutRegistry — 注册与匹配', () => {
 
   it('when 失配时不触发（shouldFire 返回 false）', () => {
     ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
       ],
     })
     registry.refresh()
@@ -97,8 +97,8 @@ describe('ShortcutRegistry — 注册与匹配', () => {
 
   it('refresh 幂等（重复加载不重复注册）', () => {
     ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
       ],
     })
     registry.refresh()
@@ -108,8 +108,8 @@ describe('ShortcutRegistry — 注册与匹配', () => {
 
   it('无 when 的快捷键恒可触发', () => {
     ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'e', contributes: { shortcuts: [{ command: 'e.global', key: 'F1' }] } },
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.global', key: 'F1' }] } },
       ],
     })
     registry.refresh()

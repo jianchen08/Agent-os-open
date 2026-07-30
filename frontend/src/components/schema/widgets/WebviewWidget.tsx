@@ -1,0 +1,174 @@
+/**
+ * WebviewWidget — VS Code 风格的插件自由 UI 沙箱（ADR §3.4'）
+ *
+ * 安全模型：
+ * - iframe 用 srcDoc 注入（前端 fetch HTML 带 Bearer → srcDoc），**不开 allow-same-origin**
+ *   → iframe 是独立 opaque origin，插件 JS 无法访问宿主 cookie/token。
+ * - sandbox = allow-scripts allow-forms allow-popups allow-modals（去掉 allow-same-origin）。
+ * - postMessage 双向通信：iframe 内 JS → parent.postMessage → 宿主校验 origin + 协议魔数
+ *   → 转发到 globalWS（带 token）。下行：widgetEventStore.latest → iframe.postMessage。
+ * - 注入 CSP meta + bootstrap JS（暴露 window.agentos.postMessage）。
+ *
+ * 与 HtmlPreviewWidget 的区别：HtmlPreviewWidget 是受信内容预览（开 allow-same-origin），
+ * WebviewWidget 是**不可信插件代码**执行沙箱（绝不开 allow-same-origin）。
+ */
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { FileWarning } from '@/assets/icons'
+import { apiClient } from '@/services/api/client'
+import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import {
+  buildWebviewMessage,
+  validateWebviewEvent,
+  type WebviewMessage,
+} from '@/utils/postMessageSecurity'
+import { loggers } from '@/utils/logger'
+
+/** Webview widget 渲染指令 props（由 RenderingEngine 从 contributes.widgets 注入） */
+export interface WebviewWidgetProps {
+  /** 插件 id（用于拼 /ext/{pluginId}/webview 端点） */
+  pluginId?: string
+  /** 插件提供的 HTML 资源路径（相对插件根，如 "webview/index.html"）；缺省取 "/webview" */
+  htmlPath?: string
+  /** widget 实例 id（订阅 widgetEventStore.latest 用） */
+  widgetId?: string
+  /** 标题 */
+  title?: string
+}
+
+/** 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。 */
+const BOOTSTRAP_JS = `<script>
+(function(){
+  var seq = 0;
+  function post(method, params){
+    var id = 'wv_' + (++seq) + '_' + Date.now();
+    var msg = { __agentos_webview: true, id: id, method: method };
+    if (params !== undefined) msg.params = params;
+    parent.postMessage(msg, '*');
+    return id;
+  }
+  window.agentos = { postMessage: post };
+  // 通知宿主 webview 已就绪
+  post('__ready', {});
+})();
+<\/script>`
+
+/** 注入 iframe 的 CSP：限制脚本/样式来源，防御 XSS。 */
+const CSP_META =
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; img-src data:; connect-src \'none\';">'
+
+/**
+ * 把原始 HTML 包装成安全 srcDoc：插 CSP meta（head 最前）+ bootstrap JS（body 末尾）。
+ * 无 head/body 时简单拼接。
+ */
+function wrapHtml(html: string): string {
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => `${m}${CSP_META}`)
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    const injected = `${CSP_META}${BOOTSTRAP_JS}`
+    return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${injected}</head>`)
+  }
+  // 无结构 HTML：包一层
+  return `<!DOCTYPE html><html><head>${CSP_META}</head><body>${html}${BOOTSTRAP_JS}</body></html>`
+}
+
+export function WebviewWidget({
+  pluginId,
+  htmlPath,
+  widgetId,
+  title,
+}: WebviewWidgetProps): React.ReactNode {
+  const [html, setHtml] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  // 订阅该 widget 的下行事件
+  const latest = useWidgetEventStore((s) => (widgetId ? s.latest[widgetId] : undefined))
+
+  const endpoint = useMemo(() => {
+    if (!pluginId) return null
+    const path = htmlPath ?? '/webview'
+    return `/ext/${pluginId}${path.startsWith('/') ? '' : '/'}${path}`
+  }, [pluginId, htmlPath])
+
+  // fetch 插件 HTML（带 Bearer token，token 不进 iframe URL）
+  useEffect(() => {
+    if (!endpoint) {
+      setError('WebviewWidget 缺少 pluginId')
+      return
+    }
+    let cancelled = false
+    apiClient
+      .get<string>(endpoint, { responseType: 'text', transformResponse: [(d) => d] })
+      .then((res) => {
+        if (cancelled) return
+        setHtml(wrapHtml(typeof res.data === 'string' ? res.data : String(res.data)))
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setError((e as Error).message ?? '加载插件 HTML 失败')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [endpoint])
+
+  // 收 iframe 上行消息（校验 origin + 协议）→ 转发 WS
+  useEffect(() => {
+    if (!iframeRef.current) return
+    const handler = (event: MessageEvent) => {
+      const msg = validateWebviewEvent(event)
+      if (!msg) return // 不可信消息丢弃
+      if (msg.method === '__ready') {
+        loggers.websocket.info(`[WebviewWidget] ${widgetId ?? '?'} 就绪`)
+        return
+      }
+      // 上行请求转发到全局 WS（具体 method 路由由后续交互任务扩展，此处先记录）
+      loggers.websocket.debug(`[WebviewWidget] 上行 ${msg.method}`, msg.params)
+      // TODO: 阶段 6b 按 method 路由到 globalWS.send 或 REST（带 token）
+    }
+    window.addEventListener('message', handler)
+    return () => window.removeEventListener('message', handler)
+  }, [widgetId])
+
+  // 下行：latest 变化时推给 iframe
+  useEffect(() => {
+    if (!latest || !iframeRef.current?.contentWindow) return
+    const msg = buildWebviewMessage('widget.event', latest)
+    // origin 用 '*' 是因为 sandbox iframe origin 是 'null'，需显式指定
+    iframeRef.current.contentWindow.postMessage(msg, '*')
+  }, [latest])
+
+  if (error) {
+    return (
+      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+        <FileWarning className="mr-2 h-5 w-5" />
+        Webview 加载失败: {error}
+      </div>
+    )
+  }
+
+  if (!html) {
+    return (
+      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+        加载 Webview...
+      </div>
+    )
+  }
+
+  return (
+    <div className="relative h-full w-full">
+      <iframe
+        ref={iframeRef}
+        srcDoc={html}
+        title={title ?? 'Webview'}
+        // 关键安全：不开 allow-same-origin → iframe 独立 opaque origin，无法访问宿主 token
+        sandbox="allow-scripts allow-forms allow-popups allow-modals"
+        className="absolute inset-0 border-0 bg-white"
+        style={{ width: '100%', height: '100%' }}
+      />
+    </div>
+  )
+}
+
+export default WebviewWidget

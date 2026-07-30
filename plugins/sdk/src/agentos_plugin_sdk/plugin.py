@@ -241,11 +241,20 @@ class AgentOSPlugin:
 
             return _call
 
+        def _make_notify_fn(_cap_name: str) -> Any:
+            async def _notify(method: str, m_params: dict[str, Any]) -> None:
+                # fire-and-forget：不等内核响应，用于流式 chunk 高频推送
+                full_method = f"{_cap_name}.{method}"
+                await channel.send_notification(full_method, m_params)
+
+            return _notify
+
         for cap_name in STANDARD_CAPABILITIES:
             if cap_name in injected_caps:
                 self._capabilities[cap_name] = CapabilityHandle(
                     name=cap_name,
                     call_fn=_make_call_fn(cap_name),
+                    notify_fn=_make_notify_fn(cap_name),
                     context=injected_caps.get(cap_name, {}) or {},
                 )
 

@@ -3,6 +3,15 @@
 //! 对应 0.1 的 `src/config/config_center.py ConfigCenter`。
 //! 基于 notify crate 实现文件监听，支持 500ms 防抖 + 内容哈希去重。
 //!
+//! ⚠️ **未接线（截至 0.2）**：本模块实现了热重载能力，但在运行期尚未启用——
+//! 没有任何 crate 依赖 `agentos-config`、`start_watching()` 从未被调用。
+//! 管道配置（config/pipelines/autonomous.yaml）目前只在启动期由
+//! `pipeline_loader::load_pipeline_config` 加载一次到 `Arc<PipelineConfig>`，
+//! 运行期不可变。修改管道配置的唯一生效方式是重启内核进程。
+//!
+//! 接线涉及 main.rs 启动流程 + 将 AppState.pipeline_config 从 `Arc`
+//! 改为可替换容器 + 并发安全，留作独立任务，不属本次持久化修复范围。
+//!
 //! [来源: src/config/config_center.py]
 
 use crate::error::ConfigError;

@@ -1,5 +1,5 @@
 {
-    "id": "monitoring_service",
+    "id": "monitoring",
     "name": "Monitoring Service",
     "version": "1.0.0",
     "plugin_type": "system",
@@ -22,5 +22,57 @@
     "permissions": {},
     "error_policy": "skip",
     "priority": 40,
-    "requires_content": 3
+    "requires_content": 3,
+    "http_endpoints": [
+        {
+            "route_id": "mon_system_metrics",
+            "method": "GET",
+            "path": "/ext/monitoring/system/metrics",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get system performance metrics (CPU/memory/disk, psutil real data)"
+        },
+        {
+            "route_id": "mon_task_statistics",
+            "method": "GET",
+            "path": "/ext/monitoring/tasks/statistics",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get task execution statistics"
+        },
+        {
+            "route_id": "mon_tasks",
+            "method": "GET",
+            "path": "/ext/monitoring/tasks",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get task list (supports ?page=&page_size=&status=)"
+        },
+        {
+            "route_id": "mon_token_usage",
+            "method": "GET",
+            "path": "/ext/monitoring/token-usage",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get token usage statistics"
+        },
+        {
+            "route_id": "mon_cache_stats",
+            "method": "GET",
+            "path": "/ext/monitoring/cache-stats",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get cache hit/miss statistics"
+        }
+    ]
 }

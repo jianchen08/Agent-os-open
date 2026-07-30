@@ -27,13 +27,18 @@ export interface NavItem {
   source?: 'kernel' | 'contributes'
 }
 
-/** 默认导航项（内核固定） */
+/**
+ * 顶栏固定入口（仅设置 / 监控，放左侧）
+ * 智能体、记忆、工具等插件相关页面不进顶栏
+ */
+const TITLEBAR_NAV_ITEMS: NavItem[] = [
+  { path: ROUTES.SETTINGS, label: '设置', order: 10, source: 'kernel' },
+  { path: ROUTES.MONITORING, label: '监控', order: 20, source: 'kernel' },
+]
+
+/** 默认导航项（内核固定；顶栏用 TITLEBAR_NAV_ITEMS） */
 const DEFAULT_NAV_ITEMS: NavItem[] = [
-  { path: ROUTES.TOOLS, label: '工具', order: 10, source: 'kernel' },
-  { path: ROUTES.AGENTS, label: '智能体', order: 20, source: 'kernel' },
-  { path: ROUTES.MONITORING, label: '监控', order: 30, source: 'kernel' },
-  { path: ROUTES.MEMORY, label: '记忆', order: 40, source: 'kernel' },
-  { path: ROUTES.SETTINGS, label: '设置', order: 50, source: 'kernel' },
+  ...TITLEBAR_NAV_ITEMS,
   { path: ROUTES.DEBUG.ROOT, label: '调试', order: 90, adminOnly: true, source: 'kernel' },
 ]
 
@@ -103,4 +108,12 @@ export function getNavItems(): NavItem[] {
  */
 export function getVisibleNavItems(isAdmin: boolean = false): NavItem[] {
   return getNavItems().filter((item) => !item.adminOnly || isAdmin)
+}
+
+/**
+ * 顶栏导航：固定「设置」「监控」，顺序固定，放左侧
+ * 不混入插件 contributes，避免顶栏被插件入口撑满
+ */
+export function getTitleBarNavItems(): NavItem[] {
+  return [...TITLEBAR_NAV_ITEMS]
 }

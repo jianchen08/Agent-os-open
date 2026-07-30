@@ -245,6 +245,23 @@ export const uiStorage = {
     return storage.getItem<boolean>(STORAGE_KEYS.SIDEBAR_COLLAPSED)
   },
 
+  /** 保存侧边栏宽度比例（0~1） */
+  setSidebarRatio(ratio: number | undefined): void {
+    storage.setItem(STORAGE_KEYS.SIDEBAR_RATIO, ratio)
+  },
+
+  /**
+   * 获取侧边栏宽度比例
+   * @returns 比例（0~1）或 null
+   */
+  getSidebarRatio(): number | null {
+    const ratio = storage.getItem<number>(STORAGE_KEYS.SIDEBAR_RATIO)
+    if (typeof ratio !== 'number' || !Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
+      return null
+    }
+    return ratio
+  },
+
   /**
    * 保存最后活跃会话ID
    * @param sessionId - 会话ID
@@ -291,6 +308,22 @@ export const uiStorage = {
    */
   getWorkspaceCollapsed(): boolean | null {
     return storage.getItem<boolean>(STORAGE_KEYS.WORKSPACE_COLLAPSED)
+  },
+
+  /**
+   * 保存工作区面板最大化状态
+   * @param maximized - 是否最大化（保留顶栏/状态栏，仅折叠侧栏+聊天）
+   */
+  setWorkspaceMaximized(maximized: boolean): void {
+    storage.setItem(STORAGE_KEYS.WORKSPACE_MAXIMIZED, maximized)
+  },
+
+  /**
+   * 获取工作区面板最大化状态
+   * @returns 是否最大化或null
+   */
+  getWorkspaceMaximized(): boolean | null {
+    return storage.getItem<boolean>(STORAGE_KEYS.WORKSPACE_MAXIMIZED)
   },
 
   /**

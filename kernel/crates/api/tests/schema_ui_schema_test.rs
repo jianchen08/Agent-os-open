@@ -38,6 +38,8 @@ fn manifest_with_ui(
         http_endpoints: vec![],
         ui_schema,
         contributes: None,
+        enabled: None,
+        activation: None,
     }
 }
 

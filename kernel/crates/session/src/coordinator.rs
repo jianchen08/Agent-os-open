@@ -76,6 +76,11 @@ impl SessionCoordinator {
         &self.registry
     }
 
+    /// 枚举当前内存中的线程列表（thread_id, user_id）。
+    pub fn list_threads(&self) -> Vec<(String, String)> {
+        self.registry.list_threads()
+    }
+
     /// 注册连接（单连接踢旧）。
     pub fn register(&self, user_id: &str, sink: Arc<dyn crate::EventSink>) -> Option<u64> {
         let kicked = self.registry.register(user_id, sink);
@@ -123,6 +128,32 @@ impl SessionCoordinator {
         self.replay
             .record(thread_id, ReplayEvent::widget(seq, widget_id, payload))
             .await;
+        delivered
+    }
+
+    /// 发送任意类型事件到 thread scope（绕过 widget_envelope 硬编码）。
+    ///
+    /// 与 emit_widget/emit_stream 的区别：那两个方法最终都走 bus.emit_inner，
+    /// 而 build_envelope 硬编码 type="widget_event"（见 event_bus.rs:236），
+    /// 发不出 new_message / stream_start / stream_end 等聊天协议事件。
+    /// 本方法直接构建 payload + registry.send_to_thread，支持任意 type。
+    ///
+    /// 用于聊天流式闭环：dispatch_user_input 把引擎结果包成 new_message 推回前端。
+    /// 不经限流（聊天事件低频，单次推送）。
+    pub async fn emit_event(&self, thread_id: &str, event_type: &str, data: Value) -> bool {
+        let sequence = self.bus.next_sequence(&EmitScope::Thread(thread_id.to_string())).await;
+        let payload = serde_json::json!({
+            "type": event_type,
+            "data": data,
+            "sequence": sequence,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+        let delivered = self.registry.send_to_thread(thread_id, &payload_str).await;
+        if delivered {
+            self.metrics.inc_event_bus_push(1);
+        } else {
+            self.metrics.inc_event_bus_dropped();
+        }
         delivered
     }
 

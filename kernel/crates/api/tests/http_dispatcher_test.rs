@@ -369,6 +369,8 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         http_endpoints: vec![endpoint("r", "POST", "/ext/good/cb")],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     };
     let bad = PluginManifest {
         id: "bad".to_string(),
@@ -394,6 +396,8 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         http_endpoints: vec![endpoint("r", "POST", "/wecom/cb")],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     };
 
     let errors = register_manifest_http_routes(&registry, &[good, bad]);

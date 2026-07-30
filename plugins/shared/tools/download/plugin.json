@@ -19,10 +19,7 @@
             "on_unload"
         ]
     },
-    "dependencies": [
-        "agentos-plugin-sdk>=0.2.0",
-        "httpx>=0.27"
-    ],
+    "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
     "priority": 30

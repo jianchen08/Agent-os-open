@@ -30,6 +30,11 @@ pub struct EngineMetrics {
     pub tool_calls_micros: AtomicU64,
     /// 迭代累计轮数（counter，每个 pipeline run 的迭代数之和）。
     pub iterations_total: AtomicU64,
+    /// 持久化落库失败累计次数（counter）。
+    ///
+    /// persist_run_start/persist_run_end/persist_trace 失败时累加。失败只 warn 不阻断管道，
+    /// 此计数器让失败可被观测（health/监控端点暴露），避免静默吞掉。
+    pub persist_failures: AtomicU64,
 }
 
 impl EngineMetrics {
@@ -69,6 +74,11 @@ impl EngineMetrics {
         self.iterations_total.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// 记录一次持久化落库失败。
+    pub fn inc_persist_failure(&self) {
+        self.persist_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 快照所有计数器。
     pub fn snapshot(&self) -> EngineMetricsSnapshot {
         EngineMetricsSnapshot {
@@ -81,6 +91,7 @@ impl EngineMetrics {
             tool_calls_total: self.tool_calls_total.load(Ordering::Relaxed),
             tool_calls_micros: self.tool_calls_micros.load(Ordering::Relaxed),
             iterations_total: self.iterations_total.load(Ordering::Relaxed),
+            persist_failures: self.persist_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -97,6 +108,7 @@ pub struct EngineMetricsSnapshot {
     pub tool_calls_total: u64,
     pub tool_calls_micros: u64,
     pub iterations_total: u64,
+    pub persist_failures: u64,
 }
 
 #[cfg(test)]

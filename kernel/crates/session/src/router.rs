@@ -18,11 +18,15 @@ use serde_json::Value;
 #[async_trait]
 pub trait PipelineDispatcher: Send + Sync {
     /// 转发用户输入到管道引擎。
+    ///
+    /// pipeline_id 是前端消息路由键（后端创建会话时回填），引擎回推流式事件时
+    /// 用它定位前端占位气泡。缺失时引擎可回退 thread_id。
     async fn dispatch_user_input(
         &self,
         thread_id: &str,
         user_id: &str,
         content: &str,
+        pipeline_id: &str,
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
@@ -86,15 +90,29 @@ impl InboundRouter {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => return RouteOutcome::Error("user_input 缺少 thread_id".into()),
         };
+        // content 兼容两种位置：
+        // - data.content：未来标准契约（WS 消息 body 统一收进 data 信封）
+        // - 顶层 content：前端 GlobalWebSocket.sendUserInput 现状（content 放顶层）
+        // 两端对齐前，读 data.content 失败时回退顶层 content，避免取到空串导致
+        // LLM 报「未正常接收到 prompt 参数」。
         let content = msg
             .get("data")
             .and_then(|d| d.get("content"))
             .and_then(|c| c.as_str())
+            .or_else(|| msg.get("content").and_then(|c| c.as_str()))
+            .unwrap_or("")
+            .to_string();
+        // pipeline_id：前端消息路由键，兼容顶层和 data.content 两种位置
+        // （与 content 同理）。引擎回推流式事件时用它定位前端占位气泡。
+        let pipeline_id = msg
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| msg.get("data").and_then(|d| d.get("pipeline_id")).and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
         match self
             .dispatcher
-            .dispatch_user_input(&thread_id, user_id, &content)
+            .dispatch_user_input(&thread_id, user_id, &content, &pipeline_id)
             .await
         {
             Ok(()) => RouteOutcome::Handled,

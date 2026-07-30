@@ -4,6 +4,8 @@
 
 export { ChatContainer } from './ChatContainer'
 export { ChatInput } from './ChatInput'
+export { ContextUsageIndicator } from './ContextUsageIndicator'
+export type { ContextUsageIndicatorProps } from './ContextUsageIndicator'
 export { MessageItem } from './MessageItem'
 export { MessageList } from './MessageList'
 

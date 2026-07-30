@@ -37,16 +37,19 @@ def _ensure_registry_loaded(registry: Any) -> None:
 
     当注册表为空时，通过 DynamicToolLoader 同步发现并加载所有可用工具，
     解决应用启动异步初始化未完成时 API 返回空数据的问题。
+
+    重要：必须对「当前 registry」加载，不能复用绑在其他 registry 上的全局
+    DynamicToolLoader。否则 ensure_loaded_sync 会认为工具已在别的表里
+    has()=True 而跳过，本 registry 仍 count()==0，/api/v1/tools 返回空列表。
     """
     if registry.count() > 0:
         return
 
     try:
-        from tools.loader import DynamicToolLoader, get_dynamic_tool_loader  # noqa: PLC0415
+        from tools.loader import DynamicToolLoader  # noqa: PLC0415
 
-        loader = get_dynamic_tool_loader()
-        if loader is None:
-            loader = DynamicToolLoader(registry)
+        # 始终用当前 registry 新建 loader，避免全局 loader 指向管道私有 registry
+        loader = DynamicToolLoader(registry)
 
         available_tools = loader.get_available_tools()
         if available_tools:
@@ -56,6 +59,31 @@ def _ensure_registry_loaded(registry: Any) -> None:
                 len(available_tools),
                 registry.count(),
             )
+        if registry.count() == 0:
+            try:
+                from tools.builtin import get_all_builtin_tools  # noqa: PLC0415
+
+                for tool_item in get_all_builtin_tools():
+                    if hasattr(tool_item, "get_tool_definition"):
+                        tool_def = tool_item.get_tool_definition()
+                        name = getattr(tool_def, "name", "")
+                        if name and not registry.has(name):
+                            try:
+                                registry.register_with_handler(
+                                    tool=tool_def,
+                                    handler=tool_item.execute,
+                                )
+                            except Exception:
+                                try:
+                                    registry.register(tool_def)
+                                except Exception:
+                                    pass
+                logger.info(
+                    "[RoutesTools] builtin 兜底加载完成 | loaded=%d",
+                    registry.count(),
+                )
+            except Exception:
+                logger.warning("[RoutesTools] builtin 兜底失败", exc_info=True)
     except Exception:
         logger.warning("[RoutesTools] 动态加载工具失败", exc_info=True)
 

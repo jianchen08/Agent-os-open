@@ -1,80 +1,92 @@
 /**
- * 统一应用导航栏
+ * TitleBar · Deep Space v2 App Shell 顶栏
  *
- * 所有布局模式共用的顶部导航栏，确保切换布局时导航栏不变
- * 三区布局：左侧(sidebar toggle + 标题) | 中间(导航按钮 + 主题) | 右侧(连接状态 + 布局切换)
+ * 通用 AI 产品做法：
+ * - 左侧：折叠侧边栏 + 品牌
+ * - 中部：会话标题
+ * - 右侧：功能入口（设置 / 监控）
  *
- * 移动端适配：
- * - < md 断点下隐藏中间导航按钮区域，改为汉堡菜单下拉
- * - 右侧连接状态改为紧凑模式
- * - 布局切换按钮只显示图标
+ * 用户 / 主题 / 通知 只放在侧栏底部，不在顶栏重复。
  */
 
-import { PanelLeftClose, PanelLeftOpen, LayoutGrid, Menu, LogOut } from '@/assets/icons'
-import React from 'react'
+import {
+  Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightIcon,
+  MaximizeWindowIcon,
+  RestoreWindowIcon,
+} from '@/assets/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { getVisibleNavItems } from '@/constants/navItems'
-import { useAuthStore } from '@/stores/authStore'
+import { getTitleBarNavItems } from '@/constants/navItems'
+import { cn } from '@/lib/utils'
+import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
-import { ConnectionStatusIndicator } from './ConnectionStatusIndicator'
-import { ThemeButton } from './ThemeButton'
-import { ThemePanel } from './ThemePanel'
 
 /** AppHeader 属性 */
 interface AppHeaderProps {
-  /** 布局切换回调 */
-  onToggleMode: () => void
-  /** 当前布局模式标签 */
-  modeLabel: string
-  /** 是否显示主题面板 */
-  showThemePanel: boolean
-  /** 主题面板开关 */
-  onShowThemePanel: (show: boolean) => void
-  /** 登出回调 */
-  onLogout: () => void
-  /** 额外的右侧内容（如 pending 计数等） */
+  /** @deprecated 主题入口已迁至侧栏底部 */
+  showThemePanel?: boolean
+  /** @deprecated */
+  onShowThemePanel?: (show: boolean) => void
+  /** @deprecated 登出挂用户菜单，侧栏用户区后续扩展 */
+  onLogout?: () => void
+  /** 额外的右侧内容（如 pending 计数） */
   extraRight?: React.ReactNode
+  /** @deprecated 兼容旧调用 */
+  onToggleMode?: () => void
+  modeLabel?: string
 }
 
 /**
- * 统一应用导航栏组件
- *
- * 使用 CSS Grid 三列布局固定各区域位置
- * 中间导航区域用 pointer-events 穿透避免遮挡左右按钮
- *
- * 移动端（< md）：隐藏中间导航区，改为右侧汉堡菜单下拉
- * 桌面端（>= md）：保持原有三栏布局
+ * 统一应用顶栏（设计稿 TitleBar）
  */
-export function AppHeader({
-  onToggleMode,
-  modeLabel,
-  showThemePanel,
-  onShowThemePanel,
-  onLogout,
-  extraRight,
-}: AppHeaderProps) {
+export function AppHeader({ extraRight }: AppHeaderProps) {
   const navigate = useNavigate()
   const location = useLocation()
+  const navItems = getTitleBarNavItems()
+  const sessions = useSessionStore((s) => s.sessions)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const sessionTitle = activeSession?.title || 'AgentOS'
+
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
-  const user = useAuthStore((s) => s.user)
-  const navItems = getVisibleNavItems(user?.role === 'admin')
+  const workspaceCollapsed = useUIStore((s) => s.workspaceCollapsed)
+  const toggleWorkspace = useUIStore((s) => s.toggleWorkspace)
+  const workspaceMaximized = useUIStore((s) => s.workspaceMaximized)
+  const toggleWorkspaceMaximize = useUIStore((s) => s.toggleWorkspaceMaximize)
+
+  const openNav = (path: string) => {
+    const opened = openWorkspacePanelByPath(path)
+    if (!opened) navigate(path)
+  }
 
   return (
-    <header className="border-border relative grid h-10 shrink-0 grid-cols-[auto_1fr_auto] items-center border-b px-2 md:px-3">
-      {/* 左侧: sidebar toggle + 标题 */}
-      <div className="flex shrink-0 items-center gap-2">
+    <header
+      className="border-border relative grid shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b px-2 md:px-3"
+      style={{
+        height: 'var(--layout-titlebar-height, 32px)',
+        background: 'var(--ds-bg-panel, hsl(var(--card)))',
+      }}
+      data-testid="app-header"
+    >
+      {/* 左侧 · 侧栏折叠 + 品牌 */}
+      <div className="flex min-w-0 shrink-0 items-center gap-1.5 md:gap-2.5">
         <button
+          type="button"
           onClick={toggleSidebar}
-          className="hover:bg-accent rounded p-1 transition-colors"
-          title={sidebarCollapsed ? '显示侧边栏' : '隐藏侧边栏'}
+          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+          title={sidebarCollapsed ? '展开侧边栏' : '隐藏侧边栏'}
+          aria-label={sidebarCollapsed ? '展开侧边栏' : '隐藏侧边栏'}
+          data-testid="titlebar-toggle-sidebar"
         >
           {sidebarCollapsed ? (
             <PanelLeftOpen className="h-4 w-4" />
@@ -82,93 +94,95 @@ export function AppHeader({
             <PanelLeftClose className="h-4 w-4" />
           )}
         </button>
-        <h1 className="text-sm font-semibold">SuperTerminal</h1>
+
+        <div
+          className="h-[22px] w-[22px] shrink-0 rounded-md"
+          style={{
+            background: 'linear-gradient(135deg, #22D3EE 0%, #A78BFA 100%)',
+          }}
+          aria-hidden
+        />
+        <h1 className="text-foreground text-[13px] font-semibold leading-none">AgentOS</h1>
       </div>
 
-      {/* 中间: 导航按钮 + 主题 —— 仅桌面端显示 */}
-      <div className="pointer-events-none hidden items-center justify-center md:flex">
-        <div className="pointer-events-auto flex items-center gap-1">
-          <nav className="flex min-w-0 items-center gap-1 overflow-x-auto">
-            {navItems.map((item) => (
-              <Button
-                key={item.path}
-                onClick={() => navigate(item.path)}
-                variant={location.pathname === item.path ? 'default' : 'outline'}
-                size="sm"
-                className="rounded-md transition-all duration-200"
-              >
-                {item.label}
-              </Button>
-            ))}
-          </nav>
-          <div className="relative ml-2">
-            <ThemeButton onClick={() => onShowThemePanel(true)} />
-            {/* 主题面板：挂在 relative 锚点内，桌面端才能用 right-0/top-full 对齐到按钮下方。
-                移动端为 fixed 底部抽屉，挂载位置不影响其定位。 */}
-            <ThemePanel isOpen={showThemePanel} onClose={() => onShowThemePanel(false)} />
-          </div>
-        </div>
+      {/* 中部 · 会话标题 */}
+      <div className="pointer-events-none flex items-center justify-center">
+        <span className="text-muted-foreground max-w-[280px] truncate text-[12px]">
+          {sessionTitle}
+        </span>
       </div>
 
-      {/* 右侧: 连接状态 + 额外内容 + 布局切换 + 移动端汉堡菜单 */}
-      <div className="flex shrink-0 items-center gap-1 md:gap-2">
-        {/* 连接状态：桌面端完整模式，移动端紧凑模式 */}
-        <div className="hidden md:block">
-          <ConnectionStatusIndicator compact={false} showLatency showQueue />
-        </div>
-        <div className="md:hidden">
-          <ConnectionStatusIndicator compact={true} />
-        </div>
-
+      {/* 右侧 · 功能入口（设置/监控）+ 工作区窗口控制 + 可选 extra */}
+      <div className="flex shrink-0 items-center justify-end gap-2 md:gap-3">
         {extraRight}
 
-        {/* 移动端主题快速切换 —— 直接显示在顶部栏 */}
-        <div className="md:hidden">
-          <ThemeButton onClick={() => onShowThemePanel(true)} />
+        <nav className="hidden items-center gap-0.5 md:flex" data-testid="titlebar-nav">
+          {navItems.map((item) => (
+            <button
+              key={item.path}
+              type="button"
+              onClick={() => openNav(item.path)}
+              className={cn(
+                'rounded px-1.5 py-0.5 text-[11px] transition-colors',
+                location.pathname === item.path ||
+                  location.pathname.startsWith(item.path + '/')
+                  ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+              title={`打开「${item.label}」面板`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* 工作区窗口控制（工作区在右侧，故控制按钮置右） */}
+        <div className="flex items-center gap-0.5">
+          {/* 工作区显隐（对齐 VS Code View: Toggle Panel） */}
+          <button
+            type="button"
+            onClick={toggleWorkspace}
+            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+            title={workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
+            aria-label={workspaceCollapsed ? '显示工作区' : '隐藏工作区'}
+            data-testid="titlebar-toggle-workspace"
+          >
+            <PanelRightIcon className="h-4 w-4" />
+          </button>
+
+          {/* 工作区最大化（保留顶栏/状态栏，仅折叠侧栏+聊天）。工作区隐藏时禁用 */}
+          <button
+            type="button"
+            onClick={toggleWorkspaceMaximize}
+            disabled={workspaceCollapsed}
+            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:pointer-events-none disabled:opacity-40"
+            title={workspaceMaximized ? '还原最大化' : '最大化'}
+            aria-label={workspaceMaximized ? '还原最大化' : '最大化'}
+            data-testid="titlebar-toggle-maximize"
+          >
+            {workspaceMaximized ? (
+              <RestoreWindowIcon className="h-4 w-4" />
+            ) : (
+              <MaximizeWindowIcon className="h-4 w-4" />
+            )}
+          </button>
         </div>
 
-        {/* 布局切换按钮 */}
-        <button
-          onClick={onToggleMode}
-          className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-1.5 py-1 text-xs transition-colors md:px-2"
-          title={`切换到${modeLabel}布局`}
-        >
-          <LayoutGrid className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">{modeLabel}</span>
-        </button>
-
-        {/* 用户名 + 登出 */}
-        {user && (
-          <>
-            <span className="text-muted-foreground hidden text-sm sm:inline">{user.username}</span>
-            <button
-              onClick={onLogout}
-              className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-1.5 py-1 text-xs transition-colors"
-              title="退出登录"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </button>
-          </>
-        )}
-
-        {/* 移动端汉堡菜单 —— 仅移动端显示 */}
+        {/* 移动端：设置/监控收进菜单 */}
         <div className="md:hidden">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
-                className="hover:bg-accent rounded p-1 transition-colors"
+                type="button"
+                className="text-muted-foreground hover:text-foreground transition-colors"
                 aria-label="导航菜单"
               >
                 <Menu className="h-4 w-4" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuContent align="end" className="w-40">
               {navItems.map((item) => (
-                <DropdownMenuItem
-                  key={item.path}
-                  onClick={() => navigate(item.path)}
-                  className={location.pathname === item.path ? 'bg-accent font-medium' : ''}
-                >
+                <DropdownMenuItem key={item.path} onClick={() => openNav(item.path)}>
                   {item.label}
                 </DropdownMenuItem>
               ))}

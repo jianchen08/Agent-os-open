@@ -174,6 +174,8 @@ fn test_manifest_programmatic_construction_with_native_wasm() {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     };
     assert_eq!(manifest.host_type, HostType::Wasm);
     assert!(manifest.native.is_none());

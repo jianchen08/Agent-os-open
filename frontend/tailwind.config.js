@@ -87,7 +87,7 @@ export default {
                           linear-gradient(90deg, var(--border-default) 1px, transparent 1px)`,
       },
       fontFamily: {
-        ui: ['Inter', 'sans-serif'],
+        ui: ['Noto Sans SC', 'Inter', 'sans-serif'],
         code: ['JetBrains Mono', 'monospace'],
       },
       boxShadow: {

@@ -252,7 +252,14 @@ apiClient.interceptors.response.use(
             ? ErrorType.VALIDATION
             : ErrorType.NETWORK
 
-    const isOptionalEndpoint = requestUrl.includes('/files/capabilities')
+    // 可选端点：前端会调但后端可能尚未实现/非核心路径，404 不上报刷屏
+    // 真实业务失败仍通过 Promise.reject 交给调用方处理
+    const isOptionalEndpoint =
+      requestUrl.includes('/files/capabilities') ||
+      requestUrl.includes('/floating-chat/') ||
+      requestUrl.includes('/evaluation-metrics') ||
+      requestUrl.includes('/agent-calls') ||
+      requestUrl.includes('/triggers')
 
     if (!isOptionalEndpoint) {
       reportError(

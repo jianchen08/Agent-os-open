@@ -9,27 +9,27 @@
 :root {
   color-scheme: dark light;
 
-  /* shadcn/ui 核心变量 - Light 模式默认值 */
-  --background: 0 0% 100%;
-  --foreground: 222.2 84% 4.9%;
+  /* shadcn/ui 核心变量 - Light 默认 = Deep Space 反转 */
+  --background: 214 40% 97%;           /* #F4F7FB */
+  --foreground: 222 47% 8%;            /* #0B1220 */
   --card: 0 0% 100%;
-  --card-foreground: 222.2 84% 4.9%;
+  --card-foreground: 222 47% 8%;
   --popover: 0 0% 100%;
-  --popover-foreground: 222.2 84% 4.9%;
+  --popover-foreground: 222 47% 8%;
   --panel-solid: 0 0% 100%;
-  --primary: 222.2 47.4% 11.2%;
+  --primary: 192 85% 36%;              /* #0891B2 */
   --primary-foreground: 210 40% 98%;
-  --secondary: 210 40% 96.1%;
-  --secondary-foreground: 222.2 47.4% 11.2%;
-  --muted: 210 40% 96.1%;
-  --muted-foreground: 215.4 16.3% 46.9%;
-  --accent: 210 40% 96.1%;
-  --accent-foreground: 222.2 47.4% 11.2%;
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 214.3 31.8% 91.4%;
-  --input: 214.3 31.8% 91.4%;
-  --ring: 222.2 84% 4.9%;
+  --secondary: 215 28% 93%;            /* elevated */
+  --secondary-foreground: 215 25% 27%; /* #334155 */
+  --muted: 215 28% 93%;
+  --muted-foreground: 215 16% 47%;     /* #64748B */
+  --accent: 215 28% 93%;
+  --accent-foreground: 222 47% 8%;
+  --destructive: 0 72% 51%;            /* #DC2626 */
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 20% 88%;
+  --input: 215 20% 88%;
+  --ring: 192 85% 36%;
   --radius: 0.5rem;
   --chart-1: 220 70% 50%;
   --chart-2: 160 60% 45%;
@@ -54,16 +54,16 @@
   --font-size-2xl: 1.5rem;
   --font-size-3xl: 1.875rem;
 
-  /* 字体族 */
-  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-  --font-family-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  /* 字体族 — Deep Space v2: UI 用 Noto Sans SC，数据/代码用 JetBrains Mono */
+  --font-family: 'Noto Sans SC', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-family-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
-  /* 圆角 */
+  /* 圆角 — Deep Space v2: r-sm 6 / r-md 8 / r-lg 10 / r-xl 12 / bubble 16 */
   --radius-sm: 0.375rem;
   --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
-  --radius-2xl: 1.25rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
   --radius-full: 9999px;
 
   /* 消息气泡圆角 */
@@ -85,25 +85,21 @@
   --shadow-float: 0 8px 30px rgb(0 0 0 / 0.08);
   --shadow-card: 0 2px 8px rgb(0 0 0 / 0.05);
 
-  /* 侧边栏 */
-  --sidebar-bg: #F7F7F8;
+  /* 侧边栏 — Deep Space light */
+  --sidebar-bg: #EEF2F8;
 
   /* 品牌辅助色 */
-  --brand-accent: hsl(221.2 83.2% 53.3%);
-  --brand-accent-light: hsl(221.2 83.2% 93.3%);
-  --brand-success: hsl(142 76% 36%);
-  --brand-success-light: hsl(142 76% 90%);
+  --brand-accent: hsl(192 85% 36%);
+  --brand-accent-light: hsl(192 70% 92%);
+  --brand-success: hsl(160 84% 30%);
+  --brand-success-light: hsl(152 60% 90%);
 
-  /* 语义色 HSL 默认值（供 Tailwind 语义色和组件变量引用） */
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 0 0% 100%;
-
-  /* 状态强调色（与 theme.css 保持一致，Light 模式默认值） */
-  --accent-running: #0ea5e9;
-  --accent-waiting: #f59e0b;
-  --accent-success: #10b981;
-  --accent-error: #ef4444;
-  --accent-pending: #94a3b8;
+  /* 状态强调色 — light 反转加深以保证对比 */
+  --accent-running: #0891B2;
+  --accent-waiting: #D97706;
+  --accent-success: #059669;
+  --accent-error: #DC2626;
+  --accent-pending: #64748B;
 
   /* === 组件级样式变量 === */
 
@@ -168,20 +164,20 @@
   --input-focus-ring: 0 0 0 3px hsl(var(--primary) / 0.15);
   --input-focus-shadow: 0 0 8px hsl(var(--primary) / 0.15);
 
-  /* 状态指示器 */
-  --status-running-color: #0ea5e9;
-  --status-running-shadow: 0 0 10px rgba(14, 165, 233, 0.2);
+  /* 状态指示器 — light */
+  --status-running-color: #0891B2;
+  --status-running-shadow: 0 0 10px rgba(8, 145, 178, 0.15);
 
-  --status-waiting-color: #f59e0b;
-  --status-waiting-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+  --status-waiting-color: #D97706;
+  --status-waiting-shadow: 0 0 10px rgba(217, 119, 6, 0.15);
 
-  --status-success-color: #10b981;
-  --status-success-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+  --status-success-color: #059669;
+  --status-success-shadow: 0 0 10px rgba(5, 150, 105, 0.15);
 
-  --status-error-color: #ef4444;
-  --status-error-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
+  --status-error-color: #DC2626;
+  --status-error-shadow: 0 0 10px rgba(220, 38, 38, 0.15);
 
-  --status-pending-color: #94a3b8;
+  --status-pending-color: #64748B;
   --status-pending-shadow: none;
 
   /* 状态别名变量（不带 -color 后缀，供 Tailwind 引用） */
@@ -217,29 +213,29 @@
   --floating-quote-hover-bg: hsl(var(--accent));
 }
 
-/* === Dark 模式覆盖 === */
+/* === Dark 模式覆盖 — Deep Space v2（设计稿 A 区默认主题规范）=== */
 .dark {
-  /* shadcn/ui 核心变量 - Dark 模式覆盖 */
-  --background: 222.2 84% 4.9%;
-  --foreground: 210 40% 98%;
-  --card: 222.2 84% 4.9%;
-  --card-foreground: 210 40% 98%;
-  --popover: 222.2 84% 4.9%;
-  --popover-foreground: 210 40% 98%;
-  --panel-solid: 222.2 84% 4.9%;
-  --primary: 217.2 91.2% 59.8%;
-  --primary-foreground: 222.2 47.4% 11.2%;
-  --secondary: 217.2 32.6% 17.5%;
-  --secondary-foreground: 210 40% 98%;
-  --muted: 217.2 32.6% 17.5%;
-  --muted-foreground: 215 20.2% 65.1%;
-  --accent: 217.2 32.6% 17.5%;
-  --accent-foreground: 210 40% 98%;
-  --destructive: 0 62.8% 30.6%;
+  /* shadcn/ui 核心变量 - 映射设计稿变量集 */
+  --background: 229 58% 4%;          /* bg-canvas #04060F */
+  --foreground: 210 40% 96.1%;       /* text-primary #F1F5F9 */
+  --card: 223 58% 9%;                /* bg-panel #0A1226 */
+  --card-foreground: 210 40% 96.1%;
+  --popover: 223 53% 14%;            /* bg-elevated #111C38 */
+  --popover-foreground: 210 40% 96.1%;
+  --panel-solid: 223 58% 9%;
+  --primary: 188 86% 53%;            /* accent-primary #22D3EE */
+  --primary-foreground: 229 58% 4%;
+  --secondary: 223 47% 19%;          /* bg-hover #1A2748 */
+  --secondary-foreground: 213 27% 84%;  /* text-secondary #CBD5E1 */
+  --muted: 223 47% 19%;
+  --muted-foreground: 215 20.2% 65.1%;  /* text-muted #94A3B8 */
+  --accent: 223 47% 19%;
+  --accent-foreground: 210 40% 96.1%;
+  --destructive: 0 91% 71%;          /* status-error #F87171 */
   --destructive-foreground: 210 40% 98%;
-  --border: 217.2 32.6% 17.5%;
-  --input: 217.2 32.6% 17.5%;
-  --ring: 224.3 76.3% 48%;
+  --border: 223 35% 16%;             /* border-subtle 混合实色 */
+  --input: 223 35% 16%;
+  --ring: 188 86% 53%;
 
   /* 阴影 - dark模式更深 */
   --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3);

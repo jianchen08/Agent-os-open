@@ -175,8 +175,12 @@ async fn handle_inbound(
     }
     match router.route(&msg, user_id).await {
         RouteOutcome::Heartbeat => {
-            // 心跳确认由调用方 sink 处理；此处仅记录
-            tracing::debug!(user = user_id, "heartbeat");
+            // 回 heartbeat_ack：对照 0.1，前端连续收不到 ack 会判定连接死亡断连
+            // （之前只打日志不回 ack，导致 LLM 生成期间连接被前端超时断开）。
+            let ack = serde_json::json!({"type": "heartbeat_ack", "data": {"timestamp": chrono::Utc::now().to_rfc3339()}});
+            let ack_str = serde_json::to_string(&ack).unwrap_or_default();
+            session.registry().send_to_user(user_id, &ack_str).await;
+            tracing::debug!(user = user_id, "heartbeat -> ack");
         }
         RouteOutcome::Error(e) => warn!(user = user_id, error = %e, "入站路由错误"),
         RouteOutcome::Handled | RouteOutcome::Ignored => {}
@@ -204,17 +208,56 @@ impl PipelineDispatcher for EngineDispatcher {
         thread_id: &str,
         user_id: &str,
         content: &str,
+        pipeline_id: &str,
     ) -> Result<(), String> {
         use agentos_core::types::TenantContext;
         let tenant = TenantContext::new(user_id.to_string(), thread_id.to_string());
         let state = self.state.clone();
         let content = content.to_string();
-        // 在租户上下文内执行管道（与 server.rs chat 路径一致）
-        let _response =
-            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos"))
+        // pipeline_id 是前端消息路由键，引擎回推流式事件时用它定位占位气泡。
+        // 缺失时回退 thread_id（前端 handleStreamStart 的 resolvePipelineId
+        // 不回退 _threadId，故缺失会导致事件被丢弃——这里尽量传真实值）。
+        let route_id = if pipeline_id.is_empty() { thread_id } else { pipeline_id };
+
+        // 生成 assistant message_id（内核权威，sidecar chunk + new_message 共用）。
+        // 对照 0.1 bridge.emit_start：在 LLM 调用前就发 stream_start + 确定 message_id，
+        // 这样 sidecar 边生成边推的 stream_chunk 能匹配到占位气泡（前端 ensureStreamingPlaceholder）。
+        let message_id = format!("a_{}", uuid::Uuid::new_v4().simple());
+
+        if let Some(session) = state.session.as_ref() {
+            // 1. stream_start 提前发（在引擎执行前），让前端先建立占位气泡
+            let _ = session
+                .emit_event(thread_id, "stream_start", serde_json::json!({
+                    "pipeline_id": route_id,
+                    "message_id": message_id,
+                    "_threadId": thread_id,
+                }))
                 .await;
-        // 注：完整实现需把 _response 通过 session.event_bus 流式推回前端；
-        // 当前 process_via_engine 为非流式返回，保持与既有 chat 端点一致的语义。
+        }
+
+        // 在租户上下文内执行管道。message_id 注入 state 供 sidecar 流式 chunk 携带
+        // （sidecar on_chunk notify 时带上，前端据此把 chunk 路由到占位气泡）。
+        let response =
+            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos", &[], route_id, thread_id, &message_id))
+                .await;
+
+        // 引擎完成后发 new_message 收尾（填充完整内容 + 标记 completed）。
+        // 对照 0.1 bridge.emit_finish：完整内容由最终事件推送，chunk 只负责逐字显示。
+        if let Some(session) = state.session.as_ref() {
+            let delivered = session
+                .emit_event(thread_id, "new_message", serde_json::json!({
+                    "pipeline_id": route_id,
+                    "message_id": message_id,
+                    "_threadId": thread_id,
+                    "content": response,
+                    "parts": [{ "type": "text", "text": response }],
+                    "sequence": 1,
+                }))
+                .await;
+            info!(thread = thread_id, delivered = delivered, "new_message 推送完成");
+        } else {
+            tracing::warn!(thread = thread_id, "session 未启用，引擎结果无法推回前端");
+        }
         Ok(())
     }
 

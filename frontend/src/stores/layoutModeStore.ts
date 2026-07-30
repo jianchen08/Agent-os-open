@@ -120,8 +120,8 @@ interface LayoutModeActions {
 export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
   persist(
     (set) => ({
-      // Layout mode
-      mode: 'classic',
+      // Layout mode — Deep Space App Shell (TitleBar 32 / SideBar / StatusBar 22)
+      mode: 'five-space',
 
       // Five-space layout state
       floatingWindows: [],

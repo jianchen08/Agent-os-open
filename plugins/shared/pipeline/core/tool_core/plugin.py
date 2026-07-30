@@ -65,6 +65,13 @@ class ToolCore(ICorePlugin):
         self._tool_registry: ToolRegistry | None = None
         self._default_timeout: float = self._config.get("timeout", 30.0)
         self._tool_timeouts: dict[str, float] = self._config.get("tool_timeouts", {})
+        # 0.2 sidecar 适配:委托内核执行 tool 插件 sidecar 的回调函数。
+        # server.py on_load 时注入(通过 tool-executor capability)。None = 进程内模式(0.1)。
+        self._kernel_tool_delegate: Callable[..., Any] | None = None
+
+    def set_kernel_tool_delegate(self, delegate: Callable[..., Any]) -> None:
+        """注入内核工具委托执行回调(0.2 sidecar 模式)。"""
+        self._kernel_tool_delegate = delegate
 
     @property
     def name(self) -> str:
@@ -382,6 +389,19 @@ class ToolCore(ICorePlugin):
         func = self._get_tool(tool_name)
         if func is None:
             func = await self._try_auto_load_tool(tool_name)
+
+        # 0.2 sidecar 适配:进程内找不到工具时,委托内核执行 tool 插件 sidecar。
+        # sidecar 进程没有 0.1 的 ToolRegistry(单进程装配的),bash_execute 等工具
+        # 在独立 sidecar 里。通过 tool-executor capability 反向请求内核 invoke_tool。
+        if func is None and self._kernel_tool_delegate is not None:
+            try:
+                result = await self._kernel_tool_delegate(tool_name, tool_args)
+                if isinstance(result, dict) and result.get("success"):
+                    return result
+                # 委托失败(返回 error)→ 记录但继续到下面的 not found 兜底
+                logger.warning("[%s] kernel delegate failed for %s: %s", self.name, tool_name, result.get("error", "?"))
+            except Exception as e:
+                logger.warning("[%s] kernel delegate error for %s: %s", self.name, tool_name, e)
 
         if func is None:
             logger.warning("[%s] Tool not found: %s", self.name, tool_name)
@@ -962,6 +982,8 @@ class ToolCore(ICorePlugin):
         submitted_task_ids = list(ctx.state.get("submitted_task_ids", []))
         evaluation_completed = False
         conversation_activated = False
+        latest_task_id = ""
+        latest_task_workspace = ""
         for r in results:
             if not r.get("success"):
                 continue
@@ -969,10 +991,17 @@ class ToolCore(ICorePlugin):
             if not isinstance(tool_data, dict):
                 continue
             meta = tool_data.get("metadata") or r.get("metadata", {})
-            if isinstance(meta, dict) and meta.get("action") == "task_submit":
+            if isinstance(meta, dict) and meta.get("action") in ("task_submit", "task_submit_container"):
                 tid = tool_data.get("task_id")
                 if tid and tid not in submitted_task_ids:
                     submitted_task_ids.append(tid)
+                # 收集任务数据(task_id + workspace),稍后写进执行者管道 state。
+                # 后续 bash_execute 的隔离链路从 state.workspace 创建 cua-<workspace> 容器。
+                if tid:
+                    latest_task_id = tid
+                ws = tool_data.get("resolved_workspace") or tool_data.get("workspace")
+                if ws:
+                    latest_task_workspace = ws
             tool_name = r.get("tool_name", "")
             if tool_name == "task_evaluate" and isinstance(meta, dict) and meta.get("result") == "completed":
                 evaluation_completed = True
@@ -997,6 +1026,13 @@ class ToolCore(ICorePlugin):
         }
         if submitted_task_ids:
             return_dict["submitted_task_ids"] = submitted_task_ids
+        # 把最新任务的 task_id + workspace 写进执行者管道 state。
+        # 后续 bash_execute 的隔离链路(isolation_guard 决策 → tool_core 创建
+        # cua-<workspace> 容器)从 state 读 workspace。不覆盖已有值(上游可能已设)。
+        if latest_task_id:
+            return_dict.setdefault("task_id", latest_task_id)
+        if latest_task_workspace:
+            return_dict.setdefault("workspace", latest_task_workspace)
         if evaluation_completed:
             return_dict["task_evaluation_completed"] = True
         if has_task_failed:

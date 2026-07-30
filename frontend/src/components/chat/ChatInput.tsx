@@ -2,7 +2,6 @@
 
 import {
   AlertCircle,
-  Database,
   File as FileIcon,
   Image as ImageIcon,
   Loader2,
@@ -13,6 +12,7 @@ import {
   Square,
   X,
 } from '@/assets/icons'
+import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
@@ -31,11 +31,6 @@ const formatFileSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-/** 格式化数字（添加千位分隔符） */
-const formatNumber = (num: number): string => {
-  return num.toLocaleString('en-US')
 }
 
 /** 格式化录音时长为 mm:ss */
@@ -647,7 +642,7 @@ export const ChatInput = ({
           role="alert"
           className="text-destructive bg-destructive/10 mb-3 flex items-center gap-2 rounded-xl p-2 text-sm"
         >
-          <AlertCircle size={16} className="flex-shrink-0" />
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">{uploadError}</span>
           <Button
             variant="ghost"
@@ -661,16 +656,16 @@ export const ChatInput = ({
         </div>
       )}
 
-      {/* 输入框容器 */}
+      {/* 输入框容器 · Deep Space v2: r-xl 12, border-active 青色 */}
       <div
         className={cn(
-          'relative rounded-2xl border',
-          'bg-background/80 border-border/50',
-          'shadow-sm transition-shadow duration-200',
-          isExpanded
-            ? 'shadow-md focus-within:border-primary/50'
-            : 'hover:shadow-md focus-within:ring-ring/50 focus-within:border-primary/50 focus-within:ring-2',
+          'relative rounded-xl border transition-shadow duration-200',
+          'bg-white/[0.04]',
         )}
+        style={{
+          borderColor: 'var(--ds-border-active, rgba(34, 211, 238, 0.45))',
+          boxShadow: '0 0 0 1px transparent',
+        }}
       >
         {/* 展开/收起编辑器按钮：固定在输入框右上角，悬浮于文本之上 */}
         <Button
@@ -810,43 +805,12 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 模型名和 Token 统计：模型无效时如实显示「模型无效」，不用默认值冒充 */}
-            {modelName ? (
-              <div className="bg-primary/10 border-primary/20 hidden h-8 items-center gap-2 rounded-lg border px-3 text-xs sm:flex">
-                <Database className="text-primary h-3.5 w-3.5" />
-                <span className="text-primary font-semibold">{modelName}</span>
-                {maxTokens > 0 && (
-                  <>
-                    <span className="text-primary/40">|</span>
-                    <div className="bg-primary/20 h-1.5 w-20 overflow-hidden rounded-full">
-                      <div
-                        className={cn(
-                          'h-full rounded-full transition-all duration-300',
-                          currentTokenUsage / maxTokens >= 0.9
-                            ? 'bg-status-error'
-                            : currentTokenUsage / maxTokens >= 0.7
-                              ? 'bg-status-warning'
-                              : 'bg-status-success',
-                        )}
-                        style={{
-                          width: `${Math.min((currentTokenUsage / maxTokens) * 100, 100)}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-primary font-medium">
-                      {formatNumber(currentTokenUsage)}
-                    </span>
-                    <span className="text-primary/50">/</span>
-                    <span className="text-primary/70">{formatNumber(maxTokens)}</span>
-                  </>
-                )}
-              </div>
-            ) : (
-              <div className="hidden h-8 items-center gap-2 rounded-lg border border-muted/20 px-3 text-xs text-muted-foreground sm:flex">
-                <AlertCircle className="h-3.5 w-3.5" />
-                <span>模型无效</span>
-              </div>
-            )}
+            {/* 模型名 + 上下文进度条（与原输入栏一致） */}
+            <ContextUsageIndicator
+              modelName={modelName}
+              currentTokenUsage={currentTokenUsage}
+              maxTokens={maxTokens}
+            />
           </div>
 
           {/* 发送/停止按钮 */}

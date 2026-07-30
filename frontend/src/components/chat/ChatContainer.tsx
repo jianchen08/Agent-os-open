@@ -293,8 +293,11 @@ export const ChatContainer = ({
       {/* 活跃投票面板 */}
       <ActiveVotingPanels sessionId={sessionId} />
 
-      {/* 输入区域 + 通知中心 */}
-      <div className="relative shrink-0">
+      {/* 输入区域 + 通知中心 · Deep Space v2: 上边框 + 12px 内边距 */}
+      <div
+        className="relative shrink-0 border-t px-3 py-3"
+        style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+      >
         <div className="absolute -top-10 right-2 z-10">
           <NotificationCenter />
         </div>
@@ -306,8 +309,12 @@ export const ChatContainer = ({
           isGenerating={effectiveIsGenerating}
           onSendMessage={(params) => {
             if (isSubTabFinished) return
-            // 所有管道（主标签/子标签）一律带 pipelineId，管道ID是唯一路由标识
-            const pid = activeTab?.pipelineRunId || pipelineActiveId
+            // 管道 ID 用单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道 ID，
+            // 子标签=sub_agent_created 事件下发的子管道 ID）。
+            // 不再 fallback 到 store 级 activePipelineId——发送是确定性动作，
+            // 必须用当前标签确定的 ID，混用会导致消息路由错管道。
+            const pid = activeTab?.pipelineRunId
+            if (!pid) return
             onSendMessage({ ...params, pipelineId: pid })
           }}
           onStopGenerate={onStopGenerate}

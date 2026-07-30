@@ -339,6 +339,14 @@ class MemorySearchRequest(BaseModel):
     method: str = "keyword"
 
 
+class MemoryCreate(BaseModel):
+    """创建记忆请求模型（联调/管理写入入口）。"""
+
+    content: str
+    memory_type: str = "semantic"
+    tags: list[str] = Field(default_factory=list)
+
+
 class MemoryResponse(BaseModel):
     """记忆条目响应模型。"""
 

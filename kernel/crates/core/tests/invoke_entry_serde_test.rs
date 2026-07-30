@@ -79,6 +79,8 @@ fn test_none_invoke_entry_omitted_in_serialization() {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
         invoke_entry: None,
     };
 

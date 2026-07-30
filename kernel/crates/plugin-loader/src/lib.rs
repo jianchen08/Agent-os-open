@@ -12,12 +12,14 @@
 //! [来源: docs/0.2_rust_plugin_solution.md §3.7]
 //! [来源: docs/tasks/task_05_plugin_system.md]
 
+pub mod enablement;
 pub mod error;
 pub mod loader;
 pub mod native_loader;
 pub mod registry;
 pub mod wasm_loader;
 
+pub use enablement::{PluginEnablement, PluginProfile, ProfileEntry};
 pub use error::LoaderError;
 pub use loader::{AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl};
 pub use native_loader::NativePluginLoader;

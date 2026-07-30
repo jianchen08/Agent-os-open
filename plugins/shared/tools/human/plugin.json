@@ -19,9 +19,7 @@
             "on_unload"
         ]
     },
-    "dependencies": [
-        "agentos-plugin-sdk>=0.2.0"
-    ],
+    "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
     "priority": 15

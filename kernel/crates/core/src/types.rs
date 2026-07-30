@@ -550,6 +550,50 @@ pub struct MessageRecord {
     pub content_preview: Option<String>,
     /// 创建时间（ISO8601）
     pub created_at: String,
+    /// 所属管道 ID（= 其他项目的会话 id）。消息层查询主键，对齐 0.1 pipeline_run_id。
+    /// 可空，兼容迁移前的历史数据。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<String>,
+}
+
+/// sessions 表记录——会话标签夹（域2，对齐 0.1 SessionModel）。
+///
+/// **解耦设计**：会话只是一个聚合管道引用的标签夹，自身不存储消息。
+/// `pipeline_ids` 是 JSON 引用列表（对齐 0.1 `SessionModel.pipeline_ids`），
+/// 消息按 pipeline_id 在 messages 表自治存储，会话层不反向 join。
+///
+/// [来源: src/infrastructure/session/models.py SessionModel]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    /// 会话 ID（= thread_id = 0.1 session_id）
+    pub thread_id: String,
+    /// 会话标题（可空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 意图描述（可空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// 当前状态（active/idle 等），默认 active
+    pub current_state: String,
+    /// 关联 agent ID（可空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 最近活跃的 pipeline_id（仅引用；子管道注册时不覆盖它，对齐 0.1 set_active=False）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_pipeline_id: Option<String>,
+    /// 属于本会话的 pipeline_id 引用列表（对齐 0.1 SessionModel.pipeline_ids）
+    #[serde(default)]
+    pub pipeline_ids: Vec<String>,
+    /// 元数据（session_type/pinned/starred 等，JSON）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// 创建时间（ISO8601）
+    pub created_at: String,
+    /// 更新时间（ISO8601）
+    pub updated_at: String,
+    /// 最近活跃时间（可空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<String>,
 }
 
 /// traces 表 Patch 类型（traces 表 patch_type 字段）。

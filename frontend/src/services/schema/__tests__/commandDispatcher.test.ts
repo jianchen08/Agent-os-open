@@ -56,9 +56,9 @@ describe('CommandDispatcher — modal trigger（P5-d）', () => {
   it('命令触发 modal：声明 trigger=on_command:xxx 的 modal 被打开', async () => {
     // 模拟插件声明：cost.showReport 命令 + 对应 modal
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'cost',
+          plugin_id: 'cost',
           contributes: {
             commands: [{ id: 'cost.showReport', title: '显示成本报告', category: '成本' }],
             modal: [
@@ -89,8 +89,8 @@ describe('CommandDispatcher — modal trigger（P5-d）', () => {
 
   it('无 modal 绑定的命令不触发 modal 打开', async () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'p', contributes: { commands: [{ id: 'p.cmd', title: 'P' }] } },
+      plugin_contributes: [
+        { plugin_id: 'p', contributes: { commands: [{ id: 'p.cmd', title: 'P' }] } },
       ],
     })
     const onModalOpen = vi.fn()
@@ -114,9 +114,9 @@ describe('CommandDispatcher — 命令面板搜索（P5-b）', () => {
 
   it('searchCommands 按标题模糊匹配', () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'cost',
+          plugin_id: 'cost',
           contributes: {
             commands: [
               { id: 'cost.showReport', title: '显示成本报告', category: '成本' },
@@ -125,7 +125,7 @@ describe('CommandDispatcher — 命令面板搜索（P5-b）', () => {
           },
         },
         {
-          module_id: 'editor',
+          plugin_id: 'editor',
           contributes: { commands: [{ id: 'editor.save', title: '保存文件', category: '编辑' }] },
         },
       ],
@@ -138,8 +138,8 @@ describe('CommandDispatcher — 命令面板搜索（P5-b）', () => {
 
   it('空查询返回全部命令', () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'p', contributes: { commands: [{ id: 'p.a', title: 'A' }, { id: 'p.b', title: 'B' }] } },
+      plugin_contributes: [
+        { plugin_id: 'p', contributes: { commands: [{ id: 'p.a', title: 'A' }, { id: 'p.b', title: 'B' }] } },
       ],
     })
     expect(dispatcher.searchCommands('')).toHaveLength(2)
@@ -147,9 +147,9 @@ describe('CommandDispatcher — 命令面板搜索（P5-b）', () => {
 
   it('搜索匹配 category', () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'p',
+          plugin_id: 'p',
           contributes: {
             commands: [
               { id: 'p.a', title: 'AAA', category: '编辑' },
@@ -165,8 +165,8 @@ describe('CommandDispatcher — 命令面板搜索（P5-b）', () => {
 
   it('搜索大小写不敏感', () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
-        { module_id: 'p', contributes: { commands: [{ id: 'p.csv', title: 'Export CSV' }] } },
+      plugin_contributes: [
+        { plugin_id: 'p', contributes: { commands: [{ id: 'p.csv', title: 'Export CSV' }] } },
       ],
     })
     expect(dispatcher.searchCommands('csv')).toHaveLength(1)
@@ -186,9 +186,9 @@ describe('CommandDispatcher — when 过滤', () => {
 
   it('getVisibleCommands 过滤掉 when 失配的命令', () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'p',
+          plugin_id: 'p',
           contributes: {
             commands: [
               { id: 'p.always', title: '总是可见' },
@@ -211,9 +211,9 @@ describe('CommandDispatcher — when 过滤', () => {
 
   it('getVisibleMenus 按 location + when 过滤', () => {
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
-      modules: [
+      plugin_contributes: [
         {
-          module_id: 'p',
+          plugin_id: 'p',
           contributes: {
             menus: [
               { id: 'p.m1', location: 'workspace/context', title: 'M1', command: 'c1' },

@@ -16,7 +16,7 @@
         "route_signals": [],
         "lifecycle_hooks": ["on_load", "on_unload"]
     },
-    "dependencies": ["aiohttp", "cryptography"],
+    "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
     "priority": 50,

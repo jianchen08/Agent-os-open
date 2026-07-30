@@ -1,21 +1,20 @@
 @echo off
 REM ============================================================
-REM  AgentOS 0.2 启动脚本 (Windows) — 方案B
+REM  AgentOS 0.2 Launcher (Windows) - pure 0.2 architecture
 REM
-REM  启动三个服务：
-REM    1. channel_api (Python FastAPI, :8988) — 提供全部 /api/v1/* 端点
-REM    2. 内核 (Rust, :9100) — 管道引擎，被 channel_api 通过 MCP 调用
-REM    3. 前端 (Vite, :5290) — 连 channel_api:8988
+REM  Starts two services (frontend directly proxies to 0.2 Rust kernel,
+REM  no 0.1 channel_api):
+REM    1. kernel  (Rust, :9100) - serves /api/v1/* /ws /metrics
+REM    2. frontend (Vite, :5290) - proxies to kernel:9100
 REM
-REM  用法:
-REM    start_web_02.bat              完整启动
-REM    start_web_02.bat --no-build   跳过内核编译
-REM    start_web_02.bat --kernel-only 仅启动内核
+REM  Usage:
+REM    start_web_02.bat              full start (release build)
+REM    start_web_02.bat --no-build   skip kernel build
+REM    start_web_02.bat --kernel-only  start kernel only
 REM
-REM  环境变量:
-REM    AGENTOS_KERNEL_PORT   内核端口  (默认 9100)
-REM    AGENTOS_FRONTEND_PORT 前端端口  (默认 5290)
-REM    BACKEND_PORT          channel_api端口 (默认 8988)
+REM  Env vars:
+REM    AGENTOS_KERNEL_PORT   kernel port    (default 9100)
+REM    AGENTOS_FRONTEND_PORT frontend port  (default 5290)
 REM ============================================================
 setlocal EnableDelayedExpansion
 
@@ -23,10 +22,9 @@ cd /d "%~dp0"
 set "PROJECT_ROOT=%cd%"
 set "KERNEL_DIR=%PROJECT_ROOT%\kernel"
 set "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
-set "CHANNEL_API_DIR=%PROJECT_ROOT%\plugins\shared\system\channel_api"
-set "KERNEL_BIN=%KERNEL_DIR%\target\debug\agentos-kernel.exe"
+set "KERNEL_BIN=%KERNEL_DIR%\target\release\agentos-kernel.exe"
 
-REM 解析参数
+REM parse args
 set "NO_BUILD=0"
 set "KERNEL_ONLY=0"
 :PARSE_ARGS
@@ -37,47 +35,40 @@ shift
 goto PARSE_ARGS
 :AFTER_ARGS
 
-REM 端口配置
-if not defined BACKEND_PORT set "BACKEND_PORT=8988"
+REM port config
 if not defined AGENTOS_KERNEL_PORT set "AGENTOS_KERNEL_PORT=9100"
 if not defined AGENTOS_FRONTEND_PORT set "AGENTOS_FRONTEND_PORT=5290"
 
 echo ========================================
-echo   AgentOS 0.2 Launcher (Plan B)
+echo   AgentOS 0.2 Launcher (pure 0.2)
 echo ========================================
-echo   channel_api: http://localhost:%BACKEND_PORT%
 echo   kernel:      http://localhost:%AGENTOS_KERNEL_PORT%
 if not "%KERNEL_ONLY%"=="1" echo   frontend:    http://localhost:%AGENTOS_FRONTEND_PORT%
 echo.
 
 REM ============================================================
-REM  清理旧实例（杀内核进程树 + channel_api + 前端）
+REM  Stop old instances (kernel process tree + frontend).
 REM ============================================================
 echo [CLEAN] Stopping old instances...
 
-REM 杀内核及其所有子进程（/T 级联杀 sidecar 孤儿）
 taskkill /F /T /IM agentos-kernel.exe >nul 2>&1
-
-REM 杀 channel_api（python run_server.py）
-taskkill /F /IM python.exe >nul 2>&1
-
-REM 杀前端（vite）
 taskkill /F /IM node.exe >nul 2>&1
 
-timeout /t 2 /nobreak >nul
+REM give Windows time to release the exe file handle (avoids cargo os error 5)
+timeout /t 3 /nobreak >nul
 echo [OK] Old instances stopped.
 echo.
 
 REM ============================================================
-REM  步骤 1: 编译内核
+REM  Step 1: build kernel (release)
 REM ============================================================
 if "%NO_BUILD%"=="1" (
-    echo [1/4] Skipping kernel build (--no-build)
+    echo [1/3] Skipping kernel build (--no-build)
 ) else (
-    echo [1/4] Building Rust kernel...
+    echo [1/3] Building Rust kernel (release)...
     pushd "%KERNEL_DIR%"
     set "CARGO_INCREMENTAL=0"
-    cargo +stable build --bin agentos-kernel -j 1
+    cargo +stable build --release --bin agentos-kernel -j 1
     if errorlevel 1 (
         echo [ERROR] Kernel build failed.
         popd
@@ -90,9 +81,9 @@ if "%NO_BUILD%"=="1" (
 echo.
 
 REM ============================================================
-REM  步骤 2: 启动内核
+REM  Step 2: start kernel
 REM ============================================================
-echo [2/4] Starting kernel on port :%AGENTOS_KERNEL_PORT%...
+echo [2/3] Starting kernel on port :%AGENTOS_KERNEL_PORT%...
 
 set "AGENTOS_KERNEL_HOST=0.0.0.0"
 set "AGENTOS_PLUGINS_DIR=%PROJECT_ROOT%\plugins\shared"
@@ -120,7 +111,7 @@ if "!KERNEL_READY!"=="0" (
 echo.
 
 if "%KERNEL_ONLY%"=="1" (
-    echo [SKIP] Kernel-only mode, skipping channel_api and frontend.
+    echo [SKIP] Kernel-only mode, skipping frontend.
     echo.
     echo ========================================
     echo   Kernel: http://localhost:%AGENTOS_KERNEL_PORT%
@@ -130,35 +121,9 @@ if "%KERNEL_ONLY%"=="1" (
 )
 
 REM ============================================================
-REM  步骤 3: 启动 channel_api
+REM  Step 3: start frontend (proxy to 0.2 kernel :9100)
 REM ============================================================
-echo [3/4] Starting channel_api on port :%BACKEND_PORT%...
-
-set "BACKEND_PORT=%BACKEND_PORT%"
-pushd "%CHANNEL_API_DIR%"
-start "AgentOS channel_api" /B python run_server.py --port %BACKEND_PORT%
-popd
-
-echo        Waiting for channel_api...
-set "API_READY=0"
-for /l %%i in (1,1,15) do (
-    if "!API_READY!"=="0" (
-        curl -s -o nul -w "%%{http_code}" "http://localhost:%BACKEND_PORT%/health" 2>nul | findstr "200" >nul
-        if not errorlevel 1 (
-            set "API_READY=1"
-            echo [OK] channel_api ready.
-        ) else (
-            timeout /t 1 /nobreak >nul
-        )
-    )
-)
-if "!API_READY!"=="0" echo [WARN] channel_api not ready within 15s.
-echo.
-
-REM ============================================================
-REM  步骤 4: 启动前端
-REM ============================================================
-echo [4/4] Starting frontend on port :%AGENTOS_FRONTEND_PORT%...
+echo [3/3] Starting frontend on port :%AGENTOS_FRONTEND_PORT%...
 
 if not exist "%FRONTEND_DIR%\node_modules" (
     echo        Installing frontend dependencies...
@@ -168,7 +133,7 @@ if not exist "%FRONTEND_DIR%\node_modules" (
 )
 
 pushd "%FRONTEND_DIR%"
-start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://localhost:%BACKEND_PORT%&& npx vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
+start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://localhost:%AGENTOS_KERNEL_PORT%&& npx vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
 popd
 
 echo        Waiting for frontend...
@@ -189,14 +154,14 @@ echo.
 
 REM ============================================================
 echo ========================================
-echo   Services started:
-echo   channel_api: http://localhost:%BACKEND_PORT%
+echo   Services started (pure 0.2):
 echo   kernel:      http://localhost:%AGENTOS_KERNEL_PORT%
 echo   frontend:    http://localhost:%AGENTOS_FRONTEND_PORT%
 echo.
 echo   Open http://localhost:%AGENTOS_FRONTEND_PORT% in browser.
+echo   Frontend proxies directly to 0.2 kernel (no 0.1 channel_api).
 echo.
-echo   Stop: taskkill /F /IM agentos-kernel.exe ^& taskkill /F /IM python.exe ^& taskkill /F /IM node.exe
+echo   Stop: taskkill /F /IM agentos-kernel.exe ^& taskkill /F /IM node.exe
 echo ========================================
 echo.
 pause

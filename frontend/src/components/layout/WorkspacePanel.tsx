@@ -1,6 +1,6 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
-import { Maximize2, Minimize2 } from '@/assets/icons'
+import { FullscreenIcon, FullscreenExitIcon } from '@/assets/icons'
 import React from 'react'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import type { WorkspaceTab } from '@/types/layout'
@@ -65,11 +65,13 @@ export function WorkspacePanel({
             }`}
             onClick={() => onTabChange(tab.id)}
           >
-            {tab.icon && <span>{tab.icon}</span>}
             <span>{tab.title}</span>
             {!tab.isPinned && (
               <button
                 className="hover:bg-accent text-muted-foreground ml-1 flex h-4 w-4 items-center justify-center rounded text-xs"
+                aria-label={`关闭 ${tab.title}`}
+                title={`关闭 ${tab.title}`}
+                data-testid={`workspace-tab-close-${tab.id}`}
                 onClick={(e) => {
                   e.stopPropagation()
                   onTabClose(tab.id)
@@ -81,17 +83,19 @@ export function WorkspacePanel({
           </div>
         ))}
         </div>
-        {/* 全屏按钮 */}
+        {/* 全屏按钮（全屏模式隐藏顶栏，故退出入口必须留在工作区内部） */}
         {onFullscreen && (
           <button
             className="hover:bg-accent text-muted-foreground mx-1 flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors"
             onClick={onFullscreen}
             title={isFullscreen ? '退出全屏' : '铺满全屏'}
+            aria-label={isFullscreen ? '退出全屏' : '铺满全屏'}
+            data-testid="workspace-toggle-fullscreen"
           >
             {isFullscreen ? (
-              <Minimize2 className="h-3.5 w-3.5" />
+              <FullscreenExitIcon className="h-3.5 w-3.5" />
             ) : (
-              <Maximize2 className="h-3.5 w-3.5" />
+              <FullscreenIcon className="h-3.5 w-3.5" />
             )}
           </button>
         )}

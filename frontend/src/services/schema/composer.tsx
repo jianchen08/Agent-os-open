@@ -88,11 +88,7 @@ class WidgetRegistryClass {
     const entry = this.widgets.get(name)
     if (entry) return entry.component
 
-    if (entry?.fallbackWidget) {
-      const fallback = this.widgets.get(entry.fallbackWidget)
-      if (fallback) return fallback.component
-    }
-
+    // 降级映射表（name 未注册时按候选逐级查找）
     const fallbackMap: Record<string, string[]> = {
       kanban: ['table', 'data_grid'],
       editor: ['code_block'],

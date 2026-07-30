@@ -2,11 +2,10 @@
  * 主题服务
  *
  * 提供主题应用、合并等工具函数
- * 主题配置由前端管理：预设主题打包进 bundle，动态主题通过后端无状态清单
- * （/api/v1/themes/manifest）发现后 fetch JSON 存入 localStorage。
+ * 主题配置由前端管理：预设主题打包进 bundle，动态主题通过 Vite 静态导入
+ * （import.meta.glob）发现，纯前端资源，不依赖后端。
  */
 
-import { API_ENDPOINTS } from '@/constants/api'
 import {
   darkTheme,
   lightTheme,
@@ -14,7 +13,6 @@ import {
   oceanBreezeTheme,
   highContrastTheme,
 } from '@/config/themes'
-import apiClient from '@/services/api/client'
 import { ThemeStorageService, mergeTheme as mergeUserTheme } from '@/services/themeStorage'
 import type { ThemeConfig } from '@/types/theme'
 
@@ -475,55 +473,29 @@ export function mergeTheme(base: ThemeConfig, custom: Partial<ThemeConfig>): The
 }
 
 /**
- * 动态主题清单条目（后端 /api/v1/themes/manifest 返回的单项）
- */
-interface ThemeManifestItem {
-  id: string
-  name: string
-  url: string
-}
-
-/**
  * 拉取并加载动态主题（自动发现，无需用户点导入）
  *
- * 流程：
- * 1. GET /api/v1/themes/manifest 拿清单（后端无状态扫描 public/themes/*.json）
- * 2. 对每个条目 fetch 其 JSON 内容
- * 3. 调现成的 ThemeStorageService.importTheme 存入 localStorage
+ * 主题是纯前端资源（public/themes/*.json），无业务逻辑、无鉴权、无多用户，
+ * 不需要内核参与。改用 Vite 静态导入（import.meta.glob）在构建期发现所有主题，
+ * 替代原先「GET manifest → fetch 每个 url」的两步流程（已删内核 themes 端点）。
  *
- * 失败容错：清单拉取失败或单个主题 fetch/导入失败，只 console.warn 不抛出，
- * 保证后端不可达时前端降级到内置 preset（符合「失败兜底不影响整体」原则）。
- *
+ * 失败容错：单个主题导入失败只 console.warn 不抛出。
  * 幂等：importTheme 内部按 id 去重，重复加载只更新不新增。
  */
 export async function fetchDynamicThemes(): Promise<void> {
-  let manifest: ThemeManifestItem[]
-  try {
-    const { data } = await apiClient.get<ThemeManifestItem[]>(API_ENDPOINTS.THEMES.MANIFEST)
-    manifest = data
-  } catch (err) {
-    // 后端不可达：静默降级，不影响现有 preset + localStorage 主题
-    console.warn('[themeService] 动态主题清单拉取失败，降级到内置主题', err)
-    return
-  }
-
-  if (!Array.isArray(manifest) || manifest.length === 0) {
-    return
-  }
+  // Vite 构建期扫描 public/themes/*.json（eager: 直接拿到 JSON 对象）
+  const modules = import.meta.glob('/themes/*.json', { eager: true, import: 'default' })
+  const entries = Object.entries(modules)
+  if (entries.length === 0) return
 
   await Promise.all(
-    manifest.map(async (item) => {
+    entries.map(async ([path, config]) => {
       try {
-        const resp = await fetch(item.url)
-        if (!resp.ok) {
-          console.warn(`[themeService] 主题 ${item.id} 加载失败: HTTP ${resp.status}`)
-          return
-        }
-        const configJson = await resp.text()
-        // 复用 importTheme 的校验 + 存储逻辑（按 id 去重）
+        // config 已是解析后的 JSON 对象，importTheme 接受 JSON 字符串
+        const configJson = JSON.stringify(config)
         ThemeStorageService.importTheme(configJson)
       } catch (err) {
-        console.warn(`[themeService] 主题 ${item.id} 导入失败，跳过`, err)
+        console.warn(`[themeService] 主题 ${path} 导入失败，跳过`, err)
       }
     }),
   )

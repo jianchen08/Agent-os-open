@@ -19,5 +19,12 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 50
+    "priority": 50,
+    "config_files": [
+        {
+            "id": "security_rules",
+            "path": "config/isolation/security_rules.yaml",
+            "label": "安全规则"
+        }
+    ]
 }

@@ -645,6 +645,17 @@ impl PluginLoaderImpl {
                     config_map.insert(dir_name, serde_json::Value::Object(sub_map));
                 }
             } else if path.is_file() {
+                // 跳过隐藏文件(`.` 前缀)——Unix 惯例隐藏文件是元数据/文档,
+                // 不是常规配置。真实用例:.agent_template_spec.yaml 是 Agent 配置
+                // 规范文档(含 {placeholder}: 占位符 key),不是可执行配置。
+                let is_hidden = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with('.'))
+                    .unwrap_or(false);
+                if is_hidden {
+                    continue;
+                }
+
                 // 只处理 .yaml 和 .yml 文件
                 let ext = path.extension().map(|e| e.to_string_lossy().to_string());
                 if ext.as_deref() != Some("yaml") && ext.as_deref() != Some("yml") {
@@ -660,12 +671,21 @@ impl PluginLoaderImpl {
                     message: format!("Failed to read config file {}: {}", path.display(), e),
                 })?;
 
-                // YAML → JSON Value（serde_yaml 直接反序列化到 serde_json::Value）
-                let yaml_value: serde_json::Value =
-                    serde_yaml::from_str(&content).map_err(|e| LoaderError::ManifestParse {
-                        path: path.to_string_lossy().to_string(),
-                        message: e.to_string(),
-                    })?;
+                // YAML → JSON Value（serde_yaml 直接反序列化到 serde_json::Value）。
+                // 单个文件解析失败时跳过该文件并 warn,不让整体 load_config 失败——
+                // full_config 只是中间字典,真正注入靠 config_files[].path 精确定位;
+                // 一个无关文件(如模板文档)解析失败不该连累全部插件收不到配置。
+                let yaml_value: serde_json::Value = match serde_yaml::from_str(&content) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(
+                            "Skipping unparseable config file {}: {}",
+                            path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
 
                 config_map.insert(stem, yaml_value);
             }
@@ -736,6 +756,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -766,6 +788,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         };
         assert!(loader.validate_manifest(&manifest).is_err());
     }
@@ -797,6 +821,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -943,6 +969,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));
@@ -1228,6 +1256,72 @@ mod tests {
         assert!(obj.contains_key("short"));
         assert_eq!(obj["long"]["type"], "yaml");
         assert_eq!(obj["short"]["type"], "yml");
+    }
+
+    /// 单个 YAML 文件解析失败时,不应连累整个 load_config 失败——
+    /// 应跳过该文件并继续加载其余文件(防御性降级 + 可观测 warn)。
+    ///
+    /// 真实用例:config/templates/.agent_template_spec.yaml 是 Agent 配置模板
+    /// 文档(含 {placeholder}: 占位符 key),解析失败时若整体失败,所有插件
+    /// 都收不到配置(实证:0.2 内核启动后管道循环空转,每步 CONFIG_PARSE_ERROR)。
+    #[tokio::test]
+    async fn test_load_config_skips_unparseable_file_without_failing_others() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        // 合法配置
+        fs::write(
+            config_dir.path().join("good.yaml"),
+            "key: value\n",
+        )
+        .unwrap();
+        // 非法 YAML(map key 用了占位符,serde_yaml 解析失败)
+        fs::write(
+            config_dir.path().join("bad.yaml"),
+            "input_schema:\n  properties:\n    {placeholder}:\n      type: string\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        // 关键:不返回 Err,而是跳过 bad.yaml 继续加载 good.yaml
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+        assert!(obj.contains_key("good"), "合法文件应正常加载");
+        assert!(
+            !obj.contains_key("bad"),
+            "非法文件应被跳过,不让整体失败"
+        );
+    }
+
+    /// 隐藏文件(以 `.` 开头)不应被当作配置加载——
+    /// Unix 惯例隐藏文件是元数据/文档,不是常规配置。
+    /// 真实用例:.agent_template_spec.yaml 是 Agent 配置规范文档。
+    #[tokio::test]
+    async fn test_load_config_skips_hidden_files() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        fs::write(
+            config_dir.path().join("visible.yaml"),
+            "key: value\n",
+        )
+        .unwrap();
+        fs::write(
+            config_dir.path().join(".hidden.yaml"),
+            "hidden_key: hidden_value\n",
+        )
+        .unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let config = loader.load_config().await.unwrap();
+        let obj = config.as_object().unwrap();
+        assert!(obj.contains_key("visible"), "常规文件应加载");
+        assert!(
+            !obj.contains_key(".hidden") && !obj.contains_key("hidden"),
+            "隐藏文件(.前缀)应被跳过"
+        );
     }
 
     // ── P2-2 插件准入白名单 + SHA256 校验测试 ──

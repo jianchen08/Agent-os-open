@@ -13,16 +13,31 @@
  * - 新增: 移动端响应式支持
  */
 
-import { ChevronLeft, ChevronRight, Loader2, MessageSquare, Plus, Search, X } from '@/assets/icons'
+import {
+  Bell,
+  ChatIcon,
+  ChatActiveIcon,
+  Loader2,
+  Plus,
+  Search,
+  User,
+  X,
+} from '@/assets/icons'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SessionEditModal } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
-import { Button } from '@/components/ui/button'
+import { ThemeButton } from '@/components/layout/ThemeButton'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
+import {
+  openWorkspacePanel,
+  openWorkspacePanelByPath,
+} from '@/services/workspacePanelOpener'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import type { ContributionEntry } from '@/services/schema/ContributionRegistry'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
@@ -32,44 +47,33 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import type { Session } from '@/types'
 
+/** fixed sessions + plugin container id */
+type SidebarView = 'sessions' | string
+
+
 interface SidebarProps {
   /** 是否为移动端 */
   isMobile?: boolean
 }
 
 /**
- * 侧边栏尺寸常量
- * 使用 CSS 变量定义的设计令牌
- *
- * 对应 design-tokens.css 中的变量:
- * - --sidebar-header-height: 40px
- * - --sidebar-padding: 8px
- * - --sidebar-item-height: 40px
- * - --sidebar-search-height: 28px
- * - --sidebar-width: 220px
- *
- * 响应式设计:
- * - 大屏幕 (>1280px): 220px
- * - 小桌面 (768px-1280px): 200px (更窄以节省空间)
- * - 移动端 (<768px): 280px (全宽遮罩)
+ * Deep Space v2 侧栏尺寸
+ * 设计来源：画布 C · SideBar · 会话视图 (49:196)
+ * - 宽度 288px，内边距 12px
+ * - 头部 36px，搜索 32px，会话项 55px
+ * - 折叠按钮放最顶部（用户决策）
  */
 const SIDEBAR_STYLES = {
-  // 头部高度 40px
-  headerHeight: 'h-10', // 40px = 10 * 4px (Tailwind)
-  // 内边距 8px
-  padding: 'p-2', // 8px = 2 * 4px (Tailwind)
-  paddingX: 'px-2',
-  // 新建按钮尺寸 28px
+  headerHeight: 'h-9', // 36px
+  padding: 'p-3', // 12px
+  paddingX: 'px-3',
   buttonSize: 'sm' as const,
-  // 搜索框高度 28px
-  searchHeight: 'h-7', // 28px = 7 * 4px (Tailwind)
-  // 会话列表项高度 40px
-  itemHeight: 40,
-  // 侧边栏宽度
+  searchHeight: 'h-8', // 32px
+  itemHeight: 55,
   width: {
-    desktop: 220, // 大屏幕默认宽度
-    smallDesktop: 200, // 小桌面宽度 (1280px以下)
-    mobile: 280, // 移动端宽度
+    desktop: 288,
+    smallDesktop: 260,
+    mobile: 288,
   },
 } as const
 
@@ -87,6 +91,23 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   // 模态框统一状态: { mode: 'create' } 或 { mode: 'edit', sessionId } 或 null
   const [modal, setModal] = useState<{ mode: 'create' | 'edit'; sessionId?: string } | null>(null)
   const [isSaving, setIsSaving] = useState(false)
+  const [activeView, setActiveView] = useState<SidebarView>('sessions')
+  const [contribTick, setContribTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const n = contributionRegistry.getViewsContainers().length
+      setContribTick((prev) => (prev === n ? prev : n))
+    }, 1500)
+    return () => window.clearInterval(id)
+  }, [])
+  const pluginContainers = useMemo(() => {
+    void contribTick
+    return contributionRegistry
+      .getViewsContainers()
+      .slice()
+      .sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
+  }, [contribTick])
+  const user = useAuthStore((s) => s.user)
 
   const sessions = useSessionStore((state) => state.sessions)
   const activeSessionId = useSessionStore((state) => state.activeSessionId)
@@ -104,7 +125,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const fetchSessions = useSessionListStore((state) => state.fetchSessions)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
-  const toggleSidebar = useUIStore((state) => state.toggleSidebar)
   const messageSearchQuery = useUIStore((state) => state.messageSearchQuery)
   const setMessageSearchQuery = useUIStore((state) => state.setMessageSearchQuery)
 
@@ -290,6 +310,42 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     [handleSessionClick, isMobile, setSidebarCollapsed],
   )
 
+
+  const handlePluginClick = useCallback(
+    (entry: ContributionEntry) => {
+      setActiveView(entry.id)
+      if (entry.path && typeof entry.path === 'string') {
+        const opened = openWorkspacePanelByPath(entry.path)
+        if (!opened && entry.path.startsWith('/')) {
+          navigate(entry.path)
+        }
+      } else if (entry.widget) {
+        openWorkspacePanel({
+          id: `ws-plugin-${entry.id}`,
+          title: entry.title || entry.id,
+          component: String(entry.widget),
+          icon: entry.icon,
+          moduleId: entry.pluginId ? `__plugin_${entry.pluginId}__` : `__contrib_${entry.id}__`,
+        })
+      } else {
+        openWorkspacePanel({
+          id: `ws-plugin-${entry.id}`,
+          title: entry.title || entry.id,
+          component: entry.id,
+          icon: entry.icon,
+          moduleId: `__contrib_${entry.id}__`,
+        })
+      }
+      if (isMobile) setSidebarCollapsed(true)
+    },
+    [isMobile, navigate, setSidebarCollapsed],
+  )
+
+  const handleSessionsClick = useCallback(() => {
+    setActiveView('sessions')
+  }, [])
+
+
   return (
     <>
       {/* 移动端遮罩层 */}
@@ -305,127 +361,216 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       <aside
         data-testid="sidebar"
         className={cn(
-          'border-border/50 flex flex-col border-r transition-all duration-300 ease-in-out',
-          // 侧边栏淡底色，与主对话区视觉分离
+          // 必须 h-full：父级是 Splitter 内 full-height panel；否则 flex-1 无效，底部空白
+          'border-border/50 flex h-full min-h-0 flex-col border-r transition-all duration-300 ease-in-out',
           'bg-[var(--sidebar-bg-light)] dark:bg-[var(--sidebar-bg-dark)]',
-          // 移动端样式：固定定位，从左侧滑入
-          isMobile && !sidebarCollapsed && 'fixed top-0 left-0 z-50 h-full shadow-2xl',
+          isMobile && !sidebarCollapsed && 'fixed top-0 left-0 z-50 shadow-2xl',
         )}
         style={
           sidebarCollapsed && !isMobile
-            ? { width: '48px', minWidth: '48px', maxWidth: '48px', flexShrink: 0 }
+            ? { width: 0, minWidth: 0, maxWidth: 0, flexShrink: 0, overflow: 'hidden', border: 'none', padding: 0 }
             : isMobile
-              ? { width: '280px', minWidth: '280px', maxWidth: '280px', flexShrink: 0 }
-              : { width: '200px', minWidth: '200px', maxWidth: '220px', flexShrink: 0 }
+              ? {
+                  width: `${SIDEBAR_STYLES.width.mobile}px`,
+                  minWidth: `${SIDEBAR_STYLES.width.mobile}px`,
+                  maxWidth: `${SIDEBAR_STYLES.width.mobile}px`,
+                  flexShrink: 0,
+                }
+              : {
+                  width: '100%',
+                  height: '100%',
+                  minWidth: 0,
+                  maxWidth: '100%',
+                  minHeight: 0,
+                  flexShrink: 0,
+                  background: 'var(--ds-bg-panel, hsl(var(--card)))',
+                }
         }
       >
-        {/* ---- 折叠状态：仅显示图标栏（48px） ---- */}
+        {/* ---- 折叠状态：图标菜单栏（48px，VS Code 感，非双侧栏） ---- */}
         {sidebarCollapsed && !isMobile ? (
-          <div className="flex h-full flex-col items-center py-3">
-            {/* 展开按钮 */}
+          
+          <div className="flex h-full flex-col items-center py-3" data-testid="sidebar-rail">
             <button
-              onClick={toggleSidebar}
-              className="hover:bg-accent text-muted-foreground hover:text-foreground mb-3 flex h-8 w-8 items-center justify-center rounded-md transition-colors"
-              aria-label="展开侧边栏"
-              title="展开侧边栏"
-              data-testid="sidebar-expand-button"
+              type="button"
+              onClick={handleSessionsClick}
+              className={cn(
+                'mb-2 flex h-10 w-10 items-center justify-center rounded-[10px] transition-colors',
+                activeView === 'sessions'
+                  ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+              )}
+              style={
+                activeView === 'sessions'
+                  ? {
+                      background: 'var(--ds-bg-elevated, #111C38)',
+                      boxShadow:
+                        'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                    }
+                  : undefined
+              }
+              title="会话"
+              data-testid="sidebar-rail-sessions"
             >
-              <ChevronRight className="h-4 w-4" />
+              {activeView === 'sessions' ? (
+                <ChatActiveIcon className="h-5 w-5" />
+              ) : (
+                <ChatIcon className="h-5 w-5" />
+              )}
             </button>
-
-            {/* 新建会话图标 */}
-            <button
-              onClick={handleOpenNewSessionModal}
-              className="hover:bg-accent text-muted-foreground hover:text-foreground mb-3 flex h-8 w-8 items-center justify-center rounded-md transition-colors"
-              aria-label="新建会话"
-              title="新建会话"
-            >
-              <Plus className="h-4 w-4" />
-            </button>
-
-            {/* 搜索图标（点击展开） */}
-            <button
-              onClick={toggleSidebar}
-              className="hover:bg-accent text-muted-foreground hover:text-foreground mb-3 flex h-8 w-8 items-center justify-center rounded-md transition-colors"
-              aria-label="搜索会话"
-              title="搜索会话"
-            >
-              <Search className="h-4 w-4" />
-            </button>
-
-            {/* 会话图标列表（最多显示 8 个） */}
-            <div className="flex-1 overflow-y-auto">
-              {sessions.slice(0, 8).map((session) => (
+            {pluginContainers.map((entry) => {
+              const selected = activeView === entry.id
+              return (
                 <button
-                  key={session.id}
-                  onClick={() => handleSessionClick(session.id)}
+                  key={entry.id}
+                  type="button"
+                  onClick={() => handlePluginClick(entry)}
                   className={cn(
-                    'hover:bg-accent mb-1 flex h-8 w-8 items-center justify-center rounded-md transition-colors',
-                    activeSessionId === session.id
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-muted-foreground',
+                    'mb-2 flex h-10 w-10 items-center justify-center rounded-[10px] transition-colors',
+                    selected
+                      ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
                   )}
-                  title={session.title}
-                  aria-label={`切换到会话: ${session.title}`}
+                  style={
+                    selected
+                      ? {
+                          background: 'var(--ds-bg-elevated, #111C38)',
+                          boxShadow:
+                            'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                        }
+                      : undefined
+                  }
+                  title={entry.title || entry.id}
+                  data-testid={`sidebar-rail-plugin-${entry.id}`}
                 >
-                  <MessageSquare className="h-3.5 w-3.5" />
+                  <span className="text-[14px]">{entry.icon || '◆'}</span>
                 </button>
-              ))}
+              )
+            })}
+            {/* 折叠态底部：仅用户 / 主题 / 通知（与展开态一致） */}
+            <div className="mt-auto flex flex-col items-center gap-2 pb-1" data-testid="sidebar-rail-footer">
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex h-9 w-9 items-center justify-center rounded-[10px]"
+                title={(user as { username?: string; email?: string } | null)?.username || '用户'}
+                aria-label="用户"
+              >
+                <User className="h-4 w-4" />
+              </button>
+              <ThemeButton compact />
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex h-9 w-9 items-center justify-center rounded-[10px]"
+                title="通知"
+                aria-label="通知"
+              >
+                <Bell className="h-4 w-4" />
+              </button>
             </div>
           </div>
+
         ) : (
-          /* ---- 展开状态：显示完整内容 ---- */
+          /* ---- 展开状态：WorkBuddy 风格纵向导航 + 会话列表 ---- */
           <>
-            {/* 侧边栏头部 - Requirements: 9.1, 9.2, 9.3 */}
-            <div
-              className={cn(
-                'border-border flex items-center justify-between border-b',
-                SIDEBAR_STYLES.headerHeight,
-                SIDEBAR_STYLES.paddingX,
-              )}
-              data-testid="sidebar-header"
-            >
-              <h2 className="text-foreground text-base font-semibold">会话</h2>
-              <div className="flex items-center gap-1">
-                {/* 移动端关闭按钮 */}
-                {isMobile && (
-                  <Button
-                    size={SIDEBAR_STYLES.buttonSize}
-                    variant="ghost"
-                    onClick={handleCloseSidebar}
-                    aria-label="关闭侧边栏"
-                    title="关闭侧边栏"
-                    data-testid="close-sidebar-button"
-                    className="h-7 w-7 p-0"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-                {/* 折叠按钮 */}
-                {!isMobile && (
-                  <button
-                    onClick={toggleSidebar}
-                    className="hover:bg-accent text-muted-foreground hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-                    aria-label="折叠侧边栏"
-                    title="折叠侧边栏"
-                    data-testid="sidebar-collapse-button"
-                  >
-                    <ChevronLeft className="h-3.5 w-3.5" />
-                  </button>
-                )}
-                {/* 新建按钮 28px */}
-                <Button
-                  size={SIDEBAR_STYLES.buttonSize}
-                  variant="default"
-                  onClick={handleOpenNewSessionModal}
-                  aria-label="新建会话"
-                  title="新建会话"
-                  data-testid="new-session-button"
-                  className="h-7 w-7 p-0"
+            
+            <div className="flex h-full min-h-0 flex-1 flex-col" data-testid="sidebar-main">
+            <div className="flex flex-col gap-0.5 px-2 pt-3 pb-2" data-testid="sidebar-nav">
+              <button
+                type="button"
+                onClick={handleOpenNewSessionModal}
+                className="hover:bg-white/5 text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors"
+                data-testid="new-session-button"
+              >
+                <span
+                  className="flex h-6 w-6 items-center justify-center rounded-md"
+                  style={{ background: 'var(--ds-bg-elevated, #111C38)' }}
                 >
-                  <Plus className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+                  <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary,#22D3EE)]" />
+                </span>
+                新建会话
+              </button>
+
+              {/* fixed: sessions */}
+              <button
+                type="button"
+                onClick={handleSessionsClick}
+                className={cn(
+                  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
+                  activeView === 'sessions'
+                    ? 'text-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+                )}
+                style={
+                  activeView === 'sessions'
+                    ? {
+                        background: 'var(--ds-bg-elevated, #111C38)',
+                        boxShadow:
+                          'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
+                      }
+                    : undefined
+                }
+                data-testid="sidebar-menu-sessions"
+              >
+                {activeView === 'sessions' ? (
+                  <ChatActiveIcon className="h-4 w-4 shrink-0" />
+                ) : (
+                  <ChatIcon className="h-4 w-4 shrink-0 opacity-90" />
+                )}
+                <span className="min-w-0 flex-1 truncate">会话</span>
+              </button>
+
+              {/* plugin contributed viewsContainers (vscode-like) */}
+              {pluginContainers.map((entry) => {
+                const selected = activeView === entry.id
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => handlePluginClick(entry)}
+                    className={cn(
+                      'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
+                      selected
+                        ? 'text-foreground'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+                    )}
+                    style={
+                      selected
+                        ? {
+                            background: 'var(--ds-bg-elevated, #111C38)',
+                            boxShadow:
+                              'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
+                          }
+                        : undefined
+                    }
+                    data-testid={`sidebar-menu-plugin-${entry.id}`}
+                    title={entry.title || entry.id}
+                  >
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[13px] opacity-90">
+                      {entry.icon || '◆'}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{entry.title || entry.id}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="border-border mx-2 mb-1 border-t" />
+
+<div className="text-muted-foreground flex items-center justify-between px-3 py-1.5 text-[11px]">
+              <span className="font-medium tracking-wide">
+                会话{filteredSessions.length ? `(${filteredSessions.length})` : ''}
+              </span>
+              {isMobile && (
+                <button
+                  type="button"
+                  onClick={handleCloseSidebar}
+                  className="hover:text-foreground"
+                  aria-label="关闭侧边栏"
+                  data-testid="close-sidebar-button"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
 
             {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
@@ -471,9 +616,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               {isLoading ? (
                 <div
                   className={cn(
-                    'flex flex-col items-center justify-center text-center',
+                    'flex flex-col items-center text-center',
                     SIDEBAR_STYLES.padding,
-                    'py-8',
+                    'py-6',
                   )}
                 >
                   <Loader2 className="text-muted-foreground mb-2 h-6 w-6 animate-spin" />
@@ -482,9 +627,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               ) : filteredSessions.length === 0 ? (
                 <div
                   className={cn(
-                    'flex flex-col items-center justify-center text-center',
+                    'flex flex-col items-center text-center',
                     SIDEBAR_STYLES.padding,
-                    'py-8',
+                    'py-6',
                   )}
                 >
                   <p className="text-muted-foreground text-sm">
@@ -507,11 +652,34 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 />
               )}
             </div>
+
+            {/* 底栏：紧凑单行，不占大空白 */}
+            <div
+              className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
+              data-testid="sidebar-footer"
+            >
+              <div className="text-muted-foreground flex min-w-0 flex-1 items-center gap-1.5 px-1">
+                <User className="h-3.5 w-3.5 shrink-0 opacity-80" />
+                <span className="truncate text-[11px] leading-none">
+                  {(user as { username?: string; email?: string } | null)?.username ||
+                    (user as { username?: string; email?: string } | null)?.email ||
+                    '未登录'}
+                </span>
+              </div>
+              <ThemeButton compact />
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+                title="通知"
+                aria-label="通知"
+              >
+                <Bell className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            </div>
           </>
         )}
       </aside>
-
-      {/* 模态框放在 aside 外面，折叠/展开状态下都能渲染 */}
       <SessionEditModal
         mode={modal?.mode || 'create'}
         isOpen={modal !== null}

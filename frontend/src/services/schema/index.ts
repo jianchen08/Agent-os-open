@@ -11,7 +11,6 @@
 export { schemaRegistry } from './registry'
 export { parseSchema, parseDataSourceRef, resolveDataSource, validateSchema } from './parser'
 export type { ParsedSchema } from './parser'
-export { renderLayoutNode, widgetRegistry as composerWidgetRegistry } from './composer'
 export type { LayoutNode, ComponentRenderer } from './composer'
 
 // ===== Schema 解析器（新增）=====

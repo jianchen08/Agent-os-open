@@ -209,7 +209,7 @@ impl FrontendEventBus {
     }
 
     /// 按 scope 分配下一个 sequence。
-    async fn next_sequence(&self, scope: &EmitScope) -> u64 {
+    pub async fn next_sequence(&self, scope: &EmitScope) -> u64 {
         match scope {
             EmitScope::Thread(thread_id) => {
                 let mut seqs = self.thread_sequences.lock().await;

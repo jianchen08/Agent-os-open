@@ -196,13 +196,9 @@ class WidgetRegistry {
     const direct = this.entries.get(type)
     if (direct) return direct.component
 
-    // 2. metadata 中声明的 fallbackWidget
-    if (direct?.metadata.fallbackWidget) {
-      const fallback = this.entries.get(direct.metadata.fallbackWidget)
-      if (fallback) return fallback.component
-    }
-
-    // 3. 降级映射表
+    // 2. 降级映射表（type 未注册时，按预定义候选逐级查找）
+    //    注：metadata.fallbackWidget 是给调用方的契约信息（ADR §3.4），
+    //    不参与 findFallback 内部决策——前者已注册则直接返回，未注册才走降级表。
     const fallbackMap: Record<string, string[]> = {
       kanban: ['table', 'status_card'],
       editor: ['code_block'],

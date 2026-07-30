@@ -8,6 +8,9 @@
 """
 from __future__ import annotations
 
+import base64
+import datetime
+import json
 import logging
 import sys
 import os
@@ -31,7 +34,7 @@ from config import CostControlConfig, get_cost_control_config
 from exceptions import BudgetExceededException, QuotaExhaustedException
 
 logger = logging.getLogger(__name__)
-plugin = AgentOSPlugin("cost_control_service")
+plugin = AgentOSPlugin("cost_control")
 
 _budget_manager: BudgetManager | None = None
 
@@ -217,6 +220,179 @@ async def cost_control_reset_session_budget(session_id: str) -> dict[str, Any]:
     """重置会话预算。"""
     await _budget_manager.reset_session_budget(session_id)
     return {"reset": True, "session_id": session_id}
+
+
+# ── HTTP 端点（http.handle）—— 前端 /ext/cost_control/** 入口 ──────────────
+# 内核 http_dispatcher 透传：dispatcher 把 HttpHandleRequest（method/path/raw_body/
+# headers/query/plugin_id）整体作为 arguments 传给本工具。本工具按 path 分发到 5 个
+# 子端点，调 BudgetManager 真实业务，返回 ToolExecutionResult{success,data}。
+# data 必须是 HttpHandleResponse{status,headers,body,body_encoding}，body 需 base64。
+# 字段形状严格对齐 frontend/src/services/api/costControl.ts 的 TS 类型。
+
+
+def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
+    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
+    body_str = json.dumps(payload, default=str, ensure_ascii=False)
+    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": body_b64,
+        "body_encoding": "base64",
+    }
+
+
+def _ok(data: Any) -> dict[str, Any]:
+    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
+    return {"success": True, "data": data}
+
+
+def _error(message: str, status: int = 503) -> dict[str, Any]:
+    """错误响应：{success:false, error}。503 表示 sidecar 未就绪。"""
+    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
+
+
+def _reshape_usage_statistics(raw: dict[str, Any]) -> dict[str, Any]:
+    """把 BudgetManager.get_usage_statistics() 的返回重塑成前端期望形状。
+
+    差异：插件用 ``global`` / ``tasks(dict)`` / ``sessions(dict)`` / 无 updated_at；
+    前端期望 ``global_stats`` / ``tasks(array)`` / ``sessions(array)`` / 有 updated_at。
+    """
+    return {
+        "global_stats": raw.get("global", {}),
+        "tasks": [
+            {"task_id": tid, **stats}
+            for tid, stats in raw.get("tasks", {}).items()
+        ],
+        "sessions": [
+            {"session_id": sid, **stats}
+            for sid, stats in raw.get("sessions", {}).items()
+        ],
+        "recent_records": raw.get("recent_records", []),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def _flatten_cost_config(cost_config: CostControlConfig) -> dict[str, Any]:
+    """把嵌套 CostControlConfig 拍平成前端 CostConfigResponse 扁平结构。"""
+    gb = cost_config.global_budget
+    al = cost_config.alerts
+    pr = cost_config.protection
+    return {
+        "daily_token_limit": gb.daily_token_limit,
+        "monthly_token_limit": gb.monthly_token_limit,
+        "per_task_token_limit": gb.per_task_token_limit,
+        "per_session_token_limit": gb.per_session_token_limit,
+        "warning_threshold": al.warning_threshold,
+        "critical_threshold": al.critical_threshold,
+        "auto_save_at_warning": pr.auto_save_at_warning,
+        "auto_pause_at_critical": pr.auto_pause_at_critical,
+        "auto_stop_at_exhausted": pr.auto_stop_at_exhausted,
+    }
+
+
+def _build_cost_report(stats_raw: dict[str, Any], period: str) -> dict[str, Any]:
+    """从 usage_statistics 派生 cost report（BudgetManager 无现成 report 方法）。
+
+    对齐前端 CostReportResponse：period/start_date/end_date/total_tokens/total_cost/
+    by_model/by_task/daily_breakdown。
+    """
+    g = stats_raw.get("global", {})
+    today = datetime.date.today()
+    if period == "weekly":
+        start = today - datetime.timedelta(days=today.weekday())
+    elif period == "monthly":
+        start = today.replace(day=1)
+    else:
+        start = today
+    records = stats_raw.get("recent_records", [])
+    by_model: dict[str, dict[str, Any]] = {}
+    for r in records:
+        m = r.get("model", "unknown")
+        bucket = by_model.setdefault(m, {"tokens": 0, "cost": 0.0, "count": 0})
+        bucket["tokens"] += r.get("tokens", 0)
+        bucket["cost"] += r.get("cost", 0.0)
+        bucket["count"] += 1
+    return {
+        "period": period,
+        "start_date": start.isoformat(),
+        "end_date": today.isoformat(),
+        "total_tokens": g.get("daily_tokens", 0),
+        "total_cost": g.get("estimated_daily_cost", 0.0),
+        "by_model": by_model,
+        "by_task": stats_raw.get("tasks", {}),
+        "daily_breakdown": [],
+        "items": records,
+    }
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/cost_control/** (cost control business REST)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发到 5 个 cost 端点。
+
+    签名覆盖 HttpHandleRequest 全部字段（SDK 的 td.handler(**arguments) 展开）。
+    BudgetManager 未初始化时返回 503（不崩，前端 axios 会重试/降级）。
+    """
+    global _budget_manager
+    if _budget_manager is None:
+        logger.warning("http.handle called but BudgetManager not initialized (on_load pending)")
+        return _error("cost_control service not initialized (sidecar warming up)", 503)
+
+    bm = _budget_manager
+
+    # 分发：按 path 精确匹配 5 个子端点
+    if path == "/ext/cost_control/budget/status" and method == "GET":
+        status = bm.get_budget_status()
+        return _ok(_json_response(_serialize_status(status)))
+
+    if path == "/ext/cost_control/usage/statistics" and method == "GET":
+        raw = bm.get_usage_statistics()
+        return _ok(_json_response(_reshape_usage_statistics(raw)))
+
+    if path == "/ext/cost_control/config" and method == "GET":
+        cost_config = get_cost_control_config()
+        return _ok(_json_response(_flatten_cost_config(cost_config)))
+
+    if path == "/ext/cost_control/report" and method == "GET":
+        period = (query or {}).get("period", "daily")
+        raw = bm.get_usage_statistics()
+        report = _build_cost_report(raw, period)
+        return _ok(_json_response(report))
+
+    if path == "/ext/cost_control/budget/reset" and method == "POST":
+        # BudgetManager 无全局 reset，重置内部 usage 累计
+        bm._global_daily_usage = 0
+        bm._global_monthly_usage = 0
+        bm._task_usage.clear()
+        bm._session_usage.clear()
+        bm._usage_records.clear()
+        logger.info("global budget reset via /ext/cost_control/budget/reset")
+        return _ok(_json_response({"success": True, "message": "预算已重置"}))
+
+    # 未匹配的 path
+    logger.warning("http.handle: no route for path=%s method=%s", path, method)
+    return _ok(_json_response({"error": "not found", "path": path}, 404))
 
 
 if __name__ == "__main__":

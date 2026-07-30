@@ -95,6 +95,27 @@ class KernelChannel:
             self._pending.pop(req_id, None)
             raise RuntimeError(f"kernel capability call timeout: {method}") from None
 
+    async def send_notification(self, method: str, params: dict[str, Any]) -> None:
+        """向内核发起一次 fire-and-forget 的 capability 通知（不等响应）。
+
+        用于流式 chunk 推送：sidecar 每生成一个 chunk 就发一个 notification，
+        内核收到后直接推前端。不等响应避免每个 chunk 阻塞 30s（send_request
+        不可用于高频流式）。无 id，内核不回 response，无 pending future 泄漏。
+
+        Args:
+            method: 形如 "event-bus.emit" 的命名空间方法名
+            params: 通知参数（如 {"event": "stream_chunk", "thread_id": ..., "chunk": ...}）
+        """
+        notification = {
+            "jsonrpc": "2.0",
+            # 注意：无 id 字段 → JSON-RPC notification（内核不回 response）
+            "method": method,
+            "params": params,
+        }
+        async with self._stdout_lock:
+            sys.stdout.write(json.dumps(notification) + "\n")
+            sys.stdout.flush()
+
 
 class McpServer:
     """MCP JSON-RPC 服务端。

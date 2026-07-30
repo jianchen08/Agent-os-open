@@ -16,6 +16,11 @@ members = [
 ]
 resolver = "2"
 
+# libsqlite3-sys 的 sqlite3.c 在 MSVC -O2 下编译崩溃(cl.exe exit 0xc0000005)，
+# 降优化级别到 1 规避（已知 MSVC + sqlite3 兼容性问题）。
+[profile.release.package.libsqlite3-sys]
+opt-level = 1
+
 [workspace.package]
 version = "0.2.0"
 edition = "2021"

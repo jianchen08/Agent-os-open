@@ -120,7 +120,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
       set({
         metrics: data.metrics,
         statistics: data.statistics,
-        recentTasks: data.recentTasks,
+        recentTasks: data.recentTasks ?? [],
         apiTokenUsage: data.tokenUsage,
         cacheStats: data.cacheStats,
         isLoading: false,

@@ -80,8 +80,8 @@ describe('WorkspacePanel — tab 切换', () => {
         renderTabContent={() => <div />}
       />,
     )
-    // 关闭按钮是 tab 内的 × 文本
-    const closeBtn = container.querySelector('button')
+    // 用 data-testid 精确定位关闭按钮（避免被 maximize/fullscreen 按钮干扰）
+    const closeBtn = container.querySelector('[data-testid="workspace-tab-close-a"]')
     expect(closeBtn).not.toBeNull()
     fireEvent.click(closeBtn!)
     expect(onTabClose).toHaveBeenCalledWith('a')
@@ -98,7 +98,44 @@ describe('WorkspacePanel — tab 切换', () => {
         renderTabContent={() => <div />}
       />,
     )
-    expect(container.querySelector('button')).toBeNull()
+    // pinned tab 无关闭按钮，也无 maximize/fullscreen（未传对应回调）
+    expect(container.querySelector('[data-testid^="workspace-tab-close-"]')).toBeNull()
+  })
+})
+
+describe('WorkspacePanel — 全屏按钮', () => {
+  it('传入 onFullscreen 时渲染全屏按钮并触发回调', () => {
+    const onFullscreen = vi.fn()
+    const tabs = [makeTab({ id: 'a', title: 'A', isActive: true })]
+    render(
+      <WorkspacePanel
+        tabs={tabs}
+        onTabChange={() => {}}
+        onTabClose={() => {}}
+        renderTabContent={() => <div />}
+        onFullscreen={onFullscreen}
+        isFullscreen={false}
+      />,
+    )
+    const btn = screen.getByTestId('workspace-toggle-fullscreen')
+    expect(btn).toHaveAttribute('title', '铺满全屏')
+    fireEvent.click(btn)
+    expect(onFullscreen).toHaveBeenCalledOnce()
+  })
+
+  it('isFullscreen=true 时按钮显示「退出全屏」', () => {
+    const tabs = [makeTab({ id: 'a', title: 'A', isActive: true })]
+    render(
+      <WorkspacePanel
+        tabs={tabs}
+        onTabChange={() => {}}
+        onTabClose={() => {}}
+        renderTabContent={() => <div />}
+        onFullscreen={() => {}}
+        isFullscreen={true}
+      />,
+    )
+    expect(screen.getByTestId('workspace-toggle-fullscreen')).toHaveAttribute('title', '退出全屏')
   })
 })
 

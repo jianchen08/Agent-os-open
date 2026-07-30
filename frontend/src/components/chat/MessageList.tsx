@@ -127,7 +127,11 @@ export const MessageList = ({
     (message: any, index: number, total: number) => {
       const isLast = index === total - 1
       return (
-        <div className="group" key={`${message.id}-${message.sequence ?? index}`}>
+        <div
+          className="group"
+          style={{ marginBottom: index < total - 1 ? 'var(--layout-chatpanel-message-gap, 20px)' : 0 }}
+          key={`${message.id}-${message.sequence ?? index}`}
+        >
           <MessageItem
             message={message}
             isLast={isLast}

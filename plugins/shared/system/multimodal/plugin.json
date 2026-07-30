@@ -9,21 +9,38 @@
     "entry": "python server.py",
     "capabilities": {
         "tools": [
-            {"name": "multimodal.convert", "description": "将文本和附件转换为模型特定格式"},
-            {"name": "multimodal.capability", "description": "查询模型的多模态能力"},
-            {"name": "multimodal.supported", "description": "检查模型是否支持多模态"},
-            {"name": "multimodal.transcribe", "description": "语音识别（ASR）：音频转文本"}
+            {
+                "name": "multimodal.convert",
+                "description": "将文本和附件转换为模型特定格式"
+            },
+            {
+                "name": "multimodal.capability",
+                "description": "查询模型的多模态能力"
+            },
+            {
+                "name": "multimodal.supported",
+                "description": "检查模型是否支持多模态"
+            },
+            {
+                "name": "multimodal.transcribe",
+                "description": "语音识别（ASR）：音频转文本"
+            }
         ],
-        "lifecycle_hooks": ["on_load", "on_unload"]
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
     },
-    "dependencies": [
-        "agentos-plugin-sdk>=0.2.0",
-        "pydantic>=2.0.0",
-        "aiohttp>=3.8.0",
-        "pyyaml>=6.0"
-    ],
+    "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
     "priority": 40,
-    "requires_content": 3
+    "requires_content": 3,
+    "config_files": [
+        {
+            "id": "media_providers",
+            "path": "config/models/media_providers.yaml",
+            "label": "媒体提供商配置"
+        }
+    ]
 }

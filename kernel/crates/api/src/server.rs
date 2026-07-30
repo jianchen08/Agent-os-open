@@ -20,6 +20,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use agentos_core::traits::CapabilityRegistry;
 use agentos_core::types::TenantContext;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -29,6 +30,13 @@ use crate::auth::{
     resolve_request_tenant_id,
 };
 use crate::error::ApiError;
+use crate::compat_routes::{
+    create_thread_handler,
+    evaluation_metrics_handler, get_thread_handler, list_thread_messages_handler,
+    list_threads_handler, plugins_history_handler,
+    plugins_reload_all_handler, plugins_reload_handler, plugins_set_enabled_handler,
+    plugins_status_handler, update_thread_agent_handler,
+};
 use crate::routes::{
     agents_handler, get_plugin_config_with_etag, health_handler, metrics_prometheus_handler,
     metrics_query_handler, pipelines_handler, put_plugin_config_handler, schema_handler,
@@ -42,6 +50,14 @@ pub struct WsRequest {
     pub message: String,
     #[serde(default)]
     pub session_id: String,
+    /// 可选对话历史（多轮上下文）。客户端传入前几轮的 messages（OpenAI 格式），
+    /// 内核注入 state.messages 供 LLM 看到上下文。0.2 内核暂不自动持久化历史，
+    /// 由客户端维护会话历史并每轮带上（与 0.1 文件存储的按 session 加载等价）。
+    #[serde(default)]
+    pub history: Vec<serde_json::Value>,
+    /// 可选 agent_id（默认 agentos）。指定执行 agent（如 general_agent 触发 bash 隔离）。
+    #[serde(default)]
+    pub agent_id: String,
 }
 
 /// WebSocket 消息响应体。
@@ -71,6 +87,32 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/plugins/{id}/config/{file_id}",
             get(get_plugin_config_with_etag).put(put_plugin_config_handler),
+        )
+        // 前端兼容端点（对齐 0.1 channel_api，消除 404）
+        .route(
+            "/api/v1/threads",
+            get(list_threads_handler).post(create_thread_handler),
+        )
+        .route("/api/v1/threads/{id}", get(get_thread_handler))
+        .route(
+            "/api/v1/threads/{id}/agent",
+            axum::routing::patch(update_thread_agent_handler),
+        )
+        .route(
+            "/api/v1/threads/{id}/messages",
+            get(list_thread_messages_handler),
+        )
+        .route("/api/v1/plugins/status", get(plugins_status_handler))
+        .route("/api/v1/plugins/history", get(plugins_history_handler))
+        .route("/api/v1/plugins/reload", post(plugins_reload_handler))
+        .route("/api/v1/plugins/{id}/enabled", axum::routing::put(plugins_set_enabled_handler))
+        .route(
+            "/api/v1/plugins/reload-all",
+            post(plugins_reload_all_handler),
+        )
+        .route(
+            "/api/v1/evaluation-metrics",
+            get(evaluation_metrics_handler),
         )
         // 监控 M5/M5b：指标查询 + Prometheus 导出（监控设计 §五/§十一）
         .route("/api/v1/metrics", get(metrics_query_handler))
@@ -159,7 +201,20 @@ pub(crate) fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> Tenan
 ///
 /// 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
 /// 时走 echo-fallback，标注降级原因。
-pub(crate) async fn process_via_engine(state: &AppState, message: &str, agent_id: &str) -> String {
+
+/// 默认核心管道插件 id（可被 agent 配置 config/agents/<id>.yaml 的 core_plugin 覆盖）。
+/// 历史上硬编码 "pipeline_llm_core" 写在 initial_state，现提取为常量便于发现与替换。
+const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
+
+pub(crate) async fn process_via_engine(
+    state: &AppState,
+    message: &str,
+    agent_id: &str,
+    history: &[serde_json::Value],
+    pipeline_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> String {
     let invoker = match state.invoker.clone() {
         Some(i) => i,
         None => {
@@ -189,18 +244,46 @@ pub(crate) async fn process_via_engine(state: &AppState, message: &str, agent_id
     };
 
     // 1. 构造初始 state
+    //    core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
+    //    覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
     let mut initial_state = serde_json::json!({
         "message": message,
         "input": message,
         "agent_id": agent_id,
         "core_type": "llm_call",
-        "core_plugin": "pipeline_llm_core", // 初始调 LLM（插件 id 带 pipeline_ 前缀）
+        "core_plugin": DEFAULT_CORE_PLUGIN,
         "ended": false,
         "suspended": false,
+        // 流式推送路由键：
+        // - pipeline_id：前端消息路由键（前端 handleStreamStart 据此匹配占位气泡）
+        // - session_id：WS 连接路由键（内核 session.emit_stream 据此定位前端 WS 连接）
+        //   必须是真实 thread_id（WS 握手时注册的），否则 chunk 推不到前端。
+        "pipeline_id": pipeline_id,
+        "session_id": thread_id,
+        // assistant message_id：内核权威生成，sidecar 流式 chunk 携带它，
+        // 前端 handleStreamChunk 据此把 chunk 路由到 stream_start 建立的占位气泡。
+        "message_id": message_id,
     });
+    // 多轮上下文：state.messages 是 LLMCore._build_messages 读取的对话历史。
+    // 有客户端传入的 history 则在其后追加当前 user 消息；无 history 则只放当前消息。
+    {
+        let mut msgs = history.to_vec();
+        msgs.push(serde_json::json!({"role": "user", "content": message}));
+        if let Some(obj) = initial_state.as_object_mut() {
+            obj.insert("messages".to_string(), serde_json::Value::Array(msgs));
+        }
+    }
 
     // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
     load_agent_config_into_state(&mut initial_state, agent_id, &project_root);
+
+    // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
+    // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
+    // ToolRegistry；0.2 sidecar 是独立进程拿不到该 service。改为内核侧在管道启动前
+    // 按 agent tool_ids 过滤、转成 OpenAI function-calling 格式注入 state["tool_schemas"]，
+    // 这样 prepare 阶段的 tool_schema 插件读到非空 schema（它优先用 state 里的值），
+    // LLM 即可看到工具并调用（tool_core 执行时内核 invoke_tool 经 MCP 调 sidecar）。
+    inject_tool_schemas(&mut initial_state, &state);
 
     // 3. 构造 PipelineExecutor 并执行
     //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
@@ -243,6 +326,79 @@ pub(crate) async fn process_via_engine(state: &AppState, message: &str, agent_id
     serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
 }
 
+/// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。
+///
+/// 按 state["tool_ids"] 过滤 capability_registry 的工具，转成 OpenAI function-calling
+/// 格式（`{type:"function", function:{name, description, parameters}}`）。tool_ids
+/// 缺失时注入全部工具（兜底）。registry 不可用时注入空列表（LLM 无工具可用）。
+fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
+    let Some(registry) = app_state.capability_registry.as_ref() else {
+        return;
+    };
+    let all_tools = registry.list_tools();
+
+    // 按 agent 的 tool_ids 过滤；缺失则用全部（兜底，避免无工具可用）
+    let wanted_ids: Option<Vec<String>> = state
+        .get("tool_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(String::from)).collect());
+    let wanted: Option<std::collections::HashSet<String>> =
+        wanted_ids.map(|ids| ids.into_iter().collect());
+    let schemas: Vec<serde_json::Value> = all_tools
+        .iter()
+        .filter(|t| match &wanted {
+            Some(ids) => ids.contains(&t.name),
+            None => true,
+        })
+        .filter(|t| {
+            // LLM 严格校验工具 schema:parameters 必须是 type:object 的 JSON Schema。
+            // 过滤掉 input_schema 缺失/非 object 的工具(如 simple_tools 的部分工具
+            // manifest 未声明 input_schema),否则 DeepSeek/OpenAI 拒绝整个请求
+            // (BadRequest: schema must be a JSON Schema of 'type: "object"')。
+            t.input_schema.is_object()
+        })
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                }
+            })
+        })
+        .collect();
+
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "tool_schemas".to_string(),
+            serde_json::Value::Array(schemas),
+        );
+    }
+}
+
+/// 在 agents 目录（含分类子目录）递归查找 `<agent_id>.yaml`。
+///
+/// agents/ 按分类组织为 `agents/<category>/<id>.yaml`（main/orchestrator/
+/// executor/system/task/test），顶层不再放单文件。返回首个匹配路径。
+fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
+    let target = format!("{}.yaml", agent_id);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = find_agent_yaml(&p, agent_id) {
+                return Some(found);
+            }
+        } else if p.file_name().map(|n| n == target.as_str()).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// 加载 Agent 配置注入到管道 state。
 ///
 /// 简化语义（[来源: 任务 §load_agent_config_into_state]）：只读 `system_prompt`
@@ -255,16 +411,33 @@ pub(crate) async fn process_via_engine(state: &AppState, message: &str, agent_id
 fn load_agent_config_into_state(
     state: &mut serde_json::Value,
     agent_id: &str,
-    config_root: &std::path::Path,
+    project_root: &std::path::Path,
 ) {
-    let path = config_root.join("agents").join(format!("{}.yaml", agent_id));
+    // Agent 配置在 config/agents/ 下（按分类子目录 main/orchestrator/executor/…）。
+    // project_root 是项目根（config/ 的父目录），拼 config/agents。
+    let agents_dir = project_root.join("config").join("agents");
+    let top = agents_dir.join(format!("{}.yaml", agent_id));
+    let path = if top.is_file() {
+        top
+    } else {
+        match find_agent_yaml(&agents_dir, agent_id) {
+            Some(p) => p,
+            None => {
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    "Agent config not found under {}, using defaults",
+                    agents_dir.display()
+                );
+                return;
+            }
+        }
+    };
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => {
-            // 文件不存在 → 跳过（用默认 state）
             tracing::debug!(
                 agent_id = %agent_id,
-                "Agent config not found at {}, using defaults",
+                "Agent config not readable at {}, using defaults",
                 path.display()
             );
             return;
@@ -305,6 +478,11 @@ fn load_agent_config_into_state(
     if let Some(v) = entry("max_iterations") {
         obj.entry("max_iterations").or_insert(v);
     }
+    // core_plugin：agent 配置优先于内核默认值（DEFAULT_CORE_PLUGIN）。
+    // 用 insert 直接覆盖，使 agent 能切换核心插件（如换 LLM 提供商）。
+    if let Some(v) = entry("core_plugin") {
+        obj.insert("core_plugin".to_string(), v);
+    }
 }
 
 /// 处理 WebSocket 连接——收发消息循环。
@@ -331,13 +509,15 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
                 let req: WsRequest = serde_json::from_str(&text).unwrap_or(WsRequest {
                     message: text.to_string(),
                     session_id: String::new(),
+                    history: Vec::new(),
+                    agent_id: String::new(),
                 });
 
                 // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
                 // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
                 let tenant_ctx = request_tenant_ctx(&headers, &req.session_id);
                 let content =
-                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, "agentos"))
+                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", ""))
                         .await;
 
                 // 构造响应
@@ -379,7 +559,7 @@ async fn chat_handler(
     // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
     let tenant_ctx = request_tenant_ctx(&headers, &req.session_id);
     let content =
-        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, "agentos"))
+        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", &req.session_id, ""))
             .await;
 
     let response = WsResponse {
@@ -500,6 +680,8 @@ mod tests {
         let body = serde_json::to_string(&WsRequest {
             message: "hello".to_string(),
             session_id: "s1".to_string(),
+            history: Vec::new(),
+            agent_id: String::new(),
         })
         .unwrap();
         let response = app
@@ -543,6 +725,8 @@ mod tests {
         let body = serde_json::to_string(&WsRequest {
             message: "hello world".to_string(),
             session_id: "test_session".to_string(),
+            history: Vec::new(),
+            agent_id: String::new(),
         })
         .unwrap();
         let response = app

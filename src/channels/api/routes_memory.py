@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from channels.api.deps import APIError, require_auth, validate_pagination
 from channels.api.memory_store import store
 from channels.api.models import (
+    MemoryCreate,
     MemoryListResponse,
     MemoryResponse,
 )
@@ -176,6 +177,78 @@ def list_semantic(
         for m in memories
     ]
     return {"items": items, "total": total}
+
+
+@router.post(
+    "",
+    response_model=MemoryResponse,
+    status_code=201,
+    summary="创建记忆",
+)
+def create_memory(
+    body: MemoryCreate,
+    _user: dict = Depends(require_auth),
+) -> MemoryResponse:
+    """创建记忆条目（semantic/episode/procedural）。
+
+    供管理面与联调写入偏好/摘要；管道侧 memory 工具仍走独立执行路径。
+    """
+    mem_type = (body.memory_type or "semantic").strip().lower()
+    if mem_type not in {"episode", "semantic", "procedural"}:
+        raise APIError(
+            status_code=400,
+            error_code="MEM_TYPE_INVALID",
+            message=f"memory_type 必须是 episode/semantic/procedural，收到: {body.memory_type}",
+        )
+    content = (body.content or "").strip()
+    if not content:
+        raise APIError(
+            status_code=400,
+            error_code="MEM_CONTENT_EMPTY",
+            message="content 不能为空",
+        )
+    memory = store.create_memory(
+        content=content,
+        memory_type=mem_type,
+        tags=list(body.tags or []),
+    )
+    logger.info(
+        "用户 %s 创建记忆 | id=%s type=%s",
+        _user.get("username") or _user.get("sub"),
+        memory.get("id"),
+        mem_type,
+    )
+    return _memory_to_response(memory)
+
+
+@router.post(
+    "/semantic",
+    response_model=MemoryResponse,
+    status_code=201,
+    summary="创建语义记忆",
+)
+def create_semantic_memory(
+    body: MemoryCreate,
+    _user: dict = Depends(require_auth),
+) -> MemoryResponse:
+    """创建语义记忆（强制 memory_type=semantic）。"""
+    forced = MemoryCreate(content=body.content, memory_type="semantic", tags=body.tags)
+    return create_memory(forced, _user)
+
+
+@router.post(
+    "/episodes",
+    response_model=MemoryResponse,
+    status_code=201,
+    summary="创建情景记忆",
+)
+def create_episode_memory(
+    body: MemoryCreate,
+    _user: dict = Depends(require_auth),
+) -> MemoryResponse:
+    """创建情景记忆（强制 memory_type=episode）。"""
+    forced = MemoryCreate(content=body.content, memory_type="episode", tags=body.tags)
+    return create_memory(forced, _user)
 
 
 # ---------------------------------------------------------------------------

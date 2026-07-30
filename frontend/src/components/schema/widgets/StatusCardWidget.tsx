@@ -8,6 +8,7 @@
  */
 
 import React from 'react'
+import { useWidgetEventStore } from '@/stores/widgetEventStore'
 
 /** 趋势方向 */
 type TrendDirection = 'up' | 'down' | 'flat'
@@ -58,9 +59,16 @@ function extractMetrics(metrics: unknown): MetricItem[] {
  * @returns 状态卡片渲染结果
  */
 export function StatusCardWidget(props: Record<string, unknown>) {
+  // 订阅 widget_event 推送（若有 widgetId，用 latest.data 的 value 覆盖 props）
+  // 这是 metric_bindings 配置驱动推送的「最后一公里」：内核推 → store → 本组件渲染。
+  const widgetId = props.widgetId as string | undefined
+  const latest = useWidgetEventStore((s) => (widgetId ? s.latest[widgetId] : undefined))
+
   const metrics = extractMetrics(props.metrics)
   const title = props.title as string | undefined
-  const value = props.value as string | number | undefined
+  // 优先用 widget_event 推送的 value（metric_bindings 场景），props 兜底（静态场景）
+  const eventValue = latest?.data?.value as string | number | undefined
+  const value = eventValue ?? (props.value as string | number | undefined)
   const trend = props.trend as TrendDirection | undefined
   const trendValue = props.trendValue as string | undefined
   const icon = props.icon as string | undefined

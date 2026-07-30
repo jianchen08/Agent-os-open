@@ -208,6 +208,21 @@ class ModuleManager {
       }
     })
 
+    // 工作区钉住页签（顶栏入口再打开设置/监控等，可关闭非常驻）
+    const workspaceExplorerId = 'ws-panel-workspace'
+    if (!existingTabIds.has(workspaceExplorerId)) {
+      newTabs.push({
+        id: workspaceExplorerId,
+        title: '工作区',
+        icon: 'folder',
+        moduleId: '__panel_workspace__',
+        component: 'workspace_explorer',
+        isActive: !hasActiveTab && newTabs.length === 0,
+        isPinned: true,
+      })
+      existingTabIds.add(workspaceExplorerId)
+    }
+
     if (fullReplace) {
       useLayoutModeStore.setState({ workspaceTabs: newTabs })
     } else if (newTabs.length > 0) {

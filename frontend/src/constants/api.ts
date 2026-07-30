@@ -142,30 +142,13 @@ export const API_ENDPOINTS = {
     /** 执行Agent */
     AGENT_EXECUTE: '/api/v1/tools/agent/execute',
   },
-  /** 评估相关 - 对应后端 /api/v1/evaluation/* */
+  /** 评估指标 - 指标定义属 config 域（内核 compat 只读查询，待 evaluation 插件声明 config_files 后迁出）。
+   *  已删除 9 个无后端无消费的死端点（evaluate/profiles/reports/statistics/trends，纯误导）。 */
   EVALUATION: {
-    /** 执行评估 */
-    EVALUATE: '/api/v1/evaluation/evaluate',
-    /** 获取评估配置列表 */
-    PROFILES: '/api/v1/evaluation/profiles',
-    /** 获取单个评估配置 */
-    PROFILE: (id: string) => `/api/v1/evaluation/profiles/${id}`,
-    /** 获取默认评估配置 */
-    DEFAULT_PROFILE: '/api/v1/evaluation/profiles/default',
-    /** 设置默认评估配置 */
-    SET_DEFAULT: (id: string) => `/api/v1/evaluation/profiles/${id}/set-default`,
-    /** 获取评估报告 */
-    REPORT: (id: string) => `/api/v1/evaluation/reports/${id}`,
-    /** 获取评估报告列表 */
-    REPORTS: '/api/v1/evaluation/reports',
     /** 获取评估指标列表 */
     METRICS: '/api/v1/evaluation-metrics',
     /** 获取单个评估指标 */
     METRIC: (id: string) => `/api/v1/evaluation-metrics/${id}`,
-    /** 获取评估统计 */
-    STATISTICS: '/api/v1/evaluation/statistics',
-    /** 获取评估趋势 */
-    TRENDS: '/api/v1/evaluation/trends',
   },
   /** 健康检查相关 */
   HEALTH: {
@@ -198,20 +181,18 @@ export const API_ENDPOINTS = {
     /** 删除用户 */
     DELETE: (id: string) => `/api/v1/users/${id}`,
   },
-  /** 监控相关 - 对应后端 /api/v1/monitoring/* */
+  /** 监控相关 - 走插件 http_endpoints /ext/monitoring/**（已从内核 compat_routes 迁出） */
   MONITORING: {
     /** 获取系统指标 */
-    SYSTEM_METRICS: '/api/v1/monitoring/system/metrics',
+    SYSTEM_METRICS: '/ext/monitoring/system/metrics',
     /** 获取任务统计 */
-    TASK_STATISTICS: '/api/v1/monitoring/tasks/statistics',
+    TASK_STATISTICS: '/ext/monitoring/tasks/statistics',
     /** 获取任务列表 */
-    TASK_LIST: '/api/v1/monitoring/tasks',
-    /** 获取事件列表 */
-    EVENT_LIST: '/api/v1/monitoring/events',
+    TASK_LIST: '/ext/monitoring/tasks',
     /** 获取 Token 使用统计 */
-    TOKEN_USAGE: '/api/v1/monitoring/token-usage',
+    TOKEN_USAGE: '/ext/monitoring/token-usage',
     /** 获取缓存命中率统计 */
-    CACHE_STATS: '/api/v1/monitoring/cache-stats',
+    CACHE_STATS: '/ext/monitoring/cache-stats',
   },
   /** 任务管理 - 对应后端 /api/v1/tasks/* */
   TASKS: {
@@ -296,23 +277,18 @@ export const API_ENDPOINTS = {
     /** 思考模式服务健康检查 */
     HEALTH: '/api/v1/thinking-mode/health',
   },
-  /** 主题管理 - 无状态清单接口（后端只扫目录返回元数据，主题内容仍归前端） */
-  THEMES: {
-    /** 动态主题清单（扫描 public/themes/*.json，返回 id/name/url） */
-    MANIFEST: '/api/v1/themes/manifest',
-  },
-  /** 成本控制相关 - 对应后端 /api/v1/cost-control/* */
+  /** 成本控制相关 - 走插件 http_endpoints /ext/cost_control/**（已从内核 compat_routes 迁出） */
   COST_CONTROL: {
     /** 获取预算状态 */
-    BUDGET_STATUS: '/api/v1/cost-control/budget/status',
+    BUDGET_STATUS: '/ext/cost_control/budget/status',
     /** 获取使用统计 */
-    USAGE_STATISTICS: '/api/v1/cost-control/usage/statistics',
+    USAGE_STATISTICS: '/ext/cost_control/usage/statistics',
     /** 获取成本配置 */
-    CONFIG: '/api/v1/cost-control/config',
+    CONFIG: '/ext/cost_control/config',
     /** 获取成本报表 */
-    REPORT: '/api/v1/cost-control/report',
+    REPORT: '/ext/cost_control/report',
     /** 重置预算 */
-    BUDGET_RESET: '/api/v1/cost-control/budget/reset',
+    BUDGET_RESET: '/ext/cost_control/budget/reset',
   },
   /** Schema 聚合相关 - 对应后端 /api/v1/schema 端点（聚合 agents/pipelines/tools/ui_schema） */
   SCHEMA: {

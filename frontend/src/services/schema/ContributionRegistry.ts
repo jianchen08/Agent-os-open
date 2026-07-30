@@ -121,7 +121,7 @@ export class ContributionRegistry {
     this.clear()
 
     // 加载 plugin_configs（配置面板）
-    const pluginConfigs = (schema as Record<string, unknown>).plugin_configs as
+    const pluginConfigs = schema.plugin_configs as
       | Array<{ plugin_id: string; plugin_name: string; config_files: Array<{ id: string; path: string; label: string }> }>
       | undefined
 
@@ -135,8 +135,10 @@ export class ContributionRegistry {
       }
     }
 
-    // 加载 modules（contributes / ui_contributions）
-    this.registerFromSchema(schema as Parameters<typeof this.registerFromSchema>[0])
+    // 加载 plugin_contributes（contributes 贡献点）
+    this.registerFromSchema(
+      schema as unknown as Parameters<typeof this.registerFromSchema>[0],
+    )
 
     // 提取 agents / pipelines 的 ui_schema.widgets
     this.extractWidgets(schema)
@@ -185,57 +187,41 @@ export class ContributionRegistry {
   }
 
   /**
-   * 从 schema 数据注册贡献
+   * 从 schema 数据注册贡献点。
+   *
+   * 数据源是后端 `/api/v1/schema` 的 `plugin_contributes` 字段：每项形如
+   * `{ plugin_id, plugin_name, contributes }`，其中 `contributes` 是 manifest 原样透传的
+   * `Record<ContributionType, item[]>`（内核不解释结构）。
+   *
+   * settingsPanels 不在此处理——已在 `loadFromSchema` 经 `plugin_configs` 字段独立加载。
    *
    * @param schemaData - /api/v1/schema 返回的聚合数据
    */
   registerFromSchema(schemaData: {
-    modules?: Array<{
-      module_id: string
-      name?: string
-      icon?: string
-      ui_contributions?: Array<Record<string, unknown>>
-      config_files?: Array<{ id: string; path: string; label: string }>
+    plugin_contributes?: Array<{
+      plugin_id: string
+      plugin_name?: string
       contributes?: Record<string, unknown[]>
     }>
   }): void {
-    if (!schemaData.modules) return
+    if (!schemaData.plugin_contributes) return
 
-    for (const module of schemaData.modules) {
-      const pluginId = module.module_id
+    for (const entry of schemaData.plugin_contributes) {
+      const pluginId = entry.plugin_id
+      const contributes = entry.contributes
+      if (!contributes) continue
 
-      // 注册 ui_contributions
-      if (module.ui_contributions) {
-        for (const contrib of module.ui_contributions) {
+      // 遍历每种贡献点类型（viewsContainers / views / menus / statusBarItems / ...）
+      for (const [type, items] of Object.entries(contributes)) {
+        if (!Array.isArray(items)) continue
+        for (const item of items) {
           this.register({
-            ...contrib,
+            ...item,
+            id: (item.id as string | undefined) ?? synthesizeId(type, pluginId, item),
+            type: type as ContributionType,
             pluginId,
           } as ContributionEntry)
         }
-      }
-
-      // 注册 contributes（manifest 内联）
-      if (module.contributes) {
-        for (const [type, items] of Object.entries(module.contributes)) {
-          for (const item of items as Array<Record<string, unknown>>) {
-            this.register({
-              ...item,
-              id: (item.id as string | undefined) ?? synthesizeId(type, pluginId, item),
-              type: type as ContributionType,
-              pluginId,
-            } as ContributionEntry)
-          }
-        }
-      }
-
-      // 注册配置面板（config_files → settingsPanels）
-      if (module.config_files && module.config_files.length > 0) {
-        this.settingsPanels.set(pluginId, {
-          pluginId,
-          pluginName: module.name || pluginId,
-          pluginIcon: module.icon,
-          configFiles: module.config_files,
-        })
       }
     }
 

@@ -53,7 +53,7 @@ const DEFAULT_PARAMS: ModelParams = {
 /**
  * LLM 配置页面组件
  */
-export function LlmSettingsPage() {
+export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [config, setConfig] = useState<LLMConfigResponse | null>(null)
   const [defaults, setDefaults] = useState<LLMDefaults | null>(null)
   const [params, setParams] = useState<ModelParams>(DEFAULT_PARAMS)
@@ -215,7 +215,7 @@ export function LlmSettingsPage() {
 
   if (isLoading) {
     return (
-      <PageShell title="LLM 模型配置" description="配置大语言模型参数">
+      <PageShell title="LLM 模型配置" description="配置大语言模型参数" embedded={embedded}>
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载配置...
@@ -225,7 +225,7 @@ export function LlmSettingsPage() {
   }
 
   return (
-    <PageShell title="LLM 模型配置" description="配置大语言模型参数">
+    <PageShell title="LLM 模型配置" description="配置大语言模型参数" embedded={embedded}>
       {loadError && (
         <div className="mb-4 flex items-center justify-between rounded-lg bg-destructive/10 px-4 py-3">
           <div>
@@ -761,11 +761,27 @@ function PageShell({
   title,
   description,
   children,
+  embedded = false,
 }: {
   title: string
   description: string
   children: React.ReactNode
+  embedded?: boolean
 }) {
+  if (embedded) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="mb-3 shrink-0">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <p className="text-muted-foreground mt-1 text-xs">{description}</p>
+        </div>
+        <div className="min-h-0 max-w-3xl flex-1 overflow-y-auto" role="form" aria-label="LLM模型配置表单">
+          {children}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
       <header className="flex h-12 shrink-0 items-center border-b px-4">
@@ -775,7 +791,9 @@ function PageShell({
         <h1 className="ml-4 text-base font-semibold">{title}</h1>
         <span className="text-muted-foreground ml-2 text-xs">{description}</span>
       </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="LLM模型配置表单">{children}</main>
+      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="LLM模型配置表单">
+        {children}
+      </main>
     </div>
   )
 }

@@ -299,6 +299,17 @@ class PluginHotReloader:
             logger.error("Config directory does not exist: %s", self._config_dir)
             return
 
+        # 启动时扫描现有 YAML，填充 status 列表（否则 /plugins/status 永远空）
+        try:
+            bootstrapped = self._bootstrap_records_from_disk()
+            logger.info(
+                "PluginHotReloader bootstrap scanned %d config files under %s",
+                bootstrapped,
+                self._config_dir,
+            )
+        except Exception as exc:
+            logger.warning("PluginHotReloader bootstrap scan failed: %s", exc, exc_info=True)
+
         # 优先：订阅 ConfigCenter（生产环境主路径）
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
@@ -388,6 +399,81 @@ class PluginHotReloader:
             results.append(event)
 
         return results
+
+    def _bootstrap_records_from_disk(self) -> int:
+        """Scan config/ YAML files and seed PluginRecord entries for status API.
+
+        Does not re-register agents/tools into runtime registries (those are
+        loaded by their own startup paths). Only fills ``_records`` so that
+        ``GET /api/v1/plugins/status`` returns a useful inventory after boot.
+
+        Returns:
+            Number of files registered into ``_records``.
+        """
+        if not self._config_dir.exists():
+            return 0
+
+        type_map = {
+            "agents": "agent",
+            "tools": "tool",
+            "pipelines": "pipeline",
+            "models": "model",
+            "modules": "module",
+            "evaluation": "evaluation",
+            "evaluation_metrics": "evaluation_metric",
+            "templates": "template",
+            "steps": "step",
+            "system": "system",
+            "isolation": "isolation",
+            "capability_adapters": "capability_adapter",
+            "external_tools": "external_tool",
+            "searxng": "searxng",
+        }
+        count = 0
+        for yaml_path in self._config_dir.rglob("*.yaml"):
+            if yaml_path.name.startswith("_") or yaml_path.name.startswith("."):
+                continue
+            # skip nested README-like / test dumps if any
+            rel = yaml_path.relative_to(self._config_dir)
+            top = rel.parts[0] if rel.parts else ""
+            config_type = type_map.get(top, top or "config")
+            abs_path = str(yaml_path.resolve())
+            config_id = yaml_path.stem
+            version = ""
+            status = PluginStatus.LOADED
+            last_error = None
+            raw_data: dict[str, Any] | None = None
+            try:
+                text = yaml_path.read_text(encoding="utf-8")
+                parsed = yaml.safe_load(text) or {}
+                if isinstance(parsed, dict):
+                    raw_data = parsed
+                    config_id = str(
+                        parsed.get("config_id")
+                        or parsed.get("id")
+                        or parsed.get("name")
+                        or config_id
+                    )
+                    version = str(parsed.get("version") or "")
+            except Exception as exc:  # noqa: BLE001
+                status = PluginStatus.ERROR
+                last_error = str(exc)
+
+            with self._records_lock:
+                if abs_path in self._records:
+                    continue
+                self._records[abs_path] = PluginRecord(
+                    config_path=abs_path,
+                    config_type=config_type,
+                    config_id=config_id,
+                    status=status,
+                    last_loaded_at=time.time(),
+                    last_error=last_error,
+                    raw_data=raw_data or {},
+                    version=version,
+                )
+                count += 1
+        return count
 
     def get_plugin_status(self) -> list[dict[str, Any]]:
         """Return status information for all tracked plugins.

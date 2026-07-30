@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use agentos_core::traits::{
     CapabilityRegistry, ConfigFileMapping, HttpHandleCapability, PluginInvoker, PluginManifest,
@@ -86,6 +87,9 @@ pub struct AppState {
     pub http_handler: Option<Arc<dyn HttpHandleCapability>>,
     /// 监控 M1：指标聚合器（监控设计 §四）。None = 不启用指标端点。
     pub metrics: Option<MetricsAggregator>,
+    /// 安装触发模型 L1：已启用插件 id 集合（schema 聚合据此过滤 contributes/configs）。
+    /// disabled 插件的 manifest 仍在 manifests（用户能看到装了什么），但不出口 contributes。
+    pub enabled_plugin_ids: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -105,6 +109,7 @@ impl AppState {
             store: None,
             plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
+            enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             session: None,
             inbound_router: None,
             http_handler: None,
@@ -128,6 +133,7 @@ impl AppState {
             store: None,
             plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
+            enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             session: None,
             inbound_router: None,
             http_handler: None,
@@ -151,6 +157,7 @@ impl AppState {
         store: Arc<dyn StorageBackend>,
         plugin_ids: std::collections::HashSet<String>,
         project_root: PathBuf,
+        enabled_plugin_ids: std::collections::HashSet<String>,
     ) -> Self {
         // 从 manifest 构建 config JSON（兼容旧的 config-based handler）
         let agents: Vec<serde_json::Value> = manifests
@@ -187,6 +194,7 @@ impl AppState {
             store: Some(store),
             plugin_ids: Arc::new(plugin_ids),
             project_root: Some(project_root),
+            enabled_plugin_ids: Arc::new(RwLock::new(enabled_plugin_ids)),
             session: None,
             inbound_router: None,
             http_handler: None,
@@ -201,12 +209,37 @@ impl AppState {
     /// 降级为旧 echo/engine 路径（兼容）。
     pub fn enable_session(self) -> Self {
         let session = Arc::new(agentos_session::SessionCoordinator::new());
-        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(self.clone()));
+        // 关键：先把 session 注入 self，再 clone 给 dispatcher。
+        // 否则 dispatcher 持有的 state.session 永远是 None（旧 bug：dispatcher
+        // 用了设置 session 字段之前的 clone，导致引擎结果无法推回前端）。
+        let self_with_session = Self {
+            session: Some(session.clone()),
+            inbound_router: None,
+            ..self
+        };
+        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(self_with_session.clone()));
         let inbound_router = Arc::new(agentos_session::router::InboundRouter::new(dispatcher));
         Self {
-            session: Some(session),
             inbound_router: Some(inbound_router),
+            ..self_with_session
+        }
+    }
+
+    /// 与 enable_session 相同，但接受外部已创建的 SessionCoordinator。
+    ///
+    /// 用于需要提前创建 session（如注入 capability router 的流式推送）的场景，
+    /// 避免重复创建。enable_session = 自建 session 的便捷封装。
+    pub fn enable_session_with(self, session: Arc<agentos_session::SessionCoordinator>) -> Self {
+        let self_with_session = Self {
+            session: Some(session),
+            inbound_router: None,
             ..self
+        };
+        let dispatcher = Arc::new(crate::ws_session::EngineDispatcher::new(self_with_session.clone()));
+        let inbound_router = Arc::new(agentos_session::router::InboundRouter::new(dispatcher));
+        Self {
+            inbound_router: Some(inbound_router),
+            ..self_with_session
         }
     }
 
@@ -312,12 +345,14 @@ pub async fn schema_handler(
         })
         .collect();
 
-    // P4/P5：聚合各插件的 contributes（仅含声明 contributes 的插件）。
+    // P4/P5：聚合各插件的 contributes（仅含声明 contributes 且 enabled 的插件）。
     // 内核不解释结构，透传给前端 ContributionRegistry（ADR §3.4/§六）。
+    // 安装触发模型 L1：disabled 插件的 contributes 不出口（tools/http 已过滤，UI 也不过来）。
+    let enabled_ids = state.enabled_plugin_ids.read().await;
     let plugin_contributes: Vec<serde_json::Value> = state
         .manifests
         .iter()
-        .filter(|m| m.contributes.is_some())
+        .filter(|m| m.contributes.is_some() && enabled_ids.contains(&m.id))
         .map(|m| {
             json!({
                 "plugin_id": m.id,
@@ -338,22 +373,89 @@ pub async fn schema_handler(
 }
 
 /// /api/v1/agents 端点处理器。
+///
+/// 扫描 config/agents/**/*.yaml 返回 Agent 列表(对照 0.1 routes_agents.py)。
+/// 支持 query 参数 agent_type 过滤(前端 agentStore 带 ?agent_type=main)。
+/// 响应格式 { items: [...] } 兼容前端 agentStore.ts:113。
 pub async fn agents_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<Vec<serde_json::Value>> {
-    let agents: Vec<serde_json::Value> = state
-        .manifests
-        .iter()
-        .filter(|m| m.plugin_type == PluginType::System)
-        .map(|m| {
-            json!({
-                "id": m.id,
-                "name": m.name,
-                "version": m.version,
-            })
-        })
-        .collect();
-    axum::Json(agents)
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::Json<serde_json::Value> {
+    let filter_type = params.get("agent_type").map(String::as_str);
+
+    let agents_dir = state
+        .project_root
+        .as_deref()
+        .map(|root| root.join("config").join("agents"))
+        .unwrap_or_else(|| std::path::PathBuf::from("config/agents"));
+
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if let Ok(yaml_files) = collect_yaml_files(&agents_dir) {
+        for path in yaml_files {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&content) {
+                    let agent_type = parsed
+                        .get("agent_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    // agent_type 过滤(前端 ?agent_type=main)
+                    if let Some(ft) = filter_type {
+                        if agent_type != ft {
+                            continue;
+                        }
+                    }
+                    let config_id = parsed
+                        .get("config_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| parsed.get("id").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    if config_id.is_empty() {
+                        continue;
+                    }
+                    items.push(json!({
+                        "id": config_id,
+                        "config_id": config_id,
+                        "name": parsed.get("name").and_then(|v| v.as_str()).unwrap_or(&config_id),
+                        "description": parsed.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                        "agent_type": agent_type,
+                        "status": "active",
+                        "model": parsed.get("model").and_then(|v| v.as_str())
+                            .or_else(|| parsed.get("model_tier").and_then(|v| v.as_str()))
+                            .unwrap_or(""),
+                        "level": parsed.get("level").and_then(|v| v.as_str()).unwrap_or(""),
+                        "model_tier": parsed.get("model_tier").and_then(|v| v.as_str()).unwrap_or(""),
+                    }));
+                }
+            }
+        }
+    }
+
+    let total = items.len();
+    axum::Json(json!({ "items": items, "total": total }))
+}
+
+/// 递归收集目录下所有 .yaml/.yml 文件(按文件名排序保证稳定)。
+fn collect_yaml_files(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    collect_yaml_files_inner(dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_yaml_files_inner(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_yaml_files_inner(&path, files)?;
+        } else if let Some(ext) = path.extension() {
+            if ext == "yaml" || ext == "yml" {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// /api/v1/pipelines 端点处理器。

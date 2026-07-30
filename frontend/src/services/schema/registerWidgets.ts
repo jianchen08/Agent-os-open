@@ -3,6 +3,17 @@
 import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPreviewWidget'
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
+import { CostDashboardWidget } from '@/components/schema/widgets/CostDashboardWidget'
+import {
+  AgentsPanel,
+  MemoryPanel,
+  MonitoringPanel,
+  PluginsPanel,
+  SettingsHubPanel,
+  ToolsPanel,
+  WorkspaceExplorerPanel,
+} from '@/components/schema/widgets/PanelHostWidget'
+import { SettingsHubWidget } from '@/components/schema/widgets/SettingsHubWidget'
 import { DecisionWidget } from '@/components/schema/widgets/DecisionWidget'
 import { EditorWidget } from '@/components/schema/widgets/EditorWidget'
 import { FileTreeWidget } from '@/components/schema/widgets/FileTreeWidget'
@@ -16,6 +27,7 @@ import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
+import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { widgetRegistry as composerRegistry } from './composer'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
@@ -47,6 +59,24 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'editor', component: EditorWidget, spaces: ['chat', 'workspace', 'floating'], fallback: 'code_block' },
   { name: 'terminal', component: TerminalWidget, spaces: ['workspace', 'fullscreen'], fallback: 'code_block' },
   { name: 'kanban', component: KanbanWidget, spaces: ['workspace'], fallback: 'table' },
+  {
+    name: 'cost_dashboard',
+    component: CostDashboardWidget,
+    spaces: ['workspace', 'floating'],
+    fallback: 'status_card',
+  },
+  // 顶栏打开的工作区面板（可关闭页签，非常驻）
+  { name: 'settings_hub', component: SettingsHubPanel, spaces: ['workspace', 'floating'] },
+  { name: 'plugins_panel', component: PluginsPanel, spaces: ['workspace'] },
+  { name: 'monitoring_panel', component: MonitoringPanel, spaces: ['workspace'] },
+  { name: 'tools_panel', component: ToolsPanel, spaces: ['workspace'] },
+  { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
+  { name: 'memory_panel', component: MemoryPanel, spaces: ['workspace'] },
+  { name: 'workspace_explorer', component: WorkspaceExplorerPanel, spaces: ['workspace'] },
+  // 兼容 SettingsHubWidget 直注册
+  { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
+  // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview
+  { name: 'webview', component: WebviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'html_preview' },
 ]
 
 /**
@@ -62,6 +92,7 @@ export function initializeWidgets(): void {
     composerRegistry.register(name, {
       component: component as React.ComponentType<Record<string, unknown>>,
       supportedSpaces: spaces,
+      fallbackWidget: fallback,
     })
     // 注册到 WidgetRegistry（RenderingEngine 独立渲染）
     widgetRegistry.register(name, component as WidgetComponent, {
@@ -70,9 +101,4 @@ export function initializeWidgets(): void {
       fallbackWidget: fallback,
     })
   }
-}
-
-/** 获取已注册 Widget 列表 */
-export function getWidgetList(): readonly WidgetEntry[] {
-  return WIDGETS
 }

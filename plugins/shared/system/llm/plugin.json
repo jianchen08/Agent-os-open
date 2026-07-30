@@ -20,7 +20,6 @@
     "error_policy": "skip",
     "priority": 30,
     "requires_content": 3,
-    "config_refs": ["models"],
     "config_files": [
         {"id": "llm", "path": "config/models/llm.yaml", "label": "LLM 模型配置"},
         {"id": "embedding", "path": "config/models/embedding.yaml", "label": "向量模型配置"}

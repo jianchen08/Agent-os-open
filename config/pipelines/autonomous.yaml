@@ -25,6 +25,7 @@ steps:
       - pipeline_memory_read
       - pipeline_knowledge_inject
       - pipeline_prompt_build
+      - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
     context:                  # 自由 key-value，merge 进 state 供插件读取
       agent_id: "{{state.agent_id}}"
       model_tier: "{{state.model_tier}}"
@@ -45,18 +46,14 @@ steps:
       - pipeline_stuck_detector
       - pipeline_result_format
     routes:                   # 配置驱动的路由分支
-      - when: "raw_tool_calls != []"
+      # 有非空工具调用 → 继续循环执行工具（明确判断非空列表，避免缺失字段误命中）
+      - when: "raw_tool_calls != [] and raw_tool_calls != None"
         then:
           next: loop
           set:
             core_type: tool_execute
             core_plugin: pipeline_tool_core
-      - when: "text_only == True and no_new_input == True"
-        then:
-          next: end
+      # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
       - when: "True"
         then:
-          next: loop
-          set:
-            core_type: llm_call
-            core_plugin: pipeline_llm_core
+          next: end

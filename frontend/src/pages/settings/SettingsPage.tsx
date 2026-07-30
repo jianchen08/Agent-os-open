@@ -1,151 +1,226 @@
-/** 设置中心页面 展示卡片网格链接到各设置子页面，包括专用设置页和通用配置页。 */
+/**
+ * 设置页 — 左列表 + 右内联编辑
+ *
+ * 去掉"设置中心"卡片二次跳转。点击左侧模块配置项，右侧直接显示并修改。
+ * 插件配置走 0.2 /api/v1/plugins/{id}/config/{file_id}。
+ */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { getSchema } from '@/services/api/schema'
 import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
+import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
+import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
+import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
 
-/** 设置项配置 */
-interface SettingCard {
-  title: string
-  description: string
-  href: string
-  icon: string
-}
+/** 左侧导航条目 */
+type NavItem =
+  | {
+      kind: 'builtin'
+      id: string
+      title: string
+      description: string
+      icon: string
+    }
+  | {
+      kind: 'plugin'
+      id: string
+      title: string
+      description: string
+      icon: string
+      pluginId: string
+      fileId: string
+      pluginName: string
+    }
 
-/** 基础设置页（有独立页面的配置，内核独占） */
-const KERNEL_SETTINGS_CARDS: SettingCard[] = [
+const BUILTIN_ITEMS: Extract<NavItem, { kind: 'builtin' }>[] = [
   {
-    title: '模块设置',
-    description: '管理已安装模块的配置',
-    href: '/settings/modules',
-    icon: '🧩',
-  },
-  {
+    kind: 'builtin',
+    id: 'theme',
     title: '主题设置',
     description: '切换界面主题和显示模式',
-    href: '/settings/theme',
     icon: '🎨',
   },
   {
-    title: 'LLM 配置',
-    description: '配置大语言模型参数',
-    href: '/settings/llm',
-    icon: '🤖',
-  },
-  {
-    title: '插件设置',
-    description: '管理插件配置',
-    href: '/settings/plugins',
+    kind: 'builtin',
+    id: 'plugins',
+    title: '插件管理',
+    description: '启用/禁用插件、查看状态',
     icon: '🔌',
   },
 ]
 
-/** 设置中心页面组件 */
+/** 设置页主组件：左导航右编辑 */
 export function SettingsPage() {
   const [settingsPanels, setSettingsPanels] = useState<SettingsPanelEntry[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [selectedId, setSelectedId] = useState<string>(BUILTIN_ITEMS[0].id)
 
-  // 加载 schema 并注册到 ContributionRegistry
   useEffect(() => {
     let cancelled = false
     setIsLoading(true)
 
     getSchema()
       .then((schema) => {
-        if (!cancelled) {
-          contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
-          setSettingsPanels(contributionRegistry.getSettingsPanels())
-        }
+        if (cancelled) return
+        contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
+        setSettingsPanels(contributionRegistry.getSettingsPanels())
       })
       .catch(() => {
-        // schema 加载失败时静默降级：只显示内核设置
+        // schema 失败时仍展示内置项
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false)
       })
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [])
 
+  const pluginItems: NavItem[] = useMemo(() => {
+    const items: NavItem[] = []
+    for (const panel of settingsPanels) {
+      for (const file of panel.configFiles) {
+        items.push({
+          kind: 'plugin',
+          id: `plugin:${panel.pluginId}:${file.id}`,
+          title: file.label,
+          description: panel.pluginName,
+          icon: panel.pluginIcon || '⚙️',
+          pluginId: panel.pluginId,
+          fileId: file.id,
+          pluginName: panel.pluginName,
+        })
+      }
+    }
+    return items
+  }, [settingsPanels])
+
+  const allItems = useMemo(() => [...BUILTIN_ITEMS, ...pluginItems], [pluginItems])
+  const selected = allItems.find((item) => item.id === selectedId) ?? allItems[0]
+
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
+    <div
+      className="text-foreground flex h-screen flex-col overflow-hidden"
+      style={{ background: 'var(--ds-bg-canvas, #04060F)' }}
+    >
+      <header
+        className="flex h-12 shrink-0 items-center border-b px-4"
+        style={{
+          background: 'var(--ds-bg-panel, #0A1226)',
+          borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
+        }}
+      >
         <Link to="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </Link>
-        <h1 className="ml-4 text-base font-semibold">设置中心</h1>
+        <h1 className="ml-4 text-base font-semibold">设置</h1>
+        <span className="text-muted-foreground ml-auto font-mono text-[10px]">Deep Space v2</span>
       </header>
-      <main className="flex-1 overflow-y-auto p-3 sm:p-6">
-        {/* 内核设置（内核独占，少数几项） */}
-        <section className="mb-8">
-          <h2 className="text-foreground mb-4 text-sm font-semibold">内核设置</h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {KERNEL_SETTINGS_CARDS.map((card) => (
-              <SettingCardLink key={card.href} card={card} />
+
+      <div className="flex min-h-0 flex-1">
+        {/* 左侧模块列表 */}
+        <aside
+          className="w-64 shrink-0 overflow-y-auto border-r p-3 sm:w-72"
+          style={{
+            background: 'var(--ds-bg-panel, #0A1226)',
+            borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
+          }}
+        >
+          <SectionTitle>内核设置</SectionTitle>
+          <nav className="mb-4 space-y-1">
+            {BUILTIN_ITEMS.map((item) => (
+              <NavButton
+                key={item.id}
+                item={item}
+                active={selected?.id === item.id}
+                onClick={() => setSelectedId(item.id)}
+              />
             ))}
-          </div>
-        </section>
+          </nav>
 
-        {/* 插件配置（按插件聚合，来自 ContributionRegistry） */}
-        {!isLoading && settingsPanels.length > 0 && (
-          <section className="mb-8">
-            <h2 className="text-foreground mb-4 text-sm font-semibold">插件配置</h2>
-            <div className="space-y-6">
-              {settingsPanels.map((panel) => (
-                <PluginConfigSection key={panel.pluginId} panel={panel} />
-              ))}
+          <SectionTitle>插件配置</SectionTitle>
+          {isLoading && (
+            <div className="text-muted-foreground px-2 py-3 text-xs">加载插件配置...</div>
+          )}
+          {!isLoading && pluginItems.length === 0 && (
+            <div className="text-muted-foreground px-2 py-3 text-xs">暂无插件配置项</div>
+          )}
+          <nav className="space-y-1">
+            {pluginItems.map((item) => (
+              <NavButton
+                key={item.id}
+                item={item}
+                active={selected?.id === item.id}
+                onClick={() => setSelectedId(item.id)}
+              />
+            ))}
+          </nav>
+        </aside>
+
+        {/* 右侧内联编辑区（嵌入子页时隐藏其独立全屏头，避免双层导航） */}
+        <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+          {selected?.kind === 'plugin' && (
+            <PluginConfigEditor
+              key={selected.id}
+              pluginId={selected.pluginId}
+              fileId={selected.fileId}
+              title={selected.title}
+              embedded
+            />
+          )}
+          {selected?.kind === 'builtin' && (
+            <div className="h-full min-h-0 [&>div]:!h-auto [&>div]:!min-h-0 [&>div]:!overflow-visible [&_header]:!hidden">
+              {selected.id === 'theme' && <ThemeSettingsPage embedded />}
+              {selected.id === 'plugins' && (
+                <PluginsSettingsPage
+                  embedded
+                  onSelectPluginConfig={(pluginId, fileId) => {
+                    setSelectedId(`plugin:${pluginId}:${fileId}`)
+                  }}
+                />
+              )}
             </div>
-          </section>
-        )}
-
-        {/* 加载中提示 */}
-        {isLoading && (
-          <div className="text-muted-foreground flex items-center justify-center py-8">
-            <span className="text-sm">加载插件配置...</span>
-          </div>
-        )}
-      </main>
-    </div>
-  )
-}
-
-/** 插件配置分区（按插件聚合展示） */
-function PluginConfigSection({ panel }: { panel: SettingsPanelEntry }) {
-  return (
-    <div>
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-lg">{panel.pluginIcon || '🔧'}</span>
-        <h3 className="text-sm font-medium">{panel.pluginName}</h3>
-      </div>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {panel.configFiles.map((file) => (
-          <SettingCardLink
-            key={file.id}
-            card={{
-              title: file.label,
-              description: file.path,
-              href: `/settings/plugin/${panel.pluginId}/${file.id}`,
-              icon: '⚙️',
-            }}
-          />
-        ))}
+          )}
+        </main>
       </div>
     </div>
   )
 }
 
-/** 设置卡片链接 */
-function SettingCardLink({ card }: { card: SettingCard }) {
+function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <Link
-      to={card.href}
-      className="bg-card hover:bg-accent/50 block rounded-lg border p-5 transition-colors"
+    <h2 className="text-muted-foreground mb-2 px-2 text-[10px] font-medium tracking-wide uppercase">
+      {children}
+    </h2>
+  )
+}
+
+function NavButton({
+  item,
+  active,
+  onClick,
+}: {
+  item: NavItem
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+        active
+          ? 'bg-[var(--ds-bg-hover,#1A2748)] text-foreground'
+          : 'text-muted-foreground hover:bg-[var(--ds-bg-hover,#1A2748)] hover:text-foreground'
+      }`}
     >
-      <div className="mb-2 text-2xl">{card.icon}</div>
-      <h3 className="mb-1 text-sm font-semibold">{card.title}</h3>
-      <p className="text-muted-foreground text-xs">{card.description}</p>
-    </Link>
+      <span className="mt-0.5 text-base leading-none">{item.icon}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] font-medium">{item.title}</span>
+      </span>
+    </button>
   )
 }

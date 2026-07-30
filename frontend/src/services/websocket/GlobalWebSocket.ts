@@ -127,10 +127,18 @@ class GlobalWebSocketService {
         if (data.type === 'heartbeat_ack') {
           this._handleHeartbeatAck()
         }
-        // 追踪 last_sequence：从消息中提取 sequence 字段，更新最大已知序号
-        if (data.data?.sequence != null && typeof data.data.sequence === 'number') {
-          if (data.data.sequence > this._lastSequence) {
-            this._lastSequence = data.data.sequence
+        // 追踪 last_sequence：从消息中提取 sequence 字段，更新最大已知序号。
+        // 后端两种 sequence 位置并存，共享同一全局 sequence 空间（ADR §3.5 第7条）：
+        // - 流式族：data.data.sequence（嵌套）
+        // - widget_event 族：data.sequence（顶层）
+        const seqCandidates = [
+          data?.data?.sequence,
+          data?.sequence,
+        ].filter((s) => typeof s === 'number') as number[]
+        if (seqCandidates.length > 0) {
+          const maxSeq = Math.max(...seqCandidates)
+          if (maxSeq > this._lastSequence) {
+            this._lastSequence = maxSeq
           }
         }
         // 处理 resync_required 事件：后端告知需要全量重新同步

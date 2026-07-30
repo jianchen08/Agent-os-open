@@ -192,6 +192,8 @@ export const WS_SERVER_EVENTS = {
   ITERATION: 'iteration',
   /** 需要全量重新同步（断线重连后后端告知 last_sequence 过期） */
   RESYNC_REQUIRED: 'resync_required',
+  /** widget 事件（内核 PluginWidgetBroadcaster 周期快照 + 插件 widget 交互，ADR §3.5'） */
+  WIDGET_EVENT: 'widget_event',
 } as const
 
 /**

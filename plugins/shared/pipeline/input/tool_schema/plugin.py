@@ -99,6 +99,11 @@ class ToolSchemaPlugin(IInputPlugin):
             tool_registry = ctx.get_service("tool_registry")
         except KeyError:
             logger.debug("[%s] No tool_registry service, skipping", self.name)
+            # 0.2 sidecar 架构:sidecar 拿不到内核 tool_registry。若内核已注入
+            # tool_schemas（process_via_engine 经 capability_registry 生成），保留它，
+            # 不覆盖为空（否则 LLM 拿不到任何工具）。无内核注入时返回空。
+            if ctx.state.get("tool_schemas"):
+                return {}  # 不覆盖，保留内核注入的 schema
             return {"tool_schemas": []}
 
         # 确定工具过滤列表：优先从 state 读取（Agent 配置注入），降级用插件配置

@@ -312,9 +312,40 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
 )
 
 /**
+ * 等待 zustand persist 完成从 localStorage 恢复
+ * 避免 initializeTheme 在 rehydrate 前用默认 dark 覆盖用户选择的 light
+ */
+async function waitForThemeHydration(): Promise<void> {
+  const persistApi = (useThemeStore as unknown as {
+    persist?: {
+      hasHydrated?: () => boolean
+      onFinishHydration?: (fn: () => void) => () => void
+    }
+  }).persist
+
+  if (!persistApi?.hasHydrated) return
+  if (persistApi.hasHydrated()) return
+
+  await new Promise<void>((resolve) => {
+    const unsub = persistApi.onFinishHydration?.(() => {
+      unsub?.()
+      resolve()
+    })
+    // 兜底：极端情况下 rehydrate 未触发也不阻塞启动
+    window.setTimeout(() => {
+      unsub?.()
+      resolve()
+    }, 500)
+  })
+}
+
+/**
  * 初始化主题（在应用启动时调用）
  */
 export async function initializeTheme() {
+  // 必须先完成 persist rehydrate，再读 currentThemeId
+  await waitForThemeHydration()
+
   const store = useThemeStore.getState()
 
   // 先拉取动态主题（后端无状态清单 → fetch JSON → 存 localStorage），
@@ -336,10 +367,10 @@ export async function initializeTheme() {
   if (typeof window !== 'undefined') {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
     mediaQuery.addEventListener('change', () => {
-      if (store.mode === 'system') {
+      if (useThemeStore.getState().mode === 'system') {
         const newResolved = getSystemTheme()
         useThemeStore.setState({ resolvedTheme: newResolved })
-        store.loadTheme(newResolved)
+        useThemeStore.getState().loadTheme(newResolved)
       }
     })
   }

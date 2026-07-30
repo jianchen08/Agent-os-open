@@ -37,6 +37,14 @@ async function bootstrap() {
 
   await initializeTheme()
 
+  // 预注册工作区面板 widget（顶栏可打开设置/监控等，不依赖登录）
+  try {
+    const { initializeWidgets } = await import('@/services/schema/registerWidgets')
+    initializeWidgets()
+  } catch (error) {
+    console.error('Widget 预注册失败:', error)
+  }
+
   // 注册全局文件打开回调
   registerGlobalOpenFileCallback(async (filePath: string, containerTaskId?: string) => {
     const result = await openFile(filePath, { containerTaskId })
@@ -62,7 +70,8 @@ async function bootstrap() {
   // 其 isAuthenticated 仍为 false。这里重新 getState() 获取最新认证状态，
   // 才能正确判断是否初始化 GrowthLoop。
   const freshAuthState = useAuthStore.getState()
-  if (freshAuthState.isAuthenticated) {
+  // DEV 无登录也要能看到壳层页签；已登录再走完整 GrowthLoop
+  if (freshAuthState.isAuthenticated || import.meta.env.DEV) {
     try {
       const { initializeGrowthLoop } = await import('@/services/modules/GrowthLoop')
       await initializeGrowthLoop()

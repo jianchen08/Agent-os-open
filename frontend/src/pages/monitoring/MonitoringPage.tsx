@@ -263,7 +263,7 @@ export function MonitoringPage() {
         {/* 最近任务 */}
         <section>
           <h2 className="mb-3 text-sm font-semibold">最近任务</h2>
-          {recentTasks.length === 0 ? (
+          {!recentTasks || recentTasks.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12">
               <Activity className="text-muted-foreground/40 mb-3 h-10 w-10" />
               <p className="text-muted-foreground text-sm">暂无任务记录</p>

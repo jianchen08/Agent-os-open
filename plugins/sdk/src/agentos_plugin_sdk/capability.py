@@ -32,10 +32,12 @@ class CapabilityHandle:
         self,
         name: str,
         call_fn: Any | None = None,
+        notify_fn: Any | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
         self._name = name
         self._call_fn = call_fn
+        self._notify_fn = notify_fn
         self._context = context or {}
 
     @property
@@ -60,6 +62,23 @@ class CapabilityHandle:
             raise RuntimeError(f"capability '{self._name}' is not connected to kernel")
         return await self._call_fn(method, params)
 
+    async def notify(self, method: str, params: dict[str, Any]) -> None:
+        """向内核发送 fire-and-forget 通知（不等响应）。
+
+        用于流式 chunk 推送：每生成一个 chunk 就 notify 一次，内核收到后
+        直接推前端。不等响应避免每个 chunk 阻塞（send_request 不可用于高频流式）。
+
+        Args:
+            method: 要调用的方法名。
+            params: 方法参数。
+
+        Raises:
+            RuntimeError: 如果句柄未连接到内核。
+        """
+        if self._notify_fn is None:
+            raise RuntimeError(f"capability '{self._name}' notify not connected to kernel")
+        await self._notify_fn(method, params)
+
     def get(self, key: str) -> Any:
         """读取上下文信息。
 
@@ -80,7 +99,7 @@ class CapabilityHandle:
         return list(self._context.keys())
 
 
-# 6 个标准能力句柄名称（与内核 STANDARD_CAPABILITIES 对齐）
+# 标准能力句柄名称（与内核 STANDARD_CAPABILITIES 对齐）
 STANDARD_CAPABILITIES = [
     "pipeline-executor",
     "config-reader",
@@ -88,5 +107,6 @@ STANDARD_CAPABILITIES = [
     "event-bus",
     "logger",
     "metrics",
+    "tool-executor",
 ]
 

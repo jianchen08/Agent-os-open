@@ -50,6 +50,18 @@ export interface SchemaResponse {
   pipelines: SchemaEntry[]
   tools: Array<Record<string, unknown>>
   routes: Record<string, unknown>
+  /** 声明了 config_files 的插件（配置面板数据源） */
+  plugin_configs: Array<{
+    plugin_id: string
+    plugin_name: string
+    config_files: Array<{ id: string; path: string; label: string }>
+  }>
+  /** 声明了 contributes 的插件（贡献点数据源，内核原样透传 contributes 结构） */
+  plugin_contributes: Array<{
+    plugin_id: string
+    plugin_name: string
+    contributes: Record<string, unknown[]>
+  }>
 }
 
 /**

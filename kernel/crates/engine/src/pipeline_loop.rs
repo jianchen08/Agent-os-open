@@ -124,6 +124,10 @@ impl PipelineExecutor {
             set_key(&mut state, "ended", serde_json::Value::Bool(false));
         }
 
+        // ADR ②③：引擎独占落库。run 开始时建 runs 记录 + 落 user 消息。
+        // 失败只 warn 不阻断执行（持久化不应让管道跑不通）。
+        self.persist_run_start(&state).await;
+
         if config.loop_config.enabled {
             let max_iters = config.loop_config.max_iterations;
             let mut iteration: i32 = 0;
@@ -151,6 +155,11 @@ impl PipelineExecutor {
         // 监控 M2：pipeline 执行累计耗时
         let elapsed = run_start.elapsed().as_micros() as u64;
         self.metrics.inc_pipeline_exec(elapsed);
+
+        // ADR ②③：一轮结束时落完整 assistant 消息 + 更新 run 状态。
+        // 流式期间只更新内存 state，此处 stream_end 一次性原子落库。
+        self.persist_run_end(&state).await;
+
         Ok(state)
     }
 
@@ -282,6 +291,8 @@ impl PipelineExecutor {
                             for (k, v) in &result.state_updates {
                                 set_key(state, k, v.clone());
                             }
+                            // ADR ③：merge 后追加 Patch 到 traces 表（Append-Only）。
+                            self.persist_trace(item, &result).await;
                             if result.skip_remaining {
                                 break;
                             }
@@ -357,6 +368,139 @@ impl PipelineExecutor {
             self.metrics.inc_tool_call(elapsed);
         }
         result
+    }
+
+    // ── 持久化（ADR ②③：引擎独占落库，插件只返回 Patch）──────────
+
+    /// 创建运行实例（runs 表）并落用户消息（messages 表）。
+    ///
+    /// 在 run() 开头调用一次。user 消息从 initial_state["message"] 取
+    /// （server.rs:242 注入的当前用户输入）。完整内容存 blobs 表，
+    /// messages 表存摘要 preview + blob_id 指针（ADR ⑦ 懒加载）。
+    async fn persist_run_start(&self, state: &serde_json::Value) {
+        // config_hash 是 runs 表的配置指纹元数据，此处用空串占位
+        // （完整实现应哈希 pipeline_config，但对持久化链路验证无影响）。
+        let config_hash = "";
+        let tenant_id = self.default_tenant.tenant_id.clone();
+        if let Err(e) = self.store.create_run(&self.run_id, &config_hash, &tenant_id).await {
+            warn!(run_id = %self.run_id, error = %e, "create_run 落库失败（继续执行）");
+            self.metrics.inc_persist_failure();
+        }
+
+        // pipeline_id 从 state 读（server.rs:261 注入，前端创建会话时生成、每轮回传）。
+        // 它是消息层查询主键（对齐 0.1 pipeline_run_id），适配"通过 state 通路执行持久化"。
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // 落用户消息（role=user）
+        if let Some(user_msg) = state.get("message").and_then(|v| v.as_str()) {
+            if !user_msg.is_empty() {
+                let msg_id = format!("u_{}", uuid::Uuid::new_v4().simple());
+                let preview: String = user_msg.chars().take(200).collect();
+                let blob_id = match self.store.store_blob(user_msg.as_bytes(), "text/plain").await {
+                    Ok(id) => Some(id),
+                    Err(e) => { warn!(error = %e, "store_blob(user msg) 失败"); self.metrics.inc_persist_failure(); None }
+                };
+                // sequence 按 pipeline_id 维度连续递增（替代旧的每轮硬编码 0/1），
+                // 支撑前端 before_sequence/after_sequence 游标分页。
+                let seq = if pipeline_id.is_empty() {
+                    0
+                } else {
+                    match self.store.next_sequence(pipeline_id).await {
+                        Ok(s) => s,
+                        Err(e) => { warn!(error = %e, "next_sequence(user) 失败，回退 seq=0"); self.metrics.inc_persist_failure(); 0 }
+                    }
+                };
+                if let Err(e) = self.store.append_message(
+                    &msg_id, &self.run_id, &self.branch_id, seq, "user",
+                    blob_id.as_deref(), Some(&preview),
+                    if pipeline_id.is_empty() { None } else { Some(pipeline_id) },
+                ).await {
+                    warn!(error = %e, "append_message(user) 失败");
+                    self.metrics.inc_persist_failure();
+                }
+            }
+        }
+    }
+
+    /// 追加插件 step 的 Patch 到 traces 表（Append-Only，ADR ③）。
+    ///
+    /// 在每个原子插件 execute 返回后、state merge 之后调用。patch_data
+    /// 直接用插件的 state_updates（对应 ADR ③ 的 Patch 语义）。
+    async fn persist_trace(&self, plugin_id: &str, result: &PluginResult) {
+        use agentos_core::types::{PatchType, TraceEntry};
+        for (k, v) in &result.state_updates {
+            let entry = TraceEntry {
+                trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
+                run_id: self.run_id.clone(),
+                branch_id: self.branch_id.clone(),
+                seq_in_branch: 0, // 简化：实际应从 state 当前 seq 读，此处用 0 占位
+                plugin_id: plugin_id.to_string(),
+                patch_type: PatchType::StateUpdate,
+                patch_data: serde_json::json!({ k: v }),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = self.store.append_trace(entry).await {
+                warn!(plugin = %plugin_id, key = %k, error = %e, "append_trace 失败");
+                self.metrics.inc_persist_failure();
+            }
+        }
+    }
+
+    /// 一轮结束时落完整 assistant 消息（messages + blobs）并更新 run 状态。
+    ///
+    /// 从 final_state["raw_result"] 取最终回复文本。stream_end 一次性落库，
+    /// 流式期间不碰库（业界标准：流式只更新内存 state，结束时原子落库）。
+    async fn persist_run_end(&self, final_state: &serde_json::Value) {
+        let assistant_msg = final_state.get("raw_result")
+            .and_then(|v| v.as_str())
+            .or_else(|| final_state.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("");
+
+        // pipeline_id 从 state 读（与 persist_run_start 一致，走 state 通路）
+        let pipeline_id = final_state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !assistant_msg.is_empty() {
+            let msg_id = format!("a_{}", uuid::Uuid::new_v4().simple());
+            // preview 按字符切（非字节），避免中文多字节 UTF-8 切在字符中间 panic。
+            let preview: String = assistant_msg.chars().take(200).collect();
+            let blob_id = match self.store.store_blob(assistant_msg.as_bytes(), "text/plain").await {
+                Ok(id) => Some(id),
+                Err(e) => { warn!(error = %e, "store_blob(assistant msg) 失败"); self.metrics.inc_persist_failure(); None }
+            };
+            // sequence 按 pipeline_id 连续递增；与 user 消息共用同一序列空间
+            let seq = if pipeline_id.is_empty() {
+                1
+            } else {
+                match self.store.next_sequence(pipeline_id).await {
+                    Ok(s) => s,
+                    Err(e) => { warn!(error = %e, "next_sequence(assistant) 失败，回退 seq=1"); self.metrics.inc_persist_failure(); 1 }
+                }
+            };
+            if let Err(e) = self.store.append_message(
+                &msg_id, &self.run_id, &self.branch_id, seq, "assistant",
+                blob_id.as_deref(), Some(&preview),
+                if pipeline_id.is_empty() { None } else { Some(pipeline_id) },
+            ).await {
+                warn!(error = %e, "append_message(assistant) 失败");
+                self.metrics.inc_persist_failure();
+            }
+        }
+
+        // update_run_status 要求 current_branch 和 current_seq 同时 Some 或同时 None。
+        // 标记完成只需更新 status + ended_at，用 (None, None) 不更新 branch/seq。
+        if let Err(e) = self.store.update_run_status(
+            &self.run_id, agentos_core::types::RunStatus::Completed,
+            None, None,
+        ).await {
+            warn!(run_id = %self.run_id, error = %e, "update_run_status(Completed) 失败");
+            self.metrics.inc_persist_failure();
+        }
     }
 }
 
@@ -530,6 +674,19 @@ mod tests {
         ) -> Result<Vec<MessageRecord>, agentos_core::types::StorageError> {
             Ok(vec![])
         }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<MessageRecord>, agentos_core::types::StorageError> {
+            Ok(vec![])
+        }
+        async fn next_sequence(
+            &self,
+            _pipeline_id: &str,
+        ) -> Result<u32, agentos_core::types::StorageError> {
+            Ok(1)
+        }
         async fn get_recent_messages(
             &self,
             _run_id: &str,
@@ -556,6 +713,59 @@ mod tests {
             _status: RunStatus,
             _branch: Option<&str>,
             _seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        #[allow(clippy::too_many_arguments)]
+        async fn append_message(
+            &self,
+            _message_id: &str,
+            _run_id: &str,
+            _branch_id: &str,
+            _seq_in_branch: u32,
+            _role: &str,
+            _blob_id: Option<&str>,
+            _content_preview: Option<&str>,
+            _pipeline_id: Option<&str>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn store_blob(
+            &self,
+            _data: &[u8],
+            _mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            Ok("null".to_string())
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError> {
+            Ok(None)
+        }
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError> {
+            Ok(vec![])
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }

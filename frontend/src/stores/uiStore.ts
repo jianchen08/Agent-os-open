@@ -47,8 +47,12 @@ interface UIState {
   taskPanelCollapsed: boolean
   /** 工作区面板是否折叠 */
   workspaceCollapsed: boolean
-  /** 工作区面板宽度比例（0~1，相对 splitter 容器）；null 表示用默认比例 */
+  /** 工作区面板是否最大化（保留顶栏/状态栏，仅折叠侧栏+聊天） */
+  workspaceMaximized: boolean
+  /** 工作区面板宽度比例（0~1，相对 chat+workspace）；null 表示用默认比例 */
   workspacePanelRatio: number | null
+  /** 侧边栏宽度比例（0~1，相对主内容区）；null 表示用默认比例 */
+  sidebarRatio: number | null
   /** 消息搜索关键词（Sidebar 与 ChatContainer 共享） */
   messageSearchQuery: string
 }
@@ -70,8 +74,14 @@ interface UIActions {
   toggleWorkspace: () => void
   /** 设置工作区面板状态 */
   setWorkspaceCollapsed: (collapsed: boolean) => void
+  /** 切换工作区面板最大化（保留顶栏/状态栏，仅折叠侧栏+聊天） */
+  toggleWorkspaceMaximize: () => void
+  /** 设置工作区面板最大化状态 */
+  setWorkspaceMaximized: (maximized: boolean) => void
   /** 设置工作区面板宽度比例（null 表示用默认比例） */
   setWorkspacePanelRatio: (ratio: number | null) => void
+  /** 设置侧边栏宽度比例（null 表示用默认比例） */
+  setSidebarRatio: (ratio: number | null) => void
   /** 设置消息搜索关键词 */
   setMessageSearchQuery: (query: string) => void
 }
@@ -87,7 +97,15 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   approvalDialog: null,
   taskPanelCollapsed: loadCollapsedState(uiStorage.getTaskPanelCollapsed, false),
   workspaceCollapsed: loadCollapsedState(uiStorage.getWorkspaceCollapsed, false),
+  workspaceMaximized: loadCollapsedState(uiStorage.getWorkspaceMaximized, false),
   workspacePanelRatio: loadWorkspacePanelRatio(),
+  sidebarRatio: (() => {
+    try {
+      return uiStorage.getSidebarRatio()
+    } catch {
+      return null
+    }
+  })(),
   messageSearchQuery: '',
 
   /**
@@ -142,20 +160,65 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   },
   /**
    * 切换工作区面板折叠状态
+   * 折叠与最大化互斥：折叠工作区时退出最大化。
    */
   toggleWorkspace: () => {
     set((state) => {
       const newCollapsed = !state.workspaceCollapsed
       uiStorage.setWorkspaceCollapsed(newCollapsed)
+      if (newCollapsed && state.workspaceMaximized) {
+        uiStorage.setWorkspaceMaximized(false)
+        return { workspaceCollapsed: newCollapsed, workspaceMaximized: false }
+      }
       return { workspaceCollapsed: newCollapsed }
     })
   },
   /**
    * 设置工作区面板状态
+   * 折叠与最大化互斥：折叠工作区时退出最大化。
    */
   setWorkspaceCollapsed: (collapsed: boolean) => {
     uiStorage.setWorkspaceCollapsed(collapsed)
+    if (collapsed) {
+      const cur = useUIStore.getState().workspaceMaximized
+      if (cur) {
+        uiStorage.setWorkspaceMaximized(false)
+        set({ workspaceCollapsed: collapsed, workspaceMaximized: false })
+        return
+      }
+    }
     set({ workspaceCollapsed: collapsed })
+  },
+  /**
+   * 切换工作区面板最大化状态
+   * 最大化与折叠互斥：最大化时取消折叠（工作区需要可见）。
+   */
+  toggleWorkspaceMaximize: () => {
+    set((state) => {
+      const newMaximized = !state.workspaceMaximized
+      uiStorage.setWorkspaceMaximized(newMaximized)
+      if (newMaximized && state.workspaceCollapsed) {
+        uiStorage.setWorkspaceCollapsed(false)
+        return { workspaceMaximized: newMaximized, workspaceCollapsed: false }
+      }
+      return { workspaceMaximized: newMaximized }
+    })
+  },
+  /**
+   * 设置工作区面板最大化状态
+   * 最大化与折叠互斥：最大化时取消折叠（工作区需要可见）。
+   */
+  setWorkspaceMaximized: (maximized: boolean) => {
+    uiStorage.setWorkspaceMaximized(maximized)
+    if (maximized) {
+      const cur = useUIStore.getState().workspaceCollapsed
+      if (cur) {
+        uiStorage.setWorkspaceCollapsed(false)
+        set({ workspaceMaximized: maximized, workspaceCollapsed: false })
+        return
+      }
+    }
+    set({ workspaceMaximized: maximized })
   },
   /**
    * 设置工作区面板宽度比例（null 表示清除记忆，回退默认比例）
@@ -167,6 +230,14 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
       uiStorage.setWorkspacePanelRatio(ratio)
     }
     set({ workspacePanelRatio: ratio })
+  },
+  setSidebarRatio: (ratio: number | null) => {
+    if (ratio === null) {
+      uiStorage.setSidebarRatio(undefined)
+    } else {
+      uiStorage.setSidebarRatio(ratio)
+    }
+    set({ sidebarRatio: ratio })
   },
   setMessageSearchQuery: (query: string) => {
     set({ messageSearchQuery: query })

@@ -159,6 +159,10 @@ pub struct PluginInvokerImpl {
     loader: Arc<dyn PluginLoader>,
     /// 已连接的 MCP 客户端 {plugin_id: McpClient}
     mcp_clients: RwLock<HashMap<String, Arc<tokio::sync::Mutex<McpClient>>>>,
+    /// per-plugin spawn 互斥锁（single-flight，防并发请求竞态 spawn 多个 sidecar）。
+    /// 同一 plugin_id 的 spawn 串行化：首个请求持锁 spawn 并写缓存，后续请求拿锁后
+    /// 二次查缓存命中直接复用。修复「并发触发 → 竞态创建多个孤儿 sidecar」泄漏。
+    spawn_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 崩溃回调（插件崩溃时调用）
     #[allow(clippy::type_complexity)]
     crash_callbacks: RwLock<Vec<Arc<dyn Fn(&str) + Send + Sync>>>,
@@ -176,6 +180,7 @@ impl PluginInvokerImpl {
         Self {
             loader,
             mcp_clients: RwLock::new(HashMap::new()),
+            spawn_locks: RwLock::new(HashMap::new()),
             crash_callbacks: RwLock::new(Vec::new()),
             router: RwLock::new(None),
             wasm_runtime: None,
@@ -190,6 +195,7 @@ impl PluginInvokerImpl {
         Self {
             loader,
             mcp_clients: RwLock::new(HashMap::new()),
+            spawn_locks: RwLock::new(HashMap::new()),
             crash_callbacks: RwLock::new(Vec::new()),
             router: RwLock::new(None),
             wasm_runtime: Some(wasm_runtime),
@@ -259,32 +265,64 @@ impl PluginInvokerImpl {
     }
 
     /// 获取或创建 MCP 客户端（按需加载）。
+    ///
+    /// 并发安全：用 per-plugin spawn 锁（single-flight）保证同一 plugin_id 的 spawn
+    /// 串行化，修复「并发请求竞态创建多个孤儿 sidecar」的进程泄漏。
     async fn get_or_create_mcp_client(
         &self,
         manifest: &PluginManifest,
     ) -> Result<Arc<tokio::sync::Mutex<McpClient>>, PluginError> {
-        // 检查缓存（不跨 await 持有读锁）
-        let cached = {
-            let clients = self.mcp_clients.read();
-            clients.get(&manifest.id).cloned()
-        };
-
-        if let Some(client) = cached {
-            // 检查进程是否存活（读锁已释放）
-            let mut client_guard = client.lock().await;
-            if client_guard.is_alive().await {
-                return Ok(Arc::clone(&client));
+        // Fast path：无锁查缓存，命中且存活直接返回（热路径，避开 spawn 锁开销）。
+        {
+            let cached = {
+                let clients = self.mcp_clients.read();
+                clients.get(&manifest.id).cloned()
+            };
+            if let Some(client) = cached {
+                let mut client_guard = client.lock().await;
+                if client_guard.is_alive().await {
+                    return Ok(Arc::clone(&client));
+                }
+                // 进程已崩溃——显式 kill 旧客户端再创建新的
+                error!("Plugin process crashed: {}", manifest.id);
+                let _ = client_guard.kill().await;
+                drop(client_guard);
+                self.notify_crash(&manifest.id);
+                self.mcp_clients.write().remove(&manifest.id);
             }
-            // 进程已崩溃——显式 kill 旧客户端再创建新的
-            error!("Plugin process crashed: {}", manifest.id);
-            let _ = client_guard.kill().await;
-            drop(client_guard);
-            self.notify_crash(&manifest.id);
-            // 从缓存中移除旧客户端
-            self.mcp_clients.write().remove(&manifest.id);
         }
 
-        // 创建新的 MCP 客户端
+        // Slow path：拿 per-plugin spawn 锁，串行化同 plugin_id 的 spawn。
+        // 取（或创建）该 plugin 的专用锁 Arc——锁本身常驻 spawn_locks，不随调用释放。
+        let spawn_lock = {
+            let mut locks = self.spawn_locks.write();
+            locks
+                .entry(manifest.id.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _spawn_guard = spawn_lock.lock().await;
+
+        // Double-check：持 spawn 锁后再查缓存——前一个持锁者可能已创建好 client。
+        // 命中则直接复用，避免重复 spawn。
+        {
+            let cached = {
+                let clients = self.mcp_clients.read();
+                clients.get(&manifest.id).cloned()
+            };
+            if let Some(client) = cached {
+                let mut client_guard = client.lock().await;
+                if client_guard.is_alive().await {
+                    return Ok(Arc::clone(&client));
+                }
+                // 极端情况：double-check 时又崩溃——kill 后继续 spawn
+                let _ = client_guard.kill().await;
+                drop(client_guard);
+                self.mcp_clients.write().remove(&manifest.id);
+            }
+        }
+
+        // 创建新的 MCP 客户端（持有 spawn 锁，保证串行）
         let (command, args) = self.parse_entry(&manifest.entry)?;
         let mut client = McpClient::new_stdio(command, args);
 
@@ -849,6 +887,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         }
     }
 
@@ -876,6 +916,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         }
     }
 
@@ -995,6 +1037,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         };
         loader.add_manifest(manifest);
 
@@ -1053,6 +1097,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         }
     }
 
@@ -1264,6 +1310,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
         }
     }
 
@@ -1373,6 +1421,8 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            enabled: None,
+            activation: None,
             invoke_entry: invoke_entry.map(str::to_string),
         }
     }
@@ -1469,6 +1519,75 @@ mod tests {
             _status: agentos_core::types::RunStatus,
             _branch: Option<&str>,
             _seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            Ok(vec![])
+        }
+        async fn next_sequence(
+            &self,
+            _pipeline_id: &str,
+        ) -> Result<u32, agentos_core::types::StorageError> {
+            Ok(1)
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        #[allow(clippy::too_many_arguments)]
+        async fn append_message(
+            &self,
+            _message_id: &str,
+            _run_id: &str,
+            _branch_id: &str,
+            _seq_in_branch: u32,
+            _role: &str,
+            _blob_id: Option<&str>,
+            _content_preview: Option<&str>,
+            _pipeline_id: Option<&str>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn store_blob(
+            &self,
+            _data: &[u8],
+            _mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            Ok("mock_blob".to_string())
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            Ok(None)
+        }
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            Ok(vec![])
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }

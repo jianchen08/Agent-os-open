@@ -203,6 +203,8 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     }
 }
 

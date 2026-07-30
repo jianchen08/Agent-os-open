@@ -236,3 +236,13 @@ export { XIcon as ZoomOut }
 import ZapIcon from './zap'
 export { ZapIcon }
 export { ZapIcon as Zap }
+import FullscreenIcon from './fullscreen'
+export { FullscreenIcon }
+import FullscreenExitIcon from './fullscreen-exit'
+export { FullscreenExitIcon }
+import MaximizeWindowIcon from './maximize-window'
+export { MaximizeWindowIcon }
+import RestoreWindowIcon from './restore-window'
+export { RestoreWindowIcon }
+import PanelRightIcon from './panel-right'
+export { PanelRightIcon }

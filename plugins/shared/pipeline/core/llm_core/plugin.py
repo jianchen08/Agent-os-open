@@ -24,11 +24,11 @@ from llm.adapter import (
 )
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
-from plugins.core.llm_core._message_normalizer import (
+from _message_normalizer import (
     _is_valid_tool_call_id,
     normalize_messages_for_provider,
 )
-from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
+from _stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,90 @@ class LLMCore(ICorePlugin):
         """插件执行优先级。"""
         return 50
 
+    def _apply_model_from_state(self, state: dict[str, Any]) -> None:
+        """从管道 state 动态解析本次调用的模型并更新 self（0.2 适配）。
+
+        0.1 由 ``plugin_resolver.apply_agent_model_override`` 在管道启动前
+        一次性覆盖 llm_call 实例；0.2 sidecar 无 plugin_resolver，改为
+        execute 时从 state 读 model_id/model_tier 动态解析。
+
+        优先级：``state.model_id`` > ``state.model_tier``(→ defaults.tiers)
+        > ``llm.yaml defaults.chat``。任一命中即用其 model_id 查
+        ``get_llm_core_config`` 更新 provider/model_name/api_base/api_key 等；
+        全部缺失则保持构造时的默认配置不变（不阻断，由调用方降级）。
+
+        Args:
+            state: 管道状态字典，读 ``model_id`` / ``model_tier``。
+        """
+        # 已锁定同一 model_id 则跳过（避免每轮重复解析）
+        resolved_id = state.get("model_id", "")
+        if not resolved_id:
+            tier = state.get("model_tier", "")
+            if tier:
+                resolved_id = self._resolve_tier(tier)
+        if not resolved_id:
+            resolved_id = self._default_chat_model()
+        if not resolved_id or resolved_id == self._model_id:
+            return
+
+        llm_conf = self._get_llm_core_config(resolved_id)
+        if not llm_conf:
+            logger.warning(
+                "[%s] model_id=%s 在 llm.yaml 未找到配置，保持当前 model=%s",
+                self.name,
+                resolved_id,
+                self._model,
+            )
+            return
+
+        self._model_id = resolved_id
+        self._provider = llm_conf.get("provider", self._provider)
+        self._model = llm_conf.get("model_name", self._model)
+        self._api_base = llm_conf.get("api_base") or self._api_base
+        self._api_key = llm_conf.get("api_key") or self._api_key
+        self._context_window = llm_conf.get("context_window") or self._context_window
+        if llm_conf.get("default_params"):
+            self._default_params = llm_conf["default_params"]
+        logger.info(
+            "[%s] model resolved: model_id=%s provider=%s model=%s",
+            self.name,
+            self._model_id,
+            self._provider,
+            self._model,
+        )
+
+    def _get_llm_core_config(self, model_id: str) -> dict[str, Any] | None:
+        """通过 sidecar 注入的 config 桥取模型配置（与 0.1 对齐）。
+
+        从 ``_config_models.get_model_config_loader()`` 拿 loader，调
+        ``get_llm_core_config``。loader 不可用时返回 None（降级）。
+        """
+        try:
+            from _config_models import get_model_config_loader  # noqa: PLC0415
+
+            return get_model_config_loader().get_llm_core_config(model_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("[%s] get_llm_core_config 失败，降级", self.name, exc_info=True)
+            return None
+
+    def _resolve_tier(self, tier: str) -> str:
+        """tier → model_id（defaults.tiers 解析）。"""
+        try:
+            from _config_models import get_model_config_loader  # noqa: PLC0415
+
+            return get_model_config_loader().resolve_tier(tier)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _default_chat_model(self) -> str:
+        """defaults.chat 默认对话模型 id。"""
+        try:
+            from _config_models import get_model_config_loader  # noqa: PLC0415
+
+            return get_model_config_loader().get_default_chat_model()
+        except Exception:  # noqa: BLE001
+            return ""
+
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行 LLM 调用，返回原始结果。
 
@@ -246,6 +330,13 @@ class LLMCore(ICorePlugin):
         Raises:
             Exception: LLM 调用失败时抛出异常
         """
+        # 动态模型选择（0.2 适配）：每次 execute 从 state 读 model_id/model_tier，
+        # 从注入的 llm.yaml 解析完整配置并更新 self。0.1 由 plugin_resolver 在
+        # 管道启动前一次性覆盖 llm_call 实例；0.2 sidecar 无 plugin_resolver，
+        # 改为 execute 时动态解析（支持多 agent/多模型切换）。
+        # 优先级：state.model_id > state.model_tier(→ defaults.tiers) > defaults.chat
+        self._apply_model_from_state(ctx.state)
+
         messages = self._build_messages(ctx.state)
         streaming = ctx.state.get("streaming", True)
         on_chunk: Callable[[dict[str, Any]], Any] | None = ctx.state.get("on_chunk")

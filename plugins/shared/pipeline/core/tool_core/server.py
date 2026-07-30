@@ -31,6 +31,20 @@ async def _on_load(params: dict) -> None:
     global _instance
     config = plugin.get_config()
     _instance = ToolCore(config=config)
+    # 0.2 sidecar 适配:注入内核工具委托(bash_execute 等工具在其他 sidecar 里,
+    # tool_core 通过 tool-executor capability 反向请求内核 invoke_tool 执行)。
+    tool_executor = plugin.get_capability("tool-executor")
+
+    async def _delegate(tool_name: str, tool_args: dict) -> dict:
+        """委托内核执行 tool 插件 sidecar。"""
+        if tool_executor is None:
+            return {"success": False, "error": "tool-executor capability 不可用"}
+        result = await tool_executor.call("invoke", {"tool_name": tool_name, "args": tool_args})
+        if isinstance(result, dict):
+            return result
+        return {"success": False, "error": f"unexpected result: {result}"}
+
+    _instance.set_kernel_tool_delegate(_delegate)
 
 
 @plugin.on_unload

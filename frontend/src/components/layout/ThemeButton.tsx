@@ -1,69 +1,105 @@
 /**
- * 主题切换按钮组件
+ * 主题切换按钮（单图标）
  *
- * 快速切换浅色/深色模式，点击图标直接切换
- * 长按或右键可打开完整主题面板
+ * - 单击：浅/深切换
+ * - 悬停：弹出小窗可选全部主题
  */
 
-import { Moon, Sun, Palette } from '@/assets/icons'
+import { Moon, Sun } from '@/assets/icons'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
+import { ThemePopover } from './ThemePanel'
 
 interface ThemeButtonProps {
-  /** 点击回调（打开主题面板） */
-  onClick?: () => void
+  /** 额外 class */
+  className?: string
+  /** 图标尺寸 */
+  compact?: boolean
 }
 
 /**
- * 主题切换按钮组件
- *
- * 左侧按钮快速切换深浅模式，右侧按钮打开更多主题选项
+ * 单图标主题切换：点击切换深浅，悬停打开选主题小窗
  */
-export function ThemeButton({ onClick }: ThemeButtonProps) {
+export function ThemeButton({ className, compact = true }: ThemeButtonProps) {
   const { resolvedTheme, setTheme } = useThemeStore()
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const leaveTimer = useRef<number | null>(null)
 
-  /**
-   * 快速切换浅色/深色模式
-   */
-  const handleQuickToggle = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    // 根据当前解析的主题切换
-    if (resolvedTheme === 'dark') {
-      setTheme('light')
-    } else {
-      setTheme('dark')
+  const clearLeave = () => {
+    if (leaveTimer.current != null) {
+      window.clearTimeout(leaveTimer.current)
+      leaveTimer.current = null
     }
   }
 
+  const handleMouseEnter = () => {
+    clearLeave()
+    setOpen(true)
+  }
+
+  const handleMouseLeave = () => {
+    clearLeave()
+    // 延迟关闭，方便移入小窗
+    leaveTimer.current = window.setTimeout(() => setOpen(false), 180)
+  }
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      // 单击：快速切换 dark/light
+      if (resolvedTheme === 'dark') {
+        void setTheme('light')
+      } else {
+        void setTheme('dark')
+      }
+    },
+    [resolvedTheme, setTheme],
+  )
+
+  useEffect(() => () => clearLeave(), [])
+
+  const iconCls = compact ? 'h-4 w-4' : 'h-4 w-4'
+  const btnCls = compact ? 'h-7 w-7' : 'h-8 w-8'
+
   return (
-    <div className="flex items-center">
-      {/* 主题切换按钮 */}
+    <div
+      ref={wrapRef}
+      className={cn('relative', className)}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      data-testid="theme-button-wrap"
+    >
       <button
-        onClick={handleQuickToggle}
+        type="button"
+        onClick={handleClick}
         className={cn(
-          'flex h-8 w-8 items-center justify-center rounded-lg',
-          'transition-all duration-200',
-          'hover:bg-muted/80 active:scale-95',
-          'text-foreground',
+          'flex items-center justify-center rounded-md transition-colors',
+          'text-muted-foreground hover:text-foreground hover:bg-white/5',
+          btnCls,
         )}
-        title={`切换到${resolvedTheme === 'dark' ? '浅色' : '深色'}模式`}
+        title={
+          resolvedTheme === 'dark'
+            ? '点击切换浅色 · 悬停选择主题'
+            : '点击切换深色 · 悬停选择主题'
+        }
+        aria-label="切换主题"
+        data-testid="theme-button"
       >
-        {resolvedTheme === 'dark' ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+        {resolvedTheme === 'dark' ? (
+          <Moon className={iconCls} />
+        ) : (
+          <Sun className={iconCls} />
+        )}
       </button>
 
-      {/* 更多主题选项按钮 */}
-      <button
-        onClick={onClick}
-        className={cn(
-          'flex h-8 w-8 items-center justify-center rounded-lg',
-          'transition-all duration-200',
-          'hover:bg-muted/80 active:scale-95',
-          'text-muted-foreground hover:text-foreground',
-        )}
-        title="更多主题选项"
-      >
-        <Palette className="h-4 w-4" />
-      </button>
+      <ThemePopover
+        open={open}
+        onOpenChange={setOpen}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      />
     </div>
   )
 }

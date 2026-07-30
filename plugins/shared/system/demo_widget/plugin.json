@@ -1,0 +1,77 @@
+{
+    "id": "demo_widget_plugin",
+    "name": "Demo Widget Plugin",
+    "description": "示范插件：演示 contributes（statusBarItems/viewsContainers/widgets）+ metric_bindings 配置驱动推送 + webview widget。无业务逻辑，仅供端到端验证 ADR §3.4/§3.5' 链路。",
+    "version": "0.1.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": []
+    },
+    "contributes": {
+        "statusBarItems": [
+            {
+                "id": "demo_status",
+                "title": "Demo",
+                "when": "true",
+                "props": {
+                    "color": "var(--ds-status-running, #22D3EE)"
+                }
+            }
+        ],
+        "viewsContainers": [
+            {
+                "id": "demo",
+                "title": "Demo",
+                "icon": "star",
+                "location": "sidebar"
+            }
+        ],
+        "views": [
+            {
+                "containerId": "demo",
+                "id": "demo.metric_view",
+                "name": "Metric",
+                "widget": "status_card"
+            }
+        ],
+        "widgets": [
+            {
+                "id": "demo_metric_widget",
+                "widget": "status_card",
+                "title": "Demo 计数器",
+                "metric_bindings": {
+                    "metric": "demo.counter",
+                    "plugin_id": "self",
+                    "interval_ms": 1000,
+                    "scope": "broadcast"
+                }
+            },
+            {
+                "id": "demo_webview_widget",
+                "widget": "webview",
+                "title": "Demo Webview",
+                "props": {
+                    "pluginId": "demo_widget_plugin",
+                    "htmlPath": "/webview",
+                    "widgetId": "demo_webview_widget"
+                }
+            }
+        ]
+    },
+    "http_endpoints": [
+        {
+            "route_id": "webview",
+            "method": "GET",
+            "path": "/ext/demo_widget_plugin/webview",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "description": "Webview widget HTML 资源端点（ADR §3.4'）"
+        }
+    ]
+}

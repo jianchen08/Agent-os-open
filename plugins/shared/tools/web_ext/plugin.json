@@ -19,11 +19,20 @@
             "on_unload"
         ]
     },
-    "dependencies": [
-        "agentos-plugin-sdk>=0.2.0",
-        "aiohttp>=3.9"
-    ],
+    "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 30
+    "priority": 30,
+    "config_files": [
+        {
+            "id": "web_fetch",
+            "path": "config/tools/web/fetch.yaml",
+            "label": "网页抓取配置"
+        },
+        {
+            "id": "web_operate",
+            "path": "config/tools/web/web_operate.yaml",
+            "label": "网页操作配置"
+        }
+    ]
 }

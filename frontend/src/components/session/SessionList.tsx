@@ -14,7 +14,6 @@ import {
   Copy,
   Edit3,
   Loader2,
-  MessageSquare,
   MoreHorizontal,
   Pin,
   Star,
@@ -108,8 +107,10 @@ const SessionItem = memo<SessionItemProps>(
     return (
       <div
         className={cn(
-          'group relative flex items-center rounded-md px-2 transition-colors',
-          isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 cursor-pointer',
+          'group relative flex flex-col justify-center rounded-lg px-2.5 transition-colors',
+          isActive
+            ? 'bg-[var(--ds-bg-elevated,#111C38)] text-foreground ring-1 ring-[var(--ds-border-active,rgba(34,211,238,0.45))]'
+            : 'hover:bg-[var(--ds-bg-hover,#1A2748)] cursor-pointer',
           isDeleting && 'pointer-events-none opacity-50',
         )}
         style={{ height: `${itemHeight}px` }}
@@ -119,107 +120,141 @@ const SessionItem = memo<SessionItemProps>(
         aria-label={`会话: ${session.title}`}
         aria-current={isActive ? 'true' : undefined}
       >
-        {/* 左侧图标：置顶会话显示 Pin，普通会话显示 MessageSquare */}
-        {session.pinned ? (
-          <Pin
-            className="mr-2 h-3.5 w-3.5 flex-shrink-0 fill-blue-500 text-blue-500"
-            data-testid="pin-icon"
-          />
-        ) : (
-          <MessageSquare
-            className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
-            data-testid="message-icon"
-          />
-        )}
-
-        {/* 标题 */}
-        <span className="min-w-0 flex-1 truncate text-sm">{session.title}</span>
-
-        {/* 星标指示器 */}
-        {session.starred && (
-          <Star className="mr-1 h-3.5 w-3.5 flex-shrink-0 fill-amber-400 text-amber-400" />
-        )}
-
-        {/* 正在删除加载指示 */}
-        {isDeleting && (
-          <Loader2 className="text-muted-foreground ml-1 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
-        )}
-
-        {/* 三点操作菜单 - hover 或活跃会话时显示 */}
-        {!isDeleting && (
-          <div
+        {/* 标题行 */}
+        <div className="flex items-center gap-1">
+          <span
             className={cn(
-              'ml-1 flex-shrink-0 transition-opacity duration-150',
-              isActive ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100',
+              'min-w-0 flex-1 truncate text-[13px]',
+              isActive ? 'font-medium text-foreground' : 'text-[var(--ds-text-secondary,#CBD5E1)]',
             )}
           >
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-muted-foreground hover:text-foreground rounded p-1 transition-colors"
-                  aria-label="更多操作"
-                  title="更多操作"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-[160px]">
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onEdit()
-                  }}
-                >
-                  <Edit3 className="mr-2 h-4 w-4" />
-                  编辑会话
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onCopy()
-                  }}
-                >
-                  <Copy className="mr-2 h-4 w-4" />
-                  复制
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onStar()
-                  }}
-                >
-                  <Star className="mr-2 h-4 w-4" />
-                  {session.starred ? '取消星标' : '星标'}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onPin()
-                  }}
-                >
-                  <Pin className="mr-2 h-4 w-4" />
-                  {session.pinned ? '取消置顶' : '置顶会话'}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onDelete()
-                  }}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  删除
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        )}
+            {session.pinned && (
+              <Pin
+                className="mr-1 inline h-3 w-3 fill-[var(--ds-accent-primary,#22D3EE)] text-[var(--ds-accent-primary,#22D3EE)]"
+                data-testid="pin-icon"
+              />
+            )}
+            {session.title}
+          </span>
+
+          {session.starred && (
+            <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-400" />
+          )}
+
+          {isDeleting && (
+            <Loader2 className="text-muted-foreground h-3.5 w-3.5 shrink-0 animate-spin" />
+          )}
+
+          {!isDeleting && (
+            <div
+              className={cn(
+                'shrink-0 transition-opacity duration-150',
+                isActive ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100',
+              )}
+            >
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-muted-foreground hover:text-foreground rounded p-1 transition-colors"
+                    aria-label="更多操作"
+                    title="更多操作"
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-[160px]">
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onEdit()
+                    }}
+                  >
+                    <Edit3 className="mr-2 h-4 w-4" />
+                    编辑会话
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onCopy()
+                    }}
+                  >
+                    <Copy className="mr-2 h-4 w-4" />
+                    复制
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onStar()
+                    }}
+                  >
+                    <Star className="mr-2 h-4 w-4" />
+                    {session.starred ? '取消星标' : '星标'}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onPin()
+                    }}
+                  >
+                    <Pin className="mr-2 h-4 w-4" />
+                    {session.pinned ? '取消置顶' : '置顶会话'}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onDelete()
+                    }}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    删除
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          )}
+        </div>
+
+        {/* 元信息行 · 设计稿 10px JetBrains Mono */}
+        <div className="text-muted-foreground mt-0.5 truncate font-mono text-[10px] leading-none">
+          {formatSessionMeta(session)}
+        </div>
       </div>
     )
   },
 )
+
+function formatSessionMeta(session: Session): string {
+  const updated = session.updatedAt || session.createdAt
+  let timeLabel = ''
+  if (updated) {
+    try {
+      const d = new Date(updated)
+      if (!Number.isNaN(d.getTime())) {
+        const now = new Date()
+        const sameDay =
+          d.getFullYear() === now.getFullYear() &&
+          d.getMonth() === now.getMonth() &&
+          d.getDate() === now.getDate()
+        timeLabel = sameDay
+          ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+          : `${d.getMonth() + 1}/${d.getDate()}`
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const msgCount =
+    typeof (session as { messageCount?: number }).messageCount === 'number'
+      ? (session as { messageCount?: number }).messageCount
+      : undefined
+  if (timeLabel && msgCount !== undefined) return `${timeLabel} · ${msgCount} 条消息`
+  if (timeLabel) return timeLabel
+  if (msgCount !== undefined) return `${msgCount} 条消息`
+  return ''
+}
 
 SessionItem.displayName = 'SessionItem'
 
@@ -239,7 +274,7 @@ export const SessionList = memo<SessionListProps>(
     onStarSession,
     onPinSession,
     className,
-    itemHeight = 40,
+    itemHeight = 55,
   }) => {
     /** 删除确认对话框状态 */
     const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)

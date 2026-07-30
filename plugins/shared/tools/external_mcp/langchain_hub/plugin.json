@@ -4,6 +4,7 @@
     "description": "LangChain Hub / LangSmith 平台适配器，搜索提示词模板和工具",
     "version": "1.0.0",
     "plugin_type": "tool",
+    "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
     "mcp_endpoint": {

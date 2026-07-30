@@ -1,5 +1,5 @@
 {
-    "id": "cost_control_service",
+    "id": "cost_control",
     "name": "Cost Control Service",
     "version": "1.0.0",
     "plugin_type": "system",
@@ -23,5 +23,57 @@
     "permissions": {},
     "error_policy": "skip",
     "priority": 50,
-    "requires_content": 5
+    "requires_content": 5,
+    "http_endpoints": [
+        {
+            "route_id": "cost_budget_status",
+            "method": "GET",
+            "path": "/ext/cost_control/budget/status",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get current budget status (frontend CostDashboardWidget / StatusBar)"
+        },
+        {
+            "route_id": "cost_usage_statistics",
+            "method": "GET",
+            "path": "/ext/cost_control/usage/statistics",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get global usage statistics"
+        },
+        {
+            "route_id": "cost_config",
+            "method": "GET",
+            "path": "/ext/cost_control/config",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get cost control config (flattened)"
+        },
+        {
+            "route_id": "cost_report",
+            "method": "GET",
+            "path": "/ext/cost_control/report",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get cost report by period (?period=daily|weekly|monthly)"
+        },
+        {
+            "route_id": "cost_budget_reset",
+            "method": "POST",
+            "path": "/ext/cost_control/budget/reset",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "Reset global budget tracking"
+        }
+    ]
 }

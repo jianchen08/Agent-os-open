@@ -24,7 +24,7 @@ import React from 'react'
 function setupRegistry(contributes: Record<string, unknown[]>): ContributionRegistry {
   const registry = new ContributionRegistry()
   registry.loadFromSchema({
-    modules: [{ module_id: 'ext', contributes }],
+    plugin_contributes: [{ plugin_id: 'ext', contributes }],
   } as never)
   return registry
 }

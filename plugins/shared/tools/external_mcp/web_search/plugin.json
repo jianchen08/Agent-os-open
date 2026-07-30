@@ -4,6 +4,7 @@
     "description": "Web 搜索 MCP 工具，基于 Bing/SearXNG",
     "version": "1.0.0",
     "plugin_type": "tool",
+    "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
     "mcp_endpoint": {

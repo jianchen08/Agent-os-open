@@ -10,15 +10,16 @@ import type { LayoutConfig, ResolvedLayout } from '@/types/layout'
 /** 默认布局配置 */
 export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
   breakpoints: { mobile: 768, tablet: 1024, desktop: 1280, widescreen: 1920 },
+  // Deep Space v2：SideBar 288 (240-360)，ChatPanel 520 (420-720)
   sidebar: {
-    minWidth: 180,
-    maxWidth: 320,
-    defaultWidth: 220,
+    minWidth: 240,
+    maxWidth: 360,
+    defaultWidth: 288,
     resizable: true,
     collapseDuration: 300,
   },
-  chatPanel: { minWidth: 320, maxWidth: Infinity, defaultWidth: 480, resizable: false },
-  workspacePanel: { minWidth: 400, maxWidth: Infinity, defaultWidth: 560, resizable: true },
+  chatPanel: { minWidth: 420, maxWidth: 720, defaultWidth: 520, resizable: false },
+  workspacePanel: { minWidth: 360, maxWidth: Infinity, defaultWidth: 576, resizable: true },
   floatingWindow: {
     defaultWidth: 480,
     defaultHeight: 360,
@@ -29,17 +30,18 @@ export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
     cascadeOffset: 24,
     closeButtonPosition: 'top-right',
   },
+  // dockBar 高度改为 StatusBar 22px（设计稿 49:331）
   dockBar: {
-    height: 48,
-    iconSize: 20,
-    iconGap: 6,
+    height: 22,
+    iconSize: 14,
+    iconGap: 16,
     position: 'bottom',
     showLabels: false,
     indicatorSize: 6,
   },
   panelSplit: {
-    chatRatio: 0.55,
-    workspaceRatio: 0.45,
+    chatRatio: 0.45,
+    workspaceRatio: 0.55,
     adjustable: true,
     divider: {
       width: 1,

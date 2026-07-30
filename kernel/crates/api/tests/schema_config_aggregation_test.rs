@@ -34,6 +34,8 @@ fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        enabled: None,
+        activation: None,
     }
 }
 

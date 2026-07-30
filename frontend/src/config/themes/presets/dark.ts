@@ -1,7 +1,8 @@
 /**
- * 深色主题配置
+ * 深色主题配置（默认主题）
  *
- * 默认深色主题，适合夜间使用
+ * 对齐设计稿 A 区 · 默认主题规范 Deep Space v2
+ * 来源：https://ardot.tencent.com/file/707091497079378
  */
 
 import type { ThemeConfig } from '@/types/theme'
@@ -9,80 +10,80 @@ import type { ThemeConfig } from '@/types/theme'
 export const darkTheme: ThemeConfig = {
   id: 'dark',
   name: '深色主题',
-  description: '默认深色主题，适合夜间使用',
+  description: 'Deep Space v2 默认深色主题',
   category: 'dark',
 
   colors: {
-    // 基于 Radix slate-dark 中性层 + indigo-dark 强调：多层灰造深度，避免纯黑刺眼
-    primary: '#3e63dd',
-    secondary: '#435db1',
-    accent: '#9eb1ff',
+    // Deep Space v2：克制深空蓝底 + 品牌青点缀
+    primary: '#22D3EE',
+    secondary: '#3B82F6',
+    accent: '#A78BFA',
 
     background: {
-      main: '#111113',
-      card: '#18191b',
-      sidebar: '#18191b',
-      input: '#272a2d',
-      elevated: '#212225',
+      main: '#04060F',
+      card: '#0A1226',
+      sidebar: '#0A1226',
+      input: '#111C38',
+      elevated: '#111C38',
     },
 
     text: {
-      primary: '#edeef0',
-      secondary: '#b0b4ba',
-      muted: '#777b84',
-      disabled: '#5a6169',
+      primary: '#F1F5F9',
+      secondary: '#CBD5E1',
+      muted: '#94A3B8',
+      disabled: '#64748B',
     },
 
     border: {
-      default: 'rgba(255, 255, 255, 0.10)',
-      hover: 'rgba(255, 255, 255, 0.18)',
-      active: 'rgba(62, 99, 221, 0.55)',
+      default: 'rgba(148, 163, 184, 0.12)',
+      hover: 'rgba(148, 163, 184, 0.22)',
+      active: 'rgba(34, 211, 238, 0.45)',
     },
 
     status: {
-      success: '#0bd8b6',
-      warning: '#ffc53d',
-      error: '#ff6b6b',
-      info: '#9eb1ff',
-      running: '#4ccce6',
-      pending: '#777b84',
+      success: '#34D399',
+      warning: '#FBBF24',
+      error: '#F87171',
+      info: '#60A5FA',
+      running: '#22D3EE',
+      pending: '#94A3B8',
     },
 
     bubble: {
-      user_bg: '#3e63dd',
-      user_text: '#ffffff',
+      user_bg: '#22D3EE',
+      user_text: '#04060F',
       user_radius: '1rem 1rem 1rem 0.25rem',
-      user_shadow: '0 4px 12px rgba(62, 99, 221, 0.28)',
-      ai_bg: '#212225',
-      ai_text: '#edeef0',
-      ai_radius: '0.875rem 0.875rem 0.875rem 0.25rem',
+      user_shadow: '0 2px 8px rgba(34, 211, 238, 0.2)',
+      ai_bg: '#111C38',
+      ai_text: '#F1F5F9',
+      ai_radius: '1rem 1rem 1rem 0.25rem',
       ai_shadow: '0 2px 8px rgba(0, 0, 0, 0.25)',
-      ai_border: '1px solid rgba(255, 255, 255, 0.08)',
+      ai_border: '1px solid rgba(148, 163, 184, 0.12)',
     },
   },
 
   components: {
     borderRadius: {
       none: '0',
-      sm: '0.25rem',
+      sm: '0.375rem',
       md: '0.5rem',
-      lg: '0.75rem',
-      xl: '1rem',
+      lg: '0.625rem',
+      xl: '0.75rem',
       full: '9999px',
       defaultRadius: 'md',
     },
 
     fonts: {
-      ui: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      ui: "'Noto Sans SC', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       code: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
     },
 
     fontSize: {
-      xs: '14px',
-      sm: '15px',
-      md: '16px',
-      lg: '17px',
-      xl: '18px',
+      xs: '11px',
+      sm: '12px',
+      md: '13px',
+      lg: '16px',
+      xl: '20px',
       defaultFontSize: 'md',
     },
 
@@ -107,10 +108,10 @@ export const darkTheme: ThemeConfig = {
     },
 
     glow: {
-      running: '0 0 15px rgba(0, 240, 255, 0.3)',
-      waiting: '0 0 15px rgba(245, 158, 11, 0.3)',
-      success: '0 0 15px rgba(16, 185, 129, 0.3)',
-      error: '0 0 15px rgba(239, 68, 68, 0.3)',
+      running: '0 0 15px rgba(34, 211, 238, 0.3)',
+      waiting: '0 0 15px rgba(251, 191, 36, 0.3)',
+      success: '0 0 15px rgba(52, 211, 153, 0.3)',
+      error: '0 0 15px rgba(248, 113, 113, 0.3)',
       defaultGlowIntensity: 30,
     },
 
@@ -123,145 +124,145 @@ export const darkTheme: ThemeConfig = {
       textureOpacity: 0.1,
       variants: {
         primary: {
-          bg: '#3e63dd',
-          text: '#ffffff',
+          bg: '#22D3EE',
+          text: '#04060F',
           border: 'transparent',
-          hoverBg: '#5472e4',
+          hoverBg: '#4ADFF2',
         },
         secondary: {
-          bg: 'rgba(158, 177, 255, 0.12)',
-          text: '#9eb1ff',
-          border: 'rgba(158, 177, 255, 0.25)',
-          hoverBg: 'rgba(158, 177, 255, 0.18)',
+          bg: 'rgba(34, 211, 238, 0.12)',
+          text: '#22D3EE',
+          border: 'rgba(34, 211, 238, 0.35)',
+          hoverBg: 'rgba(34, 211, 238, 0.2)',
         },
         ghost: {
           bg: 'transparent',
-          text: '#b0b4ba',
+          text: '#CBD5E1',
           border: 'transparent',
-          hoverBg: 'rgba(255, 255, 255, 0.06)',
+          hoverBg: 'rgba(148, 163, 184, 0.1)',
         },
         destructive: {
-          bg: 'rgba(255, 107, 107, 0.15)',
-          text: '#ff9b9b',
-          border: 'rgba(255, 107, 107, 0.35)',
-          hoverBg: 'rgba(255, 107, 107, 0.25)',
+          bg: 'rgba(248, 113, 113, 0.15)',
+          text: '#FCA5A5',
+          border: 'rgba(248, 113, 113, 0.35)',
+          hoverBg: 'rgba(248, 113, 113, 0.25)',
         },
       },
     },
 
     input: {
       style: 'filled',
-      focusBorder: '#3b82f6',
-      focusGlow: '0 0 0 3px rgba(59, 130, 246, 0.2)',
+      focusBorder: '#22D3EE',
+      focusGlow: '0 0 0 3px rgba(34, 211, 238, 0.2)',
     },
 
     card: {
       style: 'glass',
       blur: '12px',
-      border: '1px solid rgba(255, 255, 255, 0.08)',
+      border: '1px solid rgba(148, 163, 184, 0.12)',
     },
 
     badge: {
       borderRadius: '9999px',
       variants: {
         default: {
-          bg: '#3b82f6',
-          text: '#ffffff',
+          bg: '#22D3EE',
+          text: '#04060F',
           border: 'transparent',
         },
         secondary: {
-          bg: 'rgba(255,255,255,0.1)',
-          text: '#f8fafc',
+          bg: 'rgba(148, 163, 184, 0.12)',
+          text: '#CBD5E1',
           border: 'transparent',
         },
         success: {
-          bg: 'rgba(16, 185, 129, 0.25)',
-          text: '#6ee7b7',
-          border: 'rgba(16, 185, 129, 0.5)',
+          bg: 'rgba(52, 211, 153, 0.18)',
+          text: '#6EE7B7',
+          border: 'rgba(52, 211, 153, 0.45)',
         },
         warning: {
-          bg: 'rgba(245, 158, 11, 0.25)',
-          text: '#fcd34d',
-          border: 'rgba(245, 158, 11, 0.5)',
+          bg: 'rgba(251, 191, 36, 0.18)',
+          text: '#FCD34D',
+          border: 'rgba(251, 191, 36, 0.45)',
         },
         error: {
-          bg: 'rgba(239, 68, 68, 0.25)',
-          text: '#fca5a5',
-          border: 'rgba(239, 68, 68, 0.5)',
+          bg: 'rgba(248, 113, 113, 0.18)',
+          text: '#FCA5A5',
+          border: 'rgba(248, 113, 113, 0.45)',
         },
         info: {
-          bg: 'rgba(59, 130, 246, 0.25)',
-          text: '#93c5fd',
-          border: 'rgba(59, 130, 246, 0.5)',
+          bg: 'rgba(96, 165, 250, 0.18)',
+          text: '#93C5FD',
+          border: 'rgba(96, 165, 250, 0.45)',
         },
       },
     },
 
     dialog: {
-      borderRadius: '1rem',
+      borderRadius: '0.75rem',
       overlayBg: '#000000',
       overlayOpacity: 0.8,
       shadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
-      border: '1px solid rgba(255, 255, 255, 0.1)',
+      border: '1px solid rgba(148, 163, 184, 0.15)',
     },
 
     tabs: {
       borderRadius: '0.5rem',
-      listBg: 'rgba(255, 255, 255, 0.05)',
-      activeBg: '#1e293b',
-      activeText: '#f8fafc',
-      inactiveText: '#94a3b8',
+      listBg: 'rgba(148, 163, 184, 0.08)',
+      activeBg: '#111C38',
+      activeText: '#22D3EE',
+      inactiveText: '#94A3B8',
     },
 
     toast: {
-      borderRadius: '0.75rem',
+      borderRadius: '0.625rem',
       shadow: '0 10px 15px -3px rgba(0, 0, 0, 0.4)',
       variants: {
         default: {
-          bg: '#1e293b',
-          text: '#f8fafc',
-          border: 'rgba(255, 255, 255, 0.1)',
+          bg: '#111C38',
+          text: '#F1F5F9',
+          border: 'rgba(148, 163, 184, 0.15)',
         },
         success: {
-          bg: 'rgba(16, 185, 129, 0.2)',
-          text: '#6ee7b7',
-          border: 'rgba(16, 185, 129, 0.5)',
+          bg: 'rgba(52, 211, 153, 0.2)',
+          text: '#6EE7B7',
+          border: 'rgba(52, 211, 153, 0.5)',
         },
         error: {
-          bg: 'rgba(239, 68, 68, 0.2)',
-          text: '#fca5a5',
-          border: 'rgba(239, 68, 68, 0.5)',
+          bg: 'rgba(248, 113, 113, 0.2)',
+          text: '#FCA5A5',
+          border: 'rgba(248, 113, 113, 0.5)',
         },
         warning: {
-          bg: 'rgba(245, 158, 11, 0.2)',
-          text: '#fcd34d',
-          border: 'rgba(245, 158, 11, 0.5)',
+          bg: 'rgba(251, 191, 36, 0.2)',
+          text: '#FCD34D',
+          border: 'rgba(251, 191, 36, 0.5)',
         },
         info: {
-          bg: 'rgba(59, 130, 246, 0.2)',
-          text: '#93c5fd',
-          border: 'rgba(59, 130, 246, 0.5)',
+          bg: 'rgba(96, 165, 250, 0.2)',
+          text: '#93C5FD',
+          border: 'rgba(96, 165, 250, 0.5)',
         },
       },
     },
 
     progress: {
-      borderRadius: '9999px',
-      trackBg: 'rgba(59, 130, 246, 0.2)',
+      borderRadius: '0.125rem',
+      trackBg: '#121C38',
       variants: {
-        default: '#3b82f6',
-        success: '#10b981',
-        warning: '#f59e0b',
-        error: '#ef4444',
+        default: '#22D3EE',
+        success: '#34D399',
+        warning: '#FBBF24',
+        error: '#F87171',
       },
     },
 
     dropdownMenu: {
-      borderRadius: '0.75rem',
+      borderRadius: '0.625rem',
       shadow: '0 10px 15px -3px rgba(0, 0, 0, 0.4)',
-      border: '1px solid rgba(255, 255, 255, 0.1)',
-      itemHoverBg: 'rgba(255, 255, 255, 0.1)',
-      itemHoverText: '#f8fafc',
+      border: '1px solid rgba(148, 163, 184, 0.15)',
+      itemHoverBg: 'rgba(148, 163, 184, 0.1)',
+      itemHoverText: '#F1F5F9',
     },
   },
 
@@ -274,8 +275,8 @@ export const darkTheme: ThemeConfig = {
 
   backgrounds: {
     main: {
-      type: 'gradient',
-      value: 'radial-gradient(circle at 50% 0%, #0f172a, #020617)',
+      type: 'solid',
+      value: '#04060F',
     },
     image: {
       enabled: false,
@@ -283,23 +284,23 @@ export const darkTheme: ThemeConfig = {
       position: 'center',
       size: 'cover',
       attachment: 'fixed',
-      overlay: 'rgba(15, 23, 42, 0.85)',
+      overlay: 'rgba(4, 6, 15, 0.85)',
       overlayOpacity: 0.85,
     },
     texture: {
-      type: 'grid',
+      type: 'none',
       color: 'rgba(255, 255, 255, 0.03)',
       size: '24px',
       opacity: 0.1,
     },
     sidebar: {
       type: 'solid',
-      value: '#1e293b',
+      value: '#0A1226',
       texture: { type: 'none' },
     },
     chat: {
-      type: 'gradient',
-      value: 'linear-gradient(180deg, #0f172a 0%, #1e293b 100%)',
+      type: 'solid',
+      value: '#04060F',
     },
   },
 }

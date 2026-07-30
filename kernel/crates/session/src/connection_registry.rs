@@ -16,6 +16,10 @@ pub struct ConnectionRegistry {
     connections: RwLock<HashMap<String, Arc<dyn EventSink>>>,
     /// thread_id → user_id（仅持有 thread_id 的流式发送路径反查用）。
     thread_user_map: RwLock<HashMap<String, String>>,
+    /// thread_id → pipeline_id（创建会话时回填，REST 会话列表/详情据此返回给前端）。
+    thread_pipeline_map: RwLock<HashMap<String, String>>,
+    /// thread_id → agent_id（创建会话或绑定 Agent 时写入）。
+    thread_agent_map: RwLock<HashMap<String, String>>,
 }
 
 impl ConnectionRegistry {
@@ -24,6 +28,8 @@ impl ConnectionRegistry {
         Self {
             connections: RwLock::new(HashMap::new()),
             thread_user_map: RwLock::new(HashMap::new()),
+            thread_pipeline_map: RwLock::new(HashMap::new()),
+            thread_agent_map: RwLock::new(HashMap::new()),
         }
     }
 
@@ -69,6 +75,35 @@ impl ConnectionRegistry {
     /// 反查 thread_id 对应的 user_id。
     pub fn get_user_for_thread(&self, thread_id: &str) -> Option<String> {
         self.thread_user_map.read().get(thread_id).cloned()
+    }
+
+    /// 建立 thread_id → pipeline_id 映射（创建会话时回填）。
+    /// 前端发消息需要 pipeline_id 作 WS 路由键，REST 会话列表/详情据此返回。
+    pub fn register_thread_pipeline(&self, thread_id: &str, pipeline_id: &str) {
+        if !thread_id.is_empty() && !pipeline_id.is_empty() {
+            self.thread_pipeline_map
+                .write()
+                .insert(thread_id.to_string(), pipeline_id.to_string());
+        }
+    }
+
+    /// 建立 thread_id → agent_id 映射（创建会话/绑定 Agent 时写入）。
+    pub fn register_thread_agent(&self, thread_id: &str, agent_id: &str) {
+        if !thread_id.is_empty() && !agent_id.is_empty() {
+            self.thread_agent_map
+                .write()
+                .insert(thread_id.to_string(), agent_id.to_string());
+        }
+    }
+
+    /// 反查 thread_id 对应的 pipeline_id。
+    pub fn get_pipeline_for_thread(&self, thread_id: &str) -> Option<String> {
+        self.thread_pipeline_map.read().get(thread_id).cloned()
+    }
+
+    /// 反查 thread_id 对应的 agent_id。
+    pub fn get_agent_for_thread(&self, thread_id: &str) -> Option<String> {
+        self.thread_agent_map.read().get(thread_id).cloned()
     }
 
     /// 向指定 user 的连接推送一条文本消息（唯一出口 push_to_user 底层）。
@@ -127,6 +162,17 @@ impl ConnectionRegistry {
     /// 当前活跃连接数（监控 M2：gauge，监控设计 §三 通道1）。
     pub fn active_count(&self) -> usize {
         self.connections.read().len()
+    }
+
+    /// 枚举当前 thread_id → user_id 映射（供 REST 会话列表端点使用）。
+    ///
+    /// 0.2 暂无持久化会话历史，此列表仅反映内存中的活跃/曾注册线程。
+    pub fn list_threads(&self) -> Vec<(String, String)> {
+        self.thread_user_map
+            .read()
+            .iter()
+            .map(|(tid, uid)| (tid.clone(), uid.clone()))
+            .collect()
     }
 }
 

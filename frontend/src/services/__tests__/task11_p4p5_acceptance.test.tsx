@@ -33,9 +33,9 @@ import React from 'react'
  * 一个插件同时声明 menu/command/shortcut/modal + workspaceTab + viewsContainer
  */
 const TEST_PLUGIN_SCHEMA = {
-  modules: [
+  plugin_contributes: [
     {
-      module_id: 'demo-ext',
+      plugin_id: 'demo-ext',
       name: '演示扩展',
       contributes: {
         // P5-a 菜单

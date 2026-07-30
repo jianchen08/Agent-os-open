@@ -29,9 +29,9 @@ describe('ContributionRegistry — contributes.menus 解析', () => {
   it('从 modules.contributes.menus 提取右键菜单项', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'editor',
+            plugin_id: 'editor',
             contributes: {
               menus: [
                 {
@@ -58,9 +58,9 @@ describe('ContributionRegistry — contributes.menus 解析', () => {
   it('按 location 过滤菜单项', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'p',
+            plugin_id: 'p',
             contributes: {
               menus: [
                 { id: 'm1', location: 'workspace/context', title: 'M1', command: 'c1' },
@@ -80,9 +80,9 @@ describe('ContributionRegistry — contributes.menus 解析', () => {
   it('无 location 入参时返回全部菜单', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'p',
+            plugin_id: 'p',
             contributes: {
               menus: [
                 { id: 'm1', location: 'workspace/context', title: 'M1', command: 'c1' },
@@ -108,9 +108,9 @@ describe('ContributionRegistry — contributes.commands 解析', () => {
   it('从 modules.contributes.commands 提取命令', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'cost',
+            plugin_id: 'cost',
             contributes: {
               commands: [
                 { id: 'cost.showReport', title: '显示成本报告', category: '成本', icon: 'chart' },
@@ -132,13 +132,13 @@ describe('ContributionRegistry — contributes.commands 解析', () => {
   it('多插件 commands 聚合', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'a',
+            plugin_id: 'a',
             contributes: { commands: [{ id: 'a.cmd', title: 'A', category: 'X' }] },
           },
           {
-            module_id: 'b',
+            plugin_id: 'b',
             contributes: { commands: [{ id: 'b.cmd', title: 'B', category: 'Y' }] },
           },
         ],
@@ -160,9 +160,9 @@ describe('ContributionRegistry — contributes.shortcuts 解析', () => {
   it('从 modules.contributes.shortcuts 提取快捷键绑定', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'editor',
+            plugin_id: 'editor',
             contributes: {
               shortcuts: [
                 { command: 'editor.save', key: 'Ctrl+S', when: 'workspace.focus' },
@@ -192,9 +192,9 @@ describe('ContributionRegistry — contributes.modal 解析', () => {
   it('从 modules.contributes.modal 提取模态弹窗', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'review',
+            plugin_id: 'review',
             contributes: {
               modal: [
                 {
@@ -222,9 +222,9 @@ describe('ContributionRegistry — contributes.modal 解析', () => {
   it('按 trigger 查找模态弹窗', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'p',
+            plugin_id: 'p',
             contributes: {
               modal: [
                 { id: 'm1', title: 'M1', trigger: 'on_command:cmd.a', widget: 'w1' },
@@ -243,9 +243,9 @@ describe('ContributionRegistry — contributes.modal 解析', () => {
   it('trigger 未命中返回 undefined', () => {
     registry.loadFromSchema(
       makeSchema({
-        modules: [
+        plugin_contributes: [
           {
-            module_id: 'p',
+            plugin_id: 'p',
             contributes: { modal: [{ id: 'm1', title: 'M1', trigger: 'on_command:cmd.a', widget: 'w1' }] },
           },
         ],
@@ -260,8 +260,8 @@ describe('ContributionRegistry — 重新加载清空旧插槽', () => {
   it('再次 loadFromSchema 覆盖旧的 contributes（避免幽灵菜单）', () => {
     const registry = new ContributionRegistry()
     const withMenus = makeSchema({
-      modules: [
-        { module_id: 'p', contributes: { menus: [{ id: 'm1', location: 'workspace/context', title: 'M1', command: 'c1' }] } },
+      plugin_contributes: [
+        { plugin_id: 'p', contributes: { menus: [{ id: 'm1', location: 'workspace/context', title: 'M1', command: 'c1' }] } },
       ],
     } as unknown as SchemaResponse)
     registry.loadFromSchema(withMenus)

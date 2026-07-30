@@ -11,6 +11,8 @@ export { WorkspacePanel } from './WorkspacePanel'
 export type { WorkspaceTab } from '@/types/layout'
 export { DockBar } from './DockBar'
 export type { DockItem } from '@/types/layout'
+export { StatusBar } from './StatusBar'
+export type { StatusBarProps } from './StatusBar'
 export { FullscreenOverlay } from './FullscreenOverlay'
 export { ConnectionStatusIndicator } from './ConnectionStatusIndicator'
 
