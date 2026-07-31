@@ -66,8 +66,10 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
     formData.append('model_name', modelName)
   }
 
-  // 后端实际端点是 /api/v1/artifacts/upload
-  const response = await apiClient.post<FileUploadResponse>('/api/v1/artifacts/upload', formData, {
+  // 4c 迁移：后端端点 /api/v1/artifacts/upload → /ext/channel_api/artifacts/upload
+  // （multipart/form-data 经内核 dispatcher 透传原始字节到 channel_api http.handle，
+  //   sidecar 解 multipart 落盘——与 :8988 路径落盘逻辑一致）
+  const response = await apiClient.post<FileUploadResponse>('/ext/channel_api/artifacts/upload', formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
@@ -108,7 +110,7 @@ export async function getModelCapabilities(modelName: string): Promise<FileCapab
 
 /** 获取支持的文件类型 */
 export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
-  const response = await apiClient.get<SupportedTypesResponse>('/files/supported-types')
+  const response = await apiClient.get<SupportedTypesResponse>('/api/v1/files/supported-types')
   return response.data
 }
 

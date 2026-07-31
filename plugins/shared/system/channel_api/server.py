@@ -623,6 +623,205 @@ def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
+    """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
+
+    返回 {字段名: 值}；文件字段值为 {filename, content_type, data(bytes)}，
+    普通字段为 str。用 email.parser 解析（标准库，无需外部依赖）。
+    """
+    import email  # noqa: PLC0415
+    from email.policy import default as default_policy  # noqa: PLC0415
+
+    # 构造一个完整 multipart 消息让 email 解析
+    header = f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+    msg = email.message_from_bytes(header + body_bytes, policy=default_policy)
+    fields: dict[str, Any] = {}
+    if not msg.is_multipart():
+        return fields
+    for part in msg.get_payload():
+        name = part.get_param("name", header="content-disposition")
+        if name is None:
+            continue
+        filename = part.get_filename()
+        if filename is not None:
+            # 文件字段
+            data = part.get_payload(decode=True) or b""
+            fields[name] = {
+                "filename": filename,
+                "content_type": part.get_content_type(),
+                "data": data,
+            }
+        else:
+            # 普通字段
+            payload = part.get_payload(decode=True)
+            fields[name] = payload.decode("utf-8", errors="replace") if payload else ""
+    return fields
+
+
+async def _handle_artifacts_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str], headers: dict[str, str]
+) -> dict[str, Any]:
+    """artifacts + annotations 域分发：/ext/channel_api/{artifacts,annotations}/** → routes_artifacts。
+
+    非 upload 路由直接调业务函数；upload 路由从 raw_body(base64 字节)解析 multipart
+    （内核 dispatcher 已透传原始字节，不反序列化），手动落盘 + 存元数据
+    （对齐 routes_artifacts.upload_file 的落盘逻辑；_push_upload_event 在 0.2 已是 no-op）。
+    """
+    import routes_artifacts as ra  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # ── annotations 独立路由（/ext/channel_api/annotations/{id}...）──
+        if path.startswith("/ext/channel_api/annotations/"):
+            ann_id = path[len("/ext/channel_api/annotations/"):]
+            if "/" in ann_id:
+                # /annotations/{id}/resolve
+                aid, rest = ann_id.split("/", 1)
+                if rest == "resolve" and method == "POST":
+                    return _ok(_json_response(await ra.resolve_annotation(aid)))
+            else:
+                if method == "PUT":
+                    body = _decode_body(raw_body)
+                    return _ok(_json_response(await ra.update_annotation(ann_id, body)))
+                if method == "DELETE":
+                    return _ok(_json_response(await ra.delete_annotation(ann_id)))
+
+        # ── artifacts 路由（/ext/channel_api/artifacts...）──
+        if path == "/ext/channel_api/artifacts/upload" and method == "POST":
+            return await _handle_artifact_upload(raw_body, headers)
+
+        # GET "" (list, query: task_id/limit/offset)
+        if path == "/ext/channel_api/artifacts" and method == "GET":
+            return _ok(_json_response(await ra.list_artifacts(
+                task_id=query.get("task_id", ""),
+                limit=_qint("limit", 50),
+                offset=_qint("offset", 0),
+            )))
+        # POST "" (create)
+        if path == "/ext/channel_api/artifacts" and method == "POST":
+            body = _decode_body(raw_body)
+            return _ok(_json_response(await ra.create_artifact(body)))
+
+        # 子路径 /artifacts/{artifact_id}[/versions|/diff|/annotations...]
+        if path.startswith("/ext/channel_api/artifacts/"):
+            rest = path[len("/ext/channel_api/artifacts/"):]
+            # 含二级路径
+            if "/" in rest:
+                art_id, sub_path = rest.split("/", 1)
+                if sub_path == "versions" and method == "GET":
+                    return _ok(_json_response(await ra.get_version_history(art_id)))
+                if sub_path == "diff" and method == "GET":
+                    return _ok(_json_response(await ra.get_version_diff(
+                        art_id, _qint("from", 1), _qint("to", 2),
+                    )))
+                if sub_path == "annotations" and method == "GET":
+                    return _ok(_json_response(await ra.list_annotations(
+                        art_id, status=query.get("status"), limit=_qint("limit", 100),
+                    )))
+                if sub_path == "annotations" and method == "POST":
+                    body = _decode_body(raw_body)
+                    return _ok(_json_response(await ra.create_annotation(art_id, body)))
+            else:
+                # /artifacts/{artifact_id} 单级
+                if method == "GET":
+                    return _ok(_json_response(await ra.get_artifact(rest)))
+                if method == "PUT":
+                    body = _decode_body(raw_body)
+                    return _ok(_json_response(await ra.update_artifact(rest, body)))
+                if method == "DELETE":
+                    return _ok(_json_response(await ra.delete_artifact(rest)))
+
+        logger.warning("artifacts http.handle: no route for path=%s method=%s", path, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("artifacts http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_artifact_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
+    """处理 /artifacts/upload（multipart/form-data）。
+
+    内核 dispatcher 透传原始字节（base64 编码在 raw_body）。解 multipart 取 file + thread_id，
+    复用 routes_artifacts 的落盘逻辑（_get_uploads_dir + DiskFileStorage）。
+    对齐 upload_file 返回结构 {file_id, filename, mime_type, media_type, size, url}。
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+    import routes_artifacts as ra  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    try:
+        body_bytes = _b64.b64decode(raw_body) if raw_body else b""
+    except Exception as exc:  # noqa: BLE001
+        return _ok(_json_response({"error": f"invalid upload body: {exc}"}, 400))
+
+    content_type = headers.get("content-type", "") or headers.get("Content-Type", "")
+    if "multipart/form-data" not in content_type:
+        return _ok(_json_response(
+            {"error": "upload requires multipart/form-data", "content_type": content_type}, 400,
+        ))
+
+    try:
+        fields = _parse_multipart(content_type, body_bytes)
+    except Exception as exc:  # noqa: BLE001
+        return _ok(_json_response({"error": f"multipart parse failed: {exc}"}, 400))
+
+    file_field = fields.get("file")
+    if not isinstance(file_field, dict):
+        return _ok(_json_response({"error": "missing 'file' field in multipart"}, 400))
+
+    thread_id = fields.get("thread_id", "") or ""
+    content = file_field["data"]
+    filename = file_field.get("filename") or "upload"
+    mime_type = file_field.get("content_type") or "application/octet-stream"
+
+    # 复用 routes_artifacts 的落盘 + 元数据逻辑
+    file_id = uuid.uuid4().hex[:12]
+    media_type = ra._infer_media_type(mime_type)
+    uploads_dir = ra._get_uploads_dir()
+    os.makedirs(uploads_dir, exist_ok=True)
+    ext = os.path.splitext(filename)[1]
+    saved_filename = f"{file_id}{ext}"
+    file_path = os.path.join(uploads_dir, saved_filename)
+    with open(file_path, "wb") as f:
+        f.write(content)
+    url = f"/uploads/{saved_filename}"
+
+    # 存元数据到 DiskFileStorage
+    from multimodal import AttachmentInfo, MediaType  # noqa: PLC0415
+    attachment = AttachmentInfo(
+        file_id=file_id,
+        filename=filename,
+        mime_type=mime_type,
+        size=len(content),
+        media_type=MediaType(media_type),
+        url=url,
+    )
+    storage = ra.get_file_storage()
+    await storage.save(file_id, attachment)
+
+    logger.info("[upload] multipart 上传成功 file_id=%s filename=%s size=%d", file_id, filename, len(content))
+    return _ok(_json_response({
+        "file_id": file_id,
+        "filename": filename,
+        "mime_type": mime_type,
+        "media_type": media_type,
+        "size": len(content),
+        "url": url,
+    }))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -683,6 +882,10 @@ async def http_handle(
     # ── memory 域 ──
     if path.startswith("/ext/channel_api/memory"):
         return _handle_memory_domain(path, method, raw_body, q)
+
+    # ── artifacts 域（含上传）+ annotations 域 ──
+    if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):
+        return await _handle_artifacts_domain(path, method, raw_body, q, headers or {})
 
     # 未接入的域：明确 404，提示该域尚未迁移
     logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)

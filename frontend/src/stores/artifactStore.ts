@@ -35,7 +35,7 @@ interface ArtifactActions {
   clearCache: () => void
 }
 
-const API_BASE = '/api/v1/artifacts'
+const API_BASE = '/ext/channel_api/artifacts'
 
 export const useArtifactStore = create<ArtifactState & ArtifactActions>()((set, get) => ({
   artifacts: {},
