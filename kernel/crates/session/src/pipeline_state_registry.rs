@@ -71,7 +71,9 @@ pub struct PipelineStateEntry {
 impl PipelineStateRegistry {
     /// 创建空注册表。
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     /// 获取或初始化一个管道的 state 条目。
