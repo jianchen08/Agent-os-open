@@ -32,6 +32,20 @@ try:
 except ImportError:
     invalidate_all_llm_caches = None  # type: ignore[assignment]
 
+
+def _invalidate_llm_caches() -> None:
+    """4c 迁移：sidecar 模式下 config.models 不可导入（None），调用需 null-guard。
+
+    主进程 FastAPI 路径下 invalidate_all_llm_caches 为真实函数；sidecar（http.handle）
+    路径下为 None，跳过即可——sidecar 不持有 LLM 内存缓存。
+    """
+    if invalidate_all_llm_caches is not None:
+        try:
+            invalidate_all_llm_caches()
+        except Exception:  # noqa: BLE001
+            logger.warning("invalidate_all_llm_caches 调用失败", exc_info=True)
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
@@ -40,7 +54,22 @@ router = APIRouter(
     dependencies=[Depends(require_auth)],
 )
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+def _resolve_project_root() -> Path:
+    """向上查找项目根（含 config/ 目录的目录）。
+
+    4c 迁移：本模块在两处存在（plugins/shared/system/channel_api/ 与
+    src/channels/api/），二者相对项目根的深度不同，硬编码 parent×N 会差一层。
+    改为按 config/ 目录特征向上探测，两处都能正确定位。
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in [here, *here.parents]:
+        if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
+            return candidate
+    # 兜底：回退原 parent×4 语义（至少不比原来差）。
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+_PROJECT_ROOT = _resolve_project_root()
 _CONFIG_ROOT = _PROJECT_ROOT / "config"
 _CONFIG_MODELS_DIR = _CONFIG_ROOT / "models"
 _CONFIG_SYSTEM_DIR = _CONFIG_ROOT / "system"
@@ -289,7 +318,7 @@ def save_defaults(body: LlmDefaultsUpdateRequest) -> dict[str, Any]:
     if body.tiers is not None:
         data["defaults"]["tiers"] = body.tiers
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("LLM 默认配置已更新: %s", body.model_dump(exclude_none=True))
     return {
         "chat": data["defaults"].get("chat", ""),
@@ -305,7 +334,7 @@ def add_model(body: ModelAddRequest) -> dict[str, Any]:
     for model_id, model_conf in body.models.items():
         models[model_id] = model_conf
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("添加模型: %s", list(body.models.keys()))
     return {"models": models}
 
@@ -318,7 +347,7 @@ def update_model(model_id: str, body: ModelConfigUpdateRequest) -> dict[str, Any
         raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
     models[model_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("更新模型配置: %s", model_id)
     return {"models": models}
 
@@ -331,7 +360,7 @@ def delete_model(model_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
     del models[model_id]
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("删除模型: %s", model_id)
     return {"models": models}
 
@@ -360,7 +389,7 @@ def add_provider(body: ProviderCreateRequest) -> dict[str, Any]:
 
     providers[body.provider_id] = provider_config
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("添加提供商: %s", body.provider_id)
     return {"providers": providers}
 
@@ -373,7 +402,7 @@ def update_provider(provider_id: str, body: ProviderConfigUpdateRequest) -> dict
         raise HTTPException(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
     providers[provider_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("更新提供商配置: %s", provider_id)
     return {"providers": providers}
 
@@ -391,7 +420,7 @@ def delete_provider(provider_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
     del providers[provider_id]
     _write_yaml(_LLM_YAML, data)
-    invalidate_all_llm_caches()
+    _invalidate_llm_caches()
     logger.info("删除提供商: %s", provider_id)
     return {"providers": providers}
 

@@ -8,15 +8,33 @@
 属于独立进程应用入口。本插件暴露 API 通道的状态查询和路由发现能力。
 
 [来源: docs/working/module_migration_plan.md §5.2]
+
+4c 迁移（2026-08-01）：消灭 :8988 独立进程特权，channel_api 像其他插件一样经内核
+dispatcher 走 /ext/channel_api/**。本 server.py 新增 http.handle 工具，按 path 分发、
+直接 from routes_xxx import 业务函数 调用（绕开 FastAPI 装饰器与 :8988 端口）。
+试点域：config（签名最干净）。其余域逐域接力推进。
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+# 4c 迁移：http.handle 直接 import routes_config 等平铺模块，它们经 deps→auth 间接
+# 引用 src.*（src.auth.token / src.config.settings）。需把项目根与 src/ 加入 sys.path，
+# 与 run_server.py（:8988 进程）保持一致，否则 sidecar 下 import 失败。
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+_SRC_ROOT = os.path.join(_PROJECT_ROOT, "src")
+if os.path.isdir(_SRC_ROOT) and _SRC_ROOT not in sys.path:
+    sys.path.append(_SRC_ROOT)
 
 from agentos_plugin_sdk import AgentOSPlugin
 
@@ -92,6 +110,216 @@ async def api_list_routes() -> dict[str, Any]:
         Dict with list of route prefix paths
     """
     return {"routes": _available_routes}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 4c 迁移：http.handle —— 统一插件方案，绕开 :8988 独立进程
+# ════════════════════════════════════════════════════════════════════════════
+# 内核 http_dispatcher 把 /ext/channel_api/** 的 HttpHandleRequest 透传给本工具。
+# 本工具按 path 分发到各域业务函数（直接 import routes_xxx 的函数，绕开 FastAPI
+# 装饰器与 router-level Depends(require_auth)——dispatcher 侧已按 http_endpoints.auth
+# 鉴权）。返回 ToolExecutionResult{success, data}，data 为 HttpHandleResponse
+# （status/headers/body/body_encoding，body 需 base64）。
+#
+# 试点：config 域（22 条路由，签名干净，纯 YAML 读写，无 Depends/Request/DB）。
+# 其余域逐域接力（thinking_mode / execution / users / ...）。
+
+
+def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
+    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
+    body_str = json.dumps(payload, default=str, ensure_ascii=False)
+    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": body_b64,
+        "body_encoding": "base64",
+    }
+
+
+def _ok(data: Any) -> dict[str, Any]:
+    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
+    return {"success": True, "data": data}
+
+
+def _http_exc_response(exc: Exception) -> dict[str, Any]:
+    """把 FastAPI HTTPException / APIError 转成对应 HTTP 响应。
+
+    业务函数 raise HTTPException(status_code, detail)；http.handle 需捕获后转成
+    带 status 的 HttpHandleResponse，而非让它冒泡成 500。
+    """
+    # FastAPI HTTPException
+    status = getattr(exc, "status_code", None)
+    detail = getattr(exc, "detail", None)
+    if status is None:
+        # deps.APIError（自定义）携带 status_code 属性
+        status = getattr(exc, "status_code", 500)
+        detail = detail or str(exc)
+    if detail is None:
+        detail = str(exc)
+    return _ok(_json_response({"detail": detail}, int(status)))
+
+
+def _decode_body(raw_body: str) -> dict[str, Any]:
+    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
+    if not raw_body:
+        return {}
+    try:
+        # 内核透传的 raw_body 可能是 base64（HttpHandleRequest 约定）或明文
+        try:
+            decoded = base64.b64decode(raw_body).decode("utf-8")
+            # 防误判：base64 解出的若不是 JSON，回退用原文
+            if not decoded.lstrip().startswith(("{", "[")):
+                decoded = raw_body
+        except Exception:  # noqa: BLE001
+            decoded = raw_body
+        return json.loads(decoded) if decoded.strip() else {}
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON body: {e}") from e
+
+
+def _handle_config_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """config 域分发：把 /ext/channel_api/config/** 路由到 routes_config 业务函数。
+
+    直接 from routes_config import <handler> 调用，绕开 FastAPI 装饰器。
+    """
+    # 延迟导入：routes_config 顶部有可选的 config.config_center / config.models 导入
+    # （sidecar 下为 None，已 null-guard），且 _resolve_project_root 已修正路径。
+    import routes_config as rc  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    # config 域相对前缀（去掉 /ext/channel_api 前缀后的路径）
+    # 例：path=/ext/channel_api/config/llm → sub="/llm"
+    prefix = "/ext/channel_api/config"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a config path", "path": path}, 404))
+    sub = path[len(prefix):]  # 形如 "/llm" 或 "/llm/models/gpt-4"
+
+    try:
+        # ── LLM 配置 ──
+        if sub == "/llm" and method == "GET":
+            return _ok(_json_response(rc.get_llm_config()))
+        if sub == "/llm/providers" and method == "GET":
+            return _ok(_json_response(rc.get_providers()))
+        if sub == "/llm/models" and method == "GET":
+            return _ok(_json_response(rc.get_models()))
+        if sub == "/llm/defaults" and method == "GET":
+            return _ok(_json_response(rc.get_defaults()))
+        if sub == "/llm/defaults" and method == "PUT":
+            body = rc.LlmDefaultsUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.save_defaults(body)))
+        if sub == "/llm/models" and method == "POST":
+            body = rc.ModelAddRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.add_model(body)))
+        if sub.startswith("/llm/models/") and method == "PUT":
+            model_id = sub[len("/llm/models/"):]
+            body = rc.ModelConfigUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.update_model(model_id, body)))
+        if sub.startswith("/llm/models/") and method == "DELETE":
+            model_id = sub[len("/llm/models/"):]
+            return _ok(_json_response(rc.delete_model(model_id)))
+        if sub == "/llm/providers" and method == "POST":
+            body = rc.ProviderCreateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.add_provider(body)))
+        if sub.startswith("/llm/providers/") and method == "PUT":
+            provider_id = sub[len("/llm/providers/"):]
+            body = rc.ProviderConfigUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.update_provider(provider_id, body)))
+        if sub.startswith("/llm/providers/") and method == "DELETE":
+            provider_id = sub[len("/llm/providers/"):]
+            return _ok(_json_response(rc.delete_provider(provider_id)))
+
+        # ── 上下文窗口配置 ──
+        if sub == "/context-window" and method == "GET":
+            return _ok(_json_response(rc.get_context_window_config()))
+        if sub == "/context-window" and method == "PUT":
+            body = rc.ContextWindowUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.update_context_window_config(body)))
+        if sub == "/context-window/reset" and method == "POST":
+            return _ok(_json_response(rc.reset_context_window_config()))
+
+        # ── API 运行配置 ──
+        if sub == "/api" and method == "GET":
+            return _ok(_json_response(rc.get_api_config()))
+        if sub == "/api" and method == "PUT":
+            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.save_api_config(body)))
+
+        # ── 并发配置 ──
+        if sub == "/concurrency" and method == "GET":
+            return _ok(_json_response(rc.get_concurrency_config()))
+        if sub == "/concurrency" and method == "PUT":
+            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.save_concurrency_config(body)))
+
+        # ── 成本控制配置（注意：与 cost_control 插件不同，这里是配置读写） ──
+        if sub == "/cost-control" and method == "GET":
+            return _ok(_json_response(rc.get_cost_control_config()))
+        if sub == "/cost-control" and method == "PUT":
+            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.save_cost_control_config(body)))
+
+        # ── 通用配置（白名单分发，config_path:path 多段） ──
+        if sub.startswith("/generic/") and method == "GET":
+            config_path = sub[len("/generic/"):]
+            return _ok(_json_response(rc.get_generic_config(config_path)))
+        if sub.startswith("/generic/") and method == "PUT":
+            config_path = sub[len("/generic/"):]
+            body = rc.GenericConfigUpdateRequest(**_decode_body(raw_body))
+            return _ok(_json_response(rc.save_generic_config(config_path, body)))
+
+        # 未匹配
+        logger.warning("config http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        # APIError（deps 自定义）或其他业务异常
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("config http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/channel_api/** (channel_api business REST, 4c migration; pilot: config domain)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 前缀分发到各域处理器（4c 迁移统一入口）。
+
+    签名覆盖 HttpHandleRequest 全部字段（SDK 的 td.handler(**arguments) 展开）。
+    当前已接入：config 域。其余域逐域接力。
+    """
+    q = query or {}
+    # ── config 域 ──
+    if path.startswith("/ext/channel_api/config"):
+        return _handle_config_domain(path, method, raw_body, q)
+
+    # 未接入的域：明确 404，提示该域尚未迁移
+    logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)
+    return _ok(_json_response(
+        {"error": "not found", "path": path, "hint": "该域尚未完成 4c 迁移（见 channel_api_migration_plan.md）"},
+        404,
+    ))
 
 
 if __name__ == "__main__":
