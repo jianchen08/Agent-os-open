@@ -6,7 +6,7 @@
 
 import { apiClient } from './client'
 
-const BASE = '/api/v1/workspaces'
+const BASE = '/ext/channel_api/workspaces'
 
 /** 获取工作空间详情 */
 export async function getWorkspace(containerTaskId: string): Promise<any> {

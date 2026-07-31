@@ -739,6 +739,81 @@ async def _handle_asr_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_workspaces_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """workspaces 域分发：/ext/channel_api/workspaces/** → routes_workspaces 业务函数。
+
+    11 路由（FS/IDE 操作）。业务函数 async，全 dict body（非 pydantic）。
+    _user=Depends 省略（dispatcher 鉴权，handler 不读 _user）。
+    path-param {container_task_id}；file-content/delete-entry 用 Query(path=)。
+    """
+    import routes_workspaces as rws  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/workspaces"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a workspaces path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/open-file" / "/{id}" / "/{id}/file-tree" ...
+
+    try:
+        # POST /open-file（body: file_path/line/column）
+        if sub == "/open-file" and method == "POST":
+            body = _decode_body(raw_body) or {}
+            return _ok(_json_response(await rws.open_file_in_ide(body)))
+
+        # /{container_task_id} 系列路由
+        if sub.startswith("/") and len(sub) > 1:
+            rest = sub[1:]  # "{id}" 或 "{id}/file-tree" 等
+            # 单级：/{id}（GET workspace / POST open）
+            if "/" not in rest:
+                cid = rest
+                if method == "GET":
+                    return _ok(_json_response(await rws.get_workspace(cid)))
+                if method == "POST":  # /{id}/open 实际是二级，这里只处理纯 /{id} 的 fallback
+                    pass
+            else:
+                cid, action = rest.split("/", 1)
+                if action == "artifacts" and method == "GET":
+                    return _ok(_json_response(await rws.get_workspace_artifacts(cid)))
+                if action == "file-tree" and method == "GET":
+                    return _ok(_json_response(await rws.get_file_tree(cid)))
+                if action == "file-content" and method == "GET":
+                    return _ok(_json_response(await rws.get_file_content(
+                        cid, path=query.get("path", ""),
+                    )))
+                if action == "file-content" and method == "PUT":
+                    body = _decode_body(raw_body)
+                    return _ok(_json_response(await rws.save_file_content(
+                        cid, path=query.get("path", ""), body=body,
+                    )))
+                if action == "create-entry" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await rws.create_entry(cid, body)))
+                if action == "entries" and method == "DELETE":
+                    return _ok(_json_response(await rws.delete_entry(
+                        cid, path=query.get("path", ""),
+                    )))
+                if action == "rename-entry" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await rws.rename_entry(cid, body)))
+                if action == "move-entry" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await rws.move_entry(cid, body)))
+                if action == "open" and method == "POST":
+                    return _ok(_json_response(await rws.open_workspace_in_ide(cid)))
+
+        logger.warning("workspaces http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("workspaces http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
 
@@ -1006,6 +1081,10 @@ async def http_handle(
     # ── asr 域（批次3，单 multipart 路由，复用 multipart 解析）──
     if path.startswith("/ext/channel_api/audio"):
         return await _handle_asr_domain(path, method, raw_body, headers or {})
+
+    # ── workspaces 域（批次3，11 路由，FS/IDE 操作）──
+    if path.startswith("/ext/channel_api/workspaces"):
+        return await _handle_workspaces_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):
