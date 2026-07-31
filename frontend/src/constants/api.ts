@@ -159,27 +159,27 @@ export const API_ENDPOINTS = {
     /** 就绪检查 */
     READY: '/health/ready',
   },
-  /** 用户设置相关 - 对应后端 /api/v1/users/settings */
+  /** 用户设置相关 - 4c 迁移：已切 /ext/channel_api/users/settings（stub） */
   USER_SETTINGS: {
     /** 获取用户设置 */
-    GET: '/api/v1/users/settings',
+    GET: '/ext/channel_api/users/settings',
     /** 更新用户设置 */
-    UPDATE: '/api/v1/users/settings',
+    UPDATE: '/ext/channel_api/users/settings',
   },
-  /** 用户管理相关 - 对应后端 /api/v1/users/* (管理员专用) */
+  /** 用户管理相关 - 4c 迁移：已切 /ext/channel_api/users/*（管理员专用，stub） */
   USERS: {
     /** 获取用户列表 */
-    LIST: '/api/v1/users',
+    LIST: '/ext/channel_api/users',
     /** 获取用户统计 */
-    STATS: '/api/v1/users/stats',
+    STATS: '/ext/channel_api/users/stats',
     /** 创建用户 */
-    CREATE: '/api/v1/users',
+    CREATE: '/ext/channel_api/users',
     /** 更新用户角色 */
-    UPDATE_ROLE: (id: string) => `/api/v1/users/${id}/role`,
+    UPDATE_ROLE: (id: string) => `/ext/channel_api/users/${id}/role`,
     /** 更新用户激活状态 */
-    UPDATE_ACTIVE: (id: string) => `/api/v1/users/${id}/active`,
+    UPDATE_ACTIVE: (id: string) => `/ext/channel_api/users/${id}/active`,
     /** 删除用户 */
-    DELETE: (id: string) => `/api/v1/users/${id}`,
+    DELETE: (id: string) => `/ext/channel_api/users/${id}`,
   },
   /** 监控相关 - 走插件 http_endpoints /ext/monitoring/**（已从内核 compat_routes 迁出） */
   MONITORING: {

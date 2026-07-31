@@ -22,6 +22,6 @@ export async function registerClientCapabilities(capabilities: {
   clientType: string
   version: string
 }) {
-  const response = await apiClient.post('/api/v1/client/register', capabilities)
+  const response = await apiClient.post('/ext/channel_api/client/register', capabilities)
   return response.data
 }

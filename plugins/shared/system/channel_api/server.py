@@ -321,6 +321,115 @@ def _handle_thinking_mode_domain(path: str, method: str, raw_body: str, query: d
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_users_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """users 域分发：/ext/channel_api/users/** → routes_missing 的 users 路由业务函数（全 stub）。
+
+    _user=Depends(require_auth) 参数省略（dispatcher 已按 http_endpoints.auth=user 鉴权）。
+    """
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/users"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a users path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/stats" / "/{user_id}/role" / "/settings" ...
+
+    try:
+        # GET "" (list) / GET "/stats" / GET|PUT "/settings" 不带 user_id
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rm.list_users()))
+        if sub == "/stats" and method == "GET":
+            return _ok(_json_response(await rm.get_user_stats()))
+        if sub == "/settings" and method == "GET":
+            return _ok(_json_response(await rm.get_user_settings()))
+        if sub == "/settings" and method == "PUT":
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(await rm.update_user_settings(body)))
+        if sub in ("", "/") and method == "POST":
+            # create_user 用 Query 参数（username/password/role）
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(await rm.create_user(
+                username=query.get("username"),
+                password=query.get("password"),
+                role=query.get("role"),
+                body=body,
+            )))
+        # path-param 路由：/{user_id}/role | /{user_id}/active | /{user_id}
+        if sub.endswith("/role") and method in ("PUT", "PATCH"):
+            user_id = sub[1:].rsplit("/role", 1)[0]  # 去掉前导 / 与尾 /role
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(await rm.update_user_role(user_id, body)))
+        if sub.endswith("/active") and method in ("PUT", "PATCH"):
+            user_id = sub[1:].rsplit("/active", 1)[0]
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(await rm.update_user_active(user_id, body)))
+        if sub.startswith("/") and method == "DELETE":
+            user_id = sub[1:]
+            return _ok(_json_response(await rm.delete_user(user_id)))
+
+        logger.warning("users http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("users http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_sessions_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """sessions 域分发：/ext/channel_api/sessions/** → routes_missing 的 sessions 路由（全 stub）。"""
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/sessions"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a sessions path", "path": path}, 404))
+    sub = path[len(prefix):]  # "/{session_id}/total-token-usage" 等
+
+    try:
+        if sub.endswith("/total-token-usage") and method == "GET":
+            session_id = sub[1:].rsplit("/total-token-usage", 1)[0]
+            return _ok(_json_response(await rm.get_session_total_token_usage(session_id)))
+        if sub.endswith("/context-token-usage") and method == "GET":
+            session_id = sub[1:].rsplit("/context-token-usage", 1)[0]
+            parent = query.get("parent_execution_record_id")
+            return _ok(_json_response(
+                await rm.get_session_context_token_usage(session_id, parent_execution_record_id=parent)
+            ))
+
+        logger.warning("sessions http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("sessions http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_client_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """client 域分发：/ext/channel_api/client/** → routes_missing 的 client 路由。"""
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/client"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a client path", "path": path}, 404))
+    sub = path[len(prefix):]
+
+    try:
+        if sub == "/register" and method == "POST":
+            body = _decode_body(raw_body) or {}
+            return _ok(_json_response(await rm.register_client(body)))
+
+        logger.warning("client http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("client http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -357,6 +466,18 @@ async def http_handle(
     # ── thinking-mode 域 ──
     if path.startswith("/ext/channel_api/thinking-mode"):
         return _handle_thinking_mode_domain(path, method, raw_body, q)
+
+    # ── users 域 ──
+    if path.startswith("/ext/channel_api/users"):
+        return await _handle_users_domain(path, method, raw_body, q)
+
+    # ── sessions 域 ──
+    if path.startswith("/ext/channel_api/sessions"):
+        return await _handle_sessions_domain(path, method, raw_body, q)
+
+    # ── client 域 ──
+    if path.startswith("/ext/channel_api/client"):
+        return await _handle_client_domain(path, method, raw_body, q)
 
     # 未接入的域：明确 404，提示该域尚未迁移
     logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)

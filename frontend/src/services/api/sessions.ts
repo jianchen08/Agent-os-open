@@ -50,7 +50,7 @@ export async function getSessionTotalTokenUsage(
   sessionId: string,
 ): Promise<SessionTokenUsageResponse> {
   const response = await apiClient.get<SessionTokenUsageResponse>(
-    `/api/v1/sessions/${sessionId}/total-token-usage`,
+    `/ext/channel_api/sessions/${sessionId}/total-token-usage`,
   )
   return response.data
 }
@@ -60,7 +60,7 @@ export async function getContextTokenUsage(
   parentExecutionRecordId?: string,
 ): Promise<ContextTokenUsageResponse> {
   const response = await apiClient.get<ContextTokenUsageResponse>(
-    `/api/v1/sessions/${sessionId}/context-token-usage`,
+    `/ext/channel_api/sessions/${sessionId}/context-token-usage`,
     {
       params: parentExecutionRecordId
         ? {
