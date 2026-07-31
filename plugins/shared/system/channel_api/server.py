@@ -814,6 +814,154 @@ async def _handle_workspaces_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_reviews_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str], headers: dict[str, str]
+) -> dict[str, Any]:
+    """reviews 域分发：/ext/channel_api/reviews/** → routes_reviews 业务函数。
+
+    9 路由：create/get/list/feedback/viewed/cancel（JSON body 或 path-param）+
+    media-review（multipart 上传 → media_review_service）+ media-metadata +
+    attachments（JSON body，文件路径非上传）。_user 不读，省略。
+    """
+    import routes_reviews as rrv  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/reviews"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a reviews path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/media-review" / "/{id}" / "/{id}/feedback" ...
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # POST "" (create)
+        if sub in ("", "/") and method == "POST":
+            body = _decode_body(raw_body) or {}
+            return _ok(_json_response(await rrv.create_review(body)))
+        # GET "" (list, query: task_id/limit)
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rrv.list_reviews(
+                task_id=query.get("task_id", ""),
+                limit=_qint("limit", 50),
+            )))
+        # POST /media-review（multipart：file + media_type）
+        if sub == "/media-review" and method == "POST":
+            return await _handle_review_media_upload(raw_body, headers)
+
+        # /{review_id} 系列
+        if sub.startswith("/") and len(sub) > 1:
+            rest = sub[1:]
+            if "/" not in rest:
+                rid = rest
+                if method == "GET":
+                    return _ok(_json_response(await rrv.get_review(rid)))
+            else:
+                rid, action = rest.split("/", 1)
+                if action == "feedback" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await rrv.submit_feedback(rid, body)))
+                if action == "viewed" and method == "POST":
+                    return _ok(_json_response(await rrv.mark_as_viewed(rid)))
+                if action == "cancel" and method == "POST":
+                    return _ok(_json_response(await rrv.cancel_review(rid)))
+                if action == "media-metadata" and method == "GET":
+                    return _ok(_json_response(await rrv.get_media_metadata(rid)))
+                if action == "attachments" and method == "POST":
+                    body = _decode_body(raw_body) or {}
+                    return _ok(_json_response(await rrv.add_attachments(rid, body)))
+
+        logger.warning("reviews http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("reviews http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
+    """处理 reviews /media-review（multipart：file + media_type）。
+
+    复用 routes_reviews.media_review 的逻辑：解 multipart 取 file + media_type →
+    保存临时文件 → get_media_review_service().review_media → 清理临时文件。
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    import routes_reviews as rrv  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    try:
+        body_bytes = _b64.b64decode(raw_body) if raw_body else b""
+    except Exception as exc:  # noqa: BLE001
+        return _ok(_json_response({"error": f"invalid upload body: {exc}"}, 400))
+
+    content_type = headers.get("content-type", "") or headers.get("Content-Type", "")
+    if "multipart/form-data" not in content_type:
+        return _ok(_json_response(
+            {"error": "media-review requires multipart/form-data", "content_type": content_type}, 400,
+        ))
+    try:
+        fields = _parse_multipart(content_type, body_bytes)
+    except Exception as exc:  # noqa: BLE001
+        return _ok(_json_response({"error": f"multipart parse failed: {exc}"}, 400))
+
+    file_field = fields.get("file")
+    if not isinstance(file_field, dict) or not file_field.get("data"):
+        return _ok(_json_response({"error": "missing or empty 'file' field"}, 400))
+    media_type = fields.get("media_type") or ""
+    if isinstance(media_type, str):
+        media_type = media_type.strip()
+
+    filename = file_field.get("filename") or "upload"
+    content: bytes = file_field["data"]
+    suffix = os.path.splitext(filename)[1]
+    tmp_dir = tempfile.mkdtemp(prefix="media_review_")
+    tmp_path = os.path.join(tmp_dir, filename if filename else f"upload{suffix}")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+
+        # 复用 routes_reviews 的 media_review 逻辑（推断 media_type + review_media）
+        effective = media_type
+        if not effective:
+            from review.media_review_service import _infer_media_type  # noqa: PLC0415
+
+            try:
+                effective = _infer_media_type(tmp_path)
+            except ValueError:
+                return _ok(_json_response({
+                    "error": {"code": "INVALID", "message": f"无法推断媒体类型，请显式指定 media_type（文件: {filename}）"}
+                }, 400))
+
+        media_svc = rrv.get_media_review_service()
+        result = await media_svc.review_media(tmp_path, effective)
+        result_dict = result.to_dict()
+        result_dict["media_type"] = effective
+        result_dict["filename"] = filename
+        return _ok(_json_response(result_dict))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("review media-upload 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
+
+
 def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
 
@@ -1085,6 +1233,10 @@ async def http_handle(
     # ── workspaces 域（批次3，11 路由，FS/IDE 操作）──
     if path.startswith("/ext/channel_api/workspaces"):
         return await _handle_workspaces_domain(path, method, raw_body, q)
+
+    # ── reviews 域（批次3，9 路由，含 media-review multipart）──
+    if path.startswith("/ext/channel_api/reviews"):
+        return await _handle_reviews_domain(path, method, raw_body, q, headers or {})
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):

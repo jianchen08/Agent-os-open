@@ -6,7 +6,7 @@
 
 import { apiClient } from './client'
 
-const BASE = '/api/v1/reviews'
+const BASE = '/ext/channel_api/reviews'
 
 /** 创建审批请求 */
 export async function createReview(params: {
