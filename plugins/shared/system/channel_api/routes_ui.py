@@ -34,7 +34,20 @@ _schema_parser: Any | None = None
 _last_scan_time: float = 0
 _SCAN_INTERVAL: float = 5.0
 
-_CONFIG_DIRS = [Path("config/modules")]
+def _resolve_project_root() -> Path:
+    """向上查找项目根（含 config/ + config/modules/ 的目录）。
+
+    4c 迁移：与 routes_config._resolve_project_root 同源——本模块在两处存在（深度不同），
+    按 config/ 特征探测，避免相对路径依赖 cwd（sidecar cwd 不一定是项目根）。
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in [here, *here.parents]:
+        if (candidate / "config").is_dir() and (candidate / "config" / "modules").is_dir():
+            return candidate
+    return Path.cwd()
+
+
+_CONFIG_DIRS = [_resolve_project_root() / "config" / "modules"]
 
 
 def _get_schema_parser() -> Any:

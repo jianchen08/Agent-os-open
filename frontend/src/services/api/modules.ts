@@ -9,7 +9,7 @@ import apiClient from './client'
  * 获取所有模块的 UI Schema
  */
 export async function getModuleUISchemas() {
-  const response = await apiClient.get('/api/v1/modules/ui')
+  const response = await apiClient.get('/ext/channel_api/modules/ui')
   return response.data
 }
 

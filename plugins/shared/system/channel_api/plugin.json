@@ -71,6 +71,8 @@
         {"route_id": "execution_record_get", "method": "GET", "path": "/ext/channel_api/execution/records/{record_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "execution 域：获取单条执行记录"},
         {"route_id": "execution_record_delete", "method": "DELETE", "path": "/ext/channel_api/execution/records/{record_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "execution 域：删除执行记录（stub）"},
         {"route_id": "execution_records_delete_by_session", "method": "DELETE", "path": "/ext/channel_api/execution/records/session/{session_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 10000, "max_concurrency": 4, "description": "execution 域：按会话删除执行记录（stub）"},
-        {"route_id": "execution_records_clear_all", "method": "POST", "path": "/ext/channel_api/execution/records/clear-all", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 10000, "max_concurrency": 2, "description": "execution 域：清理所有执行记录（stub）"}
+        {"route_id": "execution_records_clear_all", "method": "POST", "path": "/ext/channel_api/execution/records/clear-all", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 10000, "max_concurrency": 2, "description": "execution 域：清理所有执行记录（stub）"},
+        {"route_id": "modules_ui_list", "method": "GET", "path": "/ext/channel_api/modules/ui", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "modules/ui 域：所有模块 UI Schema 列表（query: client_type 过滤）"},
+        {"route_id": "modules_ui_get", "method": "GET", "path": "/ext/channel_api/modules/ui/{module_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "modules/ui 域：指定模块 UI Schema"}
     ]
 }

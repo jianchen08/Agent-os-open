@@ -503,6 +503,40 @@ async def _handle_execution_domain(path: str, method: str, raw_body: str, query:
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+def _handle_modules_ui_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """modules/ui 域分发：/ext/channel_api/modules/ui/** → routes_ui 业务函数。
+
+    仅迁 schema 查询（list/get）；data CRUD（get_module_data_router）不迁（前端 modules.ts
+    仅消费 ui schema 列表）。_get_schema_parser 已修 config/modules 路径（_resolve_project_root）。
+    """
+    import routes_ui as rui  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/modules/ui"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a modules/ui path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/{module_id}"
+    client_type = query.get("client_type")
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(rui.list_ui_schemas(client_type=client_type)))
+        if sub.startswith("/") and method == "GET":
+            module_id = sub[1:]
+            return _ok(_json_response(rui.get_ui_schema(module_id, client_type=client_type)))
+
+        logger.warning("modules/ui http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        # APIError（deps 自定义，get_ui_schema 未找到时抛）→ 转 HTTP status
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("modules/ui http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -555,6 +589,10 @@ async def http_handle(
     # ── execution 域 ──
     if path.startswith("/ext/channel_api/execution"):
         return await _handle_execution_domain(path, method, raw_body, q)
+
+    # ── modules/ui 域 ──
+    if path.startswith("/ext/channel_api/modules/ui"):
+        return _handle_modules_ui_domain(path, method, raw_body, q)
 
     # 未接入的域：明确 404，提示该域尚未迁移
     logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)
