@@ -281,6 +281,46 @@ def _handle_config_domain(path: str, method: str, raw_body: str, query: dict[str
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+def _handle_thinking_mode_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """thinking-mode 域分发：把 /ext/channel_api/thinking-mode/** 路由到 routes_thinking_mode 业务函数。
+
+    直接 from routes_thinking_mode import <handler> 调用，绕开 FastAPI 装饰器。
+    """
+    import routes_thinking_mode as rtm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/thinking-mode"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a thinking-mode path", "path": path}, 404))
+    sub = path[len(prefix):]  # 形如 "/models" 或 "/models/gpt-4"
+
+    try:
+        if sub == "/health" and method == "GET":
+            return _ok(_json_response(rtm.health()))
+        if sub == "/models" and method == "GET":
+            return _ok(_json_response(rtm.list_models()))
+        if sub.startswith("/models/") and method == "GET":
+            model_name = sub[len("/models/"):]
+            return _ok(_json_response(rtm.get_model_info(model_name)))
+        if sub.startswith("/check/") and method == "GET":
+            model_name = sub[len("/check/"):]
+            return _ok(_json_response(rtm.check_support(model_name)))
+        if sub == "/switch" and method == "POST":
+            body = _decode_body(raw_body)
+            return _ok(_json_response(rtm.switch_mode(body)))
+        if sub == "/recommendations" and method == "POST":
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(rtm.recommendations(body)))
+
+        logger.warning("thinking-mode http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("thinking-mode http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -313,6 +353,10 @@ async def http_handle(
     # ── config 域 ──
     if path.startswith("/ext/channel_api/config"):
         return _handle_config_domain(path, method, raw_body, q)
+
+    # ── thinking-mode 域 ──
+    if path.startswith("/ext/channel_api/thinking-mode"):
+        return _handle_thinking_mode_domain(path, method, raw_body, q)
 
     # 未接入的域：明确 404，提示该域尚未迁移
     logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)

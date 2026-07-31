@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import APIRouter, Depends
 
 from deps import require_auth
@@ -30,9 +32,39 @@ router = APIRouter(
 )
 
 
+def _resolve_project_root() -> Path:
+    """向上查找项目根（含 config/ + config/models/ 的目录）。
+
+    4c 迁移：与 routes_config._resolve_project_root 同源逻辑——本模块在
+    plugins/shared/system/channel_api/ 与 src/channels/api/ 两处存在，深度不同，
+    按 config/ 特征探测，避免硬编码 parent×N 差一层。
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in [here, *here.parents]:
+        if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
+            return candidate
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+_LLM_YAML = _resolve_project_root() / "config" / "models" / "llm.yaml"
+
+
 def _get_llm_data() -> dict[str, Any]:
-    loader = get_model_config_loader()
-    return loader._load_llm_data()
+    """读取 llm.yaml 数据（models + defaults）。
+
+    主进程 FastAPI 路径：用 config.models.get_model_config_loader()（带内存缓存）。
+    Sidecar（http.handle）路径：loader 不可导入（None），直接读 llm.yaml（4c 迁移）。
+    返回结构与 loader._load_llm_data() 对齐：{models: {...}, defaults: {...}, ...}。
+    """
+    if get_model_config_loader is not None:
+        loader = get_model_config_loader()
+        return loader._load_llm_data()
+    # sidecar 兜底：直接读 YAML（无缓存，思考模式接口调用频率低）
+    if not _LLM_YAML.exists():
+        logger.warning("llm.yaml 不存在: %s", _LLM_YAML)
+        return {"models": {}, "defaults": {}}
+    with open(_LLM_YAML, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {"models": {}, "defaults": {}}
 
 
 def _is_reasoning_model(model_id: str) -> bool:

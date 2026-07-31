@@ -258,24 +258,24 @@ export const API_ENDPOINTS = {
     /** 获取验收标准评估结果 */
     GET_RESULT: (taskId: string, acId: string) => `/api/v1/tasks/${taskId}/ac/${acId}/result`,
   },
-  /** 思考模式相关 - 对应后端 /api/v1/thinking-mode/* */
+  /** 思考模式相关 - 4c 迁移：已切 /ext/channel_api/thinking-mode/**（经内核 dispatcher → channel_api http.handle） */
   THINKING_MODE: {
-    /** 测试端点 */
-    TEST: '/api/v1/thinking-mode/test',
+    /** 测试端点（注：后端无对应路由，仅前端定义） */
+    TEST: '/ext/channel_api/thinking-mode/test',
     /** 获取所有支持思考模式的模型 */
-    MODELS: '/api/v1/thinking-mode/models',
+    MODELS: '/ext/channel_api/thinking-mode/models',
     /** 获取指定模型的思考模式信息 */
-    MODEL_INFO: (modelName: string) => `/api/v1/thinking-mode/models/${modelName}`,
-    /** 使用思考模式生成响应 */
-    GENERATE: '/api/v1/thinking-mode/generate',
+    MODEL_INFO: (modelName: string) => `/ext/channel_api/thinking-mode/models/${modelName}`,
+    /** 使用思考模式生成响应（注：后端无对应路由，仅前端定义） */
+    GENERATE: '/ext/channel_api/thinking-mode/generate',
     /** 切换思考模式 */
-    SWITCH: '/api/v1/thinking-mode/switch',
+    SWITCH: '/ext/channel_api/thinking-mode/switch',
     /** 获取思考模式推荐 */
-    RECOMMENDATIONS: '/api/v1/thinking-mode/recommendations',
+    RECOMMENDATIONS: '/ext/channel_api/thinking-mode/recommendations',
     /** 检查模型是否支持思考模式 */
-    CHECK_SUPPORT: (modelName: string) => `/api/v1/thinking-mode/check/${modelName}`,
+    CHECK_SUPPORT: (modelName: string) => `/ext/channel_api/thinking-mode/check/${modelName}`,
     /** 思考模式服务健康检查 */
-    HEALTH: '/api/v1/thinking-mode/health',
+    HEALTH: '/ext/channel_api/thinking-mode/health',
   },
   /** 成本控制相关 - 走插件 http_endpoints /ext/cost_control/**（已从内核 compat_routes 迁出） */
   COST_CONTROL: {
