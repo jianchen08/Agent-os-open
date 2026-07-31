@@ -195,11 +195,22 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
     }
 
     fn find_http_route(&self, path: &str, method: &str) -> Option<HttpRouteDescriptor> {
+        let routes = self.http_routes.read();
+        // 1) 精确匹配（无 param 路由的快路径）。
         let key = RouteKey {
             path: path.to_string(),
             method: method.to_string(),
         };
-        self.http_routes.read().get(&key).cloned()
+        if let Some(d) = routes.get(&key) {
+            return Some(d.clone());
+        }
+        // 2) 模板匹配：支持 manifest 里 {param}（单段）与 {param:path}（多段通配）。
+        // 只在 method 匹配的候选里找；模板按"段数从长到短、通配优先级低"扫，
+        // 第一个 match 的返回（注册期冲突检测保证同模板不重复，故无歧义）。
+        routes
+            .values()
+            .find(|d| d.endpoint.method.eq_ignore_ascii_case(method) && path_matches_template(&d.endpoint.path, path))
+            .cloned()
     }
 
     fn clear_plugin(&self, plugin_id: &str) {
@@ -258,6 +269,66 @@ fn validate_http_route_path(plugin_id: &str, path: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// 判断 `incoming` 请求路径是否匹配已注册的 `template`（manifest path）。
+///
+/// 模板段约定（对齐 FastAPI/OpenAPI，插件 manifest 沿用）：
+/// - `{name}` —— 匹配**单段**（该段不含 `/`）。
+/// - `{name:path}` —— 匹配**剩余多段**（含 `/`，贪婪到末尾，最多一个且须在末尾）。
+/// - 其他段 —— 字面精确匹配。
+///
+/// 例：模板 `/ext/p/models/{model_id}` 匹配 `/ext/p/models/gpt-4`；
+/// `/ext/p/generic/{config_path:path}` 匹配 `/ext/p/generic/a/b/c`。
+pub(crate) fn path_matches_template(template: &str, incoming: &str) -> bool {
+    // 归一化：去尾部斜杠差异，空路径视作 "/"。
+    let norm = |s: &str| -> String {
+        let t = s.trim_end_matches('/');
+        if t.is_empty() { "/".to_string() } else { t.to_string() }
+    };
+    let template = norm(template);
+    let incoming = norm(incoming);
+    if template == incoming {
+        return true;
+    }
+    let t_segs: Vec<&str> = template.split('/').collect();
+    let i_segs: Vec<&str> = incoming.split('/').collect();
+    // 段数必须相等（多段通配 {x:path} 例外，见下）。
+    let has_catchall = t_segs.iter().any(|s| {
+        s.starts_with('{') && s.ends_with('}') && s.contains(":path")
+    });
+    if !has_catchall && t_segs.len() != i_segs.len() {
+        return false;
+    }
+    if has_catchall && t_segs.len() > i_segs.len() {
+        // 模板段比实际多（通配至少要 1 段）→ 不匹配。
+        return false;
+    }
+    // 逐段比对；遇到通配段，剩余 incoming 全归它。
+    let mut i = 0usize;
+    for (ti, ts) in t_segs.iter().enumerate() {
+        if ts.starts_with('{') && ts.ends_with('}') {
+            if ts.contains(":path") {
+                // 多段通配：吃掉 incoming 剩余全部段（至少 1 段，由上面段数检查保证）。
+                // 末尾通配（约定 catch-all 必在末尾）。
+                let _ = ti; // 仅用 incoming 剩余
+                return i < i_segs.len();
+            }
+            // 单段 {param}：吃掉 incoming 当前一段（必须非空）。
+            if i >= i_segs.len() || i_segs[i].is_empty() {
+                return false;
+            }
+            i += 1;
+        } else {
+            // 字面段：精确匹配。
+            if i >= i_segs.len() || i_segs[i] != *ts {
+                return false;
+            }
+            i += 1;
+        }
+    }
+    // 全部段消费完且无剩余（catch-all 已提前 return）。
+    i == i_segs.len()
 }
 
 /// 依赖解析器实现。
@@ -572,5 +643,82 @@ mod tests {
         let resolver = DependencyResolverImpl::new();
         let order = resolver.resolve().unwrap();
         assert!(order.is_empty());
+    }
+
+    // ── HTTP param-route 模板匹配测试（4c 解锁）──
+
+    #[test]
+    fn test_path_matches_template_static() {
+        assert!(path_matches_template("/ext/p/foo", "/ext/p/foo"));
+        assert!(!path_matches_template("/ext/p/foo", "/ext/p/bar"));
+    }
+
+    #[test]
+    fn test_path_matches_template_single_param() {
+        // {model_id} 单段
+        assert!(path_matches_template("/ext/p/models/{model_id}", "/ext/p/models/gpt-4"));
+        assert!(path_matches_template("/ext/p/models/{model_id}", "/ext/p/models/claude-3"));
+        // 单段不跨 /
+        assert!(!path_matches_template("/ext/p/models/{model_id}", "/ext/p/models/a/b"));
+        // 段数不符
+        assert!(!path_matches_template("/ext/p/models/{model_id}", "/ext/p/models"));
+    }
+
+    #[test]
+    fn test_path_matches_template_catchall_param() {
+        // {config_path:path} 多段通配
+        assert!(path_matches_template(
+            "/ext/p/generic/{config_path:path}",
+            "/ext/p/generic/a"
+        ));
+        assert!(path_matches_template(
+            "/ext/p/generic/{config_path:path}",
+            "/ext/p/generic/models/llm"
+        ));
+        assert!(path_matches_template(
+            "/ext/p/generic/{config_path:path}",
+            "/ext/p/generic/a/b/c/d"
+        ));
+        // 通配至少要 1 段
+        assert!(!path_matches_template(
+            "/ext/p/generic/{config_path:path}",
+            "/ext/p/generic"
+        ));
+    }
+
+    #[test]
+    fn test_find_http_route_template_matching() {
+        let registry = CapabilityRegistryImpl::new();
+        // 注册一个静态 + 一个单段 param + 一个多段通配
+        let mk = |path: &str, method: &str| HttpEndpoint {
+            route_id: format!("r_{path}"),
+            method: method.to_string(),
+            path: path.to_string(),
+            auth: "none".to_string(),
+            handler_capability: "http.handle".to_string(),
+            timeout_ms: None,
+            max_concurrency: None,
+            description: None,
+        };
+        registry.register_http_route("p", mk("/ext/p/llm", "GET")).unwrap();
+        registry
+            .register_http_route("p", mk("/ext/p/models/{model_id}", "PUT"))
+            .unwrap();
+        registry
+            .register_http_route("p", mk("/ext/p/generic/{config_path:path}", "GET"))
+            .unwrap();
+
+        // 精确匹配（快路径）
+        assert!(registry.find_http_route("/ext/p/llm", "GET").is_some());
+        // 单段 param 匹配
+        let r = registry.find_http_route("/ext/p/models/gpt-4", "PUT").unwrap();
+        assert_eq!(r.endpoint.path, "/ext/p/models/{model_id}");
+        // method 不符不匹配
+        assert!(registry.find_http_route("/ext/p/models/gpt-4", "GET").is_none());
+        // 多段通配匹配
+        let r2 = registry.find_http_route("/ext/p/generic/a/b/c", "GET").unwrap();
+        assert_eq!(r2.endpoint.path, "/ext/p/generic/{config_path:path}");
+        // 完全不匹配
+        assert!(registry.find_http_route("/ext/p/nonexistent", "GET").is_none());
     }
 }

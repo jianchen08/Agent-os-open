@@ -189,12 +189,39 @@ pub fn build_router_with_http_routes(
         let dispatcher = dispatcher.clone();
         let path = route.endpoint.path.clone();
         let method = route.endpoint.method.clone();
+        // manifest 用 {param}/{param:path} 约定（对齐 FastAPI/OpenAPI）；
+        // axum 0.8 路径参数语法是 :param（单段）与 *param（多段通配）。注册前转换。
+        let axum_path = manifest_path_to_axum(&path);
         // build_dynamic_route_handler 内部按 method 选 axum 方法路由（get/post/...），
-        // 返回 MethodRouter 后直接挂到 path（axum .route 接受 MethodRouter）。
+        // 返回 MethodRouter 后直接挂到 axum_path（axum .route 接受 MethodRouter）。
         let method_handler = build_dynamic_route_handler(dispatcher, path.clone(), method.clone());
-        router = router.route(&path, method_handler);
+        router = router.route(&axum_path, method_handler);
     }
     router
+}
+
+/// 把 manifest 路径约定（{param}/{param:path}）转成 axum 0.8 路径参数语法（:param/*param）。
+///
+/// - `{name}` → `:name`（单段捕获）
+/// - `{name:path}` → `*name`（剩余多段通配，axum 0.8 用 `*` 前缀）
+/// - 其他段原样保留。
+fn manifest_path_to_axum(manifest_path: &str) -> String {
+    manifest_path
+        .split('/')
+        .map(|seg| {
+            if seg.starts_with('{') && seg.ends_with('}') {
+                let inner = &seg[1..seg.len() - 1]; // 去掉 { }
+                if let Some(name) = inner.strip_suffix(":path") {
+                    format!("*{name}")
+                } else {
+                    format!(":{inner}")
+                }
+            } else {
+                seg.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// 构造一个动态端点的 axum handler：捕获 path/method → 调 dispatch_http → 转 HTTP 响应。
@@ -210,17 +237,26 @@ fn build_dynamic_route_handler(
     // 先确定 method 大写形式（供下方 match 选择 axum 方法路由；闭包会 move 原 method）。
     let method_upper = method.to_ascii_uppercase();
 
-    let handler = move |headers: HeaderMap,
+    let handler = move |uri: axum::http::Uri,
+                        headers: HeaderMap,
                         query: axum::extract::Query<HashMap<String, String>>,
                         body: axum::body::Bytes| {
         let dispatcher = dispatcher.clone();
-        let path = path.clone();
+        let registered_path = path.clone();
         let method = method.clone();
         async move {
             let headers_map = header_map_to_hashmap(&headers);
             let raw_body = body.to_vec();
+            // 用传入请求的**真实 path**（含 param 实际值，如 /models/gpt-4），
+            // 而非注册模板 path（/models/{model_id}）。这样插件的 http.handle 能拿到真实 param。
+            // uri.path() 已做百分号解码；query 部分由 axum::extract::Query 单独解析。
+            let incoming_path = uri.path().to_string();
+            // dispatch_http 内部 find_http_route 会用 incoming_path 做模板匹配，
+            // 找到对应注册路由（registered_path 仅作调试用，不参与分发）。
+            let _ = &registered_path;
             let outcome =
-                dispatch_http(&dispatcher, &path, &method, raw_body, headers_map, query.0).await;
+                dispatch_http(&dispatcher, &incoming_path, &method, raw_body, headers_map, query.0)
+                    .await;
             match outcome {
                 DispatchOutcome::Handled(resp) => {
                     let mut builder = axum::response::Response::builder().status(
@@ -322,5 +358,41 @@ impl HttpHandleCapability for SidecarHttpHandler {
         // 插件返回 {status,headers,body,body_encoding}
         serde_json::from_value::<HttpHandleResponse>(result.data)
             .map_err(|e| format!("invalid http.handle response shape: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manifest_path_to_axum_static() {
+        assert_eq!(manifest_path_to_axum("/ext/p/llm"), "/ext/p/llm");
+        assert_eq!(
+            manifest_path_to_axum("/ext/p/llm/defaults"),
+            "/ext/p/llm/defaults"
+        );
+    }
+
+    #[test]
+    fn test_manifest_path_to_axum_single_param() {
+        // {model_id} → :model_id（axum 0.8 单段捕获）
+        assert_eq!(
+            manifest_path_to_axum("/ext/p/models/{model_id}"),
+            "/ext/p/models/:model_id"
+        );
+        assert_eq!(
+            manifest_path_to_axum("/ext/p/providers/{provider_id}"),
+            "/ext/p/providers/:provider_id"
+        );
+    }
+
+    #[test]
+    fn test_manifest_path_to_axum_catchall_param() {
+        // {config_path:path} → *config_path（axum 0.8 多段通配）
+        assert_eq!(
+            manifest_path_to_axum("/ext/p/generic/{config_path:path}"),
+            "/ext/p/generic/*config_path"
+        );
     }
 }
