@@ -352,8 +352,12 @@ impl SqliteStore {
     // tenant_id 从 task_local 取。pipeline_ids / metadata 以 JSON 文本存储。
 
     /// upsert 会话（存在则更新，不存在则插入）。
-    fn upsert_session_inner(&self, session: &SessionRecord) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+    /// tenant_id 由调用方在 spawn_blocking 前解析（task_local 不跨 spawn_blocking）。
+    fn upsert_session_inner(
+        &self,
+        session: &SessionRecord,
+        tenant_id: &str,
+    ) -> Result<(), StorageError> {
         let pipeline_ids_json = serde_json::to_string(&session.pipeline_ids)
             .map_err(|e| StorageError::Database(format!("serialize pipeline_ids: {e}")))?;
         let metadata_json = session
@@ -394,20 +398,23 @@ impl SqliteStore {
     }
 
     /// 删除会话标签夹行（不级联管道/消息——会话只是聚合引用，消息/管道自治）。
-    /// 无记录时同样返回 Ok(())（幂等）。
-    fn delete_session_inner(&self, thread_id: &str) -> Result<(), StorageError> {
+    /// 无记录时同样返回 Ok(())（幂等）。tenant_id 由调用方在 spawn_blocking 前解析。
+    fn delete_session_inner(&self, thread_id: &str, tenant_id: &str) -> Result<(), StorageError> {
         let conn = self.conn.lock();
         conn.execute(
-            "DELETE FROM sessions WHERE thread_id = ?1",
-            rusqlite::params![thread_id],
+            "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![thread_id, tenant_id],
         )
         .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
     }
 
-    /// 按 thread_id 取单个会话。
-    fn get_session_inner(&self, thread_id: &str) -> Result<Option<SessionRecord>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+    /// 按 thread_id 取单个会话。tenant_id 由调用方在 spawn_blocking 前解析。
+    fn get_session_inner(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<SessionRecord>, StorageError> {
         let conn = self.conn.lock();
         let row = conn.query_row(
             "SELECT thread_id, title, intent, current_state, agent_id, active_pipeline_id, pipeline_ids, metadata, created_at, updated_at, last_active_at
@@ -423,8 +430,12 @@ impl SqliteStore {
     }
 
     /// 列会话（可选按 session_type 过滤，按 updated_at 倒序）。
-    fn list_sessions_inner(&self, filter: &SessionListFilter) -> Result<Vec<SessionRecord>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+    /// tenant_id 由调用方在 spawn_blocking 前解析（task_local 不跨 spawn_blocking）。
+    fn list_sessions_inner(
+        &self,
+        filter: &SessionListFilter,
+        tenant_id: &str,
+    ) -> Result<Vec<SessionRecord>, StorageError> {
         let conn = self.conn.lock();
         let mut sql = String::from(
             "SELECT thread_id, title, intent, current_state, agent_id, active_pipeline_id, pipeline_ids, metadata, created_at, updated_at, last_active_at
@@ -1456,18 +1467,21 @@ impl StorageBackend for SqliteStore {
     }
 
     // ── 域2：session 标签夹 CRUD（对齐 0.1 SessionModel）──────────────
+    // 注意：tenant_id 必须在 spawn_blocking 之前解析——tokio::task_local 不跨 spawn_blocking。
     async fn create_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let this = self.clone();
         let session = session.clone();
-        tokio::task::spawn_blocking(move || this.upsert_session_inner(&session))
+        tokio::task::spawn_blocking(move || this.upsert_session_inner(&session, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
 
     async fn get_session(&self, thread_id: &str) -> Result<Option<SessionRecord>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let this = self.clone();
         let thread_id = thread_id.to_string();
-        tokio::task::spawn_blocking(move || this.get_session_inner(&thread_id))
+        tokio::task::spawn_blocking(move || this.get_session_inner(&thread_id, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
@@ -1476,24 +1490,27 @@ impl StorageBackend for SqliteStore {
         &self,
         filter: SessionListFilter,
     ) -> Result<Vec<SessionRecord>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.list_sessions_inner(&filter))
+        tokio::task::spawn_blocking(move || this.list_sessions_inner(&filter, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
 
     async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let this = self.clone();
         let session = session.clone();
-        tokio::task::spawn_blocking(move || this.upsert_session_inner(&session))
+        tokio::task::spawn_blocking(move || this.upsert_session_inner(&session, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
 
     async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let this = self.clone();
         let thread_id = thread_id.to_string();
-        tokio::task::spawn_blocking(move || this.delete_session_inner(&thread_id))
+        tokio::task::spawn_blocking(move || this.delete_session_inner(&thread_id, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
@@ -2431,6 +2448,68 @@ mod tests {
         agentos_tenant::scope(TenantContext::new("tenant_a", "session_a"), async {
             assert_eq!(store.count_execution_records("pipe_a").await.unwrap(), 1);
             assert!(store.get_memory("mem_a").await.unwrap().is_some());
+        })
+        .await;
+    }
+
+    /// session 域跨租户隔离（M1 遗留隐患修复后的回归测试）。
+    ///
+    /// 原Bug：session 的 5 个写/读方法（create/get/list/update/delete）在 spawn_blocking
+    /// 内解析 tenant_id，而 tokio::task_local 不跨 spawn_blocking → 所有 session 都写入
+    /// tenant_id="default"，跨租户隔离失效；delete 甚至无 tenant 过滤（跨租户删）。
+    /// 修复：tenant_id 在 async wrapper 解析后传入闭包（同 M1 新方法模式）。
+    #[tokio::test]
+    async fn test_session_cross_tenant_isolation() {
+        use agentos_core::traits::SessionListFilter;
+        let store = SqliteStore::open_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let mk = |tid: &str| SessionRecord {
+            thread_id: tid.to_string(),
+            title: Some("t".to_string()),
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: None,
+            pipeline_ids: vec![],
+            metadata: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_active_at: None,
+        };
+
+        // 租户 A：建会话 thread_a
+        agentos_tenant::scope(TenantContext::new("tenant_a", "s_a"), async {
+            store.create_session(&mk("thread_a")).await.unwrap();
+            assert!(store.get_session("thread_a").await.unwrap().is_some());
+            assert_eq!(store.list_sessions(SessionListFilter::default()).await.unwrap().len(), 1);
+        })
+        .await;
+
+        // 租户 B：读不到 A 的会话；list 为空；get 返回 None；delete 不影响 A
+        agentos_tenant::scope(TenantContext::new("tenant_b", "s_b"), async {
+            assert!(
+                store.get_session("thread_a").await.unwrap().is_none(),
+                "tenant B must not see tenant A's session"
+            );
+            assert!(
+                store.list_sessions(SessionListFilter::default()).await.unwrap().is_empty(),
+                "tenant B must not list tenant A's sessions"
+            );
+            // B 尝试删 A 的会话：tenant 过滤下不应影响 A
+            store.delete_session("thread_a").await.unwrap();
+        })
+        .await;
+
+        // 切回 A：会话仍在（B 的删除被 tenant 过滤挡住）
+        agentos_tenant::scope(TenantContext::new("tenant_a", "s_a"), async {
+            assert!(
+                store.get_session("thread_a").await.unwrap().is_some(),
+                "tenant B's delete must not affect tenant A (isolation)"
+            );
+            // A 自己删自己的，成功
+            store.delete_session("thread_a").await.unwrap();
+            assert!(store.get_session("thread_a").await.unwrap().is_none());
         })
         .await;
     }
