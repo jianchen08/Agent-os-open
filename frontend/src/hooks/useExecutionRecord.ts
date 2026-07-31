@@ -122,7 +122,7 @@ async function fetchExecutionRecord(recordId: string): Promise<ExecutionRecord |
   }
 
   try {
-    const response = await apiClient.get<ExecutionRecord>(`/execution/records/${recordId}`)
+    const response = await apiClient.get<ExecutionRecord>(`/ext/channel_api/execution/records/${recordId}`)
     if (response.data) {
       // 缓存结果
       recordCache.set(recordId, response.data)

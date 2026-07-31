@@ -430,6 +430,79 @@ async def _handle_client_domain(path: str, method: str, raw_body: str, query: di
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_execution_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """execution 域分发：/ext/channel_api/execution/** → routes_missing 的 execution 路由。
+
+    storage 经 _get_exec_storage() 取（src/infrastructure.service_access，sidecar 下 src/ 已在
+    sys.path；handler 内部已 None-safe：storage=None 时返回空结构）。
+    仅迁前端实际消费的 /records* 子集（前端 executionRecords.ts）。
+    """
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/execution"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not an execution path", "path": path}, 404))
+    sub = path[len(prefix):]  # "/records" / "/records/sessions" / "/records/{id}" / ...
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # GET /records（list，query: session_id/parent_record_id/limit/offset）
+        if sub == "/records" and method == "GET":
+            return _ok(_json_response(await rm.list_execution_records(
+                session_id=query.get("session_id"),
+                parent_record_id=query.get("parent_record_id"),
+                limit=_qint("limit", 50),
+                offset=_qint("offset", 0),
+            )))
+        # GET /records/sessions
+        if sub == "/records/sessions" and method == "GET":
+            return _ok(_json_response(await rm.get_execution_record_sessions()))
+        # GET /records/group-summary（query: session_id）
+        if sub == "/records/group-summary" and method == "GET":
+            return _ok(_json_response(await rm.get_record_group_summary(
+                session_id=query.get("session_id"),
+            )))
+        # GET /records/tree/{session_id}（query: max_depth）
+        if sub.startswith("/records/tree/") and method == "GET":
+            session_id = sub[len("/records/tree/"):]
+            return _ok(_json_response(await rm.get_execution_tree(
+                session_id, max_depth=_qint("max_depth", 5),
+            )))
+        # GET /records/{record_id}/children
+        if sub.endswith("/children") and sub.startswith("/records/") and method == "GET":
+            record_id = sub[len("/records/"):-len("/children")]
+            return _ok(_json_response(await rm.get_children_records(record_id)))
+        # GET /records/{record_id}
+        if sub.startswith("/records/") and method == "GET" and "/" not in sub[len("/records/"):]:
+            record_id = sub[len("/records/"):]
+            return _ok(_json_response(await rm.get_execution_record(record_id)))
+        # DELETE /records/{record_id}
+        if sub.startswith("/records/") and method == "DELETE" and "/" not in sub[len("/records/"):]:
+            record_id = sub[len("/records/"):]
+            return _ok(_json_response(await rm.delete_execution_record(record_id)))
+        # DELETE /records/session/{session_id}
+        if sub.startswith("/records/session/") and method == "DELETE":
+            session_id = sub[len("/records/session/"):]
+            return _ok(_json_response(await rm.delete_execution_records_by_session(session_id)))
+        # POST /records/clear-all
+        if sub == "/records/clear-all" and method == "POST":
+            return _ok(_json_response(await rm.clear_all_records()))
+
+        logger.warning("execution http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("execution http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -478,6 +551,10 @@ async def http_handle(
     # ── client 域 ──
     if path.startswith("/ext/channel_api/client"):
         return await _handle_client_domain(path, method, raw_body, q)
+
+    # ── execution 域 ──
+    if path.startswith("/ext/channel_api/execution"):
+        return await _handle_execution_domain(path, method, raw_body, q)
 
     # 未接入的域：明确 404，提示该域尚未迁移
     logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)

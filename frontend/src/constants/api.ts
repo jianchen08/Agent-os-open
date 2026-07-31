@@ -337,10 +337,10 @@ export const API_ENDPOINTS = {
     /** 获取调用记录详情 */
     GET: (executionId: string) => `/api/v1/agent-calls/${executionId}`,
   },
-  /** 数据清理相关 - 对应后端 /api/v1/execution/records/* */
+  /** 数据清理相关 - 4c 迁移：已切 /ext/channel_api/execution/records/clear-all */
   DATA_CLEANUP: {
     /** 一键清理所有会话和执行记录 */
-    CLEAR_ALL: '/api/v1/execution/records/clear-all',
+    CLEAR_ALL: '/ext/channel_api/execution/records/clear-all',
   },
   /** 人类交互相关 - 对应后端 /api/v1/interaction/* */
   INTERACTION: {
