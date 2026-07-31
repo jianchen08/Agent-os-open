@@ -14,9 +14,11 @@
 //! | event-bus | emit | 发事件/通知前端 |
 //! | config-reader | get | 读配置节 |
 //! | metrics | record | 插件上报指标（record_metric，监控设计 §三 通道2） |
+//! | service-registry | <storage 域>.* | 插件访问内核共享基础设施（M2：execution-records/summaries/memory 存储，基础设施下沉内核） |
 //!
 //! [来源: ROADMAP.md 审批闭环/复盘调管道/event-bus 三项业务的前置地基]
 //! [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
+//! [来源: docs/working/channel_api_migration_plan.md §七 M2]
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -31,6 +33,7 @@ pub const STANDARD_CAPABILITIES: &[&str] = &[
     "event-bus",
     "logger",
     "metrics",
+    "service-registry",
 ];
 
 /// Capability 路由器——处理 sidecar 反向调用内核能力。

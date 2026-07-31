@@ -28,7 +28,9 @@ use agentos_core::traits::{
 use agentos_core::types::{ToolCategory, ToolSource};
 use agentos_engine::{AdrEngineImpl, SqliteStore};
 use agentos_invoker::PluginInvokerImpl;
-use agentos_plugin_loader::{CapabilityRegistryImpl, PluginLoaderImpl};
+use agentos_plugin_loader::{
+    CapabilityRegistryImpl, NativePluginLoader, PluginLoaderImpl, WasmRuntime,
+};
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
@@ -291,9 +293,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SqliteStore::open(&db_path)?
     });
 
-    // 创建真实插件调用器——通过 MCP stdio fork Python sidecar 执行插件
+    // 创建真实插件调用器——按 host_type 透明分发：
+    //   Sidecar: 通过 MCP stdio fork Python sidecar 执行插件
+    //   InProcess: 经 NativePluginLoader 加载 cdylib 走 C-ABI（放进插件目录即用）
+    //   Wasm: 经 WasmRuntime（wasmtime）加载执行 .wasm（放进插件目录即用）
+    // 默认配置即可运行；host 能力注册表/白名单校验器留空（按需后续注入）。
     let loader_arc = Arc::new(loader);
-    let invoker = Arc::new(PluginInvokerImpl::new(loader_arc.clone()));
+    let wasm_runtime = Arc::new(WasmRuntime::new()?);
+    let native_loader = Arc::new(NativePluginLoader::new());
+    let invoker = Arc::new(
+        PluginInvokerImpl::new(loader_arc.clone())
+            .set_wasm_runtime(wasm_runtime)
+            .set_native_loader(native_loader),
+    );
+    // 启动插件空闲软卸载 GC（生命周期管理：用到才加载 + 长时间不用自动 kill 进程，
+    // manifest 保留，下次调用重新 spawn）。每 30s 扫描，阈值默认 300s。
+    invoker.start_idle_gc();
     let engine = Arc::new(AdrEngineImpl::new(store.clone(), invoker.clone(), "default"));
 
     // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。
@@ -306,6 +321,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 监控 M4：router 持聚合器，metrics.record 分支写聚合器（第 6 个 capability）。
     // tool-executor：tool_core sidecar 委托内核执行 tool 插件 sidecar（bash_execute 等）。
     // event-bus.emit：流式 chunk 推前端——session 提前创建并注入 router + 后续 enable_session 复用。
+    // service-registry.*（M2）：基础设施下沉内核——插件经此 capability 访问内核共享存储
+    //   （execution-records/pipeline-summaries/memory，M1 落地）。复用同一 SqliteStore 实例。
     let session_coord = Arc::new(agentos_session::SessionCoordinator::new());
     let router = Arc::new(
         KernelCapabilityRouter::with_metrics(
@@ -314,7 +331,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_invoker(invoker.clone())
         .with_registry(registry.clone())
-        .with_session(session_coord.clone()),
+        .with_session(session_coord.clone())
+        .with_store(store.clone()),
     );
     invoker.set_router(router);
 

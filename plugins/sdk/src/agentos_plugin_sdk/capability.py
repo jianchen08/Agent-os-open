@@ -108,5 +108,6 @@ STANDARD_CAPABILITIES = [
     "logger",
     "metrics",
     "tool-executor",
+    "service-registry",
 ]
 
