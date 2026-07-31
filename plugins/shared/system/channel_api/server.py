@@ -677,6 +677,68 @@ def _handle_scenes_domain(path: str, method: str, raw_body: str, query: dict[str
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_asr_domain(
+    path: str, method: str, raw_body: str, headers: dict[str, str]
+) -> dict[str, Any]:
+    """asr 域分发：/ext/channel_api/audio/transcriptions → routes_asr 业务。
+
+    单 multipart 路由（POST /transcriptions）。内核透传原始字节，sidecar 解 multipart
+    取 file + language，直接调 multimodal.get_asr_service().transcribe（对齐 routes_asr）。
+    ASR 未配置时 503（对齐原 handler）。
+    """
+    import base64 as _b64  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+    from multimodal import get_asr_service  # noqa: PLC0415
+
+    if path != "/ext/channel_api/audio/transcriptions" or method != "POST":
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+    try:
+        body_bytes = _b64.b64decode(raw_body) if raw_body else b""
+    except Exception as exc:  # noqa: BLE001
+        return _ok(_json_response({"error": f"invalid upload body: {exc}"}, 400))
+
+    content_type = headers.get("content-type", "") or headers.get("Content-Type", "")
+    if "multipart/form-data" not in content_type:
+        return _ok(_json_response(
+            {"error": "asr requires multipart/form-data", "content_type": content_type}, 400,
+        ))
+
+    try:
+        fields = _parse_multipart(content_type, body_bytes)
+    except Exception as exc:  # noqa: BLE001
+        return _ok(_json_response({"error": f"multipart parse failed: {exc}"}, 400))
+
+    file_field = fields.get("file")
+    if not isinstance(file_field, dict) or not file_field.get("data"):
+        return _ok(_json_response({"error": "missing or empty 'file' field"}, 400))
+
+    audio_bytes: bytes = file_field["data"]
+    mime_type = file_field.get("content_type") or "audio/webm"
+    language = fields.get("language") or None
+    if isinstance(language, str) and language.strip() == "":
+        language = None
+
+    try:
+        asr = get_asr_service()
+        if not asr.is_available():
+            return _ok(_json_response(
+                {"code": "asr_not_configured", "message": "语音转文字服务未配置"}, 503,
+            ))
+        text = await asr.transcribe(audio_bytes, mime_type, language)
+        return _ok(_json_response({"text": text}))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except RuntimeError as exc:
+        # 对齐原 handler：转写失败 502
+        return _ok(_json_response(
+            {"code": "asr_failed", "message": str(exc)}, 502,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("asr http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
 
@@ -940,6 +1002,10 @@ async def http_handle(
     # ── scenes 域（批次3 首迁，复用 4c 模式）──
     if path.startswith("/ext/channel_api/scenes"):
         return _handle_scenes_domain(path, method, raw_body, q)
+
+    # ── asr 域（批次3，单 multipart 路由，复用 multipart 解析）──
+    if path.startswith("/ext/channel_api/audio"):
+        return await _handle_asr_domain(path, method, raw_body, headers or {})
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):

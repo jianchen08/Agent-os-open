@@ -21,7 +21,7 @@ export async function transcribeAudio(
 
   try {
     const response = await apiClient.post<TranscriptionResult>(
-      '/api/v1/audio/transcriptions',
+      '/ext/channel_api/audio/transcriptions',
       formData,
       {
         headers: { 'Content-Type': 'multipart/form-data' },

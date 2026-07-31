@@ -115,9 +115,14 @@ check "制品详情(不存在)"    200 GET  "/ext/channel_api/artifacts/nonexist
 check "制品批注列表"        200 GET  "/ext/channel_api/artifacts/a1/annotations"
 
 echo ""
-echo "${YELLOW}[10/10] scenes 域（批次3）${RESET}"
+echo "${YELLOW}[10/11] scenes 域（批次3）${RESET}"
 check "场景列表"            200 GET  "/ext/channel_api/scenes"
 check "场景模板列表"        200 GET  "/ext/channel_api/scenes/templates"
+
+echo ""
+echo "${YELLOW}[11/11] asr 域（批次3，multipart）${RESET}"
+# asr 端点需 multipart 上传真实音频才能完整测；此处只验路由注册（非 multipart 请求应返回 400，证明路由在）
+check "asr 路由注册探测"    400 POST "/ext/channel_api/audio/transcriptions" '{}'
 
 echo ""
 echo "================================================================"

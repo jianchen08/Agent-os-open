@@ -103,6 +103,7 @@
         {"route_id": "scene_get", "method": "GET", "path": "/ext/channel_api/scenes/{scene_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "scenes 域：获取场景详情"},
         {"route_id": "scene_update", "method": "PUT", "path": "/ext/channel_api/scenes/{scene_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：更新场景"},
         {"route_id": "scene_delete", "method": "DELETE", "path": "/ext/channel_api/scenes/{scene_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：删除场景"},
-        {"route_id": "scene_switch", "method": "POST", "path": "/ext/channel_api/scenes/{scene_id}/switch", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：切换场景"}
+        {"route_id": "scene_switch", "method": "POST", "path": "/ext/channel_api/scenes/{scene_id}/switch", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：切换场景"},
+        {"route_id": "asr_transcribe", "method": "POST", "path": "/ext/channel_api/audio/transcriptions", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 30000, "max_concurrency": 2, "description": "asr 域：音频转文字（multipart/form-data，file 字段）"}
     ]
 }
