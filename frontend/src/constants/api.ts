@@ -197,66 +197,66 @@ export const API_ENDPOINTS = {
   /** 任务管理 - 对应后端 /api/v1/tasks/* */
   TASKS: {
     /** 获取任务列表 */
-    LIST: '/api/v1/tasks',
+    LIST: '/ext/channel_api/tasks',
     /** 创建任务 */
-    CREATE: '/api/v1/tasks',
+    CREATE: '/ext/channel_api/tasks',
     /** 手动创建根任务（用户以 L1 身份发起，为 L2+ 提供 task 上下文） */
-    CREATE_ROOT: '/api/v1/tasks/root',
+    CREATE_ROOT: '/ext/channel_api/tasks/root',
     /** 列出会话的容器任务（供新建子任务选父容器） */
-    CONTAINERS: '/api/v1/tasks/containers',
+    CONTAINERS: '/ext/channel_api/tasks/containers',
     /** 获取任务详情 */
-    GET: (id: string) => `/api/v1/tasks/${id}`,
+    GET: (id: string) => `/ext/channel_api/tasks/${id}`,
     /** 更新任务 */
-    UPDATE: (id: string) => `/api/v1/tasks/${id}`,
+    UPDATE: (id: string) => `/ext/channel_api/tasks/${id}`,
     /** 删除任务 */
-    DELETE: (id: string) => `/api/v1/tasks/${id}`,
-    /** 获取评估状态 */
-    EVALUATION_STATUS: (id: string) => `/api/v1/tasks/${id}/evaluation-status`,
+    DELETE: (id: string) => `/ext/channel_api/tasks/${id}`,
+    /** 获取评估状态（注：后端无对应路由，前端未使用，dead constant） */
+    EVALUATION_STATUS: (id: string) => `/ext/channel_api/tasks/${id}/evaluation-status`,
     /** 暂停任务（级联子任务） */
-    PAUSE: (id: string) => `/api/v1/tasks/${id}/pause`,
+    PAUSE: (id: string) => `/ext/channel_api/tasks/${id}/pause`,
     /** 恢复任务（级联子任务） */
-    RESUME: (id: string) => `/api/v1/tasks/${id}/resume`,
+    RESUME: (id: string) => `/ext/channel_api/tasks/${id}/resume`,
     /** 取消任务 */
-    CANCEL: (id: string) => `/api/v1/tasks/${id}/cancel`,
+    CANCEL: (id: string) => `/ext/channel_api/tasks/${id}/cancel`,
   },
-  /** 任务执行闭环相关 - 对应后端 /api/v1/projects/* 和 /api/v1/tasks/* */
+  /** 长期任务相关 - 4c/批次3 迁移：已切 /ext/channel_api/projects/* */
   PROJECTS: {
     /** 获取长期任务列表 */
-    LIST: '/api/v1/projects',
+    LIST: '/ext/channel_api/projects',
     /** 创建长期任务 */
-    CREATE: '/api/v1/projects',
+    CREATE: '/ext/channel_api/projects',
     /** 获取长期任务详情 */
-    GET: (id: string) => `/api/v1/projects/${id}`,
+    GET: (id: string) => `/ext/channel_api/projects/${id}`,
     /** 切换自动执行开关 */
-    TOGGLE_AUTO_EXECUTE: (id: string) => `/api/v1/projects/${id}/auto-execute`,
+    TOGGLE_AUTO_EXECUTE: (id: string) => `/ext/channel_api/projects/${id}/auto-execute`,
     /** 暂停长期任务 */
-    PAUSE: (id: string) => `/api/v1/projects/${id}/pause`,
+    PAUSE: (id: string) => `/ext/channel_api/projects/${id}/pause`,
     /** 恢复长期任务 */
-    RESUME: (id: string) => `/api/v1/projects/${id}/resume`,
+    RESUME: (id: string) => `/ext/channel_api/projects/${id}/resume`,
     /** 删除长期任务 */
-    DELETE: (id: string) => `/api/v1/projects/${id}`,
+    DELETE: (id: string) => `/ext/channel_api/projects/${id}`,
   },
-  /** 任务阶段相关 - 对应后端 /api/v1/tasks/{id}/phase/* */
+  /** 任务阶段相关 - 4c/批次3 迁移：已切 /ext/channel_api/tasks/{id}/phase/* */
   TASK_PHASES: {
     /** 获取任务阶段状态 */
-    GET_STATUS: (taskId: string) => `/api/v1/tasks/${taskId}/phase`,
+    GET_STATUS: (taskId: string) => `/ext/channel_api/tasks/${taskId}/phase`,
     /** 完成准备阶段 */
-    COMPLETE_PREPARE: (taskId: string) => `/api/v1/tasks/${taskId}/phase/prepare/complete`,
+    COMPLETE_PREPARE: (taskId: string) => `/ext/channel_api/tasks/${taskId}/phase/prepare/complete`,
     /** 完成执行阶段 */
-    COMPLETE_EXECUTE: (taskId: string) => `/api/v1/tasks/${taskId}/phase/execute/complete`,
+    COMPLETE_EXECUTE: (taskId: string) => `/ext/channel_api/tasks/${taskId}/phase/execute/complete`,
     /** 获取阶段产物 */
-    GET_OUTPUT: (taskId: string, phase: string) => `/api/v1/tasks/${taskId}/phase/${phase}/output`,
+    GET_OUTPUT: (taskId: string, phase: string) => `/ext/channel_api/tasks/${taskId}/phase/${phase}/output`,
   },
-  /** 任务评估相关 - 对应后端 /api/v1/tasks/{id}/ac/* */
+  /** 任务验收标准评估相关 - 4c/批次3 迁移：已切 /ext/channel_api/tasks/{id}/ac/* */
   TASK_EVALUATION: {
     /** 获取任务所有验收标准 */
-    LIST: (taskId: string) => `/api/v1/tasks/${taskId}/ac`,
+    LIST: (taskId: string) => `/ext/channel_api/tasks/${taskId}/ac`,
     /** 评估单个验收标准 */
-    EVALUATE: (taskId: string, acId: string) => `/api/v1/tasks/${taskId}/ac/${acId}/evaluate`,
+    EVALUATE: (taskId: string, acId: string) => `/ext/channel_api/tasks/${taskId}/ac/${acId}/evaluate`,
     /** 评估所有验收标准 */
-    EVALUATE_ALL: (taskId: string) => `/api/v1/tasks/${taskId}/ac/evaluate-all`,
+    EVALUATE_ALL: (taskId: string) => `/ext/channel_api/tasks/${taskId}/ac/evaluate-all`,
     /** 获取验收标准评估结果 */
-    GET_RESULT: (taskId: string, acId: string) => `/api/v1/tasks/${taskId}/ac/${acId}/result`,
+    GET_RESULT: (taskId: string, acId: string) => `/ext/channel_api/tasks/${taskId}/ac/${acId}/result`,
   },
   /** 思考模式相关 - 4c 迁移：已切 /ext/channel_api/thinking-mode/**（经内核 dispatcher → channel_api http.handle） */
   THINKING_MODE: {

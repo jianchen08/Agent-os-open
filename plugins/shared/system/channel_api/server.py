@@ -885,6 +885,159 @@ async def _handle_reviews_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_tasks_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """tasks 域分发（批次3 最大域）：/ext/channel_api/{tasks,projects}/**。
+
+    覆盖 routes_tasks.py（13 路由，/tasks）+ routes_missing.py projects_router（6，/projects）
+    + routes_missing.py task_phase_router（9，/tasks/{id}/phase|ac）。前端 4 块（TASKS/
+    PROJECTS/TASK_PHASES/TASK_EVALUATION）全切到此。pydantic 返回值统一 model_dump。
+    """
+    import routes_tasks as rt  # noqa: PLC0415
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    def _qint(key: str, default: int) -> int | None:
+        if key not in query:
+            return default
+        try:
+            return int(query[key])
+        except (TypeError, ValueError):
+            return default
+
+    def _qopt(key: str) -> str | None:
+        return query.get(key)
+
+    try:
+        # ── projects 域（/ext/channel_api/projects...）──
+        if path.startswith("/ext/channel_api/projects"):
+            sub = path[len("/ext/channel_api/projects"):]
+            if sub in ("", "/") and method == "GET":
+                return _ok(_json_response(await rm.list_projects(
+                    limit=_qint("limit", 20), offset=_qint("offset", 0),
+                )))
+            if sub in ("", "/") and method == "POST":
+                body = _decode_body(raw_body)
+                return _ok(_json_response(await rm.create_project(body)))
+            if sub.startswith("/") and "/" not in sub[1:]:
+                pid = sub[1:]
+                if method == "GET":
+                    return _ok(_json_response(await rm.get_project(pid)))
+                if method == "DELETE":
+                    return _ok(_json_response(await rm.delete_project(pid)))
+            elif sub.startswith("/") and "/" in sub[1:]:
+                pid, action = sub[1:].split("/", 1)
+                if action == "auto-execute" and method == "POST":
+                    return _ok(_json_response(await rm.toggle_auto_execute(pid)))
+                if action == "pause" and method == "POST":
+                    return _ok(_json_response(await rm.pause_project(pid)))
+                if action == "resume" and method == "POST":
+                    return _ok(_json_response(await rm.resume_project(pid)))
+
+        # ── tasks 域（/ext/channel_api/tasks...）──
+        if path.startswith("/ext/channel_api/tasks"):
+            sub = path[len("/ext/channel_api/tasks"):]
+            # 顶层路由
+            if sub in ("", "/") and method == "GET":
+                skip = _qint("skip", None) if "skip" in query else None
+                return _ok(_json_response(_pydantic_to_dict(await rt.list_tasks(
+                    status=_qopt("status"), priority=_qint("priority", None),
+                    session_id=_qopt("session_id"), limit=_qint("limit", 20),
+                    offset=_qint("offset", 0), skip=skip,
+                ))))
+            if sub in ("", "/") and method == "POST":
+                body = rt.TaskCreate(**_decode_body(raw_body))
+                return _ok(_json_response(_pydantic_to_dict(await rt.create_task(body))))
+            if sub == "/debug/all" and method == "GET":
+                return _ok(_json_response(await rt.get_tasks_debug()))
+            if sub == "/root" and method == "POST":
+                body = _decode_body(raw_body)
+                return _ok(_json_response(await rt.create_root_task(body)))
+            if sub == "/containers" and method == "GET":
+                return _ok(_json_response(await rt.list_container_tasks(
+                    session_id=_qopt("session_id"),
+                )))
+            # /{task_id} 系列
+            if sub.startswith("/") and len(sub) > 1:
+                rest = sub[1:]
+                parts = rest.split("/")
+                tid = parts[0]
+                # 单级 /{task_id}
+                if len(parts) == 1:
+                    if method == "GET":
+                        return _ok(_json_response(_pydantic_to_dict(rt.get_task(tid))))
+                    if method == "PATCH":  # 前端 UPDATE 用 PATCH
+                        body = rt.TaskUpdate(**_decode_body(raw_body))
+                        return _ok(_json_response(_pydantic_to_dict(rt.update_task(tid, body))))
+                    if method == "DELETE":
+                        return _ok(_json_response(await rt.delete_task(tid)))
+                # /{task_id}/submit|evaluate|pause|resume|cancel
+                if len(parts) == 2:
+                    action = parts[1]
+                    if action == "submit" and method == "POST":
+                        return _ok(_json_response(_pydantic_to_dict(await rt.submit_task(tid))))
+                    if action == "evaluate" and method == "POST":
+                        return _ok(_json_response(await rt.evaluate_task(tid)))
+                    if action == "pause" and method == "POST":
+                        return _ok(_json_response(await rt.pause_task(tid)))
+                    if action == "resume" and method == "POST":
+                        return _ok(_json_response(await rt.resume_task(tid)))
+                    if action == "cancel" and method == "POST":
+                        return _ok(_json_response(await rt.cancel_task(tid)))
+                # task_phase：/{task_id}/phase... 与 /{task_id}/ac...
+                if len(parts) >= 2 and parts[1] == "phase":
+                    return _ok(_json_response(await _dispatch_task_phase(rm, tid, parts[2:], method, raw_body)))
+                if len(parts) >= 2 and parts[1] == "ac":
+                    return _ok(_json_response(await _dispatch_task_ac(rm, tid, parts[2:], method)))
+
+        logger.warning("tasks http.handle: no route for path=%s method=%s", path, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("tasks http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _dispatch_task_phase(rm, task_id: str, parts: list[str], method: str, raw_body: str) -> Any:
+    """分发 /tasks/{id}/phase/** 子路由（routes_missing.task_phase_router）。"""
+    from fastapi import HTTPException  # noqa: PLC0415
+    # GET /phase
+    if not parts and method == "GET":
+        return await rm.get_task_phase(task_id)
+    # POST /phase/prepare/complete
+    if len(parts) == 2 and parts[0] == "prepare" and parts[1] == "complete" and method == "POST":
+        return await rm.complete_prepare_phase(task_id)
+    # POST /phase/execute/complete
+    if len(parts) == 2 and parts[0] == "execute" and parts[1] == "complete" and method == "POST":
+        return await rm.complete_execute_phase(task_id)
+    # GET /phase/{phase}/output
+    if len(parts) == 2 and parts[1] == "output" and method == "GET":
+        return await rm.get_phase_output(task_id, parts[0])
+    raise HTTPException(status_code=404, detail=f"task phase route not found: /{'/'.join(parts)}")
+
+
+async def _dispatch_task_ac(rm, task_id: str, parts: list[str], method: str) -> Any:
+    """分发 /tasks/{id}/ac/** 子路由（routes_missing.task_phase_router AC 部分）。"""
+    from fastapi import HTTPException  # noqa: PLC0415
+    # GET /ac
+    if not parts and method == "GET":
+        return await rm.get_task_ac(task_id)
+    # POST /ac/evaluate-all
+    if len(parts) == 1 and parts[0] == "evaluate-all" and method == "POST":
+        return await rm.evaluate_all_ac(task_id)
+    # POST /ac/{ac_id}/evaluate
+    if len(parts) == 2 and parts[1] == "evaluate" and method == "POST":
+        return await rm.evaluate_ac(task_id, parts[0])
+    # GET /ac/{ac_id}/result
+    if len(parts) == 2 and parts[1] == "result" and method == "GET":
+        return await rm.get_ac_result(task_id, parts[0])
+    raise HTTPException(status_code=404, detail=f"task ac route not found: /{'/'.join(parts)}")
+
+
 async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
     """处理 reviews /media-review（multipart：file + media_type）。
 
@@ -1237,6 +1390,10 @@ async def http_handle(
     # ── reviews 域（批次3，9 路由，含 media-review multipart）──
     if path.startswith("/ext/channel_api/reviews"):
         return await _handle_reviews_domain(path, method, raw_body, q, headers or {})
+
+    # ── tasks 域（批次3，最大域：tasks + task_phase + projects）──
+    if path.startswith("/ext/channel_api/tasks") or path.startswith("/ext/channel_api/projects"):
+        return await _handle_tasks_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):
