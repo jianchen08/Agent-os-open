@@ -537,6 +537,92 @@ def _handle_modules_ui_domain(path: str, method: str, raw_body: str, query: dict
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+def _pydantic_to_dict(obj: Any) -> Any:
+    """把 pydantic 模型转成可 JSON 化的 dict（routes_memory 部分返回 pydantic）。"""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(by_alias=True, exclude_none=True)
+    return obj
+
+
+def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """memory 域分发：/ext/channel_api/memory/** → routes_memory 业务函数。
+
+    store（channels.api.memory_store 单例）import 时即创建，sidecar 下读
+    data/api_store/store.json（与 :8988 同路径，冷启动一致）。注意：这是进程态 store，
+    与 :8988 进程的 store 是不同实例——活系统双进程期间写入不互通（4c stopgap，
+    待 :8988 退役后归一）。部分返回 pydantic 模型，统一 model_dump。
+    """
+    import routes_memory as rmm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/memory"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a memory path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/search" / "/episodes" / "/{memory_id}" ...
+
+    def _qint(key: str, default: int) -> int:
+        try:
+            return int(query[key]) if key in query else default
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        # GET ""（list，query: memory_type/limit/offset）
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(_pydantic_to_dict(rmm.list_memories(
+                memory_type=query.get("memory_type"),
+                limit=_qint("limit", 20),
+                offset=_qint("offset", 0),
+            ))))
+        # GET /search（query: query/top_k/method）
+        if sub == "/search" and method == "GET":
+            return _ok(_json_response(_pydantic_to_dict(rmm.search_memories(
+                query=query.get("query", ""),
+                top_k=_qint("top_k", 5),
+                method=query.get("method", "keyword"),
+            ))))
+        # POST /search（body: query/top_k）
+        if sub == "/search" and method == "POST":
+            body = _decode_body(raw_body) or None
+            return _ok(_json_response(_pydantic_to_dict(rmm.search_memories_post(body))))
+        # GET /episodes（query: page/page_size）
+        if sub == "/episodes" and method == "GET":
+            return _ok(_json_response(rmm.list_episodes(
+                page=_qint("page", 1), page_size=_qint("page_size", 20),
+            )))
+        # GET /episodes/{episode_id}
+        if sub.startswith("/episodes/") and method == "GET":
+            episode_id = sub[len("/episodes/"):]
+            return _ok(_json_response(rmm.get_episode(episode_id)))
+        # GET /semantic
+        if sub == "/semantic" and method == "GET":
+            return _ok(_json_response(rmm.list_semantic()))
+        # POST /consolidate
+        if sub == "/consolidate" and method == "POST":
+            return _ok(_json_response(rmm.consolidate_memory()))
+        # GET /stats
+        if sub == "/stats" and method == "GET":
+            return _ok(_json_response(rmm.get_memory_stats()))
+        # GET /{memory_id}（动态路径，放最后）
+        if sub.startswith("/") and method == "GET" and "/" not in sub[1:]:
+            memory_id = sub[1:]
+            return _ok(_json_response(_pydantic_to_dict(rmm.get_memory(memory_id))))
+        # DELETE /{memory_id}
+        if sub.startswith("/") and method == "DELETE" and "/" not in sub[1:]:
+            memory_id = sub[1:]
+            return _ok(_json_response(rmm.delete_memory(memory_id)))
+
+        logger.warning("memory http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("memory http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -593,6 +679,10 @@ async def http_handle(
     # ── modules/ui 域 ──
     if path.startswith("/ext/channel_api/modules/ui"):
         return _handle_modules_ui_domain(path, method, raw_body, q)
+
+    # ── memory 域 ──
+    if path.startswith("/ext/channel_api/memory"):
+        return _handle_memory_domain(path, method, raw_body, q)
 
     # 未接入的域：明确 404，提示该域尚未迁移
     logger.warning("http.handle: path=%s not yet migrated (domain pending)", path)

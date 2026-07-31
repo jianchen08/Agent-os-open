@@ -55,20 +55,20 @@ export const API_ENDPOINTS = {
     /** 发送消息（通过 WebSocket 发送，此端点仅用于历史消息） */
     SEND: (threadId: string) => `/api/v1/threads/${threadId}/messages`,
   },
-  /** 记忆管理相关 - 对应后端 /api/v1/memory/* */
+  /** 记忆管理相关 - 4c 迁移：已切 /ext/channel_api/memory/*（进程态 store stopgap） */
   MEMORY: {
     /** 获取情景记忆列表 */
-    EPISODES: '/api/v1/memory/episodes',
+    EPISODES: '/ext/channel_api/memory/episodes',
     /** 获取单个情景记忆 */
-    EPISODE: (id: string) => `/api/v1/memory/episodes/${id}`,
+    EPISODE: (id: string) => `/ext/channel_api/memory/episodes/${id}`,
     /** 搜索记忆 */
-    SEARCH: '/api/v1/memory/search',
+    SEARCH: '/ext/channel_api/memory/search',
     /** 获取语义记忆列表 */
-    SEMANTIC: '/api/v1/memory/semantic',
+    SEMANTIC: '/ext/channel_api/memory/semantic',
     /** 记忆整合 */
-    CONSOLIDATE: '/api/v1/memory/consolidate',
+    CONSOLIDATE: '/ext/channel_api/memory/consolidate',
     /** 获取记忆统计 */
-    STATS: '/api/v1/memory/stats',
+    STATS: '/ext/channel_api/memory/stats',
   },
   /** Agent配置相关 - 对应后端 /api/v1/agents/* */
   AGENTS: {
