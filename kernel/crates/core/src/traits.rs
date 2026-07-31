@@ -22,10 +22,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Branch, CompositeStep, EngineError, ErrorPolicy, Message, MessageRecord, PluginContext,
-    PluginError, PluginResult, RouteType, RunRecord, RunStatus, SessionRecord, StepResult,
-    StorageError, SuspendHandle, ToolCategory, ToolExecutionResult, ToolSource, TraceEntry,
-    WakeEvent,
+    Branch, CompositeStep, EngineError, ErrorPolicy, ExecutionRecord, MemoryRecord, Message,
+    MessageRecord, PipelineRunSummary, PluginContext, PluginError, PluginResult, RouteType,
+    RunRecord, RunStatus, SessionRecord, StepResult, StorageError, SuspendHandle, ToolCategory,
+    ToolExecutionResult, ToolSource, TraceEntry, WakeEvent,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -223,6 +223,25 @@ pub trait PluginInvoker: Send + Sync {
         hook: LifecycleHook,
         context: &HookContext,
     ) -> Result<(), PluginError>;
+
+    /// 强制卸载插件（热重载/崩溃恢复用）。
+    ///
+    /// 对 sidecar：kill 子进程 + 从客户端缓存移除，下次调用自动 respawn 加载最新代码。
+    /// 对 wasm：从模块缓存移除，下次调用重新编译加载。
+    /// 对 cdylib：返回不支持错误（Windows dlclose 限制）。
+    /// 默认实现返回 Ok（），供无此能力的实现（如 MockInvoker）不破坏编译。
+    async fn force_unload(&self, _plugin_id: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    /// 重新扫描插件目录，发现新增插件（运行时懒加载入口）。
+    ///
+    /// 重扫 plugin roots（幂等：loader 内部 cache.clear + 重插，不杀已 spawn 的进程），
+    /// 返回本次新发现的 manifest 列表（供调用方注册 tools 到 capability_registry）。
+    /// 默认实现返回空（无 discover 能力），供 MockInvoker 不破坏编译。
+    async fn discover_new_plugins(&self) -> Result<Vec<PluginManifest>, PluginError> {
+        Ok(Vec::new())
+    }
 }
 
 /// 生命周期钩子类型。
@@ -1091,7 +1110,7 @@ pub struct McpConfig {
     pub protocol_version: String,
 }
 
-fn default_idle_timeout() -> u64 {
+pub fn default_idle_timeout() -> u64 {
     300
 }
 
@@ -1277,6 +1296,93 @@ pub trait StorageBackend: Send + Sync {
     /// 更新会话（upsert：存在则更新，不存在则插入）。
     /// 用于 create_thread 后追加 pipeline_id、更新 title/agent 等。
     async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError>;
+
+    /// 删除会话（仅删标签夹行，不级联管道/消息——会话只是聚合引用，消息/管道自治）。
+    /// 无记录时返回 Ok(())（幂等，对齐 REST 删除语义）。
+    async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError>;
+
+    // ── 域3：execution_records（对齐 0.1 ExecutionRecordStorage）─────────
+    // 承载管道执行历史（LLM 输出/工具调用）。M1 只做存储层；写入方迁移在 M4。
+
+    /// 追加一条执行记录（composite key `(record_id, sequence)`）。
+    /// 对齐 0.1 `ExecutionRecordStorage.save(record)`。幂等：同 (record_id, sequence) 覆盖。
+    async fn append_execution_record(
+        &self,
+        record: &ExecutionRecord,
+    ) -> Result<(), StorageError>;
+
+    /// 按 pipeline_run_id 游标分页查询执行记录（对齐 0.1 `list_by_pipeline`）。
+    /// opts 复用 MessageQueryOpts（before_sequence/after_sequence/limit）。
+    async fn list_execution_records(
+        &self,
+        pipeline_run_id: &str,
+        opts: MessageQueryOpts,
+    ) -> Result<Vec<ExecutionRecord>, StorageError>;
+
+    /// 统计某 pipeline_run_id 的记录数（对齐 0.1 `count_by_session`）。
+    async fn count_execution_records(&self, pipeline_run_id: &str)
+        -> Result<u64, StorageError>;
+
+    /// 删除某 pipeline_run_id 的全部执行记录（对齐 0.1 `delete_by_session`）。
+    /// 返回删除条数；无记录返回 0（幂等）。
+    async fn delete_execution_records_by_session(
+        &self,
+        pipeline_run_id: &str,
+    ) -> Result<u64, StorageError>;
+
+    // ── 域4：pipeline_run_summaries（对齐 0.1 PipelineRunSummary）──────
+
+    /// upsert 管道运行汇总（存在则替换，对齐 0.1 `save_summary`）。
+    async fn save_run_summary(&self, summary: &PipelineRunSummary)
+        -> Result<(), StorageError>;
+
+    /// 取单个汇总（对齐 0.1 `get_summary`）。
+    async fn get_run_summary(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<PipelineRunSummary>, StorageError>;
+
+    /// 按 pipeline_run_id 局部更新汇总字段（对齐 0.1 `update_summary`）。
+    /// 不存在的 run_id 返回 `NotFound`。
+    async fn update_run_summary(
+        &self,
+        run_id: &str,
+        updates: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// 列汇总，新创建优先（对齐 0.1 `list_summaries`）。limit 控制条数。
+    async fn list_run_summaries(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<PipelineRunSummary>, StorageError>;
+
+    // ── 域5：memory（对齐 0.1 MemoryStore.memories）────────────────────
+    // 0.1 为进程内字典无持久化；下沉内核落 SQLite。搜索仍为简易关键词匹配。
+
+    /// 创建记忆条目（对齐 0.1 `create_memory`）。
+    async fn create_memory(&self, memory: &MemoryRecord) -> Result<(), StorageError>;
+
+    /// 取单条记忆（对齐 0.1 `get_memory`）。
+    async fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>, StorageError>;
+
+    /// 列记忆（可按 memory_type 过滤，limit/offset 分页，对齐 0.1 `list_memories`）。
+    async fn list_memory(
+        &self,
+        memory_type: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryRecord>, StorageError>;
+
+    /// 关键词搜索记忆（简易评分：匹配次数/内容长度，对齐 0.1 `search_memories`）。
+    /// 返回按 score 倒序、top_k 条。
+    async fn search_memory(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<MemoryRecord>, StorageError>;
+
+    /// 删除记忆（对齐 0.1 `delete_memory`）。不存在返回 false。
+    async fn delete_memory(&self, id: &str) -> Result<bool, StorageError>;
 }
 
 /// `list_sessions` 的过滤条件。

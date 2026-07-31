@@ -266,6 +266,85 @@ impl StorageBackend for MockStorageBackend {
     async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
         Ok(())
     }
+    async fn delete_session(&self, _thread_id: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    // ── 域3/4/5 stub（M1）──────────────────────────────────────────
+    async fn append_execution_record(
+        &self,
+        _record: &ExecutionRecord,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn list_execution_records(
+        &self,
+        _pipeline_run_id: &str,
+        _opts: MessageQueryOpts,
+    ) -> Result<Vec<ExecutionRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn count_execution_records(
+        &self,
+        _pipeline_run_id: &str,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+    async fn delete_execution_records_by_session(
+        &self,
+        _pipeline_run_id: &str,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+    async fn save_run_summary(
+        &self,
+        _summary: &PipelineRunSummary,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn get_run_summary(
+        &self,
+        _run_id: &str,
+    ) -> Result<Option<PipelineRunSummary>, StorageError> {
+        Ok(None)
+    }
+    async fn update_run_summary(
+        &self,
+        _run_id: &str,
+        _updates: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn list_run_summaries(
+        &self,
+        _limit: Option<usize>,
+    ) -> Result<Vec<PipelineRunSummary>, StorageError> {
+        Ok(vec![])
+    }
+    async fn create_memory(&self, _memory: &MemoryRecord) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn get_memory(&self, _id: &str) -> Result<Option<MemoryRecord>, StorageError> {
+        Ok(None)
+    }
+    async fn list_memory(
+        &self,
+        _memory_type: Option<&str>,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<MemoryRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn search_memory(
+        &self,
+        _query: &str,
+        _top_k: usize,
+    ) -> Result<Vec<MemoryRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn delete_memory(&self, _id: &str) -> Result<bool, StorageError> {
+        Ok(false)
+    }
 }
 
 fn make_test_content_loader() -> ContentLoader {

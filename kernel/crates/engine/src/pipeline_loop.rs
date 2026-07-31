@@ -769,6 +769,103 @@ mod tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }
+        async fn delete_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+
+        // ── 域3/4/5 stub（M1）──────────────────────────────────────
+        async fn append_execution_record(
+            &self,
+            _record: &agentos_core::types::ExecutionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn list_execution_records(
+            &self,
+            _pipeline_run_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::ExecutionRecord>, agentos_core::types::StorageError>
+        {
+            Ok(vec![])
+        }
+        async fn count_execution_records(
+            &self,
+            _pipeline_run_id: &str,
+        ) -> Result<u64, agentos_core::types::StorageError> {
+            Ok(0)
+        }
+        async fn delete_execution_records_by_session(
+            &self,
+            _pipeline_run_id: &str,
+        ) -> Result<u64, agentos_core::types::StorageError> {
+            Ok(0)
+        }
+        async fn save_run_summary(
+            &self,
+            _summary: &agentos_core::types::PipelineRunSummary,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn get_run_summary(
+            &self,
+            _run_id: &str,
+        ) -> Result<Option<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
+        {
+            Ok(None)
+        }
+        async fn update_run_summary(
+            &self,
+            _run_id: &str,
+            _updates: &serde_json::Value,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn list_run_summaries(
+            &self,
+            _limit: Option<usize>,
+        ) -> Result<Vec<agentos_core::types::PipelineRunSummary>, agentos_core::types::StorageError>
+        {
+            Ok(vec![])
+        }
+        async fn create_memory(
+            &self,
+            _memory: &agentos_core::types::MemoryRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn get_memory(
+            &self,
+            _id: &str,
+        ) -> Result<Option<agentos_core::types::MemoryRecord>, agentos_core::types::StorageError>
+        {
+            Ok(None)
+        }
+        async fn list_memory(
+            &self,
+            _memory_type: Option<&str>,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<Vec<agentos_core::types::MemoryRecord>, agentos_core::types::StorageError>
+        {
+            Ok(vec![])
+        }
+        async fn search_memory(
+            &self,
+            _query: &str,
+            _top_k: usize,
+        ) -> Result<Vec<agentos_core::types::MemoryRecord>, agentos_core::types::StorageError>
+        {
+            Ok(vec![])
+        }
+        async fn delete_memory(
+            &self,
+            _id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            Ok(false)
+        }
     }
 
     /// 测试夹具：构造一个 PipelineExecutor + MockInvoker（可拿引用设置结果）。
