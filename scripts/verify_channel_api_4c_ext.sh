@@ -115,6 +115,11 @@ check "制品详情(不存在)"    200 GET  "/ext/channel_api/artifacts/nonexist
 check "制品批注列表"        200 GET  "/ext/channel_api/artifacts/a1/annotations"
 
 echo ""
+echo "${YELLOW}[10/10] scenes 域（批次3）${RESET}"
+check "场景列表"            200 GET  "/ext/channel_api/scenes"
+check "场景模板列表"        200 GET  "/ext/channel_api/scenes/templates"
+
+echo ""
 echo "================================================================"
 printf "结果：${GREEN}%d 通过${RESET}，${RED}%d 失败${RESET}\n" "$PASS" "$FAIL"
 if [[ "$FAIL" -gt 0 ]]; then

@@ -96,6 +96,13 @@
         {"route_id": "artifact_annotations_create", "method": "POST", "path": "/ext/channel_api/artifacts/{artifact_id}/annotations", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "annotations 域：添加批注"},
         {"route_id": "annotation_update", "method": "PUT", "path": "/ext/channel_api/annotations/{annotation_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "annotations 域：更新批注"},
         {"route_id": "annotation_delete", "method": "DELETE", "path": "/ext/channel_api/annotations/{annotation_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "annotations 域：删除批注"},
-        {"route_id": "annotation_resolve", "method": "POST", "path": "/ext/channel_api/annotations/{annotation_id}/resolve", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "annotations 域：标记批注为已解决"}
+        {"route_id": "annotation_resolve", "method": "POST", "path": "/ext/channel_api/annotations/{annotation_id}/resolve", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "annotations 域：标记批注为已解决"},
+        {"route_id": "scenes_create", "method": "POST", "path": "/ext/channel_api/scenes", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：创建场景（可基于模板）"},
+        {"route_id": "scenes_list", "method": "GET", "path": "/ext/channel_api/scenes", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "scenes 域：列出所有场景"},
+        {"route_id": "scenes_templates", "method": "GET", "path": "/ext/channel_api/scenes/templates", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "scenes 域：获取场景模板列表"},
+        {"route_id": "scene_get", "method": "GET", "path": "/ext/channel_api/scenes/{scene_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "scenes 域：获取场景详情"},
+        {"route_id": "scene_update", "method": "PUT", "path": "/ext/channel_api/scenes/{scene_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：更新场景"},
+        {"route_id": "scene_delete", "method": "DELETE", "path": "/ext/channel_api/scenes/{scene_id}", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：删除场景"},
+        {"route_id": "scene_switch", "method": "POST", "path": "/ext/channel_api/scenes/{scene_id}/switch", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "scenes 域：切换场景"}
     ]
 }

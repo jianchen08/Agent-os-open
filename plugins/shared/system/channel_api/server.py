@@ -623,6 +623,60 @@ def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+def _handle_scenes_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """scenes 域分发：/ext/channel_api/scenes/** → routes_scene 业务函数（批次3 首迁）。
+
+    复用 4c 模式（同 config/thinking-mode）。7 路由全覆盖，含 path-param {scene_id}。
+    _user=Depends(require_auth) 省略（dispatcher 已鉴权，handler 内不读 _user）。
+    create/update 用 pydantic 模型（SceneCreateRequest/SceneUpdateRequest）。
+    """
+    import routes_scene as rsc  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/scenes"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a scenes path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/templates" / "/{scene_id}" / "/{scene_id}/switch"
+
+    try:
+        # GET "" (list)
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(rsc.list_scenes()))
+        # POST "" (create, pydantic body)
+        if sub in ("", "/") and method == "POST":
+            body = _decode_body(raw_body)
+            request = rsc.SceneCreateRequest(**body)
+            return _ok(_json_response(rsc.create_scene(request)))
+        # GET /templates
+        if sub == "/templates" and method == "GET":
+            return _ok(_json_response(rsc.get_templates()))
+        # /{scene_id} 系列
+        if sub.startswith("/") and "/" not in sub[1:]:
+            scene_id = sub[1:]
+            if method == "GET":
+                return _ok(_json_response(rsc.get_scene(scene_id)))
+            if method == "PUT":
+                body = _decode_body(raw_body)
+                request = rsc.SceneUpdateRequest(**body)
+                return _ok(_json_response(rsc.update_scene(scene_id, request)))
+            if method == "DELETE":
+                return _ok(_json_response(rsc.delete_scene(scene_id)))
+        # /{scene_id}/switch
+        if sub.endswith("/switch") and method == "POST":
+            scene_id = sub[1:].rsplit("/switch", 1)[0]
+            return _ok(_json_response(rsc.switch_scene(scene_id)))
+
+        logger.warning("scenes http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("scenes http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 def _parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:
     """解析 multipart/form-data（内核透传的 raw_body base64 解码后的字节）。
 
@@ -882,6 +936,10 @@ async def http_handle(
     # ── memory 域 ──
     if path.startswith("/ext/channel_api/memory"):
         return _handle_memory_domain(path, method, raw_body, q)
+
+    # ── scenes 域（批次3 首迁，复用 4c 模式）──
+    if path.startswith("/ext/channel_api/scenes"):
+        return _handle_scenes_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):
