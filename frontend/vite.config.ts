@@ -22,6 +22,12 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        // 4c 迁移：插件 /ext/{plugin_id}/** HTTP 端点经内核 dispatcher（:9100）。
+        // 加 /ext 代理，让 dev 下 /ext/channel_api/config/** 等打到内核而非 Vite 自身。
+        '/ext': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
         '/ws': {
           target: apiTarget,
           changeOrigin: true,

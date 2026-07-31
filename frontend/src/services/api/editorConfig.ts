@@ -12,7 +12,10 @@
 
 import { apiClient } from './client'
 
-const BASE = '/api/v1/config/editor'
+// 4c 迁移：BASE 切 /ext/channel_api/config/**。注意：此端点后端实际无对应路由
+// （routes_config.py 的 editor 配置经 generic 白名单 system/editor_config 暴露），
+// getEditorConfig/updateEditorConfig 目前无前端消费（死代码），仅 resolveEditor（纯前端）在用。
+const BASE = '/ext/channel_api/config/editor'
 
 /**
  * 获取编辑器配置

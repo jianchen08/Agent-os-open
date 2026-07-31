@@ -87,37 +87,37 @@ export const API_ENDPOINTS = {
     /** 获取默认Agent */
     DEFAULT: '/api/v1/agents/default',
   },
-  /** 配置管理相关 - 对应后端 /api/v1/config/* */
+  /** 配置管理相关 - 4c 迁移：已切 /ext/channel_api/config/**（经内核 dispatcher → channel_api http.handle） */
   CONFIG: {
     /** 获取 API 配置 */
-    API_GET: '/api/v1/config/api',
+    API_GET: '/ext/channel_api/config/api',
     /** 更新 API 配置 */
-    API_UPDATE: '/api/v1/config/api',
+    API_UPDATE: '/ext/channel_api/config/api',
     /** 获取 LLM 配置 */
-    LLM_GET: '/api/v1/config/llm',
+    LLM_GET: '/ext/channel_api/config/llm',
     /** 获取提供商列表 */
-    LLM_PROVIDERS: '/api/v1/config/llm/providers',
+    LLM_PROVIDERS: '/ext/channel_api/config/llm/providers',
     /** 获取模型列表 */
-    LLM_MODELS: '/api/v1/config/llm/models',
+    LLM_MODELS: '/ext/channel_api/config/llm/models',
     /** 获取默认配置 */
-    LLM_DEFAULTS: '/api/v1/config/llm/defaults',
+    LLM_DEFAULTS: '/ext/channel_api/config/llm/defaults',
     /** 获取上下文窗口配置 */
-    CONTEXT_WINDOW_GET: '/api/v1/config/context-window',
+    CONTEXT_WINDOW_GET: '/ext/channel_api/config/context-window',
     /** 更新上下文窗口配置 */
-    CONTEXT_WINDOW_UPDATE: '/api/v1/config/context-window',
+    CONTEXT_WINDOW_UPDATE: '/ext/channel_api/config/context-window',
     /** 重置上下文窗口配置 */
-    CONTEXT_WINDOW_RESET: '/api/v1/config/context-window/reset',
+    CONTEXT_WINDOW_RESET: '/ext/channel_api/config/context-window/reset',
     /** 获取并发配置 */
-    CONCURRENCY_GET: '/api/v1/config/concurrency',
+    CONCURRENCY_GET: '/ext/channel_api/config/concurrency',
     /** 更新并发配置 */
-    CONCURRENCY_UPDATE: '/api/v1/config/concurrency',
+    CONCURRENCY_UPDATE: '/ext/channel_api/config/concurrency',
     /** 获取成本控制配置 */
-    COST_CONTROL_GET: '/api/v1/config/cost-control',
+    COST_CONTROL_GET: '/ext/channel_api/config/cost-control',
     /** 更新成本控制配置 */
-    COST_CONTROL_UPDATE: '/api/v1/config/cost-control',
+    COST_CONTROL_UPDATE: '/ext/channel_api/config/cost-control',
     /** 通用配置（动态路径） */
-    GENERIC_GET: (path: string) => `/api/v1/config/generic/${path}`,
-    GENERIC_UPDATE: (path: string) => `/api/v1/config/generic/${path}`,
+    GENERIC_GET: (path: string) => `/ext/channel_api/config/generic/${path}`,
+    GENERIC_UPDATE: (path: string) => `/ext/channel_api/config/generic/${path}`,
   },
   /** 工具相关 - 对应后端 /api/v1/tools/* */
   TOOLS: {
@@ -142,13 +142,13 @@ export const API_ENDPOINTS = {
     /** 执行Agent */
     AGENT_EXECUTE: '/api/v1/tools/agent/execute',
   },
-  /** 评估指标 - 指标定义属 config 域（内核 compat 只读查询，待 evaluation 插件声明 config_files 后迁出）。
-   *  已删除 9 个无后端无消费的死端点（evaluate/profiles/reports/statistics/trends，纯误导）。 */
+  /** 评估指标 - 走插件 http_endpoints /ext/evaluation_service/**（已从内核 compat_routes 迁出）。
+   *  指标定义读 evaluation 插件 config_files（config/evaluation/evaluation_metrics.yaml 唯一真相源）。 */
   EVALUATION: {
     /** 获取评估指标列表 */
-    METRICS: '/api/v1/evaluation-metrics',
+    METRICS: '/ext/evaluation_service/metrics',
     /** 获取单个评估指标 */
-    METRIC: (id: string) => `/api/v1/evaluation-metrics/${id}`,
+    METRIC: (id: string) => `/ext/evaluation_service/metrics/${id}`,
   },
   /** 健康检查相关 */
   HEALTH: {
