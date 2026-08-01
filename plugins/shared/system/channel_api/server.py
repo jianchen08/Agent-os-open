@@ -1038,6 +1038,62 @@ async def _dispatch_task_ac(rm, task_id: str, parts: list[str], method: str) -> 
     raise HTTPException(status_code=404, detail=f"task ac route not found: /{'/'.join(parts)}")
 
 
+async def _handle_triggers_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """triggers 域分发：/ext/channel_api/triggers/** → routes_missing.triggers_router 业务。
+
+    9 路由 stub（list/stats/get/create/update/delete/enable/disable/trigger）。
+    复用 4c 模式。批次5 重新分类：原"待启用决策"前提对 triggers 不成立（前端有消费）。
+    """
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/triggers"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a triggers path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/stats" / "/{id}" / "/{id}/enable" ...
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rm.list_triggers()))
+        if sub in ("", "/") and method == "POST":
+            body = _decode_body(raw_body)
+            return _ok(_json_response(await rm.create_trigger(body)))
+        if sub == "/stats" and method == "GET":
+            return _ok(_json_response(await rm.get_trigger_stats()))
+        # /{trigger_id} 系列
+        if sub.startswith("/") and len(sub) > 1:
+            rest = sub[1:]
+            if "/" not in rest:
+                tid = rest
+                if method == "GET":
+                    return _ok(_json_response(await rm.get_trigger(tid)))
+                if method == "PUT":
+                    body = _decode_body(raw_body)
+                    return _ok(_json_response(await rm.update_trigger(tid, body)))
+                if method == "DELETE":
+                    return _ok(_json_response(await rm.delete_trigger(tid)))
+            else:
+                tid, action = rest.split("/", 1)
+                if action == "enable" and method == "POST":
+                    return _ok(_json_response(await rm.enable_trigger(tid)))
+                if action == "disable" and method == "POST":
+                    return _ok(_json_response(await rm.disable_trigger(tid)))
+                if action == "trigger" and method == "POST":
+                    return _ok(_json_response(await rm.manual_trigger(tid)))
+
+        logger.warning("triggers http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("triggers http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
     """处理 reviews /media-review（multipart：file + media_type）。
 
@@ -1394,6 +1450,10 @@ async def http_handle(
     # ── tasks 域（批次3，最大域：tasks + task_phase + projects）──
     if path.startswith("/ext/channel_api/tasks") or path.startswith("/ext/channel_api/projects"):
         return await _handle_tasks_domain(path, method, raw_body, q)
+
+    # ── triggers 域（批次5，有前端消费，9 路由 stub）──
+    if path.startswith("/ext/channel_api/triggers"):
+        return await _handle_triggers_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):

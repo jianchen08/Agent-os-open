@@ -310,23 +310,23 @@ export const API_ENDPOINTS = {
   /** 触发器相关 - 对应后端 /api/v1/triggers/* */
   TRIGGERS: {
     /** 获取触发器列表 */
-    LIST: '/api/v1/triggers',
+    LIST: '/ext/channel_api/triggers',
     /** 获取触发器统计 */
-    STATS: '/api/v1/triggers/stats',
+    STATS: '/ext/channel_api/triggers/stats',
     /** 获取触发器详情 */
-    GET: (triggerId: string) => `/api/v1/triggers/${triggerId}`,
+    GET: (triggerId: string) => `/ext/channel_api/triggers/${triggerId}`,
     /** 创建触发器 */
-    CREATE: '/api/v1/triggers',
+    CREATE: '/ext/channel_api/triggers',
     /** 更新触发器 */
-    UPDATE: (triggerId: string) => `/api/v1/triggers/${triggerId}`,
+    UPDATE: (triggerId: string) => `/ext/channel_api/triggers/${triggerId}`,
     /** 删除触发器 */
-    DELETE: (triggerId: string) => `/api/v1/triggers/${triggerId}`,
+    DELETE: (triggerId: string) => `/ext/channel_api/triggers/${triggerId}`,
     /** 启用触发器 */
-    ENABLE: (triggerId: string) => `/api/v1/triggers/${triggerId}/enable`,
+    ENABLE: (triggerId: string) => `/ext/channel_api/triggers/${triggerId}/enable`,
     /** 禁用触发器 */
-    DISABLE: (triggerId: string) => `/api/v1/triggers/${triggerId}/disable`,
+    DISABLE: (triggerId: string) => `/ext/channel_api/triggers/${triggerId}/disable`,
     /** 手动触发触发器 */
-    TRIGGER: (triggerId: string) => `/api/v1/triggers/${triggerId}/trigger`,
+    TRIGGER: (triggerId: string) => `/ext/channel_api/triggers/${triggerId}/trigger`,
   },
   /** Agent 调用记录相关 - 对应后端 /api/v1/agent-calls/* */
   AGENT_CALLS: {
