@@ -117,13 +117,12 @@ class WorkspaceService:
     async def resolve_container_task(self, task_id: str) -> str:
         """解析任务到容器任务。"""
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            # M3：插件自包含——经 tasks.service_access 拿 TaskService（不再调 channel_api 进程的 ServiceProvider）。
+            from tasks.service_access import get_task_service  # noqa: PLC0415
 
-            provider = get_service_provider()
-            task_service = provider.get_or_create(
-                "task_service",
-                lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
-            )
+            task_service = get_task_service()
+            if task_service is None:
+                return task_id
 
             task = await asyncio.to_thread(task_service.get_task, task_id)
             if not task:
@@ -156,13 +155,12 @@ class WorkspaceService:
     async def _get_child_task_ids(self, container_task_id: str) -> set[str]:
         """获取容器任务下所有子任务 ID。"""
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            # M3：插件自包含——经 tasks.service_access 拿 TaskService（不再调 channel_api 进程的 ServiceProvider）。
+            from tasks.service_access import get_task_service  # noqa: PLC0415
 
-            provider = get_service_provider()
-            task_service = provider.get_or_create(
-                "task_service",
-                lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
-            )
+            task_service = get_task_service()
+            if task_service is None:
+                return {container_task_id}
 
             child_ids: set[str] = set()
             visited: set[str] = set()
