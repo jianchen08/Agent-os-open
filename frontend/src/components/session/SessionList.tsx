@@ -16,6 +16,7 @@ import {
   Loader2,
   MoreHorizontal,
   Pin,
+  RefreshCw,
   Star,
   Trash2,
 } from '@/assets/icons'
@@ -58,6 +59,8 @@ interface SessionListProps {
   onStarSession: (sessionId: string) => void
   /** 置顶切换回调 */
   onPinSession: (sessionId: string) => void
+  /** 重置消息回调（P3：重置消息 → 刷新整个前端页面） */
+  onResetMessages?: (sessionId: string) => void
   /** 自定义容器类名 */
   className?: string
   /** 列表项高度 */
@@ -87,6 +90,8 @@ interface SessionItemProps {
   onStar: () => void
   /** 置顶切换回调 */
   onPin: () => void
+  /** 重置消息回调（P3） */
+  onResetMessages?: () => void
   /** 列表项高度 */
   itemHeight: number
 }
@@ -102,6 +107,7 @@ const SessionItem = memo<SessionItemProps>(
     onCopy,
     onStar,
     onPin,
+    onResetMessages,
     itemHeight,
   }) => {
     return (
@@ -137,9 +143,16 @@ const SessionItem = memo<SessionItemProps>(
             {session.title}
           </span>
 
-          {session.starred && (
-            <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-400" />
-          )}
+          {/* P6: 星标图标始终展示——已星标金色填充+过渡动画；未星标灰色描边，hover 金色提示 */}
+          <Star
+            className={cn(
+              'h-4 w-4 shrink-0 transition-all duration-200',
+              session.starred
+                ? 'fill-amber-400 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]'
+                : 'text-muted-foreground opacity-60 group-hover:text-amber-400 group-hover:opacity-100',
+            )}
+            data-testid="star-icon"
+          />
 
           {isDeleting && (
             <Loader2 className="text-muted-foreground h-3.5 w-3.5 shrink-0 animate-spin" />
@@ -200,6 +213,18 @@ const SessionItem = memo<SessionItemProps>(
                     <Pin className="mr-2 h-4 w-4" />
                     {session.pinned ? '取消置顶' : '置顶会话'}
                   </DropdownMenuItem>
+                  {/* P3: 重置消息 → 刷新整个前端页面 */}
+                  {onResetMessages && (
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onResetMessages()
+                      }}
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      重置消息
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     onClick={(e) => {
@@ -273,6 +298,7 @@ export const SessionList = memo<SessionListProps>(
     onCopySession,
     onStarSession,
     onPinSession,
+    onResetMessages,
     className,
     itemHeight = 55,
   }) => {
@@ -345,6 +371,7 @@ export const SessionList = memo<SessionListProps>(
         onCopy={() => onCopySession(session)}
         onStar={() => onStarSession(session.id)}
         onPin={() => onPinSession(session.id)}
+        onResetMessages={onResetMessages ? () => onResetMessages(session.id) : undefined}
         itemHeight={itemHeight}
       />
     )

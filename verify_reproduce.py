@@ -1,301 +1,333 @@
 #!/usr/bin/env python3
-"""第三方通道插件迁移功能验证 — 可复现脚本。
+"""前端功能对齐 P2+P8 后端验证 — 可复现脚本。
+
+覆盖场景（对应 docs/working/frontend_ui_alignment_function_verify_report.md）：
+  P2 搜索框合并-后端部分：
+    S1 type=session -> 200 返回匹配会话列表（patch 存储层）
+    S2 type=message -> 200 返回匹配消息列表（patch 存储层）
+    S3 type=all    -> 200 同时返回会话与消息
+    S4 q 空/纯空白 -> 200 空结果
+    S5 type 非法   -> 422（VAL_ENUM_7002）
+    S6 无 token    -> 401
+    S7 limit 越界  -> 422（ge=1 le=100）
+    S8 存储层 helper 直接验证（_search_sessions 按用户过滤 + _search_messages 子串匹配）
+  P8 模型显示（等价逻辑核对，非 TS 实测——node 环境不可用）：
+    M1 model='large' + tiers.large='deepseek-chat' -> 'deepseek-chat'
+    M2 具体模型名原样返回
+    M3 空值 -> 空串
+    M4 tiers 缺失/键缺失/键值为空 -> 回退原值
 
 用法：
-    python3 verify_reproduce.py
+    env PYTHONPATH=src python3 verify_reproduce.py
 
-前置条件：
-    pip install pyyaml rich aiohttp pydantic fastapi uvicorn cryptography PyJWT
-    pip install -e plugins/sdk
+预期输出：全部 PASS。
 
-预期输出：所有 9 个场景全部 PASS。
-
-[来源: docs/working/function_verify_report.md]
+[来源: docs/working/frontend_ui_alignment_function_verify_report.md]
 """
+
 from __future__ import annotations
 
-import asyncio
-import importlib
-import io
-import json
-import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
-# ---------------------------------------------------------------------------
-# 路径设置
-# ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent
-PLUGINS_BASE = PROJECT_ROOT / "plugins" / "shared" / "system"
-SDK_SRC = PROJECT_ROOT / "plugins" / "sdk" / "src"
+# 项目 src 目录（脚本位于项目根）
+SRC = Path(__file__).resolve().parent / "src"
+sys.path.insert(0, str(SRC))
 
-# 添加 SDK 路径（绕过 __init__.py 缺失问题）
-sys.path.insert(0, str(SDK_SRC))
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-CHANNELS = [
-    "channel_dingtalk",
-    "channel_feishu",
-    "channel_wecom",
-    "channel_cli",
-    "channel_qq",
-    "channel_api",
-    "channel_gateway",
-]
+from channels.api.deps import APIError, api_error_handler, require_auth
+from channels.api.routes_search import router
 
-# 合法的 43 字符 base64 AES key（base64(b'\x00'*32) 去掉末尾 =）
-VALID_AES_KEY = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE"
-
-# 统计
 _results: list[tuple[str, str, bool]] = []
 
 
-def _record(scenario: str, detail: str, passed: bool) -> None:
-    _results.append((scenario, detail, passed))
-    status = "PASS" if passed else "FAIL"
-    print(f"  [{status}] {scenario}: {detail}")
-    if not passed:
-        raise AssertionError(f"场景失败: {scenario} — {detail}")
+def record(name: str, detail: str, ok: bool) -> None:
+    _results.append((name, detail, ok))
+    tag = "PASS" if ok else "FAIL"
+    print(f"[{tag}] {name}: {detail}")
 
 
-def import_from_channel(channel: str, module: str):
-    """从通道插件目录导入模块（模拟 server.py 的 sys.path 机制）。"""
-    ch_path = str(PLUGINS_BASE / channel)
-    old_path = sys.path[:]
-    sys.path.insert(0, ch_path)
-    mods_to_clear = [
-        k for k in sys.modules
-        if k in (module, "adapter", "stream_client", "card_builder", "crypto",
-                 "helpers", "output_adapter", "_base_output_adapter", "onebot_client",
-                 "input_adapter", "base_combo_adapter", "pipeline_types",
-                 "channel_gateway", "message_normalizer", "unified_types",
-                 "session_bridge", "cli_output_adapter", "server", "app")
-    ]
-    for k in mods_to_clear:
-        del sys.modules[k]
-    try:
-        return importlib.import_module(module)
-    finally:
-        sys.path[:] = old_path
+# ── 测试客户端（覆盖认证依赖 + 异常处理） ──────────────────────────
 
 
-# ---------------------------------------------------------------------------
-# 场景 1: 钉钉通道
-# ---------------------------------------------------------------------------
-def test_dingtalk() -> None:
-    print("\n=== 场景1: 钉钉通道 ===")
-    mod = import_from_channel("channel_dingtalk", "adapter")
-    adapter = mod.DingTalkAdapter(client_id="x", client_secret="y")
-    assert adapter.channel_type == "dingtalk"
-    assert hasattr(adapter, "input_adapter")
-    assert hasattr(adapter, "output_adapter")
-    assert hasattr(adapter, "start")
-    assert hasattr(adapter, "stop")
-    _record("钉钉", f"channel_type='{adapter.channel_type}', "
-            f"input={type(adapter.input_adapter).__name__}, "
-            f"output={type(adapter.output_adapter).__name__}", True)
+def make_client(authed: bool = True) -> TestClient:
+    app = FastAPI()
+    if authed:
+        async def _mock_auth():
+            return {"sub": "test_user", "username": "tester"}
+
+        app.dependency_overrides[require_auth] = _mock_auth
+    app.add_exception_handler(APIError, api_error_handler)
+    app.include_router(router)
+    return TestClient(app)
 
 
-# ---------------------------------------------------------------------------
-# 场景 2: 飞书通道
-# ---------------------------------------------------------------------------
-def test_feishu() -> None:
-    print("\n=== 场景2: 飞书通道 ===")
-    mod = import_from_channel("channel_feishu", "adapter")
-    adapter = mod.FeishuAdapter(app_id="x", app_secret="y")
-    assert adapter.channel_type == "feishu"
-    _record("飞书适配器", f"channel_type='{adapter.channel_type}'", True)
-
-    cb = import_from_channel("channel_feishu", "card_builder")
-    card = cb.CardBuilder.build_text_card("标题", "内容")
-    assert isinstance(card, dict)
-    assert "elements" in card
-    _record("飞书卡片", f"keys={list(card.keys())}, elements_count={len(card['elements'])}", True)
+# ── S1-S7: HTTP 端点全场景 ──────────────────────────────────────
 
 
-# ---------------------------------------------------------------------------
-# 场景 3: 企微通道
-# ---------------------------------------------------------------------------
-def test_wecom() -> None:
-    print("\n=== 场景3: 企微通道 ===")
-    mod = import_from_channel("channel_wecom", "adapter")
-    adapter = mod.WeComAdapter(
-        corp_id="test_corp", agent_id=1, secret="s",
-        token="t", encoding_aes_key=VALID_AES_KEY,
+def s1_session_search() -> None:
+    """type=session -> 200 返回匹配会话列表。"""
+    with patch(
+        "channels.api.routes_search._search_sessions",
+        return_value=[
+            {"id": "t1", "title": "项目计划讨论", "updated_at": "", "message_count": 3}
+        ],
+    ):
+        resp = make_client().get("/api/v1/search", params={"q": "计划", "type": "session"})
+        ok = (
+            resp.status_code == 200
+            and resp.json()["type"] == "session"
+            and len(resp.json()["sessions"]) == 1
+            and resp.json()["sessions"][0]["id"] == "t1"
+            and resp.json()["messages"] == []
+        )
+        record("S1 type=session", f"status={resp.status_code} body={resp.json()}", ok)
+
+
+def s2_message_search() -> None:
+    """type=message -> 200 返回匹配消息列表。"""
+    with patch(
+        "channels.api.routes_search._search_messages",
+        return_value=[
+            {
+                "id": "r2",
+                "session_id": "pipe-1",
+                "role": "assistant",
+                "content": "分析结果：存在内存泄漏",
+                "timestamp": "",
+                "sequence": 1,
+            }
+        ],
+    ):
+        resp = make_client().get("/api/v1/search", params={"q": "内存泄漏", "type": "message"})
+        data = resp.json()
+        ok = (
+            resp.status_code == 200
+            and len(data["messages"]) == 1
+            and data["messages"][0]["session_id"] == "pipe-1"
+            and data["sessions"] == []
+        )
+        record("S2 type=message", f"status={resp.status_code} body={data}", ok)
+
+
+def s3_all_search() -> None:
+    """type=all -> 200 同时返回会话与消息。"""
+    with (
+        patch(
+            "channels.api.routes_search._search_sessions",
+            return_value=[{"id": "t1", "title": "测试", "updated_at": "", "message_count": 1}],
+        ),
+        patch(
+            "channels.api.routes_search._search_messages",
+            return_value=[
+                {"id": "r1", "session_id": "pipe-1", "role": "assistant",
+                 "content": "测试内容", "timestamp": "", "sequence": 1}
+            ],
+        ),
+    ):
+        resp = make_client().get("/api/v1/search", params={"q": "测试", "type": "all"})
+        data = resp.json()
+        ok = (
+            resp.status_code == 200
+            and data["type"] == "all"
+            and len(data["sessions"]) == 1
+            and len(data["messages"]) == 1
+        )
+        record("S3 type=all", f"status={resp.status_code} body={data}", ok)
+
+
+def s4_empty_q() -> None:
+    """q 空 -> 200 空结果（不报错）。"""
+    resp = make_client().get("/api/v1/search", params={"q": "", "type": "session"})
+    data = resp.json()
+    ok = resp.status_code == 200 and data["sessions"] == [] and data["messages"] == []
+    record("S4 q 空", f"status={resp.status_code} body={data}", ok)
+
+    # 纯空白 q
+    resp2 = make_client().get("/api/v1/search", params={"q": "   ", "type": "all"})
+    ok2 = resp2.status_code == 200 and resp2.json()["sessions"] == [] and resp2.json()["messages"] == []
+    record("S4b q 纯空白", f"status={resp2.status_code} body={resp2.json()}", ok2)
+
+
+def s5_invalid_type() -> None:
+    """type 非法 -> 422。"""
+    resp = make_client().get("/api/v1/search", params={"q": "x", "type": "invalid"})
+    ok = resp.status_code == 422
+    record("S5 type 非法", f"status={resp.status_code} body={resp.text[:120]}", ok)
+
+
+def s6_unauthorized() -> None:
+    """无 token -> 401。"""
+    resp = make_client(authed=False).get("/api/v1/search", params={"q": "x"})
+    ok = resp.status_code == 401
+    record("S6 无 token", f"status={resp.status_code} body={resp.text[:120]}", ok)
+
+
+def s7_limit_out_of_range() -> None:
+    """limit 越界 -> 422（ge=1 le=100）。"""
+    resp = make_client().get("/api/v1/search", params={"q": "x", "type": "all", "limit": 0})
+    ok = resp.status_code == 422
+    record("S7 limit=0 越界", f"status={resp.status_code}", ok)
+
+    resp2 = make_client().get("/api/v1/search", params={"q": "x", "type": "all", "limit": 101})
+    ok2 = resp2.status_code == 422
+    record("S7b limit=101 越界", f"status={resp2.status_code}", ok2)
+
+
+# ── S8: 存储层 helper 直接验证（mock 数据驱动模块调用链） ───────────
+
+
+def _make_thread(thread_id: str, title: str, user_id: str = "test_user") -> dict:
+    return {
+        "id": thread_id,
+        "user_id": user_id,
+        "title": title,
+        "intent": title,
+        "agent_id": "agentos",
+        "metadata": {"session_type": "main_pipeline"},
+        "current_state": "active",
+        "pipeline_ids": [],
+        "active_pipeline_id": "",
+        "created_at": "2026-08-01T00:00:00+00:00",
+        "updated_at": "2026-08-01T00:00:00+00:00",
+    }
+
+
+class _FakeRecord:
+    def __init__(self, record_id: str, pipeline_run_id: str, content: str):
+        self.record_id = record_id
+        self.pipeline_run_id = pipeline_run_id
+        self.content = content
+        self.type = "ai"
+        self.role = "assistant"
+        self.sequence = 1
+        self.created_at = "2026-08-01T00:00:00"
+
+
+class _FakeStorage:
+    def __init__(self, records: list[_FakeRecord]):
+        self._records = {f"{r.record_id}::{r.sequence}": r for r in records}
+
+    def search_records(self, keyword: str, limit: int = 50) -> list[_FakeRecord]:
+        needle = keyword.lower()
+        hits = [r for r in self._records.values() if needle in (r.content or "").lower()]
+        return hits[:limit]
+
+
+def s8_helpers() -> None:
+    """_search_sessions 按用户过滤 + _search_messages 子串匹配。"""
+    store = type("FakeStore", (), {"threads": {}})()
+    store.threads = {
+        "t1": _make_thread("t1", "项目计划讨论", user_id="test_user"),
+        "t2": _make_thread("t2", "计划周报", user_id="other_user"),
+        "t3": _make_thread("t3", "无关话题", user_id="test_user"),
+    }
+    with patch("channels.api.memory_store.store", store):
+        from channels.api.routes_search import _search_sessions
+
+        hits = _search_sessions("test_user", "计划", limit=10)
+        ids = [h["id"] for h in hits]
+        ok = ids == ["t1"]  # t2 属 other_user 不返回
+        record("S8a _search_sessions 按用户过滤", f"ids={ids} (期望 ['t1'])", ok)
+
+    storage = _FakeStorage(
+        [
+            _FakeRecord("r1", "pipe-1", "分析代码性能"),
+            _FakeRecord("r2", "pipe-2", "无关内容"),
+        ]
     )
-    assert adapter.channel_type == "wecom"
-    _record("企微适配器", f"channel_type='{adapter.channel_type}'", True)
+    with patch("channels.api.routes_search._get_storage", return_value=storage):
+        from channels.api.routes_search import _search_messages
 
-    crypto_mod = import_from_channel("channel_wecom", "crypto")
-    crypto_inst = crypto_mod.WecomCrypto(
-        token="t", encoding_aes_key=VALID_AES_KEY, corp_id="test_corp",
-    )
-    assert crypto_inst is not None
-    _record("企微加密", f"WecomCrypto instantiated: {type(crypto_inst).__name__}", True)
+        hits = _search_messages("代码", limit=10)
+        ok2 = len(hits) == 1 and hits[0]["id"] == "r1"
+        record("S8b _search_messages 子串匹配", f"hits={[h['id'] for h in hits]} (期望 ['r1'])", ok2)
 
+    # 存储不可用 -> 空列表（不抛 500）
+    with patch("channels.api.routes_search._get_storage", return_value=None):
+        from channels.api.routes_search import _search_messages
 
-# ---------------------------------------------------------------------------
-# 场景 4: QQ通道
-# ---------------------------------------------------------------------------
-def test_qq() -> None:
-    print("\n=== 场景4: QQ通道 ===")
-    mod = import_from_channel("channel_qq", "adapter")
-    adapter = mod.QQAdapter(ws_port=9999, http_api_url="http://test:5700")
-    assert adapter.channel_type == "qq"
-    _record("QQ适配器", f"channel_type='{adapter.channel_type}'", True)
-
-    helpers = import_from_channel("channel_qq", "helpers")
-    # OneBot Array 格式
-    array_msg = {"message": [
-        {"type": "text", "data": {"text": "你好"}},
-        {"type": "text", "data": {"text": "世界"}},
-    ]}
-    result = helpers._extract_qq_text(array_msg)
-    assert result == "你好 世界"
-    _record("QQ Array提取", f"result='{result}'", True)
-
-    # CQ码格式
-    cq_msg = {"message": "你好[CQ:at,qq=12345]世界"}
-    result_cq = helpers._extract_qq_text(cq_msg)
-    assert result_cq == "你好世界"
-    _record("QQ CQ码提取", f"result='{result_cq}'", True)
+        hits = _search_messages("代码", limit=10)
+        ok3 = hits == []
+        record("S8c 存储不可用回退空", f"hits={hits} (期望 [])", ok3)
 
 
-# ---------------------------------------------------------------------------
-# 场景 5: 网关通道
-# ---------------------------------------------------------------------------
-def test_gateway() -> None:
-    print("\n=== 场景5: 网关通道 ===")
-    gw_mod = import_from_channel("channel_gateway", "channel_gateway")
-    gateway = gw_mod.ChannelGateway()
-    assert hasattr(gateway, "register_adapter")
-    assert hasattr(gateway, "handle_message")
-    assert hasattr(gateway, "send_response")
-    _record("网关方法", "register_adapter/handle_message/send_response 全部存在", True)
-
-    mn = import_from_channel("channel_gateway", "message_normalizer")
-    normalizer = mn.MessageNormalizer()
-    for ch in ["feishu", "dingtalk", "wecom", "qq"]:
-        assert ch in normalizer._normalizers
-    _record("网关标准化器", f"注册渠道: {list(normalizer._normalizers.keys())}", True)
+# ── M1-M4: P8 模型名解析等价逻辑核对（与 modelName.ts 逐行一致） ────
 
 
-# ---------------------------------------------------------------------------
-# 场景 6: CLI通道
-# ---------------------------------------------------------------------------
-def test_cli() -> None:
-    print("\n=== 场景6: CLI通道 ===")
-    cli_mod = import_from_channel("channel_cli", "cli_output_adapter")
-
-    # UTF-8 直通
-    result_utf8 = cli_mod.sanitize_for_terminal("hello 你好 🎉")
-    assert result_utf8 == "hello 你好 🎉"
-    _record("CLI UTF-8", f"result='{result_utf8}'", True)
-
-    # GBK 降级
-    old_stdout = sys.stdout
-    sys.stdout = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
-    try:
-        result_gbk = cli_mod.sanitize_for_terminal("hello 你好 🎉")
-        assert "?" in result_gbk
-    finally:
-        sys.stdout = old_stdout
-    _record("CLI GBK降级", "emoji 🎉 被替换为 ?", True)
+def resolve_model_display_name(model, tiers):
+    """与 frontend/src/utils/modelName.ts resolveModelDisplayName 等价：
+    - model 为空 -> ''
+    - tiers 为空 -> 原值
+    - model 命中 tiers 键且值非空白 -> 映射值
+    - 否则原样返回
+    """
+    if not model:
+        return ""
+    if not tiers:
+        return model
+    resolved = tiers.get(model)
+    if resolved and resolved.strip():
+        return resolved
+    return model
 
 
-# ---------------------------------------------------------------------------
-# 场景 7: API通道
-# ---------------------------------------------------------------------------
-def test_api() -> None:
-    print("\n=== 场景7: API通道 ===")
-    # SDK __init__.py 缺失，手动注册
-    try:
-        from agentos_plugin_sdk import AgentOSPlugin  # noqa: F401
-    except ImportError:
-        from agentos_plugin_sdk.plugin import AgentOSPlugin
-        import agentos_plugin_sdk
-        agentos_plugin_sdk.AgentOSPlugin = AgentOSPlugin
+def m_model_name_mapping() -> None:
+    # M1: 分级键 large -> deepseek-chat
+    out = resolve_model_display_name("large", {"large": "deepseek-chat", "medium": "gpt-4o"})
+    record("M1 large -> deepseek-chat", f"out={out!r}", out == "deepseek-chat")
 
-    mod = import_from_channel("channel_api", "server")
-    assert hasattr(mod, "plugin")
-    asyncio.run(mod._on_load({}))
-    routes = mod._available_routes
-    assert len(routes) == 20
-    _record("API路由", f"route_count={len(routes)}", True)
+    # M2: 具体模型名原样返回
+    out = resolve_model_display_name("deepseek-chat", {"large": "deepseek-chat"})
+    record("M2 具体名原样", f"out={out!r}", out == "deepseek-chat")
 
-    status = asyncio.run(mod.api_get_status())
-    assert status["route_count"] == 20
-    _record("API状态", f"api_get_status()={status}", True)
+    # M3: 空值 -> 空串
+    out = resolve_model_display_name("", {"large": "deepseek-chat"})
+    record("M3 空值 -> 空串", f"out={out!r}", out == "")
+    out = resolve_model_display_name(undefined := None, {"large": "deepseek-chat"})
+    record("M3b undefined -> 空串", f"out={out!r}", out == "")
 
-
-# ---------------------------------------------------------------------------
-# 场景 8: plugin.json 验证
-# ---------------------------------------------------------------------------
-def test_plugin_json() -> None:
-    print("\n=== 场景8: plugin.json 验证 ===")
-    for channel in CHANNELS:
-        path = PLUGINS_BASE / channel / "plugin.json"
-        assert path.exists(), f"plugin.json not found: {path}"
-        data = json.loads(path.read_text(encoding="utf-8"))
-        for field in ["id", "name", "plugin_type", "entry", "capabilities"]:
-            assert field in data, f"Missing '{field}' in {channel}"
-        assert "tools" in data["capabilities"]
-        assert data["id"] == channel, f"id mismatch: {data['id']} != {channel}"
-        tools_count = len(data["capabilities"]["tools"])
-        _record(f"JSON:{channel}",
-                f"id='{data['id']}', tools={tools_count}", True)
+    # M4: tiers 缺失 / 键缺失 / 键值为空 -> 回退原值
+    out = resolve_model_display_name("large", None)
+    record("M4 tiers 缺失回退原值", f"out={out!r}", out == "large")
+    out = resolve_model_display_name("large", {"medium": "gpt-4o"})
+    record("M4b 键缺失回退原值", f"out={out!r}", out == "large")
+    out = resolve_model_display_name("large", {"large": "   "})
+    record("M4c 键值为空白回退原值", f"out={out!r}", out == "large")
 
 
-# ---------------------------------------------------------------------------
-# 场景 9: pytest 测试套件
-# ---------------------------------------------------------------------------
-def test_pytest_suite() -> None:
-    print("\n=== 场景9: pytest 测试套件 ===")
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest",
-         "tests/unit/test_channel_migration.py",
-         "-v", "--tb=short", "--no-header"],
-        capture_output=True, text=True, cwd=str(PROJECT_ROOT),
-    )
-    output = result.stdout + result.stderr
-    if "55 passed" in output:
-        _record("pytest", "55/55 passed", True)
-    else:
-        # 提取通过数
-        passed = output.count(" PASSED")
-        failed = output.count(" FAILED")
-        _record("pytest", f"passed={passed}, failed={failed}", failed == 0)
+def main() -> None:
+    print("=" * 60)
+    print("P2 搜索 API 实测")
+    print("=" * 60)
+    s1_session_search()
+    s2_message_search()
+    s3_all_search()
+    s4_empty_q()
+    s5_invalid_type()
+    s6_unauthorized()
+    s7_limit_out_of_range()
+    s8_helpers()
 
+    print()
+    print("=" * 60)
+    print("P8 模型名解析（等价逻辑核对，node 不可用非 TS 实测）")
+    print("=" * 60)
+    m_model_name_mapping()
 
-# ---------------------------------------------------------------------------
-# 主函数
-# ---------------------------------------------------------------------------
-def main() -> int:
-    print("=" * 70)
-    print("第三方通道插件迁移功能验证")
-    print("=" * 70)
-
-    scenarios = [
-        test_dingtalk, test_feishu, test_wecom, test_qq,
-        test_gateway, test_cli, test_api, test_plugin_json, test_pytest_suite,
-    ]
-
-    for scenario in scenarios:
-        try:
-            scenario()
-        except Exception as exc:
-            _record(scenario.__name__, f"异常: {exc}", False)
-
-    # 汇总
-    print("\n" + "=" * 70)
-    total = len(_results)
-    passed = sum(1 for _, _, p in _results if p)
-    failed = total - passed
-    print(f"验证汇总: {passed}/{total} 通过, {failed} 失败")
-    print("=" * 70)
-
-    return 0 if failed == 0 else 1
+    print()
+    print("=" * 60)
+    failed = [r for r in _results if not r[2]]
+    print(f"总计: {len(_results)}  通过: {len(_results) - len(failed)}  失败: {len(failed)}")
+    if failed:
+        for name, detail, _ in failed:
+            print(f"  FAIL: {name}: {detail}")
+        sys.exit(1)
+    print("全部 PASS ✅")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -1,8 +1,10 @@
 /** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
 import { Loader2 } from '@/assets/icons'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
+import { getDefaults, type LLMDefaults } from '@/services/api/config'
+import { resolveModelDisplayName, type ModelTiers } from '@/utils/modelName'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
@@ -13,7 +15,6 @@ import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { MessageList } from './MessageList'
-import { NotificationCenter } from './NotificationCenter'
 import { SubTabRouter } from './SubTabRouter'
 import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
@@ -113,7 +114,28 @@ export const ChatContainer = ({
     const pid = activeTab?.pipelineRunId
     return pid ? s.pipelines[pid]?.agentName ?? '' : ''
   })
-  const effectiveModelName = useMemo(() => {
+
+  /**
+   * P8 模型显示：LLM 默认配置中的模型分级映射（large/medium/small → 具体模型名）。
+   * 从 /ext/channel_api/config/llm/defaults 读取 tiers，失败时静默（tiers 为 undefined，
+   * resolveModelDisplayName 会原样返回 model 值，不阻塞主流程）。
+   */
+  const [llmDefaults, setLlmDefaults] = useState<LLMDefaults | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    getDefaults()
+      .then((data) => {
+        if (!cancelled) setLlmDefaults(data)
+      })
+      .catch(() => {
+        // 静默：模型名解析失败不影响主流程（回退显示原始值）
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const rawModelName = useMemo(() => {
     const candidateIds = [activeTab?.agentId, pipelineAgentName].filter(Boolean) as string[]
     for (const id of candidateIds) {
       const agent = agents.find(
@@ -125,6 +147,12 @@ export const ChatContainer = ({
     }
     return ''
   }, [activeTab?.agentId, pipelineAgentName, agents])
+
+  /** P8: 分级键（large/medium/small）→ 具体模型名；具体模型名原样返回 */
+  const effectiveModelName = useMemo(
+    () => resolveModelDisplayName(rawModelName, llmDefaults?.tiers),
+    [rawModelName, llmDefaults],
+  )
 
   /** 从 pipelineMessageStore 获取当前激活管道的消息 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责， */
   const pipelineMessages = usePipelineMessageStore(
@@ -293,14 +321,11 @@ export const ChatContainer = ({
       {/* 活跃投票面板 */}
       <ActiveVotingPanels sessionId={sessionId} />
 
-      {/* 输入区域 + 通知中心 · Deep Space v2: 上边框 + 12px 内边距 */}
+      {/* 输入区域 · Deep Space v2: 上边框 + 12px 内边距（P5: 通知中心已移至侧边栏唯一入口） */}
       <div
         className="relative shrink-0 border-t px-3 py-3"
         style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
       >
-        <div className="absolute -top-10 right-2 z-10">
-          <NotificationCenter />
-        </div>
         {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
         <ChatInput
           key={`input-${activeTabId || sessionId}`}

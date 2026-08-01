@@ -258,6 +258,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
         users_router,
     )
     from channels.api.routes_reviews import reviews_router  # noqa: PLC0415
+    from channels.api.routes_search import router as search_router  # noqa: PLC0415
     from channels.api.routes_workspaces import workspaces_router  # noqa: PLC0415
 
     app.include_router(projects_router)
@@ -296,6 +297,9 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     from channels.api.routes_scene import router as scene_router  # noqa: PLC0415
 
     app.include_router(scene_router)
+
+    # ---- 搜索路由（P2 搜索框合并-后端部分） ----
+    app.include_router(search_router)
 
     # ---- 维护管理路由 ----
     from channels.api.routes_maintenance import router as maintenance_router  # noqa: PLC0415
