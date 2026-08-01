@@ -2,11 +2,10 @@
 task_submit inherit 参数单元测试
 
 测试要点：
-1. schema 定义：inherit 参数存在，properties 含 from(string) 和 mode(enum:pipe/workspace)
-2. inherit_workspace_from 标记废弃（description 含废弃提示）
-3. inherit.mode=workspace 时复用 inherit_workspace_from 逻辑
-4. inherit.mode=pipe 时记录 metadata
-5. inherit 优先于 inherit_workspace_from
+1. schema 定义：inherit 已平铺为顶层 inherit_from(string) 和 inherit_mode(oneOf: string|array)
+2. inherit_mode=workspace 时复用 inherit_workspace_from 逻辑
+3. inherit_mode=pipe 时记录 metadata
+4. inherit_from / inherit_mode 优先于 inherit_workspace_from
 """
 from __future__ import annotations
 
@@ -117,69 +116,44 @@ async def _run_execute(tool: TaskSubmitTool, inputs: dict) -> any:
 
 
 class TestInheritSchema:
-    """验证 inherit 参数在 schema 中的定义符合规范。"""
+    """验证 inherit 参数在 schema 中的定义符合规范（平铺为顶层字段）。"""
 
-    def test_schema_has_inherit_property(self):
-        """schema 应包含 inherit 顶级参数。"""
+    def test_schema_has_inherit_from_property(self):
+        """schema 应包含 inherit_from 顶级参数。"""
         schema = _get_schema()
-        assert "inherit" in schema["properties"], "schema.properties 中应包含 inherit"
+        assert "inherit_from" in schema["properties"], "schema.properties 中应包含 inherit_from"
 
-    def test_inherit_is_object_type(self):
-        """inherit 应为 object 类型。"""
+    def test_inherit_from_is_string_type(self):
+        """inherit_from 应为 string 类型。"""
         schema = _get_schema()
-        inherit_def = schema["properties"]["inherit"]
-        assert inherit_def["type"] == "object"
+        assert schema["properties"]["inherit_from"]["type"] == "string"
 
-    def test_inherit_has_from_string_property(self):
-        """inherit.properties 应包含 from（type=string）。"""
+    def test_schema_has_inherit_mode_property(self):
+        """schema 应包含 inherit_mode 顶级参数。"""
         schema = _get_schema()
-        inherit_def = schema["properties"]["inherit"]
-        assert "from" in inherit_def["properties"]
-        assert inherit_def["properties"]["from"]["type"] == "string"
+        assert "inherit_mode" in schema["properties"], "schema.properties 中应包含 inherit_mode"
 
-    def test_inherit_has_mode_enum_property(self):
-        """inherit.properties 应包含 mode（enum=[pipe, workspace]）。"""
+    def test_inherit_mode_supports_string_enum(self):
+        """inherit_mode 的 string 分支应允许 pipe/workspace。"""
         schema = _get_schema()
-        inherit_def = schema["properties"]["inherit"]
-        assert "mode" in inherit_def["properties"]
-        mode_def = inherit_def["properties"]["mode"]
-        assert mode_def["type"] == "string"
-        assert set(mode_def["enum"]) == {"pipe", "workspace"}
+        mode_def = schema["properties"]["inherit_mode"]
+        string_opt = next(o for o in mode_def["oneOf"] if o.get("type") == "string")
+        assert set(string_opt["enum"]) == {"pipe", "workspace"}
 
-    def test_inherit_required_fields(self):
-        """inherit.required 应包含 from 和 mode。"""
+    def test_inherit_mode_supports_array(self):
+        """inherit_mode 的 array 分支应限定元素为 pipe/workspace。"""
         schema = _get_schema()
-        inherit_def = schema["properties"]["inherit"]
-        assert "required" in inherit_def
-        assert set(inherit_def["required"]) == {"from", "mode"}
+        mode_def = schema["properties"]["inherit_mode"]
+        array_opt = next(o for o in mode_def["oneOf"] if o.get("type") == "array")
+        assert array_opt["items"]["type"] == "string"
+        assert set(array_opt["items"]["enum"]) == {"pipe", "workspace"}
 
-    def test_inherit_not_in_global_required(self):
-        """inherit 不应在全局 required 中（它是可选参数）。"""
+    def test_inherit_fields_not_in_global_required(self):
+        """inherit_from / inherit_mode 不应在全局 required 中（可选参数）。"""
         schema = _get_schema()
         global_required = schema.get("required", [])
-        assert "inherit" not in global_required
-
-
-class TestInheritWorkspaceFromDeprecated:
-    """验证 inherit_workspace_from 已标记为废弃。"""
-
-    def test_inherit_workspace_from_has_deprecation_hint(self):
-        """inherit_workspace_from 的 description 应包含废弃提示。"""
-        schema = _get_schema()
-        ws_from_def = schema["properties"]["inherit_workspace_from"]
-        description = ws_from_def.get("description", "")
-        assert "已废弃" in description or "废弃" in description, (
-            f"inherit_workspace_from description 应包含废弃提示，实际: {description}"
-        )
-
-    def test_inherit_workspace_from_mentions_inherit(self):
-        """inherit_workspace_from 的 description 应引导用户使用 inherit。"""
-        schema = _get_schema()
-        ws_from_def = schema["properties"]["inherit_workspace_from"]
-        description = ws_from_def.get("description", "")
-        assert "inherit" in description, (
-            f"inherit_workspace_from description 应提及 inherit，实际: {description}"
-        )
+        assert "inherit_from" not in global_required
+        assert "inherit_mode" not in global_required
 
 
 # ══════════════════════════════════════════════════════════
@@ -592,6 +566,72 @@ class TestInheritPipeConversationHistoryBug:
             f"_inherit_pipe_pipeline_id 应为 {source_pipeline_id}，"
             f"实际为 {task_data.get('_inherit_pipe_pipeline_id')}"
         )
+
+    @pytest.mark.asyncio
+    async def test_retry_resets_eval_counters(self):
+        """retry 时应清空上一轮评估计数器，避免新轮评估立即命中上限。
+
+        回归：失败任务 continue 后，eval_total_calls / eval_retry_count
+        必须被重置，否则新一轮第一次提交评估即触发 EVAL_CALL_LIMIT_EXCEEDED。
+        """
+        from tools.builtin.task.tool import TaskTool
+        from tasks.types import TaskModel, TaskStatus
+        from tasks.service import TaskService as _TS
+
+        tool = TaskTool()
+
+        task = TaskModel(
+            id="task_retry_eval_001",
+            title="评估失败重试任务",
+            description="测试评估计数器重置",
+            agent_name="test_agent",
+            agent_level="L2",
+            status=TaskStatus.FAILED,
+            metadata={
+                "acceptance_criteria": {"file_check": {"input_params": {"path": "test.txt"}}},
+                "max_retries": 6,
+                "retry_count": 0,
+                "target_id": "test_agent",
+                "ws_meta": {"path": "/tmp/ws"},
+                "isolation_level": "non_isolated",
+                "workspace": "/tmp/ws",
+                # 上一轮评估残留的计数器（模拟已命中上限的状态）
+                "eval_total_calls": 15,
+                "eval_retry_count": {"file_check": 3},
+            },
+            pipeline_run_id="current_pipeline_id",
+            parent_pipeline_id="parent_pipeline_id",
+        )
+
+        mock_service = MagicMock(spec=_TS)
+        mock_service.get_task.return_value = task
+        mock_service.force_transition = AsyncMock()
+        mock_service.save_task = AsyncMock()
+
+        mock_task_worker = MagicMock()
+        mock_task_worker.submit_task.return_value = True
+
+        with (
+            patch("tools.builtin.task.tool.TaskTool._get_task_service", return_value=mock_service),
+            patch("infrastructure.service_provider.get_service_provider") as mock_sp,
+        ):
+            mock_sp_inst = MagicMock()
+            mock_sp_inst.get.side_effect = lambda key: (
+                mock_task_worker if key == "task_worker" else None
+            )
+            mock_sp.return_value = mock_sp_inst
+
+            result = await tool._retry_from_terminal(task, "", mock_service)
+
+        # 核心断言：评估计数器必须被清空
+        assert "eval_total_calls" not in task.metadata, (
+            "retry 后 eval_total_calls 必须被清空，否则新轮评估立即命中上限"
+        )
+        assert "eval_retry_count" not in task.metadata, (
+            "retry 后 eval_retry_count 必须被清空，否则新轮评估立即命中上限"
+        )
+        # retry_count 应正常递增（确认只清了 eval 计数器，未误伤其它字段）
+        assert task.metadata["retry_count"] == 1
 
     def test_build_metadata_stores_inherit_pipe_from(self):
         """_build_metadata 应持久化 inherit_pipe_from 供 retry 恢复使用。"""

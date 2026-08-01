@@ -120,12 +120,14 @@ async def bash_execute(**kwargs):
     """执行 Shell 命令（0.2 MCP 入口）。
 
     所有调用共享同一个 BashTool 单例——进程状态跨调用保持。
+    失败响应携带稳定 error_code（PROCESS_FORBIDDEN / PROCESS_NOT_FOUND 等），
+    便于 LLM 与调用方按码分支。
     """
     bash = _get_tool()
     result = await bash.execute(kwargs)
     if result.success:
         return result.output
-    return {"error": result.error}
+    return {"error": result.error, "error_code": result.error_code}
 
 
 if __name__ == "__main__":

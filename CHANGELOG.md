@@ -7,6 +7,56 @@
 
 ---
 
+## [0.2.0] - 2026-08-01
+
+### 🐛 修复：Bash 工具 sidecar 生命周期与治理（评审 H-issue）
+
+#### 状态生命周期（核心）
+- **跨调用进程状态保持**：`plugins/shared/tools/bash/server.py` 由"每次 MCP 调用新建
+  BashTool"改为**模块级单例**（`_get_tool()`）——execute → input → continue → terminate
+  全链路跨 MCP 调用可用（原实现每次调用新建 ProcessManager，进程表丢失导致
+  continue/input/terminate 报"进程不存在"）。
+- **sidecar 退出清理**：注册 `on_unload` 生命周期钩子 + `atexit` 兜底，退出前调用
+  `ProcessManager.shutdown_all()` 终止全部活动进程并取消看门狗，防卸载残留。
+
+#### 自包含重构（0.2 范围，零 0.1 src 依赖）
+- sidecar 原依赖 0.1 `src/` 树（`tools.builtin.base → core.results → src.core.di`），
+  **实际无法启动**（`No module named 'src.config'`）。现已全部本地化：
+  `bash_types.py`（原 `types.py` 重命名——顶层名遮蔽 stdlib `types` 的隐形崩溃点）、
+  `encoding.py`、`result_types.py`（ToolResult + 工厂）、`workspace_aware.py`、
+  本地 `BuiltinTool` 语义（删 0.1 的 `get_tool_definition`/`tools.types` 依赖）。
+- **WSL 交互竞态修复**：send_input 后 ~ms 窗口内读取该进程日志文件会丢失 WSL2
+  stdio relay 退出前最后一批输出（预存在环境问题）。`_handle_input` 改为**先取摘要
+  再写 stdin**，规避竞态窗口。
+
+#### 越权防护
+- 进程记录会话身份 owner（内核注入的 `_owner`，tool_core 由 session_id/thread_id
+  拼接）；continue/input/terminate/read_log 强制校验 owner 一致，跨会话操作拒绝
+  （`PROCESS_FORBIDDEN`），防多会话 PID 越权/劫持。日志头写 `# Owner:`，磁盘降级
+  路径同样校验。
+- 内核侧：`tool-executor.invoke` 缺会话身份时告警（capability_router）；工具调用
+  参数注入 `_owner`（tool_core）。
+
+#### 工程/安全
+- **manifest 补齐**：`capabilities.tools[0]` 声明完整 input/output schema；
+  `permissions` 诚实声明（system_calls/filesystem/network/env_vars）。
+- **批量日志写入**：`_read_output` 攒批落盘（512 行或 64KB），替代逐行 open/write/close。
+- **摘要 tail 读取**：summary 压缩只喂尾部窗口（`_read_tail_lines`，默认 5000 行），
+  `read_log` 完整输出不变。
+- **敏感信息掩码**：日志头 `# Command:` 落盘前掩码
+  （Authorization/Bearer/API key/密码/URL 凭据）；输入掩码保留；看门狗日志同样掩码。
+
+#### 内核进程树治理
+- `McpClient.kill()` 杀整棵进程树：Windows `taskkill /PID /T /F`、Unix 进程组信号
+  （spawn 时 `process_group(0)`）——sidecar 卸载/崩溃/热重载时 bash 孙进程不再变孤儿。
+
+### 已知限制
+- idle GC 卸载时运行中任务被树杀终止；内存运行态不可恢复，磁盘日志
+  （`logs/bash/bash_<pid>.log`）保留，重启后可 `read_log`。
+- owner 隔离依赖内核注入 `_owner`；未注入身份的历史/异常调用走宽松兜底。
+
+---
+
 ## [0.1.0] - 2026-06-22
 
 ### 🎉 首次发布

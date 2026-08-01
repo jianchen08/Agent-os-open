@@ -476,9 +476,9 @@ class TestTaskSubmitToolDefinition:
         assert tool_def.name == "task_submit"
 
     def test_tool_definition_required_goal(self):
-        """验证工具定义要求 goal 为必填参数"""
+        """验证工具定义要求 goal_title 为必填参数（goal 已平铺）"""
         tool_def = TaskSubmitTool.get_tool_definition()
-        assert "goal" in tool_def.input_schema["required"]
+        assert "goal_title" in tool_def.input_schema["required"]
 
     def test_tool_definition_has_priority_and_scope(self):
         """验证工具定义包含 priority 和 task_scope 参数"""

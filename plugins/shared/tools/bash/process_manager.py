@@ -108,22 +108,23 @@ class ProcessManager:
             logger.warning(f"日志头部写入失败（不影响命令执行） | file={log_file} | error={e}")
 
     # 敏感信息掩码模式：保留前缀，掩掉取值（命令日志落盘前调用）
+    # 取值用 [^\s"']+（不含引号），避免吞掉值后的闭合引号。
     _SECRET_PATTERNS: ClassVar[list[tuple[re.Pattern[str], str]]] = [
         # Authorization: Bearer xxx / Basic xxx / digest xxx（curl -H 等）
         (
-            re.compile(r"(?i)(authorization\s*[:=]\s*)((?:bearer|basic|digest)\s+)?\S+"),
+            re.compile(r"(?i)(authorization\s*[:=]\s*)((?:bearer|basic|digest)\s+)?[^\s\"']+"),
             r"\1\2***",
         ),
         # 裸 Bearer token
-        (re.compile(r"(?i)(bearer\s+)(\S+)"), r"\1***"),
+        (re.compile(r"(?i)(bearer\s+)[^\s\"']+"), r"\1***"),
         # key=value 赋值（API_KEY=xxx、password: xxx 等）
         (
-            re.compile(r"(?i)((?:api[_-]?key|password|passwd|secret|token|credential)\s*[:=]\s*)(\S+)"),
+            re.compile(r"(?i)((?:api[_-]?key|password|passwd|secret|token|credential)\s*[:=]\s*)[^\s\"']+"),
             r"\1***",
         ),
         # CLI 选项 --api-key xxx / --token xxx
         (
-            re.compile(r"(?i)(--[a-z0-9_-]*(?:key|token|secret|password|auth)[a-z0-9_-]*\s+)(\S+)"),
+            re.compile(r"(?i)(--[a-z0-9_-]*(?:key|token|secret|password|auth)[a-z0-9_-]*\s+)[^\s\"']+"),
             r"\1***",
         ),
         # URL 内嵌凭据 https://user:pass@host

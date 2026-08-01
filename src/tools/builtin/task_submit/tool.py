@@ -207,28 +207,18 @@ class TaskSubmitTool(BuiltinTool):
                         "type": "string",
                         "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索",
                     },
-                    "goal": {
-                        "type": "object",
-                        "description": "任务目标（必填）",
-                        "properties": {
-                            "title": {
-                                "type": "string",
-                                "description": "任务标题（必填），简短明确",
-                            },
-                            "description": {
-                                "type": "string",
-                                "maxLength": 2000,
-                                "description": (
-                                    "任务描述（上限2000字符）。只写目标和背景，"
-                                    "禁止写执行步骤、工具选择、流程顺序。"
-                                    "引用文件只写路径（如 docs/report.md），"
-                                    "禁止复制文件内容进来，让下级 Agent 用 file_read 自行读取。"
-                                    "正确：'实现用户登录API，参考 docs/auth_spec.md'"
-                                    "错误：'先用file_write创建login.py，再...'"
-                                ),
-                            },
-                        },
-                        "required": ["title"],
+                    "goal_title": {
+                        "type": "string",
+                        "description": "任务标题（必填），简短明确",
+                    },
+                    "goal_description": {
+                        "type": "string",
+                        "maxLength": 2000,
+                        "description": (
+                            "任务描述（上限 2000 字符）。只写目标和背景，"
+                            "禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），"
+                            "让下级 Agent 自行读取，不要复制文件内容。"
+                        ),
                     },
                     "acceptance_criteria": {
                         "type": "object",
@@ -322,61 +312,33 @@ class TaskSubmitTool(BuiltinTool):
                             "isolated：隔离，在隔离的工作空间中工作，不影响原项目。"
                         ),
                     },
-                    "inherit": {
-                        "type": "object",
+                    "inherit_from": {
+                        "type": "string",
+                        "description": "源任务 ID（被继承的任务）。设置后需同时指定 inherit_mode",
+                    },
+                    "inherit_mode": {
                         "description": (
-                            "资源继承配置：从指定源任务继承资源，新任务在源任务的成果上继续工作。"
-                            "不传此参数 = 创建全新任务（默认行为）。\n"
-                            '继承内容由 mode 决定，mode 可传单个字符串（如 "pipe"），'
-                            '也可传列表（如 ["pipe", "workspace"]）同时继承管道和工作空间。\n'
-                            "如何选择 mode（什么时候用哪种继承）：\n"
-                            "- 不需要任何继承 → 不传 inherit。\n"
-                            '- 只想接着对话（改了目标/验收标准，但上下文还要用）→ mode="pipe"。'
-                            "继承源任务的对话管道（消息历史），新任务从上次对话上下文继续，但不复用工作空间。\n"
-                            '- 只想复用文件（换了实现方案，但已产出的代码/文档要留着）→ mode="workspace"。'
-                            "继承源任务的工作空间（文件目录），新任务能看到并继续修改已有文件，但对话历史清空。\n"
-                            '- 既想接着对话、又想复用文件（最常见的延续场景）→ mode=["pipe", "workspace"]。'
-                            "同时继承对话历史和工作空间，新任务等同于在源任务现场继续。\n"
-                            "from 指定源任务 ID。"
+                            "继承模式（需配合 inherit_from 使用）：\n"
+                            '- "pipe"：继承对话管道（消息历史），适合改了目标但保留上下文\n'
+                            '- "workspace"：继承工作空间（文件目录），适合换方案但保留文件\n'
+                            '- ["pipe","workspace"]：同时继承对话与文件（最常见延续场景）'
                         ),
-                        "properties": {
-                            "from": {
+                        "oneOf": [
+                            {
                                 "type": "string",
-                                "description": "源任务 ID（被继承的任务）",
+                                "enum": ["pipe", "workspace"],
                             },
-                            "mode": {
-                                "description": (
-                                    '继承模式：传 "pipe" 或 "workspace" 继承单一资源；'
-                                    '传 ["pipe", "workspace"] 同时继承对话管道和工作空间。'
-                                ),
-                                "oneOf": [
-                                    {
-                                        "type": "string",
-                                        "enum": ["pipe", "workspace"],
-                                        "description": (
-                                            "单值继承："
-                                            "pipe = 继承对话管道（消息历史），适合改了目标但保留上下文；"
-                                            "workspace = 继承工作空间（文件目录），适合换方案但保留文件。"
-                                        ),
-                                    },
-                                    {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string",
-                                            "enum": ["pipe", "workspace"],
-                                        },
-                                        "description": (
-                                            "多值继承：同时继承多种资源，"
-                                            '如 ["pipe", "workspace"] 既继承对话历史又继承文件。'
-                                        ),
-                                    },
-                                ],
+                            {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["pipe", "workspace"],
+                                },
                             },
-                        },
-                        "required": ["from", "mode"],
+                        ],
                     },
                 },
-                "required": ["goal"],
+                "required": ["goal_title"],
                 "allOf": [
                     {
                         "if": {
@@ -442,8 +404,16 @@ class TaskSubmitTool(BuiltinTool):
 
         _t0 = _time.monotonic()
         task_scope = inputs.get("task_scope", "non_container")
+        # ── goal 字段解析（schema 已平铺为 goal_title/goal_description） ──
+        # 优先读扁平字段；同时兼容旧的 goal 对象（历史调用方/未刷新 schema 的 LLM）。
         goal = inputs.get("goal")
-        if isinstance(goal, str):
+        if goal is None and (inputs.get("goal_title") is not None):
+            # 平铺后的标准入口：把扁平字段重组为下游统一使用的 {title, description}
+            goal = {
+                "title": inputs.get("goal_title"),
+                "description": inputs.get("goal_description", ""),
+            }
+        elif isinstance(goal, str):
             import json  # noqa: PLC0415
 
             try:
@@ -670,7 +640,17 @@ class TaskSubmitTool(BuiltinTool):
         # ["pipe", "workspace"]）同时继承对话管道和工作空间；两种模式相互独立，
         # 可任意组合。
         # 当 inherit 和 inherit_workspace_from 同时存在时，inherit 优先。
+        # schema 已平铺为 inherit_from/inherit_mode，这里把扁平字段重组为 inherit 对象，
+        # 供 _build_metadata 及管道引擎按既有契约读取（旧式 inherit 对象仍兼容）。
         _inherit_config = inputs.get("inherit")
+        if not isinstance(_inherit_config, dict) and (
+            inputs.get("inherit_from") is not None or inputs.get("inherit_mode") is not None
+        ):
+            _inherit_config = {
+                "from": inputs.get("inherit_from", ""),
+                "mode": inputs.get("inherit_mode", ""),
+            }
+            inputs["inherit"] = _inherit_config
         if _inherit_config and isinstance(_inherit_config, dict):
             _inherit_from_id = _inherit_config.get("from", "")
             _inherit_mode = _inherit_config.get("mode", "")
@@ -1170,7 +1150,13 @@ class TaskSubmitTool(BuiltinTool):
 
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """处理容器任务提交。"""
+        # goal 解析逻辑同 execute()：优先扁平字段，兼容旧式 goal 对象
         goal = inputs.get("goal")
+        if goal is None and inputs.get("goal_title") is not None:
+            goal = {
+                "title": inputs.get("goal_title"),
+                "description": inputs.get("goal_description", ""),
+            }
         parent_agent_level = inputs.get("parent_agent_level")
 
         # ── 目标空间安全检查 ──
@@ -1514,7 +1500,15 @@ class TaskSubmitTool(BuiltinTool):
             metadata["user_id"] = inputs["user_id"]
 
         # 存储 inherit 资源继承配置（供管道引擎读取）
+        # schema 已平铺：兼容扁平的 inherit_from/inherit_mode 与旧式 inherit 对象
         inherit_config = inputs.get("inherit")
+        if not isinstance(inherit_config, dict) and (
+            inputs.get("inherit_from") is not None or inputs.get("inherit_mode") is not None
+        ):
+            inherit_config = {
+                "from": inputs.get("inherit_from", ""),
+                "mode": inputs.get("inherit_mode", ""),
+            }
         if isinstance(inherit_config, dict) and inherit_config.get("from"):
             metadata["inherit"] = inherit_config
             # mode 可能是 "pipe" 字符串，也可能是包含 "pipe" 的列表

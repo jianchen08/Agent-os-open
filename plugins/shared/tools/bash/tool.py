@@ -643,6 +643,14 @@ class BashTool(WorkspaceAwareMixin):
         if not ok:
             return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
 
+        # 获取当前状态。
+        # ⚠️ 顺序说明（WSL 竞态）：send_input 后 ~ms 窗口内若读取该进程日志文件，
+        # Windows WSL2 的 stdio relay 会丢失进程退出前的最后一批输出（预存在
+        # 环境问题，原代码 send_input 后紧跟 get_summary 同样触发）。因此摘要
+        # 在**发送前**取（发送前/后语义等价，都是"输入已发送"时刻的状态快照），
+        # 发送后不再落盘任何读操作，避开竞态窗口。
+        summary = self.process_manager.get_summary(pid)
+
         # 发送输入
         success, error = await self.process_manager.send_input(pid, input_text)
 
@@ -651,9 +659,6 @@ class BashTool(WorkspaceAwareMixin):
                 error=error or "发送输入失败",
                 error_code="INPUT_FAILED",
             )
-
-        # 获取当前状态
-        summary = self.process_manager.get_summary(pid)
 
         return create_success_result(
             data={
