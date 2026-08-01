@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import re
 import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 from typing import Any, Protocol, runtime_checkable
 
 import litellm
@@ -35,6 +38,99 @@ _diag_logger = logging.getLogger(__name__ + "._diag")
 _diag_logger.propagate = False
 _stream_logger = logging.getLogger(__name__ + "._stream")
 _stream_logger.propagate = False
+
+# ── Prompt 审计日志（完整 messages 请求体落盘，默认关）──────────────────────
+# 发给远端 LLM API 的完整 messages/tools 请求体落盘，用于复现/审计/调试。
+# 默认关闭（含 api_key/用户隐私，需显式开启并信任本地存储）。开启时经基础脱敏
+# 写独立文件 data/logs/prompt_audit.log（独立 RotatingFileHandler，不依赖父 logger，
+# 保证 0.2 sidecar 进程里一定有 handler）。
+#
+# 开关：env AGENTOS_LOG_PROMPT_BODY=1 / true
+_PROMPT_AUDIT_ENABLED = os.getenv("AGENTOS_LOG_PROMPT_BODY", "").lower() in ("1", "true")
+_prompt_logger = logging.getLogger(__name__ + "._prompt")
+_prompt_logger.propagate = False
+
+
+def _sync_prompt_handlers() -> None:
+    """惰性初始化 prompt 审计 logger 的独立文件 handler。
+
+    与 _diag_logger 不同，这里挂独立的 RotatingFileHandler（不复用父 logger 的
+    handler），确保即便父 logger 未被 setup_logging 配置，prompt 审计仍能落盘。
+    幂等：已挂则跳过。
+    """
+    if _prompt_logger.handlers:
+        return
+    # 落盘路径：优先 env AGENTOS_LOG_PROMPT_FILE，默认 data/logs/prompt_audit.log
+    # 相对 cwd（sidecar 工作目录为插件目录），data/logs 通常在项目根——为兼容，
+    # 尝试向上查找 data/logs，找不到就在 cwd 下建。
+    log_path = os.getenv("AGENTOS_LOG_PROMPT_FILE") or _resolve_prompt_log_path()
+    try:
+        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+        handler = RotatingFileHandler(
+            log_path, maxBytes=20 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        _prompt_logger.addHandler(handler)
+        _prompt_logger.setLevel(logging.DEBUG)
+    except OSError:
+        # 路径不可写时静默降级（不阻断 LLM 调用主路径）。
+        _prompt_logger.disabled = True
+
+
+def _resolve_prompt_log_path() -> str:
+    """查找 data/logs 目录（向上最多 4 层），返回 prompt_audit.log 路径。"""
+    cwd = os.getcwd()
+    for _ in range(5):
+        candidate = os.path.join(cwd, "data", "logs")
+        if os.path.isdir(candidate):
+            return os.path.join(candidate, "prompt_audit.log")
+        parent = os.path.dirname(cwd)
+        if parent == cwd:
+            break
+        cwd = parent
+    return os.path.join(os.getcwd(), "data", "logs", "prompt_audit.log")
+
+
+# ── 脱敏 ────────────────────────────────────────────────────
+# 请求体含 api_key、用户隐私。基础脱敏：掩码常见密钥/token 形态。
+# 非穷举——文档明确警告"开启=信任本地存储"，PII 库可后续接入。
+_REDACT_PATTERNS = [
+    # OpenAI/Anthropic 风格 key：sk-... / sk-ant-...（保留前 6 位）
+    (re.compile(r"(sk-[A-Za-z0-9]{4})[A-Za-z0-9_-]+"), r"\1..."),
+    # Bearer token（保留前 8 位）
+    (re.compile(r"(Bearer\s+[A-Za-z0-9._-]{6})[A-Za-z0-9._-]+"), r"\1..."),
+    # "api_key": "value" / api_key=value 形式（值替换为掩码）
+    (re.compile(r'("(?:api_key|api-key|apikey|authorization)"\s*:\s*")[^"]+(")'), r"\1***\2"),
+]
+
+
+def _redact_prompt(text: str) -> str:
+    """对序列化后的 prompt 文本做基础脱敏。"""
+    for pattern, repl in _REDACT_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def _log_prompt_body(model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **kwargs: Any) -> None:
+    """记录完整 prompt 请求体到审计日志（开关关闭时零开销直接返回）。
+
+    在 completion() provider 适配后、stream 分发前调用，记录的是真正发往远端
+    API 边界的请求体。kwargs 中的 api_key 等敏感值一并记录但经脱敏。
+    """
+    if not _PROMPT_AUDIT_ENABLED:
+        return
+    _sync_prompt_handlers()
+    if _prompt_logger.disabled:
+        return
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        # kwargs 含 temperature/max_tokens/api_base/api_key 等——脱敏后记录
+        "params": {k: v for k, v in kwargs.items() if k not in ("on_chunk",)},
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, default=str)
+    _prompt_logger.debug("PROMPT %s", _redact_prompt(serialized))
 
 
 def _sync_diag_handlers() -> None:
@@ -278,6 +374,10 @@ class _BaseLiteLLMAdapter:
         # 等专有参数，故挪进 extra_body 透传（上游本身能接受）。
         if model.lower().startswith("openai/"):
             _move_to_extra_body(kwargs, ("reasoning_effort", "thinking"))
+
+        # Prompt 审计落盘（默认关，经基础脱敏）：记录真正发往远端 API 的请求体。
+        # 放在 provider 适配 + extra_body 处理之后，是 litellm 调用前的最终收口点。
+        _log_prompt_body(model, messages, tools, **kwargs)
 
         if stream:
             return await self._call_streaming(model, messages, tools=tools, on_chunk=on_chunk, **kwargs)

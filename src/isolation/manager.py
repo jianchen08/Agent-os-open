@@ -16,6 +16,7 @@ from typing import Any
 
 from isolation.decider import IsolationDecider, IsolationUnrecoverableError
 from isolation.providers.base import IsolationProvider
+from isolation.providers.bwrap_provider import BwrapProvider
 from isolation.providers.docker_provider import DockerProvider
 from isolation.providers.host_provider import HostProvider
 from isolation.types import (
@@ -66,53 +67,71 @@ def _create_providers_from_config(
     if host_config.get("enabled", True):
         providers[IsolationLevel.HOST] = HostProvider()
 
-    # Docker 提供者
-    docker_config = providers_config.get("docker", providers_config.get("cua", {}))
-    if docker_config.get("enabled", True):
-        # 自适应 profile 优先于配置文件的 limits（profile 非 None 时覆盖）
-        cfg_limits = docker_config.get("limits", {})
-        if profile:
-            memory_limit = profile.get("container_memory", cfg_limits.get("memory", "512m"))
-            cpu_limit = profile.get("container_cpus", cfg_limits.get("cpus", "1.0"))
-            memory_swap = profile.get("memory_swap", memory_limit)
-            pids_limit = profile.get("pids_limit", 100)
-        else:
-            memory_limit = cfg_limits.get("memory", "512m")
-            cpu_limit = cfg_limits.get("cpus", "1.0")
-            memory_swap = cfg_limits.get("memory_swap", memory_limit)
-            pids_limit = cfg_limits.get("pids_limit", 100)
+    # CONTAINER 级提供者：bwrap 优先（轻量、无需 docker daemon），不可用时回退 docker。
+    # 见 docs/working/design/bwrap_isolation_migration_plan.md §3.3。
+    bwrap_config = providers_config.get("bwrap", {})
+    if bwrap_config.get("enabled", True) and _bwrap_available():
+        providers[IsolationLevel.CONTAINER] = BwrapProvider()
+        logger.debug("[IsolationManager] 创建 BwrapProvider（CONTAINER 级轻量沙箱）")
+    else:
+        # Docker 提供者
+        docker_config = providers_config.get("docker", providers_config.get("cua", {}))
+        if docker_config.get("enabled", True):
+            # 自适应 profile 优先于配置文件的 limits（profile 非 None 时覆盖）
+            cfg_limits = docker_config.get("limits", {})
+            if profile:
+                memory_limit = profile.get("container_memory", cfg_limits.get("memory", "512m"))
+                cpu_limit = profile.get("container_cpus", cfg_limits.get("cpus", "1.0"))
+                memory_swap = profile.get("memory_swap", memory_limit)
+                pids_limit = profile.get("pids_limit", 100)
+            else:
+                memory_limit = cfg_limits.get("memory", "512m")
+                cpu_limit = cfg_limits.get("cpus", "1.0")
+                memory_swap = cfg_limits.get("memory_swap", memory_limit)
+                pids_limit = cfg_limits.get("pids_limit", 100)
 
-        providers[IsolationLevel.CONTAINER] = DockerProvider(
-            config={
-                "image": docker_config.get("image", "agentos:latest"),
-                "memory_limit": memory_limit,
-                "cpu_limit": cpu_limit,
-                "memory_swap": memory_swap,
-                "pids_limit": pids_limit,
-                "network_mode": docker_config.get("network_mode", "bridge"),
-                # system-issue #3 escape hatch：容器端口映射到宿主，默认空。
-                "publish_ports": docker_config.get("publish_ports", []),
-                # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build
-                # （BuildKit 缓存复用本机已下载的包），无 Dockerfile 则回退 pull。
-                # 默认 dockerfile_path/build_context 相对仓库根；超时默认 600s
-                # （镜像含 apt+pip+playwright 下载，分钟级）。
-                "auto_build": docker_config.get("auto_build", True),
-                "dockerfile_path": docker_config.get("dockerfile_path", "docker/agentos/Dockerfile"),
-                "build_context": docker_config.get("build_context", "."),
-                "build_timeout": docker_config.get("build_timeout", 1800),
-            },
-        )
-        logger.debug(
-            "[IsolationManager] 创建 DockerProvider: image=%s memory=%s cpu=%s swap=%s pids=%s (source=%s)",
-            docker_config.get("image", "agentos:latest"),
-            memory_limit,
-            cpu_limit,
-            memory_swap,
-            pids_limit,
-            "hardware-adaptive" if profile else "config-file",
-        )
+            providers[IsolationLevel.CONTAINER] = DockerProvider(
+                config={
+                    "image": docker_config.get("image", "agentos:latest"),
+                    "memory_limit": memory_limit,
+                    "cpu_limit": cpu_limit,
+                    "memory_swap": memory_swap,
+                    "pids_limit": pids_limit,
+                    "network_mode": docker_config.get("network_mode", "bridge"),
+                    # system-issue #3 escape hatch：容器端口映射到宿主，默认空。
+                    "publish_ports": docker_config.get("publish_ports", []),
+                    # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build
+                    # （BuildKit 缓存复用本机已下载的包），无 Dockerfile 则回退 pull。
+                    # 默认 dockerfile_path/build_context 相对仓库根；超时默认 600s
+                    # （镜像含 apt+pip+playwright 下载，分钟级）。
+                    "auto_build": docker_config.get("auto_build", True),
+                    "dockerfile_path": docker_config.get("dockerfile_path", "docker/agentos/Dockerfile"),
+                    "build_context": docker_config.get("build_context", "."),
+                    "build_timeout": docker_config.get("build_timeout", 1800),
+                },
+            )
+            logger.debug(
+                "[IsolationManager] 创建 DockerProvider: image=%s memory=%s cpu=%s swap=%s pids=%s (source=%s)",
+                docker_config.get("image", "agentos:latest"),
+                memory_limit,
+                cpu_limit,
+                memory_swap,
+                pids_limit,
+                "hardware-adaptive" if profile else "config-file",
+            )
 
     return providers
+
+
+def _bwrap_available() -> bool:
+    """bwrap 是否可用（在 PATH 上）。
+
+    复用 bwrap_provider 模块的 shutil 引用，使 mock
+    `isolation.providers.bwrap_provider.shutil.which` 能同时影响 is_available 与本函数。
+    """
+    from isolation.providers import bwrap_provider  # noqa: PLC0415
+
+    return bwrap_provider.shutil.which("bwrap") is not None
 
 
 class IsolationManager:

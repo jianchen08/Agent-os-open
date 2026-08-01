@@ -179,6 +179,12 @@ else
     ok "docker-ce 安装完成"
 fi
 
+# bwrap 轻量沙箱（CONTAINER 级 provider，对称 docker）+ socat/ripgrep 辅助。
+# 安装失败不致命：manager 自动回退到 docker provider。
+step "安装 bubblewrap（轻量沙箱 provider）"
+apt-get install -y bubblewrap socat ripgrep 2>/dev/null || warn "bubblewrap/socat/ripgrep 安装失败，将回退 docker provider"
+command -v bwrap >/dev/null 2>&1 && ok "bwrap 已就绪: $(command -v bwrap)" || warn "bwrap 不可用，CONTAINER 级将用 docker"
+
 # ── 3. 配置 docker 监听 TCP(关键:供 Windows Agent 连) ──
 step "3/5 配置 docker TCP 监听(localhost:2375)"
 # daemon.json 配置：开 TCP 监听，localhost:2375(镜像网络模式下 Windows 可直连)

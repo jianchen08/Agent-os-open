@@ -200,12 +200,15 @@ class ToolCore(ICorePlugin):
         self,
         state: dict[str, Any],
         tool_name: str,
-    ) -> str | None:
-        """解析 use_docker 路径的 container_id（容器 env_id）。
+    ) -> dict[str, Any] | None:
+        """解析 use_docker 路径的容器环境信息（env_id + provider_kind + bwrap_pid）。
 
-        通过 IsolationManager.get_or_create_environment 拿/建该 workspace 对应的容器，
-        返回其 env_id（=container_name）。workspace 缺失或建容器失败时返回 None，
-        调用方据此降级到老的同步容器执行路径（_execute_in_isolated_container）。
+        通过 IsolationManager.get_or_create_environment 拿/建该 workspace 对应的容器。
+        返回 dict（含 env_id、provider_kind、bwrap_pid？），workspace 缺失或建容器失败
+        时返回 None，调用方据此降级到老的同步容器执行路径（_execute_in_isolated_container）。
+
+        透传 provider_kind/bwrap_pid 的意义：BashTool 据此选执行后端（docker exec
+        vs nsenter），否则 bwrap 沙箱命令会误走 docker exec 失败。
 
         get_or_create_environment 本身是幂等的（同 workspace 复用同容器），所以这里
         多调一次不会重建——它只是把"解析 env_id"这步从 execute_in_isolation 内部提上来，
@@ -236,7 +239,19 @@ class ToolCore(ICorePlugin):
                 tool_name=tool_name,
             )
             if env and env.env_id:
-                return env.env_id
+                # provider_kind 优先取 provider_info.provider_kind（bwrap 显式写），
+                # 回退到 env.provider_type（docker="docker"、bwrap="bwrap"）。
+                provider_info = getattr(env, "provider_info", {}) or {}
+                provider_kind = (
+                    provider_info.get("provider_kind")
+                    or getattr(env, "provider_type", "docker")
+                )
+                bwrap_pid = provider_info.get("bwrap_pid")
+                return {
+                    "env_id": env.env_id,
+                    "provider_kind": provider_kind,
+                    "bwrap_pid": bwrap_pid,
+                }
             logger.warning(
                 "[tool_core] %s get_or_create_environment 返回空 env_id，降级 | task=%s",
                 tool_name, task_id,
@@ -713,12 +728,18 @@ class ToolCore(ICorePlugin):
                 if on_chunk:
                     on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})
 
-                # 解析 container_id：通过 IsolationManager 拿/建该 workspace 的容器 env_id。
-                # 成功则注入 tool_args，让 BashTool 带容器 backend 走完整轮询流程
+                # 解析容器环境：通过 IsolationManager 拿/建该 workspace 的容器 env_id。
+                # 成功则注入 tool_args（含 _container_id + provider_kind/bwrap_pid），
+                # 让 BashTool 带容器 backend 跑完整轮询流程
                 # （execute→running→continue→terminate）；失败则降级到老的同步容器执行路径。
-                container_id = await self._resolve_container_id(ctx.state, tool_name)
-                if container_id:
-                    tool_args = {**tool_args, "_container_id": container_id}
+                env_info = await self._resolve_container_id(ctx.state, tool_name)
+                if env_info:
+                    tool_args = {
+                        **tool_args,
+                        "_container_id": env_info["env_id"],
+                        "_provider_kind": env_info.get("provider_kind"),
+                        "_bwrap_pid": env_info.get("bwrap_pid"),
+                    }
                     result = await self._execute_single_tool(
                         tool_name,
                         tool_args,

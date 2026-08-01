@@ -82,6 +82,9 @@ install_docker_linux() {
             info "通过 apt 安装 docker..."
             sudo apt-get update -y
             sudo apt-get install -y docker.io docker-compose-plugin
+            # bwrap 轻量沙箱（CONTAINER 级 provider，对称 docker）+ socat/ripgrep 辅助
+            sudo apt-get install -y bubblewrap socat ripgrep || \
+                warn "bubblewrap 安装失败，将回退到 docker provider"
             ;;
         dnf|yum)
             info "通过 $pkg_manager 安装 docker..."

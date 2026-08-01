@@ -263,8 +263,16 @@ echo "REDIS_HOST_PORT=${REDIS_HOST_PORT:-6379}" >> "$PORTS_FILE"
 echo "[INFO] 端口信息已保存到 $PORTS_FILE"
 
 # ========== 安装前端依赖 ==========
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-    echo "[INFO] 前端依赖未安装，正在安装..."
+# 不能只判断 node_modules 目录是否存在：该目录可能为空或不完整，
+# 此时 npx 会去远程下载 vite 并弹出 "Ok to proceed? (y)" 交互确认，
+# 而脚本是非交互后台运行，无人应答 -> 卡满 30s 超时。
+# 故改为检查 vite 可执行文件是否真正存在。
+if [ ! -x "$FRONTEND_DIR/node_modules/.bin/vite" ]; then
+    if [ -d "$FRONTEND_DIR/node_modules" ]; then
+        echo "[INFO] node_modules 不完整，正在重新安装前端依赖..."
+    else
+        echo "[INFO] 前端依赖未安装，正在安装..."
+    fi
     cd "$FRONTEND_DIR" && npm install && cd "$PROJECT_ROOT"
     echo ""
 fi
@@ -291,7 +299,8 @@ BACKEND_PID=$!
 
 # ========== 启动前端 ==========
 echo "[2/2] 启动前端开发服务器 (Vite :$FRONTEND_PORT)..."
-cd "$FRONTEND_DIR" && _AO_PROJECT_ID=$PROJECT_ID npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
+# --yes: 万一本地仍缺 vite，npx 自动下载而不弹交互确认。
+cd "$FRONTEND_DIR" && _AO_PROJECT_ID=$PROJECT_ID npx --yes vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 # 等待前端就绪并打开浏览器

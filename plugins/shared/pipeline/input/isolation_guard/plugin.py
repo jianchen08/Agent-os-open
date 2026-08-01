@@ -89,6 +89,9 @@ class IsolationGuard(IInputPlugin):
         """同步检测 Docker 是否可用（CLI 存在 + daemon 运行）。
 
         用 subprocess.run 替代 asyncio subprocess，避免 Windows 静默失败。
+        timeout 从 15s 降到 3s：daemon 不可达（如 DOCKER_HOST 指向离线地址）时，
+        TCP i/o timeout 会卡满整个 timeout 窗口，15s 会让每条工具调用消息延迟 +15s。
+        3s 足够区分"daemon 正常"与"不可达"，配合 _RECHECK_COOLDOWN 冷却避免频繁探测。
         """
         import shutil  # noqa: PLC0415
         import subprocess  # noqa: PLC0415
@@ -100,7 +103,7 @@ class IsolationGuard(IInputPlugin):
             result = subprocess.run(  # noqa: PLW1510
                 ["docker", "version", "--format", "{{.Server.Version}}"],
                 capture_output=True,
-                timeout=15,
+                timeout=3,
             )
             return result.returncode == 0
         except Exception:
@@ -133,8 +136,24 @@ class IsolationGuard(IInputPlugin):
         if not self._enabled or not self._enabled_by_agent:
             return PluginResult()
 
+        state = ctx.state
+        core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
+
+        # 纯 LLM 回复（无工具调用）根本不需要 docker 隔离决策——提前返回，
+        # 避免 execute 入口为普通聊天也触发 docker 探测（daemon 不可达时会卡满
+        # subprocess timeout，实测每条消息延迟 +15s）。docker 复检下移到确认
+        # 有 tool_calls 之后再做。
+        if core_type != "tool_execute":
+            return PluginResult()
+
+        tool_calls = state.get(StateKeys.RAW_TOOL_CALLS, [])
+        if not tool_calls:
+            return PluginResult()
+
         # 可用性复检：仅自动检测来源 + 当前不可用 + 越过冷却窗口时重新探测。
         # daemon 启动那一刻假死被钉死为 False 后，恢复后无需重启进程即可解除。
+        # 放在 tool_execute + 有 tool_calls 之后：只有真正要决策工具隔离级别时才探测，
+        # 纯文本对话路径完全不触发（避免无谓的 docker 子进程开销）。
         if self._docker_auto and not self._docker_available:
             now = time.monotonic()
             if now - self._docker_checked_at >= self._RECHECK_COOLDOWN:
@@ -145,16 +164,6 @@ class IsolationGuard(IInputPlugin):
                         "[%s] Docker 可用性复检通过，解除 host 降级",
                         self.name,
                     )
-
-        state = ctx.state
-        core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
-
-        if core_type != "tool_execute":
-            return PluginResult()
-
-        tool_calls = state.get(StateKeys.RAW_TOOL_CALLS, [])
-        if not tool_calls:
-            return PluginResult()
 
         execution_contexts = []
         for tc in tool_calls:

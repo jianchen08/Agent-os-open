@@ -133,4 +133,15 @@ packages/npm-tarballs/*
 *.stackdump
 
 # ─── Rust 编译中间产物（仅保留 release 二进制）───
+# Cargo 构建缓存目录：体积大、可随时 cargo build 再生，绝不入库。
+# 锚定到任意层级的 target/（workspace 根 + 各插件 crate 子目录都适用）。
+target/
+**/target/
+# Cargo.lock：库才忽略，二进制应用应提交。AgentOS kernel 是二进制服务，
+# 故 Cargo.lock 入库（不在此忽略）。各插件 cdylib 也是二进制产物，同理。
+# Cargo 单元测试 / 基准产物
+*.rs.bk
+# RustProfiler 输出
+*.profraw
+*.profdata
 

@@ -369,6 +369,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         # 安全检查由管道层 SecurityCheckPlugin 和 ApprovalDecisionEngine 统一处理
         warning = None
         container_id = inputs.get("_container_id")
+        provider_kind = inputs.get("_provider_kind")
+        bwrap_pid = inputs.get("_bwrap_pid")
         is_isolated = bool(container_id) or inputs.get("_isolation_provider") in ("docker", "isolated")
         if not is_isolated:
             is_safe, needs_warning, message = self.security.check(command)
@@ -391,6 +393,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             working_dir=working_dir,
             warning=warning,
             container_id=container_id,
+            provider_kind=provider_kind,
+            bwrap_pid=bwrap_pid,
         )
 
     async def _execute_command(
@@ -400,6 +404,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         working_dir: str | None,
         warning: str | None = None,
         container_id: str | None = None,
+        provider_kind: str | None = None,
+        bwrap_pid: int | None = None,
     ) -> ToolResult:
         """
         统一的命令执行接口
@@ -413,6 +419,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             working_dir: 工作目录
             warning: 警告信息
             container_id: 容器 ID（非空时走 docker exec 路径）
+            provider_kind: 隔离 provider 类型（"docker"/"bwrap"），决定容器注入入口
+            bwrap_pid: bwrap 常驻 PID 1（provider_kind="bwrap" 时 nsenter 的 --target）
 
         Returns:
             ToolResult: 统一格式的执行结果
@@ -423,6 +431,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             working_dir=working_dir,
             warning=warning,
             container_id=container_id,
+            provider_kind=provider_kind,
+            bwrap_pid=bwrap_pid,
         )
 
     async def _execute_local_unified(
@@ -432,6 +442,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         working_dir: str | None,
         warning: str | None = None,
         container_id: str | None = None,
+        provider_kind: str | None = None,
+        bwrap_pid: int | None = None,
     ) -> ToolResult:
         """
         本地执行命令（统一返回格式）
@@ -458,6 +470,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 working_dir=working_dir,
                 log_dir=bash_log_dir,
                 container_id=container_id,
+                provider_kind=provider_kind,
+                bwrap_pid=bwrap_pid,
             )
 
             # 等待进程完成或超时

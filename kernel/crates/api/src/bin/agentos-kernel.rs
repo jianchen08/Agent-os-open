@@ -306,6 +306,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .set_wasm_runtime(wasm_runtime)
             .set_native_loader(native_loader),
     );
+    // 显式注入 PYTHONPATH 候选目录：sidecar SDK 统一用 `from src.core.logging import`
+    // 这种带 src. 前缀的 import，要让其解析成功，sys.path 必须含 src/ 的**父目录**
+    // （project_root），而非 src/ 本身（否则 Python 在 <src>/src/core 找模块，报
+    // `No module named 'src.core'`）。历史上靠 AGENTOS_PLUGINS_DIR 环境变量推算，
+    // 但不同启动方式（.sh / IDE）未必设置该变量，导致 sidecar 启动即 import 失败、
+    // initialize 卡到超时。这里由内核直接从已知 plugins_dir 推算 project_root 注入，
+    // 不依赖外部环境。plugins/shared → plugins/ → project_root。
+    if let Some(project_root) = plugins_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .filter(|p| p.join("src").is_dir())
+    {
+        invoker.set_pythonpath_src(project_root);
+    }
     // 启动插件空闲软卸载 GC（生命周期管理：用到才加载 + 长时间不用自动 kill 进程，
     // manifest 保留，下次调用重新 spawn）。每 30s 扫描，阈值默认 300s。
     invoker.start_idle_gc();
@@ -392,6 +406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conflict
         );
     }
+    eprintln!("[boot-diag] 重名检测完成"); use std::io::Write; std::io::stderr().flush().ok();
 
     // 构建 AppState（注入 pipeline_config / step_library / invoker / store / plugin_ids / project_root）
     let project_root = config_root
@@ -399,18 +414,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
+    eprintln!("[boot-diag] store_dyn ok"); std::io::stderr().flush().ok();
     let invoker_dyn: Arc<dyn agentos_core::traits::PluginInvoker> = invoker.clone();
+    eprintln!("[boot-diag] invoker_dyn ok"); std::io::stderr().flush().ok();
     // P3：HTTP 端点 dispatcher 的生产 handler（经 invoker 调插件 http.handle）
     let http_handler: Arc<dyn agentos_core::traits::HttpHandleCapability> =
         Arc::new(agentos_api::http_dispatcher::SidecarHttpHandler::new(
             invoker_dyn.clone(),
         ));
+    eprintln!("[boot-diag] http_handler ok"); std::io::stderr().flush().ok();
     // L1 启用集合（schema 据此过滤 contributes）
     let enabled_plugin_ids: std::collections::HashSet<String> = manifests
         .iter()
         .filter(|m| enablement.is_enabled(&m.id, m.enabled))
         .map(|m| m.id.clone())
         .collect();
+    eprintln!("[boot-diag] enabled_plugin_ids ok"); std::io::stderr().flush().ok();
     let state = AppState::with_plugins(
         manifests.clone(),
         registry,
@@ -422,13 +441,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugin_ids,
         project_root,
         enabled_plugin_ids,
-    )
-    .with_http_handler(http_handler)
+    );
+    eprintln!("[boot-diag] with_plugins 返回"); std::io::stderr().flush().ok();
+    let state = state.with_http_handler(http_handler);
+    eprintln!("[boot-diag] with_http_handler 返回"); std::io::stderr().flush().ok();
+    let state = state
     // 监控 M1/M5/M5b：注入指标聚合器（启用 /api/v1/metrics + /metrics 端点）
-    .with_metrics(metrics_aggregator.clone())
+    .with_metrics(metrics_aggregator.clone());
+    eprintln!("[boot-diag] with_metrics 返回"); std::io::stderr().flush().ok();
     // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）。
     // 复用 router 已持有的 session_coord（流式 chunk 推送与 WS 出站共享同一 SessionCoordinator）。
-    .enable_session_with(session_coord);
+    let state = state.enable_session_with(session_coord);
+    eprintln!("[boot-diag] AppState 构造完成（enable_session_with 之后）"); std::io::stderr().flush().ok();
 
     // 监控 M2/M6：后台任务——每秒把内核自采计数器 flush 到聚合器 + 滚动桶降采样。
     // M6：每秒采样关键指标广播给订阅 statusBar 的连接（widget_event）。
@@ -490,6 +514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     start_server(addr, state).await?;
+    eprintln!("[boot-diag] start_server 返回（不应到达）");
 
     Ok(())
 }

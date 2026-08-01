@@ -5,11 +5,13 @@
 """
 
 from isolation.providers.base import IsolationProvider
+from isolation.providers.bwrap_provider import BwrapProvider
 from isolation.providers.docker_provider import DockerProvider
 from isolation.providers.host_provider import HostProvider
 
 __all__ = [
     "IsolationProvider",
+    "BwrapProvider",
     "DockerProvider",
     "HostProvider",
 ]

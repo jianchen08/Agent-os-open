@@ -137,14 +137,19 @@ class ProcessManager:
         env: dict[str, str] | None = None,
         log_dir: Path | None = None,
         container_id: str | None = None,
+        provider_kind: str | None = None,
+        bwrap_pid: int | None = None,
     ) -> tuple[int, Path]:
         """启动新进程。
 
         container_id 非空时走容器路径：用 `docker exec` 起进程，命令包装成
         `echo $$; exec <cmd>` 以便从 stdout 第一行读出**容器内 pid**。
         宿主机 process.pid 只是 asyncio 句柄的 key（供 _read_output/wait 用），
-        杀进程必须用容器内 pid（存在 ProcessInfo.metadata['container_pid']），
+        杀进程必须用容器内 pid（存 ProcessInfo.metadata['container_pid']），
         否则 docker exec kill <host_pid> 在容器 namespace 里查无此 pid。
+
+        provider_kind="bwrap" 时改走 nsenter 注入（见 BwrapProcessBackend），
+        命令经 nsenter 进入 bwrap PID 1 的 namespace 执行，语义对称。
         """
         effective_log_dir = self._ensure_log_dir(log_dir) if log_dir else self.log_dir
         # 收到外部 log_dir 时同步 self.log_dir——start_process 写入目录与
@@ -156,7 +161,7 @@ class ProcessManager:
         merged_env = {**os.environ, **(env or {})}
         is_windows = platform.system() == "Windows"
 
-        # ===== 容器路径：docker exec 起进程 =====
+        # ===== 容器路径：按 provider_kind 选注入入口（docker exec / nsenter）=====
         if container_id:
             # 包装命令让容器内 sh 自己报 pid，并 exec 成用户命令——这样 $$ 报的
             # pid 就是用户命令本身（单条命令场景，如 cargo build），kill 干净。
@@ -171,15 +176,29 @@ class ProcessManager:
             # 非 POSIX 绝对路径时强制用容器挂载点 /workspace（IsolationManager 约定）。
             container_workdir = working_dir if (working_dir and working_dir.startswith("/")) else "/workspace"
             wrapped = f"echo $$; exec {command}"
+
+            if provider_kind == "bwrap" and bwrap_pid is not None:
+                # bwrap 沙箱：nsenter 进入 PID 1 的 namespace 注入（镜像 docker exec）
+                exec_argv: list[str] = [
+                    "nsenter",
+                    "--target", str(bwrap_pid),
+                    "--pid", "--mount", "--net", "--ipc",
+                    "sh", "-c", f"cd {container_workdir} && {wrapped}",
+                ]
+            else:
+                # docker：docker exec -w <workdir> <cid> sh -c <cmd>（原行为）
+                exec_argv = [
+                    "docker",
+                    "exec",
+                    "-w",
+                    container_workdir,
+                    container_id,
+                    "sh",
+                    "-c",
+                    wrapped,
+                ]
             process = await asyncio.create_subprocess_exec(
-                "docker",
-                "exec",
-                "-w",
-                container_workdir,
-                container_id,
-                "sh",
-                "-c",
-                wrapped,
+                *exec_argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
@@ -1271,4 +1290,91 @@ def _get_container_backend(container_id: str) -> ContainerProcessBackend:
     if backend is None:
         backend = ContainerProcessBackend(container_id)
         _container_backends[container_id] = backend
+    return backend
+
+
+class BwrapProcessBackend(ContainerProcessBackend):
+    """bwrap 沙箱内进程后端：`nsenter -t <bwrap_pid>` 进入 namespace 注入命令。
+
+    对称于 ContainerProcessBackend（docker exec），区别只在注入入口：
+    - docker：docker exec <cid> sh -c '<cmd>'（靠容器名 cid 定位）
+    - bwrap：nsenter -t <bwrap_pid> --pid --mount --net --ipc sh -c '<cmd>'
+      （靠 PID 1 的 bwrap_pid 定位 namespace）
+
+    kill 语义与 ContainerProcessBackend 一致：单进程杀，不整组（bwrap namespace 内
+    无 cgroup shim race 风险，但沿用单进程杀保持行为一致）。内存采样同样返回 None
+    （bwrap v1 无 cgroup 内存控制，宿主侧采样无意义）。
+
+    见 docs/working/design/bwrap_isolation_migration_plan.md §3.4。
+    """
+
+    def __init__(self, bwrap_pid: int, container_id: str) -> None:
+        """Args:
+            bwrap_pid: bwrap 常驻 PID 1（create_environment 记录），nsenter 的 --target。
+            container_id: env_id（=container_name），仅用于缓存键与日志，不参与命令。
+        """
+        super().__init__(container_id)
+        self.bwrap_pid = bwrap_pid
+
+    def _exec_argv(self, workdir: str, command: str) -> list[str]:
+        """构造 nsenter 注入命令的 argv（start_process 调它替代写死的 docker exec）。
+
+        workdir 必须是沙箱内 POSIX 绝对路径（与 ContainerProcessBackend 同约定），
+        非绝对路径时由调用方归一化到 /workspace。
+        """
+        return [
+            "nsenter",
+            "--target", str(self.bwrap_pid),
+            "--pid", "--mount", "--net", "--ipc",
+            "sh", "-c", f"cd {workdir} && {command}",
+        ]
+
+    async def kill(self, unit: WorkUnit, force: bool = True) -> None:
+        """nsenter -t <bwrap_pid> sh -c 'kill <sig> <pid>' —— 单进程杀。
+
+        unit.pid 是沙箱内 pid。与 ContainerProcessBackend.kill 同语义：单进程杀不整组，
+        失败（进程已退出）静默吞掉。
+        """
+        sig = "-9" if force else "-15"
+        inner_cmd = f"kill {sig} {unit.pid} 2>/dev/null || true"
+        try:
+            await self._run_cmd(
+                [
+                    "nsenter",
+                    "--target", str(self.bwrap_pid),
+                    "--pid", "--mount", "--net", "--ipc",
+                    "sh", "-c", inner_cmd,
+                ],
+                timeout=10,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[BwrapBackend] kill pid=%s 失败（可能已退出）: %s", unit.pid, e)
+
+
+def _get_process_backend(
+    container_id: str,
+    provider_kind: str | None = None,
+    bwrap_pid: int | None = None,
+) -> ContainerProcessBackend:
+    """按 provider_kind 选后端（按 container_id 缓存单例）。
+
+    - provider_kind == "bwrap" 且 bwrap_pid 给定 → BwrapProcessBackend
+    - 否则（docker / 缺失）→ ContainerProcessBackend（现有行为）
+
+    缓存键统一用 container_id（env_id）：同一 env 复用同一 backend 实例。
+    切换 provider_kind 时旧缓存不命中（同 env_id 不会跨 provider 复用，
+    因为 env_id 由 workspace 决定且 provider 在 create 时即确定）。
+    """
+    cache_key = container_id
+    cached = _container_backends.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if provider_kind == "bwrap" and bwrap_pid is not None:
+        backend: ContainerProcessBackend = BwrapProcessBackend(
+            bwrap_pid=bwrap_pid, container_id=container_id
+        )
+    else:
+        backend = ContainerProcessBackend(container_id)
+    _container_backends[cache_key] = backend
     return backend

@@ -186,3 +186,109 @@ async def test_use_docker_without_workspace_returns_error():
     assert len(tool_results) == 1
     assert tool_results[0]["success"] is False
     assert "workspace" in tool_results[0]["error"].lower() or "工作空间" in tool_results[0]["error"]
+
+
+# ============================================================
+# Step 5: bwrap provider 的 provider_kind/bwrap_pid 透传
+# ============================================================
+
+
+def _bwrap_env_mock(env_id: str = "cua-ws-bwrap", bwrap_pid: int = 5555) -> MagicMock:
+    """构造一个 bwrap provider 的假 environment（provider_info 含 bwrap_pid）。"""
+    fake_env = MagicMock()
+    fake_env.env_id = env_id
+    fake_env.status = "ready"
+    fake_env.provider_type = "bwrap"
+    # provider_info 必须是真实 dict（不是 MagicMock），供 .get() 取值
+    fake_env.provider_info = {
+        "provider_kind": "bwrap",
+        "bwrap_pid": bwrap_pid,
+    }
+    return fake_env
+
+
+@pytest.mark.asyncio
+async def test_bwrap_provider_injects_provider_kind_and_pid(monkeypatch):
+    """provider=bwrap → tool_args 注入 _provider_kind=bwrap + _bwrap_pid（供 BashTool 选 nsenter 后端）。
+
+    关键：_resolve_container_id 返回的 env 带 provider_info.bwrap_pid，
+    必须透传到 tool_args，否则 BashTool 不知道走 nsenter（会回退 docker exec 失败）。
+    """
+    core = ToolCore()
+
+    captured_args: dict[str, Any] = {}
+
+    async def fake_bashtool(args: dict) -> dict:
+        captured_args.update(args)
+        return {"status": "completed", "output": "ok", "exit_code": 0}
+
+    core.register_tool("bash_execute", fake_bashtool)
+
+    fake_manager = AsyncMock()
+    fake_manager.get_or_create_environment = AsyncMock(return_value=_bwrap_env_mock())
+
+    async def fake_get_manager():
+        return fake_manager
+
+    with patch("isolation.manager.get_isolation_manager", new=fake_get_manager):
+        ctx = _make_ctx(
+            raw_tool_calls=[{"name": "bash_execute", "args": {"command": "echo hi"}}],
+            execution_contexts=_docker_execution_context(),  # use_docker=True
+            task_id="task-1",
+            workspace="/tmp/ws",
+        )
+        await core.execute(ctx)
+
+    # container_id 仍注入（env_id）
+    assert captured_args.get("_container_id") == "cua-ws-bwrap"
+    # bwrap 专属字段必须透传
+    assert captured_args.get("_provider_kind") == "bwrap", (
+        f"_provider_kind 应为 'bwrap'，实际: {captured_args.get('_provider_kind')}"
+    )
+    assert captured_args.get("_bwrap_pid") == 5555, (
+        f"_bwrap_pid 应为 5555，实际: {captured_args.get('_bwrap_pid')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_docker_provider_injects_docker_kind(monkeypatch):
+    """provider=docker → tool_args 注入 _provider_kind=docker（无 bwrap_pid）。
+
+    回归保护：docker 路径的 provider_kind 必须显式为 docker，
+    让 BashTool 明确走 docker exec（而非因字段缺失走默认）。
+    """
+    core = ToolCore()
+
+    captured_args: dict[str, Any] = {}
+
+    async def fake_bashtool(args: dict) -> dict:
+        captured_args.update(args)
+        return {"status": "completed", "output": "ok"}
+
+    core.register_tool("bash_execute", fake_bashtool)
+
+    fake_env = MagicMock()
+    fake_env.env_id = "cua-ws-docker"
+    fake_env.status = "ready"
+    fake_env.provider_type = "docker"
+    fake_env.provider_info = {"container_id": "docker-cid-123"}
+
+    fake_manager = AsyncMock()
+    fake_manager.get_or_create_environment = AsyncMock(return_value=fake_env)
+
+    async def fake_get_manager():
+        return fake_manager
+
+    with patch("isolation.manager.get_isolation_manager", new=fake_get_manager):
+        ctx = _make_ctx(
+            raw_tool_calls=[{"name": "bash_execute", "args": {"command": "echo hi"}}],
+            execution_contexts=_docker_execution_context(),
+            task_id="task-1",
+            workspace="/tmp/ws",
+        )
+        await core.execute(ctx)
+
+    assert captured_args.get("_container_id") == "cua-ws-docker"
+    assert captured_args.get("_provider_kind") == "docker"
+    # docker 路径不带 bwrap_pid
+    assert captured_args.get("_bwrap_pid") is None

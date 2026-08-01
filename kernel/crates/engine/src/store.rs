@@ -47,8 +47,10 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at      TEXT NOT NULL,
     UNIQUE(run_id, branch_id, seq_in_branch)
 );
--- 按 pipeline_id 查询历史消息的主索引（get_messages_by_pipeline 走此路径）
-CREATE INDEX IF NOT EXISTS idx_messages_pipeline_seq ON messages(pipeline_id, tenant_id, seq_in_branch);
+-- 注意：idx_messages_pipeline_seq 不在 DDL 批里建，改由 migrate_add_pipeline_id 兜底。
+-- 原因：旧库 messages 表已存在但缺 pipeline_id 列，CREATE TABLE IF NOT EXISTS 是空操作，
+-- 若索引建在 DDL 批里会在 ALTER ADD COLUMN（迁移函数）之前执行，从而因列不存在而整体失败。
+-- 把索引创建挪到迁移函数内、确保列存在后再建，对新建库与旧库都安全（CREATE INDEX IF NOT EXISTS 幂等）。
 CREATE TABLE IF NOT EXISTS traces (
     trace_id      TEXT PRIMARY KEY,
     run_id        TEXT NOT NULL,
@@ -176,10 +178,12 @@ fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// 为旧库（建表时无 pipeline_id 列）补加 messages.pipeline_id 列。
+/// 为旧库（建表时无 pipeline_id 列）补加 messages.pipeline_id 列，并保证查询索引存在。
 ///
-/// 仅在列缺失时执行 `ALTER TABLE ... ADD COLUMN`，幂等。可空，兼容历史数据。
-/// 对齐 0.1 消息按 pipeline_run_id 分组的语义——pipeline_id 是消息层的查询主键。
+/// - 列缺失：执行 `ALTER TABLE ... ADD COLUMN`（幂等，可空兼容历史数据）。
+/// - 索引：列存在后无条件执行 `CREATE INDEX IF NOT EXISTS`（幂等）。
+///   索引之所以放在迁移函数而非 DDL 批里，是为了避免旧库「表已存在但缺列」时索引先于
+///   ALTER 执行而失败。对齐 0.1 消息按 pipeline_run_id 分组的语义——pipeline_id 是消息层的查询主键。
 fn migrate_add_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
     let has_col: bool = conn
         .prepare("PRAGMA table_info(messages)")
@@ -194,13 +198,13 @@ fn migrate_add_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
             [],
         )
         .map_err(|e| StorageError::Database(e.to_string()))?;
-        // 旧库已建表后补加索引（新建库走 DDL 内的 CREATE INDEX）
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_pipeline_seq ON messages(pipeline_id, tenant_id, seq_in_branch)",
-            [],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
     }
+    // 索引兜底：列已确保存在后创建（CREATE INDEX IF NOT EXISTS 幂等，新建库与旧库都安全）。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_pipeline_seq ON messages(pipeline_id, tenant_id, seq_in_branch)",
+        [],
+    )
+    .map_err(|e| StorageError::Database(e.to_string()))?;
     Ok(())
 }
 

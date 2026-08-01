@@ -253,6 +253,14 @@ pub struct PluginInvokerImpl {
     last_used: RwLock<HashMap<String, Instant>>,
     /// wasm 最后调用时刻 {plugin_id: Instant}——同上，wasm 模块的空闲软卸载依据。
     wasm_last_used: RwLock<HashMap<String, Instant>>,
+    /// 注入给 sidecar 子进程的 PYTHONPATH 候选目录（project_root/src）。
+    ///
+    /// 历史上 PYTHONPATH 注入依赖 `AGENTOS_PLUGINS_DIR` 环境变量推算 project_root，
+    /// 但启动方式（如 Git Bash 的 start_web_02.sh）未必设置该变量，导致 sidecar
+    /// 的 plugin.py 无法 import src/ 下的公共包（如 config.settings），sidecar
+    /// 启动即崩溃、initialize 永久卡到超时。这里改由内核构造期显式注入 src 路径，
+    /// 环境变量仅作向后兼容兜底。
+    pythonpath_src: RwLock<Option<std::path::PathBuf>>,
 }
 
 impl PluginInvokerImpl {
@@ -269,6 +277,7 @@ impl PluginInvokerImpl {
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
             wasm_last_used: RwLock::new(HashMap::new()),
+            pythonpath_src: RwLock::new(None),
         }
     }
 
@@ -288,6 +297,51 @@ impl PluginInvokerImpl {
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
             wasm_last_used: RwLock::new(HashMap::new()),
+            pythonpath_src: RwLock::new(None),
+        }
+    }
+
+    /// 显式设置注入给 sidecar 的 PYTHONPATH 候选目录。
+    ///
+    /// 应传入 **`project_root`**（`src/` 的父目录），而非 `src/` 本身。
+    ///
+    /// 为什么是 project_root 而不是 src/：sidecar SDK 统一用 `from src.core.logging import`
+    /// 这种**带 `src.` 前缀**的写法（见 `plugins/sdk/.../_logging.py`）。要让这种 import
+    /// 解析成功，sys.path 必须包含 `src/` 的**父目录**（project_root），Python 才能在
+    /// `<project_root>/src/core/...` 找到模块。若误注入 `src/` 本身，Python 会在
+    /// `<src>/src/core/...` 查找 → `No module named 'src.core'`（实测踩过）。
+    ///
+    /// 优先级高于 `AGENTOS_PLUGINS_DIR` 环境变量推算。内核 main 在构造 invoker 后、
+    /// spawn 任何 sidecar 前调用，确保无论用何种方式启动（.bat / .sh / IDE），
+    /// sidecar 的 plugin.py 都能 import 公共业务包（src.core.logging / config.settings 等）。
+    pub fn set_pythonpath_src(&self, src_dir: impl Into<std::path::PathBuf>) {
+        let path = src_dir.into();
+        if path.is_dir() {
+            *self.pythonpath_src.write() = Some(path);
+        } else {
+            warn!(path = %path.display(), "set_pythonpath_src: 目录不存在，忽略");
+        }
+    }
+
+    /// 解析注入给 sidecar 的 PYTHONPATH 候选目录（= project_root，即 src/ 的父目录）。
+    ///
+    /// 返回值供拼成 PYTHONPATH 注入子进程。优先返回 [`set_pythonpath_src`] 显式设置的
+    /// 值；否则从 `AGENTOS_PLUGINS_DIR` 环境变量推算（plugins/shared → plugins/ →
+    /// project_root）。返回的路径保证存在。
+    fn resolve_pythonpath_src(&self) -> Option<std::path::PathBuf> {
+        // ① 显式注入（最可靠）
+        if let Some(p) = self.pythonpath_src.read().clone() {
+            return Some(p);
+        }
+        // ② 环境变量兜底（向后兼容 .bat 等显式设置 AGENTOS_PLUGINS_DIR 的启动方式）
+        let plugins_dir = std::env::var("AGENTOS_PLUGINS_DIR").ok()?;
+        let plugins_path = std::path::Path::new(&plugins_dir);
+        // plugins/shared → plugins/ → project_root
+        let project_root = plugins_path.parent()?.parent()?;
+        if project_root.is_dir() {
+            Some(project_root.to_path_buf())
+        } else {
+            None
         }
     }
 
@@ -705,7 +759,9 @@ impl PluginInvokerImpl {
 
         // 创建新的 MCP 客户端（持有 spawn 锁，保证串行）
         let (command, args) = self.parse_entry(&manifest.entry)?;
-        let mut client = McpClient::new_stdio(command, args);
+        let mut client = McpClient::new_stdio(command, args)
+            // plugin_id 用于 stderr 转发时区分 sidecar 日志来源（[plugin_id] 前缀）。
+            .with_plugin_id(&manifest.id);
 
         // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
         // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
@@ -726,31 +782,37 @@ impl PluginInvokerImpl {
             client = client.with_working_dir(plugin_dir);
         }
 
-        // 注入 PYTHONPATH：把项目 src/ 加进子进程搜索路径，
-        // 让 sidecar 的 plugin.py 能 import 公共业务包（tools/memory/llm 等）。
-        // 从 AGENTOS_PLUGINS_DIR（plugins/shared）推算项目根 → src/
+        // 注入 PYTHONPATH：把 project_root（src/ 的父目录）加进 sidecar 子进程搜索路径，
+        // 让 sidecar 的 plugin.py 能 `from src.core.logging import ...` 这种带 src. 前缀的
+        // import 解析成功（见 resolve_pythonpath_src 的注释说明为何用父目录而非 src/）。
+        //
+        // 来源优先级：
+        // ① set_pythonpath_src 显式注入（内核构造期由 main 传入，最可靠）；
+        // ② AGENTOS_PLUGINS_DIR 环境变量推算（plugins/shared → project_root，向后兼容）。
+        // 两者都不可用时收空 PYTHONPATH——此时依赖 src.* 的插件会启动失败（import error），
+        // 但不会静默退化（早暴露比晚卡死好）。
         let mut extra_env: Vec<(String, String)> = Vec::new();
-        if let Ok(plugins_dir) = std::env::var("AGENTOS_PLUGINS_DIR") {
-            let plugins_path = std::path::Path::new(&plugins_dir);
-            // plugins/shared → plugins/ → 项目根
-            if let Some(project_root) = plugins_path
-                .parent() // plugins/
-                .and_then(|p| p.parent()) // 项目根
-            {
-                let src_dir = project_root.join("src");
-                if src_dir.is_dir() {
-                    let existing = std::env::var("PYTHONPATH").unwrap_or_default();
-                    let new_path = if existing.is_empty() {
-                        src_dir.to_string_lossy().to_string()
-                    } else {
-                        format!(
-                            "{}{}{}",
-                            src_dir.to_string_lossy(),
-                            std::path::MAIN_SEPARATOR,
-                            existing
-                        )
-                    };
-                    extra_env.push(("PYTHONPATH".to_string(), new_path));
+        if let Some(src_path) = self.resolve_pythonpath_src() {
+            let existing = std::env::var("PYTHONPATH").unwrap_or_default();
+            let new_path = if existing.is_empty() {
+                src_path.to_string_lossy().to_string()
+            } else {
+                format!(
+                    "{}{}{}",
+                    src_path.to_string_lossy(),
+                    std::path::MAIN_SEPARATOR,
+                    existing
+                )
+            };
+            extra_env.push(("PYTHONPATH".to_string(), new_path));
+        }
+        // 注入日志配置 env（进程级常量，适合走 env；per-request 上下文走 JSON-RPC）。
+        // 仅当父进程已设置时透传，否则让 sidecar SDK 用其默认（INFO + stderr）。
+        // SDK 启动时读这些 env 调用 setup_logging，使 sidecar 日志走统一基础设施。
+        for key in &["LOG_LEVEL", "LOG_JSON", "LOG_FORMAT"] {
+            if let Ok(val) = std::env::var(key) {
+                if !val.is_empty() {
+                    extra_env.push(((*key).to_string(), val));
                 }
             }
         }
@@ -1183,9 +1245,19 @@ impl PluginInvoker for PluginInvokerImpl {
                 }
 
                 // 调用 tools/call
+                // _log_ctx：per-request 日志上下文，从 ctx.state 抽取（真实数据所在，
+                // 见 server.rs 把 pipeline_id/session_id 写进 state）。SDK 在调 handler
+                // 前 LogContext.bind，使 sidecar 日志能带 pipeline_id 关联内核日志。
+                let log_ctx = serde_json::json!({
+                    "pipeline_id": ctx.state.get("pipeline_id").cloned().unwrap_or(Value::Null),
+                    "request_id": ctx.state.get("request_id").cloned().unwrap_or(Value::Null),
+                    "session_id": ctx.state.get("session_id").cloned().unwrap_or(Value::Null),
+                    "agent_name": ctx.state.get("agent_id").cloned().unwrap_or(Value::Null),
+                });
                 let tool_args = serde_json::json!({
                     "state": ctx.state,
                     "config": ctx.config,
+                    "_log_ctx": log_ctx,
                 });
 
                 let result = client.call_tool(tool_name, &tool_args).await.map_err(|e| {

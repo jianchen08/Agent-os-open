@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ============================================================
 REM  AgentOS 0.2 Launcher (Windows) - pure 0.2 architecture
 REM
@@ -125,15 +126,30 @@ REM  Step 3: start frontend (proxy to 0.2 kernel :9100)
 REM ============================================================
 echo [3/3] Starting frontend on port :%AGENTOS_FRONTEND_PORT%...
 
-if not exist "%FRONTEND_DIR%\node_modules" (
-    echo        Installing frontend dependencies...
+REM 检查前端依赖是否真正安装完整（node_modules/.bin/vite.cmd 存在）。
+REM 不能只判断 node_modules 目录是否存在：该目录可能为空或不完整，
+REM 此时 npx 会去远程下载 vite 并弹出 "Ok to proceed? (y)" 交互确认，
+REM 而脚本是非交互后台运行，无人应答 -> 卡满 30s 超时（即本次故障）。
+if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
+    if exist "%FRONTEND_DIR%\node_modules" (
+        echo        [INFO] node_modules 不完整，重新安装前端依赖...
+    ) else (
+        echo        Installing frontend dependencies...
+    )
     pushd "%FRONTEND_DIR%"
     call npm install
+    if errorlevel 1 (
+        echo [ERROR] npm install failed, frontend cannot start.
+        popd
+        pause
+        exit /b 1
+    )
     popd
 )
 
 pushd "%FRONTEND_DIR%"
-start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://localhost:%AGENTOS_KERNEL_PORT%&& npx vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
+REM --yes: 万一本地仍缺 vite，npx 自动下载而不弹交互确认。
+start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://localhost:%AGENTOS_KERNEL_PORT%&& npx --yes vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
 popd
 
 echo        Waiting for frontend...

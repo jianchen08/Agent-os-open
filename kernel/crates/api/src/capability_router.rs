@@ -217,6 +217,16 @@ impl CapabilityRouter for KernelCapabilityRouter {
                                 data["content"] = serde_json::Value::String(content.to_string());
                             }
                             let _ = session.emit_event(thread_id, event_name, data).await;
+                        } else {
+                            // 诊断：事件被丢弃（thread_id 空 或 stream_chunk content 空）
+                            // debug 级避免流式噪声；仅 stop/thinking_end 等无 content 事件偶发。
+                            tracing::debug!(
+                                target: "capability:event-bus",
+                                event = %event_name,
+                                thread = %thread_id,
+                                has_content = !content.is_empty(),
+                                "流式事件被丢弃（thread_id 空 或 content 空）"
+                            );
                         }
                     }
                     return Ok(json!({"status": "emitted", "event": event_name}));

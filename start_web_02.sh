@@ -295,15 +295,28 @@ else
     echo -e "${YELLOW}[3/4] 启动前端 (Vite :$FRONTEND_PORT, 连接内核 :$KERNEL_PORT)...${NC}"
 
     # 安装前端依赖（如需要）
-    if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-        echo -e "${YELLOW}       前端依赖未安装，正在安装...${NC}"
-        cd "$FRONTEND_DIR" && npm install && cd "$PROJECT_ROOT"
+    # 不能只判断 node_modules 目录是否存在：该目录可能为空或不完整，
+    # 此时 npx 会去远程下载 vite 并弹出 "Ok to proceed? (y)" 交互确认，
+    # 而脚本是非交互后台运行，无人应答 -> 卡满 30s 超时。
+    # 故改为检查 vite 可执行文件是否真正存在。
+    if [ ! -x "$FRONTEND_DIR/node_modules/.bin/vite" ]; then
+        if [ -d "$FRONTEND_DIR/node_modules" ]; then
+            echo -e "${YELLOW}       node_modules 不完整，正在重新安装前端依赖...${NC}"
+        else
+            echo -e "${YELLOW}       前端依赖未安装，正在安装...${NC}"
+        fi
+        cd "$FRONTEND_DIR" && npm install || {
+            echo -e "${RED}[ERROR] 前端依赖安装失败，无法启动前端${NC}"
+            exit 1
+        }
+        cd "$PROJECT_ROOT"
     fi
 
     # 启动前端，通过 VITE_API_BASE_URL 指向内核
     cd "$FRONTEND_DIR"
+    # --yes: 万一本地仍缺 vite，npx 自动下载而不弹交互确认。
     VITE_API_BASE_URL="http://localhost:$KERNEL_PORT" \
-        npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
+        npx --yes vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
     FRONTEND_PID=$!
     cd "$PROJECT_ROOT"
 

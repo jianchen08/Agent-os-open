@@ -15,11 +15,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
+
+logger = logging.getLogger(__name__)
+
+
+def _bind_log_context(log_ctx: dict[str, Any]):
+    """将内核注入的 per-request 上下文绑定到当前 async 上下文的日志追踪字段。
+
+    优先复用 ``src.core.logging.LogContext``（contextvars，async 安全）；不可用时
+    返回 no-op context manager（降级场景，绑定信息丢失但日志仍正常输出）。
+
+    返回一个 context manager：进入时 bind，退出时自动恢复（防并发污染）。
+    """
+    # 仅保留非空字段（None / "-" 视为未设置）
+    fields = {k: str(v) for k, v in log_ctx.items() if v not in (None, "", "-")}
+    if not fields:
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    try:
+        from src.core.logging import LogContext  # noqa: PLC0415
+
+        return LogContext.scoped(**fields)
+    except Exception:  # noqa: BLE001
+        from contextlib import nullcontext
+
+        return nullcontext()
 
 
 class KernelChannel:
@@ -290,15 +319,21 @@ class McpServer:
     async def _handle_tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         """处理 tools/call 请求——调用指定工具并返回结果。"""
         name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        arguments = dict(params.get("arguments") or {})
 
         td = self._tools.get(name)
         if td is None:
             raise ValueError(f"tool not found: {name}")
 
-        result = td.handler(**arguments) if arguments else td.handler()
-        if asyncio.iscoroutine(result):
-            result = await result
+        # 内核在 tool_args 注入 _log_ctx（per-request 上下文：pipeline_id 等）。
+        # 在调 handler 前绑定到日志上下文（contextvars，async 安全），请求结束自动恢复。
+        # 从 arguments 移除，避免作为工具参数传给 handler（handler 只期望 state/config）。
+        log_ctx = arguments.pop("_log_ctx", None) or {}
+
+        with _bind_log_context(log_ctx):
+            result = td.handler(**arguments) if arguments else td.handler()
+            if asyncio.iscoroutine(result):
+                result = await result
 
         return {
             "content": [{"type": "text", "text": json.dumps(result, default=str)}],

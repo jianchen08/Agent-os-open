@@ -271,6 +271,12 @@ class AgentOSPlugin:
         """
         import asyncio
 
+        # sidecar 日志统一初始化：stdout 被 JSON-RPC 占用，日志输出到 stderr，
+        # 由内核 McpClient 的 stderr reader 消费转发到 tracing。
+        from agentos_plugin_sdk._logging import setup_sidecar_logging
+
+        setup_sidecar_logging()
+
         # 通道由 _on_initialize 在握手时创建；此处兜底确保非 None（McpServer 需引用）
         if self._kernel_channel is None:
             self._kernel_channel = KernelChannel()

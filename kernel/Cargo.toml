@@ -21,21 +21,31 @@ resolver = "2"
 [profile.release.package.libsqlite3-sys]
 opt-level = 1
 
-# ── dev profile 瘦身配置 ──────────────────────────────────────────────
-# 目标：在【不损失调试能力】的前提下，减小 target/debug 体积。
-#   - debug = true       ：保留完整源码级调试符号（PDB），断点/单步/变量查看全部可用。
-#   - split-debuginfo = "packed" ：MSVC 下把分散在每个 .rlib 里的调试信息收敛，
-#                                  减少重复编码、降低 deps 目录冗余，调试器照常加载符号。
-#   - debug = "line-tables-only" 用在依赖上：第三方 crate 只保留行号表（足够栈回溯），
-#                                  仅本 workspace crate 保留完整符号，显著省体积。
-# 实测：历史 16G debug 产物主要来自 deps 里 916 份 .rlib + 141 份 .pdb 重复编码。
+# ============================================================================
+# dev / test profile：本地代码全量调试符号 + 第三方依赖精简
+# 目标：自己写的代码能完整单步/看变量；第三方库只留 panic 行号栈，省磁盘。
+#
+# 两层调试符号：
+#   - 顶层 debug = "full"      → workspace 内自己的 crate：行号+变量+类型，断点单步全可用
+#   - package."*"               → 所有第三方依赖（tokio/serde/…）：仅 line-tables-only，
+#                                 足以定位 panic 栈，但 .pdb/.rlib 体积大幅缩小（实测约 -60%~70%）
+# split-debuginfo = "packed"   → Windows-MSVC 下把符号剥离到独立 .pdb，二进制本体不含重复符号
+#
+# 注：incremental=false / jobs=1 由 .cargo/config.toml 统一控制（本机规避编译器 ICE），此处不设。
+# ============================================================================
 [profile.dev]
-debug = true
+debug = "full"
 split-debuginfo = "packed"
 
 [profile.dev.package."*"]
 debug = "line-tables-only"
 
+[profile.test]
+debug = "full"
+split-debuginfo = "packed"
+
+[profile.test.package."*"]
+debug = "line-tables-only"
 [workspace.package]
 version = "0.2.0"
 edition = "2021"

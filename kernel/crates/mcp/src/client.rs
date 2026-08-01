@@ -83,6 +83,14 @@ pub struct McpClient {
     stdin: Option<Arc<Mutex<tokio::process::ChildStdin>>>,
     /// stdout 读取端
     stdout: Option<Arc<Mutex<BufReader<tokio::process::ChildStdout>>>>,
+    /// stderr 读取端
+    ///
+    /// Python sidecar 的 `logging` 默认输出到 stderr（stdout 被 JSON-RPC 协议占用）。
+    /// 必须消费 stderr，否则管道缓冲（典型 64KB）填满后会反向阻塞 sidecar 进程。
+    /// 每行经 `start_stderr_reader` 转发到内核 tracing，实现 sidecar 日志的统一汇聚。
+    stderr: Option<Arc<Mutex<BufReader<tokio::process::ChildStderr>>>>,
+    /// 插件标识，用于 stderr 转发时区分来源。
+    plugin_id: Option<String>,
     /// 等待响应的 oneshot 发送器
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     /// 是否已初始化
@@ -105,6 +113,8 @@ impl McpClient {
             child: None,
             stdin: None,
             stdout: None,
+            stderr: None,
+            plugin_id: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
             router: None,
@@ -120,6 +130,8 @@ impl McpClient {
             child: None,
             stdin: None,
             stdout: None,
+            stderr: None,
+            plugin_id: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
             router: None,
@@ -151,6 +163,12 @@ impl McpClient {
     /// 用于注入 PYTHONPATH 等公共依赖路径，让 sidecar 能 import 公共业务包。
     pub fn with_extra_env(mut self, env: Vec<(String, String)>) -> Self {
         self.extra_env = env;
+        self
+    }
+
+    /// 设置插件标识，用于 stderr 转发时区分日志来源（前缀 `[plugin_id]`）。
+    pub fn with_plugin_id(mut self, id: impl Into<String>) -> Self {
+        self.plugin_id = Some(id.into());
         self
     }
 
@@ -200,13 +218,21 @@ impl McpClient {
                     .ok_or_else(|| McpError::ConnectionFailed {
                         message: "failed to get stdout".to_string(),
                     })?;
+                // stderr 不 take 会导致管道缓冲填满后阻塞 sidecar；这里 take 出来
+                // 交给 start_stderr_reader 消费并转发到 tracing。
+                let stderr = child.stderr.take();
 
                 self.child = Some(Arc::new(Mutex::new(child)));
                 self.stdin = Some(Arc::new(Mutex::new(stdin)));
                 self.stdout = Some(Arc::new(Mutex::new(BufReader::new(stdout))));
+                if let Some(stderr) = stderr {
+                    self.stderr = Some(Arc::new(Mutex::new(BufReader::new(stderr))));
+                }
 
                 // 启动 stdout 读取循环
                 self.start_reader_loop().await;
+                // 启动 stderr 读取循环（消费 sidecar 日志，转发到 tracing）
+                self.start_stderr_reader().await;
 
                 Ok(())
             }
@@ -242,7 +268,13 @@ impl McpClient {
                 loop {
                     line.clear();
                     match reader.read_line(&mut line).await {
-                        Ok(0) => break, // EOF
+                        Ok(0) => {
+                            // sidecar stdout 关闭（进程退出/崩溃）。原静默 break 会导致
+                            // 进行中的 send_request（如 initialize）等到 120s 超时才失败，
+                            // 这里记 warn 让"sidecar 崩溃"在日志里可见。
+                            tracing::warn!("[mcp] sidecar stdout EOF（进程退出）");
+                            break; // EOF
+                        }
                         Ok(_) => {
                             let line_str = line.trim().to_string();
                             if line_str.is_empty() {
@@ -294,6 +326,60 @@ impl McpClient {
                             // 其余忽略
                         }
                         Err(_) => break,
+                    }
+                }
+            });
+        }
+    }
+
+    /// 启动 stderr 读取循环
+    ///
+    /// 消费 sidecar 子进程的 stderr（Python `logging` 默认输出目标），逐行转发到
+    /// 内核 tracing。这是 sidecar 日志汇聚到统一 sink 的核心机制：
+    /// - 不消费会导致管道缓冲填满（~64KB）后阻塞 sidecar；
+    /// - 每行带 `[plugin_id]` 前缀，target 统一 `sidecar`，便于在内核日志中区分来源。
+    ///
+    /// 日志级别映射：sidecar 的 stderr 行本身不带级别信息（Python logging 默认格式
+    /// 含级别名，但格式可配），这里统一以 INFO 转发，避免误判；EOF 记 WARN。
+    /// 若 sidecar 行内已含 `ERROR`/`WARNING` 等关键字，仍按 INFO 转发（保真原文），
+    /// 由日志聚合工具按内容过滤。
+    async fn start_stderr_reader(&self) {
+        if let Some(stderr) = &self.stderr {
+            let stderr = Arc::clone(stderr);
+            let plugin_id = self.plugin_id.clone().unwrap_or_else(|| "?".to_string());
+
+            tokio::spawn(async move {
+                let mut reader = stderr.lock().await;
+                let mut line = String::new();
+
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => {
+                            // stderr 关闭（通常与 sidecar 退出同时发生）。
+                            tracing::warn!(
+                                target: "sidecar",
+                                "[{}] stderr EOF",
+                                plugin_id
+                            );
+                            break;
+                        }
+                        Ok(_) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            tracing::info!(target: "sidecar", "[{}] {}", plugin_id, trimmed);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "sidecar",
+                                "[{}] stderr read error: {}",
+                                plugin_id,
+                                e
+                            );
+                            break;
+                        }
                     }
                 }
             });
@@ -552,6 +638,7 @@ impl McpClient {
         self.child = None;
         self.stdin = None;
         self.stdout = None;
+        self.stderr = None;
         *self.initialized.lock().await = false;
         Ok(())
     }

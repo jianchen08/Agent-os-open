@@ -82,6 +82,7 @@ markers = [
     "requires_api: 需要真实 API 的测试",
     "requires_redis: 需要 Redis 的测试",
     "requires_db: 需要数据库的测试",
+    "requires_bwrap: 需要真实 bubblewrap (bwrap) 的集成测试",
     "offline: 可离线运行的测试",
     # ── 时序/稳定性门禁（§9.4/§6.4）──
     "timing: 关键时序不变量（事件顺序/间隔/超时边界），独立 stage 阻塞门禁",
