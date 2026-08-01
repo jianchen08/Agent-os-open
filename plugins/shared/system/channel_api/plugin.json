@@ -168,6 +168,8 @@
         {"route_id": "interaction_approve", "method": "POST", "path": "/ext/channel_api/interaction/{request_id}/approve", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 10000, "max_concurrency": 4, "description": "interaction 域：批准请求"},
         {"route_id": "interaction_deny", "method": "POST", "path": "/ext/channel_api/interaction/{request_id}/deny", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 10000, "max_concurrency": 4, "description": "interaction 域：拒绝请求"},
         {"route_id": "interaction_cancel", "method": "POST", "path": "/ext/channel_api/interaction/{request_id}/cancel", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 10000, "max_concurrency": 4, "description": "interaction 域：取消请求"},
-        {"route_id": "interaction_viewed", "method": "POST", "path": "/ext/channel_api/interaction/{request_id}/viewed", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "interaction 域：标记已查看"}
+        {"route_id": "interaction_viewed", "method": "POST", "path": "/ext/channel_api/interaction/{request_id}/viewed", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "interaction 域：标记已查看"},
+        {"route_id": "floating_chat_status", "method": "GET", "path": "/ext/channel_api/floating-chat/status", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 8, "description": "floating-chat 域：悬浮窗状态"},
+        {"route_id": "floating_chat_launch", "method": "POST", "path": "/ext/channel_api/floating-chat/launch", "auth": "user", "handler_capability": "http.handle", "timeout_ms": 5000, "max_concurrency": 4, "description": "floating-chat 域：启动悬浮窗"}
     ]
 }

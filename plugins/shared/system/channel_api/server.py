@@ -1148,6 +1148,36 @@ async def _handle_interaction_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_floating_chat_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """floating-chat 域分发：/ext/channel_api/floating-chat/** → routes_missing.floating_chat_router。
+
+    2 路由 stub：status(GET)/launch(POST)。前端 FLOATING_CHAT 块 2 端点完全对应。
+    """
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    if path == "/ext/channel_api/floating-chat/status" and method == "GET":
+        try:
+            return _ok(_json_response(await rm.get_floating_chat_status()))
+        except HTTPException as exc:
+            return _http_exc_response(exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("floating-chat http.handle 未预期错误: %s", exc, exc_info=True)
+            return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+    if path == "/ext/channel_api/floating-chat/launch" and method == "POST":
+        try:
+            return _ok(_json_response(await rm.launch_floating_chat()))
+        except HTTPException as exc:
+            return _http_exc_response(exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("floating-chat http.handle 未预期错误: %s", exc, exc_info=True)
+            return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+    return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+
 async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
     """处理 reviews /media-review（multipart：file + media_type）。
 
@@ -1512,6 +1542,10 @@ async def http_handle(
     # ── interaction 域（批次5，有前端消费，7 路由）──
     if path.startswith("/ext/channel_api/interaction"):
         return await _handle_interaction_domain(path, method, raw_body, q)
+
+    # ── floating-chat 域（批次5，有前端消费，2 路由 stub）──
+    if path.startswith("/ext/channel_api/floating-chat"):
+        return await _handle_floating_chat_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):

@@ -303,9 +303,9 @@ export const API_ENDPOINTS = {
   /** 悬浮窗相关 - 对应后端 /api/v1/floating-chat/* */
   FLOATING_CHAT: {
     /** 获取悬浮窗状态 */
-    STATUS: '/api/v1/floating-chat/status',
+    STATUS: '/ext/channel_api/floating-chat/status',
     /** 启动悬浮窗 */
-    LAUNCH: '/api/v1/floating-chat/launch',
+    LAUNCH: '/ext/channel_api/floating-chat/launch',
   },
   /** 触发器相关 - 对应后端 /api/v1/triggers/* */
   TRIGGERS: {
