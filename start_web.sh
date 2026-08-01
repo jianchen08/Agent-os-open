@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Agent OS Web Channel 启动脚本
+# [DEPRECATED M5 2026-08-01] 此脚本启动旧 :8988 FastAPI 进程，已被新架构取代。
+# 新架构请用 start_web_02.sh（内核 :9100 + 前端，channel_api 经 dispatcher 走 /ext/channel_api/**）。
+# 本脚本保留仅作 fallback / 旧环境兼容，不再维护。
+#
+# Agent OS Web Channel 启动脚本（旧架构）
 # 同时启动后端 FastAPI 服务器和前端 Vite 开发服务器
 # 支持多实例隔离：按项目目录区分，端口冲突时自动切换
 

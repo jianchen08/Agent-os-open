@@ -39,14 +39,10 @@ services:
     ports:
       - "${FRONTEND_HOST_PORT:-5289}:5188"
     environment:
-      # Agent 跑在宿主机，前端需连到宿主的 8988。
-      # - Docker Desktop 模式：host.docker.internal 由 Desktop 自动注入，指向 Windows 宿主。
-      # - WSL 原生 docker 模式：host.docker.internal 不被注入（→ 容器解析失败 → 502），
-      #   且后端在 Windows（WSL 的上一层宿主），host-gateway 也只指向 WSL 自身。
-      #   故由 wsl_ensure_containers.sh 导出 BACKEND_HOST_IP=WSL默认网关(=Windows宿主)，
-      #   未设置时回退 host.docker.internal（兼容 Desktop 模式与直接 docker compose up）。
-      - BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
-      - BACKEND_WS_URL=ws://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-8988}
+      # M5 退役（2026-08-01）：channel_api :8988 已退役，前端连内核 :9100。
+      # BACKEND_PORT 默认改为 9100（内核 agentos-kernel）。
+      - BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-9100}
+      - BACKEND_WS_URL=ws://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-9100}
     depends_on:
       redis:
         condition: service_healthy
