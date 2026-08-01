@@ -242,6 +242,7 @@ async fn test_store_content_loader_chain() {
             Some(content),
             Some(content),
             None,
+            "default",
         )
         .unwrap();
 

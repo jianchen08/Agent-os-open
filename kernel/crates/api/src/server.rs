@@ -24,12 +24,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use agentos_core::traits::CapabilityRegistry;
+use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts};
 use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 
 use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::auth::{
     login_handler, logout_handler, me_handler, refresh_handler, register_handler,
@@ -217,6 +217,10 @@ pub(crate) fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> Tenan
 /// 默认核心管道插件 id（可被 agent 配置 config/agents/<id>.yaml 的 core_plugin 覆盖）。
 /// 历史上硬编码 "pipeline_llm_core" 写在 initial_state，现提取为常量便于发现与替换。
 const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
+
+/// 冷路径恢复历史时从 messages 表加载的最大消息条数（覆盖多轮 user+assistant）。
+/// 对齐 LLM 上下文窗口的近程记忆策略：最近 20 条足够承载常规多轮对话。
+const HISTORY_MESSAGE_LIMIT: usize = 20;
 
 /// 管道配置热重载的 mtime 检测 TTL：1 秒内不重复 stat，避免高频 chat 时反复解析 YAML。
 const PIPELINE_CONFIG_TTL: Duration = Duration::from_secs(1);
@@ -416,6 +420,15 @@ async fn process_via_engine_inner(
         }
     };
 
+    // 0. 统一管道查询键：pipeline_id 为空（HTTP 路径不传 / 旧 WS handler）时
+    //    回退 thread_id，保证 messages 表 pipeline_id 列 + registry 键落到同一维度。
+    //    WS 路径（ws_session.rs）已用 route_id（pipeline_id 空时回退 thread_id）。
+    let effective_pipeline_id = if pipeline_id.is_empty() {
+        thread_id
+    } else {
+        pipeline_id
+    };
+
     // 1. 构造初始 state
     //    core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
     //    覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
@@ -431,20 +444,92 @@ async fn process_via_engine_inner(
         // - pipeline_id：前端消息路由键（前端 handleStreamStart 据此匹配占位气泡）
         // - session_id：WS 连接路由键（内核 session.emit_stream 据此定位前端 WS 连接）
         //   必须是真实 thread_id（WS 握手时注册的），否则 chunk 推不到前端。
-        "pipeline_id": pipeline_id,
+        // pipeline_id 用 effective 值覆盖：persist_run_start/end 从 state 读
+        // pipeline_id 落库，统一语义后写入与查询键一致，空值不再产生孤儿数据。
+        "pipeline_id": effective_pipeline_id,
         "session_id": thread_id,
         // assistant message_id：内核权威生成，sidecar 流式 chunk 携带它，
         // 前端 handleStreamChunk 据此把 chunk 路由到 stream_start 建立的占位气泡。
         "message_id": message_id,
     });
-    // 多轮上下文：state.messages 是 LLMCore._build_messages 读取的对话历史。
-    // 有客户端传入的 history 则在其后追加当前 user 消息；无 history 则只放当前消息。
-    {
-        let mut msgs = history.to_vec();
-        msgs.push(serde_json::json!({"role": "user", "content": message}));
-        if let Some(obj) = initial_state.as_object_mut() {
-            obj.insert("messages".to_string(), serde_json::Value::Array(msgs));
+
+    // 1b. 多轮上下文装配：state.messages 是 LLMCore._build_messages 读取的对话历史。
+    // 单一权威（不搞降级路径）：
+    //   ① 热路径：PipelineStateRegistry 内存 state 完整（每轮 final_state 含 messages
+    //      写回，LLM 插件负责 append assistant 回复）→ 直接复用 entry.state["messages"]。
+    //   ② 冷路径：registry 未命中（重启/新会话/内存丢失）→ 从 messages 表（持久化
+    //      冷数据）按 effective_pipeline_id 恢复完整历史，后续轮走热路径。
+    //   ③ 客户端传的 history 仅在①②均为空（真·首轮）时兜底，向后兼容老客户端。
+    // 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
+    let tenant =
+        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
+    let tenant_id = tenant.tenant_id.clone();
+    let mut history_prefix: Vec<serde_json::Value> = Vec::new();
+    let mut history_loaded = false;
+    let registry = agentos_session::global_registry();
+    if let Some(entry) = registry.get(&tenant_id, effective_pipeline_id) {
+        // 热路径：内存 state 完整，直接复用（无需走 DB）
+        if let Some(msgs) = entry.read().state.get("messages").and_then(|v| v.as_array()) {
+            history_prefix = msgs.clone();
+            history_loaded = true;
         }
+    }
+    if !history_loaded {
+        // 冷路径：从持久化恢复完整历史（get_messages_by_pipeline 按 pipeline_id+tenant
+        // 查询，走 idx_messages_pipeline_seq 索引，seq 升序返回）。
+        match store
+            .get_messages_by_pipeline(
+                effective_pipeline_id,
+                MessageQueryOpts {
+                    limit: Some(HISTORY_MESSAGE_LIMIT),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(records) => {
+                for rec in records {
+                    // 完整内容优先从 blobs 表取（blob_id 联查），缺失时回退 preview
+                    let content = match &rec.blob_id {
+                        Some(bid) => match store.get_blob(bid).await {
+                            Ok(data) => String::from_utf8_lossy(&data).to_string(),
+                            Err(e) => {
+                                warn!(
+                                    blob_id = %bid,
+                                    error = %e,
+                                    "get_blob 失败，回退 content_preview"
+                                );
+                                rec.content_preview.clone().unwrap_or_default()
+                            }
+                        },
+                        None => rec.content_preview.clone().unwrap_or_default(),
+                    };
+                    history_prefix.push(serde_json::json!({
+                        "role": rec.role,
+                        "content": content,
+                    }));
+                }
+                history_loaded = !history_prefix.is_empty();
+            }
+            Err(e) => {
+                // 持久化恢复失败：这是 bug 信号（内存丢 + DB 也读不到），
+                // 显式 error 暴露，不静默降级为空历史。
+                error!(
+                    pipeline_id = %effective_pipeline_id,
+                    error = %e,
+                    "get_messages_by_pipeline 恢复历史失败"
+                );
+            }
+        }
+    }
+    // 真·首轮兜底：客户端 history（向后兼容老客户端，正常路径不依赖它）
+    if !history_loaded && !history.is_empty() {
+        history_prefix = history.to_vec();
+    }
+    let mut msgs = history_prefix;
+    msgs.push(serde_json::json!({"role": "user", "content": message}));
+    if let Some(obj) = initial_state.as_object_mut() {
+        obj.insert("messages".to_string(), serde_json::Value::Array(msgs));
     }
 
     // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
@@ -461,9 +546,7 @@ async fn process_via_engine_inner(
     // 3. 构造 PipelineExecutor 并执行
     //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
     //    （多租户 P0-4：本函数已在 agentos_tenant::scope 内调用）。
-    let tenant =
-        agentos_tenant::current().unwrap_or_else(|| TenantContext::new("default", "kernel"));
-    let tenant_id = tenant.tenant_id.clone();
+    //    tenant / tenant_id 已在 1b 段解析（历史加载用），此处复用。
     let run_id = uuid::Uuid::new_v4().to_string();
     let branch_id = "main".to_string();
 
@@ -499,12 +582,15 @@ async fn process_via_engine_inner(
     };
 
     // 3b. 回写 final_state 到全局 registry（state 内存常驻，对齐 0.1 _current_state）。
-    if false /*00a0TODO: state56de51995f85 OnceLock 95ee9898639267e5540e542f7528 */ && !pipeline_id.is_empty() {
+    // final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
+    // 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
+    // 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 1b 段）。
+    if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
-        if !reg.contains(&tenant_id, pipeline_id) {
-            reg.get_or_init(&tenant_id, pipeline_id, thread_id, agent_id, final_state.clone());
+        if !reg.contains(&tenant_id, effective_pipeline_id) {
+            reg.get_or_init(&tenant_id, effective_pipeline_id, thread_id, agent_id, final_state.clone());
         } else {
-            reg.update_state(&tenant_id, pipeline_id, final_state.clone());
+            reg.update_state(&tenant_id, effective_pipeline_id, final_state.clone());
         }
     }
 
@@ -1150,5 +1236,244 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── 多轮对话上下文修复集成测试 ──────────────────────────────
+    // 验证：process_via_engine_inner 从 store/registry 加载历史，state["messages"]
+    // 组装为完整消息序列（历史 + 当前 user），第二轮能看到第一轮上下文。
+
+    /// 模拟 LLM 插件：读取 state["messages"]，append assistant 回复后写回。
+    /// 记录每次收到的 messages（按调用顺序），供测试断言。
+    struct RecordingInvoker {
+        seen: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for RecordingInvoker {
+        async fn invoke_pipeline_plugin(
+            &self,
+            _plugin_id: &str,
+            ctx: &agentos_core::types::PluginContext,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            let mut history = ctx
+                .state
+                .get("messages")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            self.seen.lock().unwrap().push(history.clone());
+            // 模拟 LLM：追加 assistant 回复（内容基于收到的消息数，便于断言）
+            if let Some(arr) = history.as_array_mut() {
+                arr.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": format!("回复第{}条", arr.len()),
+                }));
+            }
+            let mut updates = std::collections::HashMap::new();
+            let reply = history
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            updates.insert("raw_result".to_string(), serde_json::json!(reply));
+            updates.insert("messages".to_string(), history);
+            Ok(agentos_core::types::PluginResult {
+                state_updates: updates,
+                ..Default::default()
+            })
+        }
+
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+            Ok(agentos_core::types::ToolExecutionResult::success(
+                serde_json::Value::Null,
+            ))
+        }
+
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _context: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+    }
+
+    /// 构造带 store + mock invoker 的 AppState（enable_session 以启用 registry 路径）。
+    /// 创建临时 config 目录 + autonomous.yaml（引用 mock LLM 插件），使
+    /// maybe_reload_pipeline_configs 能加载真实配置（否则 load_pipeline_config
+    /// 在文件缺失时返回空 steps 配置，executor 不会调用任何插件）。
+    fn make_engine_state() -> (
+        AppState,
+        Arc<RecordingInvoker>,
+        Arc<dyn agentos_core::traits::StorageBackend>,
+    ) {
+        let store: Arc<dyn agentos_core::traits::StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let invoker = Arc::new(RecordingInvoker {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        // 临时项目根：含 config/pipelines/autonomous.yaml，引用 mock LLM 插件
+        let tmp_root = std::env::temp_dir().join(format!(
+            "mt_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let cfg_dir = tmp_root.join("config").join("pipelines");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("autonomous.yaml"),
+            "name: test_multi_turn\nloop:\n  enabled: false\nsteps:\n  - id: llm\n    steps:\n      - mock_llm_core\n",
+        )
+        .unwrap();
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.invoker = Some(invoker.clone());
+        state.project_root = Some(tmp_root);
+        // 兜底配置（与临时 YAML 一致；临时 YAML 加载成功时此值被覆盖）
+        state.pipeline_config = Arc::new(agentos_core::types::PipelineConfig {
+            name: "test_multi_turn".to_string(),
+            loop_config: Default::default(),
+            steps: vec![agentos_core::types::PipelineStep {
+                id: "llm".to_string(),
+                steps: vec!["mock_llm_core".to_string()],
+                context: std::collections::HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+        });
+        state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
+        state.plugin_ids = Arc::new(std::collections::HashSet::from([
+            "mock_llm_core".to_string(),
+        ]));
+        (state, invoker, store)
+    }
+
+    #[tokio::test]
+    async fn test_multi_turn_second_round_sees_first_round_context() {
+        let (state, invoker, _store) = make_engine_state();
+        let tenant = TenantContext::new("tenant_mt", "thread_mt");
+        let pipe = "pipe_mt";
+        let thread = "thread_mt";
+
+        // 第一轮：pipeline_id=pipe_mt 非空（WS 路径 route_id 语义）
+        let r1 = agentos_tenant::scope(
+            tenant.clone(),
+            process_via_engine(&state, "第一轮：我叫小明", "agentos", &[], pipe, thread, "m1"),
+        )
+        .await;
+        assert!(!r1.is_empty(), "第一轮应返回 assistant 回复");
+
+        // 第二轮：同 pipeline_id，应看到第一轮 user+assistant 上下文
+        let r2 = agentos_tenant::scope(
+            tenant,
+            process_via_engine(&state, "第二轮：我叫什么？", "agentos", &[], pipe, thread, "m2"),
+        )
+        .await;
+        assert!(!r2.is_empty(), "第二轮应返回 assistant 回复");
+
+        // 断言：第二轮 LLM 收到的 messages 是完整序列（历史 + 当前）
+        let seen = invoker.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "应有两轮 LLM 调用");
+        let first = seen[0].as_array().unwrap();
+        assert_eq!(first.len(), 1, "第一轮应只有当前 user 消息");
+        assert_eq!(first[0]["role"], "user");
+        assert_eq!(first[0]["content"], "第一轮：我叫小明");
+
+        let second = seen[1].as_array().unwrap();
+        // 完整序列 = 第一轮 user + 第一轮 assistant + 第二轮 user
+        assert_eq!(second.len(), 3, "第二轮应含第一轮上下文（user+assistant）+ 当前 user");
+        assert_eq!(second[0]["role"], "user");
+        assert_eq!(second[0]["content"], "第一轮：我叫小明");
+        assert_eq!(second[1]["role"], "assistant");
+        assert!(second[1]["content"].as_str().unwrap().contains("回复第1条"));
+        assert_eq!(second[2]["role"], "user");
+        assert_eq!(second[2]["content"], "第二轮：我叫什么？");
+    }
+
+    #[tokio::test]
+    async fn test_multi_turn_http_empty_pipeline_id_falls_back_to_thread() {
+        // HTTP 路径 pipeline_id=""，effective 应回退 thread_id，
+        // 使 store 写入/查询键一致，第二轮仍能看到第一轮上下文。
+        let (state, invoker, _store) = make_engine_state();
+        let tenant = TenantContext::new("tenant_http", "thread_http");
+        let thread = "thread_http";
+
+        let r1 = agentos_tenant::scope(
+            tenant.clone(),
+            process_via_engine(&state, "HTTP 第一轮", "agentos", &[], "", thread, "h1"),
+        )
+        .await;
+        assert!(!r1.is_empty());
+
+        let r2 = agentos_tenant::scope(
+            tenant,
+            process_via_engine(&state, "HTTP 第二轮", "agentos", &[], "", thread, "h2"),
+        )
+        .await;
+        assert!(!r2.is_empty());
+
+        let seen = invoker.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let second = seen[1].as_array().unwrap();
+        assert_eq!(second.len(), 3, "HTTP 空 pipeline_id 也应通过 thread_id 回退看到历史");
+        assert_eq!(second[0]["content"], "HTTP 第一轮");
+        assert_eq!(second[2]["content"], "HTTP 第二轮");
+    }
+
+    #[tokio::test]
+    async fn test_multi_turn_cold_start_recovers_from_store() {
+        // 冷路径验证：registry 未命中（新进程/重启）时，从 store 恢复历史。
+        // 模拟：先直接向 store 写入第一轮 user+assistant 消息（pipeline_id=pipe_cold），
+        // 再调用 process_via_engine，断言 LLM 收到历史 + 当前。
+        let (state, invoker, store) = make_engine_state();
+        let tenant = TenantContext::new("tenant_cold", "thread_cold");
+        let pipe = "pipe_cold";
+        let thread = "thread_cold";
+
+        // 直接写库（模拟上一轮已持久化，registry 无该管道——冷启动）
+        let store_ref = store.clone();
+        agentos_tenant::scope(tenant.clone(), async {
+            store_ref
+                .append_message("u_cold", "run_cold", "main", 1, "user", None, Some("冷启动第一轮"), Some(pipe))
+                .await
+                .unwrap();
+            store_ref
+                .append_message("a_cold", "run_cold", "main", 2, "assistant", None, Some("冷启动回复"), Some(pipe))
+                .await
+                .unwrap();
+        })
+        .await;
+
+        // 验证写库成功（恢复前置条件）
+        let check_store = store.clone();
+        let found = agentos_tenant::scope(tenant.clone(), async {
+            check_store
+                .get_messages_by_pipeline(pipe, MessageQueryOpts::default())
+                .await
+                .unwrap()
+        })
+        .await;
+        assert_eq!(found.len(), 2, "冷启动写库应成功且 tenant 一致");
+
+        let r = agentos_tenant::scope(
+            tenant,
+            process_via_engine(&state, "冷启动第二轮", "agentos", &[], pipe, thread, "c2"),
+        )
+        .await;
+        assert!(!r.is_empty(), "冷启动第二轮应返回 assistant 回复");
+
+        let seen = invoker.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "冷启动应从 store 恢复历史并调用 LLM");
+        let msgs = seen[0].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "冷启动应从 store 恢复第一轮 user+assistant + 当前 user");
+        assert_eq!(msgs[0]["content"], "冷启动第一轮");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "冷启动第二轮");
     }
 }
