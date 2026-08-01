@@ -121,7 +121,31 @@ jobs:
           shared-key: agentos-0.2
 
       - name: Run tests
+        # 覆盖全插件热加载单测（invoker 的指纹/TTL/force_unload 单测在 agentos-invoker crate 内）：
+        #   test_compute_plugin_fingerprint_stable_for_unchanged_dir
+        #   test_compute_plugin_fingerprint_changes_on_file_edit
+        #   test_is_plugin_stale_ttl_short_circuits
+        #   test_force_unload_via_trait_method
+        # 这些单测零外部依赖（不启 kernel/LLM），适合 CI。
         run: cargo test --verbose --all
+
+  # ── E2E Manual (热加载/用户旅程实测, 需 kernel+LLM, 手动触发) ─────────────
+  # 这些测试需要启动 0.2 kernel + 0.1 服务 + 真实 LLM key，不适合每次 PR 跑。
+  # 用 workflow_dispatch 手动触发，或本地直接运行：
+  #   python tests/manual/test_0_2_hot_reload.py            # 0.2 热加载
+  #   python tests/manual/test_0_1_hot_reload.py            # 0.1 热加载
+  #   python tests/manual/test_user_journey_compare.py      # 0.1 vs 0.2 对照
+  e2e-manual:
+    name: E2E Manual (热加载/用户旅程, 手动触发)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Document
+        run: |
+          echo "本 job 仅在手动触发时运行（需 kernel + LLM 环境）。"
+          echo "本地运行方式见 tests/manual/ 下三个脚本的文档头。"
+          echo "核心热加载逻辑已由 rust-test job 的单测覆盖（零 LLM 依赖）。"
 
   # ── Python Lint ────────────────────────────────────────────
   python-lint:

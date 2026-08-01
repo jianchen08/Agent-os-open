@@ -172,6 +172,22 @@ impl WasmRuntime {
         })
     }
 
+    /// 运行时替换 host 能力注册表（启动期 router 就绪后补注入）。
+    ///
+    /// WasmRuntime 通常先于 CapabilityRouter 创建（router 依赖 invoker，invoker 依赖
+    /// wasm_runtime），故 host_registry 初始留空，待 router 建好后用它补上——
+    /// 使 wasm 插件的 host.call import 能转发到内核 capability（与 sidecar 对齐）。
+    pub fn set_host_registry(&self, host_registry: Arc<dyn WasmHostRegistry>) {
+        let mut cfg = self.config.lock();
+        cfg.host_registry = Some(host_registry);
+    }
+
+    /// 运行时替换能力白名单校验器（与 set_host_registry 配套）。
+    pub fn set_capability_checker(&self, checker: Arc<dyn WasmCapabilityChecker>) {
+        let mut cfg = self.config.lock();
+        cfg.capability_checker = Some(checker);
+    }
+
     /// 返回内部 Engine 引用（外部可用于 Module::new 等场景）。
     pub fn engine(&self) -> &Engine {
         &self.engine

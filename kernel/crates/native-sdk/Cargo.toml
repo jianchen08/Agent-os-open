@@ -4,13 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Lingxi AgentOS native (cdylib) plugin SDK — plugin_entry! macro + C-ABI contract"
+description = "Lingxi AgentOS native plugin SDK (abi_stable FFI-safe traits) — interface crate"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# abi_stable：提供跨 rustc 版本稳定的 FFI-safe trait 对象（#[sabi_trait]）。
+# 用它定义插件契约，让原生插件在内核升级 rustc 时无需提心吊胆地重编。
+abi_stable = "0.11"
 
 [lib]
-# 该 crate 同时作为 rlib（供宏/类型引用）和 cdylib（自测产物）。
-# 插件项目依赖本 crate 后，其自身 Cargo.toml 声明 crate-type = ["cdylib"]。
+# interface crate：被内核（host）和插件（implementation cdylib）共同依赖。
+# 自身是 rlib（不产出 cdylib），插件 crate 声明自己的 crate-type = ["cdylib"]。
 crate-type = ["rlib"]

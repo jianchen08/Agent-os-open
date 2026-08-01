@@ -5,26 +5,67 @@
 //! // 迁移进度见 docs/working/adr_plugin_capability_gap_and_plan.md 阶段 B。
 //! // 已迁移：cost-control → plugins/shared/system/cost_control（/ext/cost_control/**）
 //! // 已迁移：monitoring → plugins/shared/system/monitoring（/ext/monitoring/**）
+//! // 已迁移：evaluation-metrics → plugins/shared/system/evaluation（/ext/evaluation_service/metrics）
 //! // 已迁移：themes → 纯前端（Vite import.meta.glob，内核不参与）
 //! // 已删死端点：evaluation 的 9 个无后端无消费常量（evaluate/profiles/reports/statistics/trends）
 //! // 保留为内核职责（非迁移项，按边界原则归属内核）：
-//! //   - evaluation-metrics：config 域只读查询（待 evaluation 插件声明 config_files 后迁出）
-//! //   - plugins/status|history|reload*：loader 监管能力（属内核；reload 未实现，诚实返回 false）
+//! //   - plugins/status|history|reload*：loader 监管能力（属内核；reload 已实现 pull 热加载，
+//! //     见 invoker.rs force_unload + 指纹检测；history 返回真实审计）
 //! //   - threads/messages：会话传输宿主（WS/session 属内核）；messages 空 stub 待持久化
 //!
 //! 对齐 `plugins/shared/system/channel_api/routes_missing.py` 与
 //! `routes_plugins.py` 的响应形状，让前端不再因缺失路由刷屏。
 //! 能接真实数据源的接真实数据；否则返回结构正确的空/零值。
 
-use std::fs;
-use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::{info, warn};
 
 use crate::routes::AppState;
+
+/// 热重载审计历史（内存环形缓冲，进程级单例）。
+/// 对照 0.1 的 PluginHotReloader 重载历史，前端 GET /api/v1/plugins/history 读取。
+struct ReloadHistory {
+    entries: std::collections::VecDeque<Value>,
+}
+
+const MAX_HISTORY: usize = 200;
+
+static RELOAD_HISTORY: OnceLock<RwLock<ReloadHistory>> = OnceLock::new();
+
+fn reload_history() -> &'static RwLock<ReloadHistory> {
+    RELOAD_HISTORY.get_or_init(|| {
+        RwLock::new(ReloadHistory {
+            entries: std::collections::VecDeque::with_capacity(MAX_HISTORY),
+        })
+    })
+}
+
+/// 追加一条审计记录。
+fn record_history(entry: Value) {
+    let mut h = reload_history().write();
+    if h.entries.len() >= MAX_HISTORY {
+        h.entries.pop_front();
+    }
+    h.entries.push_back(entry);
+}
+
+/// 在 base（已是 json! 对象）上追加键值对，生成一条新的历史记录并入库。
+/// 用于替代 `json!({...spread, ...})`（serde_json 宏不支持 spread 语法）。
+fn record_history_ext(base: Value, kvs: &[(&str, Value)]) {
+    let mut v = base;
+    if let Some(obj) = v.as_object_mut() {
+        for (k, val) in kvs {
+            obj.insert((*k).to_string(), val.clone());
+        }
+    }
+    record_history(v);
+}
 
 // ─── Threads ───────────────────────────────────────────────────────────────
 
@@ -282,6 +323,87 @@ pub async fn update_thread_agent_handler(
         "metadata": {},
     }))
 }
+
+/// PATCH /api/v1/threads/{id} — 重命名/更新会话（title/intent）。
+///
+/// 前端 `updateSession()` 调此端点（session.ts:530 用 PATCH）。
+/// body: { "intent": "<title>" }（前端把 title 映射成 intent，见 session.ts:521），
+/// 也兼容旧字段名 "title"。响应返回完整 thread 状态。
+/// 域2持久化：更新 sessions 表 title/intent + updated_at（DB 无记录则仅回退内存响应）。
+pub async fn update_thread_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    // 前端 updateSession 把 title 放进 intent 字段；同时兼容直传 title。
+    let new_intent = body
+        .get("intent")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("title").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // DB 更新：若存在会话记录则更新 title/intent + updated_at
+    if let Some(store) = state.store.as_ref() {
+        if let Ok(Some(mut s)) = store.get_session(&id).await {
+            if let Some(ref intent) = new_intent {
+                s.title = Some(intent.clone());
+                s.intent = Some(intent.clone());
+            }
+            s.updated_at = now.clone();
+            if let Err(e) = store.update_session(&s).await {
+                tracing::warn!(thread_id = %id, error = %e, "update_session(title/intent) 落库失败");
+            }
+            return Json(session_to_thread_json(&s));
+        }
+    }
+
+    // DB 无记录：回退内存构造响应（保留 agent_id/pipeline_id 等已知状态）
+    let agent_id = state
+        .session
+        .as_ref()
+        .and_then(|s| s.registry().get_agent_for_thread(&id));
+    let pipeline_id = state
+        .session
+        .as_ref()
+        .and_then(|s| s.registry().get_pipeline_for_thread(&id));
+    let pipeline_ids = pipeline_id
+        .as_deref()
+        .map(|p| vec![p.to_string()])
+        .unwrap_or_default();
+
+    Json(json!({
+        "thread_id": id,
+        "title": new_intent,
+        "current_state": "active",
+        "intent": new_intent,
+        "created_at": now,
+        "updated_at": now,
+        "agent_id": agent_id,
+        "message_count": 0,
+        "pipeline_ids": pipeline_ids,
+        "active_pipeline_id": pipeline_id,
+        "metadata": {},
+    }))
+}
+
+/// DELETE /api/v1/threads/{id} — 删除会话。
+///
+/// 前端 `deleteSession()` 调此端点（session.ts:398 用 DELETE）。
+/// 仅删 sessions 表的标签夹行：会话只是聚合管道引用的标签，消息/管道自治（store.rs
+/// sessions 表注释），不级联删除。store 不可用或无记录仍返回 200（幂等，对齐 REST 删除语义）。
+pub async fn delete_thread_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    if let Some(store) = state.store.as_ref() {
+        if let Err(e) = store.delete_session(&id).await {
+            tracing::warn!(thread_id = %id, error = %e, "delete_session 落库失败（仍返回 200）");
+        }
+    }
+    Json(json!({ "thread_id": id, "deleted": true }))
+}
 ///
 /// 按管道查询历史消息（消息层自治查询，对齐 0.1 list_by_pipeline）。
 ///
@@ -412,36 +534,308 @@ pub async fn plugins_status_handler(State(state): State<AppState>) -> Json<Value
     Json(json!(items))
 }
 
-/// GET /api/v1/plugins/history
+/// GET /api/v1/plugins/history — 热重载审计历史（内存环形缓冲）。
 pub async fn plugins_history_handler() -> Json<Value> {
-    Json(json!([]))
+    let h = reload_history().read();
+    Json(json!(h.entries.iter().cloned().collect::<Vec<_>>()))
 }
 
-/// POST /api/v1/plugins/reload
+/// 通过 plugin_id 在 manifests 里查 manifest，返回 host_type 字符串。
+fn host_type_of(state: &AppState, plugin_id: &str) -> Option<&'static str> {
+    let m = state.manifests.iter().find(|m| m.id == plugin_id)?;
+    Some(match m.host_type {
+        agentos_core::traits::HostType::Sidecar => "sidecar",
+        agentos_core::traits::HostType::InProcess => "inprocess",
+        agentos_core::traits::HostType::Wasm => "wasm",
+    })
+}
+
+/// POST /api/v1/plugins/reload — 热重载单个插件。
 ///
-/// 热重载未实现（诚实返回 false）。热重载能力见 `agentos-config::config_center`——
-/// 已实现 notify 文件监听但**未接线**（详见该模块顶部说明）。管道配置目前启动期
-/// 一次性加载到 `Arc<PipelineConfig>`，运行期不可变，修改需重启内核。
-pub async fn plugins_reload_handler(Query(params): Query<ReloadQuery>) -> Json<Value> {
+/// 行为按 host_type 分流（对照 ADR §插件热加载）：
+/// - sidecar：调 invoker.force_unload（kill 旧进程 + 清缓存），下次调用自动 respawn 加载新代码。
+/// - wasm：同上（wasm runtime 会重新编译 .wasm）。
+/// - inprocess(cdylib)：不支持热加载（Windows dlclose 限制），返回 restart_required。
+/// - 未知插件：返回 not_found（提示用户：新插件需重启 kernel 才能首次发现）。
+pub async fn plugins_reload_handler(
+    State(state): State<AppState>,
+    Query(params): Query<ReloadQuery>,
+) -> Json<Value> {
+    let now = chrono::Utc::now().to_rfc3339();
+    // 解析 plugin_id：优先 config_path（按插件目录名定位），其次 query 无则报错。
+    let plugin_id = match params.config_path.as_deref() {
+        Some(p) => {
+            // config_path 可能是 config/agents/xxx.yaml 或插件目录名；取最后一段作 plugin_id 线索
+            let seg = p
+                .trim_end_matches('/')
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(p);
+            seg.trim_end_matches(".yaml")
+                .trim_end_matches(".yml")
+                .to_string()
+        }
+        None => {
+            return Json(json!({
+                "config_path": null,
+                "success": false,
+                "error": "缺少 plugin_id：请用 ?config_path=<plugin_id> 或 <插件目录> 指定",
+                "rolled_back": false,
+            }))
+        }
+    };
+
+    let host_type = host_type_of(&state, &plugin_id);
+    let entry_base = json!({
+        "timestamp": now,
+        "plugin_id": plugin_id,
+        "config_path": params.config_path,
+    });
+
+    // 未知插件：当前运行期的 manifest 缓存里没有。新插件需重启 kernel 才能首次发现。
+    let host = match host_type {
+        Some(h) => h,
+        None => {
+            let resp = json!({
+                "config_path": params.config_path,
+                "config_type": "unknown",
+                "success": false,
+                "error": format!("插件 {} 不在当前运行期 manifest，新插件需重启内核首次发现", plugin_id),
+                "rolled_back": false,
+                "restart_required": true,
+            });
+            record_history_ext(entry_base.clone(), &[
+                ("success", json!(false)), ("event_type", json!("reload_unknown")),
+            ]);
+            return Json(resp);
+        }
+    };
+
+    // inprocess(cdylib)：不支持热加载
+    if host == "inprocess" {
+        let resp = json!({
+            "config_path": params.config_path,
+            "config_type": host,
+            "success": false,
+            "error": "cdylib(inprocess) 插件不支持热加载（Windows dlclose 限制），需重启内核",
+            "rolled_back": false,
+            "restart_required": true,
+        });
+        record_history_ext(entry_base.clone(), &[
+            ("success", json!(false)), ("event_type", json!("reload_cdylib_skip")),
+        ]);
+        return Json(resp);
+    }
+
+    // sidecar / wasm：force_unload → 下次调用 respawn 加载新代码/配置
+    let invoker = match state.invoker.as_ref() {
+        Some(i) => i,
+        None => {
+            return Json(json!({
+                "config_path": params.config_path, "config_type": host,
+                "success": false, "error": "invoker 未配置", "rolled_back": false,
+            }))
+        }
+    };
+    match invoker.force_unload(&plugin_id).await {
+        Ok(()) => {
+            info!(plugin_id = %plugin_id, host_type = host, "Plugin hot-reloaded via reload endpoint");
+            let resp = json!({
+                "config_path": params.config_path,
+                "config_type": host,
+                "success": true,
+                "message": format!("插件 {} 已卸载，下次调用自动加载最新代码/配置", plugin_id),
+                "rolled_back": false,
+                "restart_required": false,
+            });
+            record_history_ext(entry_base.clone(), &[
+                ("success", json!(true)), ("event_type", json!("reload_ok")),
+                ("host_type", json!(host)),
+            ]);
+            Json(resp)
+        }
+        Err(e) => {
+            warn!(plugin_id = %plugin_id, error = %e, "Plugin reload force_unload failed");
+            let resp = json!({
+                "config_path": params.config_path,
+                "config_type": host,
+                "success": false,
+                "error": format!("force_unload 失败: {}", e),
+                "rolled_back": false,
+            });
+            record_history_ext(entry_base.clone(), &[
+                ("success", json!(false)), ("event_type", json!("reload_failed")),
+                ("error", json!(e.to_string())),
+            ]);
+            Json(resp)
+        }
+    }
+}
+
+/// POST /api/v1/plugins/reload-all — 热重载所有插件 + 发现新增插件（运行时懒加载入口）。
+///
+/// 两件事合一：
+/// 1. **发现新增插件**：调 invoker.discover_new_plugins() 重扫插件目录（幂等，不杀进程），
+///    对比已知 id 集合，把新插件的 tools/route_signals 注册到 capability_registry。
+///    新插件之后走懒加载（首次调用才 spawn）。
+/// 2. **热重载已有插件**：对已加载的 sidecar/wasm 调 force_unload（下次调用 respawn 新代码）。
+///
+/// 新增带 http_endpoints 的插件：tools 立即生效，但 axum 路由树需重启挂载 → restart_required。
+pub async fn plugins_reload_all_handler(State(state): State<AppState>) -> Json<Value> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let invoker = match state.invoker.as_ref() {
+        Some(i) => i.clone(),
+        None => return Json(json!([])),
+    };
+
+    // ── 1. 发现并注册新增插件 ──
+    let mut discovered: Vec<Value> = Vec::new();
+    let mut restart_required_ids: Vec<String> = Vec::new();
+    let discover_err = match invoker.discover_new_plugins().await {
+        Ok(all_manifests) => {
+            // 已知 id 集合（启动期 manifests 快照）
+            let existing: std::collections::HashSet<String> =
+                state.manifests.iter().map(|m| m.id.clone()).collect();
+            if let Some(registry) = state.capability_registry.as_ref() {
+                let (new_ids, tool_count) =
+                    crate::plugin_lifecycle::register_new_plugins(&all_manifests, &existing, registry);
+                // 检查新增插件是否有 http_endpoints（需重启挂载路由）
+                for m in &all_manifests {
+                    if new_ids.contains(&m.id) && crate::plugin_lifecycle::has_http_endpoints(m) {
+                        restart_required_ids.push(m.id.clone());
+                    }
+                }
+                discovered = new_ids
+                    .iter()
+                    .map(|id| json!({"plugin_id": id, "discovered": true}))
+                    .collect();
+                info!(new_plugins = new_ids.len(), tools = tool_count, "reload-all: discovered new plugins");
+            }
+            None
+        }
+        Err(e) => Some(e.to_string()),
+    };
+
+    // ── 2. 热重载已有插件（force_unload，下次调用 respawn）──
+    let mut results: Vec<Value> = Vec::new();
+    for m in state.manifests.iter() {
+        let host = match m.host_type {
+            agentos_core::traits::HostType::Sidecar => "sidecar",
+            agentos_core::traits::HostType::Wasm => "wasm",
+            agentos_core::traits::HostType::InProcess => "inprocess",
+        };
+        if host == "inprocess" {
+            results.push(json!({
+                "plugin_id": m.id, "host_type": host,
+                "success": false, "skipped": true,
+                "error": "cdylib 不支持热加载，需重启",
+            }));
+            continue;
+        }
+        match invoker.force_unload(&m.id).await {
+            Ok(()) => results.push(json!({
+                "plugin_id": m.id, "host_type": host, "success": true,
+            })),
+            Err(e) => results.push(json!({
+                "plugin_id": m.id, "host_type": host,
+                "success": false, "error": e.to_string(),
+            })),
+        }
+    }
+    info!(reloaded = results.len(), discovered = discovered.len(), "reload-all completed");
+    record_history(json!({
+        "timestamp": now, "event_type": "reload_all",
+        "success": true, "reloaded": results.len(), "discovered": discovered.len(),
+        "discover_error": discover_err,
+    }));
     Json(json!({
-        "config_path": params.config_path.unwrap_or_default(),
-        "config_type": "unknown",
-        "success": false,
-        "error": "0.2 内核暂未实现热重载（sidecar 监管尚未接入）",
-        "rolled_back": false,
+        "reloaded": results,
+        "discovered": discovered,
+        "restart_required": restart_required_ids,
+        "discover_error": discover_err,
     }))
-}
-
-/// POST /api/v1/plugins/reload-all
-///
-/// 同 `plugins_reload_handler`，热重载未实现，返回空数组。
-pub async fn plugins_reload_all_handler() -> Json<Value> {
-    Json(json!([]))
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ReloadQuery {
     pub config_path: Option<String>,
+}
+
+/// POST /api/v1/plugins/{id}/reload — 按 plugin_id 直接热重载（REST 风格，比 query 参数更直观）。
+///
+/// 与 `plugins_reload_handler` 等价，但 plugin_id 从 path 取。行为按 host_type 分流
+/// （sidecar/wasm → force_unload；inprocess → 不支持；未知 → 提示需重启）。
+pub async fn plugins_reload_by_id_handler(
+    State(state): State<AppState>,
+    Path(plugin_id): Path<String>,
+) -> Json<Value> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let host = host_type_of(&state, &plugin_id);
+    let entry_base = json!({
+        "timestamp": now, "plugin_id": plugin_id,
+    });
+
+    let host = match host {
+        Some(h) => h,
+        None => {
+            let resp = json!({
+                "plugin_id": plugin_id, "success": false,
+                "error": format!("插件 {} 不在当前运行期 manifest，新插件需重启内核首次发现", plugin_id),
+                "restart_required": true,
+            });
+            record_history_ext(entry_base.clone(), &[
+                ("success", json!(false)), ("event_type", json!("reload_unknown")),
+            ]);
+            return Json(resp);
+        }
+    };
+
+    if host == "inprocess" {
+        let resp = json!({
+            "plugin_id": plugin_id, "host_type": host, "success": false,
+            "error": "cdylib(inprocess) 插件不支持热加载（Windows dlclose 限制），需重启内核",
+            "restart_required": true,
+        });
+        record_history_ext(entry_base.clone(), &[
+            ("success", json!(false)), ("event_type", json!("reload_cdylib_skip")),
+        ]);
+        return Json(resp);
+    }
+
+    let invoker = match state.invoker.as_ref() {
+        Some(i) => i,
+        None => {
+            return Json(json!({
+                "plugin_id": plugin_id, "host_type": host,
+                "success": false, "error": "invoker 未配置",
+            }))
+        }
+    };
+    match invoker.force_unload(&plugin_id).await {
+        Ok(()) => {
+            info!(plugin_id = %plugin_id, host_type = host, "Plugin hot-reloaded via by-id endpoint");
+            record_history_ext(entry_base.clone(), &[
+                ("success", json!(true)), ("event_type", json!("reload_ok")),
+                ("host_type", json!(host)),
+            ]);
+            Json(json!({
+                "plugin_id": plugin_id, "host_type": host, "success": true,
+                "message": format!("插件 {} 已卸载，下次调用自动加载最新代码/配置", plugin_id),
+                "restart_required": false,
+            }))
+        }
+        Err(e) => {
+            warn!(plugin_id = %plugin_id, error = %e, "reload-by-id force_unload failed");
+            record_history_ext(entry_base.clone(), &[
+                ("success", json!(false)), ("event_type", json!("reload_failed")),
+                ("error", json!(e.to_string())),
+            ]);
+            Json(json!({
+                "plugin_id": plugin_id, "host_type": host,
+                "success": false, "error": format!("force_unload 失败: {}", e),
+            }))
+        }
+    }
 }
 
 /// PUT /api/v1/plugins/{id}/enabled — 切换插件启用状态（写 default_profile.yaml）
@@ -546,70 +940,4 @@ pub struct EnabledBody {
     pub enabled: bool,
 }
 
-// ─── Evaluation metrics ────────────────────────────────────────────────────
-
-/// GET /api/v1/evaluation-metrics — 扫描 config/evaluation_metrics/*.yaml。
-pub async fn evaluation_metrics_handler(State(state): State<AppState>) -> Json<Value> {
-    let dir = resolve_project_path(&state, &["config", "evaluation_metrics"]);
-    let mut metrics: Vec<Value> = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e == "yaml" || e == "yml")
-                != Some(true)
-            {
-                continue;
-            }
-            let id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let content = fs::read_to_string(&path).unwrap_or_default();
-            let parsed: Value = serde_yaml::from_str(&content).unwrap_or(json!({}));
-            let name = parsed
-                .get("name")
-                .or_else(|| parsed.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&id);
-            let description = parsed
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let metric_type = parsed
-                .get("metric_type")
-                .or_else(|| parsed.get("type"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            metrics.push(json!({
-                "id": id,
-                "name": name,
-                "description": description,
-                "metric_type": metric_type,
-                "tags": parsed.get("tags").cloned().unwrap_or(json!([])),
-                "is_red_line": parsed.get("is_red_line").and_then(|v| v.as_bool()).unwrap_or(false),
-            }));
-        }
-    }
-
-    let total = metrics.len();
-    Json(json!({ "metrics": metrics, "total": total }))
-}
-
-
 // ─── helpers ───────────────────────────────────────────────────────────────
-
-fn resolve_project_path(state: &AppState, segments: &[&str]) -> PathBuf {
-    let mut path = state
-        .project_root
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("."));
-    for seg in segments {
-        path.push(seg);
-    }
-    path
-}

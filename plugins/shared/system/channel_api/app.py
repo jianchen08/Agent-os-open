@@ -189,33 +189,23 @@ def _add_exception_handlers(app: FastAPI) -> None:
 
 def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     """注册所有 API 路由。"""
-    from routes_agents import router as agents_router  # noqa: PLC0415
-    from routes_auth import router as auth_router  # noqa: PLC0415
     from routes_config import router as config_router  # noqa: PLC0415
     from routes_evaluation import router as metrics_router  # noqa: PLC0415
     from routes_external_chat import router as external_chat_router  # noqa: PLC0415
     from routes_memory import router as memory_router  # noqa: PLC0415
-    from routes_plugins import router as plugins_router  # noqa: PLC0415
     from routes_tasks import router as tasks_router  # noqa: PLC0415
-    from routes_themes import router as themes_router  # noqa: PLC0415
     from routes_thinking_mode import (  # noqa: PLC0415
         router as thinking_mode_router,
     )
     from routes_threads import router as threads_router  # noqa: PLC0415
-    from routes_tools import router as tools_router  # noqa: PLC0415
     from routes_ui import router as ui_router  # noqa: PLC0415
 
-    app.include_router(auth_router)
     app.include_router(threads_router)
-    app.include_router(agents_router)
     app.include_router(tasks_router)
-    app.include_router(tools_router)
     app.include_router(memory_router)
     app.include_router(metrics_router)
-    app.include_router(plugins_router)
     app.include_router(config_router)
     app.include_router(thinking_mode_router)
-    app.include_router(themes_router)
     app.include_router(ui_router)
 
     # ---- 外部系统路由 ----
@@ -241,15 +231,12 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     from routes_missing import (  # noqa: PLC0415
         agent_calls_router,
         client_router,
-        cost_control_router,
-        eval_metrics_alias_router,
         evaluation_router,
         execution_router,
         files_router,
         floating_chat_router,
         interaction_router,
         knowledge_base_router,
-        monitoring_router,
         projects_router,
         sessions_router,
         task_phase_router,
@@ -261,7 +248,6 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
 
     app.include_router(projects_router)
     app.include_router(users_router)
-    app.include_router(monitoring_router)
     app.include_router(triggers_router)
     app.include_router(interaction_router)
     app.include_router(agent_calls_router)
@@ -269,9 +255,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     app.include_router(sessions_router)
     app.include_router(knowledge_base_router)
     app.include_router(floating_chat_router)
-    app.include_router(cost_control_router)
     app.include_router(evaluation_router)
-    app.include_router(eval_metrics_alias_router)
     app.include_router(client_router)
     app.include_router(files_router)
     app.include_router(task_phase_router)
@@ -295,7 +279,3 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
 
     app.include_router(scene_router)
 
-    # ---- 维护管理路由 ----
-    from routes_maintenance import router as maintenance_router  # noqa: PLC0415
-
-    app.include_router(maintenance_router)

@@ -3,18 +3,19 @@
     "name": "Tool Core",
     "version": "1.0.0",
     "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "tool_core.execute",
+    "pipeline_role": "core",
+    "language": "rust",
+    "host_type": "in_process",
+    "entry": "pipeline_tool_core_native.dll",
+    "invoke_entry": "plugin_execute",
+    "native": {
+        "artifact": "pipeline_tool_core_native.dll"
+    },
     "capabilities": {
         "tools": [],
         "resources": [],
         "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
+        "lifecycle_hooks": []
     },
     "dependencies": [],
     "permissions": {},

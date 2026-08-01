@@ -29,9 +29,9 @@
 use core::panic::PanicInfo;
 
 /// 全局 bump 分配器指针（线性内存偏移）。
-/// 放在偏移 4 处（偏移 0..4 保留给这个指针本身）。
-const BUMP_LOC: usize = 0;
-const HEAP_START: usize = 4;
+/// 放在偏移 4 处（偏移 0..4 保留，避免解引用近 null 偏移被编译器当 UB 优化成 trap）。
+const BUMP_LOC: usize = 4;
+const HEAP_START: usize = 8;
 
 /// 读取/写入 bump 指针（i32，存放在线性内存偏移 BUMP_LOC）。
 fn load_bump() -> usize {

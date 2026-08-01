@@ -9,6 +9,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
+
+use parking_lot::RwLock as ParkingRwLock;
 
 use axum::{
     extract::{
@@ -21,7 +25,9 @@ use axum::{
     Router,
 };
 use agentos_core::traits::CapabilityRegistry;
-use agentos_core::types::TenantContext;
+use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
+
+use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -31,11 +37,12 @@ use crate::auth::{
 };
 use crate::error::ApiError;
 use crate::compat_routes::{
-    create_thread_handler,
-    evaluation_metrics_handler, get_thread_handler, list_thread_messages_handler,
+    create_thread_handler, delete_thread_handler,
+    get_thread_handler, list_thread_messages_handler,
     list_threads_handler, plugins_history_handler,
-    plugins_reload_all_handler, plugins_reload_handler, plugins_set_enabled_handler,
-    plugins_status_handler, update_thread_agent_handler,
+    plugins_reload_all_handler, plugins_reload_by_id_handler, plugins_reload_handler,
+    plugins_set_enabled_handler, plugins_status_handler, update_thread_agent_handler,
+    update_thread_handler,
 };
 use crate::routes::{
     agents_handler, get_plugin_config_with_etag, health_handler, metrics_prometheus_handler,
@@ -93,7 +100,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/threads",
             get(list_threads_handler).post(create_thread_handler),
         )
-        .route("/api/v1/threads/{id}", get(get_thread_handler))
+        .route(
+            "/api/v1/threads/{id}",
+            get(get_thread_handler)
+                .patch(update_thread_handler)
+                .delete(delete_thread_handler),
+        )
         .route(
             "/api/v1/threads/{id}/agent",
             axum::routing::patch(update_thread_agent_handler),
@@ -105,14 +117,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/plugins/status", get(plugins_status_handler))
         .route("/api/v1/plugins/history", get(plugins_history_handler))
         .route("/api/v1/plugins/reload", post(plugins_reload_handler))
+        .route(
+            "/api/v1/plugins/{id}/reload",
+            post(plugins_reload_by_id_handler),
+        )
         .route("/api/v1/plugins/{id}/enabled", axum::routing::put(plugins_set_enabled_handler))
         .route(
             "/api/v1/plugins/reload-all",
             post(plugins_reload_all_handler),
-        )
-        .route(
-            "/api/v1/evaluation-metrics",
-            get(evaluation_metrics_handler),
         )
         // 监控 M5/M5b：指标查询 + Prometheus 导出（监控设计 §五/§十一）
         .route("/api/v1/metrics", get(metrics_query_handler))
@@ -205,6 +217,149 @@ pub(crate) fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> Tenan
 /// 默认核心管道插件 id（可被 agent 配置 config/agents/<id>.yaml 的 core_plugin 覆盖）。
 /// 历史上硬编码 "pipeline_llm_core" 写在 initial_state，现提取为常量便于发现与替换。
 const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
+
+/// 管道配置热重载的 mtime 检测 TTL：1 秒内不重复 stat，避免高频 chat 时反复解析 YAML。
+const PIPELINE_CONFIG_TTL: Duration = Duration::from_secs(1);
+
+/// 热重载检测的全局缓存：记录上次检测时刻 + 上次配置文件的 mtime 指纹。
+/// 进程级单例（OnceLock），所有 chat 请求共享，避免每次都重新 stat。
+struct ConfigReloadState {
+    last_check: std::time::Instant,
+    last_fingerprint: u64,
+}
+
+static CONFIG_RELOAD_CACHE: OnceLock<ParkingRwLock<Option<ConfigReloadState>>> = OnceLock::new();
+
+fn config_reload_cache() -> &'static ParkingRwLock<Option<ConfigReloadState>> {
+    CONFIG_RELOAD_CACHE.get_or_init(|| ParkingRwLock::new(None))
+}
+
+/// 计算管道配置的 mtime 指纹：autonomous.yaml + config/steps/ 目录下所有 .yaml。
+///
+/// 用 mtime 而非内容 hash：stat 是微秒级，热路径可接受；mtime 精度足够捕获配置修改。
+/// 任一配置文件 mtime 变化 → 指纹变化 → 触发重载。
+fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut hasher = DefaultHasher::new();
+
+    let mtime_secs = |p: &std::path::Path| -> u64 {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+
+    // autonomous.yaml（核心管道配置）
+    let pipeline_yaml = config_root.join("pipelines").join("autonomous.yaml");
+    hasher.write(b"autonomous:");
+    hasher.write_u64(mtime_secs(&pipeline_yaml));
+
+    // config/steps/ 目录（公共 step 库）
+    let steps_dir = config_root.join("steps");
+    if let Ok(entries) = std::fs::read_dir(&steps_dir) {
+        let mut paths: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let p = e.path();
+                if p.is_file()
+                    && (p.extension().and_then(|x| x.to_str()) == Some("yaml")
+                        || p.extension().and_then(|x| x.to_str()) == Some("yml"))
+                {
+                    Some((p.file_name()?.to_string_lossy().to_string(), mtime_secs(&p)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, mtime) in paths {
+            hasher.write(name.as_bytes());
+            hasher.write(b":");
+            hasher.write_u64(mtime);
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Pull 热加载：按需重载管道配置。
+///
+/// 每次 `process_via_engine` 执行前调用。返回本次执行应使用的 pipeline_config + step_library。
+/// 策略（双层短路）：
+/// 1. **TTL 门**：距上次检测不足 `PIPELINE_CONFIG_TTL`（1s）→ 直接返回 AppState 里启动期加载的配置。
+/// 2. **指纹比对**：TTL 过期后 stat autonomous.yaml + steps 目录 mtime，与缓存比对。
+///    相同 → 返回 AppState 配置（没更新）；不同 → 重新加载 + 校验，校验通过返回新配置，
+///    校验失败（坏 YAML / 命名冲突）则保留旧配置 + 记 warn（不 panic，对照启动期 fail-fast 的降级版）。
+///
+/// 失败安全：任何 IO/解析错误都回退到 AppState 启动期配置，绝不因热重载让 chat 不可用。
+fn maybe_reload_pipeline_configs(
+    state: &AppState,
+    config_root: &std::path::Path,
+) -> (Arc<PipelineConfig>, Arc<StepLibrary>) {
+    let now = std::time::Instant::now();
+    // TTL 门 + 指纹比对在同一把读锁下快照
+    let needs_check = {
+        let cache = config_reload_cache().read();
+        match cache.as_ref() {
+            None => true, // 首次必检
+            Some(c) => now.duration_since(c.last_check) >= PIPELINE_CONFIG_TTL,
+        }
+    };
+    if !needs_check {
+        return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+    }
+
+    let new_fp = compute_config_fingerprint(config_root);
+    let reload = {
+        let mut cache = config_reload_cache().write();
+        let stale = match cache.as_ref() {
+            None => true,
+            Some(c) => c.last_fingerprint != new_fp,
+        };
+        // 无论是否重载都刷新检测时刻；指纹更新到 new_fp
+        *cache = Some(ConfigReloadState {
+            last_check: now,
+            last_fingerprint: new_fp,
+        });
+        stale
+    };
+
+    if !reload {
+        return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+    }
+
+    // 指纹变化 → 重新加载 + 校验
+    info!("Pipeline config changed on disk, reloading...");
+    let new_pipeline = match load_pipeline_config(config_root) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "Hot reload: load_pipeline_config failed, keeping old config");
+            return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+        }
+    };
+    let new_steps = match load_step_library(config_root) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "Hot reload: load_step_library failed, keeping old config");
+            return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+        }
+    };
+    // 重名校验（启动期 fail-fast 的降级版：记 warn 不 panic）
+    let known_ids: std::collections::HashSet<String> = state.plugin_ids.iter().cloned().collect();
+    if let Err(conflict) = validate_no_name_conflicts(&new_pipeline, &new_steps, &known_ids) {
+        warn!(conflict = %conflict, "Hot reload: name conflict, keeping old config");
+        return (Arc::clone(&state.pipeline_config), Arc::clone(&state.step_library));
+    }
+    info!(
+        pipeline = %new_pipeline.name,
+        steps = new_pipeline.steps.len(),
+        "Pipeline config hot-reloaded successfully"
+    );
+    (Arc::new(new_pipeline), Arc::new(new_steps))
+}
 
 pub(crate) async fn process_via_engine(
     state: &AppState,
@@ -311,6 +466,15 @@ async fn process_via_engine_inner(
     let tenant_id = tenant.tenant_id.clone();
     let run_id = uuid::Uuid::new_v4().to_string();
     let branch_id = "main".to_string();
+
+    // ── Pull 热加载：按需重载管道配置（autonomous.yaml + steps）──
+    // 每次 chat 执行前检测配置 mtime，变了才重新加载到本次执行用的局部变量，
+    // 不写回 AppState（启动期配置保持不动，作为重载失败的兜底）。
+    // 配置变更对本次及后续请求生效：每次执行都经此检测。
+    // 在 project_root 被 move 给 executor 之前算出 config_root。
+    let config_root = project_root.join("config");
+    let (pipeline_cfg, step_lib) = maybe_reload_pipeline_configs(state, &config_root);
+
     let executor = agentos_engine::PipelineExecutor::new(
         invoker,
         project_root,
@@ -324,7 +488,7 @@ async fn process_via_engine_inner(
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
     let final_state = match executor
-        .run(&state.pipeline_config, &state.step_library, initial_state)
+        .run(&pipeline_cfg, &step_lib, initial_state)
         .await
     {
         Ok(s) => s,

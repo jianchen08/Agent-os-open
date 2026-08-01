@@ -71,6 +71,76 @@ const DEFAULT_CONFIG: LogConfig = {
 }
 
 /**
+ * 日志参数序列化辅助：避免 Error/AxiosError/POJO 被打成 [object Object]。
+ */
+class LoggerHelpers {
+  /** 安全 JSON 序列化：处理循环引用。 */
+  static safeStringify(val: unknown): string {
+    try {
+      return JSON.stringify(val)
+    } catch {
+      // 循环引用降级：用 replacer 过滤已访问对象。
+      try {
+        const seen = new WeakSet()
+        return JSON.stringify(val, (_key, value) => {
+          if (typeof value === 'object' && value !== null) {
+            if (seen.has(value)) return '[Circular]'
+            seen.add(value)
+          }
+          return value
+        })
+      } catch {
+        return '[Circular]'
+      }
+    }
+  }
+
+  /**
+   * 把单个日志参数格式化为字符串：
+   * - 基本类型（string/number/boolean/null/undefined）→ String(val)
+   * - Error / AxiosError（含 isAxiosError 或 response 字段）→ 提取关键字段
+   * - 其它对象 → JSON 序列化（循环引用降级）
+   */
+  static formatArg(val: unknown): string {
+    if (val === null || val === undefined) return ''
+    if (typeof val === 'string') return val
+    if (typeof val === 'number' || typeof val === 'boolean' || typeof val === 'bigint') {
+      return String(val)
+    }
+    if (typeof val !== 'object') return String(val)
+
+    // Error / AxiosError：提取可读字段（避免打印整个响应体）
+    const anyVal = val as Record<string, unknown>
+    const isError = val instanceof Error
+    const isAxios = anyVal.isAxiosError === true
+    const hasResponse = 'response' in anyVal
+    if (isError || isAxios || hasResponse) {
+      const summary: Record<string, unknown> = {
+        message: anyVal.message ?? (isError ? String(val) : undefined),
+        name: anyVal.name,
+      }
+      const code = anyVal.code
+      if (code !== undefined) summary.code = code
+      // HTTP 状态：axios 存在 response.status
+      const status = (anyVal.response as Record<string, unknown> | undefined)?.status
+      if (status !== undefined) summary.status = status
+      // URL / method（axios 请求信息）
+      const cfg = anyVal.config as Record<string, unknown> | undefined
+      if (cfg) {
+        if (typeof cfg.url === 'string') summary.url = cfg.url
+        if (typeof cfg.method === 'string') summary.method = cfg.method
+      }
+      const stack = typeof anyVal.stack === 'string' ? (anyVal.stack as string) : ''
+      if (stack) summary.stack = stack.split('\n').slice(0, 3).join('\n')
+      const body = LoggerHelpers.safeStringify(summary)
+      return isAxios || hasResponse ? `<AxiosError ${body}>` : `<Error ${body}>`
+    }
+
+    return LoggerHelpers.safeStringify(val)
+  }
+}
+
+/**
  * 日志管理器
  */
 class LogManager {
@@ -273,12 +343,13 @@ class ModuleLogger {
       const val = args[idx++]
       if (match === '%d') return String(typeof val === 'number' ? val : Number(val) || 0)
       if (match === '%j') {
-        try { return JSON.stringify(val) } catch { return '[Circular]' }
+        return LoggerHelpers.safeStringify(val)
       }
-      return String(val ?? '')
+      // %s 或未知占位符：用 safeStringify 避免 Error/AxiosError/POJO 被打成 [object Object]
+      return LoggerHelpers.formatArg(val)
     })
     if (idx < args.length) {
-      return result + ' ' + args.slice(idx).map((a) => String(a ?? '')).join(' ')
+      return result + ' ' + args.slice(idx).map((a) => LoggerHelpers.formatArg(a)).join(' ')
     }
     return result
   }

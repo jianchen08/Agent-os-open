@@ -1,0 +1,17 @@
+{
+    "id": "native_test",
+    "name": "Native Test (InProcess cdylib)",
+    "version": "1.0.0",
+    "plugin_type": "pipeline",
+    "pipeline_role": "core",
+    "language": "rust",
+    "host_type": "in_process",
+    "entry": "native_test_plugin.dll",
+    "invoke_entry": "plugin_execute",
+    "native": {
+        "artifact": "native_test_plugin.dll"
+    },
+    "capabilities": {},
+    "permissions": {},
+    "priority": 100
+}

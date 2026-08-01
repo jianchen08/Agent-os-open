@@ -1,38 +1,18 @@
 version: '2.0'
-compress_trigger_ratio: 0.56
+compress_trigger_ratio: 0.55
 budgets:
-  system_prompt: 0.08
-  tools_description: 0
-  static_vars: 0.05
-  dynamic_variables: 0.05
-  l3: 0.03
-  l2: 0.08
-  l1: 0.15
-  recent: 0.25
-  retrieval: 0.08
-  response_reserve: 0.23
+  system_prompt: 0.06
+  tools_description: 0.0
+  static_vars: 0.03
+  dynamic_variables: 0.03
+  l3: 0.02
+  l2: 0.05
+  l1: 0.1
+  recent: 0.18
+  retrieval: 0.05
+  response_reserve: 0.14
 include_tools_description_in_prompt: false
-templates:
-  system_prompt: '{content}'
-  tools_description: '## 可用工具
-
-    {tools}'
-  static_vars: '## 静态资源
-
-    {content}'
-  l3_memory: '## 历史关键词索引
-
-    {keywords}'
-  l2_memory: '## 历史摘要
-
-    {summaries}'
-  l1_memory: '## 详细历史
-
-    {details}'
-  recent_messages: '{messages}'
-  dynamic_vars: '## 动态上下文
-
-    {variables}'
+templates: {}
 stability:
   system_prompt: stable
   tools_description: stable
@@ -42,13 +22,7 @@ stability:
   l1_memory: semi_stable
   recent_messages: dynamic
   dynamic_vars: dynamic
-budget_mapping:
-  static_vars: static_vars
-  l3_memory: l3_memory
-  l2_memory: l2_memory
-  l1_memory: l1_memory
-  recent_messages: recent_messages
-  dynamic_vars: dynamic_vars
+budget_mapping: {}
 layer_order:
 - system_prompt
 - tools_description

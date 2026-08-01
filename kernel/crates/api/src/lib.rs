@@ -19,6 +19,7 @@ pub mod error;
 pub mod http_dispatcher;
 pub mod metrics;
 pub mod pipeline_loader;
+pub mod plugin_lifecycle;
 pub mod routes;
 pub mod server;
 pub mod ws_session;

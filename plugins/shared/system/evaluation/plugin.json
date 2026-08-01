@@ -38,5 +38,37 @@
             "path": "config/evaluation/evaluation_metrics.yaml",
             "label": "评估指标定义"
         }
+    ],
+    "http_endpoints": [
+        {
+            "route_id": "metrics_list",
+            "method": "GET",
+            "path": "/ext/evaluation_service/metrics",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "List evaluation metrics (reads config_files: evaluation_metrics)"
+        },
+        {
+            "route_id": "metric_detail",
+            "method": "GET",
+            "path": "/ext/evaluation_service/metrics/{metric_id}",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Get a single evaluation metric by id/name"
+        },
+        {
+            "route_id": "metric_delete",
+            "method": "DELETE",
+            "path": "/ext/evaluation_service/metrics/{metric_id}",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 8,
+            "description": "Delete is rejected (built-in metrics are read-only)"
+        }
     ]
 }

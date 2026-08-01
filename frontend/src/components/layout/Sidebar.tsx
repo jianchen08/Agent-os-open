@@ -490,35 +490,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 新建会话
               </button>
 
-              {/* fixed: sessions */}
-              <button
-                type="button"
-                onClick={handleSessionsClick}
-                className={cn(
-                  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
-                  activeView === 'sessions'
-                    ? 'text-foreground'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
-                )}
-                style={
-                  activeView === 'sessions'
-                    ? {
-                        background: 'var(--ds-bg-elevated, #111C38)',
-                        boxShadow:
-                          'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
-                      }
-                    : undefined
-                }
-                data-testid="sidebar-menu-sessions"
-              >
-                {activeView === 'sessions' ? (
-                  <ChatActiveIcon className="h-4 w-4 shrink-0" />
-                ) : (
-                  <ChatIcon className="h-4 w-4 shrink-0 opacity-90" />
-                )}
-                <span className="min-w-0 flex-1 truncate">会话</span>
-              </button>
-
               {/* plugin contributed viewsContainers (vscode-like) */}
               {pluginContainers.map((entry) => {
                 const selected = activeView === entry.id
