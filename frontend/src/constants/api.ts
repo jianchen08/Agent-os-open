@@ -342,15 +342,15 @@ export const API_ENDPOINTS = {
     /** 一键清理所有会话和执行记录 */
     CLEAR_ALL: '/ext/channel_api/execution/records/clear-all',
   },
-  /** 人类交互相关 - 对应后端 /api/v1/interaction/* */
+  /** 人类交互相关 - 4c/批次5 迁移：已切 /ext/channel_api/interaction/* */
   INTERACTION: {
-    SUBMIT_RESPONSE: '/api/v1/interaction/response',
-    APPROVE: (requestId: string) => `/api/v1/interaction/${requestId}/approve`,
-    DENY: (requestId: string) => `/api/v1/interaction/${requestId}/deny`,
-    CANCEL: (requestId: string) => `/api/v1/interaction/${requestId}/cancel`,
-    VIEWED: (requestId: string) => `/api/v1/interaction/${requestId}/viewed`,
-    PENDING: '/api/v1/interaction/pending',
-    GET: (requestId: string) => `/api/v1/interaction/${requestId}`,
+    SUBMIT_RESPONSE: '/ext/channel_api/interaction/response',
+    APPROVE: (requestId: string) => `/ext/channel_api/interaction/${requestId}/approve`,
+    DENY: (requestId: string) => `/ext/channel_api/interaction/${requestId}/deny`,
+    CANCEL: (requestId: string) => `/ext/channel_api/interaction/${requestId}/cancel`,
+    VIEWED: (requestId: string) => `/ext/channel_api/interaction/${requestId}/viewed`,
+    PENDING: '/ext/channel_api/interaction/pending',
+    GET: (requestId: string) => `/ext/channel_api/interaction/${requestId}`,
   },
   /** 知识库相关 - 对应后端 /api/v1/knowledge-base/* */
   KNOWLEDGE_BASE: {
