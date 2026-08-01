@@ -556,6 +556,30 @@ class ExecutionRecordStorage:
         self._ensure_loaded(session_id)
         return sum(1 for r in self._records.values() if r.pipeline_run_id == session_id)
 
+
+    def search_records(self, keyword: str, limit: int = 50) -> list[ExecutionRecordData]:
+        """全局搜索执行记录内容（子串匹配，大小写不敏感）。
+
+        用于搜索 API（GET /api/v1/search?type=message）。搜索前触发全量加载，
+        确保磁盘上的所有分片记录都进入内存缓存，避免漏搜。
+
+        Args:
+            keyword: 搜索关键词（子串匹配）
+            limit: 返回的最大记录数
+
+        Returns:
+            按 created_at 倒序的匹配记录列表
+        """
+        if self._data_dir and not self._loaded_pipelines:
+            self._load_all()
+        needle = keyword.lower()
+        hits = [
+            r
+            for r in self._records.values()
+            if needle in (r.content or "").lower()
+        ]
+        hits.sort(key=lambda r: r.created_at or "", reverse=True)
+        return hits[:limit]
     def delete_by_session(self, session_id: str) -> int:
         # 懒加载：先从磁盘读入该 pipeline 的全部记录，否则服务重启后（或会话
         # 消息从未被访问过时）self._records 为空，下面的文件清理守卫

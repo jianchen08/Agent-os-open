@@ -375,6 +375,11 @@ export const API_ENDPOINTS = {
     /** 获取标签列表 */
     TAGS: '/ext/channel_api/knowledge-base/tags',
   },
+  /** 全局搜索相关 - 对应后端 /api/v1/search（P2 搜索框合并） */
+  SEARCH: {
+    /** 统一搜索（会话 + 消息），参数 q/type/limit */
+    GLOBAL: '/api/v1/search',
+  },
 } as const
 
 /**

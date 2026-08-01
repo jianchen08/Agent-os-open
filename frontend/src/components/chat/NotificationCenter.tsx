@@ -46,9 +46,11 @@ const PRIORITY_ORDER: NotificationPriority[] = ['critical', 'high', 'normal', 'l
 
 export interface NotificationCenterProps {
   className?: string
+  /** P5：隐藏自带触发按钮（由侧边栏 Bell 作为唯一入口触发 togglePanel） */
+  hideTrigger?: boolean
 }
 
-export function NotificationCenter({ className }: NotificationCenterProps) {
+export function NotificationCenter({ className, hideTrigger = false }: NotificationCenterProps) {
   const notifications = useNotificationStore((s) => s.notifications)
   const groupState = useNotificationStore((s) => s.groupState)
   const isPanelOpen = useNotificationStore((s) => s.isPanelOpen)
@@ -333,7 +335,8 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
   return (
     <>
       {renderBlockingDialog()}
-      {renderTrigger()}
+      {/* P5: hideTrigger 时隐藏自带触发按钮（由侧边栏 Bell 作为唯一入口调用 togglePanel） */}
+      {!hideTrigger && renderTrigger()}
 
       {isPanelOpen && createPortal(
         <>

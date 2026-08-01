@@ -19,7 +19,6 @@ import {
   ChatActiveIcon,
   Loader2,
   Plus,
-  Search,
   User,
   X,
 } from '@/assets/icons'
@@ -28,10 +27,12 @@ import { useNavigate } from 'react-router-dom'
 import { SessionEditModal } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
+import { NotificationCenter } from '@/components/chat/NotificationCenter'
 import { ThemeButton } from '@/components/layout/ThemeButton'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
+import { searchGlobal, type SearchType, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
 import {
   openWorkspacePanel,
   openWorkspacePanelByPath,
@@ -42,6 +43,7 @@ import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -88,6 +90,14 @@ const SIDEBAR_STYLES = {
 export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const navigate = useNavigate()
   const [searchKeyword, setSearchKeyword] = useState('')
+  const [searchType, setSearchType] = useState<SearchType>('all')
+  /** P2: 后端搜索结果（防抖调用 /api/v1/search） */
+  const [searchResults, setSearchResults] = useState<{
+    sessions: SessionSearchHit[]
+    messages: MessageSearchHit[]
+  }>({ sessions: [], messages: [] })
+  const [isSearching, setIsSearching] = useState(false)
+  const [searchError, setSearchError] = useState(false)
   // 模态框统一状态: { mode: 'create' } 或 { mode: 'edit', sessionId } 或 null
   const [modal, setModal] = useState<{ mode: 'create' | 'edit'; sessionId?: string } | null>(null)
   const [isSaving, setIsSaving] = useState(false)
@@ -121,12 +131,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const toggleSessionPin = useSessionListStore((state) => state.toggleSessionPin)
   const renameSession = useSessionListStore((state) => state.renameSession)
   const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
-  const searchSessions = useSessionListStore((state) => state.searchSessions)
   const fetchSessions = useSessionListStore((state) => state.fetchSessions)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
-  const messageSearchQuery = useUIStore((state) => state.messageSearchQuery)
-  const setMessageSearchQuery = useUIStore((state) => state.setMessageSearchQuery)
+  // P5：通知唯一入口——底栏 Bell 绑定 notificationStore（与 NotificationCenter 同一 store）
+  const toggleNotificationPanel = useNotificationStore((s) => s.togglePanel)
+  const notificationUnreadCount = useNotificationStore(
+    (s) => s.notifications.filter((n) => !n.isRead).length,
+  )
 
   // Agent 数据统一在这里加载
   const fetchAgents = useAgentStore((state) => state.fetchAgents)
@@ -164,11 +176,51 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     }
   }, [fetchSessions])
 
-  // 根据搜索关键词过滤会话 - 使用 useMemo 缓存计算结果
-  const filteredSessions = useMemo(
-    () => (searchKeyword ? searchSessions(searchKeyword) : sessions),
-    [searchKeyword, searchSessions, sessions],
-  )
+  /**
+   * P2 搜索框合并：防抖调用后端搜索 API（/api/v1/search）
+   * 替换原有两个搜索框的本地过滤（searchSessions + messageSearchQuery）。
+   * 输入停止 350ms 后发起请求；q 为空时清空结果。
+   */
+  useEffect(() => {
+    const keyword = searchKeyword.trim()
+    if (!keyword) {
+      setSearchResults({ sessions: [], messages: [] })
+      setSearchError(false)
+      setIsSearching(false)
+      return
+    }
+    setIsSearching(true)
+    const timer = window.setTimeout(() => {
+      searchGlobal(keyword, searchType, 20)
+        .then((data) => {
+          setSearchResults({
+            sessions: data.sessions ?? [],
+            messages: data.messages ?? [],
+          })
+          setSearchError(false)
+        })
+        .catch(() => {
+          setSearchResults({ sessions: [], messages: [] })
+          setSearchError(true)
+        })
+        .finally(() => setIsSearching(false))
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [searchKeyword, searchType])
+
+  // P2：会话列表数据源——有后端搜索结果时用后端结果（会话命中），
+  // 否则回退本地 sessions。消息搜索命中不改变会话列表（消息结果单独展示）。
+  const filteredSessions = useMemo(() => {
+    if (!searchKeyword.trim()) return sessions
+    if (searchType === 'message') return sessions
+    if (searchResults.sessions.length > 0) {
+      // 后端返回的是会话 ID 列表，映射为完整 Session 对象（保留星标/置顶等本地状态）
+      const hitIds = new Set(searchResults.sessions.map((h) => h.id))
+      return sessions.filter((s) => hitIds.has(s.id))
+    }
+    // 后端无命中：返回空（展示"未找到匹配的会话"）
+    return searchError ? sessions : []
+  }, [searchKeyword, searchType, searchResults, sessions, searchError])
 
   /**
    * 处理会话点击 - 设置活动会话并导航到会话页面
@@ -280,6 +332,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     },
     [toggleSessionPin],
   )
+
+  /**
+   * P3: 重置消息 → 刷新整个前端页面（重新初始化全部 store，等价于整页刷新）
+   * 会话切换（仅刷新消息窗口）由 ChatContainer 的 key={activeTabId || sessionId}
+   * 机制 + setActiveSession 重新加载消息实现，此处仅处理"重置消息"整页刷新。
+   */
+  const handleResetMessages = useCallback((_sessionId: string) => {
+    window.location.reload()
+  }, [])
 
   /**
    * 获取正在编辑的会话
@@ -460,11 +521,18 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <ThemeButton compact />
               <button
                 type="button"
-                className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex h-9 w-9 items-center justify-center rounded-[10px]"
+                onClick={toggleNotificationPanel}
+                className="text-muted-foreground hover:text-foreground hover:bg-white/5 relative flex h-9 w-9 items-center justify-center rounded-[10px]"
                 title="通知"
-                aria-label="通知"
+                aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
+                data-testid="sidebar-rail-notification"
               >
                 <Bell className="h-4 w-4" />
+                {notificationUnreadCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-[9px] font-bold text-white">
+                    {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -544,42 +612,43 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               )}
             </div>
 
-            {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
+            {/* 搜索框区域（P2 合并：会话搜索 + 消息搜索 → 单个搜索框 + 类型切换） */}
             <div
               className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
               data-testid="sidebar-search-section"
             >
               <SessionSearch
+                value={searchKeyword}
                 onSearchChange={setSearchKeyword}
+                searchType={searchType}
+                onSearchTypeChange={setSearchType}
                 resultCount={filteredSessions.length}
                 totalCount={sessions.length}
+                isSearching={isSearching}
                 className="sidebar-search"
                 inputClassName={SIDEBAR_STYLES.searchHeight}
               />
-              {/* 消息搜索框 */}
-              <div className="relative mt-1">
-                <Search className="text-muted-foreground absolute top-1/2 left-2 h-3.5 w-3.5 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="搜索消息内容..."
-                  value={messageSearchQuery}
-                  onChange={(e) => setMessageSearchQuery(e.target.value)}
-                  className={cn(
-                    'bg-muted/50 border-border/50 focus:border-primary w-full rounded-md border py-1 pr-7 pl-7 text-xs outline-none transition-colors',
-                    SIDEBAR_STYLES.searchHeight,
-                  )}
-                  aria-label="搜索消息内容"
-                />
-                {messageSearchQuery && (
-                  <button
-                    onClick={() => setMessageSearchQuery('')}
-                    className="text-muted-foreground hover:text-foreground absolute top-1/2 right-1.5 -translate-y-1/2 rounded p-0.5"
-                    aria-label="清除消息搜索"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                )}
-              </div>
+              {/* 消息搜索结果（仅 type=all/message 且有关键词时展示） */}
+              {searchKeyword.trim() && searchType !== 'session' && searchResults.messages.length > 0 && (
+                <div className="mt-1 space-y-0.5" data-testid="sidebar-message-results">
+                  {searchResults.messages.slice(0, 8).map((hit) => (
+                    <button
+                      key={`${hit.session_id}-${hit.id}`}
+                      type="button"
+                      onClick={() => handleSessionClick(hit.session_id)}
+                      className="text-muted-foreground hover:text-foreground hover:bg-white/5 block w-full truncate rounded px-2 py-1 text-left text-[11px] transition-colors"
+                      title={hit.content}
+                    >
+                      {hit.content}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {searchError && (
+                <p className="text-muted-foreground mt-1 px-1 text-[10px]">
+                  搜索暂不可用，已展示全部会话
+                </p>
+              )}
             </div>
 
             {/* 会话列表 - Requirements: 9.3, 9.4 */}
@@ -618,6 +687,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   onCopySession={handleCopySession}
                   onStarSession={handleStarSession}
                   onPinSession={handlePinSession}
+                  onResetMessages={handleResetMessages}
                   className="px-2"
                   itemHeight={SIDEBAR_STYLES.itemHeight}
                 />
@@ -640,17 +710,26 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <ThemeButton compact />
               <button
                 type="button"
-                className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+                onClick={toggleNotificationPanel}
+                className="text-muted-foreground hover:text-foreground hover:bg-white/5 relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
                 title="通知"
-                aria-label="通知"
+                aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
+                data-testid="sidebar-notification"
               >
                 <Bell className="h-3.5 w-3.5" />
+                {notificationUnreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-[9px] font-bold text-white">
+                    {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
+                  </span>
+                )}
               </button>
             </div>
             </div>
           </>
         )}
       </aside>
+      {/* P5: 通知中心唯一入口承载——侧边栏 Bell 调用 togglePanel，面板/阻塞模态框在此挂载 */}
+      <NotificationCenter hideTrigger />
       <SessionEditModal
         mode={modal?.mode || 'create'}
         isOpen={modal !== null}
