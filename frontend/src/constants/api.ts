@@ -331,11 +331,11 @@ export const API_ENDPOINTS = {
   /** Agent 调用记录相关 - 对应后端 /api/v1/agent-calls/* */
   AGENT_CALLS: {
     /** 获取调用记录列表 */
-    LIST: '/api/v1/agent-calls',
+    LIST: '/ext/channel_api/agent-calls',
     /** 获取调用统计 */
-    STATISTICS: '/api/v1/agent-calls/statistics',
+    STATISTICS: '/ext/channel_api/agent-calls/statistics',
     /** 获取调用记录详情 */
-    GET: (executionId: string) => `/api/v1/agent-calls/${executionId}`,
+    GET: (executionId: string) => `/ext/channel_api/agent-calls/${executionId}`,
   },
   /** 数据清理相关 - 4c 迁移：已切 /ext/channel_api/execution/records/clear-all */
   DATA_CLEANUP: {

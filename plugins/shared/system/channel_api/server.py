@@ -1178,6 +1178,40 @@ async def _handle_floating_chat_domain(
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
 
+async def _handle_agent_calls_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """agent-calls 域分发：/ext/channel_api/agent-calls/** → routes_missing.agent_calls_router。
+
+    3 路由 stub：list(GET "" )/statistics(GET)/{execution_id}(GET)。
+    前端 AGENT_CALLS 块 3 端点完全对应。
+    """
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/agent-calls"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not an agent-calls path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/statistics" / "/{execution_id}"
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rm.list_agent_calls()))
+        if sub == "/statistics" and method == "GET":
+            return _ok(_json_response(await rm.get_agent_call_statistics()))
+        if sub.startswith("/") and len(sub) > 1 and method == "GET":
+            exec_id = sub[1:]
+            return _ok(_json_response(await rm.get_agent_call(exec_id)))
+
+        logger.warning("agent-calls http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("agent-calls http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
     """处理 reviews /media-review（multipart：file + media_type）。
 
@@ -1546,6 +1580,10 @@ async def http_handle(
     # ── floating-chat 域（批次5，有前端消费，2 路由 stub）──
     if path.startswith("/ext/channel_api/floating-chat"):
         return await _handle_floating_chat_domain(path, method, raw_body, q)
+
+    # ── agent-calls 域（批次5，有前端消费，3 路由 stub）──
+    if path.startswith("/ext/channel_api/agent-calls"):
+        return await _handle_agent_calls_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):
