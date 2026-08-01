@@ -40,8 +40,8 @@ export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
     indicatorSize: 6,
   },
   panelSplit: {
-    chatRatio: 0.45,
-    workspaceRatio: 0.55,
+    chatRatio: 0.55,
+    workspaceRatio: 0.45,
     adjustable: true,
     divider: {
       width: 1,

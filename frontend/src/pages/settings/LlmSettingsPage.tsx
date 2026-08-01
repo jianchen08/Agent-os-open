@@ -15,6 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { toast } from '@/components/ui/sonner'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   getLLMConfig,
@@ -32,6 +33,15 @@ import {
 } from '@/services/api/config'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+/**
+ * 从被 reject 的对象中提取后端错误消息。
+ *
+ * apiClient 的拦截器构造的是普通 ApiError 对象（非 Error 实例），
+ * 因此不能用 instanceof Error，需直接读 .message 字段。
+ */
+const getApiMsg = (e: unknown, fallback = '操作失败'): string =>
+  (e as { message?: string })?.message ?? fallback
 
 /** 模型参数（可编辑的默认参数） */
 interface ModelParams {
@@ -140,8 +150,9 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       setDefaults(saved)
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2000)
-    } catch {
+    } catch (e) {
       setSaveState('error')
+      toast.error('保存默认配置失败', { description: getApiMsg(e) })
     }
   }, [defaults])
 
@@ -153,8 +164,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       setConfig((prev) => (prev ? { ...prev, models } : prev))
       setNewModelId('')
       setNewModelConfig({ provider: '', model_name: '', display_name: '' })
-    } catch {
-      // 静默处理
+    } catch (e) {
+      toast.error('添加模型失败', { description: getApiMsg(e, '添加模型失败') })
     }
   }, [newModelId, newModelConfig])
 
@@ -163,8 +174,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     try {
       const models = await deleteModel(modelId)
       setConfig((prev) => (prev ? { ...prev, models } : prev))
-    } catch {
-      // 静默处理
+    } catch (e) {
+      toast.error('删除模型失败', { description: getApiMsg(e, '删除模型失败') })
     }
   }, [])
 
@@ -176,8 +187,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         const updatedKeys = [{ ...firstKey, api_key: apiKey }]
         const providers = await updateProviderConfig(providerId, { keys: updatedKeys })
         setConfig((prev) => (prev ? { ...prev, providers } : prev))
-      } catch {
-        // 静默处理
+      } catch (e) {
+        toast.error('更新密钥失败', { description: getApiMsg(e, '更新密钥失败') })
       }
     },
     [],
@@ -198,8 +209,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       setNewProviderType('openai')
       setNewProviderApiBase('')
       setNewProviderApiKey('')
-    } catch {
-      // 静默处理
+    } catch (e) {
+      toast.error('添加提供商失败', { description: getApiMsg(e, '添加提供商失败') })
     }
   }, [newProviderId, newProviderType, newProviderApiBase, newProviderApiKey])
 
@@ -208,8 +219,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     try {
       const providers = await deleteProvider(providerId)
       setConfig((prev) => (prev ? { ...prev, providers } : prev))
-    } catch {
-      // 静默处理
+    } catch (e) {
+      toast.error('删除提供商失败', { description: getApiMsg(e, '删除提供商失败') })
     }
   }, [])
 
