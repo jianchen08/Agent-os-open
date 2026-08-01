@@ -165,6 +165,14 @@ impl McpClient {
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
 
+                // Unix：让 sidecar 成为新进程组组长。kill 时对 -pid 发进程组
+                // 信号可连孙进程（bash 工具拉起的进程树）一起杀——防 sidecar
+                // 被卸载/崩溃后 bash 孙进程变孤儿（治理缺口，见 kill_process_tree）。
+                #[cfg(unix)]
+                {
+                    cmd.process_group(0);
+                }
+
                 // 设置工作目录（插件目录），确保 server.py 等相对路径可解析
                 if let Some(ref dir) = self.working_dir {
                     cmd.current_dir(dir);
@@ -520,19 +528,58 @@ impl McpClient {
         }
     }
 
-    /// 终止子进程
+    /// 终止子进程及其整棵进程树
+    ///
+    /// 治理缺口修复：原实现只 kill 直接子进程（sidecar 本体），bash 工具
+    /// 拉起的孙进程会变孤儿。现在先整树杀（kill_process_tree），再对直接
+    /// 子进程 kill 兜底。idle GC 卸载 / 崩溃清理 / 热重载 respawn 三条
+    /// kill 路径均收敛到此方法。
     pub async fn kill(&mut self) -> Result<(), McpError> {
         if let Some(child) = &self.child {
             let mut child = child.lock().await;
-            child.kill().await.map_err(|e| McpError::Transport {
-                message: format!("kill error: {}", e),
-            })?;
+            let pid = child.id();
+            if let Some(pid) = pid {
+                // 整树杀（bash 等孙进程一并清理，防孤儿）
+                kill_process_tree(pid).await;
+                // 树杀已含直接子进程；kill() 仅作兜底，失败不报错（避免噪音）
+                let _ = child.kill().await;
+            } else {
+                child.kill().await.map_err(|e| McpError::Transport {
+                    message: format!("kill error: {}", e),
+                })?;
+            }
         }
         self.child = None;
         self.stdin = None;
         self.stdout = None;
         *self.initialized.lock().await = false;
         Ok(())
+    }
+}
+
+/// 杀整棵进程树（sidecar 的孙进程——bash 等——一并清理，防孤儿）。
+///
+/// 平台策略：
+/// - Windows: `taskkill /PID <pid> /T /F`（递归枚举并强制终止整棵树）
+/// - Unix: `kill(-pid, SIGKILL)` 进程组信号（spawn 时 process_group(0)
+///   保证 sidecar 是进程组组长，子孙进程同组）
+///
+/// best-effort：失败不阻断调用方（随后 child.kill() 兜底直接子进程）。
+async fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // 负 pid → 进程组（组长被杀，组内全部子孙进程一并终止）
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
     }
 }
 

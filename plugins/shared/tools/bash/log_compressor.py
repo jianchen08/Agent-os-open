@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import ClassVar
 
-from .types import LogCompressorConfig, OutputSummary, OutputType
+from bash_types import LogCompressorConfig, OutputSummary, OutputType
 
 
 class LogCompressor:

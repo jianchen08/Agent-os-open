@@ -125,17 +125,36 @@ fn run(state: &Value, host: &ROption<HostServicesBox>) -> HashMap<String, Value>
 ///
 /// 经 ctx.host 调内核 `tool-executor.invoke`，内核反查 tool_name → plugin_id
 /// 调对应工具 sidecar，返回 ToolExecutionResult。发 tool_start/tool_result 事件。
+///
+/// 会话身份注入（治理缺口修复）：从 state 提取 session_id/thread_id 拼接为
+/// `_owner` 注入工具参数——bash 等有状态工具凭此区分跨会话的 pid 级操作
+/// （continue/input/terminate/read_log 越权校验），防止多会话互相劫持。
 fn execute_single_tool(tc: &ToolCall, host: &ROption<HostServicesBox>, state: &Value) -> ToolResult {
     // 发 tool_start 事件（host 为 RNone 时 emit 内部跳过）。
     emit_tool_event(host, state, "tool_start", tc, None);
 
     let start = std::time::Instant::now();
 
+    // 会话身份（owner）：session_id/thread_id 均有时拼接（线程级隔离更细），
+    // 仅其一存在时用它。两者都缺 → 不注入（插件侧走宽松兜底）。
+    let session_id = state.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+    let thread_id = state.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+    let owner = match (session_id, thread_id) {
+        (s, t) if !s.is_empty() && !t.is_empty() => format!("{s}/{t}"),
+        (_, t) if !t.is_empty() => t.to_string(),
+        (s, _) if !s.is_empty() => s.to_string(),
+        _ => String::new(),
+    };
+
     let result = match host {
         ROption::RSome(h) => {
+            let mut args = tc.args.clone();
+            if args.is_object() && !owner.is_empty() {
+                args["_owner"] = json!(owner);
+            }
             let invoke_params = json!({
                 "tool_name": tc.name,
-                "args": tc.args,
+                "args": args,
             });
             let params_json = serde_json::to_string(&invoke_params).unwrap_or_else(|_| "{}".into());
             // 调内核 tool-executor.invoke（经 HostServices → CapabilityRouter）。

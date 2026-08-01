@@ -1,5 +1,5 @@
 """
-增强版 Bash 命令执行工具
+增强版 Bash 命令执行工具（0.2 自包含版）
 
 ⚠️ 安全威胁模型（H3）
 =================
@@ -10,16 +10,18 @@ os.system('...')" 即绕过 SecurityChecker）。
 
 SecurityChecker 的正则黑名单只拦**不可逆灾难**（rm -rf /、mkfs、dd 等
 手滑即无法挽回的操作），**不是安全边界**。curl | sh 这类"危险但合法"的
-模式不在此层硬拦，而是降级为 warning + 管道层审批。真正的控制是**隔离**：
+模式不在此层硬拦，而是降级为 warning + 管道层审批。真正的控制是**隔离**。
 
-- 可信/本地单用户场景：宿主机执行可接受（SecurityChecker 防误操作即可）。
-- 不可信/多租户场景：bash 调用必须经 IsolationCoordinator 路由到容器隔离
-  （降权 + 只读根 + 限制能力），宿主机路径对不可信输入 fail-closed。
-  容器模式下 SecurityChecker 被跳过是合理的（容器内黑名单无意义）。
+0.2 架构下本工具作为独立 sidecar 进程运行（MCP stdio），
+与 0.1 src 树零依赖；隔离决策由内核统一处理，本工具只负责执行命令。
 
-暴露接口：
-- SecurityChecker：防误操作黑名单（非安全边界，见上文）
-- BashTool：工具主类，隔离决策由上层 IsolationCoordinator 统一处理
+进程生命周期：
+- 本模块被 server.py 以**模块级单例**持有——所有 MCP 调用共享同一个
+  BashTool/ProcessManager，跨调用保留 active_processes（execute→input→
+  continue→terminate 全链路可用）。
+- 每个进程记录 owner（内核注入的会话身份，见 _owner_from_inputs），
+  pid 级操作（continue/input/terminate/read_log）强制校验调用方身份，
+  防跨会话越权。
 """
 
 from __future__ import annotations
@@ -30,21 +32,15 @@ import time
 from pathlib import Path
 from typing import Any, ClassVar
 
-from tools.builtin.base import BuiltinTool
-from plugins.shared.tools.workspace_aware import WorkspaceAwareMixin
-from tools.types import (
-    Tool,
-    ToolCategory,
-    ToolLevel,
+from bash_types import BashAction
+from input_handler import InputHandler
+from process_manager import ProcessManager
+from result_types import (
     ToolResult,
-    ToolSource,
     create_failure_result,
     create_success_result,
 )
-
-from .input_handler import InputHandler
-from .process_manager import ProcessManager
-from .types import BashAction
+from workspace_aware import WorkspaceAwareMixin
 
 
 class SecurityChecker:
@@ -60,15 +56,10 @@ class SecurityChecker:
       mkfs、dd、format、shutdown 等）。硬拦与审批层互不干涉，是最后兜底。
     - CAUTION_PATTERNS：**危险但合法**降级——curl/wget/管道到 shell 等
       是主流工具的官方用法，不应硬拦。命中只标 warning，是否放行交给管道
-      层 SecurityCheckPlugin 的审批决策（用户批准即可执行）。
-
-    与管道层的分工：管道层 SecurityCheckPlugin 基于危险工具声明 + 用户审批
-    做精细决策；本层只在工具内部兜底挡不可逆灾难，不重复审批层的语义。
+      层审批决策（用户批准即可执行）。
     """
 
     # 不可逆灾难命令：硬拦（一旦执行无法挽回）
-    # 注意：管道到 shell（| sh / | bash 等）不在此列——它们是合法常见模式，
-    # 由 CAUTION_PATTERNS 降级 + 管道层审批把关，避免"批了还过不去"。
     DANGEROUS_PATTERNS: ClassVar[list[str]] = [
         r"\brm\s+-rf\b",  # rm -rf（词边界匹配，覆盖 rm -rf / 等所有变体）
         r";\s*rm\b",  # 分号连接 rm
@@ -88,7 +79,6 @@ class SecurityChecker:
     ]
 
     # 危险但合法的命令：降级标 warning（不阻断），由管道层审批把关
-    # 管道到 shell（rustup/homebrew/nvm 等官方安装方式）、curl/wget 等属此类。
     CAUTION_PATTERNS: ClassVar[list[str]] = [
         "curl",
         "wget",
@@ -112,7 +102,6 @@ class SecurityChecker:
     # 手动后台化模式：降级标 warning（不阻断）。
     # 本工具自带后台执行+轮询语义，手动 nohup/setsid/disown/行尾& 会让进程
     # 脱离 ProcessManager 管理（continue/terminate 看不见），沦为孤儿。
-    # 用"命令位置"锚定（行首或 ;|& 之后的 token），避免误伤 grep nohup 这类参数。
     BACKGROUND_PATTERNS: ClassVar[list[str]] = [
         r"(?:^|[;|&]\s*)\s*nohup\b",  # nohup 作为命令 token
         r"(?:^|[;|&]\s*)\s*setsid\b",  # setsid 作为命令 token
@@ -156,7 +145,6 @@ class SecurityChecker:
                 return True, True, f"命令包含潜在风险操作: {pattern}"
 
         # 检查手动后台化模式（nohup/setsid/disown/行尾&）→ warning，不阻断
-        # 提醒模型：本工具已自带后台执行，手动后台化会使进程脱离管理
         for compiled in self._compiled_background:
             if compiled.search(cmd_stripped):
                 return (
@@ -172,24 +160,19 @@ class SecurityChecker:
         return True, False, None
 
 
-class BashTool(BuiltinTool, WorkspaceAwareMixin):
-    """增强版 Bash 命令执行工具。
+class BashTool(WorkspaceAwareMixin):
+    """增强版 Bash 命令执行工具（0.2 sidecar）。
 
-    隔离决策由上层 IsolationCoordinator 统一处理，本工具只负责执行命令。
+    隔离决策由内核统一处理，本工具只负责执行命令。
+    进程状态由内部 ProcessManager 维护，**实例需在 sidecar 进程内长期存活**
+    （server.py 以模块级单例持有），跨 MCP 调用保留 active_processes。
     """
-
-    # 在主事件循环直接执行，避免 to_thread 每次创建独立循环
-    # 导致的 execute/input/terminate 跨循环问题
-    run_on_main_loop: ClassVar[bool] = True
 
     # 默认超时时间（秒）
     DEFAULT_TIMEOUT: ClassVar[int] = 30
 
-    # 最大允许超时（秒），不得超过 ToolCore 外层超时 300 秒
+    # 最大允许超时（秒），不得超过内核侧 MCP 调用外层超时
     MAX_TIMEOUT: ClassVar[int] = 290
-
-    # 回调触发阈值（秒）
-    CALLBACK_THRESHOLD: ClassVar[int] = 30
 
     # summary 生效的输出行数阈值，短于此值不生成 summary
     SUMMARY_LINE_THRESHOLD: ClassVar[int] = 10
@@ -207,7 +190,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         - pid: LLM 需要 pid 才能调用 continue/terminate/input
         - output: 核心输出
         - exit_code: 始终保留（评估框架 expect 条件依赖此字段）
-        - status: 始终保留为 completed（评估框架 expect 条件依赖此字段）
+        - status: 始终保留为 completed
         - summary: 仅长输出（>10行）时保留，短输出直接看 output
         - warnings/errors: 仅非空时保留
         """
@@ -245,95 +228,59 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         # 安全组件
         self.security = SecurityChecker(allowed_commands)
 
-        # 进程管理器
+        # 进程管理器（跨 MCP 调用共享——单例持有本实例时状态得以保留）
         self.process_manager = ProcessManager()
 
         # 输入处理器
         self.input_handler = InputHandler()
 
+    # ── 会话身份（owner） ────────────────────────────────────────
+
     @staticmethod
-    def get_tool_definition() -> Tool:
-        """获取工具定义"""
-        return Tool(
-            name="bash_execute",
-            description="执行 Shell 命令。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，"
-            "手动后台化会使进程脱离管理）。读文件用 file_read、搜索用 code_search。"
-            "危险命令（rm -rf /、format、dd if= 等）会被拦截。Windows 与 Linux/Mac 语法可能不同。",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["execute", "continue", "terminate", "input", "read_log"],
-                        "description": "execute=执行新命令；"
-                        "continue=凭 pid 继续等（仍在跑则等到完成或超时，已完成则直接返回结果）；"
-                        "terminate=凭 pid 终止；input=凭 pid 向等待输入的进程发文本（yes/no、密码等）；"
-                        "read_log=凭 pid 读完整日志（任何时候都能用，进程已结束也能读）。",
-                        "default": "execute",
-                    },
-                    "command": {
-                        "type": "string",
-                        "description": "要执行的Shell命令（action=execute 时必需）",
-                    },
-                    "pid": {
-                        "type": "integer",
-                        "description": "进程ID（action=continue/terminate/input/read_log 时必需，由 execute 或 continue 的 running 返回值提供）",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "等待上限秒数（默认30，最大290）。超时不杀进程，返回 running+pid 供继续轮询。",
-                        "default": 30,
-                        "maximum": 290,
-                    },
-                    "working_dir": {
-                        "type": "string",
-                        "description": "命令执行的工作目录，默认为当前目录",
-                    },
-                    "input_text": {
-                        "type": "string",
-                        "description": "向运行中进程发送的输入文本（action=input 时必需）。如 yes/no、密码、菜单选项编号。",
-                    },
-                    "force": {
-                        "type": "boolean",
-                        "description": "强制终止（action=terminate 时有效，默认 false）",
-                        "default": False,
-                    },
-                },
-                "required": [],
-            },
-            output_schema={
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string", "enum": ["completed", "running", "terminated"]},
-                    "pid": {"type": "integer"},
-                    "exit_code": {"type": "integer"},
-                    "output": {"type": "string"},
-                    "summary": {"type": "array", "items": {"type": "string"}},
-                    "elapsed": {"type": "number"},
-                },
-                "required": ["status"],
-            },
-            source=ToolSource.CODE,
-            category=ToolCategory.SYSTEM,
-            level=ToolLevel.USER,
-            dangerous_operations=[
-                "rm -rf",
-                "format",
-                "del /q",
-                "shutdown",
-                "reboot",
-                "mkfs",
-                "dd if=",
-                "> /dev/sd",
-                "curl",
-                "wget",
-            ],
-            tags=["bash", "shell", "command", "dangerous", "interactive", "long-running"],
-            injected_params=["workspace", "project_root"],
-        )
+    def _owner_from_inputs(inputs: dict[str, Any]) -> str | None:
+        """从调用参数提取会话身份（owner）。
+
+        0.2 内核在 tool-executor.invoke 时向 args 注入 `_owner`
+        （thread_id/session_id 派生），插件据此做 pid 级越权防护。
+        优先级：_owner > session_id > thread_id > workspace > project_root。
+        全部缺失返回 None（无身份调用——仅双无身份场景放行）。
+        """
+        for key in ("_owner", "session_id", "thread_id", "workspace", "project_root"):
+            value = inputs.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return None
+
+    @staticmethod
+    def _check_owner(
+        pid: int,
+        caller_owner: str | None,
+        proc_owner: str | None,
+    ) -> tuple[bool, str | None]:
+        """pid 级操作的 owner 校验。
+
+        严格语义（防跨会话越权/劫持）：
+        - 双方身份一致 → 放行
+        - 双方皆无身份 → 放行（无身份可校验的兼容路径，0.2 注入后不出现）
+        - 其余（身份缺失/不匹配）→ 拒绝
+        """
+        if caller_owner is None and proc_owner is None:
+            return True, None
+        if caller_owner is None:
+            return False, f"进程 {pid} 属于已标识会话，无身份调用被拒绝（PROCESS_FORBIDDEN）"
+        if proc_owner is None:
+            return False, f"进程 {pid} 无归属会话，不允许跨身份操作（PROCESS_FORBIDDEN）"
+        if caller_owner != proc_owner:
+            return False, (
+                f"进程 {pid} 属于其他会话，越权操作被拒绝（PROCESS_FORBIDDEN，"
+                f"caller={caller_owner!r} vs owner={proc_owner!r}）"
+            )
+        return True, None
+
+    # ── 主入口 ───────────────────────────────────────────────────
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        """执行工具"""
+        """执行工具（0.2 侧唯一入口，由 server.py 的 MCP handler 调用）。"""
         self._init_workspace(inputs)
         action = inputs.get("action", BashAction.EXECUTE)
 
@@ -366,7 +313,6 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
 
         # 安全检查：容器隔离模式下跳过内部安全检查
         # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为
-        # 安全检查由管道层 SecurityCheckPlugin 和 ApprovalDecisionEngine 统一处理
         warning = None
         container_id = inputs.get("_container_id")
         is_isolated = bool(container_id) or inputs.get("_isolation_provider") in ("docker", "isolated")
@@ -382,47 +328,15 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         timeout = min(inputs.get("timeout", self.timeout), self.MAX_TIMEOUT)
         wd = self.get_working_dir(inputs)
         working_dir = str(wd) if wd else None
+        owner = self._owner_from_inputs(inputs)
 
-        # 隔离决策由上层 IsolationCoordinator 统一处理
-        # bash 工具只负责执行命令，不再自己决定是否隔离
-        return await self._execute_command(
-            command=command,
-            timeout=timeout,
-            working_dir=working_dir,
-            warning=warning,
-            container_id=container_id,
-        )
-
-    async def _execute_command(
-        self,
-        command: str,
-        timeout: int,
-        working_dir: str | None,
-        warning: str | None = None,
-        container_id: str | None = None,
-    ) -> ToolResult:
-        """
-        统一的命令执行接口
-
-        隔离决策由上层 IsolationCoordinator 统一处理，
-        bash 工具只负责执行命令（本地或容器内，由 container_id 决定）。
-
-        Args:
-            command: 要执行的命令
-            timeout: 超时时间（秒）
-            working_dir: 工作目录
-            warning: 警告信息
-            container_id: 容器 ID（非空时走 docker exec 路径）
-
-        Returns:
-            ToolResult: 统一格式的执行结果
-        """
         return await self._execute_local_unified(
             command=command,
             timeout=timeout,
             working_dir=working_dir,
             warning=warning,
             container_id=container_id,
+            owner=owner,
         )
 
     async def _execute_local_unified(
@@ -432,16 +346,17 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         working_dir: str | None,
         warning: str | None = None,
         container_id: str | None = None,
+        owner: str | None = None,
     ) -> ToolResult:
         """
         本地执行命令（统一返回格式）
 
-        返回数据结构（由 _compact_result_data 精简，去掉 LLM 不需要的字段）：
+        返回数据结构（由 _compact_result_data 精简）：
         {
             "status": "completed" | "running",
             "pid": 12345,           # 后续 continue/read_log/terminate 凭此操作
             "output": "命令输出...",  # completed 时含完整结果
-            "exit_code": 0,          # 始终保留（评估框架依赖）
+            "exit_code": 0,          # 始终保留
             "elapsed": 1.5,          # 已运行秒数
             "summary": [...],        # 仅长输出（>10行）时保留
             "warnings": [...],       # 仅非空时保留
@@ -458,6 +373,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 working_dir=working_dir,
                 log_dir=bash_log_dir,
                 container_id=container_id,
+                owner=owner,
             )
 
             # 等待进程完成或超时
@@ -546,23 +462,26 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_PID",
             )
 
+        caller_owner = self._owner_from_inputs(inputs)
         timeout = inputs.get("timeout", self.timeout)
 
         # 获取进程信息
         proc_info = self.process_manager.get_process_info(pid)
         if not proc_info:
             # 进程已被即时清理（completed 后 _on_output_task_done 触发）。
-            # 降级走磁盘日志，告诉 LLM "进程已结束"+最后输出，而非粗暴失败。
-            # continue 语义是"等运行中的进程"，进程已结束就用磁盘结果回复。
+            # 降级走磁盘日志——先校验 owner（磁盘日志头 # Owner:）。
             file_data = self.process_manager.read_log_by_pid(pid)
             if file_data is not None:
+                ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
+                if not ok:
+                    return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
                 return create_success_result(
                     data={
                         "status": "completed",
                         "pid": pid,
                         "output": file_data["output"],
                         "summary": file_data["summary"],
-                        "exit_code": 0,  # 磁盘日志无 exit_code，保守 0
+                        "exit_code": file_data.get("exit_code") or 0,  # 磁盘日志可能无 exit_code
                     },
                     metadata={"action": "continue", "source": "file"},
                 )
@@ -573,6 +492,11 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 ),
                 error_code="PROCESS_NOT_FOUND",
             )
+
+        # owner 校验（内存进程）
+        ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
+        if not ok:
+            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
 
         # 如果进程已完成，直接返回结果（对齐 execute 完成路径，带 output）
         if proc_info.status != "running":
@@ -655,6 +579,18 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_PID",
             )
 
+        caller_owner = self._owner_from_inputs(inputs)
+        proc_info = self.process_manager.get_process_info(pid)
+        if proc_info is None:
+            return create_failure_result(
+                error=f"进程 {pid} 不存在或已结束",
+                error_code="PROCESS_NOT_FOUND",
+            )
+        # owner 校验（终止是破坏性操作，必须严格）
+        ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
+        if not ok:
+            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
+
         force = inputs.get("force", False)
 
         # 终止进程
@@ -695,6 +631,18 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_INPUT",
             )
 
+        caller_owner = self._owner_from_inputs(inputs)
+        proc_info = self.process_manager.get_process_info(pid)
+        if proc_info is None:
+            return create_failure_result(
+                error=f"进程 {pid} 不存在或已结束",
+                error_code="PROCESS_NOT_FOUND",
+            )
+        # owner 校验（向进程注入输入是敏感操作，必须严格）
+        ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
+        if not ok:
+            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
+
         # 发送输入
         success, error = await self.process_manager.send_input(pid, input_text)
 
@@ -724,9 +672,6 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         1. 进程活跃（在 active_processes）→ 从内存读，返回实时 status + output + summary
         2. 进程已清（completed 后被 _on_output_task_done 清理）→ 按 pid 算日志文件名
            (logs/bash/bash_<pid>.log) 读磁盘
-
-        这样 read_log 在任何时候都能用：execute→completed→read_log、
-        continue→completed→read_log、running→read_log 全都通。
         """
         pid = inputs.get("pid")
         if not pid:
@@ -735,9 +680,15 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_PID",
             )
 
+        caller_owner = self._owner_from_inputs(inputs)
+
         # 路径1：进程活跃 → 从内存读（含实时 status、summary）
         proc_info = self.process_manager.get_process_info(pid)
         if proc_info:
+            # owner 校验
+            ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
+            if not ok:
+                return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
             summary = self.process_manager.get_summary(pid)
             output = self.process_manager.get_output(pid)
             return create_success_result(
@@ -762,6 +713,10 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 ),
                 error_code="LOG_FILE_NOT_FOUND",
             )
+        # owner 校验（磁盘日志头 # Owner:）
+        ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
+        if not ok:
+            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
         return create_success_result(
             data={
                 # 能从磁盘读到的都是已结束的进程（活跃的会在路径1处理）

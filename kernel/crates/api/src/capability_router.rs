@@ -360,6 +360,27 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         message: "tool-executor.invoke 缺少 tool_name 参数".to_string(),
                     })?;
                 let tool_args = params.get("args").cloned().unwrap_or(json!({}));
+                // 越权防护（治理缺口）：0.2 工具调用应携带会话身份
+                // （tool_core 在 invoke 前注入 args["_owner"]，见其 lib.rs
+                // execute_single_tool）。缺失时告警不阻断——bash 等有状态
+                // 工具插件侧据此走宽松兜底；此告警用于发现未注入的调用方。
+                let has_owner = tool_args
+                    .get("_owner")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                    || tool_args
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                if !has_owner {
+                    warn!(
+                        "tool-executor.invoke 缺少会话身份（_owner/session_id）| tool={} | args_keys={:?}",
+                        tool_name,
+                        tool_args
+                            .as_object()
+                            .map(|m| m.keys().cloned().collect::<Vec<_>>()),
+                    );
+                }
                 // 从 CapabilityRegistry 反查 tool_name → plugin_id（tool 插件的 manifest id）
                 let plugin_id = self
                     .registry

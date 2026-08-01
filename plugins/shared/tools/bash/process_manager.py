@@ -14,10 +14,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-from tools.builtin.bash.encoding import EncodingHandler
-from tools.builtin.bash.input_handler import InputHandler
-from tools.builtin.bash.log_compressor import LogCompressor
-from tools.builtin.bash.types import ProcessBackend, ProcessInfo, WorkUnit
+from bash_types import ProcessBackend, ProcessInfo, WorkUnit
+from encoding import EncodingHandler
+from input_handler import InputHandler
+from log_compressor import LogCompressor
 
 logger = logging.getLogger(__name__)
 
@@ -81,23 +81,66 @@ class ProcessManager:
         """
         return f"bash_{pid}.log"
 
-    def _write_log_header(self, log_file: Path, command: str, pid: int):
-        """写入日志头部（容错：日志写入失败不影响命令执行）"""
+    def _write_log_header(self, log_file: Path, command: str, pid: int, owner: str | None = None):
+        """写入日志头部（容错：日志写入失败不影响命令执行）。
+
+        命令先经 _mask_secrets 掩码（Authorization/Bearer/API key/密码等取值），
+        避免日志落盘泄露敏感信息。owner（会话身份）一并写入头部，
+        供进程清理后的磁盘降级路径（read_log_by_pid）做越权校验。
+        """
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             header = [
                 "# Bash Command Log",
-                f"# Command: {command}",
+                f"# Command: {self._mask_secrets(command)}",
                 f"# PID: {pid}",
                 f"# Started: {datetime.now(UTC).isoformat()}",
                 f"# Platform: {platform.system()}",
                 f"# {'=' * 50}",
                 "",
             ]
+            if owner is not None:
+                # 插到 Started 之前，read_log_by_pid 解析头部时按行序读取
+                header.insert(3, f"# Owner: {owner}")
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(header))
         except OSError as e:
             logger.warning(f"日志头部写入失败（不影响命令执行） | file={log_file} | error={e}")
+
+    # 敏感信息掩码模式：保留前缀，掩掉取值（命令日志落盘前调用）
+    _SECRET_PATTERNS: ClassVar[list[tuple[re.Pattern[str], str]]] = [
+        # Authorization: Bearer xxx / Basic xxx / digest xxx（curl -H 等）
+        (
+            re.compile(r"(?i)(authorization\s*[:=]\s*)((?:bearer|basic|digest)\s+)?\S+"),
+            r"\1\2***",
+        ),
+        # 裸 Bearer token
+        (re.compile(r"(?i)(bearer\s+)(\S+)"), r"\1***"),
+        # key=value 赋值（API_KEY=xxx、password: xxx 等）
+        (
+            re.compile(r"(?i)((?:api[_-]?key|password|passwd|secret|token|credential)\s*[:=]\s*)(\S+)"),
+            r"\1***",
+        ),
+        # CLI 选项 --api-key xxx / --token xxx
+        (
+            re.compile(r"(?i)(--[a-z0-9_-]*(?:key|token|secret|password|auth)[a-z0-9_-]*\s+)(\S+)"),
+            r"\1***",
+        ),
+        # URL 内嵌凭据 https://user:pass@host
+        (re.compile(r"(?i)(://[^/:\s@]+:)([^@\s/]+)(@)"), r"\1***\3"),
+    ]
+
+    @classmethod
+    def _mask_secrets(cls, text: str) -> str:
+        """掩码文本中的敏感取值（Authorization/Bearer/API key/密码/URL 凭据）。
+
+        只掩码「取值」保留「键名/前缀」，尽量不破坏命令可读性。
+        """
+        if not text:
+            return text
+        for pattern, replacement in cls._SECRET_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
 
     def _append_to_log(self, log_file: Path, content: str):
         """追加内容到日志（容错：日志写入失败不影响命令执行）"""
@@ -121,6 +164,46 @@ class ProcessManager:
         except Exception:
             return []
 
+    # 摘要压缩只喂尾部窗口的行数上限（防大日志全量读取，评审 H-issue）
+    TAIL_SUMMARY_LINES: ClassVar[int] = 5000
+
+    @staticmethod
+    def _read_tail_lines(log_file: Path, max_lines: int = TAIL_SUMMARY_LINES) -> list[str]:
+        """从文件尾部读取最多 max_lines 行（二进制尾部 seek，跨平台安全）。
+
+        用于摘要压缩路径——大日志（几万行编译输出）只取尾部窗口喂
+        LogCompressor，避免每次轮询全量读文件。返回过滤掉 # 注释行的文本行。
+        """
+        if not log_file.exists():
+            return []
+        try:
+            with open(log_file, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if size == 0:
+                    return []
+                # 从尾部逐块向前扩展，直到凑够 max_lines 或读到文件头
+                chunk_size = 65536
+                pos = size
+                buffer = b""
+                while pos > 0:
+                    read_size = min(chunk_size, pos)
+                    pos -= read_size
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+                    buffer = chunk + buffer
+                    if buffer.count(b"\n") >= max_lines:
+                        break
+                lines = buffer.split(b"\n")[-max_lines:]
+                result: list[str] = []
+                for raw in lines:
+                    text = raw.decode("utf-8", errors="replace").rstrip("\r")
+                    if text and not text.startswith("#"):
+                        result.append(text)
+                return result
+        except OSError:
+            return []
+
     def _ensure_log_dir(self, log_dir: Path) -> Path:
         """确保日志目录存在，返回绝对路径"""
         resolved = log_dir.resolve()
@@ -137,6 +220,7 @@ class ProcessManager:
         env: dict[str, str] | None = None,
         log_dir: Path | None = None,
         container_id: str | None = None,
+        owner: str | None = None,
     ) -> tuple[int, Path]:
         """启动新进程。
 
@@ -145,6 +229,10 @@ class ProcessManager:
         宿主机 process.pid 只是 asyncio 句柄的 key（供 _read_output/wait 用），
         杀进程必须用容器内 pid（存在 ProcessInfo.metadata['container_pid']），
         否则 docker exec kill <host_pid> 在容器 namespace 里查无此 pid。
+
+        owner: 会话身份（内核注入）。写入 ProcessInfo.metadata['owner'] 与
+        日志头 `# Owner:`，供 pid 级操作（continue/input/terminate/read_log）
+        的越权校验（工具层 _check_owner 执行）。
         """
         effective_log_dir = self._ensure_log_dir(log_dir) if log_dir else self.log_dir
         # 收到外部 log_dir 时同步 self.log_dir——start_process 写入目录与
@@ -189,8 +277,14 @@ class ProcessManager:
             container_pid = await self._read_container_pid(process)
             # 先启动 process 拿到 host_pid，再按 pid 派生日志文件名（read_log 靠此规则）。
             log_file = effective_log_dir / self._generate_log_filename(command, host_pid)
-            self._write_log_header(log_file, command, host_pid)
+            self._write_log_header(log_file, command, host_pid, owner=owner)
             output_task = asyncio.create_task(self._read_output(host_pid, process, log_file))
+            metadata: dict[str, Any] = {
+                "container_id": container_id,
+                "container_pid": container_pid,
+            }
+            if owner is not None:
+                metadata["owner"] = owner
             self.active_processes[host_pid] = ProcessInfo(
                 pid=host_pid,
                 command=command,
@@ -201,10 +295,7 @@ class ProcessManager:
                 output_task=output_task,
                 backend=_get_container_backend(container_id),
                 last_access_time=time.time(),
-                metadata={
-                    "container_id": container_id,
-                    "container_pid": container_pid,
-                },
+                metadata=metadata,
             )
             self._ensure_watchdog()
             output_task.add_done_callback(lambda t, p=host_pid: self._on_output_task_done(p, t))
@@ -284,14 +375,17 @@ class ProcessManager:
 
         # 先启动 process 拿到 pid，再按 pid 派生日志文件名（read_log 靠此规则）。
         log_file = effective_log_dir / self._generate_log_filename(command, pid)
-        # 写入日志头部
-        self._write_log_header(log_file, command, pid)
+        # 写入日志头部（命令经掩码；owner 供磁盘降级路径越权校验）
+        self._write_log_header(log_file, command, pid, owner=owner)
 
         # 启动日志读取任务并保存引用
         output_task = asyncio.create_task(self._read_output(pid, process, log_file))
 
         # 保存进程信息。注入本地后端，使看门狗的单进程内存维度判据生效
         # （sample_unit_memory 用 psutil 查该进程及其后代 RSS，超阈值按 idle 杀）。
+        metadata: dict[str, Any] = {}
+        if owner is not None:
+            metadata["owner"] = owner
         self.active_processes[pid] = ProcessInfo(
             pid=pid,
             command=command,
@@ -302,6 +396,7 @@ class ProcessManager:
             output_task=output_task,
             backend=_get_local_backend(),
             last_access_time=time.time(),
+            metadata=metadata,
         )
         # 确保看门狗在运行（首次启动进程时启动，幂等）
         self._ensure_watchdog()
@@ -327,7 +422,7 @@ class ProcessManager:
             return process.pid
 
     async def _read_output(self, pid: int, process: asyncio.subprocess.Process, log_file: Path):
-        """异步读取进程输出（块缓冲根治版）。
+        """异步读取进程输出（块缓冲根治版 + 批量落盘）。
 
         历史 bug：原用 stream.readline() 等换行符。但 cargo/gcc/make 等编译器
         检测到 stdout 不是 TTY 时切到块缓冲（4-8KB 攒满才 flush），导致长时间
@@ -340,11 +435,25 @@ class ProcessManager:
         链照常生效。
 
         残留半行（流结束时无换行符结尾）会被 flush 到日志，不丢数据。
+
+        性能：逐行 open/write/close 在大量输出时开销高（评审 H-issue）。
+        改为攒批写入——每 512 行或 64KB 落盘一次；流结束时强制 flush。
         """
 
         async def read_stream(stream, prefix: str = ""):
-            """读取流并写入日志，按 \\n 切行 + 字节级半行缓存。"""
+            """读取流并批量写入日志，按 \\n 切行 + 字节级半行缓存。"""
             pending = b""  # 上次 read 剩下的半行（字节级，防多字节字符跨块）
+            batch: list[str] = []  # 攒批缓冲（行）
+            batch_bytes = 0  # 攒批缓冲（字节数）
+
+            async def flush_batch():
+                """批量落盘（攒批到阈值或流结束时调用）。"""
+                nonlocal batch, batch_bytes
+                if batch:
+                    self._append_to_log(log_file, "".join(batch))
+                    batch = []
+                    batch_bytes = 0
+
             while True:
                 try:
                     chunk = await stream.read(4096)
@@ -354,7 +463,8 @@ class ProcessManager:
                     # 流结束，flush 残留的半行（如有）
                     if pending:
                         text = EncodingHandler.decode_output_line(pending)
-                        self._append_to_log(log_file, prefix + text + "\n")
+                        batch.append(prefix + text + "\n")
+                        batch_bytes += len(batch[-1])
                     break
                 # 字节级拼接再切，保证切分点在 \n（ASCII 安全边界）
                 full = pending + chunk
@@ -363,7 +473,14 @@ class ProcessManager:
                 *complete, pending = parts
                 for raw in complete:
                     text = EncodingHandler.decode_output_line(raw)
-                    self._append_to_log(log_file, prefix + text + "\n")
+                    batch.append(prefix + text + "\n")
+                    batch_bytes += len(batch[-1])
+                # 攒批阈值：512 行或 64KB，达到即落盘
+                if len(batch) >= 512 or batch_bytes >= 64 * 1024:
+                    await flush_batch()
+
+            # 流结束：强制 flush 攒批
+            await flush_batch()
 
         # 同时读取 stdout 和 stderr
         await asyncio.gather(
@@ -554,7 +671,8 @@ class ProcessManager:
         if proc_info.status == "running":
             self._touch_access(pid)
             self._sync_poll_process(proc_info)
-        lines = self._read_log_lines(proc_info.log_file)
+        # 摘要只取尾部窗口（大日志全量读会拖慢 0.5s 轮询循环）
+        lines = self._read_tail_lines(proc_info.log_file)
         summary = self.log_compressor.compress(lines, proc_info.command)
         elapsed = time.time() - proc_info.start_time
         # [0行] bug 修复：长任务无输出时显式告警，不静默成"0行"。
@@ -630,14 +748,19 @@ class ProcessManager:
         except OSError:
             return None
 
-        # 从头部解析 command（# Command: xxx），供 LogCompressor 推断输出类型
+        # 从头部解析 command / owner（# Command: xxx / # Owner: xxx），
+        # 供 LogCompressor 推断输出类型 + 磁盘降级路径的越权校验。
+        # 头部只在文件开头几行，遍历前 32 行即可，无需全量扫描。
         command = ""
-        content_lines: list[str] = []
-        for line in all_lines:
+        owner: str | None = None
+        header_window = all_lines[:32]
+        for line in header_window:
             if line.startswith("# Command:"):
                 command = line[len("# Command:"):].strip()
-            elif not line.startswith("#"):
-                content_lines.append(line)
+            elif line.startswith("# Owner:"):
+                owner = line[len("# Owner:"):].strip() or None
+
+        content_lines = [line for line in all_lines if not line.startswith("#")]
 
         # 从尾部解析 exit_code（# Process ended with exit code: N）。
         # 进程已被即时清理后，exit_code 无法从内存读，只能从日志尾部解析。
@@ -650,17 +773,20 @@ class ProcessManager:
                     pass
                 break
 
-        summary = self.log_compressor.compress(content_lines, command)
+        # 摘要压缩只喂尾部窗口（评审 H-issue：避免大日志全量读）
+        tail_window = content_lines[-self.TAIL_SUMMARY_LINES:]
+        summary = self.log_compressor.compress(tail_window, command)
         output = "\n".join(content_lines).replace("\x00", "")
         return {
             "output": output,
             "summary": summary.lines,
             "warnings": summary.warnings,
             "errors": summary.errors,
-            "total_lines": summary.total_lines,
+            "total_lines": len(content_lines),  # 全量行数（压缩窗口可能截断）
             "command": command,
             "log_file": str(log_file),
             "exit_code": exit_code,
+            "owner": owner,
         }
 
     def _cleanup_if_needed(self):
@@ -773,7 +899,7 @@ class ProcessManager:
             if idle_secs >= self._orphan_timeout:
                 logger.error(
                     "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | 无访问 %.0fs（阈值 %.0fs）",
-                    pid, info.command, idle_secs, self._orphan_timeout,
+                    pid, self._mask_secrets(info.command), idle_secs, self._orphan_timeout,
                 )
                 await self._watchdog_kill(pid, info, "orphan")
 
@@ -810,7 +936,7 @@ class ProcessManager:
         for pid, info, rss in over_limit:
             logger.warning(
                 "[Watchdog] 单进程内存失控清理 | pid=%s cmd=%.60s | RSS=%.0fMB（阈值 %.0fMB）| idle=%.0fs",
-                pid, info.command, rss / 1024 / 1024,
+                pid, self._mask_secrets(info.command), rss / 1024 / 1024,
                 self._unit_memory_limit / 1024 / 1024,
                 now - info.last_access_time,
             )
@@ -841,7 +967,7 @@ class ProcessManager:
 
             logger.warning(
                 "[Watchdog] 内存高水位清理 | 杀最闲进程 pid=%s cmd=%.60s | idle=%.0fs",
-                pid, info.command, now - info.last_access_time,
+                pid, self._mask_secrets(info.command), now - info.last_access_time,
             )
             await self._watchdog_kill(pid, info, "memory_pressure")
 
@@ -883,6 +1009,49 @@ class ProcessManager:
                     pass
         info.status = "terminated"
         self._append_to_log(info.log_file, "\n# Process terminated by watchdog\n")
+
+    # ── 整体关闭（sidecar 卸载/退出）──────────────────────────
+
+    async def shutdown_all(self, force: bool = True) -> int:
+        """终止所有活动进程并停止看门狗（sidecar 卸载/退出前调用）。
+
+        由 server.py 的 on_unload 生命周期钩子与 atexit 兜底调用，
+        防止 sidecar 被卸载后残留进程变孤儿。best-effort：单进程失败
+        仅记日志，不中断整体清理。
+
+        Args:
+            force: True=强制杀（SIGKILL/taskkill /F），False=先优雅终止
+
+        Returns:
+            成功终止的进程数
+        """
+        # 停止看门狗（先停后杀，避免清理过程中被看门狗再次触发）
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._watchdog_task = None
+
+        pids = [
+            pid
+            for pid, info in list(self.active_processes.items())
+            if info.status == "running"
+        ]
+        killed = 0
+        for pid in pids:
+            try:
+                ok, err = await self.terminate_process(pid, force=force)
+                if ok:
+                    killed += 1
+                else:
+                    logger.warning("[shutdown_all] 终止失败 pid=%s: %s", pid, err)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[shutdown_all] 终止异常 pid=%s: %s", pid, e)
+        if killed:
+            logger.info("[shutdown_all] 已终止 %d/%d 个活动进程", killed, len(pids))
+        return killed
 
     # ── 进程状态同步检测 ──────────────────────────────────────────
 
