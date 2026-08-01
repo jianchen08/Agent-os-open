@@ -1804,9 +1804,18 @@ mod tests {
         // 会互相覆盖。故本测试只验证单个原生插件（tool_core，生产环境的唯一原生插件）。
         let _guard = NATIVE_E2E_LOCK.lock();
         let plugins_dir = repo_root().join("plugins/shared");
-        let tool_core_dll = plugins_dir.join("pipeline/core/tool_core/pipeline_tool_core_native.dll");
-        if !tool_core_dll.exists() {
-            eprintln!("SKIP: tool_core cdylib not built at {}", tool_core_dll.display());
+        // 按平台定位 tool_core cdylib 产物（与 manifest native.artifact 裸名 +
+        // platform_artifact_name 补名逻辑一致：Windows→.dll、Linux→lib{}.so、macOS→lib{}.dylib）。
+        // 避免硬编码单一平台后缀导致纯 Linux 环境（仅 .so）静默 SKIP，掩盖真实加载路径。
+        let tool_core_artifact = if cfg!(windows) {
+            plugins_dir.join("pipeline/core/tool_core/pipeline_tool_core_native.dll")
+        } else if cfg!(target_os = "macos") {
+            plugins_dir.join("pipeline/core/tool_core/libpipeline_tool_core_native.dylib")
+        } else {
+            plugins_dir.join("pipeline/core/tool_core/libpipeline_tool_core_native.so")
+        };
+        if !tool_core_artifact.exists() {
+            eprintln!("SKIP: tool_core cdylib not built at {}", tool_core_artifact.display());
             return;
         }
         let tool_core_parent = plugins_dir.join("pipeline/core");

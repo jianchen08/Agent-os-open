@@ -9,7 +9,7 @@
     "entry": "pipeline_tool_core_native.dll",
     "invoke_entry": "plugin_execute",
     "native": {
-        "artifact": "pipeline_tool_core_native.dll"
+        "artifact": "pipeline_tool_core_native"
     },
     "capabilities": {
         "tools": [],
