@@ -54,27 +54,12 @@ def resolve_task_workspace(task: Any) -> str | None:
 
 
 def _restore_from_lifecycle(task: Any, metadata: dict) -> None:
-    """从 lifecycle._ws_meta_store 加载 ws_meta 到 task.metadata。
+    """从 workspace_lifecycle_manager 加载 ws_meta 到 task.metadata（装饰性恢复）。
 
-    持久化到 task.metadata 后，后续读取直接从任务数据获取，
-    不再需要查找 lifecycle。
-
-    直接通过 provider.get("workspace_lifecycle_manager") 获取 lifecycle
-    （lifecycle 已在 TaskWorker._init_lifecycle 注册到 ServiceProvider），
-    而非通过 provider.get("services")（ServiceProvider 从未注册 "services" key）。
+    M3（2026-08-01）：插件自包含化——workspace_lifecycle_manager 是 channel_api 进程
+    注册的服务，插件进程不可达。ws_meta 已持久化到 task.metadata（本函数原是优化：
+    首次加载时从 lifecycle 缓存补一次），缺失不影响功能（后续读取走 task.metadata）。
+    故插件路径降级为 no-op。:8988 主进程路径仍走原逻辑（src/tasks/workspace.py）。
     """
-    try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        provider = get_service_provider()
-        lifecycle = provider.get("workspace_lifecycle_manager") if provider else None
-        if not lifecycle:
-            return
-
-        lifecycle.restore_ws_meta(task.id)
-        ws_meta = lifecycle._ws_meta_store.get(task.id)
-        if ws_meta and isinstance(ws_meta, dict):
-            metadata["ws_meta"] = ws_meta
-    except Exception as exc:
-        # 原样复制自 src/tasks/workspace.py；ws_meta 恢复失败不应阻塞任务加载。
-        logger.warning("从 lifecycle 恢复 ws_meta 失败: task=%s — %s", getattr(task, "id", "?"), exc)
+    # 插件路径：lifecycle 不可达，ws_meta 已在 task.metadata，直接返回。
+    return
