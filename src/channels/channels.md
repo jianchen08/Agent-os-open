@@ -53,6 +53,15 @@ RESTful HTTP API 通道（FastAPI），含 21 个 `routes_*.py` 路由模块、J
 | `api/rate_limiter.py` | — | 限流器 |
 | `api/routes_*.py` | — | 21 个路由模块（agents / artifacts / auth / tasks / themes / threads / tools / workspaces ...） |
 
+> 路由补充（P1 API 对齐）：`api/routes_missing.py` 提供前端期望但后端未实现的占位路由组，
+> 前缀 `/api/v1/*`。其中 **`datasource_router`**（`GET /api/v1/datasource/{uri:path}`）服务于前端
+> `fetchDynamicDataSource`（schema select 动态选项），返回 `{success: False}` 占位响应，
+> 避免请求 404 在前端控制台刷 `[VALIDATION] 404` 噪音（0.2 后端此前无此路由）。
+> 此外 `DELETE /api/v1/threads/{id}`（`routes_threads.py`）删除会话时级联删除：
+> ① execution_record 执行记录（按 pipeline 关联）；② 关联任务（`parent_pipeline_id` 关联 +
+> `task.metadata.session_id == thread_id` 会话元数据关联，与 `routes_missing.get_task_tree` 同口径）；
+> ③ 管道检查点文件；④ 取消运行中管道。
+
 ### WebSocket 通道（`websocket/`）
 
 实时双向通信通道（Web UI 后端），负责流式消息推送、管道状态事件、多会话并发。

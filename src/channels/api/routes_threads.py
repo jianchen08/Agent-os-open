@@ -392,12 +392,14 @@ def delete_thread(  # noqa: PLR0912
     _recovered_user_ids.discard(_user["sub"])
 
     # 迭代式收集关联管道（以 all_pipeline_ids 中每个 ID 匹配直到不动点）
-
+    # prev_size 初始为 -1：保证首轮必然执行——
+    # 即使 session.pipeline_ids 为空，也能先收集 metadata.session_id 关联任务，
+    # 再经其 pipeline_run_id 链式展开（否则空集时 while 条件 0>0 直接跳过收集）。
     exec_storage = _get_execution_record_storage()
 
     all_pipeline_ids = set(pipeline_ids)
 
-    prev_size = 0
+    prev_size = -1
 
     while len(all_pipeline_ids) > prev_size:
         prev_size = len(all_pipeline_ids)
@@ -411,7 +413,15 @@ def delete_thread(  # noqa: PLR0912
 
         if task_service:
             for task in task_service.get_all_tasks():
-                if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
+                # 关联口径与 routes_missing.get_task_tree 一致：
+                # 1) 父管道关联（parent_pipeline_id）
+                # 2) 会话元数据关联（task.metadata.session_id == thread_id）
+                _linked_by_session = (task.metadata or {}).get("session_id") == thread_id
+                if (
+                    task.parent_pipeline_id in all_pipeline_ids
+                    or task.parent_pipeline_id == thread_id
+                    or _linked_by_session
+                ):
                     all_pipeline_ids.add(task.id)
 
                     if task.pipeline_run_id:
@@ -445,7 +455,13 @@ def delete_thread(  # noqa: PLR0912
 
     if task_service:
         for task in task_service.get_all_tasks():
-            if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
+            # 删除关联任务：与上方收集循环同口径（父管道关联 + 会话元数据关联）
+            _linked_by_session = (task.metadata or {}).get("session_id") == thread_id
+            if (
+                task.parent_pipeline_id in all_pipeline_ids
+                or task.parent_pipeline_id == thread_id
+                or _linked_by_session
+            ):
                 try:
                     task_service.hard_delete_sync(task.id)
 

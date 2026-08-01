@@ -242,6 +242,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
         agent_calls_router,
         client_router,
         cost_control_router,
+        datasource_router,
         eval_metrics_alias_router,
         evaluation_router,
         execution_router,
@@ -275,6 +276,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     app.include_router(client_router)
     app.include_router(files_router)
     app.include_router(task_phase_router)
+    app.include_router(datasource_router)
 
     # ---- 审批与工作空间路由（新增） ----
     app.include_router(artifacts_router)

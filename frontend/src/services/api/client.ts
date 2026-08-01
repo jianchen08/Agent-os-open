@@ -259,13 +259,22 @@ apiClient.interceptors.response.use(
       requestUrl.includes('/floating-chat/') ||
       requestUrl.includes('/evaluation-metrics') ||
       requestUrl.includes('/agent-calls') ||
-      requestUrl.includes('/triggers')
+      requestUrl.includes('/triggers') ||
+      // P4: datasource 动态数据源（schema select 选项），后端以占位响应收敛，避免 404 刷屏。
+      // 用 startsWith 精确匹配前端实际调用的前缀，避免误匹配其它含 /datasource/ 的路径
+      requestUrl.startsWith('/api/v1/datasource/')
 
     if (!isOptionalEndpoint) {
       reportError(
         apiError.message,
         errorType,
-        errorType === ErrorType.AUTHENTICATION ? ErrorSeverity.WARNING : ErrorSeverity.ERROR,
+        // P4: 404 多为非业务路径（端点未实现/资源不存在），降级为 WARNING 收敛告警噪音；
+        // 认证失败保持 WARNING；5xx/网络错误保持 ERROR
+        error.response?.status === 404
+          ? ErrorSeverity.WARNING
+          : errorType === ErrorType.AUTHENTICATION
+            ? ErrorSeverity.WARNING
+            : ErrorSeverity.ERROR,
         {
           code: apiError.code,
           details: apiError.details,

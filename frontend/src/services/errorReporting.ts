@@ -110,14 +110,19 @@ class ErrorReportingService {
     }
 
     // 开发环境下打印详细信息
+    // P4: 非业务路径 404 已降级为 WARNING severity，这里按 severity 区分打印级别
+    // （WARNING/INFO → console.warn，ERROR → console.error），收敛控制台告警噪音
     if (import.meta.env.DEV) {
-      console.error(
+      const severity = error.context?.errorSeverity
+      const isLowSeverity = severity === 'warning' || severity === 'info'
+      const logFn = isLowSeverity ? console.warn : console.error
+      logFn(
         '[ErrorReporting] %s (context: %s)',
         error.message,
         error.context ? JSON.stringify(error.context) : 'none',
       )
       if (error.stack) {
-        console.error('[ErrorReporting] Stack:', error.stack)
+        logFn('[ErrorReporting] Stack:', error.stack)
       }
     }
 

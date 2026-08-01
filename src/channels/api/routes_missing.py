@@ -1815,3 +1815,39 @@ async def get_ac_result(
             "passed": None,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Datasource 路由 - /api/v1/datasource
+# ---------------------------------------------------------------------------
+# 前端 fetchDynamicDataSource（frontend/src/services/api/datasource.ts）调用
+# GET /api/v1/datasource/{uri} 获取 schema 驱动的动态选项列表（如 select 字段 options）。
+# 0.2 后端此前无此路由，请求返回 404 并在前端控制台刷 [VALIDATION] 404 噪音。
+# 当前以占位响应（success=false）收敛，避免 404；真实数据源能力由插件侧按需提供。
+datasource_router = APIRouter(
+    prefix="/api/v1/datasource",
+    tags=["数据源"],
+    dependencies=[Depends(require_auth)],
+)
+
+
+@datasource_router.get("/{uri:path}", summary="获取动态数据源")
+async def get_dynamic_datasource(
+    uri: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取动态数据源（schema select 选项等）。
+
+    前端期望响应结构：{ success: bool, options?: [...] }。
+    当前返回 success=false 占位（数据源能力未实现），
+    保证前端正常消费而不产生 404 噪音。
+
+    Args:
+        uri: 数据源 URI（如 "categories/list"、"tools/list"），支持多段路径
+        _user: 认证用户
+
+    Returns:
+        {success: False, message: 占位说明}
+    """
+    logger.info("datasource http request: uri=%s", uri)
+    return {"success": False, "message": f"数据源 '{uri}' 未实现（占位响应）"}
