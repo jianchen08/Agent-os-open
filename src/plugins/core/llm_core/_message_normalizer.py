@@ -10,9 +10,30 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# 增量扫描缓存：记录上次验证完成时各 provider 的消息数量
+# 增量扫描缓存：记录上次验证完成时各 provider 的消息数量 + 末条消息指纹
 # 使用 (provider, name, pipeline_id) 作为 key，避免不同管道共享缓存
-_pairing_validated_len: dict[str, int] = {}
+# 值 = (count, fingerprint)：仅靠数量判断增量是否成立不可靠——重启恢复
+# （StateBuilder 全量恢复 + context_window_guard 裁剪重建）后消息数量可能
+# 恰好接近缓存值，但内容已整体替换，增量扫描会跳过带病消息直发上游 400
+# （实测 DeepSeek: insufficient tool messages following tool_calls）。
+_pairing_validated_len: dict[str, tuple[int, str]] = {}
+
+
+def _message_fingerprint(msg: dict[str, Any]) -> str:
+    """消息内容指纹：role + tool_call_id + content 摘要。
+
+    用于检测消息列表是否被整体重建（恢复/裁剪/压缩替换）。正常增量场景下
+    前 cached_len 条消息内容不变，指纹一致；重建后即使数量恰好相同，
+    对应位置的消息内容也必然不同，触发全量扫描。
+    """
+    role = msg.get("role", "")
+    tc_id = msg.get("tool_call_id", "")
+    content = msg.get("content")
+    if isinstance(content, str):
+        content_sig = content[:80]
+    else:
+        content_sig = json.dumps(content, ensure_ascii=False, default=str)[:80]
+    return f"{role}|{tc_id}|{content_sig}"
 
 
 def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
@@ -286,7 +307,9 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
 ) -> list[dict[str, Any]]:
     """增量验证 tool_calls 和 tool result 的配对完整性。"""
     cache_key = f"{provider}:{name}:{pipeline_id}"
-    cached_len = _pairing_validated_len.get(cache_key, 0)
+    cached = _pairing_validated_len.get(cache_key)
+    cached_len = cached[0] if cached else 0
+    cached_fp = cached[1] if cached else ""
     msg_count = len(messages)
 
     # MiniMax 对配对极度严格，增量缓存一旦过期就漏检，触发 2013 错误。
@@ -297,6 +320,19 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     # 消息被截断/重建（数量比缓存少），重置缓存做全量扫描
     if msg_count < cached_len:
         cached_len = 0
+
+    # 指纹校验：缓存对应的那条消息与当前列表不一致 → 消息列表被整体重建
+    # （重启恢复 1004 条→裁剪、压缩块替换等，数量可能恰好接近缓存值）。
+    # 此时增量假设失效，强制全量扫描，否则带病消息（assistant tool_calls
+    # 缺 tool result）会跳过验证直发上游 400。
+    if cached_len > 0 and cached_len <= msg_count:
+        if _message_fingerprint(messages[cached_len - 1]) != cached_fp:
+            logger.info(
+                "[%s] %s tool_call pairing: 消息列表已重建（指纹不匹配），重置缓存全量扫描",
+                name,
+                provider,
+            )
+            cached_len = 0
 
     # 没有新增消息，直接返回
     if cached_len > 0 and cached_len == msg_count:
@@ -471,7 +507,11 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     # 更新缓存：记录本次验证完成时的消息数量
     # 注意：final 可能比 msg_count 更短（Phase B 可能移除了不完整的消息），
     # 所以缓存 final 的实际长度，而不是原始 msg_count
-    _pairing_validated_len[cache_key] = len(final)
+    # 同时记录末条消息指纹，供下次增量验证时检测消息列表是否被整体重建
+    _pairing_validated_len[cache_key] = (
+        len(final),
+        _message_fingerprint(final[-1]) if final else "",
+    )
 
     return final
 

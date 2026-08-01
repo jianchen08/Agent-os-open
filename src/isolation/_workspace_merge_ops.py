@@ -322,14 +322,30 @@ class _MergeOpsMixin:
                 f"{verify_err[:200] if verify_err else 'unknown'}",
             }
         rc_pre, pre_merge_head, _ = self._run_git("rev-parse", "HEAD", cwd=proj_path)
-        rc, _, stderr = self._run_git("merge", branch, cwd=proj_path)
+        rc, stdout, stderr = self._run_git("merge", branch, cwd=proj_path)
         if rc == 0:
             result = {"success": True, "action": "merged", "method": "git_merge"}
             if rc_pre == 0 and pre_merge_head.strip():
                 result["pre_merge_head"] = pre_merge_head.strip()
             return result
+        # 合并失败诊断：git merge 把 CONFLICT 行写到 stdout（不是 stderr），
+        # 仅读 stderr 会得到空字符串 → 上层 fallback 成 "unknown"，丢失所有冲突信息。
+        # 这里在 merge --abort 前用 git diff --name-only --diff-filter=U 抓取冲突文件清单，
+        # 再连同 stdout/stderr 一起拼进 error，确保失败原因可定位、可诊断。
+        rc_conflict, conflict_files, _ = self._run_git(
+            "diff", "--name-only", "--diff-filter=U", cwd=proj_path
+        )
         self._run_git("merge", "--abort", cwd=proj_path)
-        return {"success": False, "error": f"git merge 失败(branch={branch}): {stderr[:300] if stderr else 'unknown'}"}
+        detail_parts = []
+        if stdout.strip():
+            detail_parts.append(f"stdout={stdout[:300]}")
+        if stderr.strip():
+            detail_parts.append(f"stderr={stderr[:300]}")
+        if rc_conflict == 0 and conflict_files.strip():
+            files_list = ", ".join(conflict_files.strip().splitlines()[:10])
+            detail_parts.append(f"冲突文件={files_list}")
+        detail = " | ".join(detail_parts) if detail_parts else "无输出(可能是文件系统错误)"
+        return {"success": False, "error": f"git merge 失败(branch={branch}): {detail}"}
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 

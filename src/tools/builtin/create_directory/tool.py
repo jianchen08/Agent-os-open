@@ -25,7 +25,7 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
     """
     目录创建工具
 
-    支持创建目录及其父目录，可选择是否处理目录已存在的情况。
+    幂等创建目录：若路径已是目录则直接返回成功；若被文件占用则报错。
     """
 
     def __init__(self, base_path: str | None = None):
@@ -37,7 +37,7 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
         """获取工具定义"""
         return Tool(
             name="create_directory",
-            description="创建新目录。适用场景：需要创建新的工作目录、创建项目文件夹、整理文件时新建目录。"
+            description="创建新目录（幂等：目录已存在直接返回成功）。适用场景：需要创建新的工作目录、创建项目文件夹、整理文件时新建目录。"
             "不适用场景：需要创建文件（使用 file_write）、需要复制文件（使用 copy_file）。",
             input_schema={
                 "type": "object",
@@ -49,11 +49,6 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
                     "parents": {
                         "type": "boolean",
                         "description": "是否创建父目录（即创建多层嵌套目录），默认 true",
-                        "default": True,
-                    },
-                    "exist_ok": {
-                        "type": "boolean",
-                        "description": "当目录已存在时是否报错，默认 true（会报错）。设为 false 则不报错",
                         "default": True,
                     },
                 },
@@ -74,7 +69,6 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
         try:
             path_str = inputs.get("path")
             parents = inputs.get("parents", True)
-            exist_ok = inputs.get("exist_ok", True)
 
             if not path_str:
                 return create_failure_result(
@@ -94,37 +88,29 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="PATH_NOT_ALLOWED",
                 )
 
-            # 检查目录是否已存在
+            # 路径已存在：是目录则幂等成功，被文件占用则报错
             if path.exists():
-                if not exist_ok:
-                    # exist_ok=False 且目录存在，不报错但返回信息
+                if path.is_dir():
                     return create_success_result(
                         data={
                             "path": display_path,
                             "created": False,
-                            "existed": True,
                             "message": "目录已存在",
                         },
                         metadata={"action": "create_directory"},
-                    )
-                if path.is_dir():
-                    return create_failure_result(
-                        error=f"目录已存在: {display_path}",
-                        error_code="DIRECTORY_EXISTS",
                     )
                 return create_failure_result(
                     error=f"路径已存在但不是目录: {display_path}",
                     error_code="PATH_EXISTS_NOT_DIRECTORY",
                 )
 
-            # 创建目录
-            path.mkdir(parents=parents, exist_ok=exist_ok)
+            # 创建目录（幂等：exist_ok=True 防止并发场景下的竞态）
+            path.mkdir(parents=parents, exist_ok=True)
 
             return create_success_result(
                 data={
                     "path": display_path,
                     "created": True,
-                    "existed": False,
                 },
                 metadata={"action": "create_directory"},
             )

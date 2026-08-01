@@ -60,6 +60,19 @@ class _TaskCleanupMixin:
             return False
         return root_task.metadata.get("task_scope") == "container"
 
+    def _has_independent_worktree(self, task: Any) -> bool:
+        """判断任务是否拥有独立 worktree（非共享父/容器空间）。
+
+        依据 task.metadata["ws_meta"].mode：仅 "worktree" 表示任务在
+        container_path.parent 下有独立 git worktree 和 task/<id> 分支，
+        删除时必须清理；shared/plain/project_root 等模式或无 ws_meta
+        表示共享目录，清理由父/容器负责，子任务删除时跳过。
+        """
+        ws_meta = task.metadata.get("ws_meta") if task.metadata else None
+        if not isinstance(ws_meta, dict):
+            return False
+        return ws_meta.get("mode") == "worktree"
+
     async def _cleanup_task_resources(
         self,
         task_id: str,
@@ -576,7 +589,9 @@ class _TaskCleanupMixin:
         task_title = task.title
 
         is_child_of_container = self._is_child_of_container(task)
-        skip_workspace = is_child_of_container
+        # 容器子任务若处于 worktree 模式，拥有独立 worktree（非共享容器空间），
+        # 必须走清理；仅 shared/plain 等共享模式才跳过，避免误删容器工作空间。
+        skip_workspace = is_child_of_container and not self._has_independent_worktree(task)
 
         self._cancel_pipeline_recursive(task_id)
 

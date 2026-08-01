@@ -225,9 +225,7 @@ class DesignReviewTool(CapabilityAdapterBase):
             name="design_review",
             description=(
                 "审查页面的元素缺陷、交互Bug和无障碍问题。"
-                "通过无障碍快照、JS注入检测和控制台日志分析，"
                 "从布局、颜色、字体、间距、响应式、无障碍、交互、DOM结构等维度进行检查。"
-                "自动回退到可用的后端。"
             ),
             input_schema={
                 "type": "object",

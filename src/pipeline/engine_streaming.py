@@ -38,6 +38,10 @@ class StreamingOutput:
         pipeline_id: 管道 ID（日志与事件信封用）。
         stop_check: 引擎注入的"是否收到停止信号"回调。on_chunk 每个 chunk 调用，
             命中即 raise CancelledError 协作式中断（见 _on_chunk 文档）。
+        on_user_stop: 引擎注入的"标记用户主动停止"回调，无参数。on_chunk 命中
+            stop 信号、raise CancelledError 之前同步调用一次，让引擎的 run()
+            CancelledError 分支能据此走"安静退出"而非"失败"路径。可选（不注入
+            则协作式中断仍按普通取消处理）。
     """
 
     # keepalive：距上个 chunk 超过该秒数即开始周期性发保活包。
@@ -47,9 +51,17 @@ class StreamingOutput:
     # chunk 队列容量：流式高峰防背压，满了丢弃（仅 WARNING 不阻塞引擎）。
     _CHUNK_QUEUE_MAXSIZE: int = 10000
 
-    def __init__(self, pipeline_id: str, stop_check: Callable[[], bool]) -> None:
+    def __init__(
+        self,
+        pipeline_id: str,
+        stop_check: Callable[[], bool],
+        on_user_stop: Callable[[], None] | None = None,
+    ) -> None:
         self._pipeline_id = pipeline_id
         self._stop_check = stop_check
+        # 用户主动停止标记回调：协作式中断前回写引擎标志，保持单向依赖
+        # （streaming 不直接持有引擎引用，只回调）。
+        self._on_user_stop = on_user_stop
 
         # 当前 bridge 引用（引擎 run 时从 registry 解析后注入，见 attach_bridge）。
         self._bridge: Any = None
@@ -152,6 +164,16 @@ class StreamingOutput:
                 self._pipeline_id[:12],
                 chunk.get("type", "?"),
             )
+            # 标记本次取消来自用户"停止生成"，供引擎 run() 的 CancelledError
+            # 分支走安静退出（不 fail_task / 不写 RAW_ERROR / 不 emit_error）。
+            if self._on_user_stop is not None:
+                try:
+                    self._on_user_stop()
+                except Exception:
+                    logger.debug(
+                        "[Streaming] on_user_stop 回调失败（忽略，仍按停止处理）: pipeline=%s",
+                        self._pipeline_id[:12],
+                    )
             raise asyncio.CancelledError("stop_generation signal")
 
         if self._bridge is None or self._chunk_queue is None:

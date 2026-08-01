@@ -75,7 +75,7 @@ system_prompt: |-
 
   ### 第四步：生成端到端测试报告【自己执行】
 
-  将所有验证结果汇总，写入 `docs/working/e2e_test_report.md`：
+  将所有验证结果汇总，写入 `docs/working/{title}_e2e_test_report.md`（{title} 用任务目标原文，不翻译、不缩写、不改写）：
 
   ```markdown
   # 端到端测试报告
@@ -140,7 +140,7 @@ tool_ids:
 - memory
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
-- 必须输出端到端测试报告 docs/working/e2e_test_report.md
+- 必须输出端到端测试报告 docs/working/{title}_e2e_test_report.md（{title} 用任务目标原文）
 - 评估通过才能结束任务
 - 同一问题修复最多 3 次，超过则标注为未解决，不继续重试
 - 修复后必须重新验证，不能假设修复成功
@@ -152,15 +152,15 @@ soft_constraints:
 - 能运行就运行，能测试就测试
 deliverables:
 - name: e2e_test_report
-  description: 端到端测试报告
-  output_path: '{{workspace}}/docs/working/e2e_test_report.md'
+  description: 端到端测试报告。文件名带任务标题前缀避免并行子任务合并冲突：{title}_e2e_test_report.md（{title} 用任务目标原文，不翻译、不缩写、不改写）
+  output_path: '{{workspace}}/docs/working/{title}_e2e_test_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/working/e2e_test_report.md'
+    path: '{{workspace}}/docs/working/{title}_e2e_test_report.md'
 static_vars:
   enabled: true
   items:
@@ -198,7 +198,7 @@ dynamic_vars:
 version: 1.0.0
 is_active: true
 status: active
-max_iterations: 100
+max_iterations: 500
 max_reminders: 5
 timeout_seconds: 1800
 tags:

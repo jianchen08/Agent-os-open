@@ -281,7 +281,9 @@ function filterBlankMessages(messages: Message[]): Message[] {
     if (m.status === 'streaming') return true
     const hasContent = m.content && m.content.trim()
     const hasParts = m.parts && m.parts.length > 0
-    return hasContent || hasParts
+    const hasToolCalls = m.toolCalls && m.toolCalls.length > 0
+    const hasThinking = m.thinking && (m.thinking.content || '').trim()
+    return hasContent || hasParts || hasToolCalls || hasThinking
   })
 }
 
@@ -782,12 +784,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       const existing = state.messagesByPipeline[pipelineId] || []
       // 含 clientMessageId 对账（与 appendMessages 共用 mergeIncrementalApiWithLocal）。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
-      // 跨边界合并保留 streaming 流式片段。
-      let finalMerged = mergePreservingStreaming(merged)
-      // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
-      finalMerged = filterBlankMessages(finalMerged)
-      // 内存封顶：翻页累计超量时丢弃最老消息，防止撑爆内存（OOM）
-      finalMerged = capMessagesForMemory(finalMerged)
+      // 过滤空白 assistant 消息（无 content 无 parts 无 toolCalls），避免空气泡
+      let finalMerged = filterBlankMessages(merged)
+      // prepend 路径不调 mergePreservingStreaming（二次合并会把跨页连续 assistant
+      // 合并成一条，93条→2条）也不调 capMessagesForMemory（300上限会裁掉刚加载
+      // 的历史）。apiGetMessages 已做合并，prepend 只需去重合并新旧。
       const topCursor = finalMerged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {

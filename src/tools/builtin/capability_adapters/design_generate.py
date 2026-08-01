@@ -36,8 +36,7 @@ class DesignGenerateTool(CapabilityAdapterBase):
             name="design_generate",
             description=(
                 "从文字描述或截图生成前端 UI 代码。"
-                "支持多种输出格式（React/HTML/Tailwind），"
-                "自动回退到可用的后端（screenshot-to-code / Stitch / Magic）。"
+                "支持多种输出格式（React/HTML/Tailwind）。"
             ),
             input_schema={
                 "type": "object",

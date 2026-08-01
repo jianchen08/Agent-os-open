@@ -1,12 +1,6 @@
 """
 增强版 Bash 命令执行工具
 
-提供：
-- 支持长时间运行的进程（30秒阈值 + 回调机制）
-- 支持交互式输入（确认、密码等）
-- 智能日志压缩（3-5行摘要）
-- 自适应编码转换（Windows CMD GBK / Git Bash UTF-8 自动识别）
-
 ⚠️ 安全威胁模型（H3）
 =================
 
@@ -179,16 +173,9 @@ class SecurityChecker:
 
 
 class BashTool(BuiltinTool, WorkspaceAwareMixin):
-    """
-    增强版 Bash 命令执行工具
+    """增强版 Bash 命令执行工具。
 
-    提供：
-    - 支持长时间运行的进程（30秒阈值 + 回调机制）
-    - 支持交互式输入（确认、密码等）
-    - 智能日志压缩（3-5行摘要）
-
-    注意：隔离决策由上层 IsolationCoordinator 统一处理，
-    本工具只负责在宿主机上执行命令。
+    隔离决策由上层 IsolationCoordinator 统一处理，本工具只负责执行命令。
     """
 
     # 在主事件循环直接执行，避免 to_thread 每次创建独立循环
@@ -269,36 +256,32 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         """获取工具定义"""
         return Tool(
             name="bash_execute",
-            description="执行 Shell 命令。本工具自带后台执行：execute 启动的命令在后台运行，"
-            "超时后进程不终止、返回 pid 供 continue 轮询(详见 action/timeout)。"
-            "直接用 execute 启动即可，不要手动 nohup/setsid/disown/行尾&(会使进程脱离管理、无法被 continue/terminate 操作)。"
-            "不适用：读文件用 file_read、搜索用 code_search、长期常驻服务（本工具面向有终点的任务）。"
-            "危险命令（rm -rf /、format、dd if=、mkfs 等）会被拦截；Windows 与 Linux/Mac 语法可能不同；可能需要审批。",
+            description="执行 Shell 命令。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，"
+            "手动后台化会使进程脱离管理）。读文件用 file_read、搜索用 code_search。"
+            "危险命令（rm -rf /、format、dd if= 等）会被拦截。Windows 与 Linux/Mac 语法可能不同。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["execute", "continue", "terminate", "input", "read_log"],
-                        "description": "操作类型。典型流程：execute 启动命令 → 若返回 running 用 continue 轮询 → 完成或 terminate。"
-                        "execute=执行新命令；continue=带 pid 继续等待一个运行中的命令（每次等待不超过 timeout，"
-                        "耗时任务需多次 continue 直到结束）；terminate=带 pid 终止进程；"
-                        "input=带 pid 向等待输入的进程发送文本（如确认 yes/no、密码、菜单选项）；"
-                        "read_log=带 pid 读取完整日志。",
+                        "description": "execute=执行新命令；"
+                        "continue=凭 pid 继续等（仍在跑则等到完成或超时，已完成则直接返回结果）；"
+                        "terminate=凭 pid 终止；input=凭 pid 向等待输入的进程发文本（yes/no、密码等）；"
+                        "read_log=凭 pid 读完整日志（任何时候都能用，进程已结束也能读）。",
                         "default": "execute",
                     },
                     "command": {
                         "type": "string",
-                        "description": "要执行的Shell命令（当action=execute时必需）。例如：ls -la, npm install, python script.py",
+                        "description": "要执行的Shell命令（action=execute 时必需）",
                     },
                     "pid": {
                         "type": "integer",
-                        "description": "进程ID（当action=continue/terminate/input/read_log时必需，由execute操作返回）",
+                        "description": "进程ID（action=continue/terminate/input/read_log 时必需，由 execute 或 continue 的 running 返回值提供）",
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "本次操作的等待上限（秒），默认30，最大290。"
-                        "超时不会杀进程，只会返回 status=running + pid；对仍在跑的命令，按需继续用 continue 轮询。",
+                        "description": "等待上限秒数（默认30，最大290）。超时不杀进程，返回 running+pid 供继续轮询。",
                         "default": 30,
                         "maximum": 290,
                     },
@@ -308,12 +291,11 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "input_text": {
                         "type": "string",
-                        "description": "要向运行中进程发送的输入文本（当action=input时必需）。"
-                        "用于命令等待交互输入时：确认类回答（yes/no/y/n）、密码、交互式菜单的选项编号等。敏感内容自动掩码。",
+                        "description": "向运行中进程发送的输入文本（action=input 时必需）。如 yes/no、密码、菜单选项编号。",
                     },
                     "force": {
                         "type": "boolean",
-                        "description": "是否强制终止进程（当action=terminate时有效）。强制终止会立即结束进程，可能导致数据丢失",
+                        "description": "强制终止（action=terminate 时有效，默认 false）",
                         "default": False,
                     },
                 },
@@ -323,8 +305,11 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 "type": "object",
                 "properties": {
                     "status": {"type": "string", "enum": ["completed", "running", "terminated"]},
+                    "pid": {"type": "integer"},
                     "exit_code": {"type": "integer"},
                     "output": {"type": "string"},
+                    "summary": {"type": "array", "items": {"type": "string"}},
+                    "elapsed": {"type": "number"},
                 },
                 "required": ["status"],
             },
@@ -383,7 +368,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为
         # 安全检查由管道层 SecurityCheckPlugin 和 ApprovalDecisionEngine 统一处理
         warning = None
-        is_isolated = inputs.get("_isolation_provider") in ("docker", "isolated")
+        container_id = inputs.get("_container_id")
+        is_isolated = bool(container_id) or inputs.get("_isolation_provider") in ("docker", "isolated")
         if not is_isolated:
             is_safe, needs_warning, message = self.security.check(command)
             if not is_safe:
@@ -404,6 +390,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             timeout=timeout,
             working_dir=working_dir,
             warning=warning,
+            container_id=container_id,
         )
 
     async def _execute_command(
@@ -412,18 +399,20 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         timeout: int,
         working_dir: str | None,
         warning: str | None = None,
+        container_id: str | None = None,
     ) -> ToolResult:
         """
         统一的命令执行接口
 
         隔离决策由上层 IsolationCoordinator 统一处理，
-        bash 工具只负责在宿主机上执行命令。
+        bash 工具只负责执行命令（本地或容器内，由 container_id 决定）。
 
         Args:
             command: 要执行的命令
             timeout: 超时时间（秒）
             working_dir: 工作目录
             warning: 警告信息
+            container_id: 容器 ID（非空时走 docker exec 路径）
 
         Returns:
             ToolResult: 统一格式的执行结果
@@ -433,6 +422,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             timeout=timeout,
             working_dir=working_dir,
             warning=warning,
+            container_id=container_id,
         )
 
     async def _execute_local_unified(
@@ -441,32 +431,33 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         timeout: int,
         working_dir: str | None,
         warning: str | None = None,
+        container_id: str | None = None,
     ) -> ToolResult:
         """
         本地执行命令（统一返回格式）
 
-        返回数据结构：
+        返回数据结构（由 _compact_result_data 精简，去掉 LLM 不需要的字段）：
         {
-            "status": "completed" | "running" | "terminated",
-            "process_id": "12345",  # 统一为字符串
-            "pid": 12345,           # 向后兼容，保留整数 pid
-            "elapsed": 1.5,
-            "output": "命令输出...",
-            "summary": ["[800行]", "类型: pip install", "进度: 120/500"],
-            "exit_code": 0,
-            "warnings": [],
-            "errors": [],
-            "isolated": False,
+            "status": "completed" | "running",
+            "pid": 12345,           # 后续 continue/read_log/terminate 凭此操作
+            "output": "命令输出...",  # completed 时含完整结果
+            "exit_code": 0,          # 始终保留（评估框架依赖）
+            "elapsed": 1.5,          # 已运行秒数
+            "summary": [...],        # 仅长输出（>10行）时保留
+            "warnings": [...],       # 仅非空时保留
+            "errors": [...],         # 仅非空时保留
         }
         """
         try:
-            # 启动进程（传入项目根路径下的 logs/bash 作为日志目录）
+            # 启动进程。start_process 收到 log_dir 时会同步更新 process_manager.log_dir，
+            # 保证后续 read_log_by_pid/get_summary 降级读磁盘时用同一目录。
             project_root = getattr(self, "_project_root", None)
             bash_log_dir = Path(project_root) / "logs" / "bash" if project_root else None
             pid, log_file = await self.process_manager.start_process(
                 command=command,
                 working_dir=working_dir,
                 log_dir=bash_log_dir,
+                container_id=container_id,
             )
 
             # 等待进程完成或超时
@@ -560,12 +551,30 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         # 获取进程信息
         proc_info = self.process_manager.get_process_info(pid)
         if not proc_info:
+            # 进程已被即时清理（completed 后 _on_output_task_done 触发）。
+            # 降级走磁盘日志，告诉 LLM "进程已结束"+最后输出，而非粗暴失败。
+            # continue 语义是"等运行中的进程"，进程已结束就用磁盘结果回复。
+            file_data = self.process_manager.read_log_by_pid(pid)
+            if file_data is not None:
+                return create_success_result(
+                    data={
+                        "status": "completed",
+                        "pid": pid,
+                        "output": file_data["output"],
+                        "summary": file_data["summary"],
+                        "exit_code": 0,  # 磁盘日志无 exit_code，保守 0
+                    },
+                    metadata={"action": "continue", "source": "file"},
+                )
             return create_failure_result(
-                error=f"进程 {pid} 不存在",
+                error=(
+                    f"进程 {pid} 不存在或已结束，且无对应日志文件（logs/bash/bash_{pid}.log）。"
+                    "可能从未执行过或日志已被清理。"
+                ),
                 error_code="PROCESS_NOT_FOUND",
             )
 
-        # 如果进程已完成，直接返回结果
+        # 如果进程已完成，直接返回结果（对齐 execute 完成路径，带 output）
         if proc_info.status != "running":
             summary = self.process_manager.get_summary(pid)
             exit_code = proc_info.exit_code
@@ -574,14 +583,16 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     error=f"命令执行失败，退出码: {exit_code}",
                     error_code="COMMAND_FAILED",
                 )
+            output = self.process_manager.get_output(pid)
+            result_data = self._compact_result_data(
+                pid=pid,
+                output=output,
+                summary_obj=summary or {},
+                exit_code=exit_code if exit_code is not None else 0,
+            )
+            result_data["elapsed"] = summary.get("elapsed_seconds", 0) if summary else 0
             return create_success_result(
-                data={
-                    "status": proc_info.status,
-                    "pid": pid,
-                    "elapsed": summary.get("elapsed_seconds", 0) if summary else 0,
-                    "summary": summary.get("summary", []) if summary else [],
-                    "exit_code": exit_code,
-                },
+                data=result_data,
                 metadata={"action": "continue"},
             )
 
@@ -612,7 +623,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
 
             await asyncio.sleep(0.5)
 
-        # 进程已完成
+        # 进程已完成（对齐 execute 完成路径，带 output）
         summary = self.process_manager.get_summary(pid)
         exit_code = proc_info.exit_code if proc_info else None
         if exit_code is not None and exit_code != 0:
@@ -621,14 +632,17 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="COMMAND_FAILED",
             )
 
+        output = self.process_manager.get_output(pid)
+        result_data = self._compact_result_data(
+            pid=pid,
+            output=output,
+            summary_obj=summary or {},
+            exit_code=exit_code if exit_code is not None else 0,
+        )
+        # 补回 elapsed（_compact_result_data 不带此字段）
+        result_data["elapsed"] = summary.get("elapsed_seconds", 0) if summary else 0
         return create_success_result(
-            data={
-                "status": "completed",
-                "pid": pid,
-                "elapsed": summary.get("elapsed_seconds", 0) if summary else 0,
-                "summary": summary.get("summary", []) if summary else [],
-                "exit_code": exit_code,
-            },
+            data=result_data,
             metadata={"action": "continue"},
         )
 
@@ -704,7 +718,16 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         )
 
     async def _handle_read_log(self, inputs: dict[str, Any]) -> ToolResult:
-        """处理 read_log 操作"""
+        """处理 read_log 操作。
+
+        双路径：
+        1. 进程活跃（在 active_processes）→ 从内存读，返回实时 status + output + summary
+        2. 进程已清（completed 后被 _on_output_task_done 清理）→ 按 pid 算日志文件名
+           (logs/bash/bash_<pid>.log) 读磁盘
+
+        这样 read_log 在任何时候都能用：execute→completed→read_log、
+        continue→completed→read_log、running→read_log 全都通。
+        """
         pid = inputs.get("pid")
         if not pid:
             return create_failure_result(
@@ -712,26 +735,42 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_PID",
             )
 
-        # 获取进程信息
+        # 路径1：进程活跃 → 从内存读（含实时 status、summary）
         proc_info = self.process_manager.get_process_info(pid)
-        if not proc_info:
-            return create_failure_result(
-                error=f"进程 {pid} 不存在",
-                error_code="PROCESS_NOT_FOUND",
+        if proc_info:
+            summary = self.process_manager.get_summary(pid)
+            output = self.process_manager.get_output(pid)
+            return create_success_result(
+                data={
+                    "status": proc_info.status,
+                    "pid": pid,
+                    "output": output,  # 完整输出文本
+                    "summary": summary.get("summary", []) if summary else [],
+                    "warnings": summary.get("warnings", 0) if summary else 0,
+                    "errors": summary.get("errors", 0) if summary else 0,
+                },
+                metadata={"action": "read_log", "source": "memory"},
             )
 
-        # 获取摘要 + 实际输出
-        summary = self.process_manager.get_summary(pid)
-        output = self.process_manager.get_output(pid)
-
+        # 路径2：进程已清 → 按 pid 算文件名读磁盘
+        file_data = self.process_manager.read_log_by_pid(pid)
+        if file_data is None:
+            return create_failure_result(
+                error=(
+                    f"进程 {pid} 不存在且无对应日志文件（logs/bash/bash_{pid}.log）。"
+                    "可能从未执行过，或日志文件已被外部清理。"
+                ),
+                error_code="LOG_FILE_NOT_FOUND",
+            )
         return create_success_result(
             data={
-                "status": proc_info.status,
+                # 能从磁盘读到的都是已结束的进程（活跃的会在路径1处理）
+                "status": "completed",
                 "pid": pid,
-                "output": output,  # 完整输出文本
-                "summary": summary.get("summary", []) if summary else [],
-                "warnings": summary.get("warnings", 0) if summary else 0,
-                "errors": summary.get("errors", 0) if summary else 0,
+                "output": file_data["output"],
+                "summary": file_data["summary"],
+                "warnings": file_data["warnings"],
+                "errors": file_data["errors"],
             },
-            metadata={"action": "read_log"},
+            metadata={"action": "read_log", "source": "file"},
         )

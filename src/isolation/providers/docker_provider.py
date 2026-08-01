@@ -368,28 +368,49 @@ class DockerProvider(IsolationProvider):
         )
         return "", start_err or err
 
-    async def destroy_environment(self, env_id: str, success: bool = True) -> None:
-        """销毁 Docker 容器环境。"""
+    async def destroy_environment(self, env_id: str, success: bool = True) -> bool:
+        """销毁 Docker 容器环境。
+
+        返回是否真正从 docker 删除成功。runc 命名空间脱节的容器 docker rm -f 会
+        失败（could not kill container ... did not receive an exit event）——
+        旧实现不检查 rm 返回码，照报"已销毁"并 pop env 记录，造成"内存里以为
+        删了、docker 里还在"的状态脱节，后续 _find_existing_container 又捡回
+        坏容器复用。修复：rm 非零时不谎报、保留 env 记录（docker 里容器仍在，
+        记录不能丢），返回 False。rm 成功才 pop 记录返回 True。
+        """
         env = self._environments.get(env_id)
         if not env:
-            return
+            return True  # 无可销毁记录，视为已成功（幂等）
 
         container_id = env.provider_info.get("container_id")
-        if container_id:
-            try:
-                await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
-                logger.info(
-                    "[DockerProvider] 容器已销毁 | id=%s",
-                    container_id[:12],
-                )
-            except Exception as e:
-                logger.warning(
-                    "[DockerProvider] 销毁容器失败 | id=%s | error=%s",
-                    container_id[:12],
-                    e,
-                )
+        if not container_id:
+            self._environments.pop(env_id, None)
+            return True
 
+        try:
+            rc, _, stderr = await self._run_cmd(
+                ["docker", "rm", "-f", container_id], timeout=15
+            )
+        except Exception as e:
+            logger.warning(
+                "[DockerProvider] 销毁容器异常（保留记录） | id=%s | error=%s",
+                container_id[:12], e,
+            )
+            return False
+
+        if rc != 0:
+            # rm 失败（典型：runc 卡死删不掉）——不谎报、不 pop 记录，
+            # docker 里容器仍在，保留 env 记录供排查与上层活性探针兜底。
+            err_tail = stderr.decode("utf-8", errors="replace")[-200:]
+            logger.warning(
+                "[DockerProvider] 销毁容器失败（docker 里仍在，保留记录） | id=%s | rc=%s | err=%s",
+                container_id[:12], rc, err_tail,
+            )
+            return False
+
+        logger.info("[DockerProvider] 容器已销毁 | id=%s", container_id[:12])
         self._environments.pop(env_id, None)
+        return True
 
     async def execute_in_environment(
         self,
@@ -535,6 +556,60 @@ class DockerProvider(IsolationProvider):
         low = err.lower()
         return any(marker in low for marker in cls._BUILDKIT_CORRUPTION_MARKERS)
 
+    # runc 命名空间脱节（setns failure）的特征标记（小写匹配）。
+    # 命中任一即判定为容器命名空间已死（可 destroy+recreate 后重试自愈）。
+    # 真实样本：OCI runtime exec failed: ... error executing setns process: exit status 1
+    # 这类故障下 docker inspect 仍报 running（元数据撒谎），pre-exec 健康检查
+    # 无法发现，只能靠 exec stderr 的 runc 特征串识别。
+    _NAMESPACE_DESYNC_MARKERS: ClassVar[tuple[str, ...]] = (
+        "error executing setns",
+        "oci runtime exec failed",
+        "unable to start container process",
+    )
+
+    @classmethod
+    def _is_namespace_desync_error(cls, err: str | bytes | None) -> bool:
+        """判断 exec 失败是否为 runc 命名空间脱节（可 destroy+recreate 后重试自愈）。
+
+        与命令本身的 stderr（command not found、编译错等）区分——后者重试无意义，
+        前者重建容器通常即恢复。setns 脱节时 docker inspect 仍报 running，
+        pre-exec 健康检查放行，错误只在 exec 时冒泡，故需在 exec stderr 上识别。
+
+        None 视作无错误（success=True 时 result.error 可能为 None），安全返回 False。
+        """
+        if not err:
+            return False
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        low = err.lower()
+        return any(marker in low for marker in cls._NAMESPACE_DESYNC_MARKERS)
+
+    # 9p/drvfs 挂载通道损坏（WSL2 已知架构缺陷）的特征标记（小写匹配）。
+    # WSL docker 模式下，容器通过 bind mount 访问宿主 /mnt/<盘>（9p 协议桥接
+    # Windows NTFS）。高负载 + VM 异常终止会让 9p 通道状态机损坏，容器内
+    # 访问 bind mount 路径时冒泡 Linux EIO 标准文本 "Input/output error"。
+    # 与 setns 不同，根因在宿主挂载点：只重建容器不够（新容器 bind mount
+    # 同一坏路径仍 EIO），必须先 umount+mount 修宿主再重建容器。
+    # 真实样本：ls: cannot access '/workspace/docs/.../report.md': Input/output error
+    _IO_ERROR_MARKERS: ClassVar[tuple[str, ...]] = (
+        "input/output error",  # Linux EIO（9p/drvfs 通道损坏时冒泡）
+    )
+
+    @classmethod
+    def _is_io_error(cls, err: str | bytes | None) -> bool:
+        """判断 exec 失败是否为 9p/drvfs 挂载通道损坏（EIO，可修宿主+重建容器自愈）。
+
+        与命令本身的 stderr（权限拒绝、文件不存在等 ENOENT/EACCES）区分——
+        后者是确定性失败重试无意义，前者修宿主挂载 + 重建容器通常即恢复。
+        None 视作无错误（success=True 时 result.error 可能为 None），安全返回 False。
+        """
+        if not err:
+            return False
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        low = err.lower()
+        return any(marker in low for marker in cls._IO_ERROR_MARKERS)
+
     async def _ensure_image(self) -> None:
         """确保镜像存在：本地有就用，没有则自动构建（优先），再不行才 pull。
 
@@ -632,7 +707,22 @@ class DockerProvider(IsolationProvider):
         container_id: str,
         operation: dict[str, Any],
     ) -> ExecutionResult:
-        """在容器中执行命令。"""
+        """在容器中执行命令。
+
+        超时处理策略：只杀本地 docker exec 客户端进程，绝不在容器内做进程组杀。
+
+        历史教训：曾在容器内用 setsid 包裹 + `kill -9 -- -PGID` 整组杀来防孤儿，
+        但实测在 WSL2 + runc 1.3.6 + cgroup v2 环境下，整组 SIGKILL 会砸进 containerd
+        shim 的 freeze/kill/exit-event 窗口，导致 shim 丢失退出事件 → 容器 runc 状态
+        永久脱节（"did not receive an exit event"）→ setns 全部失败。整组杀不是救星，
+        反而是 runc 卡死的直接触发因素。故撤掉，回到只杀本地客户端的最小干预策略。
+        容器内残留进程由 --pids-limit 兜住，坏掉的容器由 setns 自愈（检测+重建）处理。
+
+        保留：显式捕获 subprocess.TimeoutExpired（继承 SubprocessError 非 TimeoutError，
+        旧 except TimeoutError 接不住，会误报"执行命令失败"）。
+        """
+        import subprocess as _sp  # noqa: PLC0415
+
         command = operation.get("command", "")
         timeout = operation.get("timeout", 30)
         working_dir = operation.get("working_dir", "/workspace")
@@ -640,18 +730,18 @@ class DockerProvider(IsolationProvider):
         if not command:
             return ExecutionResult(success=False, output=None, error="命令不能为空")
 
-        try:
-            exec_args = [
-                "docker",
-                "exec",
-                "-w",
-                working_dir,
-                container_id,
-                "sh",
-                "-c",
-                command,
-            ]
+        exec_args = [
+            "docker",
+            "exec",
+            "-w",
+            working_dir,
+            container_id,
+            "sh",
+            "-c",
+            command,
+        ]
 
+        try:
             rc, stdout, stderr = await self._run_cmd(exec_args, timeout=timeout)
 
             stdout_text = stdout.decode("utf-8", errors="replace")
@@ -670,7 +760,11 @@ class DockerProvider(IsolationProvider):
                 error=None if success else (stderr_text or stdout_text or f"exit code {return_code}"),
             )
 
-        except TimeoutError:
+        except (_sp.TimeoutExpired, TimeoutError):
+            # subprocess.TimeoutExpired 继承 SubprocessError（非 TimeoutError），
+            # 旧 except TimeoutError 接不住 → 落到 except Exception 误报"执行命令失败"。
+            # 超时只杀本地 docker exec 客户端（_run_cmd 的 subprocess 已做），
+            # 不在容器内做任何进程操作（避免触发 runc cgroup shim race）。
             return ExecutionResult(
                 success=False,
                 output=None,
@@ -756,3 +850,4 @@ class DockerProvider(IsolationProvider):
             ],
             timeout=10,
         )
+

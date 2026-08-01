@@ -384,15 +384,29 @@ async def emit(
 
 
 async def stop(pipeline_id: str) -> InjectResult:
-    """唯一停止入口（I1 原子级联）。"""
+    """唯一停止入口（I1 原子级联）。
+
+    调用方（cancel_pipeline / 显式停止 / 级联清理）已负责设定任务的终态
+    （STOPPED/FAILED）。引擎只需安静退出，不得自行写 RAW_ERROR 或 fail_task
+    （否则会把上层设的 STOPPED 覆盖成 FAILED，并产生 "Pipeline engine cancelled"
+    这类误导性文案）。故 cancel engine_task 前置 _user_stop_requested 标志，
+    让引擎 _run_loop 的 CancelledError 走安静分支。
+    """
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return InjectResult(success=False, error="管道未注册", method="rejected", pipeline_id=pipeline_id)
 
-    # ① cancel engine_task（真正停 run 协程）
+    # ① cancel engine_task（真正停 run 协程）—— 先置标志，让引擎安静退出
     if entry.engine_task is not None and not entry.engine_task.done():
+        # 主动停止（非崩溃）：让 _run_loop 的 CancelledError 走安静分支，
+        # 不写 RAW_ERROR、不 emit_error、不 _mark_task_failed_on_engine_exit。
+        # 上层（cancel_pipeline 等）已设好任务终态，引擎不得覆盖。
+        # 用引擎公开方法（不穿透私有成员，对齐 stop() 既有的"不碰私有"约定）。
+        _engine = getattr(entry, "engine", None)
+        if _engine is not None and hasattr(_engine, "_mark_user_stop_requested"):
+            _engine._mark_user_stop_requested()  # type: ignore[attr-defined]
         entry.engine_task.cancel()
     # ② 停 bridge（如有）
     if entry.bridge is not None:

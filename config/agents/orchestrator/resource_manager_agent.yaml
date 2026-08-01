@@ -75,7 +75,7 @@ system_prompt: |-
   3. **执行修改**【自己执行】：file_write 对目标文件做精确的局部修改（使用 search_replace 或 insert 操作）
   4. **对照模板规范**（Agent 配置修改时）【自己执行】：使用 file_read 读取模板规范 config/templates/.agent_template_spec.yaml，确认修改后的字段符合规范要求（字段名、取值范围、必填性）
   5. **验证格式**【自己执行】：yaml_validate 确认修改后 YAML 格式正确
-  6. **生成简要操作报告**【自己执行】：使用 file_write 写入 `docs/working/resource_generation_report.md`（内容简要说明改动即可，不需要详细报告。生成报告时 file_read: config/templates/resource_generation_report_template.md。过程文档统一存放在 docs/working/ 目录下）
+  6. **生成简要操作报告**【自己执行】：使用 file_write 写入 `docs/working/{title}_resource_generation_report.md`（{title} 用任务目标原文，不翻译、不缩写、不改写；内容简要说明改动即可，不需要详细报告。生成报告时 file_read: config/templates/resource_generation_report_template.md。过程文档统一存放在 docs/working/ 目录下）
   7. **完成评估**【自己执行】：task_evaluate(action="auto_complete") 结束任务
 
   **轻量模式注意事项**：
@@ -206,7 +206,7 @@ system_prompt: |-
 
   | 文档类型 | 存放路径 | 说明 |
   |----------|----------|------|
-  | 资源操作报告 | `docs/working/resource_generation_report.md` | 每次资源操作的简要报告 |
+  | 资源操作报告 | `docs/working/{title}_resource_generation_report.md` | 每次资源操作的简要报告（{title} 用任务目标原文） |
   | 审查报告 | `docs/working/audit_*.md` | 审查产出的临时报告 |
   | 验证报告 | `docs/working/verify_*.md` | 功能验证产生的报告 |
   | 调研报告 | `docs/{title}_research_report.md` | research_agent 产出（仍放 docs/，因为含重要知识） |
@@ -415,7 +415,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
-  - '{{path:config/rules/dispatcher_rules_exec.md}}'
+  - '{{path:config/rules/dispatcher_rules_orchestrator.md}}'
 tool_ids:
 - task_submit
 - task_manage
@@ -530,8 +530,8 @@ output_schema:
   - resources
 deliverables:
 - name: resource_report
-  description: 资源操作报告（包含操作摘要、产出物清单、验证结果）
-  output_path: '{{workspace}}/docs/working/resource_generation_report.md'
+  description: 资源操作报告（包含操作摘要、产出物清单、验证结果）。文件名带任务标题前缀避免并行子任务合并冲突：{title}_resource_generation_report.md（{title} 用任务目标原文，不翻译、不缩写、不改写）
+  output_path: '{{workspace}}/docs/working/{title}_resource_generation_report.md'
   type: markdown
   required: true
   template_source: knowledge
@@ -540,7 +540,7 @@ recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/working/resource_generation_report.md'
+    path: '{{workspace}}/docs/working/{title}_resource_generation_report.md'
 version: 3.0.0
 is_active: true
 status: active

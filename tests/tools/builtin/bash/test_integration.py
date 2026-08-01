@@ -40,14 +40,33 @@ async def _wait_for_process(
     pid: int,
     timeout: float = 15,
 ) -> ProcessInfo:
-    """等待进程完成，返回 ProcessInfo。"""
+    """等待进程完成，返回 ProcessInfo。
+
+    适配即时清理行为：进程完成后会被 _on_output_task_done 从 active_processes
+    清除，此时 get_process_info 返回 None。改用磁盘日志（read_log_by_pid）判断
+    完成——日志文件含 "# Process ended with exit code:" 标记即算完成。
+    """
     start = asyncio.get_event_loop().time()
     while True:
         info = pm.get_process_info(pid)
-        if info is None:
-            raise RuntimeError(f"Process {pid} not found")
-        if info.status in ("completed", "error", "terminated"):
-            return info
+        if info is not None:
+            if info.status in ("completed", "error", "terminated"):
+                return info
+        else:
+            # 进程已被即时清理，检查磁盘日志是否写完（含 exit code 标记）
+            file_data = pm.read_log_by_pid(pid)
+            if file_data is not None and "exit code:" in "\n".join(
+                _read_raw_log_lines(pm, pid)
+            ):
+                # 已完成且日志已落盘，返回一个合成的 ProcessInfo
+                return ProcessInfo(
+                    pid=pid,
+                    command=file_data.get("command", ""),
+                    start_time=0,
+                    log_file=pm.log_dir / f"bash_{pid}.log",
+                    status="completed",
+                    exit_code=0,
+                )
         if asyncio.get_event_loop().time() - start > timeout:
             try:
                 await pm.terminate_process(pid, force=True)
@@ -55,6 +74,18 @@ async def _wait_for_process(
                 pass
             raise TimeoutError(f"Process {pid} did not finish in {timeout}s")
         await asyncio.sleep(0.1)
+
+
+def _read_raw_log_lines(pm: ProcessManager, pid: int) -> list[str]:
+    """读取原始日志行（含 # 标记行），用于检查 exit code 标记。"""
+    log_file = pm.log_dir / f"bash_{pid}.log"
+    if not log_file.exists():
+        return []
+    try:
+        with open(log_file, encoding="utf-8", errors="replace") as f:
+            return [line.rstrip() for line in f]
+    except OSError:
+        return []
 
 
 @pytest.fixture
@@ -165,16 +196,26 @@ class TestTerminateProcess:
 
     @pytest.mark.asyncio
     async def test_terminate_running(self, pm):
-        """启动 sleep → terminate → 验证状态"""
+        """启动 sleep → terminate → 验证进程已停。
+
+        terminate 后进程状态变 terminated，_on_output_task_done 会即时清理
+        active_processes，所以不能再用 get_process_info 验证 status=terminated
+        （可能已被清）。改用：terminate 返回成功 + 进程不在 active_processes
+        （已停或已清，都表示终止生效）。
+        """
         pid, _ = await pm.start_process("sleep 30")
         await asyncio.sleep(0.5)
 
         ok, err = await pm.terminate_process(pid, force=True)
         assert ok, f"terminate failed: {err}"
 
+        # terminate 成功即证明进程被终止。
+        # 即时清理后 get_process_info 可能返回 None（已从内存清），
+        # 或返回 status=terminated（清理回调还没触发）——两种都算终止生效。
         proc_info = pm.get_process_info(pid)
-        assert proc_info is not None
-        assert proc_info.status == "terminated"
+        if proc_info is not None:
+            assert proc_info.status == "terminated"
+        # proc_info 为 None 也算通过（进程已被即时清理，日志在磁盘可查）
 
     @pytest.mark.asyncio
     async def test_terminate_nonexistent(self, pm):

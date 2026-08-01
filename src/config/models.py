@@ -22,37 +22,89 @@ _DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config" /
 # .env 文件路径（项目根目录）
 _ENV_FILE_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 
-# 跟踪已加载的 .env 文件，避免重复加载
-_dotenv_loaded = False
+# 上次加载 .env 时的 mtime（None=从未加载）。
+# 用 mtime 而非布尔开关，这样运行中改 .env 后无需重启进程即可热重载
+# （配合 ConfigCenter 的 .env 监听 → invalidate_all_llm_caches 重建 Router）。
+_dotenv_mtime: float | None = None
+
+
+def _parse_dotenv(env_path: Path) -> dict[str, str]:
+    """解析 .env 文件为 {key: value} 字典（仅解析，不写 os.environ）。"""
+    result: dict[str, str] = {}
+    with open(env_path, encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key:
+                result[key] = value
+    return result
 
 
 def _load_dotenv_once() -> None:
-    """加载项目根目录的 .env 文件到 os.environ（仅执行一次）。"""
-    global _dotenv_loaded
-    if _dotenv_loaded:
-        return
-    _dotenv_loaded = True
+    """加载项目根目录的 .env 文件到 os.environ（基于 mtime 的幂等加载）。
+
+    首次调用与每次 .env mtime 变化时重读文件并刷新 os.environ；
+    mtime 未变时仅一次 stat 即返回，开销极低。
+    缺省文件不存在则记一次 warning 后不再重试（mtime 仍为 None，下次存在时自动加载）。
+    """
+    reload_env_file()
+
+
+def reload_env_file() -> bool:
+    """重新加载 .env 到 os.environ，若内容变化则返回 True。
+
+    由 ConfigCenter 在检测到 .env 变更后调用，也可在需要强制刷新时手动调用。
+    使用 mtime 做快速跳过；真正写入前比对解析结果，避免 mtime 变但内容未变时的无谓刷新。
+
+    Returns:
+        是否真的发生了内容变化（os.environ 被更新）。
+    """
+    global _dotenv_mtime
 
     if not _ENV_FILE_PATH.exists():
-        return
+        # 文件不存在：仅首次记录，避免日志刷屏
+        if _dotenv_mtime is None:
+            logger.debug(".env 文件不存在: %s", _ENV_FILE_PATH)
+        return False
 
     try:
-        with open(_ENV_FILE_PATH, encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-                # .env 强制覆盖系统环境变量（见 docstring 设计说明）
-                if key:
-                    os.environ[key] = value
-        logger.debug("已加载 .env 文件（强制覆盖）: %s", _ENV_FILE_PATH)
+        current_mtime = _ENV_FILE_PATH.stat().st_mtime
+    except OSError as exc:
+        logger.warning("读取 .env mtime 失败: %s", exc)
+        return False
+
+    # mtime 未变：快速跳过
+    if _dotenv_mtime is not None and current_mtime == _dotenv_mtime:
+        return False
+
+    try:
+        parsed = _parse_dotenv(_ENV_FILE_PATH)
     except Exception as exc:
         logger.warning("加载 .env 文件失败: %s", exc)
+        return False
+
+    changed = False
+    # .env 强制覆盖系统环境变量（见 docstring 设计说明）
+    for key, value in parsed.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+            changed = True
+
+    _dotenv_mtime = current_mtime
+    logger.info(
+        "已加载 .env 文件（强制覆盖）: %s (mtime=%s, keys=%d, changed=%s)",
+        _ENV_FILE_PATH,
+        current_mtime,
+        len(parsed),
+        changed,
+    )
+    return changed
 
 
 def _substitute_env_vars(value: Any) -> Any:

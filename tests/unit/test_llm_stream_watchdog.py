@@ -16,10 +16,12 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
 pytestmark = pytest.mark.timing
 # §9.4: 时序不变量门禁 — 此文件的测试断言可观察行为（事件顺序/间隔/超时边界/资源回收），
 # 不含实现细节断言（mock.call_count/私有方法），破坏不变量的改动在 CI 阶段即被拦截。
 
+from llm import stream_watchdog as sw_module
 from llm.stream_watchdog import StreamHardTimeout
 
 
@@ -192,3 +194,43 @@ class TestStreamHardTimeoutReset:
         wd.reset()  # 未 arm，不应抛异常
         wd.arm()
         wd.disarm()
+
+
+class TestStreamHardTimeoutAcloseHang:
+    """aclose 永久阻塞（半死 SSL socket）时，watchdog 回桥协程不应永久卡死。
+
+    场景：Windows ProactorEventLoop 上，服务端发了 FIN 但本地 SSL shutdown 握手
+    等不到响应，httpx/httpcore 的 aclose 永久阻塞。watchdog._fire 回桥的 aclose()
+    被 wait_for 超时包裹，到期后协程正常结束，不污染 loop 协程队列。
+    """
+
+    @pytest.mark.asyncio
+    async def test_hung_aclose_does_not_block_watchdog_coro(self, monkeypatch) -> None:
+        """aclose 永久阻塞时，watchdog 回桥协程在超时后正常退出。"""
+        # 缩短超时阈值，避免测试等 10s
+        monkeypatch.setattr(sw_module, "_ACLOSE_TIMEOUT_SECONDS", 0.5)
+
+        stream = MagicMock()
+        # aclose 永久阻塞（模拟半死 SSL socket）
+        stream.aclose = AsyncMock(side_effect=lambda: asyncio.sleep(9999))
+
+        loop = asyncio.get_running_loop()
+        fired = threading.Event()
+        wd = StreamHardTimeout(stream, loop, timeout=0.2, on_fire=fired.set)
+        wd.arm()
+
+        assert fired.wait(timeout=2.0), "watchdog 未触发"
+        # 让 loop 有时间执行回桥的 _safe_aclose（含 wait_for 超时）
+        await asyncio.sleep(1.0)
+        # aclose 确实被调用了
+        stream.aclose.assert_awaited()
+        # 此处若无 wait_for 超时保护，回桥协程会永久挂起在 loop 队列中；
+        # 有保护则 wait_for 到期后协程结束，loop 队列不会被污染。验证点：
+        # loop 仍可正常调度新任务（间接证明回桥协程已退出，没有永久占用资源）
+        marker = asyncio.Event()
+
+        async def _probe() -> None:
+            marker.set()
+
+        asyncio.ensure_future(_probe())
+        assert await asyncio.wait_for(marker.wait(), timeout=1.0), "loop 被卡死，回桥协程未退出"

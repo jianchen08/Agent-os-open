@@ -766,16 +766,6 @@ async def list_messages(
 
     from channels.api.models import MessageListResponse  # noqa: PLC0415
 
-    # 打开会话时同步 agent_id 到注册表 tags（覆盖存量会话的缺失）
-
-    _thread = store.get_thread(thread_id)
-
-    if _thread:
-        _aid = _thread.get("agent_id", "")
-
-        if _aid:
-            _sync_agent_to_registry_tags(thread_id, _aid)
-
     # before_sequence 和 after_sequence 不能同时使用
 
     if before_sequence is not None and after_sequence is not None:
@@ -907,15 +897,24 @@ def update_thread_agent(
     agent_id = body.get("agent_id", "")
 
     # P0-安全: 校验 agent_id 在 registry 中存在，禁止把无效 agent_id 写入线程存储，
-
-    # 否则后续 WS 入口会因解析失败而静默降级到默认 Agent。
-
     if agent_id:
-        provider = get_service_provider()
+        # 校验 agent_id 在 registry 中存在，禁止把无效 agent_id 写入线程存储，
+        # 否则后续 WS 入口会因解析失败而静默降级到默认 Agent。
+        #
+        # 注意：GET /api/v1/agents（下拉框数据源）用的是 global_registry 单例，
+        # 它懒加载自愈 + 支持热重载；而 service_provider 里的 "agent_registry"
+        # 仅在 pipeline 上下文初始化成功时才注册，且不感知热重载。
+        # 若此处只查 service_provider，会出现"下拉框能看到、保存却 400"的不一致。
+        # 因此以 global_registry 为主，service_provider 兜底，保证校验口径与下拉框一致。
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
 
-        agent_registry = provider.get("agent_registry") if provider else None
+        agent_registry = get_global_agent_registry_sync()
+        if agent_registry.get(agent_id) is None:
+            provider = get_service_provider()
+            fallback = provider.get("agent_registry") if provider else None
+            agent_registry = fallback or agent_registry
 
-        if agent_registry is None or agent_registry.get(agent_id) is None:
+        if agent_registry.get(agent_id) is None:
             raise APIError(
                 status_code=400,
                 error_code="AGENT_NOT_FOUND",
@@ -924,12 +923,18 @@ def update_thread_agent(
 
     updated_thread = store.update_thread(thread_id, agent_id=agent_id)
 
-    # 同步更新注册表 tags：前端切 Agent 时，会话关联的所有管道 tags 也更新 agent_id。
+    # 切 Agent 只精确更新【会话主管道】那一个 entry 的 agent_id。
+    # 注册表以 pipeline_id 为准：只有该 pipeline_id 明确匹配上才改；
+    # 同会话下的子任务管道（各自有独立的 target agent，见 task_executor 注册）
+    # pipeline_id ≠ 主管道 id，匹配不上，绝不波及——否则子任务被 stop_generation
+    # 停止后 idle 重启会解析到主 agent 配置（表现为“停止后再发消息 agent 变了”）。
+    _main_pid = (thread.get("active_pipeline_id") or "")
+    if agent_id and _main_pid:
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
-    # 这样引擎层 idle 重启时直接从 tags 拿，覆盖存量会话的缺失。
-
-    if agent_id:
-        _sync_agent_to_registry_tags(thread_id, agent_id)
+        _entry = get_engine_registry().get(_main_pid)
+        if _entry and _entry.tags.get("agent_id") != agent_id:
+            _entry.tags["agent_id"] = agent_id
 
     return _build_thread_response(updated_thread)
 
@@ -1082,45 +1087,3 @@ def restore_session_pipelines() -> int:
         _logger.warning("[session] 启动恢复会话管道失败: %s", exc)
 
     return _count
-
-
-def _sync_agent_to_registry_tags(thread_id: str, agent_id: str) -> None:
-    """会话系统同步 agent_id 到注册表 tags——覆盖存量会话的 agent_id 缺失。"""
-
-    import logging  # noqa: PLC0415
-
-    _logger = logging.getLogger(__name__)
-
-    try:
-        from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
-        _registry = get_engine_registry()
-
-        _synced = 0
-
-        for entry in _registry.all_entries().values():
-            # 按 thread_id 或 session_id tag 匹配
-
-            _matched = entry.thread_id == thread_id or entry.tags.get("session_id") == thread_id
-
-            if not _matched:
-                continue
-
-            if entry.tags.get("agent_id") == agent_id:
-                continue
-
-            entry.tags["agent_id"] = agent_id
-
-            _synced += 1
-
-            _logger.info(
-                "[session] 同步 agent_id: pipeline=%s agent=%s",
-                entry.engine.pipeline_id[:12] if entry.engine else "?",
-                agent_id,
-            )
-
-        if _synced == 0:
-            _logger.info("[session] 同步 agent_id: 无匹配 entry（thread=%s 可能还没注册管道）", thread_id[:12])
-
-    except Exception as exc:
-        _logger.warning("[session] 同步 agent_id 失败: thread=%s error=%s", thread_id[:12], exc)

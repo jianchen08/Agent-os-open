@@ -25,6 +25,17 @@ function loadCollapsedState(
 }
 
 /**
+ * 从 localStorage 读取工作区面板宽度比例，非法或未设置时回退 null（表示用默认比例）
+ */
+function loadWorkspacePanelRatio(): number | null {
+  try {
+    return uiStorage.getWorkspacePanelRatio()
+  } catch {
+    return null
+  }
+}
+
+/**
  * UI 状态接口
  */
 interface UIState {
@@ -36,6 +47,8 @@ interface UIState {
   taskPanelCollapsed: boolean
   /** 工作区面板是否折叠 */
   workspaceCollapsed: boolean
+  /** 工作区面板宽度比例（0~1，相对 splitter 容器）；null 表示用默认比例 */
+  workspacePanelRatio: number | null
   /** 消息搜索关键词（Sidebar 与 ChatContainer 共享） */
   messageSearchQuery: string
 }
@@ -57,6 +70,8 @@ interface UIActions {
   toggleWorkspace: () => void
   /** 设置工作区面板状态 */
   setWorkspaceCollapsed: (collapsed: boolean) => void
+  /** 设置工作区面板宽度比例（null 表示用默认比例） */
+  setWorkspacePanelRatio: (ratio: number | null) => void
   /** 设置消息搜索关键词 */
   setMessageSearchQuery: (query: string) => void
 }
@@ -72,6 +87,7 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   approvalDialog: null,
   taskPanelCollapsed: loadCollapsedState(uiStorage.getTaskPanelCollapsed, false),
   workspaceCollapsed: loadCollapsedState(uiStorage.getWorkspaceCollapsed, false),
+  workspacePanelRatio: loadWorkspacePanelRatio(),
   messageSearchQuery: '',
 
   /**
@@ -140,6 +156,17 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   setWorkspaceCollapsed: (collapsed: boolean) => {
     uiStorage.setWorkspaceCollapsed(collapsed)
     set({ workspaceCollapsed: collapsed })
+  },
+  /**
+   * 设置工作区面板宽度比例（null 表示清除记忆，回退默认比例）
+   */
+  setWorkspacePanelRatio: (ratio: number | null) => {
+    if (ratio === null) {
+      uiStorage.setWorkspacePanelRatio(undefined)
+    } else {
+      uiStorage.setWorkspacePanelRatio(ratio)
+    }
+    set({ workspacePanelRatio: ratio })
   },
   setMessageSearchQuery: (query: string) => {
     set({ messageSearchQuery: query })

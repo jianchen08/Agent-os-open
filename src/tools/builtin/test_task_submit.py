@@ -44,18 +44,16 @@ def _make_source_task(pipeline_run_id: str = "pipe-12345") -> MagicMock:
 
 
 def _build_inputs(mode, inherit_from: str = "src-task-001") -> dict:
-    """构造一组用于 task_submit.execute() 的最小输入。"""
+    """构造一组用于 task_submit.execute() 的最小输入（平铺后的扁平字段）。"""
     return {
-        "goal": {"title": "继承任务测试"},
+        "goal_title": "继承任务测试",
         "target_type": "agent",
         "target_id": "general_agent",
         "task_scope": "non_container",
         "acceptance_criteria": {"file_check": {"input_params": {"path": "src/foo.py"}}},
         "parent_agent_level": 1,
-        "inherit": {
-            "from": inherit_from,
-            "mode": mode,
-        },
+        "inherit_from": inherit_from,
+        "inherit_mode": mode,
     }
 
 
@@ -110,21 +108,21 @@ def _patch_infrastructure():
 
 
 def test_inherit_mode_schema_supports_string_and_array():
-    """Schema 层：inherit.mode 应支持 string（向后兼容）和 array 两种形式。
+    """Schema 层：inherit_mode 应支持 string（向后兼容）和 array 两种形式。
 
+    schema 已平铺：原 inherit.mode 现提升为顶层 inherit_mode。
     实现方案：使用 oneOf 包含 string 和 array 两种 schema。
     """
     tool_def: Tool = TaskSubmitTool.get_tool_definition()
-    inherit_schema = tool_def.input_schema["properties"]["inherit"]
-    mode_schema = inherit_schema["properties"]["mode"]
+    mode_schema = tool_def.input_schema["properties"]["inherit_mode"]
 
     # 必须是 oneOf 形式
-    assert "oneOf" in mode_schema, f"inherit.mode 缺少 oneOf 定义，实际 schema={mode_schema}"
+    assert "oneOf" in mode_schema, f"inherit_mode 缺少 oneOf 定义，实际 schema={mode_schema}"
 
     one_of = mode_schema["oneOf"]
     type_kinds = [opt.get("type") for opt in one_of]
-    assert "string" in type_kinds, f"inherit.mode 缺少 string 分支，实际={type_kinds}"
-    assert "array" in type_kinds, f"inherit.mode 缺少 array 分支，实际={type_kinds}"
+    assert "string" in type_kinds, f"inherit_mode 缺少 string 分支，实际={type_kinds}"
+    assert "array" in type_kinds, f"inherit_mode 缺少 array 分支，实际={type_kinds}"
 
     # string 分支应允许 pipe/workspace
     string_opt = next(opt for opt in one_of if opt.get("type") == "string")
@@ -135,6 +133,19 @@ def test_inherit_mode_schema_supports_string_and_array():
     items_schema = array_opt.get("items", {})
     assert items_schema.get("type") == "string"
     assert set(items_schema.get("enum", [])) == {"pipe", "workspace"}
+
+
+def test_goal_schema_flattened():
+    """Schema 层：goal 已平铺为顶层 goal_title / goal_description。"""
+    tool_def: Tool = TaskSubmitTool.get_tool_definition()
+    props = tool_def.input_schema["properties"]
+    assert "goal" not in props, "goal 不应再以嵌套对象存在"
+    assert "inherit" not in props, "inherit 不应再以嵌套对象存在"
+    assert "goal_title" in props and props["goal_title"]["type"] == "string"
+    assert props["goal_description"]["maxLength"] == 2000
+    assert "inherit_from" in props and props["inherit_from"]["type"] == "string"
+    # 必填字段变为 goal_title
+    assert tool_def.input_schema["required"] == ["goal_title"]
 
 
 # ─────────────────────────── 解析层验证 ───────────────────────────
@@ -246,16 +257,17 @@ def test_build_metadata_handles_list_mode_for_pipe():
     """_build_metadata 应正确处理 mode 为包含 'pipe' 的列表。
 
     当 mode=['pipe', 'workspace'] 时，metadata['inherit_pipe_from'] 应被设置。
+    平铺后从扁平字段 inherit_from/inherit_mode 重组读取。
     """
     tool = TaskSubmitTool()
     inputs = _build_inputs(mode=["pipe", "workspace"])
-    goal = inputs["goal"]
+    goal = {"title": inputs["goal_title"], "description": inputs.get("goal_description", "")}
     criteria = inputs["acceptance_criteria"]
 
     metadata = tool._build_metadata(inputs, goal, criteria)
 
-    # 验证 inherit 配置被原样存储
-    assert metadata.get("inherit") == inputs["inherit"]
+    # 验证 inherit 配置被重组后原样存储
+    assert metadata.get("inherit") == {"from": "src-task-001", "mode": ["pipe", "workspace"]}
 
     # 验证 pipe 标记被设置（即使 mode 是列表也应正确识别）
     assert metadata.get("inherit_pipe_from") == "src-task-001", (
@@ -267,7 +279,7 @@ def test_build_metadata_handles_string_mode_for_pipe():
     """_build_metadata 应正确处理 mode 为 'pipe' 字符串。"""
     tool = TaskSubmitTool()
     inputs = _build_inputs(mode="pipe")
-    goal = inputs["goal"]
+    goal = {"title": inputs["goal_title"], "description": inputs.get("goal_description", "")}
     criteria = inputs["acceptance_criteria"]
 
     metadata = tool._build_metadata(inputs, goal, criteria)
@@ -281,7 +293,7 @@ def test_build_metadata_no_pipe_mark_for_workspace_only_list():
     """_build_metadata 当 mode=['workspace'] 时不应设置 inherit_pipe_from。"""
     tool = TaskSubmitTool()
     inputs = _build_inputs(mode=["workspace"])
-    goal = inputs["goal"]
+    goal = {"title": inputs["goal_title"], "description": inputs.get("goal_description", "")}
     criteria = inputs["acceptance_criteria"]
 
     metadata = tool._build_metadata(inputs, goal, criteria)
@@ -338,6 +350,31 @@ def test_normalize_description_non_string_scalar():
     """非 str 标量（int/dict）转为字符串，避免 len() 校验失效。"""
     assert _normalize_description(42) == "42"
     assert _normalize_description(True) == "True"
+
+
+# ─────────────────────────── 向后兼容验证 ───────────────────────────
+
+
+def test_backward_compatible_legacy_goal_and_inherit_object():
+    """向后兼容：旧式嵌套 goal/inherit 对象仍应被正确解析。
+
+    schema 虽已平铺为 goal_title/goal_description/inherit_from/inherit_mode，
+    但 execute() 保留了旧式对象入口，避免未刷新 schema 的历史调用方/LLM 破裂。
+    """
+    inputs = {
+        "goal": {"title": "旧式 goal 对象", "description": "兼容"},
+        "target_type": "agent",
+        "target_id": "general_agent",
+        "task_scope": "non_container",
+        "acceptance_criteria": {"file_check": {"input_params": {"path": "src/foo.py"}}},
+        "parent_agent_level": 1,
+        "inherit": {"from": "src-task-001", "mode": "pipe"},
+    }
+    error_code = _run_execute_capture_error_code(inputs)
+
+    # 旧式对象应正常通过 inherit 解析层（不应触发 INVALID_INHERIT_*）
+    assert error_code != "INVALID_INHERIT_MODE", f"旧式 inherit 对象应被兼容，但收到={error_code}"
+    assert error_code != "INVALID_INHERIT_PARAMS", f"旧式 inherit 对象应被兼容，但收到={error_code}"
 
 
 if __name__ == "__main__":

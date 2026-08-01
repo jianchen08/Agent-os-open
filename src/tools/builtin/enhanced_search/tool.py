@@ -86,7 +86,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
         """获取工具定义"""
         return Tool(
             name="enhanced_search",
-            description="在文件中搜索文本、代码或文件名。支持内容搜索（集成ripgrep，性能提升10-100倍）和文件名搜索。适用于查找函数/类/变量定义、TODO注释、特定文件名等场景。默认不区分大小写，结果限制100条。文件名搜索不支持正则表达式。",
+            description="在文件中搜索文本、代码或文件名。支持内容搜索和文件名搜索。适用于查找函数/类/变量定义、TODO注释、特定文件名等场景。默认不区分大小写，结果限制100条。文件名搜索不支持正则表达式。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -140,7 +140,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             source=ToolSource.CODE,
             category=ToolCategory.SEARCH,
             level=ToolLevel.USER,
-            tags=["search", "code", "ripgrep", "performance", "filename"],
+            tags=["search", "code", "filename"],
             injected_params=["workspace", "parent_agent_level"],
         )
 

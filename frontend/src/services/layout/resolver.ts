@@ -38,8 +38,8 @@ export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
     indicatorSize: 6,
   },
   panelSplit: {
-    chatRatio: 0.45,
-    workspaceRatio: 0.55,
+    chatRatio: 0.55,
+    workspaceRatio: 0.45,
     adjustable: true,
     divider: {
       width: 1,
@@ -98,14 +98,31 @@ export function safeLoadLayout(themeLayout: LayoutConfig | undefined): LayoutCon
  *
  * 根据视口宽度计算各面板的实际尺寸
  * 当空间不足时，优先保证聊天面板
+ *
+ * @param config - 布局配置
+ * @param viewportWidth - 视口宽度
+ * @param persistedWorkspaceRatio - 已记忆的工作区宽度比例（0~1），传入则覆盖默认比例
  */
-export function resolveLayout(config: LayoutConfig, viewportWidth: number): ResolvedLayout {
+export function resolveLayout(
+  config: LayoutConfig,
+  viewportWidth: number,
+  persistedWorkspaceRatio?: number,
+): ResolvedLayout {
   const dockWidth = config.dockBar.position !== 'bottom' ? config.dockBar.height : 0
   const availableWidth =
     viewportWidth - config.sidebar.defaultWidth - dockWidth - config.gaps.betweenSpaces * 2
 
-  const desiredChat = availableWidth * config.panelSplit.chatRatio
-  const desiredWorkspace = availableWidth * config.panelSplit.workspaceRatio
+  // 持久化比例合法时覆盖默认比例；chat 与 workspace 比例之和为 1
+  const usePersistedRatio =
+    typeof persistedWorkspaceRatio === 'number' &&
+    Number.isFinite(persistedWorkspaceRatio) &&
+    persistedWorkspaceRatio > 0 &&
+    persistedWorkspaceRatio < 1
+  const workspaceRatio = usePersistedRatio ? persistedWorkspaceRatio : config.panelSplit.workspaceRatio
+  const chatRatio = usePersistedRatio ? 1 - workspaceRatio : config.panelSplit.chatRatio
+
+  const desiredChat = availableWidth * chatRatio
+  const desiredWorkspace = availableWidth * workspaceRatio
 
   const minChat = config.chatPanel.minWidth
   const minWorkspace = config.workspacePanel.minWidth

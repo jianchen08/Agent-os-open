@@ -40,6 +40,9 @@ class StateKeys:
     LLM_ERROR_HISTORY = "llm_error_history"
     TASK_COMPLETE = "task_complete"
     SHOULD_STOP = "should_stop"
+    # 用户主动"停止生成"：引擎安静退出时置 True，供 post-pipeline done-callback
+    # 识别"这是用户打断输出，不是任务失败"，跳过 fail_task。
+    USER_STOP_REQUESTED = "user_stop_requested"
     APPROVAL_REQUIRED = "approval_required"
     ROUTED_TO = "routed_to"
     WAIT_FOR = "wait_for"

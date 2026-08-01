@@ -93,6 +93,12 @@ class PipelineEngine:
 
         self._run_started: bool = False
 
+        # 用户主动"停止生成"标志：仅当 deliver_signal 收到 stop_generation（或流式
+        # _on_chunk 命中 stop 信号）时置 True，用于让 run() 的 CancelledError 分支
+        # 区分"用户主动停输出"与"管道真崩溃"。前者走安静退出（不 fail_task、不写
+        # RAW_ERROR、不 emit_error），后者保持现有失败处理。run() 开始时复位。
+        self._user_stop_requested: bool = False
+
         # 流式输出口（output port）：bridge、chunk 队列、消费者/keepalive 协程、
         # 流式上下文全部委托给 StreamingOutput，引擎核心不再持有这些传输层状态。
         # stop_check 回调注入协作式停止判定，保持单向依赖（streaming 不反向依赖引擎）。
@@ -101,6 +107,7 @@ class PipelineEngine:
         self._streaming: StreamingOutput = StreamingOutput(
             self._pipeline_id,
             self._is_stop_signal_active,
+            on_user_stop=self._mark_user_stop_requested,
         )
 
         # per-pipeline 日志管理（横切基础设施）：FileHandler 创建/关闭、contextvar 绑定、
@@ -147,6 +154,10 @@ class PipelineEngine:
         self._suspended_state = None
 
         self._wake_event = None
+
+        # 复位用户停止标志：新一轮 run 不应继承上一轮的 stop_generation 痕迹，
+        # 否则会被本 run 的 CancelledError 分支误判为"用户主动停止"而安静退出。
+        self._user_stop_requested = False
 
         self._streaming.reset_for_run()
 
@@ -378,13 +389,21 @@ class PipelineEngine:
         try:
             self._pipeline_logger.setup(pipeline_run_id, resumed)
 
-            # context_window 需在首次迭代前注入 state
+            # context_window / llm_model 需在首次迭代前注入 state。
+            # 否则首轮 prompt_build 读到的 llm_model 为空，"### 模型信息" 段会缺
+            # "模型: xxx" 行，第二轮才补上 → system_message 首尾不一致，破坏
+            # prompt cache 前缀（MSG-0 第一轮≠第二轮，全部 history 无法命中缓存）。
 
-            if not state.get("context_window"):
+            if not state.get("context_window") or not state.get("llm_model"):
                 _llm_core = self.plugin_registry.get_core("llm_call")
 
-                if _llm_core and hasattr(_llm_core, "_context_window") and _llm_core._context_window:
-                    state["context_window"] = _llm_core._context_window
+                if _llm_core:
+                    if not state.get("context_window") and getattr(_llm_core, "_context_window", 0):
+                        state["context_window"] = _llm_core._context_window
+                    # llm_model 在 llm_core 初始化时已确定（self._model），首轮即可注入，
+                    # 无需等 llm_core 执行后回写。这是 MSG-0 内容首轮稳定的关键。
+                    if not state.get("llm_model") and getattr(_llm_core, "_model", ""):
+                        state["llm_model"] = _llm_core._model
 
             while not state.get(StateKeys.ENDED, False):
                 # 1. 递增迭代计数器
@@ -500,24 +519,45 @@ class PipelineEngine:
             if _must_cancel is True:
                 _cancel_source = "explicit_cancel(_must_cancel=True)"
 
-            logger.warning(
-                "Pipeline cancelled | iteration=%d | _must_cancel=%s | cancel_source=%s",
-                state.get(StateKeys.ITERATION, 0),
-                _must_cancel,
-                _cancel_source,
-            )
+            # 用户主动"停止生成"：只打断输出流，不视为失败。
+            # stop_generation 经 deliver_signal→_interrupt_engine_task 或流式
+            # _on_chunk 抛 CancelledError 进入本分支；二者都会先把
+            # _user_stop_requested 置 True。此路径下：不写 RAW_ERROR、不 emit_error、
+            # 不 fail_task、不触发终态回调（→ 不 cancel_pipeline / 不毁注册表）。
+            # 引擎 entry 保留、_run_started 在 finally 复位为 idle，用户重发即继续。
+            if self._user_stop_requested:
+                logger.info(
+                    "用户停止生成，安静退出 | pipeline=%s iteration=%d（不 fail / 不 unregister）",
+                    self._pipeline_id[:12],
+                    state.get(StateKeys.ITERATION, 0),
+                )
+                # 标记本轮已正常结束（非错误），便于上层把引擎视为可复用 idle。
+                # 不设 RAW_ERROR，保持 state 干净。
+                state[StateKeys.ENDED] = True
+                # 把"用户停止"信号写进 state（→ 经 last_state 传给 post-pipeline
+                # done-callback），让 _check_post_pipeline_state 跳过 fail_task——
+                # 用户停止只是打断输出，任务不该被判失败。
+                state[StateKeys.USER_STOP_REQUESTED] = True
 
-            state[StateKeys.ENDED] = True
+            else:
+                logger.warning(
+                    "Pipeline cancelled | iteration=%d | _must_cancel=%s | cancel_source=%s",
+                    state.get(StateKeys.ITERATION, 0),
+                    _must_cancel,
+                    _cancel_source,
+                )
 
-            state[StateKeys.RAW_ERROR] = f"Pipeline engine cancelled (source={_cancel_source})"
+                state[StateKeys.ENDED] = True
 
-            # Phase 1: 推送 emit_error
+                state[StateKeys.RAW_ERROR] = f"Pipeline engine cancelled (source={_cancel_source})"
 
-            if self._streaming.bridge is not None:
-                with contextlib.suppress(Exception):
-                    await self._streaming.emit_error(RuntimeError(f"Pipeline cancelled ({_cancel_source})"))
+                # Phase 1: 推送 emit_error
 
-            await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine cancelled (source={_cancel_source})")
+                if self._streaming.bridge is not None:
+                    with contextlib.suppress(Exception):
+                        await self._streaming.emit_error(RuntimeError(f"Pipeline cancelled ({_cancel_source})"))
+
+                await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine cancelled (source={_cancel_source})")
 
         except Exception as exc:
             _iter = state.get(StateKeys.ITERATION, 0)
@@ -1014,6 +1054,9 @@ class PipelineEngine:
                 )
                 return
             entry.engine_task.cancel()
+            # 标记本次取消来自用户"停止生成"，供 run() 的 CancelledError 分支
+            # 走安静退出（不 fail_task / 不写 RAW_ERROR / 不 emit_error）。
+            self._user_stop_requested = True
             logger.info(
                 "[Engine] 已中断 engine_task（停止生成）: pipeline=%s",
                 self._pipeline_id[:12],
@@ -1024,6 +1067,15 @@ class PipelineEngine:
                 self._pipeline_id[:12],
                 exc,
             )
+
+    def _mark_user_stop_requested(self) -> None:
+        """标记用户主动"停止生成"（供 StreamingOutput 协作式中断回调注入）。
+
+        与 _interrupt_engine_task 里直接置 self._user_stop_requested=True 同义，
+        只是经回调暴露给流式层，避免 streaming 反向依赖引擎内部状态。
+        run() 的 CancelledError 分支据此走"安静退出"。
+        """
+        self._user_stop_requested = True
 
     async def cleanup(self) -> None:
         """公开清理接口（供 message_bus.stop 调用）。"""

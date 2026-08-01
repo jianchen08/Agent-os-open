@@ -37,7 +37,6 @@ class BrowserTestTool(CapabilityAdapterBase):
             description=(
                 "在浏览器中渲染页面、执行交互操作、收集验证数据。"
                 "支持截图、控制台日志、性能指标等验证类型。"
-                "自动回退到可用的后端（playwright-devtools / Playwright / Chrome DevTools）。"
             ),
             input_schema={
                 "type": "object",

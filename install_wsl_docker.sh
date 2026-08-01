@@ -184,10 +184,17 @@ step "3/5 配置 docker TCP 监听(localhost:2375)"
 # daemon.json 配置：开 TCP 监听，localhost:2375(镜像网络模式下 Windows 可直连)
 DAEMON_JSON="/etc/docker/daemon.json"
 # 国内镜像加速 + TCP 监听 + 日志限制(防日志膨胀)
+# containerd-snapshotter=false：docker 29.x 默认启用 containerd snapshotter 存储驱动，
+# 但它在 WSL2 上不稳定——dockerd healthcheck 反复 "only one connection allowed" →
+# 致命失败 → daemon 每约 1 分钟崩溃重启 → 容器全丢 → 前端时通时断。
+# 强制回退到稳定的 overlay2，避免崩溃循环。
 mkdir -p /etc/docker
 tee "$DAEMON_JSON" > /dev/null << 'EOF'
 {
   "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2375"],
+  "features": {
+    "containerd-snapshotter": false
+  },
   "registry-mirrors": [
     "https://docker.m.daocloud.io",
     "https://mirror.ccs.tencentyun.com"

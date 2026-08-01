@@ -48,9 +48,9 @@ def _apply_sampling(
     Returns 新列表，原 messages 不变。
     """
     if interval <= 0:
-        return [_empty_rc(m) if _has_tool_calls(m) else m for m in messages]
+        return [_empty_rc(m) if _has_tool_calls(m) else _ensure_rc(m) for m in messages]
     if interval == 1:
-        return list(messages)
+        return [_ensure_rc(m) for m in messages]
 
     result: list[dict[str, Any]] = []
     tc_count = 0
@@ -60,7 +60,7 @@ def _apply_sampling(
             if tc_count % interval != 1:
                 result.append(_empty_rc(m))
                 continue
-        result.append(m)
+        result.append(_ensure_rc(m))
     return result
 
 
@@ -68,6 +68,23 @@ def _has_tool_calls(msg: dict[str, Any]) -> bool:
     return msg.get("role") == "assistant" and msg.get("tool_calls")
 
 
+def _ensure_rc(msg: dict[str, Any]) -> dict[str, Any]:
+    """确保 assistant 消息带 reasoning_content 键（缺失补空串）。
+
+    DeepSeek thinking 模式强制要求 messages 中的 assistant 消息必须回传
+    reasoning_content（内容可为空串）。历史恢复/压缩重建的消息可能缺失
+    该键，直接透传会 400（"The `reasoning_content` in the thinking mode
+    must be passed back to the API"）。
+    """
+    if msg.get("role") != "assistant" or "reasoning_content" in msg:
+        return msg
+    new = dict(msg)
+    new["reasoning_content"] = ""
+    return new
+
+
 def _empty_rc(msg: dict[str, Any]) -> dict[str, Any]:
-    """构造新 dict，reasoning_content 清空但保留字段。"""
-    return {k: "" if k == "reasoning_content" else v for k, v in msg.items()}
+    """构造新 dict，reasoning_content 清空（缺失补键，字段必须存在）。"""
+    new = dict(msg)
+    new["reasoning_content"] = ""
+    return new

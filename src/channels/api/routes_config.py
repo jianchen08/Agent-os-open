@@ -287,8 +287,17 @@ def save_defaults(body: LlmDefaultsUpdateRequest) -> dict[str, Any]:
 
 @router.post("/llm/models", summary="添加模型")
 def add_model(body: ModelAddRequest) -> dict[str, Any]:
+    """添加模型。
+
+    Raises:
+        HTTPException 409: model_id 已存在（避免静默覆盖既有配置）
+    """
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
+    # 写入前逐个检测：已存在的 model_id 视为冲突，避免静默覆盖既有配置。
+    for model_id in body.models:
+        if model_id in models:
+            raise HTTPException(status_code=409, detail=f"模型 '{model_id}' 已存在")
     for model_id, model_conf in body.models.items():
         models[model_id] = model_conf
     _write_yaml(_LLM_YAML, data)

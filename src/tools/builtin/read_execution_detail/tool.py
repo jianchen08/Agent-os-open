@@ -32,7 +32,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="read_execution_detail",
-            description="查看管道执行的详细记录（渐进式披露）。先看骨架了解全局，再看L1了解语义，最后看L0了解细节。",
+            description="查看管道执行的详细记录。先看骨架了解全局，再看L1了解语义，最后看L0了解细节。",
             input_schema={
                 "type": "object",
                 "properties": {

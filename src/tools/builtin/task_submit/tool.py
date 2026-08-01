@@ -207,54 +207,42 @@ class TaskSubmitTool(BuiltinTool):
                         "type": "string",
                         "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索",
                     },
-                    "goal": {
-                        "type": "object",
-                        "description": "任务目标（必填）",
-                        "properties": {
-                            "title": {
-                                "type": "string",
-                                "description": "任务标题（必填），简短明确",
-                            },
-                            "description": {
-                                "type": "string",
-                                "maxLength": 2000,
-                                "description": (
-                                    "任务描述（上限2000字符）。只写目标和背景，"
-                                    "禁止写执行步骤、工具选择、流程顺序。"
-                                    "引用文件只写路径（如 docs/report.md），"
-                                    "禁止复制文件内容进来，让下级 Agent 用 file_read 自行读取。"
-                                    "正确：'实现用户登录API，参考 docs/auth_spec.md'"
-                                    "错误：'先用file_write创建login.py，再...'"
-                                ),
-                            },
-                        },
-                        "required": ["title"],
+                    "goal_title": {
+                        "type": "string",
+                        "description": "任务标题（必填），简短明确",
+                    },
+                    "goal_description": {
+                        "type": "string",
+                        "maxLength": 2000,
+                        "description": (
+                            "任务描述（上限 2000 字符）。只写目标和背景，"
+                            "禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），"
+                            "让下级 Agent 自行读取，不要复制文件内容。"
+                        ),
                     },
                     "acceptance_criteria": {
                         "type": "object",
                         "description": (
-                            "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。"
-                            "评估指标 ID 必须从下列内置指标中选取，按验证强度递增："
-                            "\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）"
-                            "\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）"
-                            "\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）"
-                            "\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）"
-                            "\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，"
-                            "不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。"
-                            "指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。"
+                            "验收标准字典（可选但推荐）。key 为评估指标 ID（必须从下列内置指标中精确选取，"
+                            "按强度递增，禁止自创）：\n"
+                            "- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）\n"
+                            "- bash_check：命令检查（工具自动，按退出码判定）\n"
+                            "- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）\n"
+                            "- human_review：人工审核（人类执行，验证需人工审批/复核的主观或不可逆判断）\n"
+                            "注意：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，"
+                            "semantic_check 是 agent 自动语义判断，不涉及人类，不可替代。"
                         ),
                         "additionalProperties": {
                             "type": "object",
-                            "description": "评估指标配置对象",
                             "properties": {
                                 "input_params": {
                                     "type": "object",
                                     "description": (
-                                        "传递给评估工具的参数。不同指标所需参数不同："
-                                        'file_check 需要 {"path": "src/main.py"}；'
-                                        'bash_check 需要 {"command": "pytest tests/"}；'
-                                        'semantic_check 需要 {"criteria": "评估要求描述"}；'
-                                        'human_review 需要 {"title": "审核标题", "mode": "choice"}。'
+                                        "传给评估工具的参数："
+                                        'file_check {"path":"src/main.py"}；'
+                                        'bash_check {"command":"pytest tests/"}；'
+                                        'semantic_check {"criteria":"评估要求描述"}；'
+                                        'human_review {"title":"审核标题","mode":"choice"}。'
                                     ),
                                 },
                                 "expected_output": {
@@ -265,10 +253,9 @@ class TaskSubmitTool(BuiltinTool):
                                     "type": "number",
                                     "minimum": 0,
                                     "maximum": 100,
-                                    "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值",
+                                    "description": "任务级别通过阈值（0-100），优先级高于指标默认阈值",
                                 },
                             },
-                            "required": [],
                         },
                     },
                     "priority": {
@@ -289,10 +276,8 @@ class TaskSubmitTool(BuiltinTool):
                         "enum": ["non_container", "container"],
                         "default": "non_container",
                         "description": (
-                            "任务范围：non_container（非容器任务，实际执行的任务，"
-                            "必须指定 target_type 和 target_id）。"
-                            "container 仅限 L1 Agent 使用（用于组织复杂长期任务的子任务链），"
-                            "L2 Agent 禁止使用 container"
+                            "任务范围。non_container=实际执行的任务（需指定 target_type/target_id）；"
+                            "container=仅 L1 可用（用于组织复杂长期任务的子任务链），L2 禁止使用。"
                         ),
                     },
                     "parent_task_id": {
@@ -302,15 +287,10 @@ class TaskSubmitTool(BuiltinTool):
                     "workspace": {
                         "type": "string",
                         "description": (
-                            "目标项目路径。指定任务需要操作（读取或修改）的项目目录，"
-                            "系统会在工作空间中基于该目录创建隔离的 worktree 副本进行操作。"
-                            "**重要**：当任务需要对某个特定文件夹进行读取或修改时，"
-                            "必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。"
-                            "容器任务：传入目标项目目录时，系统会复制到隔离空间中操作；"
-                            "不设置则创建空的工作空间。"
-                            "非容器任务（子任务）：不设置时系统自动基于父容器空间创建 worktree；"
-                            "传入目标项目路径时基于该项目创建 worktree。"
-                            "如需直接在目标项目目录工作（不隔离），设置 isolation_level 为 non_isolated。"
+                            "目标项目路径。任务需要读取或修改某个目录时必须设置，系统会基于该目录创建隔离 worktree 副本。"
+                            "容器任务：传入则复制到隔离空间操作，不传则创建空工作空间。"
+                            "子任务：不传则自动基于父容器空间创建 worktree。"
+                            "需直接在原目录工作（不隔离）时配合 isolation_level=non_isolated。"
                         ),
                     },
                     "isolation_level": {
@@ -322,61 +302,33 @@ class TaskSubmitTool(BuiltinTool):
                             "isolated：隔离，在隔离的工作空间中工作，不影响原项目。"
                         ),
                     },
-                    "inherit": {
-                        "type": "object",
+                    "inherit_from": {
+                        "type": "string",
+                        "description": "源任务 ID（被继承的任务）。设置后需同时指定 inherit_mode",
+                    },
+                    "inherit_mode": {
                         "description": (
-                            "资源继承配置：从指定源任务继承资源，新任务在源任务的成果上继续工作。"
-                            "不传此参数 = 创建全新任务（默认行为）。\n"
-                            '继承内容由 mode 决定，mode 可传单个字符串（如 "pipe"），'
-                            '也可传列表（如 ["pipe", "workspace"]）同时继承管道和工作空间。\n'
-                            "如何选择 mode（什么时候用哪种继承）：\n"
-                            "- 不需要任何继承 → 不传 inherit。\n"
-                            '- 只想接着对话（改了目标/验收标准，但上下文还要用）→ mode="pipe"。'
-                            "继承源任务的对话管道（消息历史），新任务从上次对话上下文继续，但不复用工作空间。\n"
-                            '- 只想复用文件（换了实现方案，但已产出的代码/文档要留着）→ mode="workspace"。'
-                            "继承源任务的工作空间（文件目录），新任务能看到并继续修改已有文件，但对话历史清空。\n"
-                            '- 既想接着对话、又想复用文件（最常见的延续场景）→ mode=["pipe", "workspace"]。'
-                            "同时继承对话历史和工作空间，新任务等同于在源任务现场继续。\n"
-                            "from 指定源任务 ID。"
+                            "继承模式（需配合 inherit_from 使用）：\n"
+                            '- "pipe"：继承对话管道（消息历史），适合改了目标但保留上下文\n'
+                            '- "workspace"：继承工作空间（文件目录），适合换方案但保留文件\n'
+                            '- ["pipe","workspace"]：同时继承对话与文件（最常见延续场景）'
                         ),
-                        "properties": {
-                            "from": {
+                        "oneOf": [
+                            {
                                 "type": "string",
-                                "description": "源任务 ID（被继承的任务）",
+                                "enum": ["pipe", "workspace"],
                             },
-                            "mode": {
-                                "description": (
-                                    '继承模式：传 "pipe" 或 "workspace" 继承单一资源；'
-                                    '传 ["pipe", "workspace"] 同时继承对话管道和工作空间。'
-                                ),
-                                "oneOf": [
-                                    {
-                                        "type": "string",
-                                        "enum": ["pipe", "workspace"],
-                                        "description": (
-                                            "单值继承："
-                                            "pipe = 继承对话管道（消息历史），适合改了目标但保留上下文；"
-                                            "workspace = 继承工作空间（文件目录），适合换方案但保留文件。"
-                                        ),
-                                    },
-                                    {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string",
-                                            "enum": ["pipe", "workspace"],
-                                        },
-                                        "description": (
-                                            "多值继承：同时继承多种资源，"
-                                            '如 ["pipe", "workspace"] 既继承对话历史又继承文件。'
-                                        ),
-                                    },
-                                ],
+                            {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["pipe", "workspace"],
+                                },
                             },
-                        },
-                        "required": ["from", "mode"],
+                        ],
                     },
                 },
-                "required": ["goal"],
+                "required": ["goal_title"],
                 "allOf": [
                     {
                         "if": {
@@ -442,8 +394,16 @@ class TaskSubmitTool(BuiltinTool):
 
         _t0 = _time.monotonic()
         task_scope = inputs.get("task_scope", "non_container")
+        # ── goal 字段解析（schema 已平铺为 goal_title/goal_description） ──
+        # 优先读扁平字段；同时兼容旧的 goal 对象（历史调用方/未刷新 schema 的 LLM）。
         goal = inputs.get("goal")
-        if isinstance(goal, str):
+        if goal is None and (inputs.get("goal_title") is not None):
+            # 平铺后的标准入口：把扁平字段重组为下游统一使用的 {title, description}
+            goal = {
+                "title": inputs.get("goal_title"),
+                "description": inputs.get("goal_description", ""),
+            }
+        elif isinstance(goal, str):
             import json  # noqa: PLC0415
 
             try:
@@ -670,7 +630,17 @@ class TaskSubmitTool(BuiltinTool):
         # ["pipe", "workspace"]）同时继承对话管道和工作空间；两种模式相互独立，
         # 可任意组合。
         # 当 inherit 和 inherit_workspace_from 同时存在时，inherit 优先。
+        # schema 已平铺为 inherit_from/inherit_mode，这里把扁平字段重组为 inherit 对象，
+        # 供 _build_metadata 及管道引擎按既有契约读取（旧式 inherit 对象仍兼容）。
         _inherit_config = inputs.get("inherit")
+        if not isinstance(_inherit_config, dict) and (
+            inputs.get("inherit_from") is not None or inputs.get("inherit_mode") is not None
+        ):
+            _inherit_config = {
+                "from": inputs.get("inherit_from", ""),
+                "mode": inputs.get("inherit_mode", ""),
+            }
+            inputs["inherit"] = _inherit_config
         if _inherit_config and isinstance(_inherit_config, dict):
             _inherit_from_id = _inherit_config.get("from", "")
             _inherit_mode = _inherit_config.get("mode", "")
@@ -1142,16 +1112,11 @@ class TaskSubmitTool(BuiltinTool):
             "[TaskSubmit] PERF | ws_broadcast=%.1fms | total=%.1fms", (_t_ws - _t_submit) * 1000, (_t_ws - _t0) * 1000
         )
 
-        result_data = {
+        result_data: dict[str, Any] = {
             "task_id": task.id,
             "title": task.title,
-            "description": description,
             "status": task.status.value,
-            "target_type": target_type,
             "target_id": target_id,
-            "submit_status": "submitted",
-            "workspace": workspace or "",
-            "resolved_workspace": (task.metadata or {}).get("ws_meta", {}).get("path", ""),
             "message": (
                 f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
                 "该任务需要一定时间完成。"
@@ -1159,6 +1124,11 @@ class TaskSubmitTool(BuiltinTool):
                 "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
             ),
         }
+
+        # 工作空间路径仅对 L1 返回（L2/L3 的 workspace 参数本身被隐藏，回显内部路径属信息泄漏）
+        if parent_agent_level == 1:
+            result_data["workspace"] = workspace or ""
+            result_data["resolved_workspace"] = (task.metadata or {}).get("ws_meta", {}).get("path", "")
 
         return create_success_result(
             data=result_data,
@@ -1170,7 +1140,13 @@ class TaskSubmitTool(BuiltinTool):
 
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """处理容器任务提交。"""
+        # goal 解析逻辑同 execute()：优先扁平字段，兼容旧式 goal 对象
         goal = inputs.get("goal")
+        if goal is None and inputs.get("goal_title") is not None:
+            goal = {
+                "title": inputs.get("goal_title"),
+                "description": inputs.get("goal_description", ""),
+            }
         parent_agent_level = inputs.get("parent_agent_level")
 
         # ── 目标空间安全检查 ──
@@ -1342,7 +1318,6 @@ class TaskSubmitTool(BuiltinTool):
             "title": task.title,
             "status": task.status.value,
             "task_scope": "container",
-            "submit_status": "submitted",
             "workspace": inputs.get("workspace") or "",
             "resolved_workspace": container_workspace_path,
         }
@@ -1515,7 +1490,15 @@ class TaskSubmitTool(BuiltinTool):
             metadata["user_id"] = inputs["user_id"]
 
         # 存储 inherit 资源继承配置（供管道引擎读取）
+        # schema 已平铺：兼容扁平的 inherit_from/inherit_mode 与旧式 inherit 对象
         inherit_config = inputs.get("inherit")
+        if not isinstance(inherit_config, dict) and (
+            inputs.get("inherit_from") is not None or inputs.get("inherit_mode") is not None
+        ):
+            inherit_config = {
+                "from": inputs.get("inherit_from", ""),
+                "mode": inputs.get("inherit_mode", ""),
+            }
         if isinstance(inherit_config, dict) and inherit_config.get("from"):
             metadata["inherit"] = inherit_config
             # mode 可能是 "pipe" 字符串，也可能是包含 "pipe" 的列表

@@ -53,16 +53,26 @@ class ErrorInfo:
 # 注意：智谱的"每周/每月使用上限"会被 litellm 包装成 RateLimitError(429)，
 # 必须在这里识别出来，否则只冷却 5s 后又选回同一个 key，永远轮不到备用 key。
 # 收紧：不收录 "limit" 这种宽泛词（group requests-per-minute limit 也含 limit，
-# 但那是 RPM 限流不是配额）。只收明确表示"耗尽/上限/余额"的词。
+# 但那是 RPM 限流不是配额）。同样不收录裸词 "insufficient"/"不足"——400 参数
+# 校验错误常含它们（如 DeepSeek 的 "insufficient tool messages following tool_calls"），
+# 误判成 QUOTA_EXHAUSTED 会把 key 冷却 3600s，直接打挂整个 provider。
+# 只收明确表示"耗尽/上限/余额"的词。
 _QUOTA_KEYWORDS = (
-    "insufficient",
+    "insufficient_quota",
+    "insufficient balance",
+    "insufficient funds",
+    "insufficient credits",
+    "insufficient quota",
     "balance",
     "quota",
     "额度",
     "上限",
     "用完",
     "余额",
-    "不足",
+    "余额不足",
+    "额度不足",
+    "配额不足",
+    "积分不足",
     "使用上限",
     "每周",
     "每月",

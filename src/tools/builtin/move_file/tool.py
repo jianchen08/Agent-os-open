@@ -201,7 +201,6 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
                 data={
                     "source": display_source,
                     "destination": display_dest,
-                    "moved": True,
                     "type": "directory" if source.is_dir() else "file",
                 },
                 metadata={"action": "move_file"},

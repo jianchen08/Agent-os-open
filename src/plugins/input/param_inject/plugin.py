@@ -15,6 +15,54 @@ from pipeline.types import ErrorPolicy, StateKeys
 logger = logging.getLogger(__name__)
 
 
+def classify_args_parse_failure(raw: str) -> str:
+    """对 json.loads 失败的原始串做诚实分类，避免一律归因为 max_tokens 截断。
+
+    返回稳定标识符，供日志/诊断使用：
+    - ``empty``: 空串或纯空白
+    - ``markdown_wrapped``: 被 markdown 代码块（```...```）包裹
+    - ``leading_noise``: 前导非 JSON 文本（不以 ``{`` 开头，且非 markdown）
+    - ``truncated``: 结构性截断——出现 ``{`` 但无匹配的 ``}``（末尾残缺）
+    - ``malformed``: 其它语法错误（如未转义字符、尾逗号等结构完整但非法）
+
+    背景：原日志固定打印「疑似输出被 max_tokens 截断」，但生产误报案例中
+    arguments 仅 283 字符，根本不可能触达 max_tokens。真实原因多为 markdown
+    包裹或前导自然语言，应如实标注。
+    """
+    if not raw or not raw.strip():
+        return "empty"
+
+    s = raw.strip()
+    if s.startswith("```"):
+        return "markdown_wrapped"
+    if not s.startswith("{"):
+        return "leading_noise"
+
+    # 判定结构性截断：花括号不配对（{ 比 } 多，且字符串外未闭合）。
+    # 用与 repair_json_string 一致的字符串状态机，避免被字符串内的括号误导。
+    depth = 0
+    in_string = False
+    escape_next = False
+    for c in s:
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\":
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+    # depth > 0 → 有未闭合的 { → 末尾残缺
+    return "truncated" if depth > 0 else "malformed"
+
+
 def _resolve_project_root() -> Path | None:
     """推导 Agent OS 项目根目录。"""
     if _resolve_project_root._cached is not None:
@@ -82,14 +130,18 @@ class ParamInjectPlugin(IInputPlugin):
                     raw_args = json.loads(raw_args)
                 except (json.JSONDecodeError, TypeError):
                     tool_name = injected_tc.get("name", "?")
+                    # 诚实分类失败原因：不再一律归因为 max_tokens 截断。
+                    # 生产误报：283 字符的 arguments 也曾被标「疑似截断」。
+                    reason = classify_args_parse_failure(raw_args)
                     logger.warning(
-                        "[%s] 工具 %s 的 arguments JSON 解析失败（疑似输出被 max_tokens 截断），长度=%d，前200字符: %s",
+                        "[%s] 工具 %s 的 arguments JSON 解析失败 | reason=%s | 长度=%d | 前200字符: %s",
                         self.name,
                         tool_name,
+                        reason,
                         len(raw_args),
                         raw_args[:200],
                     )
-                    # 截断修复：用 repair_json_string 尽量保住完整字段（含半截 content），
+                    # 兜底修复：用 repair_json_string 尽量保住完整字段（含半截 content），
                     # 避免直接 raw_args={} 把半截内容全部丢失，导致下游验证器/tool_core
                     # 拿不到任何内容，只能返回模糊的 "不支持的操作: None"。
                     from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
@@ -102,13 +154,17 @@ class ParamInjectPlugin(IInputPlugin):
                             raw_args = json.loads(repaired)
                         except (json.JSONDecodeError, TypeError):
                             raw_args = {}
-                        # 打结构性截断标记：不依赖代理返回 finish_reason，
-                        # 供 tool_schema_validator 识别并提示「文件太大请分块」
-                        injected_tc["_args_truncated"] = True
+                        # 仅当真实分类为截断时才打结构性截断标记，
+                        # 供 tool_schema_validator 识别并提示「文件太大请分块」。
+                        # 其它原因（markdown 包裹/前导噪声）修复成功不算截断，
+                        # 无差别打标会误导下游给出错误的「请分块」提示。
+                        if reason == "truncated":
+                            injected_tc["_args_truncated"] = True
                         logger.info(
-                            "[%s] 工具 %s 截断修复成功，已保住可用字段 %s",
+                            "[%s] 工具 %s arguments 兜底修复成功 | reason=%s | 已保住可用字段 %s",
                             self.name,
                             tool_name,
+                            reason,
                             list(raw_args.keys()) if isinstance(raw_args, dict) else [],
                         )
                     else:
