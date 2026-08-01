@@ -47,6 +47,7 @@ fi
 # 从 plugin.json 提取 (method, path) 对。Python 解析 JSON 最稳。
 ENDPOINTS=()
 while IFS= read -r line; do
+    line="${line%$'\r'}"  # 去 Windows 回车符（Python print 在 Windows 输出 \r\n）
     [[ -n "$line" ]] && ENDPOINTS+=("$line")
 done < <(
     python -c "
@@ -109,14 +110,14 @@ check() {
     # 不用 `|| echo 000`（会叠加成 000\n000）。取首行作 code，连接失败=000。
     case "$method" in
         GET|DELETE)
-            code=$(curl -s -o /tmp/_ext_resp.json -w '%{http_code}' -X "$method" "$url" 2>/dev/null)
+            code=$(curl -s --max-time 15 -o /tmp/_ext_resp.json -w '%{http_code}' -X "$method" "$url" 2>/dev/null)
             ;;
         POST|PUT|PATCH)
-            code=$(curl -s -o /tmp/_ext_resp.json -w '%{http_code}' -X "$method" \
+            code=$(curl -s --max-time 15 -o /tmp/_ext_resp.json -w '%{http_code}' -X "$method" \
                 "$url" -H 'Content-Type: application/json' --data '{}' 2>/dev/null)
             ;;
         *)
-            code=$(curl -s -o /tmp/_ext_resp.json -w '%{http_code}' -X "$method" "$url" 2>/dev/null)
+            code=$(curl -s --max-time 15 -o /tmp/_ext_resp.json -w '%{http_code}' -X "$method" "$url" 2>/dev/null)
             ;;
     esac
     local body; body=$(head -c 120 /tmp/_ext_resp.json 2>/dev/null)

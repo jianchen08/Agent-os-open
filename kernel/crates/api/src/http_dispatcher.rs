@@ -212,9 +212,9 @@ fn manifest_path_to_axum(manifest_path: &str) -> String {
             if seg.starts_with('{') && seg.ends_with('}') {
                 let inner = &seg[1..seg.len() - 1]; // 去掉 { }
                 if let Some(name) = inner.strip_suffix(":path") {
-                    format!("*{name}")
+                    format!("{{*{name}}}")  // axum 0.8 多段通配语法 {*name}
                 } else {
-                    format!(":{inner}")
+                    format!("{{{inner}}}")  // axum 0.8 单段捕获语法 {name}
                 }
             } else {
                 seg.to_string()
@@ -376,23 +376,23 @@ mod tests {
 
     #[test]
     fn test_manifest_path_to_axum_single_param() {
-        // {model_id} → :model_id（axum 0.8 单段捕获）
+        // {model_id} → {model_id}（axum 0.8 单段捕获，同名语法）
         assert_eq!(
             manifest_path_to_axum("/ext/p/models/{model_id}"),
-            "/ext/p/models/:model_id"
+            "/ext/p/models/{model_id}"
         );
         assert_eq!(
             manifest_path_to_axum("/ext/p/providers/{provider_id}"),
-            "/ext/p/providers/:provider_id"
+            "/ext/p/providers/{provider_id}"
         );
     }
 
     #[test]
     fn test_manifest_path_to_axum_catchall_param() {
-        // {config_path:path} → *config_path（axum 0.8 多段通配）
+        // {config_path:path} → {*config_path}（axum 0.8 多段通配语法）
         assert_eq!(
             manifest_path_to_axum("/ext/p/generic/{config_path:path}"),
-            "/ext/p/generic/*config_path"
+            "/ext/p/generic/{*config_path}"
         );
     }
 }

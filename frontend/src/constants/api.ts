@@ -275,7 +275,7 @@ export const API_ENDPOINTS = {
     /** 检查模型是否支持思考模式 */
     CHECK_SUPPORT: (modelName: string) => `/ext/channel_api/thinking-mode/check/${modelName}`,
     /** 思考模式服务健康检查 */
-    HEALTH: '/ext/channel_api/thinking-mode/health',
+    HEALTH: '/ext/channel_api/thinking-mode/healthz',
   },
   /** 成本控制相关 - 走插件 http_endpoints /ext/cost_control/**（已从内核 compat_routes 迁出） */
   COST_CONTROL: {

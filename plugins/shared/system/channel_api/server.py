@@ -295,7 +295,7 @@ def _handle_thinking_mode_domain(path: str, method: str, raw_body: str, query: d
     sub = path[len(prefix):]  # 形如 "/models" 或 "/models/gpt-4"
 
     try:
-        if sub == "/health" and method == "GET":
+        if sub == "/healthz" and method == "GET":
             return _ok(_json_response(rtm.health()))
         if sub == "/models" and method == "GET":
             return _ok(_json_response(rtm.list_models()))
