@@ -123,10 +123,18 @@ check() {
     local body; body=$(head -c 120 /tmp/_ext_resp.json 2>/dev/null)
 
     if [[ "$code" == "404" ]]; then
-        printf "  ${RED}✗${RESET} [%s] %s %s  -> 路由未注册（404）\n" "$code" "$method" "$tpath"
-        printf "      响应: %s\n" "$body"
-        FAIL=$((FAIL+1))
-        FAILED_CASES+=("$method $tpath -> $code (404 路由未注册)")
+        # 区分 dispatcher 404（路由未注册，body="route not found"）vs 业务 404
+        # （路由匹配成功但数据不存在，body 含 JSON detail）。
+        # 带 path-param 的端点用 probe 值请求，业务 404 是正常的（数据不存在）。
+        if echo "$body" | grep -q '"detail"'; then
+            printf "  ${GREEN}✓${RESET} [%s] %s %s  (业务 404：路由匹配成功，probe 数据不存在)\n" "$code" "$method" "$tpath"
+            PASS=$((PASS+1))
+        else
+            printf "  ${RED}✗${RESET} [%s] %s %s  -> 路由未注册（404）\n" "$code" "$method" "$tpath"
+            printf "      响应: %s\n" "$body"
+            FAIL=$((FAIL+1))
+            FAILED_CASES+=("$method $tpath -> $code (404 路由未注册)")
+        fi
     elif [[ "$code" == "000" ]]; then
         printf "  ${RED}✗${RESET} [000] %s %s  -> 连接失败（内核 :9100 未起？）\n" "$method" "$tpath"
         FAIL=$((FAIL+1))

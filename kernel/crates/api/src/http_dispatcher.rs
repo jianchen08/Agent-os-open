@@ -184,20 +184,91 @@ pub fn build_router_with_http_routes(
     let dispatcher = Arc::new(HttpDispatcher::new(registry.clone(), handler));
     let routes = registry.list_http_routes();
 
-    let mut router = static_router;
-    for route in routes {
-        let dispatcher = dispatcher.clone();
-        let path = route.endpoint.path.clone();
-        let method = route.endpoint.method.clone();
-        // manifest 用 {param}/{param:path} 约定（对齐 FastAPI/OpenAPI）；
-        // axum 0.8 路径参数语法是 :param（单段）与 *param（多段通配）。注册前转换。
-        let axum_path = manifest_path_to_axum(&path);
-        // build_dynamic_route_handler 内部按 method 选 axum 方法路由（get/post/...），
-        // 返回 MethodRouter 后直接挂到 axum_path（axum .route 接受 MethodRouter）。
-        let method_handler = build_dynamic_route_handler(dispatcher, path.clone(), method.clone());
-        router = router.route(&axum_path, method_handler);
+    // 按 plugin_id 分组，收集每个插件的命名空间前缀。
+    // axum 0.8 的 .route() 不允许同前缀下混合静态段和动态段（如 /tasks 和 /tasks/{id}），
+    // 故改为每插件注册一条通配路由 /ext/{plugin_id}/{*rest}，由 find_http_route 做模板匹配。
+    let mut plugin_prefixes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for route in &routes {
+        // path 形如 /ext/{plugin_id}/...，取前两段作命名空间
+        let segs: Vec<&str> = route.endpoint.path.split('/').collect();
+        if segs.len() >= 3 {
+            // segs = ["", "ext", "{plugin_id}", ...]
+            plugin_prefixes.insert(format!("/{}", segs[1])); // /ext
+        }
     }
+
+    let mut router = static_router;
+    // 注册一条 /ext/{*rest} 通配路由，所有 /ext/** 请求统一进 dispatcher。
+    // dispatcher 内部 find_http_route 用模板匹配（支持 {param}/{param:path}）找到对应路由。
+    let wildcard_handler = build_wildcard_handler(dispatcher);
+    router = router.route("/ext/{*rest}", wildcard_handler);
     router
+}
+
+/// 构造 /ext/{*rest} 的 axum handler：捕获真实 URI → find_http_route 模板匹配 → dispatch。
+fn build_wildcard_handler(
+    dispatcher: Arc<HttpDispatcher>,
+) -> axum::routing::MethodRouter<crate::routes::AppState> {
+    use axum::body::Body;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+    use axum::response::IntoResponse;
+
+    // axum::routing::any 注册——任何 method 都走同一 handler，由 dispatch_http 内部按
+    // find_http_route(path, method) 模板匹配找到对应路由。
+    let handler = move |method: Method,
+                         uri: axum::http::Uri,
+                         headers: HeaderMap,
+                         query: axum::extract::Query<HashMap<String, String>>,
+                         body: axum::body::Bytes| {
+        let dispatcher = dispatcher.clone();
+        async move {
+            let path = uri.path().to_string();
+            let method_str = method.as_str().to_string();
+            let headers_map = header_map_to_hashmap(&headers);
+            let raw_body = body.to_vec();
+            let outcome =
+                dispatch_http(&dispatcher, &path, &method_str, raw_body, headers_map, query.0).await;
+            match outcome {
+                DispatchOutcome::Handled(resp) => {
+                    let mut builder = axum::response::Response::builder().status(
+                        StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK),
+                    );
+                    for (k, v) in &resp.headers {
+                        if let (Ok(name), Ok(val)) =
+                            (HeaderName::try_from(k), HeaderValue::try_from(v))
+                        {
+                            builder = builder.header(name, val);
+                        }
+                    }
+                    let body_bytes = if resp.body.is_empty() {
+                        Vec::new()
+                    } else {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&resp.body)
+                            .unwrap_or_default()
+                    };
+                    builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
+                            .into_response()
+                    })
+                }
+                DispatchOutcome::NotFound => {
+                    (StatusCode::NOT_FOUND, "route not found").into_response()
+                }
+                DispatchOutcome::Timeout => {
+                    (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
+                }
+                DispatchOutcome::ConcurrencyLimited => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
+                }
+                DispatchOutcome::HandlerError(msg) => {
+                    (StatusCode::BAD_GATEWAY, msg).into_response()
+                }
+            }
+        }
+    };
+
+    axum::routing::any(handler)
 }
 
 /// 把 manifest 路径约定（{param}/{param:path}）转成 axum 0.8 路径参数语法（:param/*param）。
