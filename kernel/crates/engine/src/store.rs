@@ -284,9 +284,9 @@ impl SqliteStore {
     /// `before_sequence`/`after_sequence` 游标分页。替代旧的"每轮 run_id 重置 0/1"。
     /// 对齐 0.1 ExecutionRecordData.sequence（管道内连续）。
     ///
-    /// tenant_id 从 task_local [`agentos_tenant`] 取，无则回退 'default'。
-    pub fn next_sequence(&self, pipeline_id: &str) -> Result<u32, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+    /// tenant_id 由调用方显式传入（async trait 层在 spawn_blocking 前从 task_local
+    /// 解析——tokio::task_local 不跨 spawn_blocking，若在此处读会恒为 'default'）。
+    pub fn next_sequence(&self, pipeline_id: &str, tenant_id: &str) -> Result<u32, StorageError> {
         let conn = self.conn.lock();
         let max_seq: i64 = conn
             .query_row(
@@ -300,7 +300,8 @@ impl SqliteStore {
 
     /// 追加消息到 messages 表。
     ///
-    /// tenant_id 从 task_local [`agentos_tenant`] 取，无则回退 'default'。
+    /// tenant_id 由调用方显式传入（async trait 层在 spawn_blocking 前从 task_local
+    /// 解析——tokio::task_local 不跨 spawn_blocking，若在此处读会恒为 'default'）。
     /// pipeline_id：消息所属管道（消息层查询主键），从 state 读，可为空（兼容旧调用）。
     #[allow(clippy::too_many_arguments)]
     pub fn append_message(
@@ -313,8 +314,8 @@ impl SqliteStore {
         blob_id: Option<&str>,
         content_preview: Option<&str>,
         pipeline_id: Option<&str>,
+        tenant_id: &str,
     ) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -1223,7 +1224,9 @@ impl StorageBackend for SqliteStore {
     async fn next_sequence(&self, pipeline_id: &str) -> Result<u32, StorageError> {
         let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
-        tokio::task::spawn_blocking(move || this.next_sequence(&pipeline_id))
+        // task_local 不跨 spawn_blocking：必须在 blocking 前解析 tenant_id 传入。
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        tokio::task::spawn_blocking(move || this.next_sequence(&pipeline_id, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
@@ -1441,6 +1444,8 @@ impl StorageBackend for SqliteStore {
         let blob_id = blob_id.map(String::from);
         let content_preview = content_preview.map(String::from);
         let pipeline_id = pipeline_id.map(String::from);
+        // task_local 不跨 spawn_blocking：必须在 blocking 前解析 tenant_id 传入。
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         tokio::task::spawn_blocking(move || {
             this.append_message(
                 &message_id,
@@ -1451,6 +1456,7 @@ impl StorageBackend for SqliteStore {
                 blob_id.as_deref(),
                 content_preview.as_deref(),
                 pipeline_id.as_deref(),
+                &tenant_id,
             )
         })
         .await
@@ -1787,7 +1793,7 @@ mod tests {
         let store = SqliteStore::open_memory().unwrap();
         store.create_run("run_4", "hash", "default").unwrap();
         store
-            .append_message("msg_1", "run_4", "main", 0, "user", None, Some("Hello"), None)
+            .append_message("msg_1", "run_4", "main", 0, "user", None, Some("Hello"), None, "default")
             .unwrap();
 
         let msgs = store.get_messages("run_4", "main").await.unwrap();
@@ -1805,25 +1811,25 @@ mod tests {
 
         // 第一轮（run_A）：user 消息
         store.create_run("run_A", "hash", "default").unwrap();
-        let seq1 = store.next_sequence(pid).unwrap();
+        let seq1 = store.next_sequence(pid, "default").unwrap();
         assert_eq!(seq1, 1, "空管道首条 seq 应为 1");
         store
-            .append_message("m1", "run_A", "main", seq1, "user", None, Some("hi"), Some(pid))
+            .append_message("m1", "run_A", "main", seq1, "user", None, Some("hi"), Some(pid), "default")
             .unwrap();
 
         // 同轮（run_A）：assistant 消息
-        let seq2 = store.next_sequence(pid).unwrap();
+        let seq2 = store.next_sequence(pid, "default").unwrap();
         assert_eq!(seq2, 2);
         store
-            .append_message("m2", "run_A", "main", seq2, "assistant", None, Some("hello"), Some(pid))
+            .append_message("m2", "run_A", "main", seq2, "assistant", None, Some("hello"), Some(pid), "default")
             .unwrap();
 
         // 第二轮（新 run_B）：sequence 必须跨 run 连续，不重置为 0
         store.create_run("run_B", "hash", "default").unwrap();
-        let seq3 = store.next_sequence(pid).unwrap();
+        let seq3 = store.next_sequence(pid, "default").unwrap();
         assert_eq!(seq3, 3, "跨 run_id sequence 必须连续递增");
         store
-            .append_message("m3", "run_B", "main", seq3, "user", None, Some("again"), Some(pid))
+            .append_message("m3", "run_B", "main", seq3, "user", None, Some("again"), Some(pid), "default")
             .unwrap();
     }
 
@@ -1836,12 +1842,12 @@ mod tests {
 
         // 管道 A：2 条
         store.create_run("rA", "h", "default").unwrap();
-        store.append_message("a1", "rA", "main", 1, "user", None, Some("a-u"), Some("pipeA")).unwrap();
-        store.append_message("a2", "rA", "main", 2, "assistant", None, Some("a-ai"), Some("pipeA")).unwrap();
+        store.append_message("a1", "rA", "main", 1, "user", None, Some("a-u"), Some("pipeA"), "default").unwrap();
+        store.append_message("a2", "rA", "main", 2, "assistant", None, Some("a-ai"), Some("pipeA"), "default").unwrap();
         // 管道 B：2 条（不同 pipeline_id）
         store.create_run("rB", "h", "default").unwrap();
-        store.append_message("b1", "rB", "main", 1, "user", None, Some("b-u"), Some("pipeB")).unwrap();
-        store.append_message("b2", "rB", "main", 2, "assistant", None, Some("b-ai"), Some("pipeB")).unwrap();
+        store.append_message("b1", "rB", "main", 1, "user", None, Some("b-u"), Some("pipeB"), "default").unwrap();
+        store.append_message("b2", "rB", "main", 2, "assistant", None, Some("b-ai"), Some("pipeB"), "default").unwrap();
 
         // 隔离：查 pipeA 只返 A 的 2 条，不含 B
         let msgs_a = store
@@ -1876,7 +1882,7 @@ mod tests {
 
         // 历史数据（pipeline_id 为 NULL）不应混入任何管道查询
         store.create_run("rOld", "h", "default").unwrap();
-        store.append_message("old1", "rOld", "main", 0, "user", None, Some("legacy"), None).unwrap();
+        store.append_message("old1", "rOld", "main", 0, "user", None, Some("legacy"), None, "default").unwrap();
         let still_2 = store
             .get_messages_by_pipeline("pipeA", MessageQueryOpts::default())
             .await
@@ -1890,7 +1896,7 @@ mod tests {
         let store = SqliteStore::open_memory().unwrap();
         // init() 内部已执行 migrate_add_pipeline_id，重复调用不应报错
         store.create_run("rM", "h", "default").unwrap();
-        store.append_message("m1", "rM", "main", 0, "user", None, Some("ok"), None).unwrap();
+        store.append_message("m1", "rM", "main", 0, "user", None, Some("ok"), None, "default").unwrap();
         // 老式查询 get_messages 仍可用
         let msgs = store.get_messages("rM", "main").await.unwrap();
         assert_eq!(msgs.len(), 1);
@@ -2059,6 +2065,7 @@ mod tests {
                 Some(&blob_id),
                 Some("short"),
                 None,
+                "default",
             )
             .unwrap();
 
@@ -2078,7 +2085,7 @@ mod tests {
         let store = SqliteStore::open_memory().unwrap();
         store.create_run("run_9", "hash", "default").unwrap();
         store
-            .append_message("msg_2", "run_9", "main", 0, "assistant", None, None, None)
+            .append_message("msg_2", "run_9", "main", 0, "assistant", None, None, None, "default")
             .unwrap();
 
         let result = store.get_recent_messages("run_9", "main", 10).await;
@@ -2104,7 +2111,7 @@ mod tests {
         agentos_tenant::scope(ctx_a, async {
             store.create_run("run_a", "hash_a", "tenant_a").unwrap();
             store
-                .append_message("msg_a", "run_a", "main", 0, "user", None, Some("hi-a"), None)
+                .append_message("msg_a", "run_a", "main", 0, "user", None, Some("hi-a"), None, "tenant_a")
                 .unwrap();
 
             // 自身作用域内可读到
