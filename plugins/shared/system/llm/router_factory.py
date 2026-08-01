@@ -103,6 +103,21 @@ def _get_litellm_model_string(provider: str, model_name: str) -> str:
     return f"{prefix}/{model_name}"
 
 
+def _format_key_fingerprint(api_key: Any) -> str:
+    """格式化 api_key 为安全的诊断指纹（不泄露完整 key）。
+
+    用于 Router 构建日志，便于快速定位「Invalid API key」类问题：
+    - 空 key → EMPTY
+    - 未展开占位符 ${...} → UNRESOLVED:<占位符>
+    - 正常 key → <前6位>...(len=N)
+    """
+    if not api_key or not isinstance(api_key, str):
+        return "EMPTY"
+    if "${" in api_key:
+        return f"UNRESOLVED:{api_key}"
+    return f"{api_key[:6]}...(len={len(api_key)})"
+
+
 def _parse_provider_keys(
     llm_data: dict[str, Any],
 ) -> dict[str, list[KeySlot]]:
@@ -196,10 +211,11 @@ def build_model_list(
                     }
                 )
                 logger.info(
-                    "[Router] deployment: %s → %s (key=%s)",
+                    "[Router] deployment: %s → %s (key=%s, fp=%s)",
                     model_id,
                     litellm_model,
                     slot.key_id,
+                    _format_key_fingerprint(slot.api_key),
                 )
         else:
             # 单 key：直接用模型级或 provider 级的凭证
@@ -217,10 +233,13 @@ def build_model_list(
                     "litellm_params": lp,
                 }
             )
+            # 单 key 分支的 api_key 来源：模型级 model_api_key 优先，否则无（provider 级）
+            single_key = model_api_key or (slots[0].api_key if slots else "")
             logger.info(
-                "[Router] deployment: %s → %s",
+                "[Router] deployment: %s → %s (fp=%s)",
                 model_id,
                 litellm_model,
+                _format_key_fingerprint(single_key),
             )
 
     return model_list

@@ -1118,8 +1118,10 @@ class PromptBuildPlugin(IInputPlugin):
             return None
 
         content = f"<dynamic_vars>\n以下为系统注入的背景信息和思考提示。\n{chr(10).join(parts)}\n</dynamic_vars>"
+        # role 用 user 而非 system：实测（DeepSeek/opencode_go）末尾的 role=system 且每轮变化的
+        # 消息会破坏 prompt cache（命中率从 ~97% 崩到 ~5%），role=user 则正常（~99%）。
+        # 用 <dynamic_vars> XML 包裹 + 明确"系统注入"措辞，模型仍能识别为背景信息。
         return {
-            "role": "system",
-            "name": "dynamic_context",
+            "role": "user",
             "content": content,
         }

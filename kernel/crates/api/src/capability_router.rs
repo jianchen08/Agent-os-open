@@ -369,16 +369,16 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .ok_or_else(|| McpError::Protocol {
                         message: "tool-executor.invoke 缺少 tool_name 参数".to_string(),
                     })?;
-                let tool_args = params.get("args").cloned().unwrap_or(json!({}));
+                let tool_args_raw = params.get("args").cloned().unwrap_or(json!({}));
                 // 越权防护（治理缺口）：0.2 工具调用应携带会话身份
                 // （tool_core 在 invoke 前注入 args["_owner"]，见其 lib.rs
                 // execute_single_tool）。缺失时告警不阻断——bash 等有状态
                 // 工具插件侧据此走宽松兜底；此告警用于发现未注入的调用方。
-                let has_owner = tool_args
+                let has_owner = tool_args_raw
                     .get("_owner")
                     .and_then(|v| v.as_str())
                     .is_some_and(|s| !s.is_empty())
-                    || tool_args
+                    || tool_args_raw
                         .get("session_id")
                         .and_then(|v| v.as_str())
                         .is_some_and(|s| !s.is_empty());
@@ -386,10 +386,21 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     warn!(
                         "tool-executor.invoke 缺少会话身份（_owner/session_id）| tool={} | args_keys={:?}",
                         tool_name,
-                        tool_args
+                        tool_args_raw
                             .as_object()
                             .map(|m| m.keys().cloned().collect::<Vec<_>>()),
                     );
+                }
+                // 剥离内部元数据字段：_owner / session_id 是治理/身份注入的，_log_ctx 是
+                // 日志上下文（SDK 在 _handle_tools_call 也会 pop _log_ctx）。这些字段仅供
+                // 内核/SDK 使用，不能透传给工具 handler——否则 handler 会因 unexpected
+                // keyword argument 报错（实测 file_read 等纯函数工具踩过）。
+                let internal_keys = ["_owner", "session_id", "_log_ctx", "pipeline_id", "task_id", "tenant_id"];
+                let mut tool_args = tool_args_raw;
+                if let Some(obj) = tool_args.as_object_mut() {
+                    for k in internal_keys {
+                        obj.remove(k);
+                    }
                 }
                 // 从 CapabilityRegistry 反查 tool_name → plugin_id（tool 插件的 manifest id）
                 let plugin_id = self

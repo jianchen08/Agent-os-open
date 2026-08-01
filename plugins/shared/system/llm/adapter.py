@@ -34,10 +34,144 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+
+# === 缓存诊断：在 litellm 真正构造 HTTP body 的位置拦截 ===
+# transform_request 返回的 dict["messages"] 就是发送给 API 的最终消息体
+# （经过 provider transformation、cache_control 处理之后，httpx 发送之前）。
+# 这是唯一能看到"真实发出的字节"的位置。adapter 层看到的 messages 还会被
+# litellm 内部改写（合并 system、移除 cache_control、字段重排等），不等于
+# 真实 payload，故必须在此拦截。两轮对比 prefix_hash 即可定位 cache 断点。
+def _install_payload_diag_hook() -> None:
+    try:
+        import hashlib
+        import json as _json
+        import os as _os
+
+        _diag_logger_local = logging.getLogger("llm.adapter._payload_diag")
+
+        def _log_final_payload(model: str, body: dict) -> None:
+            try:
+                msgs = body.get("messages", [])
+                # 【关键】不 sort、不 default=str 改写，直接 dumps litellm 返回的原始 dict。
+                # body 是 transform_request 的返回值，litellm 会原样作为 HTTP body 发出，
+                # 所以这里的字段顺序/结构就是真正发给厂商的字节序列。
+                # 之前用 sort_keys=True 重新序列化会掩盖字段顺序差异——而 prefix cache
+                # 是按字节匹配的，字段顺序变了 = 前缀变了 = 缓存失效。
+                running = ""
+                # 整个 body 的原始字节 hash（含 model/可选参数，服务端可能看完整请求体）
+                body_raw = _json.dumps(body, ensure_ascii=False)
+                body_hash = hashlib.md5(body_raw.encode("utf-8")).hexdigest()[:12]
+                # messages 部分的原始字节 hash
+                msgs_raw = _json.dumps(msgs, ensure_ascii=False)
+                msgs_hash = hashlib.md5(msgs_raw.encode("utf-8")).hexdigest()[:12]
+                _diag_logger_local.info(
+                    "POST_TRANSFORM model=%s msg_count=%d body_hash=%s msgs_hash=%s",
+                    model,
+                    len(msgs),
+                    body_hash,
+                    msgs_hash,
+                )
+                for pi, pm in enumerate(msgs):
+                    # 每条消息的原始字节（不 sort），累积前缀也是原始字节拼接
+                    mj = _json.dumps(pm, ensure_ascii=False)
+                    running += mj + "\n"
+                    full = hashlib.md5(mj.encode("utf-8")).hexdigest()[:8]
+                    prefix = hashlib.md5(running.encode("utf-8")).hexdigest()[:8]
+                    _diag_logger_local.info(
+                        "POST_TRANSFORM_MSG[%d] role=%s name=%s full_hash=%s prefix_hash=%s | raw=%s",
+                        pi,
+                        pm.get("role", "?"),
+                        pm.get("name", ""),
+                        full,
+                        prefix,
+                        mj[:500],
+                    )
+                # 写入原始 body（litellm 真实发送的结构），供逐字节 diff
+                _diag_dir = _os.path.join(_os.getcwd(), "logs", "payload_diag")
+                _os.makedirs(_diag_dir, exist_ok=True)
+                _diag_file = _os.path.join(
+                    _diag_dir, f"body_{msgs_hash}_{int(_time.time() * 1000)}.json"
+                )
+                with open(_diag_file, "w", encoding="utf-8") as fh:
+                    fh.write(body_raw)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # patch 所有 provider transformation 类的 transform_request / async_transform_request。
+        # 扫描 litellm.llms 下各 provider 的 chat transformation 模块（openai/deepseek/...），
+        # 确保无论走哪个 provider 都能拦截到真实 HTTP body。
+        import importlib as _importlib
+
+        _patched_classes: set[type] = set()
+
+        def _patch_class(_cls: type) -> None:
+            if _cls in _patched_classes:
+                return
+            if not hasattr(_cls, "transform_request"):
+                return
+            _patched_classes.add(_cls)
+            _orig_sync = _cls.transform_request
+
+            def _wrap_sync(_orig):
+                def _patched(self, model, messages, optional_params, litellm_params, headers):  # noqa: ANN001
+                    body = _orig(self, model, messages, optional_params, litellm_params, headers)
+                    _log_final_payload(model, body)
+                    return body
+
+                return _patched
+
+            _cls.transform_request = _wrap_sync(_orig_sync)
+
+            if hasattr(_cls, "async_transform_request"):
+                _orig_async = _cls.async_transform_request
+
+                def _wrap_async(_orig):
+                    async def _patched_async(self, model, messages, optional_params, litellm_params, headers):  # noqa: ANN001
+                        body = await _orig(self, model, messages, optional_params, litellm_params, headers)
+                        _log_final_payload(model, body)
+                        return body
+
+                    return _patched_async
+
+                _cls.async_transform_request = _wrap_async(_orig_async)
+
+        _transformation_modules = [
+            "litellm.llms.openai.chat.gpt_transformation",
+            "litellm.llms.deepseek.chat.transformation",
+            "litellm.llms.anthropic.chat.transformation",
+            "litellm.llms.zhipu.chat.transformation",
+        ]
+        for _mod_path in _transformation_modules:
+            try:
+                _mod = _importlib.import_module(_mod_path)
+            except Exception:  # noqa: BLE001
+                continue
+            for _cls in vars(_mod).values():
+                if isinstance(_cls, type):
+                    _patch_class(_cls)
+
+        logger.info(
+            "[payload_diag] 已安装 litellm transform_request 拦截钩子，patched=%d 类",
+            len(_patched_classes),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[payload_diag] 拦截钩子安装失败: %s", e)
+
+
+_install_payload_diag_hook()
+# === 缓存诊断结束 ===
+
 _diag_logger = logging.getLogger(__name__ + "._diag")
 _diag_logger.propagate = False
 _stream_logger = logging.getLogger(__name__ + "._stream")
 _stream_logger.propagate = False
+
+# aclose 超时上限（流式连接关闭）：正常关闭一个 HTTP 连接仅需毫秒级，超过该阈值
+# 说明底层 socket（常为 Windows ProactorEventLoop 上的 SSL 流）已半死——服务端发了
+# FIN 但本地 SSL shutdown 握手等不到响应，httpx/httpcore 的 aclose 会永久阻塞。
+# 此时放弃优雅关闭，让协程返回，残留 socket（CLOSE_WAIT）交由 GC/OS 回收。
+# 选 10s 是远大于健康关闭耗时、又远小于让管道僵死的可忍受时长。
+_ACLOSE_TIMEOUT_SECONDS: float = 10.0
 
 # ── Prompt 审计日志（完整 messages 请求体落盘，默认关）──────────────────────
 # 发给远端 LLM API 的完整 messages/tools 请求体落盘，用于复现/审计/调试。
@@ -965,9 +1099,27 @@ class _BaseLiteLLMAdapter:
             # 取消独立线程硬超时（正常结束时不触发强制关闭，幂等）
             if _hard_timeout is not None:
                 _hard_timeout.disarm()
-            # 确保超时或异常时关闭 async iterator，释放 HTTP 连接
+            # 确保超时或异常时关闭 async iterator，释放 HTTP 连接。
+            # wait_for 超时兜底：Windows 半死 SSL socket 会让 httpx aclose 永久阻塞，
+            # 导致本 finally 不返回 → _run_loop 永久卡死。超时后放弃关闭，协程得以返回，
+            # 残留 socket（CLOSE_WAIT）交由 GC/OS 回收。KeyPoolAdapter 路径下 aclose
+            # 已被 _aclose_with_release 包过一层 wait_for，这里再包一层无害（外层到点
+            # 会 cancel 内层）；LiteLLMAdapter 路径下 aclose 是原始的，本层是其唯一保护。
             if hasattr(response, "aclose"):
-                await response.aclose()
+                try:
+                    await asyncio.wait_for(
+                        response.aclose(),
+                        timeout=_ACLOSE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] response.aclose finally 超时 %.0fs（半死 socket 放弃关闭），"
+                        "残留连接交 GC 回收",
+                        type(self).__name__,
+                        _ACLOSE_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    logger.debug("[%s] response.aclose finally 异常（已忽略）", type(self).__name__)
 
         result_text = "".join(result_parts) if result_parts else None
         thinking_text = "".join(thinking_parts) if thinking_parts else None
@@ -1308,6 +1460,9 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         router = get_or_create_router(model_loader)
         return await router.acompletion(**kwargs)
 
+    # aclose 超时上限（引用模块级常量，便于统一调整）。
+    _ACLOSE_TIMEOUT_SECONDS: float = _ACLOSE_TIMEOUT_SECONDS
+
     @staticmethod
     def _bind_release_to_stream(stream: Any, slot: Any) -> None:
         """把 slot.release() 绑定到 stream.aclose()，流关闭时释放并发许可。
@@ -1317,6 +1472,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         故 release 推迟到 stream 被关闭（_call_streaming 的 finally 调用 aclose）。
 
         用一次性标志保证 release 只执行一次（litellm 可能多次调用 aclose）。
+
+        original_aclose 用 wait_for 超时包裹：Windows 上半死 SSL socket 会让
+        httpx/httpcore 的 aclose 永久阻塞，导致 _call_streaming 的 finally 不
+        返回 → _run_loop 永久卡死（其他管道因 slot.release 已执行而不受影响，
+        但本管道僵死需重启才能恢复）。超时后放弃关闭，协程得以返回。
         """
         original_aclose = getattr(stream, "aclose", None)
         released = False
@@ -1327,7 +1487,21 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                 released = True
                 slot.release()
             if original_aclose is not None:
-                await original_aclose()
+                try:
+                    await asyncio.wait_for(
+                        original_aclose(),
+                        timeout=_ACLOSE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] stream.aclose 超时 %.0fs（半死 socket 放弃优雅关闭），"
+                        "残留连接交由 GC 回收",
+                        KeyPoolAdapter.__name__,
+                        _ACLOSE_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    # aclose 自身异常（非超时）不阻断 finally 返回
+                    logger.debug("[%s] stream.aclose 异常（已忽略）", KeyPoolAdapter.__name__)
 
         stream.aclose = _aclose_with_release  # type: ignore[method-assign]
 

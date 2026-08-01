@@ -37,8 +37,12 @@ class IsolationProvider(ABC):
         """创建隔离环境"""
 
     @abstractmethod
-    async def destroy_environment(self, env_id: str, success: bool = True) -> None:
-        """销毁隔离环境"""
+    async def destroy_environment(self, env_id: str, success: bool = True) -> bool:
+        """销毁隔离环境。
+
+        返回是否真正从底层（如 docker）删除成功。runc 卡死等故障下删除可能
+        失败，调用方据此决定是否走重建兜底（避免内存记录与底层状态脱节）。
+        """
 
     @abstractmethod
     async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:

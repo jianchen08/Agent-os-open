@@ -82,19 +82,21 @@ class HostProvider(IsolationProvider):
         self._environments[env.env_id] = env
         return env
 
-    async def destroy_environment(self, env_id: str, success: bool = True) -> None:
+    async def destroy_environment(self, env_id: str, success: bool = True) -> bool:
         """销毁虚拟环境
 
         host 模式不维护文件检查点，无需清理/恢复；工作区回滚由 git 层负责。
+        host 无底层容器，销毁恒成功，返回 True。
         """
         env = self._environments.get(env_id)
         if not env:
-            return
+            return True
 
         if not success:
             logger.warning(f"[HostProvider] host 任务失败，工作区回滚由 git 层处理 | task_id={env.context.task_id}")
 
         self._environments.pop(env_id, None)
+        return True
 
     async def execute_in_environment(self, env_id: str, operation: dict[str, Any]) -> ExecutionResult:
         """在宿主机上执行操作"""

@@ -622,11 +622,12 @@ class LLMCore(ICorePlugin):
                     break
 
         # 5. 动态变量（每轮变化的上下文：时间戳、session_id 等）
-        #    作为独立 system 消息追加在末尾，绝不合并进 messages[0]（system_message）。
+        #    作为独立 user 消息追加在末尾，绝不合并进 messages[0]（system_message）。
         #    system_message 必须保持纯 prompt、永不变化（prompt cache 命中依赖此不变性），
         #    而 dynamic_vars 含时间戳等每轮变化的内容，合并进去会破坏 cache 并污染系统提示词。
-        #    也不必担心污染对话历史：该消息 role=system name=dynamic_context，
-        #    与 user/assistant 历史段物理隔离。
+        #    role 必须用 user：实测末尾的 role=system 且每轮变化的消息会让 DeepSeek prompt
+        #    cache 缓存单元边界错位（命中率从 ~97% 崩到 ~5%），role=user 则正常（~99%）。
+        #    内容用 <dynamic_vars> XML 包裹并标注"系统注入"，模型仍能识别为背景信息。
         dynamic_vars_msg = state.get("prompt.dynamic_vars")
         if dynamic_vars_msg:
             if isinstance(dynamic_vars_msg, dict):
@@ -636,8 +637,7 @@ class LLMCore(ICorePlugin):
             if content:
                 messages.append(
                     {
-                        "role": "system",
-                        "name": "dynamic_context",
+                        "role": "user",
                         "content": content,
                     }
                 )
