@@ -1212,6 +1212,63 @@ async def _handle_agent_calls_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
+async def _handle_knowledge_base_domain(
+    path: str, method: str, raw_body: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """knowledge-base 域分发：/ext/channel_api/knowledge-base/** → routes_missing.knowledge_base_router。
+
+    10 路由 stub：list/stats/upload/check/categories(GET+POST)/categories/{name}(DELETE)/
+    tags(GET)/{item_id}(GET+DELETE)。前端 KNOWLEDGE_BASE 块全覆盖。
+    """
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/knowledge-base"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a knowledge-base path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/stats" / "/upload" / "/categories" / "/{item_id}" ...
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(await rm.list_knowledge_base()))
+        if sub in ("", "/") and method == "POST":  # upload stub（前端 UPLOAD 走 POST）
+            return _ok(_json_response(await rm.upload_knowledge_base()))
+        if sub == "/stats" and method == "GET":
+            return _ok(_json_response(await rm.get_knowledge_base_stats()))
+        if sub == "/upload" and method == "POST":
+            return _ok(_json_response(await rm.upload_knowledge_base()))
+        if sub == "/check" and method == "GET":
+            return _ok(_json_response(await rm.check_knowledge_base()))
+        if sub == "/categories" and method == "GET":
+            return _ok(_json_response(await rm.list_categories()))
+        if sub == "/categories" and method == "POST":
+            body = _decode_body(raw_body)
+            return _ok(_json_response(await rm.create_category(body)))
+        if sub == "/tags" and method == "GET":
+            return _ok(_json_response(await rm.list_tags()))
+        # /categories/{name} DELETE
+        if sub.startswith("/categories/") and method == "DELETE":
+            name = sub[len("/categories/"):]
+            return _ok(_json_response(await rm.delete_category(name)))
+        # /{item_id} GET/DELETE
+        if sub.startswith("/") and len(sub) > 1 and "/" not in sub[1:]:
+            item_id = sub[1:]
+            if method == "GET":
+                return _ok(_json_response(await rm.get_knowledge_base_item(item_id)))
+            if method == "DELETE":
+                return _ok(_json_response(await rm.delete_knowledge_base_item(item_id)))
+
+        logger.warning("knowledge-base http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("knowledge-base http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
 async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
     """处理 reviews /media-review（multipart：file + media_type）。
 
@@ -1584,6 +1641,10 @@ async def http_handle(
     # ── agent-calls 域（批次5，有前端消费，3 路由 stub）──
     if path.startswith("/ext/channel_api/agent-calls"):
         return await _handle_agent_calls_domain(path, method, raw_body, q)
+
+    # ── knowledge-base 域（批次5，有前端消费，10 路由 stub）──
+    if path.startswith("/ext/channel_api/knowledge-base"):
+        return await _handle_knowledge_base_domain(path, method, raw_body, q)
 
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):

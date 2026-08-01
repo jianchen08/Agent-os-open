@@ -355,25 +355,25 @@ export const API_ENDPOINTS = {
   /** 知识库相关 - 对应后端 /api/v1/knowledge-base/* */
   KNOWLEDGE_BASE: {
     /** 获取知识库列表 */
-    LIST: '/api/v1/knowledge-base',
+    LIST: '/ext/channel_api/knowledge-base',
     /** 获取知识库统计 */
-    STATS: '/api/v1/knowledge-base/stats',
+    STATS: '/ext/channel_api/knowledge-base/stats',
     /** 上传文件 */
-    UPLOAD: '/api/v1/knowledge-base/upload',
+    UPLOAD: '/ext/channel_api/knowledge-base/upload',
     /** 获取知识库详情 */
-    GET: (id: string) => `/api/v1/knowledge-base/${id}`,
+    GET: (id: string) => `/ext/channel_api/knowledge-base/${id}`,
     /** 删除知识库 */
-    DELETE: (id: string) => `/api/v1/knowledge-base/${id}`,
+    DELETE: (id: string) => `/ext/channel_api/knowledge-base/${id}`,
     /** 检查知识库 */
-    CHECK: '/api/v1/knowledge-base/check',
+    CHECK: '/ext/channel_api/knowledge-base/check',
     /** 获取分类列表 */
-    CATEGORIES: '/api/v1/knowledge-base/categories',
+    CATEGORIES: '/ext/channel_api/knowledge-base/categories',
     /** 创建分类 */
-    CREATE_CATEGORY: '/api/v1/knowledge-base/categories',
+    CREATE_CATEGORY: '/ext/channel_api/knowledge-base/categories',
     /** 删除分类 */
-    DELETE_CATEGORY: (name: string) => `/api/v1/knowledge-base/categories/${name}`,
+    DELETE_CATEGORY: (name: string) => `/ext/channel_api/knowledge-base/categories/${name}`,
     /** 获取标签列表 */
-    TAGS: '/api/v1/knowledge-base/tags',
+    TAGS: '/ext/channel_api/knowledge-base/tags',
   },
 } as const
 
