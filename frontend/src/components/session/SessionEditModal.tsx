@@ -107,8 +107,11 @@ export const SessionEditModal = memo<SessionEditModalProps>(
                 className="bg-muted/50 border-border/50 focus:border-primary w-full rounded-md border px-3 py-1.5 text-sm outline-none transition-colors"
               >
                 <option value="">默认 Agent</option>
-                {availableAgents.map((agent) => (
-                  <option key={agent.configId || agent.id} value={agent.configId || agent.id}>
+                {availableAgents.map((agent, index) => (
+                  <option
+                    key={`${agent.configId || agent.id}-${index}`}
+                    value={agent.configId || agent.id}
+                  >
                     {agent.name}
                   </option>
                 ))}

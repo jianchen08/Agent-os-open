@@ -32,7 +32,7 @@ import { ThemeButton } from '@/components/layout/ThemeButton'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
-import { searchGlobal, type SearchType, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
+import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
 import {
   openWorkspacePanel,
   openWorkspacePanelByPath,
@@ -90,8 +90,7 @@ const SIDEBAR_STYLES = {
 export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const navigate = useNavigate()
   const [searchKeyword, setSearchKeyword] = useState('')
-  const [searchType, setSearchType] = useState<SearchType>('all')
-  /** P2: 后端搜索结果（防抖调用 /api/v1/search） */
+  /** 后端搜索结果（防抖调用 /ext/channel_api/search） */
   const [searchResults, setSearchResults] = useState<{
     sessions: SessionSearchHit[]
     messages: MessageSearchHit[]
@@ -177,8 +176,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   }, [fetchSessions])
 
   /**
-   * P2 搜索框合并：防抖调用后端搜索 API（/api/v1/search）
-   * 替换原有两个搜索框的本地过滤（searchSessions + messageSearchQuery）。
+   * 统一搜索：防抖调用后端搜索 API（/ext/channel_api/search）。
    * 输入停止 350ms 后发起请求；q 为空时清空结果。
    */
   useEffect(() => {
@@ -191,7 +189,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     }
     setIsSearching(true)
     const timer = window.setTimeout(() => {
-      searchGlobal(keyword, searchType, 20)
+      searchGlobal(keyword, 'all', 20)
         .then((data) => {
           setSearchResults({
             sessions: data.sessions ?? [],
@@ -206,13 +204,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         .finally(() => setIsSearching(false))
     }, 350)
     return () => window.clearTimeout(timer)
-  }, [searchKeyword, searchType])
+  }, [searchKeyword])
 
-  // P2：会话列表数据源——有后端搜索结果时用后端结果（会话命中），
+  // 会话列表数据源——有后端搜索结果时用后端结果（会话命中），
   // 否则回退本地 sessions。消息搜索命中不改变会话列表（消息结果单独展示）。
   const filteredSessions = useMemo(() => {
     if (!searchKeyword.trim()) return sessions
-    if (searchType === 'message') return sessions
     if (searchResults.sessions.length > 0) {
       // 后端返回的是会话 ID 列表，映射为完整 Session 对象（保留星标/置顶等本地状态）
       const hitIds = new Set(searchResults.sessions.map((h) => h.id))
@@ -220,7 +217,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     }
     // 后端无命中：返回空（展示"未找到匹配的会话"）
     return searchError ? sessions : []
-  }, [searchKeyword, searchType, searchResults, sessions, searchError])
+  }, [searchKeyword, searchResults, sessions, searchError])
 
   /**
    * 处理会话点击 - 设置活动会话并导航到会话页面
@@ -233,10 +230,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       // 切换前保存当前会话的 Tab 状态到 localStorage
       useAgentTabStore.getState().saveCurrentTabs()
       await setActiveSession(sessionId)
-      // 直接导航到会话页面，而不是主页
-      navigate(`/session/${sessionId}`)
     },
-    [setActiveSession, navigate],
+    [setActiveSession],
   )
 
   /**
@@ -266,12 +261,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           await updateSessionAgent(sessionId, agentId)
           setModal(null)
         } else {
-          // 新建会话
+          // 新建会话：createSession 内部已设置 activeSessionId，
+          // ChatContainer 会随 activeSessionId 自动渲染，无需 navigate。
           const session = await createSession(title || undefined, {
             agentId: agentId || undefined,
           })
           setModal(null)
-          navigate(`/session/${session.id}`)
         }
       } catch (error) {
         reportError(error instanceof Error ? error.message : String(error), {
@@ -284,7 +279,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         setIsSaving(false)
       }
     },
-    [createSession, renameSession, updateSessionAgent, navigate],
+    [createSession, renameSession, updateSessionAgent],
   )
 
   /**
@@ -612,7 +607,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               )}
             </div>
 
-            {/* 搜索框区域（P2 合并：会话搜索 + 消息搜索 → 单个搜索框 + 类型切换） */}
+            {/* 搜索框区域（统一搜索：会话名 + 消息内容） */}
             <div
               className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
               data-testid="sidebar-search-section"
@@ -620,16 +615,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <SessionSearch
                 value={searchKeyword}
                 onSearchChange={setSearchKeyword}
-                searchType={searchType}
-                onSearchTypeChange={setSearchType}
                 resultCount={filteredSessions.length}
                 totalCount={sessions.length}
                 isSearching={isSearching}
                 className="sidebar-search"
                 inputClassName={SIDEBAR_STYLES.searchHeight}
               />
-              {/* 消息搜索结果（仅 type=all/message 且有关键词时展示） */}
-              {searchKeyword.trim() && searchType !== 'session' && searchResults.messages.length > 0 && (
+              {/* 消息搜索结果（有关键词时展示） */}
+              {searchKeyword.trim() && searchResults.messages.length > 0 && (
                 <div className="mt-1 space-y-0.5" data-testid="sidebar-message-results">
                   {searchResults.messages.slice(0, 8).map((hit) => (
                     <button

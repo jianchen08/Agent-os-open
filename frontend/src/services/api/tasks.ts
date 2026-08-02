@@ -166,7 +166,7 @@ export async function getTasksDebug(params?: {
   sort_order?: 'asc' | 'desc'
   status?: string
 }): Promise<TaskDebugListResponse> {
-  const response = await apiClient.get<TaskDebugListResponse>('/api/v1/tasks/debug/all', { params })
+  const response = await apiClient.get<TaskDebugListResponse>('/ext/channel_api/tasks/debug/all', { params })
   return response.data
 }
 

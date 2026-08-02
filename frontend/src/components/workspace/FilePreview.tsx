@@ -168,7 +168,7 @@ export function FilePreview({
     // 附件直链优先（不依赖 workspaces API）
     if (url) return url
     if (!containerTaskId) return ''
-    return `/api/v1/workspaces/${containerTaskId}/file-content?path=${encodeURIComponent(filePath)}`
+    return `/ext/channel_api/workspaces/${containerTaskId}/file-content?path=${encodeURIComponent(filePath)}`
   }, [url, containerTaskId, filePath])
 
   const handleZoomIn = useCallback(() => {

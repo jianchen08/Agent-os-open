@@ -136,7 +136,7 @@ export function FiveSpaceLayout({
 
         try {
           const resp = await apiClient.get(
-            `/api/v1/workspaces/${editorData.containerTaskId}/file-content`,
+            `/ext/channel_api/workspaces/${editorData.containerTaskId}/file-content`,
             { params: { path: editorData.filePath } }
           )
           if (resp.data?.success && resp.data.content !== undefined) {
@@ -262,7 +262,7 @@ export function FiveSpaceLayout({
           if (!containerId) return false
           try {
             const resp = await apiClient.put(
-              `/api/v1/workspaces/${containerId}/file-content`,
+              `/ext/channel_api/workspaces/${containerId}/file-content`,
               { content },
               { params: { path: editorData.filePath } },
             )
@@ -396,7 +396,7 @@ export function FiveSpaceLayout({
             }
 
             try {
-              const resp = await apiClient.get(`/api/v1/workspaces/${containerId}/file-content`, {
+              const resp = await apiClient.get(`/ext/channel_api/workspaces/${containerId}/file-content`, {
                 params: { path: filePath }
               })
               if (resp.data?.success) {
@@ -426,7 +426,7 @@ export function FiveSpaceLayout({
             const containerId = tab.dataSource?.replace('workspace://', '') || ''
             if (!containerId) return
             try {
-              await apiClient.post(`/api/v1/workspaces/${containerId}/open`)
+              await apiClient.post(`/ext/channel_api/workspaces/${containerId}/open`)
             } catch {
               // 静默失败
             }

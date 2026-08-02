@@ -1,7 +1,7 @@
 /**
- * 全局搜索 API 服务（P2 搜索框合并）
+ * 全局搜索 API 服务（统一搜索）
  *
- * 调用后端 GET /api/v1/search 统一搜索会话与消息。
+ * 调用插件端点 GET /ext/channel_api/search 统一搜索会话与消息（经内核 dispatcher 转发）。
  * 会话结果来自 MemoryStore 标题匹配，消息结果来自 ExecutionRecordStorage 内容匹配。
  */
 

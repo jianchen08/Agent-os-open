@@ -55,7 +55,7 @@ interface WorkspaceActions {
   clearCache: () => void
 }
 
-const API_BASE = '/api/v1/workspaces'
+const API_BASE = '/ext/channel_api/workspaces'
 
 export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   persist(

@@ -130,8 +130,20 @@ export const useAgentStore = create<AgentState>((set) => ({
         updatedAt: agent.updated_at,
       }))
 
+      // 按 config_id 去重：内核 agents_handler 遍历 config/agents/** 下所有 YAML 不去重
+      // （如 config/agents/main/agentos.yaml 与 main_agent.yaml 的 config_id 均为 agentos），
+      // 相同 config_id 只保留第一个，避免 SessionEditModal 渲染 option 时 key 重复。
+      const seenConfigIds = new Set<string>()
+      const dedupedAgents = mappedAgents.filter((agent: { configId?: string; id?: string }) => {
+        const key = agent.configId || agent.id
+        if (!key) return true
+        if (seenConfigIds.has(key)) return false
+        seenConfigIds.add(key)
+        return true
+      })
+
       set({
-        agents: mappedAgents,
+        agents: dedupedAgents,
         isLoading: false,
       })
     } catch (error) {

@@ -299,9 +299,9 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       } catch (error) {
         console.error('[setActiveSession] 加载会话数据失败:', error)
       }
-
-      // 只有提交任务后 useRealtimeEvents 中才会触发刷新。
-      useLayoutModeStore.getState().bumpWorkspaceDataVersion()
+      // 注意：切换会话只刷新消息区域，工作区（FileTreeWidget 等）保持不动。
+      // 不调用 bumpWorkspaceDataVersion —— 工作区数据刷新由 useRealtimeEvents
+      // 在任务状态变化（task_status_changed 等事件）时触发，会话切换不应牵连工作区。
     }
   },
 

@@ -57,7 +57,7 @@ async function parseInteractionEvent(
       filePaths.map(async (filePath) => {
         try {
           const resp = await apiClient.get(
-            `/api/v1/workspaces/_local/file-content`,
+            `/ext/channel_api/workspaces/_local/file-content`,
             { params: { path: filePath } },
           )
           if (resp.data?.success) {

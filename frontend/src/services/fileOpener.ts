@@ -64,13 +64,13 @@ async function defaultBuiltinOpenHandler(
   try {
     // 优先使用任务容器 ID，否则 fallback 到 _local（项目根目录）
     const resolvedContainerId = containerTaskId || '_local'
-    let resp = await apiClient.get(`/api/v1/workspaces/${resolvedContainerId}/file-content`, {
+    let resp = await apiClient.get(`/ext/channel_api/workspaces/${resolvedContainerId}/file-content`, {
       params: { path: filePath },
     })
 
     // 任务工作空间未找到文件时，回退到项目根目录 _local 重试
     if (!resp.data?.success && resolvedContainerId !== '_local') {
-      resp = await apiClient.get('/api/v1/workspaces/_local/file-content', {
+      resp = await apiClient.get('/ext/channel_api/workspaces/_local/file-content', {
         params: { path: filePath },
       })
     }

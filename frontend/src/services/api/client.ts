@@ -254,8 +254,10 @@ apiClient.interceptors.response.use(
 
     // 可选端点：前端会调但后端可能尚未实现/非核心路径，404 不上报刷屏
     // 真实业务失败仍通过 Promise.reject 交给调用方处理
+    // 注：/files/capabilities 已通过补路由（/ext/channel_api/files/capabilities）真正修复，
+    // 不再需要静默；其余域（floating-chat/evaluation-metrics/agent-calls/triggers/datasource）
+    // 仍为未补路由的可选端点，保留静默。
     const isOptionalEndpoint =
-      requestUrl.includes('/files/capabilities') ||
       requestUrl.includes('/floating-chat/') ||
       requestUrl.includes('/evaluation-metrics') ||
       requestUrl.includes('/agent-calls') ||

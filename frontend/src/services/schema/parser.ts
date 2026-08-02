@@ -66,7 +66,7 @@ export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
  // workspace:// 协议特殊处理
   // 该端点不存在，返回 404。
   if (ref.moduleId === 'workspace') {
-    endpoint = `/api/v1/workspaces/${ref.collection}/file-tree`
+    endpoint = `/ext/channel_api/workspaces/${ref.collection}/file-tree`
   } else {
     endpoint = `/api/v1/modules/${ref.moduleId}/data/${ref.collection}`
   }

@@ -82,7 +82,7 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
 /** 获取模型文件能力 静默处理 404，避免控制台报错 */
 export async function getModelCapabilities(modelName: string): Promise<FileCapabilityResponse> {
   try {
-    const response = await apiClient.get<FileCapabilityResponse>(`/api/v1/files/capabilities`, {
+    const response = await apiClient.get<FileCapabilityResponse>(`/ext/channel_api/files/capabilities`, {
       params: { model_name: modelName },
     })
     return response.data
@@ -110,7 +110,7 @@ export async function getModelCapabilities(modelName: string): Promise<FileCapab
 
 /** 获取支持的文件类型 */
 export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
-  const response = await apiClient.get<SupportedTypesResponse>('/api/v1/files/supported-types')
+  const response = await apiClient.get<SupportedTypesResponse>('/ext/channel_api/files/supported-types')
   return response.data
 }
 

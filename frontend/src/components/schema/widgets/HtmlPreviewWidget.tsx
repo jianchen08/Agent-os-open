@@ -52,7 +52,7 @@ export function HtmlPreviewWidget({
     if (!filePath || !containerTaskId) return
 
     const encoded = encodeURIComponent(filePath)
-    fetch(`/api/v1/workspaces/${containerTaskId}/file-content?path=${encoded}`)
+    fetch(`/ext/channel_api/workspaces/${containerTaskId}/file-content?path=${encoded}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json()

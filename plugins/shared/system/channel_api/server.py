@@ -1646,6 +1646,14 @@ async def http_handle(
     if path.startswith("/ext/channel_api/knowledge-base"):
         return await _handle_knowledge_base_domain(path, method, raw_body, q)
 
+    # ── search 域（统一搜索会话与消息，P2 搜索框合并）──
+    if path.startswith("/ext/channel_api/search"):
+        return _handle_search_domain(path, method, raw_body, q)
+
+    # ── files 域（模型文件能力 + 支持类型，ChatInput 上传按钮判断）──
+    if path.startswith("/ext/channel_api/files"):
+        return await _handle_files_domain(path, method, raw_body, q)
+
     # ── artifacts 域（含上传）+ annotations 域 ──
     if path.startswith("/ext/channel_api/artifacts") or path.startswith("/ext/channel_api/annotations"):
         return await _handle_artifacts_domain(path, method, raw_body, q, headers or {})
@@ -1656,6 +1664,77 @@ async def http_handle(
         {"error": "not found", "path": path, "hint": "该域尚未完成 4c 迁移（见 channel_api_migration_plan.md）"},
         404,
     ))
+
+
+def _handle_search_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """search 域分发：/ext/channel_api/search → routes_search 业务函数。
+
+    GET /search?q=xxx&type=all&limit=20 统一搜索会话与消息。
+    _user 省略（dispatcher 已按 http_endpoints.auth=user 鉴权，业务函数 _user 用空 dict
+    兼容：user_id 为空时按进程态 store 的会话数据做标题匹配）。
+    """
+
+    import routes_search as rs  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/search"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a search path", "path": path}, 404))
+    sub = path[len(prefix):]  # "" / "/"
+
+    try:
+        if sub in ("", "/") and method == "GET":
+            return _ok(_json_response(rs.search(
+                q=query.get("q", ""),
+                type=query.get("type", "all"),
+                limit=int(query.get("limit", "20")) if query.get("limit") else 20,
+                _user={},
+            )))
+
+        logger.warning("search http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("search http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
+
+
+async def _handle_files_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+    """files 域分发：/ext/channel_api/files/** → routes_missing 的 files 业务函数。
+
+    GET /capabilities?model_name=xxx 返回模型文件能力（ChatInput 上传按钮判断）；
+    GET /supported-types 返回支持的文件类型。_user 显式传 {}（dispatcher 已鉴权）。
+    """
+
+    import routes_missing as rm  # noqa: PLC0415
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    prefix = "/ext/channel_api/files"
+    if not path.startswith(prefix):
+        return _ok(_json_response({"error": "not a files path", "path": path}, 404))
+    sub = path[len(prefix):]  # "/capabilities" / "/supported-types"
+
+    try:
+        if sub == "/capabilities" and method == "GET":
+            return _ok(_json_response(await rm.get_model_file_capabilities(
+                model_name=query.get("model_name", "default"),
+                _user={},
+            )))
+        if sub == "/supported-types" and method == "GET":
+            return _ok(_json_response(await rm.get_supported_file_types(_user={})))
+
+        logger.warning("files http.handle: no route for sub=%s method=%s", sub, method)
+        return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except HTTPException as exc:
+        return _http_exc_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") or exc.__class__.__name__ == "APIError":
+            return _http_exc_response(exc)
+        logger.error("files http.handle 未预期错误: %s", exc, exc_info=True)
+        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
 if __name__ == "__main__":
