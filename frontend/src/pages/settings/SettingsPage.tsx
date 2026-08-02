@@ -13,6 +13,7 @@ import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
+import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 
 /** 左侧导航条目 */
 type NavItem =
@@ -48,6 +49,13 @@ const BUILTIN_ITEMS: Extract<NavItem, { kind: 'builtin' }>[] = [
     title: '插件管理',
     description: '启用/禁用插件、查看状态',
     icon: '🔌',
+  },
+  {
+    kind: 'builtin',
+    id: 'pipeline',
+    title: '管道配置',
+    description: '管理管道插件链与 Agent 管道配置',
+    icon: '🔀',
   },
 ]
 
@@ -174,6 +182,7 @@ export function SettingsPage() {
           {selected?.kind === 'builtin' && (
             <div className="h-full min-h-0 [&>div]:!h-auto [&>div]:!min-h-0 [&>div]:!overflow-visible [&_header]:!hidden">
               {selected.id === 'theme' && <ThemeSettingsPage embedded />}
+              {selected.id === 'pipeline' && <PipelineSettingsPage embedded />}
               {selected.id === 'plugins' && (
                 <PluginsSettingsPage
                   embedded

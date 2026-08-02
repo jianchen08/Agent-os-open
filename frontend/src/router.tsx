@@ -101,6 +101,11 @@ const ThemeSettingsPage = lazy(() =>
     default: m.ThemeSettingsPage,
   })),
 )
+const PipelineSettingsPage = lazy(() =>
+  import('@/pages/settings/PipelineSettingsPage').then((m) => ({
+    default: m.PipelineSettingsPage,
+  })),
+)
 const TriggersPage = lazy(() =>
   import('@/pages/triggers/TriggersPage').then((m) => ({ default: m.TriggersPage })),
 )
@@ -529,6 +534,16 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <ThemeSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_PIPELINE,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <PipelineSettingsPage />
           </Suspense>
         </ProtectedRoute>
       ),
