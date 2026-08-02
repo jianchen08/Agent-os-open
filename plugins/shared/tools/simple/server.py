@@ -96,3 +96,7 @@ TOOL_REGISTRY = {
     "read_execution_detail": (READ_EXECUTION_DETAIL_SCHEMA, read_execution_detail),
     "register_resource": (REGISTER_RESOURCE_SCHEMA, register_resource),
 }
+
+
+if __name__ == "__main__":
+    run()

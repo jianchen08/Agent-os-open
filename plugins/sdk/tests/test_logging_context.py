@@ -14,8 +14,7 @@ from typing import Any
 import pytest
 
 from agentos_plugin_sdk._logging import setup_sidecar_logging
-from agentos_plugin_sdk.server import McpServer, _bind_log_context
-from agentos_plugin_sdk.types import ToolDef
+from agentos_plugin_sdk.server import McpServer, _bind_log_contextfrom agentos_plugin_sdk.types import ToolDef
 
 
 # ═══════════════════════════════════════════════════════════
@@ -120,3 +119,99 @@ async def test_tools_call_without_log_ctx_still_works() -> None:
     result = await server._handle_tools_call({"name": "echo", "arguments": {"text": "hi"}})
     content = json.loads(result["content"][0]["text"])
     assert content == {"echo": "hi"}
+
+
+# ═══════════════════════════════════════════════════════════
+# _handle_tools_call 参数透传：签名感知过滤
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_tools_call_filters_injected_fields_for_plain_function() -> None:
+    """纯函数工具（无 **kwargs）不应收到 parent_agent_level/timestamp 等内部注入字段。
+
+    背景：param_inject 插件向所有工具参数注入 parent_agent_level/timestamp，
+    纯函数工具签名无 **kwargs，透传会触发 unexpected keyword argument 报错。
+    """
+    received: dict[str, Any] = {}
+
+    def calculator(operation: str, expression: str = "") -> dict:
+        received["operation"] = operation
+        received["expression"] = expression
+        return {"ok": True}
+
+    tools = {
+        "scientific_calculator": ToolDef(
+            name="scientific_calculator",
+            schema={"type": "object"},
+            handler=calculator,
+        ),
+    }
+    server = McpServer(tools, {}, {})
+
+    import json
+
+    result = await server._handle_tools_call(
+        {
+            "name": "scientific_calculator",
+            "arguments": {
+                "operation": "calculate",
+                "expression": "1+1",
+                "parent_agent_level": 1,
+                "timestamp": "2026-01-01T00:00:00",
+                "_log_ctx": {"pipeline_id": "p-abc"},
+            },
+        }
+    )
+    content = json.loads(result["content"][0]["text"])
+    assert content == {"ok": True}
+    # handler 只收到签名中存在的参数，内部注入字段被过滤
+    assert received == {"operation": "calculate", "expression": "1+1"}
+    assert "parent_agent_level" not in received
+    assert "timestamp" not in received
+
+
+@pytest.mark.asyncio
+async def test_tools_call_passes_all_args_to_var_keyword_handler() -> None:
+    """**kwargs 工具（task 系）应全量收到 arguments（含 parent_agent_level）。
+
+    背景：task_manage(**kwargs) 依赖 parent_agent_level 做权限校验，
+    过滤会破坏任务管理权限判断，故 VAR_KEYWORD handler 必须全量透传。
+    """
+    received: dict[str, Any] = {}
+
+    def task_manage(**kwargs) -> dict:
+        received.update(kwargs)
+        return {"ok": True}
+
+    tools = {
+        "task_manage": ToolDef(
+            name="task_manage",
+            schema={"type": "object"},
+            handler=task_manage,
+        ),
+    }
+    server = McpServer(tools, {}, {})
+
+    import json
+
+    result = await server._handle_tools_call(
+        {
+            "name": "task_manage",
+            "arguments": {
+                "action": "get",
+                "task_id": "t-1",
+                "parent_agent_level": 1,
+                "timestamp": "2026-01-01T00:00:00",
+                "_log_ctx": {"pipeline_id": "p-abc"},
+            },
+        }
+    )
+    content = json.loads(result["content"][0]["text"])
+    assert content == {"ok": True}
+    # _log_ctx 仍被 pop（不进入 handler），其余参数全量透传
+    assert "_log_ctx" not in received
+    assert received["action"] == "get"
+    assert received["task_id"] == "t-1"
+    assert received["parent_agent_level"] == 1
+    assert received["timestamp"] == "2026-01-01T00:00:00"

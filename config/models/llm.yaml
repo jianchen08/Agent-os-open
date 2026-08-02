@@ -9,7 +9,7 @@ defaults:
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: minimax-m3
+    large: mock-llm
     medium: minimax-m3
     small: minimax-m3
 embeddings: {}
@@ -128,6 +128,16 @@ models:
       supports_video: true
     provider: minimax
     reasoning_model: true
+  mock-llm:
+    api_base: http://127.0.0.1:18080/v1
+    api_key: mock-key
+    context_window: 1000000
+    default_params:
+      max_tokens: 4096
+      temperature: 0.7
+    display_name: Mock LLM (本地验证)
+    model_name: mock-llm
+    provider: mock_llm
 providers:
   deepseek:
     api_base: https://api.deepseek.com/v1
@@ -174,3 +184,12 @@ providers:
       rpm: 10
       token_quota: 0
     type: zai
+  mock_llm:
+    api_base: http://127.0.0.1:18080/v1
+    keys:
+    - api_key: mock-key
+      id: mock_main
+      max_concurrent: 6
+      rpm: 100
+      token_quota: 0
+    type: openai
