@@ -15,7 +15,6 @@ use agentos_core::traits::{
 use agentos_core::types::{PipelineConfig, StepLibrary};
 use agentos_engine::AdrEngineImpl;
 use agentos_plugin_loader::CapabilityRegistryImpl;
-use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -693,10 +692,6 @@ pub async fn get_plugin_config_with_etag(
     Ok(([(axum::http::header::ETAG, etag)], axum::Json(resp)).into_response())
 }
 
-// 触发 HeaderMap/IntoResponse 的使用（headers 参数预留用于鉴权扩展）。
-#[allow(dead_code)]
-fn _headers_used(_h: HeaderMap) {}
-
 // ── 监控 M5/M5b：指标查询与导出端点（监控设计 §五）──
 
 /// `/api/v1/metrics` 查询参数。
@@ -817,11 +812,112 @@ pub async fn metrics_prometheus_handler(
     Ok(export_prometheus(&views))
 }
 
-/// 从请求头提取 If-Match（备用：支持 header 形式而非 body）。
-#[allow(dead_code)]
-fn extract_if_match_header(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("if-match")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string())
+// ── P7: 管道配置查询/更新端点（/api/v1/config/pipelines/{name}）──
+
+/// 校验管道名白名单（防路径穿越）。
+///
+/// 只允许字母、数字、下划线、连字符；拒绝 `/`、`\`、`.`（含 `..`）、空串。
+fn validate_pipeline_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 管道配置 GET 响应体：name + data（YAML 解析为 JSON）+ etag。
+#[derive(Debug, Serialize)]
+pub struct PipelineConfigResponse {
+    pub name: String,
+    pub data: serde_json::Value,
+    pub etag: String,
+}
+
+/// 管道配置 PUT 请求体：data 为完整管道配置内容（对齐 GenericConfigUpdateRequest）。
+#[derive(Debug, Deserialize)]
+pub struct PipelineConfigUpdateRequest {
+    pub data: serde_json::Value,
+}
+
+/// 解析管道配置文件路径：`config/pipelines/{name}.yaml`。
+fn pipeline_config_path(project_root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    project_root.join("config").join("pipelines").join(format!("{name}.yaml"))
+}
+
+/// GET /api/v1/config/pipelines/{name}（P7）。
+///
+/// 返回 config/pipelines/{name}.yaml 的内容（YAML → JSON）+ ETag。
+/// 未知管道 → 404；非法 name（路径穿越）→ 400。
+pub async fn get_pipeline_config_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<axum::Json<PipelineConfigResponse>, ApiError> {
+    if !validate_pipeline_name(&name) {
+        return Err(ApiError::BadRequest {
+            message: format!("invalid pipeline name: {name}"),
+        });
+    }
+    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
+        message: "project_root not configured".to_string(),
+    })?;
+    let path = pipeline_config_path(&project_root, &name);
+    let raw = std::fs::read_to_string(&path).map_err(|_| ApiError::NotFound {
+        message: format!("pipeline config not found: {name}"),
+    })?;
+    let etag = compute_etag(raw.as_bytes());
+    let data: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
+        message: format!("pipeline config yaml parse error: {e}"),
+    })?;
+    Ok(axum::Json(PipelineConfigResponse { name, data, etag }))
+}
+
+/// PUT /api/v1/config/pipelines/{name}（P7）。
+///
+/// 原子写回 config/pipelines/{name}.yaml（tmp + rename + round-trip 校验），
+/// 返回新 ETag。非法 name → 400；父目录缺失自动创建。
+pub async fn put_pipeline_config_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<PipelineConfigUpdateRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    if !validate_pipeline_name(&name) {
+        return Err(ApiError::BadRequest {
+            message: format!("invalid pipeline name: {name}"),
+        });
+    }
+    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
+        message: "project_root not configured".to_string(),
+    })?;
+    let path = pipeline_config_path(&project_root, &name);
+
+    // B4/B6：原子写 + round-trip 校验（复用 config_service）
+    atomic_write_yaml(&path, &req.data).map_err(config_err_to_api)?;
+
+    let new_etag = compute_etag(
+        std::fs::read_to_string(&path)
+            .map_err(|e| ApiError::Internal {
+                message: format!("re-read after write failed: {e}"),
+            })?
+            .as_bytes(),
+    );
+
+    Ok(axum::Json(json!({
+        "name": name,
+        "etag": new_etag,
+    })))
+}
+
+/// GET /api/v1/config/pipelines/{name}（带 ETag 头）。
+///
+/// 覆盖默认 JSON 响应，附加 `ETag` header（B4 乐观锁语义，供前端 If-Match 用）。
+pub async fn get_pipeline_config_with_etag(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    let axum::Json(resp) = get_pipeline_config_handler(
+        axum::extract::State(state),
+        axum::extract::Path(name),
+    )
+    .await?;
+    let etag = resp.etag.clone();
+    Ok(([(axum::http::header::ETAG, etag)], axum::Json(resp)).into_response())
 }

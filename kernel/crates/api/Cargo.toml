@@ -22,6 +22,7 @@ agentos-engine.workspace = true
 agentos-invoker.workspace = true
 agentos-mcp.workspace = true
 agentos-session.workspace = true
+agentos-config.workspace = true
 parking_lot = "0.12"
 chrono.workspace = true
 base64 = "0.22"

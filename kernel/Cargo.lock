@@ -54,6 +54,7 @@ dependencies = [
 name = "agentos-api"
 version = "0.2.0"
 dependencies = [
+ "agentos-config",
  "agentos-core",
  "agentos-engine",
  "agentos-invoker",
@@ -119,6 +120,7 @@ dependencies = [
 name = "agentos-engine"
 version = "0.2.0"
 dependencies = [
+ "agentos-config",
  "agentos-core",
  "agentos-invoker",
  "agentos-tenant",

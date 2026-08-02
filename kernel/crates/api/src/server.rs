@@ -45,9 +45,9 @@ use crate::compat_routes::{
     update_thread_handler,
 };
 use crate::routes::{
-    agents_handler, get_plugin_config_with_etag, health_handler, metrics_prometheus_handler,
-    metrics_query_handler, pipelines_handler, put_plugin_config_handler, schema_handler,
-    tools_handler, AppState,
+    agents_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
+    metrics_prometheus_handler, metrics_query_handler, pipelines_handler, put_pipeline_config_handler,
+    put_plugin_config_handler, schema_handler, tools_handler, AppState,
 };
 
 /// WebSocket 消息请求体。
@@ -90,6 +90,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents", get(agents_handler))
         .route("/api/v1/pipelines", get(pipelines_handler))
         .route("/api/v1/tools", get(tools_handler))
+        // P7: 管道配置查询/更新（内核承载 config/pipelines/*.yaml）
+        .route(
+            "/api/v1/config/pipelines/{name}",
+            get(get_pipeline_config_with_etag).put(put_pipeline_config_handler),
+        )
         // P1-4: 插件配置读写端点（manifest config_files 映射）
         .route(
             "/api/v1/plugins/{id}/config/{file_id}",
