@@ -654,3 +654,69 @@ class TestProcessChanges:
         await center._process_changes(changes)
 
         assert not cb.called
+
+
+# ---------------------------------------------------------------------------
+# config_root 解析 — sidecar 相对路径失效修复
+# ---------------------------------------------------------------------------
+
+
+class TestConfigRootResolution:
+    """ConfigCenter 配置根目录解析。
+
+    sidecar 插件进程（由内核 invoker 以 working_dir=插件目录 启动）内，
+    默认相对路径 "config" 解析到不存在的目录，导致 get() 返回 None、
+    隔离策略回退默认 CONTAINER。修复要求：相对路径不存在时，
+    优先回退 AGENTOS_CONFIG_ROOT 环境变量，其次从模块位置推导项目根。
+    """
+
+    def test_relative_missing_config_root_falls_back_to_env(
+        self, tmp_path, monkeypatch
+    ):
+        """相对路径不存在时应回退到 AGENTOS_CONFIG_ROOT 环境变量。"""
+        env_cfg = tmp_path / "env_config"
+        isolation_dir = env_cfg / "isolation"
+        isolation_dir.mkdir(parents=True)
+        (isolation_dir / "isolation_policy.yaml").write_text(
+            "default:\n  isolation: non_isolated\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)  # 模拟 sidecar 进程：cwd 下无 config/
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(env_cfg))
+
+        center = ConfigCenter(config_root="config")
+
+        assert center._config_root == env_cfg
+        # 能正确加载隔离策略
+        data = center.get("isolation/isolation_policy.yaml")
+        assert data is not None
+        assert data["default"]["isolation"] == "non_isolated"
+
+    def test_relative_missing_config_root_falls_back_to_project_root(
+        self, tmp_path, monkeypatch
+    ):
+        """无环境变量时回退到从模块位置推导的项目根 config/。"""
+        monkeypatch.delenv("AGENTOS_CONFIG_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)  # 模拟 sidecar 进程：cwd 下无 config/
+
+        center = ConfigCenter(config_root="config")
+
+        expected = (
+            Path(__file__).resolve().parent.parent.parent / "config"
+        )
+        assert center._config_root.is_dir()
+        assert center._config_root == expected
+        data = center.get("isolation/isolation_policy.yaml")
+        assert data is not None
+        assert data["default"]["isolation"] == "non_isolated"
+
+    def test_absolute_config_root_unchanged(self, tmp_path):
+        """绝对路径配置根不应被改动。"""
+        center = ConfigCenter(config_root=tmp_path)
+        assert center._config_root == tmp_path
+
+    def test_existing_relative_config_root_unchanged(self, tmp_path, monkeypatch):
+        """已存在的相对路径配置根不应被改动（保持既有行为）。"""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config").mkdir()
+        center = ConfigCenter(config_root="config")
+        assert center._config_root == Path("config")

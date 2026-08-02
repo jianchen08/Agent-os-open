@@ -14,11 +14,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import sys
 import uuid
-from contextlib import contextmanager
 from typing import Any
 
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
@@ -49,6 +49,30 @@ def _bind_log_context(log_ctx: dict[str, Any]):
         from contextlib import nullcontext
 
         return nullcontext()
+
+
+def _filter_handler_kwargs(handler: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """按 handler 签名过滤工具参数，避免内部注入字段污染纯函数工具。
+
+    param_inject 插件会向所有工具参数注入内部上下文字段（parent_agent_level、
+    timestamp 等）。task 系工具签名含 **kwargs（VAR_KEYWORD），依赖
+    parent_agent_level 做权限校验，必须全量透传；纯函数工具无 **kwargs，
+    只传签名中声明的参数名，内部注入字段被过滤。
+
+    Args:
+        handler: 工具 handler。
+        arguments: 内核透传的工具参数（_log_ctx 已由调用方 pop）。
+
+    Returns:
+        过滤后的参数 dict。签名获取失败时回退全量透传（保持旧行为）。
+    """
+    try:
+        sig = inspect.signature(handler)
+    except (ValueError, TypeError):
+        return arguments
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return arguments
+    return {k: v for k, v in arguments.items() if k in sig.parameters}
 
 
 class KernelChannel:
@@ -331,7 +355,8 @@ class McpServer:
         log_ctx = arguments.pop("_log_ctx", None) or {}
 
         with _bind_log_context(log_ctx):
-            result = td.handler(**arguments) if arguments else td.handler()
+            kwargs = _filter_handler_kwargs(td.handler, arguments)
+            result = td.handler(**kwargs) if kwargs else td.handler()
             if asyncio.iscoroutine(result):
                 result = await result
 

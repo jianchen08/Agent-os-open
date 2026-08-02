@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable, Coroutine  # noqa: F401
@@ -193,7 +194,7 @@ class ConfigCenter:
         config_root: str | Path = "config",
         debounce_seconds: float = DEBOUNCE_SECONDS,
     ) -> None:
-        self._config_root = Path(config_root)
+        self._config_root = self._resolve_config_root(config_root)
         self._debounce_seconds = debounce_seconds
 
         # 文件内容哈希缓存 {file_path_str: sha256_hex}
@@ -229,6 +230,48 @@ class ConfigCenter:
         # ConfigCenter 不再在加载层拦截配置变更。
 
     # -- 公共接口 -----------------------------------------------------------
+
+    @staticmethod
+    def _resolve_config_root(config_root: str | Path) -> Path:
+        """解析配置根目录。
+
+        sidecar 插件进程（由内核 invoker 以 working_dir=插件目录 启动）内，
+        默认相对路径 "config" 会解析到不存在的目录，导致 get() 返回 None、
+        隔离策略回退默认 CONTAINER。此时依次回退：
+        1. AGENTOS_CONFIG_ROOT 环境变量（若已设置且目录存在）
+        2. 项目根推导路径（本模块位于 src/config/，向上三级 + config/）
+
+        Args:
+            config_root: 调用方传入的配置根目录（相对或绝对路径）。
+
+        Returns:
+            解析后的配置根目录。绝对路径或已存在的相对路径原样保留。
+        """
+        root = Path(config_root)
+        if root.is_absolute() or root.exists():
+            return root
+
+        # 相对路径且当前工作目录下不存在 → 依次回退
+        env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
+        if env_root:
+            env_path = Path(env_root)
+            if env_path.is_dir():
+                logger.info(
+                    "config_root 相对路径不存在，回退到 AGENTOS_CONFIG_ROOT=%s",
+                    env_path,
+                )
+                return env_path
+
+        fallback = Path(__file__).resolve().parent.parent.parent / "config"
+        if fallback.is_dir():
+            logger.info(
+                "config_root 相对路径不存在，回退到项目根推导路径=%s",
+                fallback,
+            )
+            return fallback
+
+        logger.warning("config_root 解析失败，保留原相对路径: %s", root)
+        return root
 
     @property
     def is_running(self) -> bool:

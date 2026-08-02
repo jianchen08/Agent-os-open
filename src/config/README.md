@@ -48,7 +48,17 @@ reloader.start()
 
 | 文件 | 职责 |
 |------|------|
+| `config_center.py` | 配置中心（ConfigCenter 热加载统一入口：watch / reload / get 公共接口 + 全局单例 `get_config_center()`） |
 | `reload.py` | 配置热重载（ConfigReloadHandler + ConfigReloader） |
 | `schema.py` | 配置 Schema 校验（ConfigSchemaValidator） |
 | `__init__.py` | 公共 API 导出 |
 | `README.md` | 模块文档 |
+
+### config_root 解析规则
+
+`ConfigCenter(config_root="config")` 默认使用相对路径 `config/`。当进程工作目录下不存在该相对路径（典型场景：sidecar 插件进程由内核 invoker 以 `working_dir=插件目录` 启动），按序回退：
+
+1. `AGENTOS_CONFIG_ROOT` 环境变量（若已设置且为存在的目录）
+2. 项目根推导路径 `Path(__file__).resolve().parent.parent.parent / "config"`（即仓库根 `config/`）
+
+绝对路径或已存在的相对路径原样保留，不做回退。该规则保证 sidecar 进程内 `get_config_center().get("isolation/isolation_policy.yaml")` 能正确加载配置，避免隔离策略误判。
