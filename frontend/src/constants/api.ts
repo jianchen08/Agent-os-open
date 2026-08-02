@@ -118,6 +118,9 @@ export const API_ENDPOINTS = {
     /** 通用配置（动态路径） */
     GENERIC_GET: (path: string) => `/ext/channel_api/config/generic/${path}`,
     GENERIC_UPDATE: (path: string) => `/ext/channel_api/config/generic/${path}`,
+    /** 管道配置（P7 内核专用端点，config_service denylist 含 pipelines，不走 generic） */
+    PIPELINE_GET: (name: string) => `/api/v1/config/pipelines/${name}`,
+    PIPELINE_UPDATE: (name: string) => `/api/v1/config/pipelines/${name}`,
   },
   /** 工具相关 - 对应后端 /api/v1/tools/* */
   TOOLS: {

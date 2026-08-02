@@ -232,7 +232,7 @@ export function PluginConfigEditor({
   )
 }
 
-function ConfigObject({
+export function ConfigObject({
   obj,
   parentPath,
   onChange,
