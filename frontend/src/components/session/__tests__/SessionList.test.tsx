@@ -430,4 +430,40 @@ describe('AC-1.3-4: 兼容现有功能', () => {
     expect(deleteButtons.length).toBeGreaterThan(0)
     expect(moreButtons.length).toBeGreaterThan(0)
   })
+
+  it('点击星标图标应直接调用 onStarSession（简化交互，无需打开下拉菜单）', () => {
+    const session = createMockSession({ starred: false })
+    render(
+      <SessionList
+        sessions={[session]}
+        activeSessionId={null}
+        deletingSessionIds={new Set()}
+        {...defaultCallbacks}
+      />,
+    )
+
+    // 通过 button 的 aria-label（星标/取消星标）抓取外层按钮，避免依赖内层 Star 组件的 data-testid 实现细节
+    const starButton = screen.getByRole('button', { name: /^(星标|取消星标)/ })
+    fireEvent.click(starButton)
+
+    expect(defaultCallbacks.onStarSession).toHaveBeenCalledTimes(1)
+    expect(defaultCallbacks.onStarSession).toHaveBeenCalledWith(session.id)
+  })
+
+  it('点击星标图标不应触发行点击（切换会话）', () => {
+    const session = createMockSession({ starred: false })
+    render(
+      <SessionList
+        sessions={[session]}
+        activeSessionId={null}
+        deletingSessionIds={new Set()}
+        {...defaultCallbacks}
+      />,
+    )
+
+    const starButton = screen.getByRole('button', { name: /^(星标|取消星标)/ })
+    fireEvent.click(starButton)
+
+    expect(defaultCallbacks.onSessionClick).not.toHaveBeenCalled()
+  })
 })

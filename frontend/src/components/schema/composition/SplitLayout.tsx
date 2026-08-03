@@ -8,7 +8,8 @@
  */
 
 import React from 'react'
-import { Splitter } from 'antd'
+// 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（同 FiveSpaceLayout 优化）
+import Splitter from 'antd/es/splitter'
 
 /** 分割布局属性 */
 interface SplitLayoutProps {

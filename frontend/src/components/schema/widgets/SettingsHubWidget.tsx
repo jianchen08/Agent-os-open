@@ -11,15 +11,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
+import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { getSchema } from '@/services/api/schema'
 import { cn } from '@/lib/utils'
+import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
 type NavKey =
   | 'kernel-theme'
   | 'kernel-plugins'
+  | 'kernel-pipeline'
   | `plugin:${string}`
 
 interface NavItem {
@@ -29,10 +32,13 @@ interface NavItem {
   description?: string
 }
 
-const KERNEL_NAV: NavItem[] = [
-  { key: 'kernel-theme', label: '主题', group: '内核' },
-  { key: 'kernel-plugins', label: '插件注册表', group: '内核' },
-]
+// 内核设置导航项统一来自共享数据源（与 SettingsPage.BUILTIN_ITEMS 同源，避免散点双修）
+const KERNEL_NAV: NavItem[] = KERNEL_NAV_ITEMS.map((item) => ({
+  key: `kernel-${item.id}` as NavKey,
+  label: item.label,
+  group: item.group,
+  description: item.description,
+}))
 
 /**
  * 设置中枢 — 内嵌设置导航 + 内容区
@@ -114,6 +120,7 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
       {/* 右内容区：内嵌现有设置页（无「设置总览」） */}
       <main className="min-h-0 min-w-0 flex-1 overflow-auto">
         {active === 'kernel-theme' && <ThemeSettingsPage />}
+        {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
         {active === 'kernel-plugins' && (
           <PluginsSettingsPage
             onSelectPluginConfig={(pluginId, fileId) => {

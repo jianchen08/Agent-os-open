@@ -5,6 +5,7 @@
  * 插件配置走 0.2 /api/v1/plugins/{id}/config/{file_id}。
  */
 
+import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -35,29 +36,16 @@ type NavItem =
       pluginName: string
     }
 
-const BUILTIN_ITEMS: Extract<NavItem, { kind: 'builtin' }>[] = [
-  {
+// 内核设置导航项统一来自共享数据源（与 SettingsHubWidget.KERNEL_NAV 同源，避免散点双修）
+const BUILTIN_ITEMS: Extract<NavItem, { kind: 'builtin' }>[] = KERNEL_NAV_ITEMS.map(
+  (item) => ({
     kind: 'builtin',
-    id: 'theme',
-    title: '主题设置',
-    description: '切换界面主题和显示模式',
-    icon: '🎨',
-  },
-  {
-    kind: 'builtin',
-    id: 'plugins',
-    title: '插件管理',
-    description: '启用/禁用插件、查看状态',
-    icon: '🔌',
-  },
-  {
-    kind: 'builtin',
-    id: 'pipeline',
-    title: '管道配置',
-    description: '管理管道插件链与 Agent 管道配置',
-    icon: '🔀',
-  },
-]
+    id: item.id,
+    title: item.title,
+    description: item.description,
+    icon: item.icon,
+  }),
+)
 
 /** 设置页主组件：左导航右编辑 */
 export function SettingsPage() {

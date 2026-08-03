@@ -143,16 +143,28 @@ const SessionItem = memo<SessionItemProps>(
             {session.title}
           </span>
 
-          {/* P6: 星标图标始终展示——已星标金色填充+过渡动画；未星标灰色描边，hover 金色提示 */}
-          <Star
-            className={cn(
-              'h-4 w-4 shrink-0 transition-all duration-200',
-              session.starred
-                ? 'fill-amber-400 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]'
-                : 'text-muted-foreground opacity-60 group-hover:text-amber-400 group-hover:opacity-100',
-            )}
-            data-testid="star-icon"
-          />
+          {/* 星标简化：单一点击切换收藏（金色实心=已收藏，灰色描边=未收藏） */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onStar()
+            }}
+            className="shrink-0 rounded p-0.5 transition-opacity hover:opacity-80"
+            aria-label={session.starred ? '取消星标' : '星标'}
+            title={session.starred ? '取消星标' : '星标'}
+            data-testid="star-button"
+          >
+            <Star
+              className={cn(
+                'h-4 w-4 transition-all duration-200',
+                session.starred
+                  ? 'fill-amber-400 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]'
+                  : 'text-muted-foreground opacity-60 group-hover:text-amber-400 group-hover:opacity-100',
+              )}
+              data-testid="star-icon"
+            />
+          </button>
 
           {isDeleting && (
             <Loader2 className="text-muted-foreground h-3.5 w-3.5 shrink-0 animate-spin" />
