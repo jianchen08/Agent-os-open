@@ -212,7 +212,9 @@ export function CodeBlockWidget(props: Record<string, unknown>) {
       document.body.appendChild(textarea)
       textarea.select()
       document.execCommand('copy')
-      document.body.removeChild(textarea)
+      // 判空移除：异步路径下 textarea 可能已被移除（React StrictMode/组件卸载），
+      // 直接 removeChild 会抛 NotFoundError，先检查 parentNode 避免报错
+      if (textarea.parentNode) textarea.parentNode.removeChild(textarea)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
