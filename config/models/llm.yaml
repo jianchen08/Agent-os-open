@@ -9,7 +9,7 @@ defaults:
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: mock-llm
+    large: minimax-m3
     medium: minimax-m3
     small: minimax-m3
 embeddings: {}
@@ -130,7 +130,7 @@ models:
     reasoning_model: true
   mock-llm:
     api_base: http://127.0.0.1:18080/v1
-    api_key: mock-key
+    api_key: '****'
     context_window: 1000000
     default_params:
       max_tokens: 4096
@@ -157,6 +157,15 @@ providers:
       rpm: 10
       token_quota: 0
     type: minimax
+  mock_llm:
+    api_base: http://127.0.0.1:18080/v1
+    keys:
+    - api_key: '****'
+      id: mock_main
+      max_concurrent: 6
+      rpm: 100
+      token_quota: 0
+    type: openai
   yichengc:
     api_base: https://ai.1cc.ai/v1
     keys:
@@ -184,12 +193,3 @@ providers:
       rpm: 10
       token_quota: 0
     type: zai
-  mock_llm:
-    api_base: http://127.0.0.1:18080/v1
-    keys:
-    - api_key: mock-key
-      id: mock_main
-      max_concurrent: 6
-      rpm: 100
-      token_quota: 0
-    type: openai
