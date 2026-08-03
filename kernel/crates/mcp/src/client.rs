@@ -273,6 +273,13 @@ impl McpClient {
                             // 进行中的 send_request（如 initialize）等到 120s 超时才失败，
                             // 这里记 warn 让"sidecar 崩溃"在日志里可见。
                             tracing::warn!("[mcp] sidecar stdout EOF（进程退出）");
+                            // 关键修复（工具调用"调用前卡死"根因之二）：
+                            // sidecar 崩溃时，进行中的 send_request 的 oneshot 若不 resolve，
+                            // 调用方只能等满 120s 超时——用户感知为"工具调用卡死"。
+                            // 这里清空 pending（drop 所有 oneshot sender）→ rx 端立即收到
+                            // channel closed → send_request 快速失败返回错误，不阻塞调用方。
+                            let mut pending_map = pending.lock().await;
+                            pending_map.clear();
                             break; // EOF
                         }
                         Ok(_) => {

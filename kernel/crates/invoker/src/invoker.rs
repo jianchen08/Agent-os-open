@@ -333,6 +333,13 @@ impl PluginInvokerImpl {
     /// 故 PYTHONPATH 同时含两者。只放其一会导致另一种写法的插件 sidecar 启动即崩
     /// （实测：prompt_build 用 `from config.settings`、SDK 用 `from src.core.logging`）。
     ///
+    /// 额外注入 `project_root/plugins/sdk/src`——**agentos_plugin_sdk 源码目录**。
+    /// 所有工具插件（simple/bash/download/human/builtin_tools 等）server.py 都
+    /// `from agentos_plugin_sdk import AgentOSPlugin`，而 SDK 通常未 pip install
+    /// （或版本与源码不同步），必须能从 PYTHONPATH 直接解析。缺失时 sidecar 启动即
+    /// `ModuleNotFoundError: agentos_plugin_sdk` 崩溃 → 内核 initialize 等不到响应 →
+    /// 工具调用"调用前卡死"（120s 超时，用户感知为无响应）。
+    ///
     /// 返回的字符串已拼上原有的 PYTHONPATH 环境变量（若存在）。
     fn resolve_pythonpath_src(&self) -> Option<String> {
         // ① 显式注入的 project_root（最可靠）
@@ -344,11 +351,16 @@ impl PluginInvokerImpl {
             Some(plugins_path.parent()?.parent()?.to_path_buf())
         })?;
 
-        // 拼接两个候选目录：project_root（解 src. 前缀）+ project_root/src（解裸 import）。
+        // 拼接候选目录：project_root（解 src. 前缀）+ project_root/src（解裸 import）
+        // + project_root/plugins/sdk/src（agentos_plugin_sdk 源码，工具插件公共依赖）。
         let mut dirs: Vec<std::path::PathBuf> = vec![project_root.clone()];
         let src_dir = project_root.join("src");
         if src_dir.is_dir() {
             dirs.push(src_dir);
+        }
+        let sdk_dir = project_root.join("plugins/sdk/src");
+        if sdk_dir.is_dir() {
+            dirs.push(sdk_dir);
         }
 
         // PYTHONPATH 是 env 变量，路径间用 **环境变量分隔符**（Windows ';'、Unix ':'）
@@ -2664,5 +2676,27 @@ mod tests {
         let result = invoker.discover_new_plugins().await;
         assert!(result.is_ok(), "discover_new_plugins 应返回 Ok");
         assert_eq!(result.unwrap().len(), 0, "空 MockLoader 应发现 0 个插件");
+    }
+
+    #[test]
+    fn test_resolve_pythonpath_src_includes_sdk_dir() {
+        // 根因回归：resolve_pythonpath_src 注入的 PYTHONPATH 必须包含
+        // project_root/plugins/sdk/src（agentos_plugin_sdk 源码目录）。
+        // 缺失时 sidecar 启动即 `ModuleNotFoundError: agentos_plugin_sdk` 崩溃，
+        // 内核 initialize 永远等不到响应 → 工具调用"调用前卡死"（120s 超时）。
+        let loader = Arc::new(MockLoader::new());
+        let invoker = PluginInvokerImpl::new(loader);
+        let root = repo_root();
+        invoker.set_pythonpath_src(root.clone());
+
+        let py = invoker
+            .resolve_pythonpath_src()
+            .expect("resolve_pythonpath_src 应返回 Some");
+        let sdk_dir = root.join("plugins/sdk/src").to_string_lossy().into_owned();
+        assert!(
+            py.contains(&sdk_dir),
+            "PYTHONPATH 必须包含 plugins/sdk/src（agentos_plugin_sdk 源码目录），实际: {}",
+            py
+        );
     }
 }
