@@ -93,9 +93,9 @@ set "AGENTOS_CONFIG_ROOT=%PROJECT_ROOT%\config"
 set "KERNEL_LOG=%PROJECT_ROOT%\.kernel_02.log"
 start "AgentOS Kernel" /B cmd /c ""%KERNEL_BIN%" > "%KERNEL_LOG%" 2>&1"
 
-echo        Waiting for kernel...
+echo        Waiting for kernel (poll /health up to 60s)...
 set "KERNEL_READY=0"
-for /l %%i in (1,1,15) do (
+for /l %%i in (1,1,60) do (
     if "!KERNEL_READY!"=="0" (
         curl -s -o nul -w "%%{http_code}" "http://localhost:%AGENTOS_KERNEL_PORT%/health" 2>nul | findstr "200" >nul
         if not errorlevel 1 (
@@ -107,7 +107,11 @@ for /l %%i in (1,1,15) do (
     )
 )
 if "!KERNEL_READY!"=="0" (
-    echo [WARN] Kernel not ready within 15s, continuing anyway.
+    echo [ERROR] Kernel not ready within 60s, aborting.
+    echo [HINT] Kernel did not answer /health. Check log: %KERNEL_LOG%
+    taskkill /F /T /IM agentos-kernel.exe >nul 2>&1
+    pause
+    exit /b 1
 )
 echo.
 
@@ -126,13 +130,13 @@ REM  Step 3: start frontend (proxy to 0.2 kernel :9100)
 REM ============================================================
 echo [3/3] Starting frontend on port :%AGENTOS_FRONTEND_PORT%...
 
-REM 检查前端依赖是否真正安装完整（node_modules/.bin/vite.cmd 存在）。
-REM 不能只判断 node_modules 目录是否存在：该目录可能为空或不完整，
-REM 此时 npx 会去远程下载 vite 并弹出 "Ok to proceed? (y)" 交互确认，
-REM 而脚本是非交互后台运行，无人应答 -> 卡满 30s 超时（即本次故障）。
+REM Check frontend deps really complete (node_modules/.bin/vite.cmd exists).
+REM Do not only check node_modules dir existence: it may be empty/incomplete,
+REM otherwise npx would fetch vite remotely and pop "Ok to proceed? (y)" prompt,
+REM while this script runs non-interactively in background -> blocked till timeout.
 if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
     if exist "%FRONTEND_DIR%\node_modules" (
-        echo        [INFO] node_modules 不完整，重新安装前端依赖...
+        echo        [INFO] node_modules incomplete, reinstalling frontend deps...
     ) else (
         echo        Installing frontend dependencies...
     )
@@ -148,7 +152,7 @@ if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
 )
 
 pushd "%FRONTEND_DIR%"
-REM --yes: 万一本地仍缺 vite，npx 自动下载而不弹交互确认。
+REM --yes: if local vite still missing, npx auto-downloads without prompt.
 start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://localhost:%AGENTOS_KERNEL_PORT%&& npx --yes vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
 popd
 

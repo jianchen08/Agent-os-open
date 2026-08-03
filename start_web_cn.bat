@@ -59,7 +59,7 @@ set "ISOLATION_PLUGIN_DIR=%cd%\plugins\shared\system\isolation"
 echo [OK] Python for isolation: %PYEXE%
 
 REM ============================================================
-REM  WSL/Docker orchestration — delegated to isolation plugin
+REM  WSL/Docker orchestration - delegated to isolation plugin
 REM  (was ~150 lines of inline WSL/Docker logic, now calls plugin)
 REM ============================================================
 
@@ -99,7 +99,7 @@ if errorlevel 1 goto :no_wsl_docker
 echo [INFO] WSL docker mode detected
 
 REM ============================================================
-REM WSL kernel health check — via isolation plugin
+REM WSL kernel health check - via isolation plugin
 REM ============================================================
 echo [INFO] Checking WSL kernel health...
 "%PYEXE%" "%ISOLATION_CLI%" health "%WSL_DIR%"
@@ -114,7 +114,7 @@ REM Keep WSL alive (prevents WSL suspend)
 powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'sleep infinity' } | Select-Object -First 1)) { Start-Process wsl -ArgumentList '-d','Ubuntu','--exec','/bin/bash','-c','exec sleep infinity' -WindowStyle Hidden }" >nul 2>&1
 
 REM ============================================================
-REM Ensure dockerd running — via isolation plugin
+REM Ensure dockerd running - via isolation plugin
 REM ============================================================
 echo [INFO] Ensuring dockerd running...
 "%PYEXE%" "%ISOLATION_CLI%" daemon "%WSL_DIR%"
@@ -129,7 +129,7 @@ REM Ensure docker compose plugin accessible
 wsl -d Ubuntu -u root -- bash -c "mkdir -p /usr/lib/docker/cli-plugins /root/.docker/cli-plugins; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose 2>/dev/null; ln -sf /usr/libexec/docker/cli-plugins/docker-compose /root/.docker/cli-plugins/docker-compose 2>/dev/null" >nul 2>&1
 
 REM ============================================================
-REM Get WSL IP — via isolation plugin
+REM Get WSL IP - via isolation plugin
 REM ============================================================
 echo [INFO] Getting WSL IP...
 for /f "delims=" %%i in ('"%PYEXE%" "%ISOLATION_CLI%" ip 2^>nul') do set "WSL_IP=%%i"
@@ -137,7 +137,7 @@ if not defined WSL_IP goto :no_wsl_ip
 echo [OK] WSL IP: %WSL_IP%
 
 REM ============================================================
-REM Setup port forwarding — via isolation plugin
+REM Setup port forwarding - via isolation plugin
 REM ============================================================
 echo [INFO] Setting up port forwarding...
 "%PYEXE%" "%ISOLATION_CLI%" portproxy "%WSL_IP%" "%FRONTEND_HOST_PORT%" "%REDIS_HOST_PORT%"
@@ -149,7 +149,7 @@ if "!PORTPROXY_RC!"=="0" (
 )
 
 REM ============================================================
-REM Start project containers — via isolation plugin
+REM Start project containers - via isolation plugin
 REM ============================================================
 echo [INFO] Starting project containers...
 "%PYEXE%" "%ISOLATION_CLI%" containers "%WSL_DIR%" "%FRONTEND_HOST_PORT%" "%REDIS_HOST_PORT%" "%BACKEND_PORT%"

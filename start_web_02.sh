@@ -261,7 +261,7 @@ KERNEL_PID=$!
 # 等待内核就绪
 echo -e "${YELLOW}       等待内核启动...${NC}"
 KERNEL_READY=false
-for i in $(seq 1 15); do
+for i in $(seq 1 60); do
     if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$KERNEL_PORT/health" 2>/dev/null | grep -q "200"; then
         KERNEL_READY=true
         echo -e "${GREEN}[OK] 内核已就绪 (http://localhost:$KERNEL_PORT)${NC}"
@@ -271,7 +271,7 @@ for i in $(seq 1 15); do
 done
 
 if [ "$KERNEL_READY" = false ]; then
-    echo -e "${RED}[ERROR] 内核未能在 15 秒内就绪${NC}"
+    echo -e "${RED}[ERROR] 内核未能在 60 秒内就绪${NC}"
     kill "$KERNEL_PID" 2>/dev/null || true
     exit 1
 fi
