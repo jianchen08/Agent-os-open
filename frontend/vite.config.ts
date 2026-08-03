@@ -1079,6 +1079,17 @@ export default defineConfig(({ mode }) => {
         'cosmiconfig',
         'd3-sankey',
         'dayjs',
+        // dayjs 插件子路径：@rc-component/picker（antd DatePicker 依赖）以
+        // `import x from 'dayjs/plugin/xxx'` 引入 6 个插件。noDiscovery: true 下
+        // 若 include 只列主包，插件子路径不会被预构建，浏览器直接以 ESM 加载
+        // UMD 源文件报 "does not provide an export named 'default'"，React 挂载
+        // 中断导致页面白屏。补全子路径由 rolldown 预构建（CJS interop 正确）。
+        'dayjs/plugin/weekday',
+        'dayjs/plugin/localeData',
+        'dayjs/plugin/weekOfYear',
+        'dayjs/plugin/weekYear',
+        'dayjs/plugin/advancedFormat',
+        'dayjs/plugin/customParseFormat',
         'debug',
         'delayed-stream',
         'dequal',
@@ -1199,6 +1210,16 @@ export default defineConfig(({ mode }) => {
         'use-merge-value',
         'use-sidecar',
         'use-sync-external-store',
+        // use-sync-external-store 的 shim 子路径为 CJS（module.exports = require(...)），
+        // zustand（esm/index.mjs → shim、esm/traditional.mjs → shim/with-selector.js）
+        // 与 @base-ui/utils（store/useStore.mjs → shim/with-selector，注意无 .js 后缀）
+        // 以 ESM import 引入。noDiscovery: true 下若只列主包，浏览器直接以 ESM 加载
+        // CJS 源文件报 "does not provide an export named 'useSyncExternalStore'"，
+        // React 挂载中断白屏。补全 shim 子路径（含无 .js 与带 .js 两种写法）由
+        // rolldown 预构建，保证 vite 对两种 import 写法都能重写到预构建产物。
+        'use-sync-external-store/shim',
+        'use-sync-external-store/shim/with-selector',
+        'use-sync-external-store/shim/with-selector.js',
         'v8n',
         'zustand',
         'zustand/middleware',

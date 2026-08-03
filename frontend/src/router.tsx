@@ -2,7 +2,6 @@
 
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
-import { ChatContainer } from './components/chat/ChatContainer'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
 import { ApprovalReviewOverlay } from './components/approval'
 import { ChatPanelShell } from './components/layout/ChatPanelShell'
@@ -36,6 +35,14 @@ const SettingsPage = lazy(() =>
 )
 const ApiSettingsPage = lazy(() =>
   import('@/pages/settings/ApiSettingsPage').then((m) => ({ default: m.ApiSettingsPage })),
+)
+// 聊天容器懒加载：ChatContainer 依赖链包含 @lobehub/ui 全量入口（EmojiPicker→
+// @emoji-mart/data 3.2MB、Markdown→highlight.js 197 语言）与 react-syntax-highlighter
+// 全量 Prism（300 语言）、mermaid，静态导入会让 /login 等公共页也必须加载整个聊天
+// 依赖链（4000+ 模块），冷启动连接风暴导致页面白屏/加载超时（"前端进不去"）。
+// 懒加载后仅进入聊天界面时才拉取该 chunk，登录/注册页首屏只加载轻量依赖。
+const ChatContainer = lazy(() =>
+  import('./components/chat/ChatContainer').then((m) => ({ default: m.ChatContainer })),
 )
 const LlmSettingsPage = lazy(() =>
   import('@/pages/settings/LlmSettingsPage').then((m) => ({ default: m.LlmSettingsPage })),
@@ -382,29 +389,33 @@ function HomePage(): ReactNode {
   const sidebarContent = <Sidebar />
 
   // Render chat content (shared between layouts)
+  // ChatContainer 为懒加载组件（见顶部 lazy 定义），Suspense 包裹提供加载占位，
+  // 避免聊天 chunk 拉取期间整页空白。
   const chatContent = activeSessionId ? (
-    <ChatContainer
-      sessionId={activeSessionId}
-      isLoading={isSessionLoading}
-      // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
-      // 此 prop 仅作兼容保留，实际不影响输入框状态
-      isGenerating={false}
-      onSendMessage={handleSendMessage}
-      onStopGenerate={handleStopGenerate}
-      hasMoreMessages={hasMoreMessages}
-      isLoadingMoreMessages={isLoadingMoreMessages}
-      onLoadMoreMessages={() => {
-        const store = usePipelineMessageStore.getState()
-        const pid = store.activePipelineId
-        const sid = useSessionStore.getState().activeSessionId
-        if (!pid) return
-        if (!store.hasMoreOlderByPipeline[pid]) return
-        if (store.isLoadingOlderByPipeline[pid]) return
-        const topCursor = store.getTopCursor(pid)
-        store.fetchMessages(pid, { before_sequence: topCursor, threadId: sid || undefined })
-      }}
-      className="flex-1"
-    />
+    <Suspense fallback={LazyFallback}>
+      <ChatContainer
+        sessionId={activeSessionId}
+        isLoading={isSessionLoading}
+        // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
+        // 此 prop 仅作兼容保留，实际不影响输入框状态
+        isGenerating={false}
+        onSendMessage={handleSendMessage}
+        onStopGenerate={handleStopGenerate}
+        hasMoreMessages={hasMoreMessages}
+        isLoadingMoreMessages={isLoadingMoreMessages}
+        onLoadMoreMessages={() => {
+          const store = usePipelineMessageStore.getState()
+          const pid = store.activePipelineId
+          const sid = useSessionStore.getState().activeSessionId
+          if (!pid) return
+          if (!store.hasMoreOlderByPipeline[pid]) return
+          if (store.isLoadingOlderByPipeline[pid]) return
+          const topCursor = store.getTopCursor(pid)
+          store.fetchMessages(pid, { before_sequence: topCursor, threadId: sid || undefined })
+        }}
+        className="flex-1"
+      />
+    </Suspense>
   ) : (
     <div className="text-foreground flex flex-1 flex-col items-center justify-center gap-6 px-8">
       <div className="flex flex-col items-center gap-3">
