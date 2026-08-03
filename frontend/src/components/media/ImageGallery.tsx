@@ -234,7 +234,9 @@ export const ImageGallery = memo<ImageGalleryProps>(
         link.download = image.title || `image-${image.id}`
         document.body.appendChild(link)
         link.click()
-        document.body.removeChild(link)
+        // 判空移除：React 19 StrictMode/HMR/外部脚本可能在 click 后已移除 link，
+        // 直接 removeChild 会抛 NotFoundError，先检查 parentNode 避免报错
+        if (link.parentNode) link.parentNode.removeChild(link)
       },
       []
     )
