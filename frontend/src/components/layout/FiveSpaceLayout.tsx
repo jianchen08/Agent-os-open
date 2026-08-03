@@ -3,7 +3,9 @@
 import { Minimize2, FolderOpen } from '@/assets/icons'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { getEditorForFile } from '@/config/fileEditors'
-import { Splitter } from 'antd'
+// 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
+// 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
+import Splitter from 'antd/es/splitter'
 import apiClient from '@/services/api/client'
 import { safeLoadLayout } from '@/services/layout/resolver'
 import type { LayoutConfig } from '@/types/layout'
