@@ -73,7 +73,7 @@ export function SplitLayout({
   }
 
   return (
-    <Splitter layout={direction} className="h-full w-full">
+    <Splitter orientation={direction} className="h-full w-full">
       {childArray.map((child, i) => (
         <Splitter.Panel
           key={i}

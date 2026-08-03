@@ -267,6 +267,12 @@ apiClient.interceptors.response.use(
       requestUrl.startsWith('/api/v1/datasource/')
 
     if (!isOptionalEndpoint) {
+      // DEV: 打印 404 请求 URL 定位根因（console-error-fix: errorReporting [VALIDATION] 404）。
+      // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 requestUrl 便于快速定位；
+      // 已修复端点（如 /ext/channel_api/tasks）不再触发此分支。
+      if (import.meta.env.DEV && error.response?.status === 404) {
+        console.warn(`[API-404] requestUrl=${requestUrl} status=404`)
+      }
       reportError(
         apiError.message,
         errorType,

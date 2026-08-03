@@ -595,7 +595,7 @@ export function FiveSpaceLayout({
             ) : (
               /* 桌面：比例拖动 — 侧栏 | (聊天 + 工作区)；隐藏时侧栏 0 宽完全消失 */
               <Splitter
-                layout="horizontal"
+                orientation="horizontal"
                 className="min-h-0 flex-1 overflow-hidden"
                 onResize={(sizes) => {
                   // 拖动中持续写本地 %，让受控 size 跟手。
