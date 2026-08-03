@@ -16,7 +16,7 @@ use agentos_core::types::{
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{info, warn};
 
 /// SQLite 四表 DDL（建表脚本）
 const DDL: &str = "
@@ -219,9 +219,82 @@ pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// 判断 StorageError 是否为 SQLite 损坏类错误（可自愈重建）。
+///
+/// 覆盖 rusqlite 对坏库的典型报错：
+/// - `database disk image is malformed`（SQLITE_CORRUPT=11，宿主 .kernel_02.log 即此报错）
+/// - `file is not a database` / `file is encrypted or is not a database`（SQLITE_NOTADB=26）
+/// - 其他包含 corrupt 字样的损坏描述
+///
+/// 权限/IO/磁盘满等非损坏错误**不**在此列，原样传播、不做静默降级。
+fn is_corruption_error(e: &StorageError) -> bool {
+    match e {
+        StorageError::Database(msg) => {
+            let lower = msg.to_lowercase();
+            lower.contains("malformed")
+                || lower.contains("not a database")
+                || lower.contains("file is encrypted")
+                || lower.contains("corrupt")
+        }
+        _ => false,
+    }
+}
+
+/// 备份损坏的 SQLite 文件（含 -wal/-shm 伴生文件）为 `<src>.corrupt-<ts>`，保留现场供排查。
+///
+/// 注意：WAL 模式下损坏可能落在 -wal/-shm 伴生文件中，因此三个文件一起处理。
+/// 备份失败（如文件系统权限异常）不在这里阻断——后续重建 open_inner 若仍失败，
+/// 错误会正常传播给调用方，不会假装自愈成功。
+fn backup_corrupt_files(path: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{}.{}", d.as_secs(), d.subsec_nanos()))
+        .unwrap_or_else(|_| "unknown".to_string());
+    for suffix in ["", "-wal", "-shm"] {
+        let src = format!("{path}{suffix}");
+        let dst = format!("{src}.corrupt-{ts}");
+        if std::path::Path::new(&src).exists() {
+            match std::fs::rename(&src, &dst) {
+                Ok(()) => warn!(
+                    from = %src,
+                    to = %dst,
+                    "损坏的 SQLite 文件已备份保留现场"
+                ),
+                Err(e) => warn!(
+                    from = %src,
+                    error = %e,
+                    "损坏的 SQLite 文件备份失败（继续尝试重建）"
+                ),
+            }
+        }
+    }
+}
+
 impl SqliteStore {
     /// 在指定路径创建 SQLite 数据库并初始化四表。
+    ///
+    /// 损坏自愈：若打开/初始化失败且错误为 SQLite 损坏类（malformed / not a database /
+    /// corrupt / file is encrypted，如进程异常退出或磁盘故障留下的坏库），自动将损坏文件
+    /// （含 -wal/-shm 伴生文件）备份为 `<path>.corrupt-<ts>` 保留现场，然后重建空库继续
+    /// 启动——避免 kernel 因单次库损坏直接崩溃退出（历史 issue：启动后 /health 不响应）。
+    /// 其他错误（权限、IO 等）原样传播，不做静默降级。
     pub fn open(path: &str) -> Result<Self, StorageError> {
+        match Self::open_inner(path) {
+            Ok(store) => Ok(store),
+            Err(e) if is_corruption_error(&e) => {
+                warn!(
+                    path = %path,
+                    error = %e,
+                    "SQLite 数据库损坏，自动备份并重建新库（原数据保留在 .corrupt-* 备份中）"
+                );
+                backup_corrupt_files(path);
+                Self::open_inner(path)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_inner(path: &str) -> Result<Self, StorageError> {
         let conn = Connection::open(path).map_err(|e| StorageError::Database(e.to_string()))?;
         Self::init(&conn)?;
         Ok(Self {
@@ -1703,6 +1776,65 @@ mod tests {
         store
             .create_run("test_run_1", "hash_abc", "default")
             .unwrap();
+    }
+
+    /// 回归测试：损坏的 SQLite 文件不应导致 kernel 启动崩溃（issue: kernel 启动后 /health 不响应）。
+    ///
+    /// 背景：`.kernel_02.log` 末行 `Error: Database("database disk image is malformed")` ——
+    /// 进程异常退出/磁盘故障可能留下损坏的 agentos_kernel.db，`SqliteStore::open()` 直接
+    /// 返回 Err，main 传播退出，/health 永远不响应，启动脚本 60s 轮询超时。
+    ///
+    /// 期望行为：open 检测到损坏类错误时自愈——备份损坏文件保留现场，重建空库返回 Ok，
+    /// 新库可正常读写（create_run / get_run）。
+    #[tokio::test]
+    async fn test_open_corrupt_db_self_heals() {
+        // 模拟损坏的 SQLite 文件：文件头不是 "SQLite format 3"（进程崩溃/磁盘异常场景）
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("agentos_kernel.db");
+        std::fs::write(&db_path, vec![0xDE_u8; 8192]).unwrap();
+
+        // open 不应报错退出，而应自愈：返回 Ok 且新库可正常读写
+        let store = SqliteStore::open(db_path.to_str().unwrap()).unwrap();
+        store
+            .create_run("run_self_heal", "hash_abc", "default")
+            .unwrap();
+        let run = store.get_run("run_self_heal").await.unwrap();
+        assert_eq!(run.run_id, "run_self_heal");
+
+        // 损坏文件应被备份保留现场（agentos_kernel.db.corrupt-*），便于人工排查
+        let backup_names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("agentos_kernel.db.corrupt-"))
+            .collect();
+        assert!(
+            !backup_names.is_empty(),
+            "损坏文件应被备份保留现场，实际: {:?}",
+            backup_names
+        );
+    }
+
+    /// 正常库不应被误备份重建（自愈只针对损坏场景，健康库原样打开）。
+    #[tokio::test]
+    async fn test_open_healthy_db_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("healthy.db");
+        let store = SqliteStore::open(db_path.to_str().unwrap()).unwrap();
+        store
+            .create_run("run_healthy", "hash_abc", "default")
+            .unwrap();
+        let run = store.get_run("run_healthy").await.unwrap();
+        assert_eq!(run.run_id, "run_healthy");
+
+        // 不应产生任何 .corrupt-* 备份文件
+        let corrupt_files: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".corrupt-"))
+            .collect();
+        assert!(corrupt_files.is_empty(), "健康库不应产生备份: {:?}", corrupt_files);
     }
 
     #[tokio::test]
