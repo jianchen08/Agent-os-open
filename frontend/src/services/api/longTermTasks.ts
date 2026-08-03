@@ -1,6 +1,7 @@
 /** 长期任务 API 服务 基于 Task API 实现长期任务功能 */
 
 import { apiClient } from '@/services/api/client'
+import { API_ENDPOINTS } from '@/constants/api'
 import type { Task, TaskStatus } from '@/types/task'
 
 /** 长期任务列表响应 */
@@ -35,7 +36,7 @@ export async function fetchLongTermTasks(params?: {
     queryParams.append('status', status)
   }
 
-  const response = await apiClient.get<TaskListApiResponse>(`/api/v1/tasks?${queryParams}`)
+  const response = await apiClient.get<TaskListApiResponse>(`${API_ENDPOINTS.TASKS.LIST}?${queryParams}`)
 
   // 从后端 {items, total} 结构中取出任务列表，再客户端侧过滤长期任务
   const allTasks = response.data.items
@@ -50,7 +51,7 @@ export async function fetchLongTermTasks(params?: {
 /** 切换自动执行开关 */
 export async function toggleAutoExecute(taskId: string, enabled: boolean): Promise<Task> {
   // 先获取当前任务
-  const response = await apiClient.get<Task>(`/api/v1/tasks/${taskId}`)
+  const response = await apiClient.get<Task>(API_ENDPOINTS.TASKS.GET(taskId))
   const task = response.data
 
   // 更新标签
@@ -59,7 +60,7 @@ export async function toggleAutoExecute(taskId: string, enabled: boolean): Promi
     ? [...tags.filter((t) => t !== 'auto-execute'), 'auto-execute']
     : tags.filter((t) => t !== 'auto-execute')
 
-  const updateResponse = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
+  const updateResponse = await apiClient.patch<Task>(API_ENDPOINTS.TASKS.UPDATE(taskId), {
     tags: newTags,
   })
 
@@ -68,7 +69,7 @@ export async function toggleAutoExecute(taskId: string, enabled: boolean): Promi
 
 /** 暂停长期任务 */
 export async function pauseLongTermTask(taskId: string): Promise<Task> {
-  const response = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
+  const response = await apiClient.patch<Task>(API_ENDPOINTS.TASKS.UPDATE(taskId), {
     status: 'blocked',
   })
 
@@ -77,7 +78,7 @@ export async function pauseLongTermTask(taskId: string): Promise<Task> {
 
 /** 恢复长期任务 */
 export async function resumeLongTermTask(taskId: string): Promise<Task> {
-  const response = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
+  const response = await apiClient.patch<Task>(API_ENDPOINTS.TASKS.UPDATE(taskId), {
     status: 'running',
   })
 
@@ -86,7 +87,7 @@ export async function resumeLongTermTask(taskId: string): Promise<Task> {
 
 /** 取消长期任务 */
 export async function cancelLongTermTask(taskId: string, reason?: string): Promise<Partial<Task>> {
-  const response = await apiClient.post<Partial<Task>>(`/api/v1/tasks/${taskId}/cancel`, {
+  const response = await apiClient.post<Partial<Task>>(API_ENDPOINTS.TASKS.CANCEL(taskId), {
     reason: reason || '用户取消',
   })
   return response.data
@@ -94,7 +95,7 @@ export async function cancelLongTermTask(taskId: string, reason?: string): Promi
 
 /** 删除长期任务 */
 export async function deleteLongTermTask(taskId: string): Promise<void> {
-  await apiClient.delete(`/api/v1/tasks/${taskId}`)
+  await apiClient.delete(API_ENDPOINTS.TASKS.DELETE(taskId))
 }
 
 /** 将 Task 转换为 Project 格式 */

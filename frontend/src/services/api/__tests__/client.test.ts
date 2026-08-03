@@ -29,7 +29,7 @@ describe('API客户端配置', () => {
     })
 
     it('应该能够导入apiClient', async () => {
-      const apiClientModule = await import('../index')
+      const apiClientModule = await import('../client')
       expect(apiClientModule.apiClient).toBeDefined()
       expect(apiClientModule.default).toBeDefined()
     })

@@ -12,8 +12,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ── mock 外部依赖 ──
 
+// vi.mock 工厂在模块顶层被提升执行（hoisted），不能在工厂内引用顶层 const（TDZ 错误）。
+// 必须用 vi.hoisted 声明工厂所需的 mock 变量。
+const { responseUseMock, reportErrorMock } = vi.hoisted(() => ({
+  responseUseMock: vi.fn(),
+  reportErrorMock: vi.fn(),
+}))
+
 // mock axios：捕获 interceptors.response.use 的 error handler
-const responseUseMock = vi.fn()
 vi.mock('axios', () => ({
   default: {
     create: vi.fn(() => ({
@@ -26,7 +32,6 @@ vi.mock('axios', () => ({
 }))
 
 // mock errorReporting（外部依赖）
-const reportErrorMock = vi.fn()
 vi.mock('../../errorReporting', () => ({
   reportError: (...args: unknown[]) => reportErrorMock(...args),
   ErrorType: {
@@ -51,7 +56,7 @@ vi.mock('../../errorReporting', () => ({
 }))
 
 // mock retry：404 不触发重试分支
-vi.mock('../../utils/retry', () => ({
+vi.mock('../../../utils/retry', () => ({
   isRetryableError: vi.fn(() => false),
 }))
 
@@ -61,7 +66,7 @@ vi.mock('../../authCallbacks', () => ({
 }))
 
 // mock storage keys（client.ts 依赖）
-vi.mock('../../constants/storage', () => ({
+vi.mock('../../../constants/storage', () => ({
   STORAGE_KEYS: {
     ACCESS_TOKEN: 'access_token',
     REFRESH_TOKEN: 'refresh_token',
@@ -71,7 +76,7 @@ vi.mock('../../constants/storage', () => ({
 }))
 
 // 导入 client.ts（触发拦截器注册）
-import '../../client'
+import '../client'
 
 function getResponseErrorHandler(): (error: unknown) => Promise<unknown> {
   // response.use(成功handler, 错误handler) → error handler 在第二个参数
