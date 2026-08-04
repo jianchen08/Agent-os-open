@@ -98,6 +98,14 @@ pub struct McpClient {
     /// Capability 路由器——处理 sidecar 反向调用内核能力。
     /// None 时 sidecar 反向调用将被拒绝（返回 method not found）。
     router: Option<Arc<dyn CapabilityRouter>>,
+    /// JSON-RPC 请求等待响应的超时（默认 300s）。
+    ///
+    /// 背景（llm_core.execute 120s 超时修复）：原实现硬编码 120s，与 sidecar 端
+    /// LLM 调用的 first_token_timeout（llm.yaml 默认 120s）形成竞态——reasoning
+    /// model 首 token 接近 120s 时，内核先超时掐断，sidecar 的最终响应永远到不了
+    /// 内核（pending 已被移除）。默认 300s 覆盖 sidecar 端默认 first_token_timeout
+    /// （120s）并留足余量；调用方可用 [`McpClient::with_request_timeout`] 覆盖。
+    request_timeout: Duration,
 }
 
 impl McpClient {
@@ -118,6 +126,7 @@ impl McpClient {
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
             router: None,
+            request_timeout: Duration::from_secs(300),
         }
     }
 
@@ -135,7 +144,18 @@ impl McpClient {
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
             router: None,
+            request_timeout: Duration::from_secs(300),
         }
+    }
+
+    /// 设置 JSON-RPC 请求等待响应的超时。
+    ///
+    /// 调用方（如内核 invoker 对 LLM 类插件）可根据 sidecar 端调用时长
+    /// （llm.yaml call_timeout / first_token_timeout）配置，避免内核先于
+    /// sidecar 掐断导致"响应永远到不了"的假超时。
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// 设置子进程工作目录（stdio 模式下生效）。
@@ -350,6 +370,14 @@ impl McpClient {
     /// 含级别名，但格式可配），这里统一以 INFO 转发，避免误判；EOF 记 WARN。
     /// 若 sidecar 行内已含 `ERROR`/`WARNING` 等关键字，仍按 INFO 转发（保真原文），
     /// 由日志聚合工具按内容过滤。
+    ///
+    /// 非 UTF-8 容错（llm_core.execute 120s 超时修复根因）：原实现用
+    /// `read_line`（严格 UTF-8 解码），Windows 宿主上 Python sidecar 的 stderr
+    /// （如含 GBK 中文路径的 traceback）产生非法字节时返回 `InvalidData` →
+    /// break 退出消费循环 → sidecar 继续写 stderr 管道，缓冲填满（~64KB）后
+    /// `write` 阻塞 → sidecar 进程卡死 → 无法响应 MCP 请求 → 内核等待超时。
+    /// 改为 `read_until(b'\n')` 按原始字节读行 + `String::from_utf8_lossy`
+    /// 解码（非法字节替换为 U+FFFD），读取永不因编码中断，杜绝管道阻塞。
     async fn start_stderr_reader(&self) {
         if let Some(stderr) = &self.stderr {
             let stderr = Arc::clone(stderr);
@@ -357,11 +385,13 @@ impl McpClient {
 
             tokio::spawn(async move {
                 let mut reader = stderr.lock().await;
-                let mut line = String::new();
+                let mut buf: Vec<u8> = Vec::new();
 
                 loop {
-                    line.clear();
-                    match reader.read_line(&mut line).await {
+                    buf.clear();
+                    // read_until 按字节读，不校验 UTF-8（read_line 会因非法字节报
+                    // InvalidData 并 break，导致 stderr 管道阻塞 sidecar）。
+                    match reader.read_until(b'\n', &mut buf).await {
                         Ok(0) => {
                             // stderr 关闭（通常与 sidecar 退出同时发生）。
                             tracing::warn!(
@@ -372,6 +402,8 @@ impl McpClient {
                             break;
                         }
                         Ok(_) => {
+                            // lossy 解码：非 UTF-8 字节替换为 U+FFFD，不中断消费。
+                            let line = String::from_utf8_lossy(&buf);
                             let trimmed = line.trim();
                             if trimmed.is_empty() {
                                 continue;
@@ -438,10 +470,16 @@ impl McpClient {
             });
         }
 
-        // 等待响应（超时 120 秒：LLM 调用尤其是 reasoning model 首次可能较慢）
-        let response = tokio::time::timeout(Duration::from_secs(120), rx)
+        // 等待响应（超时默认 300s：LLM 调用尤其是 reasoning model 首次可能较慢。
+        // 原硬编码 120s 与 sidecar 端 first_token_timeout（llm.yaml 默认 120s）
+        // 形成竞态——reasoning model 首 token 接近 120s 时内核先掐断，sidecar 的
+        // 最终响应永远到不了内核。默认 300s 覆盖并留足余量，可用
+        // with_request_timeout 按插件覆盖。）
+        let response = tokio::time::timeout(self.request_timeout, rx)
             .await
-            .map_err(|_| McpError::Timeout { timeout_secs: 120 })?
+            .map_err(|_| McpError::Timeout {
+                timeout_secs: self.request_timeout.as_secs(),
+            })?
             .map_err(|_| McpError::Protocol {
                 message: "response channel closed".to_string(),
             })?;
