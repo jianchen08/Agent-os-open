@@ -160,7 +160,7 @@ const SessionItem = memo<SessionItemProps>(
                 'h-4 w-4 transition-all duration-200',
                 session.starred
                   ? 'fill-amber-400 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]'
-                  : 'text-muted-foreground opacity-60 group-hover:text-amber-400 group-hover:opacity-100',
+                  : 'fill-none stroke-current stroke-[1.5] text-muted-foreground opacity-60 group-hover:text-amber-400 group-hover:opacity-100',
               )}
               data-testid="star-icon"
             />

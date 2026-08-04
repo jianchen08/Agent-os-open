@@ -170,7 +170,9 @@ export { PersonIcon }
 export { PersonIcon as User }
 export { PersonIcon as Users }
 export { PersonIcon as MapPin }
-export { PersonIcon as Star }
+import StarIcon from './star'
+export { StarIcon }
+export { StarIcon as Star }
 import PluginIcon from './plugin'
 export { PluginIcon }
 export { PluginIcon as Plug }
