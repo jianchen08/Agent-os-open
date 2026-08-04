@@ -1,0 +1,92 @@
+/**
+ * WebSocket 状态指示器样式
+ */
+
+.ws-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.ws-status-indicator.ws-status-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ws-status-indicator.ws-status-clickable:hover {
+  opacity: 0.8;
+  transform: scale(1.05);
+}
+
+/* 状态指示点 */
+.ws-status-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+/* 状态标签 */
+.ws-status-label {
+  line-height: 1;
+}
+
+/* 颜色主题 */
+.ws-status-success {
+  color: var(--status-success);
+  background-color: color-mix(in srgb, var(--status-success) 10%, transparent);
+}
+
+.ws-status-warning {
+  color: var(--status-warning);
+  background-color: color-mix(in srgb, var(--status-warning) 10%, transparent);
+}
+
+.ws-status-error {
+  color: var(--status-error);
+  background-color: color-mix(in srgb, var(--status-error) 10%, transparent);
+}
+
+.ws-status-default {
+  color: var(--status-pending);
+  background-color: color-mix(in srgb, var(--status-pending) 10%, transparent);
+}
+
+/* 重连按钮 */
+.ws-reconnect-button {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: hsl(var(--primary-foreground));
+  background-color: var(--status-info);
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ws-reconnect-button:hover {
+  background-color: var(--status-info);
+  filter: brightness(0.9);
+}
+
+.ws-reconnect-button:active {
+  transform: scale(0.95);
+}
+
+/* 响应式设计 */
+@media (max-width: 640px) {
+  .ws-status-indicator {
+    font-size: 11px;
+    padding: 3px 6px;
+    gap: 6px;
+  }
+
+  .ws-reconnect-button {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+}

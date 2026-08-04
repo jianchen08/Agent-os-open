@@ -1,0 +1,226 @@
+/**
+ * 动画定义
+ *
+ * 定义全局动画关键帧和动画类
+ */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes slideInUp {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(-5%);
+    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
+  }
+  50% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* 呼吸灯动画 - 状态指示器用 */
+@keyframes breathe {
+  0%, 100% {
+    opacity: 1;
+    filter: drop-shadow(0 0 2px currentColor);
+  }
+  50% {
+    opacity: 0.4;
+    filter: drop-shadow(0 0 6px currentColor);
+  }
+}
+
+/* 卡片呼吸灯 - running 状态，使用主题变量色 */
+@keyframes card-breathe {
+  0%, 100% {
+    border-color: var(--card-breathe-color);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--card-breathe-color) 20%, transparent);
+  }
+  50% {
+    border-color: color-mix(in srgb, var(--card-breathe-color) 50%, transparent);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--card-breathe-color) 30%, transparent);
+  }
+}
+
+/* 动画工具类 */
+.animate-fade-in {
+  animation: fadeIn var(--transition-base);
+}
+
+.animate-fade-out {
+  animation: fadeOut var(--transition-base);
+}
+
+.animate-slide-in-up {
+  animation: slideInUp var(--transition-base);
+}
+
+.animate-slide-in-down {
+  animation: slideInDown var(--transition-base);
+}
+
+.animate-slide-in-left {
+  animation: slideInLeft var(--transition-base);
+}
+
+.animate-slide-in-right {
+  animation: slideInRight var(--transition-base);
+}
+
+.animate-scale-in {
+  animation: scaleIn var(--transition-base);
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+.animate-bounce {
+  animation: bounce 1s infinite;
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2.5s ease-in-out infinite;
+}
+
+@keyframes pulse-subtle {
+  0%, 100% {
+    border-color: hsl(var(--primary) / 0.3);
+    box-shadow: 0 0 0 0 hsl(var(--primary) / 0);
+  }
+  50% {
+    border-color: hsl(var(--primary) / 0.6);
+    box-shadow: 0 0 8px hsl(var(--primary) / 0.15);
+  }
+}
+
+.animation-delay-150 {
+  animation-delay: 150ms;
+}
+
+.animation-delay-300 {
+  animation-delay: 300ms;
+}
+
+/**
+ * 无障碍：尊重系统「减少动态效果」偏好（WCAG 2.1 SC 2.3.3）
+ *
+ * 注意：主题 effects.animations=false 已通过 --transition-base:0ms 让过渡归零；
+ * 这里再针对系统级 prefers-reduced-motion 做兜底，关闭所有非必要动画，
+ * 即使主题本身开了动画，也尊重用户系统设置。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/**
+ * 用户偏好「关闭毛玻璃」（ThemePreferences.enableGlassmorphism=false）
+ *
+ * 由 themeStore 在 <html> 上切换 .no-glassmorphism 类，覆盖主题 card.style:'glass'
+ * 的 backdrop-filter，让用户能全局关闭毛玻璃（性能/可读性考量）。
+ */
+html.no-glassmorphism *,
+html.no-glassmorphism *::before,
+html.no-glassmorphism *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}

@@ -1,0 +1,94 @@
+.lobe-chat-isolated {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+
+  /*
+   * antd token 桥接：@lobehub/ui 的 Markdown 内部绑定 antd 的 colorText 等 token
+   *（渲染成 --ant-color-text 等 CSS 变量）。项目未注入 antd 主题，这些变量会落到
+   * antd 默认浅色算法值（文字=黑），导致深色主题下 markdown 黑字不可见。
+   *
+   * 解决：在该容器作用域内，把 lobehub 用到的 --ant-color-* 重新映射到我们的
+   * 主题变量（深色主题 --foreground=亮色），让 antd token 跟随主题明暗。
+   * 只覆盖 lobehub markdown 实际用到的 token，不影响全局 antd 行为。
+   */
+  --ant-color-text: hsl(var(--foreground));
+  --ant-color-text-secondary: hsl(var(--foreground));
+  --ant-color-text-description: hsl(var(--muted-foreground));
+  --ant-color-info: hsl(var(--accent));
+  --ant-color-info-text: hsl(var(--accent));
+  --ant-color-info-hover: hsl(var(--accent));
+  --ant-color-border: hsl(var(--border));
+  --ant-color-border-secondary: hsl(var(--border));
+  --ant-color-fill-quaternary: hsl(var(--muted));
+  --ant-color-fill-tertiary: hsl(var(--muted) / 0.7);
+  --ant-color-fill-secondary: hsl(var(--muted) / 0.5);
+  --ant-color-bg-container: hsl(var(--muted));
+  --ant-border-radius-lg: var(--radius-lg, 0.5rem);
+}
+
+.lobe-chat-isolated * {
+  box-sizing: border-box;
+}
+
+/* 强制正文级文字色跟随主题（覆盖 lobehub 绑定的 antd colorText 等）。
+   用 !important + 高特异性兜底：即便上方 --ant-color-* 桥接因 antd-style
+   注入时机/特异性问题没生效，也能确保深色主题下文字可见。
+   注意：代码块/引用块/表格等「自带背景」的元素不在此列，它们用各自背景上的对比色。 */
+.lobe-chat-isolated p,
+.lobe-chat-isolated li,
+.lobe-chat-isolated h1,
+.lobe-chat-isolated h2,
+.lobe-chat-isolated h3,
+.lobe-chat-isolated h4,
+.lobe-chat-isolated h5,
+.lobe-chat-isolated h6,
+.lobe-chat-isolated strong {
+  color: hsl(var(--foreground)) !important;
+}
+
+/* 引用块用次要色（比正文弱一档，但仍跟随主题明暗） */
+.lobe-chat-isolated blockquote,
+.lobe-chat-isolated blockquote p {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+.lobe-chat-isolated p {
+  margin: 0;
+}
+
+.lobe-chat-isolated pre {
+  margin: 0.5em 0;
+}
+
+.lobe-chat-isolated code {
+  font-family: inherit;
+}
+
+.lobe-chat-isolated table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  margin: 0.5rem 0;
+}
+
+.lobe-chat-isolated thead {
+  background-color: hsl(var(--muted));
+}
+
+.lobe-chat-isolated th {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  /* 表格单元格在 --muted/--background 上，用页面前景色（深色主题=亮） */
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+}
+
+.lobe-chat-isolated td {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+}

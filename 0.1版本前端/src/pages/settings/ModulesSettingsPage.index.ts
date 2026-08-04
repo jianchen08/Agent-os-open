@@ -1,0 +1,1 @@
+export { ModulesSettingsPage } from './ModulesSettingsPage'
