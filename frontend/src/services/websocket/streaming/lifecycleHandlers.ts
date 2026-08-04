@@ -20,8 +20,11 @@ export function handleStateChange(eventData: any): void {
   }
 }
 
-/** 处理 WS 重连补漏 后端 session_manager 通过 missed_messages 事件主动推送补偿光标。 */
-export function handleReconnected(): void {
+/** 处理 WS 重连补漏。重连时对每个 streaming 管道执行 backfill 增量补漏，
+ * 拉回断线期间后端 replay 缓冲累积的消息（useRealtimeEvents 只补激活会话主管道，
+ * 子管道/其他会话的 streaming 管道在此统一补漏，避免消息静默丢失）。
+ * 补漏成功不弹警告（消息已恢复）；仅补漏失败（或无法确定 threadId）时才提示「可能丢失」。 */
+export async function handleReconnected(): Promise<void> {
   const pipelineStore = usePipelineMessageStore.getState()
   const streamingState = pipelineStore.streamingState
   const logger = loggers.sessionStore
@@ -42,10 +45,34 @@ export function handleReconnected(): void {
     }
   }
 
-  // 为 streaming 管道补漏
+  // 为 streaming 管道补漏（所有管道，不止主管道）
   const streamingPipelineIds = Object.keys(streamingState).filter(
     (pipelineId) => streamingState[pipelineId]?.isStreaming,
   )
+
+  // 补漏失败或无法确定 threadId 的管道列表（补漏成功 → 消息已恢复，不打扰用户）
+  const failedPipelines: string[] = []
+  await Promise.all(
+    streamingPipelineIds.map(async (pipelineId) => {
+      const threadId = pipelineStore.pipelineSessionMap[pipelineId]
+      if (!threadId) {
+        failedPipelines.push(pipelineId)
+        return
+      }
+      try {
+        const result = await pipelineStore.loadPipelineMessages(pipelineId, {
+          threadId,
+          mode: 'backfill',
+          skipStreamingCheck: true,
+        })
+        if (!result.ok) failedPipelines.push(pipelineId)
+      } catch (err) {
+        logger.warn('[streaming] 重连补漏失败 pipeline=%s err=%s', pipelineId.slice(0, 12), String(err))
+        failedPipelines.push(pipelineId)
+      }
+    }),
+  )
+
   // streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
   for (const pipelineId of streamingPipelineIds) {
     // 将残留的 streaming 占位消息标记为 completed，避免 UI 永久转圈
@@ -61,10 +88,11 @@ export function handleReconnected(): void {
     logger.info('[streaming] 终止残留流式管道 %s，清理 streamingState', pipelineId.slice(0, 12))
   }
 
-  if (streamingPipelineIds.length > 0) {
+  // 仅补漏失败时提示（此时消息确实可能丢失，需用户手动刷新）
+  if (failedPipelines.length > 0) {
     useNotificationStore.getState().addNotification({
       title: '流式消息可能丢失',
-      message: `WebSocket 重连期间有 ${streamingPipelineIds.length} 个流式管道可能丢失消息，请检查相关会话或手动刷新`,
+      message: `WebSocket 重连期间有 ${failedPipelines.length} 个流式管道可能丢失消息，请检查相关会话或手动刷新`,
       priority: 'high',
       category: 'alert',
       isBlocking: false,
