@@ -78,7 +78,8 @@ describe('useExtensionShortcuts — 全局快捷键监听', () => {
     fireKey({ key: 's', ctrlKey: true })
     expect(execute).not.toHaveBeenCalled()
 
-    document.body.removeChild(input)
+    // 判空移除：避免 StrictMode 双挂载/竞态下节点已被移除时 removeChild 抛 NotFoundError
+    if (input.parentNode) input.parentNode.removeChild(input)
   })
 
   it('无 when 的快捷键恒触发', () => {
