@@ -16,9 +16,8 @@ tracing.workspace = true
 agentos-core.workspace = true
 agentos-mcp = { path = "../mcp" }
 agentos-plugin-loader = { path = "../plugin-loader" }
-# 原生插件 interface crate（HostServices / PipelinePlugin trait）+ abi_stable FFI-safe 工具。
+# 原生插件 interface crate（HostServices / PipelinePlugin trait 契约）。
 agentos-native-sdk.workspace = true
-abi_stable = "0.11"
 parking_lot = "0.12"
 
 [dev-dependencies]

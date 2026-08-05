@@ -27,7 +27,8 @@ export default defineConfig(({ mode }) => {
     ],
     server: {
       host: '0.0.0.0',
-      port: 5290,
+      // 6390：避开 container_22404 的 5289/5290/6290。CLI 通过 --port 覆盖；此处为 vite 默认。
+      port: 6390,
       strictPort: false,
       proxy: {
         '/api': {

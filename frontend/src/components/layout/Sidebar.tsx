@@ -28,7 +28,16 @@ import { SessionEditModal } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
+import { LoginModal } from '@/components/auth/LoginModal'
 import { ThemeButton } from '@/components/layout/ThemeButton'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
@@ -117,6 +126,11 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       .sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
   }, [contribTick])
   const user = useAuthStore((s) => s.user)
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const logout = useAuthStore((s) => s.logout)
+
+  // 弹窗式登录框状态（点菜单里的"登录"才打开）
+  const [loginModalOpen, setLoginModalOpen] = useState(false)
 
   const sessions = useSessionStore((state) => state.sessions)
   const activeSessionId = useSessionStore((state) => state.activeSessionId)
@@ -505,14 +519,46 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
             })}
             {/* 折叠态底部：仅用户 / 主题 / 通知（与展开态一致） */}
             <div className="mt-auto flex flex-col items-center gap-2 pb-1" data-testid="sidebar-rail-footer">
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex h-9 w-9 items-center justify-center rounded-[10px]"
-                title={(user as { username?: string; email?: string } | null)?.username || '用户'}
-                aria-label="用户"
-              >
-                <User className="h-4 w-4" />
-              </button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className={cn(
+                      'flex h-9 w-9 items-center justify-center rounded-[10px] transition-colors outline-none data-[state=open]:bg-white/5',
+                      isAuthenticated
+                        ? 'text-muted-foreground hover:text-foreground hover:bg-white/5'
+                        : 'text-primary hover:bg-white/10',
+                    )}
+                    title={isAuthenticated ? `${(user as { username?: string; email?: string } | null)?.username || '用户'} · 点击展开` : '点击登录'}
+                    aria-label="账号菜单"
+                    data-testid="sidebar-rail-user"
+                  >
+                    <User className="h-4 w-4" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="right" align="center" sideOffset={6} className="w-48" data-testid="sidebar-rail-user-menu">
+                  <DropdownMenuLabel className="text-[11px]">
+                    {isAuthenticated
+                      ? (user as { username?: string } | null)?.username || '已登录'
+                      : '未登录'}
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {!isAuthenticated && (
+                    <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>登录</DropdownMenuItem>
+                  )}
+                  {isAuthenticated && (
+                    <>
+                      <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>切换账号</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { logout() }} className="text-destructive focus:text-destructive">
+                        退出登录
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
+                  <DropdownMenuItem onClick={() => navigate('/settings')}>设置</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => navigate('/monitoring')}>监控</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <ThemeButton compact />
               <button
                 type="button"
@@ -692,14 +738,61 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
               data-testid="sidebar-footer"
             >
-              <div className="text-muted-foreground flex min-w-0 flex-1 items-center gap-1.5 px-1">
-                <User className="h-3.5 w-3.5 shrink-0 opacity-80" />
-                <span className="truncate text-[11px] leading-none">
-                  {(user as { username?: string; email?: string } | null)?.username ||
-                    (user as { username?: string; email?: string } | null)?.email ||
-                    '未登录'}
-                </span>
-              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors outline-none data-[state=open]:bg-white/5"
+                    title={isAuthenticated ? `${(user as { username?: string } | null)?.username || '用户'} · 点击展开` : '点击登录'}
+                    aria-label="账号菜单"
+                    data-testid="sidebar-user-area"
+                  >
+                    <User className="h-3.5 w-3.5 shrink-0 opacity-80" />
+                    <span className="truncate text-[11px] leading-none">
+                      {(user as { username?: string; email?: string } | null)?.username ||
+                        (user as { username?: string; email?: string } | null)?.email ||
+                        '未登录'}
+                    </span>
+                    {!isAuthenticated && (
+                      <span className="text-primary ml-auto shrink-0 text-[10px] font-medium">登录</span>
+                    )}
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="top" align="start" sideOffset={6} className="w-48" data-testid="sidebar-user-menu">
+                  <DropdownMenuLabel className="text-[11px]">
+                    {isAuthenticated
+                      ? (user as { username?: string } | null)?.username || '已登录'
+                      : '未登录'}
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {!isAuthenticated && (
+                    <DropdownMenuItem onClick={() => setLoginModalOpen(true)} data-testid="sidebar-user-menu-login">
+                      登录
+                    </DropdownMenuItem>
+                  )}
+                  {isAuthenticated && (
+                    <>
+                      <DropdownMenuItem onClick={() => setLoginModalOpen(true)} data-testid="sidebar-user-menu-switch">
+                        切换账号
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => { logout() }}
+                        className="text-destructive focus:text-destructive"
+                        data-testid="sidebar-user-menu-logout"
+                      >
+                        退出登录
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
+                  <DropdownMenuItem onClick={() => navigate('/settings')} data-testid="sidebar-user-menu-settings">
+                    设置
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => navigate('/monitoring')} data-testid="sidebar-user-menu-monitoring">
+                    监控
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <ThemeButton compact />
               <button
                 type="button"
@@ -723,6 +816,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       </aside>
       {/* P5: 通知中心唯一入口承载——侧边栏 Bell 调用 togglePanel，面板/阻塞模态框在此挂载 */}
       <NotificationCenter hideTrigger />
+
+      {/* 弹窗式登录框：点击底栏用户区域即弹出（不跳转页面） */}
+      <LoginModal open={loginModalOpen} onClose={() => setLoginModalOpen(false)} />
+
       <SessionEditModal
         mode={modal?.mode || 'create'}
         isOpen={modal !== null}

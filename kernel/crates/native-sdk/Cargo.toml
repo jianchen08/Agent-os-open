@@ -4,16 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Lingxi AgentOS native plugin SDK (abi_stable FFI-safe traits) — interface crate"
+description = "Lingxi AgentOS native plugin SDK — direct trait object contract (no abi_stable)"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-# abi_stable：提供跨 rustc 版本稳定的 FFI-safe trait 对象（#[sabi_trait]）。
-# 用它定义插件契约，让原生插件在内核升级 rustc 时无需提心吊胆地重编。
-abi_stable = "0.11"
 
 [lib]
 # interface crate：被内核（host）和插件（implementation cdylib）共同依赖。
-# 自身是 rlib（不产出 cdylib），插件 crate 声明自己的 crate-type = ["cdylib"]。
+# 自身是 rlib，插件 crate 声明自己的 crate-type = ["cdylib"]。
 crate-type = ["rlib"]

@@ -11,7 +11,7 @@
 #
 # 环境变量：
 #   AGENTOS_KERNEL_PORT  内核端口（默认 9100）
-#   AGENTOS_FRONTEND_PORT 前端端口（默认 5290）
+#   AGENTOS_FRONTEND_PORT 前端端口（默认 6390，避开 container_22404 的 5289/5290/6290）
 # ============================================================
 
 set -e
@@ -97,7 +97,7 @@ ensure_docker_and_redis() {
     # 使用 docker compose 管理 Redis（对标 docker/0.2/docker-compose.yml）
     if [ -f "$COMPOSE_FILE" ]; then
         echo -e "${YELLOW}[INFO] 使用 docker compose 启动 Redis（$COMPOSE_FILE）...${NC}"
-        REDIS_HOST_PORT=$(find_available_port 6481)
+        REDIS_HOST_PORT=$(find_available_port 6690)
         export REDIS_HOST_PORT
         KERNEL_HOST_PORT=$(find_available_port 8090)
         export KERNEL_HOST_PORT
@@ -136,7 +136,7 @@ _ensure_redis_container() {
         fi
     fi
 
-    REDIS_HOST_PORT=$(find_available_port 6481)
+    REDIS_HOST_PORT=$(find_available_port 6690)
     echo -e "${YELLOW}[INFO] 正在创建 Redis 容器 ($REDIS_CONTAINER, 端口 $REDIS_HOST_PORT)...${NC}"
     docker run -d --name "$REDIS_CONTAINER" --restart unless-stopped \
         -p "$REDIS_HOST_PORT:6379" \
@@ -162,7 +162,7 @@ echo -e "${YELLOW}[INFO] 正在查找可用端口...${NC}"
 KERNEL_PORT=$(find_available_port "${AGENTOS_KERNEL_PORT:-9100}") || {    echo -e "${RED}[ERROR] 无法找到可用的内核端口${NC}"
     exit 1
 }
-FRONTEND_PORT=$(find_available_port "${AGENTOS_FRONTEND_PORT:-5290}") || {
+FRONTEND_PORT=$(find_available_port "${AGENTOS_FRONTEND_PORT:-6390}") || {
     echo -e "${RED}[ERROR] 无法找到可用的前端端口${NC}"
     exit 1
 }
@@ -284,7 +284,7 @@ echo -e "${GREEN}       Health: $HEALTH_RESPONSE${NC}"
 echo "OLD_KERNEL_PID=$KERNEL_PID" > "$PORTS_FILE"
 echo "OLD_KERNEL_PORT=$KERNEL_PORT" >> "$PORTS_FILE"
 echo "OLD_FRONTEND_PORT=$FRONTEND_PORT" >> "$PORTS_FILE"
-echo "REDIS_HOST_PORT=${REDIS_HOST_PORT:-6481}" >> "$PORTS_FILE"
+echo "REDIS_HOST_PORT=${REDIS_HOST_PORT:-6690}" >> "$PORTS_FILE"
 echo "REDIS_CONTAINER=$REDIS_CONTAINER" >> "$PORTS_FILE"
 
 # ========== 步骤 3: 启动前端 ==========
@@ -350,7 +350,7 @@ echo -e "${CYAN}  WebSocket:   ws://localhost:$KERNEL_PORT/ws${NC}"
 if [ "$KERNEL_ONLY" = false ]; then
     echo -e "${CYAN}  前端:        http://localhost:$FRONTEND_PORT${NC}"
 fi
-echo -e "${CYAN}  Redis:       localhost:${REDIS_HOST_PORT:-6481} (${REDIS_CONTAINER})${NC}"
+    echo -e "${CYAN}  Redis:       localhost:${REDIS_HOST_PORT:-6690} (${REDIS_CONTAINER})${NC}"
 echo -e "${CYAN}${NC}"
 echo -e "${CYAN}  内核 PID:    $KERNEL_PID${NC}"
 [ -n "$FRONTEND_PID" ] && echo -e "${CYAN}  前端 PID:    $FRONTEND_PID${NC}"

@@ -184,8 +184,8 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
 /// 内核侧 HostServices 实现：包 `CapabilityRouter`，供原生插件调 capability。
 ///
 /// 与 sidecar（JSON-RPC 反调）、wasm（host.call import）走同一 router，三家对齐。
-/// trait 方法是 sync（abi_stable FFI-safe 约定），内部用 block_in_place + block_on
-/// 跑 async router.handle（与 capability.rs 的 block_on_router 同手法）。
+/// trait 方法是 sync（插件经 C-ABI 同步调），内部用 block_in_place + block_on
+/// 跑 async router.handle。
 struct NativeHostServices {
     router: Arc<dyn CapabilityRouter>,
 }
@@ -193,27 +193,23 @@ struct NativeHostServices {
 impl agentos_native_sdk::HostServices for NativeHostServices {
     fn call_capability(
         &self,
-        capability: abi_stable::std_types::RString,
-        method: abi_stable::std_types::RString,
-        params_json: abi_stable::std_types::RString,
-    ) -> abi_stable::std_types::RResult<abi_stable::std_types::RString, abi_stable::std_types::RString>
-    {
+        capability: &str,
+        method: &str,
+        params_json: &str,
+    ) -> Result<String, String> {
         let router = Arc::clone(&self.router);
-        let cap = capability.into_string();
-        let mth = method.into_string();
-        let params: Value = serde_json::from_str(params_json.as_str()).unwrap_or(Value::Null);
+        let cap = capability.to_string();
+        let mth = method.to_string();
+        let params: Value = serde_json::from_str(params_json).unwrap_or(Value::Null);
         // sync→async：多线程 runtime 下 block_in_place 让出 worker 再 block_on，避免死锁。
-        // （生产内核是 multi_thread；单线程 runtime 不可用，测试需 multi_thread flavor。）
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
                 router.handle(&cap, &mth, params).await
             })
         });
         match result {
-            Ok(v) => abi_stable::std_types::RResult::ROk(
-                abi_stable::std_types::RString::from(serde_json::to_string(&v).unwrap_or_default()),
-            ),
-            Err(e) => abi_stable::std_types::RResult::RErr(abi_stable::std_types::RString::from(format!("{e}"))),
+            Ok(v) => Ok(serde_json::to_string(&v).unwrap_or_default()),
+            Err(e) => Err(format!("{e}")),
         }
     }
 }
@@ -533,8 +529,8 @@ impl PluginInvokerImpl {
 
     /// 原生插件 pipeline 调用：config 注入 + 热重载 + 崩溃回调，与 sidecar 对齐。
     ///
-    /// abi_stable 版：构造 HostServices（包 router）注入 PluginCtx，调 loader.execute
-    /// 直接 trait 对象派发。不再经 JSON 序列化中间层，不再用 host_call 函数指针。
+    /// 直接 trait 对象版：构造 HostServices（包 router）+ PluginCtx，调 loader.execute
+    /// 直接 trait 派发。不经 JSON 序列化中间层，无 host_call 函数指针。
     async fn invoke_native_pipeline(
         &self,
         plugin_id: &str,
@@ -560,29 +556,27 @@ impl PluginInvokerImpl {
             manifest,
         );
 
+        // 构造 PluginCtx（state/config 用 JSON 字符串）。
+        let plugin_ctx = agentos_native_sdk::PluginCtx {
+            state_json: serde_json::to_string(&ctx.state).unwrap_or_else(|_| "{}".into()),
+            config_json: serde_json::to_string(&config).unwrap_or_else(|_| "{}".into()),
+            tenant_id: ctx.tenant.tenant_id.clone(),
+            session_id: ctx.tenant.session_id.clone(),
+            task_id: ctx.task_id.clone(),
+            pipeline_id: ctx.pipeline_id.to_string(),
+        };
+
         // 构造 HostServices（包 router）。router 缺失则 host=None，插件降级。
-        let host = self.router.read().as_ref().map(|router| {
-            agentos_native_sdk::HostServicesBox::from_value(
-                NativeHostServices {
-                    router: Arc::clone(router),
-                },
-                abi_stable::sabi_trait::prelude::TD_Opaque,
-            )
-        });
+        // NativeHostServices 是临时变量，execute 同步调用期间引用有效。
+        let host_svc: Option<NativeHostServices> = self
+            .router
+            .read()
+            .as_ref()
+            .map(|router| NativeHostServices { router: Arc::clone(router) });
+        let host_ref: Option<&dyn agentos_native_sdk::HostServices> =
+            host_svc.as_ref().map(|h| h as &dyn agentos_native_sdk::HostServices);
 
-        let state_json = serde_json::to_string(&ctx.state).unwrap_or_else(|_| "{}".into());
-        let config_json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".into());
-
-        let result = loader.execute(
-            plugin_id,
-            &state_json,
-            &config_json,
-            &ctx.tenant.tenant_id,
-            &ctx.tenant.session_id,
-            &ctx.task_id,
-            &ctx.pipeline_id.to_string(),
-            host,
-        );
+        let result = loader.execute(plugin_id, &plugin_ctx, host_ref);
 
         // execute 返回 state_updates JSON 字符串 → 解析为 PluginResult。
         let plugin_result = result.and_then(|state_updates_json| {

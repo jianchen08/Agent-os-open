@@ -19,10 +19,9 @@ parking_lot = "0.12"
 chrono.workspace = true
 # 插件准入哈希校验（P2-2）
 sha2 = "0.10"
-# 原生插件：abi_stable 加载 FFI-safe trait 对象（替代旧 C-ABI 手动 dlopen）。
-# abi_stable 内部自带 libloading，无需单独依赖 libloading。
-abi_stable = "0.11"
-# 原生插件 interface crate（PipelinePlugin trait / RootModule 契约）。
+# 原生插件 cdylib 动态加载（直接 dlopen 拿构造函数符号，还原 Box<dyn PipelinePlugin>）。
+libloading = "0.8"
+# 原生插件 interface crate（PipelinePlugin trait 契约）。
 agentos-native-sdk.workspace = true
 # WASM 插件运行时（task_11 N5-N10）。
 # 锁定 wasmtime 25：更高版本（≥28）的若干传递依赖需 rustc>1.85；

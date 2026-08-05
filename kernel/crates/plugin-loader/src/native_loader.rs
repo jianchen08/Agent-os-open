@@ -1,20 +1,21 @@
-//! # 原生插件加载器（InProcess，abi_stable trait 对象）
+//! # 原生插件加载器（InProcess，直接 trait 对象）
 //!
-//! 用 abi_stable 加载 Rust cdylib 插件，拿到 FFI-safe 的 `PipelinePlugin` trait
-//! 对象，直接调 `execute()`——零 C-ABI 手搓、零 JSON 序列化中间层。
+//! 用 libloading dlopen 加载 Rust cdylib 插件，拿构造函数符号
+//! `agentos_plugin_create`，调用得到 `Box<dyn PipelinePlugin>` 裸指针，还原为
+//! trait 对象后直接调 `execute()`——无 abi_stable 运行时校验（避开其 Windows
+//! release ABI 坑），依赖 toolchain 锁定保证 vtable 一致。
 //!
-//! ## 加载契约
+//! ## 契约
 //!
-//! 插件 cdylib 用 `#[export_root_module]` 导出 `NativePluginModule`（见
-//! `agentos-native-sdk`）。本 loader 经 abi_stable 的 `RootModule::load_root_module`
-//! 加载，校验类型布局（跨 rustc 版本安全），拿 `NativePluginModule_Ref`，调
-//! `create_plugin()` 得到 `PipelinePlugin_TO` trait 对象。
+//! 插件 cdylib export `extern "C" fn agentos_plugin_create() -> *mut ()`，
+//! 返回 `plugin_into_raw(impl)` 的双重 Box 裸指针（见 native-sdk）。
 //!
 //! ## 安全要点
 //!
-//! - abi_stable 在加载期校验类型布局（比裸 C-ABI 更安全：版本不匹配立即报错而非 UB）。
+//! - unsafe 仅在 dlopen + 指针还原（loader 内部），插件作者代码零 unsafe。
 //! - Library 句柄常驻 loader 生命周期；**生产不做原地热卸载**（Windows dlclose 坑）。
-//! - `load_root_module` 内部含 unsafe dlopen，由 abi_stable 封装。
+//! - `catch_unwind` 包裹 execute，插件 panic 不拖垮内核（panic=abort 时直接终止进程，
+//!   那是预期行为——cdylib panic=abort 是跨边界标准做法）。
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -22,20 +23,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentos_core::types::PluginError;
-use agentos_native_sdk::{NativePluginModule_Ref, PipelinePlugin_TO};
+use agentos_native_sdk::{box_from_raw, HostServices, PipelinePlugin, PluginCtx, CREATE_FN_NAME};
+use libloading::{Library, Symbol};
 use parking_lot::RwLock;
 use tracing::{debug, warn};
 
-use abi_stable::library::RootModule;
-use abi_stable::std_types::{RBox, RResult, RString};
+/// 构造函数签名：返回双重 Box 裸指针（实为 `Box<Box<dyn PipelinePlugin>>`）。
+type CreateFn = unsafe extern "C" fn() -> *mut ();
 
-/// 一个已加载的原生插件实例：RootModule + 构造出的 trait 对象。
+/// 一个已加载的原生插件实例：Library（保活）+ trait 对象。
 pub struct NativePlugin {
-    /// RootModule 引用（保活 abi_stable 加载的库元数据）。
-    #[allow(dead_code)]
-    root: NativePluginModule_Ref,
-    /// 插件构造出的 trait 对象（调 execute 用）。
-    instance: PipelinePlugin_TO<'static, RBox<()>>,
+    /// Library 句柄——保活，trait 对象的代码指向其内。
+    /// 永不单独释放（生产不做热卸载）。
+    _lib: Library,
+    /// 插件构造出的 trait 对象。
+    instance: Box<dyn PipelinePlugin>,
     /// 加载来源路径（调试/日志用）。
     path: PathBuf,
 }
@@ -63,8 +65,6 @@ impl NativePluginLoader {
     }
 
     /// 加载（或复用已加载的）原生插件。
-    ///
-    /// `path` 指向 cdylib 文件。已加载同 plugin_id 且同 path 则复用缓存。
     pub fn load(&self, plugin_id: &str, path: &Path) -> Result<Arc<NativePlugin>, PluginError> {
         // 先检查缓存
         if let Some(p) = self.loaded.read().get(plugin_id) {
@@ -77,43 +77,56 @@ impl NativePluginLoader {
         self.loaded
             .write()
             .insert(plugin_id.to_string(), Arc::clone(&arc));
-        debug!(plugin_id = plugin_id, path = ?path, "Native plugin loaded (abi_stable)");
+        debug!(plugin_id = plugin_id, path = ?path, "Native plugin loaded (direct trait object)");
         Ok(arc)
     }
 
     fn load_inner(path: &Path) -> Result<NativePlugin, PluginError> {
-        // abi_stable 加载 root module：校验类型布局 + 拿模块引用。
-        let root = NativePluginModule_Ref::load_from_file(path).map_err(|e| PluginError {
-            message: format!("native plugin load failed ({}): {:?}", path.display(), e),
+        // dlopen 加载 cdylib。
+        let lib = unsafe { Library::new(path) }.map_err(|e| PluginError {
+            message: format!("native plugin load failed ({}): {}", path.display(), e),
             code: Some("NATIVE_LOAD_FAILED".to_string()),
             source: Some("native-loader".to_string()),
         })?;
 
-        // 调构造函数拿 trait 对象。create_plugin() 返回函数指针，需再调一次。
-        let instance: PipelinePlugin_TO<'static, RBox<()>> = (root.create_plugin())();
+        // 拿构造函数符号。
+        let create_fn: CreateFn = unsafe {
+            let sym: Symbol<CreateFn> = lib.get(CREATE_FN_NAME).map_err(|e| PluginError {
+                message: format!(
+                    "symbol {} not found: {}",
+                    String::from_utf8_lossy(CREATE_FN_NAME),
+                    e
+                ),
+                code: Some("NATIVE_SYMBOL_MISSING".to_string()),
+                source: Some("native-loader".to_string()),
+            })?;
+            *sym
+        };
+
+        // 调构造函数拿裸指针，还原为 Box<dyn PipelinePlugin>。
+        // SAFETY: create_fn 由插件 cdylib 导出，返回 plugin_into_raw 产生的双重 Box 指针。
+        let ptr = unsafe { create_fn() };
+        let instance: Box<dyn PipelinePlugin> = unsafe { box_from_raw(ptr) }.ok_or_else(|| PluginError {
+            message: format!("native plugin create returned null pointer: {}", path.display()),
+            code: Some("NATIVE_CREATE_NULL".to_string()),
+            source: Some("native-loader".to_string()),
+        })?;
 
         Ok(NativePlugin {
-            root,
+            _lib: lib,
             instance,
             path: path.to_path_buf(),
         })
     }
 
-    /// 调用插件的 execute（直接 trait 对象派发，无 JSON 序列化中间层）。
+    /// 调用插件的 execute（直接 trait 对象派发）。
     ///
-    /// 返回 state_updates 的 JSON 字符串（插件侧序列化）。
-    /// `state_json` / `config_json` 由调用方（invoker）准备。
-    /// `host` 为 None 时插件降级（不调 capability）。
+    /// 返回 state_updates 的 JSON 字符串。`host` 为 None 时插件降级（不调 capability）。
     pub fn execute(
         &self,
         plugin_id: &str,
-        state_json: &str,
-        config_json: &str,
-        tenant_id: &str,
-        session_id: &str,
-        task_id: &str,
-        pipeline_id: &str,
-        host: Option<agentos_native_sdk::HostServicesBox>,
+        ctx: &PluginCtx,
+        host: Option<&dyn HostServices>,
     ) -> Result<String, PluginError> {
         let plugin = {
             let loaded = self.loaded.read();
@@ -127,22 +140,13 @@ impl NativePluginLoader {
                 })?
         };
 
-        let ctx = agentos_native_sdk::PluginCtx {
-            state_json: RString::from(state_json),
-            config_json: RString::from(config_json),
-            tenant_id: RString::from(tenant_id),
-            session_id: RString::from(session_id),
-            task_id: RString::from(task_id),
-            pipeline_id: RString::from(pipeline_id),
-            host: match host {
-                Some(h) => abi_stable::std_types::ROption::RSome(h),
-                None => abi_stable::std_types::ROption::RNone,
-            },
+        // 构造执行上下文（ctx + host），调 trait 对象 execute。
+        let ectx = agentos_native_sdk::ExecContext {
+            ctx: ctx.clone(),
+            host,
         };
-
-        // trait 对象派发——catch panic 防拖垮内核。
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            plugin.instance.execute(&ctx)
+            plugin.instance.execute(&ectx)
         }))
         .map_err(|_| PluginError {
             message: format!("native plugin '{}' panicked during execute", plugin_id),
@@ -151,11 +155,11 @@ impl NativePluginLoader {
         })?;
 
         match result {
-            RResult::ROk(state_updates_json) => Ok(state_updates_json.into_string()),
-            RResult::RErr(err) => {
-                warn!(plugin_id = plugin_id, error = %err.as_str(), "native plugin returned error");
+            Ok(state_updates_json) => Ok(state_updates_json),
+            Err(err) => {
+                warn!(plugin_id = plugin_id, error = %err, "native plugin returned error");
                 Err(PluginError {
-                    message: err.into_string(),
+                    message: err,
                     code: Some("NATIVE_PLUGIN_ERROR".to_string()),
                     source: Some("native-loader".to_string()),
                 })
@@ -190,8 +194,6 @@ impl NativePluginLoader {
     }
 
     /// 按平台约定补全 cdylib 文件名前缀/后缀。
-    ///
-    /// 若 `artifact` 已带后缀（.dll/.so/.dylib）则原样返回；否则按平台补。
     pub fn platform_artifact_name(artifact: &str) -> String {
         let has_ext = [".dll", ".so", ".dylib"]
             .iter()

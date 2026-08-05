@@ -6,7 +6,7 @@ REM
 REM  Starts two services (frontend directly proxies to 0.2 Rust kernel,
 REM  no 0.1 channel_api):
 REM    1. kernel  (Rust, :9100) - serves /api/v1/* /ws /metrics
-REM    2. frontend (Vite, :5290) - proxies to kernel:9100
+REM    2. frontend (Vite, :6390) - proxies to kernel:9100
 REM
 REM  Usage:
 REM    start_web_02.bat              full start (release build)
@@ -15,7 +15,7 @@ REM    start_web_02.bat --kernel-only  start kernel only
 REM
 REM  Env vars:
 REM    AGENTOS_KERNEL_PORT   kernel port    (default 9100)
-REM    AGENTOS_FRONTEND_PORT frontend port  (default 5290)
+REM    AGENTOS_FRONTEND_PORT frontend port  (default 6390, avoids container_22404's 5289/5290/6290)
 REM ============================================================
 setlocal EnableDelayedExpansion
 
@@ -38,7 +38,7 @@ goto PARSE_ARGS
 
 REM port config
 if not defined AGENTOS_KERNEL_PORT set "AGENTOS_KERNEL_PORT=9100"
-if not defined AGENTOS_FRONTEND_PORT set "AGENTOS_FRONTEND_PORT=5290"
+if not defined AGENTOS_FRONTEND_PORT set "AGENTOS_FRONTEND_PORT=6390"
 
 echo ========================================
 echo   AgentOS 0.2 Launcher (pure 0.2)

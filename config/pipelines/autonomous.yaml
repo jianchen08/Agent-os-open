@@ -53,6 +53,15 @@ steps:
           set:
             core_type: tool_execute
             core_plugin: pipeline_tool_core
+      # 工具刚执行完（core_type=tool_execute，raw_tool_calls 已被 tool_core 清空）
+      # → 回 LLM 让它看到 tool_results 产生下一轮或文本回复（对齐 0.1 handle_no_route_signals
+      #   的 "tool_execute 后自动 next_llm" 逻辑）
+      - when: "core_type == 'tool_execute'"
+        then:
+          next: loop
+          set:
+            core_type: llm_call
+            core_plugin: pipeline_llm_core
       # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
       - when: "True"
         then:

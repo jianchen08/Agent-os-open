@@ -70,6 +70,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 # OS 标准目录（%APPDATA% / ~/Library/Application Support / ~/.local/share）
 dirs = "5"
+# 原生插件 FFI-safe trait 对象（cdylib 插件 + 加载器共用，保证 StableAbi 布局一致）。
+abi_stable = "0.11"
+# tool_core messages 序列化（对齐 Python get_format_manager 默认 YAML）。
+serde_yaml = "0.9"
 # 内核 crate（workspace 内部引用）
 agentos-core = { path = "crates/core" }
 agentos-config = { path = "crates/config" }

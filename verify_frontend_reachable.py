@@ -3,10 +3,10 @@
 断言：访问 /login 后 30s 内 DOMContentLoaded 触发，且登录表单（>=2 个 input + 登录按钮）可见
 当前预期：失败（240s 才触发 DOMContentLoaded / 超时）
 """
-import json, sys
+import json, os, sys
 from playwright.sync_api import sync_playwright
 
-BASE = 'http://127.0.0.1:5290'
+BASE = os.environ.get('AGENTOS_FRONTEND_BASE_URL', 'http://127.0.0.1:6390')
 RESULT = {'passed': False, 'dom_loaded_sec': None, 'form_visible': False, 'errors': []}
 
 with sync_playwright() as p:

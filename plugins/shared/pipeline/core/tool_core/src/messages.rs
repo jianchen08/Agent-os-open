@@ -2,8 +2,7 @@
 //!
 //! 对齐 plugin.py:784-963。这是 LLM 上下文协议，不能改字段格式。
 
-use abi_stable::std_types::{ROption, RString};
-use agentos_native_sdk::HostServicesBox;
+use agentos_native_sdk::HostServices;
 use serde_json::{json, Value};
 
 use crate::types::{StateKey, ToolResult};
@@ -127,7 +126,7 @@ pub fn inject_multimodal(
     state: &Value,
     mut messages: Vec<Value>,
     results: &[ToolResult],
-    host: &ROption<HostServicesBox>,
+    host: Option<&dyn HostServices>,
 ) -> (Vec<Value>, bool) {
     // 三个来源收集 pending_images。
     let mut pending: Vec<PendingImage> = Vec::new();
@@ -189,7 +188,7 @@ pub fn inject_multimodal(
     }
 
     // 发 tool_multimedia_result 事件（仅 mime_type + path，不含 base64，对齐 plugin.py:904-917）。
-    if let ROption::RSome(host) = host {
+    if let Some(host) = host {
         let thread_id = state.get("session_id").and_then(|v| v.as_str())
             .or_else(|| state.get("thread_id").and_then(|v| v.as_str()))
             .unwrap_or("");
@@ -214,11 +213,7 @@ pub fn inject_multimodal(
         let params = json!({ "event": "tool_multimedia_result", "payload": payload });
         let params_json = serde_json::to_string(&params).unwrap_or_default();
         // fire-and-forget：忽略返回。
-        let _ = host.call_capability(
-            RString::from("event-bus"),
-            RString::from("emit"),
-            RString::from(params_json),
-        );
+        let _ = host.call_capability("event-bus", "emit", &params_json);
     }
 
     // 模型视觉能力：首版从 state 读标志（prepare 链注入），对齐 Python ModelCapabilityRegistry。
