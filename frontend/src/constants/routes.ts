@@ -76,6 +76,8 @@ export const ROUTES = {
     EVALUATION_METRICS: '/debug/evaluation-metrics',
     /** 用户 */
     USERS: '/debug/users',
+    /** 数据库管理（统一数据接口 /api/v1/db/*） */
+    DB: '/debug/db',
   },
 } as const
 

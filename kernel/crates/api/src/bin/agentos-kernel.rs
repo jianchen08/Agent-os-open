@@ -485,6 +485,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         enabled_plugin_ids,
     );
     eprintln!("[boot-diag] with_plugins 返回"); std::io::stderr().flush().ok();
+    // task_01：注入统一数据接口专用 SqliteStore 句柄（/api/v1/db/* 用，表驱动动态枚举）。
+    // 与 store_dyn（trait object，业务语义方法）互补；with_db 不改任何持久化方式。
+    let state = state.with_db(store.clone());
     let state = state.with_http_handler(http_handler);
     eprintln!("[boot-diag] with_http_handler 返回"); std::io::stderr().flush().ok();
     let state = state

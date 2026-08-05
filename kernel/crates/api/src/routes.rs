@@ -73,6 +73,10 @@ pub struct AppState {
     pub invoker: Option<Arc<dyn PluginInvoker>>,
     /// 存储后端（构造 ContentLoader）
     pub store: Option<Arc<dyn StorageBackend>>,
+    /// 统一数据接口专用：具体 SqliteStore 句柄（访问 sqlite_master / PRAGMA / 通用 CRUD）。
+    /// 与 `store`（trait object）互补：`store` 走业务语义方法，`db` 走表驱动动态访问。
+    /// 构造处由 `with_db` 注入；None = 统一数据接口不可用（返回 503 语义的 400）。
+    pub db: Option<Arc<agentos_engine::SqliteStore>>,
     /// 已知插件 id 集合（命中规则③判定 + 启动期重名检测）
     pub plugin_ids: Arc<std::collections::HashSet<String>>,
     /// 项目根目录（`{{path:...}}` 模板解析基准 + agent 配置加载基准）
@@ -109,6 +113,7 @@ impl AppState {
             step_library: Arc::new(StepLibrary::default()),
             invoker: None,
             store: None,
+            db: None,
             plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
             enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
@@ -133,6 +138,7 @@ impl AppState {
             step_library: Arc::new(StepLibrary::default()),
             invoker: None,
             store: None,
+            db: None,
             plugin_ids: Arc::new(std::collections::HashSet::new()),
             project_root: None,
             enabled_plugin_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
@@ -194,6 +200,7 @@ impl AppState {
             step_library,
             invoker: Some(invoker),
             store: Some(store),
+            db: None,
             plugin_ids: Arc::new(plugin_ids),
             project_root: Some(project_root),
             enabled_plugin_ids: Arc::new(RwLock::new(enabled_plugin_ids)),
@@ -202,6 +209,15 @@ impl AppState {
             http_handler: None,
             metrics: None,
         }
+    }
+
+    /// 注入统一数据接口专用 SqliteStore 句柄（`/api/v1/db/*` 用）。
+    ///
+    /// 与 `store`（trait object，业务语义方法）互补：`db` 提供表驱动动态访问
+    /// （sqlite_master / PRAGMA table_info / 通用 CRUD / SQL 执行器）。
+    pub fn with_db(mut self, db: Arc<agentos_engine::SqliteStore>) -> Self {
+        self.db = Some(db);
+        self
     }
 
     /// P2：启用会话内核（连接注册表 / 事件总线 / 重放缓冲 + 入站路由）。

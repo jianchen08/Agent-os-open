@@ -97,6 +97,9 @@ const DebugEvaluationMetricsPage = lazy(() =>
 const DebugUsersPage = lazy(() =>
   import('@/pages/debug/DebugUsersPage').then((m) => ({ default: m.DebugUsersPage })),
 )
+const DbAdminPage = lazy(() =>
+  import('@/pages/debug/DbAdminPage').then((m) => ({ default: m.DbAdminPage })),
+)
 const PluginsSettingsPage = lazy(() =>
   import('@/pages/settings/PluginsSettingsPage').then((m) => ({
     default: m.PluginsSettingsPage,
@@ -695,6 +698,16 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <DebugUsersPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.DB,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DbAdminPage />
           </Suspense>
         </ProtectedRoute>
       ),
