@@ -22,7 +22,8 @@ export interface ModalProps {
   className?: string
   /** 是否显示关闭按钮 */
   showClose?: boolean
-  /** 点击背景是否关闭 */
+  /** 点击背景是否关闭（默认 false：含表单/输入的模态框误触会丢失内容，
+   * 仅纯展示/确认类弹窗按需显式传 true） */
   closeOnBackdropClick?: boolean
   /** 最大宽度 */
   maxWidth?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | 'full'
@@ -49,10 +50,15 @@ export function Modal({
   children,
   className,
   showClose = true,
-  closeOnBackdropClick = true,
+  closeOnBackdropClick = false,
   maxWidth = '2xl',
 }: ModalProps) {
   const modalRef = useRef<HTMLDivElement>(null)
+  // 记录 mousedown 起始时是否点在遮罩（外层容器）上。
+  // 用于区分"真正点击遮罩关闭"与"在输入框拖选文字时鼠标移出触发的合成 click"：
+  // 后者 mousedown 在输入框内、mouseup 在遮罩上，浏览器会合成一个 target=遮罩的
+  // click，导致误关闭。改为 mousedown/mouseUp 双判断即可规避。
+  const mouseDownOnBackdrop = useRef(false)
 
   // ESC 键关闭
   useEffect(() => {
@@ -78,11 +84,18 @@ export function Modal({
     }
   }, [open])
 
-  // 点击背景关闭
-  const handleBackdropClick = (e: React.MouseEvent) => {
-    if (closeOnBackdropClick && e.target === e.currentTarget) {
+  // 遮罩点击关闭：mousedown + mouseUp 都在遮罩上才关闭。
+  // 仅用 click 会在"输入框拖选文字、鼠标移出"时误触发（mousedown 与 mouseup
+  // 跨元素，浏览器合成的 click target 落在公共祖先遮罩上）。
+  const handleBackdropMouseDown = (e: React.MouseEvent) => {
+    mouseDownOnBackdrop.current = closeOnBackdropClick && e.target === e.currentTarget
+  }
+
+  const handleBackdropMouseUp = (e: React.MouseEvent) => {
+    if (mouseDownOnBackdrop.current && e.target === e.currentTarget) {
       onClose()
     }
+    mouseDownOnBackdrop.current = false
   }
 
   if (!open) return null
@@ -92,7 +105,8 @@ export function Modal({
       ref={modalRef}
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
       style={{ zIndex: 9999, position: 'fixed', inset: 0 }}
-      onClick={handleBackdropClick}
+      onMouseDown={handleBackdropMouseDown}
+      onMouseUp={handleBackdropMouseUp}
     >
       {/* 背景遮罩 */}
       <div

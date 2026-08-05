@@ -44,6 +44,19 @@ class GlobalWebSocketService {
   private _heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null
   private _heartbeatMissCount: number = 0
   private _disposed: boolean = false
+  /**
+   * 正在等待 token 刷新后重连。
+   *
+   * 4001（token 过期）触发的重连会先 refreshToken 再连。在 refresh 进行期间，
+   * 外部（router.tsx 的 useEffect、useRealtimeEvents 的 visibilitychange 等）
+   * 若用过期 token 调 connect()，会经 _clearTimers() 清掉退避计时器、并用旧
+   * token 硬连 → 又 4001 → 重排退避 → 又被打断，形成死循环，refresh 永远执行
+   * 不到（后端日志表现为稳定的每 ~5s 一次 4001，无 /auth/refresh）。
+   *
+   * 置 true 后 connect() 直接 return，保证 refresh 流程不被打断；refresh 完成
+   * （成功或失败）后在 _scheduleReconnect 的回调里复位。
+   */
+  private _refreshingForReconnect: boolean = false
   /** 断线前已确认的最大消息序号（用于断线补漏 last_sequence） */
   private _lastSequence: number = 0
 
@@ -52,6 +65,13 @@ class GlobalWebSocketService {
   /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
     if (this._disposed) return
+    // 正在等 token 刷新重连时，拒绝外部 connect（通常是用过期 token 的抢占调用）。
+    // 否则会 _clearTimers 清掉 refresh 退避、用过期 token 硬连 → 4001 死循环，
+    // refresh 永远执行不到。refresh 流程会在回调里自行 connect(新token)。
+    if (this._refreshingForReconnect) {
+      _wsLogger.debug('[GlobalWS] 正在刷新 token 重连，跳过外部 connect（避免用过期 token 打断 refresh）')
+      return
+    }
     if (this._status === 'connected' && this._token === token) return
     if (this._status === 'connecting' && this._token === token) return
 
@@ -195,6 +215,7 @@ class GlobalWebSocketService {
   /** 断开连接（登出时调用） */
   disconnect(): void {
     this._disposed = true
+    this._refreshingForReconnect = false
     this._clearTimers()
     this._stopHeartbeat()
     if (this._connectionTimeoutTimer) {
@@ -425,8 +446,15 @@ class GlobalWebSocketService {
     }
     this._reconnectAttempts++
     console.info('[GlobalWS] %dms 后重连（第 %d 次, authRejected=%s）', delay, this._reconnectAttempts, authRejected)
+    // 认证拒绝需先 refresh：置标志，防止退避期间外部 connect(oldToken) 打断 refresh
+    if (authRejected) {
+      this._refreshingForReconnect = true
+    }
     this._reconnectTimer = setTimeout(async () => {
-      if (this._disposed || !this._token) return
+      if (this._disposed || !this._token) {
+        this._refreshingForReconnect = false
+        return
+      }
 
       // 普通断连（非认证拒绝）：直接重连，不触碰 token
       if (!authRejected) {
@@ -445,8 +473,11 @@ class GlobalWebSocketService {
           this._token = newToken
           _wsLogger.info('[GlobalWS] Token 已刷新，用新 token 重连')
         }
+        // 复位标志后 connect（connect 内部会检查此标志）
+        this._refreshingForReconnect = false
         this.connect(this._token)
       } catch (refreshError) {
+        this._refreshingForReconnect = false
         if (isAuthFailureFromError(refreshError)) {
           // refresh_token 真正失效：没有可用 token，连了也是 4001。
           // 走登出流程，停止重连，让用户重新登录。

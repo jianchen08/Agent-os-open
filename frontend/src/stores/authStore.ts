@@ -68,14 +68,15 @@ const TOKEN_REFRESH_MAX_LEAD_MS = 5 * 60 * 1000
  * 每次 login/register/refresh 成功后调用，setTimeout 单次 + 成功后重新调度，
  * 精确跟随实际 expires_in（每次刷新后 TTL 会变）。失败按 refreshToken 错误处理。
  *
- * 暂停：该定时器疑似导致"十几分钟后被登出"。后端用 refresh token 轮换
- * （每次 refresh 撤销旧 refresh_token），定时器在 ~12.5min 触发的 refresh 可能
- * 与其它路径竞争，用了已撤销的 token → 401 → 登出。先停用定位，确认后再设计
- * 安全的续期方案。access token 30min 内不会过期，停用期间不影响正常使用。
+ * 历史暂停与恢复：该定时器曾被疑为"十几分钟后被登出"而停用，理由是担心后端
+ * refresh token 轮换（每次 refresh 撤销旧 refresh_token）导致定时器与其它路径
+ * 竞争、用了已撤销的 token → 401 → 登出。但核查后端 refresh_handler（auth.rs）
+ * 实为**无状态设计，不撤销旧 token**（logout 也不撤销），轮换竞争不成立。
+ * 故重新启用主动续期：access_token 30min 过期前主动刷新，避免 WS 因 token 过期
+ * 断连后只能靠 4001 被动恢复（GlobalWebSocket._refreshingForReconnect 已修复
+ * 该被动路径的死循环，主动续期进一步从源头避免 4001）。
  */
 function scheduleTokenRefresh(): void {
-  // 暂停主动刷新：见上方函数注释。保留实现便于后续修复后恢复。
-  return
   if (tokenRefreshTimer) {
     clearTimeout(tokenRefreshTimer)
     tokenRefreshTimer = null
