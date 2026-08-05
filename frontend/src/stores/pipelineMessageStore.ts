@@ -800,10 +800,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
       // 过滤空白 assistant 消息（无 content 无 parts 无 toolCalls），避免空气泡
       let finalMerged = filterBlankMessages(merged)
-      console.log('[诊断-prepend]', pipelineId?.slice(0,12),
-        '新:', sorted.length, '已有:', existing.length,
-        'merge后:', merged.length, 'filter后:', finalMerged.length,
-        'seq:', finalMerged.length ? finalMerged[0].sequence+'~'+finalMerged[finalMerged.length-1].sequence : '空')
       const topCursor = finalMerged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {

@@ -66,11 +66,13 @@ describe('消息合并集成测试（真实 mergeConsecutiveAssistantMessages）
     setApiMessages([])
   })
 
-  it('场景A: [assistant(tool_call), tool(result), assistant(text)] 合并成一个气泡，parts 不重复', async () => {
+  it('场景A: [assistant(tool_call), tool(result), assistant(text)] 数据层完整保留，parts 无重复', async () => {
     // 后端把一次 LLM 响应拆成 3 条 record：
     // 1. assistant 带 tool_call（无 text）
     // 2. tool 结果
     // 3. assistant 带 text（最终回复）
+    // 修复后：数据层（getMessages）不合并，3 条原始消息完整返回（tool 保留、
+    // 多轮 assistant 独立），渲染层再决定气泡合并。
     setApiMessages([
         backendRecord({
           id: 'rec-1', sequence: 1, role: 'assistant',
@@ -90,30 +92,36 @@ describe('消息合并集成测试（真实 mergeConsecutiveAssistantMessages）
 
     const result = await getMessages(THREAD_ID, { pipelineRunId: 'pipe-1' })
 
-    // ★ 核心：合并后只有 1 条 assistant 消息（tool 被吸收，2 个 assistant 合并）
+    // ★ 修复后：3 条消息完整保留（assistant / tool / assistant）
+    expect(result.messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant'])
+
+    // assistant 消息 2 条（多轮独立，不合并）
     const assistants = result.messages.filter((m) => m.role === 'assistant')
-    expect(assistants).toHaveLength(1)
+    expect(assistants).toHaveLength(2)
 
-    const merged = assistants[0]
-    const parts = (merged.parts || []) as MessagePart[]
-
-    // parts 应包含：1 个 tool_call（带 result）+ 1 个 text，不重复
-    const toolCallParts = parts.filter((p) => p.type === 'tool_call')
-    const textParts = parts.filter((p) => p.type === 'text')
+    // 第一条 assistant 的 parts 含 tool_call（带 result）
+    const firstParts = (assistants[0].parts || []) as MessagePart[]
+    const toolCallParts = firstParts.filter((p) => p.type === 'tool_call')
     expect(toolCallParts).toHaveLength(1)
-    expect(textParts).toHaveLength(1)
-
-    // tool_call 的 result 被正确注入
     const tcPart = toolCallParts[0] as any
     expect(tcPart.result).toBe('找到3条')
 
-    // text 内容正确
+    // 第二条 assistant 的 parts 含唯一 text，无重复
+    const secondParts = (assistants[1].parts || []) as MessagePart[]
+    const textParts = secondParts.filter((p) => p.type === 'text')
+    expect(textParts).toHaveLength(1)
     const textPart = textParts[0] as any
     expect(textPart.content).toBe('根据搜索结果，这是回复')
+
+    // tool 消息独立保留（含 toolResult）
+    const tools = result.messages.filter((m) => m.role === 'tool')
+    expect(tools).toHaveLength(1)
+    expect(tools[0].toolResult).toBe('找到3条')
   })
 
-  it('场景B: 多轮 assistant 回复（thinking + text + thinking + text）不应产生重复 text part', async () => {
+  it('场景B: 多轮 assistant 回复（thinking + text + thinking + text）数据层不合并，parts 无重复', async () => {
     // 后端返回 2 条连续 assistant（各自带 thinking + text）
+    // 数据层（getMessages）不合并——合并由渲染层（MessageList → mergeConsecutiveAssistantMessages）负责。
     setApiMessages([
         backendRecord({
           id: 'rec-1', sequence: 1, role: 'assistant',
@@ -129,22 +137,23 @@ describe('消息合并集成测试（真实 mergeConsecutiveAssistantMessages）
 
     const result = await getMessages(THREAD_ID, { pipelineRunId: 'pipe-1' })
 
-    // 2 条连续 assistant 合并成 1 个气泡
+    // ★ 数据层返回 2 条原始 assistant（不合并）
     const assistants = result.messages.filter((m) => m.role === 'assistant')
-    expect(assistants).toHaveLength(1)
+    expect(assistants).toHaveLength(2)
 
-    const parts = (assistants[0].parts || []) as MessagePart[]
-    const textParts = parts.filter((p) => p.type === 'text')
-    const thinkingParts = parts.filter((p) => p.type === 'thinking')
-
-    // ★ 核心：2 个不同内容的 text part 都保留（不重复，但也不丢失）
-    expect(textParts).toHaveLength(2)
-    expect(thinkingParts).toHaveLength(2)
-
-    // 内容分别是第一段、第二段（不交叉、不重复）
-    const textContents = textParts.map((p) => (p as any).content)
-    expect(textContents).toContain('第一段回复')
-    expect(textContents).toContain('第二段回复')
+    // 每条 assistant 各自带 thinking + text，内容不重复、不丢失
+    const allTextContents: string[] = []
+    for (const a of assistants) {
+      const parts = (a.parts || []) as MessagePart[]
+      const textParts = parts.filter((p) => p.type === 'text')
+      const thinkingParts = parts.filter((p) => p.type === 'thinking')
+      expect(textParts).toHaveLength(1)
+      expect(thinkingParts).toHaveLength(1)
+      allTextContents.push((textParts[0] as any).content)
+    }
+    expect(allTextContents).toContain('第一段回复')
+    expect(allTextContents).toContain('第二段回复')
+    expect(new Set(allTextContents).size).toBe(allTextContents.length)
   })
 
   it('场景C: user / assistant / user / assistant 交替（不合并，各自独立）', async () => {

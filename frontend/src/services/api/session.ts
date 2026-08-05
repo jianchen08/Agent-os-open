@@ -253,10 +253,28 @@ function dedupePartSequences(partsByMessage: any[][]): any[] {
   return result
 }
 
-/** 合并连续的 assistant 消息 + 吸收夹在中间的 tool 消息（仅用于历史 API 加载） 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData， */
+/** 合并真正连续的 assistant 消息（仅用于历史 API 加载时的同一次响应拆分场景）
+ *
+ * 设计意图：后端可能将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData
+ * （如 assistant 声明 tool_call、tool 结果、assistant 基于结果的回答是同一轮响应的拆分），
+ * 本函数将这些"真正连续"（中间无 tool 消息分隔）的 assistant 合并回一个气泡，并把
+ * tool 结果注入对应 tool_call part。
+ *
+ * 重要边界（修复多轮工具调用渲染异常）：
+ *   - **tool 消息必须保留**：tool 角色消息是独立渲染的（MessageItem 有 isTool 分支），
+ *     不能被合并逻辑吸收丢弃。原实现在第一遍用 `i++` 消费 tool 消息却不 push，
+ *     导致工具结果消息全部丢失。
+ *   - **被 tool 分隔的多轮 assistant 不得合并**：多轮工具调用中每一轮
+ *     （assistant 声明 → tool 结果 → assistant 回答）是独立的气泡。
+ *     原实现因 tool 被吞，多轮 assistant 在 absorbed 中变成"连续"，被第二遍
+ *     合并成一条 —— 这是用户反馈"AI 消息只剩一条、工具消息不显示"的根因。
+ *   - 仅当 assistant 真正相邻（无 tool 分隔，如同一次响应拆分的 thinking+text）
+ *     时才合并。
+ */
 export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
-  // 第一遍：将夹在 assistant 之间的 tool 消息的结果注入 tool_call part
+  // 第一遍：将 tool 消息的结果注入前一个 assistant 的 tool_call part，
+  //         同时保留 tool 消息本身（修复：原实现消费 tool 却不 push，导致 tool 丢失）
   const absorbed: Message[] = []
   let i = 0
   while (i < messages.length) {
@@ -269,6 +287,11 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
     const assistant = { ...msg, parts: msg.parts ? [...msg.parts] : undefined }
     const toolParts = (assistant.parts || []).filter((p: any) => p.type === 'tool_call')
     i++
+    // ★ 修复：收集 tool 消息（注入结果到 tool_call part 后保留 tool 消息本身），
+    //   并在 assistant 之后入列，保持「assistant 声明 → tool 结果」的原始顺序。
+    //   原实现只 i++ 消费 tool 却不 push，导致 tool 消息全部丢失；
+    //   若在 assistant 之前 push 则顺序错乱，tool 无法分隔多轮 assistant。
+    const toolMessages: Message[] = []
     while (i < messages.length && messages[i].role === 'tool') {
       const tm = messages[i]
       const tcId = tm.toolCallId
@@ -281,9 +304,10 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
           target.durationMs = tm.durationMs ?? target.durationMs
         }
       }
+      toolMessages.push(tm)
       i++
     }
-    absorbed.push(assistant)
+    absorbed.push(assistant, ...toolMessages)
   }
   // 第二遍：合并连续的 assistant
   const result: Message[] = []

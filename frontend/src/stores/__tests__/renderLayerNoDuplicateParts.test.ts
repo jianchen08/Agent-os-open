@@ -96,12 +96,16 @@ describe('渲染层防线：store 最终 parts 无重复 text', () => {
     // ★ 渲染层防线：最终 parts 无重复 text
     expect(() => assertNoDuplicateTextParts('场景A')).not.toThrow()
 
-    // 进一步验证：合并后只有 1 个 text part
+    // 修复后验证：tool 消息保留（独立渲染工具结果），多轮 assistant 各自独立，
+    // 不再被合并成 1 条（原断言固化"吸收 tool + 合并"的错误行为）。
     const msgs = usePipelineMessageStore.getState().getMessages(PIPELINE_ID)
+    expect(msgs.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant'])
     const assistants = msgs.filter((m) => m.role === 'assistant')
-    expect(assistants).toHaveLength(1)
-    const textParts = (assistants[0].parts || []).filter((p: any) => p.type === 'text')
+    expect(assistants).toHaveLength(2)
+    // 最终 assistant（rec-3）含唯一 text part
+    const textParts = (assistants[1].parts || []).filter((p: any) => p.type === 'text')
     expect(textParts).toHaveLength(1)
+    expect(textParts[0].content).toBe('这是最终回复')
   })
 
   it('场景B: 多轮 thinking+text → 最终每条消息的 text parts 无重复', async () => {

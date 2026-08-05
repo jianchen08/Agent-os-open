@@ -290,8 +290,15 @@ describe('mergeConsecutiveAssistantMessages', () => {
       ]
 
       const merged = mergeConsecutiveAssistantMessages(messages)
-      expect(merged).toHaveLength(1)
+      // ★ 修复后：tool 消息保留（独立渲染工具结果），多轮 assistant 不合并
+      expect(merged).toHaveLength(3)
+      expect(merged.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant'])
 
+      // tool 消息本身保留
+      expect(merged[1].id).toBe('tool-1')
+      expect(merged[1].toolResult).toBe('搜索结果：...')
+
+      // tool 结果注入 ai-1 的 tool_call part（吸收逻辑仍生效）
       const parts = merged[0].parts as any[]
       const toolCallPart = parts.find((p: any) => p.type === 'tool_call')
       expect(toolCallPart).toBeDefined()

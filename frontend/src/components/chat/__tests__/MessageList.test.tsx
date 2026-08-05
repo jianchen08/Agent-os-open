@@ -128,16 +128,67 @@ describe('MessageList', () => {
     })
 
     it('渲染多条消息', () => {
+      // 用交替 role（user/assistant/user）避免连续 assistant 被渲染层
+      // mergeConsecutiveAssistantMessages 合并成 1 条气泡，真正验证"渲染多条"。
       const messages = [
-        makeMessage({ id: 'msg-1', content: '消息一' }),
-        makeMessage({ id: 'msg-2', content: '消息二' }),
-        makeMessage({ id: 'msg-3', content: '消息三' }),
+        makeMessage({ id: 'msg-1', role: 'user', content: '消息一' }),
+        makeMessage({ id: 'msg-2', role: 'assistant', content: '消息二' }),
+        makeMessage({ id: 'msg-3', role: 'user', content: '消息三' }),
       ]
       render(<MessageList {...defaultProps} messages={messages} />)
 
       expect(screen.getByTestId('message-item-msg-1')).toBeInTheDocument()
       expect(screen.getByTestId('message-item-msg-2')).toBeInTheDocument()
       expect(screen.getByTestId('message-item-msg-3')).toBeInTheDocument()
+    })
+
+    it('多轮工具调用消息流完整渲染：user + 各轮 assistant + tool 全部展示（回归）', () => {
+      // 对应用户反馈 bug：多轮工具调用中 AI 消息只剩一条、tool 消息不显示。
+      // 渲染层 displayMessages 经 mergeConsecutiveAssistantMessages 处理，
+      // 修复后 tool 保留、被 tool 分隔的多轮 assistant 不合并，全部独立渲染。
+      const messages = [
+        makeMessage({ id: 'u1', role: 'user', content: '查天气', sequence: 1 }),
+        makeMessage({
+          id: 'a1', role: 'assistant', content: '', sequence: 2,
+          parts: [
+            { type: 'tool_call', callId: 'tc-1', name: 'get_weather', args: {}, state: 'done', sequence: 0 },
+          ] as any,
+        }),
+        makeMessage({
+          id: 't1', role: 'tool', content: '北京晴', sequence: 3,
+          toolCallId: 'tc-1', toolName: 'get_weather', toolResult: '北京晴',
+        }),
+        makeMessage({
+          id: 'a2', role: 'assistant', content: '今天晴，查明天？', sequence: 4,
+          parts: [
+            { type: 'text', content: '今天晴，查明天？', state: 'done', sequence: 0 },
+            { type: 'tool_call', callId: 'tc-2', name: 'get_weather', args: {}, state: 'done', sequence: 1 },
+          ] as any,
+        }),
+        makeMessage({
+          id: 't2', role: 'tool', content: '明天多云', sequence: 5,
+          toolCallId: 'tc-2', toolName: 'get_weather', toolResult: '明天多云',
+        }),
+        makeMessage({
+          id: 'a3', role: 'assistant', content: '明天多云，带外套', sequence: 6,
+          parts: [
+            { type: 'text', content: '明天多云，带外套', state: 'done', sequence: 0 },
+          ] as any,
+        }),
+      ]
+      render(<MessageList {...defaultProps} messages={messages} />)
+
+      // ★ 修复后：6 条消息全部渲染（不再被合并成 1 条、tool 不被吞）
+      expect(screen.getByTestId('message-item-u1')).toBeInTheDocument()
+      expect(screen.getByTestId('message-item-a1')).toBeInTheDocument()
+      expect(screen.getByTestId('message-item-t1')).toBeInTheDocument()
+      expect(screen.getByTestId('message-item-a2')).toBeInTheDocument()
+      expect(screen.getByTestId('message-item-t2')).toBeInTheDocument()
+      expect(screen.getByTestId('message-item-a3')).toBeInTheDocument()
+
+      // tool 消息内容保留
+      expect(screen.getByText('北京晴')).toBeInTheDocument()
+      expect(screen.getByText('明天多云')).toBeInTheDocument()
     })
 
     it('最后一条消息 isLast 为 true', () => {
@@ -159,6 +210,7 @@ describe('MessageList', () => {
       ]
       const { container } = render(<MessageList {...defaultProps} messages={messages} isGenerating={true} />)
 
+      // displayMessages 渲染 1 条 user 消息；最后一条 role='user' 且 isGenerating → 显示"思考中"
       expect(container.textContent).toContain('思考中')
     })
 

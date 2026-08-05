@@ -17,12 +17,9 @@
 
 import { Loader2 } from '@/assets/icons'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
-import { logger as loggerService } from '@/utils/logger'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
-
-const logger = loggerService.module('MessageList')
 
 /**
  * 每个 Tab 的滚动位置缓存
@@ -75,14 +72,6 @@ export const MessageList = ({
     () => mergeConsecutiveAssistantMessages(messages),
     [messages],
   )
-  // [诊断] 对比 store 原始条数 vs 合并后条数，定位丢失在哪层
-  useEffect(() => {
-    if (messages.length > 0) {
-      console.log('[诊断-渲染层]', 'store原始:', messages.length,
-        '合并后:', displayMessages.length,
-        'seq范围:', messages.length ? messages[0].sequence+'~'+messages[messages.length-1].sequence : '空')
-    }
-  }, [messages.length, displayMessages.length])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   /** 是否在底部附近（距底部 150px 内） */
