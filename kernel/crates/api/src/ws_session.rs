@@ -211,7 +211,11 @@ impl PipelineDispatcher for EngineDispatcher {
         pipeline_id: &str,
     ) -> Result<(), String> {
         use agentos_core::types::TenantContext;
-        let tenant = TenantContext::new(user_id.to_string(), thread_id.to_string());
+        // tenant_id 必须用真正的租户 ID（与 HTTP 路径 resolve_request_tenant_id 同源），
+        // 不能用 user_id 顶替——否则消息按 user_id 落库，读取时按 default 查不到，
+        // 表现为「刷新后历史消息不显示」。
+        let tenant_id = crate::auth::resolve_tenant_id_by_user(user_id);
+        let tenant = TenantContext::new(tenant_id, thread_id.to_string());
         let state = self.state.clone();
         let content = content.to_string();
         // pipeline_id 是前端消息路由键，引擎回推流式事件时用它定位占位气泡。

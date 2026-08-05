@@ -181,13 +181,25 @@ pub fn resolve_request_tenant_id(headers: &HeaderMap) -> String {
     if let Some(token) = extract_bearer_token(headers) {
         if let Some((user_id, _, exp)) = decode_token(&token) {
             if !is_token_expired(exp) {
-                if let Some(user) = find_user_by_id(&user_id) {
-                    return user.tenant_id;
-                }
+                return resolve_tenant_id_by_user(&user_id);
             }
         }
     }
     DEFAULT_TENANT_ID.to_string()
+}
+
+/// 按 user_id 解析其归属的租户 ID（WS 路径用，与 HTTP 路径同源）。
+///
+/// WebSocket 握手链路只透传 `user_id`（受 `PipelineDispatcher` trait 签名约束），
+/// 无法携带 `HeaderMap`。本函数让 WS 入站分发器能用同一套内置用户表查出
+/// 真正的 `tenant_id`，避免把 `user_id` 误当 `tenant_id` 导致读写 tenant 失配。
+///
+/// 未命中内置用户时回退到 [`DEFAULT_TENANT_ID`]，行为与
+/// [`resolve_request_tenant_id`] 完全一致。
+pub fn resolve_tenant_id_by_user(user_id: &str) -> String {
+    find_user_by_id(user_id)
+        .map(|u| u.tenant_id)
+        .unwrap_or_else(|| DEFAULT_TENANT_ID.to_string())
 }
 
 /// 从 Authorization 头提取 bearer token。
