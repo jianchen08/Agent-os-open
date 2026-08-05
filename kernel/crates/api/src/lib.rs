@@ -15,6 +15,7 @@ pub mod auth;
 pub mod capability_router;
 pub mod compat_routes;
 pub mod config_service;
+pub mod db_routes;
 pub mod error;
 pub mod http_dispatcher;
 pub mod metrics;

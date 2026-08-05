@@ -815,6 +815,21 @@ impl SqliteStore {
         }
     }
 
+    /// 在锁内执行任意 SQLite 操作（统一数据接口 `/api/v1/db/*` 专用）。
+    ///
+    /// 暴露只读的 `&Connection` 给上层做表驱动动态访问（`sqlite_master` /
+    /// `PRAGMA table_info` / 通用查询/CRUD）。不改变任何持久化语义——
+    /// 只是连接访问的受控出口，DDL/迁移逻辑仍由本模块独占。
+    ///
+    /// 错误类型 `E` 由调用方决定（如 api 层的 `ApiError`），锁获取本身不失败。
+    pub fn with_conn<T, E>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let conn = self.conn.lock();
+        f(&conn)
+    }
+
     // ── 域3/4/5：execution_records / summaries / memory（M1）──────────
 
     /// 从查询行构造 ExecutionRecord（JSON 列反序列化）。

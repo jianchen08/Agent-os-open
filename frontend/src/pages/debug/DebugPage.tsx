@@ -44,6 +44,12 @@ const DEBUG_CARDS: DebugCard[] = [
     href: '/debug/users',
     icon: '👤',
   },
+  {
+    title: '数据库',
+    description: '浏览任意表、筛选/编辑行数据、SQL 调试',
+    href: '/debug/db',
+    icon: '🗄️',
+  },
 ]
 
 /**

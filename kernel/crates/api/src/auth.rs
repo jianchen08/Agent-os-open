@@ -207,6 +207,43 @@ pub async fn resolve_request_tenant_id(
     DEFAULT_TENANT_ID.to_string()
 }
 
+/// 解析请求认证用户（HTTP 管理面端点用，如 `/api/v1/db/*`）。
+///
+/// 返回 `(user_id, username, role, tenant_id)`。任一校验失败（缺失/无效/
+/// 过期/非 access 类型）→ `ApiError::Unauthorized`。
+///
+/// 角色校验由调用方执行（只读 admin/viewer；写操作仅 admin）。
+pub async fn resolve_request_user(
+    store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
+    headers: &HeaderMap,
+) -> Result<(String, String, String, String), ApiError> {
+    let token = extract_bearer_token(headers).ok_or(ApiError::Unauthorized {
+        message: "缺少认证信息".to_string(),
+    })?;
+    let (user_id, username, exp) = decode_token(&token).ok_or(ApiError::Unauthorized {
+        message: "无效的认证令牌".to_string(),
+    })?;
+    if is_token_expired(exp) {
+        return Err(ApiError::Unauthorized {
+            message: "认证令牌已过期".to_string(),
+        });
+    }
+    // 必须是 access token（拒绝 refresh token 用于管理面）
+    if !is_access_token(&token) {
+        return Err(ApiError::Unauthorized {
+            message: "无效的认证令牌".to_string(),
+        });
+    }
+    // token 校验场景无 tenant scope，用 username 跨租户查询（token 自带 username）
+    let user = find_user_by_username(store, &username)
+        .await
+        .or_else(|| default_users().into_iter().find(|u| u.id == user_id))
+        .ok_or(ApiError::Unauthorized {
+            message: "用户不存在".to_string(),
+        })?;
+    Ok((user.id, user.username, user.role, user.tenant_id))
+}
+
 /// 按 user_id 解析其归属的租户 ID（WS 路径用，与 HTTP 路径同源）。
 ///
 /// store 优先查持久化用户的 tenant_id；未命中回退内置 admin（兼容无 store 测试），

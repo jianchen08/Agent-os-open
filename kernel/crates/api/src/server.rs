@@ -146,7 +146,21 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/refresh", post(refresh_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
-        .route("/api/v1/auth/register", post(register_handler));
+        .route("/api/v1/auth/register", post(register_handler))
+        // 统一通用数据接口（task_01：表驱动动态枚举，不改持久化）
+        .route("/api/v1/db/tables", get(crate::db_routes::list_tables_handler))
+        .route(
+            "/api/v1/db/table/{table}",
+            get(crate::db_routes::query_rows_handler)
+                .post(crate::db_routes::insert_row_handler),
+        )
+        .route(
+            "/api/v1/db/table/{table}/{pk_value}",
+            get(crate::db_routes::get_row_handler)
+                .patch(crate::db_routes::update_row_handler)
+                .delete(crate::db_routes::delete_row_handler),
+        )
+        .route("/api/v1/db/execute", post(crate::db_routes::execute_sql_handler));
 
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
     let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
