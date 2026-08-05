@@ -214,7 +214,9 @@ impl PipelineDispatcher for EngineDispatcher {
         // tenant_id 必须用真正的租户 ID（与 HTTP 路径 resolve_request_tenant_id 同源），
         // 不能用 user_id 顶替——否则消息按 user_id 落库，读取时按 default 查不到，
         // 表现为「刷新后历史消息不显示」。
-        let tenant_id = crate::auth::resolve_tenant_id_by_user(user_id);
+        // 从 self.state.store 查持久化用户的 tenant_id（一用户一租户 = user_id）。
+        let tenant_id =
+            crate::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
         let tenant = TenantContext::new(tenant_id, thread_id.to_string());
         let state = self.state.clone();
         let content = content.to_string();

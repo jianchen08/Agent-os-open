@@ -23,9 +23,9 @@ use agentos_api::{
     validate_no_name_conflicts, KernelCapabilityRouter,
 };
 use agentos_core::traits::{
-    CapabilityRegistry, PluginLoader, PluginType, ToolDescriptor,
+    CapabilityRegistry, PluginLoader, PluginType, StorageBackend, ToolDescriptor,
 };
-use agentos_core::types::{ToolCategory, ToolSource};
+use agentos_core::types::{ToolCategory, ToolSource, UserRecord};
 use agentos_engine::{AdrEngineImpl, SqliteStore};
 use agentos_invoker::PluginInvokerImpl;
 use agentos_plugin_loader::{
@@ -33,6 +33,43 @@ use agentos_plugin_loader::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*};
+
+/// 播种内置 admin 用户（首次启动插入，已存在则跳过）。
+///
+/// 0.5.0 最小持久化地基：auth 由硬编码占位改为查 DB，启动时确保 admin 存在。
+/// tenant_id = "default"（与多租户隔离地基的默认租户一致），保证旧数据
+/// （0.5.0 前以 default 写入的会话/消息）仍归 admin 可见。
+async fn seed_admin_user(store: Arc<SqliteStore>) {
+    const ADMIN_ID: &str = "00000000-0000-0000-0000-000000000001";
+    match store.get_user_by_id(ADMIN_ID).await {
+        Ok(Some(_)) => {
+            // admin 已存在（非首次启动），跳过
+        }
+        Ok(None) => {
+            // 首次启动：插入 admin 种子用户。
+            // get_user_by_id 按 task_local tenant（此处为空→default）查，admin 的
+            // tenant_id 正是 default，所以 None 表示确实没播过种。
+            let now = chrono::Utc::now().to_rfc3339();
+            let admin = UserRecord {
+                user_id: ADMIN_ID.to_string(),
+                username: "admin".to_string(),
+                password: "admin12345".to_string(), // 明文（DEBT: 0.5.0 哈希）
+                email: Some("admin@agentos.dev".to_string()),
+                role: "admin".to_string(),
+                tenant_id: "default".to_string(),
+                created_at: now,
+                last_login_at: None,
+            };
+            match store.create_user(&admin).await {
+                Ok(()) => info!(target: "agentos-kernel", "已播种内置 admin 用户 (tenant=default)"),
+                Err(e) => warn!(target: "agentos-kernel", error = %e, "播种 admin 用户失败（login 将回退内置硬编码）"),
+            }
+        }
+        Err(e) => {
+            warn!(target: "agentos-kernel", error = %e, "查询 admin 用户失败，跳过播种")
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -292,6 +329,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         SqliteStore::open(&db_path)?
     });
+
+    // 播种内置 admin 用户（0.5.0 最小持久化地基）。
+    // 首次启动时若 users 表无 admin，插入（admin/admin12345/tenant=default）。
+    // 之后 login/me/register 均查 DB；进程重启用户不丢。幂等：已存在则跳过。
+    seed_admin_user(store.clone()).await;
 
     // 创建真实插件调用器——按 host_type 透明分发：
     //   Sidecar: 通过 MCP stdio fork Python sidecar 执行插件

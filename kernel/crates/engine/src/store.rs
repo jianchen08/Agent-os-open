@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
 use agentos_core::types::{
     BlobRecord, Branch, ExecutionRecord, MemoryRecord, Message, MessageRecord, PipelineRunSummary,
-    PatchType, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry,
+    PatchType, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
 };
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -150,6 +150,20 @@ CREATE TABLE IF NOT EXISTS memory (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_tenant ON memory(tenant_id, memory_type);
+-- 域6：users（0.5.0 完整用户系统的最小持久化地基）。
+-- 一用户一租户：tenant_id = user_id（admin 种子 = 'default'）。username 跨租户全局唯一。
+-- 密码明文（DEBT: 0.5.0 替换为哈希）。
+CREATE TABLE IF NOT EXISTS users (
+    user_id       TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password      TEXT NOT NULL,
+    email         TEXT,
+    role          TEXT NOT NULL DEFAULT 'user',
+    tenant_id     TEXT NOT NULL DEFAULT 'default',
+    created_at    TEXT NOT NULL,
+    last_login_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
 ";
 
 /// 为旧库（建表时无 tenant_id 列）补加 tenant_id 列。
@@ -570,6 +584,126 @@ impl SqliteStore {
             created_at: row.get(8)?,
             updated_at: row.get(9)?,
             last_active_at: row.get(10)?,
+        })
+    }
+
+    // ── 域6：users（0.5.0 完整用户系统的最小持久化地基）───────────────
+    // 一用户一租户：tenant_id = user_id。username 跨租户全局唯一。
+    // get_user_by_username 不加 tenant 过滤（登录时还没有租户上下文）。
+
+    /// 创建用户（username 全局唯一约束，重复返回 StorageError）。
+    /// user.tenant_id 直接入库（一用户一租户，由调用方设 = user_id）。
+    fn create_user_inner(&self, user: &UserRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO users (user_id, username, password, email, role, tenant_id, created_at, last_login_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                user.user_id,
+                user.username,
+                user.password,
+                user.email,
+                user.role,
+                user.tenant_id,
+                user.created_at,
+                user.last_login_at,
+            ],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 按 user_id 取用户（跨租户全局查询，token 解析用，不加 tenant 过滤）。
+    /// user_id 是全局唯一主键，按 user_id 查天然定位唯一用户。
+    /// 注意：token 解析场景（resolve_tenant_id_by_user）尚未确定 tenant，
+    /// 故不能按 task_local tenant 过滤（否则查不到 → 回退 default → 隔离失效）。
+    fn get_user_by_id_inner(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn.query_row(
+            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
+             FROM users WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            Self::row_to_user,
+        );
+        match row {
+            Ok(u) => Ok(Some(u)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Database(e.to_string())),
+        }
+    }
+
+    /// 按用户名取用户（跨租户全局查询，登录用，不加 tenant 过滤）。
+    fn get_user_by_username_inner(
+        &self,
+        username: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn.query_row(
+            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
+             FROM users WHERE username = ?1",
+            rusqlite::params![username],
+            Self::row_to_user,
+        );
+        match row {
+            Ok(u) => Ok(Some(u)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Database(e.to_string())),
+        }
+    }
+
+    /// 列全部用户（跨租户，管理用）。
+    fn list_users_inner(&self) -> Result<Vec<UserRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
+                 FROM users ORDER BY created_at ASC",
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let users = stmt
+            .query_map([], Self::row_to_user)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        users
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    /// 更新最近登录时间。
+    fn update_last_login_inner(&self, user_id: &str) -> Result<(), StorageError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE users SET last_login_at = ?1 WHERE user_id = ?2",
+            rusqlite::params![now, user_id],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 删除用户。返回是否删除了行。
+    fn delete_user_inner(&self, user_id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock();
+        let affected = conn
+            .execute(
+                "DELETE FROM users WHERE user_id = ?1",
+                rusqlite::params![user_id],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    /// 从查询行构造 UserRecord。
+    fn row_to_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+        Ok(UserRecord {
+            user_id: row.get(0)?,
+            username: row.get(1)?,
+            password: row.get(2)?,
+            email: row.get(3)?,
+            role: row.get(4)?,
+            tenant_id: row.get(5)?,
+            created_at: row.get(6)?,
+            last_login_at: row.get(7)?,
         })
     }
     pub fn get_traces(
@@ -1758,6 +1892,62 @@ impl StorageBackend for SqliteStore {
         let this = self.clone();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || this.delete_memory_inner(&id, &tenant_id))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    // ── 域6：users async wrapper（0.5.0 最小持久化地基）──────────────
+    // 注意：get_user_by_username / list_users 跨租户查询，不解析 task_local tenant。
+    // get_user_by_id 按 tenant 隔离（与消息/会话一致，task_local 在 spawn_blocking 前解析）。
+
+    async fn create_user(&self, user: &UserRecord) -> Result<(), StorageError> {
+        let this = self.clone();
+        let user = user.clone();
+        tokio::task::spawn_blocking(move || this.create_user_inner(&user))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError> {
+        // 跨租户查询（token 解析场景，user_id 是全局主键），不依赖 task_local tenant
+        let this = self.clone();
+        let user_id = user_id.to_string();
+        tokio::task::spawn_blocking(move || this.get_user_by_id_inner(&user_id))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn get_user_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        // 跨租户查询（登录时还没有租户上下文），不解析 task_local tenant
+        let this = self.clone();
+        let username = username.to_string();
+        tokio::task::spawn_blocking(move || this.get_user_by_username_inner(&username))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn list_users(&self) -> Result<Vec<UserRecord>, StorageError> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.list_users_inner())
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn update_last_login(&self, user_id: &str) -> Result<(), StorageError> {
+        let this = self.clone();
+        let user_id = user_id.to_string();
+        tokio::task::spawn_blocking(move || this.update_last_login_inner(&user_id))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn delete_user(&self, user_id: &str) -> Result<bool, StorageError> {
+        let this = self.clone();
+        let user_id = user_id.to_string();
+        tokio::task::spawn_blocking(move || this.delete_user_inner(&user_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }

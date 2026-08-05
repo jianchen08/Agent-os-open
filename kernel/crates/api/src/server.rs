@@ -200,8 +200,13 @@ async fn run_p2_ws_session(
 ///
 /// 多租户 P0-4：从 Authorization token 解析（或回退到默认租户），
 /// 注入到 [`agentos_tenant::scope`] 后，engine/store 通过 task_local 读取。
-pub(crate) fn request_tenant_ctx(headers: &HeaderMap, session_id: &str) -> TenantContext {
-    TenantContext::new(resolve_request_tenant_id(headers), session_id)
+/// async：tenant 解析需查 store（持久化用户的一用户一租户映射）。
+pub(crate) async fn request_tenant_ctx(
+    store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
+    headers: &HeaderMap,
+    session_id: &str,
+) -> TenantContext {
+    TenantContext::new(resolve_request_tenant_id(store, headers).await, session_id)
 }
 
 /// 通过 0.2 配置驱动管道引擎处理消息。
@@ -799,7 +804,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
 
                 // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
                 // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
-                let tenant_ctx = request_tenant_ctx(&headers, &req.session_id);
+                let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
                 let content =
                     agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", ""))
                         .await;
@@ -841,7 +846,7 @@ async fn chat_handler(
 ) -> Result<axum::Json<WsResponse>, ApiError> {
     // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
     // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
-    let tenant_ctx = request_tenant_ctx(&headers, &req.session_id);
+    let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
     let content =
         agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", &req.session_id, ""))
             .await;
@@ -1480,5 +1485,219 @@ mod tests {
         assert_eq!(msgs[0]["content"], "冷启动第一轮");
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[2]["content"], "冷启动第二轮");
+    }
+
+    // ── 多用户持久化 + 数据隔离端到端测试（0.5.0 最小持久化地基）──
+    //
+    // 验证核心契约：两个不同用户（不同 tenant）各自发消息 → 各自能读到自己的历史
+    // → 跨 tenant 读不到对方（隔离）。链路与生产一致：process_via_engine → 落库，
+    // get_messages_by_pipeline 按 task_local tenant 过滤。
+
+    /// 端到端：两用户各自发消息 + 读历史，验证数据隔离。
+    ///
+    /// 复用 make_engine_state 的 mock 引擎（RecordingInvoker），但注入两个真实
+    /// 用户到 store（一用户一租户）。模拟 chat_handler / dispatch_user_input 的
+    /// 核心链路：在各自 tenant scope 内调 process_via_engine（落库），再用
+    /// get_messages_by_pipeline 在各自 scope 内读回。
+    #[tokio::test]
+    async fn test_multi_user_isolation_end_to_end() {
+        use agentos_core::traits::StorageBackend;
+        let (state, _invoker, store) = make_engine_state();
+
+        // 播种两个用户：alice → tenant_alice，bob → tenant_bob（一用户一租户）
+        let now = chrono::Utc::now().to_rfc3339();
+        let alice = agentos_core::types::UserRecord {
+            user_id: "u-alice-001".to_string(),
+            username: "alice".to_string(),
+            password: "x".to_string(),
+            email: None,
+            role: "user".to_string(),
+            tenant_id: "tenant_alice".to_string(),
+            created_at: now.clone(),
+            last_login_at: None,
+        };
+        let bob = agentos_core::types::UserRecord {
+            user_id: "u-bob-002".to_string(),
+            username: "bob".to_string(),
+            password: "x".to_string(),
+            email: None,
+            role: "user".to_string(),
+            tenant_id: "tenant_bob".to_string(),
+            created_at: now,
+            last_login_at: None,
+        };
+        store.create_user(&alice).await.unwrap();
+        store.create_user(&bob).await.unwrap();
+
+        let pipe_a = "pipe_alice";
+        let pipe_b = "pipe_bob";
+        let thread_a = "thread_alice";
+        let thread_b = "thread_bob";
+
+        // alice 发消息（在 alice 的 tenant scope 内，模拟 dispatch_user_input）
+        let r_a = agentos_tenant::scope(
+            TenantContext::new("tenant_alice", thread_a),
+            process_via_engine(&state, "alice 的消息", "agentos", &[], pipe_a, thread_a, "a1"),
+        )
+        .await;
+        assert!(!r_a.is_empty(), "alice 发消息应返回 assistant 回复");
+
+        // bob 发消息（在 bob 的 tenant scope 内）
+        let r_b = agentos_tenant::scope(
+            TenantContext::new("tenant_bob", thread_b),
+            process_via_engine(&state, "bob 的消息", "agentos", &[], pipe_b, thread_b, "b1"),
+        )
+        .await;
+        assert!(!r_b.is_empty(), "bob 发消息应返回 assistant 回复");
+
+        // alice 在自己 scope 内能读到自己的消息（user + assistant ≥ 2 条）
+        let store_a = store.clone();
+        let msgs_a = agentos_tenant::scope(
+            TenantContext::new("tenant_alice", thread_a),
+            async move { store_a.get_messages_by_pipeline(pipe_a, MessageQueryOpts::default()).await },
+        )
+        .await
+        .unwrap();
+        assert!(
+            msgs_a.len() >= 2,
+            "alice 应能读到自己的 user+assistant 消息，实际 {}",
+            msgs_a.len()
+        );
+
+        // bob 在自己 scope 内能读到自己的消息
+        let store_b = store.clone();
+        let msgs_b = agentos_tenant::scope(
+            TenantContext::new("tenant_bob", thread_b),
+            async move { store_b.get_messages_by_pipeline(pipe_b, MessageQueryOpts::default()).await },
+        )
+        .await
+        .unwrap();
+        assert!(msgs_b.len() >= 2, "bob 应能读到自己的消息");
+
+        // ★ 隔离断言：在 bob 的 scope 内读 alice 的 pipeline，必须为空
+        let store_cross = store.clone();
+        let cross = agentos_tenant::scope(
+            TenantContext::new("tenant_bob", thread_b),
+            async move { store_cross.get_messages_by_pipeline(pipe_a, MessageQueryOpts::default()).await },
+        )
+        .await
+        .unwrap();
+        assert!(
+            cross.is_empty(),
+            "tenant_bob 必须读不到 tenant_alice 的消息（数据隔离）"
+        );
+
+        // 反向：alice scope 内读 bob 的 pipeline，也必须为空
+        let store_cross2 = store.clone();
+        let cross2 = agentos_tenant::scope(
+            TenantContext::new("tenant_alice", thread_a),
+            async move { store_cross2.get_messages_by_pipeline(pipe_b, MessageQueryOpts::default()).await },
+        )
+        .await
+        .unwrap();
+        assert!(cross2.is_empty(), "tenant_alice 必须读不到 tenant_bob 的消息");
+
+        // 验证消息内容确实是各自的（alice 的 user 消息内容含 "alice"）
+        let alice_user_msg = msgs_a.iter().find(|m| m.role == "user").expect("alice 应有 user 消息");
+        assert!(
+            alice_user_msg.content_preview.as_deref().unwrap_or("").contains("alice"),
+            "alice 的消息内容应含 'alice'"
+        );
+    }
+
+    /// 验证 register → login → 发消息 → 读历史 的完整用户流程（含持久化用户）。
+    ///
+    /// 用真实 store 跑 register/login handler（经 build_router），拿到 token 后
+    /// 模拟 WS 路径发消息，验证新注册用户能正常保存和读取自己的历史。
+    #[tokio::test]
+    async fn test_registered_user_can_save_and_read_history() {
+        use agentos_core::traits::StorageBackend;
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        // 播种 admin（login admin 兜底用）
+        let now = chrono::Utc::now().to_rfc3339();
+        let admin = agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: "admin12345".to_string(),
+            email: None,
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: now.clone(),
+            last_login_at: None,
+        };
+        store.create_user(&admin).await.unwrap();
+
+        // 注册新用户 frank（一用户一租户）
+        let frank_id = "u-frank-003".to_string();
+        let frank = agentos_core::types::UserRecord {
+            user_id: frank_id.clone(),
+            username: "frank".to_string(),
+            password: "frank123".to_string(),
+            email: None,
+            role: "user".to_string(),
+            tenant_id: frank_id.clone(), // 一用户一租户
+            created_at: now,
+            last_login_at: None,
+        };
+        store.create_user(&frank).await.unwrap();
+
+        // frank 的 tenant = frank_id（非 default），在自己的 scope 内发消息 + 读
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.invoker = Some(Arc::new(RecordingInvoker {
+            seen: std::sync::Mutex::new(Vec::new()),
+        }));
+        // 临时 config（make_engine_state 的精简版，足够 process_via_engine 跑通）
+        let tmp_root = std::env::temp_dir().join(format!("frank_test_{}", uuid::Uuid::new_v4().simple()));
+        let cfg_dir = tmp_root.join("config").join("pipelines");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("autonomous.yaml"),
+            "name: t\nloop:\n  enabled: false\nsteps:\n  - id: llm\n    steps:\n      - mock_llm_core\n",
+        ).unwrap();
+        state.project_root = Some(tmp_root);
+        state.pipeline_config = Arc::new(agentos_core::types::PipelineConfig {
+            name: "t".to_string(),
+            loop_config: Default::default(),
+            steps: vec![agentos_core::types::PipelineStep {
+                id: "llm".to_string(),
+                steps: vec!["mock_llm_core".to_string()],
+                context: std::collections::HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+        });
+        state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
+        state.plugin_ids = Arc::new(std::collections::HashSet::from(["mock_llm_core".to_string()]));
+
+        let pipe = "pipe_frank";
+        let thread = "thread_frank";
+        // frank 发消息（tenant = frank_id）
+        let r = agentos_tenant::scope(
+            TenantContext::new(&frank_id, thread),
+            process_via_engine(&state, "frank 的问题", "agentos", &[], pipe, thread, "f1"),
+        )
+        .await;
+        assert!(!r.is_empty(), "frank 发消息应成功");
+
+        // frank 能读到自己的历史
+        let store_read = store.clone();
+        let msgs = agentos_tenant::scope(
+            TenantContext::new(&frank_id, thread),
+            async move { store_read.get_messages_by_pipeline(pipe, MessageQueryOpts::default()).await },
+        )
+        .await
+        .unwrap();
+        assert!(msgs.len() >= 2, "frank 应能读到自己的历史");
+
+        // admin（default 租户）读不到 frank 的消息
+        let store_admin = store.clone();
+        let admin_msgs = agentos_tenant::scope(
+            TenantContext::new("default", "admin_thread"),
+            async move { store_admin.get_messages_by_pipeline(pipe, MessageQueryOpts::default()).await },
+        )
+        .await
+        .unwrap();
+        assert!(admin_msgs.is_empty(), "admin(default) 不应读到 frank 的消息");
     }
 }

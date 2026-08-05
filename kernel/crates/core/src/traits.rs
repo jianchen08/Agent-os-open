@@ -25,7 +25,7 @@ use crate::types::{
     Branch, CompositeStep, EngineError, ErrorPolicy, ExecutionRecord, MemoryRecord, Message,
     MessageRecord, PipelineRunSummary, PluginContext, PluginError, PluginResult, RouteType,
     RunRecord, RunStatus, SessionRecord, StepResult, StorageError, SuspendHandle, ToolCategory,
-    ToolExecutionResult, ToolSource, TraceEntry, WakeEvent,
+    ToolExecutionResult, ToolSource, TraceEntry, UserRecord, WakeEvent,
 };
 
 // ── 1. 插件基础 Trait ───────────────────────────────────────────
@@ -1383,6 +1383,31 @@ pub trait StorageBackend: Send + Sync {
 
     /// 删除记忆（对齐 0.1 `delete_memory`）。不存在返回 false。
     async fn delete_memory(&self, id: &str) -> Result<bool, StorageError>;
+
+    // ── 域6：users（0.5.0 完整用户系统的最小持久化地基）───────────────
+    // register 真实建用户、login/me/refresh/WS 查 DB。RBAC/JWT/bcrypt 留给 0.5.0。
+    // 一用户一租户：tenant_id = user_id（admin 种子 = "default"）。
+
+    /// 创建用户（username 全局唯一约束，重复返回 StorageError）。
+    async fn create_user(&self, user: &UserRecord) -> Result<(), StorageError>;
+
+    /// 按 user_id 取用户（WS 握手 / token 解析用，按 tenant 隔离）。
+    async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError>;
+
+    /// 按用户名取用户（登录用，跨租户全局查询，不加 tenant 过滤）。
+    async fn get_user_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<UserRecord>, StorageError>;
+
+    /// 列全部用户（管理用，跨租户）。
+    async fn list_users(&self) -> Result<Vec<UserRecord>, StorageError>;
+
+    /// 更新最近登录时间（登录成功后调）。
+    async fn update_last_login(&self, user_id: &str) -> Result<(), StorageError>;
+
+    /// 删除用户。不存在返回 false。
+    async fn delete_user(&self, user_id: &str) -> Result<bool, StorageError>;
 }
 
 /// `list_sessions` 的过滤条件。

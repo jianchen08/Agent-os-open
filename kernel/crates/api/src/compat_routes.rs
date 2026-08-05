@@ -20,6 +20,7 @@
 use std::sync::OnceLock;
 
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -73,18 +74,29 @@ fn record_history_ext(base: Value, kvs: &[(&str, Value)]) {
 ///
 /// 域2持久化：优先从 sessions 表读（重启后可恢复），DB 空时回退内存 registry
 /// （兼容 store 未配置或历史场景）。返回结构对齐前端 ThreadStateResponse。
-pub async fn list_threads_handler(State(state): State<AppState>) -> Json<Value> {
+pub async fn list_threads_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<Value> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut threads: Vec<Value> = Vec::new();
 
-    // 优先读 DB（持久化会话列表）
+    // 优先读 DB（持久化会话列表）。list_sessions 按 task_local tenant 过滤，
+    // 需在请求租户 scope 内执行（修复前直接调，多租户下永远只读 default）。
     let mut db_has_data = false;
     if let Some(store) = state.store.as_ref() {
-        let filter = agentos_core::traits::SessionListFilter {
-            session_type: Some("main_pipeline".to_string()),
-            limit: Some(100),
-        };
-        match store.list_sessions(filter).await {
+        let tenant_ctx =
+            crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+        let store_clone = store.clone();
+        let sessions_result = agentos_tenant::scope(tenant_ctx, async move {
+            let filter = agentos_core::traits::SessionListFilter {
+                session_type: Some("main_pipeline".to_string()),
+                limit: Some(100),
+            };
+            store_clone.list_sessions(filter).await
+        })
+        .await;
+        match sessions_result {
             Ok(sessions) if !sessions.is_empty() => {
                 db_has_data = true;
                 for s in sessions {
@@ -150,6 +162,7 @@ fn session_to_thread_json(s: &agentos_core::types::SessionRecord) -> Value {
 /// POST /api/v1/threads — 创建会话（内存登记，返回新 thread_id）。
 pub async fn create_thread_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<Value> {
     let now = chrono::Utc::now().to_rfc3339();
@@ -195,7 +208,16 @@ pub async fn create_thread_handler(
             updated_at: now.clone(),
             last_active_at: Some(now.clone()),
         };
-        if let Err(e) = store.create_session(&session_rec).await {
+        // create_session 按 task_local tenant 落库，需在请求租户 scope 内执行
+        // （修复前直接调，多租户下会话落到 default 而非请求用户的租户）。
+        let tenant_ctx =
+            crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &thread_id).await;
+        let store_clone = store.clone();
+        let create_result = agentos_tenant::scope(tenant_ctx, async move {
+            store_clone.create_session(&session_rec).await
+        })
+        .await;
+        if let Err(e) = create_result {
             tracing::warn!(thread_id = %thread_id, error = %e, "create_session 落库失败（继续返回）");
         }
     }
@@ -415,6 +437,7 @@ pub async fn delete_thread_handler(
 /// sequence 按 pipeline_id 维度连续递增，支持 before_sequence/after_sequence 游标分页。
 pub async fn list_thread_messages_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<MessageListQuery>,
 ) -> Json<Value> {
@@ -431,7 +454,16 @@ pub async fn list_thread_messages_handler(
         limit: q.limit,
     };
 
-    let records = match store.get_messages_by_pipeline(&target_pid, opts).await {
+    // 多租户：get_messages_by_pipeline 按 task_local tenant 过滤，需在请求租户 scope 内执行。
+    // 修复前直接调（task_local 未设 → current_or_default("default")），多租户下永远只读 default。
+    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
+    let store_clone = store.clone();
+    let target_pid_for_scope = target_pid.clone();
+    let records = match agentos_tenant::scope(tenant_ctx, async move {
+        store_clone.get_messages_by_pipeline(&target_pid_for_scope, opts).await
+    })
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(pipeline_id = %target_pid, error = %e, "get_messages_by_pipeline 查询失败");
@@ -440,6 +472,7 @@ pub async fn list_thread_messages_handler(
     };
 
     // 联查 blobs 取完整内容（content_preview 只是摘要，完整内容在 blobs 表）
+    // get_blob 内容寻址，不依赖 tenant，scope 外调用即可
     let mut messages: Vec<Value> = Vec::with_capacity(records.len());
     for rec in records {
         let content = if let Some(bid) = rec.blob_id.as_deref() {

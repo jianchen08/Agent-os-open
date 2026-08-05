@@ -262,6 +262,45 @@ impl StorageBackend for NullStorage {
     async fn delete_memory(&self, _id: &str) -> Result<bool, agentos_core::types::StorageError> {
         Ok(false)
     }
+
+    // ── users（0.5.0 最小持久化）：NullStorage 不实现，返回空
+    async fn create_user(
+        &self,
+        _user: &agentos_core::types::UserRecord,
+    ) -> Result<(), agentos_core::types::StorageError> {
+        Ok(())
+    }
+    async fn get_user_by_id(
+        &self,
+        _user_id: &str,
+    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+    {
+        Ok(None)
+    }
+    async fn get_user_by_username(
+        &self,
+        _username: &str,
+    ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+    {
+        Ok(None)
+    }
+    async fn list_users(
+        &self,
+    ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
+        Ok(Vec::new())
+    }
+    async fn update_last_login(
+        &self,
+        _user_id: &str,
+    ) -> Result<(), agentos_core::types::StorageError> {
+        Ok(())
+    }
+    async fn delete_user(
+        &self,
+        _user_id: &str,
+    ) -> Result<bool, agentos_core::types::StorageError> {
+        Ok(false)
+    }
 }
 
 /// 写入一份 default.yaml 形态的管道配置（0.1 扁平格式，含 input/output 路由 + 插件链 + 核心插件）。

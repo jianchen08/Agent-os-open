@@ -596,6 +596,38 @@ pub struct SessionRecord {
     pub last_active_at: Option<String>,
 }
 
+/// users 表记录——持久化用户（0.5.0 完整用户系统的最小持久化地基）。
+///
+/// 0.2.0 auth 为硬编码单 admin 占位实现；本次为多租户隔离测试落地最小持久化：
+/// register 真实建用户，login/me/refresh/WS 查 DB。RBAC/JWT 签名/bcrypt 哈希/
+/// 凭据保险库留给 0.5.0（见 auth.rs DEBT 标注 + ROADMAP §0.5）。
+///
+/// **租户粒度**：一用户一租户——注册时 `tenant_id = user_id`，保证不同用户数据隔离。
+/// admin 种子用户 tenant_id = "default"。
+///
+/// 密码明文存储（演示环境，DEBT 标注待 0.5.0 替换为哈希）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRecord {
+    /// 用户 ID（uuid；admin 种子为固定值）
+    pub user_id: String,
+    /// 用户名（跨租户全局唯一，登录键）
+    pub username: String,
+    /// 密码（明文，DEBT: 0.5.0 替换为哈希）
+    pub password: String,
+    /// 邮箱（可空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// 角色（admin/user；RBAC 完整化留给 0.5.0）
+    pub role: String,
+    /// 归属租户 ID（一用户一租户：注册时 = user_id；admin = "default"）
+    pub tenant_id: String,
+    /// 创建时间（ISO8601）
+    pub created_at: String,
+    /// 最近登录时间（可空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_login_at: Option<String>,
+}
+
 // ── M1：execution_records / pipeline_run_summaries / memory 三表记录 ──
 // 对齐 0.1 channel_api 的 ExecutionRecordData / PipelineRunSummary / MemoryStore，
 // 为「基础设施下沉内核」提供内核侧存储能力（M1）。capability 通路在 M2。
