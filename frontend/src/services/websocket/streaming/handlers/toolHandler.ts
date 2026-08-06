@@ -5,7 +5,7 @@ import { loggers } from '@/utils/logger'
 import { resolvePipelineId } from '../router'
 
 import { flushStreamChunkBuffer } from './streamHandler'
-import { extractMessageId } from './utils'
+import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -35,7 +35,6 @@ export function handleToolStart(eventData: any) {
 
   const toolName = eventData.tool_name || eventData.data?.tool_name || ''
   if (!toolName) {
-    // -M03: WS handler 层 console 残留
     _debugLogger.warn(
       '[TOOL_START] tool_name 缺失，跳过该工具调用: msgId=%s pipelineId=%s',
       messageId?.slice(0, 12), pipelineId?.slice(0, 8),
@@ -49,10 +48,20 @@ export function handleToolStart(eventData: any) {
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)
   const msg = msgs.find((m: any) => m.id === messageId)
-  if (!msg) return
+  if (!msg) {
+    // ★ 修复：tool_start 到达时消息占位不存在（stream_start 断线丢失/乱序/合并改名未命中），
+    //   自动创建占位符——对齐 handleStreamChunk / handleThinkingStart 的
+    //   "有消息就有占位符" 语义。原实现 `if (!msg) return` 静默丢弃工具调用，
+    //   多轮工具调用中后续轮次的 tool_start 若遇占位丢失，工具卡片不显示。
+    _debugLogger.warn(
+      `[TOOL_START] msg not found, auto-creating placeholder: pipeline=%s msgId=%s tool=%s`,
+      pipelineId?.slice(0, 12), messageId?.slice(0, 12), toolName,
+    )
+    ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
+  }
 
   // 去重：检查 parts[] 中是否已存在相同 call_id 的 tool_call part
-  const parts: any[] = msg.parts || []
+  const parts: any[] = msg?.parts || []
   const existingToolParts = parts.filter((p: any) => p.type === 'tool_call')
   if (parts.some((p: any) => p.type === 'tool_call' && p.callId === callId)) {
     _debugLogger.debug('[TOOL_DEDUP] SKIPPED duplicate: tool=%s callId=%s', toolName, callId?.slice(0, 12))
@@ -65,7 +74,7 @@ export function handleToolStart(eventData: any) {
   // 导致工具调用后的文本拼到工具卡片前面的文本里，渲染顺序错误。
   const streamingIdx = pipelineStore.getState().findStreamingPartIndex(pipelineId, messageId)
   if (streamingIdx >= 0) {
-    const streamingPart = msg.parts[streamingIdx]
+    const streamingPart = msg?.parts?.[streamingIdx]
     if (streamingPart && streamingPart.type === 'text') {
       pipelineStore.getState().updatePart(pipelineId, messageId, streamingIdx, { state: 'done' })
     }
@@ -106,7 +115,27 @@ export function handleToolResult(eventData: any) {
   if (!callId) return
 
   // 通过 call_id 精确匹配 parts[] 中的 tool_call part 并更新
-  const partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  let partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  if (partIndex < 0) {
+    // ★ 修复：tool_result 到达时对应的 tool_call part 不存在（tool_start 事件丢失/乱序，
+    //   或 tool_start 因消息占位缺失被旧实现静默丢弃）。补建 tool_call part 再写入结果，
+    //   对齐 Python bridge_events.py 的 FIXUP 自动补发 tool_start 逻辑（Rust 内核 tool_core
+    //   无 FIXUP，前端兜底）。原实现静默跳过 → 工具结果消息丢失。
+    const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
+    _debugLogger.warn(
+      '[TOOL_RESULT] tool_call part not found, FIXUP creating: tool=%s callId=%s msgId=%s',
+      toolName, callId?.slice(0, 12), messageId?.slice(0, 12),
+    )
+    pipelineStore.getState().appendPart(pipelineId, messageId, {
+      type: 'tool_call',
+      callId,
+      name: toolName,
+      args: {},
+      state: 'calling',
+    })
+    partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  }
+
   if (partIndex >= 0) {
     const resultToolName = eventData.tool_name || eventData.data?.tool_name
     const updates: Record<string, unknown> = {
