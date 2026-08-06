@@ -5,10 +5,13 @@ title Agent OS
 
 cd /d "%~dp0"
 
-REM   set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=8989
+REM   set FRONTEND_HOST_PORT=5290 && set REDIS_HOST_PORT=6481 && set BACKEND_PORT=9100
 if not defined FRONTEND_HOST_PORT set "FRONTEND_HOST_PORT=5289"
 if not defined REDIS_HOST_PORT set "REDIS_HOST_PORT=6480"
-if not defined BACKEND_PORT set "BACKEND_PORT=8988"
+REM M5 退役（2026-08-01）：channel_api :8988 已退役，前端容器代理目标改为 Rust 内核 :9100。
+REM 此处默认值必须与 docker-compose.yml 的 BACKEND_PORT:-9100 保持一致，
+REM 否则前端容器 server.py 会把 WS/API 代理到 8988（无服务）→ 状态栏「未连接」。
+if not defined BACKEND_PORT set "BACKEND_PORT=9100"
 
 echo ========================================
 echo   Agent OS Starting
@@ -286,15 +289,25 @@ if not exist ".py_deps_installed" (
 
 :: ===========================================================================
 echo [INFO] Starting Agent backend...
-REM Write a temp launcher to avoid quote-nesting hell in start cmd /c.
-set "_LAUNCHER=%TEMP%\agent_os_backend.bat"
-> "%_LAUNCHER%" echo @echo off
->> "%_LAUNCHER%" echo set PYTHONPATH=src
->> "%_LAUNCHER%" echo set REDIS_URL=redis://localhost:%REDIS_HOST_PORT%/0
->> "%_LAUNCHER%" echo set BACKEND_PORT=%BACKEND_PORT%
->> "%_LAUNCHER%" echo cd /d "%cd%"
->> "%_LAUNCHER%" echo "%PYEXE%" -m channels.websocket.app_factory
-start "Agent OS Backend" "%_LAUNCHER%"
+REM M5 退役（2026-08-01）：channel_api :8988 已退役，默认代理目标改为 Rust 内核 :9100。
+REM 若 BACKEND_PORT 已被占用（如 Rust 内核已在运行），跳过 0.1 Python backend——
+REM 前端容器已直接代理到该端口的服务（0.2 架构）；仅当端口空闲时才启动
+REM Python backend（纯 0.1 架构兼容），避免与内核端口冲突导致启动失败。
+netstat -ano | findstr ":%BACKEND_PORT% " >nul 2>&1
+if not errorlevel 1 (
+    echo [INFO] 端口 %BACKEND_PORT% 已被占用（可能 Rust 内核已在运行），跳过 0.1 Python backend
+    echo [INFO] 前端已代理到 http://127.0.0.1:%BACKEND_PORT% （Rust 内核）
+) else (
+    REM Write a temp launcher to avoid quote-nesting hell in start cmd /c.
+    set "_LAUNCHER=%TEMP%\agent_os_backend.bat"
+    > "%_LAUNCHER%" echo @echo off
+    >> "%_LAUNCHER%" echo set PYTHONPATH=src
+    >> "%_LAUNCHER%" echo set REDIS_URL=redis://localhost:%REDIS_HOST_PORT%/0
+    >> "%_LAUNCHER%" echo set BACKEND_PORT=%BACKEND_PORT%
+    >> "%_LAUNCHER%" echo cd /d "%cd%"
+    >> "%_LAUNCHER%" echo "%PYEXE%" -m channels.websocket.app_factory
+    start "Agent OS Backend" "%_LAUNCHER%"
+)
 
 echo.
 echo ========================================
