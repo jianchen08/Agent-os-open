@@ -6,11 +6,11 @@
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { openFile } from '@/services/fileOpener'
+import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { App } from './App'
 import { useAuthStore } from './stores/authStore'
 import { initializeTheme } from './stores/themeStore'
-import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
-import { openFile } from '@/services/fileOpener'
 import './index.css'
 
 // 禁用浏览器刷新时自动恢复滚动位置：浏览器默认 scrollRestoration='auto'，
@@ -24,9 +24,18 @@ if ('scrollRestoration' in history) {
 /**
  * 初始化应用
  *
- * 核心策略：先渲染 React（用户看到加载动画），再异步初始化认证。
- * 这样即使后端 API 响应慢或不可用，页面也不会空白。
- * ProtectedRoute 在 isInitializing=true 时会显示加载动画。
+ * 核心策略：先渲染 React（用户立刻看到页面，不再白屏等待），再异步初始化主题/认证。
+ *
+ * 为什么先渲染：
+ * - 旧实现中 `await initializeTheme()`（含 persist rehydrate 兜底 500ms）与
+ *   `await import('@/services/schema/registerWidgets')`（26 个 widget 组件动态 chunk）
+ *   都在 createRoot().render() 之前串行 await，首屏必须等这些异步工作全部完成
+ *   才渲染 → 内网/慢环境下面临十几秒白屏（"前端进不去"根因之一）。
+ * - 主题 CSS 变量有 design-tokens.css :root 默认值兜底（非白屏），且 index.html
+ *   内联脚本已按 localStorage 的 theme-storage 提前加 dark/light class，
+ *   因此先渲染不会出现主题缺失的白屏，主题在异步初始化完成后无缝刷新。
+ * - registerWidgets 仅注册 widget 到 registry，ChatContainer 为懒加载组件，
+ *   用户进入聊天页前有充分时间差完成注册，无需阻塞首屏。
  */
 async function bootstrap() {
   const root = document.getElementById('root')
@@ -35,9 +44,23 @@ async function bootstrap() {
     throw new Error('找不到根元素 #root')
   }
 
-  await initializeTheme()
+  // 先渲染 React 应用，用户立刻看到加载状态而非空白页
+  // ProtectedRoute 在 isInitializing=true 时显示加载动画
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
+
+  // 异步初始化主题（不阻塞首屏渲染；:root 默认变量兜底，不会白屏）
+  try {
+    await initializeTheme()
+  } catch (error) {
+    console.error('主题初始化失败:', error)
+  }
 
   // 预注册工作区面板 widget（顶栏可打开设置/监控等，不依赖登录）
+  // 放在渲染之后异步执行：注册 26 个 widget 组件 chunk 不再阻塞首屏
   try {
     const { initializeWidgets } = await import('@/services/schema/registerWidgets')
     initializeWidgets()
@@ -52,14 +75,6 @@ async function bootstrap() {
       console.error('[main] 打开文件失败:', result.message)
     }
   })
-
-  // 先渲染 React 应用，用户立刻看到加载状态而非空白页
-  // ProtectedRoute 在 isInitializing=true 时显示加载动画
-  createRoot(root).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  )
 
   // 异步初始化认证状态（不阻塞渲染）
   // initializeAuth 更新 store 后，ProtectedRoute 会自动响应状态变化

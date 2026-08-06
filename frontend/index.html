@@ -8,10 +8,24 @@
     <title>AgentOS</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 非阻塞加载 Google Fonts：同步 <link rel="stylesheet"> 是 render-blocking 资源，
+         浏览器必须等 CSS 下载完才渲染首屏。内网/无外网环境下 fonts.googleapis.com
+         不可达或慢时，页面会白屏十几秒（"前端进不去"的根因之一）。
+         media="print" + onload 切换是标准异步加载模式：CSS 下载不阻塞首屏渲染，
+         字体在下载完成后异步生效；CSS 加载失败也仅回退系统字体栈，不影响渲染。
+         字体族在 CSS 中均有系统 fallback（-apple-system / Segoe UI / Consolas 等）。 -->
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
     <script>
       ;(function () {
         try {

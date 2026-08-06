@@ -86,6 +86,24 @@ export default defineConfig(({ mode }) => {
       minify: 'esbuild',
       target: 'es2015',
       modulePreload: true,
+      rollupOptions: {
+        output: {
+          // 合理分包：按依赖域拆分 vendor chunk，避免所有第三方库挤进单个大 chunk
+          // （首屏 JS 过大 → 下载/解析慢）。登录页/壳层不依赖聊天重库
+          // （@lobehub/ui、mermaid、highlight.js 等），分包后首屏只加载轻量 chunk。
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined
+            if (id.includes('@lobehub') || id.includes('@emoji-mart')) return 'vendor-lobehub'
+            if (id.includes('mermaid') || id.includes('d3-') || id.includes('cytoscape')) return 'vendor-mermaid'
+            if (id.includes('highlight.js') || id.includes('lowlight') || id.includes('prismjs')) return 'vendor-syntax'
+            if (id.includes('react-syntax-highlighter')) return 'vendor-syntax'
+            if (id.includes('antd') || id.includes('@ant-design') || id.includes('/rc-') || id.includes('@rc-component')) return 'vendor-antd'
+            if (id.includes('lucide-react')) return 'vendor-icons'
+            if (id.includes('/react/') || id.includes('react-dom') || id.includes('scheduler')) return 'vendor-react'
+            return 'vendor'
+          },
+        },
+      },
     },
     esbuild: {
       drop: process.env.NODE_ENV === 'production' ? ['debugger'] : [],
