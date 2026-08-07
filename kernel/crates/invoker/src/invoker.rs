@@ -1666,6 +1666,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         }
     }
 
@@ -1695,6 +1696,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         }
     }
 
@@ -2029,6 +2031,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         };
         loader.add_manifest(manifest);
 
@@ -2089,6 +2092,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         }
     }
 
@@ -2303,6 +2307,7 @@ mod tests {
             enabled: None,
             activation: None,
             invoke_entry: invoke_entry.map(str::to_string),
+            persistent_fields: vec![],
         }
     }
 
@@ -2475,6 +2480,28 @@ mod tests {
             _thread_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            Ok(vec![])
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError> {
+            Ok(vec![])
         }
         // 以下方法 native 插件测试用不到，补空实现让测试编译通过（既有测试债）。
         async fn append_execution_record(

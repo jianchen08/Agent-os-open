@@ -70,6 +70,7 @@ fn make_test_manifest(
         contributes: None,
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     }
 }
 
@@ -87,6 +88,8 @@ fn test_message_record_roundtrip() {
         content_preview: Some("Hello".to_string()),
         created_at: "2026-07-14T00:00:00Z".to_string(),
         pipeline_id: Some("pipe_001".to_string()),
+        tool_calls_json: None,
+        tool_call_id: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();
@@ -113,6 +116,8 @@ fn test_message_record_roundtrip_no_optional() {
         content_preview: None,
         created_at: "2026-07-14T00:01:00Z".to_string(),
         pipeline_id: None,
+        tool_calls_json: None,
+        tool_call_id: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();

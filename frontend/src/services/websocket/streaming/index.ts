@@ -20,10 +20,11 @@ import {
   handleIteration,
 } from './handlers'
 import { handleCostUpdate, handleReconnected, handleStateChange, handleSystemNotification } from './lifecycleHandlers'
-import { resolvePipelineId } from './router'
+import { isPipelineRelevant, resolvePipelineId } from './router'
 
 let _initialized = false
 const _handlers: Record<string, (data: any) => void> = {}
+const _debugLogger = loggers.websocket
 
 /** 全局 WS 事件日志包装器 记录每一个到达前端的 WS 事件类型、pipelineId、messageId， */
 function _logEvent(eventType: string, data: any): void {
@@ -43,6 +44,13 @@ export function initStreamingEvents(): void {
 
   const _logWrap = (event: string, handler: (data: any) => void) => (data: any) => {
     _logEvent(event, data)
+    // 中央门控：非关注 pipeline 的流式事件直接丢弃，不注册幽灵管道、不写 store。
+    // 仅当事件携带 pipelineId 时才过滤；会话级/全局事件（pid 为空）照常放行。
+    const pid = resolvePipelineId(data)
+    if (pid && !isPipelineRelevant(pid)) {
+      _debugLogger.info(`[STREAM] drop irrelevant pipeline event: ${event} pid=${pid.slice(0, 12)}`)
+      return
+    }
     handler(data)
   }
 

@@ -22,20 +22,26 @@ export const ROUTES = {
   SETTINGS_COST: '/settings/cost',
   /** 插件设置 */
   SETTINGS_PLUGINS: '/settings/plugins',
+  // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 记忆配置 */
   SETTINGS_MEMORY: '/settings/memory',
+  // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 隔离配置 */
   SETTINGS_ISOLATION: '/settings/isolation',
+  // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 安全配置 */
   SETTINGS_SECURITY: '/settings/security',
+  // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 评估配置 */
   SETTINGS_EVALUATION: '/settings/evaluation',
+  // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 外部工具配置 */
   SETTINGS_EXTERNAL_TOOLS: '/settings/external-tools',
   /** 管道配置 */
   SETTINGS_PIPELINE: '/settings/pipeline',
   /** 主题设置 */
   SETTINGS_THEME: '/settings/theme',
+  // planned 未实现：无对应页面与路由，保留供后续扩展
   /** 通用配置页（动态路径，需拼 configPath 参数） */
   SETTINGS_GENERIC: '/settings/generic',
   /** 工具页面 */

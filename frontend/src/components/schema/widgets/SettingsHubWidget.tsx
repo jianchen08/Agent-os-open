@@ -12,6 +12,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
+import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
+import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
+import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
+import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
+import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { getSchema } from '@/services/api/schema'
@@ -23,6 +28,11 @@ type NavKey =
   | 'kernel-theme'
   | 'kernel-plugins'
   | 'kernel-pipeline'
+  | 'kernel-api'
+  | 'kernel-llm'
+  | 'kernel-context'
+  | 'kernel-concurrency'
+  | 'kernel-cost'
   | `plugin:${string}`
 
 interface NavItem {
@@ -121,6 +131,11 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
       <main className="min-h-0 min-w-0 flex-1 overflow-auto">
         {active === 'kernel-theme' && <ThemeSettingsPage />}
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
+        {active === 'kernel-api' && <ApiSettingsPage />}
+        {active === 'kernel-llm' && <LlmSettingsPage embedded />}
+        {active === 'kernel-context' && <ContextWindowSettingsPage />}
+        {active === 'kernel-concurrency' && <ConcurrencySettingsPage />}
+        {active === 'kernel-cost' && <CostSettingsPage />}
         {active === 'kernel-plugins' && (
           <PluginsSettingsPage
             onSelectPluginConfig={(pluginId, fileId) => {

@@ -40,6 +40,7 @@ fn manifest_with_ui(
         contributes: None,
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     }
 }
 

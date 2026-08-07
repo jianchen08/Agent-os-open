@@ -37,6 +37,7 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
             name: "default".to_string(),
             loop_config: Default::default(),
             steps: Vec::new(),
+            checkpoint: Default::default(),
         });
     }
     let raw = std::fs::read_to_string(&path)
@@ -294,6 +295,7 @@ steps:
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let mut lib = StepLibrary::default();
         lib.steps.insert(
@@ -333,6 +335,7 @@ steps:
                     loop_config: None,
                 },
             ],
+            checkpoint: Default::default(),
         };
         let lib = StepLibrary::default();
         let plugin_ids = HashSet::new();
@@ -354,6 +357,7 @@ steps:
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let lib = StepLibrary::default();
         let mut plugin_ids = HashSet::new();
@@ -370,6 +374,7 @@ steps:
             name: "p".into(),
             loop_config: Default::default(),
             steps: vec![],
+            checkpoint: Default::default(),
         };
         let mut lib = StepLibrary::default();
         lib.steps.insert(

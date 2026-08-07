@@ -42,6 +42,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         contributes: None,
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     }
 }
 

@@ -4,10 +4,9 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { loggers } from '@/utils/logger'
 
-import { resolvePipelineId } from '../router'
+import { isPipelineRelevant, resolvePipelineId } from '../router'
 
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
 
@@ -118,17 +117,18 @@ export function handleStreamStart(eventData: any) {
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
-  const threadId = extractThreadId(eventData)
-
-  const pipelineState = pipelineStore.getState()
-  if (!pipelineState.pipelines[pipelineId]) {
-    const sessionId = threadId || useSessionStore.getState().activeSessionId || ''
-    pipelineState.registerPipeline({ pipelineId, sessionId })
+  // 相关性门控：非关注 pipeline（非活跃/未注册/未开 Tab）的事件直接丢弃，
+  // 不创建占位消息、不写 store。pipeline 仅由前端主动注册（如 agentHandler
+  // 在用户实际打开/创建子任务时 registerPipeline），后端广播的事件不再触发注册。
+  if (!isPipelineRelevant(pipelineId)) {
     _debugLogger.info(
-      `[STREAM_START] auto-registered unknown pipeline: pipelineId=%s sessionId=%s`,
-      pipelineId.slice(0, 12), sessionId?.slice(0, 12) || 'null',
+      `[STREAM_START] drop irrelevant pipeline event: pipelineId=%s`,
+      pipelineId.slice(0, 12),
     )
+    return
   }
+
+  const threadId = extractThreadId(eventData)
 
   const currentActivePipelineId = pipelineStore.getState().activePipelineId
   _debugLogger.info(
@@ -162,6 +162,11 @@ export function handleStreamChunk(eventData: any) {
   const messageId = extractMessageId(eventData)
   const content = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId) return
+
+  // 相关性门控：非关注 pipeline 的 chunk 直接丢弃，不创建占位、不写 store。
+  if (!isPipelineRelevant(pipelineId)) {
+    return
+  }
 
   // 确保目标消息存在（chunk 先于 start 到达时自动创建占位符）
   const msgs = pipelineStore.getState().getMessages(pipelineId)

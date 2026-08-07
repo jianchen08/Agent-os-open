@@ -213,8 +213,15 @@ pub async fn create_thread_handler(
         let tenant_ctx =
             crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &thread_id).await;
         let store_clone = store.clone();
+        let pid_clone = pipeline_id.clone();
+        let tid_clone = thread_id.clone();
         let create_result = agentos_tenant::scope(tenant_ctx, async move {
-            store_clone.create_session(&session_rec).await
+            store_clone.create_session(&session_rec).await?;
+            // 主管道兜底：创建会话即写映射，保证主管道即使未跑过也有映射（删会话级联不漏）。
+            let tenant_id =
+                agentos_tenant::current_or_default("default").tenant_id;
+            store_clone.link_pipeline_session(&pid_clone, &tid_clone, &tenant_id).await?;
+            Ok::<(), agentos_core::types::StorageError>(())
         })
         .await;
         if let Err(e) = create_result {
@@ -410,17 +417,31 @@ pub async fn update_thread_handler(
     }))
 }
 
-/// DELETE /api/v1/threads/{id} — 删除会话。
+/// DELETE /api/v1/threads/{id} — 删除会话（级联）。
 ///
 /// 前端 `deleteSession()` 调此端点（session.ts:398 用 DELETE）。
-/// 仅删 sessions 表的标签夹行：会话只是聚合管道引用的标签，消息/管道自治（store.rs
-/// sessions 表注释），不级联删除。store 不可用或无记录仍返回 200（幂等，对齐 REST 删除语义）。
+/// 级联删除该会话下全部管道（主管道 + 子任务管道，经 pipeline_sessions 映射表按
+/// thread_id 定位）的 messages / execution_records / traces / branches /
+/// pipeline_run_summaries / runs，最后清映射表与 sessions 行。blobs 不删（内容寻址去重）。
+/// store 不可用或无记录仍返回 200（幂等，对齐 REST 删除语义）。
 pub async fn delete_thread_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Json<Value> {
     if let Some(store) = state.store.as_ref() {
-        if let Err(e) = store.delete_session(&id).await {
+        // 多租户：级联删除按 task_local tenant 过滤，需在请求租户 scope 内执行。
+        // 修复前直接调（task_local 未设 → current_or_default("default")），多租户下
+        // delete_session_inner 查 pipeline_sessions WHERE tenant_id='default' 查空 → 啥也没删。
+        let tenant_ctx =
+            crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
+        let store_clone = store.clone();
+        let id_for_scope = id.clone();
+        let del_result = agentos_tenant::scope(tenant_ctx, async move {
+            store_clone.delete_session(&id_for_scope).await
+        })
+        .await;
+        if let Err(e) = del_result {
             tracing::warn!(thread_id = %id, error = %e, "delete_session 落库失败（仍返回 200）");
         }
     }
@@ -483,7 +504,7 @@ pub async fn list_thread_messages_handler(
         } else {
             rec.content_preview.clone().unwrap_or_default()
         };
-        messages.push(json!({
+        let mut msg = json!({
             // 字段命名对齐前端 BackendMessageResponse（session.ts:53-79）
             "id": rec.message_id,
             "thread_id": id,            // 回填路径 id（满足前端 mapper，不参与查询过滤）
@@ -492,7 +513,32 @@ pub async fn list_thread_messages_handler(
             "content": content,
             "timestamp": rec.created_at,
             "status": "completed",
-        }));
+        });
+        // 工具调用相关：assistant 的 tool_calls（反序列化为数组）、tool 消息的 tool_call_id。
+        // 分层持久化补全：让前端能还原完整多轮工具调用对话，而非只存扁平文本。
+        // 字段名 camelCase 对齐前端 BackendMessageResponse（toolCalls / toolCallId）。
+        if let Some(tc_json) = rec.tool_calls_json.as_deref() {
+            if let Ok(tool_calls) = serde_json::from_str::<Value>(tc_json) {
+                msg.as_object_mut()
+                    .expect("msg is object")
+                    .insert("toolCalls".into(), tool_calls);
+            }
+        }
+        if let Some(tc_id) = rec.tool_call_id.as_deref() {
+            msg.as_object_mut()
+                .expect("msg is object")
+                .insert("toolCallId".into(), Value::String(tc_id.to_string()));
+        }
+        // 思考内容：assistant 的 reasoning_content（LLM reasoning/chain-of-thought）。
+        // 前端据此渲染思考过程折叠区。字段名 camelCase 对齐前端 BackendMessageResponse。
+        if let Some(reasoning) = rec.reasoning_content.as_deref() {
+            if !reasoning.is_empty() {
+                msg.as_object_mut()
+                    .expect("msg is object")
+                    .insert("reasoningContent".into(), Value::String(reasoning.to_string()));
+            }
+        }
+        messages.push(msg);
     }
 
     let total = messages.len();

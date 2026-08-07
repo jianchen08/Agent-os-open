@@ -45,6 +45,7 @@ fn test_manifest(
         http_endpoints: vec![],
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     }
 }
 
@@ -220,6 +221,7 @@ fn test_plugin_status_data_from_manifest() {
         http_endpoints: vec![],
         enabled: Some(true),
         activation: Some(agentos_core::traits::ActivationPolicy::Eager),
+        persistent_fields: vec![],
     };
 
     // 验证 status handler 会派生的字段（模拟 handler 逻辑）
@@ -287,6 +289,7 @@ fn test_eager_vs_lazy_distinction() {
         http_endpoints: vec![],
         enabled: None,
         activation: Some(agentos_core::traits::ActivationPolicy::Eager),
+        persistent_fields: vec![],
     };
     let manifest_lazy = test_manifest("lazy_p", PluginType::Tool, None, vec![]);
 

@@ -217,13 +217,27 @@ impl PipelineDispatcher for EngineDispatcher {
         // 从 self.state.store 查持久化用户的 tenant_id（一用户一租户 = user_id）。
         let tenant_id =
             crate::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
-        let tenant = TenantContext::new(tenant_id, thread_id.to_string());
         let state = self.state.clone();
         let content = content.to_string();
         // pipeline_id 是前端消息路由键，引擎回推流式事件时用它定位占位气泡。
         // 缺失时回退 thread_id（前端 handleStreamStart 的 resolvePipelineId
         // 不回退 _threadId，故缺失会导致事件被丢弃——这里尽量传真实值）。
-        let route_id = if pipeline_id.is_empty() { thread_id } else { pipeline_id };
+        //
+        // 防御性校验（后端不盲目信任前端数据）：前端切换/新建会话后，activePipelineId
+        // 可能因 React 渲染时序残留旧值，导致消息写到错误的 pipeline 桶（串消息）。
+        // 这里查 pipeline_sessions 表校验 pipeline_id 是否确实属于该 thread_id：
+        //   - 属于 → 信任前端值
+        //   - 不属于 → 用该 thread 的真实 active_pipeline_id（主管道），杜绝串桶
+        // 这是与前端源头修复（router.tsx 实时读 sessionStore）互补的双层防线。
+        // 注意：resolve 必须在 tenant 构造前调用（TenantContext::new 会 move tenant_id）。
+        let route_id = resolve_pipeline_id_for_thread(
+            state.store.as_ref(),
+            thread_id,
+            pipeline_id,
+            &tenant_id,
+        )
+        .await;
+        let tenant = TenantContext::new(tenant_id, thread_id.to_string());
 
         // 生成 assistant message_id（内核权威，sidecar chunk + new_message 共用）。
         // 对照 0.1 bridge.emit_start：在 LLM 调用前就发 stream_start + 确定 message_id，
@@ -244,7 +258,7 @@ impl PipelineDispatcher for EngineDispatcher {
         // 在租户上下文内执行管道。message_id 注入 state 供 sidecar 流式 chunk 携带
         // （sidecar on_chunk notify 时带上，前端据此把 chunk 路由到占位气泡）。
         let response =
-            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos", &[], route_id, thread_id, &message_id))
+            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos", &[], &route_id, thread_id, &message_id))
                 .await;
 
         // 引擎完成后发 new_message 收尾（填充完整内容 + 标记 completed）。
@@ -282,5 +296,65 @@ impl PipelineDispatcher for EngineDispatcher {
         info!(thread = thread_id, "stop_generation 已接收（引擎取消接入待 P3+）");
         Ok(())
     }
+}
+
+/// 解析消息应路由到的真实 pipeline_id（防御性校验，后端不盲目信任前端数据）。
+///
+/// 校验逻辑：
+/// 1. 前端传的 pipeline_id 非空 且 属于该 thread_id（查 pipeline_sessions）→ 信任前端值
+/// 2. 否则取该 thread 的真实 active_pipeline_id（主管道）作为权威值
+/// 3. 仍取不到 → 回退 thread_id（兼容旧路径，与原 route_id 语义一致）
+///
+/// 这与前端源头修复（router.tsx 实时读 sessionStore）互补，形成双层防线：
+/// 前端尽量传对，后端兜底确保即使前端传错也不串桶。
+async fn resolve_pipeline_id_for_thread(
+    store: Option<&Arc<dyn agentos_core::traits::StorageBackend>>,
+    thread_id: &str,
+    frontend_pipeline_id: &str,
+    tenant_id: &str,
+) -> String {
+    use agentos_core::traits::StorageBackend;
+    let Some(store) = store else {
+        return if frontend_pipeline_id.is_empty() {
+            thread_id.to_string()
+        } else {
+            frontend_pipeline_id.to_string()
+        };
+    };
+
+    // ① 前端值非空且属于该 thread → 信任
+    if !frontend_pipeline_id.is_empty() {
+        let pids = store
+            .list_pipeline_ids_by_thread(thread_id, tenant_id)
+            .await
+            .unwrap_or_default();
+        if pids.iter().any(|p| p == frontend_pipeline_id) {
+            return frontend_pipeline_id.to_string();
+        }
+        warn!(
+            thread_id = %thread_id,
+            frontend_pid = %frontend_pipeline_id,
+            "前端传来的 pipeline_id 不属于该 thread（可能残留旧会话值），改用 thread 真实主管道"
+        );
+    }
+
+    // ② 取该 thread 的真实 active_pipeline_id
+    let tenant = agentos_core::types::TenantContext::new(tenant_id.to_string(), thread_id.to_string());
+    let tid = thread_id.to_string();
+    let store_clone = store.clone();
+    let session = agentos_tenant::scope(tenant, async move {
+        store_clone.get_session(&tid).await
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(active) = session.and_then(|s| s.active_pipeline_id) {
+        if !active.is_empty() {
+            return active;
+        }
+    }
+
+    // ③ 回退 thread_id（兼容）
+    thread_id.to_string()
 }
 

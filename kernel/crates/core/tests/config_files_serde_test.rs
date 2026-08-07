@@ -114,6 +114,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         contributes: None,
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     };
 
     let serialized = serde_json::to_string(&manifest).expect("serialize");

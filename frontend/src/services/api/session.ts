@@ -63,6 +63,7 @@ interface BackendMessageResponse {
   metadata?: Record<string, unknown>
   toolCalls?: Array<Record<string, unknown>>
   toolCallId?: string
+  reasoningContent?: string
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: unknown
@@ -118,7 +119,10 @@ function mapBackendMessageToMessage(
       toolCallId: backendMessage.toolCallId,
       toolName: backendMessage.toolName,
       toolArgs: backendMessage.toolArgs,
-      toolResult: backendMessage.toolResult,
+      // tool 消息的结果：后端把执行结果放在 content 里（分层持久化投影），
+      // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
+      // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
+      toolResult: backendMessage.toolResult ?? backendMessage.content,
       toolError: backendMessage.toolError,
       durationMs: backendMessage.durationMs,
       metadata: backendMessage.metadata,
@@ -127,30 +131,37 @@ function mapBackendMessageToMessage(
 
   let toolCalls: MessageToolCall[] | undefined
   if (backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)) {
-    // 后端 toolCalls[] 子项已统一为 camelCase（ToolCallItem 模型）。
-    // 映射到前端 MessageToolCall（snake_case 内部表示）。
-    toolCalls = backendMessage.toolCalls.map((tc) => ({
-      call_id: (tc.callId || '') as string,
-      tool_name: (tc.toolName || '') as string,
-      tool_args: ((tc.toolArgs || {}) as Record<string, unknown>),
-      status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
-      result: tc.result,
-      error: tc.error as string | undefined,
-      duration_ms: tc.durationMs as number | undefined,
-      containerTaskId: tc.containerTaskId as string | undefined,
-    }))
+    // toolCalls 子项兼容两种格式：
+    // - ToolCallItem 模型（Python 后端 routes_threads）：callId/toolName/toolArgs/...
+    // - OpenAI 格式（分层持久化 tool_calls_json）：id/function.name/function.arguments
+    toolCalls = backendMessage.toolCalls.map((tc: any) => {
+      const isOpenAI = !!tc.function
+      const fn = tc.function || {}
+      return {
+        call_id: (tc.callId || tc.id || '') as string,
+        tool_name: (tc.toolName || fn.name || '') as string,
+        tool_args: ((tc.toolArgs || fn.arguments || {}) as Record<string, unknown>),
+        status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
+        result: tc.result,
+        error: tc.error as string | undefined,
+        duration_ms: tc.durationMs as number | undefined,
+        containerTaskId: tc.containerTaskId as string | undefined,
+      }
+    })
   }
 
-  // 从 metadata 中恢复思考内容。
+  // 从 metadata 或顶层 reasoning_content 恢复思考内容。
+  // 后端分层持久化把 reasoning_content 作为顶层字段返回（assistant 消息的思考过程）；
+  // 兼容旧路径 metadata.thinkingContent。
   let thinking: Message['thinking'] = undefined
   const metadata = backendMessage.metadata
-  if (metadata) {
-    const thinkingStr = metadata.thinkingContent as string | undefined
-    if (thinkingStr && typeof thinkingStr === 'string' && thinkingStr.length > 0) {
-      thinking = {
-        content: thinkingStr,
-        isThinking: false,
-      }
+  const reasoningContent = backendMessage.reasoningContent
+  const thinkingStr =
+    reasoningContent || (metadata?.thinkingContent as string | undefined)
+  if (thinkingStr && typeof thinkingStr === 'string' && thinkingStr.length > 0) {
+    thinking = {
+      content: thinkingStr,
+      isThinking: false,
     }
   }
 

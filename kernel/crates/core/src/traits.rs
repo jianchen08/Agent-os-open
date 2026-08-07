@@ -728,6 +728,11 @@ pub struct PluginManifest {
     pub error_policy: ErrorPolicy,
     #[serde(default = "default_priority")]
     pub priority: u32,
+    /// 分层持久化：插件声明需持久化的 state 标量字段（累计型，如 track.total_tokens）。
+    /// 引擎 merge state_updates 时，对在此集合内的 key 走 upsert_state_field 投影。
+    /// messages 是系统字段（引擎固定投影），不在此列。空 = 该插件无累计字段需持久化。
+    #[serde(default)]
+    pub persistent_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
     /// 原生插件产物（task_11：HostType::InProcess 必填）。
@@ -1278,6 +1283,61 @@ pub trait StorageBackend: Send + Sync {
     /// 返回 blob_id 供 messages 表引用。
     async fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError>;
 
+    // ── 域10：分层持久化投影（messages 增量对齐 + 标量快照 + checkpoint）────
+
+    /// 投影 messages 列表字段到 messages 表（增量索引对齐，幂等，追加 O(1)）。
+    /// 引擎 merge state_updates["messages"] 后调用。`new_arr` 是完整数组快照。
+    /// 默认 no-op（mock/null store 用），SqliteStore 覆盖为真实实现。
+    async fn project_messages(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+        _new_arr: &[serde_json::Value],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// upsert 一个 state 标量字段到 pipeline_state 表（覆盖最新值）。
+    /// 仅对插件 manifest 声明的 persistent_fields 调用；累计语义由插件保证。
+    async fn upsert_state_field(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+        _key: &str,
+        _value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// 读出某 pipeline 全部持久化标量字段（冷启动重建喂回 state 用）。
+    async fn load_pipeline_state(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// 保存全量 state checkpoint（每 N 步留档，O(1) 重建基线）。
+    async fn save_checkpoint(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+        _step_no: i64,
+        _state: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// 取最近 checkpoint（step_no 最大），返回 (step_no, state)。
+    async fn load_latest_checkpoint(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
+        Ok(None)
+    }
+
     // ── 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────
     // 解耦：session 只持 pipeline_ids 引用列表，不反向 join messages。
 
@@ -1297,9 +1357,35 @@ pub trait StorageBackend: Send + Sync {
     /// 用于 create_thread 后追加 pipeline_id、更新 title/agent 等。
     async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError>;
 
-    /// 删除会话（仅删标签夹行，不级联管道/消息——会话只是聚合引用，消息/管道自治）。
+    /// 删除会话并级联清理其全部关联数据（主管道 + 子任务管道的 messages/traces/runs/state）。
+    /// 通过 pipeline_sessions 映射表按 thread_id 定位全部 pipeline_id，单次事务级联删除。
     /// 无记录时返回 Ok(())（幂等，对齐 REST 删除语义）。
     async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError>;
+
+    /// 写入 pipeline↔session 映射（幂等）。每次管道开跑（persist_run_start）时记录，
+    /// 含子任务管道。删除会话时据此按 thread_id 找到全部 pipeline_id 级联清理。
+    async fn link_pipeline_session(
+        &self,
+        pipeline_id: &str,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), StorageError>;
+
+    /// 查询某会话下的全部 pipeline_id（主管道 + 子任务管道）。
+    async fn list_pipeline_ids_by_thread(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<String>, StorageError>;
+
+    /// 查询某会话下的 step 级轨迹（冷启动统一回放用）。
+    /// 经 pipeline_sessions 映射 → run_id → traces，只取 step 级（plugin_id 为配置
+    /// step id），按 created_at 升序以便按序 merge 回放重建完整 state（含 messages）。
+    async fn get_step_traces_by_thread(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError>;
 
     // ── 域3：execution_records（对齐 0.1 ExecutionRecordStorage）─────────
     // 承载管道执行历史（LLM 输出/工具调用）。M1 只做存储层；写入方迁移在 M4。

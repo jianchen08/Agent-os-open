@@ -15,6 +15,11 @@ import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
+import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
+import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
+import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
+import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
+import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
 
 /** 左侧导航条目 */
 type NavItem =
@@ -171,6 +176,11 @@ export function SettingsPage() {
             <div className="h-full min-h-0 [&>div]:!h-auto [&>div]:!min-h-0 [&>div]:!overflow-visible [&_header]:!hidden">
               {selected.id === 'theme' && <ThemeSettingsPage embedded />}
               {selected.id === 'pipeline' && <PipelineSettingsPage embedded />}
+              {selected.id === 'api' && <ApiSettingsPage />}
+              {selected.id === 'llm' && <LlmSettingsPage embedded />}
+              {selected.id === 'context' && <ContextWindowSettingsPage />}
+              {selected.id === 'concurrency' && <ConcurrencySettingsPage />}
+              {selected.id === 'cost' && <CostSettingsPage />}
               {selected.id === 'plugins' && (
                 <PluginsSettingsPage
                   embedded

@@ -21,8 +21,9 @@
 //! [来源: docs/tasks/task_06_pipeline_engine.md]
 //! [来源: docs/working/adr_engine_design.md]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use tracing::{error, warn};
@@ -55,6 +56,17 @@ pub struct PipelineExecutor {
     /// 监控 M2：engine 自采计数器（监控设计 §三 通道1 + §补引擎调度层）。
     /// 默认 new 一个；生产侧可用 with_metrics 注入共享实例。
     metrics: Arc<crate::metrics::EngineMetrics>,
+    /// 分层持久化：插件 manifest 声明需持久化的 state 标量字段（累计型）并集。
+    /// 引擎 merge state_updates 时，对在此集合内的 key 走 upsert_state_field 投影；
+    /// messages 是系统字段（固定投影），不在此集合内；传送带字段不投影。
+    /// 为空时只投影 messages（向后兼容）。
+    persistent_fields: HashSet<String>,
+    /// checkpoint 计数器：每个配置 step 完成后 +1，达 config.checkpoint.interval_steps
+    /// 时落一份全量 state 到 pipeline_checkpoints 并重置。run 间不重置（跨 run 连续累计）。
+    /// AtomicI64：persist_step_trace 是 &self（不可变借用），用原子量实现内部可变。
+    steps_since_checkpoint: AtomicI64,
+    /// 全局累计 step 序号（跨 run），作为 checkpoint 的 step_no 锚点。
+    total_step_no: AtomicI64,
 }
 
 impl PipelineExecutor {
@@ -85,12 +97,26 @@ impl PipelineExecutor {
             run_id: run_id.into(),
             branch_id: branch_id.into(),
             metrics: Arc::new(crate::metrics::EngineMetrics::new()),
+            persistent_fields: HashSet::new(),
+            steps_since_checkpoint: AtomicI64::new(0),
+            total_step_no: AtomicI64::new(0),
         }
     }
 
     /// 监控 M2：注入共享 engine 计数器（生产侧用，聚合器周期性 snapshot）。
     pub fn with_metrics(mut self, metrics: Arc<crate::metrics::EngineMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// 分层持久化：注入插件 manifest 声明需持久化的 state 字段集合。
+    /// 生产侧从插件加载器收集所有插件的 persistent_fields 并集后传入。
+    /// 不调用时为空集（向后兼容，只投影 messages）。
+    pub fn with_persistent_fields(
+        mut self,
+        fields: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.persistent_fields = fields.into_iter().collect();
         self
     }
 
@@ -141,6 +167,7 @@ impl PipelineExecutor {
                 }
                 self.execute_steps(&config.steps, &mut state, config, step_library)
                     .await;
+                self.checkpoint_after_round(&config.checkpoint, &state).await;
                 if truthy_flag(&state, "ended") {
                     break;
                 }
@@ -150,6 +177,7 @@ impl PipelineExecutor {
         } else {
             self.execute_steps(&config.steps, &mut state, config, step_library)
                 .await;
+            self.checkpoint_after_round(&config.checkpoint, &state).await;
         }
 
         // 监控 M2：pipeline 执行累计耗时
@@ -205,6 +233,11 @@ impl PipelineExecutor {
         config: &PipelineConfig,
         step_library: &StepLibrary,
     ) {
+        // 0. 快照 step 执行前的 state，用于事后算 diff 落 step 级轨迹。
+        //    轨迹颗粒度 = 配置 step（prepare/core/post 等），不钻插件。
+        //    patch_data 含本 step 期间所有顶层 key 变更（含 messages，与其它字段无区别）。
+        let state_before = state.clone();
+
         // 1. context 注入：渲染 step.context 模板，merge 进 state
         let rendered = render_value(
             &serde_json::to_value(&step.context).unwrap_or(serde_json::Value::Object(Default::default())),
@@ -240,6 +273,8 @@ impl PipelineExecutor {
                         break;
                     }
                 }
+                // 循环 step 执行完，落 step 级轨迹后返回
+                self.persist_step_trace(&step.id, &state_before, state).await;
                 return;
             }
         }
@@ -251,6 +286,79 @@ impl PipelineExecutor {
         // 4. 路由处理
         if !step.routes.is_empty() {
             apply_routes(&step.routes, state);
+        }
+
+        // 5. 落 step 级轨迹（非循环分支）
+        self.persist_step_trace(&step.id, &state_before, state).await;
+    }
+
+    /// 落 step 级轨迹：对比 step 执行前后的 state，把变更的顶层 key 聚合为一条
+    /// patch_data（含 messages，与其它字段无区别），plugin_id = step.id。
+    /// diff 为空（step 无产出）则不落轨迹。
+    async fn persist_step_trace(
+        &self,
+        step_id: &str,
+        state_before: &serde_json::Value,
+        state_after: &serde_json::Value,
+    ) {
+        let diff = state_diff(state_before, state_after);
+        // diff 为空对象则跳过（step 未改动任何 state）
+        if diff.as_object().map_or(true, |o| o.is_empty()) {
+            return;
+        }
+
+        // 分层持久化投影：state_diff 已捕获本 step 的 state 变更（含 messages）。
+        // 在此投影到业务表——用 state_after 的完整值（project_messages 内部做增量对齐，
+        // 幂等，重复投影无副作用）。比在 merge_and_project（依赖插件 state_updates 含
+        // messages）更可靠：state_diff 直接对比 state 前后，必能捕获 messages 变化。
+        self.project_state_snapshot(state_after).await;
+
+        use agentos_core::types::{PatchType, TraceEntry};
+        let entry = TraceEntry {
+            trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
+            run_id: self.run_id.clone(),
+            branch_id: self.branch_id.clone(),
+            seq_in_branch: 0,
+            plugin_id: step_id.to_string(),
+            patch_type: PatchType::StateUpdate,
+            patch_data: diff,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = self.store.append_trace(entry).await {
+            warn!(step = %step_id, error = %e, "persist_step_trace 失败");
+            self.metrics.inc_persist_failure();
+        }
+    }
+
+    /// 从完整 state 投影到业务表（messages + 声明的累计字段）。
+    ///
+    /// 在 persist_step_trace 内调用（每个配置 step 后），用 state 的当前完整值投影。
+    /// project_messages 内部按索引增量对齐（幂等），upsert_state_field 覆盖最新值。
+    /// pipeline_id 为空（测试/首轮未注入）时跳过。
+    async fn project_state_snapshot(&self, state: &serde_json::Value) {
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pipeline_id.is_empty() {
+            return;
+        }
+        let tenant_id = self.default_tenant.tenant_id.clone();
+        // messages 投影（系统字段）
+        if let Some(arr) = state.get("messages").and_then(|v| v.as_array()) {
+            if let Err(e) = self.store.project_messages(pipeline_id, &tenant_id, arr).await {
+                warn!(pipeline_id = %pipeline_id, error = %e, "project_messages 失败（继续）");
+                self.metrics.inc_persist_failure();
+            }
+        }
+        // 声明的累计标量字段投影
+        for key in &self.persistent_fields {
+            if let Some(v) = state.get(key) {
+                if let Err(e) = self.store.upsert_state_field(pipeline_id, &tenant_id, key, v).await {
+                    warn!(key = %key, error = %e, "upsert_state_field 失败（继续）");
+                    self.metrics.inc_persist_failure();
+                }
+            }
         }
     }
 
@@ -287,12 +395,9 @@ impl PipelineExecutor {
                 match self.invoke_plugin(item, state.clone()).await {
                     Ok(result) => {
                         if result.error.is_none() {
-                            // merge state_updates
-                            for (k, v) in &result.state_updates {
-                                set_key(state, k, v.clone());
-                            }
-                            // ADR ③：merge 后追加 Patch 到 traces 表（Append-Only）。
-                            self.persist_trace(item, &result).await;
+                            // merge state_updates（轨迹在 step 级统一落，不钻插件）
+                            // 分层持久化：merge 的同时投影到业务表（messages 增量、声明字段 upsert）
+                            self.merge_and_project(state, &result.state_updates).await;
                             if result.skip_remaining {
                                 break;
                             }
@@ -394,6 +499,17 @@ impl PipelineExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        // 写入 pipeline↔session 映射（每次管道开跑时记录，含子任务管道）。
+        // 删除会话时据此按 thread_id 找到全部 pipeline_id 级联清理。
+        // session_id 即 thread_id（server.rs:474 注入）；两者任一为空则跳过（幂等）。
+        let session_id = state
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Err(e) = self.store.link_pipeline_session(pipeline_id, session_id, &tenant_id).await {
+            warn!(error = %e, "link_pipeline_session 失败（继续执行）");
+        }
+
         // 落用户消息（role=user）
         if let Some(user_msg) = state.get("message").and_then(|v| v.as_str()) {
             if !user_msg.is_empty() {
@@ -427,67 +543,22 @@ impl PipelineExecutor {
 
     /// 追加插件 step 的 Patch 到 traces 表（Append-Only，ADR ③）。
     ///
-    /// 在每个原子插件 execute 返回后、state merge 之后调用。patch_data
-    /// 直接用插件的 state_updates（对应 ADR ③ 的 Patch 语义）。
-    async fn persist_trace(&self, plugin_id: &str, result: &PluginResult) {
-        use agentos_core::types::{PatchType, TraceEntry};
-        for (k, v) in &result.state_updates {
-            let entry = TraceEntry {
-                trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
-                run_id: self.run_id.clone(),
-                branch_id: self.branch_id.clone(),
-                seq_in_branch: 0, // 简化：实际应从 state 当前 seq 读，此处用 0 占位
-                plugin_id: plugin_id.to_string(),
-                patch_type: PatchType::StateUpdate,
-                patch_data: serde_json::json!({ k: v }),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            };
-            if let Err(e) = self.store.append_trace(entry).await {
-                warn!(plugin = %plugin_id, key = %k, error = %e, "append_trace 失败");
-                self.metrics.inc_persist_failure();
-            }
-        }
-    }
-
-    /// 一轮结束时落完整 assistant 消息（messages + blobs）并更新 run 状态。
-    ///
-    /// 从 final_state["raw_result"] 取最终回复文本。stream_end 一次性落库，
-    /// 流式期间不碰库（业界标准：流式只更新内存 state，结束时原子落库）。
+    /// 一轮结束时更新 run 状态。assistant 消息不再此处单独落库——它已在最后一个
+    /// llm_core step 的 merge_and_project 中投影到 messages 表（含 tool_calls）。
+    /// 分层持久化：投影是"merge state_updates 时同步落库"，不延迟到 run 结束。
     async fn persist_run_end(&self, final_state: &serde_json::Value) {
-        let assistant_msg = final_state.get("raw_result")
-            .and_then(|v| v.as_str())
-            .or_else(|| final_state.get("message").and_then(|v| v.as_str()))
-            .unwrap_or("");
-
-        // pipeline_id 从 state 读（与 persist_run_start 一致，走 state 通路）
+        // 收尾 checkpoint：run 结束时无条件落一份最终态快照（最终态是重建的最佳基线）。
+        // 这样重建时能直接从本 run 最终 state 接着跑，不必回放整轮 traces。
+        // checkpoint_id 用 step_no 锚点，同 step 重放幂等。
         let pipeline_id = final_state
             .get("pipeline_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-
-        if !assistant_msg.is_empty() {
-            let msg_id = format!("a_{}", uuid::Uuid::new_v4().simple());
-            // preview 按字符切（非字节），避免中文多字节 UTF-8 切在字符中间 panic。
-            let preview: String = assistant_msg.chars().take(200).collect();
-            let blob_id = match self.store.store_blob(assistant_msg.as_bytes(), "text/plain").await {
-                Ok(id) => Some(id),
-                Err(e) => { warn!(error = %e, "store_blob(assistant msg) 失败"); self.metrics.inc_persist_failure(); None }
-            };
-            // sequence 按 pipeline_id 连续递增；与 user 消息共用同一序列空间
-            let seq = if pipeline_id.is_empty() {
-                1
-            } else {
-                match self.store.next_sequence(pipeline_id).await {
-                    Ok(s) => s,
-                    Err(e) => { warn!(error = %e, "next_sequence(assistant) 失败，回退 seq=1"); self.metrics.inc_persist_failure(); 1 }
-                }
-            };
-            if let Err(e) = self.store.append_message(
-                &msg_id, &self.run_id, &self.branch_id, seq, "assistant",
-                blob_id.as_deref(), Some(&preview),
-                if pipeline_id.is_empty() { None } else { Some(pipeline_id) },
-            ).await {
-                warn!(error = %e, "append_message(assistant) 失败");
+        if !pipeline_id.is_empty() {
+            let step_no = self.total_step_no.load(Ordering::SeqCst);
+            let tenant_id = self.default_tenant.tenant_id.clone();
+            if let Err(e) = self.store.save_checkpoint(pipeline_id, &tenant_id, step_no, final_state).await {
+                warn!(pipeline_id = %pipeline_id, error = %e, "收尾 save_checkpoint 失败（继续执行）");
                 self.metrics.inc_persist_failure();
             }
         }
@@ -500,6 +571,50 @@ impl PipelineExecutor {
         ).await {
             warn!(run_id = %self.run_id, error = %e, "update_run_status(Completed) 失败");
             self.metrics.inc_persist_failure();
+        }
+    }
+
+    /// merge 插件 state_updates 进 state（纯内存合并）。
+    ///
+    /// 投影已移至 persist_step_trace（用 state_diff 捕获的完整 state 投影，更可靠）。
+    /// 这里只负责把插件的 state_updates merge 进内存 state。
+    async fn merge_and_project(
+        &self,
+        state: &mut serde_json::Value,
+        updates: &HashMap<String, serde_json::Value>,
+    ) {
+        for (k, v) in updates {
+            set_key(state, k, v.clone());
+        }
+    }
+
+    /// 每完成一轮（一次完整 steps 执行）后调用：自增步数计数器，达 interval 则落档。
+    ///
+    /// checkpoint = 把当前完整 state 复制到 pipeline_checkpoints（留档快照）。
+    /// 冷启动重建优先取最近 checkpoint（O(1) 基线）+ 回放其后 traces 增量。
+    /// interval_steps 从 PipelineConfig.checkpoint 读，引擎可配（默认 1000）。0/负数=禁用。
+    async fn checkpoint_after_round(
+        &self,
+        ckpt_cfg: &agentos_core::types::CheckpointConfig,
+        state: &serde_json::Value,
+    ) {
+        if !ckpt_cfg.enabled || ckpt_cfg.interval_steps <= 0 {
+            return;
+        }
+        let pipeline_id = state.get("pipeline_id").and_then(|v| v.as_str()).unwrap_or("");
+        if pipeline_id.is_empty() {
+            return;
+        }
+        let new_since = self.steps_since_checkpoint.fetch_add(1, Ordering::SeqCst) + 1;
+        let step_no = self.total_step_no.fetch_add(1, Ordering::SeqCst) + 1;
+        if new_since >= ckpt_cfg.interval_steps {
+            let tenant_id = self.default_tenant.tenant_id.clone();
+            if let Err(e) = self.store.save_checkpoint(pipeline_id, &tenant_id, step_no, state).await {
+                warn!(pipeline_id = %pipeline_id, error = %e, "save_checkpoint 失败（继续执行）");
+                self.metrics.inc_persist_failure();
+            }
+            // 重置间隔计数器（留档完成，开始下一个 interval）
+            self.steps_since_checkpoint.store(0, Ordering::SeqCst);
         }
     }
 }
@@ -562,6 +677,97 @@ fn truthy_flag(state: &serde_json::Value, key: &str) -> bool {
         .and_then(|o| o.get(key))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// 计算 step 执行前后的 state diff：返回 after 中相对 before 变更的顶层 key 及其新值。
+/// - 新增的 key：纳入 diff
+/// - 值变化的 key：纳入 diff（after 的值）
+/// - 值相同的 key：跳过
+/// 非顶层（深层）变更按整体替换（不递归细粒度 diff），对齐 step 级快照语义。
+fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
+    let before_obj = before.as_object();
+    let after_obj = match after.as_object() {
+        Some(o) => o,
+        None => return serde_json::Value::Object(Default::default()),
+    };
+    let mut diff = serde_json::Map::new();
+    for (k, v_after) in after_obj {
+        // messages 特殊处理：增量化（消除 O(n²) 冗余）
+        // 全量替换语义下，messages 每 step 把累计全量数组重抄一遍 → DB 70% 体积是冗余。
+        // 改为只记本 step 的增量 ops（append 新尾部 / delete_from 压缩 / replace_at 改某条）。
+        // 其余 key（标量字段）不膨胀，照常全量替换。
+        if k == "messages" {
+            let v_before = before_obj.and_then(|b| b.get("messages"));
+            if let Some(ops) = messages_diff_ops(v_before, v_after) {
+                // ops 为空表示 messages 实质未变（如仅引用相同），不进 diff
+                if !ops.is_empty() {
+                    diff.insert(
+                        "messages".into(),
+                        serde_json::json!({ "_ops": ops }),
+                    );
+                }
+                continue;
+            }
+            // fallback：无法计算增量（非数组等异常），回退全量（兼容）
+        }
+        let changed = match before_obj.and_then(|b| b.get(k)) {
+            Some(v_before) => v_before != v_after,
+            None => true, // 新增 key
+        };
+        if changed {
+            diff.insert(k.clone(), v_after.clone());
+        }
+    }
+    serde_json::Value::Object(diff)
+}
+
+/// 计算 messages 数组的增量 ops（消除 O(n²) 冗余的核心）。
+///
+/// 返回 `Some(ops)` 表示可增量化（数组形态）；`None` 表示形态异常，调用方回退全量。
+/// ops 元素：
+/// - `{"op":"append","msg":{...}}`：尾部新增（正常每轮 1-N 条）
+/// - `{"op":"delete_from","idx":N}`：删除 index≥N（压缩场景，如 context_window_guard）
+/// - `{"op":"replace_at","idx":N,"msg":{...}}`：替换某条（中间内容变更）
+///
+/// 比对策略：先按索引对齐前缀（变则 replace_at），尾部多出的 append，after 比 before 短则 delete_from。
+/// 正常对话每轮追加 1-N 条 → 只产 append，O(1)，不再抄写历史全量。
+fn messages_diff_ops(
+    before: Option<&serde_json::Value>,
+    after: &serde_json::Value,
+) -> Option<Vec<serde_json::Value>> {
+    let after_arr = after.as_array()?;
+    let before_arr = before.and_then(|v| v.as_array());
+    let n = before_arr.map(|a| a.len()).unwrap_or(0);
+    let m = after_arr.len();
+    let mut ops = Vec::new();
+
+    // 比对前缀：i < min(n, m)，变了则 replace_at
+    if let Some(b) = before_arr {
+        for i in 0..n.min(m) {
+            if b.get(i) != Some(&after_arr[i]) {
+                ops.push(serde_json::json!({
+                    "op": "replace_at",
+                    "idx": i,
+                    "msg": after_arr[i],
+                }));
+            }
+        }
+    }
+    // 尾部追加：m > n
+    for i in n.min(m)..m {
+        ops.push(serde_json::json!({
+            "op": "append",
+            "msg": after_arr[i],
+        }));
+    }
+    // 压缩：n > m，删除 index ≥ m
+    if n > m {
+        ops.push(serde_json::json!({
+            "op": "delete_from",
+            "idx": m,
+        }));
+    }
+    Some(ops)
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -774,6 +980,28 @@ mod tests {
             _thread_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            Ok(vec![])
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError> {
+            Ok(vec![])
         }
 
         // ── 域3/4/5 stub（M1）──────────────────────────────────────
@@ -1041,6 +1269,7 @@ mod tests {
             name: "single".into(),
             loop_config: Default::default(),
             steps: vec![atomic_step("s1", "echo")],
+            checkpoint: Default::default(),
         };
         let library = StepLibrary::default();
         let final_state = fixture.run(&config, &library, json!({})).await;
@@ -1084,6 +1313,7 @@ mod tests {
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let mut library = StepLibrary::default();
         library
@@ -1125,6 +1355,7 @@ mod tests {
                 },
                 atomic_step("child", "a"),
             ],
+            checkpoint: Default::default(),
         };
         let _ = fixture
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1148,6 +1379,7 @@ mod tests {
             name: "with_lib".into(),
             loop_config: Default::default(),
             steps: vec![atomic_step("caller", "shared_step")],
+            checkpoint: Default::default(),
         };
         let mut library = StepLibrary::default();
         library
@@ -1177,6 +1409,7 @@ mod tests {
                 max_iterations: -1, // 无限，靠 ended 退出
             },
             steps: vec![atomic_step("body", "counter_plugin")],
+            checkpoint: Default::default(),
         };
         let state = executor
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1207,6 +1440,7 @@ mod tests {
                 max_iterations: 2,
             },
             steps: vec![atomic_step("body", "p")],
+            checkpoint: Default::default(),
         };
         let _ = executor
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1235,6 +1469,7 @@ mod tests {
                 }],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let library = StepLibrary::default();
         let state = fixture
@@ -1264,6 +1499,7 @@ mod tests {
                 }],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let state = fixture
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1282,6 +1518,7 @@ mod tests {
                 atomic_step("s1", "ghost_step"), // 既不是 step 也不是已知插件
                 atomic_step("s2", "ghost_plugin"),
             ],
+            checkpoint: Default::default(),
         };
         // 不应 panic；返回的 state 仍合法
         let state = fixture
@@ -1328,6 +1565,7 @@ mod tests {
                 }],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let state = fixture2
             .run(&config, &StepLibrary::default(), json!({ "agent_id": "A1" }))
@@ -1368,6 +1606,7 @@ mod tests {
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let state = fixture
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1410,6 +1649,7 @@ mod tests {
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let state = fixture
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1438,6 +1678,7 @@ mod tests {
                 max_iterations: 10,
             },
             steps: vec![atomic_step("body", "p")],
+            checkpoint: Default::default(),
         };
         let state = executor
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1471,6 +1712,7 @@ mod tests {
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let state = fixture
             .run(
@@ -1491,6 +1733,7 @@ mod tests {
             name: "noop".into(),
             loop_config: Default::default(),
             steps: vec![],
+            checkpoint: Default::default(),
         };
         let state = fixture
             .run(&config, &StepLibrary::default(), serde_json::Value::Null)
@@ -1519,6 +1762,7 @@ mod tests {
                 }],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         };
         let state = fixture
             .run(&config, &StepLibrary::default(), json!({}))
@@ -1551,6 +1795,7 @@ mod tests {
                     max_iterations: -1,
                 }),
             }],
+            checkpoint: Default::default(),
         };
         let state = executor
             .run(&config, &StepLibrary::default(), json!({}))

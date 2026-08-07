@@ -758,6 +758,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -790,6 +791,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_err());
     }
@@ -823,6 +825,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -971,6 +974,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));

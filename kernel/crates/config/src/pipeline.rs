@@ -267,6 +267,7 @@ impl PipelineDefinition {
                 self.make_core_step(),
                 self.make_post_step(),
             ],
+            checkpoint: Default::default(),
         }
     }
 
