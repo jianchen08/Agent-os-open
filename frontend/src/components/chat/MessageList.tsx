@@ -68,10 +68,33 @@ export const MessageList = ({
    * 只影响渲染，不改 store 的原始数据——store 保持原始 sequence 保证
    * before_sequence 翻页正常（数据层不合并，渲染层合并，彻底解耦）。
    */
-  const displayMessages = useMemo(
-    () => mergeConsecutiveAssistantMessages(messages),
-    [messages],
-  )
+  const displayMessages = useMemo(() => {
+    const merged = mergeConsecutiveAssistantMessages(messages)
+    // 渲染层跳过"已被吸收"的 tool 消息：若该 tool 消息的 toolCallId 已出现在
+    // 前一个 assistant 的 tool_call part（merge 注入了结果，渲染为 ActivityCard），
+    // 则独立 tool 卡片冗余，跳过。与流式渲染保持一致（流式时 tool 结果直接更新
+    // assistant 的 tool_call part，无独立 tool 消息）。
+    // 注意：仅在渲染层过滤，不改 store/merge 的原始数据，流式与刷新后行为一致。
+    // 兜底：若 tool 消息无 toolCallId，或前一个 assistant 无对应 tool_call part，则保留渲染。
+    const absorbedToolCallIds = new Set<string>()
+    for (const m of merged) {
+      if (m.role === 'assistant' && m.parts) {
+        for (const p of m.parts as any[]) {
+          if (p.type === 'tool_call' && p.callId) {
+            absorbedToolCallIds.add(p.callId)
+          }
+        }
+      }
+    }
+    return merged.filter((m) => {
+      if (m.role !== 'tool') return true
+      const tcId = m.toolCallId
+      // 无 toolCallId 或未被吸收 → 保留（兜底，避免结果丢失）
+      if (!tcId || !absorbedToolCallIds.has(tcId)) return true
+      // 已被 assistant 的 tool_call part 吸收 → 跳过（避免与 ActivityCard 重复）
+      return false
+    })
+  }, [messages])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   /** 是否在底部附近（距底部 150px 内） */

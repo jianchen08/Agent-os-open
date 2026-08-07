@@ -188,6 +188,28 @@ impl StorageBackend for NullStorage {
     async fn delete_session(&self, _thread_id: &str) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
+    async fn link_pipeline_session(
+        &self,
+        _pipeline_id: &str,
+        _thread_id: &str,
+        _tenant_id: &str,
+    ) -> Result<(), agentos_core::types::StorageError> {
+        Ok(())
+    }
+    async fn list_pipeline_ids_by_thread(
+        &self,
+        _thread_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+        Ok(vec![])
+    }
+    async fn get_step_traces_by_thread(
+        &self,
+        _thread_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError> {
+        Ok(vec![])
+    }
     async fn append_execution_record(
         &self,
         _record: &agentos_core::types::ExecutionRecord,

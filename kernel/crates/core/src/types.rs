@@ -554,6 +554,20 @@ pub struct MessageRecord {
     /// 可空，兼容迁移前的历史数据。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_id: Option<String>,
+    /// assistant 消息的工具调用数组（JSON 序列化）。
+    /// 仅 role=assistant 且携带 tool_calls 时非空，对齐 OpenAI tool_calls 结构。
+    /// 投影层把 messages 数组里 assistant 的 tool_calls 序列化进此列，
+    /// 使消息表能完整表达多轮工具调用，而非只存扁平文本。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls_json: Option<String>,
+    /// 工具结果消息（role=tool）对应的工具调用 ID。
+    /// 与 tool_calls_json 配合还原完整的"调用-结果"配对。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// assistant 消息的思考内容（LLM reasoning/chain-of-thought）。
+    /// 前端据此渲染"思考过程"折叠区。仅 role=assistant 且模型输出思考时非空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// sessions 表记录——会话标签夹（域2，对齐 0.1 SessionModel）。
@@ -1055,6 +1069,41 @@ impl Default for LoopConfig {
     }
 }
 
+/// 检查点配置：每 N 步把当时的完整 state 复制一份到 pipeline_checkpoints 表，
+/// 作为留档快照。冷启动重建时优先从最近的 checkpoint 恢复（O(1) 取基线），
+/// 再回放其后 traces 的增量 ops，避免长会话全量回放。
+///
+/// checkpoint 存全量 state（非 diff）：用存储换 O(1) 恢复速度，
+/// 与 traces 的增量化（省存储）配套——traces 变薄后，checkpoint 补偿重建速度。
+/// checkpoint 表是状态表的留档副本，刻意冗余，N 步才产生一份，稀疏。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointConfig {
+    /// 是否启用定期 checkpoint。
+    #[serde(default = "default_checkpoint_enabled")]
+    pub enabled: bool,
+    /// 每隔多少步打一次全量快照（引擎可配）。0 或负数 = 禁用。
+    /// 默认 1000：长会话每千步留一份基线，重建成本可控。
+    #[serde(default = "default_checkpoint_interval")]
+    pub interval_steps: i64,
+}
+
+fn default_checkpoint_enabled() -> bool {
+    true
+}
+
+fn default_checkpoint_interval() -> i64 {
+    1000
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_steps: 1000,
+        }
+    }
+}
+
 /// 管道步骤（统一 step 模型：原子插件和组合节点都是 step）。
 ///
 /// `steps` 字段引用的内容按三级命中规则解析：
@@ -1083,7 +1132,7 @@ pub struct PipelineStep {
 ///
 /// 引擎作为配置解释执行器：读 PipelineConfig，按 steps 顺序执行，
 /// 据 loop/routes 决定循环与分支。一套引擎 + 不同 YAML = 不同行为。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// 管道名
     pub name: String,
@@ -1095,6 +1144,10 @@ pub struct PipelineConfig {
     pub loop_config: LoopConfig,
     /// 有序步骤
     pub steps: Vec<PipelineStep>,
+    /// 检查点配置：每 N 步把完整 state 复制到 pipeline_checkpoints 留档，
+    /// 供冷启动重建时优先恢复（O(1) 取基线 + 回放其后增量）。
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 impl PipelineConfig {

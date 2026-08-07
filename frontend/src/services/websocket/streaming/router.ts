@@ -2,6 +2,9 @@
  * 流式事件路由解析
  */
 
+import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+
 /**
  * 解析事件的 pipeline_id
  *
@@ -27,4 +30,19 @@ export function resolvePipelineId(eventData: any): string | null {
   if (typeof topPid === 'string' && topPid.length > 0) return topPid
 
   return null
+}
+
+/**
+ * 判断 pipeline 是否"被关注"（活跃/已注册/在 Tab 打开）。
+ * 非关注 pipeline 的流式事件应被丢弃，不注册幽灵管道、不写 store。
+ * ② 已注册但非活跃（如子任务管道）仍返回 true——保证子任务流式可见。
+ */
+export function isPipelineRelevant(pipelineId: string): boolean {
+  if (!pipelineId) return false
+  const ps = pipelineStore.getState()
+  if (ps.activePipelineId === pipelineId) return true        // ① 当前活跃
+  if (ps.pipelines[pipelineId]) return true                   // ② 已注册(含子任务)
+  const tabs = useAgentTabStore.getState().tabs
+  if (tabs.some((t) => t.pipelineRunId === pipelineId)) return true  // ③ Tab 打开
+  return false
 }

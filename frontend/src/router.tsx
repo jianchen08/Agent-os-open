@@ -298,14 +298,25 @@ function HomePage(): ReactNode {
 
       const pipelineStore = usePipelineMessageStore.getState()
 
-      // 管道 ID 是会话的唯一路由键，单一来源即可，不做多重 fallback。
-      // ChatContainer 已保证传入非空 params.pipelineId
-      //（activeTab.pipelineRunId，其源头是后端创建会话时回填的 session.pipelineIds[0]）。
-      // 缺失即说明会话未正确初始化，直接终止而非用脏数据硬发。
-      const targetPipelineId = params.pipelineId
+      // 管道 ID 是会话的唯一路由键。源头取值：直接从当前会话的真实 pipelineIds[0] 取，
+      // 而非依赖 ChatContainer 闭包传入的 params.pipelineId（它来自 activeTab.pipelineRunId，
+      // 新建/切换会话后 React 渲染时序可能导致闭包持有旧 tab → 串到旧会话的 pipeline）。
+      // sessionStore 是唯一真相源，这里实时读取，彻底杜绝 activePipelineId 滞留旧值。
+      const sessionForPid = sessions.find((s) => s.id === sid)
+      const targetPipelineId = sessionForPid?.pipelineIds?.[0] || params.pipelineId
       if (!targetPipelineId) {
         console.warn('[handleSendMessage] pipelineId 缺失，终止发送: sid=%s', sid)
         return
+      }
+      // 校验：params.pipelineId 与会话真实主管道不一致时，说明前端 tab 状态滞后，
+      // 记录告警（用真实值发送，避免串桶）。
+      if (params.pipelineId && params.pipelineId !== targetPipelineId) {
+        console.warn(
+          '[handleSendMessage] pipelineId 不一致，用会话真实值: sid=%s param=%s real=%s',
+          sid.slice(0, 12),
+          params.pipelineId.slice(0, 12),
+          targetPipelineId.slice(0, 12),
+        )
       }
 
       const userMessageId = generateUUID()

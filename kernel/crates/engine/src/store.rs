@@ -44,9 +44,16 @@ CREATE TABLE IF NOT EXISTS messages (
     -- 消息层只按 pipeline_id 查询，不加 thread_id（不关心会话归属）。
     -- 对齐 0.1 ExecutionRecordData.pipeline_run_id。可空兼容历史数据。
     pipeline_id     TEXT,
+    -- reasoning_content：assistant 消息的思考内容（LLM reasoning/chain-of-thought）。
+    -- 前端据此渲染思考过程折叠区。仅 role=assistant 且模型输出思考时非空。
+    reasoning_content TEXT,
     created_at      TEXT NOT NULL,
     UNIQUE(run_id, branch_id, seq_in_branch)
 );
+-- 工具调用相关列（迁移函数补加，DDL 里同步声明供新建库直接建全）：
+-- tool_calls_json：assistant 消息的 tool_calls 数组（OpenAI 结构 JSON）。
+-- tool_call_id：role=tool 的结果消息对应的调用 ID，与 tool_calls_json 配对还原调用链。
+-- 列允许 NULL，兼容迁移前的扁平历史数据（仅有 user/assistant 文本）。
 -- 注意：idx_messages_pipeline_seq 不在 DDL 批里建，改由 migrate_add_pipeline_id 兜底。
 -- 原因：旧库 messages 表已存在但缺 pipeline_id 列，CREATE TABLE IF NOT EXISTS 是空操作，
 -- 若索引建在 DDL 批里会在 ALTER ADD COLUMN（迁移函数）之前执行，从而因列不存在而整体失败。
@@ -164,6 +171,43 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
+-- 域7：pipeline_sessions（会话↔管道映射）。
+-- 一个会话下所有管道（主管道 + 子任务管道）都映射到同一 thread_id。
+-- 删除会话时按 thread_id 一次查到全部 pipeline_id 级联清理，无需父子关系。
+-- 写入时机：persist_run_start（每次管道开跑）+ create/update session（主管道兜底）。
+CREATE TABLE IF NOT EXISTS pipeline_sessions (
+    pipeline_id TEXT NOT NULL,
+    thread_id   TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL DEFAULT 'default',
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (pipeline_id, tenant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ps_thread ON pipeline_sessions(thread_id, tenant_id);
+-- 域8：pipeline_state（state 标量字段的实时快照）。
+-- 除 messages 外，state 中需要跨轮保留/重建恢复的累计字段（如 track.total_tokens），
+-- 每字段一行 upsert。冷启动重建时读出累计值喂回 state，插件自然累加。
+-- 用完即弃的传送带字段（raw_tool_calls / tool_results / router.* 等）不进此表。
+CREATE TABLE IF NOT EXISTS pipeline_state (
+    pipeline_id  TEXT NOT NULL,
+    field_key    TEXT NOT NULL,
+    field_value  TEXT NOT NULL,
+    tenant_id    TEXT NOT NULL DEFAULT 'default',
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (pipeline_id, field_key, tenant_id)
+);
+-- 域9：pipeline_checkpoints（定期全量 state 快照，留档用）。
+-- 每 N 步把当时完整 state 复制一份到此表。冷启动重建优先取最近 checkpoint（O(1) 基线），
+-- 再回放其后 traces 增量。checkpoint 存全量（非 diff）——用存储换 O(1) 恢复速度，
+-- 与 traces 增量化（省存储）配套。checkpoint 是状态表的留档副本，刻意冗余，N 步才产生一份。
+CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
+    checkpoint_id  TEXT PRIMARY KEY,
+    pipeline_id    TEXT NOT NULL,
+    step_no        INTEGER NOT NULL,
+    state_json     TEXT NOT NULL,
+    tenant_id      TEXT NOT NULL DEFAULT 'default',
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cp_pipeline_step ON pipeline_checkpoints(pipeline_id, tenant_id, step_no DESC);
 ";
 
 /// 为旧库（建表时无 tenant_id 列）补加 tenant_id 列。
@@ -222,6 +266,34 @@ fn migrate_add_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// 为旧库（建表时无 tool_calls_json / tool_call_id 列）补加这两列。
+///
+/// 让 messages 表能完整表达多轮工具调用：assistant 的 tool_calls 序列化进
+/// tool_calls_json，tool 结果消息的 tool_call_id 进对应列。
+/// 仅在列缺失时执行 `ALTER TABLE ... ADD COLUMN`（幂等，可空兼容历史扁平数据）。
+fn migrate_add_tool_call_columns(conn: &Connection) -> Result<(), StorageError> {
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(messages)")
+        .map_err(|e| StorageError::Database(e.to_string()))?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| StorageError::Database(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !cols.iter().any(|c| c == "tool_calls_json") {
+        conn.execute("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT", [])
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+    }
+    if !cols.iter().any(|c| c == "tool_call_id") {
+        conn.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT", [])
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+    }
+    if !cols.iter().any(|c| c == "reasoning_content") {
+        conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT", [])
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// SQLite 四表存储实现。
 ///
 /// 使用 `rusqlite::Connection`（线程安全包装在 `Arc<Mutex>` 中）。
@@ -251,6 +323,34 @@ fn is_corruption_error(e: &StorageError) -> bool {
                 || lower.contains("corrupt")
         }
         _ => false,
+    }
+}
+
+/// 从 messages 数组元素提取 content 的字符串表示。
+///
+/// content 可能是字符串（普通文本/工具结果）或数组（多 part：thinking/text 等）。
+/// 数组形式时拼接所有 text part 的 text 字段，保持与前端渲染一致。
+fn extract_content_string(msg: &serde_json::Value) -> String {
+    match msg.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => {
+            // 多 part：拼接 text/thinking 的内容
+            let mut buf = String::new();
+            for p in parts {
+                if let Some(t) = p.get("type").and_then(|v| v.as_str()) {
+                    if t == "text" || t == "thinking" {
+                        if let Some(txt) = p.get("text").and_then(|v| v.as_str()) {
+                            if !buf.is_empty() {
+                                buf.push('\n');
+                            }
+                            buf.push_str(txt);
+                        }
+                    }
+                }
+            }
+            buf
+        }
+        _ => String::new(),
     }
 }
 
@@ -333,6 +433,7 @@ impl SqliteStore {
             .map_err(|e| StorageError::Database(e.to_string()))?;
         migrate_add_tenant_id(conn)?;
         migrate_add_pipeline_id(conn)?;
+        migrate_add_tool_call_columns(conn)?;
         info!("SQLite four-table store initialized");
         Ok(())
     }
@@ -440,6 +541,268 @@ impl SqliteStore {
         Ok(blob_id)
     }
 
+    // ── 域10：分层持久化投影（messages 增量对齐 + 标量快照 + checkpoint）────
+    // 设计：引擎 merge state_updates 时，对 messages（系统字段）走 project_messages
+    // 增量对齐（索引比对，追加 O(1)）；对插件 manifest 声明的 persistent_fields 走
+    // upsert_state_field（标量快照）；传送带字段不投影。checkpoint 每 N 步复制完整 state。
+
+    /// 投影 messages 列表字段到 messages 表（增量对齐，幂等）。
+    ///
+    /// `new_arr` 是插件执行完返回的完整 messages 数组快照。投影按索引对齐：
+    /// - `i < min(N, M)`：逐条比对（role/content/tool_calls/tool_call_id），变了 UPDATE，没变跳过
+    ///   （正常对话每轮追加 1-3 条，对齐段全跳过 → O(0)）
+    /// - `M > N`：尾部 INSERT 新增（正常 1-2 条 → O(1)）
+    /// - `N > M`（压缩场景）：DELETE 索引 ≥ M 的旧行
+    ///
+    /// message_id 用确定性 `m_{pipeline_id}_{i}`，保证重放幂等不撞主键。
+    /// content 存 blob（内容寻址去重），tool_calls 序列化进 tool_calls_json。
+    pub fn project_messages(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        new_arr: &[serde_json::Value],
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let pid = pipeline_id.to_string();
+        // 读现有行：index → (message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content)
+        let mut existing: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+            .prepare(
+                "SELECT message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content \
+                 FROM messages WHERE pipeline_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .query_map(rusqlite::params![pid, tenant_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let n = existing.len();
+        let m = new_arr.len();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // ① 比对段：i < min(N, M)，变了 UPDATE
+        for (i, new_msg) in new_arr.iter().take(n.min(m)).enumerate() {
+            let (msg_id, old_role, old_blob, old_tc_json, old_tc_id, old_reasoning) = &existing[i];
+            let role = new_msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // content → blob_id（内容寻址）
+            let content = extract_content_string(new_msg);
+            let (blob_id, _) = self.ensure_blob_locked(&conn, &content)?;
+            let tool_calls_json = new_msg
+                .get("tool_calls")
+                .map(|tc| serde_json::to_string(tc).unwrap_or_default());
+            let tool_call_id = new_msg
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let reasoning_content = new_msg
+                .get("reasoning_content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // 内容级比对：role / blob_id / tool_calls_json / tool_call_id / reasoning 都一致则跳过
+            if role == *old_role
+                && blob_id.as_deref() == old_blob.as_deref()
+                && tool_calls_json == *old_tc_json
+                && tool_call_id == *old_tc_id
+                && reasoning_content == *old_reasoning
+            {
+                continue;
+            }
+            let content_preview: String = content.chars().take(200).collect();
+            conn.execute(
+                "UPDATE messages SET role=?2, blob_id=?3, content_preview=?4, tool_calls_json=?5, tool_call_id=?6, reasoning_content=?7 \
+                 WHERE message_id=?1",
+                rusqlite::params![msg_id, role, blob_id, content_preview, tool_calls_json, tool_call_id, reasoning_content],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+
+        // ② 追加段：M > N，尾部 INSERT
+        for i in n.min(m)..m {
+            let new_msg = &new_arr[i];
+            let msg_id = format!("m_{}_{}", pid, i);
+            let role = new_msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let content = extract_content_string(new_msg);
+            let (blob_id, _) = self.ensure_blob_locked(&conn, &content)?;
+            let content_preview: String = content.chars().take(200).collect();
+            let tool_calls_json = new_msg
+                .get("tool_calls")
+                .map(|tc| serde_json::to_string(tc).unwrap_or_default());
+            let tool_call_id = new_msg
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let reasoning_content = new_msg
+                .get("reasoning_content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // branch_id/run_id 用占位（投影语义下 messages 跨 run，按 pipeline 主键）。
+            // 取 state 通路里的 run_id 需改签名；此处用 pipeline_id 派生稳定占位即可。
+            let run_id = format!("r_{}", pid);
+            let branch_id = format!("b_{}", pid);
+            conn.execute(
+                "INSERT INTO messages (message_id, run_id, branch_id, seq_in_branch, role, blob_id, \
+                 content_preview, tenant_id, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                rusqlite::params![
+                    msg_id, run_id, branch_id, i as i64, role, blob_id, content_preview, tenant_id,
+                    now, pid, tool_calls_json, tool_call_id, reasoning_content
+                ],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+
+        // ③ 压缩段：N > M，DELETE 索引 ≥ M 的旧行
+        if n > m {
+            conn.execute(
+                "DELETE FROM messages WHERE pipeline_id=?1 AND tenant_id=?2 AND seq_in_branch >= ?3",
+                rusqlite::params![pid, tenant_id, m as i64],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// upsert 一个 state 标量字段到 pipeline_state 表（覆盖最新值，O(1)）。
+    ///
+    /// 累计语义：投影层无脑覆盖；累加智能在插件里（它读 state 旧值 + 本轮）。
+    /// 重建时从 pipeline_state 读出累计值喂回 state，插件自然累加，不归零。
+    pub fn upsert_state_field(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let value_json = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO pipeline_state (pipeline_id, field_key, field_value, tenant_id, updated_at) \
+             VALUES (?1,?2,?3,?4,?5) \
+             ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET field_value=?3, updated_at=?5",
+            rusqlite::params![pipeline_id, key, value_json, tenant_id, now],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 读出某 pipeline 的全部持久化标量字段（冷启动重建用）。
+    pub fn load_pipeline_state(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        let conn = self.conn.lock();
+        let rows = conn
+            .prepare("SELECT field_key, field_value FROM pipeline_state WHERE pipeline_id=?1 AND tenant_id=?2")
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in rows {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
+                map.insert(k, val);
+            }
+        }
+        Ok(map)
+    }
+
+    /// 保存一个全量 state checkpoint（每 N 步调用一次，留档用）。
+    pub fn save_checkpoint(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        step_no: i64,
+        state: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let checkpoint_id = format!("cp_{}_{}", pipeline_id, step_no);
+        let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".into());
+        let now = chrono::Utc::now().to_rfc3339();
+        // INSERT OR REPLACE：同一 step 重放幂等
+        conn.execute(
+            "INSERT OR REPLACE INTO pipeline_checkpoints \
+             (checkpoint_id, pipeline_id, step_no, state_json, tenant_id, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![checkpoint_id, pipeline_id, step_no, state_json, tenant_id, now],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 取最近一个 checkpoint（step_no 最大），返回 (step_no, state_json)。
+    pub fn load_latest_checkpoint(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT step_no, state_json FROM pipeline_checkpoints \
+                 WHERE pipeline_id=?1 AND tenant_id=?2 ORDER BY step_no DESC LIMIT 1",
+                rusqlite::params![pipeline_id, tenant_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok();
+        match row {
+            Some((step_no, state_json)) => {
+                let state = serde_json::from_str(&state_json).unwrap_or(serde_json::Value::Object(Default::default()));
+                Ok(Some((step_no, state)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 在已有锁定连接上确保 blob 存在，返回 (blob_id, mime)。
+    /// project_messages 复用同锁内的 conn，避免重复加锁死锁。
+    fn ensure_blob_locked(
+        &self,
+        conn: &Connection,
+        content: &str,
+    ) -> Result<(Option<String>, &'static str), StorageError> {
+        if content.is_empty() {
+            return Ok((None, "text/plain"));
+        }
+        let blob_id = Self::compute_blob_id(content.as_bytes());
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM blobs WHERE blob_id = ?1",
+                rusqlite::params![blob_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !exists {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO blobs (blob_id, mime_type, size_bytes, data, created_at) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![blob_id, "text/plain", content.len() as i64, content.as_bytes(), now],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+        Ok((Some(blob_id), "text/plain"))
+    }
+
     // ── 域2：session 标签夹内部方法（对齐 0.1 SessionModel）──────────────
     // tenant_id 从 task_local 取。pipeline_ids / metadata 以 JSON 文本存储。
 
@@ -489,16 +852,202 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 删除会话标签夹行（不级联管道/消息——会话只是聚合引用，消息/管道自治）。
+    /// 级联删除会话及其全部关联数据（主管道 + 子任务管道的 messages/traces/runs/state）。
+    ///
+    /// 通过 `pipeline_sessions` 映射表按 thread_id 找到该会话下所有 pipeline_id
+    /// （主管道 + 子管道，无需父子关系），再级联清理它们产生的 messages / execution_records /
+    /// traces / branches / pipeline_run_summaries / runs，最后删映射表与 sessions 行。
     /// 无记录时同样返回 Ok(())（幂等）。tenant_id 由调用方在 spawn_blocking 前解析。
+    /// 单次事务包裹，失败回滚。
     fn delete_session_inner(&self, thread_id: &str, tenant_id: &str) -> Result<(), StorageError> {
-        let conn = self.conn.lock();
-        conn.execute(
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
+
+        // 1. 收集该会话全部 pipeline_id：映射表 + sessions.pipeline_ids 兜底（防主管道未写映射）。
+        let mut pipeline_ids: Vec<String> = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+                )
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            for r in rows {
+                let pid = r.map_err(|e| StorageError::Database(e.to_string()))?;
+                if !pipeline_ids.contains(&pid) {
+                    pipeline_ids.push(pid);
+                }
+            }
+        }
+        // 兜底：从 sessions.pipeline_ids (JSON) 补全主管道 id
+        let session_row: Option<(Option<String>,)> = tx
+            .query_row(
+                "SELECT pipeline_ids FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+                rusqlite::params![thread_id, tenant_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?,)),
+            )
+            .ok();
+        if let Some((Some(json),)) = session_row {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
+                for pid in list {
+                    if !pid.is_empty() && !pipeline_ids.contains(&pid) {
+                        pipeline_ids.push(pid);
+                    }
+                }
+            }
+        }
+
+        if pipeline_ids.is_empty() {
+            // 无任何管道（纯标签会话）：直接删 sessions 行
+            tx.execute(
+                "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+                rusqlite::params![thread_id, tenant_id],
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+            return tx
+                .commit()
+                .map_err(|e| StorageError::Database(format!("commit: {e}")));
+        }
+
+        // 2. execution_records 直接按 pipeline_run_id 删（与 pipeline_id 同义）
+        Self::delete_in_clause(
+            &tx,
+            "DELETE FROM execution_records WHERE pipeline_run_id IN ({placeholders}) AND tenant_id = ?",
+            &pipeline_ids,
+            tenant_id,
+        )?;
+
+        // 3. 收集这些 pipeline_id 产生的 run_id（traces/branches/summaries/runs 按 run_id 删）
+        let run_ids: Vec<String> = {
+            let placeholders = (0..pipeline_ids.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT DISTINCT run_id FROM messages WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
+            );
+            let mut stmt = tx.prepare(&sql).map_err(|e| StorageError::Database(e.to_string()))?;
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                pipeline_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            params.push(&tenant_id);
+            let rows = stmt
+                .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| StorageError::Database(e.to_string()))?);
+            }
+            out
+        };
+
+        if !run_ids.is_empty() {
+            Self::delete_in_clause(&tx, "DELETE FROM traces WHERE run_id IN ({placeholders})", &run_ids, "")?;
+            Self::delete_in_clause(
+                &tx,
+                "DELETE FROM branches WHERE run_id IN ({placeholders})",
+                &run_ids,
+                "",
+            )?;
+            Self::delete_in_clause(
+                &tx,
+                "DELETE FROM pipeline_run_summaries WHERE run_id IN ({placeholders})",
+                &run_ids,
+                "",
+            )?;
+            Self::delete_in_clause(&tx, "DELETE FROM runs WHERE run_id IN ({placeholders})", &run_ids, "")?;
+        }
+
+        // 4. messages 按 pipeline_id 删（含主管道 + 子管道）
+        Self::delete_in_clause(
+            &tx,
+            "DELETE FROM messages WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?",
+            &pipeline_ids,
+            tenant_id,
+        )?;
+
+        // 5. 清映射表 + 删 sessions 行
+        tx.execute(
+            "DELETE FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![thread_id, tenant_id],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        tx.execute(
             "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
             rusqlite::params![thread_id, tenant_id],
         )
         .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        tx.commit()
+            .map_err(|e| StorageError::Database(format!("commit: {e}")))
+    }
+
+    /// 辅助：按 IN (?, ?, ...) 占位符执行 DELETE。
+    /// `sql_template` 中用 `{placeholders}` 标记占位符位置；`extra` 为可选的额外参数（如 tenant_id）。
+    fn delete_in_clause(
+        tx: &rusqlite::Transaction<'_>,
+        sql_template: &str,
+        values: &[String],
+        extra: &str,
+    ) -> Result<(), StorageError> {
+        let placeholders = (0..values.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = sql_template.replace("{placeholders}", &placeholders);
+        let mut params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        if !extra.is_empty() {
+            params.push(&extra);
+        }
+        tx.execute(&sql, params.as_slice())
+            .map_err(|e| StorageError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// 写入 pipeline↔session 映射（幂等：INSERT OR IGNORE）。
+    /// 在 persist_run_start 时调用，确保每个管道（主管道/子管道）都记录所属会话。
+    /// tenant_id 由调用方在 spawn_blocking 前解析。
+    fn link_pipeline_session_inner(
+        &self,
+        pipeline_id: &str,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        if pipeline_id.is_empty() || thread_id.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![pipeline_id, thread_id, tenant_id, now],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 查询某会话下的全部 pipeline_id（主管道 + 子管道）。
+    /// tenant_id 由调用方在 spawn_blocking 前解析。
+    fn list_pipeline_ids_by_thread_inner(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2")
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| StorageError::Database(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     /// 按 thread_id 取单个会话。tenant_id 由调用方在 spawn_blocking 前解析。
@@ -750,6 +1299,126 @@ impl SqliteStore {
             })
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
+        traces
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    /// 查询某会话下的 step 级轨迹（冷启动统一回放用）。
+    ///
+    /// 经 pipeline_sessions 映射表按 thread_id 找到全部 pipeline_id → 这些 pipeline 产生
+    /// 的 run_id → 对应 traces。只返回 step 级轨迹（plugin_id 为配置 step id，不以
+    /// `pipeline_` 前缀的旧插件级轨迹被忽略），按 created_at 升序以便按序 merge 回放。
+    /// tenant_id 由调用方在 spawn_blocking 前解析。
+    fn get_step_traces_by_thread_inner(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        let conn = self.conn.lock();
+        // pipeline_id 集合：映射表 + sessions.pipeline_ids 兜底
+        let mut pipeline_ids: Vec<String> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare("SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2")
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            for r in rows {
+                let pid = r.map_err(|e| StorageError::Database(e.to_string()))?;
+                if !pipeline_ids.contains(&pid) {
+                    pipeline_ids.push(pid);
+                }
+            }
+        }
+        let session_row: Option<(Option<String>,)> = conn
+            .query_row(
+                "SELECT pipeline_ids FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+                rusqlite::params![thread_id, tenant_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?,)),
+            )
+            .ok();
+        if let Some((Some(json),)) = session_row {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
+                for pid in list {
+                    if !pid.is_empty() && !pipeline_ids.contains(&pid) {
+                        pipeline_ids.push(pid);
+                    }
+                }
+            }
+        }
+        if pipeline_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // run_id 集合（经 messages.pipeline_id 反查）
+        let placeholders = (0..pipeline_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let run_sql = format!(
+            "SELECT DISTINCT run_id FROM messages WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
+        );
+        let run_ids: Vec<String> = {
+            let mut stmt = conn.prepare(&run_sql).map_err(|e| StorageError::Database(e.to_string()))?;
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                pipeline_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            params.push(&tenant_id);
+            let rows = stmt
+                .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| StorageError::Database(e.to_string()))?);
+            }
+            out
+        };
+        if run_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // traces：只取 step 级（plugin_id 不以 pipeline_ 开头），按 created_at 升序
+        let run_placeholders = (0..run_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let trace_sql = format!(
+            "SELECT trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at FROM traces WHERE run_id IN ({run_placeholders}) AND tenant_id = ? AND plugin_id NOT LIKE 'pipeline_%' ORDER BY created_at ASC"
+        );
+        let mut stmt = conn.prepare(&trace_sql).map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = run_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        params.push(&tenant_id);
+        let traces = stmt
+            .query_map(params.as_slice(), |row| {
+                let patch_type_str: String = row.get(5)?;
+                let patch_data_str: String = row.get(6)?;
+                Ok(TraceEntry {
+                    trace_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    branch_id: row.get(2)?,
+                    seq_in_branch: row.get(3)?,
+                    plugin_id: row.get(4)?,
+                    patch_type: match patch_type_str.as_str() {
+                        "state_update" => PatchType::StateUpdate,
+                        "route_signal" => PatchType::RouteSignal,
+                        "error" => PatchType::Error,
+                        "lifecycle" => PatchType::Lifecycle,
+                        "rollback" => PatchType::Rollback,
+                        _ => PatchType::StateUpdate,
+                    },
+                    patch_data: serde_json::from_str(&patch_data_str).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    created_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| StorageError::Database(e.to_string()))?;
         traces
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -1355,7 +2024,7 @@ impl StorageBackend for SqliteStore {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id FROM messages WHERE branch_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
+                "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content FROM messages WHERE branch_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
             )
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
@@ -1371,6 +2040,9 @@ impl StorageBackend for SqliteStore {
                     content_preview: row.get(6)?,
                     created_at: row.get(7)?,
                     pipeline_id: row.get(8)?,
+                    tool_calls_json: row.get(9)?,
+                    tool_call_id: row.get(10)?,
+                    reasoning_content: row.get(11)?,
                 })
             })
             .map_err(|e| StorageError::Database(e.to_string()))?;
@@ -1390,7 +2062,7 @@ impl StorageBackend for SqliteStore {
 
         // 动态拼装 WHERE：pipeline_id + tenant_id 必选，游标与 limit 可选
         let mut sql = String::from(
-            "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id FROM messages WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content FROM messages WHERE pipeline_id = ?1 AND tenant_id = ?2",
         );
         let mut idx = 3;
         if opts.before_sequence.is_some() {
@@ -1438,6 +2110,9 @@ impl StorageBackend for SqliteStore {
                     content_preview: row.get(6)?,
                     created_at: row.get(7)?,
                     pipeline_id: row.get(8)?,
+                    tool_calls_json: row.get(9)?,
+                    tool_call_id: row.get(10)?,
+                    reasoning_content: row.get(11)?,
                 })
             })
             .map_err(|e| StorageError::Database(e.to_string()))?;
@@ -1698,6 +2373,88 @@ impl StorageBackend for SqliteStore {
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
 
+    // ── 域10：分层持久化投影（trait async 包装，spawn_blocking + task_local tenant）──
+
+    async fn project_messages(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        new_arr: &[serde_json::Value],
+    ) -> Result<(), StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let new_arr = new_arr.to_vec();
+        tokio::task::spawn_blocking(move || {
+            this.project_messages(&pipeline_id, &tenant_id, &new_arr)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn upsert_state_field(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let key = key.to_string();
+        let value = value.clone();
+        tokio::task::spawn_blocking(move || {
+            this.upsert_state_field(&pipeline_id, &tenant_id, &key, &value)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn load_pipeline_state(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        tokio::task::spawn_blocking(move || this.load_pipeline_state(&pipeline_id, &tenant_id))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn save_checkpoint(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        step_no: i64,
+        state: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            this.save_checkpoint(&pipeline_id, &tenant_id, step_no, &state)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn load_latest_checkpoint(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        tokio::task::spawn_blocking(move || this.load_latest_checkpoint(&pipeline_id, &tenant_id))
+            .await
+            .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
     // ── 域2：session 标签夹 CRUD（对齐 0.1 SessionModel）──────────────
     // 注意：tenant_id 必须在 spawn_blocking 之前解析——tokio::task_local 不跨 spawn_blocking。
     async fn create_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
@@ -1745,6 +2502,53 @@ impl StorageBackend for SqliteStore {
         tokio::task::spawn_blocking(move || this.delete_session_inner(&thread_id, &tenant_id))
             .await
             .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn link_pipeline_session(
+        &self,
+        pipeline_id: &str,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let thread_id = thread_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            this.link_pipeline_session_inner(&pipeline_id, &thread_id, &tenant_id)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn list_pipeline_ids_by_thread(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let this = self.clone();
+        let thread_id = thread_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            this.list_pipeline_ids_by_thread_inner(&thread_id, &tenant_id)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn get_step_traces_by_thread(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        let this = self.clone();
+        let thread_id = thread_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            this.get_step_traces_by_thread_inner(&thread_id, &tenant_id)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
     }
 
     // ── 域3/4/5：execution_records / summaries / memory（M1）──────────
@@ -2332,6 +3136,85 @@ mod tests {
         store.delete_session("thread_1").await.unwrap();
     }
 
+    /// 验证删除会话级联：主管道 + 子任务管道的 messages/traces/runs/execution_records 全清，
+    /// 映射表同步清理，且不误删其他会话数据。
+    #[tokio::test]
+    async fn test_delete_session_cascade_includes_sub_pipelines() {
+        use agentos_core::types::SessionRecord;
+        let store = SqliteStore::open_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // 会话 thread_1：主管道 pid_main + 子管道 pid_sub（不同 pipeline_id，同 thread_id）
+        store.link_pipeline_session("pid_main", "thread_1", "default").await.unwrap();
+        store.link_pipeline_session("pid_sub", "thread_1", "default").await.unwrap();
+        let s1 = SessionRecord {
+            thread_id: "thread_1".to_string(),
+            title: None, intent: None, current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: Some("pid_main".to_string()),
+            pipeline_ids: vec!["pid_main".to_string()],
+            metadata: None,
+            created_at: now.clone(), updated_at: now.clone(), last_active_at: None,
+        };
+        store.create_session(&s1).await.unwrap();
+
+        // 主管道数据：1 run + 2 messages + 1 trace + 1 execution_record
+        store.create_run("run_main", "h", "default").unwrap();
+        store.append_message("m1", "run_main", "main", 1, "user", None, Some("u"), Some("pid_main"), "default").unwrap();
+        store.append_message("m2", "run_main", "main", 2, "assistant", None, Some("a"), Some("pid_main"), "default").unwrap();
+        store.append_trace(TraceEntry {
+            trace_id: "t1".into(), run_id: "run_main".into(), branch_id: "main".into(),
+            seq_in_branch: 0, plugin_id: "prepare".into(), patch_type: PatchType::StateUpdate,
+            patch_data: json!({"k": "v"}), created_at: now.clone(),
+        }).await.unwrap();
+
+        // 子管道数据：1 run + 1 message + 1 trace（独立 pipeline_id pid_sub）
+        store.create_run("run_sub", "h", "default").unwrap();
+        store.append_message("s1", "run_sub", "main", 1, "user", None, Some("su"), Some("pid_sub"), "default").unwrap();
+        store.append_trace(TraceEntry {
+            trace_id: "t2".into(), run_id: "run_sub".into(), branch_id: "main".into(),
+            seq_in_branch: 0, plugin_id: "core".into(), patch_type: PatchType::StateUpdate,
+            patch_data: json!({"k2": "v2"}), created_at: now.clone(),
+        }).await.unwrap();
+
+        // 另一会话 thread_2：数据应保留
+        store.link_pipeline_session("pid_other", "thread_2", "default").await.unwrap();
+        let s2 = SessionRecord {
+            thread_id: "thread_2".to_string(),
+            title: None, intent: None, current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: Some("pid_other".to_string()),
+            pipeline_ids: vec!["pid_other".to_string()],
+            metadata: None,
+            created_at: now.clone(), updated_at: now.clone(), last_active_at: None,
+        };
+        store.create_session(&s2).await.unwrap();
+        store.create_run("run_other", "h", "default").unwrap();
+        store.append_message("o1", "run_other", "main", 1, "user", None, Some("ou"), Some("pid_other"), "default").unwrap();
+
+        // 删 thread_1：应级联清掉主管道 + 子管道全部数据
+        store.delete_session("thread_1").await.unwrap();
+
+        // thread_1 的数据应全部归零
+        let pids = store.list_pipeline_ids_by_thread("thread_1", "default").await.unwrap();
+        assert!(pids.is_empty(), "映射表应已清理，无残留 pipeline_id");
+        assert!(store.get_session("thread_1").await.unwrap().is_none(), "sessions 行应删除");
+        let main_msgs = store.get_messages_by_pipeline("pid_main", agentos_core::traits::MessageQueryOpts::default()).await.unwrap();
+        assert!(main_msgs.is_empty(), "主管道 messages 应清空");
+        let sub_msgs = store.get_messages_by_pipeline("pid_sub", agentos_core::traits::MessageQueryOpts::default()).await.unwrap();
+        assert!(sub_msgs.is_empty(), "子管道 messages 应清空");
+        let traces_left = store.get_traces("main", 0, 999).unwrap();
+        assert!(traces_left.iter().all(|t| t.run_id != "run_main" && t.run_id != "run_sub"), "traces 应清空");
+
+        // thread_2 数据应保留
+        assert!(store.get_session("thread_2").await.unwrap().is_some(), "thread_2 应保留");
+        let other_msgs = store.get_messages_by_pipeline("pid_other", agentos_core::traits::MessageQueryOpts::default()).await.unwrap();
+        assert_eq!(other_msgs.len(), 1, "thread_2 的 messages 不应被误删");
+
+        // 幂等：再删一次不报错
+        store.delete_session("thread_1").await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_append_trace_and_replay() {
         let store = SqliteStore::open_memory().unwrap();
@@ -2860,5 +3743,111 @@ mod tests {
             assert!(store.get_session("thread_a").await.unwrap().is_none());
         })
         .await;
+    }
+
+    // ── 分层持久化投影测试 ──────────────────────────────────────
+
+    /// project_messages 增量：追加新消息只 INSERT 尾部，幂等重放不重复。
+    #[tokio::test]
+    async fn test_project_messages_append_and_idempotent() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_test_append";
+        // 第一次投影：2 条
+        let arr1 = vec![
+            json!({"role": "user", "content": "你好"}),
+            json!({"role": "assistant", "content": "你好！"}),
+        ];
+        store.project_messages(pid, "default", &arr1).unwrap();
+        let cnt1 = count_messages(&store, pid);
+        assert_eq!(cnt1, 2, "首次投影应有 2 条");
+
+        // 第二次投影：追加 1 条 tool 调用结果（共 3 条）
+        let arr2 = vec![
+            json!({"role": "user", "content": "你好"}),
+            json!({"role": "assistant", "content": "你好！", "tool_calls": [{"id":"c1","type":"function","function":{"name":"f"}}]}),
+            json!({"role": "tool", "content": "结果", "tool_call_id": "c1"}),
+        ];
+        store.project_messages(pid, "default", &arr2).unwrap();
+        let cnt2 = count_messages(&store, pid);
+        assert_eq!(cnt2, 3, "追加后应有 3 条");
+
+        // 第三次：重复投影 arr2（幂等，不应产生新行）
+        store.project_messages(pid, "default", &arr2).unwrap();
+        let cnt3 = count_messages(&store, pid);
+        assert_eq!(cnt3, 3, "幂等重放应仍为 3 条");
+
+        // 验证 tool_calls_json 和 tool_call_id 被正确写入
+        let msgs = store.get_messages_by_pipeline(pid, Default::default()).await.unwrap();
+        let assistant = msgs.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(assistant.tool_calls_json.is_some(), "assistant 应有 tool_calls_json");
+        assert!(assistant.tool_calls_json.as_ref().unwrap().contains("c1"));
+        let tool = msgs.iter().find(|m| m.role == "tool").unwrap();
+        assert_eq!(tool.tool_call_id.as_deref(), Some("c1"), "tool 应有 tool_call_id");
+    }
+
+    /// project_messages 压缩：新数组比旧短，DELETE 多余尾部。
+    #[test]
+    fn test_project_messages_compression() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_test_compress";
+        let arr_long = vec![
+            json!({"role": "user", "content": "m1"}),
+            json!({"role": "assistant", "content": "m2"}),
+            json!({"role": "user", "content": "m3"}),
+            json!({"role": "assistant", "content": "m4"}),
+        ];
+        store.project_messages(pid, "default", &arr_long).unwrap();
+        assert_eq!(count_messages(&store, pid), 4);
+
+        // 压缩：只保留前 2 条
+        let arr_short = vec![
+            json!({"role": "user", "content": "m1"}),
+            json!({"role": "assistant", "content": "m2"}),
+        ];
+        store.project_messages(pid, "default", &arr_short).unwrap();
+        assert_eq!(count_messages(&store, pid), 2, "压缩后应剩 2 条");
+    }
+
+    /// upsert_state_field 幂等 + load_pipeline_state 往返。
+    #[tokio::test]
+    async fn test_upsert_and_load_pipeline_state() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_state_test";
+        // 首次 upsert
+        store.upsert_state_field(pid, "default", "track.total_tokens", &json!(150)).unwrap();
+        // 再次 upsert 覆盖（累计语义）
+        store.upsert_state_field(pid, "default", "track.total_tokens", &json!(300)).unwrap();
+        store.upsert_state_field(pid, "default", "track.llm_usage", &json!({"prompt": 10})).unwrap();
+
+        let loaded = store.load_pipeline_state(pid, "default").unwrap();
+        assert_eq!(loaded.get("track.total_tokens"), Some(&json!(300)), "应取最新覆盖值");
+        assert_eq!(loaded.get("track.llm_usage"), Some(&json!({"prompt": 10})));
+        assert_eq!(loaded.len(), 2, "应有 2 个字段");
+    }
+
+    /// save_checkpoint / load_latest_checkpoint 往返 + 取最新。
+    #[tokio::test]
+    async fn test_save_and_load_checkpoint() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_ckpt_test";
+        store.save_checkpoint(pid, "default", 5, &json!({"messages": [], "step": 5})).unwrap();
+        store.save_checkpoint(pid, "default", 10, &json!({"messages": [{"role":"user","content":"hi"}], "step": 10})).unwrap();
+
+        let latest = store.load_latest_checkpoint(pid, "default").unwrap();
+        assert!(latest.is_some());
+        let (step_no, state) = latest.unwrap();
+        assert_eq!(step_no, 10, "应取 step_no 最大的 checkpoint");
+        assert_eq!(state["step"], json!(10));
+    }
+
+    /// 辅助：统计某 pipeline 的 messages 行数。
+    fn count_messages(store: &SqliteStore, pid: &str) -> usize {
+        let conn = store.conn.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE pipeline_id = ?1 AND tenant_id = 'default'",
+            rusqlite::params![pid],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as usize
     }
 }

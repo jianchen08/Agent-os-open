@@ -24,12 +24,13 @@ use axum::{
     routing::{get, post},
     Router,
 };
+#[allow(unused_imports)]
 use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts};
 use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 
 use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::auth::{
     login_handler, logout_handler, me_handler, refresh_handler, register_handler,
@@ -242,9 +243,8 @@ pub(crate) async fn request_tenant_ctx(
 /// 历史上硬编码 "pipeline_llm_core" 写在 initial_state，现提取为常量便于发现与替换。
 const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
 
-/// 冷路径恢复历史时从 messages 表加载的最大消息条数（覆盖多轮 user+assistant）。
-/// 对齐 LLM 上下文窗口的近程记忆策略：最近 20 条足够承载常规多轮对话。
-const HISTORY_MESSAGE_LIMIT: usize = 20;
+/// 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
+/// 不再特化只读 messages 表——轨迹颗粒度即恢复边界。
 
 /// 管道配置热重载的 mtime 检测 TTL：1 秒内不重复 stat，避免高频 chat 时反复解析 YAML。
 const PIPELINE_CONFIG_TTL: Duration = Duration::from_secs(1);
@@ -499,50 +499,73 @@ async fn process_via_engine_inner(
         }
     }
     if !history_loaded {
-        // 冷路径：从持久化恢复完整历史（get_messages_by_pipeline 按 pipeline_id+tenant
-        // 查询，走 idx_messages_pipeline_seq 索引，seq 升序返回）。
-        match store
-            .get_messages_by_pipeline(
-                effective_pipeline_id,
-                MessageQueryOpts {
-                    limit: Some(HISTORY_MESSAGE_LIMIT),
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Ok(records) => {
-                for rec in records {
-                    // 完整内容优先从 blobs 表取（blob_id 联查），缺失时回退 preview
-                    let content = match &rec.blob_id {
-                        Some(bid) => match store.get_blob(bid).await {
-                            Ok(data) => String::from_utf8_lossy(&data).to_string(),
-                            Err(e) => {
-                                warn!(
-                                    blob_id = %bid,
-                                    error = %e,
-                                    "get_blob 失败，回退 content_preview"
-                                );
-                                rec.content_preview.clone().unwrap_or_default()
-                            }
-                        },
-                        None => rec.content_preview.clone().unwrap_or_default(),
-                    };
-                    history_prefix.push(serde_json::json!({
-                        "role": rec.role,
-                        "content": content,
-                    }));
+        // 冷路径 ①：优先从最近 checkpoint 恢复（O(1) 取基线，无需回放 traces）。
+        // checkpoint 存当时完整 state（messages + 全部标量字段）。
+        // 命中则直接用作 recovered，跳过全量 traces 回放。
+        let mut recovered: serde_json::Value = serde_json::json!({});
+        let mut ckpt_hit = false;
+        if !effective_pipeline_id.is_empty() {
+            if let Ok(Some((_step_no, ckpt_state))) =
+                store.load_latest_checkpoint(effective_pipeline_id, &tenant_id).await
+            {
+                recovered = ckpt_state;
+                ckpt_hit = true;
+                debug!(
+                    pipeline_id = %effective_pipeline_id,
+                    "冷启动从 checkpoint 恢复（跳过 traces 全量回放）"
+                );
+            }
+        }
+        // 冷路径 ②：无 checkpoint → 从持久化的 step 级轨迹按序 merge 重建完整 state。
+        // 轨迹颗粒度 = 配置 step（prepare/core/post），patch_data 含该 step 期间所有
+        // state 变更（messages 现为增量 _ops，由 merge_patch/apply_messages_ops 还原）。
+        if !ckpt_hit {
+            match store.get_step_traces_by_thread(thread_id, &tenant_id).await {
+                Ok(step_traces) => {
+                    for entry in &step_traces {
+                        merge_patch(&mut recovered, &entry.patch_data);
+                    }
+                    if !step_traces.is_empty() && !recovered.as_object().map_or(true, |o| o.contains_key("messages")) {
+                        debug!(
+                            pipeline_id = %effective_pipeline_id,
+                            traces = step_traces.len(),
+                            "step 轨迹回放完成但无 messages 字段（可能首轮）"
+                        );
+                    }
                 }
+                Err(e) => {
+                    // 持久化恢复失败：bug 信号（内存丢 + DB 也读不到），显式 error 暴露。
+                    error!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "get_step_traces_by_thread 回放失败"
+                    );
+                }
+            }
+        }
+        // 冷路径 ③：从 pipeline_state 表补充累计标量字段（track.total_tokens 等）。
+        // checkpoint/traces 回放已还原 messages，但累计字段以 pipeline_state 为准
+        // （它每 step upsert 最新值）。重建后插件能在正确基线上自然累加，不归零。
+        if !effective_pipeline_id.is_empty() {
+            if let Ok(state_fields) = store.load_pipeline_state(effective_pipeline_id, &tenant_id).await {
+                if let Some(rec_obj) = recovered.as_object_mut() {
+                    for (k, v) in &state_fields {
+                        rec_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        // 把回放出的非 messages 字段并入 initial_state；messages 提取为 history
+        if let Some(rec_obj) = recovered.as_object_mut() {
+            if let Some(msgs) = rec_obj.remove("messages").and_then(|v| v.as_array().cloned()) {
+                history_prefix = msgs;
                 history_loaded = !history_prefix.is_empty();
             }
-            Err(e) => {
-                // 持久化恢复失败：这是 bug 信号（内存丢 + DB 也读不到），
-                // 显式 error 暴露，不静默降级为空历史。
-                error!(
-                    pipeline_id = %effective_pipeline_id,
-                    error = %e,
-                    "get_messages_by_pipeline 恢复历史失败"
-                );
+            // 其余字段（system_message/dynamic_vars/memory/knowledge/累计字段 等）注入 state
+            if let Some(init_obj) = initial_state.as_object_mut() {
+                for (k, v) in rec_obj.iter() {
+                    init_obj.insert(k.clone(), v.clone());
+                }
             }
         }
     }
@@ -590,6 +613,14 @@ async fn process_via_engine_inner(
         store,
         run_id.clone(),
         branch_id,
+    )
+    // 分层持久化：从所有插件 manifest 的 persistent_fields 声明收集并集。
+    // 这些是需跨轮持久化的累计标量字段（如 track.total_tokens）。
+    // messages 是系统字段（引擎固定投影），不依赖此集合。
+    .with_persistent_fields(
+        state.manifests
+            .iter()
+            .flat_map(|m| m.persistent_fields.iter().cloned()),
     );
 
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
@@ -630,6 +661,92 @@ async fn process_via_engine_inner(
 }
 
 /// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。
+/// RFC 7396 JSON Merge Patch：把 patch 按序合并进 target。
+/// 用于冷启动时按 step 级轨迹逐条 merge 回放，重建完整 state。
+/// - patch 中值为对象：递归 merge（target 同 key 也为对象时）
+/// - patch 中值为 null：从 target 删除该 key
+/// - 否则：target[key] = patch[key]（整体替换）
+fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    if let serde_json::Value::Object(patch_map) = patch {
+        if !target.is_object() {
+            *target = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let target_obj = target.as_object_mut().expect("ensured object above");
+        for (k, v) in patch_map {
+            if v.is_null() {
+                target_obj.remove(k);
+            } else if k == "messages" {
+                // 分层持久化：messages 增量化。新格式 { "_ops": [...] } 按序应用 ops；
+                // 旧格式（数组）整体覆盖（兼容历史 patch）。检测 _ops 区分新旧格式。
+                if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
+                    // 确保存在 messages 数组
+                    let existing = target_obj
+                        .entry("messages".to_string())
+                        .or_insert_with(|| serde_json::Value::Array(vec![]));
+                    if let Some(arr) = existing.as_array_mut() {
+                        apply_messages_ops(arr, ops);
+                    }
+                } else if let Some(existing) = target_obj.get_mut(k) {
+                    *existing = v.clone();
+                } else {
+                    target_obj.insert(k.clone(), v.clone());
+                }
+            } else if let Some(existing) = target_obj.get_mut(k) {
+                if existing.is_object() && v.is_object() {
+                    merge_patch(existing, v);
+                } else {
+                    *existing = v.clone();
+                }
+            } else {
+                target_obj.insert(k.clone(), v.clone());
+            }
+        }
+    } else {
+        *target = patch.clone();
+    }
+}
+
+/// 对 messages 数组应用增量 ops（回放新格式 patch 用）。
+///
+/// ops 元素（与 pipeline_loop.messages_diff_ops 对齐）：
+/// - `{"op":"append","msg":{...}}`：尾部追加
+/// - `{"op":"delete_from","idx":N}`：删除 index ≥ N（压缩）
+/// - `{"op":"replace_at","idx":N,"msg":{...}}`：替换 index N
+fn apply_messages_ops(arr: &mut Vec<serde_json::Value>, ops: &[serde_json::Value]) {
+    for op in ops {
+        let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "append" => {
+                if let Some(msg) = op.get("msg") {
+                    arr.push(msg.clone());
+                }
+            }
+            "delete_from" => {
+                if let Some(idx) = op.get("idx").and_then(|v| v.as_u64()) {
+                    let idx = idx as usize;
+                    if idx < arr.len() {
+                        arr.truncate(idx);
+                    }
+                }
+            }
+            "replace_at" => {
+                if let (Some(idx), Some(msg)) = (
+                    op.get("idx").and_then(|v| v.as_u64()),
+                    op.get("msg"),
+                ) {
+                    let idx = idx as usize;
+                    if idx < arr.len() {
+                        arr[idx] = msg.clone();
+                    } else if idx == arr.len() {
+                        arr.push(msg.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 ///
 /// 按 state["tool_ids"] 过滤 capability_registry 的工具，转成 OpenAI function-calling
 /// 格式（`{type:"function", function:{name, description, parameters}}`）。tool_ids
@@ -861,8 +978,21 @@ async fn chat_handler(
     // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
     // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
     let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
+    // 分层持久化：REST chat 路径需用会话的真实 active_pipeline_id，否则消息会落到
+    // thread_id 维度（effective 回退），与前端按 active_pipeline_id 查询不匹配 → 前端拿不到消息。
+    // WS 路径（ws_session.rs）前端已带真实 pipeline_id，此处为 REST fallback 补齐。
+    let pipeline_id = if let Some(store) = state.store.as_ref() {
+        let sid = req.session_id.clone();
+        let store_clone = store.clone();
+        match agentos_tenant::scope(tenant_ctx.clone(), async move {
+            store_clone.get_session(&sid).await
+        }).await {
+            Ok(Some(session)) => session.active_pipeline_id.unwrap_or_default(),
+            _ => String::new(),
+        }
+    } else { String::new() };
     let content =
-        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", &req.session_id, ""))
+        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, &pipeline_id, &req.session_id, ""))
             .await;
 
     let response = WsResponse {
@@ -1370,6 +1500,7 @@ mod tests {
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         });
         state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
         state.plugin_ids = Arc::new(std::collections::HashSet::from([
@@ -1461,8 +1592,14 @@ mod tests {
         let thread = "thread_cold";
 
         // 直接写库（模拟上一轮已持久化，registry 无该管道——冷启动）
+        // 冷启动恢复源是 step 级轨迹（含 messages 字段），故同时写 messages 表（供断言）
+        // 与一条 step 级 trace（patch_data 含 messages，冷路径据此回放）。
+        use agentos_core::types::{PatchType, TraceEntry};
         let store_ref = store.clone();
         agentos_tenant::scope(tenant.clone(), async {
+            store_ref.create_run("run_cold", "", "tenant_cold").await.unwrap();
+            // 管道→会话映射，使 get_step_traces_by_thread 能定位 pipe
+            store_ref.link_pipeline_session(pipe, thread, "tenant_cold").await.unwrap();
             store_ref
                 .append_message("u_cold", "run_cold", "main", 1, "user", None, Some("冷启动第一轮"), Some(pipe))
                 .await
@@ -1471,6 +1608,22 @@ mod tests {
                 .append_message("a_cold", "run_cold", "main", 2, "assistant", None, Some("冷启动回复"), Some(pipe))
                 .await
                 .unwrap();
+            // step 级轨迹：模拟上一轮 prepare/core 跑完后把 messages 写进了 state
+            store_ref.append_trace(TraceEntry {
+                trace_id: "t_cold".into(),
+                run_id: "run_cold".into(),
+                branch_id: "main".into(),
+                seq_in_branch: 0,
+                plugin_id: "core".into(),
+                patch_type: PatchType::StateUpdate,
+                patch_data: serde_json::json!({
+                    "messages": [
+                        {"role": "user", "content": "冷启动第一轮"},
+                        {"role": "assistant", "content": "冷启动回复"}
+                    ]
+                }),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }).await.unwrap();
         })
         .await;
 
@@ -1680,6 +1833,7 @@ mod tests {
                 routes: vec![],
                 loop_config: None,
             }],
+            checkpoint: Default::default(),
         });
         state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
         state.plugin_ids = Arc::new(std::collections::HashSet::from(["mock_llm_core".to_string()]));

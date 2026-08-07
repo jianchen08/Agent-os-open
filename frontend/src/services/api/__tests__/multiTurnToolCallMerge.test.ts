@@ -109,11 +109,11 @@ describe('mergeConsecutiveAssistantMessages — 多轮工具调用（回归）',
     // 最终 assistant 是完整回答
     expect(assistants[2].content).toContain('北京明天多云')
 
-    // ★ 核心回归断言 4：tool 消息内容完整保留
-    const tools = merged.filter((m) => m.role === 'tool')
-    expect(tools).toHaveLength(2)
-    expect(tools[0].toolResult).toBe('北京晴，25度')
-    expect(tools[1].toolResult).toBe('北京明天多云，22度')
+    // ★ 核心回归断言 4：tool 结果已注入 assistant 的 tool_call part（ActivityCard 数据源）
+    const a1ToolCall = assistants[0].parts?.find((p: any) => p.type === 'tool_call')
+    expect(a1ToolCall?.result).toBe('北京晴，25度')
+    const a2ToolCall = assistants[1].parts?.find((p: any) => p.type === 'tool_call')
+    expect(a2ToolCall?.result).toBe('北京明天多云，22度')
   })
 
   it('单轮工具调用（assistant + tool + assistant）也完整保留，不合并', () => {
@@ -143,6 +143,9 @@ describe('mergeConsecutiveAssistantMessages — 多轮工具调用（回归）',
     // tool 消息独立保留
     expect(merged[2].role).toBe('tool')
     expect(merged[2].toolResult).toBe('结果1')
+    // tool 结果也已注入 a1 的 tool_call part（ActivityCard 数据源）
+    const a1ToolCall = (merged[1] as Message).parts?.find((p: any) => p.type === 'tool_call')
+    expect(a1ToolCall?.result).toBe('结果1')
     // assistant 不合并：a1（声明）和 a2（回答）各自独立
     expect(merged[1].id).toBe('a1')
     expect(merged[3].id).toBe('a2')

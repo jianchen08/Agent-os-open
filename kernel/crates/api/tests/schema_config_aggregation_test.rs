@@ -36,6 +36,7 @@ fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
         contributes: None,
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     }
 }
 

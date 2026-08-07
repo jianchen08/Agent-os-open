@@ -137,6 +137,7 @@ fn make_test_manifest(
         contributes: None,
         enabled: None,
         activation: None,
+        persistent_fields: vec![],
     }
 }
 
@@ -268,6 +269,28 @@ impl StorageBackend for MockStorageBackend {
     }
     async fn delete_session(&self, _thread_id: &str) -> Result<(), StorageError> {
         Ok(())
+    }
+    async fn link_pipeline_session(
+        &self,
+        _pipeline_id: &str,
+        _thread_id: &str,
+        _tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn list_pipeline_ids_by_thread(
+        &self,
+        _thread_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(vec![])
+    }
+    async fn get_step_traces_by_thread(
+        &self,
+        _thread_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        Ok(vec![])
     }
 
     // ── 域3/4/5 stub（M1）──────────────────────────────────────────
@@ -476,6 +499,8 @@ fn test_message_record_serialization() {
         content_preview: Some("Hello".to_string()),
         created_at: "2026-07-14T00:00:00Z".to_string(),
         pipeline_id: None,
+        tool_calls_json: None,
+        tool_call_id: None,
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("msg_001"));
