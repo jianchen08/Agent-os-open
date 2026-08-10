@@ -286,20 +286,38 @@ class ProcessManager:
                 cwd=working_dir,
                 env=merged_env,
             )
-        else:
-            # CMD/POSIX 路径：使用 safe_cmd_encode 确保中文路径在 CMD 中正确编码
+        # CMD/POSIX 路径
+        elif is_windows:
+            # Windows CMD：使用 safe_cmd_encode 确保中文路径正确编码
             safe_command = EncodingHandler.safe_cmd_encode(command)
-            if is_windows:
-                full_command = f'cmd /c "{safe_command}"'
-            else:
-                # Linux/POSIX：create_subprocess_shell 默认走 /bin/sh。
-                # 复合命令同样需要 pipefail 让管道失败退出码正确冒泡
-                # （与上面 WSL/MSYS 分支语义对齐，否则 CI/Linux 上 false | true 误报成功）。
-                full_command = (
-                    f"set -o pipefail 2>/dev/null; {command}" if self._is_compound_command(command) else command
-                )
+            full_command = f'cmd /c "{safe_command}"'
             process = await asyncio.create_subprocess_shell(
                 full_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+                env=merged_env,
+            )
+        # Linux/POSIX：复合命令用 bash -c 执行（bash 原生支持 pipefail）。
+        # 不能走 /bin/sh（Ubuntu 即 dash）—— dash 不支持 `set -o pipefail`，
+        # 即使 2>/dev/null 屏蔽报错，set 本身退出码 2 仍会让简单命令异常失败、
+        # 输出丢失。bash 在所有 Linux 发行版都可用，与 WSL/MSYS 分支语义对齐。
+        elif self._is_compound_command(command) and shutil.which("bash"):
+            effective_cmd = f"set -o pipefail; {command}"
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                effective_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+                env=merged_env,
+            )
+        else:
+            process = await asyncio.create_subprocess_shell(
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
