@@ -132,7 +132,7 @@ def _resolve_source_repo(ws_path: str, mode: str, project_root_fallback: str = "
         try:
             content = git_entry.read_text(encoding="utf-8").strip()
             if content.startswith("gitdir:"):
-                gitdir_path = content[len("gitdir:"):].strip()
+                gitdir_path = content[len("gitdir:") :].strip()
                 # gitdir 形如 <源仓库>/.git/worktrees/<name>
                 # 统一分隔符后截到 /.git/ 之前
                 normalized = gitdir_path.replace("\\", "/")
@@ -745,9 +745,9 @@ class TaskSubmitTool(BuiltinTool):
                             _anc_scope = (_anc.metadata or {}).get("task_scope", "")
                             if _anc_scope == "container":
                                 _anc_ws_meta = (_anc.metadata or {}).get("ws_meta") or {}
-                                _anc_ws_path = _anc_ws_meta.get("path", "") or (
-                                    _anc.metadata or {}
-                                ).get("container_workspace", "")
+                                _anc_ws_path = _anc_ws_meta.get("path", "") or (_anc.metadata or {}).get(
+                                    "container_workspace", ""
+                                )
                                 _current_source_repo = _resolve_source_repo(
                                     _anc_ws_path,
                                     _anc_ws_meta.get("mode", ""),
@@ -760,8 +760,7 @@ class TaskSubmitTool(BuiltinTool):
                             _anc = task_service.get_task(_anc_parent) if _anc_parent else None
                     except Exception as _anc_err:
                         logger.warning(
-                            "[TaskSubmit] 沿 parent_task_id 解析容器源仓库失败，"
-                            "退化到进程 cwd: parent=%s | err=%s",
+                            "[TaskSubmit] 沿 parent_task_id 解析容器源仓库失败，退化到进程 cwd: parent=%s | err=%s",
                             parent_task_id,
                             _anc_err,
                         )
@@ -774,9 +773,7 @@ class TaskSubmitTool(BuiltinTool):
                     # 同容器 = 源仓库等于或位于当前容器目录内（含子路径，
                     # 兼容容器内子目录作为 mock 源仓库的合法场景）。
                     try:
-                        Path(_inherited_source_repo).resolve().relative_to(
-                            Path(_current_source_repo).resolve()
-                        )
+                        Path(_inherited_source_repo).resolve().relative_to(Path(_current_source_repo).resolve())
                     except (ValueError, OSError):
                         return create_failure_result(
                             error=(

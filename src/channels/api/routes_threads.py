@@ -1064,7 +1064,7 @@ def update_thread_agent(
     # 同会话下的子任务管道（各自有独立的 target agent，见 task_executor 注册）
     # pipeline_id ≠ 主管道 id，匹配不上，绝不波及——否则子任务被 stop_generation
     # 停止后 idle 重启会解析到主 agent 配置（表现为“停止后再发消息 agent 变了”）。
-    _main_pid = (thread.get("active_pipeline_id") or "")
+    _main_pid = thread.get("active_pipeline_id") or ""
     if agent_id and _main_pid:
         from pipeline.registry import get_engine_registry  # noqa: PLC0415
 

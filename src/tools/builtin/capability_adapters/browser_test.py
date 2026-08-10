@@ -34,10 +34,7 @@ class BrowserTestTool(CapabilityAdapterBase):
     def get_tool_definition() -> Tool:
         return Tool(
             name="browser_test",
-            description=(
-                "在浏览器中渲染页面、执行交互操作、收集验证数据。"
-                "支持截图、控制台日志、性能指标等验证类型。"
-            ),
+            description=("在浏览器中渲染页面、执行交互操作、收集验证数据。支持截图、控制台日志、性能指标等验证类型。"),
             input_schema={
                 "type": "object",
                 "properties": {

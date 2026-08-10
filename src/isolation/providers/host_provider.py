@@ -182,9 +182,7 @@ class HostProvider(IsolationProvider):
                     from tools.builtin.bash.process_manager import _get_local_backend
                     from tools.builtin.bash.types import WorkUnit
 
-                    await _get_local_backend().kill(
-                        WorkUnit(pid=process.pid, command=command), force=True
-                    )
+                    await _get_local_backend().kill(WorkUnit(pid=process.pid, command=command), force=True)
                     await process.wait()
                 except Exception:
                     pass

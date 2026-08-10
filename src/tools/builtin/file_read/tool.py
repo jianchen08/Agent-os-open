@@ -132,8 +132,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "起始行号（从1开始），仅读取指定行范围。不指定则从第1行开始。"
-                        "仅文件读取有效。",
+                        "description": "起始行号（从1开始），仅读取指定行范围。不指定则从第1行开始。仅文件读取有效。",
                     },
                     "end_line": {
                         "type": "integer",
@@ -142,8 +141,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "tail": {
                         "type": "integer",
-                        "description": "仅读取文件最后 N 行（仅文本文件有效）。不指定则返回完整内容。"
-                        "仅文件读取有效。",
+                        "description": "仅读取文件最后 N 行（仅文本文件有效）。不指定则返回完整内容。仅文件读取有效。",
                     },
                     "include_hidden": {
                         "type": "boolean",

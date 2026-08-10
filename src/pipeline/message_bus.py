@@ -38,8 +38,10 @@ def _track_engine_task(task: asyncio.Task[Any], pipeline_id: str) -> None:
     task.add_done_callback(_on_done)
     logger.info(
         "[MessageBus] engine_task 已登记强引用保护 | pipeline=%s task_id=%s",
-        pipeline_id[:12], id(task),
+        pipeline_id[:12],
+        id(task),
     )
+
 
 if TYPE_CHECKING:
     from agents.types import AgentConfig

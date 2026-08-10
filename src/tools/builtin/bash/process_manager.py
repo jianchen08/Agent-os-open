@@ -60,9 +60,7 @@ class ProcessManager:
         # 比系统水位更灵敏——31GB 宿主上单进程吃 2GB 只占 6% 触发不了系统水位，
         # 但该进程自身已远超合理上限，应杀。默认 2GB(覆盖大部分 build 场景)。
         # 可经环境变量 AO_UNIT_MEMORY_LIMIT_MB 覆盖。
-        self._unit_memory_limit: int = int(
-            os.environ.get("AO_UNIT_MEMORY_LIMIT_MB", "2048")
-        ) * 1024 * 1024
+        self._unit_memory_limit: int = int(os.environ.get("AO_UNIT_MEMORY_LIMIT_MB", "2048")) * 1024 * 1024
         self._watchdog_task: asyncio.Task | None = None
         # 默认内存后端：本地宿主。容器隔离路径会注入 ContainerProcessBackend。
         # 看门狗策略层只依赖 backend.sample_memory()，不关心进程跑在哪。
@@ -499,10 +497,7 @@ class ProcessManager:
         info = self.active_processes.get(pid)
         if info and info.status in ("completed", "error", "terminated"):
             self.active_processes.pop(pid, None)
-            logger.debug(
-                f"进程 {pid} 已结束（status={info.status}），清理内存记录"
-                f"（日志保留：{info.log_file.name}）"
-            )
+            logger.debug(f"进程 {pid} 已结束（status={info.status}），清理内存记录（日志保留：{info.log_file.name}）")
 
     async def send_input(self, pid: int, input_text: str) -> tuple[bool, str | None]:  # noqa: PLR0911
         """向进程发送输入。"""
@@ -726,7 +721,7 @@ class ProcessManager:
         content_lines: list[str] = []
         for line in all_lines:
             if line.startswith("# Command:"):
-                command = line[len("# Command:"):].strip()
+                command = line[len("# Command:") :].strip()
             elif not line.startswith("#"):
                 content_lines.append(line)
 
@@ -836,11 +831,7 @@ class ProcessManager:
         # 只杀超阈值且最久没访问的（活跃的超内存进程先观察，优先杀被遗忘的）。
         await self._cleanup_by_unit_memory(live, now)
         # 杀完后重新快照
-        live = [
-            (pid, info)
-            for pid, info in list(self.active_processes.items())
-            if info.status == "running"
-        ]
+        live = [(pid, info) for pid, info in list(self.active_processes.items()) if info.status == "running"]
 
         # ── 判据1：内存高水位 → 按 idle 排序杀最闲的，回落即停 ──
         if self._memory_backend is not None:
@@ -853,11 +844,7 @@ class ProcessManager:
             if mem_ratio is not None and mem_ratio >= self._cleanup_high_watermark:
                 await self._cleanup_by_idle(live, now)
                 # 杀完后重新快照（dict 可能已变），下面的孤儿兜底用新快照
-                live = [
-                    (pid, info)
-                    for pid, info in list(self.active_processes.items())
-                    if info.status == "running"
-                ]
+                live = [(pid, info) for pid, info in list(self.active_processes.items()) if info.status == "running"]
 
         # ── 判据2：孤儿兜底（idle 超 30 分钟无条件杀）──
         for pid, info in live:
@@ -865,7 +852,10 @@ class ProcessManager:
             if idle_secs >= self._orphan_timeout:
                 logger.error(
                     "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | 无访问 %.0fs（阈值 %.0fs）",
-                    pid, info.command, idle_secs, self._orphan_timeout,
+                    pid,
+                    info.command,
+                    idle_secs,
+                    self._orphan_timeout,
                 )
                 await self._watchdog_kill(pid, info, "orphan")
 
@@ -902,7 +892,9 @@ class ProcessManager:
         for pid, info, rss in over_limit:
             logger.warning(
                 "[Watchdog] 单进程内存失控清理 | pid=%s cmd=%.60s | RSS=%.0fMB（阈值 %.0fMB）| idle=%.0fs",
-                pid, info.command, rss / 1024 / 1024,
+                pid,
+                info.command,
+                rss / 1024 / 1024,
                 self._unit_memory_limit / 1024 / 1024,
                 now - info.last_access_time,
             )
@@ -933,7 +925,9 @@ class ProcessManager:
 
             logger.warning(
                 "[Watchdog] 内存高水位清理 | 杀最闲进程 pid=%s cmd=%.60s | idle=%.0fs",
-                pid, info.command, now - info.last_access_time,
+                pid,
+                info.command,
+                now - info.last_access_time,
             )
             await self._watchdog_kill(pid, info, "memory_pressure")
 

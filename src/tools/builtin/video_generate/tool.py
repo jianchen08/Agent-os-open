@@ -85,9 +85,7 @@ class VideoGenerateTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="video_generate",
-            description=(
-                "视频生成工具。根据文本描述生成视频内容，当前为基线版本。"
-            ),
+            description=("视频生成工具。根据文本描述生成视频内容，当前为基线版本。"),
             when_to_use=[
                 "需要根据文本描述生成视频内容",
                 "需要为演示或展示制作短视频片段",

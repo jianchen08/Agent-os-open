@@ -557,7 +557,9 @@ class PipelineEngine:
                     with contextlib.suppress(Exception):
                         await self._streaming.emit_error(RuntimeError(f"Pipeline cancelled ({_cancel_source})"))
 
-                await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine cancelled (source={_cancel_source})")
+                await self._mark_task_failed_on_engine_exit(
+                    state, f"Pipeline engine cancelled (source={_cancel_source})"
+                )
 
         except Exception as exc:
             _iter = state.get(StateKeys.ITERATION, 0)

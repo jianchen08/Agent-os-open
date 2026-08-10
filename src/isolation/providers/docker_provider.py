@@ -388,13 +388,12 @@ class DockerProvider(IsolationProvider):
             return True
 
         try:
-            rc, _, stderr = await self._run_cmd(
-                ["docker", "rm", "-f", container_id], timeout=15
-            )
+            rc, _, stderr = await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
         except Exception as e:
             logger.warning(
                 "[DockerProvider] 销毁容器异常（保留记录） | id=%s | error=%s",
-                container_id[:12], e,
+                container_id[:12],
+                e,
             )
             return False
 
@@ -404,7 +403,9 @@ class DockerProvider(IsolationProvider):
             err_tail = stderr.decode("utf-8", errors="replace")[-200:]
             logger.warning(
                 "[DockerProvider] 销毁容器失败（docker 里仍在，保留记录） | id=%s | rc=%s | err=%s",
-                container_id[:12], rc, err_tail,
+                container_id[:12],
+                rc,
+                err_tail,
             )
             return False
 
@@ -850,4 +851,3 @@ class DockerProvider(IsolationProvider):
             ],
             timeout=10,
         )
-

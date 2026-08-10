@@ -1077,14 +1077,8 @@ class IsolationManager:
             # 仅 command 操作纳入：file_operation 走不同 exec 组装路径，暂不覆盖。
             # 标记识别（runc 特征串）与 provider 实例无关，直接用静态方法判定，
             # 故不绑 isinstance——只对 CONTAINER 层（env.level）的 docker 容器路径有意义。
-            if (
-                not result.success
-                and operation.get("type") == "command"
-                and self._is_namespace_desync_result(result)
-            ):
-                result = await self._rebuild_and_retry_exec(
-                    env, rebuild_kwargs, operation, original_error=result.error
-                )
+            if not result.success and operation.get("type") == "command" and self._is_namespace_desync_result(result):
+                result = await self._rebuild_and_retry_exec(env, rebuild_kwargs, operation, original_error=result.error)
 
             # post-exec 自愈：9p/drvfs 挂载通道损坏（EIO）。
             # WSL docker 模式下宿主 /mnt/<盘> 的 9p 通道会静默损坏（WSL2 已知缺陷，
@@ -1095,14 +1089,8 @@ class IsolationManager:
             # （与 setns 自愈覆盖范围对齐，file_operation 走不同 exec 组装路径）。
             # 放在 setns 自愈之后：两者 marker 不重叠，不会互相吞掉；若 setns 自愈
             # 已成功（result.success=True），本分支自然跳过。
-            if (
-                not result.success
-                and operation.get("type") == "command"
-                and self._is_io_error_result(result)
-            ):
-                result = await self._remount_and_retry_exec(
-                    env, rebuild_kwargs, operation, original_error=result.error
-                )
+            if not result.success and operation.get("type") == "command" and self._is_io_error_result(result):
+                result = await self._remount_and_retry_exec(env, rebuild_kwargs, operation, original_error=result.error)
 
             # 更新最后使用时间
             env.last_used_at = datetime.now(UTC).isoformat()
@@ -1175,7 +1163,8 @@ class IsolationManager:
         except Exception as e:
             logger.warning(
                 "[IsolationManager] setns 自愈：销毁旧环境异常 | env=%s | error=%s",
-                env.env_id, e,
+                env.env_id,
+                e,
             )
             destroyed_ok = False
 
@@ -1202,7 +1191,8 @@ class IsolationManager:
             new_env = await self.get_or_create_environment(**rebuild_kwargs)
         except Exception as e:
             logger.warning(
-                "[IsolationManager] setns 自愈：重建环境失败，返回原失败结果 | error=%s", e,
+                "[IsolationManager] setns 自愈：重建环境失败，返回原失败结果 | error=%s",
+                e,
             )
             return ExecutionResult(
                 success=False,
@@ -1219,14 +1209,17 @@ class IsolationManager:
                 new_env.level,
             )
             return ExecutionResult(
-                success=False, output=None, error=original_error,
+                success=False,
+                output=None,
+                error=original_error,
             )
 
         try:
             retry_result = await provider.execute_in_environment(new_env.env_id, operation)
         except Exception as e:
             logger.warning(
-                "[IsolationManager] setns 自愈：重试执行抛异常，返回原失败结果 | error=%s", e,
+                "[IsolationManager] setns 自愈：重试执行抛异常，返回原失败结果 | error=%s",
+                e,
             )
             return ExecutionResult(
                 success=False,
@@ -1238,7 +1231,8 @@ class IsolationManager:
         if retry_result.success:
             logger.info(
                 "[IsolationManager] setns 自愈重建成功 | old=%s | new=%s",
-                env.env_id, new_env.env_id,
+                env.env_id,
+                new_env.env_id,
             )
             retry_result.metadata["namespace_desync_recovered"] = True
         else:
@@ -1268,7 +1262,8 @@ class IsolationManager:
 
         if not workspace:
             logger.warning(
-                "[IsolationManager] EIO 自愈：workspace 为空，无法定位挂载盘 | env=%s", env_id,
+                "[IsolationManager] EIO 自愈：workspace 为空，无法定位挂载盘 | env=%s",
+                env_id,
             )
             return False
 
@@ -1278,7 +1273,8 @@ class IsolationManager:
         if len(parts) < 2 or parts[0] != "/mnt" or len(parts[1]) != 1:
             logger.warning(
                 "[IsolationManager] EIO 自愈：workspace 非 /mnt/<x>/... 形态，跳过宿主修复 | env=%s | ws=%s",
-                env_id, workspace,
+                env_id,
+                workspace,
             )
             return False
         drive_letter = parts[1].upper()
@@ -1306,8 +1302,7 @@ class IsolationManager:
             verify_proc = await loop.run_in_executor(
                 None,
                 lambda: _sp.run(  # noqa: PLW1510
-                    ["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-c",
-                     f"timeout 5 ls -ld {mount_point}"],
+                    ["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-c", f"timeout 5 ls -ld {mount_point}"],
                     capture_output=True,
                     timeout=12,
                 ),
@@ -1316,18 +1311,23 @@ class IsolationManager:
             if verify_proc.returncode == 0 and "input/output error" not in verify_err.lower():
                 logger.info(
                     "[IsolationManager] EIO 自愈：宿主挂载已修复 | env=%s | mount=%s | rc=%s",
-                    env_id, mount_point, proc.returncode,
+                    env_id,
+                    mount_point,
+                    proc.returncode,
                 )
                 return True
             logger.warning(
                 "[IsolationManager] EIO 自愈：宿主重挂后仍不可访问 | env=%s | mount=%s | verify_err=%s",
-                env_id, mount_point, verify_err.strip()[:200],
+                env_id,
+                mount_point,
+                verify_err.strip()[:200],
             )
             return False
         except Exception as e:
             logger.warning(
                 "[IsolationManager] EIO 自愈：修宿主挂载异常（回退到只重建容器） | env=%s | error=%s",
-                env_id, e,
+                env_id,
+                e,
             )
             return False
 
@@ -1377,7 +1377,10 @@ class IsolationManager:
 
         # 2. 复用 setns 自愈的 destroy+recreate+retry 路径
         result = await self._rebuild_and_retry_exec(
-            env, rebuild_kwargs, operation, original_error=original_error,
+            env,
+            rebuild_kwargs,
+            operation,
+            original_error=original_error,
         )
 
         # 3. 标记 EIO 自愈元数据（仅在成功时，便于上层观测自愈命中率）

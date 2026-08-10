@@ -85,9 +85,7 @@ class MusicGenerateTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="music_generate",
-            description=(
-                "音乐生成工具。根据文本描述生成音乐内容，当前为基线版本。"
-            ),
+            description=("音乐生成工具。根据文本描述生成音乐内容，当前为基线版本。"),
             when_to_use=[
                 "需要根据文本描述生成音乐片段",
                 "需要为视频或演示生成背景音乐",

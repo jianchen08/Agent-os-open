@@ -688,7 +688,9 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
 
                 if exit_code != 0:
                     error_msg, fail_meta = BashTool._build_failure_message(
-                        exit_code, output, summary,
+                        exit_code,
+                        output,
+                        summary,
                     )
                     return create_failure_result(
                         error=error_msg,
@@ -759,7 +761,9 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             if exit_code is not None and exit_code != 0:
                 output_fail = self.process_manager.get_output(pid)
                 error_msg, fail_meta = BashTool._build_failure_message(
-                    exit_code, output_fail, summary or {},
+                    exit_code,
+                    output_fail,
+                    summary or {},
                 )
                 return create_failure_result(
                     error=error_msg,
@@ -797,9 +801,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     exit_code=None,
                     status="running",
                 )
-                running_data["elapsed"] = round(
-                    time.time() - proc_info.start_time, 1
-                )
+                running_data["elapsed"] = round(time.time() - proc_info.start_time, 1)
                 return create_success_result(
                     data=running_data,
                     metadata={"action": "continue"},
@@ -818,7 +820,9 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         if exit_code is not None and exit_code != 0:
             output_fail = self.process_manager.get_output(pid)
             error_msg, fail_meta = BashTool._build_failure_message(
-                exit_code, output_fail, summary or {},
+                exit_code,
+                output_fail,
+                summary or {},
             )
             return create_failure_result(
                 error=error_msg,

@@ -844,9 +844,7 @@ class TaskTool(BuiltinTool):
                     # 保留任务原始层级（task.agent_level 是权威源），
                     # 避免 task_executor 误用 L3 fallback 导致超时文案/分级错误
                     "agent_level": (
-                        task.agent_level.value
-                        if hasattr(task.agent_level, "value")
-                        else str(task.agent_level)
+                        task.agent_level.value if hasattr(task.agent_level, "value") else str(task.agent_level)
                     ),
                     "_prepared_context": {
                         "workspace": _workspace,
@@ -981,9 +979,7 @@ class TaskTool(BuiltinTool):
                     # 保留任务原始层级（task.agent_level 是权威源），
                     # 避免 task_executor 误用 L3 fallback 导致超时文案/分级错误
                     "agent_level": (
-                        task.agent_level.value
-                        if hasattr(task.agent_level, "value")
-                        else str(task.agent_level)
+                        task.agent_level.value if hasattr(task.agent_level, "value") else str(task.agent_level)
                     ),
                     "_prepared_context": {
                         "workspace": _workspace,

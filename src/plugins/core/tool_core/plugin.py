@@ -220,7 +220,8 @@ class ToolCore(ICorePlugin):
         if not workspace:
             logger.warning(
                 "[tool_core] %s 容器路径 workspace 缺失，降级到同步容器执行 | task=%s",
-                tool_name, task_id,
+                tool_name,
+                task_id,
             )
             return None
 
@@ -239,13 +240,16 @@ class ToolCore(ICorePlugin):
                 return env.env_id
             logger.warning(
                 "[tool_core] %s get_or_create_environment 返回空 env_id，降级 | task=%s",
-                tool_name, task_id,
+                tool_name,
+                task_id,
             )
             return None
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[tool_core] %s 解析 container_id 失败，降级到同步容器执行 | task=%s | err=%s",
-                tool_name, task_id, e,
+                tool_name,
+                task_id,
+                e,
             )
             return None
 

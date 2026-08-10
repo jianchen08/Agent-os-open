@@ -526,8 +526,7 @@ class TrackPlugin(IOutputPlugin):
         if miss_ratio > self._CACHE_MISS_RATIO_THRESHOLD:
             hit_rate = last_cached / last_input * 100
             logger.warning(
-                "[%s] 缓存命中异常: 本轮未命中=%d, 本轮input=%d, 本轮命中率=%.1f%% "
-                "(未命中占比 %.1f%% > %.0f%%阈值)",
+                "[%s] 缓存命中异常: 本轮未命中=%d, 本轮input=%d, 本轮命中率=%.1f%% (未命中占比 %.1f%% > %.0f%%阈值)",
                 pipeline_id,
                 last_uncached,
                 last_input,

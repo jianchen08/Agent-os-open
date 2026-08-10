@@ -86,9 +86,7 @@ def _install_payload_diag_hook() -> None:
                 # 写入原始 body（litellm 真实发送的结构），供逐字节 diff
                 _diag_dir = _os.path.join(_os.getcwd(), "logs", "payload_diag")
                 _os.makedirs(_diag_dir, exist_ok=True)
-                _diag_file = _os.path.join(
-                    _diag_dir, f"body_{msgs_hash}_{int(_time.time() * 1000)}.json"
-                )
+                _diag_file = _os.path.join(_diag_dir, f"body_{msgs_hash}_{int(_time.time() * 1000)}.json")
                 with open(_diag_file, "w", encoding="utf-8") as fh:
                     fh.write(body_raw)
             except Exception:  # noqa: BLE001
@@ -207,6 +205,7 @@ async def _await_with_escape(
     直接打日志（不依赖事件循环），证明「超时确实该触发但事件循环冻住了」。
     """
     import threading  # noqa: PLC0415
+
     task = asyncio.ensure_future(coro)
     _track_background_task(task)
 
@@ -216,7 +215,8 @@ async def _await_with_escape(
             logger.error(
                 "[_await_with_escape] 独立线程诊断：%.0fs 到点 task 仍未完成 | what=%s "
                 "—— asyncio.wait 的 timeout 可能因事件循环冻结而失效",
-                timeout, what,
+                timeout,
+                what,
             )
 
     diag_timer = threading.Timer(timeout, _diag_check)
@@ -228,7 +228,8 @@ async def _await_with_escape(
     if not done:
         logger.error(
             "[_await_with_escape] 超时！cancel task | what=%s timeout=%.0fs",
-            what, timeout,
+            what,
+            timeout,
         )
         task.cancel()
         raise asyncio.TimeoutError(f"{what} 超时 {timeout:.0f}s")
@@ -699,13 +700,17 @@ class _BaseLiteLLMAdapter:
             _t0 = _time.monotonic()
             logger.info(
                 "[%s] _open_and_first_chunk: 进入，准备调 _do_completion model=%s t0=%.3f",
-                type(self).__name__, model, _t0,
+                type(self).__name__,
+                model,
+                _t0,
             )
             resp = await self._do_completion(**call_kwargs, drop_params=True)
             _t1 = _time.monotonic()
             logger.info(
                 "[%s] _open_and_first_chunk: _do_completion 返回(%.3fs)，准备读首 chunk model=%s",
-                type(self).__name__, _t1 - _t0, model,
+                type(self).__name__,
+                _t1 - _t0,
+                model,
             )
             try:
                 first = await resp.__aiter__().__anext__()
@@ -713,7 +718,10 @@ class _BaseLiteLLMAdapter:
                 _t2 = _time.monotonic()
                 logger.warning(
                     "[%s] _open_and_first_chunk: 首chunk异常(%.3fs后) model=%s exc=%s",
-                    type(self).__name__, _t2 - _t1, model, type(_first_exc).__name__,
+                    type(self).__name__,
+                    _t2 - _t1,
+                    model,
+                    type(_first_exc).__name__,
                 )
                 # 超时/异常/取消：关闭流，触发绑定的 release。aclose 自身的任何
                 # 异常（含 CancelledError）都不应掩盖/替换原始异常，故全量抑制。
@@ -736,7 +744,9 @@ class _BaseLiteLLMAdapter:
             _t3 = _time.monotonic()
             logger.info(
                 "[%s] _open_and_first_chunk: 首chunk到达(%.3fs后) model=%s",
-                type(self).__name__, _t3 - _t1, model,
+                type(self).__name__,
+                _t3 - _t1,
+                model,
             )
             return resp, first
 
@@ -1186,8 +1196,7 @@ class _BaseLiteLLMAdapter:
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "[%s] response.aclose finally 超时 %.0fs（半死 socket 放弃关闭），"
-                        "残留连接交 GC 回收",
+                        "[%s] response.aclose finally 超时 %.0fs（半死 socket 放弃关闭），残留连接交 GC 回收",
                         type(self).__name__,
                         _ACLOSE_TIMEOUT_SECONDS,
                     )
@@ -1570,8 +1579,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "[%s] stream.aclose 超时 %.0fs（半死 socket 放弃优雅关闭），"
-                        "残留连接交由 GC 回收",
+                        "[%s] stream.aclose 超时 %.0fs（半死 socket 放弃优雅关闭），残留连接交由 GC 回收",
                         KeyPoolAdapter.__name__,
                         _ACLOSE_TIMEOUT_SECONDS,
                     )
@@ -1625,8 +1633,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         _dc_t0 = _time.monotonic()
         logger.info(
             "[%s] _direct_call_with_slot: 进入 litellm.acompletion model=%s api_base=%s kw_keys=%s t0=%.3f",
-            type(self).__name__, litellm_model, input_kwargs.get("api_base", "?"),
-            sorted(input_kwargs.keys()), _dc_t0,
+            type(self).__name__,
+            litellm_model,
+            input_kwargs.get("api_base", "?"),
+            sorted(input_kwargs.keys()),
+            _dc_t0,
         )
         # ★ 把首 token 超时"包括在" litellm.acompletion 调用本身（HTTP 层）。
         # 生产故障（2026-08-05 17:05:34 卡死 36 分钟）：litellm 内部存在事件循环
@@ -1733,7 +1744,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         _dc_t1 = _time.monotonic()
         logger.info(
             "[%s] _direct_call_with_slot: litellm.acompletion 返回(%.3fs) model=%s type=%s",
-            type(self).__name__, _dc_t1 - _dc_t0, litellm_model, type(_result).__name__,
+            type(self).__name__,
+            _dc_t1 - _dc_t0,
+            litellm_model,
+            type(_result).__name__,
         )
         if _result is not None:
             return _result

@@ -50,7 +50,10 @@ class TaskExecutorMixin:
         return ""
 
     def _resolve_parent_pipeline_id(
-        self, task_id: str, task_service: Any, task_data: dict[str, Any] | None = None,
+        self,
+        task_id: str,
+        task_service: Any,
+        task_data: dict[str, Any] | None = None,
     ) -> str:
         """解析子任务的父管道 ID。
 
@@ -1016,11 +1019,7 @@ class TaskExecutorMixin:
 
                 if _raw_level is not None:
                     # agent_level 可能是 AgentLevel 枚举（取 .value）或已是字符串
-                    agent_level = (
-                        _raw_level.value
-                        if hasattr(_raw_level, "value")
-                        else str(_raw_level)
-                    )
+                    agent_level = _raw_level.value if hasattr(_raw_level, "value") else str(_raw_level)
 
         if not agent_level:
             agent_level = "L3"
