@@ -287,9 +287,15 @@ class ProcessManager:
                 env=merged_env,
             )
         else:
-            # CMD 路径：使用 safe_cmd_encode 确保中文路径在 CMD 中正确编码
+            # CMD/POSIX 路径：使用 safe_cmd_encode 确保中文路径在 CMD 中正确编码
             safe_command = EncodingHandler.safe_cmd_encode(command)
-            full_command = f'cmd /c "{safe_command}"' if is_windows else command
+            if is_windows:
+                full_command = f'cmd /c "{safe_command}"'
+            else:
+                # Linux/POSIX：create_subprocess_shell 默认走 /bin/sh。
+                # 复合命令同样需要 pipefail 让管道失败退出码正确冒泡
+                # （与上面 WSL/MSYS 分支语义对齐，否则 CI/Linux 上 false | true 误报成功）。
+                full_command = f"set -o pipefail 2>/dev/null; {command}" if self._is_compound_command(command) else command
             process = await asyncio.create_subprocess_shell(
                 full_command,
                 stdout=asyncio.subprocess.PIPE,

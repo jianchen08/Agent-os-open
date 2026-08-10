@@ -690,13 +690,45 @@ class _BaseLiteLLMAdapter:
         # 也不是连接错误，若 wait_for 仅包首个 __anext__() 则因 _do_completion 尚未
         # 返回而无法启动，请求会静默挂死直到 1 小时的 httpx timeout。
 
+        # _open_and_first_chunk 建连成功后登记的流句柄：超时/异常被外层捕获后，
+        # 外层处于未取消上下文，可安全 await aclose 释放连接（内层 except 被
+        # task.cancel() 打断无法 await）。None 表示未建连（connect 阶段就失败）。
+        _opened_resp: Any = None
+
+        async def _close_opened_resp() -> None:
+            """释放 _open_and_first_chunk 登记的流连接（外层未取消上下文调用）。
+
+            半死 SSL socket 会让 aclose 永久阻塞，故用 _await_with_escape 限时：
+            正常毫秒级完成触发绑定的 release；半死到点放弃，残留协程后台回收。
+            """
+            nonlocal _opened_resp
+            resp = _opened_resp
+            _opened_resp = None
+            aclose = getattr(resp, "aclose", None)
+            if aclose is None:
+                return
+            try:
+                await _await_with_escape(
+                    aclose(),
+                    _ACLOSE_TIMEOUT_SECONDS,
+                    what="first-chunk aclose",
+                )
+            except BaseException:
+                pass
+
         async def _open_and_first_chunk() -> tuple[Any, Any]:
             """建连并读取首个 chunk，供外层 wait_for 统一限时。
 
             首个 chunk 读取若抛异常（含 wait_for 超时注入的 CancelledError），
             必须关闭 stream——既为释放 HTTP 连接，也为触发 _bind_release_to_stream
             绑定的 slot.release()，避免并发许可泄漏（建连超时是高频场景）。
+
+            注意：外层 _await_with_escape 超时会 task.cancel() 注入 CancelledError，
+            本协程进入 except 后任何 await 都会被挂起的取消立即打断，aclose 无法在此
+            执行。故 except 内只登记 nonlocal _opened_resp，真正的 aclose 交给外层
+            TimeoutError/异常处理（处于未取消上下文，await 可正常跑）。
             """
+            nonlocal _opened_resp
             _t0 = _time.monotonic()
             logger.info(
                 "[%s] _open_and_first_chunk: 进入，准备调 _do_completion model=%s t0=%.3f",
@@ -705,6 +737,8 @@ class _BaseLiteLLMAdapter:
                 _t0,
             )
             resp = await self._do_completion(**call_kwargs, drop_params=True)
+            # 建连成功：登记 resp 句柄，供外层超时/异常后 aclose 释放连接。
+            _opened_resp = resp
             _t1 = _time.monotonic()
             logger.info(
                 "[%s] _open_and_first_chunk: _do_completion 返回(%.3fs)，准备读首 chunk model=%s",
@@ -723,23 +757,8 @@ class _BaseLiteLLMAdapter:
                     model,
                     type(_first_exc).__name__,
                 )
-                # 超时/异常/取消：关闭流，触发绑定的 release。aclose 自身的任何
-                # 异常（含 CancelledError）都不应掩盖/替换原始异常，故全量抑制。
-                # ★ 不能裸 await aclose()：半死 SSL socket 会让 aclose 永久
-                # 阻塞，把原始异常（超时/取消）吞在 await 里，外层 wait_for 等不到
-                # 协程退出就永远不返回 → 引擎死锁。用 _await_with_escape 限时：
-                # 正常 aclose 毫秒级完成（同步契约，测试可立即观测关闭）；半死
-                # socket 到点即放弃，原始异常照常 raise 透传，残留协程后台回收。
-                aclose = getattr(resp, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await _await_with_escape(
-                            aclose(),
-                            _ACLOSE_TIMEOUT_SECONDS,
-                            what="first-chunk aclose",
-                        )
-                    except BaseException:
-                        pass
+                # aclose 在此处无法可靠执行（外层 cancel 会让 await 立即抛 CancelledError），
+                # 交给外层处理（外层捕获后 _close_opened_resp 统一释放）。
                 raise
             _t3 = _time.monotonic()
             logger.info(
@@ -759,7 +778,8 @@ class _BaseLiteLLMAdapter:
             )
         except StopAsyncIteration:
             # 空流：建连成功但首字节即 EOF（零 chunk），按首 token 失败处理。
-            # resp 已在 _open_and_first_chunk 内部 aclose，此处无需再关。
+            # 释放已建连的流（内层 except 被 cancel 打断无法 aclose，在此未取消上下文关闭）。
+            await _close_opened_resp()
             logger.warning(
                 "[%s] STREAM EMPTY: 首字节即空流 (建连成功但零 chunk) model=%s，按首 token 失败处理",
                 type(self).__name__,
@@ -771,6 +791,10 @@ class _BaseLiteLLMAdapter:
                 llm_provider="zai",
             )
         except asyncio.TimeoutError:
+            # 首字节超时（含建连阶段）：释放已建连的流，避免连接泄漏/slot 不释放。
+            # 内层 except 被 task.cancel() 打断无法 await aclose，此处处于未取消上下文，
+            # 可安全限时关闭（半死 socket 到点放弃，原始 Timeout 照常透传）。
+            await _close_opened_resp()
             logger.error(
                 "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs) 含建连阶段 model=%s",
                 type(self).__name__,
