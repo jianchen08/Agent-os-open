@@ -7,6 +7,12 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pipeline.message_types import (
+    MessageType,
+    PipelineMessage,
+    PipelineRequest,
+)
+
 # ★ engine_task 强引用保护集：entry 被删/覆盖后 task 不会被 GC 静默回收。
 # Python asyncio 官方警告："Save a reference to the result of ensure_future,
 # to avoid a task disappearing mid-execution"。entry.engine_task 是唯一引用时，
@@ -38,12 +44,6 @@ def _track_engine_task(task: asyncio.Task[Any], pipeline_id: str) -> None:
 if TYPE_CHECKING:
     from agents.types import AgentConfig
     from pipeline.sink import IOutputSink
-
-from pipeline.message_types import (
-    MessageType,
-    PipelineMessage,
-    PipelineRequest,
-)
 
 logger = logging.getLogger(__name__)
 

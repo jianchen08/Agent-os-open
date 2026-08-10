@@ -141,9 +141,11 @@ def test_goal_schema_flattened():
     props = tool_def.input_schema["properties"]
     assert "goal" not in props, "goal 不应再以嵌套对象存在"
     assert "inherit" not in props, "inherit 不应再以嵌套对象存在"
-    assert "goal_title" in props and props["goal_title"]["type"] == "string"
+    assert "goal_title" in props
+    assert props["goal_title"]["type"] == "string"
     assert props["goal_description"]["maxLength"] == 2000
-    assert "inherit_from" in props and props["inherit_from"]["type"] == "string"
+    assert "inherit_from" in props
+    assert props["inherit_from"]["type"] == "string"
     # 必填字段变为 goal_title
     assert tool_def.input_schema["required"] == ["goal_title"]
 

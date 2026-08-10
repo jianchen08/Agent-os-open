@@ -179,8 +179,8 @@ class HostProvider(IsolationProvider):
                 # 收养继续运行，是 host 路径进程泄漏的根因。改用 LocalProcessBackend
                 # 的 psutil 递归整树杀。
                 try:
-                    from tools.builtin.bash.types import WorkUnit
                     from tools.builtin.bash.process_manager import _get_local_backend
+                    from tools.builtin.bash.types import WorkUnit
 
                     await _get_local_backend().kill(
                         WorkUnit(pid=process.pid, command=command), force=True

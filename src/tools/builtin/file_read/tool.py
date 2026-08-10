@@ -589,7 +589,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
         # 含筛选语法 {} 时，走新的路径解析逻辑
         segments = self._parse_field_path(field)
-        current: Any = data
+        current = data
         for seg in segments:
             current = self._resolve_segment(current, seg)
             if current is None:

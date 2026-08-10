@@ -220,7 +220,11 @@ class ProcessManager:
                 },
             )
             self._ensure_watchdog()
-            output_task.add_done_callback(lambda t, p=host_pid: self._on_output_task_done(p, t))
+
+            def _on_host_output_done(t: asyncio.Task, p: int = host_pid) -> None:
+                self._on_output_task_done(p, t)
+
+            output_task.add_done_callback(_on_host_output_done)
             return host_pid, log_file
 
         # ===== 本地路径：原 WSL/Bash/CMD 分支 =====
@@ -324,7 +328,10 @@ class ProcessManager:
         self._ensure_watchdog()
 
         # 添加任务完成回调以清理引用
-        output_task.add_done_callback(lambda t, p=pid: self._on_output_task_done(p, t))
+        def _on_local_output_done(t: asyncio.Task, p: int = pid) -> None:
+            self._on_output_task_done(p, t)
+
+        output_task.add_done_callback(_on_local_output_done)
 
         return pid, log_file
 
@@ -366,9 +373,7 @@ class ProcessManager:
                     continue
                 if ch == '"':
                     in_double = False
-                elif ch == "`":  # 双引号内反引号命令替换
-                    return True
-                elif ch == "$" and nxt == "(":  # $(...) 双引号内仍展开
+                elif ch == "`" or ch == "$" and nxt == "(":  # 双引号内反引号命令替换
                     return True
                 i += 1
                 continue
@@ -402,6 +407,8 @@ class ProcessManager:
         docker exec kill 会失败但不会误杀，调用方据返回码处理。
         """
         try:
+            if process.stdout is None:
+                return process.pid
             first_line = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
             text = first_line.decode(errors="replace").strip()
             return int(text)
@@ -816,7 +823,7 @@ class ProcessManager:
             return
 
         # 先同步清理已退出的，避免对死进程做无谓采样/杀
-        for pid, info in running:
+        for _pid, info in running:
             self._sync_poll_process(info)
 
         live = [(pid, info) for pid, info in running if info.status == "running"]
@@ -1307,7 +1314,7 @@ class ContainerProcessBackend(ProcessBackend):
         """
         import subprocess as _sp  # noqa: PLC0415
 
-        proc = _sp.run(args, capture_output=True, timeout=timeout)  # noqa: S603
+        proc = _sp.run(args, capture_output=True, timeout=timeout, check=False)  # noqa: S603
         return proc.returncode, proc.stdout, proc.stderr
 
     async def kill(self, unit: WorkUnit, force: bool = True) -> None:

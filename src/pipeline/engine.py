@@ -398,11 +398,11 @@ class PipelineEngine:
                 _llm_core = self.plugin_registry.get_core("llm_call")
 
                 if _llm_core:
-                    if not state.get("context_window") and getattr(_llm_core, "_context_window", 0):
+                    if not state.get("context_window") and getattr(_llm_core, "_context_window", None):
                         state["context_window"] = _llm_core._context_window
                     # llm_model 在 llm_core 初始化时已确定（self._model），首轮即可注入，
                     # 无需等 llm_core 执行后回写。这是 MSG-0 内容首轮稳定的关键。
-                    if not state.get("llm_model") and getattr(_llm_core, "_model", ""):
+                    if not state.get("llm_model") and getattr(_llm_core, "_model", None):
                         state["llm_model"] = _llm_core._model
 
             while not state.get(StateKeys.ENDED, False):

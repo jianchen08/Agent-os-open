@@ -65,8 +65,9 @@ def classify_args_parse_failure(raw: str) -> str:
 
 def _resolve_project_root() -> Path | None:
     """推导 Agent OS 项目根目录。"""
-    if _resolve_project_root._cached is not None:
-        return _resolve_project_root._cached
+    cached: Path | None = getattr(_resolve_project_root, "_cached", None)
+    if cached is not None:
+        return cached
 
     current = Path(__file__).resolve()
     for parent in current.parents:
@@ -77,7 +78,7 @@ def _resolve_project_root() -> Path | None:
     return None
 
 
-_resolve_project_root._cached: Path | None = None
+_resolve_project_root._cached = None  # type: ignore[attr-defined]
 
 
 class ParamInjectPlugin(IInputPlugin):

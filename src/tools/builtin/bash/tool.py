@@ -658,9 +658,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                             exit_code=None,
                             status="running",
                         )
-                        running_data["elapsed"] = round(
-                            time.time() - proc_info.start_time, 1
-                        )
+                        running_data["elapsed"] = round(elapsed, 1)
                         return create_success_result(
                             data=running_data,
                             metadata={

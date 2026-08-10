@@ -1185,6 +1185,11 @@ class TaskSubmitTool(BuiltinTool):
                 "title": inputs.get("goal_title"),
                 "description": inputs.get("goal_description", ""),
             }
+        if not goal:
+            return create_failure_result(
+                error="goal 不能为空",
+                error_code="INVALID_GOAL",
+            )
         parent_agent_level = inputs.get("parent_agent_level")
 
         # ── 目标空间安全检查 ──

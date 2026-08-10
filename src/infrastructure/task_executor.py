@@ -234,7 +234,7 @@ class TaskExecutorMixin:
 
             # ── 3.x 生命周期钩子：任务启动 + 工作空间状态注入 ──
 
-            lifecycle: WorkspaceLifecycleManager | None = self._services.get("workspace_lifecycle_manager")
+            lifecycle = self._services.get("workspace_lifecycle_manager")
 
             ws_meta = {}
 
@@ -910,7 +910,8 @@ class TaskExecutorMixin:
                     if session:
                         session.register_pipeline(pipeline_id, set_active=False)
 
-                        _api_store.set_session(thread_id, session)
+                        if _api_store is not None:
+                            _api_store.set_session(thread_id, session)
 
                         logger.debug(
                             "TaskWorker: registered sub-pipeline %s to api_store session %s",
@@ -1078,7 +1079,10 @@ class TaskExecutorMixin:
 
                 _fut = loop.create_task(task_service.fail_task(task_id, _reason))
 
-                _fut.add_done_callback(lambda fut, tid=task_id: self._log_fail_task_exc(fut, tid))
+                def _on_fail_task_done(fut: Any, tid: str = task_id) -> None:
+                    self._log_fail_task_exc(fut, tid)
+
+                _fut.add_done_callback(_on_fail_task_done)
 
                 if ctx is not None:
                     ctx.set_terminal()

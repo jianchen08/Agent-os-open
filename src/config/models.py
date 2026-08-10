@@ -222,9 +222,8 @@ class ModelConfigLoader:
         if default_id:
             result = self._case_insensitive_lookup(models, default_id)
             if result is not None:
+                result["_id"] = default_id
                 return result
-            result["_id"] = default_id
-            return result
 
         return None
 
