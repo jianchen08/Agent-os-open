@@ -23,6 +23,10 @@ const logger = loggers.sessionStore
 
 interface CreateSessionOptions {
   agentId?: string
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolationMode?: 'isolated' | 'non_isolated'
 }
 
 interface SessionListState {
@@ -111,6 +115,8 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       const newSession = await createSessionApi({
         title: sessionTitle,
         agentId: options?.agentId,
+        workspace: options?.workspace,
+        isolationMode: options?.isolationMode,
       })
 
       useSessionStore.setState((state) => ({

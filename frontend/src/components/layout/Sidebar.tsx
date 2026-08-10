@@ -24,7 +24,7 @@ import {
 } from '@/assets/icons'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { SessionEditModal } from '@/components/session/SessionEditModal'
+import { SessionEditModal, type SessionCreateOptions } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
@@ -266,7 +266,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
    * 确认创建 / 编辑会话
    */
   const handleSaveSession = useCallback(
-    async (sessionId: string | null, title: string, agentId: string | null) => {
+    async (
+      sessionId: string | null,
+      title: string,
+      agentId: string | null,
+      options?: SessionCreateOptions,
+    ) => {
       setIsSaving(true)
       try {
         if (sessionId) {
@@ -279,6 +284,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           // ChatContainer 会随 activeSessionId 自动渲染，无需 navigate。
           const session = await createSession(title || undefined, {
             agentId: agentId || undefined,
+            workspace: options?.workspace,
+            isolationMode: options?.isolationMode,
           })
           setModal(null)
         }

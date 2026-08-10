@@ -143,6 +143,17 @@ const SessionItem = memo<SessionItemProps>(
             {session.title}
           </span>
 
+          {/* 工作空间徽标 */}
+          {session.workspace && (
+            <span
+              title={`工作空间: ${session.workspace}`}
+              className="text-muted-foreground ml-1 hidden max-w-[120px] flex-shrink-0 truncate rounded bg-black/5 px-1.5 py-0.5 text-[10px] sm:block"
+            >
+              📁 {session.isolationMode === 'isolated' ? '🛡️' : ''}
+              {session.workspace.split(/[\\/]/).filter(Boolean).pop() || session.workspace}
+            </span>
+          )}
+
           {/* 星标简化：单一点击切换收藏（金色实心=已收藏，灰色描边=未收藏） */}
           <button
             type="button"
