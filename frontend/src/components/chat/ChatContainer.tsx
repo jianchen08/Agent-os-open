@@ -169,6 +169,8 @@ export const ChatContainer = ({
   const currentPipelineId = currentTabPipelineId || ''
   const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
   const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
+  /** 整个管道的累计 token 用量（跨轮加总，供统计区显示命中/未命中/输出三维度）。 */
+  const cumulativeTokens = pipelineUsage?.cumulative
 
   /** 最终的 maxTokens 和 currentTokenUsage */
   const effectiveMaxTokens = modelContextWindow
@@ -302,6 +304,7 @@ export const ChatContainer = ({
           maxTokens={effectiveMaxTokens}
           completionTokens={pipelineUsage?.completionTokens ?? 0}
           totalTokens={pipelineUsage?.totalTokens ?? 0}
+          cumulativeTokens={cumulativeTokens}
           thinkingMode={thinkingMode}
           toggleThinkingMode={toggleThinkingMode}
         />

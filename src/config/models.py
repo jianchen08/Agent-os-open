@@ -262,8 +262,11 @@ class ModelConfigLoader:
 
         # api_base: 模型配置优先，提供商配置回退
         api_base = model_conf.get("api_base", "") or provider_conf.get("api_base", "")
-        # default_params: 使用模型配置中的值，或默认值
-        default_params = model_conf.get("default_params", {"temperature": 0.7, "max_tokens": 4096})
+        # default_params: 使用模型配置中的值；漏配返回空 dict（不人为塞默认值）。
+        # 兜底责任收敛到 LLMCore（plugin.py），由其决定最终默认参数。
+        # 历史教训：这里曾 fallback {"max_tokens": 4096}，对 reasoning_model 过低，
+        # 思考耗尽 token 后正文一字未出，被误判为 empty_response 死循环重试。
+        default_params = model_conf.get("default_params", {})
 
         # call_timeout: 优先模型配置，回退到 defaults 节
         defaults = self._load_llm_data().get("defaults", {})

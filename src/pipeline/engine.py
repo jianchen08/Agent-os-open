@@ -622,7 +622,10 @@ class PipelineEngine:
 
             self._last_state = state
 
-            logger.debug(
+            # ★ 必须 INFO 级：引擎退出（正常/异常/取消）的唯一可观测信号。
+            # 若此处无日志 = 协程被 GC 静默回收（engine_task 无强引用），
+            # 是定位"管道静默消失"的关键证据。
+            logger.info(
                 "[Engine] 引擎停止: pipeline=%s iteration=%d ended=%s raw_error=%s",
                 self._pipeline_id[:12],
                 state.get(StateKeys.ITERATION, 0),

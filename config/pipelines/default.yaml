@@ -10,7 +10,10 @@ name: lingxi_agent
 task_worker:
   pipeline_timeout: 7200
   child_wait_timeout: 3600
-  terminal_wait_timeout: 3600
+  # terminal_wait_timeout 已移除：原用于 _cleanup_after_engine 蹲守终态信号，
+  # 但它与 total_timeout 硬墙 + stop_check.max_duration 三层超时打架，
+  # 超时撒手时会 cancel 掉真正兜底的硬墙 → 僵尸 running 任务。终态兜底统一
+  # 交给 total_timeout 硬墙。
 
 input_routes:
   # 工具级拦截（权限/隔离/安全）不再用 target=end 终结管道。
@@ -33,6 +36,7 @@ input_routes:
       - knowledge_inject
       - prompt_build
       - isolation_guard
+      - session_isolation
       - level_guard
       - security_check
     priority: 10

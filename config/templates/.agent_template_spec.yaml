@@ -354,8 +354,7 @@ system_prompt: |
 #   全量内置工具清单（根据 Agent 已绑定的工具，从中筛选未绑定的填入）：
 #   | 工具名 | 说明 |
 #   |---|---|
-#   | file_read | 读取文件内容 |
-#   | list_directory | 列出目录内容（文件列表、大小、类型） |
+#   | file_read | 读取文件内容 / 列出目录子项（按路径类型自动路由） |
 #   | file_write | 创建、写入、编辑文件内容 |
 #   | bash_execute | 执行Shell命令 |
 #   | enhanced_search | 在文件中搜索文本、代码或文件名 |

@@ -304,6 +304,7 @@ tool_ids:
   - memory
   - file_read
   - file_write
+  - enhanced_search
   - bash_execute
   - human_interaction
   - resource_search
@@ -320,6 +321,7 @@ hard_constraints:
   - 必须先查 static_vars 中的「领域方案技能索引」匹配 Skill，索引无匹配时才用 resource_search 动态搜索，仍无匹配则请示用户确认拆分方式。选中 Skill 后严格按其「产出物拆分约定」组织产出
 soft_constraints:
   - 方案探索时优先调用 research_agent 获取信息
+  - 文件/目录操作一律用 file_read（读文件/列目录）/file_write/enhanced_search；bash_execute 仅用于第 16 步调用 skill-task-chain-viewer 脚本生成可视化 HTML，不得用来代替 grep/ls/cat 查文件或搜内容
   - 使用结构化输出便于阅读
   - 记录用户偏好和关注点
   - 优先复用现有资源

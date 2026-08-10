@@ -20,6 +20,14 @@ import {
 import { useAgentStore } from '@/stores/agentStore'
 import type { Session } from '@/types'
 
+/** 新建会话的工作空间与隔离模式选项 */
+export interface SessionCreateOptions {
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolationMode?: 'isolated' | 'non_isolated'
+}
+
 interface SessionEditModalProps {
   /** 模式：edit=编辑已有会话，create=新建会话 */
   mode: 'edit' | 'create'
@@ -30,7 +38,12 @@ interface SessionEditModalProps {
   /** 关闭模态框回调 */
   onClose: () => void
   /** 保存回调 */
-  onSave: (sessionId: string | null, title: string, agentId: string | null) => void
+  onSave: (
+    sessionId: string | null,
+    title: string,
+    agentId: string | null,
+    options?: SessionCreateOptions,
+  ) => void
   /** 是否正在保存中 */
   isSaving?: boolean
 }
@@ -42,6 +55,8 @@ export const SessionEditModal = memo<SessionEditModalProps>(
   ({ mode, isOpen, session, onClose, onSave, isSaving = false }) => {
     const [title, setTitle] = useState('')
     const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
+    const [workspace, setWorkspace] = useState('')
+    const [isolationMode, setIsolationMode] = useState<'isolated' | 'non_isolated'>('non_isolated')
     const agents = useAgentStore((state) => state.agents)
 
     const availableAgents = useMemo(() => {
@@ -60,17 +75,29 @@ export const SessionEditModal = memo<SessionEditModalProps>(
         if (mode === 'edit' && session) {
           setTitle(session.title || '')
           setSelectedAgentId(session.agentId || defaultAgentId)
+          setWorkspace(session.workspace || '')
+          setIsolationMode(session.isolationMode || 'non_isolated')
         } else {
           setTitle('新会话')
           setSelectedAgentId(defaultAgentId)
+          setWorkspace('')
+          setIsolationMode('non_isolated')
         }
       }
     }, [isOpen, mode, session, defaultAgentId])
 
     const handleSave = useCallback(() => {
       if (mode === 'edit' && (!session || !title.trim())) return
-      onSave(session?.id || null, title.trim() || '新会话', selectedAgentId)
-    }, [mode, session, title, selectedAgentId, onSave])
+      onSave(
+        session?.id || null,
+        title.trim() || '新会话',
+        selectedAgentId,
+        {
+          workspace: workspace.trim() || undefined,
+          isolationMode: workspace.trim() ? isolationMode : undefined,
+        },
+      )
+    }, [mode, session, title, selectedAgentId, workspace, isolationMode, onSave])
 
     const isCreate = mode === 'create'
 
@@ -113,6 +140,40 @@ export const SessionEditModal = memo<SessionEditModalProps>(
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="text-foreground mb-1 block text-sm font-medium">
+                工作空间 <span className="text-muted-foreground">（可选，项目目录）</span>
+              </label>
+              <input
+                type="text"
+                value={workspace}
+                onChange={(e) => setWorkspace(e.target.value)}
+                className="bg-muted/50 border-border/50 focus:border-primary w-full rounded-md border px-3 py-1.5 text-sm outline-none transition-colors"
+                placeholder="如 D:/myproject/demo-app"
+              />
+              <p className="text-muted-foreground mt-1 text-xs">
+                留空则使用系统默认目录；填写的目录需已存在，AI 的所有操作将在此目录内进行
+              </p>
+            </div>
+
+            <div>
+              <label className="text-foreground mb-1 block text-sm font-medium">隔离模式</label>
+              <select
+                value={isolationMode}
+                onChange={(e) =>
+                  setIsolationMode(e.target.value as 'isolated' | 'non_isolated')
+                }
+                disabled={!workspace.trim()}
+                className="bg-muted/50 border-border/50 focus:border-primary disabled:opacity-50 w-full rounded-md border px-3 py-1.5 text-sm outline-none transition-colors"
+              >
+                <option value="non_isolated">普通模式（读取放行，危险操作需审批）</option>
+                <option value="isolated">容器隔离（命令在 Docker 容器中执行）</option>
+              </select>
+              <p className="text-muted-foreground mt-1 text-xs">
+                需填写工作空间后可选容器隔离
+              </p>
             </div>
           </div>
 

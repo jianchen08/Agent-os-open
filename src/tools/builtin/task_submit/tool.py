@@ -1,7 +1,6 @@
 """任务提交工具"""
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -18,42 +17,6 @@ from tools.types import (
 from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
-
-# ── 危险目标空间目录列表 ──
-# 这些目录是操作系统关键目录，绝不允许作为任务的目标工作空间。
-_DANGEROUS_DIRS: set[str] = set()
-
-_DANGEROUS_WINDOWS_DIRS = [
-    r"C:\Windows",
-    r"C:\Windows\System32",
-    r"C:\Windows\SysWOW64",
-    r"C:\Program Files",
-    r"C:\Program Files (x86)",
-    r"C:\ProgramData",
-    r"C:\Users",
-]
-
-_DANGEROUS_UNIX_DIRS = [
-    "/",
-    "/bin",
-    "/boot",
-    "/dev",
-    "/etc",
-    "/lib",
-    "/lib64",
-    "/proc",
-    "/root",
-    "/sbin",
-    "/sys",
-    "/usr",
-    "/var",
-    "/tmp",
-    "/home",
-    "/opt",
-]
-
-for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
-    _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
 
 
 def _get_valid_metric_ids() -> set[str] | None:
@@ -116,46 +79,11 @@ def _validate_metric_ids(
     return filtered, invalid
 
 
-def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
-    """验证目标空间路径的安全性。"""
-    if not workspace:
-        return None
+def _validate_workspace_path(workspace: str) -> str | None:
+    """验证目标空间路径的安全性（委托 isolation.workspace 公共校验）。"""
+    from isolation.workspace import validate_workspace_path  # noqa: PLC0415
 
-    # 规范化路径用于比较
-    try:
-        normalized = os.path.normpath(workspace)
-    except (ValueError, TypeError):
-        return f"目标空间路径无效: {workspace}"
-
-    Path(normalized)
-
-    # ── 1. 磁盘根目录检查 ──
-    if os.name == "nt":
-        # Windows: 检查是否为盘符根目录，如 C:\ D:\
-        if len(normalized) == 3 and normalized[1] == ":" and normalized[2] == "\\":
-            return f"目标空间不能设置为磁盘根目录: {workspace}。请指定具体的项目子目录。"
-    # Unix: 检查是否为 /
-    elif normalized == "/":
-        return f"目标空间不能设置为根目录: {workspace}。请指定具体的项目子目录。"
-
-    # ── 2. 系统危险目录检查 ──
-    normalized_lower = normalized.lower()
-    if normalized_lower in _DANGEROUS_DIRS:
-        return f"目标空间不能设置为系统目录: {workspace}。系统关键目录不允许作为任务的工作空间。"
-
-    # ── 3. 配置文件工作空间根目录检查 ──
-    try:
-        from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
-
-        ws_root = get_workspace_config_root()
-        ws_root_normalized = os.path.normpath(ws_root)
-        if normalized_lower == ws_root_normalized.lower():
-            return (
-                f"目标空间不能设置为当前配置的工作空间根目录: {workspace}。"
-                f"该目录是系统管理工作空间的根目录，不允许作为任务目标操作。"
-            )
-    except Exception as e:
-        logger.warning("[TaskSubmit] 读取工作空间配置根目录失败，跳过该检查 | error=%s", e)
+    return validate_workspace_path(workspace)
 
     return None
 
@@ -169,6 +97,63 @@ def _normalize_description(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "\n".join(str(item) for item in value)
     return str(value)
+
+
+def _resolve_source_repo(ws_path: str, mode: str, project_root_fallback: str = "") -> str:
+    """从文件系统 ground truth 解析工作空间的「源仓库」路径。
+
+    inherit_workspace 的容器归属比对不能依赖 worktree 副本目录本身——
+    worktree 是挂在源仓库下的工作副本，副本目录可能位于与源仓库无关的位置
+    （尤其当编排进程 cwd 与容器工作空间分离时）。真正代表「任务属于哪个容器」
+    的是 worktree 背后的源仓库。
+
+    解析规则（不依赖 ws_meta 字段，避免字段过期/篡改）：
+    - worktree 模式：path/.git 是文件，内容 `gitdir: <源仓库>/.git/worktrees/<name>`，
+      截到 `/.git/` 之前即源仓库。
+    - project_root 模式：path/.git 是目录（自身即源仓库）→ 源仓库 = path。
+    - shared/plain/其它：无 .git 或 .git 无法解析 → 退化到 project_root_fallback。
+
+    Args:
+        ws_path: 工作空间路径（ws_meta.path）。
+        mode: 工作空间模式（ws_meta.mode）。
+        project_root_fallback: 字段兜底值（ws_meta.project_root）。
+
+    Returns:
+        源仓库路径字符串；全部解析失败时返回空串（调用方据此跳过容器校验，
+        让既有的 .git 存在性校验兜底）。
+    """
+    if not ws_path:
+        return project_root_fallback or ""
+
+    git_entry = Path(ws_path) / ".git"
+
+    # worktree 模式：.git 是文件，内含 gitdir 指向源仓库
+    if git_entry.is_file():
+        try:
+            content = git_entry.read_text(encoding="utf-8").strip()
+            if content.startswith("gitdir:"):
+                gitdir_path = content[len("gitdir:"):].strip()
+                # gitdir 形如 <源仓库>/.git/worktrees/<name>
+                # 统一分隔符后截到 /.git/ 之前
+                normalized = gitdir_path.replace("\\", "/")
+                marker = "/.git/"
+                idx = normalized.lower().find(marker.lower())
+                if idx != -1:
+                    source_repo = normalized[:idx]
+                    return str(Path(source_repo).resolve())
+        except Exception as exc:
+            logger.warning(
+                "[TaskSubmit] 解析 worktree .git 失败，退化到 project_root: ws=%s | err=%s",
+                ws_path,
+                exc,
+            )
+
+    # project_root 模式：.git 是目录，自身即源仓库
+    if git_entry.is_dir():
+        return str(Path(ws_path).resolve())
+
+    # shared/plain/无 .git：字段兜底
+    return project_root_fallback or ""
 
 
 class TaskSubmitTool(BuiltinTool):
@@ -735,21 +720,71 @@ class TaskSubmitTool(BuiltinTool):
                     )
                 from pathlib import Path  # noqa: PLC0415
 
-                # 同容器才能 inherit，避免产出落到错误容器。
-                _source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
-                _current_container = Path(__file__).resolve().parents[4]
-                if _source_root:
+                old_ws_path = old_ws_meta.get("path", "")
+                old_mode = old_ws_meta.get("mode", "")
+
+                # ── 容器归属校验：两端都取「源仓库」比对 ──
+                # 旧实现用 Path(__file__).parents[4]（编排进程 cwd）当「当前容器」，
+                # 但编排进程可能托管多个容器（进程 cwd ≠ 任务所属容器），
+                # 导致同容器的 worktree 继承被误判为跨容器。
+                # 正确做法：worktree 的真正归属是其背后的源仓库，而非副本目录。
+                # 两端都解析源仓库（worktree 读 .git 反推，project_root 自身即源），
+                # 命中 worktree.gitdir / parent 链不可用时优雅退化，绝不因解析失败阻断继承。
+                _inherited_source_repo = _resolve_source_repo(
+                    old_ws_path,
+                    old_mode,
+                    old_ws_meta.get("project_root", ""),
+                )
+
+                # 新任务归属端：沿 parent_task_id 上溯到容器任务，取其源仓库。
+                _current_source_repo = ""
+                if parent_task_id:
                     try:
-                        Path(_source_root).resolve().relative_to(_current_container)
-                    except ValueError:
+                        _anc = task_service.get_task(parent_task_id)
+                        while _anc is not None:
+                            _anc_scope = (_anc.metadata or {}).get("task_scope", "")
+                            if _anc_scope == "container":
+                                _anc_ws_meta = (_anc.metadata or {}).get("ws_meta") or {}
+                                _anc_ws_path = _anc_ws_meta.get("path", "") or (
+                                    _anc.metadata or {}
+                                ).get("container_workspace", "")
+                                _current_source_repo = _resolve_source_repo(
+                                    _anc_ws_path,
+                                    _anc_ws_meta.get("mode", ""),
+                                    _anc_ws_meta.get("project_root", ""),
+                                )
+                                break
+                            _anc_parent = (_anc.metadata or {}).get("parent_task_id") or getattr(
+                                _anc, "parent_task_id", None
+                            )
+                            _anc = task_service.get_task(_anc_parent) if _anc_parent else None
+                    except Exception as _anc_err:
+                        logger.warning(
+                            "[TaskSubmit] 沿 parent_task_id 解析容器源仓库失败，"
+                            "退化到进程 cwd: parent=%s | err=%s",
+                            parent_task_id,
+                            _anc_err,
+                        )
+
+                # parent 链不可用或无容器祖先 → 兜底用进程 cwd（根任务/无父链场景）
+                if not _current_source_repo:
+                    _current_source_repo = str(Path(__file__).resolve().parents[4])
+
+                if _inherited_source_repo and _current_source_repo:
+                    # 同容器 = 源仓库等于或位于当前容器目录内（含子路径，
+                    # 兼容容器内子目录作为 mock 源仓库的合法场景）。
+                    try:
+                        Path(_inherited_source_repo).resolve().relative_to(
+                            Path(_current_source_repo).resolve()
+                        )
+                    except (ValueError, OSError):
                         return create_failure_result(
                             error=(
-                                f"任务 {inherit_from} 属于其它容器({_source_root})，"
-                                f"不能跨容器继承工作空间。"
+                                f"任务 {inherit_from} 属于其它容器({_inherited_source_repo})，"
+                                f"不能跨容器继承工作空间（当前容器: {_current_source_repo}）。"
                                 f"请去掉 inherit_workspace_from 参数重新提交。"
                             ),
                         )
-                old_ws_path = old_ws_meta.get("path", "")
                 if not old_ws_path or not Path(old_ws_path).exists():
                     return create_failure_result(
                         error=(
@@ -981,6 +1016,9 @@ class TaskSubmitTool(BuiltinTool):
             "acceptance_criteria": acceptance_criteria,
             "workspace": workspace,
             "priority": inputs.get("priority", 5),
+            # 传递子任务层级（与 create_task 写入的 agent_level 一致），
+            # 避免 task_executor 误用 L3 fallback 导致超时文案/分级错误
+            "agent_level": level_str,
             "is_root": is_root,
             "_has_explicit_workspace": bool(workspace),
             "_inherit_workspace_resolved": _inherit_resolved,

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -285,6 +286,106 @@ async def test_start_process_container_ignores_host_working_dir(tmp_path):
     assert "myproject" not in str(captured_args), (
         f"宿主路径不应透传到容器，实际 args: {captured_args}"
     )
+
+
+# ============================================================
+# Step 1.5: 复合命令自动包裹（修复：echo "标签" && ls 只返回标签）
+# ============================================================
+
+
+def _capture_wrapped(command: str, tmp_path, container_id: str = "abc123") -> str:
+    """启动 start_process 容器路径，返回传给 sh -c 的 wrapped 命令字符串。"""
+    pm = ProcessManager(log_dir=tmp_path / "logs")
+    fake_proc = _make_fake_process(host_pid=42, container_pid=100)
+    captured_args: list = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured_args.extend(args)
+        return fake_proc
+
+    with patch(
+        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        side_effect=fake_create_subprocess_exec,
+    ):
+        asyncio.run(
+            pm.start_process(
+                command=command,
+                working_dir="/workspace",
+                container_id=container_id,
+            )
+        )
+
+    cmd_idx = captured_args.index("-c") + 1
+    return captured_args[cmd_idx]
+
+
+def test_compound_command_with_and_is_wrapped_with_sh_c(tmp_path):
+    """`cmd1 && cmd2` 是复合命令 → wrapped 应含 `exec sh -c '<整条>'`，不能只 exec 第一条。
+
+    根因：`exec cmd1 && cmd2` 里 exec 替换为 cmd1 后进程即退出，cmd2 丢弃 → 输出丢失。
+    修复后复合命令自动套 `exec sh -c`，让 && 在内层 sh 生效。
+
+    BUG-FIX-fix_20260802_pipefail:
+    复合命令额外加 `set -o pipefail` 前缀，让管道里任一段失败/被信号杀时退出码
+    正确冒泡（如 `cmd | grep` 里 cmd 被 OOM SIGKILL，旧实现退出码取 grep 的 0
+    → 工具误报成功）。
+    """
+    command = "echo A && echo B"
+    wrapped = _capture_wrapped(command, tmp_path)
+    assert "exec sh -c" in wrapped, f"复合命令应套 exec sh -c，实际: {wrapped}"
+    assert "echo $$" in wrapped, "仍需 echo $$ 报容器内 pid"
+    # 复合命令应加 pipefail 前缀
+    assert "pipefail" in wrapped, f"复合命令应含 set -o pipefail 前缀，实际: {wrapped}"
+    # 整条命令应在 sh -c 的单个参数内（防 double-eval）
+    assert command in wrapped, (
+        f"复合命令原文应出现在 wrapped 内，实际: {wrapped}"
+    )
+
+
+def test_single_command_not_wrapped_regression(tmp_path):
+    """`echo hello` 是单条命令 → 保持 `echo $$; exec echo hello`，字节级不变（回归）。
+
+    单条命令 pid 精准、无孤儿，是向后兼容的关键：绝不能因改动把单条命令也套上 sh -c。
+    """
+    command = "echo hello"
+    wrapped = _capture_wrapped(command, tmp_path)
+    assert wrapped == "echo $$; exec echo hello", (
+        f"单条命令应保持原包装，实际: {wrapped}"
+    )
+    assert "sh -c" not in wrapped, "单条命令不应套 sh -c"
+
+
+def test_quoted_metachar_not_compound(tmp_path):
+    """`echo "a;b"` 引号内的分号不是控制操作符 → 不应判为复合、不应套 sh -c。
+
+    引号状态机必须正确：分号在双引号内是字面量，若误判会让命令多套一层 sh（功能仍对，
+    但 pid 精度下降，且偏离"单条命令零变化"的回归承诺）。
+    """
+    command = 'echo "a;b"'
+    wrapped = _capture_wrapped(command, tmp_path)
+    assert "sh -c" not in wrapped, (
+        f"引号内分号不应判为复合，实际 wrapped: {wrapped}"
+    )
+
+
+def test_pipe_treated_as_compound(tmp_path):
+    """`ls | grep x` 管道 → 复合命令，应套 exec sh -c。
+
+    管道是最高频的复合场景，必须正确识别。
+    """
+    command = "ls | grep x"
+    wrapped = _capture_wrapped(command, tmp_path)
+    assert "exec sh -c" in wrapped, f"管道应判为复合，实际: {wrapped}"
+
+
+def test_subshell_command_compound(tmp_path):
+    """`(cd x && make)` 子 shell → 复合命令，应套 exec sh -c。
+
+    圆括号子 shell 也是控制操作符，exec 同样无法处理。
+    """
+    command = "(cd x && make)"
+    wrapped = _capture_wrapped(command, tmp_path)
+    assert "exec sh -c" in wrapped, f"子 shell 应判为复合，实际: {wrapped}"
 
 
 # ============================================================

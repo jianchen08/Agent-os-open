@@ -171,10 +171,18 @@ class TrackPlugin(IOutputPlugin):
         return updates
 
     async def _try_notify_cost_update(self, ctx: PluginContext) -> None:
-        """推送本轮 LLM 调用的 token 用量（单轮值），供输入框进度条实时显示。
+        """推送本轮 LLM 调用的 token 用量到前端。
 
-        llm_usage 直接取自 state（llm_core 插件写入），是单轮 API 返回的用量，
-        天然对应当前 pipeline。pipeline_id 一并带出，供前端按 pipeline 分桶。
+        同时携带两套数据，覆盖前端两种语义需求：
+
+        - 单轮值（顶层 input_tokens/output_tokens/cached_tokens/total_tokens）：
+          取自 state["llm_usage"]（llm_core 写入的本轮 API 返回），表达
+          「当前上下文窗口占用」。前端 ChatInput 进度条据此计算占窗比。
+        - 累计值（cumulative.*）：取自 state["track.llm_usage"] 的 total_* 字段
+          （由 _collect_token_usage 跨轮累加，见 plugin.py:214-245），表达
+          「整个管道的累计消耗」。前端统计区据此显示「缓存命中输入 / 未命中输入 /
+          输出 分别加总」。missed_tokens = 总输入 - 缓存命中输入。
+
         tool_execute 轮 llm_usage 为上一轮残留，跳过推送避免覆盖。
 
         会话标识取 session_id（state 标准字段）；thread_id 未必存在时由
@@ -187,6 +195,7 @@ class TrackPlugin(IOutputPlugin):
 
             if _notifier:
                 _llm_usage = ctx.state.get("llm_usage") or {}
+                _tracked = ctx.state.get("track.llm_usage") or {}
                 _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
                 _session_id = ctx.state.get(StateKeys.SESSION_ID, "")
                 from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
@@ -197,14 +206,27 @@ class TrackPlugin(IOutputPlugin):
                     pipeline_id=_pipeline_id,
                 )
                 if _sink:
+                    # 累计输入里命中 prompt cache 的部分
+                    _cum_input = _tracked.get("total_input_tokens", 0)
+                    _cum_cached = _tracked.get("total_cached_tokens", 0)
                     await _sink.send_event(
                         {
                             "type": "cost_update",
                             "data": {
                                 "pipeline_id": _pipeline_id,
+                                # 单轮（上下文占用，供进度条）
                                 "total_tokens": _llm_usage.get("total_tokens", 0),
                                 "input_tokens": _llm_usage.get("input_tokens", 0),
                                 "output_tokens": _llm_usage.get("output_tokens", 0),
+                                "cached_tokens": _llm_usage.get("cached_tokens", 0),
+                                # 累计（整个管道加总，供统计数显示）
+                                "cumulative": {
+                                    "input_tokens": _cum_input,
+                                    "output_tokens": _tracked.get("total_output_tokens", 0),
+                                    "cached_tokens": _cum_cached,
+                                    "missed_tokens": max(_cum_input - _cum_cached, 0),
+                                    "total_tokens": _tracked.get("total_tokens", 0),
+                                },
                             },
                         }
                     )

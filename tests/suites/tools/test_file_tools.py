@@ -2,10 +2,13 @@
 FileReadTool 和 FileWriteTool 全面单元测试
 
 覆盖范围：
-- FileReadTool: read（读文件）、list（列目录）操作的成功/失败/边界场景
+- FileReadTool: 读文件、列目录（path 指向目录时自动路由）的成功/失败/边界场景
 - FileWriteTool: write、search_replace、insert、delete_lines、append 操作的成功/失败/边界场景
 - 参数校验：缺少必填参数、无效参数
 - 错误处理：文件不存在、路径类型不匹配、行号越界、模式未找到等
+
+注：file_read 不再有 action 参数。读文件 / 列目录由 path 实际类型自动路由：
+    path 指向文件 → 读取内容；path 指向目录 → 列出直接子项。
 """
 
 import json
@@ -27,12 +30,23 @@ class TestFileReadToolDefinition:
         tool_def = FileReadTool.get_tool_definition()
         assert tool_def.name == "file_read"
 
-    def test_get_tool_definition_actions_include_read_and_list(self):
-        """验证工具定义包含 read 和 list 两种操作"""
+    def test_get_tool_definition_has_no_action_param(self):
+        """验证工具定义已移除历史 action 参数"""
         tool_def = FileReadTool.get_tool_definition()
-        action_enum = tool_def.input_schema["properties"]["action"]["enum"]
-        assert "read" in action_enum
-        assert "list" in action_enum
+        assert "action" not in tool_def.input_schema["properties"]
+
+    def test_get_tool_definition_has_no_paths_param(self):
+        """验证工具定义已移除批量 paths 参数（统一用单数 path）"""
+        tool_def = FileReadTool.get_tool_definition()
+        assert "paths" not in tool_def.input_schema["properties"]
+
+    def test_get_tool_definition_has_directory_params(self):
+        """验证工具定义包含合并自 list_directory 的过滤参数"""
+        tool_def = FileReadTool.get_tool_definition()
+        props = tool_def.input_schema["properties"]
+        assert "path" in props
+        assert "include_hidden" in props
+        assert "pattern" in props
 
 
 class TestFileReadToolInit:
@@ -52,7 +66,7 @@ class TestFileReadToolInit:
 
 
 class TestFileReadToolRead:
-    """FileReadTool read 操作测试"""
+    """FileReadTool 读文件操作测试（path 指向文件）"""
 
     async def test_read_text_file_success(self, tmp_path):
         """测试成功读取文本文件内容"""
@@ -61,11 +75,12 @@ class TestFileReadToolRead:
         test_file.write_text("Hello World\nSecond line", encoding="utf-8")
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "read", "path": str(test_file)})
+        result = await tool.execute({"path": str(test_file)})
 
         assert result.success is True
-        assert result.output["content"] == "Hello World\nSecond line"
-        assert result.output["file"] == "test.txt"
+        assert "Hello World" in result.output["content"]
+        # 传入绝对路径 → 输出文件为绝对路径
+        assert result.output["file"].endswith("test.txt")
         assert result.output["lines"] == 2
 
     async def test_read_empty_file(self, tmp_path):
@@ -74,11 +89,11 @@ class TestFileReadToolRead:
         test_file.write_text("", encoding="utf-8")
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "read", "path": str(test_file)})
+        result = await tool.execute({"path": str(test_file)})
 
         assert result.success is True
         assert result.output["content"] == ""
-        assert result.output["file"] == "empty.txt"
+        assert result.output["file"].endswith("empty.txt")
 
     async def test_read_file_with_trailing_newline(self, tmp_path):
         """测试读取末尾有换行的文件，行数统计正确"""
@@ -86,16 +101,15 @@ class TestFileReadToolRead:
         test_file.write_text("line1\nline2\n", encoding="utf-8")
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "read", "path": str(test_file)})
+        result = await tool.execute({"path": str(test_file)})
 
         assert result.success is True
-        assert result.output["content"] == "line1\nline2\n"
         assert result.output["lines"] == 2
 
     async def test_read_file_missing_path(self, tmp_path):
         """测试缺少 path 参数时返回 MISSING_PATH 错误"""
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "read"})
+        result = await tool.execute({})
 
         assert result.success is False
         assert result.error_code == "MISSING_PATH"
@@ -103,24 +117,10 @@ class TestFileReadToolRead:
     async def test_read_file_not_found(self, tmp_path):
         """测试读取不存在的文件时返回 FILE_NOT_FOUND 错误"""
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({
-            "action": "read",
-            "path": str(tmp_path / "nonexistent.txt"),
-        })
+        result = await tool.execute({"path": str(tmp_path / "nonexistent.txt")})
 
         assert result.success is False
         assert result.error_code == "FILE_NOT_FOUND"
-
-    async def test_read_directory_instead_of_file(self, tmp_path):
-        """测试读取目录路径时返回 NOT_A_FILE 错误"""
-        subdir = tmp_path / "subdir"
-        subdir.mkdir()
-
-        tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "read", "path": str(subdir)})
-
-        assert result.success is False
-        assert result.error_code == "NOT_A_FILE"
 
     async def test_read_file_with_relative_path(self, tmp_path):
         """测试使用相对路径读取文件"""
@@ -128,10 +128,11 @@ class TestFileReadToolRead:
         test_file.write_text("relative content", encoding="utf-8")
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "read", "path": "relative.txt"})
+        result = await tool.execute({"path": "relative.txt"})
 
         assert result.success is True
-        assert result.output["content"] == "relative content"
+        # content 带 cat -n 风格行号前缀
+        assert result.output["content"].endswith("relative content")
 
     async def test_read_json_file_with_fields(self, tmp_path):
         """测试读取 JSON 文件并提取指定字段"""
@@ -143,7 +144,6 @@ class TestFileReadToolRead:
 
         tool = FileReadTool(base_path=str(tmp_path))
         result = await tool.execute({
-            "action": "read",
             "path": str(test_file),
             "fields": ["id", "name"],
         })
@@ -165,7 +165,6 @@ class TestFileReadToolRead:
 
         tool = FileReadTool(base_path=str(tmp_path))
         result = await tool.execute({
-            "action": "read",
             "path": str(test_file),
             "fields": ["host", "port"],
         })
@@ -186,13 +185,13 @@ class TestFileReadToolRead:
 
         tool = FileReadTool(base_path=str(tmp_path))
         result = await tool.execute({
-            "action": "read",
             "path": str(test_file),
             "fields": ["agent.tools"],
         })
 
         assert result.success is True
-        assert result.output["agent"]["tools"] == ["read", "write"]
+        # fields 提取用扁平键存储（保留原始字段路径字符串）
+        assert result.output["agent.tools"] == ["read", "write"]
 
     async def test_read_fields_on_unsupported_file_type(self, tmp_path):
         """测试对不支持的文件类型使用 fields 参数返回 FIELDS_NOT_SUPPORTED"""
@@ -201,7 +200,6 @@ class TestFileReadToolRead:
 
         tool = FileReadTool(base_path=str(tmp_path))
         result = await tool.execute({
-            "action": "read",
             "path": str(test_file),
             "fields": ["name"],
         })
@@ -216,7 +214,6 @@ class TestFileReadToolRead:
 
         tool = FileReadTool(base_path=str(tmp_path))
         result = await tool.execute({
-            "action": "read",
             "path": str(test_file),
             "fields": ["id"],
         })
@@ -231,7 +228,6 @@ class TestFileReadToolRead:
 
         tool = FileReadTool(base_path=str(tmp_path))
         result = await tool.execute({
-            "action": "read",
             "path": str(test_file),
             "fields": ["id"],
         })
@@ -240,95 +236,100 @@ class TestFileReadToolRead:
         assert result.error_code == "FIELDS_NOT_SUPPORTED"
 
 
-class TestFileReadToolList:
-    """FileReadTool list 操作测试"""
+class TestFileReadToolListDirectory:
+    """FileReadTool 列目录操作测试（path 指向目录时自动路由）。
+
+    合并自原 ListDirectoryTool：返回 items 列表，每项含 name/type/size。
+    """
 
     async def test_list_directory_success(self, tmp_path):
-        """测试成功列出目录内容"""
-        # 准备目录结构
+        """测试成功列出目录内容（含文件与子目录）"""
         (tmp_path / "file1.txt").write_text("content1", encoding="utf-8")
         (tmp_path / "file2.txt").write_text("content2", encoding="utf-8")
         (tmp_path / "subdir").mkdir()
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "list", "path": str(tmp_path)})
+        result = await tool.execute({"path": str(tmp_path)})
 
         assert result.success is True
-        assert result.output["c"] == 3  # 2 files + 1 dir
+        items = result.output["items"]
+        names = {it["name"] for it in items}
+        assert names == {"file1.txt", "file2.txt", "subdir"}
+        # 子目录类型识别正确
+        subdir_item = next(it for it in items if it["name"] == "subdir")
+        assert subdir_item["type"] == "directory"
+        file_item = next(it for it in items if it["name"] == "file1.txt")
+        assert file_item["type"] == "file"
 
-    async def test_list_directory_with_default_path(self, tmp_path):
-        """测试不传 path 参数时使用 base_path 列出目录"""
-        (tmp_path / "default_file.txt").write_text("content", encoding="utf-8")
+    async def test_list_directory_default_excludes_hidden(self, tmp_path):
+        """测试默认不列出隐藏文件（include_hidden=False）"""
+        (tmp_path / "visible.txt").write_text("v", encoding="utf-8")
+        (tmp_path / ".hidden").write_text("h", encoding="utf-8")
+        (tmp_path / ".secret_dir").mkdir()
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "list"})
+        result = await tool.execute({"path": str(tmp_path)})
 
         assert result.success is True
-        assert result.output["c"] >= 1
+        names = {it["name"] for it in result.output["items"]}
+        assert names == {"visible.txt"}
 
-    async def test_list_directory_contains_header(self, tmp_path):
-        """测试返回数据包含正确的表头"""
-        (tmp_path / "test.txt").write_text("hello", encoding="utf-8")
+    async def test_list_directory_include_hidden(self, tmp_path):
+        """测试 include_hidden=True 时列出隐藏文件"""
+        (tmp_path / "visible.txt").write_text("v", encoding="utf-8")
+        (tmp_path / ".hidden").write_text("h", encoding="utf-8")
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "list", "path": str(tmp_path)})
+        result = await tool.execute({"path": str(tmp_path), "include_hidden": True})
 
         assert result.success is True
-        assert result.output["h"] == ["dir", "file_name", "file_size"]
+        names = {it["name"] for it in result.output["items"]}
+        assert names == {"visible.txt", ".hidden"}
 
-    async def test_list_nonexistent_path(self, tmp_path):
-        """测试列出不存在的目录时返回 PATH_NOT_FOUND 错误"""
-        tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({
-            "action": "list",
-            "path": str(tmp_path / "nonexistent_dir"),
-        })
-
-        assert result.success is False
-        assert result.error_code == "PATH_NOT_FOUND"
-
-    async def test_list_file_instead_of_directory(self, tmp_path):
-        """测试对文件路径执行 list 操作时返回 NOT_A_DIRECTORY 错误"""
-        test_file = tmp_path / "file.txt"
-        test_file.write_text("content", encoding="utf-8")
+    async def test_list_directory_with_pattern(self, tmp_path):
+        """测试 pattern 过滤（glob 语法）"""
+        (tmp_path / "a.py").write_text("x", encoding="utf-8")
+        (tmp_path / "b.py").write_text("x", encoding="utf-8")
+        (tmp_path / "c.txt").write_text("x", encoding="utf-8")
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "list", "path": str(test_file)})
+        result = await tool.execute({"path": str(tmp_path), "pattern": "*.py"})
 
-        assert result.success is False
-        assert result.error_code == "NOT_A_DIRECTORY"
+        assert result.success is True
+        names = {it["name"] for it in result.output["items"]}
+        assert names == {"a.py", "b.py"}
 
-    async def test_list_empty_directory(self, tmp_path):
+    async def test_list_directory_empty(self, tmp_path):
         """测试列出空目录"""
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
 
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "list", "path": str(empty_dir)})
+        result = await tool.execute({"path": str(empty_dir)})
 
         assert result.success is True
-        assert result.output["c"] == 0
-        assert result.output["d"] == []
+        assert result.output["items"] == []
 
-
-class TestFileReadToolInvalidAction:
-    """FileReadTool 无效操作测试"""
-
-    async def test_invalid_action_returns_error(self, tmp_path):
-        """测试无效的 action 返回 INVALID_ACTION 错误"""
+    async def test_list_nonexistent_path(self, tmp_path):
+        """测试列出不存在的路径时（走文件读取分支）返回 FILE_NOT_FOUND"""
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({"action": "delete"})
+        result = await tool.execute({"path": str(tmp_path / "nonexistent_dir")})
 
         assert result.success is False
-        assert result.error_code == "INVALID_ACTION"
+        assert result.error_code == "FILE_NOT_FOUND"
 
-    async def test_missing_action_returns_error(self, tmp_path):
-        """测试缺少 action 参数时返回 INVALID_ACTION 错误"""
+    async def test_path_to_file_reads_content_not_lists(self, tmp_path):
+        """测试 path 指向文件时走读取分支，而非列目录"""
+        test_file = tmp_path / "file.txt"
+        test_file.write_text("content", encoding="utf-8")
+
         tool = FileReadTool(base_path=str(tmp_path))
-        result = await tool.execute({})
+        result = await tool.execute({"path": str(test_file)})
 
-        assert result.success is False
-        assert result.error_code == "INVALID_ACTION"
+        assert result.success is True
+        # 返回的是文件读取结构，不是 items 列表
+        assert "content" in result.output
+        assert "items" not in result.output
 
 
 class TestFileReadToolWorkspace:
@@ -343,13 +344,13 @@ class TestFileReadToolWorkspace:
         # 使用不同的 base_path 初始化，但通过 workspace 覆盖
         tool = FileReadTool(base_path=".")
         result = await tool.execute({
-            "action": "read",
             "path": "workspace_test.txt",
             "workspace": str(tmp_path),
         })
 
         assert result.success is True
-        assert result.output["content"] == "workspace content"
+        # content 带 cat -n 风格行号前缀
+        assert result.output["content"].endswith("workspace content")
 
 
 # =====================================================================

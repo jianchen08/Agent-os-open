@@ -49,7 +49,15 @@ def _priority_label(priority: int) -> str:
 
 
 class PrioritySemaphore:
-    """优先级信号量 — 高优先级请求优先获取许可，支持动态缩容/扩容。"""
+    """优先级信号量 — 高优先级请求优先获取许可，支持动态缩容/扩容。
+
+    信号量许可的回收完全依赖调用方的错误处理保证（异常 → finally → release），
+    不做任何时间兜底：纯时间兜底会误杀长输出请求，且若错误处理路径正确
+    （LLM 调用超时/异常时 finally release），根本不需要兜底。卡死的根因
+    在 LLM 调用层（litellm 半死连接吞取消），由 adapter 的 _await_with_escape
+    超时透传 + finally release 保证许可归还，信号量层面只做"谁先来谁先拿"
+    的排队调度。
+    """
 
     def __init__(self, value: int = 1) -> None:
         self._value = value

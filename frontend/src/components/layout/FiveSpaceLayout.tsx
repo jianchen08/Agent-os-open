@@ -100,6 +100,8 @@ export function FiveSpaceLayout({
   const closeFloatingWindow = useLayoutModeStore((s) => s.closeFloatingWindow)
   const setActiveTab = useLayoutModeStore((s) => s.setActiveTab)
   const closeWorkspaceTab = useLayoutModeStore((s) => s.closeWorkspaceTab)
+  const closeOtherWorkspaceTabs = useLayoutModeStore((s) => s.closeOtherWorkspaceTabs)
+  const closeAllWorkspaceTabs = useLayoutModeStore((s) => s.closeAllWorkspaceTabs)
   const exitFullscreen = useLayoutModeStore((s) => s.exitFullscreen)
 
   /** 工作区刷新 key，用于驱动 FileTreeWidget 等组件重新加载。
@@ -159,6 +161,30 @@ export function FiveSpaceLayout({
     }
     closeWorkspaceTab(tabId)
   }, [closeWorkspaceTab])
+
+  /** 处理右键「关闭其他标签」：清理待关闭 tab 的 fileEditorRegistry，再批量关闭 */
+  const handleCloseOtherTabs = useCallback((keepTabId: string) => {
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    for (const tab of tabs) {
+      if (tab.id === keepTabId || tab.isPinned) continue
+      if (tab.moduleId === '__file_editor__') {
+        removeFileEditorData(tab.id)
+      }
+    }
+    closeOtherWorkspaceTabs(keepTabId)
+  }, [closeOtherWorkspaceTabs])
+
+  /** 处理右键「关闭所有标签」：清理所有可关 tab 的 fileEditorRegistry，再批量关闭 */
+  const handleCloseAllTabs = useCallback(() => {
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    for (const tab of tabs) {
+      if (tab.isPinned) continue
+      if (tab.moduleId === '__file_editor__') {
+        removeFileEditorData(tab.id)
+      }
+    }
+    closeAllWorkspaceTabs()
+  }, [closeAllWorkspaceTabs])
 
   // Layout resolution
   // themeConfig 异步解析（主题从 store/API 加载），刷新后会在首帧后才就位。
@@ -529,6 +555,8 @@ export function FiveSpaceLayout({
               tabs={workspaceTabs}
               onTabChange={setActiveTab}
               onTabClose={handleCloseTab}
+              onTabCloseOthers={handleCloseOtherTabs}
+              onTabCloseAll={handleCloseAllTabs}
               renderTabContent={renderTabContent}
               onFullscreen={toggleWorkspaceFullscreen}
               isFullscreen={true}
@@ -638,6 +666,8 @@ export function FiveSpaceLayout({
                       tabs={workspaceTabs}
                       onTabChange={setActiveTab}
                       onTabClose={handleCloseTab}
+                      onTabCloseOthers={handleCloseOtherTabs}
+                      onTabCloseAll={handleCloseAllTabs}
                       renderTabContent={renderTabContent}
                       onFullscreen={toggleWorkspaceFullscreen}
                       isFullscreen={false}
@@ -687,6 +717,20 @@ export function FiveSpaceLayout({
                   onTabClose={(tabId) => {
                     handleCloseTab(tabId)
                     const remaining = useLayoutModeStore.getState().workspaceTabs.filter(t => t.id !== tabId)
+                    if (remaining.length === 0) {
+                      setMobileWorkspaceOpen(false)
+                    }
+                  }}
+                  onTabCloseOthers={(keepTabId) => {
+                    handleCloseOtherTabs(keepTabId)
+                    const remaining = useLayoutModeStore.getState().workspaceTabs
+                    if (remaining.length === 0) {
+                      setMobileWorkspaceOpen(false)
+                    }
+                  }}
+                  onTabCloseAll={() => {
+                    handleCloseAllTabs()
+                    const remaining = useLayoutModeStore.getState().workspaceTabs
                     if (remaining.length === 0) {
                       setMobileWorkspaceOpen(false)
                     }

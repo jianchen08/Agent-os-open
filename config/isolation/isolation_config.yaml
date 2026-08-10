@@ -47,6 +47,9 @@ coordinator:
   enabled: true
   enable_fallback: false
   default_level: isolated
+  # 会话级默认隔离模式（与任务级 default_level 独立）：
+  # non_isolated = 宿主直接执行 + 危险操作审批；isolated = 容器执行
+  session_default_level: non_isolated
   reuse_environment: true
   resource_limits:
     max_environments: 50

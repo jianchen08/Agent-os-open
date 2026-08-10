@@ -7,6 +7,34 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+# ★ engine_task 强引用保护集：entry 被删/覆盖后 task 不会被 GC 静默回收。
+# Python asyncio 官方警告："Save a reference to the result of ensure_future,
+# to avoid a task disappearing mid-execution"。entry.engine_task 是唯一引用时，
+# 一旦 entry 从注册表删除，task 会立即被 GC → 协程静默死亡、finally 不执行。
+# 此处持有独立强引用，task 完成后由 done_callback 自动清理。
+_engine_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _track_engine_task(task: asyncio.Task[Any], pipeline_id: str) -> None:
+    """登记 engine_task 强引用 + done 回调自动清理。
+
+    即使注册表 entry 被删/覆盖，task 也不会被 GC（强引用仍在），
+    能正常执行完 finally 块（打"引擎停止"日志、emit_finish 等）。
+    """
+    _engine_tasks.add(task)
+
+    def _on_done(t: asyncio.Task[Any]) -> None:
+        _engine_tasks.discard(t)
+        if not t.cancelled():
+            with __import__("contextlib").suppress(Exception):
+                t.exception()  # 消费异常避免 "never retrieved" 告警
+
+    task.add_done_callback(_on_done)
+    logger.info(
+        "[MessageBus] engine_task 已登记强引用保护 | pipeline=%s task_id=%s",
+        pipeline_id[:12], id(task),
+    )
+
 if TYPE_CHECKING:
     from agents.types import AgentConfig
     from pipeline.sink import IOutputSink
@@ -322,6 +350,9 @@ async def _start_idle_engine(
         task_id = _tags.get("task_id", "") or ""
     if not workspace:
         workspace = _tags.get("workspace", "") or ""
+    # 会话级隔离模式（tags 由创建者写入）：随 extra_state 播种到管道 state，
+    # 供 session_isolation 插件（主会话容器决策）与 param_inject（任务继承）消费。
+    isolation_level = _tags.get("isolation_level", "") or ""
     # user_id / session_id 随上下文同源恢复，播种到管道 state
     # （task_submit 继承身份、task_status_update / task_status_changed 定位投递目标）
     _ctx_user_id = _tags.get("user_id", "") or ""
@@ -344,6 +375,7 @@ async def _start_idle_engine(
             task_id=task_id,
             workspace=workspace,
             project_root="",
+            isolation_level=isolation_level,
             streaming=True,
             on_chunk=None,
             client_message_id=client_message_id,
@@ -355,6 +387,8 @@ async def _start_idle_engine(
     _idle_entry = _registry.get(pipeline_id)
     if _idle_entry:
         _idle_entry.engine_task = engine_future
+    # ★ 独立强引用保护：防止 entry 被删/覆盖后 engine_task 被 GC 静默回收
+    _track_engine_task(engine_future, pipeline_id)
     logger.info("[MessageBus] idle engine started (main loop) | pipeline=%s", pipeline_id[:12])
     return InjectResult(success=True, method="start", pipeline_id=pipeline_id, bridge=bridge)
 

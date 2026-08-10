@@ -202,6 +202,82 @@ class TestRegisterTotalTimeout:
         assert "total_timeout" in called[0]
         ctx.set_terminal.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_missing_agent_level_falls_back_to_task_object(self) -> None:
+        """task_data 缺 agent_level 时，从 task 对象取（重试/resume 路径的回归测试）。
+
+        BUG-FIX-fix_20260802_retry_task_data_missing_agent_level:
+        _retry_from_terminal / _resume_from_stopped 构造的 task_data 不含
+        agent_level，导致 _register_total_timeout 误用 "L3" fallback，
+        L2 任务超时文案/分级全部错判为 L3。修复后从 task_service.get_task()
+        返回的 task 对象取权威 agent_level。
+        """
+        from agents.types import AgentLevel
+        from infrastructure.task_executor import TaskExecutorMixin
+
+        class _Holder(TaskExecutorMixin):
+            pass
+
+        holder = _Holder()
+        ctx = TaskExecutionContext("t-missing-level")
+        mgr = TimerManager()
+
+        # task 对象 agent_level=L2（模拟重试场景 task_data 漏带的情况）
+        _task_obj = MagicMock()
+        _task_obj.agent_level = AgentLevel.L2_SUBTASK
+
+        ts = MagicMock()
+        ts.get_task = MagicMock(return_value=_task_obj)
+
+        # task_data 故意不带 agent_level（复现重试路径的 bug）
+        holder._register_total_timeout(
+            "t-missing-level", {}, None, ts, mgr, ctx,
+        )
+        try:
+            handle = ctx.total_timeout_handle
+            assert handle is not None
+            # L2 fallback 应是 9000s（2.5h），而非 L3 的 3600s
+            loop = asyncio.get_running_loop()
+            duration_approx = handle._when - loop.time()
+            assert 8900 <= duration_approx <= 9100, (
+                f"task_data 缺 agent_level 时应从 task 对象取 L2(9000s)，"
+                f"实际 duration={duration_approx}"
+            )
+        finally:
+            if ctx.total_timeout_handle:
+                ctx.total_timeout_handle.cancel()
+
+    @pytest.mark.asyncio
+    async def test_missing_agent_level_and_no_task_defaults_l3(self) -> None:
+        """task_data 缺 agent_level 且 task 对象也不存在 → 兜底 L3。"""
+        from infrastructure.task_executor import TaskExecutorMixin
+
+        class _Holder(TaskExecutorMixin):
+            pass
+
+        holder = _Holder()
+        ctx = TaskExecutionContext("t-no-task")
+        mgr = TimerManager()
+
+        ts = MagicMock()
+        ts.get_task = MagicMock(return_value=None)
+
+        holder._register_total_timeout(
+            "t-no-task", {}, None, ts, mgr, ctx,
+        )
+        try:
+            handle = ctx.total_timeout_handle
+            assert handle is not None
+            # 无 task 对象 → 兜底 L3(3600s)
+            loop = asyncio.get_running_loop()
+            duration_approx = handle._when - loop.time()
+            assert 3500 <= duration_approx <= 3700, (
+                f"无 task 对象时应兜底 L3(3600s)，实际 duration={duration_approx}"
+            )
+        finally:
+            if ctx.total_timeout_handle:
+                ctx.total_timeout_handle.cancel()
+
 
 class TestCancelPipelineCancelsTotalTimeout:
     """cancel_pipeline（pause/cancel 终态冻结引擎的统一路径）必须取消
@@ -235,3 +311,51 @@ class TestCancelPipelineCancelsTotalTimeout:
 
         handle.cancel.assert_called_once()
         assert ctx.total_timeout_handle is None
+
+
+class TestNoTerminalWaitTimeoutLayer:
+    """回归：_cleanup_after_engine 不应再有 terminal_wait_timeout 蹲守层。
+
+    BUG-FIX-fix_20260803_zombie_running_multi_timeout_clash:
+    历史上 _cleanup_after_engine 在 _check_post_pipeline_state 之后还用
+    asyncio.wait_for(ctx.terminal_event.wait(), timeout=terminal_wait_timeout)
+    蹲守终态信号。这层超时与 total_timeout 硬墙 + stop_check.max_duration
+    三层互相打架：terminal_wait_timeout 超时后只打 warning 就 ctx.cleanup()
+    撒手，而 cleanup 会 cancel 掉真正兜底的 total_timeout 硬墙定时器
+    （task_context.cleanup:78-81）→ 硬墙哑火 → 任务永远停在 running（僵尸）。
+
+    修复：删掉这层蹲守，终态兜底统一交给 total_timeout 硬墙。本测试锁定该
+    修复不被回退——一旦有人重新加回 wait_for(terminal_event) 或
+    terminal_wait_timeout 配置键，测试即失败。
+    """
+
+    def test_source_no_longer_waits_on_terminal_event(self) -> None:
+        """task_executor.py 不应再用 wait_for 等待 terminal_event。"""
+        import infrastructure.task_executor as mod
+        from pathlib import Path
+
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        # 精确指纹：wait_for + terminal_event 同现即为回退
+        for i, line in enumerate(src.splitlines(), 1):
+            joined = line
+            if "wait_for" in joined and "terminal_event" in joined:
+                pytest.fail(
+                    f"task_executor.py:{i} 重新引入了 wait_for(terminal_event) 蹲守层，"
+                    f"会与 total_timeout 硬墙打架导致僵尸 running 任务: {line.strip()}"
+                )
+
+    def test_source_no_longer_reads_terminal_wait_timeout_config(self) -> None:
+        """task_executor.py 不应再读 terminal_wait_timeout 配置键。"""
+        import infrastructure.task_executor as mod
+        from pathlib import Path
+
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        # 注释里提到历史名是允许的（说明为何移除），只禁运行时读取
+        import re
+
+        # 匹配 self._config.get(...terminal_wait_timeout...) 形式
+        runtime_read = re.search(r"_config\.get\(\s*[\"']terminal_wait_timeout[\"']\s*,", src)
+        assert runtime_read is None, (
+            "task_executor.py 仍在运行时读取 terminal_wait_timeout 配置，"
+            "该蹲守层已移除（与 total_timeout 硬墙打架会导致僵尸 running 任务）。"
+        )

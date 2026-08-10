@@ -133,7 +133,6 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - task_evaluate
 - yaml_validate
 hard_constraints:

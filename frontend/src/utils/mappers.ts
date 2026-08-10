@@ -32,6 +32,10 @@ export interface ThreadStateResponse {
   active_pipeline_id?: string | null
   /** 元数据 */
   metadata?: Record<string, any>
+  /** 会话工作空间绝对路径 */
+  workspace?: string | null
+  /** 会话隔离模式 */
+  isolation_mode?: 'isolated' | 'non_isolated' | null
 }
 
 /**
@@ -52,6 +56,8 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
     activePipelineId: (thread as ThreadStateResponse).active_pipeline_id || null,
     pinned: metadata.pinned === true,
     starred: metadata.starred === true,
+    workspace: (thread as ThreadStateResponse).workspace ?? null,
+    isolationMode: (thread as ThreadStateResponse).isolation_mode ?? null,
   }
 }
 

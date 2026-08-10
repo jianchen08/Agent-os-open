@@ -218,6 +218,9 @@ async def test_no_leak_on_connect_timeout() -> None:
         )
 
     # 建连超时后，信号量必须已释放（通过 _open_and_first_chunk 的 aclose 触发）
+    # _await_with_escape 超时后 aclose 在后台异步执行（不阻塞调用方），
+    # 给事件循环一点时间让后台 aclose 完成。
+    await asyncio.sleep(0.1)
     sem = slot._get_semaphore()
     assert sem.capacity == 1, (
         "建连超时必须释放信号量许可——否则高频超时会耗尽信号量（泄漏回归）"
@@ -407,6 +410,46 @@ async def test_acquires_after_repeated_cancellation_not_starved() -> None:
 
     slot.release()
     await asyncio.wait_for(slot.acquire(), timeout=1.0)
+    slot.release()
+
+
+# ---------------------------------------------------------------------------
+# 7. 持锁者卡死 → 异常路径 release 保证许可归还（无时间兜底）
+#
+# 回归契约（fix_20260802_stuck_holder_permit_lease → 修正设计）：
+# 信号量许可回收完全依赖调用方的错误处理（异常 → finally → release），
+# 不做任何时间兜底。LLM 调用超时/异常时，adapter 的 finally 必须执行
+# slot.release()，保证许可归还给后续排队者。
+# 持锁卡死的根因在 LLM 调用层（litellm 半死连接吞取消），由 adapter 的
+# _await_with_escape 超时透传 + finally release 解决，信号量只做排队调度。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_release_after_exception_returns_permit() -> None:
+    """异常路径 release 后，排队者必须能拿到许可（无时间兜底，靠错误处理）。
+
+    capacity=1 占满 → 排队者等待 → 持锁者「异常退出」时调 release →
+    排队者立即被唤醒（不等任何时间兜底）。
+    """
+    slot = KeySlot(key_id="k", api_key="sk", max_concurrent=1)
+    await slot.acquire()  # 占满
+
+    acquired = asyncio.Event()
+
+    async def _waiter() -> None:
+        await slot.acquire()
+        acquired.set()
+
+    waiter_task = asyncio.create_task(_waiter())
+    await asyncio.sleep(0.05)  # 确保排队者已进入等待队列
+    assert not acquired.is_set(), "排队者必须阻塞"
+
+    # 模拟持锁者异常退出：finally 调 release
+    slot.release()
+    await asyncio.wait_for(acquired.wait(), timeout=0.5)
+    assert acquired.is_set(), "持锁者异常 release 后，排队者必须立即拿到许可"
+    waiter_task.result()
     slot.release()
 
 

@@ -90,7 +90,6 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - bash_execute
 - enhanced_search
 - resource_search
@@ -102,7 +101,6 @@ tool_ids:
 - task_evaluate
 - human_interaction
 - design_generate
-- playwright_test
 - design_review
 hard_constraints:
 - 遇到无法解决的问题必须报告
@@ -200,7 +198,7 @@ is_active: true
 status: active
 max_iterations: 250
 max_reminders: 5
-timeout_seconds: 2400
+timeout_seconds: 9000
 plugins:
   disabled: []
   enabled:

@@ -441,7 +441,18 @@ class TaskExecutorMixin:
                 _ws_meta: dict[str, Any],
                 _engine_ref: Any,  # PipelineEngine
             ) -> None:
-                """引擎结束后统一清理：检查终态 + 等待terminal + 清理上下文。"""
+                """引擎结束后统一清理：检查终态 + 清理上下文。
+
+                设计说明：此处不再额外等待 terminal_event。
+                历史上这里有一层 terminal_wait_timeout（默认 600s / 配置 3600s）蹲守
+                终态信号，但它与 total_timeout 硬墙（task_executor._register_total_timeout）
+                以及 engine 的 stop_check.max_duration 三层超时互相打架：
+                terminal_wait_timeout 超时后只打 warning 并 ctx.cleanup()，而 cleanup 会
+                cancel 掉真正有用的 total_timeout 硬墙定时器（task_context.cleanup:78-81），
+                导致硬墙哑火、任务永远停在 running（僵尸任务）。
+                终态兜底统一交给 total_timeout 硬墙（到点 fail_task）；正常结束路径由
+                _check_post_pipeline_state 写 evaluating/failed 终态即可。
+                """
 
                 try:
                     # 获取管道最终状态
@@ -478,18 +489,6 @@ class TaskExecutorMixin:
                             _ctx,
                             _timer_mgr,
                         )
-
-                    # 等待任务达到终态
-
-                    terminal_wait_timeout = self._config.get("terminal_wait_timeout", 600)
-
-                    try:
-                        await asyncio.wait_for(_ctx.terminal_event.wait(), timeout=terminal_wait_timeout)
-
-                        logger.debug("TaskWorker: task %s reached terminal state", _task_id)
-
-                    except asyncio.TimeoutError:
-                        logger.warning("TaskWorker: task %s timed out waiting for terminal state", _task_id)
 
                 except Exception as _cleanup_exc:
                     logger.error("TaskWorker: post-pipeline cleanup error | task=%s | error=%s", _task_id, _cleanup_exc)
@@ -658,9 +657,9 @@ class TaskExecutorMixin:
 
         # fire-and-forget: 引擎在独立线程中运行，不阻塞等待
 
-        # 管道完成后的 _check_post_pipeline_state + terminal_event.wait()
-
-        # 已移至 _cleanup_after_engine 回调，由 engine_future.add_done_callback 触发
+        # 管道完成后的 _check_post_pipeline_state 已移至 _cleanup_after_engine 回调，
+        # 由 engine_future.add_done_callback 触发。终态兜底交给 total_timeout 硬墙，
+        # 这里不再额外等待 terminal_event（避免与硬墙打架、误 cancel 硬墙）。
 
     # ───────────────────────────────────────────────────────────────────
 
@@ -1001,7 +1000,29 @@ class TaskExecutorMixin:
         if timer_manager is None:
             return
 
-        agent_level = str(task_data.get("agent_level", "")) or "L3"
+        # agent_level 权威来源优先级：
+        #   1. task_data["agent_level"]（task_submit 构造时写入）
+        #   2. task 对象的 agent_level（重试/resume 路径 task_data 未带时的兜底，
+        #      task 对象是权威源，避免误判为 L3 导致超时文案/分级错误）
+        #   3. "L3"（最终 fallback）
+        agent_level = str(task_data.get("agent_level", "")) or ""
+
+        if not agent_level and task_service is not None:
+            _task_obj = task_service.get_task(task_id)
+
+            if _task_obj is not None:
+                _raw_level = getattr(_task_obj, "agent_level", None)
+
+                if _raw_level is not None:
+                    # agent_level 可能是 AgentLevel 枚举（取 .value）或已是字符串
+                    agent_level = (
+                        _raw_level.value
+                        if hasattr(_raw_level, "value")
+                        else str(_raw_level)
+                    )
+
+        if not agent_level:
+            agent_level = "L3"
 
         # per-agent timeout_seconds 优先于 level fallback
         if agent is not None:

@@ -188,7 +188,7 @@ system_prompt: |-
      - 每个 L3 的 tool_ids 中的工具确实存在
      - **编排 Agent 引用校验**：L2 的 system_prompt 中引用的下级 Agent 名称（如 `xxx_agent`）必须与实际存在的 config_id（即对应 yaml 文件名去掉 `.yaml` 后缀）完全一致，逐个核对名称拼写
 
-  4. **重复文件检测**：使用 list_directory 检查 `config/agents/` 下各子目录，确认同一个 agent_id 没有出现在多个位置（如同时出现在 `config/agents/xxx_agent/agent.yaml` 和 `config/agents/<category>/xxx_agent.yaml`）。**注意：历史上曾出现过这种重复**，项目路径规范已明确要求使用扁平单文件结构（见下方路径规范），但旧文件可能残留。发现重复时，保留标准路径 `config/agents/<category>/<agent_id>.yaml`，删除非标准路径的文件。
+  4. **重复文件检测**：使用 file_read 列出 `config/agents/` 下各子目录，确认同一个 agent_id 没有出现在多个位置（如同时出现在 `config/agents/xxx_agent/agent.yaml` 和 `config/agents/<category>/xxx_agent.yaml`）。**注意：历史上曾出现过这种重复**，项目路径规范已明确要求使用扁平单文件结构（见下方路径规范），但旧文件可能残留。发现重复时，保留标准路径 `config/agents/<category>/<agent_id>.yaml`，删除非标准路径的文件。
 
   5. **task_evaluate 整体评估**
      - 通过 → 完成
@@ -426,7 +426,6 @@ tool_ids:
 - file_write
 - yaml_validate
 - create_directory
-- list_directory
 - human_interaction
 - memory
 - copy_file
@@ -546,7 +545,7 @@ is_active: true
 status: active
 max_iterations: 250
 max_reminders: 8
-timeout_seconds: 3600
+timeout_seconds: 9000
 tags:
 - orchestrator
 - resource

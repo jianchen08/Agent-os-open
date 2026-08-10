@@ -27,6 +27,10 @@ interface ThreadCreateRequest {
   metadata?: Record<string, unknown>
   /** 绑定的 Agent ID（可选）- Requirements: 6.1 */
   agent_id?: string
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolation_mode?: 'isolated' | 'non_isolated'
 }
 
 /** 后端线程创建响应类型 */
@@ -348,6 +352,10 @@ export interface CreateSessionOptions {
   title?: string
   /** 绑定的 Agent ID（可选） */
   agentId?: string
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolationMode?: 'isolated' | 'non_isolated'
 }
 
 export async function createSession(
@@ -364,6 +372,14 @@ export async function createSession(
 
     if (options.agentId !== undefined) {
       requestData.agent_id = options.agentId
+    }
+
+    if (options.workspace !== undefined) {
+      requestData.workspace = options.workspace
+    }
+
+    if (options.isolationMode !== undefined) {
+      requestData.isolation_mode = options.isolationMode
     }
 
     const response = await apiClient.post<ThreadCreateResponse>(

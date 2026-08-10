@@ -147,7 +147,7 @@ static_vars:
     content: '## 可扩展工具（下级 Agent 使用，L1 不直接调用）
 
 
-      以下工具供下级执行 Agent 使用，L1 通过 resource_search 查找匹配资源时知晓其存在即可，不自行加载调用：file_write, bash_execute, enhanced_search, web_search, task_evaluate, yaml_validate, fetch, design_generate, playwright_test, design_review, resource_merge
+      以下工具供下级执行 Agent 使用，L1 通过 resource_search 查找匹配资源时知晓其存在即可，不自行加载调用：file_write, bash_execute, enhanced_search, web_search, task_evaluate, yaml_validate, fetch, design_generate, design_review, resource_merge
 
       '
   - '{{path:config/users/default/profile.md}}'

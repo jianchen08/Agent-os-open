@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
+import { updateSession as updateSessionApi } from '@/services/api/session'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
@@ -185,18 +186,34 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
    * 确认创建 / 编辑会话
    */
   const handleSaveSession = useCallback(
-    async (sessionId: string | null, title: string, agentId: string | null) => {
+    async (
+      sessionId: string | null,
+      title: string,
+      agentId: string | null,
+      options?: { workspace?: string; isolationMode?: 'isolated' | 'non_isolated' },
+    ) => {
       setIsSaving(true)
       try {
         if (sessionId) {
-          // 编辑已有会话 — 两个操作必须串行，避免竞争
+          // 编辑已有会话 — 串行执行，避免竞争
           await renameSession(sessionId, title)
           await updateSessionAgent(sessionId, agentId)
+          // 工作空间/隔离模式变更（经 metadata 更新，后端同步注册 tags）
+          if (options?.workspace !== undefined || options?.isolationMode !== undefined) {
+            await updateSessionApi(sessionId, {
+              metadata: {
+                workspace: options.workspace || null,
+                isolation_mode: options.isolationMode || null,
+              },
+            })
+          }
           setModal(null)
         } else {
-          // 新建会话
+          // 新建会话（支持工作空间与隔离模式）
           const session = await createSession(title || undefined, {
             agentId: agentId || undefined,
+            workspace: options?.workspace || undefined,
+            isolationMode: options?.isolationMode,
           })
           setModal(null)
           navigate(`/session/${session.id}`)

@@ -593,20 +593,30 @@ def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
     is_v6 = ":" in host and not host.startswith("0.")
     family = socket.AF_INET6 if is_v6 else socket.AF_INET
     for port in range(start_port, start_port + 100):
-        try:
-            with socket.socket(family, socket.SOCK_STREAM) as s:
-                # IPv6 socket 默认可能 V6ONLY，关掉以匹配 dualstack 监听语义
-                if is_v6:
-                    try:
-                        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-                    except (OSError, AttributeError):
-                        pass
-                s.bind((host, port, 0, 0) if is_v6 else (host, port))
-                return port
-        except OSError:
-            logger.debug("端口 %d 已被占用，尝试下一个", port)
-            continue
+        if _is_port_available(port, host, family, is_v6):
+            return port
+        logger.debug("端口 %d 已被占用，尝试下一个", port)
     raise RuntimeError(f"在端口 {start_port}-{start_port + 99} 范围内没有可用端口")
+
+
+def _is_port_available(port: int, host: str, family: int, is_v6: bool) -> bool:
+    """探测单个端口在指定 host 上是否可绑定（即可被服务监听）。
+
+    抽出为独立函数，供 ``main()`` 在严格模式下做单端口可用性校验复用。
+    用临时 socket 尝试 bind：成功即空闲，OSError（EADDRINUSE 等）即被占。
+    """
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            # IPv6 socket 默认可能 V6ONLY，关掉以匹配 dualstack 监听语义
+            if is_v6:
+                try:
+                    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except (OSError, AttributeError):
+                    pass
+            s.bind((host, port, 0, 0) if is_v6 else (host, port))
+        return True
+    except OSError:
+        return False
 
 
 def main() -> None:
@@ -626,22 +636,30 @@ def main() -> None:
     # 绑定地址优先级：命令行 --host > 环境变量 BACKEND_HOST > 默认 0.0.0.0
     bind_host = _resolve_bind_host(args.host or os.environ.get("BACKEND_HOST", "0.0.0.0"))
 
-    actual_port = find_available_port(preferred_port, bind_host)
-
-    if actual_port != preferred_port:
-        logger.warning(
-            "端口 %d 已被占用，自动切换到 %d",
+    # 端口可用性校验：不再静默漂移到下一个可用端口。
+    # 历史上这里用 find_available_port() 自动跳到 8989 等端口，但该决定只在后端进程内
+    # 生效，启动脚本（start_web_cn.bat）和前端容器（docker-compose 的 BACKEND_URL）
+    # 已固化旧端口，三者不一致导致前端反代打到错误后端、登录静默失败。
+    # 现改由启动脚本在脚本层探测真实可用端口后传入，这里只做严格校验：
+    # 端口被占即报错退出，暴露问题而非掩盖。
+    is_v6 = ":" in bind_host and not bind_host.startswith("0.")
+    family = socket.AF_INET6 if is_v6 else socket.AF_INET
+    if not _is_port_available(preferred_port, bind_host, family, is_v6):
+        logger.error(
+            "端口 %d 已被占用，无法启动后端。"
+            "请释放该端口，或通过环境变量 BACKEND_PORT 指定其他端口，"
+            "或重新运行 start_web_cn.bat / start_web.sh 由脚本自动分配可用端口。",
             preferred_port,
-            actual_port,
         )
+        raise SystemExit(1)
+
+    actual_port = preferred_port
 
     logger.info("正在启动 Agent OS 服务器...")
     logger.info("绑定地址: %s:%d", bind_host, actual_port)
     logger.info("API 地址: http://127.0.0.1:%d", actual_port)
     logger.info("API 文档: http://127.0.0.1:%d/docs", actual_port)
     logger.info("健康检查: http://127.0.0.1:%d/health", actual_port)
-
-    os.environ["BACKEND_PORT"] = str(actual_port)
 
     app = create_combined_app()
     uvicorn.run(

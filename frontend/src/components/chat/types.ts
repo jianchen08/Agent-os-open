@@ -3,6 +3,7 @@
  */
 
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
+import type { CumulativeUsage } from '@/stores/contextUsageStore'
 
 /**
  * 消息内容类型
@@ -75,7 +76,7 @@ export interface ChatContainerProps {
   onSendMessage: (params: SendMessageParams) => Promise<void>
   /** 停止生成回调 */
   onStopGenerate?: () => void
-  /** 当前 Token 使用量（prompt tokens） */
+  /** 当前 Token 使用量（prompt tokens，单轮，用于进度条占窗比） */
   currentTokenUsage?: number
   /** 最大 Token 限制 */
   maxTokens?: number
@@ -83,6 +84,8 @@ export interface ChatContainerProps {
   completionTokens?: number
   /** 上一轮总 tokens */
   totalTokens?: number
+  /** 整个管道的累计 token 用量（跨轮加总，含命中/未命中/输出三维度） */
+  cumulativeTokens?: CumulativeUsage
   /** 思考模式状态 */
   thinkingMode?: ThinkingModeState
   /** 思考模式切换回调 */
@@ -205,7 +208,7 @@ export interface ChatInputProps {
   enableDragDrop?: boolean
   /** 模型名称（用于文件上传） */
   modelName?: string
-  /** 当前 Token 使用量（prompt tokens） */
+  /** 当前 Token 使用量（prompt tokens，单轮，用于进度条占窗比） */
   currentTokenUsage?: number
   /** 最大 Token 限制 */
   maxTokens?: number
@@ -213,6 +216,8 @@ export interface ChatInputProps {
   completionTokens?: number
   /** 上一轮总 tokens */
   totalTokens?: number
+  /** 整个管道的累计 token 用量（跨轮加总，含命中/未命中/输出三维度） */
+  cumulativeTokens?: CumulativeUsage
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
   /** 思考模式状态 */

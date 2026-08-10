@@ -211,6 +211,21 @@ goto :portproxy_done
 echo [WARN] Port forwarding NOT set. Run as admin or set manually.
 :portproxy_done
 
+REM 后端端口可用性探测（对齐 start_web.sh 的脚本层探测范式）。
+REM 必须在容器启动(:217)和后端进程启动(:417)之前完成：探测出的真实端口会
+REM 同时下传给前端容器(compose 的 BACKEND_PORT)和后端进程(launcher 的 BACKEND_PORT)，
+REM 保证三方一致，避免历史上 app_factory.py 静默漂移导致的前端反代打错后端。
+set "_PORT_DRIFTED=0"
+set "_ORIG_BACKEND_PORT=%BACKEND_PORT%"
+call :resolve_backend_port
+REM Avoid if(...) blocks: 见 :43-45 注释。errorlevel 判断用 goto 更稳健。
+if not errorlevel 1 goto :backend_port_resolved
+echo [ERROR] 在 %_ORIG_BACKEND_PORT% 起的 100 个端口范围内无可用端口，无法启动后端。
+echo [ERROR] 请释放占用端口的进程，或用 set BACKEND_PORT=^<其他端口^> 指定。
+pause
+exit /b 1
+:backend_port_resolved
+
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 REM    Outer timeout 240s backstop; script internals also wrap every docker call.
 echo [INFO] Starting project containers...
@@ -418,6 +433,42 @@ echo   Backend: http://127.0.0.1:%BACKEND_PORT%
 echo   Frontend: http://127.0.0.1:%FRONTEND_HOST_PORT%
 echo   Stop: close Agent window + docker compose down
 echo ========================================
+REM 端口漂移提示：原端口被占时已自动切到可用端口，且容器与后端都用该端口，三方一致。
+REM Avoid if(...) blocks: 见 :43-45 注释，echo 文本里的 ( ) 会让 cmd 块解析器误判。
+if not "!_PORT_DRIFTED!"=="1" goto :eof_backend_launch
+echo [INFO] 默认端口 %_ORIG_BACKEND_PORT% 被占用，已自动切换到 !BACKEND_PORT!（前后端均已对齐）。
+echo ========================================
+goto :eof_backend_launch
+
+REM ---------------------------------------------------------------------------
+REM 子例程：探测 BACKEND_PORT 是否可用，被占则向上找首个可用端口（+100 上限）。
+REM 入口：BACKEND_PORT（期望端口）。出口：BACKEND_PORT（实际可用端口）+ _PORT_DRIFTED。
+REM 返回码：0=成功，1=范围内无可用端口。
+REM 用 netstat 检测 LISTENING；注意 host 0.0.0.0 监听会同时占用 127.0.0.1 和具体 IP，
+REM 故同时检测 ":<port> " 和 ":<port>" 行尾的 LISTENING 项。
+REM 避免 if(...) 块（见 :43-45 注释），用 goto 分支 + delayedexpansion。
+REM ---------------------------------------------------------------------------
+:resolve_backend_port
+set "_PROBE_PORT=%BACKEND_PORT%"
+set /a "_PROBE_LIMIT=%BACKEND_PORT% + 100"
+:probe_port_loop
+netstat -ano -p tcp 2>nul | findstr /C:"LISTENING" | findstr /C:":!_PROBE_PORT! " >nul 2>&1
+if errorlevel 1 goto :probe_port_free
+REM 端口被占，尝试下一个
+set /a "_PROBE_PORT+=1"
+REM Avoid if(...) blocks: 见 :43-45 注释。用单行 goto 分支更稳健。
+if not !_PROBE_PORT! gtr !_PROBE_LIMIT! goto :probe_port_loop
+exit /b 1
+:probe_port_free
+REM _PROBE_PORT 可用。若与原始期望不同，标记漂移并覆盖 BACKEND_PORT。
+if not "!_PROBE_PORT!"=="%_ORIG_BACKEND_PORT%" (
+    set "_PORT_DRIFTED=1"
+    echo [INFO] 端口 %_ORIG_BACKEND_PORT% 已被占用，后端改用 !_PROBE_PORT!
+)
+set "BACKEND_PORT=!_PROBE_PORT!"
+exit /b 0
+
+:eof_backend_launch
 pause
 exit /b 0
 

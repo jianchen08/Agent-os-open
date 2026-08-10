@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import logging
 import threading
+import traceback
 import uuid
 from typing import Any, ClassVar
 
 from pipeline.pipeline_entry import MAX_TAGS_PER_PIPELINE, PipelineEntry
 
 logger = logging.getLogger(__name__)
+
+
+def _caller_info(depth: int = 3) -> str:
+    """获取调用方信息（文件:行号:函数），用于追踪 register/unregister 的发起者。
+
+    depth=3 跳过本函数、register/unregister 本身，定位到真正的业务调用方。
+    """
+    try:
+        frame = traceback.extract_stack(limit=depth + 1)[0]
+        return f"{frame.filename.split('/')[-1]}:{frame.lineno}:{frame.name}"
+    except Exception:
+        return "?"
 
 
 class EngineRegistry:
@@ -63,6 +76,20 @@ class EngineRegistry:
         )
 
         if existing is not None:
+            # ★ 覆盖告警：旧 entry 被新 entry 替换，若旧 entry 持有未完成的
+            # engine_task，覆盖后旧 entry 失去引用 → engine_task 可能被 GC 静默回收
+            # （Python asyncio 官方警告：task 无强引用会被 GC，finally 不执行）。
+            _old_et = existing.engine_task
+            _old_et_alive = _old_et is not None and not _old_et.done()
+            if _old_et_alive:
+                logger.error(
+                    "[EngineRegistry] register 覆盖了持有存活 engine_task 的 entry！"
+                    " pipeline=%s old_engine_task_done=%s —— 旧 task 引用即将丢失，"
+                    "可能导致协程静默死亡（finally 不执行）caller=%s",
+                    pipeline_id[:12],
+                    _old_et.done(),
+                    _caller_info(),
+                )
             entry.bridge = existing.bridge
 
             entry.drain_task = existing.drain_task
@@ -77,12 +104,13 @@ class EngineRegistry:
         self._engines[pipeline_id] = entry
 
         logger.info(
-            "[EngineRegistry] 注册引擎: pipeline=%s thread=%s is_suspended=%s total=%d preserved_bridge=%s",
+            "[EngineRegistry] 注册引擎: pipeline=%s thread=%s is_suspended=%s total=%d preserved_bridge=%s caller=%s",
             pipeline_id[:12],
             thread_id[:12] if thread_id else "",
             getattr(engine, "is_suspended", "?"),
             len(self._engines),
             entry.bridge is not None,
+            _caller_info(),
         )
 
         return entry
@@ -105,6 +133,15 @@ class EngineRegistry:
 
         if pipeline_id and pipeline_id in self._engines:
             entry = self._engines[pipeline_id]
+
+            # ★ 命中已注册：记录复用 + engine_task 状态（排查"同 pid 重复注册"线索）
+            _et = entry.engine_task
+            logger.info(
+                "[EngineRegistry] register_pipeline 命中已注册(复用): pid=%s engine_task_alive=%s caller=%s",
+                pipeline_id[:12],
+                _et is not None and not _et.done(),
+                _caller_info(),
+            )
 
             if services and hasattr(entry.engine, "update_services"):
                 entry.engine.update_services(services)
@@ -202,10 +239,32 @@ class EngineRegistry:
         entry = self._engines.pop(pipeline_id, None)
 
         if entry is not None:
+            # ★ 详细记录谁删的 + entry 状态：engine_task 是否存活、bridge 是否在
+            _et = entry.engine_task
+            _et_alive = _et is not None and not _et.done()
             logger.info(
-                "[EngineRegistry] 注销引擎: pipeline=%s total=%d",
+                "[EngineRegistry] 注销引擎: pipeline=%s total=%d engine_task_alive=%s bridge=%s caller=%s",
                 pipeline_id[:12],
                 len(self._engines),
+                _et_alive,
+                entry.bridge is not None,
+                _caller_info(),
+            )
+            # ★ 存活 engine_task 被注销：entry 失去引用后 task 可能被 GC 静默回收
+            if _et_alive:
+                logger.error(
+                    "[EngineRegistry] 注销了持有存活 engine_task 的 entry！"
+                    " pipeline=%s —— engine_task 引用即将丢失，可能导致协程静默死亡 caller=%s",
+                    pipeline_id[:12],
+                    _caller_info(),
+                )
+
+        else:
+            logger.warning(
+                "[EngineRegistry] 注销引擎(未找到): pipeline=%s total=%d caller=%s",
+                pipeline_id[:12],
+                len(self._engines),
+                _caller_info(),
             )
 
         return entry

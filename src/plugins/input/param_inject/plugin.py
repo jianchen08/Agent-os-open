@@ -219,6 +219,14 @@ class ParamInjectPlugin(IInputPlugin):
                 if workspace:
                     args["workspace"] = workspace
 
+            # 注入 isolation_level（会话级隔离模式，task_submit 继承到子任务 metadata）
+            # 与 workspace 注入同源：主会话由会话创建时写入 tags → state；
+            # 子任务管道由任务执行器写入 tags → state。
+            if "isolation_level" not in args:
+                isolation_level = ctx.state.get("isolation_level", "")
+                if isolation_level:
+                    args["isolation_level"] = isolation_level
+
             # 注入 project_root：从 state 获取 Agent OS 项目根目录
             # 供 workspace_aware 等工具使用，与 workspace 注入同源
             if "project_root" not in args:

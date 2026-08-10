@@ -88,7 +88,6 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - bash_execute
 - enhanced_search
 - web_search
@@ -96,7 +95,6 @@ tool_ids:
 - memory
 - task_evaluate
 - human_interaction
-- playwright_test
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物

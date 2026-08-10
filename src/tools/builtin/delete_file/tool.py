@@ -49,12 +49,7 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要删除的文件或目录路径（相对路径或绝对路径），与 paths 二选一",
-                    },
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "批量删除文件路径列表（与 path 二选一，优先使用 paths）",
+                        "description": "要删除的文件或目录路径（相对路径或绝对路径）",
                     },
                     "recursive": {
                         "type": "boolean",
@@ -82,50 +77,7 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
         self._init_workspace(inputs)
         self._init_agent_level(inputs)
 
-        # 优先使用 paths 批量参数
-        paths = inputs.get("paths")
-        if paths and isinstance(paths, list):
-            return await self._delete_files(inputs, paths)
-
-        # 单文件模式
         return await self._delete_single(inputs)
-
-    async def _delete_files(self, inputs: dict[str, Any], paths: list[str]) -> ToolResult:
-        """批量删除文件，每个文件独立返回结果"""
-        results = []
-        recursive = inputs.get("recursive", False)
-        force = inputs.get("force", False)
-
-        for path_str in paths:
-            file_inputs = {
-                "path": path_str,
-                "recursive": recursive,
-                "force": force,
-            }
-            result = await self._delete_single(file_inputs)
-            results.append(
-                {
-                    "path": path_str,
-                    "success": result.success,
-                    "data": result.output if result.success else None,
-                    "error": result.error if not result.success else None,
-                }
-            )
-
-        success_count = sum(1 for r in results if r["success"])
-        failed_count = len(results) - success_count
-
-        return create_success_result(
-            data={
-                "results": results,
-                "summary": {
-                    "total": len(results),
-                    "success": success_count,
-                    "failed": failed_count,
-                },
-            },
-            metadata={"action": "batch_delete_files"},
-        )
 
     async def _delete_single(self, inputs: dict[str, Any]):
         """删除单个文件"""

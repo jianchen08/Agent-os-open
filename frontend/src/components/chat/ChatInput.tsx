@@ -127,6 +127,7 @@ export const ChatInput = ({
   maxTokens = 0,
   completionTokens: _completionTokens = 0,
   totalTokens: _totalTokens = 0,
+  cumulativeTokens,
   enableThinkingMode = false,
   thinkingMode,
   toggleThinkingMode,
@@ -839,6 +840,23 @@ export const ChatInput = ({
                     <span className="text-primary/50">/</span>
                     <span className="text-primary/70">{formatNumber(maxTokens)}</span>
                   </>
+                )}
+                {/* 累计 token 消耗（整个管道跨轮加总）：进度条是单轮上下文占用，
+                    此处单独显示累计消耗，hover 展示命中/未命中/输出三维度。
+                    解决原 bug：进度条只显示单轮值，多轮管道累计几十万却只显示「一两百」。 */}
+                {cumulativeTokens && cumulativeTokens.totalTokens > 0 && (
+                  <span
+                    className="text-primary/60 cursor-help font-medium"
+                    title={
+                      `累计消耗 ${formatNumber(cumulativeTokens.totalTokens)} tokens\n` +
+                      `· 命中缓存输入: ${formatNumber(cumulativeTokens.cachedTokens)}\n` +
+                      `· 未命中输入: ${formatNumber(cumulativeTokens.missedTokens)}\n` +
+                      `· 输出: ${formatNumber(cumulativeTokens.outputTokens)}`
+                    }
+                  >
+                    <span className="text-primary/40">|</span>
+                    累计 {formatNumber(cumulativeTokens.totalTokens)}
+                  </span>
                 )}
               </div>
             ) : (

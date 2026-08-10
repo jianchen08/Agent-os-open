@@ -254,7 +254,6 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - bash_execute
 - fetch
 - task_evaluate

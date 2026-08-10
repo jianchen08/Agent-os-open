@@ -166,7 +166,6 @@ tool_ids:
 - file_read
 - file_write
 - memory
-- list_directory
 - human_interaction
 - create_directory
 - enhanced_search
@@ -261,7 +260,7 @@ is_active: true
 status: active
 max_iterations: 250
 max_reminders: 5
-timeout_seconds: 3600
+timeout_seconds: 9000
 plugins:
   disabled: []
   enabled:

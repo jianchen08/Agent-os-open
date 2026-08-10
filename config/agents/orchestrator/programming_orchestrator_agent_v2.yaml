@@ -131,6 +131,7 @@ static_vars:
       | code-frontend | 前端技术栈规范与流程（组件/样式/状态管理/API/E2E） | 前端/全栈任务与 code-implement 同时加载 | skills/code-frontend/SKILL.md |
       | code-backend | 后端技术栈规范与流程（API 设计/数据库/错误处理/端点测试） | 后端/全栈任务与 code-implement 同时加载 | skills/code-backend/SKILL.md |
       | code-debug | 调试修复（确认需要→复现→定位根因→修复→回归，含修复熔断） | 路径 B 必加载；A/C 测试失败时切换 | skills/code-debug/SKILL.md |
+      | playwright-skill | 浏览器自动化与 E2E 测试（生成并执行 Playwright 脚本，Python/TS） | 前端/全栈任务需要浏览器 GUI 验证时加载 | skills/playwright-skill/SKILL.md |
 
       标准加载示例（路径 A 编码前）：
       file_read(path="skills/code-implement/SKILL.md")
@@ -157,7 +158,6 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - enhanced_search
 - bash_execute
 - fetch
@@ -328,7 +328,7 @@ is_active: true
 status: active
 max_iterations: 400
 max_reminders: 5
-timeout_seconds: 5400
+timeout_seconds: 9000
 plugins:
   disabled: []
   enabled:

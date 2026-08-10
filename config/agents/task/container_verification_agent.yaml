@@ -32,7 +32,7 @@ system_prompt: |-
   1. 使用 file_read 读取方案文档（路径形如 `docs/{title}_solution.md`），提取测试蓝图章节：
      - **用户旅程**：角色 | 操作 | 前置条件 | 期望结果
      - **影响矩阵**：操作 | 前端影响 | 后端影响 | 副作用
-  2. 使用 list_directory 和 file_read 扫描工作空间，了解实际代码结构和文件布局
+  2. 使用 file_read 扫描工作空间（列出目录与读取文件），了解实际代码结构和文件布局
   3. 结合用户旅程和实际代码，确定每条用户旅程的验证方式：
      - API 接口 → HTTP 请求验证（curl / httpx / requests）
      - 前端交互 → Playwright DOM 断言
@@ -131,7 +131,6 @@ system_prompt: |-
 tool_ids:
 - file_read
 - file_write
-- list_directory
 - bash_execute
 - enhanced_search
 - task_submit
@@ -200,7 +199,7 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 5
-timeout_seconds: 1800
+timeout_seconds: 9000
 tags:
 - orchestrator
 - verification

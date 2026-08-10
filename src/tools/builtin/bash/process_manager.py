@@ -160,17 +160,30 @@ class ProcessManager:
         if container_id:
             # 包装命令让容器内 sh 自己报 pid，并 exec 成用户命令——这样 $$ 报的
             # pid 就是用户命令本身（单条命令场景，如 cargo build），kill 干净。
-            # 复合命令（cmd1; cmd2）的 exec 只作用于第一条（shell 标准语义），后续
-            # 命令不执行——用户需自行用 `sh -c '...'` 包裹复合命令，与终端行为一致。
-            # 不用 `exec sh -c '<cmd>'` 套内层 sh：那会让 pid 指向 sh 而非用户命令，
-            # 且不同 shell（dash 不做单命令 exec 优化）会 fork 子进程导致 kill 后孤儿。
+            #
+            # 复合命令（含 &&/;/||/|/() 等）：POSIX exec 只接受一个简单命令，
+            # `exec cmd1 && cmd2` 里 exec 替换为 cmd1 后进程即退出，cmd2 被丢弃
+            # → 后续段输出全部丢失（历史 bug：echo "标签" && ls 只返回标签）。
+            # 故复合命令自动套 `exec sh -c '<cmd>'`（shlex.quote 整条引用，防
+            # double-eval），让控制操作符在内层 sh 全部生效。代价：pid 指向内层 sh
+            # 而非用户命令，kill 后 sh 的子进程可能成孤儿（容器销毁时兜底清理）。
+            # 单条命令保持 `exec <cmd>`，pid 精准、无孤儿，向后兼容。
             #
             # working_dir 必须是容器内 POSIX 绝对路径（以 / 开头）。BashTool.get_working_dir
             # 返回的是宿主 task workspace（如 D:\myproject\xxx），直接传给
             # `docker exec -w` 会让 OCI 报 "Cwd must be an absolute path" 退 128。
             # 非 POSIX 绝对路径时强制用容器挂载点 /workspace（IsolationManager 约定）。
             container_workdir = working_dir if (working_dir and working_dir.startswith("/")) else "/workspace"
-            wrapped = f"echo $$; exec {command}"
+            if self._is_compound_command(command):
+                # set -o pipefail 让管道里任一段失败/被信号杀时，退出码反映真实失败
+                # （而非管道最后一段的成功码）。如 `cmd | grep` 里 cmd 被 OOM SIGKILL，
+                # 旧实现退出码取 grep 的 0 → 工具误报成功。2>/dev/null 兜底：dash/纯 POSIX
+                # sh 不支持 pipefail 选项时不报错中断（bash/ash 支持，容器镜像默认满足）。
+                # 注意：pipefail 只修管道(|)，不修分号序列（cmd1; cmd2 取 cmd2 码）——
+                # 后者是 shell 固有语义，靠 _build_failure_message 的信号提取兜底。
+                wrapped = f"echo $$; exec sh -c {shlex.quote('set -o pipefail 2>/dev/null; ' + command)}"
+            else:
+                wrapped = f"echo $$; exec {command}"
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
@@ -241,12 +254,14 @@ class ProcessManager:
             # WSL -e bash -c：跳过登录 shell，$VAR 正确展开
             if "LANG" not in merged_env:
                 merged_env["LANG"] = "en_US.UTF-8"
+            # 复合命令加 pipefail（bash 原生支持），让管道失败退出码正确冒泡
+            effective_cmd = f"set -o pipefail; {command}" if self._is_compound_command(command) else command
             process = await asyncio.create_subprocess_exec(
                 "wsl",
                 "-e",
                 "bash",
                 "-c",
-                command,
+                effective_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
@@ -257,10 +272,12 @@ class ProcessManager:
             # MSYS2 Git Bash（有 $VAR 参数转换问题，但作为后备）
             if "LANG" not in merged_env:
                 merged_env["LANG"] = "en_US.UTF-8"
+            # 复合命令加 pipefail，让管道失败退出码正确冒泡
+            effective_cmd = f"set -o pipefail; {command}" if self._is_compound_command(command) else command
             process = await asyncio.create_subprocess_exec(
                 "bash",
                 "-c",
-                command,
+                effective_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
@@ -310,6 +327,71 @@ class ProcessManager:
         output_task.add_done_callback(lambda t, p=pid: self._on_output_task_done(p, t))
 
         return pid, log_file
+
+    @staticmethod
+    def _is_compound_command(command: str) -> bool:
+        """检测命令是否为 shell 复合命令（含顶层控制操作符）。
+
+        用于容器路径决定是否套 ``exec sh -c '<cmd>'``：POSIX exec 只接受一个
+        简单命令，若用户命令含 ``&&``/``;``/``||``/``|``/``()`` 等控制操作符，
+        exec 会替换为第一条后丢弃后续段，导致输出丢失。
+
+        判定规则（命中任一即视为复合）：
+        - 顶层（非引号内）出现 ``;`` ``&``（单或双） ``|``（单或双） ``(`` ``)``
+          换行、反引号
+        - ``$(...)`` 命令替换（顶层或双引号内，与 bash 语义一致）
+
+        单遍字符扫描 + 引号状态机，跳过单/双引号内字符（双引号内仍检测反引号
+        和 ``$( ``），处理反斜杠转义。避免把 ``echo "a;b"`` 这类引号内的元字符
+        误判为复合。不依赖 shlex（shlex 遇不完整语法会抛异常，不适合轻量判断）。
+
+        fail-safe：宁可误判（多套一层 sh，命令仍正确，仅 pid 精度下降），
+        也不漏判（漏判会丢输出，正是要修的 bug）。
+        """
+        in_single = False  # 单引号内（bash 内无任何转义/展开）
+        in_double = False  # 双引号内（仅反引号/$( 生效）
+        i = 0
+        n = len(command)
+        while i < n:
+            ch = command[i]
+            nxt = command[i + 1] if i + 1 < n else ""
+            if in_single:
+                if ch == "'":
+                    in_single = False
+                i += 1
+                continue
+            if in_double:
+                if ch == "\\":
+                    i += 2  # 双引号内反斜杠转义下一字符
+                    continue
+                if ch == '"':
+                    in_double = False
+                elif ch == "`":  # 双引号内反引号命令替换
+                    return True
+                elif ch == "$" and nxt == "(":  # $(...) 双引号内仍展开
+                    return True
+                i += 1
+                continue
+            # 顶层
+            if ch == "\\":
+                i += 2  # 转义下一字符
+                continue
+            if ch == "'":
+                in_single = True
+                i += 1
+                continue
+            if ch == '"':
+                in_double = True
+                i += 1
+                continue
+            if ch == "`":
+                return True
+            if ch == "$" and nxt == "(":
+                return True
+            if ch in (";", "&", "|", "(", ")", "\n"):
+                return True
+            i += 1
+        return False
 
     @staticmethod
     async def _read_container_pid(process: asyncio.subprocess.Process) -> int:
@@ -577,6 +659,7 @@ class ProcessManager:
             "output_type": summary.output_type.value,
             "warnings": summary.warnings,
             "errors": summary.errors,
+            "error_lines": summary.error_lines,
             "progress": summary.progress,
             "latest_message": summary.latest_message,
             "exit_code": proc_info.exit_code,
@@ -602,6 +685,7 @@ class ProcessManager:
             "output_type": "general",
             "warnings": file_data["warnings"],
             "errors": file_data["errors"],
+            "error_lines": file_data.get("error_lines", []),
             "progress": None,
             "latest_message": "",
             "exit_code": file_data.get("exit_code"),
@@ -657,6 +741,7 @@ class ProcessManager:
             "summary": summary.lines,
             "warnings": summary.warnings,
             "errors": summary.errors,
+            "error_lines": summary.error_lines,
             "total_lines": summary.total_lines,
             "command": command,
             "log_file": str(log_file),
