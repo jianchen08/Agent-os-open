@@ -307,15 +307,19 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # system 消息 + recent 消息（非压缩块的）
         system_tokens = sum(self._estimate_msg_tokens(m) for m in messages if m.get("role") == "system")
 
-        # recent 消息：从最大 L1 块的 sequence_end 之后开始
+        # recent 消息：全局 _record_sequence > max_end 的部分（与 _trim_covered_messages
+        # 及压缩侧 sequence_end 统一真相源）。不能用「非 system 消息条数 > max_end」——
+        # system 消息占用 sequence 号会导致 non_sys_count < max_end，recent 永远算成 0。
         max_end = max((c.sequence_end for c in l1_chunks if c.sequence_end), default=0)
         recent_tokens = 0
-        non_sys_count = 0
         for m in messages:
-            if m.get("role") != "system":
-                non_sys_count += 1
-                if non_sys_count > max_end:
-                    recent_tokens += self._estimate_msg_tokens(m)
+            if m.get("role") == "system":
+                continue
+            seq = m.get("_record_sequence")
+            # 无 _record_sequence 的非 system 消息（重注入压缩块等）不计入 recent，
+            # 它们要么已在 L1 块里、要么本就不是 recent 段。
+            if isinstance(seq, int) and seq > max_end:
+                recent_tokens += self._estimate_msg_tokens(m)
 
         total = l1_tokens + snapshot_tokens + system_tokens + recent_tokens
         logger.debug(
@@ -530,8 +534,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
         如果不裁剪，prompt_build 会把压缩块 + 全部原始消息都发给 LLM，
         导致 tool_calls/tool_response 配对被破坏。
 
-        裁剪逻辑：保留 system 消息 + 非系统消息中序号 > max_end 的部分。
-        max_end 取自压缩块的 sequence_end（已修正为实际消息序号）。
+        裁剪逻辑：逐条按全局 _record_sequence 过滤，保留 system 消息 + 非系统消息
+        中 _record_sequence > max_end 的部分。max_end 取自压缩块的 sequence_end
+        （= 全局执行记录号，与压缩侧 _save_compression_result 的
+        max(_record_sequence) 对齐，是两边统一的真相源）。
 
         Args:
             ctx: 插件执行上下文
@@ -561,38 +567,52 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if max_end <= 0:
             return messages
 
-        # 裁剪：保留 system 消息 + 序号 > max_end 的非 system 消息
-        non_sys_count = sum(1 for m in messages if m.get("role") != "system")
-        if non_sys_count <= max_end:
-            # 所有非 system 消息都被压缩块覆盖，只保留 system 消息
-            trimmed = [m for m in messages if m.get("role") == "system"]
-        else:
-            # 保留 system 消息 + 最后 (non_sys_count - max_end) 条非 system 消息
-            keep_recent = non_sys_count - max_end
-            trimmed = []
-            recent_seen = 0
-            # 从尾部向前数，保留最后 keep_recent 条非 system 消息
-            recent_part: list[dict[str, Any]] = []
-            for m in reversed(messages):
-                if m.get("role") != "system":
-                    recent_seen += 1
-                    if recent_seen <= keep_recent:
-                        recent_part.append(m)
-                else:
-                    recent_part.append(m)
-            # recent_part 是倒序的，需要再反转
-            # 但 system 消息也混在里面了，需要重新分离
-            trimmed_sys = [m for m in messages if m.get("role") == "system"]
-            trimmed_recent = list(reversed([m for m in recent_part if m.get("role") != "system"]))
-            trimmed = trimmed_sys + trimmed_recent
+        # 裁剪：逐条按全局 _record_sequence 过滤，保留序号 > max_end 的非 system 消息。
+        # 与压缩侧统一真相源：压缩块 sequence_end = max(_record_sequence of old_msgs)
+        # （全局执行记录号，含穿插在其中的 system 记录号）。因此裁剪判断也必须用全局
+        # _record_sequence，不能用「非 system 消息条数」与「全局序列号」做算术——
+        # 那样 system 消息占用的序列号会让 non_sys_count < max_end 误判「全部已覆盖」，
+        # 把未被压缩的 recent 段（seq > max_end）一起裁掉（曾导致 851 -> 0 全裁）。
+        # system 消息全保留：与压缩侧 pure_system_msgs 原样保留一致（system 不进压缩块）。
+        trimmed: list[dict[str, Any]] = []
+        trimmed_non_sys = 0
+        orig_non_sys = 0
+        dropped_seqs: list[int] = []
+        for m in messages:
+            if m.get("role") == "system":
+                trimmed.append(m)
+                continue
+            orig_non_sys += 1
+            seq = m.get("_record_sequence")
+            # 无 _record_sequence 的非 system 消息（重注入压缩块等）默认保留，
+            # 它们本就不在「被压缩覆盖」的区间内。
+            if not isinstance(seq, int) or seq > max_end:
+                trimmed.append(m)
+                trimmed_non_sys += 1
+            else:
+                dropped_seqs.append(seq)
 
-        if len(trimmed) < len(messages):
+        # 防护：裁剪后非 system 消息不足原 10% 说明边界异常（如 system 大量占用序列号
+        # 致 max_end 远大于实际覆盖的非 system 数），保留原消息避免把上下文裁空。
+        if orig_non_sys > 0 and trimmed_non_sys < orig_non_sys * 0.1:
+            logger.error(
+                "[%s] 裁剪后非 system 消息仅剩 %d/%d（<10%%），疑似 max_end=%d 与消息"
+                " sequence 范围错位，放弃裁剪保留原消息",
+                self.name,
+                trimmed_non_sys,
+                orig_non_sys,
+                max_end,
+            )
+            return messages
+
+        if dropped_seqs:
             logger.info(
-                "[%s] 裁剪被压缩块覆盖的旧消息: %d -> %d (max_end=%d)",
+                "[%s] 裁剪被压缩块覆盖的旧消息: %d -> %d (max_end=%d, 裁掉非system seq=%s)",
                 self.name,
                 len(messages),
                 len(trimmed),
                 max_end,
+                f"min={min(dropped_seqs)},max={max(dropped_seqs)},count={len(dropped_seqs)}",
             )
             return trimmed
 

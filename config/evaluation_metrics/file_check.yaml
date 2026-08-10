@@ -49,7 +49,7 @@ input_schema:
 when_to_use:
   - 需要验证文件是否存在
 when_not_use:
-  - 需要验证目录是否存在（应使用 list_directory）
+  - 需要验证目录是否存在（应使用 file_read 列出目录）
   - 需要检查文件内容（应使用 semantic_check）
   - 需要检查文件权限
 examples:

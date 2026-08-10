@@ -114,58 +114,74 @@ RUN \
         "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
         "playwright>=1.40" "pandas>=2.0"
 
-# 安装 Playwright 浏览器(system-issue #3)
+# 安装 Playwright Chromium 浏览器(system-issue #3)
 # 让 agent 在容器内直接跑 e2e 测试（npx playwright / python -m pytest）。
 # server + 浏览器同处容器，共用 127.0.0.1，根除「容器内 server 对宿主浏览器不可达」。
-# 不带 --with-deps（系统依赖已在 apt 层装掉）。
+# 系统依赖已在 apt 层装掉（libnss3/libatk/libgbm 等），无需 --with-deps。
 #
-# 下载源说明：
-# - playwright 浏览器走官方 cdn.playwright.dev。新版(1.61+)用 Chrome-for-Testing，
-#   国内镜像(npmmirror)未同步该结构，故只能用官方源。
-# - 官方源国内较慢(~100KB/s, ~177MB)，故加 --force 重试 + 给足超时。
-# - 若需走代理/镜像，build 时传 --build-arg PW_HOST=... 覆盖。
-# - 失败仅 warning，不阻断镜像构建（断网时仍能得到可用镜像，#1/#2 不受影响，
-#   容器内 e2e 暂不可用，可后续 docker exec 单独补装）。
-ARG PW_HOST=""
+# ================== 为什么不用 `playwright install` ==================
+# playwright 1.61+ 改用 Chrome-for-Testing，下载 URL 会 307 重定向到
+# storage.googleapis.com（chrome-for-testing-public bucket）。国内访问 googleapis
+# 被限速到 ~60KB/s（177MB 要近 1 小时），实测 20 秒仅下载 0.6% 即超时 → install 卡死。
+# PLAYWRIGHT_DOWNLOAD_HOST 环境变量对 1.61 的 cft 路径【无效】：它只改 host 不改路径，
+# 而 npmmirror 的 cft 结构与官方不同（npmmirror 未按 playwright 旧版 builds/ 结构同步），
+# 指过去全是 404。故彻底放弃 playwright install，改为直接从 npmmirror 下载 CFT zip。
+#
+# ================== 验证过的可用镜像源 ==================
+# npmmirror 镜像了 Google chrome-for-testing-public，路径：
+#   https://cdn.npmmirror.com/binaries/chrome-for-testing/<ver>/linux64/chrome-linux64.zip
+#   https://cdn.npmmirror.com/binaries/chrome-for-testing/<ver>/linux64/chrome-headless-shell-linux64.zip
+# 实测速度 ~24MB/s（177MB 仅需 7.5s），完整文件齐全。CFT_MIRROR ARG 允许覆盖。
+#
+# ================== 目录结构（playwright 1.61 期望）==================
+# 由 driver/package/browsers.json (revision 1228) + EXECUTABLE_PATHS 决定：
+#   $PLAYWRIGHT_BROWSERS_PATH/chromium-1228/chrome-linux64/chrome
+#   $PLAYWRIGHT_BROWSERS_PATH/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell
+# revision/browserVersion 从已安装的 playwright 的 browsers.json 动态读取，
+# 避免硬编码版本号导致 playwright 升级后目录名失配。
 ARG PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-# 关键修正（历史 bug）：playwright install 默认把浏览器解压到
-# ~/.cache/ms-playwright。若该路径正好是 BuildKit cache mount 的 target，
-# 浏览器只存在于构建期 cache volume，【不会进入镜像层】——镜像里浏览器为空，
-# 容器跑 e2e 必报 "Executable doesn't exist"，之前的下载等于白做。
-#
-# 正确做法（BuildKit 「cache 下载 + 复制入层」模式）：
-# 1) PLAYWRIGHT_BROWSERS_PATH 指向镜像内固定路径 /opt/ms-playwright（非挂载点），
-#    解压产物天然进入镜像层。
-# 2) cache mount 只挂到 playwright 的 zip 下载缓存目录，二次构建跳过网络下载；
-#    最终二进制仍落在 /opt/ms-playwright 进镜像层。
-# 3) ENV 把 PLAYWRIGHT_BROWSERS_PATH 带进运行时，容器内 launch() 才能定位浏览器。
-ENV PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}
+# ENV 硬编码而非 ARG 展开（${PLAYWRIGHT_BROWSERS_PATH}）：早期镜像曾出现运行容器里
+# $PLAYWRIGHT_BROWSERS_PATH 为空串（疑似旧构建或 ARG/ENV 展开坑）。硬编码消除歧义。
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+# CFT 镜像源。官方源 https://storage.googleapis.com/chrome-for-testing-public 国内不可用。
+# 需换源时 build 传 --build-arg CFT_MIRROR=...。
+ARG CFT_MIRROR=https://cdn.npmmirror.com/binaries/chrome-for-testing
 
-# chromium 完整浏览器（默认 headful / 显式 channel 场景）。
-# 保持原有 || echo 容错：下载失败仅 warning，不阻断镜像构建。
-# 末尾 ls 校验：哪怕 install 被 || echo 吞掉，也能在构建日志里看到
-# /opt/ms-playwright 实际落了什么，便于排查「装了但为空」。
-RUN --mount=type=cache,target=/root/.cache/ms-playwright-downloads,sharing=locked \
-    mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" \
-    && if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
-    && (python -m playwright install chromium \
-        || python -m playwright install chromium \
-        || echo "[warn] playwright chromium 下载失败，镜像仍可用但容器内 e2e 不可用") \
-    && echo "[info] installed browsers:" && ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" 2>/dev/null
+# 下载 + 解压 Chromium 完整浏览器与 headless shell。
+# 关键原则（吸取历史教训）：
+# 1) 失败必 fail —— 不用 || echo 兜底。下载/解压/校验任一失败 → RUN 失败 →
+#    docker build 非 0 退出 → _ensure_image raise → 熔断器接管，问题当场暴露，
+#    绝不再出现"镜像成功但浏览器为空"。
+# 2) 版本号动态读取 —— 从 browsers.json 取 chromium 的 revision 与 browserVersion，
+#    playwright 升级后本层自动适配，无需改 Dockerfile。
+# 3) BuildKit cache mount 复用已下载 zip，二次构建跳过网络下载。
+# 注：镜像内无 unzip，用 python zipfile 解压（python 在 pip 层已装）。
+RUN --mount=type=cache,target=/tmp/pw-downloads,sharing=locked \
+    set -eu \
+    && mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" /tmp/pw-downloads \
+    && BJ=/usr/local/lib/python3.11/site-packages/playwright/driver/package/browsers.json \
+    && REV=$(python -c "import json;print(next(b['revision'] for b in json.load(open('$BJ'))['browsers'] if b['name']=='chromium'))") \
+    && VER=$(python -c "import json;print(next(b['browserVersion'] for b in json.load(open('$BJ'))['browsers'] if b['name']=='chromium'))") \
+    && echo "[pw] chromium revision=$REV browserVersion=$VER" \
+    && CHROME_ZIP=/tmp/pw-downloads/chrome-${VER}.zip \
+    && SHELL_ZIP=/tmp/pw-downloads/shell-${VER}.zip \
+    && curl -fsSL -o "${CHROME_ZIP}" "${CFT_MIRROR}/${VER}/linux64/chrome-linux64.zip" \
+    && curl -fsSL -o "${SHELL_ZIP}" "${CFT_MIRROR}/${VER}/linux64/chrome-headless-shell-linux64.zip" \
+    && mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${REV}" \
+    && python -c "import zipfile;zipfile.ZipFile('${CHROME_ZIP}').extractall('${PLAYWRIGHT_BROWSERS_PATH}/chromium-${REV}')" \
+    && mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-${REV}" \
+    && python -c "import zipfile;zipfile.ZipFile('${SHELL_ZIP}').extractall('${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-${REV}')" \
+    && chmod +x "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${REV}/chrome-linux64/chrome" \
+              "${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-${REV}/chrome-headless-shell-linux64/chrome-headless-shell" \
+    && echo "[info] installed browsers:" && ls -1 "${PLAYWRIGHT_BROWSERS_PATH}"
 
-# chromium headless shell（system-issue #3 续）。
-# playwright 1.49+ 默认 headless 模式用 chrome-headless-shell 而非完整 chrome，
-# `install chromium` 虽含 shell 但下载中途失败会被上面的 `|| echo` 吞掉，导致
-# 镜像里只有完整 chrome、缺 shell——默认 e2e 代码（launch() 不传参）会报
-# "Executable doesn't exist at chromium_headless_shell-..."。
-# 这里独立装一次 shell，确保即使完整 chrome 那层失败也能补齐 shell；
-# --only-shell 避免重复下载完整 chrome。
-RUN --mount=type=cache,target=/root/.cache/ms-playwright-downloads,sharing=locked \
-    if [ -n "${PW_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="${PW_HOST}"; fi \
-    && (python -m playwright install --only-shell chromium \
-        || python -m playwright install --only-shell chromium \
-        || echo "[warn] playwright chromium-headless-shell 下载失败，默认 headless e2e 将不可用") \
-    && echo "[info] installed browsers:" && ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" 2>/dev/null
+# 下载校验断言（双保险）：两个浏览器可执行文件必须真实存在才放行。
+# 彻底杜绝"镜像成功但浏览器为空"。test -x 要求文件存在且可执行。
+# revision 同样动态读取，与上一层保持一致，playwright 升级后不会误判。
+RUN REV=$(python -c "import json;print(next(b['revision'] for b in json.load(open('/usr/local/lib/python3.11/site-packages/playwright/driver/package/browsers.json'))['browsers'] if b['name']=='chromium'))") \
+    && test -x "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${REV}/chrome-linux64/chrome" \
+    && test -x "${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-${REV}/chrome-headless-shell-linux64/chrome-headless-shell" \
+    && echo "[ok] playwright chromium browsers present at ${PLAYWRIGHT_BROWSERS_PATH} (revision ${REV})"
 
 # Rust 工具链（≥1.85，jsonschema-rs MSRV 要求）
 # 0.2 内核用 Rust 编写，隔离子任务（cargo build/check/clippy/fmt）必须可用。
@@ -194,7 +210,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /workspace
 
 # 健康检查
-HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
+# 间隔放宽到 180s（原 60s）：每次 healthcheck 都是一次 docker exec = runc exec 短命
+# 进程，runc 1.3.x 在 WSL2 + cgroup v2 下对此有已知 race（短命进程卡死/状态脱节）。
+# 60s 间隔会把 race 概率最大化。真正的容器活性探测由 IsolationManager._find_existing
+# _container_sync 的 exec_run(["true"]) 探针承担，healthcheck 仅作 docker 元数据标记，
+# 代码不依赖它触发任何逻辑，故放宽安全。见 moby#51845 / runc 1.3.x CHANGELOG。
+HEALTHCHECK --interval=180s --timeout=5s --retries=3 \
     CMD python -c "print('ok')" || exit 1
 
 # 默认命令

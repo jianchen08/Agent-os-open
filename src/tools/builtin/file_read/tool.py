@@ -1,12 +1,16 @@
 """
-文件读取工具
+文件读取工具（含目录列表能力）
 
 暴露接口：
 - get_tool_definition() -> Tool：get_tool_definition功能
 - FileReadTool：FileReadTool类
+
+合并自原 list_directory 工具：当 path 指向目录时，自动列出该目录的直接子项，
+支持 include_hidden / pattern 过滤，行为与原 ListDirectoryTool 一致。
 """
 
 import asyncio
+import fnmatch
 import json
 import re
 from collections import deque
@@ -75,12 +79,17 @@ def _try_match_value(actual_val: Any, filter_val: str) -> bool:
 
 
 class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
-    """文件读取工具
+    """文件读取工具（合并目录列表能力）
 
-    提供读取文件内容功能。自动路由文本/二进制文件：
-    - 文本文件：直接读取内容（支持 fields/tail/start_line/end_line 参数）
-    - 文档文件（PDF/DOCX/XLSX/PPTX）：通过 markitdown 转 Markdown
-    - 图片文件（PNG/JPG 等）：通过 markitdown 转 Markdown 描述
+    提供「读取文件内容」与「列出目录子项」两种能力，按 path 实际类型自动路由：
+    - path 指向文件：自动路由文本/二进制文件
+        - 文本文件：直接读取内容（支持 fields/tail/start_line/end_line 参数）
+        - 文档文件（PDF/DOCX/XLSX/PPTX）：通过 markitdown 转 Markdown
+        - 图片文件（PNG/JPG 等）：通过 markitdown 转 Markdown 描述
+    - path 指向目录：列出该目录的直接子项（仅一层，支持 include_hidden/pattern 过滤）
+
+    合并自原独立的 list_directory 工具，行为保持一致：
+    列目录是读操作，受 workspace 读权限策略约束。
     """
 
     def __init__(self, base_path: str | None = None):
@@ -92,11 +101,13 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
         return Tool(
             name="file_read",
-            description="读取文件内容。自动识别文本和二进制文件：文本文件直接读取，"
+            description="读取文件内容或列出目录子项，根据 path 实际类型自动路由。"
+            "读取文件：自动识别文本和二进制文件，文本文件直接读取，"
             "PDF/DOCX/XLSX/PPTX/图片等通过 markitdown 转换为 Markdown。"
-            "适用场景：需要读取文件内容。"
-            "不适用场景：需要写入文件（使用 file_write）、列出目录（使用 list_directory）、"
-            "搜索文件内容（使用 enhanced_search）。"
+            "列出目录：当 path 指向目录时，列出其直接子项（名称、类型、大小），"
+            "仅一层，浏览子目录需再次调用并指定子目录路径。"
+            "适用场景：需要读取文件内容、浏览目录结构。"
+            "不适用场景：需要写入文件（使用 file_write）、搜索文件内容（使用 enhanced_search）。"
             "fields 参数：读取 YAML/JSON 文件的特定字段，节省 token。"
             "例如：fields=['id', 'name'] 只返回这两个字段。"
             "支持列表筛选：fields=['records{type=error}'] 从列表中按条件筛选。",
@@ -105,12 +116,8 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "文件路径（相对路径或绝对路径），与 paths 二选一",
-                    },
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "批量读取文件路径列表（与 path 二选一，优先使用 paths）",
+                        "description": "文件或目录路径（相对路径或绝对路径）。"
+                        "指向文件则读取内容，指向目录则列出其直接子项。",
                     },
                     "fields": {
                         "type": "array",
@@ -121,19 +128,31 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                         "支持列表筛选语法：'records{record_id=xxx}' 按条件从列表中筛选，"
                         "筛选后可接 '.field' 取子字段，如 'records{iteration=13}.thinking_content'。"
                         "多条匹配返回列表，单条匹配返回对象。"
-                        "不指定则返回完整内容。",
+                        "不指定则返回完整内容。仅文件读取有效，列目录忽略。",
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "起始行号（从1开始），仅读取指定行范围。不指定则从第1行开始。",
+                        "description": "起始行号（从1开始），仅读取指定行范围。不指定则从第1行开始。仅文件读取有效。",
                     },
                     "end_line": {
                         "type": "integer",
-                        "description": "结束行号（从1开始，包含该行），仅读取指定行范围。不指定则到文件末尾。",
+                        "description": "结束行号（从1开始，包含该行），仅读取指定行范围。不指定则到文件末尾。"
+                        "仅文件读取有效。",
                     },
                     "tail": {
                         "type": "integer",
-                        "description": "仅读取文件最后 N 行（仅文本文件有效）。不指定则返回完整内容。",
+                        "description": "仅读取文件最后 N 行（仅文本文件有效）。不指定则返回完整内容。仅文件读取有效。",
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "列出目录时是否包含隐藏文件（以 . 开头），默认 false。"
+                        "仅当 path 指向目录时有效，文件读取忽略此参数。",
+                        "default": False,
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "列出目录时的文件名匹配模式（支持 glob 语法，如 *.py, test_*.txt）。"
+                        "仅当 path 指向目录时有效，文件读取忽略此参数。",
                     },
                 },
                 "required": [],
@@ -149,55 +168,22 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         self._init_workspace(inputs)
         self.base_path = self._workspace
 
-        # 优先使用 paths 批量参数
-        paths = inputs.get("paths")
-        if paths and isinstance(paths, list):
-            return await self._read_files(inputs, paths)
-
-        # 单文件模式
-        return await self._read_file(inputs)
-
-    async def _read_files(self, inputs: dict[str, Any], paths: list[str]) -> ToolResult:
-        """批量读取文件，每个文件独立返回结果"""
-        results = []
-        fields = inputs.get("fields")
-        start_line = inputs.get("start_line")
-        end_line = inputs.get("end_line")
-        tail = inputs.get("tail")
-
-        for path_str in paths:
-            file_inputs = {
-                "path": path_str,
-                "fields": fields,
-                "start_line": start_line,
-                "end_line": end_line,
-                "tail": tail,
-            }
-            result = await self._read_file(file_inputs)
-            results.append(
-                {
-                    "path": path_str,
-                    "success": result.success,
-                    "data": result.output if result.success else None,
-                    "error": result.error if not result.success else None,
-                }
+        # 解析后按实际类型路由：目录→列子项，文件→读内容
+        path_str = inputs.get("path")
+        if not path_str:
+            return create_failure_result(
+                error="路径不能为空",
+                error_code="MISSING_PATH",
             )
 
-        # 汇总结果
-        success_count = sum(1 for r in results if r["success"])
-        failed_count = len(results) - success_count
+        path = self.resolve_path(path_str)
 
-        return create_success_result(
-            data={
-                "results": results,
-                "summary": {
-                    "total": len(results),
-                    "success": success_count,
-                    "failed": failed_count,
-                },
-            },
-            metadata={"action": "batch_read_files"},
-        )
+        # 目录：列出直接子项（含路径越界读权限校验）
+        if path.exists() and path.is_dir():
+            return await self._list_directory_path(inputs, path, path_str)
+
+        # 文件（或不存在）：走文件读取逻辑
+        return await self._read_file(inputs)
 
     async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         try:
@@ -232,7 +218,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     error=f"不支持读取此类型文件: {path.name}。"
                     f"支持的二进制文件：PDF、DOCX、XLSX、PPTX、"
                     f"PNG、JPG 等图片。"
-                    f"列出目录请使用 list_directory 工具。",
+                    f"列出目录请直接对目录路径调用 file_read。",
                     error_code="BINARY_FILE_NOT_SUPPORTED",
                 )
 
@@ -601,7 +587,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
         # 含筛选语法 {} 时，走新的路径解析逻辑
         segments = self._parse_field_path(field)
-        current: Any = data
+        current = data
         for seg in segments:
             current = self._resolve_segment(current, seg)
             if current is None:
@@ -619,3 +605,101 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             value: 要存储的值
         """
         data[field] = value
+
+    # ── 目录列表能力（合并自原 ListDirectoryTool）──────────────
+
+    async def _list_directory_path(
+        self,
+        inputs: dict[str, Any],
+        path: Path,
+        path_str: str,
+    ) -> ToolResult:
+        """列出目录直接子项。
+
+        合并自原 ListDirectoryTool.execute：列目录是读操作，
+        受 workspace 读权限策略约束（check_path_allowed），支持
+        include_hidden / pattern 过滤，仅展示一层。
+
+        Args:
+            inputs: 工具输入参数
+            path: 已解析的目录绝对路径
+            path_str: 用户原始输入路径（用于格式化显示）
+        """
+        self._init_agent_level(inputs)
+        display_path = self._format_output_path(path, path_str)
+
+        # 路径越界校验：列出目录是读操作，必须落在 workspace 允许范围内
+        agent_level = getattr(self, "_agent_level", None)
+        ok, err = self.check_path_allowed(str(path), "read", agent_level)
+        if not ok:
+            return create_failure_result(
+                error=f"路径越界拒绝: {err}",
+                error_code="PATH_NOT_ALLOWED",
+            )
+
+        include_hidden = inputs.get("include_hidden", False)
+        pattern = inputs.get("pattern")
+
+        try:
+            items = self._list_directory(path, include_hidden, pattern)
+            return create_success_result(
+                data={
+                    "dir": display_path,
+                    "items": items,
+                },
+                metadata={"action": "list_directory"},
+            )
+        except PermissionError as e:
+            return create_failure_result(
+                error=f"权限不足: {str(e)}",
+                error_code="PERMISSION_DENIED",
+            )
+        except Exception as e:
+            return create_failure_result(
+                error=f"列出目录失败: {str(e)}",
+                error_code="LIST_FAILED",
+            )
+
+    def _list_directory(
+        self,
+        directory: Path,
+        include_hidden: bool,
+        pattern: str | None,
+    ) -> list[dict[str, Any]]:
+        """列出目录的直接子项。
+
+        Args:
+            directory: 目录路径
+            include_hidden: 是否包含以 . 开头的隐藏项
+            pattern: 文件名 glob 匹配模式，None 表示不过滤
+        """
+        items = []
+        try:
+            for entry in sorted(directory.iterdir()):
+                if not include_hidden and entry.name.startswith("."):
+                    continue
+
+                if pattern and not fnmatch.fnmatch(entry.name, pattern):
+                    continue
+
+                items.append(self._get_item_info(entry))
+        except PermissionError:
+            pass
+
+        return items
+
+    def _get_item_info(self, path: Path) -> dict[str, Any]:
+        """获取目录项信息（名称、类型、大小）。"""
+        try:
+            stat = path.stat()
+            return {
+                "name": path.name,
+                "type": "directory" if path.is_dir() else "file",
+                "size": format_size(stat.st_size),
+            }
+        except Exception:
+            return {
+                "name": path.name,
+                "type": "directory" if path.is_dir() else "file",
+                "size": "0B",
+            }

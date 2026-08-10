@@ -389,13 +389,21 @@ class PipelineEngine:
         try:
             self._pipeline_logger.setup(pipeline_run_id, resumed)
 
-            # context_window 需在首次迭代前注入 state
+            # context_window / llm_model 需在首次迭代前注入 state。
+            # 否则首轮 prompt_build 读到的 llm_model 为空，"### 模型信息" 段会缺
+            # "模型: xxx" 行，第二轮才补上 → system_message 首尾不一致，破坏
+            # prompt cache 前缀（MSG-0 第一轮≠第二轮，全部 history 无法命中缓存）。
 
-            if not state.get("context_window"):
+            if not state.get("context_window") or not state.get("llm_model"):
                 _llm_core = self.plugin_registry.get_core("llm_call")
 
-                if _llm_core and hasattr(_llm_core, "_context_window") and _llm_core._context_window:
-                    state["context_window"] = _llm_core._context_window
+                if _llm_core:
+                    if not state.get("context_window") and getattr(_llm_core, "_context_window", None):
+                        state["context_window"] = _llm_core._context_window
+                    # llm_model 在 llm_core 初始化时已确定（self._model），首轮即可注入，
+                    # 无需等 llm_core 执行后回写。这是 MSG-0 内容首轮稳定的关键。
+                    if not state.get("llm_model") and getattr(_llm_core, "_model", None):
+                        state["llm_model"] = _llm_core._model
 
             while not state.get(StateKeys.ENDED, False):
                 # 1. 递增迭代计数器
@@ -526,6 +534,10 @@ class PipelineEngine:
                 # 标记本轮已正常结束（非错误），便于上层把引擎视为可复用 idle。
                 # 不设 RAW_ERROR，保持 state 干净。
                 state[StateKeys.ENDED] = True
+                # 把"用户停止"信号写进 state（→ 经 last_state 传给 post-pipeline
+                # done-callback），让 _check_post_pipeline_state 跳过 fail_task——
+                # 用户停止只是打断输出，任务不该被判失败。
+                state[StateKeys.USER_STOP_REQUESTED] = True
 
             else:
                 logger.warning(
@@ -545,7 +557,9 @@ class PipelineEngine:
                     with contextlib.suppress(Exception):
                         await self._streaming.emit_error(RuntimeError(f"Pipeline cancelled ({_cancel_source})"))
 
-                await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine cancelled (source={_cancel_source})")
+                await self._mark_task_failed_on_engine_exit(
+                    state, f"Pipeline engine cancelled (source={_cancel_source})"
+                )
 
         except Exception as exc:
             _iter = state.get(StateKeys.ITERATION, 0)
@@ -610,7 +624,10 @@ class PipelineEngine:
 
             self._last_state = state
 
-            logger.debug(
+            # ★ 必须 INFO 级：引擎退出（正常/异常/取消）的唯一可观测信号。
+            # 若此处无日志 = 协程被 GC 静默回收（engine_task 无强引用），
+            # 是定位"管道静默消失"的关键证据。
+            logger.info(
                 "[Engine] 引擎停止: pipeline=%s iteration=%d ended=%s raw_error=%s",
                 self._pipeline_id[:12],
                 state.get(StateKeys.ITERATION, 0),

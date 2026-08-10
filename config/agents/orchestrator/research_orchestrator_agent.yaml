@@ -158,7 +158,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
-  - '{{path:config/rules/dispatcher_rules_exec.md}}'
+  - '{{path:config/rules/dispatcher_rules_orchestrator.md}}'
 tool_ids:
 - task_submit
 - task_manage
@@ -166,7 +166,6 @@ tool_ids:
 - file_read
 - file_write
 - memory
-- list_directory
 - human_interaction
 - create_directory
 - enhanced_search
@@ -261,7 +260,7 @@ is_active: true
 status: active
 max_iterations: 250
 max_reminders: 5
-timeout_seconds: 3600
+timeout_seconds: 9000
 plugins:
   disabled: []
   enabled:

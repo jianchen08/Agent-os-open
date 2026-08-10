@@ -4,6 +4,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
+import { flushStreamChunkBuffer } from './streamHandler'
 import { extractMessageId } from './utils'
 
 const _debugLogger = loggers.websocket
@@ -14,6 +15,13 @@ export function handleToolStart(eventData: any) {
   if (!pipelineId) return
   const messageId = extractMessageId(eventData)
   if (!messageId) return
+
+  // 先冲刷缓冲的 chunk：tool_start 是 part 结构边界变更点（与 thinking_end / stream_end 同类），
+  // 必须在变更前把 RAF 缓冲里的正文 chunk 落到当前 text part。否则本函数会把当前
+  // streaming text part 置为 done，随后 RAF flush 时 findStreamingPartIndex 找不到
+  // streaming text part，会新建 text part 追加到 tool_call 之后 → 正文被劈到工具后面，
+  // 多轮交错时表现为「思考-工具-文本-文本-思考」错乱。
+  flushStreamChunkBuffer()
 
   const callId = eventData.call_id || eventData.data?.call_id
   // 没有 call_id 无法唯一定位和去重，跳过等数据完整

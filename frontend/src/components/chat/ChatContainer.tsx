@@ -160,10 +160,6 @@ export const ChatContainer = ({
       return pid ? (s.streamingState[pid]?.isStreaming ?? false) : false
     }
   )
-  /** 累计向上翻页条数（驱动虚拟列表 firstItemIndex，prepend 时保持视口位置） */
-  const prependedCount = usePipelineMessageStore(
-    (s) => (currentTabPipelineId ? (s.prependedCountByPipeline[currentTabPipelineId] ?? 0) : 0),
-  )
 
 
   /** 根据当前模型名获取动态 context_window 模型无效时 contextWindow=0，使下游进度条（maxTokens>0 才渲染）不显示假数据。 */
@@ -173,6 +169,8 @@ export const ChatContainer = ({
   const currentPipelineId = currentTabPipelineId || ''
   const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
   const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
+  /** 整个管道的累计 token 用量（跨轮加总，供统计区显示命中/未命中/输出三维度）。 */
+  const cumulativeTokens = pipelineUsage?.cumulative
 
   /** 最终的 maxTokens 和 currentTokenUsage */
   const effectiveMaxTokens = modelContextWindow
@@ -273,7 +271,6 @@ export const ChatContainer = ({
         sessionId={sessionId}
         searchQuery={searchQuery}
         taskId={activeTab?.taskId}
-        prependedCount={prependedCount}
       />
 
       {/* 子Tab路由增强（无UI，逻辑层） */}
@@ -307,6 +304,7 @@ export const ChatContainer = ({
           maxTokens={effectiveMaxTokens}
           completionTokens={pipelineUsage?.completionTokens ?? 0}
           totalTokens={pipelineUsage?.totalTokens ?? 0}
+          cumulativeTokens={cumulativeTokens}
           thinkingMode={thinkingMode}
           toggleThinkingMode={toggleThinkingMode}
         />

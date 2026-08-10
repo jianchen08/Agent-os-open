@@ -52,7 +52,6 @@ tool_ids:
 - task_evaluate
 - file_read
 - file_write
-- list_directory
 - create_directory
 - copy_file
 - move_file

@@ -85,9 +85,7 @@ class MusicGenerateTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="music_generate",
-            description=(
-                "音乐生成工具。根据文本描述生成音乐内容，当前为基线版本，支持通过 Suno 等 Provider 执行生成。"
-            ),
+            description=("音乐生成工具。根据文本描述生成音乐内容，当前为基线版本。"),
             when_to_use=[
                 "需要根据文本描述生成音乐片段",
                 "需要为视频或演示生成背景音乐",
@@ -101,7 +99,7 @@ class MusicGenerateTool(BuiltinTool):
             caveats=[
                 "音乐生成通常为异步任务，执行时间可能较长",
                 "生成质量取决于 Provider 和模型能力",
-                "需要配置音乐生成 Provider（如 Suno）后才能使用",
+                "需要先配置音乐生成 Provider 后才能使用",
             ],
             input_schema={
                 "type": "object",

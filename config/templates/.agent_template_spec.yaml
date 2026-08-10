@@ -354,8 +354,7 @@ system_prompt: |
 #   全量内置工具清单（根据 Agent 已绑定的工具，从中筛选未绑定的填入）：
 #   | 工具名 | 说明 |
 #   |---|---|
-#   | file_read | 读取文件内容 |
-#   | list_directory | 列出目录内容（文件列表、大小、类型） |
+#   | file_read | 读取文件内容 / 列出目录子项（按路径类型自动路由） |
 #   | file_write | 创建、写入、编辑文件内容 |
 #   | bash_execute | 执行Shell命令 |
 #   | enhanced_search | 在文件中搜索文本、代码或文件名 |
@@ -740,7 +739,7 @@ context_variables:
 #       |----------|---------|---------|----------|----------|----------|
 #       | research_agent | 调研报告 | - | docs/working/{title}_research_report.md | container | file_check |
 #       | solution_planning_agent | 方案文档、任务链、检查点 | - | docs/working/{title}_solution.md, docs/tasks/, docs/working/{title}_checkpoints.md | container | file_check |
-#       | resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/resource_generation_report.md | host | file_check |
+#       | resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/{title}_resource_generation_report.md | host | file_check |
 #       | code_writer_agent | 代码文件、测试文件 | - | 由任务决定 | container | file_check, format_valid |
 #       | code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
 #       | test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |

@@ -62,6 +62,16 @@ class TaskPostPipelineMixin:
         if status_str != "running":
             return
 
+        # 用户主动"停止生成"：引擎安静退出（无产出），state 带 USER_STOP_REQUESTED。
+        # 停止只是打断输出，不是任务失败——保持 running，不 fail、不进终态等待，
+        # 用户重发消息即继续。绝不能因"没产出 result"就 fail_task。
+        if pipeline_state and pipeline_state.get("user_stop_requested"):
+            logger.info(
+                "TaskWorker: 用户停止生成，跳过 post-pipeline fail 检查 | task=%s（保持 running，重发即继续）",
+                task_id,
+            )
+            return
+
         task_result = getattr(task, "result", None)
         if task_result:
             await self._transition_to_evaluating(

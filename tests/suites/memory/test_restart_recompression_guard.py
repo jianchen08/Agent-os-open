@@ -22,12 +22,31 @@ sys.path.insert(0, os.path.normpath(os.path.join(
 logging.basicConfig(level=logging.DEBUG)
 
 
-def _make_messages(count: int, chars_each: int = 2000) -> list[dict]:
-    """生成指定数量的模拟消息（1 条 system + count 轮 user/assistant）。"""
+def _make_messages(
+    count: int,
+    chars_each: int = 2000,
+    with_sequence: bool = False,
+) -> list[dict]:
+    """生成指定数量的模拟消息（1 条 system + count 轮 user/assistant）。
+
+    with_sequence=True 时给每条消息打上全局 _record_sequence（每条 +1，
+    含 system 占用号），与 state_builder 重启恢复后的真实结构一致。
+    """
     msgs = [{"role": "system", "content": "你是一个 AI 助手"}]
+    seq = 0
+    if with_sequence:
+        msgs[0]["_record_sequence"] = 0
+        seq = 1
     for i in range(count):
-        msgs.append({"role": "user", "content": f"消息 {i}: " + "x" * chars_each})
-        msgs.append({"role": "assistant", "content": f"回复 {i}: " + "y" * chars_each})
+        u = {"role": "user", "content": f"消息 {i}: " + "x" * chars_each}
+        a = {"role": "assistant", "content": f"回复 {i}: " + "y" * chars_each}
+        if with_sequence:
+            u["_record_sequence"] = seq
+            seq += 1
+            a["_record_sequence"] = seq
+            seq += 1
+        msgs.append(u)
+        msgs.append(a)
     return msgs
 
 
@@ -111,8 +130,9 @@ class TestRestartRecompressionGuard:
 
         plugin = ContextWindowGuardPlugin(config={"trigger_ratio": 0.5})
 
-        # 60 条非 system 消息，每条 100 字符（小，避免触发压缩）
-        messages = _make_messages(30, chars_each=100)
+        # 60 条非 system 消息，每条 100 字符（小，避免触发压缩）。
+        # 带全局 _record_sequence（1..60），与重启后 state_builder 恢复的结构一致。
+        messages = _make_messages(30, chars_each=100, with_sequence=True)
 
         ctx = MagicMock()
         ctx.state = {
@@ -127,7 +147,7 @@ class TestRestartRecompressionGuard:
         def get_service(name):
             if name == "chunk_service":
                 cs = MagicMock()
-                # L1 块覆盖前 30 条非 system → 裁后应剩 30 条非 system
+                # L1 块覆盖 _record_sequence <= 30 的消息 → 裁后应剩 seq>30 的 30 条
                 cs.find_by_pipeline = AsyncMock(return_value=[_FakeChunk(30)])
                 return cs
             if name == "context_service":
@@ -145,7 +165,7 @@ class TestRestartRecompressionGuard:
         assert "messages" in result.state_updates, "execute 应输出裁剪后的 messages"
         trimmed = result.state_updates["messages"]
         non_sys_after = sum(1 for m in trimmed if m.get("role") != "system")
-        # 原 60 条非 system，L1 覆盖 30 条 → 裁后剩 30 条
+        # 原 60 条非 system（seq 1..60），max_end=30 裁掉 seq<=30 的 30 条 → 剩 30 条
         assert non_sys_after == 30, (
             f"裁剪后非 system 消息应为 30，实际 {non_sys_after}"
         )

@@ -639,30 +639,38 @@ registerToolCard({
   icon: <Target className="h-4 w-4" />,
   formatTitle: (tc) => {
     const args = tc.tool_args as Record<string, unknown> | null
-    const goal = args?.goal as Record<string, unknown> | null
-    const title = (goal?.title as string) || (args?.description as string) || '任务提交'
+    // schema 已平铺：优先读 goal_title，兼容旧式 goal.title 历史记录
+    const legacyGoal = args?.goal as Record<string, unknown> | null
+    const title =
+      (args?.goal_title as string) ||
+      (legacyGoal?.title as string) ||
+      (args?.description as string) ||
+      (args?.goal_description as string) ||
+      '任务提交'
     return `提交任务: ${title}`
   },
   buildDetails: (tc) => {
     const args = tc.tool_args as Record<string, unknown> | null
     const details: ActivityDetailBlock[] = []
 
-    // 目标信息
-    const goal = args?.goal as Record<string, unknown> | null
-    if (goal?.title) {
+    // 目标信息（schema 已平铺：优先读扁平字段，兼容旧式 goal 嵌套历史记录）
+    const legacyGoal = args?.goal as Record<string, unknown> | null
+    const goalTitle = (args?.goal_title as string) || (legacyGoal?.title as string)
+    const goalDesc = (args?.goal_description as string) || (legacyGoal?.description as string)
+    if (goalTitle) {
       details.push({
         id: 'goal',
         label: '任务目标',
-        content: goal.title as string,
+        content: goalTitle,
         contentType: 'text',
         collapsible: false,
       })
     }
-    if (goal?.description) {
+    if (goalDesc) {
       details.push({
         id: 'goal_desc',
         label: '详细描述',
-        content: goal.description as string,
+        content: goalDesc,
         contentType: 'text',
         collapsible: true,
         defaultExpanded: false,

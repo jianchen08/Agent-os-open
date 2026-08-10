@@ -18,13 +18,13 @@ echo Ports: frontend=!FRONTEND_HOST_PORT! backend=!BACKEND_PORT! Redis=!REDIS_HO
 echo.
 
 REM WSL shutdown retry counter (reset once at startup; bumped on each auto wsl --shutdown)
-REM ä¸Šé™æåˆ° 5ï¼šå†·å¯åŠ¨æœŸï¼ˆåˆš wsl --shutdown é‡å¯åŽï¼‰æ–‡ä»¶ç³»ç»Ÿ/wslpath/wsl.exe
-REM å“åº”æœªå°±ç»ªä¼šè¢«æŽ¢é’ˆæŠ¥æˆéž 0 ç ï¼Œéœ€æ›´å¤šé‡è¯•æœºä¼šè®© WSL æš–å¥½ï¼Œé¿å…è¯¯æ”¾å¼ƒã€‚
+REM ÉÏÏÞÌáµ½ 5£ºÀäÆô¶¯ÆÚ£¨¸Õ wsl --shutdown ÖØÆôºó£©ÎÄ¼þÏµÍ³/wslpath/wsl.exe
+REM ÏìÓ¦Î´¾ÍÐ÷»á±»Ì½Õë±¨³É·Ç 0 Âë£¬Ðè¸ü¶àÖØÊÔ»ú»áÈÃ WSL Å¯ºÃ£¬±ÜÃâÎó·ÅÆú¡£
 if not defined SHUTDOWN_RETRY set "SHUTDOWN_RETRY=0"
-REM POST_SHUTDOWN_GRACE=1 è¡¨ç¤ºåˆšæ‰§è¡Œè¿‡ wsl --shutdown é‡å¯ï¼Œå¤„äºŽå†·å¯åŠ¨å®½é™çª—å£ã€‚
-REM æ­¤çª—å£å†…æŽ¢é’ˆçš„éž 0 ç ï¼ˆ124/126/127 ç­‰çž¬æ—¶æ•…éšœï¼‰èµ°åŽŸåœ°é‡è¯•è€Œéžç›´æŽ¥åˆ¤æ­»é”ã€‚
+REM POST_SHUTDOWN_GRACE=1 ±íÊ¾¸ÕÖ´ÐÐ¹ý wsl --shutdown ÖØÆô£¬´¦ÓÚÀäÆô¶¯¿íÏÞ´°¿Ú¡£
+REM ´Ë´°¿ÚÄÚÌ½ÕëµÄ·Ç 0 Âë£¨124/126/127 µÈË²Ê±¹ÊÕÏ£©×ßÔ­µØÖØÊÔ¶ø·ÇÖ±½ÓÅÐËÀËø¡£
 if not defined POST_SHUTDOWN_GRACE set "POST_SHUTDOWN_GRACE=0"
-REM health probe åŽŸåœ°é‡è¯•è®¡æ•°ï¼ˆ:probe_transient å†…è‡ªå¢žï¼‰ï¼Œä¸Ž SHUTDOWN_RETRY åˆ†å¼€è®¡æ•°
+REM health probe Ô­µØÖØÊÔ¼ÆÊý£¨:probe_transient ÄÚ×ÔÔö£©£¬Óë SHUTDOWN_RETRY ·Ö¿ª¼ÆÊý
 if not defined PROBE_RETRY set "PROBE_RETRY=0"
 
 REM NOTE: we do NOT unconditionally `wsl --shutdown` at startup.
@@ -49,8 +49,8 @@ if not "!WSL_ALIVE_RC!"=="0" goto :probe_other_error
 goto :probe_ok
 
 :probe_deadlocked
-REM rc=124 = wsl.exe è¶…æ—¶ã€‚å†·å¯åŠ¨å®½é™çª—å£å†…ï¼ˆåˆš shutdown é‡å¯ï¼‰è¿™é€šå¸¸æ˜¯
-REM WSL è¿˜æ²¡æš–å¥½è€ŒéžçœŸæ­»é”ï¼Œèµ°åŽŸåœ°é‡è¯•ï¼›å¦åˆ™æ‰å‡çº§ä¸º wsl --shutdownã€‚
+REM rc=124 = wsl.exe ³¬Ê±¡£ÀäÆô¶¯¿íÏÞ´°¿ÚÄÚ£¨¸Õ shutdown ÖØÆô£©ÕâÍ¨³£ÊÇ
+REM WSL »¹Ã»Å¯ºÃ¶ø·ÇÕæËÀËø£¬×ßÔ­µØÖØÊÔ£»·ñÔò²ÅÉý¼¶Îª wsl --shutdown¡£
 if "!POST_SHUTDOWN_GRACE!"=="1" goto :alive_probe_transient
 set "REASON=WSL probe timeout (kernel deadlock?)"
 goto :auto_shutdown
@@ -58,7 +58,7 @@ goto :auto_shutdown
 :probe_other_error
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
-REM å†·å¯åŠ¨å®½é™çª—å£å†…ï¼ŒWSL ä¸å¯ç”¨å¤šä¸ºçž¬æ—¶ï¼ˆsystemd åˆå§‹åŒ–æœªå®Œæˆï¼‰ï¼ŒåŽŸåœ°é‡è¯•
+REM ÀäÆô¶¯¿íÏÞ´°¿ÚÄÚ£¬WSL ²»¿ÉÓÃ¶àÎªË²Ê±£¨systemd ³õÊ¼»¯Î´Íê³É£©£¬Ô­µØÖØÊÔ
 if "!POST_SHUTDOWN_GRACE!"=="1" goto :alive_probe_transient
 echo [ERROR] WSL unavailable rc=!WSL_ALIVE_RC!, cannot start without WSL2 + docker-ce
 echo [ERROR] Docker Desktop is no longer supported. Run install_native_docker.bat to set up WSL2 docker first.
@@ -66,16 +66,19 @@ pause
 exit /b 1
 
 :alive_probe_transient
-REM å†·å¯åŠ¨å®½é™ï¼šwsl_alive_probe éžæ­£å¸¸è¿”å›žï¼ŒåŽŸåœ°é‡æŽ¢è€Œéžç›´æŽ¥ shutdownã€‚
-REM ä¸Ž :probe_transientï¼ˆhealth probe é‡è¯•ï¼‰å…±ç”¨ PROBE_RETRY è®¡æ•°ã€‚
+REM ÀäÆô¶¯¿íÏÞ£ºwsl_alive_probe ·ÇÕý³£·µ»Ø£¬Ô­µØÖØÌ½¶ø·ÇÖ±½Ó shutdown¡£
+REM Óë :probe_transient£¨health probe ÖØÊÔ£©¹²ÓÃ PROBE_RETRY ¼ÆÊý¡£
 set /a "PROBE_RETRY+=1"
-if !PROBE_RETRY! gtr 6 (
-    echo [WARN] alive probe transient retry exhausted (!PROBE_RETRY! times), escalating to wsl --shutdown
-    set "POST_SHUTDOWN_GRACE=0"
-    set "REASON=alive probe stuck after grace retries"
-    goto :auto_shutdown
-)
-echo [INFO] WSL not ready yet (rc=!WSL_ALIVE_RC!), grace retry !PROBE_RETRY!/6...
+REM Avoid `if (...)` blocks: cmd breaks on parentheses inside echo text
+REM ("was unexpected at this time", kills the script with rc=255, no pause).
+REM Use goto-based branching, consistent with the rest of this script.
+if not !PROBE_RETRY! gtr 6 goto :alive_probe_continue
+echo [WARN] alive probe transient retry exhausted ^( !PROBE_RETRY! times ^), escalating to wsl --shutdown
+set "POST_SHUTDOWN_GRACE=0"
+set "REASON=alive probe stuck after grace retries"
+goto :auto_shutdown
+:alive_probe_continue
+echo [INFO] WSL not ready yet ^(rc=!WSL_ALIVE_RC!^), grace retry !PROBE_RETRY!/6...
 ping -n 4 127.0.0.1 >nul
 goto :wsl_alive_entry
 
@@ -111,37 +114,39 @@ REM    later pgrep/docker probes are not infected and hang.
 REM    Outer timeout 30s backstop (probe normally <3s; if even reading /proc
 REM    hangs, the timeout will force-kill it).
 echo [INFO] Checking WSL kernel health...
-REM å…ˆæ ¡éªŒè„šæœ¬è·¯å¾„å¯è¾¾ï¼šå†·å¯åŠ¨æœŸ wslpath å¯èƒ½å°šæœªå°±ç»ªï¼Œå¯¼è‡´ "No such file"ã€‚
-REM è·¯å¾„ä¸å¯è¾¾å±žçž¬æ—¶æ•…éšœï¼Œèµ° :probe_transient åŽŸåœ°é‡è¯•ï¼Œè€Œéžè¯¯åˆ¤ä¸ºæ­»é”ã€‚
+REM ÏÈÐ£Ñé½Å±¾Â·¾¶¿É´ï£ºÀäÆô¶¯ÆÚ wslpath ¿ÉÄÜÉÐÎ´¾ÍÐ÷£¬µ¼ÖÂ "No such file"¡£
+REM Â·¾¶²»¿É´ïÊôË²Ê±¹ÊÕÏ£¬×ß :probe_transient Ô­µØÖØÊÔ£¬¶ø·ÇÎóÅÐÎªËÀËø¡£
 wsl -d Ubuntu -u root -- bash -c "test -f '%WSL_DIR%/wsl_health_probe.sh'" 2>nul
 if errorlevel 1 goto :probe_transient
-REM æ³¨æ„ï¼šwsl_health_probe.sh ä¸æŽ¥å—ä½ç½®å‚æ•°ï¼Œæ—§ä»£ç è¯¯ä¼  %WSL_DIR% ä¼šè¢«å¿½ç•¥ï¼Œ
-REM ä½†åœ¨ timeout å¤–å£³ + å†·å¯åŠ¨ wslpath æœªç¨³æ—¶å¯èƒ½è§¦å‘ "No such file"ï¼Œæ•…æ˜¾å¼ bash è°ƒç”¨ã€‚
+REM ×¢Òâ£ºwsl_health_probe.sh ²»½ÓÊÜÎ»ÖÃ²ÎÊý£¬¾É´úÂëÎó´« %WSL_DIR% »á±»ºöÂÔ£¬
+REM µ«ÔÚ timeout Íâ¿Ç + ÀäÆô¶¯ wslpath Î´ÎÈÊ±¿ÉÄÜ´¥·¢ "No such file"£¬¹ÊÏÔÊ½ bash µ÷ÓÃ¡£
 wsl -d Ubuntu -u root -- bash -c "timeout 30 bash %WSL_DIR%/wsl_health_probe.sh" 2>&1
 set "HEALTH_RC=!errorlevel!"
 if "!HEALTH_RC!"=="0" goto :wsl_alive_ok
 if "!HEALTH_RC!"=="8" goto :wsl_polluted
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%TEMP%\wsl_alive_probe.err" >nul 2>&1
 if not errorlevel 1 goto :disk_lost
-REM ä¸‰åˆ†æ³•ï¼šåªæœ‰è„šæœ¬ä¸»åŠ¨ exit 8ï¼ˆç¡®è¯ D-state æ­»é”ï¼‰æ‰ shutdownï¼›
-REM å…¶ä½™éž 0 ç ï¼ˆ124=timeout å¤–å£³è¶…æ—¶, 126=I/O error, 127=command not found ç­‰ï¼‰
-REM æ˜¯å†·å¯åŠ¨æœŸçž¬æ—¶æ•…éšœï¼Œèµ° :probe_transient åŽŸåœ°é‡è¯•ï¼Œä¸å†ä¸€å¾‹åˆ¤æ­»é”ã€‚
+REM Èý·Ö·¨£ºÖ»ÓÐ½Å±¾Ö÷¶¯ exit 8£¨È·Ö¤ D-state ËÀËø£©²Å shutdown£»
+REM ÆäÓà·Ç 0 Âë£¨124=timeout Íâ¿Ç³¬Ê±, 126=I/O error, 127=command not found µÈ£©
+REM ÊÇÀäÆô¶¯ÆÚË²Ê±¹ÊÕÏ£¬×ß :probe_transient Ô­µØÖØÊÔ£¬²»ÔÙÒ»ÂÉÅÐËÀËø¡£
 echo [WARN] health probe abnormal (rc=!HEALTH_RC!), treating as transient (not deadlock)
 goto :probe_transient
 
 :probe_transient
-REM health probe å†·å¯åŠ¨å®½é™ï¼šéž 8 çš„éž 0 ç å¤šä¸º WSL åˆšé‡å¯åŽæ–‡ä»¶ç³»ç»Ÿ/IO æœªå°±ç»ªï¼Œ
-REM åŽŸåœ°çŸ­é‡è¯•è®© WSL æš–å¥½ï¼Œä¸ç«‹å³ wsl --shutdownï¼ˆé¿å…æŠŠåˆšå¯åŠ¨å¥½çš„å†…æ ¸åˆæ‰“å›žé‡å¯ï¼‰ã€‚
+REM health probe ÀäÆô¶¯¿íÏÞ£º·Ç 8 µÄ·Ç 0 Âë¶àÎª WSL ¸ÕÖØÆôºóÎÄ¼þÏµÍ³/IO Î´¾ÍÐ÷£¬
+REM Ô­µØ¶ÌÖØÊÔÈÃ WSL Å¯ºÃ£¬²»Á¢¼´ wsl --shutdown£¨±ÜÃâ°Ñ¸ÕÆô¶¯ºÃµÄÄÚºËÓÖ´ò»ØÖØÆô£©¡£
 set /a "PROBE_RETRY+=1"
-if !PROBE_RETRY! gtr 6 (
-    echo [WARN] health probe transient retry exhausted (!PROBE_RETRY! times), escalating
-    set "PROBE_RETRY=0"
-    set "REASON=health probe stuck after grace retries"
-    goto :auto_shutdown
-)
-echo [INFO] WSL kernel probe not ready (rc=!HEALTH_RC!), grace retry !PROBE_RETRY!/6...
+REM Avoid `if (...)` blocks: cmd breaks on parentheses inside echo text
+REM ("was unexpected at this time", kills the script with rc=255, no pause).
+if not !PROBE_RETRY! gtr 6 goto :probe_transient_continue
+echo [WARN] health probe transient retry exhausted ^( !PROBE_RETRY! times ^), escalating
+set "PROBE_RETRY=0"
+set "REASON=health probe stuck after grace retries"
+goto :auto_shutdown
+:probe_transient_continue
+echo [INFO] WSL kernel probe not ready ^(rc=!HEALTH_RC!^), grace retry !PROBE_RETRY!/6...
 ping -n 4 127.0.0.1 >nul
-REM é‡è¯•æ—¶é‡æ–°æ ¡éªŒè·¯å¾„ + è·‘æŽ¢é’ˆï¼ˆä¸é‡ç½® POST_SHUTDOWN_GRACEï¼‰
+REM ÖØÊÔÊ±ÖØÐÂÐ£ÑéÂ·¾¶ + ÅÜÌ½Õë£¨²»ÖØÖÃ POST_SHUTDOWN_GRACE£©
 wsl -d Ubuntu -u root -- bash -c "test -f '%WSL_DIR%/wsl_health_probe.sh'" 2>nul
 if errorlevel 1 goto :probe_transient
 wsl -d Ubuntu -u root -- bash -c "timeout 30 bash %WSL_DIR%/wsl_health_probe.sh" 2>&1
@@ -156,8 +161,8 @@ set "PROBE_RETRY=0"
 goto :wsl_alive_ok
 
 :wsl_alive_ok
-REM WSL å·²å°±ç»ªï¼šå…³é—­å†·å¯åŠ¨å®½é™çª—å£ã€‚åŽç»­ daemon/containers é˜¶æ®µçš„ rc=7ï¼ˆçœŸæ­»é”ï¼‰
-REM èµ°æ­£å¸¸ wsl --shutdown è·¯å¾„ï¼Œä¸å†å— grace å®½é™ä¿æŠ¤ã€‚
+REM WSL ÒÑ¾ÍÐ÷£º¹Ø±ÕÀäÆô¶¯¿íÏÞ´°¿Ú¡£ºóÐø daemon/containers ½×¶ÎµÄ rc=7£¨ÕæËÀËø£©
+REM ×ßÕý³£ wsl --shutdown Â·¾¶£¬²»ÔÙÊÜ grace ¿íÏÞ±£»¤¡£
 set "POST_SHUTDOWN_GRACE=0"
 set "PROBE_RETRY=0"
 REM 1. Keep WSL alive (sleep infinity in background, prevents WSL suspend)
@@ -206,6 +211,21 @@ goto :portproxy_done
 echo [WARN] Port forwarding NOT set. Run as admin or set manually.
 :portproxy_done
 
+REM ºó¶Ë¶Ë¿Ú¿ÉÓÃÐÔÌ½²â£¨¶ÔÆë start_web.sh µÄ½Å±¾²ãÌ½²â·¶Ê½£©¡£
+REM ±ØÐëÔÚÈÝÆ÷Æô¶¯(:217)ºÍºó¶Ë½ø³ÌÆô¶¯(:417)Ö®Ç°Íê³É£ºÌ½²â³öµÄÕæÊµ¶Ë¿Ú»á
+REM Í¬Ê±ÏÂ´«¸øÇ°¶ËÈÝÆ÷(compose µÄ BACKEND_PORT)ºÍºó¶Ë½ø³Ì(launcher µÄ BACKEND_PORT)£¬
+REM ±£Ö¤Èý·½Ò»ÖÂ£¬±ÜÃâÀúÊ·ÉÏ app_factory.py ¾²Ä¬Æ¯ÒÆµ¼ÖÂµÄÇ°¶Ë·´´ú´ò´íºó¶Ë¡£
+set "_PORT_DRIFTED=0"
+set "_ORIG_BACKEND_PORT=%BACKEND_PORT%"
+call :resolve_backend_port
+REM Avoid if(...) blocks: ¼û :43-45 ×¢ÊÍ¡£errorlevel ÅÐ¶ÏÓÃ goto ¸üÎÈ½¡¡£
+if not errorlevel 1 goto :backend_port_resolved
+echo [ERROR] ÔÚ %_ORIG_BACKEND_PORT% ÆðµÄ 100 ¸ö¶Ë¿Ú·¶Î§ÄÚÎÞ¿ÉÓÃ¶Ë¿Ú£¬ÎÞ·¨Æô¶¯ºó¶Ë¡£
+echo [ERROR] ÇëÊÍ·ÅÕ¼ÓÃ¶Ë¿ÚµÄ½ø³Ì£¬»òÓÃ set BACKEND_PORT=^<ÆäËû¶Ë¿Ú^> Ö¸¶¨¡£
+pause
+exit /b 1
+:backend_port_resolved
+
 REM 5. Start project containers (delegated to wsl_ensure_containers.sh for real status check)
 REM    Outer timeout 240s backstop; script internals also wrap every docker call.
 echo [INFO] Starting project containers...
@@ -237,21 +257,23 @@ set "REASON=WSL kernel polluted by D-state deadlock"
 
 :auto_shutdown
 set /a "SHUTDOWN_RETRY+=1"
-if !SHUTDOWN_RETRY! gtr 5 (
-    echo [ERROR] auto wsl --shutdown retried !SHUTDOWN_RETRY!  times still failed, giving up
-    echo [ERROR] reason: !REASON!
-    echo [ERROR] Run wsl --shutdown manually, wait 10s, re-run this script
-    pause
-    exit /b 7
-)
+REM Avoid `if (...)` blocks: !REASON! may contain parens (e.g. "WSL probe timeout (kernel deadlock?)")
+REM which breaks cmd's block parser with "was unexpected at this time" and kills the script.
+if not !SHUTDOWN_RETRY! gtr 5 goto :auto_shutdown_retry
+echo [ERROR] auto wsl --shutdown retried !SHUTDOWN_RETRY!  times still failed, giving up
+echo [ERROR] reason: !REASON!
+echo [ERROR] Run wsl --shutdown manually, wait 10s, re-run this script
+pause
+exit /b 7
+:auto_shutdown_retry
 echo [WARN] !REASON!, auto wsl --shutdown then retry ^( !SHUTDOWN_RETRY!/5 ^)...
 REM wsl --shutdown itself may hang under kernel deadlock; wrap in timeout (wsl_shutdown.ps1).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Timeout 15 >nul 2>&1
 echo [INFO] Waiting for WSL kernel to exit ^(~10s^)...
 REM ping-based delay avoids timeout.exe (unreliable under non-interactive shells).
 ping -n 11 127.0.0.1 >nul
-REM æ ‡è®°è¿›å…¥å†·å¯åŠ¨å®½é™çª—å£ï¼šshutdown é‡å¯åŽ WSL éœ€è¦æ—¶é—´æš–å¥½ï¼Œ
-REM æ­¤çª—å£å†…æŽ¢é’ˆçš„éž 0 ç èµ°åŽŸåœ°é‡è¯•è€Œéžå†æ¬¡ shutdownï¼ˆé¿å…åå¤æ‰“å›žé‡å¯ï¼‰ã€‚
+REM ±ê¼Ç½øÈëÀäÆô¶¯¿íÏÞ´°¿Ú£ºshutdown ÖØÆôºó WSL ÐèÒªÊ±¼äÅ¯ºÃ£¬
+REM ´Ë´°¿ÚÄÚÌ½ÕëµÄ·Ç 0 Âë×ßÔ­µØÖØÊÔ¶ø·ÇÔÙ´Î shutdown£¨±ÜÃâ·´¸´´ò»ØÖØÆô£©¡£
 set "POST_SHUTDOWN_GRACE=1"
 set "PROBE_RETRY=0"
 echo [INFO] Re-probing WSL response...^(grace window on^)
@@ -411,6 +433,42 @@ echo   Backend: http://127.0.0.1:%BACKEND_PORT%
 echo   Frontend: http://127.0.0.1:%FRONTEND_HOST_PORT%
 echo   Stop: close Agent window + docker compose down
 echo ========================================
+REM ¶Ë¿ÚÆ¯ÒÆÌáÊ¾£ºÔ­¶Ë¿Ú±»Õ¼Ê±ÒÑ×Ô¶¯ÇÐµ½¿ÉÓÃ¶Ë¿Ú£¬ÇÒÈÝÆ÷Óëºó¶Ë¶¼ÓÃ¸Ã¶Ë¿Ú£¬Èý·½Ò»ÖÂ¡£
+REM Avoid if(...) blocks: ¼û :43-45 ×¢ÊÍ£¬echo ÎÄ±¾ÀïµÄ ( ) »áÈÃ cmd ¿é½âÎöÆ÷ÎóÅÐ¡£
+if not "!_PORT_DRIFTED!"=="1" goto :eof_backend_launch
+echo [INFO] Ä¬ÈÏ¶Ë¿Ú %_ORIG_BACKEND_PORT% ±»Õ¼ÓÃ£¬ÒÑ×Ô¶¯ÇÐ»»µ½ !BACKEND_PORT!£¨Ç°ºó¶Ë¾ùÒÑ¶ÔÆë£©¡£
+echo ========================================
+goto :eof_backend_launch
+
+REM ---------------------------------------------------------------------------
+REM ×ÓÀý³Ì£ºÌ½²â BACKEND_PORT ÊÇ·ñ¿ÉÓÃ£¬±»Õ¼ÔòÏòÉÏÕÒÊ×¸ö¿ÉÓÃ¶Ë¿Ú£¨+100 ÉÏÏÞ£©¡£
+REM Èë¿Ú£ºBACKEND_PORT£¨ÆÚÍû¶Ë¿Ú£©¡£³ö¿Ú£ºBACKEND_PORT£¨Êµ¼Ê¿ÉÓÃ¶Ë¿Ú£©+ _PORT_DRIFTED¡£
+REM ·µ»ØÂë£º0=³É¹¦£¬1=·¶Î§ÄÚÎÞ¿ÉÓÃ¶Ë¿Ú¡£
+REM ÓÃ netstat ¼ì²â LISTENING£»×¢Òâ host 0.0.0.0 ¼àÌý»áÍ¬Ê±Õ¼ÓÃ 127.0.0.1 ºÍ¾ßÌå IP£¬
+REM ¹ÊÍ¬Ê±¼ì²â ":<port> " ºÍ ":<port>" ÐÐÎ²µÄ LISTENING Ïî¡£
+REM ±ÜÃâ if(...) ¿é£¨¼û :43-45 ×¢ÊÍ£©£¬ÓÃ goto ·ÖÖ§ + delayedexpansion¡£
+REM ---------------------------------------------------------------------------
+:resolve_backend_port
+set "_PROBE_PORT=%BACKEND_PORT%"
+set /a "_PROBE_LIMIT=%BACKEND_PORT% + 100"
+:probe_port_loop
+netstat -ano -p tcp 2>nul | findstr /C:"LISTENING" | findstr /C:":!_PROBE_PORT! " >nul 2>&1
+if errorlevel 1 goto :probe_port_free
+REM ¶Ë¿Ú±»Õ¼£¬³¢ÊÔÏÂÒ»¸ö
+set /a "_PROBE_PORT+=1"
+REM Avoid if(...) blocks: ¼û :43-45 ×¢ÊÍ¡£ÓÃµ¥ÐÐ goto ·ÖÖ§¸üÎÈ½¡¡£
+if not !_PROBE_PORT! gtr !_PROBE_LIMIT! goto :probe_port_loop
+exit /b 1
+:probe_port_free
+REM _PROBE_PORT ¿ÉÓÃ¡£ÈôÓëÔ­Ê¼ÆÚÍû²»Í¬£¬±ê¼ÇÆ¯ÒÆ²¢¸²¸Ç BACKEND_PORT¡£
+if not "!_PROBE_PORT!"=="%_ORIG_BACKEND_PORT%" (
+    set "_PORT_DRIFTED=1"
+    echo [INFO] ¶Ë¿Ú %_ORIG_BACKEND_PORT% ÒÑ±»Õ¼ÓÃ£¬ºó¶Ë¸ÄÓÃ !_PROBE_PORT!
+)
+set "BACKEND_PORT=!_PROBE_PORT!"
+exit /b 0
+
+:eof_backend_launch
 pause
 exit /b 0
 

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import shlex
 import shutil
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -389,13 +388,12 @@ class DockerProvider(IsolationProvider):
             return True
 
         try:
-            rc, _, stderr = await self._run_cmd(
-                ["docker", "rm", "-f", container_id], timeout=15
-            )
+            rc, _, stderr = await self._run_cmd(["docker", "rm", "-f", container_id], timeout=15)
         except Exception as e:
             logger.warning(
                 "[DockerProvider] 销毁容器异常（保留记录） | id=%s | error=%s",
-                container_id[:12], e,
+                container_id[:12],
+                e,
             )
             return False
 
@@ -405,7 +403,9 @@ class DockerProvider(IsolationProvider):
             err_tail = stderr.decode("utf-8", errors="replace")[-200:]
             logger.warning(
                 "[DockerProvider] 销毁容器失败（docker 里仍在，保留记录） | id=%s | rc=%s | err=%s",
-                container_id[:12], rc, err_tail,
+                container_id[:12],
+                rc,
+                err_tail,
             )
             return False
 
@@ -585,6 +585,32 @@ class DockerProvider(IsolationProvider):
         low = err.lower()
         return any(marker in low for marker in cls._NAMESPACE_DESYNC_MARKERS)
 
+    # 9p/drvfs 挂载通道损坏（WSL2 已知架构缺陷）的特征标记（小写匹配）。
+    # WSL docker 模式下，容器通过 bind mount 访问宿主 /mnt/<盘>（9p 协议桥接
+    # Windows NTFS）。高负载 + VM 异常终止会让 9p 通道状态机损坏，容器内
+    # 访问 bind mount 路径时冒泡 Linux EIO 标准文本 "Input/output error"。
+    # 与 setns 不同，根因在宿主挂载点：只重建容器不够（新容器 bind mount
+    # 同一坏路径仍 EIO），必须先 umount+mount 修宿主再重建容器。
+    # 真实样本：ls: cannot access '/workspace/docs/.../report.md': Input/output error
+    _IO_ERROR_MARKERS: ClassVar[tuple[str, ...]] = (
+        "input/output error",  # Linux EIO（9p/drvfs 通道损坏时冒泡）
+    )
+
+    @classmethod
+    def _is_io_error(cls, err: str | bytes | None) -> bool:
+        """判断 exec 失败是否为 9p/drvfs 挂载通道损坏（EIO，可修宿主+重建容器自愈）。
+
+        与命令本身的 stderr（权限拒绝、文件不存在等 ENOENT/EACCES）区分——
+        后者是确定性失败重试无意义，前者修宿主挂载 + 重建容器通常即恢复。
+        None 视作无错误（success=True 时 result.error 可能为 None），安全返回 False。
+        """
+        if not err:
+            return False
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        low = err.lower()
+        return any(marker in low for marker in cls._IO_ERROR_MARKERS)
+
     async def _ensure_image(self) -> None:
         """确保镜像存在：本地有就用，没有则自动构建（优先），再不行才 pull。
 
@@ -684,9 +710,17 @@ class DockerProvider(IsolationProvider):
     ) -> ExecutionResult:
         """在容器中执行命令。
 
-        命令用 setsid 包裹自成进程组，超时时整组杀——防 cargo/rustc 后代变孤儿。
-        旧实现 subprocess.run(timeout=...) 只杀本地 docker exec 客户端，容器内
-        后代继续跑 → 僵尸堆积 → PidsLimit 耗尽 → runc setns 崩溃。
+        超时处理策略：只杀本地 docker exec 客户端进程，绝不在容器内做进程组杀。
+
+        历史教训：曾在容器内用 setsid 包裹 + `kill -9 -- -PGID` 整组杀来防孤儿，
+        但实测在 WSL2 + runc 1.3.6 + cgroup v2 环境下，整组 SIGKILL 会砸进 containerd
+        shim 的 freeze/kill/exit-event 窗口，导致 shim 丢失退出事件 → 容器 runc 状态
+        永久脱节（"did not receive an exit event"）→ setns 全部失败。整组杀不是救星，
+        反而是 runc 卡死的直接触发因素。故撤掉，回到只杀本地客户端的最小干预策略。
+        容器内残留进程由 --pids-limit 兜住，坏掉的容器由 setns 自愈（检测+重建）处理。
+
+        保留：显式捕获 subprocess.TimeoutExpired（继承 SubprocessError 非 TimeoutError，
+        旧 except TimeoutError 接不住，会误报"执行命令失败"）。
         """
         import subprocess as _sp  # noqa: PLC0415
 
@@ -697,17 +731,6 @@ class DockerProvider(IsolationProvider):
         if not command:
             return ExecutionResult(success=False, output=None, error="命令不能为空")
 
-        # 用 setsid 包裹命令自成进程组：cargo fork 的所有 rustc/cc 归同一 PGID，
-        # 超时时可 docker exec kill -- -PGID 整组杀（防孙子进程变孤儿）。
-        # setsid 子进程 PID 恒等于其 PGID（POSIX 保证），写标记文件记录供 kill 读。
-        # shlex.quote 防命令内单引号破坏包裹。
-        quoted = shlex.quote(command)
-        marker = f"/tmp/.ao_pgid_{id(operation)}"  # 用 operation id 作唯一标记
-        wrapped = (
-            f"setsid sh -c {quoted} < /dev/null & "
-            f"echo $! > {marker}; PGID=$!; wait $PGID"
-        )
-
         exec_args = [
             "docker",
             "exec",
@@ -716,7 +739,7 @@ class DockerProvider(IsolationProvider):
             container_id,
             "sh",
             "-c",
-            wrapped,
+            command,
         ]
 
         try:
@@ -726,9 +749,6 @@ class DockerProvider(IsolationProvider):
             stderr_text = stderr.decode("utf-8", errors="replace")
             return_code = rc
             success = return_code == 0
-
-            # 清理 PGID 标记文件（正常完成无需遗留）
-            await self._cleanup_pgid_marker(container_id, marker)
 
             return ExecutionResult(
                 success=success,
@@ -744,91 +764,19 @@ class DockerProvider(IsolationProvider):
         except (_sp.TimeoutExpired, TimeoutError):
             # subprocess.TimeoutExpired 继承 SubprocessError（非 TimeoutError），
             # 旧 except TimeoutError 接不住 → 落到 except Exception 误报"执行命令失败"。
-            # 两者都触发容器内整组杀（防孤儿），返回正确的"超时"信息。
-            await self._kill_container_process_group(container_id, marker)
+            # 超时只杀本地 docker exec 客户端（_run_cmd 的 subprocess 已做），
+            # 不在容器内做任何进程操作（避免触发 runc cgroup shim race）。
             return ExecutionResult(
                 success=False,
                 output=None,
                 error=f"命令执行超时（{timeout}秒）",
             )
         except Exception as e:
-            # 其他异常也尽力清理容器内可能残留的进程组
-            await self._kill_container_process_group(container_id, marker)
             return ExecutionResult(
                 success=False,
                 output=None,
                 error=f"执行命令失败: {e}",
             )
-
-    async def _cleanup_pgid_marker(self, container_id: str, marker: str) -> None:
-        """清理 PGID 标记文件（best-effort，失败仅记 debug）。"""
-        try:
-            await self._run_cmd(
-                ["docker", "exec", container_id, "rm", "-f", marker],
-                timeout=5,
-            )
-        except Exception:
-            pass  # 标记文件清理失败不影响主流程
-
-    async def _kill_container_process_group(self, container_id: str, marker: str) -> None:
-        """超时/异常时：读 PGID 标记并 docker exec kill -- -PGID 整组杀。
-
-        防孙子进程（cargo fork 的 rustc/cc）变孤儿继续跑——这是 setns 故障和
-        PID 耗尽的根因。读不到 PGID 时降级为杀容器内本次会话的非 PID1 进程。
-        best-effort：失败仅记日志，不阻断主流程返回。
-        """
-        pgid = await self._read_pgid_marker(container_id, marker)
-        if pgid:
-            try:
-                await self._run_cmd(
-                    ["docker", "exec", container_id, "kill", "-9", "--", f"-{pgid}"],
-                    timeout=10,
-                )
-                logger.info(
-                    "[DockerProvider] 超时清理：已整组杀容器内进程组 | cid=%s | pgid=%s",
-                    container_id[:12], pgid,
-                )
-            except Exception as e:
-                logger.warning(
-                    "[DockerProvider] 超时清理：整组杀失败 | cid=%s | pgid=%s | error=%s",
-                    container_id[:12], pgid, e,
-                )
-            finally:
-                await self._cleanup_pgid_marker(container_id, marker)
-            return
-
-        # 降级：无 PGID 时杀容器内除 PID1 外的所有进程（pkill，容器已装 procps）
-        try:
-            await self._run_cmd(
-                ["docker", "exec", container_id, "pkill", "-9", "--parent", "1"],
-                timeout=10,
-            )
-            logger.info(
-                "[DockerProvider] 超时清理：降级 pkill 容器内残留进程 | cid=%s",
-                container_id[:12],
-            )
-        except Exception as e:
-            logger.warning(
-                "[DockerProvider] 超时清理：降级 pkill 失败 | cid=%s | error=%s",
-                container_id[:12], e,
-            )
-
-    async def _read_pgid_marker(self, container_id: str, marker: str) -> int | None:
-        """读取 PGID 标记文件。失败返回 None。"""
-        try:
-            rc, stdout, _ = await self._run_cmd(
-                ["docker", "exec", container_id, "cat", marker],
-                timeout=5,
-            )
-            if rc != 0:
-                return None
-            text = stdout.decode("utf-8", errors="replace").strip()
-            for token in text.split():
-                if token.isdigit():
-                    return int(token)
-        except Exception:
-            pass
-        return None
 
     async def _file_op_in_container(
         self,
@@ -903,4 +851,3 @@ class DockerProvider(IsolationProvider):
             ],
             timeout=10,
         )
-

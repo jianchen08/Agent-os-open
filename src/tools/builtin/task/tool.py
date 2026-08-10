@@ -197,11 +197,6 @@ class TaskTool(BuiltinTool):
                         "type": "string",
                         "description": "目标任务 ID",
                     },
-                    "task_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "批量任务 ID 列表（与 task_id 二选一）。适用于 continue/stop/delete 操作",
-                    },
                     "status": {
                         "type": "string",
                         "enum": [
@@ -316,13 +311,6 @@ class TaskTool(BuiltinTool):
                 error=str(e),
                 error_code="SERVICE_UNAVAILABLE",
             )
-
-        # 检查是否使用批量参数
-
-        task_ids = inputs.get("task_ids")
-
-        if task_ids and isinstance(task_ids, list) and action in ("continue", "stop", "delete"):
-            return await self._batch_tasks(inputs, parent_agent_level)
 
         if action == "get":
             return await self._get_task(inputs, parent_agent_level)
@@ -853,6 +841,11 @@ class TaskTool(BuiltinTool):
                     "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
                     "workspace": _workspace,
                     "isolation_level": task.metadata.get("isolation_level", ""),
+                    # 保留任务原始层级（task.agent_level 是权威源），
+                    # 避免 task_executor 误用 L3 fallback 导致超时文案/分级错误
+                    "agent_level": (
+                        task.agent_level.value if hasattr(task.agent_level, "value") else str(task.agent_level)
+                    ),
                     "_prepared_context": {
                         "workspace": _workspace,
                         "ws_meta": _ws_meta,
@@ -983,6 +976,11 @@ class TaskTool(BuiltinTool):
                     "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
                     "workspace": _workspace,
                     "isolation_level": task.metadata.get("isolation_level", ""),
+                    # 保留任务原始层级（task.agent_level 是权威源），
+                    # 避免 task_executor 误用 L3 fallback 导致超时文案/分级错误
+                    "agent_level": (
+                        task.agent_level.value if hasattr(task.agent_level, "value") else str(task.agent_level)
+                    ),
                     "_prepared_context": {
                         "workspace": _workspace,
                         "ws_meta": _ws_meta,
@@ -1316,61 +1314,3 @@ class TaskTool(BuiltinTool):
                 error=f"容器状态变更失败: {str(e)}",
                 error_code="CONTAINER_CHANGE_FAILED",
             )
-
-    # ── 批量操作 ──
-
-    async def _batch_tasks(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
-        """批量任务操作，每个任务独立返回结果。"""
-
-        action = inputs.get("action")
-
-        task_ids = inputs.get("task_ids", [])
-
-        results = []
-
-        for task_id in task_ids:
-            file_inputs = dict(inputs)
-
-            file_inputs["task_id"] = task_id
-
-            file_inputs.pop("task_ids", None)
-
-            if action == "continue":
-                result = await self._continue_task(file_inputs, parent_agent_level)
-
-            elif action == "stop":
-                result = await self._stop_task(file_inputs, parent_agent_level)
-
-            elif action == "delete":
-                result = await self._delete_task(file_inputs, parent_agent_level)
-
-            else:
-                result = create_failure_result(
-                    error=f"不支持的批量操作: {action}",
-                    error_code="INVALID_ACTION",
-                )
-
-            results.append(
-                {
-                    "task_id": task_id,
-                    "success": result.success,
-                    "data": result.output if result.success else None,
-                    "error": result.error if not result.success else None,
-                }
-            )
-
-        success_count = sum(1 for r in results if r["success"])
-
-        failed_count = len(results) - success_count
-
-        return create_success_result(
-            data={
-                "results": results,
-                "summary": {
-                    "total": len(results),
-                    "success": success_count,
-                    "failed": failed_count,
-                },
-            },
-            metadata={"action": f"batch_{action}"},
-        )

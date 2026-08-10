@@ -72,14 +72,8 @@ dynamic_vars:
     - name: "当前时间"
       type: "timestamp"
     - name: "决策检查点"
-      type: "reference"
-      content: |
-        每轮动作前按此顺序思考（不在正文中输出或复述该流程）：
-        1. 确认范围：我要做什么
-        2. 回顾流程：当前任务类型对应的执行步骤
-        3. 检查约束：需求第一优先，目标多大动作多大，多余的不做；动作是否触碰硬约束红线
-        4. 确认工具：将调用工具的参数和限制
-        严格遵循以上思考结果执行。
+      type: "path"
+      path: "config/rules/execution_review_rules.md"
 
 # ============ 工具配置 ============
 tool_ids:
@@ -88,7 +82,6 @@ tool_ids:
   - task_evaluate
   - file_read
   - file_write
-  - list_directory
   - human_interaction
   - memory
   # resource_search 仅在需要灵活搜索时保留

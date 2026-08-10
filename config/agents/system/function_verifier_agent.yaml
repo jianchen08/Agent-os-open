@@ -34,6 +34,9 @@ static_vars:
       如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，工具将自动加载到当前会话，下一轮即可直接调用。
 
       '
+  - name: 浏览器测试技能
+    type: path
+    path: skills/playwright-skill/SKILL.md
 dynamic_vars:
   enabled: true
   items:
@@ -58,11 +61,12 @@ system_prompt: |-
   在开始任何验证工作之前，先评估当前可用工具能否覆盖本次验证需求：
 
   1. **梳理验证内容类型**：根据需求描述，识别需要验证的功能涉及哪些类型（后端API、前端UI、数据库、文件系统、CLI命令等）
-  2. **审查工具覆盖范围**：对照可用工具列表（file_read、file_write、bash_execute、fetch、playwright_test 等），逐项检查每种验证内容是否有合适的工具支撑
+  2. **审查工具覆盖范围**：对照可用工具列表（file_read、file_write、bash_execute、fetch 等），逐项检查每种验证内容是否有合适的工具支撑
   3. **探测前端验证栈**（前端/UI 项目必做）：通过 bash_execute + file_read 探测项目是否具备 playwright CLI 栈：
      - **Node 栈**：项目有 `package.json` 且依赖含 `@playwright/test` 或 `playwright` → 可用 `npx playwright test <spec>` 跑测试
      - **Python 栈**：项目有 `pyproject.toml`/`requirements.txt` 且依赖含 `playwright` → 可用 `pytest` 跑测试
      - 同时探测项目是否已有 playwright spec 文件（如 `e2e/**/*.spec.ts`、`tests/**/test_*.py`），可直接复用
+     - **浏览器已预装，直接用**：本环境 chromium 与 playwright 库均已预装，直接 `chromium.launch(headless=True, args=["--no-sandbox"])` 即可，不要运行 `playwright install`（会清空已预装的浏览器）。前端 E2E 验证能力默认可用，不应记为"工具缺口"
   4. **识别工具缺口**：如果某些验证内容没有合适的工具：
      - 在验证输出中明确记录：哪些内容**无法验证**，原因是什么
      - 说明需要什么工具才能补上这些验证能力
@@ -157,7 +161,7 @@ system_prompt: |-
   passed 判定：
   - passed = 可验证内容全部通过 且 不可验证内容已如实报告（在 tool_capability_assessment 说明哪些无法验证、需要什么环境、向上级请求补充）
   - 可验证部分关键步骤失败 → passed=false
-  - 弱验证冒充（如用 fetch 替代 playwright_test 做前端验证）不说明 → passed=false
+  - 弱验证冒充（如用 fetch 替代浏览器验证做前端验证）不说明 → passed=false
   - 非关键步骤失败但功能仍可用 → passed=true，score 降低
 
   ## 参考规则
@@ -167,11 +171,9 @@ system_prompt: |-
 tool_ids:
 - file_read
 - file_write
-- list_directory
 - bash_execute
 - enhanced_search
 - fetch
-- playwright_test
 - resource_search
 - task_evaluate
 hard_constraints:
@@ -195,7 +197,7 @@ soft_constraints:
 - 用户旅程步骤失败时应继续尝试后续步骤，验证错误恢复能力
 - 记录的 evidence 应包含完整的工具调用参数和真实输出
 - 验证脚本应有清晰注释，可独立运行
-- 优先使用专用工具（fetch > curl）；前端验证优先用 playwright 命令行跑测试脚本（npx playwright test / pytest），CLI 栈不可用时回退内置 playwright_test 工具，两者都不可用时如实报告工具缺口，禁止弱验证替代
+- 优先使用专用工具（fetch > curl）；前端验证用 playwright（浏览器已预装，直接 launch，不要 install），两者都不可用时如实报告工具缺口，禁止弱验证替代
 input_schema:
   type: object
   properties:
@@ -243,15 +245,15 @@ deliverables:
   type: python
   required: true
 - name: verification_report
-  description: 功能验证报告（Markdown，含验证结论、工具能力评估、用户旅程结果、不可验证项）
-  output_path: '{{workspace}}/docs/working/function_verify_report.md'
+  description: 功能验证报告（Markdown，含验证结论、工具能力评估、用户旅程结果、不可验证项）。文件名带任务标题前缀避免并行子任务合并冲突：{title}_function_verify_report.md（{title} 用任务目标原文，不翻译、不缩写、不改写）
+  output_path: '{{workspace}}/docs/working/{title}_function_verify_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/working/function_verify_report.md'
+    path: '{{workspace}}/docs/working/{title}_function_verify_report.md'
 - metric_id: semantic_check
   default_params:
     criteria: 验证报告必须包含 tool_capability_assessment、semantic_evaluation、user_journey 字段，且验证场景与用户真实使用一致

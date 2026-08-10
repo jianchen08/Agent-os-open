@@ -7,15 +7,45 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from agents.types import AgentConfig
-    from pipeline.sink import IOutputSink
-
 from pipeline.message_types import (
     MessageType,
     PipelineMessage,
     PipelineRequest,
 )
+
+# ★ engine_task 强引用保护集：entry 被删/覆盖后 task 不会被 GC 静默回收。
+# Python asyncio 官方警告："Save a reference to the result of ensure_future,
+# to avoid a task disappearing mid-execution"。entry.engine_task 是唯一引用时，
+# 一旦 entry 从注册表删除，task 会立即被 GC → 协程静默死亡、finally 不执行。
+# 此处持有独立强引用，task 完成后由 done_callback 自动清理。
+_engine_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _track_engine_task(task: asyncio.Task[Any], pipeline_id: str) -> None:
+    """登记 engine_task 强引用 + done 回调自动清理。
+
+    即使注册表 entry 被删/覆盖，task 也不会被 GC（强引用仍在），
+    能正常执行完 finally 块（打"引擎停止"日志、emit_finish 等）。
+    """
+    _engine_tasks.add(task)
+
+    def _on_done(t: asyncio.Task[Any]) -> None:
+        _engine_tasks.discard(t)
+        if not t.cancelled():
+            with __import__("contextlib").suppress(Exception):
+                t.exception()  # 消费异常避免 "never retrieved" 告警
+
+    task.add_done_callback(_on_done)
+    logger.info(
+        "[MessageBus] engine_task 已登记强引用保护 | pipeline=%s task_id=%s",
+        pipeline_id[:12],
+        id(task),
+    )
+
+
+if TYPE_CHECKING:
+    from agents.types import AgentConfig
+    from pipeline.sink import IOutputSink
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +352,9 @@ async def _start_idle_engine(
         task_id = _tags.get("task_id", "") or ""
     if not workspace:
         workspace = _tags.get("workspace", "") or ""
+    # 会话级隔离模式（tags 由创建者写入）：随 extra_state 播种到管道 state，
+    # 供 session_isolation 插件（主会话容器决策）与 param_inject（任务继承）消费。
+    isolation_level = _tags.get("isolation_level", "") or ""
     # user_id / session_id 随上下文同源恢复，播种到管道 state
     # （task_submit 继承身份、task_status_update / task_status_changed 定位投递目标）
     _ctx_user_id = _tags.get("user_id", "") or ""
@@ -344,6 +377,7 @@ async def _start_idle_engine(
             task_id=task_id,
             workspace=workspace,
             project_root="",
+            isolation_level=isolation_level,
             streaming=True,
             on_chunk=None,
             client_message_id=client_message_id,
@@ -355,6 +389,8 @@ async def _start_idle_engine(
     _idle_entry = _registry.get(pipeline_id)
     if _idle_entry:
         _idle_entry.engine_task = engine_future
+    # ★ 独立强引用保护：防止 entry 被删/覆盖后 engine_task 被 GC 静默回收
+    _track_engine_task(engine_future, pipeline_id)
     logger.info("[MessageBus] idle engine started (main loop) | pipeline=%s", pipeline_id[:12])
     return InjectResult(success=True, method="start", pipeline_id=pipeline_id, bridge=bridge)
 
@@ -384,15 +420,29 @@ async def emit(
 
 
 async def stop(pipeline_id: str) -> InjectResult:
-    """唯一停止入口（I1 原子级联）。"""
+    """唯一停止入口（I1 原子级联）。
+
+    调用方（cancel_pipeline / 显式停止 / 级联清理）已负责设定任务的终态
+    （STOPPED/FAILED）。引擎只需安静退出，不得自行写 RAW_ERROR 或 fail_task
+    （否则会把上层设的 STOPPED 覆盖成 FAILED，并产生 "Pipeline engine cancelled"
+    这类误导性文案）。故 cancel engine_task 前置 _user_stop_requested 标志，
+    让引擎 _run_loop 的 CancelledError 走安静分支。
+    """
     from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return InjectResult(success=False, error="管道未注册", method="rejected", pipeline_id=pipeline_id)
 
-    # ① cancel engine_task（真正停 run 协程）
+    # ① cancel engine_task（真正停 run 协程）—— 先置标志，让引擎安静退出
     if entry.engine_task is not None and not entry.engine_task.done():
+        # 主动停止（非崩溃）：让 _run_loop 的 CancelledError 走安静分支，
+        # 不写 RAW_ERROR、不 emit_error、不 _mark_task_failed_on_engine_exit。
+        # 上层（cancel_pipeline 等）已设好任务终态，引擎不得覆盖。
+        # 用引擎公开方法（不穿透私有成员，对齐 stop() 既有的"不碰私有"约定）。
+        _engine = getattr(entry, "engine", None)
+        if _engine is not None and hasattr(_engine, "_mark_user_stop_requested"):
+            _engine._mark_user_stop_requested()  # type: ignore[attr-defined]
         entry.engine_task.cancel()
     # ② 停 bridge（如有）
     if entry.bridge is not None:

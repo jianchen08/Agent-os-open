@@ -151,22 +151,28 @@ export function handleSystemNotification(eventData: any): void {
 }
 
 /**
- * 处理 COST_UPDATE 事件：写入本轮单轮 token 用量到 contextUsageStore。
+ * 处理 COST_UPDATE 事件：写入本轮 token 用量（单轮 + 累计）到 contextUsageStore。
  *
  * 后端 track 插件在每轮 llm_call 后推送（tool_execute 轮已跳过），
- * payload = { pipeline_id, total_tokens, input_tokens, output_tokens }，
- * 均为本轮 API 返回的单轮值。进度条据此按 pipeline 实时刷新。
+ * payload = { pipeline_id, total_tokens, input_tokens, output_tokens, cached_tokens,
+ *             cumulative: { input_tokens, output_tokens, cached_tokens,
+ *                           missed_tokens, total_tokens } }。
+ *
+ * 顶层为单轮值（本轮 API 返回），进度条据此计算占窗比；
+ * cumulative 为整个管道跨轮加总的累计值，统计区据此显示
+ * 「缓存命中输入 / 未命中输入 / 输出 分别加总」。
  */
 export function handleCostUpdate(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
   const data = eventData?.data || eventData
   const totalTokens = data?.total_tokens || 0
-  // 后端 tool_execute 轮已过滤，前端再兜底防 0 值覆盖
+  // 后端 tool_execute 轮已过滤，前端再兜底防 0 值覆盖（单轮语义仍需要）
   if (totalTokens <= 0) return
   useContextUsageStore.getState().updateUsage(pipelineId, {
     total_tokens: totalTokens,
     input_tokens: data?.input_tokens || 0,
     output_tokens: data?.output_tokens || 0,
+    cumulative: data?.cumulative,
   })
 }

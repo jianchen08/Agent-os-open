@@ -97,7 +97,7 @@ system_prompt: |-
   **文风锚定（写作层启动前必须执行）**：
 
   进入写作层的第一件事，必须确保有文风参考原文可用：
-  1. 检查 `knowledge/style_reference/` 目录是否已有参考文件（使用 list_directory）
+  1. 检查 `knowledge/style_reference/` 目录是否已有参考文件（使用 file_read 列出目录）
   2. **如已有参考文件**：记录文件路径，后续每次派发写作任务时在 goal 中附带 `style_reference_path`
   3. **如无参考文件**：使用 `human_interaction` 向用户请求参考作品
      - 说明内容：「需要1-2章同类型知名作品原文（数千到上万字）作为文风锚定参考。这段原文将用于锚定全书的叙事节奏、描写密度、句式变化、遣词造句，请粘贴或提供文件路径。」
@@ -190,7 +190,7 @@ system_prompt: |-
   **知识库规则**：
   - 给Agent派发任务时，引用知识库路径而非复制内容，让Agent自行 file_read
   - 设定锁定后，`worldbuilding/` 和 `characters/` 的基础设定不可修改（除非走异常上报）
-  - 使用 list_directory 检查文件是否存在，不使用 file_read 读取内容
+  - 使用 file_read 列出目录来检查文件是否存在，不读取文件内容
 
   ## 进度管理
 
@@ -248,11 +248,10 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
-  - '{{path:config/rules/dispatcher_rules_exec.md}}'
+  - '{{path:config/rules/dispatcher_rules_orchestrator.md}}'
 tool_ids:
 - file_read
 - file_write
-- list_directory
 - enhanced_search
 - task_submit
 - task_manage
@@ -295,8 +294,8 @@ rule_reinforcement:
   max_rules: 10
 deliverables:
 - name: novel_orchestration_report
-  description: 小说创作编排报告，包含创作流程记录、各阶段产出索引、检查点执行记录、质量评估汇总
-  output_path: '{{workspace}}/docs/working/novel_orchestration_report.md'
+  description: 小说创作编排报告，包含创作流程记录、各阶段产出索引、检查点执行记录、质量评估汇总。文件名带小说标题前缀避免并行项目合并冲突：{novel_title}_novel_orchestration_report.md（{novel_title} 用小说标题原文，不翻译、不缩写、不改写）
+  output_path: '{{workspace}}/docs/working/{novel_title}_novel_orchestration_report.md'
   type: markdown
   required: true
 - name: novel_progress
@@ -308,13 +307,13 @@ recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/working/novel_orchestration_report.md'
+    path: '{{workspace}}/docs/working/{novel_title}_novel_orchestration_report.md'
 version: 5.0.0
 is_active: true
 status: active
 max_iterations: 250
 max_reminders: 8
-timeout_seconds: 7200
+timeout_seconds: 9000
 plugins:
   disabled: []
   enabled:

@@ -192,9 +192,17 @@ class ConfigCenter:
         self,
         config_root: str | Path = "config",
         debounce_seconds: float = DEBOUNCE_SECONDS,
+        env_file_path: str | Path | None = None,
     ) -> None:
         self._config_root = Path(config_root)
         self._debounce_seconds = debounce_seconds
+        # .env 热重载目标文件（默认项目根 .env，与 config/models.py 同款推导）
+        # 单独监听而非纳入 config/ 子树，避免触发 yaml 处理流水线。
+        if env_file_path is None:
+            env_file_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        self._env_file_path = Path(env_file_path).resolve()
+        # .env 内容哈希缓存（独立于 yaml 的 _content_hashes）
+        self._env_content_hash: str | None = None
 
         # 文件内容哈希缓存 {file_path_str: sha256_hex}
         self._content_hashes: dict[str, str] = {}
@@ -405,7 +413,9 @@ class ConfigCenter:
     async def start(self) -> None:
         """启动配置中心（异步）。
 
-        基于 watchfiles 监听 config_root 目录变更。
+        基于 watchfiles 监听两类目标：
+        1. config_root 目录树（YAML 配置热重载）
+        2. 项目根 .env 文件（环境变量热重载 → 触发 LLM Router 重建）
 
         所有可能的退出路径都会 set `_ready_event`，确保调用方通过
         `wait_ready()` 等待时不会永久阻塞（无论成功还是失败）。
@@ -429,20 +439,63 @@ class ConfigCenter:
                 self._running = False
                 return
 
-            logger.info("ConfigCenter 启动 | config_root=%s", self._config_root)
-
-            async for changes in awatch(
+            logger.info(
+                "ConfigCenter 启动 | config_root=%s | env_file=%s",
                 self._config_root,
-                stop_event=self._stop_event,
-            ):
-                if not self._running:
-                    break
-                await self._process_changes(changes)
+                self._env_file_path,
+            )
+
+            # 两个监听协程并行：config/ 树 + .env 文件。
+            # 用 gather 合并，stop_event 触发时两者同步退出。
+            await asyncio.gather(
+                self._watch_config_root(awatch),
+                self._watch_env_file(awatch),
+            )
 
             logger.info("ConfigCenter 已停止")
         finally:
             # 无论成功启动、早退还是异常，都通知等待方，避免死等
             self._ready_event.set()
+
+    async def _watch_config_root(self, awatch: Any) -> None:
+        """监听 config_root 目录树的 YAML 变更。"""
+        async for changes in awatch(
+            self._config_root,
+            stop_event=self._stop_event,
+        ):
+            if not self._running:
+                break
+            await self._process_changes(changes)
+
+    async def _watch_env_file(self, awatch: Any) -> None:
+        """监听项目根 .env 文件变更。
+
+        监听 .env 的父目录（非递归）并用 watch_filter 仅放行 .env 本身，
+        避免监听整个项目根树带来的噪声。
+        """
+        env_parent = self._env_file_path.parent
+        if not env_parent.exists():
+            logger.warning(".env 父目录不存在，跳过 .env 监听: %s", env_parent)
+            return
+
+        env_name = self._env_file_path.name
+
+        def _only_env(_change: Any, path: str) -> bool:
+            # 仅放行 .env 文件本身（路径精确匹配）
+            return Path(path).resolve() == self._env_file_path and Path(path).name == env_name
+
+        try:
+            async for changes in awatch(
+                env_parent,
+                recursive=False,
+                watch_filter=_only_env,
+                stop_event=self._stop_event,
+            ):
+                if not self._running:
+                    break
+                await self._process_changes(changes)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(".env 监听协程异常（不影响 config/ 监听）: %s", exc, exc_info=True)
 
     async def wait_ready(self, timeout: float = 5.0) -> bool:
         """等待 ConfigCenter 启动就绪。
@@ -517,8 +570,19 @@ class ConfigCenter:
         }
 
         for change_type, path_str in changes:
-            # 过滤非 YAML 文件
             path = Path(path_str)
+
+            # .env 专属分支：在 yaml 过滤之前处理，不走 yaml 缓存/解析流水线
+            try:
+                if path.resolve() == self._env_file_path:
+                    event_type_env = event_map.get(change_type, "modified")
+                    if self._check_debounce(str(self._env_file_path)):
+                        await asyncio.to_thread(self._handle_env_change, event_type_env)
+                    continue
+            except OSError:
+                pass
+
+            # 过滤非 YAML 文件
             if path.suffix not in (".yaml", ".yml"):
                 continue
 
@@ -618,6 +682,109 @@ class ConfigCenter:
         )
 
         logger.info("配置自动重载: type=%s event=%s path=%s", config_type, event_type, path_str)
+
+    def _handle_env_change(self, event_type: str) -> None:
+        """处理 .env 文件变更（同步，在线程池中执行）。
+
+        与 yaml 配置不同：.env 不是 YAML，不进 _config_cache，
+        而是刷新 os.environ 后触发 LLM 缓存重建。
+
+        Args:
+            event_type: 事件类型（modified/created/deleted）。
+        """
+        env_path = self._env_file_path
+        path_str = str(env_path)
+
+        # 删除事件：仅记录，不清 os.environ（无法确定哪些 key 来自 .env）
+        if event_type == "deleted" or not env_path.exists():
+            with _WriteGuard(self._rwlock):
+                self._env_content_hash = None
+            context = {"config_type": "env"}
+            self._notify_watchers(event_type, path_str, context)
+            self._write_audit(
+                AuditEntry(
+                    file_path=path_str,
+                    event_type=event_type,
+                    config_type="env",
+                    success=True,
+                )
+            )
+            logger.warning(".env 文件已删除，环境变量保持现状: %s", path_str)
+            return
+
+        # 内容哈希去重（避免编辑器保存但内容未变时无谓重建）
+        try:
+            with open(env_path, encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            self._write_audit(
+                AuditEntry(
+                    file_path=path_str,
+                    event_type=event_type,
+                    config_type="env",
+                    success=False,
+                    error=str(e),
+                )
+            )
+            logger.warning(".env 读取失败: %s", e)
+            return
+
+        new_hash = hashlib.sha256(content.encode()).hexdigest()
+        with _WriteGuard(self._rwlock):
+            if new_hash == self._env_content_hash:
+                logger.debug(".env 内容未变化，跳过: %s", path_str)
+                return
+            self._env_content_hash = new_hash
+
+        # 1. 刷新 os.environ（reload_env_file 内部按值去重）
+        env_changed = False
+        try:
+            from config.models import reload_env_file  # noqa: PLC0415
+
+            env_changed = reload_env_file()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(".env 重载失败: %s", exc, exc_info=True)
+            self._write_audit(
+                AuditEntry(
+                    file_path=path_str,
+                    event_type=event_type,
+                    config_type="env",
+                    success=False,
+                    error=str(exc),
+                )
+            )
+            return
+
+        # 2. 环境变量变了 → 重建 LLM Router/Adapter，使新 key 立即生效
+        #    （yaml 模型配置本身没变，但 ${VAR} 占位符解析出的值变了，必须重建）
+        llm_rebuilt = False
+        if env_changed:
+            try:
+                from config.models import invalidate_all_llm_caches  # noqa: PLC0415
+
+                invalidate_all_llm_caches()
+                llm_rebuilt = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM 缓存重建失败: %s", exc, exc_info=True)
+
+        # 3. 通知 + 审计
+        context = {"config_type": "env", "content_hash": new_hash}
+        self._notify_watchers(event_type, path_str, context)
+        self._write_audit(
+            AuditEntry(
+                file_path=path_str,
+                event_type=event_type,
+                config_type="env",
+                success=True,
+                content_hash=new_hash,
+            )
+        )
+        logger.info(
+            ".env 重载完成 | env_changed=%s | llm_rebuilt=%s | path=%s",
+            env_changed,
+            llm_rebuilt,
+            path_str,
+        )
 
     def _handle_load_failure(
         self,
@@ -736,10 +903,11 @@ class ConfigCenter:
     # -- 工具方法 -----------------------------------------------------------
 
     @staticmethod
-    def _determine_config_type(file_path: str) -> str:  # noqa: PLR0911
+    def _determine_config_type(file_path: str) -> str:  # noqa: PLW3201
         """根据文件路径判断配置类型。
 
         路径规则：
+        - 文件名以 .env 开头 → env
         - 包含 agents → agent
         - 包含 pipelines → pipeline
         - 包含 tools → tool
@@ -756,6 +924,9 @@ class ConfigCenter:
             配置类型标识。
         """
         path = Path(file_path)
+        # .env 系列文件（.env / .env.local 等）
+        if path.name.startswith(".env"):
+            return "env"
         for part in path.parts:
             lower = part.lower()
             if lower == "agents":

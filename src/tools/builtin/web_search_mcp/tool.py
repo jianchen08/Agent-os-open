@@ -119,9 +119,8 @@ class WebSearchMCPTool(BuiltinTool):
         """获取工具定义"""
         return Tool(
             name="web_search",
-            description="搜索互联网信息，基于 mcp-webgate 实现。支持多引擎搜索（SearXNG 聚合），"
-            "自动 BM25 重排序、HTML 去噪、URL 去重，返回高质量结果。"
-            "提供三种搜索模式：完整搜索（搜索+抓取+清洗+排序）、"
+            description="搜索互联网信息，支持多引擎搜索、自动排序与去重，返回高质量结果。"
+            "提供三种搜索模式：完整搜索（搜索+抓取+排序）、"
             "摘要模式（仅搜索结果摘要）、内容提取（提取指定 URL 的页面内容）。",
             input_schema={
                 "type": "object",
@@ -140,7 +139,7 @@ class WebSearchMCPTool(BuiltinTool):
                     },
                     "search_mode": {
                         "type": "string",
-                        "description": "搜索模式：full=完整搜索（搜索+抓取+清洗+BM25排序），"
+                        "description": "搜索模式：full=完整搜索（搜索+抓取+排序），"
                         "summary=摘要模式（仅获取搜索结果摘要），"
                         "content_only=内容提取（将 query 作为 URL 提取页面内容）",
                         "enum": ["full", "summary", "content_only"],

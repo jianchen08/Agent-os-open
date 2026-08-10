@@ -238,6 +238,8 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
                 llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
                 llm_call._context_window = llm_conf.get("context_window")
                 # 同步 default_params（与直连模式分支保持一致）。
+                # 空 dict 不覆盖（`if _new_params` 对空 dict 为假），让 LLMCore
+                # 的兜底生效——见直连模式分支（line ~288）的同样处理。
                 _new_params = llm_conf.get("default_params")
                 if _new_params:
                     llm_call._default_params = _new_params
@@ -281,7 +283,11 @@ def apply_agent_model_override(  # noqa: PLR0912,PLR0915
     llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
     llm_call._api_key = llm_conf.get("api_key") or llm_call._api_key
     llm_call._context_window = llm_conf.get("context_window")
-    llm_call._default_params = llm_conf.get("default_params", llm_call._default_params)
+    # 空 dict 不覆盖：与 Router 模式（line 242 `if _new_params`）对齐。
+    # 漏配模型由配置层返回 {}，此处不覆盖，让 LLMCore 的兜底（plugin.py）生效。
+    _dp = llm_conf.get("default_params")
+    if _dp:
+        llm_call._default_params = _dp
     logger.debug(
         "[apply_agent_model_override] Agent %s 使用模型: %s (provider=%s, context_window=%s)",
         getattr(agent_config, "config_id", "?"),

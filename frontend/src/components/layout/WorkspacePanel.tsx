@@ -1,9 +1,10 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
 import { Maximize2, Minimize2 } from 'lucide-react'
-import React from 'react'
+import React, { useState } from 'react'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import type { WorkspaceTab } from '@/types/layout'
+import { WorkspaceTabContextMenu } from './WorkspaceTabContextMenu'
 
 /** 工作区面板属性 */
 interface WorkspacePanelProps {
@@ -21,6 +22,10 @@ interface WorkspacePanelProps {
   isFullscreen?: boolean
  /** 已访问过（至少激活过一次）的 Tab ID 集合，用于懒挂载策略 PERF 只有当前激活 Tab 或曾访问过的 Tab */
   visitedTabIds?: string[]
+  /** 右键「关闭其他标签」回调（保留 keepTabId 与所有 pinned） */
+  onTabCloseOthers?: (keepTabId: string) => void
+  /** 右键「关闭所有标签」回调（关闭所有 !pinned） */
+  onTabCloseAll?: () => void
 }
 
 /** 工作区面板组件 显示 Tab 栏和对应的 Tab 内容区域 */
@@ -32,6 +37,8 @@ export function WorkspacePanel({
   onFullscreen,
   isFullscreen,
   visitedTabIds,
+  onTabCloseOthers,
+  onTabCloseAll,
 }: WorkspacePanelProps) {
   // 以非被动方式绑定 wheel，使 preventDefault() 生效（React 默认的 onWheel 是被动的）
   const tabScrollRef = useNonPassiveWheel<HTMLDivElement>((e) => {
@@ -41,6 +48,10 @@ export function WorkspacePanel({
       el.scrollLeft += e.deltaY
     }
   })
+
+  /** 右键菜单定位与目标 tab；仅当 onTabCloseOthers/onTabCloseAll 至少一项提供时启用 */
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tab: WorkspaceTab } | null>(null)
+  const contextMenuEnabled = !!(onTabCloseOthers || onTabCloseAll)
 
   if (tabs.length === 0) {
     return (
@@ -64,6 +75,14 @@ export function WorkspacePanel({
                 : 'text-muted-foreground hover:text-foreground border-transparent'
             }`}
             onClick={() => onTabChange(tab.id)}
+            onContextMenu={
+              contextMenuEnabled
+                ? (e) => {
+                    e.preventDefault()
+                    setContextMenu({ x: e.clientX, y: e.clientY, tab })
+                  }
+                : undefined
+            }
           >
             {tab.icon && <span>{tab.icon}</span>}
             <span>{tab.title}</span>
@@ -123,6 +142,20 @@ export function WorkspacePanel({
           })
         )}
       </div>
+
+      {/* 右键上下文菜单：关闭 / 关闭其他标签 / 关闭所有标签 */}
+      {contextMenu && contextMenuEnabled && (
+        <WorkspaceTabContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          tab={contextMenu.tab}
+          tabs={tabs}
+          onCloseTab={onTabClose}
+          onCloseOthers={(keepTabId) => onTabCloseOthers?.(keepTabId)}
+          onCloseAll={() => onTabCloseAll?.()}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   )
 }

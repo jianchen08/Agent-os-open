@@ -75,6 +75,9 @@ class OutputSummary:
     errors: int = 0
     progress: str | None = None
     latest_message: str = ""
+    # 错误行原文列表（去重后），供失败路径直接回传给 LLM。
+    # 与 errors（计数）区分：errors 是"有几条"，error_lines 是"具体哪几条"。
+    error_lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -104,14 +107,16 @@ class ProcessInfo:
 class WorkUnit:
     """一次命令执行的可追踪、可杀句柄。
 
-    进程后端 launch 时返回。看门狗通过它定位并杀掉对应工作单元的整棵进程树。
-    - 本地后端：pid 是真实 OS pid，psutil 据此递归杀树。
-    - 容器后端：pgid 是容器内进程组号，docker exec kill -- -pgid 整组杀。
+    进程后端 launch 时返回。看门狗通过它定位并杀掉对应工作单元的进程。
+    - 本地后端：pid 是真实 OS pid，psutil 据此递归杀整棵进程树（防 cargo/rustc 孤儿）。
+    - 容器后端：pid 是容器内 pid（存 metadata['container_pid']），docker exec kill
+      <cid> kill <sig> <pid> 单进程杀——不在容器内整组杀（kill -9 -- -PGID 会触发
+      runc cgroup shim race 导致容器永久卡死，见 docker_provider.py 注释）。
     """
 
-    pid: int  # 主进程 pid（本地=OS pid；容器内可作标识）
+    pid: int  # 主进程 pid（本地=OS pid；容器=容器内 pid，配 metadata['container_id']）
     command: str
-    pgid: int | None = None  # 进程组号（容器后端用，本地后端可不填）
+    pgid: int | None = None  # 进程组号（保留字段，当前容器后端不用——整组杀已废弃）
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,8 +124,9 @@ class ProcessBackend(ABC):
     """进程执行/清理后端抽象（工具层）。
 
     杀进程是工具的能力，隔离模式只是接入这个抽象的一种后端实现。
-    - LocalProcessBackend：本地宿主执行，psutil 递归杀进程树。
-    - ContainerProcessBackend：容器内 docker exec 执行，进程组整组杀。
+    - LocalProcessBackend：本地宿主执行，psutil 递归杀进程树（防孙子进程变孤儿）。
+    - ContainerProcessBackend：容器内 docker exec 执行，单进程 kill（不整组杀，
+      避免 runc 卡死）。
 
     看门狗（ProcessManager）的策略层只依赖此抽象，不关心进程跑在哪。
     """

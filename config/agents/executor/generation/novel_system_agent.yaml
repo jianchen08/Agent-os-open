@@ -165,7 +165,6 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
-- list_directory
 - create_directory
 - copy_file
 - delete_file

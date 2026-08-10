@@ -79,6 +79,10 @@ export interface Session {
   activePipelineId?: string | null
   /** 元数据 */
   metadata?: Record<string, unknown>
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string | null
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolationMode?: 'isolated' | 'non_isolated' | null
   /** 是否已星标 */
   starred?: boolean
   /** 是否已置顶 */

@@ -91,6 +91,10 @@ interface LayoutModeActions {
   addWorkspaceTab: (tab: WorkspaceTab) => void
   setActiveTab: (tabId: string) => void
   closeWorkspaceTab: (tabId: string) => void
+  /** 关闭除 keepTabId 与所有 pinned tab 以外的 tab，并把 keepTabId 设为唯一激活 */
+  closeOtherWorkspaceTabs: (keepTabId: string) => void
+  /** 关闭所有可关闭（!isPinned）tab；若仍残留 pinned tab 则激活首个 */
+  closeAllWorkspaceTabs: () => void
   updateWorkspaceTab: (tabId: string, updates: Partial<WorkspaceTab>) => void
 
   /** Dock item management */
@@ -208,6 +212,39 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
           workspaceTabs: state.workspaceTabs.filter((t) => t.id !== tabId),
           visitedTabIds: state.visitedTabIds.filter((id) => id !== tabId),
         })),
+      // 右键「关闭其他标签」：保留 keepTabId 与所有 pinned tab，
+      // 删除其余可关 tab 并清理 visited；keepTabId 成为唯一激活。
+      closeOtherWorkspaceTabs: (keepTabId) =>
+        set((state) => {
+          const removed = state.workspaceTabs.filter(
+            (t) => t.id !== keepTabId && !t.isPinned,
+          )
+          const removedIds = new Set(removed.map((t) => t.id))
+          const remaining = state.workspaceTabs.filter((t) => !removedIds.has(t.id))
+          return {
+            workspaceTabs: remaining.map((t) => ({
+              ...t,
+              isActive: t.id === keepTabId,
+            })),
+            visitedTabIds: state.visitedTabIds.filter((id) => !removedIds.has(id)),
+          }
+        }),
+      // 右键「关闭所有标签」：删除所有 !isPinned tab；若仍有 pinned tab
+      // 则激活首个，否则保持为空。
+      closeAllWorkspaceTabs: () =>
+        set((state) => {
+          const removed = state.workspaceTabs.filter((t) => !t.isPinned)
+          const removedIds = new Set(removed.map((t) => t.id))
+          const remaining = state.workspaceTabs.filter((t) => !removedIds.has(t.id))
+          const firstId = remaining[0]?.id
+          return {
+            workspaceTabs: remaining.map((t) => ({
+              ...t,
+              isActive: t.id === firstId,
+            })),
+            visitedTabIds: state.visitedTabIds.filter((id) => !removedIds.has(id)),
+          }
+        }),
       updateWorkspaceTab: (tabId, updates) =>
         set((state) => ({
           workspaceTabs: state.workspaceTabs.map((t) =>

@@ -5,14 +5,101 @@
 - resolve_workspace()：统一解析任务的工作空间路径
 - resolve_workspace_chain()：递归解析任务工作空间（支持多层嵌套）
 - get_workspace_config_root()：从配置文件读取工作空间根目录
+- validate_workspace_path()：工作空间路径安全性校验（任务/会话共用）
 """
 
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE_ROOT = ".ai_workspaces"
+
+# ── 危险目标空间目录列表 ──
+# 这些目录是操作系统关键目录，绝不允许作为任务/会话的目标工作空间。
+_DANGEROUS_DIRS: set[str] = set()
+
+_DANGEROUS_WINDOWS_DIRS = [
+    r"C:\Windows",
+    r"C:\Windows\System32",
+    r"C:\Windows\SysWOW64",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData",
+    r"C:\Users",
+]
+
+_DANGEROUS_UNIX_DIRS = [
+    "/",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib64",
+    "/proc",
+    "/root",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/var",
+    "/tmp",
+    "/home",
+    "/opt",
+]
+
+for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
+    _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
+
+
+def validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
+    """验证目标空间路径的安全性（任务/会话工作空间共用）。
+
+    Args:
+        workspace: 待校验的工作空间路径
+
+    Returns:
+        校验通过返回 None；不通过返回错误信息字符串
+    """
+    if not workspace:
+        return None
+
+    # 规范化路径用于比较
+    try:
+        normalized = os.path.normpath(workspace)
+    except (ValueError, TypeError):
+        return f"目标空间路径无效: {workspace}"
+
+    Path(normalized)
+
+    # ── 1. 磁盘根目录检查 ──
+    if os.name == "nt":
+        # Windows: 检查是否为盘符根目录，如 C:\ D:\
+        if len(normalized) == 3 and normalized[1] == ":" and normalized[2] == "\\":
+            return f"目标空间不能设置为磁盘根目录: {workspace}。请指定具体的项目子目录。"
+    # Unix: 检查是否为 /
+    elif normalized == "/":
+        return f"目标空间不能设置为根目录: {workspace}。请指定具体的项目子目录。"
+
+    # ── 2. 系统危险目录检查 ──
+    normalized_lower = normalized.lower()
+    if normalized_lower in _DANGEROUS_DIRS:
+        return f"目标空间不能设置为系统目录: {workspace}。系统关键目录不允许作为任务的工作空间。"
+
+    # ── 3. 配置文件工作空间根目录检查 ──
+    try:
+        ws_root = get_workspace_config_root()
+        ws_root_normalized = os.path.normpath(ws_root)
+        if normalized_lower == ws_root_normalized.lower():
+            return (
+                f"目标空间不能设置为当前配置的工作空间根目录: {workspace}。"
+                f"该目录是系统管理工作空间的根目录，不允许作为任务目标操作。"
+            )
+    except Exception as e:
+        logger.warning("[validate_workspace_path] 读取工作空间配置根目录失败，跳过该检查 | error=%s", e)
+
+    return None
 
 
 def _load_isolation_config() -> dict:

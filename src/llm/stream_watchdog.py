@@ -46,6 +46,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 回桥 aclose 超时：与 KeyPoolAdapter._ACLOSE_TIMEOUT_SECONDS 对齐。Windows 半死
+# SSL socket 会让 httpx aclose 永久阻塞，watchdog 回桥协程必须带超时，否则提交
+# 到 loop 的协程永不退出，污染 loop 队列。
+_ACLOSE_TIMEOUT_SECONDS: float = 10.0
+
 
 class StreamHardTimeout:
     """独立线程硬超时：loop 冻住也能生效的兜底。
@@ -141,6 +146,11 @@ class StreamHardTimeout:
         经 run_coroutine_threadsafe 回主 loop 执行 aclose（async 函数不能在
         线程里直接 await）。即使主 loop 已冻死，关闭底层连接是打破死锁的
         关键——阻塞在 socket recv 的协程会因连接关闭而收到异常退出。
+
+        aclose 本身可能永久阻塞（Windows 半死 SSL socket：服务端已 FIN 但本地
+        SSL shutdown 握手等不到响应）。故回桥的协程用 wait_for 超时包裹：即便
+        aclose 卡死，wait_for 也会在超时后让该提交协程结束，不至于让 loop 队列
+        里永远挂着一个不退出的协程。残留 socket 交由 GC/OS 回收。
         """
         if self._fired:
             return
@@ -153,9 +163,30 @@ class StreamHardTimeout:
             logger.warning("[StreamHardTimeout] stream 无 aclose 方法，无法强制关闭")
             return
         try:
-            # 回桥主 loop 执行 async aclose；不阻塞等待结果（loop 可能已冻，
+            # 回桥主 loop 执行带超时包裹的 aclose；不阻塞等待结果（loop 可能已冻，
             # future.result 会卡住本线程）。仅提交，让 loop 恢复时执行。
-            asyncio.run_coroutine_threadsafe(aclose(), self._loop)
+            # 超时与 KeyPoolAdapter._ACLOSE_TIMEOUT_SECONDS 对齐（10s），确保
+            # 即使 aclose 卡死也能在时限内退出，不污染 loop 协程队列。
+            async def _safe_aclose() -> None:
+                try:
+                    # 不用 asyncio.wait_for：半死连接上 aclose 自身也可能吞掉
+                    # CancelledError 挂死。用 asyncio.wait 的超时语义（到点即
+                    # 放弃等待，不要求任务退出），保证回桥协程必然在时限内结束。
+                    _ac_task = asyncio.ensure_future(aclose())
+                    _done, _pending = await asyncio.wait(
+                        {_ac_task},
+                        timeout=_ACLOSE_TIMEOUT_SECONDS,
+                    )
+                    if not _done:
+                        _ac_task.cancel()
+                        logger.warning(
+                            "[StreamHardTimeout] 回桥 aclose 超时 %.0fs（已放弃，残留 socket 交 GC 回收）",
+                            _ACLOSE_TIMEOUT_SECONDS,
+                        )
+                except Exception:
+                    logger.debug("[StreamHardTimeout] 回桥 aclose 异常（已忽略）")
+
+            asyncio.run_coroutine_threadsafe(_safe_aclose(), self._loop)
             logger.warning(
                 "[StreamHardTimeout] 已强制关闭 stream（硬超时 %.0fs 触发）",
                 self._timeout,

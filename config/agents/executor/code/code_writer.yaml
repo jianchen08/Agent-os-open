@@ -127,7 +127,6 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - enhanced_search
 - bash_execute
 - task_evaluate

@@ -85,9 +85,7 @@ class VideoGenerateTool(BuiltinTool):
         """获取工具定义。"""
         return Tool(
             name="video_generate",
-            description=(
-                "视频生成工具。根据文本描述生成视频内容，当前为基线版本，支持通过 ComfyUI 等 Provider 执行生成。"
-            ),
+            description=("视频生成工具。根据文本描述生成视频内容，当前为基线版本。"),
             when_to_use=[
                 "需要根据文本描述生成视频内容",
                 "需要为演示或展示制作短视频片段",
@@ -101,7 +99,7 @@ class VideoGenerateTool(BuiltinTool):
             caveats=[
                 "视频生成通常为异步长任务，执行时间可能较长",
                 "生成质量取决于 Provider 和模型能力",
-                "需要配置视频生成 Provider（如 ComfyUI）后才能使用",
+                "需要先配置视频生成 Provider 后才能使用",
             ],
             input_schema={
                 "type": "object",

@@ -1077,14 +1077,20 @@ class IsolationManager:
             # 仅 command 操作纳入：file_operation 走不同 exec 组装路径，暂不覆盖。
             # 标记识别（runc 特征串）与 provider 实例无关，直接用静态方法判定，
             # 故不绑 isinstance——只对 CONTAINER 层（env.level）的 docker 容器路径有意义。
-            if (
-                not result.success
-                and operation.get("type") == "command"
-                and self._is_namespace_desync_result(result)
-            ):
-                result = await self._rebuild_and_retry_exec(
-                    env, rebuild_kwargs, operation, original_error=result.error
-                )
+            if not result.success and operation.get("type") == "command" and self._is_namespace_desync_result(result):
+                result = await self._rebuild_and_retry_exec(env, rebuild_kwargs, operation, original_error=result.error)
+
+            # post-exec 自愈：9p/drvfs 挂载通道损坏（EIO）。
+            # WSL docker 模式下宿主 /mnt/<盘> 的 9p 通道会静默损坏（WSL2 已知缺陷，
+            # 高负载 + VM 异常终止时频发），容器内访问 bind mount 的 Windows 路径
+            # 时报 "Input/output error"。与 setns 不同，根因在宿主挂载点：
+            # 只 destroy+recreate 容器不够（新容器 bind mount 同一坏路径仍 EIO），
+            # 必须先 umount+mount 修宿主挂载，再重建容器。仅 command 操作纳入
+            # （与 setns 自愈覆盖范围对齐，file_operation 走不同 exec 组装路径）。
+            # 放在 setns 自愈之后：两者 marker 不重叠，不会互相吞掉；若 setns 自愈
+            # 已成功（result.success=True），本分支自然跳过。
+            if not result.success and operation.get("type") == "command" and self._is_io_error_result(result):
+                result = await self._remount_and_retry_exec(env, rebuild_kwargs, operation, original_error=result.error)
 
             # 更新最后使用时间
             env.last_used_at = datetime.now(UTC).isoformat()
@@ -1107,6 +1113,19 @@ class IsolationManager:
         # output 可能是 dict（command exec 的标准结构）也可能为 None
         if isinstance(result.output, dict):
             return DockerProvider._is_namespace_desync_error(result.output.get("stderr"))
+        return False
+
+    @staticmethod
+    def _is_io_error_result(result: ExecutionResult) -> bool:
+        """判断 exec 失败结果是否为 9p/drvfs EIO（同时看 error 与 output.stderr）。
+
+        与 setns 自愈对称：EIO 根因在宿主 /mnt/<盘> 的 9p 通道损坏，
+        命中后需先修宿主挂载（umount+mount）再 destroy+recreate 容器。
+        """
+        if DockerProvider._is_io_error(result.error):
+            return True
+        if isinstance(result.output, dict):
+            return DockerProvider._is_io_error(result.output.get("stderr"))
         return False
 
     async def _rebuild_and_retry_exec(
@@ -1144,7 +1163,8 @@ class IsolationManager:
         except Exception as e:
             logger.warning(
                 "[IsolationManager] setns 自愈：销毁旧环境异常 | env=%s | error=%s",
-                env.env_id, e,
+                env.env_id,
+                e,
             )
             destroyed_ok = False
 
@@ -1171,7 +1191,8 @@ class IsolationManager:
             new_env = await self.get_or_create_environment(**rebuild_kwargs)
         except Exception as e:
             logger.warning(
-                "[IsolationManager] setns 自愈：重建环境失败，返回原失败结果 | error=%s", e,
+                "[IsolationManager] setns 自愈：重建环境失败，返回原失败结果 | error=%s",
+                e,
             )
             return ExecutionResult(
                 success=False,
@@ -1188,14 +1209,17 @@ class IsolationManager:
                 new_env.level,
             )
             return ExecutionResult(
-                success=False, output=None, error=original_error,
+                success=False,
+                output=None,
+                error=original_error,
             )
 
         try:
             retry_result = await provider.execute_in_environment(new_env.env_id, operation)
         except Exception as e:
             logger.warning(
-                "[IsolationManager] setns 自愈：重试执行抛异常，返回原失败结果 | error=%s", e,
+                "[IsolationManager] setns 自愈：重试执行抛异常，返回原失败结果 | error=%s",
+                e,
             )
             return ExecutionResult(
                 success=False,
@@ -1207,7 +1231,8 @@ class IsolationManager:
         if retry_result.success:
             logger.info(
                 "[IsolationManager] setns 自愈重建成功 | old=%s | new=%s",
-                env.env_id, new_env.env_id,
+                env.env_id,
+                new_env.env_id,
             )
             retry_result.metadata["namespace_desync_recovered"] = True
         else:
@@ -1217,6 +1242,153 @@ class IsolationManager:
                 (retry_result.error or "")[:200],
             )
         return retry_result
+
+    async def _repair_host_mount(self, workspace: str | None, env_id: str) -> bool:
+        """修复宿主 /mnt/<盘> 的 9p/drvfs 挂载（WSL docker 模式专属）。
+
+        EIO 自愈的关键步骤：从 workspace 路径解析出挂载盘（如
+        /mnt/d/myproject/xxx -> /mnt/d），然后 umount -l + mount -t drvfs
+        重建 9p 通道。所有操作套 timeout（8s），防 9p 卡死时 umount/mount
+        无限挂起（9p 通道损坏时这些 syscall 本身可能阻塞）。
+
+        从 Windows manager 进程通过 wsl.exe 调用宿主 WSL shell 执行。
+        返回是否成功重挂；任何失败只记 warning 返回 False，不抛异常——
+        调用方（_remount_and_retry_exec）会继续尝试只重建容器作为兜底。
+
+        非 WSL docker 模式（Docker Desktop）不调用：daemon 在 Windows 侧，
+        无 9p 通道，EIO 在那种环境下是别的原因（如磁盘真坏），重挂无意义。
+        """
+        import subprocess as _sp  # noqa: PLC0415
+
+        if not workspace:
+            logger.warning(
+                "[IsolationManager] EIO 自愈：workspace 为空，无法定位挂载盘 | env=%s",
+                env_id,
+            )
+            return False
+
+        # 从 /mnt/d/myproject/xxx 提取 /mnt/d（WSL 路径的前两段）
+        # 同时从 /mnt/d 反推 Windows 盘符 D:（drvfs mount 用）
+        parts = PurePath(workspace).parts
+        if len(parts) < 2 or parts[0] != "/mnt" or len(parts[1]) != 1:
+            logger.warning(
+                "[IsolationManager] EIO 自愈：workspace 非 /mnt/<x>/... 形态，跳过宿主修复 | env=%s | ws=%s",
+                env_id,
+                workspace,
+            )
+            return False
+        drive_letter = parts[1].upper()
+        mount_point = f"/mnt/{parts[1].lower()}"
+
+        # umount -l（lazy，不阻塞即使有进程在用）+ mount -t drvfs 重建 9p 通道。
+        # 用 && 串联：umount 失败则不 mount（避免重复挂载）。
+        # timeout 8 包住每个 syscall：9p 损坏时 umount/mount 可能挂住。
+        repair_cmd = (
+            f"timeout 8 umount -l {mount_point} 2>/dev/null && "
+            f"timeout 8 mount -t drvfs {drive_letter}: {mount_point} "
+            f"-o noatime,uid=0,gid=0 2>&1"
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            proc = await loop.run_in_executor(
+                None,
+                lambda: _sp.run(  # noqa: PLW1510
+                    ["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-c", repair_cmd],
+                    capture_output=True,
+                    timeout=25,  # 外层兜底（umount 8 + mount 8 + 进程开销）
+                ),
+            )
+            # 验证重挂是否真的成功：能 ls -ld 挂载点且不报 EIO
+            verify_proc = await loop.run_in_executor(
+                None,
+                lambda: _sp.run(  # noqa: PLW1510
+                    ["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-c", f"timeout 5 ls -ld {mount_point}"],
+                    capture_output=True,
+                    timeout=12,
+                ),
+            )
+            verify_err = verify_proc.stderr.decode("utf-8", errors="replace") if verify_proc.stderr else ""
+            if verify_proc.returncode == 0 and "input/output error" not in verify_err.lower():
+                logger.info(
+                    "[IsolationManager] EIO 自愈：宿主挂载已修复 | env=%s | mount=%s | rc=%s",
+                    env_id,
+                    mount_point,
+                    proc.returncode,
+                )
+                return True
+            logger.warning(
+                "[IsolationManager] EIO 自愈：宿主重挂后仍不可访问 | env=%s | mount=%s | verify_err=%s",
+                env_id,
+                mount_point,
+                verify_err.strip()[:200],
+            )
+            return False
+        except Exception as e:
+            logger.warning(
+                "[IsolationManager] EIO 自愈：修宿主挂载异常（回退到只重建容器） | env=%s | error=%s",
+                env_id,
+                e,
+            )
+            return False
+
+    async def _remount_and_retry_exec(
+        self,
+        env: IsolationEnvironment,
+        rebuild_kwargs: dict[str, Any],
+        operation: dict[str, Any],
+        *,
+        original_error: str | None,
+    ) -> ExecutionResult:
+        """命中 9p/drvfs EIO 后：修宿主挂载 + destroy + recreate + 单次重试。
+
+        与 setns 自愈（_rebuild_and_retry_exec）的关键差异：EIO 根因在宿主
+        /mnt/<盘> 的 9p 通道损坏，只 destroy+recreate 容器不够（新容器 bind mount
+        同一坏路径仍 EIO），必须先 umount+mount 修宿主挂载，再走标准的
+        destroy+recreate+retry 路径。
+
+        策略：
+        1. 仅 WSL docker 模式才修宿主（Docker Desktop 模式 daemon 在 Windows，无 9p）
+        2. 宿主修复失败不放弃：仍走 destroy+recreate（万一 9p 自己恢复了，或 EIO
+           是容器 bind mount 老化而非宿主问题，重建容器可能就够了）
+        3. 复用 _rebuild_and_retry_exec 的 destroy+recreate+retry 逻辑，确保各级
+           失败处理（destroy 失败、rebuild 失败、retry 失败）与 setns 自愈一致
+        4. 重试成功则在 metadata 标记 io_error_recovered / host_mount_repaired，
+           便于上层观测与去重（避免同一 EIO 被重复自愈）
+        """
+        logger.warning(
+            "[IsolationManager] exec 命中 9p/drvfs EIO，触发自愈（修宿主挂载+重建容器） | env=%s | err_tail=%s",
+            env.env_id,
+            (original_error or "")[:200],
+        )
+
+        # 1. 修宿主挂载（仅 WSL docker 模式）
+        provider = self._providers.get(env.level)
+        remounted = False
+        if isinstance(provider, DockerProvider) and provider._is_wsl_docker():
+            ws_path = provider._resolve_mount_path(
+                env.context.workspace if env.context else None,
+            )
+            remounted = await self._repair_host_mount(ws_path, env.env_id)
+        else:
+            logger.info(
+                "[IsolationManager] EIO 自愈：非 WSL docker 模式，跳过宿主修复，仅重建容器 | env=%s",
+                env.env_id,
+            )
+
+        # 2. 复用 setns 自愈的 destroy+recreate+retry 路径
+        result = await self._rebuild_and_retry_exec(
+            env,
+            rebuild_kwargs,
+            operation,
+            original_error=original_error,
+        )
+
+        # 3. 标记 EIO 自愈元数据（仅在成功时，便于上层观测自愈命中率）
+        if result.success:
+            result.metadata["io_error_recovered"] = True
+            if remounted:
+                result.metadata["host_mount_repaired"] = True
+        return result
 
     async def _ensure_env_healthy_or_rebuild(
         self,

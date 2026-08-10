@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,35 @@ def _notify_session_update(thread_id: str, action: str) -> None:
 
     except Exception:
         pass
+
+
+def _destroy_session_container(workspace: str | None) -> None:
+    """异步销毁会话隔离容器（同步路由上下文投递到事件循环，失败仅告警）。
+
+    仅销毁该 workspace 对应的容器；容器销毁是幂等的（不存在视为成功）。
+    """
+
+    if not workspace:
+        return
+
+    try:
+        from infrastructure.session.session_workspace import (  # noqa: PLC0415
+            SessionWorkspaceService,
+        )
+
+        async def _destroy() -> None:
+            await SessionWorkspaceService.destroy_session_container(workspace)
+
+        loop = asyncio.get_event_loop()
+
+        if loop.is_running():
+            asyncio.ensure_future(_destroy())
+
+        else:
+            loop.run_until_complete(_destroy())
+
+    except Exception:
+        logger.warning("[session] 投递会话容器销毁任务失败 | ws=%s", workspace, exc_info=True)
 
 
 import contextlib  # noqa: E402
@@ -177,6 +207,8 @@ def _expand_pipeline_ids_with_tasks(
 def _build_thread_response(t: dict) -> ThreadResponse:
     """将存储层的线程字典转换为前端期望的 ThreadResponse 格式。"""
 
+    _meta = t.get("metadata") or {}
+
     return ThreadResponse(
         thread_id=t["id"],
         title=t.get("title") or None,
@@ -189,6 +221,8 @@ def _build_thread_response(t: dict) -> ThreadResponse:
         pipeline_ids=t.get("pipeline_ids", []),
         active_pipeline_id=t.get("active_pipeline_id") or None,
         metadata=t.get("metadata"),
+        workspace=_meta.get("workspace") or None,
+        isolation_mode=_meta.get("isolation_mode") or None,
     )
 
 
@@ -266,6 +300,35 @@ def create_thread(
     if "session_type" not in merged_metadata:
         merged_metadata["session_type"] = "main_pipeline"
 
+    # ── 会话工作空间与隔离模式（会话系统自洽管理，与任务级隔离解耦）──
+    # workspace：用户选择的项目目录（绝对路径），主对话所有工具在此目录工作
+    # isolation_mode：non_isolated（默认，读取放行+危险阻拦）/ isolated（容器）
+    _workspace = (body.workspace or "").strip() or None
+    _isolation_mode: str | None = None
+
+    if _workspace:
+        from infrastructure.session.session_workspace import (  # noqa: PLC0415
+            SessionWorkspaceService,
+            normalize_isolation_mode,
+        )
+
+        _ws_error = SessionWorkspaceService.validate_workspace(_workspace)
+        if _ws_error:
+            raise APIError(
+                status_code=400,
+                error_code="API_VAL_4001",
+                message=f"工作空间校验失败: {_ws_error}",
+            )
+        if not os.path.isdir(_workspace):
+            raise APIError(
+                status_code=400,
+                error_code="API_VAL_4001",
+                message=f"工作空间目录不存在: {_workspace}。请指定一个已存在的项目目录。",
+            )
+        _isolation_mode = normalize_isolation_mode(body.isolation_mode)
+        merged_metadata["workspace"] = _workspace
+        merged_metadata["isolation_mode"] = _isolation_mode
+
     thread = store.create_thread(
         user_id=_user["sub"],
         title=body.title,
@@ -302,7 +365,14 @@ def create_thread(
 
     # 这是创建者的职责——谁创建谁注册。引擎层只管转发，不在此解析 agent。
 
-    _register_session_pipeline(pipeline_id, thread["id"], _effective_agent_id, user_id=_user["sub"])
+    _register_session_pipeline(
+        pipeline_id,
+        thread["id"],
+        _effective_agent_id,
+        user_id=_user["sub"],
+        workspace=_workspace,
+        isolation_level=_isolation_mode,
+    )
 
     thread["pipeline_ids"] = list(session.pipeline_ids)
 
@@ -349,11 +419,49 @@ def update_thread(
 ) -> ThreadResponse:
     """更新指定线程的标题。"""
 
+    # ── 会话工作空间/隔离模式变更（经 metadata 传递，浅合并保留其他键）──
+    # workspace/isolation_mode 变化时同步更新注册表 tags，
+    # 使后续 idle 引擎重启使用新工作空间/隔离模式。
+    _meta = dict(body.metadata or {})
+    _ws_changed = "workspace" in _meta or "isolation_mode" in _meta
+    _ws: str | None = None
+    _iso: str | None = None
+
+    if _ws_changed:
+        from infrastructure.session.session_workspace import (  # noqa: PLC0415
+            SessionWorkspaceService,
+            normalize_isolation_mode,
+        )
+
+        _existing_meta = (store.get_thread(thread_id) or {}).get("metadata") or {}
+        _ws = (_meta.get("workspace") or "").strip() or None
+        if _ws:
+            _ws_error = SessionWorkspaceService.validate_workspace(_ws)
+            if _ws_error:
+                raise APIError(
+                    status_code=400,
+                    error_code="API_VAL_4001",
+                    message=f"工作空间校验失败: {_ws_error}",
+                )
+            if not os.path.isdir(_ws):
+                raise APIError(
+                    status_code=400,
+                    error_code="API_VAL_4001",
+                    message=f"工作空间目录不存在: {_ws}。请指定一个已存在的项目目录。",
+                )
+            _iso = normalize_isolation_mode(_meta.get("isolation_mode") or _existing_meta.get("isolation_mode"))
+            _meta["workspace"] = _ws
+            _meta["isolation_mode"] = _iso
+        else:
+            # workspace 置空 → 显式写 None 覆盖旧值（浅合并无法靠删键清除）
+            _meta["workspace"] = None
+            _meta["isolation_mode"] = None
+
     thread = store.update_thread(
         thread_id,
         title=body.title or body.intent,
         agent_id=body.agent_id,
-        metadata=body.metadata,
+        metadata=_meta,
     )
 
     if thread is None:
@@ -362,6 +470,21 @@ def update_thread(
             error_code="API_NOTF_2004",
             message="线程不存在",
         )
+
+    # 工作空间/隔离模式变更 → 重注册管道 tags（register_pipeline tags 合并，
+    # 覆盖时保留 bridge/engine_task，仅更新 workspace/isolation_level）
+    if _ws_changed:
+        _agent_id = thread.get("agent_id") or ""
+        _pids = list(thread.get("pipeline_ids") or [])
+        for _pid in _pids:
+            _register_session_pipeline(
+                _pid,
+                thread_id,
+                _agent_id,
+                user_id=thread.get("user_id") or "",
+                workspace=_ws or "",
+                isolation_level=_iso,
+            )
 
     return _build_thread_response(thread)
 
@@ -379,6 +502,15 @@ def delete_thread(  # noqa: PLR0912
     session = store.get_session(thread_id)
 
     pipeline_ids = list(session.pipeline_ids) if session else []
+
+    # 删除前读取会话工作空间配置（isolated 会话需销毁对应容器）
+    _thread_data = store.get_thread(thread_id) or {}
+
+    _thread_meta = _thread_data.get("metadata") or {}
+
+    _session_ws = (_thread_meta.get("workspace") or "").strip() or None
+
+    _session_iso = (_thread_meta.get("isolation_mode") or "").strip() or None
 
     deleted = store.delete_thread(thread_id)
 
@@ -460,6 +592,10 @@ def delete_thread(  # noqa: PLR0912
                 task_worker.cancel_pipeline(pid)
 
     _notify_session_update(thread_id, "deleted")
+
+    # 销毁会话级隔离容器（isolated 会话；non_isolated 无容器）
+    if _session_ws and _session_iso == "isolated":
+        _destroy_session_container(_session_ws)
 
     return {"message": "线程已删除"}
 
@@ -766,16 +902,6 @@ async def list_messages(
 
     from channels.api.models import MessageListResponse  # noqa: PLC0415
 
-    # 打开会话时同步 agent_id 到注册表 tags（覆盖存量会话的缺失）
-
-    _thread = store.get_thread(thread_id)
-
-    if _thread:
-        _aid = _thread.get("agent_id", "")
-
-        if _aid:
-            _sync_agent_to_registry_tags(thread_id, _aid)
-
     # before_sequence 和 after_sequence 不能同时使用
 
     if before_sequence is not None and after_sequence is not None:
@@ -907,15 +1033,24 @@ def update_thread_agent(
     agent_id = body.get("agent_id", "")
 
     # P0-安全: 校验 agent_id 在 registry 中存在，禁止把无效 agent_id 写入线程存储，
-
-    # 否则后续 WS 入口会因解析失败而静默降级到默认 Agent。
-
     if agent_id:
-        provider = get_service_provider()
+        # 校验 agent_id 在 registry 中存在，禁止把无效 agent_id 写入线程存储，
+        # 否则后续 WS 入口会因解析失败而静默降级到默认 Agent。
+        #
+        # 注意：GET /api/v1/agents（下拉框数据源）用的是 global_registry 单例，
+        # 它懒加载自愈 + 支持热重载；而 service_provider 里的 "agent_registry"
+        # 仅在 pipeline 上下文初始化成功时才注册，且不感知热重载。
+        # 若此处只查 service_provider，会出现"下拉框能看到、保存却 400"的不一致。
+        # 因此以 global_registry 为主，service_provider 兜底，保证校验口径与下拉框一致。
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
 
-        agent_registry = provider.get("agent_registry") if provider else None
+        agent_registry = get_global_agent_registry_sync()
+        if agent_registry.get(agent_id) is None:
+            provider = get_service_provider()
+            fallback = provider.get("agent_registry") if provider else None
+            agent_registry = fallback or agent_registry
 
-        if agent_registry is None or agent_registry.get(agent_id) is None:
+        if agent_registry.get(agent_id) is None:
             raise APIError(
                 status_code=400,
                 error_code="AGENT_NOT_FOUND",
@@ -924,22 +1059,40 @@ def update_thread_agent(
 
     updated_thread = store.update_thread(thread_id, agent_id=agent_id)
 
-    # 同步更新注册表 tags：前端切 Agent 时，会话关联的所有管道 tags 也更新 agent_id。
+    # 切 Agent 只精确更新【会话主管道】那一个 entry 的 agent_id。
+    # 注册表以 pipeline_id 为准：只有该 pipeline_id 明确匹配上才改；
+    # 同会话下的子任务管道（各自有独立的 target agent，见 task_executor 注册）
+    # pipeline_id ≠ 主管道 id，匹配不上，绝不波及——否则子任务被 stop_generation
+    # 停止后 idle 重启会解析到主 agent 配置（表现为“停止后再发消息 agent 变了”）。
+    _main_pid = thread.get("active_pipeline_id") or ""
+    if agent_id and _main_pid:
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
-    # 这样引擎层 idle 重启时直接从 tags 拿，覆盖存量会话的缺失。
-
-    if agent_id:
-        _sync_agent_to_registry_tags(thread_id, agent_id)
+        _entry = get_engine_registry().get(_main_pid)
+        if _entry and _entry.tags.get("agent_id") != agent_id:
+            _entry.tags["agent_id"] = agent_id
 
     return _build_thread_response(updated_thread)
 
 
-def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str, user_id: str = "") -> None:
+def _register_session_pipeline(
+    pipeline_id: str,
+    thread_id: str,
+    agent_id: str,
+    user_id: str = "",
+    workspace: str | None = None,
+    isolation_level: str | None = None,
+) -> None:
     """创建者（会话系统）注册管道到引擎注册表，tags 含 agent_id 和 user_id。
 
     user_id 写入 tags 后，会随 message_bus → engine state → param_inject 一路下传，
 
-    最终落入 task_submit 写入的任务 metadata，使任务状态变更事件能按用户定向推送。"""
+    最终落入 task_submit 写入的任务 metadata，使任务状态变更事件能按用户定向推送。
+
+    workspace / isolation_level 写入 tags 后，随 message_bus → engine.run 播种到
+    管道 state（workspace 已有链路；isolation_level 由 session_isolation 插件消费），
+    使主对话工具在会话工作空间内工作、会话级隔离模式生效（与任务级隔离解耦）。
+    """
 
     import logging  # noqa: PLC0415
 
@@ -1010,6 +1163,15 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str, 
             "user_id": user_id,
         }
 
+        if workspace is not None:
+            if workspace:
+                _reg_tags["workspace"] = workspace
+                _reg_tags["isolation_level"] = isolation_level or "non_isolated"
+            else:
+                # 显式清空：写空值覆盖旧 tags（message_bus 读 "" → 无工作空间）
+                _reg_tags["workspace"] = ""
+                _reg_tags["isolation_level"] = ""
+
         from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
         _result = get_engine_registry().register_pipeline(
@@ -1068,7 +1230,21 @@ def restore_session_pipelines() -> int:
 
                 continue
 
-            _register_session_pipeline(_pid, tid, _agent_id, user_id=thread.get("user_id") or "")
+            # 恢复会话工作空间与隔离模式到注册 tags（服务重启后不丢失）
+            _meta = thread.get("metadata") or {}
+
+            _ws = (_meta.get("workspace") or "").strip() or None
+
+            _iso = (_meta.get("isolation_mode") or "").strip() or None
+
+            _register_session_pipeline(
+                _pid,
+                tid,
+                _agent_id,
+                user_id=thread.get("user_id") or "",
+                workspace=_ws,
+                isolation_level=_iso,
+            )
 
             _count += 1
 
@@ -1082,45 +1258,3 @@ def restore_session_pipelines() -> int:
         _logger.warning("[session] 启动恢复会话管道失败: %s", exc)
 
     return _count
-
-
-def _sync_agent_to_registry_tags(thread_id: str, agent_id: str) -> None:
-    """会话系统同步 agent_id 到注册表 tags——覆盖存量会话的 agent_id 缺失。"""
-
-    import logging  # noqa: PLC0415
-
-    _logger = logging.getLogger(__name__)
-
-    try:
-        from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
-        _registry = get_engine_registry()
-
-        _synced = 0
-
-        for entry in _registry.all_entries().values():
-            # 按 thread_id 或 session_id tag 匹配
-
-            _matched = entry.thread_id == thread_id or entry.tags.get("session_id") == thread_id
-
-            if not _matched:
-                continue
-
-            if entry.tags.get("agent_id") == agent_id:
-                continue
-
-            entry.tags["agent_id"] = agent_id
-
-            _synced += 1
-
-            _logger.info(
-                "[session] 同步 agent_id: pipeline=%s agent=%s",
-                entry.engine.pipeline_id[:12] if entry.engine else "?",
-                agent_id,
-            )
-
-        if _synced == 0:
-            _logger.info("[session] 同步 agent_id: 无匹配 entry（thread=%s 可能还没注册管道）", thread_id[:12])
-
-    except Exception as exc:
-        _logger.warning("[session] 同步 agent_id 失败: thread=%s error=%s", thread_id[:12], exc)

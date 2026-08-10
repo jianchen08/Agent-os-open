@@ -135,6 +135,17 @@ const SessionItem = memo<SessionItemProps>(
         {/* 标题 */}
         <span className="min-w-0 flex-1 truncate text-sm">{session.title}</span>
 
+        {/* 工作空间徽标 */}
+        {session.workspace && (
+          <span
+            title={`工作空间: ${session.workspace}`}
+            className="text-muted-foreground ml-1 hidden max-w-[120px] flex-shrink-0 truncate rounded bg-black/5 px-1.5 py-0.5 text-[10px] sm:block"
+          >
+            📁 {session.isolationMode === 'isolated' ? '🛡️' : ''}
+            {session.workspace.split(/[\\/]/).filter(Boolean).pop() || session.workspace}
+          </span>
+        )}
+
         {/* 星标指示器 */}
         {session.starred && (
           <Star className="mr-1 h-3.5 w-3.5 flex-shrink-0 fill-amber-400 text-amber-400" />

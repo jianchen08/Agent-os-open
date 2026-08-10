@@ -171,10 +171,18 @@ class TrackPlugin(IOutputPlugin):
         return updates
 
     async def _try_notify_cost_update(self, ctx: PluginContext) -> None:
-        """推送本轮 LLM 调用的 token 用量（单轮值），供输入框进度条实时显示。
+        """推送本轮 LLM 调用的 token 用量到前端。
 
-        llm_usage 直接取自 state（llm_core 插件写入），是单轮 API 返回的用量，
-        天然对应当前 pipeline。pipeline_id 一并带出，供前端按 pipeline 分桶。
+        同时携带两套数据，覆盖前端两种语义需求：
+
+        - 单轮值（顶层 input_tokens/output_tokens/cached_tokens/total_tokens）：
+          取自 state["llm_usage"]（llm_core 写入的本轮 API 返回），表达
+          「当前上下文窗口占用」。前端 ChatInput 进度条据此计算占窗比。
+        - 累计值（cumulative.*）：取自 state["track.llm_usage"] 的 total_* 字段
+          （由 _collect_token_usage 跨轮累加，见 plugin.py:214-245），表达
+          「整个管道的累计消耗」。前端统计区据此显示「缓存命中输入 / 未命中输入 /
+          输出 分别加总」。missed_tokens = 总输入 - 缓存命中输入。
+
         tool_execute 轮 llm_usage 为上一轮残留，跳过推送避免覆盖。
 
         会话标识取 session_id（state 标准字段）；thread_id 未必存在时由
@@ -187,6 +195,7 @@ class TrackPlugin(IOutputPlugin):
 
             if _notifier:
                 _llm_usage = ctx.state.get("llm_usage") or {}
+                _tracked = ctx.state.get("track.llm_usage") or {}
                 _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
                 _session_id = ctx.state.get(StateKeys.SESSION_ID, "")
                 from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
@@ -197,14 +206,27 @@ class TrackPlugin(IOutputPlugin):
                     pipeline_id=_pipeline_id,
                 )
                 if _sink:
+                    # 累计输入里命中 prompt cache 的部分
+                    _cum_input = _tracked.get("total_input_tokens", 0)
+                    _cum_cached = _tracked.get("total_cached_tokens", 0)
                     await _sink.send_event(
                         {
                             "type": "cost_update",
                             "data": {
                                 "pipeline_id": _pipeline_id,
+                                # 单轮（上下文占用，供进度条）
                                 "total_tokens": _llm_usage.get("total_tokens", 0),
                                 "input_tokens": _llm_usage.get("input_tokens", 0),
                                 "output_tokens": _llm_usage.get("output_tokens", 0),
+                                "cached_tokens": _llm_usage.get("cached_tokens", 0),
+                                # 累计（整个管道加总，供统计数显示）
+                                "cumulative": {
+                                    "input_tokens": _cum_input,
+                                    "output_tokens": _tracked.get("total_output_tokens", 0),
+                                    "cached_tokens": _cum_cached,
+                                    "missed_tokens": max(_cum_input - _cum_cached, 0),
+                                    "total_tokens": _tracked.get("total_tokens", 0),
+                                },
                             },
                         }
                     )
@@ -474,31 +496,43 @@ class TrackPlugin(IOutputPlugin):
 
         return stripped_curr
 
-    def _check_cache_anomaly(self, llm_usage: dict[str, Any], pipeline_id: str) -> None:
-        """检测缓存命中异常并输出警告。"""
-        total_input = llm_usage.get("total_input_tokens", 0)
-        total_cached = llm_usage.get("total_cached_tokens", 0)
-        last_input = llm_usage.get("last_input_tokens", 0)
+    # 缓存异常阈值：本轮未命中 token 数超过此比例视为「缓存掉了」。
+    # 注意分母是本轮 input（单轮量纲），不是累计 input。
+    _CACHE_MISS_RATIO_THRESHOLD = 0.05
 
-        if total_input <= 0:
+    def _check_cache_anomaly(self, llm_usage: dict[str, Any], pipeline_id: str) -> None:
+        """检测缓存命中异常并输出警告。
+
+        语义：判断「本轮缓存有没有异常掉」，基于本轮单轮量：
+          本轮未命中 = last_input - last_cached
+          本轮命中率 = last_cached / last_input
+        当 last_input == 0（tool_execute 轮 / 无 LLM 调用）时无法判定，跳过。
+
+        历史 bug：原实现把累计未命中（total_input - total_cached）和末轮单轮
+        input 直接相减再除以累计总量——量纲错配，导致只要累计未命中占比 >5%
+        （哪怕累计命中率 94.9%），末轮 summary（last_input 常为 0）必报异常。
+        """
+        last_input = llm_usage.get("last_input_tokens", 0)
+        last_cached = llm_usage.get("last_cached_tokens", 0)
+
+        if last_input <= 0:
+            # 末轮无 input（非 llm_call 轮调 summary）：无法判定本轮命中率，跳过。
+            # 避免用累计量跨量纲误报。
             return
 
-        total_uncached = total_input - total_cached
-        gap = abs(total_uncached - last_input)
-        ratio = gap / total_input
+        last_uncached = last_input - last_cached
+        miss_ratio = last_uncached / last_input
 
-        if ratio > 0.05:
+        if miss_ratio > self._CACHE_MISS_RATIO_THRESHOLD:
+            hit_rate = last_cached / last_input * 100
             logger.warning(
-                "[%s] 缓存命中异常: 总未命中=%d, 末轮input=%d, 偏差=%d (%.1f%% > 5%%阈值), "
-                "总input=%d, 总cached=%d, 命中率=%.1f%%",
+                "[%s] 缓存命中异常: 本轮未命中=%d, 本轮input=%d, 本轮命中率=%.1f%% (未命中占比 %.1f%% > %.0f%%阈值)",
                 pipeline_id,
-                total_uncached,
+                last_uncached,
                 last_input,
-                gap,
-                ratio * 100,
-                total_input,
-                total_cached,
-                total_cached / total_input * 100 if total_input else 0,
+                hit_rate,
+                miss_ratio * 100,
+                self._CACHE_MISS_RATIO_THRESHOLD * 100,
             )
 
     async def save_pipeline_summary(self, ctx: PluginContext, elapsed_total: float) -> None:

@@ -209,11 +209,15 @@ class WorkspaceService:
         }
     )
 
+    # 文件树递归深度的安全兜底：仅用于防范符号链接环、超深嵌套导致的死循环或栈溢出，
+    # 不再作为用户可见的嵌套层级限制（历史默认值为 5，过浅导致深层目录不显示）。
+    _SCAN_MAX_DEPTH_SAFETY_CAP = 50
+
     def _scan_directory(
         self,
         path: str,
         base_path: str,
-        max_depth: int = 5,
+        max_depth: int = _SCAN_MAX_DEPTH_SAFETY_CAP,
         current_depth: int = 0,
     ) -> list[FileTreeNode]:
         """扫描目录生成文件树。"""
