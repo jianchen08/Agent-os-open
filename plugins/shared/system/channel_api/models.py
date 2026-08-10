@@ -61,6 +61,11 @@ class ThreadCreate(BaseModel):
     agent_id: str | None = None
     intent: str | None = None
     metadata: dict[str, Any] | None = None
+    workspace: str | None = Field(default=None, description="会话工作空间绝对路径（项目目录）")
+    isolation_mode: str | None = Field(
+        default=None,
+        description="会话隔离模式：isolated（容器）/ non_isolated（宿主+审批），默认取配置 session_default_level",
+    )
 
 
 class ThreadUpdate(BaseModel):
@@ -86,6 +91,8 @@ class ThreadResponse(BaseModel):
     pipeline_ids: list[str] = Field(default_factory=list, description="关联的管道执行 ID 列表")
     active_pipeline_id: str | None = Field(default=None, description="当前活跃的管道执行 ID")
     metadata: dict[str, Any] | None = Field(default=None, description="线程元数据，含 pinned/starred 等前端状态")
+    workspace: str | None = Field(default=None, description="会话工作空间绝对路径")
+    isolation_mode: str | None = Field(default=None, description="会话隔离模式：isolated / non_isolated")
 
 
 class ThreadListResponse(BaseModel):

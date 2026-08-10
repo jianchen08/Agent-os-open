@@ -185,16 +185,22 @@ class LLMCore(ICorePlugin):
                 self._model,
                 self._provider,
             )
-        self._default_params: dict[str, Any] = self._config.get(
-            "default_params", {"temperature": 0.7, "max_tokens": 4096}
-        )
+        # default_params 兜底值：空 dict = 不人为设置任何采样参数（max_tokens/
+        # temperature 等），全部走上游默认（=不设限）。
+        # 历史教训：曾默认 {"temperature": 0.7, "max_tokens": 4096}，4096 对
+        # reasoning_model 过低——思考耗尽 token 后正文一字未出，被误判为
+        # empty_response 死循环重试（P7 任务三次失败即此原因）。
+        # 本字段是全链路唯一兜底点：配置层(models.py)与 resolver 均不覆盖空 dict，
+        # 故漏配模型最终走这里的 {} 兜底。
+        self._default_params: dict[str, Any] = self._config.get("default_params", {})
         self._call_timeout: float = float(self._config.get("call_timeout", 300))
         # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 120s）。
         # 与 call_timeout（后续 chunk 超时）分离，因首字节卡死是高发场景。
-        # 用 120s 而非 60s：yichengc/glm-5.2 等上游偶发慢节点下 60s 误判率高
-        # （曾观测连续 14 次请求中 6 次首字节 60s 超时被判为失败，但节点实际未宕机）。
-        # 120s 给上游建连+负载均衡+冷启动留足余地，仍能在死连接时及时止损。
-        self._first_token_timeout: float = float(self._config.get("first_token_timeout", 120))
+        # 用 180s：覆盖 litellm.acompletion 内部建连 + 上游首字节全过程。
+        # 实测 120s 偶发误判（上游慢节点），且 litellm 内部卡死时外层超时
+        # 未必生效——adapter._direct_call_with_slot 就地再包一层 _await_with_escape
+        # 兜底，此处 180s 作为该层的默认值，确保 litellm 这一行必然超时退出。
+        self._first_token_timeout: float = float(self._config.get("first_token_timeout", 180))
         # 流式静默超时：连续 N 秒收不到任何 chunk 即中断死等（默认 600s）。
         # 与 call_timeout 分离：call_timeout 用于非流式整体超时，此处用于流式
         # inter-chunk 静默（每个 chunk 到达即重置，活跃推理不误触发）。

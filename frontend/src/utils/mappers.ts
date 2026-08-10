@@ -24,6 +24,10 @@ export interface ThreadStateResponse {
   updated_at: string
   /** 绑定的 Agent ID */
   agent_id?: string | null
+  /** 会话工作空间绝对路径 */
+  workspace?: string | null
+  /** 会话隔离模式 */
+  isolation_mode?: 'isolated' | 'non_isolated' | null
   /** 消息数量 */
   message_count?: number
   /** 关联的管道 ID 列表 */
@@ -48,6 +52,8 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
     status: (thread as any).status || thread.current_state || 'active',
     metadata: metadata,
     agentId: thread.agent_id || null,
+    workspace: (thread as ThreadStateResponse).workspace ?? null,
+    isolationMode: (thread as ThreadStateResponse).isolation_mode ?? null,
     pipelineIds: (thread as ThreadStateResponse).pipeline_ids || [],
     activePipelineId: (thread as ThreadStateResponse).active_pipeline_id || null,
     pinned: metadata.pinned === true,

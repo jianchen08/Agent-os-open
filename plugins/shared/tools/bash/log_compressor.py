@@ -60,6 +60,17 @@ class LogCompressor:
         re.compile(r"failed", re.IGNORECASE),
         re.compile(r"exception", re.IGNORECASE),
         re.compile(r"traceback", re.IGNORECASE),
+        # 进程被信号/系统杀死：OOM Killer、段错误、总线错误等。
+        # 这类终止的报错（"Killed"、"Out of memory"）不在传统 error/fatal
+        # 模式里，但不识别会让 LLM 拿到 exit_code=137 却在输出里找不到对应错误行，
+        # 误判为"命令莫名失败"。
+        re.compile(r"^killed\s*$", re.IGNORECASE),
+        re.compile(r"out of memory", re.IGNORECASE),
+        re.compile(r"oom", re.IGNORECASE),
+        re.compile(r"segmentation fault|segfault", re.IGNORECASE),
+        re.compile(r"bus error", re.IGNORECASE),
+        re.compile(r"core dumped", re.IGNORECASE),
+        re.compile(r"command not found", re.IGNORECASE),
     ]
 
     def __init__(self, max_lines: int = 200):
@@ -313,13 +324,17 @@ class LogCompressor:
         # 警告和错误统计
         summary_lines.append(f"警告: {warnings}, 错误: {errors}")
 
-        # 错误列表（如果配置启用）
-        if config.show_errors and errors > 0:
-            error_list = self.compress_errors(recent_lines, dedup=config.dedup_errors)
-            if error_list:
-                summary_lines.append("错误列表:")
-                for error in error_list[: config.recent_lines]:
-                    summary_lines.append(f"  - {error}")
+        # 错误行原文列表（去重）——无论 show_errors 是否启用都计算，供失败路径
+        # 直接回传高价值错误行给 LLM（不必从 summary_lines 里再解析）。
+        error_lines: list[str] = []
+        if errors > 0:
+            error_lines = self.compress_errors(recent_lines, dedup=config.dedup_errors)
+
+        # 错误列表（如果配置启用，写入 summary_lines 文本摘要）
+        if config.show_errors and error_lines:
+            summary_lines.append("错误列表:")
+            for error in error_lines[: config.recent_lines]:
+                summary_lines.append(f"  - {error}")
 
         # 最新消息
         if latest:
@@ -333,4 +348,5 @@ class LogCompressor:
             errors=errors,
             progress=progress,
             latest_message=latest,
+            error_lines=error_lines,
         )

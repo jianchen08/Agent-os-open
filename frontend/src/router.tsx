@@ -228,15 +228,25 @@ function HomePage(): ReactNode {
     }
   }, [])
 
-  // 页面刷新后恢复 WS 连接
-  // 会话状态从 localStorage 恢复后需要重新建立全局 WS 连接
+  // 响应式订阅 token：登录/登出/token 刷新时自动（重）连 WS。
+  // 原实现用 getState().token 快照 + 空依赖数组，只在组件挂载时执行一次——
+  // 未登录进入页面时 token 为 null 不连接，登录成功后 token 更新但 effect 不重跑，
+  // 导致 WS 永远不连（"启动后一直未连接、发送卡住"根因）。
+  // 各类 App 记录登录状态的通用模式：持久化凭证恢复 → 设置响应式状态 → 依赖它的逻辑
+  // 自动响应。这里订阅 token 变化，登录后 effect 自动重跑建立 WS 连接。
+  const authToken = useAuthStore((s) => s.token)
   useEffect(() => {
-    const currentToken = useAuthStore.getState().token
-    if (currentToken) {
-      globalWS.connect(currentToken)
+    if (authToken) {
+      globalWS.connect(authToken)
       useSessionStore.setState({ wsStatus: globalWS.status })
     }
+    // authToken 变化（登录获得新 token / 登出清空）时自动重连或断开。
+    // globalWS.connect 内部已有幂等保护（相同 token + connected 状态直接 return），
+    // 不会重复连接；登出时 authToken 变 null，connect 不被调用（登出逻辑里已有 disconnect）。
+  }, [authToken])
 
+  // _status 订阅独立 effect：只注册一次，避免随 token 变化反复订阅/取消
+  useEffect(() => {
     const handleStatusChange = (data: { status: string }) => {
       useSessionStore.setState({ wsStatus: data.status as any })
     }

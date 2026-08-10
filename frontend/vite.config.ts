@@ -117,9 +117,27 @@ export default defineConfig(({ mode }) => {
     optimizeDeps: {
       // esbuild + noDiscovery + include 白名单（268 基础已验证成功 667 deps）
       // + antd 动态 icon 846 子路径全量（根治 @ant-design/icons-svg/lib/asn interop）
+      // 注意：noDiscovery 下白名单必须覆盖应用实际加载的 UI 栈，否则浏览器会逐文件
+      // 加载 node_modules 原始源码。曾漏掉 @lobehub/ui / antd / mermaid 等 → 冷启动
+      // 6600+ 请求（@lobehub/icons 2200+、antd 647、mermaid+d3 700…），首屏 7-8 秒。
+      // 预构建后压缩到 ~1300 请求、首屏 ~1.5s。子路径（antd/es/*、@pierre/diffs/react、
+      // react-syntax-highlighter/dist/*）单独列出，noDiscovery 不会自动发现它们。
       noDiscovery: true,
       include: [
         '@ant-design/colors',
+        // —— 应用 UI 栈（不预构建 → 逐文件加载 → 首屏 7-8s）——
+        'antd',
+        'antd/es/splitter',
+        'antd-style',
+        '@lobehub/ui',
+        '@lobehub/icons',
+        '@lobehub/fluent-emoji',
+        '@pierre/diffs',
+        '@pierre/diffs/react',
+        'mermaid',
+        'react-markdown',
+        'remark-gfm',
+        'react-syntax-highlighter/dist/esm/styles/prism',
         '@ant-design/cssinjs',
         '@ant-design/cssinjs-utils',
         '@ant-design/fast-color',

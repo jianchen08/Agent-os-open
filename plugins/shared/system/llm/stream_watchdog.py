@@ -169,12 +169,20 @@ class StreamHardTimeout:
             # 即使 aclose 卡死也能在时限内退出，不污染 loop 协程队列。
             async def _safe_aclose() -> None:
                 try:
-                    await asyncio.wait_for(aclose(), timeout=_ACLOSE_TIMEOUT_SECONDS)
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[StreamHardTimeout] 回桥 aclose 超时 %.0fs（已放弃，残留 socket 交 GC 回收）",
-                        _ACLOSE_TIMEOUT_SECONDS,
+                    # 不用 asyncio.wait_for：半死连接上 aclose 自身也可能吞掉
+                    # CancelledError 挂死。用 asyncio.wait 的超时语义（到点即
+                    # 放弃等待，不要求任务退出），保证回桥协程必然在时限内结束。
+                    _ac_task = asyncio.ensure_future(aclose())
+                    _done, _pending = await asyncio.wait(
+                        {_ac_task},
+                        timeout=_ACLOSE_TIMEOUT_SECONDS,
                     )
+                    if not _done:
+                        _ac_task.cancel()
+                        logger.warning(
+                            "[StreamHardTimeout] 回桥 aclose 超时 %.0fs（已放弃，残留 socket 交 GC 回收）",
+                            _ACLOSE_TIMEOUT_SECONDS,
+                        )
                 except Exception:
                     logger.debug("[StreamHardTimeout] 回桥 aclose 异常（已忽略）")
 

@@ -27,6 +27,10 @@ interface ThreadCreateRequest {
   metadata?: Record<string, unknown>
   /** 绑定的 Agent ID（可选）- Requirements: 6.1 */
   agent_id?: string
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolation_mode?: 'isolated' | 'non_isolated'
 }
 
 /** 后端线程创建响应类型 */
@@ -320,7 +324,12 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
     }
     absorbed.push(assistant, ...toolMessages)
   }
-  // 第二遍：合并连续的 assistant
+  // 第二遍：合并一个对话轮次为一个气泡。
+  // 从一条 assistant 开始，把其后连续的 assistant/tool 交错序列（多轮工具调用）
+  // 合并成一条 assistant 消息——与流式渲染一致（流式时 tool_start/tool_result
+  // 把 tool_call part 追加/更新在同一个 assistant 的 parts 里，多轮天然一个气泡；
+  // 刷新后历史是分离消息，合并成同构结构）。
+  // 遇到下一条非 assistant/tool 消息（如 user / system）则结束本轮。
   const result: Message[] = []
   let j = 0
   while (j < absorbed.length) {
@@ -331,20 +340,23 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
       continue
     }
     const groupStart = j
-    while (j < absorbed.length && absorbed[j].role === 'assistant') { j++ }
+    while (j < absorbed.length && (absorbed[j].role === 'assistant' || absorbed[j].role === 'tool')) {
+      j++
+    }
     const group = absorbed.slice(groupStart, j)
     if (group.length === 1) {
       result.push(group[0])
       continue
     }
     const first = group[0]
+    // 合并文本：只取 assistant 的 content（tool 的结果已注入 assistant 的 tool_call part）
     const mergedContent = group
+      .filter((m) => m.role === 'assistant')
       .map((m) => m.content)
       .filter((c) => c?.trim())
       .join('\n\n')
-    // 保留每个 part 的原始 sequence（流式大数 / API 局部小数），仅消除组内冲突。
-    // 按消息分组传入（而非 flatMap 打平），dedupePartSequences 据此保持每条消息内
-    // parts 的逻辑顺序，避免思考内容与回复分家。
+    // 合并 parts：按消息分组传入（而非 flatMap 打平），dedupePartSequences 据此保持
+    // 每条消息内 parts 的逻辑顺序（思考 → tool_call → 文本 → tool_call → 文本...）。
     const partsByMessage = group.map((m) => (m.parts || []).map((p: any) => ({ ...p })))
     const mergedParts = dedupePartSequences(partsByMessage)
     if (!mergedContent && mergedParts.length === 0) {
@@ -381,6 +393,10 @@ export interface CreateSessionOptions {
   title?: string
   /** 绑定的 Agent ID（可选） */
   agentId?: string
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolationMode?: 'isolated' | 'non_isolated'
 }
 
 export async function createSession(
@@ -397,6 +413,14 @@ export async function createSession(
 
     if (options.agentId !== undefined) {
       requestData.agent_id = options.agentId
+    }
+
+    if (options.workspace !== undefined) {
+      requestData.workspace = options.workspace
+    }
+
+    if (options.isolationMode !== undefined) {
+      requestData.isolation_mode = options.isolationMode
     }
 
     const response = await apiClient.post<ThreadCreateResponse>(

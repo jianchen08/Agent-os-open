@@ -75,6 +75,9 @@ class OutputSummary:
     errors: int = 0
     progress: str | None = None
     latest_message: str = ""
+    # 错误行原文列表（去重后），供失败路径直接回传给 LLM。
+    # 与 errors（计数）区分：errors 是"有几条"，error_lines 是"具体哪几条"。
+    error_lines: list[str] = field(default_factory=list)
 
 
 @dataclass

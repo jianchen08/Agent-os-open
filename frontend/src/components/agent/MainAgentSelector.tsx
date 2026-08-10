@@ -1,11 +1,11 @@
 /**
  * 主 Agent 选择器组件
  *
- * 只显示主 Agent（type 为 "main"）的选择器
+ * 显示全部可选 Agent（main/orchestrator/specialized/atomic/system）的选择器
  */
 
 import { Check, ChevronDown } from '@/assets/icons'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,12 +40,7 @@ export function MainAgentSelector({
   const isLoading = useAgentStore((s) => s.isLoading)
   const [isOpen, setIsOpen] = useState(false)
 
-  /** 只筛选主 Agent */
-  const mainAgents = useMemo(() => {
-    return agents.filter((agent) => agent.type === 'main')
-  }, [agents])
-
-  const currentAgent = mainAgents.find((a) => a.id === currentAgentId)
+  const currentAgent = agents.find((a) => a.id === currentAgentId)
 
   /** 处理 Agent 选择 */
   const handleSelectAgent = (agentId: string | null) => {
@@ -70,10 +65,10 @@ export function MainAgentSelector({
               <AgentIcon type={currentAgent.type} size="sm" />
               <span className="flex-1 truncate">{currentAgent.name}</span>
             </>
-          ) : mainAgents.length > 0 ? (
+          ) : agents.length > 0 ? (
             <>
-              <AgentIcon type={mainAgents[0].type} size="sm" />
-              <span className="flex-1 truncate">{mainAgents[0].name}</span>
+              <AgentIcon type={agents[0].type} size="sm" />
+              <span className="flex-1 truncate">{agents[0].name}</span>
             </>
           ) : (
             <>
@@ -85,8 +80,8 @@ export function MainAgentSelector({
         </button>
       </DropdownMenuTrigger>
 
-      <DropdownMenuContent align="start" className="w-64">
-        {mainAgents.map((agent) => (
+      <DropdownMenuContent align="start" className="max-h-[320px] w-64 overflow-y-auto">
+        {agents.map((agent) => (
           <DropdownMenuItem
             key={agent.id}
             onClick={() => handleSelectAgent(agent.id)}
@@ -112,7 +107,7 @@ export function MainAgentSelector({
           <div className="text-muted-foreground px-2 py-1.5 text-center text-sm">加载中...</div>
         )}
 
-        {!isLoading && mainAgents.length === 0 && (
+        {!isLoading && agents.length === 0 && (
           <div className="text-muted-foreground px-2 py-1.5 text-center text-sm">暂无可用助手</div>
         )}
       </DropdownMenuContent>

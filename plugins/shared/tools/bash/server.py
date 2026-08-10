@@ -113,7 +113,7 @@ def _atexit_cleanup() -> None:
         "required": [],
     },
     description="执行 Shell 命令。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，"
-    "手动后台化会使进程脱离管理）。读文件用 file_read、搜索用 code_search。"
+    "手动后台化会使进程脱离管理）。读文件/看目录用 file_read、搜文件内容/文件名用 enhanced_search。"
     "危险命令（rm -rf /、format、dd if= 等）会被拦截。Windows 与 Linux/Mac 语法可能不同。",
 )
 async def bash_execute(**kwargs):

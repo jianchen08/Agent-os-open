@@ -66,7 +66,9 @@ export const useAgentStore = create<AgentState>((set) => ({
         throw new Error(errorMsg)
       }
 
-      const response = await fetch(`${API_BASE}/agents?agent_type=main`, {
+      // 不带 agent_type 过滤：后端 /agents 默认返回全部 agent（main/orchestrator/
+      // specialized/atomic/system），前端选择器显示全部可选 agent。
+      const response = await fetch(`${API_BASE}/agents`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },

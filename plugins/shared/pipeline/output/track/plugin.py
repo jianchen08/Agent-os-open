@@ -171,12 +171,28 @@ class TrackPlugin(IOutputPlugin):
         return updates
 
     async def _try_notify_cost_update(self, ctx: PluginContext) -> None:
-        """推送本轮 LLM 调用的 token 用量（单轮值），供输入框进度条实时显示。
+        """推送本轮 LLM 调用的 token 用量到前端。
+
+        同时携带两套数据，覆盖前端两种语义需求：
+
+        - 单轮值（顶层 input_tokens/output_tokens/cached_tokens/total_tokens）：
+          取自 state["llm_usage"]（llm_core 写入的本轮 API 返回），表达
+          「当前上下文窗口占用」。前端 ChatInput 进度条据此计算占窗比。
+        - 累计值（cumulative.*）：取自 state["track.llm_usage"] 的 total_* 字段
+          （由 _collect_token_usage 跨轮累加），表达「整个管道的累计消耗」。
+          前端统计区据此显示「缓存命中输入 / 未命中输入 / 输出 分别加总」。
+          missed_tokens = 总输入 - 缓存命中输入。
+
+        tool_execute 轮 llm_usage 为上一轮残留，跳过推送避免覆盖。
+
+        会话标识取 session_id（state 标准字段）；thread_id 未必存在时由
+        TargetedSink 按 pipeline_id 从 registry 自解析，不在此硬守卫。
 
         0.2 推送改走 frontend.emit capability（ADR §3.5，插件 → 内核 → 前端唯一出口），
         SDK 暂未实现该 capability；当前 cost_update 推送静默跳过，0.2 栈不再依赖
         0.1 的 src/channels/websocket/ws_interaction_notifier（task_11 P2-7）。
-        待 SDK 实现 frontend.emit 后，在此用 ctx.frontend.emit(scope=...) 恢复推送。
+        待 SDK 实现 frontend.emit 后，在此用 ctx.frontend.emit(scope=...) 恢复推送，
+        恢复时按上述两套数据（单轮 + cumulative）组装 payload。
         """
 
     def _collect_token_usage(self, ctx: PluginContext) -> dict[str, Any]:

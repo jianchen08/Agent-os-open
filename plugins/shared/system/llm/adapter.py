@@ -173,6 +173,129 @@ _stream_logger.propagate = False
 # 选 10s 是远大于健康关闭耗时、又远小于让管道僵死的可忍受时长。
 _ACLOSE_TIMEOUT_SECONDS: float = 10.0
 
+# 后台残留任务登记表：_await_with_escape 超时放弃等待后，被取消的协程若吞掉
+# CancelledError 继续挂起（litellm 半死连接场景），task 会留在后台运行。
+# 持有强引用 + done 回调自动清理，避免 task 被 GC 时触发 "Task was destroyed
+# but it is pending" 告警；同时给上层 finally 的 aclose 兜底机会去强制关闭底层连接。
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _track_background_task(task: asyncio.Task[Any]) -> None:
+    """登记后台任务并绑定自动清理（完成/取消/异常均移除）。
+
+    同时消费 task 异常：被放弃的协程最终异常时，若不取 exception() 会触发
+    "Task exception was never retrieved" 告警（done 回调里取一次即消费）。
+    """
+    _background_tasks.add(task)
+
+    def _on_done(t: asyncio.Task[Any]) -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled():
+            with contextlib.suppress(Exception):
+                t.exception()  # 消费异常，避免 "never retrieved" 告警
+
+    task.add_done_callback(_on_done)
+
+
+async def _await_with_escape(
+    coro: Any,
+    timeout: float,
+    *,
+    what: str,
+) -> Any:
+    """带超时等待协程，超时即抛错。
+
+    asyncio.wait 的 timeout 依赖事件循环调度——若协程内部同步阻塞冻住事件循环，
+    timeout 回调永远不执行。加独立线程诊断：到点如果 task 还没完成，独立线程
+    直接打日志（不依赖事件循环），证明「超时确实该触发但事件循环冻住了」。
+    """
+    import threading  # noqa: PLC0415
+    task = asyncio.ensure_future(coro)
+    _track_background_task(task)
+
+    # 独立线程诊断：到点检查 task 是否完成
+    def _diag_check() -> None:
+        if not task.done():
+            logger.error(
+                "[_await_with_escape] 独立线程诊断：%.0fs 到点 task 仍未完成 | what=%s "
+                "—— asyncio.wait 的 timeout 可能因事件循环冻结而失效",
+                timeout, what,
+            )
+
+    diag_timer = threading.Timer(timeout, _diag_check)
+    diag_timer.daemon = True
+    diag_timer.start()
+
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    diag_timer.cancel()
+    if not done:
+        logger.error(
+            "[_await_with_escape] 超时！cancel task | what=%s timeout=%.0fs",
+            what, timeout,
+        )
+        task.cancel()
+        raise asyncio.TimeoutError(f"{what} 超时 {timeout:.0f}s")
+    return task.result()
+
+
+class _ThreadedStreamBridge:
+    """跨线程流桥接：worker 线程迭代 litellm 流，主循环从线程安全队列取 chunk。
+
+    背景（生产 2026-08-05）：
+    - 17:05:34 litellm.acompletion 卡死 36 分钟：litellm 内部事件循环线程同步
+      阻塞冻结主事件循环，asyncio 层超时全部失效 → litellm 移入独立线程。
+    - 20:08/20:33:59 首 token 超时修复后出现 "attached to a different loop" /
+      "Event loop is closed"：CustomStreamWrapper 绑定 worker 线程的 loop，主循环
+      await 它的 __anext__ 会跨 loop 报错 → 流式迭代也留在 worker 线程，
+      chunk 经 queue.Queue（线程安全）送回主循环。
+
+    主循环侧接口与 CustomStreamWrapper 对齐：
+    - __aiter__/__anext__：从队列取 chunk（StopAsyncIteration 表示流结束）
+    - aclose()：通知 worker 关闭底层流（半死连接时不再等 worker，直接返回）
+    """
+
+    def __init__(
+        self,
+        *,
+        queue: Any,
+        done_evt: Any,
+        exc_box: list[BaseException],
+        close_evt: Any,
+        completion_stream: Any = None,
+    ) -> None:
+        self._queue = queue
+        self._done_evt = done_evt
+        self._exc_box = exc_box
+        self._close_evt = close_evt
+        # 透传底层 completion_stream（心跳诊断读 is_closed 用）；worker 可能
+        # 尚未返回流对象时先为 None，worker 完成填充。
+        self.completion_stream = completion_stream
+
+    def __aiter__(self) -> "_ThreadedStreamBridge":
+        return self
+
+    async def __anext__(self) -> Any:
+        # 短轮询线程安全队列（不依赖任何事件循环的跨 loop 操作）
+        while True:
+            if self._exc_box:
+                raise self._exc_box[0]
+            if self._done_evt.is_set() and self._queue.empty():
+                raise StopAsyncIteration
+            try:
+                return self._queue.get_nowait()
+            except Exception:
+                await asyncio.sleep(0.05)
+
+    async def aclose(self) -> None:
+        """通知 worker 关闭底层流。
+
+        不等待 worker 完成（半死连接会让 aclose 挂起）：设 close_evt 后立即
+        返回，worker 线程是 daemon，残留由进程退出回收。上层 finally 已有
+        _await_with_escape 兜底，这里保持同步契约（毫秒级返回）。
+        """
+        self._close_evt.set()
+
+
 # ── Prompt 审计日志（完整 messages 请求体落盘，默认关）──────────────────────
 # 发给远端 LLM API 的完整 messages/tools 请求体落盘，用于复现/审计/调试。
 # 默认关闭（含 api_key/用户隐私，需显式开启并信任本地存储）。开启时经基础脱敏
@@ -566,7 +689,14 @@ class _BaseLiteLLMAdapter:
         # drop_params 与流式路径对齐：openai provider 不接受 thinking /
         # reasoning_effort 等 deepseek/anthropic 专有参数（自定义中转端点经
         # type=openai 接入时常见），不丢会抛 UnsupportedParamsError。
-        response = await self._do_completion(**call_kwargs, drop_params=True)
+        # ★ 非流式同样包 _await_with_escape：litellm.acompletion 在内部建连
+        # 阶段同样可能吞掉取消挂死（与流式首 chunk 同根因），直接 await 会
+        # 让引擎永久卡死。到点抛 TimeoutError 透传，由调用方错误链处理。
+        response = await _await_with_escape(
+            self._do_completion(**call_kwargs, drop_params=True),
+            call_timeout,
+            what=f"non-streaming completion model={model}",
+        )
 
         choice = response.choices[0]
         result_text = choice.message.content
@@ -629,7 +759,7 @@ class _BaseLiteLLMAdapter:
         # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死。
         # 必须在构造 call_kwargs 之前 pop 出来，否则会被 **kwargs 塞进
         # litellm 请求参数（litellm 不识别这两个 key）。
-        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 120))
+        first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 180))
         # inter-chunk 静默超时：连续 N 秒收不到任何 chunk 即判定上游/传输静默，
         # 抛 litellm.Timeout 中断死等。每个 chunk 到达即重置计时器（见下方主循环
         # asyncio.wait_for），故活跃推理（reasoning 持续吐 chunk）永不触发，只有
@@ -647,9 +777,11 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
-        # timeout 必须设大值：httpx 的 read timeout 作用于流式连接的每一次 socket
-        # 读取，不能用 first_chunk_timeout，否则长 reasoning 间隙会被掐断。
-        call_kwargs["timeout"] = 3600.0
+        # timeout 传 180（first_chunk_timeout）：KeyPool 路径在 _direct_call_with_slot
+        # 会覆盖为 first_chunk_timeout 本身——httpx 层超时在线程池线程内生效，
+        # 事件循环冻结也能到点抛异常（生产 17:05:34 卡死 36 分钟的根因是 3600s
+        # HTTP 超时太长 + asyncio 层超时随事件循环冻结失效）。
+        call_kwargs["timeout"] = first_chunk_timeout
 
         # 首字节超时统一覆盖"建连→等响应头→首字节"全过程：把 first_chunk_timeout 的
         # wait_for 同时包住 _do_completion 和首 chunk 读取。
@@ -665,24 +797,57 @@ class _BaseLiteLLMAdapter:
             必须关闭 stream——既为释放 HTTP 连接，也为触发 _bind_release_to_stream
             绑定的 slot.release()，避免并发许可泄漏（建连超时是高频场景）。
             """
+            _t0 = _time.monotonic()
+            logger.info(
+                "[%s] _open_and_first_chunk: 进入，准备调 _do_completion model=%s t0=%.3f",
+                type(self).__name__, model, _t0,
+            )
             resp = await self._do_completion(**call_kwargs, drop_params=True)
+            _t1 = _time.monotonic()
+            logger.info(
+                "[%s] _open_and_first_chunk: _do_completion 返回(%.3fs)，准备读首 chunk model=%s",
+                type(self).__name__, _t1 - _t0, model,
+            )
             try:
                 first = await resp.__aiter__().__anext__()
-            except BaseException:
+            except BaseException as _first_exc:
+                _t2 = _time.monotonic()
+                logger.warning(
+                    "[%s] _open_and_first_chunk: 首chunk异常(%.3fs后) model=%s exc=%s",
+                    type(self).__name__, _t2 - _t1, model, type(_first_exc).__name__,
+                )
                 # 超时/异常/取消：关闭流，触发绑定的 release。aclose 自身的任何
                 # 异常（含 CancelledError）都不应掩盖/替换原始异常，故全量抑制。
+                # ★ 不能裸 await aclose()：半死 SSL socket 会让 aclose 永久
+                # 阻塞，把原始异常（超时/取消）吞在 await 里，外层 wait_for 等不到
+                # 协程退出就永远不返回 → 引擎死锁。用 _await_with_escape 限时：
+                # 正常 aclose 毫秒级完成（同步契约，测试可立即观测关闭）；半死
+                # socket 到点即放弃，原始异常照常 raise 透传，残留协程后台回收。
                 aclose = getattr(resp, "aclose", None)
                 if aclose is not None:
                     try:
-                        await aclose()
+                        await _await_with_escape(
+                            aclose(),
+                            _ACLOSE_TIMEOUT_SECONDS,
+                            what="first-chunk aclose",
+                        )
                     except BaseException:
                         pass
                 raise
+            _t3 = _time.monotonic()
+            logger.info(
+                "[%s] _open_and_first_chunk: 首chunk到达(%.3fs后) model=%s",
+                type(self).__name__, _t3 - _t1, model,
+            )
             return resp, first
 
         first_chunk: Any = None
         try:
-            response, first_chunk = await asyncio.wait_for(_open_and_first_chunk(), timeout=first_chunk_timeout)
+            response, first_chunk = await _await_with_escape(
+                _open_and_first_chunk(),
+                first_chunk_timeout,
+                what=f"first chunk (incl. connect) model={model}",
+            )
         except StopAsyncIteration:
             # 空流：建连成功但首字节即 EOF（零 chunk），按首 token 失败处理。
             # resp 已在 _open_and_first_chunk 内部 aclose，此处无需再关。
@@ -1025,11 +1190,17 @@ class _BaseLiteLLMAdapter:
             except Exception:
                 pass
 
-            # 后续 chunk：逐次 wait_for 超时，每个 chunk 到达即重置计时器。
+            # 后续 chunk：逐次超时，每个 chunk 到达即重置计时器。
             # 活跃推理 chunk 间隔远小于 timeout 故不误触发；仅真正静默（死连接）累计满 timeout。
+            # 用 _await_with_escape：即使底层 __anext__ 吞掉取消挂死（半死连接），
+            # 也能到点抛错透传，而不是被 asyncio.wait_for「等协程退出」卡死。
             while True:
                 try:
-                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=inter_chunk_timeout)
+                    chunk = await _await_with_escape(
+                        aiter.__anext__(),
+                        inter_chunk_timeout,
+                        what=f"inter-chunk model={model}",
+                    )
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
@@ -1100,16 +1271,19 @@ class _BaseLiteLLMAdapter:
             if _hard_timeout is not None:
                 _hard_timeout.disarm()
             # 确保超时或异常时关闭 async iterator，释放 HTTP 连接。
-            # wait_for 超时兜底：Windows 半死 SSL socket 会让 httpx aclose 永久阻塞，
+            # 超时兜底：Windows 半死 SSL socket 会让 httpx aclose 永久阻塞，
             # 导致本 finally 不返回 → _run_loop 永久卡死。超时后放弃关闭，协程得以返回，
             # 残留 socket（CLOSE_WAIT）交由 GC/OS 回收。KeyPoolAdapter 路径下 aclose
             # 已被 _aclose_with_release 包过一层 wait_for，这里再包一层无害（外层到点
             # 会 cancel 内层）；LiteLLMAdapter 路径下 aclose 是原始的，本层是其唯一保护。
+            # ★ 用 _await_with_escape：即使 aclose 吞掉取消挂死，也能到点返回（此处
+            # 不抛错，仅记录日志），避免 finally 卡死引擎。
             if hasattr(response, "aclose"):
                 try:
-                    await asyncio.wait_for(
+                    await _await_with_escape(
                         response.aclose(),
-                        timeout=_ACLOSE_TIMEOUT_SECONDS,
+                        _ACLOSE_TIMEOUT_SECONDS,
+                        what="response.aclose",
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
@@ -1473,10 +1647,12 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
 
         用一次性标志保证 release 只执行一次（litellm 可能多次调用 aclose）。
 
-        original_aclose 用 wait_for 超时包裹：Windows 上半死 SSL socket 会让
+        original_aclose 用超时包裹：Windows 上半死 SSL socket 会让
         httpx/httpcore 的 aclose 永久阻塞，导致 _call_streaming 的 finally 不
         返回 → _run_loop 永久卡死（其他管道因 slot.release 已执行而不受影响，
         但本管道僵死需重启才能恢复）。超时后放弃关闭，协程得以返回。
+        ★ 用 _await_with_escape：即使 aclose 吞掉取消挂死，也能到点返回，
+        异常不掩盖 finally 主路径。
         """
         original_aclose = getattr(stream, "aclose", None)
         released = False
@@ -1488,9 +1664,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                 slot.release()
             if original_aclose is not None:
                 try:
-                    await asyncio.wait_for(
+                    await _await_with_escape(
                         original_aclose(),
                         timeout=_ACLOSE_TIMEOUT_SECONDS,
+                        what="stream.aclose",
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
@@ -1541,4 +1718,132 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         # 禁用 litellm 内部重试：由 KeyPoolAdapter 自己用不同 key 重试
         input_kwargs["num_retries"] = 0
 
-        return await litellm.acompletion(**input_kwargs)
+        # ★ 阶段日志：定位卡死在 litellm.acompletion 内部哪一步
+        # _direct_call_with_slot 是「拿到 slot 后 → 调 litellm.acompletion」的唯一出口，
+        # litellm.acompletion 返回 stream wrapper 后才真正建连/发请求。
+        # 若卡死在 litellm 内部（建连/发请求/等首字节），下面「进入/返回」两条日志
+        # 能精确定位耗时区间，配合 _open_and_first_chunk 的首chunk日志锁定卡死层。
+        _dc_t0 = _time.monotonic()
+        logger.info(
+            "[%s] _direct_call_with_slot: 进入 litellm.acompletion model=%s api_base=%s kw_keys=%s t0=%.3f",
+            type(self).__name__, litellm_model, input_kwargs.get("api_base", "?"),
+            sorted(input_kwargs.keys()), _dc_t0,
+        )
+        # ★ 把首 token 超时"包括在" litellm.acompletion 调用本身（HTTP 层）。
+        # 生产故障（2026-08-05 17:05:34 卡死 36 分钟）：litellm 内部存在事件循环
+        # 线程内同步阻塞路径（如 get_llm_provider 的同步网络调用），冻结主事件
+        # 循环 → 全进程 0 日志 36 分钟。事件循环冻结时 asyncio 层超时
+        # （wait_for/asyncio.wait/shield）全部失效（17:08:34 只有 threading.Timer
+        # 独立线程诊断触发，asyncio.wait 从未超时）。httpx 层 timeout 在线程池
+        # 线程内由 socket 定时生效，不依赖事件循环调度——传 180s 后卡死的 HTTP
+        # 请求必然到点抛异常透传。用户明确指示："将首token超时包括在里面就行，
+        # 把超时时间设到180"。
+        _acompletion_timeout = float(kwargs.pop("first_chunk_timeout", 0)) or 180.0
+        # 调用方已显式传 HTTP timeout（流式 _call_streaming 会把 first_chunk_timeout
+        # pop 掉并转成 timeout 传入）→ 以调用方为准，避免默认 180 覆盖自定义值。
+        if kwargs.get("timeout"):
+            try:
+                _acompletion_timeout = float(kwargs["timeout"])
+            except (TypeError, ValueError):
+                pass  # httpx.Timeout 对象等非数值：保持 first_chunk_timeout
+        input_kwargs["timeout"] = _acompletion_timeout
+
+        # ★ litellm.acompletion 在独立线程 + 独立事件循环中运行，流式迭代也
+        # 在该线程完成，chunk 经线程安全队列送回主循环：
+        # - litellm 内部同步阻塞（冻结自己的线程）不再影响主事件循环 → 其他管道
+        #   永不陪葬（生产 17:05:34 全进程 0 日志 36 分钟的根因）
+        # - CustomStreamWrapper 绑定 worker loop，主循环直接 await 会报
+        #   "attached to a different loop"（生产 20:33:59 MidStreamFallbackError）
+        #   → 主循环只从 queue.Queue 取 chunk，彻底避免跨 loop
+        # - 主协程轮询 threading.Event（OS 层事件，到点必然置位/超时，不依赖
+        #   任何事件循环调度），超时抛 TimeoutError 透传
+        import threading  # noqa: PLC0415
+        import queue  # noqa: PLC0415
+
+        _done_evt = threading.Event()
+        _result_box: list[Any] = []
+        _exc_box: list[BaseException] = []
+        _chunk_queue: queue.Queue[Any] = queue.Queue()
+        _close_evt = threading.Event()
+        _stream_obj: list[Any] = []
+
+        async def _run_litellm() -> Any:
+            return await litellm.acompletion(**input_kwargs)
+
+        async def _worker_main() -> Any:
+            """worker 线程主体：跑 litellm 并把流式 chunk 塞进队列。"""
+            resp = await _run_litellm()
+            # 非流式：直接返回结果对象
+            if not hasattr(resp, "__aiter__"):
+                return resp
+            # 流式：在 worker 自己的 loop 里迭代，chunk 进线程安全队列
+            _stream_obj.append(resp)
+            try:
+                async for chunk in resp:
+                    _chunk_queue.put(chunk)
+                    if _close_evt.is_set():
+                        break
+            finally:
+                # 主循环可能已超时放弃（残留迭代），此处尽量关闭底层流
+                aclose = getattr(resp, "aclose", None)
+                if aclose is not None:
+                    with contextlib.suppress(Exception):
+                        await aclose()
+            return None
+
+        def _worker() -> None:
+            # ★ 不用 asyncio.run：它会在结束时 close() 线程事件循环，而
+            # CustomStreamWrapper 的 logging 回调 / fallback 重试的 async client
+            # 绑定该 loop → 消费时报 "Event loop is closed"（生产 20:08:02）。
+            # 用 new_event_loop + run_until_complete，loop 保持存活
+            # （daemon 线程持有，进程退出时由 OS 回收），流对象可被主循环消费。
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                _result_box.append(loop.run_until_complete(_worker_main()))
+            except BaseException as exc:  # noqa: BLE001 - 异常装箱透传
+                _exc_box.append(exc)
+            finally:
+                _done_evt.set()
+                # 不 close loop：流 wrapper 绑定的 logging/fallback client 需要它存活。
+
+        _worker_thread = threading.Thread(
+            target=_worker,
+            name=f"litellm-acompletion-{litellm_model[:24]}",
+            daemon=True,
+        )
+        _worker_thread.start()
+
+        # 主协程等待 worker 首次返回（建连 + 非流式结果 / 流式首个 chunk 入队前）
+        _deadline = _time.monotonic() + _acompletion_timeout
+        while not _done_evt.is_set() and _chunk_queue.empty():
+            if _time.monotonic() >= _deadline:
+                _close_evt.set()
+                raise asyncio.TimeoutError(
+                    f"litellm.acompletion 超时 {_acompletion_timeout:.0f}s"
+                    f"（HTTP 层 timeout 已设 {_acompletion_timeout:.0f}s；残留线程由 daemon 回收）"
+                    f"model={litellm_model}"
+                )
+            if _exc_box:
+                raise _exc_box[0]
+            await asyncio.sleep(0.1)
+
+        if _exc_box:
+            raise _exc_box[0]
+        _result = _result_box[0] if _result_box else None
+        _dc_t1 = _time.monotonic()
+        logger.info(
+            "[%s] _direct_call_with_slot: litellm.acompletion 返回(%.3fs) model=%s type=%s",
+            type(self).__name__, _dc_t1 - _dc_t0, litellm_model, type(_result).__name__,
+        )
+        if _result is not None:
+            return _result
+
+        # 流式：返回桥接 iterator，主循环从线程安全队列消费 chunk
+        return _ThreadedStreamBridge(
+            queue=_chunk_queue,
+            done_evt=_done_evt,
+            exc_box=_exc_box,
+            close_evt=_close_evt,
+            completion_stream=_stream_obj[0] if _stream_obj else None,
+        )

@@ -28,7 +28,7 @@ export interface AgentSelectorProps {
 /**
  * Agent 选择器组件
  *
- * 下拉菜单式 Agent 选择器，只显示 L1 主 Agent。
+ * 下拉菜单式 Agent 选择器，显示全部可选 Agent。
  */
 export function AgentSelector({
   sessionId,
@@ -111,7 +111,7 @@ export function AgentSelector({
           data-testid="agent-selector-dropdown"
         >
           <div className="border-b px-3 py-1.5 text-xs font-medium text-muted-foreground">
-            选择主 Agent
+            选择 Agent
           </div>
           <div className="max-h-[240px] overflow-y-auto py-1">
             {agents.map((agent) => {

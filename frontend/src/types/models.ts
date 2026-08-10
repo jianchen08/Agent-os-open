@@ -73,6 +73,10 @@ export interface Session {
   status?: string
   /** 绑定的 Agent ID - Requirements: 2.1, 3.3 */
   agentId?: string | null
+  /** 会话工作空间绝对路径（项目目录） */
+  workspace?: string | null
+  /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
+  isolationMode?: 'isolated' | 'non_isolated' | null
   /** 关联的管道 ID 列表 */
   pipelineIds?: string[]
   /** 当前活跃的管道 ID */

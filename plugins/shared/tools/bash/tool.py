@@ -42,6 +42,84 @@ from result_types import (
 )
 from workspace_aware import WorkspaceAwareMixin
 
+# POSIX 信号编号 → 名称映射。进程在 Linux 容器内运行，退出码遵循 POSIX
+# 128+n 语义，但本工具的宿主可能是 Windows——Windows 的 signal.Signals 枚举
+# 不含 SIGKILL(9)/SIGSEGV(11) 等 POSIX 信号（Windows 无这些信号），直接用
+# signal.Signals(n) 反查会抛 ValueError。故内置 POSIX 标准信号名表，跨平台
+# 一致，不依赖宿主 OS 的 signal 模块。
+_POSIX_SIGNAL_NAMES: dict[int, str] = {
+    1: "SIGHUP",
+    2: "SIGINT",
+    3: "SIGQUIT",
+    4: "SIGILL",
+    6: "SIGABRT",
+    8: "SIGFPE",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    13: "SIGPIPE",
+    14: "SIGALRM",
+    15: "SIGTERM",
+}
+
+
+def describe_exit_code(exit_code: int | None) -> str | None:
+    """把进程退出码解释为人类可读的终止原因（仅信号终止时返回非空）。
+
+    POSIX 退出码语义：
+    - 0        → 正常成功
+    - 1..124   → 程序自身的错误码（含义因程序而异，不在此解释）
+    - 128+n    → 被信号 n 终止（如 137 = 128 + 9 = SIGKILL）
+
+    本函数**只在被信号终止时**返回描述字符串（含信号编号 + 名称），
+    正常退出/程序自身错误码返回 None——避免给每个退出码硬编码提醒。
+
+    信号名经内置 POSIX 信号表反查（SIGKILL/SIGTERM/SIGSEGV 等），查不到
+    就只给编号。让 LLM 拿到的是「原始信号」而非编造的归因。
+
+    Args:
+        exit_code: process.wait() 返回的退出码（可能为 None，表示尚未结束）。
+
+    Returns:
+        被信号终止时返回 "信号 N (SIGXXX) 终止" 形式的描述；否则 None。
+    """
+    if exit_code is None or exit_code < 128 or exit_code > 192:
+        return None
+    signum = exit_code - 128
+    name = _POSIX_SIGNAL_NAMES.get(signum, f"signal {signum}")
+    return f"信号 {signum} ({name}) 终止"
+
+
+# 失败时回传给 LLM 的尾部原始输出字符上限。OOM/崩溃的报错（如 "Killed"、
+# error stack）几乎总在末尾，给够长度让 LLM 直接看到真实原因。
+TAIL_CHARS_ON_FAILURE = 3000
+
+
+def tail_output(output: str | None, max_chars: int = TAIL_CHARS_ON_FAILURE) -> str:
+    """取输出末尾，字符上限但保证行完整（不切断多字节字符/不切到行中间）。
+
+    替代旧的 ``output[-500:]`` 纯字符截断——后者会把一行从中间切开，让 LLM
+    看到半个错误信息。本函数先按字符上限取尾部，再回退到上一个换行符边界，
+    确保返回的每行都是完整的。
+
+    Args:
+        output: 进程原始输出。
+        max_chars: 尾部最大字符数。
+
+    Returns:
+        末尾输出字符串（每行完整）；output 为空返回空串。
+    """
+    if not output:
+        return ""
+    text = output.rstrip()
+    if len(text) <= max_chars:
+        return text
+    # 从 max_chars 边界向左找最近的换行符，保证不切到行中间
+    cut = text[-max_chars:]
+    nl = cut.find("\n")
+    if nl != -1 and nl < len(cut) - 1:
+        return cut[nl + 1 :]
+    return cut
+
 
 class SecurityChecker:
     """命令防误操作检查器（**非安全边界**）。
@@ -174,48 +252,145 @@ class BashTool(WorkspaceAwareMixin):
     # 最大允许超时（秒），不得超过内核侧 MCP 调用外层超时
     MAX_TIMEOUT: ClassVar[int] = 290
 
-    # summary 生效的输出行数阈值，短于此值不生成 summary
-    SUMMARY_LINE_THRESHOLD: ClassVar[int] = 10
+    # 短输出阈值（字符数）：低于此值直接全量返回原始 output，不走任何截断/
+    # 提取——短输出本身信息量小、噪音少，提取/截断反而可能切坏（如半行被截）。
+    # 用字符数而非行数：行数受换行风格影响大（CRLF/LF、超长单行 vs 短行），
+    # 字符数才是真实体积。约 2KB（~500 token）是 LLM 一次能轻松消化的量。
+    SHORT_OUTPUT_CHAR_THRESHOLD: ClassVar[int] = 2000
+
+    # 长输出失败时回传的尾部原始输出上限（字符数）。OOM/崩溃的报错（如
+    # "Killed"、error stack）几乎总在末尾，给够长度让 LLM 直接看到真实原因。
+    # 行级截取保证每行完整（旧实现 output[-500:] 字符截断会切到行中间）。
+    TAIL_CHARS_ON_FAILURE: ClassVar[int] = 3000
 
     @staticmethod
     def _compact_result_data(
         pid: int,
         output: str | None,
         summary_obj: dict[str, Any],
-        exit_code: int,
+        exit_code: int | None,
+        status: str = "completed",
     ) -> dict[str, Any]:
         """精简 result_data，去掉 LLM 不需要的字段以节省 token。
 
-        保留策略：
-        - pid: LLM 需要 pid 才能调用 continue/terminate/input
-        - output: 核心输出
-        - exit_code: 始终保留（评估框架 expect 条件依赖此字段）
-        - status: 始终保留为 completed
-        - summary: 仅长输出（>10行）时保留，短输出直接看 output
-        - warnings/errors: 仅非空时保留
+        核心原则：**短输出全量返回，长输出提取高价值信息**。同一套逻辑覆盖
+        completed（进程结束）和 running（长任务轮询超时返回中间态）两种场景——
+        区别仅是 status 字段 + exit_code 有无，提取策略完全一致。
+
+        - 短输出（<=SHORT_OUTPUT_CHAR_THRESHOLD 字符）：信息量小、噪音少，直接
+          全量返回原始 output，不走任何截断/提取——截断反而可能切坏（如半行被截）。
+        - 长输出（>阈值）：output 字段截成尾部（行完整，旧 output[-500:] 会切到行
+          中间），额外附 summary/error_lines/latest_message（LogCompressor 已筛掉
+          刷屏噪音的高价值信息）。完整日志仍在磁盘，read_log 随时可取。
+
+        保留字段：
+        - pid/output/status：始终保留（exit_code 仅 completed 时有）
+        - terminated_by_signal：信号终止时附加（如实暴露原始信号，不编造归因）
+        - errors/warnings/error_lines：非空时保留（LogCompressor 过滤后的错误，去重）
+        - summary/latest_message/progress：仅长输出时保留（统计摘要 + 最新输出行）
         """
+        output_len = len(output or "")
+        is_short = output_len <= BashTool.SHORT_OUTPUT_CHAR_THRESHOLD
+
         data: dict[str, Any] = {
             "pid": pid,
             "output": output,
-            "status": "completed",
-            "exit_code": exit_code,
+            "status": status,
         }
+        if status == "completed":
+            data["exit_code"] = exit_code if exit_code is not None else 0
 
-        warnings = summary_obj.get("warnings", [])
-        errors = summary_obj.get("errors", [])
-        if warnings:
-            data["warnings"] = warnings
+        # 信号终止时附加结构化字段：把原始信号（编号+名称）如实暴露给 LLM，
+        # 而非让它从孤立数字猜。137=SIGKILL 常见但非唯一（OOM/timeout/外部 kill
+        # 都可能发 SIGKILL，具体归因由调用方结合上下文判断，这里不编造）。
+        if exit_code is not None:
+            signal_desc = describe_exit_code(exit_code)
+            if signal_desc:
+                data["terminated_by_signal"] = signal_desc
+
+        # errors/warnings 是 LogCompressor 提取的高价值信息（去重后的错误行），
+        # 无论输出长短都应保留——短输出即便只有几行，只要命中 error 模式就该让
+        # LLM 看到，避免它在一小段输出里还要自己找问题。
+        # errors/warnings 是计数（int），error_lines 是具体错误行（list[str]）。
+        # 计数让 LLM 知道"有几条错误"，error_lines 让它直接看到内容——两者互补。
+        errors = summary_obj.get("errors", 0)
+        warnings = summary_obj.get("warnings", 0)
         if errors:
             data["errors"] = errors
+        if warnings:
+            data["warnings"] = warnings
+        error_lines = summary_obj.get("error_lines", [])
+        if error_lines:
+            data["error_lines"] = error_lines
 
-        # 短输出不生成 summary（比 output 本身还长就失去意义）
-        output_lines = (output or "").count("\n") + 1 if output else 0
-        if output_lines > BashTool.SUMMARY_LINE_THRESHOLD:
-            summary_lines = summary_obj.get("summary", [])
-            if summary_lines:
-                data["summary"] = summary_lines
+        # 短输出到此为止：信息已全量在 output 里，summary（[N行]/类型/进度等
+        # 统计性描述）对短输出是冗余噪音，跳过。
+        if is_short:
+            return data
+
+        # 长输出：output 截成尾部（行完整，完整日志在磁盘 read_log 可取），
+        # 附 summary/latest_message/progress（LogCompressor 已筛掉刷屏噪音）。
+        data["output"] = tail_output(output, BashTool.TAIL_CHARS_ON_FAILURE)
+        summary_lines = summary_obj.get("summary", [])
+        if summary_lines:
+            data["summary"] = summary_lines
+        latest = summary_obj.get("latest_message") or ""
+        if latest:
+            data["latest_message"] = latest
+        progress = summary_obj.get("progress")
+        if progress:
+            data["progress"] = progress
 
         return data
+
+    @staticmethod
+    def _build_failure_message(
+        exit_code: int,
+        output: str | None,
+        summary_obj: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """组装失败时的 error_msg + metadata（execute/continue/read_log 共用）。
+
+        按"短全量、长提取"原则：
+        - 短输出（<=SHORT_OUTPUT_CHAR_THRESHOLD 字符）：直接全量原文，信息量小、
+          截断反而可能切坏。
+        - 长输出：按价值优先级拼接——信号描述 > LogCompressor 提取的错误列表
+          （已去重筛噪音）> latest_message > 末尾原始输出（行完整）兜底。
+
+        旧实现 ``output[-500:]`` 是纯字符截断（可能切到行中间），且失败时丢弃
+        了 LogCompressor 已提取的高价值错误列表，导致 LLM 只能从噪音里捞原因。
+        """
+        signal_desc = describe_exit_code(exit_code)
+        output_len = len(output or "")
+        is_short = output_len <= BashTool.SHORT_OUTPUT_CHAR_THRESHOLD
+
+        parts: list[str] = []
+        if signal_desc:
+            parts.append(f"{signal_desc}（退出码 {exit_code}）")
+        else:
+            parts.append(f"命令执行失败，退出码: {exit_code}")
+
+        if is_short:
+            if output:
+                parts.append(f"输出：\n{output.rstrip()}")
+        else:
+            # error_lines 是 LogCompressor 提取的错误行原文列表（去重筛噪音）；
+            # 注意与 errors（计数 int）区分——这里要的是具体行内容。
+            error_lines = summary_obj.get("error_lines") or []
+            latest = summary_obj.get("latest_message") or ""
+            if error_lines:
+                parts.append("错误行：\n" + "\n".join(error_lines[:20]))
+            if latest:
+                parts.append(f"最新输出：{latest}")
+            tail = tail_output(output, BashTool.TAIL_CHARS_ON_FAILURE)
+            if tail:
+                parts.append(f"末尾输出：\n{tail}")
+
+        error_msg = "\n".join(parts)
+        fail_meta: dict[str, Any] = {"exit_code": exit_code}
+        if signal_desc:
+            fail_meta["terminated_by_signal"] = signal_desc
+        return error_msg, fail_meta
 
     def __init__(
         self,
@@ -391,13 +566,19 @@ class BashTool(WorkspaceAwareMixin):
                     summary = self.process_manager.get_summary(pid)
 
                     if summary:
+                        running_output = self.process_manager.get_output(pid)
+                        running_data = BashTool._compact_result_data(
+                            pid=pid,
+                            output=running_output,
+                            summary_obj=summary,
+                            exit_code=None,
+                            status="running",
+                        )
+                        running_data["elapsed"] = round(
+                            time.time() - proc_info.start_time, 1
+                        )
                         return create_success_result(
-                            data={
-                                "status": "running",
-                                "pid": pid,
-                                "elapsed": round(time.time() - proc_info.start_time, 1),
-                                "summary": summary.get("summary", []),
-                            },
+                            data=running_data,
                             metadata={
                                 "action": "execute",
                                 "command": command,
@@ -424,14 +605,13 @@ class BashTool(WorkspaceAwareMixin):
                 )
 
                 if exit_code != 0:
-                    error_msg = (
-                        output[-500:]
-                        if output and len(output) > 500
-                        else (output or f"命令执行失败，退出码: {exit_code}")
+                    error_msg, fail_meta = BashTool._build_failure_message(
+                        exit_code, output, summary,
                     )
                     return create_failure_result(
                         error=error_msg,
                         error_code="COMMAND_FAILED",
+                        metadata=fail_meta,
                     )
 
                 return create_success_result(
@@ -503,9 +683,14 @@ class BashTool(WorkspaceAwareMixin):
             summary = self.process_manager.get_summary(pid)
             exit_code = proc_info.exit_code
             if exit_code is not None and exit_code != 0:
+                output_fail = self.process_manager.get_output(pid)
+                error_msg, fail_meta = BashTool._build_failure_message(
+                    exit_code, output_fail, summary or {},
+                )
                 return create_failure_result(
-                    error=f"命令执行失败，退出码: {exit_code}",
+                    error=error_msg,
                     error_code="COMMAND_FAILED",
+                    metadata=fail_meta,
                 )
             output = self.process_manager.get_output(pid)
             result_data = self._compact_result_data(
@@ -530,13 +715,19 @@ class BashTool(WorkspaceAwareMixin):
                 # 再次触发回调
                 summary = self.process_manager.get_summary(pid)
 
+                running_output = self.process_manager.get_output(pid)
+                running_data = BashTool._compact_result_data(
+                    pid=pid,
+                    output=running_output,
+                    summary_obj=summary or {},
+                    exit_code=None,
+                    status="running",
+                )
+                running_data["elapsed"] = round(
+                    time.time() - proc_info.start_time, 1
+                )
                 return create_success_result(
-                    data={
-                        "status": "running",
-                        "pid": pid,
-                        "elapsed": round(time.time() - proc_info.start_time, 1),
-                        "summary": summary.get("summary", []) if summary else [],
-                    },
+                    data=running_data,
                     metadata={"action": "continue"},
                 )
 
@@ -551,9 +742,14 @@ class BashTool(WorkspaceAwareMixin):
         summary = self.process_manager.get_summary(pid)
         exit_code = proc_info.exit_code if proc_info else None
         if exit_code is not None and exit_code != 0:
+            output_fail = self.process_manager.get_output(pid)
+            error_msg, fail_meta = BashTool._build_failure_message(
+                exit_code, output_fail, summary or {},
+            )
             return create_failure_result(
-                error=f"命令执行失败，退出码: {exit_code}",
+                error=error_msg,
                 error_code="COMMAND_FAILED",
+                metadata=fail_meta,
             )
 
         output = self.process_manager.get_output(pid)
