@@ -9,7 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# 将 0.1 源码目录加入 sys.path，使老代码的 from tools.* 导入可用
+# 0.1 src/ 已归档为 reference/0.1_src/（参考文件，不参与运行时）。
+# 守卫保留：src 存在（过渡期/调试）则注入，否则跳过——media 工具走自身平铺实现。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
 _SRC_ROOT = os.path.join(_PROJECT_ROOT, 'src')
 if os.path.isdir(_SRC_ROOT):

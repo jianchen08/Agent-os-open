@@ -8,7 +8,6 @@ import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { getSchema } from '@/services/api/schema'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
-import { registerCapabilities } from './ClientCapabilities'
 import { moduleManager } from './ModuleManager'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
@@ -19,21 +18,14 @@ export async function initializeGrowthLoop(): Promise<void> {
   initializeWidgets()
   loggers.websocket.info('预置组件注册完成')
 
-  // Step 2: 注册客户端能力（0.1 遗留端点，0.2 内核未实现，失败静默不阻塞）
-  try {
-    await registerCapabilities()
-  } catch {
-    loggers.websocket.debug('registerCapabilities 跳过（0.2 内核无此端点）')
-  }
-
-  // Step 3: 拉取并注册模块（0.1 遗留 /api/modules/ui 端点，0.2 未实现，失败静默）
+  // Step 2: 拉取并注册模块（0.1 遗留 /api/modules/ui 端点，0.2 未实现，失败静默）
   try {
     await moduleManager.initialize()
   } catch {
     loggers.websocket.debug('moduleManager.initialize 跳过（0.2 内核无 /api/modules/ui）')
   }
 
-  // Step 4: 加载 schema 到 ContributionRegistry 并同步导航（0.2 核心数据源）
+  // Step 3: 加载 schema 到 ContributionRegistry 并同步导航（0.2 核心数据源）
   await reloadContributionRegistry()
 
   loggers.websocket.info('自生长闭环初始化完成')
@@ -85,12 +77,7 @@ export async function restartGrowthLoop(): Promise<void> {
 
   initializeWidgets()
 
-  // registerCapabilities + moduleManager（0.1 遗留端点，失败静默不阻塞核心）
-  try {
-    await registerCapabilities()
-  } catch {
-    loggers.websocket.debug('registerCapabilities 跳过（重启场景）')
-  }
+  // moduleManager（0.1 遗留端点，失败静默不阻塞核心）
   try {
     await moduleManager.fetchAndRebuild()
   } catch {

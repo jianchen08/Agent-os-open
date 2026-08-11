@@ -16,7 +16,7 @@ from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
-from tools.format_manager import FormatManager, ToolFormat, get_format_manager
+from format_manager import FormatManager, ToolFormat, get_format_manager
 
 logger = logging.getLogger(__name__)
 

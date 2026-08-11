@@ -93,7 +93,7 @@ def setup_logging(
     debug: bool = False,
     log_dir: Path | str | None = None,
 ) -> None:
-    """初始化统一日志系统（已转发到 src.core.logging）。
+    """初始化统一日志系统（已转发到 agentos_plugin_sdk.logging）。
 
     在所有入口点调用一次即可。重复调用不会重复初始化。
 
@@ -109,7 +109,7 @@ def setup_logging(
     _log_dir = _PROJECT_ROOT / "logs" if log_dir is None else Path(log_dir)
     _log_dir.mkdir(parents=True, exist_ok=True)
 
-    from src.core.logging import LoggingConfig, setup_logging as _unified_setup  # noqa: PLC0415
+    from agentos_plugin_sdk.logging import LoggingConfig, setup_logging as _unified_setup  # noqa: PLC0415
 
     config = LoggingConfig(
         level=logging.DEBUG if debug else logging.INFO,

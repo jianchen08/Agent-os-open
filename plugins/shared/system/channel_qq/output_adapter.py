@@ -3,13 +3,33 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from typing import Any
 
-from _base_output_adapter import IOutputAdapter
 from onebot_client import OneBotClient
 from pipeline_types import StateKeys
 
 logger = logging.getLogger(__name__)
+
+
+class IOutputAdapter(ABC):
+    """输出适配器抽象基类（与 channel_dingtalk/channel_feishu 同构）。
+
+    负责将管道引擎的处理结果转换为外部系统可识别的响应格式，
+    支持一次性输出和流式输出。
+    """
+
+    @abstractmethod
+    async def send(self, state: dict[str, Any]) -> None:
+        """输出管道最终 state。"""
+
+    @abstractmethod
+    async def send_stream(self, chunk: dict[str, Any]) -> None:
+        """流式输出一个 chunk。"""
+
+    async def health_check(self) -> bool:
+        """检查输出适配器是否健康（默认 True）。"""
+        return True
 
 
 class QQOutputAdapter(IOutputAdapter):

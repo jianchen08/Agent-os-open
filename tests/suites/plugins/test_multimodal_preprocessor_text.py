@@ -15,6 +15,8 @@ import pytest
 from pipeline.plugin import PluginContext
 from plugins.input.multimodal_preprocessor.plugin import MultimodalPreprocessor
 
+pytestmark = pytest.mark.unit
+
 
 @dataclass
 class _FakeResult:

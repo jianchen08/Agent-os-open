@@ -12,8 +12,8 @@ from typing import Any
 
 import jwt
 
-from src.auth.token import TokenManager
-from src.config.settings import get_settings
+from agentos_plugin_sdk.settings import get_settings
+from auth_token import TokenManager
 
 logger = logging.getLogger(__name__)
 

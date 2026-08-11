@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# AgentOS — sccache 增量层（临时）
+# 基于现有 agentos:latest（已含 Rust 工具链），仅增量添加 sccache。
+# 用途：绕开 Dockerfile.rust 中当前因 debian 源网络问题无法重建的 apt 层，
+#       快速获得带 sccache 的镜像。待 debian 源恢复后，应改回用 Dockerfile.rust
+#       正常构建（它已内置 sccache，见同目录文件）。
+# =============================================================================
+
+FROM agentos:latest
+
+LABEL maintainer="Agent OS Team" \
+      description="agentos:latest + sccache 编译缓存层" \
+      increment="sccache"
+
+# sccache：内容寻址的 Rust 编译缓存。
+# 跨容器实例、跨 git worktree 复用产物；配合 docker_provider 挂载的
+# agentos-cargo-cache named volume，容器销毁/重建不丢缓存。
+#
+# 二进制来源：Mozilla sccache v0.17.0 官方 GitHub Release 的
+# x86_64-unknown-linux-musl 预编译版（musl 静态链接，不依赖 glibc 版本）。
+# 本机到 GitHub release-assets CDN 直连不稳，故先在宿主下好后随镜像一起 COPY，
+# 不依赖构建容器内的网络。
+COPY sccache-bin/sccache /usr/local/bin/sccache
+RUN chmod +x /usr/local/bin/sccache && sccache --version
+
+# RUSTC_WRAPPER 让 cargo/rustc 调用走 sccache 包装。
+# SCCACHE_DIR 指向 volume 挂载点，缓存落 named volume 而非容器可写层。
+# CARGO_INCREMENTAL=0：incremental 编译的产物含时间戳/路径相关状态，
+# sccache 无法稳定哈希 → 判为 non-cacheable。必须关闭才能让 Rust crate 命中缓存。
+ENV RUSTC_WRAPPER=sccache
+ENV SCCACHE_DIR=/cargo-cache/sccache
+ENV CARGO_INCREMENTAL=0
+
+WORKDIR /workspace
+CMD ["python"]

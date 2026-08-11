@@ -15,6 +15,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 agentos-core.workspace = true
+agentos-mcp.workspace = true
 parking_lot = "0.12"
 chrono.workspace = true
 # 插件准入哈希校验（P2-2）

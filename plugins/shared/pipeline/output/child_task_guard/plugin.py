@@ -16,7 +16,7 @@ from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, RouteSignal
-from utils.enum_utils import safe_enum_value
+from enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 

@@ -22,8 +22,8 @@ import re
 import time
 from typing import Any
 
-from isolation.decider import IsolationDecider
-from isolation.types import IsolationLevel
+from decider import IsolationDecider
+from isolation_types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
 

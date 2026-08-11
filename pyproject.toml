@@ -38,8 +38,9 @@ dependencies = [
     "Pillow>=10.0",
 ]
 
-[project.scripts]
-agent-os = "channels.cli.cli_main:main"
+# [project.scripts]
+# 0.2 架构下 CLI 由插件提供（plugins/shared/system/channel_cli/），
+# 不再在根包注册 entry point。如需 CLI，运行 channel_cli 插件或内核 dispatcher。
 
 [project.optional-dependencies]
 dev = [
@@ -103,8 +104,10 @@ filterwarnings = [
     "ignore::pydantic.warnings.PydanticDeprecatedSince20",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+# 0.2 架构：Python 包分别由 plugins/sdk（agentos-plugin-sdk）和各插件独立管理。
+# 根 pyproject 仅保留依赖清单与工具配置，不再从 src/ 打包（src/ 已迁移到 plugins/）。
+packages = []
 
 # ============================================================
 # 代码质量工具链配置（REQ-13）
@@ -193,24 +196,17 @@ unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]  # __init__.py 允许未使用 import
 "tests/**" = ["B011", "PT009", "PT027"]  # 测试文件允许 assert
-"src/channels/cli/**" = ["T201"]  # CLI 允许 print
+"plugins/shared/system/channel_cli/**" = ["T201"]  # CLI 允许 print
 # isolation/manager.py 的函数内 docker 延迟导入（已标 noqa: PLC0415），
 # 其 import 排序对延迟加载场景意义有限，避免与延迟加载意图冲突
-"src/isolation/manager.py" = ["I001"]
+"plugins/shared/system/isolation/manager.py" = ["I001"]
 
 [tool.ruff.lint.isort]
-# src/ 下各顶层模块直接以模块名(如 llm/pipeline/plugins)导入，而非 from src.xxx。
-# 必须显式声明真实模块名，否则 ruff 无法稳定识别为 first-party，
-# 在 CI(ubuntu + pip install -e .)环境下会把内部模块误判为 third-party → I001 误报。
-# 同时保留 "src" 以兼容少量 from src.xxx 风格的导入。
+# 0.2 架构：插件目录平铺，各插件内部以裸模块名 import（server.py 把自身目录加入 sys.path）。
+# 声明这些为 first-party，避免 ruff 在 CI 环境下误判为 third-party → I001 误报。
 known-first-party = [
-    "src",
-    "agents", "artifacts", "auth", "bridge", "cache", "channels", "config",
-    "connectors", "core", "cost_control", "evaluation", "human_interaction",
-    "infrastructure", "isolation", "llm", "logs", "lsp", "memory", "monitoring",
-    "multimodal", "pipeline", "plugins", "review", "rollback", "scene",
-    "services", "skills", "tasks", "templates", "tools", "triggers", "ui_schema",
-    "utils", "websocket", "workspace",
+    "agentos_plugin_sdk",
+    "plugins",
 ]
 combine-as-imports = true
 

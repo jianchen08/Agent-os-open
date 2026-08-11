@@ -19,6 +19,9 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
+
 # 确保插件目录在 sys.path 前面
 _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
@@ -380,6 +383,7 @@ class TestStateMachine:
     def test_all_status_transitions_defined(self) -> None:
         """7 种状态全部在转换表中有定义。"""
         from state_machine import get_task_state_machine
+
         sm = get_task_state_machine()
         expected_states = {"pending", "running", "evaluating", "stopped", "completed", "failed", "timeout"}
         defined = set(sm.transitions.keys())

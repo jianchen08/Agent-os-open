@@ -18,6 +18,9 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
+
 # ---- 路径常量 ----
 # 测试文件位于 plugins/shared/system/test_migration_batch3.py
 SYSTEM_DIR = Path(__file__).resolve().parent
@@ -86,7 +89,7 @@ class TestConnectorsMigration:
         data: dict[str, Any] = json.loads(json_path.read_text(encoding="utf-8"))
         assert data["id"] == "connectors_service"
         assert data["plugin_type"] == "system"
-        assert data["entry"] == "python3 server.py"
+        assert data["entry"] == "python server.py"  # 仓库统一约定为 python（85 个 plugin.json 一致）
         assert len(data["capabilities"]["tools"]) >= 5
 
     def test_server_py_exists(self) -> None:
@@ -181,7 +184,7 @@ class TestSceneMigration:
         data: dict[str, Any] = json.loads(json_path.read_text(encoding="utf-8"))
         assert data["id"] == "scene_service"
         assert data["plugin_type"] == "system"
-        assert data["entry"] == "python3 server.py"
+        assert data["entry"] == "python server.py"  # 仓库统一约定为 python（85 个 plugin.json 一致）
         assert len(data["capabilities"]["tools"]) >= 5
 
     def test_server_py_exists(self) -> None:
@@ -264,7 +267,7 @@ class TestWorkspaceMigration:
         data: dict[str, Any] = json.loads(json_path.read_text(encoding="utf-8"))
         assert data["id"] == "workspace_service"
         assert data["plugin_type"] == "system"
-        assert data["entry"] == "python3 server.py"
+        assert data["entry"] == "python server.py"  # 仓库统一约定为 python（85 个 plugin.json 一致）
         assert len(data["capabilities"]["tools"]) >= 3
 
     def test_server_py_exists(self) -> None:

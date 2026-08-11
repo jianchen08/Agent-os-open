@@ -85,9 +85,21 @@ class SessionIsolationPlugin(IInputPlugin):
 
         # 经 SessionWorkspaceService 幂等获取/创建会话容器（同 workspace 复用，
         # `-v {workspace}:/workspace` 挂载由 IsolationManager/DockerProvider 完成）
-        from infrastructure.session.session_workspace import (  # noqa: PLC0415
-            SessionWorkspaceService,
-        )
+        # infrastructure.session.session_workspace 是 0.1 模块，已归档为 reference/0.1_src/
+        # （参考文件）。0.2 环境下不可 import → 走 fallback：不做会话级容器隔离，
+        # 工具调用按原样透传（由后续 isolation_guard 等插件做宿主/容器决策）。
+        try:
+            from infrastructure.session.session_workspace import (  # noqa: PLC0415
+                SessionWorkspaceService,
+            )
+        except ImportError:
+            logger.debug(
+                "[%s] infrastructure.session.session_workspace 不可用（0.1 已归档），"
+                "跳过会话级容器隔离 | ws=%s",
+                self.name,
+                workspace,
+            )
+            return PluginResult()
 
         container_id = await SessionWorkspaceService.get_or_create_session_container(workspace)
         if not container_id:

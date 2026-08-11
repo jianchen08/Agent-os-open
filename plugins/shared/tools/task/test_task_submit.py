@@ -12,6 +12,10 @@ task_submit 工具的单元测试
   在 create_task 处失败（mock 抛异常），从 error_code 反推解析层行为
 """
 
+import pytest
+
+
+
 import asyncio
 import sys
 from pathlib import Path
@@ -26,6 +30,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from tools.builtin.task_submit.tool import TaskSubmitTool, _normalize_description  # noqa: E402
 from tools.types import Tool  # noqa: E402
+
+pytestmark = pytest.mark.unit
+
 
 # ─────────────────────────── 工具函数 ───────────────────────────
 
@@ -110,21 +117,28 @@ def _patch_infrastructure():
 
 
 def test_inherit_mode_schema_supports_string_and_array():
-    """Schema 层：inherit.mode 应支持 string（向后兼容）和 array 两种形式。
+    """Schema 层：inherit_mode 应支持 string（向后兼容）和 array 两种形式。
 
-    实现方案：使用 oneOf 包含 string 和 array 两种 schema。
+    实现方案：schema 已平铺为顶层 inherit_from/inherit_mode 两个字段
+    （旧式嵌套 inherit 对象仍兼容解析），inherit_mode 用 oneOf 包含
+    string 和 array 两种 schema。
     """
     tool_def: Tool = TaskSubmitTool.get_tool_definition()
-    inherit_schema = tool_def.input_schema["properties"]["inherit"]
-    mode_schema = inherit_schema["properties"]["mode"]
+    props = tool_def.input_schema["properties"]
 
+    # 平铺字段存在性
+    assert "inherit_from" in props, f"缺少平铺的 inherit_from 字段，实际={list(props)}"
+    assert "inherit_mode" in props, f"缺少平铺的 inherit_mode 字段，实际={list(props)}"
+    assert props["inherit_from"].get("type") == "string"
+
+    mode_schema = props["inherit_mode"]
     # 必须是 oneOf 形式
-    assert "oneOf" in mode_schema, f"inherit.mode 缺少 oneOf 定义，实际 schema={mode_schema}"
+    assert "oneOf" in mode_schema, f"inherit_mode 缺少 oneOf 定义，实际 schema={mode_schema}"
 
     one_of = mode_schema["oneOf"]
     type_kinds = [opt.get("type") for opt in one_of]
-    assert "string" in type_kinds, f"inherit.mode 缺少 string 分支，实际={type_kinds}"
-    assert "array" in type_kinds, f"inherit.mode 缺少 array 分支，实际={type_kinds}"
+    assert "string" in type_kinds, f"inherit_mode 缺少 string 分支，实际={type_kinds}"
+    assert "array" in type_kinds, f"inherit_mode 缺少 array 分支，实际={type_kinds}"
 
     # string 分支应允许 pipe/workspace
     string_opt = next(opt for opt in one_of if opt.get("type") == "string")

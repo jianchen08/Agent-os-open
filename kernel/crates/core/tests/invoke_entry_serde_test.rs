@@ -81,6 +81,7 @@ fn test_none_invoke_entry_omitted_in_serialization() {
         contributes: None,
         enabled: None,
         activation: None,
+        provides: None,
         invoke_entry: None,
         persistent_fields: vec![],
     };

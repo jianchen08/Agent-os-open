@@ -27,7 +27,6 @@ from models import (
     TaskSubmitResponse,
     TaskUpdate,
 )
-from infrastructure.service_access import get_execution_record_storage
 from tasks.service_access import get_task_service
 from utils.enum_utils import safe_enum_value
 
@@ -44,8 +43,6 @@ router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
 # A-3/A-6: 委托到公共接口，保持模块内调用兼容
 
 _get_task_service = get_task_service
-
-_get_execution_record_storage = get_execution_record_storage
 
 
 def _map_status_for_api(status: str) -> str:

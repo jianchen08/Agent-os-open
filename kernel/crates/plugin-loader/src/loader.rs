@@ -698,7 +698,7 @@ impl PluginLoaderImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::traits::HostType;
+    use agentos_core::traits::{HostType, ProvidedCapabilityHost};
     use std::fs;
 
     fn create_test_plugin_dir(root: &Path, id: &str, plugin_type: &str) {
@@ -758,6 +758,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
@@ -791,6 +792,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_err());
@@ -825,6 +827,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
@@ -974,10 +977,75 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));
+    }
+
+    #[test]
+    fn test_manifest_parses_provides_capabilities() {
+        // M4: plugin.json 的 provides.capabilities 声明应被正确反序列化。
+        // 验证：声明了 provides 的 manifest，provides 字段非 None 且内容正确。
+        let json = r#"{
+            "id": "human_interaction_service",
+            "name": "Human Interaction Service",
+            "version": "1.0.0",
+            "plugin_type": "system",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "python server.py",
+            "capabilities": {"tools": [], "lifecycle_hooks": ["on_load"]},
+            "provides": {
+                "capabilities": [
+                    {
+                        "namespace": "human-interaction",
+                        "methods": ["create_choice", "wait_for_choice", "respond", "cancel"],
+                        "host": "in-process"
+                    }
+                ]
+            }
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let provides = manifest.provides.expect("provides 应被解析");
+        assert_eq!(provides.capabilities.len(), 1);
+        let cap = &provides.capabilities[0];
+        assert_eq!(cap.namespace, "human-interaction");
+        assert_eq!(cap.methods, vec!["create_choice", "wait_for_choice", "respond", "cancel"]);
+        assert_eq!(cap.host, ProvidedCapabilityHost::InProcess);
+    }
+
+    #[test]
+    fn test_manifest_without_provides_defaults_to_none() {
+        // 向后兼容：旧 plugin.json 不含 provides 字段时，解析为 None，不报错。
+        let json = r#"{
+            "id": "legacy_plugin",
+            "name": "Legacy",
+            "version": "1.0.0",
+            "plugin_type": "tool",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "python server.py",
+            "capabilities": {"tools": [{"name": "legacy_tool"}]}
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.provides.is_none(), "无 provides 字段应解析为 None");
+    }
+
+    #[test]
+    fn test_manifest_provides_defaults_host_to_inprocess() {
+        // host 字段缺省时（#[serde(default)])应为 InProcess。
+        let json = r#"{
+            "id": "p1", "name": "P1", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "s.py",
+            "capabilities": {"tools": []},
+            "provides": {"capabilities": [{"namespace": "my-cap", "methods": ["do"]}]}
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let cap = &manifest.provides.unwrap().capabilities[0];
+        assert_eq!(cap.host, ProvidedCapabilityHost::InProcess, "host 缺省应为 InProcess");
     }
 
     // ── 配置加载测试 ──

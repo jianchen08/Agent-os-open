@@ -10,12 +10,59 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from infrastructure.session.models import SessionModel
+# SessionModel 原依赖 infrastructure.session.models（0.1 包），0.2 环境下该包不存在。
+# 这里本地化定义等价的 dataclass，字段与 0.1 保持一致，解除对 infrastructure 的依赖。
+@dataclass
+class SessionModel:
+    """会话模型 — 管道历史的引用集合（本地化版本）。
+
+    会话只是一个标记，记录哪些管道属于这个会话。
+    不负责创建管道、生成 pipeline_id 或管理管道生命周期。
+
+    Attributes:
+        session_id: 会话标签，创建后固定不变
+        channel_type: 来源通道 — "cli" 或 "web"
+        channel_ref: 通道级引用
+        pipeline_ids: 属于这个会话的 pipeline_run_id 引用列表
+        active_pipeline_id: 最近一次使用的 pipeline_run_id（仅引用）
+        created_at: 创建时间戳
+        last_active_at: 最后活跃时间戳
+        metadata: 扩展元数据
+    """
+
+    session_id: str = ""
+    channel_type: str = "cli"
+    channel_ref: str = ""
+    pipeline_ids: list[str] = field(default_factory=list)
+    active_pipeline_id: str = ""
+    created_at: float | None = None
+    last_active_at: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def touch(self) -> None:
+        """更新最后活跃时间戳。"""
+        self.last_active_at = time.time()
+
+    def register_pipeline(self, pipeline_id: str, set_active: bool = True) -> None:
+        """将一个管道 ID 注册到本会话的引用集合中。"""
+        if pipeline_id and pipeline_id not in self.pipeline_ids:
+            self.pipeline_ids.append(pipeline_id)
+        if set_active:
+            self.active_pipeline_id = pipeline_id
+        self.touch()
+
+    def clear(self) -> None:
+        """清空管道引用列表。"""
+        self.pipeline_ids.clear()
+        self.active_pipeline_id = ""
+        self.touch()
 
 _log = logging.getLogger(__name__)
 
@@ -93,7 +140,7 @@ class MemoryStore:
         """
         import os  # noqa: PLC0415
 
-        from src.auth.password import hash_password  # noqa: PLC0415
+        from password import hash_password  # noqa: PLC0415
 
         admin_password = os.environ.get("DEFAULT_ADMIN_PASSWORD")
         if not admin_password:
@@ -265,7 +312,7 @@ class MemoryStore:
         if username in self.users:
             raise ValueError(f"用户名 '{username}' 已存在")
 
-        from src.auth.password import hash_password  # noqa: PLC0415
+        from password import hash_password  # noqa: PLC0415
 
         user_id = uuid.uuid4().hex[:12]
         user = {

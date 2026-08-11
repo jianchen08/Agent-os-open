@@ -29,6 +29,9 @@ from pathlib import Path
 
 import pytest
 
+
+pytestmark = pytest.mark.unit
+
 _PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "tools" / "bash"
 _SDK_DIR = Path(__file__).resolve().parents[3] / "plugins" / "sdk" / "src"
 
@@ -247,13 +250,10 @@ class TestLogSecurity:
         log_file = tool.process_manager.log_dir / f"bash_{pid}.log"
         assert log_file.exists(), f"日志文件缺失: {log_file}"
         lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        # 只检查日志头部（首个空行前的 # 注释段；输出行里 echo 明文属于
-        # 命令自身输出，不掩码）
-        header_lines = []
-        for line in lines:
-            if not line.strip():
-                break
-            header_lines.append(line)
+        # 只检查日志头部 # 开头的注释行（# Command: 等元信息行）。
+        # 命令输出（含 echo 明文）和 WSL 注入的 stderr 翻译消息不属于日志头，
+        # 不应参与掩码校验——只验 # 注释行里的命令记录被掩码。
+        header_lines = [line for line in lines if line.startswith("#")]
         header = "\n".join(header_lines)
         assert secret not in header, "日志头部泄露命令中的密钥"
         assert "API_KEY=***" in header

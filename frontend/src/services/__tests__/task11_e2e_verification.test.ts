@@ -12,11 +12,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { SchemaParser } from '@/services/schema/SchemaParser'
 import { RenderingEngine } from '@/services/schema/RenderingEngine'
 import { SchemaRouter } from '@/services/schema/SchemaRouter'
-import {
-  adaptIncomingMessage,
-  adaptOutgoingMessage,
-  isRustKernelMessage,
-} from '@/services/websocket/MessageAdapter'
 import type { ModuleUISchema, UIContribution } from '@/types/schema'
 
 // Mock apiClient for datasource tests
@@ -41,7 +36,6 @@ describe('Task 11 用户旅程：从 Schema 定义到渲染输出', () => {
   let parsedSchema: ReturnType<SchemaParser['parse']>['parsed']
   let renderResult: ReturnType<RenderingEngine['render']>
   let datasourceResponse: { success: boolean; options: Array<{ label: string; value: string }> }
-  let wsReceivedType: string
 
   // --- Step 1: 定义 0.2 Schema 并解析 ui 字段（AC-11-1）---
   it('Step 1 [AC-11-1]: 定义 0.2 Schema，SchemaParser 正确解析 ui.input_form 和 ui.result_widget', () => {
@@ -220,46 +214,10 @@ describe('Task 11 用户旅程：从 Schema 定义到渲染输出', () => {
     expect(datasourceResponse.options[0].value).toBe('cat_a')
   })
 
-  // --- Step 6: WebSocket 消息适配（AC-11-4）---
-  it('Step 6 [AC-11-4]: adaptIncomingMessage/adaptOutgoingMessage 适配 Rust 内核格式', () => {
-    // 适配入站消息：Rust 内核格式
-    const rustIncoming = {
-      type: 'pipeline_chunk',
-      data: {
-        thread_id: 'thread-e2e-001',
-        content: 'Hello from Rust kernel',
-      },
-      metadata: { pipeline_id: 'p-e2e', seq: 1 },
-    }
-    const adaptedIn = adaptIncomingMessage(rustIncoming)
-
-    expect(adaptedIn).not.toBeNull()
-    expect(adaptedIn!.type).toBe('pipeline_chunk')
-    expect(adaptedIn!.thread_id).toBe('thread-e2e-001')
-    expect(adaptedIn!.data.thread_id).toBe('thread-e2e-001')
-    expect(adaptedIn!.data.content).toBe('Hello from Rust kernel')
-    expect(adaptedIn!.metadata).toEqual({ pipeline_id: 'p-e2e', seq: 1 })
-    wsReceivedType = adaptedIn!.type
-
-    // 适配出站消息：前端 → Rust 格式
-    const outgoing = {
-      type: 'user_input',
-      thread_id: 'thread-e2e-001',
-      content: '用户输入内容',
-    }
-    const adaptedOut = adaptOutgoingMessage(outgoing)
-
-    expect(adaptedOut.type).toBe('user_input')
-    expect(adaptedOut.data.thread_id).toBe('thread-e2e-001')
-    expect(adaptedOut.data.content).toBe('用户输入内容')
-
-    // isRustKernelMessage 识别
-    expect(isRustKernelMessage(rustIncoming)).toBe(true)
-    expect(isRustKernelMessage(outgoing)).toBe(false)
-  })
-
   // --- Step 7: 向后兼容（AC-11-5）---
-  it('Step 7 [AC-11-5]: 0.1 风格 Schema 和扁平 WS 消息向后兼容', () => {
+  // 注：原 Step 6（WebSocket 0.1 消息适配）已随 0.1 内核退役移除，AC-11-4 由
+  // MessageAdapter.test.ts 的 widget_event 用例覆盖。此处保留 Schema 向后兼容验证。
+  it('Step 7 [AC-11-5]: 0.1 风格 Schema 向后兼容（ui_schema 字段不报错）', () => {
     // 0.1 风格 Schema（含 ui_schema 字段，无 ui/ui_contributions）
     const legacySchema: ModuleUISchema = {
       identity: {
@@ -297,25 +255,6 @@ describe('Task 11 用户旅程：从 Schema 定义到渲染输出', () => {
     // 新字段为 undefined（渐进增强）
     expect(parsed.ui).toBeUndefined()
     expect(parsed.ui_contributions).toBeUndefined()
-
-    // 0.1 Python 格式的扁平 WS 消息
-    const legacyWs = {
-      type: 'pipeline_chunk',
-      thread_id: 't-legacy-001',
-      content: 'Legacy flat message',
-      pipeline_id: 'p-old',
-    }
-    const adapted = adaptIncomingMessage(legacyWs)
-
-    expect(adapted).not.toBeNull()
-    expect(adapted!.type).toBe('pipeline_chunk')
-    expect(adapted!.thread_id).toBe('t-legacy-001')
-    expect(adapted!.data.pipeline_id).toBe('p-old')
-    // 扁平格式不应被识别为 Rust 内核格式
-    expect(isRustKernelMessage(legacyWs)).toBe(false)
-
-    // 验证旅程中 step 6 的状态正确传递到了这里
-    expect(wsReceivedType).toBe('pipeline_chunk')
   })
 })
 
@@ -348,16 +287,6 @@ describe('补充场景 1：错误输入验证', () => {
     } as any
 
     expect(() => parser.parse(invalidSchema)).toThrow()
-  })
-
-  it('无 type 的 WS 消息返回 null', () => {
-    const adapted = adaptIncomingMessage({ data: { foo: 'bar' } } as any)
-    expect(adapted).toBeNull()
-  })
-
-  it('空对象作为 WS 消息返回 null', () => {
-    const adapted = adaptIncomingMessage({} as any)
-    expect(adapted).toBeNull()
   })
 
   it('fetchDynamicDataSource 网络错误时抛出异常', async () => {
@@ -414,14 +343,6 @@ describe('补充场景 2：边界场景验证', () => {
 
     const { changed: second } = parser.parse(schema)
     expect(second).toBe(false)
-  })
-
-  it('adaptOutgoingMessage 心跳消息保持正确格式', () => {
-    const heartbeat = { type: 'heartbeat', timestamp: 999 }
-    const adapted = adaptOutgoingMessage(heartbeat)
-
-    expect(adapted.type).toBe('heartbeat')
-    expect(adapted.data.timestamp).toBe(999)
   })
 
   it('RenderingEngine 缓存机制：相同 versionHash 返回缓存结果', () => {

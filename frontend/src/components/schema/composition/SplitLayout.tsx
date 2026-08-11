@@ -19,10 +19,6 @@ interface SplitLayoutProps {
   layoutProps?: {
     /** 默认尺寸比例（如 [3, 7] 表示 30% / 70%），拖拽后可改变 */
     ratio?: number[]
-    /** 已废弃但保留兼容 */
-    defaultTab?: number
-    /** 已废弃但保留兼容 */
-    columns?: number
     /** 最小百分比（默认 15），所有面板共享 */
     minRatio?: number
     /** 是否可拖动调整（默认 true），false 回退到固定 flex 模式 */

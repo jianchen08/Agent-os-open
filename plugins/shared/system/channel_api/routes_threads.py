@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
 from deps import APIError, require_auth, validate_pagination
 
@@ -59,48 +59,14 @@ import contextlib  # noqa: E402
 
 from memory_store import _parse_iso_time, store  # noqa: E402
 from models import (  # noqa: E402
-    MessageResponse,
     ThreadCreate,
     ThreadResponse,
     ThreadUpdate,
-    ToolCallItem,
 )
-from infrastructure.execution_record_storage import ExecutionRecordStorage  # noqa: E402
-from infrastructure.service_provider import get_service_provider  # noqa: E402
-from infrastructure.session.models import SessionModel  # noqa: E402
-from infrastructure.session.session_service import SessionService  # noqa: E402
-
 logger = logging.getLogger(__name__)
 
 
-# Web API 层不持久化会话状态，使用无 session_dir 的 SessionService
-
-_session_svc = SessionService()
-
-
 router = APIRouter(prefix="/api/v1/threads", tags=["线程"])
-
-
-def _get_execution_record_storage() -> ExecutionRecordStorage | None:
-    """从 ServiceProvider 获取全局 ExecutionRecordStorage 实例。"""
-
-    provider = get_service_provider()
-
-    # 1. 尝试从已注册服务获取
-
-    storage = provider.get("execution_record_storage")
-
-    if storage is not None:
-        return storage
-
-    # 2. 懒加载 fallback：ServiceProvider 未注册时直接创建
-
-    return provider.get_or_create(
-        "execution_record_storage",
-        lambda: ExecutionRecordStorage(
-            data_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "pipelines"),
-        ),
-    )
 
 
 def _get_task_service() -> Any:
@@ -495,9 +461,9 @@ def delete_thread(  # noqa: PLR0912
 
     _recovered_user_ids.discard(_user["sub"])
 
-    # 迭代式收集关联管道（以 all_pipeline_ids 中每个 ID 匹配直到不动点）
-
-    exec_storage = _get_execution_record_storage()
+    # 迭代式收集关联管道（以 all_pipeline_ids 中每个 ID 匹配直到不动点）。
+    # 历史：曾通过 ExecutionRecordStorage._pipeline_root_map 补全子管道，
+    # 0.2 架构下 YAML 存储已废弃（内核 SQLite 接管），此处仅靠 task_service 收集。
 
     all_pipeline_ids = set(pipeline_ids)
 
@@ -505,11 +471,6 @@ def delete_thread(  # noqa: PLR0912
 
     while len(all_pipeline_ids) > prev_size:
         prev_size = len(all_pipeline_ids)
-
-        if exec_storage:
-            for child_id, root_id in list(exec_storage._pipeline_root_map.items()):
-                if root_id in all_pipeline_ids or root_id == thread_id:
-                    all_pipeline_ids.add(child_id)
 
         task_service = _safe_get_service("task_service")
 
@@ -524,14 +485,6 @@ def delete_thread(  # noqa: PLR0912
                     for sub in task_service.list_subtasks(task.id):
                         if sub.pipeline_run_id:
                             all_pipeline_ids.add(sub.pipeline_run_id)
-
-    if exec_storage:
-        for pid in all_pipeline_ids:
-            try:
-                exec_storage.delete_by_session(pid)
-
-            except Exception:
-                logger.warning("清理管道 %s 执行记录失败", pid, exc_info=True)
 
     try:
         checkpoint_dir = Path("data/pipeline_checkpoints")
@@ -572,177 +525,6 @@ def delete_thread(  # noqa: PLR0912
     return {"message": "线程已删除"}
 
 
-def _record_to_message_response(  # noqa: PLR0912,PLR0915
-    record: Any,
-    thread_id: str,
-) -> MessageResponse:
-    """将 ExecutionRecordData 转换为前端期望的 MessageResponse 格式。"""
-
-    import json as _json  # noqa: PLC0415
-
-    role_map = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
-
-    role = role_map.get(record.type, record.role or "user")
-
-    metadata: dict[str, Any] | None = None
-
-    tool_calls: list[dict[str, Any]] | None = None
-
-    tool_call_id: str | None = None
-
-    tool_name: str | None = None
-
-    tool_args: dict[str, Any] | None = None
-
-    tool_result: Any = None
-
-    tool_error: str | None = None
-
-    agent_name: str | None = None
-
-    # 系统通知记录在落盘时 type 已为 "system"（见 track 插件
-    # _extract_injected_content 分支），不再靠内容前缀反向识别。
-    # 历史数据中 type="user" 但带 [系统通知] 等前缀的记录，
-    # 刷新后按普通 user 文本渲染（内容不丢，仅样式折衷）。
-
-    if record.type == "ai":
-        if record.thinking_content:
-            metadata = {"thinkingContent": record.thinking_content}
-
-        if record.name:
-            agent_name = record.name
-
-            if metadata is None:
-                metadata = {}
-
-            metadata["agentName"] = agent_name
-
-        if record.tool_calls_json:
-            try:
-                raw_calls = _json.loads(record.tool_calls_json)
-
-                if raw_calls:
-                    tool_calls = []
-
-                    for tc in raw_calls:
-                        # 兼容两种 tool_call 序列化格式：
-                        # 1. 扁平格式（LLMCore 的 RAW_TOOL_CALLS 落盘）：
-                        #    {"id", "name", "arguments"/"args"}
-                        # 2. OpenAI 嵌套格式（pipe 继承历史经 _reconstruct_tool_calls
-                        #    重建后落盘到 tool_calls_json，再随继承记录落盘）：
-                        #    {"id", "type": "function", "function": {"name", "arguments"}}
-                        #    顶层没有 name/arguments，必须下钻到 function.*。
-                        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-
-                        args = tc.get("arguments", fn.get("arguments", tc.get("args", {})))
-
-                        if isinstance(args, str):
-                            try:
-                                args = _json.loads(args)
-
-                            except (_json.JSONDecodeError, TypeError):
-                                args = {"raw": args}
-
-                        tool_calls.append(
-                            ToolCallItem(
-                                callId=tc.get("id", tc.get("call_id", "")),
-                                toolName=tc.get("name", fn.get("name", tc.get("tool_name", ""))),
-                                toolArgs=args if isinstance(args, dict) else {"raw": args},
-                                status="completed",
-                                containerTaskId=record.container_task_id,
-                            )
-                        )
-
-            except (_json.JSONDecodeError, TypeError):
-                pass
-
-    elif record.type == "system":
-        metadata = {
-            "record_type": "system",
-            "type": "system",
-            "sender_type": "system",
-            "notification_level": record.name or "info",
-            "notification_type": (record.tool_input or {}).get("notificationType", "task_notification")
-            if isinstance(record.tool_input, dict)
-            else "task_notification",
-        }
-
-    elif record.type == "tool":
-        tool_call_id = record.tool_call_id
-
-        if record.tool_input and isinstance(record.tool_input, dict):
-            tool_name = record.tool_input.get("name", record.name)
-
-            raw_args = record.tool_input.get("args", {})
-
-            tool_args = raw_args if isinstance(raw_args, dict) else None
-
-        else:
-            tool_name = record.name
-
-        content_str = record.content or ""
-
-        if content_str:
-            try:
-                parsed = _json.loads(content_str)
-
-                if isinstance(parsed, dict):
-                    output = parsed.get("output", parsed.get("data", parsed))
-
-                    err = parsed.get("error")
-
-                    if err:
-                        tool_error = str(err) if err else None
-
-                    tool_result = output if output is not parsed or not err else parsed
-
-                else:
-                    tool_result = content_str
-
-            except (_json.JSONDecodeError, TypeError):
-                tool_result = content_str
-
-    # 透传前端乐观消息 ID，供前端 initFromAPI 对账（消除重复/丢失）
-
-    if getattr(record, "client_message_id", None):
-        if metadata is None:
-            metadata = {}
-
-        metadata["client_message_id"] = record.client_message_id
-
-    # 恢复附件信息
-
-    attachments: list[dict[str, Any]] | None = None
-
-    if getattr(record, "attachments_json", None):
-        try:
-            attachments = _json.loads(record.attachments_json)
-
-        except (_json.JSONDecodeError, TypeError):
-            pass
-
-    return MessageResponse(
-        id=record.record_id,
-        thread_id=thread_id,
-        role=role,
-        content=record.content or "",
-        timestamp=record.created_at,
-        sequence=record.sequence,
-        metadata=metadata,
-        toolCalls=tool_calls,
-        toolCallId=tool_call_id,
-        toolName=tool_name,
-        toolArgs=tool_args,
-        toolResult=tool_result,
-        toolError=tool_error,
-        status="completed",
-        agentId=None,
-        agentName=agent_name,
-        durationMs=None,
-        attachments=attachments,
-    )
-
-
 def _ensure_session(thread_id: str) -> SessionModel | None:
     """确保 thread_id 对应的 session 存在，若不存在则从 thread 数据自动补建。"""
 
@@ -780,179 +562,6 @@ def _ensure_session(thread_id: str) -> SessionModel | None:
     store.set_session(thread_id, session)
 
     return session
-
-
-def _try_recover_pipeline_ids(  # noqa: PLR0912
-    thread_id: str,
-    session: SessionModel,
-    exec_storage: ExecutionRecordStorage,
-) -> list[str]:
-    """尝试从 ExecutionRecordStorage 恢复旧会话的 pipeline_ids。"""
-
-    recovered: list[str] = []
-
-    # 1. 尝试 thread_id 作为 pipeline_run_id 直接查询
-
-    try:
-        records, _ = exec_storage.list_by_pipeline(thread_id)
-
-        if records:
-            recovered.append(thread_id)
-
-    except Exception:
-        logger.warning("恢复旧会话管道记录失败: thread_id=%s", thread_id)
-
-    # 2. 扫描管道映射表，查找以 thread_id 为根的子管道
-
-    for child_id, root_id in exec_storage._pipeline_root_map.items():
-        if root_id == thread_id and child_id != thread_id:
-            try:
-                child_records, _ = exec_storage.list_by_pipeline(child_id)
-
-                if child_records:
-                    recovered.append(child_id)
-
-            except Exception:
-                pass
-
-    # 3. 终极 fallback: 扫描所有管道 YAML 文件的 summary.thread_id 字段
-
-    if not recovered:
-        try:
-            all_summaries = exec_storage.list_all_summaries()
-
-            for s in all_summaries:
-                if getattr(s, "thread_id", None) == thread_id and s.run_id:  # noqa: SIM102
-                    if s.run_id not in recovered:
-                        recovered.append(s.run_id)
-
-        except Exception:
-            logger.warning("扫描管道 summary 关联 thread_id 失败: thread_id=%s", thread_id)
-
-    # 4. 恢复成功时自动修复 session 并持久化（合并而非覆盖 pipeline_ids）
-
-    if recovered:
-        existing = set(session.pipeline_ids) if session.pipeline_ids else set()
-
-        merged = existing | set(recovered)
-
-        session.pipeline_ids = list(merged)
-
-        if not session.active_pipeline_id:
-            session.active_pipeline_id = recovered[-1]
-
-        store.set_session(thread_id, session)
-
-        logger.info(
-            "自动恢复旧会话 pipeline_ids (merged): thread=%s, existing=%s, recovered=%s, merged=%s",
-            thread_id,
-            list(existing),
-            recovered,
-            session.pipeline_ids,
-        )
-
-    return recovered
-
-
-@router.get(
-    "/{thread_id}/messages",
-    summary="获取消息列表（支持倒序分页）",
-)
-async def list_messages(
-    thread_id: str,
-    pipeline_run_id: str | None = Query(default=None, description="按管道运行 ID 过滤消息"),
-    limit: int = Query(default=20, ge=1, le=100, description="每页数量"),
-    before_sequence: int | None = Query(default=None, description="加载此 sequence 之前的消息（游标分页）"),
-    after_sequence: int | None = Query(default=None, description="加载此 sequence 之后的消息（断线补漏）"),
-    _user: dict = Depends(require_auth),
-) -> dict[str, Any]:
-    """获取指定线程的消息列表，支持倒序分页。
-
-    async + to_thread：list_by_pipeline 是同步文件 IO（大管道全量读 5+ 分片需 10-40s），
-    若用同步 def 路由会占满 FastAPI threadpool 并饿死其他协程（含 WS 推送）。
-    """
-
-    from models import MessageListResponse  # noqa: PLC0415
-
-    # before_sequence 和 after_sequence 不能同时使用
-
-    if before_sequence is not None and after_sequence is not None:
-        raise HTTPException(status_code=400, detail="before_sequence 和 after_sequence 不能同时使用")
-
-    exec_storage = _get_execution_record_storage()
-
-    # FEATURE-pipeline_unify: 所有管道（主/子）统一走 pipelineRunId 路径加载消息。
-
-    # - 优先用前端传来的 pipeline_run_id（子管道用 pipelineId，主管道前端也传 pipelineId）
-
-    # - 未传时 fallback 用 thread_id 作为 pipeline_run_id（兼容 thread_id == pipeline_run_id 的旧数据）
-
-    target_pid = pipeline_run_id or thread_id
-
-    if exec_storage and target_pid:
-        try:
-            records, has_more = await asyncio.to_thread(
-                exec_storage.list_by_pipeline,
-                target_pid,
-                limit=limit,
-                before_sequence=before_sequence,
-                after_sequence=after_sequence,
-            )
-
-        except Exception:
-            logger.warning("按 pipeline_run_id 查询执行记录失败: %s", target_pid)
-
-            records, has_more = [], False
-
-        msgs = [_record_to_message_response(r, thread_id) for r in records]
-
-        return MessageListResponse(
-            messages=msgs,
-            total=len(msgs),
-            has_more=has_more,
-        ).model_dump()
-
-    # exec_storage 不可用：尝试从 MemoryStore 的 _messages 读取（保持向后兼容）
-
-    thread = store.get_thread(thread_id)
-
-    if thread is not None:
-        raw_msgs = store.get_messages(thread_id, limit=100000)
-
-        if raw_msgs["messages"]:
-            fallback_msgs = [
-                MessageResponse(
-                    id=m.get("id", ""),
-                    thread_id=thread_id,
-                    role=m.get("role", "user"),
-                    content=m.get("content", ""),
-                    timestamp=m.get("timestamp", ""),
-                    sequence=m.get("sequence", 0),
-                )
-                for m in raw_msgs["messages"]
-            ]
-
-            # 简单内存分页（保留旧行为）
-
-            filtered = fallback_msgs
-
-            if before_sequence is not None:
-                filtered = [m for m in filtered if (m.sequence or 0) < before_sequence]
-
-            if after_sequence is not None:
-                filtered = [m for m in filtered if (m.sequence or 0) > after_sequence]
-
-            has_more = len(filtered) > limit
-
-            page = filtered[-limit:] if has_more else filtered
-
-            return MessageListResponse(
-                messages=page,
-                total=len(fallback_msgs),
-                has_more=has_more,
-            ).model_dump()
-
-    return MessageListResponse(messages=[], total=0, has_more=False).model_dump()
 
 
 @router.get(

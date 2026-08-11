@@ -14,16 +14,38 @@
 """
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
+
 # 确保插件目录在 sys.path 前面（与 server.py 启动时一致）
 _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
+
+
+def _load_llm_server() -> Any:
+    """按显式路径加载 llm 插件 server 模块。
+
+    不能用裸 `from server import ...`：同一 pytest 进程里其它插件的
+    server.py 也会把自身目录插入 sys.path[0]，裸名 `server` 会被劫持到
+    错误的插件（如 monitoring/server.py）。显式路径 + 唯一模块名可隔离。
+    """
+    mod_name = "llm_plugin_server_under_test"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
+    assert spec is not None and spec.loader is not None, "cannot load llm plugin server.py"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 # ────────────────────────────────────────────────────────────
@@ -87,7 +109,7 @@ class TestModelLoaderShimConfigExtraction:
 
     def test_load_llm_data_returns_llm_yaml_content(self) -> None:
         """_load_llm_data 返回 llm.yaml 的完整内容（含 providers/models/defaults）。"""
-        from server import _ModelLoaderShim  # noqa: PLC0415
+        _ModelLoaderShim = _load_llm_server()._ModelLoaderShim
 
         shim = _ModelLoaderShim(_INJECTED_CONFIG)
         llm_data = shim._load_llm_data()
@@ -99,7 +121,7 @@ class TestModelLoaderShimConfigExtraction:
 
     def test_load_llm_data_providers_non_empty(self) -> None:
         """P0-2 验收：providers 非空（router 构建成功的前提）。"""
-        from server import _ModelLoaderShim  # noqa: PLC0415
+        _ModelLoaderShim = _load_llm_server()._ModelLoaderShim
 
         shim = _ModelLoaderShim(_INJECTED_CONFIG)
         llm_data = shim._load_llm_data()
@@ -115,7 +137,7 @@ class TestModelLoaderShimConfigExtraction:
         导致 llm_data 拿到 {"models": {...}, }，providers 取不到。
         新实现必须精确取 config["models"]["llm"]。
         """
-        from server import _ModelLoaderShim  # noqa: PLC0415
+        _ModelLoaderShim = _load_llm_server()._ModelLoaderShim
 
         shim = _ModelLoaderShim(_INJECTED_CONFIG)
         llm_data = shim._load_llm_data()
@@ -127,7 +149,7 @@ class TestModelLoaderShimConfigExtraction:
 
     def test_load_llm_data_empty_config_returns_empty(self) -> None:
         """空配置优雅降级：返回 {}，不抛异常。"""
-        from server import _ModelLoaderShim  # noqa: PLC0415
+        _ModelLoaderShim = _load_llm_server()._ModelLoaderShim
 
         shim = _ModelLoaderShim({})
         llm_data = shim._load_llm_data()
@@ -135,14 +157,14 @@ class TestModelLoaderShimConfigExtraction:
 
     def test_load_llm_data_missing_llm_key_returns_empty(self) -> None:
         """config 没有 llm 键时返回空（不抛 KeyError）。"""
-        from server import _ModelLoaderShim  # noqa: PLC0415
+        _ModelLoaderShim = _load_llm_server()._ModelLoaderShim
 
         shim = _ModelLoaderShim({"system": {"foo": "bar"}})
         assert shim._load_llm_data() == {}
 
     def test_load_llm_data_llm_not_dict_returns_empty(self) -> None:
         """config["llm"] 不是 dict 时返回空。"""
-        from server import _ModelLoaderShim  # noqa: PLC0415
+        _ModelLoaderShim = _load_llm_server()._ModelLoaderShim
 
         shim = _ModelLoaderShim({"llm": "not-a-dict"})
         assert shim._load_llm_data() == {}

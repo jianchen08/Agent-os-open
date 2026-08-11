@@ -49,6 +49,10 @@ pub struct KernelCapabilityRouter {
     /// execution-records/summaries/memory 存储，M1 落地、M2 接通 capability）。
     /// None = 不支持 service-registry（存储未注入）。
     store: Option<Arc<dyn StorageBackend>>,
+    /// 动态 capability handler 注册表（M2/M4）——插件通过 manifest provides.capabilities
+    /// 注册的 namespace 在这里路由。handle() 先查这里，miss 再走下方 match。
+    /// None = 不支持插件自注册能力（仅内核内置能力可用）。
+    handler_registry: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
 }
 
 impl KernelCapabilityRouter {
@@ -61,6 +65,7 @@ impl KernelCapabilityRouter {
             registry: None,
             session: None,
             store: None,
+            handler_registry: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl KernelCapabilityRouter {
             registry: None,
             session: None,
             store: None,
+            handler_registry: None,
         }
     }
 
@@ -100,6 +106,19 @@ impl KernelCapabilityRouter {
         self.store = Some(store);
         self
     }
+
+    /// 注入动态 capability handler 注册表（M2/M4）。
+    ///
+    /// 启用后，handle() 先查注册表（插件自注册的 namespace 在这里路由），
+    /// miss 再走内置 match（内核自带能力）。这让 `human-interaction` 等插件
+    /// 声明的 namespace 不需修改内置 match 即可被路由。
+    pub fn with_handler_registry(
+        mut self,
+        registry: Arc<agentos_mcp::CapabilityHandlerRegistry>,
+    ) -> Self {
+        self.handler_registry = Some(registry);
+        self
+    }
 }
 
 #[async_trait]
@@ -110,6 +129,14 @@ impl CapabilityRouter for KernelCapabilityRouter {
         method: &str,
         params: Value,
     ) -> Result<Value, McpError> {
+        // 先查动态 handler 注册表（M2/M4：插件自注册的 namespace 在这里路由）。
+        // 命中则委托，不再走下方内置 match。这让 human-interaction 等插件能力
+        // 不需修改内置 match 即可被路由。
+        if let Some(reg) = &self.handler_registry {
+            if reg.has_namespace(capability) {
+                return reg.route(capability, method, params).await;
+            }
+        }
         match (capability, method) {
             // ── pipeline-executor：暂停/恢复/启动管道 ──
             ("pipeline-executor", "suspend") => {
@@ -438,6 +465,25 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 })
             }
         }
+    }
+
+    /// 合并内置 STANDARD_CAPABILITIES + 动态注册表的 namespace。
+    ///
+    /// reader loop 据此做白名单解析，initialize 据此声明给 sidecar。
+    /// 覆盖默认实现（只返回内置常量），让插件自注册的 namespace 自动可见。
+    fn known_namespaces(&self) -> Vec<String> {
+        let mut ns: Vec<String> = agentos_mcp::STANDARD_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some(reg) = &self.handler_registry {
+            for n in reg.namespaces() {
+                if !ns.contains(&n) {
+                    ns.push(n);
+                }
+            }
+        }
+        ns
     }
 }
 

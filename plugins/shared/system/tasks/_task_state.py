@@ -19,7 +19,7 @@ from enum_utils import safe_enum_value
 if TYPE_CHECKING:
     # 仅用于类型注解（运行时延迟求值，from __future__ import annotations）。
     # 放在 TYPE_CHECKING 下避免与 types.py 的潜在循环导入。
-    from tasks.types import TaskModel
+    from task_types import TaskModel
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         current = safe_enum_value(task.status)
         target = safe_enum_value(target_status)
@@ -135,7 +135,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         current = safe_enum_value(task.status)
         allowed = {"running", "pending"}
@@ -177,7 +177,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         current = safe_enum_value(task.status)
         if current != "stopped":
@@ -242,7 +242,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         if old_status not in ("pending", "running"):
@@ -280,7 +280,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         if old_status not in ("running", "evaluating"):
@@ -317,7 +317,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.FAILED
@@ -396,7 +396,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.STOPPED
@@ -452,7 +452,7 @@ class _TaskStateMixin:
         if self._storage is None:
             return 0
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})  # noqa: N806
 
@@ -487,7 +487,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.COMPLETED
@@ -623,7 +623,7 @@ class _TaskStateMixin:
         if result is not None:
             task.result = result
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         task.status = TaskStatus.COMPLETED
         task.completed_at = datetime.now(UTC)
@@ -648,7 +648,7 @@ class _TaskStateMixin:
         if task is None:
             return None
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.PENDING

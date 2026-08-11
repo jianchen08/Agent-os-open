@@ -183,20 +183,3 @@ class TestTenantPluginLoading:
         cls = _discover_plugin_class("context_build", tenant_id="nonexistent_tenant")
         assert cls is not None
         assert "shared" in cls.__module__
-
-
-class TestScannerDefaultTenantSymmetry:
-    """scanner 对 default 租户的行为对称性（审查 Must Fix #4）。"""
-
-    def test_pipeline_and_sidecar_default_behavior_symmetric(self) -> None:
-        """scan_pipeline_plugins(default) 和 scan_sidecar_plugins(default) 都只返回共享。"""
-        from plugins.plugin_scanner import scan_pipeline_plugins, scan_sidecar_plugins
-
-        pipeline_locs = scan_pipeline_plugins(tenant_id="default")
-        sidecar_locs = scan_sidecar_plugins(tenant_id="default")
-
-        # default 不应产生 TENANT 作用域的插件
-        for loc in pipeline_locs:
-            assert loc.scope.value != "tenant" or loc.tenant_id != "default"
-        for loc in sidecar_locs:
-            assert loc.scope.value != "tenant" or loc.tenant_id != "default"

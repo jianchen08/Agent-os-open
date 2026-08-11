@@ -1,0 +1,26 @@
+[package]
+name = "agentos-wasm-calc-plugin"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "WASM 沙箱化科学计算器（取代 Python calc_tools 的 eval 方案）"
+
+# 独立 workspace（wasm32 目标，不并入 kernel workspace，避免干扰 host 构建）。
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# std + serde_json：现实插件方案（wasm_hello 用 no_std 只能回显，真实计算需 JSON 解析）。
+# 体积约 50KB–百 KB 级，是采用 WIT/组件模型前需权衡的点（见 wasm_hello README）。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# 体积优化（WASM 产物）。
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -16,14 +16,14 @@ sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
-# plugin.py 内 lazy import infrastructure.session.session_workspace（位于项目 src/ 下），
-# 需把项目根与 src/ 加入 sys.path，与 channel_api/server.py 保持一致，否则 sidecar 下 import 失败。
+# plugin.py 内 lazy import infrastructure.session.session_workspace（原位于 0.1 src/ 下）。
+# 0.1 src/ 已归档为 reference/0.1_src/（参考文件，不参与运行时）。
+# 该 lazy import 在 reference 不在 sys.path 时走 fallback（plugin.py 内已 try/except），
+# 故此处不再注入 src 路径。若未来需要 reference 中的参考实现，可显式将
+# reference/0.1_src 加入 sys.path 做调试。
 _project_root = os.path.abspath(os.path.join(_this_dir, "..", "..", "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-_src_root = os.path.join(_project_root, "src")
-if _src_root not in sys.path:
-    sys.path.insert(0, _src_root)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from plugin import SessionIsolationPlugin  # noqa: E402

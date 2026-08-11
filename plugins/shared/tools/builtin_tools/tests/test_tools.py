@@ -26,6 +26,9 @@ from agentos_builtin_tools.search_tool import enhanced_search
 from agentos_builtin_tools.web_tool import WEB_OPERATE_SCHEMA, web_operate
 from agentos_builtin_tools.server import TOOL_REGISTRY
 
+pytestmark = pytest.mark.unit
+
+
 
 # ═════════════════════════════════════════════════════════════
 # AC-08-1: 10 个工具注册
@@ -335,14 +338,17 @@ class TestEnhancedSearch:
         (tmp_path / "a.py").write_text("def hello():\n    pass\n")
         result = await enhanced_search("hello", path=str(tmp_path))
         assert result.success
-        assert result.output["count"] >= 1
+        # count 在 metadata（ToolResult 设计：output=数据载荷, metadata=附加信息）
+        assert result.metadata["count"] >= 1
+        assert len(result.output["results"]) >= 1
 
     @pytest.mark.asyncio
     async def test_search_filename(self, tmp_path: Path) -> None:
         (tmp_path / "test_find.py").write_text("x")
         result = await enhanced_search("test_find", path=str(tmp_path), search_type="filename")
         assert result.success
-        assert result.output["count"] >= 1
+        assert result.metadata["count"] >= 1
+        assert len(result.output["results"]) >= 1
 
     @pytest.mark.asyncio
     async def test_search_pattern_filter(self, tmp_path: Path) -> None:
@@ -421,6 +427,7 @@ class TestMcpServerWrapper:
         })
         assert call_result["isError"] is False
         import json
+
         content = json.loads(call_result["content"][0]["text"])
         assert content["success"] is True
         assert "mcp_content" in content["output"]["content"]

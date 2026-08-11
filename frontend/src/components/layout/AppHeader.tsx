@@ -32,17 +32,8 @@ import { useUIStore } from '@/stores/uiStore'
 
 /** AppHeader 属性 */
 interface AppHeaderProps {
-  /** @deprecated 主题入口已迁至侧栏底部 */
-  showThemePanel?: boolean
-  /** @deprecated */
-  onShowThemePanel?: (show: boolean) => void
-  /** @deprecated 登出挂用户菜单，侧栏用户区后续扩展 */
-  onLogout?: () => void
   /** 额外的右侧内容（如 pending 计数） */
   extraRight?: React.ReactNode
-  /** @deprecated 兼容旧调用 */
-  onToggleMode?: () => void
-  modeLabel?: string
 }
 
 /**

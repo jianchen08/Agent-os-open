@@ -24,14 +24,14 @@ import re
 import urllib.parse
 from typing import Any
 
-from human_interaction.models import Priority, ResponseType  # noqa: F401
-from human_interaction.service import (
+from models import Priority, ResponseType  # noqa: F401
+from service import (
     InteractionCancelledError,
     InteractionDeniedError,
     InteractionTimeoutError,
 )
-from isolation.policy import IsolationPolicyLoader
-from isolation.sensitive_paths import is_sensitive_path
+from policy import IsolationPolicyLoader
+from sensitive_paths import is_sensitive_path
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
 

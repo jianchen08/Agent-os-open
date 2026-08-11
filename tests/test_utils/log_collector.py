@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.core.logging.context import LogContext
+from agentos_plugin_sdk.logging import LogContext
 
 
 @dataclass

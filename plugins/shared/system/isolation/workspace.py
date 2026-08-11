@@ -254,7 +254,16 @@ async def resolve_workspace_chain(
     Returns:
         解析后的工作空间路径字符串
     """
-    from src.db.models import Task  # noqa: PLC0415
+    try:
+        from db.models import Task  # noqa: PLC0415
+    except ImportError:
+        # 0.2 架构下 Task ORM 模型不在 src.db（kernel 用 SQLite 四表），
+        # 此函数当前无外部调用者；保留接口，降级为基础解析。
+        logger.debug(
+            "[resolve_workspace_chain] db.models.Task 不可用，降级基础解析 | task_id=%s",
+            task_id,
+        )
+        return resolve_workspace(task_id, task_workspace)
 
     task = await session.get(Task, task_id)
     if not task:

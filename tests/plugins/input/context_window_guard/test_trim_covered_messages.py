@@ -21,6 +21,8 @@ import pytest
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
+pytestmark = pytest.mark.unit
+
 
 # ============================================================
 # 辅助

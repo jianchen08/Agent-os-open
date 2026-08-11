@@ -5,6 +5,8 @@ PersistPlugin 已移除（其功能合并到 TrackPlugin）。
 MemoryWritePlugin 已废弃移除。
 """
 
+
+
 from __future__ import annotations
 
 
@@ -14,6 +16,8 @@ from pipeline.plugin import PluginContext
 from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.output.result_format import ResultFormatPlugin
 from plugins.output.track import TrackPlugin
+
+pytestmark = pytest.mark.unit
 
 
 # ── Fixtures ──

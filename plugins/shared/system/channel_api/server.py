@@ -25,17 +25,6 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# 4c 迁移：http.handle 直接 import routes_config 等平铺模块，它们经 deps→auth 间接
-# 引用 src.*（src.auth.token / src.config.settings）。需把项目根与 src/ 加入 sys.path，
-# 与 run_server.py（:8988 进程）保持一致，否则 sidecar 下 import 失败。
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-_SRC_ROOT = os.path.join(_PROJECT_ROOT, "src")
-if os.path.isdir(_SRC_ROOT) and _SRC_ROOT not in sys.path:
-    sys.path.append(_SRC_ROOT)
-
 from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)

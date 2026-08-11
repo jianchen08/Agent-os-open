@@ -3,6 +3,8 @@
 验证三个安全模块 Input 插件的独立功能。
 """
 
+
+
 from __future__ import annotations
 
 import pytest
@@ -12,6 +14,8 @@ from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.input.param_inject import ParamInjectPlugin
 from plugins.input.reasoning_check import ReasoningCheckPlugin
 from plugins.input.security_check import SecurityCheckPlugin
+
+pytestmark = pytest.mark.unit
 
 
 # ── Fixtures ──
@@ -79,52 +83,59 @@ class TestSecurityCheckPlugin:
 
     @pytest.mark.asyncio
     async def test_dangerous_command_blocked(self, ctx, base_state):
-        """测试危险命令被拦截。"""
+        """测试路径遍历攻击被拦截（基础安全检查，与审批模型无关）。
+
+        SecurityCheckPlugin 已从旧的危险命令黑名单模型重构为白名单审批模型：
+        危险工具的未知参数走审批（needs_approval），而非直接 block。
+        但路径遍历作为基础安全底线仍软拦截（soft_block，allowed=True 但
+        反馈拒绝给 LLM）。这里验证基础底线触发。
+        """
         base_state[StateKeys.CORE_TYPE] = "tool_execute"
         base_state[StateKeys.RAW_TOOL_CALLS] = [
-            {"name": "execute_command", "args": {"command": "rm -rf /"}},
+            {"name": "execute_command", "args": {"path": "../../../../etc/passwd"}},
         ]
         plugin = SecurityCheckPlugin()
         result = await plugin.execute(ctx)
 
         decision = result.state_updates["security.decision"]
-        assert decision["allowed"] is False
-        assert "Blocked by security rule: dangerous_commands" in decision["reason"]
+        # soft_block：allowed=True（软拦截不结束管道），reason 标记拦截类型
+        assert "soft_block" in decision["reason"]
+        assert "路径遍历" in decision["reason"]
 
     @pytest.mark.asyncio
     async def test_protected_path_blocked(self, ctx, base_state):
-        """测试受保护路径被拦截。"""
+        """测试空字节注入被软拦截（基础安全检查，跨平台生效）。
+
+        旧的 /etc/passwd 拦截依赖 Linux 敏感路径判定，Windows 上 /etc 非真实
+        目录无法覆盖。空字节注入在所有平台都是攻击向量，作为基础检查软拦截。
+        """
         base_state[StateKeys.CORE_TYPE] = "tool_execute"
         base_state[StateKeys.RAW_TOOL_CALLS] = [
-            {"name": "write_file", "args": {"path": "/etc/passwd", "content": "hacked"}},
+            {"name": "write_file", "args": {"path": "file.txt\x00.exe", "content": "hacked"}},
         ]
         plugin = SecurityCheckPlugin()
         result = await plugin.execute(ctx)
 
         decision = result.state_updates["security.decision"]
-        assert decision["allowed"] is False
-        assert "Blocked by security rule: protected_paths" in decision["reason"]
+        assert "soft_block" in decision["reason"]
 
     @pytest.mark.asyncio
     async def test_out_of_workspace_blocked(self, ctx, base_state):
-        """测试工作目录外访问被拦截。"""
-        import os
-        import tempfile
-        # 使用真实的临时目录确保跨平台兼容
-        workspace = tempfile.gettempdir()
-        outside_path = os.path.join(os.path.dirname(workspace), "outside_test", "file.py")
+        """基础安全检查（路径遍历）跨平台恒定软拦截。
+
+        新模型 host 模式不再做工作目录越界检查（只有路径遍历/敏感目录/空字节
+        三道基础底线）。本测试验证路径遍历基础检查的软拦截行为。
+        """
         base_state[StateKeys.CORE_TYPE] = "tool_execute"
         base_state[StateKeys.RAW_TOOL_CALLS] = [
-            {"name": "write_file", "args": {"path": outside_path, "content": "x"}},
+            {"name": "write_file", "args": {"path": "../../../outside/file.py", "content": "x"}},
         ]
-        plugin = SecurityCheckPlugin({"workspace": workspace})
+        plugin = SecurityCheckPlugin({"workspace": "/workspace"})
         result = await plugin.execute(ctx)
 
         decision = result.state_updates["security.decision"]
-        # outside_path 不在 workspace 内应被拦截
-        # 但如果 workspace 恰好是父目录可能通过，所以检查逻辑合理性
-        if not outside_path.startswith(os.path.abspath(workspace)):
-            assert decision["allowed"] is False
+        assert "soft_block" in decision["reason"]
+        assert "路径遍历" in decision["reason"]
 
     @pytest.mark.asyncio
     async def test_no_tool_calls_passes(self, ctx, base_state):
@@ -139,10 +150,15 @@ class TestSecurityCheckPlugin:
 
     @pytest.mark.asyncio
     async def test_custom_blocked_commands(self, ctx, base_state):
-        """测试自定义拦截命令。"""
+        """自定义规则命中的危险工具走审批模型（不再直接 block）。
+
+        新审批模型：危险工具 + 参数命中规则 → needs_approval（弹审批），
+        而非旧的 action=block 直接拦截。这里验证基础安全底线（路径遍历）
+        在自定义规则存在时仍优先软拦截。
+        """
         base_state[StateKeys.CORE_TYPE] = "tool_execute"
         base_state[StateKeys.RAW_TOOL_CALLS] = [
-            {"name": "execute_command", "args": {"command": "custom_danger"}},
+            {"name": "execute_command", "args": {"command": "custom_danger", "path": "../../../etc"}},
         ]
         plugin = SecurityCheckPlugin({
             "rules": [
@@ -160,7 +176,8 @@ class TestSecurityCheckPlugin:
         result = await plugin.execute(ctx)
 
         decision = result.state_updates["security.decision"]
-        assert decision["allowed"] is False
+        # 路径遍历（path 含 ../）作为基础安全底线，先于自定义规则软拦截
+        assert "soft_block" in decision["reason"]
 
 
 # ── ParamInjectPlugin Tests ──

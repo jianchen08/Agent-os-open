@@ -380,6 +380,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // service-registry.*（M2）：基础设施下沉内核——插件经此 capability 访问内核共享存储
     //   （execution-records/pipeline-summaries/memory，M1 落地）。复用同一 SqliteStore 实例。
     let session_coord = Arc::new(agentos_session::SessionCoordinator::new());
+
+    // M5：动态 capability handler 注册表 + McpBridge。
+    // 扫描已启用 manifest 的 provides.capabilities，注册成 handler；
+    // McpBridge 把 capability 调用转发到对应 sidecar 插件的工具。
+    // 这让 human-interaction 等插件自注册的 namespace 经 reader loop → router →
+    // handler → bridge → invoker.invoke_tool → sidecar 完成闭环。
+    let handler_registry = Arc::new(agentos_mcp::CapabilityHandlerRegistry::new());
+    let mcp_bridge = Arc::new(agentos_plugin_loader::McpBridge::new(invoker.clone() as Arc<dyn agentos_core::traits::PluginInvoker>));
+    mcp_bridge.add_routes_from_manifests(&enabled_manifests);
+    // human-interaction 的 sidecar 工具前缀是 interaction（不是 namespace 默认推导的
+    // human_interaction），显式覆盖。
+    mcp_bridge.add_route(
+        "human-interaction",
+        agentos_plugin_loader::CapabilityRoute {
+            plugin_id: "human_interaction_service".to_string(),
+            tool_prefix: "interaction".to_string(),
+        },
+    );
+    let registered = agentos_plugin_loader::register_provided_capabilities(
+        &handler_registry,
+        &enabled_manifests,
+        Some(mcp_bridge.clone()),
+    );
+    info!(
+        target: "agentos-kernel",
+        "Registered {} provided capabilities from plugin manifests (handler registry)",
+        registered
+    );
+
     let router = Arc::new(
         KernelCapabilityRouter::with_metrics(
             engine.clone(),
@@ -388,7 +417,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_invoker(invoker.clone())
         .with_registry(registry.clone())
         .with_session(session_coord.clone())
-        .with_store(store.clone()),
+        .with_store(store.clone())
+        .with_handler_registry(handler_registry),
     );
     invoker.set_router(router);
 

@@ -577,64 +577,10 @@ async def get_agent_call(execution_id: str, _user: dict = Depends(require_auth))
 # ---------------------------------------------------------------------------
 execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"], dependencies=[Depends(require_auth)])
 
-
-def _get_exec_storage() -> Any:
-    """获取全局 ExecutionRecordStorage 实例，不可用时返回 None。
-
-    与本模块 token 统计（line 418）/ cache 统计（line 504）的取用方式一致，
-    集中在一个入口避免每个 handler 重复 import。
-    """
-    from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
-
-    return get_execution_record_storage()
-
-
-def _record_to_response(record: Any) -> dict[str, Any]:
-    """把 ExecutionRecordData 映射为前端 ExecutionRecord 接口（见 executionRecords.ts）。
-
-    status 由 error 字段推导：有错误 → failed，否则 completed。
-    depth 用 iteration 近似（存储层无显式层级概念）。
-    message_data 返回完整字段快照，供详情查看。
-    """
-    from dataclasses import asdict  # noqa: PLC0415
-
-    status = "failed" if getattr(record, "error", None) else "completed"
-    return {
-        "id": record.record_id,
-        "session_id": record.pipeline_run_id,
-        "parent_record_id": None,
-        "depth": getattr(record, "iteration", None),
-        "sequence": getattr(record, "sequence", None),
-        "record_type": record.type,
-        "status": status,
-        "message_data": asdict(record),
-        "created_at": record.created_at or "",
-    }
-
-
-def _summary_to_session_info(summary: Any) -> dict[str, Any]:
-    """把 PipelineRunSummary 映射为前端 SessionInfo 接口。
-
-    title 用 final_output 截断（summary 无独立标题字段）。
-    updated_at 复用 created_at（summary 无独立更新时间）。
-    record_count 取 total_records。
-    """
-    from infrastructure.execution_record_storage import summarize_text  # noqa: PLC0415
-
-    return {
-        "id": summary.run_id,
-        "title": summarize_text(summary.final_output, max_len=80),
-        "created_at": summary.created_at or "",
-        "updated_at": summary.created_at or "",
-        "record_count": getattr(summary, "total_records", 0),
-    }
-
-
-def _list_session_summaries_desc(storage: Any) -> list[Any]:
-    """返回全部 summary，按 created_at 降序（最新在前）。"""
-    summaries = storage.list_all_summaries()
-    summaries.sort(key=lambda s: s.created_at or "", reverse=True)
-    return summaries
+# 执行记录的 YAML 存储后端（ExecutionRecordStorage）已在 0.2 架构中废弃：
+# 内核 pipeline_loop 将消息/轨迹下沉到 SQLite（messages / traces / pipeline_checkpoints）。
+# 以下 handler 改为返回空结构，保持前端契约不破坏（HTTP 200 + 空载荷），
+# 待后续接入内核 messages/traces 能力后再恢复数据。
 
 
 @execution_router.get("/records", summary="获取执行记录列表")
@@ -645,43 +591,12 @@ async def list_execution_records(
     offset: int = Query(default=0, ge=0),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    storage = _get_exec_storage()
-    if storage is None:
-        return {"records": [], "total": 0, "session_id": session_id}
-
-    if session_id:
-        # 指定会话：直接取该 pipeline 的记录，按 sequence 排序
-        records = storage.list_by_session(session_id, limit=offset + limit)
-        total = storage.count_by_session(session_id)
-        page = records[offset : offset + limit]
-    else:
-        # 全部会话：按 summary 时间倒序聚合各 pipeline 最近记录
-        summaries = _list_session_summaries_desc(storage)
-        collected: list[Any] = []
-        for summary in summaries:
-            if len(collected) >= limit:
-                break
-            collected.extend(storage.list_by_session(summary.run_id, limit=limit))
-        collected.sort(key=lambda r: r.created_at or "", reverse=True)
-        total = len(collected)
-        page = collected[offset : offset + limit]
-
-    return {
-        "records": [_record_to_response(r) for r in page],
-        "total": total,
-        "session_id": session_id,
-    }
+    return {"records": [], "total": 0, "session_id": session_id}
 
 
 @execution_router.get("/records/sessions", summary="获取有记录的会话列表")
 async def get_execution_record_sessions(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    storage = _get_exec_storage()
-    if storage is None:
-        return {"sessions": [], "total": 0}
-
-    summaries = _list_session_summaries_desc(storage)
-    sessions = [_summary_to_session_info(s) for s in summaries]
-    return {"sessions": sessions, "total": len(sessions)}
+    return {"sessions": [], "total": 0}
 
 
 @execution_router.get("/records/group-summary", summary="获取记录分组概要")
@@ -689,26 +604,7 @@ async def get_record_group_summary(
     session_id: str | None = Query(default=None, description="按会话ID过滤"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    storage = _get_exec_storage()
-    if storage is None:
-        return {"groups": [], "total_groups": 0}
-
-    summaries = _list_session_summaries_desc(storage)
-    if session_id:
-        summaries = [s for s in summaries if s.run_id == session_id]
-
-    groups = []
-    for summary in summaries:
-        records = storage.list_by_session(summary.run_id, limit=1)
-        groups.append(
-            {
-                "parent_record_id": summary.run_id,
-                "record_count": getattr(summary, "total_records", 0),
-                "earliest_time": summary.created_at or None,
-                "first_record": _record_to_response(records[0]) if records else None,
-            }
-        )
-    return {"groups": groups, "total_groups": len(groups)}
+    return {"groups": [], "total_groups": 0}
 
 
 @execution_router.get("/records/tree/{session_id}", summary="获取执行记录树")
@@ -717,18 +613,7 @@ async def get_execution_tree(
     max_depth: int = Query(default=5, ge=1, le=20),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    storage = _get_exec_storage()
-    if storage is None:
-        return {"tree": [], "total": 0, "session_id": session_id, "max_depth": max_depth}
-
-    # 存储层无显式父子层级，把该 session 的记录作为扁平列表返回
-    records = storage.list_by_session(session_id, limit=max_depth * 50)
-    return {
-        "tree": [_record_to_response(r) for r in records],
-        "total": storage.count_by_session(session_id),
-        "session_id": session_id,
-        "max_depth": max_depth,
-    }
+    return {"tree": [], "total": 0, "session_id": session_id, "max_depth": max_depth}
 
 
 @execution_router.get("/records/{record_id}/children", summary="获取子执行记录")
@@ -745,14 +630,7 @@ async def get_execution_record(
     record_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    storage = _get_exec_storage()
-    if storage is None:
-        return {"id": record_id, "session_id": "", "message_data": {}, "created_at": ""}
-
-    record = storage.get(record_id)
-    if record is None:
-        return {"id": record_id, "session_id": "", "message_data": {}, "created_at": ""}
-    return _record_to_response(record)
+    return {"id": record_id, "session_id": "", "message_data": {}, "created_at": ""}
 
 
 @execution_router.delete("/records/{record_id}", summary="删除执行记录")

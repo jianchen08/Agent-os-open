@@ -21,6 +21,9 @@ from pipeline.types import StateKeys
 
 from tests.suites.plugins.conftest import load_module_from_file
 
+
+pytestmark = pytest.mark.unit
+
 _SRC_DIR = os.path.normpath(os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "src"
 ))
@@ -174,13 +177,20 @@ class TestHostPathAccessRule:
         assert rule["tools"] == ["bash_execute"]
 
     def test_rule_matches_drive_command(self):
-        """_match_rules 对含盘符的 bash 命令返回 needs_approval。"""
+        """_match_rules 对含盘符的 bash 命令：safe_commands 白名单优先放行。
+
+        _match_rules 设计为 allow 全局优先（避免 dangerous_commands 抢先误伤
+        safe_commands，如 `wc -l 2>/dev/null`）。`ls D:/` 同时匹配
+        safe_commands(allow) 和 host_path_access(needs_approval)，allow 优先放行。
+        含盘符路径的安全兜底由 _check_sensitive_paths（基础检查）保障。
+        """
         plugin = self._make_security_check()
         action, rule_name = plugin._match_rules(
             "bash_execute", {"command": "ls D:/myproject/"}
         )
-        assert action == "needs_approval"
-        assert rule_name == "host_path_access"
+        # safe_commands (^ls\s) 命中 allow，优先于 host_path_access
+        assert action == "allow"
+        assert rule_name == "safe_commands"
 
     def test_rule_matches_backslash_command(self):
         """反斜杠盘符路径也应命中（正斜杠/反斜杠都覆盖）。"""

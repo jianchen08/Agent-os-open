@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from agentos_plugin_sdk._logging import setup_sidecar_logging
-from agentos_plugin_sdk.server import McpServer, _bind_log_contextfrom agentos_plugin_sdk.types import ToolDef
-
+from agentos_plugin_sdk.server import McpServer, _bind_log_context
+from agentos_plugin_sdk.types import ToolDef
 
 # ═══════════════════════════════════════════════════════════
 # setup_sidecar_logging

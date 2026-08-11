@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use agentos_core::traits::AdrEngine;
 use agentos_session::auth::HandshakeAuth;
 use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};
 use agentos_session::{EventSink, SessionCoordinator};
@@ -284,10 +285,54 @@ impl PipelineDispatcher for EngineDispatcher {
     async fn dispatch_interaction_response(
         &self,
         _thread_id: &str,
-        _request_id: &str,
+        request_id: &str,
     ) -> Result<(), String> {
-        // 审批/交互响应接入引擎层（HumanInteractionService）待后续阶段
-        info!(request_id = _request_id, "interaction_response 已接收（引擎审批接入待 P3+）");
+        // 审批/交互响应接入引擎：按 request_id 查 suspended run 并 resume。
+        //
+        // 闭环链路：
+        //   approval 插件 pipeline-executor.suspend → 内核返回 SuspendHandle
+        //   → 插件把 request_id + handle 写入 run metadata（set_run_metadata）
+        //   → 前端回传 interaction_response(request_id)
+        //   → 这里 find_suspended_run_by_request_id 还原 handle → engine.resume
+        info!(request_id = request_id, "interaction_response 已接收，查找 suspended run");
+
+        let db = self.state.db.as_ref().ok_or_else(|| {
+            "interaction_response 需要 db（SqliteStore 未注入）".to_string()
+        })?;
+
+        let run = db
+            .find_suspended_run_by_request_id(request_id)
+            .map_err(|e| format!("查找 suspended run 失败: {e}"))?
+            .ok_or_else(|| {
+                format!("未找到 request_id={request_id} 对应的 suspended run")
+            })?;
+
+        // 从 metadata 还原 SuspendHandle
+        let meta = run.metadata.clone().unwrap_or_default();
+        let handle = agentos_core::types::SuspendHandle {
+            run_id: run.run_id.clone(),
+            branch_id: meta
+                .get("suspend_branch_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&run.current_branch)
+                .to_string(),
+            seq: meta
+                .get("suspend_seq")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(run.current_seq as u64) as u32,
+        };
+
+        // 调 engine.resume（走 AdrEngineImpl 自有方法，与 capability_router 的
+        // pipeline-executor.resume 分支同一代码路径）
+        let engine = self.state.engine.as_ref().ok_or_else(|| {
+            "interaction_response 需要 engine（AdrEngineImpl 未注入）".to_string()
+        })?;
+        engine
+            .resume(&handle, agentos_core::types::WakeEvent::Manual)
+            .await
+            .map_err(|e| format!("resume 失败: {e}"))?;
+
+        info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run");
         Ok(())
     }
 

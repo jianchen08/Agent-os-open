@@ -78,8 +78,10 @@ async def file_read(
     total = len(all_lines)
 
     if tail is not None:
-        start_idx = max(0, total - tail)
-        selected = all_lines[start_idx:]
+        # split 对结尾 "\n" 会产生一个空串元素，tail 按真实行数计算（去掉末尾空串）
+        lines = all_lines[:-1] if all_lines and all_lines[-1] == "" else all_lines
+        start_idx = max(0, len(lines) - tail)
+        selected = lines[start_idx:]
     elif start_line > 1 or end_line is not None:
         start_idx = max(0, start_line - 1)
         end_idx = end_line if end_line is not None else total

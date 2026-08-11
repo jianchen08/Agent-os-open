@@ -16,8 +16,8 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from agentos_plugin_sdk.settings import get_settings
 from core.results import ToolExecutionResult
-from src.config.settings import get_settings
 from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,

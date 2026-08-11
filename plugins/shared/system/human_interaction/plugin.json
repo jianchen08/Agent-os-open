@@ -19,6 +19,23 @@
         ],
         "lifecycle_hooks": ["on_load", "on_unload"]
     },
+    "provides": {
+        "capabilities": [
+            {
+                "namespace": "human-interaction",
+                "methods": [
+                    "send_notification",
+                    "create_choice",
+                    "create_conversation",
+                    "wait_for_choice",
+                    "respond",
+                    "cancel",
+                    "get_pending"
+                ],
+                "host": "sidecar"
+            }
+        ]
+    },
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",

@@ -8,7 +8,6 @@ import importlib.util
 import os
 import sys
 
-
 # src 目录的绝对路径
 _SRC_DIR = os.path.normpath(os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "src"
@@ -20,6 +19,10 @@ _module_cache: dict[str, object] = {}
 
 def load_module_from_file(module_name: str, file_path: str):
     """通过文件路径直接加载 Python 模块，绕过 __init__.py。
+
+    插件目录已从扁平结构（plugins/input/X.py）重构为包结构
+    （plugins/input/X/plugin.py）。本函数自动把过期的扁平路径重定向到
+    新的包内 plugin.py，避免批量改测试调用点。
 
     Args:
         module_name: 模块注册名称
@@ -33,6 +36,13 @@ def load_module_from_file(module_name: str, file_path: str):
 
     if module_name in sys.modules:
         return sys.modules[module_name]
+
+    # 路径兼容：X.py 不存在但 X/plugin.py 存在 → 自动重定向（插件包结构迁移）
+    if not os.path.exists(file_path) and file_path.endswith(".py"):
+        packaged = os.path.join(os.path.dirname(file_path),
+                                os.path.basename(file_path)[:-3], "plugin.py")
+        if os.path.exists(packaged):
+            file_path = packaged
 
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None:
@@ -53,24 +63,23 @@ def _get_plugin_classes():
     output_dir = os.path.join(_SRC_DIR, "plugins", "output")
 
     input_modules = {
-        "tool_call_guard": os.path.join(input_dir, "tool_call_guard.py"),
+        "tool_call_guard": os.path.join(input_dir, "tool_call_guard", "plugin.py"),
         "security_check": os.path.join(input_dir, "security_check", "plugin.py"),
         "isolation_guard": os.path.join(input_dir, "isolation_guard", "plugin.py"),
-        "level_guard": os.path.join(input_dir, "level_guard.py"),
-        "cost_control": os.path.join(input_dir, "cost_control.py"),
-        "tool_schema_validator": os.path.join(input_dir, "tool_schema_validator.py"),
-        "knowledge_inject": os.path.join(input_dir, "knowledge_inject.py"),
-        "prompt_build": os.path.join(input_dir, "prompt_build.py"),
-        "circuit_breaker": os.path.join(input_dir, "circuit_breaker.py"),
-        "message_inject": os.path.join(input_dir, "message_inject.py"),
-        "tool_cache": os.path.join(input_dir, "tool_cache.py"),
-        "memory_read": os.path.join(input_dir, "memory_read.py"),
-        "tool_schema": os.path.join(input_dir, "tool_schema.py"),
-        "reasoning_check": os.path.join(input_dir, "reasoning_check.py"),
+        "level_guard": os.path.join(input_dir, "level_guard", "plugin.py"),
+        "cost_control": os.path.join(input_dir, "cost_control", "plugin.py"),
+        "tool_schema_validator": os.path.join(input_dir, "tool_schema_validator", "plugin.py"),
+        "knowledge_inject": os.path.join(input_dir, "knowledge_inject", "plugin.py"),
+        "prompt_build": os.path.join(input_dir, "prompt_build", "plugin.py"),
+        "circuit_breaker": os.path.join(input_dir, "circuit_breaker", "plugin.py"),
+        "tool_cache": os.path.join(input_dir, "tool_cache", "plugin.py"),
+        "memory_read": os.path.join(input_dir, "memory_read", "plugin.py"),
+        "tool_schema": os.path.join(input_dir, "tool_schema", "plugin.py"),
+        "reasoning_check": os.path.join(input_dir, "reasoning_check", "plugin.py"),
     }
 
     output_modules = {
-        "output_repetition_guard": os.path.join(output_dir, "output_repetition_guard.py"),
+        "output_repetition_guard": os.path.join(output_dir, "output_repetition_guard", "plugin.py"),
     }
 
     for mod_name, file_path in {**input_modules, **output_modules}.items():

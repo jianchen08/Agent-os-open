@@ -14,8 +14,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.unit
+
 
 # 将 simple 工具目录加入 sys.path
 SIMPLE_DIR = Path(__file__).resolve().parent.parent / "simple"
@@ -59,26 +63,41 @@ class TestSimplePluginJson:
 # ── server.py 导入校验 ──────────────────────────────────
 
 
+def _load_simple_server() -> Any:
+    """按显式路径加载 simple 插件 server 模块。
+
+    不能用裸 `from server import ...`：同一 pytest 进程里其它插件的
+    server.py 会把自身目录插入 sys.path[0]，裸名 `server` 会被劫持到
+    错误的插件（如 monitoring/server.py）。显式路径 + 唯一模块名可隔离。
+    """
+    mod_name = "simple_plugin_server_under_test"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    import importlib
+
+    spec = importlib.util.spec_from_file_location(mod_name, SIMPLE_DIR / "server.py")
+    assert spec is not None and spec.loader is not None, "cannot load simple plugin server.py"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class TestSimpleServerImport:
     """验证 server.py 可正确导入并构建 plugin。"""
 
     def test_create_plugin_returns_agentosplugin(self):
-        from server import create_plugin
         from agentos_plugin_sdk import AgentOSPlugin
 
-        plugin = create_plugin()
+        plugin = _load_simple_server().create_plugin()
         assert isinstance(plugin, AgentOSPlugin)
         assert plugin.name == "simple_tools"
 
     def test_tool_registry_has_11_tools(self):
-        from server import TOOL_REGISTRY
-
-        assert len(TOOL_REGISTRY) == 11
+        assert len(_load_simple_server().TOOL_REGISTRY) == 11
 
     def test_all_tools_registered(self):
-        from server import create_plugin
-
-        plugin = create_plugin()
+        plugin = _load_simple_server().create_plugin()
         registered = set(plugin._tools.keys())
         expected = {
             "unit_converter", "scientific_calculator", "yaml_validate",

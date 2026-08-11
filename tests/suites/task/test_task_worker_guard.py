@@ -1,4 +1,4 @@
-﻿"""TaskWorker 子任务守护相关逻辑单元测试。
+"""TaskWorker 子任务守护相关逻辑单元测试。
 
 验证 TaskWorker 在管道挂起/唤醒场景中的行为：
 1. 管道挂起时保存 engine 引用

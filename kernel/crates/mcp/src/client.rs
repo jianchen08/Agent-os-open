@@ -17,7 +17,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
-use crate::capability::{parse_capability_method, CapabilityRouter};
+use crate::capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
 use crate::error::McpError;
 
 // tracing 的 warn 宏用于 reader_loop 的降级日志
@@ -513,19 +513,12 @@ impl McpClient {
     /// config 参数为插件配置 JSON，将包含在 initialize params 的 `config` 字段中。
     pub async fn initialize(&self, config: &Value) -> Result<Value, McpError> {
         // 声明内核可被 sidecar 反向调用的 capability 名单。
-        // 仅在配置了 router 时声明全部能力；否则声明空（sidecar 反调会被拒）。
-        let capabilities: Value = if self.router.is_some() {
-            serde_json::json!({
-                "pipeline-executor": {},
-                "config-reader": {},
-                "tenant-context": {},
-                "event-bus": {},
-                "logger": {},
-                "metrics": {},
-                "tool-executor": {}
-            })
-        } else {
-            serde_json::json!({})
+        // 从 router 的 known_namespaces() 动态派生——router 是注册表时，
+        // 运行时注册的 namespace（如插件的 human-interaction）自动出现在声明里，
+        // sidecar SDK 据此创建 CapabilityHandle。无 router 时声明空。
+        let capabilities: Value = match &self.router {
+            Some(r) => build_declared_capabilities_from_namespaces(&r.known_namespaces()),
+            None => build_declared_capabilities(false),
         };
 
         let params = serde_json::json!({
@@ -751,8 +744,15 @@ async fn handle_incoming_request(
 ) {
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
+    // namespace 白名单从 router 动态获取（M2 注册表改造）。
+    // router 为 None 时用编译期 STANDARD_CAPABILITIES 兜底（实际下面会因 router
+    // 为 None 直接返回 no router configured，这里的解析仅决定是否 -32601）。
+    let known_ns = router
+        .as_ref()
+        .map(|r| r.known_namespaces())
+        .unwrap_or_default();
     // 非 capability method（如 MCP 标准方法）不处理
-    let Some((capability, cap_method)) = parse_capability_method(method) else {
+    let Some((capability, cap_method)) = parse_capability_method_with(method, &known_ns) else {
         let resp = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -799,7 +799,11 @@ async fn handle_incoming_notification(
     router: &Option<Arc<dyn CapabilityRouter>>,
 ) {
     tracing::debug!(target: "mcp:notification", method = %method, "收到 sidecar notification");
-    let Some((capability, cap_method)) = parse_capability_method(method) else {
+    let known_ns = router
+        .as_ref()
+        .map(|r| r.known_namespaces())
+        .unwrap_or_default();
+    let Some((capability, cap_method)) = parse_capability_method_with(method, &known_ns) else {
         tracing::debug!(target: "mcp:notification", method = %method, "notification 非 capability method，丢弃");
         return;
     };
@@ -821,6 +825,41 @@ impl Drop for McpClient {
     fn drop(&mut self) {
         // kill_on_drop(true) 会在 Drop 时自动 kill 子进程
     }
+}
+
+/// 构造 initialize 握手时声明给 sidecar 的 capability 名单。
+///
+/// `router_present` 为 true 时声明全部标准能力（与
+/// [`crate::capability::STANDARD_CAPABILITIES`] 对齐），sidecar SDK 据此为每个
+/// capability 创建 [`crate::capability::CapabilityHandle`]；为 false 时声明空，
+/// sidecar 反向调用会被内核拒收。
+///
+/// 抽成独立纯函数便于单测覆盖（避免依赖 `McpClient` 的进程 I/O）。
+pub fn build_declared_capabilities(router_present: bool) -> Value {
+    if router_present {
+        build_declared_capabilities_from_namespaces(STANDARD_CAPABILITIES)
+    } else {
+        serde_json::json!({})
+    }
+}
+
+/// 从动态 namespace 列表派生 initialize 声明。
+///
+/// 与 [`build_declared_capabilities`] 的区别：namespace 不再写死为
+/// [`STANDARD_CAPABILITIES`]，而是由调用方传入（通常来自
+/// [`crate::handler_registry::CapabilityHandlerRegistry::namespaces`] 或
+/// [`crate::capability::CapabilityRouter::known_namespaces`]）。
+///
+/// 这让运行时注册的 namespace（如插件通过 manifest `provides.capabilities`
+/// 注册的 `human-interaction`）自动出现在 initialize 声明里，sidecar SDK
+/// 据此创建对应的 `CapabilityHandle`，无需改内核常量。
+pub fn build_declared_capabilities_from_namespaces<T: AsRef<str>>(
+    namespaces: &[T],
+) -> Value {
+    namespaces
+        .iter()
+        .map(|ns| (ns.as_ref().to_string(), Value::Object(serde_json::Map::new())))
+        .collect()
 }
 
 #[cfg(test)]
@@ -894,5 +933,54 @@ mod tests {
         assert!(pid.is_some());
         assert!(pid.unwrap() > 0);
         client.kill().await.unwrap();
+    }
+
+    #[test]
+    fn test_declared_capabilities_when_router_present() {
+        // router 存在时，声明全部标准能力（含 service-registry / tool-executor）。
+        let caps = build_declared_capabilities(true);
+        for ns in [
+            "pipeline-executor",
+            "config-reader",
+            "tenant-context",
+            "event-bus",
+            "logger",
+            "metrics",
+            "tool-executor",
+            "service-registry",
+        ] {
+            assert!(
+                caps.get(ns).is_some(),
+                "build_declared_capabilities(true) 缺少 {ns}——sidecar 拿不到该 capability 句柄"
+            );
+        }
+    }
+
+    #[test]
+    fn test_declared_capabilities_when_no_router() {
+        // 无 router 时声明空，sidecar 反调会被拒。
+        let caps = build_declared_capabilities(false);
+        assert!(caps.as_object().map(|o| o.is_empty()).unwrap_or(true));
+    }
+
+    #[test]
+    fn test_declared_capabilities_from_dynamic_namespaces() {
+        // 从 router 提供的动态 namespace 列表派生声明。
+        // 这是 M2 的收口：initialize 声明与白名单统一到注册表单一来源。
+        let namespaces = vec![
+            "pipeline-executor".to_string(),
+            "human-interaction".to_string(), // 注册表里动态加的，不在 STANDARD_CAPABILITIES
+        ];
+        let caps = build_declared_capabilities_from_namespaces(&namespaces);
+        assert!(caps.get("pipeline-executor").is_some());
+        assert!(
+            caps.get("human-interaction").is_some(),
+            "动态注册的 namespace 必须出现在 initialize 声明里"
+        );
+        assert_eq!(
+            caps.as_object().map(|o| o.len()).unwrap_or(0),
+            2,
+            "声明数量应等于 namespace 数量"
+        );
     }
 }

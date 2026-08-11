@@ -120,14 +120,18 @@ jobs:
           workspaces: kernel
           shared-key: agentos-0.2
 
-      - name: Run tests
+      - name: Run tests (with baseline lock)
         # 覆盖全插件热加载单测（invoker 的指纹/TTL/force_unload 单测在 agentos-invoker crate 内）：
         #   test_compute_plugin_fingerprint_stable_for_unchanged_dir
         #   test_compute_plugin_fingerprint_changes_on_file_edit
         #   test_is_plugin_stale_ttl_short_circuits
         #   test_force_unload_via_trait_method
         # 这些单测零外部依赖（不启 kernel/LLM），适合 CI。
-        run: cargo test --verbose --all
+        # 失败数走基线锁（.github/rust-test-baseline.txt，只许减不许增），
+        # 与 Python test-batch-baseline 同构。
+        run: |
+          cargo test --all 2>&1 | tee /tmp/rust_test_output.txt
+          python ../scripts/check_rust_test_baseline.py
 
   # ── E2E Manual (热加载/用户旅程实测, 需 kernel+LLM, 手动触发) ─────────────
   # 这些测试需要启动 0.2 kernel + 0.1 服务 + 真实 LLM key，不适合每次 PR 跑。
@@ -171,7 +175,7 @@ jobs:
         run: ruff check .
 
       - name: Mypy check
-        run: mypy src/agentos_plugin_sdk
+        run: mypy plugins/sdk/src/agentos_plugin_sdk
 
   # ── Python Test ────────────────────────────────────────────
   python-test:
@@ -196,3 +200,67 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+  # ── Python Plugins Test（插件体系 + 全插件 E2E 冒烟矩阵）────────────────
+  # 覆盖：
+  #   1. 全部插件测试（system/tools/pipeline 目录下的 test_*.py）
+  #   2. tests/plugins/ 冒烟矩阵：94 个插件（85 sidecar + 8 external_mcp + 1 native）
+  #      逐个以子进程 sidecar 方式加载、注册校验、生命周期触发、精选工具真实执行
+  #      （见 tests/plugins/plugin_probe.py）
+  #   3. MCP 服务（bing-search/demo-tools/llm-sidecar）与 skills 清单校验
+  #   4. tests/suites/ 插件单元测试矩阵（plugins + m6_plugins：路径修复 + 接口同步）
+  # PYTHONPATH 与本地开发一致：plugins（插件）+ sdk（SDK 源码）
+  python-plugins-test:
+    name: Python Plugins Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" "./plugins/sdk"
+
+      - name: Run plugin tests + E2E smoke matrix + suite tests
+        env:
+          # 0.2 架构：插件运行时依赖 plugins（平铺模块）+ SDK 源码，不再需要 src/
+          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
+        run: |
+          python -m pytest -v \
+            plugins/test_system_plugins.py \
+            plugins/shared/system/llm/ \
+            plugins/shared/system/tasks/ \
+            plugins/shared/system/test_migration_batch3.py \
+            plugins/shared/tools/task/ \
+            plugins/shared/tools/tests/ \
+            plugins/shared/tools/builtin_tools/tests/ \
+            tests/plugins/ \
+            tests/suites/plugins/ \
+            tests/suites/m6_plugins/
+
+  # ── TDD Gate（变更必有测试）─────────────────────────────────
+  # PR 中有源码变更时，必须有对应的测试变更（先红后绿）。
+  # 纯配置/文档/前端变更豁免；纯重构可在 commit message 加 [skip-tdd] 跳过。
+  # 详见 scripts/check_tdd_compliance.py
+  tdd-gate:
+    name: TDD Gate (变更必有测试)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整历史做 diff
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check TDD compliance
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: python scripts/check_tdd_compliance.py

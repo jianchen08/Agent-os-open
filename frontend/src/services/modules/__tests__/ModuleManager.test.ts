@@ -53,7 +53,6 @@ const TASK_MANAGER_SCHEMA = {
 const mockGetModuleUISchemas = vi.fn()
 vi.mock('@/services/api/modules', () => ({
   getModuleUISchemas: () => mockGetModuleUISchemas(),
-  registerClientCapabilities: vi.fn().mockResolvedValue({}),
 }))
 
 vi.mock('@/utils/logger', () => ({

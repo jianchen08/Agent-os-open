@@ -16,36 +16,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
-# --- 跨模块兼容层 ---
-# capabilities.py 的 get_capability() / get_adapter_for_model() 使用延迟导入
-# from src.config.llm_config import get_llm_config
-# from src.llm.router_factory import get_provider_for_model
-# 在插件 sidecar 隔离进程中，src.* 不可达。
-# 按 §四 §2.3 模式，在此注入 stub，使老代码 capabilities.py 保持原样不修改。
-# stub 返回 None → 老代码自然走 fallback（返回默认空能力 / DefaultAdapter）。
-class _StubLLMConfig:
-    """模拟 llm_config 返回的配置管理器。find_model_by_name_or_alias 返回 None → 老代码走 fallback。"""
-
-    def find_model_by_name_or_alias(self, _name: str):
-        return None
-
-
-class _StubModule:
-    """占位模块：模拟 src.config.llm_config / src.llm.router_factory 的接口。"""
-
-    @staticmethod
-    def get_llm_config():
-        return _StubLLMConfig()
-
-    @staticmethod
-    def get_provider_for_model(_model_name: str):
-        return None
-
-
-# 注册 src.* stub 到 sys.modules（capabilities.py 的延迟导入会命中这些 stub）
-for _mod_path in ("src", "src.config", "src.config.llm_config", "src.llm", "src.llm.router_factory"):
-    if _mod_path not in sys.modules:
-        sys.modules[_mod_path] = _StubModule()  # type: ignore[assignment]
+# capabilities.py 的 get_capability() / get_adapter_for_model() 已改为可选导入：
+# 先尝试 from llm_config / from router_factory（本地未提供时 ImportError），
+# 找不到则走 fallback（返回默认空能力 / DefaultAdapter）。
+# 0.1 时代曾用 sys.modules 注入 src.* stub 的兼容层，现已移除——src/ 不再存在。
 
 from adapter import DefaultAdapter, MultimodalAdapter  # noqa: E402
 from capabilities import ModelCapabilityRegistry  # noqa: E402

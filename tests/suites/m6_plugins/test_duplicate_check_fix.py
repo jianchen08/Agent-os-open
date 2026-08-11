@@ -19,6 +19,8 @@ from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys, create_initial_state
 from plugins.output.duplicate_check import DuplicateCheckPlugin
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def base_state() -> dict:

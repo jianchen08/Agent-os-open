@@ -135,6 +135,68 @@ docs(readme): update quick start for Docker
 - **覆盖率 ≥ 80%**（行覆盖 + 分支覆盖）
 - **测试名描述意图**：`should_reject_expired_token` 而非 `test_1`
 
+### TDD 分层规范（强制）
+
+项目采用**测试金字塔**分层，每个测试**必须标注分层 marker**：
+
+| 层 | marker | 职责 | 工具链 | CI 策略 |
+|---|---|---|---|---|
+| 单元 | `@pytest.mark.unit` | 单函数/单模块，零外部依赖，秒级 | `pytest` / `cargo test` | PR 必跑，阻塞合并 |
+| 集成 | `@pytest.mark.integration` | 多模块协作或 sidecar 子进程 | `pytest` / `cargo test -p agentos-integration-tests` | PR 必跑 |
+| E2E | `@pytest.mark.e2e` | 真 kernel + 真 WS + 真用户旅程 | `tests/e2e_02/` | 手动/nightly |
+
+**规则**：`tests/plugins/conftest.py` 的 `pytest_collection_modifyitems` 钩子会强制检查——
+未标注 `unit`/`integration`/`e2e` 之一的测试会让**整个收集失败**。
+
+在测试文件顶部加（对全文件生效）：
+```python
+import pytest
+pytestmark = pytest.mark.unit  # 或 integration / e2e
+```
+
+#### 红-绿-重构 循环
+
+所有新功能和 bug 修复按此流程：
+
+```
+1. RED    写一个会失败的测试（描述期望行为，不写实现）
+          确认它真的失败（且失败原因正确——是"功能缺失"不是"拼写错误"）
+
+2. GREEN  写最小代码让测试通过（不追求优雅，只追求通过）
+          确认通过
+
+3. REFACTOR 重构代码（测试保持绿色保护你）
+             全量回归确认无破坏
+```
+
+**与基线锁的配合**：RED 阶段的新测试失败**不计入基线**——它是新功能的测试，不是
+pre-existing 红测。基线（`.github/test-batch-baseline.txt` /
+`.github/rust-test-baseline.txt`）只许减不许增，只管 pre-existing 失败。
+
+#### CI 门禁
+
+| 门禁 | 脚本/机制 | 拦截什么 |
+|---|---|---|
+| **TDD Gate** | `scripts/check_tdd_compliance.py` + ci.yml `tdd-gate` job | PR 有源码变更但零测试变更（纯重构可加 `[skip-tdd]` 跳过） |
+| **Marker 检查** | `tests/plugins/conftest.py` | 测试缺分层 marker |
+| **Python 基线锁** | `scripts/check_test_batch_baseline.py` + `.github/test-batch-baseline.txt` | pre-existing 失败数增长 |
+| **Rust 基线锁** | `scripts/check_rust_test_baseline.py` + `.github/rust-test-baseline.txt` | Rust 测试失败数增长 |
+
+#### 快速参考
+
+```bash
+# Python 单测（先确认 RED 失败，再实现到 GREEN 通过）
+PYTHONPATH=src:plugins:plugins/sdk/src \
+  python -m pytest tests/path/to/test.py::test_name -v
+
+# Rust 单测
+cargo test -p agentos-engine <测试名>   # 单跑
+
+# 全量回归（对齐 CI）
+python -m pytest tests/plugins/ tests/suites/ plugins/ -v
+cargo test --all
+```
+
 ---
 
 ## 📁 项目结构

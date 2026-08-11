@@ -17,6 +17,9 @@ from pipeline.types import StateKeys
 
 from tests.suites.plugins.conftest import load_module_from_file
 
+
+pytestmark = pytest.mark.unit
+
 _SRC_DIR = os.path.normpath(os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "src"
 ))

@@ -17,7 +17,7 @@ import logging
 
 import pytest
 
-from src.core.logging.context import LogContext
+from agentos_plugin_sdk.logging import LogContext
 from tests.test_utils.log_collector import LogCollector, LogCaptureResult, LogEntry
 
 

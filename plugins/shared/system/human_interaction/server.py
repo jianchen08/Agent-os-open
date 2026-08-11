@@ -3,6 +3,10 @@
 
 老代码从 0.1 src/human_interaction/ 原封不动复制到本目录（平铺），
 本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
+
+前端推送直接走内核 event-bus capability（与 approval/llm_core 插件同模式），
+不引入独立 Notifier 文件——service.py 内部的 IInteractionNotifier 接口
+由本文件内联的 _EventBusNotifier 实现（仅此处用到，0.1 架构另有 CLI/桌面实现）。
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
+from interfaces import IInteractionNotifier  # noqa: E402
 from models import Priority  # noqa: E402
 from service import HumanInteractionService  # noqa: E402
 
@@ -24,12 +29,94 @@ plugin = AgentOSPlugin("human_interaction_service")
 _service: HumanInteractionService | None = None
 
 
+class _EventBusNotifier(IInteractionNotifier):
+    """把交互事件经 event-bus capability 推到前端（sidecar 0.2 架构专用）。
+
+    一个 _emit 方法统一调 plugin.get_capability("event-bus").call("emit", ...)，
+    5 个 notify_xxx 只是构造不同 event 名/payload。capability 未注入时降级为日志。
+    """
+
+    def __init__(self, plugin_ref: Any) -> None:
+        self._plugin = plugin_ref
+
+    def _bus(self) -> Any | None:
+        try:
+            return self._plugin.get_capability("event-bus")
+        except (KeyError, AttributeError):
+            return None
+
+    async def _emit(self, event: str, payload: dict[str, Any], thread_id: str = "") -> bool:
+        bus = self._bus()
+        if bus is None:
+            logger.warning("[HumanInteraction] event-bus not injected; skip %s", event)
+            return False
+        try:
+            # 用 notify（fire-and-forget）而非 call：service 在执行工具调用期间
+            # 触发 emit，若用 call 会等内核响应——而内核此刻正等 service 的工具
+            # 返回，形成请求嵌套死锁。notify 不等响应，与 llm_core 流式 chunk 同模式。
+            await bus.notify("emit", {"event": event, "payload": payload, "thread_id": thread_id})
+            return True
+        except Exception:
+            logger.exception("[HumanInteraction] emit %s failed", event)
+            return False
+
+    async def notify_request(self, request: Any) -> bool:
+        record = request if isinstance(request, dict) else {}
+        msg = record.get("message_data", {}) if isinstance(record.get("message_data"), dict) else {}
+        payload: dict[str, Any] = {
+            "request_id": record.get("id", ""),
+            "session_id": record.get("session_id", ""),
+            "status": record.get("status", ""),
+            "thread_id": msg.get("thread_id", ""),
+            "tab_id": msg.get("tab_id", ""),
+            "interaction_mode": msg.get("interaction_mode", ""),
+            "title": msg.get("title", ""),
+            "description": msg.get("description", ""),
+        }
+        for key in ("options", "questions", "initial_message", "suggestions",
+                    "file_paths", "progress", "priority", "timeout_seconds",
+                    "agent_level", "pipeline_id", "agent_id"):
+            if msg.get(key) is not None:
+                payload[key] = msg[key]
+        return await self._emit("interaction.requested", payload, payload.get("thread_id", ""))
+
+    async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
+        return await self._emit("interaction.cancelled",
+                                {"request_id": request_id, "reason": reason}, thread_id)
+
+    async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
+        return await self._emit("interaction.timeout", {"request_id": request_id}, thread_id)
+
+    async def notify_timeout_reminder(
+        self, request_id: str, remaining_seconds: int, thread_id: str = "", *,
+        title: str = "", mode: str = "",
+        options: list[dict] | None = None, questions: list[str] | None = None,
+    ) -> bool:
+        logger.info("[HumanInteraction] timeout reminder | request_id=%s | remaining=%ss",
+                    request_id, remaining_seconds)
+        return True
+
+    async def notify_conversation_start(
+        self, thread_id: str, tab_id: str, title: str, request_id: str = "",
+        initial_message: str | None = None, suggestions: list[str] | None = None,
+    ) -> bool:
+        return await self._emit("interaction.conversation_start", {
+            "request_id": request_id, "thread_id": thread_id, "tab_id": tab_id,
+            "title": title, "initial_message": initial_message, "suggestions": suggestions,
+        }, thread_id)
+
+
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
-    """Initialize human interaction service on load."""
+    """Initialize human interaction service with event-bus notifier.
+
+    notifier 直接用内核 event-bus capability 推前端（0.2 sidecar 架构，
+    与 approval/llm_core 插件同模式）。capability 未注入时降级为日志。
+    """
     global _service
     _service = HumanInteractionService()
-    logger.info("Human interaction service initialized")
+    _service.set_notifier(_EventBusNotifier(plugin))
+    logger.info("Human interaction service initialized with event-bus notifier")
 
 
 @plugin.on_unload

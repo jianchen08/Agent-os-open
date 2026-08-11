@@ -8,8 +8,18 @@
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from agentos_plugin_sdk.capability import CapabilityHandle, STANDARD_CAPABILITIES
+from agentos_plugin_sdk.logging import (
+    ContextFilter,
+    JsonFormatter,
+    LogContext,
+    LoggingConfig,
+    StructuredFormatter,
+    get_logger,
+    setup_logging,
+)
 from agentos_plugin_sdk.plugin import AgentOSPlugin
 from agentos_plugin_sdk.server import McpServer
+from agentos_plugin_sdk.settings import Settings, get_settings
 from agentos_plugin_sdk.tool import collect_tools, tool
 from agentos_plugin_sdk.types import (
     CapabilityInjection,
@@ -27,12 +37,21 @@ __all__ = [
     "AgentOSPlugin",
     "CapabilityHandle",
     "CapabilityInjection",
+    "ContextFilter",
+    "JsonFormatter",
     "LifecycleEvent",
+    "LogContext",
+    "LoggingConfig",
     "McpServer",
     "ResourceDef",
     "STANDARD_CAPABILITIES",
+    "Settings",
+    "StructuredFormatter",
     "ToolDef",
     "__version__",
     "collect_tools",
+    "get_logger",
+    "get_settings",
+    "setup_logging",
     "tool",
 ]

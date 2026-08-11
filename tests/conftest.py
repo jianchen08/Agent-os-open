@@ -1,7 +1,7 @@
 """测试公共配置。
 
 职责：
-1. 将 src 目录添加到 Python 路径
+1. 条件化 src/ 路径注入（0.2 架构下 src/ 已废弃，仅在仍存在时兼容老测试）
 2. 注册统一日志系统
 3. 通过 pytest hook 自动收集失败测试的日志和 bug 定位信息
 4. 生成结构化测试报告
@@ -13,8 +13,11 @@ import sys
 
 import pytest
 
-# 将 src 目录添加到 Python 路径，确保测试能正确导入项目模块
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+# 0.2 架构：src/ 已迁移到 plugins/。仅在 src/ 仍存在时（过渡期）加入 path，
+# 兼容尚未迁移的 0.1 遗留测试；src/ 不存在时这些测试会被 collect_ignore_glob 跳过。
+_SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if os.path.isdir(_SRC_ROOT):
+    sys.path.insert(0, _SRC_ROOT)
 
 # 注意："suites" 已从 collect_ignore 移除，使 pytest tests/channels/ tests/suites/ 能正确收集集成测试。
 # 以下根级测试文件因需要特殊外部服务（向量库/Redis/真实 LLM 等），仍然排除：
@@ -23,9 +26,20 @@ collect_ignore = [
     "test_directory_generator.py",
     "test_memory_metrics.py",
     "test_pgvector_store.py",
-    "test_task_submit_event_chain.py",
-    "test_yaml_error_chain.py",
 ]
+
+# 0.2 架构：src/ 不存在时，跳过仍依赖 src 的测试文件。
+# 多数 0.1 遗留测试已删除或迁移到 0.2 模块（见迁移记录）。
+# 下列文件因 0.2 对应功能尚未完全就绪而暂留跳过：
+#   - test_multimodal_capabilities：依赖 llm_config 配置注入链路（未接通，
+#     见 module_migration_plan §2.1 配置注入断链）。待链路修复后迁移。
+#   - test_monitoring_validation：跨多模块（monitoring + agents + channels.cli），
+#     0.2 结构差异大；monitoring 核心已由 test_plugin_smoke_matrix 覆盖加载链路。
+if not os.path.isdir(_SRC_ROOT):
+    collect_ignore_glob = [
+        "suites/tools/test_multimodal_capabilities.py",
+        "test_monitoring_validation.py",
+    ]
 
 # ── 报告输出目录 ──────────────────────────────────────────
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
@@ -176,7 +190,7 @@ def log_context():
             log_context.bind(request_id="test-req-123")
             # ... 测试逻辑 ...
     """
-    from src.core.logging.context import LogContext
+    from agentos_plugin_sdk.logging import LogContext
 
     with LogContext.scoped():
         yield LogContext

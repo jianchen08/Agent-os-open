@@ -131,6 +131,14 @@ impl CapabilityRouter for PluginScopedRouter {
         }
         self.inner.handle(capability, method, params).await
     }
+
+    /// 委托给 inner——让 inner（KernelCapabilityRouter）的动态 namespace
+    /// （含 handler_registry 注册的 human-interaction 等）透传到 initialize 声明。
+    /// 不覆盖的话走 trait 默认实现，只返回静态 STANDARD_CAPABILITIES，
+    /// sidecar 拿不到插件自注册 namespace 的 CapabilityHandle。
+    fn known_namespaces(&self) -> Vec<String> {
+        self.inner.known_namespaces()
+    }
 }
 
 /// 从 MCP tools/call 响应中提取内部 JSON 值。

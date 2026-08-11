@@ -475,6 +475,87 @@ impl SqliteStore {
     /// sequence 按 pipeline_id 单调递增（跨多轮、跨 run_id），支撑前端
     /// `before_sequence`/`after_sequence` 游标分页。替代旧的"每轮 run_id 重置 0/1"。
     /// 对齐 0.1 ExecutionRecordData.sequence（管道内连续）。
+    /// 更新 run 的 metadata 字段（JSON 文本，整体替换）。
+    ///
+    /// 用于 approval/human_interaction 插件 suspend run 时写入
+    /// `pending_interaction_request_id` + `suspend_branch_id` + `suspend_seq`，
+    /// 后续 `find_suspended_run_by_request_id` 按此查找并还原 SuspendHandle。
+    pub fn set_run_metadata(
+        &self,
+        run_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE runs SET metadata = ?1 WHERE run_id = ?2",
+            rusqlite::params![metadata.to_string(), run_id],
+        )
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 按 `pending_interaction_request_id` 查找 Suspended run。
+    ///
+    /// 遍历所有 status='suspended' 的 run，解析 metadata，返回首个
+    /// `pending_interaction_request_id` 匹配的 RunRecord。用于
+    /// `dispatch_interaction_response` 根据 request_id 定位被挂起的 run。
+    pub fn find_suspended_run_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RunRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, \
+                 current_branch, current_seq, metadata \
+                 FROM runs WHERE status = 'suspended'",
+            )
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let metadata_str: Option<String> = row.get(8)?;
+                Ok((
+                    row.get::<_, String>(0)?,       // run_id
+                    row.get::<_, String>(1)?,       // config_hash
+                    row.get::<_, String>(3)?,       // tenant_id
+                    row.get::<_, String>(4)?,       // created_at
+                    row.get::<_, Option<String>>(5)?, // ended_at
+                    row.get::<_, String>(6)?,       // current_branch
+                    row.get::<_, i64>(7)? as u32,   // current_seq
+                    metadata_str,
+                ))
+            })
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        for row in rows {
+            let (run_id, config_hash, tenant_id, created_at, ended_at, current_branch, current_seq, metadata_str) =
+                row.map_err(|e| StorageError::Database(e.to_string()))?;
+
+            if let Some(ref meta_str) = metadata_str {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str) {
+                    if meta
+                        .get("pending_interaction_request_id")
+                        .and_then(|v| v.as_str())
+                        == Some(request_id)
+                    {
+                        return Ok(Some(RunRecord {
+                            run_id,
+                            config_hash,
+                            status: RunStatus::Suspended,
+                            tenant_id,
+                            created_at,
+                            ended_at,
+                            current_branch,
+                            current_seq,
+                            metadata: Some(meta),
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     ///
     /// tenant_id 由调用方显式传入（async trait 层在 spawn_blocking 前从 task_local
     /// 解析——tokio::task_local 不跨 spawn_blocking，若在此处读会恒为 'default'）。

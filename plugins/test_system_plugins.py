@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 # plugins/ 目录本身（测试文件就在 plugins/ 下）
 _PLUGINS_DIR = str(Path(__file__).resolve().parent)
 if _PLUGINS_DIR not in sys.path:
@@ -61,7 +63,31 @@ def _load_plugin_module(plugin_name: str) -> Any:
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
+    # 模拟内核的 notifications/on_load：不触发则依赖 on_load 初始化的插件
+    #（memory store / tasks service 等）无法工作，工具调用会静默降级。
+    _fire_lifecycle(module, "on_load")
     return module
+
+
+def _fire_lifecycle(module: Any, event: str) -> None:
+    """触发插件生命周期钩子（与内核 notification 语义一致）。
+
+    插件通过 @plugin.on_load 注册的处理器存在 _lifecycle_handlers 中；
+    加载后手动触发，保证内存/任务服务等在工具调用前完成初始化。
+    """
+    plugin = getattr(module, "plugin", None)
+    if plugin is None:
+        return
+    handler = plugin._lifecycle_handlers.get(event)
+    if handler is None:
+        return
+    result = handler({})
+    if asyncio.iscoroutine(result):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(result)
+        finally:
+            loop.close()
 
 
 def _call_tool(module: Any, tool_name: str, **kwargs: Any) -> Any:
@@ -103,8 +129,8 @@ class TestMemoryPlugin:
         assert result["stored"] is True
         assert "id" in result
 
-        # Search
-        result = _call_tool(mod, "memory.search", query="Python")
+        # Search（与 store 使用同一 memory_type，默认 semantic 搜不到 episode 数据）
+        result = _call_tool(mod, "memory.search", query="Python", memory_type="episode")
         assert result["total"] >= 1
         assert result["results"][0]["content"] == "Test memory about Python"
 
@@ -185,13 +211,16 @@ class TestEvaluationPlugin:
         assert "evaluation.run" in mod.plugin._tools
         assert "evaluation.get_result" in mod.plugin._tools
 
-    def test_evaluation_run_pass(self) -> None:
+    def test_evaluation_run_pass(self, tmp_path) -> None:
         mod = _load_plugin_module("evaluation")
+        # file_check 按 os.path.exists 判定，必须指向真实存在的文件（绝对路径，与 CWD 无关）
+        target = tmp_path / "artifact.txt"
+        target.write_text("artifact content")
         result = _call_tool(
             mod, "evaluation.run",
             task_id="task_1",
             metrics=[
-                {"metric_id": "m1", "type": "file_check", "params": {"path": "test.txt"}},
+                {"metric_id": "m1", "type": "file_check", "params": {"path": str(target)}},
             ],
             gate_mode=True,
         )

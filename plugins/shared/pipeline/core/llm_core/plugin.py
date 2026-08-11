@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from llm.adapter import (
+from adapter import (
     LiteLLMAdapter,
     LLMAdapter,
     LLMResponse,

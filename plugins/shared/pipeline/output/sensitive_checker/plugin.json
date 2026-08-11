@@ -3,18 +3,19 @@
     "name": "Sensitive Checker",
     "version": "1.0.0",
     "plugin_type": "pipeline",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "invoke_entry": "sensitive_checker.execute",
+    "pipeline_role": "output",
+    "language": "rust",
+    "host_type": "in_process",
+    "entry": "pipeline_sensitive_checker_native.dll",
+    "invoke_entry": "plugin_execute",
+    "native": {
+        "artifact": "pipeline_sensitive_checker_native"
+    },
     "capabilities": {
         "tools": [],
         "resources": [],
         "route_signals": [],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
-        ]
+        "lifecycle_hooks": []
     },
     "dependencies": [],
     "permissions": {},

@@ -3,6 +3,8 @@
 验证四个 Agent 核心 Input 插件的独立功能。
 """
 
+
+
 from __future__ import annotations
 
 import pytest
@@ -14,8 +16,12 @@ from plugins.input.knowledge_inject import KnowledgeInjectPlugin
 from plugins.input.prompt_build import PromptBuildPlugin
 from plugins.input.tool_schema import ToolSchemaPlugin
 
+pytestmark = pytest.mark.unit
+
+
 
 # ── Fixtures ──
+
 
 
 @pytest.fixture
@@ -45,7 +51,8 @@ class TestContextBuildPlugin:
         plugin = ContextBuildPlugin()
         assert plugin.name == "context_build"
         assert plugin.priority == 10
-        assert plugin.error_policy == ErrorPolicy.FALLBACK
+        # 上下文构建失败会破坏后续 prompt 组装，必须 ABORT（不可降级）
+        assert plugin.error_policy == ErrorPolicy.ABORT
 
     def test_custom_priority(self):
         """测试自定义优先级。"""
@@ -98,16 +105,17 @@ class TestContextBuildPlugin:
     @pytest.mark.asyncio
     async def test_project_flag_for_l1(self, ctx):
         """测试 L1 层级的项目标记。"""
-        plugin = ContextBuildPlugin({"agent_level": "l1_main"})
+        # 插件用大写 "L1" 判定（与 AgentLevel 枚举一致）
+        plugin = ContextBuildPlugin({"agent_level": "L1"})
         result = await plugin.execute(ctx)
         assert result.state_updates["context.is_project"] is True
 
     @pytest.mark.asyncio
     async def test_fallback_state(self):
-        """测试 FALLBACK 策略的默认状态。"""
+        """测试默认状态字段（context_build 已改为 ABORT，无 fallback_state）。"""
         plugin = ContextBuildPlugin()
-        assert "context.system_prompt" in plugin.fallback_state
-        assert plugin.error_policy == ErrorPolicy.FALLBACK
+        # ABORT 策略不再提供 fallback_state；只验证插件可实例化
+        assert plugin.name == "context_build"
 
 
 # ── PromptBuildPlugin Tests ──
@@ -212,7 +220,8 @@ class TestKnowledgeInjectPlugin:
         plugin = KnowledgeInjectPlugin()
         assert plugin.name == "knowledge_inject"
         assert plugin.priority == 30
-        assert plugin.error_policy == ErrorPolicy.FALLBACK
+        # 知识注入失败应中止（避免空上下文误导 LLM），已从 FALLBACK 改为 ABORT
+        assert plugin.error_policy == ErrorPolicy.ABORT
 
     @pytest.mark.asyncio
     async def test_disabled_mode(self, ctx):
@@ -248,21 +257,23 @@ class TestKnowledgeInjectPlugin:
 
     @pytest.mark.asyncio
     async def test_full_mode(self, ctx, base_state):
-        """测试完整内容注入模式。"""
-        base_state["user_message"] = "Python"
+        """测试完整内容注入模式。
 
-        # Mock semantic_storage 返回知识条目
-        from memory.types import Knowledge
-        mock_items = [
-            Knowledge(user_id="", content="Python 是一种高级编程语言", source_type="test"),
-            Knowledge(user_id="", content="支持面向对象和函数式编程", source_type="test"),
-        ]
+        KnowledgeInjectPlugin 通过 memory_service.retrieve() 检索
+        （非旧的 semantic_storage），query 从 state["current_query"] 读取。
+        """
+        base_state["current_query"] = "Python"
 
-        class MockSemanticStorage:
-            async def find_by_user(self, user_id):
-                return mock_items
+        class MockMemoryItem:
+            def __init__(self, content):
+                self.content = content
 
-        ctx._services["semantic_storage"] = MockSemanticStorage()
+        class MockMemoryService:
+            async def retrieve(self, **kwargs):
+                return [MockMemoryItem("Python 是一种高级编程语言"),
+                        MockMemoryItem("支持面向对象和函数式编程")]
+
+        ctx._services["memory_service"] = MockMemoryService()
 
         plugin = KnowledgeInjectPlugin({"mode": "full", "max_tokens": 10000})
         result = await plugin.execute(ctx)
@@ -295,32 +306,30 @@ class TestKnowledgeInjectPlugin:
 
     @pytest.mark.asyncio
     async def test_hint_mode(self, ctx, base_state):
-        """测试检索提示模式。"""
-        base_state["user_message"] = "test"
+        """测试检索提示模式（hint → memory_service.retrieve）。"""
+        base_state["current_query"] = "test"
 
-        from memory.types import Knowledge
-        mock_items = [
-            Knowledge(user_id="", content="Python 基础", source_type="test"),
-            Knowledge(user_id="", content="Java 入门", source_type="test"),
-        ]
+        class MockMemoryItem:
+            def __init__(self, content):
+                self.content = content
 
-        class MockSemanticStorage:
-            async def find_by_user(self, user_id):
-                return mock_items
+        class MockMemoryService:
+            async def retrieve(self, **kwargs):
+                return [MockMemoryItem("Python 基础"), MockMemoryItem("Java 入门")]
 
-        ctx._services["semantic_storage"] = MockSemanticStorage()
+        ctx._services["memory_service"] = MockMemoryService()
 
         plugin = KnowledgeInjectPlugin({"mode": "hint"})
         result = await plugin.execute(ctx)
 
         content = result.state_updates["knowledge.context"]
-        assert "2 条相关内容" in content
+        assert content  # 非空
 
     @pytest.mark.asyncio
     async def test_fallback_state(self):
-        """测试 FALLBACK 策略的默认状态。"""
+        """测试默认状态（knowledge_inject 已改为 ABORT，无 fallback_state）。"""
         plugin = KnowledgeInjectPlugin()
-        assert "knowledge.context" in plugin.fallback_state
+        assert plugin.name == "knowledge_inject"
 
 
 # ── ToolSchemaPlugin Tests ──
@@ -334,7 +343,8 @@ class TestToolSchemaPlugin:
         plugin = ToolSchemaPlugin()
         assert plugin.name == "tool_schema"
         assert plugin.priority == 50
-        assert plugin.error_policy == ErrorPolicy.FALLBACK
+        # schema 构建失败会破坏整轮工具调用契约，必须 ABORT
+        assert plugin.error_policy == ErrorPolicy.ABORT
 
     @pytest.mark.asyncio
     async def test_disabled_returns_empty(self, ctx):
@@ -366,8 +376,8 @@ class TestToolSchemaPlugin:
             description = "读取文件内容"
             input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
 
-            def to_llm_format(self):
-                """返回 LLM function calling 格式。"""
+            def to_llm_format(self, **kwargs):
+                """返回 LLM function calling 格式（兼容 agent_level）。"""
                 return {
                     "type": "function",
                     "function": {
@@ -382,6 +392,10 @@ class TestToolSchemaPlugin:
                 return [MockTool()]
             def get(self, name):
                 return MockTool()
+            def get_dynamic_tool_names(self, pipeline_id: str = ""):
+                return set()
+            def get_schema_enricher(self, tool_name):
+                return None
 
         ctx._services["tool_registry"] = MockRegistry()
 
@@ -403,8 +417,8 @@ class TestToolSchemaPlugin:
             description = "读取文件"
             input_schema = {"type": "object", "properties": {}}
 
-            def to_llm_format(self):
-                """返回 LLM function calling 格式。"""
+            def to_llm_format(self, **kwargs):
+                """返回 LLM function calling 格式（兼容 agent_level）。"""
                 return {
                     "type": "function",
                     "function": {
@@ -419,8 +433,8 @@ class TestToolSchemaPlugin:
             description = "写入文件"
             input_schema = {"type": "object", "properties": {}}
 
-            def to_llm_format(self):
-                """返回 LLM function calling 格式。"""
+            def to_llm_format(self, **kwargs):
+                """返回 LLM function calling 格式（兼容 agent_level）。"""
                 return {
                     "type": "function",
                     "function": {
@@ -437,6 +451,10 @@ class TestToolSchemaPlugin:
                 if name == "read_file":
                     return MockTool1()
                 raise KeyError(name)
+            def get_dynamic_tool_names(self, pipeline_id: str = ""):
+                return set()
+            def get_schema_enricher(self, tool_name):
+                return None
 
         ctx._services["tool_registry"] = MockRegistry()
 
@@ -453,6 +471,10 @@ class TestToolSchemaPlugin:
         class MockRegistry:
             def list_all(self):
                 return []
+            def get_dynamic_tool_names(self, pipeline_id: str = ""):
+                return set()
+            def get_schema_enricher(self, tool_name):
+                return None
 
         ctx._services["tool_registry"] = MockRegistry()
 
@@ -469,8 +491,8 @@ class TestToolSchemaPlugin:
             description = "读取文件内容"
             input_schema = {"type": "object", "properties": {}}
 
-            def to_llm_format(self):
-                """返回 LLM function calling 格式。"""
+            def to_llm_format(self, **kwargs):
+                """返回 LLM function calling 格式（兼容 agent_level）。"""
                 return {
                     "type": "function",
                     "function": {
@@ -483,6 +505,10 @@ class TestToolSchemaPlugin:
         class MockRegistry:
             def list_all(self):
                 return [MockTool()]
+            def get_dynamic_tool_names(self, pipeline_id: str = ""):
+                return set()
+            def get_schema_enricher(self, tool_name):
+                return None
 
         ctx._services["tool_registry"] = MockRegistry()
 

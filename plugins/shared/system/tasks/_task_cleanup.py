@@ -515,7 +515,7 @@ class _TaskCleanupMixin:
         Returns:
             操作结果字典
         """
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from task_types import TaskStatus  # noqa: PLC0415
 
         task = self.get_task(task_id)
         if task is None:

@@ -3,12 +3,12 @@
 sidecar(Python 插件进程)的 stdout 被 JSON-RPC 协议占用，日志必须输出到 stderr，
 由内核 McpClient 的 stderr reader 消费并转发到 tracing（统一汇聚）。
 
-本模块在 ``plugin.run()`` 启动时调用一次，复用项目统一日志基础设施
-(``src.core.logging``)：基于 contextvars 注入 trace_id/pipeline_id 等追踪字段，
-JSON/彩色双格式，第三方库降级。若 ``src.core.logging`` 不可 import（如独立运行），
+本模块在 ``plugin.run()`` 启动时调用一次，复用 SDK 内置统一日志基础设施
+(``agentos_plugin_sdk.logging``)：基于 contextvars 注入 trace_id/pipeline_id 等追踪字段，
+JSON/彩色双格式，第三方库降级。若该模块不可 import（如独立运行），
 降级到标准 ``logging.basicConfig(stream=sys.stderr)``。
 
-环境变量（与内核 ``src/core/logging/config.py`` 对齐）::
+环境变量（与 ``agentos_plugin_sdk/logging/config.py`` 对齐）::
 
     LOG_LEVEL    — DEBUG / INFO / WARNING / ERROR (默认 INFO)
     LOG_JSON     — 1 / true → JSON 输出（默认 False，彩色控制台）
@@ -34,12 +34,12 @@ def setup_sidecar_logging() -> None:
     if _INITIALIZED:
         return
 
-    # 优先复用项目统一日志基础设施。
-    # src.core.logging 的 StreamHandler 默认输出到 stderr，正好契合 sidecar 约束
+    # 优先复用 SDK 内置统一日志基础设施。
+    # agentos_plugin_sdk.logging 的 StreamHandler 默认输出到 stderr，正好契合 sidecar 约束
     #（stdout 被 JSON-RPC 占用）。output 强制 console，不写本地文件——sidecar 日志
     # 由内核 stderr reader 汇聚到统一 sink，避免双写。
     try:
-        from src.core.logging import (  # noqa: PLC0415
+        from agentos_plugin_sdk.logging import (  # noqa: PLC0415
             LoggingConfig,
             setup_logging,
         )
@@ -55,13 +55,13 @@ def setup_sidecar_logging() -> None:
         setup_logging(config, reset=True)
         _INITIALIZED = True
         logging.getLogger(__name__).debug(
-            "sidecar logging via src.core.logging (level=%s, json=%s)",
+            "sidecar logging via agentos_plugin_sdk.logging (level=%s, json=%s)",
             logging.getLevelName(config.level),
             config.json_output,
         )
         return
     except Exception as exc:  # noqa: BLE001
-        # src.core.logging 不可用（独立运行 / PYTHONPATH 未含 src/），降级。
+        # agentos_plugin_sdk.logging 不可用（独立运行 / SDK 未安装），降级。
         # 必须仍输出到 stderr，否则日志会污染 JSON-RPC 的 stdout 通道。
         level = _parse_level(os.getenv("LOG_LEVEL", "INFO"))
         logging.basicConfig(
@@ -73,7 +73,7 @@ def setup_sidecar_logging() -> None:
         )
         _INITIALIZED = True
         logging.getLogger(__name__).warning(
-            "src.core.logging 不可用，降级到 basicConfig(stream=stderr)：%s", exc
+            "agentos_plugin_sdk.logging 不可用，降级到 basicConfig(stream=stderr)：%s", exc
         )
 
 

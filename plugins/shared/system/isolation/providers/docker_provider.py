@@ -524,6 +524,19 @@ class DockerProvider(IsolationProvider):
             mount_src = self._resolve_mount_path(context.workspace)
             args.extend(["-v", f"{mount_src}:/workspace"])
 
+        # 编译/依赖缓存 named volume：跨容器实例、跨 git worktree 复用。
+        # volume 与容器实例解耦——容器销毁/重建(self_heal、namespace desync、
+        # 切 worktree 起新容器)都不丢缓存，新容器挂上同一 volume 即读到。
+        # named volume 首次使用 docker 自动创建，无需预先 docker volume create。
+        #   - agentos-cargo-cache → sccache 缓存(SCCACHE_DIR=/cargo-cache/sccache，
+        #     见 Dockerfile.sccache)。sccache 内容寻址 + 并发锁，多容器同时编译安全。
+        #   - agentos-npm-cache   → npm 下载缓存(默认 ~/.npm)。仅缓存下载的 tarball，
+        #     node_modules 仍随各项目 bind mount，不共享(依赖树不同会互相踩)。
+        args.extend([
+            "-v", "agentos-cargo-cache:/cargo-cache",
+            "-v", "agentos-npm-cache:/root/.npm",
+        ])
+
         # IMAGE 必须在 COMMAND 之前（docker create 语法要求）
         args.append(self._image)
 

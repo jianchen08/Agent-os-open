@@ -257,7 +257,7 @@ class HostProvider(IsolationProvider):
     async def _execute_python_code(self, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Python 代码"""
         try:
-            from src.core.sandbox import CodeSandbox  # noqa: PLC0415
+            from sandbox import CodeSandbox  # noqa: PLC0415
 
             code = operation.get("code")
             context = operation.get("context")
@@ -271,7 +271,7 @@ class HostProvider(IsolationProvider):
                 )
 
             # 创建沙箱
-            from src.core.sandbox import SandboxConfig  # noqa: PLC0415
+            from sandbox import SandboxConfig  # noqa: PLC0415
 
             config = SandboxConfig(timeout_seconds=timeout)
             sandbox = CodeSandbox(config)

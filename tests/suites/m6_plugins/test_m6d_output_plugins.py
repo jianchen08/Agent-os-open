@@ -5,6 +5,8 @@ task_evaluation 插件已从 plugins.output 中移除，
 保留其余插件的测试。
 """
 
+
+
 from __future__ import annotations
 
 import pytest
@@ -15,11 +17,15 @@ from plugins.output.duplicate_check import DuplicateCheckPlugin
 from plugins.output.error_check import ErrorCheckPlugin
 from plugins.output.stop_check import StopCheckPlugin
 
+pytestmark = pytest.mark.unit
+
+
 # task_evaluation 插件已移除
 # from plugins.output.task_evaluation import TaskEvaluationPlugin
 
 
 # ── Fixtures ──
+
 
 
 @pytest.fixture
@@ -341,8 +347,16 @@ class TestDuplicateCheckPlugin:
 
     @pytest.mark.asyncio
     async def test_excessive_duplicate_triggers_end(self, ctx, base_state):
-        """测试超限重复触发 end 信号。"""
+        """测试拦截次数达硬上限触发 end 信号。
+
+        新逻辑三级保护：
+        1. 早期重复 → 软提示
+        2. 重复达阈值（max_duplicate_calls）→ 拦截 + next_llm
+        3. 拦截次数达硬上限（hard_limit_intercepts，默认 4）→ end
+        本测试验证第三级。
+        """
         base_state["router.duplicate_count"] = 5
+        base_state["router.duplicate_intercepts"] = 4  # 达到默认 hard_limit
         base_state[StateKeys.RAW_TOOL_CALLS] = []
         base_state[StateKeys.RAW_RESULT] = "some response"
 
@@ -354,7 +368,7 @@ class TestDuplicateCheckPlugin:
         plugin = DuplicateCheckPlugin({"max_duplicate_calls": 3, "max_repetitive_output": 3})
         result = await plugin.execute(ctx)
 
-        # duplicate_count > 3 应触发 end
+        # 拦截次数达硬上限应触发 end
         assert result.route_signal is not None
         assert result.route_signal.route_type == "end"
 

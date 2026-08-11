@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def _bind_log_context(log_ctx: dict[str, Any]):
     """将内核注入的 per-request 上下文绑定到当前 async 上下文的日志追踪字段。
 
-    优先复用 ``src.core.logging.LogContext``（contextvars，async 安全）；不可用时
+    优先复用 ``agentos_plugin_sdk.logging.LogContext``（contextvars，async 安全）；不可用时
     返回 no-op context manager（降级场景，绑定信息丢失但日志仍正常输出）。
 
     返回一个 context manager：进入时 bind，退出时自动恢复（防并发污染）。
@@ -42,7 +42,7 @@ def _bind_log_context(log_ctx: dict[str, Any]):
         return nullcontext()
 
     try:
-        from src.core.logging import LogContext  # noqa: PLC0415
+        from agentos_plugin_sdk.logging import LogContext  # noqa: PLC0415
 
         return LogContext.scoped(**fields)
     except Exception:  # noqa: BLE001
@@ -296,11 +296,45 @@ class McpServer:
             return
 
         # 分支3：request（有 id）—— 需要响应
+        # 用 create_task 并发处理，不阻塞主读取循环。
+        # 原因：工具 handler 内部可能发起反向 capability 调用（cap.call），
+        # 该调用的 response 会通过 stdin 到达。若 await dispatch 阻塞主循环，
+        # response 永远进不来 → handler 的 future 永不 resolve → 死锁。
+        # create_task 让主循环立即回到 lines_queue.get() 读下一条消息
+        #（含反向调用的 response），handler 在后台 task 里 await 完成。
+        asyncio.create_task(self._handle_request_async(msg_id, method, msg.get("params", {})))
+
+    async def _handle_request_async(
+        self, msg_id: Any, method: str, params: dict[str, Any]
+    ) -> None:
+        """异步处理单个 JSON-RPC request 并回写 response。"""
         try:
-            result = await self._dispatch(method, msg.get("params", {}))
-            self._send_response(msg_id, result)
+            result = await self._dispatch(method, params)
+            await self._send_response_async(msg_id, result)
         except Exception as e:
-            self._send_error(msg_id, -32603, str(e))
+            await self._send_error_async(msg_id, -32603, str(e))
+
+    async def _send_response_async(self, msg_id: Any, result: Any) -> None:
+        """向 stdout 发送 JSON-RPC 成功响应（加锁，与 KernelChannel 共享同一 lock）。"""
+        response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
+        # 复用 KernelChannel 的 _stdout_lock，保证 response / 反向 request / notification
+        # 三类 stdout 写入互斥（create_task 并发后必须有锁，否则行交错）。
+        lock = self._kernel_channel._stdout_lock if self._kernel_channel else _dummy_lock()
+        async with lock:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+    async def _send_error_async(self, msg_id: Any, code: int, message: str) -> None:
+        """向 stdout 发送 JSON-RPC 错误响应（加锁，与 KernelChannel 共享同一 lock）。"""
+        response = {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "error": {"code": code, "message": message},
+        }
+        lock = self._kernel_channel._stdout_lock if self._kernel_channel else _dummy_lock()
+        async with lock:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
         """分发 JSON-RPC 请求到对应处理器。"""
@@ -359,6 +393,12 @@ class McpServer:
             result = td.handler(**kwargs) if kwargs else td.handler()
             if asyncio.iscoroutine(result):
                 result = await result
+
+        # ToolResult 等携带 to_dict() 的结果对象必须序列化为 JSON 对象
+        #（内核 invoker 按 content[0].text 的 JSON 对象解析 success/output/metadata），
+        # 否则 default=str 会退化成字符串，丢失结构。
+        if hasattr(result, "to_dict") and callable(result.to_dict):
+            result = result.to_dict()
 
         return {
             "content": [{"type": "text", "text": json.dumps(result, default=str)}],
@@ -428,3 +468,18 @@ class McpServer:
     def stop(self) -> None:
         """停止服务端。"""
         self._running = False
+
+
+class _DummyLock:
+    """无 channel 时的空 lock 兜底（测试场景 / initialize 前）。"""
+    async def __aenter__(self) -> None:
+        pass
+    async def __aexit__(self, *args: Any) -> None:
+        pass
+
+
+_DUMMY_LOCK = _DummyLock()
+
+
+def _dummy_lock() -> _DummyLock:
+    return _DUMMY_LOCK

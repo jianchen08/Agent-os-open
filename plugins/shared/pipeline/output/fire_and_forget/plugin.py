@@ -21,6 +21,10 @@ class FireAndForgetPlugin(IOutputPlugin):
     委派即结束当前管道。
     """
 
+    def __init__(self, config: dict | None = None) -> None:
+        """初始化插件（server.py on_load 以 config=config 构造，与其他 pipeline 插件一致）。"""
+        self._config = config or {}
+
     @property
     def name(self) -> str:
         """插件唯一标识名称。"""

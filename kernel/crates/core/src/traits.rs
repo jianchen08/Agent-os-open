@@ -809,6 +809,61 @@ pub struct PluginManifest {
     /// `manual` = 仅用户显式启动。缺省时由 default_profile 决定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<ActivationPolicy>,
+    /// 插件向内核反向调用通道贡献的 capability（M4 插件自注册能力）。
+    ///
+    /// 声明本插件提供一个或多个 capability namespace，其他插件（或本插件自身）
+    /// 可通过 sidecar 反向调用消费。loader 扫描时把每条记录注册进
+    /// `CapabilityHandlerRegistry`，使该 namespace 自动出现在：
+    /// - 反向调用白名单（`parse_capability_method_with` 的动态 namespace）；
+    /// - initialize 握手声明（sidecar SDK 据此创建 CapabilityHandle）；
+    /// - 路由表（`CapabilityHandlerRegistry::route`）。
+    ///
+    /// 典型用例：`human_interaction_service` 声明 provides `human-interaction`，
+    /// `human` tool 插件通过 `get_capability("human-interaction")` 反向调用，
+    /// 状态留在主进程唯一一份 service 上，链路闭合。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provides: Option<ProvidesCapabilities>,
+}
+
+/// 插件贡献的反向调用 capability 声明（M4）。
+///
+/// 一个插件可贡献多个 namespace，每个 namespace 由 `host` 决定内核如何路由：
+/// - `InProcess`：插件代码跑在主进程，handler 持有插件对象引用直接调用；
+/// - `Sidecar`：插件是独立进程，handler 把请求转发到该插件的 MCP 连接。
+///
+/// 注意：纯数据结构，不引用 mcp crate 的 trait（避免 core→mcp 循环依赖）。
+/// handler 的桥接逻辑在 plugin-loader（它能同时依赖 core 和 mcp）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProvidesCapabilities {
+    /// 该插件贡献的全部 capability namespace 声明。
+    pub capabilities: Vec<ProvidedCapability>,
+}
+
+/// 单个 capability namespace 贡献声明。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProvidedCapability {
+    /// capability namespace（如 `human-interaction`），全内核唯一。
+    /// 多个插件声明同一 namespace 时，loader 按插件 priority 决定胜出者
+    ///（与 http_endpoints 的冲突检测不同——capability 允许热替换）。
+    pub namespace: String,
+    /// 该 namespace 支持的 method 清单（如 `["create_choice", "wait_for_choice"]`）。
+    /// 用于自描述/校验，loader 注册 handler 时可据此拒绝未声明的 method。
+    pub methods: Vec<String>,
+    /// 路由方式——决定内核怎么找到真正的 handler 实现。
+    #[serde(default)]
+    pub host: ProvidedCapabilityHost,
+}
+
+/// capability 贡献的路由方式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProvidedCapabilityHost {
+    /// 插件代码跑在主进程（如 Python in-process 插件、内置 system service），
+    /// handler 持有插件对象引用直接调用。
+    #[default]
+    InProcess,
+    /// 插件是独立 sidecar 进程，handler 把请求转发到该插件的 MCP 连接。
+    Sidecar,
 }
 
 /// 插件激活策略（安装触发模型 §5.2）。

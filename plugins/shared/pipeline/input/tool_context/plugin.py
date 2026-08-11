@@ -28,8 +28,8 @@ import logging
 import time
 from typing import Any
 
-from bridge.window_info import normalize_window_info
-from connectors.adapter_config import get_adapter_status_summary
+from adapter_config import get_adapter_status_summary
+from window_info import normalize_window_info
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
 

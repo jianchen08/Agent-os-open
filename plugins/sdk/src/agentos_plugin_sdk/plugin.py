@@ -249,14 +249,18 @@ class AgentOSPlugin:
 
             return _notify
 
-        for cap_name in STANDARD_CAPABILITIES:
-            if cap_name in injected_caps:
-                self._capabilities[cap_name] = CapabilityHandle(
-                    name=cap_name,
-                    call_fn=_make_call_fn(cap_name),
-                    notify_fn=_make_notify_fn(cap_name),
-                    context=injected_caps.get(cap_name, {}) or {},
-                )
+        # 遍历内核实际声明的 capabilities（而非固定 STANDARD_CAPABILITIES 清单），
+        # 这样内核动态注册的 namespace（如 human-interaction，M4 插件自注册）
+        # 也能被 SDK 创建 CapabilityHandle。STANDARD_CAPABILITIES 仅作 SDK 侧的
+        # 文档/校验参考，不再限制注入范围。
+        declared_caps = list(injected_caps.keys()) if isinstance(injected_caps, dict) else []
+        for cap_name in declared_caps:
+            self._capabilities[cap_name] = CapabilityHandle(
+                name=cap_name,
+                call_fn=_make_call_fn(cap_name),
+                notify_fn=_make_notify_fn(cap_name),
+                context=injected_caps.get(cap_name, {}) or {},
+            )
 
         # 注入配置
         self._injected_config = params.get("config", {})

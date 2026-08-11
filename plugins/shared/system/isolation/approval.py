@@ -21,7 +21,14 @@ from policy import ToolIsolationPolicy
 from isolation_types import IsolationLevel
 
 if TYPE_CHECKING:
-    from src.tools.types import Tool
+    # Tool 仅用于类型注解（ApprovalContext.tool 字段）。运行时不 import，
+    # 避免对 src.tools.types 的硬依赖（0.2 插件环境下 src/ 不存在）。
+    # 任意的工具定义类均可匹配此注解的 structural 使用方式。
+    from typing import Protocol
+
+    class Tool(Protocol):  # type: ignore[no-redef]
+        """工具协议（结构化类型，匹配任何带 name/level 等属性的工具对象）。"""
+        name: str
 
 logger = logging.getLogger(__name__)
 
