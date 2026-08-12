@@ -528,6 +528,17 @@ class _GitOpsMixin:
             self._link_worktree_dependencies(ws_dir, repo_path)
             return
 
+        if rc < 0:
+            # 瞬态失败（超时/找不到 git/OSError）——worktree 与分支的真实状态未知
+            # （可能已创建、可能没有）。绝不能盲目走 prune + branch -D + rmtree：
+            # 若本任务为重派发、branch 已含上一轮提交，这里会摧毁可恢复的工作
+            # （与 _git_init_and_initial_commit 的 .git 擦除同构：rc<0 误判为可清理）。
+            # 失败闭合，抛错让上层重新派发整个 worktree 创建。
+            raise RuntimeError(
+                f"git worktree add 瞬态失败（rc={rc}，疑似超时/IO），拒绝 branch -D 以防数据丢失: "
+                f"task_id={task_id}, branch={branch}, error={stderr}"
+            )
+
         logger.warning(
             "[WorkspaceLifecycle] worktree add 失败，尝试 prune 修复: task_id=%s, path=%s, error=%s",
             task_id,

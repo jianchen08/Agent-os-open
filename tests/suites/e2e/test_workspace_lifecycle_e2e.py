@@ -275,6 +275,97 @@ class TestGitInitCorruptionGuard:
         assert (project / ".git").exists()
 
 
+# ── 2c. 数据丢失守卫：worktree add 瞬态失败不得 branch -D ──────────
+
+
+class TestWorktreeAddTransientGuard:
+    """回归：`_worktree_add_with_repair` 在 worktree add 瞬态失败时
+    绝不能盲目 `git branch -D`。
+
+    历史 bug：worktree add 失败（含 rc=-1 瞬态超时/IO）即走 prune + rmtree +
+    branch -D + 重试。若本任务是重派发、branch 已含上一轮提交，瞬态失败触发的
+    branch -D 会摧毁可恢复的工作。与 .git 擦除同构（rc<0 误判为可清理）。
+    """
+
+    @staticmethod
+    def _repo_with_task_branch(project: Path, branch: str) -> str:
+        """建仓并在 <branch> 上追加一个独有提交（模拟重派发：分支已含上一轮工作），
+        然后切回主分支，使 <branch> 不在 HEAD。返回该分支的 tip sha。"""
+        lc = _create_lifecycle(str(project))
+        assert lc._git_init_and_initial_commit(project, "init") is True
+        rc, default_branch, _ = lc._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=project)
+        assert rc == 0
+        assert default_branch.strip()
+        default_branch = default_branch.strip()
+        lc._run_git("checkout", "-b", branch, cwd=project)
+        (project / "prior_work.txt").write_text("上一轮工作成果", encoding="utf-8")
+        lc._run_git("add", "-A", cwd=project)
+        lc._run_git("commit", "-m", "prior task work", cwd=project)
+        rc, sha, _ = lc._run_git("rev-parse", branch, cwd=project)
+        assert rc == 0
+        assert sha
+        lc._run_git("checkout", default_branch, cwd=project)
+        return sha.strip()
+
+    def test_worktree_add_transient_failure_does_not_delete_branch(self, tmp_path):
+        """worktree add 瞬态失败(rc=-1)时，不得 branch -D 删除已有工作分支。"""
+        project = tmp_path / "wt_repo"
+        project.mkdir()
+        branch = "task/wt_redeliver"
+        prior_sha = self._repo_with_task_branch(project, branch)
+        ws_dir = project.parent / "wt_redeliver_ws"
+
+        lc = _create_lifecycle(str(project))
+        original_run_git = lc._run_git
+
+        def fake_run_git(*args, cwd=None, timeout=30):  # noqa: ANN002,ANN003
+            if args[:2] == ("worktree", "add"):
+                return (-1, "", "命令执行超时（30秒）")
+            return original_run_git(*args, cwd=cwd, timeout=timeout)
+
+        lc._run_git = fake_run_git
+
+        # 失败闭合：瞬态失败应抛 RuntimeError，而不是默默 branch -D
+        with pytest.raises(RuntimeError, match="瞬态"):
+            lc._worktree_add_with_repair(project, branch, ws_dir, "wt_redeliver")
+
+        # 分支与上一轮提交必须存活（用全新未 patch 的 lifecycle 复查）
+        verify = _create_lifecycle(str(project))
+        rc, sha, _ = verify._run_git("rev-parse", "--verify", f"{branch}^{{commit}}", cwd=project)
+        assert rc == 0, "task 分支不得被删除"
+        assert sha.strip() == prior_sha, "上一轮提交对象必须存活（数据未丢失）"
+
+    def test_worktree_add_real_failure_repair_still_works(self, tmp_path):
+        """worktree add 真实失败(rc=128，分支已存在)时，prune+branch-D+重试 的修复路径仍生效。
+
+        回归守卫：修复不得破坏"真实失败时清理重建"的合法 repair 路径。
+        """
+        project = tmp_path / "wt_repair_repo"
+        project.mkdir()
+        branch = "task/wt_repair"
+        self._repo_with_task_branch(project, branch)  # 分支已存在
+        ws_dir = project.parent / "wt_repair_ws"
+
+        lc = _create_lifecycle(str(project))
+        original_run_git = lc._run_git
+        state = {"n": 0}
+
+        def fake_run_git(*args, cwd=None, timeout=30):  # noqa: ANN002,ANN003
+            if args[:2] == ("worktree", "add"):
+                state["n"] += 1
+                if state["n"] == 1:
+                    return (128, "", f"fatal: a branch named '{branch}' already exists")
+                # 重试放行真实执行
+            return original_run_git(*args, cwd=cwd, timeout=timeout)
+
+        lc._run_git = fake_run_git
+
+        # 不抛异常：repair 删旧分支后重建 worktree 成功
+        lc._worktree_add_with_repair(project, branch, ws_dir, "wt_repair")
+
+        assert ws_dir.exists(), "重试后 worktree 应被创建"
+
+
 # ── 3. 场景C：已有项目有 .git ──────────────────────────────────────
 
 
