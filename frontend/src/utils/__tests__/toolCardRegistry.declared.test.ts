@@ -69,4 +69,16 @@ describe('功能点：enhanceActivityWithToolConfig 声明优先（chat_card 按
     // other_tool 无声明 → 不应拿到 translate 的标题
     expect(out.title).not.toBe('翻译')
   })
+
+  it('声明的 icon 字符串 → 解析为图标组件并设入 customIcon', () => {
+    loadChatCardDeclarations([
+      { name: 'bash_tool', ui: { chat_card: { icon: 'terminal', title: '命令' } } },
+    ])
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('bash_tool'),
+      makeToolCall('bash_tool', {}),
+    )
+    // customIcon 被设置（图标组件渲染为 ReactNode，非空）
+    expect(out.customIcon).toBeTruthy()
+  })
 })

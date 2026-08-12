@@ -13,6 +13,7 @@ import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
 import { interpretChatCard } from './chatCardInterpreter'
 import { getChatCardDeclaration } from './chatCardInterpreter'
+import { resolveChatCardIcon } from './chatCardIconRegistry'
 import type { ToolCallContext } from './chatCardInterpreter'
 
 /**
@@ -112,9 +113,11 @@ export function enhanceActivityWithToolConfig(
       partial_output: toolCall.partialOutput,
     }
     const interpreted = interpretChatCard(declared, ctx)
+    const Icon = resolveChatCardIcon(interpreted.icon)
     return {
       ...activity,
       title: interpreted.title ?? activity.title,
+      customIcon: interpreted.icon ? <Icon className="h-icon-md w-icon-md" /> : activity.customIcon,
       details: interpreted.details.length > 0 ? interpreted.details : activity.details,
       actions: interpreted.actions.length > 0 ? interpreted.actions : activity.actions,
     }
