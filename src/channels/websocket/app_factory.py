@@ -96,6 +96,18 @@ def create_combined_app() -> FastAPI:  # noqa: PLR0915
             os.getpid(),
             id(asyncio.get_running_loop()),
         )
+
+        # 主事件循环冻结看门狗：独立线程监控 loop 心跳，被同步代码冻住>N秒时
+        # dump 所有线程栈到 logs/loop_freeze.log。这是抓"同步阻塞冻 loop"的唯一手段
+        # （应用层 asyncio 日志在 loop 冻时不调度、抓不到元凶）。用于定位
+        # "子任务终态通知上级后上级首次 LLM 调用永久卡死"类问题。零业务侵入。
+        try:
+            from monitoring.loop_watchdog import attach_loop_watchdog  # noqa: PLC0415
+
+            attach_loop_watchdog(asyncio.get_running_loop(), "logs")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Lifespan] LoopWatchdog 启动失败（非致命）: %s", exc)
+
         if not _task_worker_started:
             tw = getattr(stream_handler, "_task_worker", None)
             if tw and hasattr(tw, "start"):

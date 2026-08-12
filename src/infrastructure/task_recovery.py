@@ -176,7 +176,12 @@ class TaskRecoveryMixin:
             result: 评估结果数据（传入会被按需补充合并失败信息）
         """
         if passed:
-            merge_error = self._try_merge_worktree(task_id)
+            # _try_merge_worktree 内部跑 worktree 合并（一串同步 git subprocess），
+            # 在 async 恢复路径同步调用会冻主 loop → 终态通知唤醒的父管道首次 LLM
+            # 调用会永久卡死。丢线程池执行（合并串行的 threading.Lock 跨线程有效）。
+            import asyncio  # noqa: PLC0415
+
+            merge_error = await asyncio.to_thread(self._try_merge_worktree, task_id)
             if merge_error:
                 logger.error(
                     "TaskWorker: 恢复路径 worktree 合并失败，任务标记 failed: task_id=%s, error=%s",

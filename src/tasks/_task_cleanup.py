@@ -111,8 +111,14 @@ class _TaskCleanupMixin:
             provider = get_service_provider()
             lifecycle = provider.get("workspace_lifecycle_manager")
             if lifecycle:
-                lifecycle.restore_ws_meta(task_id)
-                cleanup_result = lifecycle.cleanup_workspace(task_id)
+                # cleanup_workspace 内部跑 git worktree remove / branch -D（subprocess）
+                # + _force_rmtree 删整个 worktree 目录（Windows 上删大目录可达数十秒），
+                # 且内部已调 restore_ws_meta。本函数在 async 终态清理链路中，同步调用会
+                # 冻住主事件循环 → 此时被终态通知唤醒的父管道首次 LLM 调用会永久卡死。
+                # 丢线程池执行避免冻 loop（直接传 bound method，无闭包延迟捕获问题）。
+                import asyncio  # noqa: PLC0415
+
+                cleanup_result = await asyncio.to_thread(lifecycle.cleanup_workspace, task_id)
                 if cleanup_result:
                     lifecycle_cleaned = True
                     cleanup_results["workspace_cleaned"] = True
@@ -319,8 +325,11 @@ class _TaskCleanupMixin:
                     provider = get_service_provider()
                     lifecycle = provider.get("workspace_lifecycle_manager")
                     if lifecycle:
-                        lifecycle.restore_ws_meta(subtask.id)
-                        lc_result = lifecycle.cleanup_workspace(subtask.id)
+                        # 同 _cleanup_task_resources：cleanup_workspace 含 git subprocess
+                        # + rmtree 删 worktree 目录，同步阻塞会冻主 loop，丢线程池执行。
+                        import asyncio  # noqa: PLC0415
+
+                        lc_result = await asyncio.to_thread(lifecycle.cleanup_workspace, subtask.id)
                         if lc_result and (lc_result.get("worktree_removed") or lc_result.get("dir_removed")):
                             lifecycle_cleaned = True
                             result["cleaned_count"] += 1

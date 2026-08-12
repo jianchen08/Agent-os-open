@@ -507,79 +507,21 @@ class TaskExecutorMixin:
 
                     logger.debug("TaskWorker: pipeline done | task=%s", _task_id)
 
+            # ── 唯一该分支的地方：决定「发什么消息」──
+            # 续跑（有 conversation_history）发空消息，历史在 conversation_history 里；
+            # inherit / 新任务发 goal，引擎从存储自加载历史。
+            # inherit 任务和普通任务在生命周期上没有任何区别，绑兜底回调、send、
+            # 清理一律走下方公共逻辑，绝不因分支而异（f81e12cac33d 卡死根因正是
+            # 此前 else 分支漏绑 done_callback → 管道 ended 后任务不进终态空转）。
+            _msg_content = ""
             if conversation_history:
-                # FILE DIAG branch
-
-                _data_dir = os.environ.get("DATA_DIR", "") or str(Path(__file__).resolve().parents[2] / "data")
-
-                os.makedirs(_data_dir, exist_ok=True)  # noqa: PTH103
-
-                with open(str(Path(_data_dir) / "diag_inherit.log"), "a", encoding="utf-8") as _f:
-                    from datetime import datetime  # noqa: PLC0415
-
-                    _f.write(
-                        f"{datetime.now().isoformat()} | BRANCH=HISTORY task={task_id} | "
-                        f"history_len={len(conversation_history)}\n"
-                    )
-
                 logger.debug(
                     "TaskWorker: 从历史恢复启动管道（主循环）| task=%s | history_len=%d | pipeline=%s",
                     task_id,
                     len(conversation_history),
                     pipeline_id[:12],
                 )
-
-                # I4：外部不直接调 engine.run()，统一走 send_pipeline_message。
-                # send 内部启动引擎（_start_idle_engine → ensure_future(engine.run)），
-                # 并把 engine_task 写到 entry。这里从 entry 拿 engine_task 绑 done_callback。
-                from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
-                from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
-
-                _history_msg = PipelineMessage(
-                    type=MessageType.CHAT,
-                    content="",
-                    pipeline_id=pipeline_id,
-                    thread_id=_ws_thread_id or "",
-                )
-                _history_result = await send_pipeline_message(
-                    _history_msg,
-                    output_sink=_sink,
-                    agent_config=agent_config,
-                    conversation_history=conversation_history,
-                    task_id=task_id,
-                    workspace=workspace,
-                )
-
-                if not _history_result.success:
-                    logger.error("TaskWorker: 历史恢复消息注入失败 task=%s error=%s", task_id, _history_result.error)
-                    return
-
-                # send 已启动引擎，从 entry 拿 engine_task 绑 done_callback（任务编排需要）
-                from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
-                _entry = get_engine_registry().get(pipeline_id)
-                engine_future = _entry.engine_task if _entry else None
-
-                if engine_future is not None:
-                    engine_future.add_done_callback(_on_engine_done)
-
             else:
-                # FILE DIAG branch
-
-                _data_dir2 = os.environ.get("DATA_DIR", "") or str(Path(__file__).resolve().parents[2] / "data")
-
-                os.makedirs(_data_dir2, exist_ok=True)  # noqa: PTH103
-
-                with open(str(Path(_data_dir2) / "diag_inherit.log"), "a", encoding="utf-8") as _f:
-                    from datetime import datetime  # noqa: PLC0415
-
-                    _f.write(
-                        f"{datetime.now().isoformat()} | BRANCH=NO_HISTORY task={task_id} | "
-                        f"full_input_len={len(full_input) if full_input else 0}\n"
-                    )
-
-                # 无历史记录: 正常发送消息启动管道
-
                 if not full_input or not full_input.strip():
                     logger.error(
                         "TaskWorker: 拒绝发送空消息，任务终止 | task=%s",
@@ -590,35 +532,42 @@ class TaskExecutorMixin:
                         await task_service.fail_task(task_id, "消息内容为空，无法启动管道")
 
                     return
+                _msg_content = full_input
 
-                from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
+            # ── 公共：send → 绑 done_callback（所有任务一致）──
+            from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
-                _pipe_msg = PipelineMessage(
-                    type=MessageType.CHAT,
-                    content=full_input,
-                    pipeline_id=pipeline_id,
-                    thread_id=_ws_thread_id or "",
-                )
+            _pipe_msg = PipelineMessage(
+                type=MessageType.CHAT,
+                content=_msg_content,
+                pipeline_id=pipeline_id,
+                thread_id=_ws_thread_id or "",
+            )
+            _msg_result = await send_pipeline_message(
+                _pipe_msg,
+                output_sink=_sink,
+                agent_config=agent_config,
+                conversation_history=conversation_history,
+                task_id=task_id,
+                workspace=workspace,
+            )
 
-                _msg_result = await send_pipeline_message(
-                    _pipe_msg,
-                    output_sink=_sink,
-                    agent_config=agent_config,
-                    conversation_history=conversation_history,
-                    task_id=task_id,
-                    workspace=workspace,
-                )
+            if not _msg_result.success:
+                logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
+                return
 
-                if not _msg_result.success:
-                    logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
+            # 绑 done_callback：管道结束（无论正常/异常/ended 无产出）后
+            # _check_post_pipeline_state 必被触发 → 无产出 fail_task + 写 error + 通知上级。
+            # 不能依赖引擎内部 _mark_task_failed_on_engine_exit：它只覆盖异常退出
+            # （CancelledError/Exception），不覆盖「正常 ended 无产出」（如
+            # context_window_guard 压缩失败设 ENDED=True、raw_error=none 走正常退出路径），
+            # 不绑回调任务就会永远 running 空转。
+            _entry = get_engine_registry().get(pipeline_id)
+            engine_future = _entry.engine_task if _entry else None
 
-                    return
-
-                # send_pipeline_message 已启动引擎（run_in_executor），引擎自身有完整
-
-                # 的生命周期管理：stop_check、idle timer、_cleanup_run_loop、
-
-                # _mark_task_failed_on_engine_exit。不需要外部注册清理回调。
+            if engine_future is not None:
+                engine_future.add_done_callback(_on_engine_done)
 
             # fire-and-forget: 不阻塞等待引擎完成
 

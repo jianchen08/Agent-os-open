@@ -883,18 +883,31 @@ class MemoryContextService:
         if not recent_tool_ids:
             return old_msgs, recent_msgs
 
-        move_count = 0
+        # 找到「result 在 recent 但 assistant 发出方在 old」的被切断配对，
+        # 只移必要的 assistant（+ 紧跟的属于这些 call 的 tool results）到 recent。
+        # 不盲目移 old[i:] 全部——否则配对保护会让 recent 膨胀到远超预算
+        # （压缩失败根因：_find_split_by_budget 按预算切到 ~9 条，配对保护却把
+        # old[i:] 整段移过来，recent 膨胀到 115 条 / 328 万 token，巨型 tool result
+        # 压不掉 → 管道 ended → 任务卡 running）。
         for i in range(len(old_msgs) - 1, -1, -1):
             msg = old_msgs[i]
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 call_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
                 if call_ids & recent_tool_ids:
-                    move_count = len(old_msgs) - i
+                    # 只收集这条 assistant + 紧跟的属于它的 tool results（防御部分
+                    # 配对：result 可能跨 old/recent 边界）。其余 old[i+1:] 不相关，
+                    # 留给压缩。
+                    migrate = [msg]
+                    j = i + 1
+                    while (
+                        j < len(old_msgs)
+                        and old_msgs[j].get("role") == "tool"
+                        and old_msgs[j].get("tool_call_id") in call_ids
+                    ):
+                        migrate.append(old_msgs[j])
+                        j += 1
+                    old_msgs = old_msgs[:i] + old_msgs[j:]
+                    recent_msgs = migrate + recent_msgs
                     break
-
-        if move_count > 0:
-            migrated = old_msgs[-move_count:]
-            old_msgs = old_msgs[:-move_count]
-            recent_msgs = migrated + recent_msgs
 
         return old_msgs, recent_msgs
