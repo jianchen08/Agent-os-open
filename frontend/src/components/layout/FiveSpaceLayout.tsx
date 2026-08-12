@@ -22,7 +22,7 @@ import { AppHeader } from './AppHeader'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { StatusBar } from './StatusBar'
-import { WorkspacePanel } from './WorkspacePanel'
+import { WorkspaceHost } from './WorkspaceHost'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
@@ -484,7 +484,7 @@ export function FiveSpaceLayout({
         // 全屏模式：工作区 100% 占满视口，不渲染任何标题条。
         // 退出入口 = 工作区 Tab 栏的全屏按钮(isFullscreen 时显示退出图标)或 ESC 键。
         <div className="min-h-0 flex-1 overflow-hidden">
-          <WorkspacePanel
+          <WorkspaceHost
             tabs={workspaceTabs}
             onTabChange={setActiveTab}
             onTabClose={handleCloseTab}
@@ -508,7 +508,7 @@ export function FiveSpaceLayout({
             }
           />
           <div className="min-h-0 flex-1 overflow-hidden">
-            <WorkspacePanel
+            <WorkspaceHost
               tabs={workspaceTabs}
               onTabChange={setActiveTab}
               onTabClose={handleCloseTab}
@@ -655,7 +655,7 @@ export function FiveSpaceLayout({
                     resizable
                   >
                     <section className="h-full min-w-0 overflow-hidden">
-                      <WorkspacePanel
+                      <WorkspaceHost
                         tabs={workspaceTabs}
                         onTabChange={setActiveTab}
                         onTabClose={handleCloseTab}
@@ -694,7 +694,7 @@ export function FiveSpaceLayout({
               </div>
               {/* 工作区内容 */}
               <div className="min-h-0 flex-1 overflow-hidden">
-                <WorkspacePanel
+                <WorkspaceHost
                   tabs={workspaceTabs}
                   onTabChange={setActiveTab}
                   onTabClose={(tabId) => {

@@ -6,7 +6,7 @@ import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import type { WorkspaceTab } from '@/types/layout'
 
 /** 工作区面板属性 */
-interface WorkspacePanelProps {
+export interface WorkspacePanelProps {
   /** 工作区 Tab 列表 */
   tabs: WorkspaceTab[]
   /** Tab 切换回调 */
