@@ -414,3 +414,23 @@ jobs:
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
         run: python scripts/check_tdd_compliance.py
+
+  # ── Traceability Gate（测试追溯标记闭环，阶段 5.1/5.2）────────────────────
+  # 强制每个测试文件带合法 @feature（引用闭环到 docs/test_traceability.md）。
+  # 非法标记（引用不存在的功能点/愿景/审查号）→ 硬失败；
+  # 未标记文件数走"只减不增"基线锁（.github/traceability-baseline.txt），
+  # 首次接入用基线锁（316）避免一次性锁死全仓，鼓励逐步补标记。
+  # 详见 scripts/check_test_traceability.py、config/rules/testing_rules.md §9。
+  traceability-gate:
+    name: Traceability Gate (@feature 追溯闭环)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check test traceability markers
+        run: python scripts/check_test_traceability.py
