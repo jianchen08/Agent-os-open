@@ -130,3 +130,9 @@ packages/npm-tarballs/*
 
 # ─── 崩溃转储（不入库）───
 *.stackdump
+
+# ─── 本地调试/构建产物（误生成的散落文件，不入库）───
+/135
+/root_test.txt
+/frontend/build_baseline.txt
+/172.29.128.210*
