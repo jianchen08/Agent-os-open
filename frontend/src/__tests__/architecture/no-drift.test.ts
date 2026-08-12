@@ -15,11 +15,17 @@ import { listSourceFiles, readSource, scanSourceForPattern, scanSourceForRegex }
 const PAGES = 'src/pages'
 const SRC = 'src'
 
-// 基线快照（2026-08-12）：迁移推进时下调，禁止上调
+// 基线快照（2026-08-12 录入；M1 完成后下调）：迁移推进时下调，禁止上调
 const BASELINE = {
-  shellPattern: 24, // 含 flex h-screen flex-col overflow-hidden 手写外壳的页面文件数
-  getStatusStyle: 4, // getStatusStyle 出现次数（定义+调用）
-  anchorHref: 23, // <a href="/..."> 原生内部导航出现次数
+  shellPattern: 22, // 含 flex h-screen flex-col overflow-hidden 手写外壳的页面文件数（M0:24→M1:22）
+  getStatusStyle: 0, // getStatusStyle 出现次数（M0:4→M1:0，已全部收敛到 StatusBadge）
+  anchorHref: 21, // <a href="/..."> 原生内部导航出现次数（M0:23→M1:21）
+}
+
+// 统一层消费下限（M1 起 shared 有真实消费者，转为下限棘轮；ui/card 待 M2 接入仍为精确 0）
+const CONSUMPTION_MIN = {
+  shared: 10, // M1: Tools/Agents 各 5 个 shared import
+  uiCard: 0, // M2 接入后转为下限
 }
 
 describe('漂移禁令 —— 当前存量 ≤ 基线（迁移单调收敛）', () => {
@@ -45,14 +51,13 @@ describe('漂移禁令 —— 当前存量 ≤ 基线（迁移单调收敛）', 
   })
 })
 
-describe('统一层消费 —— 当前精确快照（基线 0；M1 起接入消费者后转为 ≥ BASELINE）', () => {
-  // 基线为 0 时用精确匹配：意外引入消费会被捕获，有意接入则同步更新 BASELINE 与 lint-baseline.md。
-  it('components/shared 当前 0 消费（M1 PageShell 接入后此约束切换为下限棘轮）', () => {
+describe('统一层消费 —— 下限棘轮（消费回退即回归）', () => {
+  it(`components/shared 生产引用 ≥ ${CONSUMPTION_MIN.shared}（M1 Tools/Agents 已接入）`, () => {
     const hits = scanSourceForPattern('components/shared', listSourceFiles(SRC))
-    expect(hits.length, 'shared 层消费变化必须是有意的（更新 BASELINE）').toBe(0)
+    expect(hits.length, 'shared 层消费不得回退').toBeGreaterThanOrEqual(CONSUMPTION_MIN.shared)
   })
 
-  it('components/ui/card 当前 0 消费（M2 接入后此约束切换为下限棘轮）', () => {
+  it('components/ui/card 当前 0 消费（M2 接入后转为下限棘轮）', () => {
     const hits = scanSourceForPattern('components/ui/card', listSourceFiles(SRC))
     expect(hits.length, 'ui/card 消费变化必须是有意的（更新 BASELINE）').toBe(0)
   })

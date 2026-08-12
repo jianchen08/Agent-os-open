@@ -58,6 +58,27 @@ const STATUS_VARIANT_MAP: Record<string, BadgeVariant> = {
 }
 
 /**
+ * 状态码 → 中文文案映射（统一审查 §3.3 P3：消灭中英混排）
+ *
+ * StatusBadge 不传 label 时自动查表；未知状态回退原始值。
+ */
+const STATUS_LABELS: Record<string, string> = {
+  active: '已启用',
+  success: '成功',
+  inactive: '未启用',
+  pending: '待处理',
+  error: '错误',
+  failed: '失败',
+  cancelled: '已取消',
+  running: '运行中',
+  waiting: '等待中',
+  warning: '警告',
+  disabled: '已停用',
+  deprecated: '已弃用',
+  info: '信息',
+}
+
+/**
  * 获取状态对应的 Tailwind 颜色类名
  *
  * 使用主题 badge CSS 变量，替代不生效的 bg-status-xxx/10 模式。
@@ -86,14 +107,16 @@ export function getStatusColorClass(status: string): string {
  * 根据状态值自动映射到 Badge 变体，使用主题 CSS 变量控制颜色。
  */
 export function StatusBadge({ status, label, size = 'sm' }: StatusBadgeProps) {
-  const variant = STATUS_VARIANT_MAP[status.toLowerCase()] ?? 'default'
+  const key = status.toLowerCase()
+  const variant = STATUS_VARIANT_MAP[key] ?? 'default'
+  const text = label ?? STATUS_LABELS[key] ?? status
 
   return (
     <Badge
       variant={variant}
       className={cn(size === 'md' && 'text-sm px-3 py-1')}
     >
-      {label ?? status}
+      {text}
     </Badge>
   )
 }

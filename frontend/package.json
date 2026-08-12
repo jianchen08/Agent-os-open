@@ -20,6 +20,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,json,css,md}\"",
     "format:check": "prettier --check \"src/**/*.{js,jsx,ts,tsx,json,css,md}\"",
+    "gen:page": "node scripts/gen-page.mjs",
     "preview": "vite preview",
     "postinstall": "node scripts/patch-lobehub-ui.mjs"
   },

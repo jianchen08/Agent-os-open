@@ -142,9 +142,15 @@ export default tseslint.config(
     },
   },
 
-  // Disable type-checked rules for JS files (config files, etc.)
+  // Disable type-checked rules for JS files (config files, scripts, etc.)
+  // 用 **/* 匹配嵌套目录（scripts/*.mjs 等）；原先 * 只匹配根目录，scripts 下 mjs 漏配。
   {
-    files: ['*.{js,mjs,cjs}'],
+    files: ['**/*.{js,mjs,cjs}'],
     ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
   },
 )
