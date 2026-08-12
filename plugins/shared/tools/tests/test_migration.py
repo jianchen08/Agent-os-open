@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2 迁移清理 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """工具迁移验证测试——验证简单工具插件的导入和基本功能。
 
 测试覆盖：

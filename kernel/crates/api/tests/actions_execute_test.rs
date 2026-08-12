@@ -1,3 +1,4 @@
+// @feature: FP-0.2.七 路由收敛 | @vision: V6 可即用 | @ci: rust-test
 //! 阶段3(后端):POST /api/v1/actions/execute 端点集成测试(TDD)。
 //!
 //! 前端 GrowthLoop.ts 已注入 transport,把命令面板/快捷键/菜单触发统一 POST 到

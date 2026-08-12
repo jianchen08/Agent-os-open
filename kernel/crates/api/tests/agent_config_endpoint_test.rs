@@ -1,3 +1,4 @@
+// @feature: FP-0.2.CFG 配置注入 | @vision: V6 可即用 | @ci: rust-test
 //! 阶段1:agent schema 端点 + agent config 读写端点集成测试(TDD)。
 //!
 //! 验证端点用真实文件系统跑通:

@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @audit: T5#16 | @ci: rust-test
 //! P3-1: PluginManifest.http_endpoints 字段 serde 测试（TDD RED）。
 //!
 //! 验证 manifest 的 http_endpoints 声明可正确序列化/反序列化。

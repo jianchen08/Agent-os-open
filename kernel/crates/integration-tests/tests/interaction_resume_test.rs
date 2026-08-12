@@ -12,6 +12,8 @@
 //!
 //! [来源: ws_session.rs dispatch_interaction_response 占位 P3+ 注释，
 //!        三步 capability 设计第二步 handler 注册表架构]
+//!
+//! @feature: FP-0.2.五 审批闭环补全 | @vision: V2 全能闭环 | @ci: rust-test
 
 use std::collections::HashMap;
 use std::sync::Arc;

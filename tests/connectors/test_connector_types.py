@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """连接器类型定义的单元测试。
 
 测试所有数据类型的创建和属性访问，包括：

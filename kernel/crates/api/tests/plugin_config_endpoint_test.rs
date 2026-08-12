@@ -1,3 +1,4 @@
+// @feature: FP-0.2.CFG 配置注入 | @vision: V6 可即用 | @ci: rust-test
 //! P1-4: /api/v1/plugins/{id}/config/{file_id} GET/PUT 端点集成测试（TDD）。
 //!
 //! 验证端点用真实文件系统 + 真实 manifest 跑通：

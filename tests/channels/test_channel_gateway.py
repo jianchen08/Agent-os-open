@@ -1,3 +1,4 @@
+# @feature: FP-0.2.七 路由收敛 | @vision: V3 可嵌入 | @audit: T5#10 | @ci: python-plugins-test
 """ChannelGateway 网关主入口测试。"""
 
 from __future__ import annotations

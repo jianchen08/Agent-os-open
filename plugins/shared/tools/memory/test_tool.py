@@ -1,3 +1,4 @@
+# @feature: FP-0.2.六 记忆检索/注入补全 | @vision: V1 可进化 | @ci: python-plugins-test
 """MemoryTool 0.2 重写版 TDD 测试——IMemoryBackend 注入替代已删除的 0.1 MemoryService。
 
 验证内容（与任务规格 10 个用例对齐）：

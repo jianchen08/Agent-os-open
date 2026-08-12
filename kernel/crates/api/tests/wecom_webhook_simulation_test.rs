@@ -1,3 +1,4 @@
+// @feature: FP-0.2.七 路由收敛 | @vision: V6 可即用 | @ci: rust-test
 //! P3-4: 企微 webhook 模拟回调测试（TDD RED）。
 //!
 //! 验证 ADR §3.3 示例 + 附录 E.1.1（企微是唯一需要 raw body + 自定义响应的 webhook 用例）。

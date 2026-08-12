@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! 入站路由测试——user_input/interaction_response/stop_generation/heartbeat 分发（ADR §7.2）。
 
 use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};

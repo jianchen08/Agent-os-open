@@ -5,6 +5,8 @@
 //! 本文件产出可量化对比的基线数据。
 //!
 //! 对应 AC-11-4（traces_to: AC-6）
+//!
+//! @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @audit: T5#9 | @ci: rust-test
 
 use std::collections::HashMap;
 use std::sync::Arc;

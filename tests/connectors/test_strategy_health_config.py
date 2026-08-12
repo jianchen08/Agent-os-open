@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """REQ-42: IDE 连接器策略模式 + 健康检查 + ConfigMixin 综合测试。
 
 验证内容：

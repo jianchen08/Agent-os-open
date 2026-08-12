@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest化 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """系统插件迁移测试——覆盖 AC-09-1 ~ AC-09-6。
 
 验证 6 个系统插件（记忆/审批/评估/复盘/触发器/WebSocket适配器）的 MCP 工具注册和调用。

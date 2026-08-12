@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! FrontendEventBus 测试——唯一出口 push_to_* / 序号 / 限流 / 广播（ADR §3.5）。
 
 use agentos_session::event_bus::{EmitScope, FrontendEventBus, RateLimitConfig};

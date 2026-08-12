@@ -1,3 +1,4 @@
+# @feature: FP-0.2.三 宿主接入 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """demo_widget http.handle 端点单元测试。
 
 http_handle 是 webview widget 的 HTML 资源端点：

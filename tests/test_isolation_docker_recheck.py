@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 """IsolationGuard Docker 可用性复检回归测试。
 
 背景 BUG：IsolationGuard._docker_available 仅在插件构造时（__init__）检测一次，

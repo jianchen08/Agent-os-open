@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @vision: V6 可即用 | @ci: rust-test
 //! P1-4: /api/v1/schema 聚合各插件 config_files（TDD）。
 //!
 //! 前端据此构建"按插件展示"的配置树（ADR §4.6）。

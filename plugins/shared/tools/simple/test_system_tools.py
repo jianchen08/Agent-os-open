@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """read_execution_detail 内核 trace 改造 TDD 测试（Step 5b）。
 
 验证内容（与任务规格 6 个用例对齐）：

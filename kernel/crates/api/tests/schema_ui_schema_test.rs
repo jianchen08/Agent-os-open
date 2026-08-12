@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @vision: V6 可即用 | @ci: rust-test
 //! P2-3: /api/v1/schema 聚合各插件 ui_schema（TDD）。
 //!
 //! 前端据此自动渲染插件界面（ADR §3.4 / §8.3 P2-3）。

@@ -1,3 +1,5 @@
+// @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: rust-test
+
 //! P7: 内核承载管道配置 — PipelineDefinition / AgentConfig 解析与引擎配置转换测试
 //!
 //! 验证（以 config/pipelines/default.yaml 与 config/agents/*.yaml 为真相源）：

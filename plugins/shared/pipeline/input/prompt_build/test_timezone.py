@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """prompt_build 时间注入的时区行为测试。
 
 覆盖 _now_in_configured_tz（占位符路径）和 _build_dynamic_vars（兜底路径）

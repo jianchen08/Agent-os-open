@@ -1,3 +1,4 @@
+# @feature: FP-0.2.七 路由收敛/统一对外API网关 | @vision: V3 可嵌入 | @ci: timing
 """差异化限流策略测试。
 
 覆盖场景：

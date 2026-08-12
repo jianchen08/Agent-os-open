@@ -1,3 +1,4 @@
+# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """结构化日志 + 链路追踪补充测试
 
 补充覆盖：

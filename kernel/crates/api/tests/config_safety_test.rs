@@ -1,3 +1,4 @@
+// @feature: FP-0.2.CFG 配置注入 | @vision: V6 可即用 | @ci: rust-test
 //! P1-5: 配置读写安全（B1-B6）单元测试（TDD RED）。
 //!
 //! 覆盖 ADR §4.3 的安全控制：

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """集成测试——覆盖 10 个工具的核心场景。
 
 通过直接调用工具函数验证行为等价性（AC-08-3/4）。

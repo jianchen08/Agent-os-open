@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @audit: T5#3 | @ci: timing
 import tests._isolation_path  # noqa: F401
 
 """Docker daemon 假死防阻塞回归测试。

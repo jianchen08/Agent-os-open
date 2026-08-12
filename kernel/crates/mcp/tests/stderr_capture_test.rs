@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 //! McpClient stderr 捕获回归测试——日志丢弃/阻塞修复验证。
 //!
 //! 背景：原实现 stderr 被 `Stdio::piped()` 却从不读取，Python sidecar 的日志

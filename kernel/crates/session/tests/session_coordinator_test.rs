@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! SessionCoordinator 测试——断线重连全链路（ADR §7.2）。
 //!
 //! emit 记录到重放缓冲 → 断线 → 重连上报 last_sequence → 回放续传 / resync。

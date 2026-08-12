@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """占位符递归嵌套解析的单测。
 
 验证 prompt_build.PromptBuildPlugin._resolve_placeholders 的递归行为：

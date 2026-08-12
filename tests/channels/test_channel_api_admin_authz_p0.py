@@ -1,3 +1,4 @@
+# @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: python-plugins-test
 """P0-2 channel_api 越权修复测试（TDD）。
 
 回归安全缺口：``http_handle`` 不鉴权，各 ``_handle_*`` 把 ``_user={}``（空 dict）

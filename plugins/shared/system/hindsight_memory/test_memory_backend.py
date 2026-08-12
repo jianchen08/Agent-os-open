@@ -1,3 +1,4 @@
+# @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @audit: T5#4 | @ci: python-plugins-test
 """IMemoryBackend 端口与 Hindsight/Kernel 后端 + 工厂的 TDD 测试。
 
 验证内容（与任务规格 10 个用例对齐）：

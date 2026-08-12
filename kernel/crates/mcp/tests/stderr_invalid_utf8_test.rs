@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 //! stderr 非 UTF-8 字节回归测试——sidecar 阻塞（120s 超时）根因验证。
 //!
 //! 背景（llm_core.execute 120s 超时根因）：Windows 宿主上 Python sidecar 的

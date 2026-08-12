@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 """runc setns 命名空间脱节自动恢复测试。
 
 背景 BUG：

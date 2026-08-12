@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! auth 测试——握手鉴权拒绝码 / 通过分支（ADR §7.2，参考 0.1 app_factory.py:232）。
 
 use agentos_session::auth::{

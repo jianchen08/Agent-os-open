@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @audit: T5#16 | @ci: rust-test
 //! P3-1/P3-3: CapabilityRegistry http_routes 维测试（TDD RED）。
 //!
 //! 验证：

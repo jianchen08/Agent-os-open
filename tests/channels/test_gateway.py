@@ -1,3 +1,4 @@
+# @feature: FP-0.2.七 路由收敛 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """多渠道消息网关核心组件测试。
 
 测试 ChannelGateway、MessageNormalizer、SessionBridge 和 UnifiedTypes

@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 //! McpClient.kill() 整树杀测试——治理缺口回归：
 //!
 //! 原实现只 kill 直接子进程（sidecar 本体），bash 工具拉起的孙进程会变

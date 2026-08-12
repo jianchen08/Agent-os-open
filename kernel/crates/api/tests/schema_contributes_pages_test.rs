@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @vision: V6 可即用 | @ci: rust-test
 //! 阶段2(后端):/api/v1/schema 的 plugin_contributes 原样透传 manifest.contributes(TDD)。
 //!
 //! 内核不解释 contributes 结构(ADR §3.4/§六),前端 ContributionRegistry

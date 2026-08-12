@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! 管道注册表「用户旅程」串联验证（功能验证专用）
 //!
 //! 模拟真实用户多轮对话的完整闭环（对齐 server.rs process_via_engine 的

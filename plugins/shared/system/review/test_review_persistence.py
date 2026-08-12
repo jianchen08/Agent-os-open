@@ -1,3 +1,4 @@
+# @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @ci: python-plugins-test
 """复盘报告持久化 TDD 测试（Step 5b）。
 
 验证内容（与任务规格 4 个用例对齐）：

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 """技能复制增量同步测试。
 
 覆盖修复点（BUG-FIX-fix_20260629_skills_stale_snapshot）：

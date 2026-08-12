@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """
 REQ-20/21/23 验证：监控数据/模型名/上下文信息测试
 

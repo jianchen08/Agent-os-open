@@ -1,3 +1,4 @@
+// @feature: FP-0.2.CFG 配置注入 | @vision: V6 可即用 | @ci: rust-test
 //! P7: 管道配置查询/更新接口集成测试（TDD）。
 //!
 //! 验证 `/api/v1/config/pipelines/{name}` GET/PUT 端点：

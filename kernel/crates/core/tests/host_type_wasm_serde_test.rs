@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @audit: T5#16 | @ci: rust-test
 //! task_11 N1：HostType::Wasm 变体 + PluginManifest native/wasm 字段 serde 测试。
 //!
 //! 验证：

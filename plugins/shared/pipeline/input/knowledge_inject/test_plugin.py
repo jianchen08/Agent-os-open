@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """knowledge_inject plugin TDD 测试（Step 6 重建）。
 
 验证内容（与任务规格 3 个用例对齐）：

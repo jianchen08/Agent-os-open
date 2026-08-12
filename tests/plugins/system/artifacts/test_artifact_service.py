@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """ArtifactService / AnnotationService 单元测试——纯内存 CRUD + 版本链 + diff。
 
 不触 DB / LLM / 网络：两个 service 在 __init__ 时即纯 dict 存储。

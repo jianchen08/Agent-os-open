@@ -1,3 +1,4 @@
+// @feature: FP-0.2.二 内部模块manifest | @vision: V6 可即用 | @ci: rust-test
 //! 用户流程端到端测试（验证 docs/working/user_flow_and_capabilities.md 的关键断言）
 //!
 //! 覆盖场景：

@@ -10,6 +10,8 @@
 //! 4. 验证边界场景（空文件、嵌套、数字/布尔类型推断）
 //!
 //! 对应 AC-11-3（traces_to: AC-4）
+//!
+//! @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: rust-test
 
 use agentos_config::ConfigLoader;
 use serde_json::{json, Value};

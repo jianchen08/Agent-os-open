@@ -8,6 +8,8 @@
 //! 5. config → plugin-loader：配置系统产出 manifest 供插件加载器发现
 //!
 //! 对应 AC-11-2（traces_to: AC-13）
+//!
+//! @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: rust-test
 
 use std::collections::HashMap;
 use std::sync::Arc;

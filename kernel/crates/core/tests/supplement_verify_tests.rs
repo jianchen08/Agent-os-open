@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @audit: T5#16 | @ci: rust-test
 //! 补充验证测试
 //!
 //! 填补 contract_tests.rs 中的验证缺口：

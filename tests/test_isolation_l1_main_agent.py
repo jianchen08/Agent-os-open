@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 """L1 主 agent bash_execute 路由测试。
 
 核心契约：

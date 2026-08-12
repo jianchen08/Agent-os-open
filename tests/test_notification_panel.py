@@ -1,3 +1,4 @@
+# @feature: FP-0.2.三 宿主接入 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """
 NotificationPanel 组件功能验证测试
 

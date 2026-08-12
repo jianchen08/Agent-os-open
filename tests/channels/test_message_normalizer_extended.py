@@ -1,3 +1,4 @@
+# @feature: FP-0.2.七 路由收敛 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """消息标准化器补充测试。
 
 覆盖现有测试未覆盖的渠道和边界场景：

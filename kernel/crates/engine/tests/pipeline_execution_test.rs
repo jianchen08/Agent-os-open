@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: rust-test
 //! P7: 引擎执行验证 — config crate 转换产物可被 PipelineExecutor 正确执行
 //!
 //! 验证链路（AC5）：

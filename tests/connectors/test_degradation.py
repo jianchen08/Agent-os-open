@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """降级管理器的单元测试。
 
 测试 DegradationManager 的 can_handle_locally、execute_with_fallback 对各种 action_type 的处理，

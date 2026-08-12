@@ -1,3 +1,5 @@
+// @feature: FP-0.2.CFG 配置系统与插件配置注入 | @vision: V3 可嵌入 | @ci: rust-test
+
 //! Task-04 配置系统功能验证 — 集成测试
 //!
 //! 完整用户旅程：ConfigLoader 创建(.env加载) → YAML解析(anchor/alias/merge)

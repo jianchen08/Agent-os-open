@@ -1,3 +1,4 @@
+// @feature: FP-0.2.八 多租户 | @vision: V4 多用户 | @ci: rust-test
 //! ws_session 接入层测试——握手鉴权 + EventSink 适配（P2 接线）。
 
 use agentos_session::auth::{authenticate_handshake, HandshakeAuth};

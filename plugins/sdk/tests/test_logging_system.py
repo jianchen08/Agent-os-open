@@ -1,3 +1,4 @@
+# @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: python-plugins-test
 """统一日志系统测试。
 
 覆盖模块：

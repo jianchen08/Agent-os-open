@@ -1,3 +1,4 @@
+// @feature: FP-0.2.七 路由收敛 | @vision: V6 可即用 | @ci: rust-test
 //! P3-2/P3-3: HTTP dispatcher 测试（TDD RED）。
 //!
 //! 验证 ADR §3.3 / 附录 E.1.2 / E.1.3：

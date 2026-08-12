@@ -7,6 +7,8 @@
 //!
 //! 前置：`plugins/shared/wasm_calc/` 下需已 `cargo build --release --target wasm32-unknown-unknown`。
 //! 若 wasm 未构建，测试跳过而非失败（与 wasm_loader.rs 的 hello_world 测试一致）。
+//!
+//! @feature: FP-0.2.一 第三方插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 
 use agentos_plugin_loader::WasmRuntime;
 use serde_json::json;

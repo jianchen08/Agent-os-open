@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! 断线重放测试——per-thread 环形缓冲 / last_sequence 续传 / 溢出 resync /
 //! B9 交互族不进重放 / widget 溢出保留最新帧（ADR §7.2）。
 

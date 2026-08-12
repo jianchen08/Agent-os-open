@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-plugins-test
 """连接器注册表的单元测试。
 
 测试 ConnectorRegistry 的注册、注销、查询、优先级排序和能力匹配功能。

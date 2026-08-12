@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @audit: T5#16 | @ci: rust-test
 //! P6 命名治理（ADR 附录 D②）：PluginManifest.invoke_entry 字段 serde 测试（TDD RED）。
 //!
 //! invoke_entry 是 pipeline/system 等**非 tool 插件**的 MCP 入口方法名

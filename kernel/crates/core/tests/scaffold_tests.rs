@@ -1,3 +1,4 @@
+// @feature: FP-T03 | @vision: V3 可嵌入 | @ci: rust-test
 //! 仓库脚手架结构验证测试
 //!
 //! 验证 task_03 产出的 8 crate workspace 骨架结构完整性。

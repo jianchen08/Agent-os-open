@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 """场景管理系统单元测试。
 
 覆盖 SceneManager 的核心功能：创建、切换、删除、列表、查询场景，

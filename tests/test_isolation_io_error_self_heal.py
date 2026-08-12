@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 import tests._isolation_path  # noqa: F401
 
 """9p/drvfs EIO 自愈集成测试（post-exec：修宿主挂载 + 重建容器 + 重试）。

@@ -1,3 +1,5 @@
+// @feature: FP-0.2.八 多租户核心系统 | @vision: V4 多用户 | @ci: rust-test
+
 //! connection_registry 测试——单连接踢旧 / user/thread 查找 / 注销（ADR §7.2 B10）。
 //!
 //! 真实可运行测试，用 mock EventSink（不依赖 axum WS）。

@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @ci: rust-test
 //! sidecar 进程崩溃（stdout EOF）时，进行中的 send_request 必须快速失败。
 //!
 //! 背景（工具调用"调用前卡死"根因之二）：reader loop 读到 sidecar stdout EOF

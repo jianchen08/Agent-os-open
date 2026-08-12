@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
 import tests._isolation_path  # noqa: F401
 
 """容器并发创建竞态回归测试。
