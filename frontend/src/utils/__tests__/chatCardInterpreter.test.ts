@@ -98,4 +98,32 @@ describe('功能点：interpretChatCard 把声明翻译成 ActivityDetailBlock[]
     const out = interpretChatCard(decl, { args: { cmd: 'echo hi' } })
     expect(out.details[0]).toMatchObject({ contentType: 'code', language: 'bash', collapsible: true, content: 'echo hi' })
   })
+
+  // ── 迁移内置工具引入的 interpreter 能力（TC T1） ──
+
+  it('result 为非 JSON 纯文本（如 file_read/bash 输出）→ 回退原始字符串取值', () => {
+    // safeParse 失败时不丢失内容：source 'result' 应得到原始字符串
+    const decl: ChatCardDeclaration = { blocks: [{ type: 'code', source: 'result' }] }
+    const out = interpretChatCard(decl, { result: 'plain text output\nline2' })
+    expect(out.details[0].content).toBe('plain text output\nline2')
+  })
+
+  it('default 过滤器可兜底缺失（undefined）的 source', () => {
+    // command 缺失 → first_line/truncate 得空串 → default 兜底
+    const decl: ChatCardDeclaration = { title: '{{args.command | first_line | truncate:60 | default:执行命令}}' }
+    const out = interpretChatCard(decl, {})
+    expect(out.title).toBe('执行命令')
+  })
+
+  it('内容块 source 支持过滤器管道（如 truncate）', () => {
+    const decl: ChatCardDeclaration = { blocks: [{ type: 'text', source: 'result | truncate:5' }] }
+    const out = interpretChatCard(decl, { result: 'abcdefghij' })
+    expect(out.details[0].content).toBe('abcde…')
+  })
+
+  it('filePathSource 求值非空 → 返回 filePath（供 enhance 注入点击打开）', () => {
+    const decl: ChatCardDeclaration = { filePathSource: 'args.file_path' }
+    expect(interpretChatCard(decl, { args: { file_path: '/a/b.ts' } }).filePath).toBe('/a/b.ts')
+    expect(interpretChatCard(decl, { args: {} }).filePath).toBeUndefined()
+  })
 })

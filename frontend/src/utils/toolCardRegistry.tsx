@@ -7,7 +7,7 @@
  * @module toolCardRegistry
  */
 
-import { Copy, FileEdit, FileText, Globe, Link, Target, Terminal } from '@/assets/icons'
+import { Copy, FileEdit } from '@/assets/icons'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -114,13 +114,22 @@ export function enhanceActivityWithToolConfig(
     }
     const interpreted = interpretChatCard(declared, ctx)
     const Icon = resolveChatCardIcon(interpreted.icon)
-    return {
+    const enhanced: ActivityData = {
       ...activity,
       title: interpreted.title ?? activity.title,
       customIcon: interpreted.icon ? <Icon className="h-icon-md w-icon-md" /> : activity.customIcon,
       details: interpreted.details.length > 0 ? interpreted.details : activity.details,
       actions: interpreted.actions.length > 0 ? interpreted.actions : activity.actions,
     }
+    // 声明 filePathSource 求值非空 → 注入 filePath + onOpenFile（等价手写 hasFilePath，
+    // 使 ActivityCard 头部标题可点击打开文件）
+    if (interpreted.filePath) {
+      enhanced.filePath = interpreted.filePath
+      const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
+      const recordTaskId = toolCall.containerTaskId
+      enhanced.onOpenFile = () => openFileCallback(interpreted.filePath as string, recordTaskId)
+    }
+    return enhanced
   }
 
   const config = getToolCardConfig(activity.toolName)
@@ -435,20 +444,6 @@ function extractFilePath(toolCall: MessageToolCall): string {
   return (args.file_path as string) || (args.path as string) || ''
 }
 
-function extractCommand(toolCall: MessageToolCall): string {
-  const args = toolCall.tool_args as Record<string, unknown> | null
-  if (!args) return ''
-  // 不同工具使用不同参数名（bash 用 command，部分旧工具用 cmd）
-  return (args.command as string) || (args.cmd as string) || ''
-}
-
-function extractUrl(toolCall: MessageToolCall): string {
-  const args = toolCall.tool_args as Record<string, unknown> | null
-  if (!args) return ''
-  // 不同工具使用不同参数名（web_fetch 用 url，search 用 query）
-  return (args.url as string) || (args.query as string) || ''
-}
-
 /**
  * 安全解析可能是 Python dict 字符串的结果
  *
@@ -504,65 +499,6 @@ export function safeParseResult(result: unknown): Record<string, unknown> | null
 
   return null
 }
-
-registerToolCard({
-  name: 'file_read',
-  icon: <FileText className="h-4 w-4" />,
-  hasFilePath: true,
-  formatTitle: (tc) => {
-    const path = extractFilePath(tc)
-    const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
-    return `读取 ${fileName}`
-  },
-  buildDetails: (tc) => {
-    const path = extractFilePath(tc)
-    const details: ActivityDetailBlock[] = []
-
-    if (path) {
-      details.push({
-        id: 'filepath',
-        label: '文件路径',
-        content: path,
-        contentType: 'code',
-        collapsible: false,
-      })
-    }
-
-    if (tc.result !== undefined && tc.result !== null) {
-      const resultStr =
-        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-      details.push({
-        id: 'result',
-        label: '文件内容',
-        content: resultStr,
-        contentType: 'code',
-        collapsible: true,
-        defaultExpanded: false,
-      })
-    }
-
-    return details
-  },
-  buildActions: (tc) => {
-    const actions: ActivityAction[] = []
-
-    if (tc.result !== undefined) {
-      actions.push({
-        id: 'copy_content',
-        icon: <Copy className="h-3.5 w-3.5" />,
-        label: '复制内容',
-        type: 'copy',
-        onClick: () => {
-          const content =
-            typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-          navigator.clipboard.writeText(content)
-        },
-      })
-    }
-
-    return actions
-  },
-})
 
 /**
  * 从 file_write 工具结果中解析 diff 数据（added/removed 行数 + 旧/新内容）
@@ -654,288 +590,6 @@ registerToolCard({
           label: '写入内容',
           content: contentStr,
           contentType: 'code',
-          collapsible: true,
-          defaultExpanded: false,
-        })
-      }
-    }
-
-    return details
-  },
-  buildActions: buildDefaultActions,
-})
-
-registerToolCard({
-  name: 'bash_execute',
-  icon: <Terminal className="h-4 w-4" />,
-  formatTitle: (tc) => {
-    const cmd = extractCommand(tc)
-    if (cmd) {
-      const firstLine = cmd.split('\n')[0].trim()
-      return firstLine.length > 60 ? firstLine.slice(0, 57) + '...' : firstLine
-    }
-    return '执行命令'
-  },
-  buildDetails: (tc) => {
-    const cmd = extractCommand(tc)
-    const details: ActivityDetailBlock[] = []
-
-    if (cmd) {
-      details.push({
-        id: 'command',
-        label: '命令',
-        content: cmd,
-        contentType: 'code',
-        language: 'bash',
-        collapsible: true,
-        defaultExpanded: true,
-      })
-    }
-
-    if (tc.result !== undefined && tc.result !== null) {
-      const resultStr =
-        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-      details.push({
-        id: 'result',
-        label: '输出',
-        content: resultStr,
-        contentType: 'code',
-        language: 'text',
-        collapsible: true,
-        defaultExpanded: false,
-      })
-    }
-
-    if (tc.error) {
-      details.push({
-        id: 'error',
-        label: '错误',
-        content: tc.error,
-        contentType: 'text',
-        collapsible: true,
-        defaultExpanded: true,
-      })
-    }
-
-    return details
-  },
-  buildActions: (tc) => {
-    const actions: ActivityAction[] = []
-
-    const cmd = extractCommand(tc)
-    if (cmd) {
-      actions.push({
-        id: 'copy_cmd',
-        icon: <Copy className="h-3.5 w-3.5" />,
-        label: '复制命令',
-        type: 'copy',
-        onClick: () => navigator.clipboard.writeText(cmd),
-      })
-    }
-
-    if (tc.result !== undefined) {
-      actions.push({
-        id: 'copy_output',
-        icon: <Copy className="h-3.5 w-3.5" />,
-        label: '复制输出',
-        type: 'copy',
-        onClick: () => {
-          const content =
-            typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-          navigator.clipboard.writeText(content)
-        },
-      })
-    }
-
-    return actions
-  },
-})
-
-registerToolCard({
-  name: 'web_search',
-  icon: <Globe className="h-4 w-4" />,
-  formatTitle: (tc) => {
-    const query = extractUrl(tc)
-    if (query) {
-      return query.length > 50 ? query.slice(0, 47) + '...' : query
-    }
-    return '网页搜索'
-  },
-  buildDetails: (tc) => {
-    const query = extractUrl(tc)
-    const details: ActivityDetailBlock[] = []
-
-    if (query) {
-      details.push({
-        id: 'query',
-        label: '搜索内容',
-        content: query,
-        contentType: 'text',
-        collapsible: false,
-      })
-    }
-
-    if (tc.result !== undefined && tc.result !== null) {
-      const resultStr =
-        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-      details.push({
-        id: 'result',
-        label: '搜索结果',
-        content: resultStr,
-        contentType: 'text',
-        collapsible: true,
-        defaultExpanded: false,
-      })
-    }
-
-    return details
-  },
-  buildActions: buildDefaultActions,
-})
-
-registerToolCard({
-  name: 'fetch',
-  icon: <Link className="h-4 w-4" />,
-  formatTitle: (tc) => {
-    const url = extractUrl(tc)
-    if (url) {
-      try {
-        const hostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname
-        return `访问 ${hostname}`
-      } catch {
-        return `访问网页`
-      }
-    }
-    return '访问网页'
-  },
-  buildDetails: (tc) => {
-    const url = extractUrl(tc)
-    const details: ActivityDetailBlock[] = []
-
-    if (url) {
-      details.push({
-        id: 'url',
-        label: 'URL',
-        content: url,
-        contentType: 'code',
-        collapsible: false,
-      })
-    }
-
-    if (tc.result !== undefined && tc.result !== null) {
-      const resultStr =
-        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-      const isLong = resultStr.length > 500
-      details.push({
-        id: 'result',
-        label: '页面内容',
-        content: isLong ? resultStr.slice(0, 500) + '\n\n... (内容已截断)' : resultStr,
-        contentType: 'text',
-        collapsible: true,
-        defaultExpanded: false,
-      })
-    }
-
-    return details
-  },
-  buildActions: buildDefaultActions,
-})
-
-/**
- * task_submit 工具卡片配置
- *
- * 显示任务提交的目标、描述、执行者及提交结果
- */
-registerToolCard({
-  name: 'task_submit',
-  icon: <Target className="h-4 w-4" />,
-  formatTitle: (tc) => {
-    const args = tc.tool_args as Record<string, unknown> | null
-    // schema 已平铺：优先读 goal_title，兼容旧式 goal.title 历史记录
-    const legacyGoal = args?.goal as Record<string, unknown> | null
-    const title =
-      (args?.goal_title as string) ||
-      (legacyGoal?.title as string) ||
-      (args?.description as string) ||
-      (args?.goal_description as string) ||
-      '任务提交'
-    return `提交任务: ${title}`
-  },
-  buildDetails: (tc) => {
-    const args = tc.tool_args as Record<string, unknown> | null
-    const details: ActivityDetailBlock[] = []
-
-    // 目标信息（schema 已平铺：优先读扁平字段，兼容旧式 goal 嵌套历史记录）
-    const legacyGoal = args?.goal as Record<string, unknown> | null
-    const goalTitle = (args?.goal_title as string) || (legacyGoal?.title as string)
-    const goalDesc = (args?.goal_description as string) || (legacyGoal?.description as string)
-    if (goalTitle) {
-      details.push({
-        id: 'goal',
-        label: '任务目标',
-        content: goalTitle,
-        contentType: 'text',
-        collapsible: false,
-      })
-    }
-    if (goalDesc) {
-      details.push({
-        id: 'goal_desc',
-        label: '详细描述',
-        content: goalDesc,
-        contentType: 'text',
-        collapsible: true,
-        defaultExpanded: false,
-      })
-    }
-
-    // 执行者信息
-    const targetId = args?.target_id as string
-    if (targetId) {
-      details.push({
-        id: 'target',
-        label: '执行者',
-        content: targetId,
-        contentType: 'text',
-        collapsible: false,
-      })
-    }
-
-    // 提交结果：安全解析 Python dict 字符串格式的 result
-    if (tc.result !== undefined && tc.result !== null) {
-      const parsedResult = safeParseResult(tc.result)
-
-      if (parsedResult) {
-        // 解析成功，从 output 字段中提取任务数据
-        const output = parsedResult.output as Record<string, unknown> | undefined
-        const taskId = (output?.task_id as string) || (parsedResult.task_id as string) || ''
-        const status = (output?.status as string) || (parsedResult.status as string) || ''
-        const message = (output?.message as string) || (parsedResult.message as string) || ''
-        const title = (output?.title as string) || (parsedResult.title as string) || ''
-
-        const contentParts: string[] = []
-        if (taskId) contentParts.push(`任务ID: ${taskId}`)
-        if (status) contentParts.push(`状态: ${status}`)
-        if (title) contentParts.push(`标题: ${title}`)
-        if (message) contentParts.push(message)
-
-        details.push({
-          id: 'result',
-          label: '提交结果',
-          content: contentParts.length > 0 ? contentParts.join('\n') : '提交成功',
-          contentType: 'text',
-          collapsible: true,
-          defaultExpanded: false,
-        })
-      } else {
-        // 解析失败，直接展示原始字符串
-        const resultStr =
-          typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
-        details.push({
-          id: 'result',
-          label: '提交结果',
-          content: resultStr,
-          contentType: 'text',
           collapsible: true,
           defaultExpanded: false,
         })

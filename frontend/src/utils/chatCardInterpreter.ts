@@ -48,6 +48,11 @@ export interface ChatCardDeclaration {
   summary?: string
   blocks?: ChatCardBlockDecl[]
   actions?: ChatCardActionDecl[]
+  /**
+   * 文件路径 source（如 'args.file_path'）。求值非空时，enhance 会注入
+   * activity.filePath + onOpenFile，使卡片标题可点击打开文件（等价手写 hasFilePath）。
+   */
+  filePathSource?: string
 }
 
 /** 工具调用上下文（source/when 的取值域） */
@@ -90,7 +95,10 @@ export function evalPath(ctx: ToolCallContext, path?: string): unknown {
       current = ctx.args
       break
     case 'result':
-      current = typeof ctx.result === 'string' ? safeParseResult(ctx.result) : ctx.result
+      // 字符串 result 优先按 Python dict/JSON 解析（供 result.x 取值）；
+      // 解析失败（如 file_read/bash 的纯文本输出）回退为原始字符串，避免内容丢失。
+      current =
+        typeof ctx.result === 'string' ? (safeParseResult(ctx.result) ?? ctx.result) : ctx.result
       break
     case 'output':
       current =
@@ -115,6 +123,30 @@ export function evalPath(ctx: ToolCallContext, path?: string): unknown {
   return current
 }
 
+/**
+ * 求值 source 表达式（可选 `| filter:arg` 管道，与模板引擎同语义）。
+ *
+ * - 无过滤器：返回 evalPath 原始值（保留对象类型，供 json 块等直接消费）
+ * - 有过滤器：字符串化后依次应用（first_line / truncate:N / basename / hostname / default:xxx）
+ *
+ * 用于内容块（text/code/markdown/log）的 source，如 fetch 的 `result | truncate:500`。
+ */
+export function evalSource(ctx: ToolCallContext, expr?: string): unknown {
+  if (!expr) return undefined
+  const parts = expr.split('|').map((s) => s.trim())
+  const value = evalPath(ctx, parts[0])
+  if (parts.length === 1) return value
+  let str = value == null ? '' : String(value)
+  for (let i = 1; i < parts.length; i++) {
+    const colon = parts[i].indexOf(':')
+    const fname = (colon >= 0 ? parts[i].slice(0, colon) : parts[i]).trim()
+    const arg = colon >= 0 ? parts[i].slice(colon + 1).trim() : undefined
+    const filter = FILTERS[fname]
+    str = filter ? filter(str, arg) : str
+  }
+  return str
+}
+
 const TEMPLATE_RE = /\{\{\s*([^}]+?)\s*\}\}/g
 
 /** 渲染 {{ expr | filter:arg }} 模板 */
@@ -122,8 +154,8 @@ export function renderTemplate(template: string, ctx: ToolCallContext): string {
   return template.replace(TEMPLATE_RE, (_m, expr: string) => {
     const [path, ...filterParts] = expr.split('|').map((s) => s.trim())
     const value = evalPath(ctx, path)
-    if (value == null) return ''
-    let str = String(value)
+    // 即使 source 为 null/undefined 也走过滤器管道，使 default:xxx 能兜底缺失字段
+    let str = value == null ? '' : String(value)
     for (const fp of filterParts) {
       const colon = fp.indexOf(':')
       const fname = (colon >= 0 ? fp.slice(0, colon) : fp).trim()
@@ -173,12 +205,12 @@ function translateBlock(decl: ChatCardBlockDecl, ctx: ToolCallContext): Activity
     case 'log':
     case 'text':
     case 'markdown': {
-      const content = toStr(evalPath(ctx, decl.source))
+      const content = toStr(evalSource(ctx, decl.source))
       if (content === '') return null
       return { ...base, contentType: decl.type as DetailContentType, content }
     }
     case 'code': {
-      const content = toStr(evalPath(ctx, decl.source))
+      const content = toStr(evalSource(ctx, decl.source))
       if (content === '') return null
       return { ...base, contentType: 'code' as DetailContentType, content, language: decl.language }
     }
@@ -204,6 +236,8 @@ export interface InterpretedChatCard {
   summary?: string
   details: ActivityDetailBlock[]
   actions: ActivityAction[]
+  /** 由 filePathSource 求值得到的文件路径（供 enhance 注入点击打开行为） */
+  filePath?: string
 }
 
 // ── 声明注册表：toolName → chat_card 声明（从 /api/v1/schema 的 tools[].ui.chat_card 装载） ──
@@ -232,6 +266,16 @@ export function getChatCardDeclaration(toolName: string): ChatCardDeclaration | 
   return chatCardDeclarations.get(toolName)
 }
 
+/**
+ * 追加单个工具的 chat_card 声明（不清空注册表）。
+ *
+ * 用途：内置工具声明在 schema 装载（loadChatCardDeclarations，会清空全表）之后追加，
+ * 使内置卡片在 schema 热重载后依然生效，并覆盖同名 schema 声明（builtin 在上层）。
+ */
+export function addChatCardDeclaration(toolName: string, decl: ChatCardDeclaration): void {
+  chatCardDeclarations.set(toolName, decl)
+}
+
 /** 清空声明注册表（测试 / 销毁用） */
 export function clearChatCardDeclarations(): void {
   chatCardDeclarations.clear()
@@ -258,11 +302,19 @@ export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContex
     label: a.label,
   }))
 
+  // filePathSource 求值 → 交由 enhance 注入 activity.filePath + onOpenFile
+  let filePath: string | undefined
+  if (decl.filePathSource) {
+    const v = evalPath(ctx, decl.filePathSource)
+    if (v != null && v !== '') filePath = String(v)
+  }
+
   return {
     title: decl.title ? renderTemplate(decl.title, ctx) : undefined,
     icon: decl.icon,
     summary: decl.summary ? renderTemplate(decl.summary, ctx) : undefined,
     details,
     actions,
+    filePath,
   }
 }

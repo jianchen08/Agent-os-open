@@ -8,6 +8,7 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { registerBuiltinToolChatCards } from '@/utils/builtinToolChatCards'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 import { loggers } from '@/utils/logger'
@@ -45,6 +46,9 @@ async function reloadContributionRegistry(): Promise<void> {
     loadChatCardDeclarations(
       (schema as { tools?: Array<{ name?: string; ui?: { chat_card?: ChatCardDeclaration } }> }).tools ?? [],
     )
+    // 内置工具（file_read/bash_execute/web_search/fetch/task_submit）的 chat_card 声明
+    // 追加在 schema 声明之上：schema 热重载（load 会清空全表）后 builtin 依然生效并优先
+    registerBuiltinToolChatCards()
     syncNavItemsFromContributes()
     shortcutRegistry.refresh()
   } catch (error) {
