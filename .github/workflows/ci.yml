@@ -269,7 +269,14 @@ jobs:
             tests/test_isolation_docker_timeout.py \
             tests/test_isolation_container_self_heal.py \
             -m "not requires_api and not requires_redis and not requires_db and not requires_bwrap" \
-            --ignore=tests/manual
+            --ignore=tests/manual \
+            --cov=plugins \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=50
+          # 阶段 2.1 覆盖率门禁：fail-under=50 为保守起手下限（现状 54%，见 test_traceability
+          # 表 D），CI 首次确认实测值后收紧至 54→55→...（目标 P2 80%）。coverage.xml 供阶段 5.3
+          # 矩阵自动回填消费。
 
       # ── Mypy 基线门禁（plugins/shared 类型错误"只减不增"）──────────────────
       # 此前 scripts/check_mypy_baseline.py 是孤儿——无 CI job 调用，基线锁形同虚设。
@@ -350,16 +357,17 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # ── 前端基线锁（阶段 2.4，N1 修复）──────────────────────────────────
+      # ── 前端基线锁（阶段 2.4，N1 修复）+ 覆盖率门禁（阶段 2.2）────────────
       # vitest/eslint 存在迁移遗留失败（React19/jsdom 渲染 + chat_card 存量 error）。
       # 用 `|| true` 放行 + tee 捕获输出，交由基线锁（.github/frontend-baseline.txt，
       # 只减不增）管控：失败/error 数增长 → CI 红；减少或持平 → 放行。
-      # 复用下方已 tee 的输出（--vitest-file/--eslint-file），不重复跑（N1）。
+      # test:coverage（Node20 v8 provider）同时产出 lcov/json-summary，供阶段 5.3 消费。
+      # 覆盖率阈值（vitest.config thresholds）起步=1 非阻塞，CI 跑出基线后按表 D 上调。
       - name: Lint (capture for baseline)
         run: npm run lint 2>&1 | tee /tmp/eslint_output.txt || true
 
-      - name: Unit tests (capture for baseline)
-        run: npm run test 2>&1 | tee /tmp/vitest_output.txt || true
+      - name: Unit tests + coverage (capture for baseline)
+        run: npm run test:coverage 2>&1 | tee /tmp/vitest_output.txt || true
 
       - name: Frontend baseline gate (vitest+eslint 只减不增)
         working-directory: ${{ github.workspace }}

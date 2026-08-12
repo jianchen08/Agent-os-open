@@ -47,6 +47,7 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.0",
+    "pytest-cov>=4.0",
     "mypy>=1.10",
     "ruff>=0.5",
 ]
@@ -272,3 +273,31 @@ module = [
     "aiohttp.*",
 ]
 ignore_missing_imports = true
+
+# ============================================================
+# 覆盖率配置（阶段 2.1，对照 testing_rules §3 / 表 D）
+# ============================================================
+# source 限定 plugins（0.2 架构的 Python 代码主体）；omit 排除测试自身与 SDK 桩。
+# 分级目标见 docs/test_traceability.md 表 D（core/tools P1、其余 P2）。
+# CI 门禁：python-plugins-test job 的 --cov-fail-under（起手下限，只升不降）。
+[tool.coverage.run]
+source = ["plugins"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "plugins/sdk/*",          # SDK 独立成包，自有 python-test job
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# 排除不可避免未覆盖的样板/防御性分支
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+]

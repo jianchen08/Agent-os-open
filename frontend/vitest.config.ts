@@ -42,22 +42,28 @@ export default defineConfig({
     watch: false,
     // 关闭 CSS 处理
     css: false,
-    // 覆盖率：include 限定到本阶段已有测试覆盖的文件。
-    // 阈值 0 起步（不阻塞），随 M1+ 迁移接入 shared/ui/PageShell 后逐级上调至 85。
-    // 见 docs/working/design/frontend-design-unification-execution-plan.md §二 M-1.2
+    // 覆盖率（阶段 2.2）：include 从 4 个文件放开到全量 src，产出真实全量基线。
+    // thresholds 从 1 起步（非阻塞地板），CI（Node20）跑出基线后按表 D 逐级上调。
+    // ⚠️ v8 provider 的 remapCoverage 在 Node25 本地会抛错——覆盖率请在 Node20 下运行
+    // （CI frontend-test 已固定 node-version 20；本地用 nvm use 20 后再 npm run test:coverage）。
     coverage: {
       provider: 'v8',
-      include: [
-        'src/services/schema/widgetChain.ts',
-        'src/components/schema/DeclaredWidgetLayer.tsx',
-        'src/components/schema/PageRenderer.tsx',
-        'src/__tests__/architecture/harness.ts',
+      // json-summary / lcov 供阶段 5.3 矩阵覆盖率列自动回填消费
+      reporter: ['text', 'text-summary', 'json-summary', 'lcov'],
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/__tests__/**',
+        'src/**/*.test.{ts,tsx}',
+        'src/test/**',
+        'src/**/*.d.ts',
+        'src/main.tsx',
+        'src/vite-env.d.ts',
       ],
       thresholds: {
-        lines: 0,
-        functions: 0,
-        statements: 0,
-        branches: 0,
+        lines: 1,
+        functions: 1,
+        statements: 1,
+        branches: 1,
       },
     },
   },
