@@ -317,7 +317,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
       const text = JSON.stringify(content, null, 2)
       return (
         <div className="group relative">
-          <pre className="bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs">
+          <pre className="bg-muted/30 max-h-40 overflow-y-auto break-all whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
             {text}
           </pre>
           <CopyBtn text={text} />
@@ -332,7 +332,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
           const text = JSON.stringify(parsed, null, 2)
           return (
             <div className="group relative">
-              <pre className="bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs">
+              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-all whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
                 {text}
               </pre>
               <CopyBtn text={text} />
@@ -341,7 +341,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
         } catch {
           return (
             <div className="group relative">
-              <pre className="bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs whitespace-pre-wrap">
+              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-all whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
                 {content}
               </pre>
               <CopyBtn text={content} />
@@ -446,12 +446,8 @@ const ActivityCard: FC<ActivityCardProps> = ({
   const [expanded, setExpanded] = useState(defaultExpanded)
   const { confirm, dialogState, setDialogState } = useConfirmDialog()
 
-  // 失败时强制自动展开：错误原因必须立刻可见，不应再要求用户多点一次
-  useEffect(() => {
-    if (activity.status === 'failed') {
-      setExpanded(true)
-    }
-  }, [activity.status])
+  // 注：不自动展开。业界惯例——即使工具失败也默认折叠，
+  // 用户点击头部才展开查看错误详情（用户反馈：出错不应自动展开）。
 
   const handleHeaderClick = () => {
     setExpanded(!expanded)
