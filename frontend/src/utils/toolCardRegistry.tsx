@@ -11,6 +11,8 @@ import { Copy, FileEdit, FileText, Globe, Link, Target, Terminal } from '@/asset
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
+import { interpretChatCard } from './chatCardInterpreter'
+import type { ChatCardDeclaration, ToolCallContext } from './chatCardInterpreter'
 
 /**
  * 工具卡片渲染配置
@@ -94,6 +96,26 @@ export function enhanceActivityWithToolConfig(
 ): ActivityData {
   if (activity.type !== 'tool_call' || !activity.toolName) {
     return activity
+  }
+
+  // 声明优先（S3）：插件 ui.chat_card 声明（后端经 toolCall.chat_card 透传）→ 解释器翻译成
+  // ActivityDetailBlock[]，ActivityCard 原样渲染。无声明时回退下面的手写 registry / L0 推断。
+  const declared = (toolCall as { chat_card?: ChatCardDeclaration }).chat_card
+  if (declared) {
+    const ctx: ToolCallContext = {
+      args: toolCall.tool_args,
+      result: toolCall.result ?? toolCall.resultData,
+      error: toolCall.error,
+      duration_ms: toolCall.duration_ms,
+      partial_output: toolCall.partialOutput,
+    }
+    const interpreted = interpretChatCard(declared, ctx)
+    return {
+      ...activity,
+      title: interpreted.title ?? activity.title,
+      details: interpreted.details.length > 0 ? interpreted.details : activity.details,
+      actions: interpreted.actions.length > 0 ? interpreted.actions : activity.actions,
+    }
   }
 
   const config = getToolCardConfig(activity.toolName)
