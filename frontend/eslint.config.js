@@ -102,6 +102,24 @@ export default tseslint.config(
           message:
             'Avoid inline styles. Use Tailwind CSS classes or a CSS module instead. If necessary, add an eslint-disable comment.',
         },
+        // 统一审查 §一 / §3.3 P3：getStatusStyle 重复定义，统一到 shared/StatusBadge
+        {
+          selector: "FunctionDeclaration[id.name='getStatusStyle']",
+          message:
+            '禁止定义 getStatusStyle：使用 shared/StatusBadge（前端设计统一审查 §一）。',
+        },
+        {
+          selector: "VariableDeclarator[id.name='getStatusStyle']",
+          message:
+            '禁止定义 getStatusStyle：使用 shared/StatusBadge（前端设计统一审查 §一）。',
+        },
+        // 统一审查 §二 N1：<a href="/..."> 导致整页刷新，统一到 useNavigate / PageShell
+        {
+          selector:
+            "JSXOpeningElement[name.name='a'] > JSXAttribute[name.name='href'] > Literal[value=/^\\//]",
+          message:
+            '禁止 <a href="/..."> 做 SPA 内部导航（整页刷新）：使用 useNavigate 或 shared/PageShell（前端设计统一审查 N1）。',
+        },
       ],
 
       // Relax overly strict defaults for React projects

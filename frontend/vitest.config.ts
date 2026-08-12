@@ -42,5 +42,23 @@ export default defineConfig({
     watch: false,
     // 关闭 CSS 处理
     css: false,
+    // 覆盖率：include 限定到本阶段已有测试覆盖的文件。
+    // 阈值 0 起步（不阻塞），随 M1+ 迁移接入 shared/ui/PageShell 后逐级上调至 85。
+    // 见 docs/working/design/frontend-design-unification-execution-plan.md §二 M-1.2
+    coverage: {
+      provider: 'v8',
+      include: [
+        'src/services/schema/widgetChain.ts',
+        'src/components/schema/DeclaredWidgetLayer.tsx',
+        'src/components/schema/PageRenderer.tsx',
+        'src/__tests__/architecture/harness.ts',
+      ],
+      thresholds: {
+        lines: 0,
+        functions: 0,
+        statements: 0,
+        branches: 0,
+      },
+    },
   },
 })

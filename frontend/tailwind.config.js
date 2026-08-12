@@ -7,6 +7,25 @@ export default {
   ],
   theme: {
     extend: {
+      fontSize: {
+        // 字号语义阶梯（统一审查 §4.1）：替代任意值 text-[10px]/[11px]/[12px]/[13px]
+        caption: ['var(--font-size-caption)', { lineHeight: '1.2' }],
+        label: ['var(--font-size-label)', { lineHeight: '1.3' }],
+        body: ['var(--font-size-body)', { lineHeight: '1.4' }],
+        title: ['var(--font-size-title)', { lineHeight: '1.4' }],
+        'page-title': ['var(--font-size-page-title)', { lineHeight: '1.5' }],
+      },
+      width: {
+        // 图标尺寸阶梯（统一审查 §4.1 / §3.2 C2）：替代 h-3/h-3.5/h-4/h-5/h-8 混用
+        'icon-xs': 'var(--icon-size-xs)',
+        'icon-sm': 'var(--icon-size-sm)',
+        'icon-md': 'var(--icon-size-md)',
+      },
+      height: {
+        'icon-xs': 'var(--icon-size-xs)',
+        'icon-sm': 'var(--icon-size-sm)',
+        'icon-md': 'var(--icon-size-md)',
+      },
       borderRadius: {
         lg: "var(--radius-lg)",
         md: "var(--radius-md)",

@@ -11,15 +11,16 @@
  */
 
 import { useMemo } from 'react'
-import type { ReactNode } from 'react'
+import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
-import type { PageDeclaration, PageSlot, PageSpace } from '@/services/schema/ContributionRegistry'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { SchemaDriver } from '@/services/schema/SchemaDriver'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { windowManager } from '@/services/window/WindowManager'
+import type { PageDeclaration, PageSlot, PageSpace } from '@/services/schema/ContributionRegistry'
 import type { UIInputFormField } from '@/types/schema'
+import type { ReactNode } from 'react'
 
 /** SchemaDriver 支持的字段类型集合（未知类型回退 string） */
 const FORM_FIELD_TYPES = new Set([
@@ -284,6 +285,9 @@ export function PageRenderer({ pages, space, slot, className }: PageRendererProp
           {isDetachable(page) ? <PagePopoutButton page={page} /> : null}
         </div>
       ))}
+      {/* ui_schema 声明 widget 的渲染层（架构 §5.3 生产消费：闭合 getAllWidgets 零消费者断链）。
+          无声明时返回 null，不改变既有 DOM。M1 起细化各空间放置。 */}
+      {space ? <DeclaredWidgetLayer space={space} /> : null}
     </div>
   )
 }
