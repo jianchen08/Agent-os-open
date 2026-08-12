@@ -372,13 +372,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动插件空闲软卸载 GC（生命周期管理：用到才加载 + 长时间不用自动 kill 进程，
     // manifest 保留，下次调用重新 spawn）。每 30s 扫描，阈值默认 300s。
     invoker.start_idle_gc();
-    let engine = Arc::new(AdrEngineImpl::new(store.clone(), invoker.clone(), "default"));
+
+    // 生命周期钩子事件总线（多消费者广播）：在既有"点对点"分发旁路接入一条 broadcast 通道，
+    // 把 OnPipelineStart/OnPipelineEnd 等事件 fan-out 给审计日志 + 指标等订阅者。
+    // 容量 1024：生命周期事件低频，足够吸收突发；emit best-effort 非阻塞，绝不拖慢引擎热路径。
+    let hook_bus = Arc::new(agentos_hooks::HookEventBus::new(1024));
+    let engine = Arc::new(
+        AdrEngineImpl::new(store.clone(), invoker.clone(), "default")
+            .with_hook_bus(hook_bus.clone()),
+    );
 
     // 监控 M1：创建指标聚合器（三通道汇聚：内核自采 + 插件 record_metric + invoker 代采进程态）。
     // M4：router 持聚合器，metrics.record 反向调用写入它。
     let metrics_aggregator = agentos_api::metrics::MetricsAggregator::new();
     // 监控 M2：内核自采 A 类指标计数器注册中心。
     let kernel_counters = Arc::new(agentos_api::metrics::KernelCounters::new());
+
+    // 生命周期事件订阅者接线：
+    // - 审计订阅者（agentos-hooks）：每个生命周期事件记 structured log（hook + 目标）。
+    // - 指标订阅者（metrics/lifecycle）：按 hook 类型 inc lifecycle.* 计数器，
+    //   经 KernelCounters → flush_to → MetricsAggregator → Prometheus 链路暴露。
+    // 两者均 spawn 后台任务，慢消费者 Lagged 自动 warn 恢复（绝不 fatal）。
+    let _audit_handle = agentos_hooks::spawn_audit_subscriber(hook_bus.clone());
+    let _lifecycle_metrics_handle =
+        agentos_api::metrics::spawn_lifecycle_metrics_subscriber(hook_bus.clone(), kernel_counters.clone());
+    info!(target: "agentos-kernel", "lifecycle hook event bus + subscribers (audit/metrics) started");
 
     // 启用 sidecar→内核反向 capability 通道（审批暂停/恢复、复盘调管道、event-bus 的地基）。
     // 监控 M4：router 持聚合器，metrics.record 分支写聚合器（第 6 个 capability）。

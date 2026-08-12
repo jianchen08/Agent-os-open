@@ -15,6 +15,7 @@ use agentos_core::types::{
     CompositeStep, ContentLoader, EngineError, PatchType, PluginContext, PluginResult, RouteType,
     RunStatus, StepResult, SuspendHandle, TraceEntry, WakeEvent,
 };
+use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -36,6 +37,11 @@ pub struct AdrEngineImpl {
     store: Arc<SqliteStore>,
     invoker: Arc<dyn PluginInvoker>,
     default_tenant_id: String,
+    /// 生命周期事件总线（旁路广播，可选注入）。
+    ///
+    /// `None`（默认）时仅走既有 `invoker.send_lifecycle_hook` 点对点直调，行为不变；
+    /// `Some` 时在直调**旁路**额外把事件广播给订阅者（审计/指标），best-effort、不阻塞。
+    hook_bus: Option<Arc<HookEventBus>>,
 }
 
 impl AdrEngineImpl {
@@ -48,7 +54,17 @@ impl AdrEngineImpl {
             store,
             invoker,
             default_tenant_id: default_tenant_id.into(),
+            hook_bus: None,
         }
+    }
+
+    /// 注入生命周期事件总线（Builder 模式，链式调用）。
+    ///
+    /// 不改 `new()` 签名——既有调用方零破坏；需要旁路广播的入口（如内核启动二进制）
+    /// 通过 `.with_hook_bus(bus)` 显式接入，测试可不注入（保持 `hook_bus = None`）。
+    pub fn with_hook_bus(mut self, bus: Arc<HookEventBus>) -> Self {
+        self.hook_bus = Some(bus);
+        self
     }
 
     fn config_hash(config: &serde_json::Value) -> Result<String, EngineError> {
@@ -144,12 +160,37 @@ impl AdrEngineImpl {
     }
 
     /// 分发生命周期钩子事件（AC-05-8）。
+    ///
+    /// 双路径分发（行为不变 + 旁路观察）：
+    /// 1. **权威路径**：`invoker.send_lifecycle_hook` 点对点直调目标插件（完全保留）
+    /// 2. **旁路广播**：若注入了总线，把同一事件 fan-out 给订阅者（审计/指标），
+    ///    best-effort、同步非阻塞——观察层失败绝不影响权威分发
     async fn dispatch_hook(&self, plugin_id: &str, hook: LifecycleHook, ctx: &HookContext) {
-        if let Err(e) = self.invoker.send_lifecycle_hook(plugin_id, hook, ctx).await {
+        // 1. 权威路径：点对点直调（行为不变）。
+        if let Err(e) = self
+            .invoker
+            .send_lifecycle_hook(plugin_id, hook.clone(), ctx)
+            .await
+        {
             warn!(
                 "Lifecycle hook dispatch failed: plugin={} error={}",
                 plugin_id, e
             );
+        }
+        // 2. 旁路广播：把事件投递给总线订阅者（审计日志 / 指标等）。
+        //    emit 内部对无订阅者/容量满均静默降级，绝不阻塞或 panic。
+        if let Some(bus) = &self.hook_bus {
+            let target = if plugin_id == "__engine__" {
+                EventTarget::Engine
+            } else {
+                EventTarget::Plugin(plugin_id.to_string())
+            };
+            bus.emit(LifecycleEvent {
+                hook,
+                ctx: ctx.clone(),
+                target,
+                ts: std::time::SystemTime::now(),
+            });
         }
     }
 

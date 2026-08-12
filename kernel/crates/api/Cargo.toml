@@ -20,6 +20,7 @@ agentos-tenant.workspace = true
 agentos-plugin-loader.workspace = true
 agentos-engine.workspace = true
 agentos-invoker.workspace = true
+agentos-hooks.workspace = true
 agentos-mcp.workspace = true
 agentos-session.workspace = true
 agentos-config.workspace = true

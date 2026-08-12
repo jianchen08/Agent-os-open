@@ -9,6 +9,7 @@ dependencies = [
  "agentos-config",
  "agentos-core",
  "agentos-engine",
+ "agentos-hooks",
  "agentos-invoker",
  "agentos-mcp",
  "agentos-plugin-loader",
@@ -75,6 +76,7 @@ version = "0.2.0"
 dependencies = [
  "agentos-config",
  "agentos-core",
+ "agentos-hooks",
  "agentos-invoker",
  "agentos-tenant",
  "async-trait",
