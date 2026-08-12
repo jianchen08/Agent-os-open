@@ -93,6 +93,30 @@ def describe_exit_code(exit_code: int | None) -> str | None:
 # error stack）几乎总在末尾，给够长度让 LLM 直接看到真实原因。
 TAIL_CHARS_ON_FAILURE = 3000
 
+# read_log 返回给 LLM 的字符上限：read_log 设计是「读完整日志」，但巨型日志
+# （如 grep 无 head 输出失控达数百万字符）原样返回会撑爆当前 context，且被
+# track 存进执行记录、inherit 继承后撑爆子任务（f81e12cac33d 根因）。
+# 完整日志仍在磁盘 logs/bash/bash_<pid>.log，LLM 可按需分段读取。
+READ_LOG_MAX_CHARS = 50000
+
+
+def clip_read_log_output(output: str | None) -> str | None:
+    """截断 read_log 超大输出（保留首尾 + 截断提示），完整日志在磁盘。
+
+    与 execute 的 tail_output（仅尾部 3000）不同，read_log 保留更大窗口
+    （首尾各 25000），因为它的目的就是让 LLM 看到较多日志上下文。
+    """
+    if not output or len(output) <= READ_LOG_MAX_CHARS:
+        return output
+    half = READ_LOG_MAX_CHARS // 2
+    orig = len(output)
+    return (
+        f"{output[:half]}\n\n"
+        f"...[read_log 已截断：原始 {orig} 字符，"
+        f"完整日志在 logs/bash/bash_<pid>.log，可用 offset/limit 分段读取]...\n\n"
+        f"{output[-half:]}"
+    )
+
 
 def tail_output(output: str | None, max_chars: int = TAIL_CHARS_ON_FAILURE) -> str:
     """取输出末尾，字符上限但保证行完整（不切断多字节字符/不切到行中间）。
@@ -896,7 +920,7 @@ class BashTool(WorkspaceAwareMixin):
                 data={
                     "status": proc_info.status,
                     "pid": pid,
-                    "output": output,  # 完整输出文本
+                    "output": clip_read_log_output(output),
                     "summary": summary.get("summary", []) if summary else [],
                     "warnings": summary.get("warnings", 0) if summary else 0,
                     "errors": summary.get("errors", 0) if summary else 0,
@@ -923,7 +947,7 @@ class BashTool(WorkspaceAwareMixin):
                 # 能从磁盘读到的都是已结束的进程（活跃的会在路径1处理）
                 "status": "completed",
                 "pid": pid,
-                "output": file_data["output"],
+                "output": clip_read_log_output(file_data["output"]),
                 "summary": file_data["summary"],
                 "warnings": file_data["warnings"],
                 "errors": file_data["errors"],

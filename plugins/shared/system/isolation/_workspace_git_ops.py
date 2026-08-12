@@ -275,9 +275,24 @@ class _GitOpsMixin:
         git_dir = cwd / ".git"
         needs_init = True
         if git_dir.exists():
-            rc, _, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
+            rc, _, stderr = self._run_git("rev-parse", "HEAD", cwd=cwd)
             if rc == 0:
                 needs_init = False
+            elif rc < 0:
+                # 瞬态失败（超时 / 找不到 git / OSError）——绝不能据此删除 .git。
+                # _run_git 把这三类异常统一映射成 rc=-1（git 自身退出码恒为正），
+                # 历史上这里的 else 分支不区分二者，一次 30s 超时或 WinError 267
+                # 就被误判为"仓库损坏"而 _force_rmtree 整个 .git，导致对象库
+                # 物理删除、提交永久丢失。失败闭合：保留 .git，返回 False 让上层
+                # （workspace_lifecycle.py 的调用方）抛 RuntimeError 介入。
+                logger.error(
+                    "[WorkspaceLifecycle] rev-parse HEAD 失败但属瞬态（rc=%d，疑似超时/IO），"
+                    "拒绝删除 .git 以防数据丢失: %s | %s",
+                    rc,
+                    git_dir,
+                    stderr,
+                )
+                return False
             else:
                 logger.info("[WorkspaceLifecycle] Existing .git is empty/corrupt, removing: %s", git_dir)
                 try:
@@ -390,12 +405,14 @@ class _GitOpsMixin:
                 f"path={cwd}, 文件={dirty[:10]}"
             )
         if rc != 0:
-            # 校验命令本身失败不应阻塞任务启动（避免 git 偶发故障放大成任务失败），
-            # 但必须留下告警便于排查。
-            logger.warning(
-                "[WorkspaceLifecycle] auto-save 后状态校验命令失败，无法确认工作区干净（放行）: task_id=%s, path=%s",
-                task_id,
-                cwd,
+            # 校验命令失败（瞬态超时/IO 或真实 git 错误）= 无法确认工作区是否干净。
+            # 放行会让可能存在的脏已跟踪改动随 worktree 建在旧 HEAD 上，合并回来时
+            # 永久丢失——这正是本函数 docstring 所立"宁可任务失败，也不丢数据"契约
+            # 要防止的。历史此处选择放行（避免偶发 git 故障放大成任务失败），但与
+            # 数据安全契约相悖：校验失败时失败闭合，让上层重新派发，而非赌"应该是干净的"。
+            raise RuntimeError(
+                f"auto-save 后状态校验失败(rc={rc})，无法确认工作区干净，"
+                f"为避免数据丢失中止 worktree 创建: task_id={task_id}, path={cwd}"
             )
 
     def _git_add_tracked_and_commit(self, cwd: Path, message: str) -> str | None:
@@ -512,6 +529,17 @@ class _GitOpsMixin:
         if rc == 0:
             self._link_worktree_dependencies(ws_dir, repo_path)
             return
+
+        if rc < 0:
+            # 瞬态失败（超时/找不到 git/OSError）——worktree 与分支的真实状态未知
+            # （可能已创建、可能没有）。绝不能盲目走 prune + branch -D + rmtree：
+            # 若本任务为重派发、branch 已含上一轮提交，这里会摧毁可恢复的工作
+            # （与 _git_init_and_initial_commit 的 .git 擦除同构：rc<0 误判为可清理）。
+            # 失败闭合，抛错让上层重新派发整个 worktree 创建。
+            raise RuntimeError(
+                f"git worktree add 瞬态失败（rc={rc}，疑似超时/IO），拒绝 branch -D 以防数据丢失: "
+                f"task_id={task_id}, branch={branch}, error={stderr}"
+            )
 
         logger.warning(
             "[WorkspaceLifecycle] worktree add 失败，尝试 prune 修复: task_id=%s, path=%s, error=%s",
