@@ -1,4 +1,4 @@
 # 测试追溯基线（未标记 @feature 的测试文件数上限，只减不增）
 # 见 scripts/check_test_traceability.py（阶段 5.1/5.2）
 # 治理一批未标记文件后，运行 --init 收紧该数值。
-unmarked_files=316
+unmarked_files=315
