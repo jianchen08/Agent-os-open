@@ -1,6 +1,19 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
-import { Bell, Bot, Check, FileCode, FileText, FileIcon as FileGeneric, Loader2, MessageSquare, Sparkles, User } from '@/assets/icons'
+import {
+  Bell,
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  FileCode,
+  FileText,
+  FileIcon as FileGeneric,
+  Loader2,
+  MessageSquare,
+  Sparkles,
+  User,
+} from '@/assets/icons'
 import { memo, useEffect, useRef, useState } from 'react'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -115,6 +128,8 @@ export const MessageItem = memo(function MessageItem({
 }: MessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
+  /** 工具卡片展开状态：默认折叠（含错误也默认折叠，用户点击才展开） */
+  const [toolCardExpanded, setToolCardExpanded] = useState(false)
 
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
@@ -189,13 +204,19 @@ export const MessageItem = memo(function MessageItem({
 
     return (
       <div
-        className={cn('group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors', className)}
+        className={cn(
+          'group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors',
+          'max-w-[calc(100%-44px)]',
+          className,
+        )}
         data-testid="message-item"
         data-role="tool"
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground font-medium">{toolName}</span>
+            <span className="text-muted-foreground min-w-0 flex-1 truncate font-medium">
+              {toolName}
+            </span>
             <span
               className={cn(
                 'rounded-full px-2 py-0.5 text-xs',
@@ -217,35 +238,63 @@ export const MessageItem = memo(function MessageItem({
                     : toolStatus}
             </span>
             {durationMs && <span className="text-muted-foreground text-xs">{durationMs}ms</span>}
+            {/* 展开/折叠按钮：默认折叠，点击才展开详情（含错误时也不自动展开） */}
+            <button
+              type="button"
+              data-testid="tool-card-toggle"
+              aria-expanded={toolCardExpanded}
+              aria-label={toolCardExpanded ? '收起工具详情' : '查看工具详情'}
+              onClick={() => setToolCardExpanded((v) => !v)}
+              className="text-muted-foreground hover:text-foreground flex flex-shrink-0 cursor-pointer items-center gap-1 rounded px-1 py-0.5 text-xs transition-colors"
+            >
+              {toolCardExpanded ? (
+                <ChevronDown className="h-icon-xs w-icon-xs" />
+              ) : (
+                <ChevronRight className="h-icon-xs w-icon-xs" />
+              )}
+              {toolCardExpanded ? '收起' : '查看详情'}
+            </button>
           </div>
-          {toolError && (
-            <div className="mt-1 text-sm text-status-error">{toolError}</div>
-          )}
-          {toolResult && (
-            <div className="text-muted-foreground mt-1 text-sm">
-              {(() => {
-                const parsed = safeParseResult(toolResult)
-                if (parsed) {
-                  const output = parsed.output as Record<string, unknown> | undefined
-                  const taskId = (output?.task_id as string) || (parsed.task_id as string) || ''
-                  const status = (output?.status as string) || (parsed.status as string) || ''
-                  const message = (output?.message as string) || (parsed.message as string) || ''
-                  const parts: string[] = []
-                  if (taskId) parts.push(`任务ID: ${taskId}`)
-                  if (status) parts.push(`状态: ${status}`)
-                  if (message) parts.push(message)
-                  return parts.length > 0 ? (
-                    <div className="space-y-0.5">{parts.map((p, i) => <div key={i} className={i > 0 ? 'truncate' : ''}>{p}</div>)}</div>
-                  ) : (
-                    <pre className="truncate whitespace-pre-wrap">{JSON.stringify(parsed, null, 2)}</pre>
-                  )
-                }
-                return (
-                  <span className="truncate">
-                    {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
-                  </span>
-                )
-              })()}
+
+          {toolCardExpanded && (
+            <div
+              data-testid="tool-card-body"
+              className="mt-1 max-h-40 space-y-1 overflow-y-auto break-all whitespace-pre-wrap text-sm"
+            >
+              {toolError && <div className="text-status-error">{toolError}</div>}
+              {toolResult && (
+                <div className="text-muted-foreground">
+                  {(() => {
+                    const parsed = safeParseResult(toolResult)
+                    if (parsed) {
+                      const output = parsed.output as Record<string, unknown> | undefined
+                      const taskId = (output?.task_id as string) || (parsed.task_id as string) || ''
+                      const status = (output?.status as string) || (parsed.status as string) || ''
+                      const message = (output?.message as string) || (parsed.message as string) || ''
+                      const parts: string[] = []
+                      if (taskId) parts.push(`任务ID: ${taskId}`)
+                      if (status) parts.push(`状态: ${status}`)
+                      if (message) parts.push(message)
+                      return parts.length > 0 ? (
+                        <div className="space-y-0.5">
+                          {parts.map((p, i) => (
+                            <div key={i} className="break-all whitespace-pre-wrap">
+                              {p}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <pre className="break-all whitespace-pre-wrap">{JSON.stringify(parsed, null, 2)}</pre>
+                      )
+                    }
+                    return (
+                      <span className="break-all whitespace-pre-wrap">
+                        {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
+                      </span>
+                    )
+                  })()}
+                </div>
+              )}
             </div>
           )}
         </div>
