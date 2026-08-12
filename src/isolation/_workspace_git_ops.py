@@ -405,12 +405,14 @@ class _GitOpsMixin:
                 f"path={cwd}, 文件={dirty[:10]}"
             )
         if rc != 0:
-            # 校验命令本身失败不应阻塞任务启动（避免 git 偶发故障放大成任务失败），
-            # 但必须留下告警便于排查。
-            logger.warning(
-                "[WorkspaceLifecycle] auto-save 后状态校验命令失败，无法确认工作区干净（放行）: task_id=%s, path=%s",
-                task_id,
-                cwd,
+            # 校验命令失败（瞬态超时/IO 或真实 git 错误）= 无法确认工作区是否干净。
+            # 放行会让可能存在的脏已跟踪改动随 worktree 建在旧 HEAD 上，合并回来时
+            # 永久丢失——这正是本函数 docstring 所立"宁可任务失败，也不丢数据"契约
+            # 要防止的。历史此处选择放行（避免偶发 git 故障放大成任务失败），但与
+            # 数据安全契约相悖：校验失败时失败闭合，让上层重新派发，而非赌"应该是干净的"。
+            raise RuntimeError(
+                f"auto-save 后状态校验失败(rc={rc})，无法确认工作区干净，"
+                f"为避免数据丢失中止 worktree 创建: task_id={task_id}, path={cwd}"
             )
 
     def _git_add_tracked_and_commit(self, cwd: Path, message: str) -> str | None:

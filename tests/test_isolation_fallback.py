@@ -8,9 +8,9 @@
 导致属于其它容器/工作区的任务落到本编排进程执行，checkpoint
 跟着进程 CWD 落到错误的容器根，造成跨容器污染。
 """
+
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,7 +18,6 @@ from isolation.decider import IsolationDecider, IsolationError
 from isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
 from isolation.types import IsolationLevel
 from pipeline.plugin import PluginContext
-
 
 # ═══════════════════════════════════════════════════════════════
 # IsolationDecider — 容器不可用一律报错，不降级
@@ -57,9 +56,7 @@ class TestDeciderNoFallback:
     async def test_container_available_returns_container(self):
         """container 可用时正常返回 container 策略。"""
         decider, loader = self._make_decider()
-        loader._tools["bash_execute"] = ToolIsolationPolicy(
-            isolation=IsolationLevel.CONTAINER
-        )
+        loader._tools["bash_execute"] = ToolIsolationPolicy(isolation=IsolationLevel.CONTAINER)
         available = {IsolationLevel.CONTAINER: True, IsolationLevel.HOST: True}
 
         policy = await decider.decide("bash_execute", available_providers=available)
@@ -86,18 +83,16 @@ def _make_guard(docker_available=False, force_host=False):
     """
     from plugins.input.isolation_guard.plugin import IsolationGuard
 
-    guard = IsolationGuard(config={
-        "docker_available": docker_available,
-        "force_host": force_host,
-    })
+    guard = IsolationGuard(
+        config={
+            "docker_available": docker_available,
+            "force_host": force_host,
+        }
+    )
     loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
     loader._default = ToolIsolationPolicy(isolation=IsolationLevel.CONTAINER)
-    loader._tools["bash_execute"] = ToolIsolationPolicy(
-        isolation=IsolationLevel.CONTAINER
-    )
-    loader._tools["file_read"] = ToolIsolationPolicy(
-        isolation=IsolationLevel.CONTAINER
-    )
+    loader._tools["bash_execute"] = ToolIsolationPolicy(isolation=IsolationLevel.CONTAINER)
+    loader._tools["file_read"] = ToolIsolationPolicy(isolation=IsolationLevel.CONTAINER)
     guard._decider = IsolationDecider(policy_loader=loader)
     return guard
 
@@ -146,7 +141,7 @@ class TestGuardMetadataPath:
         """metadata 要求 isolated + Docker 不可用 → blocked（不降级）。"""
         guard = _make_guard(docker_available=False)
         ctx = _make_ctx(state={"task_id": "test-task"})
-        guard._get_task_metadata = lambda c: {"isolation_level": "isolated"}
+        guard._get_task_metadata = lambda _c: {"isolation_level": "isolated"}
 
         result = guard._decide_isolation("bash_execute", ctx)
 
@@ -158,7 +153,7 @@ class TestGuardMetadataPath:
         """metadata 要求 isolated + Docker 可用 → docker。"""
         guard = _make_guard(docker_available=True)
         ctx = _make_ctx(state={"task_id": "test-task"})
-        guard._get_task_metadata = lambda c: {"isolation_level": "isolated"}
+        guard._get_task_metadata = lambda _c: {"isolation_level": "isolated"}
 
         result = guard._decide_isolation("bash_execute", ctx)
 
@@ -169,7 +164,7 @@ class TestGuardMetadataPath:
         """metadata 要求 non_isolated → 直接 host（不检查 Docker 可用性）。"""
         guard = _make_guard(docker_available=False)
         ctx = _make_ctx(state={"task_id": "test-task"})
-        guard._get_task_metadata = lambda c: {"isolation_level": "non_isolated"}
+        guard._get_task_metadata = lambda _c: {"isolation_level": "non_isolated"}
 
         result = guard._decide_isolation("bash_execute", ctx)
 
@@ -208,10 +203,12 @@ class TestGuardBlockedPropagates:
     async def test_blocked_tool_sets_isolation_blocked(self):
         """被阻止的工具设置 isolation.blocked = True。"""
         guard = _make_guard(docker_available=False)
-        ctx = _make_ctx(state={
-            "core_type": "tool_execute",
-            "raw_tool_calls": [{"name": "bash_execute", "args": {"command": "ls"}}],
-        })
+        ctx = _make_ctx(
+            state={
+                "core_type": "tool_execute",
+                "raw_tool_calls": [{"name": "bash_execute", "args": {"command": "ls"}}],
+            }
+        )
 
         result = await guard.execute(ctx)
 
@@ -264,14 +261,18 @@ class _MockMergeOps:
 
     # 从 _MergeOpsMixin 导入方法
     from isolation._workspace_merge_ops import _MergeOpsMixin
+
     for _method_name in [
-        "_cleanup_unstaged_changes", "on_eval_failed", "on_task_failed",
+        "_cleanup_unstaged_changes",
+        "on_eval_failed",
+        "on_task_failed",
     ]:
         _method = getattr(_MergeOpsMixin, _method_name)
         locals()[_method_name] = _method
 
     # 从 _GitOpsMixin 导入 auto-save 安全校验（BUG-FIX-fix_20260627_autosave_silent_loss）
     from isolation._workspace_git_ops import _GitOpsMixin
+
     locals()["_autosave_before_worktree"] = _GitOpsMixin._autosave_before_worktree
 
 
@@ -287,17 +288,12 @@ class TestCleanupUnstagedChanges:
     def test_cleanup_unstaged_changes_does_not_discard(self, tmp_path):
         """有 unstaged 修改时只告警，不调用 git checkout 丢弃。"""
         ops = _MockMergeOps()
-        ops._git_responses["status --porcelain"] = (
-            0, " M src/main.py\n D src/old.py\n", ""
-        )
+        ops._git_responses["status --porcelain"] = (0, " M src/main.py\n D src/old.py\n", "")
 
         ops._cleanup_unstaged_changes(str(tmp_path))
 
         # 核心安全断言：任何情况下都不得调用 checkout 丢弃工作区改动
-        checkout_calls = [
-            c for c in ops._git_calls
-            if c["args"] == ("checkout", "--", ".")
-        ]
+        checkout_calls = [c for c in ops._git_calls if c["args"] == ("checkout", "--", ".")]
         assert len(checkout_calls) == 0
         # 只做了一次 status 检测，未触发任何写操作
         assert all(c["args"][0] != "checkout" for c in ops._git_calls)
@@ -309,25 +305,17 @@ class TestCleanupUnstagedChanges:
 
         ops._cleanup_unstaged_changes(str(tmp_path))
 
-        checkout_calls = [
-            c for c in ops._git_calls
-            if c["args"] == ("checkout", "--", ".")
-        ]
+        checkout_calls = [c for c in ops._git_calls if c["args"] == ("checkout", "--", ".")]
         assert len(checkout_calls) == 0
 
     def test_cleanup_only_staged_skips_checkout(self, tmp_path):
         """只有 staged 修改（无 unstaged）时不调用 git checkout。"""
         ops = _MockMergeOps()
-        ops._git_responses["status --porcelain"] = (
-            0, "M  src/main.py\nA  src/new.py\n", ""
-        )
+        ops._git_responses["status --porcelain"] = (0, "M  src/main.py\nA  src/new.py\n", "")
 
         ops._cleanup_unstaged_changes(str(tmp_path))
 
-        checkout_calls = [
-            c for c in ops._git_calls
-            if c["args"] == ("checkout", "--", ".")
-        ]
+        checkout_calls = [c for c in ops._git_calls if c["args"] == ("checkout", "--", ".")]
         assert len(checkout_calls) == 0
 
     def test_cleanup_nonexistent_path_skips(self):
@@ -343,10 +331,7 @@ class TestCleanupUnstagedChanges:
 
         ops._cleanup_unstaged_changes(str(tmp_path))
 
-        checkout_calls = [
-            c for c in ops._git_calls
-            if c["args"] == ("checkout", "--", ".")
-        ]
+        checkout_calls = [c for c in ops._git_calls if c["args"] == ("checkout", "--", ".")]
         assert len(checkout_calls) == 0
 
 
@@ -362,9 +347,7 @@ class TestAutosaveBeforeWorktree:
         """auto-save 后仍残留已跟踪脏改动 → 抛 RuntimeError 中断。"""
         ops = _MockMergeOps()
         # 模拟 _git_add_commit_if_dirty 提交失败：已跟踪文件仍 dirty
-        ops._git_responses["status --porcelain -uno"] = (
-            0, " M src/main.py\n", ""
-        )
+        ops._git_responses["status --porcelain -uno"] = (0, " M src/main.py\n", "")
 
         with pytest.raises(RuntimeError, match="auto-save 失败"):
             ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")
@@ -377,25 +360,26 @@ class TestAutosaveBeforeWorktree:
         ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")  # 不抛
 
         # 确实触发了 auto-save 提交
-        autosave_calls = [
-            c for c in ops._git_calls
-            if c["args"][0] == "_git_add_commit_if_dirty"
-        ]
+        autosave_calls = [c for c in ops._git_calls if c["args"][0] == "_git_add_commit_if_dirty"]
         assert len(autosave_calls) == 1
 
-    def test_proceed_when_status_check_fails(self, tmp_path):
-        """状态校验命令本身失败 → 放行不阻塞（避免 git 偶发故障放大成任务失败）。"""
-        ops = _MockMergeOps()
-        ops._git_responses["status --porcelain -uno"] = (-1, "", "error")
+    def test_abort_when_status_check_fails(self, tmp_path):
+        """状态校验命令失败(瞬态/真实) → 必须中断（无法确认工作区干净即放行会丢数据）。
 
-        ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")  # 不抛
+        安全契约：本类职责是"宁可任务失败，也不丢数据"。校验命令失败意味着无法确认
+        工作区是否干净——放行会让可能存在的脏已跟踪改动随 worktree 建在旧 HEAD 上，
+        合并回来时永久丢失。故校验失败同样失败闭合。（历史此处选择放行，与契约相悖。）
+        """
+        ops = _MockMergeOps()
+        ops._git_responses["status --porcelain -uno"] = (-1, "", "命令执行超时（30秒）")
+
+        with pytest.raises(RuntimeError, match="状态校验失败"):
+            ops._autosave_before_worktree(tmp_path, "chore: auto-save", "task-001")
 
     def test_abort_message_identifies_task(self, tmp_path):
         """中断信息包含 task_id 和路径，便于定位。"""
         ops = _MockMergeOps()
-        ops._git_responses["status --porcelain -uno"] = (
-            0, " M src/critical.py\n", ""
-        )
+        ops._git_responses["status --porcelain -uno"] = (0, " M src/critical.py\n", "")
 
         with pytest.raises(RuntimeError) as exc_info:
             ops._autosave_before_worktree(tmp_path, "msg", "task-ZZZ")
@@ -411,6 +395,7 @@ class TestWorktreeDestroyOnlyAfterMerge:
     def test_on_task_cleanup_removed_from_class(self):
         """on_task_cleanup 方法已从 _MergeOpsMixin 删除。"""
         from isolation._workspace_merge_ops import _MergeOpsMixin
+
         assert not hasattr(_MergeOpsMixin, "on_task_cleanup"), (
             "on_task_cleanup 必须删除：它是引擎结束时无条件销毁 worktree 的入口"
         )
@@ -418,27 +403,28 @@ class TestWorktreeDestroyOnlyAfterMerge:
     def test_cleanup_orphaned_worktrees_removed_from_class(self):
         """_cleanup_orphaned_worktrees 方法已删除。"""
         from isolation._workspace_merge_ops import _MergeOpsMixin
+
         assert not hasattr(_MergeOpsMixin, "_cleanup_orphaned_worktrees"), (
             "_cleanup_orphaned_worktrees 必须删除：会误删失败任务的 worktree"
         )
 
     def test_executor_does_not_call_on_task_cleanup(self):
         """task_executor 的 _cleanup_after_engine 不再调用 on_task_cleanup。"""
-        executor_src = Path(
-            "src/infrastructure/task_executor.py"
-        ).read_text(encoding="utf-8")
-        assert ".on_task_cleanup(" not in executor_src, (
-            "task_executor.py 不得再调用 lifecycle.on_task_cleanup(...)"
-        )
+        executor_src = Path("src/infrastructure/task_executor.py").read_text(encoding="utf-8")
+        assert ".on_task_cleanup(" not in executor_src, "task_executor.py 不得再调用 lifecycle.on_task_cleanup(...)"
 
     def test_failed_task_worktree_survives_for_retry(self, tmp_path):
         """失败任务的工作空间在引擎结束时必须保留，供重试复用。"""
         ops = _MockMergeOps()
         ws = tmp_path / "container_abc__wt_retry_me"
         ws.mkdir()
-        ws_meta = {"mode": "worktree", "path": str(ws),
-                   "project_root": str(tmp_path), "branch": "task/b1",
-                   "max_retries": 3}
+        ws_meta = {
+            "mode": "worktree",
+            "path": str(ws),
+            "project_root": str(tmp_path),
+            "branch": "task/b1",
+            "max_retries": 3,
+        }
 
         result = ops.on_eval_failed("t1abc1234", str(ws), ws_meta)
         assert result["action"] == "retry"
@@ -460,6 +446,7 @@ class TestHostProviderNoCheckpoint:
     def test_host_provider_has_no_checkpoint_manager(self):
         """HostProvider 不再持有 CheckpointManager。"""
         from isolation.providers.host_provider import HostProvider
+
         provider = HostProvider()
         assert not hasattr(provider, "_checkpoint_manager"), (
             "HostProvider 不应再持有 _checkpoint_manager（host 模式不建 checkpoint）"
@@ -467,9 +454,5 @@ class TestHostProviderNoCheckpoint:
 
     def test_host_provider_no_checkpoint_import(self):
         """host_provider.py 不再 import CheckpointManager。"""
-        src = Path("src/isolation/providers/host_provider.py").read_text(
-            encoding="utf-8"
-        )
-        assert "CheckpointManager" not in src, (
-            "host_provider.py 不应再引用 CheckpointManager"
-        )
+        src = Path("src/isolation/providers/host_provider.py").read_text(encoding="utf-8")
+        assert "CheckpointManager" not in src, "host_provider.py 不应再引用 CheckpointManager"
