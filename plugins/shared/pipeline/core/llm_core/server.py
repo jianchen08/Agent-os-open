@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import sys
+from functools import lru_cache
 
 # 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
 # + system/llm（复用 _config_models 配置注入桥，与 system/llm/server.py 共享）
@@ -31,27 +32,31 @@ from plugin import LLMCore  # noqa: E402
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("llm_core_pipeline")
 
-_instance: LLMCore | None = None
+
+@lru_cache(maxsize=1)
+def get_instance() -> LLMCore:
+    """懒构建并缓存 LLMCore 单例（线程安全；替代模块级可变 `_instance` 全局）。
+
+    构造前注入 _config_models 配置 shim（供 LLMCore._apply_model_from_state 的
+    get_llm_core_config 解析 llm.yaml；与 system/llm/server.py 对齐）。
+    """
+    from _config_models import set_config  # noqa: PLC0415
+
+    config = plugin.get_config()
+    set_config(config)
+    return LLMCore(config=config)
 
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
     """Initialize llm_core plugin."""
-    global _instance
-    config = plugin.get_config()
-    # 注入配置到 _config_models shim（供 LLMCore._apply_model_from_state 的
-    # get_llm_core_config 解析 llm.yaml；与 system/llm/server.py 对齐）。
-    from _config_models import set_config  # noqa: PLC0415
-
-    set_config(config)
-    _instance = LLMCore(config=config)
+    get_instance()  # 预热：注入配置 shim + 构建 LLMCore（保持原 on_load 构造时机）
 
 
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup llm_core plugin."""
-    global _instance
-    _instance = None
+    get_instance.cache_clear()
 
 
 @plugin.tool(
@@ -161,7 +166,7 @@ async def execute(state: dict, config: dict | None = None) -> dict:
         merged_state["_stream_consumer"] = _consumer_task
         merged_state["_stream_queue"] = _chunk_queue
 
-    result = await _instance.execute(ctx)
+    result = await get_instance().execute(ctx)
 
     # LLM 结束：发哨兵 None 终止消费者协程，等待其排空剩余 chunk（保证不丢末尾）
     if "_stream_queue" in merged_state:

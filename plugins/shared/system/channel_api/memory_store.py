@@ -89,7 +89,8 @@ def _parse_iso_time(s: str) -> float:
     try:
         dt = datetime.fromisoformat(s)
         return dt.timestamp()
-    except Exception:
+    except (ValueError, OSError) as exc:
+        _log.warning("解析 ISO 时间失败，返回 0.0 | value=%r err=%s", s, exc)
         return 0.0
 
 
@@ -225,8 +226,8 @@ class MemoryStore:
                         import shutil  # noqa: PLC0415
 
                         shutil.copy2(path, backup_path)
-                    except Exception:
-                        _log.warning("备份 store.json 失败，继续写入")
+                    except OSError as exc:
+                        _log.warning("备份 store.json 失败，继续写入 | path=%s err=%s", path, exc)
 
                 data = {"threads": self.threads}
                 os.makedirs(os.path.dirname(path), exist_ok=True)  # noqa: PTH103,PTH120

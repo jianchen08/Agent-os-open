@@ -1,21 +1,34 @@
 """任务管理工具（简化版）"""
 
-import logging
-from typing import Any
+from __future__ import annotations
 
-from core.results import ToolExecutionResult
-from tasks.service import TaskService
-from tasks.state_machine import InvalidTransitionError
-from tasks.types import TaskModel, TaskStatus
-from tools.builtin.base import BuiltinTool
-from tools.types import (
+import logging
+from typing import TYPE_CHECKING, Any
+
+# 跨插件共享类型（ToolExecutionResult / BuiltinTool / Tool 及枚举与结果工厂）已上提到
+# SDK 公共依赖层 agentos_plugin_sdk；任务领域类型以 plugins/shared/system/tasks/
+# 为权威（0.2 平铺模块，由 server.py 将该目录注入 sys.path），直接 import。
+#
+# 注意：system/tasks 为平铺模块目录，其中 ``service`` / ``enum_utils`` 为通用名，
+# 在 pytest 整 suite 单进程下会与 pipeline/input/security_check/service.py 等冲突。
+# 故仅导入该目录下名称唯一的模块（task_types / state_machine）；``TaskService`` 仅用于
+# 类型注解与 _get_task_service 内构造，改用 ``from __future__ import annotations`` +
+# TYPE_CHECKING 守卫 + 方法内懒导入，避免在收集期命中被缓存的同名 service 模块。
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
 )
+from state_machine import InvalidTransitionError
+from task_types import TaskModel, TaskStatus
+
+if TYPE_CHECKING:
+    from service import TaskService
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +154,8 @@ class TaskTool(BuiltinTool):
             ) from exc
 
         provider = get_service_provider()
+
+        from service import TaskService  # noqa: PLC0415
 
         service = provider.get_or_create(
             "task_service",

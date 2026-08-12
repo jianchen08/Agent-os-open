@@ -648,10 +648,12 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
         _ws_meta = _metadata.get("ws_meta", {}) or {}
         return _ws_meta.get("path")
 
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "解析工作空间路径失败 | container_task_id=%s",
+            "解析工作空间路径失败 | container_task_id=%s err=%s",
             container_task_id,
+            exc,
+            exc_info=True,
         )
         return None
 

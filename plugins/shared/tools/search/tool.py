@@ -30,15 +30,18 @@ from typing import Any
 
 import yaml
 
-from core.constants import ToolLimits
-from core.results import ToolExecutionResult
-from tools.types import (
+# 跨插件共享类型已上提到 SDK 公共依赖层 agentos_plugin_sdk。
+# ToolLimits 仅本工具使用，就近放在本工具目录 constants.py（server.py 已将本工具
+# 目录注入 sys.path），直接 import。
+from agentos_plugin_sdk import (
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_success_result,
 )
+from constants import ToolLimits
 
 logger = logging.getLogger(__name__)
 

@@ -25,7 +25,7 @@
 - 绝不访问模块私有成员，只使用公开接口
 - 遇阻碍（如缺少参数）必须先沟通，禁止静默绕过或重写已有API
 
-> 小例子：某个内部方法 `_validate()` 缺个参数，正确做法是找作者沟通加参数或开放接口，不是自己复制一份重写。
+> 小例子：某个内部方法 `_validate()` 缺个参数，正确做法是找作者沟通加参数或开放接口，不是自己复制一份重写。同理：两种情况只有一小段不同时，提取公共部分共用、只对差异点参数化，不要把整段复制两份——复制后必然漂移（本该一样的写成不一样）。
 
 ### 1.4 错误处理铁律
 
@@ -286,9 +286,18 @@ tests/
 
 ## 七、Git 工作流
 
-### 7.1 Conventional Commits 1.0.0
+> 本仓库代码改动由任务编排器自动管理：每个任务在 `task/<id>` 分支的独立 worktree 中执行，完成后自动合并回集成分支（当前 `dev/0.2`）。运行机制见 `docs/ARCHITECTURE.md`「隔离与工作区」。
 
-格式：`<type>[scope]: description`
+### 7.1 AI 行为约束 [error]
+
+- 不得手动创建/删除分支、添加/移除 worktree——由编排器自动管理。
+- 不得改写 auto-save、auto commit、`Merge branch 'task/*'` 这类自动提交。
+- 不得发起 PR——任务合并是本地 `git merge`，不走 PR。
+- 集成分支的脏改动会被自动 auto-save 兜住，无需人工先提交。
+
+### 7.2 提交信息规范（Conventional Commits 1.0.0） [warning]
+
+人工语义提交用 `<type>[scope]: description`：
 
 | type | 用途 |
 |------|------|
@@ -304,17 +313,8 @@ tests/
 | chore | 杂项（不修改src或tests） |
 | revert | 回退之前的commit |
 
-- 破坏性变更用 `!` 标记或 body 中 `BREAKING CHANGE:` 前缀
-- scope 可选，表示影响范围（如 `auth`, `api`）
-- description 简明扼要，小写，不加句号
-
-### 7.2 分支策略
-
-- `main`：生产分支，只接受合并，不直接提交
-- `develop`：开发分支
-- `feature/*`：功能分支
-- `fix/*`：修复分支
-- PR 必须通过所有检查才能合并
+- 破坏性变更用 `!` 标记；scope 可选；description 简明小写不加句号。
+- 自动化提交（auto-save / auto commit / merge）不受此规范约束，保持原样。
 
 ---
 

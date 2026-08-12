@@ -163,8 +163,8 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     # 通知 ConfigCenter 重载（best-effort：单例懒加载，失败仅记录不影响写入）
     try:
         get_config_center().reload(str(path))
-    except Exception:
-        logger.warning("ConfigCenter reload 失败: %s", path, exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ConfigCenter reload 失败 | path=%s err=%s", path, exc, exc_info=True)
 
 
 def _mask_key(key: str) -> str:

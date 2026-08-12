@@ -295,7 +295,15 @@ async def get_tasks_debug(
 
         return {"items": items, "total": len(items)}
 
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "获取任务调试数据失败，返回空 | limit=%s status=%s session_id=%s err=%s",
+            limit,
+            status,
+            session_id,
+            exc,
+            exc_info=True,
+        )
         return {"items": [], "total": 0}
 
 
@@ -1037,7 +1045,10 @@ def _cancel_running_pipeline(task_id: str) -> bool:
 
         return task_worker.cancel_pipeline(task_id)
 
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "取消运行中管道失败，返回 False | task_id=%s err=%s", task_id, exc, exc_info=True
+        )
         return False
 
 
@@ -1073,7 +1084,10 @@ def _cancel_child_pipelines(task_id: str, task_service: Any) -> int:
     try:
         subtasks = task_service.list_by_parent(task_id)
 
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "list_by_parent 失败，返回 0 | task_id=%s err=%s", task_id, exc, exc_info=True
+        )
         return 0
 
     for subtask in subtasks:

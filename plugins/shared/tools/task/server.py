@@ -7,13 +7,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# 将 0.1 兼容 shim 目录加入 sys.path，使老代码的 from core.* / tools.* / utils.* /
-# triggers.* / tasks.* / agents.* 导入解析到 legacy_0_1_compat 下的精简副本。
-#详见 plugins/shared/legacy_0_1_compat/__init__.py。
+# 任务领域模块以 plugins/shared/system/tasks/ 为权威（0.2 平铺模块：service /
+# state_machine / task_types / agents_types / service_access …）。将其注入
+# sys.path 以便 tool.py 顶部的 `from service import …` / `from task_types import …`
+# 直接解析到该权威位置。跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_COMPAT_ROOT = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'legacy_0_1_compat')
-if os.path.isdir(_COMPAT_ROOT):
-    sys.path.insert(0, _COMPAT_ROOT)
+_TASKS_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system', 'tasks')
+if os.path.isdir(_TASKS_DIR):
+    sys.path.insert(0, _TASKS_DIR)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 

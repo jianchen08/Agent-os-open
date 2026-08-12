@@ -14,6 +14,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 agentos-core.workspace = true
+agentos-hooks.workspace = true
 agentos-mcp = { path = "../mcp" }
 agentos-plugin-loader = { path = "../plugin-loader" }
 # 原生插件 interface crate（HostServices / PipelinePlugin trait 契约）。

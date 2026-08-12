@@ -6,6 +6,7 @@
 > **SOLID 原则**见 `coding_domain_rules.md` §二。
 > **兼容性/Fallback 原则**见 `coding_domain_rules.md` §三。
 > **量化阈值**（唯一真相源）见 `coding_domain_rules.md` §九.3。
+> **Git/任务工作流**（任务自动走 `task/<id>` worktree，不得手动管分支/worktree、不得发 PR）见 `coding_domain_rules.md` §7。
 
 ---
 

@@ -374,9 +374,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     invoker.start_idle_gc();
 
     // 生命周期钩子事件总线（多消费者广播）：在既有"点对点"分发旁路接入一条 broadcast 通道，
-    // 把 OnPipelineStart/OnPipelineEnd 等事件 fan-out 给审计日志 + 指标等订阅者。
+    // 把 OnPipelineStart/OnPipelineEnd（engine）+ OnLoad（invoker sidecar spawn）等事件
+    // fan-out 给审计日志 + 指标等订阅者。
     // 容量 1024：生命周期事件低频，足够吸收突发；emit best-effort 非阻塞，绝不拖慢引擎热路径。
     let hook_bus = Arc::new(agentos_hooks::HookEventBus::new(1024));
+    // 把同一总线注入 invoker：sidecar spawn 的 OnLoad 事件在点对点直调（notifications/on_load）
+    // 旁路 fan-out 给审计/指标订阅者（与 engine 的 OnPipelineStart/End 同一总线）。
+    // 必须在 spawn 任何 sidecar 前完成（start_idle_gc 之后、请求接入之前即满足）。
+    invoker.set_hook_bus(hook_bus.clone());
     let engine = Arc::new(
         AdrEngineImpl::new(store.clone(), invoker.clone(), "default")
             .with_hook_bus(hook_bus.clone()),

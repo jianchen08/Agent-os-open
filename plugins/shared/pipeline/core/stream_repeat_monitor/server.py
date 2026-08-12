@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from functools import lru_cache
 
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _this_dir)
@@ -23,7 +24,22 @@ from plugin import StreamRepetitionMonitor  # noqa: E402
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("stream_repeat_monitor_pipeline")
 
-_instance: StreamRepetitionMonitor | None = None
+
+@lru_cache(maxsize=1)
+def get_instance() -> StreamRepetitionMonitor:
+    """懒构建并缓存 StreamRepetitionMonitor 单例（线程安全；替代模块级可变 `_instance` 全局）。
+
+    original 参数是可选的回调包装目标；作为独立 MCP tool 运行时不需要包装原始回调，
+    传 None 即可。
+    """
+    config = plugin.get_config()
+    return StreamRepetitionMonitor(
+        original=None,
+        window=config.get("window", 100),
+        interval=config.get("interval", 200),
+        similarity=config.get("similarity", 0.9),
+        trigger=config.get("trigger", 3),
+    )
 
 
 @plugin.on_load
@@ -33,22 +49,13 @@ async def _on_load(params: dict) -> None:
     StreamRepetitionMonitor 的 original 参数是可选的回调包装目标。
     作为独立 MCP tool 运行时不需要包装原始回调，传 None 即可。
     """
-    global _instance
-    config = plugin.get_config()
-    _instance = StreamRepetitionMonitor(
-        original=None,
-        window=config.get("window", 100),
-        interval=config.get("interval", 200),
-        similarity=config.get("similarity", 0.9),
-        trigger=config.get("trigger", 3),
-    )
+    get_instance()  # 预热（保持原 on_load 构造时机）
 
 
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup stream_repeat_monitor plugin."""
-    global _instance
-    _instance = None
+    get_instance.cache_clear()
 
 
 @plugin.tool(
@@ -80,8 +87,9 @@ async def check_repetition(chunks: list[str]) -> dict:
         Analysis result with 'detected' flag and chunk index where repetition was found.
     """
     stop_index: int | None = None
+    monitor = get_instance()
     for i, chunk_text in enumerate(chunks):
-        result = _instance({"type": "text", "content": chunk_text})
+        result = monitor({"type": "text", "content": chunk_text})
         if result == "stop":
             stop_index = i
             break

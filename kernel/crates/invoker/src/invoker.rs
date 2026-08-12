@@ -19,6 +19,7 @@ use agentos_core::traits::{
     HookContext, HostType, LifecycleHook, PluginInvoker, PluginLoader, PluginManifest, PluginType,
 };
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
+use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
 use agentos_mcp::{CapabilityRouter, McpClient, McpError};
 use agentos_plugin_loader::{NativePluginLoader, WasmRuntime};
 use parking_lot::RwLock;
@@ -241,6 +242,13 @@ pub struct PluginInvokerImpl {
     /// Capability 路由器——sidecar→内核反向调用通道。
     /// 设置后，新建的 MCP 客户端会带上路由器；已有客户端需重连才生效。
     router: RwLock<Option<Arc<dyn CapabilityRouter>>>,
+    /// 生命周期钩子事件总线（旁路广播，可选注入）。
+    ///
+    /// `None`（默认）时行为不变——sidecar spawn 的 `notifications/on_load` 仍是
+    /// 点对点直调目标插件的权威路径；`Some` 时在直调**旁路**额外把 OnLoad 等事件
+    /// fan-out 给订阅者（审计/指标），best-effort、非阻塞。镜像 `router` 字段的
+    /// `RwLock<Option<Arc<_>>>` 形态，经 [`set_hook_bus`] 在构造后注入。
+    hook_bus: RwLock<Option<Arc<HookEventBus>>>,
     /// WASM 插件运行时（task_11 N7）：host_type==Wasm 时用于加载/执行 .wasm。
     /// None 时 WASM 插件调用返回 WASM_RUNTIME_NOT_CONFIGURED。
     wasm_runtime: Option<Arc<WasmRuntime>>,
@@ -281,6 +289,7 @@ impl PluginInvokerImpl {
             spawn_locks: RwLock::new(HashMap::new()),
             crash_callbacks: RwLock::new(Vec::new()),
             router: RwLock::new(None),
+            hook_bus: RwLock::new(None),
             wasm_runtime: None,
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
@@ -301,6 +310,7 @@ impl PluginInvokerImpl {
             spawn_locks: RwLock::new(HashMap::new()),
             crash_callbacks: RwLock::new(Vec::new()),
             router: RwLock::new(None),
+            hook_bus: RwLock::new(None),
             wasm_runtime: Some(wasm_runtime),
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
@@ -697,6 +707,43 @@ impl PluginInvokerImpl {
         *self.router.write() = Some(router);
     }
 
+    /// 注入生命周期钩子事件总线（旁路广播，可选）。
+    ///
+    /// 镜像 [`set_router`] 的 `&self` 注入形态：内核 main 在创建总线后、spawn 任何
+    /// sidecar 前调用，把同一 `Arc<HookEventBus>` 注入 invoker，使后续 sidecar spawn
+    /// 的 OnLoad 等生命周期事件在点对点直调**旁路** fan-out 给审计/指标订阅者。
+    /// 未调用时（`None`）行为完全不变——直调仍是唯一路径。
+    pub fn set_hook_bus(&self, bus: Arc<HookEventBus>) {
+        *self.hook_bus.write() = Some(bus);
+    }
+
+    /// 旁路广播 OnError 给总线订阅者（审计 / `lifecycle.plugin_error_total` 计数）。
+    ///
+    /// 与 OnLoad 的旁路 emit 对称：插件 execute/call 返回 `Err` 时由调用方（
+    /// [`invoke_pipeline_plugin`] / [`invoke_tool`] 的中央错误返回处）调一次本方法，
+    /// 把"插件调用失败"这一事实 fan-out 给观察层。**不改错误处理语义**——原 `Err`
+    /// 照常向上传播，本方法仅 fire-and-forget 观察一次。
+    ///
+    /// best-effort、非阻塞：未注入总线（`None`，如单测）时 no-op，行为不变。
+    fn emit_lifecycle_error(&self, plugin_id: &str, err: &PluginError) {
+        let bus_guard = self.hook_bus.read();
+        let Some(bus) = bus_guard.as_ref() else {
+            return;
+        };
+        let mut ctx = HookContext::new();
+        ctx.set("plugin_id", json!(plugin_id));
+        ctx.set("error", json!(err.message));
+        if let Some(code) = &err.code {
+            ctx.set("error_code", json!(code));
+        }
+        bus.emit(LifecycleEvent {
+            hook: LifecycleHook::OnError,
+            ctx,
+            target: EventTarget::Plugin(plugin_id.to_string()),
+            ts: SystemTime::now(),
+        });
+    }
+
     /// 注册崩溃回调。
     pub fn on_crash(&self, callback: Arc<dyn Fn(&str) + Send + Sync>) {
         self.crash_callbacks.write().push(callback);
@@ -901,6 +948,24 @@ impl PluginInvokerImpl {
             .inspect_err(|e| {
                 warn!("on_load notification failed for {}: {}", manifest.id, e)
             });
+
+        // 旁路广播 OnLoad 给总线订阅者（审计/指标）。与上方 `notifications/on_load`
+        // 直调属**同一生命周期事件**：直调是权威路径（通知目标插件初始化），
+        // 总线是观察路径（审计日志 / `lifecycle.plugin_load_total` 计数）。
+        // sidecar 走到此处即视为"已加载"（连接 + initialize 握手完成），无论直调
+        // 通知成功与否——观察层关注的是"插件进程被加载起跑"这一事实。
+        // best-effort、非阻塞；未注入总线（`None`，如单测）时无操作，行为不变。
+        let bus_guard = self.hook_bus.read();
+        if let Some(bus) = bus_guard.as_ref() {
+            let mut ctx = HookContext::new();
+            ctx.set("plugin_id", json!(manifest.id));
+            bus.emit(LifecycleEvent {
+                hook: LifecycleHook::OnLoad,
+                ctx,
+                target: EventTarget::Plugin(manifest.id.clone()),
+                ts: SystemTime::now(),
+            });
+        }
 
         info!(
             "MCP client connected and initialized: plugin={}",
@@ -1142,6 +1207,23 @@ impl PluginInvokerImpl {
 
     /// 强制卸载插件的实现（供 trait 方法 force_unload 与内部热重载复用）。
     pub async fn force_unload_impl(&self, plugin_id: &str) -> Result<(), PluginError> {
+        // 旁路广播 OnUnload（杀进程/卸载之前）。与 get_or_create_mcp_client 里的 OnLoad
+        // emit 对称：观察层（审计日志 / `lifecycle.plugin_*` 指标）关注"插件进程即将被
+        // 卸载"这一事实。best-effort、非阻塞；未注入总线（`None`，如单测）时 no-op。
+        {
+            let bus_guard = self.hook_bus.read();
+            if let Some(bus) = bus_guard.as_ref() {
+                let mut ctx = HookContext::new();
+                ctx.set("plugin_id", json!(plugin_id));
+                bus.emit(LifecycleEvent {
+                    hook: LifecycleHook::OnUnload,
+                    ctx,
+                    target: EventTarget::Plugin(plugin_id.to_string()),
+                    ts: SystemTime::now(),
+                });
+            }
+        }
+
         let client_arc = {
             let mut clients = self.mcp_clients.write();
             clients.remove(plugin_id)
@@ -1149,6 +1231,15 @@ impl PluginInvokerImpl {
 
         if let Some(client_arc) = client_arc {
             let mut client = client_arc.write().await;
+            // 镜像 OnLoad 的 notifications/on_load：杀进程之前发 on_unload 给插件自己一个
+            // 收尾机会（fire-and-forget，不等响应）。失败仅 warn 不阻断——进程可能已崩溃
+            // 或不响应该通知，该杀仍杀（卸载语义不变）。
+            let _ = client
+                .send_notification("notifications/on_unload", None)
+                .await
+                .inspect_err(|e| {
+                    warn!("on_unload notification failed for {}: {}", plugin_id, e)
+                });
             if let Err(e) = client.kill().await {
                 warn!("Failed to kill crashed plugin {}: {}", plugin_id, e);
             }
@@ -1238,7 +1329,7 @@ impl PluginInvoker for PluginInvokerImpl {
         // P2-2 插件权限声明前置日志校验（不阻断）
         self.check_permissions(plugin_id, manifest);
 
-        match manifest.host_type {
+        let result = match manifest.host_type {
             HostType::InProcess => {
                 // task_11 N2：经 NativePluginLoader 加载 cdylib 并通过 C-ABI 调用。
                 // config 注入与 sidecar 同逻辑（shared::build_plugin_input）——三家对齐。
@@ -1321,7 +1412,15 @@ impl PluginInvoker for PluginInvokerImpl {
 
                 Ok(plugin_result)
             }
+        };
+
+        // 旁路广播 OnError：插件 execute/call 失败即在此中央错误返回处 emit 一次
+        // （审计日志 / `lifecycle.plugin_error_total` 计数）。best-effort、非阻塞；
+        // bus=None 时 no-op。**不改错误处理语义**——原 Err 照常向上传播。
+        if let Err(ref e) = result {
+            self.emit_lifecycle_error(plugin_id, e);
         }
+        result
     }
 
     /// 调用工具插件执行。
@@ -1342,7 +1441,7 @@ impl PluginInvoker for PluginInvokerImpl {
         // P2-2 插件权限声明前置日志校验（不阻断）
         self.check_permissions(plugin_id, manifest);
 
-        match manifest.host_type {
+        let result = match manifest.host_type {
             HostType::InProcess => {
                 // task_11 N2：原生工具插件——inputs 作为 state，config 同 pipeline 路径注入。
                 self.invoke_native_tool(plugin_id, manifest, tool_name, inputs).await
@@ -1435,7 +1534,15 @@ impl PluginInvoker for PluginInvokerImpl {
 
                 Ok(tool_result)
             }
+        };
+
+        // 旁路广播 OnError：工具插件 execute/call 失败即在此中央错误返回处 emit 一次
+        // （审计日志 / `lifecycle.plugin_error_total` 计数）。best-effort、非阻塞；
+        // bus=None 时 no-op。**不改错误处理语义**——原 Err 照常向上传播。
+        if let Err(ref e) = result {
+            self.emit_lifecycle_error(plugin_id, e);
         }
+        result
     }
 
     /// 发送生命周期钩子事件到指定插件。

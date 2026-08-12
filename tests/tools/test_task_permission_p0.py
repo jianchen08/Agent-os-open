@@ -21,24 +21,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# ── 路径注入：legacy_0_1_compat（提供 tasks/core/tools shim）+ task 工具目录 ──
+# ── 路径注入：task 工具目录 + system/tasks 权威目录（0.2 平铺模块）──
+# 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装，无需注入路径）。
+# tool.py 顶部 `from service import …` / `from task_types import …` 直接解析到
+# system/tasks 平铺模块；故注入 task 工具目录与 system/tasks 目录。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPAT = _REPO_ROOT / "plugins" / "shared" / "legacy_0_1_compat"
 _TASK_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task"
-for _p in (str(_COMPAT), str(_TASK_DIR)):
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
+for _p in (str(_TASK_DIR), str(_TASKS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+# 整 suite 收集时弹出先前测试缓存的可能同名平铺模块，避免 tool.py 的
+# `from service import …` / `from task_types import …` 命中错误缓存。
 for _m in (
     "tool",
-    "types",
     "service",
-    "base",
     "state_machine",
     "task_types",
-    # tasks 包来自 legacy_0_1_compat shim；整 suite 收集时须弹出先前测试缓存的别的 tasks，
-    # 否则 tool.py 的 `from tasks.types import ...` 会命中错误缓存（ModuleNotFoundError: tasks.types）。
-    "tasks",
-    "tasks.types",
+    "agents_types",
 ):
     sys.modules.pop(_m, None)
 

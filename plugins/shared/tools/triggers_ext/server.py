@@ -6,13 +6,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# 将 0.1 兼容 shim 目录加入 sys.path，使老代码的 from core.* / tools.* / utils.* /
-# triggers.* / tasks.* / agents.* 导入解析到 legacy_0_1_compat 下的精简副本。
-#详见 plugins/shared/legacy_0_1_compat/__init__.py。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_COMPAT_ROOT = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'legacy_0_1_compat')
-if os.path.isdir(_COMPAT_ROOT):
-    sys.path.insert(0, _COMPAT_ROOT)
+# 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
+# 触发器领域代码（triggers/）为本工具自有子包，位于本工具目录下，由上方
+# sys.path 注入解析。不再依赖 0.1 兼容 shim。
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 

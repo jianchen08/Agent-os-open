@@ -51,8 +51,10 @@ def _destroy_session_container(workspace: str | None) -> None:
         else:
             loop.run_until_complete(_destroy())
 
-    except Exception:
-        logger.warning("[session] 投递会话容器销毁任务失败 | ws=%s", workspace, exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[session] 投递会话容器销毁任务失败 | ws=%s err=%s", workspace, exc, exc_info=True
+        )
 
 
 import contextlib  # noqa: E402
@@ -82,7 +84,8 @@ def _get_task_service() -> Any:
             lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
         )
 
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("获取 TaskService 失败，返回 None | err=%s", exc, exc_info=True)
         return None
 
 
@@ -94,7 +97,10 @@ def _safe_get_service(service_name: str) -> Any:
         )
 
         return get_service_provider().get(service_name)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "获取服务失败，返回 None | service=%s err=%s", service_name, exc, exc_info=True
+        )
         return None
 
 
@@ -109,7 +115,10 @@ def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
 
     try:
         all_tasks = task_service.get_all_tasks()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "get_all_tasks 失败，回退原始 pipeline_ids | err=%s", exc, exc_info=True
+        )
         return list(pipeline_ids)
 
     return _expand_pipeline_ids_with_tasks(pipeline_ids, all_tasks or [])
@@ -498,8 +507,8 @@ def delete_thread(  # noqa: PLR0912
                     with contextlib.suppress(OSError):
                         cp_file.unlink()
 
-    except Exception:
-        logger.warning("清理检查点文件失败", exc_info=True)
+    except OSError as exc:
+        logger.warning("清理检查点文件失败 | err=%s", exc, exc_info=True)
 
     task_service = _safe_get_service("task_service")
 
@@ -509,8 +518,8 @@ def delete_thread(  # noqa: PLR0912
                 try:
                     task_service.hard_delete_sync(task.id)
 
-                except Exception:
-                    logger.warning("删除关联任务 %s 失败", task.id, exc_info=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("删除关联任务 %s 失败 | err=%s", task.id, exc, exc_info=True)
 
     task_worker = _safe_get_service("task_worker")
 
@@ -697,8 +706,13 @@ def _register_session_pipeline(
 
             user_id = user_id or _t.get("user_id") or ""
 
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "从 api_store 补全 agent_id/user_id 失败 | thread_id=%s err=%s",
+                thread_id,
+                exc,
+                exc_info=True,
+            )
 
     if not agent_id:
         _logger.error("[session] 注册失败：会话 %s 无 agent_id（api_store 数据错误）", thread_id[:12])

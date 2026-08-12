@@ -136,6 +136,7 @@ name = "agentos-invoker"
 version = "0.2.0"
 dependencies = [
  "agentos-core",
+ "agentos-hooks",
  "agentos-mcp",
  "agentos-native-sdk",
  "agentos-plugin-loader",

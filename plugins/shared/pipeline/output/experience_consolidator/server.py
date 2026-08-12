@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from functools import lru_cache
 
 # 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
 _this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -30,15 +31,18 @@ from wiring import build_memory_backend  # noqa: E402
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("experience_consolidator_pipeline")
 
-_instance: ExperienceConsolidatorPlugin | None = None
+
+@lru_cache(maxsize=1)
+def get_instance() -> ExperienceConsolidatorPlugin:
+    """懒构建并缓存插件单例（线程安全；替代模块级可变 `_instance` 全局）。"""
+    config = plugin.get_config()
+    return ExperienceConsolidatorPlugin(config=config)
 
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
     """Initialize experience_consolidator plugin + 注入记忆后端。"""
-    global _instance
-    config = plugin.get_config()
-    _instance = ExperienceConsolidatorPlugin(config=config)
+    get_instance()  # 预热：构建插件单例（保持原 on_load 构造时机）
     backend = build_memory_backend(plugin)
     if backend:
         set_memory_backend(backend)
@@ -49,8 +53,7 @@ async def _on_load(params: dict) -> None:
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup experience_consolidator plugin."""
-    global _instance
-    _instance = None
+    get_instance.cache_clear()
 
 
 @plugin.tool(
@@ -79,7 +82,7 @@ async def execute(state: dict, config: dict | None = None) -> dict:
 
     merged_state = create_initial_state(**state)
     ctx = PluginContext(state=merged_state, config=config or {})
-    result = await _instance.execute(ctx)
+    result = await get_instance().execute(ctx)
 
     # Core 插件返回 dict，Input/Output 返回 PluginResult/OutputResult
     if isinstance(result, dict):

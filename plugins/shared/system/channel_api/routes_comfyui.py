@@ -225,8 +225,13 @@ async def comfyui_ws(websocket: WebSocket) -> None:
         try:
             loop = asyncio.get_event_loop()
             loop.create_task(websocket.send_text(json.dumps({"type": msg_type, "data": data}, ensure_ascii=False)))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ComfyUI WebSocket 推送进度失败 | msg_type=%s err=%s",
+                msg_type,
+                exc,
+                exc_info=True,
+            )
 
     service.add_progress_callback(on_progress)
     try:

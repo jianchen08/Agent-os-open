@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from functools import lru_cache
 
 # 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
 _this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,24 +23,26 @@ from plugin import SecurityCheckPlugin, _set_plugin_ref  # noqa: E402
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("security_check_pipeline")
 
-_instance: SecurityCheckPlugin | None = None
+
+@lru_cache(maxsize=1)
+def get_instance() -> SecurityCheckPlugin:
+    """懒构建并缓存插件单例（线程安全；替代模块级可变 `_instance` 全局）。"""
+    # 注入 plugin 引用，供 SecurityCheckPlugin 内部拿 human-interaction capability。
+    _set_plugin_ref(plugin)
+    config = plugin.get_config()
+    return SecurityCheckPlugin(config=config)
 
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
     """Initialize security_check plugin."""
-    global _instance
-    # 注入 plugin 引用，供 SecurityCheckPlugin 内部拿 human-interaction capability。
-    _set_plugin_ref(plugin)
-    config = plugin.get_config()
-    _instance = SecurityCheckPlugin(config=config)
+    get_instance()  # 预热：注入 plugin 引用 + 构建单例（保持原 on_load 构造时机）
 
 
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup security_check plugin."""
-    global _instance
-    _instance = None
+    get_instance.cache_clear()
 
 
 @plugin.tool(
@@ -68,7 +71,7 @@ async def execute(state: dict, config: dict | None = None) -> dict:
 
     merged_state = create_initial_state(**state)
     ctx = PluginContext(state=merged_state, config=config or {})
-    result = await _instance.execute(ctx)
+    result = await get_instance().execute(ctx)
 
     # Core 插件返回 dict，Input/Output 返回 PluginResult/OutputResult
     if isinstance(result, dict):

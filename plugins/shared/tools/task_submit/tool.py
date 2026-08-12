@@ -5,17 +5,20 @@ import os
 from pathlib import Path
 from typing import Any
 
-from core.results import ToolExecutionResult
-from tools.builtin.base import BuiltinTool
-from tools.types import (
+# 跨插件共享类型（含 safe_enum_value）已上提到 SDK 公共依赖层 agentos_plugin_sdk。
+# 任务领域类型以 plugins/shared/system/tasks/ 为权威（0.2 平铺模块，由 server.py
+# 将该目录注入 sys.path），在用到处懒加载直接 import。
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
+    safe_enum_value,
 )
-from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +185,7 @@ class TaskSubmitTool(BuiltinTool):
         """获取共享的 TaskService 实例。"""
         if self._task_service is not None:
             return self._task_service
-        from tasks.service_access import get_task_service  # noqa: PLC0415
+        from service_access import get_task_service  # noqa: PLC0415
 
         service = get_task_service()
         if service is not None:
@@ -936,7 +939,7 @@ class TaskSubmitTool(BuiltinTool):
         # ── 6. 创建任务 ──
         raw_priority = inputs.get("priority", 5)
         try:
-            from tasks.types import TaskPriority as TP  # noqa: N817,PLC0415
+            from task_types import TaskPriority as TP  # noqa: N817,PLC0415
 
             TP(raw_priority)
         except (ValueError, AttributeError):
@@ -944,7 +947,7 @@ class TaskSubmitTool(BuiltinTool):
 
         try:
             child_agent_level = min(parent_agent_level + 1, 3)
-            from agents.types import AgentLevel  # noqa: PLC0415
+            from agents_types import AgentLevel  # noqa: PLC0415
 
             level_values = {"L1": 1, "L2": 2, "L3": 3}
             level_str = f"L{child_agent_level}"

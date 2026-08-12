@@ -19,14 +19,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── 路径注入：legacy_0_1_compat（tasks/core/tools shim）+ task_submit 工具目录 ──
+# ── 路径注入：task_submit 工具目录 ──
+# 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装，无需注入路径）。
+# tool.py 顶部仅需 SDK；任务领域模块（service_access / task_types / agents_types）
+# 在用到处懒加载，由 server.py 在真实运行时注入 system/tasks 路径，测试中不触达。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPAT = _REPO_ROOT / "plugins" / "shared" / "legacy_0_1_compat"
 _TS_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
-for _p in (str(_COMPAT), str(_TS_DIR)):
+for _p in (str(_TS_DIR),):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-for _m in ("tool", "types", "service", "base", "state_machine", "task_types"):
+# 弹出可能被先前测试缓存为别的 tool.py 的同名模块，确保本次拿到 task_submit 的 tool。
+for _m in ("tool",):
     sys.modules.pop(_m, None)
 
 import tool as ts_tool  # noqa: E402

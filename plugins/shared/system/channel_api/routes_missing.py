@@ -118,8 +118,13 @@ async def get_task_tree(  # noqa: PLR0912,PLR0915
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "get_task_tree: 解析会话 pipeline_ids 失败 | session_id=%s err=%s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
 
         # 从任务自身的 pipeline_run_id / parent_pipeline_id 递归扩展管道树
         # 主管道的 pipeline_run_id 已在 related_pipeline_ids 中，
@@ -921,8 +926,13 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
                     "currentPhase": phase,
                     "phaseStatus": phase_status,
                 }
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "解析任务阶段失败，回退默认 prepare/pending | task_id=%s err=%s",
+                task_id,
+                exc,
+                exc_info=True,
+            )
 
     return {
         "taskId": task_id,
