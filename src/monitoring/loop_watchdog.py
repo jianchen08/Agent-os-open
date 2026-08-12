@@ -36,7 +36,7 @@ _DEFAULT_CHECK_INTERVAL = 2.0  # 看门狗检查频率
 _DEFAULT_DUMP_COOLDOWN = 60.0  # 冻结 dump 冷却，避免冻结期间刷屏
 
 
-def dump_all_threads(file_path: Path, *, tag: str = "LOOP FROZEN") -> None:
+def dump_all_threads(file_path: Path, *, tag: str = "LOOP FROZEN", loop: Any = None) -> None:
     """dump 所有 OS 线程栈到文件。
 
     组合两套栈源，互相印证：
@@ -68,6 +68,26 @@ def dump_all_threads(file_path: Path, *, tag: str = "LOOP FROZEN") -> None:
                     fh.write("  (no frame available)\n")
                     continue
                 traceback.print_stack(frame, file=fh)
+
+            # asyncio 协程栈：OS 线程栈只能看到主 loop 在 select/_run_once，
+            # 看不到「哪个协程在等什么 event」——而这正是定位协程级卡死
+            # （主 loop 活着、某协程卡在 await）的关键。如 f81e12cac33d 卡死：
+            # OS 栈显示 select（误判没冻），但某个协程实际卡在等 LLM/lock/queue。
+            if loop is not None:
+                fh.write("\n--- asyncio tasks (协程栈，定位协程级卡死) ---\n")
+                try:
+                    import asyncio  # noqa: PLC0415
+
+                    tasks = asyncio.all_tasks(loop)
+                    fh.write(f"共 {len(tasks)} 个未完成 task\n")
+                    for _t in tasks:
+                        try:
+                            fh.write(f"\nTask {_t!r} done={_t.done()}:\n")
+                            _t.print_stack(file=fh, limit=20)
+                        except Exception as _te:  # noqa: BLE001
+                            fh.write(f"  (print_stack 失败: {_te})\n")
+                except Exception as _ae:  # noqa: BLE001
+                    fh.write(f"(asyncio tasks dump 失败: {_ae})\n")
         logger.error("[LoopWatchdog] 已 dump 线程栈到 %s（%s）", file_path, tag)
     except Exception as exc:  # noqa: BLE001 - 诊断工具自身绝不能拖垮进程
         logger.error("[LoopWatchdog] dump 线程栈失败: %s", exc)
@@ -136,6 +156,7 @@ def attach_loop_watchdog(
                     dump_all_threads(
                         dump_path,
                         tag=f"LOOP FROZEN (stalled {stalled:.0f}s)",
+                        loop=loop,
                     )
 
     thread = threading.Thread(target=_watch, name="LoopWatchdog", daemon=True)
