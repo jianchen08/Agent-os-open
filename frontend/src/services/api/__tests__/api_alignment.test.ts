@@ -1,3 +1,4 @@
+/** @feature FP-MIGR 0.1→0.2迁移 @vision V6 可即用 @ci frontend-test */
 /**
  * 前后端 API 对齐修复测试
  *
@@ -126,7 +127,7 @@ describe('F9 - getTasks 响应解包', () => {
 
     await taskApi.getTasks({ skip: 10, limit: 20, status: 'running' })
 
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/tasks', {
+    expect(mockGet).toHaveBeenCalledWith('/ext/channel_api/tasks', {
       params: { skip: 10, limit: 20, status: 'running' },
     })
   })
@@ -166,7 +167,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
     await longTermTasksApi.pauseLongTermTask('task-1')
 
     // 验证使用的是 PATCH
-    expect(mockPatch).toHaveBeenCalledWith('/api/v1/tasks/task-1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1', {
       status: 'blocked',
     })
     // 验证没有使用 PUT
@@ -194,7 +195,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
     await longTermTasksApi.resumeLongTermTask('task-1')
 
     // 验证使用的是 PATCH
-    expect(mockPatch).toHaveBeenCalledWith('/api/v1/tasks/task-1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1', {
       status: 'running',
     })
     // 验证没有使用 PUT
@@ -240,7 +241,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
     await longTermTasksApi.toggleAutoExecute('task-1', true)
 
     // 验证使用 PATCH 更新标签
-    expect(mockPatch).toHaveBeenCalledWith('/api/v1/tasks/task-1', {
+    expect(mockPatch).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1', {
       tags: ['long-term', 'auto-execute'],
     })
     // 验证没有使用 PUT
@@ -442,7 +443,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.items[0].id).toBe('project-1')
 
     // 验证调用端点（实际代码使用 { params } 对象格式）
-    expect(mockGet).toHaveBeenCalledWith('/api/v1/projects', {
+    expect(mockGet).toHaveBeenCalledWith('/ext/channel_api/projects', {
       params: { page: 1, limit: 20 },
     })
   })
@@ -481,7 +482,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.status).toBe('planning')
 
     // 验证调用端点
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/projects', {
+    expect(mockPost).toHaveBeenCalledWith('/ext/channel_api/projects', {
       goal: '测试目标',
       session_id: 'session-1',
       auto_execute: true,
@@ -516,7 +517,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.status).toBe('suspended')
 
     // 验证调用端点（POST，而非 PATCH）
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/projects/proj-1/pause')
+    expect(mockPost).toHaveBeenCalledWith('/ext/channel_api/projects/proj-1/pause')
   })
 
   it('resumeProject 应调用 POST 端点并解包 {project: {...}} 响应', async () => {
@@ -546,6 +547,6 @@ describe('前后端 Projects API 响应解包验证', () => {
     expect(result.status).toBe('running')
 
     // 验证调用端点（POST，而非 PATCH）
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/projects/proj-1/resume')
+    expect(mockPost).toHaveBeenCalledWith('/ext/channel_api/projects/proj-1/resume')
   })
 })

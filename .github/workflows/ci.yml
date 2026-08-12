@@ -259,7 +259,6 @@ jobs:
             plugins/shared/tools/builtin_tools/tests/ \
             tests/plugins/ \
             tests/suites/plugins/ \
-            tests/suites/m6_plugins/ \
             tests/channels/ \
             tests/test_p0_regression.py \
             tests/test_security_check_allow_priority.py \

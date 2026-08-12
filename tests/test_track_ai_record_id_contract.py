@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
 """TrackPlugin AI 记录 record_id 解析的回归测试。
 
 BUG-FIX-fix_20260623_ai_record_id_broken 的守护测试。
@@ -12,6 +13,12 @@ message_id（即 bridge 当前 turn 的 message_id）。一旦断裂，切 Tab /
 
 测试通过 mock registry + bridge 验证 _resolve_ai_record_id 的解析逻辑，
 不依赖真实 pipeline / engine。
+
+0.2 迁移说明：0.2 的 TrackPlugin（plugins/shared/pipeline/output/track/plugin.py）
+已移除 `_resolve_ai_record_id` —— record_id 解析逻辑随逐动作执行记录的 YAML
+持久化职责一并下沉到内核 pipeline_loop 的 SQLite 层（messages/traces 表）。
+测试 patch 的 `pipeline.registry.get_engine_registry` 也已不存在。属 0.1 遗留
+守护测试，整体跳过，待内核层补等价回归后迁移。
 """
 
 import os
@@ -19,9 +26,16 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="0.1 遗留: TrackPlugin._resolve_ai_record_id 在 0.2 已移除（record_id 解析下沉"
+           "到内核 SQLite 层），patch 目标 pipeline.registry 亦不存在，0.2 重写中"
+)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from tests._pipeline_plugin_path import add_plugin_dir
+from tests._pipeline_plugin_path import add_plugin_dir  # noqa: E402
 add_plugin_dir("output", "track")
 from plugin import TrackPlugin  # noqa: E402
 

@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
 """tasks 插件迁移验证测试。
 
 验证内容：
@@ -26,6 +27,40 @@ pytestmark = pytest.mark.unit
 _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tasks_plugin_modules():
+    """逐出被其它插件测试污染的同名裸模块，确保本插件目录的模块按自身 sys.path 解析。
+
+    0.2 各插件平铺 import（from service import ...），同名模块在跨文件收集时会
+    互相覆盖 sys.modules 缓存：例如 security_check 插件的 service.py 先被收集导入后，
+    本测试 `from service import TaskService` 会命中错误模块而 ImportError。conftest 的
+    逐出仅在收集时生效，而本文件的裸模块导入发生在测试运行期（函数体内），故在此
+    每个测试前重新置本插件目录于 sys.path 最前，并逐出本插件用到的同名裸模块，
+    强制按本目录重新解析。Windows/Ubuntu 通用。
+    """
+    d = str(_PLUGIN_DIR)
+    if d in sys.path:
+        sys.path.remove(d)
+    sys.path.insert(0, d)
+    for m in (
+        "task_types",
+        "state_machine",
+        "storage",
+        "service",
+        "timer_manager",
+        "agents_types",
+        "enum_utils",
+        "workspace",
+        "service_access",
+        "_task_cleanup",
+        "_task_crud",
+        "_task_state",
+        "server",
+    ):
+        sys.modules.pop(m, None)
+    yield
 
 
 # ═══════════════════════════════════════════════════════════

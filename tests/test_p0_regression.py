@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
 """P0 安全+冗余清理变更回归测试。
 
 覆盖 7 个核心变更点的回归验证：
@@ -19,6 +20,12 @@
 - TestTypePriorityScope: _TYPE_PRIORITY 作用域验证（5 用例）
 - TestTaskModelSerialization: TaskModel 序列化验证（4 用例）
 - TestCrossModuleConsistency: 跨模块委托一致性验证（4 用例）
+
+0.2 迁移说明：本文件全部用例通过 importlib / from 加载 0.1 的 src/ 模块
+（utils.enum_utils / tasks.service_access / infrastructure.service_access /
+channels.api.routes_* / evaluation.engine / tools.executor / pipeline.engine 等）。
+0.2 已删除 src/ 目录（仅 reference/0.1_src 留存），这些模块不再存在，
+属 0.1 遗留回归测试，整体跳过，待对应功能在 0.2 内核/plugins 下重写后迁移。
 """
 
 from __future__ import annotations
@@ -28,6 +35,12 @@ from enum import Enum
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="0.1 遗留: 依赖已删除的 src/ 模块（utils.enum_utils / tasks.service_access / "
+           "infrastructure.service_access / channels.api.routes_* / evaluation.engine / "
+           "tools.executor / pipeline.engine），0.2 src/ 已删，重写中"
+)
 
 
 # =============================================================================

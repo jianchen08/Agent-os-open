@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
 """allow 白名单优先单元测试 — _match_rules 的 allow 规则优先于 block/needs_approval。
 
 验证卡死根因修复：`wc -l ... 2>/dev/null` 这类安全命令被 dangerous_commands
@@ -6,13 +7,38 @@
 1. allow 规则命中时立即放行，即使前面有 needs_approval/block 规则也匹配
 2. 无 allow 命中时返回首个拦截/审批规则
 3. 无任何规则匹配返回空
+
+0.2 迁移说明：被测插件的 _load_rules 通过 config.config_center 加载规则，
+而 config_center 是 0.1 已删模块（仅 reference/0.1_src 留存），规则加载失败
+导致 _match_rules 恒返回空。本测试改为直接从仓库根的
+config/isolation/security_rules.yaml 读取规则列表，经 config={"rules": ...}
+注入插件，绕开已删除的 config_center，使 _match_rules 有真实规则可匹配。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
+
 from tests._pipeline_plugin_path import add_plugin_dir
 add_plugin_dir("input", "security_check")
 from plugin import SecurityCheckPlugin
+
+# 直接从仓库根读取安全规则，绕开已删除的 config.config_center。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_RULES_FILE = _REPO_ROOT / "config" / "isolation" / "security_rules.yaml"
+try:
+    _SECURITY_RULES: list[dict] = (
+        yaml.safe_load(_RULES_FILE.read_text(encoding="utf-8")) or {}
+    ).get("rules", [])
+except (FileNotFoundError, OSError, yaml.YAMLError):
+    _SECURITY_RULES = []
+
+
+def _make_plugin() -> SecurityCheckPlugin:
+    """构造带真实安全规则的 SecurityCheckPlugin（规则直接注入，不依赖 config_center）。"""
+    return SecurityCheckPlugin(config={"rules": _SECURITY_RULES})
 
 
 class TestMatchRulesAllowPriority:
@@ -25,7 +51,7 @@ class TestMatchRulesAllowPriority:
         同时命令含 curl（命中 dangerous_commands needs_approval）。
         allow 必须赢——这就是 _match_rules 修复的核心契约。
         """
-        plugin = SecurityCheckPlugin()
+        plugin = _make_plugin()
         action, rule = plugin._match_rules(
             "bash_execute",
             {"command": "wc -l file.txt && echo done"},
@@ -39,7 +65,7 @@ class TestMatchRulesAllowPriority:
         该命令不再命中任何危险规则（action 空）。是否审批由 _is_dangerous_tool
         兜底决定（bash_execute 危险工具），不在此测试范围。
         """
-        plugin = SecurityCheckPlugin()
+        plugin = _make_plugin()
         action, _ = plugin._match_rules(
             "bash_execute",
             {"command": "cd /workspace && wc -l src/*.js 2>/dev/null"},
@@ -49,24 +75,24 @@ class TestMatchRulesAllowPriority:
 
     def test_plain_safe_command_allowed(self) -> None:
         """纯安全命令（ls）→ allow。"""
-        plugin = SecurityCheckPlugin()
+        plugin = _make_plugin()
         action, _ = plugin._match_rules("bash_execute", {"command": "ls -la"})
         assert action == "allow"
 
     def test_dangerous_command_not_allowed(self) -> None:
         """真正危险命令（rm -rf）→ needs_approval（无 allow 命中）。"""
-        plugin = SecurityCheckPlugin()
+        plugin = _make_plugin()
         action, _ = plugin._match_rules("bash_execute", {"command": "rm -rf /tmp/x"})
         assert action == "needs_approval"
 
     def test_unknown_command_returns_approval(self) -> None:
         """未知命令（不匹配 allow 也不匹配危险规则）→ 空字符串。"""
-        plugin = SecurityCheckPlugin()
+        plugin = _make_plugin()
         action, _ = plugin._match_rules("bash_execute", {"command": "some-unknown-cmd"})
         assert action == ""
 
     def test_no_params_no_match(self) -> None:
         """无相关参数 → 空字符串。"""
-        plugin = SecurityCheckPlugin()
+        plugin = _make_plugin()
         action, _ = plugin._match_rules("bash_execute", {})
         assert action == ""

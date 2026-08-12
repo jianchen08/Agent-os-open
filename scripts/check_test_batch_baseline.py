@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 """散落测试批次失败数基线锁：防止 pre-existing 失败数增长。
 
+⚠️ 已废弃（2026-08-12 复测确认，reports/audit_round3/_RECHECK.md 新发现 N2）：
+   batch4/5 模型已被 ci.yml 的 python-plugins-test 自定义路径列表取代，
+   本脚本无任何 CI job 调用（孤儿）；.github/test-batch-baseline.txt 也不再被读取。
+   保留以备参考；如需重启 batch 基线，需在 ci.yml 重新接入本脚本。
+
 机制（与 check_frontend_baseline.py 同构）：
 - .github/test-batch-baseline.txt 记录各批次允许的失败数上限
 - 跑指定批次的 pytest，解析失败数

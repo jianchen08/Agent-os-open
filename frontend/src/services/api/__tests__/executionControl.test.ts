@@ -1,23 +1,28 @@
+/** @feature FP-MIGR 0.1→0.2迁移 @vision V6 可即用 @ci frontend-test */
 /**
- * 执行控制 API 服务测试
+ * 执行控制 API 服务测试（0.2 已移除该模块）
  *
- * 测试任务执行的控制接口：暂停、恢复、取消、回滚等
- * 与后端 /api/v1/execution/* 端点对齐
+ * 0.2 迁移后 src/services/api/executionControl.ts 已整体移除：暂停/恢复/取消/审批/注入等
+ * 执行控制能力改由内核管道 + interaction/review 插件驱动，前端不再直连 /api/v1/execution/*。
+ * 下面的用例整体标 describe.skip，避免调用已删函数导致 TypeError 红色失败。
+ * 待后续按新交互契约重写后再恢复。
  */
 
 /* eslint-disable import-x/order */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  approveExecution,
-  cancelExecution,
-  controlExecution,
-  getExecutionStatus,
-  getExecutionSteps,
-  injectAgentMessage,
-  pauseExecution,
-  resumeExecution,
-  rollbackExecution,
-} from '@/services/api/executionControl'
+
+// 0.2 已移除 executionControl 模块（文件不存在，无法 import）。
+// 这里定义本地 stub 占位，使用例骨架可解析；整体 describe.skip 不会真正调用。
+const approveExecution = vi.fn()
+const cancelExecution = vi.fn()
+const controlExecution = vi.fn()
+const getExecutionStatus = vi.fn()
+const getExecutionSteps = vi.fn()
+const injectAgentMessage = vi.fn()
+const pauseExecution = vi.fn()
+const resumeExecution = vi.fn()
+const rollbackExecution = vi.fn()
+
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -26,10 +31,10 @@ vi.mock('../client', () => ({
   },
 }))
 
- 
 import apiClient from '@/services/api/client'
 
-describe('执行控制 API', () => {
+// 0.2 已移除该模块：整体 skip，保留用例骨架待后续按新契约重写。
+describe.skip('执行控制 API（0.2 已移除该模块：executionControl）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })

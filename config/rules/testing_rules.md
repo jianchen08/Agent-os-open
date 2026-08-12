@@ -335,5 +335,56 @@ export class LoginPage {
 ### 8.2 实践要求
 
 - 测试命名应反映业务意图
-- 测试注释应说明"为什么这个行为重要"
+- 测试注释应说明“为什么这个行为重要”
 - 关键业务规则的测试应包含意图描述注释
+
+---
+
+## 9. 测试追溯标记规范
+
+> 目的：把「愿景 → 架构 → 审查要求 → 功能点 → 测试 → CI」六层显式连起来。每个测试必须能反查它服务哪条愿景主线、哪个功能点、回应哪个审查问题、进哪个 CI job。中心载体为 `docs/test_traceability.md`，去中心化载体为本节定义的文件头标记。两者由 `scripts/check_test_traceability.py` 交叉校验。
+
+### 9.1 标记四元组
+
+| 标记 | 必填 | 含义 | 取值 |
+|------|------|------|------|
+| `@feature` | **是** | 该测试服务的功能点 ID | 见 `docs/test_traceability.md` 表 A/B（如 `FP-0.2.〇`、`FP-DB`、`FP-MIGR`） |
+| `@vision` | 建议 | 该功能点服务的愿景主线 | `V1 可进化` / `V2 全能闭环` / `V3 可嵌入` / `V4 多用户` / `V5 可扮演` / `V6 可即用` |
+| `@audit` | 按需 | 回应的审查问题编号 | `T5#<n>`（对应 `reports/audit_round3/T5_tests.md` §⑨ 问题清单） |
+| `@ci` | 按需 | 该测试实际进入的 CI job | ci.yml job 名（如 `rust-test` / `python-plugins-test` / `frontend-test` / `timing`） |
+
+### 9.2 文件头格式（按语言）
+
+每个测试文件**顶部**（模块 docstring/imports 之前或之后的第一条声明）放置标记块。
+
+**Python**（注释行，多标记用 `|` 分隔在同一行，或拆多行）：
+
+```python
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @audit: T5#3 | @ci: python-plugins-test
+"""模块 docstring（可选）。"""
+```
+
+**前端 TS/TSX**（块注释）：
+
+```typescript
+/** @feature FP-0.2.四 前端Schema  @vision V6 可即用  @audit T5#1  @ci frontend-test */
+```
+
+**Rust**（行注释，测试文件顶部）：
+
+```rust
+// @feature: FP-0.2.一 插件协议 | @vision: V3 可嵌入 | @audit: T5#16 | @ci: rust-test
+```
+
+### 9.3 校验规则（CI 强制）
+
+1. 每个测试文件必须有 `@feature`，且其 ID 存在于 `docs/test_traceability.md` 表 A/B。
+2. `@vision` 若填，必须是 V1~V6 之一。
+3. `@audit` 若填，`T5#<n>` 的 `<n>` 必须是 `reports/audit_round3/T5_tests.md` §⑨ 表中存在的编号。
+4. 标记缺失或引用无效 → `scripts/check_test_traceability.py` 退出非 0 → CI 拦截。
+
+> 校验脚本与 CI 接入在「测试治理 · 阶段 5」落地；落地前，新增/修改测试应主动补齐标记（软约束）。
+
+### 9.4 与意图测试（§8）的关系
+
+`@feature/@vision` 是**机器可读的 WHY 索引**（服务哪个功能点/愿景），§8 的意图注释是**人可读的 WHY 叙述**（这个行为为什么重要）。两者互补：标记让测试可追溯，注释让测试可理解。关键业务规则的测试应同时具备二者。

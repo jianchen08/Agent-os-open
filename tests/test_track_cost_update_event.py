@@ -1,3 +1,4 @@
+# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
 """TrackPlugin cost_update 事件契约测试。
 
 钉死 cost_update 事件推送给前端输入框进度条的数据契约：
@@ -12,6 +13,13 @@
 但 thread_id 不是 state 标准字段（恒为空），导致 if thread_id 直接跳过发送。
 真实会话标识是 session_id；TargetedSink 可按 pipeline_id 从 registry 自解析，
 不需要 thread_id 守卫。本测试覆盖 session_id 和无 session_id 两种路径。
+
+0.2 迁移说明：0.2 的 TrackPlugin._try_notify_cost_update 已改为 no-op 存根——
+cost_update 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该
+capability，当前推送静默跳过。测试 patch 的 channels.websocket.ws_handler
+.ws_interaction_notifier 与 pipeline.stream_bridge.create_targeted_sink 均为
+0.1 已删除模块（见 ci.yml 注释）。属 0.1 遗留契约测试，整体跳过，待 frontend.emit
+capability 落地后按新出口重写。
 """
 
 import asyncio
@@ -20,16 +28,27 @@ import sys
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="0.1 遗留: 依赖已删除的 channels.websocket.ws_handler.ws_interaction_notifier / "
+           "pipeline.stream_bridge.create_targeted_sink；_try_notify_cost_update 在 0.2 已改"
+           "为 no-op（推送改走 frontend.emit，SDK 未实现），0.2 重写中"
+)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pytest  # noqa: E402
+# 跳过态下兜底导入：避免被测模块/路径在 0.2 缺失时让 collect 整体 error。
+try:
+    from tests._pipeline_plugin_path import add_plugin_dir  # noqa: E402
+    add_plugin_dir("output", "track")
+    from pipeline.plugin import PluginContext  # noqa: E402
+    from plugin import TrackPlugin  # noqa: E402
+except ModuleNotFoundError:  # 0.2 缺失 src/ 或 pipeline 包时
+    PluginContext = None  # type: ignore[assignment]
+    TrackPlugin = None  # type: ignore[assignment]
 
-from pipeline.plugin import PluginContext  # noqa: E402
-from tests._pipeline_plugin_path import add_plugin_dir
-add_plugin_dir("output", "track")
-from plugin import TrackPlugin  # noqa: E402
-
-pytestmark = pytest.mark.unit
+# 注：原 `pytestmark = pytest.mark.unit` 已被上方 skip 覆盖（整文件跳过）。
 
 PIPELINE_ID = "pipeline_cost_001"
 

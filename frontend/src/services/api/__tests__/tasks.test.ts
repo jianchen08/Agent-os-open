@@ -1,3 +1,4 @@
+/** @feature FP-MIGR 0.1→0.2迁移 @vision V6 可即用 @ci frontend-test */
 /**
  * 任务管理 API 测试
  *
@@ -5,6 +6,9 @@
  * - 长期任务（项目）管理
  * - 短期任务阶段管理
  * - 验收标准（AC）评估
+ *
+ * 注：0.2 迁移后 tasks/projects/phases/ac 域已切 /ext/channel_api/*；
+ *     completePreparePhase / evaluateAC / evaluateAllACs 三函数 0.2 已移除，用例标 skip。
  *
  * @docs docs/tasks/task-execution-loop-system.md
  */
@@ -92,8 +96,10 @@ describe('任务管理 API', () => {
       expect(result.items[0].status).toBe('running')
       expect(result.total).toBe(2)
 
-      // 验证 API 调用
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/projects?page=1&limit=20')
+      // 验证 API 调用（0.2 迁移：/ext/channel_api/projects，params 走 axios params 对象）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/projects', {
+        params: { page: 1, limit: 20 },
+      })
       expect(apiClient.get).toHaveBeenCalledTimes(1)
     })
 
@@ -127,8 +133,10 @@ describe('任务管理 API', () => {
       // 调用 API，过滤运行中的项目
       await taskApi.fetchProjects({ status: 'running' })
 
-      // 验证 API 调用包含状态过滤
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/projects?status=running')
+      // 验证 API 调用包含状态过滤（0.2 迁移：/ext/channel_api/projects）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/projects', {
+        params: { status: 'running' },
+      })
     })
 
     it('应该在请求失败时抛出错误', async () => {
@@ -152,16 +160,18 @@ describe('任务管理 API', () => {
     it('应该成功创建长期任务', async () => {
       const mockResponse = {
         data: {
-          id: 'project-new',
-          user_id: 'user-1',
-          session_id: 'session-1',
-          goal: '实现支付功能',
-          status: 'planning' as ProjectStatus,
-          auto_execute: true,
-          current_task_index: 0,
-          created_at: '2024-01-03T00:00:00Z',
-          updated_at: '2024-01-03T00:00:00Z',
-          metadata: {},
+          project: {
+            id: 'project-new',
+            user_id: 'user-1',
+            session_id: 'session-1',
+            goal: '实现支付功能',
+            status: 'planning' as ProjectStatus,
+            auto_execute: true,
+            current_task_index: 0,
+            created_at: '2024-01-03T00:00:00Z',
+            updated_at: '2024-01-03T00:00:00Z',
+            metadata: {},
+          },
         },
         status: 201,
         statusText: 'Created',
@@ -176,17 +186,17 @@ describe('任务管理 API', () => {
         autoExecute: true,
       })
 
-      // 验证结果
+      // 验证结果（impl 解包 response.data.project，字段为后端原样 snake_case）
       expect(result.id).toBe('project-new')
       expect(result.goal).toBe('实现支付功能')
       expect(result.status).toBe('planning')
-      expect(result.autoExecute).toBe(true)
+      expect(result.auto_execute).toBe(true)
 
-      // 验证 API 调用
-      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/projects', {
+      // 验证 API 调用（0.2 迁移：/ext/channel_api/projects，body 用 snake_case）
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/projects', {
         goal: '实现支付功能',
-        sessionId: 'session-1',
-        autoExecute: true,
+        session_id: 'session-1',
+        auto_execute: true,
         metadata: undefined,
       })
     })
@@ -210,11 +220,19 @@ describe('任务管理 API', () => {
 
   describe('toggleProjectAutoExecute - 切换自动执行', () => {
     it('应该成功切换自动执行开关', async () => {
-      const mockPatchResponse = {
+      // 0.2 实现：POST /ext/channel_api/projects/{id}/auto-execute { enabled }，返回 { project }
+      const mockPostResponse = {
         data: {
-          project_id: 'project-1',
-          auto_execute: true,
-          updated_at: '2024-01-01T02:00:00Z',
+          project: {
+            id: 'project-1',
+            user_id: 'user-1',
+            goal: '实现用户认证',
+            status: 'running' as ProjectStatus,
+            auto_execute: true,
+            current_task_index: 1,
+            created_at: '2024-01-01T00:00:00Z',
+            updated_at: '2024-01-01T02:00:00Z',
+          },
         },
         status: 200,
         statusText: 'OK',
@@ -222,37 +240,19 @@ describe('任务管理 API', () => {
         config: {} as any,
       }
 
-      const mockGetResponse = {
-        data: {
-          id: 'project-1',
-          user_id: 'user-1',
-          goal: '实现用户认证',
-          status: 'running' as ProjectStatus,
-          auto_execute: true,
-          current_task_index: 1,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T02:00:00Z',
-        },
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: {} as any,
-      }
-
-      vi.mocked(apiClient.patch).mockResolvedValueOnce(mockPatchResponse)
-      vi.mocked(apiClient.get).mockResolvedValueOnce(mockGetResponse)
+      vi.mocked(apiClient.post).mockResolvedValueOnce(mockPostResponse)
 
       // 调用 API
       const result = await taskApi.toggleProjectAutoExecute('project-1', true)
 
-      // 验证结果
-      expect(result.autoExecute).toBe(true)
+      // 验证结果（impl 解包 response.data.project）
+      expect(result.auto_execute).toBe(true)
 
-      // 验证 API 调用
-      expect(apiClient.patch).toHaveBeenCalledWith('/api/v1/projects/project-1/auto-execute', {
-        enabled: true,
-      })
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/projects/project-1')
+      // 验证 API 调用（POST 而非 PATCH；0.2 迁移路径）
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/ext/channel_api/projects/project-1/auto-execute',
+        { enabled: true },
+      )
     })
   })
 
@@ -294,18 +294,19 @@ describe('任务管理 API', () => {
       // 调用 API
       const result = await taskApi.fetchTaskPhase('task-1')
 
-      // 验证结果
-      expect(result.taskId).toBe('task-1')
-      expect(result.currentPhase).toBe('execute')
-      expect(result.phaseStatus.prepare?.status).toBe('completed')
-      expect(result.phaseStatus.execute?.status).toBe('running')
+      // 验证结果（impl 原样返回 response.data，字段为后端 snake_case）
+      expect(result.task_id).toBe('task-1')
+      expect(result.current_phase).toBe('execute')
+      expect(result.phases.prepare?.status).toBe('completed')
+      expect(result.phases.execute?.status).toBe('running')
 
-      // 验证 API 调用
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/tasks/task-1/phase')
+      // 验证 API 调用（0.2 迁移：/ext/channel_api/tasks/{id}/phase）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1/phase')
     })
   })
 
-  describe('completePreparePhase - 完成准备阶段', () => {
+  // 0.2 已移除 completePreparePhase 函数（前端不再调用，阶段推进改由内核管道驱动）。
+  describe.skip('completePreparePhase - 完成准备阶段（0.2 已移除该函数）', () => {
     it('应该成功完成准备阶段', async () => {
       const mockResponse = {
         data: {
@@ -376,8 +377,8 @@ describe('任务管理 API', () => {
       })
       expect(result.error).toBeUndefined()
 
-      // 验证 API 调用
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/tasks/task-1/phase/prepare/output')
+      // 验证 API 调用（0.2 迁移：/ext/channel_api/tasks/{id}/phase/{phase}/output）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1/phase/prepare/output')
     })
   })
 
@@ -444,20 +445,21 @@ describe('任务管理 API', () => {
       // 调用 API
       const result = await taskApi.fetchTaskACs('task-1')
 
-      // 验证结果
-      expect(result.taskId).toBe('task-1')
-      expect(result.acceptanceCriteria).toHaveLength(3)
-      expect(result.acceptanceCriteria[0].id).toBe('ac-1')
-      expect(result.acceptanceCriteria[0].description).toBe('支持用户名密码登录')
-      expect(result.acceptanceCriteria[0].status).toBe('passed')
-      expect(result.acceptanceCriteria[0].isRedLine).toBe(true)
+      // 验证结果（impl 原样返回 response.data，字段为后端 snake_case）
+      expect(result.task_id).toBe('task-1')
+      expect(result.acceptance_criteria).toHaveLength(3)
+      expect(result.acceptance_criteria[0].id).toBe('ac-1')
+      expect(result.acceptance_criteria[0].description).toBe('支持用户名密码登录')
+      expect(result.acceptance_criteria[0].status).toBe('passed')
+      expect(result.acceptance_criteria[0].is_red_line).toBe(true)
 
-      // 验证 API 调用
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/tasks/task-1/ac')
+      // 验证 API 调用（0.2 迁移：/ext/channel_api/tasks/{id}/ac）
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/tasks/task-1/ac')
     })
   })
 
-  describe('evaluateAC - 评估单个验收标准', () => {
+  // 0.2 已移除 evaluateAC 函数（AC 评估改由内核评估插件驱动，前端不主动调用）。
+  describe.skip('evaluateAC - 评估单个验收标准（0.2 已移除该函数）', () => {
     it('应该成功评估验收标准', async () => {
       // Mock 评估请求响应
       const mockEvaluateResponse = {
@@ -535,7 +537,8 @@ describe('任务管理 API', () => {
     })
   })
 
-  describe('evaluateAllACs - 评估所有验收标准', () => {
+  // 0.2 已移除 evaluateAllACs 函数（AC 评估改由内核评估插件驱动，前端不主动调用）。
+  describe.skip('evaluateAllACs - 评估所有验收标准（0.2 已移除该函数）', () => {
     it('应该成功评估所有验收标准', async () => {
       // Mock 评估所有请求响应
       const mockEvaluateAllResponse = {
