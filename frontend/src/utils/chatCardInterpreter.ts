@@ -206,6 +206,37 @@ export interface InterpretedChatCard {
   actions: ActivityAction[]
 }
 
+// ── 声明注册表：toolName → chat_card 声明（从 /api/v1/schema 的 tools[].ui.chat_card 装载） ──
+// 声明是静态的（每个工具一份），按名查比塞进每个 tool 事件更合理；后端只需在 ToolDescriptor
+// 透传 ui 字段（已落地），前端在 schema 加载时填充本表。
+const chatCardDeclarations = new Map<string, ChatCardDeclaration>()
+
+/**
+ * 从 schema.tools[].ui.chat_card 装载声明注册表（幂等：先清空再装）
+ *
+ * @param tools - /api/v1/schema 的 tools 字段（ToolDescriptor 序列化形态）
+ */
+export function loadChatCardDeclarations(
+  tools: Array<{ name?: string; ui?: { chat_card?: ChatCardDeclaration } }>,
+): void {
+  chatCardDeclarations.clear()
+  for (const t of tools) {
+    if (t.name && t.ui?.chat_card) {
+      chatCardDeclarations.set(t.name, t.ui.chat_card)
+    }
+  }
+}
+
+/** 按 toolName 查 chat_card 声明（供 enhanceActivityWithToolConfig 优先消费） */
+export function getChatCardDeclaration(toolName: string): ChatCardDeclaration | undefined {
+  return chatCardDeclarations.get(toolName)
+}
+
+/** 清空声明注册表（测试 / 销毁用） */
+export function clearChatCardDeclarations(): void {
+  chatCardDeclarations.clear()
+}
+
 /**
  * 据 ui.chat_card 声明 + 工具调用上下文，翻译成 ActivityCard 可直接渲染的 details/actions。
  *

@@ -8,6 +8,8 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
+import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 import { loggers } from '@/utils/logger'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
@@ -39,6 +41,10 @@ async function reloadContributionRegistry(): Promise<void> {
   try {
     const schema = await getSchema()
     contributionRegistry.loadFromSchema(schema as unknown as Record<string, unknown>)
+    // 工具卡片声明（chat_card）从 tools[].ui.chat_card 装载到解释器注册表
+    loadChatCardDeclarations(
+      (schema as { tools?: Array<{ name?: string; ui?: { chat_card?: ChatCardDeclaration } }> }).tools ?? [],
+    )
     syncNavItemsFromContributes()
     shortcutRegistry.refresh()
   } catch (error) {

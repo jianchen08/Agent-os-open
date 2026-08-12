@@ -455,6 +455,7 @@ mod tests {
             output_schema: None,
             category,
             source: ToolSource::Builtin,
+            ui: None,
         }
     }
 

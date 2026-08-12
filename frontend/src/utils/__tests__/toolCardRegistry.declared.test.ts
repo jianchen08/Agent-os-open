@@ -1,33 +1,32 @@
 /**
  * 功能测试：enhanceActivityWithToolConfig 声明优先（chat_card 注入点端到端）
  *
- * 功能点：工具调用带 ui.chat_card 声明（toolCall.chat_card，后端透传）→ enhance 走解释器
- * → 产出 ActivityData.details 命中声明的块（而非手写 registry 或 L0 推断）。
- * 无声明时回退既有路径（不回归）。
+ * 功能点：插件在 manifest 的 capabilities.tools[].ui.chat_card 声明卡片 → 后端经
+ * /api/v1/schema 的 tools[].ui.chat_card 透传 → 前端 schema 加载时入注册表 →
+ * enhance 按 toolName 查到声明 → 解释器产出 details。无声明回退既有路径（不回归）。
+ *
+ * 本测试模拟 schema 装载（loadChatCardDeclarations）+ 真实 enhance 调用，端到端验证。
  */
 
-import { describe, expect, it } from 'vitest'
-import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
+import { afterEach, describe, expect, it } from 'vitest'
+import { clearChatCardDeclarations, loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
+import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
+
+afterEach(() => clearChatCardDeclarations())
 
 function makeActivity(toolName: string): ActivityData {
   return { type: 'tool_call', toolName, title: toolName, status: 'completed' } as ActivityData
 }
 
-function makeToolCall(overrides: Partial<MessageToolCall>): MessageToolCall {
-  return {
-    id: 'tc1',
-    tool: 'x',
-    tool_args: {},
-    status: 'completed',
-    ...overrides,
-  } as unknown as MessageToolCall
+function makeToolCall(tool: string, args: Record<string, unknown>): MessageToolCall {
+  return { id: 'tc1', tool, tool_args: args, status: 'completed' } as unknown as MessageToolCall
 }
 
-describe('功能点：enhanceActivityWithToolConfig 声明优先（chat_card 注入）', () => {
-  it('toolCall 带 chat_card 声明 → 标题模板与 details 来自解释器', () => {
+describe('功能点：enhanceActivityWithToolConfig 声明优先（chat_card 按 toolName 查注册表）', () => {
+  it('schema 装载的 chat_card 声明 → enhance 走解释器产出标题与 details', () => {
     const decl: ChatCardDeclaration = {
       title: '{{args.q | truncate:6}}',
       blocks: [
@@ -35,15 +34,13 @@ describe('功能点：enhanceActivityWithToolConfig 声明优先（chat_card 注
         { type: 'link', label: '来源', source: 'args.url' },
       ],
     }
-    const activity = makeActivity('translate')
-    const toolCall = makeToolCall({
-      tool: 'translate',
-      tool_args: { q: 'long query text here', target: '你好', url: 'https://x.com' },
-      // 后端透传的声明字段（MessageToolCall 暂未类型化，运行期存在）
-      ...({ chat_card: decl } as object),
-    })
+    // 模拟 /api/v1/schema 的 tools 字段经 GrowthLoop 装载
+    loadChatCardDeclarations([{ name: 'translate', ui: { chat_card: decl } }])
 
-    const out = enhanceActivityWithToolConfig(activity, toolCall)
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('translate'),
+      makeToolCall('translate', { q: 'long query text here', target: '你好', url: 'https://x.com' }),
+    )
 
     expect(out.title).toBe('long q…')
     expect(out.details).toHaveLength(2)
@@ -53,14 +50,23 @@ describe('功能点：enhanceActivityWithToolConfig 声明优先（chat_card 注
     expect(out.details[1].url).toBe('https://x.com')
   })
 
-  it('无 chat_card 声明 → 回退既有路径（手写 registry 或 L0 推断），不回归', () => {
-    const activity = makeActivity('unknown_tool_xyz')
-    const toolCall = makeToolCall({ tool: 'unknown_tool_xyz', tool_args: { a: 1 } })
-
-    const out = enhanceActivityWithToolConfig(activity, toolCall)
-
-    // 无声明 + 无手写配置 → L0 推断（标题人性化）
+  it('未声明 chat_card 的工具 → 回退手写 registry / L0 推断，不回归', () => {
+    // 注册表为空（无声明）
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('unknown_tool_xyz'),
+      makeToolCall('unknown_tool_xyz', { a: 1 }),
+    )
     expect(out.title).toBeTruthy()
     expect(out.details).toBeDefined()
+  })
+
+  it('声明按 toolName 精确匹配（其他工具不误用）', () => {
+    loadChatCardDeclarations([{ name: 'translate', ui: { chat_card: { title: '翻译' } } }])
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('other_tool'),
+      makeToolCall('other_tool', {}),
+    )
+    // other_tool 无声明 → 不应拿到 translate 的标题
+    expect(out.title).not.toBe('翻译')
   })
 })

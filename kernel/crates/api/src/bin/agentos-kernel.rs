@@ -262,6 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         ToolSource::Builtin
                     },
+                    ui: tool_cap.ui.clone(),
                 };
                 registry.register_tool(&manifest.id, descriptor);
                 tool_count += 1;

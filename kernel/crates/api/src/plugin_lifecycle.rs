@@ -46,6 +46,7 @@ pub fn register_plugin_capabilities(
                 } else {
                     ToolSource::Builtin
                 },
+                ui: tool_cap.ui.clone(),
             };
             registry.register_tool(&manifest.id, descriptor);
             count += 1;

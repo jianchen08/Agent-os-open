@@ -397,6 +397,9 @@ pub struct ToolDescriptor {
     pub output_schema: Option<serde_json::Value>,
     pub category: ToolCategory,
     pub source: ToolSource,
+    /// 透传的 UI 声明（如 `chat_card`），由 manifest `capabilities.tools[].ui` 提供。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui: Option<serde_json::Value>,
 }
 
 /// Resource 描述符（对内表示）。
@@ -1130,6 +1133,9 @@ pub struct ToolCapability {
     pub output_schema: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<ToolCategory>,
+    /// 透传的 UI 声明（如 `chat_card`），原样出口到 ToolDescriptor。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<serde_json::Value>,
 }
 
 /// Resource 能力声明。

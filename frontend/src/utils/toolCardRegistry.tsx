@@ -12,7 +12,8 @@ import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
 import { interpretChatCard } from './chatCardInterpreter'
-import type { ChatCardDeclaration, ToolCallContext } from './chatCardInterpreter'
+import { getChatCardDeclaration } from './chatCardInterpreter'
+import type { ToolCallContext } from './chatCardInterpreter'
 
 /**
  * 工具卡片渲染配置
@@ -98,9 +99,10 @@ export function enhanceActivityWithToolConfig(
     return activity
   }
 
-  // 声明优先（S3）：插件 ui.chat_card 声明（后端经 toolCall.chat_card 透传）→ 解释器翻译成
-  // ActivityDetailBlock[]，ActivityCard 原样渲染。无声明时回退下面的手写 registry / L0 推断。
-  const declared = (toolCall as { chat_card?: ChatCardDeclaration }).chat_card
+  // 声明优先（S3）：插件 ui.chat_card 声明（后端经 /api/v1/schema 的 tools[].ui.chat_card
+  // 透传，前端在 schema 加载时装入注册表）→ 解释器翻译成 ActivityDetailBlock[]，
+  // ActivityCard 原样渲染。无声明时回退下面的手写 registry / L0 推断。
+  const declared = getChatCardDeclaration(activity.toolName)
   if (declared) {
     const ctx: ToolCallContext = {
       args: toolCall.tool_args,
