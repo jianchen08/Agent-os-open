@@ -321,7 +321,11 @@ impl McpClient {
                                     if let Ok(response) =
                                         serde_json::from_str::<JsonRpcResponse>(&line_str)
                                     {
-                                        let _ = sender.send(response);
+                                        if sender.send(response).is_err() {
+                                            tracing::warn!(
+                                                "[mcp] pending receiver dropped; JSON-RPC response id={id} not delivered"
+                                            );
+                                        }
                                     }
                                     continue;
                                 }
@@ -666,7 +670,11 @@ impl McpClient {
                 // 整树杀（bash 等孙进程一并清理，防孤儿）
                 kill_process_tree(pid).await;
                 // 树杀已含直接子进程；kill() 仅作兜底，失败不报错（避免噪音）
-                let _ = child.kill().await;
+                if let Err(e) = child.kill().await {
+                    tracing::debug!(
+                        "[mcp] best-effort child.kill() fallback failed (tree-kill likely already terminated it): {e}"
+                    );
+                }
             } else {
                 child.kill().await.map_err(|e| McpError::Transport {
                     message: format!("kill error: {}", e),
@@ -761,7 +769,11 @@ async fn handle_incoming_request(
             "id": id,
             "error": {"code": -32601, "message": format!("method not found: {method}")}
         });
-        let _ = write_raw_line(stdin, &resp.to_string()).await;
+        if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
+            tracing::warn!(
+                "[mcp] failed to write -32601 (method not found) response for id={id}: {e}"
+            );
+        }
         return;
     };
 
@@ -771,7 +783,11 @@ async fn handle_incoming_request(
             "id": id,
             "error": {"code": -32601, "message": "no capability router configured"}
         });
-        let _ = write_raw_line(stdin, &resp.to_string()).await;
+        if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
+            tracing::warn!(
+                "[mcp] failed to write -32601 (no router) response for id={id}: {e}"
+            );
+        }
         return;
     };
 
@@ -788,7 +804,9 @@ async fn handle_incoming_request(
             "error": {"code": -32603, "message": e.to_string()}
         }),
     };
-    let _ = write_raw_line(stdin, &resp.to_string()).await;
+    if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
+        tracing::warn!("[mcp] failed to write JSON-RPC response for id={id}: {e}");
+    }
 }
 
 /// 处理 sidecar 主动发起的 JSON-RPC notification（无 id，fire-and-forget）。

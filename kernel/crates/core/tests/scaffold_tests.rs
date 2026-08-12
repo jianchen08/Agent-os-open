@@ -26,7 +26,6 @@ fn test_workspace_has_8_crates() {
         "crates/invoker",
         "crates/tenant",
         "crates/api",
-        "crates/hooks",
     ];
     for crate_path in &expected_crates {
         assert!(
@@ -48,7 +47,6 @@ fn test_all_crates_have_skeleton() {
         "invoker",
         "tenant",
         "api",
-        "hooks",
     ];
     for name in &crate_names {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), name);
@@ -99,7 +97,6 @@ fn test_crates_depend_on_core() {
         "invoker",
         "tenant",
         "api",
-        "hooks",
     ];
     for name in &dependent_crates {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), name);
@@ -266,7 +263,6 @@ fn test_crate_naming_convention() {
         ("invoker", "agentos-invoker"),
         ("tenant", "agentos-tenant"),
         ("api", "agentos-api"),
-        ("hooks", "agentos-hooks"),
     ];
     for (dir, expected_name) in &crate_dirs {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), dir);

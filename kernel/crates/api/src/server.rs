@@ -1054,7 +1054,9 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     let welcome_json = serde_json::to_string(&welcome).unwrap_or_default();
-    let _ = sender.send(Message::Text(welcome_json.into())).await;
+    if let Err(e) = sender.send(Message::Text(welcome_json.into())).await {
+        warn!("Failed to send WS welcome message: {e}");
+    }
 
     info!("WebSocket connection established");
 

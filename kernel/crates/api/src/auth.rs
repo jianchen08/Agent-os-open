@@ -341,7 +341,12 @@ pub async fn login_handler(
 
     // 更新最近登录时间（best-effort，失败不影响登录）
     if let Some(store) = state.store.as_ref() {
-        let _ = store.update_last_login(&user.id).await;
+        if let Err(e) = store.update_last_login(&user.id).await {
+            tracing::warn!(
+                "Failed to update last_login for user {} (login still succeeded): {e}",
+                user.id
+            );
+        }
     }
 
     let access_token = encode_token(TokenType::Access, &user, ACCESS_TOKEN_TTL_SECS);

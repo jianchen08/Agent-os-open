@@ -231,13 +231,17 @@ impl SessionCoordinator {
             "data": {"status": "connected", "mode": "global", "user_id": user_id},
         });
         let confirmation_str = serde_json::to_string(&confirmation).unwrap_or_default();
-        let _ = sink.send_text(&confirmation_str).await;
+        if !sink.send_text(&confirmation_str).await {
+            tracing::warn!("Failed to send connection confirmation to user {user_id}");
+        }
 
         // 3. 回放缓冲
         match self.replay.replay(thread_id, last_sequence).await {
             ReplayResult::Events { events, .. } => {
                 for ev in events {
-                    let _ = sink.send_text(&ev.payload).await;
+                    if !sink.send_text(&ev.payload).await {
+                        tracing::warn!("Failed to replay event to user {user_id}");
+                    }
                 }
                 self.metrics.inc_replay_hit();
                 ReconnectOutcome {
@@ -252,9 +256,12 @@ impl SessionCoordinator {
                     "type": "resync_required",
                     "data": {"thread_id": thread_id},
                 });
-                let _ = sink
+                if !sink
                     .send_text(&serde_json::to_string(&resync).unwrap_or_default())
-                    .await;
+                    .await
+                {
+                    tracing::warn!("Failed to send resync_required to user {user_id}");
+                }
                 self.metrics.inc_replay_miss();
                 ReconnectOutcome {
                     replayed: false,

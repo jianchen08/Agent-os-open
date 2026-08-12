@@ -739,7 +739,12 @@ impl PluginInvokerImpl {
                         // 复用下方「进程已崩溃」的 kill+remove 逻辑：kill 旧进程后
                         // 自然进入 slow path respawn 新进程（加载最新磁盘代码）。
                         drop(client_guard);
-                        let _ = client.write().await.kill().await;
+                        if let Err(e) = client.write().await.kill().await {
+                            tracing::debug!(
+                                "hot-reload: best-effort kill of stale sidecar {} failed (will respawn): {e}",
+                                manifest.id
+                            );
+                        }
                         self.mcp_clients.write().remove(&manifest.id);
                         // 不调 notify_crash（这不是崩溃，是主动热更新）
                     } else {
@@ -750,7 +755,12 @@ impl PluginInvokerImpl {
                     // 进程已崩溃——显式 kill 旧客户端再创建新的
                     error!("Plugin process crashed: {}", manifest.id);
                     drop(client_guard);
-                    let _ = client.write().await.kill().await;
+                    if let Err(e) = client.write().await.kill().await {
+                        tracing::debug!(
+                            "crash cleanup: best-effort kill of crashed sidecar {} failed: {e}",
+                            manifest.id
+                        );
+                    }
                     self.notify_crash(&manifest.id);
                     self.mcp_clients.write().remove(&manifest.id);
                 }
@@ -783,7 +793,12 @@ impl PluginInvokerImpl {
                 }
                 // 极端情况：double-check 时又崩溃——kill 后继续 spawn
                 drop(client_guard);
-                let _ = client.write().await.kill().await;
+                if let Err(e) = client.write().await.kill().await {
+                    tracing::debug!(
+                        "double-check: best-effort kill of sidecar {} failed (will respawn): {e}",
+                        manifest.id
+                    );
+                }
                 self.mcp_clients.write().remove(&manifest.id);
             }
         }
