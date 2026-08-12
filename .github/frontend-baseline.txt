@@ -1,7 +1,11 @@
 # 前端测试基线（只许减不许增，见 scripts/check_frontend_baseline.py）
-# 阶段 2.4 收紧至当前实测值（2026-08-13，本地 Node25）：
-#   - vitest 88（实测 87/88 波动——1 个 React19/jsdom 渲染用例偶发抖动，留待阶段 3.8 清零后收紧）
-#   - eslint 74（chat_card 声明式迁移引入的存量 error，待 lint:fix + 手工修逐组清零）
+# 阶段 3.8 推进（2026-08-13）：
+#   - 装回 axios-mock-adapter → session.test.ts 10 测试转绿
+#   - TextDiffView 测试按当前组件实现重写（组件已收敛为仅 unified 视图，
+#     testid 改 diff-line-${idx}+data-line-type）→ 14 测试转绿
+#   - 88 → 73（-15）。剩余 73 为组件演进/状态逻辑过时（ImageAnnotationView/
+#     MediaTimelineView/ApprovalRouter/store 流式逻辑），按文件逐个调和（L，进行中）
+# eslint 74（chat_card 存量 error，待 lint:fix 逐组清零）
 # CI（Ubuntu + Node20）首次跑通后若计数有环境差异，以 CI 实测为准收紧。
-vitest_failures=88
+vitest_failures=73
 eslint_errors=74
