@@ -124,7 +124,7 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
           className="hover:bg-accent text-muted-foreground hover:text-foreground flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-colors"
           title="新建对话"
         >
-          <Plus className="h-4 w-4" />
+          <Plus className="h-icon-md w-icon-md" />
         </button>
       )}
     </div>

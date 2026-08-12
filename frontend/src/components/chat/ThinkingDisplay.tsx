@@ -23,13 +23,13 @@ const thinkingTextStyle = {
 function getStepStatusIcon(status: 'pending' | 'running' | 'completed' | 'failed') {
   switch (status) {
     case 'pending':
-      return <Clock className="h-3 w-3 text-status-warning" />
+      return <Clock className="h-icon-xs w-icon-xs text-status-warning" />
     case 'running':
-      return <Loader2 className="h-3 w-3 animate-spin text-status-info" />
+      return <Loader2 className="h-icon-xs w-icon-xs animate-spin text-status-info" />
     case 'completed':
-      return <CheckCircle2 className="h-3 w-3 text-status-success" />
+      return <CheckCircle2 className="h-icon-xs w-icon-xs text-status-success" />
     case 'failed':
-      return <XCircle className="h-3 w-3 text-status-error" />
+      return <XCircle className="h-icon-xs w-icon-xs text-status-error" />
   }
 }
 
@@ -70,7 +70,7 @@ const ThinkingStepItem: FC<{
         className="flex cursor-pointer items-center gap-2"
         onClick={() => setExpanded(!expanded)}
       >
-        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        {expanded ? <ChevronDown className="h-icon-xs w-icon-xs" /> : <ChevronRight className="h-icon-xs w-icon-xs" />}
         <span className="text-xs font-medium" style={thinkingTextStyle}>
           步骤 {typeof index === 'number' ? index + 1 : index}
         </span>
@@ -142,9 +142,9 @@ export const ThinkingDisplay: FC<{
         onClick={() => setExpanded(!expanded)}
       >
         {thinking.isThinking ? (
-          <Loader2 className="h-4 w-4 animate-spin text-status-info" />
+          <Loader2 className="h-icon-md w-icon-md animate-spin text-status-info" />
         ) : (
-          <CheckCircle2 className="h-4 w-4 text-status-success" />
+          <CheckCircle2 className="h-icon-md w-icon-md text-status-success" />
         )}
         <span className="text-sm font-medium">思考过程</span>
         {thinking.steps && thinking.steps.length > 0 && (
@@ -154,7 +154,7 @@ export const ThinkingDisplay: FC<{
           <span className="text-xs">{(thinking.durationMs / 1000).toFixed(1)}s</span>
         )}
         <div className="flex-1" />
-        {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        {expanded ? <ChevronDown className="h-icon-md w-icon-md" /> : <ChevronRight className="h-icon-md w-icon-md" />}
       </div>
 
       {/* 内容区域 */}
@@ -192,7 +192,7 @@ export const ThinkingDisplay: FC<{
             </div>
           ) : thinking.isThinking ? (
             <div className="flex items-center gap-2 py-1 text-sm">
-              <Loader2 className="h-3 w-3 animate-spin" />
+              <Loader2 className="h-icon-xs w-icon-xs animate-spin" />
               <span>正在思考中...</span>
             </div>
           ) : null}

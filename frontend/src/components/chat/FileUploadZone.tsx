@@ -185,10 +185,10 @@ function FilePreviewCard({
 
       {/* 状态图标 */}
       {item.status === 'uploading' && (
-        <Loader2 className="h-4 w-4 animate-spin text-primary flex-shrink-0" />
+        <Loader2 className="h-icon-md w-icon-md animate-spin text-primary flex-shrink-0" />
       )}
       {item.status === 'error' && (
-        <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+        <AlertCircle className="h-icon-md w-icon-md text-destructive flex-shrink-0" />
       )}
 
       {/* 删除按钮 */}
@@ -200,7 +200,7 @@ function FilePreviewCard({
         disabled={item.status === 'uploading'}
         aria-label={`移除 ${item.file.name}`}
       >
-        <X className="h-3 w-3" />
+        <X className="h-icon-xs w-icon-xs" />
       </Button>
     </div>
   )
@@ -510,15 +510,15 @@ export function FileUploadZone({
       {/* 全局错误提示 */}
       {globalError && (
         <div className="flex items-center gap-2 text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-1.5 mb-2">
-          <AlertCircle className="h-3 w-3 flex-shrink-0" />
+          <AlertCircle className="h-icon-xs w-icon-xs flex-shrink-0" />
           <span>{globalError}</span>
           <Button
             variant="ghost"
             size="sm"
-            className="h-4 w-4 p-0 ml-auto"
+            className="h-icon-md w-icon-md p-0 ml-auto"
             onClick={() => setGlobalError(null)}
           >
-            <X className="h-3 w-3" />
+            <X className="h-icon-xs w-icon-xs" />
           </Button>
         </div>
       )}
@@ -556,7 +556,7 @@ export function FileUploadZone({
               onClick={triggerSelect}
               disabled={isUploading || files.length >= maxFiles}
             >
-              <Paperclip className="h-3 w-3 mr-1" />
+              <Paperclip className="h-icon-xs w-icon-xs mr-1" />
               继续添加
             </Button>
             {hasFiles && (
@@ -567,7 +567,7 @@ export function FileUploadZone({
                 onClick={handleClearAll}
                 disabled={isUploading}
               >
-                <Trash2 className="h-3 w-3 mr-1" />
+                <Trash2 className="h-icon-xs w-icon-xs mr-1" />
                 清空全部
               </Button>
             )}
@@ -581,7 +581,7 @@ export function FileUploadZone({
           className="flex items-center gap-2 text-xs text-muted-foreground hover:text-primary transition-colors py-1"
           onClick={triggerSelect}
         >
-          <Upload className="h-3.5 w-3.5" />
+          <Upload className="h-icon-sm w-icon-sm" />
           <span>点击或拖拽文件到此处上传</span>
           <span className="text-[10px]">（支持图片、文档、音频、代码）</span>
         </button>
@@ -596,7 +596,7 @@ export function FileUploadZone({
           onClick={triggerSelect}
           aria-label="上传文件"
         >
-          <Paperclip className="h-4 w-4" />
+          <Paperclip className="h-icon-md w-icon-md" />
         </Button>
       )}
     </div>

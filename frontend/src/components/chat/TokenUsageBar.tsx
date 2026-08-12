@@ -66,7 +66,7 @@ export const TokenUsageBar = ({
       data-usage-percent={usagePercent.toFixed(1)}
     >
       {showWarning && (
-        <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" aria-label="Token 使用量警告" />
+        <AlertTriangle className="h-icon-sm w-icon-sm flex-shrink-0" aria-label="Token 使用量警告" />
       )}
 
       <span className="whitespace-nowrap">

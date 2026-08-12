@@ -242,9 +242,9 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
       aria-label={`通知中心${unreadCount > 0 ? ` (${unreadCount} 条未读)` : ''}`}
       data-testid="notification-center-trigger"
     >
-      {unreadCount > 0 ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4 opacity-50" />}
+      {unreadCount > 0 ? <Bell className="h-icon-md w-icon-md" /> : <BellOff className="h-icon-md w-icon-md opacity-50" />}
       {unreadCount > 0 && (
-        <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+        <span className="absolute -top-1 -right-1 flex h-icon-md min-w-icon-md items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
           {unreadCount > 99 ? '99+' : unreadCount}
         </span>
       )}
@@ -273,9 +273,9 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
           data-testid={`notification-group-${priority}`}
         >
           {collapsed ? (
-            <ChevronRight className="h-3.5 w-3.5" />
+            <ChevronRight className="h-icon-sm w-icon-sm" />
           ) : (
-            <ChevronDown className="h-3.5 w-3.5" />
+            <ChevronDown className="h-icon-sm w-icon-sm" />
           )}
           <span>
             {labelInfo.emoji} {labelInfo.label}
@@ -365,7 +365,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
           >
             <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
               <div className="flex items-center gap-2">
-                <Bell className="h-4 w-4" />
+                <Bell className="h-icon-md w-icon-md" />
                 <span className="text-sm font-semibold">通知中心</span>
                 {unreadCount > 0 && (
                   <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">
@@ -390,7 +390,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
                   </>
                 )}
                 <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={closePanel}>
-                  <X className="h-3.5 w-3.5" />
+                  <X className="h-icon-sm w-icon-sm" />
                 </Button>
               </div>
             </div>

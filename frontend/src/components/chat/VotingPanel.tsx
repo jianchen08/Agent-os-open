@@ -63,7 +63,7 @@ function OptionCard({
               : 'border-muted-foreground/30',
           )}
         >
-          {isSelected && <Check className="h-3 w-3" />}
+          {isSelected && <Check className="h-icon-xs w-icon-xs" />}
         </div>
 
         {/* 方案内容 */}
@@ -91,7 +91,7 @@ function OptionCard({
         {/* 票数 */}
         {showResult && (
           <div className="flex items-center gap-1 text-xs text-muted-foreground flex-shrink-0">
-            <ThumbsUp className="h-3 w-3" />
+            <ThumbsUp className="h-icon-xs w-icon-xs" />
             <span>{option.voteCount}</span>
           </div>
         )}
@@ -128,11 +128,11 @@ function OptionCard({
           >
             {expanded ? (
               <>
-                <ChevronUp className="h-3 w-3" /> 收起详情
+                <ChevronUp className="h-icon-xs w-icon-xs" /> 收起详情
               </>
             ) : (
               <>
-                <ChevronDown className="h-3 w-3" /> 查看详情
+                <ChevronDown className="h-icon-xs w-icon-xs" /> 查看详情
               </>
             )}
           </button>
@@ -266,7 +266,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
       {/* 标题区 */}
       <div className="border-b border-border/30 px-4 py-3">
         <div className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-primary" />
+          <BarChart3 className="h-icon-md w-icon-md text-primary" />
           <span className="text-sm font-semibold">{voting.title}</span>
           <span
             className={cn(
@@ -291,7 +291,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
         )}
         {deadlineStr && (
           <div className="flex items-center gap-1 text-xs text-muted-foreground mt-1">
-            <Clock className="h-3 w-3" />
+            <Clock className="h-icon-xs w-icon-xs" />
             <span>截止: {deadlineStr}</span>
           </div>
         )}
@@ -341,7 +341,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
           {voting.requireReason || showReasonInput ? (
             <div className="space-y-1">
               <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <MessageSquare className="h-3 w-3" />
+                <MessageSquare className="h-icon-xs w-icon-xs" />
                 <span>{voting.requireReason ? '请填写理由（必填）' : '投票理由（可选）'}</span>
               </div>
               <textarea
@@ -359,7 +359,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
               className="text-xs h-6"
               onClick={() => setShowReasonInput(true)}
             >
-              <MessageSquare className="h-3 w-3 mr-1" />
+              <MessageSquare className="h-icon-xs w-icon-xs mr-1" />
               附上理由
             </Button>
           )}
@@ -379,7 +379,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
             }
             onClick={handleSubmit}
           >
-            <Send className="h-3.5 w-3.5 mr-1" />
+            <Send className="h-icon-sm w-icon-sm mr-1" />
             提交投票
           </Button>
         </div>
@@ -388,7 +388,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
       {/* 已投票提示 */}
       {isOpen && hasVoted && (
         <div className="border-t border-border/30 px-4 py-3 flex items-center gap-2 text-xs text-green-600">
-          <Check className="h-3.5 w-3.5" />
+          <Check className="h-icon-sm w-icon-sm" />
           <span>已投票</span>
         </div>
       )}

@@ -167,7 +167,7 @@ export function GlobalInteractionOverlay() {
               className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 backdrop-blur-sm border border-border/50 shadow-sm hover:bg-background disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               title="上一个"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ChevronLeft className="h-icon-md w-icon-md" />
             </button>
             <span className="text-sm text-muted-foreground min-w-[60px] text-center">
               {currentIndex + 1} / {pendingItems.length}
@@ -178,7 +178,7 @@ export function GlobalInteractionOverlay() {
               className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 backdrop-blur-sm border border-border/50 shadow-sm hover:bg-background disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               title="下一个"
             >
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-icon-md w-icon-md" />
             </button>
           </div>
 
@@ -189,14 +189,14 @@ export function GlobalInteractionOverlay() {
               className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 backdrop-blur-sm border border-border/50 shadow-sm hover:bg-background transition-colors"
               title="最小化"
             >
-              <Minimize2 className="h-4 w-4" />
+              <Minimize2 className="h-icon-md w-icon-md" />
             </button>
             <button
               onClick={handleDismiss}
               className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 backdrop-blur-sm border border-border/50 shadow-sm hover:bg-background transition-colors"
               title="关闭"
             >
-              <X className="h-4 w-4" />
+              <X className="h-icon-md w-icon-md" />
             </button>
           </div>
         </div>

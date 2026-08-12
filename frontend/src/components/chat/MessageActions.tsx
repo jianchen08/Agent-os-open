@@ -62,7 +62,7 @@ export const MessageActions: FC<MessageActionsProps> = ({
         disabled={disabled}
         title="复制"
       >
-        <Copy className="h-3 w-3" />
+        <Copy className="h-icon-xs w-icon-xs" />
       </Button>
     </div>
   )

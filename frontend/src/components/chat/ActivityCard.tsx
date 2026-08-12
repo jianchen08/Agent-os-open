@@ -115,17 +115,17 @@ function getStatusIcon(status: ActivityStatus): ReactNode {
 
   switch (status) {
     case 'pending':
-      return <Clock className="h-3 w-3" style={breatheStyle} />
+      return <Clock className="h-icon-xs w-icon-xs" style={breatheStyle} />
     case 'running':
-      return <Loader2 className="h-3 w-3 animate-spin" style={breatheStyle} />
+      return <Loader2 className="h-icon-xs w-icon-xs animate-spin" style={breatheStyle} />
     case 'completed':
-      return <CheckCircle2 className="h-3 w-3" style={breatheStyle} />
+      return <CheckCircle2 className="h-icon-xs w-icon-xs" style={breatheStyle} />
     case 'failed':
-      return <XCircle className="h-3 w-3" style={breatheStyle} />
+      return <XCircle className="h-icon-xs w-icon-xs" style={breatheStyle} />
     case 'cancelled':
-      return <Ban className="h-3 w-3" style={breatheStyle} />
+      return <Ban className="h-icon-xs w-icon-xs" style={breatheStyle} />
     default:
-      return <Clock className="h-3 w-3" style={breatheStyle} />
+      return <Clock className="h-icon-xs w-icon-xs" style={breatheStyle} />
   }
 }
 
@@ -139,19 +139,19 @@ function getActivityTypeIcon(type: ActivityType, customIcon?: ReactNode): ReactN
 
   switch (type) {
     case 'tool_call':
-      return <Wrench className="h-4 w-4" />
+      return <Wrench className="h-icon-md w-icon-md" />
     case 'task_created':
-      return <Target className="h-4 w-4" />
+      return <Target className="h-icon-md w-icon-md" />
     case 'task_phase':
-      return <Loader2 className="h-4 w-4" />
+      return <Loader2 className="h-icon-md w-icon-md" />
     case 'task_completed':
-      return <CheckCircle2 className="h-4 w-4" />
+      return <CheckCircle2 className="h-icon-md w-icon-md" />
     case 'task_failed':
-      return <XCircle className="h-4 w-4" />
+      return <XCircle className="h-icon-md w-icon-md" />
     case 'agent_thinking':
-      return <Sparkles className="h-4 w-4" />
+      return <Sparkles className="h-icon-md w-icon-md" />
     default:
-      return <Target className="h-4 w-4" />
+      return <Target className="h-icon-md w-icon-md" />
   }
 }
 
@@ -177,9 +177,9 @@ const CopyBtn: FC<{ text: string }> = ({ text }) => {
       aria-label="复制内容"
     >
       {copied ? (
-        <Check className="h-3.5 w-3.5 text-status-success" />
+        <Check className="h-icon-sm w-icon-sm text-status-success" />
       ) : (
-        <Copy className="h-3.5 w-3.5" />
+        <Copy className="h-icon-sm w-icon-sm" />
       )}
     </button>
   )
@@ -196,12 +196,12 @@ const FileBlockView: FC<{ path: string }> = ({ path }) => {
       className="group flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       title={`点击打开文件: ${path}`}
     >
-      <FileText className="text-muted-foreground h-3.5 w-3.5 flex-shrink-0" />
+      <FileText className="text-muted-foreground h-icon-sm w-icon-sm flex-shrink-0" />
       <span className="text-primary min-w-0 truncate font-medium group-hover:underline">{fileName}</span>
       <span className="text-muted-foreground/70 min-w-0 max-w-[320px] truncate font-mono text-[11px]">
         {path}
       </span>
-      <ExternalLink className="text-muted-foreground/50 h-3 w-3 flex-shrink-0" />
+      <ExternalLink className="text-muted-foreground/50 h-icon-xs w-icon-xs flex-shrink-0" />
     </button>
   )
 }
@@ -257,7 +257,7 @@ const LinkBlockView: FC<{ url: string }> = ({ url }) => (
     className="text-primary inline-flex max-w-full items-center gap-1.5 truncate hover:underline"
     title={url}
   >
-    <Link className="h-3.5 w-3.5 flex-shrink-0" />
+    <Link className="h-icon-sm w-icon-sm flex-shrink-0" />
     <span className="truncate">{url}</span>
   </a>
 )
@@ -422,9 +422,9 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
         className="text-muted-foreground hover:text-foreground flex items-center gap-1.5 text-xs font-medium transition-colors"
       >
         {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5" />
+          <ChevronDown className="h-icon-sm w-icon-sm" />
         ) : (
-          <ChevronRight className="h-3.5 w-3.5" />
+          <ChevronRight className="h-icon-sm w-icon-sm" />
         )}
         {block.label}
       </button>
@@ -539,7 +539,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
             expanded && 'rotate-180',
           )}
         >
-          <ChevronDown className="h-3.5 w-3.5" />
+          <ChevronDown className="h-icon-sm w-icon-sm" />
         </span>
       </div>
 

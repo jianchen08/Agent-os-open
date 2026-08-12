@@ -30,7 +30,6 @@ import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
 import { WebComponentCardHost } from '@/components/schema/widgets/WebComponentCardHost'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
-import { widgetRegistry as composerRegistry } from './composer'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
 import type { RenderingSpaceType } from '@/types/schema'
@@ -96,18 +95,11 @@ const WIDGETS: WidgetEntry[] = [
  * 初始化所有预置组件注册
  *
  * composer 已收敛至 WidgetRegistry（composer.tsx re-export 同一单例），
- * 两处注册指向同一实例，覆盖写入幂等。
+ * 消息渲染管道与 RenderingEngine 共用此唯一注册表，注册一次即可。
  */
 export function initializeWidgets(): void {
   for (const { name, component, spaces, fallback } of WIDGETS) {
     const supportedSpaces = spaces as RenderingSpaceType[]
-    // 消息渲染管道（聊天消息中的 Widget，composer registry 与下方为同一单例）
-    composerRegistry.register(name, component as WidgetComponent, {
-      name,
-      supportedSpaces,
-      fallbackWidget: fallback,
-    })
-    // RenderingEngine 独立渲染（工作区/浮层中的 Widget）
     widgetRegistry.register(name, component as WidgetComponent, {
       name,
       supportedSpaces,

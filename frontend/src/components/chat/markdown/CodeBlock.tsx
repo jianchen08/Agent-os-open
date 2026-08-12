@@ -53,7 +53,7 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
       <div className="flex items-center gap-2">
         {isStreaming && (
           <span className="text-muted-foreground flex items-center gap-1 text-xs">
-            <Loader2 className="h-3 w-3 animate-spin" />
+            <Loader2 className="h-icon-xs w-icon-xs animate-spin" />
             输出中...
           </span>
         )}
@@ -67,12 +67,12 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
         >
           {copied ? (
             <>
-              <Check className="h-3.5 w-3.5 text-status-success" />
+              <Check className="h-icon-sm w-icon-sm text-status-success" />
               <span className="text-status-success">已复制</span>
             </>
           ) : (
             <>
-              <Copy className="h-3.5 w-3.5" />
+              <Copy className="h-icon-sm w-icon-sm" />
               <span>复制</span>
             </>
           )}

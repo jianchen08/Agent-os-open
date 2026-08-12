@@ -145,7 +145,7 @@ function renderFragment(
             styles.container,
           )}
         >
-          <IconComponent className={cn('mt-0.5 h-4 w-4 shrink-0', styles.icon)} />
+          <IconComponent className={cn('mt-0.5 h-icon-md w-icon-md shrink-0', styles.icon)} />
           <span className={cn('leading-relaxed', styles.text)}>{fragment.content}</span>
         </div>
       )

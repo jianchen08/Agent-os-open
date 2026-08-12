@@ -124,7 +124,7 @@ export function NotificationItemComponent({
         onClick={handleClick}
         data-testid={`notification-item-${id}`}
       >
-        <IconComponent className={cn('h-3.5 w-3.5 flex-shrink-0', style.text)} />
+        <IconComponent className={cn('h-icon-sm w-icon-sm flex-shrink-0', style.text)} />
         <span className="truncate flex-1">{title}</span>
         {hasInteraction && (
           <span className="text-[10px] text-primary font-medium shrink-0">点击处理</span>
@@ -165,7 +165,7 @@ export function NotificationItemComponent({
         <div className="flex items-start gap-2">
           <IconComponent
             className={cn(
-              'h-4 w-4 flex-shrink-0 mt-0.5',
+              'h-icon-md w-icon-md flex-shrink-0 mt-0.5',
               style.text,
               isProgress && 'animate-spin',
             )}
@@ -191,7 +191,7 @@ export function NotificationItemComponent({
               onClick={handleDismiss}
               aria-label="忽略通知"
             >
-              <X className="h-3.5 w-3.5" />
+              <X className="h-icon-sm w-icon-sm" />
             </Button>
           )}
         </div>

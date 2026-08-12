@@ -1,12 +1,10 @@
 /**
  * 架构契约测试：聊天层图标尺寸 token 收敛（统一审查 §3.2 C2）
  *
- * 现状：chat 组件散用 h-3/h-3.5/h-4/h-5/h-8（含少量非图标 h-N，如 div 高度），
- * 实测约 160 处。token 阶梯 --icon-size-xs/sm/md 已就绪（tokens.test.ts 守护）。
- * 本测试把当前散用计数锁为上限棘轮（基线 168，留少量余量）：禁止新增散用，
- * 收敛推进时下调基线。
+ * M4 收敛已完成：h-3/h-3.5/h-4（135 处，12/14/16px）→ h-icon-xs/sm/md（像素等价，零视觉变化）。
+ * 剩余 h-5/h-8（33 处，20/32px）无对应 token（不在 12/14/16 阶梯，多为头像/大按钮），
+ * 锁为上限棘轮：禁止新增这类散用。
  *
- * 完全收敛需视觉回归测试配套（项目当前无），故分阶段：先锁不恶化，再逐组件替换。
  * 关联：frontend-design-unification-execution-plan.md §七 M4.1
  */
 
@@ -15,19 +13,22 @@ import { listSourceFiles, scanSourceForRegex } from './harness'
 
 const CHAT = 'src/components/chat'
 
-// 上限棘轮（2026-08-12）：chat/ 下 h-3/h-3.5/h-4/h-5/h-8 命中数（实测 ~160，含少量非图标 h-N）。
-// 收敛推进时下调；regex 口径与 harness 一致，含非图标 h-N 命中（保守）。
-const CHAT_RAW_ICON_BASELINE = 168
+// 上限棘轮：h-3/3.5/4 已全收敛为 token；剩余 h-5/h-8（无 token 等价）锁为上限。
+const CHAT_RAW_SIZE_BASELINE = 33
 
-describe('聊天层图标尺寸 —— 散用上限棘轮（禁止新增）', () => {
-  it(`chat 组件 h-3/3.5/4/5/8 散用 ≤ ${CHAT_RAW_ICON_BASELINE}（基线），逐步替换为 h-icon-*`, () => {
-    const hits = scanSourceForRegex(
-      /h-(?:3\.5|3|4|5|8)[^0-9.]/,
-      listSourceFiles(CHAT),
-    )
+describe('聊天层图标尺寸 —— h-3/3.5/4 已收敛 token，剩余 h-5/h-8 上限棘轮', () => {
+  it('chat 组件 h-3/h-3.5/h-4 已全部收敛为 h-icon-xs/sm/md（零残留）', () => {
+    const hits = scanSourceForRegex(/h-(?:3\.5|3|4)[^0-9.]/, listSourceFiles(CHAT))
     expect(
       hits.length,
-      'chat 层不得新增 h-3/h-3.5/h-4/h-5/h-8 散用；新代码用 h-icon-xs/sm/md',
-    ).toBeLessThanOrEqual(CHAT_RAW_ICON_BASELINE)
+      'h-3/h-3.5/h-4 必须用 h-icon-xs/sm/md（12/14/16px 像素等价）',
+    ).toBe(0)
+  })
+
+  it(`chat 组件 h-5/h-8（无 token 等价）≤ ${CHAT_RAW_SIZE_BASELINE}，禁止新增`, () => {
+    const hits = scanSourceForRegex(/h-(?:5|8)[^0-9.]/, listSourceFiles(CHAT))
+    expect(hits.length, 'h-5/h-8 无对应 token，不得新增散用').toBeLessThanOrEqual(
+      CHAT_RAW_SIZE_BASELINE,
+    )
   })
 })

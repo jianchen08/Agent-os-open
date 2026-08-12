@@ -76,7 +76,7 @@ export const AudioRenderer = memo<AudioRendererProps>(({ src, title, className =
         className={`audio-error bg-destructive/10 border-destructive/20 my-4 rounded-xl border p-4 ${className}`}
       >
         <div className="text-destructive flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="h-icon-md w-icon-md flex-shrink-0" />
           <span className="text-sm">{error}</span>
         </div>
         <details className="text-muted-foreground mt-2 text-xs">
@@ -146,7 +146,7 @@ export const AudioRenderer = memo<AudioRendererProps>(({ src, title, className =
           className="hover:bg-muted flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
           aria-label={isMuted ? '取消静音' : '静音'}
         >
-          {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+          {isMuted ? <VolumeX className="h-icon-md w-icon-md" /> : <Volume2 className="h-icon-md w-icon-md" />}
         </button>
 
         <button
@@ -154,7 +154,7 @@ export const AudioRenderer = memo<AudioRendererProps>(({ src, title, className =
           className="hover:bg-muted flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
           aria-label="下载音频"
         >
-          <Download className="h-4 w-4" />
+          <Download className="h-icon-md w-icon-md" />
         </button>
       </div>
     </div>
@@ -205,7 +205,7 @@ export const VideoRenderer = memo<VideoRendererProps>(({ src, title, poster, cla
         className={`video-error bg-destructive/10 border-destructive/20 my-4 rounded-xl border p-4 ${className}`}
       >
         <div className="text-destructive flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="h-icon-md w-icon-md flex-shrink-0" />
           <span className="text-sm">{error}</span>
         </div>
         <details className="text-muted-foreground mt-2 text-xs">
@@ -257,14 +257,14 @@ export const VideoRenderer = memo<VideoRendererProps>(({ src, title, poster, cla
           className="hover:bg-muted flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
           aria-label="全屏播放"
         >
-          <Maximize className="h-4 w-4" />
+          <Maximize className="h-icon-md w-icon-md" />
         </button>
         <button
           onClick={handleDownload}
           className="hover:bg-muted flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
           aria-label="下载视频"
         >
-          <Download className="h-4 w-4" />
+          <Download className="h-icon-md w-icon-md" />
         </button>
       </div>
     </div>

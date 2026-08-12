@@ -48,7 +48,7 @@ export function ContextUsageIndicator({
         )}
         data-testid="context-usage-invalid"
       >
-        <AlertCircle className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+        <AlertCircle className={compact ? 'h-icon-xs w-icon-xs' : 'h-icon-sm w-icon-sm'} />
         <span>模型无效</span>
       </div>
     )
@@ -79,7 +79,7 @@ export function ContextUsageIndicator({
       }
     >
       <Database
-        className={cn('text-primary shrink-0', compact ? 'h-3 w-3' : 'h-3.5 w-3.5')}
+        className={cn('text-primary shrink-0', compact ? 'h-icon-xs w-icon-xs' : 'h-icon-sm w-icon-sm')}
       />
       <span className="text-primary max-w-[120px] truncate font-semibold">{modelName}</span>
       {maxTokens > 0 && (

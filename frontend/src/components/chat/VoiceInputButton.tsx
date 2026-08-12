@@ -121,13 +121,13 @@ export const VoiceInputButton = ({
         {isRecording && <RecordingIndicator />}
 
         {isTranscribing ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <Loader2 className="h-icon-md w-icon-md animate-spin" />
         ) : isRecording ? (
-          <Mic className="relative z-10 h-4 w-4" style={{ color: 'white' }} fill="white" />
+          <Mic className="relative z-10 h-icon-md w-icon-md" style={{ color: 'white' }} fill="white" />
         ) : error?.type === 'permission_denied' ? (
-          <MicOff className="h-4 w-4" />
+          <MicOff className="h-icon-md w-icon-md" />
         ) : (
-          <Mic className="h-4 w-4" />
+          <Mic className="h-icon-md w-icon-md" />
         )}
       </Button>
 

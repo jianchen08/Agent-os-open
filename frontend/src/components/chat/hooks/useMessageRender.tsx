@@ -91,7 +91,7 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   const actions: ActivityAction[] = [
     {
       id: 'copy_args',
-      icon: <Copy className="h-3.5 w-3.5" />,
+      icon: <Copy className="h-icon-sm w-icon-sm" />,
       label: '复制参数',
       type: 'copy',
       onClick: () => {
@@ -103,7 +103,7 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   if (toolCall.result !== undefined) {
     actions.push({
       id: 'copy_result',
-      icon: <Copy className="h-3.5 w-3.5" />,
+      icon: <Copy className="h-icon-sm w-icon-sm" />,
       label: '复制结果',
       type: 'copy',
       onClick: () => {
@@ -176,7 +176,7 @@ function makeStablePartKey(part: MessagePart, index: number): string {
 }
 
 export function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragment[] {
-  let fragments: RenderFragment[] = []
+  const fragments: RenderFragment[] = []
   const parts = message.parts!
 
   // part 渲染顺序 = 数组顺序（历史消息 part 已在 API 映射时用 seq++ 保证有序）。

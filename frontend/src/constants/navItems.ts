@@ -2,7 +2,7 @@
  * 导航配置注册表
  *
  * 替代 AppHeader 中硬编码的 NAV_ITEMS，支持动态扩展。
- * 模块/插件可通过 schemaRegistry 注册导航项，AppHeader 从这里读取。
+ * 模块/插件通过 contributionRegistry 注册导航项，AppHeader 从这里读取。
  *
  * ADR §5.7：导航收敛——顶栏导航、activity bar 图标、侧边栏视图切换，
  * 全部由 contributes.viewsContainers + contributes.views 动态生成。

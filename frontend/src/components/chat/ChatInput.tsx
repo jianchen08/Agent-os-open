@@ -88,8 +88,8 @@ const AttachmentPreview = ({
       </div>
 
       {/* 上传状态 */}
-      {status === 'uploading' && <Loader2 className="text-primary h-4 w-4 animate-spin" />}
-      {status === 'error' && <AlertCircle className="text-destructive h-4 w-4" />}
+      {status === 'uploading' && <Loader2 className="text-primary h-icon-md w-icon-md animate-spin" />}
+      {status === 'error' && <AlertCircle className="text-destructive h-icon-md w-icon-md" />}
 
       {/* 删除按钮 */}
       <Button
@@ -100,7 +100,7 @@ const AttachmentPreview = ({
         disabled={status === 'uploading'}
         aria-label={`移除附件 ${fileName}`}
       >
-        <X className="h-4 w-4" />
+        <X className="h-icon-md w-icon-md" />
       </Button>
     </div>
   )
@@ -642,7 +642,7 @@ export const ChatInput = ({
           role="alert"
           className="text-destructive bg-destructive/10 mb-3 flex items-center gap-2 rounded-xl p-2 text-sm"
         >
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="h-icon-md w-icon-md flex-shrink-0" />
           <span className="flex-1">{uploadError}</span>
           <Button
             variant="ghost"
@@ -651,7 +651,7 @@ export const ChatInput = ({
             onClick={() => setUploadError(null)}
             aria-label="关闭错误提示"
           >
-            <X className="h-4 w-4" />
+            <X className="h-icon-md w-icon-md" />
           </Button>
         </div>
       )}
@@ -678,7 +678,7 @@ export const ChatInput = ({
           title={isExpanded ? '收起 (Esc)' : '展开为大编辑器'}
           data-testid="chat-input-expand-toggle"
         >
-          {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          {isExpanded ? <Minimize2 className="h-icon-md w-icon-md" /> : <Maximize2 className="h-icon-md w-icon-md" />}
         </Button>
         {(attachments.length > 0 || pendingFiles.length > 0) && (
           <div className="flex flex-wrap gap-2 px-3 pt-3 pb-2">
@@ -765,7 +765,7 @@ export const ChatInput = ({
                 title="添加附件"
                 aria-label="添加附件"
               >
-                <Paperclip className="h-4 w-4" />
+                <Paperclip className="h-icon-md w-icon-md" />
               </Button>
             )}
 
@@ -823,7 +823,7 @@ export const ChatInput = ({
               title="停止生成"
               aria-label="停止生成"
             >
-              <Square className="h-4 w-4" />
+              <Square className="h-icon-md w-icon-md" />
             </Button>
           ) : (
             <Button
@@ -841,7 +841,7 @@ export const ChatInput = ({
               aria-label="发送消息"
               data-testid="chat-send-button"
             >
-              <Send className="h-4 w-4" />
+              <Send className="h-icon-md w-icon-md" />
             </Button>
           )}
         </div>

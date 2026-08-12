@@ -81,7 +81,7 @@ const getAgentLevelBadge = (level: AgentLevel | undefined) => {
   const config = levelConfig[level]
 
   return (
-    <Badge variant={config.variant} className="h-4 px-1.5 py-0 text-xs">
+    <Badge variant={config.variant} className="h-icon-md px-1.5 py-0 text-xs">
       {config.label}
     </Badge>
   )
@@ -138,7 +138,7 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
         </span>
       )}
 
-      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
+      <span className="flex h-icon-md w-icon-md flex-shrink-0 items-center justify-center">
         {tab.canClose && onClose && (
           <button
             onClick={(e) => {
@@ -146,13 +146,13 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
               onClose()
             }}
             className={cn(
-              'flex h-4 w-4 items-center justify-center rounded',
+              'flex h-icon-md w-icon-md items-center justify-center rounded',
               'opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity',
               'hover:bg-destructive/20 text-muted-foreground hover:text-destructive',
             )}
             title="关闭 Tab"
           >
-            <X className="h-3 w-3" />
+            <X className="h-icon-xs w-icon-xs" />
           </button>
         )}
       </span>

@@ -70,11 +70,11 @@ export function InteractionCard({
       {/* 标题区 */}
       <div className="border-b border-border/30 px-4 py-3">
         <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 shrink-0 text-status-info" />
+          <MessageSquare className="h-icon-md w-icon-md shrink-0 text-status-info" />
           <span className="text-sm font-semibold">{interaction.title || '交互请求'}</span>
           {isDone && (
             <span className="ml-auto flex items-center gap-1 text-xs text-status-success">
-              <Check className="h-3 w-3" />
+              <Check className="h-icon-xs w-icon-xs" />
               {interaction.status === 'navigated' ? '已跳转' : '已完成'}
             </span>
           )}
@@ -84,7 +84,7 @@ export function InteractionCard({
               className="ml-auto rounded-sm p-0.5 text-muted-foreground opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-foreground [.animate-pulse-subtle_&]:opacity-60"
               title="关闭"
             >
-              <X className="h-3.5 w-3.5" />
+              <X className="h-icon-sm w-icon-sm" />
             </button>
           )}
         </div>
@@ -170,7 +170,7 @@ export function InteractionCard({
                 onClick={handleTextSubmit}
               >
                 {isSubmitting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-icon-md w-icon-md animate-spin" />
                 ) : (
                   '发送'
                 )}
@@ -235,7 +235,7 @@ export function InteractionCard({
                 onClick={onNavigateToTab}
                 className="text-sm text-status-info hover:text-status-info/80"
               >
-                <ArrowRight className="mr-1 h-3.5 w-3.5" />
+                <ArrowRight className="mr-1 h-icon-sm w-icon-sm" />
                 进入对话
               </Button>
             </div>
@@ -257,7 +257,7 @@ export function InteractionCard({
                 onClick={handleTextSubmit}
               >
                 {isSubmitting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-icon-md w-icon-md animate-spin" />
                 ) : (
                   '发送'
                 )}
@@ -302,7 +302,7 @@ export function InteractionCard({
               }}
             >
               {isSubmitting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-icon-md w-icon-md animate-spin" />
               ) : (
                 '确认选择'
               )}

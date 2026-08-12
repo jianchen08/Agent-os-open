@@ -102,7 +102,7 @@ const getLevelBadge = (level: AgentLevel) => {
   const { label, variant } = config[level]
 
   return (
-    <Badge variant={variant} className="h-4 px-1.5 py-0 text-xs">
+    <Badge variant={variant} className="h-icon-md px-1.5 py-0 text-xs">
       {label}
     </Badge>
   )
@@ -186,7 +186,7 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
           </div>
           {onOpenDetail && (
             <Button variant="ghost" size="sm" onClick={handleOpenDetail} className="h-7 text-xs">
-              <MessageSquare className="mr-1 h-3 w-3" />
+              <MessageSquare className="mr-1 h-icon-xs w-icon-xs" />
               查看对话
             </Button>
           )}
@@ -211,9 +211,9 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
           {expandable && (
             <span className="text-muted-foreground flex-shrink-0">
               {isExpanded ? (
-                <ChevronDown className="h-4 w-4" />
+                <ChevronDown className="h-icon-md w-icon-md" />
               ) : (
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="h-icon-md w-icon-md" />
               )}
             </span>
           )}
@@ -234,7 +234,7 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
               handleOpenDetail()
             }}
           >
-            <ExternalLink className="h-3 w-3" />
+            <ExternalLink className="h-icon-xs w-icon-xs" />
             <span className="ml-1 text-xs">详情</span>
           </Button>
         )}

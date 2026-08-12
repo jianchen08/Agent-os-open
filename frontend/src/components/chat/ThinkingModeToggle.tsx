@@ -104,11 +104,11 @@ export const ThinkingModeToggle = ({
       aria-label={getTitle()}
     >
       {isProcessing ? (
-        <Loader2 className="h-4 w-4 animate-spin" />
+        <Loader2 className="h-icon-md w-icon-md animate-spin" />
       ) : thinkingMode.error ? (
-        <AlertCircle className="h-4 w-4" />
+        <AlertCircle className="h-icon-md w-icon-md" />
       ) : (
-        <Brain className={cn('h-4 w-4 transition-colors duration-200', getIconColor())} />
+        <Brain className={cn('h-icon-md w-icon-md transition-colors duration-200', getIconColor())} />
       )}
 
       <span className="text-sm font-medium">

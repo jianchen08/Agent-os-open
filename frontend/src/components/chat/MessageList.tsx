@@ -383,7 +383,7 @@ export const MessageList = ({
           <div className="flex items-center justify-center py-4">
             {isLoadingMore ? (
               <div className="text-muted-foreground flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-icon-md w-icon-md animate-spin" />
                 <span className="text-sm">加载历史消息...</span>
               </div>
             ) : (
@@ -401,14 +401,14 @@ export const MessageList = ({
         {isGenerating && displayMessages[displayMessages.length - 1]?.role === 'user' && (
           <div className="flex items-start gap-3 px-4 py-3">
             <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
-              <Loader2 className="text-primary h-4 w-4 animate-spin" />
+              <Loader2 className="text-primary h-icon-md w-icon-md animate-spin" />
             </div>
             <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
               <span className="text-muted-foreground text-sm">思考中...</span>
             </div>
           </div>
         )}
-        <div className="h-4" />
+        <div className="h-icon-md" />
       </div>
     </div>
   )

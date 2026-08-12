@@ -86,12 +86,12 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
           <Button type="submit" size="sm" disabled={disabled || !value.trim()}>
             {disabled ? (
               <>
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                <Loader2 className="mr-1 h-icon-md w-icon-md animate-spin" />
                 保存中...
               </>
             ) : (
               <>
-                <Check className="mr-1 h-4 w-4" />
+                <Check className="mr-1 h-icon-md w-icon-md" />
                 保存
               </>
             )}
@@ -276,11 +276,11 @@ export const MessageItem = memo(function MessageItem({
       >
         <AvatarFallback className="rounded-xl text-sm font-medium">
           {isUser ? (
-            <User className="h-4 w-4" />
+            <User className="h-icon-md w-icon-md" />
           ) : isSystemMessage ? (
-            <Bell className="h-4 w-4" />
+            <Bell className="h-icon-md w-icon-md" />
           ) : (
-            <Bot className="h-4 w-4" />
+            <Bot className="h-icon-md w-icon-md" />
           )}
         </AvatarFallback>
       </Avatar>
@@ -421,7 +421,7 @@ export const MessageItem = memo(function MessageItem({
                               }}
                               className="bg-background/60 hover:bg-background flex w-full items-center gap-2 rounded-lg border border-border/30 px-2 py-1.5 text-left text-sm transition-colors"
                             >
-                              <Icon className="text-muted-foreground h-4 w-4 shrink-0" />
+                              <Icon className="text-muted-foreground h-icon-md w-icon-md shrink-0" />
                               <span className="truncate">{att.name || '文件'}</span>
                             </button>
                           )
@@ -447,12 +447,12 @@ export const MessageItem = memo(function MessageItem({
                       <div className="flex items-center gap-2">
                         {hasPendingInteraction ? (
                           <>
-                            <MessageSquare className="h-4 w-4 text-status-info" />
+                            <MessageSquare className="h-icon-md w-icon-md text-status-info" />
                             <span className="text-sm text-status-info">等待用户响应...</span>
                           </>
                         ) : (
                           <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <Loader2 className="h-icon-md w-icon-md animate-spin" />
                             <span className="text-sm">思考中...</span>
                           </>
                         )}
@@ -481,7 +481,7 @@ export const MessageItem = memo(function MessageItem({
         >
           {isAssistant && agent && (
             <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--badge-info-bg)] px-2 py-0.5 text-xs text-[var(--badge-info-text)]">
-              <Sparkles className="h-3 w-3" />
+              <Sparkles className="h-icon-xs w-icon-xs" />
               <span className="font-medium">{agent.name}</span>
             </span>
           )}

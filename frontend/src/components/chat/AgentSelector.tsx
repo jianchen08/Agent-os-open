@@ -102,7 +102,7 @@ export function AgentSelector({
         <span className="max-w-[120px] truncate">
           {isSwitching ? '切换中...' : currentAgent?.name || '灵汐'}
         </span>
-        <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
+        <ChevronDown className="h-icon-xs w-icon-xs shrink-0 opacity-50" />
       </button>
 
       {isOpen && (
