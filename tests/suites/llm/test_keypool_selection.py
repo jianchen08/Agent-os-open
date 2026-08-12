@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @audit: T5#15 | @ci: timing
 """验证 KeyPool 主备模式选 key 策略。
 
 修复前 select() 按 score() 择优，token_quota=0 时 token 维度恒为 3999.6 常数，
@@ -54,24 +55,37 @@ class TestPrimaryPreferredSelection:
         assert pool.select() is main
 
     @pytest.mark.asyncio
+    @pytest.mark.timing
     async def test_concurrent_all_go_to_primary(self):
-        """并发场景下全部请求应打主 key，备 key 零流量。
+        """并发场景下全部请求应打主 key，备 key 零流量；且并发持有数不超过 max_concurrent。
 
         回归 BUG-FIX-20260619: 修复前 20 并发会有 17 个打备 key。
+        时序不变量（@timing, T5#15）：信号量持有期间并发数 ≤ max_concurrent——
+        用 asyncio.sleep 模拟"持有信号量"窗口，断言该窗口内并发持有峰值不超上限。
         """
         pool, main, k2 = _make_zhipu_pool()
         picks: list[str] = []
+        in_flight = 0
+        peak = 0
 
         async def _call() -> None:
+            nonlocal in_flight, peak
             slot = await pool.acquire_slot(timeout=5)
             picks.append(slot.key_id)
+            in_flight += 1
+            peak = max(peak, in_flight)
             await asyncio.sleep(0.05)  # 持有信号量一小段时间
+            in_flight -= 1
             slot.release()
 
         await asyncio.gather(*[_call() for _ in range(20)])
 
         assert picks.count("zhipu_coding_main") == 20
         assert picks.count("zhipu_coding_2") == 0
+        # 时序不变量：并发持有峰值绝不超过主 key 的 max_concurrent（7）。
+        assert peak <= main.max_concurrent, (
+            f"并发持有峰值 {peak} 超过上限 {main.max_concurrent}（信号量未正确限流）"
+        )
 
 
 class TestFailoverToBackup:
@@ -102,8 +116,9 @@ class TestFailoverToBackup:
         assert pool.select() is k2
 
     @pytest.mark.asyncio
+    @pytest.mark.timing
     async def test_concurrent_failover_to_backup(self):
-        """主 key 冷却时，并发请求全部走备 key。"""
+        """主 key 冷却时，并发请求全部走备 key（时序不变量 @timing, T5#15）。"""
         pool, main, k2 = _make_zhipu_pool()
         main.on_rate_limit(retry_after=300)
         picks: list[str] = []
@@ -111,7 +126,7 @@ class TestFailoverToBackup:
         async def _call() -> None:
             slot = await pool.acquire_slot(timeout=5)
             picks.append(slot.key_id)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)  # 持有信号量一小段时间
             slot.release()
 
         await asyncio.gather(*[_call() for _ in range(5)])
@@ -123,8 +138,9 @@ class TestFailoverToBackup:
 class TestRecoveryToPrimary:
     """主 key 恢复可用后，必须切回主 key。"""
 
+    @pytest.mark.timing
     def test_primary_recovers_selects_it_again(self):
-        """主 key 冷却期结束后，重新被选中。"""
+        """主 key 冷却期结束后，重新被选中（时序不变量 @timing, T5#15）。"""
         pool, main, k2 = _make_zhipu_pool()
         main.on_rate_limit(retry_after=0.1)  # 很短冷却
 

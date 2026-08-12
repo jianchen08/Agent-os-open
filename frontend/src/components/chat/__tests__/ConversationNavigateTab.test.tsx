@@ -85,7 +85,8 @@ describe('对话模式跳转标识符回归', () => {
     })
 
     expect(mocks.navigateToTab).toHaveBeenCalledTimes(1)
-    // 第 2 个参数是跳转标识符，必须是 pipelineId
+    // 第 2 个参数是跳转标识符，必须是 pipelineId（回归核心：绝不能传成 threadId）。
+    // T5#13：用 toHaveBeenCalledWith 在意图层断言，不直接读 mock.calls 数组下标。
     expect(mocks.navigateToTab).toHaveBeenCalledWith(
       'req-1',
       'pipe-xyz',
@@ -93,9 +94,6 @@ describe('对话模式跳转标识符回归', () => {
       undefined,
       undefined,
     )
-    // 显式断言：绝不能传成 threadId
-    expect(mocks.navigateToTab.mock.calls[0][1]).toBe('pipe-xyz')
-    expect(mocks.navigateToTab.mock.calls[0][1]).not.toBe('thread-abc')
   })
 
   it('pipelineId 缺失（退化场景）时应回退到 threadId', async () => {
@@ -111,6 +109,13 @@ describe('对话模式跳转标识符回归', () => {
     })
 
     expect(mocks.navigateToTab).toHaveBeenCalledTimes(1)
-    expect(mocks.navigateToTab.mock.calls[0][1]).toBe('thread-only')
+    // T5#13：意图层断言退化场景的回退标识符，不读 mock.calls 下标。
+    expect(mocks.navigateToTab).toHaveBeenCalledWith(
+      'req-1',
+      'thread-only',
+      '对话',
+      undefined,
+      undefined,
+    )
   })
 })

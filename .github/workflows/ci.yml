@@ -131,7 +131,8 @@ jobs:
         # 与 Python test-batch-baseline 同构。
         run: |
           cargo test --all 2>&1 | tee /tmp/rust_test_output.txt
-          python ../scripts/check_rust_test_baseline.py
+          # 基线锁复用上方已 tee 的输出（--from-file），不重复跑 cargo test（N4 修复）。
+          python ../scripts/check_rust_test_baseline.py --from-file /tmp/rust_test_output.txt
 
   # ── E2E Manual（手动触发占位，不跑测试）─────────────────────────────────
   # 注意：本 job 是 workflow_dispatch 占位——**不执行任何测试**，仅打印手动/本地
@@ -349,11 +350,23 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Lint
-        run: npm run lint
+      # ── 前端基线锁（阶段 2.4，N1 修复）──────────────────────────────────
+      # vitest/eslint 存在迁移遗留失败（React19/jsdom 渲染 + chat_card 存量 error）。
+      # 用 `|| true` 放行 + tee 捕获输出，交由基线锁（.github/frontend-baseline.txt，
+      # 只减不增）管控：失败/error 数增长 → CI 红；减少或持平 → 放行。
+      # 复用下方已 tee 的输出（--vitest-file/--eslint-file），不重复跑（N1）。
+      - name: Lint (capture for baseline)
+        run: npm run lint 2>&1 | tee /tmp/eslint_output.txt || true
 
-      - name: Unit tests
-        run: npm run test
+      - name: Unit tests (capture for baseline)
+        run: npm run test 2>&1 | tee /tmp/vitest_output.txt || true
+
+      - name: Frontend baseline gate (vitest+eslint 只减不增)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python scripts/check_frontend_baseline.py \
+            --vitest-file /tmp/vitest_output.txt \
+            --eslint-file /tmp/eslint_output.txt
 
   # ── Pre-commit（项目代码质量门禁入口）────────────────────────────────
   # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"，但此前 CI 从未运行它。

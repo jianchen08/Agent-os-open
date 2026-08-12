@@ -4,14 +4,17 @@
 机制：
 - .github/frontend-baseline.txt 记录当前允许的失败数上限（vitest failures + eslint errors）
 - 新代码若让失败数增加 → CI 失败
-- 失败数减少 → 自动更新基线（鼓励治理）
+- 失败数减少 → 鼓励治理（手动收紧基线）
 
-用法（CI 或本地）:
-    python scripts/check_frontend_baseline.py
+用法：
+    python scripts/check_frontend_baseline.py                                  # 本地：自跑 vitest+eslint 并检查
+    python scripts/check_frontend_baseline.py --vitest-file A --eslint-file B   # CI：复用已 tee 的输出
+    python scripts/check_frontend_baseline.py --init                            # 用当前结果写入/收紧基线
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
@@ -22,13 +25,31 @@ FRONTEND = ROOT / "frontend"
 BASELINE_FILE = ROOT / ".github" / "frontend-baseline.txt"
 
 
-def count_vitest_failures() -> int:
-    """运行 vitest 并解析失败测试数。
+def parse_vitest_failures(output: str) -> int:
+    """从 vitest 输出文本解析失败测试数（纯文本解析，不执行子进程）。
 
-    vitest 非零退出是正常的（有失败用例时退出码=1）。只有当连总结行都
-    解析不到时才视为异常（vitest 未正常启动/崩溃），此时打印原始输出
-    并抛错，而非静默返回 0（旧逻辑的 0 会让基线锁误判为"全部通过"）。
+    匹配总结行 "Tests  109 failed | 737 passed (846)"。注意区分
+    "Test Files  N failed" 和 "Tests  N failed"，取后者（最后一个匹配）。
+    解析不到 → 抛错（而非静默返回 0，避免基线锁误判"全部通过"）。
     """
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)  # 去 ANSI 颜色码
+    matches = re.findall(r"Tests\s+(\d+)\s+failed", output)
+    if matches:
+        return int(matches[-1])
+    print("⚠️ vitest 输出未匹配到 'Tests N failed' 总结行")
+    print("原始输出尾部：")
+    print(output[-1500:] if output.strip() else "(空输出)")
+    raise RuntimeError("vitest 未输出总结行，无法解析失败数（检查 vitest 是否正常启动）")
+
+
+def parse_eslint_errors(output: str) -> int:
+    """从 ESLint 输出文本解析 error 数。匹配 "✖ 853 problems (33 errors, 820 warnings)"。"""
+    m = re.search(r"\((\d+)\s+errors?,", output)
+    return int(m.group(1)) if m else 0
+
+
+def count_vitest_failures() -> int:
+    """运行 vitest 并解析失败测试数。"""
     result = subprocess.run(
         ["npx", "vitest", "run"],
         capture_output=True,
@@ -36,19 +57,7 @@ def count_vitest_failures() -> int:
         cwd=FRONTEND,
         check=False,
     )
-    output = result.stdout + result.stderr
-    # 去除 ANSI 颜色码
-    output = re.sub(r"\x1b\[[0-9;]*m", "", output)
-    # 精确匹配总结行 "Tests  109 failed | 737 passed (846)"
-    # 注意区分 "Test Files  N failed" 和 "Tests  N failed"，取后者
-    matches = re.findall(r"Tests\s+(\d+)\s+failed", output)
-    if matches:
-        return int(matches[-1])
-    # 解析不到总结行：vitest 未正常启动。打印原始输出辅助排查，报错而非返回 0。
-    print(f"⚠️ vitest 输出未匹配到 'Tests N failed' 总结行（returncode={result.returncode}）")
-    print("原始输出尾部：")
-    print(output[-1500:] if output.strip() else "(空输出)")
-    raise RuntimeError("vitest 未输出总结行，无法解析失败数（检查 vitest 是否正常启动）")
+    return parse_vitest_failures(result.stdout + result.stderr)
 
 
 def count_eslint_errors() -> int:
@@ -60,17 +69,7 @@ def count_eslint_errors() -> int:
         cwd=FRONTEND,
         check=False,
     )
-    output = result.stdout + result.stderr
-    # 匹配 "✖ 853 problems (33 errors, 820 warnings)"
-    m = re.search(r"\((\d+)\s+errors?,", output)
-    if m:
-        return int(m.group(1))
-    # eslint 退出码 0（无 error）时无 "(N errors)" 段，返回 0 正确。
-    # 非零退出又解析不到时打印输出辅助排查。
-    if result.returncode != 0 and "problems" in output:
-        print("⚠️ eslint 非零退出但未匹配 errors 数，原始输出尾部：")
-        print(output[-1000:])
-    return 0
+    return parse_eslint_errors(result.stdout + result.stderr)
 
 
 def read_baseline() -> tuple[int, int]:
@@ -97,15 +96,42 @@ def write_baseline(vitest: int, eslint: int) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="前端测试基线锁")
+    parser.add_argument(
+        "--vitest-file",
+        metavar="PATH",
+        help="复用已 tee 的 vitest 输出文件（CI 用，避免重复跑 vitest）",
+    )
+    parser.add_argument(
+        "--eslint-file",
+        metavar="PATH",
+        help="复用已 tee 的 eslint 输出文件（CI 用，避免重复跑 lint）",
+    )
+    parser.add_argument("--init", action="store_true", help="用当前结果写入/收紧基线")
+    args = parser.parse_args()
+
     base_v, base_e = read_baseline()
-    print("运行 vitest（约 30s）...")
-    cur_v = count_vitest_failures()
-    print("运行 ESLint...")
-    cur_e = count_eslint_errors()
+
+    if args.vitest_file or args.eslint_file:
+        # CI 模式：复用 frontend-test job 已 tee 的输出（N1 修复，避免重跑）。
+        vitest_out = Path(args.vitest_file).read_text(encoding="utf-8", errors="replace") if args.vitest_file else ""
+        eslint_out = Path(args.eslint_file).read_text(encoding="utf-8", errors="replace") if args.eslint_file else ""
+        cur_v = parse_vitest_failures(vitest_out) if vitest_out else 0
+        cur_e = parse_eslint_errors(eslint_out) if eslint_out else 0
+    else:
+        print("运行 vitest（约 30s）...")
+        cur_v = count_vitest_failures()
+        print("运行 ESLint...")
+        cur_e = count_eslint_errors()
 
     print("\n         基线    当前")
     print(f"vitest:  {base_v:<6}  {cur_v}")
     print(f"eslint:  {base_e:<6}  {cur_e}")
+
+    if args.init:
+        write_baseline(cur_v, cur_e)
+        print(f"\n✅ 基线已写入: vitest={cur_v} eslint={cur_e}")
+        return 0
 
     increased = (cur_v > base_v) or (cur_e > base_e)
     decreased = (cur_v < base_v) or (cur_e < base_e)
@@ -127,7 +153,7 @@ def main() -> int:
         if cur_e < base_e:
             parts.append(f"eslint {base_e}→{cur_e}")
         print(f"\n✅ 失败数减少了（{', '.join(parts)}）")
-        print("（基线不自动更新：本地与 CI 环境可能存在差异，请在 CI 验证后手动更新 .github/frontend-baseline.txt）")
+        print("（基线不自动更新：请在 CI 验证后手动收紧 .github/frontend-baseline.txt）")
         return 0
 
     print("\n✅ 与基线持平，无新增失败")

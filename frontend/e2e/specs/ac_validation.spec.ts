@@ -99,14 +99,18 @@ test.describe('AC 验证', () => {
     await waitForAssistantMessage(page);
 
     // 检测工具调用卡片
+    // T5#7 修复：不再吞失败——工具卡片未出现/未完成时显式抛错，
+    // 避免"测试绿但实际未验证工具调用"的假通过。
     try {
       const toolCard = await waitForToolCard(page, 45_000);
       expect(await toolCard.getAttribute('data-activity-type')).toBe('tool_call');
       await waitForToolCompleted(page, 30_000);
       const status = await toolCard.getAttribute('data-activity-status');
       expect(status, '工具调用应完成').toBe('completed');
-    } catch {
-      console.log('⚠️ 未检测到工具卡片（Agent 可能未触发工具）');
+    } catch (e) {
+      throw new Error(
+        `AC-4 工具调用流程未通过：未检测到状态为 completed 的工具卡片（不再吞失败，T5#7）。\n原始错误: ${e instanceof Error ? e.message : e}`,
+      );
     }
 
     // 验证任务页面可访问

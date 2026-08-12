@@ -8,8 +8,9 @@
 - 失败数 ≤ 基线 → 退出码 0（允许持平，鼓励逐步修复后收紧基线）
 
 用法：
-    python scripts/check_rust_test_baseline.py          # 检查（CI 用）
-    python scripts/check_rust_test_baseline.py --init   # 首次写入基线
+    python scripts/check_rust_test_baseline.py                         # 本地：跑 cargo test 并检查
+    python scripts/check_rust_test_baseline.py --init                  # 首次写入/收紧基线
+    python scripts/check_rust_test_baseline.py --from-file OUT.txt     # CI：复用已 tee 的输出，不重跑
 """
 
 from __future__ import annotations
@@ -23,6 +24,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL_DIR = ROOT / "kernel"
 BASELINE_FILE = ROOT / ".github" / "rust-test-baseline.txt"
+
+
+def parse_failures(output: str) -> int:
+    """从 cargo test 输出文本解析失败数（纯文本解析，不执行子进程）。
+
+    统计口径：
+    - 方式1：每条 "test result: ... N failed" 中的 N 求和（多个 crate 各一行）。
+    - 方式2：若无 test result 行，取 cargo 汇总 "N test(s) failed"。
+    - 方式3：编译失败（无 test result 但含 error[/]）记为 1，确保 CI 红。
+    """
+    failed_count = 0
+    for m in re.finditer(r"test result: .*?(\d+) failed", output):
+        failed_count += int(m.group(1))
+    if failed_count == 0:
+        m = re.search(r"(\d+) test(?:s)? failed", output)
+        if m:
+            failed_count = int(m.group(1))
+    if failed_count == 0 and ("error[" in output or "error:" in output):
+        # 编译失败（非测试失败，但 CI 应红）
+        failed_count = max(failed_count, 1)
+    return failed_count
 
 
 def run_cargo_test() -> tuple[int, str]:
@@ -43,29 +65,7 @@ def run_cargo_test() -> tuple[int, str]:
         return -1, ""
 
     output = proc.stdout + proc.stderr
-
-    # 解析失败数：cargo test 的 summary 行格式多样，统一统计 FAILED 行
-    # ── "test result: FAILED. N passed; M failed;" 中的 M
-    # ── 或 "N test failed" / "N tests failed"
-    failed_count = 0
-
-    # 方式1：test result 行中的 failed 数
-    for m in re.finditer(r"test result: .*?(\d+) failed", output):
-        failed_count += int(m.group(1))
-
-    # 方式2：cargo 的 error 行 "error: N test(s) failed, ... "
-    if failed_count == 0:
-        m = re.search(r"(\d+) test(?:s)? failed", output)
-        if m:
-            failed_count = int(m.group(1))
-
-    # 方式3：编译失败（非测试失败，但 CI 应红）
-    if proc.returncode != 0 and failed_count == 0:
-        if "error[" in output or "error:" in output:
-            # 编译错误，记为 1（非测试失败但需拦截）
-            failed_count = max(failed_count, 1)
-
-    return failed_count, output
+    return parse_failures(output), output
 
 
 def read_baseline() -> int:
@@ -99,11 +99,27 @@ rust_test_failures={failures}
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rust 测试失败基线锁")
     parser.add_argument("--init", action="store_true", help="首次写入/更新基线")
+    parser.add_argument(
+        "--from-file",
+        metavar="PATH",
+        help="复用已 tee 的 cargo test 输出文件（CI 用，避免重复跑 cargo test）",
+    )
     args = parser.parse_args()
 
-    failed, output = run_cargo_test()
-    if failed < 0:
-        return 1  # 超时
+    if args.from_file:
+        # CI 模式：直接解析已有输出，不再重跑 cargo test（N4 修复）。
+        # rust-test job 已 `cargo test --all 2>&1 | tee /tmp/rust_test_output.txt`，
+        # 此处只做解析 + 基线比对。
+        out_path = Path(args.from_file)
+        if not out_path.exists():
+            print(f"[rust-baseline] ❌ 输出文件不存在: {out_path}", file=sys.stderr)
+            return 1
+        output = out_path.read_text(encoding="utf-8", errors="replace")
+        failed = parse_failures(output)
+    else:
+        failed, output = run_cargo_test()
+        if failed < 0:
+            return 1  # 超时
 
     if args.init:
         write_baseline(failed)

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @audit: T5#15 | @ci: timing
 """套件 D：管道执行稳定性测试。
 
 覆盖范围：
@@ -63,11 +64,15 @@ def test_evaluator_agent_tool_ids_available():
 
 
 @pytest.mark.core
+@pytest.mark.timing
 async def test_event_loop_not_blocked_by_input_adapter():
     """验证 run_in_executor 不会阻塞事件循环，其他 async 任务可并发执行。
 
     模拟 input_adapter 中 _read_multiline 阻塞的场景，
     验证阻塞期间事件循环仍可调度其他异步任务。
+
+    时序不变量（@timing, T5#15）：阻塞读期间事件循环仍可调度轻量 async 任务——
+    不依赖绝对墙钟耗时，只断言"阻塞未卡死事件循环"这一顺序/可调度性不变量。
     """
     blocking_duration = 0.3
     other_task_completed = False

@@ -39,32 +39,51 @@ class TestChannelGateway:
 
     @pytest.mark.asyncio
     async def test_start(self) -> None:
-        """测试启动所有适配器。"""
-        mock_adapter1 = MagicMock()
-        mock_adapter1.channel_type = "feishu"
-        mock_adapter1.start = AsyncMock()
+        """测试启动所有适配器——验证适配器进入 started 状态（可观察行为，非内部调用次数）。
 
-        mock_adapter2 = MagicMock()
-        mock_adapter2.channel_type = "dingtalk"
-        mock_adapter2.start = AsyncMock()
+        T5#10 修复：不再 `assert_called_once()` 钉死内部协作者调用次数——重构
+        ChannelGateway 调度（幂等重试等）不应误报。改为断言适配器最终进入了
+        started 状态这一可观察结果。
+        """
+        states: dict[str, bool] = {}
+
+        def make_adapter(name: str) -> MagicMock:
+            adapter = MagicMock()
+            adapter.channel_type = name
+
+            async def _start() -> None:
+                states[name] = True
+
+            adapter.start = AsyncMock(side_effect=_start)
+            return adapter
+
+        mock_adapter1 = make_adapter("feishu")
+        mock_adapter2 = make_adapter("dingtalk")
 
         self.gateway.register_adapter("feishu", mock_adapter1)
         self.gateway.register_adapter("dingtalk", mock_adapter2)
 
         await self.gateway.start()
-        mock_adapter1.start.assert_called_once()
-        mock_adapter2.start.assert_called_once()
+
+        # 可观察结果：两个适配器都进入 started 状态。
+        assert states.get("feishu") is True, "feishu 适配器应已启动"
+        assert states.get("dingtalk") is True, "dingtalk 适配器应已启动"
 
     @pytest.mark.asyncio
     async def test_stop(self) -> None:
-        """测试停止所有适配器。"""
+        """测试停止适配器——验证适配器进入 stopped 状态（可观察行为，T5#10）。"""
+        states: dict[str, bool] = {}
         mock_adapter = MagicMock()
         mock_adapter.channel_type = "feishu"
-        mock_adapter.stop = AsyncMock()
+
+        async def _stop() -> None:
+            states["feishu"] = True
+
+        mock_adapter.stop = AsyncMock(side_effect=_stop)
 
         self.gateway.register_adapter("feishu", mock_adapter)
         await self.gateway.stop()
-        mock_adapter.stop.assert_called_once()
+        assert states.get("feishu") is True, "feishu 适配器应已停止"
 
     @pytest.mark.asyncio
     async def test_handle_message_normalizes_and_routes(self) -> None:
@@ -89,8 +108,8 @@ class TestChannelGateway:
 
         await gateway.handle_message("feishu", raw_msg)
 
-        # handler 应该被调用，收到 initial state
-        handler.assert_called_once()
+        # T5#10：断言可观察结果——handler 收到正确标准化的 state，而非调用次数。
+        assert handler.called, "handler 应被调用"
         state = handler.call_args[0][0]
         assert state["user_input"] == "hello gateway"
         assert state["_channel_type"] == "feishu"
