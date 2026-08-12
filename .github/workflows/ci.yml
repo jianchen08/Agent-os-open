@@ -189,8 +189,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Print manual run instructions (此 job 不执行测试)
         run: |
-          echo "本 job 是手动触发占位，不执行任何测试（原 echo 步骤已如实标注）。"
-          echo "热加载/用户旅程脚本需 kernel + LLM 环境，请本地运行 tests/manual/ 下脚本（见其文档头）。"
+          echo "本 job 是手动触发占位，不执行任何测试（已如实标注，非合并门禁）。"
+          echo "PR 级 e2e 门禁已由 frontend-e2e job 提供（零后端依赖冒烟子集 ci-smoke.spec.ts）。"
+          echo "热加载/用户旅程全流程需 kernel + LLM 环境，请本地运行："
+          echo "  - tests/manual/ 下脚本（0.2/0.1 热加载、用户旅程对照，见其文档头）"
+          echo "  - frontend/e2e/specs/journey_*.spec.ts（需启动 kernel + 前端）"
           echo "核心热加载逻辑已由 rust-test job 的单测覆盖（零 LLM 依赖）。"
 
 
@@ -412,6 +415,51 @@ jobs:
           python scripts/check_frontend_baseline.py \
             --vitest-file /tmp/vitest_output.txt \
             --eslint-file /tmp/eslint_output.txt
+
+  # ── Frontend E2E 冒烟（阶段 3.1，T5#2/#5）────────────────────────────────
+  # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
+  # (e2e/specs/ci-smoke.spec.ts，不依赖 kernel/LLM)。journey_* 全流程需后端，
+  # 仍归本地/手动（见 e2e-manual）。本 job 消除"有 e2e 覆盖"的假象。
+  frontend-e2e:
+    name: Frontend E2E (冒烟子集, 零后端依赖)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run E2E smoke (preview server + ci-smoke)
+        run: |
+          # 后台启动 preview 服务于 5188（playwright baseURL），跑完即杀
+          npm run preview -- --port 5188 --strictPort &
+          PREVIEW_PID=$!
+          # 等待服务就绪（curl 轮询，便携）
+          for i in $(seq 1 30); do curl -sf http://localhost:5188 >/dev/null && break; sleep 2; done
+          if ! curl -sf http://localhost:5188 >/dev/null; then
+            echo "❌ preview 服务未就绪"; kill $PREVIEW_PID || true; exit 1
+          fi
+          # 仅跑零后端依赖冒烟子集
+          npx playwright test e2e/specs/ci-smoke.spec.ts
+          RC=$?
+          kill $PREVIEW_PID || true
+          exit $RC
 
   # ── Pre-commit（项目代码质量门禁入口）────────────────────────────────
   # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"，但此前 CI 从未运行它。
