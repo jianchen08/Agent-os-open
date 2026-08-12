@@ -12,6 +12,7 @@ import {
   Square,
   X,
 } from '@/assets/icons'
+import { ChatInputActions } from './ChatInputActions'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button'
@@ -811,6 +812,9 @@ export const ChatInput = ({
               currentTokenUsage={currentTokenUsage}
               maxTokens={maxTokens}
             />
+
+            {/* 插件声明的聊天输入动作（chat 空间 input-action 声明驱动） */}
+            <ChatInputActions />
           </div>
 
           {/* 发送/停止按钮 */}
