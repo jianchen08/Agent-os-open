@@ -134,6 +134,43 @@ jobs:
           # 基线锁复用上方已 tee 的输出（--from-file），不重复跑 cargo test（N4 修复）。
           python ../scripts/check_rust_test_baseline.py --from-file /tmp/rust_test_output.txt
 
+  # ── Rust Coverage（阶段 2.3：line% 基线锁）──────────────────────────────
+  # cargo-llvm-cov 产出 lcov，check_rust_coverage_baseline.py 解析 line% 对照
+  # .github/rust-coverage-baseline.txt（只升不降）。
+  # invoker 的 native cdylib 插桩 STATUS_ACCESS_VIOLATION 用 --ignore-run-fail 容错；
+  # integration-tests 的 /tmp mock + 跨平台噪音用 --exclude 排除。
+  rust-coverage:
+    name: Rust Coverage (llvm-cov line% 基线锁)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kernel
+          shared-key: agentos-0.2
+
+      - name: Generate coverage (lcov)
+        run: |
+          cargo llvm-cov --workspace --exclude agentos-integration-tests \
+            --lcov --output-path coverage.lcov --ignore-run-fail
+
+      - name: Coverage baseline gate (line% 只升不降)
+        working-directory: ${{ github.workspace }}
+        run: python scripts/check_rust_coverage_baseline.py --lcov kernel/coverage.lcov
+
   # ── E2E Manual（手动触发占位，不跑测试）─────────────────────────────────
   # 注意：本 job 是 workflow_dispatch 占位——**不执行任何测试**，仅打印手动/本地
   # 运行说明。真正的热加载/用户旅程脚本需 0.2 kernel + 0.1 服务 + 真实 LLM key，
