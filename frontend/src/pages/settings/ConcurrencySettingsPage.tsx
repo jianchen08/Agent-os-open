@@ -4,8 +4,9 @@
  * 设置任务并发数、Agent 层级并发、LLM 并发、工作流并发、队列参数
  */
 
-import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Loader2 } from '@/assets/icons'
+import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -150,7 +151,7 @@ export function ConcurrencySettingsPage() {
 
   if (isLoading) {
     return (
-      <PageShell title="并发控制" description="设置任务并发数和队列参数">
+      <PageShell title="并发控制" description="设置任务并发数和队列参数" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载配置...
@@ -424,29 +425,6 @@ function QueueInfoRow({ label, current, max }: { label: string; current: number;
 /* ============================================ */
 /* 共享子组件                                    */
 /* ============================================ */
-
-function PageShell({
-  title,
-  description,
-  children,
-}: {
-  title: string
-  description: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">{title}</h1>
-        <span className="text-muted-foreground ml-2 text-xs">{description}</span>
-      </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="并发控制配置表单">{children}</main>
-    </div>
-  )
-}
 
 function FieldRow({
   label,

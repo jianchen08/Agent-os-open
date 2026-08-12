@@ -8,6 +8,7 @@
 
 import { Link, useParams } from 'react-router-dom'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
+import { PageShell } from '@/components/shared/PageShell'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 
 /**
@@ -42,22 +43,14 @@ export function PluginConfigRoute() {
     : `${pluginId} / ${fileId}`
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <Link to="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 设置
-        </Link>
-        <h1 className="ml-4 text-base font-semibold">{title}</h1>
-      </header>
-      <div className="min-h-0 flex-1 p-4 sm:p-6">
-        <PluginConfigEditor
-          pluginId={pluginId}
-          fileId={fileId}
-          title={title}
-          description={description}
-          embedded
-        />
-      </div>
-    </div>
+    <PageShell title={title} backHref="/settings" backLabel="设置">
+      <PluginConfigEditor
+        pluginId={pluginId}
+        fileId={fileId}
+        title={title}
+        description={description}
+        embedded
+      />
+    </PageShell>
   )
 }

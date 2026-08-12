@@ -5,6 +5,9 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
+import { PageShell } from '@/components/shared/PageShell'
 import { getExecutionRecords, getExecutionRecordsSessions } from '@/services/api/executionRecords'
 import type { ExecutionRecord, SessionInfo } from '@/services/api/executionRecords'
 
@@ -81,52 +84,41 @@ export function DebugExecutionRecordsPage() {
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/debug" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">执行记录</h1>
-        <span className="text-muted-foreground ml-auto text-xs">共 {total} 条</span>
-      </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
-        {/* 会话过滤 */}
-        <select
-          value={selectedSession}
-          onChange={(e) => handleSessionChange(e.target.value)}
-          className="bg-background rounded-lg border px-3 py-1.5 text-sm"
-        >
-          <option value="">全部会话</option>
-          {sessions.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.title || s.id} ({s.record_count} 条)
-            </option>
-          ))}
-        </select>
+    <PageShell
+      title="执行记录"
+      backHref="/debug"
+      actions={<span className="text-muted-foreground text-xs">共 {total} 条</span>}
+    >
+      {/* 会话过滤 */}
+      <select
+        value={selectedSession}
+        onChange={(e) => handleSessionChange(e.target.value)}
+        className="bg-background rounded-lg border px-3 py-1.5 text-sm"
+      >
+        <option value="">全部会话</option>
+        {sessions.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.title || s.id} ({s.record_count} 条)
+          </option>
+        ))}
+      </select>
 
-        {/* 加载状态 */}
-        {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
-          </div>
-        )}
+      {/* 加载状态 */}
+      {isLoading && <LoadingState />}
 
-        {/* 错误提示 */}
-        {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
-        )}
+      {/* 错误提示 */}
+      {error && <ErrorState message={error} />}
 
-        {/* 空状态 */}
-        {!isLoading && !error && records.length === 0 && (
-          <div className="text-muted-foreground py-12 text-center">暂无数据</div>
-        )}
+      {/* 空状态 */}
+      {!isLoading && !error && records.length === 0 && (
+        <div className="text-muted-foreground py-12 text-center">暂无数据</div>
+      )}
 
-        {/* 记录列表 */}
-        {!isLoading && !error && records.length > 0 && (
-          <>
-            {/* 移动端卡片视图 */}
-            <div className="space-y-2 md:hidden">
+      {/* 记录列表 */}
+      {!isLoading && !error && records.length > 0 && (
+        <>
+          {/* 移动端卡片视图 */}
+          <div className="space-y-2 md:hidden">
               {records.map((record) => (
                 <div key={record.id} className="rounded-lg border p-3">
                   <div className="flex items-start justify-between gap-2">
@@ -192,7 +184,6 @@ export function DebugExecutionRecordsPage() {
             </div>
           </>
         )}
-      </main>
-    </div>
+    </PageShell>
   )
 }

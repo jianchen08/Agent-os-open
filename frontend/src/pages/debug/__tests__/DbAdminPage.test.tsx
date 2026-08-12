@@ -10,10 +10,11 @@
  * 的数据获取→状态更新→渲染链路完整，且角色守卫生效。
  */
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import * as authApi from '@/services/api/auth'
 import * as dbAdmin from '@/services/api/dbAdmin'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { DbAdminPage } from '../DbAdminPage'
 
 // mock auth API（admin 守卫用）
@@ -76,7 +77,7 @@ describe('DbAdminPage 权限守卫', () => {
     mockFetchDbTables.mockResolvedValue(sampleTables)
     mockFetchDbRows.mockResolvedValue(sampleRows)
 
-    render(<DbAdminPage />)
+    renderWithProviders(<DbAdminPage />)
 
     // 表列表渲染（表名 + 行数）
     await waitFor(() => {
@@ -105,7 +106,7 @@ describe('DbAdminPage 权限守卫', () => {
       last_login_at: null,
     })
 
-    render(<DbAdminPage />)
+    renderWithProviders(<DbAdminPage />)
 
     await waitFor(() => {
       expect(screen.getByText(/无权限访问数据库管理页面/)).toBeInTheDocument()
@@ -128,7 +129,7 @@ describe('DbAdminPage 表列表与数据浏览', () => {
     })
     mockFetchDbTables.mockRejectedValue(new Error('获取表列表失败'))
 
-    render(<DbAdminPage />)
+    renderWithProviders(<DbAdminPage />)
 
     await waitFor(() => {
       expect(screen.getByText(/获取表列表失败/)).toBeInTheDocument()

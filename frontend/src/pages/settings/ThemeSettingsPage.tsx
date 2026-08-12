@@ -5,8 +5,9 @@
  * 主题系统完全前端化，无后端依赖。
  */
 
-import { useThemeStore } from '@/stores/themeStore'
+import { PageShell } from '@/components/shared/PageShell'
 import { themeList } from '@/config/themes'
+import { useThemeStore } from '@/stores/themeStore'
 import type { ThemeInfo } from '@/types/theme'
 
 /**
@@ -60,23 +61,16 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
 
   if (embedded) {
     return (
-      <div className="h-full overflow-y-auto">
-        <h2 className="mb-4 text-base font-semibold">主题设置</h2>
+      <PageShell title="主题设置" embedded>
         {content}
-      </div>
+      </PageShell>
     )
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">主题设置</h1>
-      </header>
-      <main className="flex-1 overflow-y-auto p-6">{content}</main>
-    </div>
+    <PageShell title="主题设置" backHref="/settings" backLabel="返回设置">
+      {content}
+    </PageShell>
   )
 }
 

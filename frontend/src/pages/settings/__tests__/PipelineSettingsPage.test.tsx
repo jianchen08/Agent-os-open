@@ -12,9 +12,10 @@
  * 测试策略：Mock 仅外部依赖（API 层 + UI 基础组件），组件真实渲染。
  */
 
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { screen, waitFor, fireEvent } from '@testing-library/react'
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { PipelineSettingsPage } from '../PipelineSettingsPage'
 
 // ── Mock API 层 ──
@@ -78,14 +79,14 @@ describe('PipelineSettingsPage', () => {
   describe('加载状态', () => {
     it('初始渲染显示加载中', () => {
       mockGetPipelineConfig.mockReturnValue(new Promise(() => {}))
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       expect(screen.getByText(/加载配置/)).toBeInTheDocument()
     })
 
     it('加载时调用 getPipelineConfig 读取默认管道', () => {
       mockGetPipelineConfig.mockReturnValue(new Promise(() => {}))
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       expect(mockGetPipelineConfig).toHaveBeenCalledWith('default')
     })
@@ -94,7 +95,7 @@ describe('PipelineSettingsPage', () => {
   describe('加载成功', () => {
     it('渲染管道 tabs（默认/L1/L2 等）', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('默认')).toBeInTheDocument()
@@ -104,7 +105,7 @@ describe('PipelineSettingsPage', () => {
 
     it('渲染配置字段（管道名称、input_routes 等）', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         // name 字段（string → Input）
@@ -116,7 +117,7 @@ describe('PipelineSettingsPage', () => {
 
     it('显示保存按钮', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('保存配置')).toBeInTheDocument()
@@ -127,7 +128,7 @@ describe('PipelineSettingsPage', () => {
   describe('加载失败', () => {
     it('显示错误提示', async () => {
       mockGetPipelineConfig.mockRejectedValue(new Error('Network error'))
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('无法加载配置')).toBeInTheDocument()
@@ -136,7 +137,7 @@ describe('PipelineSettingsPage', () => {
 
     it('空配置显示「该配置暂无字段」且保存按钮可用', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: {}, etag: 'e-empty' })
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('该配置暂无字段')).toBeInTheDocument()
@@ -153,7 +154,7 @@ describe('PipelineSettingsPage', () => {
     it('点击保存调用 savePipelineConfig 并显示已保存', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
       mockSavePipelineConfig.mockResolvedValue({ name: 'default', etag: 'e2' })
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('保存配置')).toBeInTheDocument()
@@ -171,7 +172,7 @@ describe('PipelineSettingsPage', () => {
     it('保存失败显示错误提示', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
       mockSavePipelineConfig.mockRejectedValue(new Error('Save failed'))
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('保存配置')).toBeInTheDocument()
@@ -188,7 +189,7 @@ describe('PipelineSettingsPage', () => {
   describe('切换 tab', () => {
     it('切换 tab 后加载对应管道配置', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      render(<PipelineSettingsPage />)
+      renderWithProviders(<PipelineSettingsPage />)
 
       await waitFor(() => {
         expect(screen.getByText('L1 主 Agent')).toBeInTheDocument()
@@ -205,7 +206,7 @@ describe('PipelineSettingsPage', () => {
   describe('embedded 模式', () => {
     it('embedded 时不渲染独立页面头（返回链接）', async () => {
       mockGetPipelineConfig.mockResolvedValue({ name: 'default', data: samplePipeline, etag: 'e1' })
-      render(<PipelineSettingsPage embedded />)
+      renderWithProviders(<PipelineSettingsPage embedded />)
 
       await waitFor(() => {
         expect(screen.getByText('保存配置')).toBeInTheDocument()

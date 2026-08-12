@@ -5,21 +5,21 @@
  * 插件配置走 0.2 /api/v1/plugins/{id}/config/{file_id}。
  */
 
-import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { getSchema } from '@/services/api/schema'
-import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
+import { PageShell } from '@/components/shared/PageShell'
+import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
+import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
+import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
+import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
+import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
+import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
-import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
-import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
-import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
-import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
-import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
-import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
+import { getSchema } from '@/services/api/schema'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
+import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
 /** 左侧导航条目 */
 type NavItem =
@@ -103,25 +103,15 @@ export function SettingsPage() {
   const selected = allItems.find((item) => item.id === selectedId) ?? allItems[0]
 
   return (
-    <div
-      className="text-foreground flex h-screen flex-col overflow-hidden"
-      style={{ background: 'var(--ds-bg-canvas, #04060F)' }}
+    <PageShell
+      title="设置"
+      backHref="/"
+      backLabel="返回"
+      actions={
+        <span className="text-muted-foreground font-mono text-[10px]">Deep Space v2</span>
+      }
     >
-      <header
-        className="flex h-12 shrink-0 items-center border-b px-4"
-        style={{
-          background: 'var(--ds-bg-panel, #0A1226)',
-          borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
-        }}
-      >
-        <Link to="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </Link>
-        <h1 className="ml-4 text-base font-semibold">设置</h1>
-        <span className="text-muted-foreground ml-auto font-mono text-[10px]">Deep Space v2</span>
-      </header>
-
-      <div className="flex min-h-0 flex-1">
+      <div className="flex h-full min-h-0 overflow-hidden">
         {/* 左侧模块列表 */}
         <aside
           className="w-64 shrink-0 overflow-y-auto border-r p-3 sm:w-72"
@@ -162,7 +152,7 @@ export function SettingsPage() {
         </aside>
 
         {/* 右侧内联编辑区（嵌入子页时隐藏其独立全屏头，避免双层导航） */}
-        <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
           {selected?.kind === 'plugin' && (
             <PluginConfigEditor
               key={selected.id}
@@ -191,9 +181,9 @@ export function SettingsPage() {
               )}
             </div>
           )}
-        </main>
+        </div>
       </div>
-    </div>
+    </PageShell>
   )
 }
 

@@ -4,8 +4,11 @@
  * 展示情景记忆、语义记忆和搜索功能，顶部显示统计卡片
  */
 
-import { Brain, Inbox, Search } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Brain, Inbox, Search } from '@/assets/icons'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
+import { PageShell } from '@/components/shared/PageShell'
 import { getEpisodes, searchMemory, getMemoryStats, getSemanticMemory } from '@/services/api/memory'
 import type { Episode, SemanticKnowledge, MemoryStats, MemoryItem } from '@/services/api/memory'
 
@@ -110,16 +113,9 @@ export function MemoryPage() {
   }, [activeTab, semantics.length, fetchSemantics])
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">记忆管理</h1>
-      </header>
-      <main className="flex-1 space-y-6 overflow-y-auto p-3 sm:p-6">
-        {/* 统计卡片 */}
-        {stats && (
+    <PageShell title="记忆管理" backHref="/">
+      {/* 统计卡片 */}
+      {stats && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="rounded-lg border p-4">
               <div className="text-muted-foreground mb-1 text-xs">情景记忆</div>
@@ -142,7 +138,7 @@ export function MemoryPage() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`min-h-[44px] px-4 py-2 text-sm transition-colors ${
+              className={`h-8 md:min-h-[44px] px-4 py-2 text-sm transition-colors ${
                 activeTab === tab
                   ? 'border-primary text-foreground border-b-2 font-medium'
                   : 'text-muted-foreground hover:text-foreground'
@@ -154,17 +150,10 @@ export function MemoryPage() {
         </div>
 
         {/* 错误提示 */}
-        {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
-        )}
+        {error && <ErrorState message={error} />}
 
         {/* 加载状态 */}
-        {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
-          </div>
-        )}
+        {isLoading && <LoadingState />}
 
         {/* 情景记忆 */}
         {!isLoading && activeTab === 'episodes' && (
@@ -216,7 +205,7 @@ export function MemoryPage() {
                     fetchEpisodes(episodesPage - 1)
                   }}
                   disabled={episodesPage <= 1}
-                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
@@ -229,7 +218,7 @@ export function MemoryPage() {
                     fetchEpisodes(episodesPage + 1)
                   }}
                   disabled={episodesPage >= Math.ceil(episodesTotal / 10)}
-                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>
@@ -279,7 +268,7 @@ export function MemoryPage() {
               <button
                 onClick={handleSearch}
                 disabled={isSearching}
-                className="bg-primary text-primary-foreground min-h-[44px] rounded-lg px-4 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+                className="bg-primary text-primary-foreground h-8 md:min-h-[44px] rounded-lg px-4 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
               >
                 {isSearching ? '搜索中...' : '搜索'}
               </button>
@@ -312,7 +301,6 @@ export function MemoryPage() {
             ))}
           </div>
         )}
-      </main>
-    </div>
+    </PageShell>
   )
 }

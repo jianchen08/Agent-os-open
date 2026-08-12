@@ -1,7 +1,8 @@
 /** 费用控制配置页面 Token 用量限制和预算管理：预算限制、Token 用量追踪、费用告警、使用统计 */
 
-import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Loader2 } from '@/assets/icons'
+import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
@@ -140,7 +141,7 @@ export function CostSettingsPage() {
 
   if (isLoading) {
     return (
-      <PageShell title="成本控制" description="Token 用量限制和预算管理">
+      <PageShell title="成本控制" description="Token 用量限制和预算管理" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载中...
@@ -522,29 +523,6 @@ function ProtectionBadge({
 }
 
 /* 共享子组件 */
-
-function PageShell({
-  title,
-  description,
-  children,
-}: {
-  title: string
-  description: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">{title}</h1>
-        <span className="text-muted-foreground ml-2 text-xs">{description}</span>
-      </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="成本控制配置表单">{children}</main>
-    </div>
-  )
-}
 
 function FieldRow({
   label,

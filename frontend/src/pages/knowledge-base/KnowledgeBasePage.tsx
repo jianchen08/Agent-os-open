@@ -4,6 +4,7 @@
  * 展示知识库列表，支持文件上传、分类管理、标签云和统计信息
  */
 
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   BookOpen,
   Upload,
@@ -13,11 +14,13 @@ import {
   Tag,
   Folder,
   FileText,
-  Cloud,
 } from '@/assets/icons'
-import { useState, useEffect, useCallback, useRef } from 'react'
-import apiClient from '@/services/api/client'
+import { EmptyState } from '@/components/shared/EmptyState'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
+import { PageShell } from '@/components/shared/PageShell'
 import { API_ENDPOINTS } from '@/constants/api'
+import apiClient from '@/services/api/client'
 
 /** 知识库条目 */
 interface KnowledgeItem {
@@ -250,15 +253,12 @@ export function KnowledgeBasePage() {
     : items
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">知识库</h1>
-        <span className="text-muted-foreground ml-auto text-xs">共 {items.length} 条</span>
-      </header>
-      <main className="flex flex-1 overflow-hidden">
+    <PageShell
+      title="知识库"
+      backHref="/"
+      actions={<span className="text-muted-foreground text-xs">共 {items.length} 条</span>}
+    >
+      <div className="flex h-full min-h-0 overflow-hidden">
         {/* 左侧：分类列表 */}
         <aside className="w-56 shrink-0 space-y-2 overflow-y-auto border-r p-4">
           <div className="flex items-center justify-between">
@@ -430,31 +430,18 @@ export function KnowledgeBasePage() {
           )}
 
           {/* 错误状态 */}
-          {error && (
-            <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">
-              {error}
-            </div>
-          )}
+          {error && <ErrorState message={error} />}
 
           {/* 加载状态 */}
-          {isLoading && (
-            <div className="flex items-center justify-center py-12">
-              <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-              <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
-            </div>
-          )}
+          {isLoading && <LoadingState />}
 
           {/* 空状态 */}
           {!isLoading && !error && filteredItems.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16">
-              <BookOpen className="text-muted-foreground/40 mb-3 h-12 w-12" />
-              <p className="text-muted-foreground text-sm">
-                {selectedCategory ? `"${selectedCategory}" 分类下暂无条目` : '知识库暂无条目'}
-              </p>
-              <p className="text-muted-foreground/60 mt-1 text-xs">
-                上方拖拽文件或点击上传按钮添加知识库内容
-              </p>
-            </div>
+            <EmptyState
+              icon={BookOpen}
+              title={selectedCategory ? `"${selectedCategory}" 分类下暂无条目` : '知识库暂无条目'}
+              description="上方拖拽文件或点击上传按钮添加知识库内容"
+            />
           )}
 
           {/* 知识库条目列表 */}
@@ -535,7 +522,7 @@ export function KnowledgeBasePage() {
             </div>
           )}
         </div>
-      </main>
+      </div>
 
       {/* 创建分类模态框 */}
       {showCategoryModal && (
@@ -581,6 +568,6 @@ export function KnowledgeBasePage() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   )
 }

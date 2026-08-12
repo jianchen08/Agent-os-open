@@ -4,6 +4,7 @@
  * 展示触发器列表，支持创建、编辑、删除、启用/禁用和手动触发
  */
 
+import { useState, useEffect, useCallback } from 'react'
 import {
   Zap,
   Plus,
@@ -14,9 +15,12 @@ import {
   X,
   BarChart3,
 } from '@/assets/icons'
-import { useState, useEffect, useCallback } from 'react'
-import apiClient from '@/services/api/client'
+import { EmptyState } from '@/components/shared/EmptyState'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
+import { PageShell } from '@/components/shared/PageShell'
 import { API_ENDPOINTS } from '@/constants/api'
+import apiClient from '@/services/api/client'
 
 /** 触发器信息 */
 interface TriggerItem {
@@ -255,19 +259,13 @@ export function TriggersPage() {
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">触发器管理</h1>
-        <span className="text-muted-foreground ml-auto text-xs">
-          共 {triggers.length} 个触发器
-        </span>
-      </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
-        {/* 统计卡片 */}
-        {stats && (
+    <PageShell
+      title="触发器管理"
+      backHref="/"
+      actions={<span className="text-muted-foreground text-xs">共 {triggers.length} 个触发器</span>}
+    >
+      {/* 统计卡片 */}
+      {stats && (
           <div className="grid grid-cols-3 gap-4">
             <div className="rounded-lg border p-4">
               <div className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs">
@@ -319,27 +317,18 @@ export function TriggersPage() {
         )}
 
         {/* 错误状态 */}
-        {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
-        )}
+        {error && <ErrorState message={error} />}
 
         {/* 加载状态 */}
-        {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
-          </div>
-        )}
+        {isLoading && <LoadingState />}
 
         {/* 空状态 */}
         {!isLoading && !error && triggers.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-16">
-            <Zap className="text-muted-foreground/40 mb-3 h-12 w-12" />
-            <p className="text-muted-foreground text-sm">暂无触发器</p>
-            <p className="text-muted-foreground/60 mt-1 text-xs">
-              点击上方"创建触发器"按钮添加第一个触发器
-            </p>
-          </div>
+          <EmptyState
+            icon={Zap}
+            title="暂无触发器"
+            description='点击上方"创建触发器"按钮添加第一个触发器'
+          />
         )}
 
         {/* 触发器列表 */}
@@ -440,7 +429,6 @@ export function TriggersPage() {
             ))}
           </div>
         )}
-      </main>
 
       {/* 创建/编辑模态框 */}
       {showModal && (
@@ -518,6 +506,6 @@ export function TriggersPage() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   )
 }

@@ -2,10 +2,13 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { Play } from '@/assets/icons'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
+import { PageShell } from '@/components/shared/PageShell'
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { getTaskList } from '@/services/api/monitoring'
 import { resumeTask } from '@/services/api/tasks'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import type { TaskInfo } from '@/types/monitoring'
 
 /** 任务状态选项 */
@@ -122,17 +125,13 @@ export function DebugTasksPage() {
   const totalPages = Math.ceil(total / pageSize)
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/debug" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">调试任务</h1>
-        <span className="text-muted-foreground ml-auto text-xs">共 {total} 个任务</span>
-      </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
-        {/* 状态过滤 */}
-        <div className="flex gap-2 flex-wrap">
+    <PageShell
+      title="调试任务"
+      backHref="/debug"
+      actions={<span className="text-muted-foreground text-xs">共 {total} 个任务</span>}
+    >
+      {/* 状态过滤 */}
+      <div className="flex gap-2 flex-wrap">
           {STATUS_OPTIONS.map((opt) => (
             <button
               key={opt.value}
@@ -149,17 +148,10 @@ export function DebugTasksPage() {
         </div>
 
         {/* 加载状态 */}
-        {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
-          </div>
-        )}
+        {isLoading && <LoadingState />}
 
         {/* 错误提示 */}
-        {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
-        )}
+        {error && <ErrorState message={error} />}
 
         {/* 空状态 */}
         {!isLoading && !error && tasks.length === 0 && (
@@ -265,7 +257,6 @@ export function DebugTasksPage() {
             )}
           </>
         )}
-      </main>
-    </div>
+    </PageShell>
   )
 }

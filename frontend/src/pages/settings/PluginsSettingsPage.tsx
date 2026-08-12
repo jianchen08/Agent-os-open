@@ -8,11 +8,12 @@
  * - 类型徽标 + host_type + version + 能力标记（contributes/http_endpoints）
  */
 
-import { RefreshCw, AlertCircle, Plug, Settings, ToggleLeft } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import apiClient from '@/services/api/client'
+import { RefreshCw, AlertCircle, Plug, Settings, ToggleLeft } from '@/assets/icons'
+import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
+import apiClient from '@/services/api/client'
 
 /** 插件状态信息（对齐后端 plugins_status_handler 返回） */
 interface PluginStatus {
@@ -126,7 +127,7 @@ export function PluginsSettingsPage({
   ]
 
   const mainContent = (
-    <div className={`space-y-4 ${embedded ? '' : 'p-6'}`}>
+    <div className="space-y-4">
       {/* 操作栏 */}
       <div className="flex flex-wrap items-center gap-3">
         <button
@@ -265,28 +266,24 @@ export function PluginsSettingsPage({
 
   if (embedded) {
     return (
-      <div className="flex h-full min-h-0 flex-col overflow-hidden">
-        <div className="mb-3 flex shrink-0 items-center gap-2">
-          <h2 className="text-base font-semibold">插件管理</h2>
-          <span className="text-muted-foreground ml-auto font-mono text-xs">
-            {plugins.filter((p) => p.enabled).length}/{plugins.length} 启用
-          </span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">{mainContent}</div>
-      </div>
+      <PageShell title="插件管理" embedded>
+        {mainContent}
+      </PageShell>
     )
   }
 
   return (
-    <div className="text-foreground flex h-screen flex-col overflow-hidden" style={{ background: 'var(--ds-bg-canvas, #04060F)' }}>
-      <header className="flex h-12 shrink-0 items-center border-b px-4" style={{ background: 'var(--ds-bg-panel, #0A1226)', borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}>
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">&larr; 返回设置</a>
-        <h1 className="ml-4 text-base font-semibold">插件管理</h1>
-        <span className="text-muted-foreground ml-auto font-mono text-xs">
+    <PageShell
+      title="插件管理"
+      backHref="/settings"
+      backLabel="返回设置"
+      actions={
+        <span className="text-muted-foreground font-mono text-xs">
           {plugins.filter((p) => p.enabled).length}/{plugins.length} 启用
         </span>
-      </header>
-      <main className="flex-1 overflow-y-auto">{mainContent}</main>
-    </div>
+      }
+    >
+      {mainContent}
+    </PageShell>
   )
 }

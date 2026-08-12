@@ -2,7 +2,10 @@
  * 调试中心入口页面
  *
  * 卡片网格链接到各调试子页面
+ * 统一外壳走 shared/PageShell。
  */
+
+import { PageShell } from '@/components/shared/PageShell'
 
 /** 调试子页面配置 */
 interface DebugCard {
@@ -57,28 +60,20 @@ const DEBUG_CARDS: DebugCard[] = [
  */
 export function DebugPage() {
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">调试中心</h1>
-      </header>
-      <main className="flex-1 overflow-y-auto p-3 sm:p-6">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {DEBUG_CARDS.map((card) => (
-            <a
-              key={card.href}
-              href={card.href}
-              className="bg-card hover:bg-accent/50 block rounded-lg border p-5 transition-colors"
-            >
-              <div className="mb-2 text-2xl">{card.icon}</div>
-              <h3 className="mb-1 text-sm font-semibold">{card.title}</h3>
-              <p className="text-muted-foreground text-xs">{card.description}</p>
-            </a>
-          ))}
-        </div>
-      </main>
-    </div>
+    <PageShell title="调试中心" backHref="/">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {DEBUG_CARDS.map((card) => (
+          <a
+            key={card.href}
+            href={card.href}
+            className="bg-card hover:bg-accent/50 block rounded-lg border p-5 transition-colors"
+          >
+            <div className="mb-2 text-2xl">{card.icon}</div>
+            <h3 className="mb-1 text-sm font-semibold">{card.title}</h3>
+            <p className="text-muted-foreground text-xs">{card.description}</p>
+          </a>
+        ))}
+      </div>
+    </PageShell>
   )
 }

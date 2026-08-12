@@ -1,7 +1,8 @@
 /** 上下文窗口配置页面 管理上下文窗口大小、记忆层级配置、压缩设置、Token 预算分配 */
 
-import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Loader2 } from '@/assets/icons'
+import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import {
@@ -171,7 +172,7 @@ export function ContextWindowSettingsPage() {
 
   if (isLoading) {
     return (
-      <PageShell title="上下文窗口" description="管理上下文窗口大小和策略">
+      <PageShell title="上下文窗口" description="管理上下文窗口大小和策略" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载配置...
@@ -383,29 +384,6 @@ const BUDGET_COLORS: Record<string, string> = {
 }
 
 /* 共享子组件 */
-
-function PageShell({
-  title,
-  description,
-  children,
-}: {
-  title: string
-  description: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">{title}</h1>
-        <span className="text-muted-foreground ml-2 text-xs">{description}</span>
-      </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="上下文窗口配置表单">{children}</main>
-    </div>
-  )
-}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (

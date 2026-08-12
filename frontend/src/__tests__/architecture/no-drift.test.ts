@@ -15,16 +15,16 @@ import { listSourceFiles, readSource, scanSourceForPattern, scanSourceForRegex }
 const PAGES = 'src/pages'
 const SRC = 'src'
 
-// 基线快照（2026-08-12 录入；M1 完成后下调）：迁移推进时下调，禁止上调
+// 基线快照（M3 完成后收紧至 0；新页面必须用 PageShell，不得回退到手写外壳）
 const BASELINE = {
-  shellPattern: 22, // 含 flex h-screen flex-col overflow-hidden 手写外壳的页面文件数（M0:24→M1:22）
+  shellPattern: 0, // 手写外壳页面文件数（M0:24→M1:22→M3:0，已全部收敛到 PageShell）
   getStatusStyle: 0, // getStatusStyle 出现次数（M0:4→M1:0，已全部收敛到 StatusBadge）
-  anchorHref: 21, // <a href="/..."> 原生内部导航出现次数（M0:23→M1:21）
+  anchorHref: 0, // <a href="/..."> 原生内部导航出现次数（M0:23→M1:21→M3:0，全部走 Link）
 }
 
-// 统一层消费下限（M1 起 shared 有真实消费者，转为下限棘轮；ui/card 待 M2 接入仍为精确 0）
+// 统一层消费下限（迁移单调递增）
 const CONSUMPTION_MIN = {
-  shared: 10, // M1: Tools/Agents 各 5 个 shared import
+  shared: 54, // M3: 全部页面已接入 shared 组件
   uiCard: 0, // M2 接入后转为下限
 }
 

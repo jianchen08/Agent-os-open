@@ -1,7 +1,8 @@
 /** API 配置页面 管理外部 API 密钥、端点、超时等配置 */
 
-import { Loader2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Loader2 } from '@/assets/icons'
+import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -103,27 +104,27 @@ export function ApiSettingsPage() {
 
   if (isLoading) {
     return (
-      <SettingsPageShell title="API 配置" description="管理外部 API 密钥和端点">
+      <PageShell title="API 配置" description="管理外部 API 密钥和端点" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载配置...
         </div>
-      </SettingsPageShell>
+      </PageShell>
     )
   }
 
   if (!config) {
     return (
-      <SettingsPageShell title="API 配置" description="管理外部 API 密钥和端点">
+      <PageShell title="API 配置" description="管理外部 API 密钥和端点" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
         <div className="text-muted-foreground py-20 text-center text-sm">
           {loadError || '无法加载配置'}
         </div>
-      </SettingsPageShell>
+      </PageShell>
     )
   }
 
   return (
-    <SettingsPageShell title="API 配置" description="管理外部 API 密钥和端点">
+    <PageShell title="API 配置" description="管理外部 API 密钥和端点" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
       {loadError && (
         <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}
@@ -253,35 +254,11 @@ export function ApiSettingsPage() {
         {saveState === 'saved' && <span className="text-xs text-status-success" role="status">已保存</span>}
         {saveState === 'error' && <span className="text-xs text-status-error" role="alert">保存失败</span>}
       </div>
-    </SettingsPageShell>
+    </PageShell>
   )
 }
 
 /* 共享子组件 */
-
-/** 页面外壳 */
-function SettingsPageShell({
-  title,
-  description,
-  children,
-}: {
-  title: string
-  description: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">{title}</h1>
-        <span className="text-muted-foreground ml-2 text-xs">{description}</span>
-      </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="API配置表单">{children}</main>
-    </div>
-  )
-}
 
 /** 配置段 */
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

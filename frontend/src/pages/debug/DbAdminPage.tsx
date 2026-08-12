@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { PageShell } from '@/components/shared/PageShell'
 import * as authApi from '@/services/api/auth'
 import * as dbAdmin from '@/services/api/dbAdmin'
 import type { ColumnInfo, DbQueryResult, DbTableInfo } from '@/services/api/dbAdmin'
@@ -294,35 +295,27 @@ export function DbAdminPage() {
   // admin 守卫
   if (isAdmin === false) {
     return (
-      <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-        <header className="flex h-12 shrink-0 items-center border-b px-4">
-          <a href="/debug" className="text-muted-foreground hover:text-foreground text-sm">
-            &larr; 返回
-          </a>
-          <h1 className="ml-4 text-base font-semibold">数据库管理</h1>
-        </header>
-        <main className="flex flex-1 items-center justify-center">
+      <PageShell title="数据库管理" backHref="/debug">
+        <div className="flex h-full items-center justify-center">
           <div className="bg-destructive/10 text-destructive rounded-lg px-6 py-4 text-sm">
             无权限访问数据库管理页面（需要 admin 角色）
           </div>
-        </main>
-      </div>
+        </div>
+      </PageShell>
     )
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/debug" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">数据库管理</h1>
-        <span className="text-muted-foreground ml-auto text-xs">
+    <PageShell
+      title="数据库管理"
+      backHref="/debug"
+      actions={
+        <span className="text-muted-foreground text-xs">
           {isLoading ? '加载中...' : `共 ${tables.length} 张表`}
         </span>
-      </header>
-
-      <main className="flex min-h-0 flex-1">
+      }
+    >
+      <div className="flex h-full min-h-0 overflow-hidden">
         {/* 左：表列表 */}
         <aside className="w-56 shrink-0 overflow-y-auto border-r p-2">
           {isLoading && <div className="text-muted-foreground p-3 text-xs">加载表...</div>}
@@ -576,7 +569,7 @@ export function DbAdminPage() {
             )}
           </div>
         </section>
-      </main>
-    </div>
+      </div>
+    </PageShell>
   )
 }

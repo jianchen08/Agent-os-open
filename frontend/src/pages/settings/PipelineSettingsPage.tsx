@@ -18,6 +18,7 @@
 import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { ConfigObject } from '@/components/config/PluginConfigEditor'
+import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/sonner'
 import {
@@ -227,27 +228,25 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
 
   if (embedded) {
     return (
-      <div className="flex h-full flex-col">
-        <div className="mb-4 shrink-0">
-          <h2 className="text-base font-semibold">管道配置</h2>
-          <p className="text-muted-foreground mt-1 text-xs">
-            管道插件链与 Agent 管道配置（config/pipelines/*.yaml）
-          </p>
-        </div>
-        <div className="flex-1 overflow-y-auto">{body}</div>
-      </div>
+      <PageShell
+        title="管道配置"
+        description="管道插件链与 Agent 管道配置（config/pipelines/*.yaml）"
+        embedded
+      >
+        {body}
+      </PageShell>
     )
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          ← 返回设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">管道配置</h1>
-      </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6">{body}</main>
-    </div>
+    <PageShell
+      title="管道配置"
+      description="管道插件链与 Agent 管道配置（config/pipelines/*.yaml）"
+      backHref="/settings"
+      backLabel="返回设置"
+      maxWidth="max-w-3xl"
+    >
+      {body}
+    </PageShell>
   )
 }

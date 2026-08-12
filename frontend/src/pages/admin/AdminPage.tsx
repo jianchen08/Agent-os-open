@@ -4,8 +4,12 @@
  * 用户管理，包含用户列表表格和用户统计
  */
 
-import { Users } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Users } from '@/assets/icons'
+import { EmptyState } from '@/components/shared/EmptyState'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
+import { PageShell } from '@/components/shared/PageShell'
 import * as usersApi from '@/services/api/users'
 import type { User } from '@/services/api/users'
 
@@ -68,57 +72,41 @@ export function AdminPage() {
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">管理员面板</h1>
-      </header>
-      <main className="flex-1 space-y-6 overflow-y-auto p-3 sm:p-6">
-        {/* 统计卡片 */}
-        {stats && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div className="rounded-lg border p-4">
-              <div className="text-muted-foreground mb-1 text-xs">总用户数</div>
-              <div className="text-xl font-semibold">{stats.total_users}</div>
-            </div>
-            <div className="rounded-lg border p-4">
-              <div className="text-muted-foreground mb-1 text-xs">活跃用户</div>
-              <div className="text-xl font-semibold text-status-success">{stats.active_users}</div>
-            </div>
-            <div className="rounded-lg border p-4">
-              <div className="text-muted-foreground mb-1 text-xs">管理员</div>
-              <div className="text-xl font-semibold text-status-info">{stats.admin_count}</div>
-            </div>
+    <PageShell title="管理员面板" backHref="/">
+      {/* 统计卡片 */}
+      {stats && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="rounded-lg border p-4">
+            <div className="text-muted-foreground mb-1 text-xs">总用户数</div>
+            <div className="text-xl font-semibold">{stats.total_users}</div>
           </div>
-        )}
-
-        {/* 加载状态 */}
-        {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
-            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
+          <div className="rounded-lg border p-4">
+            <div className="text-muted-foreground mb-1 text-xs">活跃用户</div>
+            <div className="text-xl font-semibold text-status-success">{stats.active_users}</div>
           </div>
-        )}
+          <div className="rounded-lg border p-4">
+            <div className="text-muted-foreground mb-1 text-xs">管理员</div>
+            <div className="text-xl font-semibold text-status-info">{stats.admin_count}</div>
+          </div>
+        </div>
+      )}
 
-        {/* 错误提示 */}
-        {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
-        )}
+      {/* 加载状态 */}
+      {isLoading && <LoadingState />}
 
-        {/* 用户列表 */}
-        {!isLoading && !error && (
-          <>
-            {users.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16">
-                <Users className="text-muted-foreground/40 mb-3 h-10 w-10" />
-                <p className="text-muted-foreground text-sm">暂无用户</p>
-                <p className="text-muted-foreground/60 mt-1 text-xs">
-                  用户注册后将在这里显示
-                </p>
-              </div>
-            ) : (
+      {/* 错误提示 */}
+      {error && <ErrorState message={error} />}
+
+      {/* 用户列表 */}
+      {!isLoading && !error && (
+        <>
+          {users.length === 0 ? (
+            <EmptyState
+              icon={Users}
+              title="暂无用户"
+              description="用户注册后将在这里显示"
+            />
+          ) : (
               <>
                 {/* 移动端卡片视图 */}
                 <div className="space-y-2 md:hidden">
@@ -237,7 +225,6 @@ export function AdminPage() {
             )}
           </>
         )}
-      </main>
-    </div>
+    </PageShell>
   )
 }

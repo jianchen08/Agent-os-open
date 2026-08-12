@@ -4,8 +4,10 @@
  * 展示系统指标、任务统计和最近任务列表，支持自动刷新
  */
 
-import { Activity } from '@/assets/icons'
 import { useState, useEffect } from 'react'
+import { Activity } from '@/assets/icons'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { PageShell } from '@/components/shared/PageShell'
 import { useMonitoringStore } from '@/stores/monitoringStore'
 
 /**
@@ -82,13 +84,11 @@ export function MonitoringPage() {
   }
 
   return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 返回
-        </a>
-        <h1 className="ml-4 text-base font-semibold">系统监控</h1>
-        <div className="ml-auto flex items-center gap-3">
+    <PageShell
+      title="系统监控"
+      backHref="/"
+      actions={
+        <>
           {lastUpdated && (
             <span className="text-muted-foreground hidden text-xs sm:inline">
               更新于 {new Date(lastUpdated).toLocaleTimeString()}
@@ -111,13 +111,11 @@ export function MonitoringPage() {
           >
             {isLoading || localRefreshing ? '刷新中...' : '刷新'}
           </button>
-        </div>
-      </header>
-      <main className="flex-1 space-y-6 overflow-y-auto p-3 sm:p-6">
-        {/* 错误提示 */}
-        {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
-        )}
+        </>
+      }
+    >
+      {/* 错误提示 */}
+      {error && <ErrorState message={error} />}
 
         {/* 加载状态 - 骨架屏 */}
         {isLoading && !metrics && !statistics && (
@@ -336,7 +334,6 @@ export function MonitoringPage() {
             </>
           )}
         </section>
-      </main>
-    </div>
+    </PageShell>
   )
 }

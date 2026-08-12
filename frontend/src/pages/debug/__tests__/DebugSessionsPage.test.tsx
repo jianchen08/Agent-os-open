@@ -6,8 +6,9 @@
  * 需确认前端组件的数据获取→状态更新→表格渲染链路完整。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import React from 'react'
+import { renderWithProviders } from '@/test/renderWithProviders'
 
 // mock 整个 executionRecords API 模块
 vi.mock('@/services/api/executionRecords', () => ({
@@ -41,7 +42,7 @@ describe('DebugSessionsPage', () => {
       total: 1,
     })
 
-    render(<DebugSessionsPage />)
+    renderWithProviders(<DebugSessionsPage />)
 
     // 等待数据渲染
     await waitFor(() => {
@@ -63,7 +64,7 @@ describe('DebugSessionsPage', () => {
   it('加载失败时显示错误提示', async () => {
     mockGetSessions.mockRejectedValue(new Error('网络错误'))
 
-    render(<DebugSessionsPage />)
+    renderWithProviders(<DebugSessionsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('网络错误')).toBeInTheDocument()
@@ -73,7 +74,7 @@ describe('DebugSessionsPage', () => {
   it('无数据时显示空状态', async () => {
     mockGetSessions.mockResolvedValue({ sessions: [], total: 0 })
 
-    render(<DebugSessionsPage />)
+    renderWithProviders(<DebugSessionsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('暂无数据')).toBeInTheDocument()
@@ -100,7 +101,7 @@ describe('DebugExecutionRecordsPage', () => {
       total: 1,
     })
 
-    render(<DebugExecutionRecordsPage />)
+    renderWithProviders(<DebugExecutionRecordsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('共 1 条')).toBeInTheDocument()

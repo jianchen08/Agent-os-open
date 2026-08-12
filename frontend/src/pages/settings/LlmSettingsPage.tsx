@@ -4,8 +4,9 @@
  * 配置大语言模型参数：默认模型选择、Temperature、Max Tokens、Fallback 模型、模型列表管理
  */
 
-import { Loader2, Plus, RefreshCw, Trash2 } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Loader2, Plus, RefreshCw, Trash2 } from '@/assets/icons'
+import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -226,7 +227,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
 
   if (isLoading) {
     return (
-      <PageShell title="LLM 模型配置" description="配置大语言模型参数" embedded={embedded}>
+      <PageShell title="LLM 模型配置" description="配置大语言模型参数" embedded={embedded} backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载配置...
@@ -767,47 +768,6 @@ function ProviderCard({
 /* ============================================ */
 /* 共享子组件 (与 ApiSettingsPage 相同模式)       */
 /* ============================================ */
-
-function PageShell({
-  title,
-  description,
-  children,
-  embedded = false,
-}: {
-  title: string
-  description: string
-  children: React.ReactNode
-  embedded?: boolean
-}) {
-  if (embedded) {
-    return (
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="mb-3 shrink-0">
-          <h2 className="text-base font-semibold">{title}</h2>
-          <p className="text-muted-foreground mt-1 text-xs">{description}</p>
-        </div>
-        <div className="min-h-0 max-w-3xl flex-1 overflow-y-auto" role="form" aria-label="LLM模型配置表单">
-          {children}
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center border-b px-4">
-        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
-          &larr; 设置
-        </a>
-        <h1 className="ml-4 text-base font-semibold">{title}</h1>
-        <span className="text-muted-foreground ml-2 text-xs">{description}</span>
-      </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="LLM模型配置表单">
-        {children}
-      </main>
-    </div>
-  )
-}
 
 function FieldRow({
   label,
