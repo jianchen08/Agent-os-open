@@ -25,6 +25,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import litellm
 
+from _payload_diag import dump_payload_diag, is_payload_diag_enabled
 from error_classifier import ErrorKind, classify_error
 from stream_watchdog import StreamHardTimeout
 
@@ -41,66 +42,65 @@ logger = logging.getLogger(__name__)
 # 这是唯一能看到"真实发出的字节"的位置。adapter 层看到的 messages 还会被
 # litellm 内部改写（合并 system、移除 cache_control、字段重排等），不等于
 # 真实 payload，故必须在此拦截。两轮对比 prefix_hash 即可定位 cache 断点。
-def _install_payload_diag_hook() -> None:
+#
+# 安全约束（P0-2 修复）：默认**关闭**，仅当 AGENTOS_PAYLOAD_DIAG=1 时才安装钩子；
+# 开启后落盘走 _payload_diag.dump_payload_diag（系统 tempfile + 敏感字段脱敏），
+# 不再把含 api_key/Authorization 的原始 body 写进仓库 logs/payload_diag。
+_DIAG_PAYLOAD_LOGGER = logging.getLogger("llm.adapter._payload_diag")
+
+
+def _log_final_payload(model: str, body: dict) -> None:
+    """记录 prefix-cache 诊断 hash，并把脱敏后的 body 写入 tempfile（受环境开关）。"""
+    import hashlib  # noqa: PLC0415
+
     try:
-        import hashlib
-        import json as _json
-        import os as _os
+        msgs = body.get("messages", [])
+        # 字段顺序须保留原序：prefix cache 按字节匹配，重排字段 = 前缀变 = 缓存失效，
+        # 故绝不能用 sort_keys 重排。此处仅计算 hash，不落盘原始 body。
+        running = ""
+        body_raw = json.dumps(body, ensure_ascii=False)
+        body_hash = hashlib.md5(body_raw.encode("utf-8")).hexdigest()[:12]
+        msgs_raw = json.dumps(msgs, ensure_ascii=False)
+        msgs_hash = hashlib.md5(msgs_raw.encode("utf-8")).hexdigest()[:12]
+        _DIAG_PAYLOAD_LOGGER.info(
+            "POST_TRANSFORM model=%s msg_count=%d body_hash=%s msgs_hash=%s",
+            model,
+            len(msgs),
+            body_hash,
+            msgs_hash,
+        )
+        for pi, pm in enumerate(msgs):
+            mj = json.dumps(pm, ensure_ascii=False)
+            running += mj + "\n"
+            full = hashlib.md5(mj.encode("utf-8")).hexdigest()[:8]
+            prefix = hashlib.md5(running.encode("utf-8")).hexdigest()[:8]
+            _DIAG_PAYLOAD_LOGGER.info(
+                "POST_TRANSFORM_MSG[%d] role=%s name=%s full_hash=%s prefix_hash=%s",
+                pi,
+                pm.get("role", "?"),
+                pm.get("name", ""),
+                full,
+                prefix,
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        # 收窄：诊断日志失败不得影响主调用；但绝不用裸 except 吞编程错误。
+        logger.debug("[payload_diag] hash 日志失败: %s", exc)
 
-        _diag_logger_local = logging.getLogger("llm.adapter._payload_diag")
+    # 落盘走统一入口：默认关闭；开启时写 tempfile + 脱敏 api_key/Authorization。
+    dump_payload_diag(model, body)
 
-        def _log_final_payload(model: str, body: dict) -> None:
-            try:
-                msgs = body.get("messages", [])
-                # 【关键】不 sort、不 default=str 改写，直接 dumps litellm 返回的原始 dict。
-                # body 是 transform_request 的返回值，litellm 会原样作为 HTTP body 发出，
-                # 所以这里的字段顺序/结构就是真正发给厂商的字节序列。
-                # 之前用 sort_keys=True 重新序列化会掩盖字段顺序差异——而 prefix cache
-                # 是按字节匹配的，字段顺序变了 = 前缀变了 = 缓存失效。
-                running = ""
-                # 整个 body 的原始字节 hash（含 model/可选参数，服务端可能看完整请求体）
-                body_raw = _json.dumps(body, ensure_ascii=False)
-                body_hash = hashlib.md5(body_raw.encode("utf-8")).hexdigest()[:12]
-                # messages 部分的原始字节 hash
-                msgs_raw = _json.dumps(msgs, ensure_ascii=False)
-                msgs_hash = hashlib.md5(msgs_raw.encode("utf-8")).hexdigest()[:12]
-                _diag_logger_local.info(
-                    "POST_TRANSFORM model=%s msg_count=%d body_hash=%s msgs_hash=%s",
-                    model,
-                    len(msgs),
-                    body_hash,
-                    msgs_hash,
-                )
-                for pi, pm in enumerate(msgs):
-                    # 每条消息的原始字节（不 sort），累积前缀也是原始字节拼接
-                    mj = _json.dumps(pm, ensure_ascii=False)
-                    running += mj + "\n"
-                    full = hashlib.md5(mj.encode("utf-8")).hexdigest()[:8]
-                    prefix = hashlib.md5(running.encode("utf-8")).hexdigest()[:8]
-                    _diag_logger_local.info(
-                        "POST_TRANSFORM_MSG[%d] role=%s name=%s full_hash=%s prefix_hash=%s | raw=%s",
-                        pi,
-                        pm.get("role", "?"),
-                        pm.get("name", ""),
-                        full,
-                        prefix,
-                        mj[:500],
-                    )
-                # 写入原始 body（litellm 真实发送的结构），供逐字节 diff
-                _diag_dir = _os.path.join(_os.getcwd(), "logs", "payload_diag")
-                _os.makedirs(_diag_dir, exist_ok=True)
-                _diag_file = _os.path.join(
-                    _diag_dir, f"body_{msgs_hash}_{int(_time.time() * 1000)}.json"
-                )
-                with open(_diag_file, "w", encoding="utf-8") as fh:
-                    fh.write(body_raw)
-            except Exception:  # noqa: BLE001
-                pass
 
-        # patch 所有 provider transformation 类的 transform_request / async_transform_request。
-        # 扫描 litellm.llms 下各 provider 的 chat transformation 模块（openai/deepseek/...），
-        # 确保无论走哪个 provider 都能拦截到真实 HTTP body。
-        import importlib as _importlib
+def _install_payload_diag_hook() -> None:
+    """安装 litellm transform_request 拦截钩子（默认关闭）。
+
+    仅当 ``AGENTOS_PAYLOAD_DIAG=1`` 时才 monkey-patch 各 provider 的
+    transformation 类；默认不 patch、不落盘，彻底消除敏感信息泄露面。
+    """
+    if not is_payload_diag_enabled():
+        logger.debug("[payload_diag] 未启用（设置 AGENTOS_PAYLOAD_DIAG=1 开启）")
+        return
+    try:
+        import importlib as _importlib  # noqa: PLC0415
 
         _patched_classes: set[type] = set()
 
@@ -144,7 +144,8 @@ def _install_payload_diag_hook() -> None:
         for _mod_path in _transformation_modules:
             try:
                 _mod = _importlib.import_module(_mod_path)
-            except Exception:  # noqa: BLE001
+            except ImportError:
+                # 该 provider transformation 模块不存在（litellm 版本/精简安装），跳过。
                 continue
             for _cls in vars(_mod).values():
                 if isinstance(_cls, type):
@@ -154,7 +155,8 @@ def _install_payload_diag_hook() -> None:
             "[payload_diag] 已安装 litellm transform_request 拦截钩子，patched=%d 类",
             len(_patched_classes),
         )
-    except Exception as e:  # noqa: BLE001
+    except ImportError as e:
+        # 收窄：仅捕获 import 期问题；patch 运行期错误不应在此吞掉。
         logger.warning("[payload_diag] 拦截钩子安装失败: %s", e)
 
 
@@ -619,7 +621,7 @@ class _BaseLiteLLMAdapter:
 
         # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
         # 透传 **kwargs（即 default_params），adapter 按需读取自身配置
-        from llm.provider_adapters import get_provider_adapter  # noqa: PLC0415
+        from provider_adapters import get_provider_adapter  # noqa: PLC0415
 
         adapter = get_provider_adapter(model)
         messages = adapter.adapt_messages_before_send(messages, **kwargs)

@@ -25,8 +25,7 @@ from task_types import TaskModel, TaskStatus
 logger = logging.getLogger(__name__)
 
 
-# 注册 Enum 的 YAML representer，确保 safe_dump 能正确序列化所有枚举类型
-# 修复 metadata 等嵌套结构中残留枚举值导致 RepresenterError 的问题
+# 注册 Enum 的 YAML representer，确保 safe_dump 能正确序列化所有枚举类型（含 metadata 等嵌套结构中的枚举值）
 def _enum_representer(dumper: yaml.Dumper, data: Enum) -> Any:
     return dumper.represent_data(data.value)
 

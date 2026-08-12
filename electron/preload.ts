@@ -55,6 +55,42 @@ export interface ElectronAPI {
    * @returns 取消监听的函数
    */
   on(channel: string, callback: (...args: unknown[]) => void): () => void;
+
+  /**
+   * 窗口管理子 API（P2/P3 多窗口基础设施）。
+   *
+   * 所有方法均通过 ipcRenderer.invoke 异步调用主进程的 window:* 通道，
+   * 不经过 `on` 方法的白名单（白名单只作用于 ipcRenderer.on 监听通道）。
+   */
+  window: {
+    /** 创建并返回子窗口；id 重复时聚焦已有窗口 */
+    open(opts: ChildWindowOpenOptions): Promise<{ id: string; success: boolean }>;
+    /** 关闭指定窗口并从注册表移除 */
+    close(id: string): Promise<void>;
+    /** 聚焦指定窗口 */
+    focus(id: string): Promise<void>;
+    /** 移动指定窗口 */
+    move(id: string, pos: { x: number; y: number }): Promise<void>;
+    /** 调整指定窗口大小 */
+    resize(id: string, size: { width: number; height: number }): Promise<void>;
+  };
+}
+
+/** window:open 的参数（与 main.ts 的 ChildWindowOptions 对齐） */
+export interface ChildWindowOpenOptions {
+  /** 窗口标识（前端传入，用于后续 close/focus） */
+  id: string;
+  /** 加载的 URL（如 'http://localhost:5188/#/p/my-page' 深链） */
+  url: string;
+  title?: string;
+  width?: number;
+  height?: number;
+  x?: number;
+  y?: number;
+  frame?: boolean;
+  transparent?: boolean;
+  alwaysOnTop?: boolean;
+  skipTaskbar?: boolean;
 }
 
 // 通过 contextBridge 安全暴露 API
@@ -94,6 +130,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
    */
   on: (channel: string, callback: (...args: unknown[]) => void): (() => void) => {
     // 白名单通道，防止渲染进程监听任意 IPC 事件
+    // 注意：window:open 等使用 ipcRenderer.invoke（见下方 window 子 API），
+    // 不经此白名单；此白名单只约束 ipcRenderer.on 监听通道。
     const allowedChannels = new Set([
       "window-info",
       "app-version",
@@ -113,5 +151,33 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => {
       ipcRenderer.removeListener(channel, handler);
     };
+  },
+
+  /**
+   * 窗口管理子 API（P2/P3 多窗口基础设施）。
+   *
+   * 所有方法封装 ipcRenderer.invoke('window:*')，主进程由 main.ts 的
+   * ipcMain.handle 注册。invoke 绕过 on 的白名单（白名单只约束 on 监听），
+   * 安全性由主进程的参数校验保证。
+   */
+  window: {
+    open: (opts: ChildWindowOpenOptions) => {
+      return ipcRenderer.invoke("window:open", opts) as Promise<{
+        id: string;
+        success: boolean;
+      }>;
+    },
+    close: (id: string) => {
+      return ipcRenderer.invoke("window:close", id) as Promise<void>;
+    },
+    focus: (id: string) => {
+      return ipcRenderer.invoke("window:focus", id) as Promise<void>;
+    },
+    move: (id: string, pos: { x: number; y: number }) => {
+      return ipcRenderer.invoke("window:move", id, pos) as Promise<void>;
+    },
+    resize: (id: string, size: { width: number; height: number }) => {
+      return ipcRenderer.invoke("window:resize", id, size) as Promise<void>;
+    },
   },
 } satisfies ElectronAPI);

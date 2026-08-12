@@ -16,9 +16,8 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from artifacts_sidecar.annotation_service import get_annotation_service
 from artifacts_sidecar.artifact_service import get_artifact_service
 from deps import require_auth
-from multimodal import AttachmentInfo, DiskFileStorage, MediaType
 from multimodal.storage import DiskFileStorage  # noqa: F811
-from multimodal.types import AttachmentInfo, MediaType  # noqa: F811
+from multimodal.mm_types import AttachmentInfo, MediaType  # noqa: F811
 
 logger = logging.getLogger(__name__)
 

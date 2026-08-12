@@ -67,6 +67,8 @@ export const API_ENDPOINTS = {
     SEMANTIC: '/ext/channel_api/memory/semantic',
     /** 记忆整合 */
     CONSOLIDATE: '/ext/channel_api/memory/consolidate',
+    /** 导入文档到记忆 */
+    IMPORT: '/ext/channel_api/memory/import',
     /** 获取记忆统计 */
     STATS: '/ext/channel_api/memory/stats',
   },
@@ -86,6 +88,10 @@ export const API_ENDPOINTS = {
     HEALTH: '/api/v1/agents/health',
     /** 获取默认Agent */
     DEFAULT: '/api/v1/agents/default',
+    /** Agent 配置字段 Schema（表单驱动，返回 { fields: UIInputFormField[] }） */
+    SCHEMA: '/api/v1/agents/schema',
+    /** 读写 Agent 配置 yaml 原文（PUT 写回前后端自动备份） */
+    CONFIG: (id: string) => `/api/v1/agents/${id}/config`,
   },
   /** 配置管理相关 - 4c 迁移：已切 /ext/channel_api/config/**（经内核 dispatcher → channel_api http.handle） */
   CONFIG: {

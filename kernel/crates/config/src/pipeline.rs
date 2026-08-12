@@ -162,6 +162,7 @@ fn to_plugin_id(name: &str) -> String {
 /// 显式映射对齐 0.2 引擎既有事实（autonomous.yaml / server.rs::DEFAULT_CORE_PLUGIN）：
 /// - `llm_call` → `pipeline_llm_core`
 /// - `tool_execute` → `pipeline_tool_core`
+///
 /// 其他 core_type 按 `pipeline_{type}_core` 推断（无既有事实时兜底）。
 fn core_plugin_id(core_type: &str) -> String {
     match core_type {
@@ -389,7 +390,7 @@ pub fn load_agent_config(config_root: &Path, agent_id: &str) -> Result<AgentConf
 }
 
 /// 在 agents 目录（含分类子目录）递归查找 `<agent_id>.yaml`。
-fn find_agent_yaml(dir: &Path, agent_id: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn find_agent_yaml(dir: &Path, agent_id: &str) -> Option<std::path::PathBuf> {
     let target = format!("{agent_id}.yaml");
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {

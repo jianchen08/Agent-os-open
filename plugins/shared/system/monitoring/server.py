@@ -425,11 +425,473 @@ async def http_handle(
         if path == "/ext/monitoring/cache-stats" and method == "GET":
             return _ok(_json_response({"cache_stats": _collect_cache_stats()}))
 
+        # ── T4：Payload 诊断快照（列目录 + 读单文件）──
+        # 数据源：logs/payload_diag/ 下 adapter.py 写的 {ts}_{model}_{hash}_{n}msg.json
+        if path == "/ext/monitoring/payload-diag" and method == "GET":
+            return _ok(_json_response({"items": _list_payload_diag(), "total": len(_list_payload_diag())}))
+
+        if path == "/ext/monitoring/payload-diag/file" and method == "GET":
+            q = query or {}
+            name = q.get("name", "")
+            return _ok(_json_response(_read_payload_diag(name)))
+
+        # ── T5：工具调用记录（json_each 解包 traces.patch_data.tool_results）──
+        if path == "/ext/monitoring/tool-calls" and method == "GET":
+            q = query or {}
+            return _ok(_json_response(_query_tool_calls(q)))
+
+        # ── T4/T5 webview 页面 HTML ──
+        if path == "/ext/monitoring/page/payload-diag" and method == "GET":
+            return _ok(_html_response(_PAYLOAD_DIAG_HTML))
+
+        if path == "/ext/monitoring/page/tool-calls" and method == "GET":
+            return _ok(_html_response(_TOOL_CALLS_HTML))
+
         logger.warning("http.handle: no route for path=%s method=%s", path, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
     except Exception as exc:
         logger.exception("monitoring http.handle failed: %s", exc)
         return _error(f"monitoring service error: {exc}", 500)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# T4/T5：可观测性 webview 端点（Payload 诊断 + 工具调用记录）
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _html_response(html: str) -> dict[str, Any]:
+    """包 HTML 成 HttpHandleResponse（body base64，Content-Type text/html）。"""
+    return {
+        "status": 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "body": base64.b64encode(html.encode("utf-8")).decode("ascii"),
+        "body_encoding": "base64",
+    }
+
+
+# ── T4：Payload 诊断 ──────────────────────────────────────────────────────
+
+
+def _payload_diag_dir() -> str:
+    """返回 payload_diag 目录路径（与 adapter.py 的 _log_final_payload 一致）。"""
+    return os.path.join(
+        os.environ.get("AGENTOS_LOG_DIR", os.getcwd()),
+        "logs", "payload_diag",
+    )
+
+
+def _list_payload_diag() -> list[dict[str, Any]]:
+    """列 logs/payload_diag/ 目录，解析文件名返回元数据列表。
+
+    文件名格式：{ts}_{model}_{msgs_hash}_{msg_count}msg.json
+    返回按时间倒序的元数据数组，供前端列表展示。
+    """
+    import glob
+
+    diag_dir = _payload_diag_dir()
+    items: list[dict[str, Any]] = []
+    for fpath in glob.glob(os.path.join(diag_dir, "*.json")):
+        fname = os.path.basename(fpath)
+        meta = _parse_payload_diag_filename(fname)
+        if meta is None:
+            continue
+        try:
+            meta["size"] = os.path.getsize(fpath)
+            meta["name"] = fname
+            items.append(meta)
+        except OSError:
+            continue
+    items.sort(key=lambda x: x.get("ts", 0), reverse=True)
+    return items
+
+
+def _parse_payload_diag_filename(fname: str) -> dict[str, Any] | None:
+    """解析文件名 {ts}__{model}__{msgs_hash}__{msg_count}msg.json。
+
+    用双下划线 __ 作字段分隔，model 内部单下划线保留（如 deepseek-v4-flash）。
+    """
+    if not fname.endswith(".json"):
+        return None
+    stem = fname[:-5]  # 去 .json
+    if not stem.endswith("msg"):
+        return None
+    stem = stem[:-3]  # 去 msg
+    parts = stem.split("__")
+    if len(parts) < 4:
+        return None
+    try:
+        ts = int(parts[0])
+        msg_count = int(parts[-1])
+        msgs_hash = parts[-2]
+        # model 是 parts[1] 到 parts[-2] 之间所有段的拼接（model 理论上不含 __，
+        # 但防御性处理：万一 model 含特殊字符被 sanitize 转成 _ 后又碰巧相邻，join 回去）
+        model = "__".join(parts[1:-2]) if len(parts) > 4 else parts[1]
+    except ValueError:
+        return None
+    return {
+        "ts": ts,
+        "model": model,
+        "msgs_hash": msgs_hash,
+        "msg_count": msg_count,
+    }
+
+
+def _read_payload_diag(name: str) -> dict[str, Any]:
+    """读单个 payload snapshot 文件，返回完整 body JSON。
+
+    防路径穿越：只允许纯文件名（不含路径分隔符或 ..）。
+
+    Args:
+        name: 文件名（如 1723380000000_deepseek-v4-flash_a1b2c3d4_12msg.json）
+
+    Returns:
+        含 content 字段（原始 body JSON 字符串）的字典；文件不存在返回 error。
+    """
+    # 严格防路径穿越：不允许任何路径分隔符或 ..
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return {"error": "invalid filename"}
+    if not name.endswith(".json"):
+        return {"error": "not a json file"}
+    fpath = os.path.join(_payload_diag_dir(), name)
+    if not os.path.isfile(fpath):
+        return {"error": "file not found", "name": name}
+    try:
+        with open(fpath, "r", encoding="utf-8") as fh:
+            return {"name": name, "content": fh.read()}
+    except OSError as exc:
+        return {"error": str(exc)}
+
+
+# ── T5：工具调用记录（json_each 解包 traces.patch_data.tool_results）─────
+
+
+def _kernel_db_path() -> str:
+    """返回 kernel SQLite 路径（与 agentos-kernel.rs 的 AGENTOS_DB_PATH 一致）。"""
+    return os.environ.get("AGENTOS_DB_PATH", os.path.join(os.getcwd(), "agentos_kernel.db"))
+
+
+def _query_tool_calls(q: dict[str, str]) -> dict[str, Any]:
+    """从 traces 表查询工具调用记录。
+
+    用 json_each 解包 patch_data.tool_results 数组，支持按 tool_name/status/
+    min_duration 筛选。不改 schema，纯查询层。
+
+    Args:
+        q: 查询参数（tool_name / status / min_duration / limit）
+
+    Returns:
+        含 items + total 的字典
+    """
+    import sqlite3
+
+    db_path = _kernel_db_path()
+    if not os.path.isfile(db_path):
+        return {"items": [], "total": 0, "error": "kernel db not found"}
+
+    limit = min(int(q.get("limit", 50)), 200)
+    tool_name_filter = q.get("tool_name", "").strip()
+    status_filter = q.get("status", "").strip()  # success / error
+    min_duration = q.get("min_duration", "").strip()
+
+    sql = """
+        SELECT t.trace_id, t.run_id, t.created_at,
+               json_extract(item.value, '$.tool_name')   AS tool_name,
+               json_extract(item.value, '$.success')     AS success,
+               json_extract(item.value, '$.error')       AS error,
+               json_extract(item.value, '$.duration_ms') AS duration_ms
+        FROM traces t, json_each(t.patch_data, '$.tool_results') AS item
+        WHERE t.plugin_id = 'pipeline_tool_core'
+    """
+    params: list[Any] = []
+    if tool_name_filter:
+        sql += " AND json_extract(item.value, '$.tool_name') = ?"
+        params.append(tool_name_filter)
+    if status_filter == "success":
+        sql += " AND json_extract(item.value, '$.success') = 1"
+    elif status_filter == "error":
+        sql += " AND json_extract(item.value, '$.success') = 0"
+    if min_duration:
+        try:
+            sql += " AND CAST(json_extract(item.value, '$.duration_ms') AS REAL) >= ?"
+            params.append(float(min_duration))
+        except ValueError:
+            pass
+    sql += " ORDER BY t.created_at DESC LIMIT ?"
+    params.append(limit)
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+    except sqlite3.Error as exc:
+        return {"items": [], "total": 0, "error": str(exc)}
+
+    items = [dict(r) for r in rows]
+    return {"items": items, "total": len(items)}
+
+
+# ── T4 webview HTML：Payload 诊断查看器 ──────────────────────────────────
+
+_PAYLOAD_DIAG_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Payload 诊断</title>
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; margin: 0; padding: 12px; color: #1a1a1a; background: #f8fafc; font-size: 13px; }
+  h2 { margin: 0 0 12px; font-size: 15px; }
+  .layout { display: flex; gap: 12px; height: calc(100vh - 80px); }
+  .list { width: 360px; overflow-y: auto; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
+  .item { padding: 8px 10px; border-bottom: 1px solid #e2e8f0; cursor: pointer; }
+  .item:hover { background: #f1f5f9; }
+  .item.active { background: #dbeafe; }
+  .item .ts { color: #64748b; font-size: 11px; }
+  .item .model { color: #0369a1; font-weight: 600; }
+  .item .meta { color: #64748b; font-size: 11px; }
+  .detail { flex: 1; overflow: auto; border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px; background: #fff; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 0; font-family: 'Consolas', monospace; font-size: 12px; }
+  .toolbar { margin-bottom: 8px; display: flex; gap: 8px; align-items: center; }
+  button { padding: 4px 10px; background: #e2e8f0; color: #1e293b; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #cbd5e1; }
+  input { padding: 4px 8px; background: #fff; color: #1e293b; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
+  .empty { color: #94a3b8; padding: 20px; text-align: center; }
+  .msg-role { color: #7c3aed; font-weight: 600; }
+  #status { color: #94a3b8; font-size: 11px; }
+</style></head><body>
+<h2>LLM Payload 诊断（最近 200 次调用快照）</h2>
+<div class="toolbar">
+  <input id="filter" placeholder="按 model 过滤..." oninput="renderList()">
+  <button onclick="refresh()">刷新</button>
+  <span id="count" style="color:#64748b"></span>
+  <span id="status"></span>
+</div>
+<div class="layout">
+  <div class="list" id="list"><div class="empty">加载中...</div></div>
+  <div class="detail" id="detail"><div class="empty">选择左侧条目查看完整 payload</div></div>
+</div>
+<script>
+// agentosFetch：通过 window.agentos.postMessage（宿主代 fetch 带 token）+ Promise 化
+// webview iframe 是 sandbox（无 same-origin），直接 fetch 会失败（无 auth）。
+function agentosFetch(path, params) {
+  return new Promise(function(resolve, reject) {
+    if (!window.agentos) { reject(new Error('window.agentos 不可用')); return; }
+    var id = window.agentos.postMessage(path, params);
+    function handler(e) {
+      var d = e.data;
+      if (!d || !d.__agentos_webview || d.id !== id) return;
+      window.removeEventListener('message', handler);
+      if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+      else resolve(d.params);
+    }
+    window.addEventListener('message', handler);
+  });
+}
+// 从响应里提取业务数据（宿主返回的 axios res.data，内层 data.body 是 base64 JSON）
+function unwrap(res) {
+  // res 可能是 {data: {body: base64, ...}} 或直接 {body: base64}
+  var data = (res && res.data) ? res.data : res;
+  if (data && data.body) {
+    try { return JSON.parse(atob(data.body)); } catch(e) { return data; }
+  }
+  return data;
+}
+
+let allItems = [];
+let activeName = null;
+function setStatus(s) { document.getElementById('status').textContent = s || ''; }
+
+async function load() {
+  setStatus('加载中...');
+  try {
+    var res = await agentosFetch('/ext/monitoring/payload-diag');
+    var d = unwrap(res);
+    allItems = d.items || [];
+    document.getElementById('count').textContent = '(' + allItems.length + ')';
+    setStatus('');
+    renderList();
+  } catch(e) {
+    document.getElementById('list').innerHTML = '<div class="empty">加载失败: '+escapeHtml(String(e))+'</div>';
+    setStatus('加载失败');
+  }
+}
+function fmt(ts) {
+  var d = new Date(ts);
+  return d.toLocaleString('zh-CN', {hour12: false});
+}
+function renderList() {
+  var f = document.getElementById('filter').value.toLowerCase();
+  var items = allItems.filter(function(i) { return !f || (i.model||'').toLowerCase().indexOf(f) >= 0; });
+  var html = items.map(function(i) {
+    return '<div class="item'+(i.name===activeName?' active':'')+'" data-name="'+i.name+'">'+
+      '<div class="ts">'+fmt(i.ts)+'</div>'+
+      '<div class="model">'+escapeHtml(i.model||'?')+'</div>'+
+      '<div class="meta">'+i.msg_count+'msg · '+(i.msgs_hash||'').slice(0,8)+' · '+(i.size?Math.round(i.size/1024)+'KB':'-')+'</div>'+
+      '</div>';
+  }).join('');
+  var listEl = document.getElementById('list');
+  listEl.innerHTML = html || '<div class="empty">无数据</div>';
+  listEl.querySelectorAll('.item').forEach(function(el) {
+    el.addEventListener('click', function() { show(el.getAttribute('data-name')); });
+  });
+}
+async function show(name) {
+  activeName = name;
+  renderList();
+  setStatus('读取中...');
+  try {
+    // GET 请求：params 必须 undefined（宿主约定 params!==undefined → POST）。
+    // 查询参数拼进 method 路径。
+    var res = await agentosFetch('/ext/monitoring/payload-diag/file?name=' + encodeURIComponent(name));
+    var d = unwrap(res);
+    if (d.error) { document.getElementById('detail').innerHTML = '<div class="empty">'+escapeHtml(d.error)+'</div>'; setStatus(''); return; }
+    var body = JSON.parse(d.content);
+    var html = '';
+    body.messages.forEach(function(m, i) {
+      var content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content, null, 2);
+      var preview = content.length > 2000 ? content.slice(0,2000)+'\\n... [截断]' : content;
+      html += '<div style="margin-bottom:8px"><span class="msg-role">['+i+'] '+(m.role||'?')+(m.name?' / '+escapeHtml(m.name):'')+'</span><pre>'+escapeHtml(preview)+'</pre></div>';
+    });
+    document.getElementById('detail').innerHTML = '<div class="toolbar"><b>model:</b> '+escapeHtml(body.model||'?')+' &nbsp; <b>messages:</b> '+body.messages.length+' 条</div>'+html;
+    setStatus('');
+  } catch(e) {
+    document.getElementById('detail').innerHTML = '<div class="empty">读取失败: '+escapeHtml(String(e))+'</div>';
+    setStatus('读取失败');
+  }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function refresh() { load(); }
+load();
+</script></body></html>"""
+
+
+# ── T5 webview HTML：工具调用记录查看器 ──────────────────────────────────
+
+_TOOL_CALLS_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>工具调用记录</title>
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; margin: 0; padding: 12px; color: #1a1a1a; background: #f8fafc; font-size: 13px; }
+  h2 { margin: 0 0 12px; font-size: 15px; }
+  .toolbar { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input, select { padding: 4px 8px; background: #fff; color: #1e293b; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
+  button { padding: 4px 10px; background: #e2e8f0; color: #1e293b; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #cbd5e1; }
+  table { width: 100%; border-collapse: collapse; background: #fff; }
+  th { text-align: left; padding: 8px; background: #f1f5f9; color: #475569; font-size: 11px; text-transform: uppercase; position: sticky; top: 0; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; }
+  tr:hover { background: #f8fafc; }
+  .ok { color: #16a34a; }
+  .fail { color: #dc2626; }
+  .slow { color: #d97706; font-weight: 600; }
+  .empty { color: #94a3b8; text-align: center; padding: 40px; }
+  #status { color: #94a3b8; font-size: 11px; }
+</style></head><body>
+<h2>工具调用记录（从 traces 表查询）</h2>
+<div class="toolbar">
+  <input id="f_tool" placeholder="工具名(精确)" style="width:140px">
+  <select id="f_status">
+    <option value="">全部状态</option>
+    <option value="success">成功</option>
+    <option value="error">失败</option>
+  </select>
+  <input id="f_dur" placeholder="最小耗时(ms)" style="width:120px" type="number">
+  <button onclick="query()">查询</button>
+  <span id="count" style="color:#64748b"></span>
+  <span id="status"></span>
+</div>
+<div style="overflow:auto; max-height:calc(100vh - 120px)">
+  <table>
+    <thead><tr><th>时间</th><th>工具</th><th>状态</th><th>耗时</th><th>run_id</th><th>错误</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty">点击查询加载数据</div>
+</div>
+<script>
+// agentosFetch：通过 window.agentos.postMessage（宿主代 fetch 带 token）
+function agentosFetch(path, params) {
+  return new Promise(function(resolve, reject) {
+    if (!window.agentos) { reject(new Error('window.agentos 不可用')); return; }
+    var id = window.agentos.postMessage(path, params);
+    function handler(e) {
+      var d = e.data;
+      if (!d || !d.__agentos_webview || d.id !== id) return;
+      window.removeEventListener('message', handler);
+      if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+      else resolve(d.params);
+    }
+    window.addEventListener('message', handler);
+  });
+}
+function unwrap(res) {
+  var data = (res && res.data) ? res.data : res;
+  if (data && data.body) {
+    try { return JSON.parse(atob(data.body)); } catch(e) { return data; }
+  }
+  return data;
+}
+function setStatus(s) { document.getElementById('status').textContent = s || ''; }
+
+async function query() {
+  // GET 请求通过 postMessage 时，params 传查询参数对象（宿主 GET 模式）
+  // 但宿主逻辑：params !== undefined → POST。GET 端点要用 query string。
+  // webview 协议：method 以 / 开头视为 REST。GET 无 params，POST 有 params。
+  // 这里我们用 POST 风格：method = 完整路径（含 query string），params = undefined → GET
+  var t = document.getElementById('f_tool').value.trim();
+  var s = document.getElementById('f_status').value;
+  var d = document.getElementById('f_dur').value.trim();
+  var qs = [];
+  if (t) qs.push('tool_name=' + encodeURIComponent(t));
+  if (s) qs.push('status=' + s);
+  if (d) qs.push('min_duration=' + d);
+  var path = '/ext/monitoring/tool-calls' + (qs.length ? '?' + qs.join('&') : '');
+  setStatus('查询中...');
+  try {
+    var res = await agentosFetch(path);
+    var data = unwrap(res);
+    var items = data.items || [];
+    document.getElementById('count').textContent = '(' + items.length + ')';
+    if (data.error) {
+      document.getElementById('empty').textContent = '错误: ' + data.error;
+      document.getElementById('empty').style.display = 'block';
+      document.getElementById('rows').innerHTML = '';
+      setStatus('查询错误');
+      return;
+    }
+    if (!items.length) {
+      document.getElementById('empty').style.display = 'block';
+      document.getElementById('rows').innerHTML = '';
+      setStatus('无数据');
+      return;
+    }
+    document.getElementById('empty').style.display = 'none';
+    document.getElementById('rows').innerHTML = items.map(function(i) {
+      var ok = i.success === 1 || i.success === true;
+      var dur = parseFloat(i.duration_ms || 0);
+      var durCls = dur > 1000 ? 'slow' : '';
+      return '<tr><td>' + fmt(i.created_at) + '</td><td>' + escapeHtml(i.tool_name || '?') + '</td>' +
+        '<td class="' + (ok ? 'ok' : 'fail') + '">' + (ok ? '成功' : '失败') + '</td>' +
+        '<td class="' + durCls + '">' + dur.toFixed(0) + 'ms</td>' +
+        '<td style="color:#94a3b8;font-size:11px">' + escapeHtml((i.run_id || '').slice(0,8)) + '</td>' +
+        '<td style="color:#dc2626;font-size:11px">' + escapeHtml((i.error || '').slice(0,80)) + '</td></tr>';
+    }).join('');
+    setStatus('');
+  } catch(e) {
+    document.getElementById('empty').textContent = '查询失败: ' + escapeHtml(String(e));
+    document.getElementById('empty').style.display = 'block';
+    setStatus('查询失败');
+  }
+}
+function fmt(s) {
+  if (!s) return '';
+  try { return new Date(s).toLocaleString('zh-CN', {hour12: false}); } catch(e) { return s; }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+</script></body></html>"""
 
 
 if __name__ == "__main__":

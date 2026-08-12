@@ -24,11 +24,13 @@
 //! [来源: docs/tasks/task_04_config_system.md]
 //! [来源: docs/working/frontend_01_alignment_plan.md §P7]
 
+pub mod agent_loader;
 pub mod config_center;
 pub mod error;
 pub mod loader;
 pub mod pipeline;
 
+pub use agent_loader::load_agent_into_state;
 pub use config_center::{AuditEntry, ConfigCenter, ConfigChangeEvent, ConfigEventType};
 pub use error::ConfigError;
 pub use loader::{CompositePluginYaml, ConfigLoader, StepConfig};

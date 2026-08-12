@@ -88,7 +88,7 @@ def _deserialize(raw: dict[str, Any]) -> Any:
     """
     required_fields = {"file_id", "filename", "mime_type", "size", "media_type"}
     if required_fields.issubset(raw.keys()):
-        from multimodal.types import AttachmentInfo  # noqa: PLC0415
+        from mm_types import AttachmentInfo  # noqa: PLC0415
 
         return AttachmentInfo.model_validate(raw)
     return raw

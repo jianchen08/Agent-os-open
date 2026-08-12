@@ -230,7 +230,7 @@ pub struct PluginInvokerImpl {
     /// 插件加载器（用于查找 manifest）
     loader: Arc<dyn PluginLoader>,
     /// 已连接的 MCP 客户端 {plugin_id: McpClient}
-    mcp_clients: RwLock<HashMap<String, Arc<tokio::sync::Mutex<McpClient>>>>,
+    mcp_clients: RwLock<HashMap<String, Arc<tokio::sync::RwLock<McpClient>>>>,
     /// per-plugin spawn 互斥锁（single-flight，防并发请求竞态 spawn 多个 sidecar）。
     /// 同一 plugin_id 的 spawn 串行化：首个请求持锁 spawn 并写缓存，后续请求拿锁后
     /// 二次查缓存命中直接复用。修复「并发触发 → 竞态创建多个孤儿 sidecar」泄漏。
@@ -262,6 +262,7 @@ pub struct PluginInvokerImpl {
     /// sidecar 的 import 有两种历史写法并存（见 `resolve_pythonpath_src` 注释）：
     /// - `from src.core.logging import ...`（带 src. 前缀，需 project_root 在 sys.path）
     /// - `from config.settings import ...`（不带前缀，需 project_root/src 在 sys.path）
+    ///
     /// 因此实际注入的 PYTHONPATH 同时含 project_root 和 project_root/src。
     ///
     /// 历史上 PYTHONPATH 注入依赖 `AGENTOS_PLUGINS_DIR` 环境变量推算，但启动方式
@@ -334,6 +335,7 @@ impl PluginInvokerImpl {
     ///   sys.path，Python 才在 `<project_root>/src/core/...` 解析。
     /// - `from config.settings import ...`（不带前缀）→ 需 **project_root/src** 在
     ///   sys.path，Python 才在 `<project_root>/src/config/...` 解析。
+    ///
     /// 故 PYTHONPATH 同时含两者。只放其一会导致另一种写法的插件 sidecar 启动即崩
     /// （实测：prompt_build 用 `from config.settings`、SDK 用 `from src.core.logging`）。
     ///
@@ -476,16 +478,7 @@ impl PluginInvokerImpl {
         })
     }
 
-    /// 解析 native 插件的 C-ABI 入口符号（默认 plugin_execute 时返回 None 走 loader 默认）。
-    fn native_entry_symbol<'a>(manifest: &'a PluginManifest) -> Option<&'a [u8]> {
-        manifest
-            .invoke_entry
-            .as_deref()
-            .filter(|s| *s != "plugin_execute")
-            .map(str::as_bytes)
-    }
-
-    /// 加载 cdylib（resolve artifact + abi_stable load，三处 native 路径共用）。
+    /// 加载 cdylib（resolve artifact + 直接 trait object load，三处 native 路径共用）。
     fn load_native(
         &self,
         loader: &NativePluginLoader,
@@ -724,7 +717,7 @@ impl PluginInvokerImpl {
     async fn get_or_create_mcp_client(
         &self,
         manifest: &PluginManifest,
-    ) -> Result<Arc<tokio::sync::Mutex<McpClient>>, PluginError> {
+    ) -> Result<Arc<tokio::sync::RwLock<McpClient>>, PluginError> {
         // Fast path：无锁查缓存，命中且存活直接返回（热路径，避开 spawn 锁开销）。
         {
             let cached = {
@@ -732,7 +725,7 @@ impl PluginInvokerImpl {
                 clients.get(&manifest.id).cloned()
             };
             if let Some(client) = cached {
-                let mut client_guard = client.lock().await;
+                let client_guard = client.read().await;
                 if client_guard.is_alive().await {
                     // ── Pull 热加载：TTL 门 + 指纹比对 ──
                     // 缓存进程存活时，检查插件代码/配置是否变更。TTL 内跳过 stat（零开销），
@@ -745,8 +738,8 @@ impl PluginInvokerImpl {
                         );
                         // 复用下方「进程已崩溃」的 kill+remove 逻辑：kill 旧进程后
                         // 自然进入 slow path respawn 新进程（加载最新磁盘代码）。
-                        let _ = client_guard.kill().await;
                         drop(client_guard);
+                        let _ = client.write().await.kill().await;
                         self.mcp_clients.write().remove(&manifest.id);
                         // 不调 notify_crash（这不是崩溃，是主动热更新）
                     } else {
@@ -756,8 +749,8 @@ impl PluginInvokerImpl {
                 } else {
                     // 进程已崩溃——显式 kill 旧客户端再创建新的
                     error!("Plugin process crashed: {}", manifest.id);
-                    let _ = client_guard.kill().await;
                     drop(client_guard);
+                    let _ = client.write().await.kill().await;
                     self.notify_crash(&manifest.id);
                     self.mcp_clients.write().remove(&manifest.id);
                 }
@@ -783,14 +776,14 @@ impl PluginInvokerImpl {
                 clients.get(&manifest.id).cloned()
             };
             if let Some(client) = cached {
-                let mut client_guard = client.lock().await;
+                let client_guard = client.read().await;
                 if client_guard.is_alive().await {
                     self.touch_last_used(&manifest.id);
                     return Ok(Arc::clone(&client));
                 }
                 // 极端情况：double-check 时又崩溃——kill 后继续 spawn
-                let _ = client_guard.kill().await;
                 drop(client_guard);
+                let _ = client.write().await.kill().await;
                 self.mcp_clients.write().remove(&manifest.id);
             }
         }
@@ -899,7 +892,7 @@ impl PluginInvokerImpl {
             manifest.id
         );
 
-        let client_arc = Arc::new(tokio::sync::Mutex::new(client));
+        let client_arc = Arc::new(tokio::sync::RwLock::new(client));
 
         // 缓存
         {
@@ -936,7 +929,7 @@ impl PluginInvokerImpl {
             clients.get(plugin_id).cloned()
         };
         if let Some(client) = client_arc {
-            let guard = client.lock().await;
+            let guard = client.read().await;
             guard.is_alive().await
         } else {
             false
@@ -1140,7 +1133,7 @@ impl PluginInvokerImpl {
         };
 
         if let Some(client_arc) = client_arc {
-            let mut client = client_arc.lock().await;
+            let mut client = client_arc.write().await;
             if let Err(e) = client.kill().await {
                 warn!("Failed to kill crashed plugin {}: {}", plugin_id, e);
             }
@@ -1257,7 +1250,7 @@ impl PluginInvoker for PluginInvokerImpl {
 
                 // Sidecar 模式：通过 MCP 客户端调用
                 let client_arc = self.get_or_create_mcp_client(manifest).await?;
-                let client = client_arc.lock().await;
+                let client = client_arc.read().await;
 
                 // 检查进程健康
                 if !client.is_alive().await {
@@ -1345,7 +1338,7 @@ impl PluginInvoker for PluginInvokerImpl {
             }
             HostType::Sidecar => {
                 let client_arc = self.get_or_create_mcp_client(manifest).await?;
-                let client = client_arc.lock().await;
+                let client = client_arc.read().await;
 
                 if !client.is_alive().await {
                     drop(client);
@@ -1379,17 +1372,44 @@ impl PluginInvoker for PluginInvokerImpl {
                 //   ③ 否则视为纯业务数据 → success(data=inner)，与 pipeline 路径
                 //      （ToolExecutionResult::success(to_value(plugin_result))）对齐。
                 let inner = extract_mcp_content(&result);
-                // 决策树（先判 success 字段，再判 error 字段，最后按纯数据兜底）：
-                //   ② 返回已是 ToolExecutionResult 信封（带 success）→ 直接 from_value
-                //   ① MCP isError=true / 工具返回 {"error":"..."}（无 success）→ failure
-                //   ③ 纯业务数据 → success(data=inner)
-                let tool_result = if inner.get("success").is_some() {
-                    // ② 返回值已是 ToolExecutionResult 信封
+                // 决策树（统一 Python ToolResult 与 ToolExecutionResult 两种信封）：
+                //   ②-a 返回已是 ToolExecutionResult 信封（同时带 success + data）→ 直接 from_value
+                //   ②-b Python ToolResult 形状（带 success 但无 data，有 output/error）→ 归一化：
+                //        success=true  → success(data=output)
+                //        success=false → failure(error)
+                //   ①   MCP isError=true / 工具返回 {"error":"..."}（无 success）→ failure
+                //   ③   纯业务数据（无 success 无 error）→ success(data=inner)
+                let tool_result = if inner.get("success").is_some() && inner.get("data").is_some() {
+                    // ②-a 真 ToolExecutionResult 信封
                     serde_json::from_value(inner).map_err(|e| PluginError {
                         message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
                         code: Some("PARSE_ERROR".to_string()),
                         source: Some("plugin-invoker".to_string()),
                     })?
+                } else if inner.get("success").is_some() {
+                    // ②-b 带 success 但无 data 字段。两种实际形态：
+                    //   (A) builtin_tools 的 ToolResult.to_dict() 信封 {success, output, error, metadata}
+                    //       → 业务数据在 output 里，取 output 作为 data。
+                    //   (B) memory 等 server.py 把 result.output 解包后直接返回（inner 本身就是业务 dict，
+                    //       恰好带 success 键，如 {success:true, memory_id:...}，无 output 键）
+                    //       → inner 本身即 data。
+                    //   区分：inner 有 "output" 键 → (A)；否则 → (B)。
+                    //   与流式 tool_result 事件使用同一个 success 信号（tool_core/src/lib.rs:351）。
+                    let ok = inner.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+                    if ok {
+                        let data = if inner.get("output").is_some() {
+                            inner.get("output").cloned().unwrap_or(serde_json::Value::Null)
+                        } else {
+                            inner.clone()
+                        };
+                        ToolExecutionResult::success(data)
+                    } else {
+                        let err_msg = inner
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool execution failed");
+                        ToolExecutionResult::failure(err_msg)
+                    }
                 } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
                     // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
                     ToolExecutionResult::failure(err)
@@ -1431,7 +1451,7 @@ impl PluginInvoker for PluginInvokerImpl {
             HostType::Sidecar => {
                 // Sidecar：经 MCP notification 发送（fire-and-forget）。
                 if let Ok(client_arc) = self.get_or_create_mcp_client(manifest).await {
-                    let client = client_arc.lock().await;
+                    let client = client_arc.read().await;
                     if client.is_alive().await {
                         let hook_method = format!("notifications/{hook_name}");
                         if let Err(e) = client
@@ -1496,7 +1516,7 @@ impl PluginInvokerImpl {
         });
         match manifest.host_type {
             HostType::InProcess => {
-                // abi_stable trait 对象模型：生命周期钩子经 PipelinePlugin trait 之外
+                // 直接 trait 对象模型：生命周期钩子经 PipelinePlugin trait 之外
                 // 的独立契约传递（当前 tool_core 无 on_load/on_unload 需求，暂 no-op）。
                 // 仅确保插件已加载（保持热重载检测一致性）。
                 if let Some(loader) = self.native_loader.as_ref() {
@@ -1561,13 +1581,13 @@ impl PluginInvokerImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::traits::{ConfigFileMapping, LoadedPlugin, PluginManifest, PluginStatus};
+    use agentos_core::traits::{LoadedPlugin, PluginManifest, PluginStatus};
     use agentos_core::types::TenantContext;
     use serde_json::json;
     use uuid::Uuid;
 
-    /// 串行化 abi_stable cdylib 加载的 native e2e 测试。
-    /// abi_stable 的 root module 加载用全局初始化，多线程并发加载不同 cdylib 会竞争，
+    /// 串行化 cdylib 加载的 native e2e 测试。
+    /// 直接 trait 对象的 root module 加载用全局初始化，多线程并发加载不同 cdylib 会竞争，
     /// 需串行（生产环境单调用串行，无此问题）。
     static NATIVE_E2E_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
@@ -1674,6 +1694,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         }
     }
@@ -1704,6 +1725,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         }
     }
@@ -1811,11 +1833,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // 测试串行化锁需覆盖整个 async 测试体，刻意跨 await 持有，改异步锁会改变串行语义。
+    #[allow(clippy::await_holding_lock)]
     async fn e2e_native_plugins_load_and_execute() {
-        // 验证 abi_stable 改造后 tool_core 原生插件能加载 + 经 HostServices 真正执行工具。
+        // 验证直接 trait 对象改造后 tool_core 原生插件能加载 + 经 HostServices 真正执行工具。
         // 注：NativeHostServices 用 block_in_place（需 multi_thread runtime，生产内核即此配置）。
         //
-        // 注意：abi_stable 的 RootModule 按 NativePluginModule_Ref 类型全局缓存
+        // 注意：直接 trait 对象的 RootModule 按 NativePluginModule_Ref 类型全局缓存
         // （root_module_statics 全局单例）。同进程加载多个用同一 RootModule 类型的 cdylib
         // 会互相覆盖。故本测试只验证单个原生插件（tool_core，生产环境的唯一原生插件）。
         let _guard = NATIVE_E2E_LOCK.lock();
@@ -1854,7 +1878,7 @@ mod tests {
                 &self,
                 capability: &str,
                 method: &str,
-                params: serde_json::Value,
+                _params: serde_json::Value,
             ) -> Result<serde_json::Value, agentos_mcp::McpError> {
                 match (capability, method) {
                     ("tool-executor", "invoke") => {
@@ -1925,8 +1949,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "native_test 与 tool_core 共用 NativePluginModule_Ref 全局缓存，同进程并行会冲突；tool_core 已由 e2e_native_plugins 覆盖。单独跑：cargo test e2e_native_inprocess -- --ignored"]
+    // 测试串行化锁需覆盖整个 async 测试体，刻意跨 await 持有，改异步锁会改变串行语义。
+    #[allow(clippy::await_holding_lock)]
     async fn e2e_native_inprocess_plugin_executes() {
-        // 单独验证 native_test echo 插件（基础 abi_stable 链路）。
+        // 单独验证 native_test echo 插件（基础 native 直接 trait 对象链路）。
         // 与 e2e_native_plugins 分离：避免同进程两个同 RootModule 类型插件互相覆盖。
         let _guard = NATIVE_E2E_LOCK.lock();
         let dll = repo_root().join("plugins/shared/native_test/native_test_plugin.dll");
@@ -2039,6 +2065,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         };
         loader.add_manifest(manifest);
@@ -2100,6 +2127,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         }
     }
@@ -2314,6 +2342,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             invoke_entry: invoke_entry.map(str::to_string),
             persistent_fields: vec![],
         }

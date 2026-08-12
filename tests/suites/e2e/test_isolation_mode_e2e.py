@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401  注入 isolation 插件目录到 sys.path
+
 """场景3：隔离模式端到端测试。
 
 覆盖场景：
@@ -6,12 +8,14 @@
 - 隔离不可用即报错：container 不可用时抛 IsolationError，不降级到 host
 - IsolationDecider 决策逻辑验证
 - PermissionChecker 权限边界验证
+
+0.2 迁移：isolation.X → 平铺 X；isolation.types → isolation_types（0.2 重命名）。
 """
 import pytest
 
-from isolation.decider import IsolationDecider, IsolationError
-from isolation.permission_checker import PermissionChecker
-from isolation.permission_policy import (
+from decider import IsolationDecider, IsolationError
+from permission_checker import PermissionChecker, check_write_permission
+from permission_policy import (
     PermissionPolicyManager,
     PermissionPolicyType,
     PermissionScope,
@@ -19,8 +23,10 @@ from isolation.permission_policy import (
     WritePermission,
     WorkspacePermissionPolicy,
 )
-from isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
-from isolation.types import IsolationLevel
+from policy import IsolationPolicyLoader, ToolIsolationPolicy
+from isolation_types import IsolationLevel
+
+pytestmark = pytest.mark.unit
 
 
 # ── 1. IsolationDecider 决策逻辑 ───────────────────────────────────
@@ -36,19 +42,19 @@ class TestIsolationDecider:
         return IsolationDecider(policy_loader=loader), loader
 
     @pytest.mark.asyncio
-    async def test_default_policy_is_host(self):
-        """默认策略为宿主机隔离（isolation_policy.yaml 的 default: host）。"""
+    async def test_default_policy_is_container(self):
+        """0.2 默认策略为容器隔离（isolation_policy.yaml 缺失/config_center 不可用时回退 container）。"""
         decider = IsolationDecider()
         policy = decider.resolve("unknown_tool")
-        assert policy.isolation == IsolationLevel.HOST
+        assert policy.isolation == IsolationLevel.CONTAINER
 
     @pytest.mark.asyncio
     async def test_decide_without_availability_check(self):
         """不做可用性检查时直接返回策略。"""
         decider = IsolationDecider()
         policy = await decider.decide("some_tool")
-        # 默认无可用性检查，返回默认策略（host）
-        assert policy.isolation == IsolationLevel.HOST
+        # 默认无可用性检查，返回默认策略（container）
+        assert policy.isolation == IsolationLevel.CONTAINER
 
     @pytest.mark.asyncio
     async def test_container_unavailable_host_available_raises(self):
@@ -245,8 +251,6 @@ class TestPermissionChecker:
 
     def test_check_write_permission_dict_policy(self, tmp_path):
         """便捷函数 check_write_permission 接受字典策略。"""
-        from isolation.permission_checker import check_write_permission
-
         workspace_dir = tmp_path / "workspace"
         workspace_dir.mkdir()
         test_file = workspace_dir / "output.txt"
@@ -279,7 +283,7 @@ class TestIsolationPolicyLoader:
 
     def test_tool_name_priority_over_category(self):
         """工具名匹配优先于分类匹配。"""
-        loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
         loader._tools["special_tool"] = ToolIsolationPolicy(
             isolation=IsolationLevel.HOST,
         )
@@ -294,7 +298,7 @@ class TestIsolationPolicyLoader:
         assert policy.isolation == IsolationLevel.CONTAINER
 
     def test_get_tool_names(self):
-        loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
         loader._tools = {
             "tool_a": ToolIsolationPolicy(),
             "tool_b": ToolIsolationPolicy(),
@@ -302,7 +306,7 @@ class TestIsolationPolicyLoader:
         assert set(loader.get_tool_names()) == {"tool_a", "tool_b"}
 
     def test_get_category_names(self):
-        loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
         loader._categories = {
             "cat_a": ToolIsolationPolicy(),
         }
@@ -358,7 +362,7 @@ class TestIsolationTypes:
         assert IsolationLevel.HOST == "non_isolated"
 
     def test_isolation_environment_defaults(self):
-        from isolation.types import IsolationContext, IsolationEnvironment, TaskType
+        from isolation_types import IsolationContext, IsolationEnvironment, TaskType
 
         ctx = IsolationContext(task_id="test", task_type=TaskType.ATOMIC)
         env = IsolationEnvironment(
@@ -372,7 +376,7 @@ class TestIsolationTypes:
         assert env.status == "ready"
 
     def test_execution_result(self):
-        from isolation.types import ExecutionResult
+        from isolation_types import ExecutionResult
 
         result = ExecutionResult(success=True, output="done")
         d = result.to_dict()

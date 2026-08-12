@@ -699,9 +699,27 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
 
         if (messageIndex >= 0) {
           const updatedMessages = [...pipelineMessages]
+          const stoppedMsg = updatedMessages[messageIndex]
+          // 收尾 part 状态：仅设置 message.status='completed' 会让 isStreamingMessage
+          // 仍因残留的 'streaming'/'calling' part 返回 true（数据不一致，Stop 后再发新
+          // 消息会卡在"思考中"）。与 handleStreamError 对齐：
+          //   text/thinking 'streaming' -> 'done'
+          //   tool_call 'calling'/'streaming' -> 'error'（abort 后未返回的工具调用视为失败）
+          const finalizedParts = (stoppedMsg.parts || []).map((p) => {
+            const partState = (p as { state?: string }).state
+            if ((p.type === 'text' || p.type === 'thinking') && partState === 'streaming') {
+              return { ...p, state: 'done' as const } as MessagePart
+            }
+            if (p.type === 'tool_call' && (partState === 'calling' || partState === 'streaming')) {
+              return { ...p, state: 'error' as const } as MessagePart
+            }
+            return p
+          })
           updatedMessages[messageIndex] = {
-            ...updatedMessages[messageIndex],
+            ...stoppedMsg,
+            parts: finalizedParts,
             status: 'completed',
+            _lastUpdated: Date.now(),
           }
 
           return {

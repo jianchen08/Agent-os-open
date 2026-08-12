@@ -11,7 +11,7 @@ import { useCostControl } from '@/hooks/useCostControl'
 import { cn } from '@/lib/utils'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
-import { contributionRegistry, type ContributionEntry } from '@/services/schema/ContributionRegistry'
+import { contributionRegistry, type PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { useContextKeys } from '@/stores/contextKeysStore'
 
@@ -25,8 +25,8 @@ export interface StatusBarProps {
  * 底部状态栏：连接 / 管道 / 审批 + 插件贡献项 + 成本 + 时间
  *
  * 系统状态（连接/管道/审批）来自 layoutModeStore；插件贡献项来自
- * contributionRegistry.getStatusBarItems()（经 when 过滤），其动态文案
- * 来自对应 widget_id 的 widgetEventStore.latest。
+ * contributionRegistry.getPagesBySpace('dock') 的 status 栏位页（经 when 过滤），
+ * 其动态文案来自对应 widget_id 的 widgetEventStore.latest。
  */
 export function StatusBar({ costLabel, className }: StatusBarProps) {
   const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
@@ -70,11 +70,12 @@ export function StatusBar({ costLabel, className }: StatusBarProps) {
     ? `管道执行中 · ${running.name || running.type || running.id}`
     : '管道空闲'
 
-  // 插件贡献的状态栏项（经 when 过滤可见性）
+  // 插件贡献的状态栏项（dock 空间 + status 栏位，经 when 过滤可见性）
   const pluginItems = useMemo(
     () =>
       contributionRegistry
-        .getStatusBarItems()
+        .getPagesBySpace('dock')
+        .filter((p) => p.slot === 'status')
         .filter((item) => evaluateWhen(item.when, contextKeys)),
     [contextKeys],
   )
@@ -128,9 +129,9 @@ export function StatusBar({ costLabel, className }: StatusBarProps) {
  * 插件贡献的状态栏项：动态文案优先取 widgetEventStore.latest.data，
  * 兜底用 item.title。
  */
-function PluginStatusItem({ item }: { item: ContributionEntry }) {
+function PluginStatusItem({ item }: { item: PageDeclaration }) {
   // 订阅该 item 的 widget_id 的最新事件（若有 widget 字段则用它，否则用 item.id）
-  const widgetId = (item.widget as string | undefined) ?? item.id
+  const widgetId = item.widget ?? item.id
   const latest = useWidgetEventStore((s) => s.latest[widgetId])
   const label = useMemo(() => resolvePluginLabel(item, latest), [item, latest])
   const color = (item.props as { color?: string } | undefined)?.color
@@ -139,7 +140,7 @@ function PluginStatusItem({ item }: { item: ContributionEntry }) {
 
 /** 从 item + latest 事件解析显示文案：latest.data 优先，item.title 兜底。 */
 function resolvePluginLabel(
-  item: ContributionEntry,
+  item: PageDeclaration,
   latest: { data?: Record<string, unknown> } | undefined,
 ): string {
   if (latest?.data) {

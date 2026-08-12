@@ -70,6 +70,9 @@ docker_watchdog_dumps/
 src/logs/
 # 根目录 logs/ 是运行时日志/截图/诊断产物，不入库
 /logs/
+# llm_core payload 诊断落盘（默认关闭；开启时改写系统 tempfile，但历史/误开仍可能在此产生）
+plugins/shared/pipeline/core/llm_core/logs/
+**/logs/payload_diag/
 
 # ─── 备份文件(含后缀变体 .bak_xxx)───
 *.bak
@@ -145,3 +148,8 @@ target/
 *.profraw
 *.profdata
 
+
+# SQLite 运行时文件（内核运行生成，勿入库）
+agentos_kernel.db
+agentos_kernel.db-wal
+agentos_kernel.db-shm

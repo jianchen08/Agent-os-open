@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401
+
 """工作空间挂载校验测试。
 
 覆盖修复点（BUG-FIX-fix_20260625_isolated_no_workspace）：
@@ -10,8 +12,8 @@
 """
 import pytest
 
-from isolation.providers.docker_provider import DockerProvider
-from isolation.types import (
+from providers.docker_provider import DockerProvider
+from isolation_types import (
     EnvironmentStatus,
     IsolationContext,
     TaskType,

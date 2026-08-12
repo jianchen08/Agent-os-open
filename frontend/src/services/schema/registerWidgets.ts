@@ -4,6 +4,7 @@ import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPrevi
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
 import { CostDashboardWidget } from '@/components/schema/widgets/CostDashboardWidget'
+import { DigitalHumanWidget } from '@/components/schema/widgets/DigitalHumanWidget'
 import {
   AgentsPanel,
   MemoryPanel,
@@ -27,10 +28,12 @@ import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
+import { WebComponentCardHost } from '@/components/schema/widgets/WebComponentCardHost'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { widgetRegistry as composerRegistry } from './composer'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
+import type { RenderingSpaceType } from '@/types/schema'
 
 /** Widget 注册条目 */
 interface WidgetEntry {
@@ -77,27 +80,37 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
   // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview
   { name: 'webview', component: WebviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'html_preview' },
+  // WebComponent：插件 JS 注册成 Custom Element，同进程直传 props（第二条组件注入路径，ADR §3.4 第二通道）
+  { name: 'webcomponent', component: WebComponentCardHost, spaces: ['chat', 'workspace', 'floating'], fallback: 'status_card' },
+  // 数字人/形象占位 widget（ADR §2.1 / §7.6）：形象是 workspace 的 widget，不占独立空间。
+  // 现阶段只占位（不引入渲染库），0.7.0 由插件接入 Live2D/VRM/TTS；支持 detachable 三态（浮窗/桌面组件/全屏）
+  {
+    name: 'digital_human',
+    component: DigitalHumanWidget,
+    spaces: ['workspace', 'floating', 'fullscreen'],
+    fallback: 'status_card',
+  },
 ]
 
 /**
  * 初始化所有预置组件注册
  *
- * 同时注册到：
- * 1. composerRegistry — 消息渲染管道（聊天消息中的 Widget）
- * 2. widgetRegistry — RenderingEngine 独立渲染（工作区/浮层中的 Widget）
+ * composer 已收敛至 WidgetRegistry（composer.tsx re-export 同一单例），
+ * 两处注册指向同一实例，覆盖写入幂等。
  */
 export function initializeWidgets(): void {
   for (const { name, component, spaces, fallback } of WIDGETS) {
-    // 注册到 Composer 的 registry（消息渲染管道）
-    composerRegistry.register(name, {
-      component: component as React.ComponentType<Record<string, unknown>>,
-      supportedSpaces: spaces,
+    const supportedSpaces = spaces as RenderingSpaceType[]
+    // 消息渲染管道（聊天消息中的 Widget，composer registry 与下方为同一单例）
+    composerRegistry.register(name, component as WidgetComponent, {
+      name,
+      supportedSpaces,
       fallbackWidget: fallback,
     })
-    // 注册到 WidgetRegistry（RenderingEngine 独立渲染）
+    // RenderingEngine 独立渲染（工作区/浮层中的 Widget）
     widgetRegistry.register(name, component as WidgetComponent, {
       name,
-      supportedSpaces: spaces as Array<'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen'>,
+      supportedSpaces,
       fallbackWidget: fallback,
     })
   }

@@ -91,6 +91,9 @@ fn test_message_record_roundtrip() {
         pipeline_id: Some("pipe_001".to_string()),
         tool_calls_json: None,
         tool_call_id: None,
+        reasoning_content: None,
+        status: None,
+        error: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();
@@ -119,6 +122,9 @@ fn test_message_record_roundtrip_no_optional() {
         pipeline_id: None,
         tool_calls_json: None,
         tool_call_id: None,
+        reasoning_content: None,
+        status: None,
+        error: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();

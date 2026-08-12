@@ -20,10 +20,18 @@
 import time
 from unittest.mock import MagicMock, patch
 
-from isolation.types import IsolationLevel
+import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 sys.path
+
+# isolation_guard 插件位于 plugins/shared/pipeline/input/isolation_guard/（0.2 平铺 import）
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
+
+from isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
-from plugins.input.isolation_guard.plugin import IsolationGuard
+from plugin import IsolationGuard
 
 
 def _make_ctx(tool="bash_execute"):
@@ -56,7 +64,7 @@ def _make_auto_plugin(detected=False):
     Args:
         detected: __init__ 阶段 _detect_docker 的返回值（模拟启动时的检测结果）
     """
-    with patch("isolation.decider.IsolationDecider"), \
+    with patch("decider.IsolationDecider"), \
          patch.object(IsolationGuard, "_detect_docker", return_value=detected):
         return IsolationGuard(config={})
 
@@ -113,7 +121,7 @@ async def test_no_recheck_within_cooldown():
 
 async def test_config_specified_false_never_rechecks():
     """config 显式指定 docker_available=False 时永不复检，始终拦截。"""
-    with patch("isolation.decider.IsolationDecider"):
+    with patch("decider.IsolationDecider"):
         plugin = IsolationGuard(config={"docker_available": False})
     assert plugin._docker_auto is False
     _container_policy(plugin)

@@ -655,6 +655,35 @@ impl KernelCapabilityRouter {
                     .map_err(|e| srv_err(format!("delete: {e}")))?;
                 Ok(json!({ "deleted": ok }))
             }
+            // ── messages 域（按 pipeline_id 查对话消息，复盘/压缩块恢复用）──
+            ("messages", "list") => {
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| srv_err("missing pipeline_id".into()))?;
+                let opts = parse_message_query_opts(&params);
+                let rows = store
+                    .get_messages_by_pipeline(pipeline_id, opts)
+                    .await
+                    .map_err(|e| srv_err(format!("messages.list: {e}")))?;
+                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
+            }
+            // ── traces 域（按 thread_id 查插件 state 变更轨迹，复盘骨架用）──
+            ("traces", "list") => {
+                let thread_id = params
+                    .get("thread_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| srv_err("missing thread_id".into()))?;
+                let tenant_id = params
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let rows = store
+                    .get_step_traces_by_thread(thread_id, tenant_id)
+                    .await
+                    .map_err(|e| srv_err(format!("traces.list: {e}")))?;
+                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
+            }
             (domain, op) => Err(McpError::Protocol {
                 message: format!("service-registry method not implemented: {domain}.{op}"),
             }),

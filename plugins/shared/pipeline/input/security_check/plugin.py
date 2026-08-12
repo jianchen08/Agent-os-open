@@ -30,6 +30,25 @@ from service import (
     InteractionDeniedError,
     InteractionTimeoutError,
 )
+
+# server.py 的 on_load 注入 plugin 引用，据此拿 human-interaction capability。
+_PLUGIN_REF: Any = None
+
+
+def _set_plugin_ref(ref: Any) -> None:
+    """由 server.py on_load 调用，注入 AgentOSPlugin 实例引用。"""
+    global _PLUGIN_REF  # noqa: PLW0603
+    _PLUGIN_REF = ref
+
+
+def _get_human_interaction_cap() -> Any | None:
+    """获取 human-interaction capability handle，未注入返回 None。"""
+    if _PLUGIN_REF is None:
+        return None
+    try:
+        return _PLUGIN_REF.get_capability("human-interaction")
+    except (KeyError, AttributeError):
+        return None
 from policy import IsolationPolicyLoader
 from sensitive_paths import is_sensitive_path
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
@@ -99,11 +118,16 @@ class SecurityCheckPlugin(IInputPlugin):
                 - rules_path: 规则配置文件路径（默认 config/isolation/security_rules.yaml）
                 - rules: 直接传入规则列表（如果提供则不从文件加载）
                 - path_params: 路径参数名列表（默认 6 个常见路径参数）
+                - fuzzy_tool_matching: 工具名模糊匹配（默认 False）。
+                  开启后规则 tools 匹配容错：大小写不敏感 + 下划线/连字符等价 +
+                  Levenshtein 距离 <= 1，防 LLM 输出 bash-execute vs bash_execute
+                  vs BashExecute 漂移导致规则被绕过。
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
         self._workspace = self._config.get("workspace", "")
         self._max_path_depth = self._config.get("max_path_depth", 10)
+        self._fuzzy_tool_matching = self._config.get("fuzzy_tool_matching", False)
         self._path_params = self._config.get(
             "path_params",
             [
@@ -377,13 +401,12 @@ class SecurityCheckPlugin(IInputPlugin):
         Returns:
             安全决策结果字典
         """
-        # 优先用 engine 注入的服务（测试可 mock），回退全局单例
-        try:
-            interaction_svc = ctx.get_service("human_interaction_service")
-        except KeyError:
-            from human_interaction import get_human_interaction_service  # noqa: PLC0415
-
-            interaction_svc = get_human_interaction_service()
+        # 经 human-interaction capability 调交互工具插件（统一交互入口）。
+        # server.py 的 on_load 把 plugin 引用注入 _PLUGIN_REF，据此拿 capability。
+        hi_cap = _get_human_interaction_cap()
+        if hi_cap is None:
+            logger.warning("[%s] human-interaction capability not injected; soft-block", self.name)
+            return self._soft_block(ctx, tool_name, "交互服务不可用，已拦截")
 
         # 提取工具调用的具体参数，显示给用户审批
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
@@ -395,16 +418,18 @@ class SecurityCheckPlugin(IInputPlugin):
         request_id = "-"
         # try 覆盖创建请求+等待响应，避免服务异常上抛中断管道。
         try:
-            request_id = await interaction_svc.create_choice_request(
-                session_id=session_id,
-                thread_id=session_id,
-                tab_id="",
-                title=f"安全审批: {tool_name}",
-                description=args_preview,
-                options=list(_APPROVAL_OPTIONS),
-                priority=Priority.HIGH,
-                user_id=ctx.state.get("user_id"),
-            )
+            create_res = await hi_cap.call("create_choice", {
+                "session_id": session_id,
+                "thread_id": session_id,
+                "tab_id": "",
+                "title": f"安全审批: {tool_name}",
+                "description": args_preview,
+                "options": list(_APPROVAL_OPTIONS),
+                "priority": "high",
+            })
+            if not isinstance(create_res, dict) or create_res.get("error"):
+                raise RuntimeError(f"create_choice failed: {create_res}")
+            request_id = create_res.get("request_id", "-")
 
             logger.info(
                 "[%s] Approval request created | request_id=%s | tool=%s | rule=%s",
@@ -414,7 +439,23 @@ class SecurityCheckPlugin(IInputPlugin):
                 rule_name,
             )
 
-            result = await interaction_svc.wait_for_choice(request_id)
+            wait_res = await hi_cap.call("wait_for_choice", {
+                "request_id": request_id,
+                "timeout": 86400,
+            })
+            # capability 返回 error dict 时转换成对应异常（与原 service 行为对齐）
+            if not isinstance(wait_res, dict):
+                raise RuntimeError(f"wait_for_choice returned non-dict: {wait_res}")
+            if wait_res.get("error"):
+                err_msg = wait_res["error"]
+                if "denied" in err_msg.lower():
+                    raise InteractionDeniedError(request_id, err_msg)
+                if "cancel" in err_msg.lower():
+                    raise InteractionCancelledError(request_id, err_msg)
+                if "timeout" in err_msg.lower():
+                    raise InteractionTimeoutError(request_id, 86400)
+                raise RuntimeError(err_msg)
+            result = wait_res
             response_type = result.get("response_type", "")
             # response_type 表示响应类型（answered/denied/cancelled），
             # 用户的具体选择在 selected_option 字段中。
@@ -750,6 +791,77 @@ class SecurityCheckPlugin(IInputPlugin):
 
         return "\n".join(lines).strip()
 
+    def _tool_matches_rule(self, tool_name: str, rule_tools: list[str]) -> bool:
+        """判断工具名是否匹配规则声明的 tools 列表。
+
+        规则的 tools 支持 ["*"] 通配（匹配所有工具）。
+        当 _fuzzy_tool_matching 开启时，对工具名做容错匹配：
+        大小写不敏感 + 下划线/连字符等价 + Levenshtein 距离 <= 1，
+        防 LLM 输出 bash-execute vs bash_execute vs BashExecute 漂移
+        导致规则被绕过。
+
+        Args:
+            tool_name: 实际工具名
+            rule_tools: 规则声明的工具名列表
+
+        Returns:
+            是否匹配
+        """
+        if "*" in rule_tools:
+            return True
+        if tool_name in rule_tools:
+            return True
+        if not self._fuzzy_tool_matching:
+            return False
+        return any(self._fuzzy_tool_eq(tool_name, t) for t in rule_tools)
+
+    @staticmethod
+    def _fuzzy_tool_eq(a: str, b: str) -> bool:
+        """工具名容错匹配。
+
+        规范化：转小写 + 把连字符转成下划线（bash-execute ≡ bash_execute ≡ BashExecute）。
+        再叠加 Levenshtein 距离 <= 1 容忍单字符差异（拼写错误）。
+
+        Args:
+            a: 工具名 A
+            b: 工具名 B
+
+        Returns:
+            视容错规则是否等价
+        """
+        na = a.lower().replace("-", "_")
+        nb = b.lower().replace("-", "_")
+        if na == nb:
+            return True
+        # Levenshtein 距离 <= 1（单字符增/删/改）
+        return SecurityCheckPlugin._levenshtein(na, nb) <= 1
+
+    @staticmethod
+    def _levenshtein(a: str, b: str) -> int:
+        """计算两字符串的 Levenshtein 编辑距离。
+
+        Args:
+            a: 字符串 A
+            b: 字符串 B
+
+        Returns:
+            编辑距离（使两字符串相同所需的最少单字符编辑次数）
+        """
+        if a == b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            curr = [i]
+            for j, cb in enumerate(b, 1):
+                cost = 0 if ca == cb else 1
+                curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost))
+            prev = curr
+        return prev[-1]
+
     def _match_rules(self, tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
         """通用规则匹配引擎。
 
@@ -776,9 +888,9 @@ class SecurityCheckPlugin(IInputPlugin):
         """
         first_reject: tuple[str, str] = ("", "")
         for rule in self._rules:
-            # 检查工具是否匹配
+            # 检查工具是否匹配（支持 ["*"] 通配 + 可选模糊匹配）
             tools = rule.get("tools", [])
-            if "*" not in tools and tool_name not in tools:
+            if not self._tool_matches_rule(tool_name, tools):
                 continue
 
             # 遍历规则关注的参数

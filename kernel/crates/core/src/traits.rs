@@ -852,6 +852,18 @@ pub struct ProvidedCapability {
     /// 路由方式——决定内核怎么找到真正的 handler 实现。
     #[serde(default)]
     pub host: ProvidedCapabilityHost,
+    /// sidecar 工具名前缀（host=sidecar 时生效）。
+    ///
+    /// McpBridge 把 `<namespace>.<method>` 映射成 `<tool_prefix>.<method>`
+    /// 调 invoker.invoke_tool。例如 namespace=`human-interaction`、tool_prefix=
+    /// `interaction` 时，`human-interaction.create_choice` →
+    /// `interaction.create_choice`。
+    ///
+    /// 缺省时从 namespace 派生（连字符转下划线：`human-interaction` →
+    /// `human_interaction`）。工具名前缀与 namespace 不一致时必须显式声明，
+    /// 否则 McpBridge 路由会拼出错误的工具名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_prefix: Option<String>,
 }
 
 /// capability 贡献的路由方式。
@@ -1223,19 +1235,6 @@ pub enum PluginStatus {
 // ADR ③④：StorageBackend trait——SQLite 四表存储抽象
 // ═════════════════════════════════════════════════════════════════
 
-/// 存储后端抽象（ADR ③④）。
-///
-/// SQLite 四表模型的 trait 抽象，供 ContentLoader 和 AdrEngine 使用。
-/// 具体实现为 SQLite，但 trait 层不绑定具体数据库——便于测试时 mock。
-///
-/// **四表模型**：
-/// - `runs`：运行实例元数据
-/// - `messages`：消息表（含分支标识）
-/// - `traces`：状态变更日志（Append-Only Patch）
-/// - `blobs`：不可变原始数据
-///
-/// [来源: docs/working/adr_engine_design.md §4.2]
-
 /// 按 pipeline_id 查询消息的选项（游标分页）。
 ///
 /// 对齐前端 getMessages 的查询参数（session.ts: before_sequence/after_sequence/limit）。
@@ -1250,6 +1249,18 @@ pub struct MessageQueryOpts {
     pub limit: Option<usize>,
 }
 
+/// 存储后端抽象（ADR ③④）。
+///
+/// SQLite 四表模型的 trait 抽象，供 ContentLoader 和 AdrEngine 使用。
+/// 具体实现为 SQLite，但 trait 层不绑定具体数据库——便于测试时 mock。
+///
+/// **四表模型**：
+/// - `runs`：运行实例元数据
+/// - `messages`：消息表（含分支标识）
+/// - `traces`：状态变更日志（Append-Only Patch）
+/// - `blobs`：不可变原始数据
+///
+/// [来源: docs/working/adr_engine_design.md §4.2]
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     /// 获取运行实例记录。

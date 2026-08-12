@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS messages (
     -- reasoning_content：assistant 消息的思考内容（LLM reasoning/chain-of-thought）。
     -- 前端据此渲染思考过程折叠区。仅 role=assistant 且模型输出思考时非空。
     reasoning_content TEXT,
+    -- status / error：工具结果消息（role=tool）的结构化结果状态。
+    -- status=completed/failed；error 为失败文本。前端刷新后据此还原失败态，
+    -- 与流式 tool_result 事件的 success 信号统一。非 tool 消息为 NULL。
+    status          TEXT,
+    error           TEXT,
     created_at      TEXT NOT NULL,
     UNIQUE(run_id, branch_id, seq_in_branch)
 );
@@ -216,10 +221,8 @@ CREATE INDEX IF NOT EXISTS idx_cp_pipeline_step ON pipeline_checkpoints(pipeline
 fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
     for table in ["messages", "traces", "branches"] {
         let has_col: bool = conn
-            .prepare(&format!("PRAGMA table_info({})", table))
-            .map_err(|e| StorageError::Database(e.to_string()))?
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| StorageError::Database(e.to_string()))?
+            .prepare(&format!("PRAGMA table_info({})", table))?
+            .query_map([], |row| row.get::<_, String>(1))?
             .filter_map(|r| r.ok())
             .any(|col| col == "tenant_id");
         if !has_col {
@@ -229,8 +232,7 @@ fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
                     table
                 ),
                 [],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         }
     }
     Ok(())
@@ -244,25 +246,21 @@ fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
 ///   ALTER 执行而失败。对齐 0.1 消息按 pipeline_run_id 分组的语义——pipeline_id 是消息层的查询主键。
 fn migrate_add_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
     let has_col: bool = conn
-        .prepare("PRAGMA table_info(messages)")
-        .map_err(|e| StorageError::Database(e.to_string()))?
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| StorageError::Database(e.to_string()))?
+        .prepare("PRAGMA table_info(messages)")?
+        .query_map([], |row| row.get::<_, String>(1))?
         .filter_map(|r| r.ok())
         .any(|col| col == "pipeline_id");
     if !has_col {
         conn.execute(
             "ALTER TABLE messages ADD COLUMN pipeline_id TEXT",
             [],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
     }
     // 索引兜底：列已确保存在后创建（CREATE INDEX IF NOT EXISTS 幂等，新建库与旧库都安全）。
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_pipeline_seq ON messages(pipeline_id, tenant_id, seq_in_branch)",
         [],
-    )
-    .map_err(|e| StorageError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -273,23 +271,24 @@ fn migrate_add_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
 /// 仅在列缺失时执行 `ALTER TABLE ... ADD COLUMN`（幂等，可空兼容历史扁平数据）。
 fn migrate_add_tool_call_columns(conn: &Connection) -> Result<(), StorageError> {
     let cols: Vec<String> = conn
-        .prepare("PRAGMA table_info(messages)")
-        .map_err(|e| StorageError::Database(e.to_string()))?
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| StorageError::Database(e.to_string()))?
+        .prepare("PRAGMA table_info(messages)")?
+        .query_map([], |row| row.get::<_, String>(1))?
         .filter_map(|r| r.ok())
         .collect();
     if !cols.iter().any(|c| c == "tool_calls_json") {
-        conn.execute("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT", [])
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        conn.execute("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT", [])?;
     }
     if !cols.iter().any(|c| c == "tool_call_id") {
-        conn.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT", [])
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        conn.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT", [])?;
     }
     if !cols.iter().any(|c| c == "reasoning_content") {
-        conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT", [])
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "status") {
+        conn.execute("ALTER TABLE messages ADD COLUMN status TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "error") {
+        conn.execute("ALTER TABLE messages ADD COLUMN error TEXT", [])?;
     }
     Ok(())
 }
@@ -384,6 +383,19 @@ fn backup_corrupt_files(path: &str) {
     }
 }
 
+/// messages 表现有行的列元组（与 SELECT 列顺序一一对应）：
+/// (message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content, status, error)
+type StoredMessageRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl SqliteStore {
     /// 在指定路径创建 SQLite 数据库并初始化四表。
     ///
@@ -409,7 +421,7 @@ impl SqliteStore {
     }
 
     fn open_inner(path: &str) -> Result<Self, StorageError> {
-        let conn = Connection::open(path).map_err(|e| StorageError::Database(e.to_string()))?;
+        let conn = Connection::open(path)?;
         Self::init(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -419,7 +431,7 @@ impl SqliteStore {
     /// 创建内存数据库（用于测试）。
     pub fn open_memory() -> Result<Self, StorageError> {
         let conn =
-            Connection::open_in_memory().map_err(|e| StorageError::Database(e.to_string()))?;
+            Connection::open_in_memory()?;
         Self::init(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -427,10 +439,8 @@ impl SqliteStore {
     }
 
     fn init(conn: &Connection) -> Result<(), StorageError> {
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(|e| StorageError::Database(e.to_string()))?;
-        conn.execute_batch(DDL)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch(DDL)?;
         migrate_add_tenant_id(conn)?;
         migrate_add_pipeline_id(conn)?;
         migrate_add_tool_call_columns(conn)?;
@@ -459,14 +469,12 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch, current_seq) VALUES (?1, ?2, 'running', ?3, ?4, 'main', 0)",
             rusqlite::params![run_id, config_hash, tenant_id, now],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         // 创建主分支（与 run 同租户）
         conn.execute(
             "INSERT INTO branches (branch_id, run_id, tenant_id, created_at) VALUES ('main', ?1, ?2, ?3)",
             rusqlite::params![run_id, tenant_id, now],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -489,8 +497,7 @@ impl SqliteStore {
         conn.execute(
             "UPDATE runs SET metadata = ?1 WHERE run_id = ?2",
             rusqlite::params![metadata.to_string(), run_id],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -509,8 +516,7 @@ impl SqliteStore {
                 "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, \
                  current_branch, current_seq, metadata \
                  FROM runs WHERE status = 'suspended'",
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         let rows = stmt
             .query_map([], |row| {
                 let metadata_str: Option<String> = row.get(8)?;
@@ -524,12 +530,11 @@ impl SqliteStore {
                     row.get::<_, i64>(7)? as u32,   // current_seq
                     metadata_str,
                 ))
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?;
 
         for row in rows {
             let (run_id, config_hash, tenant_id, created_at, ended_at, current_branch, current_seq, metadata_str) =
-                row.map_err(|e| StorageError::Database(e.to_string()))?;
+                row?;
 
             if let Some(ref meta_str) = metadata_str {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str) {
@@ -594,8 +599,7 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO messages (message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, tenant_id, created_at, pipeline_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, tenant_id, now, pipeline_id],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -616,8 +620,7 @@ impl SqliteStore {
             conn.execute(
                 "INSERT INTO blobs (blob_id, mime_type, size_bytes, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![blob_id, mime_type, data.len() as i64, data, now],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         }
         Ok(blob_id)
     }
@@ -645,13 +648,12 @@ impl SqliteStore {
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock();
         let pid = pipeline_id.to_string();
-        // 读现有行：index → (message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content)
-        let mut existing: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+        // 读现有行：index → (message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content, status, error)
+        let existing: Vec<StoredMessageRow> = conn
             .prepare(
-                "SELECT message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content \
+                "SELECT message_id, role, blob_id, tool_calls_json, tool_call_id, reasoning_content, status, error \
                  FROM messages WHERE pipeline_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?
+            )?
             .query_map(rusqlite::params![pid, tenant_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -660,18 +662,18 @@ impl SqliteStore {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         let n = existing.len();
         let m = new_arr.len();
         let now = chrono::Utc::now().to_rfc3339();
 
         // ① 比对段：i < min(N, M)，变了 UPDATE
         for (i, new_msg) in new_arr.iter().take(n.min(m)).enumerate() {
-            let (msg_id, old_role, old_blob, old_tc_json, old_tc_id, old_reasoning) = &existing[i];
+            let (msg_id, old_role, old_blob, old_tc_json, old_tc_id, old_reasoning, old_status, old_error) = &existing[i];
             let role = new_msg
                 .get("role")
                 .and_then(|v| v.as_str())
@@ -691,27 +693,39 @@ impl SqliteStore {
                 .get("reasoning_content")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            // 内容级比对：role / blob_id / tool_calls_json / tool_call_id / reasoning 都一致则跳过
+            // 工具结果状态（role=tool）：由 content 前缀推断——tool_core 失败内容固定以
+            // "Error: " 开头（messages.rs:110），成功为结果序列化文本。
+            // 不从 messages JSON 读结构化 success/error/status，避免污染发往 LLM 的上下文数组。
+            let (status, error) = if role == "tool" {
+                if let Some(err_msg) = content.strip_prefix("Error: ") {
+                    (Some("failed".to_string()), Some(err_msg.to_string()))
+                } else {
+                    (Some("completed".to_string()), None)
+                }
+            } else {
+                (None, None)
+            };
+            // 内容级比对：role / blob_id / tool_calls_json / tool_call_id / reasoning / status / error 都一致则跳过
             if role == *old_role
                 && blob_id.as_deref() == old_blob.as_deref()
                 && tool_calls_json == *old_tc_json
                 && tool_call_id == *old_tc_id
                 && reasoning_content == *old_reasoning
+                && status == *old_status
+                && error == *old_error
             {
                 continue;
             }
             let content_preview: String = content.chars().take(200).collect();
             conn.execute(
-                "UPDATE messages SET role=?2, blob_id=?3, content_preview=?4, tool_calls_json=?5, tool_call_id=?6, reasoning_content=?7 \
+                "UPDATE messages SET role=?2, blob_id=?3, content_preview=?4, tool_calls_json=?5, tool_call_id=?6, reasoning_content=?7, status=?8, error=?9 \
                  WHERE message_id=?1",
-                rusqlite::params![msg_id, role, blob_id, content_preview, tool_calls_json, tool_call_id, reasoning_content],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+                rusqlite::params![msg_id, role, blob_id, content_preview, tool_calls_json, tool_call_id, reasoning_content, status, error],
+            )?;
         }
 
         // ② 追加段：M > N，尾部 INSERT
-        for i in n.min(m)..m {
-            let new_msg = &new_arr[i];
+        for (i, new_msg) in new_arr.iter().enumerate().take(m).skip(n.min(m)) {
             let msg_id = format!("m_{}_{}", pid, i);
             let role = new_msg
                 .get("role")
@@ -732,20 +746,29 @@ impl SqliteStore {
                 .get("reasoning_content")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            // 工具结果状态（role=tool）：由 content 前缀推断（见上方比对段同款逻辑）。
+            let (status, error) = if role == "tool" {
+                if let Some(err_msg) = content.strip_prefix("Error: ") {
+                    (Some("failed".to_string()), Some(err_msg.to_string()))
+                } else {
+                    (Some("completed".to_string()), None)
+                }
+            } else {
+                (None, None)
+            };
             // branch_id/run_id 用占位（投影语义下 messages 跨 run，按 pipeline 主键）。
             // 取 state 通路里的 run_id 需改签名；此处用 pipeline_id 派生稳定占位即可。
             let run_id = format!("r_{}", pid);
             let branch_id = format!("b_{}", pid);
             conn.execute(
                 "INSERT INTO messages (message_id, run_id, branch_id, seq_in_branch, role, blob_id, \
-                 content_preview, tenant_id, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 content_preview, tenant_id, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content, status, error) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 rusqlite::params![
                     msg_id, run_id, branch_id, i as i64, role, blob_id, content_preview, tenant_id,
-                    now, pid, tool_calls_json, tool_call_id, reasoning_content
+                    now, pid, tool_calls_json, tool_call_id, reasoning_content, status, error
                 ],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         }
 
         // ③ 压缩段：N > M，DELETE 索引 ≥ M 的旧行
@@ -753,8 +776,7 @@ impl SqliteStore {
             conn.execute(
                 "DELETE FROM messages WHERE pipeline_id=?1 AND tenant_id=?2 AND seq_in_branch >= ?3",
                 rusqlite::params![pid, tenant_id, m as i64],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         }
         Ok(())
     }
@@ -778,8 +800,7 @@ impl SqliteStore {
              VALUES (?1,?2,?3,?4,?5) \
              ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET field_value=?3, updated_at=?5",
             rusqlite::params![pipeline_id, key, value_json, tenant_id, now],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -791,14 +812,11 @@ impl SqliteStore {
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
         let conn = self.conn.lock();
         let rows = conn
-            .prepare("SELECT field_key, field_value FROM pipeline_state WHERE pipeline_id=?1 AND tenant_id=?2")
-            .map_err(|e| StorageError::Database(e.to_string()))?
+            .prepare("SELECT field_key, field_value FROM pipeline_state WHERE pipeline_id=?1 AND tenant_id=?2")?
             .query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         let mut map = std::collections::HashMap::new();
         for (k, v) in rows {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
@@ -826,8 +844,7 @@ impl SqliteStore {
              (checkpoint_id, pipeline_id, step_no, state_json, tenant_id, created_at) \
              VALUES (?1,?2,?3,?4,?5,?6)",
             rusqlite::params![checkpoint_id, pipeline_id, step_no, state_json, tenant_id, now],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -878,8 +895,7 @@ impl SqliteStore {
             conn.execute(
                 "INSERT INTO blobs (blob_id, mime_type, size_bytes, data, created_at) VALUES (?1,?2,?3,?4,?5)",
                 rusqlite::params![blob_id, "text/plain", content.len() as i64, content.as_bytes(), now],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         }
         Ok((Some(blob_id), "text/plain"))
     }
@@ -928,8 +944,7 @@ impl SqliteStore {
                 session.updated_at,
                 session.last_active_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -952,13 +967,11 @@ impl SqliteStore {
             let mut stmt = tx
                 .prepare(
                     "SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
-                )
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                )?;
             let rows = stmt
-                .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))?;
             for r in rows {
-                let pid = r.map_err(|e| StorageError::Database(e.to_string()))?;
+                let pid = r?;
                 if !pipeline_ids.contains(&pid) {
                     pipeline_ids.push(pid);
                 }
@@ -987,8 +1000,7 @@ impl SqliteStore {
             tx.execute(
                 "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
                 rusqlite::params![thread_id, tenant_id],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
             return tx
                 .commit()
                 .map_err(|e| StorageError::Database(format!("commit: {e}")));
@@ -1011,16 +1023,15 @@ impl SqliteStore {
             let sql = format!(
                 "SELECT DISTINCT run_id FROM messages WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
             );
-            let mut stmt = tx.prepare(&sql).map_err(|e| StorageError::Database(e.to_string()))?;
+            let mut stmt = tx.prepare(&sql)?;
             let mut params: Vec<&dyn rusqlite::ToSql> =
                 pipeline_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
             params.push(&tenant_id);
             let rows = stmt
-                .query_map(params.as_slice(), |row| row.get::<_, String>(0))
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                .query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
             let mut out = Vec::new();
             for r in rows {
-                out.push(r.map_err(|e| StorageError::Database(e.to_string()))?);
+                out.push(r?);
             }
             out
         };
@@ -1054,13 +1065,11 @@ impl SqliteStore {
         tx.execute(
             "DELETE FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
             rusqlite::params![thread_id, tenant_id],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         tx.execute(
             "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
             rusqlite::params![thread_id, tenant_id],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
 
         tx.commit()
             .map_err(|e| StorageError::Database(format!("commit: {e}")))
@@ -1083,8 +1092,7 @@ impl SqliteStore {
         if !extra.is_empty() {
             params.push(&extra);
         }
-        tx.execute(&sql, params.as_slice())
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        tx.execute(&sql, params.as_slice())?;
         Ok(())
     }
 
@@ -1105,8 +1113,7 @@ impl SqliteStore {
         conn.execute(
             "INSERT OR IGNORE INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![pipeline_id, thread_id, tenant_id, now],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -1119,14 +1126,12 @@ impl SqliteStore {
     ) -> Result<Vec<String>, StorageError> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2")
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .prepare("SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2")?;
         let rows = stmt
-            .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(|e| StorageError::Database(e.to_string()))?);
+            out.push(r?);
         }
         Ok(out)
     }
@@ -1147,7 +1152,7 @@ impl SqliteStore {
         match row {
             Ok(s) => Ok(Some(s)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1172,8 +1177,7 @@ impl SqliteStore {
             sql.push_str(" LIMIT ?3");
         }
         let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .prepare(&sql)?;
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id)];
         if let Some(st) = &filter.session_type {
             params.push(Box::new(st.clone()));
@@ -1183,12 +1187,11 @@ impl SqliteStore {
         }
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let sessions = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_session)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .query_map(param_refs.as_slice(), Self::row_to_session)?;
         sessions
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 从查询行构造 SessionRecord（pipeline_ids/metadata 反序列化）。
@@ -1238,8 +1241,7 @@ impl SqliteStore {
                 user.created_at,
                 user.last_login_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -1258,7 +1260,7 @@ impl SqliteStore {
         match row {
             Ok(u) => Ok(Some(u)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1277,7 +1279,7 @@ impl SqliteStore {
         match row {
             Ok(u) => Ok(Some(u)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1288,15 +1290,13 @@ impl SqliteStore {
             .prepare(
                 "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
                  FROM users ORDER BY created_at ASC",
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         let users = stmt
-            .query_map([], Self::row_to_user)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .query_map([], Self::row_to_user)?;
         users
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 更新最近登录时间。
@@ -1306,8 +1306,7 @@ impl SqliteStore {
         conn.execute(
             "UPDATE users SET last_login_at = ?1 WHERE user_id = ?2",
             rusqlite::params![now, user_id],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -1318,8 +1317,7 @@ impl SqliteStore {
             .execute(
                 "DELETE FROM users WHERE user_id = ?1",
                 rusqlite::params![user_id],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         Ok(affected > 0)
     }
 
@@ -1347,8 +1345,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at FROM traces WHERE branch_id = ?1 AND seq_in_branch >= ?2 AND seq_in_branch <= ?3 AND tenant_id = ?4 ORDER BY seq_in_branch ASC",
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
 
         let traces = stmt
             .query_map(rusqlite::params![branch_id, from_seq, to_seq, tenant_id], |row| {
@@ -1377,13 +1374,12 @@ impl SqliteStore {
                     })?,
                     created_at: row.get(7)?,
                 })
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?;
 
         traces
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 查询某会话下的 step 级轨迹（冷启动统一回放用）。
@@ -1402,13 +1398,11 @@ impl SqliteStore {
         let mut pipeline_ids: Vec<String> = Vec::new();
         {
             let mut stmt = conn
-                .prepare("SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2")
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                .prepare("SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2")?;
             let rows = stmt
-                .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                .query_map(rusqlite::params![thread_id, tenant_id], |row| row.get::<_, String>(0))?;
             for r in rows {
-                let pid = r.map_err(|e| StorageError::Database(e.to_string()))?;
+                let pid = r?;
                 if !pipeline_ids.contains(&pid) {
                     pipeline_ids.push(pid);
                 }
@@ -1443,16 +1437,15 @@ impl SqliteStore {
             "SELECT DISTINCT run_id FROM messages WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
         );
         let run_ids: Vec<String> = {
-            let mut stmt = conn.prepare(&run_sql).map_err(|e| StorageError::Database(e.to_string()))?;
+            let mut stmt = conn.prepare(&run_sql)?;
             let mut params: Vec<&dyn rusqlite::ToSql> =
                 pipeline_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
             params.push(&tenant_id);
             let rows = stmt
-                .query_map(params.as_slice(), |row| row.get::<_, String>(0))
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                .query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
             let mut out = Vec::new();
             for r in rows {
-                out.push(r.map_err(|e| StorageError::Database(e.to_string()))?);
+                out.push(r?);
             }
             out
         };
@@ -1468,7 +1461,7 @@ impl SqliteStore {
         let trace_sql = format!(
             "SELECT trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at FROM traces WHERE run_id IN ({run_placeholders}) AND tenant_id = ? AND plugin_id NOT LIKE 'pipeline_%' ORDER BY created_at ASC"
         );
-        let mut stmt = conn.prepare(&trace_sql).map_err(|e| StorageError::Database(e.to_string()))?;
+        let mut stmt = conn.prepare(&trace_sql)?;
         let mut params: Vec<&dyn rusqlite::ToSql> = run_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
         params.push(&tenant_id);
         let traces = stmt
@@ -1498,12 +1491,11 @@ impl SqliteStore {
                     })?,
                     created_at: row.get(7)?,
                 })
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?;
         traces
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 获取当前分支最大 seq_in_branch。
@@ -1519,7 +1511,7 @@ impl SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 Err(StorageError::NotFound(format!("run not found: {}", run_id)))
             }
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1536,7 +1528,7 @@ impl SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 Err(StorageError::NotFound(format!("run not found: {}", run_id)))
             }
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1561,7 +1553,7 @@ impl SqliteStore {
                 "blob not found: {}",
                 blob_id
             ))),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1669,8 +1661,7 @@ impl SqliteStore {
                 tenant_id,
                 record.created_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -1706,15 +1697,13 @@ impl SqliteStore {
             params.push(Box::new(lim as i64));
         }
         let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_execution_record)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .query_map(param_refs.as_slice(), Self::row_to_execution_record)?;
         rows.into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 统计某 pipeline_run_id 的执行记录数。
@@ -1729,8 +1718,7 @@ impl SqliteStore {
                 "SELECT COUNT(*) FROM execution_records WHERE pipeline_run_id = ?1 AND tenant_id = ?2",
                 rusqlite::params![pipeline_run_id, tenant_id],
                 |row| row.get(0),
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         Ok(count as u64)
     }
 
@@ -1745,8 +1733,7 @@ impl SqliteStore {
             .execute(
                 "DELETE FROM execution_records WHERE pipeline_run_id = ?1 AND tenant_id = ?2",
                 rusqlite::params![pipeline_run_id, tenant_id],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         Ok(n as u64)
     }
 
@@ -1812,8 +1799,7 @@ impl SqliteStore {
                 tenant_id,
                 summary.created_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -1835,7 +1821,7 @@ impl SqliteStore {
         match row {
             Ok(s) => Ok(Some(s)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1905,15 +1891,13 @@ impl SqliteStore {
             params.push(Box::new(lim as i64));
         }
         let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_run_summary)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .query_map(param_refs.as_slice(), Self::row_to_run_summary)?;
         rows.into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 从查询行构造 MemoryRecord（tags JSON 反序列化）。
@@ -1957,8 +1941,7 @@ impl SqliteStore {
                 tenant_id,
                 memory.created_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -1978,7 +1961,7 @@ impl SqliteStore {
         match row {
             Ok(m) => Ok(Some(m)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -2005,15 +1988,13 @@ impl SqliteStore {
         params.push(Box::new(limit as i64));
         params.push(Box::new(offset as i64));
         let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_memory)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .query_map(param_refs.as_slice(), Self::row_to_memory)?;
         rows.into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     /// 关键词搜索记忆（评分=匹配次数/内容长度，倒序取 top_k）。
@@ -2050,8 +2031,7 @@ impl SqliteStore {
             .execute(
                 "DELETE FROM memory WHERE id = ?1 AND tenant_id = ?2",
                 rusqlite::params![id, tenant_id],
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
         Ok(n > 0)
     }
 }
@@ -2092,7 +2072,7 @@ impl StorageBackend for SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 Err(StorageError::NotFound(format!("run not found: {}", run_id)))
             }
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -2105,9 +2085,8 @@ impl StorageBackend for SqliteStore {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content FROM messages WHERE branch_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+                "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content, status, error FROM messages WHERE branch_id = ?1 AND tenant_id = ?2 ORDER BY seq_in_branch ASC",
+            )?;
 
         let msgs = stmt
             .query_map(rusqlite::params![branch_id, tenant_id], |row| {
@@ -2124,13 +2103,14 @@ impl StorageBackend for SqliteStore {
                     tool_calls_json: row.get(9)?,
                     tool_call_id: row.get(10)?,
                     reasoning_content: row.get(11)?,
+                    status: row.get(12)?,
+                    error: row.get(13)?,
                 })
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?;
 
         msgs.into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     async fn get_messages_by_pipeline(
@@ -2143,7 +2123,7 @@ impl StorageBackend for SqliteStore {
 
         // 动态拼装 WHERE：pipeline_id + tenant_id 必选，游标与 limit 可选
         let mut sql = String::from(
-            "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content FROM messages WHERE pipeline_id = ?1 AND tenant_id = ?2",
+            "SELECT message_id, run_id, branch_id, seq_in_branch, role, blob_id, content_preview, created_at, pipeline_id, tool_calls_json, tool_call_id, reasoning_content, status, error FROM messages WHERE pipeline_id = ?1 AND tenant_id = ?2",
         );
         let mut idx = 3;
         if opts.before_sequence.is_some() {
@@ -2160,8 +2140,7 @@ impl StorageBackend for SqliteStore {
         }
 
         let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .prepare(&sql)?;
 
         // 绑定参数顺序须与 SQL 占位符一致
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
@@ -2194,13 +2173,14 @@ impl StorageBackend for SqliteStore {
                     tool_calls_json: row.get(9)?,
                     tool_call_id: row.get(10)?,
                     reasoning_content: row.get(11)?,
+                    status: row.get(12)?,
+                    error: row.get(13)?,
                 })
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?;
 
         msgs.into_iter()
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))
+            .map_err(StorageError::from)
     }
 
     async fn next_sequence(&self, pipeline_id: &str) -> Result<u32, StorageError> {
@@ -2230,8 +2210,7 @@ impl StorageBackend for SqliteStore {
                  WHERE m.run_id = ?1 AND m.branch_id = ?2 AND m.tenant_id = ?3
                  ORDER BY m.seq_in_branch DESC
                  LIMIT ?4",
-            )
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            )?;
 
         let msgs = stmt
             .query_map(rusqlite::params![run_id, branch_id, tenant_id, n as i64], |row| {
@@ -2259,13 +2238,11 @@ impl StorageBackend for SqliteStore {
                     content,
                     blob_id,
                 })
-            })
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            })?;
 
         let mut messages: Vec<Message> = msgs
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+            .collect::<Result<Vec<_>, _>>()?;
         messages.reverse(); // 恢复时间顺序
         Ok(messages)
     }
@@ -2283,7 +2260,7 @@ impl StorageBackend for SqliteStore {
                 "blob not found: {}",
                 blob_id
             ))),
-            Err(e) => Err(StorageError::Database(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -2312,8 +2289,7 @@ impl StorageBackend for SqliteStore {
                 tenant_id,
                 entry.created_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -2330,8 +2306,7 @@ impl StorageBackend for SqliteStore {
                 tenant_id,
                 branch.created_at,
             ],
-        )
-        .map_err(|e| StorageError::Database(e.to_string()))?;
+        )?;
         Ok(())
     }
 
@@ -2362,8 +2337,7 @@ impl StorageBackend for SqliteStore {
                 conn.execute(
                     "UPDATE runs SET status = ?1, current_branch = ?2, current_seq = ?3, ended_at = COALESCE(?4, ended_at) WHERE run_id = ?5 AND tenant_id = ?6",
                     rusqlite::params![status_str, branch, seq as i64, ended, run_id, tenant_id],
-                )
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                )?;
             }
             (None, None) => {
                 let ended = if status == RunStatus::Completed || status == RunStatus::Failed {
@@ -2374,8 +2348,7 @@ impl StorageBackend for SqliteStore {
                 conn.execute(
                     "UPDATE runs SET status = ?1, ended_at = COALESCE(?2, ended_at) WHERE run_id = ?3 AND tenant_id = ?4",
                     rusqlite::params![status_str, ended, run_id, tenant_id],
-                )
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+                )?;
             }
             _ => {
                 return Err(StorageError::Database(

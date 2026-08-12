@@ -11,6 +11,10 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system" / "multimodal"))
+
 import asyncio
 import json
 import sys
@@ -21,7 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from multimodal.storage import DiskFileStorage, StorageError
-from multimodal.types import AttachmentInfo, MediaType
+from multimodal.mm_types import AttachmentInfo, MediaType
 
 
 def _async_run(coro):

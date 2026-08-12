@@ -16,15 +16,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# 确保 src 在 sys.path 中
-_src = os.path.join(os.path.dirname(__file__), "..", "..", "src")
-if _src not in sys.path:
-    sys.path.insert(0, os.path.abspath(_src))
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
-from channels.gateway.message_normalizer import MessageNormalizer
-from channels.gateway.session_bridge import SessionBridge
-from channels.gateway.channel_gateway import ChannelGateway
+from tests.channels.conftest import use_channel
+
+use_channel("gateway")
+from unified_types import UnifiedMessage, UnifiedResponse
+from message_normalizer import MessageNormalizer
+from session_bridge import SessionBridge
+from channel_gateway import ChannelGateway
 
 
 # ═══════════════════════════════════════════════════════════

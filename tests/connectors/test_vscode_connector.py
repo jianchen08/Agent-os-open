@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from connectors.types import ConnectorAction, ConnectorState
-from connectors.vscode.connector import VSCodeConnector
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from connector_types import ConnectorAction, ConnectorState
+from vscode.connector import VSCodeConnector
 
 
 @pytest.fixture
@@ -73,7 +75,7 @@ class TestGetContext:
     @pytest.mark.asyncio
     async def test_get_context_when_connected(self, connected_connector: VSCodeConnector) -> None:
         """测试已连接时获取上下文。"""
-        from connectors.types import ConnectorContext, CursorPosition
+        from connector_types import ConnectorContext, CursorPosition
 
         expected = ConnectorContext(
             active_file="test.py",

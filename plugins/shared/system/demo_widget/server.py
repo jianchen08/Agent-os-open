@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import threading
 import time
 from typing import Any
@@ -22,6 +23,7 @@ from typing import Any
 from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("demo_widget_plugin")
+logger = logging.getLogger(__name__)
 
 # 后台采样线程句柄
 _stop_event: threading.Event | None = None
@@ -52,7 +54,7 @@ async def _sample_loop() -> None:
         except (KeyError, RuntimeError) as exc:
             # metrics 能力未注入或调用失败：记录但不中断采样
             # （内核可能未启用聚合器，或 sidecar 尚未完成 MCP 握手）
-            print(f"[demo_widget_plugin] record_metric failed: {exc}", flush=True)
+            logger.warning("demo_widget_plugin record_metric failed: %s", exc)
         # asyncio Event 不支持跨线程 is_set，用 threading.Event + run_in_executor 轮询
         await loop.run_in_executor(None, _stop_event.wait, 1.0)
 
@@ -70,7 +72,7 @@ async def _on_load(_params: Any) -> None:
 
     _sample_thread = threading.Thread(target=_run_sample_loop, daemon=True, name="demo-sample")
     _sample_thread.start()
-    print("[demo_widget_plugin] on_load: 采样线程已启动", flush=True)
+    logger.info("demo_widget_plugin on_load: 采样线程已启动")
 
 
 @plugin.tool(

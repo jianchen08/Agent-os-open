@@ -18,8 +18,14 @@ from typing import Any
 
 import pytest
 
-from scene import SceneManager, ScenePersistence
-from scene.models import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"))
+
+from scene.manager import SceneManager  # noqa: E402
+from scene.persistence import ScenePersistence  # noqa: E402
+from scene.models import (  # noqa: E402
     Scene,
     SceneCreateRequest,
     SceneLayoutConfig,

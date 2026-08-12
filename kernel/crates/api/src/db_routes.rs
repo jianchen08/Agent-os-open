@@ -595,11 +595,11 @@ fn insert_row_inner(
         insert_values.push(Box::new(serde_json_to_sql(v)));
     }
     // 租户隔离：有 tenant_id 列则从 token 注入（忽略客户端传入，防跨租户写入）
-    if cols.iter().any(|c| c.name == "tenant_id") {
-        if !insert_cols.iter().any(|c| c == "\"tenant_id\"") {
-            insert_cols.push(quote_ident("tenant_id"));
-            insert_values.push(Box::new(tenant_id.to_string()));
-        }
+    if cols.iter().any(|c| c.name == "tenant_id")
+        && !insert_cols.iter().any(|c| c == "\"tenant_id\"")
+    {
+        insert_cols.push(quote_ident("tenant_id"));
+        insert_values.push(Box::new(tenant_id.to_string()));
     }
     if insert_cols.is_empty() {
         // 全默认值插入（表无任何列可写时兜底；实际表均有主键等列）
@@ -1154,7 +1154,7 @@ mod tests {
         }
         // 每个表有 columns 与 row_count
         let runs = tables.iter().find(|t| t["name"] == "runs").unwrap();
-        assert!(runs["columns"].as_array().unwrap().len() > 0);
+        assert!(!runs["columns"].as_array().unwrap().is_empty());
         assert!(runs["row_count"].is_number());
         // 列含主键标志
         let run_cols = runs["columns"].as_array().unwrap();

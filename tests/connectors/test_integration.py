@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
 from channels.input_adapter import IInputAdapter
 from channels.output_adapter import IOutputAdapter
 from connectors.base import BaseConnector

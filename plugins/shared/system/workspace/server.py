@@ -14,6 +14,9 @@ import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
+_SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SYSTEM_DIR not in sys.path:
+    sys.path.insert(0, _SYSTEM_DIR)
 
 from agentos_plugin_sdk import AgentOSPlugin
 

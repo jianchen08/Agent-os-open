@@ -1,3 +1,5 @@
+import tests._tasks_path  # noqa: F401  注入 tasks 插件目录到 sys.path
+
 # -*- coding: utf-8 -*-
 """端到端闭环测试：验证任务从创建到完成的完整生命周期。
 
@@ -10,33 +12,24 @@
 6. 失败路径（FAILED 状态）
 7. 全量数据一致性校验
 8. 状态机约束验证
-9. 状态变更事件验证
+9. 删除任务与文件清理
 
-设计原则：
-- 不依赖 LLM API，纯 TaskStorage + SimpleStateMachine 驱动
-- 几十秒内完成
-- 自检验：每个步骤都验证产出文件和日志
+0.2 迁移：tasks.types → tasks.task_types；其余 tasks 子模块平铺 import。
+状态机表对齐 0.2 的 7 态（pending/running/evaluating/stopped/completed/failed/timeout，
+旧的 scheduled/suspended/blocked/cancelled 已合并/移除）。
+设计原则：不依赖 LLM API，纯 TaskStorage + SimpleStateMachine 驱动。
 """
 
-import logging
 import shutil
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("closed_loop_test")
 
 import pytest
 
-from tasks.state_machine import InvalidTransitionError, SimpleStateMachine
-from tasks.storage import TaskStorage
-from tasks.types import TaskModel, TaskStatus
+from state_machine import InvalidTransitionError, SimpleStateMachine
+from storage import TaskStorage
+from task_types import TaskModel, TaskStatus
+
+pytestmark = pytest.mark.unit
 
 # ── 测试隔离：使用临时数据目录 ──
 TEST_DATA_DIR = Path("data") / "tasks_test_closed_loop"
@@ -59,20 +52,17 @@ def _make_storage() -> TaskStorage:
 
 
 # ═══════════════════════════════════════════════════════════
-# 任务状态转换规则（与 state_machine.py 中 _TASK_TRANSITIONS 一致）
+# 任务状态转换规则（与 state_machine.py 中 _TASK_TRANSITIONS 一致，0.2 七态）
 # ═══════════════════════════════════════════════════════════
 
 TASK_TRANSITIONS = {
-    "pending": ["scheduled", "running", "cancelled"],
-    "scheduled": ["running", "cancelled"],
-    "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled"],
-    "evaluating": ["completed", "failed", "running"],
-    "suspended": ["running", "cancelled", "timeout"],
-    "blocked": ["running", "cancelled", "failed"],
-    "completed": [],
-    "failed": ["pending"],
-    "cancelled": [],
-    "timeout": ["running", "cancelled", "failed"],
+    "pending": ["running", "stopped", "completed", "failed"],
+    "running": ["evaluating", "completed", "failed", "stopped", "timeout"],
+    "evaluating": ["running", "completed", "failed", "stopped"],
+    "stopped": ["running", "pending"],
+    "completed": ["pending"],
+    "failed": ["pending", "running"],
+    "timeout": ["running", "pending", "failed"],
 }
 
 
@@ -108,8 +98,6 @@ class TestTaskCreateAndPersist:
         assert data["id"] == task.id
         assert data["status"] == "pending"
         assert data["title"] == "闭环测试任务-01"
-
-        logger.info("[TC01 PASS] 任务创建并持久化成功 | id=%s", task.id)
 
 
 class TestStateTransitions:
@@ -149,8 +137,6 @@ class TestStateTransitions:
         updated = storage.get(task.id)
         assert updated.status == TaskStatus.COMPLETED
         assert updated.result == {"score": 100, "detail": "全部通过"}
-
-        logger.info("[TC02 PASS] 状态转换完整路径验证成功")
 
 
 class TestCompletedYaml:
@@ -194,8 +180,6 @@ class TestCompletedYaml:
         assert data["result"]["score"] == 100
         assert data["result"]["detail"] == "全部通过"
 
-        logger.info("[TC03 PASS] 完成 YAML 全字段验证通过")
-
 
 class TestSubtaskHierarchy:
     """TC04: 子任务创建与层级关系。"""
@@ -232,8 +216,6 @@ class TestSubtaskHierarchy:
         assert subs[0].id == child.id
         assert subs[0].status == TaskStatus.COMPLETED
 
-        logger.info("[TC04 PASS] 子任务层级关系验证通过 | parent=%s child=%s", parent.id, child.id)
-
 
 class TestFailedPath:
     """TC05: 失败路径（RUNNING → FAILED）。"""
@@ -257,8 +239,6 @@ class TestFailedPath:
         assert data["status"] == "failed"
         assert data["error"] == "验收不通过"
 
-        logger.info("[TC05 PASS] 失败路径验证通过 | task_id=%s", task.id)
-
 
 class TestStateMachineConstraints:
     """TC10: 状态机约束验证（非法转换应抛异常）。"""
@@ -266,27 +246,28 @@ class TestStateMachineConstraints:
     def test_invalid_transition_raises(self):
         sm = SimpleStateMachine(initial_state="pending", transitions=TASK_TRANSITIONS)
 
-        # completed 不允许任何转换
+        # 0.2: completed → pending 允许（重置），但 completed → running 不允许
         sm.transition("running")
         sm.transition("completed")
         assert sm.current_state == "completed"
 
         with pytest.raises(InvalidTransitionError):
-            sm.transition("running")
+            sm.transition("running")  # completed 只能回 pending
 
-    def test_direct_pending_to_completed_blocked(self):
+    def test_direct_pending_to_evaluating_blocked(self):
         sm = SimpleStateMachine(initial_state="pending", transitions=TASK_TRANSITIONS)
-        # pending 不能直接转到 completed
+        # 0.2: pending 不能直接转到 evaluating（必须先 running）
         with pytest.raises(InvalidTransitionError):
-            sm.transition("completed")
+            sm.transition("evaluating")
 
     def test_can_transition(self):
         sm = SimpleStateMachine(initial_state="pending", transitions=TASK_TRANSITIONS)
         assert sm.can_transition("running")
-        assert not sm.can_transition("completed")
-        assert sm.can_transition("cancelled")
-
-        logger.info("[TC10 PASS] 状态机约束验证通过")
+        # 0.2: pending 允许 completed/failed/stopped（终态直达），但禁止 evaluating
+        assert sm.can_transition("completed")
+        assert not sm.can_transition("evaluating")
+        # 0.2: pending 允许 stopped（恢复语义），无 cancelled
+        assert sm.can_transition("stopped")
 
 
 class TestDataConsistency:
@@ -335,8 +316,6 @@ class TestDataConsistency:
         pending_tasks = storage.list_by_status(TaskStatus.PENDING)
         assert len(pending_tasks) >= 2, f"应有至少 2 个 pending 任务，实际: {len(pending_tasks)}"
 
-        logger.info("[TC11 PASS] 全量数据一致性校验通过 | 共 %d 个任务", len(tasks))
-
 
 class TestDeleteTask:
     """TC13: 删除任务及文件清理。"""
@@ -358,8 +337,6 @@ class TestDeleteTask:
         deleted = storage.delete("nonexistent_id")
         assert not deleted
 
-        logger.info("[TC13 PASS] 删除任务验证通过")
-
 
 class TestResetFailedTask:
     """TC09: 重置失败任务为 pending。"""
@@ -376,7 +353,7 @@ class TestResetFailedTask:
         updated = storage.get(task.id)
         assert updated.status == TaskStatus.FAILED
 
-        # 重置为 pending
+        # 重置为 pending（0.2 状态机允许 failed → pending）
         storage.update(task.id, status=TaskStatus.PENDING, error=None)
         updated = storage.get(task.id)
         assert updated.status == TaskStatus.PENDING
@@ -385,5 +362,3 @@ class TestResetFailedTask:
         yaml_file = TEST_DATA_DIR / f"tree_{task.id}" / f"{task.id}.yaml"
         data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
         assert data["status"] == "pending"
-
-        logger.info("[TC09 PASS] 重置为 pending 验证通过 | task_id=%s", task.id)

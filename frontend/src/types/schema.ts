@@ -8,7 +8,7 @@
  * - ui 字段（input_form / result_widget）—— SchemaDriver 新解析能力
  * - ui_contributions —— 插件贡献的 Widget/面板/快捷按钮
  * - ui_schema（0.1 向后兼容字段）
- * - scene 渲染空间（3D/Canvas/游戏场景预留）
+ * - scene 渲染空间（@deprecated 不作为独立空间，形象走 workspace widget，见 RenderingSpaceType）
  */
 
 /** 模块身份信息 */
@@ -77,8 +77,12 @@ export interface ChatInteractionConfig {
 /**
  * 渲染空间类型
  *
- * 0.2 新增 'scene'：场景化渲染（3D/Canvas/游戏场景，后续版本数字人/游戏接入）
- * 'fullscreen' 保留向后兼容
+ * 'fullscreen' 保留向后兼容。
+ *
+ * @deprecated 'scene' 不作为独立空间——数字人/3D/2D 形象走 workspace 的 widget
+ * （注册名 digital_human / avatar_3d 等），见 ADR §2.1 / §7.6。
+ * 枚举值暂保留仅为向后兼容（已有 Schema 可能声明 scene），不再往里填新内容；
+ * 渲染层会把 scene 接入 workspace 管线或忽略。新代码请勿使用 'scene'。
  */
 export type RenderingSpaceType = 'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen' | 'scene'
 

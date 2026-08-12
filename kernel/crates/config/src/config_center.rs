@@ -76,6 +76,8 @@ pub struct ConfigCenter {
     config_cache: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     debounce_state: Arc<RwLock<HashMap<String, Instant>>>,
     audit_log: Arc<RwLock<Vec<AuditEntry>>>,
+    /// load() 的 mtime 缓存：path → 文件 mtime（pull 模式变更检测依据）
+    mtime_cache: Arc<RwLock<HashMap<String, std::time::SystemTime>>>,
 }
 
 use parking_lot::RwLock;
@@ -90,6 +92,7 @@ impl ConfigCenter {
             config_cache: Arc::new(RwLock::new(HashMap::new())),
             debounce_state: Arc::new(RwLock::new(HashMap::new())),
             audit_log: Arc::new(RwLock::new(Vec::new())),
+            mtime_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -102,6 +105,7 @@ impl ConfigCenter {
             config_cache: Arc::new(RwLock::new(HashMap::new())),
             debounce_state: Arc::new(RwLock::new(HashMap::new())),
             audit_log: Arc::new(RwLock::new(Vec::new())),
+            mtime_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -140,6 +144,204 @@ impl ConfigCenter {
             }
         }
         "unknown".to_string()
+    }
+
+    /// Pull 模式带缓存加载：mtime 变了才重读磁盘，否则返回缓存。
+    ///
+    /// 这是统一配置加载的**核心入口**（设计文档决策 1+3）。
+    /// 调用方决定调用频率（per-run / per-iteration），本方法保证：
+    /// - mtime 不变 → 返回缓存（不读磁盘）
+    /// - mtime 变了 → 重读 + 解析 + 刷新缓存 + 审计
+    /// - 解析失败 → 保留旧缓存（失败回滚），返回 Err
+    ///
+    /// 内部复用 `reload()` 的缓存写入逻辑，保证缓存/审计/回滚一致。
+    pub fn load(&self, path: &str) -> Result<serde_json::Value, ConfigError> {
+        let abs_path = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.config_root.join(path)
+        };
+        let path_str = abs_path.to_string_lossy().to_string();
+
+        // ① 先查缓存：若缓存存在且 mtime 一致，直接返回（即使文件已被删除）
+        //    —— 这是"缓存命中不读磁盘"的核心契约（test_load_returns_cache_when_mtime_unchanged）
+        if let Some(cached) = self.config_cache.read().get(&path_str) {
+            let cached_mtime = self.last_known_mtime(&path_str);
+            let disk_mtime = abs_path.metadata().and_then(|m| m.modified()).ok();
+            match disk_mtime {
+                Some(m) if m == cached_mtime => {
+                    return Ok(cached.clone()); // mtime 一致，缓存命中
+                }
+                None if cached_mtime != std::time::UNIX_EPOCH => {
+                    return Ok(cached.clone()); // 文件已删但缓存还在，返回缓存
+                }
+                _ => {} // mtime 变了或首次加载，继续走 reload
+            }
+        }
+
+        if !abs_path.exists() {
+            return Err(ConfigError::NotFound { path: path_str });
+        }
+
+        let current_mtime = abs_path
+            .metadata()
+            .and_then(|m| m.modified())
+            .map_err(|e| ConfigError::Io { message: e.to_string() })?;
+
+        // ② 需要重读：调 reload（复用其缓存写入 + 审计 + 回滚）
+        let (ok, _rolled_back, err) = self.reload(&path_str);
+        if !ok {
+            return Err(ConfigError::Io {
+                message: err.unwrap_or_else(|| "reload failed".to_string()),
+            });
+        }
+        self.mtime_cache.write().insert(path_str.clone(), current_mtime);
+
+        self.config_cache
+            .read()
+            .get(&path_str)
+            .cloned()
+            .ok_or(ConfigError::NotFound { path: path_str })
+    }
+
+    /// 取缓存中记录的 mtime（用于 load 的变更检测）。
+    fn last_known_mtime(&self, path_str: &str) -> std::time::SystemTime {
+        // 无记录视为 epoch（一定不等于真实 mtime，触发重读）
+        self.mtime_cache
+            .read()
+            .get(path_str)
+            .copied()
+            .unwrap_or(std::time::UNIX_EPOCH)
+    }
+
+    /// 原子写入配置文件 + 刷新缓存。
+    ///
+    /// 写入流程：建父目录 → 写 `.tmp` → `rename` 原子替换 → 更新缓存。
+    /// 原子写避免 reader（load）读到半写文件。
+    /// 写后 load() 能立即读到新内容（缓存已刷新到新 mtime）。
+    pub fn store(&self, path: &str, content: &str) -> Result<(), ConfigError> {
+        let abs_path = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.config_root.join(path)
+        };
+        let path_str = abs_path.to_string_lossy().to_string();
+
+        // 建父目录（支持 agents/sub/deep.yaml 这种深路径）
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io { message: e.to_string() })?;
+        }
+
+        // 原子写：先写隐藏 .tmp，再 rename 替换
+        let tmp_path = abs_path.with_extension("yaml.tmp");
+        std::fs::write(&tmp_path, content).map_err(|e| ConfigError::Io { message: e.to_string() })?;
+        std::fs::rename(&tmp_path, &abs_path).map_err(|e| ConfigError::Io { message: e.to_string() })?;
+
+        // 刷新缓存：直接用新内容 + 新 mtime，让 load() 立即读到
+        let new_value: serde_json::Value = serde_yaml::from_str(content)
+            .map_err(|e| ConfigError::YamlParse { path: path_str.clone(), message: e.to_string() })?;
+        let new_mtime = abs_path
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::now());
+
+        {
+            let mut cache = self.config_cache.write();
+            cache.insert(path_str.clone(), new_value);
+        }
+        self.mtime_cache.write().insert(path_str.clone(), new_mtime);
+
+        // 同步 content_hashes（reload 去重用），保持缓存三件套一致
+        {
+            let mut hashes = self.content_hashes.write();
+            hashes.insert(path_str, Self::compute_hash(content));
+        }
+
+        Ok(())
+    }
+
+    /// 批量加载目录下所有 .yaml/.yml（递归），返回嵌套 Map。
+    ///
+    /// 结构对齐 `plugin-loader collect_yaml_configs`：
+    ///   - 文件 → `{stem: content}`
+    ///   - 子目录 → `{子目录名: {子内容}}`
+    ///   - 跳过隐藏文件（`.` 前缀）和非 yaml 文件
+    ///   - 单文件解析失败跳过，不连累整体
+    ///
+    /// 每个文件复用 `load()`（享受 mtime 缓存 + 失败回滚）。
+    pub fn load_dir(
+        &self,
+        rel_dir: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ConfigError> {
+        let abs_dir = if Path::new(rel_dir).is_absolute() {
+            PathBuf::from(rel_dir)
+        } else {
+            self.config_root.join(rel_dir)
+        };
+
+        if !abs_dir.exists() {
+            return Err(ConfigError::NotFound {
+                path: abs_dir.to_string_lossy().to_string(),
+            });
+        }
+
+        let mut result = serde_json::Map::new();
+        self.collect_dir_recursive(&abs_dir, &mut result)?;
+        Ok(result)
+    }
+
+    /// 递归收集目录内容到 config_map（结构对齐 collect_yaml_configs）。
+    fn collect_dir_recursive(
+        &self,
+        dir: &Path,
+        config_map: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), ConfigError> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| ConfigError::Io { message: e.to_string() })?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                let dir_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut sub_map = serde_json::Map::new();
+                self.collect_dir_recursive(&path, &mut sub_map)?;
+                if !sub_map.is_empty() {
+                    config_map.insert(dir_name, serde_json::Value::Object(sub_map));
+                }
+            } else if path.is_file() {
+                // 跳过隐藏文件
+                let is_hidden = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with('.'))
+                    .unwrap_or(false);
+                if is_hidden {
+                    continue;
+                }
+                // 只处理 yaml/yml
+                let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+                if ext.as_deref() != Some("yaml") && ext.as_deref() != Some("yml") {
+                    continue;
+                }
+                let stem = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                // 复用 load()（mtime 缓存 + 失败回滚）；单文件失败跳过
+                match self.load(&path.to_string_lossy()) {
+                    Ok(v) => {
+                        config_map.insert(stem, v);
+                    }
+                    Err(e) => {
+                        warn!("Skipping unparseable config file {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 手动重载指定配置文件。
@@ -638,5 +840,236 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(600));
         assert!(center.check_debounce(path));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TDD-1: load() pull 模式核心方法测试
+    // 设计依据：docs/working/重要设计/统一配置加载方案.md 决策 1+3
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_load_reads_file_first_time() {
+        // 契约：首次调用读文件，返回解析后的 YAML 内容
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "foo: bar\nnum: 42\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let val = cc.load("cfg.yaml").expect("首次加载应成功");
+
+        assert_eq!(val["foo"], "bar");
+        assert_eq!(val["num"], 42);
+    }
+
+    #[test]
+    fn test_load_returns_cache_when_mtime_unchanged() {
+        // 契约：mtime 不变时，第二次调用返回缓存（不重读磁盘）
+        // 验证方式：第二次调用后删掉文件，load 仍应成功（说明读的是缓存）
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "key: value\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let _ = cc.load("cfg.yaml").unwrap();
+
+        // 删文件，缓存应仍可用
+        std::fs::remove_file(temp.path().join("cfg.yaml")).unwrap();
+        let val = cc.load("cfg.yaml").expect("mtime 不变应返回缓存");
+        assert_eq!(val["key"], "value");
+    }
+
+    #[test]
+    fn test_load_rereads_when_mtime_changed() {
+        // 契约：文件 mtime 变了（内容更新），load 重读返回新内容
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "v: 1\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let v1 = cc.load("cfg.yaml").unwrap();
+        assert_eq!(v1["v"], 1);
+
+        // 改内容（确保 mtime 变化——sleep 跨过文件系统 mtime 精度）
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(temp.path().join("cfg.yaml"), "v: 2\n").unwrap();
+
+        let v2 = cc.load("cfg.yaml").unwrap();
+        assert_eq!(v2["v"], 2);
+    }
+
+    #[test]
+    fn test_load_returns_err_when_file_missing() {
+        // 契约：文件不存在返回 Err（ConfigError::NotFound 或 Io）
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        let result = cc.load("nonexistent.yaml");
+        assert!(result.is_err(), "文件不存在应返回 Err");
+    }
+
+    #[test]
+    fn test_load_keeps_old_cache_on_parse_failure() {
+        // 契约：YAML 解析失败时保留旧缓存（失败回滚），返回 Err
+        // 验证：先加载合法配置 → 写入非法 YAML → load 报错但旧缓存仍在
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "good: yes\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let _ = cc.load("cfg.yaml").unwrap();
+
+        // 写入非法 YAML（确保 mtime 变化触发重读）
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(temp.path().join("cfg.yaml"), "bad: [unclosed\n").unwrap();
+
+        let result = cc.load("cfg.yaml");
+        assert!(result.is_err(), "非法 YAML 应返回 Err");
+
+        // 旧缓存应该还在（get 能拿到旧值）—— 但 get 读的是 reload() 维护的缓存，
+        // load() 应共用同一份缓存，所以解析失败后 get 应返回旧值
+        let cached = cc.get("cfg.yaml");
+        assert!(cached.is_some(), "解析失败应保留旧缓存");
+        assert_eq!(cached.unwrap()["good"], "yes");
+    }
+
+    #[test]
+    fn test_load_records_audit_on_reload() {
+        // 契约：实际重读（非缓存命中）时记录审计日志
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "x: 1\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let _ = cc.load("cfg.yaml").unwrap();
+
+        let log = cc.get_audit_log(10);
+        assert_eq!(log.len(), 1, "首次加载应记 1 条审计");
+        assert!(log[0].success);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TDD-2: store() 原子写测试
+    // 设计依据：docs/working/重要设计/统一配置加载方案.md 决策 4（阶段 4）
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_store_writes_content() {
+        // 契约：store 写入后，文件内容正确
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        cc.store("cfg.yaml", "foo: bar\n").expect("store 应成功");
+
+        let content = std::fs::read_to_string(temp.path().join("cfg.yaml")).unwrap();
+        assert_eq!(content, "foo: bar\n");
+    }
+
+    #[test]
+    fn test_store_then_load_sees_new_content() {
+        // 契约：store 后 load 能读到新内容（缓存自动失效）
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "v: 1\n").unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        let _ = cc.load("cfg.yaml").unwrap();
+        assert_eq!(cc.load("cfg.yaml").unwrap()["v"], 1);
+
+        cc.store("cfg.yaml", "v: 2\n").unwrap();
+
+        let after = cc.load("cfg.yaml").unwrap();
+        assert_eq!(after["v"], 2, "store 后 load 应读到新内容");
+    }
+
+    #[test]
+    fn test_store_creates_parent_dirs() {
+        // 契约：store 到不存在的子目录时自动创建
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        cc.store("agents/sub/deep.yaml", "key: val\n").expect("应自动创建子目录");
+
+        assert!(temp.path().join("agents/sub/deep.yaml").exists());
+    }
+
+    #[test]
+    fn test_store_no_partial_file_on_success() {
+        // 契约：原子写——成功后不留 .tmp 残留文件
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        cc.store("cfg.yaml", "x: 1\n").unwrap();
+
+        assert!(!temp.path().join("cfg.yaml.tmp").exists(), "不应残留 .tmp 文件");
+        assert!(!temp.path().join(".cfg.yaml.tmp").exists(), "不应残留隐藏 .tmp 文件");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TDD-3: load_dir() 批量加载目录测试
+    // 设计依据：统一配置加载方案.md 阶段 3（plugin config_files 统一）
+    // 返回结构对齐 plugin-loader collect_yaml_configs：嵌套 Map
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_load_dir_returns_all_yaml_files() {
+        // 契约：加载目录下所有 .yaml/.yml，返回 {stem: content}
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.yaml"), "x: 1\n").unwrap();
+        std::fs::write(temp.path().join("b.yml"), "y: 2\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let map = cc.load_dir(".").expect("load_dir 应成功");
+
+        assert_eq!(map["a"]["x"], 1);
+        assert_eq!(map["b"]["y"], 2);
+    }
+
+    #[test]
+    fn test_load_dir_nested_subdirs() {
+        // 契约：子目录嵌套为 {子目录名: {文件stem: content}}
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("models")).unwrap();
+        std::fs::write(temp.path().join("models/llm.yaml"), "chat: gpt\n").unwrap();
+        std::fs::write(temp.path().join("top.yaml"), "z: 9\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let map = cc.load_dir(".").expect("load_dir 应成功");
+
+        assert_eq!(map["models"]["llm"]["chat"], "gpt");
+        assert_eq!(map["top"]["z"], 9);
+    }
+
+    #[test]
+    fn test_load_dir_skips_non_yaml_and_hidden() {
+        // 契约：跳过非 yaml 文件和隐藏文件（. 前缀）
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("cfg.yaml"), "ok: true\n").unwrap();
+        std::fs::write(temp.path().join("readme.md"), "not yaml\n").unwrap();
+        std::fs::write(temp.path().join(".hidden.yaml"), "hidden: true\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let map = cc.load_dir(".").unwrap();
+
+        assert!(map.contains_key("cfg"));
+        assert!(!map.contains_key("readme"), "非 yaml 应被跳过");
+        assert!(!map.contains_key(".hidden"), "隐藏文件应被跳过");
+    }
+
+    #[test]
+    fn test_load_dir_missing_returns_err() {
+        // 契约：目录不存在返回 Err
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        let result = cc.load_dir("nonexistent_dir");
+        assert!(result.is_err(), "目录不存在应返回 Err");
+    }
+
+    #[test]
+    fn test_load_dir_skips_unparseable_file() {
+        // 契约：单个文件解析失败不连累整体（跳过坏文件）
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("good.yaml"), "ok: 1\n").unwrap();
+        std::fs::write(temp.path().join("bad.yaml"), "bad: [unclosed\n").unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let map = cc.load_dir(".").unwrap();
+
+        assert!(map.contains_key("good"), "合法文件应正常加载");
+        // bad 文件被跳过，不出现或值为空（不连累 good）
     }
 }

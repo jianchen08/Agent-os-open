@@ -18,7 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from tools.builtin.bash.process_manager import ProcessManager
+from process_manager import ProcessManager
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeStream:

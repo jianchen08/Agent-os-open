@@ -21,7 +21,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from plugins.output.track.plugin import TrackPlugin  # noqa: E402
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("output", "track")
+from plugin import TrackPlugin  # noqa: E402
 
 PIPELINE_ID = "pipeline_test_001"
 

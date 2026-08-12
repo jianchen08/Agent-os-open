@@ -10,6 +10,9 @@
 """
 
 from __future__ import annotations
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("input", "level_guard")
+add_plugin_dir("input", "tool_call_guard")
 
 from typing import Any
 
@@ -18,6 +21,8 @@ import pytest
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
+pytestmark = pytest.mark.unit
+
 
 # ═══════════════════════════════════════════════════════════════
 # level_guard：只读探查工具豁免
@@ -25,7 +30,7 @@ from pipeline.types import StateKeys
 
 
 def _make_level_guard() -> Any:
-    from plugins.input.level_guard.plugin import LevelGuardPlugin
+    from plugin import LevelGuardPlugin
     return LevelGuardPlugin()
 
 
@@ -125,7 +130,7 @@ class TestLevelGuardReadonlyProbeExempt:
 
 
 def _make_tool_call_guard() -> Any:
-    from plugins.input.tool_call_guard.plugin import ToolCallGuard
+    from plugin import ToolCallGuard
     return ToolCallGuard()
 
 

@@ -82,14 +82,18 @@ impl NativePluginLoader {
     }
 
     fn load_inner(path: &Path) -> Result<NativePlugin, PluginError> {
-        // dlopen 加载 cdylib。
+        // SAFETY: `path` 由 loader 校验为插件目录下的 cdylib（plugin.json host_type=native 指定）。
+        // dlopen 会执行库的构造段——这是动态插件加载的固有契约；Library 句柄存入
+        // NativePlugin._lib 随插件生命周期持有，drop 时 dlclose，不会提前卸载。
         let lib = unsafe { Library::new(path) }.map_err(|e| PluginError {
             message: format!("native plugin load failed ({}): {}", path.display(), e),
             code: Some("NATIVE_LOAD_FAILED".to_string()),
             source: Some("native-loader".to_string()),
         })?;
 
-        // 拿构造函数符号。
+        // SAFETY: lib.get 要求符号的函数签名与 CreateFn 一致。CREATE_FN_NAME
+        // (b"plugin_entry") 是 native-sdk 约定的 C ABI 导出（extern "C"），签名固定为
+        // `unsafe extern "C" fn() -> *mut ()`，C ABI 无名称修饰，类型匹配成立。
         let create_fn: CreateFn = unsafe {
             let sym: Symbol<CreateFn> = lib.get(CREATE_FN_NAME).map_err(|e| PluginError {
                 message: format!(
@@ -106,6 +110,9 @@ impl NativePluginLoader {
         // 调构造函数拿裸指针，还原为 Box<dyn PipelinePlugin>。
         // SAFETY: create_fn 由插件 cdylib 导出，返回 plugin_into_raw 产生的双重 Box 指针。
         let ptr = unsafe { create_fn() };
+        // SAFETY: ptr 由 create_fn()（插件 plugin_entry 导出）产生，按 native-sdk 契约
+        // 必须是 plugin_into_raw 生成的双重 Box 指针；box_from_raw 还原所有权并转移给 loader。
+        // null 已由 box_from_raw 内部处理（返回 None → 下游 NATIVE_CREATE_NULL 错误）。
         let instance: Box<dyn PipelinePlugin> = unsafe { box_from_raw(ptr) }.ok_or_else(|| PluginError {
             message: format!("native plugin create returned null pointer: {}", path.display()),
             code: Some("NATIVE_CREATE_NULL".to_string()),

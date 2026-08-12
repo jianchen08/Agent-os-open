@@ -17,11 +17,13 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
-from connectors.base import BaseConnector
-from connectors.config_mixin import ConfigSubscriberMixin
-from connectors.degradation import DegradationManager
-from connectors.registry import ConnectorRegistry
-from connectors.types import (
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from base import BaseConnector
+from config_mixin import ConfigSubscriberMixin
+from degradation import DegradationManager
+from registry import ConnectorRegistry
+from connector_types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,

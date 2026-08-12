@@ -2,7 +2,7 @@
  * 记忆 API 服务测试
  *
  * 测试情景记忆和语义记忆的管理接口
- * 与后端 /api/v1/memory/* 端点对齐
+ * 与后端 /ext/channel_api/memory/* 端点对齐（4c 迁移后的 dispatcher 路径）
  */
 
 /* eslint-disable import-x/order */
@@ -13,6 +13,7 @@ import {
   getEpisodes,
   getMemoryStats,
   getSemanticMemory,
+  importDocument,
   searchMemory,
 } from '@/services/api/memory'
 // Mock axios
@@ -58,7 +59,7 @@ describe('记忆 API', () => {
       const result = await getEpisodes()
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/memory/episodes', {
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/episodes', {
         params: { page: 1, page_size: 20 },
       })
     })
@@ -69,7 +70,7 @@ describe('记忆 API', () => {
 
       await getEpisodes(2, 10)
 
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/memory/episodes', {
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/episodes', {
         params: { page: 2, page_size: 10 },
       })
     })
@@ -90,7 +91,7 @@ describe('记忆 API', () => {
       const result = await getEpisode('1')
 
       expect(result).toEqual(mockEpisode)
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/memory/episodes/1')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/episodes/1')
     })
   })
 
@@ -106,7 +107,7 @@ describe('记忆 API', () => {
       const result = await searchMemory('代码重构')
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/memory/search', {
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/search', {
         query: '代码重构',
         top_k: 10,
         min_score: 0.5,
@@ -124,7 +125,7 @@ describe('记忆 API', () => {
         min_score: 0.7,
       })
 
-      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/memory/search', {
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/search', {
         query: 'test',
         memory_types: ['episode'],
         top_k: 5,
@@ -144,7 +145,7 @@ describe('记忆 API', () => {
       const result = await getSemanticMemory()
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/memory/semantic')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/semantic')
     })
   })
 
@@ -161,7 +162,7 @@ describe('记忆 API', () => {
 
       expect(result).toEqual(mockResponse)
       expect(result.success).toBe(true)
-      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/memory/consolidate')
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/consolidate')
     })
   })
 
@@ -178,7 +179,39 @@ describe('记忆 API', () => {
       const result = await getMemoryStats()
 
       expect(result).toEqual(mockStats)
-      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/memory/stats')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/channel_api/memory/stats')
+    })
+  })
+
+  describe('importDocument - 文档导入', () => {
+    it('应 POST /ext/channel_api/memory/import 并返回导入数量', async () => {
+      vi.mocked(apiClient.post).mockResolvedValueOnce({
+        data: { imported: 3, name: '知识库' },
+      })
+
+      const result = await importDocument('文档内容', undefined, '知识库')
+
+      expect(result).toEqual({ imported: 3, name: '知识库' })
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/import', {
+        text: '文档内容',
+        file_path: undefined,
+        name: '知识库',
+      })
+    })
+
+    it('应支持 file_path 导入并返回空名称', async () => {
+      vi.mocked(apiClient.post).mockResolvedValueOnce({
+        data: { imported: 0, name: '' },
+      })
+
+      const result = await importDocument(undefined, '/data/docs/guide.md')
+
+      expect(result).toEqual({ imported: 0, name: '' })
+      expect(apiClient.post).toHaveBeenCalledWith('/ext/channel_api/memory/import', {
+        text: undefined,
+        file_path: '/data/docs/guide.md',
+        name: undefined,
+      })
     })
   })
 

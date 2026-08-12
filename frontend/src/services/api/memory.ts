@@ -9,6 +9,7 @@
  * - searchMemory(query, options): MemorySearchResponse - 搜索记忆
  * - getSemanticMemory(options): 语义记忆列表 - 获取语义记忆列表
  * - consolidateMemory(options): 整合结果 - 记忆整合
+ * - importDocument(text, filePath, name, options): {imported, name} - 导入文档到记忆
  * - getMemoryStats(options): MemoryStats - 获取记忆统计
  * - MemoryItem - 记忆项类型
  * - MemorySearchResponse - 记忆搜索响应
@@ -190,6 +191,21 @@ export async function consolidateMemory(
       message: string
       consolidated_count?: number
     }>(API_ENDPOINTS.MEMORY.CONSOLIDATE)
+    return response.data
+  }, options)
+}
+
+export async function importDocument(
+  text?: string,
+  filePath?: string,
+  name?: string,
+  options: RetryOptions = {},
+): Promise<{ imported: number; name?: string }> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.post<{ imported: number; name?: string }>(
+      API_ENDPOINTS.MEMORY.IMPORT,
+      { text, file_path: filePath, name },
+    )
     return response.data
   }, options)
 }

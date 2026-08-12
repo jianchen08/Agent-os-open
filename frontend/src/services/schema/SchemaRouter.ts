@@ -32,14 +32,14 @@ export class SchemaRouter {
    * - image_viewer → chat（图片查看）
    * - floating_assistant → floating（悬浮助手）
    * - custom_tool_panel → dock（自定义工具面板）
-   * - digital_human → scene（数字人形象，预留）
+   * - digital_human → workspace（数字人/形象是 workspace 的 widget，不占独立空间；ADR §2.1 / §7.6）
    */
   private readonly defaultRoutes: Map<string, RenderingSpaceType> = new Map([
     ['review_document', 'workspace'],
     ['image_viewer', 'chat'],
     ['floating_assistant', 'floating'],
     ['custom_tool_panel', 'dock'],
-    ['digital_human', 'scene'],
+    ['digital_human', 'workspace'],
     // 通用 Widget 默认路由
     ['form', 'chat'],
     ['chart', 'chat'],

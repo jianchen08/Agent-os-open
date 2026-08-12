@@ -17,7 +17,19 @@ _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-from plugin import ContextWindowGuardPlugin  # noqa: E402
+from plugin import (
+    ContextWindowGuardPlugin,
+    set_capability_caller,
+    set_memory_backend,
+)  # noqa: E402
+
+# hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
+_HINDSIGHT_MEMORY_DIR = os.path.join(_shared_dir, "system", "hindsight_memory")
+if _HINDSIGHT_MEMORY_DIR not in sys.path:
+    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
+
+from wiring import build_memory_backend, make_capability_caller  # noqa: E402
+
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("context_window_guard_pipeline")
@@ -27,10 +39,20 @@ _instance: ContextWindowGuardPlugin | None = None
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize context_window_guard plugin."""
+    """Initialize context_window_guard plugin + 注入记忆后端。"""
     global _instance
     config = plugin.get_config()
     _instance = ContextWindowGuardPlugin(config=config)
+    backend = build_memory_backend(plugin)
+    if backend:
+        set_memory_backend(backend)
+    else:
+        logger.warning("[context_window_guard_pipeline] 记忆后端未注入，功能降级")
+    caller = make_capability_caller(plugin)
+    if caller:
+        set_capability_caller(caller)
+    else:
+        logger.warning("[context_window_guard_pipeline] capability_caller 未注入")
 
 
 @plugin.on_unload

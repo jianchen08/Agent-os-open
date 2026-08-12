@@ -8,12 +8,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
 
 # ============================================================

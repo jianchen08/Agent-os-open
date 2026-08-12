@@ -444,6 +444,8 @@ export const loggers = {
   reconnect: logManager.module('Reconnect'),
   /** 事件处理日志器 */
   eventHandler: logManager.module('EventHandler'),
+  /** 长期任务兜底轮询日志器 */
+  taskPolling: logManager.module('TaskPolling'),
 }
 
 /**

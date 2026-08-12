@@ -9,7 +9,6 @@ import Splitter from 'antd/es/splitter'
 import apiClient from '@/services/api/client'
 import { safeLoadLayout } from '@/services/layout/resolver'
 import type { LayoutConfig } from '@/types/layout'
-import { schemaRegistry } from '@/services/schema/registry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
@@ -20,7 +19,7 @@ import { useThemeStore } from '@/stores/themeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { ensureDefaultWorkspacePanels } from '@/services/workspacePanelOpener'
 import { AppHeader } from './AppHeader'
-import { FloatingWindowManager } from './FloatingWindowManager'
+import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { StatusBar } from './StatusBar'
 import { WorkspacePanel } from './WorkspacePanel'
@@ -352,32 +351,6 @@ export function FiveSpaceLayout({
         }
       }
 
-      if (tab.moduleId) {
-        const registration = schemaRegistry.get(tab.moduleId)
-        if (registration) {
-          const schema = registration.schema
-          const spaceConfig = (
-            schema.rendering?.spaces as unknown as Array<Record<string, unknown>> | undefined
-          )?.find((s) => s.space === 'workspace')
-          if (spaceConfig) {
-            const widgetType = spaceConfig.widget as string
-            const WidgetComponent = widgetRegistry.get(widgetType) ?? widgetRegistry.findFallback(widgetType)
-            if (WidgetComponent) {
-              return (
-                <div className="h-full overflow-auto p-2 sm:p-4">
-                  <WidgetComponent
-                    {...(spaceConfig.props as Record<string, unknown> ?? {})}
-                    dataSource={spaceConfig.dataSource as string}
-                    sessionId={activeSessionId}
-                    refreshKey={workspaceRefreshKey}
-                    onNodeClick={(node: any) => handleTaskNodeClick(node)}
-                  />
-                </div>
-              )
-            }
-          }
-        }
-      }
       // component-based 渲染路径：通过 tab.component 直接查找 widget
       if (tab.component) {
         const WidgetComponent = widgetRegistry.get(tab.component) ?? widgetRegistry.findFallback(tab.component)
@@ -476,17 +449,10 @@ export function FiveSpaceLayout({
     [activeSessionId, handleTaskNodeClick, workspaceRefreshKey],
   )
 
-  // Render floating window content (placeholder)
+  // Render floating window content：接通 PageRenderer（widget/schema 分发），
+  // 兜底兼容旧 FloatingWindowInstance（widgetRegistry）与占位。
   const renderFloatingContent = useCallback(
-    (window: FloatingWindowInstance) => {
-      return (
-        <div className="flex h-full items-center justify-center p-4">
-          <div className="text-muted-foreground text-sm">
-            {window.title} - Content placeholder
-          </div>
-        </div>
-      )
-    },
+    (window: FloatingWindowInstance) => renderFloatingWindowContent(window),
     [],
   )
 

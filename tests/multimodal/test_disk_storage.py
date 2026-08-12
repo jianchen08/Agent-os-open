@@ -15,16 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-from multimodal.storage import DiskFileStorage, LocalFileStorage, StorageError
-from multimodal.types import AttachmentInfo, MediaType
+from storage import DiskFileStorage, LocalFileStorage, StorageError
+from mm_types import AttachmentInfo, MediaType
 
 
 # ── helpers ──────────────────────────────────────────────

@@ -17,6 +17,8 @@ import pytest
 from pipeline.plugin import ICorePlugin, OutputResult, PluginResult
 from pipeline.types import RouteSignal
 
+pytestmark = pytest.mark.unit
+
 
 # ---------------------------------------------------------------------------
 # P6: ICorePlugin.fallback_state 是空字典

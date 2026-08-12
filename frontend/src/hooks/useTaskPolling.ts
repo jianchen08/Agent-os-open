@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useCallback } from 'react'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
-import { useNotificationStore } from '@/stores/notificationStore'
+import { loggers } from '@/utils/logger'
+
+const logger = loggers.taskPolling
 
 /** 任务终态集合 */
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'timeout'] as const
@@ -47,15 +49,15 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): void {
       }
 
       const store = useLongTermTaskStore.getState()
+      // 兜底轮询静默失败：本 hook 是 WebSocket 实时链路的降级补充，连接状态已由
+      // useConnectionStatus / useRealtimeEvents 统一提示。单次拉取失败若弹用户可见
+      // 通知，持续性故障（启动时序竞态、代理未就绪等）会每 5s 刷屏。错误仍写入
+      // store.error 供 UI 按需读取，并打到控制台便于排查真实原因。
       store.fetchTasks().catch((error) => {
-        useNotificationStore.getState().addNotification({
-          title: '任务同步失败',
-          message: error instanceof Error ? error.message : '无法同步长期任务状态，请稍后重试',
-          priority: 'normal',
-          category: 'error',
-          isBlocking: false,
-          autoDismissMs: 5000,
-        })
+        logger.warn(
+          '长期任务兜底轮询失败:',
+          error instanceof Error ? error.message : error,
+        )
       })
     }
 

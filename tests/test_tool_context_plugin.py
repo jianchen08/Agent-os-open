@@ -19,9 +19,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pipeline.plugin import PluginContext, PluginResult
-from pipeline.types import ErrorPolicy
-from plugins.input.tool_context import ToolContextPlugin
+from tests._pipeline_plugin_path import add_plugin_dir
+
+add_plugin_dir("input", "tool_context")
+from pipeline.plugin import PluginContext, PluginResult  # noqa: E402
+from pipeline.types import ErrorPolicy  # noqa: E402
+from plugin import ToolContextPlugin  # noqa: E402
+
+pytestmark = pytest.mark.unit
 
 
 # ── Fixture ─────────────────────────────────────────────

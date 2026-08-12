@@ -8,7 +8,6 @@
  */
 
 // ===== Schema 注册表（已有）=====
-export { schemaRegistry } from './registry'
 export { parseSchema, parseDataSourceRef, resolveDataSource, validateSchema } from './parser'
 export type { ParsedSchema } from './parser'
 export type { LayoutNode, ComponentRenderer } from './composer'

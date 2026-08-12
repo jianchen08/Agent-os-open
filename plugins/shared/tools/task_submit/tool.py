@@ -482,6 +482,21 @@ class TaskSubmitTool(BuiltinTool):
         acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
 
+        # P0-3 纵深防御：校验 parent_task_id 归属，防 L2/L3 伪造他人父任务越权挂载
+        # （继承他人管道/工作空间/上下文）。合法链：父任务必须由更高层级提交。
+        _own_ok, _own_err = self._check_parent_ownership(parent_agent_level, parent_task_id)
+        if not _own_ok:
+            logger.warning(
+                "[TaskSubmit] parent_task_id 归属校验失败 | parent=%s | L%d | reason=%s",
+                parent_task_id,
+                parent_agent_level,
+                _own_err,
+            )
+            return create_failure_result(
+                error=_own_err or "parent_task_id 归属校验失败",
+                error_code="INSUFFICIENT_PERMISSION",
+            )
+
         logger.info(
             "[TaskSubmit] description 追踪 | has_inputs_desc=%s | has_goal_desc=%s | final_desc_len=%d | preview=%s",
             bool(inputs.get("description")),
@@ -1346,6 +1361,46 @@ class TaskSubmitTool(BuiltinTool):
             return task, "工作空间初始化异常：ws_meta 未生成"
 
         return task, None
+
+    def _check_parent_ownership(
+        self,
+        parent_agent_level: int,
+        parent_task_id: str | None,
+    ) -> tuple[bool, str | None]:
+        """P0-3 纵深防御：校验 parent_task_id 归属，防 L2/L3 伪造他人父任务越权挂载。
+
+        合法链：子任务只能挂在「比自己更高层级」的祖先任务下——
+        - L2 的父任务须由 L1 提交（``submitted_by_level == 1``）；
+        - L3 的父任务须由 L1/L2 提交（``submitted_by_level < 3``）。
+        父任务 ``submitted_by_level`` 缺失或 ≥ 本层级 → 视为他人同级任务，拒绝。
+
+        L1 不受此约束（根 Agent，可提交根任务或挂在任意已存在任务下，存在性由
+        ``_validate_parent_task_id`` 等后续校验保证）。
+
+        Args:
+            parent_agent_level: 调用者 Agent 层级
+            parent_task_id: 客户端/框架传入的父任务 ID（可能被篡改）
+
+        Returns:
+            (ok, error_msg)：ok=False 时 error_msg 为拒绝原因
+        """
+        if parent_agent_level < 2 or not parent_task_id:
+            return True, None
+        service = self._get_task_service()
+        if service is None:
+            # 无服务时不在此阻断，交由后续存在性校验处理
+            return True, None
+        parent = service.get_task(parent_task_id)
+        if parent is None:
+            return False, f"父任务不存在: {parent_task_id}"
+        parent_level = (getattr(parent, "metadata", None) or {}).get("submitted_by_level")
+        if parent_level is None or parent_level >= parent_agent_level:
+            return False, (
+                f"权限不足：parent_task_id={parent_task_id} 非本 Agent 层级链所有"
+                f"（parent submitted_by_level={parent_level}，当前 L{parent_agent_level}），"
+                "无法在他人的同级任务下挂载子任务"
+            )
+        return True, None
 
     def _validate_parent_task_id(self, parent_agent_level: int, parent_task_id: str | None, task_scope: str) -> bool:
         """验证 parent_task_id 参数的使用权限。"""

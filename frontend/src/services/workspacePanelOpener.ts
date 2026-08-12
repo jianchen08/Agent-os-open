@@ -6,6 +6,7 @@
 
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useUIStore } from '@/stores/uiStore'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { WorkspaceTab } from '@/types/layout'
 
 export interface WorkspacePanelSpec {
@@ -109,15 +110,34 @@ export function openWorkspacePanel(spec: WorkspacePanelSpec): void {
 /**
  * 按路由 path 打开对应工作区面板（顶栏导航用）
  * 无映射则返回 false，调用方可 fallback 到路由跳转
+ *
+ * 解析顺序：
+ * 1. 插件贡献页面（contributes.pages / 旧 viewsContainers 归一化）按 path 精确匹配
+ *    —— 插件页面可经路由/路径直达，在 Workspace 打开可关闭页签
+ * 2. 静态内置顶栏面板（TOP_NAV_PANELS）精确匹配
+ * 3. 静态内置面板前缀匹配（如 /settings/xxx）
  */
 export function openWorkspacePanelByPath(path: string): boolean {
-  // 精确匹配
+  // 1) 插件页面按 path 直达（component 取 page.widget，未声明 widget 时用 page.id 兜底）
+  const pluginPage = contributionRegistry.getPages().find((p) => p.path === path)
+  if (pluginPage) {
+    openWorkspacePanel({
+      id: `ws-plugin-${pluginPage.id}`,
+      title: pluginPage.title || pluginPage.id,
+      component: pluginPage.widget || pluginPage.id,
+      icon: pluginPage.icon,
+      dataSource: pluginPage.datasourceUri,
+      moduleId: pluginPage.pluginId ? `__plugin_${pluginPage.pluginId}__` : `__contrib_${pluginPage.id}__`,
+    })
+    return true
+  }
+  // 2) 精确匹配
   const exact = TOP_NAV_PANELS[path]
   if (exact) {
     openWorkspacePanel(exact)
     return true
   }
-  // 前缀匹配（如 /settings/xxx）
+  // 3) 前缀匹配（如 /settings/xxx）
   const prefix = Object.keys(TOP_NAV_PANELS)
     .filter((k) => k.startsWith('/') && path.startsWith(k))
     .sort((a, b) => b.length - a.length)[0]

@@ -1,0 +1,47 @@
+{
+    "id": "hindsight_memory_service",
+    "name": "Hindsight Memory Service",
+    "version": "1.0.0",
+    "plugin_type": "system",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "hindsight.retain",
+                "description": "Store a memory into a hindsight bank"
+            },
+            {
+                "name": "hindsight.recall",
+                "description": "Recall relevant memories from a hindsight bank"
+            },
+            {
+                "name": "hindsight.reflect",
+                "description": "Trigger hindsight reflection/consolidation on a bank"
+            },
+            {
+                "name": "hindsight.delete",
+                "description": "Delete memories from a hindsight bank"
+            },
+            {
+                "name": "hindsight.import_document",
+                "description": "Chunk and import a text document into a hindsight bank"
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": [
+            "on_load",
+            "on_unload"
+        ]
+    },
+    "dependencies": [
+        "hindsight-all-slim"
+    ],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "requires_content": 5,
+    "config_files": []
+}

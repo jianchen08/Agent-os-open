@@ -177,6 +177,7 @@ fn test_manifest_programmatic_construction_with_native_wasm() {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        provides: None,
     };
     assert_eq!(manifest.host_type, HostType::Wasm);
     assert!(manifest.native.is_none());

@@ -95,10 +95,25 @@ output_routes:
 # Agent 可通过 plugins.disabled / plugins.enabled 覆盖
 plugins:
   # ── Input 插件链（按 priority 排序）──
+  # tool_call_guard（priority=15）：跨轮重复工具调用渐进拦截。
+  # 1-2 次软提示、3 次清空 tool_calls 路由回 LLM、4+ 次 decision 信号。
+  # 接通已有但一直未启用的代码，配合 duplicate_check（output，兜底）形成防线。
+  - name: tool_call_guard
+    config:
+      enabled: true
+      max_retries: 3
   - name: multimodal_preprocessor
     config:
       priority: 35
       max_file_size: 20971520  # 20MB
+  # tool_cache（priority=35）：工具结果缓存查询，命中跳过执行。
+  # 与 tool_cache_writer（output）共享进程级缓存。exclude_tools 默认含
+  # bash_execute/file_write 等有副作用工具，结果不可复用。
+  - name: tool_cache
+    config:
+      enabled: true
+      default_ttl: 300
+      max_size: 100
   - name: context_window_guard
     config:
       enabled: true
@@ -133,6 +148,14 @@ plugins:
       # 可选值: zh-CN, zh-TW, en, ja, ko, fr, de, es 等
       language: "zh-CN"
   # ── Output 插件链（按 priority 排序）──
+  # tool_cache_writer（priority=25）：工具执行成功后写缓存。
+  # 接通 tool_cache 写入断路：与 tool_cache（input）共享进程级缓存，
+  # 下一轮相同工具调用直接命中跳过执行。失败结果 + 有副作用工具不写。
+  - name: tool_cache_writer
+    config:
+      enabled: true
+      default_ttl: 300
+      max_size: 100
   # P0: 系统级检查（停止/错误/深度保护）
   - name: stop_check
     config:

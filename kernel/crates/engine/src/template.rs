@@ -81,10 +81,7 @@ fn render_expr(expr: &str, state: &Value, project_root: &Path) -> String {
         // 文件读取：失败静默降级为空串
         let trimmed = path.trim();
         let full = project_root.join(trimmed);
-        match std::fs::read_to_string(&full) {
-            Ok(content) => content,
-            Err(_) => String::new(),
-        }
+        std::fs::read_to_string(&full).unwrap_or_default()
     } else if let Some(rest) = expr.strip_prefix("state.") {
         // state 点链取值：不存在返回空串
         state_lookup(state, rest).unwrap_or_default()

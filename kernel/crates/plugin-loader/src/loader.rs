@@ -170,16 +170,31 @@ impl PluginLoaderImpl {
                 continue;
             };
 
-            // 解析 manifest
-            let manifest: PluginManifest = serde_json::from_str(&content).or_else(|_| {
-                serde_yaml::from_str(&content).map_err(|e| LoaderError::ManifestParse {
-                    path: manifest_path.to_string_lossy().to_string(),
-                    message: e.to_string(),
-                })
-            })?;
+            // 解析 manifest（跳过解析失败的插件，不影响同 root 的其他插件）
+            let manifest: PluginManifest = match serde_json::from_str::<PluginManifest>(&content) {
+                Ok(m) => m,
+                Err(json_err) => {
+                    match serde_yaml::from_str::<PluginManifest>(&content) {
+                        Ok(m) => m,
+                        Err(yaml_err) => {
+                            warn!(
+                                "Skipping plugin at {}: json error: {}, yaml error: {}",
+                                manifest_path.display(), json_err, yaml_err
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
 
-            // 校验 manifest
-            self.validate_manifest_internal(&manifest, &manifest_path)?;
+            // 校验 manifest（跳过校验失败的插件，不阻断同 root 的其他插件）
+            if let Err(e) = self.validate_manifest_internal(&manifest, &manifest_path) {
+                warn!(
+                    "Skipping plugin at {}: validation error: {}",
+                    manifest_path.display(), e
+                );
+                continue;
+            }
 
             results.push((manifest, manifest_path));
         }
@@ -606,6 +621,22 @@ impl PluginLoaderImpl {
     pub fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
         let manifests = self.manifests.read();
         manifests.get(plugin_id).map(|(m, _)| m.clone())
+    }
+
+    /// 获取所有已发现插件的根目录映射（plugin_id → 插件目录绝对路径）。
+    ///
+    /// 阶段3 遗留：HTTP dispatcher 据此把 `/ext/{plugin_id}/assets/{*path}`
+    /// 解析到 `<plugin_dir>/web/<path>` 直读文件返回，免去为每个子资源单独声明
+    /// http_endpoints。由 agentos-kernel 启动期调用，把结果经
+    /// `AppState::with_plugin_dirs` 注入。
+    pub fn get_plugin_dirs(&self) -> std::collections::HashMap<String, std::path::PathBuf> {
+        let manifests = self.manifests.read();
+        manifests
+            .iter()
+            .filter_map(|(id, (_, path))| {
+                path.parent().map(|p| (id.clone(), p.to_path_buf()))
+            })
+            .collect()
     }
 
     /// 递归扫描目录下的所有 YAML 文件，解析并合并到 config_map。
@@ -1497,7 +1528,7 @@ mod tests {
         let mut chars = correct_hash.chars();
         let first = chars.next().unwrap();
         let flipped = if first == '0' { '1' } else { '0' };
-        let broken_hash = format!("{}{}", flipped, correct_hash[1..].to_string());
+        let broken_hash = format!("{}{}", flipped, &correct_hash[1..]);
         let allowlist_bad = AllowlistConfig {
             mode: AllowlistMode::Permissive,
             plugins: vec![AllowlistEntry {

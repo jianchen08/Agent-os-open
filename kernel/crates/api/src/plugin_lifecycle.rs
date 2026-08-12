@@ -4,6 +4,7 @@
 //! 抽成公共函数，供：
 //! - 启动期（agentos-kernel.rs）
 //! - 运行时新增插件（reload-all 端点发现新插件后注册）
+//!
 //! 复用，避免逻辑重复。
 
 use agentos_core::traits::{CapabilityRegistry, PluginManifest, PluginType, ToolDescriptor};

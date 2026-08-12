@@ -17,6 +17,17 @@
 仅供其他插件（如 error_check）使用；记忆/知识要进提示词，必须由 static_vars 显式声明
 retrieval/tags（走 _retrieve_by_tags）。压缩层（L1/L2）作为 compression_messages
 独立消息输出，不合并到 system_message。
+
+Step 6 重建要点（相对 0.1 的变化）：
+- 压缩块/状态快照的存储来源由 ctx.get_service("chunk_service") 改为模块级
+  `_memory_backend: IMemoryBackend`（Hindsight/Kernel），通过 set_memory_backend()
+  注入——与 context_window_guard Step 4 的模式一致。L1/L2/STATE_SNAPSHOT 块以
+  memory_type="chunk" 落库，metadata.tags 含 pipeline:{id} / L1|L2 / seq:{start}-{end}。
+- 压缩预算配置不再导入 0.2 中不存在的 memory.context_compressor（老版 line 873 的
+  import 在 try/except 之外直接 ImportError），改用本文件内联的
+  _LocalCompressionConfig（读 config/system/context_window_config.yaml，失败回退默认）。
+- {{retrieval:...}} 占位符的向量检索由 ctx.get_service("retriever") 改为
+  _memory_backend.search。
 """
 
 from __future__ import annotations
@@ -24,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,9 +43,31 @@ from zoneinfo import ZoneInfo
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
+
 from agentos_plugin_sdk.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════
+# 模块级依赖注入（由 server.py 的 on_load 注入，测试直接赋值）
+# ═══════════════════════════════════════════════════════════
+
+# 长期记忆后端（IMemoryBackend，Hindsight/Kernel 统一形态）；None 时压缩块无法加载
+_memory_backend: Any | None = None
+
+
+def set_memory_backend(backend: Any | None) -> None:
+    """注入长期记忆后端（IMemoryBackend 实例或兼容 duck-type）。
+
+    由 server.py on_load 调用，把 Step 3 构建的 Hindsight/Kernel 后端注入进来；
+    测试环境直接传 FakeBackend/MagicMock。传 None 清空。
+
+    Args:
+        backend: 实现 add/search/delete/import_document 的后端实例
+    """
+    global _memory_backend
+    _memory_backend = backend
+
 
 # 占位符正则：匹配 {{xxx}} 或 {{xxx:yyy}} 格式
 PLACEHOLDER_PATTERN = re.compile(r"\{\{(.+?)\}\}")
@@ -50,6 +84,105 @@ LANGUAGE_INSTRUCTIONS: dict[str, str] = {
     "de": "Denken und antworten Sie auf Deutsch, alle Ausgaben müssen auf Deutsch sein",
     "es": "Piense y responda en español, toda la salida debe estar en español",
 }
+
+
+# ═══════════════════════════════════════════════════════════
+# 压缩预算配置（从 0.1 memory/context_compressor.py 移植的最小实现）
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class _LocalCompressionConfig:
+    """压缩预算最小配置（prompt_build 本地实现）。
+
+    Step 6 修复：0.2 中不存在 memory.context_compressor（老版 line 873 的
+    ``from memory.context_compressor import CompressionConfig`` 在 try/except 之外，
+    直接 ImportError）。本类从 config/system/context_window_config.yaml 读取
+    budgets.l1/l2/recent 与 compress_trigger_ratio；读取失败回退到代码默认
+    （与 context_window_guard Step 4 内联的 CompressionConfig 行为一致）。
+
+    Attributes:
+        context_window: 模型上下文窗口大小
+        compress_trigger_ratio: 压缩触发比例（默认 0.55，见 config/system/context_window_config.yaml）
+        l1_ratio: L1 预算比例
+        l2_ratio: L2 预算比例
+        recent_ratio: 最近原文预算比例
+    """
+
+    context_window: int = 128000
+    compress_trigger_ratio: float = 0.55  # 见 config/system/context_window_config.yaml
+    l1_ratio: float = 0.1
+    l2_ratio: float = 0.05
+    recent_ratio: float = 0.18
+
+    @classmethod
+    def from_yaml_config(cls, context_window: int) -> _LocalCompressionConfig:
+        """从 config/system/context_window_config.yaml 加载预算配置。
+
+        通过 ConfigCenter 读取（统一缓存 + 热重载），路径由 ConfigCenter 解析。
+        读取失败时回退到代码默认（与 0.1 行为一致）。
+
+        Args:
+            context_window: 当前模型上下文窗口大小
+
+        Returns:
+            填充好预算比例的 _LocalCompressionConfig
+        """
+        try:
+            from config.config_center import get_config_center  # noqa: PLC0415
+
+            yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
+            budgets = yaml_data.get("budgets", {})
+            return cls(
+                context_window=context_window,
+                compress_trigger_ratio=yaml_data.get("compress_trigger_ratio", 0.55),
+                l1_ratio=budgets.get("l1", 0.1),
+                l2_ratio=budgets.get("l2", 0.05),
+                recent_ratio=budgets.get("recent", 0.18),
+            )
+        except Exception:
+            return cls(context_window=context_window)
+
+    def get_budgets(self) -> dict[str, int]:
+        """计算各部分实际 token 预算。
+
+        Returns:
+            各层 token 预算字典 {recent, L1, L2}
+        """
+        return {
+            "recent": int(self.context_window * self.recent_ratio),
+            "L1": int(self.context_window * self.l1_ratio),
+            "L2": int(self.context_window * self.l2_ratio),
+        }
+
+    def get_trigger_threshold(self) -> int:
+        """获取触发压缩的 token 阈值。
+
+        Returns:
+            触发阈值 = context_window * compress_trigger_ratio
+        """
+        return int(self.context_window * self.compress_trigger_ratio)
+
+
+def _local_compression_config(context_window: int) -> Any:
+    """构建压缩预算配置（prompt_build 本地入口）。
+
+    优先复用相邻插件 context_window_guard 内联的 CompressionConfig
+    （Step 4 已内联到其 plugin.py，两插件目录为兄弟关系）；不可导入时
+    回退到本文件内联的 _LocalCompressionConfig 最小实现。
+
+    Args:
+        context_window: 当前模型上下文窗口大小
+
+    Returns:
+        带 get_budgets()/get_trigger_threshold() 的配置对象
+    """
+    try:
+        from context_window_guard.plugin import CompressionConfig  # noqa: PLC0415
+
+        return CompressionConfig.from_yaml_config(context_window)
+    except Exception:
+        return _LocalCompressionConfig.from_yaml_config(context_window)
 
 
 class PromptBuildPlugin(IInputPlugin):
@@ -75,8 +208,12 @@ class PromptBuildPlugin(IInputPlugin):
                 - include_tools_description_in_prompt: 是否将工具描述拼入 SystemMessage（默认 False）
                 - include_static_vars: 是否包含静态变量（默认 True）
                 - include_compressed_layers: 是否包含压缩层（默认 True）
+                - placeholder_max_depth: 占位符递归解析最大深度（默认 5）
+                  用于支持 {{path:partial.md}} 中嵌套 {{timestamp}} 这种组合。
+                  0 表示关闭递归（单趟扁平替换，行为与旧版一致）。
         """
         self._config = config or {}
+        self._placeholder_max_depth: int = int(self._config.get("placeholder_max_depth", 5))
 
     @property
     def name(self) -> str:
@@ -423,12 +560,19 @@ class PromptBuildPlugin(IInputPlugin):
 
         if mode in ("vector", "hybrid") and content:
             try:
-                retriever = ctx.get_service("retriever")
-                results = await retriever.retrieve(query=content, top_k=var_def.get("top_k", 5))
+                if _memory_backend is None:
+                    raise KeyError("no memory backend injected")
+                user_id = ctx.state.get("user_id", "")
+                results = await _memory_backend.search(
+                    query=content,
+                    user_id=user_id,
+                    top_k=var_def.get("top_k", 5),
+                    memory_type="semantic",
+                )
                 if results:
-                    retrieved_text = "\n".join(r.content for r in results if hasattr(r, "content"))
+                    retrieved_text = "\n".join(r.get("content", "") for r in results if isinstance(r, dict))
                     content = f"{content}\n\n### 相关检索结果\n{retrieved_text}" if mode == "hybrid" else retrieved_text
-            except (KeyError, Exception) as e:
+            except Exception as e:
                 logger.debug("[%s] 占位符向量检索跳过 | name=%s | error=%s", self.name, var_name, e)
 
         if output_format == "summary":
@@ -592,6 +736,11 @@ class PromptBuildPlugin(IInputPlugin):
     async def _resolve_placeholders(self, ctx: PluginContext, text: str) -> str:
         """替换文本中的所有 {{占位符}} 为实际内容。
 
+        支持有限深度的递归解析：若某占位符的解析结果里再次含 {{xxx}}，
+        会在下一趟继续解析，直到文本收敛（无占位符或本趟无变化）或达到
+        最大深度。典型用例：{{path:partial.md}} 读出的文件内容里含
+        {{timestamp}} 等组合占位符。
+
         Args:
             ctx: 插件执行上下文
             text: 包含占位符的原始文本
@@ -599,47 +748,78 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             替换后的文本
         """
-        matches = PLACEHOLDER_PATTERN.findall(text)
-        if not matches:
-            return text
+        max_depth = self._placeholder_max_depth
+        # max_depth=0 退化为单趟扁平替换（与旧版行为一致）
+        effective_depth = 1 if max_depth <= 0 else max_depth
 
-        for idx, match in enumerate(matches):
-            # 逐步日志 + 超时保护：卡死时定位到具体哪个占位符，并 fail 而非永久挂起
-            # （历史多次出现 prompt_build 协程永久挂起拖垮整个进程的僵尸引擎问题）
-            from datetime import datetime as _ph_t  # noqa: PLC0415
+        from datetime import datetime as _depth_t  # noqa: PLC0415
 
-            _ph_s = _ph_t.now()
+        for depth in range(effective_depth):
+            matches = PLACEHOLDER_PATTERN.findall(text)
+            if not matches:
+                break  # 无占位符，已收敛
+
+            _depth_s = _depth_t.now()
             logger.debug(
-                "[%s] resolve_placeholder BEGIN | idx=%d/%d | %s",
+                "[%s] resolve_placeholders depth=%d/%d | matches=%d",
                 self.name,
-                idx + 1,
+                depth + 1,
+                effective_depth,
                 len(matches),
-                match[:80] + ("..." if len(match) > 80 else ""),
             )
-            try:
-                content = await asyncio.wait_for(
-                    self._resolve_placeholder(ctx, match),
-                    timeout=30.0,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "[%s] resolve_placeholder 超时(30s)！占位符解析卡死，"
-                    "跳过此占位符避免永久挂起 | idx=%d/%d | placeholder=%s",
+
+            text_before = text  # 收敛检测：本趟若无变化则提前结束
+
+            for idx, match in enumerate(matches):
+                # 逐步日志 + 超时保护：卡死时定位到具体哪个占位符，并 fail 而非永久挂起
+                # （历史多次出现 prompt_build 协程永久挂起拖垮整个进程的僵尸引擎问题）
+                _ph_s = _depth_t.now()
+                logger.debug(
+                    "[%s] resolve_placeholder BEGIN | depth=%d idx=%d/%d | %s",
                     self.name,
+                    depth + 1,
                     idx + 1,
                     len(matches),
-                    match[:120],
+                    match[:80] + ("..." if len(match) > 80 else ""),
                 )
-                content = ""
+                try:
+                    content = await asyncio.wait_for(
+                        self._resolve_placeholder(ctx, match),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[%s] resolve_placeholder 超时(30s)！占位符解析卡死，"
+                        "跳过此占位符避免永久挂起 | depth=%d idx=%d/%d | placeholder=%s",
+                        self.name,
+                        depth + 1,
+                        idx + 1,
+                        len(matches),
+                        match[:120],
+                    )
+                    content = ""
+                logger.debug(
+                    "[%s] resolve_placeholder END | depth=%d idx=%d | elapsed=%.3fs | len=%d",
+                    self.name,
+                    depth + 1,
+                    idx + 1,
+                    (_depth_t.now() - _ph_s).total_seconds(),
+                    len(content) if content else 0,
+                )
+                placeholder = "{{" + match + "}}"
+                text = text.replace(placeholder, content)
+
             logger.debug(
-                "[%s] resolve_placeholder END | idx=%d | elapsed=%.3fs | len=%d",
+                "[%s] resolve_placeholders depth=%d done | elapsed=%.3fs",
                 self.name,
-                idx + 1,
-                (_ph_t.now() - _ph_s).total_seconds(),
-                len(content) if content else 0,
+                depth + 1,
+                (_depth_t.now() - _depth_s).total_seconds(),
             )
-            placeholder = "{{" + match + "}}"
-            text = text.replace(placeholder, content)
+
+            if text == text_before:
+                # 本趟无变化：剩余占位符都无法解析（如未知的 {{unknown}} 被替换为空），
+                # 再循环也是同样结果，提前结束避免空转。
+                break
 
         return text
 
@@ -844,37 +1024,34 @@ class PromptBuildPlugin(IInputPlugin):
         """
         messages: list[dict[str, Any]] = []
 
-        try:
-            chunk_service = ctx.get_service("chunk_service")
-        except KeyError:
-            return messages
-
         from pipeline.types import StateKeys  # noqa: PLC0415
 
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
-        if not pipeline_run_id:
+        if not pipeline_run_id or _memory_backend is None:
             return messages
 
         try:
-            chunks = await chunk_service.find_by_pipeline(
-                pipeline_run_id,
-                "L1",
+            results = await _memory_backend.search(
+                query="",
+                user_id=ctx.state.get("user_id", "") or pipeline_run_id,
+                top_k=100,
+                memory_type="chunk",
             )
         except Exception as e:
             logger.warning("[%s] 读取压缩块失败 | error=%s", self.name, e)
             return messages
 
+        # 过滤出本管道的 L1/L2 压缩块（metadata.tags 含 pipeline:{id} 标签）
+        chunks = self._filter_pipeline_chunks(results, pipeline_run_id)
         if not chunks:
             # 没有压缩块，只加载状态快照
-            state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id, chunk_service)
+            state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id)
             messages.extend(state_msgs)
             return messages
 
         # ── 预算计算 ──
-        from memory.context_compressor import CompressionConfig  # noqa: PLC0415
-
         context_window = ctx.state.get("context_window", 128000)
-        config = CompressionConfig.from_yaml_config(context_window)
+        config = _local_compression_config(context_window)
         budgets = config.get_budgets()
         trigger_tokens = config.get_trigger_threshold()
 
@@ -913,18 +1090,17 @@ class PromptBuildPlugin(IInputPlugin):
             return messages
 
         # ── 去重 ──
-        dedup_sorted = sorted(chunks, key=lambda c: c.sequence_end, reverse=True)
         high_water = float("inf")
         deduped: list = []
-        for chunk in dedup_sorted:
-            if chunk.sequence_start >= high_water:
+        for chunk in chunks:  # _filter_pipeline_chunks 已按 seq_end 降序
+            if chunk["seq_start"] >= high_water:
                 continue
             deduped.append(chunk)
-            high_water = chunk.sequence_start
+            high_water = chunk["seq_start"]
 
         # ── 预算分配：新→老，L1→L2→keywords 兜底 ──
         # 用 sequence_end 排序：自增整数，语义绝对可靠，不受跨进程/容器时钟漂移影响
-        sorted_chunks = sorted(deduped, key=lambda c: c.sequence_end, reverse=True)
+        sorted_chunks = sorted(deduped, key=lambda c: c["seq_end"], reverse=True)
         l1_used = 0
         l2_used = 0
         l1_blocks: list = []
@@ -932,10 +1108,11 @@ class PromptBuildPlugin(IInputPlugin):
         dropped_keywords: list[tuple[str, list[str]]] = []  # (seq, keywords) 被丢弃块的兜底
 
         for chunk in sorted_chunks:
-            l1_content = chunk.content or ""
-            l2_content = getattr(chunk, "l2_content", "") or ""
-            keywords = getattr(chunk, "keywords", []) or []
-            seq = f"{chunk.sequence_start}-{chunk.sequence_end}"
+            l1_content = chunk["l1_content"] or ""
+            l2_content = chunk["l2_content"] or ""
+            # 新后端不落 keywords 标签（0.1 chunk_service 的 keywords 字段已取消），恒为空
+            keywords: list[str] = []
+            seq = chunk["seq"]
 
             l1_tokens = self._estimate_tokens_for_budget(l1_content) if l1_content else 0
             l2_tokens = self._estimate_tokens_for_budget(l2_content) if l2_content else 0
@@ -991,7 +1168,7 @@ class PromptBuildPlugin(IInputPlugin):
             )
 
         # ── 状态快照（含 keywords 合并）──
-        state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id, chunk_service)
+        state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id)
         messages.extend(state_msgs)
 
         logger.debug(
@@ -1004,26 +1181,142 @@ class PromptBuildPlugin(IInputPlugin):
         )
         return messages
 
+    @staticmethod
+    def _filter_pipeline_chunks(
+        results: list[Any],
+        pipeline_run_id: str,
+    ) -> list[dict[str, Any]]:
+        """从 backend 检索结果中过滤出本管道的压缩块并合并 L1/L2。
+
+        压缩块以 memory_type="chunk" 落库（见 context_window_guard 的
+        CompressionService.save_compression_result），metadata.tags 含
+        pipeline:{id} / L1|L2 / seq:{start}-{end}。L1 与 L2 是两条独立记录，
+        按 seq 范围合并为 {seq, seq_start, seq_end, l1_content, l2_content}。
+
+        Args:
+            results: backend.search 返回的统一形态列表
+            pipeline_run_id: 管道运行 ID
+
+        Returns:
+            合并后的压缩块列表（按 seq_end 降序）；无匹配块返回 []
+        """
+        tag_prefix = f"pipeline:{pipeline_run_id}"
+        merged: dict[tuple[int, int], dict[str, Any]] = {}
+        for item in results or []:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata") or {}
+            tags = meta.get("tags") if isinstance(meta, dict) else []
+            if not isinstance(tags, list):
+                continue
+            tags = [t for t in tags if isinstance(t, str)]
+            if tag_prefix not in tags:
+                continue
+            if "L1" not in tags and "L2" not in tags:
+                continue
+            seq_start, seq_end = PromptBuildPlugin._parse_seq_from_tags(tags)
+            if seq_end <= 0:
+                continue
+            key = (seq_start, seq_end)
+            entry = merged.setdefault(
+                key,
+                {
+                    "seq": f"{seq_start}-{seq_end}",
+                    "seq_start": seq_start,
+                    "seq_end": seq_end,
+                    "l1_content": "",
+                    "l2_content": "",
+                },
+            )
+            content = item.get("content", "")
+            if "L1" in tags:
+                entry["l1_content"] = content or entry["l1_content"]
+            else:
+                entry["l2_content"] = content or entry["l2_content"]
+        return sorted(merged.values(), key=lambda c: c["seq_end"], reverse=True)
+
+    @staticmethod
+    def _parse_seq_from_tags(tags: list[Any]) -> tuple[int, int]:
+        """从 tags 中解析 ``seq:start-end`` 标签。
+
+        与 context_window_guard 的解析契约一致（落库时由
+        CompressionService.save_compression_result 写入 ``seq:{start}-{end}``）。
+
+        Args:
+            tags: 落库时打的标签列表
+
+        Returns:
+            (sequence_start, sequence_end)，解析不到时返回 (0, 0)
+        """
+        seq_start = 0
+        seq_end = 0
+        for t in tags:
+            if not isinstance(t, str):
+                continue
+            if t.startswith("seq:"):
+                # 形如 "seq:5-12"
+                rest = t[4:]
+                if "-" in rest:
+                    parts = rest.split("-", 1)
+                    try:
+                        seq_start = int(parts[0])
+                        seq_end = int(parts[1])
+                    except ValueError:
+                        pass
+                else:
+                    try:
+                        seq_start = int(rest)
+                        seq_end = seq_start
+                    except ValueError:
+                        pass
+        return seq_start, seq_end
+
     async def _load_state_snapshot_message(
         self,
         ctx: PluginContext,
         pipeline_run_id: str,
-        chunk_service,
     ) -> list[dict[str, Any]]:
-        """加载状态快照为一条独立消息。"""
+        """加载状态快照为一条独立消息。
+
+        STATE_SNAPSHOT 块以 memory_type="chunk" 落库，metadata.tags 含
+        STATE_SNAPSHOT / pipeline:{id}；与压缩块同源（模块级 _memory_backend）。
+        返回最新一条匹配快照（backend 结果按相关性排序，取首个）。
+
+        Args:
+            ctx: 插件执行上下文
+            pipeline_run_id: 管道运行 ID
+
+        Returns:
+            状态快照消息列表（最多一条）
+        """
+        if not pipeline_run_id or _memory_backend is None:
+            return []
+        tag_prefix = f"pipeline:{pipeline_run_id}"
         try:
-            snapshots = await chunk_service.find_by_pipeline(
-                pipeline_run_id,
-                "STATE_SNAPSHOT",
+            results = await _memory_backend.search(
+                query="",
+                user_id=ctx.state.get("user_id", "") or pipeline_run_id,
+                top_k=100,
+                memory_type="chunk",
             )
-            if snapshots:
-                return [
-                    {
-                        "role": "system",
-                        "name": "state_snapshot",
-                        "content": (f"<current_state>\n{snapshots[0].content}\n</current_state>"),
-                    }
-                ]
+            for item in results or []:
+                if not isinstance(item, dict):
+                    continue
+                meta = item.get("metadata") or {}
+                tags = meta.get("tags") if isinstance(meta, dict) else []
+                if not isinstance(tags, list):
+                    continue
+                tags = [t for t in tags if isinstance(t, str)]
+                if "STATE_SNAPSHOT" in tags and tag_prefix in tags:
+                    content = item.get("content", "")
+                    if content:
+                        return [
+                            {
+                                "role": "system",
+                                "name": "state_snapshot",
+                                "content": f"<current_state>\n{content}\n</current_state>",
+                            }
+                        ]
         except Exception:
             pass
         return []

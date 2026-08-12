@@ -4,36 +4,134 @@
  * ADR §六：前端建立 ContributionRegistry 作为唯一真相源，
  * 所有插件贡献（导航、布局、配置、UI 插槽）从这里派生。
  *
- * 四个投影：
- * - NavigationProvider → 顶栏/侧栏导航项
- * - LayoutProvider → 布局区的存在与拓扑
- * - SettingsProvider → 设置菜单分组 + 配置页
- * - WidgetProvider → 预置 Widget 注册
- *
  * 数据源：/api/v1/schema 聚合的插件 manifest contributes.*
+ *
+ * 统一模型（docs/working/重要设计/前端能力统一架构.md 第四章）：
+ * 插件贡献收敛为 contributes.pages[]（展示类）。旧 15 种贡献点 key
+ * （viewsContainers/views/workspaceTabs/dockItems/floating/modal/statusBarItems/
+ * menus/commands/shortcuts/chatMessages/chatInteractions/chatActions/
+ * settingsPanels/widgets）在注册时**直接归一化**为 PageDeclaration 存进 pages
+ * 集合（pages 是唯一存储，无第二套 entries），旧 key 经 legacyFrom 字段标记来源。
+ * 旧查询方法（getViewsContainers/getStatusBarItems/getMenus/...）只是 pages 之上的
+ * 薄视图，供渲染侧逐步迁移；渲染侧最终统一消费 getPages()/getPagesBySpace()。
  */
 
 import React from 'react'
 
-/** 贡献点类型 */
+/** 贡献点类型（含统一模型的 'pages'；旧类型仍可被薄视图查询） */
 export type ContributionType =
-  | 'viewsContainers'   // ActivityBar 一级导航
-  | 'views'             // 侧边栏视图
-  | 'workspaceTabs'     // 工作区标签页
-  | 'dockItems'         // 底部 dock 栏
-  | 'floating'          // 浮窗
-  | 'modal'             // 模态对话框
-  | 'statusBarItems'    // 状态栏条目
-  | 'menus'             // 右键/顶栏菜单
-  | 'commands'          // 命令面板
-  | 'shortcuts'         // 快捷键
-  | 'chatMessages'      // 聊天消息卡片样式
-  | 'chatInteractions'  // 聊天交互模式
-  | 'chatActions'       // 聊天输入区动作
-  | 'settingsPanels'    // 插件配置面板
-  | 'widgets'           // 预置 widget 注册
+  | 'pages'            // 统一页面/元素声明（唯一真相源）
+  | 'viewsContainers'  // ActivityBar 一级导航
+  | 'views'            // 侧边栏视图
+  | 'workspaceTabs'    // 工作区标签页
+  | 'dockItems'        // 底部 dock 栏
+  | 'floating'         // 浮窗
+  | 'modal'            // 模态对话框
+  | 'statusBarItems'   // 状态栏条目
+  | 'menus'            // 右键/顶栏菜单
+  | 'commands'         // 命令面板
+  | 'shortcuts'        // 快捷键
+  | 'chatMessages'     // 聊天消息卡片样式
+  | 'chatInteractions' // 聊天交互模式
+  | 'chatActions'      // 聊天输入区动作
+  | 'settingsPanels'   // 插件配置面板
+  | 'widgets'          // 预置 widget 注册
 
-/** 单个贡献条目 */
+/** 页面目标空间（contributes.pages[].space） */
+export type PageSpace = 'settings' | 'workspace' | 'chat' | 'floating' | 'dock' | 'fullscreen'
+
+/** 页面栏位（contributes.pages[].slot；activity-bar 为旧 viewsContainers 归一化专用） */
+export type PageSlot =
+  | 'nav'
+  | 'tab'
+  | 'inline'
+  | 'input-action'
+  | 'message-style'
+  | 'panel'
+  | 'item'
+  | 'status'
+  | 'overlay'
+  | 'activity-bar'
+
+/** 页面可脱离宿主容器的三档弹出配置（contributes.pages[].detachable） */
+export interface PageDetachable {
+  /** 独立浮窗（可拖拽缩放） */
+  popout?: boolean
+  /** 子窗口（跨页面窗口） */
+  childWindow?: boolean
+  /** 桌面小组件 */
+  desktopWidget?: boolean
+  /** 窗口状态持久化 */
+  persist?: boolean
+  /** 默认尺寸 */
+  defaultSize?: { w: number; h: number }
+  /** 最小尺寸 */
+  minSize?: { w: number; h: number }
+  /** 置顶 */
+  alwaysOnTop?: boolean
+  /** 隐藏于任务栏 */
+  skipTaskbar?: boolean
+}
+
+/**
+ * 统一页面声明（contributes.pages[] + 旧贡献点归一化产物）
+ *
+ * 字段透传：旧类型专有字段（command/key/location/category/trigger/containerId/
+ * openOn 等）经扩展索引原样保留，供旧查询薄视图与 commandDispatcher 等消费。
+ */
+export interface PageDeclaration {
+  /** 统一贡献点类型：固定为 'pages' */
+  type: 'pages'
+  /** 唯一标识 */
+  id: string
+  /** 显示名称 */
+  title?: string
+  /** 图标 */
+  icon?: string
+  /** 目标空间（6 空间之一） */
+  space: PageSpace
+  /** 空间内栏位 */
+  slot?: PageSlot
+  /** 路由路径（可选，用于直达） */
+  path?: string
+  /** 排序权重 */
+  order?: number
+  /** 可见条件（when 表达式） */
+  when?: string
+  /** 激活触发器（旧 modal 用） */
+  openOn?: string
+  /** 数据源（GET 读 / PUT 写） */
+  datasourceUri?: string
+  /** L1+ 字段级 schema */
+  schema?: Record<string, unknown>
+  /** L2+ 布局分组 */
+  layout?: Array<Record<string, unknown>>
+  /** L3 整体自定义组件（与 schema 互斥） */
+  widget?: string
+  /** widget 配置/数据源 */
+  props?: Record<string, unknown>
+  /** 是否可写（配置类 page 用） */
+  writable?: boolean
+  /** 脱离宿主配置 */
+  detachable?: PageDetachable
+  /** 配置文件路径（旧 settingsPanels 用） */
+  configPath?: string
+  /** 配置标签（旧 settingsPanels 用） */
+  configLabel?: string
+  /** 所属插件 ID */
+  pluginId?: string
+  /**
+   * 归一化来源标记：
+   * - 缺省：插件直接声明的 contributes.pages
+   * - 'viewsContainers'/'menus'/...：旧贡献点 key 归一化而来
+   * - 'settingsPanels'：来自 plugin_configs 的 config_files
+   */
+  legacyFrom?: string
+  /** 扩展字段（旧类型专有字段透传：command/key/location/category/trigger/containerId 等） */
+  [key: string]: unknown
+}
+
+/** 单个贡献条目（旧贡献点条目形态，兼容消费方；新数据统一以 PageDeclaration 存储） */
 export interface ContributionEntry {
   /** 贡献点类型 */
   type: ContributionType
@@ -65,7 +163,7 @@ export interface ContributionEntry {
   [key: string]: unknown
 }
 
-/** 配置面板条目（settingsPanels 专用） */
+/** 配置面板条目（settingsPanels 专用，来自 plugin_configs 独立数据源） */
 export interface SettingsPanelEntry {
   pluginId: string
   pluginName: string
@@ -94,15 +192,52 @@ export interface WidgetDeclaration {
 }
 
 /**
+ * 旧贡献点 key → 归一化 space/slot 映射（统一架构 4.4 节）
+ *
+ * 交互类（menus/commands/shortcuts/modal）在 actions 模型落地前暂归一化为
+ * 页面占位（legacyFrom 标记真实来源，旧查询薄视图按 legacyFrom 检索，不受影响）。
+ */
+const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
+  viewsContainers: { space: 'workspace', slot: 'activity-bar' },
+  views: { space: 'workspace', slot: 'tab' },
+  workspaceTabs: { space: 'workspace', slot: 'tab' },
+  dockItems: { space: 'dock', slot: 'item' },
+  statusBarItems: { space: 'dock', slot: 'status' },
+  floating: { space: 'floating', slot: 'panel' },
+  modal: { space: 'floating', slot: 'overlay' },
+  menus: { space: 'chat', slot: 'inline' },
+  commands: { space: 'chat', slot: 'input-action' },
+  shortcuts: { space: 'chat', slot: 'input-action' },
+  chatMessages: { space: 'chat', slot: 'inline' },
+  chatInteractions: { space: 'chat', slot: 'inline' },
+  chatActions: { space: 'chat', slot: 'inline' },
+  settingsPanels: { space: 'settings', slot: 'nav' },
+  widgets: { space: 'workspace', slot: 'tab' },
+}
+
+/** PageDeclaration 显式字段（归一化时其余字段原样透传） */
+const PAGE_EXPLICIT_KEYS = new Set([
+  'id', 'title', 'icon', 'space', 'slot', 'path', 'order', 'when', 'openOn',
+  'datasourceUri', 'schema', 'layout', 'widget', 'props', 'writable', 'detachable',
+  'configPath', 'configLabel', 'type', 'pluginId', 'legacyFrom',
+])
+
+/**
  * ContributionRegistry
  *
  * 全局单例，管理所有插件贡献。
  * 数据源来自 /api/v1/schema 聚合。
+ *
+ * 存储模型：pages（PageDeclaration[]）是**唯一**贡献存储；
+ * settingsPanels（plugin_configs 配置注册表）与 widgetsByPlugin（ui_schema
+ * 声明）是独立数据源的旁路注册表，保持原 API。
  */
 export class ContributionRegistry {
-  /** 所有贡献条目 */
-  private entries: Map<string, ContributionEntry[]> = new Map()
-  /** 配置面板条目 */
+  /** 归一化页面集合（唯一真相源，含声明页 + 旧贡献点归一化页） */
+  private pages: PageDeclaration[] = []
+  /** 页面集合的 pluginId 索引（同一对象引用，非第二套存储） */
+  private pagesByPlugin: Map<string, PageDeclaration[]> = new Map()
+  /** 配置面板条目（plugin_configs 独立数据源） */
   private settingsPanels: Map<string, SettingsPanelEntry> = new Map()
   /** 插件 widget 声明（按 pluginId 索引，来自 ui_schema） */
   private widgetsByPlugin: Map<string, WidgetDeclaration[]> = new Map()
@@ -120,7 +255,7 @@ export class ContributionRegistry {
     // 幂等重载：先清空旧状态
     this.clear()
 
-    // 加载 plugin_configs（配置面板）
+    // 加载 plugin_configs（配置面板注册表 + 归一化为 settings/nav 页面）
     const pluginConfigs = schema.plugin_configs as
       | Array<{ plugin_id: string; plugin_name: string; config_files: Array<{ id: string; path: string; label: string }> }>
       | undefined
@@ -132,10 +267,23 @@ export class ContributionRegistry {
           pluginName: entry.plugin_name,
           configFiles: entry.config_files,
         })
+        // config_files → settings 页（datasourceUri 指向配置文件路径）
+        for (const file of entry.config_files) {
+          this.registerPage({
+            type: 'pages',
+            id: `${entry.plugin_id}:${file.id}`,
+            title: file.label,
+            space: 'settings',
+            slot: 'nav',
+            datasourceUri: file.path,
+            pluginId: entry.plugin_id,
+            legacyFrom: 'settingsPanels',
+          })
+        }
       }
     }
 
-    // 加载 plugin_contributes（contributes 贡献点）
+    // 加载 plugin_contributes（contributes 贡献点，统一归一化为 pages）
     this.registerFromSchema(
       schema as unknown as Parameters<typeof this.registerFromSchema>[0],
     )
@@ -193,7 +341,9 @@ export class ContributionRegistry {
    * `{ plugin_id, plugin_name, contributes }`，其中 `contributes` 是 manifest 原样透传的
    * `Record<ContributionType, item[]>`（内核不解释结构）。
    *
-   * settingsPanels 不在此处理——已在 `loadFromSchema` 经 `plugin_configs` 字段独立加载。
+   * 所有 key（含旧 15 种贡献点）在注册时**直接归一化**为 PageDeclaration 存入
+   * pages 集合；旧 key 经 legacyFrom 标记来源。settingsPanels 另在
+   * `loadFromSchema` 经 `plugin_configs` 字段归一化（plugin_configs 注册表）。
    *
    * @param schemaData - /api/v1/schema 返回的聚合数据
    */
@@ -211,16 +361,11 @@ export class ContributionRegistry {
       const contributes = entry.contributes
       if (!contributes) continue
 
-      // 遍历每种贡献点类型（viewsContainers / views / menus / statusBarItems / ...）
+      // 遍历每种贡献点 key（pages / viewsContainers / views / menus / ...），统一归一化
       for (const [type, items] of Object.entries(contributes)) {
         if (!Array.isArray(items)) continue
         for (const item of items) {
-          this.register({
-            ...item,
-            id: (item.id as string | undefined) ?? synthesizeId(type, pluginId, item),
-            type: type as ContributionType,
-            pluginId,
-          } as ContributionEntry)
+          this.normalizeAndRegister(type, item as Record<string, unknown>, pluginId)
         }
       }
     }
@@ -229,52 +374,84 @@ export class ContributionRegistry {
   }
 
   /**
-   * 注册单个贡献条目
+   * 注册单个贡献条目（归一化为 page 存入 pages 集合）
    */
   register(entry: ContributionEntry): void {
-    const type = entry.type
-    if (!this.entries.has(type)) {
-      this.entries.set(type, [])
-    }
-    const list = this.entries.get(type)!
-    // 去重
-    if (!list.some((e) => e.id === entry.id)) {
-      list.push(entry)
-      // 按 order 排序
-      list.sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
-    }
+    this.normalizeAndRegister(entry.type, { ...entry } as unknown as Record<string, unknown>, entry.pluginId ?? '')
   }
 
   /**
-   * 注销贡献条目
+   * 注销贡献条目（按 id 从 pages 集合移除）
    */
   unregister(type: ContributionType, id: string): void {
-    const list = this.entries.get(type)
-    if (list) {
-      const idx = list.findIndex((e) => e.id === id)
-      if (idx >= 0) list.splice(idx, 1)
+    const before = this.pages.length
+    this.pages = this.pages.filter((p) => !(p.id === id && (type === 'pages' ? !p.legacyFrom : p.legacyFrom === type)))
+    if (this.pages.length === before) return
+    // 重建 pluginId 索引
+    this.pagesByPlugin.clear()
+    for (const page of this.pages) {
+      const pid = page.pluginId ?? 'unknown'
+      const list = this.pagesByPlugin.get(pid) ?? []
+      list.push(page)
+      this.pagesByPlugin.set(pid, list)
     }
   }
 
   /**
-   * 获取某类型的所有贡献
+   * 获取某类型的所有贡献（薄视图）
+   *
+   * - 'pages' → 插件直接声明的页面（无 legacyFrom）
+   * - 旧类型 key → 归一化页面中 legacyFrom === type 的项
    */
-  getByType(type: ContributionType): ContributionEntry[] {
-    return this.entries.get(type) ?? []
+  getByType(type: ContributionType): PageDeclaration[] {
+    if (type === 'pages') return this.pages.filter((p) => !p.legacyFrom)
+    return this.pages.filter((p) => p.legacyFrom === type)
+  }
+
+  // ── 统一模型查询（pages 集合）──
+
+  /**
+   * 获取全部页面（声明页 + 旧贡献点归一化页，按 order 排序）
+   */
+  getPages(): PageDeclaration[] {
+    return [...this.pages]
   }
 
   /**
-   * 获取导航项（viewsContainers）
+   * 按空间获取页面（settings/workspace/chat/floating/dock/fullscreen）
    */
-  getViewsContainers(): ContributionEntry[] {
-    return this.getByType('viewsContainers')
+  getPagesBySpace(space: PageSpace): PageDeclaration[] {
+    return this.pages.filter((p) => p.space === space)
   }
 
   /**
-   * 获取侧边栏视图（views）
+   * 按 id 查找页面
    */
-  getViews(containerId?: string): ContributionEntry[] {
-    const views = this.getByType('views')
+  getPage(id: string): PageDeclaration | undefined {
+    return this.pages.find((p) => p.id === id)
+  }
+
+  /**
+   * 获取指定插件的全部页面（声明页 + 归一化页）
+   */
+  getPluginPages(pluginId: string): PageDeclaration[] {
+    return [...(this.pagesByPlugin.get(pluginId) ?? [])]
+  }
+
+  // ── 旧贡献点查询（pages 之上的薄视图，渲染侧迁移前的兼容层）──
+
+  /**
+   * 获取导航项（归一化前为 viewsContainers）
+   */
+  getViewsContainers(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'viewsContainers')
+  }
+
+  /**
+   * 获取侧边栏视图（归一化前为 views）
+   */
+  getViews(containerId?: string): PageDeclaration[] {
+    const views = this.pages.filter((p) => p.legacyFrom === 'views')
     if (containerId) {
       return views.filter((v) => v.containerId === containerId)
     }
@@ -282,14 +459,14 @@ export class ContributionRegistry {
   }
 
   /**
-   * 获取工作区标签页（workspaceTabs）
+   * 获取工作区标签页（归一化前为 workspaceTabs）
    */
-  getWorkspaceTabs(): ContributionEntry[] {
-    return this.getByType('workspaceTabs')
+  getWorkspaceTabs(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'workspaceTabs')
   }
 
   /**
-   * 获取配置面板列表（settingsPanels）
+   * 获取配置面板列表（plugin_configs 注册表）
    */
   getSettingsPanels(): SettingsPanelEntry[] {
     return Array.from(this.settingsPanels.values())
@@ -303,17 +480,17 @@ export class ContributionRegistry {
   }
 
   /**
-   * 获取状态栏条目
+   * 获取状态栏条目（归一化前为 statusBarItems）
    */
-  getStatusBarItems(): ContributionEntry[] {
-    return this.getByType('statusBarItems')
+  getStatusBarItems(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'statusBarItems')
   }
 
   /**
-   * 获取 dock 栏条目
+   * 获取 dock 栏条目（归一化前为 dockItems）
    */
-  getDockItems(): ContributionEntry[] {
-    return this.getByType('dockItems')
+  getDockItems(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'dockItems')
   }
 
   // ── Widget 声明（来自 agents/pipelines 的 ui_schema）──
@@ -336,51 +513,45 @@ export class ContributionRegistry {
     return all
   }
 
-  // ── contributes.menus（右键/上下文菜单，ADR §3.4 档位二）──
+  // ── 旧交互类贡献点查询（pages 之上的薄视图）──
 
   /**
-   * 获取菜单项（按 location 过滤）
+   * 获取菜单项（归一化前为 menus，按 location 过滤）
    *
    * @param location - 菜单位置（如 'workspace/context'、'chat/context'）；省略返回全部
    */
-  getMenus(location?: string): ContributionEntry[] {
-    const menus = this.getByType('menus')
+  getMenus(location?: string): PageDeclaration[] {
+    const menus = this.pages.filter((p) => p.legacyFrom === 'menus')
     if (location === undefined) return menus
     return menus.filter((m) => m.location === location)
   }
 
-  // ── contributes.commands（命令面板，ADR §3.4 档位二）──
-
   /**
-   * 获取所有命令（命令面板聚合用）
+   * 获取所有命令（归一化前为 commands，命令面板聚合用）
    */
-  getCommands(): ContributionEntry[] {
-    return this.getByType('commands')
+  getCommands(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'commands')
   }
 
-  // ── contributes.shortcuts（快捷键，ADR §3.4 档位二）──
-
   /**
-   * 获取所有快捷键绑定
+   * 获取所有快捷键绑定（归一化前为 shortcuts）
    */
-  getShortcuts(): ContributionEntry[] {
-    return this.getByType('shortcuts')
+  getShortcuts(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'shortcuts')
   }
 
-  // ── contributes.modal（模态弹窗，ADR §3.4 档位二）──
-
   /**
-   * 获取所有模态弹窗声明
+   * 获取所有模态弹窗声明（归一化前为 modal）
    */
-  getModals(): ContributionEntry[] {
-    return this.getByType('modal')
+  getModals(): PageDeclaration[] {
+    return this.pages.filter((p) => p.legacyFrom === 'modal')
   }
 
   /**
    * 按 trigger 查找模态弹窗（如 'on_command:xxx'）
    */
-  findModalByTrigger(trigger: string): ContributionEntry | undefined {
-    return this.getModals().find((m) => m.openOn === trigger || (m as { trigger?: string }).trigger === trigger)
+  findModalByTrigger(trigger: string): PageDeclaration | undefined {
+    return this.getModals().find((m) => m.openOn === trigger || m.trigger === trigger)
   }
 
   /**
@@ -401,15 +572,100 @@ export class ContributionRegistry {
    * 清空所有注册
    */
   clear(): void {
-    this.entries.clear()
+    this.pages = []
+    this.pagesByPlugin.clear()
     this.settingsPanels.clear()
     this.widgetsByPlugin.clear()
     this.initialized = false
+  }
+
+  // ── 内部：归一化注册 ──
+
+  /**
+   * 归一化注册单个贡献项为 PageDeclaration
+   *
+   * - type === 'pages'：按声明原样注册
+   * - 旧贡献点 key：按 LEGACY_PAGE_MAP 映射 space/slot，legacyFrom 标记来源
+   * - 未知 key：兜底归一化（不丢弃），space/slot 取默认值
+   */
+  private normalizeAndRegister(type: string, item: Record<string, unknown>, pluginId: string): void {
+    if (type === 'pages') {
+      this.registerPage(toPageDeclaration(item, pluginId))
+      return
+    }
+    const mapping = LEGACY_PAGE_MAP[type]
+    if (mapping) {
+      this.registerPage(toPageDeclaration(item, pluginId, { space: mapping.space, slot: mapping.slot, legacyFrom: type }))
+    } else {
+      this.registerPage(toPageDeclaration(item, pluginId, { space: 'workspace', slot: 'tab', legacyFrom: type }))
+    }
+  }
+
+  /**
+   * 注册页面（按 id 去重，pages 与 pagesByPlugin 同步，按 order 排序）
+   */
+  private registerPage(page: PageDeclaration): void {
+    if (this.pages.some((p) => p.id === page.id)) return
+    this.pages.push(page)
+    this.pages.sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
+
+    const pid = page.pluginId ?? 'unknown'
+    const list = this.pagesByPlugin.get(pid) ?? []
+    list.push(page)
+    list.sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
+    this.pagesByPlugin.set(pid, list)
   }
 }
 
 /** 全局单例 */
 export const contributionRegistry = new ContributionRegistry()
+
+/**
+ * 将贡献项转换为 PageDeclaration
+ *
+ * 显式字段做类型收窄；其余字段（command/key/location/category/trigger/
+ * containerId 等旧类型专有字段）原样透传到扩展索引，保证旧查询薄视图可用。
+ *
+ * @param item - 贡献项原始数据（manifest 原样透传）
+ * @param pluginId - 所属插件
+ * @param override - 归一化覆盖（space/slot 映射与 legacyFrom 来源标记）
+ */
+function toPageDeclaration(
+  item: Record<string, unknown>,
+  pluginId: string,
+  override?: { space?: PageSpace; slot?: PageSlot; legacyFrom?: string },
+): PageDeclaration {
+  const id = (item.id as string | undefined) ?? synthesizeId(override?.legacyFrom ?? 'pages', pluginId, item)
+  const page: PageDeclaration = {
+    type: 'pages',
+    id,
+    title: item.title as string | undefined,
+    icon: item.icon as string | undefined,
+    space: (override?.space ?? (item.space as PageSpace | undefined)) ?? 'workspace',
+    slot: override?.slot ?? (item.slot as PageSlot | undefined),
+    path: item.path as string | undefined,
+    order: item.order as number | undefined,
+    when: item.when as string | undefined,
+    openOn: item.openOn as string | undefined,
+    datasourceUri: item.datasourceUri as string | undefined,
+    schema: item.schema as Record<string, unknown> | undefined,
+    layout: item.layout as Array<Record<string, unknown>> | undefined,
+    widget: item.widget as string | undefined,
+    props: item.props as Record<string, unknown> | undefined,
+    writable: item.writable as boolean | undefined,
+    detachable: item.detachable as PageDetachable | undefined,
+    configPath: item.configPath as string | undefined,
+    configLabel: item.configLabel as string | undefined,
+    pluginId,
+    legacyFrom: override?.legacyFrom,
+  }
+  // 透传旧类型/扩展字段（command/key/location/category/trigger/containerId 等）
+  for (const [key, value] of Object.entries(item)) {
+    if (PAGE_EXPLICIT_KEYS.has(key)) continue
+    page[key] = value
+  }
+  return page
+}
 
 /**
  * 为无显式 id 的贡献条目合成稳定 id

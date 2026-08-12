@@ -106,20 +106,12 @@ pub trait WasmHostRegistry: Send + Sync {
 }
 
 /// WasmRuntime 配置。
+#[derive(Default)]
 pub struct WasmRuntimeConfig {
     /// 全局 host 能力注册表（所有插件共享可用能力集，白名单按插件校验）。
     pub host_registry: Option<Arc<dyn WasmHostRegistry>>,
     /// 能力白名单校验器。
     pub capability_checker: Option<Arc<dyn WasmCapabilityChecker>>,
-}
-
-impl Default for WasmRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            host_registry: None,
-            capability_checker: None,
-        }
-    }
 }
 
 /// host 侧 Store 携带的状态：记录本次 invoke 的插件 id + 命中的白名单校验上下文。

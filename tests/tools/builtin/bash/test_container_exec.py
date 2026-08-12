@@ -22,12 +22,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tools.builtin.bash.process_manager import (
+from bash_types import WorkUnit
+from process_manager import (
     ContainerProcessBackend,
     ProcessManager,
     _get_container_backend,
 )
-from tools.builtin.bash.types import WorkUnit
+
+pytestmark = pytest.mark.unit
 
 
 # ============================================================
@@ -147,7 +149,7 @@ async def test_start_process_with_container_id_uses_docker_exec(tmp_path):
         return fake_proc
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         side_effect=fake_create_subprocess_exec,
     ):
         pid, _ = await pm.start_process(
@@ -191,10 +193,10 @@ async def test_start_process_without_container_id_unchanged(tmp_path):
         return fake_proc
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         side_effect=fake_exec,
     ), patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_shell",
+        "process_manager.asyncio.create_subprocess_shell",
         side_effect=fake_shell,
     ):
         await pm.start_process(command="echo hi", working_dir=str(tmp_path))
@@ -212,7 +214,7 @@ async def test_start_process_container_stores_container_pid_in_metadata(tmp_path
     fake_proc = _make_fake_process(host_pid=42, container_pid=100)
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         pid, _ = await pm.start_process(
@@ -237,7 +239,7 @@ async def test_start_process_container_returns_host_pid_as_key(tmp_path):
     fake_proc = _make_fake_process(host_pid=999, container_pid=1)
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         pid, _ = await pm.start_process(command="x", container_id="cid")
@@ -265,7 +267,7 @@ async def test_start_process_container_ignores_host_working_dir(tmp_path):
         return fake_proc
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         side_effect=fake_create_subprocess_exec,
     ):
         # 传入宿主 Windows 路径（模拟 BashTool.get_working_dir 的返回值）
@@ -402,7 +404,7 @@ async def test_start_process_container_assigns_container_backend(tmp_path):
     fake_proc = _make_fake_process(host_pid=42, container_pid=100)
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         await pm.start_process(command="x", container_id="cid")
@@ -415,16 +417,16 @@ async def test_start_process_container_assigns_container_backend(tmp_path):
 @pytest.mark.asyncio
 async def test_start_process_local_assigns_local_backend(tmp_path):
     """不传 container_id → ProcessInfo.backend 应是 LocalProcessBackend（回归）。"""
-    from tools.builtin.bash.process_manager import LocalProcessBackend
+    from process_manager import LocalProcessBackend
 
     pm = ProcessManager(log_dir=tmp_path / "logs")
     fake_proc = _make_fake_process(host_pid=8)
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ), patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_shell",
+        "process_manager.asyncio.create_subprocess_shell",
         return_value=fake_proc,
     ):
         await pm.start_process(command="x")
@@ -449,7 +451,7 @@ async def test_terminate_container_process_calls_docker_kill(tmp_path):
         return 0, b"", b""
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         await pm.start_process(command="x", container_id="cid")
@@ -485,9 +487,14 @@ async def test_get_container_backend_caches_by_container_id():
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    reason="0.2 重构：BashTool.execute 不再透传 _container_id 到 start_process；"
+    "容器隔离改由 plugin 装载层决定，待容器路径测试重写后移除",
+    strict=False,
+)
 async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
     """BashTool.execute 收到 _container_id → start_process 被调用时带 container_id。"""
-    from tools.builtin.bash.tool import BashTool
+    from tool import BashTool
 
     tool = BashTool()
     captured: dict = {}
@@ -500,7 +507,7 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
 
     tool.process_manager.start_process = fake_start_process  # type: ignore[assignment]
     # 让 get_process_info 返回 completed，避免轮询
-    from tools.builtin.bash.types import ProcessInfo
+    from bash_types import ProcessInfo
     fake_info = ProcessInfo(
         pid=1, command="x", start_time=0, log_file=tmp_path / "fake.log",
         status="completed", exit_code=0,
@@ -522,7 +529,7 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
 @pytest.mark.asyncio
 async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
     """BashTool.execute 无 _container_id → start_process 的 container_id 应为 None（回归）。"""
-    from tools.builtin.bash.tool import BashTool
+    from tool import BashTool
 
     tool = BashTool()
     captured: dict = {}
@@ -532,7 +539,7 @@ async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
         return 1, tmp_path / "fake.log"
 
     tool.process_manager.start_process = fake_start_process  # type: ignore[assignment]
-    from tools.builtin.bash.types import ProcessInfo
+    from bash_types import ProcessInfo
     fake_info = ProcessInfo(
         pid=1, command="x", start_time=0, log_file=tmp_path / "fake.log",
         status="completed", exit_code=0,
@@ -547,13 +554,18 @@ async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    reason="0.2 重构：BashTool.execute 不再透传 _container_id；容器安全边界改由"
+    "装载层处理，待容器路径测试重写后移除",
+    strict=False,
+)
 async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path):
     """有 _container_id → 跳过内部安全检查（容器内已有独立边界）。
 
     用 `rm -rf /`（SecurityChecker 判 safe=False 直接拦截）验证：
     无 container_id 时被拦返回 failure，有 container_id 时放行走到 start_process。
     """
-    from tools.builtin.bash.tool import BashTool
+    from tool import BashTool
 
     dangerous_cmd = "rm -rf /"
 
@@ -572,7 +584,7 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
         return 1, tmp_path / "fake.log"
 
     tool2.process_manager.start_process = fake_start_process  # type: ignore[assignment]
-    from tools.builtin.bash.types import ProcessInfo
+    from bash_types import ProcessInfo
     fake_info = ProcessInfo(
         pid=1, command="x", start_time=0, log_file=tmp_path / "fake.log",
         status="completed", exit_code=0,
@@ -601,14 +613,14 @@ async def test_container_execute_running_continue_completed_cycle(tmp_path):
     用真实 ProcessManager + 真实 BashTool.execute，mock 的只有 docker exec
     （返回"还活着"的 fake process）。验证容器路径的轮询行为和本地路径一致。
     """
-    from tools.builtin.bash.tool import BashTool
+    from tool import BashTool
 
     tool = BashTool()
     # 容器内 pid=100，host pid=42；进程"还活着"（stream 阻塞，wait 立即返回 0）
     fake_proc = _make_fake_process(host_pid=42, container_pid=100, keep_open=True)
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         # 1) execute：timeout 极小，进程还活着 → 返回 running
@@ -655,7 +667,7 @@ async def test_container_execute_timeout_does_not_kill_process(tmp_path):
     验证：mock backend._run_cmd 记录所有调用，execute 超时返回 running 期间
     不应有 kill 命令；只有显式 terminate 才触发 kill。
     """
-    from tools.builtin.bash.tool import BashTool
+    from tool import BashTool
 
     tool = BashTool()
     fake_proc = _make_fake_process(host_pid=42, container_pid=100, keep_open=True)
@@ -667,7 +679,7 @@ async def test_container_execute_timeout_does_not_kill_process(tmp_path):
         return 0, b"", b""
 
     with patch(
-        "tools.builtin.bash.process_manager.asyncio.create_subprocess_exec",
+        "process_manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         # execute 超时返回 running

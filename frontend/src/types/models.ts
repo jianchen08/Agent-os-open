@@ -272,8 +272,10 @@ export interface Message {
     /** 错误信息 */
     error?: string
   }
-  /** 消息状态（流式状态或工具消息状态） */
-  status?: 'idle' | 'sending' | 'streaming' | 'completed' | 'error'
+  /** 消息状态（流式状态或工具消息状态）。
+   *  'failed' 用于 role=tool 的工具结果消息（后端持久化工具执行失败态），
+   *  与 MessageToolCall.status 的 'failed' 对齐，刷新后可还原失败渲染。 */
+  status?: 'idle' | 'sending' | 'streaming' | 'completed' | 'error' | 'failed'
   /** 前端乐观消息 ID，用于与服务端持久化消息对账（消除重复/丢失） */
   clientMessageId?: string
   toolCallId?: string

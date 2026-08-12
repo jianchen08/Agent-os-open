@@ -1,0 +1,2 @@
+静态资源托管验证
+如果看到这个文件内容,说明 /ext/feature_matrix_plugin/assets/test-asset.txt 静态资源托管正常工作。

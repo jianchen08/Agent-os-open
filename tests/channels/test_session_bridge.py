@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
 import tempfile
 from pathlib import Path
 
+from tests.channels.conftest import use_channel
 
-from channels.gateway.session_bridge import SessionBridge
+use_channel("gateway")
+from session_bridge import SessionBridge
 
 
 class TestSessionBridge:

@@ -195,7 +195,7 @@ describe('ErrorRecoveryFlow — AC-1l: 错误恢复流程', () => {
       expect(screen.getByText('连接超时')).toBeInTheDocument()
 
       // 红色样式
-      const errorPre = document.querySelector('pre.text-red-600')
+      const errorPre = document.querySelector('pre.text-status-error')
       expect(errorPre).toBeInTheDocument()
     })
 
@@ -209,8 +209,10 @@ describe('ErrorRecoveryFlow — AC-1l: 错误恢复流程', () => {
 
       const card = document.querySelector('[data-activity-status="failed"]') as HTMLElement
       expect(card).toBeInTheDocument()
-      // CSS 变量包含 --accent-error
-      const style = card.getAttribute('style') || ''
+      // 2026-08-12 视觉改版：状态色从整卡染色迁移到 3px 左边条（aria-hidden span）
+      const bar = card.querySelector('span[aria-hidden="true"]') as HTMLElement
+      expect(bar).toBeInTheDocument()
+      const style = bar.getAttribute('style') || ''
       expect(style).toContain('--accent-error')
     })
   })

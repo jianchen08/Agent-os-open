@@ -22,8 +22,14 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest  # noqa: E402
+
 from pipeline.plugin import PluginContext  # noqa: E402
-from plugins.output.track.plugin import TrackPlugin  # noqa: E402
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("output", "track")
+from plugin import TrackPlugin  # noqa: E402
+
+pytestmark = pytest.mark.unit
 
 PIPELINE_ID = "pipeline_cost_001"
 

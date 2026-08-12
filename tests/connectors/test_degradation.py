@@ -10,7 +10,9 @@ import pathlib
 
 import pytest
 
-from connectors.degradation import DegradationManager
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from degradation import DegradationManager
 
 
 @pytest.fixture

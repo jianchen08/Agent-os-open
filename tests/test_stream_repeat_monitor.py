@@ -4,7 +4,9 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("core", "stream_repeat_monitor")
+from plugin import StreamRepetitionMonitor
 
 
 def test_no_repetition_returns_none():

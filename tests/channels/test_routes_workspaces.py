@@ -18,11 +18,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from channels.api.deps import require_auth
-from channels.api.routes_workspaces import workspaces_router
+from tests.channels.conftest import use_channel
+
+use_channel("api")
+from deps import require_auth  # noqa: E402
+from routes_workspaces import workspaces_router  # noqa: E402
 
 # ============================================================
 # 测试常量
@@ -66,7 +71,7 @@ def client(mock_auth, workspace_tmp):
         return workspace_tmp
 
     with patch(
-        "channels.api.routes_workspaces._resolve_workspace_path",
+        "routes_workspaces._resolve_workspace_path",
         new=_fake_resolve,
     ):
         with TestClient(app) as c:

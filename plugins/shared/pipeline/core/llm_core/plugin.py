@@ -185,13 +185,9 @@ class LLMCore(ICorePlugin):
                 self._model,
                 self._provider,
             )
-        # default_params 兜底值：空 dict = 不人为设置任何采样参数（max_tokens/
-        # temperature 等），全部走上游默认（=不设限）。
-        # 历史教训：曾默认 {"temperature": 0.7, "max_tokens": 4096}，4096 对
-        # reasoning_model 过低——思考耗尽 token 后正文一字未出，被误判为
-        # empty_response 死循环重试（P7 任务三次失败即此原因）。
-        # 本字段是全链路唯一兜底点：配置层(models.py)与 resolver 均不覆盖空 dict，
-        # 故漏配模型最终走这里的 {} 兜底。
+        # default_params 兜底：空 dict = 不设采样参数，全走上游默认（=不设限），
+        # 避免 reasoning model 被人为限 token。本字段是全链路唯一兜底点——
+        # 配置层(models.py)与 resolver 均不覆盖空 dict，漏配模型最终落此。
         self._default_params: dict[str, Any] = self._config.get("default_params", {})
         self._call_timeout: float = float(self._config.get("call_timeout", 300))
         # 首 token 超时：首 chunk 不来时强制超时的秒数（默认 120s）。
@@ -352,7 +348,7 @@ class LLMCore(ICorePlugin):
             on_chunk = StreamRepetitionMonitor(on_chunk)
 
         try:
-            from llm.key_pool import set_agent_priority  # noqa: PLC0415
+            from key_pool import set_agent_priority  # noqa: PLC0415
 
             agent_level = ctx.state.get("agent_level", "L3")
             set_agent_priority(agent_level)
@@ -558,9 +554,9 @@ class LLMCore(ICorePlugin):
             # 工具调用错误后重置消息配对缓存，确保下次全量扫描
             exc_msg = str(exc)
             if "tool_call" in exc_msg.lower() or "tool call" in exc_msg.lower():
-                from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
-                    reset_pairing_cache,
-                )
+                # 同目录平铺 import（与本文件 line 27 一致）。原 ``plugins.core...``
+                # 路径不存在（plugins.core 包未定义），ImportError 会顶替原始异常上抛。
+                from _message_normalizer import reset_pairing_cache  # noqa: PLC0415
 
                 # 精确重置当前管道的缓存（pipeline_id 维度隔离后必须带 ID）
                 _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
@@ -703,7 +699,7 @@ class LLMCore(ICorePlugin):
         """
         provider_prefix = ""
         try:
-            from llm.router_factory import get_litellm_prefix  # noqa: PLC0415
+            from router_factory import get_litellm_prefix  # noqa: PLC0415
 
             provider_prefix = get_litellm_prefix(self._provider)
         except Exception:  # noqa: BLE001

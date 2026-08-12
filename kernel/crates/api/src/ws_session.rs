@@ -358,7 +358,6 @@ async fn resolve_pipeline_id_for_thread(
     frontend_pipeline_id: &str,
     tenant_id: &str,
 ) -> String {
-    use agentos_core::traits::StorageBackend;
     let Some(store) = store else {
         return if frontend_pipeline_id.is_empty() {
             thread_id.to_string()

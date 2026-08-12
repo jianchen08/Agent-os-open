@@ -28,6 +28,8 @@ use std::sync::Arc;
 
 use tracing::{error, warn};
 
+use agentos_config::ConfigCenter;
+
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
     ContentLoader, EngineError, PipelineConfig, PipelineStep, PluginContext, PluginError,
@@ -67,6 +69,12 @@ pub struct PipelineExecutor {
     steps_since_checkpoint: AtomicI64,
     /// 全局累计 step 序号（跨 run），作为 checkpoint 的 step_no 锚点。
     total_step_no: AtomicI64,
+    /// 统一配置中心（统一配置加载方案 TDD-7）。
+    ///
+    /// 注入后，loop 内每轮迭代调 `load_agent_into_state` 重读 agent yaml，
+    /// 实现"改 agent 配置调整正在跑的任务"（per-iteration 热加载）。
+    /// None = 不做 per-iteration 重读（per-run 加载仍由 process_via_engine 负责）。
+    config_center: Option<Arc<ConfigCenter>>,
 }
 
 impl PipelineExecutor {
@@ -100,7 +108,17 @@ impl PipelineExecutor {
             persistent_fields: HashSet::new(),
             steps_since_checkpoint: AtomicI64::new(0),
             total_step_no: AtomicI64::new(0),
+            config_center: None,
         }
+    }
+
+    /// 注入统一配置中心，启用 per-iteration agent 配置热加载（TDD-7）。
+    ///
+    /// 注入后 loop 内每轮迭代开头重读 agent yaml——
+    /// 改 config/agents/<id>.yaml，正在跑的任务下一轮迭代立即用新配置。
+    pub fn with_config_center(mut self, cc: Arc<ConfigCenter>) -> Self {
+        self.config_center = Some(cc);
+        self
     }
 
     /// 监控 M2：注入共享 engine 计数器（生产侧用，聚合器周期性 snapshot）。
@@ -164,6 +182,20 @@ impl PipelineExecutor {
                 iteration += 1;
                 if max_iters > 0 && iteration > max_iters {
                     break;
+                }
+                // 统一配置加载方案 TDD-7：每轮迭代开头重读 agent 配置（per-iteration 热加载）。
+                // 改 config/agents/<id>.yaml 后，正在跑的任务下一轮迭代立即用新配置——
+                // 实现"边跑边调"（如纠正走偏的 agent / 补漏工具 / 调 max_iterations）。
+                // config_center 未注入时跳过（per-run 加载仍由 process_via_engine 负责）。
+                if let Some(cc) = &self.config_center {
+                    // 先 clone agent_id，避免 state 同时被不可变借用（get）和可变借用（load）
+                    let agent_id_opt = state
+                        .get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(agent_id) = agent_id_opt {
+                        agentos_config::load_agent_into_state(cc, &mut state, &agent_id);
+                    }
                 }
                 self.execute_steps(&config.steps, &mut state, config, step_library)
                     .await;
@@ -303,7 +335,7 @@ impl PipelineExecutor {
     ) {
         let diff = state_diff(state_before, state_after);
         // diff 为空对象则跳过（step 未改动任何 state）
-        if diff.as_object().map_or(true, |o| o.is_empty()) {
+        if diff.as_object().is_none_or(|o| o.is_empty()) {
             return;
         }
 
@@ -487,7 +519,7 @@ impl PipelineExecutor {
         // （完整实现应哈希 pipeline_config，但对持久化链路验证无影响）。
         let config_hash = "";
         let tenant_id = self.default_tenant.tenant_id.clone();
-        if let Err(e) = self.store.create_run(&self.run_id, &config_hash, &tenant_id).await {
+        if let Err(e) = self.store.create_run(&self.run_id, config_hash, &tenant_id).await {
             warn!(run_id = %self.run_id, error = %e, "create_run 落库失败（继续执行）");
             self.metrics.inc_persist_failure();
         }
@@ -683,6 +715,7 @@ fn truthy_flag(state: &serde_json::Value, key: &str) -> bool {
 /// - 新增的 key：纳入 diff
 /// - 值变化的 key：纳入 diff（after 的值）
 /// - 值相同的 key：跳过
+///
 /// 非顶层（深层）变更按整体替换（不递归细粒度 diff），对齐 step 级快照语义。
 fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
     let before_obj = before.as_object();
@@ -743,21 +776,21 @@ fn messages_diff_ops(
 
     // 比对前缀：i < min(n, m)，变了则 replace_at
     if let Some(b) = before_arr {
-        for i in 0..n.min(m) {
-            if b.get(i) != Some(&after_arr[i]) {
+        for (i, after_item) in after_arr.iter().enumerate().take(n.min(m)) {
+            if b.get(i) != Some(after_item) {
                 ops.push(serde_json::json!({
                     "op": "replace_at",
                     "idx": i,
-                    "msg": after_arr[i],
+                    "msg": after_item,
                 }));
             }
         }
     }
     // 尾部追加：m > n
-    for i in n.min(m)..m {
+    for after_item in after_arr.iter().take(m).skip(n.min(m)) {
         ops.push(serde_json::json!({
             "op": "append",
-            "msg": after_arr[i],
+            "msg": after_item,
         }));
     }
     // 压缩：n > m，删除 index ≥ m
@@ -1804,5 +1837,104 @@ mod tests {
         // step 自带循环跑了 3 轮（第 3 次 set ended）
         assert_eq!(counter.load(Ordering::SeqCst), 3);
         assert_eq!(state["ended"], json!(true));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TDD-7: per-iteration agent 配置热加载测试
+    // 设计依据：docs/working/重要设计/统一配置加载方案.md TDD-7
+    // ════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_config_center_enables_per_iteration_agent_load() {
+        // 契约：config_center 注入后，loop 内每轮调 load_agent_into_state，
+        // agent yaml 的字段被注入 state（即使 initial_state 没有这些字段）。
+        let temp = tempfile::tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("reload_test.yaml"),
+            "system_prompt: 注入的提示词\ncustom: hello\n",
+        )
+        .unwrap();
+
+        let cc = Arc::new(ConfigCenter::new(temp.path().to_path_buf()));
+
+        let fixture = Fixture::build(&["noop"]);
+        fixture.invoker.set_result(
+            "noop",
+            PluginResult {
+                state_updates: updates(&[("ended", json!(true))]),
+                ..Default::default()
+            },
+        );
+
+        let executor = make_executor(fixture.invoker.clone(), &["noop"])
+            .with_config_center(cc);
+
+        let config = PipelineConfig {
+            name: "reload_test".into(),
+            loop_config: agentos_core::types::LoopConfig {
+                enabled: true,
+                max_iterations: 5,
+            },
+            steps: vec![atomic_step("s1", "noop")],
+            checkpoint: Default::default(),
+        };
+
+        // initial_state 只有 agent_id，没有 system_prompt/custom
+        let initial = json!({"agent_id": "reload_test"});
+
+        let final_state = executor
+            .run(&config, &StepLibrary::default(), initial)
+            .await
+            .unwrap();
+
+        // 验证 load_agent_into_state 被调用：agent yaml 字段注入了 state
+        assert_eq!(
+            final_state["system_prompt"],
+            "注入的提示词",
+            "config_center 注入后，loop 应调 load_agent_into_state"
+        );
+        assert_eq!(final_state["custom"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_no_config_center_skips_agent_load() {
+        // 契约：config_center 未注入（None）时，loop 内不调 load_agent_into_state，
+        // state 不会凭空出现 agent 配置字段（per-run 加载仍由 process_via_engine 负责）。
+        let fixture = Fixture::build(&["noop"]);
+        fixture.invoker.set_result(
+            "noop",
+            PluginResult {
+                state_updates: updates(&[("ended", json!(true))]),
+                ..Default::default()
+            },
+        );
+
+        // 不调 with_config_center（config_center = None）
+        let executor = make_executor(fixture.invoker.clone(), &["noop"]);
+
+        let config = PipelineConfig {
+            name: "no_cc".into(),
+            loop_config: agentos_core::types::LoopConfig {
+                enabled: true,
+                max_iterations: 5,
+            },
+            steps: vec![atomic_step("s1", "noop")],
+            checkpoint: Default::default(),
+        };
+
+        let initial = json!({"agent_id": "ghost_agent"});
+
+        let final_state = executor
+            .run(&config, &StepLibrary::default(), initial)
+            .await
+            .unwrap();
+
+        // 没 config_center → 不调 load_agent_into_state → state 不会有 system_prompt
+        assert!(
+            final_state.get("system_prompt").is_none(),
+            "无 config_center 时不应注入 agent 配置"
+        );
     }
 }

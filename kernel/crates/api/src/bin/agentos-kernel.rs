@@ -340,6 +340,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   InProcess: 经 NativePluginLoader 加载 cdylib 走 C-ABI（放进插件目录即用）
     //   Wasm: 经 WasmRuntime（wasmtime）加载执行 .wasm（放进插件目录即用）
     // 默认配置即可运行；host 能力注册表/白名单校验器留空（按需后续注入）。
+    // 阶段3 遗留：在 loader 被 move 进 Arc 之前，先取出插件根目录映射，
+    // 后续注入 AppState 启用 /ext/{plugin_id}/assets/** 静态资源托管。
+    let plugin_dirs = loader.get_plugin_dirs();
+    eprintln!(
+        "[boot-diag] plugin_dirs loaded: {} entries",
+        plugin_dirs.len()
+    );
     let loader_arc = Arc::new(loader);
     let wasm_runtime = Arc::new(WasmRuntime::new()?);
     let native_loader = Arc::new(NativePluginLoader::new());
@@ -386,18 +393,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // McpBridge 把 capability 调用转发到对应 sidecar 插件的工具。
     // 这让 human-interaction 等插件自注册的 namespace 经 reader loop → router →
     // handler → bridge → invoker.invoke_tool → sidecar 完成闭环。
+    // 路由完全从 manifest provides.capabilities 声明派生（含 tool_prefix），
+    // 内核零硬编码——新插件声明 provides 即自动注册，无需改内核。
     let handler_registry = Arc::new(agentos_mcp::CapabilityHandlerRegistry::new());
     let mcp_bridge = Arc::new(agentos_plugin_loader::McpBridge::new(invoker.clone() as Arc<dyn agentos_core::traits::PluginInvoker>));
     mcp_bridge.add_routes_from_manifests(&enabled_manifests);
-    // human-interaction 的 sidecar 工具前缀是 interaction（不是 namespace 默认推导的
-    // human_interaction），显式覆盖。
-    mcp_bridge.add_route(
-        "human-interaction",
-        agentos_plugin_loader::CapabilityRoute {
-            plugin_id: "human_interaction_service".to_string(),
-            tool_prefix: "interaction".to_string(),
-        },
-    );
     let registered = agentos_plugin_loader::register_provided_capabilities(
         &handler_registry,
         &enabled_manifests,
@@ -520,6 +520,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = state.with_db(store.clone());
     let state = state.with_http_handler(http_handler);
     eprintln!("[boot-diag] with_http_handler 返回"); std::io::stderr().flush().ok();
+    // 阶段3 遗留：注入插件根目录映射，启用静态资源托管
+    // （/ext/{plugin_id}/assets/{*path} → <plugin_dir>/web/<path> 直读）。
+    // 插件只需在自己的目录下放 web/ 子目录即可被内核自动托管，无需声明 http_endpoints。
+    let state = state.with_plugin_dirs(plugin_dirs);
+    eprintln!("[boot-diag] with_plugin_dirs 返回"); std::io::stderr().flush().ok();
+    // 统一配置加载方案 TDD-4：构造 ConfigCenter 注入 AppState。
+    // 后续 loader（agent/pipeline/plugin config_files）经此统一走 load()/load_dir()/store()。
+    let state = if let Some(root) = state.project_root.as_ref() {
+        let cc = std::sync::Arc::new(agentos_config::config_center::ConfigCenter::new(root.join("config")));
+        state.with_config_center(cc)
+    } else {
+        state
+    };
+    eprintln!("[boot-diag] with_config_center 返回"); std::io::stderr().flush().ok();
     let state = state
     // 监控 M1/M5/M5b：注入指标聚合器（启用 /api/v1/metrics + /metrics 端点）
     .with_metrics(metrics_aggregator.clone());

@@ -19,13 +19,15 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from isolation.approval import (
+import tests._isolation_path  # noqa: F401
+
+from approval import (
     ApprovalContext,
     ApprovalDecisionEngine,
     classify_tool_safety,
 )
-from isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
-from isolation.types import IsolationLevel
+from policy import IsolationPolicyLoader, ToolIsolationPolicy
+from isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 
 
@@ -211,8 +213,8 @@ def _make_guard_with_policy(docker_available=False, force_host=False, tools=None
         tools: 自定义工具策略字典 {tool_name: ToolIsolationPolicy}。
                不传则用真实 isolation_policy.yaml。
     """
-    from plugins.input.isolation_guard.plugin import IsolationGuard
-    from isolation.decider import IsolationDecider
+    from plugin import IsolationGuard  # isolation_guard 插件目录（父级已入 path 时按平铺解析）
+    from decider import IsolationDecider
 
     guard = IsolationGuard(config={
         "docker_available": docker_available,

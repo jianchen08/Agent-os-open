@@ -47,7 +47,7 @@ import {
   openWorkspacePanelByPath,
 } from '@/services/workspacePanelOpener'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { ContributionEntry } from '@/services/schema/ContributionRegistry'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
@@ -113,7 +113,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const [contribTick, setContribTick] = useState(0)
   useEffect(() => {
     const id = window.setInterval(() => {
-      const n = contributionRegistry.getViewsContainers().length
+      // 侧栏入口 = workspace 空间 + activity-bar 栏位（旧 viewsContainers 归一化产物）
+      const n = contributionRegistry.getPagesBySpace('workspace').filter((p) => p.slot === 'activity-bar').length
       setContribTick((prev) => (prev === n ? prev : n))
     }, 1500)
     return () => window.clearInterval(id)
@@ -121,7 +122,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const pluginContainers = useMemo(() => {
     void contribTick
     return contributionRegistry
-      .getViewsContainers()
+      .getPagesBySpace('workspace')
+      .filter((p) => p.slot === 'activity-bar')
       .slice()
       .sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
   }, [contribTick])
@@ -389,7 +391,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
 
 
   const handlePluginClick = useCallback(
-    (entry: ContributionEntry) => {
+    (entry: PageDeclaration) => {
       setActiveView(entry.id)
       if (entry.path && typeof entry.path === 'string') {
         const opened = openWorkspacePanelByPath(entry.path)
@@ -606,7 +608,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 新建会话
               </button>
 
-              {/* plugin contributed viewsContainers (vscode-like) */}
+              {/* plugin contributed pages — workspace/activity-bar（vscode-like） */}
               {pluginContainers.map((entry) => {
                 const selected = activeView === entry.id
                 return (

@@ -28,7 +28,7 @@ from models import (
     TaskUpdate,
 )
 from tasks.service_access import get_task_service
-from utils.enum_utils import safe_enum_value
+from tasks.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +347,7 @@ async def create_task(
             message="创建任务必须指定执行 Agent（agent_id），禁止静默降级到默认 Agent",
         )
 
-    from tasks.types import TaskModel, TaskPriority, TaskStatus  # noqa: F401,PLC0415
+    from tasks.task_types import TaskModel, TaskPriority, TaskStatus  # noqa: F401,PLC0415
 
     task_model = await task_service.create_task(
         title=body.title,
@@ -495,7 +495,7 @@ async def create_root_task(
 
     # ── 创建任务 ──
 
-    from tasks.types import TaskModel, TaskPriority  # noqa: F401,PLC0415
+    from tasks.task_types import TaskModel, TaskPriority  # noqa: F401,PLC0415
 
     try:
         task_model = await task_service.create_task(
@@ -701,7 +701,7 @@ def update_task(
                 updates["description"] = body.description
 
             if body.status is not None:
-                from tasks.types import TaskStatus  # noqa: PLC0415
+                from tasks.task_types import TaskStatus  # noqa: PLC0415
 
                 updates["status"] = TaskStatus(body.status)
 
@@ -1336,7 +1336,7 @@ async def cancel_task(
 
     # 只有非终态任务可以取消（pending/running/stopped/evaluating）
 
-    from tasks.types import TaskStatus  # noqa: PLC0415
+    from tasks.task_types import TaskStatus  # noqa: PLC0415
 
     cancellable_statuses = {
         TaskStatus.PENDING,

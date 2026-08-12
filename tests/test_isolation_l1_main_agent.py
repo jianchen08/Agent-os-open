@@ -14,10 +14,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from isolation.types import IsolationLevel
+import tests._isolation_path  # noqa: F401
+
+from isolation_types import IsolationLevel
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
+
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
-from plugins.input.isolation_guard.plugin import IsolationGuard
+from plugin import IsolationGuard
 
 
 def _make_guard(docker_available: bool = True) -> IsolationGuard:

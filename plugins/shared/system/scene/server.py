@@ -14,12 +14,15 @@ import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
+_SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SYSTEM_DIR not in sys.path:
+    sys.path.insert(0, _SYSTEM_DIR)
 
 from agentos_plugin_sdk import AgentOSPlugin
 
 # 直接导入同目录老代码
-from manager import SceneManager
-from templates import list_templates
+from scene.manager import SceneManager
+from scene.templates import list_templates
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("scene_service")
@@ -77,7 +80,7 @@ async def scene_create(
         return {"success": False, "error": "服务未初始化"}
 
     try:
-        from models import SceneLayoutConfig  # noqa: PLC0415
+        from scene.models import SceneLayoutConfig  # noqa: PLC0415
 
         scene_layout = None
         if layout:
@@ -203,7 +206,7 @@ async def scene_update(
     if _manager is None:
         return {"success": False, "error": "服务未初始化"}
 
-    from models import SceneUpdateRequest  # noqa: PLC0415
+    from scene.models import SceneUpdateRequest  # noqa: PLC0415
 
     request = SceneUpdateRequest(name=name, description=description)
     scene = _manager.update_scene(scene_id, request)

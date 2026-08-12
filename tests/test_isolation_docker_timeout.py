@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401
+
 """Docker daemon 假死防阻塞回归测试。
 
 背景 BUG：IsolationManager 的 4 个容器管理方法（_find_existing_container 等）
@@ -19,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from isolation.manager import IsolationManager
+from manager import IsolationManager
 
 # _run_docker_sync 超时上限（秒）。测试里把硬超时压到这个值，让"挂起"场景
 # 快速收敛——这验证的是超时机制本身，生产默认是 15s/30s。
@@ -50,6 +52,7 @@ def _patch_fast_timeout(monkeypatch, manager: IsolationManager):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timing
 async def test_run_docker_sync_returns_none_on_timeout():
     """同步操作永久阻塞时，_run_docker_sync 必须在超时后返回 None，不卡死。"""
     manager = _make_manager()
@@ -105,6 +108,7 @@ async def test_find_existing_container_returns_none_when_daemon_raises():
     assert result is None
 
 
+@pytest.mark.timing
 async def test_find_existing_container_does_not_hang_when_daemon_hangs(monkeypatch):
     """daemon 假死（containers.get 永久阻塞）时不冻死进程，超时返回 None。
 
@@ -159,6 +163,7 @@ async def test_destroy_container_does_not_raise_on_connection_error():
     assert result is None
 
 
+@pytest.mark.timing
 async def test_destroy_container_does_not_hang_when_daemon_hangs(monkeypatch):
     """daemon 假死时 _destroy_container_by_name 超时返回，不卡死。"""
     manager = _make_manager()

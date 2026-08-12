@@ -92,7 +92,7 @@ class TestTrimCoveredMessages:
     @pytest.mark.asyncio
     async def test_无压缩块原样返回(self) -> None:
         """没有 L1 压缩块时不裁剪。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         ctx = _make_context(chunk_service=_chunk_service([]))
@@ -111,7 +111,7 @@ class TestTrimCoveredMessages:
         且存在 sequence > 899 的未压缩 recent 段（NoopInvoker 任务）。
         修复前：851 -> 0 全裁；修复后：保留 seq>899 的消息。
         """
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         svc = _chunk_service([_chunk("L1", 899, 1)])
@@ -141,7 +141,7 @@ class TestTrimCoveredMessages:
     @pytest.mark.asyncio
     async def test_system消息全保留与压缩侧统一(self) -> None:
         """system 消息不参与裁剪，全部保留（与压缩侧 pure_system_msgs 原样保留一致）。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         svc = _chunk_service([_chunk("L1", 50, 1)])
@@ -165,7 +165,7 @@ class TestTrimCoveredMessages:
     @pytest.mark.asyncio
     async def test_无record_sequence的非system消息保留(self) -> None:
         """无 _record_sequence 的非 system 消息（重注入压缩块等）默认保留。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         svc = _chunk_service([_chunk("L1", 50, 1)])
@@ -197,7 +197,7 @@ class TestTrimCoveredMessages:
         模拟：全部非 system 消息 sequence 都 <= max_end（确实都被覆盖），
         但裁剪后非 system 为 0，触发防护，返回原消息避免上下文裁空。
         """
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         svc = _chunk_service([_chunk("L1", 100, 1)])
@@ -219,7 +219,7 @@ class TestTrimCoveredMessages:
     @pytest.mark.asyncio
     async def test_正常裁剪保留recent段并打日志(self, caplog: pytest.LogCaptureFixture) -> None:
         """正常裁剪：大部分被覆盖，保留少量 recent 段（>10%），记录 INFO 日志。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         svc = _chunk_service([_chunk("L1", 5, 1)])
@@ -249,7 +249,7 @@ class TestTrimCoveredMessages:
     @pytest.mark.asyncio
     async def test_无pipeline_id原样返回(self) -> None:
         """pipeline_id 为空时不裁剪。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         ctx = PluginContext(state={}, config={}, _services={})
@@ -270,7 +270,7 @@ class TestEstimateAssembledTokens:
     @pytest.mark.asyncio
     async def test_recent按全局sequence累加不被system占号影响(self) -> None:
         """seq>max_end 的非 system 消息应被计入 recent，即使条数 < max_end。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         # L1 块 max_end=899；消息含穿插的 system + seq>899 的 recent
@@ -299,7 +299,7 @@ class TestEstimateAssembledTokens:
     @pytest.mark.asyncio
     async def test_无sequence的非system消息不计入recent(self) -> None:
         """无 _record_sequence 的非 system 消息不计入 recent（避免重复算）。"""
-        from plugins.input.context_window_guard.plugin import ContextWindowGuardPlugin
+        from plugin import ContextWindowGuardPlugin
 
         plugin = ContextWindowGuardPlugin()
         svc = _chunk_service([_chunk("L1", 50, 1)])

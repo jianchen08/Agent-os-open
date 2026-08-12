@@ -242,7 +242,6 @@ class ToolSchemaValidator(IInputPlugin):
                         fix_messages,
                     )
 
-                # 修复后再次验证
                 re_errors = self._validate_args(fixed_args, input_schema)
                 if re_errors:
                     # 参数校验失败（缺 required / 类型不匹配且无法修复）：
@@ -295,7 +294,6 @@ class ToolSchemaValidator(IInputPlugin):
                         tc_truncated,
                     )
                     continue
-                # 修复成功，用修复后的参数替换原始参数
                 fixed_tc = dict(tc)
                 fixed_tc["args"] = fixed_args
                 validated_calls.append(fixed_tc)
@@ -441,8 +439,9 @@ class ToolSchemaValidator(IInputPlugin):
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # 尝试修复
-        from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
+        # 尝试修复。经 pipeline 命名空间包解析（plugins/shared 在 sys.path）；
+        # 原 ``plugins.core...`` 路径不存在。
+        from pipeline.core.llm_core._message_normalizer import (  # noqa: PLC0415
             repair_json_string,
         )
 

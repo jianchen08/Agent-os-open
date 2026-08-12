@@ -20,12 +20,15 @@ client 缓存绑定在永不关闭的循环上，跨调用方循环复用不再�
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from pathlib import Path
 
 import pytest
 
-from lsp.gateway import LSPGateway
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "plugins" / "shared" / "tools" / "lsp"))
+
+from gateway import LSPGateway  # noqa: E402
 
 # 用平台无关的绝对路径构造 file URI（Windows 上 /tmp 不是绝对路径）
 _TMPDIR = Path(__file__).resolve().parent
@@ -96,7 +99,7 @@ class FakeLSPClient:
 def gateway(monkeypatch):
     """构造一个用 FakeLSPClient 替换真实 client 的 gateway 并初始化。"""
     FakeLSPClient.instances.clear()
-    monkeypatch.setattr("lsp.gateway.LSPClient", FakeLSPClient)
+    monkeypatch.setattr("gateway.LSPClient", FakeLSPClient)
     gw = LSPGateway()
     asyncio.run(gw.initialize())
     yield gw

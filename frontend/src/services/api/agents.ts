@@ -3,6 +3,7 @@
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
+import type { UIInputFormField } from '@/types/schema'
 import type { RetryOptions } from '@/utils/retry'
 
 /** Agent 响应类型（与后端 AgentResponse 对齐） */
@@ -200,6 +201,87 @@ export async function deleteAgent(agentId: string, options: RetryOptions = {}): 
 export async function getDefaultAgent(options: RetryOptions = {}): Promise<AgentResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<AgentResponse>(API_ENDPOINTS.AGENTS.DEFAULT)
+    return response.data
+  }, options)
+}
+
+/** Agent 配置字段 Schema 响应（GET /api/v1/agents/schema） */
+export interface AgentSchemaResponse {
+  /** 字段定义（表单驱动） */
+  fields: UIInputFormField[]
+}
+
+/** Agent 配置读取响应（GET /api/v1/agents/{id}/config） */
+export interface AgentConfigResponse {
+  /** Agent ID */
+  config_id: string
+  /** 配置文件 yaml 原文 */
+  yaml: string
+}
+
+/** Agent 配置写回响应（PUT /api/v1/agents/{id}/config） */
+export interface AgentConfigUpdateResponse {
+  /** Agent ID */
+  config_id: string
+  /** 是否写回成功 */
+  success: boolean
+  /** 备份文件名（写回前自动备份） */
+  backup?: string
+}
+
+/**
+ * 获取 Agent 配置字段 Schema
+ *
+ * 返回 agent 配置的字段级 schema（type 覆盖 string/textarea/number/select/multiselect）。
+ */
+export async function getAgentSchema(
+  options: RetryOptions = {},
+): Promise<AgentSchemaResponse> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<AgentSchemaResponse>(API_ENDPOINTS.AGENTS.SCHEMA)
+    return response.data
+  }, options)
+}
+
+/**
+ * 读取 Agent 配置 yaml 原文
+ *
+ * @param agentId - Agent ID（对应 config/agents 目录下的 yaml 配置文件名）
+ */
+export async function getAgentConfig(
+  agentId: string,
+  options: RetryOptions = {},
+): Promise<AgentConfigResponse> {
+  if (!agentId || agentId.trim().length === 0) {
+    throw new Error('Agent ID 不能为空')
+  }
+
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<AgentConfigResponse>(API_ENDPOINTS.AGENTS.CONFIG(agentId))
+    return response.data
+  }, options)
+}
+
+/**
+ * 写回 Agent 配置 yaml 原文（后端先备份再写）
+ *
+ * @param agentId - Agent ID
+ * @param yaml - 新的 yaml 内容（原文写回）
+ */
+export async function putAgentConfig(
+  agentId: string,
+  yaml: string,
+  options: RetryOptions = {},
+): Promise<AgentConfigUpdateResponse> {
+  if (!agentId || agentId.trim().length === 0) {
+    throw new Error('Agent ID 不能为空')
+  }
+
+  return requestWithRetry(async () => {
+    const response = await apiClient.put<AgentConfigUpdateResponse>(
+      API_ENDPOINTS.AGENTS.CONFIG(agentId),
+      { yaml },
+    )
     return response.data
   }, options)
 }

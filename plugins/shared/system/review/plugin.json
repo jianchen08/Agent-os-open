@@ -2,13 +2,13 @@
     "id": "review_service",
     "name": "Review Service",
     "version": "1.0.0",
-    "plugin_type": "system",
+    "plugin_type": "tool",
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
     "capabilities": {
         "tools": [
-            {"name": "review.trigger", "description": "Trigger a review for a completed task"},
+            {"name": "trigger_review", "description": "Trigger a review for a completed task"},
             {"name": "review.get_report", "description": "Get review report by ID"}
         ],
         "resources": [],

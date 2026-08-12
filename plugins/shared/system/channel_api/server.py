@@ -23,7 +23,33 @@ import os
 import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+# ── sys.path 装配 ──
+# channel_api 需要按 namespace package 访问兄弟系统插件（tasks/multimodal/workspace/
+# scene 等），以及 tools/human（平铺 `from service import ...`）和 hindsight_memory
+# （`from memory_backend import ...`）。把这些目录加入 sys.path。
+_SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_HUMAN_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "tools", "human")
+)
+_HINDSIGHT_MEMORY_DIR = os.path.abspath(os.path.join(_SYSTEM_DIR, "hindsight_memory"))
+for _extra in (_SYSTEM_DIR, _HUMAN_DIR, _HINDSIGHT_MEMORY_DIR):
+    if os.path.isdir(_extra) and _extra not in sys.path:
+        sys.path.insert(0, _extra)
+
+# ⚠️ channel_api 自身目录必须最后插到 sys.path 最前。
+# 本目录有 models.py / deps.py / memory_store.py 等顶层模块，与兄弟插件同名模块冲突
+# （最典型：tools/human/models.py）。若 human 目录排在前面，`from models import TaskCreate`
+# 会错误解析到 human/models.py（只有 InteractionMode 等枚举、无 TaskCreate）→
+# http.handle 报 `cannot import name 'TaskCreate' from 'models'` →
+# /ext/channel_api/tasks 持续 502 → 前端"任务同步失败"每 5s 刷屏。
+# 因此在所有兄弟目录入列后，再把自身目录提到 sys.path[0]，让本目录的同名模块优先。
+_SELF_DIR = os.path.dirname(__file__)
+if sys.path[0] != _SELF_DIR:
+    try:
+        sys.path.remove(_SELF_DIR)
+    except ValueError:
+        pass
+    sys.path.insert(0, _SELF_DIR)
 
 from agentos_plugin_sdk import AgentOSPlugin
 
@@ -46,7 +72,7 @@ async def _on_load(params: dict[str, Any]) -> None:
 
         # 收集可用路由列表
         route_prefixes = [
-            "agents", "artifacts", "asr", "auth", "comfyui",
+            "agents", "artifacts", "asr", "auth",
             "config", "evaluation", "external_chat", "maintenance",
             "memory", "plugins", "reviews", "scene", "tasks",
             "themes", "thinking_mode", "threads", "tools", "ui",
@@ -165,6 +191,54 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
         return json.loads(decoded) if decoded.strip() else {}
     except json.JSONDecodeError as e:
         raise ValueError(f"invalid JSON body: {e}") from e
+
+
+def _resolve_caller(headers: dict[str, str] | None) -> dict[str, Any]:
+    """从请求头解析可信 caller 身份（sub/username/role）。
+
+    ``http.handle`` 由内核 dispatcher 调度（鉴权在 dispatcher 层按
+    ``http_endpoints.auth=user`` 完成），但 handler 需要拿到真实 caller 身份
+    （尤其 ``role``）才能做垂直越权检查。本函数从 ``Authorization`` 头取 Bearer
+    token，复用 ``auth.verify_token`` 解出 sub/username/role。
+
+    无/无效 token → 返回 ``{}``（保持既有未鉴权兼容行为，鉴权 401 由 dispatcher 负责，
+    不在此处重复；下游管理员端点会对空身份默认拒绝）。
+    """
+    authz = ""
+    for k, v in (headers or {}).items():
+        if isinstance(k, str) and k.lower() == "authorization" and v:
+            authz = str(v)
+            break
+    token = authz[7:] if authz.lower().startswith("bearer ") else ""
+    if not token:
+        return {}
+    try:
+        from auth import verify_token  # noqa: PLC0415
+
+        payload = verify_token(token)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not payload:
+        return {}
+    return {
+        "sub": payload.get("sub"),
+        "username": payload.get("username"),
+        "role": payload.get("role", "user"),
+    }
+
+
+def _require_admin_role(_user: dict[str, Any] | None) -> None:
+    """垂直越权检查：管理员端点要求 ``caller.role == 'admin'``，否则 403 Forbidden。
+
+    空身份（未鉴权透传的 ``_user={}``）同样拒绝（默认 deny）。
+
+    Raises:
+        fastapi.HTTPException: status_code=403 当 caller 非管理员。
+    """
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    if (_user or {}).get("role") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
 
 
 def _handle_config_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
@@ -310,14 +384,23 @@ def _handle_thinking_mode_domain(path: str, method: str, raw_body: str, query: d
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
-async def _handle_users_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+async def _handle_users_domain(
+    path: str,
+    method: str,
+    raw_body: str,
+    query: dict[str, str],
+    _user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """users 域分发：/ext/channel_api/users/** → routes_missing 的 users 路由业务函数（全 stub）。
 
-    _user=Depends(require_auth) 参数省略（dispatcher 已按 http_endpoints.auth=user 鉴权）。
+    caller 身份由 ``http_handle`` 经 ``_resolve_caller`` 解析后透传（``_user`` 含
+    sub/role）。管理员端点（create_user / update_role / update_active / delete_user）
+    显式做垂直越权检查：非 admin → 403。
     """
     import routes_missing as rm  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
 
+    caller = _user or {}
     prefix = "/ext/channel_api/users"
     if not path.startswith(prefix):
         return _ok(_json_response({"error": "not a users path", "path": path}, 404))
@@ -335,7 +418,8 @@ async def _handle_users_domain(path: str, method: str, raw_body: str, query: dic
             body = _decode_body(raw_body) or None
             return _ok(_json_response(await rm.update_user_settings(body)))
         if sub in ("", "/") and method == "POST":
-            # create_user 用 Query 参数（username/password/role）
+            # create_user 用 Query 参数（username/password/role）——管理员端点
+            _require_admin_role(caller)
             body = _decode_body(raw_body) or None
             return _ok(_json_response(await rm.create_user(
                 username=query.get("username"),
@@ -345,14 +429,20 @@ async def _handle_users_domain(path: str, method: str, raw_body: str, query: dic
             )))
         # path-param 路由：/{user_id}/role | /{user_id}/active | /{user_id}
         if sub.endswith("/role") and method in ("PUT", "PATCH"):
+            # update_user_role——管理员端点（防普通用户给任意用户提权/降权）
+            _require_admin_role(caller)
             user_id = sub[1:].rsplit("/role", 1)[0]  # 去掉前导 / 与尾 /role
             body = _decode_body(raw_body) or None
             return _ok(_json_response(await rm.update_user_role(user_id, body)))
         if sub.endswith("/active") and method in ("PUT", "PATCH"):
+            # update_user_active——管理员端点（防普通用户封禁/启用他人）
+            _require_admin_role(caller)
             user_id = sub[1:].rsplit("/active", 1)[0]
             body = _decode_body(raw_body) or None
             return _ok(_json_response(await rm.update_user_active(user_id, body)))
         if sub.startswith("/") and method == "DELETE":
+            # delete_user——管理员端点
+            _require_admin_role(caller)
             user_id = sub[1:]
             return _ok(_json_response(await rm.delete_user(user_id)))
 
@@ -392,30 +482,6 @@ async def _handle_sessions_domain(path: str, method: str, raw_body: str, query: 
         return _http_exc_response(exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("sessions http.handle 未预期错误: %s", exc, exc_info=True)
-        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
-
-
-async def _handle_client_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
-    """client 域分发：/ext/channel_api/client/** → routes_missing 的 client 路由。"""
-    import routes_missing as rm  # noqa: PLC0415
-    from fastapi import HTTPException  # noqa: PLC0415
-
-    prefix = "/ext/channel_api/client"
-    if not path.startswith(prefix):
-        return _ok(_json_response({"error": "not a client path", "path": path}, 404))
-    sub = path[len(prefix):]
-
-    try:
-        if sub == "/register" and method == "POST":
-            body = _decode_body(raw_body) or {}
-            return _ok(_json_response(await rm.register_client(body)))
-
-        logger.warning("client http.handle: no route for sub=%s method=%s", sub, method)
-        return _ok(_json_response({"error": "not found", "path": path}, 404))
-    except HTTPException as exc:
-        return _http_exc_response(exc)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("client http.handle 未预期错误: %s", exc, exc_info=True)
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
@@ -497,8 +563,19 @@ def _handle_modules_ui_domain(path: str, method: str, raw_body: str, query: dict
 
     仅迁 schema 查询（list/get）；data CRUD（get_module_data_router）不迁（前端 modules.ts
     仅消费 ui schema 列表）。_get_schema_parser 已修 config/modules 路径（_resolve_project_root）。
+
+    0.2 防御：routes_ui 依赖 ui_schema 包（0.2 暂不存在，sidecar 化未完成）。前端
+    ModuleManager.ts 定期轮询 /api/v1/modules/ui 并按 response.items ?? [] 降级，故保留
+    路由：导入失败时返回 {items: [], total: 0}（空列表，前端正常同步空布局），不崩溃。
     """
-    import routes_ui as rui  # noqa: PLC0415
+    try:
+        import routes_ui as rui  # noqa: PLC0415
+    except ImportError as exc:
+        logger.warning(
+            "modules/ui 域 routes_ui 不可用（ui_schema 包未迁移）: %s —— 返回空列表 stub", exc,
+        )
+        return _ok(_json_response({"items": [], "total": 0}))
+
     from fastapi import HTTPException  # noqa: PLC0415
 
     prefix = "/ext/channel_api/modules/ui"
@@ -533,16 +610,74 @@ def _pydantic_to_dict(obj: Any) -> Any:
     return obj
 
 
-def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
+def _make_memory_capability_caller() -> Any | None:
+    """从内核注入的能力句柄构造 capability_caller（async fn `(method, params)`）。
+
+    优先 tool-executor（hindsight 后端），回落 service-registry（kernel 后端）；
+    均未注入时返回 None（memory 域路由保持空结果降级）。
+
+    桥接说明：memory_backend 的 CapabilityCaller 约定传入**完整** wire method
+    （如 "tool-executor.invoke" / "memory.create"），而 SDK CapabilityHandle.call
+    会拼接 ``f"{cap}.{method}"``。因此需剥掉已含的能力前缀，避免双命名空间
+    （"tool-executor.tool-executor.invoke"）。
+    """
+    for cap_name in ("tool-executor", "service-registry"):
+        try:
+            handle = plugin.get_capability(cap_name)
+        except KeyError:
+            continue
+        prefix = f"{cap_name}."
+
+        async def _call(method: str, params: dict[str, Any]) -> Any:
+            stripped = method[len(prefix):] if method.startswith(prefix) else method
+            return await handle.call(stripped, params)
+
+        return _call
+    return None
+
+
+# 记忆后端（懒构建 + 缓存，注入 routes_memory）
+_memory_backend: Any | None = None
+_memory_backend_attempted = False
+
+
+def _ensure_memory_backend() -> Any | None:
+    """构建并缓存 IMemoryBackend（幂等）；能力缺失/构建失败时返回 None。"""
+    global _memory_backend, _memory_backend_attempted
+    if not _memory_backend_attempted:
+        _memory_backend_attempted = True
+        caller = _make_memory_capability_caller()
+        if caller is None:
+            logger.warning(
+                "[memory] 未注入 tool-executor/service-registry 能力，"
+                "记忆后端不可用（路由空结果降级）"
+            )
+            return None
+        try:
+            # hindsight_memory 目录已在模块顶部加入 sys.path（_SYSTEM_DIR 下）
+            from memory_backend import get_memory_backend  # noqa: PLC0415
+
+            _memory_backend = get_memory_backend(
+                config=plugin.get_config() or {},
+                capability_caller=caller,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[memory] 记忆后端构建失败 | error=%s", e)
+    return _memory_backend
+
+
+async def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str, str]) -> dict[str, Any]:
     """memory 域分发：/ext/channel_api/memory/** → routes_memory 业务函数。
 
-    store（channels.api.memory_store 单例）import 时即创建，sidecar 下读
-    data/api_store/store.json（与 :8988 同路径，冷启动一致）。注意：这是进程态 store，
-    与 :8988 进程的 store 是不同实例——活系统双进程期间写入不互通（4c stopgap，
-    待 :8988 退役后归一）。部分返回 pydantic 模型，统一 model_dump。
+    Step 7：数据源切到 IMemoryBackend（Hindsight/Kernel），分发前懒注入后端
+    （幂等；能力缺失时保持 None → 路由空结果降级）。路由为 async，统一 await；
+    返回 pydantic 模型时 model_dump。POST /import 为 Step 7 新增端点。
     """
     import routes_memory as rmm  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
+
+    # 懒注入记忆后端（幂等）；无能力时保持 None → 路由空结果降级
+    rmm.set_memory_backend(_ensure_memory_backend())
 
     prefix = "/ext/channel_api/memory"
     if not path.startswith(prefix):
@@ -558,14 +693,14 @@ def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str
     try:
         # GET ""（list，query: memory_type/limit/offset）
         if sub in ("", "/") and method == "GET":
-            return _ok(_json_response(_pydantic_to_dict(rmm.list_memories(
+            return _ok(_json_response(_pydantic_to_dict(await rmm.list_memories(
                 memory_type=query.get("memory_type"),
                 limit=_qint("limit", 20),
                 offset=_qint("offset", 0),
             ))))
         # GET /search（query: query/top_k/method）
         if sub == "/search" and method == "GET":
-            return _ok(_json_response(_pydantic_to_dict(rmm.search_memories(
+            return _ok(_json_response(_pydantic_to_dict(await rmm.search_memories(
                 query=query.get("query", ""),
                 top_k=_qint("top_k", 5),
                 method=query.get("method", "keyword"),
@@ -573,33 +708,41 @@ def _handle_memory_domain(path: str, method: str, raw_body: str, query: dict[str
         # POST /search（body: query/top_k）
         if sub == "/search" and method == "POST":
             body = _decode_body(raw_body) or None
-            return _ok(_json_response(_pydantic_to_dict(rmm.search_memories_post(body))))
+            return _ok(_json_response(_pydantic_to_dict(await rmm.search_memories_post(body))))
         # GET /episodes（query: page/page_size）
         if sub == "/episodes" and method == "GET":
-            return _ok(_json_response(rmm.list_episodes(
+            return _ok(_json_response(await rmm.list_episodes(
                 page=_qint("page", 1), page_size=_qint("page_size", 20),
             )))
         # GET /episodes/{episode_id}
         if sub.startswith("/episodes/") and method == "GET":
             episode_id = sub[len("/episodes/"):]
-            return _ok(_json_response(rmm.get_episode(episode_id)))
+            return _ok(_json_response(await rmm.get_episode(episode_id)))
         # GET /semantic
         if sub == "/semantic" and method == "GET":
-            return _ok(_json_response(rmm.list_semantic()))
+            return _ok(_json_response(await rmm.list_semantic()))
         # POST /consolidate
         if sub == "/consolidate" and method == "POST":
-            return _ok(_json_response(rmm.consolidate_memory()))
+            return _ok(_json_response(await rmm.consolidate_memory()))
+        # POST /import（body: text/file_path/name，Step 7 新增）
+        if sub == "/import" and method == "POST":
+            body = _decode_body(raw_body) or {}
+            return _ok(_json_response(await rmm.import_document(
+                text=body.get("text"),
+                file_path=body.get("file_path"),
+                name=body.get("name") or "",
+            )))
         # GET /stats
         if sub == "/stats" and method == "GET":
-            return _ok(_json_response(rmm.get_memory_stats()))
+            return _ok(_json_response(await rmm.get_memory_stats()))
         # GET /{memory_id}（动态路径，放最后）
         if sub.startswith("/") and method == "GET" and "/" not in sub[1:]:
             memory_id = sub[1:]
-            return _ok(_json_response(_pydantic_to_dict(rmm.get_memory(memory_id))))
+            return _ok(_json_response(_pydantic_to_dict(await rmm.get_memory(memory_id))))
         # DELETE /{memory_id}
         if sub.startswith("/") and method == "DELETE" and "/" not in sub[1:]:
             memory_id = sub[1:]
-            return _ok(_json_response(rmm.delete_memory(memory_id)))
+            return _ok(_json_response(await rmm.delete_memory(memory_id)))
 
         logger.warning("memory http.handle: no route for sub=%s method=%s", sub, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
@@ -811,9 +954,21 @@ async def _handle_reviews_domain(
     9 路由：create/get/list/feedback/viewed/cancel（JSON body 或 path-param）+
     media-review（multipart 上传 → media_review_service）+ media-metadata +
     attachments（JSON body，文件路径非上传）。_user 不读，省略。
+
+    0.2 防御：routes_reviews 依赖 review.review_service / review.media_review_service
+    （P1-2 sidecar 化未完成，0.2 暂不存在）。前端 reviewStore 持续调用 /api/v1/reviews，
+    故保留路由分发，导入失败时返回与前端约定一致的 stub（list → {items,total}，
+    单条/写操作 → {error: {code,message}}），避免进程崩溃。待 P1-2 sidecar 落地后恢复实路由。
     """
-    import routes_reviews as rrv  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
+
+    try:
+        import routes_reviews as rrv  # noqa: PLC0415
+    except ImportError as exc:
+        logger.warning(
+            "reviews 域 routes_reviews 不可用（review.* sidecar 未迁移）: %s —— 返回 stub", exc,
+        )
+        rrv = None  # type: ignore[assignment]
 
     prefix = "/ext/channel_api/reviews"
     if not path.startswith(prefix):
@@ -825,6 +980,25 @@ async def _handle_reviews_domain(
             return int(query[key]) if key in query else default
         except (TypeError, ValueError):
             return default
+
+    def _reviews_stub(sub: str, method: str) -> dict[str, Any]:
+        """routes_reviews 不可用时的 stub 响应（与前端 reviewStore 约定一致）。
+
+        - GET list → {items: [], total: 0}（store 直接消费空列表）
+        - 其余（GET 单条/POST 写）→ {error: {code: NOT_IMPLEMENTED, message}}，
+          store 读取 data.error 并降级，不会崩溃。
+        """
+        if sub in ("", "/") and method == "GET":
+            return {"items": [], "total": 0}
+        return {
+            "error": {
+                "code": "NOT_IMPLEMENTED",
+                "message": "审批服务尚未迁移至 0.2 sidecar（P1-2 待办），暂不可用",
+            }
+        }
+
+    if rrv is None:
+        return _ok(_json_response(_reviews_stub(sub, method)))
 
     try:
         # POST "" (create)
@@ -1263,11 +1437,27 @@ async def _handle_review_media_upload(raw_body: str, headers: dict[str, str]) ->
 
     复用 routes_reviews.media_review 的逻辑：解 multipart 取 file + media_type →
     保存临时文件 → get_media_review_service().review_media → 清理临时文件。
+
+    0.2 防御：routes_reviews 依赖未迁移的 review.media_review_service；导入失败时
+    返回 NOT_IMPLEMENTED（前端按 data.error 降级），不再走到 review_media。
     """
     import base64 as _b64  # noqa: PLC0415
+
+    try:
+        import routes_reviews as rrv  # noqa: PLC0415
+    except ImportError as exc:
+        logger.warning(
+            "reviews /media-review 不可用（review.media_review_service 未迁移）: %s", exc,
+        )
+        return _ok(_json_response({
+            "error": {
+                "code": "NOT_IMPLEMENTED",
+                "message": "媒体审阅服务尚未迁移至 0.2 sidecar（P1-2 待办），暂不可用",
+            }
+        }))
+
     import os  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
-    import routes_reviews as rrv  # noqa: PLC0415
     from fastapi import HTTPException  # noqa: PLC0415
 
     try:
@@ -1571,17 +1761,15 @@ async def http_handle(
     if path.startswith("/ext/channel_api/thinking-mode"):
         return _handle_thinking_mode_domain(path, method, raw_body, q)
 
-    # ── users 域 ──
+    # ── users 域（含管理员端点，透传真实 caller 身份做垂直越权检查）──
     if path.startswith("/ext/channel_api/users"):
-        return await _handle_users_domain(path, method, raw_body, q)
+        return await _handle_users_domain(
+            path, method, raw_body, q, _user=_resolve_caller(headers or {})
+        )
 
     # ── sessions 域 ──
     if path.startswith("/ext/channel_api/sessions"):
         return await _handle_sessions_domain(path, method, raw_body, q)
-
-    # ── client 域 ──
-    if path.startswith("/ext/channel_api/client"):
-        return await _handle_client_domain(path, method, raw_body, q)
 
     # ── execution 域 ──
     if path.startswith("/ext/channel_api/execution"):
@@ -1593,7 +1781,7 @@ async def http_handle(
 
     # ── memory 域 ──
     if path.startswith("/ext/channel_api/memory"):
-        return _handle_memory_domain(path, method, raw_body, q)
+        return await _handle_memory_domain(path, method, raw_body, q)
 
     # ── scenes 域（批次3 首迁，复用 4c 模式）──
     if path.startswith("/ext/channel_api/scenes"):

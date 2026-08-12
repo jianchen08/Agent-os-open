@@ -79,7 +79,7 @@ async def open_file_in_ide(
             "file_path": file_path,
         }
 
-    from connectors.types import ConnectorAction  # noqa: PLC0415
+    from connectors.connector_types import ConnectorAction  # noqa: PLC0415
 
     params: dict[str, Any] = {"file_path": file_path}
     if line is not None:
@@ -564,7 +564,7 @@ async def open_workspace_in_ide(
         }
 
     # 3. 通过连接器发送 open_folder 操作
-    from connectors.types import ConnectorAction  # noqa: PLC0415
+    from connectors.connector_types import ConnectorAction  # noqa: PLC0415
 
     action = ConnectorAction(
         action_type="open_folder",

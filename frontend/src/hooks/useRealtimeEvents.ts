@@ -66,13 +66,6 @@ export function useRealtimeEvents(): void {
             })
           }
         })
-
-      // 直到后端推送 SCHEMA_UPDATED 事件或重新登录才恢复。
-      import('@/services/modules/ModuleManager')
-        .then(({ moduleManager }) => moduleManager.syncOnReconnect())
-        .catch(() => {
-          // syncOnReconnect 内部已兜底，此处仅防止未捕获 rejection
-        })
     }
 
     // Execution progress handlers

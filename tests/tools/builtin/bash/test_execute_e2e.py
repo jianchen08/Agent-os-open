@@ -20,8 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from tools.builtin.bash.process_manager import ProcessManager
-from tools.builtin.bash.tool import BashTool
+from process_manager import ProcessManager
+from tool import BashTool
+
+pytestmark = pytest.mark.unit
 
 
 def _make_tool_with_project_root(tmp_path: Path) -> BashTool:

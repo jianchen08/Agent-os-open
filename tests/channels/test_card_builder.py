@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from channels.feishu.card_builder import CardBuilder
+import pytest
+
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from tests.channels.conftest import use_channel
+
+use_channel("feishu")
+from card_builder import CardBuilder
 
 
 class TestCardBuilder:

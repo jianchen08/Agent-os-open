@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401
+
 """容器并发创建竞态回归测试。
 
 背景 BUG：同一 workspace 的多个并发任务同时调用 get_or_create_environment，
@@ -18,8 +20,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from isolation.manager import IsolationManager
-from isolation.types import (
+from manager import IsolationManager
+from isolation_types import (
     EnvironmentStatus,
     IsolationContext,
     IsolationEnvironment,

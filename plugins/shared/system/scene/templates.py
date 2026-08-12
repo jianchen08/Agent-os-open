@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from models import (
+from scene.models import (
     SceneLayoutConfig,
     SceneLayoutType,
     SceneTemplate,

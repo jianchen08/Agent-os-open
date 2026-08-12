@@ -16,14 +16,22 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from tools.builtin.bash.process_manager import ProcessManager
-from tools.builtin.bash.types import ProcessInfo
+# 0.2 架构：bash 工具位于 plugins/shared/tools/bash（平铺 import）。
+_BASH_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "tools" / "bash")
+if _BASH_DIR not in sys.path:
+    sys.path.insert(0, _BASH_DIR)
+
+from bash_types import ProcessInfo  # noqa: E402
+from process_manager import ProcessManager  # noqa: E402
+
+pytestmark = pytest.mark.unit
 
 
 def _make_pm() -> ProcessManager:

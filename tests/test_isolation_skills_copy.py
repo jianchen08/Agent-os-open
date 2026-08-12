@@ -9,10 +9,13 @@
 涉及模块：src/isolation/workspace_lifecycle.py::_copy_skills_to_workspace
 """
 from __future__ import annotations
+import tests._isolation_path  # noqa: F401
+
+import tests._isolation_path  # noqa: F401
 
 from pathlib import Path
 
-from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+from workspace_lifecycle import WorkspaceLifecycleManager
 
 
 def _make_manager(base_path: Path) -> WorkspaceLifecycleManager:

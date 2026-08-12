@@ -17,7 +17,14 @@ _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-from plugin import MemoryReadPlugin  # noqa: E402
+from plugin import MemoryReadPlugin, set_memory_backend  # noqa: E402
+
+# hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
+_HINDSIGHT_MEMORY_DIR = os.path.join(_shared_dir, "system", "hindsight_memory")
+if _HINDSIGHT_MEMORY_DIR not in sys.path:
+    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
+
+from wiring import build_memory_backend  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("memory_read_pipeline")
@@ -27,10 +34,15 @@ _instance: MemoryReadPlugin | None = None
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize memory_read plugin."""
+    """Initialize memory_read plugin + 注入记忆后端。"""
     global _instance
     config = plugin.get_config()
     _instance = MemoryReadPlugin(config=config)
+    backend = build_memory_backend(plugin)
+    if backend:
+        set_memory_backend(backend)
+    else:
+        logger.warning("[memory_read] 记忆后端未注入，检索将降级为空")
 
 
 @plugin.on_unload

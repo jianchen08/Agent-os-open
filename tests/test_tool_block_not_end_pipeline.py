@@ -1,3 +1,5 @@
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("core", "tool_core")
 """工具级拦截应转为「工具失败结果」而非终结整个管道。
 
 历史 Bug:
@@ -73,7 +75,7 @@ class TestCheckToolBlocked:
 
     @staticmethod
     def _make_tool_core():
-        from plugins.core.tool_core.plugin import ToolCore
+        from plugin import ToolCore
         return ToolCore()
 
     def test_level_guard_block_returns_failure(self):

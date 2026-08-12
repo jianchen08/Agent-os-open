@@ -38,6 +38,11 @@ export type DetailContentType =
   | 'code' // 代码块
   | 'markdown' // Markdown
   | 'diff' // 差异对比（oldContent/newContent 渲染为统一 diff 视图）
+  | 'kv' // 键值对两列（kvItems 有效）
+  | 'file' // 文件（path 有效，点击打开文件）
+  | 'image' // 图片（path 有效，点击灯箱预览）
+  | 'link' // 链接（url 有效，点击外部打开）
+  | 'log' // 日志流（等宽滚动区，吸底滚动+滚动锁）
 
 /**
  * 活动操作类型
@@ -71,6 +76,12 @@ export interface ActivityDetailBlock {
   diffOld?: string
   /** 差异对比新内容（仅 contentType='diff' 时有效） */
   diffNew?: string
+  /** 键值对列表（仅 contentType='kv' 时有效） */
+  kvItems?: { key: string; value: string }[]
+  /** 关联路径（仅 contentType='file'/'image' 时有效） */
+  path?: string
+  /** 链接地址（仅 contentType='link' 时有效） */
+  url?: string
 }
 
 /**

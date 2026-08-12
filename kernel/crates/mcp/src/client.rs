@@ -701,7 +701,10 @@ async fn kill_process_tree(pid: u32) {
     }
     #[cfg(unix)]
     {
-        // 负 pid → 进程组（组长被杀，组内全部子孙进程一并终止）
+        // 负 pid → 进程组：组长被杀，组内全部子孙进程一并终止（POSIX 语义）。
+        // SAFETY: libc::kill 是 POSIX FFI，不解引用指针、不涉及内存不安全；参数合法——
+        // pid 为操作系统进程号（远小于 i32::MAX，`pid as i32` 不会截断），取负值表示进程组，
+        // SIGKILL 为合法信号常量。
         unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }

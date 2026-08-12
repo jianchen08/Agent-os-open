@@ -20,14 +20,14 @@ import sys
 import time
 from pathlib import Path
 
-# 让 src 可 import
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
+# 0.2 架构：bash 工具位于 plugins/shared/tools/bash（平铺 import）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "bash"))
 
-from tools.builtin.bash.process_manager import (  # noqa: E402
+from bash_types import WorkUnit  # noqa: E402
+from process_manager import (  # noqa: E402
     ContainerProcessBackend,
     ProcessManager,
 )
-from tools.builtin.bash.types import WorkUnit  # noqa: E402
 
 CONTAINER_NAME = "agentos_test_container_exec"
 IMAGE = "python:3.11-slim"

@@ -6,8 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from channels.gateway.channel_gateway import ChannelGateway
-from channels.gateway.unified_types import UnifiedResponse
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from tests.channels.conftest import use_channel
+
+use_channel("gateway")
+from channel_gateway import ChannelGateway
+from unified_types import UnifiedResponse
 
 
 class TestChannelGateway:

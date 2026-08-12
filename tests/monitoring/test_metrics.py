@@ -9,9 +9,13 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
 import re
 
-from monitoring.metrics import (
+from metrics import (
     ACTIVE_SESSIONS,
     CHANNEL_STATUS,
     MESSAGE_PROCESSED,

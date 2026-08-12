@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from channels.api.routes_threads import delete_thread
+import tests.channels.conftest as _ch
+
+_ch.use_channel("api")
+from routes_threads import delete_thread  # noqa: E402
 
 
 def _make_task(

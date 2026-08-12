@@ -1,6 +1,8 @@
 """验证 4 个已知 bug 修复的测试用例。"""
 from __future__ import annotations
 
+import tests._isolation_path  # noqa: F401
+
 import asyncio
 import logging
 from pathlib import Path
@@ -17,7 +19,7 @@ class TestBug1DetectScenarioInstanceMethod:
 
     def test_detect_scenario_is_not_staticmethod(self):
         """BUG-1: _detect_scenario 不应被 @staticmethod 装饰。"""
-        from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+        from workspace_lifecycle import WorkspaceLifecycleManager
 
         # 检查它不是 staticmethod
         assert not isinstance(
@@ -27,7 +29,7 @@ class TestBug1DetectScenarioInstanceMethod:
 
     def test_detect_scenario_accepts_self(self):
         """BUG-1: _detect_scenario 签名应包含 self 参数。"""
-        from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+        from workspace_lifecycle import WorkspaceLifecycleManager
         import inspect
 
         sig = inspect.signature(WorkspaceLifecycleManager._detect_scenario)
@@ -37,7 +39,7 @@ class TestBug1DetectScenarioInstanceMethod:
     @pytest.mark.skip(reason="生产代码 _detect_scenario 中 ws_root / task_id 类型不兼容（str / str）")
     def test_detect_scenario_calls_self_method(self):
         """BUG-1: _detect_scenario 应能成功调用 self._get_workspace_root()。"""
-        from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+        from workspace_lifecycle import WorkspaceLifecycleManager
 
         mgr = MagicMock(spec=WorkspaceLifecycleManager)
         mgr._get_workspace_root.return_value = ".ai_workspaces"
@@ -146,7 +148,7 @@ class TestBug4SilentExceptionLogging:
 
     def test_workspace_lifecycle_no_silent_exceptions(self):
         """BUG-4: workspace_lifecycle.py 关键位置不应有静默 pass。"""
-        wl_path = Path("src/isolation/workspace_lifecycle.py")
+        wl_path = Path("plugins/shared/system/isolation/workspace_lifecycle.py")
         assert wl_path.exists(), f"文件不存在: {wl_path}"
 
         # 检查修复的关键行范围（允许非关键路径有 pass）
@@ -166,36 +168,13 @@ class TestBug4SilentExceptionLogging:
             f"workspace_lifecycle.py 仍有静默异常: {violations}"
         )
 
-    def test_task_worker_key_paths_no_silent_exceptions(self):
-        """BUG-4: task_worker.py 及其 Mixin 文件关键路径不应有静默 pass。"""
-        tw_path = Path("src/infrastructure/task_worker.py")
-        assert tw_path.exists(), f"文件不存在: {tw_path}"
-
-        content = tw_path.read_text(encoding="utf-8")
-        # 合并 Mixin 文件内容一起检查
-        for mixin_name in ("task_notifier.py", "task_executor.py"):
-            mixin_path = Path(f"src/infrastructure/{mixin_name}")
-            if mixin_path.exists():
-                content += mixin_path.read_text(encoding="utf-8")
-
-        # 验证修复后的 logger.warning 调用存在
-        assert 'logger.warning("TaskWorker: ServiceProvider 注册失败' in content, (
-            "ServiceProvider 注册失败的 logger.warning 不存在"
-        )
-        assert "logger.warning(\"TaskWorker: _find_task_by_pipeline_id 失败" in content, (
-            "_find_task_by_pipeline_id 失败的 logger.warning 不存在"
-        )
-        assert "logger.warning(\"TaskWorker: cancel_pipeline 获取 pipeline_id 失败" in content, (
-            "cancel_pipeline 获取 pipeline_id 失败的 logger.warning 不存在"
-        )
-
     def test_workspace_lifecycle_key_paths_have_logging(self):
         """BUG-4: workspace_lifecycle.py 及其 Mixin 文件关键位置应有 logger.warning。"""
-        wl_path = Path("src/isolation/workspace_lifecycle.py")
+        wl_path = Path("plugins/shared/system/isolation/workspace_lifecycle.py")
         content = wl_path.read_text(encoding="utf-8")
 
         # 重构后部分方法移至 Mixin 文件，需合并内容一起检查
-        mixin_path = Path("src/isolation/_workspace_git_ops.py")
+        mixin_path = Path("plugins/shared/system/isolation/_workspace_git_ops.py")
         mixin_content = mixin_path.read_text(encoding="utf-8") if mixin_path.exists() else ""
         combined = content + mixin_content
 

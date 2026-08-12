@@ -1,100 +1,295 @@
-"""
-记忆工具
+"""记忆工具（0.2 重写版）。
+
+0.1 的记忆服务（memory.service.MemoryService）已在 0.2 中删除，本模块改为
+注入式 IMemoryBackend（见 plugins/shared/system/hindsight_memory/memory_backend.py
+定义的端口：add / search / delete / import_document，全部 async）。
+本模块保持自包含：不导入 0.1 已删除的 core/tools/memory 包，Tool 与
+ToolExecutionResult 在本模块内就地定义（与 0.1 结构对齐）。
+
+设计要点：
+- 后端可注入（构造参数或 set_memory_backend()），测试可传 AsyncMock。
+- 未注入后端时不崩溃，返回错误结果「memory backend 未注入」。
+- 所有后端调用包 try/except，异常转为失败结果——与记忆后端韧性约定一致。
+- 动作映射：
+  - store        → backend.add(user_id, content, memory_type, tags, source="memory_tool")
+  - retrieve     → backend.search(query, user_id, top_k, memory_type)
+  - import_text  → backend.import_document(user_id, text=..., name=...)
+  - import_file  → backend.import_document(user_id, file_path=..., name=...)
+  - delete       → backend.delete(user_id, memory_id)
+  - update       → 后端支持 update 则调用；否则降级为 backend.add（同内容）
+  - get_context  → backend.search 更宽泛查询（更大 top_k，不过滤类型）
 
 暴露接口：
-- memory_service(self)：memory_service功能
-- set_tag_network(self, tag_network: Any)：set_tag_network功能
-- set_knowledge_importer(self, knowledge_importer: Any)：set_knowledge_importer功能
-- get_tool_definition() -> Tool：get_tool_definition功能
-- MemoryTool：MemoryTool类
+- create_success_result(data: Any, metadata: dict | None) -> ToolExecutionResult
+- create_failure_result(error: str, error_code: str | None) -> ToolExecutionResult
+- Tool：工具定义（与 0.1 tools.types.Tool 关键字段对齐）
+- ToolExecutionResult：工具执行结果（与 0.1 core.results.ToolExecutionResult 对齐）
+- MemoryTool：记忆工具类
 """
 
-import logging
-from typing import Any
+from __future__ import annotations
 
-from core.results import ToolExecutionResult
-from memory.types import Episode, Knowledge
-from tools.builtin.base import BuiltinTool
-from tools.types import (
-    Tool,
-    ToolCategory,
-    ToolLevel,
-    ToolSource,
-    create_failure_result,
-    create_success_result,
-)
+import logging
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class MemoryTool(BuiltinTool):
+# ═══════════════════════════════════════════════════════════
+# 本地类型定义（0.1 core.results / tools.types 在 0.2 已删除，就地对齐定义）
+# ═══════════════════════════════════════════════════════════
+
+
+@dataclass
+class ToolExecutionResult:
+    """工具执行结果——与 0.1 core.results.ToolExecutionResult 结构对齐。
+
+    Attributes:
+        success: 是否成功
+        output: 输出数据（成功时有值）
+        error: 错误信息（失败时有值）
+        error_code: 错误代码（可选）
+        metadata: 附加元数据
     """
-    记忆工具
+
+    success: bool
+    output: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    error_code: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def create_completed(
+        cls,
+        output: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> ToolExecutionResult:
+        """创建成功结果。"""
+        return cls(
+            success=True,
+            output=output,
+            metadata=metadata or {},
+        )
+
+    @classmethod
+    def create_failed(
+        cls,
+        error: str,
+        error_code: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ToolExecutionResult:
+        """创建失败结果。"""
+        return cls(
+            success=False,
+            error=error,
+            error_code=error_code,
+            metadata=metadata or {},
+        )
+
+
+class ToolCategory(str, Enum):
+    """工具功能分类（与 0.1 tools.types.ToolCategory 对齐）。"""
+
+    FILE = "file"
+    FILE_SYSTEM = "file_system"
+    SEARCH = "search"
+    WEB = "web"
+    MEMORY = "memory"
+    TASK = "task"
+    SYSTEM = "system"
+    EXECUTION = "execution"
+    ANALYSIS = "analysis"
+    EVALUATION = "evaluation"
+    AGENT = "agent"
+    MONITORING = "monitoring"
+
+
+class ToolLevel(str, Enum):
+    """工具级别分类（与 0.1 tools.types.ToolLevel 对齐）。"""
+
+    SYSTEM = "system"
+    USER = "user"
+    L1_ONLY = "l1_only"
+    L1_L2_ONLY = "l1_l2_only"
+    ALL = "all"
+
+
+class ToolSource(str, Enum):
+    """工具来源（与 0.1 tools.types.ToolSource 对齐）。"""
+
+    CODE = "code"
+    BUILTIN = "builtin"
+    MCP = "mcp"
+    HTTP = "http"
+    DATABASE = "database"
+
+
+@dataclass
+class Tool:
+    """工具定义——与 0.1 tools.types.Tool 的关键字段对齐。
+
+    Attributes:
+        name: 工具唯一标识
+        description: 工具功能描述
+        input_schema: 输入参数 JSON Schema
+        category: 功能分类
+        level: 工具级别
+        source: 工具来源
+        injected_params: 运行时注入参数列表（不暴露给 LLM）
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    category: ToolCategory | None = None
+    level: ToolLevel = ToolLevel.USER
+    source: ToolSource = ToolSource.CODE
+    injected_params: list[str] = field(default_factory=list)
+
+
+def create_success_result(
+    data: Any = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToolExecutionResult:
+    """创建成功结果。"""
+    return ToolExecutionResult.create_completed(
+        output=data,
+        metadata=metadata or {},
+    )
+
+
+def create_failure_result(
+    error: str,
+    error_code: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToolExecutionResult:
+    """创建失败结果。"""
+    return ToolExecutionResult.create_failed(
+        error=error,
+        error_code=error_code,
+        metadata=metadata or {},
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# MemoryTool
+# ═══════════════════════════════════════════════════════════
+
+
+class MemoryTool:
+    """
+    记忆工具（IMemoryBackend 注入版）
 
     提供：
-    - 存储情景记忆（任务执行记录）
-    - 存储知识（支持向量化/文件/两者）
-    - 检索记忆（支持向量/Tag/混合模式）
-    - 获取会话上下文
-    - 搜索相似 Tag
-    - 导入文本知识
-    - 导入文件知识
+    - store：存储记忆（backend.add）
+    - retrieve：检索记忆（backend.search）
+    - import_text：导入文本知识（backend.import_document）
+    - import_file：导入文件知识（backend.import_document）
+    - update：更新知识（后端不支持时降级为 add）
+    - delete：删除记忆（backend.delete）
+    - get_context：获取会话上下文（更宽泛的 backend.search）
 
-    数据库会话按需获取：仅向量检索等需要 DB 的操作才要求 session，
-    纯文件存储/检索操作通过注入的 _memory_service 工作，不依赖数据库。
+    后端为 duck-type 的 IMemoryBackend（AsyncMock / HindsightBackend /
+    KernelMemoryBackend 均可）；未注入时执行返回错误结果，不崩溃。
     """
 
     SYSTEM_USER_ID = "system"
 
-    def __init__(
-        self,
-        session: Any | None = None,
-        tag_network: Any | None = None,
-        knowledge_importer: Any | None = None,
-    ):
-        """初始化记忆工具"""
-        self._session = session
-        self._memory_service = None
-        self.tag_network = tag_network
-        self._knowledge_importer = knowledge_importer
+    def __init__(self, memory_backend: Any | None = None):
+        """初始化记忆工具。
 
-    def _get_memory_service(self, inputs: dict[str, Any]):
+        Args:
+            memory_backend: IMemoryBackend 实例（add/search/delete/import_document，
+                全部 async）；可后续通过 set_memory_backend() 注入。
         """
-        获取记忆服务实例
+        self._memory_backend = memory_backend
+        # 服务端可信 caller 身份（由运行时注入，防客户端篡改 user_id 实施 IDOR）。
+        self._trusted_user_id: str | None = None
 
-        优先级：
-        1. 从注入参数获取（ToolCore 通过 _SERVICE_INJECT_MAP 注入）
-        2. 使用已缓存的实例
-        3. 降级：创建空壳 MemoryService（无持久化存储，仅内存字典，重启数据丢失）
+    def set_memory_backend(self, backend: Any) -> None:
+        """注入记忆后端（IMemoryBackend 实例或兼容 duck-type）。
+
+        Args:
+            backend: IMemoryBackend 实例；None 表示清除后端。
         """
-        # 第一优先级：从注入参数获取（ToolCore 通过 _SERVICE_INJECT_MAP 注入）
-        injected = inputs.get("_memory_service")
-        if injected is not None:
-            self._memory_service = injected
-            return injected
+        self._memory_backend = backend
 
-        # 第二优先级：使用已缓存的实例
-        if self._memory_service is not None:
-            return self._memory_service
+    def set_trusted_user_id(self, user_id: str | None) -> None:
+        """注入服务端可信 caller 身份（鉴权层解析后调用）。
 
-        # 降级：创建空壳 MemoryService（无存储，仅内存字典）
-        from memory.service import MemoryService  # noqa: PLC0415
+        安全语义：一旦注入，``_resolve_user_id`` 将**无条件**使用此身份作为
+        记忆隔离 key，彻底忽略客户端 ``inputs["user_id"]``（后者可被任意调用者
+        篡改以实施 IDOR——读写他人记忆）。仅在未注入时才回退到 inputs（兼容旧路径，
+        标注为不可信）。
 
-        self._memory_service = MemoryService()
-        logger.warning("[MemoryTool] memory_service 未注入，使用内存降级模式（重启数据丢失）")
-        return self._memory_service
+        Args:
+            user_id: 可信 caller 用户 ID；None 表示清除（回退到 inputs/系统默认）。
+        """
+        self._trusted_user_id = user_id or None
 
-    def set_tag_network(self, tag_network: Any):
-        """设置 Tag 网络检索器"""
-        self.tag_network = tag_network
+    def _resolve_user_id(self, inputs: dict[str, Any]) -> str:
+        """解析用户隔离 key。
 
-    def set_knowledge_importer(self, knowledge_importer: Any):
-        """设置知识导入器"""
-        self._knowledge_importer = knowledge_importer
+        鉴权优先级（高 → 低）：
+        1. ``self._trusted_user_id``：服务端注入的可信 caller 身份——**忽略**
+           客户端 ``inputs["user_id"]``，防 IDOR。
+        2. ``inputs["user_id"]``：**不可信**回退（仅在未注入可信身份时沿用，
+           兼容旧调用路径）。
+        3. ``SYSTEM_USER_ID``：缺省系统态。
+
+        Args:
+            inputs: 工具输入
+
+        Returns:
+            用户隔离 key
+        """
+        if self._trusted_user_id:
+            return self._trusted_user_id
+        # 回退：无服务端可信注入时沿用 inputs（不可信，仅向后兼容）。
+        return str(inputs.get("user_id") or self.SYSTEM_USER_ID)
+
+    @staticmethod
+    def _extract_memory_id(value: Any) -> str:
+        """从 file_path（可能带 memory:// 前缀）或裸 id 提取 memory_id。
+
+        Args:
+            value: file_path 或 memory_id 原始值
+
+        Returns:
+            提取后的 memory_id；空值返回 ""
+        """
+        if not value:
+            return ""
+        text = str(value)
+        if text.startswith("memory://"):
+            return text.removeprefix("memory://")
+        return text
+
+    @staticmethod
+    def _inject_agent_tags(
+        inputs: dict[str, Any], tags: list[str]
+    ) -> list[str]:
+        """把 agent_config_id 自动注入为标签（与 0.1 行为对齐）。
+
+        Args:
+            inputs: 工具输入（含 agent_config_id）
+            tags: 原始标签列表（会被拷贝）
+
+        Returns:
+            注入 agent_config_id 后的标签列表
+        """
+        out = list(tags)
+        agent_config_id = inputs.get("agent_config_id", "")
+        if agent_config_id and agent_config_id not in out:
+            out.append(agent_config_id)
+        return out
 
     @staticmethod
     def get_tool_definition() -> Tool:
-        """获取工具定义"""
+        """获取工具定义。"""
         return Tool(
             name="memory",
             description=(
@@ -115,6 +310,7 @@ class MemoryTool(BuiltinTool):
                             "update",
                             "delete",
                             "get_context",
+                            "list",
                         ],
                         "description": "操作类型",
                     },
@@ -129,6 +325,10 @@ class MemoryTool(BuiltinTool):
                     "file_path": {
                         "type": "string",
                         "description": "文件路径（import_file/update/delete时使用）",
+                    },
+                    "memory_id": {
+                        "type": "string",
+                        "description": "记忆ID（delete时使用，与 file_path 二选一）",
                     },
                     "query": {
                         "type": "string",
@@ -172,18 +372,6 @@ class MemoryTool(BuiltinTool):
                             },
                         },
                     },
-                    "inject_type": {
-                        "type": "string",
-                        "enum": ["full", "retrieval", "summary"],
-                        "default": "retrieval",
-                        "description": "注入方式（第二层决策）：full(全量注入)/retrieval(检索注入)/summary(摘要注入)",
-                    },
-                    "retrieval_method": {
-                        "type": "string",
-                        "enum": ["vector", "keyword", "tagwave"],
-                        "default": "vector",
-                        "description": "检索方法（第三层决策，仅 retrieval 注入方式时使用）：vector(向量检索)/keyword(关键词检索)/tagwave(浪潮算法)",
-                    },
                     "top_k": {
                         "type": "integer",
                         "default": 5,
@@ -199,19 +387,20 @@ class MemoryTool(BuiltinTool):
             category=ToolCategory.MEMORY,
             level=ToolLevel.SYSTEM,
             source=ToolSource.CODE,
-            injected_params=["session_id", "_session", "_memory_service", "agent_config_id"],
+            injected_params=["session_id", "user_id", "agent_config_id"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
-        """执行记忆操作"""
-        ms = self._get_memory_service(inputs)
-        if ms is None:
-            return create_failure_result(
-                error="记忆服务未初始化。请确保 memory_service 已注册到管道共享服务中。",
-                error_code="MEMORY_SERVICE_NOT_AVAILABLE",
-            )
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """执行记忆操作。
 
-        self._memory_service = ms
+        Args:
+            inputs: 工具输入，必须含 action；其余参数按动作映射读取
+
+        Returns:
+            ToolExecutionResult：成功含 output 字典，失败含 error
+        """
+        if self._memory_backend is None:
+            return create_failure_result("memory backend 未注入")
 
         action = inputs.get("action")
 
@@ -229,358 +418,232 @@ class MemoryTool(BuiltinTool):
             return await self._delete(inputs)
         if action == "get_context":
             return await self._get_context(inputs)
+        if action == "list":
+            return await self._list(inputs)
         return create_failure_result(f"未知操作: {action}")
 
     async def _store(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """存储记忆，自动将 agent_config_id 注入为标签"""
+        """存储记忆，自动将 agent_config_id 注入为标签。"""
+        backend = self._memory_backend
         content = inputs.get("content")
-        tags = list(inputs.get("tags", []))
         memory_type = inputs.get("memory_type", "semantic")
-        agent_config_id = inputs.get("agent_config_id", "")
-
-        if agent_config_id and agent_config_id not in tags:
-            tags.append(agent_config_id)
+        tags = self._inject_agent_tags(inputs, list(inputs.get("tags", [])))
 
         if not content:
             return create_failure_result("缺少 content 参数")
 
         try:
-            if memory_type == "episode":
-                episode = Episode(
-                    user_id=self.SYSTEM_USER_ID,
-                    intent_text=content,
-                    tags=tags,
-                )
-                result = await self._memory_service.store_episode(episode)
-                return create_success_result({"success": True, "episode_id": result})
-            knowledge = Knowledge(
-                user_id=self.SYSTEM_USER_ID,
+            user_id = self._resolve_user_id(inputs)
+            memory_id = await backend.add(
+                user_id=user_id,
                 content=content,
-                source_type="manual",
-                extra_data={"tags": tags},
+                memory_type=memory_type,
+                tags=tags,
+                source="memory_tool",
             )
-            result = await self._memory_service.store_knowledge(knowledge)
-            return create_success_result({"success": True, "knowledge_id": result})
-
+            return create_success_result(
+                {"success": True, "memory_id": memory_id}
+            )
         except Exception as e:
+            logger.warning("[MemoryTool] 存储失败 | error=%s", e)
             return create_failure_result(f"存储失败: {str(e)}")
 
     async def _retrieve(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """
-        检索记忆 - 三层决策模型
-
-        决策流程：
-        1. 第一层：筛选条件 - 缩小数据范围
-        2. 第二层：注入方式 - 决定如何处理结果
-        3. 第三层：检索方法 - 选择检索算法
-        """
+        """检索记忆。"""
+        backend = self._memory_backend
         query = inputs.get("query")
         top_k = inputs.get("top_k", 5)
-        filter = inputs.get("filter", {})
-        inject_type = inputs.get("inject_type", "retrieval")
-        retrieval_method = inputs.get("retrieval_method", "vector")
+        filter_ = inputs.get("filter", {}) or {}
+        memory_type = inputs.get("memory_type") or filter_.get("memory_type")
 
-        if inject_type == "retrieval" and not query:
-            return create_failure_result("retrieval 注入方式需要提供 query")
+        if not query:
+            return create_failure_result("检索需要提供 query 参数")
 
         try:
-            results = await self._memory_service.retrieve(
-                user_id=self.SYSTEM_USER_ID,
-                filter=filter,
-                inject_type=inject_type,
-                retrieval_method=retrieval_method,
+            user_id = self._resolve_user_id(inputs)
+            results = await backend.search(
                 query=query,
+                user_id=user_id,
                 top_k=top_k,
+                memory_type=memory_type,
             )
-
-            if not results:
-                return create_success_result(
-                    {
-                        "success": True,
-                        "inject_type": inject_type,
-                        "retrieval_method": retrieval_method,
-                        "filter": filter,
-                        "results": [],
-                    }
-                )
-
-            if inject_type == "summary":
-                combined_content = "\n\n".join([r.content for r in results])
-                summary = await self._generate_summary(combined_content)
-                return create_success_result(
-                    {
-                        "success": True,
-                        "inject_type": inject_type,
-                        "retrieval_method": retrieval_method,
-                        "filter": filter,
-                        "summary": summary,
-                        "source_count": len(results),
-                    }
-                )
             return create_success_result(
                 {
                     "success": True,
-                    "inject_type": inject_type,
-                    "retrieval_method": retrieval_method,
-                    "filter": filter,
-                    "results": [
-                        {
-                            "id": str(r.id),
-                            "content": r.content,
-                            "score": r.score,
-                            "metadata": r.metadata,
-                        }
-                        for r in results
-                    ],
+                    "query": query,
+                    "top_k": top_k,
+                    "results": results or [],
                 }
             )
-
         except Exception as e:
+            logger.warning("[MemoryTool] 检索失败 | error=%s", e)
             return create_failure_result(f"检索失败: {str(e)}")
 
-    async def _generate_summary(self, content: str) -> str:
-        """生成内容摘要"""
-        if len(content) <= 500:
-            return content
-        return content[:500] + "..."
-
-    async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
-        """导入文本知识，自动将 agent_config_id 注入为标签"""
+    async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """导入文本知识（name 作为知识标签）。"""
+        backend = self._memory_backend
         content = inputs.get("content")
         name = inputs.get("name")
-        tags = list(inputs.get("tags", []))
-        agent_config_id = inputs.get("agent_config_id", "")
-
-        if agent_config_id and agent_config_id not in tags:
-            tags.append(agent_config_id)
 
         if not content:
             return create_failure_result("缺少 content 参数")
-
         if not name:
             return create_failure_result("缺少 name 参数")
 
-        if self._knowledge_importer:
-            try:
-                result = await self._knowledge_importer.import_text(
+        try:
+            user_id = self._resolve_user_id(inputs)
+            result = await backend.import_document(
+                user_id=user_id,
+                text=content,
+                name=name,
+            )
+            return create_success_result({"success": True, **result})
+        except Exception as e:
+            logger.warning("[MemoryTool] 导入文本失败 | error=%s", e)
+            return create_failure_result(f"导入文本失败: {str(e)}")
+
+    async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """导入文件知识（name 缺省取文件名）。"""
+        backend = self._memory_backend
+        file_path = inputs.get("file_path")
+
+        if not file_path:
+            return create_failure_result("缺少 file_path 参数")
+
+        name = inputs.get("name") or os.path.basename(str(file_path))
+        try:
+            user_id = self._resolve_user_id(inputs)
+            result = await backend.import_document(
+                user_id=user_id,
+                file_path=str(file_path),
+                name=name,
+            )
+            return create_success_result({"success": True, **result})
+        except Exception as e:
+            logger.warning("[MemoryTool] 导入文件失败 | error=%s", e)
+            return create_failure_result(f"导入文件失败: {str(e)}")
+
+    async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """更新记忆；后端不支持 update 时降级为 add（同内容），永不崩溃。
+
+        降级逻辑：以相同 content/tags 调用 backend.add，返回新 memory_id，
+        并标记 degraded=True。
+        """
+        backend = self._memory_backend
+        content = inputs.get("content")
+        tags = self._inject_agent_tags(inputs, list(inputs.get("tags", [])))
+
+        if not content:
+            return create_failure_result("更新记忆需要提供 content 参数")
+
+        try:
+            user_id = self._resolve_user_id(inputs)
+            # 原生 update 能力（在类上而非实例属性上探测，避免 mock 自动子属性误判）
+            updater = getattr(type(backend), "update", None)
+            if callable(updater):
+                result = await updater(
+                    backend,
+                    user_id=user_id,
+                    memory_id=self._extract_memory_id(
+                        inputs.get("memory_id") or inputs.get("file_path")
+                    ),
                     content=content,
-                    name=name,
-                    user_id=self.SYSTEM_USER_ID,
                     tags=tags,
                 )
-                if result.success:
-                    return create_success_result(
-                        {
-                            "success": True,
-                            "knowledge_id": result.knowledge_id,
-                            "file_path": result.file_path,
-                        }
-                    )
-                return create_failure_result(result.error or "导入失败")
-            except Exception as e:
-                return create_failure_result(f"导入文本失败: {str(e)}")
+                return create_success_result(
+                    {"success": True, "memory_id": result, "updated": True}
+                )
 
-        # 降级：使用 MemoryService 直接存储知识
-        try:
-            ms = self._get_memory_service(inputs)
-            knowledge = Knowledge(
-                user_id=self.SYSTEM_USER_ID,
+            # 降级：重新写入同内容记忆
+            memory_id = await backend.add(
+                user_id=user_id,
                 content=content,
-                source_type="text_import",
-                extra_data={"name": name, "tags": tags},
+                memory_type="semantic",
+                tags=tags,
+                source="memory_tool:update",
             )
-            knowledge_id = await ms.store_knowledge(knowledge)
             logger.info(
-                "[MemoryTool] import_text 降级存储成功 | name=%s | knowledge_id=%s",
-                name,
-                knowledge_id,
+                "[MemoryTool] update 降级为 add | new_memory_id=%s", memory_id
             )
             return create_success_result(
                 {
                     "success": True,
-                    "knowledge_id": knowledge_id,
-                    "file_path": f"memory://{knowledge_id}",
+                    "memory_id": memory_id,
+                    "updated": True,
+                    "degraded": True,
                 }
             )
         except Exception as e:
-            return create_failure_result(f"导入文本失败（MemoryService降级）: {str(e)}")
-
-    async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
-        """导入文件知识，自动将 agent_config_id 注入为标签"""
-        file_path = inputs.get("file_path")
-        tags = list(inputs.get("tags", []))
-        agent_config_id = inputs.get("agent_config_id", "")
-
-        if agent_config_id and agent_config_id not in tags:
-            tags.append(agent_config_id)
-
-        if not file_path:
-            return create_failure_result("缺少 file_path 参数")
-
-        if self._knowledge_importer:
-            try:
-                result = await self._knowledge_importer.import_file(
-                    source_path=file_path,
-                    user_id=self.SYSTEM_USER_ID,
-                    tags=tags,
-                )
-                if result.success:
-                    return create_success_result(
-                        {
-                            "success": True,
-                            "knowledge_id": result.knowledge_id,
-                            "file_path": result.file_path,
-                        }
-                    )
-                return create_failure_result(result.error or "导入失败")
-            except Exception as e:
-                return create_failure_result(f"导入文件失败: {str(e)}")
-
-        # 降级：读取文件内容后用 MemoryService 存储
-        import os as _os  # noqa: PLC0415
-
-        if not _os.path.exists(file_path):  # noqa: PTH110
-            return create_failure_result(f"文件不存在: {file_path}")
-        try:
-            with open(file_path, encoding="utf-8") as f:
-                file_content = f.read()
-        except Exception as e:
-            return create_failure_result(f"读取文件失败: {str(e)}")
-
-        try:
-            ms = self._get_memory_service(inputs)
-            knowledge = Knowledge(
-                user_id=self.SYSTEM_USER_ID,
-                content=file_content,
-                source_type="file_import",
-                extra_data={
-                    "name": _os.path.basename(file_path),  # noqa: PTH119
-                    "tags": tags,
-                    "source_file": file_path,
-                },
-            )
-            knowledge_id = await ms.store_knowledge(knowledge)
-            logger.info(
-                "[MemoryTool] import_file 降级存储成功 | file=%s | knowledge_id=%s",
-                file_path,
-                knowledge_id,
-            )
-            return create_success_result(
-                {
-                    "success": True,
-                    "knowledge_id": knowledge_id,
-                    "file_path": file_path,
-                }
-            )
-        except Exception as e:
-            return create_failure_result(f"导入文件失败（MemoryService降级）: {str(e)}")
-
-    async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
-        """更新知识"""
-        file_path = inputs.get("file_path")
-        new_content = inputs.get("content")
-        new_tags = inputs.get("tags")
-
-        if not file_path:
-            return create_failure_result("缺少 file_path 参数")
-
-        if self._knowledge_importer:
-            try:
-                result = await self._knowledge_importer.update_knowledge(
-                    file_path=file_path,
-                    user_id=self.SYSTEM_USER_ID,
-                    new_content=new_content,
-                    new_tags=new_tags,
-                )
-                if result.success:
-                    return create_success_result(
-                        {
-                            "success": True,
-                            "knowledge_id": result.knowledge_id,
-                            "file_path": result.file_path,
-                        }
-                    )
-                return create_failure_result(result.error or "更新失败")
-            except Exception as e:
-                return create_failure_result(f"更新失败: {str(e)}")
-
-        # 降级：从 file_path 提取 knowledge_id，删除旧知识 + 存储新知识
-        knowledge_id_raw = file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
-        if not new_content:
-            return create_failure_result("更新知识需要提供 content 参数")
-
-        try:
-            ms = self._get_memory_service(inputs)
-            # 尝试删除旧知识（忽略删除失败，可能是新知识）
-            await ms.delete_knowledge(knowledge_id_raw, self.SYSTEM_USER_ID)
-            # 存储新知识
-            knowledge = Knowledge(
-                user_id=self.SYSTEM_USER_ID,
-                content=new_content,
-                source_type="manual",
-                extra_data={"tags": new_tags or [], "updated_from": file_path},
-            )
-            knowledge_id = await ms.store_knowledge(knowledge)
-            logger.info(
-                "[MemoryTool] update 降级成功 | old_id=%s | new_knowledge_id=%s",
-                knowledge_id_raw,
-                knowledge_id,
-            )
-            return create_success_result(
-                {
-                    "success": True,
-                    "knowledge_id": knowledge_id,
-                    "file_path": file_path,
-                }
-            )
-        except Exception as e:
-            return create_failure_result(f"更新失败（MemoryService降级）: {str(e)}")
+            logger.warning("[MemoryTool] 更新失败 | error=%s", e)
+            return create_failure_result(f"更新失败: {str(e)}")
 
     async def _delete(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """删除知识"""
-        file_path = inputs.get("file_path")
-        delete_file = inputs.get("delete_file", True)
+        """删除记忆。"""
+        backend = self._memory_backend
+        memory_id = self._extract_memory_id(
+            inputs.get("memory_id") or inputs.get("file_path")
+        )
 
-        if not file_path:
-            return create_failure_result("缺少 file_path 参数")
+        if not memory_id:
+            return create_failure_result("缺少 memory_id 参数")
 
-        if self._knowledge_importer:
-            try:
-                success = await self._knowledge_importer.delete_knowledge(
-                    file_path=file_path,
-                    user_id=self.SYSTEM_USER_ID,
-                    delete_file=delete_file,
-                )
-                return create_success_result({"success": success})
-            except Exception as e:
-                return create_failure_result(f"删除失败: {str(e)}")
-
-        # 降级：从 file_path 提取 knowledge_id，调用 MemoryService
-        # file_path 格式可能是 "memory://<id>" 或直接就是 knowledge_id
-        knowledge_id = file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
         try:
-            ms = self._get_memory_service(inputs)
-            success = await ms.delete_knowledge(knowledge_id, self.SYSTEM_USER_ID)
-            logger.info(
-                "[MemoryTool] delete 降级成功 | knowledge_id=%s | deleted=%s",
-                knowledge_id,
-                success,
+            user_id = self._resolve_user_id(inputs)
+            deleted = await backend.delete(user_id=user_id, memory_id=memory_id)
+            return create_success_result(
+                {"success": deleted, "deleted": deleted, "memory_id": memory_id}
             )
-            return create_success_result({"success": success})
         except Exception as e:
-            return create_failure_result(f"删除失败（MemoryService降级）: {str(e)}")
+            logger.warning("[MemoryTool] 删除失败 | error=%s", e)
+            return create_failure_result(f"删除失败: {str(e)}")
 
     async def _get_context(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """获取记忆统计信息"""
-        try:
-            stats = await self._memory_service.get_stats(self.SYSTEM_USER_ID)
+        """获取会话上下文：以更宽泛的查询（更大 top_k，不过滤类型）检索记忆。"""
+        backend = self._memory_backend
+        query = inputs.get("query") or inputs.get("session_id") or ""
+        top_k = inputs.get("top_k", 10)
 
+        try:
+            user_id = self._resolve_user_id(inputs)
+            results = await backend.search(
+                query=query,
+                user_id=user_id,
+                top_k=top_k,
+            )
             return create_success_result(
                 {
                     "success": True,
-                    "stats": stats,
+                    "top_k": top_k,
+                    "results": results or [],
                 }
             )
-
         except Exception as e:
-            return create_failure_result(f"获取统计信息失败: {str(e)}")
+            logger.warning("[MemoryTool] 获取上下文失败 | error=%s", e)
+            return create_failure_result(f"获取上下文失败: {str(e)}")
+
+    async def _list(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """列举记忆：以空查询宽泛检索（更大 top_k，可选按类型过滤）。"""
+        backend = self._memory_backend
+        filter_ = inputs.get("filter", {}) or {}
+        memory_type = inputs.get("memory_type") or filter_.get("memory_type")
+        limit = inputs.get("limit", inputs.get("top_k", 20))
+
+        try:
+            user_id = self._resolve_user_id(inputs)
+            results = await backend.search(
+                query="",
+                user_id=user_id,
+                top_k=limit,
+                memory_type=memory_type,
+            )
+            return create_success_result(
+                {
+                    "success": True,
+                    "limit": limit,
+                    "results": results or [],
+                    "count": len(results or []),
+                }
+            )
+        except Exception as e:
+            logger.warning("[MemoryTool] 列举失败 | error=%s", e)
+            return create_failure_result(f"列举失败: {str(e)}")

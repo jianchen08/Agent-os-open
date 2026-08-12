@@ -22,6 +22,36 @@ logger = logging.getLogger(__name__)
 class DockerProvider(IsolationProvider):
     """Docker 容器隔离提供者。"""
 
+    # 通用构建/依赖缓存 named volumes。
+    # 设计原则:只缓存「可安全跨项目共享」的下载/存储层(registry / store /
+    # cache),不缓存项目特定的安装结果(node_modules、target/、dist/ 等)——后者
+    # 依赖树不同会互相踩。volume 与容器实例解耦:容器销毁/重建(self_heal、
+    # namespace desync、切 worktree 起新容器)都不丢,新容器挂上同一 volume 即
+    # 读到。named volume 首次使用 docker 自动创建,无需预先 docker volume create。
+    # 加新语言:在下面列表追加一行 (volume名, 容器内路径) 即可。
+    _BUILD_CACHE_VOLUMES: ClassVar[list[tuple[str, str]]] = [
+        # ── Rust ──
+        # sccache 编译产物缓存(内容寻址,跨 crate 复用编译结果)。配合镜像里
+        # RUSTC_WRAPPER=sccache + SCCACHE_DIR=/cargo-cache/sccache(见 Dockerfile.sccache)。
+        ("agentos-cargo-cache", "/cargo-cache"),
+        # cargo registry:下载的 crate 源码 + index。省去每个 worktree 重新下载
+        # 全部依赖源码(CARGO_HOME=/usr/local/cargo,见 Dockerfile.rust)。
+        ("agentos-cargo-registry", "/usr/local/cargo/registry"),
+        # ── Node ──
+        # npm 下载缓存(tarball)。node_modules 仍随各项目 bind mount,不共享
+        # (依赖树不同会互相踩)。想彻底加速 node_modules,改用 pnpm——其全局
+        # store 见下一行,node_modules 是 store 的硬链接,秒级建立。
+        ("agentos-npm-cache", "/root/.npm"),
+        # pnpm 全局 store(若项目用 pnpm)。内容寻址,跨项目安全共享。
+        ("agentos-pnpm-store", "/root/.local/share/pnpm/store"),
+        # ── Python ──
+        # pip 下载缓存(wheel)。省去重复下载。
+        ("agentos-pip-cache", "/root/.cache/pip"),
+        # ── Go ──
+        # go modules 下载缓存。
+        ("agentos-gomod-cache", "/root/go/pkg/mod"),
+    ]
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化 Docker 提供者。"""
         self._config = config or {}
@@ -68,6 +98,11 @@ class DockerProvider(IsolationProvider):
         # 构建锁：防多个协程并发触发 docker build（争抢同一 Dockerfile、浪费 CPU/磁盘）。
         # 本包首个 asyncio.Lock，配合二次 inspect 实现双重检查。
         self._build_lock = asyncio.Lock()
+        # 额外的缓存卷(config 可追加,格式 [(volume名, 容器内路径), ...]),
+        # 与类常量 _BUILD_CACHE_VOLUMES 合并。用于按需为特殊工具链挂缓存。
+        self._extra_cache_volumes: list[tuple[str, str]] = [
+            (str(v), str(p)) for v, p in self._config.get("extra_cache_volumes", [])
+        ]
 
     def _is_wsl_docker(self) -> bool:
         """判断 docker daemon 是否在 WSL2 Linux 里（非 Docker Desktop）。"""
@@ -524,18 +559,11 @@ class DockerProvider(IsolationProvider):
             mount_src = self._resolve_mount_path(context.workspace)
             args.extend(["-v", f"{mount_src}:/workspace"])
 
-        # 编译/依赖缓存 named volume：跨容器实例、跨 git worktree 复用。
-        # volume 与容器实例解耦——容器销毁/重建(self_heal、namespace desync、
-        # 切 worktree 起新容器)都不丢缓存，新容器挂上同一 volume 即读到。
-        # named volume 首次使用 docker 自动创建，无需预先 docker volume create。
-        #   - agentos-cargo-cache → sccache 缓存(SCCACHE_DIR=/cargo-cache/sccache，
-        #     见 Dockerfile.sccache)。sccache 内容寻址 + 并发锁，多容器同时编译安全。
-        #   - agentos-npm-cache   → npm 下载缓存(默认 ~/.npm)。仅缓存下载的 tarball，
-        #     node_modules 仍随各项目 bind mount，不共享(依赖树不同会互相踩)。
-        args.extend([
-            "-v", "agentos-cargo-cache:/cargo-cache",
-            "-v", "agentos-npm-cache:/root/.npm",
-        ])
+        # 通用构建/依赖缓存:跨容器实例、跨 git worktree 复用各类语言的下载与
+        # 编译缓存。默认集合见类常量 _BUILD_CACHE_VOLUMES(Rust/Node/Python/Go),
+        # 额外卷可经 config extra_cache_volumes 追加。详见类常量处的说明。
+        for vol, path in (*self._BUILD_CACHE_VOLUMES, *self._extra_cache_volumes):
+            args.extend(["-v", f"{vol}:{path}"])
 
         # IMAGE 必须在 COMMAND 之前（docker create 语法要求）
         args.append(self._image)

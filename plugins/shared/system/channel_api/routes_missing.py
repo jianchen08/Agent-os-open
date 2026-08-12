@@ -1,10 +1,9 @@
 """缺失路由补全模块。
 
 提供前端期望但后端未实现的路由组，返回合理的占位响应。
-包括：projects, users, monitoring, triggers, interaction,
+包括：projects, users, triggers, interaction,
 agent-calls, execution/records, sessions, knowledge-base,
-floating-chat, cost-control, evaluation, evaluation-metrics别名,
-files/capabilities。
+floating-chat, files/capabilities。
 """
 
 from __future__ import annotations
@@ -17,10 +16,22 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from deps import require_auth
-from human_interaction import get_human_interaction_service
-from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
+
+
+def _get_human_interaction_service():
+    """延迟加载 human_interaction 服务（0.2 位于 tools/human/service.py）。"""
+    from service import get_human_interaction_service  # noqa: PLC0415
+
+    return get_human_interaction_service()
+
+
+def _safe_enum_value(obj):
+    """延迟加载 safe_enum_value（0.2 位于 tasks/enum_utils.py）。"""
+    from tasks.enum_utils import safe_enum_value  # noqa: PLC0415
+
+    return safe_enum_value(obj)
 
 # 模块加载时间（近似应用启动时间，用于计算运行时长）
 _module_start_time: float = time.time()
@@ -230,7 +241,7 @@ def _task_to_tree_item(task: Any, session_id: str | None = None) -> dict[str, An
         树节点字典，包含 id、title、status、type、pipeline_run_id、
         ws_mode、ws_path 等字段
     """
-    status_val = safe_enum_value(task.status)
+    status_val = _safe_enum_value(task.status)
 
     # 安全提取 ws_meta 工作空间元信息
     _metadata = getattr(task, "metadata", None) or {}
@@ -388,7 +399,7 @@ async def update_user_settings(
 
 
 # ---------------------------------------------------------------------------
-# Monitoring 路由 - /api/v1/monitoring
+# Triggers 路由 - /api/v1/triggers
 # ---------------------------------------------------------------------------
 triggers_router = APIRouter(prefix="/api/v1/triggers", tags=["触发器"], dependencies=[Depends(require_auth)])
 
@@ -460,7 +471,7 @@ async def submit_interaction_response(
     """提交交互响应，调用 HumanInteractionService.respond() 触发 Event.set()。"""
     if not body or "request_id" not in body:
         raise HTTPException(status_code=400, detail="缺少 request_id")
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     result = await service.respond(body["request_id"], body)
     return {"success": result}
 
@@ -470,7 +481,7 @@ async def get_pending_interactions(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """获取所有待处理的交互请求列表。"""
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     requests = await service.get_pending_requests()
     return {"items": requests, "total": len(requests)}
 
@@ -481,7 +492,7 @@ async def get_interaction(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """根据 request_id 获取交互请求详情，不存在则返回 404。"""
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     record = await service.get_request(request_id)
     if not record:
         raise HTTPException(status_code=404, detail="交互请求不存在")
@@ -495,7 +506,7 @@ async def approve_interaction(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """批准交互请求。"""
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     result = await service.submit_response(
         request_id=request_id,
         response_type="approved",
@@ -512,7 +523,7 @@ async def deny_interaction(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """拒绝交互请求。"""
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     result = await service.submit_response(
         request_id=request_id,
         response_type="denied",
@@ -529,7 +540,7 @@ async def cancel_interaction(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """取消交互请求。"""
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     result = await service.cancel_request(
         request_id=request_id,
         reason=body.get("reason") if body else None,
@@ -543,7 +554,7 @@ async def mark_viewed(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """标记交互请求为已查看状态。"""
-    service = get_human_interaction_service()
+    service = _get_human_interaction_service()
     result = await service.mark_as_viewed(request_id)
     return {"success": result, "request_id": request_id, "viewed": True}
 
@@ -811,97 +822,6 @@ async def launch_floating_chat(_user: dict = Depends(require_auth)) -> dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Cost Control 路由 - /api/v1/cost-control
-# ---------------------------------------------------------------------------
-evaluation_router = APIRouter(prefix="/api/v1/evaluation", tags=["评估"], dependencies=[Depends(require_auth)])
-
-
-@evaluation_router.post("/evaluate", summary="执行评估")
-async def evaluate(body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"success": False, "message": "评估执行需要连接评估引擎", "results": []}
-
-
-@evaluation_router.get("/profiles", summary="获取评估配置列表")
-async def list_profiles(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
-
-
-@evaluation_router.get("/profiles/default", summary="获取默认评估配置")
-async def get_default_profile(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": "default", "name": "默认配置", "metrics": []}
-
-
-@evaluation_router.get("/profiles/{profile_id}", summary="获取单个评估配置")
-async def get_profile(profile_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": profile_id, "name": "", "metrics": []}
-
-
-@evaluation_router.post("/profiles/{profile_id}/set-default", summary="设置默认配置")
-async def set_default_profile(profile_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": profile_id, "is_default": True}
-
-
-@evaluation_router.get("/reports", summary="获取评估报告列表")
-async def list_reports(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
-
-
-@evaluation_router.get("/reports/{report_id}", summary="获取评估报告")
-async def get_report(report_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": report_id, "status": "not_found", "results": []}
-
-
-@evaluation_router.get("/statistics", summary="获取评估统计")
-async def get_statistics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"total_evaluations": 0, "pass_rate": 0.0}
-
-
-@evaluation_router.get("/trends", summary="获取评估趋势")
-async def get_trends(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "period": "7d"}
-
-
-# ---------------------------------------------------------------------------
-# Evaluation Metrics 别名路由 - /api/v1/evaluation-metrics
-# ---------------------------------------------------------------------------
-client_router = APIRouter(prefix="/api/v1/client", tags=["客户端"], dependencies=[Depends(require_auth)])
-
-_client_registry: dict[str, dict[str, Any]] = {}
-
-
-@client_router.post("/register", summary="注册客户端能力声明")
-async def register_client(body: dict[str, Any]) -> dict[str, Any]:
-    """接收客户端能力声明并存储。
-
-    前端启动时会发送客户端的渲染能力（支持的组件、渲染空间等），
-    后端可根据此信息过滤返回的 UI Schema。
-
-    Args:
-        body: 客户端能力声明，包含 renderingSpaces, supportedWidgets, clientType, version
-
-    Returns:
-        注册确认响应
-    """
-    client_type = body.get("clientType", "unknown")
-    version = body.get("version", "1.0.0")
-
-    _client_registry[client_type] = {
-        "renderingSpaces": body.get("renderingSpaces", []),
-        "supportedWidgets": body.get("supportedWidgets", []),
-        "clientType": client_type,
-        "version": version,
-    }
-
-    logger.info("客户端能力注册: type=%s, version=%s", client_type, version)
-
-    return {
-        "registered": True,
-        "clientType": client_type,
-        "version": version,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Files Capabilities 路由 - /api/v1/files
 # ---------------------------------------------------------------------------
 files_router = APIRouter(prefix="/api/v1/files", tags=["文件"], dependencies=[Depends(require_auth)])
@@ -943,19 +863,6 @@ async def get_model_file_capabilities(
         "max_audio_size": cap.max_audio_size,
         "max_video_size": cap.max_video_size,
         "is_multimodal": cap.supports_image or cap.supports_audio or cap.supports_video,
-    }
-
-
-@files_router.post("/upload", summary="上传文件")
-async def upload_file(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {
-        "file_id": "stub",
-        "filename": "",
-        "mime_type": "",
-        "size": 0,
-        "file_type": "document",
-        "base64_data": "",
-        "uploaded_at": "",
     }
 
 
@@ -1007,7 +914,7 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
         try:
             task = task_service.get_task(task_id)
             if task:
-                status_str = safe_enum_value(task.status)
+                status_str = _safe_enum_value(task.status)
                 phase, phase_status = _STATUS_TO_PHASE.get(status_str, ("prepare", "pending"))
                 return {
                     "taskId": task_id,

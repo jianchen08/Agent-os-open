@@ -7,7 +7,7 @@
  * @module toolCardRegistry
  */
 
-import { Copy, FileEdit, FileText, Globe, Target, Terminal } from '@/assets/icons'
+import { Copy, FileEdit, FileText, Globe, Link, Target, Terminal } from '@/assets/icons'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -98,7 +98,12 @@ export function enhanceActivityWithToolConfig(
 
   const config = getToolCardConfig(activity.toolName)
   if (!config) {
-    return activity
+    // L0：无声明时的自动推断渲染——标题人性化 + 参数/结果按数据类型推断成内容块
+    return {
+      ...activity,
+      title: humanizeToolName(activity.toolName),
+      details: inferDefaultDetails(toolCall),
+    }
   }
 
   const enhanced = { ...activity }
@@ -213,6 +218,186 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   }
 
   return actions
+}
+
+/** ========== L0 自动推断（无声明配置时，让默认卡片也"按数据渲染"）========== */
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|bmp)$/i
+const URL_RE = /^https?:\/\/\S+$/i
+/** 常见"文件路径"参数名 */
+const FILE_PATH_KEYS = new Set([
+  'file_path',
+  'path',
+  'output_file',
+  'screenshot_path',
+  'save_path',
+  'target_file',
+  'source_file',
+  'file',
+])
+
+/** 判断字符串是否像文件路径（含分隔符、盘符或已知扩展名） */
+function looksLikePath(value: string): boolean {
+  return (
+    /(?:^[a-zA-Z]:[\\/]|^\/|^\.{1,2}[\\/]|^[^/\\]*[\\/][^/\\])/.test(value) ||
+    /\.\w{1,6}$/.test(value)
+  )
+}
+
+/** 常用工具名的中文显示映射（L0 标题人性化） */
+const TOOL_NAME_ZH: Record<string, string> = {
+  file_read: '读取文件',
+  file_write: '写入文件',
+  bash_execute: '执行命令',
+  web_search: '网页搜索',
+  fetch: '访问网页',
+  task_submit: '提交任务',
+  task_manage: '任务管理',
+  human_interaction: '人工交互',
+}
+
+/** 工具名人性化：中文映射优先，其次下划线转空格 + 首字母大写 */
+function humanizeToolName(toolName: string): string {
+  if (TOOL_NAME_ZH[toolName]) return TOOL_NAME_ZH[toolName]
+  return toolName
+    .split('_')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ')
+}
+
+interface KvEntry {
+  key: string
+  value: string
+}
+
+/**
+ * 对单个字段值推断内容块：URL→link、图片路径→image、路径→file、
+ * 长文本→code 折叠、标量→kv 收集、对象/数组→json 折叠
+ */
+function pushInferredBlocks(
+  key: string,
+  value: unknown,
+  kv: KvEntry[],
+  blocks: ActivityDetailBlock[],
+): void {
+  if (typeof value === 'string') {
+    const str = value
+    if (str && URL_RE.test(str)) {
+      blocks.push({
+        id: `link-${key}`,
+        label: key,
+        content: '',
+        contentType: 'link',
+        url: str,
+        collapsible: false,
+      })
+    } else if (str && IMAGE_EXT_RE.test(str) && looksLikePath(str)) {
+      blocks.push({
+        id: `image-${key}`,
+        label: key,
+        content: '',
+        contentType: 'image',
+        path: str,
+        collapsible: false,
+      })
+    } else if (FILE_PATH_KEYS.has(key) && str && looksLikePath(str)) {
+      blocks.push({
+        id: `file-${key}`,
+        label: key,
+        content: '',
+        contentType: 'file',
+        path: str,
+        collapsible: false,
+      })
+    } else if (str.length > 120 || str.includes('\n')) {
+      blocks.push({
+        id: `code-${key}`,
+        label: key,
+        content: str,
+        contentType: 'code',
+        collapsible: true,
+        defaultExpanded: false,
+      })
+    } else {
+      kv.push({ key, value: str })
+    }
+    return
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) {
+    kv.push({ key, value: String(value) })
+    return
+  }
+
+  // 对象 / 数组 → json 折叠块
+  blocks.push({
+    id: `json-${key}`,
+    label: key,
+    content: value as Record<string, unknown>,
+    contentType: 'json',
+    collapsible: true,
+    defaultExpanded: false,
+  })
+}
+
+/** 把扁平记录按类型推断成内容块（args/result 通用） */
+function inferRecordBlocks(prefix: string, record: Record<string, unknown>): ActivityDetailBlock[] {
+  const blocks: ActivityDetailBlock[] = []
+  const kv: KvEntry[] = []
+  for (const [key, value] of Object.entries(record)) {
+    pushInferredBlocks(key, value, kv, blocks)
+  }
+  if (kv.length > 0) {
+    blocks.unshift({
+      id: `${prefix}-kv`,
+      label: prefix,
+      content: '',
+      contentType: 'kv',
+      kvItems: kv,
+      collapsible: false,
+    })
+  }
+  return blocks
+}
+
+/** L0 默认详情：参数 / 结果按数据类型推断渲染，输出流走 log 块 */
+function inferDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
+  const details: ActivityDetailBlock[] = []
+
+  const args = toolCall.tool_args as Record<string, unknown> | null
+  if (args && Object.keys(args).length > 0) {
+    details.push(...inferRecordBlocks('参数', args))
+  }
+
+  if (toolCall.result !== undefined && toolCall.result !== null) {
+    const parsed = safeParseResult(toolCall.result)
+    if (parsed) {
+      details.push(...inferRecordBlocks('结果', parsed))
+    } else if (typeof toolCall.result === 'string') {
+      const str = toolCall.result
+      const isLong = str.length > 120
+      details.push({
+        id: 'result-text',
+        label: '结果',
+        content: str,
+        contentType: isLong ? 'code' : 'text',
+        collapsible: isLong,
+        defaultExpanded: false,
+      })
+    }
+  }
+
+  if (toolCall.partialOutput && toolCall.partialOutput.length > 0) {
+    details.push({
+      id: 'output',
+      label: '执行输出',
+      content: toolCall.partialOutput.join('\n'),
+      contentType: 'log',
+      collapsible: false,
+    })
+  }
+
+  return details
 }
 
 function extractFilePath(toolCall: MessageToolCall): string {
@@ -583,7 +768,7 @@ registerToolCard({
 
 registerToolCard({
   name: 'fetch',
-  icon: <Globe className="h-4 w-4" />,
+  icon: <Link className="h-4 w-4" />,
   formatTitle: (tc) => {
     const url = extractUrl(tc)
     if (url) {

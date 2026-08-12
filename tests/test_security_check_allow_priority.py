@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
-from plugins.input.security_check.plugin import SecurityCheckPlugin
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("input", "security_check")
+from plugin import SecurityCheckPlugin
 
 
 class TestMatchRulesAllowPriority:

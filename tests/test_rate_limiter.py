@@ -7,11 +7,15 @@
 - 自定义策略
 """
 
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from channels.api.rate_limiter import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system" / "channel_api"))
+
+from rate_limiter import (
     DEFAULT_POLICIES,
     RateLimitCategory,
     RateLimitPolicy,
@@ -139,6 +143,7 @@ class TestTieredRateLimiter:
         assert limiter.is_allowed("4.4.4.4", RateLimitCategory.READ) is True
         assert limiter.is_allowed("4.4.4.4", RateLimitCategory.READ) is False
 
+    @pytest.mark.timing
     def test_window_expiry_allows_again(self) -> None:
         """窗口过期后应重新放行。"""
         policy = {RateLimitCategory.READ: RateLimitPolicy(max_requests=1, window_seconds=1)}
@@ -177,6 +182,7 @@ class TestRateLimiterEdgeCases:
             assert limiter.is_allowed("2.2.2.2", RateLimitCategory.READ) is True
         assert limiter.is_allowed("2.2.2.2", RateLimitCategory.READ) is False
 
+    @pytest.mark.timing
     def test_short_window_expires_quickly(self) -> None:
         """短窗口快速过期。"""
         import time as _time

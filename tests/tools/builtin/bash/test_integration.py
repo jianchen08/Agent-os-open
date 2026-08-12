@@ -12,8 +12,10 @@ import asyncio
 
 import pytest
 
-from tools.builtin.bash.process_manager import ProcessManager
-from tools.builtin.bash.types import ProcessInfo
+from bash_types import ProcessInfo
+from process_manager import ProcessManager
+
+pytestmark = pytest.mark.integration
 
 
 # ============================================================

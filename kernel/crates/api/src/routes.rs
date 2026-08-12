@@ -4,10 +4,12 @@
 //!
 //! [来源: docs/tasks/task_07_llm_api.md AC-06-3/AC-06-5]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use agentos_config::config_center::ConfigCenter;
 use agentos_core::traits::{
     CapabilityRegistry, ConfigFileMapping, HttpHandleCapability, PluginInvoker, PluginManifest,
     PluginType, StorageBackend,
@@ -96,6 +98,19 @@ pub struct AppState {
     /// 安装触发模型 L1：已启用插件 id 集合（schema 聚合据此过滤 contributes/configs）。
     /// disabled 插件的 manifest 仍在 manifests（用户能看到装了什么），但不出口 contributes。
     pub enabled_plugin_ids: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// 阶段3 遗留：插件根目录映射（plugin_id → 插件根目录绝对路径）。
+    ///
+    /// 由启动期 loader 扫描结果填充（或测试直接构造）。HTTP dispatcher 据此把
+    /// `/ext/{plugin_id}/assets/{*path}` 解析到 `<plugin_root>/web/<path>`，
+    /// 直接读文件返回，免去为每个子资源单独声明 http_endpoints。
+    /// 空 map = 无插件托管静态资源（兼容旧行为，仅静态路由 + dispatcher）。
+    pub plugin_dirs: Arc<HashMap<String, PathBuf>>,
+    /// 统一配置中心（统一配置加载方案 TDD-1/2/3 的入口）。
+    ///
+    /// 提供 `load()` / `load_dir()` / `store()` 三个 pull 模式 API，
+    /// 供 agent loader / pipeline loader / plugin config_files 统一走。
+    /// None = 未接线（降级：各 loader 继续各自直读，行为不变）。
+    pub config_center: Option<Arc<ConfigCenter>>,
 }
 
 impl AppState {
@@ -122,6 +137,8 @@ impl AppState {
             inbound_router: None,
             http_handler: None,
             metrics: None,
+            plugin_dirs: Arc::new(HashMap::new()),
+            config_center: None,
         }
     }
 
@@ -148,6 +165,8 @@ impl AppState {
             inbound_router: None,
             http_handler: None,
             metrics: None,
+            plugin_dirs: Arc::new(HashMap::new()),
+            config_center: None,
         }
     }
 
@@ -210,6 +229,8 @@ impl AppState {
             inbound_router: None,
             http_handler: None,
             metrics: None,
+            plugin_dirs: Arc::new(HashMap::new()),
+            config_center: None,
         }
     }
 
@@ -280,6 +301,28 @@ impl AppState {
     pub fn with_metrics(self, metrics: MetricsAggregator) -> Self {
         Self {
             metrics: Some(metrics),
+            ..self
+        }
+    }
+
+    /// 阶段3 遗留：注入插件根目录映射（plugin_id → 插件目录绝对路径）。
+    ///
+    /// 启用后，HTTP dispatcher 把 `/ext/{plugin_id}/assets/{*path}` 解析到
+    /// `<plugin_dir>/web/<path>` 直读文件返回。由启动期 loader 扫描结果填充。
+    pub fn with_plugin_dirs(self, plugin_dirs: HashMap<String, PathBuf>) -> Self {
+        Self {
+            plugin_dirs: Arc::new(plugin_dirs),
+            ..self
+        }
+    }
+
+    /// 注入统一配置中心（统一配置加载方案 TDD-4）。
+    ///
+    /// 启动期由 `agentos-kernel.rs` 构造 `ConfigCenter` 后链式注入。
+    /// 注入后所有 loader 可经 `state.config_center` 走统一 `load()` / `load_dir()` 路径。
+    pub fn with_config_center(self, cc: Arc<ConfigCenter>) -> Self {
+        Self {
+            config_center: Some(cc),
             ..self
         }
     }
@@ -455,6 +498,214 @@ pub async fn agents_handler(
 
     let total = items.len();
     axum::Json(json!({ "items": items, "total": total }))
+}
+
+/// 解析 agent 配置文件路径（顶层 `config/agents/<id>.yaml` 优先，再递归分类子目录）。
+///
+/// 与 `load_agent_config_into_state` 的定位逻辑一致：agents/ 按分类组织为
+/// `agents/<category>/<id>.yaml`（main/orchestrator/executor/...），顶层也可能放
+/// 单文件（如 code_reviewer_agent.yaml）。返回首个匹配路径，不存在返回 None。
+fn resolve_agent_yaml_path(
+    project_root: &std::path::Path,
+    agent_id: &str,
+) -> Option<std::path::PathBuf> {
+    let agents_dir = project_root.join("config").join("agents");
+    let top = agents_dir.join(format!("{}.yaml", agent_id));
+    if top.is_file() {
+        Some(top)
+    } else {
+        crate::server::find_agent_yaml(&agents_dir, agent_id)
+    }
+}
+
+/// /api/v1/agents/schema 端点——返回 agent 配置的字段级 schema（JSON Schema 子集）。
+///
+/// 供前端表单驱动渲染（createAgent/updateAgent 表单字段）。字段类型集合覆盖
+/// string/textarea/number/select/multiselect；select 带 options 枚举。
+/// [来源: config/templates/.agent_template_spec.yaml 字段规范]
+pub async fn agents_schema_handler() -> axum::Json<serde_json::Value> {
+    axum::Json(json!({
+        "fields": [
+            { "name": "config_id", "type": "string", "label": "配置ID", "required": true },
+            { "name": "name", "type": "string", "label": "名称", "required": true },
+            { "name": "display_name", "type": "string", "label": "显示名称" },
+            { "name": "description", "type": "textarea", "label": "描述" },
+            { "name": "agent_type", "type": "select", "label": "类型", "options": [
+                {"label": "主控", "value": "main"},
+                {"label": "编排", "value": "orchestrator"},
+                {"label": "专用", "value": "specialized"},
+                {"label": "原子", "value": "atomic"},
+                {"label": "系统", "value": "system"}
+            ]},
+            { "name": "level", "type": "select", "label": "层级", "options": [
+                {"label": "L1", "value": "L1"},
+                {"label": "L2", "value": "L2"},
+                {"label": "L3", "value": "L3"}
+            ]},
+            { "name": "model_tier", "type": "string", "label": "模型档位" },
+            { "name": "system_prompt", "type": "textarea", "label": "系统提示词" },
+            { "name": "tool_ids", "type": "multiselect", "label": "工具" },
+            { "name": "max_iterations", "type": "number", "label": "最大迭代" },
+            { "name": "timeout_seconds", "type": "number", "label": "超时秒" },
+            { "name": "tags", "type": "multiselect", "label": "标签" }
+        ]
+    }))
+}
+
+/// GET /api/v1/agents/{id}/config——读取指定 agent 的 yaml 文件内容。
+///
+/// 按 `resolve_agent_yaml_path` 定位文件（顶层 + 递归分类子目录），返回
+/// `{ config_id, yaml }`（yaml 为文件原文）。id 不存在 → 404。
+pub async fn get_agent_config_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
+        message: "project_root not configured".to_string(),
+    })?;
+    let path =
+        resolve_agent_yaml_path(&project_root, &agent_id).ok_or_else(|| ApiError::NotFound {
+            message: format!("agent config not found: {agent_id}"),
+        })?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| ApiError::Internal {
+        message: format!("read agent config {}: {e}", path.display()),
+    })?;
+    Ok(axum::Json(json!({ "config_id": agent_id, "yaml": raw })))
+}
+
+/// PUT /api/v1/agents/{id}/config 请求体。
+#[derive(Debug, Deserialize)]
+pub struct AgentConfigUpdateRequest {
+    /// 新的 yaml 文件内容（原文写回）。
+    pub yaml: String,
+}
+
+/// PUT /api/v1/agents/{id}/config——写回 agent 的 yaml 文件。
+///
+/// 流程：定位文件（不存在 → 404）→ 先备份原文件为 `<file>.yaml.bak` →
+/// 写新内容 → 返回 `{ config_id, success, backup }`。
+pub async fn put_agent_config_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<AgentConfigUpdateRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
+        message: "project_root not configured".to_string(),
+    })?;
+    let path =
+        resolve_agent_yaml_path(&project_root, &agent_id).ok_or_else(|| ApiError::NotFound {
+            message: format!("agent config not found: {agent_id}"),
+        })?;
+
+    // 先备份原文件（同目录 <file>.yaml.bak），再写新内容
+    let backup = path.with_extension("yaml.bak");
+    std::fs::copy(&path, &backup).map_err(|e| ApiError::Internal {
+        message: format!("backup agent config {}: {e}", path.display()),
+    })?;
+    std::fs::write(&path, &req.yaml).map_err(|e| ApiError::Internal {
+        message: format!("write agent config {}: {e}", path.display()),
+    })?;
+
+    Ok(axum::Json(json!({
+        "config_id": agent_id,
+        "success": true,
+        "backup": backup.file_name().map(|n| n.to_string_lossy().to_string()),
+    })))
+}
+
+/// POST /api/v1/actions/execute 请求体(对齐前端 GrowthLoop.ts transport 调用格式)。
+///
+/// `action` = commandId(对应某插件 contributes.commands[].id);
+/// `args` = 命令参数对象(缺省空对象)。
+/// `action` 标 `#[serde(default)]`:缺字段时反序列化为空串,由 handler 显式返回 400
+/// (而非 axum Json 提取器默认的 422),对齐前端约定的错误语义。
+#[derive(Debug, Deserialize)]
+pub struct ActionsExecuteRequest {
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// POST /api/v1/actions/execute——前端命令面板/快捷键/菜单触发的统一出口。
+///
+/// 链路:前端 `commandDispatcher.setTransport` → 本端点 → 查找声明该 command 的插件 →
+/// 执行(或占位)。重点是端点存在、不 404、链路闭合。
+///
+/// 处理:
+/// 1. 请求体缺 `action`(或空串)→ 400
+/// 2. 扫描 `state.manifests`,找 `contributes.commands[].id == action` 的插件 → 未命中 404
+/// 3. 命中后,若 command 声明了显式路由(条目里的 `tool` 字段指向工具名)且 invoker 可用,
+///    经 `invoker.invoke_tool(plugin_id, tool, args)` 调插件 sidecar(参考 capability_router
+///    的 tool-executor.invoke 模式);否则返回 success 占位(后续再细化路由)。
+pub async fn actions_execute_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(req): axum::Json<ActionsExecuteRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    if req.action.trim().is_empty() {
+        return Err(ApiError::BadRequest {
+            message: "missing required field: action".to_string(),
+        });
+    }
+
+    // 扫描 manifests 找声明了该 command 的插件(同时取出 command 条目供路由判定)。
+    let mut hit: Option<(&PluginManifest, &serde_json::Value)> = None;
+    for m in state.manifests.iter() {
+        let Some(contributes) = m.contributes.as_ref() else {
+            continue;
+        };
+        let Some(commands) = contributes.get("commands").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        if let Some(entry) = commands
+            .iter()
+            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(req.action.as_str()))
+        {
+            hit = Some((m, entry));
+            break;
+        }
+    }
+
+    let (manifest, command_entry) = hit.ok_or_else(|| ApiError::NotFound {
+        message: format!("command not declared by any plugin: {}", req.action),
+    })?;
+    let plugin_id = manifest.id.clone();
+
+    // 显式路由:command 条目声明 `tool` 字段 → 经 invoker 调对应工具 sidecar。
+    // 缺省(无 tool 字段 / invoker 不可用)→ success 占位,保证前端链路通。
+    if let Some(tool_name) = command_entry
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        if let Some(invoker) = state.invoker.clone() {
+            match invoker.invoke_tool(&plugin_id, &tool_name, &req.args).await {
+                Ok(result) => {
+                    return Ok(axum::Json(json!({
+                        "success": result.success,
+                        "result": result.data,
+                        "error": result.error,
+                        "plugin_id": plugin_id,
+                    })));
+                }
+                Err(e) => {
+                    return Ok(axum::Json(json!({
+                        "success": false,
+                        "error": e.message,
+                        "plugin_id": plugin_id,
+                    })));
+                }
+            }
+        }
+    }
+
+    // 占位成功:command 已声明但无显式执行路由(或测试环境 invoker=None)。
+    // 后续可扩展为按 command 声明的 handler_capability/方法名路由到具体 sidecar。
+    Ok(axum::Json(json!({
+        "success": true,
+        "result": { "acknowledged": true, "action": req.action },
+        "plugin_id": plugin_id,
+    })))
 }
 
 /// 递归收集目录下所有 .yaml/.yml 文件(按文件名排序保证稳定)。
@@ -938,4 +1189,47 @@ pub async fn get_pipeline_config_with_etag(
     .await?;
     let etag = resp.etag.clone();
     Ok(([(axum::http::header::ETAG, etag)], axum::Json(resp)).into_response())
+}
+
+#[cfg(test)]
+mod tdd4_config_center_tests {
+    //! TDD-4: AppState.config_center 字段 + with_config_center builder 测试。
+    //! 设计依据：docs/working/重要设计/统一配置加载方案.md 阶段 1。
+
+    use super::*;
+    use agentos_config::config_center::ConfigCenter;
+
+    #[test]
+    fn test_new_app_state_has_no_config_center() {
+        // 契约：默认构造的 AppState，config_center 为 None（未接线降级）
+        let state = AppState::new();
+        assert!(state.config_center.is_none());
+    }
+
+    #[test]
+    fn test_with_config_center_injects_instance() {
+        // 契约：with_config_center 注入后，config_center 为 Some
+        let temp = tempfile::tempdir().unwrap();
+        let cc = Arc::new(ConfigCenter::new(temp.path().to_path_buf()));
+
+        let state = AppState::new().with_config_center(cc);
+
+        assert!(state.config_center.is_some());
+    }
+
+    #[test]
+    fn test_injected_config_center_can_load() {
+        // 契约：注入的 ConfigCenter 能 load 配置文件（端到端可用性）
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("test.yaml"), "key: value\n").unwrap();
+
+        let cc = Arc::new(ConfigCenter::new(config_dir));
+        let state = AppState::new().with_config_center(cc);
+
+        let cc = state.config_center.as_ref().expect("应已注入");
+        let val = cc.load("test.yaml").expect("load 应成功");
+        assert_eq!(val["key"], "value");
+    }
 }

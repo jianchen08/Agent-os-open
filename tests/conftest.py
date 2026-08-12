@@ -10,6 +10,7 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -20,13 +21,13 @@ if os.path.isdir(_SRC_ROOT):
     sys.path.insert(0, _SRC_ROOT)
 
 # 注意："suites" 已从 collect_ignore 移除，使 pytest tests/channels/ tests/suites/ 能正确收集集成测试。
-# 以下根级测试文件因需要特殊外部服务（向量库/Redis/真实 LLM 等），仍然排除：
-collect_ignore = [
-    "test_cross_domain_discovery.py",
-    "test_directory_generator.py",
-    "test_memory_metrics.py",
-    "test_pgvector_store.py",
-]
+# 0.2 清理：原 collect_ignore 中的 test_cross_domain_discovery / test_directory_generator /
+# test_memory_metrics / test_pgvector_store 均依赖 0.1 memory.* 死模块，已删除（见
+# docs/test_cleanup_0.2.md）。
+# manual/：需手动环境（kernel + LLM key）的脚本，不进默认收集，避免污染 `pytest tests/`。
+#   含原 tests/e2e/test_compression_real_llm、tests/test_litellm_direct、tests/suites/llm/test_keypool_adapter
+#   （均为无断言或命中真实外部 API 的手动脚本，已移入）。
+collect_ignore: list[str] = ["manual"]
 
 # 0.2 架构：src/ 不存在时，跳过仍依赖 src 的测试文件。
 # 多数 0.1 遗留测试已删除或迁移到 0.2 模块（见迁移记录）。
@@ -43,6 +44,59 @@ if not os.path.isdir(_SRC_ROOT):
 
 # ── 报告输出目录 ──────────────────────────────────────────
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
+
+
+# 0.2 插件平铺 import 共享的裸模块名（plugin.py / models.py / tool.py 等）。
+# 多个插件同名，pytest 收集时先导入的会缓存进 sys.modules，导致后收集的测试
+# ``from plugin import X`` 命中错误模块。在收集完成后统一逐出，让各测试的
+# 模块级导入按自身 sys.path 重新解析。
+_BARE_MODULE_NAMES = {
+    "plugin",
+    "plugin_types",
+    "models",
+    "tool",
+    "types",
+    "adapter",
+    "stream_client",
+    "server",
+    "decorators",
+    "exceptions",
+    "registry",
+    "policy",
+    "manager",
+    "decider",
+    "approval",
+    "sensitive_paths",
+    "workspace",
+    "gateway",
+    "storage",
+    "service",
+    "models",
+    "interfaces",
+    "connector_types",
+    "isolation_types",
+    "mm_types",
+    "task_types",
+    "base",
+    "config_mixin",
+    "degradation",
+}
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Collector | None:
+    """每个测试文件收集**前**逐出共享裸模块缓存，防止跨插件同名模块互相污染。
+
+    0.2 架构下各插件目录内是平铺 import（from plugin import ...），
+    不同插件的同名模块（plugin/models/policy/storage 等）会互相覆盖
+    sys.modules 缓存——后收集的测试 ``from plugin import X`` 会命中
+    先导入的其它插件模块。本钩子在文件收集（含模块导入）前调用，
+    保证每个测试文件的模块级导入都能按自己的 sys.path 解析。
+    """
+    if file_path.suffix == ".py":
+        for name in _BARE_MODULE_NAMES:
+            sys.modules.pop(name, None)
+    return None
 
 
 # ── pytest hook: 会话级初始化 ──────────────────────────────

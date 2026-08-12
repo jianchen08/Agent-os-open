@@ -1,0 +1,257 @@
+"""P0-3 task_manage 权限覆盖修复测试（TDD）。
+
+回归安全缺口：``TaskTool`` 已有 ``_check_permission``（L1 会话隔离 / L2 父任务归属），
+但 6 个高危动作入口自身未调用——纵深防御缺失：
+
+- ``_get_task_list``：L2 无 parent_task_id 时仍可能列出他人任务（submitted_by_level 缺失的遗留任务）。
+- ``_change_status``：仅校验 L1 层级，未校验会话归属——L1 可改其他会话的容器任务。
+- ``_inject_to_running`` / ``_resume_from_stopped`` / ``_retry_from_terminal``：
+  依赖调用方 ``_continue_task`` 的检查，自身入口无防御——若被直接调用或新增调用路径即裸奔。
+- ``_batch_tasks``：逐任务委派子动作，自身入口不预检权限。
+
+契约：上述 6 个动作入口均显式调用 ``_check_permission``，无权限 →
+``INSUFFICIENT_PERMISSION``（list 动作则过滤掉越权任务）。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+# ── 路径注入：legacy_0_1_compat（提供 tasks/core/tools shim）+ task 工具目录 ──
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_COMPAT = _REPO_ROOT / "plugins" / "shared" / "legacy_0_1_compat"
+_TASK_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task"
+for _p in (str(_COMPAT), str(_TASK_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+for _m in (
+    "tool",
+    "types",
+    "service",
+    "base",
+    "state_machine",
+    "task_types",
+    # tasks 包来自 legacy_0_1_compat shim；整 suite 收集时须弹出先前测试缓存的别的 tasks，
+    # 否则 tool.py 的 `from tasks.types import ...` 会命中错误缓存（ModuleNotFoundError: tasks.types）。
+    "tasks",
+    "tasks.types",
+):
+    sys.modules.pop(_m, None)
+
+import tool as task_tool  # noqa: E402
+
+TaskTool = task_tool.TaskTool
+TaskModel = task_tool.TaskModel
+TaskStatus = task_tool.TaskStatus
+
+
+def _make_service() -> MagicMock:
+    """构造 TaskService mock（get_task/list_all/force_transition 等）。"""
+    svc = MagicMock()
+    svc.get_task.return_value = None
+    svc.list_all = AsyncMock(return_value=[])
+    svc.force_transition = AsyncMock()
+    svc.save_task = AsyncMock()
+    svc.resume_task = AsyncMock()
+    svc.pause_task = AsyncMock()
+    svc.delete_task = AsyncMock()
+    svc.list_subtasks.return_value = []
+    svc._cleanup_subtask_worktrees = AsyncMock(return_value={})
+    return svc
+
+
+def _make_tool() -> TaskTool:
+    """构造 TaskTool，注入 mock 服务并屏蔽 execution_record_storage（避免触达 infrastructure）。"""
+    t = TaskTool()
+    t._task_service = _make_service()
+    # list 路径会调 _get_latest_activity → _get_execution_record_storage；屏蔽之返回 None
+    t._get_execution_record_storage = lambda: None  # type: ignore[method-assign]
+    return t
+
+
+def _task(
+    *,
+    tid: str = "t1",
+    status: TaskStatus = TaskStatus.RUNNING,
+    session_id: str | None = "session-other",
+    submitted_by_level: int | None = None,
+    task_scope: str | None = None,
+    parent_task_id: str | None = None,
+    pipeline_run_id: str | None = None,
+) -> TaskModel:
+    """构造 TaskModel fixture。"""
+    md: dict = {}
+    if session_id is not None:
+        md["session_id"] = session_id
+    if submitted_by_level is not None:
+        md["submitted_by_level"] = submitted_by_level
+    if task_scope is not None:
+        md["task_scope"] = task_scope
+    return TaskModel(
+        id=tid,
+        title="t",
+        status=status,
+        metadata=md,
+        parent_task_id=parent_task_id,
+        pipeline_run_id=pipeline_run_id,
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# 1. _change_status：L1 跨会话改容器任务 → 拒绝
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_change_status_denied_cross_session_l1() -> None:
+    """_change_status：L1 改其他会话的容器任务 → INSUFFICIENT_PERMISSION。
+
+    RED：仅校验 parent_agent_level==1，未校验 session 归属 → force_transition 被调用（越权成功）。
+    GREEN：补 _check_permission → 拒绝，force_transition 不被调用。
+    """
+    tool = _make_tool()
+    tool._task_service.get_task.return_value = _task(
+        status=TaskStatus.RUNNING, session_id="session-other", task_scope="container"
+    )
+
+    result = await tool._change_status(
+        {"task_id": "t1", "status": "completed", "session_id": "session-mine"},
+        parent_agent_level=1,
+    )
+
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+    tool._task_service.force_transition.assert_not_awaited()
+
+
+# ═══════════════════════════════════════════════════════════
+# 2. _get_task_list：L2 无 parent_task_id → 过滤掉遗留任务
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_get_task_list_filters_unauthorized_for_l2() -> None:
+    """_get_task_list：L2 无 parent_task_id 时，遗留任务（submitted_by_level 缺失）应被过滤。
+
+    RED：现有 L2 过滤仅在传 pipeline_id/parent_task_id 时剔除；遗留任务混入列表。
+    GREEN：补 _check_permission → 遗留任务被拒，列表为空。
+    """
+    tool = _make_tool()
+    legacy = _task(tid="legacy-1", status=TaskStatus.COMPLETED, submitted_by_level=None)
+    tool._task_service.list_all = AsyncMock(return_value=[legacy])
+
+    result = await tool._get_task_list({}, parent_agent_level=2)
+
+    assert result.success
+    rows = result.output["d"]
+    assert rows == [], f"L2 无 parent_task_id 不应看到他人遗留任务，实际={rows}"
+
+
+# ═══════════════════════════════════════════════════════════
+# 3-5. continue 三子动作：直接调用、跨会话 → 拒绝（纵深防御）
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_inject_to_running_denied_cross_session() -> None:
+    """_inject_to_running：直接调用 + 跨会话 → INSUFFICIENT_PERMISSION（不触达 emit）。"""
+    tool = _make_tool()
+    task = _task(status=TaskStatus.RUNNING, session_id="session-other")
+
+    result = await tool._inject_to_running(
+        task, "do something", 1, {"session_id": "session-mine"}
+    )
+
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+@pytest.mark.asyncio
+async def test_resume_from_stopped_denied_cross_session() -> None:
+    """_resume_from_stopped：直接调用 + 跨会话 → INSUFFICIENT_PERMISSION（不触达 resume_task）。"""
+    tool = _make_tool()
+    task = _task(status=TaskStatus.STOPPED, session_id="session-other")
+
+    result = await tool._resume_from_stopped(
+        task, "", tool._task_service, 1, {"session_id": "session-mine"}
+    )
+
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+    tool._task_service.resume_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_from_terminal_denied_cross_session() -> None:
+    """_retry_from_terminal：直接调用 + 跨会话 → INSUFFICIENT_PERMISSION（不触达 force_transition）。"""
+    tool = _make_tool()
+    task = _task(status=TaskStatus.FAILED, session_id="session-other")
+
+    result = await tool._retry_from_terminal(
+        task, "", tool._task_service, 1, {"session_id": "session-mine"}
+    )
+
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+    tool._task_service.force_transition.assert_not_awaited()
+
+
+# ═══════════════════════════════════════════════════════════
+# 6. _batch_tasks：越权任务在入口预检即拒绝，不委派子动作
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_batch_tasks_prechecks_permission_and_skips_dispatch() -> None:
+    """_batch_tasks：越权任务在自身入口预检被拒，子动作（_continue_task）不被调用。
+
+    RED：_batch_tasks 直接委派 _continue_task（其内部才检查）→ _continue_task 被调用。
+    GREEN：_batch_tasks 入口先 _check_permission 预检 → 越权任务短路，不委派。
+    """
+    tool = _make_tool()
+    tool._task_service.get_task.return_value = _task(
+        status=TaskStatus.RUNNING, session_id="session-other"
+    )
+    # 监视子动作是否被委派
+    tool._continue_task = AsyncMock(  # type: ignore[method-assign]
+        return_value=task_tool.create_success_result({"task_id": "t1"})
+    )
+
+    result = await tool._batch_tasks(
+        {"action": "continue", "task_ids": ["t1"], "session_id": "session-mine"},
+        parent_agent_level=1,
+    )
+
+    assert result.success  # 批量本身成功（逐任务结果汇总）
+    rows = result.output["results"]
+    assert rows[0]["success"] is False
+    assert "INSUFFICIENT_PERMISSION" in rows[0]["error"]
+    # 关键：越权任务不应触达 _continue_task
+    tool._continue_task.assert_not_awaited()
+
+
+# ═══════════════════════════════════════════════════════════
+# 回归：合法权限不破坏（L1 操作自己会话的任务仍可继续）
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_change_status_allowed_for_own_session_l1() -> None:
+    """_change_status：L1 操作本会话容器任务 → 通过权限检查（合法行为不破坏）。"""
+    tool = _make_tool()
+    tool._task_service.get_task.return_value = _task(
+        status=TaskStatus.RUNNING, session_id="session-mine", task_scope="container"
+    )
+
+    result = await tool._change_status(
+        {"task_id": "t1", "status": "completed", "session_id": "session-mine"},
+        parent_agent_level=1,
+    )
+
+    # 通过权限检查 → 触达 force_transition（合法变更）
+    assert result.success
+    tool._task_service.force_transition.assert_awaited_once()

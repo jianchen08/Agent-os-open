@@ -13,8 +13,8 @@ from datetime import datetime
 
 import pytest
 
-from tasks.service import TaskService
-from tasks.types import TaskStatus
+from service import TaskService
+from task_types import TaskStatus
 
 
 def _make_service() -> TaskService:

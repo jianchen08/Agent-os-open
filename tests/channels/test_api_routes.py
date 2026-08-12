@@ -19,10 +19,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-# 确保 src 在 sys.path 中
-_src = os.path.join(os.path.dirname(__file__), "..", "..", "src")
-if _src not in sys.path:
-    sys.path.insert(0, os.path.abspath(_src))
+from tests.channels.conftest import use_channel
+
+use_channel("api")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -35,20 +34,20 @@ class TestConfigYamlUtils:
 
     def test_mask_key_short_key(self) -> None:
         """短密钥（≤8字符）完全遮蔽。"""
-        from channels.api.routes_config import _mask_key
+        from routes_config import _mask_key
 
         assert _mask_key("abc") == "****"
         assert _mask_key("12345678") == "****"
 
     def test_mask_key_empty(self) -> None:
         """空密钥返回空字符串。"""
-        from channels.api.routes_config import _mask_key
+        from routes_config import _mask_key
 
         assert _mask_key("") == ""
 
     def test_mask_key_long_key(self) -> None:
         """长密钥保留前4后4，中间遮蔽。"""
-        from channels.api.routes_config import _mask_key
+        from routes_config import _mask_key
 
         result = _mask_key("sk-abcdefghijklmnop")
         assert result.startswith("sk-a")
@@ -57,7 +56,7 @@ class TestConfigYamlUtils:
 
     def test_read_yaml_valid_file(self) -> None:
         """读取有效 YAML 文件。"""
-        from channels.api.routes_config import _read_yaml
+        from routes_config import _read_yaml
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, encoding="utf-8"
@@ -76,7 +75,7 @@ class TestConfigYamlUtils:
         """读取不存在的文件抛出 HTTPException(404)。"""
         from fastapi import HTTPException
 
-        from channels.api.routes_config import _read_yaml
+        from routes_config import _read_yaml
 
         with pytest.raises(HTTPException) as exc_info:
             _read_yaml(Path("/nonexistent/path/config.yaml"))
@@ -85,7 +84,7 @@ class TestConfigYamlUtils:
 
     def test_read_yaml_empty_file(self) -> None:
         """空 YAML 文件返回空字典。"""
-        from channels.api.routes_config import _read_yaml
+        from routes_config import _read_yaml
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, encoding="utf-8"
@@ -101,7 +100,7 @@ class TestConfigYamlUtils:
 
     def test_write_yaml_creates_file(self) -> None:
         """写入 YAML 数据到文件。"""
-        from channels.api.routes_config import _write_yaml
+        from routes_config import _write_yaml
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "test_output.yaml"
@@ -117,7 +116,7 @@ class TestConfigYamlUtils:
 
     def test_write_yaml_creates_parent_dirs(self) -> None:
         """写入时自动创建父目录。"""
-        from channels.api.routes_config import _write_yaml
+        from routes_config import _write_yaml
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "sub" / "dir" / "config.yaml"
@@ -126,7 +125,7 @@ class TestConfigYamlUtils:
 
     def test_write_yaml_preserves_unicode(self) -> None:
         """写入 YAML 保留中文字符（不转义）。"""
-        from channels.api.routes_config import _write_yaml
+        from routes_config import _write_yaml
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "unicode.yaml"
@@ -138,7 +137,7 @@ class TestConfigYamlUtils:
 
     def test_read_write_roundtrip(self) -> None:
         """读写往返：写入后读回数据一致。"""
-        from channels.api.routes_config import _read_yaml, _write_yaml
+        from routes_config import _read_yaml, _write_yaml
 
         original = {
             "string_val": "hello",
@@ -326,7 +325,7 @@ class TestConfigEndpoints:
         """创建临时配置目录和 FastAPI 测试应用。"""
         from fastapi import FastAPI
 
-        from channels.api.routes_config import router
+        from routes_config import router
 
         self.tmpdir = tempfile.mkdtemp()
         self.app = FastAPI()
@@ -342,7 +341,7 @@ class TestConfigEndpoints:
 
     def test_read_yaml_function_directly(self) -> None:
         """直接测试 _read_yaml 函数正常路径。"""
-        from channels.api.routes_config import _read_yaml
+        from routes_config import _read_yaml
 
         path = self._write_config("test.yaml", {"enabled": True, "max": 10})
         data = _read_yaml(path)
@@ -351,7 +350,7 @@ class TestConfigEndpoints:
 
     def test_write_yaml_function_directly(self) -> None:
         """直接测试 _write_yaml 函数正常路径。"""
-        from channels.api.routes_config import _read_yaml, _write_yaml
+        from routes_config import _read_yaml, _write_yaml
 
         path = Path(self.tmpdir) / "new_config.yaml"
         _write_yaml(path, {"new_key": "new_value"})
@@ -360,7 +359,7 @@ class TestConfigEndpoints:
 
     def test_mask_key_various_lengths(self) -> None:
         """密钥遮蔽函数边界测试。"""
-        from channels.api.routes_config import _mask_key
+        from routes_config import _mask_key
 
         # 空字符串
         assert _mask_key("") == ""

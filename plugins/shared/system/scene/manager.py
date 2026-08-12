@@ -12,9 +12,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from models import Scene, SceneLayoutConfig, SceneUpdateRequest
-from persistence import ScenePersistence
-from templates import get_template
+from scene.models import Scene, SceneLayoutConfig, SceneUpdateRequest
+from scene.persistence import ScenePersistence
+from scene.templates import get_template
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class SceneManager:
 
         scene_widgets = []
         if widgets:
-            from models import SceneWidgetConfig  # noqa: PLC0415
+            from scene.models import SceneWidgetConfig  # noqa: PLC0415
 
             scene_widgets = [SceneWidgetConfig(**w) for w in widgets]
         elif template:

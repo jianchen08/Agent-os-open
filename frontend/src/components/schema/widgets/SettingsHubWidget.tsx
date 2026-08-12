@@ -9,18 +9,19 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
+import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
+import { SchemaFormEmbed } from '@/components/schema/widgets/SchemaFormEmbed'
+import { cn } from '@/lib/utils'
+import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
+import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
+import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
+import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
+import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
+import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
-import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
-import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
-import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
-import { ContextWindowSettingsPage } from '@/pages/settings/ContextWindowSettingsPage'
-import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
-import { CostSettingsPage } from '@/pages/settings/CostSettingsPage'
-import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { getSchema } from '@/services/api/schema'
-import { cn } from '@/lib/utils'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
@@ -34,6 +35,7 @@ type NavKey =
   | 'kernel-concurrency'
   | 'kernel-cost'
   | `plugin:${string}`
+  | `schema:${string}`
 
 interface NavItem {
   key: NavKey
@@ -142,6 +144,9 @@ export function SettingsHubWidget(_props: Record<string, unknown>) {
               setActive(`plugin:${pluginId}:${fileId}`)
             }}
           />
+        )}
+        {String(active).startsWith('schema:') && (
+          <SchemaFormEmbed schemaId={String(active).slice('schema:'.length)} />
         )}
         {String(active).startsWith('plugin:') && (
           <PluginConfigEmbed pathKey={String(active).slice('plugin:'.length)} />

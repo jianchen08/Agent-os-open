@@ -12,7 +12,7 @@ use std::sync::Arc;
 use agentos_core::types::PluginError;
 use agentos_mcp::CapabilityRouter;
 use agentos_plugin_loader::{HostCapability, WasmCapabilityChecker, WasmHostRegistry};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// 把 `host.call` 这个 wasm import 转发到 `CapabilityRouter::handle`。
 ///

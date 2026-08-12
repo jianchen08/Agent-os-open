@@ -2,19 +2,42 @@
  * 表单交互组件
  *
  * 根据 Schema 渲染动态表单，支持多种字段类型和布局。
- * 字段类型：input、textarea、select、toggle、number、slider、color
+ * 字段类型：
+ * - 原生控件：input、textarea、select、toggle、number、slider、color
+ * - antd 控件（对齐 SchemaDriver）：date、multiselect、radio、checkbox
+ *
+ * antd 控件适配说明：
+ * - date：antd DatePicker，内部值以 ISO string 存储；DatePicker 接收 dayjs
+ *   对象，onChange 回调把 dayjs 转 ISO string，提交时即 ISO string（非 dayjs）
+ * - multiselect：antd Select mode="multiple"，值为数组
+ * - radio：antd Radio.Group，值为标量（单选）
+ * - checkbox：antd Checkbox.Group，值为数组（多选）
+ * 全表单以 antd ConfigProvider 包裹，提供主题/locale 上下文。
  *
  * @module FormWidget
  */
 
 import React, { useState, useCallback } from 'react'
+import { Checkbox, ConfigProvider, DatePicker, Radio, Select } from 'antd'
+import dayjs from 'dayjs'
 
 /** 表单字段定义 */
 interface FormField {
   /** 字段标识 */
   name: string
   /** 字段类型 */
-  type: 'input' | 'textarea' | 'select' | 'toggle' | 'number' | 'slider' | 'color'
+  type:
+    | 'input'
+    | 'textarea'
+    | 'select'
+    | 'toggle'
+    | 'number'
+    | 'slider'
+    | 'color'
+    | 'date'
+    | 'multiselect'
+    | 'radio'
+    | 'checkbox'
   /** 字段标签 */
   label?: string
   /** 占位文本 */
@@ -84,11 +107,17 @@ function extractOptions(
  * @returns 错误消息，无错误时返回空字符串
  */
 function validateField(field: FormField, value: unknown): string {
-  if (field.required && (value === undefined || value === null || value === '')) {
+  const isEmpty =
+    value === undefined ||
+    value === null ||
+    value === '' ||
+    (Array.isArray(value) && value.length === 0)
+
+  if (field.required && isEmpty) {
     return field.label ? `${field.label}不能为空` : '此字段为必填项'
   }
 
-  if (value === undefined || value === null || value === '') return ''
+  if (isEmpty) return ''
 
   const strValue = String(value)
   const validation = field.validation
@@ -140,7 +169,12 @@ export function FormWidget(props: Record<string, unknown>) {
   // 初始化表单值
   const initialValues: Record<string, unknown> = {}
   for (const field of fields) {
-    initialValues[field.name] = field.default ?? ''
+    // multiselect / checkbox 的值为数组，空缺时用 [] 而非 ''
+    if (field.type === 'multiselect' || field.type === 'checkbox') {
+      initialValues[field.name] = Array.isArray(field.default) ? field.default : []
+    } else {
+      initialValues[field.name] = field.default ?? ''
+    }
   }
 
   const [values, setValues] = useState<Record<string, unknown>>(initialValues)
@@ -199,42 +233,44 @@ export function FormWidget(props: Record<string, unknown>) {
   }
 
   return (
-    <div className="space-y-4">
-      {title && (
-        <h3 className="text-foreground text-base font-semibold">{title}</h3>
-      )}
+    <ConfigProvider>
+      <div className="space-y-4">
+        {title && (
+          <h3 className="text-foreground text-base font-semibold">{title}</h3>
+        )}
 
-      <div className={layoutClass}>
-        {fields.map((field) => (
-          <div
-            key={field.name}
-            className={
-              layout === 'grid' && field.type === 'textarea' ? 'col-span-2' : ''
-            }
-          >
-            <label className="text-foreground mb-1 block text-sm font-medium">
-              {field.label ?? field.name}
-              {field.required && <span className="text-status-error ml-1">*</span>}
-            </label>
+        <div className={layoutClass}>
+          {fields.map((field) => (
+            <div
+              key={field.name}
+              className={
+                layout === 'grid' && field.type === 'textarea' ? 'col-span-2' : ''
+              }
+            >
+              <label className="text-foreground mb-1 block text-sm font-medium">
+                {field.label ?? field.name}
+                {field.required && <span className="text-status-error ml-1">*</span>}
+              </label>
 
-            {renderFieldInput(field, values[field.name], errors[field.name], handleChange)}
+              {renderFieldInput(field, values[field.name], errors[field.name], handleChange)}
 
-            {errors[field.name] && (
-              <p className="mt-1 text-xs text-status-error">{errors[field.name]}</p>
-            )}
-          </div>
-        ))}
+              {errors[field.name] && (
+                <p className="mt-1 text-xs text-status-error">{errors[field.name]}</p>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={submitting}
+          className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting ? '提交中...' : submitLabel}
+        </button>
       </div>
-
-      <button
-        type="button"
-        onClick={handleSubmit}
-        disabled={submitting}
-        className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {submitting ? '提交中...' : submitLabel}
-      </button>
-    </div>
+    </ConfigProvider>
   )
 }
 
@@ -350,6 +386,58 @@ function renderFieldInput(
           </span>
         </div>
       )
+
+    case 'date': {
+      // 内部值：ISO string；DatePicker 需要 dayjs 对象 → 边界处互转
+      const dateValue = value ? dayjs(value as string) : null
+      const pickerValue = dateValue && dateValue.isValid() ? dateValue : null
+      return (
+        <DatePicker
+          style={{ width: '100%' }}
+          placeholder={field.placeholder ?? '请选择日期'}
+          value={pickerValue}
+          onChange={(dt) => onChange(field.name, dt ? dt.toISOString() : '')}
+        />
+      )
+    }
+
+    case 'multiselect': {
+      const options = extractOptions(field.options)
+      const current = Array.isArray(value) ? (value as Array<string | number>) : []
+      return (
+        <Select
+          mode="multiple"
+          style={{ width: '100%' }}
+          placeholder={field.placeholder ?? '请选择'}
+          value={current}
+          onChange={(v) => onChange(field.name, v)}
+          options={options.map((o) => ({ label: o.label, value: o.value }))}
+        />
+      )
+    }
+
+    case 'radio': {
+      const options = extractOptions(field.options)
+      return (
+        <Radio.Group
+          value={value as string | number}
+          onChange={(e) => onChange(field.name, e.target.value)}
+          options={options.map((o) => ({ label: o.label, value: o.value }))}
+        />
+      )
+    }
+
+    case 'checkbox': {
+      const options = extractOptions(field.options)
+      const current = Array.isArray(value) ? (value as Array<string | number>) : []
+      return (
+        <Checkbox.Group
+          value={current}
+          onChange={(checkedValues) => onChange(field.name, checkedValues)}
+          options={options.map((o) => ({ label: o.label, value: o.value }))}
+        />
+      )
+    }
 
     case 'input':
     default:

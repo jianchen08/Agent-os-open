@@ -80,8 +80,10 @@ export function syncNavItemsFromContributes(): void {
     }
   }
 
-  // 从 ContributionRegistry 注册新的导航项
-  const containers = contributionRegistry.getViewsContainers()
+  // 从 ContributionRegistry 注册新的导航项（workspace 空间 + activity-bar 栏位，即旧 viewsContainers）
+  const containers = contributionRegistry
+    .getPagesBySpace('workspace')
+    .filter((p) => p.slot === 'activity-bar')
   for (const container of containers) {
     if (container.path) {
       registerNavItem({

@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import pytest
 
-from channels.gateway.message_normalizer import MessageNormalizer
-from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from tests.channels.conftest import use_channel
+
+use_channel("gateway")
+from message_normalizer import MessageNormalizer
+from unified_types import UnifiedMessage, UnifiedResponse
 
 
 class TestMessageNormalizer:

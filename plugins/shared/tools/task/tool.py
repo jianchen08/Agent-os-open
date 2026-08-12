@@ -129,7 +129,16 @@ class TaskTool(BuiltinTool):
         if self._task_service is not None:
             return self._task_service
 
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        try:
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        except ImportError as exc:
+            # 0.2 sidecar 进程无 infrastructure 层（核心运行时未启动）。
+            # 抛 RuntimeError 由调用方 (execute) 的 except RuntimeError 捕获，
+            # 转化为结构化 SERVICE_UNAVAILABLE 失败结果，而非向上冒泡为
+            # 未捕获的 ModuleNotFoundError。
+            raise RuntimeError(
+                "任务服务不可用：infrastructure 层未初始化（sidecar 模式）"
+            ) from exc
 
         provider = get_service_provider()
 
@@ -599,6 +608,13 @@ class TaskTool(BuiltinTool):
                 if user_parent_task_id and task.parent_task_id != user_parent_task_id:
                     continue
 
+                # P0-3 纵深防御：用统一的 _check_permission 收口越权过滤，
+                # 覆盖既有 ad-hoc 过滤未捕获的边界（如 L2 无 parent_task_id 时的遗留任务）。
+                has_permission, _ = self._check_permission(task, parent_agent_level, inputs)
+
+                if not has_permission:
+                    continue
+
                 task_scope = inputs.get("task_scope", "all")
 
                 if task_scope != "all":
@@ -713,17 +729,17 @@ class TaskTool(BuiltinTool):
             # ── 场景 1：运行中任务 → 注入指令 ──
 
             if task.status == TaskStatus.RUNNING:
-                return await self._inject_to_running(task, message, parent_agent_level)
+                return await self._inject_to_running(task, message, parent_agent_level, inputs)
 
             # ── 场景 2：已停止任务 → 恢复执行 ──
 
             if task.status == TaskStatus.STOPPED:
-                return await self._resume_from_stopped(task, message, service)
+                return await self._resume_from_stopped(task, message, service, parent_agent_level, inputs)
 
             # ── 场景 3：失败/超时任务 → 重试 ──
 
             if task.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT):
-                return await self._retry_from_terminal(task, message, service)
+                return await self._retry_from_terminal(task, message, service, parent_agent_level, inputs)
 
             return create_failure_result(
                 error=f"当前状态 {task.status.value} 不支持 continue 操作。"
@@ -745,8 +761,23 @@ class TaskTool(BuiltinTool):
                 error_code="CONTINUE_FAILED",
             )
 
-    async def _inject_to_running(self, task: TaskModel, message: str, parent_agent_level: int) -> ToolExecutionResult:
+    async def _inject_to_running(
+        self,
+        task: TaskModel,
+        message: str,
+        parent_agent_level: int,
+        inputs: dict[str, Any],
+    ) -> ToolExecutionResult:
         """向运行中的任务注入指令（continue 场景 1）。"""
+
+        # P0-3 纵深防御：入口显式校验归属，即便被直接调用或新增调用路径也不裸奔。
+        has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
+
+        if not has_permission:
+            return create_failure_result(
+                error=error_msg,
+                error_code="INSUFFICIENT_PERMISSION",
+            )
 
         if not message:
             return create_failure_result(
@@ -810,8 +841,24 @@ class TaskTool(BuiltinTool):
             metadata={"action": "continue_inject"},
         )
 
-    async def _resume_from_stopped(self, task: TaskModel, message: str, service: TaskService) -> ToolExecutionResult:
+    async def _resume_from_stopped(
+        self,
+        task: TaskModel,
+        message: str,
+        service: TaskService,
+        parent_agent_level: int,
+        inputs: dict[str, Any],
+    ) -> ToolExecutionResult:
         """从 stopped 状态恢复执行（continue 场景 2）。"""
+
+        # P0-3 纵深防御：入口显式校验归属，不依赖调用方 _continue_task 的前置检查。
+        has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
+
+        if not has_permission:
+            return create_failure_result(
+                error=error_msg,
+                error_code="INSUFFICIENT_PERMISSION",
+            )
 
         old_status = task.status.value
 
@@ -890,9 +937,23 @@ class TaskTool(BuiltinTool):
         )
 
     async def _retry_from_terminal(  # noqa: PLR0912
-        self, task: TaskModel, message: str, service: TaskService
+        self,
+        task: TaskModel,
+        message: str,
+        service: TaskService,
+        parent_agent_level: int,
+        inputs: dict[str, Any],
     ) -> ToolExecutionResult:
         """从 failed/timeout 状态重试（continue 场景 3）。"""
+
+        # P0-3 纵深防御：入口显式校验归属，拒绝前不泄露重试次数等状态。
+        has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
+
+        if not has_permission:
+            return create_failure_result(
+                error=error_msg,
+                error_code="INSUFFICIENT_PERMISSION",
+            )
 
         if not task.metadata:
             task.metadata = {}
@@ -1223,6 +1284,16 @@ class TaskTool(BuiltinTool):
                 error_code="TASK_NOT_FOUND",
             )
 
+        # P0-3 纵深防御：变更容器状态前显式校验归属（L1 会话隔离），
+        # 防 L1 跨会话改他人容器任务。层级校验已在上方完成。
+        has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
+
+        if not has_permission:
+            return create_failure_result(
+                error=error_msg,
+                error_code="INSUFFICIENT_PERMISSION",
+            )
+
         # 用 task_scope 字段判断是否为容器任务（而非用 list_subtasks 是否为空判断）。
 
         is_container = (task.metadata or {}).get("task_scope") == "container"
@@ -1334,6 +1405,24 @@ class TaskTool(BuiltinTool):
             file_inputs["task_id"] = task_id
 
             file_inputs.pop("task_ids", None)
+
+            # P0-3 纵深防御：批量入口先逐任务预检权限，越权任务短路返回，
+            # 不委派子动作（即便未来新增无自身鉴权的批量动作也在此收口）。
+            service = self._get_task_service()
+            pre_task = service.get_task(task_id)
+            if pre_task is not None:
+                pre_ok, pre_err = self._check_permission(pre_task, parent_agent_level, file_inputs)
+                if not pre_ok:
+                    results.append(
+                        {
+                            "task_id": task_id,
+                            "success": False,
+                            "data": None,
+                            # 与既有逐任务结果契约一致（error 为字符串），前缀错误码便于识别
+                            "error": f"[INSUFFICIENT_PERMISSION] {pre_err}",
+                        }
+                    )
+                    continue
 
             if action == "continue":
                 result = await self._continue_task(file_inputs, parent_agent_level)

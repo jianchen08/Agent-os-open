@@ -11,7 +11,9 @@ isolation_level 是隔离的唯一真相源，由 isolation_guard 归一化后�
 
 from __future__ import annotations
 
-from plugins.input.security_check.plugin import SecurityCheckPlugin
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("input", "security_check")
+from plugin import SecurityCheckPlugin
 
 
 class TestIsIsolated:

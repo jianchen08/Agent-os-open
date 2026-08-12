@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401
+
 """镜像清理限频与 docker 调用并发信号量回归测试。
 
 背景：IsolationManager.start() 每次都触发全局 image/builder prune
@@ -17,8 +19,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from isolation.manager import IsolationManager
-from isolation.providers.docker_provider import DockerProvider
+from manager import IsolationManager
+from providers.docker_provider import DockerProvider
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +138,7 @@ async def test_docker_concurrency_limited_by_semaphore():
         stdout = b""
         stderr = b""
 
-    def fake_run(args, capture_output=True, timeout=30):
+    def fake_run(args, capture_output=True, timeout=30, **kwargs):
         nonlocal current_concurrent, peak_concurrent
         current_concurrent += 1
         peak_concurrent = max(peak_concurrent, current_concurrent)
@@ -145,7 +147,7 @@ async def test_docker_concurrency_limited_by_semaphore():
         return FakeResult()
 
     # monkeypatch subprocess.run
-    import isolation.providers.docker_provider as dp_mod
+    import providers.docker_provider as dp_mod
     original_run = real_sp.run
     real_sp.run = fake_run
     try:

@@ -113,19 +113,50 @@ export function WebviewWidget({
     }
   }, [endpoint])
 
-  // 收 iframe 上行消息（校验 origin + 协议）→ 转发 WS
+  // 收 iframe 上行消息（校验 origin + 协议）→ 按 method 路由到后端，下行 result/error 回 iframe
+  // handler 在 window 上注册，不依赖 iframeRef 是否就绪（实际 sendDown 用 optional chaining）
   useEffect(() => {
-    if (!iframeRef.current) return
-    const handler = (event: MessageEvent) => {
+    const handler = async (event: MessageEvent) => {
       const msg = validateWebviewEvent(event)
       if (!msg) return // 不可信消息丢弃
       if (msg.method === '__ready') {
         loggers.websocket.info(`[WebviewWidget] ${widgetId ?? '?'} 就绪`)
         return
       }
-      // 上行请求转发到全局 WS（具体 method 路由由后续交互任务扩展，此处先记录）
       loggers.websocket.debug(`[WebviewWidget] 上行 ${msg.method}`, msg.params)
-      // TODO: 阶段 6b 按 method 路由到 globalWS.send 或 REST（带 token）
+
+      // 下行 helper：把结果/错误推回 iframe（origin 用 '*' 因 sandbox iframe origin='null'）
+      const sendDown = (suffix: 'result' | 'error', params: unknown): void => {
+        iframeRef.current?.contentWindow?.postMessage(
+          buildWebviewMessage(`${msg.method}.${suffix}`, params, msg.id),
+          '*',
+        )
+      }
+
+      try {
+        let res: unknown
+        if (msg.method.startsWith('/')) {
+          // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点
+          // 有 params → POST（写操作）；无 params → GET（读操作）
+          res =
+            msg.params !== undefined
+              ? await apiClient.post(msg.method, msg.params)
+              : await apiClient.get(msg.method)
+        } else {
+          // action 约定：复用 command transport 同一端点（带 Bearer token）
+          res = await apiClient.post('/api/v1/actions/execute', {
+            action: msg.method,
+            args: msg.params,
+          })
+        }
+        // axios 响应体在 .data；mock/直返兜底用 res 本身
+        const result = (res as { data?: unknown } | undefined)?.data ?? res
+        sendDown('result', result)
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e)
+        loggers.websocket.warn(`[WebviewWidget] 上行 ${msg.method} 失败: ${message}`)
+        sendDown('error', { message })
+      }
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)

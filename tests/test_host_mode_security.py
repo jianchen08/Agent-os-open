@@ -10,6 +10,8 @@
 """
 
 from __future__ import annotations
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("input", "security_check")
 
 import os
 from typing import Any
@@ -20,10 +22,12 @@ import pytest
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
+pytestmark = pytest.mark.unit
+
 
 def _make_plugin(rules: list[dict[str, Any]] | None = None) -> Any:
     """构建 SecurityCheckPlugin 实例。"""
-    from plugins.input.security_check.plugin import SecurityCheckPlugin
+    from plugin import SecurityCheckPlugin
     config: dict[str, Any] = {"enabled": True}
     if rules is not None:
         config["rules"] = rules

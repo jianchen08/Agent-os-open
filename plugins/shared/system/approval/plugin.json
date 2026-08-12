@@ -8,17 +8,15 @@
     "entry": "python server.py",
     "capabilities": {
         "tools": [
-            {"name": "approval.create_review_request", "description": "Create a document review approval request that pauses the pipeline"},
-            {"name": "approval.create_choice", "description": "Create a choice approval request"},
-            {"name": "approval.create_conversation", "description": "Create a conversation approval request"},
-            {"name": "approval.submit", "description": "Submit approval result to resume the pipeline"}
+            {"name": "approval.create_choice", "description": "创建选择审批（委托 human-interaction 弹窗 + 挂起管道）"},
+            {"name": "approval.submit", "description": "提交审批结果并恢复挂起的管道"}
         ],
         "resources": [],
         "route_signals": ["wait"],
         "lifecycle_hooks": ["on_load", "on_unload"]
     },
     "dependencies": [],
-    "capabilities_required": ["pipeline-executor", "event-bus", "logger"],
+    "capabilities_required": ["human-interaction", "pipeline-executor"],
     "permissions": {},
     "error_policy": "abort",
     "priority": 60,

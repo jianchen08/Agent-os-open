@@ -1,10 +1,11 @@
 """知识注入 Input 插件。
 
-通过 MemoryService 统一检索知识内容，在管道输入阶段
+通过 IMemoryBackend 统一检索知识内容，在管道输入阶段
 将检索结果写入 state["knowledge.context"]。
 
-依赖注入：通过 ctx.get_service("memory_service") 获取 MemoryService 实例，
-不再自行创建 KnowledgeService。
+依赖注入：通过模块级 set_memory_backend() 注入 IMemoryBackend 实例
+（由 server.py on_load 注入，测试直接赋值），不再依赖 0.2 中不存在的
+ctx.get_service("memory_service") 服务。
 
 State 命名空间：
     - knowledge.context : 本插件写入的知识内容
@@ -20,15 +21,35 @@ from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════
+# 模块级依赖注入（由 server.py 的 on_load 注入，测试直接赋值）
+# ═══════════════════════════════════════════════════════════
+
+# 长期记忆后端（IMemoryBackend，Hindsight/Kernel 统一形态）；None 时降级为无知识对话
+_memory_backend: Any | None = None
+
+
+def set_memory_backend(backend: Any | None) -> None:
+    """注入长期记忆后端（IMemoryBackend 实例或兼容 duck-type）。
+
+    由 server.py on_load 调用，把 Step 3 构建的 Hindsight/Kernel 后端注入进来；
+    测试环境直接传 FakeBackend/MagicMock。传 None 清空。
+
+    Args:
+        backend: 实现 add/search/delete/import_document 的后端实例
+    """
+    global _memory_backend
+    _memory_backend = backend
+
 
 class KnowledgeInjectPlugin(IInputPlugin):
     """知识注入 Input 插件。
 
-    通过 MemoryService 统一检索知识内容，将结果写入 state["knowledge.context"]。
+    通过 IMemoryBackend 统一检索知识内容，将结果写入 state["knowledge.context"]。
     支持四种注入模式：full、compressed、hint、disabled。
 
-    通过 ctx.get_service("memory_service") 获取 MemoryService 实例，
-    不再自行创建 KnowledgeService。
+    通过模块级 set_memory_backend() 注入 IMemoryBackend 实例，
+    不再依赖 0.2 中不存在的 memory_service 服务。
 
     优先级：30（数据级，在 context_build 之后、prompt_build 之前）
     错误策略：FALLBACK（降级为无知识对话）
@@ -67,11 +88,10 @@ class KnowledgeInjectPlugin(IInputPlugin):
         return 30
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
-        """通过 MemoryService 从知识库检索内容并写入 state。
+        """通过 IMemoryBackend 从知识库检索内容并写入 state。
 
-        通过 ctx.get_service("memory_service") 获取 MemoryService 实例，
-        调用其 retrieve() 方法进行知识检索。
-        memory_service 不可用时降级为无知识对话。
+        通过模块级 _memory_backend.search() 进行知识检索（memory_type="semantic"），
+        无后端时降级为无知识对话。
 
         Args:
             ctx: 插件执行上下文
@@ -82,9 +102,8 @@ class KnowledgeInjectPlugin(IInputPlugin):
         if self._mode == "disabled":
             return PluginResult(state_updates={"knowledge.context": ""})
 
-        try:
-            memory_service = ctx.get_service("memory_service")
-        except KeyError:
+        # 从模块级注入的记忆后端检索知识（无后端时降级为无知识对话）
+        if _memory_backend is None:
             return PluginResult(state_updates={"knowledge.context": ""})
 
         user_id = ctx.state.get("user_id", "")
@@ -94,13 +113,11 @@ class KnowledgeInjectPlugin(IInputPlugin):
             return PluginResult(state_updates={"knowledge.context": ""})
 
         try:
-            results = await memory_service.retrieve(
-                user_id=user_id,
-                filter={"memory_type": "semantic"},
-                inject_type=self._mode,
-                retrieval_method="keyword",
+            results = await _memory_backend.search(
                 query=query,
+                user_id=user_id,
                 top_k=self._top_k,
+                memory_type="semantic",
             )
         except Exception as e:
             logger.warning("[KnowledgeInjectPlugin] 检索失败: %s", e)
@@ -112,7 +129,9 @@ class KnowledgeInjectPlugin(IInputPlugin):
         if not results:
             return PluginResult(state_updates={"knowledge.context": ""})
 
-        context = "\n\n".join(r.content for r in results)
+        context = "\n\n".join(
+            r.get("content", "") if isinstance(r, dict) else getattr(r, "content", "") for r in results
+        )
         return PluginResult(state_updates={"knowledge.context": context})
 
     def _format_full(self, items: list[dict[str, Any]]) -> str:

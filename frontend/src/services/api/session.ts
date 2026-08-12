@@ -72,6 +72,9 @@ interface BackendMessageResponse {
   toolArgs?: Record<string, unknown>
   toolResult?: unknown
   toolError?: string
+  /** 工具执行失败错误信息（后端新字段：CRITICAL CONTEXT 中 tool-role 消息携带的 error）。
+   *  与 toolError 同义；映射时优先取 error，兼容旧 toolError 兜底。 */
+  error?: string
   durationMs?: number
   attachments?: Array<{
     id?: string
@@ -127,7 +130,11 @@ function mapBackendMessageToMessage(
       // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
       // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
       toolResult: backendMessage.toolResult ?? backendMessage.content,
-      toolError: backendMessage.toolError,
+      // 后端新字段为 error（CRITICAL CONTEXT：tool-role 消息携带 status + error），
+      // 旧字段为 toolError。优先取 error、兼容兜底 toolError，确保下游
+      // mergeConsecutiveAssistantMessages 能据 tm.toolError 判定失败 → state: 'error'。
+      // （tm.status 由下方 backendMessage.status 映射，携带真实的 completed/failed。）
+      toolError: backendMessage.error ?? backendMessage.toolError,
       durationMs: backendMessage.durationMs,
       metadata: backendMessage.metadata,
     } as Message
@@ -209,7 +216,11 @@ function mapBackendMessageToMessage(
         callId: tc.call_id || '',
         name: tc.tool_name || '',
         args: tc.tool_args || {},
-        state: 'done',
+        // 构建时若 assistant toolCalls 已带 error，则派生为 'error'；否则默认 'done'。
+        // 此处 toolCalls 通常无 per-call status（后端不填充），最终 state 由
+        // mergeConsecutiveAssistantMessages 根据 tool-role 消息的 toolError/status 权威派生，
+        // 与流式 toolHandler.ts:142 路径一致（失败 → 'error'，成功 → 'done'）。
+        state: tc.error ? 'error' : 'done',
         result: tc.result,
         error: tc.error,
         sequence: seq++,
@@ -315,7 +326,15 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
         if (target) {
           target.result = tm.toolResult
           target.error = tm.toolError
-          target.state = 'done' as const
+          // 权威派生 tool_call part 的 state（与流式 toolHandler.ts:142 等价：
+          // success === false → 'error'，否则 'done'）。后端把工具执行结果持久化为
+          // tool-role 消息的 status（completed/failed）+ error；此处 tm.toolError
+          // 承载后端 error（见 mapBackendMessageToMessage），tm.status 承载后端 status。
+          // 任一信号表明失败 → 'error'，修复刷新后失败工具一律显示 completed 的 BUG。
+          // 备注：tm.status 运行时可为 'failed'（后端真实值），用 as string 比较规避
+          // Message.status 联合类型未列 'failed' 的编译期告警。
+          const failed = !!tm.toolError || (tm.status as string) === 'failed'
+          target.state = failed ? 'error' : 'done'
           target.durationMs = tm.durationMs ?? target.durationMs
         }
       }

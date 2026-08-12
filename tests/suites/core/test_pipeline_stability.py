@@ -5,11 +5,14 @@
 - D3: evaluator_agent.yaml plugins 配置正确加载
 - D4: evaluator_agent.yaml tool_ids 完整性验证
 - D5: input_adapter run_in_executor 不阻塞事件循环
-- D6: build_initial_state extra_state 参数传递
 
 注：原 D1（_evaluate_agent 经 ThreadPoolExecutor 避免嵌套 event loop）已删除——
 该架构随 I1~I5 不变量重构移除（评估改走 send + CollectingSink，不再 ThreadPoolExecutor
 + asyncio.run 嵌套，也不再有 pipeline_factory）。
+
+注：原 D6（build_initial_state extra_state 参数传递）已删除——依赖 0.1 的
+``pipeline.state_builder``，该模块在 0.2 架构中不存在（state 组装改由 kernel/plugins
+各自处理，无统一 Python 入口）。缺口见 docs/test_cleanup_0.2.md。
 """
 
 from __future__ import annotations
@@ -17,17 +20,17 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import yaml
+
+pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 EVALUATOR_YAML = PROJECT_ROOT / "config" / "agents" / "system" / "evaluator_agent.yaml"
 
 
 @pytest.mark.core
-@pytest.mark.unit
 def test_max_iterations_enforced():
     """验证 evaluator_agent.yaml 中 max_iterations 等于 500。
 
@@ -38,7 +41,6 @@ def test_max_iterations_enforced():
 
 
 @pytest.mark.core
-@pytest.mark.unit
 def test_evaluator_agent_config_loaded():
     """验证 evaluator_agent.yaml 中 plugins.enabled 包含 task_reminder 且 evaluation_mode 为 true。"""
     config = yaml.safe_load(EVALUATOR_YAML.read_text(encoding="utf-8"))
@@ -48,7 +50,6 @@ def test_evaluator_agent_config_loaded():
 
 
 @pytest.mark.core
-@pytest.mark.unit
 def test_evaluator_agent_tool_ids_available():
     """验证 evaluator_agent.yaml 中 tool_ids 包含评估所需的核心工具。
 
@@ -62,7 +63,6 @@ def test_evaluator_agent_tool_ids_available():
 
 
 @pytest.mark.core
-@pytest.mark.unit
 async def test_event_loop_not_blocked_by_input_adapter():
     """验证 run_in_executor 不会阻塞事件循环，其他 async 任务可并发执行。
 
@@ -93,30 +93,3 @@ async def test_event_loop_not_blocked_by_input_adapter():
 
     result = await read_future
     assert result == "test input"
-
-
-@pytest.mark.core
-@pytest.mark.unit
-async def test_pipeline_state_passed_through():
-    """验证 build_initial_state 的 extra_state 参数正确注入到管道 state。
-
-    通过模块级公开函数 build_initial_state 验证 task_id、workspace 等
-    extra_state 参数被正确合并到管道初始状态字典中。
-    """
-    from pipeline.state_builder import build_initial_state
-
-    state = build_initial_state(
-        user_input="test",
-        agent_config=None,
-        conversation_history=None,
-        pipeline_id="__eval__test",
-        services={},
-        extra_state={
-            "task_id": "__eval__test",
-            "workspace": ".ai_workspaces/test",
-        },
-    )
-
-    assert state["task_id"] == "__eval__test"
-    assert state["workspace"] == ".ai_workspaces/test"
-    assert state["user_input"] == "test"

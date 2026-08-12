@@ -1,26 +1,45 @@
 {
     "id": "human_interaction_tool",
     "name": "Human Interaction Tool",
-    "description": "用户交互 MCP 工具（选择/对话/通知模式）",
-    "version": "1.0.0",
+    "description": "用户交互插件（双角色：LLM 工具 + 交互服务。choice/conversation/notification 三模式）",
+    "version": "2.0.0",
     "plugin_type": "tool",
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
     "capabilities": {
         "tools": [
-            {
-                "name": "human_interaction",
-                "description": "与用户交互（选择/对话/通知模式）"
-            }
+            {"name": "human_interaction", "description": "与用户交互（LLM 工具，choice/conversation/notification）"},
+            {"name": "interaction.send_notification", "description": "发送非阻塞通知（服务能力）"},
+            {"name": "interaction.create_choice", "description": "创建选择模式交互请求（服务能力）"},
+            {"name": "interaction.wait_for_choice", "description": "等待用户选择响应（服务能力）"},
+            {"name": "interaction.respond", "description": "提交交互响应（前端响应回路）"},
+            {"name": "interaction.cancel", "description": "取消交互请求（服务能力）"},
+            {"name": "interaction.get_pending", "description": "获取待处理请求列表（服务能力）"}
         ],
-        "lifecycle_hooks": [
-            "on_load",
-            "on_unload"
+        "lifecycle_hooks": ["on_load", "on_unload"]
+    },
+    "provides": {
+        "capabilities": [
+            {
+                "namespace": "human-interaction",
+                "methods": [
+                    "send_notification",
+                    "create_choice",
+                    "create_conversation",
+                    "wait_for_choice",
+                    "respond",
+                    "cancel",
+                    "get_pending"
+                ],
+                "host": "sidecar",
+                "tool_prefix": "interaction"
+            }
         ]
     },
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 15
+    "priority": 15,
+    "activation": "eager"
 }

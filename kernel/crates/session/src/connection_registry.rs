@@ -42,8 +42,8 @@ impl ConnectionRegistry {
         sink: Arc<dyn EventSink>,
     ) -> Option<Arc<dyn EventSink>> {
         let mut conns = self.connections.write();
-        let old = conns.insert(user_id.to_string(), sink);
-        old // Some(old) 表示踢出了旧连接
+        // insert 返回被替换出的旧连接（Some(old) 表示踢出了旧连接）
+        conns.insert(user_id.to_string(), sink)
     }
 
     /// 查询 user 的当前活跃连接。

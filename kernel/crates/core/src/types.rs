@@ -568,6 +568,14 @@ pub struct MessageRecord {
     /// 前端据此渲染"思考过程"折叠区。仅 role=assistant 且模型输出思考时非空。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// 工具结果消息（role=tool）的执行状态：completed / failed。
+    /// 非 tool 消息为 None。前端刷新后据此（与 error）还原失败态，
+    /// 与流式 tool_result 事件的 success 信号统一。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 工具结果消息（role=tool）的错误文本。status=failed 时非空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// sessions 表记录——会话标签夹（域2，对齐 0.1 SessionModel）。
@@ -1008,6 +1016,15 @@ pub enum StorageError {
     /// IO 错误
     #[error("io error: {0}")]
     Io(String),
+}
+
+/// 自动将 [`rusqlite::Error`] 转为 [`StorageError::Database`]，
+/// 错误消息与历史手写 `map_err(|e| StorageError::Database(e.to_string()))` 完全一致。
+/// 这样调用处可直接用 `?` 自动转换，消除重复样板。
+impl From<rusqlite::Error> for StorageError {
+    fn from(e: rusqlite::Error) -> Self {
+        StorageError::Database(e.to_string())
+    }
 }
 
 // ── 配置驱动的管道配置类型（统一 step 模型）──────────────────

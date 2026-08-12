@@ -17,6 +17,22 @@ export function handleNewMessage(eventData: any) {
     pipelineStore.getState().stopStreaming(threadId)
   }
 
+  // 兜底：new_message 是"本轮完成"的权威信号。若事件的 pipeline_id 字段缺失/
+  // 没解析出（resolvePipelineId 返回 null），上面只按 threadId 清理，会漏掉真正
+  // 在 streaming 的 pipeline（pipeline_id ≠ thread_id）→ streamingState 残留 →
+  // UI 永久卡在"思考中"。这里按 threadId 反查 pipelineSessionMap，把该会话下所有
+  // 仍在 streaming 的 pipeline 一并清掉，保证轮次结束后 UI 一定解除生成态。
+  if (threadId) {
+    const ps = pipelineStore.getState()
+    const psm = (ps as any).pipelineSessionMap || {}
+    const streaming = (ps as any).streamingState || {}
+    for (const [pid, sid] of Object.entries(psm)) {
+      if (sid === threadId && streaming[pid]?.isStreaming) {
+        ps.stopStreaming(pid)
+      }
+    }
+  }
+
   if (!pipelineId) return
 
   const messageId = extractMessageId(eventData)

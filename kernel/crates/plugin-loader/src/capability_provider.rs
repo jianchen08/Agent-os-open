@@ -190,18 +190,18 @@ impl McpBridge {
         self.routes.write().insert(namespace.to_string(), route);
     }
 
-    /// 批量注册——从 manifest 列表的 provides 派生路由。
-    /// tool_prefix 从 namespace 推导（去连字符，如 human-interaction → human_interaction）。
-    /// 若 manifest 里工具名前缀与 namespace 不一致，调用方应单独 add_route 覆盖。
+    /// 批量注册——从 manifest 列表的 provides 派生路由（纯声明式，零硬编码）。
+    ///
+    /// tool_prefix 优先用 manifest `provides.capabilities[].tool_prefix` 显式声明；
+    /// 未声明时从 namespace 派生（连字符转下划线）作为合理默认。
     pub fn add_routes_from_manifests(&self, manifests: &[PluginManifest]) {
         for manifest in manifests {
             let Some(provides) = &manifest.provides else { continue };
             for cap in &provides.capabilities {
-                // 默认推导：namespace 的连字符转下划线作为 tool_prefix。
-                // human-interaction → human_interaction（若 sidecar 工具名是
-                // human_interaction.xxx）；但现有 sidecar 用 interaction.xxx，
-                // 所以调用方需覆盖。这里只提供合理默认。
-                let prefix = cap.namespace.replace('-', "_");
+                let prefix = cap
+                    .tool_prefix
+                    .clone()
+                    .unwrap_or_else(|| cap.namespace.replace('-', "_"));
                 self.add_route(
                     &cap.namespace,
                     CapabilityRoute {
@@ -304,6 +304,7 @@ mod tests {
                     namespace: "human-interaction".to_string(),
                     methods: vec!["create_choice".to_string(), "wait_for_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -330,6 +331,7 @@ mod tests {
                         namespace: "my-cap".to_string(),
                         methods: vec!["do".to_string()],
                         host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                     }],
                 }),
             ),
@@ -352,6 +354,7 @@ mod tests {
                     namespace: "ns1".to_string(),
                     methods: vec!["create_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -374,6 +377,7 @@ mod tests {
                     namespace: "ns1".to_string(),
                     methods: vec!["create_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -428,6 +432,7 @@ mod tests {
                     namespace: "human-interaction".to_string(),
                     methods: vec!["create_choice".to_string(), "wait_for_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -467,6 +472,7 @@ mod tests {
                     namespace: "ns1".to_string(),
                     methods: vec!["allowed".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -492,6 +498,7 @@ mod tests {
                     namespace: "dynamic-from-manifest".to_string(),
                     methods: vec!["m1".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -618,6 +625,7 @@ mod tests {
                     namespace: "my-cap".to_string(),
                     methods: vec!["do".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
+                    tool_prefix: None,
                 }],
             }),
         )];
@@ -627,5 +635,37 @@ mod tests {
         let r = routes.get("my-cap").unwrap();
         assert_eq!(r.plugin_id, "my_service");
         assert_eq!(r.tool_prefix, "my_cap", "连字符应转下划线");
+    }
+
+    #[test]
+    fn test_add_routes_uses_explicit_tool_prefix_from_manifest() {
+        // manifest 显式声明 tool_prefix 时，优先用它（不靠 namespace 推导）。
+        // 这是声明式路由的关键：namespace=human-interaction + tool_prefix=interaction
+        // → 路由到 interaction.<method>，无需内核硬编码。
+        let invoker = Arc::new(MockInvoker {
+            calls: Arc::new(parking_lot::Mutex::new(vec![])),
+            return_result: ToolExecutionResult::success(json!({})),
+        });
+        let bridge = McpBridge::new(invoker);
+        let manifests = vec![make_manifest(
+            "human_interaction_tool",
+            Some(ProvidesCapabilities {
+                capabilities: vec![ProvidedCapability {
+                    namespace: "human-interaction".to_string(),
+                    methods: vec!["create_choice".to_string()],
+                    host: ProvidedCapabilityHost::Sidecar,
+                    tool_prefix: Some("interaction".to_string()),
+                }],
+            }),
+        )];
+        bridge.add_routes_from_manifests(&manifests);
+
+        let routes = bridge.routes.read();
+        let r = routes.get("human-interaction").unwrap();
+        assert_eq!(r.plugin_id, "human_interaction_tool");
+        assert_eq!(
+            r.tool_prefix, "interaction",
+            "显式 tool_prefix 应覆盖 namespace 默认推导"
+        );
     }
 }

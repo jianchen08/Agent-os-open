@@ -7,7 +7,7 @@ import logging
 import os
 from typing import Any
 
-from models import FileTreeNode, Workspace
+from workspace.models import FileTreeNode, Workspace
 
 logger = logging.getLogger(__name__)
 

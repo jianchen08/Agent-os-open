@@ -188,7 +188,7 @@ mod tests {
             MetricType::Counter,
             vec![(1000, 10.0), (2000, 20.0), (3000, 30.0)],
         );
-        let n = store.persist_series(&[s], |l| labels_hash(l)).unwrap();
+        let n = store.persist_series(&[s], labels_hash).unwrap();
         assert_eq!(n, 3);
 
         let hist = store.query_history("p1", "m", 1500, 2500).unwrap();
@@ -202,10 +202,10 @@ mod tests {
     fn test_persist_upsert_replaces() {
         let store = MetricsStore::open_memory().unwrap();
         let s1 = make_view("p1", "m", MetricType::Gauge, vec![(1000, 10.0)]);
-        store.persist_series(&[s1], |l| labels_hash(l)).unwrap();
+        store.persist_series(&[s1], labels_hash).unwrap();
         // 同 (plugin,name,labels_hash,bucket_ts) 写入新值
         let s2 = make_view("p1", "m", MetricType::Gauge, vec![(1000, 99.0)]);
-        store.persist_series(&[s2], |l| labels_hash(l)).unwrap();
+        store.persist_series(&[s2], labels_hash).unwrap();
         let hist = store.query_history("p1", "m", 0, 99999).unwrap();
         assert_eq!(hist.len(), 1, "upsert should replace not duplicate");
         assert_eq!(hist[0].value, 99.0);
@@ -220,7 +220,7 @@ mod tests {
             MetricType::Counter,
             vec![(1000, 10.0), (2000, 20.0)],
         );
-        store.persist_series(&[s], |l| labels_hash(l)).unwrap();
+        store.persist_series(&[s], labels_hash).unwrap();
         let n = store.evict_before(1500).unwrap();
         assert_eq!(n, 1);
         let hist = store.query_history("p1", "m", 0, 99999).unwrap();

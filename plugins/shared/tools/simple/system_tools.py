@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -111,13 +112,21 @@ READ_EXECUTION_DETAIL_SCHEMA: dict[str, Any] = {
     "required": ["pipeline_run_id", "level"],
 }
 
-_storage: Any = None
+# service-registry 能力调用句柄：async fn (method, params) -> Any。
+# 由 server.py / 插件宿主在加载时注入（指向 service-registry 能力句柄的 call 方法）。
+# 未注入时 read_execution_detail 优雅降级返回错误 dict，不崩溃。
+# [来源: docs/tasks Step 5b 复盘系统读内核 trace，替代旧的 ExecutionRecordStorage]
+_capability_caller: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None
 
 
-def set_storage(storage: Any) -> None:
-    """注入 ExecutionRecordStorage 实例。"""
-    global _storage
-    _storage = storage
+def set_capability_caller(fn: Callable[[str, dict[str, Any]], Awaitable[Any]] | None) -> None:
+    """注入 service-registry 能力调用句柄。
+
+    生产环境由 simple/server.py 在插件加载时把 service-registry 能力句柄的
+    call 方法注入进来；测试环境传 AsyncMock。传 None 可重置为未注入（降级）。
+    """
+    global _capability_caller
+    _capability_caller = fn
 
 
 async def read_execution_detail(
@@ -127,131 +136,214 @@ async def read_execution_detail(
     fields: list[str] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """查看管道执行的详细记录。"""
-    if _storage is None:
-        return {"error": "ExecutionRecordStorage 未注入，无法查询执行记录"}
+    """查看管道执行的详细记录（从内核 trace/message 表读取）。
+
+    Step 5b 改造：不再依赖已删除的 ExecutionRecordStorage（YAML），改为经
+    service-registry 能力调用内核 ``messages.list`` / ``traces.list`` 读取
+    真实对话消息与插件轨迹。
+
+    Args:
+        pipeline_run_id: 管道运行 ID（映射到内核 messages.pipeline_id 主键）。
+        level: 抽象层级：
+            - ``skeleton``：骨架——每条消息一行（``[seq N] role: preview``），
+              附插件 step 轨迹（若 traces 可查）。
+            - ``L1``：按对话轮次（turn）压缩——每遇到一条 role=user 开新轮次，
+              把后续 assistant/tool 聚合进同一轮。
+            - ``L0``：原始记录——返回完整 content_preview + tool_calls_json 等。
+        iteration: 旧参数（按 iteration 过滤）。新版内核消息表无 iteration 字段，
+            只有 seq_in_branch；为向后兼容保留，传入时映射为「第 iteration 个轮次」
+            （1-based），用以框定 L1/L0 的轮次范围。None 表示不按轮次过滤。
+        fields: L0 层字段过滤（保留兼容；当前实现返回全字段）。
+    """
+    if _capability_caller is None:
+        return {"error": "capability 未注入，无法查询内核执行记录"}
 
     if not pipeline_run_id:
         return {"error": "pipeline_run_id 不能为空"}
     if not level:
         return {"error": "level 不能为空"}
 
-    _storage._ensure_loaded(pipeline_run_id)
+    messages = await _fetch_messages(pipeline_run_id)
+    if isinstance(messages, dict) and "error" in messages:
+        return messages
 
     if level == "skeleton":
-        records = _storage.list_by_pipeline(pipeline_run_id)[0]
-        if not records:
-            return {"error": f"未找到管道 {pipeline_run_id} 的执行记录"}
+        return _render_skeleton(pipeline_run_id, messages)
 
-        lines: list[str] = []
-        for record in records:
-            parts = [f"[iter {record.iteration}]", record.type]
-            if record.name:
-                parts.append(record.name)
-            line_head = " ".join(parts)
-            if record.type == "user":
-                content_str = _safe_content_to_str(record.content).replace("\n", " ").strip()
-                line = f"{line_head}: {content_str}" if content_str else line_head
-            else:
-                line = line_head
-                preview = _safe_content_to_str(record.content)[:50].replace("\n", " ").strip()
-                if preview:
-                    line += f" {preview}"
-                if record.error:
-                    line += f" -> error: {record.error[:50]}"
-            lines.append(line)
+    if level == "L1":
+        turns = _group_turns(messages)
+        if iteration is not None:
+            # 1-based：iteration=1 → 第 1 轮；越界返回错误
+            if iteration < 1 or iteration > len(turns):
+                return {"error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）"}
+            turns = [turns[iteration - 1]]
+        return _render_l1(pipeline_run_id, turns)
 
-        return {
-            "pipeline_run_id": pipeline_run_id,
-            "level": "skeleton",
-            "total_records": len(records),
-            "iterations": sorted({r.iteration for r in records}),
-            "lines": lines,
-        }
-
-    if level in ("L1", "L0"):
-        if iteration is None:
-            return {"error": f"{level} 层需要指定 iteration 参数"}
-
-        all_records = _storage.list_by_pipeline(pipeline_run_id)[0]
-        target_records = [r for r in all_records if r.iteration == iteration]
-        if not target_records:
-            return {"error": f"未找到 iteration={iteration} 的执行记录"}
-
-        if level == "L1":
-            ai_records = [r for r in target_records if r.type == "ai"]
-            tool_records = [r for r in target_records if r.type == "tool"]
-            user_records = [r for r in target_records if r.type in ("user", "human")]
-            error_records = [r for r in target_records if r.error]
-
-            summary = {
-                "iteration": iteration,
-                "user_inputs": [
-                    {"type": r.type, "content_preview": (r.content or "")[:300]}
-                    for r in user_records
-                ],
-                "ai_actions": [
-                    {
-                        "type": r.type,
-                        "content_preview": (r.content or "")[:200],
-                        "thinking_preview": (r.thinking_content or "")[:200],
-                    }
-                    for r in ai_records
-                ],
-                "tool_calls_summary": [
-                    {"name": r.name, "result_preview": (r.content or "")[:200]}
-                    for r in tool_records
-                ],
-                "errors": [
-                    {"name": r.name, "error": (r.error or "")[:200]} for r in error_records
-                ],
-            }
-            return {
-                "pipeline_run_id": pipeline_run_id,
-                "level": "L1",
-                "iteration": iteration,
-                "record_count": len(target_records),
-                "summary": summary,
-            }
-
-        # L0
-        if fields is None:
-            fields = ["all"]
-        if "all" in fields:
-            fields = ["all"]
-
-        filtered_records = []
-        for record in target_records:
-            filtered = {
-                "record_id": record.record_id,
-                "iteration": record.iteration,
-                "sequence": record.sequence,
-                "type": record.type,
-                "name": record.name,
-            }
-            if "all" in fields:
-                filtered["role"] = record.role
-                filtered["content"] = _truncate_text(record.content, _CONTENT_MAX_LEN)
-                filtered["thinking_content"] = record.thinking_content
-                filtered["error"] = record.error
-            else:
-                if "thinking" in fields and record.thinking_content:
-                    filtered["thinking_content"] = record.thinking_content
-                if "content" in fields and record.content:
-                    filtered["content"] = _truncate_text(record.content, _CONTENT_MAX_LEN)
-                if "error" in fields and record.error:
-                    filtered["error"] = record.error
-            filtered_records.append(filtered)
-
-        return {
-            "pipeline_run_id": pipeline_run_id,
-            "level": "L0",
-            "iteration": iteration,
-            "record_count": len(filtered_records),
-            "records": filtered_records,
-        }
+    if level == "L0":
+        records = _select_l0_records(messages, iteration)
+        if isinstance(records, dict) and "error" in records:
+            return records
+        return _render_l0(pipeline_run_id, records)
 
     return {"error": f"不支持的 level: {level}"}
+
+
+async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[str, Any]:
+    """经 service-registry 调用 messages.list，返回内核消息记录列表。
+
+    返回的每条记录字段对齐 kernel/crates/core/src/types.rs MessageRecord：
+    message_id / run_id / branch_id / seq_in_branch / role / content_preview /
+    tool_calls_json / tool_call_id / reasoning_content / created_at / pipeline_id。
+    能力调用失败时返回降级错误 dict（不抛异常）。
+    """
+    assert _capability_caller is not None  # 由调用方前置校验保证
+    try:
+        result = await _capability_caller(
+            "messages.list",
+            {"pipeline_id": pipeline_run_id, "limit": 500},
+        )
+    except Exception as exc:  # noqa: BLE001 — 内核调用失败统一降级，不崩 read_execution_detail
+        logger.warning(
+            "[read_execution_detail] messages.list 调用失败 pipeline=%s: %s",
+            pipeline_run_id,
+            exc,
+        )
+        return {"error": f"内核 messages.list 调用失败: {exc}"}
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict) and isinstance(result.get("messages"), list):
+        return result["messages"]
+    return []
+
+
+def _render_skeleton(
+    pipeline_run_id: str, messages: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """渲染 skeleton 层：每条消息一行骨架。
+
+    行格式 ``[seq N] role: preview``，preview 取 content_preview（截断 80 字符、
+    折叠换行）。空消息仅输出 ``[seq N] role``。
+    """
+    lines: list[str] = []
+    for msg in messages:
+        seq = msg.get("seq_in_branch")
+        role = msg.get("role", "?")
+        preview = _safe_content_to_str(msg.get("content_preview")).replace("\n", " ").strip()
+        preview = preview[:80]
+        if preview:
+            lines.append(f"[seq {seq}] {role}: {preview}")
+        else:
+            lines.append(f"[seq {seq}] {role}")
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "level": "skeleton",
+        "total_records": len(messages),
+        "lines": lines,
+    }
+
+
+def _group_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """把消息序列按对话轮次分组。
+
+    规则：每条 role=user 消息开启一个新轮次；其后的 assistant/tool 消息归入该轮，
+    直到下一条 user 消息。首条非 user 消息（无前置 user）独占一轮。
+    """
+    turns: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] | None = None
+    for msg in messages:
+        role = msg.get("role")
+        if role == "user" or current is None:
+            current = []
+            turns.append(current)
+        current.append(msg)
+    return turns
+
+
+def _render_l1(
+    pipeline_run_id: str, turns: list[list[dict[str, Any]]]
+) -> dict[str, Any]:
+    """渲染 L1 层：按轮次压缩摘要。
+
+    每轮摘要含 turn 序号（1-based）、起止 seq、user 输入预览、assistant 回复预览、
+    tool 调用计数。
+    """
+    rendered = []
+    for idx, turn in enumerate(turns, start=1):
+        seqs = [m.get("seq_in_branch") for m in turn if m.get("seq_in_branch") is not None]
+        user_msgs = [m for m in turn if m.get("role") == "user"]
+        ai_msgs = [m for m in turn if m.get("role") == "assistant"]
+        tool_msgs = [m for m in turn if m.get("role") == "tool"]
+        rendered.append({
+            "turn": idx,
+            "seq_range": [min(seqs), max(seqs)] if seqs else [],
+            "user_inputs": [
+                {"content_preview": _safe_content_to_str(m.get("content_preview"))[:300]}
+                for m in user_msgs
+            ],
+            "ai_actions": [
+                {
+                    "content_preview": _safe_content_to_str(m.get("content_preview"))[:200],
+                    "reasoning_preview": _safe_content_to_str(m.get("reasoning_content"))[:200],
+                }
+                for m in ai_msgs
+            ],
+            "tool_calls_count": len(tool_msgs),
+        })
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "level": "L1",
+        "turn_count": len(rendered),
+        "turns": rendered,
+    }
+
+
+def _select_l0_records(
+    messages: list[dict[str, Any]], iteration: int | None
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """按 iteration（轮次，1-based）筛选 L0 原始记录；None 表示返回全部。"""
+    if iteration is None:
+        return messages
+    turns = _group_turns(messages)
+    if iteration < 1 or iteration > len(turns):
+        return {"error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）"}
+    return turns[iteration - 1]
+
+
+def _render_l0(
+    pipeline_run_id: str, records: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """渲染 L0 层：返回完整 content_preview + tool_calls_json 等原始字段。"""
+    filtered: list[dict[str, Any]] = []
+    for msg in records:
+        item: dict[str, Any] = {
+            "message_id": msg.get("message_id"),
+            "run_id": msg.get("run_id"),
+            "branch_id": msg.get("branch_id"),
+            "seq_in_branch": msg.get("seq_in_branch"),
+            "role": msg.get("role"),
+            "content": _truncate_text(
+                _safe_content_to_str(msg.get("content_preview")), _CONTENT_MAX_LEN
+            ),
+            "created_at": msg.get("created_at"),
+        }
+        tool_calls_json = msg.get("tool_calls_json")
+        if tool_calls_json:
+            item["tool_calls_json"] = tool_calls_json
+        tool_call_id = msg.get("tool_call_id")
+        if tool_call_id:
+            item["tool_call_id"] = tool_call_id
+        reasoning = msg.get("reasoning_content")
+        if reasoning:
+            item["reasoning_content"] = reasoning
+        filtered.append(item)
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "level": "L0",
+        "record_count": len(filtered),
+        "records": filtered,
+    }
 
 
 def _truncate_text(text: str | None, max_len: int) -> str | None:

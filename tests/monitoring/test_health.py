@@ -9,8 +9,12 @@
 
 from __future__ import annotations
 
+import pytest
 
-from monitoring.health import HealthChecker, liveness_probe, readiness_probe
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+
+from health import HealthChecker, liveness_probe, readiness_probe
 
 
 class TestHealthChecker:

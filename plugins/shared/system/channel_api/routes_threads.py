@@ -57,7 +57,7 @@ def _destroy_session_container(workspace: str | None) -> None:
 
 import contextlib  # noqa: E402
 
-from memory_store import _parse_iso_time, store  # noqa: E402
+from memory_store import SessionModel, _parse_iso_time, store  # noqa: E402
 from models import (  # noqa: E402
     ThreadCreate,
     ThreadResponse,
@@ -89,6 +89,10 @@ def _get_task_service() -> Any:
 def _safe_get_service(service_name: str) -> Any:
     """通过 ServiceProvider 安全获取服务实例，失败时返回 None。"""
     try:
+        from infrastructure.service_provider import (  # noqa: PLC0415
+            get_service_provider,
+        )
+
         return get_service_provider().get(service_name)
     except Exception:
         return None
@@ -279,9 +283,9 @@ def create_thread(
 
     _recovered_user_ids.discard(_user["sub"])
 
-    # 桥接基础设施层：以 thread_id 作为 session_id 创建 SessionModel
+    # 以 thread_id 作为 session_id 直接构造 SessionModel（无需基础设施 session 服务）
 
-    session = _session_svc.create(
+    session = SessionModel(
         channel_type="web",
         channel_ref=thread["id"],
         session_id=thread["id"],
@@ -462,8 +466,7 @@ def delete_thread(  # noqa: PLR0912
     _recovered_user_ids.discard(_user["sub"])
 
     # 迭代式收集关联管道（以 all_pipeline_ids 中每个 ID 匹配直到不动点）。
-    # 历史：曾通过 ExecutionRecordStorage._pipeline_root_map 补全子管道，
-    # 0.2 架构下 YAML 存储已废弃（内核 SQLite 接管），此处仅靠 task_service 收集。
+    # 0.2 架构下仅靠 task_service 收集（内核 SQLite 接管，YAML 存储已废弃）。
 
     all_pipeline_ids = set(pipeline_ids)
 
@@ -628,6 +631,10 @@ def update_thread_agent(
 
         agent_registry = get_global_agent_registry_sync()
         if agent_registry.get(agent_id) is None:
+            from infrastructure.service_provider import (  # noqa: PLC0415
+                get_service_provider,
+            )
+
             provider = get_service_provider()
             fallback = provider.get("agent_registry") if provider else None
             agent_registry = fallback or agent_registry

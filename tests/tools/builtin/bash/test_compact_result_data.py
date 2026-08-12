@@ -8,7 +8,11 @@
 
 from __future__ import annotations
 
-from tools.builtin.bash.tool import BashTool
+import pytest
+
+from tool import BashTool
+
+pytestmark = pytest.mark.unit
 
 
 def test_short_output_no_summary_field():
@@ -29,21 +33,23 @@ def test_short_output_no_summary_field():
 
 
 def test_long_output_includes_summary_field():
-    """长输出（>10 行）应带 summary 字段。"""
-    output = "\n".join(f"line {i}" for i in range(20))
+    """长输出（>SHORT_OUTPUT_CHAR_THRESHOLD 字符）应带 summary 字段。"""
+    # 0.2 阈值改为按字符数（SHORT_OUTPUT_CHAR_THRESHOLD=2000），不再按行数。
+    # 构造一段明确超过阈值的输出以触达"长输出"分支。
+    output = "x" * (BashTool.SHORT_OUTPUT_CHAR_THRESHOLD + 100)
     data = BashTool._compact_result_data(
         pid=456,
         output=output,
         summary_obj={
             "warnings": [],
             "errors": [],
-            "summary": ["[20行]", "类型: 通用命令", "警告: 0, 错误: 0"],
+            "summary": ["[长输出]", "类型: 通用命令", "警告: 0, 错误: 0"],
         },
         exit_code=0,
     )
 
     assert "summary" in data
-    assert "[20行]" in data["summary"]
+    assert "[长输出]" in data["summary"]
 
 
 def test_empty_warnings_errors_omitted():

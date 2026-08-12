@@ -16,8 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from tools.builtin.bash.process_manager import LocalProcessBackend, ProcessManager
-from tools.builtin.bash.types import ProcessInfo, WorkUnit
+# 0.2 架构：bash 工具位于 plugins/shared/tools/bash（平铺 import）。
+_BASH_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "tools" / "bash")
+if _BASH_DIR not in sys.path:
+    sys.path.insert(0, _BASH_DIR)
+
+from bash_types import ProcessInfo, WorkUnit  # noqa: E402
+from process_manager import LocalProcessBackend, ProcessManager  # noqa: E402
+
+pytestmark = pytest.mark.integration
 
 
 def _is_windows() -> bool:

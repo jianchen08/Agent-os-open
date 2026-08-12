@@ -1,0 +1,7 @@
+# Hindsight memory sidecar dependencies.
+#
+# hindsight-all-slim provides the embedded (internal pg0, no Docker) agent
+# memory library. It is imported lazily inside server.py so the sidecar can
+# boot even when the package is absent (degrade-to-error-dict mode), and tests
+# run without installing it (client is mocked).
+hindsight-all-slim

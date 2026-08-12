@@ -449,7 +449,7 @@ pub async fn logout_handler(
 /// - 生成 uuid user_id，一用户一租户（tenant_id = user_id）
 /// - 明文密码存储（DEBT: 0.5.0 替换为哈希）
 /// - 重名检查查 DB（跨租户全局唯一）+ 内置 admin
-/// - 无 store 时回退旧逻辑（签发 admin token），兼容 AppState::new() 测试
+/// - 无 store 时返回 503（生产路径 store 恒非空）；测试用 app_with_store() 注入内存 store
 pub async fn register_handler(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
@@ -501,20 +501,12 @@ pub async fn register_handler(
         }));
     }
 
-    // 无 store（测试场景）：回退旧逻辑，签发 admin token
-    let user = default_users()
-        .into_iter()
-        .find(|u| u.username == "admin")
-        .unwrap();
-    let access_token = encode_token(TokenType::Access, &user, ACCESS_TOKEN_TTL_SECS);
-    let refresh_token = encode_token(TokenType::Refresh, &user, REFRESH_TOKEN_TTL_SECS);
-
-    Ok(Json(TokenResponse {
-        access_token,
-        refresh_token,
-        token_type: "bearer".to_string(),
-        expires_in: ACCESS_TOKEN_TTL_SECS,
-    }))
+    // 无 store：生产路径不可达（AppState::with_plugins 必传非空 store）。
+    // 测试请用 app_with_store() 注入内存 store（无 store 注册已回归测试为 503）。
+    // 禁止回退签发 admin token——那是测试逻辑泄漏进生产二进制的安全 footgun。
+    Err(ApiError::ServiceUnavailable {
+        message: "存储后端未初始化，无法注册用户".to_string(),
+    })
 }
 
 // ─── WS 握手鉴权（task_11 P2：session crate 复用） ────────────────
@@ -568,7 +560,7 @@ fn is_access_token(token: &str) -> bool {
         .ok();
     let payload = decoded.and_then(|b| String::from_utf8(b).ok());
     match payload {
-        Some(s) => s.splitn(4, ':').next() == Some("access"),
+        Some(s) => s.split(':').next() == Some("access"),
         None => false,
     }
 }
@@ -921,12 +913,39 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// 无 store 时注册应返回 503（生产路径 store 恒非空，无 store = 配置错误），
+    /// 而非回退签发 admin token（测试逻辑泄漏进生产二进制的安全 footgun）。
     #[tokio::test]
-    async fn test_register_new_user_returns_token() {
+    async fn test_register_without_store_returns_503_not_admin_token() {
         let body =
             json!({"username": "newuser", "password": "password12345", "email": "new@test.com"})
                 .to_string();
         let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "无 store 时注册应 503，而非签发 admin token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_new_user_returns_token() {
+        // register 是 store 操作：用 app_with_store 走真实注册路径（无 store 已改为 503）。
+        let (app, _store) = app_with_store().await;
+        let body =
+            json!({"username": "newuser", "password": "password12345", "email": "new@test.com"})
+                .to_string();
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1130,7 +1149,7 @@ mod tests {
 
         // resolve_tenant_id_by_user 应返回 eve 的真实 tenant（= user_id，非 default）
         let (user_id, _, _) = decode_token(token).unwrap();
-        let store_opt: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>> = None; // 测试直接用 _store
+        let _store_opt: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>> = None; // 测试直接用 _store
         // 用内置函数验证：find_user_by_id 需 store，这里用 get_user_by_username 间接
         // eve 的 tenant_id 应 ≠ DEFAULT_TENANT_ID（一用户一租户）
         assert_ne!(

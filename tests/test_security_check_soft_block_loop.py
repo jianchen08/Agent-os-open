@@ -20,12 +20,16 @@
 """
 
 from __future__ import annotations
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("input", "security_check")
 
 from unittest.mock import MagicMock
 
 import pytest
 
 from pipeline.plugin import PluginContext
+
+pytestmark = pytest.mark.unit
 
 
 def _ctx_with_traversal_path(
@@ -69,7 +73,7 @@ class TestSoftBlockWritesPairedToolMessage:
     @pytest.mark.asyncio
     async def test_soft_block_appends_tool_message_with_call_id(self):
         """路径遍历被拦 → messages 末尾必须有 role=tool 且 tool_call_id 配对。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         ctx = _ctx_with_traversal_path(call_id="call_fix_1")
@@ -89,7 +93,7 @@ class TestSoftBlockWritesPairedToolMessage:
     @pytest.mark.asyncio
     async def test_soft_block_preserves_existing_messages(self):
         """_soft_block 在已有 messages 基础上追加，不破坏历史。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         existing = [
@@ -110,7 +114,7 @@ class TestSoftBlockWritesPairedToolMessage:
     @pytest.mark.asyncio
     async def test_soft_block_clears_raw_tool_calls(self):
         """软拦截后 raw_tool_calls 必须清空（防止 tool_core 重复执行）。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         ctx = _ctx_with_traversal_path()
@@ -133,7 +137,7 @@ class TestSoftBlockRepeatThreshold:
     @pytest.mark.asyncio
     async def test_below_threshold_does_not_end(self):
         """连续被拦 < 阈值（3）→ 不终止，仍走 soft_block 反馈（让模型改正）。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         # 同一签名连拦 2 次（< 阈值 3）
@@ -147,7 +151,7 @@ class TestSoftBlockRepeatThreshold:
     @pytest.mark.asyncio
     async def test_at_threshold_ends_pipeline(self):
         """同一签名连续被拦达阈值（3）→ 设 ENDED 终止管道并上报。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         result = None
@@ -169,7 +173,7 @@ class TestSoftBlockRepeatThreshold:
         模型从路径遍历 A 改成路径遍历 B（不同路径）是"在尝试改正"，
         不应被上限误杀。
         """
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         # 路径 A 拦 2 次
@@ -187,7 +191,7 @@ class TestSoftBlockRepeatThreshold:
     @pytest.mark.asyncio
     async def test_threshold_configurable(self):
         """reject_threshold 可通过 config 配置。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(
             config={"enabled": True, "rules": [], "reject_threshold": 2},

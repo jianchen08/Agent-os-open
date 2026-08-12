@@ -133,23 +133,28 @@ jobs:
           cargo test --all 2>&1 | tee /tmp/rust_test_output.txt
           python ../scripts/check_rust_test_baseline.py
 
-  # ── E2E Manual (热加载/用户旅程实测, 需 kernel+LLM, 手动触发) ─────────────
-  # 这些测试需要启动 0.2 kernel + 0.1 服务 + 真实 LLM key，不适合每次 PR 跑。
-  # 用 workflow_dispatch 手动触发，或本地直接运行：
-  #   python tests/manual/test_0_2_hot_reload.py            # 0.2 热加载
-  #   python tests/manual/test_0_1_hot_reload.py            # 0.1 热加载
-  #   python tests/manual/test_user_journey_compare.py      # 0.1 vs 0.2 对照
+  # ── E2E Manual（手动触发占位，不跑测试）─────────────────────────────────
+  # 注意：本 job 是 workflow_dispatch 占位——**不执行任何测试**，仅打印手动/本地
+  # 运行说明。真正的热加载/用户旅程脚本需 0.2 kernel + 0.1 服务 + 真实 LLM key，
+  # 不适合在 CI 自动跑。请用以下方式执行：
+  #   - 本地：python tests/manual/test_0_2_hot_reload.py        # 0.2 热加载
+  #           python tests/manual/test_0_1_hot_reload.py        # 0.1 热加载
+  #           python tests/manual/test_user_journey_compare.py  # 0.1 vs 0.2 对照
+  #   - 核心热加载逻辑（零 LLM 依赖）由 rust-test job 的单测覆盖。
+  # 若要让本 job 真正联网跑 manual 脚本，需把下方 echo 换成实际执行命令并配置
+  # kernel/LLM 环境与凭据；在此之前切勿将其列为合并必需门禁（否则等于假门禁）。
   e2e-manual:
-    name: E2E Manual (热加载/用户旅程, 手动触发)
+    name: E2E Manual (占位/不跑测试, 手动触发)
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - name: Document
+      - name: Print manual run instructions (此 job 不执行测试)
         run: |
-          echo "本 job 仅在手动触发时运行（需 kernel + LLM 环境）。"
-          echo "本地运行方式见 tests/manual/ 下三个脚本的文档头。"
+          echo "本 job 是手动触发占位，不执行任何测试（原 echo 步骤已如实标注）。"
+          echo "热加载/用户旅程脚本需 kernel + LLM 环境，请本地运行 tests/manual/ 下脚本（见其文档头）。"
           echo "核心热加载逻辑已由 rust-test job 的单测覆盖（零 LLM 依赖）。"
+
 
   # ── Python Lint ────────────────────────────────────────────
   python-lint:
@@ -201,7 +206,7 @@ jobs:
       - name: Run tests
         run: pytest -v
 
-  # ── Python Plugins Test（插件体系 + 全插件 E2E 冒烟矩阵）────────────────
+  # ── Python Plugins Test（插件体系 + 全插件 E2E 冒烟矩阵 + tests/ 顶层有价值测试）──
   # 覆盖：
   #   1. 全部插件测试（system/tools/pipeline 目录下的 test_*.py）
   #   2. tests/plugins/ 冒烟矩阵：94 个插件（85 sidecar + 8 external_mcp + 1 native）
@@ -209,6 +214,10 @@ jobs:
   #      （见 tests/plugins/plugin_probe.py）
   #   3. MCP 服务（bing-search/demo-tools/llm-sidecar）与 skills 清单校验
   #   4. tests/suites/ 插件单元测试矩阵（plugins + m6_plugins：路径修复 + 接口同步）
+  #   5. tests/ 顶层有价值回归/安全/时序测试（P0 回归、isolation、security_check、
+  #      llm_timeout、track 契约、process_watchdog）——此前未进 CI，现纳入。
+  # marker 过滤：排除需要真实外部服务（API/Redis/DB/bwrap）的测试；manual/ 已由
+  # tests/conftest.py collect_ignore 排除（手动脚本，非 CI）。
   # PYTHONPATH 与本地开发一致：plugins（插件）+ sdk（SDK 源码）
   python-plugins-test:
     name: Python Plugins Test (pytest)
@@ -221,17 +230,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]" "./plugins/sdk"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - name: Run plugin tests + E2E smoke matrix + suite tests
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # 从 uv.lock 安装根项目依赖（全量锁定、可复现构建），不再 pip 在线解析。
+        # 注：plugins/sdk 是独立包（自身无锁文件、其依赖 mcp 未纳入根 uv.lock），
+        # 故单独 editable 安装以补齐 SDK 源码与其依赖；根依赖（123 包）均由锁文件锁定。
+        run: |
+          uv sync --frozen --extra dev
+          uv pip install -e ./plugins/sdk
+
+      - name: Run plugin tests + E2E smoke matrix + suite tests + tests/ 顶层回归
         env:
           # 0.2 架构：插件运行时依赖 plugins（平铺模块）+ SDK 源码，不再需要 src/
           PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
         run: |
-          python -m pytest -v \
+          uv run --frozen python -m pytest -v \
             plugins/test_system_plugins.py \
             plugins/shared/system/llm/ \
             plugins/shared/system/tasks/ \
@@ -241,7 +259,119 @@ jobs:
             plugins/shared/tools/builtin_tools/tests/ \
             tests/plugins/ \
             tests/suites/plugins/ \
-            tests/suites/m6_plugins/
+            tests/suites/m6_plugins/ \
+            tests/channels/ \
+            tests/test_p0_regression.py \
+            tests/test_security_check_allow_priority.py \
+            tests/test_track_ai_record_id_contract.py \
+            tests/test_track_cost_update_event.py \
+            tests/test_process_watchdog_integration.py \
+            tests/test_isolation_docker_timeout.py \
+            tests/test_isolation_container_self_heal.py \
+            -m "not requires_api and not requires_redis and not requires_db and not requires_bwrap" \
+            --ignore=tests/manual
+
+      # ── Mypy 基线门禁（plugins/shared 类型错误"只减不增"）──────────────────
+      # 此前 scripts/check_mypy_baseline.py 是孤儿——无 CI job 调用，基线锁形同虚设。
+      # 本 step 把它接入：跑 plugins/shared 的 mypy（根 pyproject [tool.mypy] 配置），
+      # 错误数不得超过 .github/mypy-baseline.txt（当前基线 223）；新增类型错误 → 本步失败
+      # → job 红 → 拦截合并。
+      # 复用本 job 已 `uv sync` 装好的 uv.lock 锁定版 mypy（2.2.0），用 `uv run` 调脚本，
+      # 保证 CI 与本地计数口径一致（mypy 版本漂移会让计数不稳）。--explicit-package-bases
+      # 由脚本内部传入（平铺插件架构：88 个同名 server.py 不加此标志会 Duplicate module
+      # 阻断、只报 1 个错，门禁失效）。详见 scripts/check_mypy_baseline.py 头注释。
+      - name: Mypy baseline gate (plugins/shared, 只减不增)
+        run: uv run --frozen python scripts/check_mypy_baseline.py
+
+  # ── Timing Gate（关键时序不变量，独立阻塞 stage，§9.4/§6.4）──────────────
+  # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
+  # 与单元测试 stage 隔离运行（避免真实延迟影响主套件稳定性）；
+  # 失败**直接拦截合并**，与单测同级，禁止降级为 warning 或 `|| true`。
+  # 当前覆盖：isolation docker 超时边界（3）+ rate_limiter 窗口过期边界（2）。
+  # 注：tests/test_llm_timeout_protection.py 暂未纳入——其 SUT
+  #   (pipeline.stream_bridge / channels.websocket.stream_handler) 在 0.2 已移除，
+  #   该文件为 0.1 遗留、当前全量 ModuleNotFoundError，标记会让门禁永久红，待移植后再加。
+  #   tests/test_watchdog_per_process_memory.py 断言的是内存阈值而非时序边界，故未标记。
+  timing:
+    name: Timing Gate (时序不变量, 独立阻塞)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen)
+        # 需要 --extra isolation：isolation 超时测试 patch docker.from_env，
+        # 需 docker 包（已在 uv.lock 内锁定）。其余根依赖亦由 lock 全量锁定。
+        run: uv sync --frozen --extra dev --extra isolation
+
+      - name: Run timing tests (-m timing)
+        env:
+          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
+        run: |
+          uv run --frozen python -m pytest -m timing \
+            tests/test_isolation_docker_timeout.py \
+            tests/test_rate_limiter.py
+
+  # ── Frontend Test（vitest 单测 + typecheck + lint）─────────────────────
+  # 此前前端 137 单测 0% CI 覆盖（vitest/playwright 基建已备齐却没 job）。
+  # 本 job 接入：typecheck(tsc) + lint(eslint) + vitest 单测。
+  # 注：src/ 现存 lint error（含 1 个 @ts-ignore）按 §9.3 Lint 分层——error=0 阻断；
+  # 若存量 error 阻碍接入，先用 `npm run lint:fix` 清格式类 + 手工修实质 error，
+  # 或临时挂 `continue-on-error` 并开 issue 跟踪，禁止长期放任。
+  frontend-test:
+    name: Frontend Test (tsc + lint + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
+
+  # ── Pre-commit（项目代码质量门禁入口）────────────────────────────────
+  # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"，但此前 CI 从未运行它。
+  # 本 job 让远端 CI 真正执行声明的门禁（ruff + mypy + 基础检查）。
+  pre-commit:
+    name: Pre-commit (ruff + mypy + 基础检查)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
 
   # ── TDD Gate（变更必有测试）─────────────────────────────────
   # PR 中有源码变更时，必须有对应的测试变更（先红后绿）。

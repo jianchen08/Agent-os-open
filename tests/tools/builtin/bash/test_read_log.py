@@ -13,9 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from tools.builtin.bash.process_manager import ProcessManager
-from tools.builtin.bash.tool import BashTool
-from tools.builtin.bash.types import ProcessInfo
+from bash_types import ProcessInfo
+from process_manager import ProcessManager
+from tool import BashTool
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture

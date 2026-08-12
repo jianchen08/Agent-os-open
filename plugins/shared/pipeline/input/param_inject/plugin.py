@@ -144,7 +144,9 @@ class ParamInjectPlugin(IInputPlugin):
                     # 兜底修复：用 repair_json_string 尽量保住完整字段（含半截 content），
                     # 避免直接 raw_args={} 把半截内容全部丢失，导致下游验证器/tool_core
                     # 拿不到任何内容，只能返回模糊的 "不支持的操作: None"。
-                    from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
+                    # 经 pipeline 命名空间包解析（plugins/shared 在 sys.path）；
+                    # 原 ``plugins.core...`` 路径不存在。
+                    from pipeline.core.llm_core._message_normalizer import (  # noqa: PLC0415
                         repair_json_string,
                     )
 

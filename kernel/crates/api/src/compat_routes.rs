@@ -512,8 +512,19 @@ pub async fn list_thread_messages_handler(
             "role": rec.role,
             "content": content,
             "timestamp": rec.created_at,
-            "status": "completed",
+            // 工具结果状态：用持久化的真实值（completed/failed），不再硬编码。
+            // 非 tool 消息无 status 列值 → 回退 completed（保持历史行为）。
+            // 与流式 tool_result 事件的 success 信号统一，前端刷新后可还原失败态。
+            "status": rec.status.clone().unwrap_or_else(|| "completed".to_string()),
         });
+        // 工具失败文本：role=tool 且 status=failed 时附带，前端据此与流式渲染保持一致。
+        if let Some(err) = rec.error.as_deref() {
+            if !err.is_empty() {
+                msg.as_object_mut()
+                    .expect("msg is object")
+                    .insert("error".into(), Value::String(err.to_string()));
+            }
+        }
         // 工具调用相关：assistant 的 tool_calls（反序列化为数组）、tool 消息的 tool_call_id。
         // 分层持久化补全：让前端能还原完整多轮工具调用对话，而非只存扁平文本。
         // 字段名 camelCase 对齐前端 BackendMessageResponse（toolCalls / toolCallId）。

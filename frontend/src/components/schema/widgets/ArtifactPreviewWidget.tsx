@@ -9,6 +9,7 @@
 
 import React from 'react'
 import { FileText, Image as ImageIcon, FileCode, File, Database } from '@/assets/icons'
+import { CodeBlock, MarkdownRenderer } from '@/components/chat/markdown'
 
 /** 制品类型 */
 type ArtifactKind = 'text' | 'image' | 'code' | 'document' | 'data' | 'composite' | 'file'
@@ -123,18 +124,19 @@ export function ArtifactPreviewWidget(props: Record<string, unknown>) {
             <p className="text-muted-foreground text-xs">图片地址缺失</p>
           )
         ) : kind === 'code' ? (
-          <div>
-            {artifact.language && (
-              <div className="text-muted-foreground mb-1 text-xs">{artifact.language}</div>
-            )}
-            <pre className="text-foreground overflow-auto bg-muted/40 rounded-md p-3 text-xs">
-              <code>{artifact.content ?? ''}</code>
-            </pre>
-          </div>
+          // 复用 CodeBlock（含语法高亮 + 复制 + 语言头），不再用纯 <pre>
+          <CodeBlock
+            code={artifact.content ?? ''}
+            language={artifact.language}
+            // 制品预览嵌在内容区里，CodeBlock 自带外边距会撑出空白，关掉
+            className="my-0"
+          />
         ) : kind === 'data' ? (
-          <pre className="text-foreground overflow-auto bg-muted/40 rounded-md p-3 text-xs">
-            <code>{artifact.content ?? ''}</code>
-          </pre>
+          // JSON 走 CodeBlock 高亮（language='json'），统一代码展示体验
+          <CodeBlock code={artifact.content ?? ''} language="json" className="my-0" />
+        ) : kind === 'document' ? (
+          // document 类型当 markdown 源渲染（复用 streamdown MarkdownRenderer）
+          <MarkdownRenderer content={artifact.content ?? ''} />
         ) : (
           <p className="text-foreground whitespace-pre-wrap break-words text-sm">
             {artifact.content ?? ''}

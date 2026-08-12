@@ -302,6 +302,37 @@ async def memory_summarize(
     return {"summary": summary.strip(), "count": len(recent)}
 
 
+@plugin.tool(
+    name="memory.compress",
+    schema={
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "完整的压缩 prompt（含待压缩对话+背景）"},
+            "max_tokens": {"type": "integer", "default": 8000, "minimum": 100, "maximum": 32000},
+        },
+        "required": ["prompt"],
+    },
+    description="LLM-based compression/summarization — produces structured JSON (L1/L2/keywords/state_snapshot/memory_items)",
+)
+async def memory_compress(prompt: str, max_tokens: int = 8000) -> dict[str, Any]:
+    """LLM 压缩/摘要——由 compression 插件（context_window_guard）调用生成 L1/L2 摘要。
+
+    chat key 未配置或调用失败时降级返回空摘要（调用方据此回退）。
+    成功时返回原始响应文本，由调用方解析其中的结构化 JSON。
+    """
+    if _llm is None or not _llm.chat_available:
+        logger.info("[memory.compress] chat key 未配置，降级返回空摘要")
+        return {"summary": "", "degraded": True, "error": "chat key 未配置"}
+
+    try:
+        summary = await asyncio.to_thread(_llm.chat_completion, prompt, max_tokens)
+    except Exception as e:
+        logger.warning("[memory.compress] LLM 压缩失败，降级返回空摘要: %s", e)
+        return {"summary": "", "degraded": True, "error": str(e)}
+
+    return {"summary": summary.strip(), "degraded": False}
+
+
 # 资源暴露（函数式调用——SDK register_resource 签名要求 handler 必填）
 def _episode_resource() -> dict[str, Any]:
     """Expose recent episode memories as MCP resource."""

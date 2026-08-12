@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
-from connectors.registry import ConnectorRegistry
-from connectors.types import ConnectorInfo
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from registry import ConnectorRegistry
+from connector_types import ConnectorInfo
 
 
 def _make_mock_connector(

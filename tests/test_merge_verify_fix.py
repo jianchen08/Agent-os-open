@@ -1,6 +1,8 @@
 """验证合并修复：git_merge 验证（含 diff 基准）+ 重试 + fail_task"""
 from __future__ import annotations
 
+import tests._isolation_path  # noqa: F401
+
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -14,7 +16,7 @@ def git(*args, cwd=None):
 
 
 def _make_lifecycle(project_root: str):
-    from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+    from workspace_lifecycle import WorkspaceLifecycleManager
     task_svc = MagicMock()
     task_svc.get_task.return_value = None
     ws_meta_store = {}

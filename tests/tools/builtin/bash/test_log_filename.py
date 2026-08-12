@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from tools.builtin.bash.process_manager import ProcessManager
+from process_manager import ProcessManager
+
+pytestmark = pytest.mark.unit
 
 
 def test_filename_uses_pid_not_hash(tmp_path):

@@ -65,9 +65,7 @@ pub fn validate_config_path(project_root: &Path, mapping_path: &str) -> Result<P
     }
 
     let config_root = project_root.join("config");
-    let target = if normalized.starts_with("config/") {
-        project_root.join(&normalized)
-    } else if normalized.starts_with("config") {
+    let target = if normalized.starts_with("config/") || normalized.starts_with("config") {
         project_root.join(&normalized)
     } else {
         config_root.join(&normalized)
@@ -83,7 +81,7 @@ pub fn validate_config_path(project_root: &Path, mapping_path: &str) -> Result<P
     // denylist：相对 config/ 根的任一路径段（含文件 stem）不得命中保留名。
     // 如 config/system/plugin_allowlist.yaml → 段含 plugin_allowlist → 拒绝；
     //    config/pipelines/default.yaml → 段含 pipelines → 拒绝。
-    if let Some(rel) = target.strip_prefix(&config_root).ok() {
+    if let Ok(rel) = target.strip_prefix(&config_root) {
         for seg in rel.iter() {
             let s = seg.to_string_lossy();
             let stem = s.split('.').next().unwrap_or(&s);

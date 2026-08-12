@@ -55,8 +55,8 @@ def _install_payload_diag_hook() -> None:
                 # 【关键】不 sort、不 default=str 改写，直接 dumps litellm 返回的原始 dict。
                 # body 是 transform_request 的返回值，litellm 会原样作为 HTTP body 发出，
                 # 所以这里的字段顺序/结构就是真正发给厂商的字节序列。
-                # 之前用 sort_keys=True 重新序列化会掩盖字段顺序差异——而 prefix cache
-                # 是按字节匹配的，字段顺序变了 = 前缀变了 = 缓存失效。
+                # 字段顺序须保留原序：prefix cache 按字节匹配，重排字段 = 前缀变 = 缓存失效，
+                # 故绝不能用 sort_keys 重排。
                 running = ""
                 # 整个 body 的原始字节 hash（含 model/可选参数，服务端可能看完整请求体）
                 body_raw = _json.dumps(body, ensure_ascii=False)
@@ -87,13 +87,42 @@ def _install_payload_diag_hook() -> None:
                         mj[:500],
                     )
                 # 写入原始 body（litellm 真实发送的结构），供逐字节 diff
-                _diag_dir = _os.path.join(_os.getcwd(), "logs", "payload_diag")
+                # 文件名携带元数据：{ts}_{model}_{msgs_hash}_{msg_count}msg.json
+                # 这样前端列目录后无需读文件即可展示列表（时间/模型/消息数）。
+                # 目录从 AGENTOS_LOG_DIR 解析（默认 cwd），避免 cwd 漂移导致目录不在项目根。
+                _diag_dir = _os.path.join(
+                    _os.environ.get("AGENTOS_LOG_DIR", _os.getcwd()),
+                    "logs", "payload_diag",
+                )
                 _os.makedirs(_diag_dir, exist_ok=True)
+
+                def _sanitize_for_filename(s: str) -> str:
+                    """文件名安全化：只保留字母数字下划线连字符，其余转 _，截断 48 字符。"""
+                    import re as _re
+                    return _re.sub(r"[^A-Za-z0-9_-]", "_", str(s))[:48] or "unknown"
+
+                _model_safe = _sanitize_for_filename(model or "unknown")
+                _ts = int(_time.time() * 1000)
+                # 文件名格式：{ts}__{model}__{msgs_hash}__{msg_count}msg.json
+                # 用双下划线 __ 作字段分隔，model 内部单下划线保留（如 deepseek-v4-flash）。
+                # 解析时按 __ split 即可，避免 model 含下划线导致的歧义。
                 _diag_file = _os.path.join(
-                    _diag_dir, f"body_{msgs_hash}_{int(_time.time() * 1000)}.json"
+                    _diag_dir,
+                    f"{_ts}__{_model_safe}__{msgs_hash}__{len(msgs)}msg.json",
                 )
                 with open(_diag_file, "w", encoding="utf-8") as fh:
                     fh.write(body_raw)
+
+                # 写入时惰性清理：目录超过 200 个文件删最老的（调试用，避免无限增长）
+                try:
+                    _files = sorted(
+                        (_os.path.join(_diag_dir, f) for f in _os.listdir(_diag_dir)),
+                        key=_os.path.getmtime,
+                    )
+                    while len(_files) > 200:
+                        _os.remove(_files.pop(0))
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception:  # noqa: BLE001
                 pass
 
@@ -619,7 +648,7 @@ class _BaseLiteLLMAdapter:
 
         # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
         # 透传 **kwargs（即 default_params），adapter 按需读取自身配置
-        from llm.provider_adapters import get_provider_adapter  # noqa: PLC0415
+        from provider_adapters import get_provider_adapter  # noqa: PLC0415
 
         adapter = get_provider_adapter(model)
         messages = adapter.adapt_messages_before_send(messages, **kwargs)

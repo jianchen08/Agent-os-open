@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from agentos_plugin_sdk import AgentOSPlugin
+
+logger = logging.getLogger(__name__)
 
 from converter_tools import (
     BINARY_CONVERTER_SCHEMA,
@@ -74,6 +78,24 @@ def create_plugin() -> AgentOSPlugin:
     plugin.register_tool(
         "register_resource", REGISTER_RESOURCE_SCHEMA, register_resource, "资源注册"
     )
+
+    # 注入 capability_caller：read_execution_detail 经 service-registry 读内核轨迹
+    @plugin.on_load
+    async def _on_load(params: dict) -> None:
+        try:
+            handle = plugin.get_capability("service-registry")
+        except KeyError:
+            logger.warning("[simple_tools] service-registry 能力未注入，read_execution_detail 不可用")
+            return
+        from system_tools import set_capability_caller  # noqa: PLC0415
+
+        async def _call(method: str, params_dict: dict) -> Any:
+            prefix = "service-registry."
+            stripped = method[len(prefix):] if method.startswith(prefix) else method
+            return await handle.call(stripped, params_dict)
+
+        set_capability_caller(_call)
+        logger.info("[simple_tools] capability_caller 已注入")
 
     return plugin
 

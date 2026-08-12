@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401
+
 """容器自愈回归测试。
 
 背景 BUG：容器反复 "container is not running" 卡死，由三处缺陷叠加导致：
@@ -18,9 +20,9 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from isolation.manager import IsolationManager
-from isolation.providers.docker_provider import DockerProvider
-from isolation.types import (
+from manager import IsolationManager
+from providers.docker_provider import DockerProvider
+from isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,
@@ -515,7 +517,7 @@ async def test_destroy_environment_honest_on_rm_failure():
     provider._run_cmd = fake_run
 
     # 注册一个 env 让 destroy 能找到它
-    from isolation.types import IsolationContext
+    from isolation_types import IsolationContext
     env = IsolationEnvironment(
         env_id="cua-ws",
         level=IsolationLevel.CONTAINER,
@@ -542,7 +544,7 @@ async def test_destroy_environment_true_on_rm_success():
     provider = DockerProvider()
     provider._run_cmd = _make_run_cmd(rm_rc=0)[0]
 
-    from isolation.types import IsolationContext
+    from isolation_types import IsolationContext
     env = IsolationEnvironment(
         env_id="cua-ws",
         level=IsolationLevel.CONTAINER,

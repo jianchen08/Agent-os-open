@@ -173,56 +173,66 @@ pub fn build_router_with_http_routes(
     state: crate::routes::AppState,
     static_router: axum::Router<crate::routes::AppState>,
 ) -> axum::Router<crate::routes::AppState> {
-    let Some(registry) = state.capability_registry.clone() else {
-        return static_router;
-    };
-    let Some(handler) = state.http_handler.clone() else {
-        // 无 handler：不挂载插件端点（降级，仅内核静态路由）
-        return static_router;
-    };
+    let registry = state.capability_registry.clone();
+    let handler = state.http_handler.clone();
+    let plugin_dirs = state.plugin_dirs.clone();
 
-    let dispatcher = Arc::new(HttpDispatcher::new(registry.clone(), handler));
-    let routes = registry.list_http_routes();
-
-    // 按 plugin_id 分组，收集每个插件的命名空间前缀。
-    // axum 0.8 的 .route() 不允许同前缀下混合静态段和动态段（如 /tasks 和 /tasks/{id}），
-    // 故改为每插件注册一条通配路由 /ext/{plugin_id}/{*rest}，由 find_http_route 做模板匹配。
-    let mut plugin_prefixes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for route in &routes {
-        // path 形如 /ext/{plugin_id}/...，取前两段作命名空间
-        let segs: Vec<&str> = route.endpoint.path.split('/').collect();
-        if segs.len() >= 3 {
-            // segs = ["", "ext", "{plugin_id}", ...]
-            plugin_prefixes.insert(format!("/{}", segs[1])); // /ext
-        }
+    // 至少要有 dispatcher 资源（registry + handler）或 plugin_dirs（静态资源）才挂通配路由。
+    // 否则保留内核静态路由（兼容 AppState::new() 的旧测试）。
+    let dispatcher: Option<Arc<HttpDispatcher>> = match (registry, handler) {
+        (Some(r), Some(h)) => Some(Arc::new(HttpDispatcher::new(r, h))),
+        _ => None,
+    };
+    let has_static = !plugin_dirs.is_empty();
+    if dispatcher.is_none() && !has_static {
+        return static_router;
     }
 
     let mut router = static_router;
-    // 注册一条 /ext/{*rest} 通配路由，所有 /ext/** 请求统一进 dispatcher。
-    // dispatcher 内部 find_http_route 用模板匹配（支持 {param}/{param:path}）找到对应路由。
-    let wildcard_handler = build_wildcard_handler(dispatcher);
+    // 注册一条 /ext/{*rest} 通配路由，所有 /ext/** 请求统一进 handler。
+    // handler 先尝试静态资源（plugin_dirs 命中 + 文件存在）→ 命中则直接返回；
+    // 否则若有 dispatcher，走 find_http_route 模板匹配插件 http_endpoints；
+    // 都不命中 → 404。
+    let wildcard_handler = build_wildcard_handler(dispatcher, plugin_dirs);
     router = router.route("/ext/{*rest}", wildcard_handler);
     router
 }
 
-/// 构造 /ext/{*rest} 的 axum handler：捕获真实 URI → find_http_route 模板匹配 → dispatch。
+/// 构造 /ext/{*rest} 的 axum handler：先尝试静态资源直读（plugin_dirs 命中），
+/// 否则走 dispatcher（find_http_route 模板匹配 → 插件 http.handle）。
+///
+/// 静态资源优先：`/ext/{plugin_id}/assets/{*rest}` 命中时由内核直接读文件返回，
+/// 不进入 dispatcher。这让插件带完整 SPA（分离的 JS/CSS/图片）无需为每个子资源
+/// 单独声明 http_endpoints。
 fn build_wildcard_handler(
-    dispatcher: Arc<HttpDispatcher>,
+    dispatcher: Option<Arc<HttpDispatcher>>,
+    plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
 ) -> axum::routing::MethodRouter<crate::routes::AppState> {
     use axum::body::Body;
     use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use axum::response::IntoResponse;
 
-    // axum::routing::any 注册——任何 method 都走同一 handler，由 dispatch_http 内部按
-    // find_http_route(path, method) 模板匹配找到对应路由。
+    // axum::routing::any 注册——任何 method 都走同一 handler。
     let handler = move |method: Method,
                          uri: axum::http::Uri,
                          headers: HeaderMap,
                          query: axum::extract::Query<HashMap<String, String>>,
                          body: axum::body::Bytes| {
         let dispatcher = dispatcher.clone();
+        let plugin_dirs = plugin_dirs.clone();
         async move {
             let path = uri.path().to_string();
+
+            // 1) 静态资源直读：命中则直接返回（200 + mime / 404）。
+            if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs) {
+                return resp;
+            }
+
+            // 2) 否则走 dispatcher（若有）。无 dispatcher → 404。
+            let Some(dispatcher) = dispatcher else {
+                return (StatusCode::NOT_FOUND, "route not found").into_response();
+            };
+
             let method_str = method.as_str().to_string();
             let headers_map = header_map_to_hashmap(&headers);
             let raw_body = body.to_vec();
@@ -271,11 +281,138 @@ fn build_wildcard_handler(
     axum::routing::any(handler)
 }
 
+/// 尝试把 `/ext/{plugin_id}/assets/{*rest}` 解析为插件 `web/` 子目录下的文件并直读返回。
+///
+/// 返回：
+/// - `Some(response)` —— 路径形态匹配静态资源（无论命中/未命中/被拒），由调用方直接返回；
+/// - `None` —— 不是静态资源路径形态，或该插件未声明目录，调用方应继续走 dispatcher。
+///
+/// 路径安全：
+/// - 拒绝 `..` 段；
+/// - canonicalize 后必须仍在插件 `web/` 子树内（防 symlink 逃逸）。
+fn try_serve_static_asset(
+    path: &str,
+    plugin_dirs: &HashMap<String, std::path::PathBuf>,
+) -> Option<axum::response::Response> {
+    use axum::body::Body;
+    use axum::http::{HeaderName, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+
+    // 解析 /ext/{plugin_id}/assets/{rest}。
+    let stripped = path.strip_prefix("/ext/")?;
+    let mut iter = stripped.splitn(3, '/');
+    let plugin_id = iter.next()?;
+    let mid = iter.next()?;
+    if mid != "assets" {
+        return None; // 非 assets 子路径：交回 dispatcher
+    }
+    let rest = iter.next().unwrap_or("");
+    // 空路径（/ext/{plugin}/assets 或 /ext/{plugin}/assets/）：交回 dispatcher，
+    // 让插件自己决定要不要给一个 http_endpoint 处理目录索引。
+    if rest.is_empty() {
+        return None;
+    }
+
+    let plugin_dir = plugin_dirs.get(plugin_id)?;
+    // 路径安全：先拒 .. 段（canonicalize 之前），防止 ./.. 逃逸。
+    for seg in rest.split('/') {
+        if seg == ".." {
+            return Some((StatusCode::NOT_FOUND, "not found").into_response());
+        }
+    }
+    let web_root = plugin_dir.join("web");
+    // web/ 不存在 → 此插件不托管静态资源，交回 dispatcher。
+    if !web_root.exists() {
+        return None;
+    }
+
+    let file_path = web_root.join(rest);
+
+    // canonicalize 防 symlink 逃逸：file 必须在 web_root 子树内。
+    let canonical_web = match std::fs::canonicalize(&web_root) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    let canonical_file = match std::fs::canonicalize(&file_path) {
+        Ok(p) => p,
+        Err(_) => {
+            // 文件不存在 → 此路径形态确实归静态资源所有，直接 404（不交回 dispatcher，
+            // 否则 dispatcher 也会 404，但语义上 /assets/** 是静态资源命名空间）。
+            return Some((StatusCode::NOT_FOUND, "not found").into_response());
+        }
+    };
+    if !canonical_file.starts_with(&canonical_web) || !canonical_file.is_file() {
+        return Some((StatusCode::NOT_FOUND, "not found").into_response());
+    }
+
+    let bytes = match std::fs::read(&canonical_file) {
+        Ok(b) => b,
+        Err(_) => return Some((StatusCode::NOT_FOUND, "not found").into_response()),
+    };
+
+    let mime = mime_for_extension(
+        canonical_file.extension().and_then(|s| s.to_str()).unwrap_or(""),
+    );
+
+    let mut builder = axum::response::Response::builder().status(StatusCode::OK);
+    if let (Ok(name), Ok(val)) = (
+        HeaderName::try_from("content-type"),
+        HeaderValue::try_from(mime),
+    ) {
+        builder = builder.header(name, val);
+    }
+    // 静态资源通常可缓存；这里给一个保守的 no-cache（开发期 SPA 热更新友好）。
+    if let (Ok(name), Ok(val)) = (
+        HeaderName::try_from("cache-control"),
+        HeaderValue::try_from("no-cache"),
+    ) {
+        builder = builder.header(name, val);
+    }
+    Some(builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
+    }))
+}
+
+/// 扩展名 → Content-Type 映射表（覆盖常见 web 资源类型）。
+///
+/// 未命中扩展名统一回退到 `application/octet-stream`（浏览器嗅探可识别大部分文本）。
+/// 不引入 mime crate —— 任务范围控制依赖膨胀，常见 web 类型手写映射足够。
+fn mime_for_extension(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "map" => "application/json",
+        "txt" => "text/plain; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "eot" => "application/vnd.ms-fontobject",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "xml" => "application/xml; charset=utf-8",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        _ => "application/octet-stream",
+    }
+}
+
 /// 把 manifest 路径约定（{param}/{param:path}）转成 axum 0.8 路径参数语法（:param/*param）。
 ///
 /// - `{name}` → `:name`（单段捕获）
 /// - `{name:path}` → `*name`（剩余多段通配，axum 0.8 用 `*` 前缀）
 /// - 其他段原样保留。
+#[cfg(test)]
 fn manifest_path_to_axum(manifest_path: &str) -> String {
     manifest_path
         .split('/')
@@ -293,90 +430,6 @@ fn manifest_path_to_axum(manifest_path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
-}
-
-/// 构造一个动态端点的 axum handler：捕获 path/method → 调 dispatch_http → 转 HTTP 响应。
-fn build_dynamic_route_handler(
-    dispatcher: Arc<HttpDispatcher>,
-    path: String,
-    method: String,
-) -> axum::routing::MethodRouter<crate::routes::AppState> {
-    use axum::body::Body;
-    use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-    use axum::response::IntoResponse;
-
-    // 先确定 method 大写形式（供下方 match 选择 axum 方法路由；闭包会 move 原 method）。
-    let method_upper = method.to_ascii_uppercase();
-
-    let handler = move |uri: axum::http::Uri,
-                        headers: HeaderMap,
-                        query: axum::extract::Query<HashMap<String, String>>,
-                        body: axum::body::Bytes| {
-        let dispatcher = dispatcher.clone();
-        let registered_path = path.clone();
-        let method = method.clone();
-        async move {
-            let headers_map = header_map_to_hashmap(&headers);
-            let raw_body = body.to_vec();
-            // 用传入请求的**真实 path**（含 param 实际值，如 /models/gpt-4），
-            // 而非注册模板 path（/models/{model_id}）。这样插件的 http.handle 能拿到真实 param。
-            // uri.path() 已做百分号解码；query 部分由 axum::extract::Query 单独解析。
-            let incoming_path = uri.path().to_string();
-            // dispatch_http 内部 find_http_route 会用 incoming_path 做模板匹配，
-            // 找到对应注册路由（registered_path 仅作调试用，不参与分发）。
-            let _ = &registered_path;
-            let outcome =
-                dispatch_http(&dispatcher, &incoming_path, &method, raw_body, headers_map, query.0)
-                    .await;
-            match outcome {
-                DispatchOutcome::Handled(resp) => {
-                    let mut builder = axum::response::Response::builder().status(
-                        StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK),
-                    );
-                    for (k, v) in &resp.headers {
-                        if let (Ok(name), Ok(val)) =
-                            (HeaderName::try_from(k), HeaderValue::try_from(v))
-                        {
-                            builder = builder.header(name, val);
-                        }
-                    }
-                    let body_bytes = if resp.body.is_empty() {
-                        Vec::new()
-                    } else {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(&resp.body)
-                            .unwrap_or_default()
-                    };
-                    builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "response build failed")
-                            .into_response()
-                    })
-                }
-                DispatchOutcome::NotFound => {
-                    (StatusCode::NOT_FOUND, "route not found").into_response()
-                }
-                DispatchOutcome::Timeout => {
-                    (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
-                }
-                DispatchOutcome::ConcurrencyLimited => {
-                    (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit reached").into_response()
-                }
-                DispatchOutcome::HandlerError(_) => {
-                    (StatusCode::BAD_GATEWAY, "endpoint handler error").into_response()
-                }
-            }
-        }
-    };
-
-    // 按 method 选择 axum 方法路由（method_upper 已在闭包前计算，避免 borrow-after-move）。
-    match method_upper.as_str() {
-        "GET" => axum::routing::get(handler),
-        "POST" => axum::routing::post(handler),
-        "PUT" => axum::routing::put(handler),
-        "DELETE" => axum::routing::delete(handler),
-        "PATCH" => axum::routing::patch(handler),
-        _ => axum::routing::get(handler),
-    }
 }
 
 /// HeaderMap → HashMap<String,String>（多值取首个，key 转小写）。

@@ -5,7 +5,64 @@
  */
 
 import React, { useState, useCallback, useRef } from 'react'
+import type { ReactNode } from 'react'
 import type { FloatingWindowInstance } from '@/types/layout'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { renderPageContent } from '@/components/schema/PageRenderer'
+
+/**
+ * 从 FloatingWindowInstance 解析 pageId
+ *
+ * 优先取 win.props.pageId（WindowManager.openPopout 写入）；
+ * 否则从 win.id 按 `${pageId}-popout-...` 约定拆分。
+ */
+function resolvePageId(win: FloatingWindowInstance): string | undefined {
+  const fromProps = win.props?.pageId
+  if (typeof fromProps === 'string' && fromProps) return fromProps
+  if (typeof win.id === 'string' && win.id.includes('-popout-')) {
+    return win.id.split('-popout-')[0]
+  }
+  return undefined
+}
+
+/**
+ * 渲染悬浮窗内容（阶段5：接通 PageRenderer）
+ *
+ * 分发优先级：
+ * 1. win → pageId → contributionRegistry.getPage → renderPageContent
+ *    （复用 widget/schema 分发，page 内容完整复用）
+ * 2. win.component → widgetRegistry.get（兼容旧 FloatingWindowInstance，
+ *    未走 page 体系直接注册 widget 的场景）
+ * 3. 兜底占位（不崩溃）
+ *
+ * FiveSpaceLayout 把此函数作为 renderContent 传给 FloatingWindowManager。
+ */
+export function renderFloatingWindowContent(win: FloatingWindowInstance): ReactNode {
+  // 1) page 分发：复用 PageRenderer 的 widget/schema/dock 分发链路
+  const pageId = resolvePageId(win)
+  if (pageId) {
+    const page = contributionRegistry.getPage(pageId)
+    if (page) {
+      return renderPageContent(page)
+    }
+  }
+
+  // 2) 兼容旧实例：win.component 直接查 widgetRegistry
+  if (win.component) {
+    const Widget = widgetRegistry.get(win.component)
+    if (Widget) {
+      return <Widget {...(win.props ?? {})} />
+    }
+  }
+
+  // 3) 兜底占位（不崩溃）
+  return (
+    <div className="text-muted-foreground flex h-full items-center justify-center p-4 text-sm">
+      {win.title || win.id} - 内容不可用
+    </div>
+  )
+}
 
 /** 悬浮窗管理器属性 */
 interface FloatingWindowManagerProps {

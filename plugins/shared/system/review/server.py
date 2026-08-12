@@ -16,12 +16,22 @@ agent_id/source 命名沿用 src/memory/maintenance/service.py 约定：
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import sys
 import time
 import uuid
 from typing import Any
 
 from agentos_plugin_sdk import AgentOSPlugin
+
+# hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
+_HINDSIGHT_MEMORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "hindsight_memory"))
+if _HINDSIGHT_MEMORY_DIR not in sys.path:
+    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
+
+from wiring import build_memory_backend  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +48,20 @@ _reports: dict[str, dict[str, Any]] = {}
 # review_id -> 子管道 run_id（供 get_report 查询状态/前端跳转）
 _run_ids: dict[str, str] = {}
 
+# 长期记忆后端（IMemoryBackend），用于把复盘报告持久化到 Hindsight，供跨会话检索/注入。
+# 由插件宿主在加载时注入；未注入时 store_report 仅写内存 _reports（降级，不崩）。
+_memory_backend: Any = None
+
+
+def set_memory_backend(backend: Any) -> None:
+    """注入 IMemoryBackend 实例（HindsightBackend / KernelMemoryBackend）。
+
+    生产环境由 review 插件宿主把 hindsight_memory.get_memory_backend() 产出的
+    后端注入进来；测试环境传 AsyncMock。传 None 可重置为未注入（仅内存路径）。
+    """
+    global _memory_backend
+    _memory_backend = backend
+
 
 async def store_report(review_id: str, report: dict[str, Any]) -> None:
     """内部方法：回写 review_agent 子管道产出的报告。
@@ -46,15 +70,38 @@ async def store_report(review_id: str, report: dict[str, Any]) -> None:
     回调本方法（事件监听接线留 TODO）。当前由 get_report 按需查询 / 外部调用方直接
     注入。不暴露为 MCP 工具（内部 API）。
 
+    落库策略：
+    - 内存：始终写 ``_reports[review_id]``，供 get_report 立即轮询。
+    - 长期记忆：若 ``_memory_backend`` 已注入，调用 ``backend.add`` 把整份报告
+      （JSON）落到 Hindsight，memory_type=``review``，tags 含 ``review_id:<id>`` 与
+      ``review_report``，source=``review_agent``，供后续会话检索/注入。
+
     Args:
         review_id: trigger 阶段分配的复盘 ID。
         report: review_agent 产出的完整报告（lessons/improvements/recommendations 等）。
     """
     existing = _reports.get(review_id, {})
     existing.update(report)
+    existing["review_id"] = review_id
     existing["status"] = "completed"
     existing["updated_at"] = time.time()
     _reports[review_id] = existing
+
+    # 持久化到长期记忆后端（Hindsight）。未注入时降级，仅保留内存路径。
+    if _memory_backend is not None:
+        try:
+            await _memory_backend.add(
+                user_id=existing.get("task_id") or "review",
+                content=json.dumps(existing, ensure_ascii=False),
+                memory_type="review",
+                tags=[f"review_id:{review_id}", "review_report"],
+                source="review_agent",
+            )
+        except Exception as exc:  # noqa: BLE001 — 记忆后端失败不崩复盘回写
+            logger.warning(
+                "[Review] 报告落 Hindsight 失败 review_id=%s: %s", review_id, exc
+            )
+
     logger.info(
         "[Review] 报告已回写 review_id=%s lessons=%d",
         review_id,
@@ -169,7 +216,7 @@ def _local_degrade_report(
 
 
 @plugin.tool(
-    name="review.trigger",
+    name="trigger_review",
     schema={
         "type": "object",
         "properties": {
@@ -264,8 +311,13 @@ async def get_report(review_id: str) -> dict[str, Any]:
 
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
-    """Initialize review service on load."""
-    logger.info("[Review] review_service loaded")
+    """Initialize review service + 注入记忆后端。"""
+    backend = build_memory_backend(plugin)
+    if backend:
+        set_memory_backend(backend)
+        logger.info("[Review] 记忆后端已注入，复盘报告将持久化")
+    else:
+        logger.warning("[Review] 记忆后端未注入，复盘报告仅存内存（降级）")
 
 
 if __name__ == "__main__":

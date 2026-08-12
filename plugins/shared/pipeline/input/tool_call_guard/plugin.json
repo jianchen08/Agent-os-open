@@ -10,7 +10,7 @@
     "capabilities": {
         "tools": [],
         "resources": [],
-        "route_signals": [],
+        "route_signals": ["decision", "next_llm"],
         "lifecycle_hooks": [
             "on_load",
             "on_unload"
@@ -19,5 +19,5 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 50
+    "priority": 15
 }

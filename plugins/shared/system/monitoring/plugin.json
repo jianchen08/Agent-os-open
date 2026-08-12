@@ -73,6 +73,90 @@
             "timeout_ms": 5000,
             "max_concurrency": 8,
             "description": "Get cache hit/miss statistics"
+        },
+        {
+            "route_id": "mon_payload_diag_list",
+            "method": "GET",
+            "path": "/ext/monitoring/payload-diag",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "List LLM payload diagnostic snapshots (from logs/payload_diag/)"
+        },
+        {
+            "route_id": "mon_payload_diag_get",
+            "method": "GET",
+            "path": "/ext/monitoring/payload-diag/file",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "Get one payload snapshot file content (?name=filename.json)"
+        },
+        {
+            "route_id": "mon_tool_calls",
+            "method": "GET",
+            "path": "/ext/monitoring/tool-calls",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 8000,
+            "max_concurrency": 4,
+            "description": "Query tool call records from traces table (?tool_name=&status=&min_duration=&limit=)"
+        },
+        {
+            "route_id": "mon_payload_diag_page",
+            "method": "GET",
+            "path": "/ext/monitoring/page/payload-diag",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "Webview HTML page: LLM payload diagnostic viewer"
+        },
+        {
+            "route_id": "mon_tool_calls_page",
+            "method": "GET",
+            "path": "/ext/monitoring/page/tool-calls",
+            "auth": "none",
+            "handler_capability": "http.handle",
+            "timeout_ms": 5000,
+            "max_concurrency": 4,
+            "description": "Webview HTML page: tool call records viewer"
         }
-    ]
+    ],
+    "contributes": {
+        "pages": [
+            {
+                "id": "payload_diag",
+                "title": "Payload 诊断",
+                "space": "workspace",
+                "slot": "tab",
+                "path": "/p/payload_diag",
+                "icon": "description",
+                "order": 61,
+                "widget": "webview",
+                "props": {
+                    "pluginId": "monitoring",
+                    "htmlPath": "/page/payload-diag",
+                    "widgetId": "payload_diag"
+                }
+            },
+            {
+                "id": "tool_call_records",
+                "title": "工具调用记录",
+                "space": "workspace",
+                "slot": "tab",
+                "path": "/p/tool_call_records",
+                "icon": "history",
+                "order": 62,
+                "widget": "webview",
+                "props": {
+                    "pluginId": "monitoring",
+                    "htmlPath": "/page/tool-calls",
+                    "widgetId": "tool_call_records"
+                }
+            }
+        ]
+    }
 }

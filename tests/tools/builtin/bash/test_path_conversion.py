@@ -15,7 +15,11 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from tools.builtin.bash.process_manager import ProcessManager
+import pytest
+
+from process_manager import ProcessManager
+
+pytestmark = pytest.mark.unit
 
 
 class TestConvertWindowsPathsForWsl:
@@ -162,7 +166,7 @@ class TestConvertWindowsPathsForWsl:
 
     def test_non_windows_platform_returns_unchanged(self):
         """非 Windows 平台应原样返回命令。"""
-        with patch("tools.builtin.bash.process_manager.platform.system", return_value="Linux"):
+        with patch("process_manager.platform.system", return_value="Linux"):
             assert (
                 ProcessManager._convert_windows_paths_for_wsl(r"cat D:\file.txt")
                 == r"cat D:\file.txt"

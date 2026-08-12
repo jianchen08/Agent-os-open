@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import pytest
 
-from connectors.types import (
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from connector_types import (
     ActionResult,
     ConnectorAction,
     ConnectorContext,

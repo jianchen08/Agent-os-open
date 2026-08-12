@@ -14,13 +14,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# 确保 src 在 sys.path 中
-_src = os.path.join(os.path.dirname(__file__), "..", "..", "src")
-if _src not in sys.path:
-    sys.path.insert(0, os.path.abspath(_src))
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-from channels.dingtalk.adapter import DingTalkAdapter, DingTalkInputAdapter, DingTalkOutputAdapter
-from channels.dingtalk.stream_client import DingTalkStreamClient
+from tests.channels.conftest import use_channel
+
+use_channel("dingtalk")
+from adapter import DingTalkAdapter, DingTalkInputAdapter, DingTalkOutputAdapter
+from stream_client import DingTalkStreamClient
 
 
 # ═══════════════════════════════════════════════════════════

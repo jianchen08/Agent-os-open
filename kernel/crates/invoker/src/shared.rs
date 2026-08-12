@@ -126,6 +126,7 @@ mod tests {
             contributes: None,
             enabled: None,
             activation: None,
+            provides: None,
             persistent_fields: vec![],
         }
     }

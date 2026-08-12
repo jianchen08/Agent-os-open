@@ -129,6 +129,11 @@ const PluginConfigRoute = lazy(() =>
     default: m.PluginConfigRoute,
   })),
 )
+// 插件 page 独立路由渲染器：通配 /p/:pageId → contributionRegistry.getPage → renderPageContent
+// （阶段2 遗留 — react-router 路由动态化；让插件 page 成为真实 URL 路由，可分享/刷新）
+const PluginPageRenderer = lazy(() =>
+  import('@/components/schema/PluginPageRenderer').then((m) => ({ default: m.PluginPageRenderer })),
+)
 
 /** 懒加载 fallback */
 const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
@@ -390,14 +395,25 @@ function HomePage(): ReactNode {
   /** 停止生成 */
   const handleStopGenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
-    const currentPipelineId = usePipelineMessageStore.getState().activePipelineId
+    const ps = usePipelineMessageStore.getState()
+    const currentPipelineId = ps.activePipelineId
     if (sid) {
       globalWS.sendCancel(sid, undefined, currentPipelineId || undefined)
     }
+    // 始终刷写缓冲并清理流式状态。即使 activePipelineId 为 null（如点 Stop 时
+    // pipeline 尚未激活），也要兜底清理任意残留 streamingState，否则 Stop 按钮
+    // 持续显示、下一条新消息会卡在"思考中"。
+    flushStreamChunkBuffer()
     if (currentPipelineId) {
-      flushStreamChunkBuffer()
-      usePipelineMessageStore.getState().stopStreaming(currentPipelineId)
+      ps.stopStreaming(currentPipelineId)
+    } else {
+      Object.keys(ps.streamingState).forEach((pid) => ps.stopStreaming(pid))
     }
+
+    // 不再设 5s watchdog：主管道 pipeline_id 会被下一轮对话复用，固定延时的
+    // watchdog 会把"停止后 5s 内新发的下一轮流式"误判为残留并强制 stopStreaming，
+    // 导致下一轮回复空气泡（内容已持久化但实时渲染被中途杀死）。
+    // 真正的 stream_end 丢失由更上层的 keepalive 看门狗（~180s）兜底，此处不重复。
   }, [])
 
   /** 登出并跳转到登录页 */
@@ -740,6 +756,19 @@ export function createRouter() {
     {
       path: ROUTES.REGISTER,
       element: <RegisterPage />,
+    },
+    // 插件 page 独立路由（通配）：插件 page 声明 path 为 /p/<pageId> 即可命中。
+    // 不需要运行时动态加路由——一条通配覆盖所有声明了 path 的插件 page。
+    // 插在 '*' 兜底之前，确保插件 page 被匹配而非跳转 HOME。
+    {
+      path: '/p/:pageId',
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <PluginPageRenderer />
+          </Suspense>
+        </ProtectedRoute>
+      ),
     },
     {
       path: '*',

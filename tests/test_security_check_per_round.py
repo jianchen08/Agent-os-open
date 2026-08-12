@@ -1,3 +1,5 @@
+from tests._pipeline_plugin_path import add_plugin_dir
+add_plugin_dir("input", "security_check")
 """security_check 审批闸门回归测试。
 
 覆盖两类契约：
@@ -21,6 +23,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from pipeline.plugin import PluginContext
+
+pytestmark = pytest.mark.unit
 
 
 def _approval_svc(sequence: list[dict]):
@@ -91,7 +95,7 @@ class TestPerRoundApproval:
         第二轮 execute() 开头幂等检查命中 → 跳过 → 审批只发起 1 次。
         修复后：每轮独立检查 → 审批发起 2 次。
         """
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc([
             {"selected_option": "approved_once"},
@@ -124,7 +128,7 @@ class TestPerRoundApproval:
         直接验证幂等检查已被删除：手动注入 allowed=True 的旧决策，
         execute() 仍应正常执行本轮检查（触发审批）。
         """
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc([{"selected_option": "approved_once"}])
         import human_interaction
@@ -152,7 +156,7 @@ class TestSignatureMemory:
     @pytest.mark.asyncio
     async def test_remembered_command_skips_approval(self, monkeypatch):
         """approved_remember 后，同工具+同命令再次调用 → 不再审批（放行）。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc([{"selected_option": "approved_remember"}])
         import human_interaction
@@ -177,7 +181,7 @@ class TestSignatureMemory:
     @pytest.mark.asyncio
     async def test_approved_once_does_not_remember(self, monkeypatch):
         """approved_once 不记忆 → 同命令再次调用仍要审批。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc([
             {"selected_option": "approved_once"},
@@ -203,7 +207,7 @@ class TestSignatureMemory:
     @pytest.mark.asyncio
     async def test_different_path_still_requires_approval(self, monkeypatch):
         """记忆命令 A 后，命令 B（路径不同）→ 仍要审批（精确匹配，不模糊）。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc([
             {"selected_option": "approved_remember"},
@@ -232,7 +236,7 @@ class TestSignatureMemory:
 
         "curl   http://x"（多空格）与 "curl http://x"（单空格）视为同命令。
         """
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc([{"selected_option": "approved_remember"}])
         import human_interaction
@@ -271,7 +275,7 @@ class TestLabelBasedSelection:
     @pytest.mark.asyncio
     async def test_label_remember_triggers_signature_memory(self, monkeypatch):
         """提交 label '本管道内同命令免批' → 等价 approved_remember → 记忆指纹。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc(
             [{"selected_option": "本管道内同命令免批"}]
@@ -297,7 +301,7 @@ class TestLabelBasedSelection:
     @pytest.mark.asyncio
     async def test_label_once_does_not_remember(self, monkeypatch):
         """提交 label '仅本次执行' → 等价 approved_once → 不记忆指纹。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, create = _approval_svc(
             [{"selected_option": "仅本次执行"}, {"selected_option": "仅本次执行"}]
@@ -322,7 +326,7 @@ class TestLabelBasedSelection:
     @pytest.mark.asyncio
     async def test_label_denied_soft_blocks(self, monkeypatch):
         """提交 label '拒绝执行' → 等价 denied → 软拦截，不放行。"""
-        from plugins.input.security_check.plugin import SecurityCheckPlugin
+        from plugin import SecurityCheckPlugin
 
         svc, _create = _approval_svc([{"selected_option": "拒绝执行"}])
         import human_interaction

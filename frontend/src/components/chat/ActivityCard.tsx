@@ -6,22 +6,28 @@
 
 import {
   Ban,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
+  Copy,
+  ExternalLink,
   FileText,
+  Image,
+  Link,
   Loader2,
   Sparkles,
   Target,
   Wrench,
   XCircle,
 } from '@/assets/icons'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
+import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { useConfirmDialog } from '@/utils/confirm'
 import type {
   ActivityAction,
@@ -150,6 +156,153 @@ function getActivityTypeIcon(type: ActivityType, customIcon?: ReactNode): ReactN
 }
 
 /**
+ * 复制按钮：code/json/log 块右上角，点击复制并短暂反馈
+ */
+const CopyBtn: FC<{ text: string }> = ({ text }) => {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      onClick={async (e) => {
+        e.stopPropagation()
+        try {
+          await navigator.clipboard.writeText(text)
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        } catch {
+          // 剪贴板不可用时静默
+        }
+      }}
+      className="text-muted-foreground hover:text-foreground absolute top-1 right-1 rounded p-1 transition-colors"
+      title="复制"
+      aria-label="复制内容"
+    >
+      {copied ? (
+        <Check className="h-3.5 w-3.5 text-status-success" />
+      ) : (
+        <Copy className="h-3.5 w-3.5" />
+      )}
+    </button>
+  )
+}
+
+/**
+ * 文件块：文件名 + 路径，点击打开文件（统一走全局文件打开回调）
+ */
+const FileBlockView: FC<{ path: string }> = ({ path }) => {
+  const fileName = path.split(/[/\\]/).pop() || path
+  return (
+    <button
+      onClick={() => getGlobalOpenFileCallback()(path)}
+      className="group flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      title={`点击打开文件: ${path}`}
+    >
+      <FileText className="text-muted-foreground h-3.5 w-3.5 flex-shrink-0" />
+      <span className="text-primary min-w-0 truncate font-medium group-hover:underline">{fileName}</span>
+      <span className="text-muted-foreground/70 min-w-0 max-w-[320px] truncate font-mono text-[11px]">
+        {path}
+      </span>
+      <ExternalLink className="text-muted-foreground/50 h-3 w-3 flex-shrink-0" />
+    </button>
+  )
+}
+
+/**
+ * 图片块：缩略图 + 点击灯箱预览；加载失败降级为文件行
+ */
+const ImageBlockView: FC<{ src: string }> = ({ src }) => {
+  const [open, setOpen] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  if (failed) {
+    return <FileBlockView path={src} />
+  }
+
+  return (
+    <>
+      <img
+        src={src}
+        alt="预览图"
+        loading="lazy"
+        onError={() => setFailed(true)}
+        onClick={() => setOpen(true)}
+        className="ring-border/40 max-h-40 cursor-zoom-in rounded object-contain transition-shadow hover:ring-1"
+      />
+      {open && (
+        <div
+          className="bg-black/70 fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center p-6"
+          onClick={() => setOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="图片预览"
+        >
+          <img
+            src={src}
+            alt="大图预览"
+            className="max-h-[85vh] max-w-[90vw] rounded object-contain shadow-2xl"
+          />
+        </div>
+      )}
+    </>
+  )
+}
+
+/**
+ * 链接块：点击外部浏览器打开
+ */
+const LinkBlockView: FC<{ url: string }> = ({ url }) => (
+  <a
+    href={url}
+    target="_blank"
+    rel="noreferrer"
+    className="text-primary inline-flex max-w-full items-center gap-1.5 truncate hover:underline"
+    title={url}
+  >
+    <Link className="h-3.5 w-3.5 flex-shrink-0" />
+    <span className="truncate">{url}</span>
+  </a>
+)
+
+/**
+ * 键值对块：key 弱化 / value 等宽两列
+ */
+const KvBlockView: FC<{ items: { key: string; value: string }[] }> = ({ items }) => (
+  <div className="bg-muted/30 space-y-1 rounded p-2">
+    {items.map((item, index) => (
+      <div key={`${item.key}-${index}`} className="flex min-w-0 items-baseline gap-2 text-xs">
+        <span className="text-muted-foreground w-28 flex-shrink-0 truncate">{item.key}</span>
+        <span className="min-w-0 truncate font-mono">{item.value}</span>
+      </div>
+    ))}
+  </div>
+)
+
+/**
+ * 日志块：等宽滚动区，吸底滚动 + 上翻滚动锁
+ */
+const LogBlockView: FC<{ content: string }> = ({ content }) => {
+  const ref = useRef<HTMLPreElement>(null)
+
+  useEffect(() => {
+    const el = ref.current
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 48) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [content])
+
+  return (
+    <div className="group relative">
+      <pre
+        ref={ref}
+        className="bg-muted/30 max-h-60 overflow-y-auto rounded p-2 pr-7 font-mono text-xs whitespace-pre-wrap"
+      >
+        {content}
+      </pre>
+      <CopyBtn text={content} />
+    </div>
+  )
+}
+
+/**
  * 详情区块组件
  */
 const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
@@ -161,10 +314,14 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
     const contentType = block.contentType || 'text'
 
     if (typeof content === 'object') {
+      const text = JSON.stringify(content, null, 2)
       return (
-        <pre className="bg-muted/30 overflow-x-auto rounded p-2 font-mono text-xs">
-          {JSON.stringify(content, null, 2)}
-        </pre>
+        <div className="group relative">
+          <pre className="bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs">
+            {text}
+          </pre>
+          <CopyBtn text={text} />
+        </div>
       )
     }
 
@@ -172,29 +329,39 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
       case 'json':
         try {
           const parsed = JSON.parse(content)
+          const text = JSON.stringify(parsed, null, 2)
           return (
-            <pre className="bg-muted/30 overflow-x-auto rounded p-2 font-mono text-xs">
-              {JSON.stringify(parsed, null, 2)}
-            </pre>
+            <div className="group relative">
+              <pre className="bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs">
+                {text}
+              </pre>
+              <CopyBtn text={text} />
+            </div>
           )
         } catch {
           return (
-            <pre className="bg-muted/30 overflow-x-auto rounded p-2 font-mono text-xs whitespace-pre-wrap">
-              {content}
-            </pre>
+            <div className="group relative">
+              <pre className="bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs whitespace-pre-wrap">
+                {content}
+              </pre>
+              <CopyBtn text={content} />
+            </div>
           )
         }
 
       case 'code':
         return (
-          <pre
-            className={cn(
-              'bg-muted/30 overflow-x-auto rounded p-2 font-mono text-xs',
-              block.language && `language-${block.language}`,
-            )}
-          >
-            <code>{content}</code>
-          </pre>
+          <div className="group relative">
+            <pre
+              className={cn(
+                'bg-muted/30 overflow-x-auto rounded p-2 pr-7 font-mono text-xs',
+                block.language && `language-${block.language}`,
+              )}
+            >
+              <code>{content}</code>
+            </pre>
+            <CopyBtn text={content} />
+          </div>
         )
 
       case 'diff':
@@ -213,6 +380,21 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
             <MarkdownRenderer content={content} />
           </div>
         )
+
+      case 'kv':
+        return <KvBlockView items={block.kvItems ?? []} />
+
+      case 'file':
+        return <FileBlockView path={block.path || content} />
+
+      case 'image':
+        return <ImageBlockView src={block.path || content} />
+
+      case 'link':
+        return <LinkBlockView url={block.url || content} />
+
+      case 'log':
+        return <LogBlockView content={content} />
 
       case 'text':
       default:
@@ -264,6 +446,13 @@ const ActivityCard: FC<ActivityCardProps> = ({
   const [expanded, setExpanded] = useState(defaultExpanded)
   const { confirm, dialogState, setDialogState } = useConfirmDialog()
 
+  // 失败时强制自动展开：错误原因必须立刻可见，不应再要求用户多点一次
+  useEffect(() => {
+    if (activity.status === 'failed') {
+      setExpanded(true)
+    }
+  }, [activity.status])
+
   const handleHeaderClick = () => {
     setExpanded(!expanded)
     onHeaderClick?.()
@@ -271,43 +460,43 @@ const ActivityCard: FC<ActivityCardProps> = ({
 
   const themeVars = getStatusThemeVars(activity.status, activity.customColor)
 
-  /** 卡片容器样式 */
-  const cardStyle: CSSProperties = {
-    borderColor: themeVars.border,
-    backgroundColor: themeVars.bg,
+  /** 状态左边条样式：唯一贯穿整卡的状态指示（running 呼吸、cancelled 40% 透明） */
+  const barStyle: CSSProperties = {
+    backgroundColor: themeVars.color,
     ...(activity.status === 'running'
-      ? {
-          animation: 'card-breathe 2s ease-in-out infinite',
-          ...(activity.customColor
-            ? { '--card-breathe-color': activity.customColor } as CSSProperties
-            : {}),
-        }
+      ? { animation: 'breathe 2s ease-in-out infinite' }
       : {}),
-    ...style,
+    ...(activity.status === 'cancelled' ? { opacity: 0.4 } : {}),
   }
 
   return (
     <div
       className={cn(
-        'my-1 overflow-hidden rounded-lg text-xs transition-all',
-        'w-fit max-w-[85%] border',
+        'border-border/40 bg-card relative my-1 overflow-hidden rounded-lg border text-xs transition-all',
+        'w-fit max-w-[85%]',
         activity.customClassName,
         className,
       )}
-      style={cardStyle}
+      style={style}
       data-activity-type={activity.type}
       data-activity-id={activity.id}
       data-activity-status={activity.status}
     >
+      {/* 状态左边条 */}
+      <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[3px]" style={barStyle} />
+
       {/* 头部 */}
       <div
         className={cn(
-          'flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors',
+          'flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2.5 pl-3.5 transition-colors',
           'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
         )}
         onClick={handleHeaderClick}
       >
-        <span className="flex-shrink-0">{getStatusIcon(activity.status)}</span>
+        {/* 类型图标（16px，主识别）：工具自定义图标或活动类型图标 */}
+        <span className="text-muted-foreground flex-shrink-0">
+          {getActivityTypeIcon(activity.type, activity.customIcon)}
+        </span>
 
         {/* 文件名（可点击打开）或标题 */}
         {activity.filePath && activity.onOpenFile ? (
@@ -333,10 +522,15 @@ const ActivityCard: FC<ActivityCardProps> = ({
 
         {/* 增删行数徽标（如 file_write 的 +X -Y），颜色跟随主题 status 语义色 */}
         {activity.diffStat && (
-          <span className="ml-2 flex flex-shrink-0 items-center gap-2 font-mono text-xs font-semibold">
+          <span className="flex flex-shrink-0 items-center gap-2 font-mono text-xs font-semibold">
             <span className="text-status-success">+{activity.diffStat.added}</span>
             <span className="text-status-error">-{activity.diffStat.removed}</span>
           </span>
+        )}
+
+        {/* 状态图标（12px）：仅 running/failed 出现，其余状态由左边条表达，降低图标噪音 */}
+        {(activity.status === 'running' || activity.status === 'failed') && (
+          <span className="flex-shrink-0">{getStatusIcon(activity.status)}</span>
         )}
 
         <span
@@ -345,7 +539,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
             expanded && 'rotate-180',
           )}
         >
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="h-3.5 w-3.5" />
         </span>
       </div>
 

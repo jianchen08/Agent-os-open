@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
 import time
 
-from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
+from tests.channels.conftest import use_channel
+
+use_channel("gateway")
+from unified_types import UnifiedMessage, UnifiedResponse
 
 
 class TestUnifiedMessage:

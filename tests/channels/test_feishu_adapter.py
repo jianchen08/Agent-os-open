@@ -6,8 +6,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from channels.feishu.adapter import FeishuAdapter, FeishuInputAdapter, FeishuOutputAdapter
-from channels.feishu.stream_client import FeishuStreamClient
+pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
+
+from tests.channels.conftest import use_channel
+
+use_channel("feishu")
+from adapter import FeishuAdapter, FeishuInputAdapter, FeishuOutputAdapter
+from stream_client import FeishuStreamClient
 
 
 class TestFeishuInputAdapter:

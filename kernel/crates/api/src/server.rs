@@ -15,12 +15,14 @@ use std::time::{Duration, SystemTime};
 use parking_lot::RwLock as ParkingRwLock;
 
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Request, State,
     },
-    http::HeaderMap,
-    response::IntoResponse,
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{from_fn, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -46,9 +48,11 @@ use crate::compat_routes::{
     update_thread_handler,
 };
 use crate::routes::{
-    agents_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
-    metrics_prometheus_handler, metrics_query_handler, pipelines_handler, put_pipeline_config_handler,
-    put_plugin_config_handler, schema_handler, tools_handler, AppState,
+    actions_execute_handler, agents_handler, agents_schema_handler, get_agent_config_handler,
+    get_pipeline_config_with_etag, get_plugin_config_with_etag, health_handler,
+    metrics_prometheus_handler, metrics_query_handler, pipelines_handler, put_agent_config_handler,
+    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, tools_handler,
+    AppState,
 };
 
 /// WebSocket 消息请求体。
@@ -89,6 +93,15 @@ pub fn build_router(state: AppState) -> Router {
         // AC-06-5: Schema 聚合端点
         .route("/api/v1/schema", get(schema_handler))
         .route("/api/v1/agents", get(agents_handler))
+        // 阶段1:agent schema(前端表单驱动)+ agent config 读写(真相源 config/agents/**/*.yaml)
+        .route("/api/v1/agents/schema", get(agents_schema_handler))
+        .route(
+            "/api/v1/agents/{id}/config",
+            get(get_agent_config_handler).put(put_agent_config_handler),
+        )
+        // 阶段3:命令执行统一出口(前端 GrowthLoop.ts commandDispatcher transport 注入此端点)
+        // 命令面板/快捷键/菜单触发 → 查找声明该 command 的插件 → 执行或占位
+        .route("/api/v1/actions/execute", post(actions_execute_handler))
         .route("/api/v1/pipelines", get(pipelines_handler))
         .route("/api/v1/tools", get(tools_handler))
         // P7: 管道配置查询/更新（内核承载 config/pipelines/*.yaml）
@@ -142,6 +155,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws/chat", get(ws_handler))
         // 消息发送端点（REST fallback for WS）
         .route("/api/v1/chat", post(chat_handler))
+        // 人类交互响应端点——前端用户操作经此提交，内核转发到交互插件的 interaction.respond
+        .route("/api/v1/interaction/response", post(interaction_response_handler))
         // Auth 端点
         .route("/api/v1/auth/login", post(login_handler))
         .route("/api/v1/auth/me", get(me_handler))
@@ -165,7 +180,114 @@ pub fn build_router(state: AppState) -> Router {
 
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
     let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
-    router.with_state(state)
+    // CORS：开发期前端通过 VITE_API_BASE_URL 直连内核（http://localhost:9100），
+    // 浏览器跨域请求需要预检（OPTIONS）+ 响应头带 Access-Control-Allow-Origin。
+    // 作为最外层中间件，拦截 OPTIONS 预检并给所有响应注入 CORS 头。
+    router.with_state(state).layer(from_fn(cors_middleware))
+}
+
+/// CORS 中间件：拦截 OPTIONS 预检（返回 204 + CORS 头），并给所有响应注入 CORS 头。
+/// 反射请求 Origin（开发友好，支持任意 localhost/自定义前端源），允许凭据。
+async fn cors_middleware(req: Request, next: Next) -> Response {
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // 预检请求：直接回 204 + CORS 头，不进入业务路由（业务路由未注册 OPTIONS 会 405）
+    if req.method() == Method::OPTIONS {
+        let mut resp = Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .expect("empty cors preflight body");
+        apply_cors_headers(resp.headers_mut(), origin.as_deref());
+        return resp;
+    }
+
+    let mut resp = next.run(req).await;
+    apply_cors_headers(resp.headers_mut(), origin.as_deref());
+    resp
+}
+
+/// 判断 origin 是否为本地开发源（localhost / 127.0.0.1 / [::1]，任意端口）。
+///
+/// base 后必须紧跟 `:`（端口分隔），防止 `localhost.evil.com` 这类前缀绕过。
+fn is_local_origin(origin: &str) -> bool {
+    const LOCAL_BASES: [&str; 6] = [
+        "http://localhost",
+        "https://localhost",
+        "http://127.0.0.1",
+        "https://127.0.0.1",
+        "http://[::1]",
+        "https://[::1]",
+    ];
+    for base in LOCAL_BASES {
+        if origin == base {
+            return true;
+        }
+        if let Some(rest) = origin.strip_prefix(base) {
+            if rest.starts_with(':') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 精确匹配 origin 是否在生产白名单中（不做子域/前缀模糊匹配）。
+fn origin_matches_allowlist(origin: &str, allowlist: &[&str]) -> bool {
+    allowlist.iter().any(|o| *o == origin)
+}
+
+/// 判断 origin 是否被放行：本地源任意端口，或命中 `AGENTOS_CORS_ORIGINS` 白名单。
+///
+/// 生产白名单由环境变量 `AGENTOS_CORS_ORIGINS` 提供（逗号分隔的完整 origin，
+/// 如 `https://app.example.com,https://www.example.com`）。未配置时仅放行本地源。
+fn is_origin_allowed(origin: &str) -> bool {
+    if is_local_origin(origin) {
+        return true;
+    }
+    if let Ok(raw) = std::env::var("AGENTOS_CORS_ORIGINS") {
+        let entries: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        return origin_matches_allowlist(origin, &entries);
+    }
+    false
+}
+
+/// 注入 CORS 响应头。仅当 origin 被白名单放行时才反射 Origin 并允许凭据——
+/// 反射任意 Origin + Allow-Credentials 会让任意站点带凭据跨域调用内核 API。
+/// 其余头（Methods/Headers/Max-Age）固定。
+fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
+    if let Some(o) = origin {
+        if is_origin_allowed(o) {
+            if let Ok(v) = HeaderValue::from_str(o) {
+                headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+            }
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                HeaderValue::from_static("true"),
+            );
+        }
+    }
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static(
+            "Content-Type, Authorization, X-Requested-With, X-Auth-Token, Accept, Origin",
+        ),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
 }
 
 /// WebSocket 连接处理器（AC-06-4）。
@@ -224,27 +346,27 @@ pub(crate) async fn request_tenant_ctx(
     TenantContext::new(resolve_request_tenant_id(store, headers).await, session_id)
 }
 
-/// 通过 0.2 配置驱动管道引擎处理消息。
-///
-/// 替代旧的"遍历全部 pipeline 插件"placeholder：改为构造
-/// [`agentos_engine::PipelineExecutor`]，读取 AppState 中的 `pipeline_config`
-/// + `step_library`，按 YAML 定义的 step 顺序执行（三级命中规则）。
-///
-/// 流程：
-/// 1. 构造初始 state（含 `message` / 默认 `agent_id` / `core_type` 等）
-/// 2. 加载 Agent 配置注入 state（system_prompt / tool_ids / model_tier / max_iterations）
-/// 3. 构造 PipelineExecutor 并执行 `run`
-/// 4. 从最终 state 提取响应（优先 `raw_result`，回退 `message`，再回退原消息）
-///
-/// 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
-/// 时走 echo-fallback，标注降级原因。
+// 通过 0.2 配置驱动管道引擎处理消息。
+//
+// 替代旧的"遍历全部 pipeline 插件"placeholder：改为构造
+// [`agentos_engine::PipelineExecutor`]，读取 AppState 中的 `pipeline_config`
+// + `step_library`，按 YAML 定义的 step 顺序执行（三级命中规则）。
+//
+// 流程：
+// 1. 构造初始 state（含 `message` / 默认 `agent_id` / `core_type` 等）
+// 2. 加载 Agent 配置注入 state（system_prompt / tool_ids / model_tier / max_iterations）
+// 3. 构造 PipelineExecutor 并执行 `run`
+// 4. 从最终 state 提取响应（优先 `raw_result`，回退 `message`，再回退原消息）
+//
+// 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
+// 时走 echo-fallback，标注降级原因。
 
 /// 默认核心管道插件 id（可被 agent 配置 config/agents/<id>.yaml 的 core_plugin 覆盖）。
 /// 历史上硬编码 "pipeline_llm_core" 写在 initial_state，现提取为常量便于发现与替换。
 const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
 
-/// 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
-/// 不再特化只读 messages 表——轨迹颗粒度即恢复边界。
+// 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
+// 不再特化只读 messages 表——轨迹颗粒度即恢复边界。
 
 /// 管道配置热重载的 mtime 检测 TTL：1 秒内不重复 stat，避免高频 chat 时反复解析 YAML。
 const PIPELINE_CONFIG_TTL: Duration = Duration::from_secs(1);
@@ -525,7 +647,7 @@ async fn process_via_engine_inner(
                     for entry in &step_traces {
                         merge_patch(&mut recovered, &entry.patch_data);
                     }
-                    if !step_traces.is_empty() && !recovered.as_object().map_or(true, |o| o.contains_key("messages")) {
+                    if !step_traces.is_empty() && !recovered.as_object().is_none_or(|o| o.contains_key("messages")) {
                         debug!(
                             pipeline_id = %effective_pipeline_id,
                             traces = step_traces.len(),
@@ -580,7 +702,13 @@ async fn process_via_engine_inner(
     }
 
     // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
-    load_agent_config_into_state(&mut initial_state, agent_id, &project_root);
+    // 统一配置加载方案 TDD-6：优先走 ConfigCenter（泛化注入所有字段），
+    // 未接线时降级到旧的 load_agent_config_into_state（挑 5 字段，兼容）。
+    if let Some(cc) = state.config_center.as_ref() {
+        agentos_config::load_agent_into_state(cc, &mut initial_state, agent_id);
+    } else {
+        load_agent_config_into_state(&mut initial_state, agent_id, &project_root);
+    }
 
     // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
     // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
@@ -588,7 +716,7 @@ async fn process_via_engine_inner(
     // 按 agent tool_ids 过滤、转成 OpenAI function-calling 格式注入 state["tool_schemas"]，
     // 这样 prepare 阶段的 tool_schema 插件读到非空 schema（它优先用 state 里的值），
     // LLM 即可看到工具并调用（tool_core 执行时内核 invoke_tool 经 MCP 调 sidecar）。
-    inject_tool_schemas(&mut initial_state, &state);
+    inject_tool_schemas(&mut initial_state, state);
 
     // 3. 构造 PipelineExecutor 并执行
     //    run_id / branch_id 用 uuid 保证多请求隔离；租户上下文从 task_local 读取
@@ -622,6 +750,14 @@ async fn process_via_engine_inner(
             .iter()
             .flat_map(|m| m.persistent_fields.iter().cloned()),
     );
+
+    // 统一配置加载方案 TDD-7：注入 ConfigCenter，启用 per-iteration agent 热加载。
+    // 改 config/agents/<id>.yaml 后，正在跑的任务下一轮迭代立即用新配置。
+    let executor = if let Some(cc) = state.config_center.clone() {
+        executor.with_config_center(cc)
+    } else {
+        executor
+    };
 
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
@@ -735,10 +871,10 @@ fn apply_messages_ops(arr: &mut Vec<serde_json::Value>, ops: &[serde_json::Value
                     op.get("msg"),
                 ) {
                     let idx = idx as usize;
-                    if idx < arr.len() {
-                        arr[idx] = msg.clone();
-                    } else if idx == arr.len() {
-                        arr.push(msg.clone());
+                    match idx.cmp(&arr.len()) {
+                        std::cmp::Ordering::Less => arr[idx] = msg.clone(),
+                        std::cmp::Ordering::Equal => arr.push(msg.clone()),
+                        std::cmp::Ordering::Greater => {}
                     }
                 }
             }
@@ -801,7 +937,8 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
 ///
 /// agents/ 按分类组织为 `agents/<category>/<id>.yaml`（main/orchestrator/
 /// executor/system/task/test），顶层不再放单文件。返回首个匹配路径。
-fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
+/// pub(crate)：routes.rs 的 agent config 读写端点复用同一套定位逻辑。
+pub(crate) fn find_agent_yaml(dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
     let target = format!("{}.yaml", agent_id);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;
@@ -1002,6 +1139,54 @@ async fn chat_handler(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     Ok(axum::Json(response))
+}
+
+/// 人类交互响应端点——前端用户操作（选择选项/拒绝/取消）经此提交。
+///
+/// 内核转发到交互插件（human_interaction_tool）的 interaction.respond 工具，
+/// 唤醒正在 wait_for_choice 阻塞的请求。这构成 choice/conversation 模式的
+/// 响应回路：前端 → 内核 REST → invoker.invoke_tool → 交互插件 service.submit_response。
+async fn interaction_response_handler(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let request_id = body
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if request_id.is_empty() {
+        return Ok(axum::Json(serde_json::json!({"success": false, "error": "缺少 request_id"})));
+    }
+
+    let Some(invoker) = state.invoker.clone() else {
+        return Ok(axum::Json(serde_json::json!({"success": false, "error": "invoker not available"})));
+    };
+
+    // 转发到交互插件的 interaction.respond 工具
+    let inputs = serde_json::json!({
+        "request_id": request_id,
+        "response_type": body.get("response_type").and_then(|v| v.as_str()).unwrap_or("answered"),
+        "selected_option": body.get("selected_option").and_then(|v| v.as_str()),
+        "answers": body.get("answers"),
+        "feedback": body.get("feedback").and_then(|v| v.as_str()),
+    });
+
+    match invoker
+        .invoke_tool("human_interaction_tool", "interaction.respond", &inputs)
+        .await
+    {
+        Ok(result) => Ok(axum::Json(serde_json::json!({
+            "success": result.success,
+            "request_id": request_id,
+            "data": result.data,
+            "error": result.error,
+        }))),
+        Err(e) => Ok(axum::Json(serde_json::json!({
+            "success": false,
+            "request_id": request_id,
+            "error": e.message,
+        }))),
+    }
 }
 
 /// 启动 API 服务器。
@@ -1668,7 +1853,6 @@ mod tests {
     /// get_messages_by_pipeline 在各自 scope 内读回。
     #[tokio::test]
     async fn test_multi_user_isolation_end_to_end() {
-        use agentos_core::traits::StorageBackend;
         let (state, _invoker, store) = make_engine_state();
 
         // 播种两个用户：alice → tenant_alice，bob → tenant_bob（一用户一租户）
@@ -1867,5 +2051,33 @@ mod tests {
         .await
         .unwrap();
         assert!(admin_msgs.is_empty(), "admin(default) 不应读到 frank 的消息");
+    }
+
+    // ── CORS Origin 白名单（回归：反射任意 Origin + 凭据 = 跨域数据泄露）──
+
+    #[test]
+    fn local_origins_allowed_any_port() {
+        assert!(super::is_local_origin("http://localhost:5173"));
+        assert!(super::is_local_origin("https://localhost:9100"));
+        assert!(super::is_local_origin("http://127.0.0.1:3000"));
+        assert!(super::is_local_origin("https://127.0.0.1:443"));
+        assert!(super::is_local_origin("http://[::1]:8080"));
+    }
+
+    #[test]
+    fn nonlocal_origins_rejected_by_local_check() {
+        assert!(!super::is_local_origin("https://evil.com"));
+        // 边界：localhost.evil.com 不应冒充 localhost（防前缀绕过）
+        assert!(!super::is_local_origin("http://localhost.evil.com"));
+        assert!(!super::is_local_origin("http://127.0.0.1.evil.com"));
+    }
+
+    #[test]
+    fn allowlist_exact_match_only() {
+        let allow = ["https://app.example.com", "https://www.example.com"];
+        assert!(super::origin_matches_allowlist("https://app.example.com", &allow));
+        // 精确匹配——子域/变体不应通过
+        assert!(!super::origin_matches_allowlist("https://evil.example.com", &allow));
+        assert!(!super::origin_matches_allowlist("https://app.example.com.evil.com", &allow));
     }
 }

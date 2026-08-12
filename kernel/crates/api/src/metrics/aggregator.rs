@@ -344,6 +344,8 @@ impl MetricsAggregator {
     /// - histogram：value 追加到桶。
     ///
     /// unit/help 在 series 首次创建时写入；已存在则忽略（保持首次声明）。
+    // 记录指标需要 7 个语义独立的入参；合并成结构体会改公共 API 签名，故保留。
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         plugin_id: &str,
@@ -358,6 +360,8 @@ impl MetricsAggregator {
     }
 
     /// 记录指标（指定时间戳，测试用）。
+    // record + ts 入参，共 8 个；为与 record 对齐刻意保留独立参数，不改公共签名。
+    #[allow(clippy::too_many_arguments)]
     pub fn record_at(
         &self,
         ts: i64,

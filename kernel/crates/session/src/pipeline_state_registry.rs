@@ -50,10 +50,13 @@ pub fn global_registry() -> &'static PipelineStateRegistry {
     GLOBAL_REGISTRY.get_or_init(PipelineStateRegistry::new)
 }
 
+/// 按 (tenant_id, pipeline_id) 索引的常驻管道 state 条目表（每条管道一把独立读锁）。
+type PipelineStateMap = HashMap<(String, String), Arc<RwLock<PipelineStateEntry>>>;
+
 /// 按 `(tenant_id, pipeline_id)` 常驻的管道 state 注册表。
 #[derive(Clone)]
 pub struct PipelineStateRegistry {
-    entries: Arc<RwLock<HashMap<(String, String), Arc<RwLock<PipelineStateEntry>>>>>,
+    entries: Arc<RwLock<PipelineStateMap>>,
 }
 
 /// 单个管道的常驻 state 条目。

@@ -4,8 +4,9 @@
  * 展示所有 Agent，卡片式布局，显示配置信息
  */
 
-import { Bot, RefreshCw, Search } from '@/assets/icons'
 import { useState, useEffect, useCallback } from 'react'
+import { Bot, EditIcon, RefreshCw, Search } from '@/assets/icons'
+import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
 import { getAgents } from '@/services/api/agents'
 import type { AgentResponse } from '@/services/api/agents'
 
@@ -19,6 +20,7 @@ export function AgentsPage() {
   const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [editingAgent, setEditingAgent] = useState<AgentResponse | null>(null)
 
   /**
    * 加载 Agent 列表
@@ -157,11 +159,25 @@ export function AgentsPage() {
               >
                 <div className="mb-2 flex items-start justify-between">
                   <h3 className="mr-2 flex-1 truncate text-sm font-semibold">{agent.name}</h3>
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-xs ${getStatusStyle(agent.status)}`}
-                  >
-                    {agent.status}
-                  </span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setEditingAgent(agent)
+                      }}
+                      className="text-muted-foreground hover:bg-accent/50 hover:text-foreground rounded-md p-1.5 transition-colors"
+                      aria-label={`编辑 ${agent.name}`}
+                      title="编辑配置"
+                    >
+                      <EditIcon className="h-3.5 w-3.5" />
+                    </button>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-xs ${getStatusStyle(agent.status)}`}
+                    >
+                      {agent.status}
+                    </span>
+                  </div>
                 </div>
                 <p className="text-muted-foreground mb-3 line-clamp-2 text-xs">
                   {agent.description || '暂无描述'}
@@ -232,6 +248,14 @@ export function AgentsPage() {
           </div>
         )}
       </main>
+
+      {/* 编辑配置模态框 */}
+      <AgentConfigModal
+        agent={editingAgent}
+        isOpen={!!editingAgent}
+        onClose={() => setEditingAgent(null)}
+        onSaved={fetchAgents}
+      />
     </div>
   )
 }

@@ -1,3 +1,5 @@
+import tests._isolation_path  # noqa: F401
+
 """9p/drvfs EIO 自愈集成测试（post-exec：修宿主挂载 + 重建容器 + 重试）。
 
 与 test_isolation_container_self_heal.py 的 setns 自愈测试（第 5 节）对称，
@@ -15,9 +17,9 @@ _remount_and_retry_exec 的编排逻辑与 post-exec 钩子的触发条件。
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from isolation.manager import IsolationManager
-from isolation.providers.docker_provider import DockerProvider
-from isolation.types import (
+from manager import IsolationManager
+from providers.docker_provider import DockerProvider
+from isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

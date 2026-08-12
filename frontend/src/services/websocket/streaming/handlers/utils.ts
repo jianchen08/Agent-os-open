@@ -69,6 +69,24 @@ export function startPipelineStreaming(
   messageId: string,
 ): void {
   pipelineStore.getState().startStreaming(pipelineId, messageId)
+
+  // 轮次级安全兜底：单个消息的流式若超过 90s 仍未结束（说明 stream_end/new_message
+  // 事件漏接或与 pipeline 未对齐——实测工具调用轮偶发），强制收尾，避免 UI 永久卡在
+  // "思考中"。**按 messageId 命中**：仅当当前 streamingState 仍是本条消息时才清理，
+  // 因此不会误杀后续新轮次（新轮次 messageId 不同）。后端数据已持久化，强制收尾后
+  // 内容仍可正常渲染/刷新恢复。
+  const turnMsgId = messageId
+  setTimeout(() => {
+    const ps = pipelineStore.getState()
+    const cur = (ps as any).streamingState?.[pipelineId]
+    if (cur?.isStreaming && cur?.messageId === turnMsgId) {
+      loggers.websocket.warn(
+        '[STREAM-TIMEOUT] 单消息流式超过 90s 未结束，强制收尾防卡死: pipeline=%s msg=%s',
+        pipelineId?.slice(0, 12), turnMsgId?.slice(0, 12),
+      )
+      ps.stopStreaming(pipelineId)
+    }
+  }, 90000)
 }
 
 /** 停止管道流式传输 */
@@ -102,12 +120,25 @@ export function ensureStreamingPlaceholder(
 
   const store = pipelineStore.getState()
   const existing = store.getMessages(pipelineId)
+  // 当前轮次的占位气泡：列表中最后一条 streaming 的 placeholder_* assistant
+  // （由 handleSendMessage 刚创建，等待本 stream_start 合并）。清理时必须保留它，
+  // 只清理更早轮次残留的 orphan——现在也覆盖 placeholder_* 占位气泡（abort 后
+  // 上一轮的占位气泡若残留 streaming 状态会一直显示"思考中"）。
+  const lastMsg = existing[existing.length - 1]
+  const currentPlaceholderId =
+    lastMsg && lastMsg.role === 'assistant' && lastMsg.status === 'streaming'
+    && typeof lastMsg.id === 'string' && lastMsg.id.startsWith('placeholder_')
+      ? lastMsg.id
+      : null
   for (const msg of existing) {
     if (
       msg.role === 'assistant'
       && msg.status === 'streaming'
       && msg.id !== messageId
-      && !msg.id.startsWith('placeholder_')
+      && (
+        !msg.id.startsWith('placeholder_') // 非占位符残留：照旧清理（原行为）
+        || msg.id !== currentPlaceholderId  // 占位符 orphan（非当前轮次）：清理
+      )
     ) {
       // 这些残留消息被标记 completed 后会与新的流式消息合并，造成渲染混乱。
       // - 所有 tool_call 已解析 + 有内容 → 标记 completed 保留
@@ -126,10 +157,16 @@ export function ensureStreamingPlaceholder(
         // 有未解析的 tool_call → 消息不完整，直接移除
         store.removeMessage(pipelineId, msg.id)
       } else if (hasTextContent || resolvedParts.length > 0) {
-        // 有完整内容 → 保留但标记 completed，同时确保 tool parts 为 done
-        const finalizedParts = resolvedParts.map((p: any) =>
-          p.type === 'tool_call' ? { ...p, state: 'done' as const } : p
-        )
+        // 有完整内容 → 保留但标记 completed，同时收尾所有 part 状态
+        // （text/thinking 'streaming' -> 'done'，tool_call -> 'done'），避免
+        // isStreamingMessage 因残留 streaming part 仍判定为流式。
+        const finalizedParts = resolvedParts.map((p: any) => {
+          if (p.type === 'tool_call') return { ...p, state: 'done' as const }
+          if (p.type === 'text' || p.type === 'thinking') {
+            return (p as any).state === 'streaming' ? { ...p, state: 'done' as const } : p
+          }
+          return p
+        })
         store.updateMessage(pipelineId, msg.id, {
           status: 'completed',
           parts: finalizedParts.length > 0 ? finalizedParts : undefined,
