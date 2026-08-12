@@ -114,7 +114,20 @@ def resolve_conversation_history(
     history: list[dict[str, Any]] = []
     for r in records:
         role = record_role_for_llm(r)
-        msg: dict[str, Any] = {"role": role, "content": r.content}
+        # 防御：历史记录可能含巨型 tool result（旧坏数据，如 grep 失控的 637 万字符
+        # read_log 结果被原样存进 records），加载时截断避免撑爆 context
+        # （f81e12cac33d 卡死根因：inherit 加载旧 records 的巨型 content → 估成
+        # 330 万 token → 压缩压不掉 → 管道 ended 任务卡 running）。新数据已由各
+        # 工具层截断（bash read_log 等），此处兜底历史坏数据 + 防御未来遗漏。
+        _raw_content = r.content
+        if _raw_content and len(str(_raw_content)) > 20000:
+            _s = str(_raw_content)
+            _orig_len = len(_s)
+            _raw_content = (
+                f"{_s[:10000]}\n\n...[历史记录已截断：原始 {_orig_len} 字符"
+                f"（工具输出过大），完整数据见工具日志]...\n\n{_s[-10000:]}"
+            )
+        msg: dict[str, Any] = {"role": role, "content": _raw_content}
         # 保留执行记录的 sequence，用于压缩块记录实际消息范围
         if getattr(r, "sequence", 0) > 0:
             msg["_record_sequence"] = r.sequence

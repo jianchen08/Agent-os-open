@@ -745,9 +745,21 @@ class ExecutionRecordStorage:
 
             # 逐条替换：pipeline_run_id / container_task_id 改为目标值，
             # record_id 保留不动（clone 忠实复制源数据，源内重复由 track plugin 落盘环节负责）。
+            # 同时截断巨型 content：源管道可能存了失控的工具输出（如 grep 无 head
+            # 的 637 万字符 read_log 结果），若原样 clone 给目标管道，inherit 加载
+            # 时会撑爆子任务 context（f81e12cac33d 根因）。clone 时截断，从传播
+            # 链路根治（加载侧 state_builder 也有兜底截断）。
             for rec in records:
                 rec["pipeline_run_id"] = target_pipeline_id
                 rec["container_task_id"] = new_container_task_id
+                _c = rec.get("content")
+                if _c and len(str(_c)) > 20000:
+                    _s = str(_c)
+                    _orig = len(_s)
+                    rec["content"] = (
+                        f"{_s[:10000]}\n\n...[clone 时截断：原始 {_orig} 字符"
+                        f"（工具输出过大），完整数据见源管道工具日志]...\n\n{_s[-10000:]}"
+                    )
 
             # 序列化回 YAML（保持与源文件一致的序列化风格）
             # 注：safe_dump 输出与原始 YAML 的缩进/换行等细节可能不完全相同，
