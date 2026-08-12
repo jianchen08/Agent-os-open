@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { interpretChatCard } from '@/utils/chatCardInterpreter'
+import { evalPath, interpretChatCard } from '@/utils/chatCardInterpreter'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 
 describe('功能点：interpretChatCard 把声明翻译成 ActivityDetailBlock[]', () => {
@@ -125,5 +125,88 @@ describe('功能点：interpretChatCard 把声明翻译成 ActivityDetailBlock[]
     const decl: ChatCardDeclaration = { filePathSource: 'args.file_path' }
     expect(interpretChatCard(decl, { args: { file_path: '/a/b.ts' } }).filePath).toBe('/a/b.ts')
     expect(interpretChatCard(decl, { args: {} }).filePath).toBeUndefined()
+  })
+
+  // ── file_write 迁移引入的 interpreter 能力（TC T1 6/6） ──
+
+  it('evalPath 支持 `||` 路径回退：返回第一个非 undefined 的备选', () => {
+    // `||` 用于路径型字段（diffStat / diff 源 / when / unless，均经 evalPath），
+    // 兼容「output 子层包装」与「扁平」两种数据形态
+    // 形态一：output 包装 → output.added 命中
+    expect(evalPath({ result: { output: { added: 2 } } }, 'output.added || result.added')).toBe(2)
+    // 形态二：扁平（output 缺失）→ 回退 result.added
+    expect(evalPath({ result: { added: 5 } }, 'output.added || result.added')).toBe(5)
+    // 两者都缺 → undefined
+    expect(evalPath({ result: {} }, 'output.added || result.added')).toBeUndefined()
+    // 单路径（无 ||）保持原行为
+    expect(evalPath({ args: { x: 9 } }, 'args.x')).toBe(9)
+  })
+
+  it('`||` 把空串视为有效非 undefined 值（不继续回退）', () => {
+    // old_content='' 是有效正文（非 undefined），应返回 '' 而非继续找下一条
+    const decl: ChatCardDeclaration = {
+      blocks: [
+        {
+          type: 'diff',
+          diffOldSource: 'output.old_content || result.old_content',
+          diffNewSource: 'output.new_content || result.new_content',
+        },
+      ],
+    }
+    const out = interpretChatCard(decl, { result: { old_content: '', new_content: 'x' } })
+    expect(out.details[0].diffOld).toBe('')
+    expect(out.details[0].diffNew).toBe('x')
+  })
+
+  it('unless 条件（when 的补集）：truthy → 整块不渲染', () => {
+    const decl: ChatCardDeclaration = {
+      blocks: [
+        { type: 'text', label: '差异', source: 'result.diff', when: 'result.diff' },
+        { type: 'text', label: '写入内容', source: 'args.content', unless: 'result.diff' },
+      ],
+    }
+    // 有 diff → 差异块渲染、写入内容块跳过（if/else 互斥）
+    const withDiff = interpretChatCard(decl, { args: { content: 'c' }, result: { diff: 'd' } })
+    expect(withDiff.details.map((d) => d.label)).toEqual(['差异'])
+    // 无 diff → 写入内容块渲染
+    const noDiff = interpretChatCard(decl, { args: { content: 'c' }, result: {} })
+    expect(noDiff.details.map((d) => d.label)).toEqual(['写入内容'])
+  })
+
+  it('diffStat：addedSource/removedSource 均为 number → 产出 {added, removed}', () => {
+    const decl: ChatCardDeclaration = {
+      diffStat: { addedSource: 'output.added || result.added', removedSource: 'output.removed || result.removed' },
+    }
+    // output 包装形态
+    expect(
+      interpretChatCard(decl, { result: { output: { added: 3, removed: 1 } } }).diffStat,
+    ).toEqual({ added: 3, removed: 1 })
+    // 扁平形态
+    expect(interpretChatCard(decl, { result: { added: 1, removed: 0 } }).diffStat).toEqual({
+      added: 1,
+      removed: 0,
+    })
+  })
+
+  it('diffStat：added/removed 非同时为 number → 不产出（对齐 extractWriteDiff）', () => {
+    const decl: ChatCardDeclaration = {
+      diffStat: { addedSource: 'output.added || result.added', removedSource: 'output.removed || result.removed' },
+    }
+    // 缺 removed
+    expect(interpretChatCard(decl, { result: { added: 1 } }).diffStat).toBeUndefined()
+    // 字符串类型（非 number）
+    expect(
+      interpretChatCard(decl, { result: { added: '1', removed: '0' } }).diffStat,
+    ).toBeUndefined()
+    // 完全无数据
+    expect(interpretChatCard(decl, { result: undefined }).diffStat).toBeUndefined()
+  })
+
+  it('块声明 id 透传到 ActivityDetailBlock.id（供按 id 定位）', () => {
+    const decl: ChatCardDeclaration = {
+      blocks: [{ type: 'code', id: 'content', label: '写入内容', source: 'args.content' }],
+    }
+    const out = interpretChatCard(decl, { args: { content: 'hi' } })
+    expect(out.details[0].id).toBe('content')
   })
 })

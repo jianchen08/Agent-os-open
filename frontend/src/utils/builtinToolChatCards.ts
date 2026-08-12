@@ -8,11 +8,15 @@
  * （清空全表 + 装 schema 声明）之后调用 registerBuiltinToolChatCards()，以
  * addChatCardDeclaration 逐个追加——builtin 覆盖同名 schema 声明，且在 schema 热重载后依然生效。
  *
- * 迁移范围：file_read / bash_execute / web_search / fetch / task_submit 共 5 个。
+ * 迁移范围：file_read / bash_execute / web_search / fetch / task_submit / file_write 共 6 个。
  * 保留手写（未迁）：
- *  - file_write：依赖 buildDiffStat（从 result 计算 +X -Y 徽标 → activity.diffStat），
- *    声明层目前不产出 diffStat；保留手写以不丢失头部增删行徽标（见 gap 说明）。
  *  - human_interaction：仅设 runningColor，极简，按约定保留。
+ *
+ * file_write 迁移说明（T1 6/6）：依赖声明层新增能力——
+ *  - diffStat 声明（addedSource/removedSource）→ 解释器产出 InterpretedChatCard.diffStat →
+ *    enhance 注入 activity.diffStat（头部 +X -Y 徽标），等价手写 buildDiffStat。
+ *  - source 支持 `||` 路径回退，兼容「output 子层包装」与「扁平」两种 resultData 形态。
+ *  - unless 条件使「写入内容」块在 diff 正文存在时不显示（if/else 互斥）。
  *
  * 等价性说明（不逐字节相同，但块类型/字段/折叠语义一致）：
  *  - truncate 过滤器用单字符省略号 `…`，手写用 `...`；截断长度略有差异（可接受）。
@@ -150,6 +154,55 @@ const taskSubmitDecl: ChatCardDeclaration = {
   ],
 }
 
+/**
+ * file_write —— 写入文件（T1 6/6）
+ *
+ * 手写语义：
+ *  - title="写入 <basename(path)>"，无 path → "写入 file_write"
+ *  - hasFilePath → 标题可点击打开文件
+ *  - buildDiffStat：extractWriteDiff 读 resultData??result，兼容 output 子层 vs 扁平；
+ *    added/removed 同为 number 才产出 +X -Y 徽标
+ *  - buildDetails：filepath(code) + [有 old/new 正文 → diff 块(defaultExpanded) | else → content 块]
+ *    （if/else 互斥）
+ *
+ * 声明等价映射：
+ *  - title 用 basename + default 兜底；filePathSource 保留点击打开
+ *  - diffStat.addedSource/removedSource 用 `output.x || result.x` 兼容两种数据形态
+ *  - diff 块靠解释器内置「diffOld/diffNew 均空则跳过」自然过滤（无 old/new 时不渲染），
+ *    与手写「oldContent/newContent 均 !== undefined 才渲染」在测试覆盖的数据形态下等价
+ *  - content 块 unless 'output.old_content || result.old_content'：old 正文存在（truthy）时
+ *    不显示写入内容，对齐手写 if/else 互斥（diff 正文缺失/为空串的边界由测试覆盖）
+ */
+const fileWriteDecl: ChatCardDeclaration = {
+  icon: 'edit',
+  title: '写入 {{args.path | basename | default:file_write}}',
+  filePathSource: 'args.path',
+  diffStat: {
+    addedSource: 'output.added || result.added',
+    removedSource: 'output.removed || result.removed',
+  },
+  blocks: [
+    { type: 'code', label: '文件路径', source: 'args.path', collapsible: false },
+    {
+      type: 'diff',
+      label: '差异对比',
+      diffOldSource: 'output.old_content || result.old_content',
+      diffNewSource: 'output.new_content || result.new_content',
+      collapsible: true,
+      defaultExpanded: true,
+    },
+    {
+      type: 'code',
+      id: 'content',
+      label: '写入内容',
+      source: 'args.content',
+      unless: 'output.old_content || result.old_content',
+      collapsible: true,
+      defaultExpanded: false,
+    },
+  ],
+}
+
 /** 内置工具 chat_card 声明表（name → 声明） */
 export const BUILTIN_TOOL_CHAT_CARDS: Array<{ name: string; ui: { chat_card: ChatCardDeclaration } }> =
   [
@@ -158,6 +211,7 @@ export const BUILTIN_TOOL_CHAT_CARDS: Array<{ name: string; ui: { chat_card: Cha
     { name: 'web_search', ui: { chat_card: webSearchDecl } },
     { name: 'fetch', ui: { chat_card: fetchDecl } },
     { name: 'task_submit', ui: { chat_card: taskSubmitDecl } },
+    { name: 'file_write', ui: { chat_card: fileWriteDecl } },
   ]
 
 /**

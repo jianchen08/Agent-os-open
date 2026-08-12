@@ -7,7 +7,7 @@
  * @module toolCardRegistry
  */
 
-import { Copy, FileEdit } from '@/assets/icons'
+import { Copy } from '@/assets/icons'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -15,6 +15,7 @@ import { interpretChatCard } from './chatCardInterpreter'
 import { getChatCardDeclaration } from './chatCardInterpreter'
 import { resolveChatCardIcon } from './chatCardIconRegistry'
 import type { ToolCallContext } from './chatCardInterpreter'
+import { registerBuiltinToolChatCards } from './builtinToolChatCards'
 
 /**
  * 工具卡片渲染配置
@@ -44,6 +45,11 @@ export interface ToolCardConfig {
  * 注册表：工具名 → 渲染配置
  */
 const registry = new Map<string, ToolCardConfig>()
+
+/**
+ * 内置 chat_card 声明是否已惰性装入（首次 enhance 调用时触发，避免模块加载时的循环依赖 TDZ）。
+ */
+let builtinChatCardsRegistered = false
 
 /** 全局文件打开回调（支持 containerTaskId） */
 let globalOnOpenFile: ((filePath: string, containerTaskId?: string) => void | Promise<void>) | null = null
@@ -100,6 +106,16 @@ export function enhanceActivityWithToolConfig(
     return activity
   }
 
+  // 惰性装入内置 chat_card 声明（首次 enhance 调用时）：等价手写 registerToolCard 的
+  // 「声明始终可用」语义，使内置工具卡片无需调用方显式 register 即可被查到（如 file_write
+  // 的等价性测试只引入本模块、不显式注册）。放运行时而非模块加载时，规避
+  // toolCardRegistry ↔ chatCardInterpreter ↔ builtinToolChatCards 的循环依赖 TDZ。
+  // GrowthLoop 在 schema 热重载（loadChatCardDeclarations 会清空全表）后会再次显式注册。
+  if (!builtinChatCardsRegistered) {
+    builtinChatCardsRegistered = true
+    registerBuiltinToolChatCards()
+  }
+
   // 声明优先（S3）：插件 ui.chat_card 声明（后端经 /api/v1/schema 的 tools[].ui.chat_card
   // 透传，前端在 schema 加载时装入注册表）→ 解释器翻译成 ActivityDetailBlock[]，
   // ActivityCard 原样渲染。无声明时回退下面的手写 registry / L0 推断。
@@ -107,7 +123,10 @@ export function enhanceActivityWithToolConfig(
   if (declared) {
     const ctx: ToolCallContext = {
       args: toolCall.tool_args,
-      result: toolCall.result ?? toolCall.resultData,
+      // resultData 优先（流式结构化完整数据，未截断）；缺失时回退 result（历史/兜底）。
+      // 优先级为 resultData ?? result（resultData 优先）——对齐 file_write diff 数据来源
+      // 语义；已迁工具 sample 仅设 result 不设 resultData，故翻转不影响其等价测试。
+      result: toolCall.resultData ?? toolCall.result,
       error: toolCall.error,
       duration_ms: toolCall.duration_ms,
       partial_output: toolCall.partialOutput,
@@ -128,6 +147,10 @@ export function enhanceActivityWithToolConfig(
       const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
       const recordTaskId = toolCall.containerTaskId
       enhanced.onOpenFile = () => openFileCallback(interpreted.filePath as string, recordTaskId)
+    }
+    // 声明 diffStat 求值产出 → 注入 activity.diffStat（等价手写 buildDiffStat，头部 +X -Y 徽标）
+    if (interpreted.diffStat) {
+      enhanced.diffStat = interpreted.diffStat
     }
     return enhanced
   }
@@ -499,107 +522,6 @@ export function safeParseResult(result: unknown): Record<string, unknown> | null
 
   return null
 }
-
-/**
- * 从 file_write 工具结果中解析 diff 数据（added/removed 行数 + 旧/新内容）
- *
- * 数据来源优先级：
- * 1. tc.resultData —— 后端 tool_result 事件携带的结构化完整数据（流式实时路径）
- * 2. tc.result —— 历史消息/兜底，可能为 dict 或 JSON 字符串
- *
- * 后端 _diff_extras 在成功结果里附带：
- * - added / removed：始终存在
- * - old_content / new_content：内容体积在阈值内时存在；超过则置 diff_omitted=true
- */
-function extractWriteDiff(
-  tc: MessageToolCall,
-): { added: number; removed: number; oldContent?: string; newContent?: string } | undefined {
-  // 优先用结构化 resultData（流式实时数据，未截断）
-  const source = tc.resultData ?? tc.result
-  if (!source) return undefined
-  const parsed = safeParseResult(source)
-  if (!parsed) return undefined
-  // 后端 to_dict() 把工具 data 包装在 output 子层下，即
-  //   { status, success, output: { added, removed, old_content, new_content, ... } }
-  // 历史消息 / 部分 mock 数据也可能是扁平结构（added 在顶层）。
-  // 此处同时兼容两种：优先扁平，否则取 output 子层。
-  const data =
-    typeof parsed.output === 'object' && parsed.output !== null
-      ? (parsed.output as Record<string, unknown>)
-      : parsed
-  // 仅在 added/removed 同时存在时视为有效 diff 统计
-  if (typeof data.added !== 'number' || typeof data.removed !== 'number') return undefined
-  return {
-    added: data.added as number,
-    removed: data.removed as number,
-    oldContent: typeof data.old_content === 'string' ? (data.old_content as string) : undefined,
-    newContent: typeof data.new_content === 'string' ? (data.new_content as string) : undefined,
-  }
-}
-
-registerToolCard({
-  name: 'file_write',
-  icon: <FileEdit className="h-4 w-4" />,
-  hasFilePath: true,
-  formatTitle: (tc) => {
-    const path = extractFilePath(tc)
-    const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
-    return `写入 ${fileName}`
-  },
-  buildDiffStat: (tc) => {
-    const diff = extractWriteDiff(tc)
-    return diff ? { added: diff.added, removed: diff.removed } : undefined
-  },
-  buildDetails: (tc) => {
-    const path = extractFilePath(tc)
-    const details: ActivityDetailBlock[] = []
-
-    if (path) {
-      details.push({
-        id: 'filepath',
-        label: '文件路径',
-        content: path,
-        contentType: 'code',
-        collapsible: false,
-      })
-    }
-
-    // 展开查看 diff：后端返回了 old/new 正文时才展示
-    const diff = extractWriteDiff(tc)
-    if (diff && diff.oldContent !== undefined && diff.newContent !== undefined) {
-      details.push({
-        id: 'diff',
-        label: '差异对比',
-        content: '',
-        contentType: 'diff',
-        collapsible: true,
-        // 卡片展开后默认显示差异内容（删除行红/新增行绿），
-        // 避免双重折叠让用户以为"展开后看不到内容"
-        defaultExpanded: true,
-        diffOld: diff.oldContent,
-        diffNew: diff.newContent,
-      })
-    } else {
-      // 无 diff 正文时（如 append 优化路径），退回展示写入内容
-      const args = tc.tool_args as Record<string, unknown> | null
-      if (args?.content) {
-        const contentStr =
-          typeof args.content === 'string' ? args.content : JSON.stringify(args.content, null, 2)
-        details.push({
-          id: 'content',
-          label: '写入内容',
-          content: contentStr,
-          contentType: 'code',
-          collapsible: true,
-          defaultExpanded: false,
-        })
-      }
-    }
-
-    return details
-  },
-  buildActions: buildDefaultActions,
-})
 
 /**
  * human_interaction 工具卡片配置

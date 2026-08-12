@@ -17,14 +17,18 @@ import type { ActivityAction, ActivityDetailBlock, DetailContentType } from '@/t
 /** 卡片内容块声明（type 与 ActivityCard 现有 contentType 对齐） */
 export interface ChatCardBlockDecl {
   type: 'text' | 'code' | 'json' | 'markdown' | 'diff' | 'kv' | 'file' | 'image' | 'link' | 'log'
+  /** 区块 ID（透传到 ActivityDetailBlock.id，供测试/外部按 id 定位） */
+  id?: string
   label?: string
   /** source 路径表达式（args.x / result.y / output.z / error / duration_ms / partial_output） */
   source?: string
   language?: string
   collapsible?: boolean
   defaultExpanded?: boolean
-  /** 条件：falsy → 整块不渲染 */
+  /** 条件：falsy → 整块不渲染（when 的补集为 unless） */
   when?: string
+  /** 条件：truthy → 整块不渲染（when 的补集，用于 if/else 互斥分支的另一侧） */
+  unless?: string
   /** kv 专用：字段映射 */
   fields?: Array<{ key: string; source: string }>
   /** diff 专用 */
@@ -53,6 +57,11 @@ export interface ChatCardDeclaration {
    * activity.filePath + onOpenFile，使卡片标题可点击打开文件（等价手写 hasFilePath）。
    */
   filePathSource?: string
+  /**
+   * 头部增删行数徽标 source（如 file_write 的 +X -Y）。addedSource / removedSource
+   * 各支持 `||` 路径回退；两者求值均为 number 时才产出 diffStat（对齐 extractWriteDiff）。
+   */
+  diffStat?: { addedSource: string; removedSource: string }
 }
 
 /** 工具调用上下文（source/when 的取值域） */
@@ -85,9 +94,8 @@ const FILTERS: Record<string, Filter> = {
   default: (v, d) => (v === '' || v === 'undefined' || v === 'null' ? d ?? '' : v),
 }
 
-/** 沿点路径取值（result/output 经 safeParse） */
-export function evalPath(ctx: ToolCallContext, path?: string): unknown {
-  if (!path) return undefined
+/** 沿单条点路径取值（result/output 经 safeParse） */
+function evalSinglePath(ctx: ToolCallContext, path: string): unknown {
   const [root, ...rest] = path.split('.')
   let current: unknown
   switch (root) {
@@ -121,6 +129,26 @@ export function evalPath(ctx: ToolCallContext, path?: string): unknown {
     current = (current as Record<string, unknown>)[key]
   }
   return current
+}
+
+/**
+ * 沿路径取值，支持 `||` 路径回退。
+ *
+ * `'output.added || result.added'` → 依次求值每条点路径，返回第一个非 undefined 的结果
+ * （空串 '' 视为有效非 undefined 值，会返回）。用于兼容「output 子层包装」与「扁平结构」
+ * 两种数据形态（如 file_write 的 resultData 可能是 {output:{...}} 或扁平 {...}）。
+ */
+export function evalPath(ctx: ToolCallContext, path?: string): unknown {
+  if (!path) return undefined
+  if (path.includes('||')) {
+    for (const alt of path.split('||').map((s) => s.trim())) {
+      if (!alt) continue
+      const v = evalSinglePath(ctx, alt)
+      if (v !== undefined) return v
+    }
+    return undefined
+  }
+  return evalSinglePath(ctx, path)
 }
 
 /**
@@ -181,7 +209,12 @@ function toStr(v: unknown): string {
 /** 单个块声明 → ActivityDetailBlock（值缺失返回 null） */
 function translateBlock(decl: ChatCardBlockDecl, ctx: ToolCallContext): ActivityDetailBlock | null {
   const label = decl.label ?? ''
-  const base = { label, collapsible: decl.collapsible, defaultExpanded: decl.defaultExpanded }
+  const base = {
+    id: decl.id,
+    label,
+    collapsible: decl.collapsible,
+    defaultExpanded: decl.defaultExpanded,
+  }
 
   switch (decl.type) {
     case 'kv': {
@@ -238,6 +271,8 @@ export interface InterpretedChatCard {
   actions: ActivityAction[]
   /** 由 filePathSource 求值得到的文件路径（供 enhance 注入点击打开行为） */
   filePath?: string
+  /** 由 diffStat 声明求值得到的增删统计（供 enhance 注入头部 +X -Y 徽标） */
+  diffStat?: { added: number; removed: number }
 }
 
 // ── 声明注册表：toolName → chat_card 声明（从 /api/v1/schema 的 tools[].ui.chat_card 装载） ──
@@ -291,7 +326,9 @@ export function clearChatCardDeclarations(): void {
 export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContext): InterpretedChatCard {
   const details: ActivityDetailBlock[] = []
   for (const block of decl.blocks ?? []) {
+    // when（falsy 跳过）与 unless（truthy 跳过）互补，支持 if/else 互斥分支
     if (block.when !== undefined && !evalTruthy(ctx, block.when)) continue
+    if (block.unless !== undefined && evalTruthy(ctx, block.unless)) continue
     const translated = translateBlock(block, ctx)
     if (translated) details.push(translated)
   }
@@ -309,6 +346,17 @@ export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContex
     if (v != null && v !== '') filePath = String(v)
   }
 
+  // diffStat 求值：addedSource/removedSource 各支持 `||` 回退；两者均为 number 才产出
+  // （对齐 extractWriteDiff：仅 added/removed 同为 number 时视为有效统计）
+  let diffStat: { added: number; removed: number } | undefined
+  if (decl.diffStat) {
+    const added = evalPath(ctx, decl.diffStat.addedSource)
+    const removed = evalPath(ctx, decl.diffStat.removedSource)
+    if (typeof added === 'number' && typeof removed === 'number') {
+      diffStat = { added, removed }
+    }
+  }
+
   return {
     title: decl.title ? renderTemplate(decl.title, ctx) : undefined,
     icon: decl.icon,
@@ -316,5 +364,6 @@ export function interpretChatCard(decl: ChatCardDeclaration, ctx: ToolCallContex
     details,
     actions,
     filePath,
+    diffStat,
   }
 }
