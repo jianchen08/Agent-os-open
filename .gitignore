@@ -24,6 +24,12 @@ build/
 coverage/
 .coverage
 htmlcov/
+# 阶段 2/5.3 CI 产出的覆盖率报告（供 sync_coverage_to_matrix.py 消费，不入库）
+coverage.xml
+coverage.lcov
+coverage-summary.json
+*.lcov
+docs/coverage_report.md
 
 # ─── 本地工作区(过程文档/私密资料/草稿,不入库)───
 # 锚定到根目录,避免误伤 docs/working/ 等同名子目录
