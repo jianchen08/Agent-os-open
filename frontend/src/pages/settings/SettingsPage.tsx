@@ -7,6 +7,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
+import { renderPageContent } from '@/components/schema/PageRenderer'
 import { PageShell } from '@/components/shared/PageShell'
 import { ApiSettingsPage } from '@/pages/settings/ApiSettingsPage'
 import { ConcurrencySettingsPage } from '@/pages/settings/ConcurrencySettingsPage'
@@ -19,7 +20,7 @@ import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
 import { getSchema } from '@/services/api/schema'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
-import type { SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
+import type { PageDeclaration, SettingsPanelEntry } from '@/services/schema/ContributionRegistry'
 
 /** 左侧导航条目 */
 type NavItem =
@@ -39,6 +40,13 @@ type NavItem =
       pluginId: string
       fileId: string
       pluginName: string
+    }
+  | {
+      kind: 'declared'
+      id: string
+      title: string
+      icon: string
+      page: PageDeclaration
     }
 
 // 内核设置导航项统一来自共享数据源（与 SettingsHubWidget.KERNEL_NAV 同源，避免散点双修）
@@ -99,7 +107,28 @@ export function SettingsPage() {
     return items
   }, [settingsPanels])
 
-  const allItems = useMemo(() => [...BUILTIN_ITEMS, ...pluginItems], [pluginItems])
+  // 直接声明的 settings 页（contributes.pages space=settings，非 config_files）。
+  // 与 plugin 配置（legacyFrom='settingsPanels'）区分——这是 settings 空间声明驱动的统一入口。
+  const declaredItems: NavItem[] = useMemo(
+    () =>
+      contributionRegistry
+        .getPagesBySpace('settings')
+        .filter((p) => !p.legacyFrom)
+        .map((p) => ({
+          kind: 'declared',
+          id: p.id,
+          title: p.title ?? p.id,
+          icon: p.icon ?? '📦',
+          page: p,
+        })),
+    // settingsPanels 在 loadFromSchema 后设置，作为「声明已加载」的触发器
+    [settingsPanels],
+  )
+
+  const allItems = useMemo(
+    () => [...BUILTIN_ITEMS, ...pluginItems, ...declaredItems],
+    [pluginItems, declaredItems],
+  )
   const selected = allItems.find((item) => item.id === selectedId) ?? allItems[0]
 
   return (
@@ -149,6 +178,22 @@ export function SettingsPage() {
               />
             ))}
           </nav>
+
+          {declaredItems.length > 0 && (
+            <>
+              <SectionTitle>插件页面</SectionTitle>
+              <nav className="space-y-1">
+                {declaredItems.map((item) => (
+                  <NavButton
+                    key={item.id}
+                    item={item}
+                    active={selected?.id === item.id}
+                    onClick={() => setSelectedId(item.id)}
+                  />
+                ))}
+              </nav>
+            </>
+          )}
         </aside>
 
         {/* 右侧内联编辑区（嵌入子页时隐藏其独立全屏头，避免双层导航） */}
@@ -180,6 +225,10 @@ export function SettingsPage() {
                 />
               )}
             </div>
+          )}
+          {selected?.kind === 'declared' && (
+            // 声明的 settings 页：经 PageRenderer 分发（widget/schema），声明驱动渲染
+            <div className="h-full min-h-0">{renderPageContent(selected.page)}</div>
           )}
         </div>
       </div>
