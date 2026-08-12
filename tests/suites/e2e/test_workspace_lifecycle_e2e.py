@@ -7,17 +7,15 @@
 - 隔离副本创建与合并验证
 - 清理后无残留文件
 """
-import os
-import subprocess
+
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
 
-
 # ── Mock 辅助 ─────────────────────────────────────────────────────
+
 
 class MockResourceMerge:
     """Mock ResourceMerge 工具。"""
@@ -77,6 +75,7 @@ def _create_lifecycle(base_path: str, config: dict | None = None) -> WorkspaceLi
 
 # ── Fixture ──────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def project_root(tmp_path):
     """创建临时项目根目录。"""
@@ -97,6 +96,7 @@ def lifecycle(tmp_path, ws_root):
 
 
 # ── 1. 场景A：新项目 ────────────────────────────────────────────────
+
 
 class TestScenarioA:
     """场景A：workspace 为空时创建新目录。"""
@@ -125,6 +125,7 @@ class TestScenarioA:
 
 
 # ── 2. 场景B：已有项目无 .git ──────────────────────────────────────
+
 
 class TestScenarioB:
     """场景B：检测到已有文件后初始化 git 并提交。"""
@@ -179,7 +180,103 @@ class TestScenarioB:
         assert result is True
 
 
+# ── 2b. 数据丢失守卫：rev-parse HEAD 瞬态失败不得删除 .git ──────────
+
+
+class TestGitInitCorruptionGuard:
+    """回归：`_git_init_and_initial_commit` 在 rev-parse HEAD 瞬态失败时
+    绝不能删除已有 .git。
+
+    历史 bug：`_run_git` 把超时 / 找不到 git / OSError 都映射成 rc=-1，
+    而 `_git_init_and_initial_commit` 见到 rc!=0 就 `_force_rmtree` 整个 .git，
+    导致一次 30s 超时即把对象库物理删除、提交永久丢失。
+    """
+
+    @staticmethod
+    def _lifecycle_with_rev_parse_override(
+        project: Path, rev_parse_result: tuple[int, str, str]
+    ) -> WorkspaceLifecycleManager:
+        """构造真实 lifecycle，仅把 `rev-parse HEAD` 的返回值替换为给定三元组；
+        其余 git 命令仍走真实 subprocess，便于事后验证对象库是否完好。"""
+        lifecycle = _create_lifecycle(str(project))
+        original_run_git = lifecycle._run_git
+
+        def fake_run_git(*args, cwd=None, timeout=30):  # noqa: ANN002,ANN003
+            if args[:2] == ("rev-parse", "HEAD"):
+                return rev_parse_result
+            return original_run_git(*args, cwd=cwd, timeout=timeout)
+
+        lifecycle._run_git = fake_run_git
+        return lifecycle
+
+    def test_rev_parse_timeout_does_not_wipe_git(self, tmp_path):
+        """rev-parse HEAD 超时(rc=-1)时，不得删除 .git，且返回 False。"""
+        project = tmp_path / "timeout_repo"
+        project.mkdir()
+        (project / "file.txt").write_text("data", encoding="utf-8")
+
+        # 前置：真实建仓 + 提交，得到一个有效 HEAD
+        _create_lifecycle(str(project))._git_init_and_initial_commit(project, "init")
+        verify = _create_lifecycle(str(project))
+        rc, head_sha, _ = verify._run_git("rev-parse", "HEAD", cwd=project)
+        assert rc == 0, "前置：仓库应有有效 HEAD"
+        assert head_sha, "前置：仓库应有有效 HEAD"
+
+        # 注入瞬态超时，再次调用
+        lifecycle = self._lifecycle_with_rev_parse_override(project, (-1, "", "命令执行超时（30秒）"))
+        result = lifecycle._git_init_and_initial_commit(project, "again")
+
+        # 失败闭合 + .git 未被删
+        assert result is False
+        assert (project / ".git").exists()
+        # 对象库完好：用全新未 patch 的 lifecycle 复查 HEAD 仍解析到同一个 sha
+        fresh = _create_lifecycle(str(project))
+        rc2, head_sha2, _ = fresh._run_git("rev-parse", "HEAD", cwd=project)
+        assert rc2 == 0
+        assert head_sha2 == head_sha, "HEAD 提交对象必须存活（数据未丢失）"
+
+    def test_rev_parse_oserror_does_not_wipe_git(self, tmp_path):
+        """rev-parse HEAD 因 OSError(WinError 267)返回 rc=-1 时，同样不得删除 .git。"""
+        project = tmp_path / "oserror_repo"
+        project.mkdir()
+        (project / "file.txt").write_text("data", encoding="utf-8")
+        _create_lifecycle(str(project))._git_init_and_initial_commit(project, "init")
+        verify = _create_lifecycle(str(project))
+        rc, head_sha, _ = verify._run_git("rev-parse", "HEAD", cwd=project)
+        assert rc == 0
+        assert head_sha
+
+        lifecycle = self._lifecycle_with_rev_parse_override(
+            project, (-1, "", "git 工作目录无效或不存在: ... ([WinError 267])")
+        )
+        result = lifecycle._git_init_and_initial_commit(project, "again")
+
+        assert result is False
+        assert (project / ".git").exists()
+        fresh = _create_lifecycle(str(project))
+        rc2, head_sha2, _ = fresh._run_git("rev-parse", "HEAD", cwd=project)
+        assert rc2 == 0
+        assert head_sha2 == head_sha, "HEAD 提交对象必须存活（数据未丢失）"
+
+    def test_genuinely_corrupt_git_is_reinitialized(self, tmp_path):
+        """rev-parse HEAD 返回真实非零(128，确属损坏)时，仍应删除并重建 .git。
+
+        回归守卫：修复不得破坏"真正损坏时重建仓库"的合法路径。
+        """
+        project = tmp_path / "corrupt_repo"
+        project.mkdir()
+        (project / "file.txt").write_text("data", encoding="utf-8")
+        _create_lifecycle(str(project))._git_init_and_initial_commit(project, "init")
+
+        lifecycle = self._lifecycle_with_rev_parse_override(project, (128, "", "fatal: bad revision 'HEAD'"))
+        result = lifecycle._git_init_and_initial_commit(project, "recover")
+
+        assert result is True
+        assert (project / ".git").exists()
+
+
 # ── 3. 场景C：已有项目有 .git ──────────────────────────────────────
+
 
 class TestScenarioC:
     """场景C：通过 worktree 隔离。"""
@@ -222,12 +319,14 @@ class TestScenarioC:
 
 # ── 4. 路径安全性验证 ──────────────────────────────────────────────
 
+
 class TestWorkspaceSafety:
     """工作空间路径安全相关。"""
 
     def test_safe_ws_name_normal(self):
         """正常项目名生成安全的 worktree 名称。"""
         from isolation.workspace_lifecycle import _safe_ws_name
+
         name = _safe_ws_name("my_project", "abc123456789")
         assert "my_project" in name
         assert "abc12345" in name
@@ -235,6 +334,7 @@ class TestWorkspaceSafety:
     def test_safe_ws_name_with_special_chars(self):
         """特殊字符被替换。"""
         from isolation.workspace_lifecycle import _safe_ws_name
+
         name = _safe_ws_name("my<project>test", "abc123456789")
         assert "<" not in name
         assert ">" not in name
@@ -242,6 +342,7 @@ class TestWorkspaceSafety:
     def test_safe_ws_name_truncation(self):
         """长项目名被截断。"""
         from isolation.workspace_lifecycle import _safe_ws_name
+
         long_name = "a" * 50
         name = _safe_ws_name(long_name, "abc123456789")
         # 应被截断，不会太长
@@ -249,6 +350,7 @@ class TestWorkspaceSafety:
 
 
 # ── 5. 清理验证 ────────────────────────────────────────────────────
+
 
 class TestWorkspaceCleanup:
     """工作空间清理验证。"""
@@ -270,12 +372,14 @@ class TestWorkspaceCleanup:
     def test_force_rmtree_handles_missing_dir(self, tmp_path):
         """_force_rmtree 对不存在的目录抛出 FileNotFoundError。"""
         from isolation.workspace_lifecycle import _force_rmtree
+
         # 函数内部未对不存在目录做 try-except，会抛出异常
         with pytest.raises(FileNotFoundError):
             _force_rmtree(str(tmp_path / "nonexistent"))
 
 
 # ── 6. on_task_start 集成测试 ──────────────────────────────────────
+
 
 class TestOnTaskStart:
     """on_task_start 钩子集成测试。"""

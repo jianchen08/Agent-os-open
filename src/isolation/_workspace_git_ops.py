@@ -275,9 +275,24 @@ class _GitOpsMixin:
         git_dir = cwd / ".git"
         needs_init = True
         if git_dir.exists():
-            rc, _, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
+            rc, _, stderr = self._run_git("rev-parse", "HEAD", cwd=cwd)
             if rc == 0:
                 needs_init = False
+            elif rc < 0:
+                # 瞬态失败（超时 / 找不到 git / OSError）——绝不能据此删除 .git。
+                # _run_git 把这三类异常统一映射成 rc=-1（git 自身退出码恒为正），
+                # 历史上这里的 else 分支不区分二者，一次 30s 超时或 WinError 267
+                # 就被误判为"仓库损坏"而 _force_rmtree 整个 .git，导致对象库
+                # 物理删除、提交永久丢失。失败闭合：保留 .git，返回 False 让上层
+                # （workspace_lifecycle.py 的调用方）抛 RuntimeError 介入。
+                logger.error(
+                    "[WorkspaceLifecycle] rev-parse HEAD 失败但属瞬态（rc=%d，疑似超时/IO），"
+                    "拒绝删除 .git 以防数据丢失: %s | %s",
+                    rc,
+                    git_dir,
+                    stderr,
+                )
+                return False
             else:
                 logger.info("[WorkspaceLifecycle] Existing .git is empty/corrupt, removing: %s", git_dir)
                 try:
