@@ -182,7 +182,7 @@ export function ContextWindowSettingsPage() {
   }
 
   return (
-    <PageShell title="上下文窗口" description="管理上下文窗口大小和策略">
+    <PageShell title="上下文窗口" description="管理上下文窗口大小和策略" mainLabel="上下文窗口表单">
       {loadError && (
         <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}

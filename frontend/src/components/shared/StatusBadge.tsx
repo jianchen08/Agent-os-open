@@ -79,29 +79,6 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 /**
- * 获取状态对应的 Tailwind 颜色类名
- *
- * 使用主题 badge CSS 变量，替代不生效的 bg-status-xxx/10 模式。
- * 可在 StatusBadge 之外单独使用，用于需要自定义渲染但复用颜色映射的场景。
- *
- * @param status - 状态字符串
- * @returns Tailwind 类名字符串
- */
-export function getStatusColorClass(status: string): string {
-  const variant = STATUS_VARIANT_MAP[status.toLowerCase()] ?? 'default'
-  const map: Record<string, string> = {
-    default: 'bg-[var(--badge-default-bg)] text-[var(--badge-default-text)] border-[var(--badge-default-border)]',
-    secondary: 'bg-[var(--badge-secondary-bg)] text-[var(--badge-secondary-text)] border-[var(--badge-secondary-border)]',
-    destructive: 'bg-[var(--badge-error-bg)] text-[var(--badge-error-text)] border-[var(--badge-error-border)]',
-    success: 'bg-[var(--badge-success-bg)] text-[var(--badge-success-text)] border-[var(--badge-success-border)]',
-    warning: 'bg-[var(--badge-warning-bg)] text-[var(--badge-warning-text)] border-[var(--badge-warning-border)]',
-    info: 'bg-[var(--badge-info-bg)] text-[var(--badge-info-text)] border-[var(--badge-info-border)]',
-    outline: 'text-foreground border-current',
-  }
-  return map[variant] ?? map.default
-}
-
-/**
  * 状态徽章组件
  *
  * 根据状态值自动映射到 Badge 变体，使用主题 CSS 变量控制颜色。

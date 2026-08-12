@@ -52,7 +52,7 @@ describe('漂移禁令 —— 当前存量 ≤ 基线（迁移单调收敛）', 
 })
 
 describe('统一层消费 —— 下限棘轮（消费回退即回归）', () => {
-  it(`components/shared 生产引用 ≥ ${CONSUMPTION_MIN.shared}（M1 Tools/Agents 已接入）`, () => {
+  it(`components/shared 生产引用 ≥ ${CONSUMPTION_MIN.shared}（M3 全量页面已接入）`, () => {
     const hits = scanSourceForPattern('components/shared', listSourceFiles(SRC))
     expect(hits.length, 'shared 层消费不得回退').toBeGreaterThanOrEqual(CONSUMPTION_MIN.shared)
   })

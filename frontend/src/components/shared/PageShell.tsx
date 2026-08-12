@@ -12,10 +12,10 @@
  * 关联：docs/working/design/frontend-design-unification-execution-plan.md §四 M1.1
  */
 
-import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ErrorState } from './ErrorState'
 import { LoadingState } from './LoadingState'
+import type { ReactNode } from 'react'
 
 type Density = 'comfortable' | 'compact'
 
@@ -33,13 +33,16 @@ interface PageShellProps {
   actions?: ReactNode
   /** 内容区最大宽度 CSS 类名，如 'max-w-3xl'，默认无限制 */
   maxWidth?: string
-  /** 加载态：为 true 时渲染骨架占位，不渲染 children */
+  /** 加载态：为 true 时渲染骨架占位，不渲染 children。
+   *  适用纯内容页（整页只有 loading/error/empty/data 四态）。
+   *  含常驻控件（搜索栏/统计卡）的页面应在 children 内用 inline LoadingState/ErrorState/EmptyState，
+   *  使常驻区在三态下仍可见——这类页面不用本 slot。 */
   loading?: boolean
   /** 自定义骨架内容（loading 为 true 时优先于此） */
   skeleton?: ReactNode
-  /** 错误态：字符串走 ErrorState，或传自定义节点 */
+  /** 错误态：字符串走 ErrorState，或传自定义节点。同 loading 的适用说明。 */
   error?: ReactNode
-  /** 空态节点 */
+  /** 空态节点。同 loading 的适用说明。 */
   empty?: ReactNode
   /** 是否为空数据（触发 empty 渲染） */
   isEmpty?: boolean
@@ -47,6 +50,8 @@ interface PageShellProps {
   embedded?: boolean
   /** 密度档位，默认 'comfortable'（页密度） */
   density?: Density
+  /** main 区域的可访问名（读屏区分各页面/表单区域），如 "API 配置表单" */
+  mainLabel?: string
   /** 页面内容 */
   children?: ReactNode
 }
@@ -75,6 +80,7 @@ export function PageShell({
   isEmpty,
   embedded = false,
   density = 'comfortable',
+  mainLabel,
   children,
 }: PageShellProps) {
   const body = (
@@ -109,6 +115,7 @@ export function PageShell({
         </header>
       )}
       <main
+        aria-label={mainLabel}
         className={`flex-1 space-y-4 overflow-y-auto p-6${maxWidth ? ` ${maxWidth}` : ''}`}
       >
         {body}

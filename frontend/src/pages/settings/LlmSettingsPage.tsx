@@ -237,7 +237,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   }
 
   return (
-    <PageShell title="LLM 模型配置" description="配置大语言模型参数" embedded={embedded}>
+    <PageShell title="LLM 模型配置" description="配置大语言模型参数" embedded={embedded} mainLabel="LLM 模型配置表单">
       {loadError && (
         <div className="mb-4 flex items-center justify-between rounded-lg bg-destructive/10 px-4 py-3">
           <div>

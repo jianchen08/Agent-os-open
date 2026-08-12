@@ -124,7 +124,7 @@ export function ApiSettingsPage() {
   }
 
   return (
-    <PageShell title="API 配置" description="管理外部 API 密钥和端点" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
+    <PageShell title="API 配置" description="管理外部 API 密钥和端点" backHref="/settings" backLabel="设置" maxWidth="max-w-3xl" mainLabel="API 配置表单">
       {loadError && (
         <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}

@@ -151,7 +151,7 @@ export function CostSettingsPage() {
   }
 
   return (
-    <PageShell title="成本控制" description="Token 用量限制和预算管理">
+    <PageShell title="成本控制" description="Token 用量限制和预算管理" mainLabel="成本控制表单">
       {loadError && (
         <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}

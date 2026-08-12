@@ -267,6 +267,9 @@ export function PluginsSettingsPage({
   if (embedded) {
     return (
       <PageShell title="插件管理" embedded>
+        <div className="text-muted-foreground font-mono text-xs">
+          {plugins.filter((p) => p.enabled).length}/{plugins.length} 启用
+        </div>
         {mainContent}
       </PageShell>
     )
