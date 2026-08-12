@@ -6,7 +6,7 @@
  * 文件系统/API 类 AC 标记为 skip。
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import {
   API_BASE,
   TEST_USER,
@@ -77,7 +77,8 @@ test.describe('AC 验证', () => {
     });
 
     await loginAndNavigateTo(page, ROUTES.HOME);
-    await page.waitForTimeout(3000);
+    // T5#8：用条件等待替代固定 sleep——等网络空闲即可收集 console error。
+    await page.waitForLoadState('networkidle');
 
     // 过滤掉已知的非关键错误（如网络请求失败）
     const criticalErrors = errors.filter(
@@ -147,10 +148,14 @@ test.describe('AC 验证', () => {
   // ── AC-8: TokenManager — 登录后等待仍在线 ──────────────────
 
   test('AC-8: 登录后等待 10 秒仍在线', async ({ page }) => {
+    // T5#6 修复：用 page.clock 注入可控时钟，替代真实墙钟 waitForTimeout(10_000)。
+    // TTL 边界的精确断言（边界前后真值）已下沉到 authStoreTokenExpiry.test.ts
+    // （vi.useFakeTimers）；此 e2e 只验证"快进 10s 应用时钟后仍在线"且不阻塞墙钟。
+    await page.clock.install();
     await login(page);
 
-    // 等待 10 秒
-    await page.waitForTimeout(10_000);
+    // 快进 10s 应用时钟（token 续期/过期检查的 setInterval 由 fake clock 驱动）
+    await page.clock.fastForward(10_000);
 
     // 验证仍在已认证状态（未被踢出）
     const token = await page.evaluate(() => localStorage.getItem('access_token'));
@@ -206,8 +211,9 @@ test.describe('AC 验证', () => {
       // 点击保存
       const saveBtn = page.locator('button').filter({ hasText: /保存|save/i }).first();
       if (await saveBtn.isVisible().catch(() => false)) {
+        // T5#8：用条件等待替代固定 sleep——等保存请求的网络空闲。
         await saveBtn.click();
-        await page.waitForTimeout(1000);
+        await page.waitForLoadState('networkidle');
       }
 
       // 刷新页面
@@ -299,7 +305,7 @@ test.describe('AC 验证', () => {
     if (hasInput) {
       const testValue = 'e2e-ac14-' + Date.now();
       await input.fill(testValue);
-      await page.waitForTimeout(500);
+      // T5#8：fill 后值立即同步到 DOM，原固定 sleep 多余——直接断言受控输入值。
 
       // 验证输入值已更新
       const currentValue = await input.inputValue().catch(() => '');

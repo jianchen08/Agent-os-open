@@ -5,7 +5,7 @@
  * 对应 features.md 场景 8：审批交互
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import { loginAndWaitReady } from '../helpers/auth';
 import { sendChatMessage } from '../utils/test-helpers';
 import { waitForAssistantMessage, waitForInteractionCard } from '../helpers/assertions';
@@ -60,7 +60,7 @@ test.describe('旅程08：审批交互', () => {
         console.log(`点击前状态: ${statusBefore}`);
 
         await button.click();
-        await page.waitForTimeout(2000);
+        await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
 
         // 验证状态变化或卡片消失
         const statusAfter = await interactionCard.getAttribute('data-activity-status').catch(() => '');
@@ -86,7 +86,7 @@ test.describe('旅程08：审批交互', () => {
       const button = interactionCard.locator('button').first();
       if (await button.isVisible().catch(() => false)) {
         await button.click();
-        await page.waitForTimeout(3000);
+        await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
       }
     }
 

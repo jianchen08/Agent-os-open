@@ -35,7 +35,8 @@ test.describe('旅程05：触发器', () => {
 
     if (hasBtn) {
       await createBtn.click();
-      await page.waitForTimeout(500);
+      await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
+
 
       // 验证创建表单/对话框出现
       const form = page.locator('form, dialog, [role="dialog"], .modal').first();
@@ -56,7 +57,8 @@ test.describe('旅程05：触发器', () => {
 
     if (hasToggle) {
       await toggleBtn.click();
-      await page.waitForTimeout(500);
+      await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
+
       // 验证状态变化（页面无报错即可）
       const errorEl = page.locator('.error, [role="alert"]').filter({ hasText: /error/i });
       const hasError = await errorEl.isVisible().catch(() => false);
@@ -70,7 +72,8 @@ test.describe('旅程05：触发器', () => {
 
     if (hasFilter) {
       await filterEl.click();
-      await page.waitForTimeout(300);
+      await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
+
     }
   });
 });

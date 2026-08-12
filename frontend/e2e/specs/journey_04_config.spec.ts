@@ -157,7 +157,8 @@ test.describe('旅程04：配置修改', () => {
         const testValue = 'e2e-test-' + Date.now();
         await input.fill(testValue);
         await saveBtn.click();
-        await page.waitForTimeout(1000);
+        await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
+
 
         // 刷新验证（配置持久化）
         await page.reload();

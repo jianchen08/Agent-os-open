@@ -5,7 +5,7 @@
  * 对应 features.md 场景 7：认证
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import { APP_URL, API_BASE, TEST_USER, VIEWER_USER, registerUser, loginViaAPI, logout } from '../helpers/auth';
 import { ROUTES } from '../helpers/navigation';
 
@@ -45,7 +45,7 @@ test.describe('旅程07：认证', () => {
       // 点击注册
       const registerBtn = page.locator('button').filter({ hasText: /注册|register/i }).first();
       await registerBtn.click();
-      await page.waitForTimeout(2000);
+      await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
 
       // 验证结果：要么成功跳转，要么提示已存在
       const currentUrl = page.url();

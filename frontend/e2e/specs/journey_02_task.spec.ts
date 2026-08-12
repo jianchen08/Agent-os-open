@@ -50,7 +50,8 @@ test.describe('旅程02：任务全流程', () => {
 
     if (hasBtn) {
       await createBtn.click();
-      await page.waitForTimeout(500);
+      await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
+
 
       // 验证表单出现
       const form = page.locator('form, dialog, .modal, [role="dialog"]').first();

@@ -11,7 +11,7 @@
  * 断言方式：DOM 元素断言（toBeVisible / toHaveCount）
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import { loginAndWaitReady } from '../helpers/auth';
 import { sendChatMessage } from '../utils/test-helpers';
 import * as path from 'path';

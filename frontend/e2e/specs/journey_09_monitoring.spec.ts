@@ -5,7 +5,7 @@
  * 对应 features.md 场景 9：监控调试
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import { loginAndNavigateTo, navigateTo, ROUTES } from '../helpers/navigation';
 
 test.describe.configure({ timeout: 120_000 });

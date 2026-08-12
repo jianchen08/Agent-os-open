@@ -5,7 +5,7 @@
  * 对应 features.md 场景 3：工具调用
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import { loginAndWaitReady } from '../helpers/auth';
 import { sendChatMessage } from '../utils/test-helpers';
 import { loginAndNavigateTo, ROUTES } from '../helpers/navigation';
@@ -93,10 +93,10 @@ test.describe('旅程03：工具调用', () => {
 
       if (hasToggle) {
         await toggleBtn.click();
-        await page.waitForTimeout(500);
+        await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
         // 切换回来
         await toggleBtn.click();
-        await page.waitForTimeout(500);
+        await page.waitForLoadState('networkidle'); // T5#8: click 后等网络空闲，替代固定 sleep
       }
     }
   });

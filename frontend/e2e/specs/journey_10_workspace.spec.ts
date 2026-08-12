@@ -5,7 +5,7 @@
  * 对应 features.md 场景 10：工作空间
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures';
 import { loginAndNavigateTo, navigateTo, ROUTES } from '../helpers/navigation';
 import { loginAndWaitReady } from '../helpers/auth';
 import { sendChatMessage } from '../utils/test-helpers';
