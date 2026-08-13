@@ -1,5 +1,6 @@
 """任务提交工具"""
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -21,6 +22,64 @@ from agentos_plugin_sdk import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── 0.2 服务提供者适配（FP-MIGR：infrastructure.service_provider 已废弃）──
+#
+# 0.1 的工具经 infrastructure.service_provider 拿 task_worker /
+# workspace_lifecycle_manager / agent_registry / execution_record_storage。
+# 0.2 无该单例层，内核能力经 sidecar 注入：
+# - task_worker：由 pipeline-executor.start_run 能力替代（server.py 注入 _launcher）；
+# - workspace_lifecycle_manager / agent_registry / execution_record_storage：
+#   0.2 sidecar 无等价实例 → None（调用方已有降级守卫/磁盘回退，文档化降级）。
+# 迁移测试可 monkeypatch 模块级 _get_service_provider 注入 mock。
+
+_launcher: Any = None
+
+
+def _configure_launcher(caller: Any) -> None:
+    """注入 pipeline-executor 能力调用器（server.py 启动时调用，模块级单例）。"""
+    global _launcher  # noqa: PLW0603
+    _launcher = caller
+
+
+class _TaskWorkerShim:
+    """0.1 task_worker.submit_task 的 0.2 适配：提交 → pipeline-executor.start_run。
+
+    契约保持同步返回 bool（调用方 `if not task_worker.submit_task(...)`）：
+    0.2 的 start_run 是 async 能力调用，这里经 create_task 后台调度（fire-and-forget），
+    返回 True 表示已受理；launcher 未注入或调度失败返回 False → 调用方降级。
+    """
+
+    def __init__(self, caller: Any) -> None:
+        self._caller = caller
+
+    def submit_task(self, task_data: dict[str, Any]) -> bool:
+        if self._caller is None:
+            return False
+        try:
+            asyncio.get_running_loop().create_task(
+                self._caller("pipeline-executor.start_run", task_data)
+            )
+            return True
+        except RuntimeError:
+            return False
+
+
+class _ServiceProviderShim:
+    """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。"""
+
+    def get(self, key: str) -> Any:
+        if key == "task_worker":
+            return _TaskWorkerShim(_launcher)
+        # workspace_lifecycle_manager / agent_registry / execution_record_storage
+        # 0.2 sidecar 无等价实例：调用方已有降级守卫（agent_registry 有磁盘回退）。
+        return None
+
+
+def _get_service_provider() -> Any:
+    """0.2 服务提供者获取（FP-MIGR：替代已废弃的 infrastructure.service_provider）。"""
+    return _ServiceProviderShim()
+
 
 # ── 危险目标空间目录列表 ──
 # 这些目录是操作系统关键目录，绝不允许作为任务的目标工作空间。
@@ -62,7 +121,8 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
 def _get_valid_metric_ids() -> set[str] | None:
     """获取所有合法的评估指标 ID 集合。
 
-    通过 MetricLoader 从 config/evaluation_metrics/ 加载。
+    0.2 评估指标的真相来源是 config/evaluation/evaluation_metrics.yaml
+    （evaluation 插件同款读取；不再依赖已删除的 0.1 evaluation.loader.MetricLoader）。
     用于在提交期校验 LLM 传入的 acceptance_criteria key 是否为真实存在的指标 ID，
     避免「把 pass_threshold 等 value 子字段误填为指标 ID」导致评估期反复
     METRIC_NOT_FOUND。
@@ -72,12 +132,17 @@ def _get_valid_metric_ids() -> set[str] | None:
         不阻断正常提交）。
     """
     try:
-        from evaluation.loader import MetricLoader  # noqa: PLC0415
+        import yaml  # noqa: PLC0415
 
-        loader = MetricLoader()
-        if not loader.metrics:
-            loader.load_all()
-        return set(loader.metrics.keys())
+        project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+        yaml_path = project_root / "config" / "evaluation" / "evaluation_metrics.yaml"
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        metrics = data.get("metrics", []) if isinstance(data, dict) else []
+        valid = {
+            m["name"] for m in metrics if isinstance(m, dict) and m.get("name")
+        }
+        # 空集合视作加载失败（fail-open，不阻断正常提交）
+        return valid or None
     except Exception as exc:
         logger.warning(
             "[TaskSubmit] 评估指标加载失败，跳过 metric_id 校验: %s",
@@ -976,9 +1041,7 @@ class TaskSubmitTool(BuiltinTool):
         logger.info("[TaskSubmit] PERF | create_task=%.1fms", (_t_create - _t0) * 1000)
 
         # ── 7. 提交到后台执行器 ──
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        task_worker = get_service_provider().get("task_worker")
+        task_worker = _get_service_provider().get("task_worker")
         if not task_worker:
             await task_service.hard_delete(task.id)
             return create_failure_result(
@@ -1047,7 +1110,7 @@ class TaskSubmitTool(BuiltinTool):
 
             _pre_pipeline_id = _uuid.uuid4().hex[:12]
             try:
-                exec_storage = get_service_provider().get("execution_record_storage")
+                exec_storage = _get_service_provider().get("execution_record_storage")
                 if exec_storage:
                     # root_task_id 必须与 task_executor._bind_pipeline_run 的
                     # register_pipeline(pipeline_id, root_id) 一致，否则引擎注册时
@@ -1258,9 +1321,7 @@ class TaskSubmitTool(BuiltinTool):
         if _ws_meta_path:
             container_workspace_path = _ws_meta_path
 
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        task_worker = get_service_provider().get("task_worker")
+        task_worker = _get_service_provider().get("task_worker")
         if task_worker:
             task_worker.submit_task(
                 {
@@ -1311,12 +1372,17 @@ class TaskSubmitTool(BuiltinTool):
         """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。"""
         import asyncio  # noqa: PLC0415
 
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        provider = get_service_provider()
+        provider = _get_service_provider()
         lifecycle = provider.get("workspace_lifecycle_manager") if provider else None
         if lifecycle is None:
-            return task, "工作空间管理器不可用，任务提交失败"
+            # 0.2 文档化降级（FP-MIGR）：sidecar 无 workspace_lifecycle_manager
+            # 实例（0.1 infrastructure 层已废弃）→ 跳过工作空间初始化并记录警告，
+            # 不阻塞任务提交（否则 0.2 下所有提交都会硬失败）。
+            logger.warning(
+                "[TaskSubmit] workspace_lifecycle_manager 不可用，跳过工作空间初始化 | task_id=%s",
+                task.id,
+            )
+            return task, None
 
         # 注入 isolation_mode（lifecycle 内部依赖此字段决策 worktree/non_isolated 模式）
         if "isolation_mode" not in task_data:
@@ -1577,9 +1643,7 @@ class TaskSubmitTool(BuiltinTool):
     def _get_agent_config_from_registry(self, target_id: str) -> Any | None:
         """从 agent_registry 查找 Agent 配置。"""
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            provider = get_service_provider()
+            provider = _get_service_provider()
             agent_registry = provider.get("agent_registry")
             if agent_registry is not None:
                 return agent_registry.get(target_id)
