@@ -22,5 +22,7 @@ pub mod template;
 
 pub use engine::AdrEngineImpl;
 pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
+pub use pipeline_loop::apply_messages_op_update;
+pub use pipeline_loop::apply_slot_ops_to_array;
 pub use pipeline_loop::PipelineExecutor;
 pub use store::SqliteStore;

@@ -636,6 +636,21 @@ impl PipelineExecutor {
         updates: &HashMap<String, serde_json::Value>,
     ) {
         for (k, v) in updates {
+            if k == "messages" {
+                // 新模型：插件 emit op（`{_ops:[set/insert]}`）→ "一次 apply" 到内存 state + 表。
+                // 与表侧 apply_messages_ops_to_table 是同一组 op 的两个落点（无 mirror、无 diff）。
+                if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
+                    let tenant_id = self.default_tenant.tenant_id.clone();
+                    if let Err(e) =
+                        apply_messages_op_update(state, self.store.as_ref(), &tenant_id, ops).await
+                    {
+                        warn!(error = %e, "apply_messages_op_update 失败（继续）");
+                        self.metrics.inc_persist_failure();
+                    }
+                    continue;
+                }
+                // 旧模型（全量数组）：整体替换（兼容过渡，待 slice4 退役）。
+            }
             set_key(state, k, v.clone());
         }
     }
@@ -821,6 +836,167 @@ fn messages_diff_ops(
         }));
     }
     Some(ops)
+}
+
+/// 把槽位 op（`set`/`insert`，按**稳定 seq** 寻址）应用到**内存稠密数组** `state["messages"]`。
+///
+/// 与表侧 `SqliteStore::apply_messages_ops_to_table`（稀疏、留 gap）是**同一组 op 的两个落点**：
+/// 引擎收到插件 emit 的 op 后，"一次 apply" 同时更新内存 state 与 DB。详见
+/// `docs/message_persistence_design.md`。
+///
+/// 约定：内存数组稠密（删除会紧凑），每个元素自带稳定 `seq` 字段（≠ 数组下标）。
+/// - `set(seq, msg)`：msg 为对象 → 找到该 seq 则替换内容（保留 seq=modify）；找不到则按 seq
+///   升序插入（append 或填回某 seq）。
+/// - `set(seq, null)`：删除该 seq 的元素（数组紧凑，**幸存元素 seq 不变**）。
+/// - `insert(at, msg)`：`seq>=at` 的元素 `seq+1`（后段顺延），新元素占 `at`。
+pub fn apply_slot_ops_to_array(arr: &mut Vec<serde_json::Value>, ops: &[serde_json::Value]) {
+    fn seq_of(m: &serde_json::Value) -> i64 {
+        m.get("seq").and_then(|v| v.as_i64()).unwrap_or(i64::MIN)
+    }
+    fn set_seq(msg: &mut serde_json::Value, seq: i64) {
+        if let Some(o) = msg.as_object_mut() {
+            o.insert("seq".into(), serde_json::json!(seq));
+        }
+    }
+
+    for op in ops {
+        let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "set" => {
+                let Some(seq) = op.get("seq").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                match op.get("msg") {
+                    Some(msg) if msg.is_object() => {
+                        let mut new_msg = msg.clone();
+                        set_seq(&mut new_msg, seq);
+                        if let Some(pos) = arr.iter().position(|m| seq_of(m) == seq) {
+                            arr[pos] = new_msg; // modify：同 seq 替换内容
+                        } else {
+                            // 新 seq：按升序插入（append 或填回特定 seq）
+                            let pos = arr
+                                .iter()
+                                .position(|m| seq_of(m) > seq)
+                                .unwrap_or(arr.len());
+                            arr.insert(pos, new_msg);
+                        }
+                    }
+                    _ => {
+                        // delete：移除该 seq 元素（数组紧凑，幸存元素 seq 不变）
+                        if let Some(pos) = arr.iter().position(|m| seq_of(m) == seq) {
+                            arr.remove(pos);
+                        }
+                    }
+                }
+            }
+            "insert" => {
+                let Some(at) = op.get("at").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                let Some(msg) = op.get("msg") else {
+                    continue;
+                };
+                // 后段顺延：seq>=at 的元素 seq+1
+                for m in arr.iter_mut() {
+                    let s = seq_of(m);
+                    if s >= at {
+                        set_seq(m, s + 1);
+                    }
+                }
+                let mut new_msg = msg.clone();
+                set_seq(&mut new_msg, at);
+                let pos = arr.iter().position(|m| seq_of(m) > at).unwrap_or(arr.len());
+                arr.insert(pos, new_msg);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// "一次 apply"：把插件 emit 的 messages op **同时**应用到内存 state 与 DB 表。
+///
+/// 这是新模型（op-based）的接线核心：引擎收到插件 `state_updates["messages"]={_ops:[...]}`
+/// 后调用本函数——**同一组 op** 既更新 `state["messages"]`（`apply_slot_ops_to_array`，
+/// 稠密、元素带 seq），又落 `message_slots` 表（`apply_messages_ops_to_table`，稀疏、留 gap）。
+/// 无 mirror、无 diff。详见 `docs/message_persistence_design.md`。
+///
+/// - `pipeline_id` 从 `state["pipeline_id"]` 读，为空则只更内存、跳过落表（首轮未注入兜底）。
+/// - 内存侧无 `messages` 数组时自动 seed 一个空数组。
+pub async fn apply_messages_op_update(
+    state: &mut serde_json::Value,
+    store: &dyn agentos_core::traits::StorageBackend,
+    tenant_id: &str,
+    ops: &[serde_json::Value],
+) -> Result<(), agentos_core::types::StorageError> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    // 1. 内存：把 op 应用到 state["messages"]（稠密数组，元素带 seq）
+    if !state.is_object() {
+        *state = serde_json::Value::Object(Default::default());
+    }
+    let need_seed = !matches!(state.get("messages"), Some(v) if v.is_array());
+    if need_seed {
+        state
+            .as_object_mut()
+            .expect("ensured object above")
+            .insert("messages".into(), serde_json::Value::Array(vec![]));
+    }
+
+    // 解析无 seq 的 set（= append）：引擎按 state 现有 max seq 分配递增 seq。
+    // 这样 append 类插件（llm_core/tool_core/user push）无需感知 seq——seq 是引擎分配的稳定槽位。
+    // 显式带 seq 的 op（modify/fill-gap/insert）照原样透传，并用其 seq 推进 max。
+    let mut max_seq = state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("seq").and_then(|s| s.as_i64()))
+                .max()
+                .unwrap_or(-1)
+        })
+        .unwrap_or(-1);
+    let resolved: Vec<serde_json::Value> = ops
+        .iter()
+        .map(|op| {
+            let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            let explicit = op.get("seq").and_then(|v| v.as_i64());
+            match (kind, explicit) {
+                ("set", None) => {
+                    max_seq += 1;
+                    let mut o = op.clone();
+                    if let Some(obj) = o.as_object_mut() {
+                        obj.insert("seq".into(), serde_json::json!(max_seq));
+                    }
+                    o
+                }
+                (_, Some(s)) => {
+                    if s > max_seq {
+                        max_seq = s;
+                    }
+                    op.clone()
+                }
+                _ => op.clone(),
+            }
+        })
+        .collect();
+
+    if let Some(a) = state.get_mut("messages").and_then(|v| v.as_array_mut()) {
+        apply_slot_ops_to_array(a, &resolved);
+    }
+
+    // 2. 表：同一组 op 落 message_slots（pipeline_id 为空则跳过）
+    let pipeline_id = state
+        .get("pipeline_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !pipeline_id.is_empty() {
+        store
+            .apply_messages_ops_to_table(pipeline_id, tenant_id, &resolved)
+            .await?;
+    }
+    Ok(())
 }
 
 // ═════════════════════════════════════════════════════════════════

@@ -154,6 +154,15 @@ impl SessionCoordinator {
         } else {
             self.metrics.inc_event_bus_dropped();
         }
+        // B4：记录到重放缓冲，让断线重连能回放聊天事件（new_message/stream_start 等）。
+        // 交互族（interaction_*）走 interaction family，record() 会拒绝（B9：重放过期审批无意义）；
+        // 其余走 Stream 族，正常缓冲。与 emit_widget/emit_stream 一致（它们也记录）。
+        let ev = if event_type.starts_with("interaction_") {
+            ReplayEvent::interaction(sequence, payload_str.clone())
+        } else {
+            ReplayEvent::new(sequence, payload_str.clone())
+        };
+        self.replay.record(thread_id, ev).await;
         delivered
     }
 

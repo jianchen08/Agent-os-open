@@ -1463,6 +1463,18 @@ pub trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// 应用身份/seq 感知的 messages ops 到 message_slots 表（op-based 新模型单写入器）。
+    /// 引擎把插件 emit 的 `set/insert` op 落表（与 `apply_slot_ops_to_array` 落内存是同一组 op）。
+    /// 默认 no-op（mock/null store 用），SqliteStore 覆盖为真实实现。详见 docs/message_persistence_design.md。
+    async fn apply_messages_ops_to_table(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+        _ops: &[serde_json::Value],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// upsert 一个 state 标量字段到 pipeline_state 表（覆盖最新值）。
     /// 仅对插件 manifest 声明的 persistent_fields 调用；累计语义由插件保证。
     async fn upsert_state_field(

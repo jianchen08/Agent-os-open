@@ -602,9 +602,10 @@ class LLMCore(ICorePlugin):
         # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）
         history = state.get("messages", [])
         for m in history:
-            # 清理内部标记字段，不发给 LLM
-            if "_record_sequence" in m:
-                m = {k: v for k, v in m.items() if k != "_record_sequence"}  # noqa: PLW2901
+            # 清理内部标记字段，不发给 LLM：
+            # _record_sequence 旧标记；seq 新模型槽位号（内核 apply 时带上，LLM 不需要）。
+            if "_record_sequence" in m or "seq" in m:
+                m = {k: v for k, v in m.items() if k not in ("_record_sequence", "seq")}  # noqa: PLW2901
             messages.append(m)
 
         # 4. 多模态内容（合并到最后一条用户消息）

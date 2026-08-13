@@ -10,12 +10,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use agentos_config::load_pipeline_definition;
-use agentos_core::traits::{PluginInvoker, StorageBackend};
+use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
     Branch, Message, MessageRecord, PluginContext, PluginError, PluginResult, RunRecord,
     RunStatus, ToolExecutionResult, TraceEntry,
 };
-use agentos_engine::PipelineExecutor;
+use agentos_engine::{PipelineExecutor, SqliteStore};
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -406,6 +406,25 @@ fn make_executor(invoker: Arc<MockInvoker>, plugin_ids: &[&str]) -> PipelineExec
     )
 }
 
+/// 构造 PipelineExecutor（MockInvoker + 真实 SqliteStore，用于验证 messages 落表）。
+fn make_executor_with_store(
+    invoker: Arc<MockInvoker>,
+    plugin_ids: &[&str],
+    store: Arc<SqliteStore>,
+    run_id: &str,
+) -> PipelineExecutor {
+    let store_dyn: Arc<dyn StorageBackend> = store;
+    PipelineExecutor::new(
+        invoker as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        agentos_core::types::TenantContext::new("default", "session_test"),
+        plugin_ids.iter().map(|s| s.to_string()),
+        store_dyn,
+        run_id,
+        "main",
+    )
+}
+
 // ── AC5: 转换产物可被 PipelineExecutor 正确执行 ─────────────────
 
 /// 全链路：default.yaml → PipelineDefinition → PipelineConfig → executor.run。
@@ -610,4 +629,98 @@ async fn test_converted_pipeline_routes_tool_calls_to_loop() {
         final_state.get("ended").and_then(|v| v.as_bool()),
         Some(true)
     );
+}
+
+// ── op-based 消息持久化接线验证（Step 1b-slice2）─────────────
+//
+// 验证：插件在 state_updates 里 emit `messages: {_ops:[set/insert]}` 时，
+// 引擎 merge_and_project 把同一组 op "一次 apply" 到内存 state 与 message_slots 表。
+// 详见 docs/message_persistence_design.md。
+#[tokio::test]
+async fn wiring_messages_ops_applied_to_state_and_table() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_default_pipeline(tmp.path());
+
+    let def = load_pipeline_definition(tmp.path(), "default").expect("load pipeline");
+    let engine_cfg = def.to_engine_config();
+
+    let plugin_ids = [
+        "pipeline_tool_schema",
+        "pipeline_param_inject",
+        "pipeline_security_check",
+        "pipeline_multimodal_preprocessor",
+        "pipeline_context_window_guard",
+        "pipeline_prompt_build",
+        "pipeline_pause_guard",
+        "pipeline_llm_core",
+        "pipeline_stop_check",
+        "pipeline_result_format",
+    ];
+
+    let invoker = Arc::new(MockInvoker::new());
+    // llm_core emit messages op（新模型）+ 纯文本回复（→ end 路由终止）
+    invoker.set_result(
+        "pipeline_llm_core",
+        PluginResult {
+            state_updates: HashMap::from([
+                (
+                    "messages".to_string(),
+                    json!({
+                        "_ops": [
+                            { "op": "set", "seq": 0, "msg": { "role": "user", "content": "你好" } },
+                            { "op": "set", "seq": 1, "msg": { "role": "assistant", "content": "嗨" } },
+                        ]
+                    }),
+                ),
+                ("raw_result".to_string(), json!("嗨")),
+                ("raw_tool_calls".to_string(), json!([])),
+            ]),
+            ..Default::default()
+        },
+    );
+
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    let executor = make_executor_with_store(
+        Arc::clone(&invoker),
+        &plugin_ids,
+        Arc::clone(&store),
+        "run_wiring",
+    );
+
+    let initial_state = json!({
+        "pipeline_id": "p_wiring",
+        "message": "你好",
+        "agent_id": "agentos",
+        "core_type": "llm_call",
+        "core_plugin": "pipeline_llm_core",
+        "ended": false,
+        "suspended": false,
+    });
+
+    let final_state = executor
+        .run(
+            &engine_cfg,
+            &agentos_core::types::StepLibrary::default(),
+            initial_state,
+        )
+        .await
+        .expect("run should succeed");
+
+    // 内存 state：messages 已应用 op（含 seq）
+    let arr = final_state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .expect("messages 应存在");
+    assert_eq!(arr.len(), 2, "内存应有 2 条消息");
+    assert_eq!(arr[0].get("seq").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(arr[1].get("seq").and_then(|v| v.as_u64()), Some(1));
+
+    // 表：同一组 op 已落 message_slots
+    let rows = store
+        .get_slot_messages_by_pipeline("p_wiring", "default", MessageQueryOpts::default())
+        .expect("读表应成功");
+    let seqs: Vec<u32> = rows.iter().map(|r| r.seq_in_branch).collect();
+    assert_eq!(seqs, vec![0, 1], "表应有 seq 0,1（op 一次落表）");
+    let roles: Vec<&str> = rows.iter().map(|r| r.role.as_str()).collect();
+    assert_eq!(roles, vec!["user", "assistant"]);
 }

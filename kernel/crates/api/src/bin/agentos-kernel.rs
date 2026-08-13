@@ -336,6 +336,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 之后 login/me/register 均查 DB；进程重启用户不丢。幂等：已存在则跳过。
     seed_admin_user(store.clone()).await;
 
+    // B2：启动时清扫孤儿 run——上次进程崩溃留下的 status='running' 的 run
+    // 标记为 failed + 补 ended_at（persist_run_end 未执行的真实表现；不清扫会永远卡
+    // running，历史/会话状态悬空）。已结束的 run 不受影响。
+    let reaped = store.reap_orphan_runs("default").unwrap_or(0);
+    if reaped > 0 {
+        warn!(target: "agentos-kernel", reaped = reaped, "启动清扫孤儿 run（标记为 failed）");
+    }
+
     // 创建真实插件调用器——按 host_type 透明分发：
     //   Sidecar: 通过 MCP stdio fork Python sidecar 执行插件
     //   InProcess: 经 NativePluginLoader 加载 cdylib 走 C-ABI（放进插件目录即用）
@@ -638,6 +646,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         info!(target: "agentos-kernel", "Metrics background tasks started (M2 flush + M1 rollup + M6 broadcast, 1s interval)");
+    }
+
+    // 插件运行时自动发现（notify watch + 轮询兜底）：往 plugins/ 丢新插件目录即生效，
+    // 无需重启内核、无需手动调 reload-all。复用启动期已构造的 invoker / registry；
+    // initial_ids 取启动 manifests，避免把已注册插件重复注册（与 reload-all 新插件序列对齐）。
+    //
+    // 已知 gap（与 reload-all 端点一致，非本次范围）：此处未按 enablement profile 过滤
+    // disabled 插件——启动期过滤、运行时发现路径不过滤。统一需后续单独处理。
+    //
+    // 关键前置：discover_new_plugins 内部读 AGENTOS_PLUGINS_DIR 推导 roots。启动期若走
+    // 默认 plugins_dir（未设该环境变量），须在此补设，保证 watcher 监听目录与 invoker
+    // 发现目录同源——否则 watcher 触发同步、discover 却读到空 roots、发现不到新插件。
+    if std::env::var("AGENTOS_PLUGINS_DIR").is_err() {
+        std::env::set_var("AGENTOS_PLUGINS_DIR", &plugins_dir);
+        info!(
+            target: "agentos-kernel",
+            "AGENTOS_PLUGINS_DIR unset; defaulting to {} for hot-discover",
+            plugins_dir.display()
+        );
+    }
+    {
+        let watcher_invoker: Arc<dyn agentos_core::traits::PluginInvoker> =
+            state.invoker.clone().expect("invoker present at boot");
+        let watcher_registry: Arc<CapabilityRegistryImpl> = state
+            .capability_registry
+            .clone()
+            .expect("capability_registry present at boot");
+        let initial_ids: std::collections::HashSet<String> =
+            manifests.iter().map(|m| m.id.clone()).collect();
+        let _watcher_handle = agentos_api::plugin_watcher::PluginWatcher::new(
+            plugins_dir.clone(),
+            watcher_invoker,
+            watcher_registry,
+            initial_ids,
+        )
+        .spawn();
+        info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback)");
     }
 
     start_server(addr, state).await?;

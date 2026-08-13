@@ -45,10 +45,19 @@ export async function handleReconnected(): Promise<void> {
     }
   }
 
-  // 为 streaming 管道补漏（所有管道，不止主管道）
-  const streamingPipelineIds = Object.keys(streamingState).filter(
-    (pipelineId) => streamingState[pipelineId]?.isStreaming,
+  // 为 streaming 管道补漏（所有管道，不止主管道）。
+  // F1：刷新后 streamingState 被 persist merge 重置为 {}，仅靠它会漏掉所有管道（含子管道）。
+  // 故取并集——streamingState 里 isStreaming 的 + messagesByPipeline 里有 status==='streaming'
+  // 的 assistant 消息的管道（后者在 5min grace 内会从 IndexedDB 恢复，是刷新后唯一的残留信号）。
+  const streamingPipelineIdSet = new Set<string>(
+    Object.keys(streamingState).filter((pid) => streamingState[pid]?.isStreaming),
   )
+  for (const [pid, msgs] of Object.entries(messagesByPipeline)) {
+    if ((msgs as any[]).some((m: any) => m.role === 'assistant' && m.status === 'streaming')) {
+      streamingPipelineIdSet.add(pid)
+    }
+  }
+  const streamingPipelineIds = [...streamingPipelineIdSet]
 
   // 补漏失败或无法确定 threadId 的管道列表（补漏成功 → 消息已恢复，不打扰用户）
   const failedPipelines: string[] = []
@@ -75,11 +84,18 @@ export async function handleReconnected(): Promise<void> {
 
   // streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
   for (const pipelineId of streamingPipelineIds) {
-    // 将残留的 streaming 占位消息标记为 completed，避免 UI 永久转圈
+    // F2：backfill 后仍 streaming 的消息 = 未能从后端恢复（真·丢失，如服务端杀流）。
+    // 标记 interrupted + 追加 warning system part，让用户看到"输出被中断"而非误以为完成。
     const messages = pipelineStore.messagesByPipeline[pipelineId] || []
     for (const msg of messages as any[]) {
       if (msg.role === 'assistant' && msg.status === 'streaming') {
-        pipelineStore.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+        pipelineStore.updateMessage(pipelineId, msg.id, { status: 'interrupted' } as any)
+        pipelineStore.appendPart(pipelineId, msg.id, {
+          type: 'system',
+          content: '（输出被中断，内容可能不完整）',
+          level: 'warning',
+          notificationType: 'stream_interrupted',
+        } as any)
       }
     }
     // 清理 streamingState（同时处理 threadId）

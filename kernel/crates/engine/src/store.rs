@@ -522,6 +522,20 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 启动时清扫孤儿 run（B2）：进程上次崩溃留下的 `status='running'` 的 run
+    /// 标记为 `failed` 并补 `ended_at`（未补过才补），让历史/会话状态不悬空。
+    /// 已结束（completed/failed/suspended）的 run 不受影响。返回被清扫的行数。
+    pub fn reap_orphan_runs(&self, tenant_id: &str) -> Result<u64, StorageError> {
+        let conn = self.conn.lock();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE runs SET status = 'failed', ended_at = COALESCE(ended_at, ?1) \
+             WHERE status = 'running' AND tenant_id = ?2",
+            rusqlite::params![now, tenant_id],
+        )?;
+        Ok(rows as u64)
+    }
+
     /// 取管道内下一个 sequence（按 pipeline_id 维度连续递增）。
     ///
     /// sequence 按 pipeline_id 单调递增（跨多轮、跨 run_id），支撑前端
@@ -825,18 +839,19 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 应用身份/seq 感知的 messages ops 到 message_slots 表（op-based 新模型单写入器）。
+    /// 应用槽位 ops 到 message_slots 表（op-based 新模型单写入器）。
     ///
-    /// 内核只"按插件来"：插件对 `state["messages"]` 的每次改动被表达为一组 ops，
-    /// 本方法原样落到 `message_slots` 表，不做 diff、不生成身份。详见
-    /// `docs/message_persistence_design.md`。
+    /// 内核只"按插件来"：把插件对 `state["messages"]` 的改动落表，不做 diff、不生成身份。
+    /// 详见 `docs/message_persistence_design.md`。**只有两个原语**：
     ///
-    /// op 格式（与演进后的 `messages_diff_ops` 对齐）：
-    /// - `{"op":"upsert","seq":N,"msg":{...}}`：在稳定槽位 N 写消息；有则更新
-    ///   （内容变 → `message_id` 变、`seq` 不变）
-    /// - `{"op":"delete","seq":N}`：删除槽位 N（留 gap），不影响其它槽位
+    /// - `{"op":"set","seq":N,"msg":<obj|null>}`：统一 append / modify / delete。
+    ///   - `msg` 为对象 → 写槽位 N（append=写新末槽 max+1、modify=写已存在槽；
+    ///     内容变 → `message_id` 变、`seq` 不变）
+    ///   - `msg` 为 null/缺省 → 清空槽位 N（delete=留 gap，后段不动）
+    /// - `{"op":"insert","at":N,"msg":{...}}`：在位置 N 插入槽位，`seq>=N` 的后段顺延 +1
+    ///   （后段 `message_id` 不变，仅 `seq+1`）。
     ///
-    /// `message_id = compute_message_id(role, content, tool_calls)`（内容派生）。
+    /// `message_id = compute_message_id(role, content, tool_calls)`（内容派生，与 seq 解耦）。
     pub fn apply_messages_ops_to_table(
         &self,
         pipeline_id: &str,
@@ -850,88 +865,126 @@ impl SqliteStore {
         for op in ops {
             let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
             match kind {
-                "upsert" => {
+                "set" => {
                     let Some(seq) = op.get("seq").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    match op.get("msg") {
+                        Some(msg) if msg.is_object() => {
+                            self.write_slot_to_table_locked(
+                                &conn, tenant_id, &pid, seq as i64, msg, &now,
+                            )?;
+                        }
+                        _ => {
+                            // 清空槽位（留 gap），不动其它槽位 → 后段 seq/id 不变。
+                            conn.execute(
+                                "DELETE FROM message_slots WHERE tenant_id=?1 AND pipeline_id=?2 AND seq=?3",
+                                rusqlite::params![tenant_id, pid, seq as i64],
+                            )?;
+                        }
+                    }
+                }
+                "insert" => {
+                    let Some(at) = op.get("at").and_then(|v| v.as_u64()) else {
                         continue;
                     };
                     let Some(msg) = op.get("msg") else {
                         continue;
                     };
-                    let role = msg
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let content = extract_content_string(msg);
-                    let (blob_id, _) = self.ensure_blob_locked(&conn, &content)?;
-                    let content_preview: String = content.chars().take(200).collect();
-                    let tool_calls_json = msg
-                        .get("tool_calls")
-                        .map(|tc| serde_json::to_string(tc).unwrap_or_default());
-                    let tool_call_id = msg
-                        .get("tool_call_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let reasoning_content = msg
-                        .get("reasoning_content")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    // tool 结果状态：由 content 前缀推断（与 project_messages 一致）。
-                    let (status, error) = if role == "tool" {
-                        if let Some(err_msg) = content.strip_prefix("Error: ") {
-                            (Some("failed".to_string()), Some(err_msg.to_string()))
-                        } else {
-                            (Some("completed".to_string()), None)
-                        }
-                    } else {
-                        (None, None)
-                    };
-                    let message_id =
-                        Self::compute_message_id(&role, &content, tool_calls_json.as_deref());
+                    let at = at as i64;
+                    // 复合 PK 下直接 `seq=seq+1` 会瞬态碰撞（更新途中两行抢同一 PK），
+                    // 用大偏移两步法避开：① 受影响行 seq+=BIG ② 再 -=(BIG-1) → 净 +1，
+                    // 两步内任意时刻 PK 都不冲突。
+                    const BIG: i64 = 1_000_000_000;
                     conn.execute(
-                        "INSERT INTO message_slots
-                           (tenant_id, pipeline_id, seq, message_id, role, blob_id, content_preview,
-                            reasoning_content, status, error, tool_calls_json, tool_call_id, run_id, created_at)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-                         ON CONFLICT(tenant_id, pipeline_id, seq) DO UPDATE SET
-                           message_id=excluded.message_id, role=excluded.role, blob_id=excluded.blob_id,
-                           content_preview=excluded.content_preview, reasoning_content=excluded.reasoning_content,
-                           status=excluded.status, error=excluded.error,
-                           tool_calls_json=excluded.tool_calls_json, tool_call_id=excluded.tool_call_id,
-                           run_id=excluded.run_id, created_at=excluded.created_at",
-                        rusqlite::params![
-                            tenant_id,
-                            pid,
-                            seq as i64,
-                            message_id,
-                            role,
-                            blob_id,
-                            content_preview,
-                            reasoning_content,
-                            status,
-                            error,
-                            tool_calls_json,
-                            tool_call_id,
-                            Option::<String>::None,
-                            now,
-                        ],
+                        "UPDATE message_slots SET seq = seq + ?1 \
+                         WHERE tenant_id=?2 AND pipeline_id=?3 AND seq >= ?4",
+                        rusqlite::params![BIG, tenant_id, pid, at],
                     )?;
-                }
-                "delete" => {
-                    let Some(seq) = op.get("seq").and_then(|v| v.as_u64()) else {
-                        continue;
-                    };
-                    // 删指定槽位（留 gap），不动其它槽位 → 压缩后后段 seq/id 不变。
                     conn.execute(
-                        "DELETE FROM message_slots WHERE tenant_id=?1 AND pipeline_id=?2 AND seq=?3",
-                        rusqlite::params![tenant_id, pid, seq as i64],
+                        "UPDATE message_slots SET seq = seq - ?1 \
+                         WHERE tenant_id=?2 AND pipeline_id=?3 AND seq >= ?4",
+                        rusqlite::params![BIG - 1, tenant_id, pid, BIG],
                     )?;
+                    self.write_slot_to_table_locked(&conn, tenant_id, &pid, at, msg, &now)?;
                 }
                 _ => {
                     // 未知 op 忽略（前向兼容）。
                 }
             }
         }
+        Ok(())
+    }
+
+    /// 把单条消息写到指定槽位（`INSERT … ON CONFLICT(pipeline_id,seq) DO UPDATE`）。
+    /// 供 `apply_messages_ops_to_table` 的 `set`/`insert` 复用。调用方须已持有 `conn` 锁。
+    fn write_slot_to_table_locked(
+        &self,
+        conn: &Connection,
+        tenant_id: &str,
+        pid: &str,
+        seq: i64,
+        msg: &serde_json::Value,
+        now: &str,
+    ) -> Result<(), StorageError> {
+        let role = msg
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let content = extract_content_string(msg);
+        let (blob_id, _) = self.ensure_blob_locked(conn, &content)?;
+        let content_preview: String = content.chars().take(200).collect();
+        let tool_calls_json = msg
+            .get("tool_calls")
+            .map(|tc| serde_json::to_string(tc).unwrap_or_default());
+        let tool_call_id = msg
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let reasoning_content = msg
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // tool 结果状态：由 content 前缀推断（与 project_messages 一致）。
+        let (status, error) = if role == "tool" {
+            if let Some(err_msg) = content.strip_prefix("Error: ") {
+                (Some("failed".to_string()), Some(err_msg.to_string()))
+            } else {
+                (Some("completed".to_string()), None)
+            }
+        } else {
+            (None, None)
+        };
+        let message_id = Self::compute_message_id(&role, &content, tool_calls_json.as_deref());
+        conn.execute(
+            "INSERT INTO message_slots
+               (tenant_id, pipeline_id, seq, message_id, role, blob_id, content_preview,
+                reasoning_content, status, error, tool_calls_json, tool_call_id, run_id, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+             ON CONFLICT(tenant_id, pipeline_id, seq) DO UPDATE SET
+               message_id=excluded.message_id, role=excluded.role, blob_id=excluded.blob_id,
+               content_preview=excluded.content_preview, reasoning_content=excluded.reasoning_content,
+               status=excluded.status, error=excluded.error,
+               tool_calls_json=excluded.tool_calls_json, tool_call_id=excluded.tool_call_id,
+               run_id=excluded.run_id, created_at=excluded.created_at",
+            rusqlite::params![
+                tenant_id,
+                pid,
+                seq,
+                message_id,
+                role,
+                blob_id,
+                content_preview,
+                reasoning_content,
+                status,
+                error,
+                tool_calls_json,
+                tool_call_id,
+                Option::<String>::None,
+                now,
+            ],
+        )?;
         Ok(())
     }
 
@@ -2665,6 +2718,23 @@ impl StorageBackend for SqliteStore {
         let new_arr = new_arr.to_vec();
         tokio::task::spawn_blocking(move || {
             this.project_messages(&pipeline_id, &tenant_id, &new_arr)
+        })
+        .await
+        .map_err(|e| StorageError::Database(format!("join error: {e}")))?
+    }
+
+    async fn apply_messages_ops_to_table(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        ops: &[serde_json::Value],
+    ) -> Result<(), StorageError> {
+        let this = self.clone();
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let ops = ops.to_vec();
+        tokio::task::spawn_blocking(move || {
+            this.apply_messages_ops_to_table(&pipeline_id, &tenant_id, &ops)
         })
         .await
         .map_err(|e| StorageError::Database(format!("join error: {e}")))?

@@ -787,7 +787,7 @@ async fn process_via_engine_inner(
         project_root,
         tenant,
         state.plugin_ids.iter().cloned(),
-        store,
+        store.clone(),
         run_id.clone(),
         branch_id,
     )
@@ -817,6 +817,15 @@ async fn process_via_engine_inner(
         Ok(s) => s,
         Err(e) => {
             warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
+            // B2：引擎失败兜底——把 run 标记 failed + ended_at，避免永远卡 running、
+            // 历史悬空。（PipelineExecutor::run 当前不返回 Err，这是防御网；崩溃留下的
+            // running 孤儿由内核启动 reap_orphan_runs 清扫。）
+            if let Err(pe) = store
+                .update_run_status(&run_id, agentos_core::types::RunStatus::Failed, None, None)
+                .await
+            {
+                warn!(run_id = %run_id, error = %pe, "update_run_status(Failed) 失败（继续）");
+            }
             return format!("[engine-run-failed] {}", message);
         }
     };

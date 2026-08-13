@@ -599,6 +599,57 @@
 
 ---
 
+## 🔮 未来可选方向（条件触发）
+
+以下方向**技术路径已验证可行**，但**触发条件尚未满足**，暂不排期。条件成熟后可直接按既定方案推进，无需重新调研。
+
+### 接入 DeepSeek Harness（DSH）插件生态
+
+**触发条件**：DSH（`github.com/deepseek-ai/deepseek-harness`，MIT）出现规模化的**第三方插件生态**（非官方 monorepo 内部包）。当前 DSH 24 万 star，但其 54 个 package 仍是官方内部 workspace 包，npm 上第三方 `@someone/dsh-*` 插件尚未形成规模。**生态空置期投入转接层 = 基础设施先于需求，沉没成本高，故暂缓。**
+
+**可行性结论（已调研，基于 DSH 源码）**：
+
+DSH 是基于 Cordis（Koishi 同源 DI 框架）的 TypeScript agent harness，范式为"一切皆插件"。其插件按形态分 6 类，与本项目对照及转接可行性如下：
+
+| DSH 插件形态 | 本项目对应物 | 转接可行性 |
+|------|------|------|
+| 钩子插件（`ctx.on` 事件订阅，68 种事件） | 管道 Input/Output 插件（priority 顺序） | ✅ 语义可对，核心钩子（`tools/pre-execute`/`tools/post-execute`/`agent/pre-step` 等）可双向翻译为 state_updates / RouteSignal |
+| 工具插件（`ctx.tools.register`） | 工具插件 | ✅ 同构；且 DSH 工具多为标准 MCP，已可通过 `external_mcp` 直连 |
+| 能力 Provider（`ctx.provide('shell'/'fs'/'llm'...)`） | 系统插件（manifest `provides` + capability_caller） | ✅ **可转接——fork DSH SDK 加 RPC 方法暴露 service**（见下方方案） |
+| Bundle/Profile 补丁（`cordis.patch.yml`） | pipeline yaml + Agent preset | — 概念等价，无需转接 |
+| Slot/UI 注入（`ctx.slots`） | contributes + WidgetRegistry | — 概念等价，实现不同 |
+| 自修改运行时（`cordis_define/run`） | hot_swap（持久化 + 回滚） | — 本项目实现更工程化，无需转接 |
+
+**核心技术障碍与解法**：
+
+DSH 插件是 **in-process Cordis 函数**（非服务/sidecar 形态），强依赖 `@deepseek-ai/cordis` 运行时 + `ctx.on/inject/provide/get` 机制，无法"拔出来"直接装入本项目的 sidecar。**唯一可行的转接路径是"嵌套 runtime + 改 SDK 暴露 service"**：
+
+```
+本项目 sidecar 适配器
+    ↓ JSON-RPC（自定义方法，如 shell/exec）
+fork 改造的 DSH SDK server（packages/sdk/server/src/server.ts）
+    ↓ this.ctx.get('shell').execute(...)   ← 进程内拿真 service
+DSH 进程内的真实 service / 装载的第三方 cordis 插件
+```
+
+- **SDK 可改**：DSH MIT 开源，`server.ts` 的 `handleRequest` 是 switch，加 `case 'shell/exec'` 即可暴露任意 ctx service（`this.ctx` 在构造函数已注入）。
+- **数据可序列化**：DSH service 方法参数多为普通数据类型（如 `ShellExecRequest` 的 command/workdir/timeoutMs/env），跨进程序列化无障碍；含不可序列化类型（Stream/AbortSignal/函数回调）的方法需包装层（stream 转 chunk 事件、signal 转 timeout+cancel）。
+- **钩子可翻译**：DSH 的核心钩子点（约 6 个）语义清晰（waterfall 模式带 `next()`），可在本项目引擎对应时刻合成 DSH 事件触发，捕获其 Decision 翻译为 state_updates。
+
+**落地步骤（条件成熟后执行）**：
+
+1. Fork DSH，在 `packages/sdk/server/src/server.ts` 加 RPC 方法暴露目标 service（shell/fs 等），改动集中在单个 `rpc-export.ts` 便于 rebase。
+2. 配最小 `cordis.yml` 挂载目标 provider 及其依赖链（如 `shell-sandbox` 依赖 `sandbox`+`subprocess`+`credentials`）。
+3. 本项目新增 `plugins/shared/system/dsh_runtime/` system 插件，作为 sidecar 宿主驱动改过的 DSH 进程。
+4. 最小验证：跑通一个真实 DSH 钩子插件（如 `repeat-tool-reminder`）和一个 service（如 `shell.exec`）在本项目内的转接，固化转接模式。
+5. 扩展至核心钩子全集 + 可序列化 service 全集。
+
+**维护成本**：DSH 处于 developer preview，明确会有 breaking changes，fork 需跟随 rebase。改动越集中（单文件）冲突越小。
+
+**参考**：本地 DSH 源码已 clone 至 `D:\reference_repos\deepseek-harness\`（如不存在可重新 `git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git`）。关键文件：`packages/sdk/server/src/server.ts`（SDK server，改这里）、`packages/core/tools/src/index.ts`（Events 接口，钩子点权威清单）、`packages/shell/shell/src/types.ts`（service 契约样例）。
+
+---
+
 ## 🤝 社区贡献优先级
 
 我们尤其欢迎以下方向的贡献（按优先级排序）：

@@ -218,6 +218,9 @@ export function ensureStreamingPlaceholder(
     parentId: null,
     sequence: placeholderSeq,
     status: 'streaming',
+    // F1：带 _lastUpdated，让 persist merge 的 5min grace 可靠保留 streaming 占位，
+    // 刷新后 handleReconnected 才能据 status==='streaming' 扫到并 backfill（否则会被 grace 丢弃）。
+    _lastUpdated: Date.now(),
   } as any)
 }
 

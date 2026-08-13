@@ -95,6 +95,54 @@ async fn reconnect_replays_buffered_events() {
 }
 
 #[tokio::test]
+async fn emit_event_records_chat_events_for_reconnect_replay() {
+    // B4：经 emit_event 发的聊天事件（new_message/stream_start 等）应进重放缓冲，
+    // 断线重连时能回放（之前 emit_event 不记录 → 刷新重连丢这些事件）。
+    let coord = SessionCoordinator::default();
+    let (sink1, _recv1) = MockSink::online();
+    coord.register("user-A", sink1);
+    coord.register_thread("thread-1", "user-A");
+
+    coord.emit_event("thread-1", "new_message", serde_json::json!({"content": "hi"})).await;
+    coord.emit_event("thread-1", "stream_start", serde_json::json!({"message_id": "m1"})).await;
+
+    // 重连，last_sequence=0 → 应回放全部聊天事件
+    let (sink2, recv2) = MockSink::online();
+    let outcome = coord
+        .handle_reconnect("thread-1", "user-A", sink2, 0)
+        .await;
+    assert!(outcome.replayed, "应成功回放（无溢出）");
+
+    let msgs = recv2.lock().unwrap();
+    let types: Vec<&str> = msgs
+        .iter()
+        .filter_map(|m| m["type"].as_str())
+        .collect();
+    assert!(types.contains(&"new_message"), "应回放 new_message");
+    assert!(types.contains(&"stream_start"), "应回放 stream_start");
+}
+
+#[tokio::test]
+async fn emit_event_skips_interaction_family_in_replay() {
+    // B9 保留：interaction_* 即使经 emit_event 也不进重放缓冲（重放过期审批无意义）。
+    let coord = SessionCoordinator::default();
+    let (sink1, _recv1) = MockSink::online();
+    coord.register("user-A", sink1);
+    coord.register_thread("thread-1", "user-A");
+
+    coord.emit_event("thread-1", "interaction_request", serde_json::json!({"req": "x"})).await;
+
+    let (sink2, recv2) = MockSink::online();
+    coord.handle_reconnect("thread-1", "user-A", sink2, 0).await;
+
+    let msgs = recv2.lock().unwrap();
+    let has_interaction = msgs
+        .iter()
+        .any(|m| m["type"].as_str() == Some("interaction_request"));
+    assert!(!has_interaction, "interaction_* 不应进重放缓冲（B9）");
+}
+
+#[tokio::test]
 async fn reconnect_returns_resync_when_buffer_overflowed() {
     // 小容量缓冲，溢出后重连触发 resync
     let coord = SessionCoordinator::with_replay_capacity(2);

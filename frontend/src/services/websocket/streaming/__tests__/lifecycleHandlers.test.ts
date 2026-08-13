@@ -19,6 +19,7 @@ const { mockStore, mockAddNotification } = vi.hoisted(() => ({
     messagesByPipeline: {},
     pipelineSessionMap: {},
     updateMessage: vi.fn(),
+    appendPart: vi.fn(),
     loadPipelineMessages: vi.fn(),
   },
   mockAddNotification: vi.fn(),
