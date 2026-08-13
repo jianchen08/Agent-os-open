@@ -84,8 +84,8 @@ function computeDiff(oldText: string, newText: string): { oldLines: DiffLine[]; 
 /** 行背景色 */
 const lineColor: Record<DiffLineType, string> = {
   unchanged: 'bg-transparent',
-  added: 'bg-green-100 text-green-900 dark:bg-green-900/30 dark:text-green-300',
-  removed: 'bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-300',
+  added: 'bg-status-success/10 text-status-success dark:bg-status-success/20',
+  removed: 'bg-status-error/10 text-status-error dark:bg-status-error/20',
 }
 
 /** 行前缀标记 */
@@ -125,8 +125,8 @@ export function ReviewDiff({
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-sm font-medium text-foreground">版本对比</span>
         <div className="ml-2 flex items-center gap-1 text-xs text-muted-foreground">
-          <span className="text-green-600">+{stats.added}</span>
-          <span className="text-red-600">-{stats.removed}</span>
+          <span className="text-status-success">+{stats.added}</span>
+          <span className="text-status-error">-{stats.removed}</span>
         </div>
         <div className="ml-auto flex items-center gap-1 rounded-md border border-border p-0.5">
           <button

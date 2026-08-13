@@ -79,23 +79,34 @@ def create_plugin() -> AgentOSPlugin:
         "register_resource", REGISTER_RESOURCE_SCHEMA, register_resource, "资源注册"
     )
 
-    # 注入 capability_caller：read_execution_detail 经 service-registry 读内核轨迹
+    # 注入 capability_caller：read_execution_detail 经 service-registry 读内核轨迹,
+    # L1 摘要经 tool-executor 调 hindsight.recall 读压缩块。
+    # caller 按 method 前缀路由到对应 capability handle。
     @plugin.on_load
     async def _on_load(params: dict) -> None:
-        try:
-            handle = plugin.get_capability("service-registry")
-        except KeyError:
-            logger.warning("[simple_tools] service-registry 能力未注入，read_execution_detail 不可用")
+        handles: dict[str, Any] = {}
+        for cap in ("service-registry", "tool-executor"):
+            try:
+                handles[cap] = plugin.get_capability(cap)
+            except KeyError:
+                logger.warning("[simple_tools] %s 能力未注入", cap)
+        if "service-registry" not in handles:
+            logger.warning("[simple_tools] service-registry 缺失，read_execution_detail 不可用")
             return
+
         from system_tools import set_capability_caller  # noqa: PLC0415
 
         async def _call(method: str, params_dict: dict) -> Any:
-            prefix = "service-registry."
-            stripped = method[len(prefix):] if method.startswith(prefix) else method
-            return await handle.call(stripped, params_dict)
+            # 按 method 前缀路由(messages.list → service-registry, invoke → tool-executor)
+            for cap_name, handle in handles.items():
+                prefix = f"{cap_name}."
+                if method.startswith(prefix):
+                    return await handle.call(method[len(prefix):], params_dict)
+            # 无前缀:默认 service-registry
+            return await handles["service-registry"].call(method, params_dict)
 
         set_capability_caller(_call)
-        logger.info("[simple_tools] capability_caller 已注入")
+        logger.info("[simple_tools] capability_caller 已注入 (caps=%s)", list(handles))
 
     return plugin
 

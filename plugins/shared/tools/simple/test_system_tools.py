@@ -108,28 +108,43 @@ class TestReadExecutionDetailDegradation:
 
 
 class TestReadExecutionDetailSkeleton:
-    async def test_read_detail_skeleton_calls_messages_list(
+    async def test_read_detail_skeleton_calls_traces_and_messages(
         self, mod: Any
     ) -> None:
-        """skeleton 层调用 _capability_caller，方法名 messages.list 且 params 含 pipeline_id。"""
+        """skeleton 层调用 traces.list(轨迹流程) + messages.list(对话骨架)。"""
         caller = AsyncMock()
-        caller.return_value = []  # 空列表，足以断言调用形态
+        caller.return_value = []  # 空列表
         mod.set_capability_caller(caller)
 
         await mod.read_execution_detail(pipeline_run_id="pipe-1", level="skeleton")
 
-        caller.assert_awaited_once()
-        method, params = caller.call_args.args
-        assert method == "messages.list"
-        assert params["pipeline_id"] == "pipe-1"
+        # skeleton 应调用 2 次:traces.list + messages.list
+        assert caller.await_count == 2
+        methods = [c.args[0] for c in caller.await_args_list]
+        assert "traces.list" in methods
+        assert "messages.list" in methods
 
-    async def test_read_detail_skeleton_builds_lines(self, mod: Any) -> None:
-        """skeleton 层把每条 message 渲染为一行骨架（含 role + content_preview）。"""
+    async def test_read_detail_skeleton_builds_trace_steps_and_message_lines(
+        self, mod: Any
+    ) -> None:
+        """skeleton 层渲染 trace_steps(轨迹主线) + message_lines(对话骨架)。"""
+        import json as _json
+
         caller = AsyncMock()
-        caller.return_value = [
-            _make_message(1, "user", content_preview="你好"),
-            _make_message(2, "assistant", content_preview="收到"),
-            _make_message(3, "tool", content_preview="result=42"),
+
+        # 第一次调用(traces.list)返回轨迹;第二次(messages.list)返回消息
+        # AsyncMock 每次返回同一个值,所以用 side_effect 区分
+        caller.side_effect = [
+            # traces.list 返回
+            [
+                {"plugin_id": "memory_read", "seq_in_branch": 1, "patch_data": _json.dumps({"memory.retrieved": []})},
+                {"plugin_id": "llm_core", "seq_in_branch": 2, "patch_data": _json.dumps({"core_type": "llm_call", "raw_error": None})},
+            ],
+            # messages.list 返回
+            [
+                _make_message(1, "user", content_preview="你好"),
+                _make_message(2, "assistant", content_preview="收到"),
+            ],
         ]
         mod.set_capability_caller(caller)
 
@@ -139,15 +154,14 @@ class TestReadExecutionDetailSkeleton:
 
         assert result["pipeline_run_id"] == "pipe-1"
         assert result["level"] == "skeleton"
-        assert result["total_records"] == 3
-        lines = result["lines"]
-        assert len(lines) == 3
-        # 每行骨架应含 seq 标记 + role
-        assert "user" in lines[0]
-        assert "assistant" in lines[1]
-        assert "tool" in lines[2]
-        # user 行的 content_preview 应出现在骨架中
-        assert "你好" in lines[0]
+        # trace_steps = 轨迹主线
+        assert "trace_steps" in result
+        assert result["trace_count"] == 2
+        assert result["trace_steps"][0]["plugin"] == "memory_read"
+        # message_lines = 对话骨架
+        assert "message_lines" in result
+        assert result["message_count"] == 2
+        assert "你好" in result["message_lines"][0]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -157,17 +171,23 @@ class TestReadExecutionDetailSkeleton:
 
 class TestReadExecutionDetailL1:
     async def test_read_detail_L1_groups_turns(self, mod: Any) -> None:
-        """L1 层按对话轮次分组：user→assistant→tool→user→assistant 应拆为 2 轮。
+        """L1 层:无压缩块时降级到 messages 轮次分组。
 
-        新规则：每条 role=user 消息开启一个新 turn。
+        新逻辑:L1 先调 hindsight.recall 读压缩块,无压缩块时降级用 messages 轮次摘要。
+        本测试验证降级路径:user→assistant→tool→user→assistant 应拆为 2 轮。
         """
         caller = AsyncMock()
-        caller.return_value = [
-            _make_message(1, "user", content_preview="第一问"),
-            _make_message(2, "assistant", content_preview="第一答"),
-            _make_message(3, "tool", content_preview="tool-result-1"),
-            _make_message(4, "user", content_preview="第二问"),
-            _make_message(5, "assistant", content_preview="第二答"),
+        # side_effect: 第一次(tool-executor.invoke hindsight.recall)返回空压缩块,
+        # 第二次(messages.list)返回消息列表
+        caller.side_effect = [
+            {"results": []},  # 无压缩块,触发降级
+            [
+                _make_message(1, "user", content_preview="第一问"),
+                _make_message(2, "assistant", content_preview="第一答"),
+                _make_message(3, "tool", content_preview="tool-result-1"),
+                _make_message(4, "user", content_preview="第二问"),
+                _make_message(5, "assistant", content_preview="第二答"),
+            ],
         ]
         mod.set_capability_caller(caller)
 
@@ -176,9 +196,9 @@ class TestReadExecutionDetailL1:
         )
 
         assert result["level"] == "L1"
-        # 轮次聚合结果：应有 2 轮
-        turns = result.get("turns") or result.get("summary", {}).get("turns")
-        assert turns is not None, "L1 结果应包含 turns（轮次列表）"
+        # 降级路径:turns 字段
+        turns = result.get("turns")
+        assert turns is not None, "L1 降级结果应包含 turns（轮次列表）"
         assert len(turns) == 2
 
 
@@ -228,7 +248,7 @@ class TestSetCapabilityCaller:
         assert mod._capability_caller is None
 
         caller = AsyncMock()
-        caller.return_value = [_make_message(1, "user", content_preview="hi")]
+        caller.return_value = []
         mod.set_capability_caller(caller)
 
         # 注入后模块级 _capability_caller 应为该 caller
@@ -236,4 +256,5 @@ class TestSetCapabilityCaller:
 
         await mod.read_execution_detail(pipeline_run_id="pipe-1", level="skeleton")
 
-        caller.assert_awaited_once()
+        # skeleton 调用 caller(traces.list + messages.list,至少 1 次)
+        assert caller.await_count >= 1

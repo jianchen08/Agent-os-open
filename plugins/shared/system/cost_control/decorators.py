@@ -77,8 +77,14 @@ def budget_check(
                 session_id=session_id,
             )
 
-            # 执行原函数
-            result = await func(*args, **kwargs)
+            # 执行原函数（F-CC-1：调用失败释放预留，防幽灵占用）
+            try:
+                result = await func(*args, **kwargs)
+            except BaseException:
+                await budget_manager.release_reservation(
+                    user_id=user_id, task_id=task_id, session_id=session_id
+                )
+                raise
 
             # 记录实际使用量
             actual_tokens = tokens_estimate
@@ -142,7 +148,13 @@ class BudgetContext:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        pass
+        # F-CC-1：异常退出时释放预留（幂等；正常路径 record 已兑付，no-op）
+        if exc_type is not None:
+            await self._budget_manager.release_reservation(
+                user_id=self.user_id,
+                task_id=self.task_id,
+                session_id=self.session_id,
+            )
 
     async def check(self, estimated_tokens: int) -> bool:
         """检查预算"""

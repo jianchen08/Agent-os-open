@@ -20,8 +20,8 @@ export interface TextDiffViewProps {
 /** 行背景色 class */
 const LINE_COLOR: Record<DiffLineType, string> = {
   unchanged: 'bg-transparent',
-  added: 'bg-green-100 text-green-900 dark:bg-green-900/30 dark:text-green-300',
-  removed: 'bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-300',
+  added: 'bg-status-success/10 text-status-success dark:bg-status-success/20',
+  removed: 'bg-status-error/10 text-status-error dark:bg-status-error/20',
 }
 
 /** 行前缀标记 */
@@ -166,8 +166,8 @@ export function TextDiffView({
       {/* 统计栏 */}
       <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-xs text-muted-foreground">
         <span>差异对比</span>
-        <span className="text-green-600" data-testid="diff-added-count">+{stats.added}</span>
-        <span className="text-red-600" data-testid="diff-removed-count">-{stats.removed}</span>
+        <span className="text-status-success" data-testid="diff-added-count">+{stats.added}</span>
+        <span className="text-status-error" data-testid="diff-removed-count">-{stats.removed}</span>
         <span data-testid="diff-unchanged-count">~{stats.unchanged}</span>
       </div>
 

@@ -46,8 +46,8 @@ function ThemeSwatch({
       onClick={onSelect}
       className={cn(
         'flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
-        'hover:bg-white/5',
-        isSelected && 'bg-white/5',
+        'hover:bg-[var(--hover-overlay)]',
+        isSelected && 'bg-[var(--hover-overlay)]',
       )}
       title={theme.description || theme.name}
     >
@@ -147,7 +147,7 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
 
   return (
     <>
-      <div className="fixed inset-0 z-[99] bg-black/40" onClick={onClose} />
+      <div className="fixed inset-0 z-[99] bg-[var(--overlay-bg)]" onClick={onClose} />
       <div
         className="border-border fixed right-3 bottom-14 z-[100] w-56 overflow-hidden rounded-lg border shadow-xl"
         style={{

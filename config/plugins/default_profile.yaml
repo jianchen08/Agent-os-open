@@ -29,7 +29,10 @@ plugins:
   pipeline_isolation_guard:
     enabled: true
     activation: eager
-  memory_service:
+  hindsight_memory_service:
+    enabled: true
+    activation: lazy
+  review_service:
     enabled: true
     activation: lazy
   task_service:

@@ -82,10 +82,11 @@ export const lightTheme: ThemeConfig = {
     },
 
     fontSize: {
-      xs: '11px',
-      sm: '12px',
-      md: '13px',
-      lg: '16px',
+      // 对齐 Tailwind 默认阶梯：字号变量接管后默认主题观感不变
+      xs: '12px',
+      sm: '14px',
+      md: '16px',
+      lg: '18px',
       xl: '20px',
       defaultFontSize: 'md',
     },

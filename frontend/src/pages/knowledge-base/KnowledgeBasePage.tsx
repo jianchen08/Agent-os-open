@@ -526,7 +526,7 @@ export function KnowledgeBasePage() {
 
       {/* 创建分类模态框 */}
       {showCategoryModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-bg)]">
           <div className="bg-background w-full max-w-sm rounded-lg border p-6 shadow-lg">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-base font-semibold">新建分类</h2>

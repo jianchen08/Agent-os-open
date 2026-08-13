@@ -21,7 +21,7 @@ import datetime
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .types import TriggerConfig, TriggerStatus, TriggerType
 
@@ -62,6 +62,10 @@ class TriggerManager:
         self._running = False
 
         self._main_loop: asyncio.AbstractEventLoop | None = None
+
+        # 0.2 sidecar 注入器：经内核 chat.send_message capability 投递触发消息并跑管道。
+        # server.py on_load 时注入；为 None 时回退 0.1 进程内 pipeline.message_bus。
+        self._injector: Callable[..., Any] | None = None
 
     def register(self, config: TriggerConfig) -> None:
         """注册触发器。
@@ -455,6 +459,21 @@ class TriggerManager:
 
         logger.info("[TriggerManager] 主事件循环已设置")
 
+    def set_injector(self, injector: Callable[..., Any]) -> None:
+        """注入 0.2 sidecar 触发消息投递器。
+
+        到期触发时，``_inject_trigger_message`` 会经此注入器把消息投给内核
+        （``chat.send_message`` capability），复用前端 WS 派发路径唤醒 agent。
+        约定签名：``async def injector(pipeline_id: str, message: str, user_id: str) -> Any``；
+        成功返回任意值，失败抛异常（由调用方记录）。sidecar 未注入时回退 0.1
+        进程内 ``pipeline.message_bus``（0.2 下不可用，仅作兼容）。
+
+        Args:
+            injector: async 投递协程工厂。
+        """
+        self._injector = injector
+        logger.info("[TriggerManager] 触发消息注入器已设置 (chat.send_message)")
+
     def start_check_loop(self) -> None:
         """启动后台触发器检查循环。
 
@@ -529,18 +548,15 @@ class TriggerManager:
         logger.info("[TriggerManager] 后台检查循环已退出(线程)")
 
     def _inject_trigger_message(self, trigger: TriggerConfig) -> None:
-        """构造触发消息并通过 send_pipeline_message 统一注入。
+        """触发器到期后把消息注入所属管道（唤醒 agent 跑一轮）。
 
-
-
-        只需要 pipeline_id 和 message，所有状态处理由 send_pipeline_message 完成。
-
-
+        0.2 sidecar：经注入器（``self._injector``）调内核 ``chat.send_message`` capability，
+        复用前端 WS 派发路径（dispatch_user_input → process_via_engine），agent 处理后流式回复。
+        0.1 进程内：回退 ``pipeline.message_bus.send_pipeline_message``（仅 cli 等进程内场景；
+        0.2 下该模块已删，注入器未设置时会显式报错）。
 
         Args:
-
-            trigger: 已触发的触发器配置
-
+            trigger: 已触发的触发器配置。
         """
 
         loop = self._main_loop
@@ -561,7 +577,41 @@ class TriggerManager:
 
         fire_info += f")\n{trigger.message}"
 
-        # ★ 获取 output_sink 以确保前端能收到事件
+        user_id = (trigger.metadata or {}).get("user_id", "")
+
+        # ── 0.2 sidecar 路径：内核 chat.send_message capability（主路径） ──
+        if self._injector is not None:
+            future = asyncio.run_coroutine_threadsafe(
+                self._injector(trigger.pipeline_id, fire_info, user_id),
+                loop,
+            )
+            try:
+                future.result(timeout=60)
+                logger.info(
+                    "[TriggerManager] 消息已注入: pipeline=%s method=chat.send_message trigger=%s fire_count=%d",
+                    trigger.pipeline_id,
+                    trigger.trigger_id,
+                    trigger.fire_count,
+                )
+            except Exception as e:
+                logger.error(
+                    "[TriggerManager] 消息注入异常: pipeline=%s trigger=%s error=%s",
+                    trigger.pipeline_id,
+                    trigger.trigger_id,
+                    e,
+                )
+            return
+
+        # ── 0.1 进程内回退（pipeline.message_bus 在 0.2 已删） ──
+        try:
+            from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
+            from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
+        except ImportError as e:
+            logger.error(
+                "[TriggerManager] 注入器未设置且 pipeline.message_bus 不可用（0.2 需 set_injector）: %s",
+                e,
+            )
+            return
 
         _output_sink = None
 
@@ -582,9 +632,6 @@ class TriggerManager:
 
         except Exception:
             pass
-
-        from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
-        from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
 
         _trig_msg = PipelineMessage(
             type=MessageType.CHAT,

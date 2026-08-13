@@ -1,7 +1,7 @@
 /**
  * 主题设置页面
  *
- * 提供 7 套预设主题的选择切换，支持 light/dark/system 模式。
+ * 提供多套预设主题的选择切换，支持 light/dark/system 模式。
  * 主题系统完全前端化，无后端依赖。
  */
 
@@ -133,9 +133,9 @@ function ThemeCard({
       <span
         className={`mt-2 inline-block rounded px-1.5 py-0.5 text-xs ${
           theme.category === 'light'
-            ? 'bg-yellow-500/10 text-yellow-600'
+            ? 'bg-status-warning/100/10 text-status-warning'
             : theme.category === 'dark'
-              ? 'bg-blue-500/10 text-blue-400'
+              ? 'bg-status-info/100/10 text-status-info'
               : 'bg-purple-500/10 text-purple-400'
         }`}
       >

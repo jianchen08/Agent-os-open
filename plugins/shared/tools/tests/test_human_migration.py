@@ -36,18 +36,39 @@ if str(_HUMAN_DIR) not in sys.path:
 
 
 def _load_module() -> Any:
-    """加载 human/tool.py（唯一模块名，进程内缓存）。"""
+    """加载 human/tool.py（唯一模块名，进程内缓存）。
+
+    裸名治理：tool.py 内 `from models import ...` / `from service import ...` 是
+    human 目录的平铺模块。同一 pytest 进程里其它插件（如 channel_api）可能已把
+    同名裸模块缓存进 sys.modules（sys.modules 优先于 sys.path），导致解析到错误
+    模块；其它测试的 sys.path.insert(0) 也可能把 human 目录挤出最前位。因此：
+    1. exec 前弹出相关裸名缓存；
+    2. 把 human 目录重排到 sys.path 最前；
+    3. exec 失败（半初始化）时弹出坏模块，避免后续测试拿到 AttributeError 缓存。
+    """
     mod_name = "human_tool_under_test"
     if mod_name in sys.modules:
-        return sys.modules[mod_name]
+        module = sys.modules[mod_name]
+        if hasattr(module, "HumanInteractionTool"):  # 半初始化保护
+            return module
+        sys.modules.pop(mod_name, None)
     module_path = _HUMAN_DIR / "tool.py"
     assert module_path.exists(), f"tool.py missing at {module_path}"
+    for _colliding in ("models", "service", "interfaces"):
+        sys.modules.pop(_colliding, None)
+    if str(_HUMAN_DIR) in sys.path:
+        sys.path.remove(str(_HUMAN_DIR))
+    sys.path.insert(0, str(_HUMAN_DIR))
     spec = importlib.util.spec_from_file_location(mod_name, module_path)
     assert spec is not None, "cannot load human tool.py"
     assert spec.loader is not None, "cannot load human tool.py"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(mod_name, None)  # 半初始化模块不缓存
+        raise
     return module
 
 

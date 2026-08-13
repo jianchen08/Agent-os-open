@@ -183,7 +183,7 @@ export function ApprovalReviewOverlay() {
   return createPortal(
     <div className="fixed inset-0 z-[10001] flex items-center justify-center">
       {/* 背景遮罩 */}
-      <div className="absolute inset-0 bg-black/40" />
+      <div className="absolute inset-0 bg-[var(--overlay-bg)]" />
 
       {/* 审阅面板容器 */}
       <div className="relative z-10 flex h-[85vh] w-full max-w-5xl mx-4 flex-col rounded-lg bg-background shadow-2xl">

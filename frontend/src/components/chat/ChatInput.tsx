@@ -661,7 +661,7 @@ export const ChatInput = ({
       <div
         className={cn(
           'relative rounded-xl border transition-shadow duration-200',
-          'bg-white/[0.04]',
+          'bg-[var(--hover-overlay)]',
         )}
         style={{
           borderColor: 'var(--ds-border-active, rgba(34, 211, 238, 0.45))',

@@ -465,6 +465,7 @@ class TriggerSetupTool(BuiltinTool):
             pipeline_id=pipeline_id,
             metadata={
                 "execution_id": execution_id,
+                "user_id": inputs.get("user_id", ""),
             },
         )
 
@@ -549,6 +550,7 @@ class TriggerSetupTool(BuiltinTool):
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
+                "user_id": inputs.get("user_id", ""),
                 "schedule_time": schedule_time_str,
             },
         )
@@ -626,6 +628,7 @@ class TriggerSetupTool(BuiltinTool):
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
+                "user_id": inputs.get("user_id", ""),
                 "interval_str": interval_str,
             },
         )
@@ -692,6 +695,7 @@ class TriggerSetupTool(BuiltinTool):
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
+                "user_id": inputs.get("user_id", ""),
                 "event_type": event_type,
             },
         )
@@ -746,6 +750,7 @@ class TriggerSetupTool(BuiltinTool):
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
+                "user_id": inputs.get("user_id", ""),
                 "condition": condition,
             },
         )

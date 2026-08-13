@@ -31,7 +31,6 @@ if _SDK_SRC not in sys.path:
 
 # 插件名 → 功能分类目录的映射（插件已按功能分类组织）
 _PLUGIN_CATEGORY_MAP: dict[str, str] = {
-    "memory": "shared/system",
     "approval": "shared/system",
     "evaluation": "shared/system",
     "review": "shared/system",
@@ -103,52 +102,6 @@ def _call_tool(module: Any, tool_name: str, **kwargs: Any) -> Any:
         finally:
             loop.close()
     return result
-
-
-# ═══════════════════════════════════════════════════════════
-# AC-09-1: 记忆系统
-# ═══════════════════════════════════════════════════════════
-
-class TestMemoryPlugin:
-    """验证记忆系统 MCP 服务。"""
-
-    def test_memory_tools_registered(self) -> None:
-        mod = _load_plugin_module("memory")
-        assert "memory.search" in mod.plugin._tools
-        assert "memory.store" in mod.plugin._tools
-        assert "memory.summarize" in mod.plugin._tools
-
-    def test_memory_resources_registered(self) -> None:
-        mod = _load_plugin_module("memory")
-        assert "memory://episode/recent" in mod.plugin._resources
-        assert "memory://semantic/recent" in mod.plugin._resources
-
-    def test_memory_store_and_search(self) -> None:
-        mod = _load_plugin_module("memory")
-        # Store
-        result = _call_tool(mod, "memory.store", type="episode", content="Test memory about Python")
-        assert result["stored"] is True
-        assert "id" in result
-
-        # Search（与 store 使用同一 memory_type，默认 semantic 搜不到 episode 数据）
-        result = _call_tool(mod, "memory.search", query="Python", memory_type="episode")
-        assert result["total"] >= 1
-        assert result["results"][0]["content"] == "Test memory about Python"
-
-    def test_memory_search_empty(self) -> None:
-        mod = _load_plugin_module("memory")
-        result = _call_tool(mod, "memory.search", query="nonexistent_query_xyz")
-        assert result["total"] == 0
-
-    def test_memory_summarize(self) -> None:
-        mod = _load_plugin_module("memory")
-        # Store some data first
-        _call_tool(mod, "memory.store", type="episode", content="Memory 1")
-        _call_tool(mod, "memory.store", type="episode", content="Memory 2")
-
-        result = _call_tool(mod, "memory.summarize", type="episode")
-        assert result["count"] >= 2
-        assert "Memory 1" in result["summary"]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -378,7 +331,7 @@ class TestManifestValidation:
     """验证全部 5 个插件的 plugin.json manifest 格式。"""
 
     @pytest.mark.parametrize("plugin_dir", [
-        "memory", "approval", "evaluation", "review", "triggers",
+        "approval", "evaluation", "review", "triggers",
     ])
     def test_manifest_exists_and_valid(self, plugin_dir: str) -> None:
         manifest_path = _get_plugin_dir(plugin_dir) / "plugin.json"
@@ -396,7 +349,7 @@ class TestManifestValidation:
         assert len(manifest["capabilities"]["tools"]) > 0
 
     @pytest.mark.parametrize("plugin_dir", [
-        "memory", "approval", "evaluation", "review", "triggers",
+        "approval", "evaluation", "review", "triggers",
     ])
     def test_server_exists(self, plugin_dir: str) -> None:
         server_path = _get_plugin_dir(plugin_dir) / "server.py"

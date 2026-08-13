@@ -234,7 +234,7 @@ export function VideoTimelineAnnotation({
         >
           {/* 播放进度 */}
           <div
-            className="absolute left-0 top-0 h-full rounded bg-blue-500/30 transition-all duration-100"
+            className="absolute left-0 top-0 h-full rounded bg-status-info/100/30 transition-all duration-100"
             style={{
               width: `${videoDuration > 0 ? (currentTime / videoDuration) * 100 : 0}%`,
             }}
@@ -242,7 +242,7 @@ export function VideoTimelineAnnotation({
 
           {/* 播放头 */}
           <div
-            className="absolute top-0 h-full w-0.5 bg-blue-500 transition-all duration-100"
+            className="absolute top-0 h-full w-0.5 bg-status-info/100 transition-all duration-100"
             style={{
               left: `${videoDuration > 0 ? (currentTime / videoDuration) * 100 : 0}%`,
             }}
@@ -260,7 +260,7 @@ export function VideoTimelineAnnotation({
                 title={`${formatTime(a.timestamp ?? 0)} - ${a.suggestion}`}
               >
                 {/* 标记三角 */}
-                <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-yellow-500 text-[8px] font-bold text-white">
+                <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-status-warning/100 text-[8px] font-bold text-white">
                   {idx + 1}
                 </div>
                 {/* 悬停提示 */}
@@ -281,7 +281,7 @@ export function VideoTimelineAnnotation({
                 transform: 'translateX(-50%)',
               }}
             >
-              <Plus className="h-5 w-5 animate-bounce text-green-500" />
+              <Plus className="h-5 w-5 animate-bounce text-status-success" />
             </div>
           )}
         </div>
@@ -289,7 +289,7 @@ export function VideoTimelineAnnotation({
         {/* 添加标注输入框 */}
         {addingAtTime != null && !readOnly && (
           <div className="mt-2 flex items-center gap-2 rounded border border-border bg-muted/30 p-2">
-            <MessageSquare className="h-4 w-4 shrink-0 text-yellow-600" />
+            <MessageSquare className="h-4 w-4 shrink-0 text-status-warning" />
             <span className="shrink-0 text-xs text-muted-foreground">
               {formatTime(addingAtTime)}:
             </span>
@@ -309,7 +309,7 @@ export function VideoTimelineAnnotation({
               }}
             />
             <button
-              className="shrink-0 rounded bg-yellow-600 px-2 py-0.5 text-[10px] text-white hover:bg-yellow-700 disabled:opacity-50"
+              className="shrink-0 rounded bg-status-warning px-2 py-0.5 text-[10px] text-white hover:bg-status-warning/80 disabled:opacity-50"
               onClick={handleSubmitAnnotation}
               disabled={!suggestionText.trim()}
             >
@@ -335,7 +335,7 @@ export function VideoTimelineAnnotation({
                 key={a.id}
                 className="flex items-center gap-2 rounded bg-muted/50 px-2 py-1 text-xs"
               >
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-yellow-500 text-[8px] font-bold text-white">
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-status-warning/100 text-[8px] font-bold text-white">
                   {idx + 1}
                 </span>
                 <span className="shrink-0 text-muted-foreground tabular-nums">
@@ -344,7 +344,7 @@ export function VideoTimelineAnnotation({
                 <span className="flex-1 truncate text-foreground">{a.suggestion}</span>
                 {!readOnly && onRemoveAnnotation && (
                   <button
-                    className="shrink-0 text-muted-foreground hover:text-red-500"
+                    className="shrink-0 text-muted-foreground hover:text-status-error"
                     onClick={() => onRemoveAnnotation(a.id)}
                     title="删除标注"
                   >

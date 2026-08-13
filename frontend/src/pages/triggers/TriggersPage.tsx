@@ -59,10 +59,10 @@ interface TriggerFormData {
  */
 function getTypeBadgeStyle(type: string): string {
   const styles: Record<string, string> = {
-    cron: 'bg-blue-500/10 text-blue-500',
+    cron: 'bg-status-info/100/10 text-status-info',
     event: 'bg-purple-500/10 text-purple-500',
-    webhook: 'bg-orange-500/10 text-orange-500',
-    manual: 'bg-green-500/10 text-green-500',
+    webhook: 'bg-status-warning/10 text-status-warning',
+    manual: 'bg-status-success/100/10 text-status-success',
   }
   return styles[type] || 'bg-accent/30 text-muted-foreground'
 }
@@ -432,7 +432,7 @@ export function TriggersPage() {
 
       {/* 创建/编辑模态框 */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-bg)]">
           <div className="bg-background w-full max-w-md rounded-lg border p-6 shadow-lg">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-base font-semibold">

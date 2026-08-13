@@ -60,6 +60,15 @@ models:
     display_name: Embedding-3
     model_name: embedding-3
     provider: zhipu_coding
+  bge-m3:
+    # BAAI/bge-m3 @ 硅基流动（免费，国内直连，1024 维，8K 上下文）
+    # 用于 Hindsight 记忆库向量检索。OpenAI 兼容端点。
+    api_base: https://api.siliconflow.cn/v1/
+    context_window: 8192
+    dimension: 1024
+    display_name: BGE-M3 (SiliconFlow)
+    model_name: BAAI/bge-m3
+    provider: siliconflow
   glm-5.2:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     context_window: 1000000
@@ -162,6 +171,17 @@ providers:
     keys:
     - api_key: '****'
       id: mock_main
+      max_concurrent: 6
+      rpm: 100
+      token_quota: 0
+    type: openai
+  siliconflow:
+    # 硅基流动 SiliconFlow（embedding: BAAI/bge-m3 免费）
+    # OpenAI 兼容端点，国内直连。获取 key: https://siliconflow.cn
+    api_base: https://api.siliconflow.cn/v1/
+    keys:
+    - api_key: ${SILICONFLOW_API_KEY}
+      id: siliconflow_main
       max_concurrent: 6
       rpm: 100
       token_quota: 0

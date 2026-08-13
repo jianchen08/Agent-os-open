@@ -313,7 +313,7 @@ export function ConfigModal<T extends object>({
     >
       {/* 背景遮罩 */}
       <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        className="absolute inset-0 bg-[var(--overlay-bg)] backdrop-blur-sm"
         style={{
           position: 'absolute',
           inset: 0,

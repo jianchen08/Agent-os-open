@@ -14,8 +14,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from tools.types import (
-    ToolResult,
+# 0.2 迁移（FP-MIGR / F-MIGR-2）：0.1 的 tools.types 已删除 → 结果类型面走
+# agentos_plugin_sdk（ToolExecutionResult / create_failure_result / create_success_result）。
+from agentos_plugin_sdk import (
+    ToolExecutionResult,
     create_failure_result,
     create_success_result,
 )
@@ -108,7 +110,7 @@ class GitHelpers:
             return False
         return bool(git_file.is_file())
 
-    async def ensure_project_repo(self) -> ToolResult | None:
+    async def ensure_project_repo(self) -> ToolExecutionResult | None:
         """确保 base_path 是一个 git 仓库
 
         Returns:
@@ -126,7 +128,7 @@ class GitHelpers:
             )
         return None
 
-    async def ensure_git_repo(self, workspace: Path) -> ToolResult | None:
+    async def ensure_git_repo(self, workspace: Path) -> ToolExecutionResult | None:
         """确保 workspace 目录存在且已初始化 git 仓库
 
         如果 workspace 是 worktree 则直接返回，否则执行 git init。
@@ -160,7 +162,7 @@ class GitHelpers:
         self,
         inputs: dict[str, Any],
         workspace: Path,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """git_status 操作：查看 workspace 的 git 状态
 
         Args:
@@ -230,7 +232,7 @@ class GitHelpers:
         self,
         inputs: dict[str, Any],
         workspace: Path,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """git_commit 操作：暂存并提交 workspace 中的变更
 
         Args:
@@ -329,7 +331,7 @@ class GitHelpers:
         self,
         inputs: dict[str, Any],
         workspace: Path,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """git_diff 操作：查看 workspace 中的变更
 
         Args:
@@ -383,7 +385,7 @@ class GitHelpers:
         self,
         inputs: dict[str, Any],
         workspace: Path,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """git_log 操作：查看 workspace 的提交历史
 
         Args:
@@ -449,7 +451,7 @@ class GitHelpers:
         self,
         inputs: dict[str, Any],
         workspace: Path,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """中止当前正在进行的 git merge 操作
 
         在主仓库（base_path）中执行 git merge --abort，

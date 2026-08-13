@@ -478,7 +478,7 @@ export function FiveSpaceLayout({
   return (
     <div
       className="bg-background text-foreground flex w-screen flex-col overflow-hidden"
-      style={{ fontFamily: 'var(--font-family)', height: '100dvh' }}
+      style={{ fontFamily: 'var(--font-ui, var(--font-family))', height: '100dvh' }}
     >
       {workspaceFullscreen ? (
         // 全屏模式：工作区 100% 占满视口，不渲染任何标题条。
@@ -542,7 +542,7 @@ export function FiveSpaceLayout({
                 style={{ top: 'var(--layout-titlebar-height, 32px)' }}
               >
                 <div
-                  className="absolute inset-0 bg-black/50"
+                  className="absolute inset-0 bg-[var(--overlay-bg)]"
                   onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
                 />
                 <aside

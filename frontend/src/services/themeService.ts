@@ -6,30 +6,20 @@
  * （import.meta.glob）发现，纯前端资源，不依赖后端。
  */
 
-import {
-  darkTheme,
-  lightTheme,
-  deepSpaceTheme,
-  oceanBreezeTheme,
-  highContrastTheme,
-} from '@/config/themes'
+import { presetThemes } from '@/config/themes'
 import { ThemeStorageService, mergeTheme as mergeUserTheme } from '@/services/themeStorage'
 import type { ThemeConfig } from '@/types/theme'
 
 /**
  * 获取预设主题配置
  *
+ * 注册点收敛：预设主题统一在 @/config/themes 的 presetThemes 维护，
+ * 此处仅做查找，新增预设主题不再需要改本文件。
+ *
  * @param themeId - 主题 ID
  * @returns 主题配置，如果不存在则返回 null
  */
 export function getPresetTheme(themeId: string): ThemeConfig | null {
-  const presetThemes: Record<string, ThemeConfig> = {
-    dark: darkTheme,
-    light: lightTheme,
-    'deep-space': deepSpaceTheme,
-    'ocean-breeze': oceanBreezeTheme,
-    'high-contrast': highContrastTheme,
-  }
   return presetThemes[themeId] || null
 }
 
@@ -39,7 +29,7 @@ export function getPresetTheme(themeId: string): ThemeConfig | null {
  * @returns 预设主题列表
  */
 export function getAllPresetThemes(): ThemeConfig[] {
-  return [darkTheme, lightTheme]
+  return Object.values(presetThemes)
 }
 
 /**
@@ -332,6 +322,147 @@ export function compileThemeVariables(config: ThemeConfig): string {
         vars.push(`--status-${kebabCase(key)}-shadow: ${value}`)
       }
     })
+  }
+
+  // === 全局边框线型 ===
+  // Tailwind preflight 将 border-style 写死 solid，颜色类（border-border 等）无法
+  // 控制线型；输出 --border-line-style 并在 index.css 全局覆盖，
+  // 使全站边框跟随主题（像素=dashed 虚线描边 / 软萌=dotted 圆点线）。
+  vars.push(`--border-line-style: ${config.components.borderStyle || 'solid'}`)
+
+  // === 悬停叠加层 ===
+  // 替代散布在侧边栏/面板的硬编码 bg-white/5（浅色主题下白上叠白不可见）：
+  // 深色主题叠白、浅色主题叠深，保证任何主题下 hover 反馈可见。
+  const isDarkTheme = config.category === 'dark'
+  const hoverOverlay = isDarkTheme ? 'rgba(255, 255, 255, 0.06)' : 'rgba(15, 23, 42, 0.06)'
+  vars.push(`--hover-overlay: ${hoverOverlay}`)
+
+  // === 遮罩层 ===
+  // 由主题 dialog.overlay 配置派生（overlayBg + overlayOpacity → rgba），
+  // 替代硬编码 bg-black/50；解析失败时回退深色半透明。
+  const dialogCfg = config.components.dialog
+  const overlayRgb = dialogCfg?.overlayBg ? hexToRgb(dialogCfg.overlayBg) : null
+  const overlayOpacity = dialogCfg?.overlayOpacity ?? 0.5
+  vars.push(
+    `--overlay-bg: ${overlayRgb ? `rgba(${overlayRgb.r}, ${overlayRgb.g}, ${overlayRgb.b}, ${overlayOpacity})` : 'rgba(0, 0, 0, 0.5)'}`,
+  )
+  // 媒体查看器（lightbox）底幕：恒定深色以保证图片对比度，
+  // 仅深浅略调（浅色主题带一点蓝调而非死黑）
+  vars.push(`--overlay-strong: ${isDarkTheme ? 'rgba(0, 0, 0, 0.8)' : 'rgba(15, 23, 42, 0.78)'}`)
+
+  // === Deep Space v2 桥接变量（--ds-*） ===
+  // 历史上组件大量引用 deep-space-v2.css 按 .dark/.light class 定死的
+  // --ds-* 变量，导致非深空主题下这些区域不跟随主题。
+  // 这里以主题内联样式（优先级高于 class 规则）统一覆写整套 --ds-*，
+  // 使全部既有引用零改动接入主题系统；引擎未运行时仍回落 CSS 静态定义。
+  const c2 = config.colors
+  const map: Record<string, string> = {
+    // 文字
+    '--ds-text-primary': c2.text.primary,
+    '--ds-text-secondary': c2.text.secondary,
+    '--ds-text-muted': c2.text.muted,
+    '--ds-text-disabled': c2.text.disabled,
+    // 背景（canvas 允许渐变值，均用于 background 位）
+    '--ds-bg-canvas': c2.background.main,
+    '--ds-bg-panel': c2.background.card,
+    '--ds-bg-elevated': c2.background.elevated,
+    '--ds-bg-hover': hoverOverlay,
+    // 边框
+    '--ds-border-subtle': c2.border.default,
+    '--ds-border-active': c2.border.active,
+    '--ds-border-strong': c2.border.hover,
+    // 强调色
+    '--ds-accent-primary': c2.primary,
+    '--ds-accent-ai': c2.accent,
+    '--ds-accent-blue': c2.secondary,
+    '--ds-accent-glow': config.components.glow?.running || c2.primary,
+    // 状态色（status 无 waiting，映射到 pending）
+    '--ds-status-success': c2.status.success,
+    '--ds-status-error': c2.status.error,
+    '--ds-status-info': c2.status.info,
+    '--ds-status-running': c2.status.running,
+    '--ds-status-pending': c2.status.pending,
+    '--ds-status-waiting': c2.status.pending,
+  }
+  Object.entries(map).forEach(([key, value]) => {
+    if (value) vars.push(`${key}: ${value}`)
+  })
+
+  // 圆角（ds-r-*，组件目前未引用，输出以保持桥接完整）
+  const br = config.components.borderRadius
+  if (br) {
+    vars.push(`--ds-r-sm: ${br.sm}`)
+    vars.push(`--ds-r-md: ${br.md}`)
+    vars.push(`--ds-r-lg: ${br.lg}`)
+    vars.push(`--ds-r-xl: ${br.xl}`)
+    vars.push(`--ds-r-bubble: ${br.xl}`)
+  }
+
+  // === 动画/辉光语义色 ===
+  // theme.css 静态定义了 --accent-*（引擎未跑时兜底），tailwind 的
+  // border-flow 动画与 glow-running/waiting 工具类引用它们 —— 此处按主题覆写，
+  // 并补齐工具类实际引用的 --shadow-glow-*（此前从未输出，属断线修复）。
+  vars.push(`--accent-running: ${config.colors.status.running}`)
+  vars.push(`--accent-waiting: ${config.colors.status.pending}`)
+  vars.push(`--accent-success: ${config.colors.status.success}`)
+  vars.push(`--accent-error: ${config.colors.status.error}`)
+  if (config.components.glow) {
+    vars.push(`--shadow-glow-running: ${config.components.glow.running}`)
+    vars.push(`--shadow-glow-waiting: ${config.components.glow.waiting}`)
+  }
+
+  // === 代码块底色 ===
+  // 深色主题固定深底（兼容语法高亮配色）；浅色主题用主题 input 色（淡主题色调）
+  vars.push(`--code-bg: ${isDarkTheme ? 'rgba(15, 23, 42, 0.85)' : config.colors.background.input}`)
+
+  // === 字体族 ===
+  // 主题字体接入全局：body 与 Tailwind font-ui/font-code 均消费这两个变量，
+  // 未输出时消费端回退 design-tokens.css 的 --font-family / --font-family-mono。
+  if (config.components.fonts?.ui) {
+    vars.push(`--font-ui: ${config.components.fonts.ui}`)
+  }
+  if (config.components.fonts?.code) {
+    vars.push(`--font-code: ${config.components.fonts.code}`)
+  }
+
+  // === 字号阶梯 ===
+  // 主题 fontSize 此前从未输出（死配置）。这里同时输出两套变量：
+  // 1) --text-xs~xl:接管 Tailwind 默认字号工具类，存量页面的 text-xs/sm/base
+  //    零改动即跟随主题；行高按 1.5 倍率同步输出，避免字号变大后行距局促。
+  // 2) --font-size-caption~page-title:语义阶梯（tailwind.config.js 的
+  //    text-caption/label/body/title/page-title 消费）。
+  // 引擎未运行时无内联覆写，回落 Tailwind / design-tokens 静态默认，观感不变。
+  const fs = config.components.fontSize
+  if (fs) {
+    const scale: Array<[string, string]> = [
+      ['xs', fs.xs],
+      ['sm', fs.sm],
+      ['base', fs.md],
+      ['lg', fs.lg],
+      ['xl', fs.xl],
+    ]
+    scale.forEach(([step, size]) => {
+      vars.push(`--text-${step}: ${size}`)
+      vars.push(`--text-${step}--line-height: 1.5`)
+    })
+    vars.push(`--font-size-caption: ${fs.xs}`)
+    vars.push(`--font-size-label: ${fs.sm}`)
+    vars.push(`--font-size-body: ${fs.md}`)
+    vars.push(`--font-size-title: ${fs.lg}`)
+    vars.push(`--font-size-page-title: ${fs.xl}`)
+  }
+
+  // === 区域背景（侧边栏 / 聊天区） ===
+  // backgrounds.sidebar/chat 是主题的区域背景配置；缺省时回退 colors.background
+  // 对应色，保证浅色/深色基础主题下变量始终有值。
+  const sidebarAreaBg =
+    config.backgrounds?.sidebar?.value || config.colors.background.sidebar
+  if (sidebarAreaBg) {
+    vars.push(`--sidebar-bg: ${sidebarAreaBg}`)
+  }
+  const chatAreaBg = config.backgrounds?.chat?.value || config.colors.background.main
+  if (chatAreaBg) {
+    vars.push(`--chat-bg: ${chatAreaBg}`)
   }
 
   // === 圆角 ===

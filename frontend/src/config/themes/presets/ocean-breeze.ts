@@ -79,11 +79,12 @@ export const oceanBreezeTheme: ThemeConfig = {
     },
 
     fontSize: {
-      xs: '14px',
-      sm: '15px',
+      // 对齐 Tailwind 默认阶梯：字号变量接管后默认主题观感不变
+      xs: '12px',
+      sm: '14px',
       md: '16px',
-      lg: '17px',
-      xl: '18px',
+      lg: '18px',
+      xl: '20px',
       defaultFontSize: 'md',
     },
 

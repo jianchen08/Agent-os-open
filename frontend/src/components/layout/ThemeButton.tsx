@@ -76,7 +76,7 @@ export function ThemeButton({ className, compact = true }: ThemeButtonProps) {
         onClick={handleClick}
         className={cn(
           'flex items-center justify-center rounded-md transition-colors',
-          'text-muted-foreground hover:text-foreground hover:bg-white/5',
+          'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
           btnCls,
         )}
         title={

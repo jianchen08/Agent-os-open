@@ -272,10 +272,10 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
             className={cn(
               'text-[10px] px-1.5 py-0.5 rounded-full font-medium',
               isOpen
-                ? 'bg-green-500/10 text-green-600'
+                ? 'bg-[var(--status-success)]/10 text-[var(--status-success)]'
                 : isClosed
-                  ? 'bg-gray-500/10 text-gray-500'
-                  : 'bg-red-500/10 text-red-500',
+                  ? 'bg-muted text-muted-foreground'
+                  : 'bg-[var(--status-error)]/10 text-[var(--status-error)]',
             )}
           >
             {isOpen ? '投票中' : isClosed ? '已结束' : '已取消'}
@@ -387,7 +387,7 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
 
       {/* 已投票提示 */}
       {isOpen && hasVoted && (
-        <div className="border-t border-border/30 px-4 py-3 flex items-center gap-2 text-xs text-green-600">
+        <div className="border-t border-border/30 px-4 py-3 flex items-center gap-2 text-xs text-status-success">
           <Check className="h-icon-sm w-icon-sm" />
           <span>已投票</span>
         </div>

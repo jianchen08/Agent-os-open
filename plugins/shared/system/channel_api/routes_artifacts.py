@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import uuid
 from typing import Any
 
@@ -18,6 +19,14 @@ from artifacts_sidecar.artifact_service import get_artifact_service
 from deps import require_auth
 from multimodal.storage import DiskFileStorage  # noqa: F811
 from multimodal.mm_types import AttachmentInfo, MediaType  # noqa: F811
+
+# 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
+# plugins/shared/system/channel_api/routes_artifacts.py，上溯 2 级到
+# plugins/shared/。参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +86,26 @@ def _infer_media_type(mime_type: str) -> str:
     return _MIME_TO_MEDIA.get(category, "document")
 
 
-def _get_uploads_dir() -> str:
-    """获取上传文件目录（环境变量 UPLOADS_DIR 控制，默认 ./data/uploads）。"""
-    return os.environ.get("UPLOADS_DIR", "./data/uploads")
+def _get_uploads_dir(tenant_id: str | None = None) -> str:
+    """获取上传文件目录。
+
+    解析优先级（高 → 低）：
+
+    1. 环境变量 ``UPLOADS_DIR``（兼容存量部署覆盖，最高优先级）；
+    2. 多租户数据根 ``tenant_data_root(tenant_id or default, "uploads")``
+       （方案 B 目录隔离默认值，即 ``data/{tenant_id}/uploads``）。
+
+    Args:
+        tenant_id: 租户 ID。未设 UPLOADS_DIR 时目录落在
+            ``data/{tenant_id}/uploads``；None 则用 ``DEFAULT_TENANT``。
+
+    Returns:
+        上传文件目录（str 路径）。
+    """
+    env_dir = os.environ.get("UPLOADS_DIR")
+    if env_dir:
+        return env_dir
+    return str(tenant_data_root(tenant_id or DEFAULT_TENANT, "uploads"))
 
 
 @artifacts_router.post("/upload", summary="上传多模态文件")

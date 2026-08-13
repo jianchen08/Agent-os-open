@@ -72,7 +72,7 @@ export function ReviewPanel({
       {/* 批注计数 */}
       {annotations.length > 0 && (
         <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-          <MessageSquare className="h-4 w-4 text-yellow-600" />
+          <MessageSquare className="h-4 w-4 text-status-warning" />
           <span className="text-sm font-medium text-foreground">
             {annotations.length} 条批注
           </span>
@@ -80,7 +80,7 @@ export function ReviewPanel({
             {annotations.slice(0, 3).map((a) => (
               <span
                 key={a.id}
-                className="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200"
+                className="inline-flex items-center rounded-full bg-status-warning/10 px-2 py-0.5 text-[10px] text-status-warning dark:bg-status-warning/15/40 dark:text-status-warning"
                 title={a.suggestion}
               >
                 {a.type === 'text_selection' && a.selectedText
@@ -118,7 +118,7 @@ export function ReviewPanel({
       {/* 操作按钮 */}
       <div className="flex items-center gap-2 px-4 py-3">
         <button
-          className="flex items-center gap-1.5 rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md bg-status-success px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-status-success/80 disabled:opacity-50"
           onClick={handleApprove}
           disabled={isSubmitting}
         >
@@ -131,7 +131,7 @@ export function ReviewPanel({
         </button>
 
         <button
-          className="flex items-center gap-1.5 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md bg-status-error px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-status-error disabled:opacity-50"
           onClick={handleReject}
           disabled={isSubmitting}
         >

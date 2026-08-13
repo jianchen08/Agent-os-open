@@ -1,7 +1,8 @@
 //! Capability 路由器实现——处理 sidecar 插件反向调用内核能力。
 //!
 //! 持有引擎句柄，把 sidecar 的 `<capability>.<method>` 反向调用路由到内核实现：
-//! - pipeline-executor.{suspend, resume, start_run} → AdrEngine
+//! - pipeline-executor.{suspend, resume, start_run, get_run_status} → AdrEngine/
+//!   StorageBackend（get_run_status 查 run 状态，供复盘轮询真实完成，F-REVIEW-2）
 //! - event-bus.emit → 广播事件（当前记录日志，前端推送留 P1）
 //! - config-reader.get → 读取配置节（从 AppState 配置缓存）
 //! - metrics.record → 写入指标聚合器（监控设计 §三 通道2，第 6 个 capability）
@@ -195,6 +196,28 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         message: format!("start_run 失败: {e}"),
                     })?;
                 Ok(json!({"status": "started", "run_id": run_id}))
+            }
+            ("pipeline-executor", "get_run_status") => {
+                // F-REVIEW-2：复盘侧轮询子管道真实完成状态的最小能力。
+                // 不依赖引擎（start_run 是 fire-and-forget，无完成事件/wait），
+                // 直接查 runs 表（store 生产侧由 agentos-kernel.rs with_store 注入）。
+                let run_id = params
+                    .get("run_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::Protocol {
+                        message: "get_run_status 缺少 run_id 参数".to_string(),
+                    })?;
+                let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "get_run_status disabled: kernel store not injected".to_string(),
+                })?;
+                let run = store.get_run(run_id).await.map_err(|e| McpError::Protocol {
+                    message: format!("get_run_status 失败: {e}"),
+                })?;
+                // 返回完整 RunRecord（run_id/status/ended_at/...），status 序列化为
+                // lowercase（running/suspended/completed/failed）。
+                serde_json::to_value(&run).map_err(|e| McpError::Protocol {
+                    message: format!("get_run_status 编码失败: {e}"),
+                })
             }
 
             // ── event-bus：发事件/通知。流式 chunk 推送的核心出口 ──
@@ -428,10 +451,12 @@ impl CapabilityRouter for KernelCapabilityRouter {
                         message: "tool-executor.invoke 缺少 tool_name 参数".to_string(),
                     })?;
                 let tool_args_raw = params.get("args").cloned().unwrap_or(json!({}));
-                // 越权防护（治理缺口）：0.2 工具调用应携带会话身份
-                // （tool_core 在 invoke 前注入 args["_owner"]，见其 lib.rs
-                // execute_single_tool）。缺失时告警不阻断——bash 等有状态
-                // 工具插件侧据此走宽松兜底；此告警用于发现未注入的调用方。
+                // 越权防护（治理）：0.2 工具调用应携带会话身份。会话身份由 param_inject
+                // 插件从 pipeline state 注入 session_id 到 args（state.session_id 来自
+                // server.rs 构造的 initial_state），所有走 LLM 工具调用链的工具都带得上。
+                // 缺失时告警不阻断——bash 等有状态工具插件侧用 _owner/session_id fallback
+                // 链（bash/tool.py::_owner_from_inputs）做 pid 级越权兜底；此告警用于发现
+                // 绕过 param_inject 的调用方（如 hindsight 经 memory_read 直接调用）。
                 let has_owner = tool_args_raw
                     .get("_owner")
                     .and_then(|v| v.as_str())
@@ -449,11 +474,20 @@ impl CapabilityRouter for KernelCapabilityRouter {
                             .map(|m| m.keys().cloned().collect::<Vec<_>>()),
                     );
                 }
-                // 剥离内部元数据字段：_owner / session_id 是治理/身份注入的，_log_ctx 是
-                // 日志上下文（SDK 在 _handle_tools_call 也会 pop _log_ctx）。这些字段仅供
-                // 内核/SDK 使用，不能透传给工具 handler——否则 handler 会因 unexpected
-                // keyword argument 报错（实测 file_read 等纯函数工具踩过）。
-                let internal_keys = ["_owner", "session_id", "_log_ctx", "pipeline_id", "task_id", "tenant_id"];
+                // 剥离纯内部元数据字段：_owner 是治理身份注入、_log_ctx 是日志上下文
+                // （SDK 在 _handle_tools_call 也会 pop _log_ctx）、tenant_id 是内核多租户
+                // 上下文（经 task_local 传递，不作为工具参数）。这些仅供内核/SDK 使用，
+                // 不应透传给工具 handler。
+                //
+                // 注意：session_id / pipeline_id / task_id 必须保留——它们是工具在
+                // injected_params 中显式声明的参数，由 param_inject 插件从 pipeline state
+                // 注入到 args；task/trigger 系工具（task_manage / trigger_setup /
+                // trigger_review 等）依赖它们做权限校验与会话/管道/任务绑定。剥离它们会导致
+                // sidecar 收到空值，报 MISSING_PIPELINE_ID / missing task_id 等。
+                // 纯函数工具（file_read 等）不受影响：SDK 的 _filter_handler_kwargs
+                // (agentos_plugin_sdk/server.py:54) 按 handler 签名过滤参数——无 **kwargs
+                // 的工具自动丢弃这些字段，不会因 unexpected keyword argument 崩溃。
+                let internal_keys = ["_owner", "_log_ctx", "tenant_id"];
                 let mut tool_args = tool_args_raw;
                 if let Some(obj) = tool_args.as_object_mut() {
                     for k in internal_keys {
@@ -485,7 +519,18 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // / memory 三表（M1 落地），不再各自持有进程内 ServiceProvider/store。
             ("service-registry", method) => self.handle_service_registry(method, params).await,
 
-            // tenant-context / logger 暂未实现具体 method（P0-4 多租户时补 tenant-context）
+            // ── tenant-context：多租户上下文查询（F-TENANT-B-KERNEL）──
+            // Python 侧 `plugins/shared/tenant_data.py` 经此能力取当前租户决定数据根；
+            // 无活跃 task_local 时回退 "default"（与 Python 侧回退一致，永不报错）。
+            ("tenant-context", "get") => {
+                let ctx = agentos_tenant::current_or_default("default");
+                Ok(json!({
+                    "tenant_id": ctx.tenant_id,
+                    "session_id": ctx.session_id,
+                }))
+            }
+
+            // logger 暂未实现具体 method
             (cap, m) => {
                 warn!(
                     "unhandled capability call: {}.{} (params={})",
@@ -1326,5 +1371,82 @@ mod tests {
             .handle("service-registry", "bogus.op", json!({}))
             .await;
         assert!(res.is_err(), "unknown service-registry domain/op must error");
+    }
+
+    // ── F-REVIEW-2：pipeline-executor.get_run_status（复盘轮询真实完成）──
+
+    #[tokio::test]
+    async fn test_pipeline_executor_get_run_status_ok() {
+        // 建 run（模拟 start_run 后的 runs 表记录）→ get_run_status 返回状态
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let router = KernelCapabilityRouter::new(Arc::new(StubEngine)).with_store(store.clone());
+        store
+            .create_run("run_status_1", "hash", "default")
+            .await
+            .unwrap();
+        let res = router
+            .handle(
+                "pipeline-executor",
+                "get_run_status",
+                json!({"run_id": "run_status_1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["run_id"], "run_status_1");
+        assert_eq!(res["status"], "running", "新建 run 状态应为 running");
+        // 更新为 completed 后再次查询应反映真实状态（复盘据此落 completed）
+        store
+            .update_run_status(
+                "run_status_1",
+                agentos_core::types::RunStatus::Completed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let res2 = router
+            .handle(
+                "pipeline-executor",
+                "get_run_status",
+                json!({"run_id": "run_status_1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2["status"], "completed");
+        assert!(res2.get("ended_at").is_some(), "completed run 应有 ended_at");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_executor_get_run_status_errors() {
+        // 无 store 注入 → 报错（与服务注册一致，不静默）
+        let router = KernelCapabilityRouter::new(Arc::new(StubEngine));
+        let res = router
+            .handle(
+                "pipeline-executor",
+                "get_run_status",
+                json!({"run_id": "x"}),
+            )
+            .await;
+        assert!(res.is_err(), "store 未注入必须报错");
+
+        // 缺 run_id 参数 → 报错
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let router2 = KernelCapabilityRouter::new(Arc::new(StubEngine)).with_store(store.clone());
+        let res2 = router2
+            .handle("pipeline-executor", "get_run_status", json!({}))
+            .await;
+        assert!(res2.is_err(), "缺 run_id 必须报错");
+
+        // run 不存在 → 报错（调用方降级为保持 running）
+        let res3 = router2
+            .handle(
+                "pipeline-executor",
+                "get_run_status",
+                json!({"run_id": "ghost"}),
+            )
+            .await;
+        assert!(res3.is_err(), "不存在的 run 必须报错");
     }
 }

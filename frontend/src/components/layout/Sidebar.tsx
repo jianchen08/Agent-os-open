@@ -431,7 +431,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       {isMobile && !sidebarCollapsed && (
         <div
           data-testid="sidebar-overlay"
-          className="animate-in fade-in fixed inset-0 z-40 bg-black/50 duration-200"
+          className="animate-in fade-in fixed inset-0 z-40 bg-[var(--overlay-bg)] duration-200"
           onClick={handleCloseSidebar}
           aria-hidden="true"
         />
@@ -442,7 +442,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         className={cn(
           // 必须 h-full：父级是 Splitter 内 full-height panel；否则 flex-1 无效，底部空白
           'border-border/50 flex h-full min-h-0 flex-col border-r transition-all duration-300 ease-in-out',
-          'bg-[var(--sidebar-bg-light)] dark:bg-[var(--sidebar-bg-dark)]',
+          // 主题侧边栏背景（--sidebar-bg 由主题引擎输出，自带明暗，无需 dark: 变体）
+          // theme-sidebar-area 叠加主题区域纹理（--sidebar-texture）
+          'theme-sidebar-area bg-[var(--sidebar-bg,hsl(var(--card)))]',
           isMobile && !sidebarCollapsed && 'fixed top-0 left-0 z-50 shadow-2xl',
         )}
         style={
@@ -462,7 +464,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   maxWidth: '100%',
                   minHeight: 0,
                   flexShrink: 0,
-                  background: 'var(--ds-bg-panel, hsl(var(--card)))',
+                  backgroundColor: 'var(--sidebar-bg, hsl(var(--card)))',
                 }
         }
       >
@@ -474,15 +476,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               type="button"
               onClick={handleSessionsClick}
               className={cn(
-                'mb-2 flex h-10 w-10 items-center justify-center rounded-[10px] transition-colors',
+                'mb-2 flex h-10 w-10 items-center justify-center rounded-lg transition-colors',
                 activeView === 'sessions'
                   ? 'text-[var(--ds-accent-primary,#22D3EE)]'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+                  : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
               )}
               style={
                 activeView === 'sessions'
                   ? {
-                      background: 'var(--ds-bg-elevated, #111C38)',
+                      background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
                       boxShadow:
                         'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
                     }
@@ -505,15 +507,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   type="button"
                   onClick={() => handlePluginClick(entry)}
                   className={cn(
-                    'mb-2 flex h-10 w-10 items-center justify-center rounded-[10px] transition-colors',
+                    'mb-2 flex h-10 w-10 items-center justify-center rounded-lg transition-colors',
                     selected
                       ? 'text-[var(--ds-accent-primary,#22D3EE)]'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+                      : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
                   )}
                   style={
                     selected
                       ? {
-                          background: 'var(--ds-bg-elevated, #111C38)',
+                          background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
                           boxShadow:
                             'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
                         }
@@ -533,10 +535,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   <button
                     type="button"
                     className={cn(
-                      'flex h-9 w-9 items-center justify-center rounded-[10px] transition-colors outline-none data-[state=open]:bg-white/5',
+                      'flex h-9 w-9 items-center justify-center rounded-lg transition-colors outline-none data-[state=open]:bg-[var(--hover-overlay)]',
                       isAuthenticated
-                        ? 'text-muted-foreground hover:text-foreground hover:bg-white/5'
-                        : 'text-primary hover:bg-white/10',
+                        ? 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]'
+                        : 'text-primary hover:bg-[var(--hover-overlay)]',
                     )}
                     title={isAuthenticated ? `${(user as { username?: string; email?: string } | null)?.username || '用户'} · 点击展开` : '点击登录'}
                     aria-label="账号菜单"
@@ -572,14 +574,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <button
                 type="button"
                 onClick={toggleNotificationPanel}
-                className="text-muted-foreground hover:text-foreground hover:bg-white/5 relative flex h-9 w-9 items-center justify-center rounded-[10px]"
+                className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] relative flex h-9 w-9 items-center justify-center rounded-lg"
                 title="通知"
                 aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
                 data-testid="sidebar-rail-notification"
               >
                 <Bell className="h-4 w-4" />
                 {notificationUnreadCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-[9px] font-bold text-white">
+                  <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error/100 px-0.5 text-[9px] font-bold text-white">
                     {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
                   </span>
                 )}
@@ -596,12 +598,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <button
                 type="button"
                 onClick={handleOpenNewSessionModal}
-                className="hover:bg-white/5 text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors"
+                className="hover:bg-[var(--hover-overlay)] text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors"
                 data-testid="new-session-button"
               >
                 <span
                   className="flex h-6 w-6 items-center justify-center rounded-md"
-                  style={{ background: 'var(--ds-bg-elevated, #111C38)' }}
+                  style={{ background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))' }}
                 >
                   <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary,#22D3EE)]" />
                 </span>
@@ -620,12 +622,12 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                       'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
                       selected
                         ? 'text-foreground'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+                        : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
                     )}
                     style={
                       selected
                         ? {
-                            background: 'var(--ds-bg-elevated, #111C38)',
+                            background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
                             boxShadow:
                               'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
                           }
@@ -684,7 +686,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                       key={`${hit.session_id}-${hit.id}`}
                       type="button"
                       onClick={() => handleSessionClick(hit.session_id)}
-                      className="text-muted-foreground hover:text-foreground hover:bg-white/5 block w-full truncate rounded px-2 py-1 text-left text-[11px] transition-colors"
+                      className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] block w-full truncate rounded px-2 py-1 text-left text-[11px] transition-colors"
                       title={hit.content}
                     >
                       {hit.content}
@@ -751,7 +753,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
-                    className="text-muted-foreground hover:text-foreground hover:bg-white/5 flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors outline-none data-[state=open]:bg-white/5"
+                    className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors outline-none data-[state=open]:bg-[var(--hover-overlay)]"
                     title={isAuthenticated ? `${(user as { username?: string } | null)?.username || '用户'} · 点击展开` : '点击登录'}
                     aria-label="账号菜单"
                     data-testid="sidebar-user-area"
@@ -806,14 +808,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <button
                 type="button"
                 onClick={toggleNotificationPanel}
-                className="text-muted-foreground hover:text-foreground hover:bg-white/5 relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+                className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
                 title="通知"
                 aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
                 data-testid="sidebar-notification"
               >
                 <Bell className="h-3.5 w-3.5" />
                 {notificationUnreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-0.5 text-[9px] font-bold text-white">
+                  <span className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error/100 px-0.5 text-[9px] font-bold text-white">
                     {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
                   </span>
                 )}

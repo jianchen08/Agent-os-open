@@ -19,5 +19,12 @@
     "dependencies": [],
     "permissions": {},
     "error_policy": "skip",
-    "priority": 50
+    "priority": 50,
+    "config_files": [
+        {
+            "id": "models",
+            "path": "config/models/llm.yaml",
+            "label": "LLM 模型配置（压缩用 chat completions）"
+        }
+    ]
 }

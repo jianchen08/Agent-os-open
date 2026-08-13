@@ -147,7 +147,7 @@ const SessionItem = memo<SessionItemProps>(
           {session.workspace && (
             <span
               title={`工作空间: ${session.workspace}`}
-              className="text-muted-foreground ml-1 hidden max-w-[120px] flex-shrink-0 truncate rounded bg-black/5 px-1.5 py-0.5 text-[10px] sm:block"
+              className="text-muted-foreground ml-1 hidden max-w-[120px] flex-shrink-0 truncate rounded bg-[var(--hover-overlay)] px-1.5 py-0.5 text-[10px] sm:block"
             >
               📁 {session.isolationMode === 'isolated' ? '🛡️' : ''}
               {session.workspace.split(/[\\/]/).filter(Boolean).pop() || session.workspace}
@@ -170,8 +170,8 @@ const SessionItem = memo<SessionItemProps>(
               className={cn(
                 'h-4 w-4 transition-all duration-200',
                 session.starred
-                  ? 'fill-amber-400 text-amber-400 drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]'
-                  : 'fill-none stroke-current stroke-[1.5] text-muted-foreground opacity-60 group-hover:text-amber-400 group-hover:opacity-100',
+                  ? 'fill-amber-400 text-status-warning drop-shadow-[0_0_3px_rgba(251,191,36,0.6)]'
+                  : 'fill-none stroke-current stroke-[1.5] text-muted-foreground opacity-60 group-hover:text-status-warning group-hover:opacity-100',
               )}
               data-testid="star-icon"
             />

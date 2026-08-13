@@ -24,6 +24,7 @@ class OperationStatus(str, Enum):
     """操作状态"""
 
     EXECUTED = "executed"  # 已执行
+    ROLLING_BACK = "rolling_back"  # 回滚中（幂等令牌：防重试双回滚）
     ROLLED_BACK = "rolled_back"  # 已回滚
     FAILED = "failed"  # 失败
 
@@ -100,6 +101,7 @@ class Checkpoint:
     description: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+    sequence: int = 0  # 创建检查点时该 task 的当前操作序号（按序号回滚，避免墙钟同 tick 误判）
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
@@ -110,6 +112,7 @@ class Checkpoint:
             "description": self.description,
             "metadata": self.metadata,
             "created_at": self.created_at.isoformat(),
+            "sequence": self.sequence,
         }
 
     @classmethod
@@ -122,6 +125,7 @@ class Checkpoint:
             description=data.get("description"),
             metadata=data.get("metadata", {}),
             created_at=(datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now()),
+            sequence=data.get("sequence", 0),
         )
 
 

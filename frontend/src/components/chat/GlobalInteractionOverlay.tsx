@@ -151,7 +151,7 @@ export function GlobalInteractionOverlay() {
     <div className="fixed inset-0 z-[10000] flex items-center justify-center pointer-events-none">
       {/* 背景遮罩（点击关闭） */}
       <div
-        className="absolute inset-0 bg-black/30 pointer-events-auto"
+        className="absolute inset-0 bg-[var(--overlay-bg)] pointer-events-auto"
         onClick={toggleMinimized}
       />
 

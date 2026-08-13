@@ -131,7 +131,7 @@ export function MediaTimelineView({
         <div className="flex items-center gap-2 bg-background border-t border-border px-3 py-2">
           <button
             onClick={togglePlay}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-status-info text-white hover:bg-status-info"
             data-testid="play-pause-btn"
           >
             {isPlaying ? '⏸' : '▶'}
@@ -152,14 +152,14 @@ export function MediaTimelineView({
         >
           {/* 播放进度 */}
           <div
-            className="absolute left-0 top-0 h-full rounded bg-blue-500/30"
+            className="absolute left-0 top-0 h-full rounded bg-status-info/100/30"
             style={{ width: `${progressPercent}%` }}
             data-testid="timeline-progress"
           />
 
           {/* 播放头 */}
           <div
-            className="absolute top-0 h-full w-0.5 bg-blue-500"
+            className="absolute top-0 h-full w-0.5 bg-status-info/100"
             style={{ left: `${progressPercent}%` }}
             data-testid="timeline-playhead"
           />
@@ -175,7 +175,7 @@ export function MediaTimelineView({
                 data-testid={`timeline-marker-${idx}`}
                 title={`${formatTime(a.timestamp ?? 0)} - ${a.suggestion}`}
               >
-                <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-yellow-500 text-[8px] font-bold text-white">
+                <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-status-warning/100 text-[8px] font-bold text-white">
                   {idx + 1}
                 </div>
               </div>
@@ -192,7 +192,7 @@ export function MediaTimelineView({
                 className="flex items-center gap-2 rounded bg-muted/50 px-2 py-1 text-xs"
                 data-testid={`annotation-item-${idx}`}
               >
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-yellow-500 text-[8px] font-bold text-white">
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-status-warning/100 text-[8px] font-bold text-white">
                   {idx + 1}
                 </span>
                 <span className="shrink-0 text-muted-foreground tabular-nums">

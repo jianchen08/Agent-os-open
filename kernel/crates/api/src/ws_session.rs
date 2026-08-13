@@ -259,7 +259,7 @@ impl PipelineDispatcher for EngineDispatcher {
         // 在租户上下文内执行管道。message_id 注入 state 供 sidecar 流式 chunk 携带
         // （sidecar on_chunk notify 时带上，前端据此把 chunk 路由到占位气泡）。
         let response =
-            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos", &[], &route_id, thread_id, &message_id))
+            agentos_tenant::scope(tenant, crate::server::process_via_engine(&state, &content, "agentos", &[], &route_id, thread_id, &message_id, user_id))
                 .await;
 
         // 引擎完成后发 new_message 收尾（填充完整内容 + 标记 completed）。

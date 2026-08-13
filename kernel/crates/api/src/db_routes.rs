@@ -109,7 +109,7 @@ struct ColumnMeta {
 // ─── 角色校验 ────────────────────────────────────────────────────────
 
 /// 只读接口角色校验：admin 或 viewer。返回当前请求租户 ID。
-async fn require_read_role(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+pub(crate) async fn require_read_role(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let (_, _, role, tenant_id) = resolve_request_user(state.store.as_ref(), headers).await?;
     if role != "admin" && role != "viewer" {
         return Err(ApiError::Forbidden {
@@ -120,7 +120,7 @@ async fn require_read_role(state: &AppState, headers: &HeaderMap) -> Result<Stri
 }
 
 /// 写接口角色校验：仅 admin。返回当前请求租户 ID。
-async fn require_admin_role(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+pub(crate) async fn require_admin_role(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let (_, _, role, tenant_id) = resolve_request_user(state.store.as_ref(), headers).await?;
     if role != "admin" {
         return Err(ApiError::Forbidden {

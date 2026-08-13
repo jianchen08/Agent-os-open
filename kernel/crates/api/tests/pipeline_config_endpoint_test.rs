@@ -15,6 +15,28 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
+async fn admin_token(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+
 /// 在临时 config/pipelines/ 下写一份 default.yaml。
 /// 注意：project_root 语义 = 项目根（config/ 的父目录），
 /// handler 读取 `project_root/config/pipelines/{name}.yaml`（对齐 0.1 白名单）。
@@ -42,10 +64,12 @@ async fn test_get_pipeline_config_returns_yaml_content() {
     write_pipeline(tmp.path());
 
     let app = make_router(&tmp);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -68,10 +92,12 @@ async fn test_get_pipeline_config_missing_returns_404() {
     write_pipeline(tmp.path());
 
     let app = make_router(&tmp);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/config/pipelines/nonexistent")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -88,10 +114,12 @@ async fn test_get_pipeline_config_invalid_name_returns_400() {
     write_pipeline(tmp.path());
 
     let app = make_router(&tmp);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/config/pipelines/..%2F..%2Fetc%2Fpasswd")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -108,6 +136,7 @@ async fn test_put_pipeline_config_writes_atomically() {
     write_pipeline(tmp.path());
 
     let app = make_router(&tmp);
+    let token = admin_token(&app).await;
     let body = json!({
         "data": {
             "name": "agentos_agent",
@@ -121,6 +150,7 @@ async fn test_put_pipeline_config_writes_atomically() {
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -142,12 +172,14 @@ async fn test_put_pipeline_config_invalid_name_returns_400() {
     write_pipeline(tmp.path());
 
     let app = make_router(&tmp);
+    let token = admin_token(&app).await;
     let body = json!({ "data": { "name": "x" } });
     let response = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/config/pipelines/..%2F..%2Fetc%2Fpasswd")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),

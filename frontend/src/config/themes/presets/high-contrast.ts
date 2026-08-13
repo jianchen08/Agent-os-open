@@ -79,11 +79,12 @@ export const highContrastTheme: ThemeConfig = {
     },
 
     fontSize: {
-      xs: '15px',
-      sm: '16px',
-      md: '17px',
+      // 无障碍主题：整体比默认阶梯大一号，保证可读性
+      xs: '14px',
+      sm: '15px',
+      md: '16px',
       lg: '18px',
-      xl: '19px',
+      xl: '20px',
       defaultFontSize: 'md',
     },
 

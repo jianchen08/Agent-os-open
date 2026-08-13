@@ -2,8 +2,10 @@
 """Trigger Setup 工具 MCP 服务端——接口适配层。"""
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -14,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from tool import TriggerSetupTool  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from triggers.manager import get_trigger_manager  # noqa: E402
 
 plugin = AgentOSPlugin("trigger_setup_tool")
 
@@ -26,6 +29,45 @@ _TD = TriggerSetupTool.get_tool_definition()
 _TRIGGER_SETUP_SCHEMA = _TD.input_schema
 _TRIGGER_SETUP_DESCRIPTION = _TD.description
 
+
+def _make_trigger_injector() -> Any:
+    """构造 0.2 sidecar 触发消息投递器。
+
+    到期触发时 TriggerManager 经此把消息投给内核 ``chat.send_message`` capability，
+    复用前端 WS 派发路径唤醒 agent。能力句柄懒解析（在协程内 get_capability），
+    即便 on_load 时机早于 capability 声明完成，也能在真正触发时拿到（或抛错由 manager 记录）。
+    """
+
+    async def _inject(pipeline_id: str, message: str, user_id: str) -> Any:
+        handle = plugin.get_capability("chat")
+        return await handle.call(
+            "send_message",
+            {"pipeline_id": pipeline_id, "message": message, "user_id": user_id},
+        )
+
+    return _inject
+
+
+@plugin.on_load
+async def _on_load(_params: dict[str, Any]) -> None:
+    """sidecar 启动（主事件循环内）：接通触发检查循环 + 注入器。
+
+    修复两处 0.2 迁移遗留：
+    1. set_main_loop 此前无人调用 → _main_loop 恒为 None → 触发器到期直接跳过；
+    2. 注入路径此前依赖已删除的 pipeline.message_bus → 现改为内核 chat capability。
+    """
+    mgr = get_trigger_manager()
+    mgr.set_main_loop(asyncio.get_running_loop())
+    mgr.set_injector(_make_trigger_injector())
+    mgr.start_check_loop()
+
+
+@plugin.on_unload
+async def _on_unload(_params: dict[str, Any]) -> None:
+    """sidecar 卸载：停止后台检查线程。"""
+    get_trigger_manager().stop_check_loop()
+
+
 @plugin.tool(
     name="trigger_setup",
     schema=_TRIGGER_SETUP_SCHEMA,
@@ -35,6 +77,7 @@ async def trigger_setup(**kwargs):
     t = TriggerSetupTool()
     result = await t.execute(kwargs)
     return result.output if result.success else {"error": result.error}
+
 
 if __name__ == "__main__":
     plugin.run()

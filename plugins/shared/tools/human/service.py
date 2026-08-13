@@ -354,6 +354,7 @@ class HumanInteractionService(IHumanInteractionService):
             )
         except TimeoutError:
             await self._handle_timeout(request_id)
+            self._cancel_timeout_task(request_id)
             raise InteractionTimeoutError(request_id, timeout) from None
         finally:
             self._pending_event_loops.pop(request_id, None)
@@ -706,11 +707,25 @@ class HumanInteractionService(IHumanInteractionService):
         }
 
     def _setup_timeout(self, request_id: str, timeout_seconds: int, thread_id: str = ""):
-        """设置超时任务。"""
+        """设置超时任务（F-HI-1：短超时按时收敛 + 任务结束自清理）。
+
+        两种时间尺度：
+        - 长超时（timeout >= remind）：``sleep(timeout - remind)`` → 提醒 →
+          ``sleep(remind)`` → 超时处理（原语义保留）；
+        - 短超时（timeout < remind）：**不提醒**，直接 ``sleep(timeout)`` →
+          超时处理。修复前 ``sleep(max(0, timeout - remind))`` 对短超时退化为
+          sleep(0) → 创建瞬间误发"即将超时"提醒，且真正收敛被推迟到 +remind 秒。
+        """
+        short_timeout = timeout_seconds < self._remind_before_seconds
 
         async def timeout_handler():
             try:
-                await asyncio.sleep(max(0, timeout_seconds - self._remind_before_seconds))
+                if short_timeout:
+                    await asyncio.sleep(timeout_seconds)
+                    await self._handle_timeout(request_id)
+                    return
+
+                await asyncio.sleep(timeout_seconds - self._remind_before_seconds)
 
                 record = self._requests.get(request_id)
                 if record and record.get("status") == InteractionStatus.PENDING.value:
@@ -730,25 +745,46 @@ class HumanInteractionService(IHumanInteractionService):
 
                 await asyncio.sleep(self._remind_before_seconds)
 
-                record = self._requests.get(request_id)
-                if record and record.get("status") == InteractionStatus.PENDING.value:
-                    await self._handle_timeout(request_id)
+                await self._handle_timeout(request_id)
 
             except asyncio.CancelledError:
                 pass
             except Exception as e:
                 logger.error("[HumanInteraction] 超时处理失败 | error=%s", e)
+            finally:
+                # 任务结束（正常/取消/异常）都从登记表移除，防悬挂登记
+                if self._timeout_tasks.get(request_id) is asyncio.current_task():
+                    self._timeout_tasks.pop(request_id, None)
 
         task = asyncio.create_task(timeout_handler())
         self._timeout_tasks[request_id] = task
 
+    def _cancel_timeout_task(self, request_id: str) -> None:
+        """取消并移除请求的后台超时任务（wait_for_choice 超时/完成时调用）。
+
+        审批闭环要求超时"一锤定音"：wait_for_choice 已抛超时后，后台任务若仍
+        存活，会悬挂到 +remind 秒才醒来，期间占着事件循环且可能重复触发通知。
+        """
+        task = self._timeout_tasks.get(request_id)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        self._timeout_tasks.pop(request_id, None)
+
     async def _handle_timeout(self, request_id: str):
-        """处理超时。"""
+        """处理超时（幂等：非 PENDING 状态不再处理/通知）。
+
+        幂等守卫：wait_for_choice 超时与后台 timeout_handler 会在同一时刻竞争
+        进入本方法（审批闭环最常见的竞态窗口）。状态检查与置位之间无 await 间隙
+        （仅同步代码），先到者把 status 置 TIMEOUT 并通知，后到者直接返回——
+        notify_timeout 恰好只触发一次。
+        """
         record = self._requests.get(request_id)
         thread_id = ""
         if record:
             msg_data = record.get("message_data") or {}
             thread_id = msg_data.get("thread_id", "")
+            if record.get("status") != InteractionStatus.PENDING.value:
+                return  # 幂等：已被响应/取消/已超时处理
             record["status"] = InteractionStatus.TIMEOUT.value
 
         async with self._lock:

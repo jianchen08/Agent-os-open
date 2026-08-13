@@ -10,10 +10,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 from scene.models import Scene
+
+# 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
+# plugins/shared/system/scene/persistence.py，上溯 2 级到 plugins/shared/。
+# 参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +38,36 @@ class ScenePersistence:
         scenes_file: 场景数据文件路径
     """
 
-    def __init__(self, storage_path: str | Path = "data/scenes") -> None:
+    def __init__(
+        self,
+        storage_path: str | Path | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         """初始化持久化管理器。
 
+        storage_path 解析优先级（高 → 低）：
+
+        1. 显式 ``storage_path`` 参数（测试/定制路径，最高优先级，覆盖一切）；
+        2. 环境变量 ``SCENES_STORAGE_DIR``（兼容存量部署覆盖）；
+        3. 多租户数据根 ``tenant_data_root(tenant_id or default, "scenes")``
+           （方案 B 目录隔离默认值，即 ``data/{tenant_id}/scenes``）。
+
         Args:
-            storage_path: 存储目录路径，默认为 data/scenes
+            storage_path: 存储目录路径。显式传入时优先使用，覆盖 env 与
+                tenant_id。
+            tenant_id: 租户 ID。未传 storage_path 且未设 env 时，存储目录落在
+                ``data/{tenant_id}/scenes``；None 则用 ``DEFAULT_TENANT``。
         """
-        self.storage_path = Path(storage_path)
+        if storage_path is not None:
+            resolved = storage_path
+        else:
+            env_dir = os.environ.get("SCENES_STORAGE_DIR")
+            if env_dir:
+                resolved = env_dir
+            else:
+                # 方案 B 默认：经多租户咽喉点取 data/{tenant_id}/scenes
+                resolved = tenant_data_root(tenant_id or DEFAULT_TENANT, "scenes")
+        self.storage_path = Path(resolved)
         self.scenes_file = self.storage_path / "scenes.json"
         self._ensure_storage_dir()
 

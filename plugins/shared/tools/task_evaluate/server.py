@@ -7,11 +7,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# 将 0.1 源码目录加入 sys.path，使老代码的 from tools.* 导入可用
+# 任务领域模块以 plugins/shared/system/tasks/ 为权威（0.2 平铺模块：
+# service_access / task_types / agents_types …）。注入 sys.path 供 tool.py 的
+# `from task_types import TaskStatus` / `from service_access import …` 直接解析。
+# 评估类型面（_eval_core.py）位于本目录，已由上方 sys.path.insert 覆盖。
+# 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_SRC_ROOT = os.path.join(_PROJECT_ROOT, 'src')
-if os.path.isdir(_SRC_ROOT):
-    sys.path.insert(0, _SRC_ROOT)
+_TASKS_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system', 'tasks')
+_SYSTEM_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system')
+for _d in (_TASKS_DIR, _SYSTEM_DIR):
+    if os.path.isdir(_d):
+        sys.path.insert(0, _d)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 

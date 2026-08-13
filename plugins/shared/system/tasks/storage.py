@@ -1,7 +1,7 @@
 """任务存储 — 按根任务分目录 + YAML 扁平文件持久化。
 
 存储结构：
-- data/tasks/tree_{根任务ID}/{任务ID}.yaml
+- data/{tenant_id}/tasks/tree_{根任务ID}/{任务ID}.yaml（方案 B 多租户目录隔离）
 - 每个任务独立一个 YAML 文件
 - 同一根任务树下的所有任务文件放在同一目录
 - 内存 dict 缓存 + 文件持久化
@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
@@ -21,6 +23,14 @@ from typing import Any
 import yaml
 from enum_utils import safe_enum_value
 from task_types import TaskModel, TaskStatus
+
+# 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
+# plugins/shared/system/tasks/storage.py，上溯 2 级到 plugins/shared/。
+# 参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +54,38 @@ class TaskStorage:
         _data_dir: 存储根目录路径
     """
 
-    def __init__(self, data_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         """初始化任务存储。
 
+        data_dir 解析优先级（高 → 低）：
+
+        1. 显式 ``data_dir`` 参数（测试/定制路径，最高优先级，覆盖一切）；
+        2. 环境变量 ``TASKS_STORAGE_DIR``（兼容存量部署覆盖）；
+        3. 多租户数据根 ``tenant_data_root(tenant_id or default, "tasks")``
+           （方案 B 目录隔离默认值，即 ``data/{tenant_id}/tasks``）。
+
         Args:
-            data_dir: 存储根目录，None 时仅使用内存缓存
+            data_dir: 存储根目录。显式传入时优先使用，覆盖 env 与 tenant_id。
+            tenant_id: 租户 ID。未传 data_dir 且未设 env 时，数据根落在
+                ``data/{tenant_id}/tasks``；None 则用 ``DEFAULT_TENANT``。
         """
+        if data_dir is not None:
+            resolved = data_dir
+        else:
+            env_dir = os.environ.get("TASKS_STORAGE_DIR")
+            if env_dir:
+                resolved = env_dir
+            else:
+                # 方案 B 默认：经多租户咽喉点取 data/{tenant_id}/tasks
+                resolved = tenant_data_root(tenant_id or DEFAULT_TENANT, "tasks")
         self._tasks: dict[str, TaskModel] = {}
-        self._data_dir = Path(data_dir) if data_dir else None
-        if self._data_dir:
-            self._data_dir.mkdir(parents=True, exist_ok=True)
-            self._load_all()
+        self._data_dir = Path(resolved)
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._load_all()
 
     def _load_all(self) -> None:
         """加载所有任务文件。

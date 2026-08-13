@@ -3,24 +3,37 @@
 暴露接口：
 - get_tool_definition() -> Tool：工具定义
 - TaskEvaluateTool：任务评估工具类
+
+0.2 迁移（FP-MIGR / F-MIGR-2）：
+- 顶层类型走 agentos_plugin_sdk（BuiltinTool / Tool / ToolCategory / ToolLevel /
+  ToolSource / ToolExecutionResult / create_failure_result / create_success_result）；
+- 评估类型面（EvaluationResult / MetricResult / sanitize_eval_paths /
+  EvaluationExecutor）就地重建于同目录 _eval_core.py；
+- 任务领域类型（TaskStatus）以 plugins/shared/system/tasks/ 平铺模块为权威
+  （server.py 注入 sys.path）；
+- 0.1 infrastructure.service_provider 已废弃 → 模块级 _get_service_provider()
+  shim（get 返回 None，调用方均有降级守卫）；
+- 评估执行器由外部注入（构造参数 executor=...，duck-typing）：未注入时评估
+  路径返回 EVAL_ENGINE_UNAVAILABLE，不静默空转。
 """
 
+import asyncio
 import contextlib
 import logging
 from typing import Any
 
-from core.results import ToolExecutionResult
-from evaluation.types import sanitize_eval_paths
-from tasks.types import TaskStatus
-from tools.builtin.base import BuiltinTool
-from tools.types import (
+from _eval_core import sanitize_eval_paths
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
 )
+from task_types import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +43,25 @@ _DEFAULT_MAX_EVAL_CALLS = 15
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
+
+
+class _ServiceProviderShim:
+    """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。
+
+    0.1 的 infrastructure.service_provider 已废弃（src/ 已归档）。0.2 sidecar
+    无 agent_registry / tool_registry / workspace_lifecycle_manager /
+    execution_record_storage 等价单例 → 统一返回 None，调用方均有降级守卫
+    （如 _try_merge_before_complete 跳过合并门控、_register_eval_pipelines
+    跳过管道注册）。
+    """
+
+    def get(self, key: str) -> Any:
+        return None
+
+
+def _get_service_provider() -> Any:
+    """0.2 服务提供者获取（FP-MIGR：替代已废弃的 infrastructure.service_provider）。"""
+    return _ServiceProviderShim()
 
 
 def _simple_evaluate(task: Any, notes: str = "") -> tuple[bool, str]:
@@ -72,7 +104,7 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
     Returns:
         评估结果字典
     """
-    from tasks.types import TaskStatus  # noqa: PLC0415
+    from task_types import TaskStatus  # noqa: PLC0415
 
     action = inputs.get("action")
     task_id = inputs.get("task_id")
@@ -87,13 +119,9 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
         return {"success": False, "error_code": "INVALID_ACTION", "error": f"不支持的操作: {action}"}
 
     try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from service_access import get_task_service  # noqa: PLC0415
 
-        provider = get_service_provider()
-        task_service = provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
-        )
+        task_service = get_task_service()
         if task_service is None:
             return {"success": False, "error_code": "SERVICE_UNAVAILABLE", "error": "TaskService 不可用"}
     except Exception:
@@ -134,9 +162,16 @@ class TaskEvaluateTool(BuiltinTool):
        - 失败且次数耗尽 → 更新状态 FAILED + 通知提交者
     """
 
-    def __init__(self, **kwargs: Any) -> None:
-        """初始化任务评估工具。"""
+    def __init__(self, executor: Any = None, **kwargs: Any) -> None:
+        """初始化任务评估工具。
+
+        Args:
+            executor: 评估执行器实例（0.2 注入版，duck-typing，实现
+                ``async run_evaluation(...) -> EvaluationResult``）。None 表示
+                未注入 → 评估路径返回 EVAL_ENGINE_UNAVAILABLE（不静默空转）。
+        """
         super().__init__()
+        self._executor = executor
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -310,20 +345,30 @@ class TaskEvaluateTool(BuiltinTool):
             )
             return await self._auto_complete(inputs, task_service, task)
 
-        import litellm  # noqa: PLC0415
+        try:
+            import litellm  # noqa: PLC0415
+        except ImportError:  # 0.2 精简环境可选依赖：限速细粒度识别降级
+            litellm = None  # type: ignore[assignment]
+
+        executor = self._create_executor(task_service)
+        if executor is None:
+            logger.warning(
+                "[TaskEvaluate] 评估执行器未注入（0.2 评估引擎不可用）| task_id=%s | metric_id=%s",
+                task_id,
+                metric_id,
+            )
+            return create_failure_result(
+                error="评估执行器未注入（0.2 评估引擎不可用），无法执行评估",
+                error_code="EVAL_ENGINE_UNAVAILABLE",
+            )
+        timeout = self._get_eval_timeout(task)
+
+        single_params: dict[str, dict[str, Any]] = {}
+        summary_from_input = inputs.get("summary", "")
+        if summary_from_input:
+            single_params[metric_id] = {"summary": summary_from_input}
 
         try:
-            import asyncio  # noqa: PLC0415
-
-            asyncio.get_running_loop()
-            executor = self._create_executor(task_service)
-            timeout = self._get_eval_timeout(task)
-
-            single_params: dict[str, dict[str, Any]] = {}
-            summary_from_input = inputs.get("summary", "")
-            if summary_from_input:
-                single_params[metric_id] = {"summary": summary_from_input}
-
             result = await asyncio.wait_for(
                 executor.run_evaluation(
                     task_id=task_id,
@@ -332,17 +377,6 @@ class TaskEvaluateTool(BuiltinTool):
                     skip_state_update=True,
                 ),
                 timeout=timeout,
-            )
-        except litellm.RateLimitError as exc:
-            logger.warning(
-                "[TaskEvaluate] 评估期间 API 限速 | task_id=%s | metric_id=%s: %s",
-                task_id,
-                metric_id,
-                exc,
-            )
-            return create_failure_result(
-                error=f"评估期间 API 限速: {exc}",
-                error_code="RATE_LIMITED",
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -355,9 +389,20 @@ class TaskEvaluateTool(BuiltinTool):
                 error=f"评估超时（{timeout}s）: 指标 {metric_id} 执行时间过长",
                 error_code="EVAL_TIMEOUT",
             )
-        except Exception as e:
-            logger.exception("[TaskEvaluate] 单指标评估失败: %s", e)
-            return create_failure_result(error=f"评估失败: {e}", error_code="EVAL_FAILED")
+        except Exception as exc:
+            if litellm is not None and isinstance(exc, litellm.RateLimitError):
+                logger.warning(
+                    "[TaskEvaluate] 评估期间 API 限速 | task_id=%s | metric_id=%s: %s",
+                    task_id,
+                    metric_id,
+                    exc,
+                )
+                return create_failure_result(
+                    error=f"评估期间 API 限速: {exc}",
+                    error_code="RATE_LIMITED",
+                )
+            logger.exception("[TaskEvaluate] 单指标评估失败: %s", exc)
+            return create_failure_result(error=f"评估失败: {exc}", error_code="EVAL_FAILED")
 
         # 注册评估子管道 + 追加历史记录
         self._register_eval_pipelines(task_service, task, result)
@@ -479,12 +524,19 @@ class TaskEvaluateTool(BuiltinTool):
             remaining_ids,
         )
 
+        executor = self._create_executor(task_service)
+        if executor is None:
+            logger.warning(
+                "[TaskEvaluate] 评估执行器未注入（0.2 评估引擎不可用）| task_id=%s | metrics=%s",
+                task.id,
+                remaining_ids,
+            )
+            return create_failure_result(
+                error="评估执行器未注入（0.2 评估引擎不可用），无法执行评估",
+                error_code="EVAL_ENGINE_UNAVAILABLE",
+            )
+        timeout = self._get_eval_timeout(task)
         try:
-            import asyncio  # noqa: PLC0415
-
-            asyncio.get_running_loop()
-            executor = self._create_executor(task_service)
-            timeout = self._get_eval_timeout(task)
             result = await asyncio.wait_for(
                 executor.run_evaluation(
                     task_id=task.id,
@@ -713,15 +765,11 @@ class TaskEvaluateTool(BuiltinTool):
             None 表示合并成功或不需要合并（plain/shared 模式），
             str 表示合并失败原因，调用方应据此标记任务 failed。
 
-        通过 provider.get("workspace_lifecycle_manager") 直接获取 lifecycle
-        （lifecycle 已在 TaskWorker._init_lifecycle 注册到 ServiceProvider），并复用
-        WorkspaceLifecycleManager.merge_worktree_before_complete 公共方法。
-        不用 provider.get("services")——ServiceProvider 从未注册 "services" 这个 key
-        （register_services 注册的是字典里每个独立 key）。
+        0.2 迁移（FP-MIGR）：0.1 infrastructure.service_provider 已废弃 →
+        模块级 _get_service_provider() shim（get 恒返回 None，workspace_lifecycle_manager
+        不可用 → 跳过合并门控，文档化降级）。
         """
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        lifecycle = get_service_provider().get("workspace_lifecycle_manager")
+        lifecycle = _get_service_provider().get("workspace_lifecycle_manager")
         if lifecycle is None:
             logger.warning(
                 "[TaskEvaluate] workspace_lifecycle_manager 未注册到 ServiceProvider，跳过合并门控 | task_id=%s",
@@ -807,9 +855,7 @@ class TaskEvaluateTool(BuiltinTool):
                     task.id,
                 )
                 return
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            provider = get_service_provider()
+            provider = _get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
                 logger.warning("[TaskEvaluate] execution_record_storage 不可用，跳过评估管道注册")
@@ -887,86 +933,31 @@ class TaskEvaluateTool(BuiltinTool):
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
 
-        委托到 tasks.service_access 公共接口。
+        委托到 tasks 平铺模块（plugins/shared/system/tasks/service_access.py）的
+        公共接口（M3 后插件自包含单例，不再依赖 infrastructure.service_provider）。
 
         Returns:
             TaskService 实例，获取失败返回 None
         """
-        from tasks.service_access import get_task_service  # noqa: PLC0415
+        from service_access import get_task_service  # noqa: PLC0415
 
         return get_task_service()
 
     def _create_executor(self, task_service: Any) -> Any:
-        """创建 EvaluationExecutor 实例。
+        """获取评估执行器（0.2 注入版，duck-typing）。
 
-        从全局变量获取 pipeline_factory 和 agent_registry，
-        传递给 EvaluationExecutor 以支持 Agent 型评估器。
+        0.1 的 evaluation.executor.EvaluationExecutor 完整实现未迁移（src/ 已归档，
+        其依赖 0.1 评估引擎/指标加载器）；0.2 执行器由外部注入（宿主/测试），
+        经构造参数 ``executor=...`` 传入。未注入返回 None → 调用方返回
+        EVAL_ENGINE_UNAVAILABLE（文档化降级，不静默空转）。
 
         Args:
-            task_service: TaskService 实例，用于状态回写
+            task_service: TaskService 实例（0.2 执行器自管理，仅保留签名兼容）
 
         Returns:
-            EvaluationExecutor 实例
+            注入的评估执行器；未注入返回 None
         """
-        import asyncio  # noqa: PLC0415
-
-        from evaluation.executor import EvaluationExecutor  # noqa: PLC0415
-
-        agent_registry = self._get_agent_registry()
-        tool_registry = self._get_tool_registry()
-
-        main_loop = None
-        try:
-            main_loop = asyncio.get_running_loop()
-            if main_loop is not None:
-                import threading  # noqa: F401,PLC0415
-
-                main_thread_loop = getattr(asyncio, "_main_loop_ref", None)
-                if main_thread_loop is None:
-                    with contextlib.suppress(RuntimeError):
-                        main_thread_loop = asyncio.get_event_loop()
-                if main_thread_loop is not None and main_thread_loop is not main_loop:  # noqa: SIM102
-                    if not main_thread_loop.is_closed():
-                        main_loop = main_thread_loop
-        except RuntimeError:
-            pass
-
-        return EvaluationExecutor(
-            task_service=task_service,
-            agent_registry=agent_registry,
-            tool_registry=tool_registry,
-            main_loop=main_loop,
-        )
-
-    @staticmethod
-    def _get_agent_registry() -> Any:
-        """获取 AgentRegistry 实例。
-
-        通过 ServiceProvider 统一获取。
-        """
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        provider = get_service_provider()
-        return provider.get("agent_registry")
-
-    @staticmethod
-    def _get_tool_registry() -> Any:
-        """获取 ToolRegistry 实例。
-
-        通过 ServiceProvider 统一获取，保留从全局注册表模块获取的兜底逻辑。
-        """
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        provider = get_service_provider()
-        registry = provider.get("tool_registry")
-        if registry is not None:
-            return registry
-        try:
-            from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
-
-            return get_global_tool_registry_sync()
-        except Exception:
-            return None
+        return self._executor
 
     @staticmethod
     def _all_metrics_passed(task: Any, metric_ids: list[str]) -> bool:

@@ -180,7 +180,7 @@ export function CostSettingsPage() {
               <button
                 onClick={toggleEnabled}
                 className={`relative h-5 w-10 rounded-full transition-colors ${
-                  config.enabled ? 'bg-green-500' : 'bg-gray-400'
+                  config.enabled ? 'bg-[var(--status-success)]' : 'bg-[var(--status-pending)]'
                 }`}
               >
                 <span

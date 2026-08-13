@@ -106,10 +106,22 @@ export default {
                           linear-gradient(90deg, var(--border-default) 1px, transparent 1px)`,
       },
       fontFamily: {
-        ui: ['Noto Sans SC', 'Inter', 'sans-serif'],
-        code: ['JetBrains Mono', 'monospace'],
+        // 主题驱动：--font-ui/--font-code 由主题引擎按主题输出
+        // （值本身即完整 fallback 栈），变量缺失时回退 design-tokens 静态定义
+        ui: ['var(--font-ui, var(--font-family))'],
+        code: ['var(--font-code, var(--font-family-mono))'],
       },
       boxShadow: {
+        // 阴影全站主题化：跟随主题 shadows 配置（像素=零模糊硬阴影 / 软萌=大模糊弥散）
+        // 引擎未运行时回退 design-tokens 静态默认
+        sm: 'var(--shadow-normal-sm, var(--shadow-sm))',
+        DEFAULT: 'var(--shadow-normal-md, var(--shadow-md))',
+        md: 'var(--shadow-normal-md, var(--shadow-md))',
+        lg: 'var(--shadow-normal-lg, var(--shadow-lg))',
+        xl: 'var(--shadow-strong-lg, var(--shadow-xl))',
+        '2xl': 'var(--shadow-strong-lg, var(--shadow-xl))',
+        inner: 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
+        none: 'none',
         'glow-running': 'var(--shadow-glow-running)',
         'glow-waiting': 'var(--shadow-glow-waiting)',
       },
@@ -122,7 +134,7 @@ export default {
       keyframes: {
         'border-flow': {
           '0%, 100%': { borderColor: 'var(--accent-running)' },
-          '50%': { borderColor: 'rgba(0, 240, 255, 0.5)' },
+          '50%': { borderColor: 'color-mix(in srgb, var(--accent-running, #00f0ff) 50%, transparent)' },
         },
         'scale-pulse': {
           '0%, 100%': { transform: 'scale(1)' },

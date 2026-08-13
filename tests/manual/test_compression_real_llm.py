@@ -3,8 +3,8 @@
 流程:
 1. 构造超过触发阈值(128000 × 0.55 = 70400 tokens)的消息序列
 2. 加载真实 context_window_guard 插件
-3. 注入真实 LLM caller:调用 memory sidecar 的 LLMClient.chat_completion(直连 DeepSeek)
-   —— memory.compress 工具的内部实现就是它
+3. 注入真实 LLM client:context_window_guard 进程内的 LLMClient.chat_completion
+   (直连 compression 模型)——压缩首选路径
 4. 执行 execute(),验证真实输出:
    - 压缩是否触发
    - 消息数是否减少
@@ -21,28 +21,25 @@ import os
 import sys
 
 # ── 0. 加载路径 ──
-# 本文件在 plugins/shared/pipeline/input/context_window_guard/, 上溯 5 级到项目根
-_GUARD_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.abspath(os.path.join(_GUARD_DIR, "..", "..", "..", "..", ".."))
+# 本文件在 tests/manual/, context_window_guard 插件在 plugins/shared/pipeline/input/
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
 _SHARED_DIR = os.path.join(_PROJECT_ROOT, "plugins", "shared")
-_MEMORY_DIR = os.path.join(_SHARED_DIR, "system", "memory")
+_GUARD_DIR = os.path.join(_SHARED_DIR, "pipeline", "input", "context_window_guard")
 sys.path.insert(0, _PROJECT_ROOT)
 sys.path.insert(0, _SHARED_DIR)
 sys.path.insert(0, _GUARD_DIR)
-sys.path.insert(0, _MEMORY_DIR)
 os.chdir(_PROJECT_ROOT)
 
 import yaml  # noqa: E402
 
-# ── 1. 真实 LLM caller (等价于 memory.compress 工具) ──
-def build_real_llm_caller() -> object:
-    """构造调用真实 LLM 的 caller (method, params) -> dict。
+# ── 1. 真实 LLM client (context_window_guard 进程内路径) ──
+def build_real_llm_client() -> object:
+    """构造真实 LLMClient，注入到 context_window_guard 的 set_llm_client。
 
-    等价于 memory sidecar 的 memory.compress 工具:
-    入参 {tool_name: "memory.compress", args: {prompt, max_tokens}}
-    出参 {summary: <LLM 文本>, degraded: False}
+    使用 compression 角色（defaults.compression → minimax-m3）。
     """
-    from embedding_client import LLMClient  # noqa: PLC0415
+    from llm_client import LLMClient  # noqa: PLC0415
 
     with open(os.path.join(_PROJECT_ROOT, "config/models/llm.yaml"), encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -51,36 +48,9 @@ def build_real_llm_caller() -> object:
         "models": cfg.get("models", {}),
         "providers": cfg.get("providers", {}),
     }
-    client = LLMClient({"models": models_cfg})
-    # 使用 compression 模型 minimax-m3 (llm.yaml defaults.compression)
-    import os as _os
-    import re as _re
-
-    mini = models_cfg["models"].get("minimax-m3", {})
-    client.chat_model = mini.get("model_name", "MiniMax-M3")
-    client.chat_api_base = mini.get("api_base", "")
-    prov = models_cfg["providers"].get(mini.get("provider", ""), {})
-    keys = prov.get("keys", [])
-    if keys:
-        k = keys[0].get("api_key", "")
-        m = _re.match(r"\$\{(\w+)\}", k)
-        client.chat_api_key = _os.environ.get(m.group(1), "") if m else k
+    client = LLMClient({"models": models_cfg}, default_role="compression")
     print(f"    [LLM] 使用压缩模型 {client.chat_model} @ {client.chat_api_base}, key={'有' if client.chat_api_key else '无'}")
-
-    class RealCaller:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict]] = []
-
-        async def __call__(self, method: str, params: dict) -> dict:
-            self.calls.append((method, params))
-            if method.endswith("invoke") and params.get("tool_name") == "memory.compress":
-                prompt = params["args"]["prompt"]
-                max_tokens = params["args"].get("max_tokens", 8000)
-                summary = await asyncio.to_thread(client.chat_completion, prompt, max_tokens)
-                return {"summary": summary, "degraded": False}
-            return {}
-
-    return RealCaller()
+    return client
 
 
 # ── 2. 真实后端 (记录写入,不落库) ──
@@ -113,9 +83,9 @@ async def main() -> None:
     sys.modules["cwg_plugin"] = mod
     spec.loader.exec_module(mod)
 
-    caller = build_real_llm_caller()
+    client = build_real_llm_client()
     backend = RecordingBackend()
-    mod.set_capability_caller(caller)
+    mod.set_llm_client(client)
     mod.set_memory_backend(backend)
 
     plugin = mod.ContextWindowGuardPlugin(config={})  # 默认 trigger_ratio 0.55
@@ -206,12 +176,9 @@ async def main() -> None:
         print(f"   tags: {s['tags']}")
         print(f"   content: {s['content'][:200]}")
 
-    # ── 7. 验证 capability 调用次数 ──
+    # ── 7. 压缩块写入即代表 LLM 调用成功（进程内直调，无 caller.calls 记录）──
     print(f"\n=== LLM 调用统计 ===")
-    print(f"memory.compress 调用: {len(caller.calls)} 次")
-    for i, (method, params) in enumerate(caller.calls):
-        args = params.get("args", {})
-        print(f"   #{i+1}: {method} prompt_len={len(args.get('prompt', ''))} max_tokens={args.get('max_tokens')}")
+    print(f"chunk 写入数(=LLM 调用成功数): {len(chunk_adds)}")
 
     print(f"\n✅ 真实端到端压缩测试完成: 超阈值输入 → 真实 LLM 摘要 → 压缩块+记忆产出")
 

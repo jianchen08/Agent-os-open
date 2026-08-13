@@ -28,6 +28,28 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+/// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
+async fn admin_token(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+
 // ── 共享字面量构造 ─────────────────────────────────────────────
 
 /// 构造一个最小 PluginManifest 字面量(contributes/http_endpoints 由调用方覆盖)。
@@ -48,6 +70,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        lifecycle: None,
         native: None,
         wasm: None,
         requires_content: None,
@@ -103,6 +126,7 @@ async fn path_a_agent_config_full_crud_loop() {
 
     // 1) GET /api/v1/agents 列表里能看到本 agent
     let app = build_router(state.clone());
+    let token = admin_token(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -134,6 +158,7 @@ async fn path_a_agent_config_full_crud_loop() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/agents/crud_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -158,6 +183,7 @@ async fn path_a_agent_config_full_crud_loop() {
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/agents/crud_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -172,6 +198,7 @@ async fn path_a_agent_config_full_crud_loop() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/agents/crud_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -217,11 +244,13 @@ async fn path_a_put_invalid_yaml_behavior() {
     let put_body = serde_json::to_string(&json!({ "yaml": broken_yaml })).unwrap();
 
     let app = build_router(state.clone());
+    let token = admin_token(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/agents/yamlcheck/config")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -388,6 +417,7 @@ async fn path_c_command_with_tool_field_returns_success() {
     // invoker 保持 None(AppState::new 默认),验证占位逻辑
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let body = serde_json::to_string(&json!({
         "action": "tool.cmd",
         "args": { "foo": "bar" }
@@ -398,6 +428,7 @@ async fn path_c_command_with_tool_field_returns_success() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/actions/execute")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body))
                 .unwrap(),
@@ -436,6 +467,7 @@ async fn path_c_namespaced_action_does_not_match_bare_id() {
     state.manifests = Arc::new(vec![manifest]);
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let body = serde_json::to_string(&json!({
         "action": "ns_plugin.commandId",
         "args": {}
@@ -446,6 +478,7 @@ async fn path_c_namespaced_action_does_not_match_bare_id() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/actions/execute")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body))
                 .unwrap(),
@@ -475,6 +508,7 @@ async fn path_c_empty_args_executes_normally() {
     state.manifests = Arc::new(vec![manifest]);
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let body = serde_json::to_string(&json!({
         "action": "noop",
         "args": {}
@@ -485,6 +519,7 @@ async fn path_c_empty_args_executes_normally() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/actions/execute")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body))
                 .unwrap(),

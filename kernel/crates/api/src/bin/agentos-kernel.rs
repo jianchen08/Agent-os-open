@@ -442,7 +442,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_registry(registry.clone())
         .with_session(session_coord.clone())
         .with_store(store.clone())
-        .with_handler_registry(handler_registry),
+        .with_handler_registry(handler_registry.clone()),
     );
     invoker.set_router(router);
 
@@ -566,6 +566,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 复用 router 已持有的 session_coord（流式 chunk 推送与 WS 出站共享同一 SessionCoordinator）。
     let state = state.enable_session_with(session_coord);
     eprintln!("[boot-diag] AppState 构造完成（enable_session_with 之后）"); std::io::stderr().flush().ok();
+
+    // chat namespace capability：把"向会话投递消息并跑管道"暴露给 sidecar。
+    // 触发器（trigger_setup_tool）到期触发时经 chat.send_message 复用前端同一条
+    // WS 派发（dispatch_user_input → process_via_engine）。0.1 的 pipeline.message_bus
+    // 在 0.2 已删，sidecar 此前只能推展示事件、不能唤醒 agent；本 handler 补上注入通道。
+    // AppState 在 router 之后构造，故在此（启动末期）注册到既有 handler_registry。
+    {
+        let dispatcher: std::sync::Arc<dyn agentos_session::router::PipelineDispatcher> =
+            std::sync::Arc::new(agentos_api::ws_session::EngineDispatcher::new(state.clone()));
+        handler_registry.register(std::sync::Arc::new(
+            agentos_api::chat_send_handler::ChatSendHandler::new(dispatcher),
+        ));
+        info!(target: "agentos-kernel", "Registered chat.send_message capability (trigger fire path)");
+    }
 
     // 监控 M2/M6：后台任务——每秒把内核自采计数器 flush 到聚合器 + 滚动桶降采样。
     // M6：每秒采样关键指标广播给订阅 statusBar 的连接（widget_event）。

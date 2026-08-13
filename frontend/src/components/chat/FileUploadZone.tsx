@@ -112,19 +112,19 @@ function getFileCategory(file: File): FileCategory {
 function FileCategoryIcon({ category, className }: { category: FileCategory; className?: string }) {
   switch (category) {
     case 'image':
-      return <ImageIcon className={cn('text-blue-500', className)} />
+      return <ImageIcon className={cn('text-status-info', className)} />
     case 'document':
-      return <FileText className={cn('text-orange-500', className)} />
+      return <FileText className={cn('text-status-warning', className)} />
     case 'audio':
       return <Headphones className={cn('text-purple-500', className)} />
     case 'video':
-      return <Video className={cn('text-red-500', className)} />
+      return <Video className={cn('text-status-error', className)} />
     case 'code':
-      return <FileCode className={cn('text-green-500', className)} />
+      return <FileCode className={cn('text-status-success', className)} />
     case 'archive':
-      return <FileArchive className={cn('text-yellow-600', className)} />
+      return <FileArchive className={cn('text-status-warning', className)} />
     default:
-      return <FileIcon className={cn('text-gray-500', className)} />
+      return <FileIcon className={cn('text-muted-foreground', className)} />
   }
 }
 

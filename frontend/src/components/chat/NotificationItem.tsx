@@ -154,7 +154,7 @@ export function NotificationItemComponent({
       {/* 阻塞模式遮罩提示 */}
       {isBlocking && (
         <div className="absolute -top-6 left-0 right-0 flex items-center justify-center">
-          <span className="bg-red-500 text-white text-xs px-3 py-0.5 rounded-full font-medium">
+          <span className="bg-status-error/100 text-white text-xs px-3 py-0.5 rounded-full font-medium">
             ⚠️ 需要确认
           </span>
         </div>
@@ -211,7 +211,7 @@ export function NotificationItemComponent({
                 <div
                   className={cn(
                     'h-full rounded-full transition-all duration-300',
-                    progress >= 100 ? 'bg-green-500' : 'bg-primary',
+                    progress >= 100 ? 'bg-status-success/100' : 'bg-primary',
                   )}
                   style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
                 />

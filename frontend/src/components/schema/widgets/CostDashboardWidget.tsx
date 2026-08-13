@@ -138,7 +138,7 @@ export function CostDashboardWidget(_props: Record<string, unknown>) {
 
       {/* 近 7 日 */}
       <section
-        className="rounded-[10px] border p-4"
+        className="rounded-lg border p-4"
         style={{
           background: 'var(--ds-bg-canvas, #04060F)',
           borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
@@ -178,7 +178,7 @@ export function CostDashboardWidget(_props: Record<string, unknown>) {
 
       {/* 模型用量 */}
       <section
-        className="rounded-[10px] border p-4"
+        className="rounded-lg border p-4"
         style={{
           background: 'var(--ds-bg-canvas, #04060F)',
           borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
@@ -201,7 +201,7 @@ export function CostDashboardWidget(_props: Record<string, unknown>) {
                   </div>
                   <div
                     className="h-1 overflow-hidden rounded-sm"
-                    style={{ background: '#121C38' }}
+                    style={{ background: 'var(--ds-bg-elevated, #121C38)' }}
                   >
                     <div
                       className="h-full rounded-sm transition-all"
@@ -234,7 +234,7 @@ function StatCard({
 }) {
   return (
     <div
-      className={cn('rounded-[10px] border px-4 py-3')}
+      className={cn('rounded-lg border px-4 py-3')}
       style={{
         background: 'var(--ds-bg-canvas, #04060F)',
         borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',

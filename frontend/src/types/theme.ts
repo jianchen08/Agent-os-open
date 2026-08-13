@@ -38,7 +38,7 @@ export type CardStyle = 'flat' | 'elevated' | 'outlined' | 'glass' | 'solid'
 export type BackgroundType = 'solid' | 'gradient' | 'image'
 
 /** 纹理类型 */
-export type TextureType = 'none' | 'dots' | 'grid' | 'noise' | 'lines'
+export type TextureType = 'none' | 'dots' | 'grid' | 'noise' | 'lines' | 'checker'
 
 /** 主题信息 */
 export interface ThemeInfo {
@@ -372,6 +372,9 @@ export interface DropdownMenuConfig {
 
 /** 组件样式配置 */
 export interface ComponentsConfig {
+  /** 全局边框线型（虚线=dashed 像素感 / 圆点=dotted 可爱风），默认 solid */
+  borderStyle?: 'solid' | 'dashed' | 'dotted'
+
   /** 圆角 */
   borderRadius: BorderRadiusConfig
 

@@ -18,21 +18,21 @@ const USE_LOBECHAT_MARKDOWN = true
 const SYSTEM_LEVEL_STYLES: Record<SystemLevel, { container: string; icon: string; text: string }> = {
   info: {
     container:
-      'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',
-    icon: 'text-blue-500 dark:text-blue-400',
-    text: 'text-blue-800 dark:text-blue-200',
+      'bg-status-info/10 border-status-info/30 dark:bg-status-info/20 dark:border-status-info/40',
+    icon: 'text-status-info dark:text-status-info',
+    text: 'text-status-info',
   },
   warning: {
     container:
-      'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',
-    icon: 'text-yellow-500 dark:text-yellow-400',
-    text: 'text-yellow-800 dark:text-yellow-200',
+      'bg-status-warning/10 border-status-warning/30 dark:bg-status-warning/20 dark:border-status-warning/40',
+    icon: 'text-status-warning',
+    text: 'text-status-warning dark:text-status-warning',
   },
   error: {
     container:
-      'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800',
-    icon: 'text-red-500 dark:text-red-400',
-    text: 'text-red-800 dark:text-red-200',
+      'bg-status-error/10 border-status-error/30 dark:bg-status-error/20 dark:border-status-error/40',
+    icon: 'text-status-error',
+    text: 'text-status-error',
   },
 }
 

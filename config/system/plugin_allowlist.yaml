@@ -5,5 +5,5 @@ mode: permissive
 plugins: []
 # 示例（strict 模式）：
 # plugins:
-#   - id: "memory_service"
+#   - id: "hindsight_memory_service"
 #     sha256: ""  # 留空则只校验 id 不校验哈希

@@ -37,7 +37,8 @@
         ]
     },
     "dependencies": [
-        "hindsight-all-slim"
+        "hindsight-all-slim>=0.9.0",
+        "hindsight-api-slim[embedded-db]>=0.9.0"
     ],
     "permissions": {},
     "error_policy": "skip",

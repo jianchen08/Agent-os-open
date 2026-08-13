@@ -40,6 +40,10 @@ plugin = AgentOSPlugin("hindsight_memory_service")
 # hindsight client 句柄。None 表示未初始化（包未安装 / on_load 失败），
 # 所有工具据此降级。模块级变量便于测试 monkeypatch。
 _client: Any = None
+# hindsight-api 服务器子进程（on_load 启动,on_unload 终止）
+_api_process: Any = None
+# hindsight-api 监听端口
+_HINDSIGHT_PORT = "8420"
 
 # bank_id 缺省值（多租户隔离 key 缺省；运行时由内核注入 tenant_id）
 _DEFAULT_BANK_ID = os.environ.get("HINDSIGHT_DEFAULT_BANK_ID", "default")
@@ -151,28 +155,30 @@ async def hindsight_retain(
     memory_type: str = "semantic",
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Store a memory entry via hindsight client.retain.
+    """Store a memory entry via hindsight client.aretain.
 
-    The memory_type is merged into metadata so recall can filter client-side.
+    memory_type 同时写入 tags(服务端过滤)和 metadata(客户端读取)。
     """
     if _client is None:
         return _degrade_dict("retain")
 
     try:
         bank = _resolve_bank_id(bank_id)
-        # memory_type 进 metadata 以便 recall 过滤
         meta = dict(metadata or {})
         meta.setdefault("memory_type", memory_type)
+        # tags 用于 arecall 服务端过滤(memory_type 作为 tag)
+        tags = [f"type:{memory_type}"]
 
-        result = _client.retain(bank_id=bank, content=content, metadata=meta)
-        # 兼容 hindsight 返回 id 字符串或 dict 的两种形态
-        if isinstance(result, dict):
-            mem_id = result.get("id", result.get("memory_id", ""))
-            ret_meta = result.get("metadata", meta)
-        else:
-            mem_id = str(result) if result is not None else ""
-            ret_meta = meta
-        return {"id": mem_id, "stored": True, "metadata": ret_meta}
+        result = await _client.aretain(
+            bank_id=bank, content=content, metadata=meta, tags=tags,
+        )
+        # RetainResponse 对象:取 id 字段
+        mem_id = ""
+        if hasattr(result, "accepted"):
+            mem_id = str(getattr(result, "operation_id", "") or "")
+        elif isinstance(result, dict):
+            mem_id = result.get("id", result.get("operation_id", ""))
+        return {"id": mem_id, "stored": True, "metadata": meta}
     except Exception as e:
         logger.warning("[hindsight.retain] 调用失败 | error=%s", e)
         return {"id": "", "stored": False, "error": str(e)}
@@ -209,24 +215,41 @@ async def hindsight_recall(
     top_k: int = 5,
     memory_type: str | None = None,
 ) -> dict[str, Any]:
-    """Recall memories via hindsight client.recall.
+    """Recall memories via hindsight client.arecall.
 
-    If memory_type is given, results are filtered client-side.
+    memory_type 用作 tags 服务端过滤(type:<memory_type>)。
     """
     if _client is None:
         return _degrade_dict("recall")
 
     try:
         bank = _resolve_bank_id(bank_id)
-        result = _client.recall(bank_id=bank, query=query, top_k=top_k)
-        # 统一成 list
-        if isinstance(result, dict) and "results" in result:
-            items = result.get("results", [])
-        elif isinstance(result, list):
-            items = result
-        else:
-            items = []
-        items = _filter_by_memory_type(items, memory_type)
+        kwargs: dict[str, Any] = {"bank_id": bank, "query": query}
+        if memory_type:
+            kwargs["tags"] = [f"type:{memory_type}"]
+            kwargs["tags_match"] = "any"
+
+        result = await _client.arecall(**kwargs)
+        # RecallResponse (hindsight 0.9.0) 把所有召回结果放在 results 字段
+        # (每条含 id/text/type/score 等)。results 是主字段。
+        # chunks/source_facts 是可选的辅助字段(需 include_chunks=True 等)。
+        items: list[dict[str, Any]] = []
+        # 优先取 results(0.9.0 主字段);兼容旧版 memories/facts
+        for attr in ("results", "memories", "facts"):
+            collection = getattr(result, attr, None)
+            if collection:
+                for item in collection:
+                    if hasattr(item, "model_dump"):
+                        items.append(item.model_dump())
+                    elif isinstance(item, dict):
+                        items.append(item)
+                    else:
+                        items.append({"content": str(item)})
+                break
+        # 统一字段名:results 里的 text → content(上层期望 content 字段)
+        for item in items:
+            if "text" in item and "content" not in item:
+                item["content"] = item.pop("text")
         return {"results": items, "total": len(items)}
     except Exception as e:
         logger.warning("[hindsight.recall] 调用失败 | error=%s", e)
@@ -246,17 +269,22 @@ async def hindsight_recall(
     },
     description="Trigger hindsight reflection/consolidation on a bank",
 )
-async def hindsight_reflect(bank_id: str = "") -> dict[str, Any]:
-    """Trigger hindsight reflection (consolidation) on a bank."""
+async def hindsight_reflect(bank_id: str = "", query: str = "") -> dict[str, Any]:
+    """Trigger hindsight reflection via areflect.
+
+    query 缺省时用一个通用查询触发反思/巩固。
+    """
     if _client is None:
         return _degrade_dict("reflect")
 
     try:
         bank = _resolve_bank_id(bank_id)
-        result = _client.reflect(bank_id=bank)
+        result = await _client.areflect(bank_id=bank, query=query or "总结最近的记忆和经验")
+        if hasattr(result, "model_dump"):
+            return result.model_dump()
         if isinstance(result, dict):
             return result
-        return {"result": result}
+        return {"result": str(result)}
     except Exception as e:
         logger.warning("[hindsight.reflect] 调用失败 | error=%s", e)
         return {"error": str(e)}
@@ -281,22 +309,19 @@ async def hindsight_reflect(bank_id: str = "") -> dict[str, Any]:
     description="Delete memories from a hindsight bank",
 )
 async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, Any]:
-    """Delete memories from a bank (specific id or whole bank)."""
+    """Delete a whole bank via adelete_bank (per-memory delete 见 hindsight API)。"""
     if _client is None:
         return _degrade_dict("delete")
 
     try:
         bank = _resolve_bank_id(bank_id)
-        kwargs: dict[str, Any] = {"bank_id": bank}
-        if memory_id:
-            kwargs["memory_id"] = memory_id
-        # hindsight delete API 形态多样，尽力调用
-        deleter = getattr(_client, "delete", None) or getattr(
-            _client, "delete_memory", None
-        )
+        # hindsight_client 暴露 adelete_bank(删整个 bank)
+        deleter = getattr(_client, "adelete_bank", None) or getattr(_client, "adelete", None)
         if deleter is None:
             return {"deleted": False, "error": "client has no delete method"}
-        deleter(**kwargs)
+        result = deleter(bank_id=bank)
+        if callable(result) and not isinstance(result, bool):
+            result = await result
         return {"deleted": True}
     except Exception as e:
         logger.warning("[hindsight.delete] 调用失败 | error=%s", e)
@@ -375,7 +400,7 @@ async def hindsight_import_document(
                 "chunk_total": len(chunks),
                 "source": "import_document",
             }
-            _client.retain(bank_id=bank, content=chunk, metadata=meta)
+            await _client.aretain(bank_id=bank, content=chunk, metadata=meta, tags=["type:semantic"])
         return {"chunks_imported": len(chunks), "knowledge_name": name}
     except Exception as e:
         logger.warning("[hindsight.import_document] 导入失败 | error=%s", e)
@@ -388,39 +413,67 @@ async def hindsight_import_document(
 
 
 def _apply_llm_env() -> None:
-    """把 HINDSIGHT_* 配置写入环境变量（hindsight 从 env 读取 LLM/embedding）。
+    """把 HINDSIGHT_API_* 配置写入环境变量（hindsight-api 从 env 读取配置）。
 
-    默认值复用项目的 GLM (Zhipu) OpenAI-compatible 端点：
-      - base_url: https://open.bigmodel.cn/api/coding/paas/v4/ （llm.yaml providers.zhipu_coding）
-      - model: glm-5.2 （llm.yaml models.glm-5.2）
-      - embeddings_provider: zhipu （embedding.yaml default_provider）
-      - api_key: ${ZHIPU_API_KEY}
+    注意:hindsight-api 用的是 HINDSIGHT_API_ 前缀(不是 HINDSIGHT_)。
+
+    默认配置:
+      - LLM(事实抽取/反思):GLM glm-5.2 @ 智谱 OpenAI 兼容端点(复用 ZHIPU_API_KEY)
+      - Embedding(向量检索):BAAI/bge-m3 @ 硅基流动(免费, 国内直连, OpenAI 兼容)
+        → 用 SILICONFLOW_API_KEY(用户需在 .env 配置)
+      - Reranker:rrf(Reciprocal Rank Fusion, 无需下载模型, 避免 HF 被墙)
     """
-    defaults = {
-        "HINDSIGHT_LLM_BASE_URL": "https://open.bigmodel.cn/api/coding/paas/v4/",
-        "HINDSIGHT_LLM_MODEL": "glm-5.2",
-        "HINDSIGHT_EMBEDDINGS_PROVIDER": "zhipu",
-        "HINDSIGHT_EMBEDDINGS_MODEL": "embedding-3",
+    # ── LLM(GLM, 复用智谱 key)──
+    llm_defaults = {
+        "HINDSIGHT_API_LLM_PROVIDER": "openai",
+        "HINDSIGHT_API_LLM_BASE_URL": "https://open.bigmodel.cn/api/coding/paas/v4/",
+        "HINDSIGHT_API_LLM_MODEL": "glm-5.2",
     }
-    for key, default in defaults.items():
+    for key, default in llm_defaults.items():
         if not os.environ.get(key):
             os.environ[key] = default
-
-    # API key：优先 ZHIPU_API_KEY（与 llm.yaml providers.zhipu_coding 对齐）
     zhipu_key = os.environ.get("ZHIPU_API_KEY", "")
-    if zhipu_key and not os.environ.get("HINDSIGHT_LLM_API_KEY"):
-        os.environ["HINDSIGHT_LLM_API_KEY"] = zhipu_key
+    if zhipu_key and not os.environ.get("HINDSIGHT_API_LLM_API_KEY"):
+        os.environ["HINDSIGHT_API_LLM_API_KEY"] = zhipu_key
+
+    # ── Embedding(硅基流动 bge-m3, 免费)──
+    # 硅基流动是 OpenAI 兼容端点, Hindsight 的 openai provider 直连
+    # 注意:
+    # - model 名的 env 是 _OPENAI_MODEL(不是 _MODEL)
+    # - bge-m3 固定 1024 维, 不传 dimensions 参数(SiliconFlow 传 dimensions 会 400)
+    emb_defaults = {
+        "HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai",
+        "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL": "https://api.siliconflow.cn/v1/",
+        "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL": "BAAI/bge-m3",
+    }
+    for key, default in emb_defaults.items():
+        if not os.environ.get(key):
+            os.environ[key] = default
+    sf_key = os.environ.get("SILICONFLOW_API_KEY", "")
+    if sf_key and not os.environ.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"):
+        os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] = sf_key
+
+    # ── Reranker(rrf, 无需模型, 避免 HF 下载)──
+    if not os.environ.get("HINDSIGHT_API_RERANKER_PROVIDER"):
+        os.environ["HINDSIGHT_API_RERANKER_PROVIDER"] = "rrf"
 
 
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
-    """懒导入 hindsight 并初始化嵌入式 client。
+    """启动 hindsight-api 服务器(pg0 嵌入式 PG)并创建 HTTP 客户端。
 
-    包未安装或初始化失败时 _client 保持 None，所有工具降级——sidecar 永不崩溃。
+    真实架构:hindsight-all-slim 是「客户端 + 服务器」分离设计——
+    - hindsight-api(main 入口)启动 HTTP 服务器,内部用 pg0 嵌入式 PostgreSQL
+    - hindsight_client.Hindsight(base_url) 是 HTTP 客户端,aretain/arecall 调服务器
+
+    本 on_load:
+    1. 配置 LLM/embedding env(GLM OpenAI 兼容端点)
+    2. 启动 hindsight-api 子进程(后台,监听 _HINDSIGHT_PORT)
+    3. 创建 Hindsight(base_url) 客户端,确保 bank 存在
+    4. 任一步失败 → _client=None,所有工具降级,sidecar 不崩
     """
-    global _client, _DEFAULT_BANK_ID
+    global _client, _DEFAULT_BANK_ID, _api_process
 
-    # 从内核注入的 config 读取默认 bank_id（运行时通常为 tenant_id）
     config = plugin.get_config() or {}
     cfg_default_bank = (
         config.get("default_bank_id")
@@ -430,51 +483,103 @@ async def _on_load(params: dict[str, Any]) -> None:
     if cfg_default_bank:
         _DEFAULT_BANK_ID = str(cfg_default_bank)
 
-    # 数据目录
+    # 数据目录(pg0 数据存放)
     data_dir = (
         config.get("data_dir")
         or os.environ.get("HINDSIGHT_DATA_DIR")
         or os.path.join(_THIS_DIR, "data", "hindsight")
     )
     os.makedirs(data_dir, exist_ok=True)
-    os.environ.setdefault("HINDSIGHT_DATA_DIR", data_dir)
 
-    # LLM/embedding 环境变量（hindsight 从 env 读取配置）
+    # LLM/embedding 环境变量(hindsight-api 从 env 读取配置)
     _apply_llm_env()
 
-    # 懒导入 hindsight（包可能未安装）
-    try:
-        # hindsight-all-slim 的嵌入式入口；按其文档使用 internal pg0
-        from hindsight import Hindsight  # type: ignore
+    port = int(config.get("port") or os.environ.get("HINDSIGHT_PORT") or _HINDSIGHT_PORT)
+    base_url = f"http://127.0.0.1:{port}"
 
-        _client = Hindsight(embedded=True, data_dir=data_dir)
+    try:
+        import subprocess  # noqa: PLC0415
+
+        # 启动 hindsight-api 服务器子进程(pg0 嵌入式 PG + uvicorn HTTP)
+        _api_process = subprocess.Popen(
+            [sys.executable, "-m", "hindsight_api.main",
+             "--port", str(port), "--host", "127.0.0.1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=os.environ.copy(),
+        )
+        logger.info("[hindsight] hindsight-api 子进程已启动 PID=%s port=%s", _api_process.pid, port)
+
+        # 等待服务器就绪(轮询 /health,最多 60s)
+        import asyncio as _aio  # noqa: PLC0415
+        import urllib.request  # noqa: PLC0415
+
+        for _attempt in range(60):
+            await _aio.sleep(1)
+            try:
+                with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+                    if resp.status == 200:
+                        logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
+                        break
+            except Exception:
+                # 检查子进程是否已退出
+                if _api_process.poll() is not None:
+                    raise RuntimeError(f"hindsight-api 子进程已退出 code={_api_process.returncode}")
+        else:
+            raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
+
+        # 创建 HTTP 客户端
+        from hindsight_client import Hindsight  # type: ignore
+
+        _client = Hindsight(base_url=base_url)
+
+        # 确保默认 bank 存在(幂等)
+        try:
+            await _client.acreate_bank(bank_id=_DEFAULT_BANK_ID)
+        except Exception as be:  # noqa: BLE001
+            logger.debug("[hindsight] 创建默认 bank(可能已存在): %s", be)
+
         logger.info(
-            "[hindsight] on_load 完成 | data_dir=%s | model=%s",
-            data_dir,
-            os.environ.get("HINDSIGHT_LLM_MODEL"),
+            "[hindsight] on_load 完成 | base_url=%s bank=%s model=%s",
+            base_url, _DEFAULT_BANK_ID, os.environ.get("HINDSIGHT_API_LLM_MODEL"),
         )
     except Exception as e:
-        # 包未安装 / 初始化失败：降级，sidecar 继续运行
         _client = None
         logger.warning(
-            "[hindsight] 初始化失败，sidecar 进入降级模式（所有工具返回 error）| error=%s",
-            e,
+            "[hindsight] 初始化失败,sidecar 进入降级模式 | error=%s", e,
         )
 
 
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
-    """Cleanup hindsight client on unload."""
-    global _client
+    """Cleanup hindsight client and stop api server on unload."""
+    global _client, _api_process
     if _client is not None:
         try:
-            close = getattr(_client, "close", None)
-            if callable(close):
-                close()
+            aclose = getattr(_client, "aclose", None)
+            if callable(aclose):
+                await aclose()
+            else:
+                close = getattr(_client, "close", None)
+                if callable(close):
+                    close()
         except Exception as e:
-            logger.warning("[hindsight] on_unload 清理失败 | error=%s", e)
+            logger.warning("[hindsight] on_unload client 清理失败 | error=%s", e)
         finally:
             _client = None
+    # 终止 hindsight-api 子进程
+    if _api_process is not None:
+        try:
+            _api_process.terminate()
+            _api_process.wait(timeout=10)
+        except Exception as e:
+            logger.warning("[hindsight] on_unload 终止 api 子进程失败 | error=%s", e)
+            try:
+                _api_process.kill()
+            except Exception:
+                pass
+        finally:
+            _api_process = None
 
 
 if __name__ == "__main__":

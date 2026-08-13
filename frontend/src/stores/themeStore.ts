@@ -92,6 +92,9 @@ function generateTextureCSS(texture: ThemeConfig['backgrounds']['texture']): str
       return `linear-gradient(${color} 1px, transparent 1px), linear-gradient(90deg, ${color} 1px, transparent 1px)`
     case 'lines':
       return `repeating-linear-gradient(0deg, ${color}, ${color} 1px, transparent 1px, transparent ${size})`
+    case 'checker':
+      // 25% 象限棋盘：配合 background-size 形成像素风棋盘格
+      return `repeating-conic-gradient(${color} 0% 25%, transparent 0% 50%)`
     case 'noise':
       return `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%' height='100%' filter='url(%23noise)'/%3E%3C/svg%3E")`
     default:
@@ -284,19 +287,37 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           root.style.setProperty('--bg-image', `url(${backgrounds.image.url})`)
           root.style.setProperty('--bg-image-position', backgrounds.image.position)
           root.style.setProperty('--bg-image-size', backgrounds.image.size)
+          root.style.setProperty('--bg-image-attachment', backgrounds.image.attachment)
           root.style.setProperty('--bg-overlay', backgrounds.image.overlay)
           root.style.setProperty('--bg-overlay-opacity', String(backgrounds.image.overlayOpacity))
         } else {
           body.classList.remove('has-bg-image')
+          root.style.removeProperty('--bg-image')
         }
 
-        // 纹理
+        // 纹理（主背景）
         if (backgrounds.texture) {
           const textureCSS = generateTextureCSS(backgrounds.texture)
           root.style.setProperty('--bg-texture', textureCSS)
           root.style.setProperty('--bg-texture-size', backgrounds.texture.size || '24px')
           root.style.setProperty('--bg-texture-opacity', String(backgrounds.texture.opacity || 0.1))
+        } else {
+          root.style.setProperty('--bg-texture', 'none')
         }
+
+        // 区域纹理（侧边栏 / 聊天区），叠加在各自区域背景色之上
+        const areaTextures: Array<[key: string, tex: ThemeConfig['backgrounds']['texture']]> = [
+          ['sidebar', backgrounds.sidebar?.texture],
+          ['chat', backgrounds.chat?.texture],
+        ]
+        areaTextures.forEach(([key, tex]) => {
+          if (tex) {
+            root.style.setProperty(`--${key}-texture`, generateTextureCSS(tex))
+            root.style.setProperty(`--${key}-texture-size`, tex.size || '24px')
+          } else {
+            root.style.setProperty(`--${key}-texture`, 'none')
+          }
+        })
       },
     }),
     {

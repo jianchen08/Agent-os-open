@@ -54,7 +54,7 @@ export function CommandPalette({ open, dispatcher, onClose }: CommandPaletteProp
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-start justify-center bg-black/30 pt-24"
+      className="fixed inset-0 z-[200] flex items-start justify-center bg-[var(--overlay-bg)] pt-24"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -173,7 +173,7 @@ interface ExtensionModalHostProps {
 export function ExtensionModalHost({ modal, onClose, children }: ExtensionModalHostProps): React.ReactElement {
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-[var(--overlay-bg)]"
       onClick={onClose}
       role="dialog"
       aria-modal="true"

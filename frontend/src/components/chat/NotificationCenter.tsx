@@ -178,9 +178,9 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
 
     return (
       <Dialog open={!!activeBlockingNotification} onOpenChange={() => {}}>
-        <DialogContent className="border-red-500/50 sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
+        <DialogContent className="border-status-error/50/50 sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-red-600">
+            <DialogTitle className="flex items-center gap-2 text-status-error">
               <span>⚠️</span>
               <span>{activeBlockingNotification.title}</span>
             </DialogTitle>
@@ -244,7 +244,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
     >
       {unreadCount > 0 ? <Bell className="h-icon-md w-icon-md" /> : <BellOff className="h-icon-md w-icon-md opacity-50" />}
       {unreadCount > 0 && (
-        <span className="absolute -top-1 -right-1 flex h-icon-md min-w-icon-md items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+        <span className="absolute -top-1 -right-1 flex h-icon-md min-w-icon-md items-center justify-center rounded-full bg-status-error/100 px-1 text-[10px] font-bold text-white">
           {unreadCount > 99 ? '99+' : unreadCount}
         </span>
       )}
@@ -368,7 +368,7 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
                 <Bell className="h-icon-md w-icon-md" />
                 <span className="text-sm font-semibold">通知中心</span>
                 {unreadCount > 0 && (
-                  <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">
+                  <span className="bg-status-error/100 text-white text-[10px] px-1.5 py-0.5 rounded-full">
                     {unreadCount}
                   </span>
                 )}

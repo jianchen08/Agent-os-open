@@ -89,7 +89,7 @@ export function AppHeader({ extraRight }: AppHeaderProps) {
         <div
           className="h-[22px] w-[22px] shrink-0 rounded-md"
           style={{
-            background: 'linear-gradient(135deg, #22D3EE 0%, #A78BFA 100%)',
+            background: 'linear-gradient(135deg, var(--ds-accent-primary, #22D3EE) 0%, var(--ds-accent-ai, #A78BFA) 100%)',
           }}
           aria-hidden
         />

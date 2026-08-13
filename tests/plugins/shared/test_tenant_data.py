@@ -29,6 +29,7 @@ from tenant_data import (  # noqa: E402  (conftest 已把 plugins/shared 推上 
     DEFAULT_TENANT,
     get_current_tenant_id,
     migrate_legacy_data_to_default,
+    tenant_config_dir,
     tenant_data_root,
 )
 
@@ -234,6 +235,65 @@ class TestMigrateLegacyData:
         moved = migrate_legacy_data_to_default(data_root=tmp_path)
         # 无 legacy 内容 → 无需移动；行为幂等即可
         assert isinstance(moved, list)
+
+
+# ============================================================
+# config/users/{tenant_id}/ 配置覆盖层咽喉点（F-TENANT-B 配置面）
+# ============================================================
+
+
+class TestTenantConfigDir:
+    """``tenant_config_dir`` 配置覆盖层契约。
+
+    意图（§8）：方案 B 配置面——每租户独立配置覆盖目录
+    ``config/users/{tenant_id}/``，目录存在 = 有覆盖，不存在 = 回退全局配置。
+    与存储层（tenant_data_root 自动创建）刻意不同：配置覆盖层**不因读取而生成
+    空目录**，避免空覆盖层掩盖"无覆盖 → 回退"语义。
+    """
+
+    def test_path_structure(self, tmp_path):
+        """tenant_config_dir 返回 {base}/{tenant_id}（不含 subdir 层级）。"""
+        base = tmp_path / "users"
+        (base / "default").mkdir(parents=True)
+        (base / "default" / "profile.md").write_text("p", encoding="utf-8")
+
+        d = tenant_config_dir("default", base=base)
+
+        assert d == base / "default"
+        assert (d / "profile.md").exists()
+
+    def test_no_auto_create(self, tmp_path):
+        """覆盖层目录不存在时**不自动创建**（区别于数据根）。"""
+        base = tmp_path / "users"
+        d = tenant_config_dir("tenant-x", base=base)
+
+        assert not d.exists(), "配置覆盖层不应因读取而自动创建目录"
+        assert not (base / "tenant-x").exists()
+
+    def test_default_base_uses_env(self, tmp_path, monkeypatch):
+        """env AGENTOS_CONFIG_USERS_DIR 覆盖默认 base。"""
+        monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(tmp_path / "cfg"))
+        d = tenant_config_dir("default")
+        assert str(d).startswith(str(tmp_path / "cfg"))
+
+    def test_traversal_rejected(self, tmp_path):
+        """tenant_id 含 .. / 分隔符 → 拒绝（与数据根同款防穿越）。"""
+        with pytest.raises(ValueError):
+            tenant_config_dir("../../etc", base=tmp_path)
+        with pytest.raises(ValueError):
+            tenant_config_dir("a/b", base=tmp_path)
+
+    def test_tenant_isolation(self, tmp_path):
+        """A 租户配置目录与 B 租户不同（隔离不变量）。"""
+        base = tmp_path / "users"
+        (base / "a").mkdir(parents=True)
+        (base / "b").mkdir(parents=True)
+
+        da = tenant_config_dir("a", base=base)
+        db = tenant_config_dir("b", base=base)
+
+        assert da != db
+        assert da.parent == db.parent
 
 
 # ============================================================

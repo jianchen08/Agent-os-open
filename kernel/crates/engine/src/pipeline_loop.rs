@@ -325,24 +325,44 @@ impl PipelineExecutor {
     }
 
     /// 落 step 级轨迹：对比 step 执行前后的 state，把变更的顶层 key 聚合为一条
-    /// patch_data（含 messages，与其它字段无区别），plugin_id = step.id。
-    /// diff 为空（step 无产出）则不落轨迹。
+    /// patch_data，plugin_id = step.id。
+    ///
+    /// **字段过滤**：已投影到 messages 表的原文字段（raw_result/raw_thinking/
+    /// raw_tool_calls/messages）不进 trace——它们是 messages 记录的字段
+    ///（content/reasoning_content/tool_calls_json），trace 不重复存储。
+    /// system_message 保留（追踪提示词演变，state_diff 已去重，仅在变化时记录）。
+    /// 过滤后 diff 为空（step 仅有原文产出）则不落轨迹。
     async fn persist_step_trace(
         &self,
         step_id: &str,
         state_before: &serde_json::Value,
         state_after: &serde_json::Value,
     ) {
-        let diff = state_diff(state_before, state_after);
-        // diff 为空对象则跳过（step 未改动任何 state）
+        let mut diff = state_diff(state_before, state_after);
+
+        // 过滤已投影到 messages 表的冗余字段（原文不进 trace，穿透时从 messages 取）
+        const REDUNDANT_KEYS: &[&str] = &[
+            "raw_result",     // → messages.content_preview
+            "raw_thinking",   // → messages.reasoning_content
+            "raw_tool_calls", // → messages.tool_calls_json
+            "messages",       // → messages 表增量投影（project_state_snapshot 已处理）
+        ];
+        if let Some(obj) = diff.as_object_mut() {
+            for key in REDUNDANT_KEYS {
+                obj.remove(*key);
+            }
+        }
+
+        // 过滤后 diff 为空对象则跳过（step 仅有原文产出，无 state 变更）
         if diff.as_object().is_none_or(|o| o.is_empty()) {
+            // 仍需投影 messages（原文要落 messages 表，即使不落 trace）
+            self.project_state_snapshot(state_after).await;
             return;
         }
 
         // 分层持久化投影：state_diff 已捕获本 step 的 state 变更（含 messages）。
         // 在此投影到业务表——用 state_after 的完整值（project_messages 内部做增量对齐，
-        // 幂等，重复投影无副作用）。比在 merge_and_project（依赖插件 state_updates 含
-        // messages）更可靠：state_diff 直接对比 state 前后，必能捕获 messages 变化。
+        // 幂等，重复投影无副作用）。
         self.project_state_snapshot(state_after).await;
 
         use agentos_core::types::{PatchType, TraceEntry};

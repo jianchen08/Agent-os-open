@@ -283,7 +283,7 @@ export const ChatContainer = ({
 
   return (
     <div
-      className={`flex h-full min-h-0 flex-col overflow-hidden ${className}`}
+      className={`theme-chat-area bg-[var(--chat-bg,transparent)] flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       data-testid="chat-container"
       data-session-id={sessionId}
     >

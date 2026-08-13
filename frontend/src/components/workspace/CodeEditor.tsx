@@ -574,7 +574,7 @@ export function CodeEditor({
         </div>
         <div className="flex flex-1 items-center justify-center p-8">
           <div className="text-center">
-            <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-amber-500" />
+            <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-status-warning" />
             <p className="text-foreground mb-1 text-sm font-medium">文件过大，无法编辑</p>
             <p className="text-muted-foreground text-xs">
               文件大小超过 1MB（当前 {(size ?? initialContent.length / 1024).toFixed(1)} KB），
@@ -640,17 +640,17 @@ export function CodeEditor({
     <div className={cn('flex h-full flex-col', className)}>
       {/* 外部变更提示条 */}
       {externalChange && (
-        <div className="flex items-center justify-between border-b border-amber-500/30 bg-amber-500/10 px-4 py-2">
+        <div className="flex items-center justify-between border-b border-status-warning/30 bg-status-warning/10 px-4 py-2">
           <div className="flex items-center gap-2">
-            <RefreshCw className="h-3.5 w-3.5 text-amber-600" />
-            <span className="text-xs text-amber-700">
+            <RefreshCw className="h-3.5 w-3.5 text-status-warning" />
+            <span className="text-xs text-status-warning">
               文件已被外部修改
             </span>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={handleAcceptExternalChange}
-              className="flex items-center gap-1 rounded-md bg-amber-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-700"
+              className="flex items-center gap-1 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/80"
               title="用外部修改覆盖当前内容"
             >
               <RefreshCw className="h-3 w-3" />
@@ -673,7 +673,7 @@ export function CodeEditor({
           <FileText className="text-muted-foreground h-4 w-4" />
           <span className="text-foreground text-sm font-medium">
             {fileName}
-            {!isPreview && isDirty && <span className="text-amber-500 ml-0.5">*</span>}
+            {!isPreview && isDirty && <span className="text-status-warning ml-0.5">*</span>}
           </span>
           <span className="text-muted-foreground text-xs lowercase">{language}</span>
         </div>
@@ -704,7 +704,7 @@ export function CodeEditor({
             className={cn(
               'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
               !isPreview
-                ? 'bg-blue-600 text-white hover:bg-blue-700'
+                ? 'bg-status-info text-white hover:bg-status-info'
                 : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
             )}
             title={isPreview ? '切换到编辑模式' : '切换到预览模式'}

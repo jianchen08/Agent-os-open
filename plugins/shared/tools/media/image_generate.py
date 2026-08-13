@@ -1,6 +1,21 @@
-"""图像生成工具。
+"""图像生成工具（0.2 迁移版）。
 
 通过 MediaProviderRegistry 获取图像 Provider 链，支持 Prompt 模式和工作流模板模式生成图像。
+
+迁移（FP-MIGR 0.1→0.2）：
+- 顶层 import 由 0.1 的 ``tools.builtin.base`` / ``tools.types`` / ``tools.media.*``
+  改为 ``agentos_plugin_sdk``（Tool / ToolExecutionResult / 枚举 / 结果工厂）+ 就地
+  ``_media_core``（MediaType / FallbackStrategy / ProviderChain / MediaProviderRegistry /
+  MediaProviderClient / ProviderUnavailable）。
+- ``_resolve_registry``（0.1 infrastructure.service_provider 直调）已删除；
+  ``ProviderChain`` 从 ``_media_core`` 真实 import，``# noqa: F821`` 消音已删除。
+
+F-MEDIA-2（provider 依赖迁移）：执行分两路径——
+1. 注入注册表（构造参数 registry）→ ProviderChain 链式执行（0.1 兼容语义）；
+2. 否则经 tool-executor capability 调用后端服务（MediaProviderClient，
+   服务契约 media.generate）——调用方未注入时返回**显式错误**
+   （error_code=PROVIDER_UNAVAILABLE），**不降级空转**（旧的「Provider 未配置」
+   提示已废除）。
 
 暴露接口：
 - get_tool_definition() -> Tool：工具定义
@@ -15,18 +30,24 @@ import logging
 import os
 from typing import Any
 
-from tools.builtin.base import BuiltinTool
-from tools.media.base import MediaType
-from tools.media.fallback import FallbackStrategy
-from tools.media.provider_registry import MediaProviderRegistry
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
     ToolExample,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
+)
+from _media_core import (
+    FallbackStrategy,
+    MediaProviderClient,
+    MediaProviderRegistry,
+    MediaType,
+    ProviderChain,
+    ProviderUnavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +86,8 @@ class ImageGenerateTool(BuiltinTool):
     """图像生成工具。
 
     通过 MediaProviderRegistry 获取 IMAGE 类型的 ProviderChain，
-    使用 Fallback 链执行图像生成。
+    使用 Fallback 链执行图像生成（注入式兼容路径）；未注入注册表时经
+    tool-executor capability 调用后端服务（F-MEDIA-2 主路径）。
 
     支持两种模式：
     - Prompt 模式：传入文本 prompt，使用 Provider 默认工作流生成图像
@@ -75,13 +97,19 @@ class ImageGenerateTool(BuiltinTool):
     def __init__(
         self,
         registry: MediaProviderRegistry | None = None,
+        capability_caller: Any | None = None,
     ) -> None:
         """初始化图像生成工具。
 
         Args:
-            registry: MediaProviderRegistry 实例（可选，用于 Provider 查找）
+            registry: MediaProviderRegistry 实例（可选，注入式兼容路径；
+                非 None 时走 ProviderChain 链式执行）
+            capability_caller: 注入的能力调用 async 函数 `(method, params) -> Any`
+                （F-MEDIA-2 主路径——经 tool-executor.invoke 调 media.generate；
+                生产环境由插件注入，测试传 AsyncMock）
         """
         self._registry = registry
+        self._capability_caller = capability_caller
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -212,32 +240,11 @@ class ImageGenerateTool(BuiltinTool):
 
         return [{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_data}"}}]
 
-    def _resolve_registry(self) -> MediaProviderRegistry | None:
-        """从 ServiceProvider 懒加载获取 MediaProviderRegistry。
-
-        Returns:
-            MediaProviderRegistry 实例，获取失败返回 None
-        """
-        try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            provider = get_service_provider()
-            registry = provider.get("media_provider_registry")
-            if registry is None:
-                logger.warning(
-                    "[ImageGenerate] ServiceProvider 中未找到 media_provider_registry，可用服务: %s",
-                    list(provider._services.keys()),
-                )
-            return registry
-        except Exception as exc:
-            logger.warning("[ImageGenerate] 获取 MediaProviderRegistry 失败: %s", exc)
-            return None
-
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: F821,PLR0912
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行图像生成。
 
-        通过 MediaProviderRegistry 获取 IMAGE ProviderChain，
-        使用 Fallback 策略执行生成。
+        F-MEDIA-2 双路径：注入注册表 → ProviderChain 链式执行（兼容）；
+        否则经 capability 调用后端服务（未注入调用方时显式 PROVIDER_UNAVAILABLE）。
 
         Args:
             inputs: 输入参数字典，必须包含 prompt
@@ -253,7 +260,22 @@ class ImageGenerateTool(BuiltinTool):
                 metadata={"action": "image_generate"},
             )
 
-        # 构建传递给 Provider 的参数
+        kwargs = self._build_kwargs(inputs)
+
+        logger.info(
+            "[ImageGenerate] 开始生成: prompt=%s, params=%s",
+            prompt[:50],
+            list(kwargs.keys()),
+        )
+
+        if self._registry is not None:
+            # 注入式注册表路径（0.1 ProviderChain 语义保留）
+            return await self._execute_via_registry(prompt, inputs, kwargs)
+        # F-MEDIA-2 主路径：经 capability 调用后端服务
+        return await self._execute_via_capability(prompt, inputs, kwargs)
+
+    def _build_kwargs(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """构建传递给 Provider 的可选参数（过滤无效值）。"""
         kwargs: dict[str, Any] = {}
 
         optional_str_params = ["negative_prompt", "style", "workflow_template"]
@@ -273,101 +295,149 @@ class ImageGenerateTool(BuiltinTool):
         if cfg_scale is not None and isinstance(cfg_scale, (int, float)):
             kwargs["cfg_scale"] = float(cfg_scale)
 
-        logger.info(
-            "[ImageGenerate] 开始生成: prompt=%s, params=%s",
-            prompt[:50],
-            list(kwargs.keys()),
+        return kwargs
+
+    async def _execute_via_registry(
+        self,
+        prompt: str,
+        inputs: dict[str, Any],
+        kwargs: dict[str, Any],
+    ) -> ToolExecutionResult:
+        """注入式注册表路径：ProviderChain 链式执行（0.1 兼容语义）。"""
+        try:
+            chain = self._registry.get_chain_for_type(
+                MediaType.IMAGE,
+                strategy=FallbackStrategy.SEQUENTIAL,
+            )
+
+            # 处理指定的 Provider
+            provider_name = inputs.get("provider")
+            if provider_name:
+                provider = self._registry.get(provider_name)
+                if provider:
+                    chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)
+                else:
+                    logger.warning(
+                        "[ImageGenerate] 指定的 Provider '%s' 不存在，使用自动选择",
+                        provider_name,
+                    )
+
+            if chain is None:
+                return self._provider_unavailable_result()
+
+            result = await chain.execute_generate(prompt, **kwargs)
+            return self._build_success_result(result)
+        except ProviderUnavailable as e:
+            logger.warning("[ImageGenerate] Provider 不可用: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="PROVIDER_UNAVAILABLE",
+                metadata={"action": "image_generate"},
+            )
+        except RuntimeError as e:
+            logger.error("[ImageGenerate] 生成失败: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="GENERATION_FAILED",
+                metadata={"action": "image_generate"},
+            )
+        except TimeoutError as e:
+            logger.error("[ImageGenerate] 生成超时: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="GENERATION_TIMEOUT",
+                metadata={"action": "image_generate"},
+            )
+        except Exception as e:
+            logger.error("[ImageGenerate] 未知错误: %s", e, exc_info=True)
+            return create_failure_result(
+                error=f"图像生成失败: {e}",
+                error_code="UNKNOWN_ERROR",
+                metadata={"action": "image_generate"},
+            )
+
+    async def _execute_via_capability(
+        self,
+        prompt: str,
+        inputs: dict[str, Any],
+        kwargs: dict[str, Any],
+    ) -> ToolExecutionResult:
+        """F-MEDIA-2 主路径：经 tool-executor capability 调用后端服务。
+
+        调用方未注入（无 capability_caller）时返回**显式错误**
+        PROVIDER_UNAVAILABLE——不静默空转（产品决定：迁移依赖而非降级）。
+        """
+        if self._capability_caller is None:
+            return self._provider_unavailable_result()
+
+        client = MediaProviderClient(self._capability_caller)
+        try:
+            result = await client.execute_generate(
+                MediaType.IMAGE,
+                prompt,
+                provider=inputs.get("provider"),
+                **kwargs,
+            )
+        except ProviderUnavailable as e:
+            logger.warning("[ImageGenerate] 媒体生成服务不可用: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="PROVIDER_UNAVAILABLE",
+                metadata={"action": "image_generate"},
+            )
+        return self._build_success_result(result)
+
+    @staticmethod
+    def _provider_unavailable_result() -> ToolExecutionResult:
+        """媒体生成服务不可用的显式错误结果（不降级空转）。"""
+        return create_failure_result(
+            error=(
+                "媒体生成服务不可用（media.generate）：未注入 capability_caller，"
+                "且未注入媒体 Provider 注册表"
+            ),
+            error_code="PROVIDER_UNAVAILABLE",
+            metadata={"action": "image_generate"},
         )
 
-        if self._registry is None:
-            self._registry = self._resolve_registry()
+    def _build_success_result(self, result: Any) -> ToolExecutionResult:
+        """把生成结果映射为统一成功结果（含多模态内容块）。"""
+        file_path = str(result.file_path)
+        # 构建成功结果
+        output_data: dict[str, Any] = {
+            "file_path": file_path,
+            "media_type": result.media_type.value,
+            "provider": result.provider_name,
+        }
+        if result.metadata:
+            output_data["metadata"] = result.metadata
 
-        # 尝试使用媒体 Provider 抽象层
-        if self._registry:
-            try:
-                chain = self._registry.get_chain_for_type(
-                    MediaType.IMAGE,
-                    strategy=FallbackStrategy.SEQUENTIAL,
-                )
+        # MM-3: 构建多模态内容块，供管道引擎注入下一轮 LLM 调用
+        multimodal_content = self._build_multimodal_content(file_path)
 
-                # 处理指定的 Provider
-                provider_name = inputs.get("provider")
-                if provider_name:
-                    provider = self._registry.get(provider_name)
-                    if provider:
-                        chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)  # noqa: F821
-                    else:
-                        logger.warning(
-                            "[ImageGenerate] 指定的 Provider '%s' 不存在，使用自动选择",
-                            provider_name,
-                        )
-
-                result = await chain.execute_generate(prompt, **kwargs)
-
-                file_path = str(result.file_path)
-                # 构建成功结果
-                output_data: dict[str, Any] = {
-                    "file_path": file_path,
-                    "media_type": result.media_type.value,
-                    "provider": result.provider_name,
-                }
-                if result.metadata:
-                    output_data["metadata"] = result.metadata
-
-                # MM-3: 构建多模态内容块，供管道引擎注入下一轮 LLM 调用
-                multimodal_content = self._build_multimodal_content(file_path)
-
-                return create_success_result(
-                    data=output_data,
-                    metadata={
-                        "action": "image_generate",
-                        "media_type": "image",
-                        **({"multimodal_content": multimodal_content} if multimodal_content else {}),
-                    },
-                )
-
-            except RuntimeError as e:
-                logger.error("[ImageGenerate] 生成失败: %s", e)
-                return create_failure_result(
-                    error=str(e),
-                    error_code="GENERATION_FAILED",
-                    metadata={"action": "image_generate"},
-                )
-            except TimeoutError as e:
-                logger.error("[ImageGenerate] 生成超时: %s", e)
-                return create_failure_result(
-                    error=str(e),
-                    error_code="GENERATION_TIMEOUT",
-                    metadata={"action": "image_generate"},
-                )
-            except Exception as e:
-                logger.error("[ImageGenerate] 未知错误: %s", e, exc_info=True)
-                return create_failure_result(
-                    error=f"图像生成失败: {e}",
-                    error_code="UNKNOWN_ERROR",
-                    metadata={"action": "image_generate"},
-                )
-
-        # 无注册表时返回提示
-        return create_failure_result(
-            error="图像生成 Provider 未配置，请先配置媒体 Provider",
-            error_code="NO_PROVIDER",
-            metadata={"action": "image_generate"},
+        return create_success_result(
+            data=output_data,
+            metadata={
+                "action": "image_generate",
+                "media_type": "image",
+                **({"multimodal_content": multimodal_content} if multimodal_content else {}),
+            },
         )
 
 
 def create_image_generate_tool(
     registry: MediaProviderRegistry | None = None,
+    capability_caller: Any | None = None,
 ) -> ImageGenerateTool:
     """创建图像生成工具实例。
 
     Args:
         registry: 媒体 Provider 注册表（可选）
+        capability_caller: 能力调用 async 函数（可选，F-MEDIA-2 主路径）
 
     Returns:
         ImageGenerateTool 实例
     """
-    return ImageGenerateTool(registry=registry)
+    return ImageGenerateTool(registry=registry, capability_caller=capability_caller)
 
 
 __all__ = ["ImageGenerateTool", "create_image_generate_tool"]

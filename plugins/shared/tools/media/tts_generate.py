@@ -1,7 +1,22 @@
-"""TTS 生成工具。
+"""TTS 生成工具（0.2 迁移版）。
 
 使用媒体 Provider 抽象层执行 TTS 文本合成，
 将文本转换为语音输出（支持 mp3、wav、ogg 格式）。
+
+迁移（FP-MIGR 0.1→0.2）：
+- 顶层 import 由 0.1 的 ``tools.builtin.base`` / ``tools.types`` / ``tools.media.*``
+  改为 ``agentos_plugin_sdk``（Tool / ToolExecutionResult / 枚举 / 结果工厂）+ 就地
+  ``_media_core``（MediaType / FallbackStrategy / ProviderChain / MediaProviderRegistry /
+  MediaProviderClient / ProviderUnavailable）。
+- ``_resolve_registry``（0.1 infrastructure.service_provider 直调）已删除；
+  ``ProviderChain`` 从 ``_media_core`` 真实 import，``# noqa: F821`` 消音已删除。
+
+F-MEDIA-2（provider 依赖迁移）：执行分两路径——
+1. 注入注册表（构造参数 registry）→ ProviderChain 链式执行（0.1 兼容语义）；
+2. 否则经 tool-executor capability 调用后端服务（MediaProviderClient，
+   服务契约 media.generate）——调用方未注入时返回**显式错误**
+   （error_code=PROVIDER_UNAVAILABLE），**不降级空转**（旧的「Provider 未配置」
+   提示已废除）。
 
 暴露接口：
 - TtsGenerateTool：TTS 生成工具类
@@ -13,17 +28,23 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from tools.builtin.base import BuiltinTool
-from tools.media.base import MediaType
-from tools.media.fallback import FallbackStrategy
-from tools.media.provider_registry import MediaProviderRegistry
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
+)
+from _media_core import (
+    FallbackStrategy,
+    MediaProviderClient,
+    MediaProviderRegistry,
+    MediaType,
+    ProviderChain,
+    ProviderUnavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +86,8 @@ class TtsGenerateTool(BuiltinTool):
     支持 mp3、wav、ogg 等多种音频格式。
 
     Attributes:
-        _registry: 媒体 Provider 注册表
+        _registry: 媒体 Provider 注册表（注入式兼容路径）
+        _capability_caller: 能力调用 async 函数（F-MEDIA-2 主路径）
     """
 
     SUPPORTED_FORMATS = ("mp3", "wav", "ogg")
@@ -75,13 +97,17 @@ class TtsGenerateTool(BuiltinTool):
     def __init__(
         self,
         registry: MediaProviderRegistry | None = None,
+        capability_caller: Any | None = None,
     ) -> None:
         """初始化 TTS 工具。
 
         Args:
-            registry: 媒体 Provider 注册表（可选，用于 Provider 查找）
+            registry: 媒体 Provider 注册表（可选，注入式兼容路径）
+            capability_caller: 注入的能力调用 async 函数 `(method, params) -> Any`
+                （F-MEDIA-2 主路径——经 tool-executor.invoke 调 media.generate）
         """
         self._registry = registry
+        self._capability_caller = capability_caller
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -153,22 +179,11 @@ class TtsGenerateTool(BuiltinTool):
         """获取 TTS 工具的 Schema 丰富器。"""
         return _enrich_tts_schema
 
-    def _resolve_registry(self) -> MediaProviderRegistry | None:
-        """从 ServiceProvider 懒加载获取 MediaProviderRegistry。
-
-        Returns:
-            MediaProviderRegistry 实例，获取失败返回 None
-        """
-        try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            provider = get_service_provider()
-            return provider.get("media_provider_registry")
-        except Exception:
-            return None
-
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: F821,PLR0911
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行 TTS 合成。
+
+        F-MEDIA-2 双路径：注入注册表 → ProviderChain 链式执行（兼容）；
+        否则经 capability 调用后端服务（未注入调用方时显式 PROVIDER_UNAVAILABLE）。
 
         Args:
             inputs: 输入参数，包含 text、voice、format、speed 等
@@ -206,83 +221,157 @@ class TtsGenerateTool(BuiltinTool):
 
         logger.info("[TTS] 开始合成: text=%s, voice=%s, format=%s", text[:50], voice, audio_format)
 
-        if self._registry is None:
-            self._registry = self._resolve_registry()
+        if self._registry is not None:
+            # 注入式注册表路径（0.1 ProviderChain 语义保留）
+            return await self._execute_via_registry(text, inputs, voice, audio_format, speed)
+        # F-MEDIA-2 主路径：经 capability 调用后端服务
+        return await self._execute_via_capability(text, inputs, voice, audio_format, speed)
 
-        # 尝试使用媒体 Provider 抽象层
-        if self._registry:
-            try:
-                chain = self._registry.get_chain_for_type(
-                    MediaType.TTS,
-                    strategy=FallbackStrategy.SEQUENTIAL,
-                )
+    async def _execute_via_registry(
+        self,
+        text: str,
+        inputs: dict[str, Any],
+        voice: str,
+        audio_format: str,
+        speed: float,
+    ) -> ToolExecutionResult:
+        """注入式注册表路径：ProviderChain 链式执行（0.1 兼容语义）。"""
+        try:
+            chain = self._registry.get_chain_for_type(
+                MediaType.TTS,
+                strategy=FallbackStrategy.SEQUENTIAL,
+            )
 
-                # 处理指定的 Provider
-                provider_name = inputs.get("provider")
-                if provider_name:
-                    provider = self._registry.get(provider_name)
-                    if provider:
-                        chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)  # noqa: F821
-                    else:
-                        logger.warning(
-                            "[TTS] 指定的 Provider '%s' 不存在，使用自动选择",
-                            provider_name,
-                        )
+            # 处理指定的 Provider
+            provider_name = inputs.get("provider")
+            if provider_name:
+                provider = self._registry.get(provider_name)
+                if provider:
+                    chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)
+                else:
+                    logger.warning(
+                        "[TTS] 指定的 Provider '%s' 不存在，使用自动选择",
+                        provider_name,
+                    )
 
-                result = await chain.execute_synthesize(
-                    text,
-                    voice=voice,
-                    format=audio_format,
-                    speed=speed,
-                )
-                return create_success_result(
-                    data={
-                        "file_path": str(result.file_path),
-                        "duration_seconds": result.duration_seconds,
-                        "format": audio_format,
-                        "voice": voice,
-                        "provider": result.provider_name,
-                    },
-                    metadata={
-                        "action": "tts_generate",
-                        "media_type": "tts",
-                    },
-                )
-            except RuntimeError as e:
-                logger.warning("[TTS] Provider 合成失败: %s", e)
-                return create_failure_result(
-                    error=str(e),
-                    error_code="TTS_PROVIDER_FAILED",
-                    metadata={"action": "tts_generate"},
-                )
-            except Exception as e:
-                logger.error("[TTS] 合成异常: %s", e)
-                return create_failure_result(
-                    error=f"TTS 合成失败: {e}",
-                    error_code="TTS_FAILED",
-                    metadata={"action": "tts_generate"},
-                )
+            if chain is None:
+                return self._provider_unavailable_result()
 
-        # 无注册表时返回提示
+            result = await chain.execute_synthesize(
+                text,
+                voice=voice,
+                format=audio_format,
+                speed=speed,
+            )
+            return create_success_result(
+                data={
+                    "file_path": str(result.file_path),
+                    "duration_seconds": result.duration_seconds,
+                    "format": audio_format,
+                    "voice": voice,
+                    "provider": result.provider_name,
+                },
+                metadata={
+                    "action": "tts_generate",
+                    "media_type": "tts",
+                },
+            )
+        except ProviderUnavailable as e:
+            logger.warning("[TTS] Provider 不可用: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="PROVIDER_UNAVAILABLE",
+                metadata={"action": "tts_generate"},
+            )
+        except RuntimeError as e:
+            logger.warning("[TTS] Provider 合成失败: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="TTS_PROVIDER_FAILED",
+                metadata={"action": "tts_generate"},
+            )
+        except Exception as e:
+            logger.error("[TTS] 合成异常: %s", e)
+            return create_failure_result(
+                error=f"TTS 合成失败: {e}",
+                error_code="TTS_FAILED",
+                metadata={"action": "tts_generate"},
+            )
+
+    async def _execute_via_capability(
+        self,
+        text: str,
+        inputs: dict[str, Any],
+        voice: str,
+        audio_format: str,
+        speed: float,
+    ) -> ToolExecutionResult:
+        """F-MEDIA-2 主路径：经 tool-executor capability 调用后端服务。
+
+        调用方未注入（无 capability_caller）时返回**显式错误**
+        PROVIDER_UNAVAILABLE——不静默空转（产品决定：迁移依赖而非降级）。
+        """
+        if self._capability_caller is None:
+            return self._provider_unavailable_result()
+
+        client = MediaProviderClient(self._capability_caller)
+        try:
+            result = await client.execute_synthesize(
+                MediaType.TTS,
+                text,
+                provider=inputs.get("provider"),
+                voice=voice,
+                format=audio_format,
+                speed=speed,
+            )
+        except ProviderUnavailable as e:
+            logger.warning("[TTS] 媒体生成服务不可用: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="PROVIDER_UNAVAILABLE",
+                metadata={"action": "tts_generate"},
+            )
+        return create_success_result(
+            data={
+                "file_path": str(result.file_path),
+                "duration_seconds": result.duration_seconds,
+                "format": audio_format,
+                "voice": voice,
+                "provider": result.provider_name,
+            },
+            metadata={
+                "action": "tts_generate",
+                "media_type": "tts",
+            },
+        )
+
+    @staticmethod
+    def _provider_unavailable_result() -> ToolExecutionResult:
+        """媒体生成服务不可用的显式错误结果（不降级空转）。"""
         return create_failure_result(
-            error="TTS Provider 未配置，请先配置媒体 Provider",
-            error_code="NO_PROVIDER",
+            error=(
+                "媒体生成服务不可用（media.generate）：未注入 capability_caller，"
+                "且未注入媒体 Provider 注册表"
+            ),
+            error_code="PROVIDER_UNAVAILABLE",
             metadata={"action": "tts_generate"},
         )
 
 
 def create_tts_generate_tool(
     registry: MediaProviderRegistry | None = None,
+    capability_caller: Any | None = None,
 ) -> TtsGenerateTool:
     """创建 TTS 生成工具实例。
 
     Args:
         registry: 媒体 Provider 注册表（可选）
+        capability_caller: 能力调用 async 函数（可选，F-MEDIA-2 主路径）
 
     Returns:
         TtsGenerateTool 实例
     """
-    return TtsGenerateTool(registry=registry)
+    return TtsGenerateTool(registry=registry, capability_caller=capability_caller)
 
 
 __all__ = ["TtsGenerateTool", "create_tts_generate_tool"]

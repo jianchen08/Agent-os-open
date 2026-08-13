@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -163,23 +164,38 @@ async def read_execution_detail(
     if not level:
         return {"error": "level 不能为空"}
 
-    messages = await _fetch_messages(pipeline_run_id)
-    if isinstance(messages, dict) and "error" in messages:
-        return messages
+    # thread_id: traces 按 thread_id 查(复盘 agent 传入,缺省用 pipeline_run_id)
+    thread_id = kwargs.get("thread_id") or pipeline_run_id
 
     if level == "skeleton":
-        return _render_skeleton(pipeline_run_id, messages)
+        # skeleton = 轨迹流程(traces)为主 + messages 轮次骨架为辅
+        traces = await _fetch_traces(thread_id)
+        messages = await _fetch_messages(pipeline_run_id)
+        if isinstance(messages, dict) and "error" in messages:
+            messages = []
+        return _render_skeleton(pipeline_run_id, traces, messages)
 
     if level == "L1":
+        # L1 = 压缩摘要(Hindsight 压缩块);无压缩块时降级用 messages 轮次摘要
+        chunks = await _fetch_compression_chunks(pipeline_run_id)
+        if chunks:
+            return _render_l1_from_chunks(pipeline_run_id, chunks)
+        # 降级:无压缩块,用 messages 轮次摘要
+        messages = await _fetch_messages(pipeline_run_id)
+        if isinstance(messages, dict) and "error" in messages:
+            return messages
         turns = _group_turns(messages)
         if iteration is not None:
-            # 1-based：iteration=1 → 第 1 轮；越界返回错误
             if iteration < 1 or iteration > len(turns):
                 return {"error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）"}
             turns = [turns[iteration - 1]]
         return _render_l1(pipeline_run_id, turns)
 
     if level == "L0":
+        # L0 = 穿透到原文(messages + tool_calls),按需加载
+        messages = await _fetch_messages(pipeline_run_id)
+        if isinstance(messages, dict) and "error" in messages:
+            return messages
         records = _select_l0_records(messages, iteration)
         if isinstance(records, dict) and "error" in records:
             return records
@@ -216,31 +232,194 @@ async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[s
     return []
 
 
-def _render_skeleton(
-    pipeline_run_id: str, messages: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """渲染 skeleton 层：每条消息一行骨架。
+async def _fetch_traces(thread_id: str) -> list[dict[str, Any]]:
+    """经 service-registry 调用 traces.list，返回插件步骤轨迹(state 变更 patch)。
 
-    行格式 ``[seq N] role: preview``，preview 取 content_preview（截断 80 字符、
-    折叠换行）。空消息仅输出 ``[seq N] role``。
+    每条轨迹含 plugin_id / patch_type / patch_data(JSON state_updates) /
+    seq_in_branch / created_at。这是复盘的「轨迹流程」主线——看每个插件
+    这步做了什么(state 怎么变、路由走向、错误),不含对话原文。
+
+    Args:
+        thread_id: 会话 ID(traces 按 thread_id 查询)
+
+    Returns:
+        轨迹列表；调用失败返回空列表(降级,不崩)。
     """
-    lines: list[str] = []
+    assert _capability_caller is not None
+    try:
+        result = await _capability_caller(
+            "traces.list",
+            {"thread_id": thread_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[read_execution_detail] traces.list 调用失败 thread=%s: %s", thread_id, exc)
+        return []
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict) and isinstance(result.get("traces"), list):
+        return result["traces"]
+    return []
+
+
+async def _fetch_compression_chunks(pipeline_id: str) -> list[dict[str, Any]]:
+    """经 tool-executor 调 hindsight.recall 读压缩块(L1/L2 摘要)。
+
+    压缩块是压缩器产出的结构化摘要(过程/决策/结果/状态快照),按 pipeline_id
+    过滤。这是复盘的「摘要层」——看对话要点而非原文。
+
+    调用失败或无压缩块时返回空列表(降级到 messages 轮次摘要)。
+
+    Args:
+        pipeline_id: 管道 ID(压缩块按 pipeline_id 关联)
+
+    Returns:
+        压缩块列表(每条含 content/metadata);失败返回 []。
+    """
+    assert _capability_caller is not None
+    try:
+        result = await _capability_caller(
+            "tool-executor.invoke",
+            {
+                "tool_name": "hindsight.recall",
+                "args": {
+                    "bank_id": pipeline_id,
+                    "query": "",
+                    "memory_type": "chunk",
+                    "top_k": 20,
+                },
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[read_execution_detail] hindsight.recall 压缩块失败: %s", exc)
+        return []
+    if isinstance(result, dict):
+        return result.get("results", [])
+    return []
+
+
+def _render_skeleton(
+    pipeline_run_id: str,
+    traces: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """渲染 skeleton 层：轨迹流程(traces)为主 + messages 轮次骨架为辅。
+
+    轨迹主线：每个插件步骤一行,展示插件名 + state 变更的关键字段(路由/token/错误)。
+    对话骨架：每条消息一行(附在 trace_steps 后),供快速定位轮次。
+
+    设计理由:复盘优先看「流程是否正常」(哪个插件跑了/state 怎么变/路由走向),
+    而非直接灌对话原文——具体内容按需通过 L0 穿透。
+    """
+    # ── 轨迹主线:每个插件步骤 ──
+    trace_steps: list[dict[str, Any]] = []
+    for tr in traces:
+        plugin_id = tr.get("plugin_id", "?")
+        seq = tr.get("seq_in_branch")
+        patch_data = tr.get("patch_data")
+        # 解析 state_updates,提取复盘关心的关键字段
+        state_changes: dict[str, Any] = {}
+        if isinstance(patch_data, str):
+            try:
+                state_changes = json.loads(patch_data)
+            except (json.JSONDecodeError, ValueError):
+                state_changes = {"_raw": patch_data[:100]}
+        elif isinstance(patch_data, dict):
+            state_changes = patch_data
+
+        # 提取复盘关键字段(路由/token/错误/状态)
+        key_fields: dict[str, Any] = {}
+        for k in (
+            "core_type", "execution_status", "raw_error",
+            "router.stop_reason", "router.last_tool_call",
+            "llm_usage", "track.total_tokens",
+            "stuck_detected", "stuck_reason",
+            "task_complete",
+        ):
+            if k in state_changes:
+                key_fields[k] = state_changes[k]
+
+        trace_steps.append({
+            "seq": seq,
+            "plugin": plugin_id,
+            "state_keys": list(state_changes.keys())[:8],
+            "key_changes": key_fields if key_fields else None,
+        })
+
+    # ── 对话骨架:每条消息一行(轮次定位用)──
+    message_lines: list[str] = []
     for msg in messages:
         seq = msg.get("seq_in_branch")
         role = msg.get("role", "?")
         preview = _safe_content_to_str(msg.get("content_preview")).replace("\n", " ").strip()
-        preview = preview[:80]
+        preview = preview[:60]
         if preview:
-            lines.append(f"[seq {seq}] {role}: {preview}")
+            message_lines.append(f"[seq {seq}] {role}: {preview}")
         else:
-            lines.append(f"[seq {seq}] {role}")
+            message_lines.append(f"[seq {seq}] {role}")
 
     return {
         "pipeline_run_id": pipeline_run_id,
         "level": "skeleton",
-        "total_records": len(messages),
-        "lines": lines,
+        "trace_steps": trace_steps,
+        "trace_count": len(trace_steps),
+        "message_lines": message_lines,
+        "message_count": len(messages),
+        "hint": "trace_steps=插件流程(状态变更), message_lines=对话骨架(定位轮次), L1=压缩摘要, L0=穿透原文",
     }
+
+
+def _render_l1_from_chunks(
+    pipeline_run_id: str, chunks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """从 Hindsight 压缩块渲染 L1 层:展示压缩摘要(L1 过程/L2 三元组/state_snapshot)。
+
+    压缩块是压缩器产出的结构化摘要,按 layer 和 seq 排序。
+    每块展示 content(摘要文本) + metadata(layer/keywords/sequence)。
+    """
+    rendered: list[dict[str, Any]] = []
+    for chunk in chunks:
+        content = chunk.get("content", "")
+        meta = chunk.get("metadata") or {}
+        # 尝试解析 content 为 JSON(压缩块存的是结构化 JSON)
+        parsed: dict[str, Any] | None = None
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        item: dict[str, Any] = {
+            "content_preview": content[:500] if not parsed else None,
+            "layer": meta.get("layer") or _extract_tag(meta.get("tags", []), "layer"),
+            "keywords": meta.get("keywords", []),
+            "seq_range": _extract_tag(meta.get("tags", []), "seq"),
+        }
+        if parsed:
+            # 结构化压缩块:展示 L1/L2 字段
+            if "l1" in parsed:
+                item["l1"] = parsed["l1"]
+            if "l2" in parsed:
+                item["l2"] = parsed["l2"]
+            if "state_snapshot" in parsed:
+                item["state_snapshot"] = parsed["state_snapshot"]
+        rendered.append(item)
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "level": "L1",
+        "source": "compression_chunks",
+        "chunk_count": len(rendered),
+        "chunks": rendered,
+        "hint": "压缩摘要(L1过程/L2三元组/state_snapshot)。需要具体原文用 L0 穿透。",
+    }
+
+
+def _extract_tag(tags: list[Any], prefix: str) -> str:
+    """从 tags 列表提取 prefix:xxx 格式的值。"""
+    for tag in tags:
+        s = str(tag)
+        if s.startswith(f"{prefix}:"):
+            return s[len(prefix) + 1:]
+    return ""
 
 
 def _group_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:

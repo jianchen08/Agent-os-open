@@ -8,9 +8,9 @@
   `memory` 模块的导入依赖（修复老版 _get_memory_service 第 629 行的 import
   在 try/except 之外的 bug，以及 _resolve_trigger_ratio 对
   memory.context_compressor 的硬导入）。
-- LLM 调用改为经模块级 `_capability_caller` 注入的 memory.compress 工具
-  （由 server.py 在 on_load 时把 tool-executor 能力句柄注入进来），
-  不再依赖 router_factory / llm_core._adapter；测试环境直接注入
+- LLM 调用优先用进程内 `_llm_client`（LLMClient，由 server.py 在 on_load 时
+  从内核注入的 models config 构造）；`_llm_client` 为 None 时回退到经
+  `_capability_caller` 调 memory.compress 工具的旧路径。测试环境直接注入
   llm_call_fn。
 - 存储后端由 ctx.get_service("chunk_service") 改为模块级
   `_memory_backend: IMemoryBackend`（Hindsight/capability），通过
@@ -51,8 +51,10 @@ _COMPRESSION_NOTICE = (
 
 # 长期记忆后端（Hindsight/capability）；None 时压缩块无法落库，相关流程早退
 _memory_backend: Any | None = None
-# 能力调用句柄；server.py 注入后用于构建压缩 LLM 调用函数（memory.compress）
+# 能力调用句柄；server.py 注入后用于构建压缩 LLM 调用函数（memory.compress 回退路径）
 _capability_caller: CapabilityCaller | None = None
+# 进程内 LLM 客户端（压缩首选路径）；None 时回退到 _capability_caller
+_llm_client: Any | None = None
 
 
 def set_memory_backend(backend: Any | None) -> None:
@@ -80,6 +82,20 @@ def set_capability_caller(caller: CapabilityCaller | None) -> None:
     """
     global _capability_caller
     _capability_caller = caller
+
+
+def set_llm_client(client: Any | None) -> None:
+    """注入进程内 LLM 客户端（压缩首选路径）。
+
+    server.py 在 on_load 时从内核注入的 models config 构造 LLMClient 并注入；
+    测试环境可直接传 MagicMock。传 None 则回退到 _capability_caller 旧路径。
+
+    Args:
+        client: 暴露 ``chat_available`` 属性与 ``chat_completion(prompt, max_tokens)``
+                方法的客户端实例；传 None 清空
+    """
+    global _llm_client
+    _llm_client = client
 
 
 def _make_minimal_ctx(
@@ -2076,20 +2092,35 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
 
 def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
-    """构建压缩用的 LLM 调用函数：经 capability_caller 调 memory.compress 工具。
+    """构建压缩用的 LLM 调用函数。
 
-    memory.compress 工具签名（见 plugins/shared/system/memory/server.py）：
-        入参 {prompt, max_tokens}，出参 {summary, degraded}
+    优先路径：进程内 `_llm_client`（LLMClient），直接调 chat_completion，
+    避免一次跨进程 tool-executor hop。
+    回退路径：经 capability_caller 调 memory.compress 工具（入参 {prompt, max_tokens}，
+    出参 {summary, degraded}）。
 
     Args:
-        caller: 能力调用 async 函数 (method, params) -> Any
+        caller: 能力调用 async 函数 (method, params) -> Any（_llm_client 为 None 时启用）
 
     Returns:
-        async (prompt) -> response_text 的 LLM 调用函数；工具降级时返回空串
+        async (prompt) -> response_text 的 LLM 调用函数；降级时返回空串
     """
     import asyncio  # noqa: PLC0415
 
     async def _call(prompt: str) -> str:
+        # ── 首选：进程内 LLMClient ──
+        if _llm_client is not None:
+            if not getattr(_llm_client, "chat_available", False):
+                logger.info("[compress_llm_call] LLMClient chat 不可用，降级返回空串")
+                return ""
+            try:
+                summary = await asyncio.to_thread(_llm_client.chat_completion, prompt, 8000)
+                return summary.strip() if summary else ""
+            except Exception as e:
+                logger.warning("[compress_llm_call] LLMClient chat_completion 失败: %s", e)
+                return ""
+
+        # ── 回退：capability_caller → memory.compress 工具 ──
         params = {
             "tool_name": "memory.compress",
             "args": {"prompt": prompt, "max_tokens": 8000},

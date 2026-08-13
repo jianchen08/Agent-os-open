@@ -61,7 +61,7 @@
   padding: 0.75rem;
   border-radius: 0.5rem;
   background: var(--thinking-bg);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-code, var(--font-family-mono, 'JetBrains Mono', monospace));
   font-size: 0.875rem;
   color: var(--thinking-text-color);
   overflow-x: auto;

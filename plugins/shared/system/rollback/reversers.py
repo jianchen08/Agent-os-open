@@ -79,8 +79,8 @@ class FileReverser(BaseReverser):
             before_state = operation.before_state or {}
 
             if op_type == OperationType.CREATE:
-                # 创建的逆操作：删除文件
-                return await self._reverse_create(target)
+                # 创建的逆操作：删除文件（目录保护：仅删本操作创建的）
+                return await self._reverse_create(target, before_state)
 
             if op_type == OperationType.UPDATE:
                 # 更新的逆操作：恢复原内容
@@ -104,8 +104,14 @@ class FileReverser(BaseReverser):
                 "details": {"error": str(e)},
             }
 
-    async def _reverse_create(self, target: str) -> dict[str, Any]:
-        """逆操作：删除创建的文件"""
+    async def _reverse_create(self, target: str, before_state: dict[str, Any]) -> dict[str, Any]:
+        """逆操作：删除创建的文件。
+
+        F-GITREV-1 目录保护：仅删除「本操作创建的对象」，防爆炸半径——
+        - 目录在操作前已存在（before_state.exists=True）→ 拒绝（不是本操作创建的）；
+        - 非空目录且无 before_state → 拒绝（可能已混入无关文件）；
+        - 空目录 / before_state.exists=False（本操作创建）→ 允许删除。
+        """
         path = Path(target)
 
         if not path.exists():
@@ -118,6 +124,22 @@ class FileReverser(BaseReverser):
         if path.is_file():
             path.unlink()
         elif path.is_dir():
+            if before_state.get("exists") is True:
+                return {
+                    "success": False,
+                    "message": f"目录在操作前已存在，拒绝删除: {target}",
+                    "details": {"action": "refused"},
+                }
+            if not before_state:
+                try:
+                    next(path.iterdir())
+                    return {
+                        "success": False,
+                        "message": f"非空目录且无 before_state，拒绝删除: {target}",
+                        "details": {"action": "refused"},
+                    }
+                except StopIteration:
+                    pass
             shutil.rmtree(path)
 
         return {
@@ -243,15 +265,42 @@ class GitReverser(BaseReverser):
         return process.returncode, stdout.decode(), stderr.decode()
 
     async def _reverse_commit(self, before_state: dict[str, Any]) -> dict[str, Any]:
-        """逆操作：回退 commit"""
+        """逆操作：精确回退到记录点 commit（业界成熟恢复点语义）。
+
+        F-GITREV-1：
+        - commit_hash 缺失 → 失败不静默（严禁 HEAD~1 盲目回退——有后续 commit 时会
+          回退错误对象，连续回滚会退多个）；
+        - 记录点须存在（rev-parse --verify）；
+        - HEAD 不得早于记录点（merge-base --is-ancestor，防复活历史）。
+        """
         commit_hash = before_state.get("commit_hash")
 
-        if commit_hash:
-            # 回退到指定 commit
-            returncode, stdout, stderr = await self._run_git_command("reset", "--soft", commit_hash)
-        else:
-            # 回退最近一次 commit
-            returncode, stdout, stderr = await self._run_git_command("reset", "--soft", "HEAD~1")
+        if not commit_hash:
+            return {
+                "success": False,
+                "message": "缺少 commit_hash，拒绝回退（不静默回退 HEAD~1）",
+                "details": {"action": "failed"},
+            }
+
+        # 校验记录点存在
+        rc, _, _ = await self._run_git_command("rev-parse", "--verify", f"{commit_hash}^{{commit}}")
+        if rc != 0:
+            return {
+                "success": False,
+                "message": f"记录点 commit 不存在: {commit_hash}",
+                "details": {"action": "failed"},
+            }
+
+        # 校验 HEAD 不早于记录点（防复活历史）
+        rc, _, _ = await self._run_git_command("merge-base", "--is-ancestor", commit_hash, "HEAD")
+        if rc != 0:
+            return {
+                "success": False,
+                "message": f"HEAD 早于记录点，拒绝回滚: {commit_hash}",
+                "details": {"action": "refused"},
+            }
+
+        returncode, stdout, stderr = await self._run_git_command("reset", "--soft", commit_hash)
 
         if returncode != 0:
             return {
@@ -263,7 +312,7 @@ class GitReverser(BaseReverser):
         return {
             "success": True,
             "message": "已回退 commit",
-            "details": {"action": "reset", "target": commit_hash or "HEAD~1"},
+            "details": {"action": "reset", "target": commit_hash},
         }
 
     async def _reverse_branch(self, params: dict[str, Any]) -> dict[str, Any]:

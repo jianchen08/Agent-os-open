@@ -34,7 +34,7 @@ function getTaskStatusStyle(status: string): string {
     case 'pending':
       return 'bg-status-warning/10 text-status-warning'
     case 'suspended':
-      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+      return 'bg-status-warning/10 text-status-warning dark:bg-status-warning/20'
     case 'cancelled':
       return 'bg-status-pending/10 text-status-pending'
     default:

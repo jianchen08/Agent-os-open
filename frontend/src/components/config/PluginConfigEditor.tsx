@@ -306,7 +306,7 @@ export function ConfigObject({
       ) : (
         <button
           onClick={() => setShowAdd(true)}
-          className="hover:bg-white/5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed py-1.5 text-xs text-muted-foreground transition-colors"
+          className="hover:bg-[var(--hover-overlay)] flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed py-1.5 text-xs text-muted-foreground transition-colors"
         >
           <Plus className="h-3 w-3" />
           添加自定义字段
@@ -342,7 +342,7 @@ function FieldRenderer({
             type="checkbox"
             checked={value}
             onChange={(e) => onChange(path, e.target.checked)}
-            className="h-4 w-4 rounded border-gray-300"
+            className="h-4 w-4 rounded border-border"
           />
           <span className="text-muted-foreground text-xs">{value ? '已启用' : '已禁用'}</span>
         </label>
@@ -464,7 +464,7 @@ function CollapsibleObject({
     <div className="rounded-lg border" style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}>
       <button
         onClick={() => setOpen(!open)}
-        className="hover:bg-white/5 flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left"
+        className="hover:bg-[var(--hover-overlay)] flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left"
       >
         <span className="text-muted-foreground text-[10px]">{open ? '▼' : '▶'}</span>
         <span className="text-xs font-medium">{label}</span>
@@ -585,7 +585,7 @@ function DictOfDictsRenderer({
 
         <button
           onClick={openAddDialog}
-          className="hover:bg-white/5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed py-1.5 text-xs text-muted-foreground transition-colors"
+          className="hover:bg-[var(--hover-overlay)] flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed py-1.5 text-xs text-muted-foreground transition-colors"
         >
           <Plus className="h-3 w-3" />
           添加{label}条目

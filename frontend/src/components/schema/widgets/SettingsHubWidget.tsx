@@ -184,7 +184,7 @@ function NavButton({
         'w-full rounded-md px-2 py-1.5 text-left text-[12px] transition-colors',
         active
           ? 'text-[var(--ds-accent-primary,#22D3EE)]'
-          : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
+          : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
       )}
       style={
         active

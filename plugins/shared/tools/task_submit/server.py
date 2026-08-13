@@ -26,6 +26,30 @@ from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 plugin = AgentOSPlugin("task_submit_tool")
 
 
+def _make_pipeline_caller() -> Any | None:
+    """从内核注入的能力句柄构造 pipeline-executor caller（async fn `(method, params)`）。
+
+    桥接说明：caller 约定传入完整 wire method（如 "pipeline-executor.start_run"），
+    而 SDK CapabilityHandle.call 会拼接 ``f"{cap}.{method}"``，因此这里剥掉已含的
+    能力前缀，避免双命名空间。能力未注入时返回 None——提交降级为仅落库不执行。
+    """
+    try:
+        handle = plugin.get_capability("pipeline-executor")
+    except KeyError:
+        return None
+    prefix = "pipeline-executor."
+
+    async def _call(method: str, params: dict[str, Any]) -> Any:
+        stripped = method[len(prefix):] if method.startswith(prefix) else method
+        return await handle.call(stripped, params)
+
+    return _call
+
+
+# 注意：@plugin.tool 装饰器必须落在真正的 handler（task_submit）上。
+# 此前误装在 _make_pipeline_caller 上，导致 SDK 把 _make_pipeline_caller 注册为
+# task_submit 的 handler——调用时它忽略 kwargs、直接返回内部 _call 闭包，
+# 工具结果序列化成 "<function _make_pipeline_caller.<locals>._call at 0x...>"。
 @plugin.tool(
     name="task_submit",
     schema={
@@ -47,26 +71,6 @@ plugin = AgentOSPlugin("task_submit_tool")
     },
     description="任务提交工具",
 )
-def _make_pipeline_caller() -> Any | None:
-    """从内核注入的能力句柄构造 pipeline-executor caller（async fn `(method, params)`）。
-
-    桥接说明：caller 约定传入完整 wire method（如 "pipeline-executor.start_run"），
-    而 SDK CapabilityHandle.call 会拼接 ``f"{cap}.{method}"``，因此这里剥掉已含的
-    能力前缀，避免双命名空间。能力未注入时返回 None——提交降级为仅落库不执行。
-    """
-    try:
-        handle = plugin.get_capability("pipeline-executor")
-    except KeyError:
-        return None
-    prefix = "pipeline-executor."
-
-    async def _call(method: str, params: dict[str, Any]) -> Any:
-        stripped = method[len(prefix):] if method.startswith(prefix) else method
-        return await handle.call(stripped, params)
-
-    return _call
-
-
 async def task_submit(**kwargs):
     """任务提交。"""
     from tool import TaskSubmitTool, _configure_launcher  # noqa: PLC0415

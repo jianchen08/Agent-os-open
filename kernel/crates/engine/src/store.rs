@@ -213,6 +213,32 @@ CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cp_pipeline_step ON pipeline_checkpoints(pipeline_id, tenant_id, step_no DESC);
+
+-- message_slots：op-based 消息槽位表（新模型，详见 docs/message_persistence_design.md）。
+-- 与旧 messages 表并行存在（过渡期），由 apply_messages_ops_to_table 单写入器维护。
+-- 不变量：
+--   * 主键 = (tenant_id, pipeline_id, seq)：seq 是稳定逻辑槽位（≠ 数组下标），删除留 gap；
+--   * message_id = 内容派生（hash(role+content+tool_calls)）：内容变→id 变、seq 不变；
+--   * 压缩：前段 summary 占最小 seq（id 变）、中段删 gap、后段 seq/id 不变、不顺延。
+CREATE TABLE IF NOT EXISTS message_slots (
+    tenant_id        TEXT NOT NULL DEFAULT 'default',
+    pipeline_id      TEXT NOT NULL,
+    seq              INTEGER NOT NULL,
+    message_id       TEXT NOT NULL,
+    role             TEXT NOT NULL,
+    blob_id          TEXT,
+    content_preview  TEXT,
+    reasoning_content TEXT,
+    status           TEXT,
+    error            TEXT,
+    tool_calls_json  TEXT,
+    tool_call_id     TEXT,
+    run_id           TEXT,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, pipeline_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_message_slots_pipeline_seq
+    ON message_slots(pipeline_id, tenant_id, seq);
 ";
 
 /// 为旧库（建表时无 tenant_id 列）补加 tenant_id 列。
@@ -453,6 +479,24 @@ impl SqliteStore {
         let mut hasher = Sha256::new();
         hasher.update(data);
         format!("{:x}", hasher.finalize())
+    }
+
+    /// 计算内容派生的 message_id（新模型：身份跟内容版本走）。
+    ///
+    /// 输入 = role + content + tool_calls_json（用 `\x1f` 分隔防跨界碰撞）。
+    /// 内容变 → id 变；同内容（含同 role/tool_calls）→ 同 id。
+    /// 与 blob_id（仅 content 字节）区别：message_id 还纳入 role/tool_calls，
+    /// 以表达"消息身份"而非仅"正文内容"。前缀 `mc_` 表示 message-content-derived。
+    fn compute_message_id(role: &str, content: &str, tool_calls_json: Option<&str>) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(role.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(content.as_bytes());
+        hasher.update(b"\x1f");
+        if let Some(tc) = tool_calls_json {
+            hasher.update(tc.as_bytes());
+        }
+        format!("mc_{:x}", hasher.finalize())
     }
 
     // ── runs 表操作 ──────────────────────────────────────────
@@ -779,6 +823,186 @@ impl SqliteStore {
             )?;
         }
         Ok(())
+    }
+
+    /// 应用身份/seq 感知的 messages ops 到 message_slots 表（op-based 新模型单写入器）。
+    ///
+    /// 内核只"按插件来"：插件对 `state["messages"]` 的每次改动被表达为一组 ops，
+    /// 本方法原样落到 `message_slots` 表，不做 diff、不生成身份。详见
+    /// `docs/message_persistence_design.md`。
+    ///
+    /// op 格式（与演进后的 `messages_diff_ops` 对齐）：
+    /// - `{"op":"upsert","seq":N,"msg":{...}}`：在稳定槽位 N 写消息；有则更新
+    ///   （内容变 → `message_id` 变、`seq` 不变）
+    /// - `{"op":"delete","seq":N}`：删除槽位 N（留 gap），不影响其它槽位
+    ///
+    /// `message_id = compute_message_id(role, content, tool_calls)`（内容派生）。
+    pub fn apply_messages_ops_to_table(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        ops: &[serde_json::Value],
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let pid = pipeline_id.to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for op in ops {
+            let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            match kind {
+                "upsert" => {
+                    let Some(seq) = op.get("seq").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    let Some(msg) = op.get("msg") else {
+                        continue;
+                    };
+                    let role = msg
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let content = extract_content_string(msg);
+                    let (blob_id, _) = self.ensure_blob_locked(&conn, &content)?;
+                    let content_preview: String = content.chars().take(200).collect();
+                    let tool_calls_json = msg
+                        .get("tool_calls")
+                        .map(|tc| serde_json::to_string(tc).unwrap_or_default());
+                    let tool_call_id = msg
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let reasoning_content = msg
+                        .get("reasoning_content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    // tool 结果状态：由 content 前缀推断（与 project_messages 一致）。
+                    let (status, error) = if role == "tool" {
+                        if let Some(err_msg) = content.strip_prefix("Error: ") {
+                            (Some("failed".to_string()), Some(err_msg.to_string()))
+                        } else {
+                            (Some("completed".to_string()), None)
+                        }
+                    } else {
+                        (None, None)
+                    };
+                    let message_id =
+                        Self::compute_message_id(&role, &content, tool_calls_json.as_deref());
+                    conn.execute(
+                        "INSERT INTO message_slots
+                           (tenant_id, pipeline_id, seq, message_id, role, blob_id, content_preview,
+                            reasoning_content, status, error, tool_calls_json, tool_call_id, run_id, created_at)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                         ON CONFLICT(tenant_id, pipeline_id, seq) DO UPDATE SET
+                           message_id=excluded.message_id, role=excluded.role, blob_id=excluded.blob_id,
+                           content_preview=excluded.content_preview, reasoning_content=excluded.reasoning_content,
+                           status=excluded.status, error=excluded.error,
+                           tool_calls_json=excluded.tool_calls_json, tool_call_id=excluded.tool_call_id,
+                           run_id=excluded.run_id, created_at=excluded.created_at",
+                        rusqlite::params![
+                            tenant_id,
+                            pid,
+                            seq as i64,
+                            message_id,
+                            role,
+                            blob_id,
+                            content_preview,
+                            reasoning_content,
+                            status,
+                            error,
+                            tool_calls_json,
+                            tool_call_id,
+                            Option::<String>::None,
+                            now,
+                        ],
+                    )?;
+                }
+                "delete" => {
+                    let Some(seq) = op.get("seq").and_then(|v| v.as_u64()) else {
+                        continue;
+                    };
+                    // 删指定槽位（留 gap），不动其它槽位 → 压缩后后段 seq/id 不变。
+                    conn.execute(
+                        "DELETE FROM message_slots WHERE tenant_id=?1 AND pipeline_id=?2 AND seq=?3",
+                        rusqlite::params![tenant_id, pid, seq as i64],
+                    )?;
+                }
+                _ => {
+                    // 未知 op 忽略（前向兼容）。
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 读 `message_slots` 表（按 seq 升序；支持 before/after_sequence 游标与 limit）。
+    ///
+    /// 新模型的历史读路径：`ORDER BY seq ASC`（gap 不影响顺序与游标）。返回 `MessageRecord`，
+    /// `seq_in_branch` 映射自槽位 `seq`，`message_id` 为内容派生 id。
+    pub fn get_slot_messages_by_pipeline(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        opts: MessageQueryOpts,
+    ) -> Result<Vec<MessageRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let mut sql = String::from(
+            "SELECT seq, message_id, role, blob_id, content_preview, created_at, pipeline_id, \
+             tool_calls_json, tool_call_id, reasoning_content, status, error, run_id \
+             FROM message_slots WHERE pipeline_id = ?1 AND tenant_id = ?2",
+        );
+        let mut idx = 3;
+        if opts.before_sequence.is_some() {
+            sql.push_str(&format!(" AND seq < ?{}", idx));
+            idx += 1;
+        }
+        if opts.after_sequence.is_some() {
+            sql.push_str(&format!(" AND seq > ?{}", idx));
+            idx += 1;
+        }
+        // 确定性第二排序键：seq 升序为主，created_at / message_id 兜底（防理论上的同 seq 抖动）。
+        sql.push_str(" ORDER BY seq ASC, created_at ASC, message_id ASC");
+        if opts.limit.is_some() {
+            sql.push_str(&format!(" LIMIT ?{}", idx));
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(pipeline_id.to_string()),
+            Box::new(tenant_id.to_string()),
+        ];
+        if let Some(before) = opts.before_sequence {
+            params.push(Box::new(before as i64));
+        }
+        if let Some(after) = opts.after_sequence {
+            params.push(Box::new(after as i64));
+        }
+        if let Some(limit) = opts.limit {
+            params.push(Box::new(limit as i64));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+        let msgs = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(MessageRecord {
+                    message_id: row.get(1)?,
+                    run_id: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                    branch_id: String::new(),
+                    seq_in_branch: row.get::<_, i64>(0)? as u32,
+                    role: row.get(2)?,
+                    blob_id: row.get(3)?,
+                    content_preview: row.get(4)?,
+                    created_at: row.get(5)?,
+                    pipeline_id: row.get(6)?,
+                    tool_calls_json: row.get(7)?,
+                    tool_call_id: row.get(8)?,
+                    reasoning_content: row.get(9)?,
+                    status: row.get(10)?,
+                    error: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(msgs)
     }
 
     /// upsert 一个 state 标量字段到 pipeline_state 表（覆盖最新值，O(1)）。

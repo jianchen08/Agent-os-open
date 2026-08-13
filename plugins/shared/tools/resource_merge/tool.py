@@ -7,6 +7,11 @@
 暴露接口：
 - get_tool_definition() -> Tool：获取工具定义
 - ResourceMergeTool：资源合并与回滚工具类
+
+0.2 迁移（FP-MIGR / F-MIGR-2）：0.1 的 tools.builtin.base / tools.types 已删除 →
+顶层类型走 agentos_plugin_sdk（BuiltinTool / Tool / ToolCategory / ToolLevel /
+ToolExecutionResult / ToolSource / create_failure_result / create_success_result）；
+GitHelpers 走本目录平铺模块 git_helpers.py（同目录 sys.path 注入解析）。
 """
 
 import logging
@@ -16,17 +21,17 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from tools.builtin.base import BuiltinTool
-from tools.builtin.resource_merge.git_helpers import GitHelpers
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
-    ToolResult,
     ToolSource,
     create_failure_result,
     create_success_result,
 )
+from git_helpers import GitHelpers
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +142,7 @@ class ResourceMergeTool(BuiltinTool):
             tags=["git", "merge", "rollback", "resource"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行工具
 
         根据 action 参数分派到对应的处理方法。
@@ -204,7 +209,7 @@ class ResourceMergeTool(BuiltinTool):
             path = self.base_path / path
         return path.resolve()
 
-    async def _prepare(self, inputs: dict[str, Any], workspace: Path) -> ToolResult:
+    async def _prepare(self, inputs: dict[str, Any], workspace: Path) -> ToolExecutionResult:
         """prepare 操作：基于项目仓库创建 worktree 分支
 
         1. 检查项目目录是 git 仓库
@@ -272,7 +277,7 @@ class ResourceMergeTool(BuiltinTool):
                 error_code="PREPARE_FAILED",
             )
 
-    async def _merge(self, inputs: dict[str, Any], workspace: Path) -> ToolResult:
+    async def _merge(self, inputs: dict[str, Any], workspace: Path) -> ToolExecutionResult:
         """merge 操作：根据合并策略将 workspace 中的变更合并到目标目录
 
         根据 merge_strategy 参数分派到不同的合并方式：
@@ -299,7 +304,7 @@ class ResourceMergeTool(BuiltinTool):
 
     async def _merge_copy(  # noqa: PLR0912
         self, inputs: dict[str, Any], workspace: Path
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """通过文件复制方式将 workspace 变更合并到目标目录
 
         支持两种模式：
@@ -408,7 +413,7 @@ class ResourceMergeTool(BuiltinTool):
 
     async def _git_merge(  # noqa: PLR0911
         self, inputs: dict[str, Any], workspace: Path
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """通过 git merge 策略将 workspace 分支合并到主仓库
 
         流程：
@@ -619,7 +624,7 @@ class ResourceMergeTool(BuiltinTool):
             pass
         return result
 
-    async def _rollback(self, inputs: dict[str, Any], workspace: Path) -> ToolResult:
+    async def _rollback(self, inputs: dict[str, Any], workspace: Path) -> ToolExecutionResult:
         """rollback 操作：在 worktree 中恢复到分支初始状态
 
         通过 git checkout -- . 恢复所有文件到 HEAD 状态。
@@ -671,7 +676,7 @@ class ResourceMergeTool(BuiltinTool):
                 error_code="ROLLBACK_FAILED",
             )
 
-    async def _cleanup(self, inputs: dict[str, Any], workspace: Path) -> ToolResult:
+    async def _cleanup(self, inputs: dict[str, Any], workspace: Path) -> ToolExecutionResult:
         """cleanup 操作：移除 worktree 并删除分支"""
 
         def _remove_readonly_func(func, path, _):

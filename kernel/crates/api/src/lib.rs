@@ -13,6 +13,7 @@
 
 pub mod auth;
 pub mod capability_router;
+pub mod chat_send_handler;
 pub mod compat_routes;
 pub mod config_service;
 pub mod db_routes;

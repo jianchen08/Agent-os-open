@@ -1,16 +1,18 @@
-"""LLM HTTP 客户端（embedding + chat completions）。
+"""LLM chat completions HTTP 客户端（压缩专用精简版）。
+
+从 plugins/shared/system/memory/embedding_client.py 精简而来——compress 只需要
+chat_completion，不需要 embedding，故删除了 embedding 相关代码与对 ports 的依赖。
 
 从内核注入的 config（config_refs: ["models"]）解析 GLM 模型配置，
 直接用 requests 调 OpenAI 兼容端点。独立于 src/，sidecar 内部完成 env 展开。
 
 config 形状（loader 原样传入，${ENV} 字面量未展开）：
-    config["models"]["models"]["embedding-3"]      # 模型定义
-    config["models"]["providers"]["zhipu_coding"]   # provider + api_key
-    config["models"]["defaults"]["embedding"|"chat"]
+    config["models"]["models"]["<model_id>"]   # 模型定义
+    config["models"]["providers"]["<provider>"]  # provider + api_key
+    config["models"]["defaults"]["chat"]          # 默认 chat 模型 ID
 
 暴露接口：
-- LLMClient: HTTP 客户端
-- EmbeddingUnavailableError: embedding 不可用（key 缺失/调用失败）
+- LLMClient: HTTP 客户端（chat_available / chat_completion）
 """
 
 from __future__ import annotations
@@ -21,8 +23,6 @@ import re
 from typing import Any
 
 import requests
-
-from ports import EmbeddingUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -43,37 +43,33 @@ def _resolve_env(value: str) -> str:
 
 
 class LLMClient:
-    """GLM LLM HTTP 客户端。
+    """GLM LLM HTTP 客户端（chat completions，压缩专用）。
 
-    从 models config 解析 embedding/chat 模型与 API key，
-    提供 embed_texts / chat_completion 两个同步方法（在 async 调用方用 to_thread 包裹）。
+    从 models config 解析 chat 模型与 API key，
+    提供 chat_completion 同步方法（在 async 调用方用 to_thread 包裹）。
+    默认按 ``default_role`` 从 ``defaults`` 选模型（chat / compression）。
 
     Attributes:
-        emb_api_base: embedding 端点 base url
-        emb_model: embedding 模型名
-        emb_api_key: embedding API key
         chat_api_base: chat 端点 base url
         chat_model: chat 模型名
         chat_api_key: chat API key
     """
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], default_role: str = "chat") -> None:
         """从 models config 解析配置。
 
         Args:
             config: 内核注入的插件 config（config_refs 含 "models"）
+            default_role: 从 defaults 中读取的角色键，默认 "chat"；
+                压缩场景传 "compression"（读 defaults.compression → minimax-m3）
         """
         models_cfg = config.get("models", {}) if config else {}
-        self._models_cfg = models_cfg
 
-        # 解析 embedding（默认 embedding-3）
-        self.emb_api_base, self.emb_model, self.emb_api_key = self._resolve_model(
-            models_cfg, role="embedding", default_id="embedding-3"
-        )
-
-        # 解析 chat（默认 deepseek-v4-flash，回退 glm-5.2）
+        # 按角色解析；chat 默认 deepseek-v4-flash，compression 默认 minimax-m3，回退 glm-5.2
+        fallback = "glm-5.2"
+        default_id = "minimax-m3" if default_role == "compression" else "deepseek-v4-flash"
         self.chat_api_base, self.chat_model, self.chat_api_key = self._resolve_model(
-            models_cfg, role="chat", default_id="deepseek-v4-flash", fallback_id="glm-5.2"
+            models_cfg, role=default_role, default_id=default_id, fallback_id=fallback
         )
 
     def _resolve_model(
@@ -87,7 +83,7 @@ class LLMClient:
 
         Args:
             models_cfg: models 配置块
-            role: "embedding" 或 "chat"
+            role: defaults 中的角色键（如 "chat" / "compression"）
             default_id: defaults 中指定的模型 ID
             fallback_id: 默认 ID 不可用时的回退 ID
 
@@ -133,51 +129,12 @@ class LLMClient:
         return ""
 
     @property
-    def embedding_available(self) -> bool:
-        """embedding 是否可用（api_base/model/key 均非空）。"""
-        return bool(self.emb_api_base and self.emb_model and self.emb_api_key)
-
-    @property
     def chat_available(self) -> bool:
         """chat 是否可用（api_base/model/key 均非空）。"""
         return bool(self.chat_api_base and self.chat_model and self.chat_api_key)
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """调用 embedding API 批量生成向量。
-
-        Args:
-            texts: 待嵌入文本列表
-
-        Returns:
-            向量列表，顺序与输入一致
-
-        Raises:
-            EmbeddingUnavailableError: API key 未配置
-            RuntimeError: HTTP 调用失败或响应解析失败
-        """
-        if not self.embedding_available:
-            raise EmbeddingUnavailableError(
-                "embedding 配置缺失（api_base/model/api_key），需配置 GLM embedding key"
-            )
-
-        url = f"{self.emb_api_base.rstrip('/')}/embeddings"
-        payload = {"model": self.emb_model, "input": texts}
-        headers = {"Authorization": f"Bearer {self.emb_api_key}"}
-
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=_DEFAULT_TIMEOUT)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            raise RuntimeError(f"embedding HTTP 调用失败: {e}") from e
-
-        try:
-            data = resp.json().get("data", [])
-            return [item["embedding"] for item in sorted(data, key=lambda x: x.get("index", 0))]
-        except (ValueError, KeyError) as e:
-            raise RuntimeError(f"embedding 响应解析失败: {e}") from e
-
     def chat_completion(self, prompt: str, max_tokens: int = 800) -> str:
-        """调用 chat completions 生成文本（用于摘要）。
+        """调用 chat completions 生成文本（用于压缩摘要）。
 
         Args:
             prompt: 用户 prompt

@@ -109,6 +109,12 @@ class BudgetManager:
         self._global_daily_usage: int = 0
         self._global_monthly_usage: int = 0
 
+        # F-CC-1/F-COST-2 预留计数：check_budget 通过即「答应占用」，record_usage 兑付。
+        self._task_reserved: dict[str, int] = {}
+        self._session_reserved: dict[str, int] = {}
+        self._global_daily_reserved: int = 0
+        self._global_monthly_reserved: int = 0
+
         # 使用记录
         self._usage_records: list[UsageRecord] = []
 
@@ -148,8 +154,12 @@ class BudgetManager:
         async with self._lock:
             await self._check_and_reset_periods()
 
-            # 检查全局每日限制
-            global_daily_after = self._global_daily_usage + estimated_tokens
+            # F-CC-1/F-COST-2：检查条件含「已预留 + 本次预估」，通过即预留——
+            # 并发下 check 全过、record 各记各的 TOCTOU 被闭合（到达即中断）。
+            # 检查全局每日限制（含预留）
+            global_daily_after = (
+                self._global_daily_usage + self._global_daily_reserved + estimated_tokens
+            )
             if global_daily_after > self.config.global_budget.daily_token_limit:
                 raise QuotaExhaustedException(
                     message=f"全局每日配额已耗尽，当前: {self._global_daily_usage}, 限制: {self.config.global_budget.daily_token_limit}",
@@ -157,8 +167,10 @@ class BudgetManager:
                     quota_type="daily",
                 )
 
-            # 检查全局每月限制
-            global_monthly_after = self._global_monthly_usage + estimated_tokens
+            # 检查全局每月限制（含预留）
+            global_monthly_after = (
+                self._global_monthly_usage + self._global_monthly_reserved + estimated_tokens
+            )
             if global_monthly_after > self.config.global_budget.monthly_token_limit:
                 raise QuotaExhaustedException(
                     message=f"全局每月配额已耗尽，当前: {self._global_monthly_usage}, 限制: {self.config.global_budget.monthly_token_limit}",
@@ -166,10 +178,11 @@ class BudgetManager:
                     quota_type="monthly",
                 )
 
-            # 检查任务限制
+            # 检查任务限制（含预留）
             if task_id:
                 task_usage = self._task_usage.get(task_id, 0)
-                task_after = task_usage + estimated_tokens
+                task_reserved = self._task_reserved.get(task_id, 0)
+                task_after = task_usage + task_reserved + estimated_tokens
                 if task_after > self.config.global_budget.per_task_token_limit:
                     raise BudgetExceededException(
                         message=f"任务 {task_id} 预算超限，当前: {task_usage}, 限制: {self.config.global_budget.per_task_token_limit}",
@@ -178,10 +191,11 @@ class BudgetManager:
                         limit_type="task",
                     )
 
-            # 检查会话限制
+            # 检查会话限制（含预留）
             if session_id:
                 session_usage = self._session_usage.get(session_id, 0)
-                session_after = session_usage + estimated_tokens
+                session_reserved = self._session_reserved.get(session_id, 0)
+                session_after = session_usage + session_reserved + estimated_tokens
                 if session_after > self.config.global_budget.per_session_token_limit:
                     raise BudgetExceededException(
                         message=f"会话 {session_id} 预算超限，当前: {session_usage}, 限制: {self.config.global_budget.per_session_token_limit}",
@@ -189,6 +203,14 @@ class BudgetManager:
                         limit=self.config.global_budget.per_session_token_limit,
                         limit_type="session",
                     )
+
+            # 全部通过 → 预留（task/session 按 key，global 共享计数器）
+            if task_id:
+                self._task_reserved[task_id] = self._task_reserved.get(task_id, 0) + estimated_tokens
+            if session_id:
+                self._session_reserved[session_id] = self._session_reserved.get(session_id, 0) + estimated_tokens
+            self._global_daily_reserved += estimated_tokens
+            self._global_monthly_reserved += estimated_tokens
 
             return True
 
@@ -215,6 +237,53 @@ class BudgetManager:
         """
         async with self._lock:
             await self._check_and_reset_periods()
+
+            # F-CC-1/F-COST-2：先兑付预留（task/session pop、global 钳制），
+            # 再做强制上限检查——超限 raise 且不写入（到达即中断）。
+            if task_id:
+                reserved = self._task_reserved.get(task_id, 0)
+                if reserved:
+                    self._task_reserved[task_id] = max(0, reserved - tokens)
+            if session_id:
+                reserved = self._session_reserved.get(session_id, 0)
+                if reserved:
+                    self._session_reserved[session_id] = max(0, reserved - tokens)
+            self._global_daily_reserved = max(0, self._global_daily_reserved - tokens)
+            self._global_monthly_reserved = max(0, self._global_monthly_reserved - tokens)
+
+            # 强制上限（record 阶段仍拦截，不静默累加）
+            if task_id:
+                task_after = self._task_usage.get(task_id, 0) + tokens
+                if task_after > self.config.global_budget.per_task_token_limit:
+                    raise BudgetExceededException(
+                        message=f"任务 {task_id} 预算超限，当前: {self._task_usage.get(task_id, 0)}, 限制: {self.config.global_budget.per_task_token_limit}",
+                        current_usage=self._task_usage.get(task_id, 0),
+                        limit=self.config.global_budget.per_task_token_limit,
+                        limit_type="task",
+                    )
+            if session_id:
+                session_after = self._session_usage.get(session_id, 0) + tokens
+                if session_after > self.config.global_budget.per_session_token_limit:
+                    raise BudgetExceededException(
+                        message=f"会话 {session_id} 预算超限，当前: {self._session_usage.get(session_id, 0)}, 限制: {self.config.global_budget.per_session_token_limit}",
+                        current_usage=self._session_usage.get(session_id, 0),
+                        limit=self.config.global_budget.per_session_token_limit,
+                        limit_type="session",
+                    )
+            global_daily_after = self._global_daily_usage + tokens
+            if global_daily_after > self.config.global_budget.daily_token_limit:
+                raise QuotaExhaustedException(
+                    message=f"全局每日配额已耗尽，当前: {self._global_daily_usage}, 限制: {self.config.global_budget.daily_token_limit}",
+                    usage_percent=self._global_daily_usage / self.config.global_budget.daily_token_limit * 100,
+                    quota_type="daily",
+                )
+            global_monthly_after = self._global_monthly_usage + tokens
+            if global_monthly_after > self.config.global_budget.monthly_token_limit:
+                raise QuotaExhaustedException(
+                    message=f"全局每月配额已耗尽，当前: {self._global_monthly_usage}, 限制: {self.config.global_budget.monthly_token_limit}",
+                    usage_percent=self._global_monthly_usage / self.config.global_budget.monthly_token_limit * 100,
+                    quota_type="monthly",
+                )
 
             # 计算成本
             cost_rate = self.config.get_model_cost_rate(model)
@@ -250,6 +319,23 @@ class BudgetManager:
             # 检查告警
             return await self._check_alerts()
 
+    async def release_reservation(
+        self,
+        user_id: str | None = None,
+        task_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """释放预留（调用失败时防幽灵占用）。幂等。
+
+        注意：按作用域整体释放（非按调用者）——同作用域并发下释放窗口内可能
+        多放行一个 check，但 record 硬上限兜底，不突破预算。
+        """
+        async with self._lock:
+            if task_id:
+                self._task_reserved.pop(task_id, None)
+            if session_id:
+                self._session_reserved.pop(session_id, None)
+
     async def _check_and_reset_periods(self) -> None:
         """检查并重置周期统计"""
         now = datetime.now()
@@ -258,6 +344,7 @@ class BudgetManager:
         if now.date() > self._day_start.date():
             self._day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             self._global_daily_usage = 0
+            self._global_daily_reserved = 0
             self._daily_usage.clear()
             self._last_alerts.clear()
 
@@ -265,6 +352,7 @@ class BudgetManager:
         if now.month != self._month_start.month or now.year != self._month_start.year:
             self._month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             self._global_monthly_usage = 0
+            self._global_monthly_reserved = 0
             self._monthly_usage.clear()
 
     async def _check_alerts(self) -> BudgetAlert | None:

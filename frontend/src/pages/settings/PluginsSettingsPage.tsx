@@ -43,7 +43,7 @@ function typeBadge(configType: string): { label: string; className: string } {
   if (t.includes('system')) {
     return { label: 'System', className: 'bg-[rgba(96,165,250,0.12)] text-[var(--ds-status-info,#60A5FA)] border-[rgba(96,165,250,0.35)]' }
   }
-  return { label: configType || 'Composite', className: 'bg-white/5 text-muted-foreground border-white/10' }
+  return { label: configType || 'Composite', className: 'bg-[var(--hover-overlay)] text-muted-foreground border-border' }
 }
 
 /** activation 中文 */
@@ -133,7 +133,7 @@ export function PluginsSettingsPage({
         <button
           onClick={fetchPlugins}
           disabled={isLoading}
-          className="hover:bg-white/5 flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+          className="hover:bg-[var(--hover-overlay)] flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
           style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
         >
           <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
@@ -189,7 +189,7 @@ export function PluginsSettingsPage({
             return (
               <div
                 key={plugin.plugin_id}
-                className="rounded-[10px] border p-3.5"
+                className="rounded-lg border p-3.5"
                 style={{
                   background: plugin.enabled ? 'var(--ds-bg-panel, #0A1226)' : 'rgba(148,163,184,0.04)',
                   borderColor: plugin.error ? 'rgba(248,113,113,0.55)' : 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
@@ -211,7 +211,7 @@ export function PluginsSettingsPage({
                     className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 disabled:opacity-50 ${
                       plugin.enabled
                         ? 'bg-[var(--ds-accent-primary,#22D3EE)] border-[var(--ds-accent-primary,#22D3EE)]'
-                        : 'bg-gray-600 border-gray-600'
+                        : 'bg-[var(--status-pending)] border-[var(--status-pending)]'
                     }`}
                     title={plugin.enabled ? '点击禁用（重启生效）' : '点击启用（重启生效）'}
                   >

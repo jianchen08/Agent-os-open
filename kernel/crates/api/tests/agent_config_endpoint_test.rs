@@ -17,6 +17,28 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
+async fn admin_token(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+
 /// 在临时项目根构造 config/agents/main/<id>.yaml 的测试环境。
 fn state_with_agent(id: &str, yaml_content: &str) -> (tempfile::TempDir, AppState) {
     let tmp = tempfile::tempdir().unwrap();
@@ -33,6 +55,7 @@ fn state_with_agent(id: &str, yaml_content: &str) -> (tempfile::TempDir, AppStat
 #[tokio::test]
 async fn test_agent_schema_returns_fields_array() {
     let app = build_router(AppState::new());
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
@@ -86,10 +109,12 @@ async fn test_get_agent_config_returns_yaml() {
     let (_tmp, state) = state_with_agent("test_agent", yaml);
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/agents/test_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -113,10 +138,12 @@ async fn test_get_agent_config_missing_returns_404() {
     let (_tmp, state) = state_with_agent("existing_agent", "config_id: existing_agent\nname: x\n");
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/agents/ghost_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -135,11 +162,13 @@ async fn test_put_agent_config_then_get_reads_back_new_content() {
     let put_body = serde_json::to_string(&json!({ "yaml": new_yaml })).unwrap();
 
     let app = build_router(state.clone());
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/agents/round_trip_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -161,6 +190,7 @@ async fn test_put_agent_config_then_get_reads_back_new_content() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/agents/round_trip_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -184,11 +214,13 @@ async fn test_put_agent_config_creates_backup() {
     let put_body = serde_json::to_string(&json!({ "yaml": "config_id: backup_agent\nname: 备份后\n" }))
         .unwrap();
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/agents/backup_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -213,11 +245,13 @@ async fn test_put_agent_config_missing_returns_404() {
 
     let put_body = serde_json::to_string(&json!({ "yaml": "config_id: ghost\n" })).unwrap();
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/agents/ghost/config")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -243,10 +277,12 @@ async fn test_get_agent_config_top_level_file() {
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/agents/top_level_agent/config")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )

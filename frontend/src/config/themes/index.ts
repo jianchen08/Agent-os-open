@@ -8,7 +8,9 @@ import { darkTheme } from './presets/dark'
 import { deepSpaceTheme } from './presets/deep-space'
 import { highContrastTheme } from './presets/high-contrast'
 import { lightTheme } from './presets/light'
+import { moeSoftTheme } from './presets/moe-soft'
 import { oceanBreezeTheme } from './presets/ocean-breeze'
+import { pixelArtTheme } from './presets/pixel-art'
 import type { ThemeInfo, ThemeConfig } from '@/types/theme'
 
 // 重新导出主题对象，方便直接导入
@@ -17,6 +19,8 @@ export { lightTheme } from './presets/light'
 export { deepSpaceTheme } from './presets/deep-space'
 export { oceanBreezeTheme } from './presets/ocean-breeze'
 export { highContrastTheme } from './presets/high-contrast'
+export { pixelArtTheme } from './presets/pixel-art'
+export { moeSoftTheme } from './presets/moe-soft'
 
 /**
  * 预设主题映射表
@@ -29,6 +33,8 @@ export const presetThemes: Record<string, ThemeConfig> = {
   'deep-space': deepSpaceTheme,
   'ocean-breeze': oceanBreezeTheme,
   'high-contrast': highContrastTheme,
+  'pixel-art': pixelArtTheme,
+  'moe-soft': moeSoftTheme,
 }
 
 /**
@@ -90,6 +96,32 @@ export const themeList: ThemeInfo[] = [
       surface: '#e6fffa',
       text: '#0f172a',
       accent: '#06b6d4',
+    },
+  },
+  {
+    id: 'pixel-art',
+    name: '像素糖果',
+    description: 'PICO-8 复古色板：暖白画布+实线描边+积木硬阴影，明快不刺眼',
+    category: 'light',
+    preview: {
+      primary: '#29adff',
+      background: '#fff1e8',
+      surface: '#ffe3cc',
+      text: '#1d2b53',
+      accent: '#ffec27',
+    },
+  },
+  {
+    id: 'moe-soft',
+    name: '奶油甜心',
+    description: '奶油软萌系：奶白底+玫瑰粉，柔光圆角，甜而不腻',
+    category: 'light',
+    preview: {
+      primary: '#d9738f',
+      background: '#fff9f5',
+      surface: '#f7ede6',
+      text: '#5d4a41',
+      accent: '#b8a1cf',
     },
   },
 

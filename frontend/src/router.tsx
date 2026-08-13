@@ -457,30 +457,49 @@ function HomePage(): ReactNode {
       />
     </Suspense>
   ) : (
-    <div className="text-foreground flex flex-1 flex-col items-center justify-center gap-6 px-8">
-      <div className="flex flex-col items-center gap-3">
-        <div className="bg-primary/10 text-primary flex h-16 w-16 items-center justify-center rounded-2xl text-3xl">
-          <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <div className="text-foreground flex flex-1 flex-col items-center justify-center gap-8 px-8">
+      <div className="flex flex-col items-center gap-4">
+        <div className="bg-primary/10 text-primary flex h-20 w-20 items-center justify-center rounded-xl">
+          <svg className="h-10 w-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
           </svg>
         </div>
-        <h2 className="text-3xl font-bold tracking-tight">欢迎使用超级终端</h2>
-        <p className="text-muted-foreground max-w-sm text-center text-base">
-          选择左侧已有会话，或创建新会话开始对话
-        </p>
+        <div className="flex flex-col items-center gap-2 text-center">
+          <h2 className="text-3xl font-bold tracking-tight">欢迎使用超级终端</h2>
+          <p className="text-muted-foreground max-w-md text-base">
+            选择左侧已有会话，或创建新会话开始对话
+          </p>
+        </div>
       </div>
-      <div className="flex flex-wrap justify-center gap-2">
+      <div className="grid w-full max-w-xl grid-cols-1 gap-4 sm:grid-cols-2">
         <button
           onClick={handleCreateSession}
-          className="bg-primary text-primary-foreground rounded-lg px-5 py-2.5 text-sm font-medium transition-opacity hover:opacity-90"
+          className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
         >
-          + 新会话
+          <span className="bg-primary text-primary-foreground flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-xl font-medium">
+            +
+          </span>
+          <span className="flex flex-col gap-1">
+            <span className="text-base font-medium">新会话</span>
+            <span className="text-muted-foreground text-sm">直接开始一段新的对话</span>
+          </span>
         </button>
         <a
           href={ROUTES.AGENTS}
-          className="text-foreground border-border hover:bg-accent rounded-lg border px-5 py-2.5 text-sm transition-colors"
+          className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
         >
-          浏览智能体
+          <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="9" cy="8" r="3.25" strokeWidth={1.5} />
+              <path strokeLinecap="round" strokeWidth={1.5} d="M3.5 19c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25" />
+              <circle cx="16.5" cy="9" r="2.5" strokeWidth={1.5} />
+              <path strokeLinecap="round" strokeWidth={1.5} d="M15.2 14.7c2.3.3 4 1.7 4.8 4.3" />
+            </svg>
+          </span>
+          <span className="flex flex-col gap-1">
+            <span className="text-base font-medium">浏览智能体</span>
+            <span className="text-muted-foreground text-sm">按场景挑选合适的专家角色</span>
+          </span>
         </a>
       </div>
     </div>

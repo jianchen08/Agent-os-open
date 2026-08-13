@@ -302,7 +302,7 @@ function ImageLightbox({
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-strong)]"
       onClick={onClose}
     >
       <div

@@ -1,4 +1,5 @@
 @import './styles/responsive.css';
+@import './styles/fonts.css';
 @import './styles/design-tokens.css';
 @import './styles/theme.css';
 @import './styles/deep-space-v2.css';
@@ -10,6 +11,26 @@
 
 @import "tailwindcss";
 @config "../tailwind.config.js";
+
+/* === 全局边框线型（主题驱动） ===
+   Tailwind v4 的边框宽度类（.border/.border-b 等）内嵌
+   border-style: var(--tw-border-style)，该变量经 @property 注册
+   （inherits:false，初始 solid），颜色类无法控制线型。
+   双保险接线：
+   1) unlayered 简写覆盖：压过 preflight/base 层的 solid；
+   2) utilities 层内接管 --tw-border-style：让所有 border 工具类读到主题线型；
+      显式 border-dashed/border-dotted 类 specificity 更高，仍可按组件覆盖。 */
+*,
+::before,
+::after {
+  border-style: var(--border-line-style, solid);
+}
+
+@layer utilities {
+  * {
+    --tw-border-style: var(--border-line-style, solid);
+  }
+}
 
 /* shadcn/ui 颜色工具类 - Tailwind v4 兼容层 */
 @layer utilities {
@@ -53,11 +74,32 @@ html {
   font-size: 16px;
 }
 
+html {
+  /* 主题字体基座：unlayered 压过 Tailwind v4 preflight 在 html 上写的
+     ui-sans-serif 默认栈，使不经过 body/FiveSpaceLayout 的区域也继承主题字体 */
+  font-family: var(--font-ui, var(--font-family, 'Noto Sans SC', 'Inter', -apple-system, sans-serif));
+}
+
+/* 标题/表单控件存在绕过 CSSOM 检测的字体来源（计算样式为浏览器默认栈），
+   以 inherit !important 强制回归主题字体基座；pre/code 等等宽场景不受影响 */
+h1, h2, h3, h4, h5, h6,
+button, input, select, textarea {
+  font-family: inherit !important;
+}
+
+/* antd 组件（Splitter/Form 等）运行时 cssinjs 会给 .ant-* 注入
+   antd 默认字体栈，切断主题字体继承 —— 压制之，使其继承主题基座 */
+[class^='ant-'],
+[class*=' ant-'] {
+  font-family: inherit !important;
+}
+
 body {
   height: 100%;
   margin: 0;
   padding: 0;
-  font-family: 'Noto Sans SC', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* 主题字体（--font-ui 由主题引擎输出）；未输出时回退 design-tokens 的 --font-family */
+  font-family: var(--font-ui, var(--font-family, 'Noto Sans SC', 'Inter', -apple-system, sans-serif));
   color: hsl(var(--foreground));
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -67,6 +109,51 @@ body {
 #root {
   height: 100%;
   overflow: hidden;
+  /* 抬到背景装饰层之上：纹理/背景图是 body 伪元素，垫在内容之下 */
+  position: relative;
+  z-index: 1;
+}
+
+/* === 主题背景装饰层（themeStore 输出变量的消费端） === */
+
+/* 纹理层：dots/grid/lines/noise/checker，垫在 body 背景之上、内容之下 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: var(--bg-texture, none);
+  background-size: var(--bg-texture-size, 24px) var(--bg-texture-size, 24px);
+  opacity: var(--bg-texture-opacity, 1);
+}
+
+/* 背景图片层：仅 body.has-bg-image 时渲染（themeStore 切换），
+   overlay 颜色叠在图片上方保证内容可读 */
+body.has-bg-image::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: linear-gradient(var(--bg-overlay, rgba(0, 0, 0, 0.2)), var(--bg-overlay, rgba(0, 0, 0, 0.2))),
+    var(--bg-image, none);
+  background-position: var(--bg-image-position, center);
+  background-size: var(--bg-image-size, cover);
+  background-attachment: var(--bg-image-attachment, fixed);
+  background-repeat: no-repeat;
+  opacity: var(--bg-overlay-opacity, 1);
+}
+
+/* 主题区域纹理：侧边栏 / 聊天区（叠加在各自 --sidebar-bg / --chat-bg 之上） */
+.theme-sidebar-area {
+  background-image: var(--sidebar-texture, none);
+  background-size: var(--sidebar-texture-size, 24px) var(--sidebar-texture-size, 24px);
+}
+
+.theme-chat-area {
+  background-image: var(--chat-texture, none);
+  background-size: var(--chat-texture-size, 24px) var(--chat-texture-size, 24px);
 }
 
 @media (max-height: 700px) {

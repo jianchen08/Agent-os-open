@@ -21,7 +21,7 @@ use axum::{
         Request, State,
     },
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
-    middleware::{from_fn, Next},
+    middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -180,10 +180,53 @@ pub fn build_router(state: AppState) -> Router {
 
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
     let router = crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
+    // F-API-1：配置写入面 + compat 会话/插件生命周期鉴权（白名单路径 + method 分写/读）。
+    let auth_layer = from_fn_with_state(state.clone(), write_surface_auth);
     // CORS：开发期前端通过 VITE_API_BASE_URL 直连内核（http://localhost:9100），
     // 浏览器跨域请求需要预检（OPTIONS）+ 响应头带 Access-Control-Allow-Origin。
     // 作为最外层中间件，拦截 OPTIONS 预检并给所有响应注入 CORS 头。
-    router.with_state(state).layer(from_fn(cors_middleware))
+    router
+        .with_state(state)
+        .layer(auth_layer)
+        .layer(from_fn(cors_middleware))
+}
+
+/// F-API-1：配置写入面 + compat 会话/插件生命周期鉴权中间件。
+///
+/// 按路径白名单 + method 区分：写面（POST/PUT/PATCH/DELETE）→ require_admin_role；
+/// 读面（GET）→ require_read_role（admin/viewer）。白名单覆盖：
+/// - `/api/v1/threads*`（会话 CRUD）
+/// - `/api/v1/plugins/*`（status/history/reload/enabled/config）
+/// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
+/// - `PUT /api/v1/agents/{id}/config`、`PUT /api/v1/config/pipelines/{name}`
+/// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等）。
+async fn write_surface_auth(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let path = req.uri().path();
+    let method = req.method().clone();
+
+    let needs_auth = path.starts_with("/api/v1/threads")
+        || path.starts_with("/api/v1/plugins/")
+        || path == "/api/v1/actions/execute"
+        || path == "/api/v1/interaction/response"
+        || (path.starts_with("/api/v1/agents/") && path.ends_with("/config") && method == Method::PUT)
+        || (path.starts_with("/api/v1/config/pipelines/") && method == Method::PUT);
+
+    if !needs_auth {
+        return Ok(next.run(req).await);
+    }
+
+    let result = match method {
+        Method::GET => crate::db_routes::require_read_role(&state, req.headers()).await,
+        _ => crate::db_routes::require_admin_role(&state, req.headers()).await,
+    };
+    match result {
+        Ok(_) => Ok(next.run(req).await),
+        Err(e) => Err(e),
+    }
 }
 
 /// CORS 中间件：拦截 OPTIONS 预检（返回 204 + CORS 头），并给所有响应注入 CORS 头。
@@ -519,11 +562,12 @@ pub(crate) async fn process_via_engine(
     pipeline_id: &str,
     thread_id: &str,
     message_id: &str,
+    user_id: &str,
 ) -> String {
     // Box::pin 到堆上：回写段 + executor.run 的深 sidecar 调用链让 Future 状态机
     // 在 release 下也接近 tokio worker 2MB 栈极限，堆分配规避溢出。
     Box::pin(process_via_engine_inner(
-        state, message, agent_id, history, pipeline_id, thread_id, message_id,
+        state, message, agent_id, history, pipeline_id, thread_id, message_id, user_id,
     ))
     .await
 }
@@ -537,6 +581,7 @@ async fn process_via_engine_inner(
     pipeline_id: &str,
     thread_id: &str,
     message_id: &str,
+    user_id: &str,
 ) -> String {
     let invoker = match state.invoker.clone() {
         Some(i) => i,
@@ -594,6 +639,10 @@ async fn process_via_engine_inner(
         // pipeline_id 落库，统一语义后写入与查询键一致，空值不再产生孤儿数据。
         "pipeline_id": effective_pipeline_id,
         "session_id": thread_id,
+        // user_id：触发器（trigger_setup）等工具在 0.2 需它做上下文绑定（触发时
+        // 经 chat.send_message 回派发需要 user_id 解析 tenant）。param_inject 据此
+        // 注入到工具 args；空串时 param_inject 自动跳过注入，不影响既有行为。
+        "user_id": user_id,
         // assistant message_id：内核权威生成，sidecar 流式 chunk 携带它，
         // 前端 handleStreamChunk 据此把 chunk 路由到 stream_start 建立的占位气泡。
         "message_id": message_id,
@@ -1076,7 +1125,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, headers: Heade
                 // TODO: agent_id 暂用默认（chat 协议暂未携带；后续从请求体取）
                 let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
                 let content =
-                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", ""))
+                    agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, "", "", "", ""))
                         .await;
 
                 // 构造响应
@@ -1130,8 +1179,14 @@ async fn chat_handler(
             _ => String::new(),
         }
     } else { String::new() };
+    // 解析请求用户 user_id（从 Authorization token），供 process_via_engine 写入 state；
+    // 触发器等工具据此捕获 user_id，触发时回派发（chat.send_message）解析 tenant。
+    let user_id = crate::auth::resolve_request_user(state.store.as_ref(), &headers)
+        .await
+        .map(|(uid, _, _, _)| uid)
+        .unwrap_or_default();
     let content =
-        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, &pipeline_id, &req.session_id, ""))
+        agentos_tenant::scope(tenant_ctx, process_via_engine(&state, &req.message, if req.agent_id.is_empty() { "agentos" } else { req.agent_id.as_str() }, &req.history, &pipeline_id, &req.session_id, "", &user_id))
             .await;
 
     let response = WsResponse {
@@ -1706,7 +1761,7 @@ mod tests {
         // 第一轮：pipeline_id=pipe_mt 非空（WS 路径 route_id 语义）
         let r1 = agentos_tenant::scope(
             tenant.clone(),
-            process_via_engine(&state, "第一轮：我叫小明", "agentos", &[], pipe, thread, "m1"),
+            process_via_engine(&state, "第一轮：我叫小明", "agentos", &[], pipe, thread, "m1", ""),
         )
         .await;
         assert!(!r1.is_empty(), "第一轮应返回 assistant 回复");
@@ -1714,7 +1769,7 @@ mod tests {
         // 第二轮：同 pipeline_id，应看到第一轮 user+assistant 上下文
         let r2 = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "第二轮：我叫什么？", "agentos", &[], pipe, thread, "m2"),
+            process_via_engine(&state, "第二轮：我叫什么？", "agentos", &[], pipe, thread, "m2", ""),
         )
         .await;
         assert!(!r2.is_empty(), "第二轮应返回 assistant 回复");
@@ -1748,14 +1803,14 @@ mod tests {
 
         let r1 = agentos_tenant::scope(
             tenant.clone(),
-            process_via_engine(&state, "HTTP 第一轮", "agentos", &[], "", thread, "h1"),
+            process_via_engine(&state, "HTTP 第一轮", "agentos", &[], "", thread, "h1", ""),
         )
         .await;
         assert!(!r1.is_empty());
 
         let r2 = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "HTTP 第二轮", "agentos", &[], "", thread, "h2"),
+            process_via_engine(&state, "HTTP 第二轮", "agentos", &[], "", thread, "h2", ""),
         )
         .await;
         assert!(!r2.is_empty());
@@ -1827,7 +1882,7 @@ mod tests {
 
         let r = agentos_tenant::scope(
             tenant,
-            process_via_engine(&state, "冷启动第二轮", "agentos", &[], pipe, thread, "c2"),
+            process_via_engine(&state, "冷启动第二轮", "agentos", &[], pipe, thread, "c2", ""),
         )
         .await;
         assert!(!r.is_empty(), "冷启动第二轮应返回 assistant 回复");
@@ -1890,7 +1945,7 @@ mod tests {
         // alice 发消息（在 alice 的 tenant scope 内，模拟 dispatch_user_input）
         let r_a = agentos_tenant::scope(
             TenantContext::new("tenant_alice", thread_a),
-            process_via_engine(&state, "alice 的消息", "agentos", &[], pipe_a, thread_a, "a1"),
+            process_via_engine(&state, "alice 的消息", "agentos", &[], pipe_a, thread_a, "a1", ""),
         )
         .await;
         assert!(!r_a.is_empty(), "alice 发消息应返回 assistant 回复");
@@ -1898,7 +1953,7 @@ mod tests {
         // bob 发消息（在 bob 的 tenant scope 内）
         let r_b = agentos_tenant::scope(
             TenantContext::new("tenant_bob", thread_b),
-            process_via_engine(&state, "bob 的消息", "agentos", &[], pipe_b, thread_b, "b1"),
+            process_via_engine(&state, "bob 的消息", "agentos", &[], pipe_b, thread_b, "b1", ""),
         )
         .await;
         assert!(!r_b.is_empty(), "bob 发消息应返回 assistant 回复");
@@ -2029,7 +2084,7 @@ mod tests {
         // frank 发消息（tenant = frank_id）
         let r = agentos_tenant::scope(
             TenantContext::new(&frank_id, thread),
-            process_via_engine(&state, "frank 的问题", "agentos", &[], pipe, thread, "f1"),
+            process_via_engine(&state, "frank 的问题", "agentos", &[], pipe, thread, "f1", ""),
         )
         .await;
         assert!(!r.is_empty(), "frank 发消息应成功");

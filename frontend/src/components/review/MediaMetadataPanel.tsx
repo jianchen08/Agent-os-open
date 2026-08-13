@@ -108,7 +108,7 @@ function videoSummary(result: VideoReviewResult): string {
 /** 警告标签组件 */
 function WarningBadge({ message }: { message: string }) {
   return (
-    <div className="flex items-start gap-1.5 rounded-md bg-yellow-50 px-2 py-1.5 text-[11px] text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">
+    <div className="flex items-start gap-1.5 rounded-md bg-status-warning/10 px-2 py-1.5 text-[11px] text-status-warning dark:bg-status-warning/15/20 dark:text-status-warning">
       <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
       <span>{message}</span>
     </div>
@@ -118,7 +118,7 @@ function WarningBadge({ message }: { message: string }) {
 /** 错误标签组件 */
 function ErrorBadge({ message }: { message: string }) {
   return (
-    <div className="flex items-start gap-1.5 rounded-md bg-red-50 px-2 py-1.5 text-[11px] text-red-800 dark:bg-red-900/20 dark:text-red-200">
+    <div className="flex items-start gap-1.5 rounded-md bg-status-error/10 px-2 py-1.5 text-[11px] text-status-error dark:bg-status-error/20">
       <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
       <span>{message}</span>
     </div>
@@ -318,17 +318,17 @@ export function MediaMetadataPanel({ metadata, compact = false }: MediaMetadataP
         )}
         <span className="truncate">{summary}</span>
         {errors.length > 0 && (
-          <span className="shrink-0 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300">
+          <span className="shrink-0 rounded-full bg-status-error/10 px-1.5 py-0.5 text-[10px] font-medium text-status-error dark:bg-status-error/15/30 dark:text-status-error">
             {errors.length} 错误
           </span>
         )}
         {warnings.length > 0 && (
-          <span className="shrink-0 rounded-full bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300">
+          <span className="shrink-0 rounded-full bg-status-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-status-warning dark:bg-status-warning/15/30 dark:text-status-warning">
             {warnings.length} 警告
           </span>
         )}
         {!hasIssues && (
-          <span className="shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
+          <span className="shrink-0 rounded-full bg-status-success/10 px-1.5 py-0.5 text-[10px] font-medium text-status-success dark:bg-status-success/15/30 dark:text-status-success">
             ✓ 有效
           </span>
         )}
@@ -371,11 +371,11 @@ export function MediaMetadataPanel({ metadata, compact = false }: MediaMetadataP
           {/* 有效状态指示 */}
           <div className="mt-2 flex items-center gap-2">
             {(isImage ? imageResult?.isValid : videoResult?.isValid) ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-300">
+              <span className="inline-flex items-center gap-1 rounded-full bg-status-success/10 px-2 py-0.5 text-[10px] font-medium text-status-success dark:bg-status-success/15/30 dark:text-status-success">
                 ✓ 有效文件
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300">
+              <span className="inline-flex items-center gap-1 rounded-full bg-status-error/10 px-2 py-0.5 text-[10px] font-medium text-status-error dark:bg-status-error/15/30 dark:text-status-error">
                 ✗ 无效文件
               </span>
             )}
@@ -388,7 +388,7 @@ export function MediaMetadataPanel({ metadata, compact = false }: MediaMetadataP
           {/* 警告列表 */}
           {warnings.length > 0 && (
             <div className="mt-3 space-y-1">
-              <div className="flex items-center gap-1 text-[11px] font-medium text-yellow-700 dark:text-yellow-300">
+              <div className="flex items-center gap-1 text-[11px] font-medium text-status-warning dark:text-status-warning">
                 <AlertTriangle className="h-3 w-3" />
                 警告 ({warnings.length})
               </div>
@@ -401,7 +401,7 @@ export function MediaMetadataPanel({ metadata, compact = false }: MediaMetadataP
           {/* 错误列表 */}
           {errors.length > 0 && (
             <div className="mt-3 space-y-1">
-              <div className="flex items-center gap-1 text-[11px] font-medium text-red-700 dark:text-red-300">
+              <div className="flex items-center gap-1 text-[11px] font-medium text-status-error dark:text-status-error">
                 <AlertCircle className="h-3 w-3" />
                 错误 ({errors.length})
               </div>

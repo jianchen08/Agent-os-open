@@ -17,16 +17,17 @@ from urllib.parse import urlparse
 import httpx
 import yaml  # noqa: F401
 
-from core.results import ToolExecutionResult
-from tools.builtin.base import BuiltinTool
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolResult,
     ToolSource,
     create_failure_result,
     create_success_result,
 )
+from url_security import is_private_ip, resolve_hostname_ips
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,15 @@ class WebTool(BuiltinTool):
                 )
                 if not is_allowed:
                     return False, f"域名不在允许列表中: {domain}"
+
+            # F-TOOLS-MIG：SSRF 防护——DNS 解析后比对内网/回环/元数据 IP
+            # （防触达 127.0.0.1 / localhost / 169.254.169.254 / 内网网段）
+            ips, resolve_err = resolve_hostname_ips(domain)
+            if resolve_err is not None:
+                return False, f"SSRF 防护：域名解析失败: {resolve_err}"
+            for ip in ips or []:
+                if is_private_ip(ip):
+                    return False, f"SSRF 防护：目标解析到内网/回环地址 {ip}"
 
             return True, None
 

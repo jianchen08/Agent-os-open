@@ -193,7 +193,7 @@ const FileBlockView: FC<{ path: string }> = ({ path }) => {
   return (
     <button
       onClick={() => getGlobalOpenFileCallback()(path)}
-      className="group flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      className="group flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-[var(--hover-overlay)]"
       title={`点击打开文件: ${path}`}
     >
       <FileText className="text-muted-foreground h-icon-sm w-icon-sm flex-shrink-0" />
@@ -229,7 +229,7 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
       />
       {open && (
         <div
-          className="bg-black/70 fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center p-6"
+          className="bg-[var(--overlay-strong)] fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center p-6"
           onClick={() => setOpen(false)}
           role="dialog"
           aria-modal="true"
@@ -485,7 +485,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
       <div
         className={cn(
           'flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2.5 pl-3.5 transition-colors',
-          'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
+          'hover:bg-[var(--hover-overlay)]',
         )}
         onClick={handleHeaderClick}
       >
@@ -645,7 +645,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
           aria-label="确认操作"
         >
           <div
-            className="fixed inset-0 bg-black/50"
+            className="fixed inset-0 bg-[var(--overlay-bg)]"
             onClick={() => {
               dialogState.onCancel()
             }}

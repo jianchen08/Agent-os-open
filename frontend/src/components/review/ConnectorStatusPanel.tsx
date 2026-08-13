@@ -24,10 +24,10 @@ export interface ConnectorStatusPanelProps {
 
 /** 状态颜色映射 */
 const statusColors: Record<ConnectorStatus, string> = {
-  connected: 'bg-green-500',
-  connecting: 'bg-yellow-500 animate-pulse',
-  disconnected: 'bg-gray-400',
-  error: 'bg-red-500',
+  connected: 'bg-status-success/100',
+  connecting: 'bg-status-warning/100 animate-pulse',
+  disconnected: 'bg-[var(--status-pending)]',
+  error: 'bg-status-error/100',
 }
 
 /** 状态文本映射 */
@@ -180,8 +180,8 @@ function ConnectorCard({
         <button
           className={`flex h-6 w-6 items-center justify-center rounded ${
             connector.status === 'connected'
-              ? 'text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20'
-              : 'text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20'
+              ? 'text-status-error hover:bg-status-error/10 dark:hover:bg-status-error/15/20'
+              : 'text-status-success hover:bg-status-success/10 dark:hover:bg-status-success/15/20'
           } ${isOperating ? 'animate-pulse' : ''}`}
           onClick={handleToggle}
           disabled={isOperating}

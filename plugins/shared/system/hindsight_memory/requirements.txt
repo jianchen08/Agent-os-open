@@ -1,7 +1,10 @@
 # Hindsight memory sidecar dependencies.
 #
-# hindsight-all-slim provides the embedded (internal pg0, no Docker) agent
-# memory library. It is imported lazily inside server.py so the sidecar can
-# boot even when the package is absent (degrade-to-error-dict mode), and tests
-# run without installing it (client is mocked).
-hindsight-all-slim
+# 真实架构:hindsight-all-slim 是「客户端 + 服务器」分离设计:
+# - hindsight-api (main 入口) 启动 HTTP 服务器,内部用 pg0 嵌入式 PostgreSQL
+# - hindsight_client.Hindsight(base_url) 是 HTTP 客户端,aretain/arecall 调服务器
+#
+# 本 sidecar 在 on_load 时启动 hindsight-api 子进程 + 创建客户端连接。
+# 包均懒导入(on_load 内 try/except),缺失时 sidecar 降级不崩溃。
+hindsight-all-slim>=0.9.0          # 客户端 + API 服务器(hindsight_client + hindsight_api.main)
+hindsight-api-slim[embedded-db]>=0.9.0  # pg0 嵌入式 PostgreSQL 扩展(零外部 DB)

@@ -16,6 +16,28 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
+async fn admin_token(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/api/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+
 /// 构造一个含 config_files 的 manifest，映射到临时 config 目录的真实文件。
 fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
     PluginManifest {
@@ -33,6 +55,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        lifecycle: None,
         native: None,
         wasm: None,
         requires_content: None,
@@ -75,10 +98,12 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plugins/llm_service/config/llm")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -122,10 +147,12 @@ async fn test_get_plugin_config_masks_plaintext_secret() {
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plugins/connectors_service/config/godot")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -164,10 +191,12 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
 
     // 先 GET 拿 ETag
     let app = build_router(state.clone());
+    let token = admin_token(&app).await;
     let get_resp = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plugins/llm_service/config/llm")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -194,6 +223,7 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/plugins/llm_service/config/llm")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -237,11 +267,13 @@ async fn test_put_plugin_config_without_if_match_returns_409() {
     }))
     .unwrap();
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/api/v1/plugins/llm_service/config/llm")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(put_body))
                 .unwrap(),
@@ -271,10 +303,12 @@ async fn test_get_plugin_config_unknown_file_id_returns_404() {
     state.project_root = Some(tmp.path().to_path_buf());
 
     let app = build_router(state);
+    let token = admin_token(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/plugins/llm_service/config/nonexistent")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )

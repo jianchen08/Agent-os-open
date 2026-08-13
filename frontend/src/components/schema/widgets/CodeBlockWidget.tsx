@@ -259,7 +259,7 @@ export function CodeBlockWidget(props: Record<string, unknown>) {
       </div>
 
       {/* 代码区域 */}
-      <div className="bg-zinc-900 overflow-x-auto p-4">
+      <div className="bg-[var(--code-bg)] overflow-x-auto p-4">
         <pre className="text-sm leading-relaxed">
           <code>
             {highlightedLines.map((tokens, lineIndex) => (

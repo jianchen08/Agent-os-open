@@ -1047,8 +1047,8 @@ interface TreeNodeProps {
 /** 树节点组件 递归渲染单个树节点及其子节点，处理展开/折叠动画、 */
 /** 优先级标签映射 */
 const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
-  critical: { label: '紧急', color: 'text-red-500' },
-  high: { label: '高', color: 'text-orange-500' },
+  critical: { label: '紧急', color: 'text-status-error' },
+  high: { label: '高', color: 'text-status-warning' },
   normal: { label: '普通', color: 'text-muted-foreground' },
   low: { label: '低', color: 'text-muted-foreground/60' },
 }

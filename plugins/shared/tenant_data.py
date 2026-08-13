@@ -14,6 +14,10 @@
 3. ``migrate_legacy_data_to_default(data_root)`` —— 把全局共享的 ``data/{memory,...}``
    幂等迁入 ``data/default/{memory,...}``。**仅提供函数 + 测试**，真实迁移由部署/启动
    钩子调用（不在本模块对真实 data/ 执行破坏性移动）。
+4. ``tenant_config_dir(tenant_id)`` —— 返回 ``{base}/users/{tenant_id}/`` 配置覆盖层目录
+   （不自动创建：目录存在 = 该租户有配置覆盖，不存在 = 无覆盖，调用方回退全局配置）。
+   ``base`` 默认为仓库 ``config/users/``（可经 env ``AGENTOS_CONFIG_USERS_DIR`` 或显式
+   参数覆盖）。
 
 capability 调用模式（参考 hindsight_memory/wiring.py 的 ``_bind_caller``）：
 - SDK ``CapabilityHandle.call(method, params)`` 会拼成 wire method ``f"{cap}.{method}"``
@@ -47,6 +51,9 @@ TENANT_CONTEXT_CAPABILITY = "tenant-context"
 # tenant_context_base 解析的 env 覆盖键（测试/部署可重定向数据根，避免写真实 data/）。
 DATA_BASE_ENV = "AGENTOS_DATA_DIR"
 
+# config/users 覆盖层 base 解析的 env 覆盖键（测试/部署可重定向配置根）。
+CONFIG_USERS_BASE_ENV = "AGENTOS_CONFIG_USERS_DIR"
+
 # capability_caller 类型：(method: str, params: dict) -> Awaitable[Any]
 CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
@@ -66,7 +73,7 @@ def _default_data_base() -> Path:
     if env:
         return Path(env)
     # parents[0]=shared, parents[1]=plugins, parents[2]=仓库根
-    return Path(__file__).resolve().parents[1] / "data"
+    return Path(__file__).resolve().parents[2] / "data"
 
 
 def _sanitize_segment(segment: str) -> str:
@@ -107,6 +114,45 @@ def tenant_data_root(
     root = base_path / _sanitize_segment(tenant_id) / _sanitize_segment(subdir)
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _default_config_users_base() -> Path:
+    """config/users 覆盖层 base（``config/users/`` 目录）。
+
+    优先 env ``AGENTOS_CONFIG_USERS_DIR``；否则仓库根 ``config/users/``
+    （本文件位于 ``plugins/shared/tenant_data.py``，上溯 2 级到仓库根）。
+    """
+    env = os.environ.get(CONFIG_USERS_BASE_ENV)
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "config" / "users"
+
+
+def tenant_config_dir(
+    tenant_id: str,
+    *,
+    base: Path | str | None = None,
+) -> Path:
+    """返回租户配置覆盖层目录 ``{base}/{tenant_id}/``（不自动创建）。
+
+    方案 B 配置面：每租户独立配置覆盖目录 ``config/users/{tenant_id}/``（如
+    ``config/users/default/profile.md``）。覆盖层语义——目录存在 = 该租户有配置
+    覆盖（读取方优先于此目录，缺失项回退全局 ``config/``）；不存在 = 无覆盖。
+
+    与 ``tenant_data_root``（存储层自动 mkdir）刻意不同：配置覆盖层**不因读取
+    而生成空目录**，避免空覆盖层掩盖"无覆盖 → 回退全局配置"的语义。
+
+    Args:
+        tenant_id: 租户 ID（单层目录名，禁含路径分隔符/``..``）。
+        base: 配置根 base。None 时用 ``_default_config_users_base()``（env
+            ``AGENTOS_CONFIG_USERS_DIR`` 或仓库 ``config/users/``）。测试应显式
+            传 base 或设 env 以隔离副作用。
+
+    Returns:
+        租户配置覆盖层目录 Path（可能不存在）。
+    """
+    base_path = Path(base) if base is not None else _default_config_users_base()
+    return base_path / _sanitize_segment(tenant_id)
 
 
 # ═══════════════════════════════════════════════════════════

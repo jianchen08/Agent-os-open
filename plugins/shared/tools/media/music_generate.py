@@ -1,4 +1,21 @@
-"""音乐生成工具
+"""音乐生成工具（0.2 迁移版）。
+
+迁移（FP-MIGR 0.1→0.2）：
+- 顶层 import 由 0.1 的 ``tools.builtin.base`` / ``tools.types`` / ``tools.media.*``
+  改为 ``agentos_plugin_sdk``（Tool / 枚举 / 结果工厂）+ 就地 ``_media_core``
+  （MediaType / FallbackStrategy / ProviderChain / MediaProviderClient /
+  ProviderUnavailable）。
+- ``_resolve_registry``（0.1 infrastructure.service_provider 直调）已删除；
+  ``ProviderChain`` 从 ``_media_core`` 真实 import，``# noqa: F821`` 消音已删除。
+
+F-MEDIA-2（provider 依赖迁移）：执行分两路径——
+1. 注入注册表（构造参数 provider_registry）→ ProviderChain 链式执行（0.1 兼容语义）；
+2. 否则经 tool-executor capability 调用后端服务（MediaProviderClient，
+   服务契约 media.generate）——调用方未注入时返回**显式错误**
+   （error_code=PROVIDER_UNAVAILABLE）。
+
+产品决定：**不降级空转**——0.1 的「无 Provider 返回 not_configured 成功态」
+（会让上层误以为生成已排队）已废除，统一改为显式 PROVIDER_UNAVAILABLE 错误。
 
 暴露接口：
 - get_tool_definition() -> Tool：工具定义
@@ -10,27 +27,31 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from tools.builtin.base import BuiltinTool
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
 )
+from _media_core import (
+    FallbackStrategy,
+    MediaProviderClient,
+    MediaProviderRegistry,
+    MediaType,
+    ProviderChain,
+    ProviderUnavailable,
+)
 
 logger = logging.getLogger(__name__)
-
-# 没有 Provider 时的友好提示
-_NO_PROVIDER_MESSAGE = "音乐生成功能暂未配置 Provider，请配置 Suno 等 Provider 后使用"
 
 
 def _enrich_music_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     """动态注入当前可用的音乐 Provider 列表到工具 Schema。"""
     import copy  # noqa: PLC0415
-
-    from tools.media.base import MediaType  # noqa: PLC0415
 
     media_registry = services.get("media_provider_registry")
     if media_registry is None:
@@ -61,24 +82,28 @@ class MusicGenerateTool(BuiltinTool):
     """音乐生成工具。
 
     通过 MediaProviderRegistry 获取 MUSIC 类型的 ProviderChain，
-    调用 Provider 执行音乐生成。当没有可用的 Provider 时，
-    优雅降级并返回友好提示信息。
+    调用 Provider 执行音乐生成（注入式兼容路径）；未注入注册表时经
+    tool-executor capability 调用后端服务（F-MEDIA-2 主路径）。
 
     Args:
         provider_registry: 媒体 Provider 注册表实例，可选。
-            如果不提供，execute() 将返回未配置提示。
+        capability_caller: 能力调用 async 函数（可选，F-MEDIA-2 主路径）。
     """
 
     def __init__(
         self,
-        provider_registry: Any | None = None,
+        provider_registry: MediaProviderRegistry | None = None,
+        capability_caller: Any | None = None,
     ) -> None:
         """初始化音乐生成工具。
 
         Args:
             provider_registry: MediaProviderRegistry 实例，可选。
+            capability_caller: 注入的能力调用 async 函数 `(method, params) -> Any`
+                （经 tool-executor.invoke 调 media.generate；生产环境由插件注入）
         """
         self._provider_registry = provider_registry
+        self._capability_caller = capability_caller
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -143,11 +168,12 @@ class MusicGenerateTool(BuiltinTool):
         """获取音乐生成工具的 Schema 丰富器。"""
         return _enrich_music_schema
 
-    async def execute(self, inputs: dict[str, Any]) -> Any:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行音乐生成。
 
-        尝试通过 MediaProviderRegistry 获取 MUSIC ProviderChain 并调用。
-        如果没有可用的 Provider，返回友好的提示信息。
+        F-MEDIA-2 双路径：注入注册表 → ProviderChain 链式执行（兼容）；
+        否则经 capability 调用后端服务（未注入调用方时显式 PROVIDER_UNAVAILABLE）。
+        0.1 的 not_configured 成功态已废除（不降级空转）。
 
         Args:
             inputs: 工具输入参数，包含 prompt（必填）
@@ -155,7 +181,7 @@ class MusicGenerateTool(BuiltinTool):
 
         Returns:
             ToolExecutionResult: 生成成功时包含文件路径和元数据；
-                无 Provider 时包含友好提示；失败时包含错误信息。
+                服务不可用时包含显式错误（error_code=PROVIDER_UNAVAILABLE）。
         """
         prompt = inputs.get("prompt", "").strip()
         if not prompt:
@@ -164,14 +190,24 @@ class MusicGenerateTool(BuiltinTool):
                 error_code="MISSING_PROMPT",
             )
 
-        # 尝试获取 ProviderChain
-        chain = self._get_provider_chain(inputs)
-        if chain is None:
-            return self._no_provider_result()
-
-        # 构建可选参数，过滤 None 值
         kwargs = self._build_kwargs(inputs)
 
+        if self._provider_registry is not None:
+            # 注入式注册表路径（0.1 ProviderChain 语义保留）
+            chain = self._get_provider_chain(inputs)
+            if chain is None:
+                return self._provider_unavailable_result()
+            return await self._execute_via_registry(prompt, chain, kwargs)
+        # F-MEDIA-2 主路径：经 capability 调用后端服务
+        return await self._execute_via_capability(prompt, inputs, kwargs)
+
+    async def _execute_via_registry(
+        self,
+        prompt: str,
+        chain: Any,
+        kwargs: dict[str, Any],
+    ) -> ToolExecutionResult:
+        """注入式注册表路径：ProviderChain 链式执行（0.1 兼容语义）。"""
         try:
             result = await chain.execute_generate(prompt, **kwargs)
             return create_success_result(
@@ -183,6 +219,12 @@ class MusicGenerateTool(BuiltinTool):
                     "metadata": result.metadata,
                 },
                 metadata={"action": "music_generate", "provider": result.provider_name},
+            )
+        except ProviderUnavailable as e:
+            logger.warning("[MusicGenerate] Provider 不可用: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="PROVIDER_UNAVAILABLE",
             )
         except RuntimeError as e:
             logger.warning("[MusicGenerate] Provider 执行失败: %s", e)
@@ -197,19 +239,55 @@ class MusicGenerateTool(BuiltinTool):
                 error_code="GENERATE_FAILED",
             )
 
-    def _resolve_registry(self) -> Any:
-        """从 ServiceProvider 懒加载获取 MediaProviderRegistry。
+    async def _execute_via_capability(
+        self,
+        prompt: str,
+        inputs: dict[str, Any],
+        kwargs: dict[str, Any],
+    ) -> ToolExecutionResult:
+        """F-MEDIA-2 主路径：经 tool-executor capability 调用后端服务。
 
-        Returns:
-            MediaProviderRegistry 实例，获取失败返回 None
+        调用方未注入（无 capability_caller）时返回**显式错误**
+        PROVIDER_UNAVAILABLE——不静默空转（产品决定：迁移依赖而非降级）。
         """
-        try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        if self._capability_caller is None:
+            return self._provider_unavailable_result()
 
-            provider = get_service_provider()
-            return provider.get("media_provider_registry")
-        except Exception:
-            return None
+        client = MediaProviderClient(self._capability_caller)
+        try:
+            result = await client.execute_generate(
+                MediaType.MUSIC,
+                prompt,
+                provider=inputs.get("provider"),
+                **kwargs,
+            )
+        except ProviderUnavailable as e:
+            logger.warning("[MusicGenerate] 媒体生成服务不可用: %s", e)
+            return create_failure_result(
+                error=str(e),
+                error_code="PROVIDER_UNAVAILABLE",
+            )
+        return create_success_result(
+            data={
+                "file_path": str(result.file_path),
+                "media_type": result.media_type.value,
+                "duration_seconds": result.duration_seconds,
+                "provider_name": result.provider_name,
+                "metadata": result.metadata,
+            },
+            metadata={"action": "music_generate", "provider": result.provider_name},
+        )
+
+    @staticmethod
+    def _provider_unavailable_result() -> ToolExecutionResult:
+        """媒体生成服务不可用的显式错误结果（不降级空转）。"""
+        return create_failure_result(
+            error=(
+                "媒体生成服务不可用（media.generate）：未注入 capability_caller，"
+                "且未注入媒体 Provider 注册表"
+            ),
+            error_code="PROVIDER_UNAVAILABLE",
+        )
 
     def _get_provider_chain(self, inputs: dict[str, Any] | None = None) -> Any | None:
         """获取 MUSIC 类型的 ProviderChain。
@@ -221,21 +299,15 @@ class MusicGenerateTool(BuiltinTool):
             ProviderChain 实例，如果注册表为空或链为空则返回 None。
         """
         if self._provider_registry is None:
-            self._provider_registry = self._resolve_registry()
-
-        if self._provider_registry is None:
             return None
 
         try:
-            from tools.media.base import MediaType  # noqa: PLC0415
-            from tools.media.fallback import FallbackStrategy  # noqa: PLC0415
-
             # 处理指定的 Provider
             provider_name = (inputs or {}).get("provider")
             if provider_name:
                 provider = self._provider_registry.get(provider_name)
                 if provider:
-                    return ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)  # noqa: F821
+                    return ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)
                 logger.warning(
                     "[MusicGenerate] 指定的 Provider '%s' 不存在，使用自动选择",
                     provider_name,
@@ -265,14 +337,3 @@ class MusicGenerateTool(BuiltinTool):
             if value is not None:
                 kwargs[key] = value
         return kwargs
-
-    @staticmethod
-    def _no_provider_result() -> Any:
-        """生成无 Provider 时的友好提示结果。"""
-        return create_success_result(
-            data={
-                "status": "not_configured",
-                "message": _NO_PROVIDER_MESSAGE,
-            },
-            metadata={"action": "music_generate", "fallback": True},
-        )

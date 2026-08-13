@@ -211,7 +211,7 @@ export function ImageAreaAnnotation({
         {/* 删除按钮 */}
         {!readOnly && onRemoveAnnotation && (
           <button
-            className="absolute -top-2 -right-2 hidden h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] text-white hover:bg-red-600 group-hover:flex"
+            className="absolute -top-2 -right-2 hidden h-4 w-4 items-center justify-center rounded-full bg-status-error/100 text-[10px] text-white hover:bg-status-error group-hover:flex"
             onClick={(e) => {
               e.stopPropagation()
               onRemoveAnnotation(annotation.id)
@@ -235,7 +235,7 @@ export function ImageAreaAnnotation({
 
     return (
       <div
-        className="pointer-events-none absolute border-2 border-blue-500 bg-blue-500/20"
+        className="pointer-events-none absolute border-2 border-status-info/50 bg-status-info/100/20"
         style={{ left: x, top: y, width, height }}
       />
     )
@@ -306,7 +306,7 @@ export function ImageAreaAnnotation({
                     placeholder="输入标注说明..."
                     rows={2}
                     autoFocus
-                    className="w-full resize-none rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-blue-500"
+                    className="w-full resize-none rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-status-info"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault()
@@ -324,7 +324,7 @@ export function ImageAreaAnnotation({
                     取消
                   </button>
                   <button
-                    className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-700 disabled:opacity-50"
+                    className="rounded bg-status-info px-2 py-0.5 text-[10px] text-white hover:bg-status-info disabled:opacity-50"
                     onClick={handleSubmitSuggestion}
                     disabled={!suggestionText.trim()}
                   >

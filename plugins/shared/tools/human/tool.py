@@ -5,6 +5,19 @@
 - create_human_interaction_tool(pipeline_id: str | None) -> HumanInteractionTool：create_human_interaction_tool功能
 - get_tool_definition() -> Tool：get_tool_definition功能
 - HumanInteractionTool：HumanInteractionTool类
+
+0.2 迁移（FP-MIGR / F-MIGR-2）：0.1 的 human_interaction 服务包
+（core.results / tools.builtin.base / tools.types / human_interaction.* 顶层包）
+均已删除，本文件为工具壳，接到 V2 自包含服务：
+- 顶层类型走 agentos_plugin_sdk（BuiltinTool / Tool / ToolCategory / ToolLevel /
+  ToolSource / ToolExecutionResult / create_failure_result / create_success_result）；
+- 交互服务走本插件目录 V2 平铺模块（models.InteractionMode/Priority、
+  service.HumanInteractionService + InteractionTimeoutError/Cancelled/Denied），
+  server.py 双角色实现同款（纯内存版，经 event-bus capability 推前端）；
+- WorkspaceAwareMixin 来自工具共享层 plugins/shared/tools/workspace_aware.py；
+- format_size 就地重建（0.1 tools.builtin.shared.formatters 已删，显示语义对齐）；
+- 服务实例默认懒加载 HumanInteractionService()，也可由调用方经构造参数
+  service=... 注入（测试/宿主）。
 """
 
 import asyncio  # noqa: F401
@@ -13,33 +26,45 @@ import logging
 from asyncio import CancelledError
 from typing import Any
 
-from core.results import ToolExecutionResult
-from human_interaction import (
-    InteractionMode,
-    Priority,
-    get_human_interaction_service,
-)
-from human_interaction.service import (
-    InteractionCancelledError,
-    InteractionDeniedError,
-    InteractionTimeoutError,
-)
-from tools.builtin.base import BuiltinTool
-from tools.builtin.shared.formatters import format_size
-from plugins.shared.tools.workspace_aware import WorkspaceAwareMixin
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
+    ToolExecutionResult,
     ToolLevel,
     ToolSource,
     create_failure_result,
     create_success_result,
 )
+from models import InteractionMode, Priority
+from service import (
+    HumanInteractionService,
+    InteractionCancelledError,
+    InteractionDeniedError,
+    InteractionTimeoutError,
+)
+from workspace_aware import WorkspaceAwareMixin
 
 logger = logging.getLogger(__name__)
 
 MAX_FILE_PATHS = 10
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+
+
+def format_size(size: int) -> str:
+    """人类可读文件大小（就地重建 0.1 formatters.format_size，显示语义对齐）。
+
+    512 → "512B"；1536 → "1.5KB"；1048576 → "1.0MB"；2GB → "2.0GB"。
+    """
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{size}B"
 
 
 class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
@@ -55,9 +80,26 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
     def __init__(
         self,
         pipeline_id: str | None = None,
+        service: Any | None = None,
     ):
-        """初始化人类交互工具"""
+        """初始化人类交互工具。
+
+        Args:
+            pipeline_id: 管道 ID（LLM 工具入口由内核注入）
+            service: 交互服务实例（0.2 注入版，duck-typing，实现
+                create_choice_request / create_conversation_request /
+                send_notification / wait_for_choice / cancel_request）。
+                None 时懒加载本目录 V2 自包含 HumanInteractionService
+                （纯内存版，与 server.py 双角色实现同款）。
+        """
         self.pipeline_id = pipeline_id
+        self._service = service
+
+    def _get_service(self) -> Any:
+        """获取交互服务实例（构造注入优先，未注入懒加载 V2 纯内存版）。"""
+        if self._service is None:
+            self._service = HumanInteractionService()
+        return self._service
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -150,7 +192,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         if not pipeline_id:
             return create_failure_result(error="缺少必要的上下文信息（pipeline_id）")
 
-        service = get_human_interaction_service()
+        service = self._get_service()
 
         if mode == InteractionMode.CHOICE.value:
             return await self._execute_choice_mode(inputs, service, pipeline_id)

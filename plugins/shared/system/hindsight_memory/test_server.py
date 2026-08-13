@@ -24,7 +24,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -80,8 +80,18 @@ def mod() -> Any:
 
 @pytest.fixture
 def mock_client(mod: Any) -> MagicMock:
-    """注入 mock hindsight client 到模块。"""
+    """注入 mock hindsight client 到模块。
+
+    真实 hindsight_client.Hindsight 的方法都是异步的(aretain/arecall/areflect/...),
+    故 mock 用 AsyncMock。返回值由各测试在 mock_client.aretain.return_value 上设置。
+    """
     client = MagicMock()
+    # 异步方法默认返回 None/空(各测试按需覆盖 return_value)
+    client.aretain = AsyncMock(return_value=MagicMock(operation_id="mem_mock", accepted=True))
+    client.arecall = AsyncMock(return_value=MagicMock(results=[], chunks=[], source_facts=[]))
+    client.areflect = AsyncMock(return_value=MagicMock(model_dump=lambda: {"facts": []}))
+    client.adelete_bank = AsyncMock(return_value=None)
+    client.acreate_bank = AsyncMock(return_value=None)
     mod._client = client
     return client
 
@@ -170,8 +180,8 @@ class TestDegradeWithoutClient:
 
 class TestRetainWithMock:
     def test_retain_with_mock_client(self, mod: Any, mock_client: MagicMock) -> None:
-        """mock client.retain 被正确调用，返回 {id, stored:true}。"""
-        mock_client.retain.return_value = {"id": "mem_123", "content": "hello"}
+        """mock client.aretain 被正确调用，返回 {id, stored:true}。"""
+        mock_client.aretain.return_value = MagicMock(operation_id="mem_123", accepted=True)
 
         result = _call_tool(
             mod,
@@ -182,15 +192,14 @@ class TestRetainWithMock:
             metadata={"source": "test"},
         )
 
-        # 调用断言
-        mock_client.retain.assert_called_once()
-        call_kwargs = mock_client.retain.call_args.kwargs
+        # 调用断言(aretain 异步)
+        mock_client.aretain.assert_called_once()
+        call_kwargs = mock_client.aretain.call_args.kwargs
         assert call_kwargs["bank_id"] == "bank_A"
         assert call_kwargs["content"] == "hello world"
 
         # 返回形状
         assert result["stored"] is True
-        assert result["id"] == "mem_123"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -202,12 +211,16 @@ class TestRecallFilter:
     def test_recall_filters_by_memory_type(
         self, mod: Any, mock_client: MagicMock
     ) -> None:
-        """recall 返回混合类型，memory_type 过滤后只保留匹配项。"""
-        mock_client.recall.return_value = [
-            {"id": "1", "content": "a", "metadata": {"memory_type": "semantic"}},
-            {"id": "2", "content": "b", "metadata": {"memory_type": "episode"}},
-            {"id": "3", "content": "c", "metadata": {"memory_type": "semantic"}},
-        ]
+        """recall 用 tags 服务端过滤,返回结果直接是过滤后的。"""
+        # arecall 返回带 results 的对象(0.9.0 主字段, 已由服务端按 tags 过滤)
+        mock_client.arecall.return_value = MagicMock(
+            results=[
+                MagicMock(model_dump=lambda: {"id": "1", "text": "a"}),
+                MagicMock(model_dump=lambda: {"id": "3", "text": "c"}),
+            ],
+            chunks=[],
+            source_facts=[],
+        )
 
         result = _call_tool(
             mod,
@@ -217,7 +230,10 @@ class TestRecallFilter:
             memory_type="semantic",
         )
 
-        mock_client.recall.assert_called_once()
+        mock_client.arecall.assert_called_once()
+        call_kwargs = mock_client.arecall.call_args.kwargs
+        # memory_type 转成 tags 服务端过滤
+        assert call_kwargs.get("tags") == ["type:semantic"]
         assert result["total"] == 2
         contents = [r["content"] for r in result["results"]]
         assert contents == ["a", "c"]
@@ -232,9 +248,9 @@ class TestImportDocument:
     def test_import_document_chunks_text(
         self, mod: Any, mock_client: MagicMock
     ) -> None:
-        """5000 字符文本被切分为 ~3 块，retain 调用 3 次。"""
+        """5000 字符文本被切分为 ~3 块,aretain 调用 3 次。"""
         long_text = "x" * 5000
-        mock_client.retain.return_value = {"id": "mem_x"}
+        mock_client.aretain.return_value = MagicMock(operation_id="mem_x", accepted=True)
 
         result = _call_tool(
             mod,
@@ -247,12 +263,12 @@ class TestImportDocument:
         # 2000 字符/块 → 5000/2000 ≈ 3 块
         assert result["chunks_imported"] == 3
         assert result["knowledge_name"] == "kb1"
-        assert mock_client.retain.call_count == 3
+        assert mock_client.aretain.call_count == 3
 
     def test_import_document_rejects_non_txt(
         self, mod: Any, mock_client: MagicMock
     ) -> None:
-        """file_path 为 .pdf 时返回错误字典，不读文件不 retain。"""
+        """file_path 为 .pdf 时返回错误字典,不读文件不 aretain。"""
         result = _call_tool(
             mod,
             "hindsight.import_document",
@@ -262,8 +278,8 @@ class TestImportDocument:
 
         assert isinstance(result, dict)
         assert "error" in result
-        # 关键：未触发 retain
-        mock_client.retain.assert_not_called()
+        # 关键：未触发 aretain
+        mock_client.aretain.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -276,7 +292,7 @@ class TestBankIdDefault:
         self, mod: Any, mock_client: MagicMock
     ) -> None:
         """bank_id 未给定时回落到默认值（多租户隔离 key）。"""
-        mock_client.retain.return_value = {"id": "mem_d"}
+        mock_client.aretain.return_value = MagicMock(operation_id="mem_d", accepted=True)
 
         result = _call_tool(
             mod,
@@ -284,7 +300,7 @@ class TestBankIdDefault:
             content="some memory",  # 注意：未传 bank_id
         )
 
-        call_kwargs = mock_client.retain.call_args.kwargs
+        call_kwargs = mock_client.aretain.call_args.kwargs
         # bank_id 必须被填上默认值（非空字符串）
         assert call_kwargs["bank_id"]
         assert call_kwargs["bank_id"] != ""
