@@ -112,8 +112,9 @@
   text-decoration: underline;
   text-underline-offset: 2px;
   transition: opacity 0.15s;
-  /* 长链接换行 */
-  word-break: break-all;
+  /* 长链接换行：overflow-wrap: break-word 保单词完整，仅超长 URL 断词
+     （禁止 word-break: break-all——会对中文/链接强制每字符断行） */
+  overflow-wrap: break-word;
 }
 
 .markdown-content .md-link:hover {

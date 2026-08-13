@@ -20,6 +20,7 @@
  * ```
  */
 
+import { memo, useCallback, useRef, useState } from 'react'
 import {
   Download,
   Pause,
@@ -27,7 +28,7 @@ import {
   Volume2,
   VolumeX,
 } from '@/assets/icons'
-import { memo, useCallback, useRef, useState } from 'react'
+import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 
 /** AudioPlayer 组件属性 */
 export interface AudioPlayerProps {
@@ -156,7 +157,7 @@ export const AudioPlayer = memo<AudioPlayerProps>(
             <summary className="cursor-pointer hover:text-foreground">
               查看音频链接
             </summary>
-            <code className="mt-1 block rounded bg-muted p-2 text-xs break-all">
+            <code className={`mt-1 block rounded bg-muted p-2 text-xs ${TOOL_CONTENT_SCROLL_CLASS}`}>
               {src}
             </code>
           </details>
