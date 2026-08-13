@@ -1178,7 +1178,8 @@ impl PluginInvokerImpl {
                 continue;
             }
             let threshold = self.idle_timeout_secs_sync(&plugin_id);
-            if idle_secs > threshold {
+            // threshold == 0 表示该插件声明"永不空闲卸载"，跳过。
+            if threshold != 0 && idle_secs > threshold {
                 info!(
                     plugin_id = %plugin_id,
                     idle_secs = idle_secs,
@@ -1192,8 +1193,21 @@ impl PluginInvokerImpl {
 
     /// idle_timeout_secs 的同步包装（run_idle_gc_pass 已在 async 上下文，但 load 是 async，
     /// 这里用同步读缓存的方式避免嵌套 await 复杂度——阈值取默认或环境变量即可，精确性非关键）。
-    fn idle_timeout_secs_sync(&self, _plugin_id: &str) -> u64 {
-        // 全局环境变量优先
+    ///
+    /// 优先级：插件 manifest 的 lifecycle.idle_timeout_secs > 全局环境变量 > 默认 300s。
+    /// 返回 0 表示该插件声明"永不空闲卸载"。
+    fn idle_timeout_secs_sync(&self, plugin_id: &str) -> u64 {
+        // 1) 插件 manifest 声明优先——让每个插件自定义生命周期。
+        //    Some(0) = 永不空闲卸载（human_interaction 等阻塞型工具等待用户输入）。
+        if let Some(secs) = self
+            .loader
+            .get_manifest(plugin_id)
+            .and_then(|m| m.lifecycle)
+            .and_then(|lc| lc.idle_timeout_secs)
+        {
+            return secs;
+        }
+        // 2) 全局环境变量覆盖默认
         if let Ok(v) = std::env::var("AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS") {
             if let Ok(secs) = v.parse::<u64>() {
                 if secs > 0 {
@@ -1201,7 +1215,7 @@ impl PluginInvokerImpl {
                 }
             }
         }
-        // 默认 300s
+        // 3) 默认 300s
         agentos_core::traits::default_idle_timeout()
     }
 

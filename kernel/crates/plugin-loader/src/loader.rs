@@ -608,6 +608,14 @@ impl PluginLoader for PluginLoaderImpl {
             .get(plugin_id)
             .and_then(|(_, path)| path.parent().map(|p| p.to_string_lossy().to_string()))
     }
+
+    /// 获取指定插件的 manifest（同步读缓存）。
+    ///
+    /// 供内核同步查询插件声明的运行时属性（如 lifecycle 空闲卸载阈值）。
+    fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+        let manifests = self.manifests.read();
+        manifests.get(plugin_id).map(|(m, _)| m.clone())
+    }
 }
 
 impl PluginLoaderImpl {
@@ -615,12 +623,6 @@ impl PluginLoaderImpl {
     pub fn get_manifests(&self) -> Vec<PluginManifest> {
         let manifests = self.manifests.read();
         manifests.values().map(|(m, _)| m.clone()).collect()
-    }
-
-    /// 获取指定插件的 manifest。
-    pub fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
-        let manifests = self.manifests.read();
-        manifests.get(plugin_id).map(|(m, _)| m.clone())
     }
 
     /// 获取所有已发现插件的根目录映射（plugin_id → 插件目录绝对路径）。
@@ -779,6 +781,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,
@@ -793,6 +796,33 @@ mod tests {
             persistent_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn test_manifest_lifecycle_idle_timeout_parsed() {
+        // 插件可在 plugin.json 声明 lifecycle.idle_timeout_secs 覆盖内核默认空闲卸载。
+        let json = serde_json::json!({
+            "id": "human_interaction_tool",
+            "name": "Human Interaction",
+            "version": "2.0.0",
+            "plugin_type": "tool",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "python server.py",
+            "capabilities": {},
+            "lifecycle": { "idle_timeout_secs": 0 }
+        });
+        let m: PluginManifest = serde_json::from_value(json).expect("parse manifest");
+        assert_eq!(m.lifecycle.expect("lifecycle present").idle_timeout_secs, Some(0));
+
+        let json2 = serde_json::json!({
+            "id": "p", "name": "P", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "python s.py",
+            "capabilities": {}
+        });
+        let m2: PluginManifest = serde_json::from_value(json2).expect("parse manifest2");
+        assert!(m2.lifecycle.is_none());
     }
 
     #[test]
@@ -813,6 +843,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,
@@ -848,6 +879,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,
@@ -998,6 +1030,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: Some(2),

@@ -704,6 +704,29 @@ pub trait PluginLoader: Send + Sync {
     fn get_plugin_dir(&self, _plugin_id: &str) -> Option<String> {
         None
     }
+
+    /// 读取已发现（discover）插件的 manifest。
+    ///
+    /// 供内核同步查询插件声明的运行时属性（如 lifecycle 空闲卸载阈值），
+    /// 无需再走 async load。默认返回 None，由持 manifest 缓存的实现覆盖。
+    fn get_manifest(&self, _plugin_id: &str) -> Option<PluginManifest> {
+        None
+    }
+}
+
+/// 插件生命周期策略（manifest 可声明，覆盖内核默认）。
+///
+/// 用于让每个插件自定义空闲软卸载等行为，而非全局一个默认值。
+/// 典型场景：`human_interaction` 等工具会长时间阻塞等待用户输入，
+/// 声明 `idle_timeout_secs: 0`（永不空闲卸载）避免被 GC 在响应到达前回收。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginLifecycle {
+    /// 空闲软卸载阈值（秒）。
+    /// - `None`：用内核默认（300s）或环境变量覆盖。
+    /// - `Some(0)`：永不空闲卸载（适用于会长时间阻塞的交互类插件）。
+    /// - `Some(n)`：n 秒空闲后软卸载。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// 已解析的插件 Manifest（运行时表示）。
@@ -738,6 +761,10 @@ pub struct PluginManifest {
     pub persistent_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
+    /// 生命周期策略（空闲卸载阈值等）。`None` = 内核默认。插件可声明
+    /// `lifecycle.idle_timeout_secs` 覆盖默认（如交互类插件设 0 = 永不卸载）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<PluginLifecycle>,
     /// 原生插件产物（task_11：HostType::InProcess 必填）。
     ///
     /// 指向 cdylib 编译产物，loader 用 libloading 加载并取 `invoke_entry`
