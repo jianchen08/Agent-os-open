@@ -761,6 +761,13 @@ pub struct PluginManifest {
     pub persistent_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
+    /// 外部 MCP HTTP 端点（external_mcp 插件用）。
+    ///
+    /// 声明后 invoker 不 spawn 子进程，改用 HTTP 客户端连 `url` 指定的远程
+    /// 第三方 MCP server（MCP Streamable HTTP transport）。配合 `entry: "mcp:external"`
+    /// 语义使用。`None` = 本地 stdio sidecar（默认）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_endpoint: Option<McpEndpoint>,
     /// 生命周期策略（空闲卸载阈值等）。`None` = 内核默认。插件可声明
     /// `lifecycle.idle_timeout_secs` 覆盖默认（如交互类插件设 0 = 永不卸载）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1230,6 +1237,55 @@ pub enum McpTransport {
     #[default]
     Stdio,
     StreamableHttp,
+}
+
+/// 外部 MCP HTTP 端点声明（external_mcp 插件连远程第三方 MCP server）。
+///
+/// 对应 plugin.json 的 `mcp_endpoint` 字段。transport 一律为 HTTP
+/// （`entry` 为 `mcp:external` 时由 invoker 走 HTTP 客户端，不 spawn 子进程）。
+/// `auth.value` 支持 `${ENV_VAR}` 占位，在 invoker 构造 HTTP 客户端时解析。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpEndpoint {
+    /// 远程 MCP server 的 HTTP(S) URL。
+    pub url: String,
+    /// 额外请求头（如 `X-Also-Search: smithery.ai`）。
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// 鉴权配置（可选）。
+    #[serde(default)]
+    pub auth: Option<EndpointAuth>,
+}
+
+/// 外部 MCP 端点的鉴权配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointAuth {
+    /// 鉴权方式。`api_key` 把 value 原样写入 header_name 指定的头；
+    /// `bearer` 写入 `Authorization: Bearer <value>`。
+    #[serde(rename = "type", default = "default_auth_type")]
+    pub auth_type: AuthType,
+    /// 承载鉴权值的请求头名（api_key 模式生效），默认 `Authorization`。
+    #[serde(default = "default_auth_header_name")]
+    pub header_name: String,
+    /// 鉴权值，支持 `${ENV_VAR}` 占位（构造 HTTP 客户端时解析）。
+    pub value: String,
+}
+
+/// 鉴权方式。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthType {
+    #[default]
+    ApiKey,
+    Bearer,
+    None,
+}
+
+fn default_auth_type() -> AuthType {
+    AuthType::ApiKey
+}
+
+fn default_auth_header_name() -> String {
+    "Authorization".to_string()
 }
 
 /// 已加载的插件实例。

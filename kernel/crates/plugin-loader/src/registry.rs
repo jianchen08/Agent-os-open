@@ -137,10 +137,17 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
     fn register_route_signals(&self, plugin_id: &str, signals: Vec<RouteType>) {
         let mut sig_set = self.route_signals.write();
         let mut by_plugin = self.route_signals_by_plugin.write();
-        for sig in &signals {
-            sig_set.insert(sig.clone());
-        }
         by_plugin.insert(plugin_id.to_string(), signals);
+        // 重建全局集合为「所有 plugin 当前 signals 的并集」。旧实现只 insert 不
+        // 移除，重注册或部分卸载后旧 signal 永久残留导致 has_route_signal 永真；
+        // 此处重建保证全局集合始终反映当前并集，多 plugin 共享同一 signal 时
+        // 只要还有任一 plugin 持有即保留。
+        sig_set.clear();
+        for sigs in by_plugin.values() {
+            for sig in sigs {
+                sig_set.insert(sig.clone());
+            }
+        }
     }
 
     fn has_route_signal(&self, signal: &RouteType) -> bool {

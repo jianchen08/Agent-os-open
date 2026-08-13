@@ -15,6 +15,7 @@
 import hashlib
 import json
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -73,6 +74,37 @@ class CheckpointManager:
         self.project_root = Path(project_root).resolve()
         self.checkpoint_dir = self.project_root / self.CHECKPOINT_DIR
 
+    _TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+    def _validate_task_id(self, task_id: str) -> None:
+        """F-ISO-1: task_id 白名单——仅字母/数字/-/_，防穿越/分隔符/绝对路径。"""
+        if not task_id or not self._TASK_ID_PATTERN.fullmatch(task_id):
+            raise ValueError(f"非法 task_id（仅允许字母/数字/-/_）: {task_id!r}")
+
+    def _validate_relative_path(self, path: str) -> None:
+        """F-ISO-1: 相对路径校验——拒绝绝对路径与含 ``..`` 段，抛 ValueError。
+
+        注意 ``Path.is_absolute`` 在 Windows 对 ``/etc/passwd`` 这类 Unix 绝对
+        路径返回 False（无盘符），故额外用前导分隔符判断堵住跨平台漏洞。
+        """
+        if not path:
+            return
+        p = Path(path)
+        if p.is_absolute() or path.lstrip().startswith(("/", "\\")) or ".." in p.parts:
+            raise ValueError(f"非法路径（绝对路径或含穿越段不允许）: {path!r}")
+
+    @staticmethod
+    def _is_safe_relative_path(path: str) -> bool:
+        """F-ISO-1: 相对路径安全检查（返回 bool，供 restore 的 manifest 校验）。"""
+        if not path:
+            return True
+        p = Path(path)
+        return (
+            not p.is_absolute()
+            and not path.lstrip().startswith(("/", "\\"))
+            and ".." not in p.parts
+        )
+
     def create_checkpoint(
         self,
         task_id: str,
@@ -80,6 +112,11 @@ class CheckpointManager:
         files_to_backup: list[str] | None = None,
     ) -> Checkpoint:
         """创建检查点"""
+        # F-ISO-1: task_id 白名单 + files_to_backup 路径校验（外部不可信输入）
+        self._validate_task_id(task_id)
+        if files_to_backup is not None:
+            for _frp in files_to_backup:
+                self._validate_relative_path(_frp)
         checkpoint_path = self.checkpoint_dir / task_id
         backup_path = checkpoint_path / "files"
 
@@ -163,6 +200,7 @@ class CheckpointManager:
 
     def restore_checkpoint(self, task_id: str) -> bool:
         """从检查点恢复"""
+        self._validate_task_id(task_id)
         checkpoint_path = self.checkpoint_dir / task_id
         manifest_path = checkpoint_path / "manifest.json"
 
@@ -172,6 +210,19 @@ class CheckpointManager:
 
         # 加载检查点
         checkpoint = self._load_manifest(manifest_path)
+
+        # F-ISO-1: manifest 篡改防护——任一 original_path/backup_path 越界即整体拒绝，零落盘
+        for file_record in checkpoint.files:
+            if not self._is_safe_relative_path(file_record.original_path):
+                logger.error(
+                    f"[CheckpointManager] manifest 含越界 original_path，拒绝恢复 | {file_record.original_path}"
+                )
+                return False
+            if not self._is_safe_relative_path(file_record.backup_path):
+                logger.error(
+                    f"[CheckpointManager] manifest 含越界 backup_path，拒绝恢复 | {file_record.backup_path}"
+                )
+                return False
 
         # 恢复文件
         restored_count = 0
@@ -199,6 +250,7 @@ class CheckpointManager:
 
     def cleanup_checkpoint(self, task_id: str) -> bool:
         """清理检查点"""
+        self._validate_task_id(task_id)
         checkpoint_path = self.checkpoint_dir / task_id
 
         if not checkpoint_path.exists():
@@ -215,6 +267,7 @@ class CheckpointManager:
 
     def get_checkpoint(self, task_id: str) -> Checkpoint | None:
         """获取检查点信息"""
+        self._validate_task_id(task_id)
         manifest_path = self.checkpoint_dir / task_id / "manifest.json"
 
         if not manifest_path.exists():

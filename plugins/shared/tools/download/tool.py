@@ -1,7 +1,20 @@
-"""
-通用文件下载工具
+"""通用文件下载工具（0.2 迁移版）。
 
 基于 httpx 封装，支持多连接分段下载、断点续传、自动重试、安全限制。
+
+迁移（FP-MIGR 0.1→0.2）：
+- 顶层 import 由 0.1 的 ``tools.builtin.base`` / ``tools.types`` 改为
+  ``agentos_plugin_sdk``（Tool / ToolResult / BuiltinTool / 枚举 / 结果工厂）。
+- SSRF 防护原语（is_private_ip / resolve_hostname_ips / validate_url）上提到
+  共享层 ``url_security``，本模块不再各自维护内网网段表。
+- save_path 经 ``WorkspaceAwareMixin.check_path_allowed(operation="write")`` 约束，
+  isolation 插件不可用时降级放行（与 web_ext 一致）。
+
+安全随迁（FP-MIGR P1×2，审计 T5#59）：
+- ``skip_ssrf_check`` 移出公开 schema → 仅服务端内部位：构造参数
+  ``allow_ssrf_skip``（默认 False）。execute **无条件忽略**客户端
+  ``inputs["skip_ssrf_check"]``，SSRF 校验恒执行（防 LLM/提示注入旁路）。
+- ``allow_ssrf_skip=True`` 仅用于受信本地测试服务器（服务端构造，客户端不可控）。
 
 暴露接口：
 - DownloadTool：通用下载工具类
@@ -9,7 +22,6 @@
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -21,8 +33,8 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
-from tools.builtin.base import BuiltinTool
-from tools.types import (
+from agentos_plugin_sdk import (
+    BuiltinTool,
     Tool,
     ToolCategory,
     ToolLevel,
@@ -31,6 +43,8 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
+from url_security import is_private_ip, resolve_hostname_ips, validate_url
+from workspace_aware import WorkspaceAwareMixin
 
 logger = logging.getLogger(__name__)
 
@@ -42,27 +56,6 @@ DEFAULT_MAX_RETRIES = 5
 DEFAULT_TIMEOUT = 300
 MAX_REDIRECTS = 5
 CHUNK_SIZE = 64 * 1024  # 64 KB read/write buffer
-
-# RFC 1918 / loopback / link-local 网段（SSRF 防护）
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
-
-
-def _is_private_ip(ip_str: str) -> bool:
-    """检查 IP 是否属于内网地址（SSRF 防护）"""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        return any(ip in net for net in _PRIVATE_NETWORKS)
-    except ValueError:
-        return True  # 无法解析的 IP 视为不安全
 
 
 def _sanitize_filename(name: str) -> str:
@@ -103,38 +96,6 @@ def _extract_filename_from_headers(headers: httpx.Headers) -> str | None:
     return None
 
 
-def _validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[bool, str]:
-    """URL 安全校验：协议白名单 + 域名白名单 + SSRF 防护"""
-    parsed = urlparse(url)
-
-    # 1. 协议白名单
-    if parsed.scheme not in ("http", "https"):
-        return False, f"不支持的协议: {parsed.scheme}，仅允许 http/https"
-
-    # 2. 域名检查
-    hostname = parsed.hostname
-    if not hostname:
-        return False, "URL 缺少主机名"
-
-    # 3. 域名白名单（可选）
-    if allow_domains and hostname not in allow_domains and not any(hostname.endswith(f".{d}") for d in allow_domains):
-        return False, f"域名 {hostname} 不在白名单中"
-
-    # 4. SSRF 防护：DNS 解析后检查是否为内网 IP
-    try:
-        import socket  # noqa: PLC0415
-
-        resolved_ips = socket.getaddrinfo(hostname, None)
-        for entry in resolved_ips:
-            ip_str = entry[4][0]
-            if _is_private_ip(ip_str):
-                return False, f"域名 {hostname} 解析到内网 IP {ip_str}，已拒绝（SSRF 防护）"
-    except socket.gaierror:
-        return False, f"无法解析域名: {hostname}"
-
-    return True, "OK"
-
-
 def _format_size(size_bytes: float) -> str:
     """格式化文件大小"""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -144,7 +105,7 @@ def _format_size(size_bytes: float) -> str:
     return f"{size_bytes:.1f} PB"
 
 
-class DownloadTool(BuiltinTool):
+class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
     """
     通用文件下载工具
 
@@ -153,7 +114,22 @@ class DownloadTool(BuiltinTool):
     - 断点续传（.part 文件 + 状态 JSON）
     - 自动重试（指数退避）
     - 安全限制（大小上限/域名白名单/SSRF 防护/路径穿越防护）
+
+    安全语义：
+    - SSRF 校验恒执行，客户端无法旁路（``skip_ssrf_check`` 已移出公开 schema，
+      execute 忽略 ``inputs["skip_ssrf_check"]``）。
+    - 仅服务端构造参数 ``allow_ssrf_skip=True`` 可旁路（受信本地测试服务器专用）。
     """
+
+    def __init__(self, allow_ssrf_skip: bool = False) -> None:
+        """初始化下载工具。
+
+        Args:
+            allow_ssrf_skip: 服务端内部位——是否允许旁路 SSRF 校验。
+                默认 False（SSRF 恒执行）。仅用于受信本地测试服务器，**不可**由
+                客户端/LLM 控制（防提示注入旁路内网探测）。
+        """
+        self._allow_ssrf_skip = allow_ssrf_skip
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -213,14 +189,12 @@ class DownloadTool(BuiltinTool):
                         "type": "string",
                         "description": "期望的 SHA256 哈希值（可选，下载后校验）",
                     },
-                    "skip_ssrf_check": {
-                        "type": "boolean",
-                        "description": "跳过 SSRF 内网 IP 检查（默认 false，仅用于测试本地服务器）",
-                        "default": False,
-                    },
                 },
                 "required": ["url", "save_path"],
             },
+            # skip_ssrf_check 已移出公开 schema：仅服务端内部位（构造参数 allow_ssrf_skip），
+            # 不暴露给 LLM，防提示注入旁路 SSRF。保留在 injected_params 以声明其服务端语义。
+            injected_params=["skip_ssrf_check"],
             category=ToolCategory.FILE,
             level=ToolLevel.ALL,
             source=ToolSource.BUILTIN,
@@ -244,8 +218,12 @@ class DownloadTool(BuiltinTool):
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行下载"""
-        url = inputs.get("url", "").strip()
-        save_path = inputs.get("save_path", "").strip()
+        # 初始化 workspace 上下文（供 check_path_allowed 决策；
+        # isolation 插件不可用时降级放行——与 web_ext 一致）。
+        self._init_workspace(inputs)
+
+        url = (inputs.get("url") or "").strip()
+        save_path = (inputs.get("save_path") or "").strip()
         filename = inputs.get("filename") or None
         max_connections = min(int(inputs.get("max_connections", DEFAULT_MAX_CONNECTIONS)), 32)
         max_retries = int(inputs.get("max_retries", DEFAULT_MAX_RETRIES))
@@ -254,7 +232,9 @@ class DownloadTool(BuiltinTool):
         proxy = inputs.get("proxy") or None
         allow_domains = inputs.get("allow_domains") or None
         expected_hash = inputs.get("expected_hash") or None
-        skip_ssrf_check = bool(inputs.get("skip_ssrf_check", False))
+        # ⚠️ 安全：客户端传入的 skip_ssrf_check 已移出公开 schema，此处**无条件忽略**——
+        # SSRF 旁路只能由服务端构造参数 allow_ssrf_skip 开启（受信本地测试服务器）。
+        # 故刻意不读取 inputs["skip_ssrf_check"]。
 
         # ── 参数校验 ──
         if not url:
@@ -262,18 +242,17 @@ class DownloadTool(BuiltinTool):
         if not save_path:
             return create_failure_result("缺少必填参数: save_path")
 
-        # ── URL 安全校验 ──
-        if skip_ssrf_check:
-            # 仅校验协议和基本格式
-            parsed = urlparse(url)
-            if parsed.scheme not in ("http", "https"):
-                return create_failure_result(f"URL 安全校验失败: 不支持的协议: {parsed.scheme}")
-            if not parsed.hostname:
-                return create_failure_result("URL 安全校验失败: URL 缺少主机名")
-        else:
-            valid, msg = _validate_url(url, allow_domains)
+        # ── URL 安全校验（SSRF 防护，不可被客户端旁路）──
+        # 仅服务端 allow_ssrf_skip=True 时跳过；客户端 skip_ssrf_check 无效。
+        if not self._allow_ssrf_skip:
+            valid, msg = validate_url(url, allow_domains)
             if not valid:
                 return create_failure_result(f"URL 安全校验失败: {msg}")
+
+        # ── save_path 工作空间约束（防目录穿越写）──
+        allowed, reason = self.check_path_allowed(save_path, operation="write")
+        if not allowed:
+            return create_failure_result(f"保存路径不在允许范围内: {reason}")
 
         # ── 创建保存目录 ──
         save_dir = Path(save_path)

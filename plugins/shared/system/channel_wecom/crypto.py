@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import logging
 import struct
 import time
@@ -97,7 +98,8 @@ class WecomCrypto:
             签名是否有效
         """
         calculated = self._calculate_signature(timestamp, nonce, msg_encrypt)
-        if calculated != signature:
+        # 常量时间比较，避免签名校验暴露时序侧信道。
+        if not hmac.compare_digest(calculated, signature):
             logger.warning(
                 "Signature mismatch: calculated=%s, expected=%s",
                 calculated,

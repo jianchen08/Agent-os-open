@@ -176,6 +176,18 @@ async def monitoring_get_health() -> dict[str, Any]:
 
 
 @plugin.tool(
+    name="monitoring.record_llm_request_start",
+    schema={"type": "object", "properties": {}, "required": []},
+    description="Record that an LLM API call has started (increments active_requests; pair with record_llm_request on completion)",
+)
+async def monitoring_record_llm_request_start() -> dict[str, Any]:
+    """Record an LLM request start (pairs with record_llm_request on completion)."""
+    monitor = _ensure_monitor()
+    monitor.record_llm_request_start()
+    return {"recorded": True}
+
+
+@plugin.tool(
     name="monitoring.record_llm_request",
     schema={
         "type": "object",
@@ -359,6 +371,9 @@ def _collect_token_usage() -> dict[str, Any]:
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "request_count": ls.get("request_count", 0),
+        "active_requests": ls.get("active_requests", 0),
+        "error_count": ls.get("error_count", 0),
+        "total_response_time": ls.get("total_response_time", 0.0),
     }
 
 

@@ -58,7 +58,14 @@ async def enhanced_search(
     results: list[dict[str, Any]] = []
 
     def _search_sync() -> None:
-        for root, dirs, files in os_walk_depth(search_path, max_depth):
+        # 支持单文件路径：os.walk 对「文件」路径产出空迭代（它只遍历目录条目），
+        # 导致指向具体文件时结果恒为空。这里显式把单文件构造成一次遍历，复用下方
+        # 既有匹配逻辑（file_path = Path(root) / fname 会还原成该文件路径）。
+        if search_path.is_file():
+            walk_iter: Any = [(search_path.parent, [], [search_path.name])]
+        else:
+            walk_iter = os_walk_depth(search_path, max_depth)
+        for root, dirs, files in walk_iter:
             if search_type == "filename":
                 for fname in files:
                     if not fnmatch.fnmatch(fname, file_pattern):

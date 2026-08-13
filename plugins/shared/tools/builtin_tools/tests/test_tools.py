@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -363,6 +364,61 @@ class TestEnhancedSearch:
     async def test_search_nonexistent_path(self) -> None:
         result = await enhanced_search("x", path="/nonexistent_search_path")
         assert not result.success
+
+    @pytest.mark.asyncio
+    async def test_search_single_file_path(self, tmp_path: Path) -> None:
+        """指向具体文件时应直接搜该文件，而非返回空。
+
+        回归：os.walk 对文件路径产出空迭代，导致文件级搜索恒空。修复后 is_file
+        分支会构造单次遍历。
+        """
+        target = tmp_path / "single.py"
+        target.write_text("def findme():\n    return 'hit'\n")
+
+        result = await enhanced_search("findme", path=str(target))
+        assert result.success
+        matches = result.output["results"]
+        assert len(matches) == 1
+        assert matches[0]["file_path"] == str(target)
+        assert matches[0]["line_number"] == 1
+
+    @pytest.mark.asyncio
+    async def test_search_single_file_filename_match(self, tmp_path: Path) -> None:
+        """单文件 + filename 搜索：文件名命中时返回该文件。"""
+        target = tmp_path / "needle.py"
+        target.write_text("x")
+
+        result = await enhanced_search("needle", path=str(target), search_type="filename")
+        assert result.success
+        assert len(result.output["results"]) == 1
+        assert result.output["results"][0]["file_path"] == str(target)
+
+    @pytest.mark.asyncio
+    async def test_file_read_string_line_range_via_dispatcher(self, tmp_path: Path) -> None:
+        """LLM 把 start_line/end_line 以字符串传入时，分发层应强转为 int。
+
+        回归：直接 file_read(start_line=2) 用原生 int 调用永远过测，掩盖了 MCP
+        透传字符串值导致 ``start_line - 1`` 抛 TypeError 的真问题。这里经由
+        McpServer._handle_tools_call（与内核→sidecar 同路径）传字符串验证。
+        """
+        from agentos_plugin_sdk import McpServer
+        from agentos_builtin_tools.server import create_plugin
+
+        f = tmp_path / "lines.txt"
+        f.write_text("L1\nL2\nL3\nL4\nL5\n")
+
+        plugin = create_plugin()
+        server = McpServer(plugin._tools, plugin._resources, plugin._lifecycle_handlers)
+        call_result = await server._handle_tools_call({
+            "name": "file_read",
+            "arguments": {"path": str(f), "start_line": "2", "end_line": "4"},
+        })
+        assert call_result["isError"] is False
+        content = json.loads(call_result["content"][0]["text"])
+        assert content["success"] is True
+        body = content["output"]["content"]
+        assert "L2" in body and "L4" in body
+        assert "L1" not in body
 
 
 class TestWebOperate:

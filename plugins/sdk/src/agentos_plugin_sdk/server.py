@@ -75,6 +75,42 @@ def _filter_handler_kwargs(handler: Any, arguments: dict[str, Any]) -> dict[str,
     return {k: v for k, v in arguments.items() if k in sig.parameters}
 
 
+def _coerce_args_by_schema(
+    schema: dict[str, Any], arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """按 schema 把字符串数值参数强制转为数值类型。
+
+    LLM 经常把数值参数生成成字符串（如 ``"start_line": "5"``、``"limit": "20"``），
+    而 JSON Schema 声明的是 integer/number。SDK 分发层若不转换，handler 内的算术
+    或比较（``start_line - 1``、``len(lines) - tail``）会抛 TypeError，导致整段功能
+    不可用。仅对 schema 中声明为 integer/number 且实际值为 str 的参数做 best-effort
+    转换，转换失败则保留原值（不破坏既有行为，也绝不静默吞掉真实类型错误）。
+    """
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return arguments
+    coerced = dict(arguments)
+    for key, decl in props.items():
+        if key not in coerced or not isinstance(decl, dict):
+            continue
+        val = coerced[key]
+        if not isinstance(val, str):
+            continue
+        declared = decl.get("type")
+        declared = declared if isinstance(declared, list) else [declared]
+        if "integer" in declared:
+            try:
+                coerced[key] = int(val)
+            except (ValueError, TypeError):
+                pass
+        elif "number" in declared:
+            try:
+                coerced[key] = float(val)
+            except (ValueError, TypeError):
+                pass
+    return coerced
+
+
 class KernelChannel:
     """sidecar→内核反向调用通道。
 
@@ -389,8 +425,39 @@ class McpServer:
         log_ctx = arguments.pop("_log_ctx", None) or {}
 
         with _bind_log_context(log_ctx):
+            arguments = _coerce_args_by_schema(td.schema, arguments)
             kwargs = _filter_handler_kwargs(td.handler, arguments)
-            result = td.handler(**kwargs) if kwargs else td.handler()
+            # 预校验形参绑定：必填参数缺失时（如 trigger_review 的 task_id 未到达
+            # sidecar），Python 会在调用处抛裸 TypeError（"missing positional
+            # argument"）。提前用 signature.bind 探测并转为结构化错误，避免崩溃
+            # 冒泡为未捕获异常。bind 只校验形参绑定、不执行 handler 体，因此不会
+            # 吞掉 handler 内部的真实 TypeError。签名不可内省（部分内置/动态
+            # handler，inspect 抛 ValueError）时跳过，回退到直接调用。
+            try:
+                inspect.signature(td.handler).bind(**kwargs)
+            except ValueError:
+                pass
+            except TypeError as e:
+                logger.warning(
+                    "[mcp] 工具 %s 参数绑定失败: %s | kwargs=%s", name, e, list(kwargs)
+                )
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "success": False,
+                                    "error": f"参数不匹配: {e}",
+                                    "error_code": "INVALID_ARGUMENTS",
+                                },
+                                default=str,
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                }
+            result = td.handler(**kwargs)
             if asyncio.iscoroutine(result):
                 result = await result
 

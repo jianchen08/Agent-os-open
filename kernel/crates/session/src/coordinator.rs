@@ -219,11 +219,9 @@ impl SessionCoordinator {
         sink: Arc<dyn crate::EventSink>,
         last_sequence: u64,
     ) -> ReconnectOutcome {
-        // 1. 注册新连接（踢旧）
+        // 1. 注册新连接（踢旧）—— register() 内部已对踢旧计数 inc_kick_old()，
+        //    此处不再重复计数，否则 kick_old_total 会被双计入。
         let kicked_old_sink_id = self.register(user_id, sink.clone());
-        if kicked_old_sink_id.is_some() {
-            self.metrics.inc_kick_old();
-        }
 
         // 2. 发连接确认
         let confirmation = json!({

@@ -343,14 +343,23 @@ class PerformanceMonitor:
         self._database_stats["active_connections"] = active
         self._database_stats["connection_pool_size"] = pool_size
 
-    def record_llm_request(self, response_time: float, error: bool = False):
-        """记录LLM请求"""
+    def record_llm_request_start(self):
+        """记录 LLM 请求开始（active_requests +1）。与 record_llm_request 配对。"""
         self._llm_stats["active_requests"] += 1
+
+    def record_llm_request(self, response_time: float, error: bool = False):
+        """记录 LLM 请求完成（计数/耗时/错误），并配对递减 active_requests。
+
+        语义为"请求结束后"上报（携带 response_time）；active_requests 由配对的
+        record_llm_request_start 维护，此处递减（与 start 配对），下限 0。
+        """
         self._llm_stats["request_count"] += 1
         self._llm_stats["total_response_time"] += response_time
         self._llm_stats["last_request_time"] = time.time()
         if error:
             self._llm_stats["error_count"] += 1
+        if self._llm_stats["active_requests"] > 0:
+            self._llm_stats["active_requests"] -= 1
 
     def record_llm_response(self):
         """记录LLM响应"""

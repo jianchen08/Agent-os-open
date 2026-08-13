@@ -167,6 +167,18 @@ impl ConfigLoader {
                 (ref_path.trim(), None)
             };
 
+            // F-CFG-1 路径穿越防护：拒绝绝对路径与含 `..` 段的引用，
+            // 防止 `{{path:...}}` 逃出 project_root 读取任意文件。
+            let is_unsafe = Path::new(raw_path).is_absolute()
+                || raw_path.split(['/', '\\']).any(|seg| seg == "..");
+            if is_unsafe {
+                error = Some(ConfigError::PathRefFailed {
+                    ref_path: raw_path.to_string(),
+                    source_path: project_root.to_string_lossy().to_string(),
+                });
+                return String::new();
+            }
+
             let resolved = project_root.join(raw_path);
 
             if resolved.is_dir() {

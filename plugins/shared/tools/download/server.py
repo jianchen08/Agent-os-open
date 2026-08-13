@@ -33,7 +33,8 @@ plugin = AgentOSPlugin("download_tool")
             "proxy": {"type": "string"},
             "allow_domains": {"type": "array", "items": {"type": "string"}},
             "expected_hash": {"type": "string"},
-            "skip_ssrf_check": {"type": "boolean", "default": False},
+            # skip_ssrf_check 不暴露给 LLM：SSRF 旁路仅由服务端构造参数
+            # allow_ssrf_skip 控制（FP-MIGR 安全随迁），防提示注入旁路内网探测。
         },
         "required": ["url", "save_path"],
     },

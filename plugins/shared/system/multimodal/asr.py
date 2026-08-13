@@ -108,8 +108,8 @@ def load_asr_config(config_path: Path | None = None) -> ASRConfig:
         ASRConfig 实例。未找到配置文件或文件缺失关键字段时，回退到环境变量/默认值。
     """
     if config_path is None:
-        # 项目根 = src/multimodal/asr.py 向上回溯两级
-        config_path = Path(__file__).resolve().parents[2] / "config" / "models" / "asr.yaml"
+        # 项目根 = plugins/shared/system/multimodal/asr.py 向上回溯四级
+        config_path = Path(__file__).resolve().parents[4] / "config" / "models" / "asr.yaml"
 
     if not config_path.exists():
         logger.debug("[ASR] 配置文件不存在: %s，使用默认值", config_path)

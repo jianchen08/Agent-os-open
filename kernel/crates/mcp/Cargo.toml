@@ -16,6 +16,8 @@ tracing.workspace = true
 agentos-core.workspace = true
 uuid.workspace = true
 parking_lot = "0.12"
+# MCP Streamable HTTP transport（external_mcp 插件连远程第三方 MCP server）
+reqwest.workspace = true
 
 # Unix 进程组信号（kill 整树杀 sidecar 孙进程，防孤儿）
 [target.'cfg(unix)'.dependencies]

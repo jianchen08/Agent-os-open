@@ -1,7 +1,8 @@
-"""
-代码沙箱模块
+"""代码沙箱模块（F-SANDBOX-2 白名单模式）。
 
-提供安全的代码执行环境。
+⚠️ 非安全边界：本沙箱为轻量代码执行环境，**仅用于已审批 HOST 模式下的受信代码**。
+采用白名单模式（allowlist, fail-closed）——只允许明确列出的安全内置与基础语法，
+一切未列出项默认拒绝。不可信代码必须走容器隔离，不可依赖本沙箱保证安全。
 """
 
 import ast
@@ -11,6 +12,19 @@ from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, field
 from io import StringIO
 from typing import Any
+
+
+# F-SANDBOX-2 白名单模式（allowlist, fail-closed）：仅允许下列纯函数内置，
+# 一切未列出项默认拒绝。本沙箱非安全边界，仅用于已审批 HOST 模式受信代码；
+# 不可信代码必须走容器隔离。
+ALLOWED_BUILTINS: frozenset[str] = frozenset(
+    {
+        "abs", "all", "any", "bool", "bytes", "dict", "divmod", "enumerate",
+        "filter", "float", "format", "frozenset", "int", "isinstance", "iter",
+        "len", "list", "map", "max", "min", "next", "pow", "range", "repr",
+        "reversed", "round", "set", "sorted", "str", "sum", "tuple", "zip",
+    }
+)
 
 
 class SandboxError(Exception):
@@ -120,15 +134,13 @@ class CodeValidator:
     def __init__(self, config: SandboxConfig):
         self.config = config
 
-    def validate(self, code: str) -> tuple[bool, list[str]]:  # noqa: PLR0912
+    def validate(self, code: str) -> tuple[bool, list[str]]:
         """
-        验证代码安全性
+        验证代码安全性（F-SANDBOX-2 白名单模式，fail-closed）。
 
-        Args:
-            code: 代码字符串
-
-        Returns:
-            (是否安全, 问题列表)
+        仅放行：白名单内置调用、普通（非 dunder）方法调用、基础语法。
+        一律拒绝：import 语句、未列入白名单的调用、dunder 方法调用、
+        非调用形式的属性访问。
         """
         issues = []
 
@@ -138,28 +150,34 @@ class CodeValidator:
             # 语法错误不是安全问题，返回 True 让执行阶段处理
             return True, []
 
+        # 收集"作为 Call.func 的 Attribute 节点"——这些是方法调用（在 Call
+        # 分支处理），不应被独立属性访问检查误拒。
+        call_func_attr_ids = {
+            id(n.func)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+
         for node in ast.walk(tree):
-            # 检查导入
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name in self.config.blocked_modules:
-                        issues.append(f"禁止导入模块: {alias.name}")
+            # import 一律禁止（白名单模式：模块只能由宿主预载）
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                issues.append("白名单模式禁止 import 语句")
+                continue
 
-            elif isinstance(node, ast.ImportFrom):
-                if node.module and node.module.split(".")[0] in self.config.blocked_modules:
-                    issues.append(f"禁止导入模块: {node.module}")
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name):
+                    # 内置调用：必须在白名单
+                    if func.id not in ALLOWED_BUILTINS:
+                        issues.append(f"禁止调用未列入白名单的函数: {func.id}")
+                elif isinstance(func, ast.Attribute):
+                    # 方法调用：dunder（下划线开头属性）一律拒，普通方法放行
+                    if func.attr.startswith("_"):
+                        issues.append(f"禁止调用 dunder 方法: {func.attr}")
 
-            # 检查危险函数调用
-            elif isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name):
-                    if node.func.id in self.config.blocked_builtins:
-                        issues.append(f"禁止使用函数: {node.func.id}")
-                elif isinstance(node.func, ast.Attribute):  # noqa: SIM102
-                    # 检查 os.system 等
-                    if isinstance(node.func.value, ast.Name):
-                        module = node.func.value.id
-                        if module in self.config.blocked_modules:
-                            issues.append(f"禁止使用模块: {module}")
+            elif isinstance(node, ast.Attribute) and id(node) not in call_func_attr_ids:
+                # 非调用形式的属性访问（如 x.real、[].count）一律拒（fail-closed）
+                issues.append(f"禁止属性访问（白名单模式）: {node.attr}")
 
         return len(issues) == 0, issues
 
@@ -302,46 +320,21 @@ class CodeSandbox:
         await loop.run_in_executor(None, _execute)
 
     def _prepare_globals(self, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        """准备全局变量"""
+        """准备全局变量（F-SANDBOX-2 白名单模式）。"""
         import builtins  # noqa: PLC0415
 
-        # 创建受限的 __import__ 函数
-        allowed_modules = set(self._config.allowed_modules)
-        blocked_modules = set(self._config.blocked_modules)
-
-        def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
-            """受限的导入函数"""
-            # 获取顶级模块名
-            top_level = name.split(".")[0]
-
-            # 检查是否被阻止
-            if top_level in blocked_modules:
-                raise ImportError(f"禁止导入模块: {name}")
-
-            # 检查是否允许
-            if top_level not in allowed_modules:
-                raise ImportError(f"模块未在允许列表中: {name}")
-
-            return builtins.__import__(name, globals, locals, fromlist, level)
-
-        # 安全的内置函数
+        # F-SANDBOX-2 白名单：仅允许 ALLOWED_BUILTINS 中的纯函数内置；
+        # 不提供 __import__（代码侧 import 已被 AST 拒，运行时也不给）。
         safe_builtins = {}
-        for name in dir(builtins):
-            if name.startswith("_"):
-                continue
-            if name in self._config.blocked_builtins:
-                continue
+        for name in ALLOWED_BUILTINS:
             with suppress(AttributeError):
                 safe_builtins[name] = getattr(builtins, name)
-
-        # 添加受限的 __import__
-        safe_builtins["__import__"] = restricted_import
 
         globals_dict = {
             "__builtins__": safe_builtins,
         }
 
-        # 预加载允许的模块
+        # 预加载允许的模块（宿主预载；代码侧 import 已被 AST 拒）
         for module_name in self._config.allowed_modules:
             with suppress(ImportError):
                 globals_dict[module_name] = __import__(module_name)

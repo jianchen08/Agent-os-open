@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import shlex
 import shutil
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -791,7 +792,7 @@ class DockerProvider(IsolationProvider):
             if op == "exists":
                 result = await self._exec_in_container(
                     container_id,
-                    {"command": f"test -e '{path}' && echo 'yes' || echo 'no'"},
+                    {"command": f"test -e {shlex.quote(path)} && echo yes || echo no"},
                 )
                 exists = "yes" in (result.output or {}).get("stdout", "")
                 return ExecutionResult(success=True, output={"exists": exists})
@@ -829,7 +830,7 @@ class DockerProvider(IsolationProvider):
         dir_path = path.rsplit("/", 1)[0] if "/" in path else "."
         await self._run_cmd(["docker", "exec", container_id, "mkdir", "-p", dir_path], timeout=10)
 
-        # 写入文件
+        # F-ISO-2: path/content 作为独立 argv 传入（不嵌入源码），杜绝 shell/python 注入
         encoded = json.dumps(content)
         await self._run_cmd(
             [
@@ -838,7 +839,9 @@ class DockerProvider(IsolationProvider):
                 container_id,
                 "python3",
                 "-c",
-                f"import json; open('{path}','w').write(json.loads({encoded}))",
+                "import json,sys; open(sys.argv[1],'w').write(json.loads(sys.argv[2]))",
+                path,
+                encoded,
             ],
             timeout=10,
         )

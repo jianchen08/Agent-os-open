@@ -66,6 +66,9 @@ thiserror = "2"
 tracing = "0.1"
 # ID 类型
 uuid = { version = "1", features = ["v4", "serde"] }
+# HTTP 客户端（MCP Streamable HTTP transport：external_mcp 插件连远程第三方 MCP server）
+# rustls-tls 而非 native-tls——Windows 宿主免 OpenSSL 折腾，跨平台一致。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # 时间
 chrono = { version = "0.4", features = ["serde"] }
 # OS 标准目录（%APPDATA% / ~/Library/Application Support / ~/.local/share）

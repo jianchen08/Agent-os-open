@@ -175,6 +175,87 @@ class TestMcpServer:
         assert content == {"echo": "world"}
 
     @pytest.mark.asyncio
+    async def test_tools_call_coerces_numeric_string_args(self) -> None:
+        """LLM 常把数值参数生成成字符串；schema 声明 integer 时应被强转为 int。
+
+        回归 file_read 行范围失效：start_line/end_line/tail 以字符串到达时，
+        handler 内 ``start_line - 1`` 等算术会抛 TypeError。分发层按 schema 转换。
+        """
+        seen: dict[str, Any] = {}
+
+        async def ranged(
+            path: str, start_line: int | None = None, end_line: int | None = None
+        ) -> dict:
+            seen["start_line"] = start_line
+            seen["end_line"] = end_line
+            # 模拟 file_read 中的算术——字符串值在此会抛 TypeError
+            _ = (start_line - 1) if start_line else 0
+            _ = (end_line + 1) if end_line else 0
+            return {"ok": True}
+
+        tools = {
+            "ranged": ToolDef(
+                name="ranged",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                    },
+                    "required": ["path"],
+                },
+                handler=ranged,
+            ),
+        }
+        server = McpServer(tools, {}, {})
+        # start_line/end_line 以「字符串」传入（模拟 LLM 输出）
+        result = await server._handle_tools_call({
+            "name": "ranged",
+            "arguments": {"path": "x.txt", "start_line": "2", "end_line": "4"},
+        })
+        assert result["isError"] is False
+        assert seen["start_line"] == 2 and isinstance(seen["start_line"], int)
+        assert seen["end_line"] == 4 and isinstance(seen["end_line"], int)
+
+    @pytest.mark.asyncio
+    async def test_tools_call_missing_required_arg_returns_clean_error(self) -> None:
+        """必填位置参数缺失时应返回结构化错误，而非抛裸 TypeError。
+
+        回归 trigger_review：task_id 未到达 sidecar 时，零参调用 handler 会抛
+        ``missing positional argument: task_id``。分发层应转为 isError 响应。
+        """
+        async def review(task_id: str, summary: str) -> dict:  # 无 **kwargs
+            return {"task_id": task_id}
+
+        tools = {
+            "trigger_review": ToolDef(
+                name="trigger_review",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["task_id", "summary"],
+                },
+                handler=review,
+            ),
+        }
+        server = McpServer(tools, {}, {})
+        # task_id 缺失
+        result = await server._handle_tools_call({
+            "name": "trigger_review",
+            "arguments": {"summary": "only summary"},
+        })
+        assert result["isError"] is True
+        body = json.loads(result["content"][0]["text"])
+        assert body["success"] is False
+        assert body["error_code"] == "INVALID_ARGUMENTS"
+        assert "task_id" in body["error"]
+
+
+    @pytest.mark.asyncio
     async def test_resources_read(self) -> None:
         from agentos_plugin_sdk.types import ResourceDef
 
