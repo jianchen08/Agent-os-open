@@ -34,6 +34,7 @@ impl PipelineDispatcher for MockDispatcher {
         &self,
         thread_id: &str,
         request_id: &str,
+        _response: &serde_json::Value,
     ) -> Result<(), String> {
         self.interactions
             .lock()
@@ -148,7 +149,7 @@ async fn dispatcher_failure_returns_error() {
         async fn dispatch_user_input(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), String> {
             Err("boom".into())
         }
-        async fn dispatch_interaction_response(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn dispatch_interaction_response(&self, _: &str, _: &str, _: &serde_json::Value) -> Result<(), String> {
             Ok(())
         }
         async fn dispatch_stop(&self, _: &str) -> Result<(), String> {

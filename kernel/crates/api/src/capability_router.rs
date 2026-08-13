@@ -298,7 +298,38 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     return Ok(json!({"status": "emitted", "event": event_name}));
                 }
 
-                // 其他 event 暂只记日志（审批/通知等留后续）
+                // 交互事件族：interaction_request / interaction_cancelled /
+                // interaction_timeout / interaction_conversation_start 等
+                // （human-interaction 插件经 event-bus.emit 上报，前端
+                // useInteractionHandler 订阅后渲染 InteractionCard/全局浮层表单）。
+                // 与工具族一致：整体透传 payload，补 _threadId 路由键。
+                if event_name.starts_with("interaction_") {
+                    if let Some(session) = &self.session {
+                        let thread_id = payload
+                            .get("thread_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !thread_id.is_empty() {
+                            let mut data = payload.clone();
+                            if let Some(obj) = data.as_object_mut() {
+                                obj.insert(
+                                    "_threadId".to_string(),
+                                    serde_json::Value::String(thread_id.to_string()),
+                                );
+                            }
+                            let _ = session.emit_event(thread_id, event_name, data).await;
+                        } else {
+                            tracing::debug!(
+                                target: "capability:event-bus",
+                                event = %event_name,
+                                "交互事件被丢弃（thread_id 空）"
+                            );
+                        }
+                    }
+                    return Ok(json!({"status": "emitted", "event": event_name}));
+                }
+
+                // 其他未识别 event 暂只记日志
                 tracing::debug!(
                     target: "capability:event-bus",
                     "plugin event: {} payload={}",
@@ -1056,6 +1087,42 @@ mod tests {
         let params = json!({
             "event": "tool_start",
             "payload": {"call_id": "c1", "tool_name": "f"}
+        });
+        let _ = router.handle("event-bus", "emit", params).await.unwrap();
+        assert!(received.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_interaction_request_forwarded() {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_session(received.clone());
+        let params = json!({
+            "event": "interaction_request",
+            "payload": {
+                "thread_id": "thread-1",
+                "request_id": "req-abc",
+                "interaction_mode": "choice",
+                "title": "请选择",
+                "options": [{"id": "a", "label": "方案A"}],
+            }
+        });
+        let res = router.handle("event-bus", "emit", params).await.unwrap();
+        assert_eq!(res["status"], "emitted");
+        assert_eq!(res["event"], "interaction_request");
+        let msgs = received.lock().unwrap().clone();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["type"], "interaction_request");
+        assert_eq!(msgs[0]["data"]["request_id"], "req-abc");
+        assert_eq!(msgs[0]["data"]["_threadId"], "thread-1");
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_interaction_event_no_thread_id_dropped() {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_session(received.clone());
+        let params = json!({
+            "event": "interaction_request",
+            "payload": {"request_id": "req-abc", "title": "x"}
         });
         let _ = router.handle("event-bus", "emit", params).await.unwrap();
         assert!(received.lock().unwrap().is_empty());

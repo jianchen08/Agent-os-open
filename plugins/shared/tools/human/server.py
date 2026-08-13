@@ -97,14 +97,14 @@ class _EventBusNotifier(IInteractionNotifier):
                     "agent_level", "pipeline_id", "agent_id"):
             if msg.get(key) is not None:
                 payload[key] = msg[key]
-        return await self._emit("interaction.requested", payload, payload.get("thread_id", ""))
+        return await self._emit("interaction_request", payload, payload.get("thread_id", ""))
 
     async def notify_cancel(self, request_id: str, reason: str | None = None, thread_id: str = "") -> bool:
-        return await self._emit("interaction.cancelled",
+        return await self._emit("interaction_cancelled",
                                 {"request_id": request_id, "reason": reason}, thread_id)
 
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
-        return await self._emit("interaction.timeout", {"request_id": request_id}, thread_id)
+        return await self._emit("interaction_timeout", {"request_id": request_id}, thread_id)
 
     async def notify_timeout_reminder(
         self, request_id: str, remaining_seconds: int, thread_id: str = "", *,
@@ -119,7 +119,7 @@ class _EventBusNotifier(IInteractionNotifier):
         self, thread_id: str, tab_id: str, title: str, request_id: str = "",
         initial_message: str | None = None, suggestions: list[str] | None = None,
     ) -> bool:
-        return await self._emit("interaction.conversation_start", {
+        return await self._emit("interaction_conversation_start", {
             "request_id": request_id, "thread_id": thread_id, "tab_id": tab_id,
             "title": title, "initial_message": initial_message, "suggestions": suggestions,
         }, thread_id)
@@ -170,7 +170,18 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
     if _service is None:
         return {"error": "service not initialized"}
 
-    mode = kwargs.get("mode", "choice")
+    # 兼容 LLM 偶发的参数别名（type→mode、message→title），避免参数名错配
+    # 把 notification 误判成阻塞 choice。旧逻辑 mode 缺省即 "choice"，
+    # 会让本应非阻塞的 notification 静默变成 wait_for_choice（24h 挂起）。
+    if "mode" not in kwargs and "type" in kwargs:
+        kwargs["mode"] = kwargs["type"]
+    if not kwargs.get("title") and kwargs.get("message"):
+        kwargs["title"] = kwargs["message"]
+
+    mode = kwargs.get("mode")
+    if mode not in ("choice", "conversation", "notification"):
+        return {"error": "参数 mode 必填，取值 choice/conversation/notification"}
+
     pipeline_id = kwargs.get("pipeline_id") or kwargs.get("session_id") or ""
     session_id = kwargs.get("session_id") or pipeline_id
     timeout = kwargs.get("timeout_seconds", 86400)

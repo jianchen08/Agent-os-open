@@ -30,10 +30,14 @@ pub trait PipelineDispatcher: Send + Sync {
     ) -> Result<(), String>;
 
     /// 转发人工交互响应（审批/选择）。
+    ///
+    /// `response` 为前端回传的响应体（response_type/selected_option/answers/feedback），
+    /// 由实现转发到交互插件的 interaction.respond 以唤醒 wait_for_choice。
     async fn dispatch_interaction_response(
         &self,
         thread_id: &str,
         request_id: &str,
+        response: &Value,
     ) -> Result<(), String>;
 
     /// 取消指定 thread 的生成。
@@ -131,9 +135,15 @@ impl InboundRouter {
             .and_then(|r| r.as_str())
             .unwrap_or("")
             .to_string();
+        // 前端把响应体放 data.response（response_type/selected_option/feedback），整体透传。
+        let response = msg
+            .get("data")
+            .and_then(|d| d.get("response"))
+            .cloned()
+            .unwrap_or(Value::Null);
         match self
             .dispatcher
-            .dispatch_interaction_response(&thread_id, &request_id)
+            .dispatch_interaction_response(&thread_id, &request_id, &response)
             .await
         {
             Ok(()) => RouteOutcome::Handled,

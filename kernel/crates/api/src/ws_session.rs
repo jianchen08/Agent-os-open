@@ -286,54 +286,58 @@ impl PipelineDispatcher for EngineDispatcher {
         &self,
         _thread_id: &str,
         request_id: &str,
+        response: &serde_json::Value,
     ) -> Result<(), String> {
-        // 审批/交互响应接入引擎：按 request_id 查 suspended run 并 resume。
-        //
-        // 闭环链路：
-        //   approval 插件 pipeline-executor.suspend → 内核返回 SuspendHandle
-        //   → 插件把 request_id + handle 写入 run metadata（set_run_metadata）
-        //   → 前端回传 interaction_response(request_id)
-        //   → 这里 find_suspended_run_by_request_id 还原 handle → engine.resume
-        info!(request_id = request_id, "interaction_response 已接收，查找 suspended run");
+        // 两条唤醒路径各走各的：
+        // (A) interaction.respond → 唤醒 human_interaction 工具进程内 Event
+        //     （LLM 直调 choice/conversation 路径：wait_for_choice 阻塞在此 Event）。
+        // (B) engine.resume → 唤醒审批挂起的管道 run（approval suspend 创建），
+        //     仅当 DB 有对应 suspended run 时执行；LLM 直调路径无则跳过，不视为错误。
+        info!(request_id = request_id, "interaction_response 已接收");
 
-        let db = self.state.db.as_ref().ok_or_else(|| {
-            "interaction_response 需要 db（SqliteStore 未注入）".to_string()
-        })?;
+        let inner = if response.is_object() { response } else { &serde_json::Value::Null };
+        let mut respond_failed = false;
+        if let Some(invoker) = self.state.invoker.clone() {
+            let inputs = serde_json::json!({
+                "request_id": request_id,
+                "response_type": inner.get("response_type").and_then(|v| v.as_str()).unwrap_or("answered"),
+                "selected_option": inner.get("selected_option").and_then(|v| v.as_str()),
+                "answers": inner.get("answers"),
+                "feedback": inner.get("feedback").and_then(|v| v.as_str()),
+            });
+            if let Err(e) = invoker
+                .invoke_tool("human_interaction_tool", "interaction.respond", &inputs)
+                .await
+            {
+                warn!(request_id = request_id, error = %e.message, "interaction.respond 调用失败");
+                respond_failed = true;
+            }
+        } else {
+            warn!(request_id = request_id, "invoker 未注入，跳过 interaction.respond");
+        }
 
-        let run = db
-            .find_suspended_run_by_request_id(request_id)
-            .map_err(|e| format!("查找 suspended run 失败: {e}"))?
-            .ok_or_else(|| {
-                format!("未找到 request_id={request_id} 对应的 suspended run")
-            })?;
+        if let Some(db) = self.state.db.as_ref() {
+            match db.find_suspended_run_by_request_id(request_id) {
+                Ok(Some(run)) => {
+                    let meta = run.metadata.clone().unwrap_or_default();
+                    let handle = agentos_core::types::SuspendHandle {
+                        run_id: run.run_id.clone(),
+                        branch_id: meta.get("suspend_branch_id").and_then(|v| v.as_str()).unwrap_or(&run.current_branch).to_string(),
+                        seq: meta.get("suspend_seq").and_then(|v| v.as_u64()).unwrap_or(run.current_seq as u64) as u32,
+                    };
+                    if let Some(engine) = self.state.engine.as_ref() {
+                        match engine.resume(&handle, agentos_core::types::WakeEvent::Manual).await {
+                            Ok(()) => info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run"),
+                            Err(e) => warn!(request_id = request_id, error = %e, "suspended run resume 失败"),
+                        }
+                    }
+                }
+                Ok(None) => tracing::debug!(request_id = request_id, "无 suspended run（LLM 直调路径），仅 interaction.respond"),
+                Err(e) => warn!(request_id = request_id, error = %e, "查找 suspended run 失败"),
+            }
+        }
 
-        // 从 metadata 还原 SuspendHandle
-        let meta = run.metadata.clone().unwrap_or_default();
-        let handle = agentos_core::types::SuspendHandle {
-            run_id: run.run_id.clone(),
-            branch_id: meta
-                .get("suspend_branch_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&run.current_branch)
-                .to_string(),
-            seq: meta
-                .get("suspend_seq")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(run.current_seq as u64) as u32,
-        };
-
-        // 调 engine.resume（走 AdrEngineImpl 自有方法，与 capability_router 的
-        // pipeline-executor.resume 分支同一代码路径）
-        let engine = self.state.engine.as_ref().ok_or_else(|| {
-            "interaction_response 需要 engine（AdrEngineImpl 未注入）".to_string()
-        })?;
-        engine
-            .resume(&handle, agentos_core::types::WakeEvent::Manual)
-            .await
-            .map_err(|e| format!("resume 失败: {e}"))?;
-
-        info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run");
-        Ok(())
+        if respond_failed { Err(format!("interaction.respond 失败: request_id={request_id}")) } else { Ok(()) }
     }
 
     async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String> {
