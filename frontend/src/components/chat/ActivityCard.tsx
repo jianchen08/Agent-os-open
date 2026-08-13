@@ -25,6 +25,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
+import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
 import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
@@ -317,7 +318,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
       const text = JSON.stringify(content, null, 2)
       return (
         <div className="group relative">
-          <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
+          <pre className={`bg-muted/30 ${TOOL_CONTENT_SCROLL_CLASS} rounded p-2 pr-7 font-mono text-xs`}>
             {text}
           </pre>
           <CopyBtn text={text} />
@@ -332,7 +333,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
           const text = JSON.stringify(parsed, null, 2)
           return (
             <div className="group relative">
-              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
+              <pre className={`bg-muted/30 ${TOOL_CONTENT_SCROLL_CLASS} rounded p-2 pr-7 font-mono text-xs`}>
                 {text}
               </pre>
               <CopyBtn text={text} />
@@ -341,7 +342,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
         } catch {
           return (
             <div className="group relative">
-              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
+              <pre className={`bg-muted/30 ${TOOL_CONTENT_SCROLL_CLASS} rounded p-2 pr-7 font-mono text-xs`}>
                 {content}
               </pre>
               <CopyBtn text={content} />
@@ -376,7 +377,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
 
       case 'markdown':
         return (
-          <div className="bg-muted/30 max-w-none rounded p-2 text-xs">
+          <div className={`bg-muted/30 max-w-none rounded p-2 text-xs ${TOOL_CONTENT_SCROLL_CLASS}`}>
             <MarkdownRenderer content={content} />
           </div>
         )
@@ -399,7 +400,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
       case 'text':
       default:
         return (
-          <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 text-xs">
+          <pre className={`bg-muted/30 ${TOOL_CONTENT_SCROLL_CLASS} rounded p-2 text-xs`}>
             {content}
           </pre>
         )
@@ -577,7 +578,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
                 {activity.partialOutput.map((output, index) => (
                   <pre
                     key={`partial-${index}`}
-                    className="bg-muted/30 max-h-40 overflow-y-auto break-words rounded p-2 font-mono text-xs whitespace-pre-wrap"
+                    className={`bg-muted/30 ${TOOL_CONTENT_SCROLL_CLASS} rounded p-2 font-mono text-xs`}
                   >
                     {output}
                   </pre>
@@ -593,7 +594,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
           {activity.error && (
             <div>
               <div className="mb-1 text-xs font-medium text-status-error">错误</div>
-              <pre className="rounded bg-status-error/10 p-2 text-xs whitespace-pre-wrap text-status-error">
+              <pre className={`rounded bg-status-error/10 p-2 text-xs text-status-error ${TOOL_CONTENT_SCROLL_CLASS}`}>
                 {activity.error}
               </pre>
             </div>

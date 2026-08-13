@@ -173,4 +173,22 @@ describe('AudioPlayer', () => {
     const container = document.querySelector('[data-testid="audio-player"]')
     expect(container).toBeInTheDocument()
   })
+
+  it('错误态的音频链接应含 break-words + 滚动类，不含 break-all（三轮修复：工具内容不每字一行）', () => {
+    render(<AudioPlayer src={'https://example.com/audio/' + 'a'.repeat(300)} />)
+
+    // 触发 audio error → 错误态出现「查看音频链接」
+    const audio = document.querySelector('audio')
+    fireEvent.error(audio as HTMLMediaElement)
+    fireEvent.click(screen.getByText('查看音频链接'))
+
+    const code = document.querySelector('details code')
+    expect(code).toBeInTheDocument()
+    // 长链接按语义换行（break-words），不再每字符断行（break-all）
+    expect(code!.className).toContain('break-words')
+    expect(code!.className).not.toContain('break-all')
+    // 超长链接统一滚动
+    expect(code!.className).toMatch(/max-h-/)
+    expect(code!.className).toContain('overflow-y-auto')
+  })
 })

@@ -3,8 +3,9 @@
  * 渲染音频和视频内容
  */
 
-import { AlertCircle, Download, Maximize, Pause, Play, Volume2, VolumeX } from '@/assets/icons'
 import { memo, useRef, useState } from 'react'
+import { AlertCircle, Download, Maximize, Pause, Play, Volume2, VolumeX } from '@/assets/icons'
+import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 
 interface AudioRendererProps {
   /** 音频 URL 或 base64 数据 */
@@ -81,7 +82,7 @@ export const AudioRenderer = memo<AudioRendererProps>(({ src, title, className =
         </div>
         <details className="text-muted-foreground mt-2 text-xs">
           <summary className="hover:text-foreground cursor-pointer">查看音频链接</summary>
-          <code className="bg-muted mt-1 block rounded p-2 text-xs break-all">{src}</code>
+          <code className={`bg-muted mt-1 block rounded p-2 text-xs ${TOOL_CONTENT_SCROLL_CLASS}`}>{src}</code>
         </details>
       </div>
     )
@@ -210,7 +211,7 @@ export const VideoRenderer = memo<VideoRendererProps>(({ src, title, poster, cla
         </div>
         <details className="text-muted-foreground mt-2 text-xs">
           <summary className="hover:text-foreground cursor-pointer">查看视频链接</summary>
-          <code className="bg-muted mt-1 block rounded p-2 text-xs break-all">{src}</code>
+          <code className={`bg-muted mt-1 block rounded p-2 text-xs ${TOOL_CONTENT_SCROLL_CLASS}`}>{src}</code>
         </details>
       </div>
     )

@@ -134,4 +134,55 @@ describe('AC-工具卡片UI-场景5: ActivityCard 侧（失败默认折叠 + jso
     expect(screen.queryByText(/执行失败/)).not.toBeInTheDocument()
     expect(screen.queryByText(/失败明细/)).not.toBeInTheDocument()
   })
+
+  it('展开后 error 错误信息 pre 应含滚动类（max-h + overflow-y-auto + break-words），不含 break-all（三轮修复）', () => {
+    render(
+      <ActivityCard
+        activity={makeActivity({
+          status: 'failed',
+          error: '上游服务不可达：' + 'x'.repeat(2000),
+        })}
+      />,
+    )
+
+    // 展开卡片显示错误详情
+    fireEvent.click(screen.getByText('search 工具调用'))
+
+    const errorPre = document.querySelector('pre.text-status-error')
+    expect(errorPre).toBeInTheDocument()
+    // 超长错误信息统一滚动（任何层级展开都生效）
+    expect(errorPre!.className).toMatch(/max-h-/)
+    expect(errorPre!.className).toContain('overflow-y-auto')
+    expect(errorPre!.className).toContain('break-words')
+    expect(errorPre!.className).not.toContain('break-all')
+  })
+
+  it('markdown 详情块容器应含滚动类（max-h + overflow-y-auto），超长内容可滚动浏览（三轮修复）', () => {
+    render(
+      <ActivityCard
+        activity={makeActivity({
+          status: 'completed',
+          details: [
+            {
+              id: 'd-md',
+              label: 'Markdown 结果',
+              contentType: 'markdown',
+              content: '# 标题\n\n' + '长内容'.repeat(500),
+            },
+          ],
+        })}
+      />,
+    )
+
+    // 展开卡片显示 markdown 详情
+    fireEvent.click(screen.getByText('search 工具调用'))
+
+    // 找到 markdown 分支的容器（max-w-none 是 markdown 分支特征）
+    const mdContainer = Array.from(document.querySelectorAll('div')).find(
+      (el) => el.className.includes('max-w-none'),
+    )
+    expect(mdContainer).toBeInTheDocument()
+    expect(mdContainer!.className).toMatch(/max-h-/)
+    expect(mdContainer!.className).toContain('overflow-y-auto')
+  })
 })

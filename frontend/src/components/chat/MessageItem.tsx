@@ -18,6 +18,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import { openAttachment } from '@/services/attachmentOpener'
@@ -259,7 +260,7 @@ export const MessageItem = memo(function MessageItem({
           {toolCardExpanded && (
             <div
               data-testid="tool-card-body"
-              className="mt-1 max-h-40 space-y-1 overflow-y-auto break-words whitespace-pre-wrap text-sm"
+              className={`mt-1 space-y-1 text-sm ${TOOL_CONTENT_SCROLL_CLASS}`}
             >
               {toolError && <div className="text-status-error">{toolError}</div>}
               {toolResult && (
