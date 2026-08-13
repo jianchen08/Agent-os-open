@@ -56,7 +56,7 @@ describe('AC-工具卡片UI-场景5: ActivityCard 侧（失败默认折叠 + jso
     expect(screen.getByText(/上游服务不可达/)).toBeInTheDocument()
   })
 
-  it('json 详情块应含换行类（break-all whitespace-pre-wrap）与纵向滚动（max-h-40 overflow-y-auto）', () => {
+  it('json 详情块应含语义换行类（break-words whitespace-pre-wrap）与纵向滚动（max-h-40 overflow-y-auto），不含 break-all', () => {
     render(
       <ActivityCard
         activity={makeActivity({
@@ -81,8 +81,40 @@ describe('AC-工具卡片UI-场景5: ActivityCard 侧（失败默认折叠 + jso
     expect(pre).toBeInTheDocument()
     expect(pre!.className).toContain('max-h-40')
     expect(pre!.className).toContain('overflow-y-auto')
-    expect(pre!.className).toContain('break-all')
+    // break-words（overflow-wrap: break-word）：中文按语义换行，仅超长词断词
+    expect(pre!.className).toContain('break-words')
+    // 禁止 break-all（word-break: break-all 强制每字符断行 → 中文每字一行）
+    expect(pre!.className).not.toContain('break-all')
     expect(pre!.className).toContain('whitespace-pre-wrap')
+  })
+
+  it('text 类型详情块（执行输出）应含纵向滚动（max-h-40 overflow-y-auto）与语义换行（break-words）', () => {
+    render(
+      <ActivityCard
+        activity={makeActivity({
+          status: 'completed',
+          details: [
+            {
+              id: 'd3',
+              label: '执行输出',
+              contentType: 'text',
+              content: 'line\n'.repeat(500),
+            },
+          ],
+        })}
+      />,
+    )
+
+    // 展开卡片
+    fireEvent.click(screen.getByText('search 工具调用'))
+
+    // 找到 text 类型详情块 pre 元素并断言样式契约
+    const pre = document.querySelector('pre')
+    expect(pre).toBeInTheDocument()
+    expect(pre!.className).toContain('max-h-40')
+    expect(pre!.className).toContain('overflow-y-auto')
+    expect(pre!.className).toContain('break-words')
+    expect(pre!.className).not.toContain('break-all')
   })
 
   it('status=failed 的活动卡片不因失败而自动展开（defaultExpanded 缺省 false）', () => {
