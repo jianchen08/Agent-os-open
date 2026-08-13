@@ -259,7 +259,7 @@ export const MessageItem = memo(function MessageItem({
           {toolCardExpanded && (
             <div
               data-testid="tool-card-body"
-              className="mt-1 max-h-40 space-y-1 overflow-y-auto break-all whitespace-pre-wrap text-sm"
+              className="mt-1 max-h-40 space-y-1 overflow-y-auto break-words whitespace-pre-wrap text-sm"
             >
               {toolError && <div className="text-status-error">{toolError}</div>}
               {toolResult && (
@@ -278,17 +278,17 @@ export const MessageItem = memo(function MessageItem({
                       return parts.length > 0 ? (
                         <div className="space-y-0.5">
                           {parts.map((p, i) => (
-                            <div key={i} className="break-all whitespace-pre-wrap">
+                            <div key={i} className="break-words whitespace-pre-wrap">
                               {p}
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <pre className="break-all whitespace-pre-wrap">{JSON.stringify(parsed, null, 2)}</pre>
+                        <pre className="break-words whitespace-pre-wrap">{JSON.stringify(parsed, null, 2)}</pre>
                       )
                     }
                     return (
-                      <span className="break-all whitespace-pre-wrap">
+                      <span className="break-words whitespace-pre-wrap">
                         {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
                       </span>
                     )

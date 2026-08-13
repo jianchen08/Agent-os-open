@@ -317,7 +317,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
       const text = JSON.stringify(content, null, 2)
       return (
         <div className="group relative">
-          <pre className="bg-muted/30 max-h-40 overflow-y-auto break-all whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
+          <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
             {text}
           </pre>
           <CopyBtn text={text} />
@@ -332,7 +332,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
           const text = JSON.stringify(parsed, null, 2)
           return (
             <div className="group relative">
-              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-all whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
+              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
                 {text}
               </pre>
               <CopyBtn text={text} />
@@ -341,7 +341,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
         } catch {
           return (
             <div className="group relative">
-              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-all whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
+              <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 pr-7 font-mono text-xs">
                 {content}
               </pre>
               <CopyBtn text={content} />
@@ -399,7 +399,7 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
       case 'text':
       default:
         return (
-          <pre className="bg-muted/30 overflow-x-auto rounded p-2 text-xs whitespace-pre-wrap">
+          <pre className="bg-muted/30 max-h-40 overflow-y-auto break-words whitespace-pre-wrap rounded p-2 text-xs">
             {content}
           </pre>
         )
@@ -577,7 +577,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
                 {activity.partialOutput.map((output, index) => (
                   <pre
                     key={`partial-${index}`}
-                    className="bg-muted/30 rounded p-2 font-mono text-xs whitespace-pre-wrap"
+                    className="bg-muted/30 max-h-40 overflow-y-auto break-words rounded p-2 font-mono text-xs whitespace-pre-wrap"
                   >
                     {output}
                   </pre>

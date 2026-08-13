@@ -113,7 +113,7 @@ describe('AC-工具卡片UI: 工具卡片 UI 优化', () => {
   // AC2: 长文本自动换行
   // ----------------------------------------------------------
   describe('AC2: 长参数/结果自动换行', () => {
-    it('结果容器应含换行类（whitespace-pre-wrap/break-all），不含单行截断类 truncate', () => {
+    it('结果容器应含语义换行类（whitespace-pre-wrap/break-words），不含 break-all（防中文每字一行）与 truncate', () => {
       const longResult = 'x'.repeat(2000)
       render(
         <MessageItem
@@ -127,9 +127,12 @@ describe('AC-工具卡片UI: 工具卡片 UI 优化', () => {
       const resultArea = document.querySelector('[data-testid="tool-card-body"]')
       expect(resultArea).toBeInTheDocument()
 
-      // 必须含自动换行类（长字符串不横向溢出）
+      // 必须含换行类（长字符串不横向溢出）
       expect(resultArea!.className).toContain('whitespace-pre-wrap')
-      expect(resultArea!.className).toContain('break-all')
+      // break-words（overflow-wrap: break-word）：中文按语义换行，仅超长单词/URL 断词
+      expect(resultArea!.className).toContain('break-words')
+      // 禁止 break-all（word-break: break-all 对中文强制每字符断行 → 每字一行）
+      expect(resultArea!.className).not.toContain('break-all')
       // 禁止 truncate（nowrap 单行截断会阻止换行）
       expect(resultArea!.className).not.toContain('truncate')
     })
