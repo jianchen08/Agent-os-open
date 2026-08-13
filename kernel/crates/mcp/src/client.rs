@@ -20,6 +20,8 @@ use uuid::Uuid;
 use crate::capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
 use crate::error::McpError;
 
+use agentos_core::traits::AuthType;
+
 // tracing 的 warn 宏用于 reader_loop 的降级日志
 use tracing::warn;
 
@@ -58,8 +60,14 @@ struct JsonRpcError {
 pub enum McpTransport {
     /// stdio transport: fork 子进程，通过 stdin/stdout 传 JSON-RPC
     Stdio { command: String, args: Vec<String> },
-    /// HTTP transport: 通过 HTTP POST 传 JSON-RPC
-    Http { url: String },
+    /// HTTP transport: 通过 HTTP POST 传 JSON-RPC（连远程第三方 MCP server）
+    Http {
+        url: String,
+        /// 额外请求头（auth 在 connect 时解析 env 后并入 reqwest 默认头）。
+        headers: HashMap<String, String>,
+        /// 鉴权配置（value 含 ${ENV_VAR} 占位，connect 时解析）。
+        auth: Option<agentos_core::traits::EndpointAuth>,
+    },
 }
 
 /// MCP 客户端
@@ -106,6 +114,9 @@ pub struct McpClient {
     /// 内核（pending 已被移除）。默认 300s 覆盖 sidecar 端默认 first_token_timeout
     /// （120s）并留足余量；调用方可用 [`McpClient::with_request_timeout`] 覆盖。
     request_timeout: Duration,
+    /// HTTP transport 的 reqwest 客户端（connect 时构建，含解析后的 auth 默认头）。
+    /// stdio 模式为 None。
+    http_client: Option<reqwest::Client>,
 }
 
 impl McpClient {
@@ -127,13 +138,27 @@ impl McpClient {
             initialized: Arc::new(Mutex::new(false)),
             router: None,
             request_timeout: Duration::from_secs(300),
+            http_client: None,
         }
     }
 
     /// 创建 HTTP transport 客户端
-    pub fn new_http(url: impl Into<String>) -> Self {
+    ///
+    /// `headers`：额外请求头（如 `X-Also-Search`）。`auth`：鉴权配置，其 `value`
+    /// 可含 `${ENV_VAR}` 占位，在 [`connect`](McpClient::connect) 时解析（缺失则
+    /// 连接失败，早暴露）。reqwest 客户端在 connect 时构建，把解析后的 auth 并入
+    /// 默认头。
+    pub fn new_http(
+        url: impl Into<String>,
+        headers: HashMap<String, String>,
+        auth: Option<agentos_core::traits::EndpointAuth>,
+    ) -> Self {
         Self {
-            transport: McpTransport::Http { url: url.into() },
+            transport: McpTransport::Http {
+                url: url.into(),
+                headers,
+                auth,
+            },
             working_dir: None,
             extra_env: Vec::new(),
             child: None,
@@ -145,6 +170,7 @@ impl McpClient {
             initialized: Arc::new(Mutex::new(false)),
             router: None,
             request_timeout: Duration::from_secs(300),
+            http_client: None,
         }
     }
 
@@ -256,8 +282,11 @@ impl McpClient {
 
                 Ok(())
             }
-            McpTransport::Http { .. } => {
-                // HTTP 模式不需要启动子进程
+            McpTransport::Http { url, headers, auth } => {
+                // HTTP 模式：不 spawn 子进程。构建 reqwest 客户端（解析 ${ENV_VAR}
+                // 鉴权占位 → 并入默认头），存入 self.http_client 供 send_request 复用。
+                let client = self.build_http_client(url, headers, auth)?;
+                self.http_client = Some(client);
                 Ok(())
             }
         }
@@ -429,6 +458,127 @@ impl McpClient {
         }
     }
 
+    /// 构建 HTTP reqwest 客户端：解析 `${ENV_VAR}` 鉴权占位、合并额外头、设超时。
+    fn build_http_client(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+        auth: &Option<agentos_core::traits::EndpointAuth>,
+    ) -> Result<reqwest::Client, McpError> {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+        // 先校验 URL 合法（早暴露配置错误）。
+        reqwest::Url::parse(url).map_err(|e| McpError::ConnectionFailed {
+            message: format!("invalid MCP http url {}: {}", url, e),
+        })?;
+
+        let mut header_map = HeaderMap::new();
+        for (k, v) in headers {
+            match (
+                HeaderName::try_from(k.as_str()),
+                HeaderValue::try_from(v.as_str()),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    header_map.append(name, val);
+                }
+                _ => {
+                    tracing::warn!(
+                        "[mcp] HTTP 端点非法 header 跳过 | {}={}",
+                        k,
+                        v
+                    );
+                }
+            }
+        }
+        // 鉴权头（${ENV_VAR} 解析；引用未设置变量 → 报错早暴露，不静默放行）。
+        if let Some(a) = auth {
+            if a.auth_type != AuthType::None {
+                let resolved = resolve_env_placeholders(&a.value)?;
+                let (name, val) = match a.auth_type {
+                    AuthType::Bearer => (
+                        reqwest::header::AUTHORIZATION,
+                        format!("Bearer {}", resolved),
+                    ),
+                    AuthType::ApiKey => {
+                        let name = HeaderName::try_from(a.header_name.as_str())
+                            .map_err(|e| McpError::ConnectionFailed {
+                                message: format!("invalid auth header_name {}: {}", a.header_name, e),
+                            })?;
+                        (name, resolved)
+                    }
+                    AuthType::None => unreachable!(),
+                };
+                let val = HeaderValue::from_str(&val).map_err(|e| McpError::ConnectionFailed {
+                    message: format!("invalid auth header value: {}", e),
+                })?;
+                header_map.append(name, val);
+            }
+        }
+
+        reqwest::Client::builder()
+            .default_headers(header_map)
+            .timeout(self.request_timeout)
+            .build()
+            .map_err(|e| McpError::ConnectionFailed {
+                message: format!("build http client: {}", e),
+            })
+    }
+
+    /// HTTP transport：POST 一个 JSON-RPC 请求，解析 plain JSON 响应。
+    ///
+    /// 绕开 stdio 的 pending/reader-loop（外部第三方 MCP server 不会反向调用内核
+    /// capability，无需异步配对通道）。SSE 流式响应（`text/event-stream`）暂不支持，
+    /// 命中时返回清晰错误（plain JSON 覆盖标准非流式调用，流式留作后续）。
+    async fn http_post(
+        &self,
+        url: &str,
+        request: &JsonRpcRequest,
+    ) -> Result<Value, McpError> {
+        let client = self.http_client.as_ref().ok_or_else(|| {
+            McpError::ConnectionFailed {
+                message: "http client not built (connect not called)".to_string(),
+            }
+        })?;
+        let resp = client
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| McpError::Transport {
+                message: format!("http post: {}", e),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(200).collect();
+            return Err(McpError::Protocol {
+                message: format!("http {} {}: {}", status.as_u16(), url, snippet),
+            });
+        }
+        // SSE 流式暂不支持：探测 content-type，给出清晰错误而非解析失败。
+        if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+            if ct.as_bytes()
+                .windows(b"text/event-stream".len())
+                .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
+            {
+                return Err(McpError::Protocol {
+                    message: "SSE 流式 HTTP 响应暂不支持（plain JSON only）".to_string(),
+                });
+            }
+        }
+        let response: JsonRpcResponse = resp.json().await.map_err(|e| McpError::Protocol {
+            message: format!("parse http json-rpc response: {}", e),
+        })?;
+        if let Some(error) = response.error {
+            return Err(McpError::Protocol {
+                message: format!("[{}] {}", error.code, error.message),
+            });
+        }
+        response.result.ok_or_else(|| McpError::Protocol {
+            message: "response has no result".to_string(),
+        })
+    }
+
     /// 发送 JSON-RPC 请求并等待响应
     async fn send_request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
         let id = Uuid::new_v4().to_string();
@@ -442,6 +592,11 @@ impl McpClient {
         let request_str = serde_json::to_string(&request).map_err(|e| McpError::Protocol {
             message: format!("serialize error: {}", e),
         })?;
+
+        // HTTP transport：直接 POST，绕开 stdio 的 pending/reader-loop 配对机制。
+        if let McpTransport::Http { url, .. } = &self.transport {
+            return self.http_post(url, &request).await;
+        }
 
         // 注册 oneshot 等待响应
         let (tx, rx) = oneshot::channel();
@@ -583,11 +738,25 @@ impl McpClient {
             writer.flush().await.map_err(|e| McpError::Transport {
                 message: format!("flush error: {}", e),
             })?;
+        } else if let McpTransport::Http { url, .. } = &self.transport {
+            // HTTP transport：fire-and-forget POST notification（忽略响应体）。
+            let client = self.http_client.as_ref().ok_or_else(|| {
+                McpError::ConnectionFailed {
+                    message: "http client not built (connect not called)".to_string(),
+                }
+            })?;
+            let _ = client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(notif_str)
+                .send()
+                .await
+                .map_err(|e| McpError::Transport {
+                    message: format!("http notification: {}", e),
+                })?;
         } else {
-            // DEBT: HTTP transport 的 notification 发送尚未实现。ceiling: 当前仅支持 stdio。
-            // upgrade: 引入 reqwest/hyper 后实现 HTTP POST notification。
-            return Err(McpError::Transport {
-                message: "notification via HTTP transport not implemented".to_string(),
+            return Err(McpError::ConnectionFailed {
+                message: "not connected (no stdin, not http)".to_string(),
             });
         }
 
@@ -883,6 +1052,48 @@ pub fn build_declared_capabilities_from_namespaces<T: AsRef<str>>(
         .collect()
 }
 
+/// 把字符串里的 `${ENV_VAR}` 占位替换为环境变量值。
+///
+/// 引用的变量未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值缺失
+/// 通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
+pub fn resolve_env_placeholders(raw: &str) -> Result<String, McpError> {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    loop {
+        match rest.find("${") {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(start) => {
+                out.push_str(&rest[..start]);
+                let after = &rest[start + 2..];
+                match after.find('}') {
+                    None => {
+                        // 未闭合占位——按原样保留，不报错。
+                        out.push_str(&rest[start..]);
+                        break;
+                    }
+                    Some(end) => {
+                        let var = &after[..end];
+                        let val = std::env::var(var).map_err(|_| {
+                            McpError::ConnectionFailed {
+                                message: format!(
+                                    "HTTP MCP 端点引用了未设置的环境变量: ${{{}}}",
+                                    var
+                                ),
+                            }
+                        })?;
+                        out.push_str(&val);
+                        rest = &after[end + 1..];
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_new_http_client() {
-        let client = McpClient::new_http("http://localhost:8080/mcp");
+        let client = McpClient::new_http("http://localhost:8080/mcp", HashMap::new(), None);
         assert!(matches!(client.transport, McpTransport::Http { .. }));
     }
 
@@ -941,6 +1152,8 @@ mod tests {
         };
         let http = McpTransport::Http {
             url: "http://localhost:8080".to_string(),
+            headers: HashMap::new(),
+            auth: None,
         };
         assert!(matches!(stdio, McpTransport::Stdio { .. }));
         assert!(matches!(http, McpTransport::Http { .. }));
@@ -1003,5 +1216,182 @@ mod tests {
             2,
             "声明数量应等于 namespace 数量"
         );
+    }
+
+    // ── HTTP transport 测试 ──────────────────────────────────────────
+
+    /// 启动一个 mock HTTP MCP server：回显收到的 id + 固定 result，并把原始请求
+    /// （headers+body）存入共享 state 供断言。返回 (url, captured_raw_request)。
+    async fn spawn_mock_mcp_server(
+        result: Value,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let captured: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let cap2 = captured.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut data = Vec::new();
+            let mut tmp = [0u8; 4096];
+            // 读完 headers + Content-Length 指定的 body
+            loop {
+                let n = sock.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&tmp[..n]);
+                if let Some(hdr_end) = subseq(&data, b"\r\n\r\n") {
+                    let cl = extract_content_length(&data[..hdr_end]);
+                    let body_start = hdr_end + 4;
+                    if data.len() >= body_start + cl {
+                        break;
+                    }
+                }
+            }
+            *cap2.lock().unwrap() = Some(data.clone());
+            // 解析 body 取 id 回显
+            let body_start = subseq(&data, b"\r\n\r\n").map(|p| p + 4).unwrap_or(data.len());
+            let body_str = String::from_utf8_lossy(&data[body_start..]);
+            let id = serde_json::from_str::<Value>(&body_str)
+                .ok()
+                .and_then(|v| v.get("id").cloned())
+                .unwrap_or(Value::Null);
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": result
+            })
+            .to_string();
+            let out = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                resp.len(),
+                resp
+            );
+            let _ = sock.write_all(out.as_bytes()).await;
+        });
+        (url, captured)
+    }
+
+    fn subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    fn extract_content_length(headers: &[u8]) -> usize {
+        let s = String::from_utf8_lossy(headers).to_ascii_lowercase();
+        for line in s.split("\r\n") {
+            if let Some(rest) = line.strip_prefix("content-length:") {
+                return rest.trim().parse().unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    #[tokio::test]
+    async fn test_http_send_request_roundtrip() {
+        let expected = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "mock", "version": "1.0"}
+        });
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+
+        // bearer 鉴权 + env 占位 + 额外头
+        std::env::set_var("MCP_TEST_KEY", "secret-token-xyz");
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::Bearer,
+            header_name: "Authorization".to_string(),
+            value: "${MCP_TEST_KEY}".to_string(),
+        };
+        let mut headers = HashMap::new();
+        headers.insert("X-Also-Search".to_string(), "smithery.ai".to_string());
+
+        let mut client = McpClient::new_http(url, headers, Some(auth));
+        client.connect().await.unwrap();
+        let result = client.send_request("initialize", None).await.unwrap();
+        assert_eq!(result, expected);
+
+        // 校验收到的请求带上了 auth 头和额外头
+        let raw = captured.lock().unwrap().clone().unwrap();
+        let raw_s = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(
+            raw_s.contains("authorization: bearer secret-token-xyz"),
+            "auth header missing: {raw_s}"
+        );
+        assert!(
+            raw_s.contains("x-also-search: smithery.ai"),
+            "extra header missing: {raw_s}"
+        );
+        std::env::remove_var("MCP_TEST_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_fails_on_missing_env() {
+        // 引用未设置的环境变量 → connect 早失败（不静默放行）
+        std::env::remove_var("MCP_TEST_KEY_DEFINITELY_UNSET");
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::ApiKey,
+            header_name: "Authorization".to_string(),
+            value: "${MCP_TEST_KEY_DEFINITELY_UNSET}".to_string(),
+        };
+        let mut client =
+            McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
+        let res = client.connect().await;
+        assert!(res.is_err(), "connect should fail on missing env var");
+    }
+
+    #[test]
+    fn test_resolve_env_placeholders() {
+        std::env::set_var("MCP_PH_TEST", "value123");
+        assert_eq!(
+            resolve_env_placeholders("Bearer ${MCP_PH_TEST}").unwrap(),
+            "Bearer value123"
+        );
+        // 多占位 + 原文混排
+        assert_eq!(
+            resolve_env_placeholders("a${MCP_PH_TEST}b${MCP_PH_TEST}c").unwrap(),
+            "avalue123bvalue123c"
+        );
+        // 无占位原样返回
+        assert_eq!(resolve_env_placeholders("plain").unwrap(), "plain");
+        std::env::remove_var("MCP_PH_TEST");
+        // 未设置变量 → 报错
+        assert!(resolve_env_placeholders("${MCP_PH_TEST_DEFINITELY_UNSET}").is_err());
+    }
+
+    #[test]
+    fn test_manifest_mcp_endpoint_deserialize() {
+        // 模拟 external_mcp 插件 plugin.json 的关键字段：endpoint 嵌套在 mcp 下。
+        let json = r#"{
+            "id": "external_resource_search",
+            "name": "External Resource Search",
+            "version": "1.0.0",
+            "plugin_type": "tool",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "mcp:external",
+            "capabilities": {},
+            "mcp": {
+                "transport": "streamable_http",
+                "endpoint": {
+                    "url": "https://registry.modelcontextprotocol.io",
+                    "headers": {"X-Also-Search": "smithery.ai"},
+                    "auth": {"type": "api_key", "header_name": "Authorization", "value": "${RESOURCE_SEARCH_API_KEY}"}
+                }
+            }
+        }"#;
+        let m: agentos_core::traits::PluginManifest = serde_json::from_str(json).unwrap();
+        let cfg = m.mcp.expect("mcp config should deserialize");
+        assert_eq!(cfg.transport, agentos_core::traits::McpTransport::StreamableHttp);
+        let ep = cfg.endpoint.expect("endpoint should deserialize");
+        assert_eq!(ep.url.as_deref(), Some("https://registry.modelcontextprotocol.io"));
+        assert_eq!(ep.headers.get("X-Also-Search").unwrap(), "smithery.ai");
+        let auth = ep.auth.expect("auth present");
+        assert_eq!(auth.auth_type, AuthType::ApiKey);
+        assert_eq!(auth.header_name, "Authorization");
+        assert_eq!(auth.value, "${RESOURCE_SEARCH_API_KEY}");
     }
 }

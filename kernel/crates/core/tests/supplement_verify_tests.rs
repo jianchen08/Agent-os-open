@@ -61,6 +61,7 @@ fn make_test_manifest(
         error_policy: ErrorPolicy::default(),
         priority: 100,
         mcp: None,
+        lifecycle: None,
         native: None,
         wasm: None,
         requires_content,

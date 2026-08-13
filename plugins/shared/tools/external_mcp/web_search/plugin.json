@@ -7,14 +7,16 @@
     "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
-    "mcp_endpoint": {
+    "mcp": {
         "transport": "stdio",
-        "command": "python3",
-        "args": [
-            "mcp-servers/bing-search/server.py"
-        ],
-        "env": {
-            "BING_API_KEY": "${BING_API_KEY}"
+        "endpoint": {
+            "command": "python3",
+            "args": [
+                "mcp-servers/bing-search/server.py"
+            ],
+            "env": {
+                "BING_API_KEY": "${BING_API_KEY}"
+            }
         }
     },
     "capabilities": {

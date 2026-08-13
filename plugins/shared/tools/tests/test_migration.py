@@ -269,8 +269,11 @@ class TestExternalMcpPluginJson:
 
         data = json.loads(plugin_json_path.read_text(encoding="utf-8"))
         assert data["entry"] == "mcp:external", f"{tool_name} should use mcp:external entry"
-        assert "mcp_endpoint" in data, f"{tool_name} should have mcp_endpoint"
-        assert data["mcp_endpoint"]["transport"] in ("stdio", "http")
+        assert "mcp" in data, f"{tool_name} should have mcp config"
+        assert data["mcp"]["transport"] in ("stdio", "streamable_http"), (
+            f"{tool_name} mcp.transport must be stdio or streamable_http"
+        )
+        assert "endpoint" in data["mcp"], f"{tool_name} mcp must have endpoint"
         assert "capabilities" in data
         assert len(data["capabilities"]["tools"]) >= 1
 

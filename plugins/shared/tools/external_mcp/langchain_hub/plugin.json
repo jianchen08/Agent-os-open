@@ -7,17 +7,19 @@
     "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
-    "mcp_endpoint": {
-        "transport": "http",
-        "url": "https://api.smith.langchain.com/v1/repo/search",
-        "headers": {
-            "Accept": "application/json"
-        },
-        "auth": {
-            "type": "api_key",
-            "header_name": "x-api-key",
-            "value": "${LANGSMITH_API_KEY}",
-            "required": false
+    "mcp": {
+        "transport": "streamable_http",
+        "endpoint": {
+            "url": "https://api.smith.langchain.com/v1/repo/search",
+            "headers": {
+                "Accept": "application/json"
+            },
+            "auth": {
+                "type": "api_key",
+                "header_name": "x-api-key",
+                "value": "${LANGSMITH_API_KEY}",
+                "required": false
+            }
         }
     },
     "capabilities": {

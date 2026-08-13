@@ -7,14 +7,16 @@
     "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
-    "mcp_endpoint": {
+    "mcp": {
         "transport": "stdio",
-        "command": "npx",
-        "args": [
-            "@anthropic-ai/mcp-playwright",
-            "--headless"
-        ],
-        "env": {}
+        "endpoint": {
+            "command": "npx",
+            "args": [
+                "@anthropic-ai/mcp-playwright",
+                "--headless"
+            ],
+            "env": {}
+        }
     },
     "capabilities": {
         "tools": [

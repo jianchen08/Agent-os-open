@@ -7,16 +7,18 @@
     "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
-    "mcp_endpoint": {
-        "transport": "http",
-        "url": "https://registry.modelcontextprotocol.io",
-        "headers": {
-            "Accept": "application/json"
-        },
-        "auth": {
-            "type": "api_key",
-            "header_name": "Authorization",
-            "value": "${MCP_REGISTRY_API_KEY}"
+    "mcp": {
+        "transport": "streamable_http",
+        "endpoint": {
+            "url": "https://registry.modelcontextprotocol.io",
+            "headers": {
+                "Accept": "application/json"
+            },
+            "auth": {
+                "type": "api_key",
+                "header_name": "Authorization",
+                "value": "${MCP_REGISTRY_API_KEY}"
+            }
         }
     },
     "capabilities": {

@@ -163,6 +163,7 @@ fn test_manifest_programmatic_construction_with_native_wasm() {
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        lifecycle: None,
         native: None,
         wasm: Some(WasmArtifact {
             artifact: "p.wasm".to_string(),

@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from state_machine import InvalidTransitionError
+from task_types import TaskModel, TaskStatus
+
 # 跨插件共享类型（ToolExecutionResult / BuiltinTool / Tool 及枚举与结果工厂）已上提到
 # SDK 公共依赖层 agentos_plugin_sdk；任务领域类型以 plugins/shared/system/tasks/
 # 为权威（0.2 平铺模块，由 server.py 将该目录注入 sys.path），直接 import。
@@ -24,8 +27,6 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
-from state_machine import InvalidTransitionError
-from task_types import TaskModel, TaskStatus
 
 if TYPE_CHECKING:
     from service import TaskService
@@ -36,19 +37,26 @@ logger = logging.getLogger(__name__)
 class TaskTool(BuiltinTool):
     """任务管理工具（简化版）。"""
 
-    def __init__(self) -> None:
-        """初始化任务管理工具。"""
+    def __init__(self, pipeline_caller: Any = None) -> None:
+        """初始化任务管理工具。
+
+        Args:
+            pipeline_caller: 注入的 pipeline-executor 能力调用 async fn
+                `(method, params) -> Any`（如 start_run/resume）。sidecar 经
+                server.py 从内核 CapabilityHandle 构造（memory 工具同款模式）；
+                为 None 时恢复/重试只改任务状态、不自动执行（优雅降级）。
+        """
 
         self._task_service: TaskService | None = None
+        self._pipeline_caller = pipeline_caller
 
     def _get_execution_record_storage(self):
-        """获取全局 ExecutionRecordStorage 实例。"""
+        """获取全局 ExecutionRecordStorage 实例。
 
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        provider = get_service_provider()
-
-        return provider.get("execution_record_storage")
+        0.2 sidecar 无 execution_record_storage 服务（0.1 infrastructure 层已废弃），
+        返回 None 优雅降级——调用方已有 `if not storage: return None` 守卫，
+        活动摘要显示 "-"。
+        """
 
     @staticmethod
     def _calc_elapsed_seconds(task: TaskModel) -> float | None:
@@ -137,30 +145,20 @@ class TaskTool(BuiltinTool):
         ]
 
     def _get_task_service(self) -> TaskService:
-        """获取共享的 TaskService 实例。"""
+        """获取共享的 TaskService 实例。
+
+        0.2 走 tasks 插件包的 service_access.get_task_service()（M3 自包含实例化，
+        进程内单例；server.py 已把 plugins/shared/system/tasks 注入 sys.path）。
+        初始化失败返回 None → 转结构化 SERVICE_UNAVAILABLE（execute 的
+        except RuntimeError 捕获），不再依赖已废弃的 0.1 infrastructure 层。
+        """
 
         if self._task_service is not None:
             return self._task_service
 
-        try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-        except ImportError as exc:
-            # 0.2 sidecar 进程无 infrastructure 层（核心运行时未启动）。
-            # 抛 RuntimeError 由调用方 (execute) 的 except RuntimeError 捕获，
-            # 转化为结构化 SERVICE_UNAVAILABLE 失败结果，而非向上冒泡为
-            # 未捕获的 ModuleNotFoundError。
-            raise RuntimeError(
-                "任务服务不可用：infrastructure 层未初始化（sidecar 模式）"
-            ) from exc
+        from service_access import get_task_service  # noqa: PLC0415
 
-        provider = get_service_provider()
-
-        from service import TaskService  # noqa: PLC0415
-
-        service = provider.get_or_create(
-            "task_service",
-            lambda: TaskService(event_bus=provider.get("event_bus")),
-        )
+        service = get_task_service()
 
         if service is not None:
             self._task_service = service
@@ -900,10 +898,7 @@ class TaskTool(BuiltinTool):
 
         execution_warning = None
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            task_worker = get_service_provider().get("task_worker")
-            if task_worker:
+            if self._pipeline_caller is not None:
                 task_data = {
                     "task_id": task.id,
                     "pipeline_id": task.parent_pipeline_id or "",
@@ -924,12 +919,10 @@ class TaskTool(BuiltinTool):
                         "agent_config_validated": True,
                     },
                 }
-                if not task_worker.submit_task(task_data):
-                    execution_warning = "后台执行器未启动，任务已恢复但不会自动执行"
-                else:
-                    logger.info("[TaskTool] resume 已提交到 TaskWorker: task_id=%s", task.id)
+                await self._pipeline_caller("pipeline-executor.start_run", task_data)
+                logger.info("[TaskTool] resume 已提交到 pipeline-executor: task_id=%s", task.id)
             else:
-                execution_warning = "后台执行器不可用，任务已恢复但不会自动执行"
+                execution_warning = "执行器未注入，任务已恢复但不会自动执行"
         except Exception as submit_exc:
             execution_warning = f"提交执行失败: {submit_exc}"
 
@@ -1027,11 +1020,7 @@ class TaskTool(BuiltinTool):
         _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
 
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            task_worker = get_service_provider().get("task_worker")
-
-            if task_worker:
+            if self._pipeline_caller is not None:
                 # 恢复 pipe 继承信息：从源任务获取 pipeline_run_id
 
                 _inherit_pipe_from = task.metadata.get("inherit_pipe_from")
@@ -1072,11 +1061,8 @@ class TaskTool(BuiltinTool):
                 if _inherit_pipe_pipeline_id:
                     task_data["_inherit_pipe_pipeline_id"] = _inherit_pipe_pipeline_id
 
-                if not task_worker.submit_task(task_data):
-                    execution_warning = "后台执行器未启动，任务已重置为 pending 但不会自动执行"
-
-                else:
-                    logger.info("[TaskTool] retry 已提交到 TaskWorker: task_id=%s", task.id)
+                await self._pipeline_caller("pipeline-executor.start_run", task_data)
+                logger.info("[TaskTool] retry 已提交到 pipeline-executor: task_id=%s", task.id)
 
             else:
                 execution_warning = "后台执行器不可用，任务已重置为 pending 但不会自动执行"

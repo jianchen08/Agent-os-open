@@ -27,6 +27,7 @@ fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        lifecycle: None,
         native: None,
         wasm: None,
         requires_content: None,

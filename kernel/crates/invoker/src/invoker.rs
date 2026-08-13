@@ -20,7 +20,7 @@ use agentos_core::traits::{
 };
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
 use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
-use agentos_mcp::{CapabilityRouter, McpClient, McpError};
+use agentos_mcp::{resolve_env_placeholders, CapabilityRouter, McpClient, McpError};
 use agentos_plugin_loader::{NativePluginLoader, WasmRuntime};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
@@ -851,61 +851,129 @@ impl PluginInvokerImpl {
         }
 
         // 创建新的 MCP 客户端（持有 spawn 锁，保证串行）
-        let (command, args) = self.parse_entry(&manifest.entry)?;
-        let mut client = McpClient::new_stdio(command, args)
-            // plugin_id 用于 stderr 转发时区分 sidecar 日志来源（[plugin_id] 前缀）。
-            .with_plugin_id(&manifest.id);
-
-        // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
-        // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
-        // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
-        {
-            let router_guard = self.router.read();
-            if let Some(router) = router_guard.as_ref() {
-                let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
-                    plugin_id: manifest.id.clone(),
-                    inner: Arc::clone(router),
-                });
-                client = client.with_router(scoped);
-            }
-        }
-
-        // 设置工作目录为插件目录（确保 server.py 等相对路径可解析）
-        if let Some(plugin_dir) = self.loader.get_plugin_dir(&manifest.id) {
-            client = client.with_working_dir(plugin_dir);
-        }
-
-        // 注入 PYTHONPATH：把 project_root（及 project_root/src）加进 sidecar 子进程搜索路径，
-        // 让两种 import 写法都能解析（见 resolve_pythonpath_src 注释）。
         //
-        // 来源优先级：
-        // ① set_pythonpath_src 显式注入（内核构造期由 main 传入，最可靠）；
-        // ② AGENTOS_PLUGINS_DIR 环境变量推算（plugins/shared → project_root，向后兼容）。
-        // 两者都不可用时收空 PYTHONPATH——此时依赖 src.* / config.* 的插件会启动失败
-        // （import error），但不会静默退化（早暴露比晚卡死好）。
-        let mut extra_env: Vec<(String, String)> = Vec::new();
-        if let Some(new_path) = self.resolve_pythonpath_src() {
-            extra_env.push(("PYTHONPATH".to_string(), new_path));
-        }
-        // 注入日志配置 env（进程级常量，适合走 env；per-request 上下文走 JSON-RPC）。
-        // 仅当父进程已设置时透传，否则让 sidecar SDK 用其默认（INFO + stderr）。
-        // SDK 启动时读这些 env 调用 setup_logging，使 sidecar 日志走统一基础设施。
-        for key in &["LOG_LEVEL", "LOG_JSON", "LOG_FORMAT"] {
-            if let Ok(val) = std::env::var(key) {
-                if !val.is_empty() {
-                    extra_env.push(((*key).to_string(), val));
-                }
+        // 传输三路分流（由 manifest.mcp 决定）：
+        // ① mcp.transport=StreamableHttp + endpoint.url → 外部远程 MCP，走 HTTP（不 spawn）。
+        // ② mcp.transport=Stdio + endpoint.command → 外部本地第三方命令 MCP（如 npx），
+        //    spawn endpoint.command（不经 parse_entry，entry 仅作语义标记）。
+        // ③ 其余（无 mcp 配置的项目自带 sidecar）→ parse_entry(entry) → stdio。
+        let mut client = match manifest.mcp.as_ref() {
+            Some(cfg) if cfg.transport == agentos_core::traits::McpTransport::StreamableHttp => {
+                let ep = cfg.endpoint.as_ref().ok_or_else(|| PluginError {
+                    message: format!(
+                        "插件 {} 声明 streamable_http 但缺 endpoint.url",
+                        manifest.id
+                    ),
+                    code: Some("MCP_CONFIG_INVALID".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })?;
+                let url = ep.url.clone().ok_or_else(|| PluginError {
+                    message: format!("插件 {} 的 streamable_http endpoint 缺 url", manifest.id),
+                    code: Some("MCP_CONFIG_INVALID".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })?;
+                tracing::info!(
+                    "[invoker] 插件 {} 走 HTTP transport（外部 MCP）| url={}",
+                    manifest.id,
+                    url
+                );
+                McpClient::new_http(url, ep.headers.clone(), ep.auth.clone())
+                    .with_plugin_id(&manifest.id)
             }
-        }
-        if !extra_env.is_empty() {
-            client = client.with_extra_env(extra_env);
-        }
+            Some(cfg)
+                if cfg.transport == agentos_core::traits::McpTransport::Stdio
+                    && cfg
+                        .endpoint
+                        .as_ref()
+                        .and_then(|e| e.command.as_ref())
+                        .is_some() =>
+            {
+                // 外部本地第三方命令 MCP（如 npx playwright）：spawn endpoint.command。
+                let ep = cfg.endpoint.as_ref().expect("checked above");
+                let command = ep.command.clone().unwrap_or_default();
+                tracing::info!(
+                    "[invoker] 插件 {} 走外部 stdio 命令 | command={} {}",
+                    manifest.id,
+                    command,
+                    ep.args.join(" ")
+                );
+                let mut c = McpClient::new_stdio(command, ep.args.clone())
+                    .with_plugin_id(&manifest.id);
+                // env 值含 ${ENV_VAR} 占位 → 解析（缺失则启动失败早暴露）。
+                let mut extra_env: Vec<(String, String)> = Vec::new();
+                for (k, v) in &ep.env {
+                    let resolved = resolve_env_placeholders(v).map_err(|e| PluginError {
+                        message: format!("插件 {} env 解析失败: {}", manifest.id, e),
+                        code: Some("MCP_CONFIG_INVALID".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    })?;
+                    extra_env.push((k.clone(), resolved));
+                }
+                if !extra_env.is_empty() {
+                    c = c.with_extra_env(extra_env);
+                }
+                c
+            }
+            _ => {
+                let (command, args) = self.parse_entry(&manifest.entry)?;
+                let mut c = McpClient::new_stdio(command, args)
+                    // plugin_id 用于 stderr 转发时区分 sidecar 日志来源（[plugin_id] 前缀）。
+                    .with_plugin_id(&manifest.id);
+
+                // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
+                // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
+                // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
+                {
+                    let router_guard = self.router.read();
+                    if let Some(router) = router_guard.as_ref() {
+                        let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
+                            plugin_id: manifest.id.clone(),
+                            inner: Arc::clone(router),
+                        });
+                        c = c.with_router(scoped);
+                    }
+                }
+
+                // 设置工作目录为插件目录（确保 server.py 等相对路径可解析）
+                if let Some(plugin_dir) = self.loader.get_plugin_dir(&manifest.id) {
+                    c = c.with_working_dir(plugin_dir);
+                }
+
+                // 注入 PYTHONPATH：把 project_root（及 project_root/src）加进 sidecar 子进程搜索路径，
+                // 让两种 import 写法都能解析（见 resolve_pythonpath_src 注释）。
+                //
+                // 来源优先级：
+                // ① set_pythonpath_src 显式注入（内核构造期由 main 传入，最可靠）；
+                // ② AGENTOS_PLUGINS_DIR 环境变量推算（plugins/shared → project_root，向后兼容）。
+                // 两者都不可用时收空 PYTHONPATH——此时依赖 src.* / config.* 的插件会启动失败
+                // （import error），但不会静默退化（早暴露比晚卡死好）。
+                let mut extra_env: Vec<(String, String)> = Vec::new();
+                if let Some(new_path) = self.resolve_pythonpath_src() {
+                    extra_env.push(("PYTHONPATH".to_string(), new_path));
+                }
+                // 注入日志配置 env（进程级常量，适合走 env；per-request 上下文走 JSON-RPC）。
+                // 仅当父进程已设置时透传，否则让 sidecar SDK 用其默认（INFO + stderr）。
+                // SDK 启动时读这些 env 调用 setup_logging，使 sidecar 日志走统一基础设施。
+                for key in &["LOG_LEVEL", "LOG_JSON", "LOG_FORMAT"] {
+                    if let Ok(val) = std::env::var(key) {
+                        if !val.is_empty() {
+                            extra_env.push(((*key).to_string(), val));
+                        }
+                    }
+                }
+                if !extra_env.is_empty() {
+                    c = c.with_extra_env(extra_env);
+                }
+                c
+            }
+        };
 
         client.connect().await.map_err(|e| PluginError {
             message: format!("MCP connect failed: {}", e),
             code: Some("MCP_CONNECT_FAILED".to_string()),
             source: Some("plugin-invoker".to_string()),
         })?;
+
 
         // initialize 握手（携带插件配置）
         // 配置加载失败时分级处理：IO 错误（目录不存在等）可降级为空配置；
@@ -1820,6 +1888,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,
@@ -1851,6 +1920,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,
@@ -2191,6 +2261,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,
@@ -2249,6 +2320,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: Some(agentos_core::traits::WasmArtifact {
                 artifact: artifact.to_string(),
@@ -2469,6 +2541,7 @@ mod tests {
             error_policy: Default::default(),
             priority: 100,
             mcp: None,
+            lifecycle: None,
             native: None,
             wasm: None,
             requires_content: None,

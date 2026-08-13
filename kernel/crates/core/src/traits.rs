@@ -761,13 +761,6 @@ pub struct PluginManifest {
     pub persistent_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
-    /// 外部 MCP HTTP 端点（external_mcp 插件用）。
-    ///
-    /// 声明后 invoker 不 spawn 子进程，改用 HTTP 客户端连 `url` 指定的远程
-    /// 第三方 MCP server（MCP Streamable HTTP transport）。配合 `entry: "mcp:external"`
-    /// 语义使用。`None` = 本地 stdio sidecar（默认）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_endpoint: Option<McpEndpoint>,
     /// 生命周期策略（空闲卸载阈值等）。`None` = 内核默认。插件可声明
     /// `lifecycle.idle_timeout_secs` 覆盖默认（如交互类插件设 0 = 永不卸载）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1216,6 +1209,12 @@ pub struct NetworkPermission {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     pub transport: McpTransport,
+    /// 外部 MCP HTTP 端点（transport=StreamableHttp 时必填）。
+    ///
+    /// 声明后 invoker 不 spawn 子进程，改用 HTTP 客户端连 `endpoint.url` 指定的
+    /// 远程第三方 MCP server。`None` = 本地 stdio sidecar（默认）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<McpEndpoint>,
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_protocol_version")]
@@ -1239,21 +1238,33 @@ pub enum McpTransport {
     StreamableHttp,
 }
 
-/// 外部 MCP HTTP 端点声明（external_mcp 插件连远程第三方 MCP server）。
+/// 外部 MCP 端点声明（external_mcp 插件连第三方 MCP server）。
 ///
-/// 对应 plugin.json 的 `mcp_endpoint` 字段。transport 一律为 HTTP
-/// （`entry` 为 `mcp:external` 时由 invoker 走 HTTP 客户端，不 spawn 子进程）。
-/// `auth.value` 支持 `${ENV_VAR}` 占位，在 invoker 构造 HTTP 客户端时解析。
+/// 嵌套在 [`McpConfig::endpoint`]，由 [`McpConfig::transport`] 决定用哪组字段：
+/// - `StreamableHttp`：用 `url`/`headers`/`auth`，invoker 走 HTTP 客户端，不 spawn。
+/// - `Stdio`：用 `command`/`args`/`env`，invoker spawn 第三方本地命令（如 npx）。
+///
+/// `auth.value` 与 `env` 的值支持 `${ENV_VAR}` 占位，在 invoker 构造客户端/子进程时解析。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpEndpoint {
-    /// 远程 MCP server 的 HTTP(S) URL。
-    pub url: String,
-    /// 额外请求头（如 `X-Also-Search: smithery.ai`）。
-    #[serde(default)]
+    /// 远程 MCP server 的 HTTP(S) URL（StreamableHttp 用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// 额外请求头（如 `X-Also-Search`，StreamableHttp 用）。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
-    /// 鉴权配置（可选）。
-    #[serde(default)]
+    /// 鉴权配置（StreamableHttp 用，可选）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<EndpointAuth>,
+    /// 本地第三方 MCP 命令（Stdio 用，如 `npx` / `python3`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// 命令参数（Stdio 用）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// 子进程环境变量（Stdio 用，值支持 `${ENV_VAR}` 占位）。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 /// 外部 MCP 端点的鉴权配置。

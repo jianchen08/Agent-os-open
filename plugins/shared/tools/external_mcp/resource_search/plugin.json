@@ -7,23 +7,25 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "mcp:external",
-    "mcp_endpoint": {
-        "transport": "http",
-        "url": "https://registry.modelcontextprotocol.io",
-        "headers": {
-            "X-Also-Search": "smithery.ai"
-        },
-        "auth": {
-            "type": "api_key",
-            "header_name": "Authorization",
-            "value": "${RESOURCE_SEARCH_API_KEY}"
+    "mcp": {
+        "transport": "streamable_http",
+        "endpoint": {
+            "url": "https://registry.modelcontextprotocol.io",
+            "headers": {
+                "X-Also-Search": "smithery.ai"
+            },
+            "auth": {
+                "type": "api_key",
+                "header_name": "Authorization",
+                "value": "${RESOURCE_SEARCH_API_KEY}"
+            }
         }
     },
     "capabilities": {
         "tools": [
             {
-                "name": "resource_search",
-                "description": "Aggregate search across MCP Registry and Smithery platforms"
+                "name": "mcp_marketplace_search",
+                "description": "Aggregate search across MCP Registry and Smithery platforms (external remote MCP)"
             }
         ]
     },

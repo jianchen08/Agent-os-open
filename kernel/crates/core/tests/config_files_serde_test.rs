@@ -105,6 +105,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         error_policy: Default::default(),
         priority: 100,
         mcp: None,
+        lifecycle: None,
         native: None,
         wasm: None,
         requires_content: None,

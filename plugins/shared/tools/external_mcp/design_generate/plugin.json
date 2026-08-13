@@ -7,14 +7,16 @@
     "language": "external",
     "host_type": "sidecar",
     "entry": "mcp:external",
-    "mcp_endpoint": {
+    "mcp": {
         "transport": "stdio",
-        "command": "npx",
-        "args": [
-            "-y",
-            "screenshot-to-code"
-        ],
-        "env": {}
+        "endpoint": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "screenshot-to-code"
+            ],
+            "env": {}
+        }
     },
     "capabilities": {
         "tools": [
