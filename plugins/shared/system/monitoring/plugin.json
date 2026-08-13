@@ -6,6 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "lifecycle": {
+        "idle_timeout_secs": 0
+    },
     "capabilities": {
         "tools": [
             {"name": "monitoring.get_metrics", "description": "Get current system performance metrics (CPU, memory, disk, network, LLM, tools, tasks)"},

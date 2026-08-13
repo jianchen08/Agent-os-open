@@ -6,6 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "lifecycle": {
+        "idle_timeout_secs": 0
+    },
     "capabilities": {
         "tools": [
             {"name": "dingtalk.send_message", "description": "Send a text message to a DingTalk user via Stream API"},

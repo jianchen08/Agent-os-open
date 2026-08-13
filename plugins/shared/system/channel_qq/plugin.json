@@ -6,6 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "lifecycle": {
+        "idle_timeout_secs": 0
+    },
     "capabilities": {
         "tools": [
             {"name": "qq.send_message", "description": "Send a message to a QQ user or group via OneBot HTTP API"},

@@ -6,6 +6,9 @@
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
+    "lifecycle": {
+        "idle_timeout_secs": 0
+    },
     "capabilities": {
         "tools": [
             {"name": "approval.create_choice", "description": "创建选择审批（委托 human-interaction 弹窗 + 挂起管道）"},

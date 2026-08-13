@@ -9,11 +9,21 @@
 """
 
 import json
+import os
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+# 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
+# plugins/shared/system/multimodal/storage.py，上溯 2 级到 plugins/shared/。
+# 参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
 
 
 class IFileStorage(ABC):
@@ -109,23 +119,42 @@ class DiskFileStorage(IFileStorage):
         _base_dir: 存储根目录路径
 
     Example:
-        >>> storage = DiskFileStorage(base_dir="./data/uploads")
-        >>> await storage.save("file-123", attachment_info)
-        >>> attachment = await storage.load("file-123")
+    >>> storage = DiskFileStorage(base_dir="./data/uploads")
+    >>> await storage.save("file-123", attachment_info)
+    >>> attachment = await storage.load("file-123")
     """
 
-    def __init__(self, base_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        base_dir: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         """初始化磁盘文件存储。
 
-        Args:
-            base_dir: 存储根目录。默认为环境变量 ``MULTIMODAL_STORAGE_DIR``
-                      或 ``./data/multimodal``。
-        """
-        if base_dir is None:
-            import os  # noqa: PLC0415
+        base_dir 解析优先级（高 → 低）：
 
-            base_dir = os.environ.get("MULTIMODAL_STORAGE_DIR", "./data/multimodal")
-        self._base_dir = Path(base_dir)
+        1. 显式 ``base_dir`` 参数（测试/定制路径，最高优先级，覆盖一切）；
+        2. 环境变量 ``MULTIMODAL_STORAGE_DIR``（兼容存量部署覆盖）；
+        3. 多租户数据根 ``tenant_data_root(tenant_id or default, "multimodal")``
+           （方案 B 目录隔离默认值，即 ``data/{tenant_id}/multimodal``）。
+
+        Args:
+            base_dir: 存储根目录。显式传入时优先使用，覆盖 env 与 tenant_id。
+            tenant_id: 租户 ID。未传 base_dir 且未设 env 时，base_dir 落在
+                ``data/{tenant_id}/multimodal``；None 则用 ``DEFAULT_TENANT``。
+        """
+        if base_dir is not None:
+            resolved = base_dir
+        else:
+            env_dir = os.environ.get("MULTIMODAL_STORAGE_DIR")
+            if env_dir:
+                resolved = env_dir
+            else:
+                # 方案 B 默认：经多租户咽喉点取 data/{tenant_id}/multimodal
+                resolved = str(
+                    tenant_data_root(tenant_id or DEFAULT_TENANT, "multimodal")
+                )
+        self._base_dir = Path(resolved)
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
     def _meta_path(self, file_id: str) -> Path:
