@@ -3,15 +3,17 @@
 import { syncNavItemsFromContributes } from '@/constants/navItems'
 import apiClient from '@/services/api/client'
 import { getSchema } from '@/services/api/schema'
+import { syncPluginStyles, removeAllPluginStyles } from '@/services/pluginStyles'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useThemeStore } from '@/stores/themeStore'
 import { registerBuiltinToolChatCards } from '@/utils/builtinToolChatCards'
+import { loggers } from '@/utils/logger'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
-import { loggers } from '@/utils/logger'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
 export async function initializeGrowthLoop(): Promise<void> {
@@ -33,7 +35,7 @@ export async function initializeGrowthLoop(): Promise<void> {
 }
 
 /**
- * 重新拉取 schema 并刷新 ContributionRegistry + 导航 + 快捷键。
+ * 重新拉取 schema 并刷新 ContributionRegistry + 导航 + 快捷键 + 插件主题/CSS。
  *
  * 集中了 contributes 数据的加载逻辑，供初始化、重启、schema_updated 事件复用。
  * 失败仅 warn 不抛出（contributes 加载失败不应阻塞主流程）。
@@ -51,13 +53,19 @@ async function reloadContributionRegistry(): Promise<void> {
     registerBuiltinToolChatCards()
     syncNavItemsFromContributes()
     shortcutRegistry.refresh()
+
+    // 插件视觉贡献同步（contributes.themes / client_styles）：
+    // - 主题：插件主题合入主题列表；当前用的插件主题被移除（插件禁用）→ 回退 base
+    // - CSS：以注册表为权威注入新样式 / 移除失效样式（禁用插件无残留）
+    useThemeStore.getState().syncPluginThemes()
+    syncPluginStyles(contributionRegistry.getClientStyles())
   } catch (error) {
     loggers.websocket.warn('ContributionRegistry 加载失败:', error)
   }
 }
 
 /** 处理 WebSocket 推送的 Schema 更新事件（含插件热重载后的 contributes 变更） */
-export function handleSchemaUpdate(event: {
+export function handleSchemaUpdate(_event: {
   module_id: string
   schema_version: string
   changes: string[]
@@ -66,9 +74,21 @@ export function handleSchemaUpdate(event: {
   void reloadContributionRegistry()
 }
 
+/**
+ * 主动刷新插件贡献（插件启用/禁用切换后调用，无需 WS 事件）
+ *
+ * 插件禁用语义：contributes 不再导出 → schema 重载后其主题从列表移除、
+ * 注入 CSS 被清理；当前在用其主题时回退 base（syncPluginThemes 内处理）。
+ */
+export function refreshPluginContributions(): Promise<void> {
+  return reloadContributionRegistry()
+}
+
 /** 销毁自生长闭环（完全清理） 用于登出、认证过期等场景，需要彻底清除所有模块状态。 */
 export function destroyGrowthLoop(): void {
   contributionRegistry.clear()
+  // 插件注入样式随闭环销毁清除（防跨会话残留）
+  removeAllPluginStyles()
   const store = useLayoutModeStore.getState()
   store.setDockItems([])
   useLayoutModeStore.setState({ workspaceTabs: [] })

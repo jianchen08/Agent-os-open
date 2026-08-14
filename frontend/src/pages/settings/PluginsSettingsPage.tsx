@@ -14,6 +14,7 @@ import { RefreshCw, AlertCircle, Plug, Settings, ToggleLeft } from '@/assets/ico
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
 import apiClient from '@/services/api/client'
+import { refreshPluginContributions } from '@/services/modules/GrowthLoop'
 
 /** 插件状态信息（对齐后端 plugins_status_handler 返回） */
 interface PluginStatus {
@@ -101,6 +102,10 @@ export function PluginsSettingsPage({
           ),
         )
         toast.success(res.data.message || `已${!currentEnabled ? '启用' : '禁用'} ${pluginId}`)
+        // 刷新插件贡献（contributes 仅 Enabled 插件导出）：
+        // 禁用 → 其主题从列表移除（在用则回退 base）、注入 CSS 清理；
+        // 启用 → 其主题/样式重新注入。失败不影响开关结果（仅 warn）。
+        void refreshPluginContributions()
       } else {
         toast.error(res.data.error || '操作失败')
       }

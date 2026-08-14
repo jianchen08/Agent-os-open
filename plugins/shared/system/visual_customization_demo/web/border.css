@@ -1,0 +1,51 @@
+/**
+ * 金色蕾丝边框 —— contributes.client_styles 注入示例
+ *
+ * 插件 CSS 注入（任务文档第 1 层补充）：主题插件改"变量"，本样式补"装饰规则"。
+ * 安全约束（前端注入侧已强制）：
+ * - 禁 expression() / javascript: / 外部 @import / behavior:（命中整段拒绝）
+ * - 注入的 <style> 带会话 nonce（Electron 打包 CSP 放行通道）
+ *
+ * 适配约定：引用 var(--ds-*) 主题变量 → 切换主题时金色跟随 --ds-accent-primary
+ * 变化，不写死颜色（风险 §四.6）。
+ */
+
+/* 视口装饰框：金色描边 + 内辉光（pointer-events: none，不拦截交互） */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 5px;
+  z-index: 9990;
+  pointer-events: none;
+  border: 2px solid var(--ds-accent-primary, #D4AF37);
+  border-radius: var(--ds-r-lg, 14px);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--ds-accent-primary, #D4AF37) 30%, transparent),
+    inset 0 0 24px color-mix(in srgb, var(--ds-accent-primary, #D4AF37) 14%, transparent),
+    0 0 10px color-mix(in srgb, var(--ds-accent-primary, #D4AF37) 35%, transparent);
+}
+
+/* 蕾丝花边：边框外缘一圈菱形镂空环（repeating-conic 棋盘 + mask 镂空 → 蕾丝感） */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 5px;
+  z-index: 9989;
+  pointer-events: none;
+  border: 6px solid transparent;
+  border-radius: var(--ds-r-lg, 14px);
+  background:
+    repeating-conic-gradient(
+      color-mix(in srgb, var(--ds-accent-primary, #D4AF37) 65%, transparent) 0% 25%,
+      transparent 0% 50%
+    )
+    border-box;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) padding-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) padding-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+}

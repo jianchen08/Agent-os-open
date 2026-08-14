@@ -79,7 +79,8 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
   // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview
   { name: 'webview', component: WebviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'html_preview' },
-  // WebComponent：插件 JS 注册成 Custom Element，同进程直传 props（第二条组件注入路径，ADR §3.4 第二通道）
+  // @deprecated WebComponent：插件 JS 注册成 Custom Element（eval 注入，任务域已废弃），
+  // 保留注册兼容既有插件；新插件请用 webview / 主题插件 / CSS 注入。
   { name: 'webcomponent', component: WebComponentCardHost, spaces: ['chat', 'workspace', 'floating'], fallback: 'status_card' },
   // 数字人/形象占位 widget（ADR §2.1 / §7.6）：形象是 workspace 的 widget，不占独立空间。
   // 现阶段只占位（不引入渲染库），0.7.0 由插件接入 Live2D/VRM/TTS；支持 detachable 三态（浮窗/桌面组件/全屏）

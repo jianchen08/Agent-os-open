@@ -6,15 +6,19 @@
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { createTolerantStorage } from '@/utils/tolerantStorage'
 import { themeList } from '@/config/themes'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import {
   getPresetTheme,
   applyTheme as applyThemeToDOM,
+  applyPluginThemeVars,
+  derivePluginThemePreview,
   fetchDynamicThemes,
 } from '@/services/themeService'
 import { ThemeStorageService, mergeTheme } from '@/services/themeStorage'
-import type { ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
+import { loggers } from '@/utils/logger'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
+import type { PluginTheme, ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
 
 export type { ThemeMode } from '@/types/theme'
 
@@ -27,7 +31,9 @@ export interface ThemeState {
   resolvedTheme: 'light' | 'dark'
   /** 当前加载的主题配置 */
   themeConfig: ThemeConfig | null
-  /** 可用主题列表（预设 + 用户自定义） */
+  /** 当前生效的插件主题（contributes.themes；null 表示无插件主题覆盖） */
+  activePluginTheme: PluginTheme | null
+  /** 可用主题列表（预设 + 用户自定义 + 插件贡献） */
   availableThemes: ThemeInfo[]
   /** 是否正在加载 */
   isLoading: boolean
@@ -50,6 +56,14 @@ export interface ThemeActions {
   updateAvailableThemes: () => void
   /** 刷新主题列表 */
   refreshThemes: () => void
+  /**
+   * 同步插件主题（schema 重载后调用）
+   *
+   * 1. 插件主题合入 availableThemes；
+   * 2. 当前正在用的插件主题被移除（插件禁用/卸载）→ 回退其 base 主题；
+   * 3. 当前主题是插件主题但尚未应用（启动时序：主题初始化先于 schema 加载）→ 补应用。
+   */
+  syncPluginThemes: () => void
 }
 
 /**
@@ -134,6 +148,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       currentThemeId: 'dark',
       resolvedTheme: 'dark',
       themeConfig: null,
+      activePluginTheme: null,
       availableThemes: [],
       isLoading: false,
 
@@ -180,6 +195,20 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
             }
           }
 
+          // 3. 插件主题（contributes.themes）：以 base 主题配置为基础，
+          //    插件声明的 CSS 变量在 applyTheme 之后按 setProperty 覆盖（后写者胜）。
+          //    纯数据无 JS 执行——主题插件是"大众级定制"的正路（任务文档第 1 层）。
+          let pluginTheme: PluginTheme | null = null
+          if (!config) {
+            pluginTheme = contributionRegistry.getPluginTheme(themeId)
+            if (pluginTheme) {
+              const baseTheme = getPresetTheme(pluginTheme.base)
+              if (baseTheme) {
+                config = baseTheme
+              }
+            }
+          }
+
           if (config) {
             // 判断是否为浅色主题
             const resolved = isLightTheme(config) ? 'light' : 'dark'
@@ -187,6 +216,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
               themeConfig: config,
               currentThemeId: themeId,
               resolvedTheme: resolved,
+              activePluginTheme: pluginTheme,
             })
             get().applyTheme()
           } else {
@@ -198,6 +228,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
                 themeConfig: fallback,
                 currentThemeId: 'dark',
                 resolvedTheme: 'dark',
+                activePluginTheme: null,
               })
               get().applyTheme()
             }
@@ -211,6 +242,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
               themeConfig: fallback,
               currentThemeId: 'dark',
               resolvedTheme: 'dark',
+              activePluginTheme: null,
             })
             get().applyTheme()
           }
@@ -229,9 +261,21 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       updateAvailableThemes: () => {
         const userThemes = ThemeStorageService.getUserThemes()
 
-        // 合并预设主题和用户主题
+        // 插件贡献的主题（contributes.themes）：来源插件标注 pluginId，
+        // 预览色由声明的 --ds-* 变量派生（缺省回退 base 主题预览）。
+        const pluginThemes: ThemeInfo[] = contributionRegistry.getPluginThemes().map((t) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description ?? `来自插件 ${t.pluginId} 的主题`,
+          category: t.base,
+          pluginId: t.pluginId,
+          preview: derivePluginThemePreview(t),
+        }))
+
+        // 合并预设主题 + 插件主题 + 用户主题
         const allThemes: ThemeInfo[] = [
           ...themeList,
+          ...pluginThemes,
           ...userThemes.map((theme) => ({
             id: theme.id,
             name: theme.name,
@@ -250,6 +294,30 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         set({ availableThemes: allThemes })
       },
 
+      // 同步插件主题（schema 重载后由 GrowthLoop 调用）
+      syncPluginThemes: () => {
+        get().updateAvailableThemes()
+
+        const { currentThemeId, activePluginTheme, themeConfig } = get()
+        const pluginTheme = contributionRegistry.getPluginTheme(currentThemeId)
+
+        if (pluginTheme) {
+          // 当前主题是插件主题：若尚未应用（启动时序：主题初始化先于 schema 加载，
+          // 或插件被重新启用），补一次 loadTheme 让变量生效。
+          const applied = activePluginTheme?.id === pluginTheme.id && themeConfig?.id === pluginTheme.id
+          if (!applied) {
+            void get().loadTheme(currentThemeId)
+          }
+        } else if (activePluginTheme) {
+          // 当前正在用的插件主题已从注册表消失（插件被禁用/卸载）→ 回退其 base 主题，
+          // 无残留样式（applyTheme 全量重写变量，插件变量不再被写入）。
+          loggers.websocket.info(
+            `[themeStore] 插件主题 ${activePluginTheme.id} 已移除（插件 ${activePluginTheme.pluginId} 禁用/卸载），回退 ${activePluginTheme.base}`,
+          )
+          void get().loadTheme(activePluginTheme.base)
+        }
+      },
+
       // 重置主题
       resetTheme: () => {
         set({
@@ -266,7 +334,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
 
       // 应用主题到 DOM
       applyTheme: () => {
-        const { themeConfig } = get()
+        const { themeConfig, activePluginTheme } = get()
         if (!themeConfig) return
         // 使用优化后的批量应用方法（含 effects → 全局过渡/动画变量）
         applyThemeToDOM(themeConfig)
@@ -318,6 +386,13 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
             root.style.setProperty(`--${key}-texture`, 'none')
           }
         })
+
+        // === 插件主题覆盖（contributes.themes）===
+        // 在 base 主题（含其背景）全部应用之后执行：插件声明的变量 setProperty 后写者胜，
+        // 背景按 enabled 开关覆盖。纯数据无 JS 执行（主题插件是"大众级定制"的正路）。
+        if (activePluginTheme) {
+          applyPluginThemeVars(activePluginTheme)
+        }
       },
     }),
     {

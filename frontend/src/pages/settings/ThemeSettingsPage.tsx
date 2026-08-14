@@ -16,7 +16,11 @@ import type { ThemeInfo } from '@/types/theme'
  * @param embedded 嵌入设置主页右侧面板时为 true（去掉独立全屏头）
  */
 export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) {
-  const { currentThemeId, mode, setTheme, setMode, resolvedTheme } = useThemeStore()
+  const { currentThemeId, mode, setTheme, setMode, resolvedTheme, availableThemes, refreshThemes } =
+    useThemeStore()
+  // 与 ThemePanel 同源：优先 store 聚合列表（预设 + 插件贡献 + 用户自定义），
+  // store 未初始化时回退静态 themeList（避免首帧空白）。
+  const themes = availableThemes.length > 0 ? availableThemes : themeList
 
   const content = (
     <>
@@ -46,12 +50,15 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
       <section>
         <h2 className="mb-3 text-sm font-semibold">选择主题</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {themeList.map((theme) => (
+          {themes.map((theme) => (
             <ThemeCard
               key={theme.id}
               theme={theme}
               isActive={currentThemeId === theme.id}
-              onSelect={() => setTheme(theme.id)}
+              onSelect={() => {
+                void setTheme(theme.id)
+                void refreshThemes()
+              }}
             />
           ))}
         </div>
@@ -124,6 +131,16 @@ function ThemeCard({
       <h3 className="text-sm font-semibold">{theme.name}</h3>
       {theme.description && (
         <p className="text-muted-foreground mt-1 line-clamp-2 text-xs">{theme.description}</p>
+      )}
+
+      {/* 插件贡献的主题：标注来源插件 */}
+      {theme.pluginId && (
+        <span
+          className="text-muted-foreground mt-2 inline-block rounded bg-[var(--hover-overlay)] px-1.5 py-0.5 font-mono text-[10px]"
+          title={`由插件 ${theme.pluginId} 贡献`}
+        >
+          插件 · {theme.pluginId}
+        </span>
       )}
 
       {isActive && (

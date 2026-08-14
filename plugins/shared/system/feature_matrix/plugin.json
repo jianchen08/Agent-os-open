@@ -50,7 +50,7 @@
                     "data": [
                         { "name": "SchemaDriver", "type": "表单驱动", "status": "✅" },
                         { "name": "PageRenderer", "type": "页面渲染", "status": "✅" },
-                        { "name": "WebComponent", "type": "组件注入", "status": "✅" },
+                        { "name": "WebComponent", "type": "已废弃→迁移 Webview", "status": "✅" },
                         { "name": "WindowManager", "type": "浮窗", "status": "✅" }
                     ]
                 }
@@ -143,17 +143,16 @@
             },
             {
                 "id": "fm_webcomponent",
-                "title": "Web Component",
+                "title": "Web Component(已迁移)",
                 "icon": "🧩",
                 "space": "workspace",
                 "slot": "tab",
                 "order": 80,
-                "widget": "webcomponent",
+                "widget": "webview",
                 "props": {
                     "pluginId": "feature_matrix_plugin",
-                    "scriptPath": "/component.js",
-                    "tagName": "fm-demo-widget",
-                    "props": { "message": "Hello from Web Component!" }
+                    "htmlPath": "/wc_demo",
+                    "widgetId": "fm_webview_wid_wc"
                 }
             },
             {
@@ -232,12 +231,12 @@
             "description": "Webview widget HTML"
         },
         {
-            "route_id": "component_js",
+            "route_id": "wc_demo",
             "method": "GET",
-            "path": "/ext/feature_matrix_plugin/component.js",
+            "path": "/ext/feature_matrix_plugin/wc_demo",
             "auth": "none",
             "handler_capability": "http.handle",
-            "description": "Web Component JS 资源"
+            "description": "原 Web Component 演示页的 webview 迁移版 HTML（WebComponentCardHost 已废弃）"
         },
         {
             "route_id": "config",

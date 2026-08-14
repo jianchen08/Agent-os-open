@@ -11,6 +11,16 @@
  *
  * 与 HtmlPreviewWidget 的区别：HtmlPreviewWidget 是受信内容预览（开 allow-same-origin），
  * WebviewWidget 是**不可信插件代码**执行沙箱（绝不开 allow-same-origin）。
+ *
+ * 性能边界（实测，写进插件开发文档的契约）：
+ * - 创建 50-200ms（新 browsing context，每实例付一次）；单次通信 0.5-2ms
+ *   （postMessage 序列化）；每实例 ~1-5MB 独立 JS 堆。
+ * - 适合：低频交互（按钮/表单）、中频更新（进度条/状态刷新）、整页内容（编辑器/画板）。
+ * - 吃力：60fps 高频实时同步、几十个实例并发、MB 级数据流。
+ * 插件侧避免在 iframe 内做高频实时渲染，需要时让插件走预置 Widget（同进程直通）。
+ *
+ * 作为插件自定义 widget：contributes.widgets 声明 `"widget": "webview"`，
+ * props 传 { pluginId, htmlPath, widgetId } 即可注册（RenderingEngine 原样透传 props）。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { FileWarning } from '@/assets/icons'
@@ -50,7 +60,7 @@ const BOOTSTRAP_JS = `<script>
   // 通知宿主 webview 已就绪
   post('__ready', {});
 })();
-<\/script>`
+</script>`
 
 /** 注入 iframe 的 CSP：限制脚本/样式来源，防御 XSS。 */
 const CSP_META =

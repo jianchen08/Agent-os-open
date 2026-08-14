@@ -8,7 +8,7 @@
 
 import { presetThemes } from '@/config/themes'
 import { ThemeStorageService, mergeTheme as mergeUserTheme } from '@/services/themeStorage'
-import type { ThemeConfig } from '@/types/theme'
+import type { PluginTheme, ThemeConfig, ThemeInfo } from '@/types/theme'
 
 /**
  * 获取预设主题配置
@@ -576,6 +576,100 @@ export function applyTheme(config: ThemeConfig, debug = false): void {
   if (debug) {
     console.log(`✅ 应用了 ${varEntries.length} 个 CSS 变量`)
     console.groupEnd()
+  }
+}
+
+/**
+ * 应用插件主题的变量与背景覆盖（contributes.themes）
+ *
+ * 必须在基础主题已应用（applyTheme）之后调用：声明的变量逐个 setProperty
+ * （后写者胜，覆盖 base 主题对应值）；背景（image/texture）按 enabled 开关
+ * 覆盖宿主背景。纯数据无 JS 执行，零 eval 风险（任务文档「第 1 层」）。
+ *
+ * @param theme - 插件主题声明（plugin.json contributes.themes 条目）
+ */
+export function applyPluginThemeVars(theme: PluginTheme): void {
+  const root = document.documentElement
+  const body = document.body
+
+  // === 变量覆盖 ===
+  const variables = theme.variables ?? {}
+  for (const [key, value] of Object.entries(variables)) {
+    if (key && value) {
+      root.style.setProperty(key, value)
+    }
+  }
+
+  // === 背景覆盖 ===
+  const bg = theme.backgrounds
+  if (bg?.image) {
+    // enabled=false 显式关闭宿主背景图片；未声明 enabled 视为按配置覆盖
+    if (bg.image.enabled === false) {
+      body.classList.remove('has-bg-image')
+      root.style.removeProperty('--bg-image')
+    } else if (bg.image.url) {
+      body.classList.add('has-bg-image')
+      if (bg.image.position) root.style.setProperty('--bg-image-position', bg.image.position)
+      if (bg.image.size) root.style.setProperty('--bg-image-size', bg.image.size)
+      if (bg.image.attachment) root.style.setProperty('--bg-image-attachment', bg.image.attachment)
+      if (bg.image.overlay) root.style.setProperty('--bg-overlay', bg.image.overlay)
+      if (bg.image.overlayOpacity !== undefined) {
+        root.style.setProperty('--bg-overlay-opacity', String(bg.image.overlayOpacity))
+      }
+      root.style.setProperty('--bg-image', `url(${bg.image.url})`)
+    }
+  }
+  if (bg?.texture) {
+    if (bg.texture.enabled === false || bg.texture.type === 'none') {
+      root.style.setProperty('--bg-texture', 'none')
+    } else if (bg.texture.type) {
+      root.style.setProperty('--bg-texture', generateTextureCSS(bg.texture))
+      if (bg.texture.size) root.style.setProperty('--bg-texture-size', bg.texture.size)
+      if (bg.texture.opacity !== undefined) {
+        root.style.setProperty('--bg-texture-opacity', String(bg.texture.opacity))
+      }
+    }
+  }
+}
+
+/**
+ * 为插件主题派生预览色（ThemePanel/主题卡片色块用）
+ *
+ * 优先取插件声明的 --ds-* 变量（accent-primary/bg-canvas/bg-panel/text-primary/
+ * accent-ai），缺省回退其 base 主题（dark/light 预设）的预览色。
+ *
+ * @param theme - 插件主题声明
+ * @returns 预览色对象
+ */
+export function derivePluginThemePreview(theme: PluginTheme): ThemeInfo['preview'] {
+  const vars = theme.variables ?? {}
+  const basePreview = presetThemes[theme.base]?.preview
+  return {
+    primary: vars['--ds-accent-primary'] ?? basePreview?.primary ?? '#22D3EE',
+    background: vars['--ds-bg-canvas'] ?? basePreview?.background ?? '#04060F',
+    surface: vars['--ds-bg-panel'] ?? basePreview?.surface ?? '#0A1226',
+    text: vars['--ds-text-primary'] ?? basePreview?.text ?? '#F1F5F9',
+    accent: vars['--ds-accent-ai'] ?? basePreview?.accent ?? '#A78BFA',
+  }
+}
+
+/**
+ * 生成纹理 CSS（插件主题背景用；与 themeStore.generateTextureCSS 语义一致）
+ */
+function generateTextureCSS(texture: { type?: string; color?: string; size?: string }): string {
+  if (!texture?.type || texture.type === 'none') return 'none'
+  const { type, color = 'rgba(255,255,255,0.03)', size = '24px' } = texture
+  switch (type) {
+    case 'dots':
+      return `radial-gradient(${color} 1px, transparent 1px)`
+    case 'grid':
+      return `linear-gradient(${color} 1px, transparent 1px), linear-gradient(90deg, ${color} 1px, transparent 1px)`
+    case 'lines':
+      return `repeating-linear-gradient(0deg, ${color}, ${color} 1px, transparent 1px, transparent ${size})`
+    case 'checker':
+      return `repeating-conic-gradient(${color} 0% 25%, transparent 0% 50%)`
+    default:
+      return 'none'
   }
 }
 

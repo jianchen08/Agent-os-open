@@ -56,6 +56,8 @@ export interface ThemeInfo {
   version?: string
   /** 是否为无障碍主题 */
   accessibility?: boolean
+  /** 来源插件 ID（插件贡献的主题标记，UI 用于标注来源；内置/用户主题无此字段） */
+  pluginId?: string
   /** 预览色彩 */
   preview?: {
     primary: string
@@ -64,6 +66,34 @@ export interface ThemeInfo {
     text: string
     accent: string
   }
+}
+
+/**
+ * 插件贡献的主题（contributes.themes 条目）
+ *
+ * 主题插件模型：基于一个内置 base 主题（dark/light），用**原始 CSS 变量键值对**
+ * 做覆盖。纯数据、无 JS 执行——比 CSS 注入更安全、更大众（填变量值即可造主题）。
+ * 应用时：先 applyTheme(base)，再对声明的变量逐个 setProperty（后写者胜），
+ * 背景（image/texture）按 enabled 开关覆盖宿主背景。
+ */
+export interface PluginTheme {
+  /** 主题 ID（插件内唯一，全局唯一键为 `{pluginId}:{id}`） */
+  id: string
+  /** 显示名称 */
+  name: string
+  /** 描述 */
+  description?: string
+  /** 基础主题（dark/light），决定亮暗与未覆盖变量的默认值 */
+  base: 'dark' | 'light'
+  /** CSS 变量覆盖（--ds-* 等，应用时 root.style.setProperty(key, value)） */
+  variables?: Record<string, string>
+  /** 背景覆盖（image/texture；enabled=false 表示显式关闭宿主对应背景） */
+  backgrounds?: {
+    image?: Partial<BackgroundImageConfig> & { enabled?: boolean }
+    texture?: Partial<TextureConfig> & { enabled?: boolean }
+  }
+  /** 来源插件 ID */
+  pluginId: string
 }
 
 /** 背景色配置 */

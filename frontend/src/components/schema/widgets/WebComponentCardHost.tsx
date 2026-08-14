@@ -1,6 +1,20 @@
 /**
  * WebComponentCardHost — 第二条插件 UI 注入路径（ADR §3.4 第二通道）
  *
+ * @deprecated 自 0.2 起废弃（任务域：插件前端定制化，见 docs/tasks/task_plugin_frontend_customization.md）。
+ * 三个废弃理由：
+ * 1. **eval 安全风险**：new Function（等价 eval）在主页全局执行插件 JS，
+ *    能偷 token、改 DOM、监听事件——源码安全假设已不成立（等价 bash 访问）；
+ * 2. **Shadow DOM 隔离改不到现有 UI**：CE 的 CSS 只影响自身 Shadow DOM 内部，
+ *    做不了"金色蕾丝边框"这类宿主 UI 视觉定制；
+ * 3. **无不可替代能力**：高频交互被预置 Widget 覆盖、动态组件被 WebviewWidget
+ *    覆盖、改视觉被「主题插件（contributes.themes）+ CSS 注入（contributes.client_styles）」覆盖。
+ *
+ * 迁移路径（按需选择）：
+ * - 要改宿主视觉（边框/动画/背景）→ 主题插件（变量）或 CSS 注入（装饰规则）；
+ * - 要提供完整自定义交互组件 → WebviewWidget（iframe 沙箱，见同目录 WebviewWidget.tsx）。
+ * 本组件暂不删除（兼容现有依赖），确认无插件引用后移除。
+ *
  * 与 WebviewWidget（iframe srcDoc sandbox）互补：
  * - WebviewWidget：iframe 沙箱，postMessage 通信，**绝不开 allow-same-origin**，最安全但重
  * - WebComponentCardHost：插件提供 JS（注册成 Custom Element），前端动态加载执行，
@@ -17,12 +31,6 @@
  *   this.attachShadow(...) 渲染内部 DOM）。这是 Web Components 标准模型——宿主层不应再额外
  *   attachShadow，否则会包一层无用的 shadow root，且无法直接把 props 设到 CE 实例上。
  *   因此本组件的隔离 = 「CE 类内部的 shadow root」+「CE 注册名的全局唯一性」。
- *
- * 安全假设（第一阶段）：
- *   - 执行的 JS 来自已通过插件准入白名单的插件（pluginId 经过鉴权）
- *   - apiClient 自带 Bearer token，未授权请求会被后端拦截
- *   - 我们用 new Function（等价 eval）直跑插件脚本——这是 Custom Element 注册所必需的
- *   - 后续阶段可加 CSP nonce / 受限执行环境（如 SES、ShadowRealm）进一步收口
  *
  * 错误处理：fetch 失败 / 脚本执行抛错 / 缺必需 props → 渲染错误占位（不向上抛）
  */

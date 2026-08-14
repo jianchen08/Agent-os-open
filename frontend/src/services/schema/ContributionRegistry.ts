@@ -17,6 +17,7 @@
  */
 
 import React from 'react'
+import type { PluginTheme } from '@/types/theme'
 
 /** 贡献点类型（含统一模型的 'pages'；旧类型仍可被薄视图查询） */
 export type ContributionType =
@@ -191,6 +192,23 @@ export interface WidgetDeclaration {
   pluginId?: string
 }
 
+/** 插件 CSS 注入声明（contributes.client_styles 条目） */
+export interface ClientStyleDeclaration {
+  /** 样式标识（插件内唯一，全局唯一键为 `{pluginId}:{id}`） */
+  id: string
+  /** CSS 资源路径（相对插件根，如 "/assets/border.css"；拼接为 /ext/{pluginId}{path}） */
+  path: string
+  /** 作用域：global 不包装（装饰全局）；scoped 自动加 [data-plugin] 前缀（防全局污染） */
+  scope?: 'global' | 'scoped'
+  /** 描述 */
+  description?: string
+  /** 来源插件 ID */
+  pluginId: string
+}
+
+/** contributes 中旁路注册（不归一化为页面）的视觉贡献 key */
+const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set(['themes', 'client_styles'])
+
 /**
  * 旧贡献点 key → 归一化 space/slot 映射（统一架构 4.4 节）
  *
@@ -241,6 +259,10 @@ export class ContributionRegistry {
   private settingsPanels: Map<string, SettingsPanelEntry> = new Map()
   /** 插件 widget 声明（按 pluginId 索引，来自 ui_schema） */
   private widgetsByPlugin: Map<string, WidgetDeclaration[]> = new Map()
+  /** 插件主题声明（contributes.themes 旁路注册，不归一化为页面） */
+  private pluginThemes: PluginTheme[] = []
+  /** 插件 CSS 注入声明（contributes.client_styles 旁路注册，不归一化为页面） */
+  private clientStyles: ClientStyleDeclaration[] = []
   /** 是否已初始化 */
   private initialized = false
 
@@ -362,8 +384,18 @@ export class ContributionRegistry {
       if (!contributes) continue
 
       // 遍历每种贡献点 key（pages / viewsContainers / views / menus / ...），统一归一化
+      // 例外：themes / client_styles 是纯数据视觉贡献（主题变量 + CSS），不进 pages 归一化，
+      // 由各自旁路注册表承接（themeStore / pluginStyles 消费）。
       for (const [type, items] of Object.entries(contributes)) {
         if (!Array.isArray(items)) continue
+        if (NON_PAGE_CONTRIBUTE_KEYS.has(type)) {
+          if (type === 'themes') {
+            this.registerPluginThemes(pluginId, items as Record<string, unknown>[])
+          } else {
+            this.registerClientStyles(pluginId, items as Record<string, unknown>[])
+          }
+          continue
+        }
         for (const item of items) {
           this.normalizeAndRegister(type, item as Record<string, unknown>, pluginId)
         }
@@ -513,6 +545,45 @@ export class ContributionRegistry {
     return all
   }
 
+  // ── 插件主题（contributes.themes 旁路注册）──
+
+  /**
+   * 获取全部插件贡献的主题
+   */
+  getPluginThemes(): PluginTheme[] {
+    return [...this.pluginThemes]
+  }
+
+  /**
+   * 按 id 查找插件主题（id 即 plugin.json 声明的 id；插件间同名由后注册者覆盖）
+   */
+  getPluginTheme(themeId: string): PluginTheme | undefined {
+    return this.pluginThemes.find((t) => t.id === themeId)
+  }
+
+  /**
+   * 获取指定插件的主题
+   */
+  getThemesForPlugin(pluginId: string): PluginTheme[] {
+    return this.pluginThemes.filter((t) => t.pluginId === pluginId)
+  }
+
+  // ── 插件 CSS 注入（contributes.client_styles 旁路注册）──
+
+  /**
+   * 获取全部插件 CSS 注入声明
+   */
+  getClientStyles(): ClientStyleDeclaration[] {
+    return [...this.clientStyles]
+  }
+
+  /**
+   * 获取指定插件的 CSS 注入声明
+   */
+  getClientStylesForPlugin(pluginId: string): ClientStyleDeclaration[] {
+    return this.clientStyles.filter((s) => s.pluginId === pluginId)
+  }
+
   // ── 旧交互类贡献点查询（pages 之上的薄视图）──
 
   /**
@@ -576,7 +647,63 @@ export class ContributionRegistry {
     this.pagesByPlugin.clear()
     this.settingsPanels.clear()
     this.widgetsByPlugin.clear()
+    this.pluginThemes = []
+    this.clientStyles = []
     this.initialized = false
+  }
+
+  // ── 内部：旁路注册（themes / client_styles，不归一化为页面）──
+
+  /**
+   * 注册插件主题（contributes.themes）
+   *
+   * 幂等：同 pluginId + id 重复声明只更新不追加。
+   * 同名 id 冲突（跨插件）：后注册者覆盖（风险 §四.1，缓解靠插件前缀约定）。
+   */
+  private registerPluginThemes(pluginId: string, items: Array<Record<string, unknown>>): void {
+    for (const raw of items) {
+      if (typeof raw.id !== 'string' || typeof raw.name !== 'string') continue
+      const base = raw.base === 'light' ? 'light' : 'dark'
+      const theme: PluginTheme = {
+        id: raw.id,
+        name: raw.name,
+        description: typeof raw.description === 'string' ? raw.description : undefined,
+        base,
+        variables:
+          raw.variables && typeof raw.variables === 'object'
+            ? (raw.variables as Record<string, string>)
+            : undefined,
+        backgrounds:
+          raw.backgrounds && typeof raw.backgrounds === 'object'
+            ? (raw.backgrounds as PluginTheme['backgrounds'])
+            : undefined,
+        pluginId,
+      }
+      const idx = this.pluginThemes.findIndex((t) => t.pluginId === pluginId && t.id === theme.id)
+      if (idx >= 0) this.pluginThemes[idx] = theme
+      else this.pluginThemes.push(theme)
+    }
+  }
+
+  /**
+   * 注册插件 CSS 注入声明（contributes.client_styles）
+   *
+   * 幂等：同 pluginId + id 重复声明只更新不追加。
+   */
+  private registerClientStyles(pluginId: string, items: Array<Record<string, unknown>>): void {
+    for (const raw of items) {
+      if (typeof raw.id !== 'string' || typeof raw.path !== 'string') continue
+      const style: ClientStyleDeclaration = {
+        id: raw.id,
+        path: raw.path,
+        scope: raw.scope === 'scoped' ? 'scoped' : 'global',
+        description: typeof raw.description === 'string' ? raw.description : undefined,
+        pluginId,
+      }
+      const idx = this.clientStyles.findIndex((s) => s.pluginId === pluginId && s.id === style.id)
+      if (idx >= 0) this.clientStyles[idx] = style
+      else this.clientStyles.push(style)
+    }
   }
 
   // ── 内部：归一化注册 ──

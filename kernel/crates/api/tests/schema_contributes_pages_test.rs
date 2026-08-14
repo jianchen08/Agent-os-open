@@ -142,3 +142,68 @@ async fn schema_omits_contributes_for_disabled_plugin() {
         "disabled 插件的 contributes(含 pages)不应出口, got: {plugin_contributes:?}"
     );
 }
+
+#[tokio::test]
+async fn schema_passes_visual_contributes_themes_and_client_styles_verbatim() {
+    // 插件前端定制化(任务域):contributes.themes / client_styles 是纯数据视觉贡献,
+    // 内核不解释结构(与 pages 同规则)——必须原样到达响应,前端 ContributionRegistry
+    // 的旁路注册表承接(不归一化为页面)。
+    let visual = json!({
+        "themes": [{
+            "id": "gold-lace",
+            "name": "金色蕾丝",
+            "base": "dark",
+            "variables": {"--ds-accent-primary": "#D4AF37"},
+            "backgrounds": {"image": {"enabled": false}}
+        }],
+        "client_styles": [{
+            "id": "gold-lace-border",
+            "path": "/assets/border.css",
+            "scope": "global",
+            "description": "金色蕾丝边框"
+        }]
+    });
+
+    let manifests = vec![manifest_with_contributes(
+        "visual_customization_demo",
+        Some(visual.clone()),
+    )];
+    let schema = fetch_schema(
+        manifests,
+        HashSet::from(["visual_customization_demo".to_string()]),
+    )
+    .await;
+
+    let entry = &schema["plugin_contributes"][0];
+    // 关键断言:themes / client_styles 原样透传,字段不丢(变量值、背景开关、scope 都保真)
+    assert_eq!(
+        entry["contributes"]["themes"],
+        visual["themes"],
+        "contributes.themes 应原样透传"
+    );
+    assert_eq!(
+        entry["contributes"]["client_styles"],
+        visual["client_styles"],
+        "contributes.client_styles 应原样透传"
+    );
+}
+
+#[tokio::test]
+async fn schema_omits_visual_contributes_for_disabled_plugin() {
+    // 禁用语义(任务验收):插件禁用 → contributes 不出口 → 前端重载 schema 后
+    // 主题从列表移除、注入 CSS 清理(与 pages 同规则)。
+    let visual = json!({
+        "themes": [{"id": "gold-lace", "name": "金色蕾丝", "base": "dark"}],
+        "client_styles": [{"id": "gold-lace-border", "path": "/assets/border.css"}]
+    });
+    let manifests = vec![manifest_with_contributes("visual_off", Some(visual))];
+    let schema = fetch_schema(manifests, HashSet::new()).await;
+
+    let plugin_contributes = schema["plugin_contributes"]
+        .as_array()
+        .expect("plugin_contributes array missing");
+    assert!(
+        plugin_contributes.is_empty(),
+        "disabled 插件的 themes/client_styles 不应出口, got: {plugin_contributes:?}"
+    );
+}

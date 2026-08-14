@@ -69,6 +69,15 @@ function ThemeSwatch({
       <span className="text-foreground min-w-0 flex-1 truncate text-[12px]">
         {theme.name}
       </span>
+      {/* 插件来源标注（contributes.themes 贡献的主题） */}
+      {theme.pluginId && (
+        <span
+          className="text-muted-foreground shrink-0 rounded bg-[var(--hover-overlay)] px-1 py-0.5 font-mono text-[9px]"
+          title={`来源插件: ${theme.pluginId}`}
+        >
+          {theme.pluginId}
+        </span>
+      )}
     </button>
   )
 }
