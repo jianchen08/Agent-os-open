@@ -127,17 +127,19 @@ export function InteractionCard({
           <div className="space-y-3">
             {interaction.options && interaction.options.length > 0 && (
               <div className="flex flex-wrap gap-2">
-                {interaction.options.map((opt) => (
+                {interaction.options.map((opt, i) => (
                   <Button
-                    key={opt.id}
+                    key={opt.id ?? opt.label ?? i}
                     variant="outline"
                     size="sm"
                     disabled={isSubmitting}
                     onClick={() => {
-                      if (opt.description) {
+                      // AC-1.2-3: 短 description（<20字符）直接执行选择；长描述（>=20字符）弹窗展示详情
+                      if (opt.description && opt.description.length >= 20) {
                         setDetailOption(opt)
                       } else {
-                        onRespondChoice(interaction.requestId, opt.id, opt.label)
+                        // 后端 options 可能缺 id（LLM 传参差异）——label 兜底；父层已绑定 requestId
+                        onRespondChoice(opt.id ?? opt.label ?? String(i))
                       }
                     }}
                     className="text-sm"
@@ -185,13 +187,13 @@ export function InteractionCard({
             {/* 选项按钮（如果有 options） */}
             {interaction.options && interaction.options.length > 0 && (
               <div className="flex flex-wrap gap-2">
-                {interaction.options.map((opt) => (
+                {interaction.options.map((opt, i) => (
                   <Button
-                    key={opt.id}
+                    key={opt.id ?? opt.label ?? i}
                     variant="outline"
                     size="sm"
                     disabled={isSubmitting}
-                    onClick={() => onRespondChoice(opt.id, opt.label)}
+                    onClick={() => onRespondChoice(opt.id ?? opt.label ?? String(i))}
                     className="text-sm"
                   >
                     <span className="flex flex-col items-start gap-0.5">
@@ -277,7 +279,7 @@ export function InteractionCard({
           <DialogHeader>
             <DialogTitle>{detailOption?.label}</DialogTitle>
           </DialogHeader>
-          <div className="max-h-[60vh] overflow-y-auto overscroll-contain">
+          <div data-testid="dialog-scroll-area" className="max-h-[60vh] overflow-y-auto overscroll-contain">
             {detailOption?.description && (
               <MarkdownRenderer content={detailOption.description} />
             )}
@@ -296,7 +298,7 @@ export function InteractionCard({
               disabled={isSubmitting}
               onClick={() => {
                 if (detailOption) {
-                  onRespondChoice(detailOption.id, detailOption.label)
+                  onRespondChoice(detailOption.id ?? detailOption.label ?? '')
                   setDetailOption(null)
                 }
               }}
