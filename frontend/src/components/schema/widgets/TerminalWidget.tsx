@@ -3,14 +3,12 @@
  *
  * 设计原则（见任务说明）：本组件不实现真实终端 PTY，也不引入 xterm.js。
  * 它是一个「接入点」：
- * - 声明 pluginId 时，把渲染委托给插件（插件将来通过 webcomponent 注册成 Custom
- *   Element，或通过 webview 提供 iframe 终端 UI，宿主在此容器内挂载）。
+ * - 声明 pluginId 时，把渲染委托给插件（插件通过 webview 提供 iframe 终端 UI，
+ *   宿主在此容器内挂载）。
  * - 未声明 pluginId 时，渲染占位提示，引导接入 pluginId / connector。
  *
- * 接入路径（与 WebComponentCardHost / WebviewWidget 一致的两条组件注入通道）：
- *   1) 插件 http.handle → `/ext/{pluginId}{scriptPath}` 返回 JS → 注册 Custom Element
- *      → 本组件在 `terminal-plugin-mount` 挂载点 createElement(tag)。
- *   2) 插件提供 webview URL → 本组件在挂载点渲染 iframe。
+ * 接入路径（WebviewWidget 通道；webcomponent 已于 0.2 废弃删除）：
+ *   1) 插件提供 webview URL → 本组件在挂载点渲染 iframe。
  *   （本骨架仅预留挂载点容器，不实例化 xterm / iframe；完整实现见后续 Phase。）
  *
  * Props 契约（flat，与 TableWidget 一致；由 registerWidgets 以
@@ -76,8 +74,8 @@ export function TerminalWidget(props: TerminalWidgetProps) {
   }
 
   // 声明了 pluginId → 渲染插件接入容器
-  // 这里只预留挂载点；将来插件提供的 Custom Element / webview 将注入到
-  // `terminal-plugin-mount` 容器内（与 WebComponentCardHost 同模型）。
+  // 这里只预留挂载点；将来插件提供的 webview iframe 将注入到
+  // `terminal-plugin-mount` 容器内（与 WebviewWidget 同模型）。
   return (
     <div
       data-testid="terminal-plugin-host"

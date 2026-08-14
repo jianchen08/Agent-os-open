@@ -9,7 +9,7 @@
  *
  * 「插件接入就生效」形态:
  * - 现在:显示 source/connector 信息 + 「形象渲染待插件接入」提示。
- * - 将来:形象插件可提供 webcomponent/webview,本组件作为 fallback 或 wrapper
+ * - 将来:形象插件可提供 webview UI,本组件作为 fallback 或 wrapper
  *   (插件未加载 / 未声明 connector 时回落到本占位)。
  *
  * 事件订阅预留:

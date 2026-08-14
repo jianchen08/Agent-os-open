@@ -28,7 +28,6 @@ import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import { TaskCardWidget } from '@/components/schema/widgets/TaskCardWidget'
 import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
-import { WebComponentCardHost } from '@/components/schema/widgets/WebComponentCardHost'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
@@ -77,11 +76,10 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'workspace_explorer', component: WorkspaceExplorerPanel, spaces: ['workspace'] },
   // 兼容 SettingsHubWidget 直注册
   { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
-  // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview
+  // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview。
+  // 注：webcomponent（WebComponentCardHost，eval 注入）已于 0.2 废弃并删除代码，
+  // 插件自定义完整 UI 一律走 webview / 主题插件 / CSS 注入（task_plugin_frontend_customization）。
   { name: 'webview', component: WebviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'html_preview' },
-  // @deprecated WebComponent：插件 JS 注册成 Custom Element（eval 注入，任务域已废弃），
-  // 保留注册兼容既有插件；新插件请用 webview / 主题插件 / CSS 注入。
-  { name: 'webcomponent', component: WebComponentCardHost, spaces: ['chat', 'workspace', 'floating'], fallback: 'status_card' },
   // 数字人/形象占位 widget（ADR §2.1 / §7.6）：形象是 workspace 的 widget，不占独立空间。
   // 现阶段只占位（不引入渲染库），0.7.0 由插件接入 Live2D/VRM/TTS；支持 detachable 三态（浮窗/桌面组件/全屏）
   {

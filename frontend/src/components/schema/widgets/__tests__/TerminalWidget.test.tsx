@@ -2,7 +2,7 @@
  * TerminalWidget 骨架测试 —— 插件接入点（不做真实 PTY）
  *
  * 设计原则：TerminalWidget 本身不实现终端，而是作为「接入点」让插件提供真实能力。
- * - 有 pluginId：渲染插件接入容器（将来插件通过 webcomponent/webview 注入终端 UI）
+ * - 有 pluginId：渲染插件接入容器（将来插件通过 webview 注入终端 UI）
  * - 无 pluginId：占位提示，引导接入
  *
  * 可观察行为（AC）：
