@@ -90,3 +90,118 @@ pub(crate) fn find_agent_yaml(dir: &Path, agent_id: &str) -> Option<std::path::P
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_agent_yaml(root: &std::path::Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn load_agent_config_missing_file_returns_default_with_config_id() {
+        let root = tempfile::tempdir().unwrap();
+        // agents/ 目录都不存在
+        let cfg = load_agent_config(root.path(), "ghost_agent").unwrap();
+        assert_eq!(cfg.config_id, "ghost_agent");
+        assert!(cfg.name.is_empty());
+        assert!(cfg.tool_ids.is_empty());
+        assert!(cfg.system_prompt.is_none());
+        assert!(cfg.max_iterations.is_none());
+    }
+
+    #[test]
+    fn load_agent_config_parses_full_fields() {
+        let root = tempfile::tempdir().unwrap();
+        write_agent_yaml(
+            root.path(),
+            "agents/researcher.yaml",
+            "config_id: researcher-v1\n\
+             name: Researcher\n\
+             level: senior\n\
+             model_tier: fast\n\
+             system_prompt: You are a researcher\n\
+             tool_ids: [web_fetch, memory_read]\n\
+             max_iterations: 8\n",
+        );
+        let cfg = load_agent_config(root.path(), "researcher").unwrap();
+        assert_eq!(cfg.config_id, "researcher-v1");
+        assert_eq!(cfg.name, "Researcher");
+        assert_eq!(cfg.level.as_deref(), Some("senior"));
+        assert_eq!(cfg.model_tier.as_deref(), Some("fast"));
+        assert_eq!(cfg.system_prompt.as_deref(), Some("You are a researcher"));
+        assert_eq!(cfg.tool_ids, vec!["web_fetch", "memory_read"]);
+        assert_eq!(cfg.max_iterations, Some(8));
+    }
+
+    #[test]
+    fn load_agent_config_missing_config_id_falls_back_to_filename() {
+        let root = tempfile::tempdir().unwrap();
+        // config_id 显式为空串（serde 必填字段，缺字段会解析失败）→ 文件名兜底。
+        write_agent_yaml(root.path(), "agents/plain.yaml", "config_id: ''\nname: Plain\n");
+        let cfg = load_agent_config(root.path(), "plain").unwrap();
+        assert_eq!(cfg.config_id, "plain", "config_id 为空时用文件名兜底");
+        assert_eq!(cfg.name, "Plain");
+    }
+
+    #[test]
+    fn load_agent_config_finds_nested_category_dir() {
+        let root = tempfile::tempdir().unwrap();
+        // agents/main/deep_think.yaml（分类子目录）
+        write_agent_yaml(
+            root.path(),
+            "agents/main/deep_think.yaml",
+            "config_id: deep_think\nname: Deep Think\n",
+        );
+        let cfg = load_agent_config(root.path(), "deep_think").unwrap();
+        assert_eq!(cfg.config_id, "deep_think");
+        assert_eq!(cfg.name, "Deep Think");
+    }
+
+    #[test]
+    fn load_agent_config_yaml_parse_error_is_exposed() {
+        let root = tempfile::tempdir().unwrap();
+        write_agent_yaml(root.path(), "agents/broken.yaml", "config_id: [unclosed\n");
+        let err = load_agent_config(root.path(), "broken").unwrap_err();
+        match err {
+            ConfigError::YamlParse { path, .. } => {
+                assert!(path.contains("broken.yaml"), "got: {path}")
+            }
+            other => panic!("expected YamlParse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_agent_config_unknown_fields_ignored() {
+        // serde 默认忽略未知字段——新加的 agent 配置字段不破坏旧内核。
+        let root = tempfile::tempdir().unwrap();
+        write_agent_yaml(
+            root.path(),
+            "agents/future.yaml",
+            "config_id: future\nname: Future\nsome_future_field: 42\n",
+        );
+        let cfg = load_agent_config(root.path(), "future").unwrap();
+        assert_eq!(cfg.config_id, "future");
+        assert_eq!(cfg.name, "Future");
+    }
+
+    #[test]
+    fn find_agent_yaml_returns_none_for_missing_dir_or_agent() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(find_agent_yaml(&root.path().join("agents"), "x").is_none());
+        write_agent_yaml(root.path(), "agents/a.yaml", "name: A\n");
+        assert!(find_agent_yaml(&root.path().join("agents"), "missing").is_none());
+    }
+
+    #[test]
+    fn find_agent_yaml_does_not_match_other_extensions() {
+        let root = tempfile::tempdir().unwrap();
+        write_agent_yaml(root.path(), "agents/x.yaml.bak", "name: X\n");
+        write_agent_yaml(root.path(), "agents/y.txt", "name: Y\n");
+        assert!(find_agent_yaml(&root.path().join("agents"), "x").is_none());
+        assert!(find_agent_yaml(&root.path().join("agents"), "y").is_none());
+    }
+}

@@ -729,4 +729,97 @@ mod tests {
         // 完全不匹配
         assert!(registry.find_http_route("/ext/p/nonexistent", "GET").is_none());
     }
+
+    // ── HTTP 路由注册治理（ADR 附录 E.1.3）──
+
+    fn mk_ep(path: &str, method: &str) -> HttpEndpoint {
+        HttpEndpoint {
+            route_id: format!("r_{path}"),
+            method: method.to_string(),
+            path: path.to_string(),
+            auth: "none".to_string(),
+            handler_capability: "http.handle".to_string(),
+            timeout_ms: None,
+            max_concurrency: None,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn test_register_http_route_rejects_path_outside_namespace() {
+        // 规则 1：path 必须以 /ext/{plugin_id}/ 为前缀。
+        let registry = CapabilityRegistryImpl::new();
+        assert!(registry.register_http_route("p1", mk_ep("/other/foo", "GET")).is_err());
+        assert!(registry.register_http_route("p1", mk_ep("/ext/p2/foo", "GET")).is_err());
+        // 恰好 /ext/{plugin_id}（无尾斜杠）合法
+        assert!(registry.register_http_route("p1", mk_ep("/ext/p1", "GET")).is_ok());
+    }
+
+    #[test]
+    fn test_register_http_route_rejects_reserved_segments() {
+        // 规则 2：denylist 段 ws / health。
+        let registry = CapabilityRegistryImpl::new();
+        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/ws/chat", "GET")).is_err());
+        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/health", "GET")).is_err());
+    }
+
+    #[test]
+    fn test_register_http_route_rejects_api_v1_subpath() {
+        // 规则 3：denylist 子路径 api/v1。
+        let registry = CapabilityRegistryImpl::new();
+        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/api/v1/models", "GET")).is_err());
+        assert!(registry.register_http_route("p1", mk_ep("/api/v1/models", "GET")).is_err());
+    }
+
+    #[test]
+    fn test_register_http_route_conflict_fails_closed() {
+        // 同 path+method 冲突 → 第二次注册失败（不静默覆盖）。
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_http_route("p1", mk_ep("/ext/p1/foo", "GET")).unwrap();
+        let err = registry.register_http_route("p1", mk_ep("/ext/p1/foo", "GET"));
+        assert!(err.is_err());
+        let msg = err.unwrap_err();
+        assert!(msg.contains("conflict"), "got: {msg}");
+        // 不同 method 不冲突
+        assert!(registry.register_http_route("p1", mk_ep("/ext/p1/foo", "POST")).is_ok());
+    }
+
+    #[test]
+    fn test_find_http_route_method_case_insensitive() {
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_http_route("p1", mk_ep("/ext/p1/llm", "GET")).unwrap();
+        assert!(registry.find_http_route("/ext/p1/llm", "get").is_some());
+        assert!(registry.find_http_route("/ext/p1/llm", "GeT").is_some());
+    }
+
+    #[test]
+    fn test_clear_plugin_removes_http_routes_and_signals() {
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_http_route("p1", mk_ep("/ext/p1/llm", "GET")).unwrap();
+        registry.register_route_signals("p1", vec![RouteType::End, RouteType::Wait]);
+        assert!(registry.has_route_signal(&RouteType::End));
+
+        registry.clear_plugin("p1");
+
+        assert!(registry.find_http_route("/ext/p1/llm", "GET").is_none());
+        assert!(!registry.has_route_signal(&RouteType::End), "clear 后 signal 应移除");
+        assert!(!registry.has_route_signal(&RouteType::Wait));
+    }
+
+    #[test]
+    fn test_register_route_signals_rebuilds_union_on_reregister() {
+        // 重注册（如部分卸载后）旧 signal 不得残留：全局集合 = 当前所有插件并集。
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_route_signals("plugin_a", vec![RouteType::End, RouteType::Wait]);
+        registry.register_route_signals("plugin_b", vec![RouteType::NextLlm]);
+        assert!(registry.has_route_signal(&RouteType::End));
+        assert!(registry.has_route_signal(&RouteType::Wait));
+        assert!(registry.has_route_signal(&RouteType::NextLlm));
+
+        // plugin_a 重注册为空 → End/Wait 必须消失（union 重建），NextLlm 保留
+        registry.register_route_signals("plugin_a", vec![]);
+        assert!(!registry.has_route_signal(&RouteType::End), "重注册后旧 signal 应移除");
+        assert!(!registry.has_route_signal(&RouteType::Wait));
+        assert!(registry.has_route_signal(&RouteType::NextLlm));
+    }
 }

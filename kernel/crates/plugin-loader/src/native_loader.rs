@@ -221,3 +221,84 @@ impl NativePluginLoader {
 // OsStr 兼容（路径操作工具，未来扩展用）
 #[allow(dead_code)]
 fn _osstr(_s: &OsStr) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_artifact_name_keeps_known_extensions() {
+        assert_eq!(NativePluginLoader::platform_artifact_name("p.dll"), "p.dll");
+        assert_eq!(NativePluginLoader::platform_artifact_name("P.SO"), "P.SO", "大小写后缀保留");
+        assert_eq!(NativePluginLoader::platform_artifact_name("x.dylib"), "x.dylib");
+        assert_eq!(NativePluginLoader::platform_artifact_name("liby.so"), "liby.so");
+    }
+
+    #[test]
+    fn platform_artifact_name_appends_platform_suffix_for_bare_names() {
+        let name = NativePluginLoader::platform_artifact_name("my_plugin");
+        if cfg!(windows) {
+            assert_eq!(name, "my_plugin.dll");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(name, "libmy_plugin.dylib");
+        } else {
+            assert_eq!(name, "libmy_plugin.so");
+        }
+    }
+
+    #[test]
+    fn load_nonexistent_path_returns_native_load_failed() {
+        let loader = NativePluginLoader::new();
+        let err = match loader.load("ghost", Path::new("C:/definitely/not/exists/ghost.dll")) {
+            Ok(_) => panic!("load should fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code.as_deref(), Some("NATIVE_LOAD_FAILED"));
+        assert!(!loader.is_loaded("ghost"));
+    }
+
+    #[test]
+    fn load_non_dll_file_returns_native_load_failed() {
+        // 把文本文件当 cdylib 加载 → 系统加载器拒绝 → NATIVE_LOAD_FAILED（不 panic）。
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("fake.dll");
+        std::fs::write(&fake, b"this is not a dll").unwrap();
+        let loader = NativePluginLoader::new();
+        let err = match loader.load("fake", &fake) {
+            Ok(_) => panic!("load should fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code.as_deref(), Some("NATIVE_LOAD_FAILED"));
+    }
+
+    #[test]
+    fn execute_not_loaded_returns_native_not_loaded() {
+        let loader = NativePluginLoader::new();
+        let ctx = PluginCtx {
+            state_json: "{}".to_string(),
+            config_json: "{}".to_string(),
+            tenant_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            task_id: "task1".to_string(),
+            pipeline_id: "p1".to_string(),
+        };
+        let err = loader.execute("never_loaded", &ctx, None).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("NATIVE_NOT_LOADED"));
+    }
+
+    #[test]
+    fn unload_not_loaded_returns_error() {
+        let loader = NativePluginLoader::new();
+        let err = loader.unload("never_loaded").unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("NATIVE_NOT_LOADED"));
+    }
+
+    #[test]
+    fn new_loader_starts_empty() {
+        let loader = NativePluginLoader::new();
+        assert!(loader.list_loaded().is_empty());
+        assert!(!loader.is_loaded("anything"));
+        let default = NativePluginLoader::default();
+        assert!(default.list_loaded().is_empty());
+    }
+}

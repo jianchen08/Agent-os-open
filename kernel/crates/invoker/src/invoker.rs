@@ -1869,6 +1869,10 @@ mod tests {
                 .map(|p| p.status.clone())
                 .unwrap_or(PluginStatus::Discovered)
         }
+
+        fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+            self.manifests.read().get(plugin_id).cloned()
+        }
     }
 
     #[allow(dead_code)]
@@ -2970,5 +2974,356 @@ mod tests {
             "PYTHONPATH 必须包含 plugins/sdk/src（agentos_plugin_sdk 源码目录），实际: {}",
             py
         );
+    }
+
+    // ── 补充分支覆盖：extract_mcp_content 错误/多元素/非字符串 ──
+
+    #[test]
+    fn test_extract_mcp_content_is_error_without_text_uses_default() {
+        // isError=true 但 content[0] 无 text 字段 → 用默认错误文案。
+        let mcp_result = json!({
+            "content": [{"type": "text"}],
+            "isError": true
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        assert_eq!(extracted["error"], "MCP tool returned isError=true");
+    }
+
+    #[test]
+    fn test_extract_mcp_content_is_error_without_content_uses_default() {
+        // isError=true 且无 content 字段 → 用默认错误文案。
+        let mcp_result = json!({"isError": true});
+        let extracted = extract_mcp_content(&mcp_result);
+        assert_eq!(extracted["error"], "MCP tool returned isError=true");
+    }
+
+    #[test]
+    fn test_extract_mcp_content_multiple_items_takes_first() {
+        // content 多元素时取第一项（Python SDK 只产出单元素数组）。
+        let mcp_result = json!({
+            "content": [
+                {"type": "text", "text": r#"{"first": true}"#},
+                {"type": "text", "text": r#"{"second": true}"#}
+            ],
+            "isError": false
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        assert_eq!(extracted["first"], true);
+        assert!(extracted.get("second").is_none());
+    }
+
+    #[test]
+    fn test_extract_mcp_content_non_string_text_falls_back() {
+        // text 不是字符串（如数字）→ 提取失败 → fallback 返回原对象。
+        let mcp_result = json!({
+            "content": [{"type": "text", "text": 12345}],
+            "isError": false
+        });
+        let extracted = extract_mcp_content(&mcp_result);
+        assert_eq!(extracted["content"][0]["text"], 12345);
+    }
+
+    // ── sidecar spawn 失败降级（无真实插件进程）──
+
+    /// 构造带 permissions 声明的 sidecar tool manifest（entry 指向不存在的命令）。
+    fn make_bad_entry_tool_manifest(id: &str) -> PluginManifest {
+        let mut m = make_sidecar_manifest(id, "definitely_missing_command_98765 --flag");
+        m.permissions = agentos_core::traits::ManifestPermissions {
+            network: agentos_core::traits::NetworkPermission {
+                allowed_hosts: vec!["example.com".to_string()],
+            },
+            filesystem: agentos_core::traits::FilesystemPermission {
+                read_paths: vec!["/tmp".to_string()],
+                write_paths: vec![],
+            },
+            env_vars: vec!["HOME".to_string()],
+            system_calls: vec!["exec".to_string()],
+        };
+        m
+    }
+
+    #[tokio::test]
+    async fn test_invoke_tool_sidecar_spawn_failure_returns_mcp_connect_failed() {
+        // 入口命令不存在 → spawn 失败 → 降级为 MCP_CONNECT_FAILED 错误（不 panic、不卡死）。
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_bad_entry_tool_manifest("tool_spawn_fail"));
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let err = invoker
+            .invoke_tool("tool_spawn_fail", "some_tool", &json!({"x": 1}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MCP_CONNECT_FAILED"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_pipeline_sidecar_spawn_failure_returns_mcp_connect_failed() {
+        // pipeline 类型 sidecar：入口命令不存在 → MCP_CONNECT_FAILED。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_pipeline_sidecar_manifest("pipe_spawn_fail", Some("ctx_build.execute"));
+        m.entry = "definitely_missing_command_98765 --flag".to_string();
+        loader.add_manifest(m);
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let ctx = PluginContext::new(
+            json!({}),
+            json!({}),
+            TenantContext::new("t1", "s1"),
+            Uuid::new_v4(),
+            agentos_core::types::ContentLoader::new(
+                Arc::new(MockStorage),
+                "run1".to_string(),
+                "main".to_string(),
+                0,
+            ),
+        );
+        let err = invoker
+            .invoke_pipeline_plugin("pipe_spawn_fail", &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MCP_CONNECT_FAILED"));
+    }
+
+    // ── manifest.mcp 配置错误早暴露（不 spawn）──
+
+    #[tokio::test]
+    async fn test_invoke_streamable_http_missing_endpoint_errors() {
+        // transport=StreamableHttp 但无 endpoint → MCP_CONFIG_INVALID。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_sidecar_manifest("http_no_ep", "unused entry");
+        m.mcp = Some(agentos_core::traits::McpConfig {
+            transport: agentos_core::traits::McpTransport::StreamableHttp,
+            endpoint: None,
+            idle_timeout_secs: 300,
+            protocol_version: "2025-06-18".to_string(),
+        });
+        loader.add_manifest(m);
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let err = invoker
+            .invoke_tool("http_no_ep", "t", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MCP_CONFIG_INVALID"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_streamable_http_endpoint_missing_url_errors() {
+        // transport=StreamableHttp 且有 endpoint 但缺 url → MCP_CONFIG_INVALID。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_sidecar_manifest("http_no_url", "unused entry");
+        m.mcp = Some(agentos_core::traits::McpConfig {
+            transport: agentos_core::traits::McpTransport::StreamableHttp,
+            endpoint: Some(agentos_core::traits::McpEndpoint {
+                url: None,
+                ..Default::default()
+            }),
+            idle_timeout_secs: 300,
+            protocol_version: "2025-06-18".to_string(),
+        });
+        loader.add_manifest(m);
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let err = invoker
+            .invoke_tool("http_no_url", "t", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MCP_CONFIG_INVALID"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_stdio_external_bad_env_placeholder_errors() {
+        // Stdio 外部命令的 env 含无法解析的 ${VAR} 占位 → MCP_CONFIG_INVALID
+        // （在 spawn 前暴露，避免启动后 import error 卡死）。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_sidecar_manifest("stdio_bad_env", "unused entry");
+        let mut env = std::collections::HashMap::new();
+        env.insert("PLUGIN_HOME".to_string(), "${DEFINITELY_UNSET_VAR_XYZ}".to_string());
+        m.mcp = Some(agentos_core::traits::McpConfig {
+            transport: agentos_core::traits::McpTransport::Stdio,
+            endpoint: Some(agentos_core::traits::McpEndpoint {
+                command: Some("npx".to_string()),
+                args: vec!["-y".to_string()],
+                env,
+                ..Default::default()
+            }),
+            idle_timeout_secs: 300,
+            protocol_version: "2025-06-18".to_string(),
+        });
+        loader.add_manifest(m);
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let err = invoker
+            .invoke_tool("stdio_bad_env", "t", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MCP_CONFIG_INVALID"));
+        assert!(
+            err.message.contains("env 解析失败"),
+            "错误应点名 env 解析失败: {}",
+            err.message
+        );
+    }
+
+    // ── native/wasm tool 调用错误路径 ──
+
+    #[tokio::test]
+    async fn test_invoke_native_tool_unsupported() {
+        // InProcess 工具插件暂不支持 → NATIVE_TOOL_UNSUPPORTED（不会尝试加载 cdylib）。
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_inprocess_manifest("native_tool_plug"));
+
+        let invoker = PluginInvokerImpl::new(loader);
+        let err = invoker
+            .invoke_tool("native_tool_plug", "some_tool", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("NATIVE_TOOL_UNSUPPORTED"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_wasm_tool_missing_artifact_errors() {
+        // wasm 工具插件缺 manifest.wasm.artifact → MISSING_WASM_ARTIFACT。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_wasm_manifest("wasm_tool_no_art", "x.wasm");
+        m.plugin_type = PluginType::Tool;
+        m.wasm = None;
+        loader.add_manifest(m);
+
+        let runtime = Arc::new(WasmRuntime::new().unwrap());
+        let invoker = PluginInvokerImpl::with_wasm_runtime(loader, runtime);
+        let err = invoker
+            .invoke_tool("wasm_tool_no_art", "some_tool", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("MISSING_WASM_ARTIFACT"));
+    }
+
+    // ── unload_if_idle 各 host_type 分支 ──
+
+    #[tokio::test]
+    async fn test_unload_if_idle_wasm_without_runtime_false() {
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_wasm_manifest("wasm_idle", "x.wasm"));
+        let invoker = PluginInvokerImpl::new(loader);
+        // wasm 插件但未注入 WasmRuntime → 不支持卸载 → false
+        assert!(!invoker.unload_if_idle("wasm_idle").await);
+    }
+
+    #[tokio::test]
+    async fn test_unload_if_idle_inprocess_false() {
+        // InProcess（rust cdylib）：dlclose 限制，永不软卸载 → false
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_inprocess_manifest("native_idle"));
+        let invoker = PluginInvokerImpl::new(loader);
+        assert!(!invoker.unload_if_idle("native_idle").await);
+    }
+
+    // ── idle_timeout_secs_sync 优先级链 ──
+
+    #[tokio::test]
+    async fn test_idle_timeout_secs_sync_manifest_never_unload() {
+        // manifest 声明 Some(0) = 永不空闲卸载。
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_sidecar_manifest("never_idle", "python server.py");
+        m.lifecycle = Some(agentos_core::traits::PluginLifecycle {
+            idle_timeout_secs: Some(0),
+        });
+        loader.add_manifest(m);
+        let invoker = PluginInvokerImpl::new(loader);
+        assert_eq!(invoker.idle_timeout_secs_sync("never_idle"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_idle_timeout_secs_sync_manifest_value() {
+        let loader = Arc::new(MockLoader::new());
+        let mut m = make_sidecar_manifest("custom_idle", "python server.py");
+        m.lifecycle = Some(agentos_core::traits::PluginLifecycle {
+            idle_timeout_secs: Some(42),
+        });
+        loader.add_manifest(m);
+        let invoker = PluginInvokerImpl::new(loader);
+        assert_eq!(invoker.idle_timeout_secs_sync("custom_idle"), 42);
+    }
+
+    #[tokio::test]
+    async fn test_idle_timeout_secs_sync_default() {
+        // 未声明 lifecycle → 内核默认 300s。
+        let loader = Arc::new(MockLoader::new());
+        loader.add_manifest(make_sidecar_manifest("default_idle", "python server.py"));
+        let invoker = PluginInvokerImpl::new(loader);
+        assert_eq!(
+            invoker.idle_timeout_secs_sync("default_idle"),
+            agentos_core::traits::default_idle_timeout()
+        );
+    }
+
+    // ── PluginScopedRouter：_plugin_id 注入（信任锚点）──
+
+    /// 记录收到的 capability 调用（供断言 _plugin_id 注入）。
+    struct RecordRouter {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    }
+    #[async_trait]
+    impl CapabilityRouter for RecordRouter {
+        async fn handle(
+            &self,
+            capability: &str,
+            method: &str,
+            params: Value,
+        ) -> Result<Value, agentos_mcp::McpError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((capability.to_string(), method.to_string(), params));
+            Ok(json!({"ok": true}))
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            vec!["custom-ns".to_string()]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plugin_scoped_router_injects_plugin_id_into_object_params() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
+            plugin_id: "plugin_a".to_string(),
+            inner: Arc::new(RecordRouter { calls: calls.clone() }),
+        });
+        let res = scoped
+            .handle("metrics", "record", json!({"name": "calls", "value": 1}))
+            .await
+            .unwrap();
+        assert_eq!(res["ok"], true);
+        let got = calls.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2["_plugin_id"], "plugin_a");
+        // 原始参数保留
+        assert_eq!(got[0].2["name"], "calls");
+    }
+
+    #[tokio::test]
+    async fn test_plugin_scoped_router_wraps_non_object_params() {
+        // 非对象 params（如字符串）→ 包成 {"_plugin_id", "value": params}。
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
+            plugin_id: "plugin_b".to_string(),
+            inner: Arc::new(RecordRouter { calls: calls.clone() }),
+        });
+        let _ = scoped.handle("ping", "pong", json!("hello")).await.unwrap();
+        let got = calls.lock().unwrap().clone();
+        assert_eq!(got[0].2["_plugin_id"], "plugin_b");
+        assert_eq!(got[0].2["value"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_plugin_scoped_router_known_namespaces_delegates() {
+        // known_namespaces 委托给 inner（sidecar initialize 才能拿到插件自注册 namespace）。
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
+            plugin_id: "plugin_c".to_string(),
+            inner: Arc::new(RecordRouter { calls }),
+        });
+        assert_eq!(scoped.known_namespaces(), vec!["custom-ns".to_string()]);
     }
 }

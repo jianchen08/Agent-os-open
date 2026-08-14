@@ -137,7 +137,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
             }
         }
         match (capability, method) {
-            // ── pipeline-executor：暂停/恢复/启动管道 ──
+            // ── pipeline-executor：挂起/恢复管道（审批闭环）＋ 运行状态查询（复盘）──
+            // 0.2 收尾：旧引擎 AdrEngineImpl 已清理，这些能力直接操作 runs 表
+            // （审批挂起是状态簿记——新引擎执行流由 state.suspended 插件机制控制，
+            // 此处仅同步 runs 表状态供查询/恢复语义；start_run 占位能力已移除）。
             ("pipeline-executor", "suspend") => {
                 let run_id = params
                     .get("run_id")
@@ -145,15 +148,41 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .ok_or_else(|| McpError::Protocol {
                         message: "suspend 缺少 run_id 参数".to_string(),
                     })?;
-                let handle = self.engine.suspend(run_id).await.map_err(|e| McpError::Protocol {
-                    message: format!("suspend 失败: {e}"),
+                let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "suspend disabled: kernel store not injected".to_string(),
                 })?;
+                let run = store
+                    .get_run(run_id)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("suspend 失败: {e}"),
+                    })?;
+                // 已终态（completed/failed）的 run 不再挂起，直接返回当前句柄（幂等）
+                if run.status == agentos_core::types::RunStatus::Suspended {
+                    return Ok(json!({
+                        "status": "suspended",
+                        "run_id": run.run_id,
+                        "branch_id": run.current_branch,
+                        "seq": run.current_seq,
+                    }));
+                }
+                store
+                    .update_run_status(
+                        run_id,
+                        agentos_core::types::RunStatus::Suspended,
+                        Some(&run.current_branch),
+                        Some(run.current_seq),
+                    )
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("suspend 失败: {e}"),
+                    })?;
                 // 返回完整 handle，sidecar resume 时需回传全部字段
                 Ok(json!({
                     "status": "suspended",
-                    "run_id": handle.run_id,
-                    "branch_id": handle.branch_id,
-                    "seq": handle.seq,
+                    "run_id": run.run_id,
+                    "branch_id": run.current_branch,
+                    "seq": run.current_seq,
                 }))
             }
             ("pipeline-executor", "resume") => {
@@ -165,39 +194,19 @@ impl CapabilityRouter for KernelCapabilityRouter {
                     .ok_or_else(|| McpError::Protocol {
                         message: "resume 缺少 run_id 参数".to_string(),
                     })?;
-                let handle = agentos_core::types::SuspendHandle {
-                    run_id: run_id.to_string(),
-                    branch_id: params
-                        .get("branch_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("main")
-                        .to_string(),
-                    seq: params
-                        .get("seq")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                };
-                self.engine
-                    .resume(&handle, agentos_core::types::WakeEvent::Manual)
+                let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
+                    message: "resume disabled: kernel store not injected".to_string(),
+                })?;
+                store
+                    .update_run_status(run_id, agentos_core::types::RunStatus::Running, None, None)
                     .await
                     .map_err(|e| McpError::Protocol {
                         message: format!("resume 失败: {e}"),
                     })?;
                 Ok(json!({"status": "resumed", "run_id": run_id}))
             }
-            ("pipeline-executor", "start_run") => {
-                let run_id = self
-                    .engine
-                    .start_run(&params)
-                    .await
-                    .map_err(|e| McpError::Protocol {
-                        message: format!("start_run 失败: {e}"),
-                    })?;
-                Ok(json!({"status": "started", "run_id": run_id}))
-            }
             ("pipeline-executor", "get_run_status") => {
                 // F-REVIEW-2：复盘侧轮询子管道真实完成状态的最小能力。
-                // 不依赖引擎（start_run 是 fire-and-forget，无完成事件/wait），
                 // 直接查 runs 表（store 生产侧由 agentos-kernel.rs with_store 注入）。
                 let run_id = params
                     .get("run_id")
@@ -945,41 +954,11 @@ fn _pipeline_error_code() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::traits::AdrEngine;
-    use agentos_core::types::{CompositeStep, EngineError, StepResult, SuspendHandle, WakeEvent};
     use serde_json::json;
-
-    /// 不做任何事的 AdrEngine mock（metrics.record 测试不需要引擎）。
-    struct StubEngine;
-    #[async_trait]
-    impl AdrEngine for StubEngine {
-        async fn start_run(&self, _c: &Value) -> Result<String, EngineError> {
-            Ok("stub".to_string())
-        }
-        async fn execute_step(
-            &self,
-            _: &str,
-            _: &CompositeStep,
-        ) -> Result<StepResult, EngineError> {
-            unimplemented!()
-        }
-        async fn suspend(&self, _: &str) -> Result<SuspendHandle, EngineError> {
-            unimplemented!()
-        }
-        async fn resume(&self, _: &SuspendHandle, _: WakeEvent) -> Result<(), EngineError> {
-            unimplemented!()
-        }
-        async fn rollback(&self, _: &str, _: u32) -> Result<String, EngineError> {
-            unimplemented!()
-        }
-        async fn end_run(&self, _: &str) -> Result<(), EngineError> {
-            Ok(())
-        }
-    }
 
     fn router_with_metrics() -> (KernelCapabilityRouter, MetricsAggregator) {
         let agg = MetricsAggregator::new();
-        let r = KernelCapabilityRouter::with_metrics(Arc::new(StubEngine), agg.clone());
+        let r = KernelCapabilityRouter::with_metrics(agg.clone());
         (r, agg)
     }
 
@@ -1073,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_record_without_aggregator_errors() {
         // 不带 metrics 的 router → metrics.record 报错
-        let router = KernelCapabilityRouter::new(Arc::new(StubEngine));
+        let router = KernelCapabilityRouter::new();
         let res = router
             .handle(
                 "metrics",
@@ -1164,7 +1143,7 @@ mod tests {
         coord.register("user-test", sink);
         coord.register_thread("thread-1", "user-test");
         let agg = MetricsAggregator::new();
-        KernelCapabilityRouter::with_metrics(Arc::new(StubEngine), agg)
+        KernelCapabilityRouter::with_metrics(agg)
             .with_session(coord)
     }
 
@@ -1466,7 +1445,7 @@ mod tests {
                 ui: None,
             },
         );
-        KernelCapabilityRouter::with_metrics(Arc::new(StubEngine), MetricsAggregator::new())
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
             .with_invoker(Arc::new(CaptureInvoker { captured }))
             .with_registry(Arc::new(registry))
     }
@@ -1523,6 +1502,194 @@ mod tests {
         assert_eq!(inputs["command"], "echo hi");
     }
 
+    // ── tool-executor.invoke 目标插件解析（显式 plugin_id 优先于注册表反查）──
+
+    #[tokio::test]
+    async fn test_tool_executor_explicit_plugin_id_wins_over_registry() {
+        // 调用方显式传 plugin_id（系统插件工具如 hindsight.recall 不在 CapabilityRegistry，
+        // 反查必然失败）→ 必须优先用显式 plugin_id，而不是注册表反查结果。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // 注册表把 bash_execute → plugin_bash；但显式 plugin_id 指向 system 插件 hindsight。
+        let router = router_with_tool_invoke(captured.clone());
+
+        let params = json!({
+            "tool_name": "bash_execute",
+            "plugin_id": "hindsight",
+            "args": {"query": "where did I leave the keys", "session_id": "sess-1"},
+        });
+        let res = router.handle("tool-executor", "invoke", params).await.unwrap();
+        assert_eq!(res["success"], true);
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "hindsight", "显式 plugin_id 应优先于注册表反查");
+        assert_eq!(calls[0].1, "bash_execute");
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_empty_plugin_id_falls_back_to_registry() {
+        // 显式 plugin_id 为空字符串 → 视为未提供，回退注册表反查。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_tool_invoke(captured.clone());
+
+        let params = json!({
+            "tool_name": "bash_execute",
+            "plugin_id": "",
+            "args": {"command": "echo hi"},
+        });
+        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "plugin_bash", "空 plugin_id 应回退注册表反查");
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_internal_keys_stripped_from_args() {
+        // _owner/_log_ctx/tenant_id/plugin_id 是内核/SDK 内部元数据，不得透传给工具 handler。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_tool_invoke(captured.clone());
+
+        let params = json!({
+            "tool_name": "bash_execute",
+            "plugin_id": "plugin_bash",
+            "args": {
+                "command": "echo hi",
+                "session_id": "sess-1",
+                "_owner": "user-1",
+                "_log_ctx": {"request_id": "req-1"},
+                "tenant_id": "tenant-a",
+                "plugin_id": "spoofed",
+                "pipeline_id": "pipe-1"
+            },
+            "_log_ctx": {"request_id": "req-1"},
+        });
+        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+
+        let calls = captured.lock().unwrap().clone();
+        let inputs = &calls[0].2;
+        // 内部元数据全部剥离
+        assert!(inputs.get("_owner").is_none(), "_owner 应被剥离");
+        assert!(inputs.get("_log_ctx").is_none(), "_log_ctx 应被剥离");
+        assert!(inputs.get("tenant_id").is_none(), "tenant_id 应被剥离");
+        assert!(inputs.get("plugin_id").is_none(), "args 级 plugin_id 应被剥离（防伪造）");
+        // 业务字段保留（session_id/pipeline_id 是 param_inject 注入的显式参数）
+        assert_eq!(inputs["command"], "echo hi");
+        assert_eq!(inputs["session_id"], "sess-1");
+        assert_eq!(inputs["pipeline_id"], "pipe-1");
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_registry_fallback_without_explicit_id() {
+        // 无显式 plugin_id → 注册表 tool_name → plugin_id 反查。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_tool_invoke(captured.clone());
+
+        let params = json!({
+            "tool_name": "bash_execute",
+            "args": {"command": "echo hi", "session_id": "sess-1"},
+        });
+        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls[0].0, "plugin_bash");
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_no_registry_falls_back_to_tool_name() {
+        // 无注册表注入 + 无显式 plugin_id → plugin_id 兜底为 tool_name 本身。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_invoker(Arc::new(CaptureInvoker { captured: captured.clone() }));
+
+        let params = json!({
+            "tool_name": "some_tool",
+            "args": {"x": 1},
+        });
+        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "some_tool", "无注册表时应兜底为 tool_name");
+    }
+
+    /// 固定返回错误的 invoker（验证 tool-executor.invoke 的错误归一化）。
+    struct ErroringInvoker;
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for ErroringInvoker {
+        async fn invoke_pipeline_plugin(
+            &self,
+            _plugin_id: &str,
+            _ctx: &agentos_core::types::PluginContext,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            Err(agentos_core::types::PluginError {
+                message: "not used".into(),
+                code: None,
+                source: None,
+            })
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+            Err(agentos_core::types::PluginError {
+                message: "sidecar crashed".into(),
+                code: Some("MCP_TOOL_CALL_FAILED".into()),
+                source: None,
+            })
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _context: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_invoke_error_normalized_to_failure_json() {
+        // invoke_tool 返回 Err → capability 层归一化为 {"success": false, "error": ...}，
+        // 不把内核 PluginError 泄漏给 sidecar。
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_invoker(Arc::new(ErroringInvoker));
+
+        let res = router
+            .handle(
+                "tool-executor",
+                "invoke",
+                json!({"tool_name": "bash_execute", "args": {"command": "echo hi"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["success"], false);
+        assert!(res["error"].as_str().unwrap().contains("sidecar crashed"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_missing_invoker_returns_protocol_error() {
+        // 未注入 invoker → Protocol 错误（配置缺失早暴露）。
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
+        let res = router
+            .handle(
+                "tool-executor",
+                "invoke",
+                json!({"tool_name": "bash_execute", "args": {}}),
+            )
+            .await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        match err {
+            agentos_mcp::McpError::Protocol { message } => {
+                assert!(message.contains("未配置 invoker"), "got: {message}")
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
 
     // ── M2：service-registry capability（用真实内存 SqliteStore 验证端到端）──
 
@@ -1531,7 +1698,7 @@ mod tests {
         let store: Arc<dyn StorageBackend> = Arc::new(
             agentos_engine::SqliteStore::open_memory().expect("open_memory"),
         );
-        KernelCapabilityRouter::new(Arc::new(StubEngine)).with_store(store)
+        KernelCapabilityRouter::new().with_store(store)
     }
 
     #[tokio::test]
@@ -1704,7 +1871,7 @@ mod tests {
     #[tokio::test]
     async fn test_service_registry_disabled_without_store() {
         // 不注入 store → service-registry 应返回错误
-        let router = KernelCapabilityRouter::new(Arc::new(StubEngine));
+        let router = KernelCapabilityRouter::new();
         let res = router
             .handle(
                 "service-registry",
@@ -1731,7 +1898,7 @@ mod tests {
         // 建 run（模拟 start_run 后的 runs 表记录）→ get_run_status 返回状态
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let router = KernelCapabilityRouter::new(Arc::new(StubEngine)).with_store(store.clone());
+        let router = KernelCapabilityRouter::new().with_store(store.clone());
         store
             .create_run("run_status_1", "hash", "default")
             .await
@@ -1771,7 +1938,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_executor_get_run_status_errors() {
         // 无 store 注入 → 报错（与服务注册一致，不静默）
-        let router = KernelCapabilityRouter::new(Arc::new(StubEngine));
+        let router = KernelCapabilityRouter::new();
         let res = router
             .handle(
                 "pipeline-executor",
@@ -1784,7 +1951,7 @@ mod tests {
         // 缺 run_id 参数 → 报错
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let router2 = KernelCapabilityRouter::new(Arc::new(StubEngine)).with_store(store.clone());
+        let router2 = KernelCapabilityRouter::new().with_store(store.clone());
         let res2 = router2
             .handle("pipeline-executor", "get_run_status", json!({}))
             .await;
