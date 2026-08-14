@@ -9,10 +9,10 @@ import {
   AgentsPanel,
   MemoryPanel,
   MonitoringPanel,
+  PipelineManagerPanel,
   PluginsPanel,
   SettingsHubPanel,
   ToolsPanel,
-  WorkspaceExplorerPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
 import { SettingsHubWidget } from '@/components/schema/widgets/SettingsHubWidget'
 import { DecisionWidget } from '@/components/schema/widgets/DecisionWidget'
@@ -73,7 +73,9 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'tools_panel', component: ToolsPanel, spaces: ['workspace'] },
   { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
   { name: 'memory_panel', component: MemoryPanel, spaces: ['workspace'] },
-  { name: 'workspace_explorer', component: WorkspaceExplorerPanel, spaces: ['workspace'] },
+  { name: 'workspace_explorer', component: PipelineManagerPanel, spaces: ['workspace'] },
+  // 任务/管道管理（独立工作区标签，按需打开；旧 workspace_explorer 注册保留兼容）
+  { name: 'pipeline_manager', component: PipelineManagerPanel, spaces: ['workspace'] },
   // 兼容 SettingsHubWidget 直注册
   { name: 'settings_hub_widget', component: SettingsHubWidget, spaces: ['workspace'] },
   // Webview：VS Code 风格插件自由 UI 沙箱（ADR §3.4'），fallback 到 html_preview。
