@@ -1,6 +1,12 @@
 """委派深度守卫 Output 插件。
 
-在跨管道路由（delegate）时检查嵌套深度，防止无限递归。
+**0.2 状态（路由方式收敛）**：delegate 路由信号已从引擎协议移除
+（Rust `RouteType` 仅 next_llm/next_tool/end/wait 四种；跨管道路由统一经
+任务系统/复盘系统等专门服务的工具调用显式发起）。本插件保留为 0.1 兼容
+透传——无 delegate 信号输入时纯透传（SKIP），深度字段初始化逻辑保留；
+不再声明 delegate 路由信号（`route_signals` 返回空）。
+
+历史职责（0.1）：在跨管道路由（delegate）时检查嵌套深度，防止无限递归。
 深度计数存储在 state 的自定义字段 `delegate_depth` 中，
 由本插件维护递增，无需修改 StateKeys 或管道基础设施。
 
@@ -70,8 +76,12 @@ class DelegateDepthGuardPlugin(IOutputPlugin):
 
     @property
     def route_signals(self) -> list[str]:
-        """本插件关注的路由信号类型列表。"""
-        return ["delegate"]
+        """本插件关注的路由信号类型列表。
+
+        0.2 起返回空：delegate 信号已从引擎协议移除（见模块 docstring），
+        插件不再声明/拦截任何路由信号，执行时纯透传。
+        """
+        return []
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """执行委派深度检查。

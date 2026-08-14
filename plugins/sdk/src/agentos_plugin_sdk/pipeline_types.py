@@ -85,8 +85,13 @@ class RouteSignal:
 
     由插件产生，经输出路由表仲裁后决定管道下一步走向。
 
+    0.2 协议收敛（ROADMAP「路由方式收敛」）：仅支持 next_llm / next_tool /
+    end / wait 四种。delegate / fork 已从引擎移除——跨管道路由统一经专门服务
+    （任务系统 / 复盘系统）的工具调用显式发起，不产生路由信号；
+    decision 下沉为组合插件的 YAML 条件分支（route_check.condition）。
+
     Attributes:
-        route_type: 路由类型，支持 next_llm / next_tool / end / delegate / wait / decision
+        route_type: 路由类型，next_llm / next_tool / end / wait
         target: 路由目标，可为字符串、字符串列表或 None
         reason: 路由原因描述
         payload: 附加数据
