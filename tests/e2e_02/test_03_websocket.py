@@ -1,4 +1,8 @@
 """
+⚠️ 已过时（0.2 迁移）：本文件断言 0.1 的 /ws echo 协议（欢迎消息 +
+"Echo: ..." 回显），0.2 内核协议为 user_input → stream_* 事件流
+（见 test_06_ws_stream.py）。整体 skip 保留代码供参考，不参与 CI。
+
 用户旅程 3：WebSocket 通信验证
 
 使用 websocket-client 库验证 Kernel 的 WebSocket 端点。
@@ -13,6 +17,8 @@
 """
 import json
 import pytest
+
+pytestmark = pytest.mark.skip(reason="0.1 echo 协议已过时，0.2 见 test_06_ws_stream.py")
 
 try:
     import websocket

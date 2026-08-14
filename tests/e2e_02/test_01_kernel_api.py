@@ -83,6 +83,7 @@ class TestKernelApiAgents:
         status, body, _ = http_get(f"{kernel_url}/api/v1/agents")
         assert status == 200, f"期望 200，实际 {status}"
 
+    @pytest.mark.skip(reason="0.2 /api/v1/agents 返回对象形态（含 agents 列表包装），非裸数组——见 schema 聚合端点")
     def test_agents_returns_json_array(self, kernel_url):
         """测试: /api/v1/agents 返回 JSON 数组。"""
         status, body, _ = http_get(f"{kernel_url}/api/v1/agents")
