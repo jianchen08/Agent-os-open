@@ -109,47 +109,73 @@ def _call_tool(module: Any, tool_name: str, **kwargs: Any) -> Any:
 # ═══════════════════════════════════════════════════════════
 
 class TestApprovalPlugin:
-    """验证审批系统插件。"""
+    """验证审批系统插件（0.2 语义：create_choice 同步阻塞 + submit 恢复）。
+
+    0.2 重构后 approval 只保留 create_choice / submit 两个工具：
+    create_conversation 移除（对话审批走 human-interaction 插件）；
+    create_choice 内联 wait_for_choice（超时/异常 = 拒绝，F-APPROVAL-1）。
+    """
 
     def test_approval_tools_registered(self) -> None:
         mod = _load_plugin_module("approval")
         assert "approval.create_choice" in mod.plugin._tools
-        assert "approval.create_conversation" in mod.plugin._tools
         assert "approval.submit" in mod.plugin._tools
+        assert "approval.create_conversation" not in mod.plugin._tools
 
-    def test_create_choice(self) -> None:
+    def test_create_choice_sync_resolves(self) -> None:
+        """0.2：create_choice 内联 wait_for_choice，正常路径返回 resolved。"""
         mod = _load_plugin_module("approval")
-        result = _call_tool(
-            mod, "approval.create_choice",
-            title="Choose option",
-            options=["A", "B", "C"],
-        )
-        assert result["status"] == "pending"
-        assert result["mode"] == "choice"
-        assert "approval_id" in result
+        original = mod.plugin.get_capability
 
-    def test_create_conversation(self) -> None:
-        mod = _load_plugin_module("approval")
-        result = _call_tool(
-            mod, "approval.create_conversation",
-            message="Please review",
-        )
-        assert result["status"] == "pending"
-        assert result["mode"] == "conversation"
+        class _FakeHi:
+            async def call(self, method: str, params: dict) -> dict:
+                if method == "create_choice":
+                    return {"request_id": "req-1", "status": "pending"}
+                if method == "wait_for_choice":
+                    return {"selected_option": "A"}
+                return {}
 
-    def test_submit_resolves(self) -> None:
-        mod = _load_plugin_module("approval")
-        created = _call_tool(mod, "approval.create_choice", title="T", options=["A"])
-        result = _call_tool(
-            mod, "approval.submit",
-            approval_id=created["approval_id"],
-            result="A",
-        )
+        def _fake_get(name: str):
+            if name == "human-interaction":
+                return _FakeHi()
+            raise KeyError(name)
+
+        mod.plugin.get_capability = _fake_get  # type: ignore[method-assign]
+        try:
+            result = _call_tool(mod, "approval.create_choice", title="T", options=["A", "B"])
+        finally:
+            mod.plugin.get_capability = original
         assert result["status"] == "resolved"
+        assert result["selected_option"] == "A"
+
+    def test_create_choice_timeout_rejects(self) -> None:
+        """0.2 F-APPROVAL-1：wait 超时/异常 = 拒绝，不恢复管道。"""
+        mod = _load_plugin_module("approval")
+        original = mod.plugin.get_capability
+
+        class _FakeHiTimeout:
+            async def call(self, method: str, params: dict) -> dict:
+                if method == "create_choice":
+                    return {"request_id": "req-2", "status": "pending"}
+                return {"error": "timeout", "error_code": "INTERACTION_TIMEOUT"}
+
+        def _fake_get(name: str):
+            if name == "human-interaction":
+                return _FakeHiTimeout()
+            raise KeyError(name)
+
+        mod.plugin.get_capability = _fake_get  # type: ignore[method-assign]
+        try:
+            result = _call_tool(mod, "approval.create_choice", title="T", options=["A"])
+        finally:
+            mod.plugin.get_capability = original
+        assert result["status"] == "rejected"
+        assert result["resumed"] is False
 
     def test_submit_nonexistent(self) -> None:
         mod = _load_plugin_module("approval")
-        result = _call_tool(mod, "approval.submit", approval_id="fake", result="X")
+        mod._suspended.clear()
+        result = _call_tool(mod, "approval.submit", request_id="fake", result="X")
         assert "error" in result
 
 
@@ -212,17 +238,17 @@ class TestEvaluationPlugin:
 # ═══════════════════════════════════════════════════════════
 
 class TestReviewPlugin:
-    """验证复盘系统插件。"""
+    """验证复盘系统插件（0.2：触发工具名为 trigger_review，无 review. 前缀）。"""
 
     def test_review_tools_registered(self) -> None:
         mod = _load_plugin_module("review")
-        assert "review.trigger" in mod.plugin._tools
+        assert "trigger_review" in mod.plugin._tools
         assert "review.get_report" in mod.plugin._tools
 
     def test_trigger_review(self) -> None:
         mod = _load_plugin_module("review")
         result = _call_tool(
-            mod, "review.trigger",
+            mod, "trigger_review",
             task_id="task_1",
             summary="Completed data analysis",
             metrics={"accuracy": 0.95},
@@ -233,7 +259,7 @@ class TestReviewPlugin:
     def test_trigger_review_with_low_metrics(self) -> None:
         mod = _load_plugin_module("review")
         result = _call_tool(
-            mod, "review.trigger",
+            mod, "trigger_review",
             task_id="task_2",
             summary="Failed task",
             metrics={"accuracy": 0.3},
@@ -244,7 +270,7 @@ class TestReviewPlugin:
     def test_get_report(self) -> None:
         mod = _load_plugin_module("review")
         triggered = _call_tool(
-            mod, "review.trigger",
+            mod, "trigger_review",
             task_id="task_3",
             summary="Test",
         )
@@ -330,6 +356,15 @@ class TestTriggerPlugin:
 class TestManifestValidation:
     """验证全部 5 个插件的 plugin.json manifest 格式。"""
 
+    # 0.2 插件类型：approval/evaluation/triggers 为 system 服务插件，
+    # review 声明为 tool 类型（trigger_review 等工具直接暴露给 LLM）。
+    _EXPECTED_PLUGIN_TYPES = {
+        "approval": "system",
+        "evaluation": "system",
+        "review": "tool",
+        "triggers": "system",
+    }
+
     @pytest.mark.parametrize("plugin_dir", [
         "approval", "evaluation", "review", "triggers",
     ])
@@ -341,7 +376,7 @@ class TestManifestValidation:
         assert "id" in manifest and manifest["id"]
         assert "name" in manifest and manifest["name"]
         assert "version" in manifest and manifest["version"]
-        assert manifest["plugin_type"] == "system"
+        assert manifest["plugin_type"] == self._EXPECTED_PLUGIN_TYPES[plugin_dir]
         assert manifest["host_type"] == "sidecar"
         assert "entry" in manifest
         assert "capabilities" in manifest

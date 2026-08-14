@@ -13,10 +13,6 @@ task_submit 工具的单元测试
   在 create_task 处失败（mock 抛异常），从 error_code 反推解析层行为
 """
 
-import pytest
-
-
-
 import asyncio
 import sys
 from pathlib import Path
@@ -24,13 +20,28 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ── 把项目根加入 sys.path（保证 import core.* / tools.* / tasks.* 等正常） ──
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+# ── 0.2 架构导入：task_submit 是独立插件目录（tools.builtin 包已废弃）──
+# 动态加载 tool.py 为唯一模块名，避免与其它插件目录的 tool.py 冲突。
+_TASK_SUBMIT_DIR = Path(__file__).resolve().parent.parent / "task_submit"
+_TASKS_DIR = Path(__file__).resolve().parent.parent.parent / "system" / "tasks"
+for _d in (str(_TASK_SUBMIT_DIR), str(_TASKS_DIR)):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
-from tools.builtin.task_submit.tool import TaskSubmitTool, _normalize_description  # noqa: E402
-from tools.types import Tool  # noqa: E402
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location(
+    "task_submit_tool_test", _TASK_SUBMIT_DIR / "tool.py"
+)
+assert _spec is not None, "Cannot load task_submit/tool.py"
+assert _spec.loader is not None, "Cannot load task_submit/tool.py"
+_tool_mod = importlib.util.module_from_spec(_spec)
+sys.modules["task_submit_tool_test"] = _tool_mod
+_spec.loader.exec_module(_tool_mod)
+
+TaskSubmitTool = _tool_mod.TaskSubmitTool
+_normalize_description = _tool_mod._normalize_description  # noqa: SLF001
+from agentos_plugin_sdk.tool_types import Tool  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -99,10 +110,8 @@ def _patch_infrastructure():
             "_check_dependencies_exist",
             return_value=[],
         ),
-        patch(
-            "infrastructure.service_provider.get_service_provider",
-            return_value=mock_service_provider,
-        ),
+        # 0.2 服务提供者：patch 模块级 _get_service_provider（infrastructure 包已废弃）
+        patch.object(_tool_mod, "_get_service_provider", return_value=mock_service_provider),
         # 屏蔽 ws 广播副作用
         patch.dict(
             sys.modules,
