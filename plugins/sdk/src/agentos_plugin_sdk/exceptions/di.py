@@ -73,7 +73,7 @@ class CircularDependencyError(DIException):
 
     def __init__(
         self,
-        dependency_chain: list,
+        dependency_chain: list[str],
         details: dict[str, Any] | None = None,
     ):
         """初始化循环依赖异常

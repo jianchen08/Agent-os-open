@@ -75,15 +75,16 @@ class LoggingConfig:
         )
 
     @classmethod
-    def from_dict(cls, data: dict) -> LoggingConfig:
+    def from_dict(cls, data: dict[str, object]) -> LoggingConfig:
         """从字典构建配置，忽略未知键。"""
         known_keys = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in data.items() if k in known_keys}
+        filtered: dict[str, object] = {k: v for k, v in data.items() if k in known_keys}
         if "level" in filtered and isinstance(filtered["level"], str):
             filtered["level"] = _LEVEL_MAP.get(filtered["level"].upper(), INFO)
         if "third_party_level" in filtered and isinstance(filtered["third_party_level"], str):
             filtered["third_party_level"] = _LEVEL_MAP.get(filtered["third_party_level"].upper(), WARNING)
-        return cls(**filtered)
+        # 运行时字段动态注入（dataclass 构造），类型系统无法精确表达
+        return cls(**filtered)  # type: ignore[arg-type]
 
 
 def _parse_output(value: str) -> OutputTarget:

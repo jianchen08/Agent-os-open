@@ -425,7 +425,9 @@ class ICorePlugin(IPlugin):
     fallback_state: dict[str, Any] = {}
 
     @abstractmethod
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]
+        # 设计意图：core 插件返回状态更新 dict（与 IPlugin.execute 的 PluginResult 不同，
+        # 由引擎包装层转换）；类型系统无法表达该协变契约，豁免 override 检查。
         """执行核心插件逻辑。
 
         Args:
@@ -527,7 +529,7 @@ class OutputResult(PluginResult):
 
 def find_plugin_config(
     plugin_name: str,
-    plugin_configs: dict[str, Any],
+    plugin_configs: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """从 plugin_configs 中查找插件配置，支持前缀匹配。
 

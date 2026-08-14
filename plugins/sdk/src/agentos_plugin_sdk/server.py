@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -26,7 +27,7 @@ from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 logger = logging.getLogger(__name__)
 
 
-def _bind_log_context(log_ctx: dict[str, Any]):
+def _bind_log_context(log_ctx: dict[str, Any]) -> contextlib.AbstractContextManager[Any]:
     """将内核注入的 per-request 上下文绑定到当前 async 上下文的日志追踪字段。
 
     优先复用 ``agentos_plugin_sdk.logging.LogContext``（contextvars，async 安全）；不可用时
@@ -315,7 +316,7 @@ class McpServer:
         3. request（有 method + id）：内核发起的请求，需响应
         """
         method = msg.get("method")
-        msg_id = msg.get("id")
+        msg_id: str | None = msg.get("id")
 
         # 分支1：内核对反向调用的响应（无 method，有 id，且 kernel_channel 在等）
         if method is None and msg_id is not None and self._kernel_channel is not None:
@@ -328,10 +329,15 @@ class McpServer:
 
         # 分支2：notification（无 id）—— fire-and-forget
         if msg_id is None:
+            # notification 必须有 method（类型收窄断言，逻辑已保证）
+            assert method is not None  # noqa: S101
             await self._handle_notification(method, params=msg.get("params", {}))
             return
 
         # 分支3：request（有 id）—— 需要响应
+        # 类型收窄断言：分支 2 已处理 msg_id None；request 必须有 method
+        assert msg_id is not None  # noqa: S101
+        assert method is not None  # noqa: S101
         # 用 create_task 并发处理，不阻塞主读取循环。
         # 原因：工具 handler 内部可能发起反向 capability 调用（cap.call），
         # 该调用的 response 会通过 stdin 到达。若 await dispatch 阻塞主循环，

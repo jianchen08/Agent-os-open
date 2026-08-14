@@ -215,7 +215,7 @@ class Tool(BaseModel):
     enabled: bool = Field(True, description="工具是否启用")
     permissions: list[str] = Field(default_factory=list, description="工具权限列表")
     parameters: dict[str, Any] = Field(default_factory=dict, description="参数定义（兼容字段）")
-    handler: Callable | None = Field(None, description="工具处理函数")
+    handler: Callable[..., Any] | None = Field(None, description="工具处理函数")
     author: str = Field("system", description="工具作者")
     created_at: datetime | None = Field(None, description="创建时间")
 
@@ -354,7 +354,7 @@ class Tool(BaseModel):
 
     def to_llm_yaml_format(self) -> str:
         """转换为 LLM 可用的 YAML 格式工具描述（节省 token）"""
-        import yaml  # noqa: PLC0415
+        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415（第三方 stubs 缺失，懒导入）
 
         llm_schema = self._get_llm_schema()
 
@@ -364,14 +364,15 @@ class Tool(BaseModel):
             "params": self._simplify_schema(llm_schema),
         }
 
-        return yaml.dump(tool_desc, default_flow_style=False, allow_unicode=True)
+        dumped = yaml.dump(tool_desc, default_flow_style=False, allow_unicode=True)
+        return str(dumped)
 
     def _simplify_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
         """简化 JSON Schema 为更紧凑的 YAML 格式"""
         if not isinstance(schema, dict):
             return schema
 
-        simplified = {}
+        simplified: dict[str, Any] = {}
 
         if "properties" in schema:
             simplified["props"] = {}
@@ -435,14 +436,14 @@ class Tool(BaseModel):
 
     def to_runnable(
         self,
-        handler: Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]],
+        handler: Callable[[dict[str, Any]], Coroutine[Any, Any, ToolExecutionResult]],
     ) -> Any:
         """转换为 ToolRunnable。
 
         依赖 0.1 ``core.runnable.ToolRunnable``（0.2 暂无对应物）。
         sidecar 工具不调用此方法；仅在显式调用时触发懒导入。
         """
-        from core.runnable import ToolRunnable  # noqa: PLC0415
+        from core.runnable import ToolRunnable  # type: ignore[import-not-found]  # noqa: PLC0415（0.1 依赖，懒导入）
 
         return ToolRunnable(
             name=self.name,

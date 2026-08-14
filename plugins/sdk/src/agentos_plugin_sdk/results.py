@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -237,18 +237,18 @@ class ExecutionResult(BaseModel, Generic[T]):
     # === 工厂方法 ===
 
     @classmethod
-    def create_running(cls, **kwargs: Any) -> ExecutionResult[T]:
+    def create_running(cls, **kwargs: Any) -> Self:
         """创建运行中状态的结果"""
         return cls(status=ExecutionStatus.RUNNING, started_at=datetime.now(UTC), **kwargs)
 
     @classmethod
-    def create_completed(cls, output: T, **kwargs: Any) -> ExecutionResult[T]:
+    def create_completed(cls, output: T, **kwargs: Any) -> Self:
         """创建成功完成的结果"""
         now = datetime.now(UTC)
         return cls(status=ExecutionStatus.COMPLETED, output=output, completed_at=now, **kwargs)
 
     @classmethod
-    def create_failed(cls, error: str, error_code: str | None = None, **kwargs: Any) -> ExecutionResult[T]:
+    def create_failed(cls, error: str, error_code: str | None = None, **kwargs: Any) -> Self:
         """创建失败结果"""
         return cls(
             status=ExecutionStatus.FAILED, error=error, error_code=error_code, completed_at=datetime.now(UTC), **kwargs

@@ -54,7 +54,7 @@ class BaseAppException(Exception):
             class_name = class_name[:-9]
         return class_name.upper()
 
-    def _log_exception(self):
+    def _log_exception(self) -> None:
         """记录异常日志"""
         # 子类可以覆盖此方法以自定义日志记录
 
@@ -91,7 +91,7 @@ class DomainException(BaseAppException):
     用于表示业务逻辑中的错误，这些错误是预期的和可恢复的。
     """
 
-    def _log_exception(self):
+    def _log_exception(self) -> None:
         """记录域异常为警告级别"""
         logger.warning(
             f"[{self.code}] {self.message}",
@@ -281,7 +281,7 @@ class SystemException(BaseAppException):
     用于表示系统级的错误，通常需要运维介入。
     """
 
-    def _log_exception(self):
+    def _log_exception(self) -> None:
         """记录系统异常为错误级别"""
         logger.error(
             f"[{self.code}] {self.message}",

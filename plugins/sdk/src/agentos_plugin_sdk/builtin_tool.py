@@ -64,7 +64,7 @@ class BuiltinTool(ABC):
         tool = self.get_tool_definition()
         return tool.to_llm_format()
 
-    def get_schema_enricher(self) -> Callable | None:
+    def get_schema_enricher(self) -> Callable[[Tool, dict[str, Any]], Tool] | None:
         """获取工具的 Schema 动态丰富器。
 
         子类可重写此方法，返回一个函数：
@@ -94,4 +94,4 @@ def register_builtin_tool(
     enricher = tool_instance.get_schema_enricher()
     if enricher:
         registry.register_schema_enricher(tool.name, enricher)
-    return name
+    return str(name)
