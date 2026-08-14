@@ -30,7 +30,7 @@ import asyncio
 import re
 import time
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 from bash_types import BashAction
 from input_handler import InputHandler
@@ -89,60 +89,9 @@ def describe_exit_code(exit_code: int | None) -> str | None:
     return f"信号 {signum} ({name}) 终止"
 
 
-# 失败时回传给 LLM 的尾部原始输出字符上限。OOM/崩溃的报错（如 "Killed"、
-# error stack）几乎总在末尾，给够长度让 LLM 直接看到真实原因。
-TAIL_CHARS_ON_FAILURE = 3000
-
-# read_log 返回给 LLM 的字符上限：read_log 设计是「读完整日志」，但巨型日志
-# （如 grep 无 head 输出失控达数百万字符）原样返回会撑爆当前 context，且被
-# track 存进执行记录、inherit 继承后撑爆子任务（f81e12cac33d 根因）。
-# 完整日志仍在磁盘 logs/bash/bash_<pid>.log，LLM 可按需分段读取。
-READ_LOG_MAX_CHARS = 50000
-
-
-def clip_read_log_output(output: str | None) -> str | None:
-    """截断 read_log 超大输出（保留首尾 + 截断提示），完整日志在磁盘。
-
-    与 execute 的 tail_output（仅尾部 3000）不同，read_log 保留更大窗口
-    （首尾各 25000），因为它的目的就是让 LLM 看到较多日志上下文。
-    """
-    if not output or len(output) <= READ_LOG_MAX_CHARS:
-        return output
-    half = READ_LOG_MAX_CHARS // 2
-    orig = len(output)
-    return (
-        f"{output[:half]}\n\n"
-        f"...[read_log 已截断：原始 {orig} 字符，"
-        f"完整日志在 logs/bash/bash_<pid>.log，可用 offset/limit 分段读取]...\n\n"
-        f"{output[-half:]}"
-    )
-
-
-def tail_output(output: str | None, max_chars: int = TAIL_CHARS_ON_FAILURE) -> str:
-    """取输出末尾，字符上限但保证行完整（不切断多字节字符/不切到行中间）。
-
-    替代旧的 ``output[-500:]`` 纯字符截断——后者会把一行从中间切开，让 LLM
-    看到半个错误信息。本函数先按字符上限取尾部，再回退到上一个换行符边界，
-    确保返回的每行都是完整的。
-
-    Args:
-        output: 进程原始输出。
-        max_chars: 尾部最大字符数。
-
-    Returns:
-        末尾输出字符串（每行完整）；output 为空返回空串。
-    """
-    if not output:
-        return ""
-    text = output.rstrip()
-    if len(text) <= max_chars:
-        return text
-    # 从 max_chars 边界向左找最近的换行符，保证不切到行中间
-    cut = text[-max_chars:]
-    nl = cut.find("\n")
-    if nl != -1 and nl < len(cut) - 1:
-        return cut[nl + 1 :]
-    return cut
+# 失败时回传给 LLM 的错误消息由 LogCompressor 提取行组装（信号描述 + 错误行 +
+# 最新消息），不做原始尾部截取——大输出兜底（原文存档 + 提取 + 定位符）已统一
+# 移交 pipeline 的 spill_guard 输出插件（task_spill_guard.md 任务 2）。
 
 
 class SecurityChecker:
@@ -276,16 +225,11 @@ class BashTool(WorkspaceAwareMixin):
     # 最大允许超时（秒），不得超过内核侧 MCP 调用外层超时
     MAX_TIMEOUT: ClassVar[int] = 290
 
-    # 短输出阈值（字符数）：低于此值直接全量返回原始 output，不走任何截断/
-    # 提取——短输出本身信息量小、噪音少，提取/截断反而可能切坏（如半行被截）。
+    # 短输出阈值（字符数）：低于此值直接全量返回原始 output，不走任何提取——
+    # 短输出本身信息量小、噪音少，提取反而可能切坏（如半行被截）。
     # 用字符数而非行数：行数受换行风格影响大（CRLF/LF、超长单行 vs 短行），
     # 字符数才是真实体积。约 2KB（~500 token）是 LLM 一次能轻松消化的量。
     SHORT_OUTPUT_CHAR_THRESHOLD: ClassVar[int] = 2000
-
-    # 长输出失败时回传的尾部原始输出上限（字符数）。OOM/崩溃的报错（如
-    # "Killed"、error stack）几乎总在末尾，给够长度让 LLM 直接看到真实原因。
-    # 行级截取保证每行完整（旧实现 output[-500:] 字符截断会切到行中间）。
-    TAIL_CHARS_ON_FAILURE: ClassVar[int] = 3000
 
     @staticmethod
     def _compact_result_data(
@@ -297,15 +241,16 @@ class BashTool(WorkspaceAwareMixin):
     ) -> dict[str, Any]:
         """精简 result_data，去掉 LLM 不需要的字段以节省 token。
 
-        核心原则：**短输出全量返回，长输出提取高价值信息**。同一套逻辑覆盖
-        completed（进程结束）和 running（长任务轮询超时返回中间态）两种场景——
-        区别仅是 status 字段 + exit_code 有无，提取策略完全一致。
+        核心原则：**短输出全量返回，长输出附语义提取、原文不截断**。同一套逻辑
+        覆盖 completed（进程结束）和 running（长任务轮询超时返回中间态）两种场景
+        ——区别仅是 status 字段 + exit_code 有无，提取策略完全一致。
 
         - 短输出（<=SHORT_OUTPUT_CHAR_THRESHOLD 字符）：信息量小、噪音少，直接
-          全量返回原始 output，不走任何截断/提取——截断反而可能切坏（如半行被截）。
-        - 长输出（>阈值）：output 字段截成尾部（行完整，旧 output[-500:] 会切到行
-          中间），额外附 summary/error_lines/latest_message（LogCompressor 已筛掉
-          刷屏噪音的高价值信息）。完整日志仍在磁盘，read_log 随时可取。
+          全量返回原始 output，不走提取——提取反而可能切坏（如半行被截）。
+        - 长输出（>阈值）：**完整 output 原样返回**（大输出兜底由 pipeline 的
+          spill_guard 统一负责：原文存档 + 头尾提取 + 定位符，task_spill_guard
+          任务 2 已删除工具内截断），额外附 summary/error_lines/latest_message/
+          progress（LogCompressor 已筛掉刷屏噪音的高价值信息）。
 
         保留字段：
         - pid/output/status：始终保留（exit_code 仅 completed 时有）
@@ -352,9 +297,8 @@ class BashTool(WorkspaceAwareMixin):
         if is_short:
             return data
 
-        # 长输出：output 截成尾部（行完整，完整日志在磁盘 read_log 可取），
-        # 附 summary/latest_message/progress（LogCompressor 已筛掉刷屏噪音）。
-        data["output"] = tail_output(output, BashTool.TAIL_CHARS_ON_FAILURE)
+        # 长输出：output 保持完整原文（spill_guard 统一兜底），附 summary/
+        # latest_message/progress（LogCompressor 已筛掉刷屏噪音）。
         summary_lines = summary_obj.get("summary", [])
         if summary_lines:
             data["summary"] = summary_lines
@@ -378,11 +322,9 @@ class BashTool(WorkspaceAwareMixin):
         按"短全量、长提取"原则：
         - 短输出（<=SHORT_OUTPUT_CHAR_THRESHOLD 字符）：直接全量原文，信息量小、
           截断反而可能切坏。
-        - 长输出：按价值优先级拼接——信号描述 > LogCompressor 提取的错误列表
-          （已去重筛噪音）> latest_message > 末尾原始输出（行完整）兜底。
-
-        旧实现 ``output[-500:]`` 是纯字符截断（可能切到行中间），且失败时丢弃
-        了 LogCompressor 已提取的高价值错误列表，导致 LLM 只能从噪音里捞原因。
+        - 长输出：信号描述 + LogCompressor 提取的错误列表（已去重筛噪音）+
+          latest_message——不拼原始输出尾部（大输出兜底由 spill_guard 统一负责，
+          task_spill_guard.md 任务 2：工具只保留"执行 + 语义提取"）。
         """
         signal_desc = describe_exit_code(exit_code)
         output_len = len(output or "")
@@ -406,9 +348,6 @@ class BashTool(WorkspaceAwareMixin):
                 parts.append("错误行：\n" + "\n".join(error_lines[:20]))
             if latest:
                 parts.append(f"最新输出：{latest}")
-            tail = tail_output(output, BashTool.TAIL_CHARS_ON_FAILURE)
-            if tail:
-                parts.append(f"末尾输出：\n{tail}")
 
         error_msg = "\n".join(parts)
         fail_meta: dict[str, Any] = {"exit_code": exit_code}
@@ -478,8 +417,12 @@ class BashTool(WorkspaceAwareMixin):
 
     # ── 主入口 ───────────────────────────────────────────────────
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        """执行工具（0.2 侧唯一入口，由 server.py 的 MCP handler 调用）。"""
+    async def execute(self, inputs: dict[str, Any], on_output: Callable[[str], None] | None = None) -> ToolResult:
+        """执行工具（0.2 侧唯一入口，由 server.py 的 MCP handler 调用）。
+
+        on_output（task_observability 任务 2）：execute action 的每行输出回调，
+        供执行中进度推送（server.py 经 ProgressReporter 节流后推前端）。
+        """
         self._init_workspace(inputs)
         action = inputs.get("action", BashAction.EXECUTE)
 
@@ -499,9 +442,13 @@ class BashTool(WorkspaceAwareMixin):
                 error_code="INVALID_ACTION",
             )
 
+        if action == BashAction.EXECUTE and on_output is not None:
+            return await self._handle_execute(inputs, on_output=on_output)
         return await handler(inputs)
 
-    async def _handle_execute(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _handle_execute(
+        self, inputs: dict[str, Any], on_output: Callable[[str], None] | None = None
+    ) -> ToolResult:
         """处理 execute 操作"""
         command = inputs.get("command")
         if not command:
@@ -536,6 +483,7 @@ class BashTool(WorkspaceAwareMixin):
             warning=warning,
             container_id=container_id,
             owner=owner,
+            on_output=on_output,
         )
 
     async def _execute_local_unified(
@@ -546,6 +494,7 @@ class BashTool(WorkspaceAwareMixin):
         warning: str | None = None,
         container_id: str | None = None,
         owner: str | None = None,
+        on_output: Callable[[str], None] | None = None,
     ) -> ToolResult:
         """
         本地执行命令（统一返回格式）
@@ -573,6 +522,7 @@ class BashTool(WorkspaceAwareMixin):
                 log_dir=bash_log_dir,
                 container_id=container_id,
                 owner=owner,
+                on_output=on_output,
             )
 
             # 等待进程完成或超时
@@ -920,7 +870,7 @@ class BashTool(WorkspaceAwareMixin):
                 data={
                     "status": proc_info.status,
                     "pid": pid,
-                    "output": clip_read_log_output(output),
+                    "output": output,
                     "summary": summary.get("summary", []) if summary else [],
                     "warnings": summary.get("warnings", 0) if summary else 0,
                     "errors": summary.get("errors", 0) if summary else 0,
@@ -947,7 +897,7 @@ class BashTool(WorkspaceAwareMixin):
                 # 能从磁盘读到的都是已结束的进程（活跃的会在路径1处理）
                 "status": "completed",
                 "pid": pid,
-                "output": clip_read_log_output(file_data["output"]),
+                "output": file_data["output"],
                 "summary": file_data["summary"],
                 "warnings": file_data["warnings"],
                 "errors": file_data["errors"],

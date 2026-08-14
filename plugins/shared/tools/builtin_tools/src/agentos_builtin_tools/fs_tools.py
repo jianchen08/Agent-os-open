@@ -16,7 +16,10 @@ from typing import Any
 
 from agentos_builtin_tools.result import ToolResult
 
-MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
+# 大文件不再拒绝（task_spill_guard.md 任务 2）：大输出兜底由 pipeline 的
+# spill_guard 统一负责（原文存档 + 提取 + 定位符），工具只负责"读文件 +
+# 返回内容"。行范围（start_line/end_line/tail）是用户显式指定的查询窗口，
+# 不属于静默截断，保留。
 
 
 # ═════════════════════════════════════════════════════════════
@@ -62,10 +65,6 @@ async def file_read(
         return ToolResult.failure_result(f"Not a file: {path}")
 
     size = file_path.stat().st_size
-    if size > MAX_FILE_SIZE:
-        return ToolResult.failure_result(
-            f"File too large: {size} bytes (max {MAX_FILE_SIZE})"
-        )
 
     try:
         content = await asyncio.to_thread(file_path.read_text, "utf-8")

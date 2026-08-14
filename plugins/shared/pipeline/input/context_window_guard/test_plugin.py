@@ -194,7 +194,7 @@ class TestCompressAllHappy:
         """mock llm_call_fn 返回合法 5 部分 JSON，compress_all 解析成对应字段。"""
         mod = _load_plugin_module()
 
-        async def fake_llm(prompt: str) -> str:
+        async def fake_llm(payload: list) -> str:
             return _valid_compress_json()
 
         compressor = mod.ContextCompressor(llm_call_fn=fake_llm)
@@ -203,7 +203,7 @@ class TestCompressAllHappy:
             {"role": "assistant", "content": "好的，开始"},
         ]
         result = _run(
-            compressor.compress_all(messages, state_snapshot="", recent_process_blocks="")
+            compressor.compress_all(messages)
         )
         assert result is not None
         assert "l1" in result and result["l1"]
@@ -225,7 +225,7 @@ class TestCompressAllEmpty:
         """空消息列表 → 返回空结果字典（不调用 LLM）。"""
         mod = _load_plugin_module()
         compressor = mod.ContextCompressor(llm_call_fn=AsyncMock(return_value="x"))
-        result = _run(compressor.compress_all([], state_snapshot="", recent_process_blocks=""))
+        result = _run(compressor.compress_all([]))
         # 空消息返回的是空结果字典（含 l1/l2/keywords 等键，值为空），不是 None
         assert result is not None
         assert result.get("l1") == ""
@@ -242,12 +242,12 @@ class TestCompressAllBadJson:
         """LLM 返回乱码（无 JSON）→ compress_all 返回 None。"""
         mod = _load_plugin_module()
 
-        async def bad_llm(prompt: str) -> str:
+        async def bad_llm(payload: list) -> str:
             return "这不是 JSON，完全无法解析的乱码文本 (((( "
 
         compressor = mod.ContextCompressor(llm_call_fn=bad_llm)
         messages = [{"role": "user", "content": "做一些事"}]
-        result = _run(compressor.compress_all(messages, state_snapshot="", recent_process_blocks=""))
+        result = _run(compressor.compress_all(messages))
         assert result is None
 
 
@@ -287,16 +287,16 @@ class TestSaveUsesBackend:
         mod = _load_plugin_module()
         backend = FakeBackend()
 
-        async def fake_llm(prompt: str) -> str:
+        async def fake_llm(payload: list) -> str:
             return _valid_compress_json()
 
         compressor = mod.ContextCompressor(llm_call_fn=fake_llm)
         messages = [
-            {"role": "user", "content": "做 X", "_record_sequence": 1},
-            {"role": "assistant", "content": "好的", "_record_sequence": 2},
+            {"role": "user", "content": "做 X", "seq": 1},
+            {"role": "assistant", "content": "好的", "seq": 2},
         ]
         result = _run(
-            compressor.compress_all(messages, state_snapshot="", recent_process_blocks="")
+            compressor.compress_all(messages)
         )
         assert result is not None
 
@@ -350,15 +350,15 @@ class TestTrimUsesBackend:
         # seq 1-5 已被压缩（应裁），seq 6-8 是 recent（应保留，>10% 防护不触发）
         messages: list[dict[str, Any]] = []
         for i in range(1, 6):
-            messages.append({"role": "user", "content": f"msg{i}", "_record_sequence": i})
+            messages.append({"role": "user", "content": f"msg{i}", "seq": i})
         for i in range(6, 9):
-            messages.append({"role": "assistant", "content": f"recent{i}", "_record_sequence": i})
+            messages.append({"role": "assistant", "content": f"recent{i}", "seq": i})
 
         result = _run(plugin._trim_covered_messages(ctx, messages))
         kept_seqs = [
-            m["_record_sequence"]
+            m["seq"]
             for m in result
-            if m.get("role") != "system" and isinstance(m.get("_record_sequence"), int)
+            if m.get("role") != "system" and isinstance(m.get("seq"), int)
         ]
         # recent 段 6,7,8 保留，1-5 被裁
         assert 6 in kept_seqs and 8 in kept_seqs
@@ -382,3 +382,233 @@ class TestGetMemoryServiceNoDeps:
         # ctx.get_service 会抛 KeyError（无服务注册）
         service = plugin._get_memory_service(ctx)
         assert service is None
+
+
+# ═══════════════════════════════════════════════════════════
+# 11-14. op 模式迁移：state_updates["messages"] 形如 {"_ops": [...]}
+#     （任务 2：context_window_guard 迁移 op 模式）
+# ═══════════════════════════════════════════════════════════
+
+
+def _ops_by_seq(state_updates: SimpleNamespace | Any) -> dict[int, dict[str, Any]]:
+    """从 PluginResult.state_updates 提取 messages._ops，按 seq 索引成字典。
+
+    若 messages 不是 _ops 形态（旧全量数组），返回空字典便于断言区分。
+    """
+    messages = state_updates.get("messages")
+    if not isinstance(messages, dict) or "_ops" not in messages:
+        return {}
+    return {op["seq"]: op for op in messages["_ops"] if isinstance(op, dict) and "seq" in op}
+
+
+class TestOpModeEmission:
+    """op 模式迁移测试：插件 emit {"_ops":[...]} 而非全量数组。
+
+    覆盖四个场景：压缩 / 裁剪 / 窗口清理 / 未触发。
+    """
+
+    def test_compress_emits_set_null_and_set_modify_ops(self) -> None:
+        """压缩场景：被删消息 set(seq, null)；被 standardize 改写的幸存消息
+        set(seq, 新内容)；未动消息无 op。
+
+        mock service.compress_messages 返回压缩子集（删 seq 2,3），
+        其中幸存的 seq4 assistant 带非标准 tool_calls（会被 normalizer 改写）。
+        """
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+
+        messages = [
+            {"role": "system", "content": "S" * 300, "seq": 1},
+            {"role": "user", "content": "U" * 300, "seq": 2},
+            {"role": "user", "content": "V" * 300, "seq": 3},
+            {
+                "role": "assistant",
+                "content": "",
+                "seq": 4,
+                "tool_calls": [{"id": "bad_id", "name": "search", "args": "{}"}],
+            },
+        ]
+        # service 返回的压缩结果：保留 seq1(system) 与 seq4(assistant)，删 2,3
+        survivor = {
+            "role": "assistant",
+            "content": "",
+            "seq": 4,
+            "tool_calls": [{"id": "bad_id", "name": "search", "args": "{}"}],
+        }
+        compressed = [
+            {"role": "system", "content": "S" * 300, "seq": 1},
+            survivor,
+        ]
+        mock_service = MagicMock()
+        mock_service.setup = MagicMock()
+        mock_service.compress_messages = AsyncMock(return_value=compressed)
+        mock_service._last_deleted_seqs = [2, 3]
+
+        ctx = mod._make_minimal_ctx(
+            state={"context_window": 200, "messages": messages},
+        )
+        ctx._services["context_service"] = mock_service
+
+        result = _run(plugin.execute(ctx))
+        ops = _ops_by_seq(result.state_updates)
+
+        # messages 必须是 _ops 形态
+        assert isinstance(result.state_updates.get("messages"), dict)
+        assert "_ops" in result.state_updates["messages"]
+
+        # 被删 seq 2,3 → set(seq, null)
+        assert ops[2] == {"op": "set", "seq": 2, "msg": None}
+        assert ops[3] == {"op": "set", "seq": 3, "msg": None}
+        # 幸存但被 standardize 改写的 seq4 → set(seq, 新内容)，新内容含标准 tool_calls
+        assert 4 in ops
+        assert ops[4]["op"] == "set"
+        new_msg = ops[4]["msg"]
+        assert new_msg is not None
+        assert new_msg["role"] == "assistant"
+        tc = new_msg["tool_calls"][0]
+        assert tc["type"] == "function"
+        assert isinstance(tc["function"], dict)
+        assert tc["function"]["name"] == "search"
+        assert tc["id"].startswith("call_")
+        # 未动的 seq1（system）无 op
+        assert 1 not in ops
+        # 不应有多余 op
+        assert set(ops.keys()) == {2, 3, 4}
+
+    def test_trim_emits_set_null_for_dropped_seqs(self) -> None:
+        """裁剪场景（_trim_covered_messages）：dropped 的 seq 都是 set(seq, null)。
+
+        backend 返回 L1 chunk（sequence_end=50），60 条消息中 seq 1-50 被覆盖裁掉，
+        seq 51-60 保留（>10% 防护不触发）。阈值之下不压缩。
+        """
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        backend = FakeBackend()
+        backend.search_returns = [
+            {
+                "id": "c1",
+                "content": "已有摘要",
+                "score": 1.0,
+                "memory_type": "chunk",
+                "metadata": {"tags": ["L1", "pipeline:pipe-1", "seq:1-50"]},
+            }
+        ]
+        mod.set_memory_backend(backend)
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.55})
+
+        messages: list[dict[str, Any]] = []
+        for i in range(1, 61):
+            messages.append({"role": "user", "content": f"m{i}", "seq": i})
+
+        # 注入一个 service 占位（让 _get_memory_service 不早退），但不会触发压缩
+        mock_service = MagicMock()
+        mock_service.setup = MagicMock()
+        mock_service.compress_messages = AsyncMock(return_value=None)
+
+        ctx = mod._make_minimal_ctx(
+            state={"context_window": 128000, "messages": messages},
+            pipeline_id="pipe-1",
+        )
+        ctx._services["context_service"] = mock_service
+
+        result = _run(plugin.execute(ctx))
+        ops = _ops_by_seq(result.state_updates)
+
+        # messages 是 _ops 形态
+        assert "_ops" in result.state_updates["messages"]
+        # dropped seq 1-50 都是 set(seq, null)
+        for s in (1, 25, 50):
+            assert ops[s] == {"op": "set", "seq": s, "msg": None}
+        # 保留的 seq 51-60 没有 op
+        for s in (51, 55, 60):
+            assert s not in ops
+        # op 总数 = 50
+        assert len(result.state_updates["messages"]["_ops"]) == 50
+
+    def test_clean_emits_set_null_for_old_summary(self) -> None:
+        """窗口清理场景（clean_if_window_changed）：被删旧摘要消息 set(seq, null)。
+
+        backend 返回的 L1 块 ctx 标签=64000，当前 context_window=128000（变更），
+        clean 移除旧压缩摘要 system 消息（seq1）。
+        """
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        backend = FakeBackend()
+        backend.search_returns = [
+            {
+                "id": "c1",
+                "content": "## 历史对话压缩摘要 ...",
+                "score": 1.0,
+                "memory_type": "chunk",
+                "metadata": {
+                    "tags": ["L1", "pipeline:pipe-1", "seq:1-5", "ctx:64000"]
+                },
+            }
+        ]
+        mod.set_memory_backend(backend)
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.55})
+
+        messages = [
+            {
+                "role": "system",
+                "content": "## 历史对话压缩摘要 旧窗口产物",
+                "seq": 1,
+            },
+            {"role": "system", "content": "正常系统提示", "seq": 2},
+            {"role": "user", "content": "hello", "seq": 3},
+        ]
+
+        mock_service = MagicMock()
+        mock_service.setup = MagicMock()
+        mock_service.compress_messages = AsyncMock(return_value=None)
+
+        ctx = mod._make_minimal_ctx(
+            state={"context_window": 128000, "messages": messages},
+            pipeline_id="pipe-1",
+        )
+        ctx._services["context_service"] = mock_service
+
+        result = _run(plugin.execute(ctx))
+        ops = _ops_by_seq(result.state_updates)
+
+        # messages 是 _ops 形态
+        assert "_ops" in result.state_updates["messages"]
+        # 旧摘要 seq1 被删 → set(1, null)
+        assert ops[1] == {"op": "set", "seq": 1, "msg": None}
+        # 正常 system seq2 与 user seq3 保留，无 op
+        assert 2 not in ops
+        assert 3 not in ops
+        assert len(result.state_updates["messages"]["_ops"]) == 1
+
+    def test_not_triggered_has_no_messages_key(self) -> None:
+        """未触发场景：既无 trim 也无 clean 也无压缩时，state_updates 不含 messages key。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.55})
+
+        messages = [{"role": "user", "content": "hi", "seq": 1}]
+
+        mock_service = MagicMock()
+        mock_service.setup = MagicMock()
+        mock_service.compress_messages = AsyncMock(return_value=None)
+
+        ctx = mod._make_minimal_ctx(
+            state={"context_window": 128000, "messages": messages},
+            pipeline_id="pipe-1",
+        )
+        ctx._services["context_service"] = mock_service
+
+        result = _run(plugin.execute(ctx))
+        # 没有 clean/trim/压缩 → 不 emit messages key（仅 _tracked_msg_count）
+        assert "messages" not in result.state_updates

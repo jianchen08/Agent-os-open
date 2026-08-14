@@ -17,6 +17,7 @@ pub mod condition;
 pub mod engine;
 pub mod metrics;
 pub mod pipeline_loop;
+pub mod replay;
 pub mod store;
 pub mod template;
 

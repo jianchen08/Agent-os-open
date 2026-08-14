@@ -1,7 +1,8 @@
-/** 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知 / 用量更新） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。 */
+/** 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知 / 用量更新 / 终止评估） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。 */
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useTerminationStore } from '@/stores/terminationStore'
 import { loggers } from '@/utils/logger'
 
 import { allocateNextSequence, terminatePipeline } from './handlers/utils'
@@ -198,9 +199,47 @@ export function handleSystemNotification(eventData: any): void {
  * 处理 COST_UPDATE 事件：写入本轮单轮 token 用量到 contextUsageStore。
  *
  * 后端 track 插件在每轮 llm_call 后推送（tool_execute 轮已跳过），
- * payload = { pipeline_id, total_tokens, input_tokens, output_tokens }，
- * 均为本轮 API 返回的单轮值。进度条据此按 pipeline 实时刷新。
+ * payload = { pipeline_id, total_tokens, input_tokens, output_tokens,
+ * cached_tokens, missed_tokens, cache_hit_ratio, cumulative.* }，
+ * 均为本轮 API 返回的单轮值（cumulative 为管道累计）。进度条据此按
+ * pipeline 实时刷新；cache 维度供 CostDashboardWidget 展示命中率与趋势。
  */
+
+/** cache 命中率骤降检测阈值：降幅 ≥30pp 且当前 <70% 视为异常 */
+const CACHE_DROP_DELTA = 0.3
+const CACHE_DROP_FLOOR = 0.7
+
+/** 已提示骤降未恢复的 pipeline（恢复到 ≥70% 后解除，可再次提示） */
+const cacheDropAlerted = new Map<string, boolean>()
+
+/** 命中率骤降检测（task_observability 1b：提示哪轮调用破坏了 cache 前缀） */
+function checkCacheDrop(pipelineId: string, prevRatio: number, nextRatio: number): void {
+  if (!Number.isFinite(prevRatio) || !Number.isFinite(nextRatio)) return
+  if (nextRatio >= CACHE_DROP_FLOOR) {
+    cacheDropAlerted.delete(pipelineId)
+    return
+  }
+  const dropped = prevRatio - nextRatio >= CACHE_DROP_DELTA
+  if (dropped && !cacheDropAlerted.get(pipelineId)) {
+    cacheDropAlerted.set(pipelineId, true)
+    useNotificationStore.getState().addNotification({
+      category: 'alert',
+      title: '缓存命中率骤降',
+      message:
+        `本轮命中率 ${(nextRatio * 100).toFixed(1)}%（上一轮 ${(prevRatio * 100).toFixed(1)}%）。` +
+        '某处输入可能破坏了 cache 前缀，miss 部分将按全价计费。',
+      priority: 'normal',
+      isBlocking: false,
+      sessionId: pipelineId,
+      autoDismissMs: 15000,
+    })
+    loggers.websocket.warn(
+      '[COST_UPDATE] cache 命中率骤降: pipeline=%s %.1f%% → %.1f%%',
+      pipelineId, prevRatio * 100, nextRatio * 100,
+    )
+  }
+}
+
 export function handleCostUpdate(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
@@ -208,9 +247,37 @@ export function handleCostUpdate(eventData: any): void {
   const totalTokens = data?.total_tokens || 0
   // 后端 tool_execute 轮已过滤，前端再兜底防 0 值覆盖
   if (totalTokens <= 0) return
+  const prevUsage = useContextUsageStore.getState().getUsage(pipelineId)
   useContextUsageStore.getState().updateUsage(pipelineId, {
     total_tokens: totalTokens,
     input_tokens: data?.input_tokens || 0,
     output_tokens: data?.output_tokens || 0,
+    cached_tokens: data?.cached_tokens,
+    missed_tokens: data?.missed_tokens,
+    cache_hit_ratio: data?.cache_hit_ratio,
+    cumulative: data?.cumulative,
+  })
+  if (typeof data?.cache_hit_ratio === 'number' && prevUsage) {
+    checkCacheDrop(pipelineId, prevUsage.hitRatio, data.cache_hit_ratio)
+  }
+}
+
+/**
+ * 处理 TERMINATION_STATUS 事件（task_observability 1c）：
+ * termination_advisor Input 插件每轮推送的主动终止评估，
+ * 写入 terminationStore（「剩余预算」+「收敛信号」指示器数据源）。
+ */
+export function handleTerminationStatus(eventData: any): void {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) return
+  const data = eventData?.data || eventData
+  useTerminationStore.getState().updateStatus(pipelineId, {
+    convergence: data?.convergence ?? 'converging',
+    shouldStop: Boolean(data?.should_stop),
+    stopReason: data?.stop_reason ?? '',
+    remainingBudgetPercent:
+      typeof data?.remaining_budget_percent === 'number' ? data.remaining_budget_percent : null,
+    iteration: Number(data?.iteration) || 0,
+    elapsedS: Number(data?.elapsed_s) || 0,
   })
 }

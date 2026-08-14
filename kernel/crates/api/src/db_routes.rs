@@ -1148,7 +1148,7 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
         for expect in [
-            "runs", "messages", "traces", "blobs", "branches", "sessions", "memory", "users",
+            "runs", "message_slots", "traces", "blobs", "branches", "sessions", "memory", "users",
         ] {
             assert!(names.contains(&expect.to_string()), "缺少表 {expect}: {names:?}");
         }

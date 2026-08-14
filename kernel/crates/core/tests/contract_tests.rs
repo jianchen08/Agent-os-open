@@ -182,35 +182,12 @@ impl StorageBackend for MockStorageBackend {
     async fn get_run(&self, _run_id: &str) -> Result<RunRecord, StorageError> {
         Err(StorageError::NotFound("mock".to_string()))
     }
-    async fn get_messages(
-        &self,
-        _run_id: &str,
-        _branch_id: &str,
-    ) -> Result<Vec<MessageRecord>, StorageError> {
-        Ok(vec![])
-    }
     async fn get_messages_by_pipeline(
         &self,
         _pipeline_id: &str,
         _opts: MessageQueryOpts,
     ) -> Result<Vec<MessageRecord>, StorageError> {
         Ok(vec![])
-    }
-    async fn next_sequence(&self, _pipeline_id: &str) -> Result<u32, StorageError> {
-        Ok(1)
-    }
-    async fn get_recent_messages(
-        &self,
-        _run_id: &str,
-        _branch_id: &str,
-        _n: usize,
-    ) -> Result<Vec<Message>, StorageError> {
-        Ok(vec![Message {
-            message_id: "msg_mock".to_string(),
-            role: "user".to_string(),
-            content: "mock content".to_string(),
-            blob_id: None,
-        }])
     }
     async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, StorageError> {
         Ok(vec![1, 2, 3])
@@ -235,20 +212,6 @@ impl StorageBackend for MockStorageBackend {
         _run_id: &str,
         _config_hash: &str,
         _tenant_id: &str,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
-    #[allow(clippy::too_many_arguments)]
-    async fn append_message(
-        &self,
-        _message_id: &str,
-        _run_id: &str,
-        _branch_id: &str,
-        _seq_in_branch: u32,
-        _role: &str,
-        _blob_id: Option<&str>,
-        _content_preview: Option<&str>,
-        _pipeline_id: Option<&str>,
     ) -> Result<(), StorageError> {
         Ok(())
     }
@@ -414,14 +377,6 @@ async fn test_content_loader_creation() {
 }
 
 #[tokio::test]
-async fn test_content_loader_load_messages() {
-    let loader = make_test_content_loader();
-    let messages = loader.load_recent_messages(5).await.unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].message_id, "msg_mock");
-}
-
-#[tokio::test]
 async fn test_content_loader_load_blob() {
     let loader = make_test_content_loader();
     let blob = loader.load_blob("blob_001").await.unwrap();
@@ -507,6 +462,7 @@ fn test_message_record_serialization() {
         reasoning_content: None,
         status: None,
         error: None,
+        tool_result_json: None,
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("msg_001"));

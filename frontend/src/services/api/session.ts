@@ -71,6 +71,14 @@ interface BackendMessageResponse {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: unknown
+  /** 工具结果 envelope 的结构化数据（后端 tool_result_json.data 投影）。
+   *  与流式 tool_result 事件的 result_data 同源——冷热路径数据结构一致的关键字段，
+   *  工具卡片刷新后仍能渲染 +/- 徽标与结构化 diff。 */
+  toolResultData?: unknown
+  /** 工具执行耗时（后端 tool_result_json.duration_ms 投影）。 */
+  toolDurationMs?: number
+  /** 工具执行所在容器任务 ID（envelope metadata.container_task_id 投影）。 */
+  containerTaskId?: string
   toolError?: string
   /** 工具执行失败错误信息（后端新字段：CRITICAL CONTEXT 中 tool-role 消息携带的 error）。
    *  与 toolError 同义；映射时优先取 error，兼容旧 toolError 兜底。 */
@@ -130,12 +138,15 @@ function mapBackendMessageToMessage(
       // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
       // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
       toolResult: backendMessage.toolResult ?? backendMessage.content,
-      // 后端新字段为 error（CRITICAL CONTEXT：tool-role 消息携带 status + error），
-      // 旧字段为 toolError。优先取 error、兼容兜底 toolError，确保下游
-      // mergeConsecutiveAssistantMessages 能据 tm.toolError 判定失败 → state: 'error'。
-      // （tm.status 由下方 backendMessage.status 映射，携带真实的 completed/failed。）
+      // 结构化结果 envelope（tool_result_json 投影）：与流式 result_data 同源，
+      // merge 时注入 tool_call part 的 resultData。null 归一为 undefined
+      // （对齐流式 handler 的 ?? 语义，失败工具双侧均为 undefined）。
+      toolResultData: backendMessage.toolResultData ?? undefined,
+      // 后端新字段为 error（tool-role 消息携带 status + error），旧字段为 toolError。
+      // 优先取 error、兼容兜底，mergeConsecutiveAssistantMessages 据 toolError 判定失败。
       toolError: backendMessage.error ?? backendMessage.toolError,
-      durationMs: backendMessage.durationMs,
+      durationMs: backendMessage.toolDurationMs ?? backendMessage.durationMs,
+      containerTaskId: backendMessage.containerTaskId,
       metadata: backendMessage.metadata,
     } as Message
   }
@@ -148,12 +159,24 @@ function mapBackendMessageToMessage(
     toolCalls = backendMessage.toolCalls.map((tc: any) => {
       const isOpenAI = !!tc.function
       const fn = tc.function || {}
+      // OpenAI 规范的 arguments 是 JSON 字符串（持久化 rebuild 强制转字符串），
+      // 解析回对象——与流式路径的 args（事件 payload 对象）结构一致。
+      // 解析失败（截断/损坏数据）保留原值降级，不中断整批消息映射。
+      let toolArgs = tc.toolArgs || fn.arguments || {}
+      if (typeof toolArgs === 'string') {
+        try {
+          toolArgs = JSON.parse(toolArgs)
+        } catch {
+          // 非法 JSON：降级保留字符串
+        }
+      }
       return {
         call_id: (tc.callId || tc.id || '') as string,
         tool_name: (tc.toolName || fn.name || '') as string,
-        tool_args: ((tc.toolArgs || fn.arguments || {}) as Record<string, unknown>),
+        tool_args: toolArgs as Record<string, unknown>,
         status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
         result: tc.result,
+        resultData: tc.resultData,
         error: tc.error as string | undefined,
         duration_ms: tc.durationMs as number | undefined,
         containerTaskId: tc.containerTaskId as string | undefined,
@@ -222,11 +245,14 @@ function mapBackendMessageToMessage(
         // 与流式 toolHandler.ts:142 路径一致（失败 → 'error'，成功 → 'done'）。
         state: tc.error ? 'error' : 'done',
         result: tc.result,
+        resultData: tc.resultData,
         error: tc.error,
+        durationMs: tc.duration_ms,
         sequence: seq++,
-        // // 从后端 API 恢复 containerTaskId，确保历史消息加载后
-        // 工具卡片的"打开文件"功能能正确解析工作空间路径。
-        containerTaskId: tc.container_task_id || undefined,
+        // 从后端 API 恢复 containerTaskId（tc 上是 camelCase 字段——历史 bug 误读
+        // snake_case 恒 undefined），确保历史消息加载后工具卡片的"打开文件"
+        // 能正确解析工作空间路径。
+        containerTaskId: tc.containerTaskId || undefined,
       })
     }
   }
@@ -336,6 +362,11 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
           const failed = !!tm.toolError || (tm.status as string) === 'failed'
           target.state = failed ? 'error' : 'done'
           target.durationMs = tm.durationMs ?? target.durationMs
+          // 结构化结果 envelope 注入（冷热一致性）：与流式 tool_result 事件的
+          // result_data / container_task_id 同源，刷新后工具卡片的 diff 徽标、
+          // 打开文件路径解析不降级。
+          target.resultData = tm.toolResultData ?? target.resultData
+          target.containerTaskId = tm.containerTaskId ?? target.containerTaskId
         }
       }
       toolMessages.push(tm)

@@ -65,10 +65,20 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     Returns:
         Execution result containing state updates and optional route signal.
     """
+    from agentos_plugin_sdk import FrontendEmitter  # noqa: PLC0415
     from agentos_plugin_sdk.pipeline_types import PluginContext, create_initial_state  # noqa: PLC0415
 
     merged_state = create_initial_state(**state)
     ctx = PluginContext(state=merged_state, config=config or {})
+
+    # frontend.emit 桥接（task_observability 1a）：sidecar 进程的 capability
+    # 句柄在 AgentOSPlugin 实例上，TrackPlugin 经 ctx.get_service 访问——
+    # 此处把 FrontendEmitter 注入 ctx._services。旧内核未声明 frontend
+    # capability 时 from_plugin 返回 None，不注入（插件静默跳过推送）。
+    _emitter = FrontendEmitter.from_plugin(plugin)
+    if _emitter is not None:
+        ctx._services["frontend"] = _emitter
+
     result = await get_instance().execute(ctx)
 
     # Core 插件返回 dict，Input/Output 返回 PluginResult/OutputResult

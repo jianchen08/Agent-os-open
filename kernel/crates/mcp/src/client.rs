@@ -1182,6 +1182,7 @@ mod tests {
             "metrics",
             "tool-executor",
             "service-registry",
+            "frontend",
         ] {
             assert!(
                 caps.get(ns).is_some(),

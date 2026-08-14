@@ -94,29 +94,11 @@ impl StorageBackend for NullStorage {
     async fn get_run(&self, _run_id: &str) -> Result<RunRecord, agentos_core::types::StorageError> {
         Err(agentos_core::types::StorageError::NotFound("null".into()))
     }
-    async fn get_messages(
-        &self,
-        _run_id: &str,
-        _branch_id: &str,
-    ) -> Result<Vec<MessageRecord>, agentos_core::types::StorageError> {
-        Ok(vec![])
-    }
     async fn get_messages_by_pipeline(
         &self,
         _pipeline_id: &str,
         _opts: agentos_core::traits::MessageQueryOpts,
     ) -> Result<Vec<MessageRecord>, agentos_core::types::StorageError> {
-        Ok(vec![])
-    }
-    async fn next_sequence(&self, _pipeline_id: &str) -> Result<u32, agentos_core::types::StorageError> {
-        Ok(1)
-    }
-    async fn get_recent_messages(
-        &self,
-        _run_id: &str,
-        _branch_id: &str,
-        _n: usize,
-    ) -> Result<Vec<Message>, agentos_core::types::StorageError> {
         Ok(vec![])
     }
     async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, agentos_core::types::StorageError> {
@@ -142,20 +124,6 @@ impl StorageBackend for NullStorage {
         _run_id: &str,
         _config_hash: &str,
         _tenant_id: &str,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    #[allow(clippy::too_many_arguments)]
-    async fn append_message(
-        &self,
-        _message_id: &str,
-        _run_id: &str,
-        _branch_id: &str,
-        _seq_in_branch: u32,
-        _role: &str,
-        _blob_id: Option<&str>,
-        _content_preview: Option<&str>,
-        _pipeline_id: Option<&str>,
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }

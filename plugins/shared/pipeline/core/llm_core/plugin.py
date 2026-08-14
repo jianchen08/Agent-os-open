@@ -463,10 +463,9 @@ class LLMCore(ICorePlugin):
                             repr(_tc_args_raw[:80]),
                         )
 
-            # LLMCore 生产的 assistant 回复，由 LLMCore 负责 append 到 messages
-            # 只追加对话历史部分（不含 system_message 和 dynamic_vars），
-            # 因为 system_message 和 dynamic_vars 由 _build_messages() 每次重新组装
-            history = list(ctx.state.get("messages", []))
+            # LLMCore 生产的 assistant 回复。新模型(op-based):只 emit 一个 append set op,
+            # 由引擎 apply 到 state["messages"] + message_slots(不再返回全量 history)。
+            appended_msg: dict[str, Any] | None = None
             if tool_calls:
                 # 预先解析 tool_call_id，确保 assistant 消息和 state 中的 raw_tool_calls 使用一致的 id
                 # 同时标准化 id 格式：部分模型返回非标准格式（如 call_function_xxx_1），
@@ -511,13 +510,13 @@ class LLMCore(ICorePlugin):
                 }
                 if thinking_text:
                     assistant_msg["reasoning_content"] = thinking_text
-                history.append(assistant_msg)
+                appended_msg = assistant_msg
             elif result_text:
                 # LLM 普通文本回复 -> append assistant 消息
                 _plain_msg: dict[str, Any] = {"role": "assistant", "content": result_text}
                 if thinking_text:
                     _plain_msg["reasoning_content"] = thinking_text
-                history.append(_plain_msg)
+                appended_msg = _plain_msg
 
             _pipeline_id = ctx.state.get("pipeline_id", "?")
             _iteration = ctx.state.get("iteration", -1)
@@ -530,12 +529,17 @@ class LLMCore(ICorePlugin):
                 len(tool_calls) if tool_calls else 0,
                 len(thinking_text) if thinking_text else 0,
             )
-            return {
+            # 仅当产出了 assistant 消息才 emit append op（无文本/无工具调用时不追加）。
+            messages_update = (
+                {"_ops": [{"op": "set", "msg": appended_msg}]}
+                if appended_msg is not None
+                else None
+            )
+            result: dict[str, Any] = {
                 StateKeys.RAW_RESULT: result_text,
                 StateKeys.RAW_ERROR: None,
                 StateKeys.RAW_TOOL_CALLS: tool_calls,
                 StateKeys.RAW_THINKING: thinking_text,
-                "messages": history,
                 "llm_usage": llm_usage or {},
                 "context_window": self._context_window,
                 "llm_model": self._model,
@@ -543,6 +547,9 @@ class LLMCore(ICorePlugin):
                 "llm_api_base": self._api_base,
                 "output_truncated": output_truncated,
             }
+            if messages_update is not None:
+                result["messages"] = messages_update
+            return result
 
         except Exception as exc:
             logger.error(
@@ -596,16 +603,24 @@ class LLMCore(ICorePlugin):
             messages.append(system_msg)
 
         # 2. 压缩消息（每个块独立消息，老→新。前缀匹配 → cache hit）
+        #    _context_form 是语义标记内部字段（prompt_build 打标），发送前剥离，
+        #    不进 API 载荷（同下方 history 段的 seq/tool_result 处理）。
         for cm in state.get("compression_messages", []):
+            if "_context_form" in cm:
+                cm = {k: v for k, v in cm.items() if k != "_context_form"}  # noqa: PLW2901
             messages.append(cm)
 
         # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）
         history = state.get("messages", [])
         for m in history:
             # 清理内部标记字段，不发给 LLM：
-            # _record_sequence 旧标记；seq 新模型槽位号（内核 apply 时带上，LLM 不需要）。
-            if "_record_sequence" in m or "seq" in m:
-                m = {k: v for k, v in m.items() if k not in ("_record_sequence", "seq")}  # noqa: PLW2901
+            # seq 槽位号（内核 apply 时带上，LLM 不需要）；
+            # tool_result envelope 字段（tool 消息持久形态的一部分，发送前剥离，
+            # 是 Rust 侧后续 envelope 搬家改动的前置配合）；
+            # _context_form 语义标记（压缩优化任务 1：产出方打的内部字段，
+            # 只供压缩链路消费，最终 LLM 载荷必须剥离以保持 cache 不变）。
+            if "seq" in m or "tool_result" in m or "_context_form" in m:
+                m = {k: v for k, v in m.items() if k not in ("seq", "tool_result", "_context_form")}  # noqa: PLW2901
             messages.append(m)
 
         # 4. 多模态内容（合并到最后一条用户消息）

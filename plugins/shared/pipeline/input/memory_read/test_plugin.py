@@ -148,8 +148,13 @@ class TestExecuteRetrieval:
         assert call["user_id"] == "u-1"
         assert call["top_k"] == 5
         assert call["memory_type"] == "semantic"
-        # 后端结果原样写入 state（统一形态 id/content/score/memory_type/metadata）
-        assert result.state_updates["memory.retrieved"] == [_SAMPLE]
+        # 后端结果写入 state（统一形态 id/content/score/memory_type/metadata），
+        # 每条追加 _context_form="recall" 语义标记（压缩优化任务 1：内部字段，
+        # 声明"从记忆库检索的内容"，压缩链路差异化摘要用）
+        retrieved = result.state_updates["memory.retrieved"]
+        assert retrieved == [
+            {**_SAMPLE, "_context_form": "recall"},
+        ]
 
 
 # ═══════════════════════════════════════════════════════════

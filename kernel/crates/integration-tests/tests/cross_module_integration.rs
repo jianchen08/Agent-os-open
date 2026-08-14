@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use agentos_config::{CompositePluginYaml, ConfigLoader};
-use agentos_core::traits::{AdrEngine, HookContext, LifecycleHook, PluginInvoker, StorageBackend};
+use agentos_core::traits::{AdrEngine, HookContext, LifecycleHook, MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    CompositeStep, ContentLoader, PluginContext, PluginError, PluginResult, RouteSignal, RouteType,
+    CompositeStep, PluginContext, PluginError, PluginResult, RouteSignal, RouteType,
     RunStatus, TenantContext, WakeEvent,
 };
 use agentos_engine::{AdrEngineImpl, SqliteStore};
@@ -232,19 +232,16 @@ async fn test_store_content_loader_chain() {
     let config_hash = "abc123";
     store.create_run(run_id, config_hash, "default").unwrap();
 
-    // 写入一条消息（消息内容存到 blobs 表）
+    // 写入一条消息（op 模型：整条消息进 blob，slots 纯索引）
     let content = "Hello, integration test!";
     store
-        .append_message(
-            "msg_001",
-            run_id,
-            "main",
-            0,
-            "user",
-            Some(content),
-            Some(content),
-            None,
+        .apply_messages_ops_to_table(
+            "pipe_cl_001",
             "default",
+            &[serde_json::json!({
+                "op": "set", "seq": 0,
+                "msg": { "role": "user", "content": content }
+            })],
         )
         .unwrap();
 
@@ -252,17 +249,19 @@ async fn test_store_content_loader_chain() {
     let run = store.get_run(run_id).await.unwrap();
     assert_eq!(run.run_id, run_id);
 
-    // 验证消息可读取
-    let messages = store.get_messages(run_id, "main").await.unwrap();
+    // 验证消息可读取（读时重建，content_preview 即全文）
+    let messages = store
+        .get_messages_by_pipeline("pipe_cl_001", MessageQueryOpts::default())
+        .await
+        .unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, "user");
+    assert_eq!(messages[0].content_preview.as_deref(), Some(content));
 
-    // 验证 ContentLoader 能加载最近消息
-    let store_as_backend: Arc<dyn StorageBackend> = store.clone();
-    let loader = ContentLoader::new(store_as_backend, run_id.to_string(), "main".to_string(), 10);
-    let recent = loader.load_recent_messages(5).await.unwrap();
-    assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].content, content);
+    // 验证冷启动历史读路径（join blobs 重建完整消息）
+    let history = store.load_message_history("pipe_cl_001", "default").unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["content"], content);
 }
 
 // ═══════════════════════════════════════════════════════════════════

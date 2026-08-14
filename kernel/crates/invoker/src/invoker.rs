@@ -2609,22 +2609,8 @@ mod tests {
                 "mock".to_string(),
             ))
         }
-        async fn get_messages(
-            &self,
-            _run_id: &str,
-            _branch_id: &str,
-        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
-        {
-            Ok(vec![])
-        }
-        async fn get_recent_messages(
-            &self,
-            _run_id: &str,
-            _branch_id: &str,
-            _n: usize,
-        ) -> Result<Vec<agentos_core::types::Message>, agentos_core::types::StorageError> {
-            Ok(vec![])
-        }
+        // 注：旧 trait 方法 get_messages/get_recent_messages/next_sequence 已随
+        // StorageBackend 演进移除，mock 同步删除（修复 HEAD 上 lib test 编译失败）。
         async fn get_blob(
             &self,
             _blob_id: &str,
@@ -2660,31 +2646,11 @@ mod tests {
         {
             Ok(vec![])
         }
-        async fn next_sequence(
-            &self,
-            _pipeline_id: &str,
-        ) -> Result<u32, agentos_core::types::StorageError> {
-            Ok(1)
-        }
         async fn create_run(
             &self,
             _run_id: &str,
             _config_hash: &str,
             _tenant_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            Ok(())
-        }
-        #[allow(clippy::too_many_arguments)]
-        async fn append_message(
-            &self,
-            _message_id: &str,
-            _run_id: &str,
-            _branch_id: &str,
-            _seq_in_branch: u32,
-            _role: &str,
-            _blob_id: Option<&str>,
-            _content_preview: Option<&str>,
-            _pipeline_id: Option<&str>,
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }

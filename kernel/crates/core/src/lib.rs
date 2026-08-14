@@ -35,5 +35,6 @@
 //! [方案总纲 §3.7]: docs/0.2_rust_plugin_solution.md
 //! [方案总纲 §3.4]: docs/0.2_rust_plugin_solution.md
 
+pub mod ids;
 pub mod traits;
 pub mod types;

@@ -346,8 +346,11 @@ async fn ws_handler(
     // P2 内核化路径
     if let (Some(session), Some(router)) = (state.session.clone(), state.inbound_router.clone()) {
         let token = params.get("token").cloned();
-        return ws
-            .on_upgrade(move |socket| run_p2_ws_session(socket, session, router, token));
+        // B3：前端重连时上报 last_sequence（全局 watermark），用于首个 thread 注册时回放断线期间事件。
+        let last_sequence = params.get("last_sequence").and_then(|s| s.parse::<u64>().ok());
+        return ws.on_upgrade(move |socket| {
+            run_p2_ws_session(socket, session, router, token, last_sequence)
+        });
     }
     // 降级路径（旧 echo/engine，未启用 session 时）
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
@@ -359,6 +362,7 @@ async fn run_p2_ws_session(
     session: Arc<agentos_session::SessionCoordinator>,
     router: Arc<agentos_session::router::InboundRouter>,
     token: Option<String>,
+    last_sequence: Option<u64>,
 ) {
     let mut user_id = None;
     let (code, reason) = crate::ws_session::run_ws_session(
@@ -367,6 +371,7 @@ async fn run_p2_ws_session(
         router,
         token.as_deref(),
         &mut user_id,
+        last_sequence,
     )
     .await;
     if code != 1000 {
@@ -670,9 +675,12 @@ async fn process_via_engine_inner(
         }
     }
     if !history_loaded {
-        // 冷路径 ①：优先从最近 checkpoint 恢复（O(1) 取基线，无需回放 traces）。
-        // checkpoint 存当时完整 state（messages + 全部标量字段）。
-        // 命中则直接用作 recovered，跳过全量 traces 回放。
+        // 冷路径（零兼容重排）：
+        // ① checkpoint 只提供**标量基线**——messages 一律不消费（load 后剥离丢弃），
+        //    无论新旧格式（任务 5 瘦身后新 checkpoint 本就不含 messages）。
+        // ② 无 checkpoint → traces 回放**标量字段**（merge_patch 跳过 messages）。
+        // ③ pipeline_state 表补充累计标量（每 step upsert 最新值）。
+        // ④ messages 从 message_slots 表直读（消息队列持久真值，零回放）。
         let mut recovered: serde_json::Value = serde_json::json!({});
         let mut ckpt_hit = false;
         if !effective_pipeline_id.is_empty() {
@@ -680,28 +688,22 @@ async fn process_via_engine_inner(
                 store.load_latest_checkpoint(effective_pipeline_id, &tenant_id).await
             {
                 recovered = ckpt_state;
+                // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
+                if let Some(rec_obj) = recovered.as_object_mut() {
+                    rec_obj.remove("messages");
+                }
                 ckpt_hit = true;
                 debug!(
                     pipeline_id = %effective_pipeline_id,
-                    "冷启动从 checkpoint 恢复（跳过 traces 全量回放）"
+                    "冷启动从 checkpoint 恢复标量基线（messages 走表读）"
                 );
             }
         }
-        // 冷路径 ②：无 checkpoint → 从持久化的 step 级轨迹按序 merge 重建完整 state。
-        // 轨迹颗粒度 = 配置 step（prepare/core/post），patch_data 含该 step 期间所有
-        // state 变更（messages 现为增量 _ops，由 merge_patch/apply_messages_ops 还原）。
         if !ckpt_hit {
             match store.get_step_traces_by_thread(thread_id, &tenant_id).await {
                 Ok(step_traces) => {
                     for entry in &step_traces {
                         merge_patch(&mut recovered, &entry.patch_data);
-                    }
-                    if !step_traces.is_empty() && !recovered.as_object().is_none_or(|o| o.contains_key("messages")) {
-                        debug!(
-                            pipeline_id = %effective_pipeline_id,
-                            traces = step_traces.len(),
-                            "step 轨迹回放完成但无 messages 字段（可能首轮）"
-                        );
                     }
                 }
                 Err(e) => {
@@ -714,9 +716,8 @@ async fn process_via_engine_inner(
                 }
             }
         }
-        // 冷路径 ③：从 pipeline_state 表补充累计标量字段（track.total_tokens 等）。
-        // checkpoint/traces 回放已还原 messages，但累计字段以 pipeline_state 为准
-        // （它每 step upsert 最新值）。重建后插件能在正确基线上自然累加，不归零。
+        // 累计标量字段以 pipeline_state 为准（每 step upsert 最新值），
+        // 重建后插件能在正确基线上自然累加，不归零。
         if !effective_pipeline_id.is_empty() {
             if let Ok(state_fields) = store.load_pipeline_state(effective_pipeline_id, &tenant_id).await {
                 if let Some(rec_obj) = recovered.as_object_mut() {
@@ -726,13 +727,16 @@ async fn process_via_engine_inner(
                 }
             }
         }
-        // 把回放出的非 messages 字段并入 initial_state；messages 提取为 history
-        if let Some(rec_obj) = recovered.as_object_mut() {
-            if let Some(msgs) = rec_obj.remove("messages").and_then(|v| v.as_array().cloned()) {
+        // messages 直读 message_slots（零回放；元素自带稳定 seq）
+        if !effective_pipeline_id.is_empty() {
+            if let Ok(msgs) = store.load_message_history(effective_pipeline_id, &tenant_id).await {
                 history_prefix = msgs;
                 history_loaded = !history_prefix.is_empty();
             }
-            // 其余字段（system_message/dynamic_vars/memory/knowledge/累计字段 等）注入 state
+        }
+        // 标量字段注入 state
+        if let Some(rec_obj) = recovered.as_object_mut() {
+            rec_obj.remove("messages");
             if let Some(init_obj) = initial_state.as_object_mut() {
                 for (k, v) in rec_obj.iter() {
                     init_obj.insert(k.clone(), v.clone());
@@ -740,14 +744,31 @@ async fn process_via_engine_inner(
             }
         }
     }
-    // 真·首轮兜底：客户端 history（向后兼容老客户端，正常路径不依赖它）
-    if !history_loaded && !history.is_empty() {
-        history_prefix = history.to_vec();
-    }
-    let mut msgs = history_prefix;
-    msgs.push(serde_json::json!({"role": "user", "content": message}));
+    // messages 塞回 state（热路径元素自带 seq；冷路径表读也已带 seq——零兼容，
+    // 不做缺 seq 补位、不做客户端 history 兜底）
     if let Some(obj) = initial_state.as_object_mut() {
-        obj.insert("messages".to_string(), serde_json::Value::Array(msgs));
+        obj.insert("messages".to_string(), serde_json::Value::Array(history_prefix));
+    }
+    // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
+    // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
+    // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
+    if let Ok(user_ledger) =
+        agentos_engine::apply_messages_op_update(
+            &mut initial_state,
+            store.as_ref(),
+            &tenant_id,
+            &[serde_json::json!({"op":"set","msg":{"role":"user","content":message}})],
+        )
+        .await
+    {
+        if !user_ledger.is_empty() {
+            if let Some(obj) = initial_state.as_object_mut() {
+                obj.insert(
+                    "_pending_message_ops".to_string(),
+                    serde_json::Value::Array(user_ledger),
+                );
+            }
+        }
     }
 
     // 2. 加载 Agent 配置注入 state（读 config/agents/<agent_id>.yaml，不存在跳过）
@@ -798,6 +819,18 @@ async fn process_via_engine_inner(
         state.manifests
             .iter()
             .flat_map(|m| m.persistent_fields.iter().cloned()),
+    )
+    // on_pipeline_end 钩子插件收集（spill_guard 清理通道）：manifest 声明了该
+    // 钩子的插件在 run 结束时收到 OnPipelineEnd（best-effort，见 executor）。
+    .with_pipeline_end_hook_plugins(
+        state.manifests
+            .iter()
+            .filter(|m| {
+                m.capabilities
+                    .lifecycle_hooks
+                    .contains(&agentos_core::traits::LifecycleHook::OnPipelineEnd)
+            })
+            .map(|m| m.id.clone()),
     );
 
     // 统一配置加载方案 TDD-7：注入 ConfigCenter，启用 per-iteration agent 热加载。
@@ -854,12 +887,25 @@ async fn process_via_engine_inner(
     serde_json::to_string_pretty(&final_state).unwrap_or_else(|_| message.to_string())
 }
 
+/// 框架级强制工具：无视 agent `tool_ids`，只要 registry 里存在就注入。
+///
+/// 这些工具的存在是**无害**的（LLM 不会无缘无故调——需要具体参数引导），但对
+/// 框架兜底闭环**必需**。例如 `spill_retrieve`：spill_guard 把大输出替换为
+/// 摘要 + "调用 spill_retrieve(tool_call_id=...) 取回" 引导，若 agent 的
+/// tool_ids 未列此工具，LLM 工具列表里没有它的 schema，原文就永远取不回——
+/// 兜底链路断裂。它与 spill_guard 配套安装（要么都装要么都不装），故"registry
+/// 存在 = 已安装"即可作为注入判据，无需读 pipeline 配置做条件联动。
+const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
+
 /// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。
 /// RFC 7396 JSON Merge Patch：把 patch 按序合并进 target。
-/// 用于冷启动时按 step 级轨迹逐条 merge 回放，重建完整 state。
+/// 用于冷启动时按 step 级轨迹逐条 merge 回放，重建完整 state（**仅标量字段**）。
 /// - patch 中值为对象：递归 merge（target 同 key 也为对象时）
 /// - patch 中值为 null：从 target 删除该 key
 /// - 否则：target[key] = patch[key]（整体替换）
+///
+/// messages **不参与回放**（零兼容）：消息队列真值在 message_slots 表（冷路径直读），
+/// 轨迹里的 messages 实录只做审计/回退重建（任务 6），不走本函数。
 fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
     if let serde_json::Value::Object(patch_map) = patch {
         if !target.is_object() {
@@ -870,21 +916,7 @@ fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
             if v.is_null() {
                 target_obj.remove(k);
             } else if k == "messages" {
-                // 分层持久化：messages 增量化。新格式 { "_ops": [...] } 按序应用 ops；
-                // 旧格式（数组）整体覆盖（兼容历史 patch）。检测 _ops 区分新旧格式。
-                if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
-                    // 确保存在 messages 数组
-                    let existing = target_obj
-                        .entry("messages".to_string())
-                        .or_insert_with(|| serde_json::Value::Array(vec![]));
-                    if let Some(arr) = existing.as_array_mut() {
-                        apply_messages_ops(arr, ops);
-                    }
-                } else if let Some(existing) = target_obj.get_mut(k) {
-                    *existing = v.clone();
-                } else {
-                    target_obj.insert(k.clone(), v.clone());
-                }
+                continue; // 队列真值在表，标量回放跳过
             } else if let Some(existing) = target_obj.get_mut(k) {
                 if existing.is_object() && v.is_object() {
                     merge_patch(existing, v);
@@ -897,47 +929,6 @@ fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
         }
     } else {
         *target = patch.clone();
-    }
-}
-
-/// 对 messages 数组应用增量 ops（回放新格式 patch 用）。
-///
-/// ops 元素（与 pipeline_loop.messages_diff_ops 对齐）：
-/// - `{"op":"append","msg":{...}}`：尾部追加
-/// - `{"op":"delete_from","idx":N}`：删除 index ≥ N（压缩）
-/// - `{"op":"replace_at","idx":N,"msg":{...}}`：替换 index N
-fn apply_messages_ops(arr: &mut Vec<serde_json::Value>, ops: &[serde_json::Value]) {
-    for op in ops {
-        let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
-        match kind {
-            "append" => {
-                if let Some(msg) = op.get("msg") {
-                    arr.push(msg.clone());
-                }
-            }
-            "delete_from" => {
-                if let Some(idx) = op.get("idx").and_then(|v| v.as_u64()) {
-                    let idx = idx as usize;
-                    if idx < arr.len() {
-                        arr.truncate(idx);
-                    }
-                }
-            }
-            "replace_at" => {
-                if let (Some(idx), Some(msg)) = (
-                    op.get("idx").and_then(|v| v.as_u64()),
-                    op.get("msg"),
-                ) {
-                    let idx = idx as usize;
-                    match idx.cmp(&arr.len()) {
-                        std::cmp::Ordering::Less => arr[idx] = msg.clone(),
-                        std::cmp::Ordering::Equal => arr.push(msg.clone()),
-                        std::cmp::Ordering::Greater => {}
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -961,7 +952,11 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     let schemas: Vec<serde_json::Value> = all_tools
         .iter()
         .filter(|t| match &wanted {
-            Some(ids) => ids.contains(&t.name),
+            Some(ids) => {
+                // tool_ids 命中 或 框架级强制工具（spill_retrieve 等，无视 agent 配置）
+                ids.contains(&t.name)
+                    || FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
+            }
             None => true,
         })
         .filter(|t| {
@@ -1666,23 +1661,19 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!([]));
             self.seen.lock().unwrap().push(history.clone());
-            // 模拟 LLM：追加 assistant 回复（内容基于收到的消息数，便于断言）
-            if let Some(arr) = history.as_array_mut() {
-                arr.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": format!("回复第{}条", arr.len()),
-                }));
-            }
+            // 模拟 LLM：构造 assistant 回复（内容基于收到的消息数，便于断言），
+            // 以增量 op emit（零兼容：所有插件一律 op 模型，无全量数组分支）
+            let reply_msg = serde_json::json!({
+                "role": "assistant",
+                "content": format!("回复第{}条", history.as_array().map(|a| a.len()).unwrap_or(1)),
+            });
+            let reply = reply_msg["content"].as_str().unwrap_or("").to_string();
             let mut updates = std::collections::HashMap::new();
-            let reply = history
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string();
             updates.insert("raw_result".to_string(), serde_json::json!(reply));
-            updates.insert("messages".to_string(), history);
+            updates.insert(
+                "messages".to_string(),
+                serde_json::json!({ "_ops": [{ "op": "set", "msg": reply_msg }] }),
+            );
             Ok(agentos_core::types::PluginResult {
                 state_updates: updates,
                 ..Default::default()
@@ -1718,9 +1709,10 @@ mod tests {
         AppState,
         Arc<RecordingInvoker>,
         Arc<dyn agentos_core::traits::StorageBackend>,
+        Arc<agentos_engine::SqliteStore>,
     ) {
-        let store: Arc<dyn agentos_core::traits::StorageBackend> =
-            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
         let invoker = Arc::new(RecordingInvoker {
             seen: std::sync::Mutex::new(Vec::new()),
         });
@@ -1757,12 +1749,12 @@ mod tests {
         state.plugin_ids = Arc::new(std::collections::HashSet::from([
             "mock_llm_core".to_string(),
         ]));
-        (state, invoker, store)
+        (state, invoker, store, sqlite)
     }
 
     #[tokio::test]
     async fn test_multi_turn_second_round_sees_first_round_context() {
-        let (state, invoker, _store) = make_engine_state();
+        let (state, invoker, _store, _sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_mt", "thread_mt");
         let pipe = "pipe_mt";
         let thread = "thread_mt";
@@ -1806,7 +1798,7 @@ mod tests {
     async fn test_multi_turn_http_empty_pipeline_id_falls_back_to_thread() {
         // HTTP 路径 pipeline_id=""，effective 应回退 thread_id，
         // 使 store 写入/查询键一致，第二轮仍能看到第一轮上下文。
-        let (state, invoker, _store) = make_engine_state();
+        let (state, invoker, _store, _sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_http", "thread_http");
         let thread = "thread_http";
 
@@ -1834,47 +1826,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_turn_cold_start_recovers_from_store() {
-        // 冷路径验证：registry 未命中（新进程/重启）时，从 store 恢复历史。
-        // 模拟：先直接向 store 写入第一轮 user+assistant 消息（pipeline_id=pipe_cold），
+        // 冷路径验证：registry 未命中（新进程/重启）时，从 message_slots 表恢复历史
+        // （零兼容重排：messages 持久真值 = slots 表，checkpoint/traces 只管标量）。
+        // 模拟：直接向 slots 写入第一轮 user+assistant（pipeline_id=pipe_cold），
         // 再调用 process_via_engine，断言 LLM 收到历史 + 当前。
-        let (state, invoker, store) = make_engine_state();
+        let (state, invoker, store, sqlite) = make_engine_state();
         let tenant = TenantContext::new("tenant_cold", "thread_cold");
         let pipe = "pipe_cold";
         let thread = "thread_cold";
 
-        // 直接写库（模拟上一轮已持久化，registry 无该管道——冷启动）
-        // 冷启动恢复源是 step 级轨迹（含 messages 字段），故同时写 messages 表（供断言）
-        // 与一条 step 级 trace（patch_data 含 messages，冷路径据此回放）。
-        use agentos_core::types::{PatchType, TraceEntry};
+        // 直接写 slots（模拟上一轮已持久化，registry 无该管道——冷启动）
         let store_ref = store.clone();
         agentos_tenant::scope(tenant.clone(), async {
             store_ref.create_run("run_cold", "", "tenant_cold").await.unwrap();
-            // 管道→会话映射，使 get_step_traces_by_thread 能定位 pipe
             store_ref.link_pipeline_session(pipe, thread, "tenant_cold").await.unwrap();
-            store_ref
-                .append_message("u_cold", "run_cold", "main", 1, "user", None, Some("冷启动第一轮"), Some(pipe))
-                .await
+            sqlite
+                .apply_messages_ops_to_table(pipe, "tenant_cold", &[
+                    serde_json::json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "冷启动第一轮"}}),
+                    serde_json::json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "冷启动回复"}}),
+                ])
                 .unwrap();
-            store_ref
-                .append_message("a_cold", "run_cold", "main", 2, "assistant", None, Some("冷启动回复"), Some(pipe))
-                .await
-                .unwrap();
-            // step 级轨迹：模拟上一轮 prepare/core 跑完后把 messages 写进了 state
-            store_ref.append_trace(TraceEntry {
-                trace_id: "t_cold".into(),
-                run_id: "run_cold".into(),
-                branch_id: "main".into(),
-                seq_in_branch: 0,
-                plugin_id: "core".into(),
-                patch_type: PatchType::StateUpdate,
-                patch_data: serde_json::json!({
-                    "messages": [
-                        {"role": "user", "content": "冷启动第一轮"},
-                        {"role": "assistant", "content": "冷启动回复"}
-                    ]
-                }),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            }).await.unwrap();
         })
         .await;
 
@@ -1919,7 +1890,7 @@ mod tests {
     /// get_messages_by_pipeline 在各自 scope 内读回。
     #[tokio::test]
     async fn test_multi_user_isolation_end_to_end() {
-        let (state, _invoker, store) = make_engine_state();
+        let (state, _invoker, store, _sqlite) = make_engine_state();
 
         // 播种两个用户：alice → tenant_alice，bob → tenant_bob（一用户一租户）
         let now = chrono::Utc::now().to_rfc3339();
@@ -2145,5 +2116,82 @@ mod tests {
         // 精确匹配——子域/变体不应通过
         assert!(!super::origin_matches_allowlist("https://evil.example.com", &allow));
         assert!(!super::origin_matches_allowlist("https://app.example.com.evil.com", &allow));
+    }
+
+    // ── spill_guard 配套：框架级强制工具注入 ──────────────────────
+
+    /// 构造含 spill_retrieve + 普通工具的 registry，注入 AppState。
+    fn app_state_with_tools(tool_names: &[&str]) -> AppState {
+        use agentos_core::traits::ToolDescriptor;
+        use agentos_core::types::{ToolCategory, ToolSource};
+        use agentos_plugin_loader::CapabilityRegistryImpl;
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        for name in tool_names {
+            registry.register_tool(
+                "test_plugin",
+                ToolDescriptor {
+                    name: (*name).to_string(),
+                    description: format!("test tool {name}"),
+                    plugin_id: "test_plugin".to_string(),
+                    input_schema: json!({"type": "object", "properties": {}}),
+                    output_schema: None,
+                    category: ToolCategory::System,
+                    source: ToolSource::Builtin,
+                    ui: None,
+                },
+            );
+        }
+        let mut state = AppState::new();
+        state.capability_registry = Some(registry);
+        state
+    }
+
+    /// spill_retrieve 即使不在 agent tool_ids 里也必须注入——spill_guard 替换
+    /// 文本引导 LLM 调它取回原文，若 schema 不可见就是死路。
+    #[test]
+    fn inject_tool_schemas_forces_spill_retrieve_regardless_of_tool_ids() {
+        let app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
+        let mut state = json!({
+            "tool_ids": ["bash_execute"],  // 显式不含 spill_retrieve
+        });
+        inject_tool_schemas(&mut state, &app_state);
+        let schemas = state["tool_schemas"].as_array().unwrap();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"spill_retrieve"), "spill_retrieve 必须强制注入: {names:?}");
+        assert!(names.contains(&"bash_execute"), "tool_ids 命中的正常注入: {names:?}");
+    }
+
+    /// 没有 tool_ids（兜底全量）时，spill_retrieve 自然在内。
+    #[test]
+    fn inject_tool_schemas_all_mode_includes_everything() {
+        let app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
+        let mut state = json!({});  // 无 tool_ids → 全量
+        inject_tool_schemas(&mut state, &app_state);
+        let names: Vec<&str> = state["tool_schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"spill_retrieve"));
+        assert!(names.contains(&"bash_execute"));
+    }
+
+    /// registry 里没有 spill_retrieve（插件未安装）时不会凭空注入。
+    #[test]
+    fn inject_tool_schemas_no_spill_retrieve_when_not_installed() {
+        let app_state = app_state_with_tools(&["bash_execute"]);  // 无 spill_retrieve
+        let mut state = json!({"tool_ids": ["bash_execute"]});
+        inject_tool_schemas(&mut state, &app_state);
+        let names: Vec<&str> = state["tool_schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"spill_retrieve"), "未安装不应凭空出现");
     }
 }

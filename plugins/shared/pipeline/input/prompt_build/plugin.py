@@ -1139,6 +1139,8 @@ class PromptBuildPlugin(IInputPlugin):
                     "role": "system",
                     "name": "compressed",
                     "content": f'<compressed seq="{seq}" level="L2">\n## 三元组摘要\n{content}\n</compressed>',
+                    # 语义标记（内部字段）：记忆库检索内容；llm_core 发送前清理
+                    "_context_form": "recall",
                 }
             )
 
@@ -1148,6 +1150,8 @@ class PromptBuildPlugin(IInputPlugin):
                     "role": "system",
                     "name": "compressed",
                     "content": f'<compressed seq="{seq}" level="L1">\n## 过程摘要\n{content}\n</compressed>',
+                    # 语义标记（内部字段）：记忆库检索内容；llm_core 发送前清理
+                    "_context_form": "recall",
                 }
             )
 
@@ -1164,6 +1168,8 @@ class PromptBuildPlugin(IInputPlugin):
                     "content": '<compressed level="KEYWORDS">\n'
                     "## 已降级块的关键词索引（L1/L2 预算不足，仅保留关键词）\n" + "\n".join(index_lines) + "\n"
                     "</compressed>",
+                    # 语义标记（内部字段）：记忆库检索内容；llm_core 发送前清理
+                    "_context_form": "recall",
                 }
             )
 
@@ -1315,6 +1321,8 @@ class PromptBuildPlugin(IInputPlugin):
                                 "role": "system",
                                 "name": "state_snapshot",
                                 "content": f"<current_state>\n{content}\n</current_state>",
+                                # 语义标记（内部字段）：状态快照；llm_core 发送前清理
+                                "_context_form": "snapshot",
                             }
                         ]
         except Exception:

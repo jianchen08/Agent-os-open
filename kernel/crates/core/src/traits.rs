@@ -1366,12 +1366,6 @@ pub trait StorageBackend: Send + Sync {
     /// 获取运行实例记录。
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError>;
 
-    /// 获取指定分支的所有消息记录。
-    async fn get_messages(
-        &self,
-        run_id: &str,
-        branch_id: &str,
-    ) -> Result<Vec<MessageRecord>, StorageError>;
 
     /// 按 pipeline_id 查询历史消息（消息层自治查询主键）。
     ///
@@ -1384,23 +1378,6 @@ pub trait StorageBackend: Send + Sync {
         opts: MessageQueryOpts,
     ) -> Result<Vec<MessageRecord>, StorageError>;
 
-    /// 取管道内下一个 sequence（按 pipeline_id 维度连续递增）。
-    ///
-    /// sequence 按 pipeline_id 单调递增（跨多轮、跨 run_id），支撑前端
-    /// `before_sequence`/`after_sequence` 游标分页。替代旧的"每轮 run_id 重置 0/1"。
-    /// 对齐 0.1 ExecutionRecordData.sequence（管道内连续）。
-    async fn next_sequence(&self, pipeline_id: &str) -> Result<u32, StorageError>;
-
-    /// 获取最近 N 条消息的完整内容（联查 messages + blobs 表）。
-    ///
-    /// 这是 ContentLoader 的底层调用——从 messages 表查询最近 N 条消息的
-    /// blob_id，再从 blobs 表加载完整内容，组装成 Message 返回。
-    async fn get_recent_messages(
-        &self,
-        run_id: &str,
-        branch_id: &str,
-        n: usize,
-    ) -> Result<Vec<Message>, StorageError>;
 
     /// 获取指定 blob_id 的原始数据。
     async fn get_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError>;
@@ -1428,22 +1405,6 @@ pub trait StorageBackend: Send + Sync {
         tenant_id: &str,
     ) -> Result<(), StorageError>;
 
-    /// 追加消息到 messages 表（ADR ③④）。
-    /// tenant_id 从 task_local agentos_tenant 取。完整内容存 blobs 表，
-    /// messages 表只存 content_preview 摘要 + blob_id 指针（ADR ⑦ 懒加载）。
-    /// pipeline_id：消息所属管道（消息层查询主键），从 state 读，可为 None 兼容旧调用。
-    #[allow(clippy::too_many_arguments)]
-    async fn append_message(
-        &self,
-        message_id: &str,
-        run_id: &str,
-        branch_id: &str,
-        seq_in_branch: u32,
-        role: &str,
-        blob_id: Option<&str>,
-        content_preview: Option<&str>,
-        pipeline_id: Option<&str>,
-    ) -> Result<(), StorageError>;
 
     /// 存储不可变原始数据到 blobs 表（内容寻址去重，blob_id = SHA256）。
     /// 返回 blob_id 供 messages 表引用。
@@ -1451,17 +1412,6 @@ pub trait StorageBackend: Send + Sync {
 
     // ── 域10：分层持久化投影（messages 增量对齐 + 标量快照 + checkpoint）────
 
-    /// 投影 messages 列表字段到 messages 表（增量索引对齐，幂等，追加 O(1)）。
-    /// 引擎 merge state_updates["messages"] 后调用。`new_arr` 是完整数组快照。
-    /// 默认 no-op（mock/null store 用），SqliteStore 覆盖为真实实现。
-    async fn project_messages(
-        &self,
-        _pipeline_id: &str,
-        _tenant_id: &str,
-        _new_arr: &[serde_json::Value],
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
 
     /// 应用身份/seq 感知的 messages ops 到 message_slots 表（op-based 新模型单写入器）。
     /// 引擎把插件 emit 的 `set/insert` op 落表（与 `apply_slot_ops_to_array` 落内存是同一组 op）。
@@ -1514,6 +1464,16 @@ pub trait StorageBackend: Send + Sync {
         _tenant_id: &str,
     ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
         Ok(None)
+    }
+
+    /// 冷启动历史读路径：从 message_slots（消息队列持久真值）join blobs 重建完整
+    /// 消息对象数组（元素自带稳定 seq），零回放。
+    async fn load_message_history(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        Ok(vec![])
     }
 
     // ── 域2：session 标签夹（对齐 0.1 SessionModel）─────────────────────

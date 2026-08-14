@@ -227,15 +227,31 @@ def _is_valid_tool_call_id(tc_id: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
 
 
-def standardize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
-    """标准化 tool_calls 为 OpenAI API 格式（公共入口）。"""
-    _normalize_tool_calls_in_messages(messages)
+def standardize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> list[int]:
+    """标准化 tool_calls 为 OpenAI API 格式（公共入口）。
+
+    Returns:
+        被改写的消息下标列表（结构重建 / id remap 触发过的 assistant 消息，
+        以及 tool_call_id 被 remap 的 tool 消息）。无改写返回空列表。
+        消息本身仍就地改写（向后兼容旧调用方忽略返回值）。
+    """
+    return _normalize_tool_calls_in_messages(messages)
 
 
-def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  # noqa: PLR0912
-    """确保 assistant 消息中的 tool_calls 使用统一的内部格式。"""
+def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> list[int]:  # noqa: PLR0912
+    """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
+
+    Returns:
+        被就地改写的消息下标列表（保持插入顺序）。调用方可据此对相应槽位
+        emit 增量 op（set(seq, 新内容)）。忽略返回值时行为与旧版完全一致。
+    """
     # id_remap: 记录非标准 id -> 新标准 id 的映射，用于同步修正 tool 消息
     id_remap: dict[str, str] = {}
+    changed: list[int] = []
+
+    def _mark(idx: int) -> None:
+        if idx not in changed:
+            changed.append(idx)
 
     for _msg_idx, msg in enumerate(messages):
         if msg.get("role") != "assistant" or not msg.get("tool_calls"):
@@ -272,6 +288,7 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  
                 )
             msg["tool_calls"] = normalized
             raw_tcs = normalized
+            _mark(_msg_idx)
 
         # ── 修正 2: tool_call_id 格式统一 ──
         for tc in raw_tcs:
@@ -282,6 +299,7 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  
                 new_id = f"call_{uuid.uuid4().hex[:24]}"
                 tc["id"] = new_id
                 id_remap[old_id] = new_id
+                _mark(_msg_idx)
                 logger.info(
                     "tool_call_id 格式修正: %s → %s",
                     old_id,
@@ -290,12 +308,15 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  
 
     # 同步修正 tool 消息中对应的 tool_call_id，保持 assistant↔tool 配对一致
     if id_remap:
-        for msg in messages:
+        for _msg_idx, msg in enumerate(messages):
             if msg.get("role") != "tool":
                 continue
             tc_id = msg.get("tool_call_id")
             if tc_id and tc_id in id_remap:
                 msg["tool_call_id"] = id_remap[tc_id]
+                _mark(_msg_idx)
+
+    return changed
 
 
 def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915

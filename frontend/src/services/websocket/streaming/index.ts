@@ -15,11 +15,12 @@ import {
   handleThinkingChunk,
   handleThinkingEnd,
   handleThinkingStart,
+  handleToolProgress,
   handleToolResult,
   handleToolStart,
   handleIteration,
 } from './handlers'
-import { handleCostUpdate, handleReconnected, handleStateChange, handleSystemNotification } from './lifecycleHandlers'
+import { handleCostUpdate, handleReconnected, handleStateChange, handleSystemNotification, handleTerminationStatus } from './lifecycleHandlers'
 import { isPipelineRelevant, resolvePipelineId } from './router'
 
 let _initialized = false
@@ -66,6 +67,7 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.THINKING_END] = _logWrap(WS_SERVER_EVENTS.THINKING_END, handleThinkingEnd)
   _handlers[WS_SERVER_EVENTS.TOOL_START] = _logWrap(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
   _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _logWrap(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)
+  _handlers[WS_SERVER_EVENTS.TOOL_PROGRESS] = _logWrap(WS_SERVER_EVENTS.TOOL_PROGRESS, handleToolProgress)
   _handlers[WS_SERVER_EVENTS.SUB_AGENT_CREATED] = _logWrap(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated)
   _handlers[WS_SERVER_EVENTS.STREAM_KEEPALIVE] = _logWrap(WS_SERVER_EVENTS.STREAM_KEEPALIVE, handleStreamKeepalive)
   _handlers[WS_SERVER_EVENTS.ITERATION] = _logWrap(WS_SERVER_EVENTS.ITERATION, handleIteration)
@@ -73,6 +75,7 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.STATE_CHANGE] = _logWrap(WS_SERVER_EVENTS.STATE_CHANGE, handleStateChange)
   _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = _logWrap(WS_SERVER_EVENTS.SYSTEM_NOTIFICATION, handleSystemNotification)
   _handlers[WS_SERVER_EVENTS.COST_UPDATE] = _logWrap(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
+  _handlers[WS_SERVER_EVENTS.TERMINATION_STATUS] = _logWrap(WS_SERVER_EVENTS.TERMINATION_STATUS, handleTerminationStatus)
 
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)

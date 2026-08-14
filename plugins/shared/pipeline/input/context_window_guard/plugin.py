@@ -3,7 +3,7 @@
 在每次 LLM 调用前检查上下文大小，超阈值时执行预算驱动的分层压缩。
 
 本插件 Step 4 重建要点（相对 0.1 的变化）：
-- 压缩算法（CompressionConfig + ContextCompressor + COMPRESS_PROMPT）从
+- 压缩算法（CompressionConfig + ContextCompressor）从
   memory/context_compressor.py 内联到本文件，消除对 0.2 中不存在的
   `memory` 模块的导入依赖（修复老版 _get_memory_service 第 629 行的 import
   在 try/except 之外的 bug，以及 _resolve_trigger_ratio 对
@@ -16,6 +16,15 @@
   `_memory_backend: IMemoryBackend`（Hindsight/capability），通过
   `set_memory_backend()` 注入。L1/L2/STATE_SNAPSHOT 块以
   memory_type="chunk" 写入，memory_items 以 memory_type="semantic" 写入。
+
+压缩优化（docs/tasks/task_compression_optimization.md，0.2 P2）：
+- 任务 1 语义标记：消息内部字段 _context_form 声明语义形态
+  （instructions/notice/recall/relay/snapshot，见 CONTEXT_FORM_* 词汇表），
+  压缩时渲染为 [form] 标签前缀供压缩 LLM 差异化摘要；llm_core 发送前清理。
+- 任务 2 fork 压缩（对标 DSH summarizer）：压缩输入从 COMPRESS_PROMPT 拼字符串
+  改为 fork 执行时消息队列（[system] + compression_messages + 待压缩消息原样）
+  + 末尾追加 COMPACTION_INSTRUCTION（user 角色）。同模型时复用前缀 cache，
+  任何模型时压缩 LLM 读到完整连贯消息流。产物结构不变（五段 JSON）。
 
 State 命名空间:
     - messages : 压缩后替换的消息列表
@@ -34,8 +43,8 @@ from pipeline.types import ErrorPolicy, StateKeys
 
 logger = logging.getLogger(__name__)
 
-# LLM 调用函数类型：接收 prompt 字符串，返回响应字符串
-LLMCallFn = Callable[[str], Awaitable[str]]
+# LLM 调用函数类型：接收 fork 消息列表（或兼容旧路径的 prompt 字符串），返回响应字符串
+LLMCallFn = Callable[[str | list[dict[str, Any]]], Awaitable[str]]
 # 能力调用函数类型：(method, params) -> Any（用于调 memory.compress 等工具）
 CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
@@ -44,6 +53,29 @@ _COMPRESSION_NOTICE = (
     "[系统提示] 由于对话历史过长，较早的上下文已被记忆系统分层压缩。"
     "压缩摘要包含在上方消息中，请基于压缩摘要和当前剩余上下文继续完成任务。"
 )
+
+# ═══════════════════════════════════════════════════════════
+# 语义标记词汇表（对齐 DSH ContextForm，docs/tasks/task_compression_optimization.md 任务 1）
+# ═══════════════════════════════════════════════════════════
+# 消息的内部字段 _context_form 声明"这条内容是什么"（语义形态），与 role（谁说的）
+# 正交。产出方（prompt_build 压缩块 / memory_read 检索条目等）打标，两个消费者：
+# 1. 压缩 LLM——喂压缩时渲染为 [form] 可见前缀，据此分配摘要权重
+#    （instructions 详细保留、notice 一笔带过）；
+# 2. 最终 LLM——llm_core._build_messages 发送前清理该字段（同 seq/tool_result），
+#    不进 API 载荷，不影响 prompt cache。
+CONTEXT_FORM_INSTRUCTIONS = "instructions"  # 文件规则/项目约定（须遵守的指令性内容）
+CONTEXT_FORM_NOTICE = "notice"  # 一次性通知（发生了什么，无需展开）
+CONTEXT_FORM_RECALL = "recall"  # 从记忆库检索的内容
+CONTEXT_FORM_RELAY = "relay"  # 其他 agent 传来的消息
+CONTEXT_FORM_SNAPSHOT = "snapshot"  # 状态快照（后一份覆盖前一份）
+
+CONTEXT_FORM_LABELS = {
+    CONTEXT_FORM_INSTRUCTIONS: "[instructions]",
+    CONTEXT_FORM_NOTICE: "[notice]",
+    CONTEXT_FORM_RECALL: "[recall]",
+    CONTEXT_FORM_RELAY: "[relay]",
+    CONTEXT_FORM_SNAPSHOT: "[snapshot]",
+}
 
 # ═══════════════════════════════════════════════════════════
 # 模块级依赖注入（由 server.py 的 on_load 注入，测试直接赋值）
@@ -235,6 +267,12 @@ class ContextCompressor:
     负责把长对话历史压成结构化摘要。支持分层递进：
     L0(原文) → L1(过程摘要) → L2(三元组)。
 
+    fork 消息队列压缩（0.2 压缩优化任务 2，对标 DSH summarizer）：
+    压缩输入不再拼字符串模板，而是 fork 执行时消息队列（system +
+    compression_messages + 待压缩消息原样）+ 末尾追加 COMPACTION_INSTRUCTION。
+    同模型时复用 provider 前缀 cache；任何模型时压缩 LLM 读到完整连贯消息流。
+    带 _context_form 的消息渲染 [form] 语义标签（任务 1 叠加生效）。
+
     设计原则（与 0.1 一致）：
     - 纯函数设计，无状态管理
     - 输入输出都是字符串/字典
@@ -244,30 +282,35 @@ class ContextCompressor:
     Attributes:
         config: 压缩配置
         budgets: 各层 token 预算
-        _llm_call_fn: LLM 调用函数（async (prompt) -> response_text）
+        _llm_call_fn: LLM 调用函数（async (messages) -> response_text）
     """
 
-    # 一次性压缩模板：L1 + L2 + keywords + state_snapshot + memory_items
-    # 从 0.1 memory/context_compressor.py 原样移植（精心调校的 prompt，勿改）
-    COMPRESS_PROMPT = """## 任务
-将以下对话历史压缩为五部分：l1 / l2 / keywords / state_snapshot / memory_items。
+    # fork 压缩指令（对标 DSH summarizer 的 COMPACTION_INSTRUCTION）：
+    # 作为 fork 消息队列的"最后一条 user 消息"追加，不是独立的 summarizer
+    # system prompt。复现执行时的 system + 压缩块 + 消息前缀，让压缩调用成为
+    # 上一次执行请求的真前缀（同模型时可复用 provider 的 warm prefix cache），
+    # 末尾指令是唯一新增输入。
+    # 产出结构不变：仍要求 L1/L2/keywords/state_snapshot/memory_items 五段 JSON
+    # （字段定义从 0.1 COMPRESS_PROMPT 原样移植，精心调校，勿改）。
+    # 旧 {messages}/{state_snapshot}/{recent_process_blocks} 占位符已删——
+    # 这些内容已在 fork 消息流里（压缩块/快照在 compression_messages 段，
+    # 过程在 messages 段），模板不再重复拼。
+    COMPACTION_INSTRUCTION = """## 任务
+你现在作为压缩引擎工作：把上方（本条指令之前）的消息流压缩为五部分：l1 / l2 / keywords / state_snapshot / memory_items。
+
+上方的消息流即压缩输入，包括：系统提示、<compressed> 压缩摘要块（此前压缩的产物，只描述已覆盖的旧消息）、<current_state> 状态快照、以及其后的对话消息。不要复述压缩摘要块已覆盖的内容，只在 state_snapshot 中合并更新。
+
+### 语义标签
+部分消息内容前带 [form] 语义标签，摘要时据此分配权重：
+- [instructions] 文件规则/项目约定——必须在 L1 中详细保留
+- [notice] 一次性通知——一笔带过即可
+- [recall] 从记忆库检索的内容——提炼要点，不逐字保留
+- [relay] 其他 agent 传来的——保留关键信息
+- [snapshot] 状态快照——并入 state_snapshot，不重复描述
 
 l1/l2/keywords 描述同一批对话，详略不同。
 **L1 必须比 L2 详细得多**：L1 含具体步骤、决策、产出，
 L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
-
-## 输入
-
-### 当前全局状态（已累积，请在此基础上合并更新）
-{state_snapshot}
-
-### 最近的步骤（了解上下文即可，不重复描述）
-{recent_process_blocks}
-
-### 需要压缩的对话
-{messages}
-
----
 
 ## l1 — 过程摘要（预算充足时使用）
 
@@ -372,21 +415,21 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 ## 输出格式
 严格输出 JSON，不要任何其他内容。
 
-{{
-  "l1": {{
+{
+  "l1": {
     "session_title": "...",
     "workflow": "...",
     "errors_and_corrections": "无则null",
     "decisions": "无则null",
     "key_results": "无则null"
-  }},
-  "l2": {{
+  },
+  "l2": {
     "intent": "...",
     "process": "...",
     "results": "..."
-  }},
+  },
   "keywords": ["词1", "词2"],
-  "state_snapshot": {{
+  "state_snapshot": {
     "current_state": "...",
     "task_specification": "...",
     "pending": "...",
@@ -394,13 +437,13 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
     "domain_knowledge": "...",
     "user_feedback": "...",
     "attention_hints": "..."
-  }},
-  "memory_items": {{
+  },
+  "memory_items": {
     "user_profile_updates": "无则null",
     "project_knowledge_updates": "无则null",
     "experience_updates": "无则null"
-  }}
-}}
+  }
+}
 """
 
     def __init__(
@@ -429,15 +472,29 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
     async def compress_all(
         self,
         messages: list[dict[str, Any]],
-        state_snapshot: str = "",
-        recent_process_blocks: str = "",
+        system_message: dict[str, Any] | str | None = None,
+        compression_messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        """一次性完成 L1 + L2 + keywords + state_snapshot + memory_items 压缩。
+        """fork 消息队列压缩：L1 + L2 + keywords + state_snapshot + memory_items。
+
+        对标 DSH summarizer：不再拼 COMPRESS_PROMPT 字符串，改为 fork 执行时的
+        消息队列并在末尾追加压缩指令——
+
+        fork = [执行时 system] + compression_messages（此前压缩块/快照，原样）
+             + 待压缩消息（原样 role/content，不压成 【用户 N】）
+             + [user: COMPACTION_INSTRUCTION]
+
+        同模型时前缀与执行请求一致（cache 复用）；任何模型时压缩 LLM 读到
+        完整连贯消息流（理解质量）。带 _context_form 的消息渲染 [form] 标签前缀
+        （任务 1 语义标记叠加生效），内部字段（seq/tool_result/_context_form）
+        渲染后剥离，不进 LLM 载荷。
 
         Args:
-            messages: 对话消息列表
-            state_snapshot: 当前累积的状态快照（JSON 字符串）
-            recent_process_blocks: 最近的过程块样本（采样后的文本）
+            messages: 待压缩消息列表
+            system_message: 执行时系统消息（dict 含 role/content，或纯字符串）；
+                None 时 fork 不带 system 前缀
+            compression_messages: 执行时装配的压缩块消息（prompt_build 产出，
+                含 _context_form 标记）；None/空时跳过
 
         Returns:
             压缩结果字典；空消息返回空结果字典（含空键）；
@@ -457,16 +514,10 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
                 "memory_items": {},
             }
 
-        messages_text = self._format_messages(messages)
-
-        prompt = self.COMPRESS_PROMPT.format(
-            messages=messages_text,
-            state_snapshot=state_snapshot or "（无已有状态，这是首次压缩）",
-            recent_process_blocks=recent_process_blocks or "（无最近步骤）",
-        )
+        fork_messages = self._build_fork_messages(messages, system_message, compression_messages)
 
         try:
-            response = await self._call_llm(prompt)
+            response = await self._call_llm(fork_messages)
             if not response or not response.strip():
                 logger.warning("[ContextCompressor] LLM 返回空响应，跳过压缩")
                 return None
@@ -613,14 +664,19 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             logger.warning("[ContextCompressor] JSON 解析失败，返回原文")
             return stripped
 
-    def _format_messages(self, messages: list[dict[str, Any]]) -> str:
-        """格式化消息为带角色头的文本。
+    @classmethod
+    def _format_messages(cls, messages: list[dict[str, Any]]) -> str:
+        """格式化消息为带角色头的文本（capability 回退路径 / 兜底序列化用）。
+
+        带 _context_form 内部字段的消息在角色头后渲染语义标签前缀
+        （如 ``[instructions]``），让压缩 LLM 区分消息重要性；
+        无标记消息行为与旧版一致。
 
         Args:
             messages: 消息列表
 
         Returns:
-            格式化后的文本（每条以 【角色 N】\\n 内容 形式）
+            格式化后的文本（每条以 【角色 N】\\n [form] 内容 形式）
         """
         lines: list[str] = []
 
@@ -630,6 +686,11 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 
             if not content:
                 continue
+
+            form = msg.get("_context_form")
+            label = CONTEXT_FORM_LABELS.get(form, "") if isinstance(form, str) else ""
+            if label:
+                content = f"{label} {content}"
 
             if role == "user":
                 lines.append(f"【用户 {i}】\n{content}")
@@ -649,11 +710,77 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 
         return "\n".join(lines)
 
-    async def _call_llm(self, prompt: str) -> str:
-        """调用 LLM 生成摘要。
+    # 发送给 LLM 前必须剥离的内部字段（fork 复制消息时清理，不改动原消息）
+    _INTERNAL_MSG_FIELDS = ("seq", "tool_result", "_context_form")
+
+    @classmethod
+    def _render_fork_message(cls, msg: dict[str, Any]) -> dict[str, Any]:
+        """把消息转为可发压缩 LLM 的副本：剥离内部字段，渲染语义标签。
+
+        - 内部字段（seq/tool_result/_context_form）不进 LLM 载荷（对齐
+          llm_core._build_messages 的清理集）；
+        - 带 _context_form 的消息在 content 前渲染 [form] 标签前缀，
+          让压缩 LLM 区分重要性（instructions 详细保留、notice 一笔带过）；
+        - 其余字段（role/content/name/tool_calls 等）原样保留——fork 前缀
+          与执行请求保持一致是 cache 复用的前提。
 
         Args:
-            prompt: 提示词
+            msg: 原始消息（不会被改动）
+
+        Returns:
+            可发送的消息副本
+        """
+        rendered = {k: v for k, v in msg.items() if k not in cls._INTERNAL_MSG_FIELDS}
+        form = msg.get("_context_form")
+        label = CONTEXT_FORM_LABELS.get(form, "") if isinstance(form, str) else ""
+        if label and isinstance(rendered.get("content"), str) and rendered["content"]:
+            rendered["content"] = f"{label} {rendered['content']}"
+        return rendered
+
+    def _build_fork_messages(
+        self,
+        messages: list[dict[str, Any]],
+        system_message: dict[str, Any] | str | None = None,
+        compression_messages: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """构造 fork 消息队列（对齐执行时装配顺序 + 末尾压缩指令）。
+
+        顺序：[执行时 system] + compression_messages + 待压缩消息 + [user 指令]。
+        system 与 compression_messages 复现执行请求前缀（同模型 cache 复用）；
+        末尾指令是唯一新增输入（DSH summarizer 方案）。
+
+        Args:
+            messages: 待压缩消息（原样进 fork，不 _format_messages 压扁）
+            system_message: 执行时系统消息（dict 或 str；None 跳过）
+            compression_messages: 压缩块消息（prompt_build 产出；None/空跳过）
+
+        Returns:
+            fork 消息列表
+        """
+        fork: list[dict[str, Any]] = []
+
+        if isinstance(system_message, dict):
+            if system_message.get("content"):
+                fork.append(self._render_fork_message(system_message))
+        elif isinstance(system_message, str) and system_message.strip():
+            fork.append({"role": "system", "content": system_message})
+
+        for cm in compression_messages or []:
+            if isinstance(cm, dict) and cm.get("content"):
+                fork.append(self._render_fork_message(cm))
+
+        for m in messages:
+            if isinstance(m, dict):
+                fork.append(self._render_fork_message(m))
+
+        fork.append({"role": "user", "content": self.COMPACTION_INSTRUCTION})
+        return fork
+
+    async def _call_llm(self, messages: list[dict[str, Any]]) -> str:
+        """调用 LLM 生成摘要（fork 消息队列）。
+
+        Args:
+            messages: fork 消息列表（system + messages + 末尾指令）
 
         Returns:
             LLM 响应文本
@@ -664,7 +791,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         if not self._llm_call_fn:
             raise RuntimeError("未提供 LLM 调用函数，无法执行压缩")
 
-        return await self._llm_call_fn(prompt)
+        return await self._llm_call_fn(messages)
 
     def _estimate_tokens(self, text: str | list[dict[str, Any]]) -> int:
         """估算 token 数（简化版：字符数 // 2）。
@@ -730,6 +857,8 @@ class CompressionService:
         self._session_id = ""
         self._user_id = ""
         self._config: dict[str, Any] = {"context_window": 128000}
+        # 最近一次 compress_messages 累计的被删消息 seq 列表（供插件 emit set(seq,null) ops）
+        self._last_deleted_seqs: list[int] = []
 
     def set_llm_call_fn(self, llm_call_fn: LLMCallFn) -> None:
         """延迟注入 LLM 调用函数。
@@ -770,9 +899,9 @@ class CompressionService:
         messages: list[dict[str, Any]],
         context_window: int,
         trigger_ratio: float = 0.55,
-        state_snapshot: str = "",
-        recent_process_blocks: str = "",
         llm_call_fn: LLMCallFn | None = None,
+        system_message: dict[str, Any] | str | None = None,
+        compression_messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]] | None:
         """预算驱动的完整压缩流程。
 
@@ -783,11 +912,14 @@ class CompressionService:
             messages: 完整消息列表
             context_window: 主模型上下文窗口（预算切分用）
             trigger_ratio: 触发压缩比例
-            state_snapshot: 当前累积状态快照（JSON）
-            recent_process_blocks: 最近过程块采样文本
-            llm_call_fn: 本次调用覆盖的 LLM 调用函数（async (prompt) -> str），
+            llm_call_fn: 本次调用覆盖的 LLM 调用函数（async (messages) -> str），
                 可选；注入后即作为本服务的 LLM 通道（并同步到内部 compressor）。
                 不传则沿用构造/上次注入的函数
+            system_message: 执行时系统消息（fork 前缀用，cache 复现）；
+                由插件从 ctx.state["system_message"] 传入
+            compression_messages: 执行时装配的压缩块消息（fork 前缀用，
+                含 state_snapshot / 此前 L1/L2 块）；由插件从
+                ctx.state["compression_messages"] 传入
 
         Returns:
             压缩后的消息列表；无需压缩/失败/无 LLM 函数返回 None
@@ -799,8 +931,8 @@ class CompressionService:
                 messages,
                 context_window,
                 trigger_ratio,
-                state_snapshot,
-                recent_process_blocks,
+                system_message,
+                compression_messages,
             )
         except Exception as exc:
             logger.error(
@@ -810,21 +942,22 @@ class CompressionService:
             )
             return None
 
-    async def _compress_messages_impl(  # noqa: PLR0911
+    async def _compress_messages_impl(
         self,
         messages: list[dict[str, Any]],
         context_window: int,
         trigger_ratio: float,
-        state_snapshot: str,
-        recent_process_blocks: str,
+        system_message: dict[str, Any] | str | None = None,
+        compression_messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]] | None:
-        """compress_messages 的实际实现。"""
-        # 自动从 backend 加载背景（state_snapshot + process blocks）
-        if not state_snapshot and self._backend and self._pipeline_id:
-            bg = await self._load_background()
-            state_snapshot = bg["state_snapshot"]
-            if not recent_process_blocks:
-                recent_process_blocks = bg["process_blocks"]
+        """compress_messages 的实际实现。
+
+        多轮压缩中累计的"被删消息 seq 列表"写入 self._last_deleted_seqs，
+        供外层（插件 execute）据此生成 set(seq, null) ops。返回值仍为压缩后
+        消息列表（或 None），保持 compress_messages 向后兼容。
+        """
+        # 重置上一轮累计的被删 seq（每轮调用独立）
+        self._last_deleted_seqs: list[int] = []
 
         if not self._llm_call_fn:
             logger.warning("[CompressionService] 跳过压缩：未提供 LLM 调用函数")
@@ -838,15 +971,17 @@ class CompressionService:
         compressed: list[dict[str, Any]] | None = None
 
         for round_idx in range(self._MAX_COMPRESS_ROUNDS):
-            compressed = await self._do_compress_round(
+            round_result = await self._do_compress_round(
                 current_messages,
                 context_window,
                 budgets,
-                state_snapshot,
-                recent_process_blocks,
+                system_message,
+                compression_messages,
             )
-            if compressed is None:
+            if round_result is None:
                 break
+            compressed, round_deleted = round_result
+            self._last_deleted_seqs.extend(round_deleted)
 
             total_tokens = sum(self._estimate_msg_tokens(m) for m in compressed)
             logger.info(
@@ -870,9 +1005,9 @@ class CompressionService:
         messages: list[dict[str, Any]],
         context_window: int,
         budgets: dict[str, int],
-        state_snapshot: str,
-        recent_process_blocks: str,
-    ) -> list[dict[str, Any]] | None:
+        system_message: dict[str, Any] | str | None = None,
+        compression_messages: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[int]] | None:
         """执行一轮预算驱动的压缩。
 
         三路分离：pure_system / 旧压缩块（## 历史对话压缩摘要 / _COMPRESSION_NOTICE）/
@@ -883,11 +1018,13 @@ class CompressionService:
             messages: 当前消息列表
             context_window: 主模型窗口（recent 预算切分）
             budgets: 各层 token 预算
-            state_snapshot: 状态快照
-            recent_process_blocks: 过程块采样
+            system_message: 执行时系统消息（fork 前缀）
+            compression_messages: 执行时压缩块消息（fork 前缀）
 
         Returns:
-            pure_system + recent 组成的消息列表；无需压缩返回 None
+            (pure_system + recent 组成的消息列表, 被删消息的 seq 列表)；
+            无需压缩返回 None。被删消息 = old_msgs + 遗留 old_blocks，
+            外层据此生成 set(seq, null) ops。
         """
         pure_system_msgs: list[dict[str, Any]] = []
         old_blocks: list[dict[str, Any]] = []
@@ -944,8 +1081,8 @@ class CompressionService:
 
             comp_result = await self._build_compression_content(
                 batch,
-                state_snapshot,
-                recent_process_blocks,
+                system_message,
+                compression_messages,
             )
             if not comp_result:
                 logger.warning("[CompressionService] 第 %d 批压缩失败", batch_idx + 1)
@@ -967,20 +1104,24 @@ class CompressionService:
         if not any_success:
             return None
 
-        return pure_system_msgs + recent_msgs
+        # 被删消息 seq 列表：被压缩的 old_msgs + 遗留 old_blocks（旧摘要 system）
+        deleted_seqs: list[int] = [
+            m["seq"] for m in (old_msgs + old_blocks) if isinstance(m.get("seq"), int)
+        ]
+        return pure_system_msgs + recent_msgs, deleted_seqs
 
     async def _build_compression_content(
         self,
         old_msgs: list[dict[str, Any]],
-        state_snapshot: str,
-        recent_process_blocks: str,
+        system_message: dict[str, Any] | str | None = None,
+        compression_messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """调 compress_all 压一批旧消息，返回 5 部分结果字典。
 
         Args:
             old_msgs: 待压缩的旧消息批次
-            state_snapshot: 状态快照
-            recent_process_blocks: 过程块采样
+            system_message: 执行时系统消息（fork 前缀）
+            compression_messages: 执行时压缩块消息（fork 前缀，含 state_snapshot）
 
         Returns:
             {l1, l2, keywords, state_snapshot, memory_items} 或 None
@@ -993,8 +1134,8 @@ class CompressionService:
         try:
             result = await self._compressor.compress_all(
                 old_msgs,
-                state_snapshot=state_snapshot,
-                recent_process_blocks=recent_process_blocks,
+                system_message=system_message,
+                compression_messages=compression_messages,
             )
         except Exception as exc:
             logger.warning("[CompressionService] 压缩失败: %s", exc)
@@ -1045,11 +1186,10 @@ class CompressionService:
         state_snapshot = comp_result.get("state_snapshot", {})
         memory_items = comp_result.get("memory_items", {})
 
-        # sequence 范围（用于 _trim_covered_messages / _estimate_assembled_tokens）
+        # sequence 范围（用于 _trim_covered_messages / _estimate_assembled_tokens）。
+        # 零兼容：统一用引擎分配的消息自带 seq 字段（_record_sequence 已退役）。
         sequences = [
-            m["_record_sequence"]
-            for m in old_msgs
-            if "_record_sequence" in m and isinstance(m["_record_sequence"], int)
+            m["seq"] for m in old_msgs if isinstance(m.get("seq"), int)
         ]
         sequence_start = min(sequences) if sequences else 1
         sequence_end = max(sequences) if sequences else (sequence_start + len(old_msgs) - 1)
@@ -1116,69 +1256,6 @@ class CompressionService:
                         tags=[tag_map.get(key, key)],
                         source="compression",
                     )
-
-    async def _load_background(self) -> dict[str, str]:
-        """从 backend 加载压缩背景（state_snapshot + 过程块采样）。
-
-        Returns:
-            {"state_snapshot": str, "process_blocks": str}；加载失败返回空串
-        """
-        state_snapshot = ""
-        process_blocks = ""
-
-        if not self._backend or not self._pipeline_id:
-            return {"state_snapshot": state_snapshot, "process_blocks": process_blocks}
-
-        try:
-            results = await self._backend.search(
-                query=f"pipeline:{self._pipeline_id}",
-                user_id=self._user_id or self._pipeline_id,
-                top_k=20,
-                memory_type="chunk",
-            )
-        except Exception as e:
-            logger.warning("[CompressionService] 加载压缩背景失败: %s", e)
-            return {"state_snapshot": "", "process_blocks": ""}
-
-        l1_chunks = []
-        snapshot = ""
-        for item in results:
-            meta = item.get("metadata", {}) if isinstance(item, dict) else {}
-            tags = meta.get("tags") if isinstance(meta, dict) else None
-            if not tags:
-                continue
-            if "L1" in tags:
-                l1_chunks.append(item)
-            elif "STATE_SNAPSHOT" in tags:
-                content = item.get("content", "") if isinstance(item, dict) else ""
-                if content and not snapshot:
-                    snapshot = content
-
-        state_snapshot = snapshot
-
-        if l1_chunks:
-            # 按 sequence 排序后采样首/中/尾
-            def _seq_start(item: dict[str, Any]) -> int:
-                tags = (item.get("metadata", {}) or {}).get("tags", [])
-                for t in tags:
-                    if isinstance(t, str) and t.startswith("seq:"):
-                        try:
-                            return int(t.split(":")[1].split("-")[0])
-                        except (IndexError, ValueError):
-                            pass
-                return 0
-
-            sorted_chunks = sorted(l1_chunks, key=_seq_start)
-            if len(sorted_chunks) <= 3:
-                samples = sorted_chunks
-            else:
-                mid_idx = len(sorted_chunks) // 2
-                samples = [sorted_chunks[0], sorted_chunks[mid_idx], sorted_chunks[-1]]
-            process_blocks = "\n\n---\n\n".join(
-                (c.get("content", "") if isinstance(c, dict) else "") for c in samples
-            )
-
-        return {"state_snapshot": state_snapshot, "process_blocks": process_blocks}
 
     @staticmethod
     def _find_split_by_budget(
@@ -1402,6 +1479,38 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 tokens += max(1, len(args) // 2)
         return tokens
 
+    @staticmethod
+    def _deleted_seq_list(
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+    ) -> list[int]:
+        """计算 before 相对 after 多出的 seq（即被删除的槽位地址）。
+
+        clean/trim/compression 的纯删除路径都用 seq 差集确定被删消息。
+        """
+        after_seqs = {
+            m.get("seq") for m in after if isinstance(m.get("seq"), int)
+        }
+        deleted: list[int] = []
+        seen: set[int] = set()
+        for m in before:
+            seq = m.get("seq")
+            if isinstance(seq, int) and seq not in after_seqs and seq not in seen:
+                deleted.append(seq)
+                seen.add(seq)
+        return deleted
+
+    @staticmethod
+    def _deleted_seq_ops(
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """构造被删消息的 set(seq, null) ops 列表。"""
+        return [
+            {"op": "set", "seq": seq, "msg": None}
+            for seq in ContextWindowGuardPlugin._deleted_seq_list(before, after)
+        ]
+
     async def _estimate_effective_tokens(
         self,
         messages: list[dict[str, Any]],
@@ -1542,13 +1651,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
             self._estimate_msg_tokens(m) for m in messages if m.get("role") == "system"
         )
 
-        # recent 消息：全局 _record_sequence > max_end 的部分
+        # recent 消息：seq > max_end 的部分（_record_sequence 已退役，统一用 seq）
         max_end = max((c["sequence_end"] for c in l1_chunks if c["sequence_end"]), default=0)
         recent_tokens = 0
         for m in messages:
             if m.get("role") == "system":
                 continue
-            seq = m.get("_record_sequence")
+            seq = m.get("seq")
             if isinstance(seq, int) and seq > max_end:
                 recent_tokens += self._estimate_msg_tokens(m)
 
@@ -1681,8 +1790,11 @@ class ContextWindowGuardPlugin(IInputPlugin):
         self._setup_service(ctx, service, context_window)
 
         # 窗口变更检测（无 backend 时 clean_if_window_changed 直接返回 None）
+        # delete_ops 收集 clean/trim 两条纯删除路径的 set(seq, null) ops
+        delete_ops: list[dict[str, Any]] = []
         cleaned = await self.clean_if_window_changed(messages, context_window, ctx)
         if cleaned is not None:
+            delete_ops.extend(self._deleted_seq_ops(messages, cleaned))
             messages = cleaned
 
         # 重启场景裁剪：从存储全量恢复后，已被压缩块覆盖的旧消息需先剔除。
@@ -1691,6 +1803,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             new_messages = await self._trim_covered_messages(ctx, messages)
             trimmed = new_messages is not messages
             if trimmed:
+                delete_ops.extend(self._deleted_seq_ops(messages, new_messages))
                 messages = new_messages
 
         # 阈值检查
@@ -1711,8 +1824,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
             current_non_sys = sum(1 for m in messages if m.get("role") != "system")
             self._tracked_msg_count = current_non_sys
             updates: dict[str, Any] = {"_tracked_msg_count": current_non_sys}
-            if trimmed or cleaned is not None:
-                updates["messages"] = messages
+            # clean/trim 产生的删除以增量 ops 上报（无删除则不写 messages key）
+            if delete_ops:
+                updates["messages"] = {"_ops": delete_ops}
             return PluginResult(state_updates=updates)
 
         logger.info(
@@ -1740,10 +1854,15 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 调用压缩
         logger.info("[%s] 开始调用 compress_messages ...", self.name)
         try:
+            # fork 上下文：执行时 system + 压缩块消息（prompt_build 上一轮产出，
+            # 本轮 prompt_build 尚未执行——内容不变，一轮时差可忽略）。
+            # 传入后压缩调用复现执行请求前缀（同模型 cache 复用 + 理解质量）。
             compressed = await service.compress_messages(
                 messages=messages,
                 context_window=context_window,
                 trigger_ratio=self._trigger_ratio,
+                system_message=ctx.state.get("system_message"),
+                compression_messages=ctx.state.get("compression_messages") or [],
             )
         except Exception as exc:
             logger.error(
@@ -1769,13 +1888,31 @@ class ContextWindowGuardPlugin(IInputPlugin):
             )
             # 压缩只搬运消息不格式化，会原样保留历史段里的 raw 格式 tool_calls，
             # 写回 state 前强制标准化为 OpenAI API 格式，否则上游报"工具类型不能为空"。
-            self._standardize_tool_calls(compressed)
+            # standardize 返回被改写的消息下标，外层据此 emit set(seq, 新内容) ops。
+            changed_indices = self._standardize_tool_calls(compressed)
             post_compress_count = sum(1 for m in compressed if m.get("role") != "system")
             self._tracked_msg_count = post_compress_count
             ctx.state["_tracked_msg_count"] = post_compress_count
+
+            # 构造增量 ops（零兼容：不再回写全量数组）
+            ops: list[dict[str, Any]] = list(delete_ops)
+            # 压缩删除：被压掉的 old_msgs + 遗留 old_blocks 按其 seq set(seq, null)
+            deleted_seqs = getattr(service, "_last_deleted_seqs", None)
+            if not isinstance(deleted_seqs, list):
+                # 回退：按 before/after 的 seq 差集计算（多轮压缩同样成立）
+                deleted_seqs = self._deleted_seq_list(messages, compressed)
+            for seq in deleted_seqs:
+                ops.append({"op": "set", "seq": seq, "msg": None})
+            # 幸存但被 standardize 改写的消息 set(seq, 新内容)
+            for idx in changed_indices:
+                m = compressed[idx]
+                seq = m.get("seq")
+                if isinstance(seq, int):
+                    ops.append({"op": "set", "seq": seq, "msg": m})
+
             return PluginResult(
                 state_updates={
-                    "messages": compressed,
+                    "messages": {"_ops": ops},
                     "_tracked_msg_count": post_compress_count,
                 }
             )
@@ -1799,7 +1936,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 辅助方法
     # ------------------------------------------------------------------
 
-    def _standardize_tool_calls(self, messages: list[dict[str, Any]]) -> None:
+    def _standardize_tool_calls(self, messages: list[dict[str, Any]]) -> list[int]:
         """压缩写回前把 tool_calls 标准化为 OpenAI API 格式。
 
         委托给 normalizer 的公共入口 standardize_tool_calls_in_messages
@@ -1809,6 +1946,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
         异常策略：只容忍 messages 数据形态引发的运行期错误（不阻塞写回）；
         ImportError 等编程/配置错误必须上抛——历史上用空泛 ``except Exception``
         吞掉了断裂 import（``plugins.core`` 不存在），使标准化静默失效三轮审查未觉。
+
+        Returns:
+            被改写的消息下标列表（用于对这些槽位 emit 增量 set(seq, 新内容) op）；
+            标准化失败时返回空列表（不阻塞写回）。
         """
         try:
             # 经 pipeline 命名空间包解析（plugins/shared 在 sys.path）。
@@ -1817,13 +1958,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 standardize_tool_calls_in_messages,
             )
 
-            standardize_tool_calls_in_messages(messages)
+            return standardize_tool_calls_in_messages(messages)
         except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
             logger.warning(
                 "[%s] tool_calls 标准化失败（不阻塞写回）: %s",
                 self.name,
                 exc,
             )
+            return []
 
     async def _trim_covered_messages(  # noqa: PLR0911
         self,
@@ -1835,8 +1977,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         Step 4 修复：压缩块来源由 ctx.get_service("chunk_service") 改为
         模块级 _memory_backend，无 backend 时原样返回。
 
-        裁剪逻辑：逐条按全局 _record_sequence 过滤，保留 system 消息 + 非系统消息
-        中 _record_sequence > max_end 的部分。max_end 取自压缩块的 sequence_end。
+        裁剪逻辑：逐条按消息自带 seq 过滤，保留 system 消息 + 非系统消息
+        中 seq > max_end 的部分。max_end 取自压缩块的 sequence_end。
+        （零兼容：_record_sequence 已退役，统一用引擎分配的 seq 字段。）
 
         Args:
             ctx: 插件执行上下文
@@ -1868,7 +2011,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if max_end <= 0:
             return messages
 
-        # 裁剪：逐条按全局 _record_sequence 过滤，保留序号 > max_end 的非 system 消息。
+        # 裁剪：逐条按 seq 过滤，保留序号 > max_end 的非 system 消息。
         trimmed: list[dict[str, Any]] = []
         trimmed_non_sys = 0
         orig_non_sys = 0
@@ -1878,7 +2021,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 trimmed.append(m)
                 continue
             orig_non_sys += 1
-            seq = m.get("_record_sequence")
+            seq = m.get("seq")
             if not isinstance(seq, int) or seq > max_end:
                 trimmed.append(m)
                 trimmed_non_sys += 1
@@ -2095,32 +2238,39 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller) -> LLMCallFn:
     """构建压缩用的 LLM 调用函数。
 
     优先路径：进程内 `_llm_client`（LLMClient），直接调 chat_completion，
-    避免一次跨进程 tool-executor hop。
+    避免一次跨进程 tool-executor hop。fork 消息列表原样透传（llm_client
+    升级后支持列表，前缀 cache 复用前提）。
     回退路径：经 capability_caller 调 memory.compress 工具（入参 {prompt, max_tokens}，
-    出参 {summary, degraded}）。
+    出参 {summary, degraded}）。该工具契约只收字符串——消息列表经
+    ContextCompressor._format_messages 压平为带角色头/语义标签的文本
+    （cache 收益丢失，理解质量保留，属可接受降级）。
 
     Args:
         caller: 能力调用 async 函数 (method, params) -> Any（_llm_client 为 None 时启用）
 
     Returns:
-        async (prompt) -> response_text 的 LLM 调用函数；降级时返回空串
+        async (messages) -> response_text 的 LLM 调用函数；降级时返回空串
     """
     import asyncio  # noqa: PLC0415
 
-    async def _call(prompt: str) -> str:
-        # ── 首选：进程内 LLMClient ──
+    async def _call(payload: str | list[dict[str, Any]]) -> str:
+        # ── 首选：进程内 LLMClient（消息列表原样透传）──
         if _llm_client is not None:
             if not getattr(_llm_client, "chat_available", False):
                 logger.info("[compress_llm_call] LLMClient chat 不可用，降级返回空串")
                 return ""
             try:
-                summary = await asyncio.to_thread(_llm_client.chat_completion, prompt, 8000)
+                summary = await asyncio.to_thread(_llm_client.chat_completion, payload, 8000)
                 return summary.strip() if summary else ""
             except Exception as e:
                 logger.warning("[compress_llm_call] LLMClient chat_completion 失败: %s", e)
                 return ""
 
-        # ── 回退：capability_caller → memory.compress 工具 ──
+        # ── 回退：capability_caller → memory.compress 工具（仅收字符串）──
+        if isinstance(payload, list):
+            prompt = ContextCompressor._format_messages(payload)
+        else:
+            prompt = payload
         params = {
             "tool_name": "memory.compress",
             "args": {"prompt": prompt, "max_tokens": 8000},

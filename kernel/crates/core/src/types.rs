@@ -269,14 +269,6 @@ impl ContentLoader {
         }
     }
 
-    /// 按需加载最近 N 条消息的完整内容。
-    ///
-    /// 从 messages 表查询最近 N 条消息的 blob_id，再从 blobs 表加载完整内容。
-    pub async fn load_recent_messages(&self, n: usize) -> Result<Vec<Message>, StorageError> {
-        self.store
-            .get_recent_messages(&self.run_id, &self.branch_id, n)
-            .await
-    }
 
     /// 按需加载指定 blob_id 的内容。
     pub async fn load_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError> {
@@ -576,6 +568,13 @@ pub struct MessageRecord {
     /// 工具结果消息（role=tool）的错误文本。status=failed 时非空。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 工具结果消息（role=tool）的结构化工具结果 envelope（JSON 序列化）。
+    /// 含 call_id/tool_name/success/error/data/metadata/duration_ms。
+    /// 由投影层从消息数组的 `tool_result` 字段序列化而来（messages 数组本身是
+    /// LLM 上下文协议不携带该字段）；HTTP 读侧解析后以 toolResultData 等
+    /// camelCase 字段返回，前端据此还原 resultData/durationMs——冷热路径一致。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result_json: Option<String>,
 }
 
 /// sessions 表记录——会话标签夹（域2，对齐 0.1 SessionModel）。

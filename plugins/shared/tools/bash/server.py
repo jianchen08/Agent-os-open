@@ -15,8 +15,9 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import time
 
-from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk import AgentOSPlugin, FrontendEmitter
 
 from tool import BashTool
 
@@ -38,6 +39,71 @@ def _get_tool() -> BashTool:
     if _tool is None:
         _tool = BashTool()
     return _tool
+
+
+def _progress_forwarder(call_context: dict):
+    """构建执行中进度推送前向器（task_observability 任务 2）。
+
+    组装 ProgressReporter（1KB/2s 节流）+ asyncio.Queue 消费者（llm_core
+    同款模式）：_read_output 每行调 report → 阈值触发 → 消费者协程经
+    frontend.emit 推 tool_progress 事件（bash_execute await 期间事件循环
+    空闲，消费者得以并发运行）。
+
+    Returns:
+        (report 回调, 收尾协程工厂)。frontend capability 不可用或路由键
+        缺失时返回 (None, None)——进度推送优雅降级，工具照常执行。
+    """
+    from progress_reporter import ProgressReporter  # noqa: PLC0415
+
+    if not call_context.get("call_id") or not call_context.get("thread_id"):
+        return None, None
+    emitter = FrontendEmitter.from_plugin(plugin)
+    if emitter is None:
+        return None, None
+
+    call_id = str(call_context.get("call_id", ""))
+    thread_id = str(call_context.get("thread_id", ""))
+    pipeline_id = str(call_context.get("pipeline_id", ""))
+    message_id = str(call_context.get("message_id", ""))
+    started_at = time.monotonic()
+    queue: asyncio.Queue[tuple[str, int] | None] = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    async def _consumer() -> None:
+        """从队列取 (delta, bytes_total) 推 tool_progress 到前端。"""
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            delta, bytes_total = item
+            await emitter.emit("tool_progress", {
+                "thread_id": thread_id,
+                "pipeline_id": pipeline_id,
+                "message_id": message_id,
+                "call_id": call_id,
+                "tool_name": "bash_execute",
+                "delta": delta,
+                "bytes_read": bytes_total,
+                "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+            })
+
+    def _on_flush(delta: str, bytes_total: int) -> None:
+        """ProgressReporter 阈值回调 → 入队（O(1)，输出读取任务安全调用）。"""
+        queue.put_nowait((delta, bytes_total))
+
+    reporter = ProgressReporter(_on_flush)
+    consumer_task = loop.create_task(_consumer())
+
+    async def _finalize() -> None:
+        """工具调用结束：冲刷残留缓冲 + 哨兵终止消费者（排空不丢尾）。"""
+        reporter.close()
+        queue.put_nowait(None)
+        try:
+            await consumer_task
+        except Exception:  # noqa: BLE001
+            logger.debug("[bash_tool] 进度消费者收尾异常（忽略）", exc_info=True)
+
+    return reporter.report, _finalize
 
 
 async def _shutdown_all() -> None:
@@ -122,9 +188,26 @@ async def bash_execute(**kwargs):
     所有调用共享同一个 BashTool 单例——进程状态跨调用保持。
     失败响应携带稳定 error_code（PROCESS_FORBIDDEN / PROCESS_NOT_FOUND 等），
     便于 LLM 与调用方按码分支。
+
+    工具执行中的 stdout 增量经 frontend.emit 推 tool_progress 进度
+    （task_observability 任务 2）：内核在 args 注入 _call_context 路由键，
+    据此构建节流前向器；推送链路任何一环缺失都优雅降级（工具照常执行）。
     """
+    # 剥离路由上下文（内核 tool-executor 合入；旧内核无此字段）
+    call_context = kwargs.pop("_call_context", None) or {}
+    report, finalize = (None, None)
+    if isinstance(call_context, dict) and call_context.get("call_id"):
+        try:
+            report, finalize = _progress_forwarder(call_context)
+        except Exception:  # noqa: BLE001
+            logger.debug("[bash_tool] 进度前向器构建失败（降级）", exc_info=True)
+
     bash = _get_tool()
-    result = await bash.execute(kwargs)
+    try:
+        result = await bash.execute(kwargs, on_output=report)
+    finally:
+        if finalize is not None:
+            await finalize()
     if result.success:
         return result.output
     return {"error": result.error, "error_code": result.error_code}

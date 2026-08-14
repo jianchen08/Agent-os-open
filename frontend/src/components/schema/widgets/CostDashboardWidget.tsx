@@ -5,12 +5,18 @@
  * - 统计卡行：今日 / 本周消耗
  * - 近 7 日 Token 柱状
  * - 模型用量占比条
+ * - 缓存命中卡（task_observability 1b）：本轮命中率 / 命中 / 未命中 /
+ *   累计浪费 + 会话级命中率趋势（来自 track 插件 cost_update 实时推送，
+ *   不依赖 HTTP）
  *
- * 数据：对接 /api/v1/cost-control/*（useCostControl）
+ * 数据：对接 /api/v1/cost-control/*（useCostControl）+ WS cost_update
  */
 
 import { useEffect, useMemo } from 'react'
 import { useCostControl } from '@/hooks/useCostControl'
+import { useContextUsageStore } from '@/stores/contextUsageStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useTerminationStore } from '@/stores/terminationStore'
 import { cn } from '@/lib/utils'
 
 function formatTokens(n: number): string {
@@ -100,6 +106,36 @@ export function CostDashboardWidget(_props: Record<string, unknown>) {
   }, [costReport, usageStats])
 
   const modelMax = Math.max(1, ...modelRows.map((m) => m.tokens))
+
+  // ── 缓存命中维度（task_observability 1b）：来自 WS cost_update 实时推送 ──
+  // 当前关注管道优先；无激活管道时取最近有数据的（按最后一条趋势时间戳）
+  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
+  const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
+  const cacheUsage = useMemo(() => {
+    if (activePipelineId && usageByPipeline[activePipelineId]?.hitRatio > 0) {
+      return usageByPipeline[activePipelineId]
+    }
+    const entries = Object.values(usageByPipeline)
+      .filter((u) => (u.cacheHistory?.length ?? 0) > 0)
+      .sort(
+        (a, b) =>
+          (b.cacheHistory?.[b.cacheHistory.length - 1]?.ts ?? 0) -
+          (a.cacheHistory?.[a.cacheHistory.length - 1]?.ts ?? 0),
+      )
+    return entries[0]
+  }, [activePipelineId, usageByPipeline])
+
+  const cacheTrend = useMemo(() => (cacheUsage?.cacheHistory ?? []).slice(-20), [cacheUsage])
+
+  // ── 终止评估（task_observability 1c）：剩余预算 + 收敛信号指示器 ──
+  const terminationByPipeline = useTerminationStore((s) => s.statusByPipeline)
+  const termination = useMemo(() => {
+    if (activePipelineId && terminationByPipeline[activePipelineId]) {
+      return terminationByPipeline[activePipelineId]
+    }
+    const entries = Object.values(terminationByPipeline).sort((a, b) => b.ts - a.ts)
+    return entries[0]
+  }, [activePipelineId, terminationByPipeline])
 
   return (
     <div
@@ -214,6 +250,161 @@ export function CostDashboardWidget(_props: Record<string, unknown>) {
                 </div>
               )
             })}
+          </div>
+        )}
+      </section>
+
+      {/* 缓存命中（task_observability 1b）：实时推送，定位破坏 cache 前缀的轮次 */}
+      <section
+        data-testid="cost-cache-card"
+        className="rounded-lg border p-4"
+        style={{
+          background: 'var(--ds-bg-canvas, #04060F)',
+          borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
+        }}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-foreground text-[13px] font-medium">缓存命中</h3>
+          {cacheUsage && (
+            <span className="text-muted-foreground font-mono text-[10px]">
+              累计浪费 {formatTokens(cacheUsage.cumulative?.missed ?? 0)} tok
+            </span>
+          )}
+        </div>
+        {!cacheUsage ? (
+          <EmptyHint text="暂无缓存数据（等待 LLM 调用）" />
+        ) : (
+          <>
+            <div className="mb-3 grid grid-cols-3 gap-3">
+              <div>
+                <div className="text-muted-foreground mb-1 text-[10px]">本轮命中率</div>
+                <div
+                  className="text-[18px] font-semibold tracking-tight"
+                  style={{
+                    color:
+                      cacheUsage.hitRatio >= 0.7
+                        ? 'var(--ds-status-success, #34D399)'
+                        : 'var(--ds-status-warning, #FBBF24)',
+                  }}
+                >
+                  {(cacheUsage.hitRatio * 100).toFixed(1)}%
+                </div>
+              </div>
+              <div>
+                <div className="text-muted-foreground mb-1 text-[10px]">本轮命中</div>
+                <div className="text-secondary font-mono text-[14px]">
+                  {formatTokens(cacheUsage.cachedTokens)}
+                </div>
+              </div>
+              <div>
+                <div className="text-muted-foreground mb-1 text-[10px]">本轮未命中</div>
+                <div className="text-secondary font-mono text-[14px]">
+                  {formatTokens(cacheUsage.missedTokens)}
+                </div>
+              </div>
+            </div>
+            {/* 会话级命中率趋势：骤降点定位哪轮破坏了 cache 前缀 */}
+            <div>
+              <div className="text-muted-foreground mb-1 text-[10px]">会话命中率趋势（近 20 轮）</div>
+              <div data-testid="cost-cache-trend" className="flex h-10 items-end gap-[3px]">
+                {cacheTrend.map((point, i) => (
+                  <div
+                    key={`${point.ts}-${i}`}
+                    data-testid="cache-trend-bar"
+                    className="flex-1 rounded-t-sm"
+                    style={{
+                      height: `${Math.max(6, Math.round(point.hitRatio * 100))}%`,
+                      background:
+                        point.hitRatio >= 0.7
+                          ? 'var(--ds-status-success, #34D399)'
+                          : 'var(--ds-status-warning, #FBBF24)',
+                      opacity: 0.35 + point.hitRatio * 0.65,
+                    }}
+                    title={`第 ${i + 1} 轮：命中 ${(point.hitRatio * 100).toFixed(1)}%（未命中 ${point.missedTokens} tok）`}
+                  />
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* 运行状态（task_observability 1c）：剩余预算 + 收敛信号 */}
+      <section
+        data-testid="termination-indicator"
+        className="rounded-lg border p-4"
+        style={{
+          background: 'var(--ds-bg-canvas, #04060F)',
+          borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
+        }}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-foreground text-[13px] font-medium">运行状态</h3>
+          {termination && (
+            <span className="text-muted-foreground font-mono text-[10px]">
+              第 {termination.iteration} 轮 · {Math.round(termination.elapsedS)}s
+            </span>
+          )}
+        </div>
+        {!termination ? (
+          <EmptyHint text="暂无运行数据（等待管道启动）" />
+        ) : (
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <div className="text-muted-foreground mb-1 text-[10px]">剩余预算</div>
+              {termination.remainingBudgetPercent === null ? (
+                <div className="text-muted-foreground text-[14px]">未启用</div>
+              ) : (
+                <>
+                  <div
+                    className="text-[18px] font-semibold tracking-tight"
+                    style={{
+                      color:
+                        termination.remainingBudgetPercent >= 30
+                          ? 'var(--ds-status-success, #34D399)'
+                          : 'var(--ds-status-warning, #FBBF24)',
+                    }}
+                  >
+                    {termination.remainingBudgetPercent.toFixed(1)}%
+                  </div>
+                  <div
+                    className="mt-1 h-1 overflow-hidden rounded-sm"
+                    style={{ background: 'var(--ds-bg-elevated, #121C38)' }}
+                  >
+                    <div
+                      className="h-full rounded-sm transition-all"
+                      style={{
+                        width: `${Math.min(100, Math.max(0, termination.remainingBudgetPercent))}%`,
+                        background: 'var(--ds-accent-primary, #22D3EE)',
+                      }}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+            <div>
+              <div className="text-muted-foreground mb-1 text-[10px]">收敛信号</div>
+              <div
+                className="text-[14px] font-medium"
+                style={{
+                  color:
+                    termination.convergence === 'converging'
+                      ? 'var(--ds-status-success, #34D399)'
+                      : 'var(--ds-status-warning, #FBBF24)',
+                }}
+              >
+                {termination.convergence === 'stalled'
+                  ? '停滞'
+                  : termination.convergence === 'budget_critical'
+                    ? '预算临界'
+                    : '收敛中'}
+              </div>
+              {termination.shouldStop && termination.stopReason && (
+                <div className="text-muted-foreground mt-1 text-[10px] break-all">
+                  终止：{termination.stopReason}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </section>

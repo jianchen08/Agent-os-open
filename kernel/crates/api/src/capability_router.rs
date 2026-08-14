@@ -361,6 +361,57 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 Ok(json!({"status": "emitted", "event": event_name}))
             }
 
+            // ── frontend：插件 → 内核 → 前端一次性事件出口（ADR §3.5）──
+            // 低频观测/进度事件（cost_update / tool_progress / termination_status，
+            // task_observability 任务 1/2）统一走此通道：payload 整体透传 +
+            // 补 pipeline_id/message_id/_threadId 路由键（与 event-bus 工具族
+            // 同构），经 session.emit_event 推前端（{type,data,sequence} 信封，
+            // 与现有前端事件契约一致）。与 event-bus.emit 的分工：event-bus 承载
+            // llm_core 流式 chunk；frontend.emit 承载一次性观测事件。
+            // v1 无 per-plugin 令牌桶限流（与 tool 事件通路一致）；源头自带
+            // 节流（track 每轮一次、bash 进度 1KB/2s 阈值）。如需限流可改挂
+            // FrontendEventBus（session/src/event_bus.rs）。
+            ("frontend", "emit") => {
+                let event_name = params
+                    .get("event")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let payload = params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                // thread_id 双取：payload 内优先，params 顶层兜底（scope 语义）
+                let thread_id = payload
+                    .get("thread_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| params.get("thread_id").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                if thread_id.is_empty() {
+                    tracing::debug!(
+                        target: "capability:frontend",
+                        event = %event_name,
+                        "frontend.emit 被丢弃（thread_id 空）"
+                    );
+                    return Ok(json!({"status": "dropped", "event": event_name}));
+                }
+                if let Some(session) = &self.session {
+                    let pipeline_id = payload
+                        .get("pipeline_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let message_id = payload
+                        .get("message_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let mut data = payload.clone();
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert("pipeline_id".to_string(), serde_json::Value::String(pipeline_id.to_string()));
+                        obj.insert("message_id".to_string(), serde_json::Value::String(message_id.to_string()));
+                        obj.insert("_threadId".to_string(), serde_json::Value::String(thread_id.to_string()));
+                    }
+                    let _ = session.emit_event(thread_id, event_name, data).await;
+                }
+                Ok(json!({"status": "emitted", "event": event_name}))
+            }
+
             // ── config-reader：读配置节（P1 后为显式 no-op fallback）──
             // task_11 P1 已把配置注入改到源头：manifest.config_files → invoker
             // build_injected_config 在 spawn sidecar 时下发，插件经 plugin.get_config()
@@ -487,11 +538,23 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // 纯函数工具（file_read 等）不受影响：SDK 的 _filter_handler_kwargs
                 // (agentos_plugin_sdk/server.py:54) 按 handler 签名过滤参数——无 **kwargs
                 // 的工具自动丢弃这些字段，不会因 unexpected keyword argument 崩溃。
-                let internal_keys = ["_owner", "_log_ctx", "tenant_id"];
+                let internal_keys = ["_owner", "_log_ctx", "tenant_id", "_call_context"];
                 let mut tool_args = tool_args_raw;
                 if let Some(obj) = tool_args.as_object_mut() {
                     for k in internal_keys {
                         obj.remove(k);
+                    }
+                }
+                // task_observability 任务 2：tool_core 在 params 级携带 _call_context
+                // （前端路由键 call_id/pipeline_id/message_id/thread_id），合入 tool args
+                // 透传给工具 sidecar——bash 等长任务工具据此经 frontend.emit 推
+                // tool_progress 执行中进度。args 级的同名字段已在上方剥离（防伪造）。
+                // 无 **kwargs 的纯函数工具由 SDK _filter_handler_kwargs 静默丢弃，无影响。
+                if let Some(call_ctx) = params.get("_call_context") {
+                    if !call_ctx.is_null() {
+                        if let Some(obj) = tool_args.as_object_mut() {
+                            obj.insert("_call_context".to_string(), call_ctx.clone());
+                        }
                     }
                 }
                 // 从 CapabilityRegistry 反查 tool_name → plugin_id（tool 插件的 manifest id）
@@ -1172,6 +1235,249 @@ mod tests {
         let _ = router.handle("event-bus", "emit", params).await.unwrap();
         assert!(received.lock().unwrap().is_empty());
     }
+
+    // ── frontend.emit：插件 → 内核 → 前端一次性事件出口（ADR §3.5，
+    //    task_observability 任务 1/2 共享前置）──
+
+    #[tokio::test]
+    async fn test_frontend_emit_cost_update_forwarded() {
+        // track 插件经 frontend.emit 推 cost_update：payload 携带路由键 +
+        // 单轮/累计 token 指标，整体透传并补齐路由键后推前端。
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_session(received.clone());
+
+        let params = json!({
+            "event": "cost_update",
+            "payload": {
+                "thread_id": "thread-1",
+                "pipeline_id": "pipe-1",
+                "message_id": "msg-1",
+                "input_tokens": 60632,
+                "output_tokens": 512,
+                "cached_tokens": 60000,
+                "total_tokens": 61144,
+                "cache_hit_ratio": 0.9895,
+                "cumulative": {
+                    "total_input": 2458025,
+                    "total_output": 30000,
+                    "total_cached": 2331456,
+                    "missed": 126569
+                }
+            }
+        });
+        let res = router.handle("frontend", "emit", params).await.unwrap();
+        assert_eq!(res["status"], "emitted");
+        assert_eq!(res["event"], "cost_update");
+
+        let msgs = received.lock().unwrap().clone();
+        assert_eq!(msgs.len(), 1);
+        let ev = &msgs[0];
+        assert_eq!(ev["type"], "cost_update");
+        assert_eq!(ev["data"]["pipeline_id"], "pipe-1");
+        assert_eq!(ev["data"]["message_id"], "msg-1");
+        assert_eq!(ev["data"]["_threadId"], "thread-1");
+        assert_eq!(ev["data"]["input_tokens"], 60632);
+        assert_eq!(ev["data"]["cached_tokens"], 60000);
+        assert_eq!(ev["data"]["cumulative"]["missed"], 126569);
+        // sequence 信封由 SessionCoordinator 分配（与 tool 事件同空间）
+        assert!(ev.get("sequence").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_frontend_emit_tool_progress_forwarded() {
+        // bash 工具执行中经 frontend.emit 推 tool_progress（stdout 增量）。
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_session(received.clone());
+
+        let params = json!({
+            "event": "tool_progress",
+            "payload": {
+                "thread_id": "thread-1",
+                "pipeline_id": "pipe-1",
+                "message_id": "msg-1",
+                "call_id": "call_abc",
+                "tool_name": "bash_execute",
+                "delta": "build ok\n",
+                "bytes_read": 4096,
+                "elapsed_ms": 2100
+            }
+        });
+        let res = router.handle("frontend", "emit", params).await.unwrap();
+        assert_eq!(res["event"], "tool_progress");
+
+        let msgs = received.lock().unwrap().clone();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["type"], "tool_progress");
+        assert_eq!(msgs[0]["data"]["call_id"], "call_abc");
+        assert_eq!(msgs[0]["data"]["delta"], "build ok\n");
+        assert_eq!(msgs[0]["data"]["pipeline_id"], "pipe-1");
+        assert_eq!(msgs[0]["data"]["_threadId"], "thread-1");
+    }
+
+    #[tokio::test]
+    async fn test_frontend_emit_thread_id_top_level_fallback() {
+        // thread_id 允许在 params 顶层（ADR scope 语义）——payload 内缺失时兜底。
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_session(received.clone());
+
+        let params = json!({
+            "event": "termination_status",
+            "thread_id": "thread-1",
+            "payload": {
+                "pipeline_id": "pipe-1",
+                "convergence": "converging",
+                "remaining_budget_percent": 73.5
+            }
+        });
+        let res = router.handle("frontend", "emit", params).await.unwrap();
+        assert_eq!(res["event"], "termination_status");
+
+        let msgs = received.lock().unwrap().clone();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["type"], "termination_status");
+        assert_eq!(msgs[0]["data"]["_threadId"], "thread-1");
+        assert_eq!(msgs[0]["data"]["convergence"], "converging");
+    }
+
+    #[tokio::test]
+    async fn test_frontend_emit_no_thread_id_dropped() {
+        // thread_id 缺失（payload 与顶层都无）→ 前端无法路由，丢弃。
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_session(received.clone());
+
+        let params = json!({
+            "event": "cost_update",
+            "payload": {"pipeline_id": "pipe-1", "total_tokens": 100}
+        });
+        let _ = router.handle("frontend", "emit", params).await.unwrap();
+        assert!(received.lock().unwrap().is_empty());
+    }
+
+    // ── tool-executor._call_context 透传（task_observability 任务 2）──
+
+    /// 捕获 invoke_tool 收到的 (plugin_id, tool_name, inputs)。
+    struct CaptureInvoker {
+        captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    }
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for CaptureInvoker {
+        async fn invoke_pipeline_plugin(
+            &self,
+            _plugin_id: &str,
+            _ctx: &agentos_core::types::PluginContext,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            Err(agentos_core::types::PluginError {
+                message: "not used in test".into(),
+                code: None,
+                source: None,
+            })
+        }
+        async fn invoke_tool(
+            &self,
+            plugin_id: &str,
+            tool_name: &str,
+            inputs: &Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
+            self.captured.lock().unwrap().push((
+                plugin_id.to_string(),
+                tool_name.to_string(),
+                inputs.clone(),
+            ));
+            Ok(agentos_core::types::ToolExecutionResult {
+                success: true,
+                data: json!({"output": "ok"}),
+                error: None,
+                duration_ms: Some(1),
+            })
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _context: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+    }
+
+    /// 构造带单工具注册表（bash_execute → plugin_bash）+ 捕获 invoker 的 router。
+    fn router_with_tool_invoke(
+        captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    ) -> KernelCapabilityRouter {
+        use agentos_core::traits::ToolDescriptor;
+        use agentos_core::types::{ToolCategory, ToolSource};
+        use agentos_plugin_loader::CapabilityRegistryImpl;
+        let registry = CapabilityRegistryImpl::new();
+        registry.register_tool(
+            "plugin_bash",
+            ToolDescriptor {
+                name: "bash_execute".into(),
+                description: String::new(),
+                plugin_id: "plugin_bash".into(),
+                input_schema: json!({}),
+                output_schema: None,
+                category: ToolCategory::System,
+                source: ToolSource::Mcp,
+                ui: None,
+            },
+        );
+        KernelCapabilityRouter::with_metrics(Arc::new(StubEngine), MetricsAggregator::new())
+            .with_invoker(Arc::new(CaptureInvoker { captured }))
+            .with_registry(Arc::new(registry))
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_invoke_merges_call_context_into_args() {
+        // tool_core 在 params 级携带 _call_context（前端路由键）→
+        // 内核合入 tool args 透传给工具 sidecar（bash 据此推 tool_progress）。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_tool_invoke(captured.clone());
+
+        let params = json!({
+            "tool_name": "bash_execute",
+            "args": {"command": "echo hi", "session_id": "sess-1"},
+            "_call_context": {
+                "call_id": "call_abc",
+                "pipeline_id": "pipe-1",
+                "message_id": "msg-1",
+                "thread_id": "sess-1"
+            }
+        });
+        let res = router.handle("tool-executor", "invoke", params).await.unwrap();
+        assert_eq!(res["success"], true);
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        let (plugin_id, tool_name, inputs) = &calls[0];
+        assert_eq!(plugin_id, "plugin_bash");
+        assert_eq!(tool_name, "bash_execute");
+        assert_eq!(inputs["command"], "echo hi");
+        assert_eq!(inputs["session_id"], "sess-1");
+        assert_eq!(inputs["_call_context"]["call_id"], "call_abc");
+        assert_eq!(inputs["_call_context"]["pipeline_id"], "pipe-1");
+        assert_eq!(inputs["_call_context"]["message_id"], "msg-1");
+        assert_eq!(inputs["_call_context"]["thread_id"], "sess-1");
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_invoke_without_call_context_untouched() {
+        // 无 _call_context（旧 tool_core / 无进度需求的工具）→ args 原样透传。
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = router_with_tool_invoke(captured.clone());
+
+        let params = json!({
+            "tool_name": "bash_execute",
+            "args": {"command": "echo hi", "session_id": "sess-1"},
+        });
+        let _ = router.handle("tool-executor", "invoke", params).await.unwrap();
+
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        let inputs = &calls[0].2;
+        assert!(inputs.get("_call_context").is_none());
+        assert_eq!(inputs["command"], "echo hi");
+    }
+
 
     // ── M2：service-registry capability（用真实内存 SqliteStore 验证端到端）──
 

@@ -12,7 +12,7 @@ import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 from bash_types import ProcessBackend, ProcessInfo, WorkUnit
 from encoding import EncodingHandler
@@ -222,6 +222,7 @@ class ProcessManager:
         log_dir: Path | None = None,
         container_id: str | None = None,
         owner: str | None = None,
+        on_output: Callable[[str], None] | None = None,
     ) -> tuple[int, Path]:
         """启动新进程。
 
@@ -234,6 +235,9 @@ class ProcessManager:
         owner: 会话身份（内核注入）。写入 ProcessInfo.metadata['owner'] 与
         日志头 `# Owner:`，供 pid 级操作（continue/input/terminate/read_log）
         的越权校验（工具层 _check_owner 执行）。
+
+        on_output: 每行输出的同步回调（task_observability 任务 2——执行中
+        进度推送。ProgressReporter.report，自带 1KB/2s 节流；None 时零开销）。
         """
         effective_log_dir = self._ensure_log_dir(log_dir) if log_dir else self.log_dir
         # 收到外部 log_dir 时同步 self.log_dir——start_process 写入目录与
@@ -292,7 +296,7 @@ class ProcessManager:
             # 先启动 process 拿到 host_pid，再按 pid 派生日志文件名（read_log 靠此规则）。
             log_file = effective_log_dir / self._generate_log_filename(command, host_pid)
             self._write_log_header(log_file, command, host_pid, owner=owner)
-            output_task = asyncio.create_task(self._read_output(host_pid, process, log_file))
+            output_task = asyncio.create_task(self._read_output(host_pid, process, log_file, on_output))
             metadata: dict[str, Any] = {
                 "container_id": container_id,
                 "container_pid": container_pid,
@@ -422,7 +426,7 @@ class ProcessManager:
         self._write_log_header(log_file, command, pid, owner=owner)
 
         # 启动日志读取任务并保存引用
-        output_task = asyncio.create_task(self._read_output(pid, process, log_file))
+        output_task = asyncio.create_task(self._read_output(pid, process, log_file, on_output))
 
         # 保存进程信息。注入本地后端，使看门狗的单进程内存维度判据生效
         # （sample_unit_memory 用 psutil 查该进程及其后代 RSS，超阈值按 idle 杀）。
@@ -529,7 +533,13 @@ class ProcessManager:
         except (TimeoutError, ValueError, TypeError):
             return process.pid
 
-    async def _read_output(self, pid: int, process: asyncio.subprocess.Process, log_file: Path):
+    async def _read_output(
+        self,
+        pid: int,
+        process: asyncio.subprocess.Process,
+        log_file: Path,
+        on_output: Callable[[str], None] | None = None,
+    ):
         """异步读取进程输出（块缓冲根治版 + 批量落盘）。
 
         历史 bug：原用 stream.readline() 等换行符。但 cargo/gcc/make 等编译器
@@ -546,7 +556,19 @@ class ProcessManager:
 
         性能：逐行 open/write/close 在大量输出时开销高（评审 H-issue）。
         改为攒批写入——每 512 行或 64KB 落盘一次；流结束时强制 flush。
+
+        on_output（task_observability 任务 2）：每行输出的同步回调，
+        供执行中进度推送（ProgressReporter.report 节流后推前端）。
         """
+
+        def _notify(text: str) -> None:
+            """进度回调（异常隔离：进度失败不影响日志主流程）。"""
+            if on_output is None:
+                return
+            try:
+                on_output(text)
+            except Exception:  # noqa: BLE001
+                logger.debug("进度回调异常（忽略）", exc_info=True)
 
         async def read_stream(stream, prefix: str = ""):
             """读取流并批量写入日志，按 \\n 切行 + 字节级半行缓存。"""
@@ -571,8 +593,10 @@ class ProcessManager:
                     # 流结束，flush 残留的半行（如有）
                     if pending:
                         text = EncodingHandler.decode_output_line(pending)
-                        batch.append(prefix + text + "\n")
-                        batch_bytes += len(batch[-1])
+                        line = prefix + text + "\n"
+                        batch.append(line)
+                        batch_bytes += len(line)
+                        _notify(line)
                     break
                 # 字节级拼接再切，保证切分点在 \n（ASCII 安全边界）
                 full = pending + chunk
@@ -581,8 +605,10 @@ class ProcessManager:
                 *complete, pending = parts
                 for raw in complete:
                     text = EncodingHandler.decode_output_line(raw)
-                    batch.append(prefix + text + "\n")
-                    batch_bytes += len(batch[-1])
+                    line = prefix + text + "\n"
+                    batch.append(line)
+                    batch_bytes += len(line)
+                    _notify(line)
                 # 攒批阈值：512 行或 64KB，达到即落盘
                 if len(batch) >= 512 or batch_bytes >= 64 * 1024:
                     await flush_batch()

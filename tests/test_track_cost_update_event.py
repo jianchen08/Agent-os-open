@@ -1,194 +1,187 @@
-# @feature: FP-MIGR 0.1→0.2迁移 | @ci: python-plugins-test
-"""TrackPlugin cost_update 事件契约测试。
+# @feature: FP-0.2.可观测性 | @ci: python-plugins-test
+"""TrackPlugin cost_update 事件契约测试（frontend.emit 出口，task_observability 1a）。
 
-钉死 cost_update 事件推送给前端输入框进度条的数据契约：
-- payload 必须含 pipeline_id（前端按 pipeline 分桶写入 contextUsageStore）
-- token 必须是单轮值（取自 state["llm_usage"]，即本轮 API 返回，非跨轮累计）
+钉死 cost_update 推送给前端的数据契约（经 frontend.emit capability，ADR §3.5）：
+- payload 必须含路由键 thread_id（= session_id）/ pipeline_id / message_id
+  （内核 frontend.emit 分支与前端 resolvePipelineId/extractMessageId 硬门控）
+- 单轮值（顶层）：取自 state["llm_usage"]（本轮 API 返回，表达当前上下文窗口
+  占用，前端 ChatInput 进度条用）+ missed_tokens / cache_hit_ratio
+- 累计值（cumulative.*）：取自 _collect_token_usage 跨轮累加的 total_* 字段
+  （前端统计区用），missed = 总输入 - 缓存命中
 - tool_execute 轮不推送（llm_usage 是上一轮残留，避免错误覆盖）
+- frontend 服务未注入（旧内核 / 单测环境）静默跳过
 
-根因：原实现推送的是 _collect_token_usage 的累计 total_tokens（跨轮相加），
-多轮时越加越大；且不带 pipeline_id，前端无法分桶 → 进度条恒为 0。
-
-二次根因（运行时确诊）：原代码用 state.get("thread_id") 做发送守卫，
-但 thread_id 不是 state 标准字段（恒为空），导致 if thread_id 直接跳过发送。
-真实会话标识是 session_id；TargetedSink 可按 pipeline_id 从 registry 自解析，
-不需要 thread_id 守卫。本测试覆盖 session_id 和无 session_id 两种路径。
-
-0.2 迁移说明：0.2 的 TrackPlugin._try_notify_cost_update 已改为 no-op 存根——
-cost_update 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该
-capability，当前推送静默跳过。测试 patch 的 channels.websocket.ws_handler
-.ws_interaction_notifier 与 pipeline.stream_bridge.create_targeted_sink 均为
-0.1 已删除模块（见 ci.yml 注释）。属 0.1 遗留契约测试，整体跳过，待 frontend.emit
-capability 落地后按新出口重写。
+0.1 遗留的 ws_interaction_notifier / create_targeted_sink 出口已删除；
+0.2 按 task_observability 以 ctx.get_service("frontend") 的 FrontendEmitter 出口重写。
 """
 
-import asyncio
 import os
 import sys
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="0.1 遗留: 依赖已删除的 channels.websocket.ws_handler.ws_interaction_notifier / "
-           "pipeline.stream_bridge.create_targeted_sink；_try_notify_cost_update 在 0.2 已改"
-           "为 no-op（推送改走 frontend.emit，SDK 未实现），0.2 重写中"
-)
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-# 跳过态下兜底导入：避免被测模块/路径在 0.2 缺失时让 collect 整体 error。
-try:
-    from tests._pipeline_plugin_path import add_plugin_dir  # noqa: E402
-    add_plugin_dir("output", "track")
-    from pipeline.plugin import PluginContext  # noqa: E402
-    from plugin import TrackPlugin  # noqa: E402
-except ModuleNotFoundError:  # 0.2 缺失 src/ 或 pipeline 包时
-    PluginContext = None  # type: ignore[assignment]
-    TrackPlugin = None  # type: ignore[assignment]
-
-# 注：原 `pytestmark = pytest.mark.unit` 已被上方 skip 覆盖（整文件跳过）。
+from tests._pipeline_plugin_path import add_plugin_dir  # noqa: E402
+add_plugin_dir("output", "track")
+from pipeline.plugin import PluginContext  # noqa: E402
+from plugin import TrackPlugin  # noqa: E402
 
 PIPELINE_ID = "pipeline_cost_001"
 
 
-def _run(coro: Any) -> Any:
-    """安全执行 async（兼容已在事件循环内的场景）。"""
-    try:
-        asyncio.get_running_loop()
-        import concurrent.futures  # noqa: PLC0415
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(asyncio.run, coro).result(timeout=10)
-    except RuntimeError:
-        return asyncio.run(coro)
+class _FakeFrontend:
+    """假 frontend emitter：记录 emit(event, payload) 调用。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(self, event: str, payload: dict[str, Any]) -> None:
+        self.calls.append((event, payload))
 
 
-def _make_ctx(state: dict[str, Any]) -> PluginContext:
-    """构造最小 PluginContext（track 插件只用 ctx.state）。"""
-    return PluginContext(state=state, config={})
+def _make_ctx(state: dict[str, Any], services: dict[str, Any] | None = None) -> PluginContext:
+    """构造带可选 frontend 服务的 PluginContext。"""
+    return PluginContext(state=state, config={}, _services=services or {})
 
 
-class _FakeSink:
-    """假 sink：记录所有 send_event 收到的事件 + sink 构造参数。"""
-
-    def __init__(self, events: list[dict[str, Any]], calls: list[tuple]) -> None:
-        self._events = events
-        self._calls = calls
-        self.send_event = AsyncMock(side_effect=self._record)
-
-    async def _record(self, event: dict[str, Any]) -> bool:
-        self._events.append(event)
-        return True
-
-
-def _patch_notifier_and_sink(events_out: list[dict[str, Any]], calls_out: list[tuple]):
-    """patch ws_interaction_notifier + create_targeted_sink。
-
-    create_targeted_sink 返回假 sink，并把构造参数记入 calls_out，
-    便于断言传入的 session_id / pipeline_id。
-    """
-    def _factory(notifier, thread_id="", pipeline_id="", user_id=""):
-        calls_out.append((thread_id, pipeline_id))
-        return _FakeSink(events_out, calls_out)
-
-    return (
-        patch("channels.websocket.ws_handler.ws_interaction_notifier", object()),
-        patch("pipeline.stream_bridge.create_targeted_sink", side_effect=_factory),
-    )
-
-
-# 真实 state 标准字段是 session_id，不是 thread_id
 def _base_state(**overrides: Any) -> dict[str, Any]:
+    """llm_call 轮标准 state（真实会话标识是 session_id，不是 thread_id）。"""
     state = {
         "core_type": "llm_call",
         "session_id": "session_001",
         "pipeline_id": PIPELINE_ID,
+        "message_id": "msg_001",
         "llm_usage": {
             "input_tokens": 1200,
             "output_tokens": 300,
             "total_tokens": 1500,
-            "cached_tokens": 0,
+            "cached_tokens": 1000,
+        },
+        "track.llm_usage": {
+            "total_input_tokens": 3200,
+            "total_output_tokens": 700,
+            "total_tokens": 3900,
+            "total_cached_tokens": 2500,
+            "total_missed_tokens": 700,
+            "total_cache_hit_ratio": 2500 / 3200,
+            "last_input_tokens": 1200,
+            "last_output_tokens": 300,
+            "last_cached_tokens": 1000,
+            "last_missed_tokens": 200,
+            "last_cache_hit_ratio": 1000 / 1200,
         },
     }
     state.update(overrides)
     return state
 
 
-def test_cost_update_carries_single_round_tokens_and_pipeline_id():
-    """llm_call 轮：cost_update 必须含 pipeline_id + 单轮 total/input/output tokens。"""
+def _cost_calls(frontend: _FakeFrontend) -> list[dict[str, Any]]:
+    return [payload for event, payload in frontend.calls if event == "cost_update"]
+
+
+@pytest.mark.asyncio
+async def test_cost_update_single_round_tokens_and_routing_keys() -> None:
+    """llm_call 轮：cost_update 含路由键 + 单轮值 + cache 指标 + 累计值。"""
     plugin = TrackPlugin()
-    ctx = _make_ctx(_base_state())
-    events: list[dict[str, Any]] = []
-    calls: list[tuple] = []
+    frontend = _FakeFrontend()
+    ctx = _make_ctx(_base_state(), {"frontend": frontend})
+    usage = plugin._collect_token_usage(ctx)
 
-    notifier_patch, sink_patch = _patch_notifier_and_sink(events, calls)
-    with notifier_patch, sink_patch:
-        _run(plugin._try_notify_cost_update(ctx))
+    await plugin._try_notify_cost_update(ctx, usage)
 
-    cost_events = [e for e in events if e.get("type") == "cost_update"]
-    assert len(cost_events) == 1, f"应推送一个 cost_update，得到 {len(cost_events)}"
-    data = cost_events[0]["data"]
-    assert data["pipeline_id"] == PIPELINE_ID, "必须带 pipeline_id 供前端分桶"
-    assert data["total_tokens"] == 1500, "total_tokens 必须是本轮单轮值"
+    costs = _cost_calls(frontend)
+    assert len(costs) == 1, f"应推送一个 cost_update，得到 {len(costs)}"
+    data = costs[0]
+    # 路由键（内核/前端硬门控）
+    assert data["thread_id"] == "session_001"
+    assert data["pipeline_id"] == PIPELINE_ID
+    assert data["message_id"] == "msg_001"
+    # 单轮值（本轮 API 返回，非累计）
     assert data["input_tokens"] == 1200
     assert data["output_tokens"] == 300
+    assert data["cached_tokens"] == 1000
+    assert data["total_tokens"] == 1500
+    assert data["missed_tokens"] == 200
+    assert data["cache_hit_ratio"] == pytest.approx(1000 / 1200)
 
 
-def test_cost_update_passes_session_id_to_sink():
-    """会话标识 session_id 必须传给 create_targeted_sink 的 thread_id 参数。"""
+@pytest.mark.asyncio
+async def test_cost_update_carries_cumulative_block() -> None:
+    """cumulative.* 表达整个管道累计消耗（前端统计区分桶加总用）。"""
     plugin = TrackPlugin()
-    ctx = _make_ctx(_base_state(session_id="sess_xyz"))
-    events: list[dict[str, Any]] = []
-    calls: list[tuple] = []
+    frontend = _FakeFrontend()
+    ctx = _make_ctx(_base_state(), {"frontend": frontend})
+    usage = plugin._collect_token_usage(ctx)
 
-    notifier_patch, sink_patch = _patch_notifier_and_sink(events, calls)
-    with notifier_patch, sink_patch:
-        _run(plugin._try_notify_cost_update(ctx))
+    await plugin._try_notify_cost_update(ctx, usage)
 
-    assert len(calls) == 1
-    thread_id_arg, pipeline_id_arg = calls[0]
-    assert thread_id_arg == "sess_xyz", "应把 session_id 作为会话标识传入 sink"
-    assert pipeline_id_arg == PIPELINE_ID
+    data = _cost_calls(frontend)[0]
+    cum = data["cumulative"]
+    # 3200+1200 / 700+300 / 2500+1000
+    assert cum["total_input"] == 4400
+    assert cum["total_output"] == 1000
+    assert cum["total_cached"] == 3500
+    assert cum["missed"] == 900  # 4400 - 3500
+    assert cum["total_tokens"] == 5400
+    assert cum["cache_hit_ratio"] == pytest.approx(3500 / 4400)
 
 
-def test_cost_update_skipped_on_tool_execute_round():
-    """tool_execute 轮不推送 cost_update（llm_usage 是上一轮残留，避免错误覆盖）。"""
+@pytest.mark.asyncio
+async def test_cost_update_skipped_on_tool_execute_round() -> None:
+    """tool_execute 轮不推送（llm_usage 是上一轮残留，避免错误覆盖）。"""
     plugin = TrackPlugin()
-    ctx = _make_ctx(_base_state(core_type="tool_execute"))
-    events: list[dict[str, Any]] = []
-    calls: list[tuple] = []
+    frontend = _FakeFrontend()
+    state = _base_state(core_type="tool_execute")
+    ctx = _make_ctx(state, {"frontend": frontend})
+    usage = plugin._collect_token_usage(ctx)
 
-    notifier_patch, sink_patch = _patch_notifier_and_sink(events, calls)
-    with notifier_patch, sink_patch:
-        _run(plugin._try_notify_cost_update(ctx))
+    await plugin._try_notify_cost_update(ctx, usage)
 
-    assert len(events) == 0, f"tool_execute 轮不应推送，得到 {len(events)} 个事件"
+    assert frontend.calls == [], "tool_execute 轮不应推送"
 
 
-def test_cost_update_not_accumulated_across_rounds():
-    """多轮场景：每轮推送的是本轮 llm_usage，不是跨轮累计。
+@pytest.mark.asyncio
+async def test_cost_update_silent_without_frontend_service() -> None:
+    """frontend 服务未注入（旧内核 / 无桥接）静默跳过，不抛异常。"""
+    plugin = TrackPlugin()
+    ctx = _make_ctx(_base_state())
+    usage = plugin._collect_token_usage(ctx)
 
-    回归守护：原 bug 推送累计值（total 越加越大）。这里模拟第二轮 llm_usage
-    较小，验证推送的就是第二轮的单轮值，而非叠加第一轮。
+    await plugin._try_notify_cost_update(ctx, usage)  # 不抛即通过
+
+
+@pytest.mark.asyncio
+async def test_cost_update_not_accumulated_across_rounds() -> None:
+    """多轮场景：每轮推送的是本轮 llm_usage 单轮值，不是跨轮累计。
+
+    回归守护：原 bug 推送累计值（total 越加越大）。
     """
     plugin = TrackPlugin()
 
-    state_r1 = _base_state(llm_usage={"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200})
-    events_r1: list[dict[str, Any]] = []
-    calls_r1: list[tuple] = []
-    n1, s1 = _patch_notifier_and_sink(events_r1, calls_r1)
-    with n1, s1:
-        _run(plugin._try_notify_cost_update(_make_ctx(state_r1)))
-
     state_r2 = _base_state(llm_usage={"input_tokens": 1800, "output_tokens": 100, "total_tokens": 1900})
-    events_r2: list[dict[str, Any]] = []
-    calls_r2: list[tuple] = []
-    n2, s2 = _patch_notifier_and_sink(events_r2, calls_r2)
-    with n2, s2:
-        _run(plugin._try_notify_cost_update(_make_ctx(state_r2)))
+    frontend = _FakeFrontend()
+    ctx = _make_ctx(state_r2, {"frontend": frontend})
+    usage = plugin._collect_token_usage(ctx)
+    await plugin._try_notify_cost_update(ctx, usage)
 
-    assert len(events_r2) == 1
-    assert events_r2[0]["data"]["total_tokens"] == 1900, (
-        "第二轮推送的必须是第二轮单轮值 1900，而非累计 1200+1900=3100"
+    costs = _cost_calls(frontend)
+    assert len(costs) == 1
+    assert costs[0]["total_tokens"] == 1900, (
+        "第二轮推送的必须是第二轮单轮值 1900，而非累计值"
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_wires_notify_into_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """execute 主流程：token 追踪开启时经 frontend 推送一次 cost_update。"""
+    plugin = TrackPlugin()
+    frontend = _FakeFrontend()
+    ctx = _make_ctx(_base_state(), {"frontend": frontend})
+
+    await plugin.execute(ctx)
+
+    costs = _cost_calls(frontend)
+    assert len(costs) == 1
+    assert costs[0]["pipeline_id"] == PIPELINE_ID

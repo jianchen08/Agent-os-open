@@ -8,7 +8,11 @@
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from agentos_plugin_sdk.builtin_tool import BuiltinTool, register_builtin_tool
-from agentos_plugin_sdk.capability import CapabilityHandle, STANDARD_CAPABILITIES
+from agentos_plugin_sdk.capability import (
+    STANDARD_CAPABILITIES,
+    CapabilityHandle,
+    FrontendEmitter,
+)
 from agentos_plugin_sdk.enum_utils import safe_enum_value
 from agentos_plugin_sdk.logging import (
     ContextFilter,
@@ -64,6 +68,7 @@ __all__ = [
     "EXECUTION_TRANSITIONS",
     "ExecutionResult",
     "ExecutionStatus",
+    "FrontendEmitter",
     "InjectedArg",
     "InjectedParam",
     "JsonFormatter",

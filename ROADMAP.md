@@ -648,6 +648,22 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 **参考**：本地 DSH 源码已 clone 至 `D:\reference_repos\deepseek-harness\`（如不存在可重新 `git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git`）。关键文件：`packages/sdk/server/src/server.ts`（SDK server，改这里）、`packages/core/tools/src/index.ts`（Events 接口，钩子点权威清单）、`packages/shell/shell/src/types.ts`（service 契约样例）。
 
+### subagent 桥接外部 agent（spawn Codex / Claude Code）
+
+**触发条件**：本项目多 agent 编排（L1/L2/L3）稳定后，且用户场景出现"需要调用外部专业 agent（Codex/Claude Code）执行子任务"的真实需求。当前本项目子 agent 只能调度自身 agent，无法 spawn 外部 agent 进程。
+
+**可行性结论（已调研）**：DSH 的 `subagent` 是平铺的 provider 家族（`ctx.subagents`），支持多个 provider 共存，其中 `subagent-codex` / `subagent-claude-code` 能 spawn 真正的 Codex / Claude Code 进程作为子 agent。这是 DSH 唯一明显领先于本项目的多 agent 能力。
+
+**与 Capability Provider 抽象的关系**：此事依赖 `task_architecture_borrow_from_dsh.md` 任务 1（Capability Provider）落地——subagent 本质也是一种 capability（多 provider：in-process/fork/codex/claude-code）。Provider 抽象就绪后，桥接外部 agent = 新增一个 provider 实现。
+
+**落地方向（条件成熟后）**：
+1. subagent capability 契约定义（start / startContinuable / followup / list-children）
+2. 本地 provider（in-process / fork）—— 对标 DSH 的 spawn-in-process / fork-in-process
+3. 外部 agent provider（codex / claude-code）—— 通过各 agent 的 SDK/CLI spawn 子进程，经 ACP（Agent Client Protocol）或各自协议通信
+4. tool-subagent 工具——把委派能力暴露给模型
+
+**参考**：DSH 源码 `packages/subagent/`（service 契约 + 各 provider 实现）、`packages/acp/`（ACP server，跨进程 agent 通信协议）。
+
 ---
 
 ## 🤝 社区贡献优先级

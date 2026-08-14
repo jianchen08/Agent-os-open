@@ -1,0 +1,31 @@
+[package]
+name = "pipeline-spill-guard-native"
+version = "1.0.0"
+edition = "2021"
+description = "Native (cdylib) spill_guard pipeline plugin — 大输出兜底（原文存文件 + UTF-8 安全提取 + 定位符返回）"
+
+[lib]
+# cdylib：产出供 NativePluginLoader 加载的动态库（.dll/.so/.dylib）。
+crate-type = ["cdylib"]
+
+[dependencies]
+# 原生插件 interface crate：PipelinePlugin/HostServices trait 契约 + 构造函数封装。
+agentos-native-sdk = { path = "../../../../../kernel/crates/native-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# data 序列化（与 tool_core messages 内容同源：serde_yaml）。
+serde_yaml = "0.9"
+# 语义增强正则（WARNING/ERROR/PROGRESS，工具无关模式）。
+regex = "1"
+# gzip 压缩（纯 Rust miniz_oxide 后端，无 C 依赖）。
+flate2 = "1.0"
+# spill key 兜底生成（对齐 tool_core 的 call_ 前缀 uuid 短码）。
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# spill_store 文件落盘测试的临时目录。
+tempfile = "3"
+
+# cdylib 跨边界标准做法：panic=abort（避免 unwind 跨 FFI UB）。
+[profile.release]
+panic = "abort"

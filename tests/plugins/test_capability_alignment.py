@@ -13,8 +13,8 @@ from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.capability import STANDARD_CAPABILITIES as SDK_CAPS
 
 
-def test_standard_capabilities_matches_expected_eight():
-    """SDK 清单应包含全部 8 个标准能力，且无重复。"""
+def test_standard_capabilities_matches_expected_nine():
+    """SDK 清单应包含全部 9 个标准能力（含 frontend，task_observability），且无重复。"""
     expected = {
         "pipeline-executor",
         "config-reader",
@@ -24,16 +24,18 @@ def test_standard_capabilities_matches_expected_eight():
         "metrics",
         "tool-executor",
         "service-registry",
+        # task_observability：插件 → 内核 → 前端一次性事件出口（ADR §3.5）
+        "frontend",
     }
     assert set(SDK_CAPS) == expected, f"SDK 清单漂移: {set(SDK_CAPS) ^ expected}"
     assert len(SDK_CAPS) == len(set(SDK_CAPS)), "SDK 清单有重复项"
 
 
 def test_sdk_injects_all_standard_caps_when_kernel_declares_them():
-    """当内核声明全部 8 项能力时，SDK 应能为每一项创建 CapabilityHandle。
+    """当内核声明全部 9 项能力时，SDK 应能为每一项创建 CapabilityHandle。
 
     模拟 M1 修复后内核 initialize 的行为：build_declared_capabilities(true) 返回
-    全部 8 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。
+    全部 9 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。
     """
     plugin = AgentOSPlugin("test_alignment")
     declared = {name: {} for name in SDK_CAPS}

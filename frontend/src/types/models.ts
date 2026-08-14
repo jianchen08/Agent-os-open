@@ -282,8 +282,13 @@ export interface Message {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: unknown
+  /** 工具结果 envelope 的结构化数据（HTTP toolResultData，与流式 result_data 同源）。
+   *  mergeConsecutiveAssistantMessages 据此注入 tool_call part 的 resultData。 */
+  toolResultData?: unknown
   toolError?: string
   durationMs?: number
+  /** 工具执行所在容器任务 ID（envelope metadata.container_task_id 投影）。 */
+  containerTaskId?: string
 }
 
 /**

@@ -109,5 +109,59 @@ STANDARD_CAPABILITIES = [
     "metrics",
     "tool-executor",
     "service-registry",
+    "frontend",
 ]
+
+
+class FrontendEmitter:
+    """frontend.emit capability 的高层封装（ADR §3.5，task_observability 前置）。
+
+    「插件 → 内核 → 前端」的一次性事件推送出口：emit(event, payload) 经
+    capability notify（fire-and-forget JSON-RPC notification）发往内核，
+    内核路由到 session.emit_event 推前端 WS（事件信封与 tool_start 等
+    现有前端事件一致：{type, data, sequence}）。
+
+    与 event-bus.emit 的分工：event-bus 承载流式 chunk（llm_core 逐字推送），
+    frontend.emit 承载低频观测/进度事件（cost_update / tool_progress /
+    termination_status）。
+
+    推送失败（通道关闭、内核未实现等）静默降级——可观测性出口绝不阻断
+    插件主流程。
+    """
+
+    def __init__(self, handle: CapabilityHandle | None) -> None:
+        self._handle = handle
+
+    @classmethod
+    def from_plugin(cls, plugin: Any) -> "FrontendEmitter | None":
+        """从 AgentOSPlugin 实例解析 frontend capability。
+
+        内核未声明 frontend（旧内核）时 get_capability 抛 KeyError，
+        返回 None 由调用方优雅降级（不推送）。
+        """
+        try:
+            return cls(plugin.get_capability("frontend"))
+        except Exception:
+            return None
+
+    @property
+    def available(self) -> bool:
+        """frontend capability 是否可用。"""
+        return self._handle is not None
+
+    async def emit(self, event: str, payload: dict[str, Any]) -> None:
+        """推送一次性事件到前端（fire-and-forget，异常静默）。
+
+        Args:
+            event: 事件名（如 cost_update / tool_progress / termination_status）。
+            payload: 事件数据。须携带前端路由键（thread_id/pipeline_id，
+                工具类事件另需 message_id/call_id），缺失会被内核丢弃。
+        """
+        if self._handle is None:
+            return
+        try:
+            await self._handle.notify("emit", {"event": event, "payload": payload})
+        except Exception:
+            # 通道异常静默：观测推送失败不影响插件主流程
+            pass
 

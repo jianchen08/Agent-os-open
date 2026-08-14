@@ -28,7 +28,10 @@ from pipeline.types import ErrorPolicy, StateKeys
 logger = logging.getLogger(__name__)
 
 # 默认 Token 预算
-_DEFAULT_BUDGET = 100000
+# task_observability 1c：接入管道时默认给到「实际不可能触达」的量级——预算
+# 管控默认只做可观测（剩余预算指示），真实限额经任务 metadata.token_budget
+# 或 state["cost_control.budget"] 显式下发。
+_DEFAULT_BUDGET = 100_000_000
 
 # 警告阈值（用量百分比）
 _WARNING_THRESHOLD = 0.80

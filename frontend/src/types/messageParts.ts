@@ -54,6 +54,8 @@ export interface ToolCallPart {
   progress?: number
   /** 当前执行步骤描述 */
   currentStep?: string
+  /** 执行中实时输出增量（tool_progress 事件追加，ActivityCard「执行输出」渲染） */
+  partialOutput?: string[]
   /** 所属任务容器 ID（用于解析工具卡片的文件路径） */
   containerTaskId?: string
 }

@@ -109,10 +109,23 @@ pub fn rebuild(state: &Value, tool_calls_raw: &[Value], results: &[ToolResult]) 
         } else {
             format!("Error: {}", result.error.as_deref().unwrap_or("unknown"))
         };
+        // tool_result envelope：随消息持久化（消息持久形态的一部分），llm_core
+        // 发送前剥离（清理列表含 tool_result）——前端 resultData/durationMs 的
+        // 冷热一致基石，替代旧的引擎侧 project_messages 富化投影（已退役）。
+        let envelope = json!({
+            "call_id": tc_id.clone(),
+            "tool_name": result.tool_name,
+            "success": result.success,
+            "error": result.error,
+            "data": result.data,
+            "metadata": result.metadata,
+            "duration_ms": result.duration_ms,
+        });
         current.push(json!({
             "role": "tool",
             "tool_call_id": tc_id,
             "content": content,
+            "tool_result": envelope,
         }));
     }
 

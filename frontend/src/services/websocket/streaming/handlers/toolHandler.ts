@@ -96,6 +96,61 @@ export function handleToolStart(eventData: any) {
   })
 }
 
+/** 处理工具执行中进度事件（task_observability 任务 2）。
+
+ * bash 等长任务执行中经 frontend.emit 推 tool_progress（stdout 增量，
+ * 源头已按 1KB/2s 节流）：按 call_id 定位 tool_call part，追加 partialOutput
+ * 供 ActivityCard「执行输出」实时渲染，并更新 currentStep 运行时摘要。
+ */
+/** partialOutput 累计字符上限（保留尾部，防超大输出把 store 撑爆） */
+const PARTIAL_OUTPUT_CAP = 64 * 1024
+
+export function handleToolProgress(eventData: any) {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) return
+  const messageId = extractMessageId(eventData)
+  if (!messageId) return
+  const callId = eventData.call_id || eventData.data?.call_id
+  if (!callId) return
+
+  const data = eventData.data || eventData
+  const delta: string = typeof data?.delta === 'string' ? data.delta : ''
+  if (!delta) return
+
+  const partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  if (partIndex < 0) {
+    // tool_start 未达/丢失：进度无法定位，静默丢弃（结果仍会由 tool_result 补齐）
+    _debugLogger.debug(
+      '[TOOL_PROGRESS] tool_call part not found, skip: tool=%s callId=%s',
+      data?.tool_name, callId?.slice(0, 12),
+    )
+    return
+  }
+
+  const msgs = pipelineStore.getState().getMessages(pipelineId)
+  const msg = msgs.find((m: any) => m.id === messageId)
+  const part = msg?.parts?.[partIndex] as any
+  if (!part) return
+  // 迟到进度（part 已 done/error）：结果已定，忽略避免覆盖
+  if (part.state === 'done' || part.state === 'error' || part.state === 'cancelled') return
+
+  // 追加 delta（尾部截断：最新输出最有信息量）
+  const chunks: string[] = [...(part.partialOutput ?? []), delta]
+  const merged = chunks.join('')
+  const nextOutput: string[] =
+    merged.length > PARTIAL_OUTPUT_CAP ? [merged.slice(merged.length - PARTIAL_OUTPUT_CAP)] : chunks
+
+  // 运行时摘要：已输出 X KB / Ys（「工具跑到哪了」一句话可见）
+  const kb = (Number(data?.bytes_read) || 0) / 1024
+  const secs = (Number(data?.elapsed_ms) || 0) / 1000
+  const currentStep = `已输出 ${kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb.toFixed(1)} KB`} / ${secs.toFixed(1)}s`
+
+  pipelineStore.getState().updatePart(pipelineId, messageId, partIndex, {
+    partialOutput: nextOutput,
+    currentStep,
+  } as any)
+}
+
 /** 处理工具调用结果事件 在 parts[] 中定位对应的 tool_call part 并更新其状态。 */
 export function handleToolResult(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)

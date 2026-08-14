@@ -143,6 +143,33 @@ async fn emit_event_skips_interaction_family_in_replay() {
 }
 
 #[tokio::test]
+async fn replay_missed_delivers_buffered_events_to_current_connection() {
+    // B3：连接已建立后，replay_missed 把该 thread 缺失的事件投递到当前连接。
+    let coord = SessionCoordinator::default();
+    let (sink1, _recv1) = MockSink::online();
+    coord.register("user-A", sink1);
+    coord.register_thread("thread-1", "user-A");
+    // emit 3 条聊天事件（经 emit_event，B4 已记录进缓冲；全局 seq 1,2,3）
+    for i in 1..=3 {
+        coord.emit_event("thread-1", "new_message", serde_json::json!({"i": i})).await;
+    }
+
+    // 模拟重连：新连接（踢旧），replay_missed(last=1) → 投递 seq 2,3
+    let (sink2, recv2) = MockSink::online();
+    coord.register("user-A", sink2);
+    coord.register_thread("thread-1", "user-A");
+    coord.replay_missed("thread-1", "user-A", 1).await;
+
+    let msgs = recv2.lock().unwrap();
+    let delivered: Vec<u64> = msgs
+        .iter()
+        .filter(|m| m["type"].as_str() == Some("new_message"))
+        .map(|m| m["sequence"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(delivered, vec![2, 3], "应回放 seq 2,3 到当前连接");
+}
+
+#[tokio::test]
 async fn reconnect_returns_resync_when_buffer_overflowed() {
     // 小容量缓冲，溢出后重连触发 resync
     let coord = SessionCoordinator::with_replay_capacity(2);

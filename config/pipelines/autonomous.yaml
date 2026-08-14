@@ -26,6 +26,8 @@ steps:
       - pipeline_knowledge_inject
       - pipeline_prompt_build
       - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
+      - pipeline_cost_control      # 预算统计（task_observability 1c：默认预算放大到实际不触达）
+      - pipeline_termination_advisor  # 主动终止判断（整合 cost_control/stuck/track 信号，task_observability 1c）
     context:                  # 自由 key-value，merge 进 state 供插件读取
       agent_id: "{{state.agent_id}}"
       model_tier: "{{state.model_tier}}"
@@ -34,6 +36,11 @@ steps:
   - id: core
     steps:
       - "{{state.core_plugin}}"   # 动态：pipeline_llm_core 或 pipeline_tool_core
+      # spill_guard（大输出兜底）：必须与 tool_core 同 step 后置组合——
+      # tool_core 大结果 merge 进内存 state（纯内存未落轨迹）→ spill_guard
+      # 立刻替换成小的 → step 末尾才落轨迹/messages 收尾，落的是小结果。
+      # llm_core 轮次天然 no-op（tool_results 已小/已标记，幂等透传）。
+      - pipeline_spill_guard
     context:
       agent_id: "{{state.agent_id}}"
       temperature: 0.7
@@ -41,6 +48,7 @@ steps:
   # ── 输出处理 + 路由仲裁 ──
   - id: post
     steps:
+      - pipeline_track             # token/耗时统计 + cache 可观测 + cost_update 推送（首位：提前 end 也不丢统计）
       - pipeline_stop_check
       - pipeline_duplicate_check
       - pipeline_stuck_detector

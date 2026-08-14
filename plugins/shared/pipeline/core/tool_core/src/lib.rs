@@ -86,6 +86,12 @@ fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value>
     }
 
     // messages 重建（OpenAI 规范，对齐 plugin.py:784-859）。
+    // 记录重建前的 messages 长度，用于识别本插件新增的消息（assistant tool_calls[若补造] + tool 结果）。
+    let original_len = state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
     let current_messages = messages::rebuild(state, tool_calls_raw, &results);
 
     // 多模态图片收集 + 注入（对齐 plugin.py:861-963）。
@@ -98,7 +104,13 @@ fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value>
     updates.insert(StateKey::RAW_RESULT.into(), Value::String(last_result_text));
     updates.insert(StateKey::RAW_TOOL_CALLS.into(), json!([]));
     updates.insert("_executed_tool_calls".into(), json!(tool_calls_raw));
-    updates.insert("messages".into(), json!(current_messages));
+    // op-based：只 emit 新增消息的 set op（无 seq → 引擎分配递增 seq + 落 message_slots）。
+    // 旧表仍由 project_messages 投影（读侧暂未切换，行为不变）。
+    if current_messages.len() > original_len {
+        let new_msgs = &current_messages[original_len..];
+        let ops: Vec<Value> = new_msgs.iter().map(|m| json!({ "op": "set", "msg": m })).collect();
+        updates.insert("messages".into(), json!({ "_ops": ops }));
+    }
 
     // 聚合错误 + 任务级副作用（对齐 plugin.py:965-1017）。
     collect_side_effects(state, &results, &mut updates);
@@ -118,10 +130,7 @@ fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &V
 
     let result = match host {
         Some(h) => {
-            let invoke_params = json!({
-                "tool_name": tc.name,
-                "args": tc.args,
-            });
+            let invoke_params = build_invoke_params(tc, state);
             let params_json = serde_json::to_string(&invoke_params).unwrap_or_else(|_| "{}".into());
             // 调内核 tool-executor.invoke（经 HostServices → CapabilityRouter）。
             match h.call_capability("tool-executor", "invoke", &params_json) {
@@ -146,6 +155,31 @@ fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &V
     // 发 tool_result 事件。
     emit_tool_event(host, state, "tool_result", tc, Some(&result));
     result
+}
+
+/// 构造 tool-executor.invoke 参数。
+///
+/// `_call_context`（task_observability 任务 2）：本次调用的前端路由键
+/// （call_id/pipeline_id/message_id/thread_id），内核透传给工具 sidecar，
+/// 供 bash 等长任务工具执行中经 frontend.emit 推 tool_progress 进度。
+fn build_invoke_params(tc: &ToolCall, state: &Value) -> Value {
+    let thread_id = state
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| state.get("thread_id").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let pipeline_id = state.get("pipeline_id").and_then(|v| v.as_str()).unwrap_or("");
+    let message_id = state.get("message_id").and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "tool_name": tc.name,
+        "args": tc.args,
+        "_call_context": {
+            "call_id": tc.call_id.clone().unwrap_or_default(),
+            "pipeline_id": pipeline_id,
+            "message_id": message_id,
+            "thread_id": thread_id,
+        },
+    })
 }
 
 /// 解析 tool-executor.invoke 的响应（对齐内核 ToolExecutionResult + Python normalize）。
@@ -341,12 +375,15 @@ fn emit_tool_event(
     if kind == "tool_start" {
         payload.insert("args".into(), tc.args.clone());
     } else if let Some(r) = result {
-        let preview = if r.success {
+        // result 为全量结果文本（冷热一致性契约）：与持久化 content 同源——
+        // 成功 = serialize_for_content 全文，失败 = "Error: {error}"（对齐
+        // messages.rs:110）。不再截断 200 字符，前端实时与刷新后读到的文本一致。
+        let result_text = if r.success {
             messages::serialize_for_content(&r.data).unwrap_or_else(|_| r.data.to_string())
         } else {
-            r.error.clone().unwrap_or_default()
+            format!("Error: {}", r.error.as_deref().unwrap_or("unknown"))
         };
-        payload.insert("result".into(), Value::String(preview.chars().take(200).collect()));
+        payload.insert("result".into(), Value::String(result_text));
         payload.insert("result_data".into(), r.data.clone());
         payload.insert("success".into(), Value::Bool(r.success));
         payload.insert("duration_ms".into(), json!((r.duration_ms * 10.0).round() / 10.0));
@@ -362,4 +399,46 @@ fn emit_tool_event(
     let params_json = serde_json::to_string(&params).unwrap_or_default();
     // fire-and-forget：忽略返回（event-bus.emit 不需要结果）。
     let _ = host.call_capability("event-bus", "emit", &params_json);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// task_observability 任务 2：invoke 参数必须携带 _call_context 路由键，
+    /// bash 等长任务工具据此经 frontend.emit 推 tool_progress 进度。
+    #[test]
+    fn test_build_invoke_params_contains_call_context() {
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+        });
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({"command": "echo hi"}),
+            call_id: Some("call_abc".into()),
+        };
+        let params = build_invoke_params(&tc, &state);
+        assert_eq!(params["tool_name"], "bash_execute");
+        assert_eq!(params["args"]["command"], "echo hi");
+        assert_eq!(params["_call_context"]["call_id"], "call_abc");
+        assert_eq!(params["_call_context"]["pipeline_id"], "pipe-1");
+        assert_eq!(params["_call_context"]["message_id"], "msg-1");
+        assert_eq!(params["_call_context"]["thread_id"], "sess-1");
+    }
+
+    /// 路由键缺失时的兜底：空字符串（内核/前端门控丢弃，不 panic）。
+    #[test]
+    fn test_build_invoke_params_empty_context_defaults() {
+        let state = json!({});
+        let tc = ToolCall {
+            name: "file_read".into(),
+            args: json!({}),
+            call_id: None,
+        };
+        let params = build_invoke_params(&tc, &state);
+        assert_eq!(params["_call_context"]["call_id"], "");
+        assert_eq!(params["_call_context"]["thread_id"], "");
+    }
 }

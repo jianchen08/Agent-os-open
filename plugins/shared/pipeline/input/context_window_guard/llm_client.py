@@ -13,6 +13,8 @@ config 形状（loader 原样传入，${ENV} 字面量未展开）：
 
 暴露接口：
 - LLMClient: HTTP 客户端（chat_available / chat_completion）
+  chat_completion 入参 prompt 支持字符串（包成单条 user 消息）或
+  消息列表（原样发送，fork 压缩用）。
 """
 
 from __future__ import annotations
@@ -133,11 +135,16 @@ class LLMClient:
         """chat 是否可用（api_base/model/key 均非空）。"""
         return bool(self.chat_api_base and self.chat_model and self.chat_api_key)
 
-    def chat_completion(self, prompt: str, max_tokens: int = 800) -> str:
+    def chat_completion(
+        self,
+        prompt: str | list[dict[str, Any]],
+        max_tokens: int = 800,
+    ) -> str:
         """调用 chat completions 生成文本（用于压缩摘要）。
 
         Args:
-            prompt: 用户 prompt
+            prompt: 用户 prompt 字符串，或完整消息列表（fork 压缩：
+                system + messages + 末尾指令原样发送，复用 provider 前缀 cache）
             max_tokens: 最大输出 token 数
 
         Returns:
@@ -149,10 +156,15 @@ class LLMClient:
         if not self.chat_available:
             raise RuntimeError("chat 配置缺失（api_base/model/api_key）")
 
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        else:
+            messages = list(prompt)
+
         url = f"{self.chat_api_base.rstrip('/')}/chat/completions"
         payload = {
             "model": self.chat_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0.3,
         }

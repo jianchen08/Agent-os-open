@@ -255,6 +255,9 @@ class MemoryReadPlugin(IInputPlugin):
         """把后端检索结果归一化为统一形态 {id, content, score, memory_type, metadata}。
 
         IMemoryBackend.search 已返回该形态，直接透传；兼容老式对象（带 to_dict()）。
+        每条追加 _context_form="recall" 语义标记（内部字段，压缩优化任务 1）：
+        声明"这是从记忆库检索的内容"，供压缩链路差异化摘要；
+        若后续被组装进 LLM 消息，发送前由 llm_core 清理。
 
         Args:
             results: 后端搜索结果列表
@@ -265,10 +268,13 @@ class MemoryReadPlugin(IInputPlugin):
         normalized: list[dict[str, Any]] = []
         for r in results or []:
             if isinstance(r, dict):
-                normalized.append(r)
+                item = dict(r)
+                item.setdefault("_context_form", "recall")
+                normalized.append(item)
             elif hasattr(r, "to_dict"):
                 d = r.to_dict()
                 if isinstance(d, dict):
+                    d.setdefault("_context_form", "recall")
                     normalized.append(d)
         return normalized
 

@@ -78,6 +78,7 @@ pub async fn run_ws_session(
     router: Arc<InboundRouter>,
     token: Option<&str>,
     user_id_out: &mut Option<String>,
+    last_sequence: Option<u64>,
 ) -> (u16, String) {
     let auth = authenticate(token);
     let (user_id, username) = match auth {
@@ -94,7 +95,16 @@ pub async fn run_ws_session(
         info!(user = %user_id, kicked_old = old_id, "WS 踢旧连接（B10 单连接）");
     }
 
-    run_socket_loop(socket, sink, out_rx, session, router, user_id.clone()).await;
+    run_socket_loop(
+        socket,
+        sink,
+        out_rx,
+        session,
+        router,
+        user_id.clone(),
+        last_sequence,
+    )
+    .await;
     info!(user = %user_id, username = %username, "WS 会话结束");
     (1000, "normal closure".to_string())
 }
@@ -107,6 +117,7 @@ async fn run_socket_loop(
     session: Arc<SessionCoordinator>,
     router: Arc<InboundRouter>,
     user_id: String,
+    last_sequence: Option<u64>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -136,11 +147,21 @@ async fn run_socket_loop(
     let session_for_unreg = session.clone();
     let sink_id = sink.id();
     let user_id_for_task = user_id.clone();
+    // B3：每连接一次的回放标志——首个带 thread_id 的入站消息触发 replay_missed。
+    let replayed_for_task = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
-                    handle_inbound(&text, &user_id_for_task, &session, &router).await;
+                    handle_inbound(
+                        &text,
+                        &user_id_for_task,
+                        &session,
+                        &router,
+                        last_sequence,
+                        &replayed_for_task,
+                    )
+                    .await;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -163,6 +184,8 @@ async fn handle_inbound(
     user_id: &str,
     session: &SessionCoordinator,
     router: &InboundRouter,
+    last_sequence: Option<u64>,
+    replayed: &std::sync::atomic::AtomicBool,
 ) {
     let msg: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -172,6 +195,12 @@ async fn handle_inbound(
     if let Some(thread_id) = msg.get("thread_id").and_then(|v| v.as_str()) {
         if !thread_id.is_empty() {
             session.register_thread(thread_id, user_id);
+            // B3：首个 thread 注册时回放断线期间该 thread 缺失的事件（每连接仅一次）。
+            if let Some(ls) = last_sequence.filter(|&l| l > 0) {
+                if !replayed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    session.replay_missed(thread_id, user_id, ls).await;
+                }
+            }
         }
     }
     match router.route(&msg, user_id).await {

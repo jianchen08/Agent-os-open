@@ -278,6 +278,28 @@ impl SessionCoordinator {
             }
         }
     }
+
+    /// B3：仅回放（不重注册连接、不发连接确认）——连接已建立、确认已发，
+    /// 在首个 thread 注册时补发断线期间该 thread 缺失的事件。
+    /// `last_sequence` 是前端全局 watermark（0.2 sequence 已为全局空间，单 cursor 正确）。
+    pub async fn replay_missed(&self, thread_id: &str, _user_id: &str, last_sequence: u64) {
+        match self.replay.replay(thread_id, last_sequence).await {
+            ReplayResult::Events { events, .. } => {
+                for ev in events {
+                    // 该 thread 已 register_thread → send_to_thread 能定位到当前连接的 sink
+                    self.registry.send_to_thread(thread_id, &ev.payload).await;
+                }
+                self.metrics.inc_replay_hit();
+            }
+            ReplayResult::ResyncRequired => {
+                let resync = json!({"type": "resync_required", "data": {"thread_id": thread_id}});
+                self.registry
+                    .send_to_thread(thread_id, &serde_json::to_string(&resync).unwrap_or_default())
+                    .await;
+                self.metrics.inc_replay_miss();
+            }
+        }
+    }
 }
 
 impl Default for SessionCoordinator {

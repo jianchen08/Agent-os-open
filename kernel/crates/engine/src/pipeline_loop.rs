@@ -69,12 +69,24 @@ pub struct PipelineExecutor {
     steps_since_checkpoint: AtomicI64,
     /// 全局累计 step 序号（跨 run），作为 checkpoint 的 step_no 锚点。
     total_step_no: AtomicI64,
+    /// per-step messages ops 实录缓冲（ops 即轨迹）。
+    ///
+    /// merge_and_project 应用插件 ops 时把指纹降级实录（`{op, seq, message_id}`）累积到这，
+    /// execute_step_impl 在 step 开头清空，persist_step_trace 在 step 末尾取走落 traces。
+    /// 轨迹因此是插件声明的**实录**，不做 diff 推断。Mutex：&self 内部可变。
+    ops_ledger: parking_lot::Mutex<Vec<serde_json::Value>>,
     /// 统一配置中心（统一配置加载方案 TDD-7）。
     ///
-    /// 注入后，loop 内每轮迭代调 `load_agent_into_state` 重读 agent yaml，
+    /// 注入后 loop 内每轮迭代调 `load_agent_into_state` 重读 agent yaml，
     /// 实现"改 agent 配置调整正在跑的任务"（per-iteration 热加载）。
     /// None = 不做 per-iteration 重读（per-run 加载仍由 process_via_engine 负责）。
     config_center: Option<Arc<ConfigCenter>>,
+    /// 声明了 `on_pipeline_end` 生命周期钩子的插件 id（manifest 收集）。
+    ///
+    /// run 结束时逐个 best-effort 分发 [`LifecycleHook::OnPipelineEnd`]（HookContext
+    /// 携带 pipeline_id/run_id 标签）——spill_guard 的原文清理（spill_retrieve
+    /// sidecar 收通知删 `{base}/{pipeline_id}/`）依赖此通道。空集零开销。
+    pipeline_end_hooks: Vec<String>,
 }
 
 impl PipelineExecutor {
@@ -108,7 +120,9 @@ impl PipelineExecutor {
             persistent_fields: HashSet::new(),
             steps_since_checkpoint: AtomicI64::new(0),
             total_step_no: AtomicI64::new(0),
+            ops_ledger: parking_lot::Mutex::new(Vec::new()),
             config_center: None,
+            pipeline_end_hooks: Vec::new(),
         }
     }
 
@@ -118,6 +132,15 @@ impl PipelineExecutor {
     /// 改 config/agents/<id>.yaml，正在跑的任务下一轮迭代立即用新配置。
     pub fn with_config_center(mut self, cc: Arc<ConfigCenter>) -> Self {
         self.config_center = Some(cc);
+        self
+    }
+
+    /// 注入声明了 `on_pipeline_end` 钩子的插件 id 集合（spill_guard 清理通道）。
+    ///
+    /// 生产侧从插件 manifest 的 `capabilities.lifecycle_hooks` 收集；run 结束时
+    /// 逐个 best-effort 分发（失败仅 warn，不影响 run 返回值）。不调用为空集。
+    pub fn with_pipeline_end_hook_plugins(mut self, plugin_ids: impl IntoIterator<Item = String>) -> Self {
+        self.pipeline_end_hooks = plugin_ids.into_iter().collect();
         self
     }
 
@@ -170,7 +193,7 @@ impl PipelineExecutor {
 
         // ADR ②③：引擎独占落库。run 开始时建 runs 记录 + 落 user 消息。
         // 失败只 warn 不阻断执行（持久化不应让管道跑不通）。
-        self.persist_run_start(&state).await;
+        self.persist_run_start(&mut state).await;
 
         if config.loop_config.enabled {
             let max_iters = config.loop_config.max_iterations;
@@ -220,7 +243,36 @@ impl PipelineExecutor {
         // 流式期间只更新内存 state，此处 stream_end 一次性原子落库。
         self.persist_run_end(&state).await;
 
+        // on_pipeline_end 钩子分发（spill_guard 原文清理等）：run 结束后逐个
+        // best-effort 通知（HookContext 带 pipeline_id/run_id 标签；sidecar 未活
+        // 会被 respawn 后收通知）。失败仅 warn——清理类钩子不得让 run 翻车。
+        self.dispatch_pipeline_end_hooks(&state).await;
+
         Ok(state)
+    }
+
+    /// 向声明 `on_pipeline_end` 的插件分发管道结束钩子（best-effort）。
+    async fn dispatch_pipeline_end_hooks(&self, state: &serde_json::Value) {
+        if self.pipeline_end_hooks.is_empty() {
+            return;
+        }
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut hook_ctx = agentos_core::traits::HookContext::new();
+        hook_ctx.set("pipeline_id", serde_json::json!(pipeline_id));
+        hook_ctx.set("run_id", serde_json::json!(self.run_id));
+        for plugin_id in &self.pipeline_end_hooks {
+            if let Err(e) = self
+                .invoker
+                .send_lifecycle_hook(plugin_id, agentos_core::traits::LifecycleHook::OnPipelineEnd, &hook_ctx)
+                .await
+            {
+                warn!(plugin = %plugin_id, error = ?e, "OnPipelineEnd 分发失败（继续）");
+            }
+        }
     }
 
     /// 遍历 step 列表，遇到 `ended` / `suspended` 即停。
@@ -267,8 +319,10 @@ impl PipelineExecutor {
     ) {
         // 0. 快照 step 执行前的 state，用于事后算 diff 落 step 级轨迹。
         //    轨迹颗粒度 = 配置 step（prepare/core/post 等），不钻插件。
-        //    patch_data 含本 step 期间所有顶层 key 变更（含 messages，与其它字段无区别）。
+        //    patch_data 含本 step 期间所有顶层 key 变更；messages 走 ops 实录（见 ops_ledger）。
         let state_before = state.clone();
+        // 清空本 step 的 messages 实录缓冲（step 边界，防跨 step 泄漏）
+        self.ops_ledger.lock().clear();
 
         // 1. context 注入：渲染 step.context 模板，merge 进 state
         let rendered = render_value(
@@ -327,11 +381,14 @@ impl PipelineExecutor {
     /// 落 step 级轨迹：对比 step 执行前后的 state，把变更的顶层 key 聚合为一条
     /// patch_data，plugin_id = step.id。
     ///
+    /// **messages 走实录**（ops 即轨迹）：本 step 内插件 emit 的 ops 在
+    /// merge_and_project 时已降级为指纹实录累积到 `ops_ledger`，此处取走拼进
+    /// patch_data——轨迹记录的是"插件声明过什么"，不是 diff 推断。
+    ///
     /// **字段过滤**：已投影到 messages 表的原文字段（raw_result/raw_thinking/
-    /// raw_tool_calls/messages）不进 trace——它们是 messages 记录的字段
-    ///（content/reasoning_content/tool_calls_json），trace 不重复存储。
+    /// raw_tool_calls）不进 trace——全文真值在 blobs/messages 表，trace 只存指纹。
     /// system_message 保留（追踪提示词演变，state_diff 已去重，仅在变化时记录）。
-    /// 过滤后 diff 为空（step 仅有原文产出）则不落轨迹。
+    /// diff 与实录均为空（step 无产出）则不落轨迹。
     async fn persist_step_trace(
         &self,
         step_id: &str,
@@ -340,12 +397,11 @@ impl PipelineExecutor {
     ) {
         let mut diff = state_diff(state_before, state_after);
 
-        // 过滤已投影到 messages 表的冗余字段（原文不进 trace，穿透时从 messages 取）
+        // 过滤已投影到 messages 表的冗余字段（原文不进 trace，全文在 blobs）
         const REDUNDANT_KEYS: &[&str] = &[
             "raw_result",     // → messages.content_preview
             "raw_thinking",   // → messages.reasoning_content
             "raw_tool_calls", // → messages.tool_calls_json
-            "messages",       // → messages 表增量投影（project_state_snapshot 已处理）
         ];
         if let Some(obj) = diff.as_object_mut() {
             for key in REDUNDANT_KEYS {
@@ -353,16 +409,22 @@ impl PipelineExecutor {
             }
         }
 
-        // 过滤后 diff 为空对象则跳过（step 仅有原文产出，无 state 变更）
+        // 取走本 step 的 messages 实录，拼进 patch_data
+        let ledger: Vec<serde_json::Value> = std::mem::take(&mut *self.ops_ledger.lock());
+        if !ledger.is_empty() {
+            if let Some(obj) = diff.as_object_mut() {
+                obj.insert("messages".into(), serde_json::json!({ "_ops": ledger }));
+            }
+        }
+
+        // diff 与实录均为空则跳过（step 无产出）
         if diff.as_object().is_none_or(|o| o.is_empty()) {
-            // 仍需投影 messages（原文要落 messages 表，即使不落 trace）
+            // 仍需投影累计标量字段（messages 原文已在 merge 时实时落表）
             self.project_state_snapshot(state_after).await;
             return;
         }
 
-        // 分层持久化投影：state_diff 已捕获本 step 的 state 变更（含 messages）。
-        // 在此投影到业务表——用 state_after 的完整值（project_messages 内部做增量对齐，
-        // 幂等，重复投影无副作用）。
+        // 分层持久化投影：累计标量字段用 state_after 的完整值 upsert（覆盖最新值）。
         self.project_state_snapshot(state_after).await;
 
         use agentos_core::types::{PatchType, TraceEntry};
@@ -396,13 +458,7 @@ impl PipelineExecutor {
             return;
         }
         let tenant_id = self.default_tenant.tenant_id.clone();
-        // messages 投影（系统字段）
-        if let Some(arr) = state.get("messages").and_then(|v| v.as_array()) {
-            if let Err(e) = self.store.project_messages(pipeline_id, &tenant_id, arr).await {
-                warn!(pipeline_id = %pipeline_id, error = %e, "project_messages 失败（继续）");
-                self.metrics.inc_persist_failure();
-            }
-        }
+        // messages 不在此投影——op 模型下 merge 时已实时落 message_slots（一次 apply）。
         // 声明的累计标量字段投影
         for key in &self.persistent_fields {
             if let Some(v) = state.get(key) {
@@ -534,7 +590,7 @@ impl PipelineExecutor {
     /// 在 run() 开头调用一次。user 消息从 initial_state["message"] 取
     /// （server.rs:242 注入的当前用户输入）。完整内容存 blobs 表，
     /// messages 表存摘要 preview + blob_id 指针（ADR ⑦ 懒加载）。
-    async fn persist_run_start(&self, state: &serde_json::Value) {
+    async fn persist_run_start(&self, state: &mut serde_json::Value) {
         // config_hash 是 runs 表的配置指纹元数据，此处用空串占位
         // （完整实现应哈希 pipeline_config，但对持久化链路验证无影响）。
         let config_hash = "";
@@ -559,35 +615,33 @@ impl PipelineExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if let Err(e) = self.store.link_pipeline_session(pipeline_id, session_id, &tenant_id).await {
-            warn!(error = %e, "link_pipeline_session 失败（继续执行）");
+            warn!(error = %e, "link_pipeline_session 失败（继续）");
         }
 
-        // 落用户消息（role=user）
-        if let Some(user_msg) = state.get("message").and_then(|v| v.as_str()) {
-            if !user_msg.is_empty() {
-                let msg_id = format!("u_{}", uuid::Uuid::new_v4().simple());
-                let preview: String = user_msg.chars().take(200).collect();
-                let blob_id = match self.store.store_blob(user_msg.as_bytes(), "text/plain").await {
-                    Ok(id) => Some(id),
-                    Err(e) => { warn!(error = %e, "store_blob(user msg) 失败"); self.metrics.inc_persist_failure(); None }
-                };
-                // sequence 按 pipeline_id 维度连续递增（替代旧的每轮硬编码 0/1），
-                // 支撑前端 before_sequence/after_sequence 游标分页。
-                let seq = if pipeline_id.is_empty() {
-                    0
-                } else {
-                    match self.store.next_sequence(pipeline_id).await {
-                        Ok(s) => s,
-                        Err(e) => { warn!(error = %e, "next_sequence(user) 失败，回退 seq=0"); self.metrics.inc_persist_failure(); 0 }
+        // 用户消息不再单独落库：server.rs 在 run 前经 append op push 进 state["messages"]
+        // 并落 message_slots；其指纹实录经 state["_pending_message_ops"] 传入，此处落一条
+        // 轨迹（plugin_id="user_input"）保证首轮 user 也在审计/回放范围内，然后移除内部字段。
+        if let Some(ledger) = state
+            .as_object_mut()
+            .and_then(|o| o.remove("_pending_message_ops"))
+        {
+            if let Some(ops) = ledger.as_array() {
+                if !ops.is_empty() {
+                    use agentos_core::types::{PatchType, TraceEntry};
+                    let entry = TraceEntry {
+                        trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
+                        run_id: self.run_id.clone(),
+                        branch_id: self.branch_id.clone(),
+                        seq_in_branch: 0,
+                        plugin_id: "user_input".to_string(),
+                        patch_type: PatchType::StateUpdate,
+                        patch_data: serde_json::json!({ "messages": { "_ops": ops } }),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    };
+                    if let Err(e) = self.store.append_trace(entry).await {
+                        warn!(error = %e, "user_input 实录落轨迹失败（继续）");
+                        self.metrics.inc_persist_failure();
                     }
-                };
-                if let Err(e) = self.store.append_message(
-                    &msg_id, &self.run_id, &self.branch_id, seq, "user",
-                    blob_id.as_deref(), Some(&preview),
-                    if pipeline_id.is_empty() { None } else { Some(pipeline_id) },
-                ).await {
-                    warn!(error = %e, "append_message(user) 失败");
-                    self.metrics.inc_persist_failure();
                 }
             }
         }
@@ -628,8 +682,9 @@ impl PipelineExecutor {
 
     /// merge 插件 state_updates 进 state（纯内存合并）。
     ///
-    /// 投影已移至 persist_step_trace（用 state_diff 捕获的完整 state 投影，更可靠）。
-    /// 这里只负责把插件的 state_updates merge 进内存 state。
+    /// messages **只接受 op 声明**（`{_ops:[set/insert]}`）→ "一次 apply" 到内存 + 表
+    /// + 实录三落点。全量数组形式已退役（零兼容）：收到即 warn 丢弃——改队列必须
+    /// 走 ops，声明式契约由所有插件（llm_core/tool_core/context_window_guard）履行。
     async fn merge_and_project(
         &self,
         state: &mut serde_json::Value,
@@ -637,23 +692,41 @@ impl PipelineExecutor {
     ) {
         for (k, v) in updates {
             if k == "messages" {
-                // 新模型：插件 emit op（`{_ops:[set/insert]}`）→ "一次 apply" 到内存 state + 表。
-                // 与表侧 apply_messages_ops_to_table 是同一组 op 的两个落点（无 mirror、无 diff）。
                 if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
                     let tenant_id = self.default_tenant.tenant_id.clone();
-                    if let Err(e) =
-                        apply_messages_op_update(state, self.store.as_ref(), &tenant_id, ops).await
-                    {
-                        warn!(error = %e, "apply_messages_op_update 失败（继续）");
-                        self.metrics.inc_persist_failure();
+                    // 归属标记：每个 op 带上 run_id（表侧写 message_slots.run_id，
+                    // 供会话删除/轨迹反查定位；内存/实录侧自然忽略该字段）
+                    let ops_owned: Vec<serde_json::Value> = ops
+                        .iter()
+                        .map(|op| {
+                            let mut o = op.clone();
+                            if let Some(obj) = o.as_object_mut() {
+                                obj.insert("_run_id".into(), serde_json::json!(self.run_id));
+                            }
+                            o
+                        })
+                        .collect();
+                    match apply_messages_op_update(state, self.store.as_ref(), &tenant_id, &ops_owned).await {
+                        Ok(ledger) => {
+                            // ops 即轨迹：指纹实录累积到 per-step 缓冲，step 末尾落 traces
+                            if !ledger.is_empty() {
+                                self.ops_ledger.lock().extend(ledger);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "apply_messages_op_update 失败（继续）");
+                            self.metrics.inc_persist_failure();
+                        }
                     }
-                    continue;
+                } else {
+                    warn!("messages 更新未携带 _ops（全量数组已退役，零兼容），该更新被忽略");
                 }
-                // 旧模型（全量数组）：整体替换（兼容过渡，待 slice4 退役）。
+                continue;
             }
             set_key(state, k, v.clone());
         }
     }
+
 
     /// 每完成一轮（一次完整 steps 执行）后调用：自增步数计数器，达 interval 则落档。
     ///
@@ -752,6 +825,8 @@ fn truthy_flag(state: &serde_json::Value, key: &str) -> bool {
 /// - 值相同的 key：跳过
 ///
 /// 非顶层（深层）变更按整体替换（不递归细粒度 diff），对齐 step 级快照语义。
+/// messages **不参与 diff**——它走 ops 实录（ops_ledger，插件声明、指纹降级），
+/// 旧的全量数组 diff 推断（messages_diff_ops）已退役（零兼容）。
 fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
     let before_obj = before.as_object();
     let after_obj = match after.as_object() {
@@ -760,23 +835,8 @@ fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_js
     };
     let mut diff = serde_json::Map::new();
     for (k, v_after) in after_obj {
-        // messages 特殊处理：增量化（消除 O(n²) 冗余）
-        // 全量替换语义下，messages 每 step 把累计全量数组重抄一遍 → DB 70% 体积是冗余。
-        // 改为只记本 step 的增量 ops（append 新尾部 / delete_from 压缩 / replace_at 改某条）。
-        // 其余 key（标量字段）不膨胀，照常全量替换。
         if k == "messages" {
-            let v_before = before_obj.and_then(|b| b.get("messages"));
-            if let Some(ops) = messages_diff_ops(v_before, v_after) {
-                // ops 为空表示 messages 实质未变（如仅引用相同），不进 diff
-                if !ops.is_empty() {
-                    diff.insert(
-                        "messages".into(),
-                        serde_json::json!({ "_ops": ops }),
-                    );
-                }
-                continue;
-            }
-            // fallback：无法计算增量（非数组等异常），回退全量（兼容）
+            continue; // 轨迹由 ops_ledger 实录提供，diff 不推断
         }
         let changed = match before_obj.and_then(|b| b.get(k)) {
             Some(v_before) => v_before != v_after,
@@ -787,55 +847,6 @@ fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_js
         }
     }
     serde_json::Value::Object(diff)
-}
-
-/// 计算 messages 数组的增量 ops（消除 O(n²) 冗余的核心）。
-///
-/// 返回 `Some(ops)` 表示可增量化（数组形态）；`None` 表示形态异常，调用方回退全量。
-/// ops 元素：
-/// - `{"op":"append","msg":{...}}`：尾部新增（正常每轮 1-N 条）
-/// - `{"op":"delete_from","idx":N}`：删除 index≥N（压缩场景，如 context_window_guard）
-/// - `{"op":"replace_at","idx":N,"msg":{...}}`：替换某条（中间内容变更）
-///
-/// 比对策略：先按索引对齐前缀（变则 replace_at），尾部多出的 append，after 比 before 短则 delete_from。
-/// 正常对话每轮追加 1-N 条 → 只产 append，O(1)，不再抄写历史全量。
-fn messages_diff_ops(
-    before: Option<&serde_json::Value>,
-    after: &serde_json::Value,
-) -> Option<Vec<serde_json::Value>> {
-    let after_arr = after.as_array()?;
-    let before_arr = before.and_then(|v| v.as_array());
-    let n = before_arr.map(|a| a.len()).unwrap_or(0);
-    let m = after_arr.len();
-    let mut ops = Vec::new();
-
-    // 比对前缀：i < min(n, m)，变了则 replace_at
-    if let Some(b) = before_arr {
-        for (i, after_item) in after_arr.iter().enumerate().take(n.min(m)) {
-            if b.get(i) != Some(after_item) {
-                ops.push(serde_json::json!({
-                    "op": "replace_at",
-                    "idx": i,
-                    "msg": after_item,
-                }));
-            }
-        }
-    }
-    // 尾部追加：m > n
-    for after_item in after_arr.iter().take(m).skip(n.min(m)) {
-        ops.push(serde_json::json!({
-            "op": "append",
-            "msg": after_item,
-        }));
-    }
-    // 压缩：n > m，删除 index ≥ m
-    if n > m {
-        ops.push(serde_json::json!({
-            "op": "delete_from",
-            "idx": m,
-        }));
-    }
-    Some(ops)
 }
 
 /// 把槽位 op（`set`/`insert`，按**稳定 seq** 寻址）应用到**内存稠密数组** `state["messages"]`。
@@ -920,6 +931,10 @@ pub fn apply_slot_ops_to_array(arr: &mut Vec<serde_json::Value>, ops: &[serde_js
 /// 稠密、元素带 seq），又落 `message_slots` 表（`apply_messages_ops_to_table`，稀疏、留 gap）。
 /// 无 mirror、无 diff。详见 `docs/message_persistence_design.md`。
 ///
+/// 返回**指纹降级实录**（ops 即轨迹）：`[{op, seq, message_id}]`，msg 全文替换为
+/// `compute_message_id` 指纹（delete 为 null）——调用方（executor）把它落进 step 轨迹，
+/// 轨迹因此是"实际运行的实录"而非事后 diff 推断。
+///
 /// - `pipeline_id` 从 `state["pipeline_id"]` 读，为空则只更内存、跳过落表（首轮未注入兜底）。
 /// - 内存侧无 `messages` 数组时自动 seed 一个空数组。
 pub async fn apply_messages_op_update(
@@ -927,9 +942,9 @@ pub async fn apply_messages_op_update(
     store: &dyn agentos_core::traits::StorageBackend,
     tenant_id: &str,
     ops: &[serde_json::Value],
-) -> Result<(), agentos_core::types::StorageError> {
+) -> Result<Vec<serde_json::Value>, agentos_core::types::StorageError> {
     if ops.is_empty() {
-        return Ok(());
+        return Ok(vec![]);
     }
 
     // 1. 内存：把 op 应用到 state["messages"]（稠密数组，元素带 seq）
@@ -996,7 +1011,57 @@ pub async fn apply_messages_op_update(
             .apply_messages_ops_to_table(pipeline_id, tenant_id, &resolved)
             .await?;
     }
-    Ok(())
+
+    // 3. 实录：msg → 指纹降级（compute_message_id 规范化排除 seq，带不带 seq 同指纹）
+    Ok(resolved.iter().filter_map(op_ledger_entry).collect())
+}
+
+/// 把单个已解析 op 降级为轨迹实录条目：`{op, seq, message_id, blob_id}`。
+///
+/// - `set`：msg 为对象 → message_id = 内容指纹 + blob_id = 全文 blob 定位
+///   （回退重建按 blob_id 直查 blobs 取全文，指纹仅审计核对）；msg 为 null/缺省
+///   （delete）→ 两者皆 null
+/// - `insert`：`{op, at, message_id, blob_id}`
+/// - 未知 op：跳过（前向兼容）
+///
+/// blob_id 与表侧写路径（`write_slot_to_table_locked` 的 `ensure_blob_locked`）同源：
+/// 都是 `compute_blob_id(serde_json::to_string(msg))`——同一消息必得同一 blob。
+pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Value> {
+    let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let ids = |op: &serde_json::Value| {
+        op.get("msg")
+            .filter(|m| m.is_object())
+            .map(|m| {
+                let blob_src = serde_json::to_string(m).unwrap_or_default();
+                (
+                    agentos_core::ids::compute_message_id(m),
+                    agentos_core::ids::compute_blob_id(blob_src.as_bytes()),
+                )
+            })
+    };
+    match kind {
+        "set" => {
+            let seq = op.get("seq").and_then(|v| v.as_i64())?;
+            let ids = ids(op);
+            Some(serde_json::json!({
+                "op": "set",
+                "seq": seq,
+                "message_id": ids.as_ref().map(|(m, _)| m.clone()),
+                "blob_id": ids.as_ref().map(|(_, b)| b.clone()),
+            }))
+        }
+        "insert" => {
+            let at = op.get("at").and_then(|v| v.as_i64())?;
+            let ids = ids(op);
+            Some(serde_json::json!({
+                "op": "insert",
+                "at": at,
+                "message_id": ids.as_ref().map(|(m, _)| m.clone()),
+                "blob_id": ids.as_ref().map(|(_, b)| b.clone()),
+            }))
+        }
+        _ => None,
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -1102,32 +1167,11 @@ mod tests {
         async fn get_run(&self, _run_id: &str) -> Result<RunRecord, agentos_core::types::StorageError> {
             Err(agentos_core::types::StorageError::NotFound("null".into()))
         }
-        async fn get_messages(
-            &self,
-            _run_id: &str,
-            _branch_id: &str,
-        ) -> Result<Vec<MessageRecord>, agentos_core::types::StorageError> {
-            Ok(vec![])
-        }
         async fn get_messages_by_pipeline(
             &self,
             _pipeline_id: &str,
             _opts: agentos_core::traits::MessageQueryOpts,
         ) -> Result<Vec<MessageRecord>, agentos_core::types::StorageError> {
-            Ok(vec![])
-        }
-        async fn next_sequence(
-            &self,
-            _pipeline_id: &str,
-        ) -> Result<u32, agentos_core::types::StorageError> {
-            Ok(1)
-        }
-        async fn get_recent_messages(
-            &self,
-            _run_id: &str,
-            _branch_id: &str,
-            _n: usize,
-        ) -> Result<Vec<Message>, agentos_core::types::StorageError> {
             Ok(vec![])
         }
         async fn get_blob(
@@ -1156,20 +1200,6 @@ mod tests {
             _run_id: &str,
             _config_hash: &str,
             _tenant_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            Ok(())
-        }
-        #[allow(clippy::too_many_arguments)]
-        async fn append_message(
-            &self,
-            _message_id: &str,
-            _run_id: &str,
-            _branch_id: &str,
-            _seq_in_branch: u32,
-            _role: &str,
-            _blob_id: Option<&str>,
-            _content_preview: Option<&str>,
-            _pipeline_id: Option<&str>,
         ) -> Result<(), agentos_core::types::StorageError> {
             Ok(())
         }

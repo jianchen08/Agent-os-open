@@ -240,6 +240,7 @@ export function buildFragmentsFromParts(message: Message, taskId?: string): Rend
           duration_ms: part.durationMs,
           progress: part.progress,
           currentStep: part.currentStep,
+          partialOutput: part.partialOutput,
           containerTaskId: part.containerTaskId,
         }
         // 构建 ActivityData 并应用工具卡片注册表增强。

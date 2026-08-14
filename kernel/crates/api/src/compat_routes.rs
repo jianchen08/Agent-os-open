@@ -540,6 +540,27 @@ pub async fn list_thread_messages_handler(
                 .expect("msg is object")
                 .insert("toolCallId".into(), Value::String(tc_id.to_string()));
         }
+        // 工具结果 envelope（role=tool）：解析 tool_result_json 返回结构化字段，
+        // 前端据此还原 resultData（diff 徽标）/ durationMs / toolName /
+        // containerTaskId——与流式 tool_result 事件的 result_data/duration_ms
+        // 同源，保证冷热路径数据结构一致。历史行无 envelope 时不附带（前端回退 content）。
+        if let Some(tr_json) = rec.tool_result_json.as_deref() {
+            if let Ok(envelope) = serde_json::from_str::<Value>(tr_json) {
+                let obj = msg.as_object_mut().expect("msg is object");
+                obj.insert("toolResultData".into(), envelope["data"].clone());
+                if let Some(dur) = envelope["duration_ms"].as_f64() {
+                    obj.insert("toolDurationMs".into(), serde_json::json!(dur));
+                }
+                if let Some(name) = envelope["tool_name"].as_str() {
+                    if !name.is_empty() {
+                        obj.insert("toolName".into(), Value::String(name.to_string()));
+                    }
+                }
+                if let Some(ctid) = envelope["metadata"]["container_task_id"].as_str() {
+                    obj.insert("containerTaskId".into(), Value::String(ctid.to_string()));
+                }
+            }
+        }
         // 思考内容：assistant 的 reasoning_content（LLM reasoning/chain-of-thought）。
         // 前端据此渲染思考过程折叠区。字段名 camelCase 对齐前端 BackendMessageResponse。
         if let Some(reasoning) = rec.reasoning_content.as_deref() {

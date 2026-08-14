@@ -184,6 +184,10 @@ export const WS_SERVER_EVENTS = {
   SESSION_UPDATE: 'session_update',
   /** 成本更新（Token 用量变化时推送） */
   COST_UPDATE: 'cost_update',
+  /** 终止评估更新（termination_advisor 每轮推送剩余预算+收敛信号，task_observability 1c） */
+  TERMINATION_STATUS: 'termination_status',
+  /** 工具执行进度（bash 等长任务执行中的 stdout 增量，task_observability 任务 2） */
+  TOOL_PROGRESS: 'tool_progress',
   /** 流式保活（长时间操作期间由后端发送，防止 chunk 超时） */
   STREAM_KEEPALIVE: 'stream_keepalive',
   /** 管道已接收到消息 */

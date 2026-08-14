@@ -1,0 +1,56 @@
+{
+    "id": "spill_retrieve_tool",
+    "name": "Spill Retrieve Tool",
+    "description": "取回 spill_guard 存档的工具大输出原文（按 tool_call_id）。管道结束（on_pipeline_end 钩子）自动清理该管道的 spill 目录。",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {
+        "tools": [
+            {
+                "name": "spill_retrieve",
+                "description": "取回 spill_guard 存档的工具大输出原文。当工具结果被替换为 [spill_guard] 提取摘要时，用替换文本中的 tool_call_id 调本工具取回完整原文。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_call_id": {
+                            "type": "string",
+                            "description": "要取回的工具调用 ID（spill_guard 替换文本中定位符携带）"
+                        },
+                        "pipeline_id": {
+                            "type": "string",
+                            "description": "管道 ID（通常自动注入，无需手动提供）"
+                        }
+                    },
+                    "required": ["tool_call_id"]
+                },
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_call_id": {"type": "string"},
+                        "pipeline_id": {"type": "string"},
+                        "content": {"type": "string", "description": "完整原文"},
+                        "encoding": {"type": "string", "enum": ["plain", "gzip"]},
+                        "size_bytes": {"type": "integer"}
+                    }
+                }
+            }
+        ],
+        "resources": [],
+        "route_signals": [],
+        "lifecycle_hooks": ["on_pipeline_end"]
+    },
+    "dependencies": [],
+    "permissions": {},
+    "error_policy": "skip",
+    "priority": 50,
+    "config_files": [
+        {
+            "id": "spill",
+            "path": "config/system/spill_config.yaml",
+            "label": "spill 存储配置（与 spill_guard 共享）"
+        }
+    ]
+}
