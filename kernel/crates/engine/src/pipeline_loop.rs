@@ -972,6 +972,8 @@ pub async fn apply_messages_op_update(
                 .unwrap_or(-1)
         })
         .unwrap_or(-1);
+    // A1 注入判定基准：resolve 前的旧 max（新槽位 = append 的判据）。
+    let entry_max_seq = max_seq;
     let resolved: Vec<serde_json::Value> = ops
         .iter()
         .map(|op| {
@@ -1002,18 +1004,92 @@ pub async fn apply_messages_op_update(
     }
 
     // 2. 表：同一组 op 落 message_slots（pipeline_id 为空则跳过）
+    // 提取为 owned String，避免对 state 的不可变借用跨越后续可变借用（E0502）。
     let pipeline_id = state
         .get("pipeline_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .map(str::to_string)
+        .unwrap_or_default();
     if !pipeline_id.is_empty() {
+        // A1：本轮首个 assistant 追加 op 携带内核 message_id（`_message_id` 内部
+        // 字段挂 op 上），落表时优先用它作 record_id——流式占位（a_<uuid>）与
+        // DB 重载记录 id 对齐，前端去重不再依赖 role::seq 指纹兜底。
+        let table_ops = inject_run_message_id(state, &resolved, entry_max_seq);
         store
-            .apply_messages_ops_to_table(pipeline_id, tenant_id, &resolved)
+            .apply_messages_ops_to_table(&pipeline_id, tenant_id, &table_ops)
             .await?;
     }
 
     // 3. 实录：msg → 指纹降级（compute_message_id 规范化排除 seq，带不带 seq 同指纹）
     Ok(resolved.iter().filter_map(op_ledger_entry).collect())
+}
+
+/// A1：把内核 message_id 注入"本轮首个 assistant 追加 op"。
+///
+/// 注入以 `_message_id` 内部字段挂在 **op** 上而非消息体上：消息是不可变值
+/// （blob 内容寻址、LLM 上下文、指纹实录都不应携带它），仅表侧 record_id 消费。
+///
+/// 命中条件（缺一不可，防止误注入历史消息）：
+/// - `set` op 且 msg.role == "assistant" 且 msg 未自带 id；
+/// - 新槽位追加（op.seq > resolve 前旧 max）——context_window_guard 等对旧槽位的
+///   modify op 带显式旧 seq，天然排除；
+/// - 每 run 仅一次：`state["_assistant_id_assigned"]` 置位后，多轮迭代的后续
+///   assistant 追加（各自独立消息）不再注入，保证 id 与前端流式占位一一对应。
+fn inject_run_message_id(
+    state: &mut serde_json::Value,
+    resolved: &[serde_json::Value],
+    entry_max_seq: i64,
+) -> Vec<serde_json::Value> {
+    let Some(mid) = state
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return resolved.to_vec();
+    };
+    if state
+        .get("_assistant_id_assigned")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return resolved.to_vec();
+    }
+    let mut out: Vec<serde_json::Value> = resolved.to_vec();
+    for op in out.iter_mut() {
+        if op.get("op").and_then(|v| v.as_str()) != Some("set") {
+            continue;
+        }
+        let is_new_slot = op
+            .get("seq")
+            .and_then(|v| v.as_i64())
+            .map(|s| s > entry_max_seq)
+            .unwrap_or(false);
+        if !is_new_slot {
+            continue;
+        }
+        let Some(msg) = op.get("msg") else { continue };
+        if !msg.is_object() {
+            continue;
+        }
+        if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        if msg
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map_or(false, |s| !s.is_empty())
+        {
+            continue;
+        }
+        if let Some(obj) = op.as_object_mut() {
+            obj.insert("_message_id".to_string(), serde_json::json!(mid));
+        }
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("_assistant_id_assigned".to_string(), serde_json::json!(true));
+        }
+        break;
+    }
+    out
 }
 
 /// 把单个已解析 op 降级为轨迹实录条目：`{op, seq, message_id, blob_id}`。
