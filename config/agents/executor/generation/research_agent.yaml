@@ -46,7 +46,7 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
-- web_search
+- universal_search
 - fetch
 - memory
 - task_evaluate

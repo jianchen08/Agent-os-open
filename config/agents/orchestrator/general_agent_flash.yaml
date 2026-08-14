@@ -42,7 +42,7 @@ system_prompt: |-
   - 使用 resource_search 搜索现有 Agent 和工具资源
   - 使用 file_read/file_write 操作文件
   - 使用 bash_execute 执行命令
-  - 使用 web_search/fetch 搜索网络信息
+  - 使用 universal_search/fetch 搜索网络信息
 
   ## 工作空间
 
@@ -94,7 +94,7 @@ tool_ids:
 - bash_execute
 - enhanced_search
 - resource_search
-- web_search
+- universal_search
 - fetch
 - memory
 - task_submit

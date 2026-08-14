@@ -91,7 +91,7 @@ tool_ids:
 - list_directory
 - bash_execute
 - enhanced_search
-- web_search
+- universal_search
 - fetch
 - memory
 - task_evaluate
