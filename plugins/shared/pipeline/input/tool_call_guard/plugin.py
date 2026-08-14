@@ -1,9 +1,11 @@
 """工具调用守卫 Input 插件。
 
 检测工具调用重复，提供渐进式干预：
+0.2 路由收敛：decision 信号已移除（ROADMAP「路由方式收敛」），
+超限后产出 next_llm 信号让 LLM 分析引导。
 1. 单轮内重复：去重 + 提示
 2. 多轮累积重复：丢弃 + 随机提示 + 重试（最多3次）
-3. 超过阈值：产出 decision 信号
+3. 超过阈值：产出 next_llm 信号
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ class ToolCallGuard(IInputPlugin):
     渐进式干预策略：
     - 1-2 次重复：去重 + 随机提示
     - 3 次重复：丢弃工具调用 + 随机提示 + 标记重试
-    - 4+ 次：产出 decision 信号
+    - 4+ 次：产出 next_llm 信号（让 LLM 引导下一步）
 
     优先级：15（Input 阶段，在 ParamInject 之后）
     错误策略：ABORT
@@ -56,7 +58,7 @@ class ToolCallGuard(IInputPlugin):
 
     @property
     def route_signals(self) -> list[str]:
-        return ["decision", "next_llm"]
+        return ["next_llm"]
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """执行工具调用守卫检查，根据重复次数采取渐进式干预。"""
@@ -114,7 +116,7 @@ class ToolCallGuard(IInputPlugin):
             )
             return updates
         updates["__route_signal__"] = RouteSignal(
-            route_type="decision",
+            route_type="next_llm",
             reason=f"Tool call repeat exceeded max retries ({self._max_retries})",
             payload={
                 "decision_type": "agent",

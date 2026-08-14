@@ -1,6 +1,7 @@
 {
     "id": "pipeline_termination_advisor",
     "name": "Termination Advisor",
+    "version": "1.0.0",
     "plugin_type": "pipeline",
     "language": "python",
     "host_type": "sidecar",

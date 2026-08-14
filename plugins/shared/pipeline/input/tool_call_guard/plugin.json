@@ -10,7 +10,7 @@
     "capabilities": {
         "tools": [],
         "resources": [],
-        "route_signals": ["decision", "next_llm"],
+        "route_signals": ["next_llm"],
         "lifecycle_hooks": [
             "on_load",
             "on_unload"
