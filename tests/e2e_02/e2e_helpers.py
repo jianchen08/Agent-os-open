@@ -139,6 +139,32 @@ def http_post_json_auth(url, data, token=None, timeout=10):
         raise ConnectionError(f"无法连接 {url}: {e}")
 
 
+def http_delete_auth(url, token=None, timeout=10):
+    """发起带可选 Bearer Token 的 HTTP DELETE 请求，返回 (status_code, body, headers)。"""
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(url, method="DELETE", headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            status = resp.status
+            try:
+                body_json = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                body_json = body
+            return status, body_json, dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8") if e.fp else ""
+        try:
+            body_json = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            body_json = body
+        return e.code, body_json, dict(e.headers)
+    except urllib.error.URLError as e:
+        raise ConnectionError(f"无法连接 {url}: {e}")
+
+
 # ============================================================
 # 登录 / 会话 / WS 地址 工具（新增 e2e 测试复用）
 # ============================================================
@@ -161,6 +187,19 @@ def create_session(token, title="e2e-session", timeout=10):
     )
     if status != 200 or not isinstance(body, dict) or not body.get("thread_id"):
         raise RuntimeError(f"创建会话失败: status={status}, body={body}")
+    return body
+
+
+def delete_session(token, session_id, timeout=10):
+    """删除会话（含其消息/执行记录级联清理，尽力而为）。
+
+    e2e 测试 teardown 用：避免测试产生的会话/消息残留到内核 SQLite。
+    """
+    status, body, _ = http_delete_auth(
+        f"{KERNEL_URL}/api/v1/sessions/{session_id}", token=token, timeout=timeout
+    )
+    if status not in (200, 404):
+        raise RuntimeError(f"删除会话失败: status={status}, body={body}")
     return body
 
 

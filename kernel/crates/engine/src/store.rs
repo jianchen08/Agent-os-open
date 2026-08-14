@@ -1197,10 +1197,17 @@ impl SqliteStore {
                 pipeline_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
             params.push(&tenant_id);
             let rows = stmt
-                .query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+                .query_map(params.as_slice(), |row| row.get::<_, Option<String>>(0))?;
             let mut out = Vec::new();
             for r in rows {
-                out.push(r?);
+                // message_slots.run_id 可 NULL（流式占位消息等）：
+                // 用 Option 读取跳过 NULL，避免 Invalid column type Null 抛错
+                // 导致整个删除事务回滚（delete_session 级联删除失败的根因）。
+                if let Some(rid) = r? {
+                    if !out.contains(&rid) {
+                        out.push(rid);
+                    }
+                }
             }
             out
         };
@@ -1611,10 +1618,15 @@ impl SqliteStore {
                 pipeline_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
             params.push(&tenant_id);
             let rows = stmt
-                .query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+                .query_map(params.as_slice(), |row| row.get::<_, Option<String>>(0))?;
             let mut out = Vec::new();
             for r in rows {
-                out.push(r?);
+                // run_id 可 NULL（同 delete_session_inner 的收集）：跳过 NULL 防抛错
+                if let Some(rid) = r? {
+                    if !out.contains(&rid) {
+                        out.push(rid);
+                    }
+                }
             }
             out
         };
@@ -2837,6 +2849,70 @@ mod tests {
     ///
     /// 期望行为：open 检测到损坏类错误时自愈——备份损坏文件保留现场，重建空库返回 Ok，
     /// 新库可正常读写（create_run / get_run）。
+
+    /// 回归测试：delete_session 遇到 run_id 为 NULL 的 message_slots 行不抛错、
+    /// 级联删除完整生效。
+    ///
+    /// 根因：收集 run_ids 时 `row.get::<_, String>(0)` 遇 NULL 抛
+    /// "Invalid column type Null" → 事务回滚 → 会话/消息/执行记录全部残留
+    /// （DELETE /api/v1/sessions 返回 200 但啥也没删）。
+    #[tokio::test]
+    async fn test_delete_session_with_null_run_id_cascades() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-delete-test";
+        let pid = "pipeline-delete-test";
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at)                  VALUES (?1, ?2, 'active', 'default', ?3, ?3)",
+                rusqlite::params![tid, "delete-test", now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at)                  VALUES (?1, ?2, 'default', ?3)",
+                rusqlite::params![pid, tid, now],
+            )
+            .unwrap();
+            // run_id NULL 的流式占位消息（bug 触发行）
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at)                  VALUES ('default', ?1, 1, 'm-null-run', NULL, ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
+            // 有 run_id 的消息 + 对应 run/trace（应被级联删除）
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at)                  VALUES ('default', ?1, 2, 'm-with-run', 'run-del-1', ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch)                  VALUES ('run-del-1', 'h', 'completed', 'default', ?1, 'main')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at)                  VALUES ('t1', 'run-del-1', 'main', 0, 'p', 'state', '{}', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+
+        // 此前在此抛 Invalid column type Null，事务回滚，全部残留
+        store.delete_session(tid).await.unwrap();
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM sessions"), 0, "sessions 应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM pipeline_sessions"), 0, "映射应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM message_slots"), 0, "消息应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM runs"), 0, "runs 应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM traces"), 0, "traces 应删除");
+    }
+
     #[tokio::test]
     async fn test_open_corrupt_db_self_heals() {
         // 模拟损坏的 SQLite 文件：文件头不是 "SQLite format 3"（进程崩溃/磁盘异常场景）

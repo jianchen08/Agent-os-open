@@ -89,12 +89,13 @@ class TestWsStreamChain:
     """WS 流式全链路：连接确认 + 流式事件序列 + 文本产出。"""
 
     @pytest.mark.timeout(120)
-    def test_ws_connection_confirmation(self, auth_token):
+    def test_ws_connection_confirmation(self, auth_token, cleanup_sessions):
         """连接 /ws/chat 后第一条消息应为 connection_confirmation。"""
         import websockets
 
         token = auth_token
         session = create_session(token, title="e2e-ws-confirm")
+        cleanup_sessions(session["thread_id"])
 
         async def _run():
             url = ws_chat_url(token)
@@ -112,13 +113,14 @@ class TestWsStreamChain:
         )
 
     @pytest.mark.timeout(300)
-    def test_ws_stream_contains_start_and_end(self, auth_token):
+    def test_ws_stream_contains_start_and_end(self, auth_token, cleanup_sessions):
         """发 user_input 后应收到完整流式链：stream_start ... stream_end，
         且 stream_chunk 行数 > 0、累计文本非空。"""
         import websockets
 
         token = auth_token
         session = create_session(token, title="e2e-ws-stream")
+        cleanup_sessions(session["thread_id"])
         sid = session["thread_id"]
 
         async def _run():

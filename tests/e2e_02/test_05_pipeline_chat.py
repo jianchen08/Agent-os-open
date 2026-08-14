@@ -39,13 +39,14 @@ CHAT_PROMPT = "你好，请回复一句话介绍你自己"
 
 
 @pytest.fixture(scope="module")
-def chat_flow(auth_token):
+def chat_flow(auth_token, cleanup_sessions):
     """模块级 fixture：登录 + 建会话 + 一次真实 LLM chat 调用，供各断言复用。
 
     只做一次 LLM 调用（耗时 ~30s），避免每个断言重复触发。
     """
     token = auth_token
     session = create_session(token, title="e2e-pipeline-chat")
+    cleanup_sessions(session["thread_id"])
     status, body, _ = http_post_json(
         f"{KERNEL_URL}/api/v1/chat",
         {"message": CHAT_PROMPT, "session_id": session["thread_id"]},

@@ -96,10 +96,11 @@ class TestApprovalChoiceLoop:
     """2. LLM 触发选择审批闭环（依赖 LLM 决策，未触发则 skip，不视为失败）。"""
 
     @pytest.mark.timeout(300)
-    def test_llm_triggered_approval_choice_loop(self, auth_token):
+    def test_llm_triggered_approval_choice_loop(self, auth_token, cleanup_sessions):
         """发引导消息 → 收 interaction_request → 提交响应 '批准' → 断言 ok=true。"""
         token = auth_token
         session = create_session(token, title="e2e-approval-flow")
+        cleanup_sessions(session["thread_id"])
         sid = session["thread_id"]
 
         async def _run() -> str | None:

@@ -59,3 +59,29 @@ def auth_token():
     from e2e_helpers import login_admin
 
     return login_admin()
+
+
+@pytest.fixture(scope="module")
+def cleanup_sessions(auth_token):
+    """e2e 数据清理：测试内创建的会话在此注册，teardown 时逐个删除。
+
+    所有会产生数据的 e2e 测试必须把创建的 session 注册进来——
+    避免测试残留的会话/消息落到内核 SQLite（本地反复跑会越积越多，
+    CI 内存库虽无持久影响，但保持一致卫生习惯）。
+    删除是 best-effort：失败只告警不阻塞测试结论。
+    """
+    from e2e_helpers import delete_session
+
+    created: list[str] = []
+
+    def _register(session_id: str) -> str:
+        created.append(session_id)
+        return session_id
+
+    yield _register
+
+    for sid in created:
+        try:
+            delete_session(auth_token, sid)
+        except Exception as exc:  # noqa: BLE001 —— teardown 尽力而为
+            print(f"[e2e-cleanup] 删除会话失败（忽略）: {sid} | {exc}")
